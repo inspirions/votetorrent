@@ -23,8 +23,10 @@ module.exports = {
   // @react-navigation (ESM-only; App.test.tsx imports NavigationContainer from it),
   // jose (ESM-only, no CJS build at all in v6.x — @votetorrent/vote-engine/rn now
   // transitively pulls it in via association/verifiers/play-integrity.ts, Phase 43).
+  // uint8arrays (ESM-only dep of @optimystic/quereus-plugin-crypto, first exercised by
+  // an app-Jest test in 46-09 — see the moduleNameMapper entry below for detail).
   transformIgnorePatterns: [
-    'node_modules/(?!((jest-)?react-native|@react-native(-community)?|@react-navigation|@quereus|@optimystic|@votetorrent|@noble|inheritree|moat-maker|multiformats|@serfab|jose)/)',
+    'node_modules/(?!((jest-)?react-native|@react-native(-community)?|@react-navigation|@quereus|@optimystic|@votetorrent|@noble|inheritree|moat-maker|multiformats|@serfab|jose|uint8arrays)/)',
   ],
   moduleNameMapper: {
     '^react-native-localize$': '<rootDir>/__mocks__/react-native-localize.js',
@@ -83,8 +85,28 @@ module.exports = {
     // Node environment. Map to the provided jest mock so compliance-strand.spec.ts can import
     // @votetorrent/vote-engine/rn (which exports LocalStorageReact that imports AsyncStorage).
     '^@react-native-async-storage/async-storage$': '<rootDir>/node_modules/@react-native-async-storage/async-storage/jest/async-storage-mock.js',
+    // uint8arrays — ESM-only ("import"/"module-sync" only exports map, no "require"
+    // condition) transitive dep of @optimystic/quereus-plugin-crypto (dist/index.js,
+    // dist/plugin.js). First exercised by an app-Jest test in 46-09 (RegistrationPolicyScreen.test.tsx),
+    // which is the first screen test to require the real MockRegistrationEngine —
+    // its selective-disclosure methods import setCommit/setDisclose/randomBytes from
+    // quereus-plugin-crypto, which imports { toString, fromString } from 'uint8arrays'.
+    '^uint8arrays$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/index.js',
+    // uint8arrays' own dist/src/index.js internally imports its INTERNAL "#foo"
+    // self-references (package.json "imports" map) — that map has "types"/"node"/
+    // "import" conditions only, no "require", so Jest's default CJS condition set
+    // matches none of them ("No known conditions for '#alloc' specifier"). Map each
+    // self-reference straight to its physical dist file, same idiom as the
+    // @noble/curves / multiformats subpath mappers above.
+    '^#util/as-uint8array$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/util/as-uint8array.js',
+    '^#alloc$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/alloc.js',
+    '^#compare$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/compare.js',
+    '^#concat$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/concat.js',
+    '^#from-string$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/from-string.js',
+    '^#to-string$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/to-string.js',
     // multiformats — ESM-only subpath imports used by @optimystic/quereus-plugin-crypto.
     // The exports field has no "require" condition; map subpaths to their physical dist files.
+    '^multiformats/basics$': '<rootDir>/node_modules/multiformats/dist/src/basics.js',
     '^multiformats/cid$': '<rootDir>/node_modules/multiformats/dist/src/cid.js',
     '^multiformats/bases/base16$': '<rootDir>/node_modules/multiformats/dist/src/bases/base16.js',
     '^multiformats/bases/base32$': '<rootDir>/node_modules/multiformats/dist/src/bases/base32.js',
