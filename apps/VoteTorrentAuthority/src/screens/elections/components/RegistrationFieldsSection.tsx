@@ -133,6 +133,7 @@ export function RegistrationFieldsSection({
 	function writeWrap(testID: string, onPress: (() => void) | undefined, child: React.ReactNode) {
 		return (
 			<View
+				key={testID}
 				testID={testID}
 				pointerEvents={canWrite ? "auto" : "none"}
 				style={canWrite ? undefined : styles.disabledControl}
