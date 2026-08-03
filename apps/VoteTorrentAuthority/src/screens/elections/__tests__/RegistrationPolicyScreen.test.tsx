@@ -302,6 +302,44 @@ function treeText(tr: renderer.ReactTestRenderer): string {
   return JSON.stringify(tr.toJSON());
 }
 
+/** Seeds an ElectionRegistrationField directly through the mock's own engine surface. */
+async function seedField(
+  engine: any,
+  args: { fieldName: string; tier: string; requirement: string },
+): Promise<void> {
+  await engine.addElectionRegistrationField(
+    { electionId: "test-election", fieldName: args.fieldName, tier: args.tier, requirement: args.requirement },
+    SEED_SIGN,
+  );
+}
+
+/** Seeds an ElectionDisclosurePolicy directly through the mock's own engine surface. */
+async function seedDisclosure(
+  engine: any,
+  args: { fieldName: string; audience: string },
+): Promise<void> {
+  await engine.addElectionDisclosurePolicy(
+    { electionId: "test-election", fieldName: args.fieldName, audience: args.audience },
+    SEED_SIGN,
+  );
+}
+
+/**
+ * Spies on all six 'mel'-signed write methods WITHOUT replacing their
+ * implementation — the mock's state must keep mutating for real so the
+ * screen's post-write loadPolicy() reload observes real changes.
+ */
+function spyWrites(engine: any) {
+  return {
+    addElectionRegistrationField: jest.spyOn(engine, "addElectionRegistrationField"),
+    removeElectionRegistrationField: jest.spyOn(engine, "removeElectionRegistrationField"),
+    addElectionDisclosurePolicy: jest.spyOn(engine, "addElectionDisclosurePolicy"),
+    removeElectionDisclosurePolicy: jest.spyOn(engine, "removeElectionDisclosurePolicy"),
+    setElectionAttestationPolicy: jest.spyOn(engine, "setElectionAttestationPolicy"),
+    removeElectionAttestationPolicy: jest.spyOn(engine, "removeElectionAttestationPolicy"),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
@@ -435,6 +473,158 @@ describe("RegistrationPolicyScreen — VALIDATION Wave 0 (D-02/D-03/D-04/D-05/D-
       setAttestation.mock.calls.length +
       removeAttestation.mock.calls.length;
     expect(totalCalls).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // D-02 District field
+  // -------------------------------------------------------------------------
+
+  it("D-02: District is offered, visually separated, and rendered once declared", async () => {
+    const tr1 = await renderScreen();
+    present(tr1, "registration-field-picker-known");
+    present(tr1, "registration-field-picker-divider");
+    present(tr1, "registration-field-picker-district");
+    present(tr1, "registration-field-district-hint");
+
+    await seedField(mockRegistrationEngine, { fieldName: "District", tier: "public", requirement: "optional" });
+    const tr2 = await renderScreen();
+    present(tr2, "registration-field-row-District");
+  });
+
+  // -------------------------------------------------------------------------
+  // D-03 compound 'district' audience gate — proven at the SCREEN level via
+  // the screen's own N+1 getBallots -> getBallotDetails read. The remaining
+  // two truth-table legs (Leg B alone; both legs closed) are proven at the
+  // component level by 46-06's DisclosurePolicySection.test.tsx and are not
+  // duplicated here.
+  // -------------------------------------------------------------------------
+
+  it("D-03: the compound gate is OPEN when both legs hold, proven via the screen's own N+1 read", async () => {
+    await seedField(mockRegistrationEngine, { fieldName: "District", tier: "public", requirement: "optional" });
+    await seedField(mockRegistrationEngine, { fieldName: "Address", tier: "selective", requirement: "optional" });
+    mockCurrentElectionEngine = makeElectionEngine({ districts: ["D1"] });
+
+    const tr = await renderScreen();
+    present(tr, "disclosure-audience-Address-district");
+    expect(mockCurrentElectionEngine.getBallotDetails).toHaveBeenCalled();
+  });
+
+  it("D-03: the compound gate is CLOSED (chip ABSENT, not disabled) when Leg A alone fails", async () => {
+    await seedField(mockRegistrationEngine, { fieldName: "District", tier: "public", requirement: "optional" });
+    await seedField(mockRegistrationEngine, { fieldName: "Address", tier: "selective", requirement: "optional" });
+    mockCurrentElectionEngine = makeElectionEngine({ districts: [] });
+
+    const tr = await renderScreen();
+    absent(tr, "disclosure-audience-Address-district");
+    present(tr, "disclosure-audience-Address-everyone");
+    expect(tr.root.findAllByProps({ testID: "disclosure-district-unavailable-hint" }, { deep: false }).length).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // D-04/D-05 reconciliation + repair
+  // -------------------------------------------------------------------------
+
+  it("D-04/D-05: an orphan disclosure is flagged, its repair removes the row on the real mock, and the flag clears", async () => {
+    await seedDisclosure(mockRegistrationEngine, { fieldName: "ZipCode", audience: "everyone" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    present(tr, "registration-policy-issues-card");
+    present(tr, "registration-policy-issue-orphan-ZipCode");
+
+    await press(tr, "registration-policy-issue-repair-remove-ZipCode");
+
+    expect(spies.removeElectionDisclosurePolicy).toHaveBeenCalledTimes(1);
+    const [electionIdArg, fieldNameArg, signArg] = spies.removeElectionDisclosurePolicy.mock.calls[0]!;
+    expect(electionIdArg).toBe("test-election");
+    expect(fieldNameArg).toBe("ZipCode");
+    expect(typeof signArg).toBe("function");
+
+    const remaining = await mockRegistrationEngine.getElectionDisclosurePolicies("test-election");
+    expect(remaining).toEqual([]);
+
+    absent(tr, "registration-policy-issue-orphan-ZipCode");
+  });
+
+  it("D-04/D-05: an audience-less selective field is flagged, its repair sets an audience on the real mock, and the flag clears", async () => {
+    await seedField(mockRegistrationEngine, { fieldName: "Address", tier: "selective", requirement: "optional" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    present(tr, "registration-policy-issue-no-audience-Address");
+
+    // Reveal the inline Everyone/District choice first — it is never defaulted.
+    await press(tr, "registration-policy-issue-repair-set-audience-Address");
+    await press(tr, "registration-policy-issue-audience-Address-everyone");
+
+    expect(spies.addElectionDisclosurePolicy).toHaveBeenCalledTimes(1);
+    const [payload, signArg] = spies.addElectionDisclosurePolicy.mock.calls[0]!;
+    expect(payload).toEqual({ electionId: "test-election", fieldName: "Address", audience: "everyone" });
+    expect(typeof signArg).toBe("function");
+
+    const rows = await mockRegistrationEngine.getElectionDisclosurePolicies("test-election");
+    expect(rows.length).toBe(1);
+
+    absent(tr, "registration-policy-issue-no-audience-Address");
+  });
+
+  it("clean state: a selective field with its matching disclosure renders no issues card", async () => {
+    // The control that stops the two tests above from passing on an
+    // always-on card.
+    await seedField(mockRegistrationEngine, { fieldName: "Address", tier: "selective", requirement: "optional" });
+    await seedDisclosure(mockRegistrationEngine, { fieldName: "Address", audience: "everyone" });
+
+    const tr = await renderScreen();
+    absent(tr, "registration-policy-issues-card");
+  });
+
+  // -------------------------------------------------------------------------
+  // D-14 — call sequencing only (T-46-09-01, see the header's declared blind
+  // spot). MockRegistrationEngine's addElectionRegistrationField is a Map.set
+  // upsert, so a single bare `add` on an existing LastName row would ALSO
+  // succeed here — this test cannot and does not distinguish that from the
+  // correct remove-then-add sequence. It asserts the CALLBACK CONTRACT only:
+  // one edit produces exactly one remove followed by exactly one add against
+  // the mock, and nothing else. A green run here does not prove policy
+  // editing works against the real engine's plain-insert (ElectionId,
+  // FieldName) PK — that proof is routed to 46-10's device run, and 46-10's
+  // add-a-new-field write does not exercise this edit path either. Do NOT
+  // "fix" this by making the mock throw on duplicate keys — that changes a
+  // shared fixture every other suite in this workspace depends on; it is a
+  // candidate follow-up only.
+  // -------------------------------------------------------------------------
+
+  it("D-14: one tier edit fires exactly one remove then one add, and nothing else — CALL SEQUENCING ONLY", async () => {
+    await seedField(mockRegistrationEngine, { fieldName: "LastName", tier: "public", requirement: "required" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    await press(tr, "registration-field-tier-LastName-selective");
+
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(1);
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledWith(
+      "test-election",
+      "LastName",
+      expect.any(Function),
+    );
+
+    expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(1);
+    const [addPayload] = spies.addElectionRegistrationField.mock.calls[0]!;
+    expect(addPayload).toEqual({
+      electionId: "test-election",
+      fieldName: "LastName",
+      tier: "selective",
+      requirement: "required", // unchanged requirement carried through
+    });
+
+    expect(spies.addElectionDisclosurePolicy).toHaveBeenCalledTimes(0);
+    expect(spies.removeElectionDisclosurePolicy).toHaveBeenCalledTimes(0);
+    expect(spies.setElectionAttestationPolicy).toHaveBeenCalledTimes(0);
+    expect(spies.removeElectionAttestationPolicy).toHaveBeenCalledTimes(0);
+
+    expect(spies.removeElectionRegistrationField.mock.invocationCallOrder[0]).toBeLessThan(
+      spies.addElectionRegistrationField.mock.invocationCallOrder[0]!,
+    );
   });
 
 });
