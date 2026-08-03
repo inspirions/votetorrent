@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
+import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
@@ -14,7 +15,7 @@ import type { SignCallback } from "../../engines/device-signer";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import { reconcilePolicyState } from "./registration-policy-reconciliation";
 import { RegistrationFieldsSection } from "./components/RegistrationFieldsSection";
-import { DisclosurePolicySection } from "./components/DisclosurePolicySection";
+import { DisclosurePolicySection, isDistrictAudienceAvailable } from "./components/DisclosurePolicySection";
 import { AttestationPolicySection } from "./components/AttestationPolicySection";
 import { ElectionEvent, scopeDescriptions } from "@votetorrent/vote-core";
 import type {
@@ -27,6 +28,9 @@ import type {
 	RegistrantTier,
 	FieldRequirement,
 } from "@votetorrent/vote-core";
+
+/** Which control's home the D-13 confirmation card is intercepting on behalf of. */
+type PolicySection = "fields" | "disclosure" | "attestation" | "issues";
 
 /**
  * RegistrationPolicyScreen — the single RegistrationPolicy route (D-01). Owns every
@@ -67,9 +71,29 @@ export default function RegistrationPolicyScreen() {
 	// here (unincremented) so Task 1's render already keys every section on it.
 	const [sectionEpoch, setSectionEpoch] = useState(0);
 
+	// D-04/D-05 Policy Issues card write state. There is deliberately no "saved" status:
+	// a successful repair removes the flagged row from the NEXT reconciliation pass (via
+	// loadPolicy() inside runSignedWrite), so the row disappears from this card entirely
+	// instead of showing a transient checkmark.
+	const [issueStatus, setIssueStatus] = useState<Record<string, "idle" | "saving" | "error">>({});
+	const [issueRetry, setIssueRetry] = useState<Record<string, () => Promise<void>>>({});
+	// Which audience-less field row currently has its inline Everyone/District choice
+	// open. Pressing "Set Audience" reveals the choice; it never defaults a choice for
+	// the officer.
+	const [audienceRepairFor, setAudienceRepairFor] = useState<string | undefined>(undefined);
+
+	// D-13 warn-don't-block inline confirmation. Acknowledging once (Proceed Anyway)
+	// lets every subsequent edit this session bypass the card entirely.
+	const [confirmAcknowledged, setConfirmAcknowledged] = useState(false);
+	const [confirmForSection, setConfirmForSection] = useState<PolicySection | undefined>(undefined);
+	const pendingWriteRef = useRef<
+		{ run: () => Promise<void>; resolve: () => void; reject: (e: unknown) => void } | undefined
+	>(undefined);
+
 	const { scopes, loading: scopesLoading } = useCurrentOfficerScopes(authorityId);
 	const canWrite = !scopesLoading && scopes?.includes("mel") === true;
 	const reconciliation = reconcilePolicyState(fields, disclosures);
+	const needsConfirmation = rosterNonEmpty || registrationOpen;
 
 	// CR-02 guard against a stale setState: loadPolicy is invoked both from the mount
 	// effect below AND from runSignedWrite after every write, so a single effect-scoped
@@ -143,6 +167,26 @@ export default function RegistrationPolicyScreen() {
 		// end of every write it fires itself.
 	}, [loadPolicy]);
 
+	/**
+	 * D-13 warn-don't-block gate. The engine is deliberately permissive and the
+	 * AdminSignature is the sole control (Phase 42 D-16), so this card carries the
+	 * confirmation burden and is NOT a hard gate. When neither risky condition holds, or
+	 * the officer has already Proceeded once this session, the write fires immediately
+	 * with no card (D-14 unaffected). Otherwise the pending write is parked in
+	 * pendingWriteRef and the returned promise stays pending until the officer decides —
+	 * the originating row therefore honestly displays Saving while awaiting that
+	 * decision, since the write really is in flight, pending confirmation.
+	 */
+	function guardedWrite(section: PolicySection, run: () => Promise<void>): Promise<void> {
+		if (!needsConfirmation || confirmAcknowledged) {
+			return run();
+		}
+		return new Promise<void>((resolve, reject) => {
+			pendingWriteRef.current = { run, resolve, reject };
+			setConfirmForSection(section);
+		});
+	}
+
 	// D-14: every edit fires its signed engine call immediately — there is no draft
 	// state and no Save button anywhere in this screen. Acquire "Device User" — the
 	// same literal bootstrap fallback AppProvider.tsx:75 and useCurrentOfficerScopes
@@ -158,10 +202,12 @@ export default function RegistrationPolicyScreen() {
 	async function onAddField(fieldName: string, tier: RegistrantTier, requirement: FieldRequirement) {
 		// Plain add: RegistrationFieldsSection already dedupes against existing names, so
 		// this row does not yet exist.
-		await runSignedWrite(async (sign) => {
-			const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-			await registrationEngine.addElectionRegistrationField({ electionId, fieldName, tier, requirement }, sign);
-		});
+		await guardedWrite("fields", () =>
+			runSignedWrite(async (sign) => {
+				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+				await registrationEngine.addElectionRegistrationField({ electionId, fieldName, tier, requirement }, sign);
+			})
+		);
 	}
 
 	// PRIMARY-KEY HAZARD (shared by onChangeField and onSetAudience below):
@@ -181,54 +227,180 @@ export default function RegistrationPolicyScreen() {
 	// flagged Policy Issues row (D-04/D-05). CONTEXT.md D-04 enumerates this as a state
 	// that genuinely occurs in a live database, not a theoretical one.
 	async function onChangeField(fieldName: string, tier: RegistrantTier, requirement: FieldRequirement) {
-		await runSignedWrite(async (sign) => {
-			const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-			await registrationEngine.removeElectionRegistrationField(electionId, fieldName, sign);
-			await registrationEngine.addElectionRegistrationField({ electionId, fieldName, tier, requirement }, sign);
-		});
+		await guardedWrite("fields", () =>
+			runSignedWrite(async (sign) => {
+				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+				await registrationEngine.removeElectionRegistrationField(electionId, fieldName, sign);
+				await registrationEngine.addElectionRegistrationField({ electionId, fieldName, tier, requirement }, sign);
+			})
+		);
 	}
 
 	async function onRemoveField(fieldName: string) {
-		await runSignedWrite(async (sign) => {
-			const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-			await registrationEngine.removeElectionRegistrationField(electionId, fieldName, sign);
-		});
+		await guardedWrite("fields", () =>
+			runSignedWrite(async (sign) => {
+				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+				await registrationEngine.removeElectionRegistrationField(electionId, fieldName, sign);
+			})
+		);
 	}
 
 	async function onSetAudience(fieldName: string, audience: DisclosureAudience) {
-		await runSignedWrite(async (sign) => {
-			const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-			// When a disclosure row for this field already exists, delete it FIRST using
-			// its STORED casing — the PK argument the delete is keyed on — then always add
-			// under the caller-supplied field-row casing.
-			const existing = disclosures.find((d) => d.fieldName.toLowerCase() === fieldName.toLowerCase());
-			if (existing) {
-				await registrationEngine.removeElectionDisclosurePolicy(electionId, existing.fieldName, sign);
-			}
-			await registrationEngine.addElectionDisclosurePolicy({ electionId, fieldName, audience }, sign);
-		});
+		await guardedWrite("disclosure", () =>
+			runSignedWrite(async (sign) => {
+				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+				// When a disclosure row for this field already exists, delete it FIRST using
+				// its STORED casing — the PK argument the delete is keyed on — then always
+				// add under the caller-supplied field-row casing.
+				const existing = disclosures.find((d) => d.fieldName.toLowerCase() === fieldName.toLowerCase());
+				if (existing) {
+					await registrationEngine.removeElectionDisclosurePolicy(electionId, existing.fieldName, sign);
+				}
+				await registrationEngine.addElectionDisclosurePolicy({ electionId, fieldName, audience }, sign);
+			})
+		);
 	}
 
 	async function onRemoveDisclosure(fieldName: string) {
-		await runSignedWrite(async (sign) => {
-			const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-			await registrationEngine.removeElectionDisclosurePolicy(electionId, fieldName, sign);
-		});
+		await guardedWrite("disclosure", () =>
+			runSignedWrite(async (sign) => {
+				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+				await registrationEngine.removeElectionDisclosurePolicy(electionId, fieldName, sign);
+			})
+		);
 	}
 
 	async function onSetAttestation(required: boolean) {
-		await runSignedWrite(async (sign) => {
-			const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-			// insert or replace (registration-engine.ts:1108) — no remove-then-add needed.
-			await registrationEngine.setElectionAttestationPolicy(electionId, required, sign);
-		});
+		await guardedWrite("attestation", () =>
+			runSignedWrite(async (sign) => {
+				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+				// insert or replace (registration-engine.ts:1108) — no remove-then-add needed.
+				await registrationEngine.setElectionAttestationPolicy(electionId, required, sign);
+			})
+		);
 	}
 
 	async function onRevertToDefault() {
-		await runSignedWrite(async (sign) => {
-			const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-			await registrationEngine.removeElectionAttestationPolicy(electionId, sign);
-		});
+		await guardedWrite("attestation", () =>
+			runSignedWrite(async (sign) => {
+				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+				await registrationEngine.removeElectionAttestationPolicy(electionId, sign);
+			})
+		);
+	}
+
+	/**
+	 * D-04/D-05 Policy Issues repair write. Distinct from the section-row runWrite
+	 * helpers (46-05/46-06/46-07) because this card lives on the screen itself, keyed by
+	 * fieldName so the orphan-disclosure repair and the audience-less repair share one
+	 * status map. There is no "saved" branch — see the state declaration comment above.
+	 */
+	async function runIssueWrite(fieldName: string, op: () => Promise<void>) {
+		setIssueStatus((prev) => ({ ...prev, [fieldName]: "saving" }));
+		try {
+			await op();
+		} catch {
+			setIssueStatus((prev) => ({ ...prev, [fieldName]: "error" }));
+			setIssueRetry((prev) => ({ ...prev, [fieldName]: () => runIssueWrite(fieldName, op) }));
+		}
+	}
+
+	function handleRetryIssue(fieldName: string) {
+		const retry = issueRetry[fieldName];
+		if (retry) retry();
+	}
+
+	function handleRepairRemoveDisclosure(fieldName: string) {
+		// fieldName here is always issue.fieldName — the disclosure row's STORED original
+		// casing — since a folded name would key a delete that matches no row.
+		runIssueWrite(fieldName, () =>
+			guardedWrite("issues", () =>
+				runSignedWrite(async (sign) => {
+					const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+					await registrationEngine.removeElectionDisclosurePolicy(electionId, fieldName, sign);
+				})
+			)
+		);
+	}
+
+	function handleRepairSetAudience(fieldName: string, audience: DisclosureAudience) {
+		runIssueWrite(fieldName, () =>
+			guardedWrite("issues", () =>
+				runSignedWrite(async (sign) => {
+					const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+					await registrationEngine.addElectionDisclosurePolicy({ electionId, fieldName, audience }, sign);
+				})
+			)
+		);
+		setAudienceRepairFor(undefined);
+	}
+
+	function handleProceedAnyway() {
+		setConfirmAcknowledged(true);
+		setConfirmForSection(undefined);
+		const record = pendingWriteRef.current;
+		pendingWriteRef.current = undefined;
+		if (record) {
+			record.run().then(record.resolve, record.reject);
+		}
+	}
+
+	function handleKeepCurrentPolicy() {
+		setConfirmForSection(undefined);
+		// Clear WITHOUT calling run — deliberately leave the pending promise unsettled.
+		// Settling it would force either a false Saved (resolve) or a false Couldn't-save
+		// (reject), and nothing failed — the officer chose not to apply the edit.
+		pendingWriteRef.current = undefined;
+		// Bumping sectionEpoch remounts the three section components (keyed on it since
+		// Task 1), resetting their internal row-status maps to idle, so an abandoned
+		// field/disclosure/attestation row returns to displaying the unchanged current
+		// policy. The unsettled promise's consumer is unmounted, so no state update on an
+		// unmounted component occurs. confirmAcknowledged is NOT set here — the card must
+		// reappear on the next attempt, since this one was never acknowledged.
+		setSectionEpoch((e) => e + 1);
+		// The Policy Issues card is NOT one of the three sectionEpoch-remounted
+		// components (it lives directly on this screen), so an abandoned repair row
+		// needs its own reset here alongside the remount above, or it would be stuck
+		// showing Saving forever with no path back to idle.
+		setIssueStatus({});
+		setIssueRetry({});
+		setAudienceRepairFor(undefined);
+	}
+
+	function renderConfirmCard() {
+		const bodyLines = [
+			rosterNonEmpty ? t("registrationPolicyConfirmRosterBody") : undefined,
+			registrationOpen ? t("registrationPolicyConfirmWindowOpenBody") : undefined,
+		].filter((line): line is string => line !== undefined);
+
+		return (
+			<View
+				testID="registration-policy-confirm-card"
+				style={[styles.cardSurface, { backgroundColor: colors.card, borderLeftWidth: 4, borderLeftColor: colors.warning }]}
+			>
+				<ThemedText type="defaultSemiBold">{t("registrationPolicyConfirmTitle")}</ThemedText>
+				<ThemedText type="default">{bodyLines.join("\n")}</ThemedText>
+				<View style={localStyles.confirmButtonRow}>
+					<View testID="registration-policy-confirm-keep">
+						<CustomButton
+							size="thin"
+							title={t("registrationPolicyConfirmCancelButton")}
+							backgroundColor={colors.accent}
+							onPress={handleKeepCurrentPolicy}
+						/>
+					</View>
+					<View testID="registration-policy-confirm-proceed">
+						<CustomButton
+							size="thin"
+							title={t("registrationPolicyConfirmProceedButton")}
+							backgroundColor={colors.warning}
+							forceDarkText
+							onPress={handleProceedAnyway}
+						/>
+					</View>
+				</View>
+			</View>
+		);
 	}
 
 	return (
@@ -262,8 +434,147 @@ export default function RegistrationPolicyScreen() {
 				)
 			)}
 
-			{/* Policy Issues card slot (D-04/D-05) — Task 2. */}
+			{confirmForSection === "issues" && renderConfirmCard()}
 
+			{/* D-04 detection / D-05 repair. There is NO FK and NO cross-table CHECK
+			    between ElectionDisclosurePolicy.FieldName and ElectionRegistrationField,
+			    and none is added this phase — both tables validate only ElectionId
+			    existence, enum membership and the 'mel' signature digest. These states
+			    genuinely occur in a live database: a partial failure of two non-atomic
+			    signed writes (including this screen's own remove-then-add above), a
+			    non-cascading remove, a tier flip, or another writer (the voter app, a
+			    second officer device, direct engine use, P2P replication). */}
+			{reconciliation.hasIssues && (
+				<View
+					testID="registration-policy-issues-card"
+					style={[styles.cardSurface, { backgroundColor: colors.card, borderLeftWidth: 4, borderLeftColor: colors.warning }]}
+				>
+					<View style={localStyles.issuesHeadingRow}>
+						<FontAwesome6 name="triangle-exclamation" size={16} color={colors.warning} />
+						<ThemedText type="defaultSemiBold">{t("registrationPolicyIssuesSectionTitle")}</ThemedText>
+					</View>
+
+					{reconciliation.orphanDisclosures.map((issue) => {
+						const status = issueStatus[issue.fieldName] ?? "idle";
+						return (
+							<View
+								key={"orphan-" + issue.fieldName}
+								testID={"registration-policy-issue-orphan-" + issue.fieldName}
+								style={localStyles.issueRow}
+							>
+								<View style={localStyles.issueRowHeader}>
+									<ThemedText type="smallBold">
+										{t("registrationPolicyOrphanDisclosureFlag")} {issue.fieldName}
+									</ThemedText>
+									<View
+										testID={"registration-policy-issue-repair-remove-" + issue.fieldName}
+										pointerEvents={canWrite ? "auto" : "none"}
+										style={canWrite ? undefined : localStyles.disabledControl}
+									>
+										<ChipButton
+											label={t("registrationPolicyRemoveButton")}
+											onPress={canWrite ? () => handleRepairRemoveDisclosure(issue.fieldName) : undefined}
+										/>
+									</View>
+								</View>
+								<ThemedText type="small">{t("registrationPolicyOrphanDisclosureBody")}</ThemedText>
+								<View testID={"registration-policy-issue-status-" + issue.fieldName}>
+									{status === "saving" && (
+										<ThemedText type="small" style={{ color: colors.textSecondary }}>
+											{t("registrationPolicyRowSaving")}
+										</ThemedText>
+									)}
+									{status === "error" && (
+										<>
+											<ThemedText type="small" style={{ color: colors.error }}>
+												{t("registrationPolicyRowError")}
+											</ThemedText>
+											<View testID={"registration-policy-issue-retry-" + issue.fieldName}>
+												<ChipButton
+													label={t("registrationPolicyRetryButton")}
+													onPress={() => handleRetryIssue(issue.fieldName)}
+												/>
+											</View>
+										</>
+									)}
+								</View>
+							</View>
+						);
+					})}
+
+					{reconciliation.audienceLessSelectiveFields.map((issue) => {
+						const status = issueStatus[issue.fieldName] ?? "idle";
+						const showAudienceChoices = audienceRepairFor === issue.fieldName;
+						const districtAvailable = isDistrictAudienceAvailable(fields, hasDistrictedBallot);
+						return (
+							<View
+								key={"no-audience-" + issue.fieldName}
+								testID={"registration-policy-issue-no-audience-" + issue.fieldName}
+								style={localStyles.issueRow}
+							>
+								<View style={localStyles.issueRowHeader}>
+									<ThemedText type="smallBold">
+										{t("registrationPolicyMissingAudienceFlag")} {issue.fieldName}
+									</ThemedText>
+									<View
+										testID={"registration-policy-issue-repair-set-audience-" + issue.fieldName}
+										pointerEvents={canWrite ? "auto" : "none"}
+										style={canWrite ? undefined : localStyles.disabledControl}
+									>
+										<ChipButton
+											label={t("registrationPolicySetAudienceButton")}
+											onPress={canWrite ? () => setAudienceRepairFor(issue.fieldName) : undefined}
+										/>
+									</View>
+								</View>
+								<ThemedText type="small">{t("registrationPolicyMissingAudienceBody")}</ThemedText>
+
+								{showAudienceChoices && (
+									<View style={localStyles.issueAudienceChoices}>
+										<View testID={"registration-policy-issue-audience-" + issue.fieldName + "-everyone"}>
+											<ChipButton
+												label={t("registrationPolicyAudienceEveryone")}
+												onPress={() => handleRepairSetAudience(issue.fieldName, "everyone")}
+											/>
+										</View>
+										{districtAvailable && (
+											<View testID={"registration-policy-issue-audience-" + issue.fieldName + "-district"}>
+												<ChipButton
+													label={t("registrationPolicyAudienceDistrict")}
+													onPress={() => handleRepairSetAudience(issue.fieldName, "district")}
+												/>
+											</View>
+										)}
+									</View>
+								)}
+
+								<View testID={"registration-policy-issue-status-" + issue.fieldName}>
+									{status === "saving" && (
+										<ThemedText type="small" style={{ color: colors.textSecondary }}>
+											{t("registrationPolicyRowSaving")}
+										</ThemedText>
+									)}
+									{status === "error" && (
+										<>
+											<ThemedText type="small" style={{ color: colors.error }}>
+												{t("registrationPolicyRowError")}
+											</ThemedText>
+											<View testID={"registration-policy-issue-retry-" + issue.fieldName}>
+												<ChipButton
+													label={t("registrationPolicyRetryButton")}
+													onPress={() => handleRetryIssue(issue.fieldName)}
+												/>
+											</View>
+										</>
+									)}
+								</View>
+							</View>
+						);
+					})}
+				</View>
+			)}
+
+			{confirmForSection === "fields" && renderConfirmCard()}
 			<View style={styles.section} testID="registration-policy-fields-section">
 				<View testID="registration-policy-fields-toggle">
 					<ChipButton
@@ -290,6 +601,7 @@ export default function RegistrationPolicyScreen() {
 			    title. The resulting word-level redundancy between the toggle chip and those
 			    inner titles is accepted this phase, since 46-06/46-07 are finished
 			    contracts outside this plan's edit surface. */}
+			{confirmForSection === "disclosure" && renderConfirmCard()}
 			<View style={styles.section} testID="registration-policy-disclosure-section">
 				<View testID="registration-policy-disclosure-toggle">
 					<ChipButton
@@ -311,6 +623,7 @@ export default function RegistrationPolicyScreen() {
 				)}
 			</View>
 
+			{confirmForSection === "attestation" && renderConfirmCard()}
 			<View style={styles.section} testID="registration-policy-attestation-section">
 				<View testID="registration-policy-attestation-toggle">
 					<ChipButton
@@ -339,6 +652,37 @@ const localStyles = StyleSheet.create({
 		alignItems: "center",
 		gap: 8,
 		marginBottom: 12,
+	},
+	issuesHeadingRow: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 8,
+		marginBottom: 8,
+	},
+	issueRow: {
+		gap: 4,
+		marginTop: 8,
+	},
+	issueRowHeader: {
+		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "space-between",
+		gap: 8,
+	},
+	issueAudienceChoices: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 8,
+		flexWrap: "wrap",
+		marginTop: 4,
+	},
+	disabledControl: {
+		opacity: 0.5,
+	},
+	confirmButtonRow: {
+		flexDirection: "row",
+		gap: 8,
+		marginTop: 8,
 	},
 });
 
