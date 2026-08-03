@@ -36,6 +36,7 @@ import {
 	PlayIntegrityVerifier,
 	StubAttestationVerifier,
 	LocalConfigKeyProvider,
+	RegistrationEngine,
 } from '@votetorrent/vote-engine/rn'
 import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn'
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory'
@@ -265,10 +266,10 @@ export class EngineFactory {
 	/**
 	 * Build a fresh engine instance for the given name.
 	 *
-	 * Covers all 11 engine names currently handled by AppProvider:
+	 * Covers all 13 engine names this switch handles:
 	 *   network, defaultUser, user, authority,
-	 *   elections, signing, election, keysTasksEngine, signatureTasksEngine,
-	 *   onboardingTasksEngine, invitations.
+	 *   elections, signing, registration, election, keysTasksEngine, signatureTasksEngine,
+	 *   onboardingTasksEngine, invitations, association.
 	 *
 	 * For sibling engines that require a live EngineContext, call
 	 * requireEstablishedCtx() which throws if no ctx is yet established
@@ -344,6 +345,18 @@ export class EngineFactory {
 			case 'signing': {
 				const ctx = this.requireEstablishedCtx()
 				return new SigningEngine(ctx)
+			}
+
+			case 'registration': {
+				// Phase 46 (D-06): plumbing for RegistrationPolicyScreen (46-05..46-08).
+				// T-46-03: the factory grants no authorization — requireEstablishedCtx()
+				// is a network-lifecycle guard only. The real access control on every
+				// policy write is the 'mel' AdminSignature CHECK enforced in the schema
+				// (MutationValid/DeleteValid on ElectionRegistrationField /
+				// ElectionDisclosurePolicy / ElectionAttestationPolicy). Any future UI
+				// scope gate (D-10) is convenience, not a boundary.
+				const ctx = this.requireEstablishedCtx()
+				return new RegistrationEngine(ctx)
 			}
 
 			case 'election': {
