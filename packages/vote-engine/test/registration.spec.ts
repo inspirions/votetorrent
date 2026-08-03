@@ -887,9 +887,50 @@ describe('ElectionRegistrant roster (authority-only, D-17)', () => {
       await mock.enrollElectionRegistrant(electionId, registrantId, dummySign)
       await mock.removeElectionRegistrant(electionId, registrantId, dummySign)
       // No public read method to assert against directly (getElectionRegistrants
-      // stays a [] stub, out of this plan's scope) — parity is exercised by the
-      // fact that both calls resolve without throwing (matches the real
-      // engine's insert-then-delete-succeeds shape).
+      // is now covered by the dedicated D-08/D-09 scope-lock describe below) —
+      // parity here is exercised by the fact that both calls resolve without
+      // throwing (matches the real engine's insert-then-delete-succeeds shape).
+    })
+  })
+
+  describe('getElectionRegistrants stays stubbed in Phase 46 (D-08/D-09 — real read is Phase 47)', () => {
+    // INTENTIONAL stub per D-08/D-09: Phase 47 implements the real roster read
+    // alongside listRegistrants/searchRegistrants. This is a scope lock, not a
+    // permanent contract — expect it to be REWRITTEN when Phase 47 lands.
+    it('real engine: an enrolled ElectionRegistrant row exists, but getElectionRegistrants still returns []', async () => {
+      const { auth, engine, sign } = await setupRegistrationTest()
+      const elec = await addTestElection(auth)
+      const electionId = await resolveElectionId(elec.ctx, elec.authority.id)
+      const registrantId = nextRegistrantId()
+      await engine.createRegistrant(
+        { id: registrantId, authorityId: auth.authority.id, privateCid: 'test-private-cid', expiration: FUTURE_EXPIRATION },
+        sign
+      )
+      await engine.enrollElectionRegistrant(electionId, registrantId, sign)
+
+      const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+      const row = await ctx.db
+        .prepare('select count(*) as n from ElectionRegistrant where ElectionId = :electionId and RegistrantId = :registrantId')
+        .get({ electionId, registrantId })
+      expect(Number(row?.n)).to.equal(1)
+
+      const registrants = await engine.getElectionRegistrants(electionId)
+      expect(registrants).to.deep.equal([])
+    })
+
+    // INTENTIONAL stub per D-08/D-09: Phase 47 implements the real roster read
+    // alongside listRegistrants/searchRegistrants. This is a scope lock, not a
+    // permanent contract — expect it to be REWRITTEN when Phase 47 lands.
+    it('mock engine parity: an enrolled roster entry exists, but getElectionRegistrants still returns []', async () => {
+      const mock = new MockRegistrationEngine()
+      const dummySign = async (): Promise<Signature> => ({ signerUserId: 'u', signerKey: 'k', signature: 's' })
+      const electionId = 'election-mock-stub-1'
+      const registrantId = 'registrant-mock-stub-1'
+
+      await mock.enrollElectionRegistrant(electionId, registrantId, dummySign)
+
+      const registrants = await mock.getElectionRegistrants(electionId)
+      expect(registrants).to.deep.equal([])
     })
   })
 })
