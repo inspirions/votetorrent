@@ -32,7 +32,8 @@ import type { NavigationProp } from "../../navigation/types";
  *       · signing rows per keyholder (SIGN accent / SHARE warning CustomButton pills)
  *       · ADJUST REVISION → EditElectionRevision
  *   6.  Ballot Templates section (one InfoCard per template with Questions subtitle)
- *   7.  More section (collapsible) + filter-authorities input
+ *   7.  Registration Policy entry (InfoCard -> RegistrationPolicy) — Phase 46 (D-01)
+ *   8.  More section (collapsible) + filter-authorities input
  */
 export default function ElectionDetailsScreen() {
 	const { t } = useTranslation();
@@ -375,7 +376,24 @@ export default function ElectionDetailsScreen() {
 				)}
 			</View>
 
-			{/* 7. More section (collapsible) + filter-authorities input */}
+			{/* 7. Registration Policy entry — Phase 46 (D-01): one InfoCard placed after
+			    Ballot Templates and before More, navigating to the single RegistrationPolicy
+			    route (Fields/Disclosure/Attestation sections). */}
+			<View style={styles.section} testID="election-details-registration-policy-entry">
+				<InfoCard
+					title={t("registrationPolicyEntryTitle")}
+					icon="chevron-right"
+					onPress={() =>
+						navigation.navigate("RegistrationPolicy", {
+							electionEngine,
+							electionId: election.id,
+							authorityId: election.authorityId,
+						} as any)
+					}
+				/>
+			</View>
+
+			{/* 8. More section (collapsible) + filter-authorities input */}
 			<View style={styles.section}>
 				<ChipButton label={t("more")} onPress={() => setMoreOpen((v) => !v)} />
 				{moreOpen && (

@@ -50,6 +50,7 @@ import ProposedElectionScreen from "../screens/tasks/ProposedElectionScreen";
 import ProposedRevisionScreen from "../screens/tasks/ProposedRevisionScreen";
 import ScreenScaffoldsDebugScreen from "../screens/tasks/ScreenScaffoldsDebugScreen";
 import ElectionDetailsScreen from "../screens/elections/ElectionDetailsScreen";
+import RegistrationPolicyScreen from "../screens/elections/RegistrationPolicyScreen";
 import { CreateElectionScreen } from "../screens/elections/CreateElectionScreen";
 // Phase 9 plan 09-13 (ELECUI-04) — Election Revision screen (Screen C, Figma #16/#17).
 // Aliased to avoid name collision with task-flow EditElectionScreen (imported above on ~line 40).
@@ -445,6 +446,15 @@ export const RootNavigator = () => {
 				name="EditElectionRevision"
 				component={EditElectionRevisionScreen}
 				options={{ title: t("electionRevisionTitle") }}
+			/>
+			{/* Phase 46 (D-01) — RegistrationPolicy: a push from within the election
+			    modal, not a new modal, so it uses the simple non-modal options={{ title }}
+			    shape (the CreateBallot/EditBallot precedent), not ElectionDetails's
+			    presentation:"modal" + CloseButton header shape. */}
+			<Stack.Screen
+				name="RegistrationPolicy"
+				component={RegistrationPolicyScreen}
+				options={{ title: t("registrationPolicyEntryTitle") }}
 			/>
 			{/* BallotDraftProvider is hoisted above the navigator (App.tsx) so all
 			    ballot screens share ONE draft instance (screenLayout gave each
