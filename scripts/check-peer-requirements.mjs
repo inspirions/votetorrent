@@ -93,8 +93,17 @@ const execAsync = promisify(exec);
 // alongside cadre-core 0.9.0 + quereus 4.4.1. The crypto-plugin peer wart is the SAME
 // known-suppressed `^0.16.2` mismatch against the plugin's own internal quereus-version
 // scheme (unrelated to @quereus/quereus 4.4.1) — only the resolved version moved.
+// db-p2p 0.18.0 bump (2026-08-03): @optimystic/* family bumped 0.16.3 → 0.18.0 (all
+// aligned) to pick up the reworked db-p2p membership admission gate. The mismatch is
+// unchanged in SHAPE — `packages/attestation-native` consumes
+// @optimystic/quereus-plugin-crypto but does not itself declare @quereus/quereus, so it
+// cannot provide that peer (every other consumer — vote-engine, cadre-core,
+// quereus-plugin-sereus, both apps — provides the resolved 4.4.1 patch copy and reports ✓).
+// Only the resolved version moved. Note the crypto plugin's peer range is now
+// `@quereus/quereus: ^4.3.0`, satisfied by 4.4.1; the residual ✘ is the missing
+// declaration in attestation-native, not a version conflict.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:0.16.3',
+  '@optimystic/quereus-plugin-crypto@npm:0.18.0',
 ]);
 
 // The ✘ marker (U+2718)
