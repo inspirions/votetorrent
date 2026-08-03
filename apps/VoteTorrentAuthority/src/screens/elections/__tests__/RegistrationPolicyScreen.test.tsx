@@ -8,8 +8,8 @@
  * PATTERN SOURCE: apps/VoteTorrentAuthority/src/screens/ballots/__tests__/BallotConfirmation.test.tsx
  * — a REAL MockRegistrationEngine instance imported via a relative `dist/`
  * require, NOT AdministratorInvitationScreen.test.tsx's `jest.fn()`-mock
- * pattern. react-test-renderer ONLY; @testing-library/react-native and
- * @testing-library/react-hooks are NOT dependencies of this app.
+ * pattern. react-test-renderer ONLY; the testing-library packages for React
+ * Native and for React Hooks are NOT dependencies of this app.
  *
  * ============================================================================
  * DECLARED BLIND SPOT — read before trusting a single green test in this file.
@@ -585,9 +585,9 @@ describe("RegistrationPolicyScreen — VALIDATION Wave 0 (D-02/D-03/D-04/D-05/D-
   // succeed here — this test cannot and does not distinguish that from the
   // correct remove-then-add sequence. It asserts the CALLBACK CONTRACT only:
   // one edit produces exactly one remove followed by exactly one add against
-  // the mock, and nothing else. A green run here does not prove policy
-  // editing works against the real engine's plain-insert (ElectionId,
-  // FieldName) PK — that proof is routed to 46-10's device run, and 46-10's
+  // the mock, and nothing else. A green run here does not prove policy editing works
+  // against the real engine's plain-insert (ElectionId, FieldName) PK —
+  // that proof is routed to 46-10's device run, and 46-10's
   // add-a-new-field write does not exercise this edit path either. Do NOT
   // "fix" this by making the mock throw on duplicate keys — that changes a
   // shared fixture every other suite in this workspace depends on; it is a
@@ -625,6 +625,97 @@ describe("RegistrationPolicyScreen — VALIDATION Wave 0 (D-02/D-03/D-04/D-05/D-
     expect(spies.removeElectionRegistrationField.mock.invocationCallOrder[0]).toBeLessThan(
       spies.addElectionRegistrationField.mock.invocationCallOrder[0]!,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // D-13 warn-don't-block confirmation. All three tests here open the
+  // registration window explicitly (makeElectionEngine's registrationEndsAt
+  // in the future) — the rosterNonEmpty leg CANNOT be exercised because
+  // getElectionRegistrants is stubbed to [] (D-08), so the window leg is the
+  // only trigger this suite can drive.
+  // -------------------------------------------------------------------------
+
+  it("D-13: the confirmation card appears before the first write and the write is withheld", async () => {
+    mockCurrentElectionEngine = makeElectionEngine({ registrationEndsAt: Date.now() + 86400000 });
+    await seedField(mockRegistrationEngine, { fieldName: "LastName", tier: "public", requirement: "required" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    await press(tr, "registration-field-tier-LastName-selective");
+
+    present(tr, "registration-policy-confirm-card");
+    present(tr, "registration-policy-confirm-proceed");
+    present(tr, "registration-policy-confirm-keep");
+
+    // The write is PENDING the officer's decision, not applied.
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(0);
+    expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(0);
+  });
+
+  it("D-13: Proceed Anyway releases exactly the pending write and stays acknowledged for the session", async () => {
+    mockCurrentElectionEngine = makeElectionEngine({ registrationEndsAt: Date.now() + 86400000 });
+    await seedField(mockRegistrationEngine, { fieldName: "LastName", tier: "public", requirement: "required" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    await press(tr, "registration-field-tier-LastName-selective");
+    await press(tr, "registration-policy-confirm-proceed");
+
+    absent(tr, "registration-policy-confirm-card");
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(1);
+    expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(1);
+
+    // A second edit, same session, must NOT reopen the card — confirmAcknowledged
+    // is session-sticky once Proceed Anyway has been pressed.
+    await press(tr, "registration-field-requirement-LastName-optional");
+    absent(tr, "registration-policy-confirm-card");
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(2);
+    expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(2);
+  });
+
+  it("D-13: Keep Current Policy withholds the write, resets the row, and the card can return", async () => {
+    mockCurrentElectionEngine = makeElectionEngine({ registrationEndsAt: Date.now() + 86400000 });
+    await seedField(mockRegistrationEngine, { fieldName: "LastName", tier: "public", requirement: "required" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    await press(tr, "registration-field-tier-LastName-selective");
+    // Keep does NOT resolve or reject the pending write's promise by design
+    // (46-08) — the abandoned write is deliberately left unsettled, so this
+    // test must not await it.
+    await press(tr, "registration-policy-confirm-keep");
+
+    absent(tr, "registration-policy-confirm-card");
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(0);
+    expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(0);
+    expect(spies.addElectionDisclosurePolicy).toHaveBeenCalledTimes(0);
+    expect(spies.removeElectionDisclosurePolicy).toHaveBeenCalledTimes(0);
+    expect(spies.setElectionAttestationPolicy).toHaveBeenCalledTimes(0);
+    expect(spies.removeElectionAttestationPolicy).toHaveBeenCalledTimes(0);
+
+    // The sectionEpoch remount reset the row status back to idle; the row is
+    // still rendered (LastName never actually became selective).
+    present(tr, "registration-field-row-LastName");
+
+    // Pressing the edit control again must reopen the card — Keep did NOT
+    // set confirmAcknowledged.
+    await press(tr, "registration-field-tier-LastName-selective");
+    present(tr, "registration-policy-confirm-card");
+  });
+
+  it("D-13 control: with the registration window CLOSED, an edit fires immediately and the card never renders", async () => {
+    // mockCurrentElectionEngine stays at the beforeEach default (window closed) —
+    // this is the control that stops the three tests above from passing on an
+    // always-on card.
+    await seedField(mockRegistrationEngine, { fieldName: "LastName", tier: "public", requirement: "required" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    await press(tr, "registration-field-tier-LastName-selective");
+
+    absent(tr, "registration-policy-confirm-card");
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(1);
+    expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(1);
   });
 
 });

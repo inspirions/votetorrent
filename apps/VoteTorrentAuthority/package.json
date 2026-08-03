@@ -10,6 +10,7 @@
 		"start": "react-native start",
 		"test": "jest",
 		"test:node": "jest --config jest.node.config.js",
+		"typecheck": "tsc --noEmit",
 		"build": "bin/build.sh",
 		"clean": "rm -rf node_modules"
 	},
