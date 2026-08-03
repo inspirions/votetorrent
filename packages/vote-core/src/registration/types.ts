@@ -2,6 +2,8 @@ import type { Signature } from '../common/index.js'
 import type { IBuilder } from '../common/builder.js'
 import type {
   DisclosedSelective,
+  ElectionAttestationPolicy,
+  ElectionDisclosurePolicy,
   ElectionRegistrant,
   ElectionRegistrationField,
   RegisterInit,
@@ -76,6 +78,34 @@ export interface IRegistrationEngine {
   removeElectionRegistrationField(electionId: string, fieldName: string, signatureOrCallback: SignatureOrCallback): Promise<void>
 
   getElectionRegistrationFields(electionId: string): Promise<ElectionRegistrationField[]>
+
+  /**
+   * D-14: per-election selective-disclosure policy CRUD ('mel'-signed,
+   * election-scoped). Declares which `RegistrantSelective` field names may be
+   * disclosed, and to which audience — consumed by `getDisclosedSelective`.
+   */
+  addElectionDisclosurePolicy(policy: ElectionDisclosurePolicy, signatureOrCallback: SignatureOrCallback): Promise<void>
+
+  removeElectionDisclosurePolicy(electionId: string, fieldName: string, signatureOrCallback: SignatureOrCallback): Promise<void>
+
+  getElectionDisclosurePolicies(electionId: string): Promise<ElectionDisclosurePolicy[]>
+
+  /**
+   * D-14b: election policy declaring whether device attestation is required
+   * to Associate ('mel'-signed, single row per election). An UPSERT — a
+   * second call replaces the stored value rather than erroring/duplicating.
+   */
+  setElectionAttestationPolicy(electionId: string, attestationRequired: boolean, signatureOrCallback: SignatureOrCallback): Promise<void>
+
+  /** D-14b: read the stored policy; `undefined` when no row exists — MUST NOT synthesize a default. */
+  getElectionAttestationPolicy(electionId: string): Promise<ElectionAttestationPolicy | undefined>
+
+  /**
+   * D-07: revert-to-default — deletes the `ElectionAttestationPolicy` row so
+   * the fail-closed "absent row = attestation REQUIRED" default (owned by the
+   * associate() ceremony and, for Phase 46, the UI) applies again.
+   */
+  removeElectionAttestationPolicy(electionId: string, signatureOrCallback: SignatureOrCallback): Promise<void>
 }
 
 export interface IRegistrationRegisterBuilder extends IBuilder<RegisterInit, void> {

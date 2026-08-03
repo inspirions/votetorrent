@@ -1137,6 +1137,45 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
   }
 
+  /**
+   * D-07 (46): revert-to-default — a 'mel'-signed read-then-delete mirroring
+   * `removeElectionDisclosurePolicy`'s structure. The re-read is mandatory:
+   * `DeleteValid`'s digest binds the OLD `AttestationRequired` value
+   * (`votetorrent.qsql:1775` — `Digest(context.Tid, old.ElectionId,
+   * old.AttestationRequired, 'delete')`), and the PK (`ElectionId` alone) is
+   * not sufficient to reconstruct it. After this succeeds,
+   * `getElectionAttestationPolicy` returns `undefined` again, so the
+   * fail-closed "absent = REQUIRED" default (enforced by 45-04's associate()
+   * ceremony / 46-07's UI) applies once more.
+   */
+  async removeElectionAttestationPolicy (electionId: string, signatureOrCallback: SignatureOrCallback): Promise<void> {
+    this.requireCtx('removeElectionAttestationPolicy')
+    const ctx = this.ctx!
+    try {
+      const authorityId = await this.resolveElectionAuthorityId(electionId, 'removeElectionAttestationPolicy')
+      const existing = await ctx.db
+        .prepare('select AttestationRequired from ElectionAttestationPolicy where ElectionId = :electionId')
+        .get({ electionId })
+      if (!existing) {
+        throw new Error(`removeElectionAttestationPolicy: ElectionAttestationPolicy not found for electionId=${electionId}`)
+      }
+      const attestationRequired = Number(existing.AttestationRequired)
+      const tid = await allocateTid(ctx.db, 'registration')
+      const digestExpr = "select Digest(:tid, :electionId, :attestationRequired, 'delete') as d"
+      const digestParams = { tid, electionId, attestationRequired }
+      const nonce = await seedSignedMutation(ctx, authorityId, 'mel', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
+
+      await ctx.db.exec(
+        `delete from ElectionAttestationPolicy
+         with context SigningNonce = :signingNonce, Tid = ${tid}
+         where ElectionId = :electionId`,
+        { electionId, signingNonce: nonce }
+      )
+    } catch (err) {
+      this.rethrow(err, 'removeElectionAttestationPolicy')
+    }
+  }
+
   /** Resolve an Election's owning AuthorityId (needed to seed the vrg/mel ceremony's CurrentAdmin lookup). */
   private async resolveElectionAuthorityId (electionId: string, method: string): Promise<string> {
     const ctx = this.ctx!

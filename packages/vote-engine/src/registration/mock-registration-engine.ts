@@ -2,6 +2,7 @@ import { setCommit, setDisclose, randomBytes } from '@optimystic/quereus-plugin-
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
 import type {
   DisclosedSelective,
+  ElectionAttestationPolicy,
   ElectionDisclosurePolicy,
   ElectionRegistrant,
   ElectionRegistrationField,
@@ -39,6 +40,8 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   private readonly electionRegistrationFields = new Map<string, ElectionRegistrationField>()
   /** D-14: in-memory parity for ElectionDisclosurePolicy, keyed by `${electionId}/${fieldName}`. */
   private readonly electionDisclosurePolicies = new Map<string, ElectionDisclosurePolicy>()
+  /** D-14b: in-memory parity for ElectionAttestationPolicy, keyed by `electionId` ALONE (single-row-per-election). */
+  private readonly electionAttestationPolicies = new Map<string, ElectionAttestationPolicy>()
 
   buildRegister (): IRegistrationRegisterBuilder {
     return new RegistrationRegisterBuilder(this)
@@ -218,5 +221,20 @@ export class MockRegistrationEngine implements IRegistrationEngine {
 
   async getElectionDisclosurePolicies (electionId: string): Promise<ElectionDisclosurePolicy[]> {
     return [...this.electionDisclosurePolicies.values()].filter((p) => p.electionId === electionId)
+  }
+
+  /** D-14b: policy declaration — in-memory Map set (upsert), no signing (additive, mirrors addElectionRegistrationField). */
+  async setElectionAttestationPolicy (electionId: string, attestationRequired: boolean, _signatureOrCallback: SignatureOrCallback): Promise<void> {
+    this.electionAttestationPolicies.set(electionId, { electionId, attestationRequired })
+  }
+
+  /** D-14b: returns `undefined` when absent — do NOT synthesize a `true` default (the fail-closed rule is the UI's job). */
+  async getElectionAttestationPolicy (electionId: string): Promise<ElectionAttestationPolicy | undefined> {
+    return this.electionAttestationPolicies.get(electionId)
+  }
+
+  /** D-07: revert-to-default — in-memory Map delete, no signing. */
+  async removeElectionAttestationPolicy (electionId: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
+    this.electionAttestationPolicies.delete(electionId)
   }
 }
