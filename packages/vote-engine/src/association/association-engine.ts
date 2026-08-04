@@ -12,6 +12,8 @@ import type {
   AssociateInit,
   Association,
   AttestationChallenge,
+  AttestationVerdict,
+  AttestationVerdictCode,
   AttestationVerification,
   IAssociationAssociateBuilder,
   IAssociationEngine,
@@ -276,11 +278,32 @@ export class AssociationEngine implements IAssociationEngine {
     // D-07 seam — verify BEFORE opening any transaction; no row written on rejection.
     if (attestationRequired) {
       const verification: AttestationVerification = await this.verifier.verify(challenge, attestation)
-      if (!verification.ok) {
-        throw new Error(
-          `AssociationEngine.associate: attestation verification failed${verification.reason ? `: ${verification.reason}` : ''}`
-        )
+
+      // D-03/T-47-11/T-47-12 (LOCKED ORDER — do not reorder): the verdict is
+      // recorded HERE, unconditionally on both the pass and the fail path,
+      // BEFORE the fail-closed gate below AND before `await ctx.db.exec('BEGIN')`
+      // further down — recording failures is the entire point of D-03, and an
+      // insert placed after the throw or inside the transaction would record
+      // nothing on the fail path (the transaction is never opened there, and a
+      // ROLLBACK would erase it anyway). The record's own outcome is CAPTURED,
+      // never let to influence the gate directly: a storage failure must never
+      // be able to mask or re-shape the "attestation verification failed"
+      // rejection (a caller distinguishing "attestation rejected" from
+      // "storage error" would mis-classify a rejected device), and on the pass
+      // path a record failure must never be silently swallowed.
+      let recordError: unknown
+      try {
+        await this.recordAttestationVerdict(registrantId, deviceKey, verification)
+      } catch (err) {
+        recordError = err
       }
+
+      if (!verification.ok) {
+        const message = `AssociationEngine.associate: attestation verification failed${verification.reason ? `: ${verification.reason}` : ''}`
+        throw recordError !== undefined ? new Error(message, { cause: recordError }) : new Error(message)
+      }
+
+      if (recordError !== undefined) throw recordError
     }
 
     // D-06 device-uniqueness (authority-side — needs the private DeviceId).
@@ -548,6 +571,94 @@ export class AssociationEngine implements IAssociationEngine {
       )
     } catch (err) {
       this.rethrow(err, 'removeAssociation')
+    }
+  }
+
+  // ---------- D-03: attestation verdict store ----------
+
+  /**
+   * D-03: append-only, UNSIGNED insert — no `seedSignedMutation`,
+   * `SigningNonce`, `AdminSigning`, or `Digest(...)` ceremony (D-02),
+   * following the `InviteCancellation` precedent, not `UserEvent`.
+   * `Sequence` is monotonic per `(RegistrantId, DeviceKey)` so
+   * re-verifications accumulate rather than overwrite. Called
+   * unconditionally from `associate()` on both the pass and the fail path.
+   * Persisting a verdict neither authorizes nor blocks anything — the
+   * fail-closed control is `associate()`'s own `if (!verification.ok) throw`.
+   */
+  async recordAttestationVerdict (registrantId: string, deviceKey: string, verification: AttestationVerification): Promise<void> {
+    this.requireCtx('recordAttestationVerdict')
+    const ctx = this.ctx!
+    try {
+      const seqRow = await ctx.db
+        .prepare('select coalesce(max(Sequence), -1) + 1 as n from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey')
+        .get({ registrantId, deviceKey })
+      const sequence = Number(seqRow?.n ?? 0)
+
+      // Text code, never a boolean — a boolean-shaped bind fails VerdictValid.
+      const verdict = verification.ok ? 'pass' : 'fail'
+      // Z-suffixed, required by VerifiedAtValid's like('%Z', VerifiedAt); the
+      // context `now` param stays Z-less (nowCanonicalDatetime()) — the same
+      // split every other like('%Z', X)-checked datetime column in this
+      // codebase uses (Association.Expiration, AttestationChallenge.Expiration,
+      // the private device-association row's own attestation-time column,
+      // 47-07's RegistrantAccessEvent.Timestamp). Do NOT bind
+      // nowCanonicalDatetime() into this column.
+      const verifiedAt = toIsoZDatetime(Date.now())
+      const tid = await allocateTid(ctx.db, 'association')
+
+      await ctx.db.exec(
+        `insert into AttestationVerdict (RegistrantId, DeviceKey, Sequence, Verdict, Reason, VerifiedAt)
+         with context Tid = ${tid}, now = :now
+         values (:registrantId, :deviceKey, :sequence, :verdict, :reason, :verifiedAt)`,
+        {
+          registrantId,
+          deviceKey,
+          sequence,
+          verdict,
+          reason: verification.reason ?? null,
+          verifiedAt,
+          now: nowCanonicalDatetime()
+        }
+      )
+    } catch (err) {
+      this.rethrow(err, 'recordAttestationVerdict')
+    }
+  }
+
+  /**
+   * `deviceKey` is an OPTIONAL narrowing predicate. Results are ordered
+   * `DeviceKey` asc then `Sequence` asc — the LAST element of a narrowed
+   * read is the most recent verdict (the ordering contract 47-15/47-16
+   * render "the latest verdict" from). T-47-05: projects only
+   * `AttestationVerdict`'s own six columns — no column from the private,
+   * authority-held device-association row, and no join; `DeviceKey` is
+   * already public via `Association`.
+   */
+  async getAttestationVerdicts (registrantId: string, deviceKey?: string): Promise<AttestationVerdict[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: AttestationVerdict[] = []
+    try {
+      const sql = deviceKey === undefined
+        ? 'select RegistrantId, DeviceKey, Sequence, Verdict, Reason, VerifiedAt from AttestationVerdict where RegistrantId = :registrantId order by DeviceKey asc, Sequence asc'
+        : 'select RegistrantId, DeviceKey, Sequence, Verdict, Reason, VerifiedAt from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey order by DeviceKey asc, Sequence asc'
+      const params: Record<string, string> = deviceKey === undefined ? { registrantId } : { registrantId, deviceKey }
+      for await (const row of ctx.db.eval(sql, params)) {
+        out.push({
+          registrantId: asText(row.RegistrantId, 'AttestationVerdict.RegistrantId'),
+          deviceKey: asText(row.DeviceKey, 'AttestationVerdict.DeviceKey'),
+          sequence: Number(row.Sequence),
+          verdict: asText(row.Verdict, 'AttestationVerdict.Verdict') as AttestationVerdictCode,
+          // undefined, never null — the model declares `reason?: string`.
+          reason: row.Reason == null ? undefined : asText(row.Reason, 'AttestationVerdict.Reason'),
+          // CR-02: a datetime read-back is Z-stripped; re-stamp it.
+          verifiedAt: toIsoZDatetime(row.VerifiedAt as string)
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getAttestationVerdicts')
     }
   }
 

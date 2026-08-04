@@ -3,6 +3,8 @@ import type {
   AssociateInit,
   Association,
   AttestationChallenge,
+  AttestationVerdict,
+  AttestationVerification,
   IAssociationAssociateBuilder,
   IAssociationEngine,
   Signature
@@ -24,6 +26,8 @@ type SignatureOrCallback = Signature | ((digest: Uint8Array) => Promise<Signatur
 export class MockAssociationEngine implements IAssociationEngine {
   private readonly challenges = new Map<string, AttestationChallenge>()
   private readonly associations = new Map<string, Association>()
+  /** D-03 in-memory parity — append-only, ordered; an array (not a Map) mirrors the real store's shape. */
+  private readonly verdicts: AttestationVerdict[] = []
 
   async issueAttestationChallenge (
     registrantId: string,
@@ -75,6 +79,11 @@ export class MockAssociationEngine implements IAssociationEngine {
       signorKey: sig.signerKey,
       signature: sig.signature
     })
+    // The mock holds no IAttestationVerifier (see recordAttestationVerdict
+    // below) and therefore can only ever record a 'pass' verdict here — no
+    // screen may infer from the mock that a 'fail' verdict is unreachable.
+    // Fail-path parity is proven against the REAL engine only.
+    await this.recordAttestationVerdict(init.registrantId, init.deviceKey, { ok: true })
   }
 
   async getAssociation (registrantId: string, deviceKey: string): Promise<Association | undefined> {
@@ -87,5 +96,25 @@ export class MockAssociationEngine implements IAssociationEngine {
 
   async removeAssociation (registrantId: string, deviceKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.associations.delete(`${registrantId}:${deviceKey}`)
+  }
+
+  /** D-03 mock parity — no signature parameter, matching the real engine's unsigned (D-02) shape. */
+  async recordAttestationVerdict (registrantId: string, deviceKey: string, verification: AttestationVerification): Promise<void> {
+    const sequence = this.verdicts.filter((v) => v.registrantId === registrantId && v.deviceKey === deviceKey).length
+    this.verdicts.push({
+      registrantId,
+      deviceKey,
+      sequence,
+      verdict: verification.ok ? 'pass' : 'fail',
+      reason: verification.reason,
+      verifiedAt: new Date().toISOString()
+    })
+  }
+
+  /** D-03 mock parity — mutates nothing; returns a sorted copy, never the internal array by reference. */
+  async getAttestationVerdicts (registrantId: string, deviceKey?: string): Promise<AttestationVerdict[]> {
+    return this.verdicts
+      .filter((v) => v.registrantId === registrantId && (deviceKey === undefined || v.deviceKey === deviceKey))
+      .sort((a, b) => (a.deviceKey < b.deviceKey ? -1 : a.deviceKey > b.deviceKey ? 1 : a.sequence - b.sequence))
   }
 }
