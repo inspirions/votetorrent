@@ -7,6 +7,8 @@ import { EngineFactory } from "../engines/engine-factory";
 import { LocalStorageReact } from "@votetorrent/vote-engine/rn";
 import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
+import { createDeviceSigner } from "../engines/device-signer";
+import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { useCadreNode } from "./CadreNodeProvider";
 
 interface AppContextType {
@@ -163,6 +165,14 @@ export function AppProvider({ children }: PropsWithChildren) {
 						factory.setCurrentUser(user);
 						await networksEng.open(network, user);
 						await factory.getEngine("network", network);
+						// 47-23: __DEV__-guarded, flag-gated registrant fixture. No-op in
+						// release and whenever REGISTRANT_SEED_ENABLED is false (committed
+						// default). Awaited HERE — rather than fired from index.js — so
+						// exactly one Quereus context ever touches the store (the factory's
+						// own), matching the voter app's VoterAppProvider precedent for the
+						// same placement.
+						const seedSign = await createDeviceSigner(user.name);
+						await maybeSeedRegistrantFixtures(networksEng, network, user, seedSign);
 						// Pitfall 4: setHasNetwork is called by AppProvider (not the factory).
 						setHasNetwork(true);
 						// RE-ATTACH FIX: clear any initError from a previous failed attempt so
