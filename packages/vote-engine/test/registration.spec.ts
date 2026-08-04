@@ -886,18 +886,21 @@ describe('ElectionRegistrant roster (authority-only, D-17)', () => {
 
       await mock.enrollElectionRegistrant(electionId, registrantId, dummySign)
       await mock.removeElectionRegistrant(electionId, registrantId, dummySign)
-      // No public read method to assert against directly (getElectionRegistrants
-      // is now covered by the dedicated D-08/D-09 scope-lock describe below) —
-      // parity here is exercised by the fact that both calls resolve without
-      // throwing (matches the real engine's insert-then-delete-succeeds shape).
+      // Phase 47/D-07: getElectionRegistrants is now a real public read (see the
+      // rewritten describe block below) — parity here is exercised by the fact
+      // that both calls resolve without throwing (matches the real engine's
+      // insert-then-delete-succeeds shape).
     })
   })
 
-  describe('getElectionRegistrants stays stubbed in Phase 46 (D-08/D-09 — real read is Phase 47)', () => {
-    // INTENTIONAL stub per D-08/D-09: Phase 47 implements the real roster read
-    // alongside listRegistrants/searchRegistrants. This is a scope lock, not a
-    // permanent contract — expect it to be REWRITTEN when Phase 47 lands.
-    it('real engine: an enrolled ElectionRegistrant row exists, but getElectionRegistrants still returns []', async () => {
+  describe('getElectionRegistrants returns real rows (D-07 — Phase 47 replaced the Phase 46 stub)', () => {
+    // This block was a Phase 46 scope lock ("stays stubbed in Phase 46 (D-08/D-09
+    // — real read is Phase 47)") asserting getElectionRegistrants always returned
+    // `[]`, even for an enrolled registrant. Phase 47/47-05 implemented the real
+    // read; 47-06 REWRITES (not deletes) these two tests into real-rows
+    // assertions so the only automated coverage getElectionRegistrants has is
+    // updated, not destroyed.
+    it('real engine: an enrolled ElectionRegistrant row is returned by getElectionRegistrants', async () => {
       const { auth, engine, sign } = await setupRegistrationTest()
       const elec = await addTestElection(auth)
       const electionId = await resolveElectionId(elec.ctx, elec.authority.id)
@@ -915,13 +918,20 @@ describe('ElectionRegistrant roster (authority-only, D-17)', () => {
       expect(Number(row?.n)).to.equal(1)
 
       const registrants = await engine.getElectionRegistrants(electionId)
-      expect(registrants).to.deep.equal([])
+      expect(registrants).to.deep.equal([{ electionId, registrantId }])
+
+      // A second election's roster must not leak this registrant in — `[]`
+      // remains correct for a genuinely empty roster; what is no longer
+      // correct is `[]` for a populated one. (addTestElection() always seeds a
+      // fixed Election.Id, so a second REAL election would PK-collide; a plain
+      // read like getElectionRegistrants has no FK requirement on Election, so
+      // an arbitrary distinct id is sufficient to prove the isolation.)
+      const otherElectionId = `${electionId}-other`
+      const otherRegistrants = await engine.getElectionRegistrants(otherElectionId)
+      expect(otherRegistrants).to.deep.equal([])
     })
 
-    // INTENTIONAL stub per D-08/D-09: Phase 47 implements the real roster read
-    // alongside listRegistrants/searchRegistrants. This is a scope lock, not a
-    // permanent contract — expect it to be REWRITTEN when Phase 47 lands.
-    it('mock engine parity: an enrolled roster entry exists, but getElectionRegistrants still returns []', async () => {
+    it('mock engine parity: getElectionRegistrants returns the enrolled roster entry and drops it on remove', async () => {
       const mock = new MockRegistrationEngine()
       const dummySign = async (): Promise<Signature> => ({ signerUserId: 'u', signerKey: 'k', signature: 's' })
       const electionId = 'election-mock-stub-1'
@@ -930,7 +940,11 @@ describe('ElectionRegistrant roster (authority-only, D-17)', () => {
       await mock.enrollElectionRegistrant(electionId, registrantId, dummySign)
 
       const registrants = await mock.getElectionRegistrants(electionId)
-      expect(registrants).to.deep.equal([])
+      expect(registrants).to.deep.equal([{ electionId, registrantId }])
+
+      await mock.removeElectionRegistrant(electionId, registrantId, dummySign)
+      const afterRemove = await mock.getElectionRegistrants(electionId)
+      expect(afterRemove, 'the mock read tracks its own writes rather than being hardcoded').to.deep.equal([])
     })
   })
 })
