@@ -305,6 +305,21 @@ export default function SettingsScreen() {
 					}}
 				/>
 
+				{/* Phase 47 plan 47-21 (D-09) — device-level provisioning entry, placed
+				    above the {currentNetwork} boundary because Play Console key
+				    provisioning is a build/device concern, not per-network and not
+				    per-authority. Deliberately NO scope gate: 47-19's screen reads a
+				    build-state boolean, makes no engine call and holds no registrant
+				    data, so gating it would make it unreachable for exactly the
+				    operator who needs to diagnose a build. */}
+				<View testID="settings-attestation-provisioning-entry">
+					<InfoCard
+						title={t("attestationProvisioningScreenTitle")}
+						icon="chevron-right"
+						onPress={() => navigation.navigate("AttestationProvisioningStatus")}
+					/>
+				</View>
+
 				<ThemedText type="subtitle" style={styles.networkTitle}>
 					{currentNetwork}
 				</ThemedText>
