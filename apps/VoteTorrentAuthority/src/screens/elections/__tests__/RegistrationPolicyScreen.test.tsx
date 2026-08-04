@@ -375,6 +375,32 @@ function treeText(tr: renderer.ReactTestRenderer): string {
   return JSON.stringify(tr.toJSON());
 }
 
+/**
+ * Recursively find a node in the tr.toJSON() tree by its testID prop.
+ *
+ * NOT `tr.root.findByProps(...)` directly: a TestInstance carries a `parent`
+ * back-reference into the live fiber tree, and JSON.stringify on it throws
+ * "Converting circular structure to JSON" (confirmed empirically). The
+ * `.toJSON()` tree is plain data (type/props/children only, no back-refs), so
+ * this is the safe subtree-scoping primitive — the same pattern
+ * RegistrationFieldsSection.test.tsx / DisclosurePolicySection.test.tsx use.
+ */
+function findJsonNodeByTestID(node: unknown, testID: string): unknown {
+  if (!node) return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findJsonNodeByTestID(child, testID);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof node !== "object") return null;
+  const n = node as { props?: { testID?: string }; children?: unknown };
+  if (n.props?.testID === testID) return n;
+  if (n.children) return findJsonNodeByTestID(n.children, testID);
+  return null;
+}
+
 /** Seeds an ElectionRegistrationField directly through the mock's own engine surface. */
 async function seedField(
   engine: any,
@@ -789,6 +815,60 @@ describe("RegistrationPolicyScreen — VALIDATION Wave 0 (D-02/D-03/D-04/D-05/D-
     absent(tr, "registration-policy-confirm-card");
     expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(1);
     expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // gap 5 (46-VERIFICATION.md, D-13/CR-04 displaced-write closure, 46-14).
+  // A field with tier:'selective' renders in BOTH the Fields section and the
+  // Disclosure section (DisclosurePolicySection.selectiveFields), giving this
+  // test one control in each section without needing two seeded fields.
+  // -------------------------------------------------------------------------
+
+  it("D-13: a second edit while the card is open settles the displaced write instead of stranding its row", async () => {
+    mockCurrentElectionEngine = makeElectionEngine({ registrationEndsAt: Date.now() + 86400000 });
+    await seedField(mockRegistrationEngine, { fieldName: "Address", tier: "selective", requirement: "optional" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+
+    // Press a fields control — the D-13 card opens and the tier-change write
+    // is parked in pendingWriteRef, not yet fired.
+    await press(tr, "registration-field-tier-Address-public");
+    present(tr, "registration-policy-confirm-card");
+
+    // Press a disclosure control while the card is still open. This is the
+    // cross-section displacement case: the card renders inline directly
+    // above the Fields section while every section stays mounted and
+    // interactive, so a second edit from a DIFFERENT section still displaces
+    // the first write parked in the single-slot pendingWriteRef.
+    await press(tr, "disclosure-audience-Address-everyone");
+
+    // The displaced fields write settled into error rather than hanging —
+    // its row reached Couldn't-save + a working Retry.
+    present(tr, "registration-field-retry-Address");
+    const statusNode = findJsonNodeByTestID(tr.toJSON(), "registration-field-status-Address");
+    expect(JSON.stringify(statusNode)).not.toContain("registrationPolicyRowSaving");
+
+    // Neither write has actually reached the engine yet — both are still
+    // gated behind the (now second, disclosure) pending write awaiting the
+    // officer's decision.
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(0);
+    expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(0);
+    expect(spies.addElectionDisclosurePolicy).toHaveBeenCalledTimes(0);
+    expect(spies.removeElectionDisclosurePolicy).toHaveBeenCalledTimes(0);
+
+    // Proceed Anyway releases ONLY the most recent (disclosure) pending
+    // write — the displaced fields edit is not silently applied alongside it.
+    await press(tr, "registration-policy-confirm-proceed");
+
+    expect(spies.addElectionDisclosurePolicy).toHaveBeenCalledTimes(1);
+    expect(spies.removeElectionRegistrationField).toHaveBeenCalledTimes(0);
+    expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(0);
+
+    // The D-13 roster leg cannot be exercised here because
+    // getElectionRegistrants is stubbed to [] (D-08/D-09, deferred to Phase
+    // 47) — the registration-window leg above is the only reachable trigger,
+    // matching the three existing D-13 tests in this file.
   });
 
 });
