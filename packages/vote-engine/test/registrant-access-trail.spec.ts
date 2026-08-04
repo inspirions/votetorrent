@@ -22,8 +22,17 @@
  */
 
 import { expect } from 'chai'
-import type { PrivateDetail } from '@votetorrent/vote-core'
+import { secp256k1 } from '@noble/curves/secp256k1.js'
+import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
+import type { PrivateDetail, Signature } from '@votetorrent/vote-core'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from '../src/registration/access-trail-fields.js'
+import { RegistrationEngine } from '../src/registration/registration-engine.js'
+import { MockRegistrationEngine } from '../src/registration/mock-registration-engine.js'
+import { createTestNetwork, addTestAuthority } from './fixtures/test-context.js'
+import { randomTestKeyPair } from './fixtures/keys.js'
+import { nowCanonicalDatetime } from '../src/utils.js'
+import type { EngineContext } from '../src/types.js'
+import type { TestAuthorityContext } from './fixtures/test-context.js'
 
 describe('access-trail field sanitizer (D-01/T-47-02)', () => {
   describe('collectPrivateFieldNames', () => {
@@ -88,6 +97,304 @@ describe('access-trail field sanitizer (D-01/T-47-02)', () => {
     it('does not throw on the value-rejection lock input', () => {
       const allowed = new Set(['ssn'])
       expect(() => sanitizeAccessTrailFields(['123-45-6789', 'ssn'], allowed)).to.not.throw()
+    })
+  })
+})
+
+// ===========================================================================
+// RegistrationEngine + MockRegistrationEngine — the trail itself (Task 3)
+// ===========================================================================
+
+/** Build a real secp256k1 sign callback (@noble/curves v2 defaults — prehash:true). */
+function makeRealSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
+  const { privateHex, publicHex } = randomTestKeyPair()
+  const privBytes = hexToBytes(privateHex)
+  return async (digest: Uint8Array): Promise<Signature> => {
+    const sig = secp256k1.sign(digest, privBytes) // v2 default: prehash:true
+    return { signerUserId: userId, signerKey: publicHex, signature: bytesToHex(sig) }
+  }
+}
+
+let trailRegistrantSeq = 0
+function nextTrailRegistrantId (): string {
+  trailRegistrantSeq += 1
+  return `access-trail-registrant-${Date.now()}-${trailRegistrantSeq}`
+}
+
+const TRAIL_FUTURE_EXPIRATION = Date.now() + 365 * 86_400_000
+
+/** Three named private fields carrying obviously-fake sentinel values — the names allowlist is derived from these. */
+const TRAIL_PRIVATE_DETAILS: PrivateDetail[] = [
+  { name: 'ssn', value: '000-00-0000' },
+  { name: 'dob', value: '1980-01-01' },
+  { name: 'phone', value: '555-0100' }
+]
+
+/** Mirrors RegistrationEngine's private computeRegistrantPrivateCid (registration.spec.ts's own precedent). */
+async function computeTrailPrivateCid (
+  ctx: EngineContext,
+  registrantId: string,
+  input: { expiration: number; details: PrivateDetail[] }
+): Promise<string> {
+  const expiration = new Date(input.expiration).toISOString()
+  const row = await ctx.db
+    .prepare('select cid(Digest(:registrantId, :expiration, :privateDetails)) as c')
+    .get({ registrantId, expiration, privateDetails: JSON.stringify(input.details) })
+  return row!.c as string
+}
+
+async function setup (): Promise<{
+  auth: TestAuthorityContext
+  engine: RegistrationEngine
+  sign: (digest: Uint8Array) => Promise<Signature>
+}> {
+  const net = await createTestNetwork()
+  const auth = await addTestAuthority(net)
+  const sign = makeRealSigner(auth.user.id)
+  const engine = new RegistrationEngine(auth.ctx)
+  return { auth, engine, sign }
+}
+
+/**
+ * Seed a Registrant + a RegistrantPrivate row carrying `TRAIL_PRIVATE_DETAILS`.
+ * The RegistrantPrivate row is mandatory, not decoration: the names allowlist
+ * is derived from it, so a registrant without one records nothing (proven by
+ * a dedicated test below).
+ */
+async function seedRegistrant (
+  engine: RegistrationEngine,
+  auth: TestAuthorityContext,
+  sign: (digest: Uint8Array) => Promise<Signature>
+): Promise<string> {
+  const registrantId = nextTrailRegistrantId()
+  const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+  const privateCid = await computeTrailPrivateCid(ctx, registrantId, { expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS })
+  await engine.createRegistrant(
+    { id: registrantId, authorityId: auth.authority.id, privateCid, expiration: TRAIL_FUTURE_EXPIRATION },
+    sign
+  )
+  await engine.createRegistrantPrivate({ registrantId, expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS }, sign)
+  return registrantId
+}
+
+describe('RegistrantAccessEvent trail (D-01/D-02)', () => {
+  it('is an unsigned insert: the row lands but neither AdminSigning nor AdminSignature grows', async () => {
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+    const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+
+    const beforeSigning = await ctx.db.prepare('select count(*) as n from AdminSigning where AuthorityId = :id').get({ id: auth.authority.id })
+    const beforeSignature = await ctx.db.prepare('select count(*) as n from AdminSignature').get()
+
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn', 'dob'])
+
+    const afterSigning = await ctx.db.prepare('select count(*) as n from AdminSigning where AuthorityId = :id').get({ id: auth.authority.id })
+    const afterSignature = await ctx.db.prepare('select count(*) as n from AdminSignature').get()
+
+    // The assertion that would go red if a later "hardening" added a ceremony —
+    // D-02 forbids that because it would grow AdminSignature with read traffic.
+    expect(Number(afterSigning?.n)).to.equal(Number(beforeSigning?.n))
+    expect(Number(afterSignature?.n)).to.equal(Number(beforeSignature?.n))
+
+    const rowCount = await ctx.db.prepare('select count(*) as n from RegistrantAccessEvent where RegistrantId = :registrantId').get({ registrantId })
+    expect(Number(rowCount?.n)).to.equal(1)
+  })
+
+  it('Fields round-trips NAMES sorted ascending, with viewerUserId/sequence/a Z-suffixed timestamp (D-01/CR-02)', async () => {
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn', 'dob'])
+
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events).to.have.length(1)
+    const event = events[0]!
+    expect(event.fields).to.deep.equal(['dob', 'ssn'])
+    expect(event.viewerUserId).to.equal(auth.user.id)
+    expect(event.sequence).to.equal(0)
+    expect(event.timestamp).to.match(/Z$/)
+    expect(new Date(event.timestamp).getTime()).to.be.closeTo(Date.now(), 5000)
+  })
+
+  it('the value-rejection lock: handing the write path the registrant\'s own private VALUES writes no row, and Fields never contains a sentinel', async () => {
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+    const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['000-00-0000', '1980-01-01'])
+
+    const countAfterValues = await ctx.db.prepare('select count(*) as n from RegistrantAccessEvent where RegistrantId = :registrantId').get({ registrantId })
+    expect(Number(countAfterValues?.n)).to.equal(0)
+
+    let allFields = ''
+    for await (const row of ctx.db.eval('select Fields from RegistrantAccessEvent where RegistrantId = :registrantId', { registrantId })) {
+      allFields += String(row.Fields)
+    }
+    expect(allFields).to.not.include('000-00-0000')
+    expect(allFields).to.not.include('1980-01-01')
+
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn', '000-00-0000'])
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events).to.have.length(1)
+    expect(events[0]!.fields).to.deep.equal(['ssn'])
+  })
+
+  it('Sequence is monotonic per registrant, and independent across registrants', async () => {
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn'])
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['dob'])
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['phone'])
+
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events.map((e) => e.sequence).sort((a, b) => a - b)).to.deep.equal([0, 1, 2])
+
+    const secondRegistrantId = await seedRegistrant(engine, auth, sign)
+    await engine.recordRegistrantAccessEvent(secondRegistrantId, auth.user.id, ['ssn'])
+    const secondEvents = await engine.getRegistrantAccessEvents(secondRegistrantId)
+    expect(secondEvents).to.have.length(1)
+    expect(secondEvents[0]!.sequence).to.equal(0)
+  })
+
+  it('getRegistrantAccessEvents returns newest-first (Sequence descending)', async () => {
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn'])
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['dob'])
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['phone'])
+
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events.map((e) => e.sequence)).to.deep.equal([2, 1, 0])
+    expect(events[0]!.fields).to.deep.equal(['phone'])
+  })
+
+  it('InsertOnly rejects both update and delete, leaving prior rows present and unmodified', async () => {
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn'])
+
+    const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+
+    let updateErr: unknown
+    try {
+      await ctx.db.exec(
+        "update RegistrantAccessEvent with context Tid = 9, now = :now set ViewerUserId = 'X'",
+        { now: nowCanonicalDatetime() }
+      )
+    } catch (err) {
+      updateErr = err
+    }
+    // A missing-mutation-context error may fire before InsertOnly itself —
+    // either rejection satisfies the append-only property (authority.spec.ts precedent).
+    expect(updateErr).to.be.instanceOf(Error)
+
+    let deleteErr: unknown
+    try {
+      await ctx.db.exec(
+        'delete from RegistrantAccessEvent with context Tid = 9, now = :now',
+        { now: nowCanonicalDatetime() }
+      )
+    } catch (err) {
+      deleteErr = err
+    }
+    expect(deleteErr).to.be.instanceOf(Error)
+
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events).to.have.length(1)
+    expect(events[0]!.viewerUserId).to.equal(auth.user.id)
+    expect(events[0]!.fields).to.deep.equal(['ssn'])
+  })
+
+  it('an empty fields list writes no row and does not throw', async () => {
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, [])
+
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events).to.have.length(0)
+  })
+
+  it('a registrant with no RegistrantPrivate row writes no row and does not throw', async () => {
+    const { auth, engine, sign } = await setup()
+    const registrantId = nextTrailRegistrantId()
+    const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+    const privateCid = await computeTrailPrivateCid(ctx, registrantId, { expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS })
+    await engine.createRegistrant(
+      { id: registrantId, authorityId: auth.authority.id, privateCid, expiration: TRAIL_FUTURE_EXPIRATION },
+      sign
+    )
+    // Deliberately no createRegistrantPrivate call — no RegistrantPrivate row exists.
+    await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn'])
+
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events).to.have.length(0)
+  })
+
+  describe('MockRegistrationEngine parity', () => {
+    async function setupMock (): Promise<{ mock: MockRegistrationEngine; registrantId: string }> {
+      const mock = new MockRegistrationEngine()
+      const registrantId = nextTrailRegistrantId()
+      const stubSign = async (): Promise<Signature> => ({ signerUserId: 'mock-user', signerKey: 'mock-key', signature: 'mock-sig' })
+      await mock.register(
+        {
+          registrant: { id: registrantId, authorityId: 'mock-authority', expiration: TRAIL_FUTURE_EXPIRATION },
+          private: { expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS }
+        },
+        stubSign
+      )
+      return { mock, registrantId }
+    }
+
+    it('names round-trip sorted and de-duped', async () => {
+      const { mock, registrantId } = await setupMock()
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', ['dob', 'ssn', 'dob'])
+      const events = await mock.getRegistrantAccessEvents(registrantId)
+      expect(events).to.have.length(1)
+      expect(events[0]!.fields).to.deep.equal(['dob', 'ssn'])
+    })
+
+    it('value strings are dropped', async () => {
+      const { mock, registrantId } = await setupMock()
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', ['000-00-0000', 'ssn'])
+      const events = await mock.getRegistrantAccessEvents(registrantId)
+      expect(events).to.have.length(1)
+      expect(events[0]!.fields).to.deep.equal(['ssn'])
+    })
+
+    it('sequence is 0, 1, 2 on repeated calls', async () => {
+      const { mock, registrantId } = await setupMock()
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', ['ssn'])
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', ['dob'])
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', ['phone'])
+      const events = await mock.getRegistrantAccessEvents(registrantId)
+      expect(events.map((e) => e.sequence).sort((a, b) => a - b)).to.deep.equal([0, 1, 2])
+    })
+
+    it('getRegistrantAccessEvents returns newest-first', async () => {
+      const { mock, registrantId } = await setupMock()
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', ['ssn'])
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', ['dob'])
+      const events = await mock.getRegistrantAccessEvents(registrantId)
+      expect(events.map((e) => e.sequence)).to.deep.equal([1, 0])
+    })
+
+    it('an empty list writes nothing', async () => {
+      const { mock, registrantId } = await setupMock()
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', [])
+      const events = await mock.getRegistrantAccessEvents(registrantId)
+      expect(events).to.have.length(0)
+    })
+
+    it('the returned array is a copy — mutating it does not change what a subsequent read returns', async () => {
+      const { mock, registrantId } = await setupMock()
+      await mock.recordRegistrantAccessEvent(registrantId, 'viewer-1', ['ssn'])
+      const events = await mock.getRegistrantAccessEvents(registrantId)
+      events.pop()
+      const eventsAgain = await mock.getRegistrantAccessEvents(registrantId)
+      expect(eventsAgain).to.have.length(1)
     })
   })
 })
