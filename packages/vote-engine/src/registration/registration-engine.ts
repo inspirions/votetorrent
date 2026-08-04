@@ -1,10 +1,12 @@
 import { setDisclose } from '@optimystic/quereus-plugin-crypto'
-import { digestToBytes, nowCanonicalDatetime, parseJsonOr, asText } from '../utils.js'
+import { digestToBytes, nowCanonicalDatetime, parseJsonOr, asText, asNumberOr } from '../utils.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
 import { validateFieldPolicy } from './field-policy.js'
+import { buildRegistrantListCountSql, buildRegistrantListPageSql, clampPageSize } from './registrant-list-query.js'
+import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
 import type {
   DisclosedSelective,
@@ -19,6 +21,10 @@ import type {
   RegisterInit,
   RegisterSelectivePayload,
   Registrant,
+  RegistrantListFilter,
+  RegistrantListPage,
+  RegistrantListResult,
+  RegistrantListRow,
   RegistrantPrivate,
   RegistrantPublic,
   RegistrantSelective,
@@ -684,6 +690,65 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
   }
 
+  /**
+   * D-04/D-05/D-06: the registrant roster read. Filter dimensions are ANDed
+   * (D-04); paging is keyset on `Registrant.Id` with `total` computed only on
+   * a cursor-absent call (D-05); rows join the CURRENT `RegistrantPublic` row
+   * only, via the shared `buildRegistrantListFragment`'s D-06 currency
+   * predicate (see `registrant-list-query.ts`). Mirrors
+   * `getElectionRegistrationFields`'s no-ctx convention — no context yet
+   * means an empty page, not an error.
+   */
+  async listRegistrants (filter?: RegistrantListFilter, page?: RegistrantListPage): Promise<RegistrantListResult> {
+    if (!this.ctx) return { rows: [] }
+    const ctx = this.ctx
+    try {
+      const pageSize = clampPageSize(page?.pageSize)
+      const cursor = page?.cursor
+      const { sql, params } = buildRegistrantListPageSql(filter, cursor, pageSize)
+      const rows: RegistrantListRow[] = []
+      for await (const row of ctx.db.eval(sql, params as Record<string, SqlValue>)) {
+        rows.push({
+          registrantId: asText(row.Id, 'Registrant.Id'),
+          authorityId: asText(row.AuthorityId, 'Registrant.AuthorityId'),
+          status: asText(row.Status, 'Registrant.Status') as RegistrantStatus,
+          expiration: reZuluDatetime(row.Expiration as string),
+          privateCid: asText(row.PrivateCid, 'Registrant.PrivateCid'),
+          publicCid: row.PublicCid == null ? undefined : asText(row.PublicCid, 'Registrant.PublicCid'),
+          selectiveCid: row.SelectiveCid == null ? undefined : asText(row.SelectiveCid, 'Registrant.SelectiveCid'),
+          lastName: row.LastName == null ? undefined : asText(row.LastName, 'RegistrantPublic.LastName'),
+          firstName: row.FirstName == null ? undefined : asText(row.FirstName, 'RegistrantPublic.FirstName'),
+          district: row.District == null ? undefined : asText(row.District, 'RegistrantPublic.District')
+        })
+      }
+
+      const nextCursor = rows.length === pageSize ? rows[rows.length - 1]!.registrantId : undefined
+
+      let total: number | undefined
+      if (cursor === undefined) {
+        // D-05: run once per filter-change (a cursor-absent call), never per
+        // page. A failed count degrades to `total: undefined` — the roster
+        // read must never fail because counting failed.
+        try {
+          const countSql = buildRegistrantListCountSql(filter)
+          const countRow = await ctx.db.prepare(countSql.sql).get(countSql.params as Record<string, SqlValue>)
+          total = asNumberOr(countRow?.n, 0, 'listRegistrants.total')
+        } catch {
+          // T-47-06: deliberately NOT logged and NOT interpolated into any
+          // message — the count query's bound params can carry the
+          // officer's typed `name` search term, which is registrant PII
+          // under D-01's never-log rule. A future "let's log this" change
+          // must be a deliberate decision, not an accident.
+          total = undefined
+        }
+      }
+
+      return { rows, nextCursor, total }
+    } catch (err) {
+      this.rethrow(err, 'listRegistrants')
+    }
+  }
+
   // ---------- Register builder ----------
 
   buildRegister (): IRegistrationRegisterBuilder {
@@ -862,8 +927,32 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
   }
 
-  async getElectionRegistrants (_electionId: string): Promise<ElectionRegistrant[]> {
-    return []
+  /**
+   * D-07: thin, faithful direct read of `ElectionRegistrant` — NOT routed
+   * through `listRegistrants`. The declared return type is
+   * `ElectionRegistrant[]` (`{electionId, registrantId}` pairs), a much
+   * narrower shape than `RegistrantListResult`; this method exists for
+   * non-UI callers of the interface's declared signature. The roster
+   * SCREEN uses `listRegistrants({ electionId })` instead.
+   */
+  async getElectionRegistrants (electionId: string): Promise<ElectionRegistrant[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: ElectionRegistrant[] = []
+    try {
+      for await (const row of ctx.db.eval(
+        'select ElectionId, RegistrantId from ElectionRegistrant where ElectionId = :electionId',
+        { electionId }
+      )) {
+        out.push({
+          electionId: asText(row.ElectionId, 'ElectionRegistrant.ElectionId'),
+          registrantId: asText(row.RegistrantId, 'ElectionRegistrant.RegistrantId')
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getElectionRegistrants')
+    }
   }
 
   // ---------- Permissive registrant lifecycle (D-16) ----------

@@ -1,5 +1,6 @@
 import { setCommit, setDisclose, randomBytes } from '@optimystic/quereus-plugin-crypto'
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
+import { clampPageSize } from './registrant-list-query.js'
 import type {
   DisclosedSelective,
   ElectionAttestationPolicy,
@@ -10,6 +11,10 @@ import type {
   IRegistrationRegisterBuilder,
   RegisterInit,
   Registrant,
+  RegistrantListFilter,
+  RegistrantListPage,
+  RegistrantListResult,
+  RegistrantListRow,
   RegistrantPrivate,
   RegistrantPublic,
   RegistrantSelective,
@@ -34,8 +39,8 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   private readonly registrantPrivates = new Map<string, RegistrantPrivate>()
   /** D-11/D-12/D-13: in-memory parity for RegistrantSelective, keyed by registrantId. */
   private readonly registrantSelectives = new Map<string, RegistrantSelective>()
-  /** D-17: authority-only roster — in-memory parity for ElectionRegistrant, keyed by `${electionId}${registrantId}`. */
-  private readonly electionRegistrants = new Set<string>()
+  /** D-17: authority-only roster — in-memory parity for ElectionRegistrant, keyed by `${electionId}/${registrantId}`. */
+  private readonly electionRegistrants = new Map<string, ElectionRegistrant>()
   /** D-08/D-10: in-memory parity for ElectionRegistrationField policy, keyed by `${electionId}/${fieldName}`. */
   private readonly electionRegistrationFields = new Map<string, ElectionRegistrationField>()
   /** D-14: in-memory parity for ElectionDisclosurePolicy, keyed by `${electionId}/${fieldName}`. */
@@ -181,18 +186,93 @@ export class MockRegistrationEngine implements IRegistrationEngine {
     this.registrants.set(registrantId, { ...existing, expiration })
   }
 
-  /** D-17: authority-only roster — in-memory Set add, no signing. */
+  /** D-17: authority-only roster — in-memory Map set, no signing. */
   async enrollElectionRegistrant (electionId: string, registrantId: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
-    this.electionRegistrants.add(`${electionId}${registrantId}`)
+    this.electionRegistrants.set(`${electionId}/${registrantId}`, { electionId, registrantId })
   }
 
-  /** D-17: authority-only roster — in-memory Set delete, no signing. */
+  /** D-17: authority-only roster — in-memory Map delete, no signing. */
   async removeElectionRegistrant (electionId: string, registrantId: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
-    this.electionRegistrants.delete(`${electionId}${registrantId}`)
+    this.electionRegistrants.delete(`${electionId}/${registrantId}`)
   }
 
-  async getElectionRegistrants (_electionId: string): Promise<ElectionRegistrant[]> {
-    return []
+  /** D-07: mirrors RegistrationEngine.getElectionRegistrants — real enrolled pairs, not always []. */
+  async getElectionRegistrants (electionId: string): Promise<ElectionRegistrant[]> {
+    return [...this.electionRegistrants.values()].filter((r) => r.electionId === electionId)
+  }
+
+  /**
+   * D-04/D-07: in-memory parity for `listRegistrants`, applying filter
+   * dimensions in the SAME predicate order as the real engine's SQL fragment
+   * (`registrant-list-query.ts`). The mock stores one CURRENT public row per
+   * registrant, so the D-06 currency question is structurally absent here —
+   * that invariant lives entirely in `REGISTRANT_PUBLIC_CURRENCY_JOIN` on the
+   * real engine.
+   */
+  async listRegistrants (filter?: RegistrantListFilter, page?: RegistrantListPage): Promise<RegistrantListResult> {
+    let candidates = [...this.registrants.values()]
+
+    if (filter?.authorityId !== undefined) {
+      candidates = candidates.filter((r) => r.authorityId === filter.authorityId)
+    }
+    if (filter?.status !== undefined) {
+      candidates = candidates.filter((r) => r.status === filter.status)
+    }
+    if (filter?.expiringBefore !== undefined) {
+      candidates = candidates.filter((r) => String(r.expiration) < filter.expiringBefore!)
+    }
+    if (filter?.expiringAfter !== undefined) {
+      candidates = candidates.filter((r) => String(r.expiration) > filter.expiringAfter!)
+    }
+    if (filter?.district !== undefined) {
+      candidates = candidates.filter((r) => this.registrantPublics.get(r.id)?.district === filter.district)
+    }
+    if (filter?.electionId !== undefined) {
+      candidates = candidates.filter((r) => this.electionRegistrants.has(`${filter.electionId}/${r.id}`))
+    }
+    if (filter?.name !== undefined) {
+      // The ONE mock/real parity assumption in this method: mirrors SQL
+      // `like '%q%'` with a case-insensitive substring test. 47-06 confirms
+      // Quereus `like`'s actual case behavior against a real DB fixture and
+      // reconciles the mock if it differs.
+      const q = filter.name.toLowerCase()
+      candidates = candidates.filter((r) => {
+        const pub = this.registrantPublics.get(r.id)
+        return (pub?.lastName ?? '').toLowerCase().includes(q) || (pub?.firstName ?? '').toLowerCase().includes(q)
+      })
+    }
+
+    // Sort ascending by id with a plain relational comparison — a
+    // locale-collation-aware string comparator would diverge from the SQL
+    // `order by R.Id asc` text ordering and break keyset parity.
+    candidates.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+
+    const total = page?.cursor === undefined ? candidates.length : undefined
+
+    const cursor = page?.cursor
+    const afterCursor = cursor === undefined ? candidates : candidates.filter((r) => r.id > cursor)
+    const pageSize = clampPageSize(page?.pageSize)
+    const pageRegistrants = afterCursor.slice(0, pageSize)
+
+    const rows: RegistrantListRow[] = pageRegistrants.map((r) => {
+      const pub = this.registrantPublics.get(r.id)
+      return {
+        registrantId: r.id,
+        authorityId: r.authorityId,
+        status: r.status,
+        expiration: String(r.expiration),
+        privateCid: r.privateCid,
+        publicCid: r.publicCid,
+        selectiveCid: r.selectiveCid,
+        lastName: pub?.lastName,
+        firstName: pub?.firstName,
+        district: pub?.district
+      }
+    })
+
+    const nextCursor = rows.length === pageSize ? rows[rows.length - 1]!.registrantId : undefined
+
+    return { rows, nextCursor, total }
   }
 
   /** D-08/D-10: policy declaration — in-memory Map add, no signing. */

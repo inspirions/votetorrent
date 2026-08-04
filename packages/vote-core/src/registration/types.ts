@@ -8,6 +8,9 @@ import type {
   ElectionRegistrationField,
   RegisterInit,
   Registrant,
+  RegistrantListFilter,
+  RegistrantListPage,
+  RegistrantListResult,
   RegistrantPrivate,
   RegistrantPublic,
   RegistrantSelective,
@@ -53,6 +56,16 @@ export interface IRegistrationEngine {
    * `setVerify` — withheld leaves never appear as more than opaque digests.
    */
   getDisclosedSelective(electionId: string, registrantId: string, audience: string): Promise<DisclosedSelective | null>
+
+  /**
+   * D-04: the registrant roster read — ONE method, ONE optional filter
+   * object (no separate `searchRegistrants`). D-05: keyset paging on the
+   * `Registrant.Id` PK; `total` is computed only on a cursor-absent call and
+   * cached by the caller for the duration of the scroll. D-06: rows carry
+   * the CURRENT `RegistrantPublic` district/name only — never a stale
+   * historical row.
+   */
+  listRegistrants(filter?: RegistrantListFilter, page?: RegistrantListPage): Promise<RegistrantListResult>
 
   /**
    * D-16: change Status ('a' | 's' | 'r'). Status transitions stay permissive —

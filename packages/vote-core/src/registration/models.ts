@@ -202,6 +202,85 @@ export interface ElectionRegistrant {
   registrantId: string
 }
 
+/** ********* Registrant roster read (D-04/D-05/D-06/D-07) ***********/
+
+/**
+ * Filter dimensions for `listRegistrants` (D-04: one method, one optional
+ * filter object — no separate `searchRegistrants`). Every field is OPTIONAL;
+ * every dimension supplied is ANDed with the others, never ORed.
+ *
+ * `name` performs a substring match against `RegistrantPublic.LastName`/
+ * `FirstName` via SQL `like`, with NO wildcard escaping — a query containing
+ * a literal `%` or `_` broadens the match beyond a plain substring. This is a
+ * deliberate, documented omission (47-RESEARCH.md Open Question 2), not an
+ * oversight, and is not a security issue: the query is local, non-networked,
+ * and already `'vrg'`-scope-gated.
+ *
+ * `expiringBefore`/`expiringAfter` are ISO-Z datetime strings compared
+ * directly against `Registrant.Expiration`, which the schema already
+ * constrains to `isISODatetime` + `like('%Z', …)`, so plain string comparison
+ * is chronological.
+ */
+export interface RegistrantListFilter {
+  /**
+   * When omitted, results span every authority present in the local
+   * database. Every UI caller supplies it (the `RegistrantsList` route
+   * carries a required `authorityId`); omission exists only so a non-UI
+   * caller can read the whole local roster.
+   */
+  authorityId?: string
+  status?: RegistrantStatus
+  expiringBefore?: string
+  expiringAfter?: string
+  district?: string
+  electionId?: string
+  name?: string
+}
+
+/**
+ * Keyset paging input for `listRegistrants` (D-05). `cursor` is the previous
+ * page's `nextCursor`, which is the last row's `registrantId` verbatim — not
+ * an encoded token.
+ */
+export interface RegistrantListPage {
+  cursor?: string
+  pageSize?: number
+}
+
+/**
+ * One roster row (D-06). Deliberately omits `Registrant.SignorKey` and
+ * `Registrant.Signature` and touches no `RegistrantPrivate`/
+ * `RegistrantSelective` column — the roster read must not widen the
+ * disclosure surface of the existing point reads (threat `T-47-05`).
+ * `lastName`/`firstName`/`district` come from the CURRENT `RegistrantPublic`
+ * row only (D-06) — never a stale historical row.
+ */
+export interface RegistrantListRow {
+  registrantId: string
+  authorityId: string
+  status: RegistrantStatus
+  expiration: string
+  privateCid: string
+  publicCid?: string
+  selectiveCid?: string
+  lastName?: string
+  firstName?: string
+  district?: string
+}
+
+/**
+ * Result of `listRegistrants` (D-05). `total` is populated only on a
+ * cursor-absent (first-page) call; it is `undefined` on paged calls AND when
+ * the count query itself failed. `total` and `rows.length` may honestly
+ * disagree by a row or two under concurrent mutation — this is explicitly not
+ * an error state.
+ */
+export interface RegistrantListResult {
+  rows: RegistrantListRow[]
+  nextCursor?: string
+  total?: number
+}
+
 /**
  * Per-election registration field policy (D-08/D-09/D-10). Declares which
  * registrant detail fields an election expects, which tier each belongs to,
