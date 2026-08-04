@@ -21,13 +21,13 @@ const REGISTRATION_POLICY_RE = /^registrationPolicy[A-Z]/;
 const BARE_REGISTRATION_RE = /^registration(?!Policy)/;
 
 describe('registrationPolicy* i18n key group (D-11)', () => {
-	test('EN has exactly 54 registrationPolicy* keys, ES key set is deeply equal', () => {
+	test('EN has exactly 55 registrationPolicy* keys, ES key set is deeply equal', () => {
 		const enKeys = Object.keys(enTranslation).filter(k => REGISTRATION_POLICY_RE.test(k));
 		const esKeys = Object.keys(esTranslation).filter(k => REGISTRATION_POLICY_RE.test(k));
 
-		expect(enKeys).toHaveLength(54);
+		expect(enKeys).toHaveLength(55);
 		expect(new Set(esKeys)).toEqual(new Set(enKeys));
-		expect(esKeys).toHaveLength(54);
+		expect(esKeys).toHaveLength(55);
 	});
 
 	test('no registrationPolicy* value is empty or whitespace-only, in either locale', () => {
