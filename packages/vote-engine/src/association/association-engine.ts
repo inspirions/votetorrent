@@ -455,6 +455,66 @@ export class AssociationEngine implements IAssociationEngine {
     }
   }
 
+  /**
+   * Array variant of `getAssociation` — every public `Association` row bound
+   * to `registrantId`. Same column list as the point read, hence the same
+   * D-04 information-disclosure boundary by construction.
+   */
+  async getAssociations (registrantId: string): Promise<Association[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: Association[] = []
+    try {
+      for await (const row of ctx.db.eval(
+        'select RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration, SignorKey, Signature from Association where RegistrantId = :registrantId',
+        { registrantId }
+      )) {
+        out.push({
+          registrantId: asText(row.RegistrantId, 'Association.RegistrantId'),
+          deviceKey: asText(row.DeviceKey, 'Association.DeviceKey'),
+          deviceHash: row.DeviceHash == null ? undefined : asText(row.DeviceHash, 'Association.DeviceHash'),
+          attestationCid: row.AttestationCid == null ? undefined : asText(row.AttestationCid, 'Association.AttestationCid'),
+          expiration: toIsoZDatetime(row.Expiration as string),
+          signorKey: asText(row.SignorKey, 'Association.SignorKey'),
+          signature: asText(row.Signature, 'Association.Signature')
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getAssociations')
+    }
+  }
+
+  /**
+   * D-11 inspect half: every outstanding `AttestationChallenge`, optionally
+   * narrowed to one registrant. Pairs with `removeAttestationChallenge` (the
+   * expire half) — a removed challenge disappears from this read for free.
+   */
+  async getAttestationChallenges (registrantId?: string): Promise<AttestationChallenge[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: AttestationChallenge[] = []
+    try {
+      const sql = registrantId === undefined
+        ? 'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration from AttestationChallenge'
+        : 'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration from AttestationChallenge where RegistrantId = :registrantId'
+      const params: Record<string, string> = registrantId === undefined ? {} : { registrantId }
+      for await (const row of ctx.db.eval(sql, params)) {
+        out.push({
+          nonce: asText(row.Nonce, 'AttestationChallenge.Nonce'),
+          authorityId: asText(row.AuthorityId, 'AttestationChallenge.AuthorityId'),
+          registrantId: asText(row.RegistrantId, 'AttestationChallenge.RegistrantId'),
+          deviceKey: asText(row.DeviceKey, 'AttestationChallenge.DeviceKey'),
+          electionId: row.ElectionId == null ? undefined : asText(row.ElectionId, 'AttestationChallenge.ElectionId'),
+          expiration: toIsoZDatetime(row.Expiration as string)
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getAttestationChallenges')
+    }
+  }
+
   /** 'vrg'-signed delete. */
   async removeAssociation (registrantId: string, deviceKey: string, signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.requireCtx('removeAssociation')

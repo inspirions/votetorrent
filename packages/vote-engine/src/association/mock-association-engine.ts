@@ -49,6 +49,10 @@ export class MockAssociationEngine implements IAssociationEngine {
     this.challenges.delete(nonce)
   }
 
+  async getAttestationChallenges (registrantId?: string): Promise<AttestationChallenge[]> {
+    return [...this.challenges.values()].filter((c) => registrantId === undefined || c.registrantId === registrantId)
+  }
+
   buildAssociate (): IAssociationAssociateBuilder {
     return new AssociationAssociateBuilder(this)
   }
@@ -75,6 +79,10 @@ export class MockAssociationEngine implements IAssociationEngine {
 
   async getAssociation (registrantId: string, deviceKey: string): Promise<Association | undefined> {
     return this.associations.get(`${registrantId}:${deviceKey}`)
+  }
+
+  async getAssociations (registrantId: string): Promise<Association[]> {
+    return [...this.associations.values()].filter((a) => a.registrantId === registrantId)
   }
 
   async removeAssociation (registrantId: string, deviceKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {

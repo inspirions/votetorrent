@@ -46,6 +46,22 @@ export interface IAssociationEngine {
   /** Public Association row read. */
   getAssociation(registrantId: string, deviceKey: string): Promise<Association | undefined>
 
+  /**
+   * Array variant of {@link getAssociation} — every public `Association` row
+   * bound to `registrantId`. Carries the IDENTICAL Phase-42 D-04
+   * information-disclosure boundary as the point read: at most `DeviceHash`,
+   * never `AssociationPrivate.DeviceId`.
+   */
+  getAssociations(registrantId: string): Promise<Association[]>
+
+  /**
+   * D-11 inspect half (paired with the existing `removeAttestationChallenge`
+   * expire half): every outstanding `AttestationChallenge`. `registrantId` is
+   * an OPTIONAL narrowing predicate — omitted returns all outstanding
+   * challenges.
+   */
+  getAttestationChallenges(registrantId?: string): Promise<AttestationChallenge[]>
+
   /** 'vrg'-signed delete. */
   removeAssociation(registrantId: string, deviceKey: string, signatureOrCallback: SignatureOrCallback): Promise<void>
 }
