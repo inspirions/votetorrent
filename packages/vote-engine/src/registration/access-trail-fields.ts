@@ -7,8 +7,8 @@ import type { PrivateDetail } from '@votetorrent/vote-core'
  * that payload — a second, unfiltered assembly path would make the
  * names-only guarantee a convention again, not a structural one.
  * `RegistrantAccessEvent` records app-mediated access only, for
- * accountability, deterrence, and regulatory posture; it is not a security
- * control. A caller-supplied entry that fails the intersection below is
+ * accountability, deterrence, and regulatory posture; it is not a security control.
+ * A caller-supplied entry that fails the intersection below is
  * dropped SILENTLY and on purpose: a rejected entry is, by construction, the
  * exact class of string that might be a private VALUE (SSN/DOB/phone), so
  * naming it in a log line, an Error message, or any diagnostic string would
