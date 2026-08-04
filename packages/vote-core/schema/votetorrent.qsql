@@ -1641,6 +1641,65 @@ declare schema main
 	)
 		with context ( SigningNonce text, Tid int );
 
+	-- Authority-held, unsigned, InsertOnly access trail for RegistrantPrivate reads (D-01/D-02).
+	-- Not replicated to the public Election Network -- same posture as RegistrantPrivate itself.
+	-- Fields holds a JSON array of the revealed PRIVATE attribute NAMES only, never their values.
+	-- One row is written per screen-visit (D-14): a single audit row records the set of private
+	-- fields revealed during that visit, flushed on unmount/background rather than per-field-tap.
+	--
+	-- Accountability, deterrence, and regulatory posture -- NOT a security control. This table
+	-- records app-mediated access only: reads happen on the officer's own device against a local
+	-- Quereus/LevelDB file, and an officer who queries that file directly (or pulls the LevelDB
+	-- store off the device) bypasses the app entirely, so no row is written for that access. It
+	-- neither prevents nor restricts anything; it exists so app-mediated PII reveals are
+	-- accountable after the fact.
+	table RegistrantAccessEvent (
+		RegistrantId text, -- references Registrant.Id
+		ViewerUserId text, -- the officer's User.Id who viewed the private tier
+		Sequence integer not null, -- per-registrant monotonic ordering key (coalesce(max(Sequence),-1)+1)
+		Timestamp datetime, -- nowCanonicalDatetime()
+		Fields text, -- JSON array of revealed private attribute NAMES -- never values
+		primary key (RegistrantId, Sequence),
+		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId)),
+		constraint TimestampValid check (isISODatetime(Timestamp) and like('%Z', Timestamp)),
+		constraint InsertOnly check on update, delete (false)
+	)
+		with context ( Tid int, now datetime );
+
+	view AttestationVerdictResult as
+		select 'pass' as Code, 'Pass' as Name
+		union all select 'fail', 'Fail';
+
+	-- Authority-held, unsigned, InsertOnly store for device-attestation verdicts (D-03). Persists
+	-- PlayIntegrityVerifier.verify()'s otherwise-transient { ok, reason } result, which today is
+	-- never written anywhere. AssociationPrivate cannot carry it after the fact: that table is
+	-- InsertOnly and its Cid commits to a fixed digest tuple over the device-produced attestation
+	-- data, so folding an authority-computed judgement in would conflate the two. Sequence is
+	-- monotonic per (RegistrantId, DeviceKey) so re-verifications accumulate over time rather than
+	-- overwriting. Verdict is a text code referencing AttestationVerdictResult(Code) -- a
+	-- boolean-default column here would hit the quereus 4.x re-attach ALTER-COLUMN coercion class
+	-- (see the schema's ElectionRegistrationField comment above). Deliberately carries NO
+	-- foreign-key CHECK against Association/AssociationPrivate: a FAIL verdict is written before
+	-- the associate() ceremony throws, at a point where no Association row exists yet on that
+	-- path, so such a CHECK would make recording a failed verification structurally impossible --
+	-- destroying exactly the record this table exists to keep. RegistrantIdValid deliberately does
+	-- NOT require R.Status = 'a' (unlike Association's own existence CHECK): a verdict must stay
+	-- readable after a registrant is later suspended or revoked.
+	table AttestationVerdict (
+		RegistrantId text, -- references Registrant.Id
+		DeviceKey text, -- the device's public key, as attested (no FK -- see comment above)
+		Sequence integer not null, -- per (RegistrantId, DeviceKey) monotonic ordering key
+		Verdict text, -- references AttestationVerdictResult(Code)
+		Reason text null, -- the verifier's {reason} string, if any
+		VerifiedAt datetime, -- nowCanonicalDatetime()
+		primary key (RegistrantId, DeviceKey, Sequence),
+		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId)),
+		constraint VerdictValid check (Verdict in (select Code from AttestationVerdictResult)),
+		constraint VerifiedAtValid check (isISODatetime(VerifiedAt) and like('%Z', VerifiedAt)),
+		constraint InsertOnly check on update, delete (false)
+	)
+		with context ( Tid int, now datetime );
+
 	view RegistrantTier as
 		select 'public' as Code, 'Public' as Name
 		union all select 'selective' as Code, 'Selective' as Name
