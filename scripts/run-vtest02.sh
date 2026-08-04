@@ -111,6 +111,15 @@ if [ "${STRAND_MODE}" = "off" ]; then
 else
   STRAND_FLAG="true"
 fi
+# D-16 (47-01 Task 4): fail closed on a stale BUILT vote-engine BEFORE anything is
+# bundled. The app resolves @votetorrent/vote-engine to dist/, never src/, so a
+# dist that lags votetorrent.qsql yields a VACUOUS on-device PASS against the old
+# schema (observed 2026-08-04). This MUST stay ahead of the flag write below —
+# that is the last point where aborting is still free. `set -euo pipefail` makes a
+# non-zero exit abort the run; keep this a bare call, never a soft conditional.
+echo "[vtest02] Checking built vote-engine schema freshness (D-16) ..."
+bash scripts/check-dist-freshness.sh
+
 echo "[vtest02] Writing proof-flags.generated.ts (PROOF_ENABLED=true, DIAL_PROBE_ENABLED=false, STRAND_PERSISTENCE_PROOF_ENABLED=${STRAND_FLAG}, mode=${STRAND_MODE}) ..."
 cat > "${FLAG_FILE}" << EOF
 // proof-flags.generated.ts — written by run-vtest02.sh before launch (D-18).

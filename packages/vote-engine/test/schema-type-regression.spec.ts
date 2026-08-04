@@ -62,9 +62,9 @@
  */
 
 import { expect } from 'chai'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 
@@ -238,5 +238,66 @@ describe('schema-sql.ts regeneration freshness lock (47-01 / D-16)', () => {
     }
 
     expect(isEqual, message).to.equal(true)
+  })
+
+  // Built-package (dist) freshness — 47-01 Task 4.
+  //
+  // The lock above covers .qsql -> src/database/schema-sql.ts. That is necessary
+  // but NOT sufficient: vote-engine's package.json `main`/`exports` both point at
+  // dist/, so the React Native app bundles the BUILT package and never reads src/.
+  // A src-fresh but dist-stale tree therefore passes every other lock in this file
+  // while shipping the OLD schema to Hermes. Observed 2026-08-04: an on-device
+  // re-attach proof emitted FULL-CHAIN VERDICT: PASS against a day-stale dist that
+  // contained neither table under test — a vacuous pass. `--reset-cache` does not
+  // help (the stale input is a file on disk, not Metro's transform cache), and
+  // dist/ is gitignored so `git status` stays clean.
+  //
+  // SKIPS when dist is absent: CI and a clean checkout run this suite from src via
+  // ts-node with no build present, and an unbuilt package fails loudly at Metro
+  // module resolution rather than being silently served — so an absent dist is not
+  // this lock's failure mode. Needs `function` (not an arrow) for `this.skip()`.
+  it('the BUILT dist schema matches votetorrent.qsql when a build is present', async function () {
+    const distPath = join(testDir, '../dist/database/schema-sql.js')
+    if (!existsSync(distPath)) {
+      this.skip()
+      return
+    }
+
+    const source = readFileSync(QSQL_PATH, 'utf8')
+    const { VOTETORRENT_SCHEMA_SQL } = await import(pathToFileURL(distPath).href)
+
+    expect(
+      VOTETORRENT_SCHEMA_SQL,
+      `The built vote-engine schema (dist, length ${String(VOTETORRENT_SCHEMA_SQL?.length)}) does not match `
+      + `votetorrent.qsql (length ${source.length}). The app bundles dist/, NOT src/ — so an on-device run `
+      + `would silently exercise the OLD schema and report a VACUOUS PASS. `
+      + `Rebuild with: yarn --cwd packages/vote-engine build`,
+    ).to.equal(source)
+  })
+
+  // Wiring lock — the guard is only worth anything if the on-device harness runs
+  // it, and runs it BEFORE it commits to a bundle. Assert both the presence of the
+  // call and its ordering relative to the flag write, so the ordering guarantee
+  // itself is locked rather than just the call's existence.
+  it('run-vtest02.sh runs the dist-freshness guard before writing proof flags', () => {
+    const harness = readFileSync(join(testDir, '../../../scripts/run-vtest02.sh'), 'utf8')
+    const lines = harness.split('\n')
+
+    const guardLine = lines.findIndex(l => l.includes('check-dist-freshness.sh'))
+    const flagWriteLine = lines.findIndex(l => l.includes('Writing proof-flags.generated.ts'))
+
+    expect(
+      guardLine,
+      'run-vtest02.sh does not invoke scripts/check-dist-freshness.sh — a stale built '
+      + 'vote-engine would be bundled into the proof, producing a vacuous PASS.',
+    ).to.not.equal(-1)
+
+    expect(flagWriteLine, 'could not locate the proof-flags write in run-vtest02.sh').to.not.equal(-1)
+
+    expect(
+      guardLine < flagWriteLine,
+      `The dist-freshness guard must run BEFORE the proof-flags write (guard at line ${guardLine + 1}, `
+      + `flag write at line ${flagWriteLine + 1}) — that is the last point where aborting is still free.`,
+    ).to.equal(true)
   })
 })
