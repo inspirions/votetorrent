@@ -1668,7 +1668,7 @@ declare schema main
 
 	view AttestationVerdictResult as
 		select 'pass' as Code, 'Pass' as Name
-		union all select 'fail', 'Fail';
+		union all select 'fail' as Code, 'Fail' as Name;
 
 	-- Authority-held, unsigned, InsertOnly store for device-attestation verdicts (D-03). Persists
 	-- PlayIntegrityVerifier.verify()'s otherwise-transient { ok, reason } result, which today is

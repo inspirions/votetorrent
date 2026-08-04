@@ -44,6 +44,21 @@
  *   - `with context ( ... boolean )` clauses are constraint context params, not
  *     stored columns, and do NOT trigger the re-attach ALTER — intentionally NOT
  *     matched by this lock (no `default` token on those clauses).
+ *
+ * schema-sql.ts regeneration freshness lock (47-01 / D-16): a THIRD, distinct lock
+ * class from the two shape-scanning locks above. Those locks scan votetorrent.qsql
+ * and the generated schema-sql.ts independently for forbidden shapes (bare `number`,
+ * `boolean default`) — so they pass VACUOUSLY when the .qsql is edited but
+ * schema-sql.ts is never regenerated (a whole new table can be missing from the
+ * generated file entirely, and neither shape-scanning lock notices, because there
+ * is nothing forbidden to find in either file taken alone). This lock instead
+ * asserts the two artifacts are byte-identical: schema-sql.ts's generator
+ * (see its own header comment) is a whole-file `JSON.stringify` of votetorrent.qsql,
+ * so exact string equality between `readFileSync(QSQL_PATH)` and the imported
+ * `VOTETORRENT_SCHEMA_SQL` export is the correct invariant — any edit to the .qsql
+ * that is not followed by a regen, and any hand-edit of schema-sql.ts itself, both
+ * fail this lock immediately instead of silently shipping a stale schema to Hermes
+ * (which loads schema-sql.ts, never the .qsql, at runtime).
  */
 
 import { expect } from 'chai'
@@ -192,5 +207,36 @@ describe('schema boolean-default-column regression lock (37-04 / D-05b, D-15)', 
       `Found ${violations.length} 'boolean default <literal>' column declaration(s) in the generated schema-sql.ts — `
       + `regenerate it from votetorrent.qsql (editing the .qsql alone is a silent no-op on Hermes):\n  ${violations.join('\n  ')}`,
     ).to.have.length(0)
+  })
+})
+
+describe('schema-sql.ts regeneration freshness lock (47-01 / D-16)', () => {
+  it('the generated VOTETORRENT_SCHEMA_SQL export is byte-identical to votetorrent.qsql', async () => {
+    const source = readFileSync(QSQL_PATH, 'utf8')
+    const { VOTETORRENT_SCHEMA_SQL } = await import('../src/database/schema-sql.js')
+
+    const isEqual = VOTETORRENT_SCHEMA_SQL === source
+
+    let message = ''
+    if (!isEqual) {
+      const sourceLines = source.split('\n')
+      const generatedLines = VOTETORRENT_SCHEMA_SQL.split('\n')
+      let firstDiffLine = -1
+      const maxLines = Math.max(sourceLines.length, generatedLines.length)
+      for (let i = 0; i < maxLines; i++) {
+        if (sourceLines[i] !== generatedLines[i]) {
+          firstDiffLine = i + 1
+          break
+        }
+      }
+      const truncate = (s: string | undefined): string => (s ?? '<missing>').slice(0, 120)
+      message = `schema-sql.ts is stale relative to votetorrent.qsql (first differing line ${firstDiffLine}):\n`
+        + `  votetorrent.qsql  (length ${source.length}): ${truncate(sourceLines[firstDiffLine - 1])}\n`
+        + `  schema-sql.ts     (length ${VOTETORRENT_SCHEMA_SQL.length}): ${truncate(generatedLines[firstDiffLine - 1])}\n`
+        + `Regenerate schema-sql.ts from votetorrent.qsql using the header one-liner in `
+        + `packages/vote-engine/src/database/schema-sql.ts.`
+    }
+
+    expect(isEqual, message).to.equal(true)
   })
 })
