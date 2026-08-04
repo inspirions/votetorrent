@@ -37,6 +37,7 @@ import {
 	StubAttestationVerifier,
 	LocalConfigKeyProvider,
 	RegistrationEngine,
+	AuthorityConfigEngine,
 } from '@votetorrent/vote-engine/rn'
 import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn'
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory'
@@ -289,10 +290,10 @@ export class EngineFactory {
 	/**
 	 * Build a fresh engine instance for the given name.
 	 *
-	 * Covers all 13 engine names this switch handles:
+	 * Covers all 14 engine names this switch handles:
 	 *   network, defaultUser, user, authority,
-	 *   elections, signing, registration, election, keysTasksEngine, signatureTasksEngine,
-	 *   onboardingTasksEngine, invitations, association.
+	 *   elections, signing, registration, authorityConfig, election, keysTasksEngine,
+	 *   signatureTasksEngine, onboardingTasksEngine, invitations, association.
 	 *
 	 * For sibling engines that require a live EngineContext, call
 	 * requireEstablishedCtx() which throws if no ctx is yet established
@@ -380,6 +381,18 @@ export class EngineFactory {
 				// scope gate (D-10) is convenience, not a boundary.
 				const ctx = this.requireEstablishedCtx()
 				return new RegistrationEngine(ctx)
+			}
+
+			case 'authorityConfig': {
+				// Phase 47 (D-09/Pattern 2): AuthorityPeer ('cap' scope) / PollingDevice
+				// ('vrg' scope) administration. T-46-03 spirit: requireEstablishedCtx()
+				// is a network-lifecycle guard only and grants NO authorization — the
+				// real access control on every AuthorityPeer/PollingDevice mutation is
+				// the schema's InsertValid/DeleteValid AdminSignature CHECK ('cap' for
+				// peers, 'vrg' for polling devices). 47-17/47-18's UI scope gates
+				// (useCurrentOfficerScopes()) are convenience, not a boundary.
+				const ctx = this.requireEstablishedCtx()
+				return new AuthorityConfigEngine(ctx)
 			}
 
 			case 'election': {

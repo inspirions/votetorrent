@@ -30,6 +30,14 @@ export { LocalStorageReact } from './local-storage-react.js'
 // (D-06) BOTH RN apps (voter + authority) build a 'registration' case, so this
 // single export serves both.
 export { RegistrationEngine } from './registration/registration-engine.js'
+// Phase 47 (D-09/Pattern 2): the authority app's EngineFactory builds an
+// 'authorityConfig' case (AuthorityPeer / PollingDevice administration), so
+// AuthorityConfigEngine must be reachable from this controlled RN-safe seam
+// rather than the default '.' subpath. Export the REAL engine only — per this
+// file's header rule, the Mock sibling class is NOT re-exported here (screen
+// tests reach mocks through the relative dist/ require, and a barrel
+// re-export would pull the Mock siblings in).
+export { AuthorityConfigEngine } from './authority-config/authority-config-engine.js'
 // Phase 43 (D-13/D-14): the device-attestation seam — EngineFactory's
 // 'association' case imports these to construct the real verifier by
 // default, dev-gated to the stub (never a silent prod fallback).
