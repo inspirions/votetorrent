@@ -6,6 +6,7 @@ import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, resolveSign as
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
 import { validateFieldPolicy } from './field-policy.js'
 import { buildRegistrantListCountSql, buildRegistrantListPageSql, clampPageSize } from './registrant-list-query.js'
+import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
 import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
 import type {
@@ -21,6 +22,7 @@ import type {
   RegisterInit,
   RegisterSelectivePayload,
   Registrant,
+  RegistrantAccessEvent,
   RegistrantListFilter,
   RegistrantListPage,
   RegistrantListResult,
@@ -639,6 +641,104 @@ export class RegistrationEngine implements IRegistrationEngine {
       }
     } catch (err) {
       this.rethrow(err, 'getRegistrantSelective')
+    }
+  }
+
+  /**
+   * D-01: record one app-mediated read of a registrant's private tier.
+   * Accountability/deterrence/regulatory posture only — NOT a security
+   * control; direct local database access bypasses this entirely and writes
+   * no row. D-02: deliberately UNSIGNED — no `seedSignedMutation`, no
+   * `SigningNonce`, no signature parameter. `vrg`-signing every read would
+   * grow `AdminSignature` with read traffic, which D-02 refused to pay.
+   */
+  async recordRegistrantAccessEvent (registrantId: string, viewerUserId: string, fields: string[]): Promise<void> {
+    this.requireCtx('recordRegistrantAccessEvent')
+    const ctx = this.ctx!
+    try {
+      // The allowlist derivation must read RegistrantPrivate.PrivateDetails —
+      // which carries the registrant's actual SSN/DOB/phone VALUES — in order
+      // to learn the NAMES. `privateDetails` is confined to this one `const`
+      // and goes out of scope immediately below: it is never logged, never
+      // interpolated into a message, never returned, and never rethrown; only
+      // the NAME set `collectPrivateFieldNames` derives from it leaves this
+      // statement (T-47-11).
+      const privateRow = await ctx.db
+        .prepare('select PrivateDetails from RegistrantPrivate where RegistrantId = :registrantId')
+        .get({ registrantId })
+      const privateDetails = parseJsonOr<PrivateDetail[]>(privateRow?.PrivateDetails, [], 'RegistrantPrivate.PrivateDetails')
+      const allowedNames = collectPrivateFieldNames(privateDetails)
+
+      const safeFields = sanitizeAccessTrailFields(fields, allowedNames)
+      if (safeFields.length === 0) {
+        // The normal no-reveal case (an empty visit accumulator flushes
+        // nothing) and also what a caller passing VALUES instead of NAMES
+        // collapses to — resolve without allocating a Tid or touching the DB.
+        return
+      }
+
+      const seqRow = await ctx.db
+        .prepare('select coalesce(max(Sequence), -1) + 1 as n from RegistrantAccessEvent where RegistrantId = :registrantId')
+        .get({ registrantId })
+      const sequence = asNumberOr(seqRow?.n, 0, 'RegistrantAccessEvent.Sequence')
+
+      const tid = await allocateTid(ctx.db, 'registration')
+
+      // CORRECTNESS TRAP (T-47-15): `Timestamp`'s `TimestampValid` CHECK is
+      // IMMEDIATE (no subquery), so it sees the raw bound value and requires
+      // a trailing `Z`. `nowCanonicalDatetime()` returns a 19-char string
+      // with NO `Z` — binding it into the `Timestamp` COLUMN fails the
+      // CHECK. Bind a Z-suffixed value into the column and the Z-less
+      // canonical form into the context `now`, matching `createRegistrant`'s
+      // Z-suffixed `expiration` alongside a Z-less `now`. NOTE: this
+      // deliberately diverges from `47-RESEARCH.md` Code Examples §1 and
+      // `47-PATTERNS.md` §6, which both show `:now` bound into `Timestamp` —
+      // that form fails this CHECK.
+      await ctx.db.exec(
+        `insert into RegistrantAccessEvent (RegistrantId, ViewerUserId, Sequence, Timestamp, Fields)
+         with context Tid = ${tid}, now = :now
+         values (:registrantId, :viewerUserId, :sequence, :timestamp, :fields)`,
+        {
+          registrantId,
+          viewerUserId,
+          sequence,
+          timestamp: toIsoZDatetime(Date.now()),
+          now: nowCanonicalDatetime(),
+          fields: JSON.stringify(safeFields)
+        }
+      )
+    } catch (err) {
+      this.rethrow(err, 'recordRegistrantAccessEvent')
+    }
+  }
+
+  /**
+   * D-01: the reviewer read — a write-only trail was explicitly rejected.
+   * The select list is fixed at RegistrantId/ViewerUserId/Sequence/
+   * Timestamp/Fields and touches no `RegistrantPrivate`, `RegistrantSelective`,
+   * or `RegistrantPublic` column, so this read cannot widen the private
+   * tier's disclosure surface (T-47-12).
+   */
+  async getRegistrantAccessEvents (registrantId: string): Promise<RegistrantAccessEvent[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: RegistrantAccessEvent[] = []
+    try {
+      for await (const row of ctx.db.eval(
+        'select RegistrantId, ViewerUserId, Sequence, Timestamp, Fields from RegistrantAccessEvent where RegistrantId = :registrantId order by Sequence desc',
+        { registrantId }
+      )) {
+        out.push({
+          registrantId: asText(row.RegistrantId, 'RegistrantAccessEvent.RegistrantId'),
+          viewerUserId: asText(row.ViewerUserId, 'RegistrantAccessEvent.ViewerUserId'),
+          sequence: asNumberOr(row.Sequence, 0, 'RegistrantAccessEvent.Sequence'),
+          timestamp: reZuluDatetime(row.Timestamp as string),
+          fields: parseJsonOr<string[]>(row.Fields, [], 'RegistrantAccessEvent.Fields')
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getRegistrantAccessEvents')
     }
   }
 

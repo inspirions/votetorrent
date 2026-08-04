@@ -8,6 +8,7 @@ import type {
   ElectionRegistrationField,
   RegisterInit,
   Registrant,
+  RegistrantAccessEvent,
   RegistrantListFilter,
   RegistrantListPage,
   RegistrantListResult,
@@ -84,6 +85,27 @@ export interface IRegistrationEngine {
 
   /** Roster read for an election. */
   getElectionRegistrants(electionId: string): Promise<ElectionRegistrant[]>
+
+  /**
+   * D-01: record one app-mediated read of a registrant's private tier — the
+   * authority-held, append-only accountability/deterrence/regulatory-posture
+   * record described on `RegistrantAccessEvent`. It is not a security control:
+   * direct local database access bypasses it entirely and writes no row.
+   * D-02: deliberately **unsigned** — there is no signature parameter,
+   * because `vrg`-signing every read would grow `AdminSignature` with read
+   * traffic. `fields` carries attribute NAMES, never values; the engine
+   * filters them against the registrant's own `RegistrantPrivate` vocabulary,
+   * and a call whose names all fail that filter resolves without writing a
+   * row.
+   */
+  recordRegistrantAccessEvent(registrantId: string, viewerUserId: string, fields: string[]): Promise<void>
+
+  /**
+   * D-01: the reviewer read — a write-only trail was explicitly rejected.
+   * Returns every `RegistrantAccessEvent` for `registrantId`, newest first
+   * (`Sequence` descending), unbounded.
+   */
+  getRegistrantAccessEvents(registrantId: string): Promise<RegistrantAccessEvent[]>
 
   /** D-08/D-09/D-10: per-election field policy CRUD ('mel'-signed, election-scoped). */
   addElectionRegistrationField(field: ElectionRegistrationField, signatureOrCallback: SignatureOrCallback): Promise<void>

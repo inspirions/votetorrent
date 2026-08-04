@@ -1,6 +1,7 @@
 import { setCommit, setDisclose, randomBytes } from '@optimystic/quereus-plugin-crypto'
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
 import { clampPageSize } from './registrant-list-query.js'
+import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
 import type {
   DisclosedSelective,
   ElectionAttestationPolicy,
@@ -9,8 +10,10 @@ import type {
   ElectionRegistrationField,
   IRegistrationEngine,
   IRegistrationRegisterBuilder,
+  PrivateDetail,
   RegisterInit,
   Registrant,
+  RegistrantAccessEvent,
   RegistrantListFilter,
   RegistrantListPage,
   RegistrantListResult,
@@ -39,6 +42,16 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   private readonly registrantPrivates = new Map<string, RegistrantPrivate>()
   /** D-11/D-12/D-13: in-memory parity for RegistrantSelective, keyed by registrantId. */
   private readonly registrantSelectives = new Map<string, RegistrantSelective>()
+  /**
+   * D-01/D-02: in-memory parity for RegistrantAccessEvent, keyed by
+   * registrantId. Append-only by construction (never spliced/cleared) — the
+   * in-memory form of the schema's `InsertOnly` constraint. `sequence` is
+   * derived from array length at append time (see
+   * `recordRegistrantAccessEvent`), which is only correct because nothing
+   * ever removes an entry; adding a `clear()`-style method later would be a
+   * deliberate parity break, not a refactor.
+   */
+  private readonly registrantAccessEvents = new Map<string, RegistrantAccessEvent[]>()
   /** D-17: authority-only roster — in-memory parity for ElectionRegistrant, keyed by `${electionId}/${registrantId}`. */
   private readonly electionRegistrants = new Map<string, ElectionRegistrant>()
   /** D-08/D-10: in-memory parity for ElectionRegistrationField policy, keyed by `${electionId}/${fieldName}`. */
@@ -142,6 +155,41 @@ export class MockRegistrationEngine implements IRegistrationEngine {
 
   async getRegistrantSelective (registrantId: string): Promise<RegistrantSelective | undefined> {
     return this.registrantSelectives.get(registrantId)
+  }
+
+  /**
+   * D-01/D-02: mirrors RegistrationEngine.recordRegistrantAccessEvent —
+   * accountability/deterrence/regulatory posture only, NOT a security
+   * control, and deliberately UNSIGNED (no ceremony). Derives the same
+   * names-only allowlist from `RegistrantPrivate.PrivateDetails` via the
+   * SAME shared `collectPrivateFieldNames`/`sanitizeAccessTrailFields`
+   * functions the real engine uses, so the mock cannot disagree about what
+   * may be recorded.
+   */
+  async recordRegistrantAccessEvent (registrantId: string, viewerUserId: string, fields: string[]): Promise<void> {
+    const privateDetails: PrivateDetail[] | undefined = this.registrantPrivates.get(registrantId)?.privateDetails
+    const allowedNames = collectPrivateFieldNames(privateDetails)
+    const safeFields = sanitizeAccessTrailFields(fields, allowedNames)
+    if (safeFields.length === 0) return
+
+    const existing = this.registrantAccessEvents.get(registrantId) ?? []
+    // `sequence: existing.length` reproduces the real engine's
+    // `coalesce(max(Sequence), -1) + 1` because this array is append-only
+    // and never deleted from (see the field's own doc comment).
+    existing.push({
+      registrantId,
+      viewerUserId,
+      sequence: existing.length,
+      timestamp: new Date().toISOString(),
+      fields: safeFields
+    })
+    this.registrantAccessEvents.set(registrantId, existing)
+  }
+
+  /** D-01: mirrors RegistrationEngine.getRegistrantAccessEvents — newest first, a copy (never the stored array by reference). */
+  async getRegistrantAccessEvents (registrantId: string): Promise<RegistrantAccessEvent[]> {
+    const events = this.registrantAccessEvents.get(registrantId) ?? []
+    return [...events].sort((a, b) => b.sequence - a.sequence)
   }
 
   /** D-14: mirrors RegistrationEngine.getDisclosedSelective using the plugin's own setDisclose (parity). */
