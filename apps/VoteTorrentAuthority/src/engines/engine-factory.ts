@@ -133,17 +133,27 @@ export class EngineFactory {
 	 *
 	 * CR-03: the keys come from bundled config (attestation-keys.generated.ts).
 	 * They are EMPTY until real per-app Play Console keys are provisioned (D-10,
-	 * SETUP.md). While unprovisioned, `playConsoleKeysProvisioned` is false and
-	 * the 'association' case FAILS CLOSED rather than constructing a real
-	 * verifier with non-functional (formerly committed all-zero) key material.
-	 * Swapping in real keys is a config-only change (D-12).
+	 * SETUP.md). D-09: `playConsoleKeysProvisioned` is now threaded into
+	 * `PlayIntegrityVerifier`'s `keysProvisioned` constructor parameter — the
+	 * 'association' case constructs UNCONDITIONALLY, and `verify()` returns
+	 * `{ ok: false, reason: 'Play Console key material is not provisioned — see
+	 * SETUP.md' }` while unprovisioned, so `associate()`'s own
+	 * `if (!verification.ok) throw` still fails the ceremony closed. Association
+	 * and registrant **reads** deliberately work without key material — they
+	 * never consult the verifier. Swapping in real keys is a config-only change
+	 * (D-12).
 	 */
 	private readonly integrityKeyProvider = new LocalConfigKeyProvider({
 		decryptionKeyBase64: PLAY_CONSOLE_DECRYPTION_KEY_BASE64,
 		verificationKeyBase64: PLAY_CONSOLE_VERIFICATION_KEY_BASE64,
 	})
 
-	/** CR-03: true only when BOTH Play Console keys are present (non-empty) — gates the real verifier. */
+	/**
+	 * CR-03/D-09: true only when BOTH Play Console keys are present (non-empty).
+	 * No longer gates construction — it is injected into `PlayIntegrityVerifier`
+	 * as its 5th ctor argument (`case 'association'`) and exposed read-only via
+	 * `isAttestationVerifierProvisioned()`.
+	 */
 	private readonly playConsoleKeysProvisioned =
 		PLAY_CONSOLE_DECRYPTION_KEY_BASE64.length > 0 && PLAY_CONSOLE_VERIFICATION_KEY_BASE64.length > 0
 
@@ -229,6 +239,19 @@ export class EngineFactory {
 		const engine = await this.buildEngine(engineName, initParams)
 		this.engineCache.set(key, engine)
 		return engine as T
+	}
+
+	/**
+	 * D-09: the device-attestation capability probe. Bare getter — no ctx, no
+	 * established network, no scope gate required. Key provisioning is a
+	 * build/device concern independent of any network, so this is callable on
+	 * a bare `new EngineFactory(...)` before any network has been opened.
+	 * Consumed by `AttestationProvisioningStatusScreen` (47-19) and the inline
+	 * banner on the challenge-admin surface (47-16), both via AppProvider's
+	 * `isAttestationVerifierProvisioned` passthrough.
+	 */
+	isAttestationVerifierProvisioned(): boolean {
+		return this.playConsoleKeysProvisioned
 	}
 
 	// ---------- private helpers ----------
@@ -395,15 +418,18 @@ export class EngineFactory {
 				// inside AssociationEngine/PlayIntegrityVerifier (D-12 seam-never-changes).
 				const ctx = this.requireEstablishedCtx()
 				const useStub = __DEV__ && USE_STUB_ATTESTATION_VERIFIER
-				// CR-03: fail closed. The real verifier must never run on a
-				// production path with absent/placeholder Play Console key material —
-				// that path can neither verify real Google tokens nor (pre-CR-01/02)
-				// resist a forged token minted under the public placeholder keys.
-				if (!useStub && !this.playConsoleKeysProvisioned) {
-					throw new Error(
-						'EngineFactory: device-attestation verifier fail-closed — Play Console key material is not provisioned. Provision the real per-app keys (see SETUP.md) or enable the dev stub gate (__DEV__ && USE_STUB_ATTESTATION_VERIFIER).',
-					)
-				}
+				// D-09: the CR-03 fail-closed decision is unchanged in EFFECT but no
+				// longer lives here as a construction-time throw — it now lives inside
+				// PlayIntegrityVerifier.verify() (47-03), so the engine constructs
+				// UNCONDITIONALLY and association/registrant READS are never blocked by
+				// absent key material. associate()'s `if (!verification.ok) throw`
+				// (association-engine.ts:279-283) is what still converts the tuple back
+				// into fail-closed behavior for the WRITE ceremony.
+				//
+				// CRITICAL: omitting this 5th argument silently RE-ENABLES the verifier,
+				// because 47-03's `keysProvisioned` parameter defaults to `true`. This is
+				// why engine-factory.association.test.ts asserts the argument COUNT, not
+				// just its value.
 				const verifier: IAttestationVerifier = useStub
 					? new StubAttestationVerifier()
 					: new PlayIntegrityVerifier(
@@ -411,6 +437,7 @@ export class EngineFactory {
 							PINNED_HARDWARE_ROOTS_DER,
 							this.expectedAppIdentity,
 							REVOKED_ATTESTATION_SERIALS,
+							this.playConsoleKeysProvisioned,
 						)
 				return new AssociationEngine(ctx, verifier)
 			}

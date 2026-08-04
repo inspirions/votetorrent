@@ -69,13 +69,20 @@ interface LocalConfigKeyProviderConfig {
 Today, `apps/VoteTorrentAuthority/src/engines/attestation-keys.generated.ts`
 ships the two key fields (`PLAY_CONSOLE_DECRYPTION_KEY_BASE64`,
 `PLAY_CONSOLE_VERIFICATION_KEY_BASE64`) as **empty strings** — the committed
-default is UNPROVISIONED, not a usable secret. Because the keys are absent,
-`engine-factory.ts`'s `'association'` case **fails closed**: it refuses to
-construct the real `PlayIntegrityVerifier` (throwing at construction) unless
-the explicit `__DEV__ && USE_STUB_ATTESTATION_VERIFIER` dev gate is active.
-This replaced an earlier all-zero placeholder-key default, which — combined
-with the pre-fix verifier — allowed a full Play Integrity bypass (CR-01/CR-03).
-The verifier stays fail-closed until you supply the real values from step 1.4.
+default is UNPROVISIONED, not a usable secret. As of D-09 (Phase 47), an
+absent key pair no longer blocks construction: `engine-factory.ts`'s
+`'association'` case **does** construct the real `PlayIntegrityVerifier`,
+threading the unprovisioned state into its `keysProvisioned` constructor
+argument. `PlayIntegrityVerifier.verify()` then returns `{ ok: false, reason:
+'Play Console key material is not provisioned — see SETUP.md' }` as the FIRST
+thing it checks, and `associate()` turns that `{ ok: false }` into a thrown
+error — so the associate ceremony (binding a new device to a registrant)
+still fails closed. Association and registrant **reads and administration
+continue to work normally** with no keys provisioned; only the write path
+(`associate()`) is gated. This replaced an earlier all-zero placeholder-key
+default, which — combined with the pre-fix verifier — allowed a full Play
+Integrity bypass (CR-01/CR-03). The verifier stays fail-closed until you
+supply the real values from step 1.4.
 
 **Do this:**
 
@@ -91,10 +98,11 @@ The verifier stays fail-closed until you supply the real values from step 1.4.
    in `apps/VoteTorrentAuthority/src/engines/attestation-keys.generated.ts`
    (or via the out-of-band secure-config mechanism from step 2) — `engine-factory.ts`
    reads them into `LocalConfigKeyProviderConfig` when it constructs
-   `LocalConfigKeyProvider`. Once both are non-empty the `'association'` case
-   stops failing closed and builds the real verifier. This is a config-only
-   change — the seam's shape (`IIntegrityKeyProvider`) never changes, so no
-   verifier code needs to be touched.
+   `LocalConfigKeyProvider`. Once both are non-empty, `verify()` stops
+   short-circuiting on the provisioning check and the `'association'` case's
+   verifier is fully live. This is a config-only change — the seam's shape
+   (`IIntegrityKeyProvider`) never changes, so no verifier code needs to be
+   touched.
 
 ## 4. Pinned hardware root + revoked-serial snapshots (D-04 offline posture)
 

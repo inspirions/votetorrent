@@ -13,6 +13,13 @@ interface AppContextType {
 	networksEngine?: INetworksEngine;
 	getEngine: <T>(engineName: string, initParams?: any) => Promise<T>;
 	hasEngine: (engineName: string) => boolean;
+	/**
+	 * D-09: the device-attestation capability probe (bare boolean — no ctx, no
+	 * network, no data). Consumed by 47-16's inline banner and 47-19's
+	 * AttestationProvisioningStatusScreen so neither has to reach past the
+	 * context boundary into EngineFactory directly.
+	 */
+	isAttestationVerifierProvisioned: () => boolean;
 	isInitialized: boolean;
 	hasNetwork: boolean;
 	/**
@@ -64,6 +71,14 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// hasEngine delegates to factory's cache (SWAP-01).
 	const hasEngine = useCallback((engineName: string) => {
 		return engineFactoryRef.current?.hasEngine(engineName) ?? false;
+	}, []);
+
+	// D-09: passthrough to the factory's capability probe. The `?? false`
+	// fallback is deliberate: if the factory ref is somehow absent, report NOT
+	// provisioned — the conservative direction, which surfaces the setup
+	// warning rather than falsely claiming the verifier is ready.
+	const isAttestationVerifierProvisioned = useCallback(() => {
+		return engineFactoryRef.current?.isAttestationVerifierProvisioned() ?? false;
 	}, []);
 
 	// Activate a network at runtime (create / picker "Select") without a reboot.
@@ -240,6 +255,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 				networksEngine: networksEngine ?? undefined,
 				getEngine,
 				hasEngine,
+				isAttestationVerifierProvisioned,
 				isInitialized,
 				hasNetwork,
 				selectNetwork,

@@ -4,13 +4,17 @@
 // (D-04b / D-10). Two independent snapshots live here:
 //
 //   1. Play Console key material (decryption + JWS verification keys) that
-//      `LocalConfigKeyProvider` reads. EMPTY by default = NOT provisioned; the
-//      real `PlayIntegrityVerifier` then FAILS CLOSED at construction
-//      (engine-factory 'association') unless the __DEV__ stub gate is active
-//      (CR-03). This replaces the previously-committed all-zero placeholder
-//      secrets, which — combined with the pre-CR-01/CR-02 verifier — allowed a
-//      full Play Integrity bypass. Provision the real per-app values from
-//      secure config as part of the Play Console registration runbook (SETUP.md).
+//      `LocalConfigKeyProvider` reads. EMPTY by default = NOT provisioned. As
+//      of D-09 (Phase 47), the empty default is threaded into
+//      `PlayIntegrityVerifier`'s `keysProvisioned` constructor parameter — the
+//      real verifier still constructs (engine-factory 'association' no longer
+//      fails at construction), but `verify()` returns `{ ok: false, reason:
+//      'Play Console key material is not provisioned — see SETUP.md' }` while
+//      unprovisioned, so the associate() ceremony still fails closed. This
+//      replaces the previously-committed all-zero placeholder secrets, which —
+//      combined with the pre-CR-01/CR-02 verifier — allowed a full Play
+//      Integrity bypass. Provision the real per-app values from secure config
+//      as part of the Play Console registration runbook (SETUP.md).
 //
 //   2. The expected app identity (package name + signing-certificate SHA-256
 //      digest allowlist) BOTH attestation halves pin the token/key to (CR-04 /
