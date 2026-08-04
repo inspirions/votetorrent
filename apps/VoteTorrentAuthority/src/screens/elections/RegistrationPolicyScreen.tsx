@@ -195,8 +195,19 @@ export default function RegistrationPolicyScreen() {
 	// Couldn't-save plus Retry.
 	async function runSignedWrite(op: (sign: SignCallback) => Promise<void>): Promise<void> {
 		const sign = await createDeviceSigner("Device User");
-		await op(sign);
-		await loadPolicy();
+		// The reload runs in a finally so BOTH the success and the failure path
+		// refresh the screen (gap 4's second missing bullet) — a half-applied
+		// remove-then-add is visible in the fields list and the D-04/D-05 Policy
+		// Issues card immediately, not just at the next successful write.
+		// loadPolicy() already catches its own read errors internally, so this
+		// finally cannot swallow or mask op's rejection — that rejection still
+		// propagates to the caller (guardedWrite -> the section's runWrite, which
+		// is what renders Couldn't-save + Retry).
+		try {
+			await op(sign);
+		} finally {
+			await loadPolicy();
+		}
 	}
 
 	async function onAddField(fieldName: string, tier: RegistrantTier, requirement: FieldRequirement) {
@@ -226,11 +237,26 @@ export default function RegistrationPolicyScreen() {
 	// the very next loadPolicy() reconciliation pass is what surfaces that gap as a
 	// flagged Policy Issues row (D-04/D-05). CONTEXT.md D-04 enumerates this as a state
 	// that genuinely occurs in a live database, not a theoretical one.
+	//
+	// gap 4 (D-14 retry): the stored Retry handler re-invokes this SAME op closure. If
+	// the remove already committed and only the add failed, a naive replay would call
+	// remove again on an absent row — and the real engine's removeElectionRegistrationField
+	// (registration-engine.ts:950-952) THROWS when the row is not found, making every
+	// subsequent Retry throw the same way before it ever reaches the add. The fresh
+	// existence re-read below exists SPECIFICALLY for retry idempotency — do not
+	// "simplify" it back to an unconditional remove.
 	async function onChangeField(fieldName: string, tier: RegistrantTier, requirement: FieldRequirement) {
 		await guardedWrite("fields", () =>
 			runSignedWrite(async (sign) => {
 				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-				await registrationEngine.removeElectionRegistrationField(electionId, fieldName, sign);
+				const existingFields = await registrationEngine.getElectionRegistrationFields(electionId);
+				const existingRow = existingFields.find((f) => f.fieldName.toLowerCase() === fieldName.toLowerCase());
+				// Only skip the remove when the row is genuinely absent (the retry case).
+				// A remove that IS attempted must still be allowed to throw and propagate —
+				// this is not a blanket try/catch around the remove call.
+				if (existingRow) {
+					await registrationEngine.removeElectionRegistrationField(electionId, existingRow.fieldName, sign);
+				}
 				await registrationEngine.addElectionRegistrationField({ electionId, fieldName, tier, requirement }, sign);
 			})
 		);
@@ -249,10 +275,21 @@ export default function RegistrationPolicyScreen() {
 		await guardedWrite("disclosure", () =>
 			runSignedWrite(async (sign) => {
 				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+				// Fresh engine read INSIDE the op, not the captured `disclosures` React
+				// state — two reasons. (1) Retry idempotency, same as onChangeField above:
+				// after a half-applied audience change (remove committed, add rejected), a
+				// naive replay would call remove again on an absent row, and the real
+				// engine's removeElectionDisclosurePolicy (registration-engine.ts:1044-1046)
+				// throws when the row is not found. (2) A `disclosures` state snapshot is a
+				// stale-closure hazard: it can reflect the policy as of an EARLIER write,
+				// not the current engine state, if this op closure outlives a prior write.
+				const existingDisclosures = await registrationEngine.getElectionDisclosurePolicies(electionId);
+				const existing = existingDisclosures.find((d) => d.fieldName.toLowerCase() === fieldName.toLowerCase());
 				// When a disclosure row for this field already exists, delete it FIRST using
 				// its STORED casing — the PK argument the delete is keyed on — then always
-				// add under the caller-supplied field-row casing.
-				const existing = disclosures.find((d) => d.fieldName.toLowerCase() === fieldName.toLowerCase());
+				// add under the caller-supplied field-row casing. Only skip the remove when
+				// the row is genuinely absent; a remove that IS attempted must still be
+				// allowed to throw and propagate.
 				if (existing) {
 					await registrationEngine.removeElectionDisclosurePolicy(electionId, existing.fieldName, sign);
 				}
