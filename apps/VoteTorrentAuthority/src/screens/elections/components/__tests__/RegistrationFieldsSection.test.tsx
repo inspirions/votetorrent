@@ -225,10 +225,15 @@ describe('RegistrationFieldsSection — D-02/D-14/D-10', () => {
 
     expect(treeContainsText(tr, 'registrationPolicyRowError')).toBe(true);
     expect(() => tr.root.findByProps({ testID: 'registration-field-retry-ZipCode' })).not.toThrow();
-    // Prior value integrity: the row still reads from props (field.tier === 'public'
-    // in the fixture, never mutated locally) — re-pressing 'public' below is a no-op
-    // proof that the displayed selection did not silently flip to 'selective'.
-    expect(JSON.stringify(tr.toJSON())).toContain('ZipCode');
+    // Prior value integrity (D-14 real assertion, not the vacuous 'ZipCode'
+    // substring check this replaces): the row still reads from props
+    // (field.tier === 'public' in the fixture, never mutated locally), so
+    // after a REJECTED write the current-value subtree must still read the
+    // ORIGINAL tier and must NOT read the attempted one.
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'registration-field-current-ZipCode');
+    const currentJson = JSON.stringify(currentNode);
+    expect(currentJson).toContain('registrationPolicyTierPublic');
+    expect(currentJson).not.toContain('registrationPolicyTierSelective');
 
     press(tr, 'registration-field-retry-ZipCode');
     await flush(tr);
@@ -293,5 +298,111 @@ describe('RegistrationFieldsSection — D-02/D-14/D-10', () => {
 
     const nonEmpty = renderSection({ fields: [makeField()] });
     expect(() => nonEmpty.tr.root.findByProps({ testID: 'registration-fields-empty' })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Current-value legibility (D-02/D-10) — 46-11 gap closure
+// ---------------------------------------------------------------------------
+
+/**
+ * SCOPING RULE — do not widen this back out.
+ *
+ * All three tier labels (Public/Selective/Private) and both requirement
+ * labels (Required/Optional) are ALWAYS present somewhere in the rendered
+ * tree, because they are the chip labels themselves. A whole-tree text-search
+ * helper applied to any of those label keys therefore passes on ANY render
+ * regardless of whether the current value is actually shown — this exact
+ * vacuity is what let the original defect ship with a green suite
+ * (46-VERIFICATION.md gap-1, 46-REVIEW.md CR-01/WR-10).
+ *
+ * Every current-value assertion below MUST resolve through
+ * `findJsonNodeByTestID(tr.toJSON(), 'registration-field-current-ZipCode')`
+ * and assert against `JSON.stringify` of THAT node only — never the whole
+ * tree. Do not reach for the whole-tree text helper to check a tier or
+ * requirement label; scope it to the current-value subtree instead.
+ */
+
+/** Count `FontAwesome6 name="check"` glyphs inside the wrapper at testID. */
+function checkGlyphCount(tr: renderer.ReactTestRenderer, testID: string): number {
+  const wrapper = tr.root.findByProps({ testID });
+  return wrapper.findAll(
+    (node) => node.type === ('FontAwesome6' as never) && node.props.name === 'check',
+  ).length;
+}
+
+describe('RegistrationFieldsSection — current-value legibility (46-11 gap closure)', () => {
+  it('current-value subtree shows the selective/optional labels and NEITHER the public/required labels', () => {
+    const field = makeField({ fieldName: 'ZipCode', tier: 'selective', requirement: 'optional' });
+    const { tr } = renderSection({ fields: [field] });
+
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'registration-field-current-ZipCode');
+    expect(currentNode).not.toBeNull();
+    const currentJson = JSON.stringify(currentNode);
+
+    expect(currentJson).toContain('registrationPolicyTierSelective');
+    expect(currentJson).toContain('registrationPolicyRequirementOptional');
+    expect(currentJson).not.toContain('registrationPolicyTierPublic');
+    expect(currentJson).not.toContain('registrationPolicyRequirementRequired');
+  });
+
+  it('exactly one tier chip carries the check glyph — the one matching field.tier', () => {
+    const field = makeField({ fieldName: 'ZipCode', tier: 'selective', requirement: 'optional' });
+    const { tr } = renderSection({ fields: [field] });
+
+    expect(checkGlyphCount(tr, 'registration-field-tier-ZipCode-selective')).toBe(1);
+    expect(checkGlyphCount(tr, 'registration-field-tier-ZipCode-public')).toBe(0);
+    expect(checkGlyphCount(tr, 'registration-field-tier-ZipCode-private')).toBe(0);
+  });
+
+  it('exactly one requirement chip carries the check glyph — the one matching field.requirement', () => {
+    const field = makeField({ fieldName: 'ZipCode', tier: 'selective', requirement: 'optional' });
+    const { tr } = renderSection({ fields: [field] });
+
+    expect(checkGlyphCount(tr, 'registration-field-requirement-ZipCode-optional')).toBe(1);
+    expect(checkGlyphCount(tr, 'registration-field-requirement-ZipCode-required')).toBe(0);
+  });
+
+  it('D-10 read-only officer (canWrite=false) sees the same current-value text and the same selected-chip markers', () => {
+    const field = makeField({ fieldName: 'ZipCode', tier: 'selective', requirement: 'optional' });
+    const { tr } = renderSection({ fields: [field], canWrite: false });
+
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'registration-field-current-ZipCode');
+    const currentJson = JSON.stringify(currentNode);
+    expect(currentJson).toContain('registrationPolicyTierSelective');
+    expect(currentJson).toContain('registrationPolicyRequirementOptional');
+    expect(currentJson).not.toContain('registrationPolicyTierPublic');
+    expect(currentJson).not.toContain('registrationPolicyRequirementRequired');
+
+    expect(checkGlyphCount(tr, 'registration-field-tier-ZipCode-selective')).toBe(1);
+    expect(checkGlyphCount(tr, 'registration-field-tier-ZipCode-public')).toBe(0);
+    expect(checkGlyphCount(tr, 'registration-field-requirement-ZipCode-optional')).toBe(1);
+    expect(checkGlyphCount(tr, 'registration-field-requirement-ZipCode-required')).toBe(0);
+  });
+
+  it('current-value summary stays rendered while a write is in flight (D-10 persistence during saving)', async () => {
+    const field = makeField({ fieldName: 'ZipCode', tier: 'public', requirement: 'required' });
+    const onChangeField = jest.fn().mockReturnValue(new Promise(() => {}));
+    const { tr } = renderSection({ fields: [field], onChangeField });
+
+    press(tr, 'registration-field-tier-ZipCode-selective');
+    await flush(tr);
+
+    expect(treeContainsText(tr, 'registrationPolicyRowSaving')).toBe(true);
+    expect(() => tr.root.findByProps({ testID: 'registration-field-current-ZipCode' })).not.toThrow();
+  });
+
+  it('D-14 prior-value integrity: after a REJECTED tier write from public to selective, current-value still reads public', async () => {
+    const field = makeField({ fieldName: 'ZipCode', tier: 'public', requirement: 'required' });
+    const onChangeField = jest.fn().mockRejectedValueOnce(new Error('write failed')).mockResolvedValue(undefined);
+    const { tr } = renderSection({ fields: [field], onChangeField });
+
+    press(tr, 'registration-field-tier-ZipCode-selective');
+    await flush(tr);
+
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'registration-field-current-ZipCode');
+    const currentJson = JSON.stringify(currentNode);
+    expect(currentJson).toContain('registrationPolicyTierPublic');
+    expect(currentJson).not.toContain('registrationPolicyTierSelective');
   });
 });
