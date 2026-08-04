@@ -201,6 +201,79 @@ function makeElectionEngine(options: ElectionEngineFixtureOptions) {
 }
 
 // ---------------------------------------------------------------------------
+// Gap 4 (46-VERIFICATION.md, D-14 retry recovery) — purpose-built
+// partial-failure ElectionRegistrationField double.
+//
+// MockRegistrationEngine's remove* is a Map.delete, which NEVER throws on a
+// missing key (confirmed by direct read of mock-registration-engine.ts — NOT
+// modified by this plan). That is exactly why the 174/174-green mock-backed
+// suite could not see this defect class: the real engine's
+// removeElectionRegistrationField (registration-engine.ts:950-952) throws an
+// Error when the row is not found. This double is a plain object literal
+// (no class, no `implements` clause — mockGetEngine returns `any`) whose
+// remove* reproduces that throw-on-missing-row contract verbatim in intent,
+// and whose add* rejects exactly once via an explicit call counter (not a
+// jest mock-implementation queue, so the once-only behavior stays legible at
+// the call site). It exposes only the methods RegistrationPolicyScreen's
+// loadPolicy/onChangeField actually call, plus snapshot() so assertions can
+// read engine state directly instead of inferring it from the render tree.
+// ---------------------------------------------------------------------------
+interface PartialFailureFieldRow {
+  electionId: string;
+  fieldName: string;
+  tier: string;
+  requirement: string;
+}
+
+function makePartialFailureRegistrationEngine(seed: PartialFailureFieldRow[]) {
+  const fields = new Map<string, PartialFailureFieldRow>();
+  for (const row of seed) fields.set(row.fieldName, row);
+
+  let addCallCount = 0;
+
+  return {
+    async getElectionRegistrationFields(electionId: string): Promise<PartialFailureFieldRow[]> {
+      return Array.from(fields.values()).filter((f) => f.electionId === electionId);
+    },
+    // Rejects on its FIRST invocation only — every later invocation (the
+    // Retry) sets the row for real. Driven from a counter, not a jest
+    // mock-implementation queue.
+    async addElectionRegistrationField(field: PartialFailureFieldRow, _sign: unknown): Promise<void> {
+      addCallCount += 1;
+      if (addCallCount === 1) {
+        throw new Error("partial-failure double: add rejected (simulated)");
+      }
+      fields.set(field.fieldName, field);
+    },
+    // Mirrors registration-engine.ts:950-952 in intent: throws when the row
+    // is absent, deletes otherwise. This is the behavior MockRegistrationEngine
+    // structurally cannot express (Map.delete never throws).
+    async removeElectionRegistrationField(electionId: string, fieldName: string, _sign: unknown): Promise<void> {
+      if (!fields.has(fieldName)) {
+        throw new Error(
+          `removeElectionRegistrationField: ElectionRegistrationField not found for electionId=${electionId}, fieldName=${fieldName}`,
+        );
+      }
+      fields.delete(fieldName);
+    },
+    // Every other read loadPolicy invokes — a missing method here would
+    // surface as a load error, not a silent pass, so each is present.
+    async getElectionDisclosurePolicies(_electionId: string) {
+      return [];
+    },
+    async getElectionAttestationPolicy(_electionId: string) {
+      return undefined;
+    },
+    async getElectionRegistrants(_electionId: string) {
+      return [];
+    },
+    snapshot(): PartialFailureFieldRow[] {
+      return Array.from(fields.values());
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -718,4 +791,73 @@ describe("RegistrationPolicyScreen — VALIDATION Wave 0 (D-02/D-03/D-04/D-05/D-
     expect(spies.addElectionRegistrationField).toHaveBeenCalledTimes(1);
   });
 
+});
+
+// ---------------------------------------------------------------------------
+// Gap 4 closure (46-VERIFICATION.md, D-14 retry recovery, 46-13). This suite
+// installs makePartialFailureRegistrationEngine — NOT MockRegistrationEngine
+// — as the module-level mockRegistrationEngine slot, so it proves the thing
+// the DECLARED BLIND SPOT at the top of this file says the rest of the suite
+// cannot: that Retry recovers after a remove-then-add edit whose remove
+// committed and whose add failed, against an engine whose remove throws on a
+// missing row exactly like the real registration-engine.ts does. It does
+// NOT prove T-46-08-01's remove-then-add PK-collision class against the
+// real engine — that class concerns the FIRST add attempt colliding with an
+// existing PK row on a plain `insert into`, a different failure shape from
+// the SECOND (add-rejected) leg this test exercises, and remains routed to a
+// real-engine run per 46-VALIDATION.md and the 46-08/46-10 SUMMARYs.
+// ---------------------------------------------------------------------------
+describe("RegistrationPolicyScreen — gap 4 (D-14 retry recovery, 46-13)", () => {
+  it("Retry after a half-applied tier edit eventually succeeds against an engine whose remove throws on a missing row", async () => {
+    const partialFailureEngine = makePartialFailureRegistrationEngine([
+      { electionId: "test-election", fieldName: "LastName", tier: "public", requirement: "required" },
+    ]);
+    // Installed per-test into the module-level slot; beforeEach resets it to
+    // a fresh MockRegistrationEngine before every test, so this cannot leak.
+    mockRegistrationEngine = partialFailureEngine;
+
+    const removeSpy = jest.spyOn(partialFailureEngine, "removeElectionRegistrationField");
+    const addSpy = jest.spyOn(partialFailureEngine, "addElectionRegistrationField");
+
+    const tr = await renderScreen();
+    present(tr, "registration-field-row-LastName");
+
+    // First press: onChangeField's fresh existence read finds the row, removes
+    // it (committing on the double), then the add rejects (the double's
+    // first-call-only failure). runSignedWrite's finally still reloads the
+    // policy on this failure branch.
+    await press(tr, "registration-field-tier-LastName-selective");
+
+    // The double holds ZERO registration fields — the remove really committed.
+    expect(partialFailureEngine.snapshot()).toEqual([]);
+
+    // The field vanished from `fields`, so the normal row is gone — but the
+    // orphan-error row (Task 2) keeps the Couldn't-save message and Retry
+    // reachable. This proves both that loadPolicy ran on the failure branch
+    // (Task 1) and that the recovery affordance survived the row's disappearance
+    // (Task 2).
+    absent(tr, "registration-field-row-LastName");
+    present(tr, "registration-field-orphan-error-LastName");
+    present(tr, "registration-field-orphan-error-retry-LastName");
+
+    // Press Retry. onChangeField's existence re-read now finds no row, SKIPS
+    // the remove (the row is genuinely absent), and calls add — which
+    // succeeds this time because the double's rejection is first-call-only.
+    await press(tr, "registration-field-orphan-error-retry-LastName");
+
+    // No rejection escaped: the orphan-error row is gone, the normal row is
+    // back, and the double holds the fully-applied edit.
+    absent(tr, "registration-field-orphan-error-LastName");
+    present(tr, "registration-field-row-LastName");
+    expect(partialFailureEngine.snapshot()).toEqual([
+      { electionId: "test-election", fieldName: "LastName", tier: "selective", requirement: "required" },
+    ]);
+
+    // Across the WHOLE failure-then-retry sequence, removeElectionRegistrationField
+    // was called exactly once — the second attempt (Retry) skipped the
+    // already-committed remove instead of replaying it into a throw. A second
+    // call here would mean the identical op was replayed: the defect gap 4 closes.
+    expect(removeSpy).toHaveBeenCalledTimes(1);
+    expect(addSpy).toHaveBeenCalledTimes(2);
+  });
 });
