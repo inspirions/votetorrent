@@ -237,6 +237,23 @@ export function RegistrationFieldsSection({
 								</>
 							)}
 
+							{/*
+							 * Current-value legibility (D-02/D-10, closes 46-VERIFICATION.md gap-1 /
+							 * 46-REVIEW.md CR-01). Deliberately OUTSIDE the status==="saving" ternary
+							 * below and BEFORE the registration-field-status- View: it must stay
+							 * rendered while a write is in flight AND while canWrite is false, since
+							 * that persistence is the entire point of the D-10 read-only legibility
+							 * half of this fix. field.tier/field.requirement always come straight from
+							 * props (never mirrored into local state), so this also satisfies D-14
+							 * prior-value integrity — a rejected write leaves the ORIGINAL value on
+							 * screen, never the attempted one.
+							 */}
+							<View testID={`registration-field-current-${field.fieldName}`}>
+								<ThemedText type="small">
+									{t(TIER_LABEL_KEYS[field.tier])} · {t(REQUIREMENT_LABEL_KEYS[field.requirement])}
+								</ThemedText>
+							</View>
+
 							<View testID={`registration-field-status-${field.fieldName}`}>
 								{status === "saving" ? (
 									<ThemedText type="small" style={{ color: colors.textSecondary }}>
@@ -244,25 +261,32 @@ export function RegistrationFieldsSection({
 									</ThemedText>
 								) : (
 									<>
-										{/* Tier chip group. */}
+										{/* Tier chip group. Selected-chip marker (46-VERIFICATION.md gap-1 /
+										 * 46-REVIEW.md CR-01): icon="check" iff this tier equals field.tier. */}
 										<View style={localStyles.chipRow}>
 											<ThemedText type="small">{t("registrationPolicyTierLabel")}</ThemedText>
 											{TIERS.map(tier =>
 												writeWrap(
 													`registration-field-tier-${field.fieldName}-${tier}`,
 													() => handleTierChange(field, tier),
-													<ChipButton label={t(TIER_LABEL_KEYS[tier])} />,
+													<ChipButton
+														label={t(TIER_LABEL_KEYS[tier])}
+														icon={tier === field.tier ? "check" : undefined}
+													/>,
 												),
 											)}
 										</View>
 
-										{/* Requirement chip group. */}
+										{/* Requirement chip group. Selected-chip marker, same pattern. */}
 										<View style={localStyles.chipRow}>
 											{REQUIREMENTS.map(requirement =>
 												writeWrap(
 													`registration-field-requirement-${field.fieldName}-${requirement}`,
 													() => handleRequirementChange(field, requirement),
-													<ChipButton label={t(REQUIREMENT_LABEL_KEYS[requirement])} />,
+													<ChipButton
+														label={t(REQUIREMENT_LABEL_KEYS[requirement])}
+														icon={requirement === field.requirement ? "check" : undefined}
+													/>,
 												),
 											)}
 										</View>
