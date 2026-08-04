@@ -42,6 +42,8 @@ import { LifecycleConfirmCard } from "./components/LifecycleConfirmCard";
 import { AssociationsSection } from "./components/AssociationsSection";
 import { AttestationChallengesSection } from "./components/AttestationChallengesSection";
 import { AccessHistorySection } from "./components/AccessHistorySection";
+import type { RootStackParamList } from "../../navigation/types";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 
 /**
  * RegistrantDetailScreen — the phase's integration seam, and the only
@@ -64,20 +66,16 @@ import { AccessHistorySection } from "./components/AccessHistorySection";
  * -> Attestation Challenges (47-16) -> Access History (47-14, last).
  */
 
-// D-08: RootStackParamList does not yet carry a `RegistrantDetail` key, nor
-// an `AttestationProvisioningStatus` key — 47-21 owns adding all five Phase
-// 47 routes and registering the Stack.Screens. This screen-local widening
-// (47-11's idiom, `RegistrantsListScreen.tsx:27-30`) keeps the net-new
-// typecheck-error count at zero without this plan taking ownership of
-// navigation/types.ts. 47-21 must replace the two lines below —
-// `const navigation = useNavigation() as unknown as PendingRouteNavigation;`
-// and the `navigation.navigate("AttestationProvisioningStatus")` call in
-// `handleOpenProvisioningStatus` — with `useNavigation<NavigationProp>()`
-// and a typed navigate once both routes are real.
-type PendingRouteNavigation = {
-	navigate: (screen: string, params?: Record<string, unknown>) => void;
-	setOptions: (options: unknown) => void;
-};
+// D-08: this screen previously carried a screen-local loosely-typed
+// navigation widening (47-11's idiom) because RootStackParamList did not yet
+// carry `RegistrantDetail` or `AttestationProvisioningStatus` keys. 47-21
+// added the five Phase 47 routes (navigation/types.ts) and registered their
+// Stack.Screens (navigation/index.tsx), so this screen now navigates through
+// `NativeStackNavigationProp<RootStackParamList>`, which checks both the
+// route name AND the param shape — restoring the checking the widening had
+// disabled. Honest residual: the app's shared `NavigationProp` alias
+// (navigation/types.ts) still types params as `any`; tightening it is a
+// repo-wide refactor deliberately out of scope here.
 
 // A stable no-op for the (non-optional) CustomButton.onPress prop when a
 // gate is unmet — belt-and-suspenders alongside `disabled` so no callback
@@ -100,7 +98,7 @@ export default function RegistrantDetailScreen() {
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
 	const { registrantId, authorityId } = useRoute().params as { registrantId: string; authorityId: string };
-	const navigation = useNavigation() as unknown as PendingRouteNavigation;
+	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 
 	useLayoutEffect(() => {
 		navigation.setOptions({ title: t("registrantDetailScreenTitle") });
@@ -335,9 +333,8 @@ export default function RegistrantDetailScreen() {
 	}
 
 	const handleOpenProvisioningStatus = useCallback(() => {
-		// 47-21 registers the AttestationProvisioningStatus route; the
-		// PendingRouteNavigation widening above is what lets this compile
-		// before that route exists.
+		// 47-21 registers the AttestationProvisioningStatus route (undefined
+		// params) — navigate() is now checked against the real route name.
 		navigation.navigate("AttestationProvisioningStatus");
 	}, [navigation]);
 

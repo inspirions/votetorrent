@@ -16,18 +16,19 @@ import { scopeDescriptions } from "@votetorrent/vote-core";
 import type { IRegistrationEngine, RegistrantListFilter, RegistrantListRow, RegistrantStatus } from "@votetorrent/vote-core";
 import { REGISTRANT_STATUS_META } from "./registrant-display";
 import { RegistrantRow } from "./components/RegistrantRow";
+import type { RootStackParamList } from "../../navigation/types";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 
-// D-08: RootStackParamList does not yet carry a `RegistrantDetail` key — 47-21
-// owns adding all five Phase 47 routes and registering the Stack.Screens.
-// This screen-local widening keeps the net-new typecheck-error count at zero
-// without taking ownership of navigation/types.ts, which this plan does not
-// edit (git status gate, see the plan's <verification> section). 47-21 must
-// replace this with `useNavigation<NavigationProp>()` once RegistrantDetail
-// is a real route.
-type PendingRouteNavigation = {
-	navigate: (screen: string, params?: Record<string, unknown>) => void;
-	setOptions: (options: unknown) => void;
-};
+// D-08: this screen previously carried a screen-local loosely-typed
+// navigation widening because RootStackParamList did not yet carry a
+// `RegistrantDetail` key. 47-21 added the five Phase 47 routes
+// (navigation/types.ts) and registered their Stack.Screens
+// (navigation/index.tsx), so this screen now navigates through
+// `NativeStackNavigationProp<RootStackParamList>`, which checks both the
+// route name AND the param shape — restoring the checking the widening had
+// disabled. Honest residual: the app's shared `NavigationProp` alias
+// (navigation/types.ts) still types params as `any`; tightening it is a
+// repo-wide refactor deliberately out of scope here.
 
 // UI-SPEC's 25-50 recommendation. This app has no virtualized-list-component
 // precedent anywhere — every list in this codebase is a `.map()`-in-`ScrollView`
@@ -50,10 +51,7 @@ export default function RegistrantsListScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
-	// D-08: RootStackParamList does not yet carry a `RegistrantDetail` key —
-	// see the `PendingRouteNavigation` comment above. 47-21 must replace this
-	// with `useNavigation<NavigationProp>()`.
-	const navigation = useNavigation() as unknown as PendingRouteNavigation;
+	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const { authorityId, electionFilter } = useRoute().params as {
 		authorityId: string;
 		electionFilter?: { electionId: string; electionTitle?: string };

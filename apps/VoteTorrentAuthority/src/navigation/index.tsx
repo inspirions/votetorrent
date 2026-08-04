@@ -51,6 +51,12 @@ import ProposedRevisionScreen from "../screens/tasks/ProposedRevisionScreen";
 import ScreenScaffoldsDebugScreen from "../screens/tasks/ScreenScaffoldsDebugScreen";
 import ElectionDetailsScreen from "../screens/elections/ElectionDetailsScreen";
 import RegistrationPolicyScreen from "../screens/elections/RegistrationPolicyScreen";
+// Phase 47 plan 47-21 (D-08) — the five Phase 47 screen modules.
+import RegistrantsListScreen from "../screens/registration/RegistrantsListScreen";
+import RegistrantDetailScreen from "../screens/registration/RegistrantDetailScreen";
+import AttestationProvisioningStatusScreen from "../screens/registration/AttestationProvisioningStatusScreen";
+import PollingDevicesScreen from "../screens/authorities/PollingDevicesScreen";
+import AuthorityPeersScreen from "../screens/authorities/AuthorityPeersScreen";
 import { CreateElectionScreen } from "../screens/elections/CreateElectionScreen";
 // Phase 9 plan 09-13 (ELECUI-04) — Election Revision screen (Screen C, Figma #16/#17).
 // Aliased to avoid name collision with task-flow EditElectionScreen (imported above on ~line 40).
@@ -455,6 +461,41 @@ export const RootNavigator = () => {
 				name="RegistrationPolicy"
 				component={RegistrationPolicyScreen}
 				options={{ title: t("registrationPolicyEntryTitle") }}
+			/>
+			{/* Phase 47 plan 47-21 (D-07/D-08/D-09) — the five Phase 47 routes. These are
+			    pushes from within existing modal screens, so they use the
+			    RegistrationPolicy/CreateBallot non-modal options={{ title }} shape, never
+			    presentation:"modal", never a CloseButton headerLeft. RegistrantsList,
+			    RegistrantDetail and PollingDevices additionally set their own title via
+			    setOptions (the static title here is the pre-effect frame, and for
+			    PollingDevices is the identical key), while AuthorityPeers and
+			    AttestationProvisioningStatus are bound ONLY here — 47-19 source-gates
+			    attestationProvisioningScreenTitle at zero occurrences in its own file for
+			    exactly this reason. */}
+			<Stack.Screen
+				name="RegistrantsList"
+				component={RegistrantsListScreen}
+				options={{ title: t("registrantListScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="RegistrantDetail"
+				component={RegistrantDetailScreen}
+				options={{ title: t("registrantDetailScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="AttestationProvisioningStatus"
+				component={AttestationProvisioningStatusScreen}
+				options={{ title: t("attestationProvisioningScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="PollingDevices"
+				component={PollingDevicesScreen}
+				options={{ title: t("pollingDeviceScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="AuthorityPeers"
+				component={AuthorityPeersScreen}
+				options={{ title: t("authorityPeerScreenTitle") }}
 			/>
 			{/* BallotDraftProvider is hoisted above the navigator (App.tsx) so all
 			    ballot screens share ONE draft instance (screenLayout gave each

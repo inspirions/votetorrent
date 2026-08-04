@@ -72,6 +72,22 @@ export type RootStackParamList = {
 	// electionId/authorityId are passed to avoid a redundant getElectionDetails()
 	// round-trip just to learn them.
 	RegistrationPolicy: { electionEngine: IElectionEngine; electionId: string; authorityId: string };
+	// Phase 47 plan 47-21 (D-07/D-08/D-09) — the five Phase 47 routes, split by owning domain.
+	// D-07: RegistrantsList is BOTH the authority-wide roster (no electionFilter) and the
+	// election roster (electionFilter pre-applied). There is deliberately no second roster route.
+	// D-08: RegistrantDetail is reached only from a RegistrantsList row press — no deep link
+	// this phase.
+	// T-47-21-01: params carry identifiers only. electionTitle is the single exception and is
+	// public election metadata used for the header; a registrant name, a district, or any
+	// RegistrantPrivate value must never be added, because React Navigation serializes route
+	// params into navigation state and that state surfaces in crash and debug payloads.
+	// Unlike RegistrationPolicy, no engine handle is threaded: every Phase 47 screen resolves
+	// its engine from useApp().getEngine(...).
+	RegistrantsList: { authorityId: string; electionFilter?: { electionId: string; electionTitle?: string } };
+	RegistrantDetail: { registrantId: string; authorityId: string };
+	AttestationProvisioningStatus: undefined;
+	PollingDevices: { authorityId: string };
+	AuthorityPeers: { authorityId: string };
 	EditBallot: { electionId?: string; electionTitle?: string; electionDate?: string; ballotId?: string; electionEngine?: IElectionEngine; removeQuestionCode?: string; question?: any; originalQuestionCode?: string; readOnly?: boolean };
 	// Phase 9 plan 09-01 — type entries for routes whose screens land in later
 	// plans (CreateElection in 09-02, CreateBallot in 09-04). Stack.Screen

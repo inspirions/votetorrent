@@ -975,7 +975,7 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 	// Provisioning-status callback
 	// -------------------------------------------------------------------------
 
-	it("supplies onOpenProvisioningStatus as a real callback that navigates via the PendingRouteNavigation widening", async () => {
+	it("supplies onOpenProvisioningStatus as a real callback that navigates to AttestationProvisioningStatus", async () => {
 		await seedRegistrant(mockRegistrationEngine);
 		await renderScreen();
 
