@@ -1,0 +1,634 @@
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ScrollView, StyleSheet, View } from "react-native";
+import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useTranslation } from "react-i18next";
+import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
+import { scopeDescriptions } from "@votetorrent/vote-core";
+import type {
+	DisclosedSelective,
+	DisclosureAudience,
+	IElectionsEngine,
+	IRegistrationEngine,
+	Registrant,
+	RegistrantPrivate,
+	RegistrantPublic,
+	RegistrantSelective,
+} from "@votetorrent/vote-core";
+import { ThemedText } from "../../components/ThemedText";
+import { CustomButton } from "../../components/CustomButton";
+import { DateField } from "../../components/DateField";
+import { InlineError } from "../../components/InlineError";
+import { globalStyles } from "../../theme/styles";
+import { useApp } from "../../providers/AppProvider";
+import { createDeviceSigner } from "../../engines/device-signer";
+import type { SignCallback } from "../../engines/device-signer";
+import { getOrCreateDeviceUser } from "../../engines/device-user";
+import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
+import { REGISTRANT_STATUS_META, formatExpirationDate, registrantDisplayName, truncateId } from "./registrant-display";
+import {
+	LIFECYCLE_ACTIONS,
+	availableLifecycleActions,
+	flattenPrivateDetails,
+	toPublicTierRows,
+} from "./registrant-detail-model";
+import type { LifecycleActionId } from "./registrant-detail-model";
+import { useAccessTrailVisit } from "./useAccessTrailVisit";
+import type { AccessTrailRecorder } from "./access-trail-visit";
+import { pillStyles, tintPill } from "./components/pill";
+import { PrivateFieldRow } from "./components/PrivateFieldRow";
+import { SelectiveAudiencePreview } from "./components/SelectiveAudiencePreview";
+import { LifecycleConfirmCard } from "./components/LifecycleConfirmCard";
+import { AssociationsSection } from "./components/AssociationsSection";
+import { AttestationChallengesSection } from "./components/AttestationChallengesSection";
+import { AccessHistorySection } from "./components/AccessHistorySection";
+
+/**
+ * RegistrantDetailScreen — the phase's integration seam, and the only
+ * screen in the product that ever holds a decrypted `RegistrantPrivate`
+ * value (an SSN, a date of birth, a phone number). No private value may
+ * reach `console.*`, an `errorMessage` string, an i18n interpolation, or a
+ * crash payload — the never-log rule this file structurally enforces.
+ *
+ * The D-13 private-tier gate and the D-13 scope banner are UI legibility
+ * affordances, NOT enforcement boundaries (T-46-03 precedent, T-47-04): the
+ * schema's `'vrg'` `AdminSignature` CHECK is the real and only control. The
+ * access trail this screen feeds (D-14) records app-mediated reveals only,
+ * exists for accountability, deterrence and regulatory posture, and is
+ * not a security control.
+ *
+ * Composes, in `47-UI-SPEC.md:644-663`'s exact order: InlineError -> the
+ * 'vrg' scope-gate banner -> the registrant header (status pill,
+ * expiration, signor key, lifecycle actions) -> Public tier -> Selective
+ * tier + SelectiveAudiencePreview -> Private tier -> Associations (47-15)
+ * -> Attestation Challenges (47-16) -> Access History (47-14, last).
+ */
+
+// D-08: RootStackParamList does not yet carry a `RegistrantDetail` key, nor
+// an `AttestationProvisioningStatus` key — 47-21 owns adding all five Phase
+// 47 routes and registering the Stack.Screens. This screen-local widening
+// (47-11's idiom, `RegistrantsListScreen.tsx:27-30`) keeps the net-new
+// typecheck-error count at zero without this plan taking ownership of
+// navigation/types.ts. 47-21 must replace the two lines below —
+// `const navigation = useNavigation() as unknown as PendingRouteNavigation;`
+// and the `navigation.navigate("AttestationProvisioningStatus")` call in
+// `handleOpenProvisioningStatus` — with `useNavigation<NavigationProp>()`
+// and a typed navigate once both routes are real.
+type PendingRouteNavigation = {
+	navigate: (screen: string, params?: Record<string, unknown>) => void;
+	setOptions: (options: unknown) => void;
+};
+
+// A stable no-op for the (non-optional) CustomButton.onPress prop when a
+// gate is unmet — belt-and-suspenders alongside `disabled` so no callback
+// can fire even from a direct programmatic invocation of the handler, not
+// just from a blocked touch event.
+const NOOP = () => {};
+
+// D-12: the RegistrantDetail route carries only `{ registrantId, authorityId }`
+// (47-UI-SPEC.md:162-166) and IRegistrationEngine exposes no reverse
+// registrant->elections read, so the election context `getDisclosedSelective`
+// needs has to be discovered by scanning elections. Capped so a registrant
+// enrolled in many elections cannot turn one audience press into an unbounded
+// scan; this is a policy-validation aid, not a disclosure record, so a
+// bounded best-effort answer is an accepted, documented limit.
+const PREVIEW_ELECTION_SCAN_LIMIT = 20;
+
+export default function RegistrantDetailScreen() {
+	const { t } = useTranslation();
+	const { colors } = useTheme() as ExtendedTheme;
+	const insets = useSafeAreaInsets();
+	const { getEngine } = useApp();
+	const { registrantId, authorityId } = useRoute().params as { registrantId: string; authorityId: string };
+	const navigation = useNavigation() as unknown as PendingRouteNavigation;
+
+	useLayoutEffect(() => {
+		navigation.setOptions({ title: t("registrantDetailScreenTitle") });
+	}, [navigation, t]);
+
+	const { scopes, loading: scopesLoading } = useCurrentOfficerScopes(authorityId);
+	const canWrite = !scopesLoading && scopes?.includes("vrg") === true;
+	// D-13: private-tier reads are gated on the SAME 'vrg' scope as the
+	// writes — the accepted consequence (an officer who can change a
+	// registrant's status can also read their SSN) is explicitly recorded
+	// there; a dedicated read-only private-tier scope was considered and
+	// rejected as expansion and is a Deferred Idea. One alias, never a
+	// second derivation, so the tier and the writes can never drift.
+	const canViewPrivate = canWrite;
+
+	const [core, setCore] = useState<Registrant | undefined>(undefined);
+	const [publicTier, setPublicTier] = useState<RegistrantPublic | undefined>(undefined);
+	const [selectiveTier, setSelectiveTier] = useState<RegistrantSelective | undefined>(undefined);
+	const [privateTier, setPrivateTier] = useState<RegistrantPrivate | undefined>(undefined);
+	const [loading, setLoading] = useState(true);
+	const [errorMessage, setErrorMessage] = useState("");
+	const [pendingAction, setPendingAction] = useState<LifecycleActionId | undefined>(undefined);
+	const [renewalExpiration, setRenewalExpiration] = useState("");
+	const [selectedAudience, setSelectedAudience] = useState<DisclosureAudience | undefined>(undefined);
+	const [disclosure, setDisclosure] = useState<DisclosedSelective | null | undefined>(undefined);
+
+	// CR-02 guard against a stale setState after unmount, copied from
+	// RegistrationPolicyScreen.tsx:102-111. Reset on entry so a cleanup that
+	// runs while the component stays mounted (StrictMode double-invoke, Fast
+	// Refresh, remount-in-place) does not permanently latch every setState off.
+	const unmountedRef = useRef(false);
+	useEffect(() => {
+		unmountedRef.current = false;
+		return () => {
+			unmountedRef.current = true;
+		};
+	}, []);
+
+	const loadRegistrant = useCallback(async () => {
+		setLoading(true);
+		setErrorMessage("");
+		try {
+			const engine = await getEngine<IRegistrationEngine>("registration");
+			// This is the D-13 gate's structural half: it must NOT read the
+			// private tier here — that read is issued separately below, ONLY
+			// when canViewPrivate is true, so an ungated officer's device never
+			// issues it at all.
+			const [fetchedCore, fetchedPublic, fetchedSelective] = await Promise.all([
+				engine.getRegistrant(registrantId),
+				engine.getRegistrantPublic(registrantId),
+				engine.getRegistrantSelective(registrantId),
+			]);
+			if (!unmountedRef.current) {
+				setCore(fetchedCore);
+				setPublicTier(fetchedPublic);
+				setSelectiveTier(fetchedSelective);
+			}
+		} catch (err) {
+			// The caught message is engine-authored (a `rethrow`d
+			// "RegistrationEngine.<method>: ..." string) — no field name, no
+			// field value and no viewer id is ever interpolated into it.
+			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+		} finally {
+			if (!unmountedRef.current) setLoading(false);
+		}
+	}, [getEngine, registrantId]);
+
+	useEffect(() => {
+		loadRegistrant();
+	}, [loadRegistrant]);
+
+	const loadPrivateTier = useCallback(async () => {
+		if (!canViewPrivate) return;
+		try {
+			const engine = await getEngine<IRegistrationEngine>("registration");
+			const fetched = await engine.getRegistrantPrivate(registrantId);
+			if (!unmountedRef.current) setPrivateTier(fetched);
+		} catch (err) {
+			// Set from the engine message only — never from the tier data itself.
+			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+		}
+	}, [canViewPrivate, getEngine, registrantId]);
+
+	useEffect(() => {
+		loadPrivateTier();
+		// This effect is the STRUCTURAL half of the D-13 divergence: an
+		// ungated officer's device never issues this query, so there is no
+		// decrypted private tier sitting in this component's state to leak
+		// into a snapshot, a crash payload, or a future careless render.
+		// Hiding it at render time alone would not achieve that.
+	}, [canViewPrivate, loadPrivateTier]);
+
+	// D-14 visit wiring. The device officer's own User.Id is the viewer this
+	// screen's reveals are attributed to.
+	const deviceUserIdRef = useRef<string | undefined>(undefined);
+	useEffect(() => {
+		(async () => {
+			try {
+				const user = await getOrCreateDeviceUser("Device User");
+				if (!unmountedRef.current) deviceUserIdRef.current = user.id;
+			} catch {
+				// Swallowed — the recorder below resolves without writing when
+				// deviceUserIdRef.current stays undefined. No console call.
+			}
+		})();
+	}, []);
+
+	const recordVisit = useCallback<AccessTrailRecorder>(
+		async (fieldNames) => {
+			const viewerUserId = deviceUserIdRef.current;
+			// 47-13's explicitly-assigned obligation on this plan: if the
+			// officer's User.Id is unresolved at flush time, the recorder
+			// resolves WITHOUT writing — the same accepted loss as a dropped
+			// flush. No retry and no persistence is attempted here.
+			if (viewerUserId === undefined) return;
+			const engine = await getEngine<IRegistrationEngine>("registration");
+			// D-02 made this table unsigned — no signature parameter.
+			await engine.recordRegistrantAccessEvent(registrantId, viewerUserId, fieldNames);
+			// No try/catch here: 47-13's flush() already swallows a rejection
+			// from this call, and a second swallow here would be a place a
+			// future edit could put a log line.
+		},
+		[getEngine, registrantId],
+	);
+
+	const visit = useAccessTrailVisit(recordVisit);
+	// The hook owns both flush triggers (unmount and the AppState
+	// active->background transition). A background flush followed by an
+	// unmount flush produces two rows with DISJOINT names, never a
+	// duplicate — the delta contract 47-13 froze.
+
+	// D-12 preview wiring. `undefined` = not yet resolved; `null` = resolved
+	// to "no election found".
+	const previewElectionIdRef = useRef<string | null | undefined>(undefined);
+
+	/**
+	 * Resolves the election context `getDisclosedSelective` needs, memoised
+	 * through `previewElectionIdRef`. Two documented limits: `getElections()`
+	 * filters to `E.Date >= :now` (Phase 42), so a registrant enrolled only in
+	 * a past election resolves to `undefined` here; and the first matching
+	 * election wins when a registrant is enrolled in several — both are
+	 * accepted limits of a policy-validation AID, not a disclosure record.
+	 */
+	async function resolvePreviewElectionId(): Promise<string | undefined> {
+		if (previewElectionIdRef.current !== undefined) {
+			return previewElectionIdRef.current === null ? undefined : previewElectionIdRef.current;
+		}
+		const electionsEngine = await getEngine<IElectionsEngine>("elections");
+		const registrationEngine = await getEngine<IRegistrationEngine>("registration");
+		const summaries = await electionsEngine.getElections();
+		for (const summary of summaries.slice(0, PREVIEW_ELECTION_SCAN_LIMIT)) {
+			const roster = await registrationEngine.getElectionRegistrants(summary.id);
+			if (roster.some((row) => row.registrantId === registrantId)) {
+				previewElectionIdRef.current = summary.id;
+				return summary.id;
+			}
+		}
+		previewElectionIdRef.current = null;
+		return undefined;
+	}
+
+	const handleSelectAudience = useCallback(
+		async (audience: DisclosureAudience) => {
+			setSelectedAudience(audience);
+			// The in-flight state (47-12): raw rows, no annotations, while a
+			// fetch (or the election-context resolution ahead of it) is pending.
+			setDisclosure(undefined);
+			try {
+				const electionId = await resolvePreviewElectionId();
+				if (!unmountedRef.current) {
+					if (electionId === undefined) {
+						// `null` is 47-12's "no selective row / no policy" state and
+						// renders every row Not-disclosed — the truthful answer: a
+						// registrant enrolled in no upcoming election has no election
+						// disclosing anything to any audience. Deliberately NOT an
+						// error state, and no copy key exists to describe one (47-02
+						// pinned the phase at 117 keys).
+						setDisclosure(null);
+					} else {
+						const engine = await getEngine<IRegistrationEngine>("registration");
+						const result = await engine.getDisclosedSelective(electionId, registrantId, audience);
+						if (!unmountedRef.current) setDisclosure(result ?? null);
+					}
+				}
+			} catch (err) {
+				// Leave disclosure at undefined — NEVER annotate off a failed
+				// fetch, since annotating every row Not-disclosed after a failure
+				// would be a false claim about the disclosure policy.
+				if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			}
+		},
+		[getEngine, registrantId],
+	);
+
+	// D-10 lifecycle wiring.
+	async function runLifecycleWrite(action: LifecycleActionId): Promise<void> {
+		// device-signer.ts is consumed, never altered — WR-10's prehash
+		// contract lives there and this screen must not touch it.
+		const sign: SignCallback = await createDeviceSigner("Device User");
+		const engine = await getEngine<IRegistrationEngine>("registration");
+		if (action === "renew") {
+			await engine.changeExpiration(registrantId, renewalExpiration, sign);
+		} else {
+			await engine.changeStatus(registrantId, LIFECYCLE_ACTIONS[action].targetStatus!, sign);
+		}
+	}
+
+	async function handleConfirmLifecycle(action: LifecycleActionId): Promise<void> {
+		try {
+			await runLifecycleWrite(action);
+			if (!unmountedRef.current) {
+				setErrorMessage("");
+				setPendingAction(undefined);
+				setRenewalExpiration("");
+			}
+			await loadRegistrant();
+		} catch (err) {
+			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			// Re-thrown so 47-10's LifecycleConfirmCard sees a REJECTED
+			// onConfirm and returns to idle (its latch contract) — this is what
+			// lets a stranded officer retry a failed signed write. Unmounting
+			// the card on success (above) is what prevents a second one.
+			// Neither behaviour is optional.
+			throw err;
+		}
+	}
+
+	function handleDismissLifecycle() {
+		// A dismissed confirmation performs ZERO engine work.
+		setPendingAction(undefined);
+		if (pendingAction === "renew") setRenewalExpiration("");
+	}
+
+	const handleOpenProvisioningStatus = useCallback(() => {
+		// 47-21 registers the AttestationProvisioningStatus route; the
+		// PendingRouteNavigation widening above is what lets this compile
+		// before that route exists.
+		navigation.navigate("AttestationProvisioningStatus");
+	}, [navigation]);
+
+	const statusMeta = core ? REGISTRANT_STATUS_META[core.status] : undefined;
+	const displayName = registrantDisplayName({
+		registrantId,
+		lastName: publicTier?.lastName,
+		firstName: publicTier?.firstName,
+	});
+
+	function renderLifecycleCard() {
+		if (!core || pendingAction === undefined) return null;
+		const meta = LIFECYCLE_ACTIONS[pendingAction];
+		const testIDPrefix = "registrant-detail-confirm-" + pendingAction;
+
+		if (pendingAction === "renew") {
+			const hasValidExpiration = renewalExpiration.length > 0 && !isNaN(new Date(renewalExpiration).getTime());
+			if (!hasValidExpiration) return null;
+			return (
+				<LifecycleConfirmCard
+					variant="ordinary"
+					tone={meta.tone}
+					testIDPrefix={testIDPrefix}
+					title={t(meta.titleKey)}
+					body={t(meta.bodyKey, { name: displayName, newExpiration: formatExpirationDate(renewalExpiration) })}
+					confirmLabel={t(meta.confirmLabelKey)}
+					dismissLabel={t(meta.dismissLabelKey)}
+					onConfirm={() => handleConfirmLifecycle("renew")}
+					onDismiss={handleDismissLifecycle}
+				/>
+			);
+		}
+
+		if (pendingAction === "reinstate") {
+			return (
+				<LifecycleConfirmCard
+					variant="ordinary"
+					tone={meta.tone}
+					testIDPrefix={testIDPrefix}
+					title={t(meta.titleKey)}
+					body={t(meta.bodyKey, { name: displayName, oldStatus: statusMeta ? t(statusMeta.labelKey) : "" })}
+					confirmLabel={t(meta.confirmLabelKey)}
+					dismissLabel={t(meta.dismissLabelKey)}
+					onConfirm={() => handleConfirmLifecycle("reinstate")}
+					onDismiss={handleDismissLifecycle}
+				/>
+			);
+		}
+
+		// suspend / revoke — the typed variant.
+		return (
+			<LifecycleConfirmCard
+				variant="typed"
+				testIDPrefix={testIDPrefix}
+				title={t(meta.titleKey, { name: displayName })}
+				body={t(meta.bodyKey, { name: displayName })}
+				confirmLabel={t(meta.confirmLabelKey)}
+				dismissLabel={t(meta.dismissLabelKey)}
+				matchText={displayName}
+				typedPlaceholder={t("registrantLifecycleTypedConfirmPlaceholder", { name: displayName })}
+				onConfirm={() => handleConfirmLifecycle(pendingAction)}
+				onDismiss={handleDismissLifecycle}
+			/>
+		);
+	}
+
+	const publicRows = toPublicTierRows(publicTier);
+	const privateRows = flattenPrivateDetails(privateTier?.privateDetails);
+
+	return (
+		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
+			<View style={styles.section} testID="registrant-detail-error">
+				<InlineError message={errorMessage} />
+			</View>
+
+			{/* D-13 default scope-gate pattern — two DISTINCT branches, never
+			    collapsed: 'scopes === undefined' (no matching Officer row) is a
+			    different fact from a real scopes array missing 'vrg'. Never
+			    rendered while scopesLoading, so the not-an-officer copy never
+			    flashes during load. */}
+			{!scopesLoading &&
+				!canWrite &&
+				(scopes === undefined ? (
+					<View testID="registrant-detail-scope-no-officer-banner" style={localStyles.banner}>
+						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
+						<ThemedText type="small" style={{ color: colors.textSecondary }}>
+							{t("registrantScopeReadOnlyNoOfficerBanner")}
+						</ThemedText>
+					</View>
+				) : (
+					<View testID="registrant-detail-scope-banner" style={localStyles.banner}>
+						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
+						<ThemedText type="small" style={{ color: colors.textSecondary }}>
+							{t("registrantScopeReadOnlyBanner", { scope: scopeDescriptions.vrg })}
+						</ThemedText>
+					</View>
+				))}
+
+			{loading && core === undefined ? (
+				<View testID="registrant-detail-loading">
+					<ThemedText type="small" style={{ color: colors.textSecondary }}>
+						{t("loading")}
+					</ThemedText>
+				</View>
+			) : (
+				core && (
+					<View style={styles.section} testID="registrant-detail-header">
+						<ThemedText type="title">{displayName}</ThemedText>
+						{statusMeta ? (
+							<>
+								<View
+									testID="registrant-detail-status-pill"
+									style={[pillStyles.pill, { backgroundColor: tintPill(colors[statusMeta.colorKey]) }]}
+								>
+									<ThemedText type="smallBold" style={{ color: colors[statusMeta.colorKey] }}>
+										{t(statusMeta.labelKey)}
+									</ThemedText>
+								</View>
+								<ThemedText type="small" testID="registrant-detail-expiration">
+									{t("registrantDetailExpirationLabel") + ": " + formatExpirationDate(String(core.expiration))}
+								</ThemedText>
+								<ThemedText type="small" testID="registrant-detail-signor-key">
+									{t("registrantDetailSignorKeyLabel") + ": " + truncateId(core.signorKey)}
+								</ThemedText>
+								<View style={localStyles.lifecycleButtonRow}>
+									{availableLifecycleActions(core.status).map((id) => {
+										const meta = LIFECYCLE_ACTIONS[id];
+										return (
+											<View key={id} testID={"registrant-detail-lifecycle-" + id}>
+												<CustomButton
+													size="thin"
+													title={t(meta.buttonLabelKey)}
+													backgroundColor={meta.tone === "destructive" ? colors.error : colors.accent}
+													disabled={!canWrite}
+													onPress={canWrite ? () => setPendingAction(id) : NOOP}
+												/>
+											</View>
+										);
+									})}
+								</View>
+								{pendingAction === "renew" && (
+									<View testID="registrant-detail-renew-picker">
+										<DateField
+											title={t("registrantDetailExpirationLabel")}
+											value={renewalExpiration}
+											onChange={setRenewalExpiration}
+										/>
+										<View testID="registrant-detail-renew-dismiss">
+											<CustomButton
+												size="thin"
+												title={t("registrantLifecycleKeepCurrentExpiration")}
+												backgroundColor={colors.accent}
+												onPress={() => {
+													setPendingAction(undefined);
+													setRenewalExpiration("");
+												}}
+											/>
+										</View>
+									</View>
+								)}
+								{renderLifecycleCard()}
+							</>
+						) : (
+							// An unknown status code from a future schema revision: never
+							// crash, and never offer a transition off a status this build
+							// does not understand.
+							<ThemedText type="small" style={{ color: colors.textSecondary }}>
+								{String(core.status)}
+							</ThemedText>
+						)}
+					</View>
+				)
+			)}
+
+			{/* Public tier — always visible, always unmasked, never gated. This
+			    section is 4th precisely so the screen stays useful to an officer
+			    whose private tier is hidden (47-UI-SPEC.md:639). */}
+			<View style={styles.section} testID="registrant-detail-public-tier">
+				<ThemedText type="title">{t("registrantDetailPublicTierTitle")}</ThemedText>
+				{publicRows.length === 0 ? (
+					<View testID="registrant-detail-public-empty">
+						<ThemedText type="small" style={{ color: colors.textSecondary }}>
+							{t("registrantDetailNoPublicTier")}
+						</ThemedText>
+					</View>
+				) : (
+					publicRows.map((row) => (
+						<View key={row.name} testID={"registrant-detail-public-row-" + row.name} style={localStyles.propertyRow}>
+							<ThemedText type="defaultSemiBold" style={localStyles.propertyName}>
+								{row.name + ": "}
+							</ThemedText>
+							<ThemedText type="default" style={localStyles.propertyValue}>
+								{row.value}
+							</ThemedText>
+						</View>
+					))
+				)}
+			</View>
+
+			{/* Selective tier + D-12 audience preview. */}
+			<View style={styles.section} testID="registrant-detail-selective-tier">
+				<ThemedText type="title">{t("registrantDetailSelectiveTierTitle")}</ThemedText>
+				<SelectiveAudiencePreview
+					leaves={selectiveTier?.selectiveDetails ?? []}
+					selectedAudience={selectedAudience}
+					disclosure={disclosure}
+					onSelectAudience={handleSelectAudience}
+				/>
+			</View>
+
+			{/* Private tier — the D-13 divergence. */}
+			<View style={styles.section} testID="registrant-detail-private-tier">
+				<ThemedText type="title">{t("registrantDetailPrivateTierTitle")}</ThemedText>
+				{!canViewPrivate ? (
+					// Phase 46's gate hides only WRITE controls because election
+					// policy has no confidentiality concern; here the underlying
+					// data is SSN/DOB/phone, so an ungated officer must not even
+					// learn which private fields exist. This is a deliberate,
+					// documented DIVERGENCE for this ONE tier — not an
+					// inconsistency to "fix" toward the visible-but-disabled
+					// default — and it is a UI legibility posture, not an
+					// enforcement boundary.
+					<View testID="registrant-detail-private-gate">
+						<ThemedText type="small" style={{ color: colors.textSecondary }}>
+							{t("registrantDetailPrivateGateHeading", { scope: scopeDescriptions.vrg })}
+						</ThemedText>
+					</View>
+				) : privateRows.length === 0 ? (
+					<View testID="registrant-detail-private-empty">
+						<ThemedText type="small" style={{ color: colors.textSecondary }}>
+							{t("registrantDetailNoPrivateTier")}
+						</ThemedText>
+					</View>
+				) : (
+					privateRows.map((row) => (
+						<PrivateFieldRow
+							key={row.name}
+							name={row.name}
+							value={row.value}
+							onReveal={visit.noteRevealed}
+							testIDPrefix="registrant-detail-private"
+						/>
+					))
+				)}
+			</View>
+
+			<AssociationsSection registrantId={registrantId} authorityId={authorityId} registrantDisplayName={displayName} />
+
+			<AttestationChallengesSection
+				registrantId={registrantId}
+				canWrite={canWrite}
+				onOpenProvisioningStatus={handleOpenProvisioningStatus}
+			/>
+
+			{/* Last, and default-collapsed by its own contract (the one section
+			    on this screen that does not mirror Phase 46's default-open
+			    posture). canView is the SAME derivation as the private tier
+			    because the trail's rows are private field NAMES. */}
+			<AccessHistorySection registrantId={registrantId} canView={canViewPrivate} />
+		</ScrollView>
+	);
+}
+
+const localStyles = StyleSheet.create({
+	propertyRow: {
+		flexDirection: "row",
+		alignItems: "flex-start",
+		width: "100%",
+	},
+	propertyName: {
+		marginRight: 4,
+	},
+	propertyValue: {
+		flex: 1,
+	},
+	banner: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 8,
+		marginBottom: 12,
+	},
+	headerRow: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 8,
+	},
+	lifecycleButtonRow: {
+		flexDirection: "row",
+		gap: 8,
+		flexWrap: "wrap",
+	},
+});
+
+const styles = { ...globalStyles, ...localStyles };
