@@ -1083,3 +1083,63 @@ describe("RegistrationPolicyScreen — gap 2 (CR-02 in-flight double-press guard
     expect(statusJson).toContain("registrationPolicyRowSaving");
   });
 });
+
+describe("RegistrationPolicyScreen — 46-UAT test 12 (repair chip must survive its own success)", () => {
+  // Found by driving the real app on a Pixel_8, not by this suite: a repair
+  // that SUCCEEDS left issueStatus[fieldName] pinned at "saving" (WR-03, which
+  // 46-REVIEW.md assessed as a cosmetic stale label). 46-16 later added
+  // `if (issueStatus[fieldName] === "saving") return;` to runIssueWrite as the
+  // CR-02 double-press guard — and that guard then matched the stale status,
+  // silently swallowing every LATER repair press for the field.
+  //
+  // Why no existing test caught it: 46-16's PROBE A/B assert call counts within
+  // ONE press cycle, deliberately holding the write in flight forever. Nothing
+  // exercised repair -> SUCCESS -> re-flag -> repair again across one mount.
+
+  // NOTE — a companion test asserting "the status node no longer says Saving…"
+  // immediately after a successful repair was written first and DELETED: it is
+  // structurally vacuous. A successful repair removes the flagged row from the
+  // card entirely, so `registration-policy-issue-status-<field>` does not exist
+  // to inspect, and `JSON.stringify(undefined)` satisfies `.not.toContain(...)`
+  // whether or not the status was ever cleared. It stayed GREEN under the
+  // mutation below. The press-through test is the only sound formulation: the
+  // stale status is observable ONLY through the behaviour it blocks.
+
+  it("the SAME field's repair chip still fires a write when the issue re-appears in one screen session", async () => {
+    // The device repro, verbatim: repair the audience (succeeds, flag clears),
+    // remove the disclosure from the Disclosure section (field is re-flagged),
+    // then press the repair again. Before the fix the second press was a silent
+    // no-op — no confirmation, no write, no error.
+    await seedField(mockRegistrationEngine, {
+      fieldName: "LastName",
+      tier: "selective",
+      requirement: "required",
+    });
+
+    const spies = spyWrites(mockRegistrationEngine);
+    const tr = await renderScreen();
+
+    // --- repair #1: succeeds, issue clears ---
+    await press(tr, "registration-policy-issue-repair-set-audience-LastName");
+    await flushTicks(6);
+    await press(tr, "registration-policy-issue-audience-LastName-everyone");
+    await flushTicks(6);
+    expect(spies.addElectionDisclosurePolicy).toHaveBeenCalledTimes(1);
+    absent(tr, "registration-policy-issue-no-audience-LastName");
+
+    // --- re-flag the SAME field through the Disclosure section's own control ---
+    await press(tr, "disclosure-remove-LastName");
+    await flushTicks(6);
+    present(tr, "registration-policy-issue-no-audience-LastName");
+
+    // --- repair #2: must actually fire, not be swallowed by the stale guard ---
+    await press(tr, "registration-policy-issue-repair-set-audience-LastName");
+    await flushTicks(6);
+    await press(tr, "registration-policy-issue-audience-LastName-everyone");
+    await flushTicks(6);
+
+    expect(spies.addElectionDisclosurePolicy).toHaveBeenCalledTimes(2);
+    // And the repair really took effect, not merely got called.
+    absent(tr, "registration-policy-issue-no-audience-LastName");
+  });
+});

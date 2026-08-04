@@ -408,12 +408,36 @@ export default function RegistrationPolicyScreen() {
 		// second call is either a violation or a throw-on-missing-row, and the
 		// officer is told a repair failed that actually succeeded.
 		// handleRetryIssue is unaffected: a failed repair leaves the status at
-		// "error", not "saving". No success branch is added here — that is
-		// WR-03, deliberately out of scope.
+		// "error", not "saving".
+		//
+		// The success branch below is REQUIRED BY the guard above, not optional
+		// polish (WR-03, escalated by 46-UAT.md test 12 and fixed here). Without
+		// it a successful repair leaves this field pinned at "saving" forever, so
+		// the guard's own early return then swallows every LATER repair press for
+		// that field — no card, no write, no error — until the officer leaves and
+		// re-enters the screen. WR-03 was assessed in 46-REVIEW.md as a cosmetic
+		// stale "Saving…" label; that assessment predates this guard, which turned
+		// it into a functional dead-end. Reproduced on device: repair an audience
+		// (succeeds, flag clears) -> remove the disclosure (field re-flagged) ->
+		// press the repair again -> nothing happens.
+		//
+		// Clears only THIS field: other fields may legitimately be in flight.
+		// (handleKeepCurrentPolicy resets the whole map instead — correct there,
+		// since abandoning the confirmation abandons every parked repair.)
 		if (issueStatus[fieldName] === "saving") return;
 		setIssueStatus((prev) => ({ ...prev, [fieldName]: "saving" }));
 		try {
 			await op();
+			setIssueStatus((prev) => {
+				const next = { ...prev };
+				delete next[fieldName];
+				return next;
+			});
+			setIssueRetry((prev) => {
+				const next = { ...prev };
+				delete next[fieldName];
+				return next;
+			});
 		} catch {
 			setIssueStatus((prev) => ({ ...prev, [fieldName]: "error" }));
 			setIssueRetry((prev) => ({ ...prev, [fieldName]: () => runIssueWrite(fieldName, op) }));
