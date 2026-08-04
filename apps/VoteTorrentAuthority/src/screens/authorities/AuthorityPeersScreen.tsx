@@ -6,13 +6,28 @@ import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
+import { CustomButton } from "../../components/CustomButton";
+import { CustomTextInput } from "../../components/CustomTextInput";
 import { InfoCard } from "../../components/InfoCard";
 import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
+import { createDeviceSigner } from "../../engines/device-signer";
+import type { SignCallback } from "../../engines/device-signer";
+// LifecycleConfirmCard is owned by 47-10 and lives in the registration tree
+// because that is where its other seven call sites are; this screen is one
+// authorities-tree consumer among two (47-17 is the other) and imports it
+// rather than forking a second confirmation card.
+import { LifecycleConfirmCard } from "../registration/components/LifecycleConfirmCard";
 import { scopeDescriptions } from "@votetorrent/vote-core";
 import type { AuthorityPeer, IAuthorityConfigEngine } from "@votetorrent/vote-core";
+
+// A stable no-op for the (non-optional) CustomButton.onPress prop when a gate
+// is unmet — belt-and-suspenders alongside `disabled`, mirroring
+// AttestationPolicySection's NOOP idiom, so a direct programmatic invocation
+// of the handler (bypassing a real touch event) still cannot fire a write.
+const NOOP = () => {};
 
 /**
  * AuthorityPeersScreen — the `'cap'`-scoped `AuthorityPeer` CRUD surface
@@ -73,6 +88,10 @@ export default function AuthorityPeersScreen() {
 	const [peers, setPeers] = useState<AuthorityPeer[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [errorMessage, setErrorMessage] = useState("");
+	const [addFormOpen, setAddFormOpen] = useState(false);
+	const [peerIdInput, setPeerIdInput] = useState("");
+	const [pendingRemovePeerId, setPendingRemovePeerId] = useState<string | undefined>(undefined);
+	const [submitting, setSubmitting] = useState(false);
 
 	const { scopes, loading: scopesLoading } = useCurrentOfficerScopes(authorityId);
 	const canWrite = !scopesLoading && scopes?.includes("cap") === true;
@@ -116,6 +135,92 @@ export default function AuthorityPeersScreen() {
 		loadPeers();
 	}, [loadPeers]);
 
+	// Shared write runner for both 'cap' ceremonies. Sets submitting, clears
+	// errorMessage, resolves the device signer and the authorityConfig
+	// engine, awaits the caller's op(sign, engine), then re-reads the list so
+	// the screen reflects the committed row rather than an optimistic local
+	// edit. On failure, sets errorMessage and RE-THROWS so the caller (and,
+	// for the remove path, LifecycleConfirmCard's own handleConfirm) can
+	// distinguish success from failure.
+	const runSignedWrite = useCallback(
+		async (op: (sign: SignCallback, engine: IAuthorityConfigEngine) => Promise<void>) => {
+			setSubmitting(true);
+			setErrorMessage("");
+			try {
+				// Same literal bootstrap name AppProvider.tsx and
+				// useCurrentOfficerScopes use, so a first-run identity cannot
+				// diverge.
+				const sign = await createDeviceSigner("Device User");
+				const engine = await getEngine<IAuthorityConfigEngine>("authorityConfig");
+				await op(sign, engine);
+				await loadPeers();
+			} catch (err) {
+				if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+				throw err;
+			} finally {
+				if (!unmountedRef.current) setSubmitting(false);
+			}
+		},
+		[getEngine, loadPeers],
+	);
+
+	const canAddSubmit = canWrite && !submitting && peerIdInput.trim().length > 0;
+
+	// The raw peerId is submitted verbatim (47-UI-SPEC.md:568) — trim only, no
+	// format validation, no multiaddr/PeerId parsing. Deliberate scope
+	// boundary carried by threat T-47-18-02, not an oversight.
+	const handleAddPeer = async () => {
+		if (!canAddSubmit) return;
+		const candidate = peerIdInput.trim();
+		// Guard FIRST, before any engine call. See the module-level
+		// declared-blind-spot note: MockAuthorityConfigEngine.addAuthorityPeer
+		// silently no-ops on a duplicate peerId while the real engine's PK
+		// insert throws — this guard is the only thing that keeps the
+		// mock-green path and the real-engine path in agreement.
+		if (isDuplicatePeerId(peers, candidate)) {
+			// The only non-i18n string in this file, deliberately (see
+			// handleAddPeer's plan-level rationale): it is the same class of
+			// developer-facing diagnostic the real engine itself raises as a
+			// PK-violation message, travelling the same errorMessage ->
+			// InlineError channel Phase 46 already uses for raw engine text.
+			setErrorMessage(`Peer already configured: ${candidate}`);
+			return;
+		}
+		try {
+			await runSignedWrite((sign, engine) => engine.addAuthorityPeer(authorityId, candidate, sign));
+			if (!unmountedRef.current) {
+				setAddFormOpen(false);
+				setPeerIdInput("");
+			}
+		} catch {
+			// Leave the form open with the draft intact so the officer can
+			// retry — errorMessage already carries the reason.
+		}
+	};
+
+	// State only, zero engine calls — the confirmation card is what actually
+	// fires the write.
+	function handleRequestRemove(peerId: string) {
+		if (!canWrite || submitting) return;
+		setPendingRemovePeerId(peerId);
+	}
+
+	// A dismissed confirmation fires ZERO engine calls (D-10).
+	function handleDismissRemove() {
+		setPendingRemovePeerId(undefined);
+	}
+
+	async function handleConfirmRemove(peerId: string) {
+		await runSignedWrite((sign, engine) => engine.removeAuthorityPeer(authorityId, peerId, sign));
+		// Per 47-10's downstream contract, the card latches after a RESOLVED
+		// onConfirm and re-enables after a REJECTED one — clear the pending
+		// slot only on resolve (a throw here propagates to
+		// LifecycleConfirmCard's handleConfirm, which resets its own
+		// submitState to idle without this screen touching
+		// pendingRemovePeerId).
+		if (!unmountedRef.current) setPendingRemovePeerId(undefined);
+	}
+
 	return (
 		<ScrollView
 			testID="authority-peers-screen"
@@ -158,10 +263,45 @@ export default function AuthorityPeersScreen() {
 				<ChipButton
 					label={t("authorityPeerAddButton")}
 					icon="circle-plus"
-					// TODO(47-18 Task 2): wire the toggle handler.
-					onPress={undefined}
+					onPress={
+						canWrite
+							? () => {
+									setAddFormOpen((o) => !o);
+									setPeerIdInput("");
+								}
+							: undefined
+					}
 				/>
 			</View>
+
+			{addFormOpen && (
+				<View testID="authority-peers-add-form" style={[styles.section, globalStyles.cardSurface, { backgroundColor: colors.card }]}>
+					<CustomTextInput
+						testID="authority-peers-add-input"
+						title={t("authorityPeerIdLabel")}
+						placeholder={t("authorityPeerIdPlaceholder")}
+						value={peerIdInput}
+						onChangeText={setPeerIdInput}
+						// Load-bearing, not cosmetic: a PeerId is case-sensitive
+						// base58 and an autocapitalised first character produces a
+						// silently different peer.
+						autoCapitalize="none"
+						autoCorrect={false}
+					/>
+					<View
+						testID="authority-peers-add-submit"
+						pointerEvents={canWrite ? "auto" : "none"}
+						style={canWrite ? undefined : localStyles.disabledControl}
+					>
+						<CustomButton
+							size="thin"
+							title={t("authorityPeerAddButton")}
+							disabled={!canAddSubmit}
+							onPress={canAddSubmit ? handleAddPeer : NOOP}
+						/>
+					</View>
+				</View>
+			)}
 
 			{loading && (
 				<ThemedText type="small" testID="authority-peers-loading" style={{ color: colors.textSecondary }}>
@@ -181,26 +321,49 @@ export default function AuthorityPeersScreen() {
 			{!loading &&
 				peers.length > 0 &&
 				peers.map((peer) => (
-					<View key={peer.peerId} testID={"authority-peers-row-" + peer.peerId} style={localStyles.row}>
-						{/* InfoCard renders no children and exposes no trailing slot
-						    (InfoCard.tsx:9-17), so the Remove chip is a sibling in a
-						    flex row, not nested inside the card. Do not modify
-						    InfoCard. */}
-						<View style={localStyles.rowCard}>
-							<InfoCard
-								title={truncatePeerId(peer.peerId)}
-								additionalInfo={[{ label: t("authorityPeerIdLabel"), value: peer.peerId }]}
+					<React.Fragment key={peer.peerId}>
+						<View testID={"authority-peers-row-" + peer.peerId} style={localStyles.row}>
+							{/* InfoCard renders no children and exposes no trailing slot
+							    (InfoCard.tsx:9-17), so the Remove chip is a sibling in a
+							    flex row, not nested inside the card. Do not modify
+							    InfoCard. */}
+							<View style={localStyles.rowCard}>
+								<InfoCard
+									title={truncatePeerId(peer.peerId)}
+									additionalInfo={[{ label: t("authorityPeerIdLabel"), value: peer.peerId }]}
+								/>
+							</View>
+							<View
+								testID={"authority-peers-remove-" + peer.peerId}
+								pointerEvents={canWrite ? "auto" : "none"}
+								style={canWrite ? undefined : localStyles.disabledControl}
+							>
+								<ChipButton
+									label={t("authorityPeerRemoveButton")}
+									onPress={canWrite && !submitting ? () => handleRequestRemove(peer.peerId) : undefined}
+								/>
+							</View>
+						</View>
+						{pendingRemovePeerId === peer.peerId && (
+							// Ordinary variant only: removing a peer is reversible
+							// ("It can be added back at any time" —
+							// authorityPeerRemoveBody) and touches no registrant
+							// record, so it does not meet D-10's typed-gate bar —
+							// but it is still a delete and never a silent
+							// single-tap action.
+							<LifecycleConfirmCard
+								variant="ordinary"
+								tone="destructive"
+								title={t("authorityPeerRemoveTitle")}
+								body={t("authorityPeerRemoveBody")}
+								confirmLabel={t("authorityPeerRemoveConfirm")}
+								dismissLabel={t("authorityPeerKeepPeer")}
+								testIDPrefix={"authority-peers-confirm-" + peer.peerId}
+								onDismiss={handleDismissRemove}
+								onConfirm={() => handleConfirmRemove(peer.peerId)}
 							/>
-						</View>
-						<View
-							testID={"authority-peers-remove-" + peer.peerId}
-							pointerEvents={canWrite ? "auto" : "none"}
-							style={canWrite ? undefined : localStyles.disabledControl}
-						>
-							{/* TODO(47-18 Task 2): wire the remove handler. */}
-							<ChipButton label={t("authorityPeerRemoveButton")} onPress={undefined} />
-						</View>
-					</View>
+						)}
+					</React.Fragment>
 				))}
 		</ScrollView>
 	);
