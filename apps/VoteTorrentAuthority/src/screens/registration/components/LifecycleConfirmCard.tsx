@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { ThemedText } from "../../../components/ThemedText";
@@ -132,6 +132,16 @@ export function LifecycleConfirmCard({
 	const { colors } = useTheme() as ExtendedTheme;
 	const [typedValue, setTypedValue] = useState("");
 	const [submitState, setSubmitState] = useState<SubmitState>("idle");
+	// `submitState` alone is NOT sufficient to guard against a rapid
+	// multi-press: two touch events dispatched within the same JS tick both
+	// read the SAME closure's `submitState` (React does not re-render
+	// synchronously between them), so a `useState`-only guard can still let
+	// a second call through before the first `setSubmitState("submitting")`
+	// has taken effect. This app has already shipped two such double-press
+	// defects on signed writes. `submittingRef` closes that gap: a ref
+	// mutation is synchronous and visible to every subsequent call in the
+	// same tick, unlike a state update.
+	const submittingRef = useRef(false);
 
 	// __DEV__-only diagnostic, re-evaluated only when `dismissLabel` changes:
 	// a build with a bare-acknowledgement dismiss label warns so the defect
@@ -178,14 +188,19 @@ export function LifecycleConfirmCard({
 	// un-undoable status changes. A resolved submit latches permanently
 	// (the card's owner is expected to unmount it on success); a rejected
 	// submit returns to idle so the officer can retry rather than being
-	// stranded.
+	// stranded. `submittingRef` is checked and set FIRST, synchronously,
+	// before any state update — this is what actually closes the
+	// same-tick multi-press gap that `submitState`/`canConfirm` alone
+	// cannot (see the ref's declaration comment above).
 	async function handleConfirm() {
-		if (submitState !== "idle" || !canConfirm) return;
+		if (submittingRef.current || submitState !== "idle" || !canConfirm) return;
+		submittingRef.current = true;
 		setSubmitState("submitting");
 		try {
 			await onConfirm();
 			setSubmitState("submitted");
 		} catch {
+			submittingRef.current = false;
 			setSubmitState("idle");
 		}
 	}

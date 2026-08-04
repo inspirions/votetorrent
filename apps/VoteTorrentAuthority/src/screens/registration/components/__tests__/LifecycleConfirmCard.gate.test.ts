@@ -5,7 +5,7 @@
  * status change) and `isBareDismissLabel` (the D-10 "never a bare
  * acknowledgement" rule).
  *
- * Imports only the two pure exports — no react-test-renderer, no rendering
+ * Imports only the two pure exports — no test-renderer package, no rendering
  * of any kind. Structured like the plain-jest key-contract suites under
  * `src/i18n/__tests__/`.
  *
