@@ -353,18 +353,26 @@ export default function RegistrantDetailScreen() {
 		const meta = LIFECYCLE_ACTIONS[pendingAction];
 		const testIDPrefix = "registrant-detail-confirm-" + pendingAction;
 
+		// Every branch below derives `variant` (and, where relevant, `tone`)
+		// from `LIFECYCLE_ACTIONS[pendingAction]` rather than hardcoding a
+		// literal — the model's table is the single source of truth for which
+		// confirmation gate an action gets, so a change there (e.g. D-10's
+		// suspend/revoke grouping) is observable here without a second edit.
+
 		if (pendingAction === "renew") {
 			const hasValidExpiration = renewalExpiration.length > 0 && !isNaN(new Date(renewalExpiration).getTime());
 			if (!hasValidExpiration) return null;
 			return (
 				<LifecycleConfirmCard
-					variant="ordinary"
+					variant={meta.variant}
 					tone={meta.tone}
 					testIDPrefix={testIDPrefix}
 					title={t(meta.titleKey)}
 					body={t(meta.bodyKey, { name: displayName, newExpiration: formatExpirationDate(renewalExpiration) })}
 					confirmLabel={t(meta.confirmLabelKey)}
 					dismissLabel={t(meta.dismissLabelKey)}
+					matchText={displayName}
+					typedPlaceholder={t("registrantLifecycleTypedConfirmPlaceholder", { name: displayName })}
 					onConfirm={() => handleConfirmLifecycle("renew")}
 					onDismiss={handleDismissLifecycle}
 				/>
@@ -374,23 +382,26 @@ export default function RegistrantDetailScreen() {
 		if (pendingAction === "reinstate") {
 			return (
 				<LifecycleConfirmCard
-					variant="ordinary"
+					variant={meta.variant}
 					tone={meta.tone}
 					testIDPrefix={testIDPrefix}
 					title={t(meta.titleKey)}
 					body={t(meta.bodyKey, { name: displayName, oldStatus: statusMeta ? t(statusMeta.labelKey) : "" })}
 					confirmLabel={t(meta.confirmLabelKey)}
 					dismissLabel={t(meta.dismissLabelKey)}
+					matchText={displayName}
+					typedPlaceholder={t("registrantLifecycleTypedConfirmPlaceholder", { name: displayName })}
 					onConfirm={() => handleConfirmLifecycle("reinstate")}
 					onDismiss={handleDismissLifecycle}
 				/>
 			);
 		}
 
-		// suspend / revoke — the typed variant.
+		// suspend / revoke — LIFECYCLE_ACTIONS binds both to variant: "typed".
 		return (
 			<LifecycleConfirmCard
-				variant="typed"
+				variant={meta.variant}
+				tone={meta.tone}
 				testIDPrefix={testIDPrefix}
 				title={t(meta.titleKey, { name: displayName })}
 				body={t(meta.bodyKey, { name: displayName })}
