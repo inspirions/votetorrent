@@ -202,6 +202,49 @@ export interface ElectionRegistrant {
   registrantId: string
 }
 
+/** ********* RegistrantPrivate access trail (D-01/D-02) ***********/
+
+/**
+ * Authority-held, append-only record of app-mediated reads of a registrant's
+ * private tier (D-01). Like `RegistrantPrivate` itself, it is never
+ * replicated to the public Election Network. It exists for accountability,
+ * deterrence, and regulatory posture and is **not a security control** — an
+ * officer holding the device and the local Quereus/LevelDB file can read
+ * that file directly, and no row is written by that path.
+ */
+export interface RegistrantAccessEvent {
+  /** references Registrant.id */
+  registrantId: string
+
+  /**
+   * The officer's User.Id. There is deliberately no foreign-key CHECK on
+   * this column in the schema, so a caller must tolerate an id it cannot
+   * resolve to a display name.
+   */
+  viewerUserId: string
+
+  /**
+   * Per-registrant monotonic ordering key starting at 0 (the `UserEvent`
+   * idiom); it is not a `Tid` and does not reset per process.
+   */
+  sequence: number
+
+  /**
+   * Z-suffixed ISO — the engine re-stamps the Z-stripped `datetime`
+   * read-back (CR-02), so a caller's `new Date(timestamp)` reads UTC and not
+   * host-local time.
+   */
+  timestamp: string
+
+  /**
+   * The NAMES of the private attributes revealed during one screen-visit,
+   * never their values. Names are filtered engine-side against the
+   * registrant's own `RegistrantPrivate.PrivateDetails` vocabulary, so a
+   * value handed in by a caller is dropped rather than stored.
+   */
+  fields: string[]
+}
+
 /** ********* Registrant roster read (D-04/D-05/D-06/D-07) ***********/
 
 /**
