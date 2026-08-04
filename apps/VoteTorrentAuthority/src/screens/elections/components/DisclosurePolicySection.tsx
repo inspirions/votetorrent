@@ -53,6 +53,23 @@ export function isDistrictAudienceAvailable(
 	return hasDistrictedBallot && hasDistrictFieldDeclared(fields);
 }
 
+/**
+ * Case-folded disclosure lookup (folded-in WR-01, T-46-12-02). An
+ * ElectionDisclosurePolicy row has no FK to ElectionRegistrationField (D-04),
+ * so a row can genuinely be stored under a differently-cased fieldName. Every
+ * sibling module in this domain folds case — registration-policy-reconciliation.ts,
+ * hasDistrictFieldDeclared above, RegistrationFieldsSection.isDuplicate, and
+ * the screen's own onSetAudience — so an exact-match lookup here would render
+ * "Not set" for a field that IS disclosed, understating the disclosure
+ * surface and defeating the already-selected no-op guard in handleSetAudience.
+ */
+function findDisclosureForField(
+	disclosures: ElectionDisclosurePolicy[],
+	fieldName: string,
+): ElectionDisclosurePolicy | undefined {
+	return disclosures.find(d => d.fieldName.toLowerCase() === fieldName.toLowerCase());
+}
+
 type RowStatus = "idle" | "saving" | "saved" | "error";
 
 export interface DisclosurePolicySectionProps {
@@ -92,7 +109,7 @@ export function DisclosurePolicySection({
 	}
 
 	function handleSetAudience(field: ElectionRegistrationField, audience: DisclosureAudience) {
-		const current = disclosures.find(d => d.fieldName === field.fieldName)?.audience;
+		const current = findDisclosureForField(disclosures, field.fieldName)?.audience;
 		if (current === audience) return;
 		runWrite(field.fieldName, () => onSetAudience(field.fieldName, audience));
 	}
@@ -157,7 +174,7 @@ export function DisclosurePolicySection({
 			) : (
 				selectiveFields.map(field => {
 					const status: RowStatus = rowStatus[field.fieldName] ?? "idle";
-					const currentAudience = disclosures.find(d => d.fieldName === field.fieldName)?.audience;
+					const currentAudience = findDisclosureForField(disclosures, field.fieldName)?.audience;
 					const hasDisclosure = currentAudience !== undefined;
 
 					return (
@@ -171,6 +188,29 @@ export function DisclosurePolicySection({
 								{t("registrationPolicyAudienceLabel")}
 							</ThemedText>
 
+							{/*
+							 * Current-audience legibility (D-03/D-10, closes 46-VERIFICATION.md
+							 * gap-2 / 46-REVIEW.md CR-02). Deliberately OUTSIDE the
+							 * status==="saving" ternary below and BEFORE the
+							 * disclosure-status- View: it must stay rendered while a write
+							 * is in flight AND while canWrite is false, since that
+							 * persistence is the entire point of the D-10 read-only
+							 * legibility half of this fix. currentAudience always comes
+							 * straight from props via the case-folded lookup above (never
+							 * mirrored into local state), so this also satisfies D-14
+							 * prior-value integrity — a rejected write leaves the ORIGINAL
+							 * audience on screen, never the attempted one.
+							 */}
+							<View testID={`disclosure-current-audience-${field.fieldName}`}>
+								<ThemedText type="defaultSemiBold">
+									{currentAudience === "district"
+										? t("registrationPolicyAudienceDistrict")
+										: currentAudience === "everyone"
+											? t("registrationPolicyAudienceEveryone")
+											: t("registrationPolicyAudienceNotSet")}
+								</ThemedText>
+							</View>
+
 							<View testID={`disclosure-status-${field.fieldName}`}>
 								{status === "saving" ? (
 									<ThemedText type="small" style={{ color: colors.textSecondary }}>
@@ -182,13 +222,19 @@ export function DisclosurePolicySection({
 											{writeWrap(
 												`disclosure-audience-${field.fieldName}-everyone`,
 												() => handleSetAudience(field, "everyone"),
-												<ChipButton label={t("registrationPolicyAudienceEveryone")} />,
+												<ChipButton
+													label={t("registrationPolicyAudienceEveryone")}
+													icon={currentAudience === "everyone" ? "check" : undefined}
+												/>,
 											)}
 											{districtAvailable &&
 												writeWrap(
 													`disclosure-audience-${field.fieldName}-district`,
 													() => handleSetAudience(field, "district"),
-													<ChipButton label={t("registrationPolicyAudienceDistrict")} />,
+													<ChipButton
+														label={t("registrationPolicyAudienceDistrict")}
+														icon={currentAudience === "district" ? "check" : undefined}
+													/>,
 												)}
 										</View>
 
