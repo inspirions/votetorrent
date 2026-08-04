@@ -318,6 +318,45 @@ export function RegistrationFieldsSection({
 					);
 				})
 			)}
+
+			{/*
+			 * Orphan-error row (46-VERIFICATION.md gap-4 / 46-13, D-14 retry recovery).
+			 * RegistrationPolicyScreen's runSignedWrite now reloads the policy in a
+			 * finally on EVERY write, including a failed one -- so after a half-applied
+			 * tier/requirement edit (the remove committed, the add rejected) the field is
+			 * genuinely gone from `fields` on the very next render. Without this block the
+			 * row above -- and the Couldn't-save text and Retry control that live only
+			 * inside it -- would stop rendering entirely, leaving the officer with no error
+			 * and no recovery path. This renders one minimal row per rowStatus entry whose
+			 * status is "error" and whose key (case-folded, matching isDuplicate's
+			 * convention above) is absent from `fields`. It renders unconditionally after
+			 * the block above -- including when `fields` is empty, which is exactly the
+			 * half-applied single-field case -- because it is a SIBLING of the
+			 * fields.length === 0 ternary, not nested inside either branch.
+			 */}
+			{Object.entries(rowStatus)
+				.filter(
+					([key, status]) =>
+						status === "error" && !fields.some(f => f.fieldName.toLowerCase() === key.toLowerCase()),
+				)
+				.map(([fieldName]) => (
+					<View
+						testID={`registration-field-orphan-error-${fieldName}`}
+						key={`orphan-error-${fieldName}`}
+						style={localStyles.fieldRow}
+					>
+						<ThemedText type="defaultSemiBold">{fieldName}</ThemedText>
+						<ThemedText type="small" style={{ color: colors.error }}>
+							{t("registrationPolicyRowError")}
+						</ThemedText>
+						<View testID={`registration-field-orphan-error-retry-${fieldName}`}>
+							<ChipButton
+								label={t("registrationPolicyRetryButton")}
+								onPress={() => handleRetry(fieldName)}
+							/>
+						</View>
+					</View>
+				))}
 		</View>
 	);
 }
