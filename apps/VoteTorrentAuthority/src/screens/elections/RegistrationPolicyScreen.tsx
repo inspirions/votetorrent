@@ -292,27 +292,59 @@ export default function RegistrationPolicyScreen() {
 		);
 	}
 
+	/**
+	 * Resolves an ElectionDisclosurePolicy row's STORED fieldName casing — the
+	 * PK argument a disclosure delete must be keyed on. Closes CR-01
+	 * (46-VERIFICATION.md gap 1, a REGRESSION this phase's own 46-12
+	 * introduced): 46-12 case-folded DisclosurePolicySection's Remove-control
+	 * predicate (`findDisclosureForField`), so the control now renders for a
+	 * case-skewed disclosure row — but the fieldName crossing that component
+	 * boundary is the FIELD row's casing, not the disclosure row's STORED
+	 * casing. The engine's disclosure read/delete
+	 * (registration-engine.ts:1041-1046) does an exact-match PK read and
+	 * THROWS on a miss, so a caller-supplied field-row casing is NOT a valid
+	 * PK argument for it.
+	 *
+	 * Awaits a FRESH getElectionDisclosurePolicies read — never the captured
+	 * `disclosures` React state (see onSetAudience's comment below for the
+	 * retry-idempotency and stale-closure reasons that read has to be fresh) —
+	 * finds the row case-insensitively, and returns its OWN fieldName. Returns
+	 * undefined when no row exists, which every caller below treats as
+	 * "already absent, nothing to delete" (retry idempotency).
+	 */
+	async function resolveStoredDisclosureName(
+		registrationEngine: IRegistrationEngine,
+		fieldName: string,
+	): Promise<string | undefined> {
+		const existingDisclosures = await registrationEngine.getElectionDisclosurePolicies(electionId);
+		const existing = existingDisclosures.find((d) => d.fieldName.toLowerCase() === fieldName.toLowerCase());
+		return existing?.fieldName;
+	}
+
 	async function onSetAudience(fieldName: string, audience: DisclosureAudience) {
 		await guardedWrite("disclosure", () =>
 			runSignedWrite(async (sign) => {
 				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-				// Fresh engine read INSIDE the op, not the captured `disclosures` React
-				// state — two reasons. (1) Retry idempotency, same as onChangeField above:
-				// after a half-applied audience change (remove committed, add rejected), a
+				// Resolves via a FRESH engine read INSIDE the op, not the captured
+				// `disclosures` React state — two reasons survive this refactor
+				// unchanged. (1) Retry idempotency, same as onChangeField above: after
+				// a half-applied audience change (remove committed, add rejected), a
 				// naive replay would call remove again on an absent row, and the real
 				// engine's removeElectionDisclosurePolicy (registration-engine.ts:1044-1046)
-				// throws when the row is not found. (2) A `disclosures` state snapshot is a
-				// stale-closure hazard: it can reflect the policy as of an EARLIER write,
-				// not the current engine state, if this op closure outlives a prior write.
-				const existingDisclosures = await registrationEngine.getElectionDisclosurePolicies(electionId);
-				const existing = existingDisclosures.find((d) => d.fieldName.toLowerCase() === fieldName.toLowerCase());
+				// throws when the row is not found. (2) A `disclosures` state snapshot
+				// is a stale-closure hazard: it can reflect the policy as of an
+				// EARLIER write, not the current engine state, if this op closure
+				// outlives a prior write. resolveStoredDisclosureName (CR-01, 46-15)
+				// is what performs that fresh read now, shared with the two other
+				// disclosure write paths below.
+				const storedName = await resolveStoredDisclosureName(registrationEngine, fieldName);
 				// When a disclosure row for this field already exists, delete it FIRST using
 				// its STORED casing — the PK argument the delete is keyed on — then always
 				// add under the caller-supplied field-row casing. Only skip the remove when
 				// the row is genuinely absent; a remove that IS attempted must still be
 				// allowed to throw and propagate.
-				if (existing) {
-					await registrationEngine.removeElectionDisclosurePolicy(electionId, existing.fieldName, sign);
+				if (storedName) {
+					await registrationEngine.removeElectionDisclosurePolicy(electionId, storedName, sign);
 				}
 				await registrationEngine.addElectionDisclosurePolicy({ electionId, fieldName, audience }, sign);
 			})
@@ -323,7 +355,20 @@ export default function RegistrationPolicyScreen() {
 		await guardedWrite("disclosure", () =>
 			runSignedWrite(async (sign) => {
 				const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-				await registrationEngine.removeElectionDisclosurePolicy(electionId, fieldName, sign);
+				// CR-01 (46-VERIFICATION.md gap 1, 46-15) — this was the one disclosure
+				// write path that skipped stored-casing resolution. `fieldName` here is
+				// the FIELD row's casing (DisclosurePolicySection.handleRemove passes
+				// field.fieldName, correctly — see that component's comment for why the
+				// section itself must not resolve this), NOT the disclosure row's
+				// STORED casing the delete has to be keyed on. Resolve it first,
+				// exactly like onSetAudience above.
+				const storedName = await resolveStoredDisclosureName(registrationEngine, fieldName);
+				// Only skip the remove when the row is genuinely absent — retry
+				// idempotency, same shape as onSetAudience/onChangeField above. A
+				// remove that IS attempted must still be allowed to throw and
+				// propagate; this is not a blanket try/catch.
+				if (!storedName) return;
+				await registrationEngine.removeElectionDisclosurePolicy(electionId, storedName, sign);
 			})
 		);
 	}
@@ -369,13 +414,21 @@ export default function RegistrationPolicyScreen() {
 	}
 
 	function handleRepairRemoveDisclosure(fieldName: string) {
-		// fieldName here is always issue.fieldName — the disclosure row's STORED original
-		// casing — since a folded name would key a delete that matches no row.
+		// fieldName here is always issue.fieldName — the disclosure row's STORED
+		// original casing (registration-policy-reconciliation.ts's CASE-FOLDING
+		// RULE guarantees this: the emitted fieldName is never lower-cased).
+		// Routed through resolveStoredDisclosureName anyway (46-15): the safety
+		// no longer rests on that non-local guarantee holding — the resolver
+		// makes the invariant structural instead of commentary, which is
+		// exactly the kind of reasoning that drifted and produced CR-01 in
+		// onRemoveDisclosure above.
 		runIssueWrite(fieldName, () =>
 			guardedWrite("issues", () =>
 				runSignedWrite(async (sign) => {
 					const registrationEngine = await getEngine<IRegistrationEngine>("registration");
-					await registrationEngine.removeElectionDisclosurePolicy(electionId, fieldName, sign);
+					const storedName = await resolveStoredDisclosureName(registrationEngine, fieldName);
+					if (!storedName) return;
+					await registrationEngine.removeElectionDisclosurePolicy(electionId, storedName, sign);
 				})
 			)
 		);
