@@ -27,6 +27,7 @@ import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
+import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 
 type AdministratorInvitationParams = {
 	mode: "send" | "accept";
@@ -112,7 +113,7 @@ export default function AdministratorInvitationScreen() {
 			const officerInvite = authorityEngine.createOfficerInvite({
 				name,
 				title,
-				scopes: ["rn", "rad", "iad", "uai", "mel", "ceb"] as Scope[],
+				scopes: [...FOUNDING_OFFICER_SCOPES],
 			});
 
 			// D-01/D-03/D-04: device signer callback — engine computes Digest(InviteSlot.Cid)

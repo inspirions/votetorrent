@@ -35,6 +35,9 @@ const KNOWN_ENGLISH_OK = new Set([
 	'token',
 	'hash',
 	'adhoc',
+	// Phase 47 (D-12) — the masked-value glyph itself, not English text; identical
+	// by design in both locales (47-UI-SPEC.md's registrantDetailPrivateMaskedValue).
+	'registrantDetailPrivateMaskedValue',
 ]);
 
 describe('i18n parity (D-12)', () => {

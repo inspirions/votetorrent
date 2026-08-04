@@ -17,6 +17,7 @@ import type { IDefaultUserEngine, INetworksEngine, NetworkInit, NetworkReference
 import { ElectionType } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
 import { InlineError } from "../../components/InlineError";
+import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -135,7 +136,7 @@ export default function AddNetworkScreen() {
 							init: {
 								name: adminName,
 								title: adminTitle,
-								scopes: ["rn", "rad", "iad", "uai", "mel", "ceb"],
+								scopes: [...FOUNDING_OFFICER_SCOPES],
 							},
 						},
 					],
