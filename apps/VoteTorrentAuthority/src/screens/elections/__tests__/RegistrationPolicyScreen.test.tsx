@@ -941,3 +941,85 @@ describe("RegistrationPolicyScreen — gap 4 (D-14 retry recovery, 46-13)", () =
     expect(addSpy).toHaveBeenCalledTimes(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Gap 1 closure (46-VERIFICATION.md gap 1, 46-REVIEW.md CR-01, a REGRESSION
+// 46-12 itself introduced, closed by 46-15). onRemoveDisclosure passed the
+// caller-supplied fieldName (the FIELD row's casing) straight to
+// removeElectionDisclosurePolicy, which does an exact-match PK read against
+// the real engine and throws on a case-skewed miss. MockRegistrationEngine's
+// removeElectionDisclosurePolicy is a Map.delete that never throws — it
+// silently removes NOTHING on a wrong-cased key, so the row survives in
+// getElectionDisclosurePolicies afterward. That miss is sufficient to prove
+// this gap: every test below asserts BOTH the exact argument the delete was
+// keyed on AND the resulting engine state, never just that a delete fired.
+// ---------------------------------------------------------------------------
+describe("RegistrationPolicyScreen — gap 1 (CR-01 stored-casing disclosure delete, 46-15)", () => {
+  it("the delete is keyed on the STORED casing, not the field row's casing", async () => {
+    await seedField(mockRegistrationEngine, { fieldName: "Address", tier: "selective", requirement: "optional" });
+    // Deliberate case skew: the disclosure row is stored lower-cased while
+    // the field row is 'Address'.
+    await seedDisclosure(mockRegistrationEngine, { fieldName: "address", audience: "everyone" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    await press(tr, "disclosure-remove-Address");
+
+    expect(spies.removeElectionDisclosurePolicy).toHaveBeenCalledTimes(1);
+    const [electionIdArg, fieldNameArg] = spies.removeElectionDisclosurePolicy.mock.calls[0]!;
+    expect(electionIdArg).toBe("test-election");
+    // The delete's PK argument must be the STORED casing ('address'), not
+    // the field row's casing ('Address') the press originated from. This is
+    // the load-bearing assertion the plan requires — the argument's value,
+    // not merely that the spy was called.
+    expect(fieldNameArg).toBe("address");
+
+    // Independent proof the row is genuinely gone from the engine, not
+    // merely that a delete was attempted.
+    const remaining = await mockRegistrationEngine.getElectionDisclosurePolicies("test-election");
+    expect(remaining).toEqual([]);
+  });
+
+  it("after the case-skewed remove, the screen reflects that the row is gone", async () => {
+    await seedField(mockRegistrationEngine, { fieldName: "Address", tier: "selective", requirement: "optional" });
+    await seedDisclosure(mockRegistrationEngine, { fieldName: "address", audience: "everyone" });
+
+    const tr = await renderScreen();
+    await press(tr, "disclosure-remove-Address");
+
+    // Subtree-scoped, per the anti-vacuity rule — never a whole-tree
+    // toContain check, since both audience labels are always present
+    // somewhere as chip labels.
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), "disclosure-current-audience-Address");
+    const currentJson = JSON.stringify(currentNode);
+    expect(currentJson).toContain("registrationPolicyAudienceNotSet");
+    expect(currentJson).not.toContain("registrationPolicyAudienceEveryone");
+
+    absent(tr, "disclosure-remove-Address");
+
+    // Independent proof of the same fact from a different angle: the row's
+    // removal makes Address a selective field with no audience row, which
+    // is exactly what the Policy Issues card flags (D-04/D-05).
+    present(tr, "registration-policy-issue-no-audience-Address");
+  });
+
+  it("matched-casing control: a same-cased remove is still keyed on that casing (guards against a blanket-lowercase fix)", async () => {
+    // Without this control, an implementation that lower-cased EVERY PK
+    // argument (instead of resolving the stored casing) would pass the two
+    // tests above while silently breaking this one.
+    await seedField(mockRegistrationEngine, { fieldName: "Address", tier: "selective", requirement: "optional" });
+    await seedDisclosure(mockRegistrationEngine, { fieldName: "Address", audience: "everyone" });
+    const spies = spyWrites(mockRegistrationEngine);
+
+    const tr = await renderScreen();
+    await press(tr, "disclosure-remove-Address");
+
+    expect(spies.removeElectionDisclosurePolicy).toHaveBeenCalledTimes(1);
+    const [electionIdArg, fieldNameArg] = spies.removeElectionDisclosurePolicy.mock.calls[0]!;
+    expect(electionIdArg).toBe("test-election");
+    expect(fieldNameArg).toBe("Address");
+
+    const remaining = await mockRegistrationEngine.getElectionDisclosurePolicies("test-election");
+    expect(remaining).toEqual([]);
+  });
+});

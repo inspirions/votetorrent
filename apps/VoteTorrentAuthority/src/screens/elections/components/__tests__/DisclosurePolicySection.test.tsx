@@ -455,8 +455,8 @@ describe('DisclosurePolicySection — current-audience legibility (46-12 gap clo
     expect(checkGlyphCount(tr, 'disclosure-audience-Address-everyone')).toBe(1);
   });
 
-  it('WR-01 case-skew: a disclosure row stored lower-cased resolves to the real audience, not Not-set, and Remove is present', () => {
-    const { tr } = renderSection({
+  it('WR-01 case-skew: a disclosure row stored lower-cased resolves to the real audience, not Not-set, and Remove is present', async () => {
+    const { tr, onRemoveDisclosure } = renderSection({
       fields: [SELECTIVE_FIELD],
       disclosures: [{ electionId: 'e1', fieldName: 'address', audience: 'everyone' }],
     });
@@ -467,5 +467,22 @@ describe('DisclosurePolicySection — current-audience legibility (46-12 gap clo
     expect(currentJson).not.toContain('registrationPolicyAudienceNotSet');
 
     expect(() => tr.root.findByProps({ testID: 'disclosure-remove-Address' })).not.toThrow();
+
+    // 46-15 (CR-01) — upgraded from a presence-only assertion to a press.
+    // This is literally the defective artifact CR-01 named: 46-12's version
+    // of this test asserted the Remove control was PRESENT and never
+    // pressed it, so a control that could never succeed against the real
+    // engine shipped green. Pressing here proves only the CONTRACT AT THIS
+    // BOUNDARY: the section supplies the field-row name it was given
+    // ('Address', unchanged by the disclosure row's stored lower-casing) —
+    // it is purely presentational and makes no engine call, so it cannot
+    // itself resolve a stored PK casing. The screen owns that resolution
+    // (RegistrationPolicyScreen.resolveStoredDisclosureName), pinned
+    // separately by screen tests A/B/C in RegistrationPolicyScreen.test.tsx
+    // ("gap 1 (CR-01 stored-casing disclosure delete, 46-15)").
+    press(tr, 'disclosure-remove-Address');
+    expect(onRemoveDisclosure).toHaveBeenCalledTimes(1);
+    expect(onRemoveDisclosure).toHaveBeenCalledWith('Address');
+    await flush(tr);
   });
 });
