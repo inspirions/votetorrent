@@ -101,6 +101,10 @@ export default function RegistrationPolicyScreen() {
 	// caller generalizes the same "never setState after unmount" guarantee.
 	const unmountedRef = useRef(false);
 	useEffect(() => {
+		// WR-08: reset on entry so a cleanup that runs while the component stays
+		// mounted (StrictMode double-invoke, Fast Refresh, remount-in-place) does
+		// not permanently latch every setState in loadPolicy off.
+		unmountedRef.current = false;
 		return () => {
 			unmountedRef.current = true;
 		};
@@ -182,6 +186,23 @@ export default function RegistrationPolicyScreen() {
 			return run();
 		}
 		return new Promise<void>((resolve, reject) => {
+			// Never leave a parked write unsettled (D-13/CR-04, gap 5). The card
+			// renders inline -- not a modal, not an overlay -- and every section
+			// stays mounted and interactive, so a second write control can be
+			// pressed before the first is decided. A displaced write whose promise
+			// is never settled leaves its originating row on registrationPolicyRowSaving
+			// forever with no error and no Retry -- the officer is told a policy
+			// change is in flight when it has actually been discarded. Rejecting it
+			// here settles that row into Couldn't-save + Retry instead.
+			//
+			// This message is an internal control-flow marker only and must never
+			// reach the screen: the section's runWrite catch discards the error
+			// object entirely and renders the existing registrationPolicyRowError
+			// i18n copy.
+			const displaced = pendingWriteRef.current;
+			if (displaced) {
+				displaced.reject(new Error("superseded-by-newer-edit"));
+			}
 			pendingWriteRef.current = { run, resolve, reject };
 			setConfirmForSection(section);
 		});
