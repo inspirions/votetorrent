@@ -406,3 +406,59 @@ describe('RegistrationFieldsSection — current-value legibility (46-11 gap clos
     expect(currentJson).not.toContain('registrationPolicyTierSelective');
   });
 });
+
+// ---------------------------------------------------------------------------
+// CR-02 in-flight double-press guard (46-VERIFICATION.md gap 2, 46-16)
+// ---------------------------------------------------------------------------
+
+describe('RegistrationFieldsSection — gap 2 (CR-02 in-flight double-press guard, 46-16)', () => {
+  it('double-pressing a picker chip while its add is in flight fires onAddField exactly once', async () => {
+    // The add never settles, so the write stays genuinely in flight and the
+    // `fields` prop never refreshes — exactly the window isDuplicate cannot
+    // see into.
+    const onAddField = jest.fn().mockReturnValue(new Promise<void>(() => {}));
+    const { tr } = renderSection({ fields: [], onAddField });
+
+    press(tr, 'registration-field-picker-lastname');
+    press(tr, 'registration-field-picker-lastname');
+
+    expect(onAddField).toHaveBeenCalledTimes(1);
+    expect(onAddField).toHaveBeenCalledWith('LastName', 'public', 'required');
+  });
+
+  it('key scope control: a different field is still writable while the first add is in flight', async () => {
+    // Without this control, an over-broad "any write in flight blocks every
+    // picker chip" implementation would pass the exactly-once test above too.
+    const onAddField = jest.fn().mockReturnValue(new Promise<void>(() => {}));
+    const { tr } = renderSection({ fields: [], onAddField });
+
+    press(tr, 'registration-field-picker-lastname');
+    press(tr, 'registration-field-picker-firstname');
+
+    expect(onAddField).toHaveBeenCalledTimes(2);
+    expect(onAddField.mock.calls[0]).toEqual(['LastName', 'public', 'required']);
+    expect(onAddField.mock.calls[1]).toEqual(['FirstName', 'public', 'required']);
+  });
+
+  it('release control: the same field is writable again once its add settles', async () => {
+    // Without this control, a guard that latched permanently (never leaving
+    // "saving") would pass the two tests above and leave the picker dead for
+    // the rest of the session.
+    let release!: () => void;
+    const onAddField = jest.fn(() => new Promise<void>((r) => { release = r; }));
+    const { tr } = renderSection({ fields: [], onAddField });
+
+    press(tr, 'registration-field-picker-lastname');
+    press(tr, 'registration-field-picker-lastname');
+    expect(onAddField).toHaveBeenCalledTimes(1);
+
+    await renderer.act(async () => {
+      release();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    press(tr, 'registration-field-picker-lastname');
+    expect(onAddField).toHaveBeenCalledTimes(2);
+  });
+});

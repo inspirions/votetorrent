@@ -90,7 +90,20 @@ export function RegistrationFieldsSection({
 
 	function handleAdd(fieldName: string) {
 		const trimmed = fieldName.trim();
-		if (!trimmed || isDuplicate(trimmed)) return;
+		// CR-02 (46-VERIFICATION.md gap 2 / 46-REVIEW.md, closed by 46-16):
+		// isDuplicate alone is insufficient while an add is in flight — it reads
+		// the `fields` prop, which the owning screen only refreshes via
+		// loadPolicy() at the end of the write chain, so the entire in-flight
+		// window passes the duplicate check. A double press on a picker chip
+		// therefore fired addElectionRegistrationField twice; against the real
+		// engine's plain `insert into` on the (ElectionId, FieldName) PK, the
+		// second add is a violation on a field that WAS added, and the stored
+		// Retry replays the same colliding closure. Checking
+		// rowStatus[trimmed] === "saving" — the same signal the section rows
+		// already use — closes the in-flight window without inventing a new
+		// mechanism. The PK-violation class itself remains T-46-08-01's open
+		// item, not closed here.
+		if (!trimmed || isDuplicate(trimmed) || rowStatus[trimmed] === "saving") return;
 		runWrite(trimmed, () => onAddField(trimmed, "public", "required"));
 	}
 
