@@ -110,6 +110,31 @@ function treeContainsText(tr: renderer.ReactTestRenderer, text: string): boolean
   return json.includes(text.toLowerCase());
 }
 
+/** Recursively find a node in the tr.toJSON() tree by its testID prop. */
+function findJsonNodeByTestID(node: unknown, testID: string): unknown {
+  if (!node) return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findJsonNodeByTestID(child, testID);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof node !== 'object') return null;
+  const n = node as { props?: { testID?: string }; children?: unknown };
+  if (n.props?.testID === testID) return n;
+  if (n.children) return findJsonNodeByTestID(n.children, testID);
+  return null;
+}
+
+/** Count `FontAwesome6 name="check"` glyphs inside the wrapper at testID. */
+function checkGlyphCount(tr: renderer.ReactTestRenderer, testID: string): number {
+  const wrapper = tr.root.findByProps({ testID });
+  return wrapper.findAll(
+    (node) => node.type === ('FontAwesome6' as never) && node.props.name === 'check',
+  ).length;
+}
+
 function renderSection(overrides: {
   fields?: Field[];
   disclosures?: Disclosure[];
@@ -197,7 +222,8 @@ describe('DisclosurePolicySection — D-03/D-14/D-10', () => {
     // would falsely read as two hints rendered.
     const hints = tr.root.findAllByProps({ testID: 'disclosure-district-unavailable-hint' }, { deep: false });
     expect(hints).toHaveLength(1);
-    expect(treeContainsText(tr, 'registrationPolicyAudienceDistrictUnavailableHint')).toBe(true);
+    const hintNode = findJsonNodeByTestID(tr.toJSON(), 'disclosure-district-unavailable-hint');
+    expect(JSON.stringify(hintNode)).toContain('registrationPolicyAudienceDistrictUnavailableHint');
   });
 
   it('Pure-helper unit assertions (no render)', () => {
@@ -239,11 +265,15 @@ describe('DisclosurePolicySection — D-03/D-14/D-10', () => {
 
     expect(treeContainsText(tr, 'registrationPolicyRowError')).toBe(true);
     expect(() => tr.root.findByProps({ testID: 'disclosure-retry-Address' })).not.toThrow();
-    // Prior-value integrity: no disclosure row was ever created (the write
-    // rejected), so the row still reflects its original (audience-less)
-    // props state — asserted against the still-rendered tree, not a mutated
-    // prop. No disclosure row means no remove control either.
-    expect(JSON.stringify(tr.toJSON())).toContain('Address');
+    // D-14 prior-value integrity (the real assertion the deleted vacuous
+    // whole-tree check claimed to make): no disclosure row was ever created
+    // (the write rejected), so the current-audience subtree must still read
+    // the ORIGINAL not-set value and must NOT read the attempted 'everyone'
+    // value. No disclosure row also means no remove control.
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'disclosure-current-audience-Address');
+    const currentJson = JSON.stringify(currentNode);
+    expect(currentJson).toContain('registrationPolicyAudienceNotSet');
+    expect(currentJson).not.toContain('registrationPolicyAudienceEveryone');
     expect(() => tr.root.findByProps({ testID: 'disclosure-remove-Address' })).toThrow();
 
     press(tr, 'disclosure-retry-Address');
@@ -320,5 +350,122 @@ describe('DisclosurePolicySection — D-03/D-14/D-10', () => {
 
     const withSelective = renderSection({ fields: [SELECTIVE_FIELD] });
     expect(() => withSelective.tr.root.findByProps({ testID: 'disclosure-empty' })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Current-audience legibility (D-03/D-10) — 46-12 gap closure
+// ---------------------------------------------------------------------------
+
+/**
+ * SCOPING RULE — do not widen this back out.
+ *
+ * Both audience chip labels (Everyone / Same district) are ALWAYS present
+ * somewhere in the rendered tree, because they are the chip labels
+ * themselves. A whole-tree text-search assertion applied to either label
+ * therefore passes on ANY render regardless of whether the field's actual
+ * current audience is shown — this exact vacuity is what let the original
+ * defect ship with a green suite (46-VERIFICATION.md gap-2, 46-REVIEW.md
+ * CR-02).
+ *
+ * Every current-audience assertion below MUST resolve through
+ * `findJsonNodeByTestID(tr.toJSON(), 'disclosure-current-audience-Address')`
+ * and assert against `JSON.stringify` of THAT node only — never the whole
+ * tree. Do not reach for the whole-tree text helper to check an audience
+ * value; scope it to the current-audience subtree instead.
+ */
+
+describe('DisclosurePolicySection — current-audience legibility (46-12 gap closure)', () => {
+  it('current-audience subtree shows Everyone and NEITHER District NOR Not-set, when audience is everyone', () => {
+    const { tr } = renderSection({
+      fields: [SELECTIVE_FIELD],
+      disclosures: [{ electionId: 'e1', fieldName: 'Address', audience: 'everyone' }],
+    });
+
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'disclosure-current-audience-Address');
+    expect(currentNode).not.toBeNull();
+    const currentJson = JSON.stringify(currentNode);
+
+    expect(currentJson).toContain('registrationPolicyAudienceEveryone');
+    expect(currentJson).not.toContain('registrationPolicyAudienceDistrict');
+    expect(currentJson).not.toContain('registrationPolicyAudienceNotSet');
+  });
+
+  it('current-audience subtree shows District and NOT Everyone, when both D-03 legs are open and audience is district', () => {
+    const { tr } = renderSection({
+      fields: [SELECTIVE_FIELD, DISTRICT_FIELD],
+      hasDistrictedBallot: true,
+      disclosures: [{ electionId: 'e1', fieldName: 'Address', audience: 'district' }],
+    });
+
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'disclosure-current-audience-Address');
+    const currentJson = JSON.stringify(currentNode);
+
+    expect(currentJson).toContain('registrationPolicyAudienceDistrict');
+    expect(currentJson).not.toContain('registrationPolicyAudienceEveryone');
+  });
+
+  it('current-audience subtree shows Not-set when no disclosure row exists for the field', () => {
+    const { tr } = renderSection({ fields: [SELECTIVE_FIELD], disclosures: [] });
+
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'disclosure-current-audience-Address');
+    const currentJson = JSON.stringify(currentNode);
+
+    expect(currentJson).toContain('registrationPolicyAudienceNotSet');
+  });
+
+  it('exactly one chip carries the check glyph — the one matching the current audience (or neither, when unset)', () => {
+    const everyoneSelected = renderSection({
+      fields: [SELECTIVE_FIELD, DISTRICT_FIELD],
+      hasDistrictedBallot: true,
+      disclosures: [{ electionId: 'e1', fieldName: 'Address', audience: 'everyone' }],
+    });
+    expect(checkGlyphCount(everyoneSelected.tr, 'disclosure-audience-Address-everyone')).toBe(1);
+    expect(checkGlyphCount(everyoneSelected.tr, 'disclosure-audience-Address-district')).toBe(0);
+
+    const districtSelected = renderSection({
+      fields: [SELECTIVE_FIELD, DISTRICT_FIELD],
+      hasDistrictedBallot: true,
+      disclosures: [{ electionId: 'e1', fieldName: 'Address', audience: 'district' }],
+    });
+    expect(checkGlyphCount(districtSelected.tr, 'disclosure-audience-Address-everyone')).toBe(0);
+    expect(checkGlyphCount(districtSelected.tr, 'disclosure-audience-Address-district')).toBe(1);
+
+    const unset = renderSection({
+      fields: [SELECTIVE_FIELD, DISTRICT_FIELD],
+      hasDistrictedBallot: true,
+      disclosures: [],
+    });
+    expect(checkGlyphCount(unset.tr, 'disclosure-audience-Address-everyone')).toBe(0);
+    expect(checkGlyphCount(unset.tr, 'disclosure-audience-Address-district')).toBe(0);
+  });
+
+  it('D-10 read-only officer (canWrite=false) sees the same current-audience text and the same selected-chip marker', () => {
+    const { tr } = renderSection({
+      fields: [SELECTIVE_FIELD],
+      disclosures: [{ electionId: 'e1', fieldName: 'Address', audience: 'everyone' }],
+      canWrite: false,
+    });
+
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'disclosure-current-audience-Address');
+    const currentJson = JSON.stringify(currentNode);
+    expect(currentJson).toContain('registrationPolicyAudienceEveryone');
+    expect(currentJson).not.toContain('registrationPolicyAudienceNotSet');
+
+    expect(checkGlyphCount(tr, 'disclosure-audience-Address-everyone')).toBe(1);
+  });
+
+  it('WR-01 case-skew: a disclosure row stored lower-cased resolves to the real audience, not Not-set, and Remove is present', () => {
+    const { tr } = renderSection({
+      fields: [SELECTIVE_FIELD],
+      disclosures: [{ electionId: 'e1', fieldName: 'address', audience: 'everyone' }],
+    });
+
+    const currentNode = findJsonNodeByTestID(tr.toJSON(), 'disclosure-current-audience-Address');
+    const currentJson = JSON.stringify(currentNode);
+    expect(currentJson).toContain('registrationPolicyAudienceEveryone');
+    expect(currentJson).not.toContain('registrationPolicyAudienceNotSet');
+
+    expect(() => tr.root.findByProps({ testID: 'disclosure-remove-Address' })).not.toThrow();
   });
 });
