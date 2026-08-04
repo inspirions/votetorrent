@@ -1023,3 +1023,63 @@ describe("RegistrationPolicyScreen — gap 1 (CR-01 stored-casing disclosure del
     expect(remaining).toEqual([]);
   });
 });
+
+describe("RegistrationPolicyScreen — gap 2 (CR-02 in-flight double-press guard, 46-16)", () => {
+  it("screen level, picker chip: double-pressing while its add is in flight fires addElectionRegistrationField exactly once (PROBE B)", async () => {
+    // Replaces the implementation entirely (unlike spyWrites) so the mock's
+    // state stops mutating — that is intended: the write must stay in flight.
+    const addSpy = jest
+      .spyOn(mockRegistrationEngine, "addElectionRegistrationField")
+      .mockImplementation(() => new Promise<void>(() => {}));
+
+    const tr = await renderScreen();
+
+    // Explicit flush between presses (beyond press()'s own internal flush) so
+    // the screen's createDeviceSigner -> getEngine -> add chain is genuinely
+    // mid-flight and loadPolicy() has not re-run.
+    await press(tr, "registration-field-picker-lastname");
+    await flushTicks(6);
+    await press(tr, "registration-field-picker-lastname");
+    await flushTicks(6);
+
+    expect(addSpy).toHaveBeenCalledTimes(1);
+    expect(addSpy.mock.calls[0]![0]).toEqual({
+      electionId: "test-election",
+      fieldName: "LastName",
+      tier: "public",
+      requirement: "required",
+    });
+  });
+
+  it("screen level, Issues-card repair chip: double-pressing while its repair is in flight fires removeElectionDisclosurePolicy exactly once (PROBE A)", async () => {
+    // An orphan disclosure with no matching field, so the Policy Issues card
+    // renders registration-policy-issue-orphan-ZipCode.
+    await seedDisclosure(mockRegistrationEngine, { fieldName: "ZipCode", audience: "everyone" });
+
+    // Stub ONLY removeElectionDisclosurePolicy. After 46-15 the repair path
+    // first performs a getElectionDisclosurePolicies read inside the op to
+    // resolve the stored PK casing — leaving that read intact is required, or
+    // the resolver returns undefined and the delete is legitimately skipped
+    // (which would make this test vacuous).
+    const removeSpy = jest
+      .spyOn(mockRegistrationEngine, "removeElectionDisclosurePolicy")
+      .mockImplementation(() => new Promise<void>(() => {}));
+
+    const tr = await renderScreen();
+    present(tr, "registration-policy-issue-orphan-ZipCode");
+
+    await press(tr, "registration-policy-issue-repair-remove-ZipCode");
+    await flushTicks(6);
+    await press(tr, "registration-policy-issue-repair-remove-ZipCode");
+    await flushTicks(6);
+
+    expect(removeSpy).toHaveBeenCalledTimes(1);
+
+    // Subtree-scoped, per the anti-vacuity rule: prove the repair really is
+    // in flight (the guard is being exercised in its intended state), not
+    // that the test accidentally proves nothing.
+    const statusNode = findJsonNodeByTestID(tr.toJSON(), "registration-policy-issue-status-ZipCode");
+    const statusJson = JSON.stringify(statusNode);
+    expect(statusJson).toContain("registrationPolicyRowSaving");
+  });
+});

@@ -399,6 +399,18 @@ export default function RegistrationPolicyScreen() {
 	 * status map. There is no "saved" branch — see the state declaration comment above.
 	 */
 	async function runIssueWrite(fieldName: string, op: () => Promise<void>) {
+		// CR-02 (46-VERIFICATION.md gap 2 / 46-REVIEW.md, closed by 46-16): the
+		// Issues card's repair chips, unlike the section rows, stay rendered and
+		// live during a write — only a "Saving…" label is added alongside — so
+		// the handler is the only place a double press can be stopped. Without
+		// this guard, a double press fires `op` twice; against the real
+		// engine's plain `insert into`/exact-match-delete PK behaviour the
+		// second call is either a violation or a throw-on-missing-row, and the
+		// officer is told a repair failed that actually succeeded.
+		// handleRetryIssue is unaffected: a failed repair leaves the status at
+		// "error", not "saving". No success branch is added here — that is
+		// WR-03, deliberately out of scope.
+		if (issueStatus[fieldName] === "saving") return;
 		setIssueStatus((prev) => ({ ...prev, [fieldName]: "saving" }));
 		try {
 			await op();
