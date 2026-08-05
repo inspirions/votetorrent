@@ -511,17 +511,31 @@ async function reattachSummary(
  * FATAL —` with the error MESSAGE only and swallowing it, so a seed failure
  * can never take down the app's boot path (the `signing-proof-runner.ts`
  * convention).
+ *
+ * `createSign` is a LAZY FACTORY, not a resolved signer, and that is the whole
+ * point of its shape. `createDeviceSigner` reads the device's raw secp256k1
+ * PRIVATE KEY out of AsyncStorage and throws when the device user is missing
+ * or its stored blob is corrupt. Taking a resolved `SignCallback` forced the
+ * caller to do both of those things on EVERY cold start — including release
+ * builds, where this function is guaranteed to no-op — and a throw there
+ * landed in AppProvider's re-attach catch, blanking a perfectly good network
+ * behind "Failed to load network". Deferring the call to after the gate means
+ * release builds never touch the private key for this fixture, and a signer
+ * failure in dev is caught below as a seed failure, which is what it is.
  */
 export async function maybeSeedRegistrantFixtures(
 	networksEngine: NetworksEngine,
 	networkRef: NetworkReference,
 	user: User,
-	sign: SignCallback,
+	createSign: () => Promise<SignCallback>,
 ): Promise<void> {
 	if (!(__DEV__ && REGISTRANT_SEED_ENABLED)) {
 		return
 	}
 	try {
+		// Inside the try on purpose: a createSign() rejection is a seed failure,
+		// not a boot failure.
+		const sign = await createSign()
 		await seedRegistrantFixtures(networksEngine, networkRef, user, sign)
 	} catch (err) {
 		console.log('[seed] FATAL —', err instanceof Error ? err.message : String(err))

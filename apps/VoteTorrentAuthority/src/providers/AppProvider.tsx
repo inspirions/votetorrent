@@ -171,8 +171,16 @@ export function AppProvider({ children }: PropsWithChildren) {
 						// exactly one Quereus context ever touches the store (the factory's
 						// own), matching the voter app's VoterAppProvider precedent for the
 						// same placement.
-						const seedSign = await createDeviceSigner(user.name);
-						await maybeSeedRegistrantFixtures(networksEng, network, user, seedSign);
+						// A LAZY factory, never a resolved signer: createDeviceSigner reads
+						// the device private key out of AsyncStorage and throws when the
+						// device user is absent/corrupt. Resolving it here ran that read on
+						// every release cold start for a call that always no-ops, and let a
+						// signer failure abort a SUCCESSFUL re-attach into "Failed to load
+						// network". maybeSeedRegistrantFixtures now invokes this only after
+						// its own __DEV__/flag gate, inside its own try/catch.
+						await maybeSeedRegistrantFixtures(networksEng, network, user, () =>
+							createDeviceSigner(user.name),
+						);
 						// Pitfall 4: setHasNetwork is called by AppProvider (not the factory).
 						setHasNetwork(true);
 						// RE-ATTACH FIX: clear any initError from a previous failed attempt so

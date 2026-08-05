@@ -58,6 +58,17 @@ function throwingSign(): (digest: Uint8Array) => Promise<Signature> {
 	}) as unknown as (digest: Uint8Array) => Promise<Signature>
 }
 
+/**
+ * A signer FACTORY that throws when invoked — the stand-in for
+ * `createDeviceSigner`, which really does throw when the device user is
+ * missing or its stored key blob is corrupt.
+ */
+function throwingSignFactory(): () => Promise<(digest: Uint8Array) => Promise<Signature>> {
+	return () => {
+		throw new Error('createSign should not be called')
+	}
+}
+
 // Mocks RegistrationEngine/AssociationEngine so the completion-marker
 // regression test below can observe how far seedRegistrantFixtures
 // progresses without touching a real Quereus DB or a real signing ceremony.
@@ -168,11 +179,71 @@ describe('registrant-dev-seed — Phase 47-23 Task 1 static contract', () => {
 		const networksEngine = throwingStub<NetworksEngine>('networksEngine')
 		const networkRef = throwingStub<NetworkReference>('networkRef')
 		const user = throwingStub<User>('user')
-		const sign = throwingSign()
+		const createSign = throwingSignFactory()
 
 		// REGISTRANT_SEED_ENABLED is false in the committed tree — this must
 		// resolve without ever touching any of the four throwing stubs above.
-		await expect(maybeSeedRegistrantFixtures(networksEngine, networkRef, user, sign)).resolves.toBeUndefined()
+		await expect(
+			maybeSeedRegistrantFixtures(networksEngine, networkRef, user, createSign),
+		).resolves.toBeUndefined()
+	})
+
+	it('the gated-off path never INVOKES the signer factory (the release boot-path lock)', async () => {
+		// The defect this locks: AppProvider resolved `createDeviceSigner(...)`
+		// BEFORE calling this gate, so every release cold start read the device's
+		// secp256k1 private key out of AsyncStorage for a call that always
+		// no-ops — and a throw from it (missing/corrupt device user) surfaced as
+		// the blocking "Failed to load network" screen even though the network
+		// re-attach had SUCCEEDED. Passing a lazy factory moves that work behind
+		// the gate; this asserts it is never called.
+		const createSign = jest.fn(async () => throwingSign())
+
+		await maybeSeedRegistrantFixtures(
+			throwingStub<NetworksEngine>('networksEngine'),
+			throwingStub<NetworkReference>('networkRef'),
+			throwingStub<User>('user'),
+			createSign,
+		)
+
+		expect(createSign).not.toHaveBeenCalled()
+	})
+
+	it('with the gate OPEN, a signer-factory rejection is swallowed, never rethrown at the caller', async () => {
+		// The second half of the same defect: once the gate is open, a
+		// createDeviceSigner rejection still must not escape into AppProvider's
+		// re-attach catch, where it rendered "Failed to load network" over a
+		// network that had opened fine. Re-imports the module with
+		// REGISTRANT_SEED_ENABLED forced true so the gate is genuinely open —
+		// the previous test only proves the closed path.
+		const createSign = jest.fn(async (): Promise<(digest: Uint8Array) => Promise<Signature>> => {
+			throw new Error('Device user not initialised — cannot sign')
+		})
+
+		let gatedSeed: typeof maybeSeedRegistrantFixtures = maybeSeedRegistrantFixtures
+		jest.isolateModules(() => {
+			jest.doMock('../proof-flags.generated', () => ({
+				...jest.requireActual('../proof-flags.generated'),
+				REGISTRANT_SEED_ENABLED: true,
+			}))
+			// eslint-disable-next-line @typescript-eslint/no-var-requires
+			gatedSeed = require('../registrant-dev-seed').maybeSeedRegistrantFixtures
+		})
+
+		try {
+			await expect(
+				gatedSeed(
+					throwingStub<NetworksEngine>('networksEngine'),
+					throwingStub<NetworkReference>('networkRef'),
+					throwingStub<User>('user'),
+					createSign,
+				),
+			).resolves.toBeUndefined()
+			// The factory WAS reached this time — otherwise the assertion above
+			// would pass vacuously, exactly as it would with the gate closed.
+			expect(createSign).toHaveBeenCalledTimes(1)
+		} finally {
+			jest.dontMock('../proof-flags.generated')
+		}
 	})
 
 	it('seedRegistrantFixtures throws outside __DEV__', async () => {
