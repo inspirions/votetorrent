@@ -60,6 +60,18 @@ const REGISTRANTS_PAGE_SIZE = 25;
  *
  * Returns `prev` by identity when nothing new appeared, so a page of
  * already-known districts does not force a re-render.
+ *
+ * KNOWN AND ACCEPTED (47-REVIEW IN-01): because this only ever widens, the
+ * set is monotonic for the screen's whole lifetime. A district discovered
+ * under one status filter stays offered after that filter is cleared and after
+ * a name search narrows the roster, so tapping it can yield an empty page.
+ * That is deliberate — the two alternatives are both worse. Pruning to the
+ * currently-loaded rows reintroduces the erasure IN-05 removed (the officer
+ * loses the chip they are standing on, with no way back, since no engine
+ * surface enumerates an authority's districts). De-emphasising an
+ * out-of-context chip needs a new visual state and a new i18n key on a screen
+ * this phase keeps purely additive. An empty page is legible and recoverable;
+ * a vanished chip is neither. Do NOT "fix" this into a replace.
  */
 function widenDistrictOptions(
 	prev: string[],
