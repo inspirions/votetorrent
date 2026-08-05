@@ -21,6 +21,17 @@ import renderer from "react-test-renderer";
 import fs from "fs";
 import path from "path";
 
+// Rendering the REAL RootNavigator eagerly loads every screen module in the
+// app, so the FIRST test in this file pays the whole module-graph cost. Run
+// alone that fits inside Jest's 5s default; run as part of the full suite,
+// competing with the other workers, it does not — this file and its Suite B
+// sibling were the only two that intermittently timed out under full-suite
+// load (observed 2026-08-05: RED in one full run, GREEN in the next, GREEN
+// 18/18 in isolation). A timeout-flaky navigator proof is worse than a slow
+// one: the gate can no longer tell a real route regression from scheduler
+// noise. Raised deliberately rather than by shortening the render.
+jest.setTimeout(30_000);
+
 jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
 
 // navigation/index.tsx eagerly imports every screen module (including
