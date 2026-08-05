@@ -154,7 +154,26 @@ export function AssociationsSection({
 
 	const load = useCallback(async () => {
 		setDataLoading(true);
-		const engine = await getEngine<IAssociationEngine>("association");
+
+		// Inside a try, mirroring AttestationChallengesSection.load(). getEngine
+		// reaches EngineFactory.buildEngine → requireEstablishedCtx(), which
+		// throws NoNetworkEstablishedError when the network context is absent or
+		// has just been switched. Outside the try, that rejection escaped load()
+		// into `useEffect(() => { load(); })` — a floating promise with no
+		// .catch — producing an unhandled rejection, dataLoading stuck at true,
+		// and no InlineError telling the officer anything went wrong.
+		let engine: IAssociationEngine;
+		try {
+			engine = await getEngine<IAssociationEngine>("association");
+		} catch (err) {
+			if (!unmountedRef.current) {
+				setAssociations([]);
+				setVerdictMap(undefined);
+				setErrorMessage(err instanceof Error ? err.message : String(err));
+				setDataLoading(false);
+			}
+			return;
+		}
 
 		// Associations — independent try/catch #1.
 		let rows: Association[] = [];

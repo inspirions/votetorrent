@@ -646,4 +646,40 @@ describe("AssociationsSection — D-03/D-10/D-13", () => {
 		expect(() => tr.root.findByProps({ testID: "association-row-0" })).not.toThrow();
 		expect(() => tr.root.findByProps({ testID: "association-row-1" })).not.toThrow();
 	});
+
+	// -------------------------------------------------------------------------
+	// getEngine failure inside load()
+	// -------------------------------------------------------------------------
+
+	test("25: a getEngine failure surfaces InlineError and clears loading, with no unhandled rejection", async () => {
+		// The defect: `const engine = await getEngine(...)` sat OUTSIDE both try
+		// blocks in load(). getEngine → EngineFactory.buildEngine →
+		// requireEstablishedCtx() throws NoNetworkEstablishedError whenever the
+		// network context is absent or has just been switched, and load()'s only
+		// caller is `useEffect(() => { load(); })` — a floating promise with no
+		// .catch. The rejection escaped as an unhandled rejection while the
+		// section sat on "Loading…" forever with no message.
+		const unhandled: unknown[] = [];
+		const onUnhandled = (err: unknown) => unhandled.push(err);
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			mockGetEngine.mockImplementation(async (name: string): Promise<any> => {
+				if (name === "association") throw new Error("Network not established");
+				if (name === "network") return mockNetworkEngine;
+				return null;
+			});
+
+			const tr = await renderSection();
+			// Drain the macrotask queue so a genuinely unhandled rejection would
+			// have been reported by now.
+			await new Promise((resolve) => setImmediate(resolve));
+
+			expect(treeText(tr)).toContain("Network not established");
+			expect(() => tr.root.findByProps({ testID: "associations-loading" })).toThrow();
+			expect(() => tr.root.findByProps({ testID: "association-row-0" })).toThrow();
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
 });
