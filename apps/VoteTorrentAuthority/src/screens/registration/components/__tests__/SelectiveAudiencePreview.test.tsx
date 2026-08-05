@@ -78,24 +78,26 @@ function findJsonNodeByTestID(node: unknown, testID: string): unknown {
 function checkGlyphCount(tr: renderer.ReactTestRenderer, testID: string): number {
 	const wrapper = tr.root.findByProps({ testID });
 	return wrapper.findAll(
-		node => node.type === ("FontAwesome6" as never) && node.props.name === "check",
+		(node) => node.type === ("FontAwesome6" as never) && node.props.name === "check"
 	).length;
 }
 
 function press(tr: renderer.ReactTestRenderer, testID: string) {
 	const wrapper = tr.root.findByProps({ testID });
-	const pressable = wrapper.findAll(node => typeof node.props.onPress === "function")[0];
+	const pressable = wrapper.findAll((node) => typeof node.props.onPress === "function")[0];
 	renderer.act(() => {
 		pressable.props.onPress();
 	});
 }
 
-function renderPreview(overrides: {
-	leaves?: SelectiveLeaf[];
-	selectedAudience?: "everyone" | "district";
-	disclosure?: DisclosedSelective | null;
-	onSelectAudience?: jest.Mock;
-} = {}) {
+function renderPreview(
+	overrides: {
+		leaves?: SelectiveLeaf[];
+		selectedAudience?: "everyone" | "district";
+		disclosure?: DisclosedSelective | null;
+		onSelectAudience?: jest.Mock;
+	} = {}
+) {
 	const onSelectAudience = overrides.onSelectAudience ?? jest.fn();
 	const leaves = overrides.leaves ?? LEAVES;
 
@@ -107,7 +109,7 @@ function renderPreview(overrides: {
 				selectedAudience={overrides.selectedAudience}
 				disclosure={overrides.disclosure}
 				onSelectAudience={onSelectAudience}
-			/>,
+			/>
 		);
 	});
 	return { tr, onSelectAudience };
@@ -129,9 +131,9 @@ describe("SelectiveAudiencePreview — D-12", () => {
 		expect(treeContainsText(tr, "555-0100")).toBe(true);
 
 		const eyeNodes = tr.root.findAll(
-			node =>
+			(node) =>
 				node.type === ("FontAwesome6" as never) &&
-				(node.props.name === "eye" || node.props.name === "eye-slash"),
+				(node.props.name === "eye" || node.props.name === "eye-slash")
 		);
 		expect(eyeNodes).toHaveLength(0);
 		expect(treeContainsText(tr, "registrantDetailPrivateMaskedValue")).toBe(false);
@@ -227,12 +229,16 @@ describe("SelectiveAudiencePreview — D-12", () => {
 		expect(() => tr.root.findByProps({ testID: "selective-field-row-Email" })).not.toThrow();
 		expect(() => tr.root.findByProps({ testID: "selective-field-row-Phone" })).not.toThrow();
 
-		const addressJson = JSON.stringify(findJsonNodeByTestID(tr.toJSON(), "selective-field-disclosure-Address"));
+		const addressJson = JSON.stringify(
+			findJsonNodeByTestID(tr.toJSON(), "selective-field-disclosure-Address")
+		);
 		expect(addressJson).toContain("registrantDetailSelectiveDisclosedLabel");
 		expect(addressJson).not.toContain("registrantDetailSelectiveNotDisclosedLabel");
 
 		for (const name of ["Email", "Phone"]) {
-			const json = JSON.stringify(findJsonNodeByTestID(tr.toJSON(), `selective-field-disclosure-${name}`));
+			const json = JSON.stringify(
+				findJsonNodeByTestID(tr.toJSON(), `selective-field-disclosure-${name}`)
+			);
 			expect(json).toContain("registrantDetailSelectiveNotDisclosedLabel");
 			expect(json).not.toContain("registrantDetailSelectiveDisclosedLabel");
 		}
@@ -241,29 +247,93 @@ describe("SelectiveAudiencePreview — D-12", () => {
 	it("disclosure === null annotates every row as not-disclosed; disclosure === undefined annotates none", () => {
 		const nullDisclosure = renderPreview({ disclosure: null });
 		for (const name of ["Address", "Email", "Phone"]) {
-			expect(() => nullDisclosure.tr.root.findByProps({ testID: `selective-field-disclosure-${name}` })).not.toThrow();
-			const json = JSON.stringify(findJsonNodeByTestID(nullDisclosure.tr.toJSON(), `selective-field-disclosure-${name}`));
+			expect(() =>
+				nullDisclosure.tr.root.findByProps({ testID: `selective-field-disclosure-${name}` })
+			).not.toThrow();
+			const json = JSON.stringify(
+				findJsonNodeByTestID(nullDisclosure.tr.toJSON(), `selective-field-disclosure-${name}`)
+			);
 			expect(json).toContain("registrantDetailSelectiveNotDisclosedLabel");
 		}
 
 		const undefinedDisclosure = renderPreview({ disclosure: undefined });
 		for (const name of ["Address", "Email", "Phone"]) {
-			expect(() => undefinedDisclosure.tr.root.findByProps({ testID: `selective-field-disclosure-${name}` })).toThrow();
-			expect(() => undefinedDisclosure.tr.root.findByProps({ testID: `selective-field-row-${name}` })).not.toThrow();
+			expect(() =>
+				undefinedDisclosure.tr.root.findByProps({ testID: `selective-field-disclosure-${name}` })
+			).toThrow();
+			expect(() =>
+				undefinedDisclosure.tr.root.findByProps({ testID: `selective-field-row-${name}` })
+			).not.toThrow();
 		}
 	});
 
-	it("disclosed-name matching is case-folded", () => {
-		const disclosure: DisclosedSelective = {
+	// 47-REVIEW IN-08. This previously asserted the OPPOSITE ("matching is
+	// case-folded"), which made the preview claim a disclosure the engine had
+	// not made. `getDisclosedSelective` matches policy FieldName to leaf name
+	// EXACTLY, and both sides of this component's comparison are the same
+	// RegistrantSelective leaf names read twice — so a fold here can only
+	// diverge from the engine, never agree with it more often.
+	it("disclosed-name matching is EXACT, never case-folded — the engine's own rule", () => {
+		const foldOnly: DisclosedSelective = {
 			cid: "cid1",
 			root: "root1",
+			// Differs from the "Address" leaf in case alone. The engine could not
+			// have produced this for that leaf; the preview must not claim it did.
 			disclosed: [{ name: "address", value: "12 Elm St", salt: "SALT_SENTINEL_ADDRESS" }],
 			hidden: [],
 		};
-		const { tr } = renderPreview({ disclosure });
-		const json = JSON.stringify(findJsonNodeByTestID(tr.toJSON(), "selective-field-disclosure-Address"));
-		expect(json).toContain("registrantDetailSelectiveDisclosedLabel");
-		expect(json).not.toContain("registrantDetailSelectiveNotDisclosedLabel");
+		const foldJson = JSON.stringify(
+			findJsonNodeByTestID(
+				renderPreview({ disclosure: foldOnly }).tr.toJSON(),
+				"selective-field-disclosure-Address"
+			)
+		);
+		expect(foldJson).toContain("registrantDetailSelectiveNotDisclosedLabel");
+		expect(foldJson).not.toContain("registrantDetailSelectiveDisclosedLabel");
+
+		// The exact name still matches, so this is a tightening, not a break.
+		const exact: DisclosedSelective = {
+			cid: "cid1",
+			root: "root1",
+			disclosed: [{ name: "Address", value: "12 Elm St", salt: "SALT_SENTINEL_ADDRESS" }],
+			hidden: [],
+		};
+		const exactJson = JSON.stringify(
+			findJsonNodeByTestID(
+				renderPreview({ disclosure: exact }).tr.toJSON(),
+				"selective-field-disclosure-Address"
+			)
+		);
+		expect(exactJson).toContain("registrantDetailSelectiveDisclosedLabel");
+		expect(exactJson).not.toContain("registrantDetailSelectiveNotDisclosedLabel");
+	});
+
+	it("IN-08: two leaves differing only in case are annotated independently — one Disclosed, one not", () => {
+		// The concrete false-claim the fold produced: the engine discloses ONE of
+		// these, the folded preview marked BOTH.
+		const leaves: SelectiveLeaf[] = [
+			{ name: "Party", value: "Green", salt: "SALT_SENTINEL_PARTY_UPPER" },
+			{ name: "party", value: "Blue", salt: "SALT_SENTINEL_PARTY_LOWER" },
+		];
+		const disclosure: DisclosedSelective = {
+			cid: "cid1",
+			root: "root1",
+			disclosed: [{ name: "Party", value: "Green", salt: "SALT_SENTINEL_PARTY_UPPER" }],
+			hidden: [],
+		};
+		const { tr } = renderPreview({ leaves, disclosure });
+
+		const upper = JSON.stringify(
+			findJsonNodeByTestID(tr.toJSON(), "selective-field-disclosure-Party")
+		);
+		expect(upper).toContain("registrantDetailSelectiveDisclosedLabel");
+		expect(upper).not.toContain("registrantDetailSelectiveNotDisclosedLabel");
+
+		const lower = JSON.stringify(
+			findJsonNodeByTestID(tr.toJSON(), "selective-field-disclosure-party")
+		);
+		expect(lower).toContain("registrantDetailSelectiveNotDisclosedLabel");
+		expect(lower).not.toContain("registrantDetailSelectiveDisclosedLabel");
 	});
 
 	it("empty leaves render the no-selective-tier copy and zero field rows", () => {

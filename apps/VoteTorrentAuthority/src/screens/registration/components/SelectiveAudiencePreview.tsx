@@ -48,9 +48,9 @@ export interface RenderableSelectiveField {
  * rather than dereferencing a leaf directly.
  */
 export function toRenderableLeaves(leaves: readonly SelectiveLeaf[]): RenderableSelectiveField[] {
-	return leaves.map(leaf => {
+	return leaves.map((leaf) => {
 		const filtered = Object.fromEntries(
-			Object.entries(leaf).filter(([key]) => !SALT_KEY_PATTERN.test(key)),
+			Object.entries(leaf).filter(([key]) => !SALT_KEY_PATTERN.test(key))
 		) as { name: string; value: string | number | boolean };
 		return { name: filtered.name, value: String(filtered.value) };
 	});
@@ -74,17 +74,33 @@ export function SelectiveAudiencePreview({
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 
-	// Case-folded, matching findDisclosureForField's rationale in this same
-	// domain (an ElectionDisclosurePolicy/disclosed-leaf name can be stored
-	// under a differently-cased fieldName). Only disclosure.disclosed[].name
-	// is read here — disclosure.hidden is never dereferenced.
-	const disclosedNames = new Set((disclosure?.disclosed ?? []).map(l => l.name.toLowerCase()));
+	// EXACT match, deliberately NOT case-folded (47-REVIEW IN-08). Both sides
+	// of this comparison originate from the SAME RegistrantSelective row:
+	// `leaves` is its SelectiveDetails, and `disclosure.disclosed` is the
+	// subset of those very leaves that `getDisclosedSelective` -> `setDisclose`
+	// returned, carrying each leaf's `name` through verbatim. The engine's own
+	// policy match is exact, so case-folding here could only ever DIVERGE from
+	// it — a registrant holding two leaves differing only in case ("party" and
+	// "Party") rendered BOTH as Disclosed when the engine disclosed one. On a
+	// preview whose entire job is showing the officer the true disclosure
+	// delta, that is a false claim about what the audience receives.
+	//
+	// This is NOT findDisclosureForField's situation: that helper folds case
+	// because it matches an operator-typed ElectionDisclosurePolicy.FieldName
+	// against a leaf name — two independently-authored strings. Here there is
+	// only one string, read twice.
+	//
+	// Only disclosure.disclosed[].name is read — disclosure.hidden is never
+	// dereferenced.
+	const disclosedNames = new Set((disclosure?.disclosed ?? []).map((l) => l.name));
 
 	const renderableFields = toRenderableLeaves(leaves);
 
 	return (
 		<View testID="selective-audience-preview" style={styles.section}>
-			<ThemedText type="defaultSemiBold">{t("registrantDetailSelectiveAudiencePreviewTitle")}</ThemedText>
+			<ThemedText type="defaultSemiBold">
+				{t("registrantDetailSelectiveAudiencePreviewTitle")}
+			</ThemedText>
 			<ThemedText type="small" style={{ color: colors.textSecondary }}>
 				{t("registrantDetailSelectiveAudiencePreviewHint")}
 			</ThemedText>
@@ -122,16 +138,21 @@ export function SelectiveAudiencePreview({
 					</ThemedText>
 				</View>
 			) : (
-				renderableFields.map(field => {
+				renderableFields.map((field) => {
 					// disclosure === null means every row is not-disclosed;
 					// disclosure === undefined means no audience chosen yet (or
 					// a fetch is in flight) — no annotation rendered at all.
-					const isDisclosed = disclosure !== undefined && disclosure !== null
-						? disclosedNames.has(field.name.toLowerCase())
-						: false;
+					const isDisclosed =
+						disclosure !== undefined && disclosure !== null
+							? disclosedNames.has(field.name)
+							: false;
 
 					return (
-						<View testID={`selective-field-row-${field.name}`} key={field.name} style={localStyles.propertyRow}>
+						<View
+							testID={`selective-field-row-${field.name}`}
+							key={field.name}
+							style={localStyles.propertyRow}
+						>
 							<ThemedText type="defaultSemiBold" style={localStyles.propertyName}>
 								{field.name}:{" "}
 							</ThemedText>
@@ -146,11 +167,16 @@ export function SelectiveAudiencePreview({
 							 * destroys the entire purpose of D-12.
 							 */}
 							{disclosure !== undefined && (
-								<View testID={`selective-field-disclosure-${field.name}`} style={localStyles.disclosureBadge}>
+								<View
+									testID={`selective-field-disclosure-${field.name}`}
+									style={localStyles.disclosureBadge}
+								>
 									{isDisclosed ? (
 										<>
 											<FontAwesome6 name="check" size={14} color={colors.success} />
-											<ThemedText type="small">{t("registrantDetailSelectiveDisclosedLabel")}</ThemedText>
+											<ThemedText type="small">
+												{t("registrantDetailSelectiveDisclosedLabel")}
+											</ThemedText>
 										</>
 									) : (
 										<>
