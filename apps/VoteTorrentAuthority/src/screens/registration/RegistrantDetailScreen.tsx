@@ -25,7 +25,12 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import type { SignCallback } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
-import { REGISTRANT_STATUS_META, formatExpirationDate, registrantDisplayName, truncateId } from "./registrant-display";
+import {
+	REGISTRANT_STATUS_META,
+	formatExpirationDate,
+	registrantDisplayName,
+	truncateId,
+} from "./registrant-display";
 import {
 	LIFECYCLE_ACTIONS,
 	availableLifecycleActions,
@@ -97,7 +102,10 @@ export default function RegistrantDetailScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
-	const { registrantId, authorityId } = useRoute().params as { registrantId: string; authorityId: string };
+	const { registrantId, authorityId } = useRoute().params as {
+		registrantId: string;
+		authorityId: string;
+	};
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 
 	useLayoutEffect(() => {
@@ -122,7 +130,9 @@ export default function RegistrantDetailScreen() {
 	const [errorMessage, setErrorMessage] = useState("");
 	const [pendingAction, setPendingAction] = useState<LifecycleActionId | undefined>(undefined);
 	const [renewalExpiration, setRenewalExpiration] = useState("");
-	const [selectedAudience, setSelectedAudience] = useState<DisclosureAudience | undefined>(undefined);
+	const [selectedAudience, setSelectedAudience] = useState<DisclosureAudience | undefined>(
+		undefined
+	);
 	const [disclosure, setDisclosure] = useState<DisclosedSelective | null | undefined>(undefined);
 
 	// CR-02 guard against a stale setState after unmount, copied from
@@ -221,7 +231,7 @@ export default function RegistrantDetailScreen() {
 			// from this call, and a second swallow here would be a place a
 			// future edit could put a log line.
 		},
-		[getEngine, registrantId],
+		[getEngine, registrantId]
 	);
 
 	const visit = useAccessTrailVisit(recordVisit);
@@ -287,10 +297,11 @@ export default function RegistrantDetailScreen() {
 				// Leave disclosure at undefined — NEVER annotate off a failed
 				// fetch, since annotating every row Not-disclosed after a failure
 				// would be a false claim about the disclosure policy.
-				if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+				if (!unmountedRef.current)
+					setErrorMessage(err instanceof Error ? err.message : String(err));
 			}
 		},
-		[getEngine, registrantId],
+		[getEngine, registrantId]
 	);
 
 	// D-10 lifecycle wiring.
@@ -357,7 +368,8 @@ export default function RegistrantDetailScreen() {
 		// suspend/revoke grouping) is observable here without a second edit.
 
 		if (pendingAction === "renew") {
-			const hasValidExpiration = renewalExpiration.length > 0 && !isNaN(new Date(renewalExpiration).getTime());
+			const hasValidExpiration =
+				renewalExpiration.length > 0 && !isNaN(new Date(renewalExpiration).getTime());
 			if (!hasValidExpiration) return null;
 			return (
 				<LifecycleConfirmCard
@@ -365,7 +377,10 @@ export default function RegistrantDetailScreen() {
 					tone={meta.tone}
 					testIDPrefix={testIDPrefix}
 					title={t(meta.titleKey)}
-					body={t(meta.bodyKey, { name: displayName, newExpiration: formatExpirationDate(renewalExpiration) })}
+					body={t(meta.bodyKey, {
+						name: displayName,
+						newExpiration: formatExpirationDate(renewalExpiration),
+					})}
 					confirmLabel={t(meta.confirmLabelKey)}
 					dismissLabel={t(meta.dismissLabelKey)}
 					matchText={displayName}
@@ -383,7 +398,10 @@ export default function RegistrantDetailScreen() {
 					tone={meta.tone}
 					testIDPrefix={testIDPrefix}
 					title={t(meta.titleKey)}
-					body={t(meta.bodyKey, { name: displayName, oldStatus: statusMeta ? t(statusMeta.labelKey) : "" })}
+					body={t(meta.bodyKey, {
+						name: displayName,
+						oldStatus: statusMeta ? t(statusMeta.labelKey) : "",
+					})}
 					confirmLabel={t(meta.confirmLabelKey)}
 					dismissLabel={t(meta.dismissLabelKey)}
 					matchText={displayName}
@@ -416,7 +434,10 @@ export default function RegistrantDetailScreen() {
 	const privateRows = flattenPrivateDetails(privateTier?.privateDetails);
 
 	return (
-		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
+		<ScrollView
+			style={styles.container}
+			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+		>
 			<View style={styles.section} testID="registrant-detail-error">
 				<InlineError message={errorMessage} />
 			</View>
@@ -458,14 +479,19 @@ export default function RegistrantDetailScreen() {
 							<>
 								<View
 									testID="registrant-detail-status-pill"
-									style={[pillStyles.pill, { backgroundColor: tintPill(colors[statusMeta.colorKey]) }]}
+									style={[
+										pillStyles.pill,
+										{ backgroundColor: tintPill(colors[statusMeta.colorKey]) },
+									]}
 								>
 									<ThemedText type="smallBold" style={{ color: colors[statusMeta.colorKey] }}>
 										{t(statusMeta.labelKey)}
 									</ThemedText>
 								</View>
 								<ThemedText type="small" testID="registrant-detail-expiration">
-									{t("registrantDetailExpirationLabel") + ": " + formatExpirationDate(String(core.expiration))}
+									{t("registrantDetailExpirationLabel") +
+										": " +
+										formatExpirationDate(String(core.expiration))}
 								</ThemedText>
 								<ThemedText type="small" testID="registrant-detail-signor-key">
 									{t("registrantDetailSignorKeyLabel") + ": " + truncateId(core.signorKey)}
@@ -478,7 +504,9 @@ export default function RegistrantDetailScreen() {
 												<CustomButton
 													size="thin"
 													title={t(meta.buttonLabelKey)}
-													backgroundColor={meta.tone === "destructive" ? colors.error : colors.accent}
+													backgroundColor={
+														meta.tone === "destructive" ? colors.error : colors.accent
+													}
 													disabled={!canWrite}
 													onPress={canWrite ? () => setPendingAction(id) : NOOP}
 												/>
@@ -533,7 +561,11 @@ export default function RegistrantDetailScreen() {
 					</View>
 				) : (
 					publicRows.map((row) => (
-						<View key={row.name} testID={"registrant-detail-public-row-" + row.name} style={localStyles.propertyRow}>
+						<View
+							key={row.name}
+							testID={"registrant-detail-public-row-" + row.name}
+							style={localStyles.propertyRow}
+						>
 							<ThemedText type="defaultSemiBold" style={localStyles.propertyName}>
 								{row.name + ": "}
 							</ThemedText>
@@ -592,7 +624,11 @@ export default function RegistrantDetailScreen() {
 				)}
 			</View>
 
-			<AssociationsSection registrantId={registrantId} authorityId={authorityId} registrantDisplayName={displayName} />
+			<AssociationsSection
+				registrantId={registrantId}
+				authorityId={authorityId}
+				registrantDisplayName={displayName}
+			/>
 
 			<AttestationChallengesSection
 				registrantId={registrantId}
