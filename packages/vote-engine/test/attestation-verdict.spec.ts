@@ -551,5 +551,42 @@ describe('AttestationVerdict store (D-03)', () => {
       expect(mockVerdicts).to.have.lengthOf(1)
       expect(mockVerdicts[0].verdict).to.equal('pass')
     })
+
+    it('associate() with attestationRequired:false writes the association and NO verdict — the real engine\'s AttestationRequired=0 path', async () => {
+      // 47-REVIEW IN-04. The real engine records no verdict at all when
+      // ElectionAttestationPolicy.AttestationRequired = 0 (proven against the
+      // real engine in the skip-verify test above). That is the common
+      // non-attested path per Phase 45 D-14a, and it is exactly the state
+      // VerdictBadge's "none" branch exists for. Before this option the mock
+      // recorded a pass verdict unconditionally, so no mock-driven screen test
+      // could reach "none" — and a green mock run could wrongly suggest that
+      // branch was dead code. This locks the reachability.
+      const mock = new MockAssociationEngine({ attestationRequired: false })
+      const registrantId = nextRegistrantId()
+      const deviceKey = nextDeviceKey()
+      const sig: Signature = { signerUserId: 'u', signerKey: 'k', signature: 's' }
+
+      const challenge = await mock.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sig)
+      await mock.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation: makeDeviceAttestation() }, sig)
+
+      // The association itself is still written — only the verdict is skipped.
+      expect(await mock.getAssociation(registrantId, deviceKey)).to.not.be.undefined
+      expect(await mock.getAttestationVerdicts(registrantId, deviceKey)).to.deep.equal([])
+      expect(await mock.getAttestationVerdicts(registrantId)).to.deep.equal([])
+    })
+
+    it('defaults to attestationRequired:true so no existing caller changes behavior', async () => {
+      // The no-arg and explicit-true constructions must be indistinguishable;
+      // every pre-IN-04 call site passes no options.
+      const registrantId = nextRegistrantId()
+      const deviceKey = nextDeviceKey()
+      const sig: Signature = { signerUserId: 'u', signerKey: 'k', signature: 's' }
+
+      for (const mock of [new MockAssociationEngine(), new MockAssociationEngine({}), new MockAssociationEngine({ attestationRequired: true })]) {
+        const challenge = await mock.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sig)
+        await mock.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation: makeDeviceAttestation() }, sig)
+        expect(await mock.getAttestationVerdicts(registrantId, deviceKey)).to.have.lengthOf(1)
+      }
+    })
   })
 })

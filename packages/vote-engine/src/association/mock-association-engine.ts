@@ -12,6 +12,26 @@ import type {
 
 type SignatureOrCallback = Signature | ((digest: Uint8Array) => Promise<Signature>)
 
+/** Construction-time knobs for the mock's divergences from the real engine. */
+export interface MockAssociationEngineOptions {
+  /**
+   * Whether `associate()` records a verdict at all — the mock's stand-in for
+   * `ElectionAttestationPolicy.AttestationRequired` (47-REVIEW IN-04).
+   *
+   * The real engine records NO verdict when `AttestationRequired = 0`
+   * (`association-engine.ts`), which per Phase 45 D-14a is the common
+   * non-attested path and the exact state `VerdictBadge`'s "none" branch
+   * exists for. The mock holds no policy store, so it cannot derive this
+   * itself; without this knob the "none" state was unreachable from any
+   * mock-driven screen test, and a screen test could wrongly conclude the
+   * "none" badge was dead code.
+   *
+   * Defaults to `true` — the pre-existing behaviour, so no existing caller
+   * changes.
+   */
+  attestationRequired?: boolean
+}
+
 /**
  * MockAssociationEngine — UI-layer-only, in-memory parity implementation of
  * `IAssociationEngine` (D-01). Mirrors `MockElectionsEngine`'s `Map`-keyed
@@ -22,12 +42,29 @@ type SignatureOrCallback = Signature | ((digest: Uint8Array) => Promise<Signatur
  * `${registrantId}:${deviceKey}` — a second `associate()` for the same key
  * throws (mock replay parity, matching the real engine's Association PK
  * collision behavior for D-06 replay).
+ *
+ * DECLARED DIVERGENCES from the real engine — both about `associate()`'s
+ * verdict write, both stated here so no screen test infers a false invariant
+ * from a green mock-driven run:
+ *   1. The mock holds no `IAttestationVerifier`, so a verdict it records is
+ *      always `'pass'`. Fail-path parity is proven against the REAL engine
+ *      only.
+ *   2. The mock holds no `ElectionAttestationPolicy`, so whether a verdict is
+ *      recorded AT ALL comes from `options.attestationRequired` rather than
+ *      from the policy row. Pass `{ attestationRequired: false }` to reproduce
+ *      the real engine's `AttestationRequired = 0` path — association written,
+ *      no verdict row — which is `VerdictBadge`'s "none" state.
  */
 export class MockAssociationEngine implements IAssociationEngine {
   private readonly challenges = new Map<string, AttestationChallenge>()
   private readonly associations = new Map<string, Association>()
   /** D-03 in-memory parity — append-only, ordered; an array (not a Map) mirrors the real store's shape. */
   private readonly verdicts: AttestationVerdict[] = []
+  private readonly attestationRequired: boolean
+
+  constructor (options?: MockAssociationEngineOptions) {
+    this.attestationRequired = options?.attestationRequired ?? true
+  }
 
   async issueAttestationChallenge (
     registrantId: string,
@@ -79,6 +116,11 @@ export class MockAssociationEngine implements IAssociationEngine {
       signorKey: sig.signerKey,
       signature: sig.signature
     })
+    // The policy gate, standing in for ElectionAttestationPolicy.
+    // AttestationRequired (see the class doc's divergence 2): when false, the
+    // association is written and NO verdict row is — the real engine's
+    // AttestationRequired = 0 path, and VerdictBadge's "none" state.
+    if (!this.attestationRequired) return
     // The mock holds no IAttestationVerifier (see recordAttestationVerdict
     // below) and therefore can only ever record a 'pass' verdict here — no
     // screen may infer from the mock that a 'fail' verdict is unreachable.
