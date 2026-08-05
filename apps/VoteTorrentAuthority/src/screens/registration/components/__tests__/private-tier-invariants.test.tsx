@@ -82,11 +82,29 @@ const SELECTIVE_AUDIENCE_PREVIEW_PATH = path.join(__dirname, "../SelectiveAudien
  * SAME number of spaces (newlines preserved) so byte offsets, line numbers and
  * line counts are unchanged — a match/no-match result stays attributable to a
  * real source location.
+ *
+ * 47-REVIEW WR-04: `@babel/parser` is now a DECLARED devDependency of this app.
+ * It previously resolved only as a hoisted transitive of `@babel/core`, so a
+ * Babel major, a yarn hoisting change or a `nohoist` would have turned this
+ * repo's strongest privacy gate into a module-load crash rather than a check.
+ * A parse failure is likewise reported as an explicit "the gate is NOT
+ * running" error rather than as a raw SyntaxError, because the correct
+ * response is to add the missing parser plugin, never to relax the gate.
  */
 function stripComments(source: string): string {
 	// eslint-disable-next-line @typescript-eslint/no-var-requires
 	const { parse } = require("@babel/parser");
-	const ast = parse(source, { sourceType: "module", plugins: ["typescript", "jsx"] });
+	let ast: { comments?: Array<{ start: number; end: number }> };
+	try {
+		ast = parse(source, { sourceType: "module", plugins: ["typescript", "jsx"] });
+	} catch (err) {
+		throw new Error(
+			"private-tier-invariants: could not parse the source under gate — the never-log " +
+				"gate is NOT running. Add the missing @babel/parser plugin (decorators, `using` " +
+				"declarations, a future TS/JSX syntax) rather than relaxing the gate. " +
+				String(err)
+		);
+	}
 	const comments: Array<{ start: number; end: number }> = ast.comments ?? [];
 	let out = source;
 	// Reverse order so earlier spans' offsets stay valid as we rewrite.
@@ -102,6 +120,12 @@ function readStripped(filePath: string): string {
 	return stripComments(fs.readFileSync(filePath, "utf8"));
 }
 
+// Deliberately module scope, and deliberately NOT wrapped in a per-test lazy
+// getter (47-REVIEW WR-04, secondary): if the parse fails, every source-text
+// gate in this file is inoperative, so taking the whole suite down at import
+// time is the correct blast radius. The failure mode that would actually be
+// dangerous is a gate that still REPORTS green on unparsed or blanked-out
+// input, and neither this nor stripComments' explicit throw can produce that.
 const PRIVATE_SOURCE = readStripped(PRIVATE_FIELD_ROW_PATH);
 const SELECTIVE_SOURCE = readStripped(SELECTIVE_AUDIENCE_PREVIEW_PATH);
 
@@ -148,6 +172,26 @@ describe("private-tier-invariants — Part 0: the comment stripper itself (WR-12
 	it("is non-vacuous against the real sources: they parse and are not blanked wholesale", () => {
 		expect(PRIVATE_SOURCE).toContain("PrivateFieldRow");
 		expect(SELECTIVE_SOURCE).toContain("SelectiveAudiencePreview");
+	});
+
+	it("@babel/parser is a DECLARED dependency, not a hoisted transitive (WR-04)", () => {
+		// The stripper hard-depends on it. Resolving it only through
+		// @babel/core's dependency tree meant a Babel major, a yarn hoisting
+		// change or a `nohoist` would turn this gate into a module-load crash
+		// rather than a check.
+		const pkg = JSON.parse(
+			fs.readFileSync(path.join(__dirname, "../../../../../package.json"), "utf8")
+		);
+		const declared = Object.keys({ ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) });
+		expect(declared).toContain("@babel/parser");
+	});
+
+	it("an unparseable source throws the 'gate is NOT running' error, never a silent pass (WR-04)", () => {
+		// A future syntax outside the two configured plugins (decorators,
+		// `using` declarations) must be attributable, and must never be able to
+		// make a Part A assertion pass on blanked-out or partial input.
+		expect(() => stripComments("const x = @@@ ;")).toThrow(/the never-log gate is NOT running/);
+		expect(() => stripComments("const x = @@@ ;")).toThrow(/@babel\/parser plugin/);
 	});
 });
 
@@ -230,7 +274,7 @@ function renderCombined() {
 					disclosure={DISCLOSURE}
 					onSelectAudience={jest.fn()}
 				/>
-			</>,
+			</>
 		);
 	});
 	return tr;
@@ -245,7 +289,7 @@ function pressPrivateToggle(tr: renderer.ReactTestRenderer) {
 
 function pressAudienceChip(tr: renderer.ReactTestRenderer, testID: string) {
 	const wrapper = tr.root.findByProps({ testID });
-	const pressable = wrapper.findAll(node => typeof node.props.onPress === "function")[0];
+	const pressable = wrapper.findAll((node) => typeof node.props.onPress === "function")[0];
 	renderer.act(() => {
 		pressable.props.onPress();
 	});

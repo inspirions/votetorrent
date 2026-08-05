@@ -20900,6 +20900,7 @@ __metadata:
   resolution: "votetorrent-authority@workspace:apps/VoteTorrentAuthority"
   dependencies:
     "@babel/core": "npm:^7.25.2"
+    "@babel/parser": "npm:^7.25.3"
     "@babel/preset-env": "npm:^7.25.3"
     "@babel/runtime": "npm:^7.25.0"
     "@libp2p/circuit-relay-v2": "npm:^4"
