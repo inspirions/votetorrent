@@ -32,6 +32,7 @@
 
 import React from "react";
 import renderer from "react-test-renderer";
+import { StyleSheet } from "react-native";
 import type { AuthorityPeer } from "@votetorrent/vote-core";
 
 // ---------------------------------------------------------------------------
@@ -442,5 +443,25 @@ describe("AuthorityPeersScreen — D-08 / D-13 ('cap' scope)", () => {
     expect(removeSpy).toHaveBeenCalledWith("auth-1", "peer-alpha", expect.any(Function));
     absent(tr, "authority-peers-confirm-peer-alpha-card");
     absent(tr, "authority-peers-row-peer-alpha");
+  });
+
+  test("13. row containment: card slot carries flex:1 + minWidth:0, REMOVE wrapper carries flexShrink:0, row stays flexDirection:row", async () => {
+    await seedPeers(["peer-alpha"]);
+    const tr = await renderScreen();
+
+    const row = tr.root.findByProps({ testID: "authority-peers-row-peer-alpha" });
+    const rowFlat = StyleSheet.flatten(row.props.style) as Record<string, unknown>;
+    expect(rowFlat.flexDirection).toBe("row");
+
+    const [cardSlot, removeWrapper] = row.props.children as [
+      { props: { style?: unknown } },
+      { props: { style?: unknown } },
+    ];
+    const cardFlat = StyleSheet.flatten(cardSlot.props.style) as Record<string, unknown>;
+    expect(cardFlat.flex).toBe(1);
+    expect(cardFlat.minWidth).toBe(0);
+
+    const removeFlat = StyleSheet.flatten(removeWrapper.props.style) as Record<string, unknown>;
+    expect(removeFlat.flexShrink).toBe(0);
   });
 });

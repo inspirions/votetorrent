@@ -29,6 +29,7 @@
 
 import React from "react";
 import renderer from "react-test-renderer";
+import { StyleSheet } from "react-native";
 import { ChipButton } from "../../../components/ChipButton";
 import { CustomButton } from "../../../components/CustomButton";
 import type { PollingDevice } from "@votetorrent/vote-core";
@@ -617,5 +618,25 @@ describe("PollingDevicesScreen — D-08/D-13 whitelist CRUD", () => {
       expect(isBareDismissLabel("Keep Device")).toBe(false);
       expect(isBareDismissLabel("Mantener Dispositivo")).toBe(false);
     }
+  });
+
+  test("18. row containment: card slot carries flex:1 + minWidth:0, REMOVE wrapper carries flexShrink:0, row stays flexDirection:row", async () => {
+    await mockAuthorityConfigEngine.addPollingDevice("auth-1", HASH_A, "Precinct 4 tablet", SEED_SIGN);
+    const tr = await renderScreen();
+
+    const row = tr.root.findByProps({ testID: "polling-devices-row-" + HASH_A });
+    const rowFlat = StyleSheet.flatten(row.props.style) as Record<string, unknown>;
+    expect(rowFlat.flexDirection).toBe("row");
+
+    const [cardSlot, removeWrapper] = row.props.children as [
+      { props: { style?: unknown } },
+      { props: { style?: unknown } },
+    ];
+    const cardFlat = StyleSheet.flatten(cardSlot.props.style) as Record<string, unknown>;
+    expect(cardFlat.flex).toBe(1);
+    expect(cardFlat.minWidth).toBe(0);
+
+    const removeFlat = StyleSheet.flatten(removeWrapper.props.style) as Record<string, unknown>;
+    expect(removeFlat.flexShrink).toBe(0);
   });
 });

@@ -309,7 +309,7 @@ export default function PollingDevicesScreen() {
 								<View
 									testID={"polling-devices-remove-" + device.deviceHash}
 									pointerEvents={canWrite ? "auto" : "none"}
-									style={canWrite ? undefined : localStyles.disabledControl}
+									style={[localStyles.rowAction, canWrite ? null : localStyles.disabledControl]}
 								>
 									<ChipButton
 										label={t("pollingDeviceRemoveButton")}
@@ -359,6 +359,13 @@ const localStyles = StyleSheet.create({
 	},
 	cardFlex: {
 		flex: 1,
+		minWidth: 0,
+	},
+	// flexShrink: 0 guarantees the REMOVE chip claims its intrinsic width
+	// first and the card absorbs all remaining pressure, so REMOVE can never
+	// be squeezed past the screen edge even if a future card grows.
+	rowAction: {
+		flexShrink: 0,
 	},
 });
 
