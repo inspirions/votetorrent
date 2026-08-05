@@ -52,24 +52,40 @@ export const REGISTRANT_PUBLIC_CURRENCY_JOIN =
  * could display a superseded SSN/DOB and `recordRegistrantAccessEvent` could
  * derive its name allowlist from a superseded revision.
  *
- * UNPROVEN ON DEVICE (47-REVIEW WR-03) — read this before the next device leg.
+ * DEVICE-PROVEN 2026-08-05 (47-REVIEW WR-03 — was UNPROVEN ON DEVICE).
  * These three constants turned five hot single-registrant reads
  * (`getRegistrantPublic`, `getRegistrantPrivate`, `getRegistrantSelective`,
  * `getDisclosedSelective`, and the allowlist read inside
  * `recordRegistrantAccessEvent`, i.e. every access-trail write) from
- * PK point lookups into joins. The CORRECTNESS argument above is verified; the
- * EXECUTION argument is not. Whether Quereus's planner pushes
- * `T.RegistrantId = :registrantId` down into the tier PK prefix and then does a
- * PK point lookup on `Registrant.Id` — or falls back to scanning `Registrant` —
- * has only ever been exercised against the Node/in-memory harness, and
- * `tid-allocator.ts` is explicit that the Optimystic/LevelDB vtab ABORTS full
- * table scans under concurrent mutation. The roster constant above drives from
- * `Registrant` and IS device-proven; these drive from the TIER table, which is
- * a different plan shape and inherits none of that evidence.
+ * PK point lookups into joins. The CORRECTNESS argument above was already
+ * verified; the EXECUTION argument — whether Quereus's planner pushes
+ * `T.RegistrantId = :registrantId` down into the tier PK prefix rather than
+ * scanning `Registrant`, given that `tid-allocator.ts` is explicit that the
+ * Optimystic/LevelDB vtab ABORTS full table scans under concurrent mutation —
+ * had only ever been exercised against the Node/in-memory harness.
  *
- * If a device leg shows a scan, the fallback keeps both lookups on their PKs
- * without giving up currency — read the parent's Cid first, then point-read the
- * tier by `(RegistrantId, Cid)`:
+ * It has now been exercised on device (Pixel_8 AVD, Hermes, debug build, D-15
+ * walkthrough fixture, 5 seeded registrants). All five reads returned data with
+ * no aborted scan and no error:
+ *   - public tier rendered (lastName/firstName/district)
+ *   - selective tier rendered (Party/BirthYear)
+ *   - `getDisclosedSelective` rendered its per-audience "Not disclosed to this
+ *     audience" annotations under the SAME-DISTRICT audience
+ *   - private tier rendered masked, and a reveal produced plaintext
+ *   - the reveal's access-trail row landed and read back in Access History
+ *     ("SSN — Device User — 2026-08-05 11:39 UTC"), which is the allowlist read
+ *     plus the sanitize-and-insert path end to end
+ * The feared scan abort did not materialize on any of the five.
+ *
+ * SCOPE OF THE EVIDENCE: one registrant, ~5-row tables, no concurrent mutation.
+ * That exercises the PLAN SHAPE — the thing genuinely in doubt — but says
+ * nothing about behavior at roster scale or under the concurrent writes that
+ * `tid-allocator.ts`'s abort actually keys on. Treat a scan at scale as still
+ * possible.
+ *
+ * If a device leg ever DOES show a scan, the fallback keeps both lookups on
+ * their PKs without giving up currency — read the parent's Cid first, then
+ * point-read the tier by `(RegistrantId, Cid)`:
  *
  *   select PrivateCid from Registrant where Id = :registrantId
  *   select ... from RegistrantPrivate where RegistrantId = :registrantId and Cid = :cid
