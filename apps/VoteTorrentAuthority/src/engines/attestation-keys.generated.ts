@@ -23,6 +23,18 @@
 //
 // Static import ONLY — dynamic require() breaks Metro (Phase 16-07 lesson).
 
+/**
+ * SECRET-HANDLING RULE for the two constants below (47-REVIEW WR-10). This
+ * file is GIT-TRACKED. Both values MUST stay empty in the tracked tree, and
+ * real key material must be injected by the build/deploy step into an
+ * ephemeral workspace copy — never typed in here and "remembered" out of a
+ * commit. `attestation-keys.secretGuard.test.ts` enforces the empty default
+ * and runs with the app suite, so CI rejects a commit that carries a key. If
+ * you provision locally and that test goes red, that redness is the intended
+ * signal that your working tree holds a secret: clear the values before
+ * committing rather than weakening the guard. See packages/vote-engine/SETUP.md §3.
+ */
+
 /** Base64-encoded Play Console A256KW/A256GCM decryption key. Empty = not provisioned (fail closed). */
 export const PLAY_CONSOLE_DECRYPTION_KEY_BASE64 = '';
 /** Base64-encoded Play Console ES256 SPKI verification public key. Empty = not provisioned (fail closed). */
