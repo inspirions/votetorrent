@@ -1,6 +1,8 @@
 // proof-flags.generated.ts — committed default fallback (all flags false).
-// The run scripts (run-vtest02.sh, run-dial-probe.sh) overwrite this file
-// before bundling and restore the default-false content in an EXIT trap.
+// The run scripts (run-vtest02.sh, run-dial-probe.sh, run-signing-proof.sh,
+// run-replication-proof.sh) overwrite this file before bundling and restore
+// the default-false content in an EXIT trap. schema-type-regression.spec.ts
+// locks all four heredocs to this file's flag SET (order does not matter).
 // NOTE: this file IS git-tracked (gitignore would be a no-op for a tracked
 // file — WR-02, 17-REVIEW). If a run script is killed before its EXIT trap
 // fires, `git status` will show this file modified: restore it with

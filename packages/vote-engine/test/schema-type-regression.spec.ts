@@ -367,13 +367,20 @@ describe('schema-sql.ts regeneration freshness lock (47-01 / D-16)', () => {
         + 'stopped writing the flag file, or the heredoc form changed and this lock can no longer see it.',
       ).to.be.greaterThan(0)
 
+      // Compared as SETS, not as ordered arrays (47-REVIEW IN-02). These are
+      // independent `export const`s, so declaration order is not load-bearing
+      // — but `deep.equal` on the raw arrays enforced it anyway, which meant
+      // inserting a new flag anywhere but the END of the committed file turned
+      // all four scripts red while the message still said "a different flag
+      // SET", sending the next reader hunting for a missing flag.
       bodies.forEach((body, index) => {
         expect(
-          exportedFlagNames(body),
+          [...exportedFlagNames(body)].sort(),
           `${scriptName} heredoc #${index + 1} declares a different flag SET than the committed `
-          + 'proof-flags.generated.ts. Add every new flag to every heredoc (values may differ, names may not) — '
-          + 'a missing export makes the generated file fail typecheck mid-run, and makes the fallback restore lossy.',
-        ).to.deep.equal(committed)
+          + 'proof-flags.generated.ts. Add every new flag to every heredoc (values may differ, names may not, '
+          + 'order does not matter) — a missing export makes the generated file fail typecheck mid-run, and '
+          + 'makes the fallback restore lossy.',
+        ).to.deep.equal([...committed].sort())
       })
     }
   })
