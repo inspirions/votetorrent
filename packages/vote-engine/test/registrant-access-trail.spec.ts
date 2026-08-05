@@ -301,6 +301,30 @@ describe('RegistrantAccessEvent trail (D-01/D-02)', () => {
     expect(secondEvents[0]!.sequence).to.equal(0)
   })
 
+  it('two OVERLAPPING flushes both land, with distinct Sequences (WR-06 read-then-insert race)', async () => {
+    // `useAccessTrailVisit` fires BOTH its flushes fire-and-forget
+    // (`void visitRef.current?.flush()` on the background timer AND on
+    // unmount), so two recordRegistrantAccessEvent calls really can be in
+    // flight at once. Sequence allocation is a `select max(Sequence)` followed
+    // by an unwrapped `insert`: without the retry, both reads returned the
+    // same high-water mark and the loser violated
+    // `primary key (RegistrantId, Sequence)` — and createAccessTrailVisit's
+    // flush() swallows the rejection in an empty catch, so the losing audit
+    // row disappeared with no error, no log line and no UI signal.
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+
+    await Promise.all([
+      engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn']),
+      engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['dob'])
+    ])
+
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events, 'BOTH overlapping flushes must be recorded — neither may be silently lost').to.have.length(2)
+    expect(new Set(events.map((e) => e.sequence)).size, 'the two rows must carry DISTINCT sequences').to.equal(2)
+    expect(events.map((e) => e.fields).flat().sort()).to.deep.equal(['dob', 'ssn'])
+  })
+
   it('getRegistrantAccessEvents returns newest-first (Sequence descending)', async () => {
     const { auth, engine, sign } = await setup()
     const registrantId = await seedRegistrant(engine, auth, sign)

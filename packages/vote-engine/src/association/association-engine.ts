@@ -1,7 +1,7 @@
 import { bytesToHex } from '@noble/curves/utils.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { utf8ToBytes } from '@noble/hashes/utils.js'
-import { asText, digestToBytes, nowCanonicalDatetime } from '../utils.js'
+import { asText, digestToBytes, nowCanonicalDatetime, SEQUENCE_ALLOCATION_ATTEMPTS } from '../utils.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
@@ -590,11 +590,6 @@ export class AssociationEngine implements IAssociationEngine {
     this.requireCtx('recordAttestationVerdict')
     const ctx = this.ctx!
     try {
-      const seqRow = await ctx.db
-        .prepare('select coalesce(max(Sequence), -1) + 1 as n from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey')
-        .get({ registrantId, deviceKey })
-      const sequence = Number(seqRow?.n ?? 0)
-
       // Text code, never a boolean — a boolean-shaped bind fails VerdictValid.
       const verdict = verification.ok ? 'pass' : 'fail'
       // Z-suffixed, required by VerifiedAtValid's like('%Z', VerifiedAt); the
@@ -605,22 +600,50 @@ export class AssociationEngine implements IAssociationEngine {
       // 47-07's RegistrantAccessEvent.Timestamp). Do NOT bind
       // nowCanonicalDatetime() into this column.
       const verifiedAt = toIsoZDatetime(Date.now())
-      const tid = await allocateTid(ctx.db, 'association')
 
-      await ctx.db.exec(
-        `insert into AttestationVerdict (RegistrantId, DeviceKey, Sequence, Verdict, Reason, VerifiedAt)
-         with context Tid = ${tid}, now = :now
-         values (:registrantId, :deviceKey, :sequence, :verdict, :reason, :verifiedAt)`,
-        {
-          registrantId,
-          deviceKey,
-          sequence,
-          verdict,
-          reason: verification.reason ?? null,
-          verifiedAt,
-          now: nowCanonicalDatetime()
+      // Sequence allocation is a read-then-insert with no enclosing
+      // transaction, so two overlapping calls read the same `max(Sequence)`
+      // and the loser violates `primary key (RegistrantId, DeviceKey,
+      // Sequence)`. Here a lost row is a lost VERDICT — potentially a lost
+      // FAIL verdict — so it retries rather than letting the row vanish.
+      // Same discipline as `recordRegistrantAccessEvent`: on failure, re-read
+      // the high-water mark and only retry if it ADVANCED (a genuine race);
+      // any other failure rethrows on the first attempt rather than being
+      // masked by a retry loop. Deliberately does not sniff the driver's
+      // error text for "primary key".
+      const readNextSequence = async (): Promise<number> => {
+        const seqRow = await ctx.db
+          .prepare('select coalesce(max(Sequence), -1) + 1 as n from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey')
+          .get({ registrantId, deviceKey })
+        return Number(seqRow?.n ?? 0)
+      }
+
+      for (let attempt = 0; attempt < SEQUENCE_ALLOCATION_ATTEMPTS; attempt++) {
+        const sequence = await readNextSequence()
+        // A fresh Tid per attempt — never replayed into a second insert.
+        const tid = await allocateTid(ctx.db, 'association')
+
+        try {
+          await ctx.db.exec(
+            `insert into AttestationVerdict (RegistrantId, DeviceKey, Sequence, Verdict, Reason, VerifiedAt)
+             with context Tid = ${tid}, now = :now
+             values (:registrantId, :deviceKey, :sequence, :verdict, :reason, :verifiedAt)`,
+            {
+              registrantId,
+              deviceKey,
+              sequence,
+              verdict,
+              reason: verification.reason ?? null,
+              verifiedAt,
+              now: nowCanonicalDatetime()
+            }
+          )
+          return
+        } catch (err) {
+          if (attempt + 1 >= SEQUENCE_ALLOCATION_ATTEMPTS) throw err
+          if ((await readNextSequence()) <= sequence) throw err
         }
-      )
+      }
     } catch (err) {
       this.rethrow(err, 'recordAttestationVerdict')
     }

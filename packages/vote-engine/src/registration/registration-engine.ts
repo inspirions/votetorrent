@@ -1,5 +1,5 @@
 import { setDisclose } from '@optimystic/quereus-plugin-crypto'
-import { digestToBytes, nowCanonicalDatetime, parseJsonOr, asText, asNumberOr } from '../utils.js'
+import { digestToBytes, nowCanonicalDatetime, parseJsonOr, asText, asNumberOr, SEQUENCE_ALLOCATION_ATTEMPTS } from '../utils.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
@@ -712,36 +712,69 @@ export class RegistrationEngine implements IRegistrationEngine {
         return
       }
 
-      const seqRow = await ctx.db
-        .prepare('select coalesce(max(Sequence), -1) + 1 as n from RegistrantAccessEvent where RegistrantId = :registrantId')
-        .get({ registrantId })
-      const sequence = asNumberOr(seqRow?.n, 0, 'RegistrantAccessEvent.Sequence')
+      // Sequence allocation is a read-then-insert with no enclosing
+      // transaction, so two overlapping calls can read the same
+      // `max(Sequence)` and the second insert then violates
+      // `primary key (RegistrantId, Sequence)`. This is genuinely reachable:
+      // `useAccessTrailVisit` fires BOTH its flushes as fire-and-forget
+      // (`void visitRef.current?.flush()`), so a background flush and an
+      // unmount flush can overlap, and `createAccessTrailVisit.flush()`
+      // swallows the rejection in an empty catch — the losing audit row would
+      // disappear with no trace at all.
+      //
+      // Retry rather than lock: on a failed insert, re-read the high-water
+      // mark. If it ADVANCED past the sequence we tried, another writer won
+      // the race and we retry with the new value. If it did not advance, the
+      // failure was not a race (a CHECK violation, a storage error) and is
+      // rethrown immediately — deliberately not sniffing the driver's error
+      // TEXT for "primary key", which would silently stop working the moment
+      // that wording changed.
+      const readNextSequence = async (): Promise<number> => {
+        const seqRow = await ctx.db
+          .prepare('select coalesce(max(Sequence), -1) + 1 as n from RegistrantAccessEvent where RegistrantId = :registrantId')
+          .get({ registrantId })
+        return asNumberOr(seqRow?.n, 0, 'RegistrantAccessEvent.Sequence')
+      }
 
-      const tid = await allocateTid(ctx.db, 'registration')
+      const timestamp = toIsoZDatetime(Date.now())
+      const fieldsJson = JSON.stringify(safeFields)
 
-      // CORRECTNESS TRAP (T-47-15): `Timestamp`'s `TimestampValid` CHECK is
-      // IMMEDIATE (no subquery), so it sees the raw bound value and requires
-      // a trailing `Z`. `nowCanonicalDatetime()` returns a 19-char string
-      // with NO `Z` — binding it into the `Timestamp` COLUMN fails the
-      // CHECK. Bind a Z-suffixed value into the column and the Z-less
-      // canonical form into the context `now`, matching `createRegistrant`'s
-      // Z-suffixed `expiration` alongside a Z-less `now`. NOTE: this
-      // deliberately diverges from `47-RESEARCH.md` Code Examples §1 and
-      // `47-PATTERNS.md` §6, which both show `:now` bound into `Timestamp` —
-      // that form fails this CHECK.
-      await ctx.db.exec(
-        `insert into RegistrantAccessEvent (RegistrantId, ViewerUserId, Sequence, Timestamp, Fields)
-         with context Tid = ${tid}, now = :now
-         values (:registrantId, :viewerUserId, :sequence, :timestamp, :fields)`,
-        {
-          registrantId,
-          viewerUserId,
-          sequence,
-          timestamp: toIsoZDatetime(Date.now()),
-          now: nowCanonicalDatetime(),
-          fields: JSON.stringify(safeFields)
+      for (let attempt = 0; attempt < SEQUENCE_ALLOCATION_ATTEMPTS; attempt++) {
+        const sequence = await readNextSequence()
+        // A fresh Tid per attempt — a Tid is consumed by the attempt that
+        // used it, never replayed into a second insert.
+        const tid = await allocateTid(ctx.db, 'registration')
+
+        try {
+          // CORRECTNESS TRAP (T-47-15): `Timestamp`'s `TimestampValid` CHECK is
+          // IMMEDIATE (no subquery), so it sees the raw bound value and requires
+          // a trailing `Z`. `nowCanonicalDatetime()` returns a 19-char string
+          // with NO `Z` — binding it into the `Timestamp` COLUMN fails the
+          // CHECK. Bind a Z-suffixed value into the column and the Z-less
+          // canonical form into the context `now`, matching `createRegistrant`'s
+          // Z-suffixed `expiration` alongside a Z-less `now`. NOTE: this
+          // deliberately diverges from `47-RESEARCH.md` Code Examples §1 and
+          // `47-PATTERNS.md` §6, which both show `:now` bound into `Timestamp` —
+          // that form fails this CHECK.
+          await ctx.db.exec(
+            `insert into RegistrantAccessEvent (RegistrantId, ViewerUserId, Sequence, Timestamp, Fields)
+             with context Tid = ${tid}, now = :now
+             values (:registrantId, :viewerUserId, :sequence, :timestamp, :fields)`,
+            {
+              registrantId,
+              viewerUserId,
+              sequence,
+              timestamp,
+              now: nowCanonicalDatetime(),
+              fields: fieldsJson
+            }
+          )
+          return
+        } catch (err) {
+          if (attempt + 1 >= SEQUENCE_ALLOCATION_ATTEMPTS) throw err
+          if ((await readNextSequence()) <= sequence) throw err
         }
-      )
+      }
     } catch (err) {
       this.rethrow(err, 'recordRegistrantAccessEvent')
     }

@@ -358,6 +358,26 @@ describe('AttestationVerdict store (D-03)', () => {
       expect(secondRegistrantRows[0].sequence).to.equal(0)
     })
 
+    it('two OVERLAPPING recordAttestationVerdict calls both land, with distinct Sequences (WR-06)', async () => {
+      // Same read-then-insert race as RegistrantAccessEvent: a
+      // `select max(Sequence)` followed by an unwrapped `insert`, with no
+      // transaction around the pair. Here a lost row is a lost VERDICT — and
+      // the fail verdict is precisely the one that must never vanish, since it
+      // is the record that a device was rejected.
+      const { registrantId, engine } = await setupAssociationTest()
+      const deviceKey = nextDeviceKey()
+
+      await Promise.all([
+        engine.recordAttestationVerdict(registrantId, deviceKey, { ok: false, reason: 'racing-fail' }),
+        engine.recordAttestationVerdict(registrantId, deviceKey, { ok: true })
+      ])
+
+      const rows = await engine.getAttestationVerdicts(registrantId, deviceKey)
+      expect(rows, 'BOTH verdicts must be recorded — a lost row here is a lost fail verdict').to.have.length(2)
+      expect(new Set(rows.map((r) => r.sequence)).size, 'the two rows must carry DISTINCT sequences').to.equal(2)
+      expect(rows.map((r) => r.verdict).sort()).to.deep.equal(['fail', 'pass'])
+    })
+
     it('read shape and ordering: unfiltered spans device keys, narrowed returns only one, last element is most recent', async () => {
       const { registrantId, engine } = await setupAssociationTest()
       const deviceKeyA = nextDeviceKey()
