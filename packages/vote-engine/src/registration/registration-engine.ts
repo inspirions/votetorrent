@@ -5,7 +5,14 @@ import { allocateTid } from '../database/tid-allocator.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
 import { validateFieldPolicy } from './field-policy.js'
-import { buildRegistrantListCountSql, buildRegistrantListPageSql, clampPageSize } from './registrant-list-query.js'
+import {
+  buildRegistrantListCountSql,
+  buildRegistrantListPageSql,
+  clampPageSize,
+  REGISTRANT_PRIVATE_POINT_CURRENCY_JOIN,
+  REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN,
+  REGISTRANT_SELECTIVE_POINT_CURRENCY_JOIN
+} from './registrant-list-query.js'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
 import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
@@ -544,7 +551,11 @@ export class RegistrationEngine implements IRegistrationEngine {
     if (!this.ctx) return undefined
     try {
       const row = await this.ctx.db
-        .prepare('select Cid, RegistrantId, LastName, FirstName, District, ExtraFields from RegistrantPublic where RegistrantId = :registrantId')
+        .prepare(
+          'select T.Cid, T.RegistrantId, T.LastName, T.FirstName, T.District, T.ExtraFields '
+          + `from RegistrantPublic T ${REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN} `
+          + 'where T.RegistrantId = :registrantId'
+        )
         .get({ registrantId })
       if (!row) return undefined
       return {
@@ -574,13 +585,21 @@ export class RegistrationEngine implements IRegistrationEngine {
     try {
       if (column) {
         const row = await ctx.db
-          .prepare(`select ${column} as v from RegistrantPublic where RegistrantId = :registrantId`)
+          .prepare(
+            `select T.${column} as v `
+            + `from RegistrantPublic T ${REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN} `
+            + 'where T.RegistrantId = :registrantId'
+          )
           .get({ registrantId })
         return row?.v == null ? undefined : asText(row.v, `RegistrantPublic.${column}`)
       }
       const path = `$.${fieldName}`
       const row = await ctx.db
-        .prepare("select cast(json_extract(ExtraFields, :path) as text) as v from RegistrantPublic where RegistrantId = :registrantId")
+        .prepare(
+          'select cast(json_extract(T.ExtraFields, :path) as text) as v '
+          + `from RegistrantPublic T ${REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN} `
+          + 'where T.RegistrantId = :registrantId'
+        )
         .get({ registrantId, path })
       return row?.v == null ? undefined : String(row.v)
     } catch (err) {
@@ -594,7 +613,11 @@ export class RegistrationEngine implements IRegistrationEngine {
     const ctx = this.ctx!
     try {
       const row = await ctx.db
-        .prepare('select ExtraFields from RegistrantPublic where RegistrantId = :registrantId')
+        .prepare(
+          'select T.ExtraFields '
+          + `from RegistrantPublic T ${REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN} `
+          + 'where T.RegistrantId = :registrantId'
+        )
         .get({ registrantId })
       if (!row || row.ExtraFields == null) return []
       const keys: string[] = []
@@ -611,7 +634,11 @@ export class RegistrationEngine implements IRegistrationEngine {
     if (!this.ctx) return undefined
     try {
       const row = await this.ctx.db
-        .prepare('select Cid, RegistrantId, Expiration, PrivateDetails from RegistrantPrivate where RegistrantId = :registrantId')
+        .prepare(
+          'select T.Cid, T.RegistrantId, T.Expiration, T.PrivateDetails '
+          + `from RegistrantPrivate T ${REGISTRANT_PRIVATE_POINT_CURRENCY_JOIN} `
+          + 'where T.RegistrantId = :registrantId'
+        )
         .get({ registrantId })
       if (!row) return undefined
       return {
@@ -630,7 +657,11 @@ export class RegistrationEngine implements IRegistrationEngine {
     if (!this.ctx) return undefined
     try {
       const row = await this.ctx.db
-        .prepare('select Cid, RegistrantId, Expiration, SelectiveDetails from RegistrantSelective where RegistrantId = :registrantId')
+        .prepare(
+          'select T.Cid, T.RegistrantId, T.Expiration, T.SelectiveDetails '
+          + `from RegistrantSelective T ${REGISTRANT_SELECTIVE_POINT_CURRENCY_JOIN} `
+          + 'where T.RegistrantId = :registrantId'
+        )
         .get({ registrantId })
       if (!row) return undefined
       return {
@@ -664,7 +695,11 @@ export class RegistrationEngine implements IRegistrationEngine {
       // the NAME set `collectPrivateFieldNames` derives from it leaves this
       // statement (T-47-11).
       const privateRow = await ctx.db
-        .prepare('select PrivateDetails from RegistrantPrivate where RegistrantId = :registrantId')
+        .prepare(
+          'select T.PrivateDetails '
+          + `from RegistrantPrivate T ${REGISTRANT_PRIVATE_POINT_CURRENCY_JOIN} `
+          + 'where T.RegistrantId = :registrantId'
+        )
         .get({ registrantId })
       const privateDetails = parseJsonOr<PrivateDetail[]>(privateRow?.PrivateDetails, [], 'RegistrantPrivate.PrivateDetails')
       const allowedNames = collectPrivateFieldNames(privateDetails)
@@ -756,7 +791,11 @@ export class RegistrationEngine implements IRegistrationEngine {
     const ctx = this.ctx!
     try {
       const row = await ctx.db
-        .prepare('select Cid, SelectiveDetails from RegistrantSelective where RegistrantId = :registrantId')
+        .prepare(
+          'select T.Cid, T.SelectiveDetails '
+          + `from RegistrantSelective T ${REGISTRANT_SELECTIVE_POINT_CURRENCY_JOIN} `
+          + 'where T.RegistrantId = :registrantId'
+        )
         .get({ registrantId })
       if (!row) return null
       const cid = asText(row.Cid, 'RegistrantSelective.Cid')

@@ -41,10 +41,15 @@ export function truncateId(id: string, keep = 5): string {
  * Resolves the roster's display name: `"Last, First"` when both are present
  * (trimmed, non-empty), whichever one is present alone, or a truncated
  * `Registrant.Id` when neither is present. `lastName`/`firstName` arrive from
- * the CURRENT `RegistrantPublic` row only (47-05's
- * `REGISTRANT_PUBLIC_CURRENCY_JOIN`), and a registrant with no public tier —
- * `Registrant.PublicCid` is nullable — legitimately has neither, which is why
- * the truncated-id fallback exists and is not an error path.
+ * the CURRENT `RegistrantPublic` row only. Both callers now guarantee that:
+ * the roster via 47-05's `REGISTRANT_PUBLIC_CURRENCY_JOIN`, and the detail
+ * screen via `getRegistrantPublic`'s point-read
+ * `REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN`. (Before 47-REVIEW WR-04 that claim
+ * held on the roster only — the detail screen's point read carried no currency
+ * predicate at all and could serve a superseded revision.) A registrant with
+ * no public tier — `Registrant.PublicCid` is nullable — legitimately has
+ * neither name, which is why the truncated-id fallback exists and is not an
+ * error path.
  */
 export function registrantDisplayName(
 	row: Pick<RegistrantListRow, "registrantId" | "lastName" | "firstName">,

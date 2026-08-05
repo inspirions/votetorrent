@@ -764,5 +764,88 @@ describe('listRegistrants (D-04/D-05/D-06/D-07)', () => {
         'any query touching RegistrantPublic that joins on RegistrantId alone (Pitfall 4 warning sign)'
       ).to.equal(0)
     })
+
+    // -----------------------------------------------------------------------
+    // WR-04 (47-REVIEW): the same D-06 currency rule, on the POINT reads
+    // -----------------------------------------------------------------------
+    //
+    // The roster carried the currency predicate and said so emphatically; every
+    // single-registrant point read (`getRegistrantPublic`, `getRegistrantPrivate`,
+    // `getRegistrantSelective`, `getDisclosedSelective`, and the allowlist read
+    // inside `recordRegistrantAccessEvent`) did a bare
+    // `where RegistrantId = :registrantId` `.get()` with no `and Cid = <parent
+    // Cid>`. All three tier tables are `InsertOnly` with PK `(RegistrantId, Cid)`,
+    // so those reads returned whichever revision the storage layer yielded first
+    // — on the private tier that means a superseded SSN/DOB on the detail screen,
+    // and an access-trail allowlist derived from a superseded revision.
+    //
+    // The fixture above already carries TWO RegistrantPublic revisions with
+    // `Registrant.PublicCid` repointed at the second, which is exactly what a
+    // point read needs to be non-vacuous.
+
+    it('getRegistrantPublic returns the CURRENT revision, never the superseded one', async () => {
+      const row = await engine.getRegistrantPublic(registrantId)
+      expect(row, 'the current public tier must be found').to.not.equal(undefined)
+      expect(row!.district).to.equal('D-NEW')
+      expect(row!.lastName).to.equal('Nyman')
+      expect(row!.district).to.not.equal('D-OLD')
+      expect(row!.lastName).to.not.equal('Olsen')
+    })
+
+    it('getRegistrantPublic agrees with listRegistrants — the detail screen and the roster cannot disagree', async () => {
+      // registrant-display.ts formats names from BOTH surfaces. Before this fix
+      // the roster was currency-aware and the detail screen was not, so the same
+      // registrant could render two different names in one session.
+      const point = await engine.getRegistrantPublic(registrantId)
+      const listed = (await engine.listRegistrants({ authorityId: auth.authority.id })).rows.find(
+        (r) => r.registrantId === registrantId
+      )
+      expect(listed, 'roster precondition').to.not.equal(undefined)
+      expect(point!.lastName).to.equal(listed!.lastName)
+      expect(point!.firstName).to.equal(listed!.firstName)
+      expect(point!.district).to.equal(listed!.district)
+    })
+
+    it('SOURCE GUARD: every tier point read in registration-engine.ts carries a currency join', () => {
+      // Structural cover for the four point reads this fixture cannot reach
+      // cheaply (private/selective would each need their own repoint ceremony).
+      // Scans for any `from <TierTable>` in the engine source that is not
+      // immediately followed by that tier's currency-join constant reference.
+      const enginePath = join(__dirname, '..', 'src', 'registration', 'registration-engine.ts')
+      const engineSource = readFileSync(enginePath, 'utf8')
+        .split('\n')
+        .filter((line) => {
+          const t = line.trim()
+          return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))
+        })
+        .join('\n')
+
+      const tiers: Array<[string, string]> = [
+        ['RegistrantPublic', 'REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN'],
+        ['RegistrantPrivate', 'REGISTRANT_PRIVATE_POINT_CURRENCY_JOIN'],
+        ['RegistrantSelective', 'REGISTRANT_SELECTIVE_POINT_CURRENCY_JOIN']
+      ]
+
+      for (const [table, constantName] of tiers) {
+        // `from <Table> T ${CONSTANT}` is the one sanctioned point-read shape.
+        const sanctioned = new RegExp(`from ${table} T \\$\\{${constantName}\\}`, 'g')
+        // Any other `from <Table>` is a currency-less read.
+        const unsanctionedPattern = new RegExp(`from ${table}(?! T \\$\\{${constantName}\\})`, 'g')
+
+        const sanctionedCount = (engineSource.match(sanctioned) ?? []).length
+        const unsanctioned = engineSource.match(unsanctionedPattern) ?? []
+
+        expect(
+          sanctionedCount,
+          `expected at least one currency-joined point read of ${table} — if this is 0 the guard is vacuous`
+        ).to.be.greaterThan(0)
+        expect(
+          unsanctioned.length,
+          `registration-engine.ts has ${unsanctioned.length} currency-LESS read(s) of ${table}. `
+          + `Every point read must be \`from ${table} T \${${constantName}}\` — a bare `
+          + 'where-RegistrantId read serves whichever revision the storage layer yields first.'
+        ).to.equal(0)
+      }
+    })
   })
 })

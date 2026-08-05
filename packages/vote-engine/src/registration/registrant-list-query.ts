@@ -18,8 +18,10 @@ import type { RegistrantListFilter } from '@votetorrent/vote-core'
  * column is current; the second join condition below carries that equality
  * and must never be reduced to just the RegistrantId equality alone — a join
  * missing that second condition still runs, still renders, and still passes
- * a single-row fixture while silently serving stale district/name data. This
- * constant is the ONLY place that predicate is written out in
+ * a single-row fixture while silently serving stale district/name data.
+ *
+ * This constant, together with the three POINT-READ constants below, is the
+ * exhaustive set of places that predicate is written out in
  * `packages/vote-engine/src` (excluding the generated `schema-sql.ts`).
  *
  * It is a `left join` (not `inner`) so a registrant with no public tier —
@@ -29,6 +31,37 @@ import type { RegistrantListFilter } from '@votetorrent/vote-core'
  */
 export const REGISTRANT_PUBLIC_CURRENCY_JOIN =
   'left join RegistrantPublic RP on RP.RegistrantId = R.Id and RP.Cid = R.PublicCid'
+
+/**
+ * The same D-06 currency predicate, expressed for a single-registrant POINT
+ * READ rather than for the roster.
+ *
+ * The roster join above drives from `Registrant R` and reaches out to the
+ * tier; a point read drives from the TIER table and reaches back to
+ * `Registrant`, so the join text is genuinely different and cannot be shared
+ * with the roster constant. All three below alias the tier table `T` and the
+ * parent `Registrant R`, so a caller's `from <Tier> T` / `where T.RegistrantId
+ * = :registrantId` composes directly.
+ *
+ * `join`, not `left join`, and that is the point: a point read that finds no
+ * CURRENT tier row must return "no current tier" (undefined), never a
+ * superseded revision. `RegistrantPublic`/`RegistrantPrivate`/
+ * `RegistrantSelective` are all `InsertOnly` with PK `(RegistrantId, Cid)`, so
+ * without these joins a `.get()` returns whichever revision the storage layer
+ * happens to yield first — which on the private tier means the detail screen
+ * could display a superseded SSN/DOB and `recordRegistrantAccessEvent` could
+ * derive its name allowlist from a superseded revision.
+ */
+export const REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN =
+  'join Registrant R on R.Id = T.RegistrantId and R.PublicCid = T.Cid'
+
+/** Point-read D-06 currency join for `RegistrantPrivate` — see the constant above. */
+export const REGISTRANT_PRIVATE_POINT_CURRENCY_JOIN =
+  'join Registrant R on R.Id = T.RegistrantId and R.PrivateCid = T.Cid'
+
+/** Point-read D-06 currency join for `RegistrantSelective` — see the constant above. */
+export const REGISTRANT_SELECTIVE_POINT_CURRENCY_JOIN =
+  'join Registrant R on R.Id = T.RegistrantId and R.SelectiveCid = T.Cid'
 
 export const REGISTRANT_LIST_DEFAULT_PAGE_SIZE = 50
 export const REGISTRANT_LIST_MAX_PAGE_SIZE = 200
