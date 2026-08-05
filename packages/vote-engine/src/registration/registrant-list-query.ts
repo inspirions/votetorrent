@@ -51,6 +51,28 @@ export const REGISTRANT_PUBLIC_CURRENCY_JOIN =
  * happens to yield first — which on the private tier means the detail screen
  * could display a superseded SSN/DOB and `recordRegistrantAccessEvent` could
  * derive its name allowlist from a superseded revision.
+ *
+ * UNPROVEN ON DEVICE (47-REVIEW WR-03) — read this before the next device leg.
+ * These three constants turned five hot single-registrant reads
+ * (`getRegistrantPublic`, `getRegistrantPrivate`, `getRegistrantSelective`,
+ * `getDisclosedSelective`, and the allowlist read inside
+ * `recordRegistrantAccessEvent`, i.e. every access-trail write) from
+ * PK point lookups into joins. The CORRECTNESS argument above is verified; the
+ * EXECUTION argument is not. Whether Quereus's planner pushes
+ * `T.RegistrantId = :registrantId` down into the tier PK prefix and then does a
+ * PK point lookup on `Registrant.Id` — or falls back to scanning `Registrant` —
+ * has only ever been exercised against the Node/in-memory harness, and
+ * `tid-allocator.ts` is explicit that the Optimystic/LevelDB vtab ABORTS full
+ * table scans under concurrent mutation. The roster constant above drives from
+ * `Registrant` and IS device-proven; these drive from the TIER table, which is
+ * a different plan shape and inherits none of that evidence.
+ *
+ * If a device leg shows a scan, the fallback keeps both lookups on their PKs
+ * without giving up currency — read the parent's Cid first, then point-read the
+ * tier by `(RegistrantId, Cid)`:
+ *
+ *   select PrivateCid from Registrant where Id = :registrantId
+ *   select ... from RegistrantPrivate where RegistrantId = :registrantId and Cid = :cid
  */
 export const REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN =
   'join Registrant R on R.Id = T.RegistrantId and R.PublicCid = T.Cid'
