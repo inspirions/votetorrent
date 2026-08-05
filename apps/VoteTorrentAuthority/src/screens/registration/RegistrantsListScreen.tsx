@@ -13,7 +13,12 @@ import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import { scopeDescriptions } from "@votetorrent/vote-core";
-import type { IRegistrationEngine, RegistrantListFilter, RegistrantListRow, RegistrantStatus } from "@votetorrent/vote-core";
+import type {
+	IRegistrationEngine,
+	RegistrantListFilter,
+	RegistrantListRow,
+	RegistrantStatus,
+} from "@votetorrent/vote-core";
 import { REGISTRANT_STATUS_META } from "./registrant-display";
 import { RegistrantRow } from "./components/RegistrantRow";
 import type { RootStackParamList } from "../../navigation/types";
@@ -35,6 +40,40 @@ import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 // — so pages are bounded here instead, keeping a bounded render regardless of
 // roster size.
 const REGISTRANTS_PAGE_SIZE = 25;
+
+/**
+ * Widens the district chip set with the districts carried by a freshly loaded
+ * page. Union, never replace (47-REVIEW IN-05).
+ *
+ * No engine surface enumerates the districts of an authority, so the chip set
+ * can only ever be "districts seen in loaded pages". Replacing the set with
+ * the current FIRST page broke that in two ways the comment did not admit:
+ * applying a status filter that narrowed results to a single district erased
+ * every other chip (leaving the officer no way back), and `loadMore()` never
+ * contributed at all, so a district that first appears on page 2 was never
+ * offered. Both are silent — the chip simply is not there.
+ *
+ * `districtFilter` is unioned in explicitly: when it is set, the engine has
+ * already narrowed the rows to it, and a page that comes back empty (a
+ * status+district intersection with no members) would otherwise let the
+ * active chip disappear from under the officer's selection.
+ *
+ * Returns `prev` by identity when nothing new appeared, so a page of
+ * already-known districts does not force a re-render.
+ */
+function widenDistrictOptions(
+	prev: string[],
+	rows: readonly RegistrantListRow[],
+	districtFilter: string | undefined
+): string[] {
+	const next = new Set(prev);
+	for (const row of rows) {
+		if (row.district) next.add(row.district);
+	}
+	if (districtFilter !== undefined) next.add(districtFilter);
+	// prev is deduped by construction, so equal sizes means nothing was added.
+	return next.size === prev.length ? prev : Array.from(next).sort();
+}
 
 /**
  * RegistrantsListScreen — the roster surface every other Phase 47 registrant
@@ -108,7 +147,14 @@ export default function RegistrantsListScreen() {
 		// authorityId is ALWAYS supplied — 47-05's T-47-05a accepts an omitted
 		// authorityId as a whole-database read, and this screen must never
 		// trigger that.
-	}, [authorityId, electionFilter?.electionId, statusFilter, districtFilter, expiringBefore, appliedName]);
+	}, [
+		authorityId,
+		electionFilter?.electionId,
+		statusFilter,
+		districtFilter,
+		expiringBefore,
+		appliedName,
+	]);
 
 	const loadFirstPage = useCallback(async () => {
 		setLoadingInitial(true);
@@ -119,7 +165,9 @@ export default function RegistrantsListScreen() {
 			// the count query, and it happens exactly once per filter change
 			// because this callback's identity only changes when a filter
 			// primitive changes (buildFilter's own dep array).
-			const result = await engine.listRegistrants(buildFilter(), { pageSize: REGISTRANTS_PAGE_SIZE });
+			const result = await engine.listRegistrants(buildFilter(), {
+				pageSize: REGISTRANTS_PAGE_SIZE,
+			});
 			if (unmountedRef.current) return;
 			setRows(result.rows);
 			setNextCursor(result.nextCursor);
@@ -130,19 +178,9 @@ export default function RegistrantsListScreen() {
 			setTotal(result.total);
 
 			// Honest limitation: no engine surface enumerates districts, so the
-			// chip set reflects districts seen in loaded pages only.
-			if (districtFilter === undefined) {
-				const distinct = Array.from(
-					new Set(result.rows.map((r) => r.district).filter((d): d is string => !!d)),
-				).sort();
-				setDistrictOptions(distinct);
-			} else {
-				// districtFilter IS set — leave districtOptions untouched and merely
-				// union in districtFilter, otherwise selecting a district would
-				// collapse the chip set to that one district and strand the
-				// officer with no way to switch back.
-				setDistrictOptions((prev) => (prev.includes(districtFilter) ? prev : [...prev, districtFilter].sort()));
-			}
+			// chip set reflects districts seen in loaded pages only — hence
+			// union, never replace (see widenDistrictOptions).
+			setDistrictOptions((prev) => widenDistrictOptions(prev, result.rows, districtFilter));
 		} catch (err) {
 			// The caught error's message is rendered as-is, but the filter
 			// object, the officer's typed search term and the district value are
@@ -173,6 +211,9 @@ export default function RegistrantsListScreen() {
 			if (unmountedRef.current) return;
 			setRows((prev) => [...prev, ...result.rows]);
 			setNextCursor(result.nextCursor);
+			// A later page can carry districts the first page never showed, so
+			// every appended page widens the chip set too (47-REVIEW IN-05).
+			setDistrictOptions((prev) => widenDistrictOptions(prev, result.rows, districtFilter));
 			// Deliberately NOT touching `total` here: a cursored call always
 			// returns `total: undefined` (47-05's contract), so assigning it
 			// would blank a perfectly good count on the second page.
@@ -195,13 +236,19 @@ export default function RegistrantsListScreen() {
 	}
 
 	const hasActiveFilters =
-		statusFilter !== undefined || districtFilter !== undefined || expiringBefore !== "" || appliedName !== undefined;
+		statusFilter !== undefined ||
+		districtFilter !== undefined ||
+		expiringBefore !== "" ||
+		appliedName !== undefined;
 	// electionFilter deliberately does NOT count as an active filter — it
 	// arrives from the route and is the screen's identity, not something the
 	// officer can clear.
 
 	return (
-		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
+		<ScrollView
+			style={styles.container}
+			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+		>
 			<View style={styles.section} testID="registrants-list-error">
 				<InlineError message={errorMessage} />
 			</View>
@@ -297,7 +344,9 @@ export default function RegistrantsListScreen() {
 									<ChipButton
 										label={option}
 										icon={option === districtFilter ? "check" : undefined}
-										onPress={() => setDistrictFilter((prev) => (prev === option ? undefined : option))}
+										onPress={() =>
+											setDistrictFilter((prev) => (prev === option ? undefined : option))
+										}
 									/>
 								</View>
 							))}
@@ -343,7 +392,9 @@ export default function RegistrantsListScreen() {
 					</View>
 				) : (
 					<View testID="registrants-list-empty-none">
-						<ThemedText type="defaultSemiBold">{t("registrantListEmptyHeadingNoFilters")}</ThemedText>
+						<ThemedText type="defaultSemiBold">
+							{t("registrantListEmptyHeadingNoFilters")}
+						</ThemedText>
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
 							{t("registrantListEmptyBodyNoFilters")}
 						</ThemedText>
@@ -361,7 +412,10 @@ export default function RegistrantsListScreen() {
 						// name. React Navigation params are persisted into navigation
 						// state and can surface in crash/debug payloads (T-47-11-03).
 						onPress={() =>
-							navigation.navigate("RegistrantDetail", { registrantId: row.registrantId, authorityId })
+							navigation.navigate("RegistrantDetail", {
+								registrantId: row.registrantId,
+								authorityId,
+							})
 						}
 					/>
 				))

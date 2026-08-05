@@ -45,7 +45,10 @@ const mockGetEngine = jest.fn(async (name: string): Promise<any> => {
 	return null;
 });
 
-let mockRouteParams: { authorityId: string; electionFilter?: { electionId: string; electionTitle?: string } } = {
+let mockRouteParams: {
+	authorityId: string;
+	electionFilter?: { electionId: string; electionTitle?: string };
+} = {
 	authorityId: "auth-1",
 };
 
@@ -79,8 +82,8 @@ jest.mock("react-i18next", () => ({
 		t: (key: string, options?: Record<string, unknown>) =>
 			options && Object.keys(options).length > 0
 				? key +
-					"|" +
-					Object.entries(options)
+				  "|" +
+				  Object.entries(options)
 						.map(([k, v]) => k + "=" + String(v))
 						.join(",")
 				: key,
@@ -141,9 +144,9 @@ jest.mock("../../../providers/AppProvider", () => ({
 // guard below).
 // ---------------------------------------------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { MockRegistrationEngine } = require(
-	"../../../../../../packages/vote-engine/dist/registration/mock-registration-engine",
-);
+const {
+	MockRegistrationEngine,
+} = require("../../../../../../packages/vote-engine/dist/registration/mock-registration-engine");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { ChipButton } = require("../../../components/ChipButton");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -173,7 +176,8 @@ async function flushTicks(count: number): Promise<void> {
 async function renderScreen(): Promise<renderer.ReactTestRenderer> {
 	// eslint-disable-next-line @typescript-eslint/no-var-requires
 	const RegistrantsListScreenModule = require("../RegistrantsListScreen");
-	const RegistrantsListScreen = RegistrantsListScreenModule.default ?? RegistrantsListScreenModule.RegistrantsListScreen;
+	const RegistrantsListScreen =
+		RegistrantsListScreenModule.default ?? RegistrantsListScreenModule.RegistrantsListScreen;
 
 	let tr!: renderer.ReactTestRenderer;
 	await renderer.act(async () => {
@@ -198,7 +202,7 @@ async function renderScreen(): Promise<renderer.ReactTestRenderer> {
 async function press(tr: renderer.ReactTestRenderer, testID: string): Promise<void> {
 	const wrapper = tr.root.findByProps({ testID });
 	const candidates = wrapper.findAll(
-		(node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function",
+		(node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function"
 	);
 	expect(candidates.length).toBeGreaterThan(0);
 	const target = candidates[0]!;
@@ -260,7 +264,10 @@ function chipIcon(tr: renderer.ReactTestRenderer, containerTestID: string): stri
 }
 
 /** The live `TextInput` node under the search field's wrapping View (CustomTextInput does not forward `testID` to itself). */
-function findTextInput(tr: renderer.ReactTestRenderer, containerTestID: string): renderer.ReactTestInstance {
+function findTextInput(
+	tr: renderer.ReactTestRenderer,
+	containerTestID: string
+): renderer.ReactTestInstance {
 	const wrapper = tr.root.findByProps({ testID: containerTestID });
 	const candidates = wrapper.findAll((node) => typeof node.props.onChangeText === "function");
 	expect(candidates.length).toBeGreaterThan(0);
@@ -289,17 +296,20 @@ async function seedRegistrant(
 		district?: string;
 		expiration?: string;
 		status?: "a" | "s" | "r";
-	},
+	}
 ): Promise<void> {
-	const hasPublic = args.lastName !== undefined || args.firstName !== undefined || args.district !== undefined;
+	const hasPublic =
+		args.lastName !== undefined || args.firstName !== undefined || args.district !== undefined;
 	const expiration = args.expiration ?? FUTURE_EXPIRATION;
 	await engine.register(
 		{
 			registrant: { id: args.id, authorityId: args.authorityId, expiration },
-			public: hasPublic ? { lastName: args.lastName, firstName: args.firstName, district: args.district } : undefined,
+			public: hasPublic
+				? { lastName: args.lastName, firstName: args.firstName, district: args.district }
+				: undefined,
 			private: { expiration, details: {} },
 		},
-		SEED_SIGN,
+		SEED_SIGN
 	);
 	if (args.status !== undefined && args.status !== "a") {
 		await engine.changeStatus(args.id, args.status, SEED_SIGN);
@@ -339,7 +349,9 @@ function makePagingProxy(realEngine: any, pageSize: number) {
 beforeEach(() => {
 	jest.clearAllMocks();
 	mockRegistrationEngine = new MockRegistrationEngine();
-	mockOfficers = [{ userId: "device-user-1", authorityId: "auth-1", title: "Chair", scopes: ["vrg"] }];
+	mockOfficers = [
+		{ userId: "device-user-1", authorityId: "auth-1", title: "Chair", scopes: ["vrg"] },
+	];
 	mockRouteParams = { authorityId: "auth-1" };
 	// Do NOT call jest.resetModules() — that would break the cached dist
 	// require and the mock factory closures (RegistrationPolicyScreen.test.tsx's
@@ -366,8 +378,18 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 	// -------------------------------------------------------------------------
 
 	it("D-04: one row per registrant, with a truncated-id fallback when no public tier exists", async () => {
-		await seedRegistrant(mockRegistrationEngine, { id: "r-01", authorityId: "auth-1", lastName: "Doe", firstName: "Jane" });
-		await seedRegistrant(mockRegistrationEngine, { id: "r-02", authorityId: "auth-1", lastName: "Smith", firstName: "Sam" });
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-01",
+			authorityId: "auth-1",
+			lastName: "Doe",
+			firstName: "Jane",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-02",
+			authorityId: "auth-1",
+			lastName: "Smith",
+			firstName: "Sam",
+		});
 		await seedRegistrant(mockRegistrationEngine, { id: "r-03zzzzzzzzz", authorityId: "auth-1" }); // no public tier
 
 		const tr = await renderScreen();
@@ -392,7 +414,7 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 		const tr = await renderScreen();
 
 		expect(JSON.stringify(findJsonNodeByTestID(tr.toJSON(), "registrants-list-count"))).toContain(
-			"registrantListCountLabel|shown=3,total=3",
+			"registrantListCountLabel|shown=3,total=3"
 		);
 	});
 
@@ -424,7 +446,7 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 		// regression a naive setTotal(result.total) in loadMore would break,
 		// since a cursored call returns total: undefined.
 		expect(JSON.stringify(findJsonNodeByTestID(tr.toJSON(), "registrants-list-count"))).toContain(
-			"registrantListCountLabel|shown=6,total=7",
+			"registrantListCountLabel|shown=6,total=7"
 		);
 
 		// (d) press Load More once more -> 7 rows, End of list renders, Load
@@ -452,9 +474,27 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 		// `listRegistrants` on the registration engine, so this double needs no
 		// other method.
 		const rows = [
-			{ registrantId: "r-01", authorityId: "auth-1", status: "a", expiration: FUTURE_EXPIRATION, privateCid: "p1" },
-			{ registrantId: "r-02", authorityId: "auth-1", status: "a", expiration: FUTURE_EXPIRATION, privateCid: "p2" },
-			{ registrantId: "r-03", authorityId: "auth-1", status: "a", expiration: FUTURE_EXPIRATION, privateCid: "p3" },
+			{
+				registrantId: "r-01",
+				authorityId: "auth-1",
+				status: "a",
+				expiration: FUTURE_EXPIRATION,
+				privateCid: "p1",
+			},
+			{
+				registrantId: "r-02",
+				authorityId: "auth-1",
+				status: "a",
+				expiration: FUTURE_EXPIRATION,
+				privateCid: "p2",
+			},
+			{
+				registrantId: "r-03",
+				authorityId: "auth-1",
+				status: "a",
+				expiration: FUTURE_EXPIRATION,
+				privateCid: "p3",
+			},
 		];
 		mockRegistrationEngine = {
 			async listRegistrants(_filter: any, _page: any) {
@@ -466,10 +506,12 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 
 		expect(rowIds(tr)).toEqual(["r-01", "r-02", "r-03"]);
 		expect(JSON.stringify(findJsonNodeByTestID(tr.toJSON(), "registrants-list-count"))).toContain(
-			"registrantListCountUnknown|shown=3",
+			"registrantListCountUnknown|shown=3"
 		);
 		// InlineError renders `null` for an empty message — no error surfaced.
-		const errorNode = findJsonNodeByTestID(tr.toJSON(), "registrants-list-error") as { children?: unknown } | null;
+		const errorNode = findJsonNodeByTestID(tr.toJSON(), "registrants-list-error") as {
+			children?: unknown;
+		} | null;
 		expect(errorNode?.children ?? null).toBeNull();
 		absent(tr, "registrants-list-empty-none");
 		absent(tr, "registrants-list-empty-filtered");
@@ -480,10 +522,30 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 	// -------------------------------------------------------------------------
 
 	it("D-04: status is single-select, district ANDs with status, and All Statuses restores the full set", async () => {
-		await seedRegistrant(mockRegistrationEngine, { id: "r-01", authorityId: "auth-1", district: "D1", status: "a" });
-		await seedRegistrant(mockRegistrationEngine, { id: "r-02", authorityId: "auth-1", district: "D1", status: "s" });
-		await seedRegistrant(mockRegistrationEngine, { id: "r-03", authorityId: "auth-1", district: "D2", status: "s" });
-		await seedRegistrant(mockRegistrationEngine, { id: "r-04", authorityId: "auth-1", district: "D2", status: "r" });
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-01",
+			authorityId: "auth-1",
+			district: "D1",
+			status: "a",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-02",
+			authorityId: "auth-1",
+			district: "D1",
+			status: "s",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-03",
+			authorityId: "auth-1",
+			district: "D2",
+			status: "s",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-04",
+			authorityId: "auth-1",
+			district: "D2",
+			status: "r",
+		});
 
 		const tr = await renderScreen();
 		expect(rowIds(tr)).toEqual(["r-01", "r-02", "r-03", "r-04"]);
@@ -516,12 +578,109 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 	});
 
 	// -------------------------------------------------------------------------
+	// IN-05: the district chip set widens, it never narrows
+	// -------------------------------------------------------------------------
+
+	it("IN-05: a status filter that narrows the rows to one district keeps every district chip", async () => {
+		// D1 holds the only two active registrants; D2 holds the only suspended
+		// one. Filtering to Suspended therefore returns a first page whose rows
+		// are entirely D2 — the exact shape that used to REPLACE the chip set
+		// with {D2} and leave the officer no D1 chip to switch back to.
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-01",
+			authorityId: "auth-1",
+			district: "D1",
+			status: "a",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-02",
+			authorityId: "auth-1",
+			district: "D1",
+			status: "a",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-03",
+			authorityId: "auth-1",
+			district: "D2",
+			status: "s",
+		});
+
+		const tr = await renderScreen();
+		present(tr, "registrants-list-filter-district-D1");
+		present(tr, "registrants-list-filter-district-D2");
+
+		await press(tr, "registrants-list-filter-status-s");
+		expect(rowIds(tr)).toEqual(["r-03"]);
+		present(tr, "registrants-list-filter-district-D1");
+		present(tr, "registrants-list-filter-district-D2");
+
+		// And the officer really can still get back to D1 through the surviving chip.
+		await press(tr, "registrants-list-filter-status-all");
+		await press(tr, "registrants-list-filter-district-D1");
+		expect(rowIds(tr)).toEqual(["r-01", "r-02"]);
+	});
+
+	it("IN-05: Load More contributes the districts that only appear on a later page", async () => {
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-01",
+			authorityId: "auth-1",
+			district: "D1",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-02",
+			authorityId: "auth-1",
+			district: "D1",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-03",
+			authorityId: "auth-1",
+			district: "D3",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-04",
+			authorityId: "auth-1",
+			district: "D4",
+		});
+		const { engine: proxyEngine } = makePagingProxy(mockRegistrationEngine, 2);
+		mockRegistrationEngine = proxyEngine;
+
+		const tr = await renderScreen();
+
+		// Page 1 is D1-only, so D3/D4 are not offerable yet — an honest chip set.
+		expect(rowIds(tr)).toEqual(["r-01", "r-02"]);
+		present(tr, "registrants-list-filter-district-D1");
+		absent(tr, "registrants-list-filter-district-D3");
+		absent(tr, "registrants-list-filter-district-D4");
+
+		// Page 2 introduces D3 and D4; page 1's D1 chip must survive.
+		await press(tr, "registrants-list-load-more");
+		expect(rowIds(tr)).toEqual(["r-01", "r-02", "r-03", "r-04"]);
+		present(tr, "registrants-list-filter-district-D1");
+		present(tr, "registrants-list-filter-district-D3");
+		present(tr, "registrants-list-filter-district-D4");
+
+		// The newly-offered chip is a working filter, not just a label.
+		await press(tr, "registrants-list-filter-district-D3");
+		expect(rowIds(tr)).toEqual(["r-03"]);
+	});
+
+	// -------------------------------------------------------------------------
 	// D-04 name search applies on submit only
 	// -------------------------------------------------------------------------
 
 	it("D-04: name search applies on submit, never per keystroke, with no debounce timer", async () => {
-		await seedRegistrant(mockRegistrationEngine, { id: "r-01", authorityId: "auth-1", lastName: "Smith", firstName: "Ann" });
-		await seedRegistrant(mockRegistrationEngine, { id: "r-02", authorityId: "auth-1", lastName: "Jones", firstName: "Bob" });
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-01",
+			authorityId: "auth-1",
+			lastName: "Smith",
+			firstName: "Ann",
+		});
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-02",
+			authorityId: "auth-1",
+			lastName: "Jones",
+			firstName: "Bob",
+		});
 
 		const listSpy = jest.spyOn(mockRegistrationEngine, "listRegistrants");
 		const tr = await renderScreen();
@@ -553,7 +712,12 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 		present(trEmpty, "registrants-list-empty-none");
 		absent(trEmpty, "registrants-list-empty-filtered");
 
-		await seedRegistrant(mockRegistrationEngine, { id: "r-01", authorityId: "auth-1", lastName: "Smith", firstName: "Ann" });
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-01",
+			authorityId: "auth-1",
+			lastName: "Smith",
+			firstName: "Ann",
+		});
 		const trFiltered = await renderScreen();
 		await submitSearch(trFiltered, "zzz-no-match");
 		present(trFiltered, "registrants-list-empty-filtered");
@@ -565,7 +729,10 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 	// -------------------------------------------------------------------------
 
 	it("D-07: an electionFilter route param pre-applies electionId and titles the screen — same screen, no second route", async () => {
-		mockRouteParams = { authorityId: "auth-1", electionFilter: { electionId: "e-1", electionTitle: "Spring" } };
+		mockRouteParams = {
+			authorityId: "auth-1",
+			electionFilter: { electionId: "e-1", electionTitle: "Spring" },
+		};
 		await seedRegistrant(mockRegistrationEngine, { id: "r-01", authorityId: "auth-1" });
 		await seedRegistrant(mockRegistrationEngine, { id: "r-02", authorityId: "auth-1" });
 		await mockRegistrationEngine.enrollElectionRegistrant("e-1", "r-01", SEED_SIGN);
@@ -586,7 +753,10 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 	});
 
 	it("D-07: an election filter with zero enrolled registrants renders empty-none, NOT empty-filtered", async () => {
-		mockRouteParams = { authorityId: "auth-1", electionFilter: { electionId: "e-1", electionTitle: "Spring" } };
+		mockRouteParams = {
+			authorityId: "auth-1",
+			electionFilter: { electionId: "e-1", electionTitle: "Spring" },
+		};
 		await seedRegistrant(mockRegistrationEngine, { id: "r-01", authorityId: "auth-1" }); // not enrolled
 
 		const tr = await renderScreen();
@@ -609,17 +779,23 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 		expect(rowIds(trNoOfficer)).toEqual(["r-01"]);
 
 		// An officer holding a scope other than 'vrg'.
-		mockOfficers = [{ userId: "device-user-1", authorityId: "auth-1", title: "Clerk", scopes: ["mel"] }];
+		mockOfficers = [
+			{ userId: "device-user-1", authorityId: "auth-1", title: "Clerk", scopes: ["mel"] },
+		];
 		const trWrongScope = await renderScreen();
 		present(trWrongScope, "registrants-list-readonly-banner");
 		absent(trWrongScope, "registrants-list-readonly-no-officer-banner");
 		// The interpolation-echoing t() proves scopeDescriptions.vrg was
 		// actually bound, proving the gate checks 'vrg' and not some other scope.
-		expect(treeText(trWrongScope)).toContain("registrantScopeReadOnlyBanner|scope=Validate registrations");
+		expect(treeText(trWrongScope)).toContain(
+			"registrantScopeReadOnlyBanner|scope=Validate registrations"
+		);
 		expect(rowIds(trWrongScope)).toEqual(["r-01"]);
 
 		// An officer holding 'vrg'.
-		mockOfficers = [{ userId: "device-user-1", authorityId: "auth-1", title: "Chair", scopes: ["vrg"] }];
+		mockOfficers = [
+			{ userId: "device-user-1", authorityId: "auth-1", title: "Chair", scopes: ["vrg"] },
+		];
 		const trWithScope = await renderScreen();
 		absent(trWithScope, "registrants-list-readonly-banner");
 		absent(trWithScope, "registrants-list-readonly-no-officer-banner");
@@ -631,13 +807,21 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 	// -------------------------------------------------------------------------
 
 	it("T-47-11-03: pressing a row navigates with {registrantId, authorityId} ONLY — an exact deep-equality assertion", async () => {
-		await seedRegistrant(mockRegistrationEngine, { id: "r-01", authorityId: "auth-1", lastName: "Doe", firstName: "Jane" });
+		await seedRegistrant(mockRegistrationEngine, {
+			id: "r-01",
+			authorityId: "auth-1",
+			lastName: "Doe",
+			firstName: "Jane",
+		});
 		const tr = await renderScreen();
 
 		await press(tr, "registrant-row-r-01");
 
 		expect(mockNavigate).toHaveBeenCalledTimes(1);
-		expect(mockNavigate).toHaveBeenCalledWith("RegistrantDetail", { registrantId: "r-01", authorityId: "auth-1" });
+		expect(mockNavigate).toHaveBeenCalledWith("RegistrantDetail", {
+			registrantId: "r-01",
+			authorityId: "auth-1",
+		});
 	});
 
 	// -------------------------------------------------------------------------
@@ -659,7 +843,9 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 		});
 		await flushTicks(2);
 
-		jest.spyOn(mockRegistrationEngine, "listRegistrants").mockRejectedValue(new Error("listRegistrants failed"));
+		jest
+			.spyOn(mockRegistrationEngine, "listRegistrants")
+			.mockRejectedValue(new Error("listRegistrants failed"));
 
 		await renderer.act(async () => {
 			input.props.onSubmitEditing();
@@ -673,7 +859,11 @@ describe("RegistrantsListScreen — D-04/D-05/D-07/D-13 (47-11)", () => {
 		const occurrences = treeText(tr).split(SENTINEL).length - 1;
 		expect(occurrences).toBe(1);
 
-		const allConsoleCalls = [...consoleWarnSpy.mock.calls, ...consoleErrorSpy.mock.calls, ...consoleLogSpy.mock.calls];
+		const allConsoleCalls = [
+			...consoleWarnSpy.mock.calls,
+			...consoleErrorSpy.mock.calls,
+			...consoleLogSpy.mock.calls,
+		];
 		for (const call of allConsoleCalls) {
 			expect(JSON.stringify(call)).not.toContain(SENTINEL);
 		}
