@@ -122,29 +122,38 @@ function seedCompletionKey(networkHash: string): string {
 }
 
 /**
- * SEED_PRIVATE_LITERALS — the EXHAUSTIVE list of every private-tier VALUE
- * this fixture writes (36 = 12 registrants x 3 fields). This is the grep
- * corpus 47-23 Task 2's leg B logcat/Metro check uses; exporting it as a
- * single source of truth means the grep list can never drift from the
- * fixture. Every value is drawn from a reserved/never-issued range so it is
- * realistic in SHAPE (the reveal UI renders what an officer would really
- * see) but cannot collide with real data and is unambiguous as a grep
- * token:
+ * seedPrivateLiterals() — the EXHAUSTIVE list of every private-tier VALUE this
+ * fixture writes (36 = 12 registrants x 3 fields). This is the grep corpus
+ * 47-23 Task 2's leg B logcat/Metro check uses; exposing it as a single source
+ * of truth means the grep list can never drift from the fixture. Every value
+ * is drawn from a reserved/never-issued range so it is realistic in SHAPE (the
+ * reveal UI renders what an officer would really see) but cannot collide with
+ * real data and is unambiguous as a grep token:
  *   - SSN: the `900-86-XXXX` block (the 900-series is never issued by SSA).
  *   - DateOfBirth: `1970-01-XX` (an arbitrary but plausible epoch-adjacent date).
  *   - Phone: `+1-555-01XX` (the `555-0100`..`555-0199` fiction-reserved block).
- * A change to this constant requires re-running Task 2's leg B logcat check
- * — the grep list and the fixture's actual writes must never diverge.
+ * A change here requires re-running Task 2's leg B logcat check — the grep
+ * list and the fixture's actual writes must never diverge.
+ *
+ * A FUNCTION, not a module-level `const` built by an IIFE (47-REVIEW WR-11).
+ * The IIFE form executed at IMPORT time, so a release bundle built and held 36
+ * synthetic SSN/DOB/phone strings in memory on every cold start, for a module
+ * whose entire body is gated off in release. Memoised, so the seed's own
+ * repeated calls still build the list once.
  */
-export const SEED_PRIVATE_LITERALS: readonly string[] = (() => {
+let seedPrivateLiteralsCache: readonly string[] | undefined
+
+export function seedPrivateLiterals(): readonly string[] {
+	if (seedPrivateLiteralsCache !== undefined) return seedPrivateLiteralsCache
 	const literals: string[] = []
 	for (let i = 0; i < REGISTRANT_COUNT; i++) {
 		literals.push(`900-86-${String(4000 + i).padStart(4, '0')}`) // SSN
 		literals.push(`1970-01-${String(10 + i).padStart(2, '0')}`) // DateOfBirth
 		literals.push(`+1-555-01${String(10 + i).padStart(2, '0')}`) // Phone
 	}
-	return literals
-})()
+	seedPrivateLiteralsCache = literals
+	return seedPrivateLiteralsCache
+}
 
 /** Deterministic per-index registrant id. */
 function registrantId(i: number): string {
@@ -165,12 +174,13 @@ const FIRST_NAMES = [
 	'Gia', 'Hugo', 'Iris', 'Jax', 'Kira', 'Leo',
 ]
 
-/** Per-index private-tier values (SSN/DateOfBirth/Phone) — sourced from SEED_PRIVATE_LITERALS, never re-derived. */
+/** Per-index private-tier values (SSN/DateOfBirth/Phone) — sourced from seedPrivateLiterals(), never re-derived. */
 function privateDetailsFor(i: number): PrivateDetail[] {
+	const literals = seedPrivateLiterals()
 	return [
-		{ name: 'SSN', value: SEED_PRIVATE_LITERALS[i * 3]! },
-		{ name: 'DateOfBirth', value: SEED_PRIVATE_LITERALS[i * 3 + 1]! },
-		{ name: 'Phone', value: SEED_PRIVATE_LITERALS[i * 3 + 2]! },
+		{ name: 'SSN', value: literals[i * 3]! },
+		{ name: 'DateOfBirth', value: literals[i * 3 + 1]! },
+		{ name: 'Phone', value: literals[i * 3 + 2]! },
 	]
 }
 
@@ -199,8 +209,29 @@ export interface SeedRegistrantFixturesResult {
 /**
  * Seed (or, if already seeded, report) the registrant fixtures against an
  * ALREADY-OPEN network. `__DEV__`-guarded with a throw (voter `dev-seed.ts`
- * precedent) so Metro dead-code-eliminates this from a release bundle and a
- * release build can never reach it even if the flag were mistakenly left on.
+ * precedent) so a release build can never reach it even if the flag were
+ * mistakenly left on.
+ *
+ * RUNTIME-GUARDED, NOT ELIMINATED (47-REVIEW WR-11). An earlier version of
+ * this comment claimed Metro strips this module from a release bundle as dead
+ * code. It does not, and believing otherwise would be the wrong basis for
+ * deciding what may live here:
+ *   - `AppProvider.tsx` imports `maybeSeedRegistrantFixtures` statically, so
+ *     this module is in the release module graph unconditionally.
+ *   - Metro does not tree-shake by default; only `if (__DEV__)`-shaped
+ *     BRANCHES are collapsed by the minifier. `seedRegistrantFixtures`,
+ *     `SeedRegistrantFixturesResult`, `reattachSummary` and
+ *     `seedPrivateLiterals` all survive into the release bundle.
+ * What IS true: the throw guard below plus `maybeSeedRegistrantFixtures`'
+ * `__DEV__ && REGISTRANT_SEED_ENABLED` gate mean nothing here EXECUTES in
+ * release. `seedPrivateLiterals()` was converted from a module-level IIFE to a
+ * memoised function for the same reason — as an IIFE it really did build its
+ * 36 synthetic strings at import time in release.
+ *
+ * The fixture's 12 names and its literal generator therefore ship in the
+ * release binary as inert code. The values are drawn from reserved/never-
+ * issued ranges so they are not real PII; that is the actual mitigation, not
+ * elimination.
  *
  * `networksEngine` is caller-supplied so this module stays DB-factory-
  * agnostic, mirroring the voter seed's `networksEngine` parameter.

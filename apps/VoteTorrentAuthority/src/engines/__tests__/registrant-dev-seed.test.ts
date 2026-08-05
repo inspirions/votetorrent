@@ -33,7 +33,7 @@ import type { NetworksEngine } from '@votetorrent/vote-engine/rn'
 import {
 	maybeSeedRegistrantFixtures,
 	seedRegistrantFixtures,
-	SEED_PRIVATE_LITERALS,
+	seedPrivateLiterals,
 } from '../registrant-dev-seed'
 
 const MODULE_PATH = path.join(__dirname, '../registrant-dev-seed.ts')
@@ -267,18 +267,44 @@ describe('registrant-dev-seed — Phase 47-23 Task 1 static contract', () => {
 		}
 	})
 
-	it('SEED_PRIVATE_LITERALS are all drawn from reserved ranges', () => {
-		expect(SEED_PRIVATE_LITERALS.length).toBe(36)
-		expect(new Set(SEED_PRIVATE_LITERALS).size).toBe(SEED_PRIVATE_LITERALS.length)
+	it('seedPrivateLiterals() values are all drawn from reserved ranges', () => {
+		const literals = seedPrivateLiterals()
+		expect(literals.length).toBe(36)
+		expect(new Set(literals).size).toBe(literals.length)
 
 		const ssnPattern = /^900-86-\d{4}$/
 		const dobPattern = /^1970-01-\d{2}$/
 		const phonePattern = /^\+1-555-01\d{2}$/
 
-		for (const literal of SEED_PRIVATE_LITERALS) {
+		for (const literal of literals) {
 			const matchesOne = ssnPattern.test(literal) || dobPattern.test(literal) || phonePattern.test(literal)
 			expect(matchesOne).toBe(true)
 		}
+
+		// Memoised: the seed calls this once per registrant, so it must not
+		// rebuild the list 12 times — and it must return the SAME array.
+		expect(seedPrivateLiterals()).toBe(literals)
+	})
+
+	it('the private literals are built LAZILY, never by a module-level IIFE (WR-11)', () => {
+		// The defect: `export const SEED_PRIVATE_LITERALS = (() => { ... })()`
+		// executed at IMPORT time. AppProvider imports this module statically and
+		// Metro does not tree-shake, so a release build really did construct and
+		// hold all 36 synthetic SSN/DOB/phone strings on every cold start, for a
+		// module whose whole body is gated off in release.
+		expect(MODULE_SOURCE).not.toContain('SEED_PRIVATE_LITERALS')
+		// No module-level (column-0) IIFE of any kind in this module.
+		expect(MODULE_SOURCE.split('\n').filter((line) => /^(export )?const \w+.*=\s*\(\(\)\s*=>/.test(line))).toEqual([])
+	})
+
+	it('the DCE claim in the module header is not restated (WR-11)', () => {
+		// The header used to assert Metro "dead-code-eliminates this from a
+		// release bundle". It does not — the module is statically imported by
+		// AppProvider and Metro does not tree-shake by default. Believing that
+		// claim is the wrong basis for deciding what may live in this file, so
+		// the wording must not come back.
+		expect(MODULE_SOURCE).not.toMatch(/dead-code-eliminates this/)
+		expect(MODULE_SOURCE).toMatch(/RUNTIME-GUARDED, NOT ELIMINATED/)
 	})
 
 	it('the module logs no private literal', () => {
@@ -288,7 +314,7 @@ describe('registrant-dev-seed — Phase 47-23 Task 1 static contract', () => {
 		// vacuously true and prove nothing).
 		expect(consoleLines.length).toBeGreaterThan(0)
 
-		for (const literal of SEED_PRIVATE_LITERALS) {
+		for (const literal of seedPrivateLiterals()) {
 			for (const line of consoleLines) {
 				expect(line.includes(literal)).toBe(false)
 			}
