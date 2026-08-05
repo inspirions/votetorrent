@@ -14,6 +14,7 @@ import { useApp } from "../../../providers/AppProvider";
 import { createDeviceSigner } from "../../../engines/device-signer";
 import { LifecycleConfirmCard } from "./LifecycleConfirmCard";
 import { VerdictBadge } from "./VerdictBadge";
+import { latestVerdictByDeviceKey } from "./verdicts";
 
 /**
  * AttestationChallengesSection — the D-11 inspect + expire surface on
@@ -63,29 +64,6 @@ import { VerdictBadge } from "./VerdictBadge";
 // callback can fire even from a direct programmatic invocation of the
 // handler, not just from a blocked touch event.
 const NOOP = () => {};
-
-/**
- * latestVerdictByDeviceKey — reduces a registrant's full verdict list to the
- * single latest verdict per deviceKey. 47-08 locks the read ordering to
- * `deviceKey` ascending then `sequence` ascending, so folding left-to-right
- * and overwriting each key means the LAST row per key wins and equals the
- * most recent verdict. The `>=` sequence comparison below is a defensive
- * belt-and-suspenders check, not a re-derivation of that ordering contract:
- * it keeps this helper correct even if a future engine change relaxes the
- * `order by` clause, at negligible cost.
- */
-export function latestVerdictByDeviceKey(
-	verdicts: readonly AttestationVerdict[],
-): Record<string, AttestationVerdict> {
-	const result: Record<string, AttestationVerdict> = {};
-	for (const verdict of verdicts) {
-		const existing = result[verdict.deviceKey];
-		if (!existing || verdict.sequence >= existing.sequence) {
-			result[verdict.deviceKey] = verdict;
-		}
-	}
-	return result;
-}
 
 /**
  * toDisplayTimestamp — the display-ready string VerdictBadge and the expiry
@@ -141,7 +119,7 @@ export function AttestationChallengesSection({
 	// Default-open per the phase's default-open collapsible group.
 	const [expanded, setExpanded] = useState(true);
 	const [challenges, setChallenges] = useState<AttestationChallenge[]>([]);
-	const [verdicts, setVerdicts] = useState<Record<string, AttestationVerdict>>({});
+	const [verdicts, setVerdicts] = useState<Map<string, AttestationVerdict>>(new Map());
 	const [loading, setLoading] = useState(true);
 	const [errorMessage, setErrorMessage] = useState("");
 	// The FULL nonce of the challenge whose confirmation is open — a single
@@ -181,7 +159,7 @@ export function AttestationChallengesSection({
 				const verdictRows = await engine.getAttestationVerdicts(registrantId);
 				if (!unmountedRef.current) setVerdicts(latestVerdictByDeviceKey(verdictRows));
 			} catch {
-				if (!unmountedRef.current) setVerdicts({});
+				if (!unmountedRef.current) setVerdicts(new Map());
 			}
 		} catch (err) {
 			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -273,7 +251,7 @@ export function AttestationChallengesSection({
 
 					{!loading &&
 						challenges.map((c) => {
-							const v = verdicts[c.deviceKey];
+							const v = verdicts.get(c.deviceKey);
 							const expireDisabled = !canWrite;
 							return (
 								<View

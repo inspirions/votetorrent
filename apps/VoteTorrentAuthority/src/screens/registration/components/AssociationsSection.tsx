@@ -14,6 +14,7 @@ import { createDeviceSigner } from "../../../engines/device-signer";
 import { useCurrentOfficerScopes } from "../../../hooks/useCurrentOfficerScopes";
 import { LifecycleConfirmCard } from "./LifecycleConfirmCard";
 import { VerdictBadge } from "./VerdictBadge";
+import { latestVerdictByDeviceKey } from "./verdicts";
 
 /**
  * AssociationsSection — the default-open "Associated Devices" collapsible on
@@ -70,27 +71,6 @@ export function formatTimestamp(value: string | number | undefined): string | un
 	const ms = typeof value === "number" ? value : Date.parse(value);
 	if (Number.isNaN(ms)) return undefined;
 	return formatDate(ms);
-}
-
-/**
- * latestVerdictByDeviceKey — reduces a registrant's full verdict list to the
- * single latest verdict per deviceKey, keyed by max `sequence`. Deliberately
- * does NOT depend on the engine's `deviceKey asc, sequence asc` ordering
- * contract — reducing by max sequence means a future ordering change cannot
- * silently promote a stale verdict, which on this surface would mean
- * showing an officer a Pass that has since been superseded by a Fail.
- */
-export function latestVerdictByDeviceKey(
-	verdicts: readonly AttestationVerdict[],
-): Map<string, AttestationVerdict> {
-	const result = new Map<string, AttestationVerdict>();
-	for (const verdict of verdicts) {
-		const existing = result.get(verdict.deviceKey);
-		if (!existing || verdict.sequence >= existing.sequence) {
-			result.set(verdict.deviceKey, verdict);
-		}
-	}
-	return result;
 }
 
 export interface AssociationsSectionProps {

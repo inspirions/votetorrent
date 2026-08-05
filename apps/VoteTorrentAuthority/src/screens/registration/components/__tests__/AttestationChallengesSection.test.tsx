@@ -98,9 +98,13 @@ const { MockAssociationEngine } = require(
 );
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { AttestationChallengesSection, latestVerdictByDeviceKey, toDisplayTimestamp } = require(
-	"../AttestationChallengesSection",
-);
+const { AttestationChallengesSection, toDisplayTimestamp } = require("../AttestationChallengesSection");
+
+// latestVerdictByDeviceKey now lives in ONE shared module rather than being
+// copy-pasted into this section and AssociationsSection with divergent return
+// types (47-REVIEW WR-08). Both sections, and both suites, consume it here.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { latestVerdictByDeviceKey } = require("../verdicts");
 
 // The mock's issueAttestationChallenge calls crypto.randomUUID(), which may
 // be absent from the jest RN environment's globals. Test-environment shim
@@ -681,9 +685,30 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 			},
 		];
 		const reduced = latestVerdictByDeviceKey(outOfOrder);
-		expect(reduced["d1"].sequence).toBe(5);
-		expect(reduced["d1"].verdict).toBe("pass");
-		expect(latestVerdictByDeviceKey([])).toEqual({});
+		expect(reduced.get("d1")?.sequence).toBe(5);
+		expect(reduced.get("d1")?.verdict).toBe("pass");
+		expect(latestVerdictByDeviceKey([]).size).toBe(0);
+
+		// WR-08: the Record-keyed copy this replaced read through the prototype
+		// chain, so a deviceKey of "toString"/"valueOf"/"constructor" resolved
+		// `existing` to the inherited Function — truthy, with an undefined
+		// `.sequence` — and the verdict was NEVER stored, silently degrading the
+		// badge to "none". Device keys are hex/base58 today so this was not
+		// reachable in practice; it is asserted anyway because this function's
+		// whole job is "never a false Pass, never a false Fail".
+		for (const hostileKey of ["toString", "valueOf", "constructor", "__proto__", "hasOwnProperty"]) {
+			const hostile = latestVerdictByDeviceKey([
+				{
+					registrantId: REGISTRANT_ID,
+					deviceKey: hostileKey,
+					sequence: 0,
+					verdict: "fail" as const,
+					verifiedAt: "2020-01-01T00:00:00.000Z",
+				},
+			]);
+			expect(hostile.size).toBe(1);
+			expect(hostile.get(hostileKey)?.verdict).toBe("fail");
+		}
 
 		expect(toDisplayTimestamp(undefined)).toBe("");
 		const iso = "2024-03-15T00:00:00.000Z";

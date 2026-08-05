@@ -141,9 +141,13 @@ const { MockAssociationEngine } = require(
 );
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { AssociationsSection, latestVerdictByDeviceKey, truncateDeviceKey, formatTimestamp } = require(
-	"../AssociationsSection",
-);
+const { AssociationsSection, truncateDeviceKey, formatTimestamp } = require("../AssociationsSection");
+
+// latestVerdictByDeviceKey now lives in ONE shared module rather than being
+// copy-pasted into this section and AttestationChallengesSection with divergent
+// return types (47-REVIEW WR-08). Both sections, and both suites, consume it here.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { latestVerdictByDeviceKey } = require("../verdicts");
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { isBareDismissLabel } = require("../LifecycleConfirmCard");
