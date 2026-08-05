@@ -1657,7 +1657,7 @@ declare schema main
 		RegistrantId text, -- references Registrant.Id
 		ViewerUserId text, -- the officer's User.Id who viewed the private tier
 		Sequence integer not null, -- per-registrant monotonic ordering key (coalesce(max(Sequence),-1)+1)
-		Timestamp datetime, -- nowCanonicalDatetime()
+		Timestamp datetime, -- Z-suffixed ISO (toIsoZDatetime); NOT nowCanonicalDatetime(), which lacks the trailing Z the CHECK below requires
 		Fields text, -- JSON array of revealed private attribute NAMES -- never values
 		primary key (RegistrantId, Sequence),
 		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId)),
@@ -1691,7 +1691,7 @@ declare schema main
 		Sequence integer not null, -- per (RegistrantId, DeviceKey) monotonic ordering key
 		Verdict text, -- references AttestationVerdictResult(Code)
 		Reason text null, -- the verifier's {reason} string, if any
-		VerifiedAt datetime, -- nowCanonicalDatetime()
+		VerifiedAt datetime, -- Z-suffixed ISO (toIsoZDatetime); NOT nowCanonicalDatetime(), which lacks the trailing Z the CHECK below requires
 		primary key (RegistrantId, DeviceKey, Sequence),
 		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId)),
 		constraint VerdictValid check (Verdict in (select Code from AttestationVerdictResult)),
