@@ -765,6 +765,56 @@ describe("RegistrantDetailScreen.integration — the Phase 47 E2E gate (D-10/D-1
 			expect((await mockRegistrationEngine.getRegistrant(REGISTRANT_ID)).status).toBe("s");
 		});
 
+		// Regression: 47-UAT.md test 12 (blocker), found on device.
+		//
+		// Both typed actions render through the SAME <LifecycleConfirmCard>
+		// element at the same position in RegistrantDetailScreen. Switching
+		// pendingAction suspend -> revoke swaps the props but does NOT unmount
+		// the element, so without a `key` React reconciles them as one
+		// instance and the card's internal `typedValue` carries over. An
+		// officer who typed the registrant's name to arm SUSPEND and then
+		// pressed REVOKE instead — permanent, no undo — arrived already armed,
+		// having typed nothing for that action.
+		//
+		// The pre-existing coverage could not catch this: the component-level
+		// tests mount ONE card in isolation, and the "dismissed fires zero
+		// engine calls" test above goes suspend -> dismiss -> renew, where the
+		// dismiss unmounts the card (pendingAction becomes undefined) and it
+		// never types anything first, so no typed value ever exists to carry.
+		// Only a DIRECT switch between the two typed actions keeps the element
+		// mounted with a satisfied gate.
+		it("D-10: switching from one typed action to the other does not carry the typed name over", async () => {
+			await seedRegistrant();
+			const changeStatusSpy = jest.spyOn(mockRegistrationEngine, "changeStatus");
+			const tr = await renderScreen();
+
+			// Arm SUSPEND with the exact name, then — WITHOUT dismissing —
+			// change our mind and press REVOKE. The lifecycle action buttons
+			// stay rendered above the open card, so this is an ordinary thing
+			// to do. Dismissing first would set pendingAction to undefined and
+			// unmount the card, which resets its state anyway; switching
+			// directly is what keeps the element mounted and is the path that
+			// was actually broken.
+			await press(tr, "registrant-detail-lifecycle-suspend");
+			typeInto(tr, "registrant-detail-confirm-suspend-typed-input", DISPLAY_NAME);
+			expect(isDisabled(tr, "registrant-detail-confirm-suspend-confirm")).toBe(false);
+
+			await press(tr, "registrant-detail-lifecycle-revoke");
+			present(tr, "registrant-detail-confirm-revoke-card");
+			absent(tr, "registrant-detail-confirm-suspend-card");
+
+			// The typed field must be empty and the gate must be closed. Both
+			// are asserted: an empty input with an enabled button, or a
+			// pre-filled input, are each independently the defect.
+			expect(tr.root.findByProps({ testID: "registrant-detail-confirm-revoke-typed-input" }).props.value).toBe("");
+			expect(isDisabled(tr, "registrant-detail-confirm-revoke-confirm")).toBe(true);
+
+			// And the armed-by-inheritance path must reach no engine call.
+			await press(tr, "registrant-detail-confirm-revoke-confirm");
+			expect(changeStatusSpy).toHaveBeenCalledTimes(0);
+			expect((await mockRegistrationEngine.getRegistrant(REGISTRANT_ID)).status).toBe("a");
+		});
+
 		it("D-10: the dismiss label is never a bare Cancel", async () => {
 			await seedRegistrant();
 			const tr = await renderScreen();

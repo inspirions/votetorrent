@@ -143,6 +143,21 @@ export function LifecycleConfirmCard({
 	// same tick, unlike a state update.
 	const submittingRef = useRef(false);
 
+	// Belt-and-braces against instance reuse. A caller that renders two
+	// different typed actions through the same element position without a
+	// `key` gets the SAME instance, and `typedValue` would otherwise carry
+	// from the action the officer dismissed into the one they just opened —
+	// arming a destructive confirmation nobody typed for. `RegistrantDetail`
+	// now passes `key={pendingAction}`, which alone fixes its own call site;
+	// this effect makes the component safe for every future caller rather
+	// than resting on each remembering the key. Keyed on the identifying
+	// props: a change of matched name or of which action is being confirmed
+	// invalidates anything already typed.
+
+	useEffect(() => {
+		setTypedValue("");
+	}, [matchText, testIDPrefix]);
+
 	// __DEV__-only diagnostic, re-evaluated only when `dismissLabel` changes:
 	// a build with a bare-acknowledgement dismiss label warns so the defect
 	// is caught before it ships. This warns rather than throws — a throw

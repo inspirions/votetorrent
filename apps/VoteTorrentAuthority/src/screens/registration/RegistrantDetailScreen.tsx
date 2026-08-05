@@ -444,8 +444,21 @@ export default function RegistrantDetailScreen() {
 		}
 
 		// suspend / revoke — LIFECYCLE_ACTIONS binds both to variant: "typed".
+		//
+		// `key={pendingAction}` is load-bearing, not cosmetic. Both typed
+		// actions render through THIS element at THIS position, so without a
+		// key React reconciles suspend and revoke as the same component
+		// instance and `LifecycleConfirmCard`'s internal `typedValue` survives
+		// the action change. An officer who typed the registrant's name to arm
+		// SUSPEND, then dismissed it, would land on REVOKE — permanent, no
+		// undo — already armed, having typed nothing for that action. The
+		// differing `testIDPrefix` changes the rendered testID but does NOT
+		// force a remount. Found by on-device UAT (47-UAT.md test 12); the
+		// card's own four fail-closed points were all intact, because every
+		// one of them is scoped to a single instance.
 		return (
 			<LifecycleConfirmCard
+				key={pendingAction}
 				variant={meta.variant}
 				tone={meta.tone}
 				testIDPrefix={testIDPrefix}
