@@ -19,6 +19,12 @@ export function ChipButton({label, icon, fullWidth, onPress}: ChipButtonProps) {
 		<TouchableOpacity
 			// This is using onPressIn because of a bug with onPress in headers
 			onPressIn={onPress}
+			// The 32pt chip height is a deliberate app-wide visual constant, so
+			// raising `height` would reflow every header and card row. hitSlop
+			// lifts the effective touch target to 44 with ZERO layout change.
+			// Left/right stay 0 because chips sit adjacent in rows and
+			// horizontal slop would create overlapping touch regions.
+			hitSlop={{top: 6, bottom: 6, left: 0, right: 0}}
 			style={[
 				styles.button,
 				{backgroundColor: colors.accent},
@@ -39,7 +45,7 @@ const styles = StyleSheet.create({
 		flexDirection: 'row',
 		alignItems: 'center',
 		height: 32,
-		paddingHorizontal: 12,
+		paddingHorizontal: 20,
 		borderRadius: 16,
 		alignSelf: 'flex-start',
 		gap: 8,
@@ -48,6 +54,7 @@ const styles = StyleSheet.create({
 		alignSelf: 'stretch',
 		justifyContent: 'center',
 		height: 48,
+		paddingHorizontal: 28,
 		borderRadius: 24,
 		marginVertical: 8,
 	},
