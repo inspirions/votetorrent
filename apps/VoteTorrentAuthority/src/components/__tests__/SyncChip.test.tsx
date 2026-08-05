@@ -18,16 +18,40 @@ import React from 'react';
 import renderer from 'react-test-renderer';
 
 // ---------------------------------------------------------------------------
-// Mock useCadreNode hook before it is implemented
-// The CadreNodeProvider module is also not-yet-existing — mock it as a virtual
-// module so jest can resolve the path independently of the real file.
+// Mock useCadreNode.
+//
+// This mock was authored (Phase 22) when CadreNodeProvider did not yet exist, so
+// it was declared `virtual`. The module exists now, which makes that flag stale —
+// and load-bearing in a way it was never meant to be: if the mock is ever missed,
+// the REAL provider loads and drags in @optimystic/db-p2p-storage-rn, an ESM-only
+// package whose `exports` map has no `require` condition. Jest's CJS resolver then
+// fails the whole suite with "Cannot find module", which reproduced only in
+// full-suite runs (never when this file ran alone) and so read as flakiness.
+//
+// The provider mock below is kept, and the ESM-only leaf is ALSO stubbed, matching
+// CadreNodeProvider.test.tsx's convention. Either one alone would do; both together
+// mean this suite cannot fail that way regardless of which modules a given run has
+// already loaded.
 // ---------------------------------------------------------------------------
 
+jest.mock('../../providers/CadreNodeProvider', () => ({
+  useCadreNode: jest.fn(() => ({ syncState: 'connected', node: null, connectedPeers: jest.fn() })),
+}));
+
+// ESM-only ("type": "module", exports map exposes only an `import` condition) and
+// native-backed respectively — neither can load under the react-native jest preset.
 jest.mock(
-  '../../providers/CadreNodeProvider',
+  '@optimystic/db-p2p-storage-rn',
   () => ({
-    useCadreNode: jest.fn(() => ({ syncState: 'connected', node: null, connectedPeers: jest.fn() })),
+    openOptimysticRNDb: jest.fn(() => ({})),
+    loadOrCreateRNPeerKey: jest.fn(async () => ({})),
+    LevelDBRawStorage: class {},
   }),
+  { virtual: true },
+);
+jest.mock(
+  'rn-leveldb',
+  () => ({ LevelDB: class {}, LevelDBWriteBatch: class {} }),
   { virtual: true },
 );
 
