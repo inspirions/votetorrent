@@ -378,6 +378,83 @@ describe('AttestationVerdict store (D-03)', () => {
       expect(rows.map((r) => r.verdict).sort()).to.deep.equal(['fail', 'pass'])
     })
 
+    it('a verdict insert that LANDS and then reports failure is not written twice (WR-01)', async () => {
+      // The retry's original predicate was "did the high-water mark advance?"
+      // — but our own row advances it. An exec that rejects AFTER the row
+      // landed (project memory records intermittent
+      // `stale revision: rev 1 vs rev 1` rejections from @optimystic/db-p2p
+      // 0.18) was therefore read as a lost race, and the retry appended a
+      // SECOND copy at sequence + 1. AttestationVerdict is InsertOnly, so a
+      // duplicated pass/fail judgement can never be removed from the table
+      // that exists to keep those judgements honest.
+      const { registrantId, engine } = await setupAssociationTest()
+      const deviceKey = nextDeviceKey()
+      const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+
+      const realExec = ctx.db.exec.bind(ctx.db)
+      let rejectedOnce = false
+      ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = async (sql: any, params?: any) => {
+        const result = await realExec(sql, params)
+        if (!rejectedOnce && typeof sql === 'string' && sql.includes('insert into AttestationVerdict')) {
+          rejectedOnce = true
+          // The write COMMITTED; only the acknowledgement failed.
+          throw new Error('stale revision: rev 1 vs rev 1')
+        }
+        return result
+      }
+
+      try {
+        await engine.recordAttestationVerdict(registrantId, deviceKey, { ok: false, reason: 'revoked hardware root' })
+      } finally {
+        ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = realExec
+      }
+
+      expect(rejectedOnce, 'the fault injector must actually have fired, or this test is vacuous').to.equal(true)
+      const rows = await engine.getAttestationVerdicts(registrantId, deviceKey)
+      expect(rows, 'the landed verdict must NOT be duplicated by the retry').to.have.length(1)
+      expect(rows[0].sequence).to.equal(0)
+      expect(rows[0].verdict).to.equal('fail')
+      expect(rows[0].reason).to.equal('revoked hardware root')
+    })
+
+    it('a probe failure inside the verdict retry never REPLACES the original insert error (WR-01)', async () => {
+      const { registrantId, engine } = await setupAssociationTest()
+      const deviceKey = nextDeviceKey()
+      const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+
+      const realExec = ctx.db.exec.bind(ctx.db)
+      const realPrepare = ctx.db.prepare.bind(ctx.db)
+      let insertFailed = false
+      ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = async (sql: any, params?: any) => {
+        if (typeof sql === 'string' && sql.includes('insert into AttestationVerdict')) {
+          insertFailed = true
+          throw new Error('THE-REAL-INSERT-FAILURE')
+        }
+        return await realExec(sql, params)
+      }
+      ;(ctx.db as unknown as { prepare: typeof ctx.db.prepare }).prepare = (sql: any, ...rest: any[]) => {
+        if (insertFailed && typeof sql === 'string' && sql.includes('AttestationVerdict')) {
+          throw new Error('THE-PROBE-FAILURE')
+        }
+        return realPrepare(sql, ...rest)
+      }
+
+      let caught: unknown
+      try {
+        await engine.recordAttestationVerdict(registrantId, deviceKey, { ok: true })
+      } catch (err) {
+        caught = err
+      } finally {
+        ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = realExec
+        ;(ctx.db as unknown as { prepare: typeof ctx.db.prepare }).prepare = realPrepare
+      }
+
+      expect(insertFailed, 'the fault injector must actually have fired').to.equal(true)
+      expect(caught).to.be.instanceOf(Error)
+      expect(String((caught as Error).message)).to.contain('THE-REAL-INSERT-FAILURE')
+      expect(String((caught as Error).message), 'the probe failure must not mask the insert failure').to.not.contain('THE-PROBE-FAILURE')
+    })
+
     it('read shape and ordering: unfiltered spans device keys, narrowed returns only one, last element is most recent', async () => {
       const { registrantId, engine } = await setupAssociationTest()
       const deviceKeyA = nextDeviceKey()

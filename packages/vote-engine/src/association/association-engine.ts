@@ -606,16 +606,48 @@ export class AssociationEngine implements IAssociationEngine {
       // and the loser violates `primary key (RegistrantId, DeviceKey,
       // Sequence)`. Here a lost row is a lost VERDICT — potentially a lost
       // FAIL verdict — so it retries rather than letting the row vanish.
-      // Same discipline as `recordRegistrantAccessEvent`: on failure, re-read
-      // the high-water mark and only retry if it ADVANCED (a genuine race);
-      // any other failure rethrows on the first attempt rather than being
-      // masked by a retry loop. Deliberately does not sniff the driver's
-      // error text for "primary key".
+      // Same discipline as `recordRegistrantAccessEvent`: on failure, probe
+      // for our own row (below) and otherwise retry only if the high-water
+      // mark ADVANCED. Deliberately does not sniff the driver's error text
+      // for "primary key". Known imprecision, accepted: a non-race failure
+      // that coincides with an unrelated writer advancing the counter is
+      // still retried, costing at most SEQUENCE_ALLOCATION_ATTEMPTS attempts
+      // before the original error is rethrown.
       const readNextSequence = async (): Promise<number> => {
         const seqRow = await ctx.db
           .prepare('select coalesce(max(Sequence), -1) + 1 as n from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey')
           .get({ registrantId, deviceKey })
         return Number(seqRow?.n ?? 0)
+      }
+
+      // "Did the counter move?" is NOT "did another writer win?" — our own
+      // row moves it too. If `db.exec` rejects AFTER the row landed (project
+      // memory records intermittent `stale revision: rev 1 vs rev 1`
+      // rejections from @optimystic/db-p2p 0.18), a bare high-water test
+      // reads our own row as someone else's and appends a SECOND copy at
+      // sequence + 1. `AttestationVerdict` is
+      // `constraint InsertOnly check on update, delete (false)`, so a
+      // duplicated pass/fail judgement can never be removed from the table
+      // that exists to keep those judgements honest. The
+      // fresh-Tid-per-attempt note above rules out Tid replay, not row
+      // duplication. Same fix as `recordRegistrantAccessEvent`.
+      //
+      // NOTE `stripZ`: `VerifiedAt` round-trips WITHOUT the trailing `Z` that
+      // `VerifiedAtValid`'s like('%Z', VerifiedAt) requires on the way IN, so
+      // comparing the read value raw against the bound value never matches —
+      // the probe would answer "not ours" every time and silently reinstate
+      // the duplicate it exists to prevent.
+      const stripZ = (value: string): string => value.endsWith('Z') ? value.slice(0, -1) : value
+      const ownRowLanded = async (seq: number): Promise<boolean> => {
+        const row = await ctx.db
+          .prepare('select Verdict, Reason, VerifiedAt from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey and Sequence = :sequence')
+          .get({ registrantId, deviceKey, sequence: seq })
+        if (row === null || row === undefined) return false
+        const reason = verification.reason ?? null
+        const rowReason = row.Reason === null || row.Reason === undefined ? null : String(row.Reason)
+        return String(row.Verdict ?? '') === verdict &&
+          rowReason === reason &&
+          stripZ(String(row.VerifiedAt ?? '')) === stripZ(verifiedAt)
       }
 
       for (let attempt = 0; attempt < SEQUENCE_ALLOCATION_ATTEMPTS; attempt++) {
@@ -641,7 +673,18 @@ export class AssociationEngine implements IAssociationEngine {
           return
         } catch (err) {
           if (attempt + 1 >= SEQUENCE_ALLOCATION_ATTEMPTS) throw err
-          if ((await readNextSequence()) <= sequence) throw err
+          // Both probes are fresh round trips issued immediately after a
+          // storage failure — exactly when they are most likely to fail too.
+          // Their rejection must never REPLACE the insert error the caller
+          // needs, so the whole diagnosis collapses to `throw err`.
+          let anotherWriterWon: boolean
+          try {
+            if (await ownRowLanded(sequence)) return
+            anotherWriterWon = (await readNextSequence()) > sequence
+          } catch {
+            throw err
+          }
+          if (!anotherWriterWon) throw err
         }
       }
     } catch (err) {

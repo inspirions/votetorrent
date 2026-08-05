@@ -728,7 +728,11 @@ export class RegistrationEngine implements IRegistrationEngine {
       // failure was not a race (a CHECK violation, a storage error) and is
       // rethrown immediately — deliberately not sniffing the driver's error
       // TEXT for "primary key", which would silently stop working the moment
-      // that wording changed.
+      // that wording changed. Known imprecision, accepted: a non-race failure
+      // that COINCIDES with an unrelated writer advancing the counter is
+      // still classified as a race and retried. It costs at most
+      // SEQUENCE_ALLOCATION_ATTEMPTS attempts before the original error is
+      // rethrown, and the own-row probe below keeps it from duplicating a row.
       const readNextSequence = async (): Promise<number> => {
         const seqRow = await ctx.db
           .prepare('select coalesce(max(Sequence), -1) + 1 as n from RegistrantAccessEvent where RegistrantId = :registrantId')
@@ -738,6 +742,40 @@ export class RegistrationEngine implements IRegistrationEngine {
 
       const timestamp = toIsoZDatetime(Date.now())
       const fieldsJson = JSON.stringify(safeFields)
+
+      // "Did the counter move?" is NOT the same question as "did another
+      // writer win?" — our own row moves it too. If `db.exec` rejects AFTER
+      // the row landed (project memory records intermittent
+      // `stale revision: rev 1 vs rev 1` rejections from @optimystic/db-p2p
+      // 0.18), a bare high-water test reads our own row as someone else's,
+      // retries at sequence + 1, and appends a SECOND copy of the same
+      // logical event. `RegistrantAccessEvent` is
+      // `constraint InsertOnly check on update, delete (false)`, so that
+      // duplicate can never be removed. The fresh-Tid-per-attempt note above
+      // rules out Tid replay, not row duplication.
+      //
+      // So probe for OUR row specifically, comparing every non-key column:
+      // a row another writer placed at this sequence differs in at least one
+      // of ViewerUserId / Timestamp / Fields. (Two flushes that agree on all
+      // three are byte-identical audit rows for one viewer at one instant;
+      // treating those as already-landed is the safe reading, since the
+      // alternative is a permanent unremovable duplicate.)
+      //
+      // NOTE `stripZ`: `Timestamp` round-trips WITHOUT the trailing `Z` that
+      // `TimestampValid` requires on the way IN, so comparing the read value
+      // raw against the bound value never matches — the probe would answer
+      // "not ours" every time and silently reinstate the duplicate it exists
+      // to prevent. Covered by the WR-01 test in registrant-access-trail.spec.
+      const stripZ = (value: string): string => value.endsWith('Z') ? value.slice(0, -1) : value
+      const ownRowLanded = async (seq: number): Promise<boolean> => {
+        const row = await ctx.db
+          .prepare('select ViewerUserId, Timestamp, Fields from RegistrantAccessEvent where RegistrantId = :registrantId and Sequence = :sequence')
+          .get({ registrantId, sequence: seq })
+        if (row === null || row === undefined) return false
+        return String(row.ViewerUserId ?? '') === viewerUserId &&
+          stripZ(String(row.Timestamp ?? '')) === stripZ(timestamp) &&
+          String(row.Fields ?? '') === fieldsJson
+      }
 
       for (let attempt = 0; attempt < SEQUENCE_ALLOCATION_ATTEMPTS; attempt++) {
         const sequence = await readNextSequence()
@@ -772,7 +810,19 @@ export class RegistrationEngine implements IRegistrationEngine {
           return
         } catch (err) {
           if (attempt + 1 >= SEQUENCE_ALLOCATION_ATTEMPTS) throw err
-          if ((await readNextSequence()) <= sequence) throw err
+          // Both probes are fresh round trips issued immediately after a
+          // storage failure — i.e. exactly when they are most likely to fail
+          // too. Their own rejection must never REPLACE the insert error the
+          // caller actually needs to see, so the whole diagnosis is wrapped
+          // and collapses to `throw err`.
+          let anotherWriterWon: boolean
+          try {
+            if (await ownRowLanded(sequence)) return
+            anotherWriterWon = (await readNextSequence()) > sequence
+          } catch {
+            throw err
+          }
+          if (!anotherWriterWon) throw err
         }
       }
     } catch (err) {

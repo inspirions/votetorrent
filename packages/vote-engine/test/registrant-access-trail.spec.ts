@@ -325,6 +325,85 @@ describe('RegistrantAccessEvent trail (D-01/D-02)', () => {
     expect(events.map((e) => e.fields).flat().sort()).to.deep.equal(['dob', 'ssn'])
   })
 
+  it('an insert that LANDS and then reports failure is not written twice (WR-01)', async () => {
+    // The retry's original predicate was "did the high-water mark advance?".
+    // Our own row advances it, so an exec that rejects AFTER the row landed
+    // — project memory records intermittent `stale revision: rev 1 vs rev 1`
+    // rejections from @optimystic/db-p2p 0.18 — was read as a lost race, and
+    // the retry appended a SECOND copy of the same logical event at
+    // sequence + 1. RegistrantAccessEvent is InsertOnly, so that duplicate
+    // could never be removed.
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+    const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+
+    const realExec = ctx.db.exec.bind(ctx.db)
+    let rejectedOnce = false
+    ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = async (sql: any, params?: any) => {
+      const result = await realExec(sql, params)
+      if (!rejectedOnce && typeof sql === 'string' && sql.includes('insert into RegistrantAccessEvent')) {
+        rejectedOnce = true
+        // The write COMMITTED; only the acknowledgement failed.
+        throw new Error('stale revision: rev 1 vs rev 1')
+      }
+      return result
+    }
+
+    try {
+      await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn'])
+    } finally {
+      ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = realExec
+    }
+
+    expect(rejectedOnce, 'the fault injector must actually have fired, or this test is vacuous').to.equal(true)
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(events, 'the landed row must NOT be duplicated by the retry').to.have.length(1)
+    expect(events[0]!.sequence).to.equal(0)
+    expect(events[0]!.fields).to.deep.equal(['ssn'])
+  })
+
+  it('a probe failure inside the retry never REPLACES the original insert error (WR-01)', async () => {
+    // `readNextSequence` / the own-row probe are fresh round trips issued
+    // immediately after a storage failure, i.e. exactly when they are most
+    // likely to fail too. If one rejects, the caller must still be handed the
+    // INSERT's error, not a `select` failure, or the diagnosis is misleading.
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+    const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+
+    const realExec = ctx.db.exec.bind(ctx.db)
+    const realPrepare = ctx.db.prepare.bind(ctx.db)
+    let insertFailed = false
+    ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = async (sql: any, params?: any) => {
+      if (typeof sql === 'string' && sql.includes('insert into RegistrantAccessEvent')) {
+        insertFailed = true
+        throw new Error('THE-REAL-INSERT-FAILURE')
+      }
+      return await realExec(sql, params)
+    }
+    ;(ctx.db as unknown as { prepare: typeof ctx.db.prepare }).prepare = (sql: any, ...rest: any[]) => {
+      if (insertFailed && typeof sql === 'string' && sql.includes('RegistrantAccessEvent')) {
+        throw new Error('THE-PROBE-FAILURE')
+      }
+      return realPrepare(sql, ...rest)
+    }
+
+    let caught: unknown
+    try {
+      await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn'])
+    } catch (err) {
+      caught = err
+    } finally {
+      ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = realExec
+      ;(ctx.db as unknown as { prepare: typeof ctx.db.prepare }).prepare = realPrepare
+    }
+
+    expect(insertFailed, 'the fault injector must actually have fired').to.equal(true)
+    expect(caught).to.be.instanceOf(Error)
+    expect(String((caught as Error).message)).to.contain('THE-REAL-INSERT-FAILURE')
+    expect(String((caught as Error).message), 'the probe failure must not mask the insert failure').to.not.contain('THE-PROBE-FAILURE')
+  })
+
   it('getRegistrantAccessEvents returns newest-first (Sequence descending)', async () => {
     const { auth, engine, sign } = await setup()
     const registrantId = await seedRegistrant(engine, auth, sign)
