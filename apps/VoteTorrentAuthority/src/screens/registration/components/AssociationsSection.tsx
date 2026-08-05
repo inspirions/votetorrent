@@ -138,8 +138,15 @@ export function AssociationsSection({
 	// device.
 	const [pendingRemoveKey, setPendingRemoveKey] = useState<string | undefined>(undefined);
 
+	// CR-02 guard against a stale setState after unmount. Reset on entry so a
+	// cleanup that runs while the component stays mounted (StrictMode
+	// double-invoke, Fast Refresh, remount-in-place) does not permanently latch
+	// every setState off. Without the reset this section is the one sibling that
+	// latches: `dataLoading` never leaves `true`, so it renders "Loading…"
+	// forever and a device revocation never re-reads.
 	const unmountedRef = useRef(false);
 	useEffect(() => {
+		unmountedRef.current = false;
 		return () => {
 			unmountedRef.current = true;
 		};

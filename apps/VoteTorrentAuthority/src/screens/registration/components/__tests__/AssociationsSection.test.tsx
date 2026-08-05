@@ -611,4 +611,39 @@ describe("AssociationsSection — D-03/D-10/D-13", () => {
 		expect(formatTimestamp(undefined)).toBeUndefined();
 		expect(formatTimestamp("not-a-date")).toBeUndefined();
 	});
+
+	// -------------------------------------------------------------------------
+	// unmountedRef latching (StrictMode / Fast Refresh)
+	// -------------------------------------------------------------------------
+
+	test("24: a cleanup that runs while STILL MOUNTED does not latch every setState off", async () => {
+		// The defect: this section's unmountedRef effect had no `unmountedRef.current
+		// = false` on entry, unlike every sibling that copies the idiom. React 18
+		// StrictMode (and any Fast Refresh) runs effect → cleanup → effect on the
+		// SAME instance, so the cleanup latched the ref true forever and suppressed
+		// every subsequent setState: dataLoading never left `true`, the section
+		// rendered "Loading…" permanently, and a device revocation never re-read.
+		//
+		// Asserted through the rendered output, not the ref: with the reset absent
+		// the rows below never appear and "associations-loading" never clears.
+		await seedEngine(mockAssociationEngine, [{ deviceKey: DEVICE_KEY_ALPHA }, { deviceKey: DEVICE_KEY_BRAVO }]);
+
+		let tr!: renderer.ReactTestRenderer;
+		await renderer.act(async () => {
+			tr = renderer.create(
+				<React.StrictMode>
+					<AssociationsSection
+						registrantId={REGISTRANT_ID}
+						authorityId={AUTHORITY_ID}
+						registrantDisplayName={DISPLAY_NAME}
+					/>
+				</React.StrictMode>,
+			);
+		});
+		await flush();
+
+		expect(() => tr.root.findByProps({ testID: "associations-loading" })).toThrow();
+		expect(() => tr.root.findByProps({ testID: "association-row-0" })).not.toThrow();
+		expect(() => tr.root.findByProps({ testID: "association-row-1" })).not.toThrow();
+	});
 });
