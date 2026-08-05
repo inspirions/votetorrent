@@ -59,17 +59,43 @@ const PRIVATE_FIELD_ROW_PATH = path.join(__dirname, "../PrivateFieldRow.tsx");
 const SELECTIVE_AUDIENCE_PREVIEW_PATH = path.join(__dirname, "../SelectiveAudiencePreview.tsx");
 
 /**
- * Strips `//` line comments and `/* ... *\/` block comments (including
- * doc-comment header blocks) from a source string, so a prose mention of a
- * forbidden token inside a comment can never trip — or hide a trip of — a
- * gate meant to catch it in real code.
+ * Blanks out every comment span in a source string — line comments, block
+ * comments and doc-comment header blocks — so a prose mention of a forbidden
+ * token inside a comment can never trip, or HIDE a trip of, a gate meant to
+ * catch it in real code.
+ *
+ * TOKENIZER, NOT A REGEX (47-REVIEW WR-12). The previous implementation was
+ *
+ *     source.replace(BLOCK_COMMENT_RE, "")
+ *           .split("\n").map(l => l.replace(LINE_COMMENT_RE, "")).join("\n")
+ *
+ * and the `//`-stripping half truncated a line at the first `//` ANYWHERE,
+ * including inside a string literal, a URL or a regex literal. One line of the
+ * shape `const doc = "see https://x"; console.log(value);` would have been
+ * silently cut before the `console.log` the gate exists to catch. The
+ * block-comment half had the mirror-image problem: a `/*` inside a string
+ * literal swallowed everything up to the next block-comment terminator. For a
+ * test whose entire value is that it cannot be accidentally satisfied, a
+ * stripper that can accidentally HIDE a violation is a real weakness.
+ *
+ * `@babel/parser` gives exact comment ranges. Each span is replaced with the
+ * SAME number of spaces (newlines preserved) so byte offsets, line numbers and
+ * line counts are unchanged — a match/no-match result stays attributable to a
+ * real source location.
  */
 function stripComments(source: string): string {
-	return source
-		.replace(/\/\*[\s\S]*?\*\//g, "")
-		.split("\n")
-		.map(line => line.replace(/\/\/.*$/, ""))
-		.join("\n");
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const { parse } = require("@babel/parser");
+	const ast = parse(source, { sourceType: "module", plugins: ["typescript", "jsx"] });
+	const comments: Array<{ start: number; end: number }> = ast.comments ?? [];
+	let out = source;
+	// Reverse order so earlier spans' offsets stay valid as we rewrite.
+	for (const comment of [...comments].sort((a, b) => b.start - a.start)) {
+		const span = out.slice(comment.start, comment.end);
+		const blanked = span.replace(/[^\n]/g, " ");
+		out = out.slice(0, comment.start) + blanked + out.slice(comment.end);
+	}
+	return out;
 }
 
 function readStripped(filePath: string): string {
@@ -78,6 +104,52 @@ function readStripped(filePath: string): string {
 
 const PRIVATE_SOURCE = readStripped(PRIVATE_FIELD_ROW_PATH);
 const SELECTIVE_SOURCE = readStripped(SELECTIVE_AUDIENCE_PREVIEW_PATH);
+
+describe("private-tier-invariants — Part 0: the comment stripper itself (WR-12)", () => {
+	// This gate is only as strong as its stripper. The two cases below are the
+	// exact ways the previous regex stripper could be DEFEATED — not merely made
+	// noisy, but made to hide a real violation from every assertion in Part A.
+
+	it("a `//` inside a string literal does not truncate the rest of the line", () => {
+		const source = 'const doc = "see https://example.com"; console.log(value);\n';
+		const stripped = stripComments(source);
+		expect(stripped).toContain("console.log");
+		expect(stripped).toContain("https://example.com");
+	});
+
+	it("a `/*` inside a string literal does not swallow the code that follows", () => {
+		const source = 'const glob = "/*"; console.log(value);\nconst after = 1;\n';
+		const stripped = stripComments(source);
+		expect(stripped).toContain("console.log");
+		expect(stripped).toContain("const after");
+	});
+
+	it("real comments ARE removed — line, trailing and block", () => {
+		const source = [
+			"// console.log(a)",
+			"const x = 1; // console.log(b)",
+			"/* console.log(c) */",
+			"/**\n * console.log(d)\n */",
+			"const y = 2;",
+		].join("\n");
+		const stripped = stripComments(source);
+		expect(stripped).not.toContain("console.log");
+		expect(stripped).toContain("const x = 1;");
+		expect(stripped).toContain("const y = 2;");
+	});
+
+	it("offsets and line count are preserved, so a match stays attributable", () => {
+		const source = "const a = 1; // comment\nconst b = 2;\n/* two\n   lines */\nconst c = 3;\n";
+		const stripped = stripComments(source);
+		expect(stripped.length).toBe(source.length);
+		expect(stripped.split("\n").length).toBe(source.split("\n").length);
+	});
+
+	it("is non-vacuous against the real sources: they parse and are not blanked wholesale", () => {
+		expect(PRIVATE_SOURCE).toContain("PrivateFieldRow");
+		expect(SELECTIVE_SOURCE).toContain("SelectiveAudiencePreview");
+	});
+});
 
 describe("private-tier-invariants — Part A: source-text gates (D-01/D-12/T-47-02)", () => {
 	it("neither private-tier component writes to the debug console", () => {
