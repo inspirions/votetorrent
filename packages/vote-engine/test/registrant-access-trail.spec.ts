@@ -44,7 +44,7 @@ describe('access-trail field sanitizer (D-01/T-47-02)', () => {
       expect([...collectPrivateFieldNames(details)].sort()).to.deep.equal(['dob', 'ssn'])
     })
 
-    it('returns nested group names too, for an element whose value is a PrivateDetail[]', () => {
+    it('QUALIFIES nested names with the dotted path the reveal UI emits, and keeps the group name too', () => {
       const details: PrivateDetail[] = [
         {
           name: 'address',
@@ -54,7 +54,51 @@ describe('access-trail field sanitizer (D-01/T-47-02)', () => {
           ]
         }
       ]
-      expect([...collectPrivateFieldNames(details)].sort()).to.deep.equal(['address', 'street', 'zip'])
+      // 'address.street', NOT a bare 'street'. The Authority app's
+      // flattenPrivateDetails builds the same dotted path and PrivateFieldRow
+      // reveals it under that name; collecting the bare segment made the
+      // sanitizer's intersection empty and silently dropped every nested
+      // reveal from the trail. The bare segments must NOT be present.
+      const names = [...collectPrivateFieldNames(details)].sort()
+      expect(names).to.deep.equal(['address', 'address.street', 'address.zip'])
+      expect(names).to.not.include('street')
+      expect(names).to.not.include('zip')
+    })
+
+    it('qualifies to full depth through a group nested inside a group', () => {
+      const details: PrivateDetail[] = [
+        {
+          name: 'address',
+          value: [
+            { name: 'geo', value: [{ name: 'lat', value: '42.0' }] }
+          ]
+        }
+      ]
+      expect([...collectPrivateFieldNames(details)].sort()).to.deep.equal([
+        'address', 'address.geo', 'address.geo.lat'
+      ])
+    })
+
+    it('the nested reveal survives the sanitizer end-to-end — the D-14 seam CR-01 broke', () => {
+      const details: PrivateDetail[] = [
+        { name: 'ssn', value: '000-00-0000' },
+        {
+          name: 'address',
+          value: [
+            { name: 'street', value: '123 Main St' },
+            { name: 'zip', value: '00000' }
+          ]
+        }
+      ]
+      // The exact strings the UI's flattenPrivateDetails produces for these
+      // details (leaves only, dotted). Kept as a literal rather than derived
+      // so this spec fails loudly if the app-side vocabulary ever changes;
+      // the app-side half of this seam is locked by
+      // apps/VoteTorrentAuthority/.../access-trail-seam.test.ts, which feeds
+      // the REAL flattener into this REAL sanitizer.
+      const revealedByUi = ['ssn', 'address.street', 'address.zip']
+      const stored = sanitizeAccessTrailFields(revealedByUi, collectPrivateFieldNames(details))
+      expect(stored).to.deep.equal(['address.street', 'address.zip', 'ssn'])
     })
 
     it('returns an empty Set for undefined, [], and a malformed element, without throwing', () => {

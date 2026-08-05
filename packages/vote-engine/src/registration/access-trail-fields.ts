@@ -26,18 +26,38 @@ const MAX_DEPTH = 8
  * `parseJsonOr`, so a malformed row must degrade to "no names allowed"
  * (which records nothing) instead of taking down the caller. A depth cap
  * guards against a cyclic/pathological structure.
+ *
+ * THE VOCABULARY CONTRACT (D-14). Names are **qualified**: a nested leaf is
+ * collected as its full dotted path from the root (`'address.street'`), NOT
+ * as its bare segment (`'street'`). This module is the single authority for
+ * that vocabulary, and it deliberately matches what the reveal UI emits —
+ * `flattenPrivateDetails` in the Authority app builds exactly the same dotted
+ * path (`namePrefix + '.' + detail.name`) and `PrivateFieldRow.onReveal`
+ * hands that string straight to `recordRegistrantAccessEvent`. Collecting the
+ * bare segment instead makes `sanitizeAccessTrailFields`' intersection empty
+ * for every nested reveal, and because a failed intersection is dropped
+ * silently (by design, see the header), the audit row simply never appears.
+ *
+ * A group node contributes its own qualified name too (`'address'`), so a
+ * caller that reveals a whole group rather than a leaf still records. The
+ * bare child segment is intentionally NOT collected: it is ambiguous the
+ * moment two groups carry a leaf of the same name, and no producer emits it.
+ *
+ * `registrant-access-trail.spec.ts` locks this seam end-to-end by feeding the
+ * flattener's own output through `sanitizeAccessTrailFields`.
  */
-export function collectPrivateFieldNames (details: PrivateDetail[] | undefined, depth = 0): Set<string> {
+export function collectPrivateFieldNames (details: PrivateDetail[] | undefined, depth = 0, prefix = ''): Set<string> {
   const names = new Set<string>()
   if (!Array.isArray(details) || depth >= MAX_DEPTH) return names
   for (const entry of details) {
     if (entry === null || typeof entry !== 'object') continue
     const name = (entry as { name?: unknown }).name
     if (typeof name !== 'string' || name.length === 0) continue
-    names.add(name)
+    const qualified = prefix.length > 0 ? prefix + '.' + name : name
+    names.add(qualified)
     const value = (entry as { value?: unknown }).value
     if (Array.isArray(value)) {
-      for (const nested of collectPrivateFieldNames(value as PrivateDetail[], depth + 1)) {
+      for (const nested of collectPrivateFieldNames(value as PrivateDetail[], depth + 1, qualified)) {
         names.add(nested)
       }
     }
