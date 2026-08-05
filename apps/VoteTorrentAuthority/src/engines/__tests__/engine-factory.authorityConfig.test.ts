@@ -98,7 +98,7 @@ jest.mock(
 			InvitationEngine: class {},
 		};
 	},
-	{ virtual: true },
+	{ virtual: true }
 );
 
 jest.mock('../attestation-roots.generated', () => ({
@@ -112,6 +112,8 @@ jest.mock('../attestation-keys.generated', () => ({
 	PLAY_CONSOLE_VERIFICATION_KEY_BASE64: '',
 	EXPECTED_APP_PACKAGE: 'org.votetorrent.authority',
 	EXPECTED_APP_CERT_SHA256_DIGESTS: [],
+	PUBLIC_DEBUG_CERT_SHA256_DIGESTS: [],
+	buildExpectedCertDigests: () => [],
 }));
 
 import { EngineFactory, NoNetworkEstablishedError } from '../engine-factory';
@@ -148,7 +150,7 @@ describe("EngineFactory buildEngine('authorityConfig') — D-09 / Pattern 2", ()
 		const factory = new EngineFactory(new rn.LocalStorageReact(), jest.fn());
 
 		await expect(factory.getEngine('authorityConfig')).rejects.toBeInstanceOf(
-			NoNetworkEstablishedError,
+			NoNetworkEstablishedError
 		);
 	});
 

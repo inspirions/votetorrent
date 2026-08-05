@@ -18,8 +18,8 @@
  * which is cache-first (T-15-03-05 / Pitfall 2).
  */
 
-import type { NetworkReference, User, IAttestationVerifier } from '@votetorrent/vote-core'
-import type { ExpectedAppIdentity } from '@votetorrent/vote-engine/rn'
+import type { NetworkReference, User, IAttestationVerifier } from '@votetorrent/vote-core';
+import type { ExpectedAppIdentity } from '@votetorrent/vote-engine/rn';
 import {
 	NetworksEngine,
 	NetworkEngine,
@@ -38,19 +38,19 @@ import {
 	LocalConfigKeyProvider,
 	RegistrationEngine,
 	AuthorityConfigEngine,
-} from '@votetorrent/vote-engine/rn'
-import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn'
-import { rnDbFactory, createStrandDbFactory } from './rn-db-factory'
-import type { StrandHost } from './rn-db-factory'
-import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated'
-import { PINNED_HARDWARE_ROOTS_DER } from './attestation-roots.generated'
-import { REVOKED_ATTESTATION_SERIALS } from './attestation-status.generated'
+} from '@votetorrent/vote-engine/rn';
+import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn';
+import { rnDbFactory, createStrandDbFactory } from './rn-db-factory';
+import type { StrandHost } from './rn-db-factory';
+import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated';
+import { PINNED_HARDWARE_ROOTS_DER } from './attestation-roots.generated';
+import { REVOKED_ATTESTATION_SERIALS } from './attestation-status.generated';
 import {
 	EXPECTED_APP_PACKAGE,
-	EXPECTED_APP_CERT_SHA256_DIGESTS,
+	buildExpectedCertDigests,
 	PLAY_CONSOLE_DECRYPTION_KEY_BASE64,
 	PLAY_CONSOLE_VERIFICATION_KEY_BASE64,
-} from './attestation-keys.generated'
+} from './attestation-keys.generated';
 
 /**
  * Thrown when an engine is requested before any network has been opened.
@@ -65,11 +65,11 @@ import {
  * Tasks and Settings tabs.
  */
 export class NoNetworkEstablishedError extends Error {
-	readonly noNetworkEstablished = true as const
+	readonly noNetworkEstablished = true as const;
 
 	constructor(message: string) {
-		super(message)
-		this.name = 'NoNetworkEstablishedError'
+		super(message);
+		this.name = 'NoNetworkEstablishedError';
 	}
 }
 
@@ -83,18 +83,18 @@ export function isNoNetworkEstablishedError(error: unknown): boolean {
 	return (
 		typeof error === 'object' &&
 		error !== null &&
-		(error as {noNetworkEstablished?: unknown}).noNetworkEstablished === true
-	)
+		(error as { noNetworkEstablished?: unknown }).noNetworkEstablished === true
+	);
 }
 
 export class EngineFactory {
-	private readonly networksEngine: NetworksEngine
+	private readonly networksEngine: NetworksEngine;
 	/** Cache keyed by engineName (+ ':' + JSON(initParams) for param-keyed engines). */
-	private readonly engineCache = new Map<string, unknown>()
+	private readonly engineCache = new Map<string, unknown>();
 	/** The hash of the most recently opened/created network; gates requireEstablishedCtx. */
-	private currentNetworkHash: string | undefined
+	private currentNetworkHash: string | undefined;
 	/** The resolved device user to bind into ctx on every internal open() call. */
-	private currentUser: User | undefined
+	private currentUser: User | undefined;
 
 	/**
 	 * ENG-05: live peer-count source, keyed by strandId (== networkHash, D-05).
@@ -102,16 +102,16 @@ export class EngineFactory {
 	 * network engine reports connected peers in getStatistics; absent, it falls
 	 * back to the relay-count heuristic.
 	 */
-	private getPeerCount: ((strandId: string) => number) | undefined
+	private getPeerCount: ((strandId: string) => number) | undefined;
 
 	/** Called by AppProvider after resolving the device user, before getEngine("network"). */
 	setCurrentUser(user: User | undefined): void {
-		this.currentUser = user
+		this.currentUser = user;
 	}
 
 	/** Called by CadreNodeProvider after boot to wire live peer counts into NetworkEngine. */
 	setGetPeerCount(getPeerCount: (strandId: string) => number): void {
-		this.getPeerCount = getPeerCount
+		this.getPeerCount = getPeerCount;
 	}
 
 	/**
@@ -120,11 +120,11 @@ export class EngineFactory {
 	 * createStrandDbFactory(node); otherwise falls back to rnDbFactory (solo-safe).
 	 * Set by AppProvider in the same useEffect that registers setGetPeerCount.
 	 */
-	private node: StrandHost | null = null
+	private node: StrandHost | null = null;
 
 	/** Called by AppProvider when the CadreNode boots (mirrors setGetPeerCount / D-04). */
 	setNode(node: StrandHost | null): void {
-		this.node = node
+		this.node = node;
 	}
 
 	/**
@@ -147,7 +147,7 @@ export class EngineFactory {
 	private readonly integrityKeyProvider = new LocalConfigKeyProvider({
 		decryptionKeyBase64: PLAY_CONSOLE_DECRYPTION_KEY_BASE64,
 		verificationKeyBase64: PLAY_CONSOLE_VERIFICATION_KEY_BASE64,
-	})
+	});
 
 	/**
 	 * CR-03/D-09: true only when BOTH Play Console keys are present (non-empty).
@@ -156,22 +156,32 @@ export class EngineFactory {
 	 * `isAttestationVerifierProvisioned()`.
 	 */
 	private readonly playConsoleKeysProvisioned =
-		PLAY_CONSOLE_DECRYPTION_KEY_BASE64.length > 0 && PLAY_CONSOLE_VERIFICATION_KEY_BASE64.length > 0
+		PLAY_CONSOLE_DECRYPTION_KEY_BASE64.length > 0 &&
+		PLAY_CONSOLE_VERIFICATION_KEY_BASE64.length > 0;
 
 	/**
 	 * CR-04/WR-03: the injected app-identity pin BOTH attestation halves enforce
 	 * — the token/key must name THIS authority app (package + signing-cert
 	 * digest), not merely "some genuine Play app on a genuine device". Bundled
 	 * config (attestation-keys.generated.ts), swappable without a code change.
+	 *
+	 * CR-02 (Phase 47 review): the committed default lists ONLY the standard
+	 * Android SDK debug certificate, whose private key is public. Accepting it in
+	 * a release build would make this pin prove nothing, so
+	 * `buildExpectedCertDigests(__DEV__)` strips public debug digests outside
+	 * `__DEV__` — leaving an empty allowlist that both verifier halves reject.
+	 * Release attestation fails loudly rather than trusting a public key. Adding
+	 * the real voter release digest to `EXPECTED_APP_CERT_SHA256_DIGESTS` is what
+	 * actually closes this.
 	 */
 	private readonly expectedAppIdentity: ExpectedAppIdentity = {
 		packageName: EXPECTED_APP_PACKAGE,
-		certificateSha256Digests: EXPECTED_APP_CERT_SHA256_DIGESTS,
-	}
+		certificateSha256Digests: buildExpectedCertDigests(__DEV__),
+	};
 
 	constructor(
 		private readonly localStorage: LocalStorageReact,
-		private readonly rnDbFactory: DbFactory,
+		private readonly rnDbFactory: DbFactory
 	) {
 		// Construct NetworksEngine once — it owns the per-network ctx lifecycle (Phase-14 seam).
 		// Never call rnDbFactory directly from the factory (Pitfall 2 / T-15-03-05).
@@ -182,15 +192,15 @@ export class EngineFactory {
 		// RESEARCH Pitfall 1: never call createStrandDbFactory(null) — guard on this.node truthy.
 		this.networksEngine = new NetworksEngine(localStorage, async (networkHash: string) => {
 			if (this.node && !(__DEV__ && USE_LOCAL_DB_FACTORY)) {
-				return createStrandDbFactory(this.node)(networkHash)
+				return createStrandDbFactory(this.node)(networkHash);
 			}
-			return this.rnDbFactory(networkHash)
-		})
+			return this.rnDbFactory(networkHash);
+		});
 	}
 
 	/** Expose the shared NetworksEngine for initialize() in AppProvider. */
 	getNetworksEngine(): NetworksEngine {
-		return this.networksEngine
+		return this.networksEngine;
 	}
 
 	/**
@@ -199,14 +209,14 @@ export class EngineFactory {
 	 * After clearing, engines are rebuilt lazily on the next getEngine() call.
 	 */
 	clearEngineCache(): void {
-		this.engineCache.clear()
-		this.currentNetworkHash = undefined
+		this.engineCache.clear();
+		this.currentNetworkHash = undefined;
 	}
 
 	/** True if the named engine (with optional initParams) is already cached. */
 	hasEngine(engineName: string, initParams?: unknown): boolean {
-		const key = this.cacheKey(engineName, initParams)
-		return this.engineCache.has(key)
+		const key = this.cacheKey(engineName, initParams);
+		return this.engineCache.has(key);
 	}
 
 	/**
@@ -223,23 +233,23 @@ export class EngineFactory {
 		// one, evict the stale 'network' entry + ctx-dependent siblings so buildEngine re-opens
 		// against the new ref. Param-less / same-hash calls fall through unchanged (CR-01).
 		if (engineName === 'network') {
-			const ref = initParams as NetworkReference | undefined
+			const ref = initParams as NetworkReference | undefined;
 			if (
 				ref?.hash !== undefined &&
 				this.currentNetworkHash !== undefined &&
 				ref.hash !== this.currentNetworkHash
 			) {
-				this.evictNetworkScopedEngines()
+				this.evictNetworkScopedEngines();
 			}
 		}
 
-		const key = this.cacheKey(engineName, initParams)
+		const key = this.cacheKey(engineName, initParams);
 		if (this.engineCache.has(key)) {
-			return this.engineCache.get(key) as T
+			return this.engineCache.get(key) as T;
 		}
-		const engine = await this.buildEngine(engineName, initParams)
-		this.engineCache.set(key, engine)
-		return engine as T
+		const engine = await this.buildEngine(engineName, initParams);
+		this.engineCache.set(key, engine);
+		return engine as T;
 	}
 
 	/**
@@ -252,7 +262,7 @@ export class EngineFactory {
 	 * `isAttestationVerifierProvisioned` passthrough.
 	 */
 	isAttestationVerifierProvisioned(): boolean {
-		return this.playConsoleKeysProvisioned
+		return this.playConsoleKeysProvisioned;
 	}
 
 	// ---------- private helpers ----------
@@ -267,8 +277,8 @@ export class EngineFactory {
 	 */
 	private evictNetworkScopedEngines(): void {
 		for (const key of [...this.engineCache.keys()]) {
-			if (key === 'defaultUser') continue
-			this.engineCache.delete(key)
+			if (key === 'defaultUser') continue;
+			this.engineCache.delete(key);
 		}
 	}
 
@@ -280,11 +290,9 @@ export class EngineFactory {
 		// screen call is a cache HIT (CR-01) rather than re-entering buildEngine with
 		// undefined initParams (which dereferences ref.hash → crash).
 		if (engineName === 'network') {
-			return 'network'
+			return 'network';
 		}
-		return initParams !== undefined
-			? `${engineName}:${JSON.stringify(initParams)}`
-			: engineName
+		return initParams !== undefined ? `${engineName}:${JSON.stringify(initParams)}` : engineName;
 	}
 
 	/**
@@ -311,14 +319,15 @@ export class EngineFactory {
 				// supplied, resolve it from the already-established hash rather than
 				// dereferencing undefined.hash. Never overwrite currentNetworkHash with
 				// undefined — that would break every sibling's requireEstablishedCtx().
-				const ref = (initParams as NetworkReference | undefined)
-					?? (this.currentNetworkHash !== undefined
+				const ref =
+					(initParams as NetworkReference | undefined) ??
+					(this.currentNetworkHash !== undefined
 						? ({ hash: this.currentNetworkHash } as NetworkReference)
-						: undefined)
+						: undefined);
 				if (ref === undefined) {
 					throw new NoNetworkEstablishedError(
-						'EngineFactory: no network established — call getEngine("network", ref) during init',
-					)
+						'EngineFactory: no network established — call getEngine("network", ref) during init'
+					);
 				}
 				// Q3 open question 3: auto-open so screen-initiated network resolution works.
 				// Thread the resolved device user so ctx.user is a real User after boot.
@@ -326,49 +335,49 @@ export class EngineFactory {
 				// (== strandId, D-05) so NetworkEngine.getStatistics reports connected peers.
 				// The closure reads getPeerCount lazily at call time, so it picks up the
 				// CadreNodeProvider registration even if it lands after open().
-				const peerCount = (): number => this.getPeerCount?.(ref.hash) ?? 0
+				const peerCount = (): number => this.getPeerCount?.(ref.hash) ?? 0;
 				const networkEngine = await this.networksEngine.open(
 					ref,
 					this.currentUser,
 					true,
-					peerCount,
-				)
-				this.currentNetworkHash = ref.hash
-				return networkEngine
+					peerCount
+				);
+				this.currentNetworkHash = ref.hash;
+				return networkEngine;
 			}
 
 			case 'defaultUser':
 				// LocalStorage-backed only — no ctx required. Cheap to rebuild; included in
 				// uniform clear-all (D-14) for simplicity.
-				return new DefaultUserEngine(this.localStorage)
+				return new DefaultUserEngine(this.localStorage);
 
 			case 'user': {
 				// Delegates to the cached NetworkEngine — not constructed directly.
 				// Requires "network" to have been built first.
-				const networkEngine = this.engineCache.get('network') as NetworkEngine | undefined
+				const networkEngine = this.engineCache.get('network') as NetworkEngine | undefined;
 				if (!networkEngine) {
-					throw new Error('EngineFactory: "network" must be built before "user"')
+					throw new Error('EngineFactory: "network" must be built before "user"');
 				}
-				return networkEngine.getCurrentUser()
+				return networkEngine.getCurrentUser();
 			}
 
 			case 'authority': {
 				// Delegates to the cached NetworkEngine; initParams is the authority ID string.
-				const networkEngine = this.engineCache.get('network') as NetworkEngine | undefined
+				const networkEngine = this.engineCache.get('network') as NetworkEngine | undefined;
 				if (!networkEngine) {
-					throw new Error('EngineFactory: "network" must be built before "authority"')
+					throw new Error('EngineFactory: "network" must be built before "authority"');
 				}
-				return networkEngine.openAuthority(initParams as string)
+				return networkEngine.openAuthority(initParams as string);
 			}
 
 			case 'elections': {
-				const ctx = this.requireEstablishedCtx()
-				return new ElectionsEngine(ctx)
+				const ctx = this.requireEstablishedCtx();
+				return new ElectionsEngine(ctx);
 			}
 
 			case 'signing': {
-				const ctx = this.requireEstablishedCtx()
-				return new SigningEngine(ctx)
+				const ctx = this.requireEstablishedCtx();
+				return new SigningEngine(ctx);
 			}
 
 			case 'registration': {
@@ -379,8 +388,8 @@ export class EngineFactory {
 				// (MutationValid/DeleteValid on ElectionRegistrationField /
 				// ElectionDisclosurePolicy / ElectionAttestationPolicy). Any future UI
 				// scope gate (D-10) is convenience, not a boundary.
-				const ctx = this.requireEstablishedCtx()
-				return new RegistrationEngine(ctx)
+				const ctx = this.requireEstablishedCtx();
+				return new RegistrationEngine(ctx);
 			}
 
 			case 'authorityConfig': {
@@ -391,37 +400,37 @@ export class EngineFactory {
 				// the schema's InsertValid/DeleteValid AdminSignature CHECK ('cap' for
 				// peers, 'vrg' for polling devices). 47-17/47-18's UI scope gates
 				// (useCurrentOfficerScopes()) are convenience, not a boundary.
-				const ctx = this.requireEstablishedCtx()
-				return new AuthorityConfigEngine(ctx)
+				const ctx = this.requireEstablishedCtx();
+				return new AuthorityConfigEngine(ctx);
 			}
 
 			case 'election': {
 				// Real ElectionEngine requires ElectionSubject (id + authorityId).
 				// initParams must carry ElectionSubject — unlike the mock which ignored it.
-				const ctx = this.requireEstablishedCtx()
-				return new ElectionEngine(initParams as ElectionSubject, ctx)
+				const ctx = this.requireEstablishedCtx();
+				return new ElectionEngine(initParams as ElectionSubject, ctx);
 			}
 
 			case 'keysTasksEngine': {
-				const ctx = this.requireEstablishedCtx()
-				const ref = { hash: this.currentNetworkHash! } as NetworkReference
-				return new KeysTasksEngine(ref, ctx)
+				const ctx = this.requireEstablishedCtx();
+				const ref = { hash: this.currentNetworkHash! } as NetworkReference;
+				return new KeysTasksEngine(ref, ctx);
 			}
 
 			case 'signatureTasksEngine': {
-				const ctx = this.requireEstablishedCtx()
-				const ref = { hash: this.currentNetworkHash! } as NetworkReference
-				return new SignatureTasksEngine(ref, ctx)
+				const ctx = this.requireEstablishedCtx();
+				const ref = { hash: this.currentNetworkHash! } as NetworkReference;
+				return new SignatureTasksEngine(ref, ctx);
 			}
 
 			case 'onboardingTasksEngine': {
-				const ctx = this.requireEstablishedCtx()
-				return new OnboardingTasksEngine(ctx)
+				const ctx = this.requireEstablishedCtx();
+				return new OnboardingTasksEngine(ctx);
 			}
 
 			case 'invitations': {
-				const ctx = this.requireEstablishedCtx()
-				return new InvitationEngine(ctx)
+				const ctx = this.requireEstablishedCtx();
+				return new InvitationEngine(ctx);
 			}
 
 			case 'association': {
@@ -429,8 +438,8 @@ export class EngineFactory {
 				// stub is selected ONLY under an explicit __DEV__ dev gate, never a
 				// silent prod fallback. The gate lives HERE in the factory, never
 				// inside AssociationEngine/PlayIntegrityVerifier (D-12 seam-never-changes).
-				const ctx = this.requireEstablishedCtx()
-				const useStub = __DEV__ && USE_STUB_ATTESTATION_VERIFIER
+				const ctx = this.requireEstablishedCtx();
+				const useStub = __DEV__ && USE_STUB_ATTESTATION_VERIFIER;
 				// D-09: the CR-03 fail-closed decision is unchanged in EFFECT but no
 				// longer lives here as a construction-time throw — it now lives inside
 				// PlayIntegrityVerifier.verify() (47-03), so the engine constructs
@@ -450,13 +459,13 @@ export class EngineFactory {
 							PINNED_HARDWARE_ROOTS_DER,
 							this.expectedAppIdentity,
 							REVOKED_ATTESTATION_SERIALS,
-							this.playConsoleKeysProvisioned,
-						)
-				return new AssociationEngine(ctx, verifier)
+							this.playConsoleKeysProvisioned
+					  );
+				return new AssociationEngine(ctx, verifier);
 			}
 
 			default:
-				throw new Error(`EngineFactory: unknown engine type "${engineName}"`)
+				throw new Error(`EngineFactory: unknown engine type "${engineName}"`);
 		}
 	}
 
@@ -470,15 +479,15 @@ export class EngineFactory {
 	private requireEstablishedCtx(): EngineContext {
 		if (this.currentNetworkHash === undefined) {
 			throw new NoNetworkEstablishedError(
-				'EngineFactory: Network context not established — call getEngine("network", ref) first',
-			)
+				'EngineFactory: Network context not established — call getEngine("network", ref) first'
+			);
 		}
-		const ctx = this.networksEngine.getEstablishedContext(this.currentNetworkHash)
+		const ctx = this.networksEngine.getEstablishedContext(this.currentNetworkHash);
 		if (ctx === undefined) {
 			throw new NoNetworkEstablishedError(
-				`EngineFactory: Network context not established for hash ${this.currentNetworkHash} — call getEngine("network", ref) first`,
-			)
+				`EngineFactory: Network context not established for hash ${this.currentNetworkHash} — call getEngine("network", ref) first`
+			);
 		}
-		return ctx
+		return ctx;
 	}
 }

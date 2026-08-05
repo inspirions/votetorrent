@@ -134,7 +134,7 @@ jest.mock(
 			AuthorityConfigEngine: class {},
 		};
 	},
-	{ virtual: true },
+	{ virtual: true }
 );
 
 // Stub attestation-roots/status generated files so the test doesn't depend on the
@@ -156,6 +156,8 @@ jest.mock('../attestation-keys.generated', () => ({
 	PLAY_CONSOLE_VERIFICATION_KEY_BASE64: 'dmVyaWZpY2F0aW9uLWtleS1wcm92aXNpb25lZA==',
 	EXPECTED_APP_PACKAGE: 'org.votetorrent.authority',
 	EXPECTED_APP_CERT_SHA256_DIGESTS: ['abc123'],
+	PUBLIC_DEBUG_CERT_SHA256_DIGESTS: [],
+	buildExpectedCertDigests: () => ['abc123'],
 }));
 
 /** D-09: shared unprovisioned-key build helper for the read-surface tests below. */
@@ -169,6 +171,8 @@ function mockUnprovisionedKeys() {
 		PLAY_CONSOLE_VERIFICATION_KEY_BASE64: '',
 		EXPECTED_APP_PACKAGE: 'org.votetorrent.authority',
 		EXPECTED_APP_CERT_SHA256_DIGESTS: [],
+		PUBLIC_DEBUG_CERT_SHA256_DIGESTS: [],
+		buildExpectedCertDigests: () => [],
 	}));
 }
 
@@ -243,7 +247,7 @@ describe("EngineFactory buildEngine('association') — D-09/D-12/D-13/D-14", () 
 			// catch — the factory forgetting the 5th argument, leaving 47-03's
 			// `= true` default in force and silently re-enabling the verifier.
 			expect(injectedVerifier.keysProvisioned).toBe(false);
-		},
+		}
 	);
 
 	it('D-09: getAssociation succeeds against the unprovisioned-key engine without consulting the verifier', async () => {
@@ -290,7 +294,7 @@ describe("EngineFactory buildEngine('association') — D-09/D-12/D-13/D-14", () 
 
 		await expect(
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			(engine as any).removeAssociation('r1', 'dk1', { sig: 'stub' }),
+			(engine as any).removeAssociation('r1', 'dk1', { sig: 'stub' })
 		).resolves.toBeUndefined();
 		expect(injectedVerifier.verifyCallCount).toBe(0);
 	});
@@ -311,7 +315,7 @@ describe("EngineFactory buildEngine('association') — D-09/D-12/D-13/D-14", () 
 				(engine as any).getAssociations('r1'),
 				// eslint-disable-next-line @typescript-eslint/no-explicit-any
 				(engine as any).removeAssociation('r1', 'dk1', { sig: 'stub' }),
-			]),
+			])
 		).resolves.toBeDefined();
 		expect(injectedVerifier.verifyCallCount).toBe(0);
 	});
@@ -326,6 +330,8 @@ describe("EngineFactory buildEngine('association') — D-09/D-12/D-13/D-14", () 
 			PLAY_CONSOLE_VERIFICATION_KEY_BASE64: '',
 			EXPECTED_APP_PACKAGE: 'org.votetorrent.authority',
 			EXPECTED_APP_CERT_SHA256_DIGESTS: [],
+			PUBLIC_DEBUG_CERT_SHA256_DIGESTS: [],
+			buildExpectedCertDigests: () => [],
 		}));
 
 		const { factory, rn } = buildFactoryWithEstablishedCtx();
