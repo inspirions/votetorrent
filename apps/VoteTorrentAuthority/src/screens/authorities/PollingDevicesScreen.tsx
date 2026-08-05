@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
+import type { RouteProp } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
@@ -17,7 +18,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import type { SignCallback } from "../../engines/device-signer";
 import { scopeDescriptions } from "@votetorrent/vote-core";
 import type { IAuthorityConfigEngine, PollingDevice } from "@votetorrent/vote-core";
-import type { NavigationProp } from "../../navigation/types";
+import type { NavigationProp, RootStackParamList } from "../../navigation/types";
 import {
 	formatDeviceTitle,
 	isValidDeviceHash,
@@ -46,13 +47,12 @@ const NOOP = () => {};
  * `./polling-device-hash.ts` for the normalization/validation contract this
  * screen delegates to.
  *
- * `PollingDevices` is NOT yet a key of `RootStackParamList` — 47-21 owns
- * adding `{ authorityId: string }` and registering the `Stack.Screen`. This
- * screen reads `useRoute().params` via an unconditional cast (the same
- * pattern `RegistrationPolicyScreen.tsx` uses) and uses
+ * `PollingDevices` IS a key of `RootStackParamList` (47-21 added
+ * `{ authorityId: string }` and registered the `Stack.Screen`), so this screen
+ * reads its param through `RouteProp<RootStackParamList, "PollingDevices">`
+ * rather than the unconditional cast it used before that landed. It still uses
  * `useNavigation<NavigationProp>()` for `setOptions` ONLY — it navigates
- * nowhere (no detail screen this phase), so no route-key widening is needed
- * and `navigation/types.ts` is not edited here.
+ * nowhere (no detail screen this phase).
  */
 export default function PollingDevicesScreen() {
 	const { t } = useTranslation();
@@ -60,7 +60,9 @@ export default function PollingDevicesScreen() {
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
 	const navigation = useNavigation<NavigationProp>();
-	const { authorityId } = useRoute().params as { authorityId: string };
+	// Typed, not cast: 47-21 registered "PollingDevices" on RootStackParamList,
+	// so RouteProp gives the param checking the earlier cast could not.
+	const { authorityId } = useRoute<RouteProp<RootStackParamList, "PollingDevices">>().params;
 
 	const [devices, setDevices] = useState<PollingDevice[]>([]);
 	const [loading, setLoading] = useState(true);

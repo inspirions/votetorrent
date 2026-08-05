@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useRoute, useTheme } from "@react-navigation/native";
+import type { RouteProp } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
@@ -22,6 +23,7 @@ import type { SignCallback } from "../../engines/device-signer";
 import { LifecycleConfirmCard } from "../registration/components/LifecycleConfirmCard";
 import { scopeDescriptions } from "@votetorrent/vote-core";
 import type { AuthorityPeer, IAuthorityConfigEngine } from "@votetorrent/vote-core";
+import type { RootStackParamList } from "../../navigation/types";
 
 // A stable no-op for the (non-optional) CustomButton.onPress prop when a gate
 // is unmet — belt-and-suspenders alongside `disabled`, mirroring
@@ -48,13 +50,12 @@ const NOOP = () => {};
  * `addAuthorityPeer`/`removeAuthorityPeer` pass `'cap'` to
  * `seedSignedMutation` unconditionally (T-46-03 precedent, T-47-04).
  *
- * `AuthorityPeers` is NOT yet a key of `RootStackParamList` — 47-21 owns
- * adding `{ authorityId: string }` and registering the `Stack.Screen`. This
- * screen reads `useRoute().params` via a local cast (matching
- * `RegistrationPolicyScreen.tsx`'s pattern) rather than
- * `RouteProp<RootStackParamList, "AuthorityPeers">`, which would not
- * typecheck until 47-21 lands. This screen has no detail screen and
- * navigates nowhere, so no navigation-prop hook or type is imported.
+ * `AuthorityPeers` IS a key of `RootStackParamList` (47-21 added
+ * `{ authorityId: string }` and registered the `Stack.Screen`), so this screen
+ * reads its param through `RouteProp<RootStackParamList, "AuthorityPeers">`
+ * rather than the local `as { authorityId: string }` cast it used before that
+ * landed. This screen has no detail screen and navigates nowhere, so no
+ * navigation-prop hook or type is imported.
  */
 
 /**
@@ -81,9 +82,9 @@ export default function AuthorityPeersScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
-	// TODO(47-21): swap to `useRoute<RouteProp<RootStackParamList, "AuthorityPeers">>()`
-	// once the "AuthorityPeers" route key exists on RootStackParamList.
-	const { authorityId } = useRoute().params as { authorityId: string };
+	// Typed, not cast: 47-21 registered "AuthorityPeers" on RootStackParamList,
+	// so RouteProp gives the param checking the earlier cast could not.
+	const { authorityId } = useRoute<RouteProp<RootStackParamList, "AuthorityPeers">>().params;
 
 	const [peers, setPeers] = useState<AuthorityPeer[]>([]);
 	const [loading, setLoading] = useState(true);
