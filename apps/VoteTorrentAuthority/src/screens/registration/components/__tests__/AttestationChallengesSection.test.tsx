@@ -93,12 +93,15 @@ jest.mock("../../../../providers/AppProvider", () => ({
 // stale-dist guard, test 1.
 // ---------------------------------------------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { MockAssociationEngine } = require(
-	"../../../../../../../packages/vote-engine/dist/association/mock-association-engine",
-);
+const {
+	MockAssociationEngine,
+} = require("../../../../../../../packages/vote-engine/dist/association/mock-association-engine");
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { AttestationChallengesSection, toDisplayTimestamp } = require("../AttestationChallengesSection");
+const {
+	AttestationChallengesSection,
+	toDisplayTimestamp,
+} = require("../AttestationChallengesSection");
 
 // latestVerdictByDeviceKey now lives in ONE shared module rather than being
 // copy-pasted into this section and AssociationsSection with divergent return
@@ -162,7 +165,7 @@ class ThrowingRemoveEngine extends MockAssociationEngine {
 function press(tr: renderer.ReactTestRenderer, testID: string) {
 	const wrapper = tr.root.findByProps({ testID });
 	const pressable = [wrapper, ...wrapper.findAll(() => true)].find(
-		(node) => typeof node.props.onPress === "function",
+		(node) => typeof node.props.onPress === "function"
 	);
 	renderer.act(() => {
 		pressable!.props.onPress();
@@ -174,7 +177,7 @@ function press(tr: renderer.ReactTestRenderer, testID: string) {
 function pressChip(tr: renderer.ReactTestRenderer, testID: string) {
 	const wrapper = tr.root.findByProps({ testID });
 	const pressable = [wrapper, ...wrapper.findAll(() => true)].find(
-		(node) => typeof node.props.onPressIn === "function",
+		(node) => typeof node.props.onPressIn === "function"
 	);
 	renderer.act(() => {
 		pressable!.props.onPressIn();
@@ -196,7 +199,7 @@ function treeText(tr: renderer.ReactTestRenderer): string {
 function isDisabled(tr: renderer.ReactTestRenderer, testID: string): boolean {
 	const wrapper = tr.root.findByProps({ testID });
 	const withDisabled = [wrapper, ...wrapper.findAll(() => true)].find(
-		(node) => typeof node.props.disabled === "boolean",
+		(node) => typeof node.props.disabled === "boolean"
 	);
 	return withDisabled!.props.disabled === true;
 }
@@ -204,7 +207,7 @@ function isDisabled(tr: renderer.ReactTestRenderer, testID: string): boolean {
 function findOnPress(tr: renderer.ReactTestRenderer, testID: string): () => void {
 	const wrapper = tr.root.findByProps({ testID });
 	const pressable = [wrapper, ...wrapper.findAll(() => true)].find(
-		(node) => typeof node.props.onPress === "function",
+		(node) => typeof node.props.onPress === "function"
 	);
 	return pressable!.props.onPress;
 }
@@ -245,14 +248,14 @@ function assertNoCreateLanguage(tr: renderer.ReactTestRenderer) {
 
 async function seedChallenge(
 	engine: any,
-	opts: { deviceKey: string; electionId?: string; expiration?: string; registrantId?: string },
+	opts: { deviceKey: string; electionId?: string; expiration?: string; registrantId?: string }
 ) {
 	return engine.issueAttestationChallenge(
 		opts.registrantId ?? REGISTRANT_ID,
 		opts.deviceKey,
 		opts.expiration ?? FUTURE_EXPIRATION,
 		SEED_SIGN,
-		opts.electionId,
+		opts.electionId
 	);
 }
 
@@ -272,7 +275,7 @@ async function renderSection(overrides?: {
 				registrantId={overrides?.registrantId ?? REGISTRANT_ID}
 				canWrite={overrides?.canWrite ?? true}
 				onOpenProvisioningStatus={onOpenProvisioningStatus}
-			/>,
+			/>
 		);
 	});
 	await flush();
@@ -294,12 +297,19 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 	});
 
 	test("2: D-11 populated render — binding fields for two challenges", async () => {
-		const c1 = await seedChallenge(mockAssociationEngine, { deviceKey: DEVICE_KEY_ALPHA, electionId: "election-1" });
+		const c1 = await seedChallenge(mockAssociationEngine, {
+			deviceKey: DEVICE_KEY_ALPHA,
+			electionId: "election-1",
+		});
 		const c2 = await seedChallenge(mockAssociationEngine, { deviceKey: DEVICE_KEY_BRAVO });
 		const { tr } = await renderSection();
 
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })).not.toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-row-${c2.nonce}` })).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })
+		).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-row-${c2.nonce}` })
+		).not.toThrow();
 
 		const text = treeText(tr);
 		expect(text).toContain(DEVICE_KEY_ALPHA.slice(0, 5) + "...");
@@ -313,7 +323,9 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 	test("3: D-03 verdict join — latest wins, and the inversion guard holds", async () => {
 		const cA = await seedChallenge(mockAssociationEngine, { deviceKey: DEVICE_KEY_ALPHA });
 		const cB = await seedChallenge(mockAssociationEngine, { deviceKey: DEVICE_KEY_BRAVO });
-		await mockAssociationEngine.recordAttestationVerdict(REGISTRANT_ID, DEVICE_KEY_ALPHA, { ok: true });
+		await mockAssociationEngine.recordAttestationVerdict(REGISTRANT_ID, DEVICE_KEY_ALPHA, {
+			ok: true,
+		});
 		await mockAssociationEngine.recordAttestationVerdict(REGISTRANT_ID, DEVICE_KEY_ALPHA, {
 			ok: false,
 			reason: "revoked hardware root",
@@ -321,13 +333,23 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 
 		const { tr } = await renderSection();
 
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-verdict-${cA.nonce}-fail` })).not.toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-verdict-${cA.nonce}-pass` })).toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-verdict-${cB.nonce}-none` })).not.toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-verdict-${cB.nonce}-fail` })).toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${cA.nonce}-fail` })
+		).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${cA.nonce}-pass` })
+		).toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${cB.nonce}-none` })
+		).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${cB.nonce}-fail` })
+		).toThrow();
 
 		press(tr, `attestation-challenges-verdict-${cA.nonce}`);
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-verdict-${cA.nonce}-reason` })).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${cA.nonce}-reason` })
+		).not.toThrow();
 		expect(treeText(tr)).toContain("revoked hardware root");
 	});
 
@@ -339,11 +361,21 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 
 		const { tr } = await renderSection();
 
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })).not.toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-row-${c2.nonce}` })).not.toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-none` })).not.toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-pass` })).toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-fail` })).toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })
+		).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-row-${c2.nonce}` })
+		).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-none` })
+		).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-pass` })
+		).toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-fail` })
+		).toThrow();
 		expect(() => tr.root.findByProps({ testID: "attestation-challenges-error" })).not.toThrow();
 		expect(treeText(tr)).not.toContain("verdict store unavailable");
 	});
@@ -380,9 +412,12 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		const { tr, onOpenProvisioningStatus } = await renderSection({ provisioned: false });
 
 		const banner = tr.root.findByProps({ testID: "attestation-challenges-provisioning-banner" });
-		const bannerStyle = Array.isArray(banner.props.style) ? banner.props.style.flat(5) : [banner.props.style];
+		const bannerStyle = Array.isArray(banner.props.style)
+			? banner.props.style.flat(5)
+			: [banner.props.style];
 		const withBorder = bannerStyle.find(
-			(s: unknown) => s !== null && typeof s === "object" && "borderLeftColor" in (s as Record<string, unknown>),
+			(s: unknown) =>
+				s !== null && typeof s === "object" && "borderLeftColor" in (s as Record<string, unknown>)
 		) as Record<string, unknown> | undefined;
 		expect(withBorder?.borderLeftColor).toBe(PALETTE.warning);
 
@@ -396,10 +431,12 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 
 		const provisionedRender = await renderSection({ provisioned: true });
 		expect(() =>
-			provisionedRender.tr.root.findByProps({ testID: "attestation-challenges-provisioning-banner" }),
+			provisionedRender.tr.root.findByProps({
+				testID: "attestation-challenges-provisioning-banner",
+			})
 		).toThrow();
 		expect(() =>
-			provisionedRender.tr.root.findByProps({ testID: "attestation-challenges-provisioning-link" }),
+			provisionedRender.tr.root.findByProps({ testID: "attestation-challenges-provisioning-link" })
 		).toThrow();
 	});
 
@@ -409,14 +446,19 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 
 		pressChip(tr, "attestation-challenges-toggle");
 
-		expect(() => tr.root.findByProps({ testID: "attestation-challenges-provisioning-banner" })).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: "attestation-challenges-provisioning-banner" })
+		).not.toThrow();
 		expect(() => tr.root.findByProps({ testID: "attestation-challenges-empty" })).toThrow();
 		expect(() => tr.root.findByProps({ testID: "attestation-challenges-loading" })).toThrow();
 		expect(treeText(tr)).not.toContain("attestation-challenges-row-");
 	});
 
 	test("10: the banner link is never scope-gated", async () => {
-		const { tr, onOpenProvisioningStatus } = await renderSection({ provisioned: false, canWrite: false });
+		const { tr, onOpenProvisioningStatus } = await renderSection({
+			provisioned: false,
+			canWrite: false,
+		});
 
 		pressChip(tr, "attestation-challenges-provisioning-link");
 		expect(onOpenProvisioningStatus).toHaveBeenCalledTimes(1);
@@ -458,7 +500,7 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 					"attestation-challenges-toggle",
 					`attestation-challenges-expire-trigger-${c1.nonce}`,
 					`attestation-challenges-expire-trigger-${c2.nonce}`,
-				].sort(),
+				].sort()
 			);
 			assertNoCreateLanguage(tr);
 		}
@@ -479,7 +521,7 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 					`attestation-challenges-expire-trigger-${c1.nonce}`,
 					`attestation-challenges-expire-trigger-${c2.nonce}`,
 					`attestation-challenges-verdict-${c1.nonce}`,
-				].sort(),
+				].sort()
 			);
 			assertNoCreateLanguage(tr);
 		}
@@ -496,7 +538,7 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 					"attestation-challenges-provisioning-link",
 					`attestation-challenges-expire-trigger-${c1.nonce}`,
 					`attestation-challenges-expire-trigger-${c2.nonce}`,
-				].sort(),
+				].sort()
 			);
 			assertNoCreateLanguage(tr);
 		}
@@ -514,7 +556,7 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 					"attestation-challenges-toggle",
 					`attestation-challenges-expire-trigger-${c1.nonce}`,
 					`attestation-challenges-expire-trigger-${c2.nonce}`,
-				].sort(),
+				].sort()
 			);
 			assertNoCreateLanguage(tr);
 		}
@@ -536,7 +578,7 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 			const { tr } = await renderSection({ provisioned: false });
 			pressChip(tr, "attestation-challenges-toggle");
 			expect(pressableTestIDs(tr)).toEqual(
-				["attestation-challenges-toggle", "attestation-challenges-provisioning-link"].sort(),
+				["attestation-challenges-toggle", "attestation-challenges-provisioning-link"].sort()
 			);
 			assertNoCreateLanguage(tr);
 		}
@@ -566,7 +608,9 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 
 		press(tr, `attestation-challenges-expire-trigger-${c1.nonce}`);
 
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })
+		).not.toThrow();
 		const text = treeText(tr);
 		expect(text).toContain("attestationChallengeExpireTitle");
 		expect(text).toContain("attestationChallengeExpireBody");
@@ -588,8 +632,12 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		press(tr, `attestation-challenges-expire-${c1.nonce}-dismiss`);
 		await flush();
 
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })).toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })
+		).toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })
+		).not.toThrow();
 		expect(removeSpy).not.toHaveBeenCalled();
 	});
 
@@ -607,9 +655,15 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		expect(removeSpy).toHaveBeenCalledTimes(1);
 		expect(removeSpy.mock.calls[0][0]).toBe(c1.nonce);
 		expect(typeof removeSpy.mock.calls[0][1]).toBe("function");
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })).toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })).toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-row-${c2.nonce}` })).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })
+		).toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })
+		).toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-row-${c2.nonce}` })
+		).not.toThrow();
 	});
 
 	test("16: expire failure keeps the card mounted, surfaces InlineError, and is retryable", async () => {
@@ -624,8 +678,12 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		await flush();
 
 		expect(treeText(tr)).toContain("expire-failed");
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })).not.toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })
+		).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-row-${c1.nonce}` })
+		).not.toThrow();
 
 		press(tr, `attestation-challenges-expire-${c1.nonce}-confirm`);
 		await flush();
@@ -642,8 +700,12 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		press(tr, `attestation-challenges-expire-trigger-${c1.nonce}`);
 		press(tr, `attestation-challenges-expire-trigger-${c2.nonce}`);
 
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c2.nonce}-card` })).not.toThrow();
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })).toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-expire-${c2.nonce}-card` })
+		).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })
+		).toThrow();
 	});
 
 	test("18: D-13 read-only — trigger present, disabled, zero calls even invoked programmatically", async () => {
@@ -661,7 +723,9 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 			renderer.act(() => {
 				findOnPress(tr, testID)();
 			});
-			expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c.nonce}-card` })).toThrow();
+			expect(() =>
+				tr.root.findByProps({ testID: `attestation-challenges-expire-${c.nonce}-card` })
+			).toThrow();
 		}
 
 		expect(removeSpy).not.toHaveBeenCalled();
@@ -696,7 +760,13 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		// badge to "none". Device keys are hex/base58 today so this was not
 		// reachable in practice; it is asserted anyway because this function's
 		// whole job is "never a false Pass, never a false Fail".
-		for (const hostileKey of ["toString", "valueOf", "constructor", "__proto__", "hasOwnProperty"]) {
+		for (const hostileKey of [
+			"toString",
+			"valueOf",
+			"constructor",
+			"__proto__",
+			"hasOwnProperty",
+		]) {
 			const hostile = latestVerdictByDeviceKey([
 				{
 					registrantId: REGISTRANT_ID,
@@ -731,8 +801,8 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 			press(tr, `attestation-challenges-expire-${c1.nonce}-dismiss`);
 			await flush();
 
-			const allArgs = [...logSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls].map((args) =>
-				JSON.stringify(args),
+			const allArgs = [...logSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls].map(
+				(args) => JSON.stringify(args)
 			);
 			expect(allArgs.some((a) => a.includes(DEVICE_KEY_ALPHA))).toBe(false);
 		} finally {
@@ -757,7 +827,7 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const { createDeviceSigner } = require("../../../../engines/device-signer");
 		(createDeviceSigner as jest.Mock).mockRejectedValueOnce(
-			new Error("Device user not initialised — cannot sign"),
+			new Error("Device user not initialised — cannot sign")
 		);
 
 		press(tr, `attestation-challenges-expire-trigger-${c1.nonce}`);
@@ -767,7 +837,9 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		expect(treeText(tr)).toContain("Device user not initialised");
 		// The card must stay mounted so the officer can retry, exactly as in the
 		// removeAttestationChallenge-failure case (test 16).
-		expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })).not.toThrow();
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })
+		).not.toThrow();
 	});
 
 	test("22: a getEngine failure during expire surfaces InlineError too", async () => {

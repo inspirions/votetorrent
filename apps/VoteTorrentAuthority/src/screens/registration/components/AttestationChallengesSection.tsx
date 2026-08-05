@@ -3,7 +3,11 @@ import { StyleSheet, View } from "react-native";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
-import type { AttestationChallenge, AttestationVerdict, IAssociationEngine } from "@votetorrent/vote-core";
+import type {
+	AttestationChallenge,
+	AttestationVerdict,
+	IAssociationEngine,
+} from "@votetorrent/vote-core";
 import { ThemedText } from "../../../components/ThemedText";
 import { ChipButton } from "../../../components/ChipButton";
 import { CustomButton } from "../../../components/CustomButton";
@@ -227,7 +231,10 @@ export function AttestationChallengesSection({
 					</View>
 					{/* The link is never scope-gated — provisioning is a build/device concern, not registrant data. */}
 					<View testID={`${testIDPrefix}-provisioning-link`}>
-						<ChipButton label={t("attestationProvisioningInlineBannerLink")} onPress={onOpenProvisioningStatus} />
+						<ChipButton
+							label={t("attestationProvisioningInlineBannerLink")}
+							onPress={onOpenProvisioningStatus}
+						/>
 					</View>
 				</View>
 			)}
@@ -249,7 +256,9 @@ export function AttestationChallengesSection({
 					{/* D-11: purely informational — no chip, no button, nothing pressable here. */}
 					{!loading && challenges.length === 0 && (
 						<View testID={`${testIDPrefix}-empty`}>
-							<ThemedText type="defaultSemiBold">{t("attestationChallengeEmptyHeading")}</ThemedText>
+							<ThemedText type="defaultSemiBold">
+								{t("attestationChallengeEmptyHeading")}
+							</ThemedText>
 							<ThemedText type="small" style={{ color: colors.textSecondary }}>
 								{t("attestationChallengeEmptyBody")}
 							</ThemedText>
@@ -268,7 +277,10 @@ export function AttestationChallengesSection({
 								>
 									<View testID={`${testIDPrefix}-device-key-${c.nonce}`} style={localStyles.row}>
 										<ThemedText type="tiny">
-											{t("attestationChallengeDeviceKeyLabel") + ": " + c.deviceKey.slice(0, 5) + "..."}
+											{t("attestationChallengeDeviceKeyLabel") +
+												": " +
+												c.deviceKey.slice(0, 5) +
+												"..."}
 										</ThemedText>
 									</View>
 
@@ -281,7 +293,9 @@ export function AttestationChallengesSection({
 
 									<View testID={`${testIDPrefix}-expiry-${c.nonce}`} style={localStyles.row}>
 										<ThemedText type="tiny">
-											{t("attestationChallengeExpiryLabel") + ": " + toDisplayTimestamp(c.expiration)}
+											{t("attestationChallengeExpiryLabel") +
+												": " +
+												toDisplayTimestamp(c.expiration)}
 										</ThemedText>
 									</View>
 
