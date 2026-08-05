@@ -47,6 +47,19 @@
  *      partway" — and a re-run must resume, not re-throw on a primary-key
  *      collision against rows a prior partial run already wrote.
  *
+ * MARKER/DATA DOMAIN SPLIT (47-REVIEW WR-07): moving the marker to
+ * AsyncStorage fixed the mid-sequence problem but introduced a second one —
+ * the marker and the data it describes now live in DIFFERENT persistence
+ * domains. The seeded rows live in the network's LevelDB store, which "Start
+ * Fresh" (`AppProvider`) and `run-vtest02.sh`'s `rm -rf votetorrent-q2-*` both
+ * wipe; neither touches AsyncStorage. After any store reset the marker
+ * survived and the seed reported "already seeded — re-attaching, no writes"
+ * against an EMPTY database, leaving the walkthrough unseedable with no
+ * indication why. The completion check therefore cross-checks the marker
+ * against a witness row (registrant 0, written first in step (3)) before
+ * trusting it. That witness can only DEMOTE a completion claim, never grant
+ * one, so it does not reintroduce the mid-sequence bug above.
+ *
  * Do NOT hand-roll any signing-ceremony SQL here — every mutation below goes
  * through a real `vote-engine` method (`RegistrationEngine.register` /
  * `changeStatus` / `enrollElectionRegistrant`, `AssociationEngine.
@@ -244,8 +257,29 @@ export async function seedRegistrantFixtures(
 	const electionId = electionRow.Id as string
 
 	if (alreadyComplete) {
-		console.log('[seed] already seeded — re-attaching, no writes')
-		return reattachSummary(ctx, electionId)
+		// The marker and the DATA live in two different persistence domains:
+		// the marker in AsyncStorage, the seeded rows in the network's LevelDB
+		// store. "Start Fresh" (AppProvider) and run-vtest02.sh's
+		// `rm -rf votetorrent-q2-*` both wipe the store and neither touches
+		// AsyncStorage — so after any store reset the marker survived, this
+		// branch was taken, and reattachSummary returned all-empty arrays
+		// against an empty DB. The walkthrough was unseedable with nothing at
+		// all indicating why.
+		//
+		// So: cross-check the marker against a WITNESS row before trusting it.
+		// Registrant 0 is written in step (3), the very first write of the
+		// sequence, so its absence means the data is gone. This does not
+		// reintroduce the DB-row-marker bug the header warns about: a witness
+		// can only DEMOTE a completion claim, never grant one — a partial run
+		// that wrote registrant 0 and crashed still has no marker and still
+		// resumes below.
+		const witness = await ctx.db.prepare('select Id from Registrant where Id = :id').get({ id: registrantId(0) })
+		if (witness) {
+			console.log('[seed] already seeded — re-attaching, no writes')
+			return reattachSummary(ctx, electionId)
+		}
+		console.log('[seed] completion marker present but data absent (store reset) — re-seeding')
+		await AsyncStorage.removeItem(completionKey)
 	}
 
 	// Fresh — or RESUMED-PARTIAL — seed. "Not complete" can mean "never

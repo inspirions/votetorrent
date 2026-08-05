@@ -133,7 +133,12 @@ const { __mock } = require('@votetorrent/vote-engine/rn') as {
  * `select` statements — this proves nothing beyond the module's own
  * `ctx.db.prepare(...).get(...)` read contract.
  */
-function makePartialSeedCtx() {
+/**
+ * @param registrantsExist when false, every `select Id from Registrant`
+ *   returns undefined — the shape of a WIPED store ("Start Fresh",
+ *   `rm -rf votetorrent-q2-*`), which is what the WR-07 test needs.
+ */
+function makePartialSeedCtx(registrantsExist = true) {
 	return {
 		db: {
 			prepare: (sql: string) => ({
@@ -143,6 +148,7 @@ function makePartialSeedCtx() {
 					}
 					if (sql.startsWith('select Id from Registrant where Id')) {
 						// Every registrant from step (3) already exists.
+						if (!registrantsExist) return undefined
 						return { Id: params?.id }
 					}
 					if (sql.startsWith('select Status from Registrant where Id')) {
@@ -355,5 +361,40 @@ describe('registrant-dev-seed — Phase 47-23 Task 1 static contract', () => {
 			expect(mock.mock.calls.length).toBe(callCountsAfterFirstRun[name])
 		}
 		expect(secondResult.seeded).toBe(false)
+	})
+
+	it('a surviving completion marker over a WIPED store re-seeds instead of reporting "already seeded"', async () => {
+		// The defect: the completion marker lives in AsyncStorage while the data
+		// lives in the network's LevelDB store. "Start Fresh" and
+		// run-vtest02.sh's `rm -rf votetorrent-q2-*` wipe the store and touch
+		// NEITHER AsyncStorage nor the marker — so the marker outlived its data,
+		// the seed logged "already seeded — re-attaching, no writes", and
+		// reattachSummary returned all-empty arrays against an empty DB. The
+		// walkthrough was unseedable with no indication why.
+		Object.values(__mock).forEach((mock) => mock.mockClear())
+		await AsyncStorage.clear()
+
+		const networkRef = { hash: 'network-hash-wiped-store-test', name: 'n', imageUrl: undefined } as unknown as NetworkReference
+		const user = { id: 'user-1', name: 'Dev Officer' } as unknown as User
+		const sign = (async (_digest: Uint8Array) => ({}) as unknown as Signature) as (
+			digest: Uint8Array,
+		) => Promise<Signature>
+
+		// 1. A complete run — writes the completion marker for this networkRef.
+		const seededCtx = makePartialSeedCtx()
+		await seedRegistrantFixtures(makeFakeNetworksEngine(seededCtx), networkRef, user, sign)
+
+		// 2. The store is wiped; AsyncStorage (and therefore the marker) is not.
+		Object.values(__mock).forEach((mock) => mock.mockClear())
+		const wipedCtx = makePartialSeedCtx(false)
+
+		const result = await seedRegistrantFixtures(makeFakeNetworksEngine(wipedCtx), networkRef, user, sign)
+
+		// Pre-fix this returned seeded:false with every mock at zero calls.
+		expect(result.seeded).toBe(true)
+		expect(__mock.registerMock).toHaveBeenCalledTimes(12)
+		expect(__mock.enrollElectionRegistrantMock).toHaveBeenCalledTimes(5)
+		expect(__mock.associateMock).toHaveBeenCalledTimes(1)
+		expect(result.registrantIds).toHaveLength(12)
 	})
 })
