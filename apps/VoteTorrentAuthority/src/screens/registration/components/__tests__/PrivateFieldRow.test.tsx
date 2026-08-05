@@ -210,4 +210,66 @@ describe("PrivateFieldRow — D-01/D-13/D-14/T-47-02", () => {
 		toggle = tr.root.findByProps({ testID: "private-field-toggle-SSN" });
 		expect(toggle.props.accessibilityLabel).toBe("registrantDetailPrivateHideHint");
 	});
+
+	it("under StrictMode, ONE tap still emits exactly ONE onReveal", () => {
+		// DECLARED WEAKNESS, read before trusting this test as the regression
+		// lock for the updater-purity fix: react-test-renderer does NOT
+		// double-invoke state updaters under StrictMode (verified — it invokes
+		// the updater once even with `unstable_isConcurrent: true`), so this
+		// test passes against the pre-fix source too. It locks the OBSERVABLE
+		// one-tap-one-reveal contract; the structural guard below is what
+		// actually locks the fix.
+		const onReveal = jest.fn();
+		let tr!: renderer.ReactTestRenderer;
+		renderer.act(() => {
+			tr = renderer.create(
+				<React.StrictMode>
+					<PrivateFieldRow name={FIELD_NAME} value={SSN_SENTINEL} onReveal={onReveal} />
+				</React.StrictMode>,
+			);
+		});
+
+		press(tr, "private-field-toggle-SSN");
+		expect(onReveal).toHaveBeenCalledTimes(1);
+		expect(onReveal.mock.calls[0]).toEqual([FIELD_NAME]);
+
+		press(tr, "private-field-toggle-SSN"); // re-mask — emits nothing (D-14)
+		expect(onReveal).toHaveBeenCalledTimes(1);
+
+		press(tr, "private-field-toggle-SSN"); // reveal again
+		expect(onReveal).toHaveBeenCalledTimes(2);
+	});
+
+	it("STRUCTURAL GUARD: onReveal is never called from inside a setState updater", () => {
+		// The defect this locks:
+		//     setRevealed(prev => { const next = !prev; if (next) onReveal(name); return next; });
+		// React state updaters must be PURE — React double-invokes them in
+		// StrictMode/dev and may re-invoke them during concurrent rendering, so
+		// onReveal fired twice per tap in dev and had no once-per-tap guarantee
+		// under concurrent rendering. The Set inside createAccessTrailVisit
+		// absorbed the duplicate, making that accumulator's dedup load-bearing
+		// for a property that should be structural — and it would break the
+		// moment the accumulator became order-sensitive.
+		//
+		// A source gate rather than a behavioural one BY NECESSITY: this app's
+		// only render harness (react-test-renderer) does not reproduce React's
+		// StrictMode updater double-invoke, so the impurity is invisible to
+		// every behavioural test that could be written here.
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require("fs");
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require("path");
+		const source: string = fs.readFileSync(path.join(__dirname, "../PrivateFieldRow.tsx"), "utf8");
+
+		// Every setRevealed(...) call must take a plain VALUE, not a function.
+		// A non-empty match means an updater form is back: setRevealed must be
+		// called with a value, and the reveal side effect must not live inside
+		// it. Derive `next` outside the updater instead.
+		const updaterForm = /setRevealed\(\s*(\(?\s*\w*\s*\)?\s*=>|function)/g;
+		expect(source.match(updaterForm) ?? []).toEqual([]);
+
+		// Non-vacuity: the call site the guard is aimed at still exists.
+		expect(source).toContain("setRevealed(next)");
+		expect(source).toContain("onReveal(name)");
+	});
 });

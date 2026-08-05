@@ -52,15 +52,22 @@ export function PrivateFieldRow({ name, value, onReveal, testIDPrefix = "private
 	const [revealed, setRevealed] = useState(false);
 
 	function handlePress() {
-		setRevealed(prev => {
-			const next = !prev;
-			// Only the false -> true edge emits. The true -> false (re-mask)
-			// edge calls nothing at all (D-14) — there is no retraction.
-			if (next) {
-				onReveal(name);
-			}
-			return next;
-		});
+		// `next` is derived OUTSIDE the updater and the side effect fires
+		// outside it too. React state updaters must be pure: React
+		// double-invokes them in StrictMode/dev and may re-invoke them during
+		// concurrent rendering, so an `onReveal(name)` call inside the updater
+		// fired twice per tap in dev and had no once-per-tap guarantee at all
+		// under concurrent rendering. The Set inside createAccessTrailVisit
+		// absorbed the duplicate, which made that accumulator's dedup
+		// load-bearing for a property that should be structural — and would
+		// break the moment the accumulator became order-sensitive.
+		const next = !revealed;
+		setRevealed(next);
+		// Only the false -> true edge emits. The true -> false (re-mask)
+		// edge calls nothing at all (D-14) — there is no retraction.
+		if (next) {
+			onReveal(name);
+		}
 	}
 
 	return (
