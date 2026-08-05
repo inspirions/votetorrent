@@ -590,6 +590,70 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 		expect(treeText(tr)).not.toContain(SSN_SENTINEL);
 	});
 
+	it("WR-02: a gate that closes while the private read is IN FLIGHT discards the late resolution", async () => {
+		// The IN-07 test above lets the first read settle before flipping the
+		// scopes, so it never exercises the in-flight window. Checking
+		// canViewPrivate only at loadPrivateTier's ENTRY leaves that window open:
+		// gate open -> the engine call is awaited -> scopes are revised away ->
+		// the effect clears privateTier -> the still-pending promise resolves and
+		// writes the decrypted tier straight back into state. The render gate
+		// hides it, so nothing is visible; only a snapshot or a crash payload
+		// would show it -- which is exactly what D-13's structural half claims
+		// cannot happen.
+		mockScopesResult = { scopes: ["vrg"], loading: false };
+		await seedRegistrant(mockRegistrationEngine);
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const RegistrantDetailScreen = require("../RegistrantDetailScreen").default;
+
+		// Capture the real tier, then hand the screen a promise WE decide when
+		// to settle, so the gate can close strictly before it resolves.
+		const realPrivate = await mockRegistrationEngine.getRegistrantPrivate(REGISTRANT_ID);
+		expect(JSON.stringify(realPrivate)).toContain(SSN_SENTINEL);
+
+		let releaseRead: (() => void) | undefined;
+		const deferred = new Promise((resolve) => {
+			releaseRead = () => resolve(realPrivate);
+		});
+		const privateReadSpy = jest
+			.spyOn(mockRegistrationEngine, "getRegistrantPrivate")
+			.mockReturnValueOnce(deferred as never);
+
+		const tr = await renderScreen();
+		expect(privateReadSpy).toHaveBeenCalledTimes(1);
+		// Still in flight: nothing has been written yet.
+		present(tr, "registrant-detail-private-empty");
+
+		// The scopes are revised away WHILE the read is outstanding.
+		mockScopesResult = { scopes: [], loading: false };
+		await renderer.act(async () => {
+			tr.update(<RegistrantDetailScreen />);
+		});
+		await flushTicks(4);
+		present(tr, "registrant-detail-private-gate");
+
+		// Only NOW does the read come back.
+		releaseRead!();
+		await flushTicks(6);
+		expect(treeText(tr)).not.toContain(SSN_SENTINEL);
+
+		// Same isolation device as the IN-07 test: reopen the gate with the
+		// refetch FAILING, so nothing can write privateTier on the way back in.
+		// Whatever renders therefore came from state. A late resolution that was
+		// allowed to write renders the stale rows; a discarded one renders empty.
+		privateReadSpy.mockRejectedValueOnce(
+			new Error("RegistrationEngine.getRegistrantPrivate: unavailable")
+		);
+		mockScopesResult = { scopes: ["vrg"], loading: false };
+		await renderer.act(async () => {
+			tr.update(<RegistrantDetailScreen />);
+		});
+		await flushTicks(6);
+
+		present(tr, "registrant-detail-private-empty");
+		absent(tr, "registrant-detail-private-row-SSN");
+		expect(treeText(tr)).not.toContain(SSN_SENTINEL);
+	});
+
 	// -------------------------------------------------------------------------
 	// Private tier revealed (D-01/D-14)
 	// -------------------------------------------------------------------------

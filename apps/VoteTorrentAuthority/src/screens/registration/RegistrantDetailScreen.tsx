@@ -180,12 +180,29 @@ export default function RegistrantDetailScreen() {
 		loadRegistrant();
 	}, [loadRegistrant]);
 
+	// 47-REVIEW WR-02: checking canViewPrivate only at ENTRY is not enough.
+	// The gate can close while the read is in flight — gate open ->
+	// loadPrivateTier awaits the engine -> scopes are revised away -> the
+	// effect below clears privateTier -> the still-pending promise resolves
+	// and writes the decrypted tier straight back into state with the gate
+	// closed. The render gate hides it, so the failure is invisible; only a
+	// snapshot or a crash payload would show it, which is precisely what the
+	// structural gate exists to prevent. This generation counter is bumped by
+	// the load itself and by the gate closing, so a resolution that is no
+	// longer the current load cannot write.
+	const privateLoadGenerationRef = useRef(0);
+
 	const loadPrivateTier = useCallback(async () => {
 		if (!canViewPrivate) return;
+		const generation = ++privateLoadGenerationRef.current;
 		try {
 			const engine = await getEngine<IRegistrationEngine>("registration");
 			const fetched = await engine.getRegistrantPrivate(registrantId);
-			if (!unmountedRef.current) setPrivateTier(fetched);
+			// Discard if the gate closed (or another load started) while this
+			// was in flight — see privateLoadGenerationRef above.
+			if (!unmountedRef.current && generation === privateLoadGenerationRef.current) {
+				setPrivateTier(fetched);
+			}
 		} catch (err) {
 			// Set from the engine message only — never from the tier data itself.
 			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -201,6 +218,9 @@ export default function RegistrantDetailScreen() {
 		// otherwise the structural claim below is false in exactly the case it
 		// matters most: a just-revoked officer.
 		if (!canViewPrivate) {
+			// Invalidates any read still in flight (WR-02) as well as dropping
+			// what already arrived.
+			privateLoadGenerationRef.current++;
 			setPrivateTier(undefined);
 			return;
 		}
