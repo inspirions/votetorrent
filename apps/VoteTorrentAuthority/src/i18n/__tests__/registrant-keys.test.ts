@@ -41,7 +41,9 @@ const GROUPS: ReadonlyArray<[RegExp, number]> = [
 	[ATTESTATION_VERDICT_RE, 5],
 	[ATTESTATION_PROVISIONING_RE, 8],
 	[POLLING_DEVICE_RE, 12],
-	[AUTHORITY_PEER_RE, 12],
+	// 13, not 12: 47-REVIEW IN-06 added authorityPeerDuplicateError, replacing
+	// the one hard-coded English string this group used to render.
+	[AUTHORITY_PEER_RE, 13],
 	[REGISTRANT_SCOPE_RE, 2],
 ];
 
@@ -59,15 +61,15 @@ const ALL_PHASE_47_RE = new RegExp(
 		'attestationProvisioning',
 		'pollingDevice',
 		'authorityPeer',
-	].join('|')})[A-Z]`,
+	].join('|')})[A-Z]`
 );
 
 describe('Phase 47 registrant/attestation/device i18n key groups', () => {
 	test('each Phase 47 prefix group has its exact key count in EN, and the ES key set is deeply equal', () => {
 		let totalEn = 0;
 		for (const [re, expectedCount] of GROUPS) {
-			const enKeys = Object.keys(enTranslation).filter(k => re.test(k));
-			const esKeys = Object.keys(esTranslation).filter(k => re.test(k));
+			const enKeys = Object.keys(enTranslation).filter((k) => re.test(k));
+			const esKeys = Object.keys(esTranslation).filter((k) => re.test(k));
 
 			expect(enKeys).toHaveLength(expectedCount);
 			expect(new Set(esKeys)).toEqual(new Set(enKeys));
@@ -75,11 +77,11 @@ describe('Phase 47 registrant/attestation/device i18n key groups', () => {
 
 			totalEn += enKeys.length;
 		}
-		expect(totalEn).toBe(117);
+		expect(totalEn).toBe(118);
 	});
 
 	test('no Phase 47 value is empty or whitespace-only, in either locale', () => {
-		const enKeys = Object.keys(enTranslation).filter(k => ALL_PHASE_47_RE.test(k));
+		const enKeys = Object.keys(enTranslation).filter((k) => ALL_PHASE_47_RE.test(k));
 		for (const key of enKeys) {
 			expect(enTranslation[key]?.trim().length).toBeGreaterThan(0);
 			expect(esTranslation[key]?.trim().length).toBeGreaterThan(0);
@@ -87,10 +89,14 @@ describe('Phase 47 registrant/attestation/device i18n key groups', () => {
 	});
 
 	test('every {{placeholder}} token matches between EN and ES', () => {
-		const enKeys = Object.keys(enTranslation).filter(k => ALL_PHASE_47_RE.test(k));
+		const enKeys = Object.keys(enTranslation).filter((k) => ALL_PHASE_47_RE.test(k));
 		for (const key of enKeys) {
-			const enPlaceholders = [...(enTranslation[key]?.matchAll(/\{\{(\w+)\}\}/g) ?? [])].map(m => m[1]).sort();
-			const esPlaceholders = [...(esTranslation[key]?.matchAll(/\{\{(\w+)\}\}/g) ?? [])].map(m => m[1]).sort();
+			const enPlaceholders = [...(enTranslation[key]?.matchAll(/\{\{(\w+)\}\}/g) ?? [])]
+				.map((m) => m[1])
+				.sort();
+			const esPlaceholders = [...(esTranslation[key]?.matchAll(/\{\{(\w+)\}\}/g) ?? [])]
+				.map((m) => m[1])
+				.sort();
 			expect(esPlaceholders).toEqual(enPlaceholders);
 		}
 	});
@@ -100,26 +106,32 @@ describe('Phase 47 registrant/attestation/device i18n key groups', () => {
 	// preventing anything.
 	test('registrantAccessTrailDisclaimer preserves the D-01 framing verbatim in both locales', () => {
 		expect(enTranslation.registrantAccessTrailDisclaimer).toBe(
-			'Records when an officer viewed private details for this registrant through this app, and which fields were revealed — for accountability and transparency, not as a security control. It only captures access made through this app; direct database access is not recorded here.',
+			'Records when an officer viewed private details for this registrant through this app, and which fields were revealed — for accountability and transparency, not as a security control. It only captures access made through this app; direct database access is not recorded here.'
 		);
 		expect(esTranslation.registrantAccessTrailDisclaimer).toBe(
-			'Registra cuándo un funcionario vio los detalles privados de este registrante a través de esta aplicación, y qué campos fueron revelados — para rendición de cuentas y transparencia, no como control de seguridad. Solo captura el acceso realizado a través de esta aplicación; el acceso directo a la base de datos no queda registrado aquí.',
+			'Registra cuándo un funcionario vio los detalles privados de este registrante a través de esta aplicación, y qué campos fueron revelados — para rendición de cuentas y transparencia, no como control de seguridad. Solo captura el acceso realizado a través de esta aplicación; el acceso directo a la base de datos no queda registrado aquí.'
 		);
 
 		expect(enTranslation.registrantAccessTrailDisclaimer).toContain('not as a security control');
-		expect(enTranslation.registrantAccessTrailDisclaimer).toContain('accountability and transparency');
-		expect(enTranslation.registrantAccessTrailDisclaimer).toContain('direct database access is not recorded here');
-		expect(enTranslation.registrantAccessTrailDisclaimer).not.toMatch(/\b(prevents?|blocks?|stops?|protects? against)\b/i);
+		expect(enTranslation.registrantAccessTrailDisclaimer).toContain(
+			'accountability and transparency'
+		);
+		expect(enTranslation.registrantAccessTrailDisclaimer).toContain(
+			'direct database access is not recorded here'
+		);
+		expect(enTranslation.registrantAccessTrailDisclaimer).not.toMatch(
+			/\b(prevents?|blocks?|stops?|protects? against)\b/i
+		);
 	});
 
 	test('no attestationChallenge* key offers an issue affordance (D-11)', () => {
-		const enKeys = Object.keys(enTranslation).filter(k => ATTESTATION_CHALLENGE_RE.test(k));
+		const enKeys = Object.keys(enTranslation).filter((k) => ATTESTATION_CHALLENGE_RE.test(k));
 
-		const issueKeys = enKeys.filter(k => /issue/i.test(k));
+		const issueKeys = enKeys.filter((k) => /issue/i.test(k));
 		expect(issueKeys).toEqual([]);
 
 		const issueValues = enKeys.filter(
-			k => k !== 'attestationChallengeExpireBody' && /\bissue\b/i.test(enTranslation[k] ?? ''),
+			(k) => k !== 'attestationChallengeExpireBody' && /\bissue\b/i.test(enTranslation[k] ?? '')
 		);
 		expect(issueValues).toEqual([]);
 
@@ -137,7 +149,7 @@ describe('Phase 47 registrant/attestation/device i18n key groups', () => {
 	});
 
 	test('no Phase 47 copy string binds a private-tier value placeholder (T-47-02)', () => {
-		const enKeys = Object.keys(enTranslation).filter(k => ALL_PHASE_47_RE.test(k));
+		const enKeys = Object.keys(enTranslation).filter((k) => ALL_PHASE_47_RE.test(k));
 		const privateValueRe = /\{\{(ssn|dob|dateOfBirth|phone|value|privateValue)\}\}/i;
 		for (const key of enKeys) {
 			expect(enTranslation[key]).not.toMatch(privateValueRe);
@@ -147,8 +159,8 @@ describe('Phase 47 registrant/attestation/device i18n key groups', () => {
 
 	test('Phase 46 key groups survive intact', () => {
 		const REGISTRATION_POLICY_RE = /^registrationPolicy[A-Z]/;
-		const enPolicyKeys = Object.keys(enTranslation).filter(k => REGISTRATION_POLICY_RE.test(k));
-		const esPolicyKeys = Object.keys(esTranslation).filter(k => REGISTRATION_POLICY_RE.test(k));
+		const enPolicyKeys = Object.keys(enTranslation).filter((k) => REGISTRATION_POLICY_RE.test(k));
+		const esPolicyKeys = Object.keys(esTranslation).filter((k) => REGISTRATION_POLICY_RE.test(k));
 		expect(enPolicyKeys).toHaveLength(55);
 		expect(esPolicyKeys).toHaveLength(55);
 

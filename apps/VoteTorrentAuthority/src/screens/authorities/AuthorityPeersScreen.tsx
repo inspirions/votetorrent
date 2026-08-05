@@ -156,13 +156,14 @@ export default function AuthorityPeersScreen() {
 				await op(sign, engine);
 				await loadPeers();
 			} catch (err) {
-				if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+				if (!unmountedRef.current)
+					setErrorMessage(err instanceof Error ? err.message : String(err));
 				throw err;
 			} finally {
 				if (!unmountedRef.current) setSubmitting(false);
 			}
 		},
-		[getEngine, loadPeers],
+		[getEngine, loadPeers]
 	);
 
 	const canAddSubmit = canWrite && !submitting && peerIdInput.trim().length > 0;
@@ -179,12 +180,12 @@ export default function AuthorityPeersScreen() {
 		// insert throws — this guard is the only thing that keeps the
 		// mock-green path and the real-engine path in agreement.
 		if (isDuplicatePeerId(peers, candidate)) {
-			// The only non-i18n string in this file, deliberately (see
-			// handleAddPeer's plan-level rationale): it is the same class of
-			// developer-facing diagnostic the real engine itself raises as a
-			// PK-violation message, travelling the same errorMessage ->
-			// InlineError channel Phase 46 already uses for raw engine text.
-			setErrorMessage(`Peer already configured: ${candidate}`);
+			// 47-REVIEW IN-06: this was the one untranslated user-visible string
+			// in the file, and it interpolated `candidate` — operator-supplied
+			// text — straight into a rendered message. Now a translated key with
+			// no interpolation: the rejected value is still on screen in the add
+			// form's input, which the failed submit deliberately leaves intact.
+			setErrorMessage(t("authorityPeerDuplicateError"));
 			return;
 		}
 		try {
@@ -238,8 +239,9 @@ export default function AuthorityPeersScreen() {
 			    Officer row) vs. a real scopes array missing 'cap' are two
 			    distinct facts and bind to two distinct copies. This gate is a
 			    UI affordance for legibility, NOT a security boundary. */}
-			{!scopesLoading && !canWrite && (
-				scopes === undefined ? (
+			{!scopesLoading &&
+				!canWrite &&
+				(scopes === undefined ? (
 					<View testID="authority-peers-readonly-no-officer-banner" style={localStyles.banner}>
 						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
@@ -253,8 +255,7 @@ export default function AuthorityPeersScreen() {
 							{t("authorityPeerScopeReadOnlyBanner", { scope: scopeDescriptions.cap })}
 						</ThemedText>
 					</View>
-				)
-			)}
+				))}
 
 			<View
 				testID="authority-peers-add-toggle"
@@ -269,14 +270,17 @@ export default function AuthorityPeersScreen() {
 							? () => {
 									setAddFormOpen((o) => !o);
 									setPeerIdInput("");
-								}
+							  }
 							: undefined
 					}
 				/>
 			</View>
 
 			{addFormOpen && (
-				<View testID="authority-peers-add-form" style={[styles.section, globalStyles.cardSurface, { backgroundColor: colors.card }]}>
+				<View
+					testID="authority-peers-add-form"
+					style={[styles.section, globalStyles.cardSurface, { backgroundColor: colors.card }]}
+				>
 					<CustomTextInput
 						testID="authority-peers-add-input"
 						title={t("authorityPeerIdLabel")}
@@ -305,7 +309,11 @@ export default function AuthorityPeersScreen() {
 			)}
 
 			{loading && (
-				<ThemedText type="small" testID="authority-peers-loading" style={{ color: colors.textSecondary }}>
+				<ThemedText
+					type="small"
+					testID="authority-peers-loading"
+					style={{ color: colors.textSecondary }}
+				>
 					{t("loading")}
 				</ThemedText>
 			)}
@@ -341,7 +349,9 @@ export default function AuthorityPeersScreen() {
 							>
 								<ChipButton
 									label={t("authorityPeerRemoveButton")}
-									onPress={canWrite && !submitting ? () => handleRequestRemove(peer.peerId) : undefined}
+									onPress={
+										canWrite && !submitting ? () => handleRequestRemove(peer.peerId) : undefined
+									}
 								/>
 							</View>
 						</View>

@@ -71,8 +71,10 @@ const resources = {
 			newAuthority: 'New Authority',
 			invitationName: 'Invitation Name',
 			invitationKey: 'Invitation Key',
-			soleInitialAdministratorNote: 'Please create a user on this network. Your user will be the sole initial administrator.',
-			userIsSoleAdministratorNote: 'Your following user profile will be the sole initial administrator for the new authority.',
+			soleInitialAdministratorNote:
+				'Please create a user on this network. Your user will be the sole initial administrator.',
+			userIsSoleAdministratorNote:
+				'Your following user profile will be the sole initial administrator for the new authority.',
 			expires: 'Expires',
 			position: 'Position',
 			switchingNetworks: 'Switching networks...',
@@ -99,8 +101,10 @@ const resources = {
 			invalidDate: 'Please enter a valid date.',
 			errAuthorityNameRequired: 'Please enter an authority name.',
 			creating: 'Creating…',
-			networkCreateTimeout: 'Network creation timed out at the {{step}} step. Check your connection and try again.',
-			errRelayRequired: 'Add at least one relay address under Advanced → Add Relay before creating the network.',
+			networkCreateTimeout:
+				'Network creation timed out at the {{step}} step. Check your connection and try again.',
+			errRelayRequired:
+				'Add at least one relay address under Advanced → Add Relay before creating the network.',
 			validationFailed: 'Validation failed.',
 			errTitleRequired: 'Please enter an election title.',
 			errElectionDateRequired: 'Please choose an election date.',
@@ -108,11 +112,16 @@ const resources = {
 			errElectionDateInvalid: 'Please enter a valid election date.',
 			errRevisionDeadlineInvalid: 'Please enter a valid revision deadline.',
 			errRevisionDeadlineAfterDate: 'The revision deadline must be on or before the election date.',
-			errElectionDateTooSoon: 'The election date is too soon — choose a date on or after {{date}} so the ballot deadline can fall before it.',
-			errBallotDeadlineAfterDate: 'The election date is too soon for the ballot deadline. Please choose a later election date.',
-			errTimelineOrder: 'Please order the timeline so voting starts before tallying, and tallying before certification.',
-			errThresholdExceedsKeyholders: 'The signing threshold cannot be more than the number of key holders.',
-			errCouldNotSaveElection: 'Could not save the election. Please review the dates and try again.',
+			errElectionDateTooSoon:
+				'The election date is too soon — choose a date on or after {{date}} so the ballot deadline can fall before it.',
+			errBallotDeadlineAfterDate:
+				'The election date is too soon for the ballot deadline. Please choose a later election date.',
+			errTimelineOrder:
+				'Please order the timeline so voting starts before tallying, and tallying before certification.',
+			errThresholdExceedsKeyholders:
+				'The signing threshold cannot be more than the number of key holders.',
+			errCouldNotSaveElection:
+				'Could not save the election. Please review the dates and try again.',
 			initialAdministrator: 'Initial Administrator',
 			imageUrl: 'Image URL',
 			makePermanent: 'Make Permanent',
@@ -149,7 +158,8 @@ const resources = {
 			addOfficer: 'Add officer',
 			createProposal: 'Create Proposal',
 			noNetworkTitle: 'Choose a network to get started',
-			noNetwork: 'Tap “Select Network” at the top to join an existing network — or create your own.',
+			noNetwork:
+				'Tap “Select Network” at the top to join an existing network — or create your own.',
 			selectNetwork: 'Select Network',
 			remove: 'Remove',
 			permissions: 'Permissions',
@@ -318,21 +328,24 @@ const resources = {
 			// Phase 7 onboarding keys (07-05) — flat camelCase per D-13; dotted forms PROHIBITED
 			// Slug fallback: FrameN per plan contingency (semantic rename deferred — see 07-05-SUMMARY)
 			screenScaffoldsDebugTitle: 'Onboarding Debug',
-			screenScaffoldsDebugIntro: 'Direct entry points for the six onboarding screens. Temporary dev route per D-12; replaced by real callers in phases 8–10.',
+			screenScaffoldsDebugIntro:
+				'Direct entry points for the six onboarding screens. Temporary dev route per D-12; replaced by real callers in phases 8–10.',
 			// Phase 8 gap-closure 08-07 — interim accept/send-mode invitation entries
 			debugAdministratorInvitationAccept: 'Administrator Invitation (Accept)',
 			debugAuthorityInvitationSend: 'Authority Invitation (Send)',
 			debugAuthorityInvitationAccept: 'Authority Invitation (Accept)',
 			// Frame 2 — Invitation sent (initial confirmation)
 			editElectionTitle: 'Invitation Sent',
-			editElectionBodyPrimary: 'Your invitation has been sent. You will be notified when the recipient responds.',
+			editElectionBodyPrimary:
+				'Your invitation has been sent. You will be notified when the recipient responds.',
 			editElectionBodySecondary: 'If no response is received soon, you can resend the invitation.',
 			editElectionResend: 'Resend Invitation',
 			editElectionBackToTasks: 'Back to Tasks',
 			// Frame 7 — Awaiting response
 			authorityDetailTitle: 'Awaiting Response',
 			authorityDetailBodyPrimary: 'Waiting for the recipient to respond to your invitation.',
-			authorityDetailBodySecondary: 'You can resend the invitation or cancel it if no longer needed.',
+			authorityDetailBodySecondary:
+				'You can resend the invitation or cancel it if no longer needed.',
 			authorityDetailResend: 'Resend Invitation',
 			authorityDetailCancelInvitation: 'Cancel Invitation',
 			// Frame 18 — Sent confirmation
@@ -470,8 +483,10 @@ const resources = {
 			registrationPolicyAttestationSectionTitle: 'Attestation',
 			registrationPolicyIssuesSectionTitle: 'Policy Issues',
 			// Scope gate (D-10)
-			registrationPolicyReadOnlyBanner: 'Viewing only. You need the {{scope}} permission to change this policy.',
-			registrationPolicyReadOnlyNoOfficerBanner: 'Viewing only. You are not a registered officer of this authority, so changes are disabled.',
+			registrationPolicyReadOnlyBanner:
+				'Viewing only. You need the {{scope}} permission to change this policy.',
+			registrationPolicyReadOnlyNoOfficerBanner:
+				'Viewing only. You are not a registered officer of this authority, so changes are disabled.',
 			// Field editor (D-02)
 			registrationPolicyKnownFieldLastName: 'Last Name',
 			registrationPolicyKnownFieldFirstName: 'First Name',
@@ -495,29 +510,37 @@ const resources = {
 			registrationPolicyAudienceEveryone: 'Everyone',
 			registrationPolicyAudienceDistrict: 'Same district (neighboring voters)',
 			registrationPolicyAudienceNotSet: 'Not set',
-			registrationPolicyAudienceDistrictUnavailableHint: "Same-district disclosure isn't available yet — it needs BOTH a District field declared above AND a ballot template for this election that declares districts.",
+			registrationPolicyAudienceDistrictUnavailableHint:
+				"Same-district disclosure isn't available yet — it needs BOTH a District field declared above AND a ballot template for this election that declares districts.",
 			registrationPolicyNoDisclosureHeading: 'No selective fields yet',
-			registrationPolicyNoDisclosureBody: "Selective-tier fields you add in Fields above will appear here so you can set who they're disclosed to.",
+			registrationPolicyNoDisclosureBody:
+				"Selective-tier fields you add in Fields above will appear here so you can set who they're disclosed to.",
 			registrationPolicyOrphanDisclosureFlag: 'Orphan disclosure:',
 			registrationPolicyOrphanDisclosureBody: 'This audience rule has no matching selective field.',
 			registrationPolicyMissingAudienceFlag: 'No audience set:',
-			registrationPolicyMissingAudienceBody: "This selective field can't be disclosed to anyone until an audience is set.",
+			registrationPolicyMissingAudienceBody:
+				"This selective field can't be disclosed to anyone until an audience is set.",
 			registrationPolicySetAudienceButton: 'Set Audience',
 			registrationPolicyRemoveButton: 'Remove',
 			// Attestation editor — tri-state (D-07)
 			registrationPolicyAttestationNotConfiguredLabel: 'Not configured — required by default',
-			registrationPolicyAttestationNotConfiguredBody: 'No policy has been set, so device attestation is REQUIRED for this election (the fail-closed default).',
+			registrationPolicyAttestationNotConfiguredBody:
+				'No policy has been set, so device attestation is REQUIRED for this election (the fail-closed default).',
 			registrationPolicyAttestationRequiredLabel: 'Required',
-			registrationPolicyAttestationRequiredBody: 'Device attestation is explicitly required for this election.',
+			registrationPolicyAttestationRequiredBody:
+				'Device attestation is explicitly required for this election.',
 			registrationPolicyAttestationNotRequiredLabel: 'Not required',
-			registrationPolicyAttestationNotRequiredBody: 'Device attestation is explicitly turned off for this election.',
+			registrationPolicyAttestationNotRequiredBody:
+				'Device attestation is explicitly turned off for this election.',
 			registrationPolicyAttestationRequireButton: 'Require Attestation',
 			registrationPolicyAttestationDontRequireButton: "Don't Require Attestation",
 			registrationPolicyAttestationRevertButton: 'Revert to Default',
 			// Policy editability window (D-13)
 			registrationPolicyConfirmTitle: 'Change registration policy?',
-			registrationPolicyConfirmRosterBody: 'This election already has registrants. They were validated against the previous policy and will not be re-validated.',
-			registrationPolicyConfirmWindowOpenBody: 'Registration is already open for this election. Registrants who already signed up were validated against the previous policy and will not be re-validated.',
+			registrationPolicyConfirmRosterBody:
+				'This election already has registrants. They were validated against the previous policy and will not be re-validated.',
+			registrationPolicyConfirmWindowOpenBody:
+				'Registration is already open for this election. Registrants who already signed up were validated against the previous policy and will not be re-validated.',
 			registrationPolicyConfirmProceedButton: 'Proceed Anyway',
 			registrationPolicyConfirmCancelButton: 'Keep Current Policy',
 			// Per-row immediate-apply affordance (D-14)
@@ -540,7 +563,8 @@ const resources = {
 			registrantListEmptyHeading: 'No registrants match these filters',
 			registrantListEmptyBody: 'Try a different status, district, or search term.',
 			registrantListEmptyHeadingNoFilters: 'No registrants yet',
-			registrantListEmptyBodyNoFilters: 'Registrants will appear here once people register for this authority.',
+			registrantListEmptyBodyNoFilters:
+				'Registrants will appear here once people register for this authority.',
 			// Phase 47 (D-10) — registrantStatus* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantStatusActive: 'Active',
 			registrantStatusSuspended: 'Suspended',
@@ -556,7 +580,8 @@ const resources = {
 			registrantDetailSignorKeyLabel: 'Signed by',
 			registrantDetailExpirationLabel: 'Expires',
 			registrantDetailSelectiveAudiencePreviewTitle: 'Audience Preview',
-			registrantDetailSelectiveAudiencePreviewHint: 'Shows what each audience would receive if this election discloses selective details.',
+			registrantDetailSelectiveAudiencePreviewHint:
+				'Shows what each audience would receive if this election discloses selective details.',
 			registrantDetailSelectiveDisclosedLabel: 'Disclosed',
 			registrantDetailSelectiveNotDisclosedLabel: 'Not disclosed to this audience',
 			registrantDetailPrivateMaskedValue: '••••••',
@@ -573,9 +598,11 @@ const resources = {
 			registrantLifecycleReinstateTitle: 'Reinstate to active?',
 			registrantLifecycleReinstateBody: "Changes {{name}}'s status from {{oldStatus}} to Active.",
 			registrantLifecycleSuspendTitle: 'Suspend {{name}}?',
-			registrantLifecycleSuspendBody: "This immediately changes {{name}}'s status to Suspended. There is no automatic undo — reinstating requires a separate signed action. Type {{name}}'s name to confirm.",
+			registrantLifecycleSuspendBody:
+				"This immediately changes {{name}}'s status to Suspended. There is no automatic undo — reinstating requires a separate signed action. Type {{name}}'s name to confirm.",
 			registrantLifecycleRevokeTitle: "Revoke {{name}}'s registration?",
-			registrantLifecycleRevokeBody: "This immediately and permanently revokes {{name}}'s voter registration. There is no undo. Type {{name}}'s name to confirm.",
+			registrantLifecycleRevokeBody:
+				"This immediately and permanently revokes {{name}}'s voter registration. There is no undo. Type {{name}}'s name to confirm.",
 			registrantLifecycleTypedConfirmPlaceholder: 'Type {{name}} to confirm',
 			registrantLifecycleKeepCurrentStatus: 'Keep Current Status',
 			registrantLifecycleKeepCurrentExpiration: 'Keep Current Expiration',
@@ -584,9 +611,11 @@ const resources = {
 			// Phase 47 (D-01/D-02/D-14) — registrantAccessTrail* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantAccessTrailSectionTitle: 'Access History',
 			// D-01: load-bearing framing — accountability/transparency, NOT a security control. Do not paraphrase.
-			registrantAccessTrailDisclaimer: 'Records when an officer viewed private details for this registrant through this app, and which fields were revealed — for accountability and transparency, not as a security control. It only captures access made through this app; direct database access is not recorded here.',
+			registrantAccessTrailDisclaimer:
+				'Records when an officer viewed private details for this registrant through this app, and which fields were revealed — for accountability and transparency, not as a security control. It only captures access made through this app; direct database access is not recorded here.',
 			registrantAccessTrailEmptyHeading: 'No recorded access yet',
-			registrantAccessTrailEmptyBody: "Private details haven't been revealed for this registrant through this app.",
+			registrantAccessTrailEmptyBody:
+				"Private details haven't been revealed for this registrant through this app.",
 			registrantAccessTrailRow: '{{viewer}} revealed {{fields}} — {{timestamp}}',
 			// Phase 47 (D-03) — associationList* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			associationListSectionTitle: 'Associated Devices',
@@ -596,19 +625,22 @@ const resources = {
 			associationListExpirationLabel: 'Expires',
 			associationListRemoveButton: 'Remove Association',
 			associationListRemoveTitle: 'Remove this device association?',
-			associationListRemoveBody: '{{name}} will need to associate a device again before voting. This does not change their registration status.',
+			associationListRemoveBody:
+				'{{name}} will need to associate a device again before voting. This does not change their registration status.',
 			associationListRemoveConfirm: 'Remove Association',
 			associationListKeepAssociation: 'Keep Association',
 			// Phase 47 (D-11) — attestationChallenge* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			attestationChallengeSectionTitle: 'Attestation Challenges',
 			attestationChallengeEmptyHeading: 'No outstanding challenges',
-			attestationChallengeEmptyBody: 'No attestation challenges are currently outstanding for this registrant.',
+			attestationChallengeEmptyBody:
+				'No attestation challenges are currently outstanding for this registrant.',
 			attestationChallengeDeviceKeyLabel: 'Device Key',
 			attestationChallengeElectionLabel: 'Election',
 			attestationChallengeExpiryLabel: 'Expires',
 			attestationChallengeExpireButton: 'Expire Challenge',
 			attestationChallengeExpireTitle: 'Expire this challenge?',
-			attestationChallengeExpireBody: "The device holding this challenge will no longer be able to complete attestation with it. A new challenge can only be issued by the device's own registration/association attempt.",
+			attestationChallengeExpireBody:
+				"The device holding this challenge will no longer be able to complete attestation with it. A new challenge can only be issued by the device's own registration/association attempt.",
 			attestationChallengeExpireConfirm: 'Expire Challenge',
 			attestationChallengeKeepChallenge: 'Keep Challenge',
 			// Phase 47 (D-03) — attestationVerdict* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
@@ -620,11 +652,14 @@ const resources = {
 			// Phase 47 (D-09) — attestationProvisioning* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			attestationProvisioningScreenTitle: 'Device Attestation Setup',
 			attestationProvisioningProvisionedHeading: 'Play Console keys are configured',
-			attestationProvisioningProvisionedBody: 'Device attestation is fully operational — new device associations can be verified.',
+			attestationProvisioningProvisionedBody:
+				'Device attestation is fully operational — new device associations can be verified.',
 			attestationProvisioningNotProvisionedHeading: 'Play Console keys are not configured',
-			attestationProvisioningNotProvisionedBody: 'Device association will fail until Play Console key material is provisioned. Registrant and association data can still be viewed and managed normally.',
+			attestationProvisioningNotProvisionedBody:
+				'Device association will fail until Play Console key material is provisioned. Registrant and association data can still be viewed and managed normally.',
 			attestationProvisioningSetupLink: 'See SETUP.md for provisioning steps',
-			attestationProvisioningInlineBannerBody: "Device attestation isn't configured. Associate ceremonies will fail closed until this is fixed.",
+			attestationProvisioningInlineBannerBody:
+				"Device attestation isn't configured. Associate ceremonies will fail closed until this is fixed.",
 			attestationProvisioningInlineBannerLink: 'View setup status',
 			// Phase 47 (D-08/D-13) — pollingDevice* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			pollingDeviceScreenTitle: 'Polling Devices',
@@ -634,11 +669,13 @@ const resources = {
 			pollingDeviceHashLabel: 'Device Hash',
 			pollingDeviceRemoveButton: 'Remove',
 			pollingDeviceRemoveTitle: 'Remove this polling device?',
-			pollingDeviceRemoveBody: '{{label}} will no longer be able to operate as an in-person polling device for this authority. It can be added back at any time.',
+			pollingDeviceRemoveBody:
+				'{{label}} will no longer be able to operate as an in-person polling device for this authority. It can be added back at any time.',
 			pollingDeviceRemoveConfirm: 'Remove Device',
 			pollingDeviceKeepDevice: 'Keep Device',
 			pollingDeviceEmptyHeading: 'No polling devices whitelisted',
-			pollingDeviceEmptyBody: 'Add a device to allow it to operate as an in-person polling device for this authority.',
+			pollingDeviceEmptyBody:
+				'Add a device to allow it to operate as an in-person polling device for this authority.',
 			// Phase 47 (D-08/D-13) — authorityPeer* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			authorityPeerScreenTitle: 'Authority Peers',
 			authorityPeerAddButton: 'Add Authority Peer',
@@ -646,16 +683,25 @@ const resources = {
 			authorityPeerIdPlaceholder: 'Peer ID',
 			authorityPeerRemoveButton: 'Remove',
 			authorityPeerRemoveTitle: 'Remove this authority peer?',
-			authorityPeerRemoveBody: "This peer will be dropped from this authority's P2P cluster. It can be added back at any time.",
+			authorityPeerRemoveBody:
+				"This peer will be dropped from this authority's P2P cluster. It can be added back at any time.",
 			authorityPeerRemoveConfirm: 'Remove Peer',
 			authorityPeerKeepPeer: 'Keep Peer',
 			authorityPeerEmptyHeading: 'No authority peers configured',
 			authorityPeerEmptyBody: "Add a peer to expand this authority's P2P cluster.",
+			// 47-REVIEW IN-06. Deliberately carries NO {{peerId}} interpolation: the
+			// rejected value is operator-supplied text and stays visible in the add
+			// form's input, so naming it again in the message buys nothing and would
+			// put unvalidated input inside a translated sentence.
+			authorityPeerDuplicateError: 'That peer is already configured for this authority.',
 			// D-13: UI legibility affordance, NOT the enforcement boundary — the schema's AdminSignature CHECK is the real control.
-			authorityPeerScopeReadOnlyBanner: 'Viewing only. You need the {{scope}} permission to change authority peers.',
+			authorityPeerScopeReadOnlyBanner:
+				'Viewing only. You need the {{scope}} permission to change authority peers.',
 			// Phase 47 (D-13) — registrantScope* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
-			registrantScopeReadOnlyBanner: 'Viewing only. You need the {{scope}} permission to change registrants, associations, or devices.',
-			registrantScopeReadOnlyNoOfficerBanner: 'Viewing only. You are not a registered officer of this authority, so changes are disabled.',
+			registrantScopeReadOnlyBanner:
+				'Viewing only. You need the {{scope}} permission to change registrants, associations, or devices.',
+			registrantScopeReadOnlyNoOfficerBanner:
+				'Viewing only. You are not a registered officer of this authority, so changes are disabled.',
 		},
 	},
 	es: {
@@ -726,8 +772,10 @@ const resources = {
 			newAuthority: 'Nueva Autoridad',
 			invitationName: 'Nombre de Invitación',
 			invitationKey: 'Clave de Invitación',
-			soleInitialAdministratorNote: 'Cree un usuario en esta red. Su usuario será el único administrador inicial.',
-			userIsSoleAdministratorNote: 'El siguiente perfil de usuario será el único administrador inicial de la nueva autoridad.',
+			soleInitialAdministratorNote:
+				'Cree un usuario en esta red. Su usuario será el único administrador inicial.',
+			userIsSoleAdministratorNote:
+				'El siguiente perfil de usuario será el único administrador inicial de la nueva autoridad.',
 			expires: 'Expira',
 			position: 'Cargo',
 			switchingNetworks: 'Cambiando redes...',
@@ -754,20 +802,28 @@ const resources = {
 			invalidDate: 'Ingrese una fecha válida.',
 			errAuthorityNameRequired: 'Ingrese un nombre de autoridad.',
 			creating: 'Creando…',
-			networkCreateTimeout: 'La creación de la red expiró en el paso {{step}}. Verifique su conexión e inténtelo de nuevo.',
-			errRelayRequired: 'Agregue al menos una dirección de relay en Avanzado → Agregar relay antes de crear la red.',
+			networkCreateTimeout:
+				'La creación de la red expiró en el paso {{step}}. Verifique su conexión e inténtelo de nuevo.',
+			errRelayRequired:
+				'Agregue al menos una dirección de relay en Avanzado → Agregar relay antes de crear la red.',
 			validationFailed: 'Error de validación.',
 			errTitleRequired: 'Ingrese un título para la elección.',
 			errElectionDateRequired: 'Elija una fecha para la elección.',
 			errRevisionDeadlineRequired: 'Elija una fecha límite de revisión.',
 			errElectionDateInvalid: 'Ingrese una fecha de elección válida.',
 			errRevisionDeadlineInvalid: 'Ingrese una fecha límite de revisión válida.',
-			errRevisionDeadlineAfterDate: 'La fecha límite de revisión debe ser igual o anterior a la fecha de la elección.',
-			errElectionDateTooSoon: 'La fecha de la elección es demasiado pronto: elija una fecha igual o posterior al {{date}} para que la fecha límite de boletas quede antes.',
-			errBallotDeadlineAfterDate: 'La fecha de la elección es demasiado pronto para la fecha límite de boletas. Elija una fecha de elección posterior.',
-			errTimelineOrder: 'Ordene el cronograma para que la votación comience antes del recuento, y el recuento antes de la certificación.',
-			errThresholdExceedsKeyholders: 'El umbral de firmas no puede ser mayor que el número de custodios.',
-			errCouldNotSaveElection: 'No se pudo guardar la elección. Revise las fechas e intente de nuevo.',
+			errRevisionDeadlineAfterDate:
+				'La fecha límite de revisión debe ser igual o anterior a la fecha de la elección.',
+			errElectionDateTooSoon:
+				'La fecha de la elección es demasiado pronto: elija una fecha igual o posterior al {{date}} para que la fecha límite de boletas quede antes.',
+			errBallotDeadlineAfterDate:
+				'La fecha de la elección es demasiado pronto para la fecha límite de boletas. Elija una fecha de elección posterior.',
+			errTimelineOrder:
+				'Ordene el cronograma para que la votación comience antes del recuento, y el recuento antes de la certificación.',
+			errThresholdExceedsKeyholders:
+				'El umbral de firmas no puede ser mayor que el número de custodios.',
+			errCouldNotSaveElection:
+				'No se pudo guardar la elección. Revise las fechas e intente de nuevo.',
 			initialAdministrator: 'Administrador Inicial',
 			imageUrl: 'URL de Imagen',
 			makePermanent: 'Hacer Permanente',
@@ -804,7 +860,8 @@ const resources = {
 			addOfficer: 'Agregar Oficial',
 			createProposal: 'Crear Propuesta',
 			noNetworkTitle: 'Elige una red para comenzar',
-			noNetwork: 'Toca «Seleccionar Red» en la parte superior para unirte a una red existente, o crea la tuya propia.',
+			noNetwork:
+				'Toca «Seleccionar Red» en la parte superior para unirte a una red existente, o crea la tuya propia.',
 			selectNetwork: 'Seleccionar Red',
 			remove: 'Eliminar',
 			permissions: 'Permisos',
@@ -950,31 +1007,36 @@ const resources = {
 			electionTitle: 'Título de la Elección', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			// Phase 7 onboarding keys (07-05) — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			screenScaffoldsDebugTitle: 'Depuración de Incorporación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			screenScaffoldsDebugIntro: 'Puntos de entrada directos a las seis pantallas de incorporación. Ruta temporal de desarrollo; reemplazada por llamadas reales en las fases 8–10.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			screenScaffoldsDebugIntro:
+				'Puntos de entrada directos a las seis pantallas de incorporación. Ruta temporal de desarrollo; reemplazada por llamadas reales en las fases 8–10.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			// Phase 8 gap-closure 08-07 — interim accept/send-mode invitation entries
 			debugAdministratorInvitationAccept: 'Invitación de administrador (aceptar)',
 			debugAuthorityInvitationSend: 'Invitación de autoridad (enviar)',
 			debugAuthorityInvitationAccept: 'Invitación de autoridad (aceptar)',
 			editElectionTitle: 'Invitación Enviada', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			editElectionBodyPrimary: 'Tu invitación ha sido enviada. Se te notificará cuando el destinatario responda.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			editElectionBodyPrimary:
+				'Tu invitación ha sido enviada. Se te notificará cuando el destinatario responda.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionBodySecondary: 'Si no se recibe respuesta pronto, puedes reenviar la invitación.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionResend: 'Reenviar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionBackToTasks: 'Volver a Tareas', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailTitle: 'Esperando Respuesta', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailBodyPrimary: 'Esperando que el destinatario responda tu invitación.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			authorityDetailBodySecondary: 'Puedes reenviar la invitación o cancelarla si ya no es necesaria.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			authorityDetailBodySecondary:
+				'Puedes reenviar la invitación o cancelarla si ya no es necesaria.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailResend: 'Reenviar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailCancelInvitation: 'Cancelar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterTitle: 'Solicitud Enviada', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterBodyPrimary: 'Tu solicitud ha sido enviada exitosamente.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterGotIt: 'Entendido', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editRevisionFormTitle: 'Esperando Aprobación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			editRevisionFormBodyPrimary: 'Tu envío está pendiente de aprobación por parte de la autoridad.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			editRevisionFormBodyPrimary:
+				'Tu envío está pendiente de aprobación por parte de la autoridad.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editRevisionFormBodySecondary: 'Recibirás una notificación una vez que sea revisado.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editRevisionFormResend: 'Reenviar Solicitud', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editRevisionFormDismissRequest: 'Descartar Solicitud', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			proposedElectionTitle: 'Solicitud de Liberación Enviada', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			proposedElectionBodyPrimary: 'Tu solicitud de liberación de clave ha sido entregada a los custodios.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			proposedElectionBodyPrimary:
+				'Tu solicitud de liberación de clave ha sido entregada a los custodios.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			proposedElectionBackToTasks: 'Volver a Tareas', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			proposedRevisionTitle: 'Esperando Liberación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			proposedRevisionBodyPrimary: 'Esperando que los custodios completen la liberación.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
@@ -1114,8 +1176,10 @@ const resources = {
 			registrationPolicyAttestationSectionTitle: 'Certificación',
 			registrationPolicyIssuesSectionTitle: 'Problemas de la Política',
 			// Scope gate (D-10) (D-11)
-			registrationPolicyReadOnlyBanner: 'Solo visualización. Necesitas el permiso {{scope}} para cambiar esta política.',
-			registrationPolicyReadOnlyNoOfficerBanner: 'Solo visualización. No eres un funcionario registrado de esta autoridad, así que los cambios están desactivados.',
+			registrationPolicyReadOnlyBanner:
+				'Solo visualización. Necesitas el permiso {{scope}} para cambiar esta política.',
+			registrationPolicyReadOnlyNoOfficerBanner:
+				'Solo visualización. No eres un funcionario registrado de esta autoridad, así que los cambios están desactivados.',
 			// Field editor (D-02) (D-11)
 			registrationPolicyKnownFieldLastName: 'Apellido',
 			registrationPolicyKnownFieldFirstName: 'Nombre',
@@ -1124,7 +1188,8 @@ const resources = {
 			registrationPolicyCustomFieldOption: 'Personalizado…',
 			registrationPolicyCustomFieldPlaceholder: 'Nombre del campo',
 			registrationPolicyExtraFieldBadge: 'Campo Adicional',
-			registrationPolicyExtraFieldHint: 'Se guarda en Campos Adicionales, no en una columna dedicada',
+			registrationPolicyExtraFieldHint:
+				'Se guarda en Campos Adicionales, no en una columna dedicada',
 			registrationPolicyTierLabel: 'Visibilidad',
 			registrationPolicyTierPublic: 'Público',
 			registrationPolicyTierSelective: 'Selectivo',
@@ -1133,35 +1198,45 @@ const resources = {
 			registrationPolicyRequirementOptional: 'Opcional',
 			registrationPolicyAddFieldButton: 'Agregar Campo',
 			registrationPolicyNoFieldsHeading: 'Aún no hay campos configurados',
-			registrationPolicyNoFieldsBody: 'Agrega un campo arriba para definir lo que deben proporcionar los registrantes.',
+			registrationPolicyNoFieldsBody:
+				'Agrega un campo arriba para definir lo que deben proporcionar los registrantes.',
 			// Disclosure editor (D-03/D-04/D-05) (D-11)
 			registrationPolicyAudienceLabel: 'Audiencia',
 			registrationPolicyAudienceEveryone: 'Todos',
 			registrationPolicyAudienceDistrict: 'Mismo distrito (votantes vecinos)',
 			registrationPolicyAudienceNotSet: 'Sin definir',
-			registrationPolicyAudienceDistrictUnavailableHint: 'La divulgación por mismo distrito aún no está disponible — requiere AMBAS cosas: un campo Distrito declarado arriba Y una plantilla de boleta de esta elección que declare distritos.',
+			registrationPolicyAudienceDistrictUnavailableHint:
+				'La divulgación por mismo distrito aún no está disponible — requiere AMBAS cosas: un campo Distrito declarado arriba Y una plantilla de boleta de esta elección que declare distritos.',
 			registrationPolicyNoDisclosureHeading: 'Aún no hay campos selectivos',
-			registrationPolicyNoDisclosureBody: 'Los campos de nivel selectivo que agregues arriba en Campos aparecerán aquí para que definas a quién se divulgan.',
+			registrationPolicyNoDisclosureBody:
+				'Los campos de nivel selectivo que agregues arriba en Campos aparecerán aquí para que definas a quién se divulgan.',
 			registrationPolicyOrphanDisclosureFlag: 'Divulgación huérfana:',
-			registrationPolicyOrphanDisclosureBody: 'Esta regla de audiencia no corresponde a ningún campo selectivo.',
+			registrationPolicyOrphanDisclosureBody:
+				'Esta regla de audiencia no corresponde a ningún campo selectivo.',
 			registrationPolicyMissingAudienceFlag: 'Sin audiencia definida:',
-			registrationPolicyMissingAudienceBody: 'Este campo selectivo no puede divulgarse a nadie hasta que se defina una audiencia.',
+			registrationPolicyMissingAudienceBody:
+				'Este campo selectivo no puede divulgarse a nadie hasta que se defina una audiencia.',
 			registrationPolicySetAudienceButton: 'Definir Audiencia',
 			registrationPolicyRemoveButton: 'Eliminar',
 			// Attestation editor — tri-state (D-07) (D-11)
 			registrationPolicyAttestationNotConfiguredLabel: 'No configurado — obligatorio por defecto',
-			registrationPolicyAttestationNotConfiguredBody: 'No se ha definido una política, por lo que la certificación del dispositivo es OBLIGATORIA para esta elección (el valor predeterminado de falla-cerrada).',
+			registrationPolicyAttestationNotConfiguredBody:
+				'No se ha definido una política, por lo que la certificación del dispositivo es OBLIGATORIA para esta elección (el valor predeterminado de falla-cerrada).',
 			registrationPolicyAttestationRequiredLabel: 'Obligatorio',
-			registrationPolicyAttestationRequiredBody: 'La certificación del dispositivo es explícitamente obligatoria para esta elección.',
+			registrationPolicyAttestationRequiredBody:
+				'La certificación del dispositivo es explícitamente obligatoria para esta elección.',
 			registrationPolicyAttestationNotRequiredLabel: 'No obligatorio',
-			registrationPolicyAttestationNotRequiredBody: 'La certificación del dispositivo está explícitamente desactivada para esta elección.',
+			registrationPolicyAttestationNotRequiredBody:
+				'La certificación del dispositivo está explícitamente desactivada para esta elección.',
 			registrationPolicyAttestationRequireButton: 'Exigir Certificación',
 			registrationPolicyAttestationDontRequireButton: 'No Exigir Certificación',
 			registrationPolicyAttestationRevertButton: 'Restablecer Predeterminado',
 			// Policy editability window (D-13) (D-11)
 			registrationPolicyConfirmTitle: '¿Cambiar la política de registro?',
-			registrationPolicyConfirmRosterBody: 'Esta elección ya tiene registrantes. Fueron validados contra la política anterior y no se volverán a validar.',
-			registrationPolicyConfirmWindowOpenBody: 'El registro ya está abierto para esta elección. Los registrantes que ya se inscribieron fueron validados contra la política anterior y no se volverán a validar.',
+			registrationPolicyConfirmRosterBody:
+				'Esta elección ya tiene registrantes. Fueron validados contra la política anterior y no se volverán a validar.',
+			registrationPolicyConfirmWindowOpenBody:
+				'El registro ya está abierto para esta elección. Los registrantes que ya se inscribieron fueron validados contra la política anterior y no se volverán a validar.',
 			registrationPolicyConfirmProceedButton: 'Continuar de Todos Modos',
 			registrationPolicyConfirmCancelButton: 'Mantener Política Actual',
 			// Per-row immediate-apply affordance (D-14) (D-11)
@@ -1184,7 +1259,8 @@ const resources = {
 			registrantListEmptyHeading: 'Ningún registrante coincide con estos filtros',
 			registrantListEmptyBody: 'Prueba con un estado, distrito o término de búsqueda diferente.',
 			registrantListEmptyHeadingNoFilters: 'Aún no hay registrantes',
-			registrantListEmptyBodyNoFilters: 'Los registrantes aparecerán aquí una vez que las personas se registren en esta autoridad.',
+			registrantListEmptyBodyNoFilters:
+				'Los registrantes aparecerán aquí una vez que las personas se registren en esta autoridad.',
 			// Phase 47 (D-10) — registrantStatus* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantStatusActive: 'Activo',
 			registrantStatusSuspended: 'Suspendido',
@@ -1200,7 +1276,8 @@ const resources = {
 			registrantDetailSignorKeyLabel: 'Firmado por',
 			registrantDetailExpirationLabel: 'Vence',
 			registrantDetailSelectiveAudiencePreviewTitle: 'Vista Previa de Audiencia',
-			registrantDetailSelectiveAudiencePreviewHint: 'Muestra lo que cada audiencia recibiría si esta elección divulga detalles selectivos.',
+			registrantDetailSelectiveAudiencePreviewHint:
+				'Muestra lo que cada audiencia recibiría si esta elección divulga detalles selectivos.',
 			registrantDetailSelectiveDisclosedLabel: 'Divulgado',
 			registrantDetailSelectiveNotDisclosedLabel: 'No divulgado a esta audiencia',
 			registrantDetailPrivateMaskedValue: '••••••',
@@ -1217,9 +1294,11 @@ const resources = {
 			registrantLifecycleReinstateTitle: '¿Reincorporar a activo?',
 			registrantLifecycleReinstateBody: 'Cambia el estado de {{name}} de {{oldStatus}} a Activo.',
 			registrantLifecycleSuspendTitle: '¿Suspender a {{name}}?',
-			registrantLifecycleSuspendBody: 'Esto cambia de inmediato el estado de {{name}} a Suspendido. No hay deshacer automático — reincorporar requiere una acción firmada aparte. Escribe el nombre de {{name}} para confirmar.',
+			registrantLifecycleSuspendBody:
+				'Esto cambia de inmediato el estado de {{name}} a Suspendido. No hay deshacer automático — reincorporar requiere una acción firmada aparte. Escribe el nombre de {{name}} para confirmar.',
 			registrantLifecycleRevokeTitle: '¿Revocar el registro de {{name}}?',
-			registrantLifecycleRevokeBody: 'Esto revoca de inmediato y de forma permanente el registro de votante de {{name}}. No hay deshacer. Escribe el nombre de {{name}} para confirmar.',
+			registrantLifecycleRevokeBody:
+				'Esto revoca de inmediato y de forma permanente el registro de votante de {{name}}. No hay deshacer. Escribe el nombre de {{name}} para confirmar.',
 			registrantLifecycleTypedConfirmPlaceholder: 'Escribe {{name}} para confirmar',
 			registrantLifecycleKeepCurrentStatus: 'Mantener Estado Actual',
 			registrantLifecycleKeepCurrentExpiration: 'Mantener Vencimiento Actual',
@@ -1228,9 +1307,11 @@ const resources = {
 			// Phase 47 (D-01/D-02/D-14) — registrantAccessTrail* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantAccessTrailSectionTitle: 'Historial de Acceso',
 			// D-01: load-bearing framing — accountability/transparency, NOT a security control. Do not paraphrase.
-			registrantAccessTrailDisclaimer: 'Registra cuándo un funcionario vio los detalles privados de este registrante a través de esta aplicación, y qué campos fueron revelados — para rendición de cuentas y transparencia, no como control de seguridad. Solo captura el acceso realizado a través de esta aplicación; el acceso directo a la base de datos no queda registrado aquí.',
+			registrantAccessTrailDisclaimer:
+				'Registra cuándo un funcionario vio los detalles privados de este registrante a través de esta aplicación, y qué campos fueron revelados — para rendición de cuentas y transparencia, no como control de seguridad. Solo captura el acceso realizado a través de esta aplicación; el acceso directo a la base de datos no queda registrado aquí.',
 			registrantAccessTrailEmptyHeading: 'Aún no hay acceso registrado',
-			registrantAccessTrailEmptyBody: 'Los detalles privados de este registrante no se han revelado a través de esta aplicación.',
+			registrantAccessTrailEmptyBody:
+				'Los detalles privados de este registrante no se han revelado a través de esta aplicación.',
 			registrantAccessTrailRow: '{{viewer}} reveló {{fields}} — {{timestamp}}',
 			// Phase 47 (D-03) — associationList* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			associationListSectionTitle: 'Dispositivos Asociados',
@@ -1240,19 +1321,22 @@ const resources = {
 			associationListExpirationLabel: 'Vence',
 			associationListRemoveButton: 'Eliminar Asociación',
 			associationListRemoveTitle: '¿Eliminar esta asociación de dispositivo?',
-			associationListRemoveBody: '{{name}} deberá asociar un dispositivo nuevamente antes de votar. Esto no cambia su estado de registro.',
+			associationListRemoveBody:
+				'{{name}} deberá asociar un dispositivo nuevamente antes de votar. Esto no cambia su estado de registro.',
 			associationListRemoveConfirm: 'Eliminar Asociación',
 			associationListKeepAssociation: 'Mantener Asociación',
 			// Phase 47 (D-11) — attestationChallenge* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			attestationChallengeSectionTitle: 'Certificaciones Pendientes',
 			attestationChallengeEmptyHeading: 'No hay certificaciones pendientes',
-			attestationChallengeEmptyBody: 'No hay certificaciones de dispositivo pendientes para este registrante.',
+			attestationChallengeEmptyBody:
+				'No hay certificaciones de dispositivo pendientes para este registrante.',
 			attestationChallengeDeviceKeyLabel: 'Clave del Dispositivo',
 			attestationChallengeElectionLabel: 'Elección',
 			attestationChallengeExpiryLabel: 'Vence',
 			attestationChallengeExpireButton: 'Vencer Certificación',
 			attestationChallengeExpireTitle: '¿Vencer esta certificación?',
-			attestationChallengeExpireBody: 'El dispositivo que posee esta certificación ya no podrá completarla. Una nueva certificación solo puede ser emitida por el propio intento de registro/asociación del dispositivo.',
+			attestationChallengeExpireBody:
+				'El dispositivo que posee esta certificación ya no podrá completarla. Una nueva certificación solo puede ser emitida por el propio intento de registro/asociación del dispositivo.',
 			attestationChallengeExpireConfirm: 'Vencer Certificación',
 			attestationChallengeKeepChallenge: 'Mantener Certificación',
 			// Phase 47 (D-03) — attestationVerdict* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
@@ -1264,11 +1348,15 @@ const resources = {
 			// Phase 47 (D-09) — attestationProvisioning* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			attestationProvisioningScreenTitle: 'Configuración de Certificación de Dispositivo',
 			attestationProvisioningProvisionedHeading: 'Las claves de Play Console están configuradas',
-			attestationProvisioningProvisionedBody: 'La certificación de dispositivos está completamente operativa — las nuevas asociaciones de dispositivos pueden verificarse.',
-			attestationProvisioningNotProvisionedHeading: 'Las claves de Play Console no están configuradas',
-			attestationProvisioningNotProvisionedBody: 'La asociación de dispositivos fallará hasta que se configuren las claves de Play Console. Los datos de registrantes y asociaciones aún pueden verse y gestionarse con normalidad.',
+			attestationProvisioningProvisionedBody:
+				'La certificación de dispositivos está completamente operativa — las nuevas asociaciones de dispositivos pueden verificarse.',
+			attestationProvisioningNotProvisionedHeading:
+				'Las claves de Play Console no están configuradas',
+			attestationProvisioningNotProvisionedBody:
+				'La asociación de dispositivos fallará hasta que se configuren las claves de Play Console. Los datos de registrantes y asociaciones aún pueden verse y gestionarse con normalidad.',
 			attestationProvisioningSetupLink: 'Consulta SETUP.md para los pasos de configuración',
-			attestationProvisioningInlineBannerBody: 'La certificación de dispositivos no está configurada. Las ceremonias de asociación fallarán hasta que esto se corrija.',
+			attestationProvisioningInlineBannerBody:
+				'La certificación de dispositivos no está configurada. Las ceremonias de asociación fallarán hasta que esto se corrija.',
 			attestationProvisioningInlineBannerLink: 'Ver estado de configuración',
 			// Phase 47 (D-08/D-13) — pollingDevice* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			pollingDeviceScreenTitle: 'Dispositivos de Votación',
@@ -1278,11 +1366,13 @@ const resources = {
 			pollingDeviceHashLabel: 'Hash del Dispositivo',
 			pollingDeviceRemoveButton: 'Eliminar',
 			pollingDeviceRemoveTitle: '¿Eliminar este dispositivo de votación?',
-			pollingDeviceRemoveBody: '{{label}} ya no podrá operar como dispositivo de votación presencial para esta autoridad. Puede agregarse nuevamente en cualquier momento.',
+			pollingDeviceRemoveBody:
+				'{{label}} ya no podrá operar como dispositivo de votación presencial para esta autoridad. Puede agregarse nuevamente en cualquier momento.',
 			pollingDeviceRemoveConfirm: 'Eliminar Dispositivo',
 			pollingDeviceKeepDevice: 'Mantener Dispositivo',
 			pollingDeviceEmptyHeading: 'No hay dispositivos de votación en la lista blanca',
-			pollingDeviceEmptyBody: 'Agrega un dispositivo para permitirle operar como dispositivo de votación presencial para esta autoridad.',
+			pollingDeviceEmptyBody:
+				'Agrega un dispositivo para permitirle operar como dispositivo de votación presencial para esta autoridad.',
 			// Phase 47 (D-08/D-13) — authorityPeer* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			authorityPeerScreenTitle: 'Pares de Autoridad',
 			authorityPeerAddButton: 'Agregar Par de Autoridad',
@@ -1290,16 +1380,22 @@ const resources = {
 			authorityPeerIdPlaceholder: 'ID del par',
 			authorityPeerRemoveButton: 'Eliminar',
 			authorityPeerRemoveTitle: '¿Eliminar este par de autoridad?',
-			authorityPeerRemoveBody: 'Este par será eliminado del clúster P2P de esta autoridad. Puede agregarse nuevamente en cualquier momento.',
+			authorityPeerRemoveBody:
+				'Este par será eliminado del clúster P2P de esta autoridad. Puede agregarse nuevamente en cualquier momento.',
 			authorityPeerRemoveConfirm: 'Eliminar Par',
 			authorityPeerKeepPeer: 'Mantener Par',
 			authorityPeerEmptyHeading: 'No hay pares de autoridad configurados',
 			authorityPeerEmptyBody: 'Agrega un par para expandir el clúster P2P de esta autoridad.',
+			// 47-REVIEW IN-06. Sin interpolación de {{peerId}} — ver la nota en la versión en inglés.
+			authorityPeerDuplicateError: 'Ese par ya está configurado para esta autoridad.',
 			// D-13: UI legibility affordance, NOT the enforcement boundary — the schema's AdminSignature CHECK is the real control.
-			authorityPeerScopeReadOnlyBanner: 'Solo visualización. Necesitas el permiso {{scope}} para cambiar pares de autoridad.',
+			authorityPeerScopeReadOnlyBanner:
+				'Solo visualización. Necesitas el permiso {{scope}} para cambiar pares de autoridad.',
 			// Phase 47 (D-13) — registrantScope* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
-			registrantScopeReadOnlyBanner: 'Solo visualización. Necesitas el permiso {{scope}} para cambiar registrantes, asociaciones o dispositivos.',
-			registrantScopeReadOnlyNoOfficerBanner: 'Solo visualización. No eres un funcionario registrado de esta autoridad, así que los cambios están desactivados.',
+			registrantScopeReadOnlyBanner:
+				'Solo visualización. Necesitas el permiso {{scope}} para cambiar registrantes, asociaciones o dispositivos.',
+			registrantScopeReadOnlyNoOfficerBanner:
+				'Solo visualización. No eres un funcionario registrado de esta autoridad, así que los cambios están desactivados.',
 		},
 	},
 };

@@ -40,17 +40,17 @@ import type { AuthorityPeer } from "@votetorrent/vote-core";
 // allows the jest.mock() factories below to close over them).
 // ---------------------------------------------------------------------------
 interface TestOfficer {
-  userId: string;
-  authorityId: string;
-  title: string;
-  scopes: string[];
+	userId: string;
+	authorityId: string;
+	title: string;
+	scopes: string[];
 }
 let mockOfficers: TestOfficer[] = [];
 
 const mockGetAdminDetails = jest.fn(async () => ({ admin: { officers: mockOfficers } }));
 
 const mockNetworkEngine = {
-  openAuthority: jest.fn(async () => ({ getAdminDetails: mockGetAdminDetails })),
+	openAuthority: jest.fn(async () => ({ getAdminDetails: mockGetAdminDetails })),
 };
 
 // The live authorityConfig engine instance this suite drives — reassigned in
@@ -62,9 +62,9 @@ let mockAuthorityConfigEngine: any;
 // "authorityConfig" and the network-engine fixture (officer lookup chain)
 // for "network" — everything else resolves null.
 const mockGetEngine = jest.fn(async (name: string): Promise<any> => {
-  if (name === "authorityConfig") return mockAuthorityConfigEngine;
-  if (name === "network") return mockNetworkEngine;
-  return null;
+	if (name === "authorityConfig") return mockAuthorityConfigEngine;
+	if (name === "network") return mockNetworkEngine;
+	return null;
 });
 
 // ---------------------------------------------------------------------------
@@ -74,13 +74,13 @@ const mockGetEngine = jest.fn(async (name: string): Promise<any> => {
 jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
 
 jest.mock("react-native-safe-area-context", () => ({
-  useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+	useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
 }));
 
 jest.mock("@votetorrent/vote-engine/rn", () => ({}), { virtual: true });
 
 jest.mock("../../../providers/SettingsProvider", () => ({
-  useSettings: () => ({ showHelpIcons: false }),
+	useSettings: () => ({ showHelpIcons: false }),
 }));
 
 // react-i18next mock — an interpolation-ECHOING `t()`, load-bearing for the
@@ -89,50 +89,50 @@ jest.mock("../../../providers/SettingsProvider", () => ({
 // `scope` field, so a test can prove `scopeDescriptions.cap` was actually
 // bound rather than merely that some key rendered.
 jest.mock("react-i18next", () => ({
-  useTranslation: () => ({
-    t: (key: string, options?: { scope?: string }) =>
-      options && "scope" in options ? key + "|" + String(options.scope) : key,
-  }),
+	useTranslation: () => ({
+		t: (key: string, options?: { scope?: string }) =>
+			options && "scope" in options ? key + "|" + String(options.scope) : key,
+	}),
 }));
 
 jest.mock("@react-navigation/native", () => ({
-  // Distinct sentinel values for every color token so a color assertion can
-  // never pass by accidental equality between two tokens.
-  useTheme: () => ({
-    colors: {
-      primary: "sentinel-primary",
-      background: "sentinel-background",
-      card: "sentinel-card",
-      text: "sentinel-text",
-      border: "sentinel-border",
-      notification: "sentinel-notification",
-      error: "sentinel-error",
-      textSecondary: "sentinel-textSecondary",
-      important: "sentinel-important",
-      success: "sentinel-success",
-      accent: "sentinel-accent",
-      warning: "sentinel-warning",
-      dark: "sentinel-dark",
-      light: "sentinel-light",
-    },
-  }),
-  useRoute: () => ({ params: { authorityId: "auth-1" } }),
+	// Distinct sentinel values for every color token so a color assertion can
+	// never pass by accidental equality between two tokens.
+	useTheme: () => ({
+		colors: {
+			primary: "sentinel-primary",
+			background: "sentinel-background",
+			card: "sentinel-card",
+			text: "sentinel-text",
+			border: "sentinel-border",
+			notification: "sentinel-notification",
+			error: "sentinel-error",
+			textSecondary: "sentinel-textSecondary",
+			important: "sentinel-important",
+			success: "sentinel-success",
+			accent: "sentinel-accent",
+			warning: "sentinel-warning",
+			dark: "sentinel-dark",
+			light: "sentinel-light",
+		},
+	}),
+	useRoute: () => ({ params: { authorityId: "auth-1" } }),
 }));
 
 jest.mock("../../../engines/device-user", () => ({
-  getOrCreateDeviceUser: jest.fn(async () => ({ id: "device-user-1", name: "Device User" })),
+	getOrCreateDeviceUser: jest.fn(async () => ({ id: "device-user-1", name: "Device User" })),
 }));
 
 jest.mock("../../../engines/device-signer", () => ({
-  createDeviceSigner: jest.fn(async () => async () => ({
-    signature: "mock-sig",
-    signerKey: "mock-key",
-    signerUserId: "device-user-1",
-  })),
+	createDeviceSigner: jest.fn(async () => async () => ({
+		signature: "mock-sig",
+		signerKey: "mock-key",
+		signerUserId: "device-user-1",
+	})),
 }));
 
 jest.mock("../../../providers/AppProvider", () => ({
-  useApp: () => ({ getEngine: mockGetEngine }),
+	useApp: () => ({ getEngine: mockGetEngine }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -141,9 +141,9 @@ jest.mock("../../../providers/AppProvider", () => ({
 // blocks this subpath; the physical `dist/` file is required directly.
 // ---------------------------------------------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { MockAuthorityConfigEngine } = require(
-  "../../../../../../packages/vote-engine/dist/authority-config/mock-authority-config-engine",
-);
+const {
+	MockAuthorityConfigEngine,
+} = require("../../../../../../packages/vote-engine/dist/authority-config/mock-authority-config-engine");
 
 // ---------------------------------------------------------------------------
 // Fixtures and helpers
@@ -151,43 +151,44 @@ const { MockAuthorityConfigEngine } = require(
 
 /** A stable, reusable sign callback for directly-seeded engine state (bypasses createDeviceSigner). */
 const SEED_SIGN = async () => ({
-  signature: "seed-sig",
-  signerKey: "seed-key",
-  signerUserId: "seed-user",
+	signature: "seed-sig",
+	signerKey: "seed-key",
+	signerUserId: "seed-user",
 });
 
 async function seedPeers(peerIds: string[]): Promise<void> {
-  for (const peerId of peerIds) {
-    await mockAuthorityConfigEngine.addAuthorityPeer("auth-1", peerId, SEED_SIGN);
-  }
-  // Seeding must not contaminate call counts the tests assert on.
-  addSpy.mockClear();
-  removeSpy.mockClear();
+	for (const peerId of peerIds) {
+		await mockAuthorityConfigEngine.addAuthorityPeer("auth-1", peerId, SEED_SIGN);
+	}
+	// Seeding must not contaminate call counts the tests assert on.
+	addSpy.mockClear();
+	removeSpy.mockClear();
 }
 
 async function flushTicks(count: number): Promise<void> {
-  await renderer.act(async () => {
-    for (let i = 0; i < count; i++) {
-      await Promise.resolve();
-    }
-  });
+	await renderer.act(async () => {
+		for (let i = 0; i < count; i++) {
+			await Promise.resolve();
+		}
+	});
 }
 
 async function renderScreen(): Promise<renderer.ReactTestRenderer> {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const AuthorityPeersScreenModule = require("../AuthorityPeersScreen");
-  const AuthorityPeersScreen = AuthorityPeersScreenModule.default ?? AuthorityPeersScreenModule.AuthorityPeersScreen;
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const AuthorityPeersScreenModule = require("../AuthorityPeersScreen");
+	const AuthorityPeersScreen =
+		AuthorityPeersScreenModule.default ?? AuthorityPeersScreenModule.AuthorityPeersScreen;
 
-  let tr!: renderer.ReactTestRenderer;
-  await renderer.act(async () => {
-    tr = renderer.create(<AuthorityPeersScreen />);
-  });
-  // Flush AT LEAST six ticks: engine acquisition -> getAuthorityPeers, PLUS
-  // useCurrentOfficerScopes' own device-user -> network engine ->
-  // openAuthority -> getAdminDetails walk (RegistrationPolicyScreen.test.tsx
-  // / PollingDevicesScreen.test.tsx precedent).
-  await flushTicks(6);
-  return tr;
+	let tr!: renderer.ReactTestRenderer;
+	await renderer.act(async () => {
+		tr = renderer.create(<AuthorityPeersScreen />);
+	});
+	// Flush AT LEAST six ticks: engine acquisition -> getAuthorityPeers, PLUS
+	// useCurrentOfficerScopes' own device-user -> network engine ->
+	// openAuthority -> getAdminDetails walk (RegistrationPolicyScreen.test.tsx
+	// / PollingDevicesScreen.test.tsx precedent).
+	await flushTicks(6);
+	return tr;
 }
 
 /**
@@ -198,20 +199,20 @@ async function renderScreen(): Promise<renderer.ReactTestRenderer> {
  * vacuous pass.
  */
 async function press(tr: renderer.ReactTestRenderer, testID: string): Promise<void> {
-  const wrapper = tr.root.findByProps({ testID });
-  const candidates = wrapper.findAll(
-    (node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function",
-  );
-  expect(candidates.length).toBeGreaterThan(0);
-  const target = candidates[0]!;
-  await renderer.act(async () => {
-    if (typeof target.props.onPressIn === "function") {
-      target.props.onPressIn();
-    } else {
-      await target.props.onPress();
-    }
-  });
-  await flushTicks(4);
+	const wrapper = tr.root.findByProps({ testID });
+	const candidates = wrapper.findAll(
+		(node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function"
+	);
+	expect(candidates.length).toBeGreaterThan(0);
+	const target = candidates[0]!;
+	await renderer.act(async () => {
+		if (typeof target.props.onPressIn === "function") {
+			target.props.onPressIn();
+		} else {
+			await target.props.onPress();
+		}
+	});
+	await flushTicks(4);
 }
 
 /**
@@ -221,22 +222,22 @@ async function press(tr: renderer.ReactTestRenderer, testID: string): Promise<vo
  * present" assertion.
  */
 function attemptPress(tr: renderer.ReactTestRenderer, testID: string): void {
-  const wrapper = tr.root.findByProps({ testID });
-  const candidates = wrapper.findAll(
-    (node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function",
-  );
-  candidates.forEach((c) => {
-    if (typeof c.props.onPressIn === "function") c.props.onPressIn();
-    else if (typeof c.props.onPress === "function") c.props.onPress();
-  });
+	const wrapper = tr.root.findByProps({ testID });
+	const candidates = wrapper.findAll(
+		(node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function"
+	);
+	candidates.forEach((c) => {
+		if (typeof c.props.onPressIn === "function") c.props.onPressIn();
+		else if (typeof c.props.onPress === "function") c.props.onPress();
+	});
 }
 
 function present(tr: renderer.ReactTestRenderer, testID: string): void {
-  expect(() => tr.root.findByProps({ testID })).not.toThrow();
+	expect(() => tr.root.findByProps({ testID })).not.toThrow();
 }
 
 function absent(tr: renderer.ReactTestRenderer, testID: string): void {
-  expect(() => tr.root.findByProps({ testID })).toThrow();
+	expect(() => tr.root.findByProps({ testID })).toThrow();
 }
 
 /**
@@ -250,7 +251,7 @@ function absent(tr: renderer.ReactTestRenderer, testID: string): void {
  * PollingDevicesScreen.test.tsx precedent).
  */
 function treeText(tr: renderer.ReactTestRenderer): string {
-  return JSON.stringify(tr.toJSON());
+	return JSON.stringify(tr.toJSON());
 }
 
 // ---------------------------------------------------------------------------
@@ -261,14 +262,16 @@ let addSpy: jest.SpyInstance;
 let removeSpy: jest.SpyInstance;
 
 beforeEach(() => {
-  jest.clearAllMocks();
-  mockAuthorityConfigEngine = new MockAuthorityConfigEngine();
-  // Preserve real behaviour, count calls — never replace with jest.fn().
-  addSpy = jest.spyOn(mockAuthorityConfigEngine, "addAuthorityPeer");
-  removeSpy = jest.spyOn(mockAuthorityConfigEngine, "removeAuthorityPeer");
-  mockOfficers = [{ userId: "device-user-1", authorityId: "auth-1", title: "Chair", scopes: ["cap"] }];
-  // Do NOT call jest.resetModules() — it would break the cached top-level
-  // require for MockAuthorityConfigEngine and the mock-factory closures.
+	jest.clearAllMocks();
+	mockAuthorityConfigEngine = new MockAuthorityConfigEngine();
+	// Preserve real behaviour, count calls — never replace with jest.fn().
+	addSpy = jest.spyOn(mockAuthorityConfigEngine, "addAuthorityPeer");
+	removeSpy = jest.spyOn(mockAuthorityConfigEngine, "removeAuthorityPeer");
+	mockOfficers = [
+		{ userId: "device-user-1", authorityId: "auth-1", title: "Chair", scopes: ["cap"] },
+	];
+	// Do NOT call jest.resetModules() — it would break the cached top-level
+	// require for MockAuthorityConfigEngine and the mock-factory closures.
 });
 
 // ---------------------------------------------------------------------------
@@ -276,192 +279,201 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("AuthorityPeersScreen — D-08 / D-13 ('cap' scope)", () => {
-  test("1. pure helper truncatePeerId — mutation lock on the slice(0,5)+'...' convention", () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { truncatePeerId } = require("../AuthorityPeersScreen");
-    expect(truncatePeerId("12345678")).toBe("12345678"); // length 8, unchanged
-    expect(truncatePeerId("123456789")).toBe("12345...");
-    expect(truncatePeerId("")).toBe("");
-  });
+	test("1. pure helper truncatePeerId — mutation lock on the slice(0,5)+'...' convention", () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const { truncatePeerId } = require("../AuthorityPeersScreen");
+		expect(truncatePeerId("12345678")).toBe("12345678"); // length 8, unchanged
+		expect(truncatePeerId("123456789")).toBe("12345...");
+		expect(truncatePeerId("")).toBe("");
+	});
 
-  test("2. pure helper isDuplicatePeerId — exact match, trim only, NOT case-folded", () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { isDuplicatePeerId } = require("../AuthorityPeersScreen");
-    const peers: AuthorityPeer[] = [{ authorityId: "auth-1", peerId: "QmAbC" }];
-    expect(isDuplicatePeerId(peers, "QmAbC")).toBe(true);
-    expect(isDuplicatePeerId(peers, "  QmAbC  ")).toBe(true);
-    // Mutation lock on the "no case-folding" rule — a toLowerCase added to
-    // either side of isDuplicatePeerId would flip this to true.
-    expect(isDuplicatePeerId(peers, "qmabc")).toBe(false);
-  });
+	test("2. pure helper isDuplicatePeerId — exact match, trim only, NOT case-folded", () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const { isDuplicatePeerId } = require("../AuthorityPeersScreen");
+		const peers: AuthorityPeer[] = [{ authorityId: "auth-1", peerId: "QmAbC" }];
+		expect(isDuplicatePeerId(peers, "QmAbC")).toBe(true);
+		expect(isDuplicatePeerId(peers, "  QmAbC  ")).toBe(true);
+		// Mutation lock on the "no case-folding" rule — a toLowerCase added to
+		// either side of isDuplicatePeerId would flip this to true.
+		expect(isDuplicatePeerId(peers, "qmabc")).toBe(false);
+	});
 
-  test("3. 'cap' officer sees a writable screen", async () => {
-    await seedPeers(["peer-alpha", "peer-beta"]);
-    const tr = await renderScreen();
+	test("3. 'cap' officer sees a writable screen", async () => {
+		await seedPeers(["peer-alpha", "peer-beta"]);
+		const tr = await renderScreen();
 
-    absent(tr, "authority-peers-readonly-banner");
-    absent(tr, "authority-peers-readonly-no-officer-banner");
-    present(tr, "authority-peers-row-peer-alpha");
-    present(tr, "authority-peers-row-peer-beta");
-    present(tr, "authority-peers-add-toggle");
-  });
+		absent(tr, "authority-peers-readonly-banner");
+		absent(tr, "authority-peers-readonly-no-officer-banner");
+		present(tr, "authority-peers-row-peer-alpha");
+		present(tr, "authority-peers-row-peer-beta");
+		present(tr, "authority-peers-add-toggle");
+	});
 
-  test("4. SCOPE-CONFLATION PROOF — a 'vrg'-only officer is read-only here", async () => {
-    // This is the plan's reason for existing: 'vrg' is the scope every other
-    // Phase 47 authorities/registration screen uses, so a copy-paste from
-    // 47-17 lands here as a silently-widened cluster-membership gate. This
-    // test proves the gate stayed at 'cap'.
-    mockOfficers = [{ userId: "device-user-1", authorityId: "auth-1", title: "Chair", scopes: ["vrg"] }];
-    await seedPeers(["peer-alpha"]);
-    const tr = await renderScreen();
+	test("4. SCOPE-CONFLATION PROOF — a 'vrg'-only officer is read-only here", async () => {
+		// This is the plan's reason for existing: 'vrg' is the scope every other
+		// Phase 47 authorities/registration screen uses, so a copy-paste from
+		// 47-17 lands here as a silently-widened cluster-membership gate. This
+		// test proves the gate stayed at 'cap'.
+		mockOfficers = [
+			{ userId: "device-user-1", authorityId: "auth-1", title: "Chair", scopes: ["vrg"] },
+		];
+		await seedPeers(["peer-alpha"]);
+		const tr = await renderScreen();
 
-    present(tr, "authority-peers-readonly-banner");
-    absent(tr, "authority-peers-readonly-no-officer-banner");
-    // The interpolation-echoing `t` makes this prove scopeDescriptions.cap
-    // was actually bound, not merely that some key rendered.
-    expect(treeText(tr)).toContain("authorityPeerScopeReadOnlyBanner|Configure Authority Peers");
-    // NEGATIVE assertions: the registrant-scope banner copy and the 'vrg'
-    // scope description must NOT appear anywhere in this tree.
-    expect(treeText(tr)).not.toContain("registrantScopeReadOnlyBanner");
-    expect(treeText(tr)).not.toContain("Validate registrations");
+		present(tr, "authority-peers-readonly-banner");
+		absent(tr, "authority-peers-readonly-no-officer-banner");
+		// The interpolation-echoing `t` makes this prove scopeDescriptions.cap
+		// was actually bound, not merely that some key rendered.
+		expect(treeText(tr)).toContain("authorityPeerScopeReadOnlyBanner|Configure Authority Peers");
+		// NEGATIVE assertions: the registrant-scope banner copy and the 'vrg'
+		// scope description must NOT appear anywhere in this tree.
+		expect(treeText(tr)).not.toContain("registrantScopeReadOnlyBanner");
+		expect(treeText(tr)).not.toContain("Validate registrations");
 
-    // Visible-but-disabled (D-13 default), not hidden.
-    present(tr, "authority-peers-row-peer-alpha");
-    present(tr, "authority-peers-add-toggle");
+		// Visible-but-disabled (D-13 default), not hidden.
+		present(tr, "authority-peers-row-peer-alpha");
+		present(tr, "authority-peers-add-toggle");
 
-    attemptPress(tr, "authority-peers-add-toggle");
-    attemptPress(tr, "authority-peers-remove-peer-alpha");
-    await flushTicks(2);
+		attemptPress(tr, "authority-peers-add-toggle");
+		attemptPress(tr, "authority-peers-remove-peer-alpha");
+		await flushTicks(2);
 
-    expect(addSpy).toHaveBeenCalledTimes(0);
-    expect(removeSpy).toHaveBeenCalledTimes(0);
-    absent(tr, "authority-peers-confirm-peer-alpha-card");
-  });
+		expect(addSpy).toHaveBeenCalledTimes(0);
+		expect(removeSpy).toHaveBeenCalledTimes(0);
+		absent(tr, "authority-peers-confirm-peer-alpha-card");
+	});
 
-  test("5. not-an-officer gets the other banner", async () => {
-    mockOfficers = [];
-    const tr = await renderScreen();
+	test("5. not-an-officer gets the other banner", async () => {
+		mockOfficers = [];
+		const tr = await renderScreen();
 
-    present(tr, "authority-peers-readonly-no-officer-banner");
-    absent(tr, "authority-peers-readonly-banner");
-    expect(treeText(tr)).not.toContain("Configure Authority Peers");
-  });
+		present(tr, "authority-peers-readonly-no-officer-banner");
+		absent(tr, "authority-peers-readonly-banner");
+		expect(treeText(tr)).not.toContain("Configure Authority Peers");
+	});
 
-  test("6. empty state", async () => {
-    const tr = await renderScreen();
+	test("6. empty state", async () => {
+		const tr = await renderScreen();
 
-    present(tr, "authority-peers-empty");
-    absent(tr, "authority-peers-row-peer-alpha");
-    absent(tr, "authority-peers-loading");
-  });
+		present(tr, "authority-peers-empty");
+		absent(tr, "authority-peers-row-peer-alpha");
+		absent(tr, "authority-peers-loading");
+	});
 
-  test("7. add: happy path", async () => {
-    const tr = await renderScreen();
+	test("7. add: happy path", async () => {
+		const tr = await renderScreen();
 
-    await press(tr, "authority-peers-add-toggle");
-    present(tr, "authority-peers-add-form");
+		await press(tr, "authority-peers-add-toggle");
+		present(tr, "authority-peers-add-form");
 
-    const input = tr.root.findByProps({ testID: "authority-peers-add-input" });
-    await renderer.act(async () => {
-      input.props.onChangeText("peer-alpha");
-    });
+		const input = tr.root.findByProps({ testID: "authority-peers-add-input" });
+		await renderer.act(async () => {
+			input.props.onChangeText("peer-alpha");
+		});
 
-    await press(tr, "authority-peers-add-submit");
+		await press(tr, "authority-peers-add-submit");
 
-    expect(addSpy).toHaveBeenCalledTimes(1);
-    expect(addSpy).toHaveBeenCalledWith("auth-1", "peer-alpha", expect.any(Function));
-    absent(tr, "authority-peers-add-form");
-    // Proves the post-write loadPeers() re-read, not an optimistic local push.
-    present(tr, "authority-peers-row-peer-alpha");
-  });
+		expect(addSpy).toHaveBeenCalledTimes(1);
+		expect(addSpy).toHaveBeenCalledWith("auth-1", "peer-alpha", expect.any(Function));
+		absent(tr, "authority-peers-add-form");
+		// Proves the post-write loadPeers() re-read, not an optimistic local push.
+		present(tr, "authority-peers-row-peer-alpha");
+	});
 
-  test("8. add trims, does not case-fold", async () => {
-    const tr = await renderScreen();
+	test("8. add trims, does not case-fold", async () => {
+		const tr = await renderScreen();
 
-    await press(tr, "authority-peers-add-toggle");
-    const input = tr.root.findByProps({ testID: "authority-peers-add-input" });
-    await renderer.act(async () => {
-      input.props.onChangeText("  peer-beta  ");
-    });
-    await press(tr, "authority-peers-add-submit");
+		await press(tr, "authority-peers-add-toggle");
+		const input = tr.root.findByProps({ testID: "authority-peers-add-input" });
+		await renderer.act(async () => {
+			input.props.onChangeText("  peer-beta  ");
+		});
+		await press(tr, "authority-peers-add-submit");
 
-    expect(addSpy).toHaveBeenCalledWith("auth-1", "peer-beta", expect.any(Function));
-  });
+		expect(addSpy).toHaveBeenCalledWith("auth-1", "peer-beta", expect.any(Function));
+	});
 
-  test("9. DUPLICATE GUARD — a duplicate peerId never reaches the engine", async () => {
-    // The real engine would raise a PK violation here while the mock
-    // silently no-ops — this guard is the only thing keeping the two in
-    // agreement (see the DECLARED BLIND SPOT header comment).
-    await seedPeers(["peer-alpha"]);
-    const tr = await renderScreen();
+	test("9. DUPLICATE GUARD — a duplicate peerId never reaches the engine", async () => {
+		// The real engine would raise a PK violation here while the mock
+		// silently no-ops — this guard is the only thing keeping the two in
+		// agreement (see the DECLARED BLIND SPOT header comment).
+		await seedPeers(["peer-alpha"]);
+		const tr = await renderScreen();
 
-    await press(tr, "authority-peers-add-toggle");
-    const input = tr.root.findByProps({ testID: "authority-peers-add-input" });
-    await renderer.act(async () => {
-      input.props.onChangeText("peer-alpha");
-    });
-    await press(tr, "authority-peers-add-submit");
+		await press(tr, "authority-peers-add-toggle");
+		const input = tr.root.findByProps({ testID: "authority-peers-add-input" });
+		await renderer.act(async () => {
+			input.props.onChangeText("peer-alpha");
+		});
+		await press(tr, "authority-peers-add-submit");
 
-    expect(addSpy).toHaveBeenCalledTimes(0);
-    expect(treeText(tr)).toContain("Peer already configured: peer-alpha");
-  });
+		expect(addSpy).toHaveBeenCalledTimes(0);
+		// The message is a translated key (47-REVIEW IN-06), and it must NOT carry
+		// the operator-supplied peer id — the rejected draft stays in the input
+		// instead, which the assertion below proves.
+		expect(treeText(tr)).toContain("authorityPeerDuplicateError");
+		expect(treeText(tr)).not.toContain("Peer already configured");
+		expect(tr.root.findByProps({ testID: "authority-peers-add-input" }).props.value).toBe(
+			"peer-alpha"
+		);
+	});
 
-  test("10. remove requires the confirmation card — a single tap never deletes", async () => {
-    await seedPeers(["peer-alpha"]);
-    const tr = await renderScreen();
+	test("10. remove requires the confirmation card — a single tap never deletes", async () => {
+		await seedPeers(["peer-alpha"]);
+		const tr = await renderScreen();
 
-    await press(tr, "authority-peers-remove-peer-alpha");
+		await press(tr, "authority-peers-remove-peer-alpha");
 
-    present(tr, "authority-peers-confirm-peer-alpha-card");
-    expect(removeSpy).toHaveBeenCalledTimes(0);
-  });
+		present(tr, "authority-peers-confirm-peer-alpha-card");
+		expect(removeSpy).toHaveBeenCalledTimes(0);
+	});
 
-  test("11. dismissed confirmation fires ZERO engine calls", async () => {
-    await seedPeers(["peer-alpha"]);
-    const tr = await renderScreen();
+	test("11. dismissed confirmation fires ZERO engine calls", async () => {
+		await seedPeers(["peer-alpha"]);
+		const tr = await renderScreen();
 
-    await press(tr, "authority-peers-remove-peer-alpha");
-    present(tr, "authority-peers-confirm-peer-alpha-card");
+		await press(tr, "authority-peers-remove-peer-alpha");
+		present(tr, "authority-peers-confirm-peer-alpha-card");
 
-    await press(tr, "authority-peers-confirm-peer-alpha-dismiss");
+		await press(tr, "authority-peers-confirm-peer-alpha-dismiss");
 
-    absent(tr, "authority-peers-confirm-peer-alpha-card");
-    expect(removeSpy).toHaveBeenCalledTimes(0);
-    present(tr, "authority-peers-row-peer-alpha");
-  });
+		absent(tr, "authority-peers-confirm-peer-alpha-card");
+		expect(removeSpy).toHaveBeenCalledTimes(0);
+		present(tr, "authority-peers-row-peer-alpha");
+	});
 
-  test("12. confirmed removal deletes exactly once and the row disappears", async () => {
-    await seedPeers(["peer-alpha"]);
-    const tr = await renderScreen();
+	test("12. confirmed removal deletes exactly once and the row disappears", async () => {
+		await seedPeers(["peer-alpha"]);
+		const tr = await renderScreen();
 
-    await press(tr, "authority-peers-remove-peer-alpha");
-    present(tr, "authority-peers-confirm-peer-alpha-card");
+		await press(tr, "authority-peers-remove-peer-alpha");
+		present(tr, "authority-peers-confirm-peer-alpha-card");
 
-    await press(tr, "authority-peers-confirm-peer-alpha-confirm");
+		await press(tr, "authority-peers-confirm-peer-alpha-confirm");
 
-    expect(removeSpy).toHaveBeenCalledTimes(1);
-    expect(removeSpy).toHaveBeenCalledWith("auth-1", "peer-alpha", expect.any(Function));
-    absent(tr, "authority-peers-confirm-peer-alpha-card");
-    absent(tr, "authority-peers-row-peer-alpha");
-  });
+		expect(removeSpy).toHaveBeenCalledTimes(1);
+		expect(removeSpy).toHaveBeenCalledWith("auth-1", "peer-alpha", expect.any(Function));
+		absent(tr, "authority-peers-confirm-peer-alpha-card");
+		absent(tr, "authority-peers-row-peer-alpha");
+	});
 
-  test("13. row containment: card slot carries flex:1 + minWidth:0, REMOVE wrapper carries flexShrink:0, row stays flexDirection:row", async () => {
-    await seedPeers(["peer-alpha"]);
-    const tr = await renderScreen();
+	test("13. row containment: card slot carries flex:1 + minWidth:0, REMOVE wrapper carries flexShrink:0, row stays flexDirection:row", async () => {
+		await seedPeers(["peer-alpha"]);
+		const tr = await renderScreen();
 
-    const row = tr.root.findByProps({ testID: "authority-peers-row-peer-alpha" });
-    const rowFlat = StyleSheet.flatten(row.props.style) as Record<string, unknown>;
-    expect(rowFlat.flexDirection).toBe("row");
+		const row = tr.root.findByProps({ testID: "authority-peers-row-peer-alpha" });
+		const rowFlat = StyleSheet.flatten(row.props.style) as Record<string, unknown>;
+		expect(rowFlat.flexDirection).toBe("row");
 
-    const [cardSlot, removeWrapper] = row.props.children as [
-      { props: { style?: unknown } },
-      { props: { style?: unknown } },
-    ];
-    const cardFlat = StyleSheet.flatten(cardSlot.props.style) as Record<string, unknown>;
-    expect(cardFlat.flex).toBe(1);
-    expect(cardFlat.minWidth).toBe(0);
+		const [cardSlot, removeWrapper] = row.props.children as [
+			{ props: { style?: unknown } },
+			{ props: { style?: unknown } }
+		];
+		const cardFlat = StyleSheet.flatten(cardSlot.props.style) as Record<string, unknown>;
+		expect(cardFlat.flex).toBe(1);
+		expect(cardFlat.minWidth).toBe(0);
 
-    const removeFlat = StyleSheet.flatten(removeWrapper.props.style) as Record<string, unknown>;
-    expect(removeFlat.flexShrink).toBe(0);
-  });
+		const removeFlat = StyleSheet.flatten(removeWrapper.props.style) as Record<string, unknown>;
+		expect(removeFlat.flexShrink).toBe(0);
+	});
 });
