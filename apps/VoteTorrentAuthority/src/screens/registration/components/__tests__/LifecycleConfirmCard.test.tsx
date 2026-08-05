@@ -388,4 +388,82 @@ describe('LifecycleConfirmCard — D-10', () => {
     warnSpy.mockRestore();
     errorSpy.mockRestore();
   });
+
+  it('17. both slots are width-constrained: flex:1 and minWidth:0 on both dismiss and confirm wrappers', () => {
+    const { tr } = renderCard();
+
+    expect(styleValue(tr, `${PREFIX}-dismiss`, 'flex')).toBe(1);
+    expect(styleValue(tr, `${PREFIX}-dismiss`, 'minWidth')).toBe(0);
+    expect(styleValue(tr, `${PREFIX}-confirm`, 'flex')).toBe(1);
+    expect(styleValue(tr, `${PREFIX}-confirm`, 'minWidth')).toBe(0);
+  });
+
+  it('18. long ES labels: slots stay constrained and the confirm label chain can shrink/wrap instead of clipping', () => {
+    const { tr } = renderCard({
+      dismissLabel: 'Mantener Estado Actual',
+      confirmLabel: 'Suspender Registrante',
+    });
+
+    expect(styleValue(tr, `${PREFIX}-dismiss`, 'flex')).toBe(1);
+    expect(styleValue(tr, `${PREFIX}-dismiss`, 'minWidth')).toBe(0);
+    expect(styleValue(tr, `${PREFIX}-confirm`, 'flex')).toBe(1);
+    expect(styleValue(tr, `${PREFIX}-confirm`, 'minWidth')).toBe(0);
+
+    const confirmWrapper = tr.root.findByProps({ testID: `${PREFIX}-confirm` });
+    const textNode = [confirmWrapper, ...confirmWrapper.findAll(() => true)].find((node) => {
+      const flat = Array.isArray(node.props.style)
+        ? node.props.style.flat(5).find(
+            (s: unknown) => s !== null && typeof s === 'object' && 'flexShrink' in (s as Record<string, unknown>),
+          )
+        : node.props.style && typeof node.props.style === 'object' && 'flexShrink' in node.props.style
+          ? node.props.style
+          : undefined;
+      return flat !== undefined;
+    });
+    expect(textNode).not.toBeUndefined();
+    const flat = Array.isArray(textNode!.props.style)
+      ? textNode!.props.style
+          .flat(5)
+          .find((s: unknown) => s !== null && typeof s === 'object' && 'flexShrink' in (s as Record<string, unknown>))
+      : textNode!.props.style;
+    expect((flat as Record<string, unknown>).flexShrink).toBe(1);
+  });
+
+  it('19. the row itself never opens an unbounded axis: flexDirection row, alignItems stretch', () => {
+    const { tr } = renderCard();
+
+    const dismissWrapper = tr.root.findByProps({ testID: `${PREFIX}-dismiss` });
+    const row = dismissWrapper.parent!;
+    const flat = Array.isArray(row.props.style) ? row.props.style.flat(5) : [row.props.style];
+    const withFlexDirection = flat.find(
+      (s: unknown) => s !== null && typeof s === 'object' && 'flexDirection' in (s as Record<string, unknown>),
+    ) as Record<string, unknown>;
+
+    expect(withFlexDirection.flexDirection).toBe('row');
+    expect(withFlexDirection.alignItems).toBe('stretch');
+  });
+
+  it('20. safety unchanged under the new styles: typed gate + submittingRef latch survive the restyle (long ES labels)', () => {
+    const onConfirm = jest.fn().mockReturnValue(new Promise(() => {}));
+    const { tr } = renderCard({
+      dismissLabel: 'Mantener Estado Actual',
+      confirmLabel: 'Suspender Registrante',
+      onConfirm,
+    });
+
+    type(tr, PREFIX, 'Jane Doex');
+    expect(isDisabled(tr, `${PREFIX}-confirm`)).toBe(true);
+
+    type(tr, PREFIX, 'Jane Doe');
+    expect(isDisabled(tr, `${PREFIX}-confirm`)).toBe(false);
+
+    const pressable = findPressable(tr, `${PREFIX}-confirm`);
+    renderer.act(() => {
+      pressable!.props.onPress();
+      pressable!.props.onPress();
+      pressable!.props.onPress();
+    });
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
 });

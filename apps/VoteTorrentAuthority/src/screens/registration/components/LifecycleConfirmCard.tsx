@@ -240,18 +240,20 @@ export function LifecycleConfirmCard({
 			)}
 
 			<View style={localStyles.buttonRow}>
-				<View testID={`${testIDPrefix}-dismiss`}>
+				<View testID={`${testIDPrefix}-dismiss`} style={localStyles.buttonSlot}>
 					<CustomButton
 						size="thin"
+						flex
 						title={dismissLabel}
 						backgroundColor={dismissBackground}
 						disabled={submitState !== "idle"}
 						onPress={submitState === "idle" ? handleDismiss : NOOP}
 					/>
 				</View>
-				<View testID={`${testIDPrefix}-confirm`}>
+				<View testID={`${testIDPrefix}-confirm`} style={localStyles.buttonSlot}>
 					<CustomButton
 						size="thin"
+						flex
 						title={confirmLabel}
 						backgroundColor={confirmBackground}
 						disabled={!canConfirm}
@@ -266,9 +268,27 @@ export function LifecycleConfirmCard({
 const localStyles = StyleSheet.create({
 	buttonRow: {
 		flexDirection: "row",
-		alignItems: "center",
+		// "stretch" (not "center") so both slots match the taller button's
+		// height when one label wraps to two lines.
+		alignItems: "stretch",
 		gap: 8,
 		marginTop: 8,
+	},
+	// Fixed half-width slots (flex:1 + minWidth:0) chosen over `flexWrap`:
+	// the component's own contract (see the `dismissBackground` comment
+	// above) makes left/right POSITION the only signal that dismiss is the
+	// secondary control, because both buttons share `colors.accent` on the
+	// neutral row. A wrapping row would intermittently stack them
+	// vertically at long label lengths and destroy that reading, and would
+	// do so on ES but not EN — a locale-dependent hierarchy. Fixed
+	// half-width slots keep the pair on one line in every locale;
+	// CustomButton's own `flexShrink: 1` + `textAlign: 'center'` label (no
+	// `numberOfLines` cap) wraps onto a second line inside the button
+	// instead of clipping. `minWidth: 0` is already RN's flex default; it
+	// is declared explicitly as the intent marker this rule pins.
+	buttonSlot: {
+		flex: 1,
+		minWidth: 0,
 	},
 });
 
