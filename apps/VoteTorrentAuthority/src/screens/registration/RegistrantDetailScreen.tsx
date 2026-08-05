@@ -404,6 +404,7 @@ export default function RegistrantDetailScreen() {
 			if (!hasValidExpiration) return null;
 			return (
 				<LifecycleConfirmCard
+					key={pendingAction}
 					variant={meta.variant}
 					tone={meta.tone}
 					testIDPrefix={testIDPrefix}
@@ -425,6 +426,7 @@ export default function RegistrantDetailScreen() {
 		if (pendingAction === "reinstate") {
 			return (
 				<LifecycleConfirmCard
+					key={pendingAction}
 					variant={meta.variant}
 					tone={meta.tone}
 					testIDPrefix={testIDPrefix}
