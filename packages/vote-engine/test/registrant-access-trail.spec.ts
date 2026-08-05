@@ -325,6 +325,62 @@ describe('RegistrantAccessEvent trail (D-01/D-02)', () => {
     expect(events.map((e) => e.fields).flat().sort()).to.deep.equal(['dob', 'ssn'])
   })
 
+  it('the landed-row probe survives a trailing-zero millisecond, which Quereus stores truncated (WR-01)', async () => {
+    // REGRESSION LOCK for a ~10% flake that was a real duplicate-write defect.
+    //
+    // Quereus coerces the `datetime` column through a normalization that drops
+    // the trailing `Z` AND strips trailing zeros from the fractional seconds:
+    // a bound `...:31.910Z` comes back as `...:31.91`. The probe originally
+    // compared the two as strings after removing only the `Z`, so whenever
+    // `Date.now()` landed on a millisecond ending in zero the probe answered
+    // "not ours", the retry ran, and a SECOND copy of the same logical event
+    // was appended. `RegistrantAccessEvent` is InsertOnly, so the duplicate is
+    // permanent.
+    //
+    // The sibling test below exercises the same path but with whatever
+    // millisecond the clock happens to supply, so it only caught this about one
+    // run in ten — it read as flakiness rather than as the defect it was. This
+    // test PINS the clock to a trailing-zero millisecond so the regression is
+    // deterministic. Do not "fix" a failure here by loosening the comparison to
+    // ignore the timestamp: that would let a genuinely foreign row at the same
+    // sequence be mistaken for ours and silently DROP an audit write.
+    const { auth, engine, sign } = await setup()
+    const registrantId = await seedRegistrant(engine, auth, sign)
+    const ctx = (engine as unknown as { ctx: EngineContext }).ctx
+
+    const realNow = Date.now
+    // .910 -> Quereus stores ".91". Any ms ending in 0 reproduces it.
+    const pinned = new Date('2026-08-05T12:04:31.910Z').getTime()
+    Date.now = () => pinned
+
+    const realExec = ctx.db.exec.bind(ctx.db)
+    let rejectedOnce = false
+    ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = async (sql: any, params?: any) => {
+      const result = await realExec(sql, params)
+      if (!rejectedOnce && typeof sql === 'string' && sql.includes('insert into RegistrantAccessEvent')) {
+        rejectedOnce = true
+        throw new Error('stale revision: rev 1 vs rev 1')
+      }
+      return result
+    }
+
+    try {
+      await engine.recordRegistrantAccessEvent(registrantId, auth.user.id, ['ssn'])
+    } finally {
+      ;(ctx.db as unknown as { exec: typeof ctx.db.exec }).exec = realExec
+      Date.now = realNow
+    }
+
+    expect(rejectedOnce, 'the fault injector must actually have fired, or this test is vacuous').to.equal(true)
+    const events = await engine.getRegistrantAccessEvents(registrantId)
+    expect(
+      events,
+      'a trailing-zero millisecond must not defeat the own-row probe and duplicate the audit row'
+    ).to.have.length(1)
+    expect(events[0]!.sequence).to.equal(0)
+    expect(events[0]!.fields).to.deep.equal(['ssn'])
+  })
+
   it('an insert that LANDS and then reports failure is not written twice (WR-01)', async () => {
     // The retry's original predicate was "did the high-water mark advance?".
     // Our own row advances it, so an exec that rejects AFTER the row landed

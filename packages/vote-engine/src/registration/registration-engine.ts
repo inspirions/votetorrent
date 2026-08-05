@@ -761,19 +761,48 @@ export class RegistrationEngine implements IRegistrationEngine {
       // treating those as already-landed is the safe reading, since the
       // alternative is a permanent unremovable duplicate.)
       //
-      // NOTE `stripZ`: `Timestamp` round-trips WITHOUT the trailing `Z` that
-      // `TimestampValid` requires on the way IN, so comparing the read value
-      // raw against the bound value never matches — the probe would answer
-      // "not ours" every time and silently reinstate the duplicate it exists
-      // to prevent. Covered by the WR-01 test in registrant-access-trail.spec.
-      const stripZ = (value: string): string => value.endsWith('Z') ? value.slice(0, -1) : value
+      // TIMESTAMP COMPARISON MUST BE SEMANTIC, NOT TEXTUAL.
+      //
+      // `Timestamp` does not round-trip as the string that was bound. Quereus
+      // coerces the `datetime` column through a `Temporal.PlainDateTime`-shaped
+      // normalization which (a) drops the trailing `Z` that `TimestampValid`
+      // requires on the way IN, and (b) STRIPS TRAILING ZEROS from the
+      // fractional seconds. Observed: bound `2026-08-05T12:04:31.910Z` stored
+      // as `2026-08-05T12:04:31.91`.
+      //
+      // (b) is why an earlier `stripZ`-only comparison was intermittently
+      // wrong rather than always wrong: it only diverges when `Date.now()`
+      // lands on a millisecond ending in zero, i.e. roughly one call in ten.
+      // The consequence was the exact defect this probe exists to prevent —
+      // the probe answered "not ours", the retry ran, and a SECOND copy of the
+      // same logical event was appended to a table declared
+      // `constraint InsertOnly check on update, delete (false)`, so the
+      // duplicate could never be removed. It presented as a ~10% flaky test.
+      //
+      // Comparing instants sidesteps every formatting question: parse both
+      // sides to epoch milliseconds, appending `Z` to the stored value because
+      // Quereus stores UTC without a designator and `new Date()` would
+      // otherwise read it as LOCAL time (see `fromCanonicalDatetime` in
+      // utils.ts). Any future change to the stored spelling — more or fewer
+      // fractional digits, a space separator — is absorbed automatically.
+      const asInstant = (value: string): number => {
+        const withZone = value.endsWith('Z') ? value : `${value}Z`
+        return new Date(withZone).getTime()
+      }
+      const sameInstant = (stored: string, bound: string): boolean => {
+        const a = asInstant(stored)
+        const b = asInstant(bound)
+        // An unparseable value must never compare equal — that would report a
+        // foreign row as ours and DROP a legitimate audit write.
+        return !Number.isNaN(a) && !Number.isNaN(b) && a === b
+      }
       const ownRowLanded = async (seq: number): Promise<boolean> => {
         const row = await ctx.db
           .prepare('select ViewerUserId, Timestamp, Fields from RegistrantAccessEvent where RegistrantId = :registrantId and Sequence = :sequence')
           .get({ registrantId, sequence: seq })
         if (row === null || row === undefined) return false
         return String(row.ViewerUserId ?? '') === viewerUserId &&
-          stripZ(String(row.Timestamp ?? '')) === stripZ(timestamp) &&
+          sameInstant(String(row.Timestamp ?? ''), timestamp) &&
           String(row.Fields ?? '') === fieldsJson
       }
 
