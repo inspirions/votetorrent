@@ -815,6 +815,54 @@ describe("RegistrantDetailScreen.integration — the Phase 47 E2E gate (D-10/D-1
 			expect((await mockRegistrationEngine.getRegistrant(REGISTRANT_ID)).status).toBe("a");
 		});
 
+		// Sibling of the typed-action test above, for the ORDINARY pair. The
+		// re-audit (47-SECURITY.md, D-10-SITE-3) found renew and reinstate are
+		// also early returns at the same tree position, and ARE co-reachable —
+		// on a suspended registrant the screen offers renew, reinstate and
+		// revoke together. Unkeyed, switching between them reuses one instance,
+		// carrying submitState / submittingRef rather than typedValue.
+		//
+		// That direction is fail-SAFE (a confirm stuck disabled, never one
+		// wrongly enabled), so this is robustness rather than a security lock —
+		// but the fix shipped with nothing holding it, which is what this test
+		// is for. Without key={pendingAction} on those two branches, the
+		// reinstate card inherits the renew card's in-flight `submitting` state
+		// and renders disabled with no way forward.
+		it("D-10: switching between the two ordinary actions yields a fresh, usable card", async () => {
+			await seedRegistrant();
+			await mockRegistrationEngine.changeStatus(REGISTRANT_ID, "s", SEED_SIGN);
+
+			// Hold the renew write open so the card is genuinely mid-submit.
+			let releaseRenew: () => void = () => {};
+			jest
+				.spyOn(mockRegistrationEngine, "changeExpiration")
+				.mockImplementation(() => new Promise<void>((resolve) => {
+					releaseRenew = resolve;
+				}));
+
+			const tr = await renderScreen();
+
+			await press(tr, "registrant-detail-lifecycle-renew");
+			const dateField = tr.root.findByProps({ title: "registrantDetailExpirationLabel" });
+			await renderer.act(async () => {
+				dateField.props.onChange(new Date(Date.now() + 2 * 365 * 24 * 60 * 60 * 1000).toISOString());
+			});
+			present(tr, "registrant-detail-confirm-renew-card");
+			await press(tr, "registrant-detail-confirm-renew-confirm");
+			// Renew is now latched submitting (its own write has not resolved).
+			expect(isDisabled(tr, "registrant-detail-confirm-renew-confirm")).toBe(true);
+
+			// Switch to the other ordinary action without the first resolving.
+			await press(tr, "registrant-detail-lifecycle-reinstate");
+			present(tr, "registrant-detail-confirm-reinstate-card");
+
+			// It must be a FRESH card: usable, not inheriting renew's latch.
+			expect(isDisabled(tr, "registrant-detail-confirm-reinstate-confirm")).toBe(false);
+
+			releaseRenew();
+			await flushTicks(4);
+		});
+
 		it("D-10: the dismiss label is never a bare Cancel", async () => {
 			await seedRegistrant();
 			const tr = await renderScreen();

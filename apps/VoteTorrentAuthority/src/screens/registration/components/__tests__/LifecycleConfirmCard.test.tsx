@@ -466,4 +466,72 @@ describe('LifecycleConfirmCard — D-10', () => {
 
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
+
+  // Locks the defensive half of the fix for the blocker on-device UAT found
+  // (47-UAT.md test 12). A caller that renders two different destructive
+  // actions through the same element position without a `key` gets ONE
+  // instance, and this component's `typedValue` would carry from the action
+  // the officer abandoned into the one they just opened — arming a
+  // confirmation nobody typed for.
+  //
+  // RegistrantDetailScreen now passes `key={pendingAction}`, which fixes that
+  // call site on its own. This suite exists because that means the component's
+  // own reset is NOT exercised by any screen-level test: with the key in
+  // place, deleting the reset left the entire app suite green (verified
+  // 2026-08-05). Belt-and-braces defence where each layer masks the other's
+  // absence is defence nothing verifies. These two tests hold this layer.
+  it('21. a change of matched name clears anything already typed', () => {
+    const { tr } = renderCard({ matchText: 'Jane Doe' });
+
+    type(tr, PREFIX, 'Jane Doe');
+    expect(isDisabled(tr, `${PREFIX}-confirm`)).toBe(false);
+
+    // Same instance, different target — exactly what an unkeyed caller does.
+    renderer.act(() => {
+      tr.update(
+        <LifecycleConfirmCard
+          variant="typed"
+          matchText="Ada Vasquez"
+          title="lifecycleTitleKey"
+          body="lifecycleBodyKey"
+          confirmLabel="lifecycleConfirmKey"
+          dismissLabel="lifecycleKeepKey"
+          typedPlaceholder="lifecycleTypedPlaceholderKey"
+          onConfirm={jest.fn().mockResolvedValue(undefined)}
+          onDismiss={jest.fn()}
+          testIDPrefix={PREFIX}
+        />,
+      );
+    });
+
+    expect(tr.root.findByProps({ testID: `${PREFIX}-typed-input` }).props.value).toBe('');
+    expect(isDisabled(tr, `${PREFIX}-confirm`)).toBe(true);
+  });
+
+  it('22. a change of testIDPrefix (a different action on the same target) clears anything already typed', () => {
+    const { tr } = renderCard({ matchText: 'Jane Doe', testIDPrefix: 'confirm-suspend' });
+
+    type(tr, 'confirm-suspend', 'Jane Doe');
+    expect(isDisabled(tr, 'confirm-suspend-confirm')).toBe(false);
+
+    renderer.act(() => {
+      tr.update(
+        <LifecycleConfirmCard
+          variant="typed"
+          matchText="Jane Doe"
+          title="lifecycleTitleKey"
+          body="lifecycleBodyKey"
+          confirmLabel="lifecycleConfirmKey"
+          dismissLabel="lifecycleKeepKey"
+          typedPlaceholder="lifecycleTypedPlaceholderKey"
+          onConfirm={jest.fn().mockResolvedValue(undefined)}
+          onDismiss={jest.fn()}
+          testIDPrefix="confirm-revoke"
+        />,
+      );
+    });
+
+    expect(tr.root.findByProps({ testID: 'confirm-revoke-typed-input' }).props.value).toBe('');
+    expect(isDisabled(tr, 'confirm-revoke-confirm')).toBe(true);
+  });
 });
