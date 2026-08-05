@@ -54,8 +54,10 @@ import { latestVerdictByDeviceKey } from "./verdicts";
  * non-null identifier on the Association record too, so this file never
  * reads that field — the badge state derives solely from
  * getAttestationVerdicts, reduced to the latest verdict per deviceKey. A
- * missing or unreadable verdict renders the neutral badge, never a false
- * Pass and never a false Fail.
+ * device with no verdict row renders the neutral badge, never a false Pass
+ * and never a false Fail. An UNREADABLE verdict list renders NO badge at
+ * all (T-47-12) — see the `verdicts` state below and AssociationsSection,
+ * which holds the identical contract.
  *
  * Purely additive: this file adds no i18n key, no route, no shared
  * component under src/components/, no schema change, and no package. The
@@ -123,7 +125,11 @@ export function AttestationChallengesSection({
 	// Default-open per the phase's default-open collapsible group.
 	const [expanded, setExpanded] = useState(true);
 	const [challenges, setChallenges] = useState<AttestationChallenge[]>([]);
-	const [verdicts, setVerdicts] = useState<Map<string, AttestationVerdict>>(new Map());
+	// `undefined` means the verdict list could not be read — NOT the same as
+	// "no verdict rows exist" (an empty Map). Load-bearing for T-47-12, and
+	// the same shape AssociationsSection holds: a read failure must render no
+	// badge at all, never the honest-looking "none" state.
+	const [verdicts, setVerdicts] = useState<Map<string, AttestationVerdict> | undefined>(undefined);
 	const [loading, setLoading] = useState(true);
 	const [errorMessage, setErrorMessage] = useState("");
 	// The FULL nonce of the challenge whose confirmation is open — a single
@@ -150,20 +156,21 @@ export function AttestationChallengesSection({
 			if (!unmountedRef.current) setChallenges(rows);
 
 			// Verdicts — independent try/catch, deliberately isolated from
-			// the block above. A verdict-read failure degrades to the
-			// neutral badge (an empty map), never to an error banner: "no
-			// verdict yet" is already the correct rendering for the common
-			// AttestationRequired=0 path (Phase 45 D-14a..D-14e), and the
-			// only unsafe outcomes would be a false Pass (an unearned
-			// assurance) or a false Fail (an unearned accusation) — neither
-			// can arise from an empty map. The challenge list is the
-			// primary content and must render regardless of this read's
-			// outcome.
+			// the block above. A verdict-read failure never becomes an error
+			// banner: the challenge list is the primary content and must
+			// render regardless of this read's outcome. But it degrades to
+			// NO badge, not to the neutral one. "none" is not a null value —
+			// it is an affirmative claim that no verdict was recorded, which
+			// a failed read does not know, and on this surface it would read
+			// as an all-clear for a device whose real verdict may be a fail
+			// (T-47-12). Hence `undefined`, NOT an empty Map: an empty Map
+			// says "every device here has no verdict", which is exactly the
+			// unearned assertion. See AssociationsSection:107-111.
 			try {
 				const verdictRows = await engine.getAttestationVerdicts(registrantId);
 				if (!unmountedRef.current) setVerdicts(latestVerdictByDeviceKey(verdictRows));
 			} catch {
-				if (!unmountedRef.current) setVerdicts(new Map());
+				if (!unmountedRef.current) setVerdicts(undefined);
 			}
 		} catch (err) {
 			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -267,7 +274,7 @@ export function AttestationChallengesSection({
 
 					{!loading &&
 						challenges.map((c) => {
-							const v = verdicts.get(c.deviceKey);
+							const v = verdicts?.get(c.deviceKey);
 							const expireDisabled = !canWrite;
 							return (
 								<View
@@ -299,13 +306,16 @@ export function AttestationChallengesSection({
 										</ThemedText>
 									</View>
 
-									{/* D-03: verdict is the only honest signal; never reads the non-null identifier field. */}
-									<VerdictBadge
-										testIDPrefix={`${testIDPrefix}-verdict-${c.nonce}`}
-										verdict={v?.verdict}
-										reason={v?.reason}
-										verifiedAt={toDisplayTimestamp(v?.verifiedAt)}
-									/>
+									{/* D-03: verdict is the only honest signal; never reads the non-null identifier field.
+									    T-47-12: omitted entirely when the verdict list could not be read — see `verdicts`. */}
+									{verdicts && (
+										<VerdictBadge
+											testIDPrefix={`${testIDPrefix}-verdict-${c.nonce}`}
+											verdict={v?.verdict}
+											reason={v?.reason}
+											verifiedAt={toDisplayTimestamp(v?.verifiedAt)}
+										/>
+									)}
 
 									<View style={localStyles.row}>
 										<View testID={`${testIDPrefix}-expire-trigger-${c.nonce}`}>

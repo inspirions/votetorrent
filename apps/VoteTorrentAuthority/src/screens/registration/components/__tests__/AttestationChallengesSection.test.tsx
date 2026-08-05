@@ -353,7 +353,13 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		expect(treeText(tr)).toContain("revoked hardware root");
 	});
 
-	test("4: a verdict-read failure degrades to no-verdict, never blocks the rows", async () => {
+	// T-47-12: the "none" pill is an AFFIRMATIVE claim ("no verdict recorded"),
+	// not a null rendering — resolveVerdictState maps `undefined` straight to
+	// it (VerdictBadge.tsx:44). So a FAILED verdict read must omit the badge
+	// entirely, or an officer inspecting a device before it is allowed to
+	// associate is handed an unearned all-clear derived from an error the UI
+	// swallowed. This mirrors AssociationsSection.test.tsx test 9 exactly.
+	test("4: a verdict-read FAILURE omits the badge entirely, never blocks the rows", async () => {
 		const engine = new ThrowingVerdictsEngine();
 		const c1 = await seedChallenge(engine, { deviceKey: DEVICE_KEY_ALPHA });
 		const c2 = await seedChallenge(engine, { deviceKey: DEVICE_KEY_BRAVO });
@@ -367,17 +373,47 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		expect(() =>
 			tr.root.findByProps({ testID: `attestation-challenges-row-${c2.nonce}` })
 		).not.toThrow();
+		for (const nonce of [c1.nonce, c2.nonce]) {
+			expect(() =>
+				tr.root.findByProps({ testID: `attestation-challenges-verdict-${nonce}` })
+			).toThrow();
+			expect(() =>
+				tr.root.findByProps({ testID: `attestation-challenges-verdict-${nonce}-none` })
+			).toThrow();
+			expect(() =>
+				tr.root.findByProps({ testID: `attestation-challenges-verdict-${nonce}-pass` })
+			).toThrow();
+			expect(() =>
+				tr.root.findByProps({ testID: `attestation-challenges-verdict-${nonce}-fail` })
+			).toThrow();
+		}
+
+		const text = treeText(tr);
+		expect(text).not.toContain("attestationVerdictNone");
+		expect(text).not.toContain("attestationVerdictPass");
+		expect(text).not.toContain("attestationVerdictFail");
+
+		// The verdict read stays isolated: no error banner, and the challenge
+		// list (the primary content) still renders.
+		expect(() => tr.root.findByProps({ testID: "attestation-challenges-error" })).not.toThrow();
+		expect(text).not.toContain("verdict store unavailable");
+	});
+
+	// Non-vacuity partner for test 4: with the SAME rows and a WORKING verdict
+	// read, the "none" badge IS present. Without this, test 4 would still pass
+	// if the badge were deleted outright or the rows stopped rendering.
+	test("4b: a SUCCESSFUL verdict read with no rows still renders the neutral badge", async () => {
+		const c1 = await seedChallenge(mockAssociationEngine, { deviceKey: DEVICE_KEY_ALPHA });
+
+		const { tr } = await renderSection();
+
+		expect(() =>
+			tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}` })
+		).not.toThrow();
 		expect(() =>
 			tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-none` })
 		).not.toThrow();
-		expect(() =>
-			tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-pass` })
-		).toThrow();
-		expect(() =>
-			tr.root.findByProps({ testID: `attestation-challenges-verdict-${c1.nonce}-fail` })
-		).toThrow();
-		expect(() => tr.root.findByProps({ testID: "attestation-challenges-error" })).not.toThrow();
-		expect(treeText(tr)).not.toContain("verdict store unavailable");
+		expect(treeText(tr)).toContain("attestationVerdictNone");
 	});
 
 	test("5: D-11 empty state offers nothing", async () => {

@@ -20,6 +20,18 @@ import type { AttestationVerdict } from '@votetorrent/vote-core';
  * Pass and never a false Fail": a false Pass is an unearned assurance, a false
  * Fail an unearned accusation, and a silently-dropped verdict produces the
  * "none" badge, which asserts something the caller does not actually know.
+ *
+ * THE CALLER'S HALF OF THAT CONTRACT (T-47-12), stated here once for both
+ * consumers: this function is total over the rows it is GIVEN, so it can only
+ * ever be called with rows that were actually read. A caller whose
+ * `getAttestationVerdicts` REJECTED must NOT substitute an empty array or an
+ * empty Map — `resolveVerdictState(undefined)` maps a missing verdict to the
+ * affirmative "no verdict recorded" pill, so an empty container turns a failed
+ * read into an all-clear for a device whose real verdict may be a fail. Hold
+ * the verdict map as `Map<string, AttestationVerdict> | undefined`, let
+ * `undefined` mean "could not read", and omit the badge entirely in that state.
+ * Both consumers (AssociationsSection, AttestationChallengesSection) do this,
+ * and both suites lock it.
  */
 
 /**
