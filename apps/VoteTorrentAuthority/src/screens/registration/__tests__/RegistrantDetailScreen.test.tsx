@@ -61,7 +61,10 @@ const mockGetEngine = jest.fn(async (name: string): Promise<any> => {
 	return null;
 });
 
-let mockScopesResult: { scopes: string[] | undefined; loading: boolean } = { scopes: ["vrg"], loading: false };
+let mockScopesResult: { scopes: string[] | undefined; loading: boolean } = {
+	scopes: ["vrg"],
+	loading: false,
+};
 
 let mockDeviceUser: { id: string } | undefined = { id: "u-officer-1" };
 
@@ -107,8 +110,8 @@ jest.mock("react-i18next", () => ({
 		t: (key: string, options?: Record<string, unknown>) =>
 			options && Object.keys(options).length > 0
 				? key +
-					"|" +
-					Object.entries(options)
+				  "|" +
+				  Object.entries(options)
 						.map(([k, v]) => k + "=" + String(v))
 						.join(",")
 				: key,
@@ -213,9 +216,9 @@ jest.mock("../components/AccessHistorySection", () => {
 // (see the stale-dist guard below).
 // ---------------------------------------------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { MockRegistrationEngine } = require(
-	"../../../../../../packages/vote-engine/dist/registration/mock-registration-engine",
-);
+const {
+	MockRegistrationEngine,
+} = require("../../../../../../packages/vote-engine/dist/registration/mock-registration-engine");
 
 // ---------------------------------------------------------------------------
 // Helpers — copied/adapted from RegistrationPolicyScreen.test.tsx:287-341.
@@ -260,7 +263,7 @@ async function renderScreen(): Promise<renderer.ReactTestRenderer> {
 async function press(tr: renderer.ReactTestRenderer, testID: string): Promise<void> {
 	const wrapper = tr.root.findByProps({ testID });
 	const candidates = wrapper.findAll(
-		(node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function",
+		(node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function"
 	);
 	expect(candidates.length).toBeGreaterThan(0);
 	const target = candidates[0]!;
@@ -278,7 +281,7 @@ async function press(tr: renderer.ReactTestRenderer, testID: string): Promise<vo
 function attemptPress(tr: renderer.ReactTestRenderer, testID: string): void {
 	const wrapper = tr.root.findByProps({ testID });
 	const candidates = wrapper.findAll(
-		(node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function",
+		(node) => typeof node.props.onPressIn === "function" || typeof node.props.onPress === "function"
 	);
 	candidates.forEach((c) => {
 		if (typeof c.props.onPressIn === "function") c.props.onPressIn();
@@ -295,7 +298,9 @@ function typeInto(tr: renderer.ReactTestRenderer, testID: string, text: string):
 
 function isDisabled(tr: renderer.ReactTestRenderer, testID: string): boolean {
 	const wrapper = tr.root.findByProps({ testID });
-	const disabledNode = [wrapper, ...wrapper.findAll(() => true)].find((node) => "disabled" in node.props);
+	const disabledNode = [wrapper, ...wrapper.findAll(() => true)].find(
+		(node) => "disabled" in node.props
+	);
 	return disabledNode?.props.disabled === true;
 }
 
@@ -335,7 +340,7 @@ async function seedRegistrant(
 		public?: Record<string, unknown>;
 		privateDetails?: Array<{ name: string; value: unknown; hint?: string }>;
 		selective?: Array<{ name: string; value: unknown }>;
-	} = {},
+	} = {}
 ): Promise<void> {
 	await engine.register(
 		{
@@ -343,12 +348,11 @@ async function seedRegistrant(
 			public: overrides.public ?? { lastName: "Doe", firstName: "Jane", district: "D-7" },
 			private: {
 				expiration: FUTURE_ISO,
-				details:
-					overrides.privateDetails ?? [
-						{ name: "SSN", value: SSN_SENTINEL },
-						{ name: "DOB", value: DOB_SENTINEL },
-						{ name: "Phone", value: PHONE_SENTINEL },
-					],
+				details: overrides.privateDetails ?? [
+					{ name: "SSN", value: SSN_SENTINEL },
+					{ name: "DOB", value: DOB_SENTINEL },
+					{ name: "Phone", value: PHONE_SENTINEL },
+				],
 			},
 			selective: {
 				expiration: FUTURE_ISO,
@@ -358,7 +362,7 @@ async function seedRegistrant(
 				],
 			},
 		},
-		SEED_SIGN,
+		SEED_SIGN
 	);
 }
 
@@ -379,7 +383,10 @@ beforeEach(() => {
 	mockAccessHistoryProps = null;
 	capturedAppStateHandler = undefined;
 
-	jest.spyOn(AppState, "addEventListener").mockImplementation(((type: string, handler: (s: AppStateStatus) => void) => {
+	jest.spyOn(AppState, "addEventListener").mockImplementation(((
+		type: string,
+		handler: (s: AppStateStatus) => void
+	) => {
 		capturedAppStateHandler = handler;
 		return { remove: jest.fn() } as never;
 	}) as typeof AppState.addEventListener);
@@ -489,10 +496,14 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 
 		present(tr, "registrant-detail-private-tier");
 		present(tr, "registrant-detail-private-gate");
-		expect(treeText(tr)).toContain("registrantDetailPrivateGateHeading|scope=Validate registrations");
+		expect(treeText(tr)).toContain(
+			"registrantDetailPrivateGateHeading|scope=Validate registrations"
+		);
 
 		const privateRows = tr.root.findAll(
-			(node) => typeof node.props.testID === "string" && node.props.testID.startsWith("registrant-detail-private-row-"),
+			(node) =>
+				typeof node.props.testID === "string" &&
+				node.props.testID.startsWith("registrant-detail-private-row-")
 		);
 		expect(privateRows.length).toBe(0);
 
@@ -519,7 +530,9 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 		present(tr, "selective-field-row-Email");
 
 		const lifecycleButtons = tr.root.findAll(
-			(node) => typeof node.props.testID === "string" && node.props.testID.startsWith("registrant-detail-lifecycle-"),
+			(node) =>
+				typeof node.props.testID === "string" &&
+				node.props.testID.startsWith("registrant-detail-lifecycle-")
 		);
 		expect(lifecycleButtons.length).toBeGreaterThan(0);
 		for (const wrapperNode of lifecycleButtons) {
@@ -529,6 +542,52 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 
 		expect(mockAttestationProps.canWrite).toBe(false);
 		expect(mockAccessHistoryProps.canView).toBe(false);
+	});
+
+	it("IN-07: a gate that closes mid-session DROPS the fetched private tier from state, not just from the render", async () => {
+		// canViewPrivate is not constant for this screen's lifetime — the
+		// officer's scopes can be revised while it stays open. D-13's structural
+		// claim is that no decrypted private tier sits in this component's state
+		// whenever the gate is closed, which a render-time-only gate does not
+		// deliver.
+		mockScopesResult = { scopes: ["vrg"], loading: false };
+		await seedRegistrant(mockRegistrationEngine);
+		const privateReadSpy = jest.spyOn(mockRegistrationEngine, "getRegistrantPrivate");
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const RegistrantDetailScreen = require("../RegistrantDetailScreen").default;
+
+		const tr = await renderScreen();
+		await press(tr, "registrant-detail-private-toggle-SSN");
+		expect(treeText(tr)).toContain(SSN_SENTINEL);
+		expect(privateReadSpy).toHaveBeenCalledTimes(1);
+
+		// The scopes are revised away while the screen stays mounted.
+		mockScopesResult = { scopes: [], loading: false };
+		await renderer.act(async () => {
+			tr.update(<RegistrantDetailScreen />);
+		});
+		await flushTicks(4);
+		present(tr, "registrant-detail-private-gate");
+		expect(treeText(tr)).not.toContain(SSN_SENTINEL);
+
+		// THE assertion that separates "cleared from state" from "merely hidden":
+		// reopen the gate with the refetch FAILING. The failure is what isolates
+		// the two — it means nothing can write privateTier on the way back in, so
+		// whatever renders came from state that survived the close. A retained
+		// tier renders its stale rows (and, once revealed again, its SSN);
+		// cleared state renders the empty branch.
+		privateReadSpy.mockRejectedValueOnce(
+			new Error("RegistrationEngine.getRegistrantPrivate: unavailable")
+		);
+		mockScopesResult = { scopes: ["vrg"], loading: false };
+		await renderer.act(async () => {
+			tr.update(<RegistrantDetailScreen />);
+		});
+		await flushTicks(6);
+
+		present(tr, "registrant-detail-private-empty");
+		absent(tr, "registrant-detail-private-row-SSN");
+		expect(treeText(tr)).not.toContain(SSN_SENTINEL);
 	});
 
 	// -------------------------------------------------------------------------
@@ -622,7 +681,7 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 					tr.unmount();
 				});
 				await flushTicks(4);
-			})(),
+			})()
 		).resolves.not.toThrow();
 
 		expect(recordSpy).toHaveBeenCalledTimes(0);
@@ -668,28 +727,31 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 	it.each<["suspend" | "revoke", "s" | "r"]>([
 		["suspend", "s"],
 		["revoke", "r"],
-	])("D-10 typed variant: %s requires the exact registrant name and commits the status change", async (action, targetStatus) => {
-		await seedRegistrant(mockRegistrationEngine);
-		const tr = await renderScreen();
-		const prefix = "registrant-detail-confirm-" + action;
+	])(
+		"D-10 typed variant: %s requires the exact registrant name and commits the status change",
+		async (action, targetStatus) => {
+			await seedRegistrant(mockRegistrationEngine);
+			const tr = await renderScreen();
+			const prefix = "registrant-detail-confirm-" + action;
 
-		await press(tr, "registrant-detail-lifecycle-" + action);
-		present(tr, prefix + "-card");
-		present(tr, prefix + "-typed-input");
-		expect(isDisabled(tr, prefix + "-confirm")).toBe(true);
+			await press(tr, "registrant-detail-lifecycle-" + action);
+			present(tr, prefix + "-card");
+			present(tr, prefix + "-typed-input");
+			expect(isDisabled(tr, prefix + "-confirm")).toBe(true);
 
-		typeInto(tr, prefix + "-typed-input", "Doe, Jan");
-		expect(isDisabled(tr, prefix + "-confirm")).toBe(true);
+			typeInto(tr, prefix + "-typed-input", "Doe, Jan");
+			expect(isDisabled(tr, prefix + "-confirm")).toBe(true);
 
-		typeInto(tr, prefix + "-typed-input", "  doe, jane  ");
-		expect(isDisabled(tr, prefix + "-confirm")).toBe(false);
+			typeInto(tr, prefix + "-typed-input", "  doe, jane  ");
+			expect(isDisabled(tr, prefix + "-confirm")).toBe(false);
 
-		await press(tr, prefix + "-confirm");
+			await press(tr, prefix + "-confirm");
 
-		const registrant = await mockRegistrationEngine.getRegistrant(REGISTRANT_ID);
-		expect(registrant.status).toBe(targetStatus);
-		absent(tr, prefix + "-card");
-	});
+			const registrant = await mockRegistrationEngine.getRegistrant(REGISTRANT_ID);
+			expect(registrant.status).toBe(targetStatus);
+			absent(tr, prefix + "-card");
+		}
+	);
 
 	it("D-10: -typed-input never renders for renew or reinstate", async () => {
 		await seedRegistrant(mockRegistrationEngine);
@@ -714,7 +776,7 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 		present(tr, prefix + "-card");
 		absent(tr, prefix + "-typed-input");
 		expect(treeText(tr)).toContain(
-			"registrantLifecycleReinstateBody|name=Doe, Jane,oldStatus=registrantStatusSuspended",
+			"registrantLifecycleReinstateBody|name=Doe, Jane,oldStatus=registrantStatusSuspended"
 		);
 
 		await press(tr, prefix + "-confirm");
@@ -748,47 +810,49 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 	// D-10 zero-call dismiss
 	// -------------------------------------------------------------------------
 
-	it.each<"renew" | "reinstate" | "suspend" | "revoke">(["renew", "reinstate", "suspend", "revoke"])(
-		"D-10: dismissing %s fires ZERO engine calls",
-		async (action) => {
-			await seedRegistrant(mockRegistrationEngine);
-			if (action === "reinstate") {
-				await mockRegistrationEngine.changeStatus(REGISTRANT_ID, "s", SEED_SIGN);
-			}
-			const changeStatusSpy = jest.spyOn(mockRegistrationEngine, "changeStatus");
-			const changeExpirationSpy = jest.spyOn(mockRegistrationEngine, "changeExpiration");
+	it.each<"renew" | "reinstate" | "suspend" | "revoke">([
+		"renew",
+		"reinstate",
+		"suspend",
+		"revoke",
+	])("D-10: dismissing %s fires ZERO engine calls", async (action) => {
+		await seedRegistrant(mockRegistrationEngine);
+		if (action === "reinstate") {
+			await mockRegistrationEngine.changeStatus(REGISTRANT_ID, "s", SEED_SIGN);
+		}
+		const changeStatusSpy = jest.spyOn(mockRegistrationEngine, "changeStatus");
+		const changeExpirationSpy = jest.spyOn(mockRegistrationEngine, "changeExpiration");
 
-			const tr = await renderScreen();
-			const prefix = "registrant-detail-confirm-" + action;
+		const tr = await renderScreen();
+		const prefix = "registrant-detail-confirm-" + action;
 
-			await press(tr, "registrant-detail-lifecycle-" + action);
+		await press(tr, "registrant-detail-lifecycle-" + action);
 
-			if (action === "renew") {
-				const dateField = tr.root.findByProps({ title: "registrantDetailExpirationLabel" });
-				await renderer.act(async () => {
-					dateField.props.onChange(new Date(Date.now() + 86400000).toISOString());
-				});
-			}
+		if (action === "renew") {
+			const dateField = tr.root.findByProps({ title: "registrantDetailExpirationLabel" });
+			await renderer.act(async () => {
+				dateField.props.onChange(new Date(Date.now() + 86400000).toISOString());
+			});
+		}
 
-			if (action === "suspend" || action === "revoke") {
-				typeInto(tr, prefix + "-typed-input", "Doe, Jane");
-			}
+		if (action === "suspend" || action === "revoke") {
+			typeInto(tr, prefix + "-typed-input", "Doe, Jane");
+		}
 
-			present(tr, prefix + "-card");
-			await press(tr, prefix + "-dismiss");
+		present(tr, prefix + "-card");
+		await press(tr, prefix + "-dismiss");
 
-			expect(changeStatusSpy).toHaveBeenCalledTimes(0);
-			expect(changeExpirationSpy).toHaveBeenCalledTimes(0);
-			absent(tr, prefix + "-card");
+		expect(changeStatusSpy).toHaveBeenCalledTimes(0);
+		expect(changeExpirationSpy).toHaveBeenCalledTimes(0);
+		absent(tr, prefix + "-card");
 
-			const registrant = await mockRegistrationEngine.getRegistrant(REGISTRANT_ID);
-			// reinstate is exercised from a Suspended seed (its trigger is a
-			// no-op — and therefore absent — on the default Active status), so
-			// the unchanged status after a dismissed reinstate is 's', not 'a'.
-			expect(registrant.status).toBe(action === "reinstate" ? "s" : "a");
-			expect(registrant.expiration).toBe(FUTURE_ISO);
-		},
-	);
+		const registrant = await mockRegistrationEngine.getRegistrant(REGISTRANT_ID);
+		// reinstate is exercised from a Suspended seed (its trigger is a
+		// no-op — and therefore absent — on the default Active status), so
+		// the unchanged status after a dismissed reinstate is 's', not 'a'.
+		expect(registrant.status).toBe(action === "reinstate" ? "s" : "a");
+		expect(registrant.expiration).toBe(FUTURE_ISO);
+	});
 
 	// -------------------------------------------------------------------------
 	// D-10 failed-write retry latch
@@ -871,13 +935,17 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 		await seedRegistrant(mockRegistrationEngine);
 		mockElections = [{ id: "election-1", title: "General" }];
 		await mockRegistrationEngine.enrollElectionRegistrant("election-1", REGISTRANT_ID, SEED_SIGN);
-		jest.spyOn(mockRegistrationEngine, "getDisclosedSelective").mockRejectedValueOnce(new Error("disclosure fetch failed"));
+		jest
+			.spyOn(mockRegistrationEngine, "getDisclosedSelective")
+			.mockRejectedValueOnce(new Error("disclosure fetch failed"));
 
 		const tr = await renderScreen();
 		await press(tr, "selective-audience-chip-everyone");
 
 		const disclosureBadges = tr.root.findAll(
-			(node) => typeof node.props.testID === "string" && node.props.testID.startsWith("selective-field-disclosure-"),
+			(node) =>
+				typeof node.props.testID === "string" &&
+				node.props.testID.startsWith("selective-field-disclosure-")
 		);
 		expect(disclosureBadges.length).toBe(0);
 		expect(treeText(tr)).toContain("disclosure fetch failed");
@@ -890,7 +958,9 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 	// -------------------------------------------------------------------------
 
 	it("D-12: no salt ever reaches the rendered tree across the undefined/null/result states", async () => {
-		await seedRegistrant(mockRegistrationEngine, { selective: [{ name: "SaltyField", value: "visible-value" }] });
+		await seedRegistrant(mockRegistrationEngine, {
+			selective: [{ name: "SaltyField", value: "visible-value" }],
+		});
 		mockElections = [];
 
 		const tr = await renderScreen();
@@ -964,7 +1034,11 @@ describe("RegistrantDetailScreen — the phase's integration seam", () => {
 			expect(spy).toHaveBeenCalledTimes(0);
 		}
 
-		const combinedCallLog = JSON.stringify([...recordSpy.mock.calls, ...disclosedSpy.mock.calls, ...changeStatusSpy.mock.calls]);
+		const combinedCallLog = JSON.stringify([
+			...recordSpy.mock.calls,
+			...disclosedSpy.mock.calls,
+			...changeStatusSpy.mock.calls,
+		]);
 		expect(combinedCallLog).not.toContain(SSN_SENTINEL);
 		expect(combinedCallLog).not.toContain(DOB_SENTINEL);
 		expect(combinedCallLog).not.toContain(PHONE_SENTINEL);

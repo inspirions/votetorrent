@@ -193,6 +193,17 @@ export default function RegistrantDetailScreen() {
 	}, [canViewPrivate, getEngine, registrantId]);
 
 	useEffect(() => {
+		// 47-REVIEW IN-07: canViewPrivate is NOT constant for this screen's
+		// lifetime — useCurrentOfficerScopes resolves asynchronously and
+		// re-resolves, so the officer's scopes can be revised while the screen
+		// stays open. On a true -> false transition the already-fetched tier
+		// must be dropped from state, not merely hidden at render time,
+		// otherwise the structural claim below is false in exactly the case it
+		// matters most: a just-revoked officer.
+		if (!canViewPrivate) {
+			setPrivateTier(undefined);
+			return;
+		}
 		loadPrivateTier();
 		// This effect is the STRUCTURAL half of the D-13 divergence: an
 		// ungated officer's device never issues this query, so there is no
