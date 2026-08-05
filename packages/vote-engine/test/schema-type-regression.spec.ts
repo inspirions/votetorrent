@@ -300,4 +300,81 @@ describe('schema-sql.ts regeneration freshness lock (47-01 / D-16)', () => {
       + `flag write at line ${flagWriteLine + 1}) — that is the last point where aborting is still free.`,
     ).to.equal(true)
   })
+
+  // -------------------------------------------------------------------------
+  // Proof-flag shape lock (WR-03, 47-REVIEW)
+  // -------------------------------------------------------------------------
+  //
+  // Every run script both OVERWRITES apps/.../proof-flags.generated.ts before
+  // bundling and REWRITES a fallback copy of it from a heredoc when the EXIT
+  // trap's `git checkout` restore fails. Each of those heredocs is a hand-
+  // maintained duplicate of the committed file's shape, and each had drifted:
+  // run-vtest02.sh declared six of the eight flags, so a proof run left a
+  // generated file that no longer type-checks (engine-factory.ts imports
+  // USE_STUB_ATTESTATION_VERIFIER, registrant-dev-seed.ts imports
+  // REGISTRANT_SEED_ENABLED), and a failed restore wrote that LOSSY version
+  // back into the tree.
+  //
+  // Today's runtime blast radius happened to be benign — `__DEV__ && undefined`
+  // is falsy, so a dropped flag stayed off — but that is luck: a future flag
+  // whose safe default is `true` would silently flip closed-to-open. This lock
+  // makes the committed file the single source of truth for the SHAPE (the set
+  // of exported names), while leaving each script free to choose the VALUES.
+  const FLAG_FILE_PATH = join(testDir, '../../../apps/VoteTorrentAuthority/src/engines/proof-flags.generated.ts')
+  const FLAG_WRITING_SCRIPTS = [
+    'run-vtest02.sh',
+    'run-dial-probe.sh',
+    'run-signing-proof.sh',
+    'run-replication-proof.sh',
+  ]
+
+  /** The `export const NAME` identifiers in a source blob, in order of appearance. */
+  function exportedFlagNames (source: string): string[] {
+    return [...source.matchAll(/^export const (\w+)\s*=/gm)].map(m => m[1]!)
+  }
+
+  /** Each `cat > "${FLAG_FILE}" << ...EOF ... EOF` body in a shell script. */
+  function flagHeredocBodies (script: string): string[] {
+    const bodies: string[] = []
+    const lines = script.split('\n')
+    let current: string[] | undefined
+    for (const line of lines) {
+      if (current === undefined) {
+        if (/cat > "\$\{FLAG_FILE\}" << '?EOF'?/.test(line)) current = []
+        continue
+      }
+      if (line.trim() === 'EOF') {
+        bodies.push(current.join('\n'))
+        current = undefined
+        continue
+      }
+      current.push(line)
+    }
+    return bodies
+  }
+
+  it('every run-script heredoc declares EXACTLY the flags the committed proof-flags file declares', () => {
+    const committed = exportedFlagNames(readFileSync(FLAG_FILE_PATH, 'utf8'))
+    expect(committed.length, 'no flags found in proof-flags.generated.ts — the parser is wrong').to.be.greaterThan(0)
+
+    for (const scriptName of FLAG_WRITING_SCRIPTS) {
+      const script = readFileSync(join(testDir, '../../../scripts/', scriptName), 'utf8')
+      const bodies = flagHeredocBodies(script)
+
+      expect(
+        bodies.length,
+        `${scriptName} writes no recognisable "cat > \${FLAG_FILE} << EOF" block — either the script `
+        + 'stopped writing the flag file, or the heredoc form changed and this lock can no longer see it.',
+      ).to.be.greaterThan(0)
+
+      bodies.forEach((body, index) => {
+        expect(
+          exportedFlagNames(body),
+          `${scriptName} heredoc #${index + 1} declares a different flag SET than the committed `
+          + 'proof-flags.generated.ts. Add every new flag to every heredoc (values may differ, names may not) — '
+          + 'a missing export makes the generated file fail typecheck mid-run, and makes the fallback restore lossy.',
+        ).to.deep.equal(committed)
+      })
+    }
+  })
 })

@@ -229,6 +229,10 @@ export const PROOF_ENABLED = false;
 export const DIAL_PROBE_ENABLED = false;
 export const REPLICATION_PROOF_ENABLED = false;
 export const USE_LOCAL_DB_FACTORY = false;
+export const SIGNING_PROOF_ENABLED = false;
+export const STRAND_PERSISTENCE_PROOF_ENABLED = false;
+export const USE_STUB_ATTESTATION_VERIFIER = false;
+export const REGISTRANT_SEED_ENABLED = false;
 EOF
 }
 
@@ -269,6 +273,10 @@ export const PROOF_ENABLED = false;
 export const DIAL_PROBE_ENABLED = false;
 export const REPLICATION_PROOF_ENABLED = true;
 export const USE_LOCAL_DB_FACTORY = false;
+export const SIGNING_PROOF_ENABLED = false;
+export const STRAND_PERSISTENCE_PROOF_ENABLED = false;
+export const USE_STUB_ATTESTATION_VERIFIER = false;
+export const REGISTRANT_SEED_ENABLED = false;
 EOF
 echo "[run-replication-proof] Flag file updated: REPLICATION_PROOF_ENABLED=true"
 
