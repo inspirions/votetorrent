@@ -4,7 +4,6 @@ import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
 import { ThemedText } from "../../../components/ThemedText";
-import { globalStyles } from "../../../theme/styles";
 
 /**
  * PrivateFieldRow — the registrant-detail private-tier field row (D-01/D-13/D-14).
@@ -138,5 +137,3 @@ const localStyles = StyleSheet.create({
 		justifyContent: "center",
 	},
 });
-
-const styles = { ...globalStyles, ...localStyles };

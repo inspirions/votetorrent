@@ -663,11 +663,6 @@ const localStyles = StyleSheet.create({
 		gap: 8,
 		marginBottom: 12,
 	},
-	headerRow: {
-		flexDirection: "row",
-		alignItems: "center",
-		gap: 8,
-	},
 	lifecycleButtonRow: {
 		flexDirection: "row",
 		gap: 8,
