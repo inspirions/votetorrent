@@ -179,9 +179,16 @@ export function AttestationChallengesSection({
 	// would latch the card `submitted` and strand the officer with a
 	// permanently disabled, still-mounted confirmation.
 	async function handleExpire(nonce: string) {
-		const sign = await createDeviceSigner("Device User");
-		const engine = await getEngine<IAssociationEngine>("association");
 		try {
+			// Both of these are INSIDE the try, mirroring
+			// AssociationsSection.handleRemove. createDeviceSigner throws
+			// ('Device user not initialised — cannot sign') and getEngine throws
+			// (NoNetworkEstablishedError); outside the try neither set an
+			// errorMessage, so LifecycleConfirmCard caught the rejection, reset
+			// to idle, and the officer saw the confirm button simply re-enable
+			// with nothing else happening — a silent failure on a signed write.
+			const sign = await createDeviceSigner("Device User");
+			const engine = await getEngine<IAssociationEngine>("association");
 			await engine.removeAttestationChallenge(nonce, sign);
 		} catch (err) {
 			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));

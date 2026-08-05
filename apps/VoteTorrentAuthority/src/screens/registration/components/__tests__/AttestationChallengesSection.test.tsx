@@ -741,4 +741,47 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 			errorSpy.mockRestore();
 		}
 	});
+
+	test("21: a createDeviceSigner failure during expire surfaces InlineError, never silently no-ops", async () => {
+		// The defect: createDeviceSigner and getEngine sat OUTSIDE handleExpire's
+		// try, so their rejections set no errorMessage.
+		// LifecycleConfirmCard.handleConfirm catches the rejection and resets to
+		// idle — so the officer saw the confirm button re-enable and NOTHING else
+		// happen, a silent failure on a signed write. The sibling
+		// AssociationsSection.handleRemove wraps all three calls in one try and
+		// never had this hole.
+		mockAssociationEngine = new MockAssociationEngine();
+		const c1 = await seedChallenge(mockAssociationEngine, { deviceKey: DEVICE_KEY_ALPHA });
+		const { tr } = await renderSection();
+
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const { createDeviceSigner } = require("../../../../engines/device-signer");
+		(createDeviceSigner as jest.Mock).mockRejectedValueOnce(
+			new Error("Device user not initialised — cannot sign"),
+		);
+
+		press(tr, `attestation-challenges-expire-trigger-${c1.nonce}`);
+		press(tr, `attestation-challenges-expire-${c1.nonce}-confirm`);
+		await flush();
+
+		expect(treeText(tr)).toContain("Device user not initialised");
+		// The card must stay mounted so the officer can retry, exactly as in the
+		// removeAttestationChallenge-failure case (test 16).
+		expect(() => tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })).not.toThrow();
+	});
+
+	test("22: a getEngine failure during expire surfaces InlineError too", async () => {
+		mockAssociationEngine = new MockAssociationEngine();
+		const c1 = await seedChallenge(mockAssociationEngine, { deviceKey: DEVICE_KEY_ALPHA });
+		const { tr } = await renderSection();
+
+		// Fail only the expire-time getEngine call, not the initial load's.
+		mockGetEngine.mockRejectedValueOnce(new Error("Network not established"));
+
+		press(tr, `attestation-challenges-expire-trigger-${c1.nonce}`);
+		press(tr, `attestation-challenges-expire-${c1.nonce}-confirm`);
+		await flush();
+
+		expect(treeText(tr)).toContain("Network not established");
+	});
 });
