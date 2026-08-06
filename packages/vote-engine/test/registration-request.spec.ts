@@ -268,3 +268,109 @@ describe("registration-request schema: ExtensionExists 'registrant' pairing (D-0
     expect(Number(extRow?.n)).to.equal(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// (b) D-05 regression — the six pre-existing ExtensionExists pairings
+// ---------------------------------------------------------------------------
+
+/**
+ * The six SignatureType<->extension-table pairings `Task.ExtensionExists` enumerated BEFORE 48-02's
+ * amendment — cross-checked against the landed schema text (votetorrent.qsql:1012-1023) before
+ * writing this list down. `'registrant'` is deliberately NOT included here — Task 1 owns that
+ * pairing.
+ */
+const PRE_EXISTING_PAIRINGS: ReadonlyArray<{ signatureType: string; extensionTable: string }> = [
+  { signatureType: 'network', extensionTable: 'NetworkSignatureTaskExtension' },
+  { signatureType: 'authority', extensionTable: 'AuthoritySignatureTaskExtension' },
+  { signatureType: 'admin', extensionTable: 'AdminSignatureTaskExtension' },
+  { signatureType: 'election', extensionTable: 'ElectionSignatureTaskExtension' },
+  { signatureType: 'election-revision', extensionTable: 'ElectionRevisionSignatureTaskExtension' },
+  { signatureType: 'ballot', extensionTable: 'BallotSignatureTaskExtension' },
+]
+
+describe('registration-request schema: ExtensionExists pre-existing pairing regression (D-05)', () => {
+  // 48-02 amended a CHECK on a LIVE table (Task.ExtensionExists). Proving the new 'registrant'
+  // clause works (the describe block above) proves NOTHING about the six clauses that were
+  // already there. Neither mocha nor jest exercises Quereus re-attach reconcile, so this suite is
+  // the ONLY automated evidence that the amendment was additive rather than destructive. 48-02's
+  // on-device proof covers reconcile, not semantics — these two legs are complementary, and
+  // neither substitutes for the other.
+  for (const { signatureType, extensionTable } of PRE_EXISTING_PAIRINGS) {
+    it(`rejects a Task with SignatureType='${signatureType}' and no ${extensionTable} row`, async () => {
+      const auth = await addTestAuthority(await createTestNetwork())
+      const taskId = crypto.randomUUID()
+      const nonce = crypto.randomUUID()
+      const tid = Date.now()
+
+      // No extension row and no AdminSigning row is needed here — the insert must fail on
+      // ExtensionExists before anything downstream matters; keeping the setup minimal keeps the
+      // failure attributable.
+      let caught: unknown
+      await auth.ctx.db.exec('BEGIN')
+      try {
+        await auth.ctx.db.exec(
+          `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
+           with context IsMutationValid = true, Tid = :tid
+           values (:id, :userId, 'signature', :signatureType, :nonce, 0)`,
+          { id: taskId, userId: auth.user.id, signatureType, nonce, tid }
+        )
+        await auth.ctx.db.exec('COMMIT')
+      } catch (err) {
+        caught = err
+        await auth.ctx.db.exec('ROLLBACK')
+      }
+
+      expect(caught, `COMMIT must throw: SignatureType='${signatureType}' has no matching ${extensionTable} row`).to.be.instanceOf(Error)
+      const taskRow = await auth.ctx.db.prepare('select count(*) as n from Task where Id = :id').get({ id: taskId })
+      expect(Number(taskRow?.n)).to.equal(0)
+    })
+  }
+
+  it("rejects a mismatched pairing: a SignatureType='network' Task carrying an AdminSignatureTaskExtension row", async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const taskId = crypto.randomUUID()
+    const nonce = crypto.randomUUID()
+    const tid = Date.now()
+
+    const adminRow = await auth.ctx.db
+      .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
+      .get({ authorityId: auth.authority.id })
+    if (!adminRow) throw new Error('mismatched-pairing test: CurrentAdmin not found')
+    const adminEffectiveAt = adminRow.EffectiveAt as string
+
+    // Deliberately imprecise about WHICH constraint fires: AdminSignatureTaskExtension.TaskIdValid
+    // (requires T.SignatureType = 'admin') AND Task.ExtensionExists (a 'network' Task requires a
+    // NetworkSignatureTaskExtension row, not an Admin one) BOTH reject this insert. Asserting on
+    // the specific constraint name would couple the test to Quereus error-message formatting — the
+    // contract under test is "the pairing cannot be crossed", not "constraint X is the one that
+    // objected".
+    let caught: unknown
+    await auth.ctx.db.exec('BEGIN')
+    try {
+      await auth.ctx.db.exec(
+        `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
+         with context IsMutationValid = true, Tid = :tid
+         values (:id, :userId, 'signature', 'network', :nonce, 0)`,
+        { id: taskId, userId: auth.user.id, nonce, tid }
+      )
+      await auth.ctx.db.exec(
+        `insert into AdminSignatureTaskExtension (TaskId, AuthorityId, AdminEffectiveAt)
+         with context Tid = :tid
+         values (:taskId, :authorityId, :adminEffectiveAt)`,
+        { taskId, authorityId: auth.authority.id, adminEffectiveAt, tid }
+      )
+      await auth.ctx.db.exec('COMMIT')
+    } catch (err) {
+      caught = err
+      await auth.ctx.db.exec('ROLLBACK')
+    }
+
+    expect(caught, 'COMMIT must throw: a network Task cannot carry an AdminSignatureTaskExtension row').to.be.instanceOf(Error)
+    const taskRow = await auth.ctx.db.prepare('select count(*) as n from Task where Id = :id').get({ id: taskId })
+    expect(Number(taskRow?.n)).to.equal(0)
+    const extRow = await auth.ctx.db
+      .prepare('select count(*) as n from AdminSignatureTaskExtension where TaskId = :id')
+      .get({ id: taskId })
+    expect(Number(extRow?.n)).to.equal(0)
+  })
+})
