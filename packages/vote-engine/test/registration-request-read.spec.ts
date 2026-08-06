@@ -22,11 +22,55 @@ import { randomTestKeyPair } from './fixtures/keys.js'
 import { digestToBytes } from '../src/utils.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
-import type { RegisterInit } from '@votetorrent/vote-core'
+import { verificationCid } from '@votetorrent/vote-core'
+import type { RegisterInit, RegistrationVerificationChecklistItem, Signature } from '@votetorrent/vote-core'
 
 type TestAuthority = Awaited<ReturnType<typeof addTestAuthority>>
 
 const FUTURE_EXPIRATION = new Date(Date.now() + 365 * 86_400_000).toISOString()
+
+/**
+ * T-42-06 (carried from `registration-request.spec.ts`): a plain SELECT
+ * read-back of a Quereus `datetime` column drops the trailing `Z` AND
+ * serializes fractional seconds at MINIMAL precision (trailing zero digits
+ * stripped) — not just for deferred-CHECK snapshots. A literal
+ * byte-identical comparison against the originally-seeded string is
+ * therefore flaky whenever the millisecond component happens to end in a
+ * `0`. Normalize the EXPECTED value through this before comparing against
+ * the engine's own `reZuluDatetime`-normalized read-back.
+ */
+function stripTrailingZeroMs (isoZ: string): string {
+  let s = isoZ.replace(/Z$/, '')
+  if (s.includes('.')) {
+    s = s.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+  }
+  return `${s}Z`
+}
+
+/** Computes a checklist's VerificationCid the SAME way the D-07 module + engine do — the D-06 module's own canonical serializer, digested through the real `cid(Digest(...))` UDF, never a JS hash. */
+async function computeTestVerificationCid (auth: TestAuthority, items: readonly RegistrationVerificationChecklistItem[]): Promise<string> {
+  return await verificationCid(items, async (canonical) => {
+    const row = await auth.ctx.db.prepare('select cid(Digest(:canonical)) as c').get({ canonical })
+    if (!row || row.c == null) throw new Error('computeTestVerificationCid: cid(Digest(...)) returned null')
+    return row.c as string
+  })
+}
+
+/**
+ * A real 'vrg'-ceremony-shaped signer for `RegistrationEngine.register()` —
+ * mirrors `field-policy.spec.ts`'s own `makeRegistrantSigner`. `AdminSigning
+ * .SignerKeyValid` is a hardcoded stub CHECK (T-48-08-09) — any genuine
+ * secp256k1 signature over the row's own digest satisfies the ceremony
+ * regardless of which key produced it.
+ */
+function makeOfficerSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
+  const { privateHex, publicHex } = randomTestKeyPair()
+  const privBytes = hexToBytes(privateHex)
+  return async (digest: Uint8Array): Promise<Signature> => {
+    const sig = secp256k1.sign(digest, privBytes)
+    return { signerUserId: userId, signerKey: publicHex, signature: bytesToHex(sig) }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Module-level helpers
@@ -357,5 +401,188 @@ describe('listRegistrationRequests', () => {
     expect(resubmissionRow.hasPriorRejections, 'a pending request from a key with an earlier rejection').to.equal(true)
     expect(firstTimeRow.hasPriorRejections, 'a first-time key').to.equal(false)
     expect(rejectedRow.hasPriorRejections, 'a rejected request does not count itself as its own prior rejection').to.equal(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getRegistrationRequest — the point read backing all three approval-screen modes
+// ---------------------------------------------------------------------------
+
+describe('getRegistrationRequest', () => {
+  it('a pending registrant-issued request round-trips, and a seeded submittedAt/receivedAt divergence survives the read', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const submittedAt = toIsoZDatetime(Date.now() - 45 * 60_000)
+    const receivedAt = toIsoZDatetime(Date.now())
+    const seeded = await seedRequest(auth, { submittedAt, receivedAt })
+
+    const read = await engine.getRegistrationRequest(seeded.id)
+    expect(read, 'a seeded request must round-trip').to.not.equal(undefined)
+    expect(read!.payload).to.deep.equal(seeded.payload)
+    expect(read!.issuerType).to.equal('registrant')
+    expect(read!.bridgeId).to.equal(undefined)
+    expect(read!.bridgeLabel).to.equal(undefined)
+    expect(read!.decidedAt).to.equal(undefined)
+    expect(read!.registrantId).to.equal(undefined)
+
+    // The point read surfaces the divergence rather than collapsing it —
+    // the only way an officer can ever notice a requester whose claim
+    // disagrees with the authority's own observation.
+    expect(read!.submittedAt).to.equal(stripTrailingZeroMs(submittedAt))
+    expect(read!.receivedAt).to.equal(stripTrailingZeroMs(receivedAt))
+    expect(read!.submittedAt).to.not.equal(read!.receivedAt)
+  })
+
+  it('a bridge-issued request returns issuerType=bridge, its bridgeId, and the registered Label as bridgeLabel', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const bridgeSigner = makeRequesterSigner()
+    const { id: bridgeId } = await seedBridgeKey(auth, { label: 'State Voter Roll Import', key: bridgeSigner.publicHex })
+    const seeded = await seedRequest(auth, { issuerType: 'bridge', signer: bridgeSigner, bridgeId })
+
+    const read = await engine.getRegistrationRequest(seeded.id)
+    expect(read!.issuerType).to.equal('bridge')
+    expect(read!.bridgeId).to.equal(bridgeId)
+    expect(read!.bridgeLabel).to.equal('State Voter Roll Import')
+  })
+
+  it('an approved request with an existing Registrant returns registrantId; one whose Registrant is absent returns registrantId=undefined and does not throw', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+
+    // T-48-08-05: seed a REAL Registrant row through the real register()
+    // ceremony (Registrant.MutationValid requires a genuine 'vrg' AdminSigning
+    // row and a genuine SignatureValid — a raw INSERT cannot fabricate this)
+    // so the existence probe below has something real to find.
+    const registrantId = crypto.randomUUID()
+    const officerSign = makeOfficerSigner(auth.user.id)
+    const producedPayload: RegisterInit = {
+      registrant: { id: registrantId, authorityId: auth.authority.id, expiration: FUTURE_EXPIRATION },
+      private: { expiration: FUTURE_EXPIRATION, details: [] }
+    }
+    await engine.register(producedPayload, officerSign)
+
+    const produced = await seedRequest(auth, {
+      payload: producedPayload,
+      status: 'a',
+      decidedAt: toIsoZDatetime(Date.now()),
+      decidingOfficerUserId: auth.user.id
+    })
+
+    const missingPayload: RegisterInit = {
+      registrant: { id: crypto.randomUUID(), authorityId: auth.authority.id, expiration: FUTURE_EXPIRATION },
+      private: { expiration: FUTURE_EXPIRATION, details: [] }
+    }
+    const missing = await seedRequest(auth, {
+      payload: missingPayload,
+      status: 'a',
+      decidedAt: toIsoZDatetime(Date.now()),
+      decidingOfficerUserId: auth.user.id
+    })
+
+    const producedRead = await engine.getRegistrationRequest(produced.id)
+    expect(producedRead!.registrantId).to.equal(registrantId)
+
+    const missingRead = await engine.getRegistrationRequest(missing.id)
+    expect(missingRead!.registrantId).to.equal(undefined)
+  })
+
+  it('a request decided with checklist [id, roll] returns verificationChecklist deep-equal to the canonical ordering, and verificationCid equal to the stored digest; an unknown id returns undefined', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const checklist: RegistrationVerificationChecklistItem[] = ['id', 'roll']
+    const cid = await computeTestVerificationCid(auth, checklist)
+    const seeded = await seedRequest(auth, {
+      status: 'a',
+      decidedAt: toIsoZDatetime(Date.now()),
+      decidingOfficerUserId: auth.user.id,
+      verificationCid: cid
+    })
+
+    const read = await engine.getRegistrationRequest(seeded.id)
+    expect(read!.verificationCid).to.equal(cid)
+    // VERIFICATION_CHECKLIST_ITEM_ORDER is ['id','roll','eligibility','none'] — canonical order
+    // regardless of the input order above.
+    expect(read!.verificationChecklist).to.deep.equal(['id', 'roll'])
+
+    const unknown = await engine.getRegistrationRequest(crypto.randomUUID())
+    expect(unknown).to.equal(undefined)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getPriorRejections (D-06 reachability)
+// ---------------------------------------------------------------------------
+
+describe('getPriorRejections', () => {
+  it('three rejections for one requesterKey come back newest-rejectedAt-first, each carrying its own rejectionReason and decidingOfficerUserId', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const signer = makeRequesterSigner()
+    const base = Date.now()
+
+    const r1 = await seedRequest(auth, {
+      signer,
+      status: 'r',
+      decidedAt: toIsoZDatetime(base),
+      decidingOfficerUserId: auth.user.id,
+      rejectionReason: 'Illegible identification'
+    })
+    const r2 = await seedRequest(auth, {
+      signer,
+      status: 'r',
+      decidedAt: toIsoZDatetime(base + 60_000),
+      decidingOfficerUserId: auth.user.id,
+      rejectionReason: 'Address mismatch'
+    })
+    const r3 = await seedRequest(auth, {
+      signer,
+      status: 'r',
+      decidedAt: toIsoZDatetime(base + 120_000),
+      decidingOfficerUserId: auth.user.id,
+      rejectionReason: 'Duplicate submission'
+    })
+
+    const rejections = await engine.getPriorRejections(signer.publicHex)
+    expect(rejections.map((r) => r.requestId)).to.deep.equal([r3.id, r2.id, r1.id])
+    expect(rejections.map((r) => r.rejectionReason)).to.deep.equal(['Duplicate submission', 'Address mismatch', 'Illegible identification'])
+    expect(rejections.every((r) => r.decidingOfficerUserId === auth.user.id)).to.equal(true)
+  })
+
+  it('a key with no rejections returns []; an entirely unknown key returns [] without throwing', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const seeded = await seedRequest(auth)
+
+    const noRejections = await engine.getPriorRejections(seeded.requesterKey)
+    expect(noRejections).to.deep.equal([])
+
+    const unknownKey = await engine.getPriorRejections(randomTestKeyPair().publicHex)
+    expect(unknownKey).to.deep.equal([])
+  })
+
+  it('rejections belonging to a DIFFERENT RequesterKey are not returned (the read is key-scoped, not authority-scoped)', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const signerA = makeRequesterSigner()
+    const signerB = makeRequesterSigner()
+
+    await seedRequest(auth, {
+      signer: signerA,
+      status: 'r',
+      decidedAt: toIsoZDatetime(Date.now()),
+      decidingOfficerUserId: auth.user.id,
+      rejectionReason: 'signer A reason'
+    })
+    const bRejection = await seedRequest(auth, {
+      signer: signerB,
+      status: 'r',
+      decidedAt: toIsoZDatetime(Date.now()),
+      decidingOfficerUserId: auth.user.id,
+      rejectionReason: 'signer B reason'
+    })
+
+    const forB = await engine.getPriorRejections(signerB.publicHex)
+    expect(forB.map((r) => r.requestId)).to.deep.equal([bRejection.id])
   })
 })

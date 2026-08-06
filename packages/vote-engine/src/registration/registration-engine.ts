@@ -17,9 +17,11 @@ import {
   buildPriorRejectionCountSql,
   buildRegistrationRequestListCountSql,
   buildRegistrationRequestListPageSql,
+  STATUS_APPROVED,
   STATUS_REJECTED
 } from './registration-request-query.js'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
+import { isChecklistGateMet, VERIFICATION_CHECKLIST_ITEM_ORDER, verificationCid as computeVerificationCidFor } from '@votetorrent/vote-core'
 import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
 import type {
@@ -57,6 +59,7 @@ import type {
   RegistrationRequestRead,
   RegistrationRequestStatus,
   RegistrationTransparencyStats,
+  RegistrationVerificationChecklistItem,
   SelectiveLeaf,
   Signature,
   Timestamp
@@ -95,6 +98,35 @@ const SUBMITTED_AT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
  * D-09's median time-to-decision.
  */
 const SUBMITTED_AT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
+ * D-07/48-08: bounded enumeration of the CLOSED, 4-item checklist vocabulary
+ * (`VERIFICATION_CHECKLIST_ITEM_ORDER`, imported — its four members are NOT
+ * re-listed here; re-declaring the vocabulary in more than one place is
+ * exactly how a digest and its gate drift apart)'s gate-valid subsets — at
+ * most 8 of the 16 possible subsets pass
+ * `isChecklistGateMet`. Computed ONCE at module scope (the vocabulary is
+ * fixed, so this never needs recomputation per call) and consumed by
+ * `RegistrationEngine.recoverVerificationChecklist` to recover a decided
+ * request's checklist from its persisted `VerificationCid` WITHOUT storing
+ * the item set anywhere (no new storage — D-09). Enumeration is sound only
+ * because the vocabulary is closed and small; widening it beyond 4 items
+ * requires revisiting this enumeration (2^n subsets) or persisting the
+ * items directly — do not "fix" a widened vocabulary by growing this loop
+ * unboundedly.
+ */
+const CHECKLIST_GATE_VALID_CANDIDATES: RegistrationVerificationChecklistItem[][] = (() => {
+  const items = VERIFICATION_CHECKLIST_ITEM_ORDER
+  const candidates: RegistrationVerificationChecklistItem[][] = []
+  for (let mask = 1; mask < (1 << items.length); mask++) {
+    const subset: RegistrationVerificationChecklistItem[] = []
+    for (let i = 0; i < items.length; i++) {
+      if ((mask & (1 << i)) !== 0) subset.push(items[i]!)
+    }
+    if (isChecklistGateMet(subset)) candidates.push(subset)
+  }
+  return candidates
+})()
 
 // 999.1 D-01/D-02: RegistrationEngine mutations allocate Tids through the
 // shared durable, peer-safe allocator (`../database/tid-allocator.js`,
@@ -2012,14 +2044,171 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
   }
 
-  async getRegistrationRequest (_requestId: string): Promise<RegistrationRequestRead | undefined> {
-    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
-    throw new Error('getRegistrationRequest is not implemented')
+  /**
+   * The point read backing all three approval-screen modes (pending /
+   * approved / rejected). Returns `undefined` for an unknown id and NEVER
+   * throws on one.
+   */
+  async getRegistrationRequest (requestId: string): Promise<RegistrationRequestRead | undefined> {
+    if (!this.ctx) return undefined
+    const ctx = this.ctx
+    try {
+      // No tier join here (unlike getRegistrantPublic/Private/Selective) —
+      // if a future change ever joins this read to a tier table, it must
+      // adopt the D-06 REGISTRANT_*_POINT_CURRENCY_JOIN currency predicate
+      // shape rather than a naive equi-join (that trap cost Phase 47 a fix).
+      const row = await ctx.db
+        .prepare(
+          `select R.Id, R.AuthorityId, R.RequesterKey, R.IssuerType, R.BridgeId, R.Payload, R.PayloadCid, R.Status,
+                  R.SubmittedAt, R.ReceivedAt, R.DecidedAt, R.DecidingOfficerUserId, R.RejectionReason, R.VerificationCid,
+                  B.Label as BridgeLabel
+           from RegistrationRequest R left join RegistrationBridgeKey B on B.Id = R.BridgeId
+           where R.Id = :requestId`
+        )
+        .get({ requestId })
+      if (!row) return undefined
+
+      const payload = parseJsonOr<RegisterInit>(row.Payload, {} as RegisterInit, 'RegistrationRequest.Payload')
+      const status = asText(row.Status, 'RegistrationRequest.Status') as RegistrationRequestStatus
+
+      // T-48-08-05: registrantId is reported ONLY when status === 'a' AND a
+      // `select Id from Registrant` probe confirms the row actually exists.
+      // Reporting an id the approval never actually produced would put a
+      // "View Registrant" CTA on the approval screen that dead-ends,
+      // presenting to the officer as a broken app rather than as the data
+      // inconsistency it is. A miss leaves registrantId undefined — the CTA
+      // does not render — it is not an error.
+      let registrantId: string | undefined
+      if (status === STATUS_APPROVED) {
+        const candidateId = payload.registrant?.id
+        if (candidateId) {
+          const registrantRow = await ctx.db.prepare('select Id from Registrant where Id = :id').get({ id: candidateId })
+          if (registrantRow) registrantId = candidateId
+        }
+      }
+
+      // D-07: no new storage — the checklist is RECOVERED, not stored. See
+      // `recoverVerificationChecklist`'s own comment for the
+      // bounded-enumeration argument.
+      let verificationCidOut: string | undefined
+      let verificationChecklist: RegistrationVerificationChecklistItem[] | undefined
+      if (row.VerificationCid != null) {
+        verificationCidOut = asText(row.VerificationCid, 'RegistrationRequest.VerificationCid')
+        verificationChecklist = await this.recoverVerificationChecklist(verificationCidOut)
+      }
+
+      return {
+        requestId: asText(row.Id, 'RegistrationRequest.Id'),
+        authorityId: asText(row.AuthorityId, 'RegistrationRequest.AuthorityId'),
+        requesterKey: asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'),
+        issuerType: asText(row.IssuerType, 'RegistrationRequest.IssuerType') as RegistrationRequestIssuerType,
+        bridgeId: row.BridgeId == null ? undefined : asText(row.BridgeId, 'RegistrationRequest.BridgeId'),
+        bridgeLabel: row.BridgeLabel == null ? undefined : asText(row.BridgeLabel, 'RegistrationBridgeKey.Label'),
+        payload,
+        payloadCid: asText(row.PayloadCid, 'RegistrationRequest.PayloadCid'),
+        status,
+        // Surface BOTH timestamps — this is not redundancy. submittedAt is
+        // what the requester CLAIMED at signing time; receivedAt is what
+        // the authority OBSERVED at intake. Within 48-07's accepted skew
+        // window the two can legitimately diverge, and the ONLY way a
+        // reviewing officer can ever see that divergence is if both reach
+        // the screen. Never render one as the other, never substitute one
+        // for the other when the other is inconvenient, never "simplify"
+        // this read by dropping one.
+        submittedAt: reZuluDatetime(row.SubmittedAt as string),
+        receivedAt: reZuluDatetime(row.ReceivedAt as string),
+        decidedAt: row.DecidedAt == null ? undefined : reZuluDatetime(row.DecidedAt as string),
+        decidingOfficerUserId: row.DecidingOfficerUserId == null ? undefined : asText(row.DecidingOfficerUserId, 'RegistrationRequest.DecidingOfficerUserId'),
+        rejectionReason: row.RejectionReason == null ? undefined : asText(row.RejectionReason, 'RegistrationRequest.RejectionReason'),
+        verificationCid: verificationCidOut,
+        verificationChecklist,
+        registrantId
+      }
+    } catch (err) {
+      this.rethrow(err, 'getRegistrationRequest')
+    }
   }
 
-  async getPriorRejections (_requesterKey: string): Promise<PriorRejection[]> {
-    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
-    throw new Error('getPriorRejections is not implemented')
+  /**
+   * D-06: what makes a persisted rejection REACHABLE by the next reviewing
+   * officer — not merely recorded. Without this, the rejection record
+   * exists and nobody sees it, and a rejected applicant can re-submit and
+   * be approved by an officer with no way to know — the repudiation risk
+   * `48-RESEARCH.md` § Security Domain names. Keyed by `requesterKey`
+   * (never by request id) precisely so a NEW request carries the OLD
+   * history. `DecidedAt` is an AUTHORITY-written decision timestamp, not a
+   * submitter-supplied value, so ordering on it — newest first — carries
+   * NONE of the backdating hazard that moved the triage queue off
+   * `SubmittedAt`. Returns `[]` for a key with no rejections and NEVER
+   * throws on an unknown key.
+   */
+  async getPriorRejections (requesterKey: string): Promise<PriorRejection[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    try {
+      const out: PriorRejection[] = []
+      for await (const row of ctx.db.eval(
+        `select R.Id, R.DecidedAt, R.RejectionReason, R.DecidingOfficerUserId
+         from RegistrationRequest R
+         where R.RequesterKey = :requesterKey and R.Status = :status
+         order by R.DecidedAt desc, R.Id desc`,
+        { requesterKey, status: STATUS_REJECTED }
+      )) {
+        out.push({
+          requestId: asText(row.Id, 'RegistrationRequest.Id'),
+          rejectedAt: reZuluDatetime(row.DecidedAt as string),
+          // Deliberately NOT `asText` on the two columns below — it throws
+          // on null. `DecisionValid` SHOULD make both present on a rejected
+          // row, but a read surface must not crash on a row a future
+          // migration left partial; the UI renders an empty reason through
+          // its own i18n string.
+          rejectionReason: row.RejectionReason == null ? '' : String(row.RejectionReason),
+          decidingOfficerUserId: row.DecidingOfficerUserId == null ? '' : String(row.DecidingOfficerUserId)
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getPriorRejections')
+    }
+  }
+
+  /**
+   * D-07: recovers the decision-time checklist from the persisted
+   * `VerificationCid` by BOUNDED ENUMERATION over the module-level
+   * `CHECKLIST_GATE_VALID_CANDIDATES` — the schema persists only the
+   * digest, never the item set (no new storage). Sound only because the
+   * vocabulary is closed and small (4 items, at most 8 gate-valid
+   * subsets); widening it requires revisiting this method or persisting
+   * the items directly. Uses the D-07 module's OWN canonical
+   * serializer/digest helper (`verificationCid`, imported as
+   * `computeVerificationCidFor`) — re-deriving the serialization or
+   * re-declaring the vocabulary here is exactly how the digest and the
+   * gate would drift apart. No match (a stored `VerificationCid` produced
+   * by a widened vocabulary, or one that otherwise cannot be reproduced)
+   * returns `undefined` — the raw `verificationCid` is still returned by
+   * the caller regardless.
+   */
+  private async recoverVerificationChecklist (storedVerificationCid: string): Promise<RegistrationVerificationChecklistItem[] | undefined> {
+    for (const candidate of CHECKLIST_GATE_VALID_CANDIDATES) {
+      const candidateCid = await computeVerificationCidFor(candidate, async (canonical) => this.computeChecklistCid(canonical))
+      if (candidateCid === storedVerificationCid) {
+        // Already in VERIFICATION_CHECKLIST_ITEM_ORDER's canonical order —
+        // the candidate was built from that same order above, so the
+        // read-only checklist renders stably.
+        return candidate
+      }
+    }
+    return undefined
+  }
+
+  /** Digest primitive for `recoverVerificationChecklist` — the SAME `cid(Digest(...))` call shape `computeRegistrantPrivateCid`/`computeRegistrantSelectiveCid` use above, never a JS-side hash. */
+  private async computeChecklistCid (canonical: string): Promise<string> {
+    const ctx = this.ctx!
+    const row = await ctx.db.prepare('select cid(Digest(:canonical)) as c').get({ canonical })
+    if (!row || row.c == null) {
+      throw new Error('computeChecklistCid: cid(Digest(...)) returned null — crypto plugin not registered?')
+    }
+    return row.c as string
   }
 
   async getRegistrationTransparencyStats (_authorityId: string): Promise<RegistrationTransparencyStats> {
