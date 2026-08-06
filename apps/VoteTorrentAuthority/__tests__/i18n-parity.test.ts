@@ -38,6 +38,9 @@ const KNOWN_ENGLISH_OK = new Set([
 	// Phase 47 (D-12) — the masked-value glyph itself, not English text; identical
 	// by design in both locales (47-UI-SPEC.md's registrantDetailPrivateMaskedValue).
 	'registrantDetailPrivateMaskedValue',
+	// Phase 48 (D-01) — protocol names, not prose. "Webhook" and "REST" are the
+	// same tokens in Spanish, so this heading is identical in both locales by design.
+	'bulkImportSyncRestHeading',
 ]);
 
 describe('i18n parity (D-12)', () => {

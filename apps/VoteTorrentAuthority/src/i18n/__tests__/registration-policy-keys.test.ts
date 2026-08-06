@@ -18,7 +18,11 @@ const enTranslation = resources.en.translation as Record<string, string>;
 const esTranslation = resources.es.translation as Record<string, string>;
 
 const REGISTRATION_POLICY_RE = /^registrationPolicy[A-Z]/;
-const BARE_REGISTRATION_RE = /^registration(?!Policy)/;
+const REGISTRATION_REQUEST_RE = /^registrationRequest[A-Z]/;
+// Phase 48 widened this to also carve out the `registrationRequest*` group. The
+// guard's purpose is unchanged — catch a key that lands in neither declared
+// namespace — and each carve-out is paid for by its own key-group test below.
+const BARE_REGISTRATION_RE = /^registration(?!Policy)(?!Request)/;
 
 describe('registrationPolicy* i18n key group (D-11)', () => {
 	test('EN has exactly 55 registrationPolicy* keys, ES key set is deeply equal', () => {
@@ -50,7 +54,24 @@ describe('registrationPolicy* i18n key group (D-11)', () => {
 		expect(esTranslation.registrationDeadline).toBe('Fecha Límite de Registro');
 	});
 
-	test('no new bare-registration* key exists beyond the four timeline names', () => {
+	test('EN has exactly 42 registrationRequest* keys, ES key set is deeply equal', () => {
+		const enKeys = Object.keys(enTranslation).filter(k => REGISTRATION_REQUEST_RE.test(k));
+		const esKeys = Object.keys(esTranslation).filter(k => REGISTRATION_REQUEST_RE.test(k));
+
+		expect(enKeys).toHaveLength(42);
+		expect(new Set(esKeys)).toEqual(new Set(enKeys));
+		expect(esKeys).toHaveLength(42);
+	});
+
+	test('no registrationRequest* value is empty or whitespace-only, in either locale', () => {
+		const enKeys = Object.keys(enTranslation).filter(k => REGISTRATION_REQUEST_RE.test(k));
+		for (const key of enKeys) {
+			expect(enTranslation[key]?.trim().length).toBeGreaterThan(0);
+			expect(esTranslation[key]?.trim().length).toBeGreaterThan(0);
+		}
+	});
+
+	test('no bare-registration* key exists outside the Policy and Request groups', () => {
 		const allowed = new Set([
 			'registrationEnds',
 			'registrationOpens',
