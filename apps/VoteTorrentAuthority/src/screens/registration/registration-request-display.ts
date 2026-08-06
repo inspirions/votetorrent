@@ -1,5 +1,5 @@
 import type { RegistrationRequestStatus } from "@votetorrent/vote-core";
-import { truncateId } from "./registrant-display.js";
+import { truncateId } from "./registrant-display";
 
 /**
  * registration-request-display.ts — pure, React-free, theme-free,
