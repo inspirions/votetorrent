@@ -2,6 +2,7 @@ import type { AdminInit, AuthorityInit, Authority } from '../authority'
 import type { Proposal, Signature } from '../common'
 import type { ElectionDetails, ElectionInit, Ballot } from '../election'
 import type { NetworkReference, NetworkInit } from '../network'
+import type { RegisterInit, RegistrationRequestIssuerType } from '../registration/index.js'
 
 export interface Task {
   type: string
@@ -25,6 +26,7 @@ export type SignatureTask = Task & {
   | 'election'
   | 'election-revision'
   | 'network'
+  | 'registrant'
 }
 
 export type AdminSignatureTask = SignatureTask & {
@@ -56,6 +58,31 @@ export type ElectionRevisionSignatureTask = SignatureTask & {
 export type BallotSignatureTask = SignatureTask & {
   signatureType: 'ballot'
   ballot: Proposal<Ballot>
+}
+
+/**
+ * D-05: the officer-facing registration-approval signature task. Unlike its
+ * six siblings above, its source is the non-`ProposedX` `RegistrationRequest`
+ * table, not a `Proposal<T>` row, so `payload` is the request's stored
+ * `RegisterInit` directly — deliberately NOT wrapped in `Proposal<…>`.
+ */
+export type RegistrantSignatureTask = SignatureTask & {
+  signatureType: 'registrant'
+  /** The `RegistrationRequest.Id` this task's extension row points at. */
+  requestId: string
+  /** The request's stored `RegisterInit`, parsed. */
+  payload: RegisterInit
+  /** ISO-Z string — the submitter-supplied `RegistrationRequestInit.submittedAt` (48-02 L-3), never engine-generated. */
+  submittedAt: string
+  issuerType: RegistrationRequestIssuerType
+  /**
+   * OPTIONAL — present only for `issuerType === 'bridge'` rows, resolved from
+   * the bridge-key registry (D-03). Its absence on a bridge row means the
+   * registry lookup found no label; a consumer must NOT infer
+   * "registrant-submitted" from a missing label — `issuerType` is the only
+   * authoritative issuer signal (D-03).
+   */
+  bridgeLabel?: string
 }
 
 export interface SignatureResult {

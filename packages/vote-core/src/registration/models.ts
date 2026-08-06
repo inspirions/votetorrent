@@ -389,3 +389,223 @@ export interface RegisterInit {
     details: RegisterSelectivePayload
   }
 }
+
+/** ********* Registration Request protocol + approval inbox (Phase 48) ***********/
+
+/** RegistrationRequestStatus(Code) — Pending / Approved / Rejected, mirrors `view RegistrationRequestStatus` (48-02). */
+export type RegistrationRequestStatus = 'p' | 'a' | 'r'
+
+/** RegistrationRequestIssuerType(Code) — who submitted the request, mirrors `view RegistrationRequestIssuer` (D-03). */
+export type RegistrationRequestIssuerType = 'registrant' | 'bridge'
+
+/**
+ * D-07's four-item checklist vocabulary, matching the UI-SPEC's
+ * `verificationChecklistItem*` i18n keys. This is the ONE declaration of the
+ * union — the pure checklist module (serialization, `verificationCid`,
+ * `isChecklistGateMet`) MUST import this alias rather than re-declaring it;
+ * two declarations here would let the digest and the gate drift apart.
+ * `'none'` is mutually exclusive with the other three items, but that rule
+ * is enforced by the pure predicate (`isChecklistGateMet`), not by this type.
+ */
+export type RegistrationVerificationChecklistItem = 'id' | 'roll' | 'eligibility' | 'none'
+
+/**
+ * What a submitter (voter device or bridge) supplies to submit a
+ * registration request (D-02). Deliberately carries NO `userId`, `userKey`,
+ * or `IsUserValid` field — a prospective registrant has no `User` row, and
+ * the row's own requester-key self-signature is the entire authorization
+ * gate.
+ *
+ * `submittedAt` is **required, canonical ISO-Z (trailing `Z`), and chosen by
+ * the SUBMITTER at signing time.** It is the **seventh argument of DG-1**,
+ * the digest the requester's own signature covers (48-02 `<digest_register>`
+ * / **L-3**), and the offline courier binding (48-09) has the submitter sign
+ * at **staging** time while the authority INSERTs at some later,
+ * unobservable intake moment with an **already-resolved `Signature`, never a
+ * callback**. If the engine generated this value, the signer could not have
+ * known it and no offline signature would ever verify — **the engine
+ * neither generates nor rewrites it.**
+ *
+ * Consequence: this is an **attacker-controlled** value inside a signed
+ * tuple. It is bounded, not trusted — absolutely by the schema's
+ * `SubmittedAtSaneValid` CHECK (48-02) and relatively by
+ * `submitRegistrationRequest`'s skew guard (48-07: no more than **5 minutes
+ * after**, or **30 days before**, the authority's `receivedAt`). The
+ * authority's own observation is `receivedAt`, which is inside no digest and
+ * is what the triage queue sorts by.
+ */
+export interface RegistrationRequestInit {
+  id: string
+  authorityId: string
+  payload: RegisterInit
+  submittedAt: string
+  issuerType?: RegistrationRequestIssuerType
+  bridgeId?: string
+}
+
+/**
+ * The single-request read backing the approval screen's three modes
+ * (pending / approved / rejected).
+ *
+ * `receivedAt` is **required** (the column is not-null) — the authority's
+ * own observation of intake time, written by the engine with
+ * `toIsoZDatetime`, and inside **no** digest; it is not something the
+ * requester attests to. It is surfaced beside `submittedAt` deliberately:
+ * within the accepted skew window a submitter may state a `submittedAt`
+ * that diverges from when the authority actually received the request, and
+ * the only way a reviewing officer can see that divergence is if both
+ * values reach the screen. **Never render one as the other, and never
+ * substitute one for the other when the other is inconvenient.**
+ *
+ * `registrantId` is populated **only** for `status === 'a'` — it is the
+ * `Registrant.Id` the approval's `register()` call produced, and it exists
+ * because the UI-SPEC flags resolving an approved request to its registrant
+ * as an **engine** dependency, not a UI decision (it backs the approved-mode
+ * "View Registrant" CTA into the existing `RegistrantDetail` route).
+ */
+export interface RegistrationRequestRead {
+  requestId: string
+  authorityId: string
+  requesterKey: string
+  issuerType: RegistrationRequestIssuerType
+  bridgeId?: string
+  bridgeLabel?: string
+  payload: RegisterInit
+  payloadCid: string
+  status: RegistrationRequestStatus
+  submittedAt: string
+  receivedAt: string
+  decidedAt?: string
+  decidingOfficerUserId?: string
+  rejectionReason?: string
+  verificationCid?: string
+  verificationChecklist?: RegistrationVerificationChecklistItem[]
+  registrantId?: string
+}
+
+/**
+ * D-06/D-07: the officer's decision payload for `rejectRegistrationRequest`.
+ * `checklist` is structured, not free text, precisely so D-09's counts can
+ * aggregate over it. `rejectionReason` is the ONLY free-text field in this
+ * phase's decision surface and is meaningful only on the reject path. This
+ * type carries **no** `isAccepted` flag — see the `rejectRegistrationRequest`
+ * -only engine surface (`IRegistrationEngine`); approval is reachable only
+ * through the officer signature-task ceremony.
+ */
+export interface RegistrationRequestDecision {
+  checklist: RegistrationVerificationChecklistItem[]
+  rejectionReason?: string
+}
+
+/**
+ * Filter dimensions for `listRegistrationRequests` (mirrors
+ * `RegistrantListFilter`'s discipline). Every field is OPTIONAL and ANDed
+ * with the others. `authorityId` is optional even though every UI caller
+ * supplies it — the `RegistrationInbox` route carries a required
+ * `authorityId`; omission exists only so a non-UI caller can read the whole
+ * local set of requests.
+ */
+export interface RegistrationRequestListFilter {
+  authorityId?: string
+  status?: RegistrationRequestStatus
+  issuerType?: RegistrationRequestIssuerType
+  name?: string
+}
+
+/**
+ * Keyset paging input for `listRegistrationRequests`, mirroring
+ * `RegistrantListPage` verbatim: `cursor` is the previous page's last row
+ * id, not an encoded token.
+ */
+export interface RegistrationRequestListPage {
+  cursor?: string
+  pageSize?: number
+}
+
+/**
+ * Exactly what the inbox row renders and nothing more. Deliberately omits
+ * `requesterSignature` and the full `payload` — the list read must not
+ * widen the disclosure surface of the point read.
+ *
+ * `receivedAt` is **required** here too — it is the **ordering key of the
+ * triage queue** (see `listRegistrationRequests` on `IRegistrationEngine`),
+ * and a row should be able to render the value it is sorted by rather than
+ * a value it is not. `hasPriorRejections` is required-not-optional so a
+ * caller cannot render `undefined` as "no prior rejections" when the query
+ * simply did not compute it.
+ */
+export interface RegistrationRequestListRow {
+  requestId: string
+  authorityId: string
+  status: RegistrationRequestStatus
+  issuerType: RegistrationRequestIssuerType
+  bridgeId?: string
+  bridgeLabel?: string
+  submittedAt: string
+  receivedAt: string
+  lastName?: string
+  firstName?: string
+  hasPriorRejections: boolean
+}
+
+/**
+ * Result of `listRegistrationRequests`. Carries Phase 47's exact `total`
+ * semantics: populated only on a cursor-absent first-page call, `undefined`
+ * both on paged calls and when the count query itself failed, and honest
+ * disagreement with `rows.length` under concurrent mutation is not an error
+ * state.
+ */
+export interface RegistrationRequestListResult {
+  rows: RegistrationRequestListRow[]
+  nextCursor?: string
+  total?: number
+}
+
+/**
+ * D-06: what makes a persisted rejection reachable by the next reviewing
+ * officer.
+ */
+export interface PriorRejection {
+  requestId: string
+  rejectedAt: string
+  rejectionReason: string
+  decidingOfficerUserId: string
+}
+
+/**
+ * D-09: the entire transparency surface this phase ships. `medianTimeToDecisionMs`
+ * is optional and is `undefined` when no request has been decided yet; the UI
+ * renders that case as an explicit "not enough data" string and **never** a
+ * raw millisecond count, `NaN`, or `Invalid Date`.
+ *
+ * Deliberate negative space: this type carries **no rating, score, star,
+ * thumbs, or comparative-rank field**. `doc/registration.md`'s rating system
+ * is explicitly out of scope this phase (D-09) — an implementer must not add
+ * one.
+ */
+export interface RegistrationTransparencyStats {
+  pending: number
+  approved: number
+  rejected: number
+  medianTimeToDecisionMs?: number
+}
+
+/**
+ * D-03 registry read shape — a bridge's registered key + display label.
+ * `label` is authority-supplied registry text shown to the reviewing
+ * officer, never attacker-supplied content from the request payload.
+ */
+export interface RegistrationBridgeKey {
+  id: string
+  authorityId: string
+  label: string
+  key: string
+}
+
+/** D-03 registry write shape — see `RegistrationBridgeKey` for the `label` provenance rule. */
+export interface RegistrationBridgeKeyInit {
+  id: string
+  authorityId: string
+  label: string
+  key: string
+}
