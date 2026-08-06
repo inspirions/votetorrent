@@ -1485,6 +1485,96 @@ const resources = {
 				'Solo visualización. Necesitas el permiso {{scope}} para cambiar registrantes, asociaciones o dispositivos.',
 			registrantScopeReadOnlyNoOfficerBanner:
 				'Solo visualización. No eres un funcionario registrado de esta autoridad, así que los cambios están desactivados.',
+			// Phase 48 (D-01/D-03/D-09) — registrationRequest* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			registrationRequestScreenTitle: 'Solicitudes de Registro',
+			registrationRequestSearchPlaceholder: 'Buscar por nombre',
+			registrationRequestFilterStatusAll: 'Todas',
+			registrationRequestFilterStatusPending: 'Pendientes',
+			registrationRequestFilterStatusApproved: 'Aprobadas',
+			registrationRequestFilterStatusRejected: 'Rechazadas',
+			registrationRequestFilterIssuerAll: 'Todas las Fuentes',
+			registrationRequestFilterIssuerRegistrant: 'Enviadas por el Registrante',
+			registrationRequestFilterIssuerBridge: 'Importadas por Puente',
+			registrationRequestCountLabel: 'Mostrando {{shown}} de {{total}}',
+			registrationRequestCountUnknown: 'Mostrando {{shown}}',
+			registrationRequestSortedByReceivedLabel:
+				'Ordenadas por fecha de recepción (más antiguas primero)',
+			registrationRequestLoadMoreButton: 'Cargar Más',
+			registrationRequestLoadingMore: 'Cargando más…',
+			registrationRequestEndOfList: 'Fin de la lista',
+			registrationRequestEmptyHeading: 'Ninguna solicitud coincide con estos filtros',
+			registrationRequestEmptyBody: 'Prueba con un estado o fuente diferente.',
+			registrationRequestEmptyHeadingNoFilters: 'Aún no hay solicitudes de registro',
+			registrationRequestEmptyBodyNoFilters:
+				'Las solicitudes enviadas por cualquier método de sincronización aparecerán aquí para revisión.',
+			registrationRequestBulkImportSyncButton: 'Importación Masiva / Sincronizar',
+			registrationRequestPreviouslyRejectedFlag: 'Rechazada anteriormente',
+			registrationRequestReceivedAtLabel: 'Recibida',
+			registrationRequestClaimedSubmittedAtLabel: 'Envío declarado',
+			registrationRequestScopeReadOnlyBanner:
+				'Solo visualización. Necesitas el permiso {{scope}} para revisar solicitudes de registro.',
+			registrationRequestScopeReadOnlyNoOfficerBanner:
+				'Solo visualización. No eres un funcionario registrado de esta autoridad, así que los cambios están desactivados.',
+			registrationRequestStatusPending: 'Pendiente',
+			registrationRequestStatusApproved: 'Aprobada',
+			registrationRequestStatusRejected: 'Rechazada',
+			// Phase 48 (D-06/D-07) — registrationRequestApproval* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			registrationRequestApprovalScreenTitle: 'Detalle de la Solicitud',
+			registrationRequestApprovalSummaryTitle: 'Solicitud',
+			registrationRequestApprovalReceivedAtLabel: 'Recibida',
+			registrationRequestApprovalSubmittedAtLabel: 'Envío declarado',
+			registrationRequestApprovalRequesterKeyLabel: 'Clave del Solicitante',
+			registrationRequestApprovalApproveButton: 'Aprobar Registro',
+			registrationRequestApprovalRejectButton: 'Rechazar Solicitud',
+			registrationRequestApprovalApprovedByLabel: 'Aprobada por {{officer}} el {{date}}',
+			registrationRequestApprovalViewRegistrantButton: 'Ver Registrante',
+			// Phase 48 (D-06) — registrationRequestReject* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			registrationRequestRejectTitle: '¿Rechazar esta solicitud?',
+			registrationRequestRejectBody:
+				'Esto quedará registrado de forma permanente con tu nombre. Si {{name}} vuelve a enviar una solicitud, este rechazo y tu motivo se mostrarán a quien lo revise después.',
+			registrationRequestRejectReasonPlaceholder: 'Motivo del rechazo',
+			registrationRequestRejectConfirmButton: 'Confirmar Rechazo',
+			registrationRequestRejectKeepReviewingButton: 'Seguir Revisando',
+			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			bridgeSourceBadgeLabel: 'Importación por Puente',
+			bridgeSourceCalloutHeading: 'Enviada por un puente de importación',
+			bridgeSourceCalloutBody:
+				'Esta solicitud fue firmada por {{bridgeLabel}}, un puente de importación, en nombre del remitente. Es una afirmación del puente, no una firma del propio registrante. Verifica en consecuencia.',
+			// Phase 48 (D-07) — verificationChecklist* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			verificationChecklistSectionTitle: 'Verificación Fuera de Banda',
+			verificationChecklistItemId: 'Verificó identificación oficial con fotografía',
+			verificationChecklistItemRoll: 'Comprobó contra el padrón electoral existente',
+			verificationChecklistItemEligibility:
+				'Confirmó elegibilidad (edad, residencia, ciudadanía según la política)',
+			verificationChecklistItemNone: 'No se realizó verificación adicional fuera de banda',
+			verificationChecklistBindingNotice:
+				'Esta lista se convierte en parte de tu aprobación firmada y no puede modificarse después.',
+			verificationChecklistDecidedAtLabel: 'Registrado al decidir',
+			// Phase 48 (D-06) — priorRejections* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			priorRejectionsCalloutHeading: 'Este solicitante fue rechazado anteriormente',
+			priorRejectionsCalloutRow: 'Rechazado el {{date}} por {{officer}} — {{reason}}',
+			// Phase 48 (D-09) — transparencyStats* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			transparencyStatsSectionTitle: 'Transparencia',
+			transparencyStatsPendingLabel: 'Pendientes',
+			transparencyStatsApprovedLabel: 'Aprobadas',
+			transparencyStatsRejectedLabel: 'Rechazadas',
+			transparencyStatsMedianTimeLabel: 'Tiempo medio de decisión',
+			transparencyStatsMedianTimeUnknown: 'Aún no hay datos suficientes',
+			// Phase 48 (D-01/D-11) — bulkImportSync* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			bulkImportSyncScreenTitle: 'Importación Masiva / Sincronizar',
+			bulkImportSyncFilesystemHeading: 'Sistema de Archivos',
+			bulkImportSyncRestHeading: 'Webhook / REST',
+			bulkImportSyncP2pHeading: 'Entre Pares (Experimental)',
+			bulkImportSyncP2pBody:
+				'Este método de sincronización aún está en desarrollo y no se ha verificado que funcione de forma confiable. Usa la sincronización por Sistema de Archivos o REST para resultados confiables.',
+			bulkImportSyncNeverSyncedBody: 'Aún no sincronizado',
+			bulkImportSyncLastSyncedLabel: 'Última sincronización {{date}}',
+			bulkImportSyncImportedCountLabel: '{{count}} importadas',
+			bulkImportSyncPendingCountLabel: '{{count}} pendientes de revisión',
+			bulkImportSyncErrorCountLabel: '{{count}} errores',
+			bulkImportSyncNowButton: 'Sincronizar Ahora',
+			bulkImportSyncP2pTryButton: 'Probar Sincronización P2P (Experimental)',
+			bulkImportSyncErrorsSectionTitle: 'Errores de Sincronización',
 		},
 	},
 };
