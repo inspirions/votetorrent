@@ -295,3 +295,234 @@ describe('rest-registration-transport: real round-trip', () => {
     expect(server.received[1]!.url).to.include('since=c002')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Task 3: wire failure modes, disclosure discipline, shipped-code gates
+// ---------------------------------------------------------------------------
+
+describe('rest-registration-transport: failure and disclosure semantics', () => {
+  let server: TestServer
+
+  afterEach(async () => {
+    await server.close()
+  })
+
+  it('rejects a decision notice whose status is outside the vote-core union rather than dropping it', async () => {
+    server = await startTestAuthorityServer()
+    server.decisions.push(
+      { requestId: 'rest-transport-test-good', status: 'p', cursor: 'c001' },
+      { requestId: 'rest-transport-test-bad', status: 'x', cursor: 'c002' }
+    )
+    const transport = new RestRegistrationTransport({ baseUrl: server.baseUrl })
+
+    // A silently dropped decision is a request nobody ever acts on, with no
+    // signal anywhere — re-delivery is permitted, loss is not (T-48-10-06).
+    let result: unknown
+    let caught: unknown
+    try {
+      result = await transport.pollDecisions()
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'pollDecisions must reject rather than filter out the malformed notice').to.be.instanceOf(Error)
+    expect(result, 'pollDecisions must not resolve with a filtered array when a notice is malformed').to.be.undefined
+  })
+
+  it('rejects a submit response whose requestId does not match the id that was signed', async () => {
+    server = await startTestAuthorityServer()
+    const transport = new RestRegistrationTransport({ baseUrl: server.baseUrl })
+    const { privateHex, publicHex } = randomTestKeyPair()
+    const privBytes = hexToBytes(privateHex)
+    const init = buildInit()
+    server.setNextSubmitRequestId('rest-transport-test-a-different-request-id-entirely')
+
+    // An endpoint that renames the request is repointing the row the
+    // requester signed; the mismatch must be loud rather than absorbed.
+    let caught: unknown
+    try {
+      await transport.submitRequest(init, publicHex, makeRealSigner(privBytes, publicHex))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).to.be.instanceOf(Error)
+  })
+
+  it('maps a non-2xx response to an error carrying the status and path but not the response body', async () => {
+    server = await startTestAuthorityServer()
+    const transport = new RestRegistrationTransport({ baseUrl: server.baseUrl })
+    const { privateHex, publicHex } = randomTestKeyPair()
+    const privBytes = hexToBytes(privateHex)
+    const init = buildInit()
+    const PII_MARKER = 'Wanda Q. Testperson national-id 999-00-1234'
+    server.setNextSubmitResponse(500, { error: 'internal error', detail: PII_MARKER })
+
+    let caught: unknown
+    try {
+      await transport.submitRequest(init, publicHex, makeRealSigner(privBytes, publicHex))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).to.be.instanceOf(Error)
+    const message = (caught as Error).message
+    expect(message).to.include('500')
+    expect(message).to.include('/registration-requests')
+    // An endpoint can echo submitted PII back in an error body, so this
+    // omission is deliberate and must not be "improved" later by appending
+    // `await response.text()`.
+    expect(message).to.not.include(PII_MARKER)
+  })
+
+  it('never puts key material on the wire', async () => {
+    server = await startTestAuthorityServer()
+    const transport = new RestRegistrationTransport({ baseUrl: server.baseUrl })
+    const { privateHex, publicHex } = randomTestKeyPair()
+    const privBytes = hexToBytes(privateHex)
+    const init = buildInit()
+
+    await transport.submitRequest(init, publicHex, makeRealSigner(privBytes, publicHex))
+
+    // This is the seam's stated security property made testable — a
+    // binding crossing a network holds no key material (D-01/D-19).
+    const wireJson = JSON.stringify(server.received)
+    expect(wireJson).to.not.match(/privateKey|privKey|secretKey|mnemonic/i)
+    expect(wireJson).to.not.include(privateHex)
+  })
+
+  it('rejects an endpoint whose R-1 echo disagrees with the submitter-signed submittedAt, and never adopts the endpoint value', async () => {
+    server = await startTestAuthorityServer()
+    const transport = new RestRegistrationTransport({ baseUrl: server.baseUrl })
+    const { privateHex, publicHex } = randomTestKeyPair()
+    const privBytes = hexToBytes(privateHex)
+    const init = buildInit()
+    // Still a valid Z-suffixed ISO string, one second different, so the
+    // failure cannot be mistaken for a format check.
+    const divergentSubmittedAt = new Date(new Date(SUBMITTED_AT).getTime() + 1000).toISOString()
+    server.setNextDigest({ submittedAt: divergentSubmittedAt })
+
+    let caught: unknown
+    try {
+      await transport.submitRequest(init, publicHex, makeRealSigner(privBytes, publicHex))
+    } catch (err) {
+      caught = err
+    }
+    // submittedAt is the submitter's, chosen at signing time and covered by
+    // its own signature as DG-1's seventh argument (48-02 L-3); an endpoint
+    // returning a different one has digested a tuple the requester did not
+    // sign, and a binding that adopted it would produce a signature that
+    // fails SignatureValid inside the authority's INSERT — a plan away from
+    // the cause, presenting as a schema error rather than as the endpoint
+    // defect it is. The comparison inside the binding is deliberately a raw
+    // string !==, not a Date-normalized one: two strings that parse to the
+    // same instant are still different digest inputs.
+    expect(caught, 'a divergent R-1 echo must be rejected before signing/submitting').to.be.instanceOf(Error)
+
+    // The half that actually matters: no R-2 request was ever made — the
+    // binding did not sign-and-submit under the endpoint's substituted
+    // value.
+    expect(server.received).to.have.lengthOf(1)
+    expect(server.received[0]!.url).to.equal('/registration-requests/digest')
+    expect(server.received.some((r) => r.url === '/registration-requests')).to.equal(false)
+  })
+})
+
+describe('rest-registration-transport: shipped-code constraints', () => {
+  // These read source text with node:fs, because the constraints are
+  // architectural and cannot be observed at runtime. This gate deliberately
+  // reads the SHIPPED source only (not this spec file, which legitimately
+  // starts a test-only node:http server above and is excluded from
+  // tsconfig.build.json).
+  const SOURCE_PATH = join(__dirname, '..', '..', 'src', 'registration', 'transport', 'rest-registration-transport.ts')
+  const source = readFileSync(SOURCE_PATH, 'utf8')
+
+  it('the shipped binding hosts no inbound listener', () => {
+    // React Native cannot reliably run a persistent background HTTP
+    // listener, and an inbound port on a NAT'd mobile device is an attack
+    // surface with no way to close it; if a genuine push receiver is ever
+    // wanted it belongs in a standalone Node service, never the app bundle.
+    for (const bad of ['node:http', 'node:https', 'http2', 'createServer', '.listen(']) {
+      expect(source, `shipped binding must not reference ${bad}`).to.not.include(bad)
+    }
+  })
+
+  it('the shipped binding imports no HTTP client package', () => {
+    // The header comment is REQUIRED (Task 1) to NAME the four forbidden
+    // packages in prose ("axios, node-fetch, express, fastify are absent"),
+    // so a blanket substring check would fail against the plan's own
+    // mandated wording. This gate instead checks for an actual IMPORT-LIKE
+    // reference — the name appearing as a quoted/slashed module specifier,
+    // e.g. `from 'axios'`, `require('axios')`, `'/node-fetch'` — which a
+    // bare-prose mention of the package's name never produces.
+    for (const bad of ['axios', 'node-fetch', 'express', 'fastify']) {
+      const importPattern = new RegExp(`["'/]${bad}["'/]|from\\s+['"]${bad}`)
+      expect(importPattern.test(source), `shipped binding must not import ${bad}`).to.equal(false)
+    }
+    expect(source).to.include('fetch')
+  })
+
+  it('no package.json in the repository declares axios, node-fetch, express, or fastify', () => {
+    // This repo has a documented aversion to new RN bundling risk (Phase
+    // 44's @peculiar device-boot wall) and a single JSON round-trip does
+    // not justify an HTTP client package — RESEARCH's Package Legitimacy
+    // Audit records zero proposed packages for this phase. The walk skips
+    // node_modules (and dist/.git/.yarn/vendor) so it asserts intent (what
+    // this repo's OWN packages declare), not npm's transitive closure, and
+    // resolves the repo root by walking up so it passes whether mocha is
+    // invoked from the workspace root or from the package directory.
+    const repoRoot = findRepoRoot(__dirname)
+    const packageJsonFiles = collectPackageJsonFiles(repoRoot)
+    expect(packageJsonFiles.length).to.be.greaterThan(0)
+
+    const forbidden = ['axios', 'node-fetch', 'express', 'fastify']
+    const offenders: string[] = []
+    for (const file of packageJsonFiles) {
+      const pkg = JSON.parse(readFileSync(file, 'utf8')) as {
+        dependencies?: Record<string, string>
+        devDependencies?: Record<string, string>
+        peerDependencies?: Record<string, string>
+      }
+      const allDeps = { ...pkg.dependencies, ...pkg.devDependencies, ...pkg.peerDependencies }
+      for (const name of forbidden) {
+        if (name in allDeps) offenders.push(`${file}: ${name}`)
+      }
+    }
+    expect(offenders, offenders.join(', ')).to.deep.equal([])
+  })
+})
+
+function findRepoRoot (startDir: string): string {
+  let dir = startDir
+  while (true) {
+    if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, '.git'))) {
+      return dir
+    }
+    const parent = dirname(dir)
+    if (parent === dir) {
+      throw new Error(`findRepoRoot: could not locate repo root (package.json + .git) walking up from ${startDir}`)
+    }
+    dir = parent
+  }
+}
+
+function collectPackageJsonFiles (root: string): string[] {
+  const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.yarn', 'vendor'])
+  const results: string[] = []
+  const stack: string[] = [root]
+  while (stack.length > 0) {
+    const dir = stack.pop()!
+    let entries: ReturnType<typeof readdirSync>
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name)) continue
+        stack.push(join(dir, entry.name))
+      } else if (entry.isFile() && entry.name === 'package.json') {
+        results.push(join(dir, entry.name))
+      }
+    }
+  }
+  return results
+}
