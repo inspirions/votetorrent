@@ -9,6 +9,7 @@ import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
 import { createDeviceSigner } from "../engines/device-signer";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
+import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
 import { useCadreNode } from "./CadreNodeProvider";
 
 interface AppContextType {
@@ -74,6 +75,20 @@ export function AppProvider({ children }: PropsWithChildren) {
 	const hasEngine = useCallback((engineName: string) => {
 		return engineFactoryRef.current?.hasEngine(engineName) ?? false;
 	}, []);
+
+	// 48-22 Task 2: DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY. attachSyncBindings() is a no-op
+	// unless DEV_REGISTRATION_SYNC_REST_BASE_URL is explicitly set (no hardcoded default), so a
+	// normal build is byte-identically unaffected. Called exactly once, at the point engines
+	// become available (getEngine is stable via useCallback's [] dep array above); the try/catch
+	// is defense-in-depth on top of the attachment's own internal no-throw guards — a missing or
+	// misconfigured dev sync target must never fail app boot.
+	useEffect(() => {
+		try {
+			attachSyncBindings(getEngine);
+		} catch (err) {
+			console.error("attachSyncBindings (dev/device-proof only) failed:", err);
+		}
+	}, [getEngine]);
 
 	// D-09: passthrough to the factory's capability probe. The `?? false`
 	// fallback is deliberate: if the factory ref is somehow absent, report NOT
