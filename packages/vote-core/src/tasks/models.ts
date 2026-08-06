@@ -2,7 +2,7 @@ import type { AdminInit, AuthorityInit, Authority } from '../authority'
 import type { Proposal, Signature } from '../common'
 import type { ElectionDetails, ElectionInit, Ballot } from '../election'
 import type { NetworkReference, NetworkInit } from '../network'
-import type { RegisterInit, RegistrationRequestIssuerType } from '../registration/index.js'
+import type { RegisterInit, RegistrationRequestDecision, RegistrationRequestIssuerType } from '../registration/index.js'
 
 export interface Task {
   type: string
@@ -104,4 +104,18 @@ export interface SignatureResult {
    * the header-signature ceremony) remain byte-identical.
    */
   sign?: (digest: Uint8Array) => Promise<Signature>
+  /**
+   * L-1 (48-11): OPTIONAL channel carrying D-07's structured out-of-band verification checklist
+   * into the accept ceremony. Required in practice on the `'registrant'` accept path — an accept
+   * missing it is refused, no placeholder substituted — and ignored on every other signature type.
+   * Optional so every existing caller stays byte-identical, mirroring how `sign?` above was added
+   * in 39-03 for the same class of problem: a ceremony needing data the base result shape did not
+   * carry.
+   *
+   * Approval runs through this signature-task ceremony, and ONLY through it, because
+   * `IRegistrationEngine` deliberately exposes no approve/decide method (48-05 T-48-05-02) — a
+   * single boolean-flagged decide method would let a caller mint a `Registrant` while bypassing
+   * the ceremony this field exists to feed.
+   */
+  decision?: RegistrationRequestDecision
 }

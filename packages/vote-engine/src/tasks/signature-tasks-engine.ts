@@ -1,8 +1,11 @@
 import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { SqlValue } from '@quereus/quereus'
 import { SigningEngine } from '../signing/signing-engine.js'
+import { seedSignedMutation } from '../signing/signed-mutation.js'
+import { toIsoZDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
+import { verificationCid } from '@votetorrent/vote-core'
 import type {
   ISigningEngine,
   ISignatureTasksEngine,
@@ -20,11 +23,13 @@ import type {
   Ballot,
   Question,
   RegisterInit,
+  RegistrationRequestDecision,
   Signature,
 } from '@votetorrent/vote-core'
 import { BALLOT_HEADER_TID } from '../election/election-engine.js'
 import { CompleteSignatureBuilder } from './builders/index.js'
 import { allocateTid } from '../database/tid-allocator.js'
+import { RegistrationEngine } from '../registration/registration-engine.js'
 
 /**
  * SignatureTasksEngine — Phase 05 (TASK-03, TASK-04) implementation.
@@ -422,6 +427,33 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           `SignatureTasksEngine.completeSignature: no pending ballot task for user=${task.userId} ballotId=${ballotId}`
         )
       }
+    } else if (task.signatureType === 'registrant') {
+      // L-3 (48-11): an officer legitimately has several pending registration requests at once —
+      // scope the lookup by requestId, copying the 'ballot' branch's disambiguation shape above,
+      // rather than the plain UserId + SignatureType lookup that would resolve an arbitrary LIMIT-1
+      // row (and therefore complete the WRONG request's task).
+      const requestId = (task as RegistrantSignatureTask).requestId
+      taskRow = await this.ctx!.db
+        .prepare(
+          `select Task.Id, Task.SigningNonce from Task
+            join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id
+            where Task.UserId = :userId
+              and Task.Type = 'signature'
+              and Task.SignatureType = :signatureType
+              and Task.IsCompleted = 0
+              and E.RequestId = :requestId
+            limit 1`
+        )
+        .get({
+          userId: task.userId,
+          signatureType: task.signatureType,
+          requestId,
+        }) as { Id: string; SigningNonce: string } | undefined
+      if (!taskRow) {
+        throw new Error(
+          `SignatureTasksEngine.completeSignature: no pending registrant task for user=${task.userId} requestId=${requestId}`
+        )
+      }
     } else {
       taskRow = await this.ctx!.db
         .prepare(
@@ -464,6 +496,36 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         await this.finalizeBallot(taskRow.Id as string, nonce, result.sign)
       } catch (err) {
         this.rethrow(err, 'completeSignature (finalize)')
+      }
+    }
+
+    // Registrant finalize branch (D-05, D-07): after sign() succeeds (the officer's header
+    // signature over DG-4), drive the D-07 decision ceremony and the byte-unchanged register()
+    // BEFORE the Task-complete update — mirrors finalizeBallot's call-site placement immediately
+    // above. Do NOT touch the reject path: result.isAccepted === false must continue to skip
+    // sign(), skip this block entirely, and fall through to the unconditional task-complete update
+    // — 48-12 owns the reject ceremony.
+    if (result.isAccepted && task.signatureType === 'registrant') {
+      // L-2 (48-11): the accept path REQUIRES the reusable per-digest callback — DG-2 is signed at
+      // decision time, and there is no placeholder fallback on this path. An approval whose
+      // checklist is covered by nothing is exactly the failure D-07 exists to prevent; do not
+      // substitute a placeholder signature here.
+      if (!result.sign) {
+        throw new Error(
+          'SignatureTasksEngine.completeSignature: registrant accept requires result.sign (a reusable per-digest signing callback) — none supplied'
+        )
+      }
+      // The D-07 checklist is what VerificationCid is derived from — there is no legal approval
+      // without one.
+      if (!result.decision) {
+        throw new Error(
+          'SignatureTasksEngine.completeSignature: registrant accept requires result.decision (the D-07 verification checklist) — none supplied'
+        )
+      }
+      try {
+        await this.finalizeRegistrantApproval(taskRow.Id as string, result.decision, result.sign)
+      } catch (err) {
+        this.rethrow(err, 'completeSignature (finalize registrant)')
       }
     }
 
@@ -803,6 +865,120 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
   }
 
   /**
+   * D-05/D-07 — the registrant accept ceremony. `RegistrationEngine.register()` is reused
+   * COMPLETELY UNCHANGED — it was always correct, and the defect this phase corrects was only
+   * ever that the voter app supplied a founding-officer key it held. This method changes WHO
+   * DRIVES `register()`, not what `register()` does. A second `register()`-shaped write path
+   * (an inline `insert into Registrant`, a copy of `register()`'s body, etc.) must never be
+   * created here.
+   */
+  private async finalizeRegistrantApproval (
+    taskId: string,
+    decision: RegistrationRequestDecision,
+    sign: (digest: Uint8Array) => Promise<Signature>
+  ): Promise<void> {
+    const ctx = this.ctx!
+
+    // Resolve the request by joining the extension row — finalizeBallot's own opening shape.
+    const extRow = await ctx.db
+      .prepare(
+        `select E.RequestId, R.AuthorityId, R.Payload, R.Status
+           from RegistrantSignatureTaskExtension E
+             join RegistrationRequest R on R.Id = E.RequestId
+           where E.TaskId = :taskId`
+      )
+      .get({ taskId }) as { RequestId: string; AuthorityId: string; Payload: string; Status: string } | undefined
+    if (!extRow) {
+      throw new Error(`SignatureTasksEngine.finalizeRegistrantApproval: no RegistrantSignatureTaskExtension for taskId=${taskId}`)
+    }
+    const requestId = extRow.RequestId
+
+    // A decided request is not re-decidable — DecisionValid enforces this too; this engine-side
+    // check exists only to produce an attributable error, not as the actual boundary.
+    if (extRow.Status !== 'p') {
+      throw new Error(
+        `SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} is not pending (Status=${extRow.Status})`
+      )
+    }
+
+    const init = parseJsonOr<RegisterInit | undefined>(extRow.Payload, undefined, 'RegistrationRequest.Payload')
+    if (!init) {
+      throw new Error(`SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} Payload failed to parse`)
+    }
+
+    const tid = await allocateTid(ctx.db, 'registration-request')
+
+    // D-07: derive VerificationCid through 48-06's injected-digest helper — never a hand-rolled JS
+    // hash. The callback runs the SAME select cid(Digest(:canonical)) call shape
+    // computeRegistrantPrivateCid uses.
+    const cid = await verificationCid(decision.checklist, async (canonical: string) => {
+      const row = await ctx.db.prepare('select cid(Digest(:canonical)) as c').get({ canonical })
+      if (!row || row.c == null) {
+        throw new Error('SignatureTasksEngine.finalizeRegistrantApproval: cid(Digest(...)) returned null — crypto plugin not registered?')
+      }
+      return row.c as string
+    })
+
+    // DecidedAt must carry a trailing 'Z' (DecidedAtValid's like('%Z', ...)) — toIsoZDatetime, NEVER
+    // nowCanonicalDatetime() (48-02 hygiene item 3).
+    const decidedAt = toIsoZDatetime(Date.now())
+    const decidingOfficerUserId = ctx.user?.id ?? null
+
+    // DG-2, field for field: Digest(context.Tid, new.Id, new.Status, new.VerificationCid,
+    // new.DecidedAt, new.DecidingOfficerUserId, new.RejectionReason). rejectionReason binds null and
+    // the UPDATE below leaves the column null, so the digested tuple and the stored row agree.
+    // `decidingOfficerUserId` is a DELIBERATE defensive rename — bare `userId` is one of
+    // seedSignedMutation's eight reserved bind names and would be silently overwritten by the
+    // helper's own ceremony binds (the real Phase 42-03 bug; registration-engine.ts NOTE 1).
+    const digestExpr = 'select Digest(:tid, :requestId, :status, :verificationCid, :decidedAt, :decidingOfficerUserId, :rejectionReason) as d'
+    const digestParams = {
+      tid,
+      requestId,
+      status: 'a',
+      verificationCid: cid,
+      decidedAt,
+      decidingOfficerUserId,
+      rejectionReason: null,
+    }
+
+    // The reviewing officer's OWN reusable per-digest callback produces a real signature over
+    // DG-2 — this is the D-07 weld: VerificationCid rides inside the SAME digest as Status/
+    // DecidedAt/DecidingOfficerUserId/RejectionReason, so the officer's real signature
+    // transitively covers the checklist. This runs under a 'vrg'-scoped AdminSigning ceremony —
+    // AdminSigning.UserIdValid requires merely that the signer be some officer at that authority —
+    // it does not require a 'vrg'-scoped officer specifically (Phase 999.1).
+    const decisionNonce = await seedSignedMutation(ctx, extRow.AuthorityId, 'vrg', tid, digestExpr, digestParams, sign)
+
+    // register()-then-decide ordering: register() opens its own BEGIN/COMMIT envelope and cannot
+    // share a transaction with the decision UPDATE below, so the two are ordered register()-then-
+    // decide. The existence guard makes a retried approval converge instead of colliding on the
+    // Registrant primary key — the residual (a Registrant created while the request stays 'p') is
+    // an accepted residual in this plan's threat model (T-48-11-11).
+    const existingRegistrant = await ctx.db
+      .prepare('select 1 from Registrant where Id = :id')
+      .get({ id: init.registrant.id })
+    if (!existingRegistrant) {
+      // RegistrationEngine.register() — reused COMPLETELY UNCHANGED, with the reviewing officer's
+      // own device-signer callback. No wrapper, no reimplementation, no inline Registrant insert.
+      await new RegistrationEngine(ctx).register(init, sign)
+    }
+
+    await ctx.db.exec(
+      `update RegistrationRequest
+       with context SigningNonce = :signingNonce, Tid = ${tid}
+       set Status = 'a', VerificationCid = :verificationCid, DecidedAt = :decidedAt, DecidingOfficerUserId = :decidingOfficerUserId
+       where Id = :requestId`,
+      {
+        signingNonce: decisionNonce,
+        verificationCid: cid,
+        decidedAt,
+        decidingOfficerUserId,
+        requestId,
+      }
+    )
+  }
+
+  /**
    * D-03 — Return the engine-authoritative `AdminSigning.Digest` bytes for the
    * pending task. The screen passes these bytes to the device-signer callback
    * and never recomputes any canonical form itself.
@@ -843,6 +1019,32 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       if (!taskRow) {
         throw new Error(
           `SignatureTasksEngine.getSignatureDigest: no pending ballot task for user=${task.userId} ballotId=${ballotId}`
+        )
+      }
+    } else if (task.signatureType === 'registrant') {
+      // L-3 (48-11): the SHARPER of the two disambiguation defects — left unscoped, an officer
+      // with two pending registration requests would be shown, and would SIGN, the digest
+      // belonging to the WRONG request. Scope by requestId exactly like the 'ballot' branch above.
+      const requestId = (task as RegistrantSignatureTask).requestId
+      taskRow = await this.ctx!.db
+        .prepare(
+          `select Task.Id, Task.SigningNonce from Task
+            join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id
+            where Task.UserId = :userId
+              and Task.Type = 'signature'
+              and Task.SignatureType = :signatureType
+              and Task.IsCompleted = 0
+              and E.RequestId = :requestId
+            limit 1`
+        )
+        .get({
+          userId: task.userId,
+          signatureType: task.signatureType,
+          requestId,
+        }) as { Id: string; SigningNonce: string } | undefined
+      if (!taskRow) {
+        throw new Error(
+          `SignatureTasksEngine.getSignatureDigest: no pending registrant task for user=${task.userId} requestId=${requestId}`
         )
       }
     } else {
