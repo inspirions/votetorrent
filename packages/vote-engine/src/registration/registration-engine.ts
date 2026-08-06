@@ -13,6 +13,12 @@ import {
   REGISTRANT_PUBLIC_POINT_CURRENCY_JOIN,
   REGISTRANT_SELECTIVE_POINT_CURRENCY_JOIN
 } from './registrant-list-query.js'
+import {
+  buildPriorRejectionCountSql,
+  buildRegistrationRequestListCountSql,
+  buildRegistrationRequestListPageSql,
+  STATUS_REJECTED
+} from './registration-request-query.js'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
 import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
@@ -43,10 +49,13 @@ import type {
   RegistrationBridgeKeyInit,
   RegistrationRequestDecision,
   RegistrationRequestInit,
+  RegistrationRequestIssuerType,
   RegistrationRequestListFilter,
   RegistrationRequestListPage,
   RegistrationRequestListResult,
+  RegistrationRequestListRow,
   RegistrationRequestRead,
+  RegistrationRequestStatus,
   RegistrationTransparencyStats,
   SelectiveLeaf,
   Signature,
@@ -1897,9 +1906,110 @@ export class RegistrationEngine implements IRegistrationEngine {
     return out
   }
 
-  async listRegistrationRequests (_filter?: RegistrationRequestListFilter, _page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult> {
-    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
-    throw new Error('listRegistrationRequests is not implemented')
+  /**
+   * D-06/D-09/T-48-08-11: the triage inbox read. Oldest-`ReceivedAt`-first —
+   * the AUTHORITY's own intake observation — NEVER oldest-`SubmittedAt`-first
+   * (48-05's recorded supersession of this plan's original wording; see
+   * `registration-request-query.ts`'s header comment for the full
+   * anti-backdating argument). Mirrors `listRegistrants`'s six pagination
+   * mechanics exactly (no-context convention, `clampPageSize`, keyset
+   * accumulation, cursor-absent-only `total`, the silent T-47-06
+   * count-failure catch) — only the order key and the row shape differ.
+   */
+  async listRegistrationRequests (filter?: RegistrationRequestListFilter, page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult> {
+    if (!this.ctx) return { rows: [] }
+    const ctx = this.ctx
+    try {
+      const pageSize = clampPageSize(page?.pageSize)
+      const cursor = page?.cursor
+
+      // Cursor resolution POINT-READS ReceivedAt — matching the order key,
+      // never Id alone and never SubmittedAt. An unresolvable (stale or
+      // fabricated) cursor degrades to an empty page and must NOT fall back
+      // to an un-cursored first page (T-48-08-06) — that fallback would make
+      // `loadMore` restart the list forever.
+      let cursorReceivedAt: string | undefined
+      if (cursor !== undefined) {
+        const cursorRow = await ctx.db.prepare('select ReceivedAt from RegistrationRequest where Id = :cursor').get({ cursor })
+        if (!cursorRow) return { rows: [] }
+        cursorReceivedAt = asText(cursorRow.ReceivedAt, 'RegistrationRequest.ReceivedAt')
+      }
+
+      const { sql, params } = buildRegistrationRequestListPageSql(filter, cursor, cursorReceivedAt, pageSize)
+      const rows: RegistrationRequestListRow[] = []
+      // Parallel array (not a field on RegistrationRequestListRow — the list
+      // row deliberately omits RequesterKey/the full payload, T-48-08-10) so
+      // the hasPriorRejections pass below can still key back to each row.
+      const requesterKeys: string[] = []
+      for await (const row of ctx.db.eval(sql, params as Record<string, SqlValue>)) {
+        // A malformed Payload yields undefined names, never a throw — the
+        // inbox row must still render.
+        const payload = parseJsonOr<{ public?: { lastName?: string; firstName?: string } }>(row.Payload, {}, 'RegistrationRequest.Payload')
+        requesterKeys.push(asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'))
+        rows.push({
+          requestId: asText(row.Id, 'RegistrationRequest.Id'),
+          authorityId: asText(row.AuthorityId, 'RegistrationRequest.AuthorityId'),
+          status: asText(row.Status, 'RegistrationRequest.Status') as RegistrationRequestStatus,
+          issuerType: asText(row.IssuerType, 'RegistrationRequest.IssuerType') as RegistrationRequestIssuerType,
+          bridgeId: row.BridgeId == null ? undefined : asText(row.BridgeId, 'RegistrationRequest.BridgeId'),
+          bridgeLabel: row.BridgeLabel == null ? undefined : asText(row.BridgeLabel, 'RegistrationBridgeKey.Label'),
+          // BOTH timestamps reach the row — submittedAt is DISPLAYED beside
+          // receivedAt (the sort key), so a divergence between claim and
+          // observation is visible, never collapsed. Never render one as
+          // the other.
+          submittedAt: reZuluDatetime(row.SubmittedAt as string),
+          receivedAt: reZuluDatetime(row.ReceivedAt as string),
+          lastName: payload.public?.lastName,
+          firstName: payload.public?.firstName,
+          // Placeholder — overwritten below once the prior-rejection counts
+          // are known. A caller must never observe this placeholder value;
+          // the field is required-not-optional precisely so `undefined`
+          // never means "no prior rejections" (see the overwrite below).
+          hasPriorRejections: false
+        })
+      }
+
+      // ONE grouped query for the WHOLE page (T-48-08-06) — never a per-row
+      // subquery.
+      if (rows.length > 0) {
+        const rejectionSql = buildPriorRejectionCountSql(filter)
+        const rejectionCounts = new Map<string, number>()
+        for await (const rejRow of ctx.db.eval(rejectionSql.sql, rejectionSql.params as Record<string, SqlValue>)) {
+          rejectionCounts.set(asText(rejRow.k, 'RegistrationRequest.RequesterKey'), asNumberOr(rejRow.n, 0, 'priorRejectionCount'))
+        }
+        for (let i = 0; i < rows.length; i++) {
+          const count = rejectionCounts.get(requesterKeys[i]!) ?? 0
+          // A rejected request does not count itself as its own prior
+          // rejection — this is a `!== undefined` boolean by construction,
+          // satisfying the "required, not optional" contract.
+          rows[i]!.hasPriorRejections = count > (rows[i]!.status === STATUS_REJECTED ? 1 : 0)
+        }
+      }
+
+      const nextCursor = rows.length === pageSize ? rows[rows.length - 1]!.requestId : undefined
+
+      let total: number | undefined
+      if (cursor === undefined) {
+        // D-05/T-47-09 pattern: run once per filter-change (a cursor-absent
+        // call), never per page.
+        try {
+          const countSql = buildRegistrationRequestListCountSql(filter)
+          const countRow = await ctx.db.prepare(countSql.sql).get(countSql.params as Record<string, SqlValue>)
+          total = asNumberOr(countRow?.n, 0, 'listRegistrationRequests.total')
+        } catch {
+          // T-47-06 (carried verbatim): deliberately NOT logged and NOT
+          // interpolated into any message — the count query's bound params
+          // can carry the officer's typed `name` search term, which is PII
+          // under D-01's never-log rule. A future "let's log this" change
+          // must be a deliberate decision, not an accident.
+          total = undefined
+        }
+      }
+
+      return { rows, nextCursor, total }
+    } catch (err) {
+      this.rethrow(err, 'listRegistrationRequests')
+    }
   }
 
   async getRegistrationRequest (_requestId: string): Promise<RegistrationRequestRead | undefined> {
