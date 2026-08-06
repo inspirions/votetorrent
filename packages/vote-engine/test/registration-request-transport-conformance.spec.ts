@@ -139,6 +139,52 @@ interface DigestIssuer {
   digestFor: (requestId: string) => Uint8Array
 }
 
+/**
+ * The pure DG1_FIELD_ORDER tuple-building + hashing computation, independent
+ * of any memoization. Used two ways below, deliberately: `createDigestIssuer`
+ * wraps this in a once-per-request memo (the RECEIVING SIDE's issuance
+ * behavior, the thing case 6's `allocationCount` guards); `verifyDelivered`
+ * calls this DIRECTLY, unmemoized, every time — mirroring what the real
+ * schema's `SignatureValid` CHECK actually does: `Digest(...)` is evaluated
+ * fresh from the ROW's CURRENT column values at INSERT time, never from a
+ * cached issuance. A tampered delivered document therefore fails
+ * `verifyDelivered` precisely because it recomputes over the CURRENT
+ * (possibly mutated) content — without the issuer ever being asked to
+ * re-issue anything, which is exactly the property case 4's
+ * `allocationCount === 1` assertion checks from the other side.
+ */
+function computeCanonicalDigest (init: RegistrationRequestInit, requesterKey: string): { input: Record<string, string>; digest: Uint8Array } {
+  // Neither this function nor its callers ever manufacture a submittedAt:
+  // no `new Date()`, no `toIsoZDatetime`, no `nowCanonicalDatetime()`. A
+  // missing one is a fixture bug and must throw loudly here, never be
+  // silently defaulted.
+  if (typeof init.submittedAt !== 'string' || init.submittedAt.length === 0 || !init.submittedAt.endsWith('Z')) {
+    throw new Error(
+      `computeCanonicalDigest: init.submittedAt must be a non-empty Z-suffixed string (fixture bug), got ${JSON.stringify(init.submittedAt)}`
+    )
+  }
+  const payloadCid = bytesToHex(sha256(utf8ToBytes(JSON.stringify(init.payload))))
+
+  const input: Record<string, string> = {}
+  for (const field of DG1_FIELD_ORDER) {
+    let value: string
+    switch (field) {
+      case 'id': value = init.id; break
+      case 'authorityId': value = init.authorityId; break
+      case 'requesterKey': value = requesterKey; break
+      case 'issuerType': value = init.issuerType ?? 'registrant'; break
+      case 'bridgeId': value = init.bridgeId ?? ''; break
+      case 'payloadCid': value = payloadCid; break
+      case 'submittedAt': value = init.submittedAt; break
+    }
+    input[field] = value
+  }
+
+  const line = DG1_FIELD_ORDER.map((field) => `${field}=${input[field]}`).join('\n')
+  const digest = sha256(utf8ToBytes(line))
+  return { input, digest }
+}
+
 function createDigestIssuer (): DigestIssuer {
   const records = new Map<string, DigestIssuerRecord>()
   const counts = new Map<string, number>()
@@ -148,35 +194,8 @@ function createDigestIssuer (): DigestIssuer {
     const existing = records.get(init.id)
     if (existing !== undefined) return existing
 
-    // The issuer never manufactures a submittedAt: no `new Date()`, no
-    // `toIsoZDatetime`, no `nowCanonicalDatetime()`. A missing one is a
-    // fixture bug and must throw loudly here, never be silently defaulted.
-    if (typeof init.submittedAt !== 'string' || init.submittedAt.length === 0 || !init.submittedAt.endsWith('Z')) {
-      throw new Error(
-        `createDigestIssuer.issue: init.submittedAt must be a non-empty Z-suffixed string (fixture bug), got ${JSON.stringify(init.submittedAt)}`
-      )
-    }
-    const submittedAt = init.submittedAt
-    const payloadCid = bytesToHex(sha256(utf8ToBytes(JSON.stringify(init.payload))))
-
-    const input: Record<string, string> = {}
-    for (const field of DG1_FIELD_ORDER) {
-      let value: string
-      switch (field) {
-        case 'id': value = init.id; break
-        case 'authorityId': value = init.authorityId; break
-        case 'requesterKey': value = requesterKey; break
-        case 'issuerType': value = init.issuerType ?? 'registrant'; break
-        case 'bridgeId': value = init.bridgeId ?? ''; break
-        case 'payloadCid': value = payloadCid; break
-        case 'submittedAt': value = submittedAt; break
-      }
-      input[field] = value
-    }
-
-    const line = DG1_FIELD_ORDER.map((field) => `${field}=${input[field]}`).join('\n')
-    const digest = sha256(utf8ToBytes(line))
-    const record: DigestIssuerRecord = { submittedAt, input, digest }
+    const { input, digest } = computeCanonicalDigest(init, requesterKey)
+    const record: DigestIssuerRecord = { submittedAt: init.submittedAt, input, digest }
     records.set(init.id, record)
     return record
   }
@@ -257,7 +276,14 @@ interface DeliveredVerification { ok: boolean; reason?: string }
  * (Task 2), which is what makes "identically" literal rather than
  * aspirational. */
 function verifyDelivered (delivered: StagedRequest, issuer: DigestIssuer): DeliveredVerification {
-  const digest = issuer.digestFor(delivered.requestId)
+  // `issuer` is accepted (not merely a bare transport) to keep this
+  // helper's shape consistent with the rest of the harness, but the
+  // verification itself is deliberately an INDEPENDENT recompute over
+  // `delivered`'s CURRENT content via `computeCanonicalDigest` — see that
+  // function's header for why a memoized `issuer.digestFor` lookup would
+  // make case 4's tamper detection vacuous.
+  void issuer
+  const { digest } = computeCanonicalDigest(delivered.init, delivered.requesterKey)
   const ok = secp256k1.verify(hexToBytes(delivered.signature.signature), digest, hexToBytes(delivered.requesterKey))
   return ok ? { ok: true } : { ok: false, reason: TAMPER_REJECTION_REASON }
 }
@@ -564,6 +590,159 @@ export function runRegistrationRequestTransportConformance (testCase: Conformanc
       ).to.equal(true)
 
       assertNoKeyMaterial(binding.capturedWireText(), signer.privateHex)
+    })
+
+    it('polls back the authority decision with its status and reason byte-identical', async () => {
+      const signer = makeRealSigner()
+      const approvedInit = makeInit()
+      await binding.transport.submitRequest(approvedInit, signer.publicHex, signer.sign)
+      const rejectedInit = makeInit()
+      await binding.transport.submitRequest(rejectedInit, signer.publicHex, signer.sign)
+
+      const rejectionReason = `conformance-reject-reason-${Date.now()}`
+      await binding.publishDecision({ requestId: approvedInit.id, status: 'a' })
+      await binding.publishDecision({ requestId: rejectedInit.id, status: 'r', reason: rejectionReason })
+
+      const notices = await binding.transport.pollDecisions()
+      const approvedNotice = notices.find((n) => n.requestId === approvedInit.id)
+      const rejectedNotice = notices.find((n) => n.requestId === rejectedInit.id)
+      expect(approvedNotice, 'approval notice must be present').to.not.equal(undefined)
+      expect(rejectedNotice, 'rejection notice must be present').to.not.equal(undefined)
+      expect(approvedNotice!.status).to.equal('a')
+      expect(rejectedNotice!.status).to.equal('r')
+      // D-06: a persisted rejection reason is what lets an applicant be
+      // told why, and a transport that mangled it would silently degrade
+      // an auditable record into a shrug.
+      expect(rejectedNotice!.reason).to.equal(rejectionReason)
+    })
+
+    it('advances decision cursors monotonically and re-delivers on a stale cursor rather than losing one', async () => {
+      const firstId = nextRequestId()
+      const secondId = nextRequestId()
+      const thirdId = nextRequestId()
+      const firstCursor = await binding.publishDecision({ requestId: firstId, status: 'a' })
+      const secondCursor = await binding.publishDecision({ requestId: secondId, status: 'a' })
+      const thirdCursor = await binding.publishDecision({ requestId: thirdId, status: 'a' })
+
+      const all = await binding.transport.pollDecisions()
+      expect(all.map((n) => n.requestId)).to.deep.equal([firstId, secondId, thirdId])
+      expect(all.map((n) => n.cursor)).to.deep.equal([firstCursor, secondCursor, thirdCursor])
+      expect(
+        firstCursor < secondCursor && secondCursor < thirdCursor,
+        'cursors must be strictly increasing (plain string comparison, which the zero-padded format exists to make valid)'
+      ).to.equal(true)
+
+      const afterFirst = await binding.transport.pollDecisions(firstCursor)
+      expect(afterFirst.map((n) => n.requestId)).to.deep.equal([secondId, thirdId])
+
+      const afterThird = await binding.transport.pollDecisions(thirdCursor)
+      expect(afterThird).to.deep.equal([])
+
+      // Duplicate delivery is permitted, loss is not: a silently dropped
+      // decision is a request nobody ever acts on, with no signal anywhere.
+      const repeatA = await binding.transport.pollDecisions(firstCursor)
+      const repeatB = await binding.transport.pollDecisions(firstCursor)
+      expect(repeatA.length).to.be.greaterThan(0)
+      expect(repeatA).to.deep.equal(repeatB)
+    })
+
+    it('detects a tampered payload identically, and neither binding launders it into a verifiable document', async () => {
+      const signer = makeRealSigner()
+      const init = makeInit()
+      await binding.transport.submitRequest(init, signer.publicHex, signer.sign)
+
+      const before = (await binding.deliveredSubmissions())[0]!
+      const beforeVerification = verifyDelivered(before, issuer)
+      expect(beforeVerification.ok, 'a genuine, untampered signature must verify before any tampering').to.equal(true)
+
+      await binding.tamperDeliveredPayload(init.id)
+
+      const after = (await binding.deliveredSubmissions())[0]!
+      const afterVerification = verifyDelivered(after, issuer)
+      // A seam where one binding detects tampering and another does not is
+      // WORSE than no seam: it invites the reviewing officer to trust a
+      // uniformity that is not there. (1) the SAME shared helper now
+      // reports failure, through EITHER binding.
+      expect(afterVerification.ok, 'a tampered document must fail the same verification the genuine one passed').to.equal(false)
+      // (2) the same shared reason CONSTANT — asserted on the constant, not
+      // a free-text message, so "identically" is literal.
+      expect(afterVerification.reason).to.equal(TAMPER_REJECTION_REASON)
+      // (3) the receiving side must NOT have re-issued a digest over the
+      // mutated bytes — that is the laundering path this case closes.
+      expect(issuer.allocationCount(init.id)).to.equal(1)
+
+      // Honest limit restated: neither transport REJECTS the tampered
+      // document — they are couriers, and the schema's SignatureValid CHECK
+      // is the authorization gate (D-02). What is proven here is that the
+      // evidence needed to reject is present and identical on both sides.
+      assertNoKeyMaterial(binding.capturedWireText(), signer.privateHex)
+    })
+
+    it('carries bridge issuer markers through unchanged and inside the signed digest input', async () => {
+      const signer = makeRealSigner()
+      const bridgeId = `conf-bridge-${Date.now()}`
+      const bridgeInit = makeInit({ issuerType: 'bridge', bridgeId })
+      await binding.transport.submitRequest(bridgeInit, signer.publicHex, signer.sign)
+
+      const bridgeDelivered = (await binding.deliveredSubmissions()).find((r) => r.requestId === bridgeInit.id)
+      expect(bridgeDelivered, 'bridge-issued submission must be delivered').to.not.equal(undefined)
+      expect(bridgeDelivered!.init.issuerType).to.equal('bridge')
+      expect(bridgeDelivered!.init.bridgeId).to.equal(bridgeId)
+
+      // The markers must be INSIDE the bytes the requester signed, not
+      // metadata bolted on beside them (D-03) — a binding that dropped,
+      // defaulted, or normalized these markers would make a bridge
+      // assertion arrive looking like a voter's own cryptographically
+      // attributed act.
+      const bridgeRecord = issuer.recordFor(bridgeInit.id)
+      expect(bridgeRecord.input.issuerType).to.equal('bridge')
+      expect(bridgeRecord.input.bridgeId).to.equal(bridgeId)
+
+      const registrantSigner = makeRealSigner()
+      const registrantInit = makeInit()
+      await binding.transport.submitRequest(registrantInit, registrantSigner.publicHex, registrantSigner.sign)
+      const registrantDelivered = (await binding.deliveredSubmissions()).find((r) => r.requestId === registrantInit.id)
+      expect(registrantDelivered, 'registrant-issued submission must be delivered').to.not.equal(undefined)
+      expect(registrantDelivered!.init.bridgeId).to.equal(undefined)
+    })
+
+    it('agrees on digest inputs: one frozen field order, and a submittedAt the receiving side issues once and reuses', async () => {
+      const signer = makeRealSigner()
+      const init = makeInit()
+      await binding.transport.submitRequest(init, signer.publicHex, signer.sign)
+
+      const record = issuer.recordFor(init.id)
+      // 1. Same fields, same order, for both bindings — a field-order
+      // divergence between the two bindings fails HERE rather than as a
+      // CHECK failure at INSERT time a phase later.
+      expect(Object.keys(record.input)).to.deep.equal([...DG1_FIELD_ORDER])
+
+      // 2. The receiving side memoized the submitter's submittedAt ONCE and
+      // never re-issued a digest over a different one.
+      expect(issuer.allocationCount(init.id)).to.equal(1)
+
+      // 3. The submitter's submittedAt round-trips unchanged through
+      // either medium — nothing on the path rewrote, re-stamped,
+      // re-formatted, truncated, or normalised the value the requester
+      // signed over. This is the ONE place in the phase where the
+      // filesystem binding's injected digest-function resolution and the
+      // REST binding's handshake resolution are checked against each
+      // other: the divergence in HOW they resolve the digest is expected
+      // (the bindings share an interface, not internals), but the VALUE
+      // they arrive at must agree.
+      expect(record.submittedAt).to.equal(init.submittedAt)
+      expect(record.submittedAt.endsWith('Z')).to.equal(true)
+      const delivered = (await binding.deliveredSubmissions()).find((r) => r.requestId === init.id)
+      expect(delivered, 'submission must be delivered').to.not.equal(undefined)
+      expect(delivered!.init.submittedAt).to.equal(record.submittedAt)
+
+      // 4. Closing the loop from field order through to a verifying
+      // signature.
+      const verification = verifyDelivered(delivered!, issuer)
+      expect(
+        verification.ok,
+        `expected the delivered signature to verify (reason if failed: ${String(verification.reason)})`
+      ).to.equal(true)
     })
   })
 }
