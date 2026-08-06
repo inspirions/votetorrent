@@ -72,6 +72,23 @@ export type RootStackParamList = {
 	// electionId/authorityId are passed to avoid a redundant getElectionDetails()
 	// round-trip just to learn them.
 	RegistrationPolicy: { electionEngine: IElectionEngine; electionId: string; authorityId: string };
+	// Phase 48 plan 48-21 (D-12) — the three Phase 48 routes: the Registration
+	// Requests inbox, its per-request approval ceremony, and Bulk Import / Sync.
+	// T-48-21-01: params carry identifiers only — authorityId, requestId. React
+	// Navigation serializes route params into navigation state, and that state
+	// surfaces in crash and debug payloads, so a requester name, a district, an
+	// IssuerType payload value or an engine handle must never be added here.
+	// Unlike RegistrationPolicy, no engine handle is threaded: every Phase 48
+	// screen resolves its engine from useApp().getEngine(...). Placement: this
+	// block sits ABOVE the Phase 47 comment/block (not folded into it) so
+	// phase47Routes.test.tsx's param-hygiene source-block extraction (which
+	// starts at the Phase 47 RegistrantsList route entry and ends at the
+	// EditBallot route entry) stays byte-identical in coverage — do not
+	// "tidy" this block down next to Phase 47's, that silently breaks that
+	// gate.
+	RegistrationInbox: { authorityId: string };
+	RegistrationRequestApproval: { requestId: string; authorityId: string };
+	BulkImportSync: { authorityId: string };
 	// Phase 47 plan 47-21 (D-07/D-08/D-09) — the five Phase 47 routes, split by owning domain.
 	// D-07: RegistrantsList is BOTH the authority-wide roster (no electionFilter) and the
 	// election roster (electionFilter pre-applied). There is deliberately no second roster route.

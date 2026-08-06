@@ -23,24 +23,18 @@ import type {
 } from "@votetorrent/vote-core";
 import { RegistrationRequestRow } from "./components/RegistrationRequestRow";
 import { TransparencyStatsCard } from "./components/TransparencyStatsCard";
+import type { RootStackParamList } from "../../navigation/types";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 
-// 48-21 REMOVES THIS WIDENING. `RootStackParamList` (navigation/types.ts)
-// does not yet carry `RegistrationRequestApproval` or `BulkImportSync` —
-// 48-21 (wave 8) lands all three Phase 48 routes and registers their
-// Stack.Screens, at which point this alias is replaced by
-// `NativeStackNavigationProp<RootStackParamList>`, exactly as 47-21 did for
-// `RegistrantsListScreen.tsx:27-36`. Two things are load-bearing here:
-//   - `params` is typed `Record<string, string>` — IDENTIFIERS ONLY. React
-//     Navigation params are persisted into navigation state and can surface
-//     in crash/debug payloads, so this widening deliberately narrows the
-//     value type even while it widens the route-name type. Never widen it
-//     to `unknown`/`any`.
-//   - The exact literal marker above (`48-21 REMOVES THIS WIDENING`) is
-//     what 48-21 greps for.
-type InboxNavigation = {
-	navigate: (screen: string, params?: Record<string, string>) => void;
-	setOptions: (options: Record<string, unknown>) => void;
-};
+// D-12: this screen previously carried a screen-local loosely-typed
+// navigation widening because RootStackParamList did not yet carry
+// `RegistrationRequestApproval` or `BulkImportSync`. 48-21 added all three
+// Phase 48 routes (navigation/types.ts) and registered their Stack.Screens
+// (navigation/index.tsx), so this screen now navigates through
+// `NativeStackNavigationProp<RootStackParamList>`, which checks both the
+// route name AND the param shape — restoring the checking the widening had
+// disabled. A widening left in place after its routes land compiles, works,
+// and silently disables route-name checking on that call forever.
 
 // UI-SPEC's 25-50 recommendation. This app has no virtualized-list-component
 // precedent anywhere — every list in this codebase is a `.map()`-in-`ScrollView`
@@ -62,7 +56,7 @@ export default function RegistrationInboxScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
-	const navigation = useNavigation() as unknown as InboxNavigation;
+	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const { authorityId } = useRoute().params as { authorityId: string };
 
 	const { scopes, loading: scopesLoading } = useCurrentOfficerScopes(authorityId);

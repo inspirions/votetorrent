@@ -51,6 +51,13 @@ import ProposedRevisionScreen from "../screens/tasks/ProposedRevisionScreen";
 import ScreenScaffoldsDebugScreen from "../screens/tasks/ScreenScaffoldsDebugScreen";
 import ElectionDetailsScreen from "../screens/elections/ElectionDetailsScreen";
 import RegistrationPolicyScreen from "../screens/elections/RegistrationPolicyScreen";
+// Phase 48 plan 48-21 (D-12) — the three Phase 48 screen modules.
+import RegistrationInboxScreen from "../screens/registration/RegistrationInboxScreen";
+import RegistrationRequestApprovalScreen from "../screens/registration/RegistrationRequestApprovalScreen";
+// BulkImportSyncScreen (48-20) is a named export, not a default export —
+// imported accordingly (a Rule-1 fix: the plan's "default imports" language
+// does not hold for this one file).
+import { BulkImportSyncScreen } from "../screens/registration/BulkImportSyncScreen";
 // Phase 47 plan 47-21 (D-08) — the five Phase 47 screen modules.
 import RegistrantsListScreen from "../screens/registration/RegistrantsListScreen";
 import RegistrantDetailScreen from "../screens/registration/RegistrantDetailScreen";
@@ -461,6 +468,33 @@ export const RootNavigator = () => {
 				name="RegistrationPolicy"
 				component={RegistrationPolicyScreen}
 				options={{ title: t("registrationPolicyEntryTitle") }}
+			/>
+			{/* Phase 48 plan 48-21 (D-12) — the three Phase 48 routes. Pushes from
+			    within Authority Details / the inbox itself, so they use the same
+			    non-modal options={{ title }} shape as RegistrationPolicy and the
+			    Phase 47 block below — never presentation:"modal", never a
+			    CloseButton headerLeft (that shape is reserved for the
+			    ElectionDetails screen family). RegistrationInbox and
+			    RegistrationRequestApproval additionally set their own title via
+			    setOptions (the static title here is the pre-effect frame);
+			    BulkImportSync is bound ONLY here. No headerRight on any of the
+			    three — the inbox sets its own Bulk Import / Sync chip via
+			    setOptions (48-18), and a duplicate header chip is exactly what
+			    47-18 removed from AuthorityPeers. */}
+			<Stack.Screen
+				name="RegistrationInbox"
+				component={RegistrationInboxScreen}
+				options={{ title: t("registrationRequestScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="RegistrationRequestApproval"
+				component={RegistrationRequestApprovalScreen}
+				options={{ title: t("registrationRequestApprovalScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="BulkImportSync"
+				component={BulkImportSyncScreen}
+				options={{ title: t("bulkImportSyncScreenTitle") }}
 			/>
 			{/* Phase 47 plan 47-21 (D-07/D-08/D-09) — the five Phase 47 routes. These are
 			    pushes from within existing modal screens, so they use the

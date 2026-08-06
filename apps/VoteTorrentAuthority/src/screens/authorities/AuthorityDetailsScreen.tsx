@@ -414,6 +414,18 @@ export default function AuthorityDetailsScreen() {
 						}
 					/>
 				</View>
+				{/* Phase 48 plan 48-21 (D-12) — Registration Requests entry row,
+				    following its three siblings' ungated pattern deliberately: no
+				    officer-scope hook, no conditional render, no disabled state. The
+				    row is navigation, not access control — RegistrationInboxScreen owns
+				    its own read-only banner and visible-but-disabled write controls. */}
+				<View testID="authority-details-registration-requests-entry">
+					<InfoCard
+						title={t("registrationRequestScreenTitle")}
+						icon="chevron-right"
+						onPress={() => navigation.navigate("RegistrationInbox", { authorityId: authority.id })}
+					/>
+				</View>
 				<View testID="authority-details-polling-devices-entry">
 					<InfoCard
 						title={t("pollingDeviceScreenTitle")}
