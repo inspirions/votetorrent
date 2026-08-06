@@ -72,9 +72,9 @@
  */
 
 import { mkdtemp, readdir, readFile, writeFile, rm } from 'node:fs/promises'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { expect } from 'chai'
@@ -749,3 +749,129 @@ export function runRegistrationRequestTransportConformance (testCase: Conformanc
 // #endregion SHARED-CONFORMANCE-BODY
 
 for (const testCase of CONFORMANCE_BINDINGS) runRegistrationRequestTransportConformance(testCase)
+
+// ---------------------------------------------------------------------------
+// Task 3: structural gates. These read THIS FILE's own source text (and, for
+// gate three, the filesystem binding's source), so the three properties that
+// make this suite meaningful — the body is shared, the peer-cluster slot is
+// reserved and skipped, and both bindings route through one intake
+// declaration and one digest issuer — are permanent regression tests rather
+// than paragraphs someone has to remember to read. Located relative to the
+// workspace root (walking up from process.cwd() for a directory containing
+// both package.json and .git), not relative to an assumed working
+// directory, so these gates pass whether mocha is invoked from the repo
+// root or from this package's own directory.
+// ---------------------------------------------------------------------------
+function findRepoRoot (startDir: string): string {
+  let dir = startDir
+  for (let i = 0; i < 64; i++) {
+    if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, '.git'))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  throw new Error('findRepoRoot: reached the filesystem root without finding a directory containing both package.json and .git')
+}
+
+const REPO_ROOT = findRepoRoot(process.cwd())
+const THIS_FILE_PATH = join(REPO_ROOT, 'packages', 'vote-engine', 'test', 'registration-request-transport-conformance.spec.ts')
+const FILESYSTEM_BINDING_SOURCE_PATH = join(
+  REPO_ROOT, 'packages', 'vote-engine', 'src', 'registration', 'transport', 'filesystem-registration-transport.ts'
+)
+
+// These gates read THIS FILE's own source text, so every marker string they
+// search for is built via concatenation rather than written as one
+// contiguous literal — otherwise the gate's OWN source line would itself be
+// counted as an extra occurrence of the very marker it is trying to count
+// (the same self-collision class recorded in 48-09/48-10's SUMMARYs for
+// their grep gates). Concatenation is a correctness requirement here, not a
+// style choice: a gate that miscounts its own text would be silently
+// vacuous or silently over-strict depending on which direction it drifts.
+const REGION_START_MARKER = '// #' + 'region SHARED-CONFORMANCE-BODY'
+const REGION_END_MARKER = '// #' + 'endregion SHARED-CONFORMANCE-BODY'
+const CONFORMANCE_FN_NAME = 'runRegistrationRequestTransportConf' + 'ormance'
+const CREATE_ISSUER_FN_TEXT = 'function ' + 'createDigestIssuer'
+const VOTE_ENGINE_BARREL_SPECIFIER = '@votetorrent' + '/vote-engine'
+const FORBIDDEN_PEER_CLUSTER_TERMS = [
+  'p2p-registration' + '-transport',
+  'Cadre' + 'Node',
+  'str' + 'and',
+  'optimys' + 'tic',
+  'db-' + 'p2p'
+]
+const INTAKE_INTERFACE_DECLARATION_TEXT = 'export interface I' + 'RegistrationRequestIntake'
+
+describe('registration-request transport conformance: structure', () => {
+  const thisFileSource = readFileSync(THIS_FILE_PATH, 'utf8')
+
+  it('declares the conformance body exactly once and shares it across every binding', () => {
+    // D-01's claim is that the implementations are INTERCHANGEABLE, and the
+    // only evidence for interchangeability is that the SAME assertions ran
+    // against both. Two copied bodies that happen to agree today prove
+    // nothing tomorrow; six literals producing twelve passing tests is what
+    // makes "shared" mechanically true, not aspirational.
+    const start = thisFileSource.indexOf(REGION_START_MARKER)
+    const end = thisFileSource.indexOf(REGION_END_MARKER)
+    expect(start).to.be.greaterThan(-1)
+    expect(end).to.be.greaterThan(start)
+    expect(thisFileSource.split(REGION_START_MARKER).length - 1).to.equal(1)
+    expect(thisFileSource.split(REGION_END_MARKER).length - 1).to.equal(1)
+
+    const region = thisFileSource.slice(start, end)
+    expect((region.match(/\bit\s*\(/g) ?? []).length).to.equal(6)
+    expect((thisFileSource.match(/\bit\s*\(/g) ?? []).length).to.equal(9)
+    expect(thisFileSource.split(CONFORMANCE_FN_NAME).length - 1).to.equal(2)
+
+    expect(/testCase\.label\s*===/.test(region)).to.equal(false)
+    expect(/binding\.label\s*===/.test(region)).to.equal(false)
+    expect(/label\s*===\s*'filesystem'/.test(region)).to.equal(false)
+    expect(/label\s*===\s*'rest'/.test(region)).to.equal(false)
+    expect(/label\s*===\s*'p2p'/.test(region)).to.equal(false)
+    expect(/instanceof\s+(FilesystemRegistrationTransport|RestRegistrationTransport)/.test(region)).to.equal(false)
+  })
+
+  it('reserves the peer-cluster slot as skipped rather than absent, and claims nothing for it', () => {
+    // A skipped branch cannot fail a wave and it cannot pass one either;
+    // 48-23 flips the entry's mode and supplies a real factory; even then,
+    // Node and mocha results are not verification for that leg (D-11 —
+    // this project has repeatedly had "implemented but unproven" read as
+    // "done"). A later reader must not "fix" the skip by deleting it or
+    // flipping it early.
+    expect(/label:\s*'p2p'/.test(thisFileSource)).to.equal(true)
+    expect(/mode:\s*'skip'/.test(thisFileSource)).to.equal(true)
+    expect((thisFileSource.match(/describe\.skip/g) ?? []).length).to.equal(1)
+    expect((thisFileSource.match(/\bit\.skip\s*\(/g) ?? []).length).to.equal(0)
+    expect((thisFileSource.match(/\.only\(/g) ?? []).length).to.equal(0)
+    expect(thisFileSource.includes('cannot fail a wave, and it cannot pass one either')).to.equal(true)
+    expect(thisFileSource.includes('code-complete, unverified')).to.equal(true)
+    for (const term of FORBIDDEN_PEER_CLUSTER_TERMS) {
+      expect(
+        thisFileSource.toLowerCase().includes(term.toLowerCase()),
+        `this plan must import no peer-cluster transport module: found forbidden term ${term}`
+      ).to.equal(false)
+    }
+  })
+
+  it('routes both bindings through one intake declaration and one digest issuer', () => {
+    // Two declarations of the same interface name let two bindings satisfy
+    // DIFFERENT contracts while appearing to satisfy one — precisely the
+    // failure D-01's one-suite/two-bindings requirement exists to prevent.
+    // Sharing one digest issuer is the same discipline applied to bytes
+    // rather than to types.
+    for (const typeName of ['IRegistrationRequestIntake', 'StagedRequest', 'StagedRequestDocument']) {
+      expect(
+        new RegExp(`(interface|type)\\s+${typeName}\\b`).test(thisFileSource),
+        `must not re-declare ${typeName} (imported from the filesystem binding's single declaration)`
+      ).to.equal(false)
+    }
+    expect(thisFileSource.includes("from '../src/registration/transport/filesystem-registration-transport.js'")).to.equal(true)
+    expect(thisFileSource.includes("from '../src/registration/transport/rest-registration-transport.js'")).to.equal(true)
+    expect(thisFileSource.includes(VOTE_ENGINE_BARREL_SPECIFIER)).to.equal(false)
+    expect((thisFileSource.match(/DG1_FIELD_ORDER\s*=\s*Object\.freeze/g) ?? []).length).to.equal(1)
+    expect(thisFileSource.split(CREATE_ISSUER_FN_TEXT).length - 1).to.equal(1)
+    expect(/submittedAt\s*[:=]\s*(new Date|toIso|nowCanonical|Date\.now)/.test(thisFileSource)).to.equal(false)
+
+    const filesystemSource = readFileSync(FILESYSTEM_BINDING_SOURCE_PATH, 'utf8')
+    expect(filesystemSource.includes(INTAKE_INTERFACE_DECLARATION_TEXT)).to.equal(true)
+  })
+})
