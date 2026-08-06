@@ -61,6 +61,32 @@ import type {
  */
 type SignatureOrCallback = Signature | ((digest: Uint8Array) => Promise<Signature>)
 
+/**
+ * L-3 skew guard bounds for `submitRegistrationRequest`'s submitter-supplied
+ * `SubmittedAt` (48-02 `<digest_register>` / 48-07). Named module-level
+ * constants, not inline magic numbers, because both bounds are pinned by a
+ * test from each side (48-07 Task 3, tests 7/8) — a later change to either
+ * has to move a test, not just a comment.
+ *
+ * +5 minutes forward: a submitter's device clock is not the authority's own.
+ * This project has a recorded ~45s emulator/host clock-skew failure (project
+ * memory: device proof clock skew) — the tolerance is deliberately an order
+ * of magnitude wider than that observed drift, so an honest fast clock is
+ * never rejected. Beyond 5 minutes the claim is to have signed AFTER the
+ * authority received the document, which no clock error explains.
+ */
+const SUBMITTED_AT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
+
+/**
+ * -30 days backward: the filesystem courier (48-09) is a BATCH/periodic sync
+ * (doc/registration.md:12) — a staged document may legitimately sit in a
+ * drop directory, and a bulk import prepared from a legacy roll may be
+ * delivered well after it was signed. 30 days accommodates any realistic
+ * courier delay while still bounding what lands in the audit record and in
+ * D-09's median time-to-decision.
+ */
+const SUBMITTED_AT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+
 // 999.1 D-01/D-02: RegistrationEngine mutations allocate Tids through the
 // shared durable, peer-safe allocator (`../database/tid-allocator.js`,
 // namespace 'registration') instead of a process-local `Date.now()` counter
@@ -1637,9 +1663,149 @@ export class RegistrationEngine implements IRegistrationEngine {
   // replace these with real implementations against the schema. A stub MUST
   // throw and MUST NOT return a plausible empty value.
 
-  async submitRegistrationRequest (_init: RegistrationRequestInit, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
-    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
-    throw new Error('submitRegistrationRequest is not implemented')
+  /**
+   * D-02/D-03/D-04: the phase's ceremony-free intake. A prospective
+   * registrant carries no `User` row and no officer scope to seed a signing
+   * session against — so this INSERT runs NO `seedSignedMutation`, holds NO
+   * `SigningNonce`-bearing `AdminSigning` ceremony, and consults no
+   * `IsUserValid`/`userKey`. The row's own requester-key self-signature over
+   * DG-1 (`SignatureValid`) is the ENTIRE authorization gate. Pattern-
+   * matching this method against the five sibling `vrg` ceremonies in this
+   * file (e.g. `createRegistrant` above) would reintroduce the `ProposedX`
+   * context envelope `48-CONTEXT.md`'s D-02 rejects — the exact regression
+   * this phase's design correction exists to prevent.
+   *
+   * L-3 timestamp contract: `SubmittedAt` is `init.submittedAt`, bound
+   * VERBATIM — the submitter's own staging-time value, never engine-
+   * generated — because the offline courier (48-09) signs at staging time
+   * and hands this method an ALREADY-RESOLVED `Signature`, not a callback;
+   * `resolveSign` returns that signature verbatim, so the engine gets no
+   * chance to re-sign anything a regenerated timestamp would invalidate.
+   * `ReceivedAt` is this engine's own `toIsoZDatetime` observation, written
+   * outside every digest, and is bounded against `SubmittedAt` by the named
+   * skew constants above rather than trusted.
+   */
+  async submitRegistrationRequest (
+    init: RegistrationRequestInit,
+    requesterKey: string,
+    signatureOrCallback: SignatureOrCallback
+  ): Promise<string> {
+    this.requireCtx('submitRegistrationRequest')
+    const ctx = this.ctx!
+    try {
+      // A NEW allocator namespace, distinct from 'registration' above — shared
+      // with registerBridgeKey below so a Tid is never reused across the
+      // intake path and the registry path.
+      const tid = await allocateTid(ctx.db, 'registration-request')
+
+      // D-03 issuer normalization. bridgeId binds null (never undefined — a
+      // bound undefined and a bound null are not interchangeable in the
+      // digest).
+      const issuerType = init.issuerType ?? 'registrant'
+      const bridgeId = init.bridgeId ?? null
+
+      // Pre-flight guard: produces an ATTRIBUTABLE error only. BridgeIdValid
+      // remains the actual enforcement boundary — this guard must never be
+      // described as the boundary itself.
+      if (issuerType === 'registrant' && bridgeId !== null) {
+        throw new Error('submitRegistrationRequest: issuerType is registrant but bridgeId is set — a registrant-issued row cannot carry a BridgeId')
+      }
+      if (issuerType === 'bridge' && bridgeId === null) {
+        throw new Error('submitRegistrationRequest: issuerType is bridge but bridgeId is null — a bridge-issued row must carry a BridgeId')
+      }
+
+      // The identical serialized string flows into Digest(:payload) AND the
+      // Payload column, so PayloadCidValid's own Digest(Payload)
+      // recomputation matches (any re-serialization between the two would
+      // produce a different cid).
+      const payload = JSON.stringify(init.payload)
+      const payloadCidRow = await ctx.db.prepare('select Digest(:payload) as d').get({ payload })
+      if (!payloadCidRow || payloadCidRow.d == null) {
+        throw new Error('submitRegistrationRequest: Digest() returned null for Payload — crypto plugin not registered?')
+      }
+      const payloadCid = payloadCidRow.d as string
+
+      // L-3: SubmittedAt is the SUBMITTER's own value, bound VERBATIM.
+      // NEVER toIsoZDatetime(new Date()) / nowCanonicalDatetime() here — see
+      // the doc comment above.
+      const submittedAt = init.submittedAt
+      if (Number.isNaN(Date.parse(submittedAt))) {
+        // Attributable-error guard only; SubmittedAtValid/SubmittedAtSaneValid remain the enforcement.
+        throw new Error(`submitRegistrationRequest: init.submittedAt does not parse as a date: ${submittedAt}`)
+      }
+
+      // ReceivedAt: the AUTHORITY's OWN observation of intake time, inside NO digest.
+      const receivedAt = toIsoZDatetime(Date.now())
+
+      // Skew guard: BOUNDS the submitter-supplied SubmittedAt, does not
+      // authenticate it — inside the window it remains a submitter-chosen
+      // value covered only by the submitter's own signature (T-48-07-12).
+      const submittedAtMs = Date.parse(submittedAt)
+      const receivedAtMs = Date.parse(receivedAt)
+      if (submittedAtMs - receivedAtMs > SUBMITTED_AT_MAX_FUTURE_SKEW_MS) {
+        throw new Error(
+          `submitRegistrationRequest: submittedAt (${submittedAt}) is more than ${SUBMITTED_AT_MAX_FUTURE_SKEW_MS}ms ahead of receivedAt (${receivedAt})`
+        )
+      }
+      if (receivedAtMs - submittedAtMs > SUBMITTED_AT_MAX_AGE_MS) {
+        throw new Error(
+          `submitRegistrationRequest: submittedAt (${submittedAt}) is more than ${SUBMITTED_AT_MAX_AGE_MS}ms before receivedAt (${receivedAt})`
+        )
+      }
+
+      // D-02's ONLY authorization gate: DG-1, field for field —
+      // Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt).
+      // NO context.Tid, NO ReceivedAt (the requester never observed ReceivedAt at signing time).
+      const digestRow = await ctx.db
+        .prepare('select Digest(:id, :rowAuthorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt) as d')
+        .get({
+          id: init.id,
+          rowAuthorityId: init.authorityId,
+          requesterKey,
+          issuerType,
+          bridgeId,
+          payloadCid,
+          submittedAt
+        })
+      if (!digestRow || digestRow.d == null) {
+        throw new Error('submitRegistrationRequest: Digest() returned null — crypto plugin not registered?')
+      }
+      const digestBytes = digestToBytes(digestRow.d)
+      const signature = await this.resolveSign(signatureOrCallback)(digestBytes)
+      // D-02/D-04: `signature.signerUserId` is NEVER read here — a
+      // prospective registrant has no user id, the field is a type artifact
+      // on this path, and touching it is how a User dependency would creep
+      // back in.
+
+      // No signing session exists at INSERT — signingNonce binds null.
+      await ctx.db.exec(
+        `insert into RegistrationRequest (
+          Id, AuthorityId, RequesterKey, IssuerType, BridgeId, Payload, PayloadCid, Status, SubmittedAt, ReceivedAt, RequesterSignature
+        )
+        with context SigningNonce = :signingNonce, Tid = ${tid}
+        values (:id, :rowAuthorityId, :requesterKey, :issuerType, :bridgeId, :payload, :payloadCid, :status, :submittedAt, :receivedAt, :requesterSignature)`,
+        {
+          id: init.id,
+          rowAuthorityId: init.authorityId,
+          // The requesterKey PARAMETER — not signature.signerKey — because DG-1
+          // digested the parameter and the CHECK verifies against the column.
+          requesterKey,
+          issuerType,
+          bridgeId,
+          payload,
+          payloadCid,
+          status: 'p',
+          submittedAt,
+          receivedAt,
+          requesterSignature: signature.signature,
+          signingNonce: null
+        }
+      )
+
+      return init.id
+    } catch (err) {
+      this.rethrow(err, 'submitRegistrationRequest')
+    }
   }
 
   async registerBridgeKey (_init: RegistrationBridgeKeyInit, _signatureOrCallback: SignatureOrCallback): Promise<void> {
