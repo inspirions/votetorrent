@@ -30,10 +30,14 @@ import 'reflect-metadata'
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import { createTestNetwork, addTestAuthority, seedSignedMutation, makeTestSignature } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, seedSignedMutation, makeTestSignature, makeTestSignCallback } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
+import type { TestKeyPair } from './fixtures/keys.js'
 import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
-import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
+import { toIsoZDatetime, reZuluDatetime } from '../src/signing/ceremony-helpers.js'
+import { RegistrationEngine } from '../src/registration/registration-engine.js'
+import type { EngineContext } from '../src/types.js'
+import type { RegisterInit, RegistrationBridgeKeyInit, RegistrationRequestInit, Signature } from '@votetorrent/vote-core'
 
 type TestAuthority = Awaited<ReturnType<typeof addTestAuthority>>
 
@@ -583,5 +587,341 @@ describe('registration-request schema: RegistrationRequest bridge issuer binding
       caught = err
     }
     expect(caught, 'INSERT must throw: a registrant-issued row cannot carry a BridgeId').to.be.instanceOf(Error)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 48-07 — engine-level round-trips (D-02, D-03, D-04)
+// ---------------------------------------------------------------------------
+
+describe('registration-request engine: intake and bridge-key registry', () => {
+  // 48-04 (above) proved the CHECKs through raw SQL — no engine method existed at wave 3. These
+  // tests prove the ENGINE METHODS (submitRegistrationRequest / registerBridgeKey / listBridgeKeys)
+  // drive those same CHECKs correctly through REAL secp256k1 signatures, for both issuer types,
+  // for both signing modes (callback and pre-resolved), and across the skew window's boundaries.
+
+  /**
+   * A digest-bytes -> Signature callback for submitRegistrationRequest's callback-signer path.
+   * The empty `signerUserId` is deliberate and is the D-02 point under test: a prospective
+   * registrant has no user id, the field is a type artifact on this path, and the engine must
+   * NEVER read it (Task 1's grep gate enforces the engine side of this).
+   */
+  function makeCallbackSigner (keyPair: TestKeyPair): (digest: Uint8Array) => Promise<Signature> {
+    const privBytes = hexToBytes(keyPair.privateHex)
+    return async (digest: Uint8Array): Promise<Signature> => {
+      // WR-10: two-argument secp256k1.sign(digest, priv) — no explicit prehash option, relying on
+      // @noble/curves v2's prehash:true default (matches authority-transport.spec.ts:31-40).
+      const sig = secp256k1.sign(digest, privBytes)
+      return { signature: bytesToHex(sig), signerKey: keyPair.publicHex, signerUserId: '' }
+    }
+  }
+
+  /**
+   * Computes the DG-1 digest INDEPENDENTLY of the engine — exactly as an injected `RequestDigestFn`
+   * in a real transport binding would (48-09/48-10). Duplicating the expression here is the POINT,
+   * not a smell: it demonstrates that a party which never sees the engine can reproduce the signed
+   * bytes, which is the whole claim tests 6-8 depend on.
+   */
+  async function stagingDigest (
+    ctx: EngineContext,
+    init: { id: string; authorityId: string; payload: RegisterInit; submittedAt: string; issuerType?: string; bridgeId?: string | null },
+    requesterKey: string
+  ): Promise<Uint8Array> {
+    const payload = JSON.stringify(init.payload)
+    const payloadCidRow = await ctx.db.prepare('select Digest(:payload) as d').get({ payload })
+    if (!payloadCidRow || payloadCidRow.d == null) throw new Error('stagingDigest: PayloadCid Digest() returned null')
+    const payloadCid = payloadCidRow.d as string
+    const issuerType = init.issuerType ?? 'registrant'
+    const bridgeId = init.bridgeId === undefined ? null : init.bridgeId
+    const digestRow = await ctx.db
+      .prepare('select Digest(:id, :authorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt) as d')
+      .get({ id: init.id, authorityId: init.authorityId, requesterKey, issuerType, bridgeId, payloadCid, submittedAt: init.submittedAt })
+    if (!digestRow || digestRow.d == null) throw new Error('stagingDigest: SignatureValid Digest() returned null')
+    return digestToBytes(digestRow.d as string)
+  }
+
+  /** Behavioral proof of the D-02 no-ceremony design — see test 1's load-bearing assertion. */
+  async function countAdminSigning (ctx: EngineContext): Promise<number> {
+    const row = await ctx.db.prepare('select count(*) as n from AdminSigning').get({})
+    return Number(row?.n ?? 0)
+  }
+
+  /** Minimal, fully-typed RegisterInit payload — this suite asserts engine/CHECK behaviour, not payload semantics. */
+  function makeTestPayload (authorityId: string): RegisterInit {
+    return {
+      registrant: { id: crypto.randomUUID(), authorityId, expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000) },
+      private: { expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000), details: [] }
+    }
+  }
+
+  function makeRequestInit (authorityId: string, overrides?: Partial<RegistrationRequestInit>): RegistrationRequestInit {
+    return {
+      id: crypto.randomUUID(),
+      authorityId,
+      payload: makeTestPayload(authorityId),
+      submittedAt: toIsoZDatetime(Date.now()),
+      ...overrides
+    }
+  }
+
+  /**
+   * Quereus's canonical stored form for a `datetime` column serializes fractional seconds at
+   * MINIMAL precision — trailing zero digits dropped (`toIsoZDatetime`'s own doc comment) — even on
+   * a plain, non-deferred read-back. Normalizes an expected ISO-Z string down to that same minimal
+   * form before comparing it against a value read back off the row, so a millisecond value that
+   * happens to end in `0` does not produce a false-negative byte-comparison failure.
+   */
+  function stripTrailingZeroMs (isoZ: string): string {
+    let s = isoZ.replace(/Z$/, '')
+    if (s.includes('.')) {
+      s = s.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+    }
+    return `${s}Z`
+  }
+
+  it('submits a registrant-issued request signed by a key that belongs to no User row, creating zero AdminSigning rows', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const requester = randomTestKeyPair()
+    const init = makeRequestInit(auth.authority.id)
+
+    const before = await countAdminSigning(auth.ctx)
+    const returnedId = await engine.submitRegistrationRequest(init, requester.publicHex, makeCallbackSigner(requester))
+    const after = await countAdminSigning(auth.ctx)
+
+    expect(returnedId).to.equal(init.id)
+
+    const row = await auth.ctx.db
+      .prepare('select IssuerType, BridgeId, Status from RegistrationRequest where Id = :id')
+      .get({ id: init.id })
+    expect(row, 'RegistrationRequest row must exist post-call').to.not.be.undefined
+    expect(row?.IssuerType).to.equal('registrant')
+    expect(row?.BridgeId).to.equal(null)
+    expect(row?.Status).to.equal('p')
+
+    const userKeyRow = await auth.ctx.db.prepare('select count(*) as n from UserKey where PubKey = :pubKey').get({ pubKey: requester.publicHex })
+    expect(Number(userKeyRow?.n), 'D-02: requester key must NOT belong to any User (no UserKey row)').to.equal(0)
+
+    // LOAD-BEARING: the behavioral proof of D-02's no-ceremony design, complementing Task 1's grep
+    // gate — a prospective registrant has no User row and no officer scope to seed a ceremony
+    // against, and this call must not seed one on its own initiative either.
+    expect(after, 'submitRegistrationRequest must create ZERO AdminSigning rows').to.equal(before)
+  })
+
+  it('submits a bridge-issued request under a registered bridge key, and the persisted IssuerType and BridgeId keep it machine-distinguishable from a self-submission', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const bridgeKeyPair = randomTestKeyPair()
+    const bridgeInit: RegistrationBridgeKeyInit = {
+      id: crypto.randomUUID(),
+      authorityId: auth.authority.id,
+      label: 'Legacy Roll Importer',
+      key: bridgeKeyPair.publicHex
+    }
+    // Registering a bridge key is an authority act, signed under a 'vrg'-scoped AdminSigning
+    // ceremony (D-03) — categorically different from the requester's own self-signature below.
+    await engine.registerBridgeKey(bridgeInit, makeTestSignCallback(auth.user))
+
+    const init = makeRequestInit(auth.authority.id, { issuerType: 'bridge', bridgeId: bridgeInit.id })
+    const requestId = await engine.submitRegistrationRequest(init, bridgeKeyPair.publicHex, makeCallbackSigner(bridgeKeyPair))
+
+    const row = await auth.ctx.db
+      .prepare('select IssuerType, BridgeId from RegistrationRequest where Id = :id')
+      .get({ id: requestId })
+    // D-03's requirement is DATA-LAYER distinguishability — the markers' persistence is the
+    // assertion under test, not merely the call's success.
+    expect(row?.IssuerType).to.equal('bridge')
+    expect(row?.BridgeId).to.equal(bridgeInit.id)
+
+    const keys = await engine.listBridgeKeys(auth.authority.id)
+    const found = keys.find((k) => k.id === bridgeInit.id)
+    expect(found, 'listBridgeKeys must return the just-registered key').to.not.be.undefined
+    expect(found?.key).to.equal(bridgeKeyPair.publicHex)
+    expect(found?.label).to.equal('Legacy Roll Importer')
+  })
+
+  it('refuses a bridge-issued request whose BridgeId is not a registered bridge key', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const bridgeKeyPair = randomTestKeyPair()
+    const unregisteredBridgeId = crypto.randomUUID()
+    const init = makeRequestInit(auth.authority.id, { issuerType: 'bridge', bridgeId: unregisteredBridgeId })
+
+    // Threat: an unregistered bridge key submitting bulk rows would be an unbounded trust anchor
+    // (T-48-07-02) — bridge keys must be a bounded, authority-registered set.
+    let caught: unknown
+    try {
+      await engine.submitRegistrationRequest(init, bridgeKeyPair.publicHex, makeCallbackSigner(bridgeKeyPair))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'submitRegistrationRequest must throw: BridgeId does not resolve to a registered RegistrationBridgeKey').to.be.instanceOf(Error)
+
+    const row = await auth.ctx.db.prepare('select count(*) as n from RegistrationRequest where Id = :id').get({ id: init.id })
+    expect(Number(row?.n)).to.equal(0)
+  })
+
+  it('refuses a registrant-issued request carrying a BridgeId', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const requester = randomTestKeyPair()
+    const bogusBridgeId = crypto.randomUUID()
+    const init = makeRequestInit(auth.authority.id, { issuerType: 'registrant', bridgeId: bogusBridgeId })
+
+    // Threat: a bridge assertion masquerading as a voter's own cryptographically attributed act.
+    // Deliberately agnostic about WHICH gate objects (the pre-flight guard or BridgeIdValid) — the
+    // contract under test is that it cannot happen, not which layer stops it.
+    let caught: unknown
+    try {
+      await engine.submitRegistrationRequest(init, requester.publicHex, makeCallbackSigner(requester))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'submitRegistrationRequest must throw: a registrant-issued row cannot carry a BridgeId').to.be.instanceOf(Error)
+
+    const row = await auth.ctx.db.prepare('select count(*) as n from RegistrationRequest where Id = :id').get({ id: init.id })
+    expect(Number(row?.n)).to.equal(0)
+  })
+
+  it('registers a bridge key through one vrg-scoped AdminSigning ceremony', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const bridgeKeyPair = randomTestKeyPair()
+    const bridgeInit: RegistrationBridgeKeyInit = {
+      id: crypto.randomUUID(),
+      authorityId: auth.authority.id,
+      label: 'Bulk Import Bridge',
+      key: bridgeKeyPair.publicHex
+    }
+
+    const beforeVrg = await auth.ctx.db
+      .prepare("select count(*) as n from AdminSigning where AuthorityId = :authorityId and Scope = 'vrg'")
+      .get({ authorityId: auth.authority.id })
+    await engine.registerBridgeKey(bridgeInit, makeTestSignCallback(auth.user))
+    const afterVrg = await auth.ctx.db
+      .prepare("select count(*) as n from AdminSigning where AuthorityId = :authorityId and Scope = 'vrg'")
+      .get({ authorityId: auth.authority.id })
+
+    // The new row was signed under a 'vrg'-scoped AdminSigning ceremony (T-48-07-09) — never
+    // phrase this as "only a vrg officer can": AdminSigning.SignerKeyValid and
+    // OfficerSignature.OfficerValid are hardcoded stub CHECKs, and AdminSigning.UserIdValid
+    // requires only that the signer be SOME officer at that authority.
+    expect(
+      Number(afterVrg?.n) - Number(beforeVrg?.n),
+      "registerBridgeKey must create exactly one 'vrg'-scoped AdminSigning row"
+    ).to.equal(1)
+  })
+
+  it('accepts a pre-resolved offline signature: a submitter that signed at staging time, before the authority ever saw the request, verifies at INSERT', async () => {
+    // THE direct proof that the offline courier path (48-09) is possible, and the reason 48-02's
+    // L-3 exists. 48-04 drives raw SQL with a timestamp it chose itself, and test 1 above uses a
+    // CALLBACK signer — the engine computes a digest and immediately asks the callback to sign it,
+    // which sidesteps the offline case entirely. This is the ONLY test in the phase that exercises
+    // the pre-resolved-signature path. If SubmittedAt ever reverts to being engine-generated, THIS
+    // is the test that fails — in the plan that caused it, not a phase later inside a filesystem
+    // binding.
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const requester = randomTestKeyPair()
+    const init = makeRequestInit(auth.authority.id)
+
+    // Staging-time signing, entirely independent of the engine — exactly what the offline
+    // filesystem courier (48-09) does.
+    const digestBytes = await stagingDigest(auth.ctx, init, requester.publicHex)
+    const resolvedSignature: Signature = {
+      signature: bytesToHex(secp256k1.sign(digestBytes, hexToBytes(requester.privateHex))),
+      signerKey: requester.publicHex,
+      signerUserId: ''
+    }
+
+    const before = await countAdminSigning(auth.ctx)
+    // The engine's ReceivedAt is provably a DIFFERENT instant from SubmittedAt.
+    await new Promise((resolve) => setTimeout(resolve, 25))
+
+    // Pass the resolved Signature VALUE, not a callback — resolveSign returns it verbatim, so the
+    // engine has NO opportunity to re-sign anything a regenerated SubmittedAt would invalidate.
+    const requestId = await engine.submitRegistrationRequest(init, requester.publicHex, resolvedSignature)
+    const after = await countAdminSigning(auth.ctx)
+
+    const row = await auth.ctx.db
+      .prepare('select SubmittedAt, ReceivedAt from RegistrationRequest where Id = :id')
+      .get({ id: requestId })
+    // A plain SELECT of a `datetime` column comes back Z-stripped (T-42-06) — reZuluDatetime
+    // re-stamps the exact stored wall-clock digits as UTC without re-parsing them.
+    const submittedAtBack = reZuluDatetime(row?.SubmittedAt as string)
+    const receivedAtBack = reZuluDatetime(row?.ReceivedAt as string)
+    expect(submittedAtBack).to.equal(stripTrailingZeroMs(init.submittedAt))
+    expect(receivedAtBack).to.match(/Z$/)
+    expect(receivedAtBack).to.not.equal(submittedAtBack)
+    expect(after, 'the pre-resolved offline path must also create ZERO AdminSigning rows').to.equal(before)
+  })
+
+  it('refuses a submittedAt outside the accepted skew window in either direction', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+
+    // Threat: submittedAt is attacker-controlled, and an unbounded value poisons D-09's median
+    // time-to-decision and makes the audit record dishonest.
+    const future = randomTestKeyPair()
+    const futureInit = makeRequestInit(auth.authority.id, { submittedAt: toIsoZDatetime(Date.now() + 10 * 60 * 1000) })
+    const futureDigest = await stagingDigest(auth.ctx, futureInit, future.publicHex)
+    const futureSig: Signature = {
+      signature: bytesToHex(secp256k1.sign(futureDigest, hexToBytes(future.privateHex))),
+      signerKey: future.publicHex,
+      signerUserId: ''
+    }
+    let futureCaught: unknown
+    try {
+      await engine.submitRegistrationRequest(futureInit, future.publicHex, futureSig)
+    } catch (err) {
+      futureCaught = err
+    }
+    expect(futureCaught, 'submitRegistrationRequest must throw: submittedAt 10 minutes in the future exceeds the +5-minute skew ceiling').to.be.instanceOf(Error)
+    const futureRow = await auth.ctx.db.prepare('select count(*) as n from RegistrationRequest where Id = :id').get({ id: futureInit.id })
+    expect(Number(futureRow?.n)).to.equal(0)
+
+    const past = randomTestKeyPair()
+    const pastInit = makeRequestInit(auth.authority.id, { submittedAt: toIsoZDatetime(Date.now() - 60 * 24 * 60 * 60 * 1000) })
+    const pastDigest = await stagingDigest(auth.ctx, pastInit, past.publicHex)
+    const pastSig: Signature = {
+      signature: bytesToHex(secp256k1.sign(pastDigest, hexToBytes(past.privateHex))),
+      signerKey: past.publicHex,
+      signerUserId: ''
+    }
+    let pastCaught: unknown
+    try {
+      await engine.submitRegistrationRequest(pastInit, past.publicHex, pastSig)
+    } catch (err) {
+      pastCaught = err
+    }
+    expect(pastCaught, 'submitRegistrationRequest must throw: submittedAt 60 days in the past exceeds the 30-day skew floor').to.be.instanceOf(Error)
+    const pastRow = await auth.ctx.db.prepare('select count(*) as n from RegistrationRequest where Id = :id').get({ id: pastInit.id })
+    expect(Number(pastRow?.n)).to.equal(0)
+  })
+
+  it('accepts a submittedAt 60 seconds ahead of the authority clock, because honest device clocks drift', async () => {
+    // REGRESSION GUARD on the tolerance itself: this project has a recorded failure where emulator
+    // clocks ran ~45s BEHIND the host and expired consensus transactions (project memory: device
+    // proof clock skew) — a bound tight enough to reject a minute of drift would reject honest
+    // submissions on real hardware. A later "tighten the window" change has to argue with THIS
+    // failing test, not with prose.
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const requester = randomTestKeyPair()
+    const init = makeRequestInit(auth.authority.id, { submittedAt: toIsoZDatetime(Date.now() + 60 * 1000) })
+
+    const digestBytes = await stagingDigest(auth.ctx, init, requester.publicHex)
+    const resolvedSignature: Signature = {
+      signature: bytesToHex(secp256k1.sign(digestBytes, hexToBytes(requester.privateHex))),
+      signerKey: requester.publicHex,
+      signerUserId: ''
+    }
+
+    const requestId = await engine.submitRegistrationRequest(init, requester.publicHex, resolvedSignature)
+
+    const row = await auth.ctx.db.prepare('select SubmittedAt from RegistrationRequest where Id = :id').get({ id: requestId })
+    // T-42-06: a plain SELECT read-back of a `datetime` column is Z-stripped AND normalized to
+    // minimal fractional-second precision.
+    expect(reZuluDatetime(row?.SubmittedAt as string)).to.equal(stripTrailingZeroMs(init.submittedAt))
   })
 })
