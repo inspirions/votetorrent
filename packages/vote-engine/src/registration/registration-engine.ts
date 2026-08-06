@@ -18,6 +18,7 @@ import {
   buildRegistrationRequestListCountSql,
   buildRegistrationRequestListPageSql,
   STATUS_APPROVED,
+  STATUS_PENDING,
   STATUS_REJECTED
 } from './registration-request-query.js'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
@@ -2211,9 +2212,83 @@ export class RegistrationEngine implements IRegistrationEngine {
     return row.c as string
   }
 
-  async getRegistrationTransparencyStats (_authorityId: string): Promise<RegistrationTransparencyStats> {
-    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
-    throw new Error('getRegistrationTransparencyStats is not implemented')
+  /**
+   * D-09: pending/approved/rejected counts plus ONE median time-to-decision
+   * — TWO queries against `RegistrationRequest` columns that already exist.
+   * NO new storage: no column, no table, no cached aggregate, no
+   * memoization.
+   *
+   * Negative space, stated as a decision rather than an omission: this
+   * method computes counts and one median. It computes NO rating, NO
+   * score, NO star value, NO thumbs, and NO comparative figure between
+   * authorities. `doc/registration.md`'s separate rating system is
+   * explicitly out of scope this phase (D-09); the reserved `InviteType`
+   * `'r'` stays reserved and consumed by nothing. An implementer who
+   * believes a "stats surface" implies more than counts + one median is
+   * wrong — the omission IS the decision. A comparative figure between
+   * authorities would also be a PRIVACY violation, not only a scope one: it
+   * would publish a comparative judgement no authority consented to.
+   */
+  async getRegistrationTransparencyStats (authorityId: string): Promise<RegistrationTransparencyStats> {
+    if (!this.ctx) return { pending: 0, approved: 0, rejected: 0 }
+    const ctx = this.ctx
+    try {
+      let pending = 0
+      let approved = 0
+      let rejected = 0
+      for await (const row of ctx.db.eval(
+        'select R.Status as s, count(*) as n from RegistrationRequest R where R.AuthorityId = :authorityId group by R.Status',
+        { authorityId }
+      )) {
+        const n = asNumberOr(row.n, 0, 'getRegistrationTransparencyStats.count')
+        // A status code outside the schema's three-value union is ignored,
+        // not thrown on — StatusValid already forbids it at the schema
+        // level, and a read surface should not be the thing that fails.
+        if (row.s === STATUS_PENDING) pending = n
+        else if (row.s === STATUS_APPROVED) approved = n
+        else if (row.s === STATUS_REJECTED) rejected = n
+      }
+
+      // MEDIAN, measured from ReceivedAt — the authority's OWN observation —
+      // NEVER from SubmittedAt (submitter-supplied, 48-02 L-3). SubmittedAt
+      // could move the published responsiveness figure in either direction
+      // without the authority doing anything differently: forward-dating
+      // shrinks the measured interval and flatters the authority's apparent
+      // responsiveness, backdating inflates it and defames the authority.
+      // Neither number would measure anything the authority did. ReceivedAt
+      // is the SAME clock the triage queue sorts by (T-48-08-11) — the two
+      // must never diverge.
+      const deltas: number[] = []
+      for await (const row of ctx.db.eval(
+        'select R.ReceivedAt as recv, R.DecidedAt as dec from RegistrationRequest R where R.AuthorityId = :authorityId and R.DecidedAt is not null',
+        { authorityId }
+      )) {
+        const delta = Date.parse(row.dec as string) - Date.parse(row.recv as string)
+        // Discard anything not Number.isFinite and any clock-skewed
+        // negative delta — this project has a documented emulator
+        // clock-skew lesson, so a negative delta is an EXPECTED input, not
+        // a hypothetical.
+        if (Number.isFinite(delta) && delta >= 0) deltas.push(delta)
+      }
+      deltas.sort((a, b) => a - b)
+
+      let medianTimeToDecisionMs: number | undefined
+      if (deltas.length > 0) {
+        const mid = Math.floor(deltas.length / 2)
+        medianTimeToDecisionMs = deltas.length % 2 === 1
+          ? deltas[mid]!
+          : Math.round((deltas[mid - 1]! + deltas[mid]!) / 2)
+      }
+      // medianTimeToDecisionMs is therefore ALWAYS either a finite
+      // non-negative integer or undefined — never NaN, never a float,
+      // never Infinity. `undefined` is the UI's "not enough data" case; the
+      // UI renders the number as a short duration, never as a raw
+      // millisecond count.
+
+      return { pending, approved, rejected, medianTimeToDecisionMs }
+    } catch (err) {
+      this.rethrow(err, 'getRegistrationTransparencyStats')
+    }
   }
 
   async rejectRegistrationRequest (_requestId: string, _decision: RegistrationRequestDecision, _signatureOrCallback: SignatureOrCallback): Promise<void> {

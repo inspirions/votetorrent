@@ -17,13 +17,18 @@ import 'reflect-metadata'
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import { createTestNetwork, addTestAuthority, seedSignedMutation } from './fixtures/test-context.js'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createTestNetwork, addTestAuthority, seedSignedMutation, seedAuthorityInvite } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { digestToBytes } from '../src/utils.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { verificationCid } from '@votetorrent/vote-core'
-import type { RegisterInit, RegistrationVerificationChecklistItem, Signature } from '@votetorrent/vote-core'
+import type { RegisterInit, RegistrationVerificationChecklistItem, Scope, Signature } from '@votetorrent/vote-core'
+
+const SRC_REGISTRATION_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'registration')
 
 type TestAuthority = Awaited<ReturnType<typeof addTestAuthority>>
 
@@ -96,6 +101,8 @@ function makeRequesterSigner (): { publicHex: string; signDigest: (digestBase64u
 interface SeedRequestOverrides {
   /** External signer to use instead of a freshly-generated one — e.g. two rows from the SAME requester (D-06 prior-rejection tests). */
   signer?: { publicHex: string; signDigest: (digestBase64url: string) => string }
+  /** Row's own AuthorityId — defaults to `auth.authority.id`. Overridable so the D-09 authority-scoping test can seed a row under a DIFFERENT (but still real) Authority row in the same db. */
+  authorityId?: string
   issuerType?: 'registrant' | 'bridge'
   bridgeId?: string | null
   requesterKey?: string
@@ -135,7 +142,7 @@ interface SeedRequestResult {
  * transition semantics, which the rejection plan (48-12) owns.
  */
 async function seedRequest (auth: TestAuthority, overrides?: SeedRequestOverrides): Promise<SeedRequestResult> {
-  const authorityId = auth.authority.id
+  const authorityId = overrides?.authorityId ?? auth.authority.id
   const id = crypto.randomUUID()
   const signer = overrides?.signer ?? makeRequesterSigner()
   const requesterKey = overrides?.requesterKey ?? signer.publicHex
@@ -222,6 +229,33 @@ async function seedBridgeKey (auth: TestAuthority, opts: { label: string; key: s
     { id, authorityId, label, bridgeKey, revokedAt, nonce, tid }
   )
   return { id }
+}
+
+/**
+ * Creates a REAL second `Authority` row inside the SAME db as `auth` — the
+ * proven `'rad'` recipe mirrored verbatim from `registrant-list.spec.ts`'s
+ * own `createSecondAuthority`, needed to prove `getRegistrationTransparencyStats`
+ * is actually authority-SCOPED by its `AuthorityId = :authorityId` predicate,
+ * not merely db-isolated (two separate `createTestNetwork()` dbs would never
+ * exercise that predicate at all).
+ */
+async function createSecondAuthority (auth: TestAuthority, name: string, domainName: string): Promise<string> {
+  const inviteCtx = await seedAuthorityInvite(auth, {
+    name,
+    domainName,
+    officers: [{ userId: auth.user.id, title: 'Chair', scopes: JSON.stringify(['rad']) }]
+  })
+  await auth.networkEngine.createAuthority(
+    { name, domainName },
+    {
+      officers: [{ init: { name: 'Officer', title: 'Chair', scopes: ['rad'] as Scope[] } }],
+      effectiveAt: inviteCtx.adminEffectiveAt,
+      thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+    },
+    { inviteSlotCid: inviteCtx.inviteSlotCid, inviteSignature: 'a'.repeat(128) }
+  )
+  const row = await auth.ctx.db.prepare('select Id from Authority where Name = :n').get({ n: name })
+  return row!.Id as string
 }
 
 // ---------------------------------------------------------------------------
@@ -584,5 +618,167 @@ describe('getPriorRejections', () => {
 
     const forB = await engine.getPriorRejections(signerB.publicHex)
     expect(forB.map((r) => r.requestId)).to.deep.equal([bRejection.id])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getRegistrationTransparencyStats (D-09)
+// ---------------------------------------------------------------------------
+
+describe('getRegistrationTransparencyStats', () => {
+  it('counts match a seeded mix exactly (3 pending / 2 approved / 1 rejected)', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    for (let i = 0; i < 3; i++) await seedRequest(auth, { status: 'p' })
+    for (let i = 0; i < 2; i++) {
+      await seedRequest(auth, { status: 'a', decidedAt: toIsoZDatetime(Date.now()), decidingOfficerUserId: auth.user.id })
+    }
+    await seedRequest(auth, {
+      status: 'r',
+      decidedAt: toIsoZDatetime(Date.now()),
+      decidingOfficerUserId: auth.user.id,
+      rejectionReason: 'Could not verify identity'
+    })
+
+    const stats = await engine.getRegistrationTransparencyStats(auth.authority.id)
+    expect(stats.pending).to.equal(3)
+    expect(stats.approved).to.equal(2)
+    expect(stats.rejected).to.equal(1)
+  })
+
+  it('an authority with zero requests returns all-zero counts and medianTimeToDecisionMs=undefined — never NaN', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+
+    const stats = await engine.getRegistrationTransparencyStats(auth.authority.id)
+    expect(stats).to.deep.equal({ pending: 0, approved: 0, rejected: 0, medianTimeToDecisionMs: undefined })
+    // Not merely `to.be.undefined` — explicitly assert it is never the OTHER
+    // degenerate numeric value a naive 0/0 division would produce.
+    expect(Number.isNaN(stats.medianTimeToDecisionMs), 'medianTimeToDecisionMs must never be NaN').to.equal(false)
+  })
+
+  it('requests belonging to a DIFFERENT authority do not contribute to counts or the median (authority-scoped)', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const authorityBId = await createSecondAuthority(auth, 'Stats Authority B', 'stats-authority-b.example.com')
+
+    await seedRequest(auth, { status: 'p' })
+    await seedRequest(auth, {
+      authorityId: authorityBId,
+      status: 'a',
+      decidedAt: toIsoZDatetime(Date.now()),
+      decidingOfficerUserId: auth.user.id
+    })
+
+    const stats = await engine.getRegistrationTransparencyStats(auth.authority.id)
+    expect(stats.pending).to.equal(1)
+    expect(stats.approved, 'the approved row belongs to authority B and must not be counted').to.equal(0)
+    expect(stats.medianTimeToDecisionMs, 'authority B\'s decided row must not enter the median').to.equal(undefined)
+  })
+
+  it('an odd count yields the middle delta; an even count yields the rounded mean of the two middle deltas — measured from ReceivedAt, not SubmittedAt', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const base = Date.now()
+
+    // Three rows, deltas (DecidedAt - ReceivedAt) = 10min / 20min / 30min.
+    // submittedAt is deliberately engineered to a CONSTANT 100s offset from
+    // DecidedAt for every row — if the median were (wrongly) computed from
+    // SubmittedAt instead of ReceivedAt, every row would report the SAME
+    // ~100s delta and the median would be ~100000, not the ReceivedAt-based
+    // expectation below. This fails on that wrong basis rather than passing
+    // by coincidence.
+    const rows = [10, 20, 30].map((min) => {
+      const receivedAt = base + min * 1000
+      const decidedAt = receivedAt + min * 60_000
+      return { receivedAt: toIsoZDatetime(receivedAt), decidedAt: toIsoZDatetime(decidedAt), submittedAt: toIsoZDatetime(decidedAt - 100_000) }
+    })
+    for (const r of rows) {
+      await seedRequest(auth, {
+        receivedAt: r.receivedAt,
+        submittedAt: r.submittedAt,
+        status: 'a',
+        decidedAt: r.decidedAt,
+        decidingOfficerUserId: auth.user.id
+      })
+    }
+
+    const oddStats = await engine.getRegistrationTransparencyStats(auth.authority.id)
+    expect(oddStats.medianTimeToDecisionMs).to.equal(20 * 60_000)
+    expect(Number.isInteger(oddStats.medianTimeToDecisionMs)).to.equal(true)
+
+    // A 4th row (delta = 40min) makes the count even: sorted deltas are
+    // [10,20,30,40] minutes -> rounded mean of the two middle = 25min.
+    const fourth = { receivedAt: base + 40 * 1000, decidedAt: base + 40 * 1000 + 40 * 60_000 }
+    await seedRequest(auth, {
+      receivedAt: toIsoZDatetime(fourth.receivedAt),
+      submittedAt: toIsoZDatetime(fourth.decidedAt - 100_000),
+      status: 'a',
+      decidedAt: toIsoZDatetime(fourth.decidedAt),
+      decidingOfficerUserId: auth.user.id
+    })
+
+    const evenStats = await engine.getRegistrationTransparencyStats(auth.authority.id)
+    expect(evenStats.medianTimeToDecisionMs).to.equal(25 * 60_000)
+    expect(Number.isInteger(evenStats.medianTimeToDecisionMs)).to.equal(true)
+  })
+
+  it('a row whose DecidedAt precedes its ReceivedAt (seeded clock skew) is excluded from the median, which stays finite and non-negative', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const base = Date.now()
+
+    // Valid row: 10-minute delta.
+    await seedRequest(auth, {
+      receivedAt: toIsoZDatetime(base),
+      status: 'a',
+      decidedAt: toIsoZDatetime(base + 10 * 60_000),
+      decidingOfficerUserId: auth.user.id
+    })
+    // Skewed row: DecidedAt is BEFORE ReceivedAt (a documented emulator
+    // clock-skew class this project has hit before) — must be discarded,
+    // not poison the statistic with a negative delta.
+    await seedRequest(auth, {
+      receivedAt: toIsoZDatetime(base + 60_000),
+      status: 'a',
+      decidedAt: toIsoZDatetime(base + 60_000 - 45_000),
+      decidingOfficerUserId: auth.user.id
+    })
+
+    const stats = await engine.getRegistrationTransparencyStats(auth.authority.id)
+    expect(stats.medianTimeToDecisionMs).to.equal(10 * 60_000)
+    expect(stats.medianTimeToDecisionMs! >= 0).to.equal(true)
+    expect(Number.isFinite(stats.medianTimeToDecisionMs)).to.equal(true)
+  })
+
+  it('a pending row (null DecidedAt) contributes to pending but is excluded from the median, AND (D-09 negative space) registration-engine.ts carries no rating/score/ranking/stars/thumbs surface', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+    const base = Date.now()
+
+    await seedRequest(auth, {
+      receivedAt: toIsoZDatetime(base),
+      status: 'a',
+      decidedAt: toIsoZDatetime(base + 15 * 60_000),
+      decidingOfficerUserId: auth.user.id
+    })
+    await seedRequest(auth, { status: 'p' })
+
+    const stats = await engine.getRegistrationTransparencyStats(auth.authority.id)
+    expect(stats.pending).to.equal(1)
+    expect(stats.medianTimeToDecisionMs).to.equal(15 * 60_000)
+
+    // D-09 negative space, the grep-checkable form: this fails the SUITE at
+    // TEST time, not only at review time, if a rating/score/rank/thumbs
+    // surface is ever added to the engine source. `rank` alone is
+    // deliberately excluded from the pattern — SQL/JS identifiers
+    // legitimately contain it as a substring (e.g. a future `ranking`
+    // column-name fragment); the word-boundary list below is the enforced
+    // vocabulary.
+    const src = readFileSync(join(SRC_REGISTRATION_DIR, 'registration-engine.ts'), 'utf8')
+    const stripped = src.split('\n').filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n')
+    const forbidden = /\b(rating|ratings|score|scores|ranking|stars|thumbs)\b/i
+    const match = stripped.match(forbidden)
+    expect(match, `forbidden D-09 identifier found: ${match?.[0]}`).to.equal(null)
   })
 })

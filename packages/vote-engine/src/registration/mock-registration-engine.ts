@@ -27,10 +27,13 @@ import type {
   RegistrationBridgeKeyInit,
   RegistrationRequestDecision,
   RegistrationRequestInit,
+  RegistrationRequestIssuerType,
   RegistrationRequestListFilter,
   RegistrationRequestListPage,
   RegistrationRequestListResult,
+  RegistrationRequestListRow,
   RegistrationRequestRead,
+  RegistrationRequestStatus,
   RegistrationTransparencyStats,
   SelectiveLeaf,
   Signature
@@ -70,7 +73,14 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   private readonly electionDisclosurePolicies = new Map<string, ElectionDisclosurePolicy>()
   /** D-14b: in-memory parity for ElectionAttestationPolicy, keyed by `electionId` ALONE (single-row-per-election). */
   private readonly electionAttestationPolicies = new Map<string, ElectionAttestationPolicy>()
-  /** 48-07/D-02: in-memory parity for RegistrationRequest, keyed by requestId. Verifies no signature. */
+  /**
+   * 48-07/48-08 (D-02/D-06/D-09): in-memory parity for RegistrationRequest,
+   * keyed by requestId. Verifies no signature. The decision fields
+   * (decidedAt/decidingOfficerUserId/rejectionReason/verificationCid) are
+   * OPTIONAL — `submitRegistrationRequest` never sets them (a fresh
+   * submission is always pending); only the seeded fixture rows below and a
+   * future rejection-plan mock method populate them.
+   */
   private readonly registrationRequests = new Map<string, {
     id: string
     authorityId: string
@@ -81,12 +91,140 @@ export class MockRegistrationEngine implements IRegistrationEngine {
     bridgeId: string | null
     receivedAt: string
     status: string
+    decidedAt?: string
+    decidingOfficerUserId?: string
+    rejectionReason?: string
+    verificationCid?: string
   }>()
   /** 48-07/D-03: in-memory parity for the RegistrationBridgeKey registry, keyed by bridge key id. */
   private readonly registrationBridgeKeys = new Map<string, RegistrationBridgeKey>()
 
+  constructor () {
+    this.seedRegistrationRequestFixtures()
+  }
+
   buildRegister (): IRegistrationRegisterBuilder {
     return new RegistrationRegisterBuilder(this)
+  }
+
+  /**
+   * 48-08: a small DETERMINISTIC fixture the wave-7 screens (inbox,
+   * approval, stats card) render against with NO real database — this is
+   * the mock's only source of read-surface data until a real
+   * `submitRegistrationRequest`/decision call is made against the SAME
+   * instance. Deliberately includes:
+   *   - one bridge-issued row (`fixture-request-bridge-1`), registered
+   *     against a matching `RegistrationBridgeKey` so `bridgeLabel`
+   *     resolves, AND whose `submittedAt`/`receivedAt` deliberately
+   *     DIVERGE — the two-timestamp case, not only the degenerate one
+   *     where they coincide.
+   *   - one registrant-issued PENDING row
+   *     (`fixture-request-pending-repeat`) sharing its `requesterKey` with
+   *     the rejected row below — the prior-rejection callout fixture.
+   *   - one REJECTED row (`fixture-request-rejected-1`) carrying a reason
+   *     and a deciding officer, same `requesterKey` as the row above.
+   *   - one APPROVED row (`fixture-request-approved-1`) whose
+   *     `payload.registrant.id` resolves to a real fixture `Registrant`
+   *     row seeded alongside it, so `getRegistrationRequest`'s
+   *     existence-probe finds it and reports `registrantId`.
+   */
+  private seedRegistrationRequestFixtures (): void {
+    const authorityId = 'fixture-authority-1'
+    const officerUserId = 'fixture-officer-1'
+    const now = Date.now()
+    const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z')
+
+    const bridgeId = 'fixture-bridge-1'
+    this.registrationBridgeKeys.set(bridgeId, {
+      id: bridgeId,
+      authorityId,
+      label: 'County Clerk Import',
+      key: 'fixture-bridge-key-1'
+    })
+
+    const bridgePayload: RegisterInit = {
+      registrant: { id: 'fixture-registrant-bridge-1', authorityId, expiration: iso(now + 365 * 86_400_000) },
+      public: { lastName: 'Alvarez', firstName: 'Jordan' },
+      private: { expiration: iso(now + 365 * 86_400_000), details: [] }
+    }
+    this.registrationRequests.set('fixture-request-bridge-1', {
+      id: 'fixture-request-bridge-1',
+      authorityId,
+      payload: bridgePayload,
+      // Deliberately DIVERGENT — the claim is 2 hours before the observation.
+      submittedAt: iso(now - 2 * 60 * 60_000),
+      receivedAt: iso(now - 60_000),
+      requesterKey: 'fixture-bridge-key-1',
+      issuerType: 'bridge',
+      bridgeId,
+      status: 'p'
+    })
+
+    const repeatRequesterKey = 'fixture-requester-repeat'
+    const rejectedPayload: RegisterInit = {
+      registrant: { id: 'fixture-registrant-rejected-1', authorityId, expiration: iso(now + 365 * 86_400_000) },
+      public: { lastName: 'Chen', firstName: 'Priya' },
+      private: { expiration: iso(now + 365 * 86_400_000), details: [] }
+    }
+    this.registrationRequests.set('fixture-request-rejected-1', {
+      id: 'fixture-request-rejected-1',
+      authorityId,
+      payload: rejectedPayload,
+      submittedAt: iso(now - 10 * 86_400_000),
+      receivedAt: iso(now - 10 * 86_400_000),
+      requesterKey: repeatRequesterKey,
+      issuerType: 'registrant',
+      bridgeId: null,
+      status: 'r',
+      decidedAt: iso(now - 9 * 86_400_000),
+      decidingOfficerUserId: officerUserId,
+      rejectionReason: 'Could not verify identity against the provided roll entry.'
+    })
+
+    const resubmissionPayload: RegisterInit = {
+      registrant: { id: 'fixture-registrant-resubmission-1', authorityId, expiration: iso(now + 365 * 86_400_000) },
+      public: { lastName: 'Chen', firstName: 'Priya' },
+      private: { expiration: iso(now + 365 * 86_400_000), details: [] }
+    }
+    this.registrationRequests.set('fixture-request-pending-repeat', {
+      id: 'fixture-request-pending-repeat',
+      authorityId,
+      payload: resubmissionPayload,
+      submittedAt: iso(now - 30_000),
+      receivedAt: iso(now - 30_000),
+      requesterKey: repeatRequesterKey,
+      issuerType: 'registrant',
+      bridgeId: null,
+      status: 'p'
+    })
+
+    // Deliberately does NOT also seed `this.registrants` — that Map is
+    // shared with `listRegistrants`/`getRegistrant`, which several
+    // pre-existing specs exercise against a FRESH `new
+    // MockRegistrationEngine()` with exact-count assertions
+    // (`registrant-list-query.spec.ts` et al.); adding an entry there would
+    // silently contaminate those unrelated suites. See
+    // `getRegistrationRequest`'s own comment for how `registrantId`
+    // resolution compensates.
+    const approvedRegistrantId = 'fixture-registrant-approved-1'
+    const approvedPayload: RegisterInit = {
+      registrant: { id: approvedRegistrantId, authorityId, expiration: iso(now + 365 * 86_400_000) },
+      public: { lastName: 'Okafor', firstName: 'Amara' },
+      private: { expiration: iso(now + 365 * 86_400_000), details: [] }
+    }
+    this.registrationRequests.set('fixture-request-approved-1', {
+      id: 'fixture-request-approved-1',
+      authorityId,
+      payload: approvedPayload,
+      submittedAt: iso(now - 5 * 86_400_000),
+      receivedAt: iso(now - 5 * 86_400_000),
+      requesterKey: 'fixture-requester-approved',
+      issuerType: 'registrant',
+      bridgeId: null,
+      status: 'a',
+      decidedAt: iso(now - 4 * 86_400_000),
+      decidingOfficerUserId: officerUserId
+    })
   }
 
   async register (init: RegisterInit, signatureOrCallback: SignatureOrCallback): Promise<void> {
@@ -428,24 +566,145 @@ export class MockRegistrationEngine implements IRegistrationEngine {
     return [...this.registrationBridgeKeys.values()].filter((k) => k.authorityId === authorityId)
   }
 
-  async listRegistrationRequests (_filter?: RegistrationRequestListFilter, _page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult> {
-    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
-    throw new Error('listRegistrationRequests is not implemented')
+  /**
+   * D-06/D-09/T-48-08-11: in-memory parity for the triage list read —
+   * oldest-`receivedAt`-first with an `id` tiebreak (mirrors the real
+   * engine's order key EXACTLY; a mock that sorted by `submittedAt` would
+   * teach the wave-7 screens the WRONG ordering contract), honoring the
+   * SAME three filter dimensions in the SAME AND semantics.
+   */
+  async listRegistrationRequests (filter?: RegistrationRequestListFilter, page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult> {
+    let candidates = [...this.registrationRequests.values()]
+    if (filter?.authorityId !== undefined) candidates = candidates.filter((r) => r.authorityId === filter.authorityId)
+    if (filter?.status !== undefined) candidates = candidates.filter((r) => r.status === filter.status)
+    if (filter?.issuerType !== undefined) candidates = candidates.filter((r) => r.issuerType === filter.issuerType)
+    if (filter?.name !== undefined) {
+      const q = filter.name.toLowerCase()
+      candidates = candidates.filter((r) => {
+        const pub = r.payload.public
+        return (pub?.lastName ?? '').toLowerCase().includes(q) || (pub?.firstName ?? '').toLowerCase().includes(q)
+      })
+    }
+
+    // Oldest-receivedAt-first, id tiebreak — NEVER submittedAt (T-48-08-11).
+    candidates.sort((a, b) => {
+      if (a.receivedAt !== b.receivedAt) return a.receivedAt < b.receivedAt ? -1 : 1
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+    })
+
+    const total = page?.cursor === undefined ? candidates.length : undefined
+    const cursor = page?.cursor
+    const afterCursor = cursor === undefined ? candidates : candidates.filter((r) => r.id > cursor)
+    const pageSize = clampPageSize(page?.pageSize)
+    const pageRows = afterCursor.slice(0, pageSize)
+
+    const rows: RegistrationRequestListRow[] = pageRows.map((r) => {
+      const bridgeLabel = r.bridgeId ? this.registrationBridgeKeys.get(r.bridgeId)?.label : undefined
+      // ONE pass over the map per row here is fine at fixture/mock scale —
+      // the real engine's ONE-grouped-query discipline (T-48-08-06) is what
+      // matters against a real database, not this in-memory parity layer.
+      const hasPriorRejections = [...this.registrationRequests.values()].some(
+        (other) => other.requesterKey === r.requesterKey && other.status === 'r' && other.id !== r.id
+      )
+      return {
+        requestId: r.id,
+        authorityId: r.authorityId,
+        status: r.status as RegistrationRequestStatus,
+        issuerType: r.issuerType as RegistrationRequestIssuerType,
+        bridgeId: r.bridgeId ?? undefined,
+        bridgeLabel,
+        submittedAt: r.submittedAt,
+        receivedAt: r.receivedAt,
+        lastName: r.payload.public?.lastName,
+        firstName: r.payload.public?.firstName,
+        hasPriorRejections
+      }
+    })
+
+    const nextCursor = rows.length === pageSize ? rows[rows.length - 1]!.requestId : undefined
+    return { rows, nextCursor, total }
   }
 
-  async getRegistrationRequest (_requestId: string): Promise<RegistrationRequestRead | undefined> {
-    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
-    throw new Error('getRegistrationRequest is not implemented')
+  /** Mock parity for the point read — verifies NO signature, applies NO CHECK. registrantId mirrors the real engine's existence-probe discipline against the mock's own `registrants` map. */
+  async getRegistrationRequest (requestId: string): Promise<RegistrationRequestRead | undefined> {
+    const r = this.registrationRequests.get(requestId)
+    if (!r) return undefined
+
+    // Mock simplification (declared, not a security-relevant gap — this
+    // class already carries the file's "verifies no signature, enforces no
+    // CHECK" disclaimer throughout): reports payload.registrant.id directly
+    // for an approved row WITHOUT probing `this.registrants` for existence.
+    // The real engine's `getRegistrationRequest` DOES run that probe and it
+    // IS load-bearing there (T-48-08-05) — the mock skips it only so the
+    // fixture rows below don't have to also seed `this.registrants`, which
+    // is shared with `listRegistrants`/`getRegistrant` and exercised by
+    // unrelated pre-existing specs against a fresh, otherwise-empty mock.
+    const registrantId = r.status === 'a' ? r.payload.registrant?.id : undefined
+
+    return {
+      requestId: r.id,
+      authorityId: r.authorityId,
+      requesterKey: r.requesterKey,
+      issuerType: r.issuerType as RegistrationRequestIssuerType,
+      bridgeId: r.bridgeId ?? undefined,
+      bridgeLabel: r.bridgeId ? this.registrationBridgeKeys.get(r.bridgeId)?.label : undefined,
+      payload: r.payload,
+      payloadCid: `mock-payload-cid-${r.id}`,
+      status: r.status as RegistrationRequestStatus,
+      submittedAt: r.submittedAt,
+      receivedAt: r.receivedAt,
+      decidedAt: r.decidedAt,
+      decidingOfficerUserId: r.decidingOfficerUserId,
+      rejectionReason: r.rejectionReason,
+      verificationCid: r.verificationCid,
+      // Not recovered in the mock (no D-07 digest primitive without a real
+      // DB) — the mock's own declared blind spot. The real engine's
+      // recoverVerificationChecklist owns this.
+      verificationChecklist: undefined,
+      registrantId
+    }
   }
 
-  async getPriorRejections (_requesterKey: string): Promise<PriorRejection[]> {
-    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
-    throw new Error('getPriorRejections is not implemented')
+  /** D-06: in-memory parity, key-scoped (not authority-scoped), newest-`decidedAt`-first. */
+  async getPriorRejections (requesterKey: string): Promise<PriorRejection[]> {
+    return [...this.registrationRequests.values()]
+      .filter((r) => r.requesterKey === requesterKey && r.status === 'r')
+      .sort((a, b) => {
+        const aAt = a.decidedAt ?? ''
+        const bAt = b.decidedAt ?? ''
+        if (aAt !== bAt) return aAt < bAt ? 1 : -1
+        return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
+      })
+      .map((r) => ({
+        requestId: r.id,
+        rejectedAt: r.decidedAt ?? '',
+        rejectionReason: r.rejectionReason ?? '',
+        decidingOfficerUserId: r.decidingOfficerUserId ?? ''
+      }))
   }
 
-  async getRegistrationTransparencyStats (_authorityId: string): Promise<RegistrationTransparencyStats> {
-    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
-    throw new Error('getRegistrationTransparencyStats is not implemented')
+  /** D-09: in-memory parity — counts + a median measured from receivedAt, matching the real engine's measurement basis. NO rating/score/rank surface. */
+  async getRegistrationTransparencyStats (authorityId: string): Promise<RegistrationTransparencyStats> {
+    const rows = [...this.registrationRequests.values()].filter((r) => r.authorityId === authorityId)
+    const pending = rows.filter((r) => r.status === 'p').length
+    const approved = rows.filter((r) => r.status === 'a').length
+    const rejected = rows.filter((r) => r.status === 'r').length
+
+    const deltas = rows
+      .filter((r) => r.decidedAt !== undefined)
+      .map((r) => Date.parse(r.decidedAt!) - Date.parse(r.receivedAt))
+      .filter((d) => Number.isFinite(d) && d >= 0)
+      .sort((a, b) => a - b)
+
+    let medianTimeToDecisionMs: number | undefined
+    if (deltas.length > 0) {
+      const mid = Math.floor(deltas.length / 2)
+      medianTimeToDecisionMs = deltas.length % 2 === 1
+        ? deltas[mid]!
+        : Math.round((deltas[mid - 1]! + deltas[mid]!) / 2)
+    }
+
+    return { pending, approved, rejected, medianTimeToDecisionMs }
   }
 
   async rejectRegistrationRequest (_requestId: string, _decision: RegistrationRequestDecision, _signatureOrCallback: SignatureOrCallback): Promise<void> {
