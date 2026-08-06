@@ -22,7 +22,9 @@ import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import { createTestNetwork, addTestAuthority, makeTestSignCallback } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
-import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
+import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime } from '../src/signing/ceremony-helpers.js'
+import { seedSignedMutation } from '../src/signing/signed-mutation.js'
+import { allocateTid } from '../src/database/tid-allocator.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
 import { SigningEngine } from '../src/signing/signing-engine.js'
@@ -352,5 +354,170 @@ describe('completeSignature — registrant reject path', () => {
       .prepare(`select Task.IsCompleted from Task join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id where E.RequestId = :requestId`)
       .get({ requestId })
     expect(Number(taskRow!.IsCompleted), 'a rejected task must still close').to.equal(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Task 3 — permanence and reachability. No source file is modified by this task; it proves
+// properties Task 1, 48-02, and 48-08 already own, and its value is that nothing else proves
+// them end to end. Attempts a direct, ceremony-shaped 'r' -> 'a' UPDATE (bypassing the engine,
+// since IRegistrationEngine deliberately exposes no approve method) to prove DecisionValid's
+// single-transition conjunction, not merely rejectRegistrationRequest's own already-decided guard.
+// ---------------------------------------------------------------------------
+
+/**
+ * Attempts a fully ceremony-shaped UPDATE RegistrationRequest set Status = :toStatus, built the
+ * SAME way rejectRegistrationRequest/finalizeRegistrantApproval build theirs (real seedSignedMutation
+ * ceremony, restoreCanonicalDatetime-rebound SubmittedAt/ReceivedAt). Used ONLY to prove
+ * DecisionValid's own `old.Status = 'p'` conjunct rejects a transition off an already-decided row —
+ * a real signed digest changes nothing when the OLD status disqualifies the row.
+ */
+async function attemptDirectStatusFlip (auth: TestAuthority, requestId: string, toStatus: 'a' | 'r'): Promise<void> {
+  const ctx = auth.ctx
+  const row = await ctx.db
+    .prepare('select AuthorityId, SubmittedAt, ReceivedAt from RegistrationRequest where Id = :id')
+    .get({ id: requestId })
+  const authorityId = row!.AuthorityId as string
+  const submittedAt = restoreCanonicalDatetime(row!.SubmittedAt as string)
+  const receivedAt = restoreCanonicalDatetime(row!.ReceivedAt as string)
+  const tid = await allocateTid(ctx.db, 'registration-request')
+  const decidedAt = toIsoZDatetime(Date.now())
+  const decidedAtForDigest = toDeferredCheckDatetime(decidedAt)
+  const verificationCidVal = 'test-direct-flip-cid'
+  const rejectionReason = toStatus === 'r' ? 'direct flip attempt' : null
+  const digestExpr = 'select Digest(:tid, :requestId, :status, :verificationCid, :decidedAt, :decidingOfficerUserId, :rejectionReason) as d'
+  const digestParams = {
+    tid,
+    requestId,
+    status: toStatus,
+    verificationCid: verificationCidVal,
+    decidedAt: decidedAtForDigest,
+    decidingOfficerUserId: auth.user.id,
+    rejectionReason,
+  }
+  const nonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, makeTestSignCallback(auth.user))
+  await ctx.db.exec(
+    `update RegistrationRequest
+     with context SigningNonce = :signingNonce, Tid = ${tid}
+     set Status = :status, VerificationCid = :verificationCid, DecidedAt = :decidedAt, DecidingOfficerUserId = :decidingOfficerUserId,
+         RejectionReason = :rejectionReason, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+     where Id = :requestId`,
+    {
+      signingNonce: nonce,
+      status: toStatus,
+      verificationCid: verificationCidVal,
+      decidedAt,
+      decidingOfficerUserId: auth.user.id,
+      rejectionReason,
+      submittedAt,
+      receivedAt,
+      requestId,
+    }
+  )
+}
+
+describe('a rejected request is permanent', () => {
+  it('NoDelete rejects a delete attempt, and the row survives', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    await rejectRequest(auth, requestId, { rejectionReason: 'Photo ID mismatch' })
+
+    let threw = false
+    try {
+      await auth.ctx.db.exec('delete from RegistrationRequest where Id = :id', { id: requestId })
+    } catch {
+      threw = true
+    }
+    expect(threw, 'a delete of a decided RegistrationRequest must be rejected by NoDelete').to.be.true
+
+    // Assert on the row's CONTINUED EXISTENCE, not merely that the statement threw.
+    const countRow = await auth.ctx.db.prepare('select count(*) as n from RegistrationRequest where Id = :id').get({ id: requestId })
+    expect(Number(countRow!.n), 'the row must still exist after the rejected delete attempt').to.equal(1)
+  })
+
+  it('admits no further update — a second reject throws, a direct r->a flip is rejected by DecisionValid, and stored decision fields survive byte-identical', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    await rejectRequest(auth, requestId, { rejectionReason: 'Original reason' })
+
+    let secondRejectThrew = false
+    try {
+      await rejectRequest(auth, requestId, { rejectionReason: 'Second reason' })
+    } catch {
+      secondRejectThrew = true
+    }
+    expect(secondRejectThrew, 'a second rejectRegistrationRequest on an already-decided row must throw').to.be.true
+
+    let directFlipThrew = false
+    try {
+      // old.Status = 'p' is false (already 'r') — DecisionValid's conjunction rejects this
+      // regardless of the digest being otherwise well-formed and validly signed.
+      await attemptDirectStatusFlip(auth, requestId, 'a')
+    } catch {
+      directFlipThrew = true
+    }
+    expect(directFlipThrew, "a direct signed update attempting 'r' -> 'a' must be rejected by DecisionValid").to.be.true
+
+    const row = await auth.ctx.db
+      .prepare('select Status, RejectionReason, DecidingOfficerUserId from RegistrationRequest where Id = :id')
+      .get({ id: requestId })
+    expect(row!.Status, 'Status must remain byte-identical after both rejected attempts').to.equal('r')
+    expect(row!.RejectionReason, 'RejectionReason must remain byte-identical after both rejected attempts').to.equal('Original reason')
+    expect(row!.DecidingOfficerUserId, 'DecidingOfficerUserId must remain byte-identical after both rejected attempts').to.equal(auth.user.id)
+  })
+
+  it('leaves Payload unchanged across the decision — PayloadImmutable plus the reject update setting only the decision columns', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    const before = await auth.ctx.db.prepare('select Payload from RegistrationRequest where Id = :id').get({ id: requestId })
+
+    await rejectRequest(auth, requestId, { rejectionReason: 'Payload must survive this' })
+
+    const after = await auth.ctx.db.prepare('select Payload from RegistrationRequest where Id = :id').get({ id: requestId })
+    // This is what lets a later reader see WHAT was refused, not just that something was.
+    expect(after!.Payload, 'Payload must be byte-identical across the decision').to.equal(before!.Payload)
+  })
+})
+
+describe('D-06 reachability — getPriorRejections surfaces the record', () => {
+  it('returns exactly one entry carrying the reason and the deciding officer id after a rejection', async () => {
+    const auth = await setup()
+    const requester = randomTestKeyPair()
+    const { requestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    await rejectRequest(auth, requestId, { rejectionReason: 'Roll entry not found' })
+
+    const engine = new RegistrationEngine(auth.ctx)
+    const rejections = await engine.getPriorRejections(requester.publicHex)
+    expect(rejections.length, 'exactly one prior rejection for this requesterKey').to.equal(1)
+    expect(rejections[0]!.rejectionReason).to.equal('Roll entry not found')
+    expect(rejections[0]!.decidingOfficerUserId).to.equal(auth.user.id)
+  })
+
+  it('surfaces the prior rejection on a brand-new submission from the SAME RequesterKey (keyed by key, not request id)', async () => {
+    const auth = await setup()
+    const requester = randomTestKeyPair()
+    const { requestId: firstRequestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    await rejectRequest(auth, firstRequestId, { rejectionReason: 'Address could not be verified' })
+
+    // A brand-new submission from the SAME RequesterKey — a DIFFERENT request id.
+    const { requestId: secondRequestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    expect(secondRequestId, 'the fresh submission must be a genuinely new request id').to.not.equal(firstRequestId)
+
+    const engine = new RegistrationEngine(auth.ctx)
+    const rejections = await engine.getPriorRejections(requester.publicHex)
+    expect(rejections.map((r) => r.requestId)).to.deep.equal([firstRequestId])
+    expect(rejections.map((r) => r.requestId), "the new request's own id must NOT appear in prior rejections").to.not.include(secondRequestId)
+  })
+
+  it('returns an empty array for a different RequesterKey — the history does not leak across applicants', async () => {
+    const auth = await setup()
+    const rejectedRequester = randomTestKeyPair()
+    const { requestId } = await submitPendingRequest(auth, { requesterKey: rejectedRequester })
+    await rejectRequest(auth, requestId, { rejectionReason: 'Not eligible in this district' })
+
+    const otherRequester = randomTestKeyPair()
+    const engine = new RegistrationEngine(auth.ctx)
+    const rejections = await engine.getPriorRejections(otherRequester.publicHex)
+    expect(rejections, "a different requesterKey's history must not leak the other applicant's rejection").to.deep.equal([])
   })
 })
