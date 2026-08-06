@@ -2,7 +2,7 @@ import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { SqlValue } from '@quereus/quereus'
 import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
-import { toIsoZDatetime } from '../signing/ceremony-helpers.js'
+import { toIsoZDatetime, toDeferredCheckDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import { verificationCid } from '@votetorrent/vote-core'
@@ -30,6 +30,29 @@ import { BALLOT_HEADER_TID } from '../election/election-engine.js'
 import { CompleteSignatureBuilder } from './builders/index.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { RegistrationEngine } from '../registration/registration-engine.js'
+
+/**
+ * 48-11: reconstructs the EXACT canonical `toIsoZDatetime` byte form (a trailing 'Z' and
+ * fixed 3-digit milliseconds) from a value that has been through a Quereus plain-SELECT
+ * round-trip — which strips the trailing 'Z' AND drops trailing zero fractional digits
+ * (T-42-06). Every write of a `datetime`-typed column in this codebase goes through
+ * `toIsoZDatetime`, which (for a numeric `Timestamp`) always emits EXACTLY 3 fractional
+ * digits via `Date.prototype.toISOString()` — so Quereus's "minimal precision" stripping only
+ * ever REMOVES trailing zeros, never changes a non-zero digit. Padding back up to 3 digits is
+ * therefore a byte-exact reconstruction, not a guess, and is what makes
+ * `finalizeRegistrantApproval`'s decision UPDATE able to rebind `SubmittedAt` without breaking
+ * `RegistrationRequest.SignatureValid`'s unqualified (every-write) re-verification of the
+ * requester's original signature. `reZuluDatetime` alone is insufficient here — it restores
+ * the 'Z' but not the dropped precision digits.
+ */
+function restoreCanonicalDatetime (stored: string): string {
+  const withZ = stored.endsWith('Z') ? stored.slice(0, -1) : stored
+  const dot = withZ.indexOf('.')
+  if (dot < 0) return `${withZ}.000Z`
+  const fraction = withZ.slice(dot + 1)
+  const padded = (fraction + '000').slice(0, 3)
+  return `${withZ.slice(0, dot)}.${padded}Z`
+}
 
 /**
  * SignatureTasksEngine — Phase 05 (TASK-03, TASK-04) implementation.
@@ -880,18 +903,39 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     const ctx = this.ctx!
 
     // Resolve the request by joining the extension row — finalizeBallot's own opening shape.
+    // SubmittedAt/ReceivedAt are read here too: the decision UPDATE further down must explicitly
+    // rebind them (a partial UPDATE that leaves them unbound — or even self-referencing,
+    // `SubmittedAt = SubmittedAt` — makes Quereus re-validate the unqualified
+    // SubmittedAtValid/ReceivedAtValid CHECKs against a Z-STRIPPED reconstruction of the row, a
+    // real, empirically-confirmed defect class this plan discovered; T-42-06 documents the same
+    // stripping for plain reads). restoreCanonicalDatetime (below) reconstructs the exact
+    // fixed-3-digit-millisecond, Z-suffixed byte form every write in this codebase produces via
+    // toIsoZDatetime, which SubmittedAt must match byte-for-byte — RegistrationRequest.SignatureValid
+    // is UNQUALIFIED (re-evaluates on every update, not just insert) and recomputes
+    // Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt) against
+    // the REQUESTER's original signature, so a merely Z-suffixed-but-truncated SubmittedAt would
+    // silently break that verification.
     const extRow = await ctx.db
       .prepare(
-        `select E.RequestId, R.AuthorityId, R.Payload, R.Status
+        `select E.RequestId, R.AuthorityId, R.Payload, R.Status, R.SubmittedAt, R.ReceivedAt
            from RegistrantSignatureTaskExtension E
              join RegistrationRequest R on R.Id = E.RequestId
            where E.TaskId = :taskId`
       )
-      .get({ taskId }) as { RequestId: string; AuthorityId: string; Payload: string; Status: string } | undefined
+      .get({ taskId }) as {
+        RequestId: string
+        AuthorityId: string
+        Payload: string
+        Status: string
+        SubmittedAt: string
+        ReceivedAt: string
+      } | undefined
     if (!extRow) {
       throw new Error(`SignatureTasksEngine.finalizeRegistrantApproval: no RegistrantSignatureTaskExtension for taskId=${taskId}`)
     }
     const requestId = extRow.RequestId
+    const submittedAt = restoreCanonicalDatetime(extRow.SubmittedAt)
+    const receivedAt = restoreCanonicalDatetime(extRow.ReceivedAt)
 
     // A decided request is not re-decidable — DecisionValid enforces this too; this engine-side
     // check exists only to produce an attributable error, not as the actual boundary.
@@ -930,13 +974,23 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // `decidingOfficerUserId` is a DELIBERATE defensive rename — bare `userId` is one of
     // seedSignedMutation's eight reserved bind names and would be silently overwritten by the
     // helper's own ceremony binds (the real Phase 42-03 bug; registration-engine.ts NOTE 1).
+    //
+    // T-42-03: RegistrationRequest.DecisionValid contains a subquery, so it is a DEFERRED CHECK —
+    // Quereus re-derives `new.DecidedAt` from a Temporal.PlainDateTime-coerced snapshot (Z
+    // stripped, fractional seconds at MINIMAL precision) when it re-evaluates at COMMIT. The
+    // digest bound into AdminSigning.Digest (below, via seedSignedMutation) MUST use that SAME
+    // coerced form or DecisionValid's re-derivation will never match the stored Digest — this is
+    // the prior-attempt trap: it surfaces as "CHECK constraint failed: DecisionValid" and reads
+    // like a signature bug, not a datetime-formatting one. The STORED DecidedAt column (the UPDATE
+    // below) still uses the RAW toIsoZDatetime value — only the DIGEST argument is coerced.
+    const decidedAtForDigest = toDeferredCheckDatetime(decidedAt)
     const digestExpr = 'select Digest(:tid, :requestId, :status, :verificationCid, :decidedAt, :decidingOfficerUserId, :rejectionReason) as d'
     const digestParams = {
       tid,
       requestId,
       status: 'a',
       verificationCid: cid,
-      decidedAt,
+      decidedAt: decidedAtForDigest,
       decidingOfficerUserId,
       rejectionReason: null,
     }
@@ -964,15 +1018,23 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     }
 
     await ctx.db.exec(
+      // SubmittedAt/ReceivedAt are explicitly rebound (restoreCanonicalDatetime, above) rather than
+      // left untouched or self-referenced (`SubmittedAt = SubmittedAt`) — empirically, EITHER of
+      // those leaves Quereus's unqualified SubmittedAtValid/ReceivedAtValid CHECKs evaluating a
+      // Z-stripped reconstruction of the row on this UPDATE (a real, previously-undiscovered defect
+      // class this plan surfaced; T-42-06 documents the same stripping for plain reads elsewhere).
       `update RegistrationRequest
        with context SigningNonce = :signingNonce, Tid = ${tid}
-       set Status = 'a', VerificationCid = :verificationCid, DecidedAt = :decidedAt, DecidingOfficerUserId = :decidingOfficerUserId
+       set Status = 'a', VerificationCid = :verificationCid, DecidedAt = :decidedAt, DecidingOfficerUserId = :decidingOfficerUserId,
+           SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
        where Id = :requestId`,
       {
         signingNonce: decisionNonce,
         verificationCid: cid,
         decidedAt,
         decidingOfficerUserId,
+        submittedAt,
+        receivedAt,
         requestId,
       }
     )

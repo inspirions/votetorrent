@@ -1,0 +1,488 @@
+/**
+ * registrant-approval.spec.ts — Phase 48 Plan 11 (D-05, D-07)
+ *
+ * Proves the registrant approval ceremony — "the point of the entire phase" — end-to-end against
+ * the REAL Quereus schema with REAL secp256k1 signatures: seeding (pull-and-seed, idempotent),
+ * materialization (parsed payload, submittedAt, issuerType, bridge label), disambiguation
+ * (requestId-scoped getSignatureDigest/completeSignature, L-3), the unchanged register() outcome
+ * (D-05), and D-07 tamper-evidence — that VerificationCid rides inside the SAME digest the
+ * officer's key actually signs, so a post-hoc checklist edit changes the digest and would break
+ * verification of the officer's own signature. No other spec in this repo proves that the
+ * approval path drives RegistrationEngine.register() UNCHANGED from the officer side.
+ */
+
+import 'reflect-metadata'
+import { expect } from 'chai'
+import { secp256k1 } from '@noble/curves/secp256k1.js'
+import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
+import { createTestNetwork, addTestAuthority, makeTestSignCallback } from './fixtures/test-context.js'
+import { randomTestKeyPair } from './fixtures/keys.js'
+import type { TestKeyPair } from './fixtures/keys.js'
+import { digestToBytes } from '../src/utils.js'
+import { toIsoZDatetime, reZuluDatetime } from '../src/signing/ceremony-helpers.js'
+import { allocateTid } from '../src/database/tid-allocator.js'
+import { RegistrationEngine } from '../src/registration/registration-engine.js'
+import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
+import type { EngineContext } from '../src/types.js'
+import type {
+  RegisterInit,
+  RegistrationRequestInit,
+  RegistrationVerificationChecklistItem,
+  RegistrantSignatureTask,
+  SignatureTask,
+  Signature,
+} from '@votetorrent/vote-core'
+
+type TestAuthority = Awaited<ReturnType<typeof addTestAuthority>>
+
+// ---------------------------------------------------------------------------
+// Module-level helpers
+// ---------------------------------------------------------------------------
+
+function makeNetworkRef () {
+  return {
+    hash: 'test-registrant-approval-hash',
+    name: 'Test Network',
+    relays: [] as string[],
+    primaryAuthorityDomainName: 'test.example',
+  }
+}
+
+async function setup (): Promise<TestAuthority> {
+  const net = await createTestNetwork()
+  return addTestAuthority(net)
+}
+
+/**
+ * WR-10 prehash contract: `secp256k1.sign(digest, priv)` with NO explicit `prehash` option,
+ * relying on @noble/curves v2's default (`prehash:true`) — matches
+ * `authority-transport.spec.ts:31-40` and `registration-request.spec.ts`'s own helper.
+ * Deliberately returns `signerUserId: ''` — a prospective registrant has no user id.
+ */
+function makeCallbackSigner (keyPair: TestKeyPair): (digest: Uint8Array) => Promise<Signature> {
+  const privBytes = hexToBytes(keyPair.privateHex)
+  return async (digest: Uint8Array): Promise<Signature> => {
+    const sig = secp256k1.sign(digest, privBytes)
+    return { signature: bytesToHex(sig), signerKey: keyPair.publicHex, signerUserId: '' }
+  }
+}
+
+function makeTestPayload (authorityId: string, registrantId?: string): RegisterInit {
+  return {
+    registrant: {
+      id: registrantId ?? crypto.randomUUID(),
+      authorityId,
+      expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000),
+    },
+    private: {
+      expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000),
+      details: [],
+    },
+  }
+}
+
+/** Submits one pending RegistrationRequest through the REAL engine method (D-02 intake, 48-07). */
+async function submitPendingRequest (
+  auth: TestAuthority,
+  opts?: { issuerType?: 'registrant' | 'bridge'; bridgeId?: string; requesterKey?: TestKeyPair; registrantId?: string }
+): Promise<{ requestId: string; requester: TestKeyPair; init: RegistrationRequestInit }> {
+  const requester = opts?.requesterKey ?? randomTestKeyPair()
+  const engine = new RegistrationEngine(auth.ctx)
+  const init: RegistrationRequestInit = {
+    id: crypto.randomUUID(),
+    authorityId: auth.authority.id,
+    payload: makeTestPayload(auth.authority.id, opts?.registrantId),
+    submittedAt: toIsoZDatetime(Date.now()),
+    issuerType: opts?.issuerType,
+    bridgeId: opts?.bridgeId,
+  }
+  const requestId = await engine.submitRegistrationRequest(init, requester.publicHex, makeCallbackSigner(requester))
+  return { requestId, requester, init }
+}
+
+/** Registers one bridge key through the REAL D-03 registry ceremony (48-07). */
+async function registerBridge (auth: TestAuthority, label: string): Promise<{ id: string; key: TestKeyPair }> {
+  const key = randomTestKeyPair()
+  const engine = new RegistrationEngine(auth.ctx)
+  const id = crypto.randomUUID()
+  await engine.registerBridgeKey({ id, authorityId: auth.authority.id, label, key: key.publicHex }, makeTestSignCallback(auth.user))
+  return { id, key }
+}
+
+/** Finds the seeded RegistrantSignatureTask for a given requestId out of a pending pull. */
+async function getRegistrantTask (engine: SignatureTasksEngine, requestId: string): Promise<RegistrantSignatureTask> {
+  const tasks = await engine.getRequestedSignatures(true)
+  const found = tasks.find(
+    (t) => t.signatureType === 'registrant' && (t as RegistrantSignatureTask).requestId === requestId
+  ) as RegistrantSignatureTask | undefined
+  expect(found, `registrant task for requestId=${requestId} must be present`).to.not.be.undefined
+  return found!
+}
+
+async function countRows (ctx: EngineContext, sql: string, params: Record<string, unknown> = {}): Promise<number> {
+  const row = await ctx.db.prepare(sql).get(params as Record<string, unknown>)
+  return Number(row?.n ?? 0)
+}
+
+/**
+ * Runs the full accept ceremony for one seeded request under the fixture officer's REAL
+ * secp256k1 key (`makeTestSignCallback`), used as both the header signer and the D-07 reusable
+ * per-digest callback.
+ */
+async function acceptRequest (
+  engine: SignatureTasksEngine,
+  auth: TestAuthority,
+  requestId: string,
+  checklist: RegistrationVerificationChecklistItem[] = ['id']
+): Promise<RegistrantSignatureTask> {
+  const officerSign = makeTestSignCallback(auth.user)
+  const task = await getRegistrantTask(engine, requestId)
+  const digestBytes = await engine.getSignatureDigest(task)
+  const headerSignature = await officerSign(digestBytes)
+  await engine.completeSignature(task, {
+    isAccepted: true,
+    signature: headerSignature,
+    sign: officerSign,
+    decision: { checklist },
+  })
+  return task
+}
+
+/**
+ * Runs the accept ceremony while capturing every digest handed to the reusable `sign` callback,
+ * IN ORDER. `finalizeRegistrantApproval` calls `sign` for DG-2 FIRST (inside `seedSignedMutation`,
+ * before `register()` runs) — so `captured[0]` is always the DG-2 bytes. Resolves the STORED
+ * `AdminSigning.Digest` row whose bytes match those captured bytes exactly (a real DB read-back,
+ * not a locally-computed value) and returns it.
+ */
+async function acceptAndCaptureDecisionDigest (
+  engine: SignatureTasksEngine,
+  auth: TestAuthority,
+  requestId: string,
+  checklist: RegistrationVerificationChecklistItem[]
+): Promise<Uint8Array> {
+  const officerSign = makeTestSignCallback(auth.user)
+  const captured: Uint8Array[] = []
+  const wrappedSign = async (digest: Uint8Array): Promise<Signature> => {
+    captured.push(digest)
+    return officerSign(digest)
+  }
+  const task = await getRegistrantTask(engine, requestId)
+  const headerDigest = await engine.getSignatureDigest(task)
+  const headerSignature = await officerSign(headerDigest)
+  await engine.completeSignature(task, {
+    isAccepted: true,
+    signature: headerSignature,
+    sign: wrappedSign,
+    decision: { checklist },
+  })
+  expect(captured.length, 'DG-2 must be the first digest handed to the reusable sign callback').to.be.greaterThan(0)
+  const dg2Hex = bytesToHex(captured[0]!)
+
+  const matches: string[] = []
+  for await (const row of auth.ctx.db.eval(
+    "select Digest from AdminSigning where Scope = 'vrg' and AuthorityId = :authorityId",
+    { authorityId: auth.authority.id }
+  )) {
+    if (bytesToHex(digestToBytes(row.Digest as string)) === dg2Hex) matches.push(row.Digest as string)
+  }
+  expect(matches.length, 'exactly one STORED AdminSigning row must match the DG-2 bytes the officer signed').to.equal(1)
+  return digestToBytes(matches[0]!)
+}
+
+// ---------------------------------------------------------------------------
+
+describe('registrant approval ceremony', () => {
+  // ---- Seeding (3) ----
+
+  it('seeds one Task, one extension row and one unsigned vrg AdminSigning per pending request, under the signed-in officer userId', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+
+    await engine.getRequestedSignatures(true)
+
+    const taskCount = await countRows(
+      auth.ctx,
+      `select count(*) as n from Task T join RegistrantSignatureTaskExtension E on E.TaskId = T.Id where E.RequestId = :requestId`,
+      { requestId }
+    )
+    expect(taskCount, 'exactly one Task row for this request').to.equal(1)
+
+    const extCount = await countRows(
+      auth.ctx,
+      'select count(*) as n from RegistrantSignatureTaskExtension where RequestId = :requestId',
+      { requestId }
+    )
+    expect(extCount, 'exactly one extension row for this request').to.equal(1)
+
+    const taskRow = await auth.ctx.db
+      .prepare(
+        `select Task.SigningNonce from Task join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id where E.RequestId = :requestId`
+      )
+      .get({ requestId })
+    const nonce = taskRow!.SigningNonce as string
+
+    const signingRow = await auth.ctx.db.prepare('select Scope, UserId from AdminSigning where Nonce = :nonce').get({ nonce })
+    expect(signingRow, 'AdminSigning row must exist for the seeded nonce').to.not.be.undefined
+    expect(signingRow!.Scope, "seeded AdminSigning row's Scope must be vrg").to.equal('vrg')
+    expect(signingRow!.UserId, "seeded AdminSigning row's UserId must equal the signed-in officer's id").to.equal(auth.user.id)
+
+    const officerSigCount = await countRows(auth.ctx, 'select count(*) as n from OfficerSignature where SigningNonce = :nonce', { nonce })
+    expect(officerSigCount, 'the seeded row is UNSIGNED — no OfficerSignature yet').to.equal(0)
+    const adminSigCount = await countRows(auth.ctx, 'select count(*) as n from AdminSignature where SigningNonce = :nonce', { nonce })
+    expect(adminSigCount, 'the seeded row is UNSIGNED — no AdminSignature yet').to.equal(0)
+  })
+
+  it('is idempotent — a second pull creates no duplicate Task, extension or AdminSigning row', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+
+    const countsFor = async (): Promise<[number, number, number]> => {
+      const taskCount = await countRows(
+        auth.ctx,
+        `select count(*) as n from Task T join RegistrantSignatureTaskExtension E on E.TaskId = T.Id where E.RequestId = :requestId`,
+        { requestId }
+      )
+      const extCount = await countRows(auth.ctx, 'select count(*) as n from RegistrantSignatureTaskExtension where RequestId = :requestId', { requestId })
+      const adminCount = await countRows(auth.ctx, "select count(*) as n from AdminSigning where Scope = 'vrg' and AuthorityId = :authorityId", {
+        authorityId: auth.authority.id,
+      })
+      return [taskCount, extCount, adminCount]
+    }
+
+    await engine.getRequestedSignatures(true)
+    const before = await countsFor()
+
+    await engine.getRequestedSignatures(true)
+    const after = await countsFor()
+
+    expect(after, 'a second pull-and-seed must create no duplicate Task/extension/AdminSigning row').to.deep.equal(before)
+  })
+
+  it('does not seed a task for a request that is no longer pending', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+    await acceptRequest(engine, auth, requestId)
+
+    // Pull again post-decision — the request's Status is no longer 'p', so the seed step's own
+    // `where R.Status = 'p'` clause must skip it.
+    await engine.getRequestedSignatures(true)
+
+    const taskCount = await countRows(
+      auth.ctx,
+      `select count(*) as n from Task T join RegistrantSignatureTaskExtension E on E.TaskId = T.Id where E.RequestId = :requestId`,
+      { requestId }
+    )
+    expect(taskCount, 'no additional registrant Task rows for a decided request').to.equal(1)
+  })
+
+  // ---- Materialization (3) ----
+
+  it('returns a RegistrantSignatureTask carrying the parsed RegisterInit, submittedAt and issuerType', async () => {
+    const auth = await setup()
+    const { requestId, init } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    const task = await getRegistrantTask(engine, requestId)
+    expect(task.requestId).to.equal(requestId)
+    expect(task.issuerType).to.equal('registrant')
+    // T-42-06: a plain SELECT read-back of a `datetime` column comes back Z-stripped and at
+    // minimal fractional precision — reZuluDatetime + a trailing-zero-agnostic string compare.
+    expect(reZuluDatetime(task.submittedAt).replace(/0+Z$/, 'Z')).to.equal(init.submittedAt.replace(/0+Z$/, 'Z'))
+    expect(task.payload, 'the JSON round-trip must reproduce the submitted RegisterInit, not merely a string').to.deep.equal(init.payload)
+  })
+
+  it('surfaces issuerType bridge and the registry label for a bridge-issued request', async () => {
+    const auth = await setup()
+    const bridge = await registerBridge(auth, 'Legacy Roll Importer')
+    const { requestId } = await submitPendingRequest(auth, { issuerType: 'bridge', bridgeId: bridge.id, requesterKey: bridge.key })
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    const task = await getRegistrantTask(engine, requestId)
+    // D-03: issuerType, NOT bridgeLabel, is the only authoritative issuer signal — bridgeLabel is
+    // present here only because the registry lookup found a label for this bridge row.
+    expect(task.issuerType).to.equal('bridge')
+    expect(task.bridgeLabel).to.equal('Legacy Roll Importer')
+  })
+
+  it('falls back to the base task instead of throwing when the extension row is missing', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    const orphan = await auth.ctx.db
+      .prepare(`select Task.Id from Task join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id where E.RequestId = :requestId`)
+      .get({ requestId })
+    expect(orphan, 'the seeded Task must exist before orphaning it').to.not.be.undefined
+    const orphanTaskId = orphan!.Id as string
+
+    // Schema note: RegistrantSignatureTaskExtension.DeleteValid only permits deleting the
+    // extension row once its Task is already completed — a still-pending, extension-missing Task
+    // cannot be constructed at all (ExtensionExists is a deferred, always-on CHECK). Complete the
+    // Task directly (bypassing the accept ceremony — this proves the READ-side fallback, not the
+    // ceremony), then delete the extension row, leaving a genuinely orphaned completed Task row.
+    // Reading with pending=false is what makes the orphaned completed Task visible to this read.
+    const completeTid = await allocateTid(auth.ctx.db, 'registration-request')
+    await auth.ctx.db.exec(
+      'update Task with context IsMutationValid = true, Tid = :tid set IsCompleted = 1 where Id = :id',
+      { id: orphanTaskId, tid: completeTid }
+    )
+    const deleteTid = await allocateTid(auth.ctx.db, 'registration-request')
+    await auth.ctx.db.exec(
+      'delete from RegistrantSignatureTaskExtension with context Tid = :tid where TaskId = :taskId',
+      { taskId: orphanTaskId, tid: deleteTid }
+    )
+
+    let tasks: SignatureTask[] | undefined
+    let threw = false
+    try {
+      tasks = await engine.getRequestedSignatures(false)
+    } catch {
+      threw = true
+    }
+    expect(threw, 'a missing extension row must never throw — it must take down the whole task inbox otherwise').to.be.false
+
+    const orphanEntry = tasks!.find((t) => t.signatureType === 'registrant' && !('requestId' in t))
+    expect(orphanEntry, 'the orphaned Task must degrade to a base task, not be silently dropped').to.not.be.undefined
+    expect((orphanEntry as RegistrantSignatureTask).requestId, "a base-task fallback's requestId must be undefined").to.be.undefined
+  })
+
+  // ---- Disambiguation (2) — two pending requests for the same officer, the ordinary case ----
+
+  it('getSignatureDigest returns the digest belonging to the requested request, not an arbitrary pending task', async () => {
+    const auth = await setup()
+    const { requestId: r1 } = await submitPendingRequest(auth)
+    const { requestId: r2 } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    const task1 = await getRegistrantTask(engine, r1)
+    const task2 = await getRegistrantTask(engine, r2)
+
+    // L-3: unscoped, the officer would be shown the wrong request's digest to sign.
+    const digest1 = await engine.getSignatureDigest(task1)
+    const digest2 = await engine.getSignatureDigest(task2)
+    expect(bytesToHex(digest1)).to.not.equal(bytesToHex(digest2))
+
+    const row1 = await auth.ctx.db
+      .prepare(
+        `select A.Digest from AdminSigning A join Task T on T.SigningNonce = A.Nonce
+           join RegistrantSignatureTaskExtension E on E.TaskId = T.Id where E.RequestId = :requestId`
+      )
+      .get({ requestId: r1 })
+    const row2 = await auth.ctx.db
+      .prepare(
+        `select A.Digest from AdminSigning A join Task T on T.SigningNonce = A.Nonce
+           join RegistrantSignatureTaskExtension E on E.TaskId = T.Id where E.RequestId = :requestId`
+      )
+      .get({ requestId: r2 })
+
+    expect(bytesToHex(digestToBytes(row1!.Digest as string)), "task1's digest must equal its own seeded AdminSigning.Digest").to.equal(bytesToHex(digest1))
+    expect(bytesToHex(digestToBytes(row2!.Digest as string)), "task2's digest must equal its own seeded AdminSigning.Digest").to.equal(bytesToHex(digest2))
+  })
+
+  it('completeSignature completes the Task belonging to the request under review', async () => {
+    const auth = await setup()
+    const { requestId: r1 } = await submitPendingRequest(auth)
+    const { requestId: r2 } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    await acceptRequest(engine, auth, r2)
+
+    const isCompleted = async (requestId: string): Promise<number> => {
+      const row = await auth.ctx.db
+        .prepare(`select Task.IsCompleted from Task join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id where E.RequestId = :requestId`)
+        .get({ requestId })
+      return Number(row!.IsCompleted)
+    }
+
+    expect(await isCompleted(r2), 'the accepted request (r2) must be completed').to.equal(1)
+    expect(await isCompleted(r1), "the OTHER pending request (r1) must remain untouched").to.equal(0)
+  })
+
+  // ---- The accept ceremony (3) ----
+
+  it('produces a real Registrant row through the unchanged register() path and records the decision on the request', async () => {
+    const auth = await setup()
+    const { requestId, init } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    await acceptRequest(engine, auth, requestId, ['id', 'roll'])
+
+    // register() was called unchanged — a real Registrant row now exists for init.registrant.id.
+    const registrantRow = await auth.ctx.db.prepare('select Id from Registrant where Id = :id').get({ id: init.payload.registrant.id })
+    expect(registrantRow, 'a Registrant row must exist for init.registrant.id').to.not.be.undefined
+
+    const reqRow = await auth.ctx.db
+      .prepare('select Status, VerificationCid, DecidedAt, DecidingOfficerUserId, RejectionReason from RegistrationRequest where Id = :id')
+      .get({ id: requestId })
+    expect(reqRow!.Status).to.equal('a')
+    expect(reqRow!.VerificationCid).to.be.a('string').and.not.equal('')
+    // T-42-06 read-back Z-stripping — normalize before asserting full ISO-Z shape.
+    expect(reZuluDatetime(reqRow!.DecidedAt as string)).to.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/)
+    expect(reqRow!.DecidingOfficerUserId).to.equal(auth.user.id)
+    expect(reqRow!.RejectionReason).to.equal(null)
+
+    const taskRow = await auth.ctx.db
+      .prepare(`select Task.IsCompleted from Task join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id where E.RequestId = :requestId`)
+      .get({ requestId })
+    expect(Number(taskRow!.IsCompleted)).to.equal(1)
+  })
+
+  it('binds the decision-time checklist into the officer-signed digest — flipping one checklist item changes it', async () => {
+    const auth = await setup()
+    const { requestId: r1 } = await submitPendingRequest(auth)
+    const { requestId: r2 } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    // D-07 tamper-evidence: VerificationCid rides inside the SAME digest as every other decision
+    // field (DG-2), so a post-hoc checklist edit changes these bytes and would break verification
+    // of the officer's own signature over AdminSigning.Digest.
+    const digest1 = await acceptAndCaptureDecisionDigest(engine, auth, r1, ['id'])
+    const digest2 = await acceptAndCaptureDecisionDigest(engine, auth, r2, ['id', 'roll'])
+
+    expect(bytesToHex(digest1)).to.not.equal(bytesToHex(digest2))
+  })
+
+  it('refuses an accept that carries no reusable sign callback, creating no Registrant', async () => {
+    const auth = await setup()
+    const { requestId, init } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    const officerSign = makeTestSignCallback(auth.user)
+    const task = await getRegistrantTask(engine, requestId)
+    const digestBytes = await engine.getSignatureDigest(task)
+    const headerSignature = await officerSign(digestBytes)
+
+    let threw = false
+    try {
+      await engine.completeSignature(task, {
+        isAccepted: true,
+        signature: headerSignature,
+        decision: { checklist: ['id'] },
+        // sign deliberately omitted — a placeholder signature must never be substituted here; an
+        // approval whose checklist is covered by nothing is exactly what D-07 exists to prevent.
+      })
+    } catch {
+      threw = true
+    }
+    expect(threw, 'an accept with no reusable sign callback must be refused').to.be.true
+
+    const registrantRow = await auth.ctx.db.prepare('select 1 as x from Registrant where Id = :id').get({ id: init.payload.registrant.id })
+    expect(registrantRow, 'no Registrant row may be created').to.be.undefined
+
+    const reqRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
+    expect(reqRow!.Status, 'the request must remain pending').to.equal('p')
+  })
+})
