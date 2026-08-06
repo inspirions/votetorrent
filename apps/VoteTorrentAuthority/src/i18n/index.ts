@@ -702,6 +702,95 @@ const resources = {
 				'Viewing only. You need the {{scope}} permission to change registrants, associations, or devices.',
 			registrantScopeReadOnlyNoOfficerBanner:
 				'Viewing only. You are not a registered officer of this authority, so changes are disabled.',
+			// Phase 48 (D-01/D-03/D-09) — registrationRequest* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			registrationRequestScreenTitle: 'Registration Requests',
+			registrationRequestSearchPlaceholder: 'Search by name',
+			registrationRequestFilterStatusAll: 'All',
+			registrationRequestFilterStatusPending: 'Pending',
+			registrationRequestFilterStatusApproved: 'Approved',
+			registrationRequestFilterStatusRejected: 'Rejected',
+			registrationRequestFilterIssuerAll: 'All Sources',
+			registrationRequestFilterIssuerRegistrant: 'Registrant-Submitted',
+			registrationRequestFilterIssuerBridge: 'Bridge-Imported',
+			registrationRequestCountLabel: 'Showing {{shown}} of {{total}}',
+			registrationRequestCountUnknown: 'Showing {{shown}}',
+			registrationRequestSortedByReceivedLabel: 'Sorted by date received (oldest first)',
+			registrationRequestLoadMoreButton: 'Load More',
+			registrationRequestLoadingMore: 'Loading more…',
+			registrationRequestEndOfList: 'End of list',
+			registrationRequestEmptyHeading: 'No requests match these filters',
+			registrationRequestEmptyBody: 'Try a different status or source.',
+			registrationRequestEmptyHeadingNoFilters: 'No registration requests yet',
+			registrationRequestEmptyBodyNoFilters:
+				'Requests submitted through any sync method will appear here for review.',
+			registrationRequestBulkImportSyncButton: 'Bulk Import / Sync',
+			registrationRequestPreviouslyRejectedFlag: 'Previously rejected',
+			registrationRequestReceivedAtLabel: 'Received',
+			registrationRequestClaimedSubmittedAtLabel: 'Claimed sent',
+			registrationRequestScopeReadOnlyBanner:
+				'Viewing only. You need the {{scope}} permission to review registration requests.',
+			registrationRequestScopeReadOnlyNoOfficerBanner:
+				'Viewing only. You are not a registered officer of this authority, so changes are disabled.',
+			registrationRequestStatusPending: 'Pending',
+			registrationRequestStatusApproved: 'Approved',
+			registrationRequestStatusRejected: 'Rejected',
+			// Phase 48 (D-06/D-07) — registrationRequestApproval* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			registrationRequestApprovalScreenTitle: 'Request Detail',
+			registrationRequestApprovalSummaryTitle: 'Request',
+			registrationRequestApprovalReceivedAtLabel: 'Received',
+			registrationRequestApprovalSubmittedAtLabel: 'Claimed sent',
+			registrationRequestApprovalRequesterKeyLabel: 'Requester Key',
+			registrationRequestApprovalApproveButton: 'Approve Registration',
+			registrationRequestApprovalRejectButton: 'Reject Request',
+			registrationRequestApprovalApprovedByLabel: 'Approved by {{officer}} on {{date}}',
+			registrationRequestApprovalViewRegistrantButton: 'View Registrant',
+			// Phase 48 (D-06) — registrationRequestReject* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			registrationRequestRejectTitle: 'Reject this request?',
+			registrationRequestRejectBody:
+				'This will be recorded permanently with your name attached. If {{name}} submits again, this rejection and your reason will be shown to whoever reviews it next.',
+			registrationRequestRejectReasonPlaceholder: 'Reason for rejection',
+			registrationRequestRejectConfirmButton: 'Confirm Rejection',
+			registrationRequestRejectKeepReviewingButton: 'Keep Reviewing',
+			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			bridgeSourceBadgeLabel: 'Bridge Import',
+			bridgeSourceCalloutHeading: 'Submitted by an import bridge',
+			bridgeSourceCalloutBody:
+				"This request was signed by {{bridgeLabel}}, an import bridge, on the submitter's behalf. It is the bridge's assertion, not a signature from the registrant themselves. Verify accordingly.",
+			// Phase 48 (D-07) — verificationChecklist* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			verificationChecklistSectionTitle: 'Out-of-Band Verification',
+			verificationChecklistItemId: 'Verified government-issued photo ID',
+			verificationChecklistItemRoll: 'Checked against existing voter roll',
+			verificationChecklistItemEligibility:
+				'Confirmed eligibility (age, residency, citizenship per policy)',
+			verificationChecklistItemNone: 'No additional out-of-band verification performed',
+			verificationChecklistBindingNotice:
+				'This checklist becomes part of your signed approval and cannot be changed afterward.',
+			verificationChecklistDecidedAtLabel: 'Recorded at decision',
+			// Phase 48 (D-06) — priorRejections* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			priorRejectionsCalloutHeading: 'This requester was rejected before',
+			priorRejectionsCalloutRow: 'Rejected {{date}} by {{officer}} — {{reason}}',
+			// Phase 48 (D-09) — transparencyStats* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			transparencyStatsSectionTitle: 'Transparency',
+			transparencyStatsPendingLabel: 'Pending',
+			transparencyStatsApprovedLabel: 'Approved',
+			transparencyStatsRejectedLabel: 'Rejected',
+			transparencyStatsMedianTimeLabel: 'Median time to decision',
+			transparencyStatsMedianTimeUnknown: 'Not enough data yet',
+			// Phase 48 (D-01/D-11) — bulkImportSync* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
+			bulkImportSyncScreenTitle: 'Bulk Import / Sync',
+			bulkImportSyncFilesystemHeading: 'Filesystem',
+			bulkImportSyncRestHeading: 'Webhook / REST',
+			bulkImportSyncP2pHeading: 'Peer-to-Peer (Experimental)',
+			bulkImportSyncP2pBody:
+				'This sync method is still under development and has not been verified to work reliably. Use Filesystem or REST sync for dependable results.',
+			bulkImportSyncNeverSyncedBody: 'Not synced yet',
+			bulkImportSyncLastSyncedLabel: 'Last synced {{date}}',
+			bulkImportSyncImportedCountLabel: '{{count}} imported',
+			bulkImportSyncPendingCountLabel: '{{count}} pending review',
+			bulkImportSyncErrorCountLabel: '{{count}} errors',
+			bulkImportSyncNowButton: 'Sync Now',
+			bulkImportSyncP2pTryButton: 'Try Peer Sync (Experimental)',
+			bulkImportSyncErrorsSectionTitle: 'Sync Errors',
 		},
 	},
 	es: {
