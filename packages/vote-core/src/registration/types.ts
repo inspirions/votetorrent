@@ -6,6 +6,7 @@ import type {
   ElectionDisclosurePolicy,
   ElectionRegistrant,
   ElectionRegistrationField,
+  PriorRejection,
   RegisterInit,
   Registrant,
   RegistrantAccessEvent,
@@ -15,7 +16,16 @@ import type {
   RegistrantPrivate,
   RegistrantPublic,
   RegistrantSelective,
-  RegistrantStatus
+  RegistrantStatus,
+  RegistrationBridgeKey,
+  RegistrationBridgeKeyInit,
+  RegistrationRequestDecision,
+  RegistrationRequestInit,
+  RegistrationRequestListFilter,
+  RegistrationRequestListPage,
+  RegistrationRequestListResult,
+  RegistrationRequestRead,
+  RegistrationTransparencyStats
 } from './models.js'
 
 /**
@@ -141,6 +151,91 @@ export interface IRegistrationEngine {
    * associate() ceremony and, for Phase 46, the UI) applies again.
    */
   removeElectionAttestationPolicy(electionId: string, signatureOrCallback: SignatureOrCallback): Promise<void>
+
+  /**
+   * D-02: submit a registration request. Returns the assigned request id.
+   * The signature deliberately has no `userId`/`userKey`/`IsUserValid`
+   * parameter — the caller is an untrusted party with no `User` row and no
+   * officer scope, and this INSERT runs **no** `seedSignedMutation`/
+   * `AdminSigning` ceremony; the row's own requester-key self-signature is
+   * the only authorization gate. D-03: a bridge submission sets
+   * `init.issuerType = 'bridge'` + `init.bridgeId` and passes the
+   * **registered bridge key** as `requesterKey`, so a bridge assertion is
+   * machine-distinguishable from a voter's own act at the data layer, not
+   * merely in the UI.
+   *
+   * Timestamp contract (48-02 **L-3**): the engine takes `SubmittedAt` from
+   * `init.submittedAt` **verbatim** and generates none of its own, because a
+   * caller may pass an **already-resolved `Signature` produced at some
+   * earlier staging moment** — which is exactly what the filesystem courier
+   * binding does — and every byte inside the verified digest must therefore
+   * be a value that caller already knew. The engine separately records its
+   * own `ReceivedAt` at INSERT, which is inside no digest, and rejects an
+   * `init.submittedAt` implausibly far from it in either direction.
+   */
+  submitRegistrationRequest(init: RegistrationRequestInit, requesterKey: string, signatureOrCallback: SignatureOrCallback): Promise<string>
+
+  /** D-03: registry write, an authority-signed ceremony (runs under a `'vrg'`-scoped `AdminSigning` ceremony). */
+  registerBridgeKey(init: RegistrationBridgeKeyInit, signatureOrCallback: SignatureOrCallback): Promise<void>
+
+  /** D-03: registry read; the inbox resolves a row's `bridgeLabel` through this registry. */
+  listBridgeKeys(authorityId: string): Promise<RegistrationBridgeKey[]>
+
+  /**
+   * ONE method, ONE optional filter object. Oldest-**`receivedAt`**-first
+   * (triage order, the opposite of a directory listing), keyset paging on
+   * the request id, and `total` computed only on a cursor-absent call — i.e.
+   * mirroring `listRegistrants` rather than inventing a second pagination
+   * scheme.
+   *
+   * **The ordering key is `receivedAt`, not `submittedAt`.** `submittedAt`
+   * is submitter-supplied (see `RegistrationRequestInit`), so ordering the
+   * triage queue by it would let a submitter buy its own position by
+   * backdating — a self-serve priority channel into an officer's attention.
+   * `receivedAt` is the authority's own observation and cannot be influenced
+   * from outside. The list still **carries** `submittedAt` for display; it
+   * does not **sort** by it. This supersedes the oldest-`submittedAt`-first
+   * wording in `48-08-PLAN.md`, whose implementation must follow the
+   * contract declared here.
+   */
+  listRegistrationRequests(filter?: RegistrationRequestListFilter, page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult>
+
+  /**
+   * Returns `undefined` for an unknown id, never throws. Resolves
+   * `registrantId` for an approved request, and returns **both**
+   * `submittedAt` and `receivedAt` so the approval screen can show the
+   * officer any divergence between what the requester claimed and what the
+   * authority observed.
+   */
+  getRegistrationRequest(requestId: string): Promise<RegistrationRequestRead | undefined>
+
+  /**
+   * D-06, newest-first. This is what makes persisted rejections actually
+   * reachable by the reviewing officer, and it is keyed by `requesterKey`
+   * (not by request id) so a re-application from the same key carries its
+   * history.
+   */
+  getPriorRejections(requesterKey: string): Promise<PriorRejection[]>
+
+  /**
+   * D-09. Derived from `Status`/`SubmittedAt`/`DecidedAt` with **no new
+   * storage**; counts plus a median are the entire transparency surface
+   * this phase ships — no rating is designed here.
+   */
+  getRegistrationTransparencyStats(authorityId: string): Promise<RegistrationTransparencyStats>
+
+  /**
+   * D-06: this is a reject-only method **by design**. There is deliberately
+   * no approve-a-request method and no accept/reject-flag decide method
+   * (an `isAccepted` boolean parameter) on this interface, because approval must run the officer
+   * signature-task ceremony (which produces the real `AdminSignature` and
+   * drives the unchanged `register()`), and a single boolean-flagged decide
+   * method would let a caller mint a `Registrant` through one engine call
+   * while bypassing that ceremony. `decision.rejectionReason` is required
+   * in practice on this path even though the type marks it optional (the
+   * reject UI gates on a non-empty trimmed reason).
+   */
+  rejectRegistrationRequest(requestId: string, decision: RegistrationRequestDecision, signatureOrCallback: SignatureOrCallback): Promise<void>
 }
 
 export interface IRegistrationRegisterBuilder extends IBuilder<RegisterInit, void> {

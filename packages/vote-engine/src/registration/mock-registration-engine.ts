@@ -10,6 +10,7 @@ import type {
   ElectionRegistrationField,
   IRegistrationEngine,
   IRegistrationRegisterBuilder,
+  PriorRejection,
   PrivateDetail,
   RegisterInit,
   Registrant,
@@ -22,6 +23,15 @@ import type {
   RegistrantPublic,
   RegistrantSelective,
   RegistrantStatus,
+  RegistrationBridgeKey,
+  RegistrationBridgeKeyInit,
+  RegistrationRequestDecision,
+  RegistrationRequestInit,
+  RegistrationRequestListFilter,
+  RegistrationRequestListPage,
+  RegistrationRequestListResult,
+  RegistrationRequestRead,
+  RegistrationTransparencyStats,
   SelectiveLeaf,
   Signature
 } from '@votetorrent/vote-core'
@@ -364,5 +374,51 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   /** D-07: revert-to-default — in-memory Map delete, no signing. */
   async removeElectionAttestationPolicy (electionId: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.electionAttestationPolicies.delete(electionId)
+  }
+
+  // ---------- Registration Request protocol + approval inbox (Phase 48) ----------
+  // Throwing stub bodies only — 48-05 declares the contract; 48-07 (intake +
+  // bridge registry), 48-08 (read surface + stats), and 48-12 (rejection)
+  // replace these with real mock parity implementations. A stub MUST throw
+  // and MUST NOT return a plausible empty value.
+
+  async submitRegistrationRequest (_init: RegistrationRequestInit, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
+    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
+    throw new Error('submitRegistrationRequest is not implemented')
+  }
+
+  async registerBridgeKey (_init: RegistrationBridgeKeyInit, _signatureOrCallback: SignatureOrCallback): Promise<void> {
+    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
+    throw new Error('registerBridgeKey is not implemented')
+  }
+
+  async listBridgeKeys (_authorityId: string): Promise<RegistrationBridgeKey[]> {
+    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
+    throw new Error('listBridgeKeys is not implemented')
+  }
+
+  async listRegistrationRequests (_filter?: RegistrationRequestListFilter, _page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult> {
+    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
+    throw new Error('listRegistrationRequests is not implemented')
+  }
+
+  async getRegistrationRequest (_requestId: string): Promise<RegistrationRequestRead | undefined> {
+    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
+    throw new Error('getRegistrationRequest is not implemented')
+  }
+
+  async getPriorRejections (_requesterKey: string): Promise<PriorRejection[]> {
+    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
+    throw new Error('getPriorRejections is not implemented')
+  }
+
+  async getRegistrationTransparencyStats (_authorityId: string): Promise<RegistrationTransparencyStats> {
+    // CONTRACT STUB — replaced by 48-08 (read surface + stats)
+    throw new Error('getRegistrationTransparencyStats is not implemented')
+  }
+
+  async rejectRegistrationRequest (_requestId: string, _decision: RegistrationRequestDecision, _signatureOrCallback: SignatureOrCallback): Promise<void> {
+    // CONTRACT STUB — replaced by 48-12 (rejection)
+    throw new Error('rejectRegistrationRequest is not implemented')
   }
 }
