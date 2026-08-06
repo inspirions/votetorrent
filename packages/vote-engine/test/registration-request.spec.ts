@@ -30,7 +30,7 @@ import 'reflect-metadata'
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import { createTestNetwork, addTestAuthority, seedSignedMutation, signTestDigest, makeTestSignature } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, seedSignedMutation, makeTestSignature } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
@@ -372,5 +372,216 @@ describe('registration-request schema: ExtensionExists pre-existing pairing regr
       .prepare('select count(*) as n from AdminSignatureTaskExtension where TaskId = :id')
       .get({ id: taskId })
     expect(Number(extRow?.n)).to.equal(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// (c) D-02 — RegistrationRequest self-signature
+// ---------------------------------------------------------------------------
+
+describe('registration-request schema: RegistrationRequest self-signature (D-02)', () => {
+  it('accepts a genuine requester signature from a key that belongs to no User row', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const { id, requesterKey } = await seedRegistrationRequest(auth)
+
+    const row = await auth.ctx.db.prepare('select count(*) as n from RegistrationRequest where Id = :id').get({ id })
+    expect(Number(row?.n), 'RegistrationRequest row must exist post-insert').to.equal(1)
+
+    // D-02's decisive claim: this signature verifies under the supplied key, with NO requirement
+    // that the key belong to a known User. UserKey is the table that would carry the FK from a
+    // key to a User row (see fixtures/test-context.ts's makeTestUser) — its absence here is what
+    // proves the requester key belongs to no User, not merely that a signature verified. This is
+    // also the first table in the schema where the `SignatureValid(Digest(...), Signature, Key)`
+    // shape validates an untrusted EXTERNAL party's key rather than the authority's own signor
+    // (48-PATTERNS.md's Registrant analog caveat).
+    // NOTE: `:key` collides with Quereus's contextual keyword `key` — bind as `:pubKey` instead.
+    const userKeyRow = await auth.ctx.db.prepare('select count(*) as n from UserKey where PubKey = :pubKey').get({ pubKey: requesterKey })
+    expect(Number(userKeyRow?.n), 'D-02: requester key must NOT belong to any User (no UserKey row)').to.equal(0)
+  })
+
+  it('rejects a row whose Payload was swapped after the digest was signed', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const authorityId = auth.authority.id
+    const id = crypto.randomUUID()
+    const signer = makeRequesterSigner()
+    const requesterKey = signer.publicHex
+    const issuerType = 'registrant'
+    const bridgeId = null
+    const submittedAt = toIsoZDatetime(Date.now())
+
+    const payloadA = JSON.stringify({ registrant: { authorityId, note: 'payload-a' } })
+    const payloadB = JSON.stringify({ registrant: { authorityId, note: 'payload-b' } })
+
+    const cidARow = await auth.ctx.db.prepare('select Digest(:payload) as d').get({ payload: payloadA })
+    if (!cidARow || cidARow.d == null) throw new Error('payload-swap test: Digest(payloadA) returned null')
+    const payloadCidA = cidARow.d as string
+
+    const cidBRow = await auth.ctx.db.prepare('select Digest(:payload) as d').get({ payload: payloadB })
+    if (!cidBRow || cidBRow.d == null) throw new Error('payload-swap test: Digest(payloadB) returned null')
+    const payloadCidB = cidBRow.d as string
+
+    // Sign the digest over payload A's PayloadCid.
+    const digestRow = await auth.ctx.db
+      .prepare('select Digest(:id, :authorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt) as d')
+      .get({ id, authorityId, requesterKey, issuerType, bridgeId, payloadCid: payloadCidA, submittedAt })
+    if (!digestRow || digestRow.d == null) throw new Error('payload-swap test: SignatureValid Digest() returned null')
+    const requesterSignature = signer.signDigest(digestRow.d as string)
+
+    // INSERT with payload B and PayloadCid = Digest(B) — keeps PayloadCidValid satisfied so the
+    // rejection is attributable to SignatureValid, not the cid check.
+    let caught: unknown
+    try {
+      await auth.ctx.db.exec(
+        `insert into RegistrationRequest (
+          Id, AuthorityId, RequesterKey, IssuerType, BridgeId, Payload, PayloadCid, SubmittedAt, ReceivedAt, RequesterSignature
+        )
+        with context SigningNonce = null, Tid = :tid
+        values (:id, :authorityId, :requesterKey, :issuerType, :bridgeId, :payload, :payloadCid, :submittedAt, :receivedAt, :requesterSignature)`,
+        {
+          id, authorityId, requesterKey, issuerType, bridgeId,
+          payload: payloadB, payloadCid: payloadCidB, submittedAt,
+          receivedAt: toIsoZDatetime(Date.now()), requesterSignature, tid: Date.now(),
+        }
+      )
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught, 'INSERT must throw: signature was over payload A, row carries payload B').to.be.instanceOf(Error)
+    const row = await auth.ctx.db.prepare('select count(*) as n from RegistrationRequest where Id = :id').get({ id })
+    expect(Number(row?.n)).to.equal(0)
+  })
+
+  it('rejects a signature produced by a key other than the RequesterKey column', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const authorityId = auth.authority.id
+    const id = crypto.randomUUID()
+    const signerX = makeRequesterSigner()
+    const signerY = makeRequesterSigner()
+    const issuerType = 'registrant'
+    const bridgeId = null
+    const payload = JSON.stringify({ registrant: { authorityId, note: 'wrong-key' } })
+    const submittedAt = toIsoZDatetime(Date.now())
+
+    const cidRow = await auth.ctx.db.prepare('select Digest(:payload) as d').get({ payload })
+    if (!cidRow || cidRow.d == null) throw new Error('wrong-key test: Digest(payload) returned null')
+    const payloadCid = cidRow.d as string
+
+    // Sign the CORRECT digest with signer X's private key, while binding signer Y's publicHex
+    // into RequesterKey.
+    const digestRow = await auth.ctx.db
+      .prepare('select Digest(:id, :authorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt) as d')
+      .get({ id, authorityId, requesterKey: signerY.publicHex, issuerType, bridgeId, payloadCid, submittedAt })
+    if (!digestRow || digestRow.d == null) throw new Error('wrong-key test: SignatureValid Digest() returned null')
+    const requesterSignature = signerX.signDigest(digestRow.d as string)
+
+    let caught: unknown
+    try {
+      await auth.ctx.db.exec(
+        `insert into RegistrationRequest (
+          Id, AuthorityId, RequesterKey, IssuerType, BridgeId, Payload, PayloadCid, SubmittedAt, ReceivedAt, RequesterSignature
+        )
+        with context SigningNonce = null, Tid = :tid
+        values (:id, :authorityId, :requesterKey, :issuerType, :bridgeId, :payload, :payloadCid, :submittedAt, :receivedAt, :requesterSignature)`,
+        {
+          id, authorityId, requesterKey: signerY.publicHex, issuerType, bridgeId,
+          payload, payloadCid, submittedAt,
+          receivedAt: toIsoZDatetime(Date.now()), requesterSignature, tid: Date.now(),
+        }
+      )
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught, 'INSERT must throw: signature was produced by a key other than RequesterKey').to.be.instanceOf(Error)
+    const row = await auth.ctx.db.prepare('select count(*) as n from RegistrationRequest where Id = :id').get({ id })
+    expect(Number(row?.n)).to.equal(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// (d) D-03 — bridge issuer binding
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a bridge key via the real `'vrg'`-scoped officer ceremony. This ceremony is an
+ * OFFICER act (signed under scope 'vrg'), categorically different from the requester's own
+ * self-signature above — `seedSignedMutation`/`signTestDigest` against the fixture `User` is
+ * correct here. `digestParams` deliberately avoids `seedSignedMutation`'s reserved bind names
+ * (`nonce`, `authorityId`, `adminEffectiveAt`, `scope`, `userId`, `signerKey`, `signature`, `now`)
+ * by binding the row's own authority id as `authId`, not `authorityId`.
+ */
+async function seedBridgeKey (auth: TestAuthority, opts: { label: string; key: string }): Promise<{ id: string }> {
+  const id = crypto.randomUUID()
+  const authorityId = auth.authority.id
+  const label = opts.label
+  const bridgeKey = opts.key
+  const revokedAt = null
+  const tid = Date.now()
+
+  // RegistrationBridgeKey.MutationValid's Digest(...) argument order, field for field:
+  //   Digest(context.Tid, new.Id, new.AuthorityId, new.Label, new.BridgeKey, new.RevokedAt)
+  const digestExpr = 'select Digest(:tid, :id, :authId, :label, :bridgeKey, :revokedAt) as d'
+  const digestParams = { tid, id, authId: authorityId, label, bridgeKey, revokedAt }
+  const { nonce } = await seedSignedMutation(auth.ctx, authorityId, 'vrg', tid, digestExpr, digestParams, auth.user)
+
+  await auth.ctx.db.exec(
+    `insert into RegistrationBridgeKey (Id, AuthorityId, Label, BridgeKey, RevokedAt)
+     with context SigningNonce = :nonce, Tid = :tid
+     values (:id, :authorityId, :label, :bridgeKey, :revokedAt)`,
+    { id, authorityId, label, bridgeKey, revokedAt, nonce, tid }
+  )
+
+  return { id }
+}
+
+describe('registration-request schema: RegistrationRequest bridge issuer binding (D-03)', () => {
+  it('accepts an IssuerType=bridge row whose BridgeId resolves to a registered RegistrationBridgeKey with a matching Key', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const bridgeSigner = makeRequesterSigner()
+    const { id: bridgeId } = await seedBridgeKey(auth, { label: 'Legacy Roll Importer', key: bridgeSigner.publicHex })
+
+    const { id } = await seedRegistrationRequest(auth, { signer: bridgeSigner, issuerType: 'bridge', bridgeId })
+
+    const row = await auth.ctx.db
+      .prepare('select IssuerType, BridgeId from RegistrationRequest where Id = :id')
+      .get({ id })
+    expect(row, 'RegistrationRequest row must exist post-insert').to.not.be.undefined
+    // D-03: the marker's persistence is the assertion, not just the insert's success — a bridge
+    // assertion must be machine-distinguishable at the data layer, not merely in the UI.
+    expect(row?.IssuerType).to.equal('bridge')
+    expect(row?.BridgeId).to.equal(bridgeId)
+  })
+
+  it('rejects an IssuerType=bridge row whose BridgeId is not a registered RegistrationBridgeKey', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const bridgeSigner = makeRequesterSigner()
+    const unregisteredBridgeId = crypto.randomUUID()
+
+    // Threat: an unregistered bridge key submitting bulk rows would be an unbounded trust anchor
+    // (T-48-04-02) — bridge keys must be a bounded, authority-registered set.
+    let caught: unknown
+    try {
+      await seedRegistrationRequest(auth, { signer: bridgeSigner, issuerType: 'bridge', bridgeId: unregisteredBridgeId })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'INSERT must throw: BridgeId does not resolve to a registered RegistrationBridgeKey').to.be.instanceOf(Error)
+  })
+
+  it('rejects an IssuerType=registrant row carrying a non-null BridgeId', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const bogusBridgeId = crypto.randomUUID()
+
+    // Threat: a bridge assertion masquerading as a voter's own cryptographically attributed act
+    // (RESEARCH's Security Domain Spoofing threat; T-48-04-01) — a genuinely self-signed request
+    // must not be able to also carry a BridgeId.
+    let caught: unknown
+    try {
+      await seedRegistrationRequest(auth, { issuerType: 'registrant', bridgeId: bogusBridgeId })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'INSERT must throw: a registrant-issued row cannot carry a BridgeId').to.be.instanceOf(Error)
   })
 })
