@@ -1225,6 +1225,40 @@ declare schema main
 
 	index BallotSignatureTaskBallot on BallotSignatureTaskExtension (BallotId);
 
+	-- D-05. This is the FIRST signature-extension table whose FK target (RegistrationRequest) is
+	-- NOT a ProposedX table -- that is correct; the extension pattern only needs a stable row with
+	-- a digest to bind to. Do not "fix" this asymmetry by reshaping RegistrationRequest.
+	table RegistrantSignatureTaskExtension (
+		TaskId text primary key, -- references Task.Id
+		RequestId text, -- references RegistrationRequest.Id
+		constraint TaskIdValid check (exists (select 1 from Task T where T.Id = new.TaskId and T.Type = 'signature' and T.SignatureType = 'registrant')),
+		constraint RequestIdValid check (exists (select 1 from RegistrationRequest R where R.Id = new.RequestId)),
+		constraint MutationValid check on insert, update (
+			exists (
+				select 1 from Task T join AdminSigning A on A.Nonce = T.SigningNonce and A.Scope = 'vrg'
+					join RegistrationRequest R on R.Id = new.RequestId
+						where T.Id = new.TaskId and T.Type = 'signature' and T.SignatureType = 'registrant'
+							and T.IsCompleted = false
+							and A.Digest = Digest(
+								context.Tid, R.Id, R.AuthorityId, R.RequesterKey, R.IssuerType, R.BridgeId, R.PayloadCid, R.SubmittedAt
+							)
+			)
+			-- if the registration request change has been fully signed, no uncompleted tasks should be left
+			and not exists (
+				select 1 from Task T join AdminSigning A on A.Nonce = T.SigningNonce
+					join AdminSignature ASig on ASig.SigningNonce = A.Nonce
+						where T.Id = new.TaskId and T.IsCompleted = false
+			)
+		),
+		constraint DeleteValid check on delete (
+			not exists (select 1 from Task T where T.Id = old.TaskId)
+				or exists (select 1 from Task T where T.Id = old.TaskId and T.IsCompleted = true)
+		)
+	)
+		with context ( Tid int );
+
+	index RegistrantSignatureTaskRequest on RegistrantSignatureTaskExtension (RequestId);
+
 	table OnboardingTaskExtension (
 		TaskId text primary key, -- references Task.Id
 		OnboardingId text, -- references Onboarding.Id
@@ -1257,6 +1291,127 @@ declare schema main
 	-- Registration
 	-- Voter registration, device association + attestation, authority peers, polling devices
 	-- ═══════════════════════════════════════════════════════════════════════
+
+	view RegistrationRequestStatus as
+		select 'p' as Code, 'Pending' as Name
+		union all select 'a' as Code, 'Approved' as Name
+		union all select 'r' as Code, 'Rejected' as Name;
+
+	view RegistrationRequestIssuer as
+		select 'registrant' as Code, 'Registrant' as Name
+		union all select 'bridge' as Code, 'Bridge' as Name;
+
+	-- D-03 registry: the bounded, append-only allowlist of bridge keys authorized to submit
+	-- RegistrationRequest rows on another person's behalf. RevokedAt is shipped so
+	-- RegistrationRequest.BridgeIdValid can honestly enforce revocation, but no revoke ceremony
+	-- ships this phase (48-07 implements registerBridgeKey/listBridgeKeys only) -- do not add one
+	-- and do not remove the column because nothing writes it yet.
+	table RegistrationBridgeKey (
+		Id text primary key, -- 32 byte random id
+		AuthorityId text,
+		Label text, -- human-readable importer name, surfaced in the inbox (48-14)
+		BridgeKey text, -- the bridge's public key
+		RevokedAt datetime null,
+		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
+		constraint RevokedAtValid check (RevokedAt is null or (isISODatetime(RevokedAt) and like('%Z', RevokedAt))),
+		constraint CantDelete check on delete (false),
+		constraint MutationValid check on insert, update (
+			exists (
+				select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+					where A.Nonce = context.SigningNonce
+						and A.AuthorityId = new.AuthorityId
+						and A.Scope = 'vrg'
+						and A.Digest = Digest(
+							context.Tid, new.Id, new.AuthorityId, new.Label, new.BridgeKey, new.RevokedAt
+						)
+			)
+		)
+	)
+		with context ( SigningNonce text, Tid int );
+
+	-- D-02/D-03/D-06/D-07 intake row. Authorized on INSERT SOLELY by the requester's own
+	-- signature (SignatureValid below) -- NO User FK, NO IsUserValid gate (D-02/D-04). This is
+	-- deliberately NOT a ProposedX-shaped table; see votetorrent.qsql's ProposedOfficer (:411) for
+	-- the shape this table must NOT have.
+	--
+	-- SubmittedAt vs ReceivedAt (L-3): SubmittedAt is SUPPLIED BY THE SUBMITTER -- it is DG-1's
+	-- seventh argument, so it must be a value the signer already knew at signing time (an offline
+	-- courier binding depends on this). ReceivedAt is the AUTHORITY'S OWN OBSERVATION of intake
+	-- time, written by the engine with toIsoZDatetime, and is deliberately inside NO digest at all.
+	-- Do not collapse these two columns back into one -- see the plan's <digest_register>.
+	table RegistrationRequest (
+		Id text primary key, -- 32 byte random id
+		AuthorityId text,
+		RequesterKey text, -- the requester's (or bridge's) public key
+		IssuerType text default 'registrant', -- references RegistrationRequestIssuer(Code)
+		BridgeId text null, -- references RegistrationBridgeKey.Id when IssuerType = 'bridge'
+		Payload text, -- JSON RegisterInit
+		PayloadCid text, -- content-addressed hash of Payload
+		Status text default 'p', -- references RegistrationRequestStatus(Code)
+		SubmittedAt datetime, -- submitter-supplied, inside DG-1 (see comment above)
+		ReceivedAt datetime, -- authority-observed intake time, inside NO digest (see comment above)
+		RequesterSignature text,
+		VerificationCid text null, -- content-addressed hash of the structured verification record (D-07)
+		DecidedAt datetime null,
+		DecidingOfficerUserId text null,
+		RejectionReason text null,
+		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
+		constraint StatusValid check (Status in (select Code from RegistrationRequestStatus)),
+		constraint IssuerTypeValid check (IssuerType in (select Code from RegistrationRequestIssuer)),
+		-- D-03 machine-distinguishability gate: a bridge assertion is distinguishable from a
+		-- voter's own act at the data layer, not merely in the UI.
+		constraint BridgeIdValid check (
+			(IssuerType = 'registrant' and BridgeId is null)
+				or (IssuerType = 'bridge' and exists (
+					select 1 from RegistrationBridgeKey B where B.Id = new.BridgeId and B.BridgeKey = new.RequesterKey and B.RevokedAt is null
+				))
+		),
+		-- payload's digest-boundness is what makes DG-1 cover the payload transitively
+		constraint PayloadCidValid check (PayloadCid = Digest(Payload)),
+		-- SubmittedAt validates an UNTRUSTED, submitter-supplied value (L-3), not an engine-written one
+		constraint SubmittedAtValid check (isISODatetime(SubmittedAt) and like('%Z', SubmittedAt)),
+		-- ReceivedAt is written by the engine with toIsoZDatetime
+		constraint ReceivedAtValid check (isISODatetime(ReceivedAt) and like('%Z', ReceivedAt)),
+		-- Absolute plausibility bound only -- NOT the relative skew window (that is engine-side,
+		-- 48-07). Arithmetic-free lexicographic comparison over fixed-width canonical ISO-Z strings.
+		constraint SubmittedAtSaneValid check on insert (
+			SubmittedAt >= '2024-01-01T00:00:00.000Z' and SubmittedAt < '2100-01-01T00:00:00.000Z'
+		),
+		constraint DecidedAtValid check (DecidedAt is null or (isISODatetime(DecidedAt) and like('%Z', DecidedAt))),
+		-- D-02 -- the ONLY authorization gate on INSERT. No User FK, no UserId/UserKey context
+		-- param, no IsUserValid gate. Unqualified so it re-evaluates on UPDATE.
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt),
+				RequesterSignature,
+				RequesterKey
+			)
+		),
+		constraint IdImmutable check on update (new.Id = old.Id),
+		constraint PayloadImmutable check on update (new.Payload = old.Payload),
+		-- D-06: a rejected request is a permanent, attributable record
+		constraint NoDelete check on delete (false),
+		-- D-06/D-07: the ONLY legal update to this table is a signed pending->decided transition
+		constraint DecisionValid check on update (
+			old.Status = 'p'
+				and new.Status in ('a', 'r')
+				and exists (
+					select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+						where A.Nonce = context.SigningNonce
+							and A.AuthorityId = new.AuthorityId
+							and A.Scope = 'vrg'
+							and A.Digest = Digest(
+								context.Tid, new.Id, new.Status, new.VerificationCid, new.DecidedAt, new.DecidingOfficerUserId, new.RejectionReason
+							)
+				)
+		)
+	)
+		-- At INSERT no signing session exists, so only Tid is meaningful -- 48-07 still binds both
+		-- declared params. Do not "fix" the insert path by inventing a ceremony, and do not add a
+		-- third context param.
+		with context ( SigningNonce text, Tid int );
+
+	index RegistrationRequestAuthorityStatus on RegistrationRequest (AuthorityId, Status);
 
 	view RegistrantStatus as
 		select 'a' as Code, 'Active' as Name
