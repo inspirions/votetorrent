@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useRoute, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
+import { scopeDescriptions } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
 import { InlineError } from "../../components/InlineError";
 import {
@@ -140,7 +141,7 @@ export function BulkImportSyncScreen() {
 				) : (
 					<View testID="bulk-import-sync-scope-banner" style={styles.banner}>
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
-							{t("registrationRequestScopeReadOnlyBanner", { scope: "vrg" })}
+							{t("registrationRequestScopeReadOnlyBanner", { scope: scopeDescriptions.vrg })}
 						</ThemedText>
 					</View>
 				))}
