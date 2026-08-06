@@ -2,7 +2,7 @@ import { setDisclose } from '@optimystic/quereus-plugin-crypto'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr, asText, asNumberOr, SEQUENCE_ALLOCATION_ATTEMPTS } from '../utils.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { allocateTid } from '../database/tid-allocator.js'
-import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
+import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, restoreCanonicalDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
 import { validateFieldPolicy } from './field-policy.js'
 import {
@@ -2291,9 +2291,152 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
   }
 
-  async rejectRegistrationRequest (_requestId: string, _decision: RegistrationRequestDecision, _signatureOrCallback: SignatureOrCallback): Promise<void> {
-    // CONTRACT STUB — replaced by 48-12 (rejection)
-    throw new Error('rejectRegistrationRequest is not implemented')
+  /**
+   * D-06/D-07 — the rejection ceremony. Rejecting a request produces a
+   * PERMANENT, ATTRIBUTABLE, signed record: `Status` moves `'p'` -> `'r'`
+   * and the row carries `RejectionReason`, `DecidingOfficerUserId`,
+   * `DecidedAt`, and the decision-time `VerificationCid`, all inside the
+   * DG-2 digest the officer's `'vrg'`-scoped `AdminSigning` ceremony
+   * covers. There is no delete path (`NoDelete check on delete (false)`)
+   * — that permanence is what lets an applicant be told why, what lets a
+   * re-application carry its own history (`getPriorRejections`), and what
+   * makes D-09's transparency counts mean anything. A rejection that left
+   * no trace would be indistinguishable from a request never reviewed.
+   *
+   * D-07: `VerificationCid` rides inside the SAME DG-2 digest as
+   * `Status`/`DecidedAt`/`DecidingOfficerUserId`/`RejectionReason`, so the
+   * officer's real signature transitively covers the checklist as it
+   * stood at decision time — mirrors 48-11's accept-path weld exactly.
+   *
+   * This runs under a `'vrg'`-scoped `AdminSigning` ceremony —
+   * `AdminSigning.UserIdValid` merely requires the signer be SOME officer
+   * at that authority, not a `'vrg'`-scoped one specifically (Phase
+   * 999.1); this method never claims the scope is enforced.
+   *
+   * This is a REJECT-ONLY method by design (48-05 T-48-05-02): there is
+   * deliberately no `approveRegistrationRequest` and no
+   * `decideRegistrationRequest(isAccepted)` on `IRegistrationEngine` —
+   * approval is reachable ONLY through the officer signature-task
+   * ceremony (`SignatureTasksEngine.finalizeRegistrantApproval`), so no
+   * single engine call can mint a `Registrant`. Do not add either.
+   */
+  async rejectRegistrationRequest (requestId: string, decision: RegistrationRequestDecision, signatureOrCallback: SignatureOrCallback): Promise<void> {
+    this.requireCtx('rejectRegistrationRequest')
+    const ctx = this.ctx!
+    try {
+      // SubmittedAt/ReceivedAt are read here too, mirroring
+      // finalizeRegistrantApproval's opening shape exactly (48-11 handoff):
+      // the decision UPDATE below must explicitly rebind BOTH via
+      // restoreCanonicalDatetime, or Quereus's unqualified
+      // SubmittedAtValid/ReceivedAtValid/SignatureValid CHECKs re-evaluate
+      // against a Z-stripped, precision-truncated snapshot of the row and
+      // fail — a real, empirically-confirmed defect class (T-42-06),
+      // NOT avoided by leaving the columns untouched or by
+      // self-referencing them (`SubmittedAt = SubmittedAt`).
+      const row = await ctx.db
+        .prepare('select Id, AuthorityId, Status, SubmittedAt, ReceivedAt from RegistrationRequest where Id = :requestId')
+        .get({ requestId })
+      if (!row) {
+        throw new Error(`rejectRegistrationRequest: RegistrationRequest not found for requestId=${requestId}`)
+      }
+      const authorityId = asText(row.AuthorityId, 'RegistrationRequest.AuthorityId')
+      const status = asText(row.Status, 'RegistrationRequest.Status')
+      if (status !== 'p') {
+        // DecisionValid would reject the update anyway (its conjunction only
+        // permits old.Status = 'p'), but a clear engine-level error beats an
+        // opaque CHECK failure.
+        throw new Error(`rejectRegistrationRequest: RegistrationRequest ${requestId} is already decided (Status=${status})`)
+      }
+      const submittedAt = restoreCanonicalDatetime(asText(row.SubmittedAt, 'RegistrationRequest.SubmittedAt'))
+      const receivedAt = restoreCanonicalDatetime(asText(row.ReceivedAt, 'RegistrationRequest.ReceivedAt'))
+
+      // rejectionReason is optional on the TYPE (meaningless on the accept
+      // path) but required IN PRACTICE on this path — the reject UI gates on
+      // this same trimmed-non-empty rule.
+      const rejectionReason = (decision.rejectionReason ?? '').trim()
+      if (!rejectionReason) {
+        throw new Error('rejectRegistrationRequest: decision.rejectionReason must be a non-empty string')
+      }
+
+      // D-07: derive VerificationCid through the SAME injected-digest helper
+      // (and the SAME private computeChecklistCid primitive) the read
+      // surface's recoverVerificationChecklist uses — never an independent
+      // createHash reimplementation (digest-vectors.ts's standing rule).
+      const verificationCid = await computeVerificationCidFor(decision.checklist, async (canonical) => this.computeChecklistCid(canonical))
+
+      const tid = await allocateTid(ctx.db, 'registration-request')
+
+      // DecidedAt must carry a trailing 'Z' (DecidedAtValid's like('%Z', ...))
+      // — toIsoZDatetime, never the other datetime helper this file's other
+      // ceremonies avoid on this same column (48-02 hygiene item 3).
+      const decidedAt = toIsoZDatetime(Date.now())
+      const decidingOfficerUserId = ctx.user?.id ?? null
+      if (!decidingOfficerUserId) {
+        // An unattributable rejection would be a permanent record no one can
+        // be held to, degrading D-06 to a bare status flag — refuse rather
+        // than write an anonymous decision.
+        throw new Error('rejectRegistrationRequest: no signed-in officer (ctx.user) — a rejection must be attributable')
+      }
+
+      // DG-2, field for field — 48-11's accept path passes the IDENTICAL
+      // seven-argument tuple with status: 'a'. None of seedSignedMutation's
+      // eight reserved bind names (nonce, authorityId, adminEffectiveAt,
+      // scope, userId, signerKey, signature, now) appears here;
+      // `decidingOfficerUserId` is deliberately NOT named `userId` for
+      // exactly that reason — a same-named digestParams entry would be
+      // silently overwritten by seedSignedMutation's own ceremony binds
+      // (the real Phase 42-03 bug, registration-engine.ts:238-244 /
+      // createRegistrant's NOTE 1 above).
+      //
+      // T-42-03: RegistrationRequest.DecisionValid contains a subquery, so
+      // it is a Quereus DEFERRED CHECK — it re-derives new.DecidedAt from a
+      // Temporal-coerced, Z-stripped, minimal-precision snapshot at
+      // re-evaluation. The digest argument MUST use that coerced form
+      // (toDeferredCheckDatetime), NOT the raw toIsoZDatetime value, or
+      // DecisionValid's re-derivation will never match the stored Digest.
+      // The STORED DecidedAt column (the UPDATE below) still uses the RAW
+      // value — only the digest argument is coerced.
+      const decidedAtForDigest = toDeferredCheckDatetime(decidedAt)
+      const digestExpr = 'select Digest(:tid, :requestId, :status, :verificationCid, :decidedAt, :decidingOfficerUserId, :rejectionReason) as d'
+      const digestParams = {
+        tid,
+        requestId,
+        status: 'r',
+        verificationCid,
+        decidedAt: decidedAtForDigest,
+        decidingOfficerUserId,
+        rejectionReason
+      }
+      const nonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
+
+      await ctx.db.exec(
+        // SubmittedAt/ReceivedAt are explicitly rebound (restoreCanonicalDatetime,
+        // above) rather than left untouched or self-referenced — either of those
+        // leaves Quereus's unqualified SubmittedAtValid/ReceivedAtValid CHECKs
+        // evaluating a Z-stripped reconstruction of the row on this UPDATE.
+        // No other column is set: Payload and Id are guarded by
+        // PayloadImmutable/IdImmutable, and this is what lets a later reader
+        // see WHAT was refused, not just that something was.
+        `update RegistrationRequest
+         with context SigningNonce = :signingNonce, Tid = ${tid}
+         set Status = 'r', RejectionReason = :rejectionReason, DecidingOfficerUserId = :decidingOfficerUserId,
+             DecidedAt = :decidedAt, VerificationCid = :verificationCid,
+             SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+         where Id = :requestId`,
+        {
+          signingNonce: nonce,
+          rejectionReason,
+          decidingOfficerUserId,
+          decidedAt,
+          verificationCid,
+          submittedAt,
+          receivedAt,
+          requestId
+        }
+      )
+    } catch (err) {
+      this.rethrow(err, 'rejectRegistrationRequest')
+    }
   }
 
   // ---------- helpers ----------

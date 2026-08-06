@@ -2,7 +2,7 @@ import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { SqlValue } from '@quereus/quereus'
 import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
-import { toIsoZDatetime, toDeferredCheckDatetime } from '../signing/ceremony-helpers.js'
+import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import { verificationCid } from '@votetorrent/vote-core'
@@ -30,29 +30,6 @@ import { BALLOT_HEADER_TID } from '../election/election-engine.js'
 import { CompleteSignatureBuilder } from './builders/index.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { RegistrationEngine } from '../registration/registration-engine.js'
-
-/**
- * 48-11: reconstructs the EXACT canonical `toIsoZDatetime` byte form (a trailing 'Z' and
- * fixed 3-digit milliseconds) from a value that has been through a Quereus plain-SELECT
- * round-trip — which strips the trailing 'Z' AND drops trailing zero fractional digits
- * (T-42-06). Every write of a `datetime`-typed column in this codebase goes through
- * `toIsoZDatetime`, which (for a numeric `Timestamp`) always emits EXACTLY 3 fractional
- * digits via `Date.prototype.toISOString()` — so Quereus's "minimal precision" stripping only
- * ever REMOVES trailing zeros, never changes a non-zero digit. Padding back up to 3 digits is
- * therefore a byte-exact reconstruction, not a guess, and is what makes
- * `finalizeRegistrantApproval`'s decision UPDATE able to rebind `SubmittedAt` without breaking
- * `RegistrationRequest.SignatureValid`'s unqualified (every-write) re-verification of the
- * requester's original signature. `reZuluDatetime` alone is insufficient here — it restores
- * the 'Z' but not the dropped precision digits.
- */
-function restoreCanonicalDatetime (stored: string): string {
-  const withZ = stored.endsWith('Z') ? stored.slice(0, -1) : stored
-  const dot = withZ.indexOf('.')
-  if (dot < 0) return `${withZ}.000Z`
-  const fraction = withZ.slice(dot + 1)
-  const padded = (fraction + '000').slice(0, 3)
-  return `${withZ.slice(0, dot)}.${padded}Z`
-}
 
 /**
  * SignatureTasksEngine — Phase 05 (TASK-03, TASK-04) implementation.
