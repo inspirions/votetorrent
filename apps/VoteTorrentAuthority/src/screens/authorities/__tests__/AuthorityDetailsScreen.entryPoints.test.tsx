@@ -135,6 +135,7 @@ async function renderScreen(): Promise<renderer.ReactTestRenderer> {
 const REGISTRANTS_TESTID = "authority-details-registrants-entry";
 const POLLING_DEVICES_TESTID = "authority-details-polling-devices-entry";
 const AUTHORITY_PEERS_TESTID = "authority-details-authority-peers-entry";
+const REGISTRATION_REQUESTS_TESTID = "authority-details-registration-requests-entry";
 
 beforeEach(() => {
 	jest.clearAllMocks();
@@ -232,5 +233,63 @@ describe("AuthorityDetailsScreen — Phase 47 entry rows (D-08)", () => {
 		// proving the insertion did not displace this existing section.
 		const json = JSON.stringify(tr.toJSON());
 		expect(json).toContain("invitedAuthorities");
+	});
+});
+
+// -----------------------------------------------------------------------
+// 48-21 (D-12) — the Registration Requests entry row. The real RootNavigator
+// really resolving this route is proven separately by
+// src/navigation/__tests__/phase48Routes.test.tsx; this suite complements
+// that with the runtime half of the reachability proof: pressing the row on
+// the REAL screen and asserting the exact navigate call it produces.
+// -----------------------------------------------------------------------
+describe("AuthorityDetailsScreen — Registration Requests entry row (48-21, D-12)", () => {
+	it("the row renders exactly once", async () => {
+		const tr = await renderScreen();
+		// findByProps (not findAllByProps) — see the Phase 47 comment above for
+		// why: findAllByProps's default deep:true double-counts the underlying
+		// host View carrying the same forwarded testID.
+		expect(() => tr.root.findByProps({ testID: REGISTRATION_REQUESTS_TESTID })).not.toThrow();
+	});
+
+	it("pressing it navigates to RegistrationInbox with exactly { authorityId }", async () => {
+		const tr = await renderScreen();
+		await press(tr, REGISTRATION_REQUESTS_TESTID);
+		expect(mockNavigate).toHaveBeenCalledTimes(1);
+		expect(mockNavigate).toHaveBeenCalledWith("RegistrationInbox", { authorityId: AUTHORITY_FIXTURE.id });
+	});
+
+	// T-48-21-01: React Navigation serializes params into navigation state,
+	// which surfaces in crash and debug payloads — an exact key-set assertion,
+	// not a substring scan, is the one place a future editor's "just pass the
+	// authority object too" is caught.
+	it("T-48-21-01: the navigate call's params carry exactly the key 'authorityId', nothing else", async () => {
+		const tr = await renderScreen();
+		await press(tr, REGISTRATION_REQUESTS_TESTID);
+		const params = mockNavigate.mock.calls[0]![1];
+		expect(Object.keys(params)).toEqual(["authorityId"]);
+	});
+
+	// T-47-04 / D-13 precedent, restated for this row's own decision: the row
+	// is navigation, not access control. This file mocks no officer-scope hook
+	// whatsoever, so the row rendering here at all is itself the ungated proof
+	// — the destination screen owns the read-only banner.
+	it("the row is ungated — renders with no officer-scope fixture configured, and the screen source contains no scope-hook reference", async () => {
+		const SCOPE_HOOK_NAME = ["useCurrent", "OfficerScopes"].join("");
+		const source = fs.readFileSync(path.join(__dirname, "..", "AuthorityDetailsScreen.tsx"), "utf8");
+		expect(source).not.toContain(SCOPE_HOOK_NAME);
+
+		const tr = await renderScreen();
+		expect(() => tr.root.findByProps({ testID: REGISTRATION_REQUESTS_TESTID })).not.toThrow();
+	});
+
+	// The new row must not displace any of the three Phase 47 rows sharing its
+	// container block.
+	it("the three Phase 47 rows still resolve alongside the new row", async () => {
+		const tr = await renderScreen();
+		expect(() => tr.root.findByProps({ testID: REGISTRANTS_TESTID })).not.toThrow();
+		expect(() => tr.root.findByProps({ testID: POLLING_DEVICES_TESTID })).not.toThrow();
+		expect(() => tr.root.findByProps({ testID: AUTHORITY_PEERS_TESTID })).not.toThrow();
+		expect(() => tr.root.findByProps({ testID: REGISTRATION_REQUESTS_TESTID })).not.toThrow();
 	});
 });
