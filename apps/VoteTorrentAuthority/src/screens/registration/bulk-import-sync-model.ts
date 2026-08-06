@@ -35,14 +35,20 @@ import type { TransportSyncState } from "../../components/TransportStatusCard";
 // ---------------------------------------------------------------------------
 
 /**
- * The set of transports this screen can drive from a real, attached binding. `'peer'` is
- * deliberately absent — the same structural-severance discipline 48-17 used when it left `'p2p'`
- * out of `TransportKind`. Registering a peer binding and driving the peer card from it is a type
- * error here, not a style choice, and that is what keeps the peer card's inertness a property of
- * the code rather than a convention someone could quietly drop. Whoever attaches a peer binding
- * (48-23, if it lands) must widen this union out loud.
+ * The set of transports this screen can drive from a real, attached binding. `'peer'` was
+ * DELIBERATELY ABSENT through 48-20 — the same structural-severance discipline 48-17 used when it
+ * left `'p2p'` out of `TransportKind` — so that registering a peer binding and driving the peer
+ * card from it would be a type error here, not a style choice: the out-loud step this severance
+ * existed to force.
+ *
+ * **48-23, 2026-08-06: `'peer'` is now admitted.** This member's addition IS that out-loud step.
+ * The peer-cluster leg it routes to is **code-complete, unverified** (D-11) — admitting the id at
+ * this seam does not change that, and it does not change what the peer card SHOWS:
+ * `ExperimentalTransportStatusCard` (48-17) still accepts only `disabled?` and `onTrySync`, with
+ * no state channel of any kind. Widening this union changes what the peer control's press CAN DO
+ * (resolve a `'peer'` binding through the seam below) — never what the card renders.
  */
-export type SyncBindingId = "filesystem" | "rest";
+export type SyncBindingId = "filesystem" | "rest" | "peer";
 
 /**
  * What a binding's `syncNow()` resolves to. `errorItemIds` is an array of `string` and NOT a
@@ -129,12 +135,16 @@ export function clearSyncBindings(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * The peer-cluster leg ships **code-complete, unverified**. This plan attaches no peer binding,
- * so the peer card's action is inert by construction — pressing it invokes this no-op and nothing
- * else. 48-23 attaches a real peer binding, and nothing in this phase depends on 48-23: if it
- * never lands, this screen still works and still tells the truth. Whoever attaches a peer binding
- * must also widen `SyncBindingId` above to admit it, which is the out-loud step this severance
- * exists to force — a peer binding cannot quietly start driving this card.
+ * Through 48-20, this was the peer card's ONLY handler — pressing it invoked this no-op and
+ * nothing else, and the peer card's action was inert by construction.
+ *
+ * **48-23: the peer card's `onTrySync` now routes through `runSync('peer')` in the screen
+ * instead of this export.** `INERT_PEER_SYNC` stays exported anyway — 48-20's own test suite
+ * asserts it exists and returns `undefined` (Suite F), and this export is retained precisely so
+ * that assertion keeps documenting the transition it was written to describe: the peer card WAS
+ * structurally inert through 48-20, and is now wired through the seam. The peer-cluster leg
+ * itself remains **code-complete, unverified** (D-11) either way — this export's retirement from
+ * the call site changes nothing about that.
  */
 export const INERT_PEER_SYNC = (): void => {};
 

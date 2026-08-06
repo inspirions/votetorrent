@@ -12,7 +12,6 @@ import {
 import { globalStyles } from "../../theme/styles";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import {
-	INERT_PEER_SYNC,
 	resolveSyncBinding,
 	resolveTransportCardState,
 	toSyncErrorRefs,
@@ -36,12 +35,13 @@ import {
  * (`bulk-import-sync-model.ts`'s registry) — this screen imports no transport module itself, so it
  * cannot drag `node:fs` into the Metro bundle (48-09's bundling clause).
  *
- * THE PEER CARD HAS NO BINDING ATTACHED IN THIS PLAN and its action is inert by construction —
- * pressing it invokes `INERT_PEER_SYNC`, a no-op, and nothing else. 48-23 attaches a real peer
- * binding through this same seam, widening `SyncBindingId` to admit it out loud. Nothing in this
- * phase depends on 48-23: if it never lands, this screen still works and still tells the truth —
- * the peer-cluster leg ships **code-complete, unverified**, and this screen presents that honestly
- * rather than as a working third bridge.
+ * THE PEER CARD ROUTES THROUGH THE SEAM AS OF 48-23 — `SyncBindingId` now admits `'peer'`, and
+ * pressing the card calls `runSync('peer')`. No host in this repo registers a `'peer'` binding, so
+ * with nothing attached the existing no-binding path in `runSync` reports `{ failed: true }` — an
+ * honest failure, not a silent no-op. The peer-cluster leg itself remains **code-complete,
+ * unverified** (D-11): a green press proves only that the seam resolved a handle, and Node or jest
+ * results are not verification for it. Nothing in this phase depended on 48-23 landing — if it had
+ * not, this screen would still work and still tell the truth about that leg.
  *
  * The errors section renders a transport heading and an item IDENTIFIER only — never a payload
  * value, a requester name, or a transport's error text (T-48-20-02).
@@ -74,6 +74,10 @@ export function BulkImportSyncScreen() {
 	const [errorMessage, setErrorMessage] = useState("");
 	const [filesystemEntry, setFilesystemEntry] = useState<TransportCardEntry>({});
 	const [restEntry, setRestEntry] = useState<TransportCardEntry>({});
+	// Never rendered — ExperimentalTransportStatusCard (48-17) carries no state channel, so this
+	// slot exists only so runSync('peer') below has somewhere honest to record { failed: true }
+	// when nothing is attached, without special-casing the peer id out of runSync's shared logic.
+	const [, setPeerEntry] = useState<TransportCardEntry>({});
 
 	// CR-02/WR-08-class guard against a stale setState: a `syncNow()` resolving after this screen
 	// has been navigated away from must not `setState` on an unmounted screen
@@ -87,7 +91,8 @@ export function BulkImportSyncScreen() {
 	}, []);
 
 	const runSync = useCallback((id: SyncBindingId) => {
-		const setEntry = id === "filesystem" ? setFilesystemEntry : setRestEntry;
+		const setEntry =
+			id === "filesystem" ? setFilesystemEntry : id === "rest" ? setRestEntry : setPeerEntry;
 		const binding = resolveSyncBinding(id);
 		if (!binding) {
 			// An unattached binding must not read as a successful or idle sync — it is honestly an
@@ -164,15 +169,23 @@ export function BulkImportSyncScreen() {
 				/>
 			</View>
 
-			{/* The peer-cluster leg ships code-complete, unverified (D-11). This plan attaches no
-			    binding, so this action is inert — `INERT_PEER_SYNC` invokes nothing. 48-23 attaches
-			    one through the same seam; nothing in this phase depends on 48-23. No conditional of
-			    any kind wraps this card: it renders every time this screen renders, in this
-			    position, always — never reordered above the two proven bindings above it. Nothing
-			    but `disabled` and `onTrySync` is passed: no state, no counts, no connection flag,
-			    no `kind` — the card's own prop type carries no channel for any of that. */}
+			{/* The peer-cluster leg ships code-complete, unverified (D-11). 48-23 routes this
+			    control's press through runSync('peer') against the widened SyncBindingId seam — no
+			    host in this repo registers a 'peer' binding, so with nothing attached the existing
+			    no-binding path in runSync sets { failed: true } and the transport is honestly
+			    reported as failed rather than silently idle. A green press proves only that the seam
+			    resolved a handle and nothing more; Node or jest results are not verification for this
+			    leg. No conditional of any kind wraps this card: it renders every time this screen
+			    renders, in this position, always — never reordered above the two proven bindings
+			    above it. Nothing but `disabled` and `onTrySync` is passed: no state, no counts, no
+			    connection flag, no `kind` — the card's own prop type carries no channel for any of
+			    that, so this routing change alters what the control DOES, never what the card
+			    SHOWS. */}
 			<View style={styles.section}>
-				<ExperimentalTransportStatusCard disabled={!canSync} onTrySync={INERT_PEER_SYNC} />
+				<ExperimentalTransportStatusCard
+					disabled={!canSync}
+					onTrySync={() => runSync("peer")}
+				/>
 			</View>
 
 			{errorRefs.length > 0 && (

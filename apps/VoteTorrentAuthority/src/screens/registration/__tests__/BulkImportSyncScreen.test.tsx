@@ -8,6 +8,17 @@
  * holds `'vrg'`: that gate is a legibility control, not enforcement (Phase 999.1), and this suite's
  * "disabled, not hidden" assertions describe presentation only.
  *
+ * 48-23 UPDATE — Suite C: through 48-20, `SyncBindingId` excluded `'peer'` and the peer card's
+ * `onTrySync` was the literal `INERT_PEER_SYNC` no-op — pressing it could invoke NOTHING, by
+ * construction. 48-23 widens `SyncBindingId` to admit `'peer'` and routes the peer card's press
+ * through `runSync('peer')` against the seam. Suite C below is rewritten to the POST-widening
+ * truth: the peer control resolves nothing (because no host in this repo registers a `'peer'`
+ * binding) and never reaches the filesystem or REST bindings, and the peer card's warning
+ * treatment and experimental body copy survive a real bridge succeeding, a real bridge failing,
+ * AND a peer sync attempt. The peer-cluster leg itself remains **code-complete, unverified**
+ * throughout — nothing in this file verifies it, and a green assertion below proves only that the
+ * seam resolved (or failed to resolve) a handle, never that the peer-cluster protocol works.
+ *
  * PATTERN SOURCE: `RegistrantsListScreen.test.tsx` (mock preamble, press/present/absent/treeText
  * helpers) and `TransportStatusCard.test.tsx` (sentinel color palette, host-node testID filtering,
  * serializeSubtree for substring assertions against an arbitrary rendered subtree).
@@ -284,10 +295,19 @@ describe("BulkImportSyncScreen — Filesystem/REST cards invoke a real attached 
 });
 
 // ---------------------------------------------------------------------------
-// Suite C — the peer card is inert (the D-11 proof at the screen level).
+// Suite C — the peer card's control is wired through the seam (48-23), and its experimental
+// treatment is unchanged by that (the D-11 proof at the screen level).
+//
+// Through 48-20, this suite proved the peer control invoked NOTHING and left the tree
+// byte-identical. 48-23 wires the control through `runSync('peer')`, so that specific claim is no
+// longer true and is not silenced here — it is replaced by the narrower, still-true claims below:
+// the control never reaches the filesystem or REST bindings, an attached peer binding's rejection
+// text never reaches the tree, and the card's warning treatment survives every combination of
+// outcome. The peer-cluster leg itself remains **code-complete, unverified** throughout — none of
+// these assertions is evidence that the peer-cluster protocol works.
 // ---------------------------------------------------------------------------
 
-describe("BulkImportSyncScreen — the peer card is inert by construction (D-11)", () => {
+describe("BulkImportSyncScreen — the peer card's control is wired, its treatment is unchanged (D-11)", () => {
 	it("transport-status-card-p2p is present when both real transports are unregistered", async () => {
 		const tr = await renderScreen();
 		present(tr, "transport-status-card-p2p");
@@ -302,28 +322,43 @@ describe("BulkImportSyncScreen — the peer card is inert by construction (D-11)
 		present(tr, "transport-status-card-p2p");
 	});
 
-	it("pressing the peer control invokes no registered binding, and the tree stays byte-identical: peer, inert", async () => {
+	it("48-23: with no peer binding registered, pressing the peer control resolves nothing, throws nothing, and never reaches the filesystem or REST bindings", async () => {
 		const filesystemSyncNow = jest.fn(async () => report());
 		const restSyncNow = jest.fn(async () => report());
 		registerSyncBinding({ id: "filesystem", syncNow: filesystemSyncNow });
 		registerSyncBinding({ id: "rest", syncNow: restSyncNow });
 		const tr = await renderScreen();
 
-		const before = treeText(tr);
-		await press(tr, "transport-try-peer-sync-p2p");
-		const after = treeText(tr);
+		await expect(press(tr, "transport-try-peer-sync-p2p")).resolves.not.toThrow();
 
+		// The peer control never reaches another transport's binding — the seam resolves 'peer'
+		// independently of 'filesystem'/'rest', and nothing in this repo registers a 'peer' handle.
 		expect(filesystemSyncNow).not.toHaveBeenCalled();
 		expect(restSyncNow).not.toHaveBeenCalled();
-		expect(after).toStrictEqual(before);
 	});
 
-	it("a real bridge succeeding does not soften the peer card's warning treatment", async () => {
+	it("48-23: an attached peer binding's rejection is called exactly once and its text never reaches the tree (T-48-20-02 holds for the third binding)", async () => {
+		const peerSyncNow = jest.fn(async () => {
+			throw new Error("SSN-123-45-6789-LEAKED");
+		});
+		registerSyncBinding({ id: "peer", syncNow: peerSyncNow });
+		const tr = await renderScreen();
+
+		await expect(press(tr, "transport-try-peer-sync-p2p")).resolves.not.toThrow();
+
+		expect(peerSyncNow).toHaveBeenCalledTimes(1);
+		expect(treeText(tr)).not.toContain("SSN-123-45-6789-LEAKED");
+	});
+
+	it("a real bridge succeeding, and a peer sync attempt of either outcome, do not soften the peer card's warning treatment", async () => {
 		registerSyncBinding({ id: "filesystem", syncNow: jest.fn(async () => report()) });
 		registerSyncBinding({ id: "rest", syncNow: jest.fn(async () => report()) });
 		const tr = await renderScreen();
 		await press(tr, "transport-sync-now-filesystem");
 		await press(tr, "transport-sync-now-rest");
+		// No peer binding attached here — a peer press resolves to the honest { failed: true }
+		// no-binding path, which is itself a "peer sync attempt" outcome the card must survive.
+		await press(tr, "transport-try-peer-sync-p2p");
 
 		const peerCard = tr.root.findByProps({ testID: "transport-status-card-p2p" });
 		const serialized = serializeSubtree(peerCard);
@@ -331,7 +366,40 @@ describe("BulkImportSyncScreen — the peer card is inert by construction (D-11)
 		expect(serialized).toContain("bulkImportSyncP2pBody");
 	});
 
-	it("INERT_PEER_SYNC itself is a no-op that returns undefined and throws nothing", () => {
+	it("48-23: the same warning treatment survives an ATTACHED peer binding succeeding", async () => {
+		registerSyncBinding({ id: "filesystem", syncNow: jest.fn(async () => report()) });
+		registerSyncBinding({ id: "rest", syncNow: jest.fn(async () => report()) });
+		registerSyncBinding({ id: "peer", syncNow: jest.fn(async () => report()) });
+		const tr = await renderScreen();
+		await press(tr, "transport-sync-now-filesystem");
+		await press(tr, "transport-sync-now-rest");
+		await press(tr, "transport-try-peer-sync-p2p");
+
+		const peerCard = tr.root.findByProps({ testID: "transport-status-card-p2p" });
+		const serialized = serializeSubtree(peerCard);
+		expect(serialized).toContain(SENTINEL_COLORS.warning);
+		expect(serialized).toContain("bulkImportSyncP2pBody");
+	});
+
+	it("the ordered block-testID array equality from Suite A still holds with a peer binding attached", async () => {
+		registerSyncBinding({
+			id: "filesystem",
+			syncNow: jest.fn(async () => report({ errorItemIds: ["req-0001"] })),
+		});
+		registerSyncBinding({
+			id: "rest",
+			syncNow: jest.fn(async () => report({ errorItemIds: ["req-0009"] })),
+		});
+		registerSyncBinding({ id: "peer", syncNow: jest.fn(async () => report()) });
+		const tr = await renderScreen();
+		await press(tr, "transport-sync-now-filesystem");
+		await press(tr, "transport-sync-now-rest");
+		await press(tr, "transport-try-peer-sync-p2p");
+
+		expect(orderedBlockIds(tr)).toEqual(BLOCK_TEST_IDS);
+	});
+
+	it("INERT_PEER_SYNC itself is a no-op that returns undefined and throws nothing — retained across the widening for the assertion that documents it (48-20 Suite F still applies)", () => {
 		expect(() => expect(INERT_PEER_SYNC()).toBeUndefined()).not.toThrow();
 	});
 });
