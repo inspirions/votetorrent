@@ -2313,12 +2313,12 @@ export class RegistrationEngine implements IRegistrationEngine {
    * at that authority, not a `'vrg'`-scoped one specifically (Phase
    * 999.1); this method never claims the scope is enforced.
    *
-   * This is a REJECT-ONLY method by design (48-05 T-48-05-02): there is
-   * deliberately no `approveRegistrationRequest` and no
-   * `decideRegistrationRequest(isAccepted)` on `IRegistrationEngine` —
-   * approval is reachable ONLY through the officer signature-task
+   * This is a REJECT-ONLY method by design (48-05 T-48-05-02):
+   * `IRegistrationEngine` deliberately exposes no sibling "approve" method
+   * and no single boolean-flagged "decide" method that branches on the
+   * outcome — approval is reachable ONLY through the officer signature-task
    * ceremony (`SignatureTasksEngine.finalizeRegistrantApproval`), so no
-   * single engine call can mint a `Registrant`. Do not add either.
+   * single engine call can mint a `Registrant`. Do not add either shape.
    */
   async rejectRegistrationRequest (requestId: string, decision: RegistrationRequestDecision, signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.requireCtx('rejectRegistrationRequest')
