@@ -70,6 +70,20 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   private readonly electionDisclosurePolicies = new Map<string, ElectionDisclosurePolicy>()
   /** D-14b: in-memory parity for ElectionAttestationPolicy, keyed by `electionId` ALONE (single-row-per-election). */
   private readonly electionAttestationPolicies = new Map<string, ElectionAttestationPolicy>()
+  /** 48-07/D-02: in-memory parity for RegistrationRequest, keyed by requestId. Verifies no signature. */
+  private readonly registrationRequests = new Map<string, {
+    id: string
+    authorityId: string
+    payload: RegisterInit
+    submittedAt: string
+    requesterKey: string
+    issuerType: string
+    bridgeId: string | null
+    receivedAt: string
+    status: string
+  }>()
+  /** 48-07/D-03: in-memory parity for the RegistrationBridgeKey registry, keyed by bridge key id. */
+  private readonly registrationBridgeKeys = new Map<string, RegistrationBridgeKey>()
 
   buildRegister (): IRegistrationRegisterBuilder {
     return new RegistrationRegisterBuilder(this)
@@ -382,19 +396,36 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   // replace these with real mock parity implementations. A stub MUST throw
   // and MUST NOT return a plausible empty value.
 
-  async submitRegistrationRequest (_init: RegistrationRequestInit, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
-    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
-    throw new Error('submitRegistrationRequest is not implemented')
+  /**
+   * Mock parity — verifies NO signature, enforces NO CHECK, applies NO skew
+   * bound. Exists for navigation/legibility only; a passing screen test here
+   * proves an affordance, not a boundary (the same DECLARED BLIND SPOT
+   * discipline the app suite already uses). `init.submittedAt` is stored
+   * unmodified; `receivedAt` is a mock-stamped observation. Never calls
+   * `signatureOrCallback` and never fabricates a `Signature`.
+   */
+  async submitRegistrationRequest (init: RegistrationRequestInit, requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
+    this.registrationRequests.set(init.id, {
+      id: init.id,
+      authorityId: init.authorityId,
+      payload: init.payload,
+      submittedAt: init.submittedAt,
+      requesterKey,
+      issuerType: init.issuerType ?? 'registrant',
+      bridgeId: init.bridgeId ?? null,
+      receivedAt: new Date().toISOString(),
+      status: 'p'
+    })
+    return init.id
   }
 
-  async registerBridgeKey (_init: RegistrationBridgeKeyInit, _signatureOrCallback: SignatureOrCallback): Promise<void> {
-    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
-    throw new Error('registerBridgeKey is not implemented')
+  /** Mock parity — verifies NO signature, enforces NO CHECK. See submitRegistrationRequest's comment. */
+  async registerBridgeKey (init: RegistrationBridgeKeyInit, _signatureOrCallback: SignatureOrCallback): Promise<void> {
+    this.registrationBridgeKeys.set(init.id, { id: init.id, authorityId: init.authorityId, label: init.label, key: init.key })
   }
 
-  async listBridgeKeys (_authorityId: string): Promise<RegistrationBridgeKey[]> {
-    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
-    throw new Error('listBridgeKeys is not implemented')
+  async listBridgeKeys (authorityId: string): Promise<RegistrationBridgeKey[]> {
+    return [...this.registrationBridgeKeys.values()].filter((k) => k.authorityId === authorityId)
   }
 
   async listRegistrationRequests (_filter?: RegistrationRequestListFilter, _page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult> {

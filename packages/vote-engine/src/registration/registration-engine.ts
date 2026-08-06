@@ -1808,14 +1808,93 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
   }
 
-  async registerBridgeKey (_init: RegistrationBridgeKeyInit, _signatureOrCallback: SignatureOrCallback): Promise<void> {
-    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
-    throw new Error('registerBridgeKey is not implemented')
+  /**
+   * D-03 registry write. Unlike `submitRegistrationRequest` above, this IS
+   * an authority act and DOES run the full ceremony: registering a bridge
+   * key is a decision the authority makes about whom to trust, whereas
+   * submitting a request is an act an untrusted party performs. Follows
+   * `Registrant.MutationValid`'s `AdminSignature`-join shape through
+   * `seedSignedMutation` at scope `'vrg'` (48-02 L-1 — NOT the `'cap'`
+   * RESEARCH speculated).
+   *
+   * No revoke ceremony ships this phase (48-02): `RevokedAt` exists so
+   * `listBridgeKeys`/`BridgeIdValid` can stay honest about revocation, but
+   * nothing writes it here — do not add one.
+   */
+  async registerBridgeKey (init: RegistrationBridgeKeyInit, signatureOrCallback: SignatureOrCallback): Promise<void> {
+    this.requireCtx('registerBridgeKey')
+    const ctx = this.ctx!
+    try {
+      // The SAME durable allocator namespace submitRegistrationRequest uses
+      // above — a Tid is never reused across the intake path and the
+      // registry path.
+      const tid = await allocateTid(ctx.db, 'registration-request')
+
+      // DG-3, field for field: Digest(context.Tid, new.Id, new.AuthorityId,
+      // new.Label, new.BridgeKey, new.RevokedAt). `rowAuthorityId`/`bridgeKey`
+      // are DEFENSIVE RENAMES — `authorityId` and a `signerKey`-adjacent name
+      // are among seedSignedMutation's eight reserved bind names and would be
+      // silently overwritten by the helper's own ceremony binds (the real
+      // Phase 42-03 bug documented at createRegistrant's NOTE 1 above).
+      const digestExpr = 'select Digest(:tid, :id, :rowAuthorityId, :label, :bridgeKey, :revokedAt) as d'
+      const digestParams = {
+        tid,
+        id: init.id,
+        rowAuthorityId: init.authorityId,
+        label: init.label,
+        bridgeKey: init.key,
+        revokedAt: null
+      }
+      const nonce = await seedSignedMutation(
+        ctx,
+        init.authorityId,
+        'vrg',
+        tid,
+        digestExpr,
+        digestParams,
+        this.resolveSign(signatureOrCallback)
+      )
+
+      await ctx.db.exec(
+        `insert into RegistrationBridgeKey (Id, AuthorityId, Label, BridgeKey, RevokedAt)
+        with context SigningNonce = :signingNonce, Tid = ${tid}
+        values (:id, :rowAuthorityId, :label, :bridgeKey, :revokedAt)`,
+        {
+          id: init.id,
+          rowAuthorityId: init.authorityId,
+          label: init.label,
+          bridgeKey: init.key,
+          revokedAt: null,
+          signingNonce: nonce
+        }
+      )
+    } catch (err) {
+      this.rethrow(err, 'registerBridgeKey')
+    }
   }
 
-  async listBridgeKeys (_authorityId: string): Promise<RegistrationBridgeKey[]> {
-    // CONTRACT STUB — replaced by 48-07 (request intake + bridge registry)
-    throw new Error('listBridgeKeys is not implemented')
+  /**
+   * D-03 registry read. The `RevokedAt is null` filter mirrors
+   * `BridgeIdValid`'s own predicate exactly, so the set a reviewing officer
+   * reads here can never disagree with the set the CHECK accepts. Returns
+   * `[]` for an authority with no registered keys — never throws on empty.
+   */
+  async listBridgeKeys (authorityId: string): Promise<RegistrationBridgeKey[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: RegistrationBridgeKey[] = []
+    for await (const row of ctx.db.eval(
+      'select Id, AuthorityId, Label, BridgeKey from RegistrationBridgeKey where AuthorityId = :authorityId and RevokedAt is null order by Label',
+      { authorityId }
+    )) {
+      out.push({
+        id: asText(row.Id, 'RegistrationBridgeKey.Id'),
+        authorityId: asText(row.AuthorityId, 'RegistrationBridgeKey.AuthorityId'),
+        label: asText(row.Label, 'RegistrationBridgeKey.Label'),
+        key: asText(row.BridgeKey, 'RegistrationBridgeKey.BridgeKey')
+      })
+    }
+    return out
   }
 
   async listRegistrationRequests (_filter?: RegistrationRequestListFilter, _page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult> {
