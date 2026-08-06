@@ -504,7 +504,16 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // BEFORE the Task-complete update — mirrors finalizeBallot's call-site placement immediately
     // above. Do NOT touch the reject path: result.isAccepted === false must continue to skip
     // sign(), skip this block entirely, and fall through to the unconditional task-complete update
-    // — 48-12 owns the reject ceremony.
+    // — 48-12 owns the reject ceremony (RegistrationEngine.rejectRegistrationRequest), not this file.
+    //
+    // D-12 (48-12): a rejection that advances the signing session is a critical integrity hole —
+    // the SAME sentence guarding sign() above, carried verbatim onto this branch, because the
+    // registrant-specific consequence is sharper here than on any other signature type. If this
+    // guard's `result.isAccepted &&` were ever dropped, the completed 'vrg' AdminSigning session
+    // (from sign(), above) would drive finalizeRegistrantApproval -> the unchanged register(), so a
+    // rejection that advanced the session would CREATE THE VERY Registrant THE OFFICER REFUSED —
+    // silently, with the request row still reading Status = 'r'. That failure would be invisible
+    // to anyone reading only RegistrationRequest.Status.
     if (result.isAccepted && task.signatureType === 'registrant') {
       // L-2 (48-11): the accept path REQUIRES the reusable per-digest callback — DG-2 is signed at
       // decision time, and there is no placeholder fallback on this path. An approval whose

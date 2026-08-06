@@ -24,12 +24,16 @@ import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
+import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
+import { SigningEngine } from '../src/signing/signing-engine.js'
 import { verificationCid } from '@votetorrent/vote-core'
 import type { EngineContext } from '../src/types.js'
 import type {
+  ISigningEngine,
   RegisterInit,
   RegistrationRequestInit,
   RegistrationVerificationChecklistItem,
+  RegistrantSignatureTask,
   Signature,
 } from '@votetorrent/vote-core'
 
@@ -194,5 +198,159 @@ describe('rejectRegistrationRequest', () => {
 
     const row = await auth.ctx.db.prepare('select RejectionReason from RegistrationRequest where Id = :id').get({ id: requestId })
     expect(row!.RejectionReason, 'the ORIGINAL reason must survive a rejected second decision attempt').to.equal('Original reason')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Task 2 — the no-sign discipline: both negatives, asserted explicitly
+// ---------------------------------------------------------------------------
+
+/** Finds the seeded RegistrantSignatureTask for a given requestId out of a pending pull. */
+async function getRegistrantTask (engine: SignatureTasksEngine, requestId: string): Promise<RegistrantSignatureTask> {
+  const tasks = await engine.getRequestedSignatures(true)
+  const found = tasks.find(
+    (t) => t.signatureType === 'registrant' && (t as RegistrantSignatureTask).requestId === requestId
+  ) as RegistrantSignatureTask | undefined
+  expect(found, `registrant task for requestId=${requestId} must be present`).to.not.be.undefined
+  return found!
+}
+
+/**
+ * Wraps a real SigningEngine's `sign` method in a counting proxy — every OTHER ISigningEngine
+ * method delegates untouched via Reflect. This is the literal "wrap the engine's signingEngine.sign
+ * in a counting proxy" the plan specifies, constructed through SignatureTasksEngine's own
+ * constructor-injected `signingEngine` field (48-11's documented injection seam).
+ */
+function makeCountingSigningEngine (ctx: EngineContext): { engine: ISigningEngine; counter: { calls: number } } {
+  const real = new SigningEngine(ctx)
+  const counter = { calls: 0 }
+  const engine = new Proxy(real, {
+    get (target, prop, receiver) {
+      if (prop === 'sign') {
+        return async (...args: Parameters<ISigningEngine['sign']>) => {
+          counter.calls += 1
+          return target.sign(...args)
+        }
+      }
+      return Reflect.get(target, prop, receiver)
+    }
+  }) as unknown as ISigningEngine
+  return { engine, counter }
+}
+
+describe('completeSignature — registrant reject path', () => {
+  it('sign() is never called on reject — and DOES record 1 call on an accept control run, so the spy cannot pass vacuously', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    const { engine: countingSigningEngine, counter } = makeCountingSigningEngine(auth.ctx)
+    const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx, countingSigningEngine)
+    await tasksEngine.getRequestedSignatures(true)
+
+    const officerSign = makeTestSignCallback(auth.user)
+    const task = await getRegistrantTask(tasksEngine, requestId)
+    const digestBytes = await tasksEngine.getSignatureDigest(task)
+    const headerSignature = await officerSign(digestBytes)
+
+    // asserting only `status === 'r'` here would pass against code that signed anyway — this
+    // spec asserts the ABSENCE of the sign() side-effect, not the presence of a status value.
+    await tasksEngine.completeSignature(task, { isAccepted: false, signature: headerSignature })
+
+    const signCalls = counter.calls
+    expect(signCalls, 'sign() must be called exactly 0 times on reject').to.equal(0)
+
+    // Control run: a fresh pending request, ACCEPTED, on the SAME counting proxy — proves the
+    // spy itself is a live signal, not a permanently-broken counter that would pass vacuously
+    // either way.
+    const { requestId: controlRequestId } = await submitPendingRequest(auth)
+    await tasksEngine.getRequestedSignatures(true)
+    const controlTask = await getRegistrantTask(tasksEngine, controlRequestId)
+    const controlDigest = await tasksEngine.getSignatureDigest(controlTask)
+    const controlHeaderSig = await officerSign(controlDigest)
+    await tasksEngine.completeSignature(controlTask, {
+      isAccepted: true,
+      signature: controlHeaderSig,
+      sign: officerSign,
+      decision: { checklist: ['id'] },
+    })
+    expect(counter.calls, 'the SAME wrapper DOES record 1 call on an isAccepted:true control run').to.equal(1)
+  })
+
+  it('no AdminSignature advance on reject — the count delta is exactly 0', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await tasksEngine.getRequestedSignatures(true)
+
+    const officerSign = makeTestSignCallback(auth.user)
+    const task = await getRegistrantTask(tasksEngine, requestId)
+    const digestBytes = await tasksEngine.getSignatureDigest(task)
+    const headerSignature = await officerSign(digestBytes)
+    const nonceRow = await auth.ctx.db
+      .prepare(
+        `select Task.SigningNonce from Task join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id where E.RequestId = :requestId`
+      )
+      .get({ requestId })
+    const nonce = nonceRow!.SigningNonce as string
+
+    const before = await countRows(auth.ctx, 'select count(*) as n from AdminSignature where SigningNonce = :nonce', { nonce })
+    await tasksEngine.completeSignature(task, { isAccepted: false, signature: headerSignature })
+    const after = await countRows(auth.ctx, 'select count(*) as n from AdminSignature where SigningNonce = :nonce', { nonce })
+
+    const adminSignatureDelta = after - before
+    expect(adminSignatureDelta, 'the vrg AdminSigning session must not advance on a rejection').to.equal(0)
+  })
+
+  it('register() is never reached — a prototype spy on RegistrationEngine.register AND zero new Registrant rows', async () => {
+    const auth = await setup()
+    const { requestId, init } = await submitPendingRequest(auth)
+    const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await tasksEngine.getRequestedSignatures(true)
+
+    const officerSign = makeTestSignCallback(auth.user)
+    const task = await getRegistrantTask(tasksEngine, requestId)
+    const digestBytes = await tasksEngine.getSignatureDigest(task)
+    const headerSignature = await officerSign(digestBytes)
+
+    // Prototype spy: finalizeRegistrantApproval constructs `new RegistrationEngine(ctx)` and calls
+    // `.register(...)` directly (no DI seam) — a prototype patch is the only way to observe the
+    // CALL without altering the code path itself. Always restored, even on assertion failure.
+    let registerCalls = 0
+    const originalRegister = RegistrationEngine.prototype.register
+    RegistrationEngine.prototype.register = async function (this: RegistrationEngine, ...args: Parameters<typeof originalRegister>) {
+      registerCalls += 1
+      return originalRegister.apply(this, args)
+    } as typeof originalRegister
+
+    try {
+      await tasksEngine.completeSignature(task, { isAccepted: false, signature: headerSignature })
+    } finally {
+      RegistrationEngine.prototype.register = originalRegister
+    }
+
+    // The spy proves the CODE PATH; the row count proves the OUTCOME and survives any future
+    // refactor of how the register() reference is injected.
+    expect(registerCalls, 'register() must be reached exactly 0 times on reject').to.equal(0)
+
+    const anyRegistrant = await auth.ctx.db.prepare('select 1 as x from Registrant where Id = :id').get({ id: init.payload.registrant.id })
+    expect(anyRegistrant, 'no Registrant row may exist for a rejected request').to.be.undefined
+  })
+
+  it('the task still closes — the discipline forbids advancing the signature, not closing the task', async () => {
+    const auth = await setup()
+    const { requestId } = await submitPendingRequest(auth)
+    const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await tasksEngine.getRequestedSignatures(true)
+
+    const officerSign = makeTestSignCallback(auth.user)
+    const task = await getRegistrantTask(tasksEngine, requestId)
+    const digestBytes = await tasksEngine.getSignatureDigest(task)
+    const headerSignature = await officerSign(digestBytes)
+
+    await tasksEngine.completeSignature(task, { isAccepted: false, signature: headerSignature })
+
+    const taskRow = await auth.ctx.db
+      .prepare(`select Task.IsCompleted from Task join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id where E.RequestId = :requestId`)
+      .get({ requestId })
+    expect(Number(taskRow!.IsCompleted), 'a rejected task must still close').to.equal(1)
   })
 })
