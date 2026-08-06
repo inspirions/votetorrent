@@ -12,12 +12,14 @@ import type {
   SignatureTask,
   AdminSignatureTask,
   BallotSignatureTask,
+  RegistrantSignatureTask,
   Authority,
   ThresholdPolicy,
   AdminInit,
   Proposal,
   Ballot,
   Question,
+  RegisterInit,
   Signature,
 } from '@votetorrent/vote-core'
 import { BALLOT_HEADER_TID } from '../election/election-engine.js'
@@ -62,6 +64,14 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     const userId = this.ctx.user?.id ?? null
     const out: SignatureTask[] = []
     try {
+      // D-05 pull-and-seed point: for every pending RegistrationRequest lacking a task, seed one
+      // under the currently signed-in officer BEFORE this same pull reads it back — so a
+      // newly-arrived request is visible on the same call that seeded it. Consequence for
+      // downstream: 'registrant' tasks now appear in this generic getRequestedSignatures(true)
+      // result alongside the six existing types; this method does NOT filter them out — 48-18/48-19
+      // decide whether the generic tasks list renders or filters them.
+      await this.seedRegistrantSignatureTasks()
+
       // Resolve network name once — single Network row per DB.
       const networkRow = await this.ctx.db
         .prepare('select Name, Hash from Network limit 1')
@@ -184,6 +194,45 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
             // Extension or ProposedBallot row missing — fall back to base task
             out.push(base)
           }
+        } else if (signatureType === 'registrant') {
+          // D-05: materialise the RegistrantSignatureTask. LEFT join RegistrationBridgeKey
+          // deliberately — a registrant-issued row has a null BridgeId and must still
+          // materialise. A missing bridgeLabel on a bridge row means the registry lookup found no
+          // label; issuerType — NOT bridgeLabel — is the only authoritative issuer signal (D-03), a
+          // consumer must never infer "registrant-submitted" from a missing label.
+          const rExtRow = await this.ctx.db
+            .prepare(
+              `select E.RequestId, R.AuthorityId, R.IssuerType, R.BridgeId, R.Payload, R.SubmittedAt,
+                      B.Label as BridgeLabel
+                 from RegistrantSignatureTaskExtension E
+                   join RegistrationRequest R on R.Id = E.RequestId
+                   left join RegistrationBridgeKey B on B.Id = R.BridgeId
+                 where E.TaskId = :taskId`
+            )
+            .get({ taskId: row.Id })
+
+          const payload = rExtRow
+            ? parseJsonOr<RegisterInit | undefined>(rExtRow.Payload as string, undefined, 'RegistrationRequest.Payload')
+            : undefined
+
+          if (rExtRow && payload) {
+            const registrantTask: RegistrantSignatureTask = {
+              ...base,
+              signatureType: 'registrant',
+              requestId: rExtRow.RequestId as string,
+              payload,
+              submittedAt: rExtRow.SubmittedAt as string,
+              issuerType: rExtRow.IssuerType as RegistrantSignatureTask['issuerType'],
+              bridgeLabel: rExtRow.BridgeLabel == null ? undefined : (rExtRow.BridgeLabel as string),
+            }
+            out.push(registrantTask)
+          } else {
+            // Missing extension row, missing joined request, or an unparseable payload — fall back
+            // to base rather than throwing, the 'admin'/'ballot' contract verbatim: the approval
+            // screen renders from getRegistrationRequest, so a degraded task costs legibility, while
+            // a throw here would take down the entire task inbox for every signature type.
+            out.push(base)
+          }
         } else {
           out.push(base)
         }
@@ -191,6 +240,135 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       return out
     } catch (err) {
       this.rethrow(err, 'getRequestedSignatures')
+    }
+  }
+
+  /**
+   * D-05 — pull-and-seed intake for the registrant approval ceremony, resolving
+   * `48-RESEARCH.md` Open Question 1 in the form the research itself proposed: PULL-AND-SEED at
+   * inbox mount rather than push-and-seed at submission time. `AdminSigning.UserIdValid` requires
+   * a `UserId`, and an outside submitter categorically cannot supply one — a prospective
+   * registrant has no `User` row at all (D-02). The task can therefore only be seeded on the
+   * authority side, at read time, under the CURRENTLY SIGNED-IN OFFICER's own `ctx.user` — never
+   * the requester's.
+   *
+   * This is NOT a claim that a `'vrg'`-scoped officer is required to seed: `AdminSigning.UserIdValid`
+   * requires merely that the signer be some officer at that authority. `AdminSigning.SignerKeyValid`
+   * and `OfficerSignature.OfficerValid` remain hardcoded stub CHECKs (Phase 999.1).
+   *
+   * Best-effort, silent no-op: with no signed-in officer there is no legal `UserId` to seed under.
+   */
+  private async seedRegistrantSignatureTasks (): Promise<void> {
+    if (!this.ctx?.user?.id) return
+    const ctx = this.ctx
+    const userId = ctx.user!.id
+
+    // Collect the work set FIRST, into an array, before any write — mirrors this file's own
+    // "avoid interleaving eval + prepare on the same handle" discipline used for the base task-row
+    // collection above. The `not exists` clause is what makes seeding idempotent: a request that
+    // already has an extension row is never re-seeded, which is what makes it safe to run this step
+    // on every inbox mount.
+    const pendingRows: Array<{
+      Id: string
+      AuthorityId: string
+      RequesterKey: string
+      IssuerType: string
+      BridgeId: string | null
+      PayloadCid: string
+      SubmittedAt: string
+    }> = []
+    for await (const row of ctx.db.eval(
+      `select R.Id, R.AuthorityId, R.RequesterKey, R.IssuerType, R.BridgeId, R.PayloadCid, R.SubmittedAt
+         from RegistrationRequest R
+         where R.Status = 'p'
+           and not exists (select 1 from RegistrantSignatureTaskExtension E where E.RequestId = R.Id)`,
+      {}
+    )) {
+      pendingRows.push({
+        Id: row.Id as string,
+        AuthorityId: row.AuthorityId as string,
+        RequesterKey: row.RequesterKey as string,
+        IssuerType: row.IssuerType as string,
+        BridgeId: row.BridgeId as string | null,
+        PayloadCid: row.PayloadCid as string,
+        SubmittedAt: row.SubmittedAt as string,
+      })
+    }
+
+    for (const row of pendingRows) {
+      // A request addressed to an authority with no current administration cannot be seeded — skip
+      // it and continue rather than aborting the batch (T-48-11-10: one malformed/unresolvable
+      // request must never take down seeding for the others).
+      const adminRow = await ctx.db
+        .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
+        .get({ authorityId: row.AuthorityId })
+      if (!adminRow) continue
+      const adminEffectiveAt = adminRow.EffectiveAt as string | number
+
+      // One fresh Tid per request, from 48-07's shared 'registration-request' namespace — the SAME
+      // value feeds BOTH the Digest(...) expression below AND the extension INSERT's context.Tid;
+      // MutationValid re-derives DG-4 from the joined RegistrationRequest using context.Tid, and a
+      // mismatch fails the CHECK with an error that reads like a signature problem, not a Tid one
+      // (mirrors election-engine.ts:910-925's BALLOT_HEADER_TID discipline).
+      const tid = await allocateTid(this.ctx!.db, 'registration-request')
+      const nonce = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
+      const taskId = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
+      const signerKey = ctx.user?.activeKeys?.[0]?.key ?? '0'.repeat(66)
+      const placeholderSig = '0'.repeat(128)
+      // nowCanonicalDatetime() is correct here and must NOT be "fixed" to toIsoZDatetime — it feeds
+      // AdminSigning's pre-existing `now` context param, not a new Z-checked column; this step
+      // writes no Z-checked column at all (48-02's hygiene rule pushes the opposite way for NEW
+      // columns only).
+      const now = nowCanonicalDatetime()
+
+      // Insert the UNSIGNED AdminSigning('vrg') row, DG-4's argument order EXACTLY. Do NOT call
+      // sign() here — the officer's real crypto arrives later at completeSignature as a SEPARATE
+      // OfficerSignature row, never as a mutation of this one (999.1 R-02/R-04).
+      await ctx.db.exec(
+        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
+         values (:nonce, :authorityId, :adminEffectiveAt, 'vrg',
+                 Digest(:tid, :requestId, :authorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt),
+                 :userId, :signerKey, :signature)`,
+        {
+          nonce,
+          authorityId: row.AuthorityId,
+          adminEffectiveAt,
+          tid,
+          requestId: row.Id,
+          requesterKey: row.RequesterKey,
+          issuerType: row.IssuerType,
+          bridgeId: row.BridgeId,
+          payloadCid: row.PayloadCid,
+          submittedAt: row.SubmittedAt,
+          userId,
+          signerKey,
+          signature: placeholderSig,
+          now,
+        }
+      )
+
+      // Task + RegistrantSignatureTaskExtension in one envelope — mirrors
+      // submitBallotForConfirmation's BEGIN/Task-insert/extension-insert/COMMIT/ROLLBACK shape.
+      await ctx.db.exec('BEGIN')
+      try {
+        await ctx.db.exec(
+          `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
+           with context IsMutationValid = true, Tid = :tid
+           values (:id, :userId, 'signature', 'registrant', :nonce, 0)`,
+          { id: taskId, userId, nonce, tid }
+        )
+        await ctx.db.exec(
+          `insert into RegistrantSignatureTaskExtension (TaskId, RequestId)
+           with context Tid = :tid
+           values (:taskId, :requestId)`,
+          { taskId, requestId: row.Id, tid }
+        )
+        await ctx.db.exec('COMMIT')
+      } catch (err) {
+        await ctx.db.exec('ROLLBACK')
+        throw err
+      }
     }
   }
 
