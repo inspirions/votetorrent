@@ -30,6 +30,24 @@
  * ============================================================================
  *
  * ============================================================================
+ * DECLARED BLIND SPOT (48-25) — a simulated focus event is not a real one.
+ * ============================================================================
+ * The `useFocusEffect` mock below proves that the engine is RE-QUERIED on a
+ * simulated focus event (via `mockTriggerFocus`) and that the rendered
+ * output tracks the new data. It does NOT prove that React Navigation
+ * actually delivers a focus event on a real pop-back from the approval /
+ * rejection ceremony, or on a real return from Bulk Import / Sync — that is
+ * a navigation-container behaviour this mock stands in for, and jest never
+ * runs a navigation container. The only proof of the real trigger is
+ * 48-28's on-device leg. This gap-2 defect (48-UAT.md test 14) was
+ * previously invisible to jest for exactly this reason: the mock this suite
+ * used before 48-25 fired the focus callback once on mount and never again,
+ * so a plain `useEffect` and a real `useFocusEffect` were indistinguishable
+ * here. A mock that asserts its own premise must admit what it does not
+ * prove.
+ * ============================================================================
+ *
+ * ============================================================================
  * DISCLOSED DEVIATION — order-crossing supplement to 48-08's fixture.
  * ============================================================================
  * 48-08's built-in `fixture-authority-1` fixture (4 rows) is
@@ -135,6 +153,38 @@ const mockNavigate = jest.fn();
 const mockSetOptions = jest.fn();
 const mockSetParams = jest.fn();
 
+// ---------------------------------------------------------------------------
+// useFocusEffect mock registry (48-25). Prefixed `mock` — babel-plugin-jest-
+// hoist forbids a jest.mock() factory from closing over a non-`mock`-
+// prefixed out-of-scope binding. Deliberately NOT the
+// SettingsScreen.provisioningEntry.test.tsx / TasksScreen.registrantTasks.
+// test.tsx precedent verbatim: both of those fire the callback ONCE with
+// `[]` deps, which would silently break this file's existing filter-change
+// tests (a filter press would no longer refetch) and would make the gap-2
+// assertion below unwritable. This registry instead re-fires on every
+// callback-identity change (mirroring the real hook while focused, via
+// deps `[cb]`) AND exposes `mockTriggerFocus` to simulate an explicit
+// re-focus with no identity change at all — the pop-back / return-from-
+// Bulk-Import-Sync case gap 2 is actually about.
+// ---------------------------------------------------------------------------
+interface MockFocusEntry {
+	cb: () => void | (() => void);
+	cleanup: (() => void) | undefined;
+}
+let mockFocusEntries: MockFocusEntry[] = [];
+
+/**
+ * Simulates a real re-focus: runs every registered callback's cleanup (if
+ * any), then re-invokes the callback and records its new cleanup. Call from
+ * inside `renderer.act(...)`.
+ */
+function mockTriggerFocus(): void {
+	for (const entry of mockFocusEntries) {
+		if (typeof entry.cleanup === "function") entry.cleanup();
+		entry.cleanup = entry.cb() ?? undefined;
+	}
+}
+
 jest.mock("@react-navigation/native", () => ({
 	// Distinct sentinel values for every color token so a color assertion can
 	// never pass by accidental equality between two tokens.
@@ -165,6 +215,26 @@ jest.mock("@react-navigation/native", () => ({
 	useRoute: () => ({
 		params: mockRouteParams,
 	}),
+	// Deferred via a real useEffect keyed on [cb] (NOT called synchronously
+	// during render): this screen's focus callbacks set state on every
+	// invocation, and a synchronous during-render call trips React's
+	// render-phase-update loop guard — same reasoning as the
+	// SettingsScreen.provisioningEntry.test.tsx precedent, but with the
+	// registry above so callback-identity changes AND an explicit
+	// `mockTriggerFocus()` both re-fire it, instead of only-once-on-mount.
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const ReactLib = require("react");
+		ReactLib.useEffect(() => {
+			const entry: MockFocusEntry = { cb, cleanup: undefined };
+			entry.cleanup = cb() ?? undefined;
+			mockFocusEntries.push(entry);
+			return () => {
+				mockFocusEntries = mockFocusEntries.filter((e) => e !== entry);
+				if (typeof entry.cleanup === "function") entry.cleanup();
+			};
+		}, [cb]);
+	},
 }));
 
 jest.mock("../../../engines/device-user", () => ({
@@ -410,6 +480,9 @@ beforeEach(() => {
 	];
 	mockRouteParams = { authorityId: "fixture-authority-1" };
 	mockGetRequestedSignatures.mockResolvedValue([]);
+	// A focus-callback entry leaked from a previous test is its own defect
+	// class — reset the registry alongside every other mock.
+	mockFocusEntries = [];
 	// Do NOT call jest.resetModules() — that would break the cached dist
 	// require and the mock factory closures (RegistrantsListScreen.test.tsx's
 	// same note applies here).
@@ -852,6 +925,160 @@ describe("RegistrationInboxScreen — D-03/D-09/D-12 (48-18)", () => {
 		consoleWarnSpy.mockRestore();
 		consoleErrorSpy.mockRestore();
 		consoleLogSpy.mockRestore();
+	});
+
+	// -------------------------------------------------------------------------
+	// Focus-driven refetch (48-25, gap 2 — 48-UAT.md test 14)
+	// -------------------------------------------------------------------------
+	// See the DECLARED BLIND SPOT header block above this describe: these
+	// tests prove the screen re-queries the engine on a SIMULATED focus
+	// event (`mockTriggerFocus`), not that React Navigation delivers a real
+	// one on a pop-back or a return from Bulk Import / Sync — 48-28 owns
+	// that proof.
+
+	it("on mount, the list and the stats are each queried exactly once", async () => {
+		const listSpy = jest.spyOn(mockRegistrationEngine, "listRegistrationRequests");
+		const statsSpy = jest.spyOn(mockRegistrationEngine, "getRegistrationTransparencyStats");
+		await renderScreen();
+		expect(listSpy).toHaveBeenCalledTimes(1);
+		expect(statsSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("refetch-list-on-focus: an explicit re-focus re-queries listRegistrationRequests", async () => {
+		const listSpy = jest.spyOn(mockRegistrationEngine, "listRegistrationRequests");
+		await renderScreen();
+		const callsAfterMount = listSpy.mock.calls.length;
+
+		await renderer.act(async () => {
+			mockTriggerFocus();
+		});
+		await flushTicks(4);
+
+		expect(listSpy.mock.calls.length).toBeGreaterThan(callsAfterMount);
+	});
+
+	it("refetch-stats-on-focus: an explicit re-focus re-queries getRegistrationTransparencyStats", async () => {
+		const statsSpy = jest.spyOn(mockRegistrationEngine, "getRegistrationTransparencyStats");
+		await renderScreen();
+		const callsAfterMount = statsSpy.mock.calls.length;
+
+		await renderer.act(async () => {
+			mockTriggerFocus();
+		});
+		await flushTicks(4);
+
+		expect(statsSpy.mock.calls.length).toBeGreaterThan(callsAfterMount);
+	});
+
+	it("no-stats-recompute-on-filter-change (D-09): a status chip refetches the list but not the stats", async () => {
+		const statsSpy = jest.spyOn(mockRegistrationEngine, "getRegistrationTransparencyStats");
+		const listSpy = jest.spyOn(mockRegistrationEngine, "listRegistrationRequests");
+		const tr = await renderScreen();
+		const statsCallsAfterMount = statsSpy.mock.calls.length;
+		const listCallsAfterMount = listSpy.mock.calls.length;
+
+		await press(tr, "registration-inbox-filter-status-r");
+		await press(tr, "registration-inbox-filter-issuer-bridge");
+
+		expect(listSpy.mock.calls.length).toBeGreaterThan(listCallsAfterMount);
+		expect(statsSpy.mock.calls.length).toBe(statsCallsAfterMount);
+	});
+
+	it("reseed-on-focus: an explicit re-focus re-calls getRequestedSignatures(true)", async () => {
+		await renderScreen();
+		const callsAfterMount = mockGetRequestedSignatures.mock.calls.length;
+		expect(callsAfterMount).toBeGreaterThan(0);
+
+		await renderer.act(async () => {
+			mockTriggerFocus();
+		});
+		await flushTicks(4);
+
+		expect(mockGetRequestedSignatures.mock.calls.length).toBeGreaterThan(callsAfterMount);
+		expect(mockGetRequestedSignatures).toHaveBeenLastCalledWith(true);
+	});
+
+	it("a status change made elsewhere is reflected on re-focus, with no remount", async () => {
+		const tr = await renderScreen();
+		// Switch off the Pending-only mount default so the mutated row stays
+		// visible after its status changes away from "p".
+		await press(tr, "registration-inbox-filter-status-all");
+
+		const before = findJsonNodeByTestID(
+			tr.toJSON(),
+			"registration-request-row-status-fixture-request-pending-repeat"
+		);
+		expect(JSON.stringify(before)).toContain("registrationRequestStatusPending");
+
+		// Mutate the mock engine's own state directly, exactly as a
+		// completed approval ceremony would have committed it — this test
+		// does not exercise the (unimplemented-in-mock) approve/reject
+		// ceremony APIs, only the inbox's reaction to a state change it did
+		// not itself cause.
+		const stored = mockRegistrationEngine.registrationRequests.get("fixture-request-pending-repeat");
+		stored.status = "a";
+		stored.decidedAt = new Date().toISOString();
+
+		await renderer.act(async () => {
+			mockTriggerFocus();
+		});
+		await flushTicks(6);
+
+		const after = findJsonNodeByTestID(
+			tr.toJSON(),
+			"registration-request-row-status-fixture-request-pending-repeat"
+		);
+		expect(JSON.stringify(after)).toContain("registrationRequestStatusApproved");
+		expect(JSON.stringify(after)).not.toContain("registrationRequestStatusPending");
+
+		// "No remount" — the same ReactTestRenderer instance rendered both
+		// the pre- and post-mutation trees; a remount would have required a
+		// fresh `renderer.create` call, which this test never makes.
+	});
+
+	it("the transparency card renders new totals on re-focus, with no filter change in between", async () => {
+		const tr = await renderScreen();
+
+		const pendingBefore = findJsonNodeByTestID(tr.toJSON(), "registration-inbox-stats");
+		void pendingBefore;
+		const pendingValueBefore = findJsonNodeByTestID(tr.toJSON(), "transparency-stats-pending-value");
+		const approvedValueBefore = findJsonNodeByTestID(tr.toJSON(), "transparency-stats-approved-value");
+		expect(JSON.stringify(pendingValueBefore)).toContain("2");
+		expect(JSON.stringify(approvedValueBefore)).toContain("1");
+
+		const stored = mockRegistrationEngine.registrationRequests.get("fixture-request-pending-repeat");
+		stored.status = "a";
+		stored.decidedAt = new Date().toISOString();
+
+		await renderer.act(async () => {
+			mockTriggerFocus();
+		});
+		await flushTicks(6);
+
+		const pendingValueAfter = findJsonNodeByTestID(tr.toJSON(), "transparency-stats-pending-value");
+		const approvedValueAfter = findJsonNodeByTestID(tr.toJSON(), "transparency-stats-approved-value");
+		expect(JSON.stringify(pendingValueAfter)).toContain("1");
+		expect(JSON.stringify(approvedValueAfter)).toContain("2");
+	});
+
+	it("source gate: no plain useEffect besides the unmountedRef guard, and the false premise sentence is gone", () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require("fs");
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require("path");
+		const source: string = fs.readFileSync(
+			path.join(__dirname, "..", "RegistrationInboxScreen.tsx"),
+			"utf8"
+		);
+		const stripped = source
+			.split("\n")
+			.filter((line) => !/^\s*\/\//.test(line))
+			.join("\n");
+
+		const useEffectCalls = stripped.match(/useEffect\(/g) ?? [];
+		expect(useEffectCalls.length).toBe(1);
+
+		expect(source).not.toContain("nothing else in the app mutates this queue mid-session");
 	});
 
 	// -------------------------------------------------------------------------
