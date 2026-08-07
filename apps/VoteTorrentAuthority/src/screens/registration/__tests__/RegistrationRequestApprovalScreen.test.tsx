@@ -804,19 +804,34 @@ describe("RegistrationRequestApprovalScreen — Group F (never-log privacy rule)
 });
 
 // ---------------------------------------------------------------------------
-// Group G — the untouched-file source gate.
+// Groups H & I — 48-26 gap-closure suite (48-UAT.md gaps 3 and 4).
+//
+// PROVEN here: the ScrollView carries a positive, safe-area-aware
+// `contentContainerStyle.paddingBottom` in all three modes (pending, approved,
+// rejected); the rejected block still ends with
+// `registration-request-approval-decided-at` as its LAST child, in the
+// pill/reason/officer/decided-at order; the pending footer is a column of two
+// non-flex, full-width buttons (`Footer` receives no truthy `row`, neither
+// `CustomButton` receives a truthy `flex`, `footerSlot` stretches rather than
+// flexes); and both buttons still bind their original i18n keys as `title`.
+//
+// NOT proven here, and UNPROVABLE here: that the decided-at line is actually
+// REACHABLE at maximum scroll on a 360dp viewport, and that either button
+// label RENDERS IN FULL rather than clipped, in either locale.
+// `react-test-renderer` has no layout engine — it measures nothing and clips
+// nothing. `48-UAT.md` recorded that treating "rendered in code" as
+// "observable on screen" is precisely what let gap 3 ship as DEFECT-3; this
+// suite must not repeat that substitution by implying more than a style-prop
+// assertion can support.
+//
+// WHAT DOES DISCHARGE IT: 48-29's on-device leg, in EN and ES, using the same
+// discriminator the UAT used to establish the defect — scroll to the end,
+// swipe twice more, confirm the screenshots are byte-identical (so the scroll
+// is genuinely at its end), and read the decided-at line in that final frame;
+// and visually confirm both button labels render unclipped at that viewport.
 // ---------------------------------------------------------------------------
 
 describe("RegistrationRequestApprovalScreen — Group H (48-26 gap 3: scroll bottom padding, D-06)", () => {
-	/**
-	 * PROVEN here: the ScrollView carries a positive, safe-area-aware
-	 * `contentContainerStyle.paddingBottom` in all three modes, and the
-	 * rejected block's child order is unchanged with decided-at still last.
-	 * NOT proven here, and unprovable here: that the decided-at line is
-	 * actually reachable at maximum scroll on a real viewport —
-	 * `react-test-renderer` has no layout engine. See the Group H/I header
-	 * block below for the full statement; 48-29's on-device leg owns that.
-	 */
 	function scrollPaddingBottom(tr: renderer.ReactTestRenderer): number | undefined {
 		const node = tr.root.findByProps({ testID: "registration-request-approval-scroll" });
 		const style = node.props.contentContainerStyle;
@@ -915,6 +930,10 @@ describe("RegistrationRequestApprovalScreen — Group I (48-26 gap 4: footer sta
 		expect(rejectCustomButton.props.title).toBe("registrationRequestApprovalRejectButton");
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Group G — the untouched-file source gate.
+// ---------------------------------------------------------------------------
 
 describe("RegistrationRequestApprovalScreen — Group G (SignatureTaskScreen.tsx left alone)", () => {
 	it("23. SignatureTaskScreen.tsx carries no 'registrant' token and its titleKey record has exactly six entries — asserted at the source level, since react-test-renderer cannot see a file that was never touched", () => {
