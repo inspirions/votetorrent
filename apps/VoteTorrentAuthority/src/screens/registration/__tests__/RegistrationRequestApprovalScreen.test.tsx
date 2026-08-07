@@ -174,8 +174,12 @@ const mockSetOptions = jest.fn();
 
 jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
 
+// bottom: 34 (not 0) is deliberate — a non-zero mocked inset is what makes
+// the "strictly greater than 24" padding assertions below actually
+// discriminate a safe-area-aware pad from a hardcoded one; with bottom: 0
+// `insets.bottom + 24` and a bare `paddingBottom: 24` would be indistinguishable.
 jest.mock("react-native-safe-area-context", () => ({
-	useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+	useSafeAreaInsets: () => ({ top: 0, bottom: 34, left: 0, right: 0 }),
 }));
 
 // react-i18next: identity `t` that returns the bare key even when given an

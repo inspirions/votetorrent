@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import type {
@@ -201,6 +202,7 @@ export default function RegistrationRequestApprovalScreen() {
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const { t } = useTranslation();
 	const { colors } = useTheme() as ExtendedTheme;
+	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
 	const { scopes } = useCurrentOfficerScopes(authorityId);
 
@@ -394,7 +396,21 @@ export default function RegistrationRequestApprovalScreen() {
 
 	return (
 		<View testID="registration-request-approval-screen" style={styles.content}>
-			<ScrollView testID="registration-request-approval-scroll" style={styles.container}>
+			{/* Neither decided mode renders a footer (see below), so nothing else
+			    clears the Android gesture bar / iOS home indicator below the last
+			    line of the approved or rejected block — the rejected block's
+			    trailing decided-at line was unreachable at maximum scroll for
+			    exactly this reason (48-UAT.md gap 3 / DEFECT-3). Applied
+			    unconditionally (not just in decided modes) so this does not become
+			    a third three-valued branch; in pending mode the Footer supplies its
+			    own inset clearance and the extra scroll room is harmless. Mirrors
+			    RegistrationInboxScreen.tsx's contentContainerStyle exactly — do not
+			    delete this as redundant-looking. */}
+			<ScrollView
+				testID="registration-request-approval-scroll"
+				style={styles.container}
+				contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+			>
 				{/* InlineError renders null for an empty message and carries no
 				    testID prop, so its absence is otherwise unassertable — the
 				    wrapping View is what makes presence/absence testable. */}
