@@ -784,7 +784,12 @@ const resources = {
 			bulkImportSyncP2pBody:
 				'This sync method is still under development and has not been verified to work reliably. Use Filesystem or REST sync for dependable results.',
 			bulkImportSyncNeverSyncedBody: 'Not synced yet',
-			bulkImportSyncLastSyncedLabel: 'Last synced {{date}}',
+			bulkImportSyncSyncedBody: 'Sync completed.',
+			bulkImportSyncErrorBody:
+				'Sync failed. No sync method is connected, or the connected one could not be reached.',
+			// bulkImportSyncLastSyncedLabel is no longer a body key — it is a separate line rendered
+			// only when a real timestamp exists (48-UAT.md gap 1).
+			bulkImportSyncLastSyncedLabel: 'Last successful sync {{date}}',
 			bulkImportSyncImportedCountLabel: '{{count}} imported',
 			bulkImportSyncPendingCountLabel: '{{count}} pending review',
 			bulkImportSyncErrorCountLabel: '{{count}} errors',
@@ -1568,7 +1573,10 @@ const resources = {
 			bulkImportSyncP2pBody:
 				'Este método de sincronización aún está en desarrollo y no se ha verificado que funcione de forma confiable. Usa la sincronización por Sistema de Archivos o REST para resultados confiables.',
 			bulkImportSyncNeverSyncedBody: 'Aún no sincronizado',
-			bulkImportSyncLastSyncedLabel: 'Última sincronización {{date}}',
+			bulkImportSyncSyncedBody: 'Sincronización completada.',
+			bulkImportSyncErrorBody:
+				'La sincronización falló. No hay ningún método de sincronización conectado, o no se pudo contactar con el que está conectado.',
+			bulkImportSyncLastSyncedLabel: 'Última sincronización correcta {{date}}',
 			bulkImportSyncImportedCountLabel: '{{count}} importadas',
 			bulkImportSyncPendingCountLabel: '{{count}} pendientes de revisión',
 			bulkImportSyncErrorCountLabel: '{{count}} errores',
