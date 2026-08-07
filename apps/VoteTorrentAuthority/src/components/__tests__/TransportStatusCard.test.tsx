@@ -25,10 +25,21 @@ import renderer from 'react-test-renderer';
 // ---------------------------------------------------------------------------
 
 // Mock react-i18next: no i18next instance is initialized in this isolated unit test. `t` echoes
-// its key — these assertions are about key *selection*, never about copy text, which 48-03's own
-// gates own.
+// its key plus a serialized interpolation object when one is passed (the
+// `RegistrantDetailScreen.accessTrail.test.tsx` pattern) — these assertions are about key
+// *selection* (and, for the date line, that the raw value reaches the string), never about copy
+// text, which 48-03's own gates own.
 jest.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, unknown>) =>
+      options && Object.keys(options).length > 0
+        ? key +
+          '|' +
+          Object.entries(options)
+            .map(([k, v]) => k + '=' + String(v))
+            .join(',')
+        : key,
+  }),
 }));
 
 // Sentinel palette — visually impossible, uniquely greppable color strings so a color assertion
@@ -59,6 +70,7 @@ const {
   ExperimentalTransportStatusCard,
   transportCopy,
   TRANSPORT_STATE_ICONS,
+  TRANSPORT_BODY_KEYS,
 } = require('../TransportStatusCard');
 
 function renderCard(tree: React.ReactElement): renderer.ReactTestRenderer {
@@ -125,10 +137,13 @@ describe('transportCopy — pure resolver', () => {
     filesystem: 'bulkImportSyncFilesystemHeading',
     rest: 'bulkImportSyncRestHeading',
   };
+  // Three DISTINCT body keys, one per state — this is the exhaustive-Record contract Task 2
+  // introduces. The `error` row is the assertion that is RED against today's two-way ternary,
+  // which collapses `error` into `bulkImportSyncLastSyncedLabel`.
   const expectedBodyKey = {
     never: 'bulkImportSyncNeverSyncedBody',
-    success: 'bulkImportSyncLastSyncedLabel',
-    error: 'bulkImportSyncLastSyncedLabel',
+    success: 'bulkImportSyncSyncedBody',
+    error: 'bulkImportSyncErrorBody',
   };
 
   for (const kind of KINDS) {
@@ -156,6 +171,35 @@ describe('transportCopy — pure resolver', () => {
       expect(new Set(bodyKeys).size).toBe(1);
       expect(bodyKeys[0]).toBe(expectedBodyKey[state]);
     }
+  });
+
+  it('the three body keys are pairwise distinct, and bulkImportSyncLastSyncedLabel is not among them', () => {
+    const bodyKeys = STATES.map((state) => expectedBodyKey[state]);
+    expect(new Set(bodyKeys).size).toBe(bodyKeys.length);
+    expect(bodyKeys).not.toContain('bulkImportSyncLastSyncedLabel');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite B2 — TRANSPORT_BODY_KEYS shape: exhaustive over the three-valued state, mirroring
+// TRANSPORT_STATE_ICONS's own Record shape so a future fourth state is a compile error rather
+// than a silent fallthrough.
+// ---------------------------------------------------------------------------
+
+describe('TRANSPORT_BODY_KEYS — shape', () => {
+  it('has exactly three own keys, matching Object.keys(TRANSPORT_STATE_ICONS)', () => {
+    expect(Object.keys(TRANSPORT_BODY_KEYS).sort()).toEqual(
+      Object.keys(TRANSPORT_STATE_ICONS).sort(),
+    );
+    expect(Object.keys(TRANSPORT_BODY_KEYS).sort()).toEqual(['error', 'never', 'success']);
+  });
+
+  it('maps each state to its own distinct body key', () => {
+    expect(TRANSPORT_BODY_KEYS).toEqual({
+      never: 'bulkImportSyncNeverSyncedBody',
+      success: 'bulkImportSyncSyncedBody',
+      error: 'bulkImportSyncErrorBody',
+    });
   });
 });
 
@@ -295,6 +339,95 @@ describe('TransportStatusCard — counts line', () => {
       expect(serialized).not.toContain('bulkImportSyncErrorCountLabel');
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Suite E2 — the state-by-date-presence render matrix (48-UAT.md gap 1 / DEFECT-2). Six cells per
+// kind (three states x date-present/date-absent) = twelve total across both kinds. Proves the
+// dateless "Last synced" render this UAT photographed is now unreachable, and that
+// `bulkImportSyncLastSyncedLabel` never leaks into the body node, in every one of the twelve
+// cells — including the `error` + no-date cell, the exact cell the UAT photographed.
+// ---------------------------------------------------------------------------
+
+describe('TransportStatusCard — state-by-date-presence render matrix (48-UAT.md gap 1)', () => {
+  const SENTINEL_TIMESTAMP = '2026-08-05T12:00:00Z';
+  const expectedBodyKey = {
+    never: 'bulkImportSyncNeverSyncedBody',
+    success: 'bulkImportSyncSyncedBody',
+    error: 'bulkImportSyncErrorBody',
+  };
+
+  for (const kind of KINDS) {
+    for (const state of STATES) {
+      it(`kind=${kind} state=${state}, lastSyncedAt UNDEFINED: no date line, body is the state's own key, never bulkImportSyncLastSyncedLabel`, () => {
+        const onSyncNow = jest.fn();
+        const tree = renderCard(
+          <TransportStatusCard kind={kind} syncState={state} onSyncNow={onSyncNow} />,
+        );
+
+        expect(
+          findByTestID(tree.root, `transport-status-last-synced-${kind}`),
+        ).toHaveLength(0);
+
+        const bodyNode = findByTestID(tree.root, `transport-status-${kind}-${state}-body`)[0];
+        const serialized = serializeSubtree(bodyNode);
+        expect(serialized).toContain(expectedBodyKey[state]);
+        expect(serialized).not.toContain('bulkImportSyncLastSyncedLabel');
+      });
+
+      it(`kind=${kind} state=${state}, lastSyncedAt SET: date line present and contains the sentinel, body is still the state's own key`, () => {
+        const onSyncNow = jest.fn();
+        const tree = renderCard(
+          <TransportStatusCard
+            kind={kind}
+            syncState={state}
+            lastSyncedAt={SENTINEL_TIMESTAMP}
+            onSyncNow={onSyncNow}
+          />,
+        );
+
+        const dateNode = findByTestID(tree.root, `transport-status-last-synced-${kind}`)[0];
+        expect(dateNode).toBeDefined();
+        const dateSerialized = serializeSubtree(dateNode);
+        expect(dateSerialized).toContain('bulkImportSyncLastSyncedLabel');
+        expect(dateSerialized).toContain(SENTINEL_TIMESTAMP);
+
+        const bodyNode = findByTestID(tree.root, `transport-status-${kind}-${state}-body`)[0];
+        const bodySerialized = serializeSubtree(bodyNode);
+        expect(bodySerialized).toContain(expectedBodyKey[state]);
+        expect(bodySerialized).not.toContain('bulkImportSyncLastSyncedLabel');
+      });
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Suite E3 — source-level gate on TransportStatusCard.tsx (comments stripped, since the file's own
+// header prose names these identifiers and an unfiltered count would be self-invalidating).
+// ---------------------------------------------------------------------------
+
+describe('TransportStatusCard.tsx — source-level gate (comments stripped)', () => {
+  function sourceWithoutComments(): string {
+    const raw = fs.readFileSync(path.resolve(__dirname, '../TransportStatusCard.tsx'), 'utf8');
+    return raw
+      .split('\n')
+      .filter((line) => !/^\s*\*/.test(line) && !/^\s*\/\//.test(line))
+      .join('\n');
+  }
+
+  it('bulkImportSyncLastSyncedLabel appears exactly once', () => {
+    const src = sourceWithoutComments();
+    const occurrences = (src.match(/bulkImportSyncLastSyncedLabel/g) || []).length;
+    expect(occurrences).toBe(1);
+  });
+
+  it('t(copy.bodyKey appears exactly once and is followed by ) with no interpolation object', () => {
+    const src = sourceWithoutComments();
+    const occurrences = (src.match(/t\(copy\.bodyKey/g) || []).length;
+    expect(occurrences).toBe(1);
+    expect(src).toMatch(/t\(copy\.bodyKey\)/);
+    expect(src).not.toMatch(/t\(copy\.bodyKey,/);
+  });
 });
 
 // ---------------------------------------------------------------------------
