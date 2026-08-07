@@ -1,6 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
-import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
+import {
+	ExtendedTheme,
+	useFocusEffect,
+	useNavigation,
+	useRoute,
+	useTheme,
+} from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
@@ -171,12 +177,30 @@ export default function RegistrationInboxScreen() {
 		}
 	}, [getEngine, buildFilter]);
 
-	// Plain effect, NOT useFocusEffect — mirrors RegistrantsListScreen.tsx's
-	// reasoning: nothing else in the app mutates this queue mid-session, and a
-	// focus refetch would silently re-run the expensive count.
-	useEffect(() => {
-		loadFirstPage();
-	}, [loadFirstPage]);
+	// useFocusEffect, NOT a plain useEffect (48-25, gap-2 fix). The premise a
+	// plain effect relied on — "nothing else in the app mutates this queue
+	// mid-session" — is FALSE: Bulk Import / Sync is reached from this
+	// screen's own header, and the approval/rejection ceremonies are pushed
+	// screens that pop back to this still-mounted inbox. A plain useEffect
+	// only re-runs when loadFirstPage's identity changes (a filter
+	// primitive), so a return from any of those three paths left the list
+	// showing pre-decision data even though the write had committed — an
+	// officer was shown a decision they just made as though it had not been
+	// made. useCallback-wrapping is mandatory here, not stylistic:
+	// useFocusEffect re-runs whenever the callback identity changes WHILE
+	// focused, so an inline arrow would re-run on every render and loop; the
+	// wrapper makes this exactly the union of "refetch on focus" and
+	// "refetch on a filter change while focused" (loadFirstPage's identity
+	// still tracks buildFilter's filter primitives). Accepted tradeoff: this
+	// re-runs 48-08's count query on every focus, not only on a filter
+	// change. That cost is accepted because pages are bounded at
+	// REGISTRATION_REQUESTS_PAGE_SIZE and the alternative is the stale-queue
+	// defect above.
+	useFocusEffect(
+		useCallback(() => {
+			loadFirstPage();
+		}, [loadFirstPage])
+	);
 
 	const loadStats = useCallback(async () => {
 		try {
@@ -193,35 +217,46 @@ export default function RegistrationInboxScreen() {
 		}
 	}, [getEngine, authorityId]);
 
-	useEffect(() => {
-		loadStats();
-		// The dep array excludes every filter primitive ON PURPOSE (D-09).
-		// These counts are authority-wide. Recomputing them per filter change
-		// would make them appear to respond to the chips, and
-		// "Pending: 0" beside a Rejected-filtered list would read as a
-		// contradiction rather than as two independent facts.
-	}, [loadStats]);
+	// useFocusEffect, NOT a plain useEffect (48-25). The trigger is FOCUS,
+	// not filter — the dep array below still excludes every filter primitive
+	// ON PURPOSE (D-09), and that decision survives this conversion
+	// unchanged. These counts are authority-wide. Recomputing them per
+	// filter change would make them appear to respond to the chips, and
+	// "Pending: 0" beside a Rejected-filtered list would read as a
+	// contradiction rather than as two independent facts. Anyone who later
+	// adds a filter primitive (statusFilter / issuerFilter / appliedName) to
+	// loadStats's own dep array is deleting D-09 and must say so out loud in
+	// the commit and here.
+	useFocusEffect(
+		useCallback(() => {
+			loadStats();
+		}, [loadStats])
+	);
 
-	useEffect(() => {
-		// Mount-only, best-effort, non-blocking seeding of registrant signature
-		// tasks. 48-11 made getRequestedSignatures(true) an IDEMPOTENT
-		// pull-and-seed — it creates the Task + RegistrantSignatureTaskExtension
-		// + unsigned 'vrg' AdminSigning rows the approval ceremony needs, and a
-		// second call creates no duplicates. Firing it here is what lets an
-		// officer who navigates straight to the inbox (never opening the Tasks
-		// tab) reach a request that has a task to sign. Deliberately
-		// fire-and-forget: it contributes no data to this screen, a failure is
-		// not an inbox failure, and it must never set errorMessage or blank the
-		// rows.
-		(async () => {
-			try {
-				const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
-				await engine.getRequestedSignatures(true);
-			} catch {
-				// Best-effort — swallow silently, never console.*'d.
-			}
-		})();
-	}, [getEngine]);
+	// useFocusEffect, NOT mount-only (48-25). Best-effort, non-blocking
+	// seeding of registrant signature tasks. 48-11 made
+	// getRequestedSignatures(true) an IDEMPOTENT pull-and-seed — it creates
+	// the Task + RegistrantSignatureTaskExtension + unsigned 'vrg'
+	// AdminSigning rows the approval ceremony needs, and a second call
+	// creates no duplicates. Firing it on every focus (not only on mount)
+	// closes a second-order version of the gap-2 defect: a request imported
+	// during the session via Bulk Import / Sync would now correctly APPEAR
+	// in the refreshed list (see the list effect above) but have no seeded
+	// signature task, so opening it could not produce a digest. Every
+	// existing property is preserved: best-effort, non-blocking, never sets
+	// errorMessage, never blanks the rows, never console.*'d.
+	useFocusEffect(
+		useCallback(() => {
+			(async () => {
+				try {
+					const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
+					await engine.getRequestedSignatures(true);
+				} catch {
+					// Best-effort — swallow silently, never console.*'d.
+				}
+			})();
+		}, [getEngine])
+	);
 
 	async function loadMore() {
 		if (loadingMore || nextCursor === undefined) return;
