@@ -531,14 +531,26 @@ export default function RegistrationRequestApprovalScreen() {
 			{/* Neither decided mode renders a footer of any kind. */}
 			{mode === "pending" && !showRejectCard ? (
 				<View testID="registration-request-approval-footer">
-					<Footer row>
+					{/* Stacked (no `row`), not the two-across row every other footer
+					    in the app uses: a row gave each label ~84dp, and "APPROVE
+					    REGISTRATION" clipped to "APPROVE RE" rather than wrapping
+					    (48-UAT.md gap 4). The real cause is CustomButton.tsx's
+					    `buttonContent` being content-sized under an
+					    `alignItems: "center"` TouchableOpacity, so its
+					    `flexShrink: 1` on the label never has an overflow to resolve
+					    against — an app-wide shared-component fix, filed as a todo
+					    rather than made here (see
+					    2026-08-07-custombutton-label-clips-instead-of-wrapping.md).
+					    A full-width column slot leaves ~276dp, comfortably fitting
+					    both EN and ES labels on one line without touching the shared
+					    component. */}
+					<Footer>
 						<View testID="registration-request-approval-approve" style={localStyles.footerSlot}>
 							<CustomButton
 								title={t("registrationRequestApprovalApproveButton")}
 								icon="check"
 								backgroundColor={colors.success}
 								size="thin"
-								flex
 								disabled={!gateMet || !canDecide || priorRejectionsUnavailable || submittingRef.current}
 								onPress={handleApprove}
 							/>
@@ -549,7 +561,6 @@ export default function RegistrationRequestApprovalScreen() {
 								icon="xmark"
 								backgroundColor={colors.error}
 								size="thin"
-								flex
 								disabled={!canDecide}
 								// Fires NO engine call whatsoever — only reveals the card.
 								onPress={() => setShowRejectCard(true)}
@@ -579,8 +590,11 @@ const localStyles = StyleSheet.create({
 	summaryRow: {
 		marginBottom: 8,
 	},
+	// `alignSelf: "stretch"`, not `flex: 1` — inside a column Footer with no
+	// defined height, `flex: 1` resolves to a zero flex-basis and collapses
+	// the slot (48-26 gap 4 / D-07).
 	footerSlot: {
-		flex: 1,
+		alignSelf: "stretch",
 	},
 });
 
