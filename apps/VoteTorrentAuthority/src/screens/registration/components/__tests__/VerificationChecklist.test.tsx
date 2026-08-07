@@ -13,6 +13,26 @@
  * `@votetorrent/vote-core` to `dist/src/index.js`, and this is the FIRST app
  * file to import VALUES (not just types) from that package — every
  * pre-existing app import of it is type-only and never exercised this path.
+ *
+ * ============================================================================
+ * DECLARED BLIND SPOT (48-27) — a flex style in the tree is not proof of wrap.
+ * ============================================================================
+ * PROVEN here: every checklist label carries a flattened `flex: 1` in both
+ * interactive and read-only modes, and no label anywhere in the source
+ * carries a line-count truncation prop.
+ *
+ * NOT PROVEN, AND UNPROVABLE IN JEST: that the Spanish labels — in
+ * particular "Comprobó contra el padrón electoral existente" (`roll`) and
+ * the longer `eligibility` string — actually wrap inside the screen rather
+ * than running past the right edge on a real device. `react-test-renderer`
+ * has no layout engine and no text measurement, so a flex style in the tree
+ * is evidence of intent, not of fit. This is the same substitution the UAT
+ * identified as the reason 48-UAT.md gap 4 shipped in the first place.
+ *
+ * WHAT DISCHARGES IT: 48-29's on-device leg, walked in EN and then ES at the
+ * same viewport — ES is the longer locale and was never walked before this
+ * UAT.
+ * ============================================================================
  */
 
 import React from "react";

@@ -66,6 +66,27 @@
  * prevent without modifying 48-08's landed fixture (this file's `packages/`
  * diff stays empty).
  * ============================================================================
+ *
+ * ============================================================================
+ * DECLARED BLIND SPOT (48-27) — a flex style in the tree is not proof of fit.
+ * ============================================================================
+ * PROVEN here: the header carries no action button and the title is still
+ * bound (`setOptions` carries `title` and no `headerRight` key at all); the
+ * body Bulk Import / Sync control exists, is unconditional on scope (renders
+ * with `vrg`, without `vrg`, and while scopes are still loading), and
+ * navigates with `{ authorityId }` only; render order is stats card, then
+ * the control, then the filters.
+ *
+ * NOT PROVEN, AND UNPROVABLE IN JEST: that the title actually renders in
+ * full in Spanish on a 360dp header. `react-test-renderer` has no layout
+ * engine and no text measurement — moving the control off the header is
+ * evidence of intent, not of fit, and this is the same substitution the UAT
+ * identified as the reason 48-UAT.md gap 4 shipped in the first place.
+ *
+ * WHAT DISCHARGES IT: 48-29's on-device leg, walked in EN and then ES at the
+ * same viewport — ES is the longer locale and was never walked before this
+ * UAT.
+ * ============================================================================
  */
 
 import React from "react";
