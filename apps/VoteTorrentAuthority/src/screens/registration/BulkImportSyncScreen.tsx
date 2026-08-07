@@ -96,8 +96,10 @@ export function BulkImportSyncScreen() {
 		const binding = resolveSyncBinding(id);
 		if (!binding) {
 			// An unattached binding must not read as a successful or idle sync — it is honestly an
-			// ERROR state, not a silent no-op. The card's existing copy plus its error icon carry
-			// this with no new string (T-48-20-05).
+			// ERROR state, not a silent no-op. 48-24 gave this state its own string
+			// (`bulkImportSyncErrorBody`, fixed and interpolation-free so no transport-supplied text
+			// can ever reach it) rather than leaving it to fall through into a dangling "Last synced"
+			// with no date (48-UAT.md gap 1).
 			if (!unmountedRef.current) setEntry({ failed: true });
 			return;
 		}

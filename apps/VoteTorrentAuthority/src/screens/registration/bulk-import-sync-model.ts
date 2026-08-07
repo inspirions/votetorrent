@@ -170,7 +170,10 @@ export interface TransportCardState {
  *   `bulkImportSyncNeverSyncedBody` and omits its counts line entirely.
  * - `failed` -> `'error'`, carrying the LAST successful report's values when one exists,
  *   otherwise `undefined`. A failed sync must not erase what the previous successful sync
- *   legitimately reported.
+ *   legitimately reported. As of 48-24, the card consumes that carried-forward `lastSyncedAt` as
+ *   a separately-labelled "last successful sync" line that is omitted entirely when undefined —
+ *   so carrying the previous report's timestamp forward through an error state is now honest
+ *   instead of being the source of a dangling claim (48-UAT.md gap 1).
  * - a `report` with no failure -> `'success'`, with `lastSyncedAt`/`importedCount`/
  *   `pendingCount`/`errorCount` read straight off the report.
  */

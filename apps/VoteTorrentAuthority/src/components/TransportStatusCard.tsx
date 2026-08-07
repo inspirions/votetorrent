@@ -76,14 +76,28 @@ export const TRANSPORT_STATE_ICONS: Record<
 };
 
 /**
+ * Per-state body-key lookup, mirroring `TRANSPORT_STATE_ICONS`'s own `Record` shape so a future
+ * fourth `TransportSyncState` member is a compile error here, not a silent fallthrough into
+ * whichever branch happened to be last. `bulkImportSyncLastSyncedLabel` is deliberately NOT a
+ * member of this Record — after 48-24 it is a separate line rendered only behind a `lastSyncedAt`
+ * truthiness guard (see the render body below), never a body key (48-UAT.md gap 1).
+ */
+export const TRANSPORT_BODY_KEYS: Record<TransportSyncState, string> = {
+	never: 'bulkImportSyncNeverSyncedBody',
+	success: 'bulkImportSyncSyncedBody',
+	error: 'bulkImportSyncErrorBody',
+};
+
+/**
  * The ONE discriminant producing `testIDBase` + `headingKey` + `bodyKey` together (the
  * `provisioningCopy` discipline from `AttestationProvisioningStatusScreen.tsx:74-91`), so a
  * wrong-state heading can never render above a wrong-state body, and a future state addition adds
  * a branch here and nowhere else.
  *
- * The success/error distinction is carried by the icon (`TRANSPORT_STATE_ICONS`) and the counts
- * line, not by a second body key: the UI-SPEC's copy table defines no error-specific body string,
- * and inventing one here would fork the copy contract away from the keys 48-03 owns.
+ * The body key is a total function of `syncState` via `TRANSPORT_BODY_KEYS` — one distinct key
+ * per state, including `error` (48-24 closed 48-UAT.md gap 1: an unattached or failed transport
+ * used to fall through into the "Last synced" body with no date). The timestamp is a separate
+ * guarded line elsewhere in this file so it can never render dateless.
  */
 export function transportCopy(
 	kind: TransportKind,
@@ -91,12 +105,10 @@ export function transportCopy(
 ): { testIDBase: string; headingKey: string; bodyKey: string } {
 	const headingKey =
 		kind === "filesystem" ? "bulkImportSyncFilesystemHeading" : "bulkImportSyncRestHeading";
-	const bodyKey =
-		syncState === "never" ? "bulkImportSyncNeverSyncedBody" : "bulkImportSyncLastSyncedLabel";
 	return {
 		testIDBase: `transport-status-${kind}-${syncState}`,
 		headingKey,
-		bodyKey,
+		bodyKey: TRANSPORT_BODY_KEYS[syncState],
 	};
 }
 
@@ -166,10 +178,25 @@ export function TransportStatusCard({
 				</ThemedText>
 			</View>
 
-			{/* The interpolation object is passed unconditionally; the `never` body ignores it. */}
+			{/* No second argument: removing the interpolation object is the structural guarantee that
+			    no body string can receive a date any more (48-UAT.md gap 1). */}
 			<ThemedText type="default" style={localStyles.bodyText} testID={`${copy.testIDBase}-body`}>
-				{t(copy.bodyKey, { date: lastSyncedAt })}
+				{t(copy.bodyKey)}
 			</ThemedText>
+
+			{/* Guarded on lastSyncedAt truthiness alone — this is the date string's ONLY call site in
+			    this file. That is what makes a dateless "Last synced" render unreachable: the string
+			    simply has nowhere else to be printed from. Placed above the counts line so the reading
+			    order is state sentence, then when it happened, then what it moved. */}
+			{lastSyncedAt ? (
+				<ThemedText
+					type="small"
+					style={[localStyles.countsText, { color: colors.textSecondary }]}
+					testID={`transport-status-last-synced-${kind}`}
+				>
+					{t("bulkImportSyncLastSyncedLabel", { date: lastSyncedAt })}
+				</ThemedText>
+			) : null}
 
 			{countSegments.length > 0 && (
 				<ThemedText
