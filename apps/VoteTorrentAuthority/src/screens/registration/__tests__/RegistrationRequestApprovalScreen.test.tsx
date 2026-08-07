@@ -867,6 +867,55 @@ describe("RegistrationRequestApprovalScreen — Group H (48-26 gap 3: scroll bot
 	});
 });
 
+describe("RegistrationRequestApprovalScreen — Group I (48-26 gap 4: footer stacks, D-07)", () => {
+	it("27. pending mode: Footer receives no truthy row prop, footerSlot no longer flexes, and both CustomButtons receive no truthy flex prop", async () => {
+		const tr = await renderScreen();
+
+		const footerNode = tr.root.findByProps({ testID: "registration-request-approval-footer" });
+		const footerElement = footerNode.findByType(require("../../../components/Footer").Footer as any);
+		expect(Boolean(footerElement.props.row)).toBe(false);
+
+		const approveButton = tr.root.findByProps({ testID: "registration-request-approval-approve" });
+		const approveCustomButton = approveButton.findByType(
+			require("../../../components/CustomButton").CustomButton as any
+		);
+		expect(Boolean(approveCustomButton.props.flex)).toBe(false);
+
+		const rejectButton = tr.root.findByProps({ testID: "registration-request-approval-reject" });
+		const rejectCustomButton = rejectButton.findByType(
+			require("../../../components/CustomButton").CustomButton as any
+		);
+		expect(Boolean(rejectCustomButton.props.flex)).toBe(false);
+	});
+
+	it("28. footerSlot wrapper style no longer carries flex: 1 — it stretches instead", async () => {
+		const tr = await renderScreen();
+		const approveButton = tr.root.findByProps({ testID: "registration-request-approval-approve" });
+		const style = approveButton.props.style;
+		const flattened = Array.isArray(style) ? Object.assign({}, ...style.filter(Boolean)) : style;
+		expect(flattened?.flex).not.toBe(1);
+		expect(flattened?.alignSelf).toBe("stretch");
+	});
+
+	it("29. testIDs and i18n title keys are unchanged after the footer-shape change", async () => {
+		const tr = await renderScreen();
+		expect(exists(tr, "registration-request-approval-approve")).toBe(true);
+		expect(exists(tr, "registration-request-approval-reject")).toBe(true);
+
+		const approveButton = tr.root.findByProps({ testID: "registration-request-approval-approve" });
+		const approveCustomButton = approveButton.findByType(
+			require("../../../components/CustomButton").CustomButton as any
+		);
+		expect(approveCustomButton.props.title).toBe("registrationRequestApprovalApproveButton");
+
+		const rejectButton = tr.root.findByProps({ testID: "registration-request-approval-reject" });
+		const rejectCustomButton = rejectButton.findByType(
+			require("../../../components/CustomButton").CustomButton as any
+		);
+		expect(rejectCustomButton.props.title).toBe("registrationRequestApprovalRejectButton");
+	});
+});
+
 describe("RegistrationRequestApprovalScreen — Group G (SignatureTaskScreen.tsx left alone)", () => {
 	it("23. SignatureTaskScreen.tsx carries no 'registrant' token and its titleKey record has exactly six entries — asserted at the source level, since react-test-renderer cannot see a file that was never touched", () => {
 		// react-test-renderer proves what RENDERS; it cannot prove a sibling
