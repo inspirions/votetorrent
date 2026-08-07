@@ -803,6 +803,66 @@ describe("RegistrationRequestApprovalScreen — Group F (never-log privacy rule)
 // Group G — the untouched-file source gate.
 // ---------------------------------------------------------------------------
 
+describe("RegistrationRequestApprovalScreen — Group H (48-26 gap 3: scroll bottom padding, D-06)", () => {
+	/**
+	 * PROVEN here: the ScrollView carries a positive, safe-area-aware
+	 * `contentContainerStyle.paddingBottom` in all three modes, and the
+	 * rejected block's child order is unchanged with decided-at still last.
+	 * NOT proven here, and unprovable here: that the decided-at line is
+	 * actually reachable at maximum scroll on a real viewport —
+	 * `react-test-renderer` has no layout engine. See the Group H/I header
+	 * block below for the full statement; 48-29's on-device leg owns that.
+	 */
+	function scrollPaddingBottom(tr: renderer.ReactTestRenderer): number | undefined {
+		const node = tr.root.findByProps({ testID: "registration-request-approval-scroll" });
+		const style = node.props.contentContainerStyle;
+		const flattened = Array.isArray(style) ? Object.assign({}, ...style.filter(Boolean)) : style;
+		return flattened?.paddingBottom;
+	}
+
+	it("24. pending mode: the scroll carries a contentContainerStyle paddingBottom > 24", async () => {
+		const tr = await renderScreen();
+		const paddingBottom = scrollPaddingBottom(tr);
+		expect(typeof paddingBottom).toBe("number");
+		expect(paddingBottom as number).toBeGreaterThan(24);
+	});
+
+	it("25. approved mode: the scroll carries the same paddingBottom > 24 contract", async () => {
+		mockCurrentRead = APPROVED_READ;
+		mockRouteParams = { requestId: APPROVED_READ.requestId, authorityId: "auth-1" };
+		const tr = await renderScreen();
+		const paddingBottom = scrollPaddingBottom(tr);
+		expect(typeof paddingBottom).toBe("number");
+		expect(paddingBottom as number).toBeGreaterThan(24);
+	});
+
+	it("26. rejected mode: the scroll carries the same paddingBottom > 24 contract, and registration-request-approval-decided-at is the LAST child of the rejected block, after pill/reason/officer in that order", async () => {
+		mockCurrentRead = REJECTED_READ;
+		mockRouteParams = { requestId: REJECTED_READ.requestId, authorityId: "auth-1" };
+		const tr = await renderScreen();
+
+		const paddingBottom = scrollPaddingBottom(tr);
+		expect(typeof paddingBottom).toBe("number");
+		expect(paddingBottom as number).toBeGreaterThan(24);
+
+		const ids = orderedTestIDs(tr);
+		const blockIdx = ids.indexOf("registration-request-approval-rejected-block");
+		const pillIdx = ids.indexOf("registration-request-approval-rejected-pill");
+		const reasonIdx = ids.indexOf("registration-request-approval-rejection-reason");
+		const officerIdx = ids.indexOf("registration-request-approval-rejecting-officer");
+		const decidedAtIdx = ids.indexOf("registration-request-approval-decided-at");
+
+		expect(blockIdx).toBeGreaterThanOrEqual(0);
+		expect(pillIdx).toBeGreaterThan(blockIdx);
+		expect(reasonIdx).toBeGreaterThan(pillIdx);
+		expect(officerIdx).toBeGreaterThan(reasonIdx);
+		expect(decidedAtIdx).toBeGreaterThan(officerIdx);
+		// decided-at is the LAST testID under the rejected block — no sibling
+		// after it anywhere in the tree's rejected-block subtree.
+		expect(decidedAtIdx).toBe(ids.length - 1);
+	});
+});
+
 describe("RegistrationRequestApprovalScreen — Group G (SignatureTaskScreen.tsx left alone)", () => {
 	it("23. SignatureTaskScreen.tsx carries no 'registrant' token and its titleKey record has exactly six entries — asserted at the source level, since react-test-renderer cannot see a file that was never touched", () => {
 		// react-test-renderer proves what RENDERS; it cannot prove a sibling
