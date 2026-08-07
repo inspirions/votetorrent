@@ -77,15 +77,19 @@ export default function RegistrationInboxScreen() {
 	useLayoutEffect(() => {
 		// Avoids first-frame flicker (NetworksScreen.tsx:99-110's pattern):
 		// setOptions runs in useLayoutEffect, before the first paint, so the
-		// header never briefly renders without its title/chip.
+		// header never briefly renders without its title.
+		//
+		// Title ONLY, deliberately no header-right action (48-27, closing
+		// 48-UAT.md gap 4): the native-stack header cannot fit a title beside
+		// an action button whose width is locale-dependent — in Spanish,
+		// "IMPORTACIÓN MASIVA / SINCRONIZAR" consumed the header entirely and
+		// NO title rendered at all, leaving an officer who arrived by a deep
+		// link or a back-stack unable to confirm which surface they were on.
+		// The Bulk Import / Sync control now lives in the screen body instead
+		// (see `registration-inbox-bulk-import-sync` below). Anyone re-adding
+		// a header-side action here re-opens that defect.
 		navigation.setOptions({
 			title: t("registrationRequestScreenTitle"),
-			headerRight: () => (
-				<ChipButton
-					label={t("registrationRequestBulkImportSyncButton")}
-					onPress={() => navigation.navigate("BulkImportSync", { authorityId })}
-				/>
-			),
 		});
 		// Negative space (load-bearing, do not "complete" this):
 		// - This screen has NO write control. Opening a request is a read;
@@ -93,13 +97,13 @@ export default function RegistrationInboxScreen() {
 		//   treatment of its own Sync buttons; 48-19 owns Approve/Reject.
 		//   `ChipButton` has NO `disabled` prop and must not be given one here
 		//   — that would be a shared-component change belonging to no plan in
-		//   this phase. The chip above is therefore NOT scope-disabled.
+		//   this phase. The body control below is therefore NOT scope-disabled.
 		// - Nothing on this screen is hidden or removed by `canWrite`. The
 		//   variable exists solely to decide whether the read-only banner
 		//   renders below. It must never gate rows, the stats card, the filter
-		//   bar, the search input, or this header chip. The ungated officer
-		//   sees the entire inbox — only the destination screens' actions are
-		//   inert.
+		//   bar, the search input, or the body Bulk Import / Sync control. The
+		//   ungated officer sees the entire inbox — only the destination
+		//   screens' actions are inert.
 	}, [navigation, t, authorityId]);
 
 	// Filter state — primitives only, so buildFilter's dep array is stable
@@ -346,6 +350,22 @@ export default function RegistrationInboxScreen() {
 			    does NOT respond to the filter chips below. */}
 			<View style={styles.section} testID="registration-inbox-stats">
 				<TransparencyStatsCard stats={stats} />
+			</View>
+
+			{/* Body-mounted Bulk Import / Sync control (48-27, closing 48-UAT.md
+			    gap 4 — moved out of the header, see the setOptions comment
+			    above). Position is deliberate and must not drift: below the
+			    D-09 transparency card so the card keeps its topmost, filter-
+			    independent prominence exactly as 48-18 established, and above
+			    the filters so the control is still on the first screenful at
+			    mount. A future "move it somewhere tidier" edit would cost D-09
+			    its position — don't. Unconditional on `canWrite`/scope, exactly
+			    as the header chip was (see the negative-space note above). */}
+			<View style={styles.section} testID="registration-inbox-bulk-import-sync">
+				<ChipButton
+					label={t("registrationRequestBulkImportSyncButton")}
+					onPress={() => navigation.navigate("BulkImportSync", { authorityId })}
+				/>
 			</View>
 
 			<View style={styles.section} testID="registration-inbox-filters">

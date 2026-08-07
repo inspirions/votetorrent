@@ -835,21 +835,69 @@ describe("RegistrationInboxScreen — D-03/D-09/D-12 (48-18)", () => {
 		expect(serialized).not.toContain("requesterKey");
 	});
 
-	it("the header chip carries { authorityId } ONLY and navigates to BulkImportSync", async () => {
-		const tr = await renderScreen();
-		void tr;
+	// -------------------------------------------------------------------------
+	// Body-mounted Bulk Import / Sync control (48-27, closing 48-UAT.md gap 4)
+	// -------------------------------------------------------------------------
+	// Replaces the pre-48-27 "header chip" test: the control moved from
+	// `setOptions`'s `headerRight` into the screen body so a title always
+	// renders, in every locale. See the RegistrationInboxScreen.tsx setOptions
+	// comment for why.
+
+	it("setOptions carries the title but no headerRight key at all — not a function, not undefined", async () => {
+		await renderScreen();
 
 		const titleCall = mockSetOptions.mock.calls.find((call) => call[0]?.title === "registrationRequestScreenTitle");
 		expect(titleCall).toBeDefined();
-		expect(typeof titleCall![0].headerRight).toBe("function");
+		expect("headerRight" in titleCall![0]).toBe(false);
+	});
 
-		const element = titleCall![0].headerRight();
-		expect(element.props.label).toBe("registrationRequestBulkImportSyncButton");
+	it("the body control carries the unchanged label and navigates with { authorityId } ONLY — identifiers only, no row/name/payload", async () => {
+		const tr = await renderScreen();
+
+		const control = tr.root.findByProps({ testID: "registration-inbox-bulk-import-sync" });
+		const chip = control.findByType(ChipButton);
+		expect(chip.props.label).toBe("registrationRequestBulkImportSyncButton");
 
 		mockNavigate.mockClear();
-		element.props.onPress();
+		await press(tr, "registration-inbox-bulk-import-sync");
 		expect(mockNavigate).toHaveBeenCalledTimes(1);
 		expect(mockNavigate).toHaveBeenCalledWith("BulkImportSync", { authorityId: "fixture-authority-1" });
+		const serialized = JSON.stringify(mockNavigate.mock.calls[0]);
+		expect(serialized).not.toContain("Alvarez");
+	});
+
+	it("the body control renders in every scope state — with vrg, without vrg, and while scopes are still loading", async () => {
+		const trWithScope = await renderScreen();
+		present(trWithScope, "registration-inbox-bulk-import-sync");
+
+		mockOfficers = [
+			{ userId: "device-user-1", authorityId: "fixture-authority-1", title: "Clerk", scopes: ["ele"] },
+		];
+		const trWrongScope = await renderScreen();
+		present(trWrongScope, "registration-inbox-bulk-import-sync");
+
+		// Loading: openAuthority hangs forever, so scopesLoading never flips —
+		// the body control is unconditional on it, unlike the two branches of
+		// the read-only banner above.
+		mockNetworkEngine.openAuthority.mockImplementationOnce(() => new Promise(() => {}));
+		const trLoading = await renderScreen();
+		present(trLoading, "registration-inbox-bulk-import-sync");
+	});
+
+	it("render order: the stats card, then the body Bulk Import / Sync control, then the filters", async () => {
+		const tr = await renderScreen();
+		const ids = [
+			...collectTestIDs(tr.toJSON(), [
+				"registration-inbox-stats",
+				"registration-inbox-bulk-import-sync",
+				"registration-inbox-filters",
+			]),
+		];
+		expect(ids).toEqual([
+			"registration-inbox-stats",
+			"registration-inbox-bulk-import-sync",
+			"registration-inbox-filters",
+		]);
 	});
 
 	// -------------------------------------------------------------------------

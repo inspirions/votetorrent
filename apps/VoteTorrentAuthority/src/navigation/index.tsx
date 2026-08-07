@@ -478,9 +478,11 @@ export const RootNavigator = () => {
 			    RegistrationRequestApproval additionally set their own title via
 			    setOptions (the static title here is the pre-effect frame);
 			    BulkImportSync is bound ONLY here. No headerRight on any of the
-			    three — the inbox sets its own Bulk Import / Sync chip via
-			    setOptions (48-18), and a duplicate header chip is exactly what
-			    47-18 removed from AuthorityPeers. */}
+			    three: the inbox sets ONLY its title via setOptions and renders
+			    its Bulk Import / Sync control in the screen body instead (48-27,
+			    closing 48-UAT.md gap 4 — a locale-dependent header chip left no
+			    room for the title in Spanish), and a duplicate header chip is
+			    exactly what 47-18 removed from AuthorityPeers. */}
 			<Stack.Screen
 				name="RegistrationInbox"
 				component={RegistrationInboxScreen}
