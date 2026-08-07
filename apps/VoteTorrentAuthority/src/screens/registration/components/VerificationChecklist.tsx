@@ -169,7 +169,11 @@ export function VerificationChecklist({
 						<View testID={`${testIDPrefix}-glyph-${item}`} style={localStyles.glyphBox}>
 							<FontAwesome6 name={glyphName} size={20} color={glyphColor} />
 						</View>
-						<ThemedText type="defaultSemiBold" testID={`${testIDPrefix}-label-${item}`}>
+						<ThemedText
+							type="defaultSemiBold"
+							testID={`${testIDPrefix}-label-${item}`}
+							style={localStyles.itemLabel}
+						>
 							{t(labelKey)}
 						</ThemedText>
 					</>
@@ -232,6 +236,20 @@ const localStyles = StyleSheet.create({
 		minHeight: 44,
 		alignItems: "center",
 		justifyContent: "center",
+	},
+	// D-07 (48-27, closing 48-UAT.md gap 4): `flex: 1` is sufficient here and
+	// was NOT sufficient in 48-26's CustomButton case — this row is genuinely
+	// width-constrained (`propertyRow` is `width: "100%"`, `tapTarget` is
+	// `flex: 1`), so the label receives the row width minus `glyphBox`'s 44
+	// and the 8 gap, and RN wraps the text within it. CustomButton's
+	// `buttonContent` row is content-sized under an `alignItems: "center"`
+	// parent, which is why its `flexShrink: 1` never engaged there. Do not
+	// conclude the two cases are the same bug and "unify" them. No
+	// line-count truncation prop, no `ellipsizeMode` — an officer attesting
+	// to a checklist item they could not fully read is exactly the defect
+	// this closes.
+	itemLabel: {
+		flex: 1,
 	},
 });
 

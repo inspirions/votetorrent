@@ -297,6 +297,37 @@ describe("VerificationChecklist — D-07", () => {
 		trMalformed.unmount();
 	});
 
+	// D-07 (48-27, closing 48-UAT.md gap 4): the Spanish item "Comprobó contra
+	// el padrón electoral existente" clipped at the right edge instead of
+	// wrapping — an officer attesting to text they could not read. `flex: 1`
+	// is sufficient because this row IS width-constrained (`propertyRow` is
+	// `width: "100%"`, `tapTarget` is `flex: 1`), unlike CustomButton's
+	// content-sized row in 48-26.
+	it("every label node carries flex:1 in both modes, and no label ever carries numberOfLines", () => {
+		const { tr } = renderChecklist();
+		for (const item of ITEMS) {
+			const label = tr.root.findByProps({ testID: `${PREFIX}-label-${item}` });
+			const flattened = StyleSheet.flatten(label.props.style) as { flex?: number };
+			expect(flattened.flex).toBe(1);
+			expect(label.props.numberOfLines).toBeUndefined();
+		}
+		tr.unmount();
+
+		const { tr: trReadOnly } = renderChecklist({ readOnly: true });
+		for (const item of ITEMS) {
+			const label = trReadOnly.root.findByProps({ testID: `${PREFIX}-label-${item}` });
+			const flattened = StyleSheet.flatten(label.props.style) as { flex?: number };
+			expect(flattened.flex).toBe(1);
+			expect(label.props.numberOfLines).toBeUndefined();
+		}
+		trReadOnly.unmount();
+	});
+
+	it("SOURCE-LEVEL: no numberOfLines anywhere in VerificationChecklist.tsx — truncation would trade one unreadable rendering for another", () => {
+		const source = fs.readFileSync(path.join(__dirname, "../VerificationChecklist.tsx"), "utf8");
+		expect(source).not.toContain("numberOfLines");
+	});
+
 	it("negative space: the rendered tree contains no ssn/score/rating/rank/percent substring — a closed set of codes, no numeric strength value", () => {
 		const { tr } = renderChecklist({ checked: ["id", "roll", "eligibility", "none"] });
 		const json = JSON.stringify(tr.toJSON());
