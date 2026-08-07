@@ -13,6 +13,17 @@
  *
  * testIDBase inventory this file proves (built from `${kind}-${syncState}`, all six pairs are
  * exercised below), e.g. `transport-status-filesystem-never` and `transport-status-rest-success`.
+ *
+ * WHAT THIS SUITE PROVES, AND WHAT IT DOES NOT (48-24, closing 48-UAT.md gap 1 / DEFECT-2):
+ * Suites E2/E3 prove which i18n KEY is selected in each of the six state-by-date-presence cells
+ * per kind (twelve cells total), and that the dateless "Last synced" render the UAT photographed
+ * is now unreachable in code — `bulkImportSyncLastSyncedLabel` has exactly one call site in the
+ * source, guarded on `lastSyncedAt` truthiness. It does NOT prove that the resulting sentence is
+ * legible, correctly sized, or unclipped on a real 360dp viewport in either locale, because
+ * `react-test-renderer` has no layout engine — it has no notion of pixels, wrapping, clipping, or
+ * font metrics at all. That claim is discharged only by 48-28's on-device leg. This is stated here,
+ * not only in a planning document, because the UAT's own finding was that "renders in code"
+ * standing in for "observable on screen" is exactly what let this defect ship in the first place.
  */
 
 import fs from 'fs';
