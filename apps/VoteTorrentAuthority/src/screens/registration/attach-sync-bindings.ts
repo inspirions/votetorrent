@@ -64,7 +64,7 @@ import { RestRegistrationTransport } from "../../../../../packages/vote-engine/d
 // No default. A device-proof session sets this before the app cold-starts (and Task 3's teardown
 // reverts it to `undefined` afterward); a normal checkout/build leaves it `undefined`, and
 // `attachSyncBindings()` then registers nothing — a byte-identical no-op.
-export const DEV_REGISTRATION_SYNC_REST_BASE_URL: string | undefined = 'http://10.0.2.2:8791';
+export const DEV_REGISTRATION_SYNC_REST_BASE_URL: string | undefined = undefined;
 
 /** The shape the throwaway host bridge's `GET /staged-requests` response carries per document —
  * a superset of what this file reads is tolerated (unused keys are ignored), never a subset. */
