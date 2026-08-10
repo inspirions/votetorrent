@@ -973,6 +973,22 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       )
     }
 
+    // T-48-31-02 (CR-03): init.registrant.id is also requester-chosen. The register() call below
+    // (register()-then-decide ordering) used to be conditioned on this same probe, silently
+    // SKIPPING register() on any id collision while the decision UPDATE still marked the request
+    // 'a' — an approval that reports success while creating nothing, and a "View Registrant" CTA
+    // that would point at someone else's record. Refuse here instead, before any signature is
+    // consumed, and make the register() call unconditional (see its own comment, further down, for
+    // why the old convergence guard is gone rather than merely relocated).
+    const existingRegistrant = await ctx.db
+      .prepare('select 1 from Registrant where Id = :id')
+      .get({ id: init.registrant.id })
+    if (existingRegistrant) {
+      throw new Error(
+        `SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} payload names an already-existing Registrant record that this approval did not create`
+      )
+    }
+
     const tid = await allocateTid(ctx.db, 'registration-request')
 
     // D-07: derive VerificationCid through 48-06's injected-digest helper — never a hand-rolled JS
@@ -1028,17 +1044,21 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
 
     // register()-then-decide ordering: register() opens its own BEGIN/COMMIT envelope and cannot
     // share a transaction with the decision UPDATE below, so the two are ordered register()-then-
-    // decide. The existence guard makes a retried approval converge instead of colliding on the
-    // Registrant primary key — the residual (a Registrant created while the request stays 'p') is
-    // an accepted residual in this plan's threat model (T-48-11-11).
-    const existingRegistrant = await ctx.db
-      .prepare('select 1 from Registrant where Id = :id')
-      .get({ id: init.registrant.id })
-    if (!existingRegistrant) {
-      // RegistrationEngine.register() — reused COMPLETELY UNCHANGED, with the reviewing officer's
-      // own device-signer callback. No wrapper, no reimplementation, no inline Registrant insert.
-      await new RegistrationEngine(ctx).register(init, sign)
-    }
+    // decide. register() is now UNCONDITIONAL — the CR-03 existence refusal above already ruled
+    // out an id collision, so there is nothing left to converge on here.
+    //
+    // T-48-11-11 (superseded): the previous existence-gated guard around this call was justified as
+    // making a RETRIED approval converge instead of colliding on the Registrant primary key. That
+    // convergence was already unreachable: completeSignature calls sign() (this task's header
+    // signature) BEFORE finalizeRegistrantApproval runs, and OfficerSignature's primary key is
+    // (SigningNonce, UserId) with a fixed per-task SigningNonce — a retried approval collides on
+    // that PK long before it would ever reach this guard. Removing the guard therefore removes no
+    // behaviour that was reachable; it only stops an id collision from being laundered into a
+    // silent no-op success. WR-05 (a finalize failure leaves this task un-retryable) is a separate,
+    // still-open concern this change does not fix.
+    // RegistrationEngine.register() — reused COMPLETELY UNCHANGED, with the reviewing officer's
+    // own device-signer callback. No wrapper, no reimplementation, no inline Registrant insert.
+    await new RegistrationEngine(ctx).register(init, sign)
 
     await ctx.db.exec(
       // SubmittedAt/ReceivedAt are explicitly rebound (restoreCanonicalDatetime, above) rather than

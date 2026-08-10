@@ -537,4 +537,54 @@ describe('registrant approval ceremony', () => {
     const reqRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
     expect(reqRow!.Status, 'a refused request must remain pending, not linked to a foreign authority').to.equal('p')
   })
+
+  it('CR-03: refuses an approval whose payload reuses an existing Registrant id, creating nothing and leaving the request pending', async () => {
+    const auth = await setup()
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+
+    // R1: a normal approval mints a real Registrant for id X.
+    const collidingId = crypto.randomUUID()
+    const { requestId: r1 } = await submitPendingRequest(auth, { registrantId: collidingId })
+    await engine.getRequestedSignatures(true)
+    await acceptRequest(engine, auth, r1)
+    const mintedRow = await auth.ctx.db.prepare('select Id from Registrant where Id = :id').get({ id: collidingId })
+    expect(mintedRow, 'R1 must mint a real Registrant row for the colliding id before R2 is tested').to.not.be.undefined
+
+    // R2: a DIFFERENT requester submits a second request at the same authority naming the SAME id.
+    const { requestId: r2 } = await submitPendingRequest(auth, { registrantId: collidingId, requesterKey: randomTestKeyPair() })
+    await engine.getRequestedSignatures(true)
+
+    const registrantCountBefore = await countRows(auth.ctx, 'select count(*) as n from Registrant')
+    const vrgCountBefore = await countRows(
+      auth.ctx,
+      "select count(*) as n from AdminSigning where Scope = 'vrg' and AuthorityId = :authorityId",
+      { authorityId: auth.authority.id }
+    )
+
+    let thrownMessage: string | undefined
+    try {
+      await acceptRequest(engine, auth, r2)
+    } catch (err) {
+      thrownMessage = (err as Error).message
+    }
+    expect(thrownMessage, 'an id-colliding payload must be refused, not silently converged on').to.not.be.undefined
+    expect(thrownMessage, 'the refusal must name the refused request').to.include(r2)
+
+    const registrantCountAfter = await countRows(auth.ctx, 'select count(*) as n from Registrant')
+    expect(registrantCountAfter, 'a refused R2 must create no additional Registrant row').to.equal(registrantCountBefore)
+
+    const vrgCountAfter = await countRows(
+      auth.ctx,
+      "select count(*) as n from AdminSigning where Scope = 'vrg' and AuthorityId = :authorityId",
+      { authorityId: auth.authority.id }
+    )
+    expect(vrgCountAfter, 'the refusal must precede seedSignedMutation for R2').to.equal(vrgCountBefore)
+
+    const reqRow2 = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: r2 })
+    expect(reqRow2!.Status, 'R2 must remain pending, not silently marked approved').to.equal('p')
+
+    const read = await new RegistrationEngine(auth.ctx).getRegistrationRequest(r2)
+    expect(read?.status, "R2's read surface must still report pending").to.equal('p')
+    expect(read?.registrantId, 'a refused R2 must offer no "View Registrant" CTA pointing at the other person\'s record').to.be.undefined
+  })
 })
