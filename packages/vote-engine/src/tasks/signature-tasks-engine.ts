@@ -282,12 +282,23 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       PayloadCid: string
       SubmittedAt: string
     }> = []
+    // CR-01 (T-48-30-01): D-02 makes intake unauthenticated, so an outside submitter chooses
+    // AuthorityId freely — including an authority the signed-in officer does not serve, where
+    // this method's own AdminSigning('vrg') insert (below) would fail AdminSigning.UserIdValid.
+    // Scope the work set to authorities the signed-in :userId actually serves BEFORE any write
+    // is attempted, joining Officer to CurrentAdmin so a request is only considered when the
+    // officer serves the authority's CURRENT administration.
     for await (const row of ctx.db.eval(
       `select R.Id, R.AuthorityId, R.RequesterKey, R.IssuerType, R.BridgeId, R.PayloadCid, R.SubmittedAt
          from RegistrationRequest R
          where R.Status = 'p'
-           and not exists (select 1 from RegistrantSignatureTaskExtension E where E.RequestId = R.Id)`,
-      {}
+           and not exists (select 1 from RegistrantSignatureTaskExtension E where E.RequestId = R.Id)
+           and exists (
+             select 1 from Officer O
+               join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
+               where O.AuthorityId = R.AuthorityId and O.UserId = :userId
+           )`,
+      { userId }
     )) {
       pendingRows.push({
         Id: row.Id as string,
@@ -301,78 +312,91 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     }
 
     for (const row of pendingRows) {
-      // A request addressed to an authority with no current administration cannot be seeded — skip
-      // it and continue rather than aborting the batch (T-48-11-10: one malformed/unresolvable
-      // request must never take down seeding for the others).
-      const adminRow = await ctx.db
-        .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
-        .get({ authorityId: row.AuthorityId })
-      if (!adminRow) continue
-      const adminEffectiveAt = adminRow.EffectiveAt as string | number
-
-      // One fresh Tid per request, from 48-07's shared 'registration-request' namespace — the SAME
-      // value feeds BOTH the Digest(...) expression below AND the extension INSERT's context.Tid;
-      // MutationValid re-derives DG-4 from the joined RegistrationRequest using context.Tid, and a
-      // mismatch fails the CHECK with an error that reads like a signature problem, not a Tid one
-      // (mirrors election-engine.ts:910-925's BALLOT_HEADER_TID discipline).
-      const tid = await allocateTid(this.ctx!.db, 'registration-request')
-      const nonce = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
-      const taskId = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
-      const signerKey = ctx.user?.activeKeys?.[0]?.key ?? '0'.repeat(66)
-      const placeholderSig = '0'.repeat(128)
-      // nowCanonicalDatetime() is correct here and must NOT be "fixed" to toIsoZDatetime — it feeds
-      // AdminSigning's pre-existing `now` context param, not a new Z-checked column; this step
-      // writes no Z-checked column at all (48-02's hygiene rule pushes the opposite way for NEW
-      // columns only).
-      const now = nowCanonicalDatetime()
-
-      // Insert the UNSIGNED AdminSigning('vrg') row, DG-4's argument order EXACTLY. Do NOT call
-      // sign() here — the officer's real crypto arrives later at completeSignature as a SEPARATE
-      // OfficerSignature row, never as a mutation of this one (999.1 R-02/R-04).
-      await ctx.db.exec(
-        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
-         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
-         values (:nonce, :authorityId, :adminEffectiveAt, 'vrg',
-                 Digest(:tid, :requestId, :authorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt),
-                 :userId, :signerKey, :signature)`,
-        {
-          nonce,
-          authorityId: row.AuthorityId,
-          adminEffectiveAt,
-          tid,
-          requestId: row.Id,
-          requesterKey: row.RequesterKey,
-          issuerType: row.IssuerType,
-          bridgeId: row.BridgeId,
-          payloadCid: row.PayloadCid,
-          submittedAt: row.SubmittedAt,
-          userId,
-          signerKey,
-          signature: placeholderSig,
-          now,
-        }
-      )
-
-      // Task + RegistrantSignatureTaskExtension in one envelope — mirrors
-      // submitBallotForConfirmation's BEGIN/Task-insert/extension-insert/COMMIT/ROLLBACK shape.
-      await ctx.db.exec('BEGIN')
+      // T-48-30-02/T-48-11-10: one malformed/unresolvable request must never take down seeding
+      // for the others. Every read/write for this row — the CurrentAdmin lookup, tid allocation,
+      // the AdminSigning insert, and the Task/extension envelope — lives inside this try; a throw
+      // anywhere in the body advances to the next row instead of aborting the batch. The `catch`
+      // logs NOTHING: the bound params above carry request identifiers, and logging on this
+      // surface is a closed security gate (T-48-08-02, T-48-30-04). The row stays 'p' and is
+      // retried on the next pull once the obstruction clears (transient, not permanent).
       try {
-        await ctx.db.exec(
-          `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
-           with context IsMutationValid = true, Tid = :tid
-           values (:id, :userId, 'signature', 'registrant', :nonce, 0)`,
-          { id: taskId, userId, nonce, tid }
-        )
-        await ctx.db.exec(
-          `insert into RegistrantSignatureTaskExtension (TaskId, RequestId)
-           with context Tid = :tid
-           values (:taskId, :requestId)`,
-          { taskId, requestId: row.Id, tid }
-        )
-        await ctx.db.exec('COMMIT')
-      } catch (err) {
-        await ctx.db.exec('ROLLBACK')
-        throw err
+        // A request addressed to an authority with no current administration cannot be seeded —
+        // one case of the general per-row-isolation rule this try/catch implements.
+        const adminRow = await ctx.db
+          .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
+          .get({ authorityId: row.AuthorityId })
+        if (!adminRow) continue
+        const adminEffectiveAt = adminRow.EffectiveAt as string | number
+
+        // One fresh Tid per request, from 48-07's shared 'registration-request' namespace — the
+        // SAME value feeds BOTH the Digest(...) expression below AND the extension INSERT's
+        // context.Tid; MutationValid re-derives DG-4 from the joined RegistrationRequest using
+        // context.Tid, and a mismatch fails the CHECK with an error that reads like a signature
+        // problem, not a Tid one (mirrors election-engine.ts:910-925's BALLOT_HEADER_TID
+        // discipline).
+        const tid = await allocateTid(this.ctx!.db, 'registration-request')
+        const nonce = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
+        const taskId = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
+        const signerKey = ctx.user?.activeKeys?.[0]?.key ?? '0'.repeat(66)
+        const placeholderSig = '0'.repeat(128)
+        // nowCanonicalDatetime() is correct here and must NOT be "fixed" to toIsoZDatetime — it
+        // feeds AdminSigning's pre-existing `now` context param, not a new Z-checked column; this
+        // step writes no Z-checked column at all (48-02's hygiene rule pushes the opposite way for
+        // NEW columns only).
+        const now = nowCanonicalDatetime()
+
+        // WR-06 (T-48-30-05): the AdminSigning('vrg') insert now shares ONE envelope with the
+        // Task/extension inserts below. Before this fix it ran OUTSIDE the BEGIN/COMMIT — and
+        // AdminSigning is `InsertOnly check on update, delete (false)`, so a row that failed
+        // inside the envelope AFTER a successful AdminSigning insert became a permanent orphan.
+        // With try/continue retrying a failed row on every future mount, that one-off orphan would
+        // otherwise become unbounded growth driven entirely by unauthenticated input. Do NOT call
+        // sign() here — the officer's real crypto arrives later at completeSignature as a SEPARATE
+        // OfficerSignature row, never as a mutation of this one (999.1 R-02/R-04).
+        await ctx.db.exec('BEGIN')
+        try {
+          await ctx.db.exec(
+            `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+             with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
+             values (:nonce, :authorityId, :adminEffectiveAt, 'vrg',
+                     Digest(:tid, :requestId, :authorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt),
+                     :userId, :signerKey, :signature)`,
+            {
+              nonce,
+              authorityId: row.AuthorityId,
+              adminEffectiveAt,
+              tid,
+              requestId: row.Id,
+              requesterKey: row.RequesterKey,
+              issuerType: row.IssuerType,
+              bridgeId: row.BridgeId,
+              payloadCid: row.PayloadCid,
+              submittedAt: row.SubmittedAt,
+              userId,
+              signerKey,
+              signature: placeholderSig,
+              now,
+            }
+          )
+          await ctx.db.exec(
+            `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
+             with context IsMutationValid = true, Tid = :tid
+             values (:id, :userId, 'signature', 'registrant', :nonce, 0)`,
+            { id: taskId, userId, nonce, tid }
+          )
+          await ctx.db.exec(
+            `insert into RegistrantSignatureTaskExtension (TaskId, RequestId)
+             with context Tid = :tid
+             values (:taskId, :requestId)`,
+            { taskId, requestId: row.Id, tid }
+          )
+          await ctx.db.exec('COMMIT')
+        } catch (err) {
+          await ctx.db.exec('ROLLBACK')
+          throw err
+        }
+      } catch {
+        continue
       }
     }
   }
