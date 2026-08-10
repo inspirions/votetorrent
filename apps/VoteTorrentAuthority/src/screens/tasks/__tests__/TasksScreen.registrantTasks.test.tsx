@@ -114,6 +114,25 @@ const adminTask = {
 	authority: { name: "Test Authority" },
 };
 
+// CR-01 (48-30, Task 3): fixtures for the two additional non-registrant types exercised below.
+// Each carries a distinguishable rendered string the way `adminTask` carries `authority.name` —
+// read from TaskCard.tsx's per-type `determineInfo` switch (ballot: title = ballot.proposed
+// description; network: title = network.name).
+const ballotTask = {
+	type: "signature",
+	userId: "user-1",
+	signatureType: "ballot",
+	network: { name: "Test Network" },
+	ballot: { proposed: { id: "ballot-1", description: "Ballot Card Marker", timestamp: Date.now() } },
+};
+
+const networkTask = {
+	type: "signature",
+	userId: "user-1",
+	signatureType: "network",
+	network: { name: "Network Card Marker" },
+};
+
 beforeEach(() => {
 	jest.clearAllMocks();
 	mockGetKeysToRelease.mockResolvedValue([]);
@@ -169,5 +188,34 @@ describe("TasksScreen — 'registrant' signature tasks are excluded (48-11 hando
 
 		expect(mockGetRequestedSignatures).toHaveBeenCalledWith(true);
 		expect(mockGetKeysToRelease).toHaveBeenCalledWith(true);
+	});
+
+	// CR-01 (48-30, Task 3): this test proves ONLY "given this array, these cards render" against
+	// a jest.fn()-stubbed engine — it proves nothing about whether the REAL engine produces this
+	// array (that is the mocha suite in registrant-seeding-scope.spec.ts, Task 2) and nothing
+	// about a real device (48-32). Without CR-01's fix, a single foreign-authority
+	// RegistrationRequest would make the REAL getRequestedSignatures(true) reject outright,
+	// bricking this screen for every signature type — a failure mode this jest stub cannot
+	// reproduce, since the mock never throws. This test only guards the render layer's OWN
+	// contract: given a mixed list that happens to include a 'registrant' task, every
+	// non-registrant type still renders its own card.
+	it("renders a card for every non-registrant signature type when a registrant task is also present", async () => {
+		const consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+		mockGetRequestedSignatures.mockResolvedValue([registrantTask, adminTask, ballotTask, networkTask]);
+
+		const tr = await renderScreen();
+
+		const treeText = JSON.stringify(tr.toJSON());
+		expect(treeText).toContain("Test Authority"); // admin card title
+		expect(treeText).toContain("Ballot Card Marker"); // ballot card title
+		expect(treeText).toContain("Network Card Marker"); // network card title
+
+		// noTasks must NOT render — cards are present.
+		expect(() => tr.root.findByProps({ children: "noTasks" })).toThrow();
+
+		// No InlineError message renders — loadTasksEngines never hit its catch branch.
+		expect(consoleErrorSpy).not.toHaveBeenCalled();
+
+		consoleErrorSpy.mockRestore();
 	});
 });
