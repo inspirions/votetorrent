@@ -67,11 +67,11 @@ function makeCallbackSigner (keyPair: TestKeyPair): (digest: Uint8Array) => Prom
   }
 }
 
-function makeTestPayload (authorityId: string, registrantId?: string): RegisterInit {
+function makeTestPayload (authorityId: string, registrantId?: string, payloadAuthorityId?: string): RegisterInit {
   return {
     registrant: {
       id: registrantId ?? crypto.randomUUID(),
-      authorityId,
+      authorityId: payloadAuthorityId ?? authorityId,
       expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000),
     },
     private: {
@@ -84,14 +84,23 @@ function makeTestPayload (authorityId: string, registrantId?: string): RegisterI
 /** Submits one pending RegistrationRequest through the REAL engine method (D-02 intake, 48-07). */
 async function submitPendingRequest (
   auth: TestAuthority,
-  opts?: { issuerType?: 'registrant' | 'bridge'; bridgeId?: string; requesterKey?: TestKeyPair; registrantId?: string }
+  opts?: {
+    issuerType?: 'registrant' | 'bridge'
+    bridgeId?: string
+    requesterKey?: TestKeyPair
+    registrantId?: string
+    /** CR-02: lets a caller submit a request addressed to auth.authority.id whose
+     * payload.registrant.authorityId names a DIFFERENT authority — the adversarial shape
+     * finalizeRegistrantApproval must refuse. */
+    payloadAuthorityId?: string
+  }
 ): Promise<{ requestId: string; requester: TestKeyPair; init: RegistrationRequestInit }> {
   const requester = opts?.requesterKey ?? randomTestKeyPair()
   const engine = new RegistrationEngine(auth.ctx)
   const init: RegistrationRequestInit = {
     id: crypto.randomUUID(),
     authorityId: auth.authority.id,
-    payload: makeTestPayload(auth.authority.id, opts?.registrantId),
+    payload: makeTestPayload(auth.authority.id, opts?.registrantId, opts?.payloadAuthorityId),
     submittedAt: toIsoZDatetime(Date.now()),
     issuerType: opts?.issuerType,
     bridgeId: opts?.bridgeId,
@@ -484,5 +493,48 @@ describe('registrant approval ceremony', () => {
 
     const reqRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
     expect(reqRow!.Status, 'the request must remain pending').to.equal('p')
+  })
+
+  // ---- CR-02 / CR-03 adversarial-payload guards ----
+
+  it('CR-02: refuses an approval whose payload registers under an authority other than the one addressed', async () => {
+    const auth = await setup()
+    const foreignAuthorityId = crypto.randomUUID()
+    const { requestId } = await submitPendingRequest(auth, { payloadAuthorityId: foreignAuthorityId })
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    const registrantCountBefore = await countRows(auth.ctx, 'select count(*) as n from Registrant')
+    const vrgCountBefore = await countRows(
+      auth.ctx,
+      "select count(*) as n from AdminSigning where Scope = 'vrg' and AuthorityId = :authorityId",
+      { authorityId: auth.authority.id }
+    )
+
+    let thrownMessage: string | undefined
+    try {
+      await acceptRequest(engine, auth, requestId)
+    } catch (err) {
+      thrownMessage = (err as Error).message
+    }
+    expect(thrownMessage, 'a cross-authority payload must be refused, not silently minted').to.not.be.undefined
+    expect(thrownMessage, "the refusal must name the addressed authority").to.include(auth.authority.id)
+    expect(thrownMessage, "the refusal must name the payload's authority").to.include(foreignAuthorityId)
+
+    const registrantCountAfter = await countRows(auth.ctx, 'select count(*) as n from Registrant')
+    expect(registrantCountAfter, 'no Registrant row may be created by a refused approval').to.equal(registrantCountBefore)
+
+    const vrgCountAfter = await countRows(
+      auth.ctx,
+      "select count(*) as n from AdminSigning where Scope = 'vrg' and AuthorityId = :authorityId",
+      { authorityId: auth.authority.id }
+    )
+    expect(
+      vrgCountAfter,
+      'the refusal must precede seedSignedMutation — no new vrg AdminSigning row beyond the one seeding created'
+    ).to.equal(vrgCountBefore)
+
+    const reqRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
+    expect(reqRow!.Status, 'a refused request must remain pending, not linked to a foreign authority').to.equal('p')
   })
 })

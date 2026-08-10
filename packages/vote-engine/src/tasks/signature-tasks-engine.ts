@@ -960,6 +960,19 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       throw new Error(`SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} Payload failed to parse`)
     }
 
+    // T-48-31-01 (CR-02): init.registrant.authorityId is chosen by the UNAUTHENTICATED requester
+    // (D-02) and covered only by the requester's own signature. RegistrationEngine.register()'s
+    // only cross-authority guard compares the payload against an ELECTION's authority
+    // (register(), registration-engine.ts's electionAuthorityId check) and cannot see the
+    // authority THIS request was addressed to. The only authority this approval may mint a
+    // Registrant under is extRow.AuthorityId — the one whose officer is signing DG-2 below. Refuse
+    // before any signature is consumed (allocateTid/seedSignedMutation, further down).
+    if (init.registrant?.authorityId !== extRow.AuthorityId) {
+      throw new Error(
+        `SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} payload registers under authority ${String(init.registrant?.authorityId)}, not the addressed authority ${extRow.AuthorityId}`
+      )
+    }
+
     const tid = await allocateTid(ctx.db, 'registration-request')
 
     // D-07: derive VerificationCid through 48-06's injected-digest helper — never a hand-rolled JS
