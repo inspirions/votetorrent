@@ -2,7 +2,7 @@ import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { SqlValue, Database } from '@quereus/quereus'
 import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
-import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime } from '../signing/ceremony-helpers.js'
+import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import { verificationCid, isChecklistGateMet } from '@votetorrent/vote-core'
@@ -288,7 +288,18 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
               signatureType: 'registrant',
               requestId: rExtRow.RequestId as string,
               payload,
-              submittedAt: rExtRow.SubmittedAt as string,
+              // WR-04: a plain `select` of a `datetime` column comes back WITHOUT the trailing 'Z'
+              // (T-42-06), while RegistrantSignatureTask.submittedAt is documented as an ISO-Z
+              // string (vote-core tasks/models.ts). Binding the raw read-back made every consumer
+              // doing `new Date(task.submittedAt)` interpret the instant as HOST-LOCAL time — the
+              // exact defect class reZuluDatetime exists to prevent. Every other Phase-48 read
+              // surface already re-Zulus this column (registration-engine.ts's inbox row and
+              // getRegistrationRequest); this one now agrees with them. reZuluDatetime, NOT
+              // restoreCanonicalDatetime: this value is READ, never re-bound into an UPDATE, so
+              // the byte-exact millisecond reconstruction the write paths need is not required —
+              // and a third datetime shape on a read surface is precisely the drift WR-01/T-42-06
+              // warns about.
+              submittedAt: reZuluDatetime(rExtRow.SubmittedAt as string),
               issuerType: rExtRow.IssuerType as RegistrantSignatureTask['issuerType'],
               bridgeLabel: rExtRow.BridgeLabel == null ? undefined : (rExtRow.BridgeLabel as string),
             }

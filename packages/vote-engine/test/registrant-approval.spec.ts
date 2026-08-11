@@ -325,9 +325,18 @@ describe('registrant approval ceremony', () => {
     const task = await getRegistrantTask(engine, requestId)
     expect(task.requestId).to.equal(requestId)
     expect(task.issuerType).to.equal('registrant')
-    // T-42-06: a plain SELECT read-back of a `datetime` column comes back Z-stripped and at
-    // minimal fractional precision — reZuluDatetime + a trailing-zero-agnostic string compare.
-    expect(reZuluDatetime(task.submittedAt).replace(/0+Z$/, 'Z')).to.equal(init.submittedAt.replace(/0+Z$/, 'Z'))
+    // WR-04: assert the ENGINE already returned an ISO-Z string. The previous form wrapped the
+    // value in reZuluDatetime INSIDE the assertion, which passed identically whether or not the
+    // engine had re-Zulu'd it — it encoded the defect rather than catching it.
+    // RegistrantSignatureTask.submittedAt is documented as an ISO-Z string (vote-core
+    // tasks/models.ts), so a consumer's `new Date(task.submittedAt)` must read UTC, not host-local.
+    expect(
+      task.submittedAt,
+      'submittedAt must already carry the trailing Z — the task contract is an ISO-Z string, not a raw Quereus read-back'
+    ).to.match(/Z$/)
+    // T-42-06: the plain SELECT read-back still drops trailing zero fractional digits, so the
+    // value comparison stays trailing-zero-agnostic. reZuluDatetime is applied to NEITHER side.
+    expect(task.submittedAt.replace(/0+Z$/, 'Z')).to.equal(init.submittedAt.replace(/0+Z$/, 'Z'))
     expect(task.payload, 'the JSON round-trip must reproduce the submitted RegisterInit, not merely a string').to.deep.equal(init.payload)
   })
 
