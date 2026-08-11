@@ -594,7 +594,32 @@ export class MockRegistrationEngine implements IRegistrationEngine {
 
     const total = page?.cursor === undefined ? candidates.length : undefined
     const cursor = page?.cursor
-    const afterCursor = cursor === undefined ? candidates : candidates.filter((r) => r.id > cursor)
+    // WR-09: the keyset predicate must key on the SAME column the sort above orders by. The
+    // previous form was `r.id > cursor` while the sort compares `receivedAt` with an `id`
+    // tiebreak — exactly the half-migration registration-request-query.ts's own header warns
+    // about ("a predicate that still compares [the wrong column] while the order by compares
+    // ReceivedAt typechecks perfectly and pages WRONG"). With ids uncorrelated to arrival order,
+    // page 2 silently dropped and repeated rows — and because this mock backs the screens'
+    // dev/test paths, it taught the WRONG paging contract.
+    //
+    // Both branches below key on `receivedAt`: "received-after OR (received-equal AND id-after)"
+    // — the same two-branch shape buildRegistrationRequestListPageSql binds against the real DB.
+    // (listRegistrants above deliberately keeps a bare `id > cursor`: THAT read orders by
+    // `R.Id asc`, so there the predicate and the order key already agree.)
+    const cursorRow = cursor === undefined ? undefined : this.registrationRequests.get(cursor)
+    // An unresolvable (stale or fabricated) cursor degrades to an EMPTY page and must NOT fall
+    // back to an un-cursored first page — the real engine's own rule (T-48-08-06,
+    // registration-engine.ts's `if (!cursorRow) return { rows: [] }`); that fallback would make
+    // `loadMore` restart the list forever.
+    if (cursor !== undefined && cursorRow === undefined) return { rows: [], nextCursor: undefined, total }
+    const afterCursor =
+      cursorRow === undefined
+        ? candidates
+        : candidates.filter(
+            (r) =>
+              r.receivedAt > cursorRow.receivedAt ||
+              (r.receivedAt === cursorRow.receivedAt && r.id > cursorRow.id)
+          )
     const pageSize = clampPageSize(page?.pageSize)
     const pageRows = afterCursor.slice(0, pageSize)
 
