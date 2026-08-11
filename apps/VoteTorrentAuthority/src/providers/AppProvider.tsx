@@ -82,7 +82,17 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// become available (getEngine is stable via useCallback's [] dep array above); the try/catch
 	// is defense-in-depth on top of the attachment's own internal no-throw guards — a missing or
 	// misconfigured dev sync target must never fail app boot.
+	//
+	// WR-17: `__DEV__`-gated at this CALL SITE as well as inside the harness itself. Two things
+	// change. (1) A release build never invokes the harness at all, so editing
+	// `DEV_REGISTRATION_SYNC_REST_BASE_URL` alone can no longer turn a shipped app into a live
+	// outbound sync client — the hazard plan 48-32's commit 70c40b7 demonstrated in practice
+	// before 4c1b231 reverted it. (2) The `console.error` below no longer runs unconditionally in
+	// release builds; a dev-only harness's failure is a dev-only diagnostic. The gate is
+	// duplicated (here and in `attachSyncBindings`) on purpose: this one keeps the call out of the
+	// release path, the other keeps the harness inert even if some future caller forgets.
 	useEffect(() => {
+		if (!__DEV__) return;
 		try {
 			attachSyncBindings(getEngine);
 		} catch (err) {

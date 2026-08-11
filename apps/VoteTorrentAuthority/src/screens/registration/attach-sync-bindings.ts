@@ -15,7 +15,38 @@ import { createDeviceSigner } from "../../engines/device-signer";
 // own header states it is "Bundled so initDB never needs Node fs / import.meta (Hermes cannot
 // parse import.meta)"; its lone "fs" occurrence is inside a code-generation COMMENT describing how
 // the file was regenerated, not a runtime import.
-import { RestRegistrationTransport } from "../../../../../packages/vote-engine/dist/registration/transport/rest-registration-transport.js";
+//
+// WR-17: this is now a LAZY, `__DEV__`-GATED require rather than a top-level static import. The
+// static form put the REST transport — and this five-level relative path into a git-ignored
+// `dist/` tree — into the module graph of EVERY build, reachable from `AppProvider`, a provider
+// loaded on every launch of every build. The consequence the review named is a matter of record,
+// not a hypothesis: a release build could be turned into a live outbound sync client by a ONE-LINE
+// edit to `DEV_REGISTRATION_SYNC_REST_BASE_URL` below, and plan 48-32 shipped exactly that edit
+// (commit 70c40b7, reverted by 4c1b231). With the gate, released code cannot reach the transport
+// at all — Metro replaces `__DEV__` with a literal `false` in a release transform, so the branch
+// below is unreachable there and flipping the constant alone no longer suffices.
+//
+// The require keeps a LITERAL path string: Metro cannot resolve a computed specifier, and a
+// resolution failure must stay a loud build-time error rather than becoming a silent runtime one.
+// It stays `require` rather than a dynamic `import()` because this attachment must remain
+// synchronous (`attachSyncBindings` returns `void` and is called from a `useEffect`). The original
+// rationale for a relative path over a bare specifier is unchanged and still applies: the package
+// `exports` map blocks deep subpaths under `unstable_enablePackageExports`.
+//
+// RESIDUAL, stated rather than glossed: this closes the RUNTIME hazard. Whether Metro also drops
+// the module from the release BUNDLE GRAPH depends on where its constant folding runs relative to
+// dependency collection, and that is NOT verified here — only inspecting a real release bundle can
+// settle it.
+type RestRegistrationTransportCtor = new (options: { baseUrl: string }) => {
+	pollDecisions(sinceCursor?: string): Promise<unknown[]>;
+};
+
+function loadRestRegistrationTransport(): RestRegistrationTransportCtor | undefined {
+	if (!__DEV__) return undefined;
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	return require("../../../../../packages/vote-engine/dist/registration/transport/rest-registration-transport.js")
+		.RestRegistrationTransport as RestRegistrationTransportCtor;
+}
 
 /**
  * attach-sync-bindings.ts — DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY (D-01).
@@ -106,9 +137,19 @@ interface RegistrationIntakeEngine {
  * an engine class directly.
  */
 export function attachSyncBindings(getEngine: <T>(engineName: string) => Promise<T>): void {
+	// WR-17: TWO independent conditions must hold before anything is attached, and they are
+	// deliberately not collapsed into one. `__DEV__` is the BUILD-time condition (a release build
+	// registers nothing, whatever the constant says); the base URL is the SESSION-time condition
+	// (a dev build with no target configured also registers nothing). Before this, only the second
+	// existed, which is why editing one constant was enough to make a release build sync.
+	if (!__DEV__) return;
 	const baseUrl = DEV_REGISTRATION_SYNC_REST_BASE_URL;
 	if (!baseUrl) return;
 
+	const RestRegistrationTransport = loadRestRegistrationTransport();
+	// Unreachable while `__DEV__` is true, but typed as optional because the loader is gated: an
+	// unattached harness must be a silent no-op, never a boot-time throw.
+	if (!RestRegistrationTransport) return;
 	const transport = new RestRegistrationTransport({ baseUrl });
 
 	const handle: SyncBindingHandle = {
