@@ -1,5 +1,5 @@
 import { MisuseError, QuereusError } from '@quereus/quereus'
-import type { SqlValue } from '@quereus/quereus'
+import type { SqlValue, Database } from '@quereus/quereus'
 import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime } from '../signing/ceremony-helpers.js'
@@ -32,6 +32,61 @@ import { allocateTid } from '../database/tid-allocator.js'
 import { RegistrationEngine } from '../registration/registration-engine.js'
 
 /**
+ * CR-04 (T-48-33-02/03) — the identifier-free tally a registrant seed pass returns and the
+ * engine keeps the most recent copy of on {@link SignatureTasksEngine.lastSeedOutcome}. Every
+ * field is a `number` or a `boolean` — NEVER a request identifier: D-02 makes
+ * `RegistrationRequest` intake unauthenticated, so a skip/abort signal derived from a pending row
+ * must not leak requester-chosen values across that trust boundary (T-48-08-02).
+ *
+ * Field meanings:
+ *  - `considered` — rows in the work set AFTER the CR-01 authority-scoping predicate (the ones
+ *    this pass actually attempted).
+ *  - `seeded` — rows whose envelope reached `COMMIT`.
+ *  - `skipped` — rows that failed and were isolated, INCLUDING the one aborting row (its
+ *    `ROLLBACK` failure counts as a skip too, on top of setting `aborted`).
+ *  - `aborted` — a `ROLLBACK` failure stopped the pass before every considered row was attempted.
+ *  - `handleInAutocommit` — `Database.getAutocommit()` probed at pass end.
+ *
+ * `considered > 0, seeded === 0` is what distinguishes a permanently un-seedable request from an
+ * empty inbox — the exact signal CR-04 closes the gap on. This type is intentionally NOT added to
+ * `ISignatureTasksEngine` in `vote-core`: it has no UI consumer this round (PARTIAL BY DESIGN —
+ * only a developer or a test can see it; an officer still cannot).
+ */
+export type RegistrantSeedOutcome = {
+  considered: number
+  seeded: number
+  skipped: number
+  aborted: boolean
+  handleInAutocommit: boolean
+}
+
+/**
+ * CR-04 (T-48-33-01) — module-private sentinel distinguishing "this row's ROLLBACK could not be
+ * recovered, stop the pass" from an ordinary per-row failure that simply retries on the next
+ * pull. Carries NO request data — only a fixed, identifier-free message. Never exported: callers
+ * outside this file have no legitimate reason to construct or catch it.
+ */
+class SeedPassAborted extends Error {
+  constructor () {
+    super('seedRegistrantSignatureTasks: rollback failed; seed pass aborted')
+    this.name = 'SeedPassAborted'
+  }
+}
+
+/**
+ * CR-04 (T-48-33-04/05) — one registrant seed pass at a time per `Database` handle.
+ * `useTaskCount.fetchCount` and `TasksScreen`'s focus effect both call
+ * `getRequestedSignatures(true)` on the SAME `ctx.db`, and Quereus's transactions are flat and
+ * handle-global (`signing-engine.ts`) — interleaved `BEGIN`/`COMMIT` pairs from two overlapping
+ * passes corrupt each other (duplicate extension rows or a wedged handle). This copies the
+ * proven D-10 promise-chain mutex shape from `tid-allocator.ts:88-115` verbatim, keyed by
+ * `Database` handle instead of a namespace string: read the prior chain (`?? Promise.resolve()`),
+ * `.then()` the pass onto it, and store `next.catch(() => {})` back into the map — the STORED
+ * chain's `.catch` is the wedge guard, so a rejected pass can never poison the next caller.
+ */
+const seedPassLocks = new WeakMap<Database, Promise<unknown>>()
+
+/**
  * SignatureTasksEngine — Phase 05 (TASK-03, TASK-04) implementation.
  *
  * The ISignatureTasksEngine interface declares
@@ -46,6 +101,13 @@ import { RegistrationEngine } from '../registration/registration-engine.js'
  * are silently rejected on INSERT.
  */
 export class SignatureTasksEngine implements ISignatureTasksEngine {
+  /**
+   * CR-04 (T-48-33-02) — the most recent registrant seed pass's tally. Public so a test or a
+   * future UI consumer can read it; NOT part of `ISignatureTasksEngine` (no interface change, no
+   * UI consumer this round — see {@link RegistrantSeedOutcome}'s own doc comment).
+   */
+  lastSeedOutcome?: RegistrantSeedOutcome
+
   constructor (
     private readonly networkRef: NetworkReference,
     private readonly ctx?: EngineContext,
@@ -262,10 +324,52 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
    * and `OfficerSignature.OfficerValid` remain hardcoded stub CHECKs (Phase 999.1).
    *
    * Best-effort, silent no-op: with no signed-in officer there is no legal `UserId` to seed under.
+   *
+   * CR-04 (T-48-33-04): this method now only decides WHETHER to run a pass and enforces the
+   * per-`Database`-handle serialization lock (`seedPassLocks`) around it — the actual per-row work
+   * lives in {@link runRegistrantSeedPass}. `useTaskCount.fetchCount` and `TasksScreen`'s focus
+   * effect both call `getRequestedSignatures(true)` on the SAME `ctx.db`; without this lock their
+   * per-row `BEGIN`/`COMMIT` pairs can interleave on Quereus's flat, handle-global transaction
+   * model, producing duplicate `RegistrantSignatureTaskExtension` rows or a wedged handle. The
+   * lock shape is `tid-allocator.ts`'s proven D-10 promise chain, copied verbatim.
    */
   private async seedRegistrantSignatureTasks (): Promise<void> {
-    if (!this.ctx?.user?.id) return
+    if (!this.ctx?.user?.id) {
+      // No signed-in officer — no legal UserId to seed under (unchanged silent no-op). Still
+      // record a tally so `lastSeedOutcome` is never left stale from a PRIOR ctx/user.
+      this.lastSeedOutcome = {
+        considered: 0,
+        seeded: 0,
+        skipped: 0,
+        aborted: false,
+        handleInAutocommit: this.ctx?.db ? this.ctx.db.getAutocommit() : true,
+      }
+      return
+    }
     const ctx = this.ctx
+    const db = ctx.db
+
+    // CR-04 (T-48-33-04/05): chain onto any pass already in flight for this SAME Database handle
+    // — copied verbatim from tid-allocator.ts:88-115's D-10 shape. The STORED chain's
+    // `.catch(() => {})` is the wedge guard: a rejected pass must not poison the next caller.
+    const prior = seedPassLocks.get(db) ?? Promise.resolve()
+    const next = prior.then(async () => {
+      this.lastSeedOutcome = await this.runRegistrantSeedPass(ctx)
+    })
+    seedPassLocks.set(db, next.catch(() => {}))
+    await next
+  }
+
+  /**
+   * CR-04 — the actual per-row seed pass, run under {@link seedRegistrantSignatureTasks}'s
+   * per-handle serialization lock. Returns the identifier-free {@link RegistrantSeedOutcome}
+   * tally rather than throwing: `seedRegistrantSignatureTasks` must NEVER reject, because
+   * `getRequestedSignatures`'s own `catch` rethrows anything that escapes its `try` — an error
+   * escaping this method would re-brick the whole Tasks inbox for every signature type, which is
+   * CR-01 verbatim (round 1's closed defect). Every failure mode below is therefore captured into
+   * the tally, never re-thrown out of this method.
+   */
+  private async runRegistrantSeedPass (ctx: EngineContext): Promise<RegistrantSeedOutcome> {
     const userId = ctx.user!.id
 
     // Collect the work set FIRST, into an array, before any write — mirrors this file's own
@@ -311,21 +415,43 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       })
     }
 
+    let seeded = 0
+    let skipped = 0
+    let aborted = false
+
+    // T-48-30-02/T-48-11-10, rewritten for CR-04 (T-48-33-06): one malformed/unresolvable request
+    // must never take down seeding for the others — but a row whose `ROLLBACK` cannot be closed is
+    // a DIFFERENT failure than an ordinary row failure, and this loop now tells them apart. Three
+    // outcomes, each named by its tally field:
+    //   - seeded: the row's BEGIN/AdminSigning/Task/extension/COMMIT envelope succeeded outright.
+    //   - skipped (transient): the row's body failed but its own ROLLBACK succeeded — the row
+    //     stays 'p' and is retried on the NEXT pull, because nothing about the shared handle is
+    //     broken. This is the ONLY case the next pull is proven to recover (registrant-seeding-
+    //     scope.spec.ts's CR-04 Test 5, second pull).
+    //   - aborted (NOT transient): the row's own ROLLBACK failed, and Quereus's transaction model
+    //     is flat and handle-global — an unclosed transaction would poison every later BEGIN on
+    //     this handle (this row's remaining siblings, the next inbox mount, an approval's
+    //     register(), a rejection's ceremony) with an error itself swallowed wherever it lands.
+    //     ONE bounded recovery attempt is made; whether or not it succeeds, the pass STOPS
+    //     (`break`, never a rethrow — see this method's own doc comment for why a rethrow here
+    //     would re-brick the inbox, CR-01 verbatim) rather than continuing onto a handle whose
+    //     transaction state is unknown. If the bounded recovery ALSO failed, the handle is left
+    //     mid-transaction and reported as `handleInAutocommit === false` — that state persists
+    //     until something OUTSIDE this method issues a real ROLLBACK or the handle is replaced; NO
+    //     subsequent pull is claimed to recover it (registrant-seeding-scope.spec.ts's CR-04
+    //     Test 6 asserts the stuck state, not a recovery).
+    // The catch below logs NOTHING in either case: the bound params above carry request
+    // identifiers, and logging on this surface is a closed security gate (T-48-08-02, T-48-30-04).
+    // The tally is the only signal, and it is identifier-free by construction (see
+    // RegistrantSeedOutcome's doc comment).
     for (const row of pendingRows) {
-      // T-48-30-02/T-48-11-10: one malformed/unresolvable request must never take down seeding
-      // for the others. Every read/write for this row — the CurrentAdmin lookup, tid allocation,
-      // the AdminSigning insert, and the Task/extension envelope — lives inside this try; a throw
-      // anywhere in the body advances to the next row instead of aborting the batch. The `catch`
-      // logs NOTHING: the bound params above carry request identifiers, and logging on this
-      // surface is a closed security gate (T-48-08-02, T-48-30-04). The row stays 'p' and is
-      // retried on the next pull once the obstruction clears (transient, not permanent).
       try {
         // A request addressed to an authority with no current administration cannot be seeded —
         // one case of the general per-row-isolation rule this try/catch implements.
         const adminRow = await ctx.db
           .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
           .get({ authorityId: row.AuthorityId })
-        if (!adminRow) continue
+        if (!adminRow) { skipped++; continue }
         const adminEffectiveAt = adminRow.EffectiveAt as string | number
 
         // One fresh Tid per request, from 48-07's shared 'registration-request' namespace — the
@@ -334,7 +460,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         // context.Tid, and a mismatch fails the CHECK with an error that reads like a signature
         // problem, not a Tid one (mirrors election-engine.ts:910-925's BALLOT_HEADER_TID
         // discipline).
-        const tid = await allocateTid(this.ctx!.db, 'registration-request')
+        const tid = await allocateTid(ctx.db, 'registration-request')
         const nonce = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
         const taskId = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
         const signerKey = ctx.user?.activeKeys?.[0]?.key ?? '0'.repeat(66)
@@ -391,13 +517,45 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
             { taskId, requestId: row.Id, tid }
           )
           await ctx.db.exec('COMMIT')
+          seeded++
         } catch (err) {
-          await ctx.db.exec('ROLLBACK')
+          // CR-04 (T-48-33-01): attempt the ordinary ROLLBACK first. On success, rethrow the
+          // ORIGINAL error unchanged — the ordinary per-row-failure path, preserved verbatim.
+          try {
+            await ctx.db.exec('ROLLBACK')
+          } catch {
+            // The ROLLBACK itself failed. Exactly ONE bounded recovery attempt, itself wrapped so
+            // a second failure cannot escape as a different error shape — Quereus's transaction
+            // model is flat, so the handle's OWN autocommit state is the only reliable signal of
+            // whether anything is left open to close.
+            try {
+              if (!ctx.db.getAutocommit()) {
+                await ctx.db.exec('ROLLBACK')
+              }
+            } catch {
+              // Swallowed — the handle may still be mid-transaction; handleInAutocommit (below)
+              // reports this truthfully rather than pretending recovery succeeded.
+            }
+            throw new SeedPassAborted()
+          }
           throw err
         }
-      } catch {
+      } catch (err) {
+        skipped++
+        if (err instanceof SeedPassAborted) {
+          aborted = true
+          break
+        }
         continue
       }
+    }
+
+    return {
+      considered: pendingRows.length,
+      seeded,
+      skipped,
+      aborted,
+      handleInAutocommit: ctx.db.getAutocommit(),
     }
   }
 
