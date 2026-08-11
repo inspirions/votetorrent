@@ -244,9 +244,21 @@ declare schema main
 		-- explicit escape hatch for the carried DEBT-11 ad-hoc/system-derived signing ceremonies
 		-- (election-engine.ts submitBallotForConfirmation's initially-unsigned header row,
 		-- signature-tasks-engine.ts finalizeBallot's per-question/option rows, elections-engine.ts
-		-- debugSeedPendingTasks) that intentionally carry no real crypto — those call sites are the ONLY
+		-- debugSeedPendingTasks, and -- WR-07, added by Phase 48 --
+		-- signature-tasks-engine.ts seedRegistrantSignatureTasks's per-request AdminSigning('vrg')
+		-- row) that intentionally carry no real crypto — those call sites are the ONLY
 		-- ones permitted to bind IsPlaceholderSignature = true; every other producer leaves it at its
 		-- default (false) and must supply a real, verifiable signature.
+		-- Why the seedRegistrantSignatureTasks producer is correct here (WR-07): the seed step runs
+		-- at INBOX-READ time, before the reviewing officer has decided anything, so there is no
+		-- officer decision for a real signature to cover yet. The officer's real crypto arrives
+		-- later, at completeSignature, as a SEPARATE OfficerSignature row over this SAME Digest —
+		-- never as a mutation of this row (AdminSigning is InsertOnly check on update, delete
+		-- (false)). The placeholder therefore stands in for "not yet signed", not for
+		-- "signed by something unverifiable". When the user holds no active key the row also binds
+		-- SignerKey = '0'.repeat(66); SignerKeyValid is a stub (see above), so that placeholder key
+		-- is not load-bearing either. This entry exists because an allowlist that silently omits a
+		-- producer of a security-relevant flag is worse than no allowlist.
 		constraint SignatureValid check (
 			context.IsPlaceholderSignature = true
 				or SignatureValid(new.Digest, new.Signature, new.SignerKey)

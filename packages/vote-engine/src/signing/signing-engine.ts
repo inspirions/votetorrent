@@ -59,6 +59,15 @@ export class SigningEngine implements ISigningEngine {
 		// system-derived callers (SignatureTasksEngine.finalizeBallot's per-question/option
 		// rows) pass true. Every other caller (real officer-supplied Signature) defaults to
 		// false, so OfficerSignature.SignatureValid's UDF actually verifies the signature.
+		//
+		// WR-07: the schema-side allowlist (votetorrent.qsql, AdminSigning.SignatureValid) now names
+		// a fourth producer of `IsPlaceholderSignature = true` — SignatureTasksEngine's
+		// seedRegistrantSignatureTasks, which binds the flag DIRECTLY on its `insert into
+		// AdminSigning`, NOT through this method. It is recorded here so the two allowlists stay in
+		// agreement about which call sites are permitted to set the flag; it does not reach this
+		// `sign()` seam, and no `sign()` caller was added by that path. Reason it is correct there:
+		// the seeded row is "not yet signed" — the officer's real crypto arrives later as a separate
+		// OfficerSignature row over the same Digest (see the schema comment for the full rationale).
 		const isPlaceholderSignature = options?.isPlaceholderSignature ?? false;
 		try {
 			// AUTH-08: BEGIN/COMMIT/ROLLBACK envelope around OfficerSignature
