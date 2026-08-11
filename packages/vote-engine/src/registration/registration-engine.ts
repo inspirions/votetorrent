@@ -2157,7 +2157,15 @@ export class RegistrationEngine implements IRegistrationEngine {
       )) {
         out.push({
           requestId: asText(row.Id, 'RegistrationRequest.Id'),
-          rejectedAt: reZuluDatetime(row.DecidedAt as string),
+          // WR-03: `DecidedAt` is a `datetime null` column, and the two columns below were
+          // null-guarded while this one was not — `reZuluDatetime(null)` is `null.endsWith(...)`,
+          // a TypeError this method's own catch rethrows as an engine error. On the approval
+          // screen that sets `priorRejectionsUnavailable` and blocks Approve for EVERY request
+          // from that requester key, which is the exact "must not crash on a row a future
+          // migration left partial" case the comment below claims to tolerate.
+          // `getRegistrationRequest` already guards the same column this way, so the two read
+          // surfaces now agree.
+          rejectedAt: row.DecidedAt == null ? '' : reZuluDatetime(row.DecidedAt as string),
           // Deliberately NOT `asText` on the two columns below — it throws
           // on null. `DecisionValid` SHOULD make both present on a rejected
           // row, but a read surface must not crash on a row a future
