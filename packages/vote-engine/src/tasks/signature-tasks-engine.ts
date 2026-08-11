@@ -363,11 +363,19 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
   /**
    * CR-04 — the actual per-row seed pass, run under {@link seedRegistrantSignatureTasks}'s
    * per-handle serialization lock. Returns the identifier-free {@link RegistrantSeedOutcome}
-   * tally rather than throwing: `seedRegistrantSignatureTasks` must NEVER reject, because
-   * `getRequestedSignatures`'s own `catch` rethrows anything that escapes its `try` — an error
-   * escaping this method would re-brick the whole Tasks inbox for every signature type, which is
-   * CR-01 verbatim (round 1's closed defect). Every failure mode below is therefore captured into
-   * the tally, never re-thrown out of this method.
+   * tally rather than throwing, because `getRequestedSignatures`'s own `catch` rethrows anything
+   * that escapes its `try` — a PER-ROW error escaping this method would re-brick the whole Tasks
+   * inbox for every signature type, which is CR-01 verbatim (round 1's closed defect).
+   *
+   * Scope of that guarantee, stated precisely (WR-23): every failure mode INSIDE the per-row loop
+   * below is captured into the tally and never re-thrown. The work-set collection query above the
+   * loop is deliberately NOT wrapped, and an error there DOES propagate. That is intentional, not
+   * an oversight: the query is fully parameterized and reads no requester-chosen input, so it is
+   * not reachable from D-02's unauthenticated intake; and if the handle cannot be read at all,
+   * every other ceremony sharing it is equally broken — a loud failure is the correct response,
+   * where a silent one would show an empty inbox and hide a dead database. CR-01's isolation
+   * requirement is about per-row WRITES driven by attacker-chosen rows, and that is what this
+   * method isolates.
    */
   private async runRegistrantSeedPass (ctx: EngineContext): Promise<RegistrantSeedOutcome> {
     const userId = ctx.user!.id
