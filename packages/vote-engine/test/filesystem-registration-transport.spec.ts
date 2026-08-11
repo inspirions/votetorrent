@@ -317,4 +317,35 @@ describe('filesystem registration transport', () => {
     // would be mis-decided the same way.
     expect(transport.skipped.some((s) => s.file.includes('vocabulary-drift'))).to.equal(false)
   })
+
+  it('12. (WR-11) `skipped` reports the most recent read only — a permanently-malformed file is not re-appended on every poll', async () => {
+    const init = makeInit()
+    const { publicHex, sign } = makeRealSigner()
+    await transport.submitRequest(init, publicHex, await sign(await computeDigest(init, publicHex)))
+
+    const requestsDir = join(root, 'requests')
+    await writeFile(join(requestsDir, '0000000000000001-junk.json'), 'not json at all', 'utf8')
+
+    // Three reads of the SAME unchanged directory. Before WR-11 `skipped` was a lifetime
+    // accumulator, so the one permanently-malformed file appeared 1, then 2, then 3 times — a
+    // host mapping it into TransportSyncReport.errorItemIds rendered the same item id N times
+    // after N syncs, and the array grew without bound on a long-lived instance.
+    await transport.readStagedRequests()
+    const afterFirst = transport.skipped.length
+    await transport.readStagedRequests()
+    const afterSecond = transport.skipped.length
+    await transport.readStagedRequests()
+    const afterThird = transport.skipped.length
+
+    expect(afterFirst, 'the malformed file must be reported once by the first read').to.equal(1)
+    expect(afterSecond, 'a second read of the same directory must report it once, not twice').to.equal(1)
+    expect(afterThird, 'and a third read must still report it once — the array is per-read, not cumulative').to.equal(1)
+    expect(transport.skipped[0]!.file).to.equal('0000000000000001-junk.json')
+
+    // Once the offending file is gone, the NEXT read reports nothing — a stale skip must not
+    // outlive the condition that produced it.
+    await rm(join(requestsDir, '0000000000000001-junk.json'))
+    await transport.readStagedRequests()
+    expect(transport.skipped, 'a resolved skip must not survive into the next read').to.deep.equal([])
+  })
 })

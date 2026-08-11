@@ -221,7 +221,17 @@ interface RawDocument {
 export class FilesystemRegistrationTransport implements IRegistrationRequestTransport, IRegistrationRequestIntake {
   /** Filenames skipped while reading either directory, and why. A caller
    * reporting sync errors must surface the filename ONLY, never a document
-   * value — a staged payload is registrant PII. */
+   * value — a staged payload is registrant PII.
+   *
+   * WR-11: this array reports the MOST RECENT read only — it is cleared at the head of every
+   * `readDocuments` pass (i.e. of every `readStagedRequests` / `pollDecisions` call). It was
+   * previously a lifetime accumulator on a long-lived instance, which had two consequences on a
+   * repeating sync: a permanently-malformed file was re-appended on EVERY poll, so the array grew
+   * without bound; and a host mapping `skipped` into `TransportSyncReport.errorItemIds` — exactly
+   * the adaptation `bulk-import-sync-model.ts` documents as intended — rendered the same item id
+   * N times after N syncs. "Errors from the last sync" is the only reading that matches how the
+   * value is consumed. Read it immediately after the read call that produced it; do not treat it
+   * as a running log. */
   public readonly skipped: Array<{ file: string; reason: string }> = []
 
   private readonly rootDir: string
@@ -473,6 +483,12 @@ export class FilesystemRegistrationTransport implements IRegistrationRequestTran
    * `<16-digit>-<id>.json` pattern.
    */
   private async readDocuments (dirPath: string, sinceCursor?: string): Promise<RawDocument[]> {
+    // WR-11: `skipped` reports THIS read, not every read since construction. Cleared here — the
+    // single funnel both public read paths (`readStagedRequests`, `pollDecisions`) go through —
+    // rather than in each of them, so a future third read path cannot forget it. `skipped` is
+    // `readonly` (the reference, not the contents), so the length reset is the correct idiom;
+    // reassigning it would break every caller holding the array.
+    this.skipped.length = 0
     const entries = await readdir(dirPath)
     const candidates = entries
       .map((file) => {
