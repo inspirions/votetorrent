@@ -713,6 +713,49 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 		expect(mockGoBack).toHaveBeenCalledTimes(1);
 	});
 
+	it("14b. (WR-14) a task-completion failure AFTER a successful rejection does not report the rejection as failed", async () => {
+		// The rejection itself succeeds; only the follow-on task close fails. Before WR-14 both
+		// steps lived in one try, so this surfaced an error and rethrew — RejectReasonCard returned
+		// to idle "for a retry", and that retry re-entered rejectRegistrationRequest, which now
+		// throws "is already decided (Status=r)". The officer saw a hard error on a refusal that
+		// had in fact been recorded, with no press sequence that could ever clear it.
+		mockCompleteSignature.mockRejectedValueOnce(new Error("task close failed"));
+
+		const tr = await renderScreen();
+		press(tr, "registration-request-approval-reject");
+		const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
+		renderer.act(() => {
+			input.props.onChangeText("no proof of residence");
+		});
+		await pressAsync(tr, "reject-reason-confirm");
+
+		// The refusal was recorded exactly once — and never retried.
+		expect(mockRejectRegistrationRequest).toHaveBeenCalledTimes(1);
+		expect(mockCompleteSignature).toHaveBeenCalledTimes(1);
+		// No error surface, and the screen leaves normally.
+		expect(exists(tr, "registration-request-approval-error")).toBe(false);
+		expect(mockGoBack).toHaveBeenCalledTimes(1);
+	});
+
+	it("14c. (WR-14) a failure of the rejection ITSELF is still surfaced and still rethrown", async () => {
+		// The isolation added for WR-14 must not swallow the step that actually matters. A failed
+		// rejectRegistrationRequest is a refusal that did NOT happen: it must surface, must rethrow
+		// so RejectReasonCard unlatches, and must not close the task.
+		mockRejectRegistrationRequest.mockRejectedValueOnce(new Error("rejection failed"));
+
+		const tr = await renderScreen();
+		press(tr, "registration-request-approval-reject");
+		const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
+		renderer.act(() => {
+			input.props.onChangeText("no proof of residence");
+		});
+		await pressAsync(tr, "reject-reason-confirm");
+
+		expect(mockCompleteSignature).not.toHaveBeenCalled();
+		expect(exists(tr, "registration-request-approval-error")).toBe(true);
+		expect(mockGoBack).not.toHaveBeenCalled();
+	});
+
 	it("15. dismiss restores the footer and still fires zero engine calls", async () => {
 		const tr = await renderScreen();
 		const snapshot = totalEngineCallCount();

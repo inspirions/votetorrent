@@ -397,16 +397,40 @@ export default function RegistrationRequestApprovalScreen() {
 			// `reason` arrives already trimmed from RejectReasonCard — not
 			// re-trimmed here.
 			await reg.rejectRegistrationRequest(requestId, { checklist: checked, rejectionReason: reason }, signer);
+			// WR-14: past this line the rejection IS RECORDED — permanently, signed, and
+			// `NoDelete`. The two steps below are therefore NOT part of the same atomic act and
+			// must not be reported as one.
+			//
+			// The previous shape awaited task completion inside the same try and let a failure
+			// there propagate to the catch, which surfaced an error and rethrew so RejectReasonCard
+			// returned to idle "for a retry". That retry was a trap: it re-entered
+			// `rejectRegistrationRequest`, which now throws "is already decided (Status=r)". The
+			// officer saw a hard error on a rejection that had in fact SUCCEEDED, and no sequence
+			// of presses could ever clear it.
+			//
+			// So the task-completion step is isolated and its failure swallowed. What is lost by
+			// swallowing is bounded and cosmetic: the Task row stays `IsCompleted = 0`, so a stale
+			// entry lingers in the officer's inbox. What is gained is that the officer is not told
+			// a completed refusal failed. Seeding will not resurrect or duplicate anything either —
+			// the extension row already exists and the request is no longer `'p'`, so
+			// `seedRegistrantSignatureTasks`'s `not exists` / `Status = 'p'` predicates both
+			// exclude it. No `console.*` here: this file's never-log rule (header note 3) is
+			// absolute, and the caught value can carry request identifiers.
 			if (task) {
-				const tasksEngine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
-				// The blank triple, byte-identical to SignatureTaskScreen.tsx's own
-				// reject path — no `sign` field, no `decision` field. Closing the
-				// task and advancing the signature are different things; only the
-				// second is forbidden.
-				await tasksEngine.completeSignature(task, {
-					isAccepted: false,
-					signature: { signature: "", signerKey: "", signerUserId: "" },
-				});
+				try {
+					const tasksEngine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
+					// The blank triple, byte-identical to SignatureTaskScreen.tsx's own
+					// reject path — no `sign` field, no `decision` field. Closing the
+					// task and advancing the signature are different things; only the
+					// second is forbidden.
+					await tasksEngine.completeSignature(task, {
+						isAccepted: false,
+						signature: { signature: "", signerKey: "", signerUserId: "" },
+					});
+				} catch {
+					// Deliberately swallowed — see above. The refusal is recorded; a stale open
+					// task is cosmetic, and reporting it as a failed refusal is not.
+				}
 			}
 			navigation.goBack();
 		} catch (err) {
