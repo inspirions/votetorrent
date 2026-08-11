@@ -362,6 +362,8 @@ describe('TransportStatusCard — counts line', () => {
 
 describe('TransportStatusCard — state-by-date-presence render matrix (48-UAT.md gap 1)', () => {
   const SENTINEL_TIMESTAMP = '2026-08-05T12:00:00Z';
+  // WR-18: the date line renders the FORMATTED value, not the raw ISO-8601 one.
+  const SENTINEL_DATE = '2026-08-05';
   const expectedBodyKey = {
     never: 'bulkImportSyncNeverSyncedBody',
     success: 'bulkImportSyncSyncedBody',
@@ -386,7 +388,7 @@ describe('TransportStatusCard — state-by-date-presence render matrix (48-UAT.m
         expect(serialized).not.toContain('bulkImportSyncLastSyncedLabel');
       });
 
-      it(`kind=${kind} state=${state}, lastSyncedAt SET: date line present and contains the sentinel, body is still the state's own key`, () => {
+      it(`kind=${kind} state=${state}, lastSyncedAt SET: date line present and carries the FORMATTED date (never the raw ISO string), body is still the state's own key`, () => {
         const onSyncNow = jest.fn();
         const tree = renderCard(
           <TransportStatusCard
@@ -401,7 +403,13 @@ describe('TransportStatusCard — state-by-date-presence render matrix (48-UAT.m
         expect(dateNode).toBeDefined();
         const dateSerialized = serializeSubtree(dateNode);
         expect(dateSerialized).toContain('bulkImportSyncLastSyncedLabel');
-        expect(dateSerialized).toContain(SENTINEL_TIMESTAMP);
+        // WR-18: this assertion previously read `toContain(SENTINEL_TIMESTAMP)` and so pinned the
+        // defect in place — this card was the only timestamp surface in the phase that rendered
+        // `2026-08-05T12:00:00Z` where the inbox row, the approval summary and the rejected block
+        // all render `2026-08-05`. Both directions are asserted so a silent revert to raw
+        // interpolation goes red rather than merely passing a weaker check.
+        expect(dateSerialized).toContain(SENTINEL_DATE);
+        expect(dateSerialized).not.toContain(SENTINEL_TIMESTAMP);
 
         const bodyNode = findByTestID(tree.root, `transport-status-${kind}-${state}-body`)[0];
         const bodySerialized = serializeSubtree(bodyNode);

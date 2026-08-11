@@ -6,6 +6,13 @@ import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { ThemedText } from "./ThemedText";
 import { CustomButton } from "./CustomButton";
 import { globalStyles } from "../theme/styles";
+// WR-18: the SHARED never-throw date formatter, imported rather than re-implemented.
+// `registration-request-display.ts` is pure — React-free, theme-free, engine-free — so importing
+// it here adds no dependency weight, and more importantly adds no FOURTH copy of "how a timestamp
+// is shown to an officer". The other three timestamp surfaces in this phase (the inbox row, the
+// approval summary, the rejected block) already route through it; this import is what stops this
+// card from being the one place that shows a raw ISO-8601 string instead.
+import { formatRequestTimestamp } from "../screens/registration/registration-request-display";
 
 /**
  * TransportStatusCard — the Bulk Import / Sync screen's per-binding status card (D-01/D-11).
@@ -194,7 +201,15 @@ export function TransportStatusCard({
 					style={[localStyles.countsText, { color: colors.textSecondary }]}
 					testID={`transport-status-last-synced-${kind}`}
 				>
-					{t("bulkImportSyncLastSyncedLabel", { date: lastSyncedAt })}
+					{/* WR-18: FORMATTED, never the raw value. `lastSyncedAt` arrives as
+					    `TransportSyncReport.syncedAt`, produced by `new Date().toISOString()`, so
+					    interpolating it directly showed the officer `2026-08-10T13:04:31.910Z`
+					    where every other timestamp in this phase shows `2026-08-10`.
+					    `formatRequestTimestamp` never throws and returns its input unchanged on an
+					    unparseable value, so a malformed `syncedAt` degrades to the raw string
+					    rather than blanking the line — the same contract the row and the approval
+					    screen rely on. */}
+					{t("bulkImportSyncLastSyncedLabel", { date: formatRequestTimestamp(lastSyncedAt) })}
 				</ThemedText>
 			) : null}
 
