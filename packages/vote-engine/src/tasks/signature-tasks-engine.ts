@@ -1130,6 +1130,14 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
    *  - CR-03 (T-48-31-02): init.registrant.id is also requester-chosen. register() is unconditional
    *    (see finalizeRegistrantApproval's own comment for why the old convergence guard is gone
    *    rather than merely relocated) — refuse the id collision here, exactly like CR-02 above.
+   *  - WR-01: no signed-in officer. `RegistrationRequest.DecisionValid` accepts a null
+   *    DecidingOfficerUserId and the DG-2 digest simply binds `null`, so an unattributable APPROVAL
+   *    — the more consequential of the two decisions — would otherwise be writable while
+   *    `rejectRegistrationRequest` (registration-engine.ts) already refuses the same column's null
+   *    with "a rejection must be attributable". The asymmetry was backwards and D-06's
+   *    attributability claim did not hold for approvals. Refused HERE rather than at the
+   *    finalizeRegistrantApproval write site so it lands on the pre-sign side of WR-19's ordering:
+   *    an anonymous accept never spends the officer's header signature either.
    *
    * WR-19 is closed by WHERE this gate is called from completeSignature (before sign()), not by
    * anything in this method's own body — this method's refusals are the same whether they run
@@ -1145,8 +1153,18 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     init: RegisterInit
     submittedAt: string
     receivedAt: string
+    decidingOfficerUserId: string
   }> {
     const ctx = this.ctx!
+
+    // WR-01: mirror rejectRegistrationRequest's refusal verbatim in intent — an unattributable
+    // approval is a permanent record no one can be held to, degrading D-06 to a bare status flag.
+    const decidingOfficerUserId = ctx.user?.id ?? null
+    if (!decidingOfficerUserId) {
+      throw new Error(
+        'SignatureTasksEngine.resolveAcceptableRegistrantApproval: no signed-in officer (ctx.user) — an approval must be attributable'
+      )
+    }
     const extRow = await ctx.db
       .prepare(
         `select E.RequestId, R.AuthorityId, R.Payload, R.Status, R.SubmittedAt, R.ReceivedAt
@@ -1197,7 +1215,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       )
     }
 
-    return { requestId, authorityId: extRow.AuthorityId, init, submittedAt, receivedAt }
+    return { requestId, authorityId: extRow.AuthorityId, init, submittedAt, receivedAt, decidingOfficerUserId }
   }
 
   /**
@@ -1220,7 +1238,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // already been proven acceptable. This second call exists so a future caller that reaches
     // finalizeRegistrantApproval directly gets the SAME refusals from the SAME producer — never a
     // duplicated or drifted copy of the CR-02/CR-03 checks.
-    const { requestId, authorityId, init, submittedAt, receivedAt } = await this.resolveAcceptableRegistrantApproval(taskId)
+    const { requestId, authorityId, init, submittedAt, receivedAt, decidingOfficerUserId } = await this.resolveAcceptableRegistrantApproval(taskId)
 
     const tid = await allocateTid(ctx.db, 'registration-request')
 
@@ -1238,7 +1256,10 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // DecidedAt must carry a trailing 'Z' (DecidedAtValid's like('%Z', ...)) — toIsoZDatetime, NEVER
     // nowCanonicalDatetime() (48-02 hygiene item 3).
     const decidedAt = toIsoZDatetime(Date.now())
-    const decidingOfficerUserId = ctx.user?.id ?? null
+    // WR-01: `decidingOfficerUserId` is produced by resolveAcceptableRegistrantApproval (above),
+    // which refuses a null one outright — it is a non-null string by the time it reaches the DG-2
+    // digest and the decision UPDATE, and it is never re-derived from ctx.user here (one producer,
+    // so the digested tuple and the stored row cannot disagree about who decided).
 
     // DG-2, field for field: Digest(context.Tid, new.Id, new.Status, new.VerificationCid,
     // new.DecidedAt, new.DecidingOfficerUserId, new.RejectionReason). rejectionReason binds null and
