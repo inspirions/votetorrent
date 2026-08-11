@@ -2,6 +2,7 @@ import { mkdir, readdir, readFile, writeFile, link, unlink } from 'node:fs/promi
 import { join } from 'node:path'
 import type { RegistrationRequestInit, RegistrationRequestStatus, Signature } from '@votetorrent/vote-core'
 import type { IRegistrationRequestTransport, RegistrationDecisionNotice } from './registration-request-transport.js'
+import { assertKnownRegistrationStatus } from './registration-request-transport.js'
 
 /**
  * filesystem-registration-transport.ts — the D-01 filesystem drop-file
@@ -317,9 +318,22 @@ export class FilesystemRegistrationTransport implements IRegistrationRequestTran
         continue
       }
       const reason = typeof body.reason === 'string' ? body.reason : undefined
+      // WR-10: the seam's shared status guard, replacing a bare `status as
+      // RegistrationRequestStatus` coercion that let a drop file carrying `"approved"` or
+      // `"deleted"` through as a well-typed notice whose downstream `switch (notice.status)` then
+      // took no branch — a decision silently LOST, which this seam's contract forbids
+      // ("re-delivery is permitted; loss is not").
+      //
+      // This THROWS rather than joining the `skipped` accumulator above, and the asymmetry is
+      // deliberate: a document missing a member is one malformed file to step over, while an
+      // unknown status CODE means the producer and the schema disagree about the vocabulary —
+      // every subsequent notice from that producer would be mis-decided the same way. The REST
+      // binding already made exactly this call; this binding now agrees with it, which is what
+      // D-01's "one shared conformance suite with identical assertions" actually requires.
+      const knownStatus = assertKnownRegistrationStatus(status, 'FilesystemRegistrationTransport.pollDecisions')
       notices.push({
         requestId,
-        status: status as RegistrationRequestStatus,
+        status: knownStatus,
         reason,
         cursor: seq
       })

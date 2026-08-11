@@ -282,4 +282,39 @@ describe('filesystem registration transport', () => {
     // never recorded as a skip.
     expect(transport.skipped.some((s) => s.file.endsWith('.tmp'))).to.equal(false)
   })
+
+  it('11. (WR-10) a decision document whose status is outside the vote-core union is REFUSED, not coerced through', async () => {
+    // Publish one legitimate decision first so decisions/ exists and the layout is real.
+    await transport.publishDecision({ requestId: nextId(), status: 'a', decidedAt: new Date().toISOString() })
+
+    // Hand-write a drop file carrying a status the schema does not know. Before WR-10 this passed
+    // the bare `typeof status === 'string'` check and was coerced with
+    // `status as RegistrationRequestStatus`, so it surfaced as a well-typed
+    // RegistrationDecisionNotice whose downstream `switch (notice.status)` took NO branch — a
+    // decision silently lost, which this seam's contract forbids ("loss is not" permitted).
+    const decisionsDir = join(root, 'decisions')
+    await writeFile(
+      join(decisionsDir, '0000000000009999-vocabulary-drift.json'),
+      // `version: 1` is mandatory — without it readDocuments skips the entry before pollDecisions
+      // ever sees the status, and the test would pass vacuously.
+      JSON.stringify({ version: 1, requestId: nextId(), status: 'approved', decidedAt: new Date().toISOString() }),
+      'utf8'
+    )
+
+    let caught: unknown
+    try {
+      await transport.pollDecisions()
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'an unknown status code must be refused, not dropped or coerced').to.be.instanceOf(Error)
+    expect((caught as Error).message).to.include('outside the vote-core union')
+    // The refusal must still name the binding that produced it — the seam helper takes a `where`
+    // prefix precisely so a shared guard does not produce an anonymous error.
+    expect((caught as Error).message).to.include('FilesystemRegistrationTransport.pollDecisions')
+    // A vocabulary mismatch is NOT an ordinary malformed-document skip: it must surface rather
+    // than join the `skipped` accumulator, because every later notice from the same producer
+    // would be mis-decided the same way.
+    expect(transport.skipped.some((s) => s.file.includes('vocabulary-drift'))).to.equal(false)
+  })
 })

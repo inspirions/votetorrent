@@ -50,6 +50,39 @@ export interface RegistrationDecisionNotice {
   cursor: string
 }
 
+/**
+ * WR-10: the closed vote-core `RegistrationRequestStatus` union, expressed once, HERE, on the seam
+ * itself — hoisted out of `rest-registration-transport.ts`, which was the only binding that
+ * validated it.
+ *
+ * Why it belongs on the seam rather than in one binding: D-01's whole claim is "one shared
+ * conformance suite with identical assertions" across the bindings. Two of the three coerced
+ * instead of checked (`status as RegistrationRequestStatus` after a bare `typeof === 'string'`,
+ * or with no check at all), so a drop file or a strand row carrying `"approved"` or `"deleted"`
+ * flowed through as a well-typed `RegistrationDecisionNotice` and every downstream
+ * `switch (notice.status)` silently took no branch — a silent drop of a DECISION, which is the one
+ * thing this seam's own contract says must never be lost ("re-delivery is permitted; loss is not").
+ *
+ * Why a THROW and not a skip: a code outside this set means the producer and the schema disagree
+ * about the vocabulary. That is not a malformed row to step over — it will mis-decide every
+ * subsequent notice from the same producer too, so it must be surfaced.
+ */
+export const KNOWN_REGISTRATION_STATUS_CODES: ReadonlySet<string> = new Set(['p', 'a', 'r'])
+
+/**
+ * WR-10: the single narrowing helper every binding routes an untrusted `status` value through.
+ * `where` is a caller-supplied prefix (e.g. `'RestRegistrationTransport.pollDecisions'`) so the
+ * thrown error still names the binding that produced it. The message carries the offending status
+ * value and NOTHING else — no document body, no filename, no requester field (the never-log rule
+ * each of these transports states in its own header).
+ */
+export function assertKnownRegistrationStatus (status: unknown, where: string): RegistrationRequestStatus {
+  if (typeof status !== 'string' || !KNOWN_REGISTRATION_STATUS_CODES.has(status)) {
+    throw new Error(`${where}: decision notice carries a status outside the vote-core union: ${JSON.stringify(status)}`)
+  }
+  return status as RegistrationRequestStatus
+}
+
 export interface IRegistrationRequestTransport {
   /**
    * Submit a registration request through this binding. The parameter list

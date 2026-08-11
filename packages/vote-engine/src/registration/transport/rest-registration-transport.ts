@@ -1,5 +1,6 @@
 import type { RegistrationRequestInit, RegistrationRequestStatus, Signature } from '@votetorrent/vote-core'
 import type { IRegistrationRequestTransport, RegistrationDecisionNotice } from './registration-request-transport.js'
+import { assertKnownRegistrationStatus } from './registration-request-transport.js'
 import { digestToBytes } from '../../utils.js'
 
 /**
@@ -94,10 +95,11 @@ type FetchLike = typeof fetch
 
 const DEFAULT_TIMEOUT_MS = 15_000
 
-/** The vote-core `RegistrationRequestStatus` union, closed. A decision
- * notice carrying a code outside this set means the endpoint and the schema
- * disagree about the vocabulary, and must be rejected — never dropped. */
-const KNOWN_STATUS_CODES: ReadonlySet<string> = new Set(['p', 'a', 'r'])
+/* WR-10: the closed status union and its guard used to be declared HERE, in this one binding —
+ * the reason the other two bindings shipped without the check. Both now live on the seam
+ * (`registration-request-transport.ts`: `KNOWN_REGISTRATION_STATUS_CODES` /
+ * `assertKnownRegistrationStatus`) so every binding applies the SAME rule from the SAME
+ * definition. Do not re-declare either here. */
 
 interface DigestHandshakeResponseBody {
   digest?: unknown
@@ -281,13 +283,12 @@ export class RestRegistrationTransport implements IRegistrationRequestTransport 
     if (typeof cursor !== 'string' || cursor.length === 0) {
       throw new Error('RestRegistrationTransport.pollDecisions: decision notice is missing cursor')
     }
-    if (typeof status !== 'string' || !KNOWN_STATUS_CODES.has(status)) {
-      throw new Error(`RestRegistrationTransport.pollDecisions: decision notice carries a status outside the vote-core union: ${JSON.stringify(status)}`)
-    }
+    // WR-10: the shared seam guard — same rule, same message, one definition across the bindings.
+    const knownStatus = assertKnownRegistrationStatus(status, 'RestRegistrationTransport.pollDecisions')
     if (reason !== undefined && typeof reason !== 'string') {
       throw new Error('RestRegistrationTransport.pollDecisions: decision notice reason must be a string when present')
     }
-    return { requestId, status: status as RegistrationRequestStatus, reason, cursor }
+    return { requestId, status: knownStatus, reason, cursor }
   }
 
   /**
