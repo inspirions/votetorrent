@@ -307,6 +307,90 @@ describe("BulkImportSyncScreen — Filesystem/REST cards invoke a real attached 
 // these assertions is evidence that the peer-cluster protocol works.
 // ---------------------------------------------------------------------------
 
+describe("BulkImportSyncScreen — WR-16 in-flight guard", () => {
+	it("(WR-16) repeated presses on one binding launch exactly ONE syncNow, and the control renders disabled while it is in flight", async () => {
+		let release!: (r: any) => void;
+		const filesystemSyncNow = jest.fn(
+			() =>
+				new Promise<any>((resolve) => {
+					release = resolve;
+				}),
+		);
+		registerSyncBinding({ id: "filesystem", syncNow: filesystemSyncNow });
+		const tr = await renderScreen();
+
+		await press(tr, "transport-sync-now-filesystem");
+		// The call is parked. Before WR-16 these two further presses each launched ANOTHER
+		// overlapping syncNow() against the same binding, and whichever settled last won the card
+		// state — so the displayed counts need not have described the most recent run.
+		await press(tr, "transport-sync-now-filesystem");
+		await press(tr, "transport-sync-now-filesystem");
+		expect(filesystemSyncNow).toHaveBeenCalledTimes(1);
+
+		// The visual half of the guard: `disabled` reads state, not the ref, so this is observable.
+		const card = tr.root.findByProps({ testID: "transport-status-card-filesystem" });
+		const disabledNode = card.findAll((node) => "disabled" in node.props)[0];
+		expect(disabledNode!.props.disabled).toBe(true);
+
+		await renderer.act(async () => {
+			release(report({ imported: 3 }));
+		});
+		await flushTicks(4);
+
+		// Once settled, the control is live again and a fresh press starts a new run.
+		await press(tr, "transport-sync-now-filesystem");
+		expect(filesystemSyncNow).toHaveBeenCalledTimes(2);
+	});
+
+	it("(WR-16) the guard is PER BINDING — an in-flight filesystem sync does not block the REST control", async () => {
+		let releaseFs!: (r: any) => void;
+		const filesystemSyncNow = jest.fn(
+			() =>
+				new Promise<any>((resolve) => {
+					releaseFs = resolve;
+				}),
+		);
+		const restSyncNow = jest.fn(async () => report());
+		registerSyncBinding({ id: "filesystem", syncNow: filesystemSyncNow });
+		registerSyncBinding({ id: "rest", syncNow: restSyncNow });
+		const tr = await renderScreen();
+
+		await press(tr, "transport-sync-now-filesystem");
+		await press(tr, "transport-sync-now-rest");
+
+		expect(filesystemSyncNow).toHaveBeenCalledTimes(1);
+		expect(restSyncNow).toHaveBeenCalledTimes(1);
+
+		await renderer.act(async () => {
+			releaseFs(report());
+		});
+		await flushTicks(4);
+	});
+
+	it("(WR-16) a REJECTED sync releases the guard — the control must not latch permanently on failure", async () => {
+		const filesystemSyncNow = jest.fn(async () => {
+			throw new Error("transport unavailable");
+		});
+		registerSyncBinding({ id: "filesystem", syncNow: filesystemSyncNow });
+		const tr = await renderScreen();
+
+		await press(tr, "transport-sync-now-filesystem");
+		await press(tr, "transport-sync-now-filesystem");
+
+		expect(filesystemSyncNow).toHaveBeenCalledTimes(2);
+	});
+
+	it("(WR-16) the no-binding path starts nothing and therefore must NOT latch the control", async () => {
+		const tr = await renderScreen();
+		// No binding registered: runSync returns synchronously with { failed: true }. A guard that
+		// latched on this path would make the honest-failure state unretryable.
+		await press(tr, "transport-sync-now-filesystem");
+		const card = tr.root.findByProps({ testID: "transport-status-card-filesystem" });
+		const disabledNode = card.findAll((node) => "disabled" in node.props)[0];
+		expect(disabledNode!.props.disabled).toBe(false);
+	});
+});
+
 describe("BulkImportSyncScreen — the peer card's control is wired, its treatment is unchanged (D-11)", () => {
 	it("transport-status-card-p2p is present when both real transports are unregistered", async () => {
 		const tr = await renderScreen();

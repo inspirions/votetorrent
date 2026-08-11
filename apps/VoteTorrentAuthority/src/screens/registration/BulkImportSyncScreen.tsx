@@ -93,7 +93,25 @@ export function BulkImportSyncScreen() {
 		};
 	}, []);
 
+	// WR-16: a per-id in-flight guard. Every other signed/network control in this phase carries one
+	// (`RejectReasonCard`'s `submittingRef`, the approval screen's `handleApprove`); this one did
+	// not, so repeated "Sync Now" presses launched OVERLAPPING `syncNow()` calls against the same
+	// binding and whichever settled LAST won the card state. For the REST binding that means
+	// overlapping intake batches, and an early failure could overwrite a later success (or the
+	// reverse), so the displayed counts need not have described the most recent run at all.
+	//
+	// Two representations, deliberately, and the split is the same one WR-13 fixes on the approval
+	// screen: the REF is the correctness guard (two presses dispatched in the same JS tick both
+	// read the same closure's state, so a state-only guard cannot close that gap), and the STATE is
+	// the feedback (mutating a ref schedules no render, so a ref-only guard would never actually
+	// disable the button). Neither alone is sufficient.
+	const inFlightRef = useRef<Set<SyncBindingId>>(new Set());
+	const [inFlight, setInFlight] = useState<ReadonlySet<SyncBindingId>>(new Set());
+
 	const runSync = useCallback((id: SyncBindingId) => {
+		// Synchronous, same-tick guard. Checked and set before any await/promise boundary.
+		if (inFlightRef.current.has(id)) return;
+
 		const setEntry =
 			id === "filesystem" ? setFilesystemEntry : id === "rest" ? setRestEntry : setPeerEntry;
 		const binding = resolveSyncBinding(id);
@@ -109,6 +127,17 @@ export function BulkImportSyncScreen() {
 
 		if (!unmountedRef.current) setErrorMessage("");
 
+		// Marked in flight only on the path that actually starts a call. The no-binding branch
+		// above returns synchronously and starts nothing, so it must not latch the control.
+		inFlightRef.current.add(id);
+		if (!unmountedRef.current) setInFlight(new Set(inFlightRef.current));
+		const settle = () => {
+			inFlightRef.current.delete(id);
+			// The ref is cleared unconditionally — the guard must not survive an unmount and wedge a
+			// remounted screen — while the render-facing state is only updated while mounted.
+			if (!unmountedRef.current) setInFlight(new Set(inFlightRef.current));
+		};
+
 		binding
 			.syncNow()
 			.then((report) => {
@@ -122,7 +151,8 @@ export function BulkImportSyncScreen() {
 				if (!unmountedRef.current) {
 					setEntry((prev) => ({ failed: true, report: prev.report }));
 				}
-			});
+			})
+			.finally(settle);
 	}, []);
 
 	// WR-15: all three bindings are passed. `toSyncErrorRefs` reads `errorItemIds` and nothing
@@ -163,7 +193,9 @@ export function BulkImportSyncScreen() {
 				<TransportStatusCard
 					kind="filesystem"
 					{...resolveTransportCardState(filesystemEntry)}
-					disabled={!canSync}
+					// WR-16: reads the STATE half of the in-flight guard — the ref half cannot drive
+					// a render. Overlapping presses are refused by the ref regardless.
+					disabled={!canSync || inFlight.has("filesystem")}
 					onSyncNow={() => runSync("filesystem")}
 				/>
 			</View>
@@ -172,7 +204,7 @@ export function BulkImportSyncScreen() {
 				<TransportStatusCard
 					kind="rest"
 					{...resolveTransportCardState(restEntry)}
-					disabled={!canSync}
+					disabled={!canSync || inFlight.has("rest")}
 					onSyncNow={() => runSync("rest")}
 				/>
 			</View>
@@ -191,7 +223,7 @@ export function BulkImportSyncScreen() {
 			    SHOWS. */}
 			<View style={styles.section}>
 				<ExperimentalTransportStatusCard
-					disabled={!canSync}
+					disabled={!canSync || inFlight.has("peer")}
 					onTrySync={() => runSync("peer")}
 				/>
 			</View>
