@@ -236,10 +236,17 @@ export default function RegistrationRequestApprovalScreen() {
 	// so a `useState`-only guard cannot close that gap; a ref mutation is
 	// visible to every subsequent call in the same tick. This app has already
 	// shipped double-press defects on signed writes (RejectReasonCard's own
-	// `submittingRef` doc comment carries the identical reasoning). Read
-	// directly in the Approve button's `disabled` expression below so the
-	// visual freeze tracks the ref without a redundant state variable.
+	// `submittingRef` doc comment carries the identical reasoning).
 	const submittingRef = useRef(false);
+	// WR-13: the ref is the CORRECTNESS guard; this state is the FEEDBACK. Mutating a ref
+	// schedules no render, so the previous `disabled={… || submittingRef.current}` never actually
+	// disabled the button while the ceremony was in flight — directly contradicting the comment
+	// that claimed "the visual freeze tracks the ref without a redundant state variable". On a
+	// slow device-signer path (biometric prompt, TEE round trip) the officer saw an apparently
+	// live Approve button for the whole ceremony. The two are set together, ref first, and both
+	// cleared in the same `finally`; the state is NEVER read as the guard, so the
+	// same-tick double-press case still resolves against the ref.
+	const [submitting, setSubmitting] = useState(false);
 
 	const mode: ApprovalMode =
 		read?.status === "p" ? "pending" : read?.status === "a" ? "approved" : read?.status === "r" ? "rejected" : "loading";
@@ -308,6 +315,9 @@ export default function RegistrationRequestApprovalScreen() {
 	async function handleApprove() {
 		if (submittingRef.current) return;
 		submittingRef.current = true;
+		// WR-13: set immediately after the ref, so the render pass that follows this press already
+		// shows the button disabled. Never checked as the guard — see the ref's own comment.
+		setSubmitting(true);
 		try {
 			setErrorMessage("");
 			// WR-02: re-assert the D-07 gate INSIDE the handler. Before this the gate lived
@@ -356,6 +366,9 @@ export default function RegistrationRequestApprovalScreen() {
 			setErrorMessage(err instanceof Error ? err.message : String(err));
 		} finally {
 			submittingRef.current = false;
+			// The screen navigates away on success, so this setState can land after unmount —
+			// guarded by the same `unmountedRef` discipline the load effect uses.
+			if (!unmountedRef.current) setSubmitting(false);
 		}
 	}
 
@@ -567,7 +580,9 @@ export default function RegistrationRequestApprovalScreen() {
 								icon="check"
 								backgroundColor={colors.success}
 								size="thin"
-								disabled={!gateMet || !canDecide || priorRejectionsUnavailable || submittingRef.current}
+								// WR-13: reads the STATE, not the ref — a ref mutation schedules no render, so
+								// the ref-based form never produced a visual disable while the ceremony ran.
+								disabled={!gateMet || !canDecide || priorRejectionsUnavailable || submitting}
 								onPress={handleApprove}
 							/>
 						</View>

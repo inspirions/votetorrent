@@ -537,6 +537,64 @@ describe("RegistrationRequestApprovalScreen — Group B (D-07 gate, accept cerem
 		expect(mockGoBack).toHaveBeenCalledTimes(1);
 	});
 
+	it("7b. (WR-13) Approve VISUALLY disables while the ceremony is in flight, and re-enables if it fails", async () => {
+		// The device-signer path is the slow one on real hardware (biometric prompt + TEE round
+		// trip). Stalling it here is what makes "in flight" observable at all — with every stub
+		// resolving immediately the render never lands between press and completion.
+		let releaseSigner!: () => void;
+		mockCreateDeviceSigner.mockImplementationOnce(async (_displayName: string) => {
+			await new Promise<void>((resolve) => {
+				releaseSigner = resolve;
+			});
+			return mockSignerFn;
+		});
+
+		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
+		expect(isDisabled(tr, "registration-request-approval-approve")).toBe(false);
+
+		// Fire the press but do NOT await the ceremony — it is parked inside createDeviceSigner.
+		const pressable = findPressable(tr, "registration-request-approval-approve");
+		await renderer.act(async () => {
+			pressable!.props.onPress();
+		});
+
+		// Before WR-13 the guard was a ref read directly in `disabled`. Mutating a ref schedules
+		// no render, so this assertion observed `false` — the officer saw an apparently-live
+		// Approve button for the whole ceremony, exactly contradicting the comment that claimed
+		// "the visual freeze tracks the ref".
+		// (jest's expect takes no message argument — the intent is stated here instead:
+		// Approve must render disabled while the signing ceremony is in flight.)
+		expect(isDisabled(tr, "registration-request-approval-approve")).toBe(true);
+
+		// Fail the ceremony so the screen stays mounted (the success path calls goBack()).
+		mockCompleteSignature.mockRejectedValueOnce(new Error("ceremony failed"));
+		await renderer.act(async () => {
+			releaseSigner();
+		});
+		await flushTicks(8);
+
+		expect(mockGoBack).not.toHaveBeenCalled();
+		// A failed ceremony must re-enable Approve so the officer can retry.
+		expect(isDisabled(tr, "registration-request-approval-approve")).toBe(false);
+	});
+
+	it("7c. (WR-02) handleApprove re-asserts the D-07 gate itself — a gate-unmet press writes nothing even if it reaches the handler", async () => {
+		const tr = await renderScreen();
+		// No checklist item is ticked, so the button is disabled — but `disabled` is a rendering
+		// affordance, not a boundary. Invoking the handler directly is exactly the
+		// "`disabled`-bypassing press / non-UI caller" case WR-02 names, and before the fix it
+		// wrote an ungated decision whose VerificationCid the read surface can never invert.
+		await pressAsync(tr, "registration-request-approval-approve");
+
+		expect(mockGetSignatureDigest).not.toHaveBeenCalled();
+		// No device signature may be requested for a gate-unmet decision.
+		expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+		expect(mockCompleteSignature).not.toHaveBeenCalled();
+		expect(mockGoBack).not.toHaveBeenCalled();
+		expect(exists(tr, "registration-request-approval-error")).toBe(true);
+	});
+
 	it("8. requestId scoping: with two pending 'registrant' tasks (non-matching first), the matching one is signed and completed", async () => {
 		const otherTask = taskFor({ ...PENDING_READ, requestId: "req-other-pending" });
 		const matchingTask = taskFor(PENDING_READ);
