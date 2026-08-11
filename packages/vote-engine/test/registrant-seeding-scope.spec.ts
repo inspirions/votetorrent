@@ -651,4 +651,62 @@ describe('registrant task seeding — rollback recovery, skip telemetry and pass
       'the shared handle must be back in autocommit after both overlapping passes complete'
     ).to.be.true
   })
+
+  it('WR-23: a failure of the work-set COLLECTION query is reported as an aborted pass, not rethrown out of getRequestedSignatures', async () => {
+    const auth = await setup()
+    await submitPendingRequest(auth)
+
+    // Fault the seed pass's own collection `eval` — identified by the CR-01 scoping predicate's
+    // Officer/CurrentAdmin join, which no other query in this engine issues. Every OTHER `eval` on
+    // this handle (including getRequestedSignatures' own base task-row read, further down the same
+    // call) is left untouched, so this test isolates exactly the statement WR-23 named.
+    const dbHandle = auth.ctx.db as unknown as {
+      eval: (sql: string, params?: Record<string, unknown>) => AsyncIterable<Record<string, unknown>>
+    }
+    const origEval = dbHandle.eval.bind(auth.ctx.db)
+    dbHandle.eval = (sql: string, params?: Record<string, unknown>) => {
+      if (sql.includes('from RegistrationRequest R') && sql.includes('join CurrentAdmin CA')) {
+        throw new Error('forced work-set collection fault')
+      }
+      return origEval(sql, params)
+    }
+
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    try {
+      let rejected = false
+      let rejectionMessage = ''
+      let tasks: SignatureTask[] = []
+      try {
+        tasks = await engine.getRequestedSignatures(true)
+      } catch (err) {
+        rejected = true
+        rejectionMessage = err instanceof Error ? err.message : String(err)
+      }
+
+      // Pre-fix this rejected: the error escaped runRegistrantSeedPass, rejected the seedPassLocks
+      // chain's `next`, and getRequestedSignatures' outer catch rethrew it — CR-01's blank-inbox
+      // failure mode for this one call.
+      expect(
+        rejected,
+        `a collection-query failure must not reject getRequestedSignatures (got: ${rejectionMessage})`
+      ).to.be.false
+      expect(tasks, 'the call must still return a task array, not undefined').to.be.an('array')
+
+      // And it must be REPORTED, not silently swallowed — the CR-04 distinction.
+      const outcome = lastSeedOutcome(engine)
+      expect(outcome, 'the engine must expose a tally even when collection failed').to.not.be.undefined
+      expect(outcome!.aborted, 'a collection failure is an aborted pass').to.be.true
+      expect(outcome!.considered, 'a partial work set must not be reported as if it were the whole set').to.equal(0)
+      expect(outcome!.seeded, 'nothing can have been seeded from a work set that was never collected').to.equal(0)
+
+      // The mutex is not wedged: with the fault removed, the next pass runs normally.
+      dbHandle.eval = origEval
+      await engine.getRequestedSignatures(true)
+      const recovered = lastSeedOutcome(engine)
+      expect(recovered!.aborted, 'the following pass must run normally once the fault is removed').to.be.false
+      expect(recovered!.seeded, 'the pending request seeds on the recovered pass').to.equal(1)
+    } finally {
+      dbHandle.eval = origEval
+    }
+  })
 })

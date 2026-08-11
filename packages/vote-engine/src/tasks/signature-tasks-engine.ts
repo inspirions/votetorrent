@@ -378,15 +378,24 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
    * that escapes its `try` — a PER-ROW error escaping this method would re-brick the whole Tasks
    * inbox for every signature type, which is CR-01 verbatim (round 1's closed defect).
    *
-   * Scope of that guarantee, stated precisely (WR-23): every failure mode INSIDE the per-row loop
-   * below is captured into the tally and never re-thrown. The work-set collection query above the
-   * loop is deliberately NOT wrapped, and an error there DOES propagate. That is intentional, not
-   * an oversight: the query is fully parameterized and reads no requester-chosen input, so it is
-   * not reachable from D-02's unauthenticated intake; and if the handle cannot be read at all,
-   * every other ceremony sharing it is equally broken — a loud failure is the correct response,
-   * where a silent one would show an empty inbox and hide a dead database. CR-01's isolation
-   * requirement is about per-row WRITES driven by attacker-chosen rows, and that is what this
-   * method isolates.
+   * Scope of that guarantee (WR-23): the guarantee is now METHOD-WIDE, and the doc comment can say
+   * so honestly. Round 3 narrowed this paragraph to cover only the per-row loop, because the
+   * work-set collection query below sat outside every try/catch — an error there propagated out of
+   * this method, rejected the `seedPassLocks` chain's `next`, and was rethrown by
+   * `getRequestedSignatures`'s outer `catch`: the CR-01 failure mode (a blank Tasks inbox for EVERY
+   * signature type), for that one call. Narrower than CR-04 was — `seedPassLocks` stores
+   * `next.catch(() => {})`, so the mutex was never poisoned and the NEXT caller started clean — but
+   * real, and a reader who trusted the "never rejects" claim would not have expected it.
+   *
+   * The collection step is now inside the same `try` as the loop, and a failure there is reported
+   * as `aborted: true` with a zeroed tally instead of escaping. Two things make that the right
+   * trade rather than a silent swallow: the outcome is OBSERVABLE
+   * (`SignatureTasksEngine.lastSeedOutcome` distinguishes `aborted: true` from an ordinary empty
+   * pass, which is precisely the distinction CR-04 existed to restore), and the failure is not
+   * hidden from the rest of the app — a handle so broken that this parameterized read fails will
+   * fail the caller's own subsequent reads in `getRequestedSignatures`, loudly, on their own merits.
+   * What must NOT happen is this one best-effort seeding step taking down the display of admin,
+   * ballot, network and election tasks that have nothing to do with registration.
    */
   private async runRegistrantSeedPass (ctx: EngineContext): Promise<RegistrantSeedOutcome> {
     const userId = ctx.user!.id
@@ -411,27 +420,45 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // Scope the work set to authorities the signed-in :userId actually serves BEFORE any write
     // is attempted, joining Officer to CurrentAdmin so a request is only considered when the
     // officer serves the authority's CURRENT administration.
-    for await (const row of ctx.db.eval(
-      `select R.Id, R.AuthorityId, R.RequesterKey, R.IssuerType, R.BridgeId, R.PayloadCid, R.SubmittedAt
-         from RegistrationRequest R
-         where R.Status = 'p'
-           and not exists (select 1 from RegistrantSignatureTaskExtension E where E.RequestId = R.Id)
-           and exists (
-             select 1 from Officer O
-               join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
-               where O.AuthorityId = R.AuthorityId and O.UserId = :userId
-           )`,
-      { userId }
-    )) {
-      pendingRows.push({
-        Id: row.Id as string,
-        AuthorityId: row.AuthorityId as string,
-        RequesterKey: row.RequesterKey as string,
-        IssuerType: row.IssuerType as string,
-        BridgeId: row.BridgeId as string | null,
-        PayloadCid: row.PayloadCid as string,
-        SubmittedAt: row.SubmittedAt as string,
-      })
+    //
+    // WR-23: this collection step is wrapped. An `eval` failure here used to propagate out of the
+    // method and be rethrown by `getRequestedSignatures`'s outer catch — CR-01's blank-inbox
+    // failure mode, for that one call. It is reported instead: `aborted: true` over a zeroed tally,
+    // partially collected rows discarded (a partial work set would seed an arbitrary prefix and
+    // report `considered` as if that prefix were the whole set — a worse lie than reporting
+    // nothing). Nothing is logged: every bound value in the query below is fine, but the ROWS this
+    // loop pushes carry request identifiers, and an error object can carry a row with it.
+    try {
+      for await (const row of ctx.db.eval(
+        `select R.Id, R.AuthorityId, R.RequesterKey, R.IssuerType, R.BridgeId, R.PayloadCid, R.SubmittedAt
+           from RegistrationRequest R
+           where R.Status = 'p'
+             and not exists (select 1 from RegistrantSignatureTaskExtension E where E.RequestId = R.Id)
+             and exists (
+               select 1 from Officer O
+                 join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
+                 where O.AuthorityId = R.AuthorityId and O.UserId = :userId
+             )`,
+        { userId }
+      )) {
+        pendingRows.push({
+          Id: row.Id as string,
+          AuthorityId: row.AuthorityId as string,
+          RequesterKey: row.RequesterKey as string,
+          IssuerType: row.IssuerType as string,
+          BridgeId: row.BridgeId as string | null,
+          PayloadCid: row.PayloadCid as string,
+          SubmittedAt: row.SubmittedAt as string,
+        })
+      }
+    } catch {
+      return {
+        considered: 0,
+        seeded: 0,
+        skipped: 0,
+        aborted: true,
+        handleInAutocommit: ctx.db.getAutocommit(),
+      }
     }
 
     let seeded = 0
