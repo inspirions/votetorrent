@@ -1,5 +1,5 @@
 /**
- * registrant-seeding-scope.spec.ts — Phase 48 Plan 30 (CR-01)
+ * registrant-seeding-scope.spec.ts — Phase 48 Plan 30 (CR-01) + Plan 33 (CR-04)
  *
  * `seedRegistrantSignatureTasks` (signature-tasks-engine.ts) pulls EVERY pending
  * `RegistrationRequest` in the local DB with no authority predicate, and isolates only the
@@ -9,7 +9,8 @@
  * try, and is rethrown — permanently disabling `TasksScreen` for that officer, for ALL signature
  * types, re-firing on every mount because the offending row stays `'p'`.
  *
- * This suite proves three things against the REAL Quereus schema and the REAL engine:
+ * The first `describe` below (CR-01) proves three things against the REAL Quereus schema and the
+ * REAL engine:
  *   1. scope   — a request addressed to an authority the signed-in officer does not serve is
  *                never seeded, and never blocks a request at the officer's own authority.
  *   2. isolation — a per-row failure never aborts the batch; the failure is transient, not
@@ -17,8 +18,29 @@
  *   3. inbox availability — getRequestedSignatures(true) resolves and still returns every other
  *                signature type's tasks while an un-seedable request is pending.
  *
- * NOT proven here: that TasksScreen renders on a device, or that the new scoping predicate
- * matches a real device's Officer/CurrentAdmin history — both are 48-32's concern.
+ * The second `describe` below (CR-04) proves the fix for a defect round 2's own CR-01 fix
+ * introduced: the per-row `try { ... } catch { continue }` envelope also swallows a failed
+ * `ROLLBACK`, which — because Quereus's transaction model is flat and handle-global — leaves the
+ * shared `Database` handle mid-transaction for the rest of the session, with zero telemetry. It
+ * proves four things against the SAME real schema and real engine:
+ *   4. recovery  — a failed `ROLLBACK` gets one bounded recovery attempt, and the shared handle is
+ *                usable again afterwards (a subsequent `BEGIN` on it succeeds).
+ *   5. telemetry — every pass returns an identifier-free tally that distinguishes a skipped row
+ *                from an empty inbox, and the ORDINARY per-row skip (not the aborted case) is
+ *                proven to recover on the next pull.
+ *   6. the residual — a DOUBLY-unrecoverable `ROLLBACK` (the row's own ROLLBACK and the engine's
+ *                single bounded recovery attempt both fail) stops the pass instead of continuing
+ *                onto a handle whose transaction state is unknown; that stuck state is bounded and
+ *                telemetered but explicitly NOT self-healing — no pull recovers it, and none is
+ *                asserted to.
+ *   7. serialization — two overlapping `getRequestedSignatures(true)` calls on the SAME handle
+ *                (the badge and the screen's real shape) seed each pending request exactly once,
+ *                never twice and never zero times.
+ *
+ * NOT proven here: that TasksScreen renders on a device, that the new scoping predicate matches a
+ * real device's Officer/CurrentAdmin history (both 48-32's concern), that a `ROLLBACK` fails in
+ * practice on a real LevelDB-backed handle (the CR-04 tests force it), or that the tally has any
+ * UI consumer this round — it does not, by design.
  */
 
 import { expect } from 'chai'
@@ -337,5 +359,296 @@ describe('registrant task seeding — authority scope and per-row isolation (CR-
       'the ballot signature task must still be visible while a foreign-authority request sits unseedable'
     ).to.not.be.undefined
     expect(ballotTask?.ballot.proposed.id).to.equal(ballotId)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CR-04 — rollback recovery, skip telemetry and pass serialization.
+// ---------------------------------------------------------------------------
+
+/**
+ * The tally is a new public field this suite must read BEFORE it exists (Task 1 is RED-first), so
+ * read it structurally rather than through an import that would not compile pre-fix. This makes
+ * every RED failure a behavioural chai assertion (`expected undefined to not be undefined`), never
+ * a TypeScript compile error.
+ */
+type SeedOutcomeProbe = {
+  considered: number
+  seeded: number
+  skipped: number
+  aborted: boolean
+  handleInAutocommit: boolean
+}
+
+function lastSeedOutcome (engine: SignatureTasksEngine): SeedOutcomeProbe | undefined {
+  return (engine as unknown as { lastSeedOutcome?: SeedOutcomeProbe }).lastSeedOutcome
+}
+
+interface SeedFaultOptions {
+  failFirstAdminSigningInsert: boolean
+  rollbackFailures: number
+}
+
+/**
+ * A two-stage fault injector, written once and reused across Tests 4, 5 and 6 — extends the
+ * existing one-shot idiom above (the CR-01 "isolates a per-row failure" test) into a reusable,
+ * two-axis form: it can fault the FIRST `insert into AdminSigning` (the ordinary per-row failure
+ * CR-01 already exercises) and/or the first N `ROLLBACK` calls (the CR-04 recovery path), in any
+ * combination, so a single helper drives every fault shape this describe block needs.
+ */
+function installSeedFaultInjector (
+  auth: TestAuthorityContext,
+  opts: SeedFaultOptions
+): { restore: () => Promise<void> } {
+  const dbHandle = auth.ctx.db as unknown as { exec: (sql: string, params?: Record<string, unknown>) => Promise<unknown> }
+  const origExec = dbHandle.exec.bind(auth.ctx.db)
+  let adminSigningArmed = opts.failFirstAdminSigningInsert
+  let rollbackFailuresRemaining = opts.rollbackFailures
+  let restored = false
+  dbHandle.exec = async (sql: string, params?: Record<string, unknown>): Promise<unknown> => {
+    if (adminSigningArmed && sql.includes('insert into AdminSigning')) {
+      adminSigningArmed = false
+      throw new Error('forced per-row seeding fault')
+    }
+    if (rollbackFailuresRemaining > 0 && sql.trim() === 'ROLLBACK') {
+      rollbackFailuresRemaining--
+      throw new Error('forced rollback fault')
+    }
+    return origExec(sql, params)
+  }
+  return {
+    restore: async (): Promise<void> => {
+      if (restored) return
+      restored = true
+      dbHandle.exec = origExec
+      try {
+        await origExec('ROLLBACK')
+      } catch {
+        // Best-effort — a genuinely stuck handle (Test 6's doubly-unrecoverable case) must never
+        // leak into another assertion in the same test.
+      }
+    },
+  }
+}
+
+/**
+ * Test 7 needs two logically-concurrent passes to genuinely INTERLEAVE their BEGIN/COMMIT
+ * envelopes on the SAME handle, not merely be invoked concurrently. Empirically, without this
+ * forcer, Node's microtask scheduling combined with this engine's promise-only (no real I/O)
+ * async chain lets the first-invoked pass run to full completion before the second pass's
+ * continuation advances past its own first read — so the race Test 7 exists to catch never
+ * manifests, and the test would pass whether or not the fix is applied. Forcing a genuine
+ * macrotask-level event-loop yield before every `BEGIN` gives the OTHER pass a real opportunity
+ * to interleave, reproducing the concurrency the badge (`useTaskCount.fetchCount`) and the screen
+ * (`TasksScreen`'s focus effect) can trigger for real. This is a TEST-HARNESS timing aid only —
+ * it does not change what SQL either pass issues.
+ */
+function installBeginYieldForcer (auth: TestAuthorityContext): { restore: () => void } {
+  const dbHandle = auth.ctx.db as unknown as { exec: (sql: string, params?: Record<string, unknown>) => Promise<unknown> }
+  const origExec = dbHandle.exec.bind(auth.ctx.db)
+  dbHandle.exec = async (sql: string, params?: Record<string, unknown>): Promise<unknown> => {
+    if (sql === 'BEGIN') {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    return origExec(sql, params)
+  }
+  return {
+    restore: () => {
+      dbHandle.exec = origExec
+    },
+  }
+}
+
+describe('registrant task seeding — rollback recovery, skip telemetry and pass serialization (CR-04)', () => {
+  it('leaves the shared Database handle usable after a failed ROLLBACK', async () => {
+    const auth = await setup()
+    await submitPendingRequest(auth)
+    await submitPendingRequest(auth)
+    await submitPendingRequest(auth)
+
+    const injector = installSeedFaultInjector(auth, { failFirstAdminSigningInsert: true, rollbackFailures: 1 })
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    try {
+      let rejected = false
+      let rejectionMessage = ''
+      try {
+        await engine.getRequestedSignatures(true)
+      } catch (err) {
+        rejected = true
+        rejectionMessage = err instanceof Error ? err.message : String(err)
+      }
+      expect(
+        rejected,
+        `getRequestedSignatures(true) must resolve even when a ROLLBACK fails (got: ${rejectionMessage})`
+      ).to.be.false
+
+      // With the injector restored, the shared handle's actual state — not the fault harness's —
+      // is what the recovery path must leave usable.
+      await injector.restore()
+
+      expect(
+        auth.ctx.db.getAutocommit(),
+        'the shared Database handle must be back in autocommit after the engine\'s own bounded ROLLBACK recovery'
+      ).to.be.true
+      let beginThrew = false
+      try {
+        await auth.ctx.db.exec('BEGIN')
+      } catch {
+        beginThrew = true
+      }
+      expect(
+        beginThrew,
+        'db.exec("BEGIN") on the SAME handle must succeed after a failed ROLLBACK — the verifier\'s literal requirement'
+      ).to.be.false
+      await auth.ctx.db.exec('ROLLBACK')
+
+      const outcome = lastSeedOutcome(engine)
+      expect(outcome, 'the engine must expose a tally after the pass').to.not.be.undefined
+      expect(
+        outcome!.aborted,
+        'a failed ROLLBACK stops the pass even when the bounded recovery attempt itself succeeds'
+      ).to.be.true
+      expect(
+        outcome!.handleInAutocommit,
+        'the tally must report the handle is back in autocommit when the bounded recovery succeeded'
+      ).to.be.true
+    } finally {
+      await injector.restore()
+    }
+  })
+
+  it('reports an identifier-free tally that distinguishes a skipped row from an empty inbox', async () => {
+    const auth = await setup()
+    const { requestId: id1 } = await submitPendingRequest(auth)
+    const { requestId: id2 } = await submitPendingRequest(auth)
+
+    const injector = installSeedFaultInjector(auth, { failFirstAdminSigningInsert: true, rollbackFailures: 0 })
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    try {
+      await engine.getRequestedSignatures(true)
+
+      const outcome = lastSeedOutcome(engine)
+      expect(outcome, 'the engine must expose a tally after the pass').to.not.be.undefined
+      expect(outcome, 'the tally must be exactly this shape after one ordinary per-row failure among two considered rows').to.deep.equal({
+        considered: 2,
+        seeded: 1,
+        skipped: 1,
+        aborted: false,
+        handleInAutocommit: true,
+      })
+
+      const serialized = JSON.stringify(outcome)
+      expect(serialized, 'the tally must never carry the first request id — D-02 intake is unauthenticated').to.not.include(id1)
+      expect(serialized, 'the tally must never carry the second request id — D-02 intake is unauthenticated').to.not.include(id2)
+      for (const [field, value] of Object.entries(outcome!)) {
+        expect(['number', 'boolean'], `tally field "${field}" must be a number or boolean, never a string identifier`).to.include(typeof value)
+      }
+
+      await injector.restore()
+
+      // Second, unfaulted pull — the SOLE evidence in this suite that recovery happens after an
+      // ORDINARY per-row skip (aborted === false). It says NOTHING about Test 6's aborted (break)
+      // path — that path's non-recovery is asserted separately, and deliberately not here.
+      await engine.getRequestedSignatures(true)
+      const secondOutcome = lastSeedOutcome(engine)
+      expect(secondOutcome!.skipped, 'the row skipped on the first pull must be retried and seeded on this unfaulted pull').to.equal(0)
+      expect(secondOutcome!.seeded, 'exactly the one previously-skipped row seeds on this pull').to.equal(1)
+
+      expect(await extensionCount(auth.ctx, id1), 'request 1 must have exactly one extension row after both pulls — the lock did not wedge').to.equal(1)
+      expect(await extensionCount(auth.ctx, id2), 'request 2 must have exactly one extension row after both pulls — the lock did not wedge').to.equal(1)
+    } finally {
+      await injector.restore()
+    }
+  })
+
+  it('stops the pass instead of continuing when the ROLLBACK cannot be recovered', async () => {
+    const auth = await setup()
+    const { requestId: id1 } = await submitPendingRequest(auth)
+    const { requestId: id2 } = await submitPendingRequest(auth)
+    const { requestId: id3 } = await submitPendingRequest(auth)
+
+    const injector = installSeedFaultInjector(auth, { failFirstAdminSigningInsert: true, rollbackFailures: 2 })
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    try {
+      let rejected = false
+      let rejectionMessage = ''
+      try {
+        await engine.getRequestedSignatures(true)
+      } catch (err) {
+        rejected = true
+        rejectionMessage = err instanceof Error ? err.message : String(err)
+      }
+      expect(
+        rejected,
+        `getRequestedSignatures(true) must resolve even when BOTH the row's ROLLBACK and the recovery attempt fail (got: ${rejectionMessage})`
+      ).to.be.false
+
+      const outcome = lastSeedOutcome(engine)
+      expect(outcome, 'the engine must expose a tally after the pass').to.not.be.undefined
+      expect(outcome!.aborted, 'a doubly-unrecoverable ROLLBACK stops the pass').to.be.true
+      expect(
+        outcome!.handleInAutocommit,
+        'the handle must be reported mid-transaction — the residual this plan bounds and telemeters rather than hides'
+      ).to.be.false
+      expect(outcome!.considered, 'all three pending requests were in the work set').to.equal(3)
+      expect(outcome!.seeded, 'no row committed before the abort').to.equal(0)
+      expect(
+        outcome!.seeded + outcome!.skipped,
+        'seeded + skipped must be strictly less than considered, proving the remaining rows were never attempted on a handle whose transaction state is unknown'
+      ).to.be.lessThan(outcome!.considered)
+
+      const total = (await extensionCount(auth.ctx, id1)) + (await extensionCount(auth.ctx, id2)) + (await extensionCount(auth.ctx, id3))
+      expect(total, 'no RegistrantSignatureTaskExtension row may exist for any of the three requests').to.equal(0)
+    } finally {
+      // This cleanup IS the external reset the must-haves name: the engine does not self-heal from
+      // a doubly-unrecoverable ROLLBACK, so a real caller would remain stuck until something
+      // OUTSIDE the seed pass clears the transaction or the handle is replaced. Deliberately NOT
+      // asserting a recovering second pull here — there is nothing in the code that recovers it.
+      await injector.restore()
+    }
+  })
+
+  it('serializes concurrent seed passes on the same handle', async () => {
+    const auth = await setup()
+    const { requestId: id1 } = await submitPendingRequest(auth)
+    const { requestId: id2 } = await submitPendingRequest(auth)
+    const { requestId: id3 } = await submitPendingRequest(auth)
+
+    // The badge (useTaskCount.fetchCount) and the screen (TasksScreen's focus effect) are exactly
+    // this shape — two independent SignatureTasksEngine instances over the SAME ctx.db.
+    const e1 = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    const e2 = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+
+    // Force a genuine event-loop interleaving opportunity around every BEGIN — see the forcer's
+    // doc comment for why this is necessary for the race to manifest at all in this harness.
+    const forcer = installBeginYieldForcer(auth)
+    let rejected = false
+    let rejectionMessage = ''
+    try {
+      try {
+        await Promise.all([e1.getRequestedSignatures(true), e2.getRequestedSignatures(true)])
+      } catch (err) {
+        rejected = true
+        rejectionMessage = err instanceof Error ? err.message : String(err)
+      }
+    } finally {
+      forcer.restore()
+    }
+    expect(rejected, `both overlapping seed passes must resolve (got: ${rejectionMessage})`).to.be.false
+
+    for (const id of [id1, id2, id3]) {
+      const count = await extensionCount(auth.ctx, id)
+      expect(
+        count,
+        `request ${id} must have EXACTLY ONE extension row — a duplicate row or a row left unseeded are both failure directions, since RequestId carries only a non-unique index`
+      ).to.equal(1)
+    }
+
+    expect(lastSeedOutcome(e1)?.aborted, 'engine 1\'s pass must not abort').to.not.equal(true)
+    expect(lastSeedOutcome(e2)?.aborted, 'engine 2\'s pass must not abort').to.not.equal(true)
+    expect(
+      auth.ctx.db.getAutocommit(),
+      'the shared handle must be back in autocommit after both overlapping passes complete'
+    ).to.be.true
   })
 })
