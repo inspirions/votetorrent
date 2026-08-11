@@ -15,7 +15,8 @@ import 'reflect-metadata'
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import { createTestNetwork, addTestAuthority, addSiblingAuthority, makeTestSignCallback } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, addTestElection, addSiblingAuthority, makeTestSignCallback, makeElectionInit, seedElectionSigning } from './fixtures/test-context.js'
+import { ElectionsEngine, peekNextElectionTid } from '../src/elections/elections-engine.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
 import { digestToBytes } from '../src/utils.js'
@@ -67,18 +68,55 @@ function makeCallbackSigner (keyPair: TestKeyPair): (digest: Uint8Array) => Prom
   }
 }
 
-function makeTestPayload (authorityId: string, registrantId?: string, payloadAuthorityId?: string): RegisterInit {
+function makeTestPayload (
+  authorityId: string,
+  registrantId?: string,
+  payloadAuthorityId?: string,
+  payloadElectionId?: string
+): RegisterInit {
   return {
     registrant: {
       id: registrantId ?? crypto.randomUUID(),
       authorityId: payloadAuthorityId ?? authorityId,
       expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000),
     },
+    // WR-20: also requester-chosen, and the switch that decides whether field policy runs at all.
+    // Spread rather than assigned: an explicit `electionId: undefined` key survives in the
+    // in-memory object but is dropped by JSON.stringify, so the payload round-trip assertion above
+    // would fail on a key the submitter never sent.
+    ...(payloadElectionId === undefined ? {} : { electionId: payloadElectionId }),
     private: {
       expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000),
       details: [],
     },
   }
+}
+
+/** The single Election row a fresh `addTestElection(auth)` seeded for this authority. */
+async function resolveOneElectionId (ctx: EngineContext, authorityId: string): Promise<string> {
+  const row = await ctx.db
+    .prepare('select Id from Election where AuthorityId = :authorityId limit 1')
+    .get({ authorityId })
+  if (!row) throw new Error('resolveOneElectionId: no Election row for authority')
+  return row.Id as string
+}
+
+/**
+ * WR-20: adds a SECOND election at the same authority and returns its id. The second election
+ * declares no `ElectionRegistrationField` rows — it is the "policy-free election of the same
+ * authority" a requester could otherwise steer at to evade the first election's policy.
+ */
+async function addSecondElectionId (auth: TestAuthority): Promise<string> {
+  // Deliberately NOT a second `addTestElection(auth)` call: `makeElectionInit`'s default id is the
+  // fixed literal `'election-1'`, so a second call collides on `Election`'s primary key. Only the
+  // `Election` row itself is needed here (the WR-20 gate joins `ElectionRegistrationField` to
+  // `Election`), so the `ElectionRevision` half `addTestElection` also seeds is skipped.
+  const electionsEngine = new ElectionsEngine(auth.ctx)
+  const init = makeElectionInit({ id: `election-policy-free-${crypto.randomUUID()}`, authorityId: auth.authority.id })
+  const tid = await peekNextElectionTid(auth.ctx.db)
+  const { nonce } = await seedElectionSigning(auth.ctx, auth.authority.id, init, auth.user, tid)
+  await electionsEngine.createElection(init, { signingNonce: nonce })
+  return init.election.id
 }
 
 /** Submits one pending RegistrationRequest through the REAL engine method (D-02 intake, 48-07). */
@@ -93,6 +131,8 @@ async function submitPendingRequest (
      * payload.registrant.authorityId names a DIFFERENT authority — the adversarial shape
      * finalizeRegistrantApproval must refuse. */
     payloadAuthorityId?: string
+    /** WR-20: lets a caller set (or omit) the requester-chosen `payload.electionId`. */
+    payloadElectionId?: string
   }
 ): Promise<{ requestId: string; requester: TestKeyPair; init: RegistrationRequestInit }> {
   const requester = opts?.requesterKey ?? randomTestKeyPair()
@@ -100,7 +140,7 @@ async function submitPendingRequest (
   const init: RegistrationRequestInit = {
     id: crypto.randomUUID(),
     authorityId: auth.authority.id,
-    payload: makeTestPayload(auth.authority.id, opts?.registrantId, opts?.payloadAuthorityId),
+    payload: makeTestPayload(auth.authority.id, opts?.registrantId, opts?.payloadAuthorityId, opts?.payloadElectionId),
     submittedAt: toIsoZDatetime(Date.now()),
     issuerType: opts?.issuerType,
     bridgeId: opts?.bridgeId,
@@ -698,6 +738,77 @@ describe('registrant approval ceremony', () => {
 
     const reqRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
     expect(reqRow!.Status, 'a refused request must remain pending').to.equal('p')
+  })
+
+  it('WR-20: an authority that declares registration field policy refuses a payload that omits electionId, and one that names a policy-free election of the same authority', async () => {
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    // Two elections at the SAME authority. Only the first declares a field policy — that asymmetry
+    // is the whole point: a requester who may name any election of the authority can otherwise
+    // steer at the policy-free one and evade enforcement entirely.
+    const elec = await addTestElection(auth)
+    const governedElectionId = await resolveOneElectionId(auth.ctx, auth.authority.id)
+    const regEngine = new RegistrationEngine(auth.ctx)
+    await regEngine.addElectionRegistrationField(
+      { electionId: governedElectionId, fieldName: 'district', tier: 'public', requirement: 'required' },
+      makeTestSignCallback(auth.user)
+    )
+    void elec
+
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+
+    // Variant A — payload omits electionId entirely. Pre-fix, register()'s
+    // `if (init.electionId)` guard meant validateFieldPolicy simply never ran, and D-09 records
+    // there is no schema CHECK backstop: the submitter opted out of the whole policy by leaving a
+    // field blank.
+    const { requestId: requestIdA } = await submitPendingRequest(auth)
+    await engine.getRequestedSignatures(true)
+    let messageA: string | undefined
+    try {
+      await acceptRequest(engine, auth, requestIdA)
+    } catch (err) {
+      messageA = (err as Error).message
+    }
+    expect(messageA, 'a payload omitting electionId must be refused while the authority declares field policy').to.not.be.undefined
+    expect(messageA).to.include('names no electionId')
+
+    // No signature spent — this gate runs on the pre-sign side, like every other refusal here.
+    const countsA = await signatureRowCounts(auth, requestIdA)
+    expect(countsA.officer, 'the omission refusal must not spend the officer signature').to.equal(0)
+
+    const statusA = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestIdA })
+    expect(statusA!.Status, 'a refused request stays pending').to.equal('p')
+
+    // Variant B — payload names a REAL election of the SAME authority that declares no policy.
+    const policyFreeElectionId = await addSecondElectionId(auth)
+    expect(policyFreeElectionId, 'the second election must be distinct').to.not.equal(governedElectionId)
+    const { requestId: requestIdB } = await submitPendingRequest(auth, { payloadElectionId: policyFreeElectionId })
+    await engine.getRequestedSignatures(true)
+    let messageB: string | undefined
+    try {
+      await acceptRequest(engine, auth, requestIdB)
+    } catch (err) {
+      messageB = (err as Error).message
+    }
+    expect(messageB, 'a payload steering at a policy-free election of the same authority must be refused').to.not.be.undefined
+    expect(messageB).to.include('declares no registration field policy')
+
+    // Variant C — the payload that names the governed election is NOT refused by this gate. It
+    // still has to satisfy the policy itself (register()'s validateFieldPolicy owns that), and the
+    // fixture payload supplies no `district`, so the error that DOES surface must come from the
+    // field-policy validator rather than from this gate — proving the gate is not simply refusing
+    // everything.
+    const { requestId: requestIdC } = await submitPendingRequest(auth, { payloadElectionId: governedElectionId })
+    await engine.getRequestedSignatures(true)
+    let messageC: string | undefined
+    try {
+      await acceptRequest(engine, auth, requestIdC)
+    } catch (err) {
+      messageC = (err as Error).message
+    }
+    expect(messageC, 'the governed-election payload still fails the policy it now cannot evade').to.not.be.undefined
+    expect(messageC, 'and it fails on the POLICY, not on this gate').to.not.include('declares no registration field policy')
+    expect(messageC, 'and it fails on the POLICY, not on this gate').to.not.include('names no electionId')
   })
 
   it('CR-03: refuses an approval whose payload reuses an existing Registrant id, creating nothing and leaving the request pending', async () => {

@@ -1188,6 +1188,10 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
    *  - CR-03 (T-48-31-02): init.registrant.id is also requester-chosen. register() is unconditional
    *    (see finalizeRegistrantApproval's own comment for why the old convergence guard is gone
    *    rather than merely relocated) — refuse the id collision here, exactly like CR-02 above.
+   *  - WR-20: `init.electionId` is the OTHER requester-chosen, authority-scoped payload field, and
+   *    it decides whether `validateFieldPolicy` runs at all. See the inline comment at the check
+   *    itself for what is closed (omission bypass; steering at a policy-free election of the same
+   *    authority) and what is not (choosing among several policy-bearing elections);
    *  - WR-01: no signed-in officer. `RegistrationRequest.DecisionValid` accepts a null
    *    DecidingOfficerUserId and the DG-2 digest simply binds `null`, so an unattributable APPROVAL
    *    — the more consequential of the two decisions — would otherwise be writable while
@@ -1262,6 +1266,62 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       throw new Error(
         `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} payload registers under authority ${String(init.registrant?.authorityId)}, not the addressed authority ${extRow.AuthorityId}`
       )
+    }
+
+    // WR-20: `registrant.authorityId` was not the only requester-chosen, authority-scoped field in
+    // the payload. `electionId` is the other, and it is the switch that decides whether field
+    // policy is enforced AT ALL: `RegistrationEngine.register` runs `validateFieldPolicy` only
+    // `if (init.electionId)`, and D-09 records that there is NO schema CHECK backstop — so that
+    // call is the entire enforcement. An unauthenticated submitter therefore chose both WHETHER a
+    // policy applied (omit the field and none runs) and WHICH one did (name a laxer election of the
+    // same authority), with the reviewing officer unable to see either choice: the approval screen
+    // renders the payload, not the policy decision.
+    //
+    // What this gate decides authority-side, from data that already exists rather than an invented
+    // "governing election" concept: the set of the ADDRESSED authority's elections that actually
+    // declare a field policy (`ElectionRegistrationField` rows). If that set is empty there is no
+    // policy at this authority and nothing to evade. If it is NOT empty, then a payload that names
+    // no election, or that names an election of this authority carrying no policy, is refused —
+    // closing both the omission bypass and the "steer at the policy-less sibling election" half of
+    // the selection bypass.
+    //
+    // RESIDUAL, stated rather than glossed: when the authority has MORE THAN ONE policy-bearing
+    // election, the requester still chooses which of them governs. Closing that needs a genuine
+    // governing-election concept — a per-request column, or a defined "currently open for
+    // registration" election — which is a schema and product decision, not a code-review fix. This
+    // gate removes the two evasions that need no election-selection semantics at all; it does not
+    // claim to close the class.
+    //
+    // Placed in this gate (not in `register()`) on purpose: it runs pre-`sign()` at the
+    // `completeSignature` call site, so a payload that will be refused never spends the officer's
+    // header signature (WR-19's ordering). `register()`'s own election-ownership check is
+    // unchanged and still runs — this is an additional, narrower gate, not a replacement.
+    const policyBearingElections = await ctx.db
+      .prepare(
+        `select count(*) as n from ElectionRegistrationField F
+           join Election E on E.Id = F.ElectionId
+           where E.AuthorityId = :authorityId`
+      )
+      .get({ authorityId: extRow.AuthorityId })
+    if (Number(policyBearingElections?.n ?? 0) > 0) {
+      if (!init.electionId) {
+        throw new Error(
+          `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} names no electionId, but authority ${extRow.AuthorityId} declares registration field policy — a payload may not opt out of the policy by omission`
+        )
+      }
+      const governedElection = await ctx.db
+        .prepare(
+          `select 1 as x from ElectionRegistrationField F
+             join Election E on E.Id = F.ElectionId
+             where E.AuthorityId = :authorityId and F.ElectionId = :electionId
+             limit 1`
+        )
+        .get({ authorityId: extRow.AuthorityId, electionId: init.electionId })
+      if (!governedElection) {
+        throw new Error(
+          `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} names election ${String(init.electionId)}, which declares no registration field policy at authority ${extRow.AuthorityId} — refusing a payload that selects a policy-free election while the authority declares one`
+        )
+      }
     }
 
     const existingRegistrant = await ctx.db
