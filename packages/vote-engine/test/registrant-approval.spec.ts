@@ -811,6 +811,85 @@ describe('registrant approval ceremony', () => {
     expect(messageC, 'and it fails on the POLICY, not on this gate').to.not.include('names no electionId')
   })
 
+  it('WR-05: a finalize failure AFTER the acceptability gate leaves the accept RETRYABLE — the retry completes instead of colliding on OfficerSignature PK', async () => {
+    const auth = await setup()
+    const { requestId, init } = await submitPendingRequest(auth)
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    // Force a failure INSIDE finalizeRegistrantApproval, strictly AFTER the acceptability gate has
+    // passed and after signingEngine.sign() has already committed this officer's header signature.
+    // This is the failure class 48-34 explicitly left open: the gate cannot foresee a register()
+    // CHECK failure or a transient storage error, so no amount of pre-sign refusal reaches it.
+    const registerProto = RegistrationEngine.prototype as unknown as {
+      register: (init: RegisterInit, sign: unknown) => Promise<void>
+    }
+    const originalRegister = registerProto.register
+    let faulted = false
+    registerProto.register = async function faultingRegister (this: RegistrationEngine, ...args: [RegisterInit, unknown]) {
+      if (!faulted) {
+        faulted = true
+        throw new Error('forced post-gate finalize fault')
+      }
+      return originalRegister.apply(this, args)
+    }
+
+    try {
+      let firstMessage: string | undefined
+      try {
+        await acceptRequest(engine, auth, requestId)
+      } catch (err) {
+        firstMessage = (err as Error).message
+      }
+      expect(firstMessage, 'the forced fault must surface on the first accept').to.not.be.undefined
+      expect(firstMessage).to.include('forced post-gate finalize fault')
+
+      // The officer's header signature IS spent by now — that is the premise of WR-05, not a
+      // failure of the WR-19 gate. Assert it, so the retry below is proven to be retrying over a
+      // genuinely spent signature rather than over a clean slate.
+      const spent = await signatureRowCounts(auth, requestId)
+      expect(spent.officer, "the header signature is spent by the first attempt — this is WR-05's premise").to.equal(1)
+
+      // The task is still open and the request still pending — nothing was completed.
+      const midRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
+      expect(midRow!.Status, 'the request must still be pending after the failed finalize').to.equal('p')
+
+      // THE ASSERTION WR-05 IS ABOUT: retry the SAME accept. Pre-fix this died with
+      // `UNIQUE constraint failed: OfficerSignature PK` inside signingEngine.sign(), and the
+      // officer could never complete this approval again — recoverable only by rejecting a request
+      // they intended to approve.
+      let secondMessage: string | undefined
+      try {
+        await acceptRequest(engine, auth, requestId)
+      } catch (err) {
+        secondMessage = (err as Error).message
+      }
+      expect(
+        secondMessage,
+        `the retry must succeed outright — got: ${String(secondMessage)}`
+      ).to.be.undefined
+
+      // And it must have actually completed the ceremony, not merely not-thrown.
+      const finalRow = await auth.ctx.db
+        .prepare('select Status, DecidingOfficerUserId from RegistrationRequest where Id = :id')
+        .get({ id: requestId })
+      expect(finalRow!.Status, 'the retried approval must record the decision').to.equal('a')
+      expect(finalRow!.DecidingOfficerUserId, 'and it must stay attributable (WR-01)').to.equal(auth.user.id)
+
+      const registrantRow = await auth.ctx.db
+        .prepare('select Id from Registrant where Id = :id')
+        .get({ id: init.payload.registrant.id })
+      expect(registrantRow, 'the retried approval must mint the Registrant the first attempt could not').to.not.be.undefined
+
+      // Exactly ONE OfficerSignature for the task nonce — the retry re-used the existing row
+      // rather than inserting a second one or replacing it.
+      const after = await signatureRowCounts(auth, requestId)
+      expect(after.officer, 'the retry must not create a SECOND OfficerSignature row for the same nonce').to.equal(1)
+    } finally {
+      registerProto.register = originalRegister
+    }
+  })
+
   it('CR-03: refuses an approval whose payload reuses an existing Registrant id, creating nothing and leaving the request pending', async () => {
     const auth = await setup()
     const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)

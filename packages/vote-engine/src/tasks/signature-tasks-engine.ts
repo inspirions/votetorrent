@@ -736,11 +736,13 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // result.sign AND missing result.decision separately), so a later reader cannot assume one
     // covers the other.
     //
-    // WR-05 is NOT fixed by this gate: signingEngine.sign() is still not idempotent on
-    // (SigningNonce, UserId), so a finalize failure this gate cannot foresee — a register() CHECK
-    // failure, a storage error, arising AFTER this gate passes but before finalize completes —
-    // still leaves the task un-retryable via accept, recoverable only by rejecting. That failure
-    // class stays open; this gate only removes the requester-CHOOSABLE trigger.
+    // WR-05 (now CLOSED, elsewhere): this gate removes the requester-CHOOSABLE trigger, and it
+    // was all this gate ever claimed. The residual it used to leave open — a finalize failure the
+    // gate cannot foresee (a register() CHECK failure, a storage error) arising AFTER the gate
+    // passes but before finalize completes, leaving the task un-retryable via accept — is closed
+    // by making `SigningEngine.sign()` idempotent on (SigningNonce, UserId) (signing-engine.ts).
+    // A retry now re-enters sign(), finds this officer's row already present, no-ops, and proceeds
+    // to finalize instead of dying on `UNIQUE constraint failed: OfficerSignature PK`.
     if (result.isAccepted && task.signatureType === 'registrant') {
       // L-2 (48-11): the accept path REQUIRES the reusable per-digest callback — DG-2 is signed at
       // decision time, and there is no placeholder fallback on this path. An approval whose
@@ -1218,11 +1220,11 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
    *
    * WR-19 is closed by WHERE this gate is called from completeSignature (before sign()), not by
    * anything in this method's own body — this method's refusals are the same whether they run
-   * before or after a signature was spent. WR-05 is NOT fixed by this gate: signingEngine.sign()
-   * is still not idempotent on (SigningNonce, UserId), so a finalize failure this gate cannot
-   * foresee — a register() CHECK failure, a storage error, arising AFTER this gate passes but
-   * before finalize completes — still leaves the task un-retryable via accept, recoverable only by
-   * rejecting.
+   * before or after a signature was spent. WR-05 (a finalize failure AFTER this gate passes) is a
+   * separate concern and is closed separately, by `SigningEngine.sign()`'s idempotency probe on
+   * (SigningNonce, UserId) — see signing-engine.ts. Neither fix subsumes the other: this gate
+   * stops a refusable payload from spending a signature at all, and that probe stops an
+   * already-spent signature from making a retry impossible.
    */
   private async resolveAcceptableRegistrantApproval (taskId: string): Promise<{
     requestId: string
@@ -1475,9 +1477,13 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // reaches that PK-collision ordering at all — the officer's signature is never spent, and a
     // retried accept raises the SAME refusal rather than a UNIQUE constraint error. Removing the
     // guard here therefore removes no behaviour that was reachable; it only stops an id collision
-    // from being laundered into a silent no-op success. WR-05 (a finalize failure AFTER this gate
-    // passes leaves this task un-retryable) is a separate, still-open concern this change does not
-    // fix.
+    // from being laundered into a silent no-op success.
+    //
+    // WR-05 UPDATE: the PK-collision premise above no longer holds either. `SigningEngine.sign()`
+    // is now idempotent on (SigningNonce, UserId), so a retried accept re-enters this method
+    // rather than dying at sign() — and it must, because that retryability is the entire point of
+    // the WR-05 fix. The CR-03 refusal is what stops the retry from silently adopting a
+    // pre-existing Registrant; it does not rely on sign() throwing.
     // RegistrationEngine.register() — reused COMPLETELY UNCHANGED, with the reviewing officer's
     // own device-signer callback. No wrapper, no reimplementation, no inline Registrant insert.
     await new RegistrationEngine(ctx).register(init, sign)
