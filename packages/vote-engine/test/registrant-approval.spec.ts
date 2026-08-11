@@ -134,6 +134,31 @@ async function countRows (ctx: EngineContext, sql: string, params: Record<string
 }
 
 /**
+ * WR-19: the tables that can actually detect a spent officer signature. `AdminSigning` is written
+ * at SEED time by `seedRegistrantSignatureTasks` — it exists whether or not the officer's signature
+ * was ever consumed, so an unchanged `AdminSigning` count proves only that `seedSignedMutation` did
+ * not run, nothing about `signingEngine.sign()`. `OfficerSignature`/`AdminSignature` are written at
+ * SIGN time by `SigningEngine.sign` — only THOSE tables can show whether a refused approval burned
+ * the officer's real signature. Resolves the task's `SigningNonce` for `requestId` via the same join
+ * `completeSignature`/`finalizeRegistrantApproval` use, then counts each table by that nonce.
+ */
+async function signatureRowCounts (
+  auth: TestAuthority,
+  requestId: string
+): Promise<{ nonce: string; officer: number; admin: number }> {
+  const taskRow = await auth.ctx.db
+    .prepare(
+      `select Task.SigningNonce from Task join RegistrantSignatureTaskExtension E on E.TaskId = Task.Id where E.RequestId = :requestId`
+    )
+    .get({ requestId })
+  expect(taskRow, `a seeded task must exist for requestId=${requestId}`).to.not.be.undefined
+  const nonce = taskRow!.SigningNonce as string
+  const officer = await countRows(auth.ctx, 'select count(*) as n from OfficerSignature where SigningNonce = :nonce', { nonce })
+  const admin = await countRows(auth.ctx, 'select count(*) as n from AdminSignature where SigningNonce = :nonce', { nonce })
+  return { nonce, officer, admin }
+}
+
+/**
  * Runs the full accept ceremony for one seeded request under the fixture officer's REAL
  * secp256k1 key (`makeTestSignCallback`), used as both the header signer and the D-07 reusable
  * per-digest callback.
@@ -463,36 +488,77 @@ describe('registrant approval ceremony', () => {
     expect(bytesToHex(digest1)).to.not.equal(bytesToHex(digest2))
   })
 
-  it('refuses an accept that carries no reusable sign callback, creating no Registrant', async () => {
+  it('refuses an accept that carries no reusable sign callback and one that carries no decision, creating no Registrant and consuming no signature', async () => {
     const auth = await setup()
-    const { requestId, init } = await submitPendingRequest(auth)
+    const { requestId: requestIdA, init: initA } = await submitPendingRequest(auth)
+    const { requestId: requestIdB, init: initB } = await submitPendingRequest(auth)
     const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
     await engine.getRequestedSignatures(true)
 
     const officerSign = makeTestSignCallback(auth.user)
-    const task = await getRegistrantTask(engine, requestId)
-    const digestBytes = await engine.getSignatureDigest(task)
-    const headerSignature = await officerSign(digestBytes)
 
-    let threw = false
+    // Variant A (missing `sign`) — against request A.
+    const taskA = await getRegistrantTask(engine, requestIdA)
+    const digestBytesA = await engine.getSignatureDigest(taskA)
+    const headerSignatureA = await officerSign(digestBytesA)
+
+    let threwA = false
     try {
-      await engine.completeSignature(task, {
+      await engine.completeSignature(taskA, {
         isAccepted: true,
-        signature: headerSignature,
+        signature: headerSignatureA,
         decision: { checklist: ['id'] },
         // sign deliberately omitted — a placeholder signature must never be substituted here; an
         // approval whose checklist is covered by nothing is exactly what D-07 exists to prevent.
       })
     } catch {
-      threw = true
+      threwA = true
     }
-    expect(threw, 'an accept with no reusable sign callback must be refused').to.be.true
+    expect(threwA, 'an accept with no reusable sign callback must be refused').to.be.true
 
-    const registrantRow = await auth.ctx.db.prepare('select 1 as x from Registrant where Id = :id').get({ id: init.payload.registrant.id })
-    expect(registrantRow, 'no Registrant row may be created').to.be.undefined
+    const registrantRowA = await auth.ctx.db.prepare('select 1 as x from Registrant where Id = :id').get({ id: initA.payload.registrant.id })
+    expect(registrantRowA, 'no Registrant row may be created for the missing-sign variant').to.be.undefined
 
-    const reqRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
-    expect(reqRow!.Status, 'the request must remain pending').to.equal('p')
+    const reqRowA = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestIdA })
+    expect(reqRowA!.Status, 'request A must remain pending').to.equal('p')
+
+    // A malformed accept must be refused before any signature is consumed, exactly as an
+    // adversarial payload is (WR-19) — read against A's OWN nonce, not inferred from B's.
+    const countsA = await signatureRowCounts(auth, requestIdA)
+    expect(countsA.officer, 'a missing-sign accept must not consume the officer signature — no OfficerSignature row for A\'s nonce').to.equal(0)
+    expect(countsA.admin, 'a missing-sign accept must not mint an AdminSignature row for A\'s nonce').to.equal(0)
+
+    // Variant B (missing `decision`) — against request B. An accept with no recorded decision is
+    // exactly as malformed as one with no reusable signer: a signature must not be spent to
+    // discover that.
+    const taskB = await getRegistrantTask(engine, requestIdB)
+    const digestBytesB = await engine.getSignatureDigest(taskB)
+    const headerSignatureB = await officerSign(digestBytesB)
+
+    let threwB = false
+    try {
+      await engine.completeSignature(taskB, {
+        isAccepted: true,
+        signature: headerSignatureB,
+        sign: officerSign,
+        // decision deliberately omitted.
+      })
+    } catch {
+      threwB = true
+    }
+    expect(threwB, 'an accept with no recorded decision must be refused').to.be.true
+
+    const registrantRowB = await auth.ctx.db.prepare('select 1 as x from Registrant where Id = :id').get({ id: initB.payload.registrant.id })
+    expect(registrantRowB, 'no Registrant row may be created for the missing-decision variant').to.be.undefined
+
+    const reqRowB = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestIdB })
+    expect(reqRowB!.Status, 'request B must remain pending').to.equal('p')
+
+    // Read independently against B's OWN nonce — the point of the widening is that the
+    // result.decision path is proven by its own assertion, not by code-identity with result.sign.
+    const countsB = await signatureRowCounts(auth, requestIdB)
+    expect(countsB.officer, 'a missing-decision accept must not consume the officer signature — no OfficerSignature row for B\'s nonce').to.equal(0)
+    expect(countsB.admin, 'a missing-decision accept must not mint an AdminSignature row for B\'s nonce').to.equal(0)
   })
 
   // ---- CR-02 / CR-03 adversarial-payload guards ----
@@ -511,6 +577,11 @@ describe('registrant approval ceremony', () => {
       { authorityId: auth.authority.id }
     )
 
+    // Fixture integrity — the seeded row is unsigned before any accept attempt.
+    const countsBefore = await signatureRowCounts(auth, requestId)
+    expect(countsBefore.officer, 'the seeded row must be unsigned before the accept attempt').to.equal(0)
+    expect(countsBefore.admin, 'the seeded row must be unsigned before the accept attempt').to.equal(0)
+
     let thrownMessage: string | undefined
     try {
       await acceptRequest(engine, auth, requestId)
@@ -524,6 +595,15 @@ describe('registrant approval ceremony', () => {
     const registrantCountAfter = await countRows(auth.ctx, 'select count(*) as n from Registrant')
     expect(registrantCountAfter, 'no Registrant row may be created by a refused approval').to.equal(registrantCountBefore)
 
+    // WR-19: a refused approval must not consume the officer's signature — no OfficerSignature row
+    // may exist for the task's nonce.
+    const countsAfter = await signatureRowCounts(auth, requestId)
+    expect(countsAfter.officer, "a refused approval must not consume the officer's signature — no OfficerSignature row may exist for the task's nonce").to.equal(0)
+    expect(
+      countsAfter.admin,
+      "a refused approval must not mint an AdminSignature row either — at the || 1 threshold fallback signingEngine.sign() would otherwise auto-complete one for a single officer"
+    ).to.equal(0)
+
     const vrgCountAfter = await countRows(
       auth.ctx,
       "select count(*) as n from AdminSigning where Scope = 'vrg' and AuthorityId = :authorityId",
@@ -531,11 +611,29 @@ describe('registrant approval ceremony', () => {
     )
     expect(
       vrgCountAfter,
-      'the refusal must precede seedSignedMutation — no new vrg AdminSigning row beyond the one seeding created'
+      "the refusal must precede seedSignedMutation — this proves only that seedSignedMutation did not run (AdminSigning is written at SEED time by seedRegistrantSignatureTasks, not at sign time); it proves NOTHING about whether the officer's signature was consumed — see the OfficerSignature/AdminSignature assertions above"
     ).to.equal(vrgCountBefore)
 
     const reqRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
     expect(reqRow!.Status, 'a refused request must remain pending, not linked to a foreign authority').to.equal('p')
+
+    // Retryability: a second accept attempt on the same task must throw the SAME refusal, never a
+    // UNIQUE constraint violation on OfficerSignature's (SigningNonce, UserId) primary key.
+    let secondThrownMessage: string | undefined
+    try {
+      await acceptRequest(engine, auth, requestId)
+    } catch (err) {
+      secondThrownMessage = (err as Error).message
+    }
+    expect(secondThrownMessage, 'a refused approval must remain retryable via a second accept attempt').to.not.be.undefined
+    expect(secondThrownMessage, 'the retry must raise the SAME CR-02 refusal fragment').to.include('not the addressed authority')
+    expect(
+      secondThrownMessage,
+      'a refused approval must stay retryable via accept, not be burned into a PK collision on OfficerSignature'
+    ).to.not.match(/UNIQUE constraint|OfficerSignature/i)
+
+    const countsAfterRetry = await signatureRowCounts(auth, requestId)
+    expect(countsAfterRetry.officer, 'after the retry, still no OfficerSignature row for the task\'s nonce').to.equal(0)
   })
 
   it('CR-03: refuses an approval whose payload reuses an existing Registrant id, creating nothing and leaving the request pending', async () => {
@@ -561,6 +659,12 @@ describe('registrant approval ceremony', () => {
       { authorityId: auth.authority.id }
     )
 
+    // Fixture integrity — take the reading for R2's OWN task only; R1 already accepted
+    // legitimately and its signature rows must not be counted here.
+    const countsBefore = await signatureRowCounts(auth, r2)
+    expect(countsBefore.officer, "R2's seeded row must be unsigned before the accept attempt").to.equal(0)
+    expect(countsBefore.admin, "R2's seeded row must be unsigned before the accept attempt").to.equal(0)
+
     let thrownMessage: string | undefined
     try {
       await acceptRequest(engine, auth, r2)
@@ -573,12 +677,23 @@ describe('registrant approval ceremony', () => {
     const registrantCountAfter = await countRows(auth.ctx, 'select count(*) as n from Registrant')
     expect(registrantCountAfter, 'a refused R2 must create no additional Registrant row').to.equal(registrantCountBefore)
 
+    // WR-19: a refused R2 must not consume the officer's signature — read against R2's OWN nonce.
+    const countsAfter = await signatureRowCounts(auth, r2)
+    expect(countsAfter.officer, "a refused approval must not consume the officer's signature — no OfficerSignature row may exist for R2's nonce").to.equal(0)
+    expect(
+      countsAfter.admin,
+      "a refused approval must not mint an AdminSignature row either — at the || 1 threshold fallback signingEngine.sign() would otherwise auto-complete one for a single officer"
+    ).to.equal(0)
+
     const vrgCountAfter = await countRows(
       auth.ctx,
       "select count(*) as n from AdminSigning where Scope = 'vrg' and AuthorityId = :authorityId",
       { authorityId: auth.authority.id }
     )
-    expect(vrgCountAfter, 'the refusal must precede seedSignedMutation for R2').to.equal(vrgCountBefore)
+    expect(
+      vrgCountAfter,
+      "the refusal must precede seedSignedMutation for R2 — this proves only that seedSignedMutation did not run for R2 (AdminSigning is written at SEED time, not sign time); it proves NOTHING about whether the officer's signature was consumed — see the OfficerSignature/AdminSignature assertions above"
+    ).to.equal(vrgCountBefore)
 
     const reqRow2 = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: r2 })
     expect(reqRow2!.Status, 'R2 must remain pending, not silently marked approved').to.equal('p')
@@ -586,5 +701,23 @@ describe('registrant approval ceremony', () => {
     const read = await new RegistrationEngine(auth.ctx).getRegistrationRequest(r2)
     expect(read?.status, "R2's read surface must still report pending").to.equal('p')
     expect(read?.registrantId, 'a refused R2 must offer no "View Registrant" CTA pointing at the other person\'s record').to.be.undefined
+
+    // Retryability: a second accept attempt on R2 must throw the SAME refusal, never a UNIQUE
+    // constraint violation on OfficerSignature's (SigningNonce, UserId) primary key.
+    let secondThrownMessage: string | undefined
+    try {
+      await acceptRequest(engine, auth, r2)
+    } catch (err) {
+      secondThrownMessage = (err as Error).message
+    }
+    expect(secondThrownMessage, 'a refused approval must remain retryable via a second accept attempt').to.not.be.undefined
+    expect(secondThrownMessage, 'the retry must raise the SAME CR-03 refusal fragment').to.include('already-existing Registrant record')
+    expect(
+      secondThrownMessage,
+      'a refused approval must stay retryable via accept, not be burned into a PK collision on OfficerSignature'
+    ).to.not.match(/UNIQUE constraint|OfficerSignature/i)
+
+    const countsAfterRetry = await signatureRowCounts(auth, r2)
+    expect(countsAfterRetry.officer, "after the retry, still no OfficerSignature row for R2's nonce").to.equal(0)
   })
 })
