@@ -34,7 +34,8 @@ import { createTestNetwork, addTestAuthority, seedSignedMutation, makeTestSignat
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
 import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
-import { toIsoZDatetime, reZuluDatetime } from '../src/signing/ceremony-helpers.js'
+import { toIsoZDatetime, reZuluDatetime, restoreCanonicalDatetime } from '../src/signing/ceremony-helpers.js'
+import { addSiblingAuthority } from './fixtures/test-context.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import type { EngineContext } from '../src/types.js'
 import type { RegisterInit, RegistrationBridgeKeyInit, RegistrationRequestInit, Signature } from '@votetorrent/vote-core'
@@ -538,6 +539,155 @@ async function seedBridgeKey (auth: TestAuthority, opts: { label: string; key: s
 
   return { id }
 }
+
+describe('registration-request schema: RegistrationRequest identity-column immutability (WR-08)', () => {
+  it('rejects the coordinated re-signature attack: rewriting AuthorityId + RequesterKey + RequesterSignature together, with a digest that VERIFIES', async () => {
+    // This is WR-08's attack verbatim, and the only shape that discriminates. SignatureValid is
+    // deliberately UNQUALIFIED so it re-evaluates on UPDATE — but it verifies
+    // Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt) against
+    // RequesterSignature AND RequesterKey, both columns of the SAME row. Rewriting the identity
+    // tuple and re-signing it with the ATTACKER's own key therefore SATISFIED SignatureValid, and
+    // (with a 'vrg' AdminSignature at the new authority) DecisionValid too. Rewriting AuthorityId
+    // was the last remaining way to move a request between authorities after intake — which is
+    // exactly what the engine-side CR-02 refusal assumes cannot happen, since it compares the
+    // payload against RegistrationRequest.AuthorityId.
+    //
+    // Single-column rewrites are NOT used as the assertion here: they break the digest and are
+    // stopped by SignatureValid/PayloadCidValid first, so they would pass whether or not the
+    // immutability constraints exist.
+    const auth = await addTestAuthority(await createTestNetwork())
+    const { id } = await seedRegistrationRequest(auth)
+
+    const before = await auth.ctx.db
+      .prepare(
+        'select AuthorityId, RequesterKey, RequesterSignature, IssuerType, BridgeId, PayloadCid, SubmittedAt, ReceivedAt from RegistrationRequest where Id = :id'
+      )
+      .get({ id })
+    expect(before, 'the seeded request must exist').to.not.be.undefined
+
+    // A second REAL authority in the same db, so AuthorityIdValid cannot be what rejects this.
+    const foreignAuthorityId = await addSiblingAuthority(auth, {
+      name: 'WR-08 Sibling Authority',
+      domainName: 'wr08-sibling.example.com',
+    })
+
+    // The attacker's own key, re-signing the REWRITTEN tuple. SubmittedAt/ReceivedAt are rebound to
+    // their unchanged canonical values, exactly as both real decision ceremonies do — a partial
+    // UPDATE that left them unbound would fail the unqualified SubmittedAtValid/ReceivedAtValid
+    // CHECKs against a Z-stripped row reconstruction and make this test pass for the wrong reason.
+    const attacker = makeRequesterSigner()
+    const submittedAt = restoreCanonicalDatetime(before!.SubmittedAt as string)
+    const receivedAt = restoreCanonicalDatetime(before!.ReceivedAt as string)
+    const digestRow = await auth.ctx.db
+      .prepare('select Digest(:id, :authorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt) as d')
+      .get({
+        id,
+        authorityId: foreignAuthorityId,
+        requesterKey: attacker.publicHex,
+        issuerType: before!.IssuerType as string,
+        bridgeId: before!.BridgeId as string | null,
+        payloadCid: before!.PayloadCid as string,
+        submittedAt,
+      })
+    if (!digestRow || digestRow.d == null) throw new Error('WR-08 test: Digest() returned null')
+    const forgedSignature = attacker.signDigest(digestRow.d as string)
+
+    let caught: unknown
+    try {
+      await auth.ctx.db.exec(
+        `update RegistrationRequest
+         with context SigningNonce = null, Tid = :tid
+         set AuthorityId = :authorityId, RequesterKey = :requesterKey, RequesterSignature = :requesterSignature,
+             SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+         where Id = :id`,
+        {
+          id,
+          authorityId: foreignAuthorityId,
+          requesterKey: attacker.publicHex,
+          requesterSignature: forgedSignature,
+          submittedAt,
+          receivedAt,
+          tid: Date.now(),
+        }
+      )
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught, 'a coordinated, self-consistent re-signature must still be rejected').to.be.instanceOf(Error)
+    expect(
+      (caught as Error).message,
+      'the rejection must come from an immutability constraint — SignatureValid cannot catch this, because the rewritten tuple verifies'
+    ).to.include('Immutable')
+
+    const after = await auth.ctx.db
+      .prepare('select AuthorityId, RequesterKey, RequesterSignature from RegistrationRequest where Id = :id')
+      .get({ id })
+    expect(after?.AuthorityId, 'AuthorityId must be unchanged').to.equal(before!.AuthorityId)
+    expect(after?.RequesterKey, 'RequesterKey must be unchanged').to.equal(before!.RequesterKey)
+    expect(after?.RequesterSignature, 'RequesterSignature must be unchanged').to.equal(before!.RequesterSignature)
+  })
+
+  it('names the constraint: an AuthorityId rewrite re-signed by the ORIGINAL requester key is refused by AuthorityIdImmutable specifically', async () => {
+    // The narrowest discriminating case, and the one that names the constraint. The ORIGINAL
+    // requester re-signs the rewritten tuple with the SAME key, so RequesterKey and
+    // RequesterSignature-vs-RequesterKey both stay coherent and SignatureValid PASSES — leaving
+    // AuthorityIdImmutable as the only thing that can reject it. AuthorityId is the column the
+    // engine-side CR-02 refusal directly depends on being immutable, since it compares the
+    // requester-chosen payload authority against RegistrationRequest.AuthorityId.
+    //
+    // A rewrite WITHOUT re-signing is not used: it breaks the digest and is stopped by
+    // SignatureValid first, which would prove nothing about immutability.
+    const auth = await addTestAuthority(await createTestNetwork())
+    const { id, signer } = await seedRegistrationRequest(auth)
+    const foreignAuthorityId = await addSiblingAuthority(auth, {
+      name: 'WR-08 Second Sibling',
+      domainName: 'wr08-sibling-2.example.com',
+    })
+    const before = await auth.ctx.db
+      .prepare('select RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt, ReceivedAt from RegistrationRequest where Id = :id')
+      .get({ id })
+    const submittedAt = restoreCanonicalDatetime(before!.SubmittedAt as string)
+    const receivedAt = restoreCanonicalDatetime(before!.ReceivedAt as string)
+
+    const digestRow = await auth.ctx.db
+      .prepare('select Digest(:id, :authorityId, :requesterKey, :issuerType, :bridgeId, :payloadCid, :submittedAt) as d')
+      .get({
+        id,
+        authorityId: foreignAuthorityId,
+        requesterKey: before!.RequesterKey as string,
+        issuerType: before!.IssuerType as string,
+        bridgeId: before!.BridgeId as string | null,
+        payloadCid: before!.PayloadCid as string,
+        submittedAt,
+      })
+    if (!digestRow || digestRow.d == null) throw new Error('WR-08 test: Digest() returned null')
+    const reSignature = signer.signDigest(digestRow.d as string)
+
+    let caught: unknown
+    try {
+      await auth.ctx.db.exec(
+        `update RegistrationRequest
+         with context SigningNonce = null, Tid = :tid
+         set AuthorityId = :authorityId, RequesterSignature = :requesterSignature,
+             SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+         where Id = :id`,
+        {
+          id,
+          authorityId: foreignAuthorityId,
+          requesterSignature: reSignature,
+          submittedAt,
+          receivedAt,
+          tid: Date.now(),
+        }
+      )
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'rewriting AuthorityId must be rejected even when the digest verifies').to.be.instanceOf(Error)
+    expect((caught as Error).message).to.include('Immutable')
+  })
+})
 
 describe('registration-request schema: RegistrationRequest bridge issuer binding (D-03)', () => {
   it('accepts an IssuerType=bridge row whose BridgeId resolves to a registered RegistrationBridgeKey with a matching Key', async () => {

@@ -1403,6 +1403,56 @@ declare schema main
 		),
 		constraint IdImmutable check on update (new.Id = old.Id),
 		constraint PayloadImmutable check on update (new.Payload = old.Payload),
+		-- WR-08: every remaining IDENTITY column is now immutable too. SignatureValid above is
+		-- deliberately unqualified so it re-evaluates on UPDATE -- but it verifies
+		-- Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt)
+		-- against RequesterSignature AND RequesterKey, both COLUMNS OF THE SAME ROW. An UPDATE that
+		-- changed AuthorityId, RequesterKey and RequesterSignature TOGETHER therefore still
+		-- satisfied it (the attacker simply signs the new tuple with their own key) and, with a
+		-- 'vrg' AdminSignature at the NEW authority, satisfied DecisionValid as well. Given this
+		-- phase frames these CHECKs as THE authorization boundary, the omission was a real
+		-- defense-in-depth gap; Registrant already carries AuthorityIdImmutable, this table did not.
+		-- Note the interaction with the engine-side CR-02 refusal, which compares the payload
+		-- against RegistrationRequest.AuthorityId: without AuthorityIdImmutable, rewriting that
+		-- column was the last remaining way to move a request between authorities after intake.
+		--
+		-- WHY THERE IS NO SubmittedAtImmutable, and it is not an omission: SubmittedAt is the
+		-- seventh argument of the SignatureValid digest above, and that CHECK is unqualified, so it
+		-- re-runs on every UPDATE. With RequesterKey and RequesterSignature now immutable, an
+		-- attacker can no longer re-sign a rewritten tuple, so SignatureValid pins SubmittedAt (and
+		-- Id/AuthorityId/IssuerType/BridgeId/PayloadCid) transitively. A literal
+		-- `new.SubmittedAt = old.SubmittedAt` CHECK is ALSO not expressible here: `new.*` sees the
+		-- raw bound Z-suffixed value while `old.*` is read back Temporal-coerced (Z stripped,
+		-- trailing fractional zeros dropped -- T-42-03/T-42-06), so the two never compare equal and
+		-- the constraint would reject every legitimate decision. This was confirmed empirically, not
+		-- assumed: the constraint was written, and the whole registrant accept AND reject suite went
+		-- red with `CHECK constraint failed: SubmittedAtImmutable`.
+		--
+		-- WHY THERE IS NO ReceivedAtImmutable, stated as an OPEN RESIDUAL rather than a conclusion:
+		-- ReceivedAt is inside NO digest, so the transitive argument above does not reach it -- and
+		-- it is both the anti-backdating sort key (registration-request-query.ts's order key) and
+		-- the basis of D-09's published median time-to-decision, so a rewrite would flatter the
+		-- authority's own responsiveness figure. It is blocked by the SAME datetime-coercion
+		-- asymmetry (a literal equality CHECK fails identically, also confirmed by running it), and
+		-- no format-insensitive comparison is available: Quereus rejects the two-operand `is` form,
+		-- and a prefix/`like` workaround would still admit a sub-second rewrite. What holds today is
+		-- ENGINE-side only: the two decision ceremonies are the only writers, and both rebind
+		-- ReceivedAt to its unchanged value via restoreCanonicalDatetime. Closing this properly needs
+		-- either a Quereus-level datetime comparison primitive or ReceivedAt folded into a digest.
+		-- BridgeId needs NULL-SAFE equality: it is null on every registrant-issued row, and
+		-- `null = null` is null (not true), which would make a plain `=` reject every legitimate
+		-- decision on a non-bridge request. Quereus's parser does NOT accept the two-operand
+		-- `x is y` form (only `is null` / `is not null`), so the equality is spelled out as an
+		-- explicit disjunction. The asymmetric cases still fail closed: null -> non-null (or the
+		-- reverse) leaves the first disjunct false and the second null, so the CHECK does not pass.
+		constraint AuthorityIdImmutable check on update (new.AuthorityId = old.AuthorityId),
+		constraint RequesterKeyImmutable check on update (new.RequesterKey = old.RequesterKey),
+		constraint RequesterSignatureImmutable check on update (new.RequesterSignature = old.RequesterSignature),
+		constraint IssuerTypeImmutable check on update (new.IssuerType = old.IssuerType),
+		constraint BridgeIdImmutable check on update (
+			(new.BridgeId is null and old.BridgeId is null) or new.BridgeId = old.BridgeId
+		),
+		constraint PayloadCidImmutable check on update (new.PayloadCid = old.PayloadCid),
 		-- D-06: a rejected request is a permanent, attributable record
 		constraint NoDelete check on delete (false),
 		-- D-06/D-07: the ONLY legal update to this table is a signed pending->decided transition
