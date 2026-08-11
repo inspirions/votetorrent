@@ -207,20 +207,35 @@ export function resolveTransportCardState(entry: TransportCardEntry): TransportC
 // ---------------------------------------------------------------------------
 
 /**
- * Returns `SyncErrorRef[]` in FIXED transport order (filesystem first, then rest) and, within a
- * transport, in the order the binding reported. This mirrors the card order above it — an officer
+ * Returns `SyncErrorRef[]` in FIXED transport order (filesystem, then rest, then peer) and, within
+ * a transport, in the order the binding reported. This mirrors the card order above it — an officer
  * reading top-to-bottom never has to reconcile two different orderings on one screen. Reads ONLY
  * `errorItemIds`; it must never read `imported`, `pending`, or `syncedAt`, and it accepts no
  * free-text argument of any kind.
  *
- * Note for a future third binding (48-23): this fixed two-element order is the piece that would
- * need to widen alongside `SyncBindingId` — see the model's file doc comment (c) and this plan's
- * SUMMARY for the full list of what a peer-binding wiring plan must touch.
+ * WR-15: the order array now covers all THREE `SyncBindingId` members. 48-23 widened
+ * `SyncBindingId` to include `'peer'` and routed the peer card's press through `runSync('peer')`,
+ * but left this array at `["filesystem", "rest"]` — so a peer binding's `errorItemIds` had nowhere
+ * to go and were discarded AFTER the seam had already admitted the id. `TransportSyncReport` is
+ * structurally a per-transport contract, which makes that a silent DROP rather than a display
+ * choice: the officer saw a card and a press that reported nothing.
+ *
+ * What this widening does NOT do: it softens the D-11 posture nowhere. The peer card still carries
+ * no state channel at all (`ExperimentalTransportStatusCardProps` is exactly
+ * `{disabled?, onTrySync}`) and still renders its unconditional warning treatment; this function
+ * still reads ONLY `errorItemIds`, never `imported`/`pending`/`syncedAt`; and a caught transport
+ * error's `message` is never placed into a report in the first place
+ * (`BulkImportSyncScreen`'s `.catch()`), so no endpoint- or peer-supplied text can reach a rendered
+ * row through this path (T-48-20-02). Only opaque item identifiers do, exactly as for the two
+ * proven bindings.
+ *
+ * Keep this array EXHAUSTIVE over `SyncBindingId`. A fourth member added to the union without a
+ * matching entry here reintroduces exactly this defect, and nothing in the type system catches it.
  */
 export function toSyncErrorRefs(
 	entries: Partial<Record<SyncBindingId, TransportSyncReport>>,
 ): SyncErrorRef[] {
-	const order: SyncBindingId[] = ["filesystem", "rest"];
+	const order: SyncBindingId[] = ["filesystem", "rest", "peer"];
 	const refs: SyncErrorRef[] = [];
 	for (const transport of order) {
 		const report = entries[transport];

@@ -454,6 +454,30 @@ describe("BulkImportSyncScreen — the errors section is identifier-only", () =>
 		}
 	});
 
+	it("(WR-15) an attached peer binding's error identifiers reach the errors section, still identifier-only", async () => {
+		registerSyncBinding({
+			id: "peer",
+			syncNow: jest.fn(async () => report({ errorItemIds: ["req-peer-0001"] })),
+		});
+		const tr = await renderScreen();
+		await press(tr, "transport-try-peer-sync-p2p");
+
+		present(tr, "bulk-import-sync-errors-section");
+		const row0 = serializeSubtree(tr.root.findByProps({ testID: "bulk-import-sync-error-row-0" }));
+		expect(row0).toContain("req-peer-0001");
+		// Identifier + fixed heading only — no counts, no timestamp, no transport-supplied text.
+		expect(row0).not.toContain("2026-08-05T12:00:00Z");
+		expect(row0).not.toContain("bulkImportSyncImportedCountLabel");
+		expect(row0).not.toContain("bulkImportSyncPendingCountLabel");
+
+		// The peer CARD is unchanged by this: it still carries no state channel and keeps its
+		// unconditional D-11 warning treatment.
+		const peerCard = serializeSubtree(tr.root.findByProps({ testID: "transport-status-card-p2p" }));
+		expect(peerCard).toContain(SENTINEL_COLORS.warning);
+		expect(peerCard).toContain("bulkImportSyncP2pBody");
+		expect(peerCard).not.toContain("req-peer-0001");
+	});
+
 	it("is absent when both transports report empty errorItemIds", async () => {
 		registerSyncBinding({ id: "filesystem", syncNow: jest.fn(async () => report()) });
 		registerSyncBinding({ id: "rest", syncNow: jest.fn(async () => report()) });
@@ -586,6 +610,24 @@ describe("bulk-import-sync-model — pure unit", () => {
 
 		it("returns [] for empty input", () => {
 			expect(toSyncErrorRefs({})).toEqual([]);
+		});
+
+		it("(WR-15) the order array is exhaustive over SyncBindingId — a peer report's errorItemIds are NOT dropped, and peer sorts last", () => {
+			const refs = toSyncErrorRefs({
+				peer: report({ errorItemIds: ["p1", "p2"] }),
+				rest: report({ errorItemIds: ["r1"] }),
+				filesystem: report({ errorItemIds: ["f1"] }),
+			});
+			// Before WR-15 the order array was ["filesystem", "rest"], so p1/p2 were silently
+			// discarded even though 48-23 had already widened SyncBindingId and routed the peer
+			// card's press through runSync('peer') — a report with nowhere to go.
+			expect(refs.map((r) => r.transport)).toEqual(["filesystem", "rest", "peer", "peer"]);
+			expect(refs.map((r) => r.itemId)).toEqual(["f1", "r1", "p1", "p2"]);
+			// Still identifier-only for the third binding too — the runtime PII gate applies
+			// uniformly across bindings.
+			for (const ref of refs) {
+				expect(Object.keys(ref).sort()).toEqual(["itemId", "transport"]);
+			}
 		});
 
 		it("every returned ref has exactly the keys transport and itemId (the runtime PII gate)", () => {

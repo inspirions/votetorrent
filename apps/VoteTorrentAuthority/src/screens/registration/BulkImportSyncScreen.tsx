@@ -74,10 +74,13 @@ export function BulkImportSyncScreen() {
 	const [errorMessage, setErrorMessage] = useState("");
 	const [filesystemEntry, setFilesystemEntry] = useState<TransportCardEntry>({});
 	const [restEntry, setRestEntry] = useState<TransportCardEntry>({});
-	// Never rendered — ExperimentalTransportStatusCard (48-17) carries no state channel, so this
-	// slot exists only so runSync('peer') below has somewhere honest to record { failed: true }
-	// when nothing is attached, without special-casing the peer id out of runSync's shared logic.
-	const [, setPeerEntry] = useState<TransportCardEntry>({});
+	// The peer CARD renders no state — ExperimentalTransportStatusCard (48-17) carries no state
+	// channel, and this entry is never passed to it. WR-15: the entry IS read now, for
+	// `errorItemIds` only, so a peer binding's error identifiers reach the errors section instead
+	// of being dropped after `runSync('peer')` had already produced them. The slot also still
+	// gives runSync somewhere honest to record `{ failed: true }` when nothing is attached,
+	// without special-casing the peer id out of runSync's shared logic.
+	const [peerEntry, setPeerEntry] = useState<TransportCardEntry>({});
 
 	// CR-02/WR-08-class guard against a stale setState: a `syncNow()` resolving after this screen
 	// has been navigated away from must not `setState` on an unmounted screen
@@ -122,9 +125,12 @@ export function BulkImportSyncScreen() {
 			});
 	}, []);
 
+	// WR-15: all three bindings are passed. `toSyncErrorRefs` reads `errorItemIds` and nothing
+	// else, so this carries opaque identifiers only — no counts, no timestamps, no transport text.
 	const errorRefs = toSyncErrorRefs({
 		filesystem: filesystemEntry.report,
 		rest: restEntry.report,
+		peer: peerEntry.report,
 	});
 
 	return (
