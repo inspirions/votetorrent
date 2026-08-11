@@ -2358,6 +2358,32 @@ export class RegistrationEngine implements IRegistrationEngine {
         throw new Error('rejectRegistrationRequest: decision.rejectionReason must be a non-empty string')
       }
 
+      // WR-02: the D-07 gate is enforced HERE — on the write path — not only by the approval
+      // screen's `disabled` prop. Both decision paths (this one and
+      // SignatureTasksEngine.completeSignature's registrant accept) now apply the SAME imported
+      // vote-core predicate, never a local length/includes re-derivation.
+      //
+      // The sharper reason this matters on the REJECT path specifically:
+      // `recoverVerificationChecklist` (above) recovers a decided request's checklist by
+      // enumerating only the GATE-VALID subsets in CHECKLIST_GATE_VALID_CANDIDATES. A
+      // non-gate-valid checklist — `[]`, or `'none'` alongside a substantive item — produces a
+      // perfectly valid VerificationCid that that enumeration can never invert, so the permanent,
+      // NoDelete rejection record would silently lose the checklist it exists to preserve, and the
+      // read surface could not tell "empty checklist" from "vocabulary widened" from "digest
+      // corrupted".
+      //
+      // Officer-visible consequence, recorded rather than hidden: an officer who refuses a request
+      // without ticking anything now gets this refusal on the approval screen's existing
+      // InlineError surface and must record what they verified — including the explicit `'none'`
+      // ("I verified nothing"), which IS gate-valid on its own. `'none'` is deliberately NOT
+      // substituted for an empty checklist here: that would write an assertion into a signed,
+      // permanent record that the officer never actually made.
+      if (!isChecklistGateMet(decision.checklist)) {
+        throw new Error(
+          'rejectRegistrationRequest: decision.checklist does not satisfy the D-07 gate (empty, or "none" combined with a substantive item)'
+        )
+      }
+
       // D-07: derive VerificationCid through the SAME injected-digest helper
       // (and the SAME private computeChecklistCid primitive) the read
       // surface's recoverVerificationChecklist uses — never an independent

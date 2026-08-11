@@ -5,7 +5,7 @@ import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
-import { verificationCid } from '@votetorrent/vote-core'
+import { verificationCid, isChecklistGateMet } from '@votetorrent/vote-core'
 import type {
   ISigningEngine,
   ISignatureTasksEngine,
@@ -703,6 +703,26 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       if (!result.decision) {
         throw new Error(
           'SignatureTasksEngine.completeSignature: registrant accept requires result.decision (the D-07 verification checklist) — none supplied'
+        )
+      }
+      // WR-02: the D-07 gate was previously enforced NOWHERE on a write path — only by the approval
+      // screen's `disabled` prop, which any non-UI caller (or a `disabled`-bypassing press) skips.
+      // Two distinct failures follow from an ungated checklist, and this one predicate closes both:
+      //   1. the gate itself — `[]` ("I verified nothing, and I did not say so") and the
+      //      `['none', <substantive>]` contradiction are exactly the states isChecklistGateMet
+      //      exists to forbid, and D-07's whole claim is that an approval carries a declared
+      //      verification basis;
+      //   2. audit-trail recoverability — `verificationCid([])` is a perfectly valid CID, but
+      //      `recoverVerificationChecklist` enumerates only GATE-VALID subsets
+      //      (CHECKLIST_GATE_VALID_CANDIDATES, registration-engine.ts), so a non-gate-valid
+      //      checklist writes a VerificationCid the read surface can never invert. The decided
+      //      request then renders `verificationChecklist: undefined`, indistinguishable from
+      //      "vocabulary widened" or "digest corrupted".
+      // The imported vote-core predicate is used verbatim — never a local length/includes
+      // re-derivation, which is how the gate and the digest drift apart.
+      if (!isChecklistGateMet(result.decision.checklist)) {
+        throw new Error(
+          'SignatureTasksEngine.completeSignature: registrant decision checklist does not satisfy the D-07 gate (empty, or "none" combined with a substantive item)'
         )
       }
       try {

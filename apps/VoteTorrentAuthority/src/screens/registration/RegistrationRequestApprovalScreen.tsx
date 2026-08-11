@@ -12,6 +12,7 @@ import type {
 	RegistrationRequestRead,
 	RegistrationVerificationChecklistItem,
 } from "@votetorrent/vote-core";
+import { isChecklistGateMet } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
@@ -309,6 +310,21 @@ export default function RegistrationRequestApprovalScreen() {
 		submittingRef.current = true;
 		try {
 			setErrorMessage("");
+			// WR-02: re-assert the D-07 gate INSIDE the handler. Before this the gate lived
+			// solely in the Approve button's `disabled` expression, so any press that
+			// reached the handler — a `disabled`-bypassing dispatch, a future caller, a
+			// state update racing the press — wrote an ungated decision. `isChecklistGateMet`
+			// is the same imported vote-core predicate `VerificationChecklist` reports
+			// through `onChange`; it is re-evaluated against `checked` (the array actually
+			// bound into `decision.checklist` below) rather than trusting the derived
+			// `gateMet` state, so the value gated and the value signed cannot diverge. The
+			// engine refuses this independently — this check exists so the officer sees the
+			// refusal before a device signature is requested, not to replace it.
+			if (!isChecklistGateMet(checked)) {
+				throw new Error(
+					`RegistrationRequestApprovalScreen: the verification checklist does not satisfy the approval gate (requestId=${requestId})`
+				);
+			}
 			if (!task) {
 				throw new Error(`RegistrationRequestApprovalScreen: no pending signature task for requestId=${requestId}`);
 			}
