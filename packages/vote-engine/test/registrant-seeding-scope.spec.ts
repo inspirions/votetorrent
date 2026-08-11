@@ -54,6 +54,7 @@ import {
   seedUserInvite,
   seedProposedBallot,
   makeDistinctTestUser,
+  addSiblingAuthority,
 } from './fixtures/test-context.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
@@ -650,6 +651,69 @@ describe('registrant task seeding — rollback recovery, skip telemetry and pass
       auth.ctx.db.getAutocommit(),
       'the shared handle must be back in autocommit after both overlapping passes complete'
     ).to.be.true
+  })
+
+  it('WR-22: a request addressed to an authority where this officer holds no vrg scope is NOT seeded, while a vrg-scoped one is', async () => {
+    const auth = await setup()
+
+    // Two REAL sibling authorities in the SAME database. `auth.user` is a genuine officer of BOTH
+    // — the only difference is the scope set, which is exactly the variable under test. Before
+    // WR-22 the seed predicate tested Officer MEMBERSHIP only and never read Officer.Scopes, so
+    // both requests below seeded identically and any officer of any scope could go on to mint a
+    // Registrant single-handedly (AdminSigning.UserIdValid never reads Scopes;
+    // AdminSigning.SignerKeyValid and OfficerSignature.OfficerValid are hardcoded stubs; and
+    // SigningEngine.sign's threshold falls back to 1 with no declared 'vrg' policy).
+    const scopedAuthorityId = await addSiblingAuthority(auth, {
+      name: 'Vrg Scoped Authority',
+      domainName: 'vrg-scoped.example.com',
+      scopes: ['rad', 'vrg'] as Scope[],
+    })
+    const unscopedAuthorityId = await addSiblingAuthority(auth, {
+      name: 'Rad Only Authority',
+      domainName: 'rad-only.example.com',
+      scopes: ['rad'] as Scope[],
+    })
+
+    // Fixture integrity — assert the premise instead of assuming it: the officer must genuinely be
+    // an officer at BOTH, so a non-seed can only be attributable to the scope.
+    for (const authorityId of [scopedAuthorityId, unscopedAuthorityId]) {
+      const officerCount = await countRows(
+        auth.ctx,
+        'select count(*) as n from Officer where AuthorityId = :authorityId and UserId = :userId',
+        { authorityId, userId: auth.user.id }
+      )
+      expect(officerCount, `the officer must be a real Officer at ${authorityId}`).to.be.greaterThan(0)
+    }
+
+    const { requestId: scopedRequestId } = await submitPendingRequest(auth, { authorityId: scopedAuthorityId })
+    const { requestId: unscopedRequestId } = await submitPendingRequest(auth, { authorityId: unscopedAuthorityId })
+
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    let rejected = false
+    let rejectionMessage = ''
+    try {
+      await engine.getRequestedSignatures(true)
+    } catch (err) {
+      rejected = true
+      rejectionMessage = err instanceof Error ? err.message : String(err)
+    }
+    expect(rejected, `the pull must resolve normally (got: ${rejectionMessage})`).to.be.false
+
+    expect(
+      await extensionCount(auth.ctx, scopedRequestId),
+      'a request at an authority where the officer HOLDS vrg must still seed — the gate must not blank the inbox wholesale'
+    ).to.equal(1)
+    expect(
+      await extensionCount(auth.ctx, unscopedRequestId),
+      "a request at an authority where the officer holds only 'rad' must NOT be seeded"
+    ).to.equal(0)
+
+    // And the un-seeded row is EXCLUDED from the work set, not skipped inside it — the scope test
+    // lives in the collection predicate, so it must never cost a Tid or a DB round trip per pull.
+    const outcome = lastSeedOutcome(engine)
+    expect(outcome!.considered, 'only the vrg-scoped request may enter the work set').to.equal(1)
+    expect(outcome!.seeded, 'and it seeds').to.equal(1)
+    expect(outcome!.skipped, 'the unscoped request is filtered out, never attempted and skipped').to.equal(0)
   })
 
   it('WR-23: a failure of the work-set COLLECTION query is reported as an aborted pass, not rethrown out of getRequestedSignatures', async () => {

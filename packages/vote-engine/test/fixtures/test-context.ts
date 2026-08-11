@@ -215,7 +215,17 @@ export function makeTestNetworkInit (overrides?: Partial<NetworkInit>): NetworkI
           init: {
             name: 'Admin A',
             title: 'Chair',
-            scopes: ['rn', 'rad', 'iad', 'uai', 'mel', 'ceb'] as Scope[],
+            // WR-22: `'vrg'` added. The registrant ceremony now genuinely requires it (the seed
+            // predicate and the approval gate both test `json_each(O.Scopes)`), and this fixture
+            // was the only place claiming a founding officer holds fewer scopes than the app
+            // actually seeds — `FOUNDING_OFFICER_SCOPES`
+            // (apps/VoteTorrentAuthority/src/utils/foundingOfficerScopes.ts) seeds all NINE codes,
+            // `'vrg'` among them, precisely because a brand-new network's sole officer would
+            // otherwise be locked out of the screens that gate on it. Granting the scope here
+            // makes the fixture officer a LEGITIMATELY authorized one; it does not weaken any
+            // assertion, and the negative case (an officer WITHOUT `'vrg'`) is covered explicitly
+            // in registrant-seeding-scope.spec.ts.
+            scopes: ['rn', 'rad', 'vrg', 'iad', 'uai', 'mel', 'ceb'] as Scope[],
           },
         },
       ],

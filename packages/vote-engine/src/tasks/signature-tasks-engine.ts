@@ -330,9 +330,23 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
    * authority side, at read time, under the CURRENTLY SIGNED-IN OFFICER's own `ctx.user` — never
    * the requester's.
    *
-   * This is NOT a claim that a `'vrg'`-scoped officer is required to seed: `AdminSigning.UserIdValid`
-   * requires merely that the signer be some officer at that authority. `AdminSigning.SignerKeyValid`
-   * and `OfficerSignature.OfficerValid` remain hardcoded stub CHECKs (Phase 999.1).
+   * WR-22: a `'vrg'`-scoped officer IS now required to seed — the predicate below tests
+   * `json_each(O.Scopes)` for `'vrg'`, and `resolveAcceptableRegistrantApproval` re-tests it on the
+   * mint path. This paragraph previously said the opposite, and that was accurate at the time: the
+   * scope was enforced NOWHERE. `AdminSigning.UserIdValid` (`votetorrent.qsql`) reads `Officer`
+   * membership and never `Officer.Scopes`; `AdminSigning.SignerKeyValid` and
+   * `OfficerSignature.OfficerValid` are hardcoded `context.Is…Valid = true` stubs (Phase 999.1);
+   * and `SigningEngine.sign` falls back to `Number(thresholdRes?.threshold) || 1`, so an authority
+   * declaring no `'vrg'` policy silently gets threshold 1. Net effect before this change: ONE
+   * officer holding any scope at all — `'rad'`-only, say — could single-handedly mint a Registrant.
+   *
+   * What this fix is and is not: it is ENGINE-side enforcement at both registrant-path gates, which
+   * is the only layer that can carry it today — a schema-side CHECK would sit beside the two
+   * hardcoded stubs above and could not be trusted to fire. It does NOT convert `'vrg'` into a
+   * schema-enforced boundary, and no code or document may claim that it does; `48-SECURITY.md`'s
+   * accepted risk R-02 narrows rather than closes. The threshold half of the finding
+   * (`|| 1` when an authority declares no `'vrg'` ThresholdPolicy) is also NOT addressed here —
+   * changing authority-creation default policies is a product decision, not a review fix.
    *
    * Best-effort, silent no-op: with no signed-in officer there is no legal `UserId` to seed under.
    *
@@ -438,6 +452,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
                select 1 from Officer O
                  join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
                  where O.AuthorityId = R.AuthorityId and O.UserId = :userId
+                   and exists (select 1 from json_each(O.Scopes) where value = 'vrg')
              )`,
         { userId }
       )) {
@@ -1265,6 +1280,34 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     if (init.registrant?.authorityId !== extRow.AuthorityId) {
       throw new Error(
         `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} payload registers under authority ${String(init.registrant?.authorityId)}, not the addressed authority ${extRow.AuthorityId}`
+      )
+    }
+
+    // WR-22: the officer driving this mint must hold `'vrg'` AT THE ADDRESSED AUTHORITY, in its
+    // CURRENT administration. Nothing downstream supplies this: `AdminSigning.UserIdValid` tests
+    // Officer membership and never reads `Officer.Scopes`, `AdminSigning.SignerKeyValid` and
+    // `OfficerSignature.OfficerValid` are hardcoded stubs, and `SigningEngine.sign`'s threshold
+    // falls back to 1 when the authority declares no `'vrg'` policy — so before this check any
+    // officer of any scope could single-handedly mint a Registrant.
+    //
+    // Checked HERE as well as in the seed predicate, and the duplication is deliberate: the seed
+    // predicate decides what appears in the inbox, while this decides what may be MINTED. A task
+    // seeded before an officer's scopes were narrowed would otherwise still be completable, and
+    // `finalizeRegistrantApproval` is reachable independently of a seed pass. `CurrentAdmin` is
+    // joined for the same reason the seed predicate joins it: an officer of a SUPERSEDED
+    // administration must not qualify.
+    const vrgOfficer = await ctx.db
+      .prepare(
+        `select 1 as x from Officer O
+           join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
+           where O.AuthorityId = :authorityId and O.UserId = :userId
+             and exists (select 1 from json_each(O.Scopes) where value = 'vrg')
+           limit 1`
+      )
+      .get({ authorityId: extRow.AuthorityId, userId: decidingOfficerUserId })
+    if (!vrgOfficer) {
+      throw new Error(
+        `SignatureTasksEngine.resolveAcceptableRegistrantApproval: user ${decidingOfficerUserId} does not hold the 'vrg' scope in authority ${extRow.AuthorityId}'s current administration — refusing to mint a Registrant`
       )
     }
 
