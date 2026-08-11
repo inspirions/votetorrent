@@ -658,6 +658,52 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     }
     const nonce = taskRow.SigningNonce as string
 
+    // WR-19 (T-48-34-01/02/05): registrant pre-sign gate — runs BEFORE signingEngine.sign() below,
+    // so a payload guaranteed to be refused (CR-02, CR-03) or a malformed accept (missing
+    // result.sign, missing result.decision) never spends the officer's real header signature. This
+    // is the FIRST of resolveAcceptableRegistrantApproval's two call sites; the SECOND is inside
+    // finalizeRegistrantApproval itself, as defence in depth for any future caller that reaches it
+    // directly — one gate, two call sites, zero duplicated SQL or message text, so the two cannot
+    // drift apart (T-48-34-05). Because THIS call site runs first, a refused approval creates no
+    // OfficerSignature/AdminSignature row (SigningEngine's own BEGIN/COMMIT, further down, never
+    // opens) and the accept path stays retryable via a second accept attempt — the exact ordering
+    // defect WR-19 closes.
+    //
+    // Both malformed-accept shapes are refused HERE too, moved up as one adjacent pair (never
+    // duplicated, never split across the sign() call below) — each is independently
+    // regression-tested (the malformed-accept case in registrant-approval.spec.ts covers missing
+    // result.sign AND missing result.decision separately), so a later reader cannot assume one
+    // covers the other.
+    //
+    // WR-05 is NOT fixed by this gate: signingEngine.sign() is still not idempotent on
+    // (SigningNonce, UserId), so a finalize failure this gate cannot foresee — a register() CHECK
+    // failure, a storage error, arising AFTER this gate passes but before finalize completes —
+    // still leaves the task un-retryable via accept, recoverable only by rejecting. That failure
+    // class stays open; this gate only removes the requester-CHOOSABLE trigger.
+    if (result.isAccepted && task.signatureType === 'registrant') {
+      // L-2 (48-11): the accept path REQUIRES the reusable per-digest callback — DG-2 is signed at
+      // decision time, and there is no placeholder fallback on this path. An approval whose
+      // checklist is covered by nothing is exactly the failure D-07 exists to prevent; do not
+      // substitute a placeholder signature here.
+      if (!result.sign) {
+        throw new Error(
+          'SignatureTasksEngine.completeSignature: registrant accept requires result.sign (a reusable per-digest signing callback) — none supplied'
+        )
+      }
+      // The D-07 checklist is what VerificationCid is derived from — there is no legal approval
+      // without one.
+      if (!result.decision) {
+        throw new Error(
+          'SignatureTasksEngine.completeSignature: registrant accept requires result.decision (the D-07 verification checklist) — none supplied'
+        )
+      }
+      try {
+        await this.resolveAcceptableRegistrantApproval(taskRow.Id as string)
+      } catch (err) {
+        this.rethrow(err, 'completeSignature (registrant pre-check)')
+      }
+    }
+
     // D-12: Branch on result.isAccepted.
     // Accept path only — call sign() to insert OfficerSignature and (at threshold=1)
     // auto-complete AdminSignature. Do NOT call sign() on reject: a rejection that
@@ -696,25 +742,12 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // rejection that advanced the session would CREATE THE VERY Registrant THE OFFICER REFUSED —
     // silently, with the request row still reading Status = 'r'. That failure would be invisible
     // to anyone reading only RegistrationRequest.Status.
+    //
+    // result.sign/result.decision were already validated above, before sign() — do not re-check
+    // them here.
     if (result.isAccepted && task.signatureType === 'registrant') {
-      // L-2 (48-11): the accept path REQUIRES the reusable per-digest callback — DG-2 is signed at
-      // decision time, and there is no placeholder fallback on this path. An approval whose
-      // checklist is covered by nothing is exactly the failure D-07 exists to prevent; do not
-      // substitute a placeholder signature here.
-      if (!result.sign) {
-        throw new Error(
-          'SignatureTasksEngine.completeSignature: registrant accept requires result.sign (a reusable per-digest signing callback) — none supplied'
-        )
-      }
-      // The D-07 checklist is what VerificationCid is derived from — there is no legal approval
-      // without one.
-      if (!result.decision) {
-        throw new Error(
-          'SignatureTasksEngine.completeSignature: registrant accept requires result.decision (the D-07 verification checklist) — none supplied'
-        )
-      }
       try {
-        await this.finalizeRegistrantApproval(taskRow.Id as string, result.decision, result.sign)
+        await this.finalizeRegistrantApproval(taskRow.Id as string, result.decision!, result.sign!)
       } catch (err) {
         this.rethrow(err, 'completeSignature (finalize registrant)')
       }
@@ -1056,33 +1089,56 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
   }
 
   /**
-   * D-05/D-07 — the registrant accept ceremony. `RegistrationEngine.register()` is reused
-   * COMPLETELY UNCHANGED — it was always correct, and the defect this phase corrects was only
-   * ever that the voter app supplied a founding-officer key it held. This method changes WHO
-   * DRIVES `register()`, not what `register()` does. A second `register()`-shaped write path
-   * (an inline `insert into Registrant`, a copy of `register()`'s body, etc.) must never be
-   * created here.
+   * WR-19 (T-48-34-01..-05) — the single payload-acceptability gate for a registrant approval.
+   * Called from TWO sites: `completeSignature`, BEFORE `signingEngine.sign()` consumes the
+   * officer's real header signature (the fix), and again from `finalizeRegistrantApproval` itself,
+   * as defence in depth for any future caller that reaches finalize directly. One gate, two call
+   * sites, zero duplicated SQL or message text — a grep gate (`registrant-approval.spec.ts`'s own
+   * regression coverage plus this plan's acceptance criteria) keeps them from drifting apart.
+   *
+   * Resolves the request by joining the extension row — finalizeBallot's own opening shape.
+   * SubmittedAt/ReceivedAt are read here too: the decision UPDATE further down (in
+   * finalizeRegistrantApproval) must explicitly rebind them (a partial UPDATE that leaves them
+   * unbound — or even self-referencing, `SubmittedAt = SubmittedAt` — makes Quereus re-validate the
+   * unqualified SubmittedAtValid/ReceivedAtValid CHECKs against a Z-STRIPPED reconstruction of the
+   * row, a real, empirically-confirmed defect class this phase discovered; T-42-06 documents the
+   * same stripping for plain reads). restoreCanonicalDatetime (below) reconstructs the exact
+   * fixed-3-digit-millisecond, Z-suffixed byte form every write in this codebase produces via
+   * toIsoZDatetime, which SubmittedAt must match byte-for-byte — RegistrationRequest.SignatureValid
+   * is UNQUALIFIED (re-evaluates on every update, not just insert) and recomputes
+   * Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt) against
+   * the REQUESTER's original signature, so a merely Z-suffixed-but-truncated SubmittedAt would
+   * silently break that verification.
+   *
+   * Refuses:
+   *  - a missing extension row, a non-pending RegistrationRequest, or an unparseable Payload;
+   *  - CR-02 (T-48-31-01): init.registrant.authorityId is chosen by the UNAUTHENTICATED requester
+   *    (D-02) and covered only by the requester's own signature. RegistrationEngine.register()'s
+   *    only cross-authority guard compares the payload against an ELECTION's authority
+   *    (register(), registration-engine.ts's electionAuthorityId check) and cannot see the
+   *    authority THIS request was addressed to. The only authority this approval may mint a
+   *    Registrant under is extRow.AuthorityId — the one whose officer is signing DG-2 in
+   *    finalizeRegistrantApproval;
+   *  - CR-03 (T-48-31-02): init.registrant.id is also requester-chosen. register() is unconditional
+   *    (see finalizeRegistrantApproval's own comment for why the old convergence guard is gone
+   *    rather than merely relocated) — refuse the id collision here, exactly like CR-02 above.
+   *
+   * WR-19 is closed by WHERE this gate is called from completeSignature (before sign()), not by
+   * anything in this method's own body — this method's refusals are the same whether they run
+   * before or after a signature was spent. WR-05 is NOT fixed by this gate: signingEngine.sign()
+   * is still not idempotent on (SigningNonce, UserId), so a finalize failure this gate cannot
+   * foresee — a register() CHECK failure, a storage error, arising AFTER this gate passes but
+   * before finalize completes — still leaves the task un-retryable via accept, recoverable only by
+   * rejecting.
    */
-  private async finalizeRegistrantApproval (
-    taskId: string,
-    decision: RegistrationRequestDecision,
-    sign: (digest: Uint8Array) => Promise<Signature>
-  ): Promise<void> {
+  private async resolveAcceptableRegistrantApproval (taskId: string): Promise<{
+    requestId: string
+    authorityId: string
+    init: RegisterInit
+    submittedAt: string
+    receivedAt: string
+  }> {
     const ctx = this.ctx!
-
-    // Resolve the request by joining the extension row — finalizeBallot's own opening shape.
-    // SubmittedAt/ReceivedAt are read here too: the decision UPDATE further down must explicitly
-    // rebind them (a partial UPDATE that leaves them unbound — or even self-referencing,
-    // `SubmittedAt = SubmittedAt` — makes Quereus re-validate the unqualified
-    // SubmittedAtValid/ReceivedAtValid CHECKs against a Z-STRIPPED reconstruction of the row, a
-    // real, empirically-confirmed defect class this plan discovered; T-42-06 documents the same
-    // stripping for plain reads). restoreCanonicalDatetime (below) reconstructs the exact
-    // fixed-3-digit-millisecond, Z-suffixed byte form every write in this codebase produces via
-    // toIsoZDatetime, which SubmittedAt must match byte-for-byte — RegistrationRequest.SignatureValid
-    // is UNQUALIFIED (re-evaluates on every update, not just insert) and recomputes
-    // Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt) against
-    // the REQUESTER's original signature, so a merely Z-suffixed-but-truncated SubmittedAt would
-    // silently break that verification.
     const extRow = await ctx.db
       .prepare(
         `select E.RequestId, R.AuthorityId, R.Payload, R.Status, R.SubmittedAt, R.ReceivedAt
@@ -1099,7 +1155,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         ReceivedAt: string
       } | undefined
     if (!extRow) {
-      throw new Error(`SignatureTasksEngine.finalizeRegistrantApproval: no RegistrantSignatureTaskExtension for taskId=${taskId}`)
+      throw new Error(`SignatureTasksEngine.resolveAcceptableRegistrantApproval: no RegistrantSignatureTaskExtension for taskId=${taskId}`)
     }
     const requestId = extRow.RequestId
     const submittedAt = restoreCanonicalDatetime(extRow.SubmittedAt)
@@ -1109,43 +1165,54 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // check exists only to produce an attributable error, not as the actual boundary.
     if (extRow.Status !== 'p') {
       throw new Error(
-        `SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} is not pending (Status=${extRow.Status})`
+        `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} is not pending (Status=${extRow.Status})`
       )
     }
 
     const init = parseJsonOr<RegisterInit | undefined>(extRow.Payload, undefined, 'RegistrationRequest.Payload')
     if (!init) {
-      throw new Error(`SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} Payload failed to parse`)
+      throw new Error(`SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} Payload failed to parse`)
     }
 
-    // T-48-31-01 (CR-02): init.registrant.authorityId is chosen by the UNAUTHENTICATED requester
-    // (D-02) and covered only by the requester's own signature. RegistrationEngine.register()'s
-    // only cross-authority guard compares the payload against an ELECTION's authority
-    // (register(), registration-engine.ts's electionAuthorityId check) and cannot see the
-    // authority THIS request was addressed to. The only authority this approval may mint a
-    // Registrant under is extRow.AuthorityId — the one whose officer is signing DG-2 below. Refuse
-    // before any signature is consumed (allocateTid/seedSignedMutation, further down).
     if (init.registrant?.authorityId !== extRow.AuthorityId) {
       throw new Error(
-        `SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} payload registers under authority ${String(init.registrant?.authorityId)}, not the addressed authority ${extRow.AuthorityId}`
+        `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} payload registers under authority ${String(init.registrant?.authorityId)}, not the addressed authority ${extRow.AuthorityId}`
       )
     }
 
-    // T-48-31-02 (CR-03): init.registrant.id is also requester-chosen. The register() call below
-    // (register()-then-decide ordering) used to be conditioned on this same probe, silently
-    // SKIPPING register() on any id collision while the decision UPDATE still marked the request
-    // 'a' — an approval that reports success while creating nothing, and a "View Registrant" CTA
-    // that would point at someone else's record. Refuse here instead, before any signature is
-    // consumed, and make the register() call unconditional (see its own comment, further down, for
-    // why the old convergence guard is gone rather than merely relocated).
     const existingRegistrant = await ctx.db
       .prepare('select 1 from Registrant where Id = :id')
       .get({ id: init.registrant.id })
     if (existingRegistrant) {
       throw new Error(
-        `SignatureTasksEngine.finalizeRegistrantApproval: RegistrationRequest ${requestId} payload names an already-existing Registrant record that this approval did not create`
+        `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} payload names an already-existing Registrant record that this approval did not create`
       )
     }
+
+    return { requestId, authorityId: extRow.AuthorityId, init, submittedAt, receivedAt }
+  }
+
+  /**
+   * D-05/D-07 — the registrant accept ceremony. `RegistrationEngine.register()` is reused
+   * COMPLETELY UNCHANGED — it was always correct, and the defect this phase corrects was only
+   * ever that the voter app supplied a founding-officer key it held. This method changes WHO
+   * DRIVES `register()`, not what `register()` does. A second `register()`-shaped write path
+   * (an inline `insert into Registrant`, a copy of `register()`'s body, etc.) must never be
+   * created here.
+   */
+  private async finalizeRegistrantApproval (
+    taskId: string,
+    decision: RegistrationRequestDecision,
+    sign: (digest: Uint8Array) => Promise<Signature>
+  ): Promise<void> {
+    const ctx = this.ctx!
+
+    // T-48-34-05: defence in depth — completeSignature already calls this SAME gate BEFORE
+    // signingEngine.sign() (T-48-34-01/02), so by the time execution reaches here the payload has
+    // already been proven acceptable. This second call exists so a future caller that reaches
+    // finalizeRegistrantApproval directly gets the SAME refusals from the SAME producer — never a
+    // duplicated or drifted copy of the CR-02/CR-03 checks.
+    const { requestId, authorityId, init, submittedAt, receivedAt } = await this.resolveAcceptableRegistrantApproval(taskId)
 
     const tid = await allocateTid(ctx.db, 'registration-request')
 
@@ -1198,22 +1265,29 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // transitively covers the checklist. This runs under a 'vrg'-scoped AdminSigning ceremony —
     // AdminSigning.UserIdValid requires merely that the signer be some officer at that authority —
     // it does not require a 'vrg'-scoped officer specifically (Phase 999.1).
-    const decisionNonce = await seedSignedMutation(ctx, extRow.AuthorityId, 'vrg', tid, digestExpr, digestParams, sign)
+    const decisionNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
 
     // register()-then-decide ordering: register() opens its own BEGIN/COMMIT envelope and cannot
     // share a transaction with the decision UPDATE below, so the two are ordered register()-then-
-    // decide. register() is now UNCONDITIONAL — the CR-03 existence refusal above already ruled
-    // out an id collision, so there is nothing left to converge on here.
+    // decide. register() is now UNCONDITIONAL — the CR-03 existence refusal in
+    // resolveAcceptableRegistrantApproval already ruled out an id collision, so there is nothing
+    // left to converge on here.
     //
-    // T-48-11-11 (superseded): the previous existence-gated guard around this call was justified as
-    // making a RETRIED approval converge instead of colliding on the Registrant primary key. That
-    // convergence was already unreachable: completeSignature calls sign() (this task's header
-    // signature) BEFORE finalizeRegistrantApproval runs, and OfficerSignature's primary key is
-    // (SigningNonce, UserId) with a fixed per-task SigningNonce — a retried approval collides on
-    // that PK long before it would ever reach this guard. Removing the guard therefore removes no
-    // behaviour that was reachable; it only stops an id collision from being laundered into a
-    // silent no-op success. WR-05 (a finalize failure leaves this task un-retryable) is a separate,
-    // still-open concern this change does not fix.
+    // T-48-11-11 (superseded, and superseded AGAIN by WR-19/T-48-34): the previous existence-gated
+    // guard around this call was justified as making a RETRIED approval converge instead of
+    // colliding on the Registrant primary key. That reasoning is still correct as far as it goes —
+    // completeSignature calls sign() (this task's header signature) BEFORE
+    // finalizeRegistrantApproval runs, and OfficerSignature's primary key is (SigningNonce, UserId)
+    // with a fixed per-task SigningNonce, so a retried approval used to collide on that PK long
+    // before it would ever reach this guard — but its conclusion no longer applies to a REFUSED
+    // approval as of this plan: resolveAcceptableRegistrantApproval is now ALSO called from
+    // completeSignature, before sign() ever runs, so a payload this method would refuse never
+    // reaches that PK-collision ordering at all — the officer's signature is never spent, and a
+    // retried accept raises the SAME refusal rather than a UNIQUE constraint error. Removing the
+    // guard here therefore removes no behaviour that was reachable; it only stops an id collision
+    // from being laundered into a silent no-op success. WR-05 (a finalize failure AFTER this gate
+    // passes leaves this task un-retryable) is a separate, still-open concern this change does not
+    // fix.
     // RegistrationEngine.register() — reused COMPLETELY UNCHANGED, with the reviewing officer's
     // own device-signer callback. No wrapper, no reimplementation, no inline Registrant insert.
     await new RegistrationEngine(ctx).register(init, sign)
