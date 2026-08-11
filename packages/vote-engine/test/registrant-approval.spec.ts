@@ -15,7 +15,7 @@ import 'reflect-metadata'
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import { createTestNetwork, addTestAuthority, makeTestSignCallback } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, addSiblingAuthority, makeTestSignCallback } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
 import { digestToBytes } from '../src/utils.js'
@@ -643,6 +643,61 @@ describe('registrant approval ceremony', () => {
 
     const countsAfterRetry = await signatureRowCounts(auth, requestId)
     expect(countsAfterRetry.officer, 'after the retry, still no OfficerSignature row for the task\'s nonce').to.equal(0)
+  })
+
+  it('CR-02 (WR-21): refuses a payload naming a REAL sibling authority at which this SAME officer also serves — the dual-authority case AdminSigning.UserIdValid does not catch', async () => {
+    const auth = await setup()
+
+    // The case CR-02 actually described, and the one the original regression test did not build.
+    // That test used `crypto.randomUUID()` — an authority id with NO Authority row — so even the
+    // UNFIXED code would have been stopped by Registrant's own authority-existence CHECK, and
+    // only its `vrgCountBefore/After` assertion was discriminating. Here the sibling authority is
+    // REAL, it is in the SAME database, and `auth.user` is a genuine officer of it, so
+    // `AdminSigning.UserIdValid` does NOT accidentally save us: without the CR-02 refusal a real
+    // cross-authority Registrant could be minted under the sibling.
+    const siblingAuthorityId = await addSiblingAuthority(auth)
+    expect(siblingAuthorityId, 'the sibling authority must be a real, distinct Authority row').to.not.equal(auth.authority.id)
+
+    // Fixture integrity — assert the dual-officer premise rather than assuming it. If this ever
+    // stops holding, the test stops being the dual-authority case and silently becomes the old,
+    // narrower one.
+    const siblingOfficerCount = await countRows(
+      auth.ctx,
+      'select count(*) as n from Officer where AuthorityId = :authorityId and UserId = :userId',
+      { authorityId: siblingAuthorityId, userId: auth.user.id }
+    )
+    expect(siblingOfficerCount, 'the signing officer must genuinely be an officer of the sibling authority').to.be.greaterThan(0)
+
+    // The request is ADDRESSED to auth.authority.id; only the payload names the sibling.
+    const { requestId } = await submitPendingRequest(auth, { payloadAuthorityId: siblingAuthorityId })
+    const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
+    await engine.getRequestedSignatures(true)
+
+    let thrownMessage: string | undefined
+    try {
+      await acceptRequest(engine, auth, requestId)
+    } catch (err) {
+      thrownMessage = (err as Error).message
+    }
+    expect(thrownMessage, 'a payload naming a sibling authority must be refused').to.not.be.undefined
+    expect(thrownMessage, 'the refusal must name the addressed authority').to.include(auth.authority.id)
+    expect(thrownMessage, "the refusal must name the payload's authority").to.include(siblingAuthorityId)
+
+    // The assertion WR-21 asked for by name: nothing was minted UNDER THE SIBLING.
+    const siblingRegistrants = await countRows(
+      auth.ctx,
+      'select count(*) as n from Registrant where AuthorityId = :authorityId',
+      { authorityId: siblingAuthorityId }
+    )
+    expect(siblingRegistrants, 'no Registrant may exist under the sibling authority after a refused approval').to.equal(0)
+
+    // And the officer's signature was not spent (WR-19 ordering still holds on this variant).
+    const counts = await signatureRowCounts(auth, requestId)
+    expect(counts.officer, "a refused approval must not consume the officer's signature").to.equal(0)
+    expect(counts.admin, 'a refused approval must not mint an AdminSignature row').to.equal(0)
+
+    const reqRow = await auth.ctx.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: requestId })
+    expect(reqRow!.Status, 'a refused request must remain pending').to.equal('p')
   })
 
   it('CR-03: refuses an approval whose payload reuses an existing Registrant id, creating nothing and leaving the request pending', async () => {
