@@ -87,16 +87,41 @@ function buildRegistrationRequestListFragment (filter?: RegistrationRequestListF
     params.issuerType = filter.issuerType
   }
   if (filter?.name !== undefined) {
-    // RegistrationRequest carries no denormalized name column (unlike
-    // RegistrantPublic.LastName/FirstName on the roster read) — this is a
-    // PAYLOAD SUBSTRING MATCH against the stored RegisterInit JSON text,
-    // not a structured name search. A future denormalization (a generated
-    // LastName/FirstName column populated at INSERT) would be an obvious
-    // improvement; this is a documented limitation, not a silent bug.
-    // Mirrors registrant-list-query.ts's own `like`-only idiom (no `lower`
-    // wrapper, no `escape` clause — D-04/RESEARCH-Open-Question-2).
-    where += ' and R.Payload like :nameQuery'
-    params.nameQuery = `%${filter.name}%`
+    // WR-12. The previous predicate was `R.Payload like '%<name>%'` — a raw substring match over
+    // the WHOLE serialized RegisterInit, private tier included. That made the inbox search box an
+    // ORACLE over the private tier: typing a candidate SSN, date of birth or phone number
+    // confirmed or denied its presence in a pending request, defeating the never-log/never-
+    // disclose discipline the rest of this phase maintains around `private.details`. It also
+    // matched ids, keys, cids and timestamps — any of which could make an unrelated request
+    // surface under a name search.
+    //
+    // The predicate is now restricted to the PUBLIC tier's two name fields, read structurally via
+    // `json_extract` (the same `cast(json_extract(...) as text)` idiom votetorrent.qsql already
+    // uses for `SlotCidValid`; the cast is required because json_extract's JSON-typed return is
+    // not directly comparable). A missing path, a malformed Payload or a non-string value all
+    // yield `null` rather than throwing, so such a row is simply excluded — a request whose
+    // payload will not parse must not crash the officer's inbox.
+    //
+    // `instr(lower(...), lower(:nameQuery)) > 0` replaces `like` deliberately, and it closes the
+    // second half of WR-12 at the same time: `like`'s `%`/`_` are wildcards, and Quereus does NOT
+    // support the `escape` clause (re-confirmed by probe against the installed engine — the same
+    // finding this module's previous comment recorded as D-04/RESEARCH-Open-Question-2), so an
+    // unescaped bound term containing `%` silently broadened the query and no escape mechanism
+    // existed to fix it in place. `instr` has no metacharacters at all, so the search term matches
+    // literally and there is nothing to escape. `lower(...)` on both sides makes the match
+    // case-insensitive, which also brings this read into parity with
+    // `MockRegistrationEngine.listRegistrationRequests` — that mock already filtered
+    // case-insensitively on exactly these two public fields, so the mock was right and the real
+    // engine was the surface that disagreed.
+    //
+    // One documented limitation is unchanged: RegistrationRequest carries no denormalized
+    // LastName/FirstName column (unlike RegistrantPublic on the roster read), so this remains an
+    // unindexed per-row JSON read. A generated column populated at INSERT is still the obvious
+    // future improvement.
+    where +=
+      " and (instr(lower(cast(json_extract(R.Payload, '$.public.lastName') as text)), lower(:nameQuery)) > 0" +
+      " or instr(lower(cast(json_extract(R.Payload, '$.public.firstName') as text)), lower(:nameQuery)) > 0)"
+    params.nameQuery = filter.name
   }
 
   return { from, where, params }

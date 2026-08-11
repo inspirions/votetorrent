@@ -436,6 +436,61 @@ describe('listRegistrationRequests', () => {
     expect(firstTimeRow.hasPriorRejections, 'a first-time key').to.equal(false)
     expect(rejectedRow.hasPriorRejections, 'a rejected request does not count itself as its own prior rejection').to.equal(false)
   })
+
+  it('WR-12: filter.name matches the PUBLIC name fields only — it is not an oracle over the private tier, and % is not a wildcard', async () => {
+    const auth = await addTestAuthority(await createTestNetwork())
+    const engine = new RegistrationEngine(auth.ctx)
+
+    // A payload whose PRIVATE tier carries a distinctive sentinel that appears nowhere in the
+    // public tier. Before WR-12 the filter was `R.Payload like '%<name>%'` over the whole
+    // serialized RegisterInit, so typing this sentinel into the inbox search box returned the row
+    // — confirming the value's presence in a pending request and turning a name search into an
+    // oracle over exactly the tier this phase never logs or discloses.
+    const privateSentinel = '555-90-1234'
+    const target = await seedRequest(auth, {
+      payload: {
+        registrant: { id: crypto.randomUUID(), authorityId: auth.authority.id, expiration: FUTURE_EXPIRATION },
+        public: { lastName: 'Okonkwo', firstName: 'Ada' },
+        private: { expiration: FUTURE_EXPIRATION, details: [{ name: 'ssn', value: privateSentinel }] }
+      } as RegisterInit
+    })
+    await seedRequest(auth, {
+      payload: {
+        registrant: { id: crypto.randomUUID(), authorityId: auth.authority.id, expiration: FUTURE_EXPIRATION },
+        public: { lastName: 'Nakamura', firstName: 'Kenji' },
+        private: { expiration: FUTURE_EXPIRATION, details: [] }
+      } as RegisterInit
+    })
+
+    const byPrivate = await engine.listRegistrationRequests({ authorityId: auth.authority.id, name: privateSentinel })
+    expect(
+      byPrivate.rows,
+      'a private-tier value must never be reachable through the name filter — the search box must not be an oracle over private.details'
+    ).to.deep.equal([])
+
+    // The filter still does its actual job, on the public tier, case-insensitively.
+    const byLastName = await engine.listRegistrationRequests({ authorityId: auth.authority.id, name: 'okon' })
+    expect(byLastName.rows.map((r) => r.requestId)).to.deep.equal([target.id])
+
+    const byFirstName = await engine.listRegistrationRequests({ authorityId: auth.authority.id, name: 'ADA' })
+    expect(byFirstName.rows.map((r) => r.requestId)).to.deep.equal([target.id])
+
+    // `%` is matched LITERALLY now, not as a wildcard. Under the old `like '%<name>%'` form this
+    // query returned every row; Quereus supports no `escape` clause, so escaping was not an
+    // available fix — the metacharacter-free `instr` is.
+    const byWildcard = await engine.listRegistrationRequests({ authorityId: auth.authority.id, name: '%' })
+    expect(byWildcard.rows, "a bare '%' must match nothing — it is a literal, not a wildcard").to.deep.equal([])
+
+    // A request with no public tier at all must be excluded, not crash the inbox.
+    await seedRequest(auth, {
+      payload: {
+        registrant: { id: crypto.randomUUID(), authorityId: auth.authority.id, expiration: FUTURE_EXPIRATION },
+        private: { expiration: FUTURE_EXPIRATION, details: [] }
+      } as RegisterInit
+    })
+    const stillWorks = await engine.listRegistrationRequests({ authorityId: auth.authority.id, name: 'okon' })
+    expect(stillWorks.rows.map((r) => r.requestId)).to.deep.equal([target.id])
+  })
 })
 
 // ---------------------------------------------------------------------------
