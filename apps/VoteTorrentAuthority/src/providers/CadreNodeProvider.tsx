@@ -242,26 +242,25 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
             // Per-strand enrollment gating is v2.x scope.
             connectionGater: { denyDialMultiaddr: async () => false },
           } as any,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          // STRAND node network override (cadre-core strandNetwork patch, P2P-11 41-11):
-          // per-strand libp2p nodes use THIS config instead of `network` above, reserving
-          // through the drone's STRAND relay — a DISTINCT relay identity from the control
-          // node — closing the shared-PeerId hop-connect collision (41-10 diagnosis §5).
-          // Unset ⇒ strands would reuse `network` (the pre-fix collision).
-          strandNetwork: {
-            transports: [
-              webSockets(),
-              circuitRelayTransport({
-                reservationConcurrency: Math.max(1, STRAND_RELAY_LISTEN_ADDRS.length),
-              }) as unknown as ReturnType<typeof webSockets>,
-            ],
-            listenAddrs: STRAND_RELAY_LISTEN_ADDRS,
-            connectionGater: { denyDialMultiaddr: async () => false },
-            // NETOP-04: strand-cohort bootstrap — the drone's strand-node multiaddr.
-            // Placeholder/unset → [] → strand boots solo without crashing (P2P-03 no regression).
-            // For the proof, harness injects a real STRAND_BOOTSTRAP_ADDR per-run.
-            strandBootstrapNodes: resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR),
-          } as any,
+          // SPIKE 062 — the `strandNetwork` override block is REMOVED on cadre-core 0.10.0.
+          //
+          // It was VT's 41-11 workaround for the shared-PeerId circuit-relay-v2 collision:
+          // give strand nodes a SECOND relay identity so the relay could not misroute their
+          // streams onto the control connection. Upstream fixed the root cause instead —
+          // `strandTransportKey(identityKey, strandId)` gives each strand its OWN derived
+          // transport peerId (sereus#1, spike 059) — so one relay is now correct and the
+          // two-relay topology is obsolete.
+          //
+          // Both keys this block carried are DEAD CONFIG on 0.10.0 (verified: zero
+          // occurrences of either in the published types/dist):
+          //   - `strandNetwork`         — the config key our dropped yarn-patch added
+          //   - `strandBootstrapNodes`  — replaced by `resolveCohortSeed`, which derives
+          //     strand peers from the CONTROL cohort (`queryCadrePeers()` → siblings with a
+          //     live control connection → `/sereus/strand-addr/1.0.0` RPC), not from an
+          //     app-supplied strand multiaddr.
+          //
+          // Strand nodes therefore inherit `network` above (the single control relay), which
+          // is the topology upstream's delegate-admission path expects.
           hibernation: { enabled: false },
         });
 

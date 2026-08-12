@@ -243,25 +243,32 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
             connectionGater: { denyDialMultiaddr: async () => false },
           } as any,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          // STRAND node network override (cadre-core strandNetwork patch, P2P-11 41-11):
-          // per-strand libp2p nodes use THIS config instead of `network` above, reserving
-          // through the drone's STRAND relay — a DISTINCT relay identity from the control
-          // node — closing the shared-PeerId hop-connect collision (41-10 diagnosis §5).
-          // Unset ⇒ strands would reuse `network` (the pre-fix collision).
-          strandNetwork: {
-            transports: [
-              webSockets(),
-              circuitRelayTransport({
-                reservationConcurrency: Math.max(1, STRAND_RELAY_LISTEN_ADDRS.length),
-              }) as unknown as ReturnType<typeof webSockets>,
-            ],
-            listenAddrs: STRAND_RELAY_LISTEN_ADDRS,
-            connectionGater: { denyDialMultiaddr: async () => false },
-            // NETOP-04: strand-cohort bootstrap — the drone's strand-node multiaddr.
-            // Placeholder/unset → [] → strand boots solo without crashing (P2P-03 no regression).
-            // For the proof, harness injects a real STRAND_BOOTSTRAP_ADDR per-run.
-            strandBootstrapNodes: resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR),
-          } as any,
+          // On cadre-core 0.10.0 the `strandNetwork` override block is REMOVED.
+          //
+          // It was VT's 41-11 workaround for the shared-peerId circuit-relay-v2 collision: give
+          // strand nodes a SECOND relay identity so the relay could not misroute their streams
+          // onto the control connection. Upstream fixed the ROOT CAUSE instead — each strand
+          // node now derives its OWN transport peerId via
+          // `strandTransportKey(identityKey, strandId)` — so one relay is correct and the
+          // two-relay topology is obsolete.
+          //
+          // IMPORTANT (supersedes the earlier "peer id duplication" framing): a peerId is NO
+          // LONGER the cadre's authority key. Every libp2p node a cadre runs gets its own
+          // transport identity; cadre AUTHORITY is unchanged and stays on the control node,
+          // where the peerId->authority derivation (`ed25519PublicKeyB64FromPeerId`) is a
+          // control-network path only. The collision was never an authority/owner problem —
+          // it was one identity being reused across several libp2p nodes, and it is resolved
+          // by letting each node hold its own id.
+          //
+          // Both keys this block carried are DEAD CONFIG on 0.10.0 (zero occurrences in the
+          // published types/dist):
+          //   - `strandNetwork`        — the key our now-retired yarn-patch added
+          //   - `strandBootstrapNodes` — replaced by `resolveCohortSeed`, which derives strand
+          //     peers from the CONTROL cohort (`queryCadrePeers()` -> siblings with a live
+          //     control connection -> `/sereus/strand-addr/1.0.0` RPC), not from an
+          //     app-supplied strand multiaddr.
+          //
+          // Strand nodes therefore inherit `network` above (the single control relay).
           hibernation: { enabled: false },
         });
 

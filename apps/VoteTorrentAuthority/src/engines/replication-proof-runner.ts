@@ -206,29 +206,32 @@ export async function runReplicationProof(): Promise<void> {
         connectionGater: { denyDialMultiaddr: async () => false },
       } as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      // STRAND node network override (cadre-core strandNetwork patch, P2P-11 41-11): the
-      // per-strand libp2p node reserves through the drones' STRAND relays — a DISTINCT relay
-      // identity from the control node above — closing the shared-PeerId hop-connect collision
-      // (41-10 diagnosis §5). Unset ⇒ strands would reuse `network` (the pre-fix collision).
-      strandNetwork: {
-        transports: [
-          webSockets(),
-          circuitRelayTransport({
-            reservationConcurrency: Math.max(1, STRAND_RELAY_LISTEN_ADDRS.length),
-          }) as unknown as ReturnType<typeof webSockets>,
-        ],
-        listenAddrs: STRAND_RELAY_LISTEN_ADDRS,
-        connectionGater: { denyDialMultiaddr: async () => false },
-        // REPL-01: strand-cohort bootstrap — the drones' strand-node multiaddrs (injected
-        // per-run). 38-05 (D-04 n=4): both drone-A and drone-B addrs are included so the
-        // emulator dials BOTH voting-member drones; each is independently placeholder-aware
-        // (resolveBootstrapNodes → [] for an unset/placeholder addr), so a single-drone run
-        // (drone-B addr left as placeholder) degrades cleanly to the pre-38-05 behavior.
-        strandBootstrapNodes: [
-          ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR),
-          ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR_B),
-        ],
-      } as any,
+        // On cadre-core 0.10.0 the `strandNetwork` override block is REMOVED.
+        //
+        // It was VT's 41-11 workaround for the shared-peerId circuit-relay-v2 collision: give
+        // strand nodes a SECOND relay identity so the relay could not misroute their streams
+        // onto the control connection. Upstream fixed the ROOT CAUSE instead — each strand
+        // node now derives its OWN transport peerId via
+        // `strandTransportKey(identityKey, strandId)` — so one relay is correct and the
+        // two-relay topology is obsolete.
+        //
+        // IMPORTANT (supersedes the earlier "peer id duplication" framing): a peerId is NO
+        // LONGER the cadre's authority key. Every libp2p node a cadre runs gets its own
+        // transport identity; cadre AUTHORITY is unchanged and stays on the control node,
+        // where the peerId->authority derivation (`ed25519PublicKeyB64FromPeerId`) is a
+        // control-network path only. The collision was never an authority/owner problem —
+        // it was one identity being reused across several libp2p nodes, and it is resolved
+        // by letting each node hold its own id.
+        //
+        // Both keys this block carried are DEAD CONFIG on 0.10.0 (zero occurrences in the
+        // published types/dist):
+        //   - `strandNetwork`        — the key our now-retired yarn-patch added
+        //   - `strandBootstrapNodes` — replaced by `resolveCohortSeed`, which derives strand
+        //     peers from the CONTROL cohort (`queryCadrePeers()` -> siblings with a live
+        //     control connection -> `/sereus/strand-addr/1.0.0` RPC), not from an
+        //     app-supplied strand multiaddr.
+        //
+        // Strand nodes therefore inherit `network` above (the single control relay).
       hibernation: { enabled: false },
     });
 
@@ -351,11 +354,51 @@ export async function runReplicationProof(): Promise<void> {
       // The shoe-in branch needs SigningNonce/InviteSignature null + count(*)=1 (the per-run
       // wipe guarantees the empty table). 'Authority' resolves to 'App.Authority' via the
       // setSchemaPath set by createStrandDbFactory (D-14).
-      await strandDb.exec(
-        `insert into Authority (Id, Name)
-          with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
-          values ('${proofAuthId}', '${proofNetworkName}');`,
-      );
+      //
+      // IDEMPOTENCE (spike 062). `proofAuthId` is `repl-auth-<peerTail>` — deterministic per
+      // peer — and D-05 deliberately proves the peerId is STABLE across restart while the
+      // strand store SURVIVES the relaunch. So on the harness's D-05 relaunch leg this insert
+      // re-ran against a table that already held this peer's own row and died with
+      // `UNIQUE constraint failed: Authority.Id`, which aborted the write phase and left the
+      // sibling with nothing new to read.
+      //
+      // Re-inserting is also impossible by design once the table is non-empty: `InsertValid`'s
+      // shoe-in branch requires `(select count(*) from Authority) = 1`, so a second Authority
+      // row — this peer's own from a prior boot, OR the sibling's once replication WORKS — is
+      // rejected regardless of the Id. A per-run-unique Id would therefore not have helped.
+      //
+      // The proof's actual question is "did the OTHER peer's row arrive", so this peer having
+      // already contributed its row is SUCCESS, not failure. Check first, insert only when
+      // absent, and treat an Id collision as benign if we lose the race.
+      let alreadyContributed = false;
+      for await (const row of strandDb.eval(
+        `SELECT Id FROM Authority WHERE Id = '${proofAuthId}'`,
+      )) {
+        if (row && row['Id']) {
+          alreadyContributed = true;
+          break;
+        }
+      }
+      if (alreadyContributed) {
+        L('write phase: own row already present, skipping insert (idempotent)', proofAuthId);
+      } else {
+        try {
+          await strandDb.exec(
+            `insert into Authority (Id, Name)
+              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+              values ('${proofAuthId}', '${proofNetworkName}');`,
+          );
+        } catch (insertErr) {
+          const msg = insertErr instanceof Error ? insertErr.message : String(insertErr);
+          // Benign only when it is OUR OWN row that already exists; anything else is a real
+          // write failure and must still surface.
+          if (/UNIQUE constraint failed: Authority\.Id/.test(msg)) {
+            L('write phase: own row raced in, treating as contributed (idempotent)', proofAuthId);
+          } else {
+            throw insertErr;
+          }
+        }
+      }
     } catch (writeErr) {
       // Write phase error — log the error; proof continues to the read phase which will FAIL.
       L('WARN write phase error (proof will FAIL):', writeErr instanceof Error ? writeErr.message : String(writeErr));

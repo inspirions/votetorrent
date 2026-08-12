@@ -1,67 +1,9 @@
-diff --git a/dist/src/runtime/emit/constraint-check.js b/dist/src/runtime/emit/constraint-check.js
-index ef1d270b44c4cb7bed31d168c794f21d1ea88f7e..3ea1f6a0ffe7365f3b0917c540da84a2e95e01d2 100644
---- a/dist/src/runtime/emit/constraint-check.js
-+++ b/dist/src/runtime/emit/constraint-check.js
-@@ -268,7 +268,18 @@ async function checkCheckConstraints(rctx, plan, tableSchema, constraintMetadata
-         const mustEvaluateNow = effectiveAction !== ConflictResolution.ABORT;
-         if (metadata.shouldDefer && !mustEvaluateNow) {
-             const activeConnectionId = rctx.activeConnection?.connectionId;
--            rctx.db._queueDeferredConstraintRow(metadata.baseTable, metadata.constraintName, flatRow, metadata.flatRowDescriptor, evaluator, activeConnectionId, metadata.contextRow, metadata.contextDescriptor);
-+            // VoteTorrent patch (datetime-immediate-check-coercion), part 2 of 2:
-+            // restore 4.3.1's `coerceNewSection` on the DEFERRED path. 4.3.1 kept a
-+            // deliberate split — IMMEDIATE CHECKs saw the value as provided, DEFERRED
-+            // CHECKs saw the coerced form, because a deferred subquery compares NEW
-+            // against already-coerced stored rows in OTHER tables (coerced-vs-coerced
-+            // equality). 4.4.1 collapsed the split to coerced-everywhere by converting
-+            // up front in emitInsert/emitUpdate and deleted coerceNewSection. Since
-+            // this patch turns the up-front conversion back off (see insert.js), the
-+            // deferred snapshot has to coerce again or cross-table digest equality
-+            // (e.g. Registrant.MutationValid comparing Digest(..., new.Expiration, ...)
-+            // against a stored AdminSigning.Digest) breaks.
-+            rctx.db._queueDeferredConstraintRow(metadata.baseTable, metadata.constraintName, coerceNewSection(flatRow, tableSchema), metadata.flatRowDescriptor, evaluator, activeConnectionId, metadata.contextRow, metadata.contextDescriptor);
-             continue;
-         }
-         // Resolve without a per-row microtask hop (see runtime/async-util.ts).
-@@ -296,6 +307,33 @@ async function checkCheckConstraints(rctx, plan, tableSchema, constraintMetadata
-     }
-     return { skip: false };
- }
-+/**
-+ * VoteTorrent patch (datetime-immediate-check-coercion), part 2 of 2.
-+ * Verbatim port of 4.3.1's `coerceNewSection` (deleted in 4.4.1). Snapshot the flat
-+ * OLD/NEW row for deferred evaluation, coercing the NEW half to declared column types.
-+ * OLD values (0..n-1) are NULL on INSERT or read from already-coerced stored rows on
-+ * UPDATE, so they are left untouched. A per-cell parse failure falls back to the raw
-+ * value, preserving the existing error semantics — the row's own performInsert remains
-+ * the authoritative place that throws MISMATCH.
-+ */
-+function coerceNewSection(row, tableSchema) {
-+    const numCols = tableSchema.columns.length;
-+    const snapshot = row.slice();
-+    for (let i = 0; i < numCols; i++) {
-+        const newIndex = numCols + i;
-+        if (newIndex >= snapshot.length)
-+            break;
-+        const column = tableSchema.columns[i];
-+        const value = snapshot[newIndex];
-+        try {
-+            snapshot[newIndex] = validateAndParse(value, column.logicalType, column.name);
-+        }
-+        catch {
-+            // Keep the raw value; downstream performInsert reports the error as today.
-+        }
-+    }
-+    return snapshot;
-+}
- function generateDefaultConstraintName(tableSchema, constraint) {
-     // Find the index of this constraint in the original array to get the correct constraint number
-     const originalIndex = tableSchema.checkConstraints.findIndex((c) => c === constraint);
 diff --git a/dist/src/runtime/emit/dml-executor.js b/dist/src/runtime/emit/dml-executor.js
-index 61980aeb20358a2e7ba2dda7d6e7fad8e7e47db2..f22b006ce4d0fe116f9a1347410cbad7f90aa9fd 100644
+index 6fa901186ee05ead470edca38abaed037803213f..3ad11f0c8bfe8ef0f2697b39258214bfb855264a 100644
 --- a/dist/src/runtime/emit/dml-executor.js
 +++ b/dist/src/runtime/emit/dml-executor.js
-@@ -389,14 +389,16 @@ export function emitDmlExecutor(plan, ctx) {
-         }
+@@ -588,14 +588,16 @@ export function emitDmlExecutor(plan, ctx) {
+         await assertTransitiveRestrictsForParentMutation(rctx.db, tableSchema, 'update', existingRow, updatedRow, plan.lensRouted);
          // Extract the primary key from existing row
          const keyValues = pkColumnIndicesInSchema.map(idx => existingRow[idx]);
 -        // Perform the UPDATE operation. `preCoerced`: the row is composed of
@@ -80,7 +22,7 @@ index 61980aeb20358a2e7ba2dda7d6e7fad8e7e47db2..f22b006ce4d0fe116f9a1347410cbad7
              mutationStatement: vtab.wantStatements ?
                  buildUpdateStatement(tableSchema, updatedRow, keyValues, contextRow) : undefined
          };
-@@ -665,10 +667,11 @@ export function emitDmlExecutor(plan, ctx) {
+@@ -914,10 +916,11 @@ export function emitDmlExecutor(plan, ctx) {
              // can fall back to per-constraint defaultConflict directives. The memory
              // module treats undefined as ABORT when no constraint default is set.
              onConflict: plan.onConflict,
@@ -95,8 +37,8 @@ index 61980aeb20358a2e7ba2dda7d6e7fad8e7e47db2..f22b006ce4d0fe116f9a1347410cbad7
 +            preCoerced: false,
              mutationStatement
          };
-         const result = await vtab.update(args);
-@@ -862,10 +865,10 @@ export function emitDmlExecutor(plan, ctx) {
+         if (REPR_STRICT)
+@@ -1099,10 +1102,10 @@ export function emitDmlExecutor(plan, ctx) {
              // can fall back to per-constraint defaultConflict directives. The memory
              // module treats undefined as ABORT when no constraint default is set.
              onConflict: plan.onConflict,
@@ -110,7 +52,7 @@ index 61980aeb20358a2e7ba2dda7d6e7fad8e7e47db2..f22b006ce4d0fe116f9a1347410cbad7
 +            preCoerced: false,
              mutationStatement
          };
-         const result = await vtab.update(args);
+         if (REPR_STRICT)
 diff --git a/dist/src/runtime/emit/insert.js b/dist/src/runtime/emit/insert.js
 index 9402d71b8efbf72e2dfbe1a6e4430adea271bd5a..12ea2930dd1365155731f70b871a1b2a4a26b8d8 100644
 --- a/dist/src/runtime/emit/insert.js
@@ -142,10 +84,10 @@ index 9402d71b8efbf72e2dfbe1a6e4430adea271bd5a..12ea2930dd1365155731f70b871a1b2a
          for await (const sourceRow of sourceValue) {
              // Convert source row to flat OLD/NEW format
 diff --git a/dist/src/runtime/emit/schema-declarative.js b/dist/src/runtime/emit/schema-declarative.js
-index dd17c058f1b21ae25f7f79a918da0064a8e6db17..36583d955743f3eb7f6b60b2ef6e80b7bb518aa6 100644
+index bf4a8ba5403821a1c0fe29a78d27fdfcd1d37424..6a03308e88a18b528e19a9073b379645759a665e 100644
 --- a/dist/src/runtime/emit/schema-declarative.js
 +++ b/dist/src/runtime/emit/schema-declarative.js
-@@ -308,6 +308,19 @@ export function emitExplainSchema(plan, _ctx) {
+@@ -338,6 +338,19 @@ export function emitExplainSchema(plan, _ctx) {
   * pay nothing — they're filtered out before the loop.
   */
  async function runBatchedMigrationLoop(db, schemaName, migrationStatements) {
@@ -165,7 +107,7 @@ index dd17c058f1b21ae25f7f79a918da0064a8e6db17..36583d955743f3eb7f6b60b2ef6e80b7
      const startedModules = await beginSchemaBatchAll(db, schemaName);
      let loopError;
      try {
-@@ -329,6 +342,10 @@ async function runBatchedMigrationLoop(db, schemaName, migrationStatements) {
+@@ -359,6 +372,10 @@ async function runBatchedMigrationLoop(db, schemaName, migrationStatements) {
      }
      finally {
          await endSchemaBatchAll(startedModules, db, schemaName, loopError);
@@ -177,10 +119,10 @@ index dd17c058f1b21ae25f7f79a918da0064a8e6db17..36583d955743f3eb7f6b60b2ef6e80b7
  }
  /**
 diff --git a/dist/src/runtime/emit/update.js b/dist/src/runtime/emit/update.js
-index dd9a3f377d0c6bf2a3eacc4d0f374581547f867c..2187f841c411678fd0215b2852781f5b7445a77b 100644
+index 174a602ca88f3f514294c99fc043f78c6da56cbc..4ec3edd1d74dcca3516d07bd68d8b59b1359b66d 100644
 --- a/dist/src/runtime/emit/update.js
 +++ b/dist/src/runtime/emit/update.js
-@@ -48,21 +48,16 @@ export function emitUpdate(plan, ctx) {
+@@ -48,21 +48,18 @@ export function emitUpdate(plan, ctx) {
      // type differs), phase 2 the generated cells. A generated column left in
      // place by phase 1 still holds its scanned value, which is already in
      // declared form.
@@ -206,69 +148,60 @@ index dd9a3f377d0c6bf2a3eacc4d0f374581547f867c..2187f841c411678fd0215b2852781f5b
 +    // columns); both are disabled so an immediate CHECK on UPDATE evaluates the
 +    // assigned value as provided, exactly as on 4.3.1. Storage coerces instead
 +    // (`preCoerced: false` in dml-executor.js).
++    // Forward-ported 4.4.1 -> 4.11.0 (spike 060): block is byte-identical to the
++    // 4.4.1 original; only its trailing context moved (generatedRowDescriptor).
 +    // ---------------------------------------------------------------------------
 +    const coerceRegular = undefined;
 +    const coerceGenerated = undefined;
-     async function* run(rctx, sourceRowsIterable, ...assignmentEvaluators) {
-         const slot = createRowSlot(rctx, sourceRowDescriptor);
-         try {
-diff --git a/dist/src/schema/schema-differ.js b/dist/src/schema/schema-differ.js
-index 91ba9419d2c4a3a30ae260ebacc3a30ad31d67d2..9d8df7c159a8295c77b63763253ae754d2815a93 100644
---- a/dist/src/schema/schema-differ.js
-+++ b/dist/src/schema/schema-differ.js
-@@ -379,7 +379,7 @@ defaultCollation = 'BINARY') {
-     for (const [name, declaredView] of declaredViews) {
-         const matchedActual = viewRenames.pairs.get(name);
-         if (!matchedActual) {
--            diff.viewsToCreate.push(createViewToString(declaredView.viewStmt));
-+            diff.viewsToCreate.push(createViewToString(applyViewDefaults(declaredView.viewStmt, targetSchemaName)));
+     // Distinct descriptor object carrying the same attribute IDs as `sourceRowDescriptor`,
+     // so tearing the phase-2 context down does not evict the streaming source slot (the
+     // context map is keyed by descriptor identity).
+diff --git a/dist/src/runtime/row-constraints.js b/dist/src/runtime/row-constraints.js
+index 48226c88d2dab3954cbe436208e18da8f653b798..0bdad49817d2fce4cabf85dbc1a2540b8c0ee107 100644
+--- a/dist/src/runtime/row-constraints.js
++++ b/dist/src/runtime/row-constraints.js
+@@ -214,7 +214,7 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
+                 }
+                 return result;
+             };
+-            rctx.db._queueDeferredConstraintRow(metadata.baseTable, metadata.constraintName, flatRow, metadata.flatRowDescriptor, deferredEvaluator, activeConnectionId, contextRow, metadata.contextDescriptor);
++            rctx.db._queueDeferredConstraintRow(metadata.baseTable, metadata.constraintName, coerceNewSection(flatRow, tableSchema), metadata.flatRowDescriptor, deferredEvaluator, activeConnectionId, contextRow, metadata.contextDescriptor);
              continue;
          }
-         const stmt = declaredView.viewStmt;
-@@ -391,7 +391,7 @@ defaultCollation = 'BINARY') {
-         }
-         if (definitionDrifted) {
-             diff.viewsToDrop.push(matchedActual.name);
--            diff.viewsToCreate.push(createViewToString(stmt));
-+            diff.viewsToCreate.push(createViewToString(applyViewDefaults(stmt, targetSchemaName)));
-             viewRecreates++;
-             continue;
-         }
-@@ -399,7 +399,7 @@ defaultCollation = 'BINARY') {
-             // Hinted rename, definition unchanged → drop(old) + recreate(declared),
-             // rendered with in-diff column renames inverse-applied (NEW→OLD).
-             diff.viewsToDrop.push(matchedActual.name);
--            diff.viewsToCreate.push(createViewToString(columnReconciledViewStmt(stmt, columnRenamesByTable, targetSchemaName, resolveDeclaredColumn)));
-+            diff.viewsToCreate.push(createViewToString(applyViewDefaults(columnReconciledViewStmt(stmt, columnRenamesByTable, targetSchemaName, resolveDeclaredColumn), targetSchemaName)));
-             viewRecreates++;
-             continue;
-         }
-@@ -745,6 +745,28 @@ function applyIndexDefaults(indexStmt, targetSchemaName) {
-     }
-     return result;
+         // Resolve without a per-row microtask hop (see runtime/async-util.ts).
+@@ -237,3 +237,35 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
+     return { skip: false };
  }
+ //# sourceMappingURL=row-constraints.js.map
++
 +/**
-+ * Applies schema name to a view statement.
-+ * Mirror of applyTableDefaults/applyIndexDefaults: qualify the view with the target
-+ * schema so `apply schema App { view X }` creates App.X (not main.X). Without this,
-+ * unqualified views default to 'main' (create-view.js), so a CHECK constraint on an
-+ * App table resolving a sibling view against its own schema path ('App') fails with
-+ * "Table 'X' not found in schema path: App".
++ * VoteTorrent patch (datetime-immediate-check-coercion), part 2 of 2.
++ * Verbatim port of 4.3.1's `coerceNewSection` (deleted in 4.4.1). Snapshot the flat
++ * OLD/NEW row for deferred evaluation, coercing the NEW half to declared column types.
++ * OLD values (0..n-1) are NULL on INSERT or read from already-coerced stored rows on
++ * UPDATE, so they are left untouched. A per-cell parse failure falls back to the raw
++ * value, preserving the existing error semantics — the row's own performInsert remains
++ * the authoritative place that throws MISMATCH.
 + *
-+ * VoteTorrent patch: forward-ported from the 3.3.0 patch (Piece 1) to 4.2.1 → 4.3.1 → 4.4.1.
++ * Forward-ported 4.4.1 -> 4.11.0 (spike 060): 4.11.0 moved the deferred-queue call out
++ * of runtime/emit/constraint-check.js into this module, so the helper moved with it.
++ * `validateAndParse` is already imported here — no new import needed.
 + */
-+function applyViewDefaults(viewStmt, targetSchemaName) {
-+    if (targetSchemaName && targetSchemaName !== 'main' && !viewStmt.view.schema) {
-+        return {
-+            ...viewStmt,
-+            view: {
-+                ...viewStmt.view,
-+                schema: targetSchemaName
-+            }
-+        };
++function coerceNewSection(row, tableSchema) {
++    const numCols = tableSchema.columns.length;
++    const snapshot = row.slice();
++    for (let i = 0; i < numCols; i++) {
++        const newIndex = numCols + i;
++        if (newIndex >= snapshot.length)
++            break;
++        const column = tableSchema.columns[i];
++        const value = snapshot[newIndex];
++        try {
++            snapshot[newIndex] = validateAndParse(value, column.logicalType, column.name);
++        }
++        catch {
++            // Keep the raw value; downstream performInsert reports the error as today.
++        }
 +    }
-+    return viewStmt;
++    return snapshot;
 +}
- /**
-  * Reads an index column's EXPLICIT per-column collation as-written, covering both
-  * indexed-column forms: the plain `col.collation` and the parser's collate-folded

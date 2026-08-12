@@ -142,7 +142,14 @@ const NETWORK_CLOSE = 'hibernation' + ': { enabled: false }'
 // inside listenAddrs. Search the WHOLE (comment-stripped) file, not just the network-body slice.
 const QUALIFIED_ADDR_TEMPLATE_MARKER = '${addr}' + '/p2p' + '-circuit'
 // The listenAddrs assignment must reference the qualified-addrs constant by identifier.
-const LISTEN_ADDRS_BY_IDENTIFIER_MARKER = 'listenAddrs' + ': ' + 'STRAND_RELAY_LISTEN_ADDRS'
+// Repointed for cadre-core 0.10.0: the 41-11 two-relay split is retired (upstream gave
+// each strand node its OWN derived transport peerId, so one relay is correct), and the
+// surviving single relay-qualified constant is the CONTROL one.
+const LISTEN_ADDRS_BY_IDENTIFIER_MARKER = 'listenAddrs' + ': ' + 'CONTROL_RELAY_LISTEN_ADDRS'
+// The retired per-node-type override. Must NOT reappear: `strandNetwork` is dead config on
+// cadre-core 0.10.0 (zero occurrences in the published types/dist), so re-adding it would
+// silently do nothing while looking load-bearing.
+const RETIRED_STRAND_OVERRIDE_MARKER = 'strandNetwork' + ':'
 // The retired direct-only advertise posture that MUST stay absent from the network body — a
 // bare direct WS listen entry would defeat the whole point of relay-routing across the emulator
 // NAT surface (D-02).

@@ -103,7 +103,7 @@ const execAsync = promisify(exec);
 // `@quereus/quereus: ^4.3.0`, satisfied by 4.4.1; the residual ✘ is the missing
 // declaration in attestation-native, not a version conflict.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:0.18.0',
+  '@optimystic/quereus-plugin-crypto@npm:0.22.0',
 ]);
 
 // The ✘ marker (U+2718)

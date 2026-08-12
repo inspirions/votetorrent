@@ -87,7 +87,14 @@ const EMPTY_LISTEN_MARKER = 'listenAddrs' + ': []'
 const QUALIFIED_ADDR_TEMPLATE_MARKER = '${addr}' + '/p2p' + '-circuit'
 // The listenAddrs assignment must reference the qualified-addrs constant by
 // identifier (not a bare array literal) inside the network body.
-const LISTEN_ADDRS_BY_IDENTIFIER_MARKER = 'listenAddrs' + ': ' + 'STRAND_RELAY_LISTEN_ADDRS'
+// Repointed for cadre-core 0.10.0: the 41-11 two-relay split is retired (upstream gave
+// each strand node its OWN derived transport peerId, so one relay is correct), and the
+// surviving single relay-qualified constant is the CONTROL one.
+const LISTEN_ADDRS_BY_IDENTIFIER_MARKER = 'listenAddrs' + ': ' + 'CONTROL_RELAY_LISTEN_ADDRS'
+// The retired per-node-type override. Must NOT reappear: `strandNetwork` is dead config on
+// cadre-core 0.10.0 (zero occurrences in the published types/dist), so re-adding it would
+// silently do nothing while looking load-bearing.
+const RETIRED_STRAND_OVERRIDE_MARKER = 'strandNetwork' + ':'
 // D-10: the transportSymbol cast — libp2p matches transports by the global
 // symbol, not structural type, under multi-copy @libp2p/interface.
 const TRANSPORT_SYMBOL_CAST_MARKER = 'as unknown as Return' + 'Type<typeof webSockets>'
@@ -174,8 +181,15 @@ function assertQualifiedListenAddrsShape (path: string, label: string): void {
   expect(
     body.includes(LISTEN_ADDRS_BY_IDENTIFIER_MARKER),
     `Expected ${label} network.listenAddrs to be assigned the qualified-addrs constant by ` +
-    'identifier (STRAND_RELAY_LISTEN_ADDRS), not a bare array literal'
+    'identifier (CONTROL_RELAY_LISTEN_ADDRS), not a bare array literal'
   ).to.equal(true)
+  expect(
+    stripCommentLines(fullSrc).includes(RETIRED_STRAND_OVERRIDE_MARKER),
+    `Expected the retired per-node-type \`strandNetwork\` override to be GONE from ${label}. ` +
+    'It was the 41-11 workaround for the shared-peerId circuit-relay-v2 collision; cadre-core ' +
+    '0.10.0 fixes the root cause by deriving a per-strand transport peerId, and no longer reads ' +
+    'the key at all — so re-adding it would be dead config that looks load-bearing.'
+  ).to.equal(false)
   expect(
     body.includes(BARE_SENTINEL_MARKER),
     `Expected the retired bare listenAddrs: ['/p2p-circuit'] sentinel (wall #8's one-slot ` +
