@@ -96,6 +96,22 @@ const node = new CadreNode({
     },
     ...(DRONE_BOOTSTRAP_STRAND_ADDR && { strandBootstrapNodes: [DRONE_BOOTSTRAP_STRAND_ADDR] }),
   },
+  // STRAND CLUSTER BREADTH (spike 062 re-run). cadre-core 0.10.0 exposes
+  // `strandClusterSize`; it defaults to DEFAULT_STRAND_CLUSTER_SIZE = 4, described upstream
+  // as "the smallest breadth whose 0.75 super-majority still commits with one holder
+  // offline". That default is why the n=4 proof could form a cohort and still never
+  // replicate: breadth 4 needs ceil(0.75 * 4) = 3 holders to commit, but each peer sees
+  // `strandPeers=1` — a TWO-member cohort — so a commit can never reach quorum. Nothing
+  // errors; the write just never becomes visible, which is exactly the observed signature
+  // (clean logs, silent read-poll timeout).
+  //
+  // MIN_CLUSTER_SIZE is 2, and every node on one strand MUST agree on the value, so this is
+  // set here AND in packages/p2p-probe-host/drone.mjs.
+  //
+  // Trade-off, stated upstream and accepted for a dev proof: at breadth 2 read repair cannot
+  // converge, because a lone corroborator's stale answer is taken as the cluster's truth.
+  // Commit correctness is unaffected — this is replication breadth, not safety.
+  strandClusterSize: 2,
   hibernation: { enabled: false },
 });
 
