@@ -184,11 +184,54 @@ exactly one strand peer — consistent with each being connected to a drone but 
 emulator** (two partial cohorts, drones not relaying strand data between them). Confirming it needs
 the drone-side strand logs, which the harness auto-cleans on exit.
 
+### Run 3 — `strandClusterSize: 2` — hypothesis REFUTED, real blocker identified
+
+cadre-core 0.10.0 dropped its hardcoded cluster size and exposes `strandClusterSize`. It defaults
+to `DEFAULT_STRAND_CLUSTER_SIZE = 4` ("the smallest breadth whose 0.75 super-majority still
+commits with one holder offline"), so breadth 4 needs 3 holders to commit while the observed
+cohort has 2 — a clean explanation for a silent, error-free failure to replicate.
+
+It was set to 2 (`MIN_CLUSTER_SIZE`) on **both** emulator peers and the drones, since every node
+on a strand must agree. Verified live: `strandClusterSize` appears in the served Metro bundle.
+
+**Result: FAIL again, unchanged.** `relayReservation=true`, `peers=1`, `strandPeers=1`, the
+idempotent write behaving correctly — and still neither peer reads the other's row. **Quorum
+breadth was not the blocker.**
+
+The drone-side logs (captured this run with a background copy loop, since the harness deletes
+them on exit) show where the failure actually lives:
+
+| Drone-A signal | Count |
+|---|---|
+| `NoValidAddressesError` | 76 |
+| `no valid addresses for peer: <Peer B>` | 57 |
+| `no valid addresses for peer: <Peer A>` | 19 |
+| `could not negotiate /optimystic/control-votetorrent/fret/1.0.0/ping` | 9 |
+| `could not negotiate /optimystic/control-votetorrent/id/1.0.0` | 2 |
+| `could not negotiate .../fret/1.0.0/neighbors/announce` | 1 |
+
+**The drone has no dial path back to either emulator.** Both peers dial *out* successfully and
+both hold relay reservations (`relayReservation=true`), but the drone — a cohort voting member —
+cannot reach either of them, and its FRET `ping`/`neighbors/announce` negotiation on the CONTROL
+network fails. Drone-B's log is clean and idle.
+
+That makes the `strandPeers=1` reading concrete: each emulator is paired with the **drone**, not
+with the other emulator, and the reverse path needed to complete the mesh is missing. Writes
+commit locally and have nowhere to go — which is why the device logs stay clean while the read
+poll silently expires.
+
+This is the same *class* as the historical drone→peer addressing walls (38-18 / 38-21), reappearing
+on the new substrate. It is an addressing/reachability problem, **not** a consensus, quorum, or
+cohort-formation problem — all three of which the upgrade genuinely fixed.
+
 ## Follow-ups
 
-1. Capture drone-side strand logs (background copy loop before the run) and determine whether the
-   two emulators are in one mesh or two partial cohorts. This is the next concrete step, and it is
-   a **new** investigation — distinct from the cohort-formation blocker P2P-11 has tracked.
+1. **DONE (run 3):** drone logs captured; the two emulators are each paired with the drone, not
+   with each other. Next is the drone→emulator reverse path: why a peer holding a live relay
+   reservation is still `no valid addresses` from the drone's side, and why FRET
+   `ping`/`neighbors/announce` fails to negotiate on the control network. Note the harness's
+   `mktemp /tmp/drone-full-run-XXXXXX.log` template leaves a LITERAL `XXXXXX` (the `.log` suffix
+   defeats substitution) — copy that exact filename.
 2. Re-author the 6 stale/vacuous vote-engine tests against current upstream behaviour.
 3. `vote-engine`'s WR-01 attestation-verdict retry-dedup test fails intermittently (~1 run in 5)
    and is **pre-existing** — a one-shot run of that package is not a floor. Untouched here.
