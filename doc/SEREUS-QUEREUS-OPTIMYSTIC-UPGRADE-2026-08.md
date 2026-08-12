@@ -161,11 +161,34 @@ mistaken for breakage:
 | `clusterSize: 3` hardcode | cadre-core no longer hardcodes it — the assertion's own message says to close the upstream issue and wire the option through. |
 | composite-PK DELETE (×2) | `extractPrimaryKey` now throws a helpful diagnostic instead of silently deriving a wrong key, so the bug repro's shape changed. |
 
+### Re-run after the fix — the artifact is gone, the failure is real
+
+The proof was re-run from a clean state with the idempotent write in place, the served Metro
+bundle verified as the new code, and the fix confirmed to survive the harness's source injection.
+
+`REPLICATION VERDICT: FAIL` on both peers again, but for a different reason:
+
+- Peer A logged `write phase: own row already present, skipping insert (idempotent)` — the fix
+  behaves as designed, and Peer A did contribute its row on its first networked boot. Peer B wrote
+  cleanly.
+- `strandPeers=1` reproduced on both peers, so cohort formation is repeatable.
+- Neither peer read the other's row, and the device logs are **completely clean** — no errors, no
+  `super-majority` / `quorum` / `rejected by validators` / `stale revision` signals. Replication is
+  not erroring; the row never arrives and the read poll expires silently.
+
+With the write phase healthy on both peers, **the remaining blocker is genuine**: rows do not
+propagate across a formed strand cohort.
+
+**Leading hypothesis, not yet proven:** `strandPeers=1` in an n=4 topology means each emulator sees
+exactly one strand peer — consistent with each being connected to a drone but **not to the other
+emulator** (two partial cohorts, drones not relaying strand data between them). Confirming it needs
+the drone-side strand logs, which the harness auto-cleans on exit.
+
 ## Follow-ups
 
-1. Re-run the device proof with the idempotent write and see whether cross-peer row visibility
-   now passes. If it still fails on a clean write, strand-mesh replication over a *formed* cohort
-   is a new investigation, distinct from what P2P-11 has tracked.
+1. Capture drone-side strand logs (background copy loop before the run) and determine whether the
+   two emulators are in one mesh or two partial cohorts. This is the next concrete step, and it is
+   a **new** investigation — distinct from the cohort-formation blocker P2P-11 has tracked.
 2. Re-author the 6 stale/vacuous vote-engine tests against current upstream behaviour.
 3. `vote-engine`'s WR-01 attestation-verdict retry-dedup test fails intermittently (~1 run in 5)
    and is **pre-existing** — a one-shot run of that package is not a floor. Untouched here.
