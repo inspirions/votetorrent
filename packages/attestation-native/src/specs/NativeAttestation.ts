@@ -106,6 +106,25 @@ export interface Spec extends TurboModule {
 		promptSubtitle: string,
 		promptNegativeButton: string,
 	): Promise<Object>
+
+	/**
+	 * Phase 49 (D-16/D-07): provisions the Authority app's second Keystore alias — a
+	 * `DEVICE_CREDENTIAL`-authenticated key that `setInvalidatedByBiometricEnrollment` does NOT
+	 * govern, so it survives a biometric re-enrolment that would otherwise permanently strand the
+	 * primary `signWithDeviceKey` alias. Unlike `provisionDeviceKey`'s two-step placeholder-then-
+	 * attested dance (D-11, a Voter-app attestation concern this key has no analog for), this
+	 * resolves the SAME shape in one step — `{ publicKeyBase64, keyAlias, publicKeyCompressedHex }`
+	 * — with no attestation challenge: this key exists purely to sign a replacement key back into
+	 * `UserKey` (D-16), not to produce a verifier-consumed cert chain.
+	 *
+	 * `keyAlias` should be the canonical `VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1` value (distinct
+	 * from `VOTETORRENT_AUTHORITY_SIGNING_KEY_V1` and from the Voter app's
+	 * `VOTETORRENT_DEVICE_KEY_V1` — D-07, different apps, different threat surfaces).
+	 *
+	 * **Unproven until D-24 leg 3 on real hardware** — do not take biometric-re-enrolment survival
+	 * from the docs (D-16).
+	 */
+	provisionRecoveryKey(keyAlias: string): Promise<Object>
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('AttestationNative')

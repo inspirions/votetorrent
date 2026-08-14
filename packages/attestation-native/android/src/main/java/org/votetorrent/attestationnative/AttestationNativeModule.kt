@@ -70,6 +70,26 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		}
 	}
 
+	override fun provisionRecoveryKey(keyAlias: String, promise: Promise) {
+		try {
+			// Phase 49 (D-16) — the recovery variant of the shared keygen: one-step, no attestation
+			// challenge, KeyAuthenticator.DEVICE_CREDENTIAL bitmask (API 30+) so this key survives a
+			// biometric re-enrolment that would strand VOTETORRENT_AUTHORITY_SIGNING_KEY_V1.
+			val result = keyAttestationHelper.generateRecoveryKey(keyAlias)
+			promise.resolve(Arguments.createMap().apply {
+				putString("publicKeyBase64", result.publicKeyBase64)
+				putString("keyAlias", result.keyAlias)
+				putString("securityLevel", result.securityLevel)
+				putString("publicKeyCompressedHex", result.publicKeyCompressedHex)
+			})
+		} catch (e: NoStrongBoxOrTeeException) {
+			// D-09 terminal, release-only (see class doc comment) — same taxonomy as provisionDeviceKey.
+			promise.reject("NO_STRONGBOX_OR_TEE", e)
+		} catch (e: Exception) {
+			promise.reject("PROVISION_FAILED", e)
+		}
+	}
+
 	override fun produceAttestation(
 		keyAlias: String,
 		boundDigest: String,

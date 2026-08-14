@@ -21,6 +21,44 @@ import java.security.spec.ECGenParameterSpec
 private const val ANDROID_KEYSTORE = "AndroidKeyStore"
 
 /**
+ * Phase 49 (D-07) — canonical Authority Keystore aliases, distinct from the Voter app's device
+ * signing key alias (`real-attestation-producer.ts`'s `KEY_ALIAS` constant). Different apps,
+ * different threat surfaces, independent rotation, and the Authority app has no attestation flow
+ * to bind to — so these are NOT aliased to, or derived from, the Voter constant. Both must stay
+ * stable for the same reason the Voter alias must: [KeyPermanentlyInvalidatedException] detection
+ * (D-13) depends on re-resolving a *known* alias, not a freshly-generated one.
+ *
+ * [VOTETORRENT_AUTHORITY_SIGNING_KEY_V1] is the primary per-use `AUTH_BIOMETRIC_STRONG` signing
+ * key (provisioned/used via the existing [generateProvisionKey]/[regenerateAttested]/
+ * [signWithDeviceKey] path). [VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1] is the D-16 second key that
+ * `setInvalidatedByBiometricEnrollment` does NOT govern, provisioned/used via
+ * [generateRecoveryKey]/[signWithRecoveryKey].
+ */
+const val VOTETORRENT_AUTHORITY_SIGNING_KEY_V1 = "VOTETORRENT_AUTHORITY_SIGNING_KEY_V1"
+const val VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1 = "VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1"
+
+/**
+ * Which authenticator [KeyGenParameterSpec.Builder.setUserAuthenticationParameters] requests at
+ * key-creation time (API 30+ only — see the `Build.VERSION.SDK_INT >= 30` guards below). The `0`
+ * timeout argument is ALWAYS per-use (D-10) regardless of which member is selected; D-10 rejected
+ * any non-zero validity duration explicitly, since its boundary is a wall clock and any code path
+ * signing inside the window would inherit the authentication silently.
+ */
+enum class KeyAuthenticator {
+	/** Per-use biometric — the primary Authority signing key and the Voter attestation key. */
+	BIOMETRIC_STRONG,
+
+	/**
+	 * Per-use device credential (PIN/pattern/password OR biometric, whichever the lock screen
+	 * accepts) — the D-16 recovery key. `setInvalidatedByBiometricEnrollment` governs only
+	 * biometric-auth keys, so a key created with this authenticator SURVIVES a biometric
+	 * re-enrolment that would otherwise permanently strand [BIOMETRIC_STRONG]-authenticated keys.
+	 * **Unproven until D-24 leg 3 on real hardware** — do not take this from the docs (D-16).
+	 */
+	DEVICE_CREDENTIAL,
+}
+
+/**
  * P-256 curve order `n` and `n/2` (49-RESEARCH.md Pattern 3, computed from
  * `@noble/curves/nist.js:17`) — used by [derToCompactLowS]'s low-S normalization, which must match
  * `@noble/curves` v2's `lowS: true` verify-side default exactly.
@@ -216,7 +254,20 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	 * require a fresh biometric (that gate applies at key USE time in [regenerateAttested]).
 	 */
 	fun generateProvisionKey(keyAlias: String): ProvisionResult {
-		return generateKey(keyAlias, attestationChallenge = null)
+		return generateKey(keyAlias, attestationChallenge = null, authenticator = KeyAuthenticator.BIOMETRIC_STRONG)
+	}
+
+	/**
+	 * Phase 49 (D-16) — provision the second Authority Keystore alias with
+	 * [KeyAuthenticator.DEVICE_CREDENTIAL]. Unlike [generateProvisionKey]/[regenerateAttested]'s
+	 * two-step placeholder-then-attested dance (Open Q1, a Voter-app/D-11 concern with no analog
+	 * here — the Authority app has no attestation flow to bind a challenge to), this key is
+	 * generated once, directly, with no attestation challenge at all: it exists purely to sign a
+	 * replacement key back into `UserKey` when the primary biometric key is invalidated, not to
+	 * produce a verifier-consumed cert chain.
+	 */
+	fun generateRecoveryKey(keyAlias: String): ProvisionResult {
+		return generateKey(keyAlias, attestationChallenge = null, authenticator = KeyAuthenticator.DEVICE_CREDENTIAL)
 	}
 
 	/**
@@ -454,7 +505,11 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	 * "placeholder" (Open Q1's provision-time call, no real challenge yet); a non-null array is
 	 * the real utf8(BOUND_DIGEST) bytes.
 	 */
-	private fun generateKey(keyAlias: String, attestationChallenge: ByteArray?): ProvisionResult {
+	private fun generateKey(
+		keyAlias: String,
+		attestationChallenge: ByteArray?,
+		authenticator: KeyAuthenticator = KeyAuthenticator.BIOMETRIC_STRONG,
+	): ProvisionResult {
 		fun buildSpec(strongBox: Boolean): KeyGenParameterSpec {
 			val builder = KeyGenParameterSpec.Builder(keyAlias, KeyProperties.PURPOSE_SIGN).apply {
 				setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1")) // D-03 — P-256 only;
@@ -462,14 +517,32 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 				setDigests(KeyProperties.DIGEST_SHA256)
 				setAttestationChallenge(attestationChallenge ?: ByteArray(0))
 				setUserAuthenticationRequired(true) // D-17
-				setInvalidatedByBiometricEnrollment(true) // D-17/D-13 — KeyPermanentlyInvalidatedException trigger
+				// D-17/D-13 — KeyPermanentlyInvalidatedException trigger. Governs ONLY
+				// biometric-auth keys (KeyAuthenticator.BIOMETRIC_STRONG) — this is precisely why a
+				// KeyAuthenticator.DEVICE_CREDENTIAL key (D-16) SURVIVES a biometric re-enrolment
+				// that permanently strands a BIOMETRIC_STRONG key. Setting it unconditionally on
+				// BOTH variants reads like a bug otherwise: it is a no-op for DEVICE_CREDENTIAL
+				// keys, not a shared invalidation trigger. **D-16 requires this be verified on real
+				// hardware, not taken from the docs** — that is D-24 leg 3 in 49-14.
+				setInvalidatedByBiometricEnrollment(true)
 				if (Build.VERSION.SDK_INT >= 30) {
-					setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG) // 0 = per-use (D-06)
+					val bitmask = when (authenticator) {
+						KeyAuthenticator.BIOMETRIC_STRONG -> KeyProperties.AUTH_BIOMETRIC_STRONG
+						KeyAuthenticator.DEVICE_CREDENTIAL -> KeyProperties.AUTH_DEVICE_CREDENTIAL
+					}
+					setUserAuthenticationParameters(0, bitmask) // 0 = per-use (D-06/D-10), both variants
 				}
-				// else: pre-API-30 fallback (Pitfall 4, [ASSUMED] LOW confidence — Pixel 8 proof
-				// device is API 34+). setUserAuthenticationRequired(true) alone, with NO
-				// validity-duration call, defaults to per-use CryptoObject-bound auth on API < 30.
-				// Not on this phase's critical path; flagged for a future pre-30 device check.
+				// else: pre-API-30 fallback (D-26, resolved at planning from RESEARCH Open Question
+				// 2). Below API 30 there is no way to request a specific authenticator at the
+				// KeyGenParameterSpec/BiometricPrompt API surface — a bare-auth key can still be
+				// created via setUserAuthenticationRequired(true) alone (no
+				// setUserAuthenticationParameters call, no validity-duration call), but which
+				// authenticator satisfies it at USE time is decided by how the key is EXERCISED, not
+				// how it was created. For KeyAuthenticator.DEVICE_CREDENTIAL on API 24-29 that means
+				// KeyguardManager.createConfirmDeviceCredentialIntent (see signWithRecoveryKey) —
+				// BiometricPrompt cannot request device-credential-only authentication at all below
+				// API 30, independent of this key's flags. Proven by D-26a leg 5 on the Redmi 8
+				// (API 29) in 49-14, not by this comment.
 				if (strongBox) {
 					setIsStrongBoxBacked(true) // D-07 — try StrongBox first
 				}
@@ -507,7 +580,7 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 			// Software/stub rung — T-45-04/CR-03: a release build must NEVER reach this rung.
 			// __DEV__/BuildConfig.DEBUG is the ONLY gate; anything else rethrows terminal.
 			if (BuildConfig.DEBUG) {
-				return generateSoftwareStubKey(keyAlias, attestationChallenge)
+				return generateSoftwareStubKey(keyAlias, attestationChallenge, authenticator)
 			}
 			throw NoStrongBoxOrTeeException(e)
 		}
@@ -515,9 +588,15 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 
 	/**
 	 * Debug-only software keygen fallback so the emulator path (no StrongBox/TEE) still runs.
-	 * Unreachable in a release build — see the `BuildConfig.DEBUG` guard in [generateKey].
+	 * Unreachable in a release build — see the `BuildConfig.DEBUG` guard in [generateKey]. Mirrors
+	 * [generateKey]'s [KeyAuthenticator] parameterization so a debug-build recovery key falling to
+	 * this rung still gets `AUTH_DEVICE_CREDENTIAL`, not a silently-wrong biometric-only key.
 	 */
-	private fun generateSoftwareStubKey(keyAlias: String, attestationChallenge: ByteArray?): ProvisionResult {
+	private fun generateSoftwareStubKey(
+		keyAlias: String,
+		attestationChallenge: ByteArray?,
+		authenticator: KeyAuthenticator = KeyAuthenticator.BIOMETRIC_STRONG,
+	): ProvisionResult {
 		val spec = KeyGenParameterSpec.Builder(keyAlias, KeyProperties.PURPOSE_SIGN).apply {
 			setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
 			setDigests(KeyProperties.DIGEST_SHA256)
@@ -525,7 +604,11 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 			setUserAuthenticationRequired(true)
 			setInvalidatedByBiometricEnrollment(true)
 			if (Build.VERSION.SDK_INT >= 30) {
-				setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+				val bitmask = when (authenticator) {
+					KeyAuthenticator.BIOMETRIC_STRONG -> KeyProperties.AUTH_BIOMETRIC_STRONG
+					KeyAuthenticator.DEVICE_CREDENTIAL -> KeyProperties.AUTH_DEVICE_CREDENTIAL
+				}
+				setUserAuthenticationParameters(0, bitmask)
 			}
 		}.build()
 		val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
