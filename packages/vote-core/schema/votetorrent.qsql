@@ -259,9 +259,24 @@ declare schema main
 		-- SignerKey = '0'.repeat(66); SignerKeyValid is a stub (see above), so that placeholder key
 		-- is not load-bearing either. This entry exists because an allowlist that silently omits a
 		-- producer of a security-relevant flag is worse than no allowlist.
+		--
+		-- 49-02 (D-02/D-03): curve-branched. `new.SignerKey` may be a P-256 Authority-app device
+		-- key (D-01) or a secp256k1 key (every pre-49-02 producer) -- resolve the curve from the
+		-- signer's PERSISTED UserKey.Type, defaulting to secp256k1 ('M') when the key is not
+		-- registered in UserKey. The 'M' default is load-bearing, not arbitrary: SignerKeyValid
+		-- above is a documented D-13 stub precisely because some device/test signer keys are
+		-- never inserted into UserKey, and those rows must keep verifying exactly as they did
+		-- before this plan -- defaulting to 'P' here would fail closed on every one of them.
 		constraint SignatureValid check (
 			context.IsPlaceholderSignature = true
-				or SignatureValid(new.Digest, new.Signature, new.SignerKey)
+				or (
+					coalesce((select K.Type from UserKey K where K.PubKey = new.SignerKey), 'M') = 'P'
+					and SignatureValidP256(new.Digest, new.Signature, new.SignerKey)
+				)
+				or (
+					coalesce((select K.Type from UserKey K where K.PubKey = new.SignerKey), 'M') <> 'P'
+					and SignatureValid(new.Digest, new.Signature, new.SignerKey)
+				)
 		)
 	)
 		with context ( now datetime, IsSignerKeyValid boolean, IsPlaceholderSignature boolean );
@@ -284,12 +299,27 @@ declare schema main
 		-- own Digest (the officer counter-signs the session digest, not a private per-officer digest).
 		-- IsPlaceholderSignature: the same narrow DEBT-11 carve-out as AdminSigning.SignatureValid,
 		-- propagated through the shared SigningEngine.sign() seam.
+		--
+		-- 49-02 (D-02/D-03): same curve-branch discriminant and 'M' default as
+		-- AdminSigning.SignatureValid above (see its comment for the full rationale) -- the
+		-- referenced-session digest subquery is kept IDENTICAL in both curve branches.
 		constraint SignatureValid check (
 			context.IsPlaceholderSignature = true
-				or SignatureValid(
-					(select Digest from AdminSigning where Nonce = new.SigningNonce),
-					new.Signature,
-					new.SignerKey
+				or (
+					coalesce((select K.Type from UserKey K where K.PubKey = new.SignerKey), 'M') = 'P'
+					and SignatureValidP256(
+						(select Digest from AdminSigning where Nonce = new.SigningNonce),
+						new.Signature,
+						new.SignerKey
+					)
+				)
+				or (
+					coalesce((select K.Type from UserKey K where K.PubKey = new.SignerKey), 'M') <> 'P'
+					and SignatureValid(
+						(select Digest from AdminSigning where Nonce = new.SigningNonce),
+						new.Signature,
+						new.SignerKey
+					)
 				)
 		)
 	)
@@ -1417,6 +1447,16 @@ declare schema main
 		constraint DecidedAtValid check (DecidedAt is null or (isISODatetime(DecidedAt) and like('%Z', DecidedAt))),
 		-- D-02 -- the ONLY authorization gate on INSERT. No User FK, no UserId/UserKey context
 		-- param, no IsUserValid gate. Unqualified so it re-evaluates on UPDATE.
+		-- 49-02 (D-02/D-03) audit verdict: RequesterKey is PROVABLY voter/bridge-side only, never
+		-- an Authority-app device key -- deliberately left secp256k1-only, NOT curve-branched.
+		-- registration-engine.ts submitRegistrationRequest is called exclusively by the
+		-- requesting party (the registrant's own device, see
+		-- VoteTorrentVoter ConfirmationScreen.tsx-style self-service submission) or by an
+		-- allowlisted RegistrationBridgeKey holder (an external paper-form-intake operator key,
+		-- registered in its own RegistrationBridgeKey table -- never in UserKey, never the
+		-- Authority app's own signing key). No Authority-app call site ever signs a
+		-- RegistrationRequest with its own device key; the Authority app only ever DECIDES on one
+		-- (RegistrationRequest.DecisionValid, a separate CHECK, out of this constraint's scope).
 		constraint SignatureValid check (
 			SignatureValid(
 				Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt),
@@ -1521,8 +1561,35 @@ declare schema main
 		constraint ExpirationFuture check on insert (Expiration > context.now),
 		constraint IdImmutable check on update (new.Id = old.Id),
 		constraint AuthorityIdImmutable check on update (new.AuthorityId = old.AuthorityId),
+		-- 49-02 (D-02/D-03) audit finding: SignorKey is NOT always a voter-side key -- this row is
+		-- signed either by the registrant's OWN device key (VoteTorrentVoter's self-service
+		-- registration path, ConfirmationScreen.tsx, secp256k1 by design) OR by the reviewing
+		-- Authority officer's device key (signature-tasks-engine.ts finalizeRegistrantApproval's
+		-- officer-approval path, which becomes P-256 this phase) -- genuinely mixed-curve.
+		--
+		-- UNLIKE AdminSigning/OfficerSignature/UserKey, this does NOT use a UserKey.Type lookup
+		-- discriminant -- empirically, adding ANY correlated subquery here promotes this CHECK
+		-- from an immediate (non-deferred) evaluation to Quereus's DEFERRED constraint queue,
+		-- whose row snapshot re-derives `new.Expiration` through a Temporal round-trip that
+		-- strips the trailing `Z` (the same class of trap recorded in this project's Quereus
+		-- deferred-CHECK memory). `Digest(Id, ..., Expiration)` recomputed against that
+		-- Z-stripped snapshot no longer matches the digest the caller pre-signed with the raw
+		-- Z-suffixed value (registration-engine.ts createRegistrant step 1), so EVERY insert --
+		-- secp256k1 included -- started failing closed when this was first tried with a
+		-- coalesce((select ...)) discriminant (confirmed empirically: the full registration
+		-- suite went red, not just the P-256 cases). Trying both curves directly needs no
+		-- subquery, stays a non-deferred CHECK, and is not a weaker check: an ECDSA signature
+		-- essentially never verifies against the wrong curve's point/generator by chance (the
+		-- same assumption Task 2's wrong-curve-rejection case already empirically proved for
+		-- UserKey) -- so this only ever accepts a genuinely valid signature on ONE of the two
+		-- curves, exactly like the discriminant form, just without the lookup.
 		constraint SignatureValid check (
 			SignatureValid(
+				Digest(Id, AuthorityId, PrivateCid, PublicCid, SelectiveCid, Status, Expiration),
+				Signature,
+				SignorKey
+			)
+			or SignatureValidP256(
 				Digest(Id, AuthorityId, PrivateCid, PublicCid, SelectiveCid, Status, Expiration),
 				Signature,
 				SignorKey
@@ -1737,8 +1804,23 @@ declare schema main
 		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId and R.Status = 'a')),
 		constraint ExpirationValid check (isISODatetime(Expiration) and like('%Z', Expiration)),
 		constraint ExpirationFuture check on insert (Expiration > context.now),
+		-- 49-02 (D-02/D-03) audit finding: same reasoning as Registrant.SignatureValid above --
+		-- SignorKey is either the registrant's own device key (VoteTorrentVoter self-service
+		-- association, secp256k1) or the reviewing Authority officer's device key (Authority-app
+		-- association ceremony, becomes P-256 this phase) -- mixed-curve. Same subquery-free
+		-- "try both curves" form as Registrant.SignatureValid, for the SAME empirically-found
+		-- reason: a UserKey.Type lookup discriminant here promotes this CHECK to Quereus's
+		-- deferred queue, whose Expiration re-derivation no longer matches the pre-signed digest
+		-- (association-engine.ts associate()'s row-level signature, computed before insert with
+		-- the raw Z-suffixed value) -- see Registrant.SignatureValid's comment for the full
+		-- empirical finding.
 		constraint SignatureValid check (
 			SignatureValid(
+				Digest(RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration),
+				Signature,
+				SignorKey
+			)
+			or SignatureValidP256(
 				Digest(RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration),
 				Signature,
 				SignorKey
