@@ -16,6 +16,7 @@ import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
 export function RevokeKeyScreen() {
 	const { user, userEngine } = useRoute().params as { user: User; userEngine: IUserEngine };
@@ -27,7 +28,10 @@ export function RevokeKeyScreen() {
 	const [isSigned, setIsSigned] = useState(false);
 	const [realSignature, setRealSignature] = useState<Signature | null>(null);
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isSigning, setIsSigning] = useState(false);
+	const [isRevoking, setIsRevoking] = useState(false);
 	const navigation = useNavigation();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	const toggleKeySelection = (keyId: string) => {
 		setSelectedKeys((prevSelectedKeys) => {
@@ -57,6 +61,7 @@ export function RevokeKeyScreen() {
 
 	const handleSign = async () => {
 		setErrorMessage("");
+		setIsSigning(true);
 		try {
 			// WR-02: only the device user can revoke their own keys. Verify subject == device
 			// user before producing any signature, so the device signer's signerKey is always
@@ -92,12 +97,17 @@ export function RevokeKeyScreen() {
 			setRealSignature(previewSig);
 			setIsSigned(true);
 		} catch (error) {
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+		} finally {
+			setIsSigning(false);
 		}
 	};
 
 	const handleRevoke = async () => {
 		setErrorMessage("");
+		setIsRevoking(true);
 		try {
 			if (!isSigned) {
 				setErrorMessage("Signature is required — please sign before revoking.");
@@ -121,13 +131,21 @@ export function RevokeKeyScreen() {
 			// D-20 / 49-05: a rejected revoke (forged or wrong signature) surfaces as the
 			// UserKey.DeleteValid CHECK constraint failing — match on the constraint identifier
 			// (not free-text English) so this narrow branch renders a real, actionable message
-			// instead of the raw Quereus error string. Every other revokeKey failure mode keeps
-			// the existing raw-message fallback.
+			// instead of the raw Quereus error string. This is evaluated FIRST, before the
+			// device-signing handler: a schema CHECK rejection carries no native `code`, so
+			// isDeviceSigningError would classify it as "not mine" and the handler would pass
+			// it through regardless — but keeping the ordering explicit here avoids a future
+			// reader reversing it. Every other revokeKey failure mode keeps the existing
+			// raw-message fallback via the shared handler below.
 			if (error instanceof Error && error.message.includes("DeleteValid")) {
 				setErrorMessage(t("revokeKeySignatureInvalid"));
 				return;
 			}
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+		} finally {
+			setIsRevoking(false);
 		}
 	};
 
@@ -215,11 +233,11 @@ export function RevokeKeyScreen() {
 					onChangeText={(text) => checkConfirmText(text)}
 				/>
 				<CustomButton
-					title={t("sign")}
+					title={isSigning ? `${t("sign")}…` : t("sign")}
 					icon={"signature"}
 					backgroundColor={colors.important}
 					onPress={() => handleSign()}
-					disabled={!readyToSign || selectedKeys.size === 0}
+					disabled={!readyToSign || selectedKeys.size === 0 || isSigning}
 				/>
 				{isSigned && realSignature && (
 					<View style={styles.detail}>
@@ -237,11 +255,11 @@ export function RevokeKeyScreen() {
 			</ScrollView>
 			<Footer>
 				<CustomButton
-					title={t("revoke")}
+					title={isRevoking ? `${t("revoke")}…` : t("revoke")}
 					icon={"trash"}
 					backgroundColor={colors.success}
 					onPress={() => handleRevoke()}
-					disabled={!isSigned || selectedKeys.size === 0}
+					disabled={!isSigned || selectedKeys.size === 0 || isRevoking}
 				/>
 			</Footer>
 		</View>

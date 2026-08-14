@@ -13,6 +13,7 @@ import type { RootStackParamList } from "../../navigation/types";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
 export function ReviseUserScreen() {
 	const { user, userEngine } = useRoute().params as {
@@ -27,6 +28,8 @@ export function ReviseUserScreen() {
 	const [realSignature, setRealSignature] = useState<Signature | null>(null);
 	const [edited, setEdited] = useState(false);
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isSigning, setIsSigning] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	const handleSave = async () => {
 		setErrorMessage("");
@@ -67,6 +70,7 @@ export function ReviseUserScreen() {
 
 	const handleSign = async () => {
 		setErrorMessage("");
+		setIsSigning(true);
 		try {
 			// D-01: createDeviceSigner closes over the private key app-side —
 			// only the resulting Signature crosses into vote-engine.
@@ -80,7 +84,11 @@ export function ReviseUserScreen() {
 			const sig = await signer(payloadBytes);
 			setRealSignature(sig);
 		} catch (error) {
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+		} finally {
+			setIsSigning(false);
 		}
 	};
 
@@ -118,10 +126,10 @@ export function ReviseUserScreen() {
 				</View>
 				<View style={styles.section}>
 					<CustomButton
-						title={t("sign")}
+						title={isSigning ? `${t("sign")}…` : t("sign")}
 						backgroundColor={colors.important}
 						icon="signature"
-						disabled={!edited}
+						disabled={!edited || isSigning}
 						forceDarkText={true}
 						onPress={() => {
 							handleSign();

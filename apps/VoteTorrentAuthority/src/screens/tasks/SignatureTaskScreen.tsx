@@ -24,6 +24,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
 const titleKey: Record<SignatureTask["signatureType"], string> = {
 	admin: "adminRevision",
@@ -42,6 +43,8 @@ export default function SignatureTaskScreen() {
 	const isNetwork = task.signatureType === "network";
 
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isProcessing, setIsProcessing] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	useLayoutEffect(() => {
 		navigation.setOptions({ title: t(titleKey[task.signatureType]) });
@@ -53,6 +56,7 @@ export default function SignatureTaskScreen() {
 	//   3. Call completeSignature with the resulting Signature only
 	const sign = async () => {
 		setErrorMessage("");
+		setIsProcessing(true);
 		try {
 			const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
 			const digest = await engine.getSignatureDigest(task);
@@ -73,8 +77,12 @@ export default function SignatureTaskScreen() {
 			navigation.goBack();
 		} catch (err) {
 			console.warn("sign error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
 			return;
+		} finally {
+			setIsProcessing(false);
 		}
 	};
 
@@ -84,6 +92,7 @@ export default function SignatureTaskScreen() {
 	//   so no OfficerSignature is inserted and the signing session is not advanced (D-12).
 	const reject = async () => {
 		setErrorMessage("");
+		setIsProcessing(true);
 		try {
 			const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
 			await engine.completeSignature(task, {
@@ -93,8 +102,16 @@ export default function SignatureTaskScreen() {
 			navigation.goBack();
 		} catch (err) {
 			console.warn("reject error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			// This path never calls createDeviceSigner (D-12), so
+			// isDeviceSigningError will always classify a rejection here as
+			// "not mine" — routed through the same shared handler anyway for
+			// consistency with every other migrated catch block.
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
 			return;
+		} finally {
+			setIsProcessing(false);
 		}
 	};
 
@@ -124,7 +141,14 @@ export default function SignatureTaskScreen() {
 			<SignatureTaskFooter
 				onAccept={sign}
 				onReject={reject}
-				acceptLabel={isNetwork ? t("accept") : t("sign")}
+				acceptLabel={
+					isProcessing
+						? `${isNetwork ? t("accept") : t("sign")}…`
+						: isNetwork
+							? t("accept")
+							: t("sign")
+				}
+				disabled={isProcessing}
 			/>
 		</View>
 	);
