@@ -16,6 +16,7 @@ import { globalStyles } from "../../../theme/styles";
 import { formatDate } from "../../../utils/displayUtils";
 import { useApp } from "../../../providers/AppProvider";
 import { createDeviceSigner } from "../../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../../hooks/useDeviceSigningErrorHandler";
 import { LifecycleConfirmCard } from "./LifecycleConfirmCard";
 import { VerdictBadge } from "./VerdictBadge";
 import { latestVerdictByDeviceKey } from "./verdicts";
@@ -121,6 +122,7 @@ export function AttestationChallengesSection({
 	// surface as a loud typecheck failure, not as a silently suppressed
 	// banner.
 	const provisioned = isAttestationVerifierProvisioned();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Default-open per the phase's default-open collapsible group.
 	const [expanded, setExpanded] = useState(true);
@@ -173,10 +175,24 @@ export function AttestationChallengesSection({
 				if (!unmountedRef.current) setVerdicts(undefined);
 			}
 		} catch (err) {
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			// The handler's navigation branch must also respect unmountedRef.
+			const outcome = unmountedRef.current
+				? { handled: false, message: undefined }
+				: handleDeviceSigningError(err);
+			if (!unmountedRef.current && !outcome.handled) {
+				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			}
 		} finally {
 			if (!unmountedRef.current) setLoading(false);
 		}
+		// handleDeviceSigningError is deliberately excluded from this dependency
+		// list: it is a useCallback-stabilized function in production, but its
+		// identity is only as stable as the i18n `t` function it closes over —
+		// re-including it here would re-trigger the mount effect below whenever
+		// that upstream identity shifts (observed as an infinite render loop
+		// against a non-memoized test double for useTranslation). `load` only
+		// needs the CURRENT handler at call time, which the closure always has.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [registrantId, getEngine]);
 
 	// Load unconditionally on mount — never gated on `expanded`, or a
@@ -202,7 +218,14 @@ export function AttestationChallengesSection({
 			const engine = await getEngine<IAssociationEngine>("association");
 			await engine.removeAttestationChallenge(nonce, sign);
 		} catch (err) {
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			// The handler's navigation branch must also respect unmountedRef —
+			// do not navigate away from a component that has already unmounted.
+			const outcome = unmountedRef.current
+				? { handled: false, message: undefined }
+				: handleDeviceSigningError(err);
+			if (!unmountedRef.current && !outcome.handled) {
+				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			}
 			throw err;
 		}
 		if (!unmountedRef.current) {

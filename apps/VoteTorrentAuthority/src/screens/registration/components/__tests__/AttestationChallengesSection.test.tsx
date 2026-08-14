@@ -54,6 +54,10 @@ const PALETTE = {
 };
 
 jest.mock("@react-navigation/native", () => ({
+	// 49-11: useDeviceSigningErrorHandler resolves useNavigation() —
+	// mockNavigate lets AttestationChallengesSection.handleExpire's
+	// device-signing navigation branch resolve to a stable, assertable no-op.
+	useNavigation: () => ({ navigate: jest.fn() }),
 	useTheme: () => ({ dark: false, colors: PALETTE }),
 }));
 

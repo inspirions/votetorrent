@@ -12,6 +12,7 @@ import { formatDate } from "../../../utils/displayUtils";
 import { useApp } from "../../../providers/AppProvider";
 import { createDeviceSigner } from "../../../engines/device-signer";
 import { useCurrentOfficerScopes } from "../../../hooks/useCurrentOfficerScopes";
+import { useDeviceSigningErrorHandler } from "../../../hooks/useDeviceSigningErrorHandler";
 import { LifecycleConfirmCard } from "./LifecycleConfirmCard";
 import { VerdictBadge } from "./VerdictBadge";
 import { latestVerdictByDeviceKey } from "./verdicts";
@@ -100,6 +101,7 @@ export function AssociationsSection({
 	// ignores this gate cannot thereby delete anything.
 	const { scopes, loading: scopesLoading } = useCurrentOfficerScopes(authorityId);
 	const canWrite = !scopesLoading && scopes?.includes("vrg") === true;
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Section is default-open per 47-UI-SPEC.md:654.
 	const [open, setOpen] = useState(true);
@@ -211,7 +213,14 @@ export function AssociationsSection({
 			if (!unmountedRef.current) setPendingRemoveKey(undefined);
 			await load();
 		} catch (err) {
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			// The handler's navigation branch must also respect unmountedRef —
+			// do not navigate away from a component that has already unmounted.
+			const outcome = unmountedRef.current
+				? { handled: false, message: undefined }
+				: handleDeviceSigningError(err);
+			if (!unmountedRef.current && !outcome.handled) {
+				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			}
 			throw err;
 		}
 	}

@@ -143,7 +143,7 @@ describe('useDeviceSigningErrorHandler — 49-11 outcome contract', () => {
 			expect(outcome).toEqual({ handled: false, message: 'deviceSigningErrorLockoutPermanent' });
 		});
 
-		it("'biometric-error' returns handled:false with the expected copy key (the hook's own switch branch — 'biometric-error' is mapDeviceSigningError's default for a code NOT in CODE_TO_CLASS, which isDeviceSigningError's gate excludes by design; spying on the taxonomy functions isolates this branch from that gate rather than contradicting it)", () => {
+		it("'biometric-error' returns handled:false with the expected copy key (the hook's own switch branch — 'biometric-error' is mapDeviceSigningError's default for a code the taxonomy's lookup table does not recognize, which isDeviceSigningError's gate excludes by design; spying on the taxonomy functions isolates this branch from that gate rather than contradicting it)", () => {
 			const isDeviceSigningErrorSpy = jest
 				.spyOn(deviceSigningErrorModule, 'isDeviceSigningError')
 				.mockReturnValueOnce(true);

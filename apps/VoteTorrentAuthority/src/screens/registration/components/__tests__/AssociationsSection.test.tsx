@@ -58,6 +58,10 @@ jest.mock("react-i18next", () => ({
 // Distinct sentinel values for every color token so a color assertion can
 // never pass by accidental equality between two tokens.
 jest.mock("@react-navigation/native", () => ({
+	// 49-11: useDeviceSigningErrorHandler resolves useNavigation() —
+	// mockNavigate lets AssociationsSection.handleRemove's device-signing
+	// navigation branch resolve to a stable, assertable no-op.
+	useNavigation: () => ({ navigate: jest.fn() }),
 	useTheme: () => ({
 		colors: {
 			primary: "sentinel-primary",

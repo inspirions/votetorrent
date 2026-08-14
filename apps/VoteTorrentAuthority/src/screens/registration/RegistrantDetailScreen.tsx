@@ -22,6 +22,7 @@ import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import type { SignCallback } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
@@ -107,6 +108,7 @@ export default function RegistrantDetailScreen() {
 		authorityId: string;
 	};
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	useLayoutEffect(() => {
 		navigation.setOptions({ title: t("registrantDetailScreenTitle") });
@@ -358,7 +360,10 @@ export default function RegistrantDetailScreen() {
 			}
 			await loadRegistrant();
 		} catch (err) {
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			const outcome = handleDeviceSigningError(err);
+			if (!unmountedRef.current && !outcome.handled) {
+				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			}
 			// Re-thrown so 47-10's LifecycleConfirmCard sees a REJECTED
 			// onConfirm and returns to idle (its latch contract) — this is what
 			// lets a stranded officer retry a failed signed write. Unmounting

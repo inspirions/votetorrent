@@ -20,6 +20,7 @@ import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import {
 	REGISTRATION_REQUEST_STATUS_META,
@@ -202,6 +203,7 @@ export default function RegistrationRequestApprovalScreen() {
 	const { requestId, authorityId } = useRoute().params as { requestId: string; authorityId: string };
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const { t } = useTranslation();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
@@ -363,7 +365,10 @@ export default function RegistrationRequestApprovalScreen() {
 			// SignatureTaskScreen.tsx.
 			navigation.goBack();
 		} catch (err) {
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			const outcome = handleDeviceSigningError(err);
+			if (!outcome.handled) {
+				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			}
 		} finally {
 			submittingRef.current = false;
 			// The screen navigates away on success, so this setState can land after unmount —
@@ -434,7 +439,10 @@ export default function RegistrationRequestApprovalScreen() {
 			}
 			navigation.goBack();
 		} catch (err) {
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			const outcome = handleDeviceSigningError(err);
+			if (!outcome.handled) {
+				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			}
 			// Re-thrown so RejectReasonCard's own submit latch (idle ->
 			// submitting -> submitted) sees a REJECTED onConfirm and returns to
 			// idle — mirroring RegistrantDetailScreen.tsx's handleConfirmLifecycle
