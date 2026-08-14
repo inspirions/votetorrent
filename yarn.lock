@@ -4218,7 +4218,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@optimystic/db-core@npm:0.22.0":
+"@optimystic/db-core@npm:^0.22.0":
   version: 0.22.0
   resolution: "@optimystic/db-core@npm:0.22.0"
   dependencies:
@@ -4241,7 +4241,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@optimystic/db-p2p-storage-rn@npm:0.22.0":
+"@optimystic/db-p2p-storage-rn@npm:^0.22.0":
   version: 0.22.0
   resolution: "@optimystic/db-p2p-storage-rn@npm:0.22.0"
   dependencies:
@@ -4274,7 +4274,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@optimystic/db-p2p@npm:0.22.0":
+"@optimystic/db-p2p@npm:^0.22.0":
   version: 0.22.0
   resolution: "@optimystic/db-p2p@npm:0.22.0"
   dependencies:
@@ -4313,7 +4313,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@optimystic/quereus-plugin-crypto@npm:0.22.0":
+"@optimystic/quereus-plugin-crypto@npm:^0.22.0":
   version: 0.22.0
   resolution: "@optimystic/quereus-plugin-crypto@npm:0.22.0"
   dependencies:
@@ -4327,7 +4327,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@optimystic/quereus-plugin-optimystic@npm:0.22.0":
+"@optimystic/quereus-plugin-optimystic@npm:^0.22.0":
   version: 0.22.0
   resolution: "@optimystic/quereus-plugin-optimystic@npm:0.22.0"
   dependencies:
@@ -5403,7 +5403,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@serfab/cadre-core@npm:0.10.0":
+"@serfab/cadre-core@npm:^0.10.0":
   version: 0.10.0
   resolution: "@serfab/cadre-core@npm:0.10.0"
   dependencies:
@@ -5424,7 +5424,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@serfab/quereus-plugin-sereus@npm:0.10.0":
+"@serfab/quereus-plugin-sereus@npm:^0.10.0":
   version: 0.10.0
   resolution: "@serfab/quereus-plugin-sereus@npm:0.10.0"
   dependencies:
@@ -5443,7 +5443,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@serfab/strand-proto@npm:0.10.0":
+"@serfab/strand-proto@npm:^0.10.0":
   version: 0.10.0
   resolution: "@serfab/strand-proto@npm:0.10.0"
   dependencies:
@@ -20923,6 +20923,7 @@ __metadata:
     "@types/readable-stream": "npm:^4"
     "@types/ungap__structured-clone": "npm:^1"
     "@ungap/structured-clone": "npm:^1.3.1"
+    "@votetorrent/attestation-native": "workspace:*"
     "@votetorrent/vote-core": "workspace:*"
     "@votetorrent/vote-engine": "workspace:*"
     buffer: "npm:^6.0.3"
