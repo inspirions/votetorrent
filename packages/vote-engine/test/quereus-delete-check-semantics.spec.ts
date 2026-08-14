@@ -9,7 +9,27 @@
  * D-20's revoke-signature verification (a security control) could stop firing while every other
  * test still passes — this spec is what would catch that regression.
  *
- * (Task 2 of 49-03-PLAN.md adds the VERDICT block here, once every assertion below is green.)
+ * VERDICT: (installed @quereus/quereus 4.11.0, see `installedQuereusVersion()` below)
+ *   1. Does a bare `check` fire on DELETE?                                     NO
+ *   2. Does `check on delete` fire on INSERT or UPDATE (quereus#23 shape)?     NO (stays fixed)
+ *   3. Can `check on delete` call SignatureValid(Digest(old...), ...) cleanly? YES
+ *   4. Selected D-20 shape:                                                    extend-DeleteValid
+ *
+ * Decision rule applied (per 49-03-PLAN.md Task 2): (1)=no and (3)=yes -> extend the existing
+ * `UserKey.DeleteValid` (qsql:646-651) with an additional AND'd
+ * `SignatureValid(Digest(old.UserId, old.PubKey), context.Signature, context.UserKey)` clause.
+ * This is the RESEARCH.md Pitfall 5 "expected outcome" branch — no new separately-named
+ * constraint is needed. Finding 1 (NO) also confirms UserKey.SignatureValid — the existing BARE
+ * check at qsql:663-673 — is genuinely NOT evaluated on today's DELETE path, so CONTEXT.md's "the
+ * delete path is unverified" premise stands exactly as stated; it is not accidentally already
+ * covered by the bare constraint.
+ *
+ * quereus#23 cross-reference (finding 2): no reappearance observed — `check on delete` stays
+ * correctly scoped to DELETE-only on 4.11.0, consistent with the project's spike-findings skill
+ * (references/quereus-constraint-evaluation.md: "quereus#23 ... FIXED in 3.3.0") and this repo's
+ * existing `test/quereus-repros/stage-6-check-on-delete.spec.ts` (which proves the same fix on a
+ * single `check on delete (false)` constraint, without the SignatureValid/Digest UDF combination
+ * this file adds).
  *
  * METHODOLOGY: a scratch schema (NOT votetorrent.qsql) declares one table, `Widget`, with four
  * separately-named constraints exercising every DML-qualifier shape:
