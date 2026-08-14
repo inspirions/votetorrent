@@ -334,6 +334,113 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 		}
 	}
 
+	/**
+	 * (Phase 49, D-06/D-04) Produce a biometric-gated, hardware-backed P-256 signature over
+	 * [digestBytes] using the key under [keyAlias]. Follows [regenerateAttested]'s ceremony shape
+	 * exactly (resolve key -> catch [KeyPermanentlyInvalidatedException] FIRST -> build
+	 * [BiometricPrompt.CryptoObject] -> dispatch on the UI thread -> three-callback
+	 * [BiometricPrompt.AuthenticationCallback]), with one addition: unlike [regenerateAttested]
+	 * (where the biometric gate alone was the proof — key ATTESTATION needs no signature),
+	 * [onAuthenticationSucceeded] here actually signs [digestBytes] and returns the normalized
+	 * compact signature — a real signature is the product, not just the biometric check.
+	 *
+	 * Does NOT recompute [digestBytes] — [AttestationNativeModule] already base64-decoded the
+	 * bridge payload (D-04/T-49-DER-2) before calling this.
+	 */
+	fun signWithDeviceKey(
+		keyAlias: String,
+		digestBytes: ByteArray,
+		activity: FragmentActivity,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		onResult: (String) -> Unit,
+		onKeyInvalidatedReassociate: () -> Unit,
+		onError: (code: String, throwable: Throwable?) -> Unit,
+	) {
+		// 49-UI-SPEC.md's explicitly-flagged sixth condition: no key has EVER been provisioned
+		// under this alias — detected BEFORE any prompt is shown, so it must not be collapsed into
+		// BIOMETRIC_ERROR (that class implies a prompt was actually presented and failed).
+		if (!keyStore.containsAlias(keyAlias)) {
+			onError("NO_KEY_PROVISIONED", IllegalStateException("no key provisioned under alias $keyAlias"))
+			return
+		}
+
+		val signature: Signature
+		try {
+			val privateKey = keyStore.getKey(keyAlias, null) as PrivateKey
+			signature = Signature.getInstance("SHA256withECDSA")
+			signature.initSign(privateKey)
+		} catch (e: KeyPermanentlyInvalidatedException) {
+			// D-13 — caught FIRST, exactly like regenerateAttested — never falls through to the
+			// generic catch below. The device's biometric enrollment changed since this alias's key
+			// was created; route the caller to restart the D-11 provisioning ceremony.
+			onKeyInvalidatedReassociate()
+			return
+		} catch (e: Exception) {
+			onError("BIOMETRIC_ERROR", e)
+			return
+		}
+
+		val cryptoObject = BiometricPrompt.CryptoObject(signature)
+		val promptInfo = BiometricPrompt.PromptInfo.Builder()
+			.setTitle(promptTitle)
+			.setSubtitle(promptSubtitle)
+			.setNegativeButtonText(promptNegativeButton)
+			.build()
+
+		// 45-11 DEVICE FINDING (MUST preserve, T-49-KEY-2): BiometricPrompt construction AND
+		// authenticate() both require the main/UI thread. This helper is invoked from the
+		// TurboModule's calling thread (the native-modules thread), so both calls stay wrapped here
+		// exactly as regenerateAttested wraps them above. Jest is structurally blind to this device-
+		// only defect — do not move either call off the UI thread.
+		UiThreadUtil.runOnUiThread {
+			val biometricPrompt = BiometricPrompt(
+				activity,
+				ContextCompat.getMainExecutor(reactContext),
+				object : BiometricPrompt.AuthenticationCallback() {
+					override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+						// D-06/signWithDeviceKey NEW (unlike regenerateAttested, which has no
+						// explicit .sign() call): take the CryptoObject's per-use-authenticated
+						// Signature, sign the raw digest bytes, and normalize DER -> compact/low-S
+						// (D-04) before resolving.
+						try {
+							val sig = result.cryptoObject!!.signature!!
+							sig.update(digestBytes)
+							val derSignature = sig.sign()
+							val compact = derToCompactLowS(derSignature)
+							val hex = compact.joinToString("") { b -> "%02x".format(b) }
+							onResult(hex)
+						} catch (e: Exception) {
+							onError("BIOMETRIC_ERROR", e)
+						}
+					}
+
+					override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+						// D-13 — cancellation branch FIRST, distinct from the four existing classes;
+						// regenerateAttested collapses both lockout codes into LOCKOUT — this mapping
+						// deliberately splits them (different remediation copy, 49-UI-SPEC.md). Do
+						// NOT retroactively change regenerateAttested's mapping.
+						val code = when (errorCode) {
+							BiometricPrompt.ERROR_USER_CANCELED, BiometricPrompt.ERROR_NEGATIVE_BUTTON -> "CANCELED"
+							BiometricPrompt.ERROR_NO_BIOMETRICS -> "NO_BIOMETRICS_ENROLLED"
+							BiometricPrompt.ERROR_LOCKOUT -> "LOCKOUT"
+							BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> "LOCKOUT_PERMANENT"
+							else -> "BIOMETRIC_ERROR"
+						}
+						onError(code, RuntimeException(errString.toString()))
+					}
+
+					override fun onAuthenticationFailed() {
+						// Biometric mismatch — a retry, NOT an error, per D-13 (BiometricPrompt
+						// re-prompts itself; nothing to surface to JS here).
+					}
+				},
+			)
+			biometricPrompt.authenticate(promptInfo, cryptoObject)
+		}
+	}
+
 	/** (3) D-15b — export leaf+intermediates only; drop the trailing root (verifier pins its own). */
 	private fun exportCertificateChain(keyAlias: String): List<String> {
 		val chain = keyStore.getCertificateChain(keyAlias)

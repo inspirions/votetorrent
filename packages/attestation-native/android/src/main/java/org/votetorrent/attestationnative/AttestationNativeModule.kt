@@ -29,6 +29,16 @@ import com.facebook.react.module.annotations.ReactModule
  *     [KeyAttestationHelper], D-07/D-09, so the emulator is never blocked) and
  *     `KEY_INVALIDATED_REASSOCIATE` (D-13 — routed to forced re-association, not a plain
  *     terminal failure).
+ *
+ * Phase 49 (D-13) extends this taxonomy for [signWithDeviceKey] with three new classes:
+ *   - `cancellation`: `CANCELED` (`ERROR_USER_CANCELED`/`ERROR_NEGATIVE_BUTTON`) — a neutral
+ *     dismissal, never rendered as an error screen and never logged as a fault (49-UI-SPEC.md).
+ *   - `LOCKOUT_PERMANENT` is now a DISTINCT recoverable-transient entry, split out from the plain
+ *     `LOCKOUT` class above (different remediation copy) — [regenerateAttested]'s own mapping is
+ *     NOT retroactively changed to match; it keeps collapsing both lockout codes into `LOCKOUT`.
+ *   - `NO_KEY_PROVISIONED` is a routing (not terminal) class: the Keystore alias simply does not
+ *     exist yet, detected BEFORE any prompt is shown — 49-UI-SPEC.md's explicitly-flagged sixth
+ *     condition, sibling to (not a redefinition of) D-13's original five codes.
  */
 @ReactModule(name = AttestationNativeModule.NAME)
 class AttestationNativeModule(reactContext: ReactApplicationContext) :
@@ -48,6 +58,9 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 				putString("publicKeyBase64", result.publicKeyBase64)
 				putString("keyAlias", result.keyAlias)
 				putString("securityLevel", result.securityLevel)
+				// Phase 49 (D-04/RESEARCH Pattern 4) — the 33-byte compressed SEC1 point callers
+				// must register as UserKey.PubKey; publicKeyBase64 above stays the raw SPKI DER.
+				putString("publicKeyCompressedHex", result.publicKeyCompressedHex)
 			})
 		} catch (e: NoStrongBoxOrTeeException) {
 			// D-09 terminal, release-only (see class doc comment).
@@ -90,6 +103,53 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 				// D-13 — biometric enrollment changed since key creation; KeyAttestationHelper
 				// already deleted + regenerated a fresh placeholder key. The JS caller must
 				// restart the two-step D-11 ceremony from provisionDeviceKey().
+				promise.reject(
+					"KEY_INVALIDATED_REASSOCIATE",
+					"biometric enrollment changed since this key was created — key invalidated, re-association required",
+				)
+			},
+			onError = { code, throwable ->
+				promise.reject(code, throwable)
+			},
+		)
+	}
+
+	override fun signWithDeviceKey(
+		keyAlias: String,
+		digestBase64: String,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		promise: Promise,
+	) {
+		val activity = currentActivity as? FragmentActivity
+		if (activity == null) {
+			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
+			return
+		}
+
+		// D-04/T-49-DER-2 (WR-10-class trap, 49-RESEARCH.md Pattern 2): plain base64 decode of the
+		// RAW digest bytes — NOT the UTF-8 bytes of a base64url STRING. Deliberately UNLIKE
+		// produceAttestation's boundDigestUtf8Base64 asymmetry (ATTESTATION-CONTRACT.md §3); mixing
+		// the two encodings here would silently sign the wrong bytes.
+		val digestBytes: ByteArray = try {
+			Base64.decode(digestBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_DIGEST_ENCODING", e)
+			return
+		}
+
+		keyAttestationHelper.signWithDeviceKey(
+			keyAlias = keyAlias,
+			digestBytes = digestBytes,
+			activity = activity,
+			promptTitle = promptTitle,
+			promptSubtitle = promptSubtitle,
+			promptNegativeButton = promptNegativeButton,
+			onResult = { signatureHex ->
+				promise.resolve(Arguments.createMap().apply { putString("signatureHex", signatureHex) })
+			},
+			onKeyInvalidatedReassociate = {
 				promise.reject(
 					"KEY_INVALIDATED_REASSOCIATE",
 					"biometric enrollment changed since this key was created — key invalidated, re-association required",
