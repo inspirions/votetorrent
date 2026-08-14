@@ -29,6 +29,17 @@ module.exports = {
     'node_modules/(?!((jest-)?react-native|@react-native(-community)?|@react-navigation|@quereus|@optimystic|@votetorrent|@noble|inheritree|moat-maker|multiformats|@serfab|jose|uint8arrays)/)',
   ],
   moduleNameMapper: {
+    // Phase 49 plan 49-07 (Rule 3 — blocking), mirroring apps/VoteTorrentVoter/jest.config.js's
+    // identical, already-documented Phase 45-07 fix: `packages/attestation-native` declares its
+    // own `react-native` devDependency, giving it its OWN local `node_modules/react-native`
+    // copy — a different module identity than this app's own `react-native` (and than the one
+    // a test file's own `jest.mock('react-native', ...)` intercepts). Without this mapper,
+    // `packages/attestation-native/src/specs/NativeAttestation.ts`'s
+    // `import { TurboModuleRegistry } from 'react-native'` resolves to that PRIVATE copy, so
+    // `TurboModuleRegistry.getEnforcing` inside it is the REAL implementation (unmocked) and
+    // throws `__fbBatchedBridgeConfig is not set`. Redirecting every `react-native` require to
+    // the single app-hoisted copy closes the gap.
+    '^react-native$': '<rootDir>/node_modules/react-native/index.js',
     '^react-native-localize$': '<rootDir>/__mocks__/react-native-localize.js',
     '^@optimystic/db-p2p$': '<rootDir>/__mocks__/@optimystic/db-p2p.js',
     // Phase 39 plan 39-04 (DEBT-09 app-Jest gate) — native TurboModules pulled in
