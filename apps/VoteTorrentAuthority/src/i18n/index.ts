@@ -201,6 +201,9 @@ const resources = {
 			signed: 'Signed',
 			unchanged: 'Unchanged',
 			revoke: 'Revoke',
+			// D-20 / 49-05: rendered when the engine/schema rejects a revokeKey signature
+			// (UserKey.DeleteValid CHECK) — see RevokeKeyScreen.tsx's constraint-name match.
+			revokeKeySignatureInvalid: 'This revocation could not be verified and was not applied.',
 			warningIrrevocableAction: 'WARNING: This is an irrevocable action; proceed with caution.',
 			typeIConfirm: 'Type "I confirm" to continue',
 			confirmIfSure: '"I confirm" if you are sure',
@@ -1000,6 +1003,8 @@ const resources = {
 			signed: 'Firmada',
 			unchanged: 'Sin cambios',
 			revoke: 'Revocar',
+			revokeKeySignatureInvalid:
+				'Esta revocación no pudo verificarse y no se aplicó.',
 			warningIrrevocableAction:
 				'¡ATENCIÓN: Esta es una acción irrevocable; proceda con precaución.',
 			typeIConfirm: 'Escribe "Confirmo" para continuar',

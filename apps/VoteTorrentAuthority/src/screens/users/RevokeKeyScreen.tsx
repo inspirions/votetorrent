@@ -16,7 +16,6 @@ import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
-import { utf8ToBytes } from "@noble/hashes/utils.js";
 
 export function RevokeKeyScreen() {
 	const { user, userEngine } = useRoute().params as { user: User; userEngine: IUserEngine };
@@ -80,14 +79,16 @@ export function RevokeKeyScreen() {
 			// only the resulting Signature crosses into vote-engine.
 			// WR-10: secp256k1.sign called with v2 defaults (prehash:true) inside signer.
 			// CR-05/UKEY-02: do NOT precompute a single combined-keys signature here —
-			// each key is signed at revoke time over its own revokeKey:key payload (two-segment
-			// canonical form matching user.spec.ts:464) so the signature is bound to that
-			// specific key. We only validate the device signer is available and gate the
-			// confirmation UX. For the "Signed: <signature>" display we sign the FIRST selected
-			// key's per-key payload (two-segment form), never a combined-keys payload.
+			// each key is signed at revoke time over its OWN canonical digest (D-20 / 49-05:
+			// UserEngine.getRevokeKeyDigest -- Digest(UserId, PubKey), the engine's single
+			// definition of the revoke pre-image; the screen never recomputes a canonical
+			// form itself, per D-03) so the signature is bound to that specific key. We only
+			// validate the device signer is available and gate the confirmation UX. For the
+			// "Signed: <signature>" display we sign the FIRST selected key's digest, never a
+			// combined-keys payload.
 			const signer = await createDeviceSigner(user.name);
-			const previewBytes = utf8ToBytes(`revokeKey:${firstKey}`);
-			const previewSig = await signer(previewBytes);
+			const previewDigest = await userEngine.getRevokeKeyDigest(firstKey);
+			const previewSig = await signer(previewDigest);
 			setRealSignature(previewSig);
 			setIsSigned(true);
 		} catch (error) {
@@ -102,20 +103,30 @@ export function RevokeKeyScreen() {
 				setErrorMessage("Signature is required — please sign before revoking.");
 				return;
 			}
-			// CR-05/UKEY-02: sign each key at revoke time over revokeKey:${key} (two-segment
-			// canonical form matching the engine test's revokeKey:${secondPub} / revokeKey:${addedPub}
-			// in user.spec.ts:464,680) so every revocation carries its OWN signature bound to
-			// that specific key — never a single combined-key signature reused across keys.
+			// CR-05/UKEY-02: sign each key at revoke time over its OWN canonical digest
+			// (D-20 / 49-05: UserEngine.getRevokeKeyDigest -- Digest(UserId, PubKey)) so every
+			// revocation carries its OWN signature bound to that specific key — never a single
+			// combined-key signature reused across keys. The screen never constructs the signed
+			// bytes itself (D-03); it only ever signs exactly what the engine hands back.
 			const signer = await createDeviceSigner(user.name);
 			await Promise.all(
 				Array.from(selectedKeys).map(async (key) => {
-					const payloadBytes = utf8ToBytes(`revokeKey:${key}`);
-					const perKeySignature = await signer(payloadBytes);
+					const digest = await userEngine.getRevokeKeyDigest(key);
+					const perKeySignature = await signer(digest);
 					await userEngine.revokeKey(key, perKeySignature);
 				})
 			);
 			navigation.goBack();
 		} catch (error) {
+			// D-20 / 49-05: a rejected revoke (forged or wrong signature) surfaces as the
+			// UserKey.DeleteValid CHECK constraint failing — match on the constraint identifier
+			// (not free-text English) so this narrow branch renders a real, actionable message
+			// instead of the raw Quereus error string. Every other revokeKey failure mode keeps
+			// the existing raw-message fallback.
+			if (error instanceof Error && error.message.includes("DeleteValid")) {
+				setErrorMessage(t("revokeKeySignatureInvalid"));
+				return;
+			}
 			setErrorMessage(error instanceof Error ? error.message : String(error));
 		}
 	};
