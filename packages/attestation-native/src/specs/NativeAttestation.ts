@@ -38,7 +38,14 @@ import { TurboModuleRegistry } from 'react-native'
 export interface Spec extends TurboModule {
 	/**
 	 * Generates (or returns the existing) hardware-backed P-256 signing key under
-	 * `keyAlias`. Biometric-gated per D-06/D-17. Resolves `{ publicKeyBase64, keyAlias }`.
+	 * `keyAlias`. Biometric-gated per D-06/D-17. Resolves `{ publicKeyBase64, keyAlias,
+	 * publicKeyCompressedHex }` — `publicKeyBase64` remains the raw X.509 SPKI DER
+	 * (base64), consumed only by the Phase 45 attestation path; `publicKeyCompressedHex`
+	 * (Phase 49, D-04/RESEARCH Pattern 4) is the NEW 33-byte compressed SEC1 point,
+	 * hex-encoded. Callers registering a `UserKey.PubKey` MUST use
+	 * `publicKeyCompressedHex` — `publicKeyBase64` is a DER-wrapped blob, not a valid
+	 * `UserKey.PubKey`, and will fail closed (and, per `verify()`'s swallow-all
+	 * exception handling, silently) if registered as one.
 	 * Scaffold (45-01): rejects with a NOT_IMPLEMENTED-class code — no real Keystore
 	 * logic yet (lands in 45-02).
 	 */
@@ -60,6 +67,44 @@ export interface Spec extends TurboModule {
 		boundDigest: string,
 		boundDigestUtf8Base64: string,
 		enablePlayIntegrity: boolean,
+	): Promise<Object>
+
+	/**
+	 * Phase 49 (D-06/D-04): produces a biometric-gated, hardware-backed P-256 signature
+	 * over `digestBase64` using the key under `keyAlias`. Resolves
+	 * `{ signatureHex: string }` — a 64-byte compact, low-S, hex-encoded signature
+	 * (`r||s`, `s` normalized into the lower half of the P-256 order, matching
+	 * `@noble/curves` v2's `verify()` defaults: `prehash: true`, `lowS: true`,
+	 * `format: 'compact'`). Callers must NOT re-normalize the returned signature.
+	 *
+	 * Byte-format contract for `digestBase64` — a silent-failure trap if violated:
+	 * this is **plain base64 (`Base64.NO_WRAP`) of the RAW digest bytes**, never
+	 * base64url, and emphatically never the UTF-8 bytes of a base64url string. This is
+	 * deliberately UNLIKE `produceAttestation`'s `boundDigestUtf8Base64` argument, whose
+	 * UTF-8-of-a-string encoding is a documented asymmetry required by
+	 * `setAttestationChallenge` (see `ATTESTATION-CONTRACT.md` §3). Repeating that
+	 * asymmetry here would silently sign the wrong bytes — `verify()` swallows
+	 * exceptions and returns `false`, so a wrong-bytes signature looks like an ordinary
+	 * "invalid signature" rejection, not a crash.
+	 *
+	 * `promptTitle`/`promptSubtitle`/`promptNegativeButton` are resolved JS-side via
+	 * `t()` — a deliberate widening beyond the Phase 45 precedent, which hardcodes
+	 * English in `KeyAttestationHelper.kt`. This project's standing rule is that
+	 * user-facing copy lives in `src/i18n/index.ts`. There are exactly 4 distinct
+	 * string values across all three call shapes (per-use, provisioning, recovery) —
+	 * only the subtitle varies (see `49-UI-SPEC.md` §"Native BiometricPrompt string
+	 * contract").
+	 *
+	 * Rejects with one of the typed codes: `CANCELED`, `NO_BIOMETRICS_ENROLLED`,
+	 * `LOCKOUT`, `LOCKOUT_PERMANENT`, `BIOMETRIC_ERROR`, `KEY_INVALIDATED_REASSOCIATE`,
+	 * `NO_KEY_PROVISIONED`, `NO_ACTIVITY`, `INVALID_DIGEST_ENCODING`.
+	 */
+	signWithDeviceKey(
+		keyAlias: string,
+		digestBase64: string,
+		promptTitle: string,
+		promptSubtitle: string,
+		promptNegativeButton: string,
 	): Promise<Object>
 }
 
