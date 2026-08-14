@@ -673,11 +673,47 @@ declare schema main
 					and K.PubKey <> new.PubKey
 			)
 	),
+		-- 49-05 (D-20): extends the pre-existing two-clause DeleteValid (signer non-expired;
+		-- not the last key) with a third AND'd clause verifying a REAL signature over the
+		-- canonical revoke pre-image Digest(old.UserId, old.PubKey) -- the single formula also
+		-- defined TS-side by UserEngine.getRevokeKeyDigest, so the engine and the schema can
+		-- never drift. Shape selected by 49-03's empirical probe
+		-- (quereus-delete-check-semantics.spec.ts VERDICT: extend-DeleteValid) -- installed
+		-- Quereus 4.11.0 proved `check on delete` fires ONLY on DELETE (never INSERT/UPDATE --
+		-- quereus#23 stays fixed) and can safely call `SignatureValid(Digest(old...), ...)`.
+		-- Curve-branched per 49-02 (D-02/D-03), mirroring SignatureValid's own discriminant
+		-- above: resolves the verifying curve from the EXISTING signer's persisted
+		-- UserKey.Type (context.UserKey), defaulting to 'M' (secp256k1) when unregistered --
+		-- the same default AdminSigning/OfficerSignature use, and immaterial here in practice
+		-- because the FIRST clause already requires context.UserKey to be a registered,
+		-- non-expired UserKey row for this user. Digest(old.UserId, old.PubKey) is TEXT-only
+		-- (no datetime column), so this is NOT the Registrant/Association deferred-CHECK
+		-- Expiration-coercion trap (49-02 Deviation 2) -- and DeleteValid already carries two
+		-- pre-existing EXISTS subqueries, so this adds no NEW deferred-promotion risk either.
 		constraint DeleteValid check on delete (
 				-- must be a non-expired key for the user
 				exists (select 1 from UserKey K where K.UserId = old.UserId and K.PubKey = context.UserKey and K.Expiration > context.now)
 					-- and not the last key for the user
 					and exists (select 1 from UserKey K where K.UserId = old.UserId and K.PubKey <> old.PubKey)
+					-- and a real signature over the canonical revoke pre-image
+					and (
+						(
+							coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), 'M') = 'P'
+							and SignatureValidP256(
+								Digest(old.UserId, old.PubKey),
+								context.Signature,
+								context.UserKey
+							)
+						)
+						or (
+							coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), 'M') <> 'P'
+							and SignatureValid(
+								Digest(old.UserId, old.PubKey),
+								context.Signature,
+								context.UserKey
+							)
+						)
+					)
 		),
 		-- 999.1 R-02/D-11/Pitfall 3: real in-schema verification via the shared SignatureValid UDF,
 		-- gated by a bootstrap discriminant that MIRRORS InsertValid's own first branch exactly

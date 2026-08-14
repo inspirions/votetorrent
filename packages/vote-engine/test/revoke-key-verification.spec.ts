@@ -1,21 +1,20 @@
 // revoke-key-verification.spec.ts — 49-01 Wave 0 scaffolding for D-20
 // (revokeKey real-signature verification).
 //
-// RED-BY-DESIGN: un-skip in 49-05 (D-20)
+// Un-skipped in 49-05 (D-20): `UserEngine.revokeKey` now computes the
+// canonical revoke digest engine-side (`getRevokeKeyDigest`) and binds a
+// real, curve-dispatched verification result instead of hardcoding
+// `IsSignatureValid = true`; `UserKey.DeleteValid`
+// (packages/vote-core/schema/votetorrent.qsql) now also calls
+// `SignatureValid`/`SignatureValidP256` over `Digest(old.UserId, old.PubKey)`
+// as a third AND'd clause (49-03's `extend-DeleteValid` verdict), alongside
+// the pre-existing "signer non-expired" and "not the last key" clauses. A
+// forged signature is now rejected at both the engine layer and the schema
+// layer.
 //
-// `UserEngine.revokeKey` (`user-engine.ts:493`) hardcodes
-// `IsSignatureValid = true` and `UserKey.DeleteValid`
-// (packages/vote-core/schema/votetorrent.qsql:646-651) never calls
-// `SignatureValid` at all — it only checks that the authorizing signer's key
-// is non-expired and that the deleted key is not the user's last one. A
-// forged signature therefore succeeds today. These cases assert the target
-// D-20 behavior (a genuinely verified signature over the canonical
-// `Digest(UserId, PubKey)`, per RESEARCH.md Pitfall 5) that 49-05 must
-// deliver. Committed skipped so the wave-0 gate stays green.
-//
-// Does NOT modify `packages/vote-engine/test/user.spec.ts` — 49-05 owns the
-// breaking update to its three existing ad-hoc-digest revoke cases
-// (:584, :835, :1829).
+// `packages/vote-engine/test/user.spec.ts` was migrated separately (49-05
+// Task 1) off its three ad-hoc-digest revoke cases onto the same canonical
+// `Digest(UserId, PubKey)` formula.
 
 import { expect } from 'chai'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -26,7 +25,7 @@ import { createTestNetwork, signTestDigest, makeTestSignCallback } from './fixtu
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { UserKeyType } from '@votetorrent/vote-core'
 
-describe.skip('revokeKey — forged/canonical signature verification (D-20)', () => {
+describe('revokeKey — forged/canonical signature verification (D-20)', () => {
   it('case 1: revokeKey with a well-formed-but-wrong signature over unrelated bytes is REJECTED and the row survives', async () => {
     const net = await createTestNetwork()
     const userEngine = new UserEngine(net.user, net.ctx)
