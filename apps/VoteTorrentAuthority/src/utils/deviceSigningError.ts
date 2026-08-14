@@ -103,3 +103,26 @@ export const DEVICE_SIGNING_ERROR_COPY_KEY: Partial<Record<DeviceSigningErrorCla
 export function isNavigationClass(c: DeviceSigningErrorClass): boolean {
 	return c === 'key-invalidated' || c === 'no-key-provisioned';
 }
+
+/**
+ * Recognition predicate (49-11), additive alongside the 49-01 taxonomy above.
+ *
+ * `mapDeviceSigningError` deliberately defaults **unknown** input to
+ * `'biometric-error'` — that default exists so an unrecognized/future native
+ * code degrades to a recoverable UI state instead of throwing. But every one
+ * of the 17 `createDeviceSigner` call sites this predicate protects wraps a
+ * WHOLE `try` body — engine writes, network calls, validation — not just the
+ * sign call. Routing every caught error through `mapDeviceSigningError` alone
+ * would relabel a genuine engine failure (e.g. a rejected `DeleteValid` CHECK)
+ * as "Couldn't verify your biometrics," hiding the real fault (T-49-USER-7).
+ *
+ * `isDeviceSigningError` is what keeps the two populations apart: only an
+ * error carrying a string `code` that is a KNOWN key of `CODE_TO_CLASS`
+ * counts as a device-signing rejection. Anything else — a plain `Error`,
+ * `undefined`, `{}`, or an object with an unrecognized `code` — is "not
+ * mine" and must fall through to the call site's own raw-message handling.
+ */
+export function isDeviceSigningError(err: unknown): boolean {
+	const code = (err as { code?: unknown } | null | undefined)?.code;
+	return typeof code === 'string' && code in CODE_TO_CLASS;
+}
