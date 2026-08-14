@@ -16,6 +16,7 @@ import { useApp } from "../../providers/AppProvider";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import { createDeviceSigner } from "../../engines/device-signer";
 import type { SignCallback } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { scopeDescriptions } from "@votetorrent/vote-core";
 import type { IAuthorityConfigEngine, PollingDevice } from "@votetorrent/vote-core";
 import type { NavigationProp, RootStackParamList } from "../../navigation/types";
@@ -72,6 +73,7 @@ export default function PollingDevicesScreen() {
 	const [hashInput, setHashInput] = useState("");
 	const [addSubmitting, setAddSubmitting] = useState(false);
 	const [confirmForHash, setConfirmForHash] = useState<string | undefined>(undefined);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	const { scopes, loading: scopesLoading } = useCurrentOfficerScopes(authorityId);
 	// 'vrg' (Validate Registrations), NOT 'cap' — AuthorityConfigEngine splits
@@ -192,7 +194,10 @@ export default function PollingDevicesScreen() {
 		} catch (err) {
 			// Leave the form open with the operator's input intact so a retry
 			// costs no retyping.
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			const outcome = handleDeviceSigningError(err);
+			if (!unmountedRef.current && !outcome.handled) {
+				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			}
 		} finally {
 			if (!unmountedRef.current) setAddSubmitting(false);
 			await load();
@@ -206,7 +211,10 @@ export default function PollingDevicesScreen() {
 			await authorityConfigEngine.removePollingDevice(authorityId, deviceHash, sign);
 			if (!unmountedRef.current) setConfirmForHash(undefined);
 		} catch (err) {
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			const outcome = handleDeviceSigningError(err);
+			if (!unmountedRef.current && !outcome.handled) {
+				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			}
 			// Re-throw: 47-10's downstream contract requires a REJECTED
 			// onConfirm so the card re-enables for a retry; swallowing the
 			// error would latch the card permanently disabled with no recourse.
@@ -274,7 +282,7 @@ export default function PollingDevicesScreen() {
 					<View testID="polling-devices-add-submit">
 						<CustomButton
 							size="thin"
-							title={t("pollingDeviceAddButton")}
+							title={addSubmitting ? `${t("pollingDeviceAddButton")}…` : t("pollingDeviceAddButton")}
 							disabled={!canSubmitAdd}
 							onPress={canSubmitAdd ? handleAddSubmit : NOOP}
 						/>

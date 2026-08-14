@@ -20,6 +20,7 @@ import { ElectionsCreateElectionBuilder } from "@votetorrent/vote-engine";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
 // Phase 9 plan 09-12 (ELECUI-03) — Single-scroll New Election form.
 // Phase 20 plan 20-06 (EUI-02, EUI-03) — type radio + per-field inline validation.
@@ -69,6 +70,8 @@ export function CreateElectionScreen() {
 
 	// 16-08 item 4: surface the ACTUAL propose failure inline (not just console.error).
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isCreating, setIsCreating] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	useEffect(() => {
 		async function loadAuthority() {
@@ -120,6 +123,7 @@ export function CreateElectionScreen() {
 			return;
 		}
 
+		setIsCreating(true);
 		try {
 			const electionsEngine = await getEngine<IElectionsEngine>("elections");
 			if (!electionsEngine) {
@@ -285,8 +289,12 @@ export function CreateElectionScreen() {
 			await saveLocalKeyholders(electionId, cleanKeyholders);
 		} catch (err) {
 			console.warn("createElection error:", err);
-			setErrorMessage(mapElectionError(err, t));
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? mapElectionError(err, t));
 			return;
+		} finally {
+			setIsCreating(false);
 		}
 		navigation.goBack();
 	};
@@ -389,8 +397,9 @@ export function CreateElectionScreen() {
 			<InlineError message={errorMessage} />
 			<Footer>
 				<CustomButton
-					title={t("propose")}
+					title={isCreating ? `${t("propose")}…` : t("propose")}
 					icon="floppy-disk"
+					disabled={isCreating}
 					onPress={handlePropose}
 					backgroundColor={colors.success}
 					forceDarkText={true}

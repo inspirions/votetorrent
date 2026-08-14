@@ -16,6 +16,7 @@ import { useApp } from "../../providers/AppProvider";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import { createDeviceSigner } from "../../engines/device-signer";
 import type { SignCallback } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 // LifecycleConfirmCard is owned by 47-10 and lives in the registration tree
 // because that is where its other seven call sites are; this screen is one
 // authorities-tree consumer among two (47-17 is the other) and imports it
@@ -93,6 +94,7 @@ export default function AuthorityPeersScreen() {
 	const [peerIdInput, setPeerIdInput] = useState("");
 	const [pendingRemovePeerId, setPendingRemovePeerId] = useState<string | undefined>(undefined);
 	const [submitting, setSubmitting] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	const { scopes, loading: scopesLoading } = useCurrentOfficerScopes(authorityId);
 	const canWrite = !scopesLoading && scopes?.includes("cap") === true;
@@ -156,14 +158,21 @@ export default function AuthorityPeersScreen() {
 				await op(sign, engine);
 				await loadPeers();
 			} catch (err) {
-				if (!unmountedRef.current)
-					setErrorMessage(err instanceof Error ? err.message : String(err));
+				// Preserve the existing re-throw contract (handleAddPeer's catch and
+				// LifecycleConfirmCard's handleConfirm both depend on it) — only the
+				// message-setting decision routes through the shared handler. When
+				// `outcome.handled` is true (navigation fired), the throw is still
+				// propagated so callers unwind cleanly, but no errorMessage is set.
+				const outcome = handleDeviceSigningError(err);
+				if (!unmountedRef.current && !outcome.handled) {
+					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+				}
 				throw err;
 			} finally {
 				if (!unmountedRef.current) setSubmitting(false);
 			}
 		},
-		[getEngine, loadPeers]
+		[getEngine, loadPeers, handleDeviceSigningError]
 	);
 
 	const canAddSubmit = canWrite && !submitting && peerIdInput.trim().length > 0;
@@ -300,7 +309,7 @@ export default function AuthorityPeersScreen() {
 					>
 						<CustomButton
 							size="thin"
-							title={t("authorityPeerAddButton")}
+							title={submitting ? `${t("authorityPeerAddButton")}…` : t("authorityPeerAddButton")}
 							disabled={!canAddSubmit}
 							onPress={canAddSubmit ? handleAddPeer : NOOP}
 						/>
@@ -348,7 +357,8 @@ export default function AuthorityPeersScreen() {
 								style={[localStyles.rowAction, canWrite ? null : localStyles.disabledControl]}
 							>
 								<ChipButton
-									label={t("authorityPeerRemoveButton")}
+									label={submitting ? `${t("authorityPeerRemoveButton")}…` : t("authorityPeerRemoveButton")}
+									disabled={submitting}
 									onPress={
 										canWrite && !submitting ? () => handleRequestRemove(peer.peerId) : undefined
 									}

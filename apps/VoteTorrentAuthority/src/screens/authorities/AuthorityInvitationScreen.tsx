@@ -27,6 +27,7 @@ import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
 type AuthorityInvitationParams = {
 	mode: "send" | "accept";
@@ -53,6 +54,8 @@ export default function AuthorityInvitationScreen() {
 
 	// 16-08 item 4: surface the ACTUAL send failure inline (send-mode only).
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isSending, setIsSending] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// D-05: share text shown after a successful send (authority invite material).
 	const [shareText, setShareText] = useState<string>("");
@@ -111,6 +114,7 @@ export default function AuthorityInvitationScreen() {
 			setErrorMessage(t("errAuthorityNameRequired"));
 			return;
 		}
+		setIsSending(true);
 		try {
 			// Resolve device identity (D-02 / generate-on-first-run) — needed to
 			// populate ctx.user so Officer.UserIdValid passes (Pitfall 2 / T-16-05).
@@ -177,8 +181,12 @@ export default function AuthorityInvitationScreen() {
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
 			console.warn("AuthorityInvitationScreen send failed:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
 			return;
+		} finally {
+			setIsSending(false);
 		}
 	};
 
@@ -274,8 +282,9 @@ export default function AuthorityInvitationScreen() {
 				{!shareText ? (
 					<Footer>
 						<CustomButton
-							title={t("send")}
+							title={isSending ? `${t("send")}…` : t("send")}
 							icon="paper-plane"
+							disabled={isSending}
 							backgroundColor={colors.success}
 							forceDarkText={true}
 							onPress={onSend}

@@ -117,6 +117,10 @@ jest.mock("@react-navigation/native", () => ({
 		},
 	}),
 	useRoute: () => ({ params: { authorityId: "auth-1" } }),
+	// 49-12: AuthorityPeersScreen now imports useDeviceSigningErrorHandler,
+	// which resolves useNavigation() internally — the prior mock had no
+	// consumer of it (this screen navigates nowhere of its own).
+	useNavigation: () => ({ navigate: jest.fn() }),
 }));
 
 jest.mock("../../../engines/device-user", () => ({

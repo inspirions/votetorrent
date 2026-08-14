@@ -12,6 +12,7 @@ import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import type { SignCallback } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import { reconcilePolicyState } from "./registration-policy-reconciliation";
 import { RegistrationFieldsSection } from "./components/RegistrationFieldsSection";
@@ -58,6 +59,7 @@ export default function RegistrationPolicyScreen() {
 	const [rosterNonEmpty, setRosterNonEmpty] = useState(false);
 	const [registrationOpen, setRegistrationOpen] = useState(false);
 	const [errorMessage, setErrorMessage] = useState("");
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Default-open, unlike ElectionDetailsScreen's "More" section (which defaults
 	// closed): this is policy-review content an auditing read-only officer must see
@@ -211,22 +213,41 @@ export default function RegistrationPolicyScreen() {
 	// D-14: every edit fires its signed engine call immediately — there is no draft
 	// state and no Save button anywhere in this screen. Acquire "Device User" — the
 	// same literal bootstrap fallback AppProvider.tsx:75 and useCurrentOfficerScopes
-	// use, so a first-run identity cannot diverge. This helper never catches: every
-	// rejection propagates to the section's own runWrite, which is what renders
-	// Couldn't-save plus Retry.
+	// use, so a first-run identity cannot diverge.
+	//
+	// 49-12: this is the ONLY point in the file with access to the real signing
+	// error before the section components' own `runWrite` (RegistrationFieldsSection
+	// et al.) discards it with a bare `catch {}` (by design — see that file's own
+	// comment on the "superseded-by-newer-edit" internal marker). A
+	// KEY_INVALIDATED_REASSOCIATE/NO_KEY_PROVISIONED/NO_DEVICE_CREDENTIAL rejection
+	// therefore MUST be classified and, where applicable, navigated HERE — it would
+	// otherwise be silently swallowed into a generic "Couldn't save" row with no
+	// path back to recovery. `createDeviceSigner` itself is now inside the try (it
+	// previously ran unguarded before the try/finally, which is exactly the gap:
+	// its rejection used to skip this function's error handling entirely).
+	//
+	// This still ALWAYS re-throws (never swallows), preserving the pre-existing
+	// contract every call site depends on: guardedWrite -> the section's runWrite,
+	// which needs a rejection to know the write did NOT commit and render its Retry
+	// affordance. Known limitation (documented, not silently accepted): the
+	// section's per-row state machine has only "saved"/"error", no third
+	// "silently reverted" state, so a cancelled biometric prompt still surfaces as
+	// a retryable row error rather than D-13's ideal "no error screen" — the
+	// navigation and inline-copy outcomes for the other five classes are unaffected
+	// and correct.
 	async function runSignedWrite(op: (sign: SignCallback) => Promise<void>): Promise<void> {
-		const sign = await createDeviceSigner("Device User");
-		// The reload runs in a finally so BOTH the success and the failure path
-		// refresh the screen (gap 4's second missing bullet) — a half-applied
-		// remove-then-add is visible in the fields list and the D-04/D-05 Policy
-		// Issues card immediately, not just at the next successful write.
-		// loadPolicy() already catches its own read errors internally, so this
-		// finally cannot swallow or mask op's rejection — that rejection still
-		// propagates to the caller (guardedWrite -> the section's runWrite, which
-		// is what renders Couldn't-save + Retry).
 		try {
+			const sign = await createDeviceSigner("Device User");
 			await op(sign);
+		} catch (err) {
+			// Classify/navigate now, while the real error is still available.
+			handleDeviceSigningError(err);
+			throw err;
 		} finally {
+			// The reload runs in a finally so BOTH the success and the failure path
+			// refresh the screen (gap 4's second missing bullet) — a half-applied
+			// remove-then-add is visible in the fields list and the D-04/D-05 Policy
+			// Issues card immediately, not just at the next successful write.
 			await loadPolicy();
 		}
 	}
