@@ -39,6 +39,13 @@ import com.facebook.react.module.annotations.ReactModule
  *   - `NO_KEY_PROVISIONED` is a routing (not terminal) class: the Keystore alias simply does not
  *     exist yet, detected BEFORE any prompt is shown — 49-UI-SPEC.md's explicitly-flagged sixth
  *     condition, sibling to (not a redefinition of) D-13's original five codes.
+ *
+ * Plan 06 (D-16/D-26/D-18) adds [signWithRecoveryKey] and one further TERMINAL class:
+ *   - `NO_DEVICE_CREDENTIAL`: the device has no screen lock configured at all. TERMINAL, not
+ *     routing — distinct from `KEY_INVALIDATED_REASSOCIATE`, which routes the caller back into a
+ *     re-provisioning ceremony that CAN succeed. Removing the lock screen destroys both the
+ *     primary signing key and the recovery key (the device credential IS the lock screen, D-18's
+ *     boundary); there is no on-device ceremony this code could route the caller into.
  */
 @ReactModule(name = AttestationNativeModule.NAME)
 class AttestationNativeModule(reactContext: ReactApplicationContext) :
@@ -173,6 +180,50 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 				promise.reject(
 					"KEY_INVALIDATED_REASSOCIATE",
 					"biometric enrollment changed since this key was created — key invalidated, re-association required",
+				)
+			},
+			onError = { code, throwable ->
+				promise.reject(code, throwable)
+			},
+		)
+	}
+
+	override fun signWithRecoveryKey(
+		keyAlias: String,
+		digestBase64: String,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		promise: Promise,
+	) {
+		val activity = currentActivity as? FragmentActivity
+		if (activity == null) {
+			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the recovery ceremony")
+			return
+		}
+
+		// Same D-04/T-49-DER-2 byte-format contract as signWithDeviceKey.
+		val digestBytes: ByteArray = try {
+			Base64.decode(digestBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_DIGEST_ENCODING", e)
+			return
+		}
+
+		keyAttestationHelper.signWithRecoveryKey(
+			keyAlias = keyAlias,
+			digestBytes = digestBytes,
+			activity = activity,
+			promptTitle = promptTitle,
+			promptSubtitle = promptSubtitle,
+			promptNegativeButton = promptNegativeButton,
+			onResult = { signatureHex ->
+				promise.resolve(Arguments.createMap().apply { putString("signatureHex", signatureHex) })
+			},
+			onKeyInvalidatedReassociate = {
+				promise.reject(
+					"KEY_INVALIDATED_REASSOCIATE",
+					"recovery key invalidated — re-association required",
 				)
 			},
 			onError = { code, throwable ->

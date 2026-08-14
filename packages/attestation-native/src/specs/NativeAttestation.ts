@@ -125,6 +125,40 @@ export interface Spec extends TurboModule {
 	 * from the docs (D-16).
 	 */
 	provisionRecoveryKey(keyAlias: string): Promise<Object>
+
+	/**
+	 * Phase 49 (D-16/D-26/D-18): produces a device-credential-authenticated, hardware-backed P-256
+	 * signature over `digestBase64` using the recovery key under `keyAlias`. Resolves the same
+	 * `{ signatureHex: string }` shape as `signWithDeviceKey`, with the identical byte-format
+	 * contract for `digestBase64` (plain base64 of raw digest bytes, never base64url, never
+	 * UTF-8-of-a-string).
+	 *
+	 * On API 30+ this authenticates via `BiometricPrompt` with
+	 * `setAllowedAuthenticators(DEVICE_CREDENTIAL)` — no negative button, since the platform
+	 * forbids combining a negative button with a device-credential authenticator. Below API 30
+	 * (D-26 — `androidx.biometric` 1.1.0 already supports the API; `DEVICE_CREDENTIAL` via
+	 * `BiometricPrompt` is unavailable below API 30 regardless of library version), this
+	 * authenticates via `KeyguardManager.createConfirmDeviceCredentialIntent` instead.
+	 * `promptNegativeButton` is therefore IGNORED on the API 30+ branch and used only by the
+	 * `KeyguardManager` branch — callers pass the same four strings in both cases.
+	 *
+	 * Rejects with one of `signWithDeviceKey`'s typed codes, plus one new D-18 terminal code:
+	 * `NO_DEVICE_CREDENTIAL` — the device has no screen lock configured at all, so no recovery
+	 * ceremony (on either API branch) can succeed. Distinct from `BIOMETRIC_ERROR`, which implies a
+	 * ceremony was actually attempted and failed; this device state is checked BEFORE either
+	 * ceremony begins.
+	 *
+	 * **Unproven at runtime on both API branches** — the API 30+ branch is proven by D-24 leg 3 on
+	 * the Pixel 8 and the API 24-29 branch by D-26a leg 5 on the Redmi 8, both in 49-14.
+	 * Compilation is not evidence of either.
+	 */
+	signWithRecoveryKey(
+		keyAlias: string,
+		digestBase64: string,
+		promptTitle: string,
+		promptSubtitle: string,
+		promptNegativeButton: string,
+	): Promise<Object>
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('AttestationNative')

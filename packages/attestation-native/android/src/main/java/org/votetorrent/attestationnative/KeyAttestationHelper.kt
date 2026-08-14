@@ -1,14 +1,19 @@
 package org.votetorrent.attestationnative
 
+import android.app.Activity
+import android.app.KeyguardManager
+import android.content.Intent
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import android.util.Base64
+import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.UiThreadUtil
 import java.math.BigInteger
@@ -17,6 +22,14 @@ import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
+
+/**
+ * Request code for the API 24-29 [KeyguardManager.createConfirmDeviceCredentialIntent] fallback
+ * (D-26) — scoped to this module (an arbitrary but stable value unlikely to collide with any
+ * other `startActivityForResult` call in the host app) so [ActivityEventListener.onActivityResult]
+ * can distinguish this ceremony's result from any other in-flight activity result.
+ */
+private const val RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE = 49160
 
 private const val ANDROID_KEYSTORE = "AndroidKeyStore"
 
@@ -490,6 +503,226 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 			)
 			biometricPrompt.authenticate(promptInfo, cryptoObject)
 		}
+	}
+
+	/**
+	 * (Phase 49, D-16/D-26/D-18) Produce a device-credential-authenticated, hardware-backed P-256
+	 * signature over [digestBytes] using the recovery key under [keyAlias]. Mirrors
+	 * [signWithDeviceKey]'s shape exactly (same [NO_KEY_PROVISIONED]-before-any-prompt check, same
+	 * [KeyPermanentlyInvalidatedException]-first catch ordering, same [derToCompactLowS]/
+	 * `SHA256withECDSA` [Signature] setup) — ONLY the authentication mechanism branches, by API
+	 * level:
+	 *
+	 * - API 30+ ([signRecoveryViaBiometricPrompt]): [BiometricPrompt] with
+	 *   `setAllowedAuthenticators(DEVICE_CREDENTIAL)` and NO negative button — the platform
+	 *   forbids setting a negative button together with a device-credential authenticator.
+	 * - API 24-29 ([signRecoveryViaKeyguardManager]): [BiometricPrompt] cannot request
+	 *   device-credential-only authentication at all below API 30, independent of the Keystore
+	 *   key's own flags (D-26, 49-RESEARCH.md "Pitfall 1") — falls back to
+	 *   [KeyguardManager.createConfirmDeviceCredentialIntent].
+	 *
+	 * Before EITHER branch: [KeyguardManager.isDeviceSecure] is checked. A device with no screen
+	 * lock at all emits the distinct TERMINAL code `NO_DEVICE_CREDENTIAL` (D-18) rather than
+	 * attempting a ceremony that cannot succeed — removing the lock screen destroys this key too
+	 * (the device credential IS the lock screen, D-18's boundary), so no retry can fix this state.
+	 * A generic `BIOMETRIC_ERROR` here would show the officer a retry affordance for something no
+	 * retry can fix.
+	 *
+	 * **Neither branch has been exercised at runtime by this plan** — the API 30+ branch is proven
+	 * by D-24 leg 3 on the Pixel 8 and the API 24-29 branch by D-26a leg 5 on the Redmi 8, both in
+	 * 49-14. Compilation is not evidence of either.
+	 */
+	fun signWithRecoveryKey(
+		keyAlias: String,
+		digestBytes: ByteArray,
+		activity: FragmentActivity,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		onResult: (String) -> Unit,
+		onKeyInvalidatedReassociate: () -> Unit,
+		onError: (code: String, throwable: Throwable?) -> Unit,
+	) {
+		val keyguardManager = ContextCompat.getSystemService(reactContext, KeyguardManager::class.java)
+		if (keyguardManager == null || !keyguardManager.isDeviceSecure) {
+			// D-18 terminal state, checked BEFORE either ceremony branch begins.
+			onError("NO_DEVICE_CREDENTIAL", IllegalStateException("device has no screen lock configured"))
+			return
+		}
+
+		// Same sixth-condition check as signWithDeviceKey (49-UI-SPEC.md) — the recovery alias may
+		// simply never have been provisioned yet.
+		if (!keyStore.containsAlias(keyAlias)) {
+			onError("NO_KEY_PROVISIONED", IllegalStateException("no recovery key provisioned under alias $keyAlias"))
+			return
+		}
+
+		val signature: Signature
+		try {
+			val privateKey = keyStore.getKey(keyAlias, null) as PrivateKey
+			signature = Signature.getInstance("SHA256withECDSA")
+			signature.initSign(privateKey)
+		} catch (e: KeyPermanentlyInvalidatedException) {
+			// D-13 — caught FIRST, exactly like signWithDeviceKey. In practice this key's
+			// setInvalidatedByBiometricEnrollment flag is a no-op (it governs only biometric-auth
+			// keys) so this should not fire from a biometric re-enrolment — but a screen-lock
+			// change already routes through the isDeviceSecure() check above, not here, and any
+			// OTHER cause of invalidation is still routed identically to signWithDeviceKey.
+			onKeyInvalidatedReassociate()
+			return
+		} catch (e: Exception) {
+			onError("BIOMETRIC_ERROR", e)
+			return
+		}
+
+		if (Build.VERSION.SDK_INT >= 30) {
+			signRecoveryViaBiometricPrompt(
+				signature = signature,
+				digestBytes = digestBytes,
+				activity = activity,
+				promptTitle = promptTitle,
+				promptSubtitle = promptSubtitle,
+				onResult = onResult,
+				onError = onError,
+			)
+		} else {
+			signRecoveryViaKeyguardManager(
+				signature = signature,
+				digestBytes = digestBytes,
+				activity = activity,
+				keyguardManager = keyguardManager,
+				promptTitle = promptTitle,
+				promptSubtitle = promptSubtitle,
+				onResult = onResult,
+				onError = onError,
+			)
+		}
+	}
+
+	/** API 30+ branch of [signWithRecoveryKey] — see that function's doc comment for the shape. */
+	private fun signRecoveryViaBiometricPrompt(
+		signature: Signature,
+		digestBytes: ByteArray,
+		activity: FragmentActivity,
+		promptTitle: String,
+		promptSubtitle: String,
+		onResult: (String) -> Unit,
+		onError: (code: String, throwable: Throwable?) -> Unit,
+	) {
+		val cryptoObject = BiometricPrompt.CryptoObject(signature)
+		// D-26/49-RESEARCH.md "Pitfall 1" — BiometricPrompt.PromptInfo.Builder THROWS at build()
+		// time if setNegativeButtonText is combined with setAllowedAuthenticators(DEVICE_CREDENTIAL)
+		// — the platform forbids the combination outright. promptNegativeButton is therefore NOT
+		// passed to this builder at all (it is used only by the KeyguardManager branch below).
+		val promptInfo = BiometricPrompt.PromptInfo.Builder()
+			.setTitle(promptTitle)
+			.setSubtitle(promptSubtitle)
+			.setAllowedAuthenticators(BiometricManager.Authenticators.DEVICE_CREDENTIAL)
+			.build()
+
+		// 45-11 DEVICE FINDING (MUST preserve, T-49-KEY-2): same UI-thread wrapping as
+		// signWithDeviceKey/regenerateAttested — construction AND authenticate() both require it.
+		UiThreadUtil.runOnUiThread {
+			val biometricPrompt = BiometricPrompt(
+				activity,
+				ContextCompat.getMainExecutor(reactContext),
+				object : BiometricPrompt.AuthenticationCallback() {
+					override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+						try {
+							val sig = result.cryptoObject!!.signature!!
+							sig.update(digestBytes)
+							val derSignature = sig.sign()
+							val compact = derToCompactLowS(derSignature)
+							onResult(compact.joinToString("") { b -> "%02x".format(b) })
+						} catch (e: Exception) {
+							onError("BIOMETRIC_ERROR", e)
+						}
+					}
+
+					override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+						// No NO_BIOMETRICS_ENROLLED branch here — that class is meaningless for a
+						// DEVICE_CREDENTIAL-only authenticator (it reports absent biometric
+						// enrollment, not an absent device credential; NO_DEVICE_CREDENTIAL above
+						// already covers the "nothing configured at all" case for this ceremony).
+						val code = when (errorCode) {
+							BiometricPrompt.ERROR_USER_CANCELED, BiometricPrompt.ERROR_NEGATIVE_BUTTON -> "CANCELED"
+							BiometricPrompt.ERROR_LOCKOUT -> "LOCKOUT"
+							BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> "LOCKOUT_PERMANENT"
+							else -> "BIOMETRIC_ERROR"
+						}
+						onError(code, RuntimeException(errString.toString()))
+					}
+
+					override fun onAuthenticationFailed() {
+						// Wrong PIN/pattern/password — a retry, NOT an error; the platform re-prompts
+						// itself, nothing to surface to JS here.
+					}
+				},
+			)
+			biometricPrompt.authenticate(promptInfo, cryptoObject)
+		}
+	}
+
+	/**
+	 * API 24-29 branch of [signWithRecoveryKey] — see that function's doc comment for the shape.
+	 * Launches [KeyguardManager.createConfirmDeviceCredentialIntent] for a result and completes
+	 * the ALREADY-INITIALIZED [signature] with the raw digest bytes on success. The
+	 * [ActivityEventListener] is scoped to [RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE] and
+	 * unregisters itself the instant it fires — the check-then-remove-then-act ordering
+	 * (`reactContext.removeActivityEventListener(this)` before any callback is invoked) is what
+	 * makes this listener a single-shot despite the ActivityEventListener API itself being
+	 * register-once/fire-many, so it cannot leak across configuration changes or double-fire for
+	 * one ceremony.
+	 */
+	private fun signRecoveryViaKeyguardManager(
+		signature: Signature,
+		digestBytes: ByteArray,
+		activity: FragmentActivity,
+		keyguardManager: KeyguardManager,
+		promptTitle: String,
+		promptSubtitle: String,
+		onResult: (String) -> Unit,
+		onError: (code: String, throwable: Throwable?) -> Unit,
+	) {
+		val intent = keyguardManager.createConfirmDeviceCredentialIntent(promptTitle, promptSubtitle)
+		if (intent == null) {
+			// isDeviceSecure() was already confirmed true by the caller immediately before this —
+			// this branch should be unreachable in practice, but is a real (if narrow) TOCTOU
+			// window if the device's credential state changes between the two calls.
+			onError(
+				"NO_DEVICE_CREDENTIAL",
+				IllegalStateException("createConfirmDeviceCredentialIntent returned null despite isDeviceSecure() == true"),
+			)
+			return
+		}
+
+		lateinit var listener: ActivityEventListener
+		listener = object : ActivityEventListener {
+			override fun onActivityResult(act: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+				if (requestCode != RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE) return
+				reactContext.removeActivityEventListener(this)
+				if (resultCode == Activity.RESULT_OK) {
+					try {
+						signature.update(digestBytes)
+						val derSignature = signature.sign()
+						val compact = derToCompactLowS(derSignature)
+						onResult(compact.joinToString("") { b -> "%02x".format(b) })
+					} catch (e: Exception) {
+						onError("BIOMETRIC_ERROR", e)
+					}
+				} else {
+					// Cancelled/dismissed — the same neutral dismissal as the BiometricPrompt
+					// branch's CANCELED class, not an error (49-UI-SPEC.md).
+					onError("CANCELED", null)
+				}
+			}
+
+			override fun onNewIntent(intent: Intent) {
+				// Not applicable to a startActivityForResult flow — required by the interface only.
+			}
+		}
+		reactContext.addActivityEventListener(listener)
+		activity.startActivityForResult(intent, RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE)
 	}
 
 	/** (3) D-15b — export leaf+intermediates only; drop the trailing root (verifier pins its own). */
