@@ -28,6 +28,7 @@ import { ElectionProposeRevisionBuilder } from './builders/election-propose-revi
 import { ElectionInviteKeyholderBuilder } from './builders/election-invite-keyholder-builder.js'
 import { ElectionRevokeKeyholderBuilder } from './builders/election-revoke-keyholder-builder.js'
 import { allocateTid } from '../database/tid-allocator.js'
+import { verifyUserKeyMembership } from '../user/verify-user-key.js'
 import { SigningEngine } from '../signing/signing-engine.js'
 
 /**
@@ -400,12 +401,18 @@ export class ElectionEngine implements IElectionEngine {
 
   /**
    * ELEC-05 — INSERT a ProposedElectionRevision row. The schema's
-   * UserValid CHECK gates on an Officer with scope 'mel' + a non-expired
-   * UserKey matching `context.UserKey` + SignatureValid.
+   * UserValid CHECK is a dumb `context.IsUserValid` gate the engine computes
+   * into. D-21 (Class B): this path carries no `Signature` argument
+   * (`proposeRevision`'s own public signature has none), so `IsUserValid` is
+   * bound to registered/unexpired UserKey membership only, via
+   * `verifyUserKeyMembership` — not a signature verification. The caller
+   * pre-signs through the AdminSigning/AdminSignature pipeline downstream.
    */
   async proposeRevision (revision: ElectionRevisionInit): Promise<void> {
     const tid = await allocateTid(this.ctx.db, 'election')
+    const userId = this.ctx.user?.id ?? null
     const signerKey = this.ctx.user?.activeKeys?.[0]?.key ?? null
+    const membership = await verifyUserKeyMembership(this.ctx, userId, signerKey)
     try {
       await this.ctx.db.exec(
 				`insert into ProposedElectionRevision (
@@ -417,7 +424,7 @@ export class ElectionEngine implements IElectionEngine {
 					Timeline,
 					KeyholderThreshold
 				)
-				with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = true
+				with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
 				values (
 					:electionId,
 					:revision,
@@ -435,9 +442,10 @@ export class ElectionEngine implements IElectionEngine {
           instructions: revision.instructions,
           timeline: JSON.stringify(revision.timeline),
           keyholderThreshold: revision.keyholderThreshold,
-          userId: this.ctx.user?.id ?? null,
+          userId,
           userKey: signerKey,
           signature: null,
+          isUserValid: membership.valid,
           now: nowCanonicalDatetime()
         }
       )
@@ -447,14 +455,19 @@ export class ElectionEngine implements IElectionEngine {
   }
 
   /**
-   * ELEC-06 — INSERT a ProposedBallot row. The schema's UserValid CHECK
-   * gates on Officer scope 'ceb' + non-expired UserKey + SignatureValid.
-   * The Ballot insert itself (via AdminSignature pipeline) lives downstream
-   * once the proposal is accepted.
+   * ELEC-06 — INSERT a ProposedBallot row. The schema's UserValid CHECK is a
+   * dumb `context.IsUserValid` gate the engine computes into. D-21 (Class B):
+   * this path carries no `Signature` argument, so `IsUserValid` is bound to
+   * registered/unexpired UserKey membership only, via
+   * `verifyUserKeyMembership` — not a signature verification. The Ballot
+   * insert itself (via AdminSignature pipeline) lives downstream once the
+   * proposal is accepted.
    */
   async proposeBallot (ballot: Ballot): Promise<void> {
     const tid = await allocateTid(this.ctx.db, 'election')
+    const userId = this.ctx.user?.id ?? null
     const signerKey = this.ctx.user?.activeKeys?.[0]?.key ?? null
+    const membership = await verifyUserKeyMembership(this.ctx, userId, signerKey)
     try {
       await this.ctx.db.exec(
 				`insert or replace into ProposedBallot (
@@ -465,7 +478,7 @@ export class ElectionEngine implements IElectionEngine {
 					Districts,
 					Questions
 				)
-				with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = true
+				with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
 				values (
 					:id,
 					:electionId,
@@ -483,9 +496,10 @@ export class ElectionEngine implements IElectionEngine {
           questions: ballot.questions && ballot.questions.length > 0
             ? JSON.stringify(ballot.questions)
             : null,
-          userId: this.ctx.user?.id ?? null,
+          userId,
           userKey: signerKey,
           signature: null,
+          isUserValid: membership.valid,
           now: nowCanonicalDatetime()
         }
       )
