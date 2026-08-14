@@ -28,6 +28,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
 type AdministratorInvitationParams = {
 	mode: "send" | "accept";
@@ -48,6 +49,8 @@ export default function AdministratorInvitationScreen() {
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isSending, setIsSending] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Accept-mode paste field (D-06 — invitee pastes the share text here)
 	const [pastedInvite, setPastedInvite] = useState<string>("");
@@ -95,6 +98,7 @@ export default function AdministratorInvitationScreen() {
 	const onSend = async () => {
 		// Pattern B: clear any prior error so a retry starts clean.
 		setErrorMessage("");
+		setIsSending(true);
 		try {
 			if (!authority?.id) {
 				setErrorMessage("Authority not available — navigate from an authority context.");
@@ -140,7 +144,11 @@ export default function AdministratorInvitationScreen() {
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
 			console.warn("onSend error:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+		} finally {
+			setIsSending(false);
 		}
 	};
 
@@ -238,8 +246,9 @@ export default function AdministratorInvitationScreen() {
 				{!shareText ? (
 					<Footer>
 						<CustomButton
-							title={t("send")}
+							title={isSending ? `${t("send")}…` : t("send")}
 							icon="paper-plane"
+							disabled={isSending}
 							backgroundColor={colors.success}
 							forceDarkText={true}
 							onPress={onSend}

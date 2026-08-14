@@ -10,15 +10,18 @@ interface ChipButtonProps {
 	/** Stretch to fill the row as a full-width CTA (e.g. CREATE USER), centered. */
 	fullWidth?: boolean;
 	onPress?: () => void;
+	/** Optional, backward-compatible: disables the chip (e.g. in-flight signing state). */
+	disabled?: boolean;
 }
 
-export function ChipButton({label, icon, fullWidth, onPress}: ChipButtonProps) {
+export function ChipButton({label, icon, fullWidth, onPress, disabled}: ChipButtonProps) {
 	const {colors} = useTheme() as ExtendedTheme;
 
 	return (
 		<TouchableOpacity
 			// This is using onPressIn because of a bug with onPress in headers
-			onPressIn={onPress}
+			onPressIn={disabled ? undefined : onPress}
+			disabled={disabled}
 			// The 32pt chip height is a deliberate app-wide visual constant, so
 			// raising `height` would reflow every header and card row. hitSlop
 			// lifts the effective touch target to 44 with ZERO layout change.
@@ -29,6 +32,7 @@ export function ChipButton({label, icon, fullWidth, onPress}: ChipButtonProps) {
 				styles.button,
 				{backgroundColor: colors.accent},
 				fullWidth && styles.fullWidth,
+				disabled && styles.disabled,
 			]}>
 			{icon && (
 				<View style={[styles.iconCircle, {backgroundColor: colors.dark}]}>
@@ -64,5 +68,8 @@ const styles = StyleSheet.create({
 		borderRadius: 12,
 		alignItems: 'center',
 		justifyContent: 'center',
+	},
+	disabled: {
+		opacity: 0.5,
 	},
 });

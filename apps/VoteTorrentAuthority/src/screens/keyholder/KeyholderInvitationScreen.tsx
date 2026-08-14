@@ -24,6 +24,7 @@ import type { RootStackParamList } from "../../navigation/types";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { globalStyles } from "../../theme/styles";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
 type KeyholderInvitationParams = {
 	mode: "send" | "accept";
@@ -44,6 +45,8 @@ export function KeyholderInvitationScreen() {
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isSending, setIsSending] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Accept-mode paste field (D-06)
 	const [pastedInvite, setPastedInvite] = useState<string>("");
@@ -76,6 +79,7 @@ export function KeyholderInvitationScreen() {
 	const onSend = async () => {
 		// Pattern B: clear any prior error so a retry starts clean.
 		setErrorMessage("");
+		setIsSending(true);
 		try {
 			if (!electionEngine) {
 				setErrorMessage("Election engine not available — navigate from an election context.");
@@ -141,7 +145,11 @@ export function KeyholderInvitationScreen() {
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
 			console.warn("onSend error:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+		} finally {
+			setIsSending(false);
 		}
 	};
 
@@ -228,8 +236,9 @@ export function KeyholderInvitationScreen() {
 				{!shareText ? (
 					<Footer>
 						<CustomButton
-							title={t("send")}
+							title={isSending ? `${t("send")}…` : t("send")}
 							icon="paper-plane"
+							disabled={isSending}
 							backgroundColor={colors.success}
 							forceDarkText={true}
 							onPress={onSend}
