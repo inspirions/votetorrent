@@ -118,7 +118,15 @@ export class NetworksEngine implements INetworksEngine {
 			scopes: officerScopesJson,
 			userName: user.name,
 			userImageRef: userImageRefJson,
-			keyType: 'user',
+			// 49-02 bugfix: this was hardcoded to the literal string 'user' — a value
+			// that is not any valid UserKeyType code ('M'/'Y'/'P') — so the founding
+			// user's UserKey.Type never actually reflected the key's real curve. That
+			// went unnoticed while every founding key was secp256k1 (any non-'P' value
+			// happened to route UserKey.SignatureValid's curve-branch correctly by
+			// accident), but a P-256 founding key would silently mis-dispatch to the
+			// wrong verifier on its own SECOND key insert (D-02/D-03). Must be
+			// `firstKey.type` — the actual UserKeyType code from the caller.
+			keyType: firstKey.type,
 			keyValue: firstKey.key,
 			expiration: toCanonicalDatetime(firstKey.expiration),
 			now: nowCanonicalDatetime(),

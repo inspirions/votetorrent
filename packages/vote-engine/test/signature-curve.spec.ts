@@ -10,14 +10,13 @@
 //      the threat register's T-49-DER mitigation: a wrong fixture would
 //      make a wrong implementation look correct, so the fixture is proven
 //      first.
-//   2. `describe.skip('verifySig — UserKey P-256 curve dispatch ...')` —
-//      RED-BY-DESIGN: un-skip in 49-02 (D-02/D-03 curve branch). Today
-//      `verifySig` (packages/vote-engine/src/database/initialize.ts)
-//      hardcodes `'secp256k1'`, so a P-256 signature over a `Type='P'`
-//      UserKey row cannot verify yet. These three cases assert the target
-//      behavior 49-02 must deliver; they are committed skipped so the
-//      wave-0 gate stays green (a red suite here would mask real
-//      regressions in every later wave).
+//   2. `describe('verifySig — UserKey P-256 curve dispatch ...')` — the
+//      D-02/D-03 curve branch. 49-02 curve-branched `UserKey.SignatureValid`
+//      (packages/vote-core/schema/votetorrent.qsql) and registered
+//      `SignatureValidP256` (packages/vote-engine/src/database/initialize.ts),
+//      so a P-256 signature over a `Type='P'` UserKey row now verifies. These
+//      three cases assert that behavior: P-256 acceptance, wrong-curve
+//      rejection, and the pre-existing secp256k1 path unregressed.
 
 import { expect } from 'chai'
 import { verify as cryptoVerify } from '@optimystic/quereus-plugin-crypto'
@@ -57,10 +56,10 @@ describe('p256 fixture', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 2. RED-BY-DESIGN: un-skip in 49-02 (D-02/D-03 curve branch)
+// 2. verifySig — UserKey P-256 curve dispatch (D-02/D-03)
 // ---------------------------------------------------------------------------
 
-describe.skip('verifySig — UserKey P-256 curve dispatch (D-02/D-03)', () => {
+describe('verifySig — UserKey P-256 curve dispatch (D-02/D-03)', () => {
   it('case 1: a Type=\'P\' second UserKey signed (by an existing P-256 key) with a real P-256 signature is ACCEPTED', async () => {
     // The existing (first, bootstrap) active key must itself be P-256 —
     // UserKey.SignatureValid's subsequent-key branch requires the SECOND

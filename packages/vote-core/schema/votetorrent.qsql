@@ -660,15 +660,38 @@ declare schema main
 		-- IsSignatureValid stays declared (unused by this CHECK) for backward-compatible binding
 		-- from other raw-SQL seeders across the suite; producers accepting a real signature no
 		-- longer assert it hardcoded true (R-04) -- see UserEngine.addKey.
+		--
+		-- 49-02 (D-02/D-03): curve-branched. `new.Type` describes the curve of the KEY BEING
+		-- INSERTED, but the curve that must actually verify the signature bytes is the EXISTING
+		-- signer's own curve (`context.UserKey`), which may differ in this permanently
+		-- mixed-curve system (D-03) -- a P-256 Authority officer key can countersign a new
+		-- secp256k1 key and vice versa. The discriminant therefore resolves from the PERSISTED
+		-- `UserKey.Type` of the verifying key, not from `new.Type`: `coalesce((select K.Type
+		-- from UserKey K where K.PubKey = context.UserKey), new.Type)` -- a registered signer
+		-- uses its own recorded curve, and an unregistered/legacy signer falls back to the new
+		-- row's own type, which preserves every existing (pre-49-02) test path exactly. Do not
+		-- "simplify" this back to `new.Type` -- that would verify a P-256 signer's countersignature
+		-- of a new secp256k1 key against the WRONG curve and fail closed and silently.
 		constraint SignatureValid check (
 			(
 				(select count(*) from UserKey K where K.UserId = new.UserId) = 1
 				and context.UserKey is null
 			)
-			or SignatureValid(
-				Digest(new.UserId, new.PubKey, new.Type, new.Expiration),
-				context.Signature,
-				context.UserKey
+			or (
+				coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), new.Type) = 'P'
+				and SignatureValidP256(
+					Digest(new.UserId, new.PubKey, new.Type, new.Expiration),
+					context.Signature,
+					context.UserKey
+				)
+			)
+			or (
+				coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), new.Type) <> 'P'
+				and SignatureValid(
+					Digest(new.UserId, new.PubKey, new.Type, new.Expiration),
+					context.Signature,
+					context.UserKey
+				)
 			)
 		),
 		constraint NoUpdate check on update (false),
