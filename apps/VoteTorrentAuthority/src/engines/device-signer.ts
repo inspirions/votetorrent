@@ -48,8 +48,21 @@ import { getDeviceUser } from './device-user'
 // own barrel-export doc comment explains for the identical reason.
 import type { Spec as NativeAttestationSpec } from '@votetorrent/attestation-native/src/specs/NativeAttestation'
 
-/** Stable Keystore alias for the Authority app's primary device signing key (49-06). */
-const SIGNING_KEY_ALIAS = 'VOTETORRENT_AUTHORITY_SIGNING_KEY_V1'
+/**
+ * Stable Keystore alias for the Authority app's primary device signing key (49-06). Exported
+ * (49-10) so `ProvisionSigningKeyScreen` imports the same literal rather than re-declaring it —
+ * one alias string, one source of truth.
+ */
+export const SIGNING_KEY_ALIAS = 'VOTETORRENT_AUTHORITY_SIGNING_KEY_V1'
+
+/**
+ * Stable Keystore alias for the Authority app's device-credential recovery key (49-06/D-16).
+ * Exported (49-10) for the same reason as `SIGNING_KEY_ALIAS` above — `ProvisionSigningKeyScreen`
+ * is the ONLY screen that ever signs with this alias (T-49-KEY-3); this module does not itself
+ * use it, it only re-exports the literal 49-06 already defined natively
+ * (`KeyAttestationHelper.kt`'s `VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1`).
+ */
+export const RECOVERY_KEY_ALIAS = 'VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1'
 
 /**
  * App-layer sign callback type: receives canonical digest bytes from the engine and returns a
