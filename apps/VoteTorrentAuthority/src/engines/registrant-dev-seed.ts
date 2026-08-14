@@ -578,15 +578,19 @@ async function reattachSummary(
  * convention).
  *
  * `createSign` is a LAZY FACTORY, not a resolved signer, and that is the whole
- * point of its shape. `createDeviceSigner` reads the device's raw secp256k1
- * PRIVATE KEY out of AsyncStorage and throws when the device user is missing
- * or its stored blob is corrupt. Taking a resolved `SignCallback` forced the
- * caller to do both of those things on EVERY cold start — including release
- * builds, where this function is guaranteed to no-op — and a throw there
- * landed in AppProvider's re-attach catch, blanking a perfectly good network
- * behind "Failed to load network". Deferring the call to after the gate means
- * release builds never touch the private key for this fixture, and a signer
- * failure in dev is caught below as a seed failure, which is what it is.
+ * point of its shape. `createDeviceSigner` (Phase 49 hardware rewrite) signs
+ * through the Android Keystore-backed `signWithDeviceKey` native ceremony —
+ * no private key material is ever read out of AsyncStorage — and it throws
+ * `NO_KEY_PROVISIONED` when the device has never completed the biometric
+ * `ProvisionSigningKeyScreen` ceremony. Taking a resolved `SignCallback`
+ * forced the caller to do both key resolution and (pre-Phase-49) a raw-key
+ * read on EVERY cold start — including release builds, where this function
+ * is guaranteed to no-op — and a throw there landed in AppProvider's
+ * re-attach catch, blanking a perfectly good network behind "Failed to load
+ * network". Deferring the call to after the gate means release builds never
+ * touch signer resolution for this fixture, and a signer failure in dev
+ * (including an unprovisioned device) is caught below as a seed failure,
+ * which is what it is.
  */
 export async function maybeSeedRegistrantFixtures(
 	networksEngine: NetworksEngine,
