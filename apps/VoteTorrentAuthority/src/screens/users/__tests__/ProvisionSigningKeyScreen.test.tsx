@@ -61,8 +61,10 @@ jest.mock("@react-navigation/native", () => ({
 const mockAddKey = jest.fn(async (_key: unknown, sign?: (digest: Uint8Array) => Promise<unknown>) => {
 	if (sign) await sign(new Uint8Array([1, 2, 3]));
 });
-const mockRevokeKey = jest.fn(async () => {});
-const mockGetRevokeKeyDigest = jest.fn(async () => new Uint8Array([9, 9, 9]));
+const mockRevokeKey = jest.fn(
+	async (_key: string, _signature: { signerKey: string; signature: string; signerUserId: string }) => {},
+);
+const mockGetRevokeKeyDigest = jest.fn(async (_key: string) => new Uint8Array([9, 9, 9]));
 const mockGetSummary = jest.fn(async () => ({
 	id: "user-1",
 	name: "Officer One",
@@ -244,5 +246,97 @@ describe("ProvisionSigningKeyScreen — 49-10 first-run provisioning", () => {
 
 		const json = JSON.stringify(tr.toJSON());
 		expect(json).toContain("deviceSigningErrorLockoutPermanent");
+	});
+});
+
+const OLD_SIGNING_KEY_HEX = "cc" + "33".repeat(32);
+const NEW_SIGNING_KEY_HEX = "dd" + "44".repeat(32);
+const RECOVERY_KEY_HEX = "ee" + "55".repeat(32);
+
+describe("ProvisionSigningKeyScreen — 49-10 recovery variant (D-16) and D-18 terminal state", () => {
+	beforeEach(() => {
+		mockRouteParams = { reason: "invalidated" };
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [{ key: OLD_SIGNING_KEY_HEX, type: "P", expiration: Date.now() + 1000 }],
+		});
+	});
+
+	it("(a) the recovery happy path signs with signWithRecoveryKey (never signWithDeviceKey), registers the replacement key, then revokes the old one", async () => {
+		nativeFake.provisionDeviceKey.mockResolvedValue({
+			publicKeyBase64: "NEW-SIGNING-SPKI-DER-BASE64",
+			publicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+		});
+		nativeFake.provisionRecoveryKey.mockResolvedValue({
+			publicKeyBase64: "RECOVERY-SPKI-DER-BASE64",
+			publicKeyCompressedHex: RECOVERY_KEY_HEX,
+		});
+		nativeFake.signWithRecoveryKey.mockResolvedValue({ signatureHex: "cafebabe" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(nativeFake.signWithDeviceKey).not.toHaveBeenCalled();
+		expect(nativeFake.signWithRecoveryKey).toHaveBeenCalled();
+		for (const call of nativeFake.signWithRecoveryKey.mock.calls) {
+			expect(call[0]).toBe("VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1");
+		}
+
+		expect(mockRevokeKey).toHaveBeenCalledTimes(1);
+		expect(mockRevokeKey.mock.calls[0]![0]).toBe(OLD_SIGNING_KEY_HEX);
+		const revokeSignature = mockRevokeKey.mock.calls[0]![1] as { signerKey: string; signature: string };
+		expect(revokeSignature.signerKey).toBe(RECOVERY_KEY_HEX);
+		expect(revokeSignature.signature).toBe("cafebabe");
+
+		expect(mockAddKey).toHaveBeenCalledTimes(1);
+		const addedKey = mockAddKey.mock.calls[0]![0] as { key: string };
+		expect(addedKey.key).toBe(NEW_SIGNING_KEY_HEX);
+		expect(typeof mockAddKey.mock.calls[0]![1]).toBe("function");
+
+		expect(mockPersistProvisionedDeviceUser).toHaveBeenCalledWith("Officer One", NEW_SIGNING_KEY_HEX);
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningSuccessHeading");
+	});
+
+	it("(b) a NO_DEVICE_CREDENTIAL rejection renders the no-recovery heading/body and ZERO buttons", async () => {
+		nativeFake.provisionDeviceKey.mockResolvedValue({
+			publicKeyBase64: "NEW-SIGNING-SPKI-DER-BASE64",
+			publicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+		});
+		nativeFake.provisionRecoveryKey.mockResolvedValue({
+			publicKeyBase64: "RECOVERY-SPKI-DER-BASE64",
+			publicKeyCompressedHex: RECOVERY_KEY_HEX,
+		});
+		nativeFake.signWithRecoveryKey.mockRejectedValue(
+			Object.assign(new Error("no device credential"), { code: "NO_DEVICE_CREDENTIAL" }),
+		);
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningNoRecoveryHeading");
+		expect(json).toContain("signingKeyProvisioningNoRecoveryBody");
+
+		// D-18: no action affordance at all — assert the rendered button COUNT, not just the
+		// absence of a specific testID (a stray pressable elsewhere would still be a lie).
+		const pressables = tr.root.findAll((node) => typeof node.props.onPress === "function");
+		expect(pressables.length).toBe(0);
+	});
+});
+
+describe("ProvisionSigningKeyScreen — D-14 boot invariant", () => {
+	it("AppProvider.tsx never references this route — no boot-time redirect exists", () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require("fs");
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require("path");
+		const appProviderSource = fs.readFileSync(
+			path.join(__dirname, "..", "..", "..", "providers", "AppProvider.tsx"),
+			"utf8",
+		);
+		expect(appProviderSource).not.toContain("ProvisionSigningKey");
 	});
 });
