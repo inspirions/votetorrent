@@ -16,6 +16,9 @@ import { MisuseError, QuereusError } from '@quereus/quereus';
 import { Temporal } from 'temporal-polyfill';
 import { SigningEngine } from '../signing/signing-engine.js';
 import { allocateTid } from '../database/tid-allocator.js';
+import { verifySig, verifySigP256 } from '../database/initialize.js';
+import { verifyUserKeyMembership } from '../user/verify-user-key.js';
+import { UserKeyType } from '@votetorrent/vote-core';
 import {
 	asText,
 	authorityInviteSignedBytes,
@@ -420,31 +423,47 @@ export class AuthorityEngine implements IAuthorityEngine {
 		const effectiveAtCanon = toCanonicalDatetime(admin.proposed.effectiveAt);
 		const tid = await allocateTid(this.ctx.db, 'authority');
 		try {
-			// D-03/D-04: resolve the concrete Signature.
-			// If a sign callback is provided, compute the canonical digest engine-side
-			// (same args as PATH A's inline Digest() in startSigningSession) and invoke
-			// the callback so the caller signs exactly the bytes the engine stores.
-			// If a completed Signature is passed (test fixture path), use it directly.
+			// D-03/D-04: resolve the canonical digest ENGINE-SIDE first — needed both to
+			// hand a sign callback the exact bytes to sign, and (D-21) to independently
+			// re-verify whatever Signature ends up bound, including a pre-supplied one.
+			const digestRow = await this.ctx.db
+				.prepare(
+					'select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d',
+				)
+				.get({
+					authorityId: this.authority.id,
+					effectiveAt: effectiveAtCanon,
+					thresholdPolicies: thresholdPoliciesJson,
+				});
+			if (!digestRow || digestRow.d == null) {
+				throw new Error('proposeAdmin: Digest() returned null — crypto plugin not registered?');
+			}
+			// WR-01: single shared digestToBytes decoder.
+			const digestBytes = digestToBytes(digestRow.d);
+
+			// If a sign callback is provided, invoke it so the caller signs exactly the
+			// bytes the engine stores. If a completed Signature is passed (test fixture
+			// path), use it directly — either way `digestRow.d`/`digestBytes` above are
+			// the SAME bytes the signature must cover, per D-21 verification below.
 			let signature: Signature;
 			if (typeof signatureOrCallback === 'function') {
-				const digestRow = await this.ctx.db
-					.prepare(
-						'select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d',
-					)
-					.get({
-						authorityId: this.authority.id,
-						effectiveAt: effectiveAtCanon,
-						thresholdPolicies: thresholdPoliciesJson,
-					});
-				if (!digestRow || digestRow.d == null) {
-					throw new Error('proposeAdmin: Digest() returned null — crypto plugin not registered?');
-				}
-				// WR-01: single shared digestToBytes decoder.
-				const digestBytes = digestToBytes(digestRow.d);
 				signature = await signatureOrCallback(digestBytes);
 			} else {
 				signature = signatureOrCallback;
 			}
+
+			// D-21 (Class A): compute a REAL IsUserValid — the conjunction of registered/
+			// unexpired key membership AND a curve-dispatched signature verification over
+			// the digest already computed above. Replaces the prior literal `true`.
+			const membership = await verifyUserKeyMembership(
+				this.ctx,
+				signature.signerUserId,
+				signature.signerKey,
+			);
+			const signatureValid = membership.keyType === UserKeyType.p256
+				? verifySigP256(digestRow.d, signature.signature, signature.signerKey)
+				: verifySig(digestRow.d, signature.signature, signature.signerKey);
+			const isUserValid = membership.valid && signatureValid;
 
 			await this.ctx.db.exec(
 				`insert into ProposedAdmin (
@@ -452,7 +471,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 					EffectiveAt,
 					ThresholdPolicies
 				)
-					with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = true
+					with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
 				values (
 					:authorityId,
 					:effectiveAt,
@@ -466,6 +485,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 					signerKey: signature.signerKey,
 					signature: signature.signature,
 					now: nowCanonicalDatetime(),
+					isUserValid,
 				},
 			);
 

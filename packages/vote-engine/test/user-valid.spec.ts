@@ -1,17 +1,14 @@
-// user-valid.spec.ts — 49-01 Wave 0 scaffolding for D-21 Class A (IsUserValid).
-//
-// RED-BY-DESIGN: un-skip in 49-08 (D-21 Class A)
+// user-valid.spec.ts — D-21 Class A (IsUserValid) rejection specs.
 //
 // `ProposedAdmin.UserValid` (packages/vote-core/schema/votetorrent.qsql:419)
-// is `check (context.IsUserValid = true)` — a vacuous gate. Every producer
-// (`AuthorityEngine.proposeAdmin`, `authority-engine.ts:409-470`) binds
-// `IsUserValid = true` as a hardcoded literal, so today's CHECK passes for
-// ANY signer/key pair regardless of whether it corresponds to a real,
-// unexpired UserKey row. These cases assert the target D-21 behavior
-// (`IsUserValid` computed engine-side from a real `UserKey` lookup, per
-// RESEARCH.md's "Don't Hand-Roll" table) that 49-08 must deliver. Committed
-// skipped so the wave-0 gate stays green — a red suite here would mask real
-// regressions in every later wave.
+// is `check (context.IsUserValid = true)`. `AuthorityEngine.proposeAdmin`
+// (`authority-engine.ts:409-`) binds a REAL, computed `IsUserValid` (49-08):
+// the conjunction of `verifyUserKeyMembership` (registered, unexpired
+// UserKey row) and a curve-dispatched signature verification over the
+// canonical digest. These cases assert that behavior: an unregistered
+// signer key is rejected, an expired signer key is rejected, and a
+// registered/unexpired signer with a real verifying signature still
+// succeeds.
 
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
@@ -22,7 +19,7 @@ import { randomTestKeyPair } from './fixtures/keys.js'
 import type { EngineContext } from '../src/types.js'
 import type { AdminInit, Proposal, Scope, Signature } from '@votetorrent/vote-core'
 
-describe.skip('IsUserValid — ProposedAdmin Class A signer/key gate (D-21)', () => {
+describe('IsUserValid — ProposedAdmin Class A signer/key gate (D-21)', () => {
   it('case 1: proposeAdmin with a signer key that has NO matching UserKey row is REJECTED', async () => {
     const net = await createTestNetwork()
     const auth = await addTestAuthority(net)

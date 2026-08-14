@@ -962,6 +962,15 @@ export class ElectionsEngine implements IElectionsEngine {
       //    The Digest in step 4 is computed using adminThresholdPolicies read from Admin, NOT from
       //    ProposedAdmin — so the Digest is correct regardless of what ProposedAdmin.ThresholdPolicies
       //    contains (the values should match, but we don't rely on ProposedAdmin being fresh here).
+      // 49-08 (D-21) exemption, D-11-style: this is the SAME debug-only seed helper
+      // documented above (never calls sign() — placeholderKey/placeholderSig, no real
+      // crypto). authority-engine.ts's proposeAdmin now computes a real, verified
+      // IsUserValid for every production caller; this raw-SQL ProposedAdmin insert
+      // stays hardcoded IsUserValid = true on purpose, exactly like its sibling
+      // IsPlaceholderSignature = true a few lines below. Confirmed __DEV__-only via
+      // its sole call site (SettingsScreen.tsx's debug seed button, gated by
+      // `{__DEV__ && (...)}`) — never reachable from a release build. Do not "finish
+      // the job" here; leave this bound to the placeholder.
       try {
         await ctx.db.exec(
           `insert into ProposedAdmin (AuthorityId, EffectiveAt, ThresholdPolicies)
