@@ -62,6 +62,8 @@ import { BulkImportSyncScreen } from "../screens/registration/BulkImportSyncScre
 import RegistrantsListScreen from "../screens/registration/RegistrantsListScreen";
 import RegistrantDetailScreen from "../screens/registration/RegistrantDetailScreen";
 import AttestationProvisioningStatusScreen from "../screens/registration/AttestationProvisioningStatusScreen";
+// Phase 49 plan 49-10 (D-14) — the officer-facing signing-key provisioning/recovery screen.
+import ProvisionSigningKeyScreen from "../screens/users/ProvisionSigningKeyScreen";
 import PollingDevicesScreen from "../screens/authorities/PollingDevicesScreen";
 import AuthorityPeersScreen from "../screens/authorities/AuthorityPeersScreen";
 import { CreateElectionScreen } from "../screens/elections/CreateElectionScreen";
@@ -522,6 +524,11 @@ export const RootNavigator = () => {
 				name="AttestationProvisioningStatus"
 				component={AttestationProvisioningStatusScreen}
 				options={{ title: t("attestationProvisioningScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="ProvisionSigningKey"
+				component={ProvisionSigningKeyScreen}
+				options={{ title: t("signingKeyProvisioningScreenTitle") }}
 			/>
 			<Stack.Screen
 				name="PollingDevices"

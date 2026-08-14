@@ -204,6 +204,39 @@ const resources = {
 			// D-20 / 49-05: rendered when the engine/schema rejects a revokeKey signature
 			// (UserKey.DeleteValid CHECK) — see RevokeKeyScreen.tsx's constraint-name match.
 			revokeKeySignatureInvalid: 'This revocation could not be verified and was not applied.',
+			// D-13/D-14/D-16: native BiometricPrompt string contract + the signingKeyProvisioning*
+			// screen copy (ProvisionSigningKeyScreen) + settingsSigningKeyRow. See
+			// 49-UI-SPEC.md's Copywriting Contract for the full table this mirrors verbatim.
+			deviceSigningPromptTitle: 'Confirm your identity',
+			deviceSigningPromptSubtitle: 'Verify to sign this action',
+			deviceSigningPromptNegativeButton: 'Cancel',
+			signingKeyProvisioningPromptSubtitle: 'Verify to set up secure signing',
+			signingKeyRecoveryPromptSubtitle:
+				'Verify with your device PIN, pattern, or password to replace your signing key',
+			deviceSigningErrorNoBiometricsEnrolled:
+				'This device has no biometrics enrolled. Enroll a fingerprint or face in your device settings, then try again.',
+			deviceSigningErrorLockout: 'Too many attempts. Wait a moment and try again.',
+			deviceSigningErrorLockoutPermanent:
+				'Biometric verification is locked. Unlock your device with your PIN, pattern, or password to reset it, then try again.',
+			deviceSigningErrorGeneric: "Couldn't verify your biometrics. Try again.",
+			signingKeyProvisioningScreenTitle: 'Secure Signing Setup',
+			signingKeyProvisioningFirstRunHeading: 'Set up hardware-backed signing',
+			signingKeyProvisioningFirstRunBody:
+				"Your officer signature will be produced by a key stored in this device's secure hardware and protected by your biometrics. The key never leaves the device.",
+			signingKeyProvisioningSetupButton: 'Set Up Secure Signing',
+			signingKeyProvisioningPending: 'Setting up your signing key…',
+			signingKeyProvisioningSuccessHeading: 'Signing key ready',
+			signingKeyProvisioningSuccessBody: 'You can now sign officer actions with your biometrics.',
+			signingKeyProvisioningContinueButton: 'Return to App',
+			signingKeyProvisioningRecoveryHeading: 'Your signing key needs to be replaced',
+			signingKeyProvisioningRecoveryBody:
+				"Your device's biometrics changed, which invalidated your previous signing key for security. Verify with your device PIN, pattern, or password to sign in a replacement key.",
+			signingKeyProvisioningRecoveryButton: 'Replace Signing Key',
+			signingKeyProvisioningRecoveryPending: 'Replacing your signing key…',
+			signingKeyProvisioningNoRecoveryHeading: 'This device no longer has a screen lock',
+			signingKeyProvisioningNoRecoveryBody:
+				'Both your signing key and its recovery key were protected by your device\'s screen lock, which has been removed. They cannot be recovered on this device — ask an officer to invite this device again.',
+			settingsSigningKeyRow: 'Secure Signing',
 			warningIrrevocableAction: 'WARNING: This is an irrevocable action; proceed with caution.',
 			typeIConfirm: 'Type "I confirm" to continue',
 			confirmIfSure: '"I confirm" if you are sure',
@@ -1005,6 +1038,38 @@ const resources = {
 			revoke: 'Revocar',
 			revokeKeySignatureInvalid:
 				'Esta revocación no pudo verificarse y no se aplicó.',
+			// D-13/D-14/D-16: ver el bloque EN equivalente (mismas claves) para el
+			// contexto completo — 49-UI-SPEC.md's Copywriting Contract.
+			deviceSigningPromptTitle: 'Confirma tu identidad',
+			deviceSigningPromptSubtitle: 'Verifica para firmar esta acción',
+			deviceSigningPromptNegativeButton: 'Cancelar',
+			signingKeyProvisioningPromptSubtitle: 'Verifica para configurar la firma segura',
+			signingKeyRecoveryPromptSubtitle:
+				'Verifica con el PIN, patrón o contraseña de tu dispositivo para reemplazar tu clave de firma',
+			deviceSigningErrorNoBiometricsEnrolled:
+				'Este dispositivo no tiene biometría registrada. Registra una huella o el rostro en la configuración del dispositivo e inténtalo de nuevo.',
+			deviceSigningErrorLockout: 'Demasiados intentos. Espera un momento e inténtalo de nuevo.',
+			deviceSigningErrorLockoutPermanent:
+				'La verificación biométrica está bloqueada. Desbloquea tu dispositivo con el PIN, patrón o contraseña para restablecerla, luego inténtalo de nuevo.',
+			deviceSigningErrorGeneric: 'No se pudo verificar tu biometría. Inténtalo de nuevo.',
+			signingKeyProvisioningScreenTitle: 'Configuración de Firma Segura',
+			signingKeyProvisioningFirstRunHeading: 'Configura la firma respaldada por hardware',
+			signingKeyProvisioningFirstRunBody:
+				'Tu firma de funcionario será producida por una clave almacenada en el hardware seguro de este dispositivo y protegida por tu biometría. La clave nunca sale del dispositivo.',
+			signingKeyProvisioningSetupButton: 'Configurar Firma Segura',
+			signingKeyProvisioningPending: 'Configurando tu clave de firma…',
+			signingKeyProvisioningSuccessHeading: 'Clave de firma lista',
+			signingKeyProvisioningSuccessBody: 'Ahora puedes firmar acciones de funcionario con tu biometría.',
+			signingKeyProvisioningContinueButton: 'Volver a la Aplicación',
+			signingKeyProvisioningRecoveryHeading: 'Tu clave de firma debe reemplazarse',
+			signingKeyProvisioningRecoveryBody:
+				'La biometría de tu dispositivo cambió, lo que invalidó tu clave de firma anterior por seguridad. Verifica con el PIN, patrón o contraseña de tu dispositivo para firmar una clave de reemplazo.',
+			signingKeyProvisioningRecoveryButton: 'Reemplazar Clave de Firma',
+			signingKeyProvisioningRecoveryPending: 'Reemplazando tu clave de firma…',
+			signingKeyProvisioningNoRecoveryHeading: 'Este dispositivo ya no tiene bloqueo de pantalla',
+			signingKeyProvisioningNoRecoveryBody:
+				'Tanto tu clave de firma como su clave de recuperación estaban protegidas por el bloqueo de pantalla de tu dispositivo, que fue eliminado. No se pueden recuperar en este dispositivo — pídele a un funcionario que invite a este dispositivo nuevamente.',
+			settingsSigningKeyRow: 'Firma Segura',
 			warningIrrevocableAction:
 				'¡ATENCIÓN: Esta es una acción irrevocable; proceda con precaución.',
 			typeIConfirm: 'Escribe "Confirmo" para continuar',

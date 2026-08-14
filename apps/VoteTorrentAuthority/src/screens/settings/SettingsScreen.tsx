@@ -320,6 +320,19 @@ export default function SettingsScreen() {
 					/>
 				</View>
 
+				{/* Phase 49 plan 49-10 (D-14) — device-level signing-key provisioning entry, placed
+				    adjacent to the attestation-provisioning row above for the same reason: a
+				    device/build concern, not per-network and not per-authority. No scope gate for
+				    the same reason as that row — this is exactly the entry point an unprovisioned
+				    device needs before it can complete ANY signing action. */}
+				<View testID="settings-signing-key-provisioning-entry">
+					<InfoCard
+						title={t("settingsSigningKeyRow")}
+						icon="fingerprint"
+						onPress={() => navigation.navigate("ProvisionSigningKey", { reason: "first-run" })}
+					/>
+				</View>
+
 				<ThemedText type="subtitle" style={styles.networkTitle}>
 					{currentNetwork}
 				</ThemedText>

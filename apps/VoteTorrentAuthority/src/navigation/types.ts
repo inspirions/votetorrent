@@ -106,6 +106,15 @@ export type RootStackParamList = {
 	PollingDevices: { authorityId: string };
 	AuthorityPeers: { authorityId: string };
 	EditBallot: { electionId?: string; electionTitle?: string; electionDate?: string; ballotId?: string; electionEngine?: IElectionEngine; removeQuestionCode?: string; question?: any; originalQuestionCode?: string; readOnly?: boolean };
+	// Phase 49 plan 49-10 (D-14) — the officer-facing signing-key provisioning/recovery surface.
+	// Deliberately placed OUTSIDE the RegistrantsList..EditBallot block above: that block is the
+	// scanned region of navigation/__tests__/phase47Routes.test.tsx's T-47-21-01 param-hygiene
+	// gate (a Phase-47-scoped allow-list of exactly 5 route entries) — adding a param name here
+	// would spuriously widen that gate's allow-list rather than proving anything about THIS
+	// route's own param hygiene. No third `no-key-yet` value: that condition reuses `first-run`
+	// (see 49-UI-SPEC.md), since visually and copy-wise it is the identical variant — only *how*
+	// the screen was reached differs, not what it renders.
+	ProvisionSigningKey: { reason: 'first-run' | 'invalidated' };
 	// Phase 9 plan 09-01 — type entries for routes whose screens land in later
 	// plans (CreateElection in 09-02, CreateBallot in 09-04). Stack.Screen
 	// registration is deferred; only the type signature is added here so the
