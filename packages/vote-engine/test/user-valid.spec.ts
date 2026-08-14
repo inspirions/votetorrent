@@ -14,9 +14,17 @@ import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import { digestToBytes, toCanonicalDatetime } from '../src/utils.js'
-import { createTestNetwork, addTestAuthority, signTestDigest } from './fixtures/test-context.js'
+import {
+  createTestNetwork,
+  addTestAuthority,
+  addTestElection,
+  signTestDigest,
+  makeElectionInit
+} from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
+import { ElectionsEngine } from '../src/elections/elections-engine.js'
 import type { EngineContext } from '../src/types.js'
+import { ElectionEvent, ElectionType, UserKeyType } from '@votetorrent/vote-core'
 import type { AdminInit, Proposal, Scope, Signature } from '@votetorrent/vote-core'
 
 describe('IsUserValid — ProposedAdmin Class A signer/key gate (D-21)', () => {
@@ -163,5 +171,206 @@ describe('IsUserValid — ProposedAdmin Class A signer/key gate (D-21)', () => {
       .prepare('select count(*) as n from ProposedAdmin where AuthorityId = :id and EffectiveAt = :e')
       .get({ id: auth.authority.id, e: effectiveAtCanon })
     expect(Number(row?.n)).to.equal(1)
+  })
+})
+
+// 49-09 D-21 Class B: the six sites closed this plan carry no `Signature`
+// argument, so `verifyUserKeyMembership`'s membership-and-non-expiry result
+// is the WHOLE of "real IsUserValid" here — not one conjunct of a
+// signature check, as it is for the Class A `proposeAdmin` cases above. Each
+// describe block below covers one of the five live `ProposedX` write paths
+// with a rejection case (userId/userKey absent from `UserKey`) plus a
+// positive control (the network's own registered founding key).
+
+describe('IsUserValid — ProposedNetwork Class B membership gate (D-21)', () => {
+  it('rejects NetworkEngine.proposeRevision when the signer key has NO matching UserKey row', async () => {
+    const net = await createTestNetwork()
+    const unregistered = randomTestKeyPair()
+    net.ctx.user = {
+      ...net.user,
+      activeKeys: [
+        { key: unregistered.publicHex, type: UserKeyType.mobile, expiration: Date.now() + 86_400_000 }
+      ]
+    }
+
+    let threw = false
+    try {
+      await net.networkEngine.proposeRevision({
+        name: 'Ghost Revision',
+        relays: [],
+        policies: { timestampAuthorities: [], numberRequiredTSAs: 1, electionType: ElectionType.adhoc }
+      })
+    } catch {
+      threw = true
+    }
+    expect(threw, 'proposeRevision with an unregistered signer key must reject').to.be.true
+
+    const row = await net.ctx.db
+      .prepare('select 1 from ProposedNetwork where Name = :n')
+      .get({ n: 'Ghost Revision' })
+    expect(row, 'no ProposedNetwork row should be written on rejection').to.equal(undefined)
+  })
+
+  it('(positive control) NetworkEngine.proposeRevision with the registered founding key SUCCEEDS', async () => {
+    const net = await createTestNetwork()
+    await net.networkEngine.proposeRevision({
+      name: 'Real Revision',
+      relays: [],
+      policies: { timestampAuthorities: [], numberRequiredTSAs: 1, electionType: ElectionType.adhoc }
+    })
+    const row = await net.ctx.db
+      .prepare('select Name from ProposedNetwork where Name = :n')
+      .get({ n: 'Real Revision' })
+    expect(row?.Name).to.equal('Real Revision')
+  })
+})
+
+describe('IsUserValid — ProposedElection Class B membership gate (D-21, adjustElection)', () => {
+  it('rejects ElectionsEngine.adjustElection when the signer key has NO matching UserKey row', async () => {
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    const unregistered = randomTestKeyPair()
+    auth.ctx.user = {
+      ...auth.user,
+      activeKeys: [
+        { key: unregistered.publicHex, type: UserKeyType.mobile, expiration: Date.now() + 86_400_000 }
+      ]
+    }
+    const engine = new ElectionsEngine(auth.ctx)
+
+    let threw = false
+    try {
+      await engine.adjustElection(makeElectionInit({ authorityId: auth.authority.id }))
+    } catch {
+      threw = true
+    }
+    expect(threw, 'adjustElection with an unregistered signer key must reject').to.be.true
+
+    const row = await auth.ctx.db
+      .prepare('select 1 from ProposedElection where Id = :id')
+      .get({ id: 'election-1' })
+    expect(row, 'no ProposedElection row should be written on rejection').to.equal(undefined)
+  })
+
+  it('(positive control) ElectionsEngine.adjustElection with the registered founding key SUCCEEDS', async () => {
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    const engine = new ElectionsEngine(auth.ctx)
+    await engine.adjustElection(makeElectionInit({ authorityId: auth.authority.id }))
+
+    const core = await auth.ctx.db
+      .prepare('select Id from ProposedElection where Id = :id')
+      .get({ id: 'election-1' })
+    expect(core?.Id).to.equal('election-1')
+  })
+})
+
+describe('IsUserValid — ProposedElectionRevision Class B membership gate (D-21, election-engine proposeRevision)', () => {
+  it('rejects ElectionEngine.proposeRevision when the signer key has NO matching UserKey row', async () => {
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    const elCtx = await addTestElection(auth)
+    const unregistered = randomTestKeyPair()
+    elCtx.ctx.user = {
+      ...elCtx.user,
+      activeKeys: [
+        { key: unregistered.publicHex, type: UserKeyType.mobile, expiration: Date.now() + 86_400_000 }
+      ]
+    }
+
+    let threw = false
+    try {
+      await elCtx.electionEngine.proposeRevision({
+        electionId: 'election-1',
+        revision: 1,
+        revisionTimestamp: Date.now(),
+        tags: ['ghost'],
+        instructions: '# Ghost',
+        keyholders: [],
+        timeline: {} as Record<ElectionEvent, number>,
+        keyholderThreshold: 1
+      })
+    } catch {
+      threw = true
+    }
+    expect(threw, 'proposeRevision with an unregistered signer key must reject').to.be.true
+
+    const row = await elCtx.ctx.db
+      .prepare('select 1 from ProposedElectionRevision where ElectionId = :id and Revision = :rev')
+      .get({ id: 'election-1', rev: 1 })
+    expect(row, 'no ProposedElectionRevision row should be written on rejection').to.equal(undefined)
+  })
+
+  it('(positive control) ElectionEngine.proposeRevision with the registered founding key SUCCEEDS', async () => {
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    const elCtx = await addTestElection(auth)
+    await elCtx.electionEngine.proposeRevision({
+      electionId: 'election-1',
+      revision: 1,
+      revisionTimestamp: Date.now(),
+      tags: ['amended'],
+      instructions: '# Revised',
+      keyholders: [],
+      timeline: {} as Record<ElectionEvent, number>,
+      keyholderThreshold: 1
+    })
+    const row = await elCtx.ctx.db
+      .prepare('select Revision from ProposedElectionRevision where ElectionId = :id')
+      .get({ id: 'election-1' })
+    expect(row?.Revision).to.equal(1)
+  })
+})
+
+describe('IsUserValid — ProposedBallot Class B membership gate (D-21, election-engine proposeBallot)', () => {
+  it('rejects ElectionEngine.proposeBallot when the signer key has NO matching UserKey row', async () => {
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    const elCtx = await addTestElection(auth)
+    const unregistered = randomTestKeyPair()
+    elCtx.ctx.user = {
+      ...elCtx.user,
+      activeKeys: [
+        { key: unregistered.publicHex, type: UserKeyType.mobile, expiration: Date.now() + 86_400_000 }
+      ]
+    }
+
+    let threw = false
+    try {
+      await elCtx.electionEngine.proposeBallot({
+        id: 'ghost-ballot',
+        electionId: 'election-1',
+        authorityId: auth.authority.id,
+        description: 'Ghost ballot',
+        districts: ['d1'],
+        questions: []
+      })
+    } catch {
+      threw = true
+    }
+    expect(threw, 'proposeBallot with an unregistered signer key must reject').to.be.true
+
+    const row = await elCtx.ctx.db
+      .prepare('select 1 from ProposedBallot where Id = :id')
+      .get({ id: 'ghost-ballot' })
+    expect(row, 'no ProposedBallot row should be written on rejection').to.equal(undefined)
+  })
+
+  it('(positive control) ElectionEngine.proposeBallot with the registered founding key SUCCEEDS', async () => {
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    const elCtx = await addTestElection(auth)
+    await elCtx.electionEngine.proposeBallot({
+      id: 'ballot-1',
+      electionId: 'election-1',
+      authorityId: auth.authority.id,
+      description: 'Test ballot',
+      districts: ['d1'],
+      questions: []
+    })
+    const row = await elCtx.ctx.db
+      .prepare('select Description from ProposedBallot where Id = :id')
+      .get({ id: 'ballot-1' })
+    expect(row?.Description).to.equal('Test ballot')
   })
 })

@@ -2,6 +2,7 @@ import { MisuseError, QuereusError } from '@quereus/quereus'
 import { ElectionEngine } from '../election/election-engine.js'
 import { digestToBytes, fromCanonicalDatetime, nowCanonicalDatetime, parseJsonOr, toCanonicalDatetime } from '../utils.js'
 import { allocateTid } from '../database/tid-allocator.js'
+import { verifyUserKeyMembership } from '../user/verify-user-key.js'
 import type { Database } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
 import type {
@@ -125,9 +126,14 @@ export class ElectionsEngine implements IElectionsEngine {
   /**
    * ELEC-05 (narrative) / `adjustElection` (interface) — UPSERT the
    * ProposedElection + ProposedElectionRevision pair for an election. The
-   * schema's ProposedElection.UserValid CHECK gates on an Officer with scope
-   * 'mel', a non-expired UserKey matching `context.UserKey`, and a
-   * SignatureValid call over the row digest.
+   * schema's ProposedElection.UserValid / ProposedElectionRevision.UserValid
+   * CHECKs are a dumb `context.IsUserValid` gate the engine computes into.
+   * D-21 (Class B): this path carries no `Signature` argument, so
+   * `IsUserValid` is bound to registered/unexpired UserKey membership only,
+   * via `verifyUserKeyMembership` — resolved ONCE per invocation and reused
+   * across all four `with context` clauses below (two branches x two
+   * tables), not a signature verification. See `election-engine.ts`'s
+   * `proposeRevision`/`proposeBallot` for the same treatment.
    *
    * A proposal is a *pending* amendment keyed by `ProposedElection.Id`
    * (primary key), so re-proposing for the same election REPLACES the
@@ -149,7 +155,13 @@ export class ElectionsEngine implements IElectionsEngine {
 				`ElectionsEngine.adjustElection: revision.electionId (${election.revision.electionId}) does not match election.id (${e.id})`
       )
     }
+    const userId = this.ctx!.user?.id ?? null
     const signerKey = this.ctx!.user?.activeKeys?.[0]?.key ?? null
+    // D-21 (Class B): resolved ONCE per invocation and reused across all four
+    // `with context` clauses below — no Signature is available on this path,
+    // so registered/unexpired UserKey membership is the whole of real
+    // IsUserValid here.
+    const membership = await verifyUserKeyMembership(this.ctx!, userId, signerKey)
     try {
       // WR-24 (17-REVIEW): the ProposedElection + ProposedElectionRevision
       // inserts must be atomic — a second-insert failure would otherwise
@@ -167,7 +179,7 @@ export class ElectionsEngine implements IElectionsEngine {
       await this.ctx!.db.exec(
         existingCore
 					? `update ProposedElection
-						with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = true
+						with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
 						set
 							AuthorityId = :authorityId,
 							Title = :title,
@@ -185,7 +197,7 @@ export class ElectionsEngine implements IElectionsEngine {
 					BallotDeadline,
 					Type
 				)
-				with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = true
+				with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
 				values (
 					:id,
 					:authorityId,
@@ -205,13 +217,14 @@ export class ElectionsEngine implements IElectionsEngine {
           revisionDeadline: e.revisionDeadline,
           ballotDeadline: e.ballotDeadline,
           type: e.type,
-          userId: this.ctx!.user?.id ?? null,
+          userId,
           userKey: signerKey,
           // No application-level signature is carried on ElectionInit; the
           // caller pre-signs via the signing engine and binds the signature
           // through the AdminSigning/AdminSignature pipeline. Phase 6 /
           // TEST-01 will tighten this contract to require a Signature here.
           signature: null,
+          isUserValid: membership.valid,
           now: nowCanonicalDatetime()
         }
       )
@@ -230,7 +243,7 @@ export class ElectionsEngine implements IElectionsEngine {
       await this.ctx!.db.exec(
         existingRev
 					? `update ProposedElectionRevision
-						with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${revTid}, now = :now, IsUserValid = true
+						with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${revTid}, now = :now, IsUserValid = :isUserValid
 						set
 							Revision = :revision,
 							RevisionTimestamp = :revisionTimestamp,
@@ -250,7 +263,7 @@ export class ElectionsEngine implements IElectionsEngine {
 					KeyholderThreshold,
 					Keyholders
 				)
-				with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${revTid}, now = :now, IsUserValid = true
+				with context UserId = :userId, UserKey = :userKey, Signature = :signature, Tid = ${revTid}, now = :now, IsUserValid = :isUserValid
 				values (
 					:electionId,
 					:revision,
@@ -275,9 +288,10 @@ export class ElectionsEngine implements IElectionsEngine {
           // this write, keyholders edited on a revision were silently
           // dropped by the engine (the app compensated with a local cache).
           keyholders: JSON.stringify(r.keyholders ?? []),
-          userId: this.ctx!.user?.id ?? null,
+          userId,
           userKey: signerKey,
           signature: null,
+          isUserValid: membership.valid,
           now: nowCanonicalDatetime()
         }
       )
