@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.UiThreadUtil
+import java.math.BigInteger
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -19,12 +20,160 @@ import java.security.spec.ECGenParameterSpec
 
 private const val ANDROID_KEYSTORE = "AndroidKeyStore"
 
+/**
+ * P-256 curve order `n` and `n/2` (49-RESEARCH.md Pattern 3, computed from
+ * `@noble/curves/nist.js:17`) — used by [derToCompactLowS]'s low-S normalization, which must match
+ * `@noble/curves` v2's `lowS: true` verify-side default exactly.
+ */
+private val P256_ORDER = BigInteger(
+	"ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", 16
+)
+private val P256_HALF_ORDER = P256_ORDER.shiftRight(1)
+
+/**
+ * DER `SEQUENCE { INTEGER r, INTEGER s }` (Java `Signature.sign()`'s output for an EC key) ->
+ * 64-byte compact `r||s`, with `s` normalized to the lower half of the P-256 order (D-04,
+ * 49-RESEARCH.md Pattern 3 — copied verbatim, no third-party ASN.1 dependency per "Don't
+ * Hand-Roll": a general ASN.1 library is unjustified weight for this one fixed-shape parse).
+ *
+ * This is the byte-level contract `signWithDeviceKey` must satisfy for the signature to verify
+ * against `@noble/curves` v2's `p256.verify()` defaults (`prehash: true`, `lowS: true`,
+ * `format: 'compact'`) with zero JS-side changes.
+ */
+private fun derToCompactLowS(der: ByteArray): ByteArray {
+	// Minimal ASN.1 walk: SEQUENCE tag(0x30) + length, then two INTEGER(0x02) TLVs. Assumes
+	// short-form DER length encoding throughout — always true for a P-256 ECDSA signature (r and s
+	// are each <= 33 bytes, well under the 128-byte long-form threshold); the require() below is
+	// cheap insurance against a misparse rather than a real expected failure mode.
+	require(der.size >= 2 && der[0] == 0x30.toByte()) { "expected DER SEQUENCE tag" }
+	require((der[1].toInt() and 0x80) == 0) { "unexpected long-form DER SEQUENCE length in ECDSA signature" }
+	var offset = 2 // skip SEQUENCE tag + length byte
+
+	// First INTEGER TLV -> r. Two-arg unsigned BigInteger constructor: a DER INTEGER's payload can
+	// itself carry a leading 0x00 sign-pad byte, which must NOT be interpreted as sign information a
+	// second time — the single-arg (signed) BigInteger(bytes) constructor would double-count it.
+	require(der[offset] == 0x02.toByte()) { "expected DER INTEGER tag for r" }
+	offset++
+	val rLen = der[offset].toInt() and 0xFF
+	offset++
+	val rBytes = der.copyOfRange(offset, offset + rLen)
+	offset += rLen
+	val r = BigInteger(1, rBytes)
+
+	// Second INTEGER TLV -> s. Same unsigned-constructor discipline as r above.
+	require(der[offset] == 0x02.toByte()) { "expected DER INTEGER tag for s" }
+	offset++
+	val sLen = der[offset].toInt() and 0xFF
+	offset++
+	val sBytes = der.copyOfRange(offset, offset + sLen)
+	offset += sLen
+	var s = BigInteger(1, sBytes)
+
+	if (s > P256_HALF_ORDER) {
+		s = P256_ORDER.subtract(s) // low-S normalization (matches noble's lowS:true default)
+	}
+	return fixed32(r) + fixed32(s)
+}
+
+/**
+ * `BigInteger` -> exactly 32 big-endian bytes. `BigInteger.toByteArray()` is signed
+ * two's-complement output: for a positive 256-bit value whose top bit is set it PREPENDS an extra
+ * `0x00` byte (33 bytes total) to keep the result non-negative — the 33-byte branch strips exactly
+ * that byte. For small values it can return FEWER than 32 bytes — the left-pad branch handles that
+ * (effectively unreachable for real signature scalars, but guards a real-world r/s that starts with
+ * several zero bits).
+ */
+private fun fixed32(n: BigInteger): ByteArray {
+	val raw = n.toByteArray()
+	return when {
+		raw.size == 32 -> raw
+		raw.size == 33 && raw[0] == 0.toByte() -> raw.copyOfRange(1, 33)
+		raw.size < 32 -> ByteArray(32 - raw.size) + raw
+		else -> throw IllegalStateException("unexpected scalar byte length: ${raw.size}")
+	}
+}
+
+/**
+ * X.509 `SubjectPublicKeyInfo` DER (the shape `java.security.PublicKey.getEncoded()` returns for an
+ * AndroidKeyStore EC key) -> 33-byte compressed SEC1 point, hex-encoded lowercase (49-RESEARCH.md
+ * Pattern 4). The SPKI BIT STRING payload for a P-256/`secp256r1` key is the UNCOMPRESSED 65-byte
+ * point `0x04 || X(32) || Y(32)`; every `UserKey.PubKey` in this schema is a 33-byte COMPRESSED
+ * point (`device-user.ts:50`'s `secp256k1.getPublicKey(privKey, true)` convention) — storing the
+ * raw SPKI blob (or the uncompressed 65-byte point) as-is would silently break the fixed-shape
+ * `UserKey.PubKey` column and every `verify()` call that decodes it.
+ *
+ * Does NOT hardcode a fixed byte offset for the point (RESEARCH Assumption A2 flags that an OEM
+ * Keystore's named-curve OID encoding could shift it) — instead walks the outer SEQUENCE, skips the
+ * `AlgorithmIdentifier` SEQUENCE using its own declared length, then reads the BIT STRING (tag
+ * 0x03), skips its unused-bits byte, and requires the first payload byte to be 0x04 with an exactly
+ * 65-byte payload. A malformed input throws naming the actual first byte and payload length — the
+ * value D-24 leg 1 reads off logcat to confirm this parse on-device before it is trusted.
+ */
+private fun spkiToCompressedPointHex(spki: ByteArray): String {
+	require(spki.isNotEmpty() && spki[0] == 0x30.toByte()) { "expected outer DER SEQUENCE (SubjectPublicKeyInfo)" }
+	var offset = 1
+	val (outerLen, outerLenBytes) = readDerLength(spki, offset)
+	offset += outerLenBytes
+	val outerEnd = offset + outerLen
+
+	// AlgorithmIdentifier SEQUENCE — skip using its own declared length, never a hardcoded offset.
+	require(offset < outerEnd && spki[offset] == 0x30.toByte()) { "expected AlgorithmIdentifier SEQUENCE" }
+	offset++
+	val (algLen, algLenBytes) = readDerLength(spki, offset)
+	offset += algLenBytes + algLen
+
+	// BIT STRING (tag 0x03): 1-byte "unused bits" count (0 for a byte-aligned EC point) precedes
+	// the point payload.
+	require(offset < outerEnd && spki[offset] == 0x03.toByte()) { "expected BIT STRING tag for SPKI public key" }
+	offset++
+	val (bitStrLen, bitStrLenBytes) = readDerLength(spki, offset)
+	offset += bitStrLenBytes
+	val unusedBits = spki[offset].toInt() and 0xFF
+	require(unusedBits == 0) { "unexpected non-zero BIT STRING unused-bits count: $unusedBits" }
+	offset++
+	val payloadLen = bitStrLen - 1
+	val payload = spki.copyOfRange(offset, offset + payloadLen)
+
+	val firstByte = payload.getOrNull(0)?.toInt()?.and(0xFF)
+	require(firstByte == 0x04 && payload.size == 65) {
+		"malformed EC SubjectPublicKeyInfo payload — expected 0x04-prefixed 65-byte uncompressed " +
+			"point, got first byte ${firstByte?.let { "0x%02x".format(it) } ?: "<empty>"} and " +
+			"payload length ${payload.size}"
+	}
+
+	val x = payload.copyOfRange(1, 33)
+	val y = payload.copyOfRange(33, 65)
+	val yIsEven = (y[y.size - 1].toInt() and 1) == 0
+	val prefix: Byte = if (yIsEven) 0x02 else 0x03
+	val compressed = byteArrayOf(prefix) + x
+	return compressed.joinToString("") { "%02x".format(it) }
+}
+
+/** Short-form-or-long-form DER length reader. Returns (length, bytesConsumedForTheLengthField). */
+private fun readDerLength(bytes: ByteArray, offset: Int): Pair<Int, Int> {
+	val first = bytes[offset].toInt() and 0xFF
+	return if ((first and 0x80) == 0) {
+		first to 1
+	} else {
+		val numLenBytes = first and 0x7F
+		var len = 0
+		for (i in 1..numLenBytes) {
+			len = (len shl 8) or (bytes[offset + i].toInt() and 0xFF)
+		}
+		len to (1 + numLenBytes)
+	}
+}
+
 /** Result of a (placeholder or attested) P-256 keygen. */
 data class ProvisionResult(
 	val publicKeyBase64: String,
 	val keyAlias: String,
 	// "strongbox" | "tee" | "software" — the last rung is unreachable in a release build (T-45-04/CR-03).
 	val securityLevel: String,
+	// 33-byte compressed SEC1 point, hex-encoded (D-04/RESEARCH Pattern 4) — the form callers MUST
+	// register as `UserKey.PubKey`. `publicKeyBase64` above remains the raw X.509 SPKI DER,
+	// consumed only by the Phase 45 attestation cert-chain path.
+	val publicKeyCompressedHex: String,
 )
 
 /**
@@ -230,6 +379,7 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 				publicKeyBase64 = Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP),
 				keyAlias = keyAlias,
 				securityLevel = "strongbox",
+				publicKeyCompressedHex = spkiToCompressedPointHex(keyPair.public.encoded),
 			)
 		} catch (e: StrongBoxUnavailableException) {
 			// Fall through to the TEE rung below.
@@ -244,6 +394,7 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 				publicKeyBase64 = Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP),
 				keyAlias = keyAlias,
 				securityLevel = "tee",
+				publicKeyCompressedHex = spkiToCompressedPointHex(keyPair.public.encoded),
 			)
 		} catch (e: Exception) {
 			// Software/stub rung — T-45-04/CR-03: a release build must NEVER reach this rung.
@@ -277,6 +428,7 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 			publicKeyBase64 = Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP),
 			keyAlias = keyAlias,
 			securityLevel = "software",
+			publicKeyCompressedHex = spkiToCompressedPointHex(keyPair.public.encoded),
 		)
 	}
 }
