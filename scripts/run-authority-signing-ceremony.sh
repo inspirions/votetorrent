@@ -93,9 +93,21 @@ preflight() {
   fi
 
   echo "[ceremony] Preflight: secure lock screen + fingerprint enrollment ..."
+  # A lock credential may already be set to this script's own PIN from a
+  # prior ceremony run — `pm clear` (reset_identity) only resets the APP's
+  # data, never the device lock screen, so a bare `set-pin 1234` on a second
+  # run fails with "old credential was not provided" even though the PIN is
+  # already correct. Try the no-`--old` form first (first-ever setup on a
+  # fresh AVD), then retry with `--old 1234` (idempotent re-run) before
+  # treating it as a genuine failure.
   if ! adb ${ADBD} shell locksettings set-pin 1234 >/dev/null 2>&1; then
-    echo "[ceremony] PREFLIGHT FAIL: 'locksettings set-pin 1234' failed — a Keystore key with setUserAuthenticationRequired(true) cannot even be GENERATED on a device with no secure lock screen, so a missing PIN here presents downstream as a keygen failure, not a prompt failure. Set the PIN by hand and re-run." >&2
-    exit 1
+    # `--old` must precede the PIN argument (locksettings' shell parser is
+    # positional-sensitive: `set-pin 1234 --old 1234` is rejected the same
+    # as no --old at all).
+    if ! adb ${ADBD} shell locksettings set-pin --old 1234 1234 >/dev/null 2>&1; then
+      echo "[ceremony] PREFLIGHT FAIL: 'locksettings set-pin 1234' failed (with and without --old 1234) — a Keystore key with setUserAuthenticationRequired(true) cannot even be GENERATED on a device with no secure lock screen, so a missing/mismatched PIN here presents downstream as a keygen failure, not a prompt failure. Set the PIN by hand ('adb shell locksettings clear --old <existing>' then re-run) and re-run." >&2
+      exit 1
+    fi
   fi
   # Enroll a fingerprint under finger id 1 for the emulator's virtual sensor.
   adb ${ADBD} emu finger touch 1 >/dev/null 2>&1 || true
@@ -136,7 +148,58 @@ launch_app() {
   sleep 1
   adb ${ADBD} logcat -c
   adb ${ADBD} shell monkey -p "${PACKAGE}" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
-  sleep 5
+  # Cold start + first Metro bundle fetch is slow (CadreNode boot is CPU-heavy
+  # per this project's own emulator-boot precedent), and duration varies
+  # sharply with host load (observed 90-150s real render time under moderate
+  # load in this session, occasionally worse). A fixed sleep is racy, so this
+  # polls for the rendered Home tab bar instead of trusting a guessed
+  # duration — bounded on REAL elapsed wall time (not an iteration count
+  # times a guessed per-iteration duration), since each poll round-trip's own
+  # cost varies with load too.
+  #
+  # Two failure modes specific to this project's emulator, both handled:
+  # (a) a STALE com.android.settings window (used earlier in this ceremony
+  #     for PIN/fingerprint enrollment) can still hold focus, and that app's
+  #     own screens are full of the literal string "Settings" — a bare
+  #     text-content grep can false-positive-match it well before our app
+  #     has regained focus. Gate on window focus naming our own package
+  #     before trusting any text-content match.
+  # (b) a genuine system ANR dialog ("VoteTorrent Authority isn't
+  #     responding") can appear while CadreNode boots under load — this is
+  #     the documented 'a loaded host has previously ANR'd and killed the
+  #     AVD' gotcha. Detect it and tap 'Wait' (never 'Close app') so the
+  #     ceremony can survive a transient ANR instead of hanging or false-
+  #     failing on it. Polling is deliberately infrequent (12s) so the
+  #     dump/pull round-trips themselves don't add CPU pressure on an
+  #     already-loaded emulator during the exact window this matters most.
+  local start_epoch dump focus wait_bounds wx1 wy1 wx2 wy2 wcx wcy
+  start_epoch=$(date +%s)
+  while [ "$(( $(date +%s) - start_epoch ))" -lt 300 ]; do
+    focus=$(adb ${ADBD} shell dumpsys window 2>/dev/null | grep -i mCurrentFocus || true)
+    if echo "${focus}" | grep -qi "Application Not Responding"; then
+      dump=$(dump_ui)
+      wait_bounds=$(grep -o '<node[^>]*text="Wait"[^>]*>' "${dump}" | grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' | head -1 | sed 's/bounds="//;s/"//')
+      if [ -n "${wait_bounds}" ]; then
+        wx1=$(echo "${wait_bounds}" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\1/')
+        wy1=$(echo "${wait_bounds}" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\2/')
+        wx2=$(echo "${wait_bounds}" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\3/')
+        wy2=$(echo "${wait_bounds}" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\4/')
+        wcx=$(( (wx1 + wx2) / 2 )); wcy=$(( (wy1 + wy2) / 2 ))
+        echo "[ceremony] ANR dialog observed mid-boot (host-load gotcha) — tapping Wait, never Close app." >&2
+        adb ${ADBD} shell input tap "${wcx}" "${wcy}"
+      fi
+      sleep 12
+      continue
+    fi
+    if echo "${focus}" | grep -q "${PACKAGE}"; then
+      dump=$(dump_ui)
+      if grep -qi 'text="Settings"' "${dump}" || grep -qi 'text="Select Network"' "${dump}"; then
+        return 0
+      fi
+    fi
+    sleep 12
+  done
+  echo "[ceremony] WARNING: launch_app polled 300 real seconds without seeing Home render — proceeding anyway; the next dump-based assertion will fail loudly if the app truly isn't up." >&2
 }
 
 # uiautomator dump helper: dumps the current window hierarchy to a local file
@@ -144,8 +207,28 @@ launch_app() {
 # control is located by EN label text and tapped by computed center coords.
 dump_ui() {
   local out="${TMPDIR_CEREMONY}/dump-$$-${RANDOM}.xml"
-  adb ${ADBD} shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
-  adb ${ADBD} pull /sdcard/window_dump.xml "${out}" >/dev/null 2>&1
+  # uiautomator dump can transiently fail (no accessible root node, e.g.
+  # mid app-transition, or under the host-load conditions this project's
+  # emulator gotchas warn about) WITHOUT touching /sdcard/window_dump.xml —
+  # leaving a STALE file from a previous, unrelated dump on the device, or
+  # producing a truncated/partial pull. Remove the remote file first so a
+  # failed dump this call produces an empty/missing local file (a real
+  # negative) rather than silently returning a prior ceremony's leftover
+  # content as a false positive. Retry up to 3 times (observed under load:
+  # a single dump attempt can transiently fail even while the app is
+  # genuinely fully rendered) before giving up and returning whatever (or
+  # empty) content was last captured — callers treat "no match" as the
+  # correct negative either way.
+  local attempt
+  for attempt in 1 2 3; do
+    adb ${ADBD} shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1
+    adb ${ADBD} shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
+    adb ${ADBD} pull /sdcard/window_dump.xml "${out}" >/dev/null 2>&1 || : > "${out}"
+    if [ -s "${out}" ] && grep -q "</hierarchy>" "${out}" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
   echo "${out}"
 }
 
@@ -157,8 +240,22 @@ dump_ui() {
 tap_on_text() {
   local label="$1" dump="$2"
   local bounds
-  bounds=$(grep -io "text=\"[^\"]*${label}[^\"]*\"[^>]*bounds=\"[0-9,\[\]]*\"" "${dump}" \
-    | grep -o 'bounds="[0-9,\[\]]*"' | head -1 | sed 's/bounds="//;s/"//')
+  # Bracket-expression note (real bug, found and fixed during 49-13 Task 2):
+  # POSIX bracket expressions (`[...]`) do NOT support backslash-escaping —
+  # `\[`/`\]` INSIDE a `[...]` class are literal backslash-then-bracket, not
+  # an escaped bracket. `[0-9,\[\]]` under BSD/POSIX grep (the actual
+  # interpreter this script runs under, confirmed via `grep --version` ->
+  # "BSD grep, GNU compatible" — NOT the same grep some interactive dev
+  # shells alias) therefore closes the class early at the first literal `]`
+  # and silently fails to match every real `bounds="[x1,y1][x2,y2]"` value,
+  # making every tap_on_text call fail 100% of the time despite the target
+  # text being genuinely present (observed: 12/12 identical false failures
+  # against a real, static, already-rendered dump — not a timing issue).
+  # `[][0-9,]` is the POSIX-safe form: placing `]` immediately after the
+  # opening `[` makes it a literal member of the class instead of closing
+  # it.
+  bounds=$(grep -io "text=\"[^\"]*${label}[^\"]*\"[^>]*bounds=\"[][0-9,]*\"" "${dump}" \
+    | grep -o 'bounds="[][0-9,]*"' | head -1 | sed 's/bounds="//;s/"//')
   if [ -z "${bounds}" ]; then
     return 1
   fi
@@ -184,13 +281,22 @@ navigate_to_settings() {
   # so Settings is reachable with zero network context. The tab header's
   # circle-user icon navigates Home -> Settings on every tab; tap the Settings
   # tab bar item directly (present in the bottom TabNavigator).
-  local dump
-  dump=$(dump_ui)
-  if ! tap_on_text "Settings" "${dump}"; then
-    echo "[ceremony] ERROR: Settings tab not found in uiautomator dump" >&2
-    return 1
-  fi
-  sleep 2
+  local dump attempt
+  # A single dump_ui call immediately after launch_app's own successful
+  # readiness match can occasionally miss the same control under host-load
+  # adb/uiautomator flakiness. Retry a few times with a short settle pause
+  # before declaring the leg FAILed on what would otherwise be a false
+  # negative.
+  for attempt in 1 2 3; do
+    dump=$(dump_ui)
+    if tap_on_text "Settings" "${dump}"; then
+      sleep 2
+      return 0
+    fi
+    sleep 3
+  done
+  echo "[ceremony] ERROR: Settings tab not found in uiautomator dump" >&2
+  return 1
 }
 
 # ── Leg: provision (D-24 leg 1) ──────────────────────────────────────────────
@@ -276,13 +382,28 @@ leg_sign() {
 
 # ── Leg: cancel (D-24 leg 2) ─────────────────────────────────────────────────
 leg_cancel() {
+  # Reset to a clean identity and re-navigate first (mirrors leg_provision).
+  # Without this, running 'cancel' after a prior 'provision' leg's error
+  # state leaves STALE error text (e.g. a generic biometric-error banner
+  # from an earlier failed attempt) on screen, which the deviceSigningError*
+  # text-absence check below would then false-FAIL on — flagging content
+  # that predates this leg's own dismissal action, not content it caused.
+  reset_identity
+  launch_app
+  if ! navigate_to_settings; then
+    record_leg "cancel-negative-button" "FAIL" "could not reach Settings to start the cancel leg from a clean identity"
+    return
+  fi
   local dump
+  dump=$(dump_ui)
+  if ! tap_on_text "${STR_SETTINGS_ROW}" "${dump}"; then
+    record_leg "cancel-negative-button" "FAIL" "could not tap '${STR_SETTINGS_ROW}' row to reach ProvisionSigningKeyScreen"
+    return
+  fi
+  sleep 2
   dump=$(dump_ui)
 
   adb ${ADBD} logcat -c
-  # Trigger a per-use signing action (re-provision path re-triggers a prompt
-  # if reachable; otherwise this leg is driven from an already-provisioned
-  # state per the proof log's own recorded sequence).
   if ! tap_on_text "${STR_SETUP_BUTTON}" "${dump}" && ! tap_on_text "Replace Signing Key" "${dump}"; then
     echo "[ceremony] 'cancel' leg: no provisioning/replace action reachable from the current screen — drive to a signing action manually first." >&2
   fi
@@ -292,6 +413,7 @@ leg_cancel() {
     record_leg "cancel-negative-button" "FAIL" "deviceSigningPromptNegativeButton ('${STR_NEGATIVE_BUTTON}') not found to dismiss the prompt"
     return
   fi
+  record_leg "cancel-negative-button" "PASS" "deviceSigningPromptNegativeButton tapped, dismissing the prompt"
   sleep 2
 
   dump=$(dump_ui)
@@ -305,8 +427,21 @@ leg_cancel() {
     record_leg "cancel-no-error-text" "FAIL" "a deviceSigningError* string was rendered post-dismissal"
   fi
 
-  local err_lines
-  err_lines=$(adb ${ADBD} logcat -d 2>/dev/null | grep -c " E " || true)
+  # Scope the error-level check to OUR app's pid — an unscoped `grep " E "`
+  # over the whole system logcat buffer matches heavy unrelated emulator
+  # noise (keystore2 StrongBox-fallback logs, FeatureFlagsImplExport,
+  # ThemeUtils, etc.) and makes this leg's verdict meaningless regardless of
+  # our app's actual behavior (observed: 15 unrelated system E-lines with 0
+  # from our own package). This mirrors the leg's own record_leg message,
+  # which already claims "app-package" scoping — the prior implementation
+  # didn't actually do that.
+  local app_pid err_lines
+  app_pid=$(adb ${ADBD} shell pidof "${PACKAGE}" 2>/dev/null | tr -d '\r' | awk '{print $1}')
+  if [ -n "${app_pid}" ]; then
+    err_lines=$(adb ${ADBD} logcat -d --pid="${app_pid}" 2>/dev/null | grep -c " E " || true)
+  else
+    err_lines=$(adb ${ADBD} logcat -d 2>/dev/null | grep " ${PACKAGE}" | grep -c " E " || true)
+  fi
   if [ "${err_lines}" -eq 0 ]; then
     record_leg "cancel-no-logged-fault" "PASS" "0 error-level app-package logcat lines since dismissal"
   else
