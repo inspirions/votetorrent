@@ -227,6 +227,9 @@ const resources = {
 			signingKeyProvisioningPending: 'Setting up your signing key…',
 			signingKeyProvisioningSuccessHeading: 'Signing key ready',
 			signingKeyProvisioningSuccessBody: 'You can now sign officer actions with your biometrics.',
+			signingKeyProvisioningAwaitingNetworkHeading: 'Secure signing is set up on this device',
+			signingKeyProvisioningAwaitingNetworkBody:
+				'Your signing key is protected by your biometrics. Select or create a network to finish registering it.',
 			signingKeyProvisioningContinueButton: 'Return to App',
 			signingKeyProvisioningRecoveryHeading: 'Your signing key needs to be replaced',
 			signingKeyProvisioningRecoveryBody:
@@ -1060,6 +1063,9 @@ const resources = {
 			signingKeyProvisioningPending: 'Configurando tu clave de firma…',
 			signingKeyProvisioningSuccessHeading: 'Clave de firma lista',
 			signingKeyProvisioningSuccessBody: 'Ahora puedes firmar acciones de funcionario con tu biometría.',
+			signingKeyProvisioningAwaitingNetworkHeading: 'La firma segura está configurada en este dispositivo',
+			signingKeyProvisioningAwaitingNetworkBody:
+				'Tu clave de firma está protegida por tu biometría. Selecciona o crea una red para terminar de registrarla.',
 			signingKeyProvisioningContinueButton: 'Volver a la Aplicación',
 			signingKeyProvisioningRecoveryHeading: 'Tu clave de firma debe reemplazarse',
 			signingKeyProvisioningRecoveryBody:
