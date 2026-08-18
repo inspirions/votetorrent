@@ -4,7 +4,7 @@ import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigat
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
-import type { INetworkEngine, IUserEngine, Signature } from "@votetorrent/vote-core";
+import type { IDefaultUserEngine, INetworkEngine, IUserEngine, Signature } from "@votetorrent/vote-core";
 import { UserKeyType } from "@votetorrent/vote-core";
 import type { Spec as NativeAttestationSpec } from "@votetorrent/attestation-native/src/specs/NativeAttestation";
 import { ThemedText } from "../../components/ThemedText";
@@ -12,7 +12,12 @@ import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
-import { persistProvisionedDeviceUser } from "../../engines/device-user";
+import {
+	getDeviceProvisioningRecord,
+	getDeviceUser,
+	persistDeviceProvisioningRecord,
+	persistProvisionedDeviceUser,
+} from "../../engines/device-user";
 import { SIGNING_KEY_ALIAS, RECOVERY_KEY_ALIAS } from "../../engines/device-signer";
 import { mapDeviceSigningError, DEVICE_SIGNING_ERROR_COPY_KEY } from "../../utils/deviceSigningError";
 import type { DeviceSigningErrorClass } from "../../utils/deviceSigningError";
@@ -32,25 +37,29 @@ import type { DeviceSigningErrorClass } from "../../utils/deviceSigningError";
  * redirecting to a signer-setup screen — during boot can turn a successful re-attach into a
  * spurious "Failed to load network". This file must never be imported by `AppProvider.tsx`.
  *
- * D-15 clean cut: the first UserKey is registered through the schema's first-key bootstrap
- * branch (`count(*) = 1 and context.UserKey is null`, `packages/vote-core/schema/votetorrent.qsql`
- * `UserKey.InsertValid`) — no signature required. Nothing has shipped; the only identities are
- * dev-team testers who clear app data. There is no legacy rotation ceremony and no migration path
- * here, deliberately.
+ * D-15 two-stage registration (Gap A closure, 49-17): first-run onboarding is
+ * network-independent by construction (49-16), so the first `UserKey` cannot always be
+ * registered through the schema's first-key bootstrap branch FROM THIS SCREEN — a `pm clear`
+ * device has no network `User` row to attach it to yet. That bootstrap branch
+ * (`count(*) = 1 and context.UserKey is null`, `packages/vote-core/schema/votetorrent.qsql`
+ * `UserKey.InsertValid`) is exercised by `networks-engine.create()` on the network-creation
+ * path instead; this screen's stage 2 exercises it only when it finds a network `User` with no
+ * keys yet (the join-network path). The recovery key always registers through the signed
+ * subsequent-key path, authorized by the signing key.
  *
- * D-08: the provision-time attestation cert chain is captured (via `produceAttestation`) even
- * though nothing in this phase consumes it — it is the only mechanism that ever makes user
- * presence verifiable in-schema, and capturing it now avoids re-provisioning keys later. The
- * X.509 chain proves hardware and key continuity, never user identity; same-user continuity
- * across provisioning events is the deferred master-password item, not this screen's job. Unlike
- * the Voter app's device-association flow (45-05), there is no server-issued challenge nonce in
- * this ceremony, so the bound digest is self-issued over a locally generated nonce plus the new
- * key's own public value.
+ * D-08: the provision-time attestation cert chain is captured (via `produceAttestation`) and
+ * persisted (49-16's `persistDeviceProvisioningRecord`) — it is the only mechanism that ever
+ * makes user presence verifiable in-schema, and capturing it now avoids re-provisioning keys
+ * later. The X.509 chain proves hardware and key continuity, never user identity; same-user
+ * continuity across provisioning events is the deferred master-password item, not this screen's
+ * job. Unlike the Voter app's device-association flow (45-05), there is no server-issued
+ * challenge nonce in this ceremony, so the bound digest is self-issued over a locally generated
+ * nonce plus the new key's own public value.
  *
  * DEVICE-PROOF HONESTY: jest cannot exercise the real Android Keystore, `BiometricPrompt`, or
  * `KeyguardManager`. This screen's own test suite proves the JS-side wiring and rendering against
  * a faked native module ONLY — not that provisioning works on real hardware. That proof is D-24
- * leg 1 (49-13) and leg 3 (49-14).
+ * leg 1 (49-13/49-18) and leg 3 (49-14).
  */
 
 type ProvisionReason = "first-run" | "invalidated";
@@ -101,7 +110,7 @@ function getNative(): NativeAttestationSpec {
 	return require("@votetorrent/attestation-native/src/specs/NativeAttestation").default as NativeAttestationSpec;
 }
 
-type ScreenPhase = "idle" | "pending" | "success" | "no-recovery";
+type ScreenPhase = "idle" | "pending" | "success" | "awaiting-network" | "no-recovery";
 
 export default function ProvisionSigningKeyScreen() {
 	const insets = useSafeAreaInsets();
@@ -125,6 +134,12 @@ export default function ProvisionSigningKeyScreen() {
 	 * inserted. Going through the (also cached, but read-fresh-on-call) network engine's
 	 * `getCurrentUser()` directly, instead of the app-wide `getEngine("user")` cache entry, gives
 	 * a real DB read every time this is called.
+	 *
+	 * Throwing variant — used by the recovery path, which by definition runs on a device that
+	 * already has a network (a recovery ceremony can only be reached once a `UserKey` already
+	 * exists to invalidate). First-run stage 2 uses the non-throwing `tryResolveNetworkUserEngine`
+	 * sibling below instead, because a genuinely network-less device is an expected, not
+	 * exceptional, state there.
 	 */
 	async function resolveFreshUserEngine(): Promise<IUserEngine> {
 		const networkEngine = await getEngine<INetworkEngine>("network");
@@ -137,74 +152,141 @@ export default function ProvisionSigningKeyScreen() {
 		return userEngine;
 	}
 
+	/**
+	 * Non-throwing sibling of `resolveFreshUserEngine`, used by first-run stage 2. Returns
+	 * `undefined` when `getEngine('network')` itself rejects (no network context exists at all —
+	 * the genuinely network-less `pm clear` case) OR when `getCurrentUser()` resolves nothing (a
+	 * network exists but this device has no `User` row in it yet). Catches broadly rather than
+	 * narrowly around `getCurrentUser()` alone: on a network-less device it is `getEngine('network')`
+	 * itself that fails, not just the call after it.
+	 */
+	async function tryResolveNetworkUserEngine(): Promise<IUserEngine | undefined> {
+		try {
+			const networkEngine = await getEngine<INetworkEngine>("network");
+			const userEngine = await networkEngine.getCurrentUser();
+			return userEngine ?? undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Stage 1 (network-independent, D-14/D-08): generate the signing key, generate the recovery
+	 * key, capture the D-08 attestation cert chain, and persist the provisioning record + the
+	 * local device `User`. NO engine call anywhere on this path — the `defaultUser` engine used
+	 * for the display name is LocalStorage-only (`engine-factory.ts`), never network-scoped.
+	 */
+	async function runLocalCeremony(
+		native: NativeAttestationSpec,
+	): Promise<{ attestedKeyHex: string; recoveryKeyHex: string }> {
+		// Step 1 — the biometric-gated primary signing key.
+		const deviceKey = (await native.provisionDeviceKey(SIGNING_KEY_ALIAS)) as {
+			publicKeyCompressedHex: string;
+		};
+		// Step 2 (D-16) — the device-credential recovery key.
+		const recoveryKey = (await native.provisionRecoveryKey(RECOVERY_KEY_ALIAS)) as {
+			publicKeyCompressedHex: string;
+		};
+
+		// Step 3 (D-08) — capture the provision-time attestation cert chain. There is no
+		// server-issued challenge nonce to bind against in this ceremony (unlike the Voter app's
+		// device-association flow, which uses `computeBoundDigest(nonce, deviceKey)` against an
+		// authority-issued nonce — 45-05); a self-issued, locally generated string stands in as
+		// `boundDigest` since nothing verifies this binding this phase (T-49-PLAIN: only the
+		// public cert chain itself is persisted, never key material).
+		const boundDigest = `signing-key-provisioning-${Date.now()}-${deviceKey.publicKeyCompressedHex}`;
+		const attestation = (await native.produceAttestation(
+			SIGNING_KEY_ALIAS,
+			boundDigest,
+			base64FromUtf8(boundDigest),
+			false,
+		)) as { certificateChainBase64: string[]; publicKeyCompressedHex: string };
+
+		// The ONLY compressed public key this screen may ever register or persist as the signing
+		// key. `produceAttestation` deletes and regenerates the `SIGNING_KEY_ALIAS` entry
+		// (`regenerateAttested`, `KeyAttestationHelper.kt`), so `deviceKey.publicKeyCompressedHex`
+		// above refers to a key the Keystore no longer holds. Registering the discarded value
+		// would attribute every later signature to a `signerKey` that never produced it, and
+		// `verify()` swallows exceptions and fails closed — silently (T-49-KEY). Nothing else in
+		// this function consumes `deviceKey.publicKeyCompressedHex` beyond the self-issued
+		// `boundDigest` string above (49-10's key decision — a self-issued placeholder is correct
+		// while nothing verifies the binding).
+		const attestedKeyHex = attestation.publicKeyCompressedHex;
+
+		// Persist the attestation record FIRST, then the local device user — reversed from
+		// 49-10's original "persist the device user last, only once both UserKey rows are real"
+		// rule (deviation, see 49-17-SUMMARY.md). Under this plan's two-stage onboarding order the
+		// network UserKey rows are written later, by design (stage 2 below, possibly on a return
+		// visit) — so "last" here means last within stage 1: the device-user entry is what every
+		// other call site (`device-signer.ts`, `useDeviceSigningErrorHandler`) treats as "this
+		// device is provisioned", so it must be written only once it points at a key that
+		// genuinely exists (the post-attestation key, never the discarded pre-attestation one).
+		await persistDeviceProvisioningRecord({
+			recoveryPublicKeyCompressedHex: recoveryKey.publicKeyCompressedHex,
+			attestedPublicKeyCompressedHex: attestedKeyHex,
+			signingKeyAlias: SIGNING_KEY_ALIAS,
+			certificateChainBase64: attestation.certificateChainBase64,
+			capturedAt: Date.now(),
+		});
+
+		// Resolve the display name from the network-independent `defaultUser` engine — the same
+		// source `AddNetworkScreen` and `AppProvider` already use — NEVER from a network `User`
+		// summary; that dependency is exactly what this plan exists to break.
+		const defaultUserEngine = await getEngine<IDefaultUserEngine>("defaultUser");
+		const defaultUser = await defaultUserEngine.get();
+		const displayName = defaultUser?.name ?? "Device User";
+		await persistProvisionedDeviceUser(displayName, attestedKeyHex);
+
+		return { attestedKeyHex, recoveryKeyHex: recoveryKey.publicKeyCompressedHex };
+	}
+
 	async function handleFirstRun(): Promise<void> {
 		setErrorClass(undefined);
 		setPhase("pending");
 		try {
 			const native = getNative();
 
-			// Step 1 — the biometric-gated primary signing key.
-			const deviceKey = (await native.provisionDeviceKey(SIGNING_KEY_ALIAS)) as {
-				publicKeyCompressedHex: string;
-			};
-			// Step 2 (D-16) — the device-credential recovery key.
-			const recoveryKey = (await native.provisionRecoveryKey(RECOVERY_KEY_ALIAS)) as {
-				publicKeyCompressedHex: string;
-			};
+			// Stage 1 — local, guarded, idempotent. Run the native ceremony ONLY when this device
+			// has never been locally provisioned. This guard is load-bearing in two directions:
+			// `provisionDeviceKey`/`produceAttestation` unconditionally regenerate the Keystore
+			// alias, so a second run would mint a DIFFERENT key and orphan whatever is already
+			// registered in the network; and `persistProvisionedDeviceUser` mints a fresh
+			// `crypto.randomUUID()` for `user.id`, which `networks-engine.create()` writes as
+			// `User.Id` — re-running it after a network exists would fork the device's identity.
+			let attestedKeyHex: string;
+			let recoveryKeyHex: string;
+			const existingDeviceUser = await getDeviceUser();
+			if (existingDeviceUser === undefined) {
+				({ attestedKeyHex, recoveryKeyHex } = await runLocalCeremony(native));
+			} else {
+				const existingRecord = await getDeviceProvisioningRecord();
+				if (existingRecord === undefined) {
+					// Defensive: a legacy pre-49-16 install can carry a `deviceUser` entry with no
+					// sibling provisioning record. Treat that as unprovisioned for
+					// network-registration purposes and run stage 1 to backfill both, rather than
+					// proceeding with a partial (recovery-key-less) set.
+					({ attestedKeyHex, recoveryKeyHex } = await runLocalCeremony(native));
+				} else {
+					attestedKeyHex = existingDeviceUser.activeKeys[0]!.key;
+					recoveryKeyHex = existingRecord.recoveryPublicKeyCompressedHex;
+				}
+			}
 
-			// Step 3 (D-08) — capture the provision-time attestation cert chain. See this file's
-			// header comment: nothing consumes it this phase, and the chain proves hardware/key
-			// continuity, never user identity. There is no server-issued challenge nonce to bind
-			// against in this ceremony (unlike the Voter app's device-association flow, which uses
-			// `computeBoundDigest(nonce, deviceKey)` against an authority-issued nonce — 45-05); a
-			// self-issued, locally generated string stands in as `boundDigest` since nothing
-			// verifies this binding this phase (T-49-PLAIN: only the public cert chain itself is
-			// persisted, never key material).
-			const boundDigest = `signing-key-provisioning-${Date.now()}-${deviceKey.publicKeyCompressedHex}`;
-			const attestation = await native.produceAttestation(
-				SIGNING_KEY_ALIAS,
-				boundDigest,
-				base64FromUtf8(boundDigest),
-				false,
-			);
-			// Persisted nowhere yet in this phase — see the header comment on why capturing it
-			// now, unconsumed, is still correct. Referenced so it is not an unused local.
-			void attestation;
-
-			const expiration = Date.now() + TEN_YEARS_MS;
-
-			// Step 4 (D-15) — the first-key bootstrap branch: no signature required, ONLY legal
-			// when this is genuinely the user's first key.
-			const userEngine = await resolveFreshUserEngine();
-			await userEngine.addKey({ key: deviceKey.publicKeyCompressedHex, type: UserKeyType.p256, expiration });
-
-			// Step 5 — the recovery key as a SECOND UserKey, via the signed subsequent-key path,
-			// authorized by the signing key just registered above (one biometric prompt). A fresh
-			// engine is resolved so context.UserKey binds to the key inserted in step 4, not the
-			// pre-provisioning empty snapshot (see resolveFreshUserEngine's doc comment).
-			const userEngineAfterFirstKey = await resolveFreshUserEngine();
-			await userEngineAfterFirstKey.addKey(
-				{ key: recoveryKey.publicKeyCompressedHex, type: UserKeyType.p256, expiration },
-				async (digest: Uint8Array): Promise<Signature> => {
-					const result = (await native.signWithDeviceKey(
-						SIGNING_KEY_ALIAS,
-						base64FromDigestBytes(digest),
-						t("deviceSigningPromptTitle"),
-						t("signingKeyProvisioningPromptSubtitle"),
-						t("deviceSigningPromptNegativeButton"),
-					)) as { signatureHex: string };
-					return {
-						signerUserId: (await userEngine.getSummary())?.id ?? "",
-						signerKey: deviceKey.publicKeyCompressedHex,
-						signature: result.signatureHex,
-					};
-				},
-			);
-
-			// Step 6 (D-14) — persist the local device identity LAST, only once both UserKey rows
-			// are real: never leave a "provisioned" local record pointing at an unregistered key.
-			const displayName = (await userEngine.getSummary())?.name ?? "Device User";
-			await persistProvisionedDeviceUser(displayName, deviceKey.publicKeyCompressedHex);
+			// Stage 2 (network-scoped): register whichever keys the network `User` is still
+			// missing. Skipped entirely — landing on the awaiting-network state — when no network
+			// `User` resolves yet (the officer provisioned before creating or joining a network).
+			// TASK 1 SCOPE ENDS HERE: this landed the awaiting-network branch and stage 1's local
+			// ceremony. The reconciliation write-set (49-17 Task 2) fills in below.
+			const networkUserEngine = await tryResolveNetworkUserEngine();
+			if (networkUserEngine === undefined) {
+				setPhase("awaiting-network");
+				return;
+			}
+			// `attestedKeyHex`/`recoveryKeyHex` are consumed by Task 2's reconciliation writes,
+			// landing next in this same plan — referenced here so they are not unused locals in
+			// this intermediate state.
+			void attestedKeyHex;
+			void recoveryKeyHex;
 
 			setPhase("success");
 		} catch (err) {
@@ -314,7 +396,15 @@ export default function ProvisionSigningKeyScreen() {
 		setPhase("idle");
 	}
 
-	if (phase === "success") {
+	if (phase === "success" || phase === "awaiting-network") {
+		const headingKey =
+			phase === "awaiting-network"
+				? "signingKeyProvisioningAwaitingNetworkHeading"
+				: "signingKeyProvisioningSuccessHeading";
+		const bodyKey =
+			phase === "awaiting-network"
+				? "signingKeyProvisioningAwaitingNetworkBody"
+				: "signingKeyProvisioningSuccessBody";
 		return (
 			<ScrollView
 				testID="signing-key-provisioning-screen"
@@ -325,10 +415,10 @@ export default function ProvisionSigningKeyScreen() {
 					<FontAwesome6 name="circle-check" size={32} color={colors.success} />
 				</View>
 				<ThemedText type="default" style={{ color: colors.text }}>
-					{t("signingKeyProvisioningSuccessHeading")}
+					{t(headingKey)}
 				</ThemedText>
 				<ThemedText type="small" style={[localStyles.body, { color: colors.textSecondary }]}>
-					{t("signingKeyProvisioningSuccessBody")}
+					{t(bodyKey)}
 				</ThemedText>
 				<View testID="signing-key-provisioning-continue-button">
 					<CustomButton
