@@ -40,7 +40,9 @@ export type DeviceSigningErrorClass =
 	| 'biometric-error'
 	| 'key-invalidated' // navigate, never inline
 	| 'no-key-provisioned' // navigate, never inline — detected BEFORE any prompt
-	| 'no-device-credential'; // D-18 terminal — no recovery possible
+	| 'no-device-credential' // D-18 terminal — no recovery possible
+	| 'recovery-key-invalidated' // 49-14 follow-up — the D-16 FAIL signal, inline-rendered
+	| 'recovery-key-not-registered'; // 49-14 follow-up — DeleteValid precondition unmet, inline-rendered
 
 /**
  * Native reject code -> UI class. Reused verbatim from Phase 45's taxonomy
@@ -57,6 +59,19 @@ export const CODE_TO_CLASS: Record<string, DeviceSigningErrorClass> = {
 	KEY_INVALIDATED_REASSOCIATE: 'key-invalidated',
 	NO_KEY_PROVISIONED: 'no-key-provisioned',
 	NO_DEVICE_CREDENTIAL: 'no-device-credential',
+	// 49-14 follow-up (D-16 observability defect) — native's provisionRecoveryKey now rejects with
+	// this code (KeyAttestationHelper.kt's RecoveryKeyInvalidatedException) instead of silently
+	// regenerating an invalidated recovery-key alias. See this class's DEVICE_SIGNING_ERROR_COPY_KEY
+	// entry below for why it renders inline rather than navigating.
+	RECOVERY_KEY_INVALIDATED: 'recovery-key-invalidated',
+	// 49-14 follow-up — JS-thrown (ProvisionSigningKeyScreen.tsx's handleRecovery), never a native
+	// reject code: the network User's currently-registered recovery key does not match this
+	// device's recovery key, i.e. `UserKey.DeleteValid`'s clause 1 (a valid, non-expired signer) or
+	// clause 2 (not the user's last key) precondition is unmet before the ceremony would even
+	// attempt to revoke the invalidated signing key. Reuses this same code-based taxonomy
+	// mechanism deliberately (a `code` field on a plain thrown Error) rather than introducing a
+	// second classification mechanism alongside it.
+	RECOVERY_KEY_NOT_REGISTERED: 'recovery-key-not-registered',
 };
 
 /**
@@ -77,7 +92,8 @@ export function mapDeviceSigningError(err: unknown): DeviceSigningErrorClass {
 /**
  * i18n copy key for each INLINE-rendered error class (the four classes
  * `49-UI-SPEC.md`'s Error Taxonomy Contract table renders as `InlineError`
- * on the calling screen).
+ * on the calling screen, PLUS the two `recovery-key-*` classes 49-14 added
+ * — see their own entries below for why those render inline too).
  *
  * `cancellation`, `key-invalidated`, `no-key-provisioned`, and
  * `no-device-credential` are DELIBERATELY ABSENT from this map — that
@@ -91,6 +107,14 @@ export const DEVICE_SIGNING_ERROR_COPY_KEY: Partial<Record<DeviceSigningErrorCla
 	lockout: 'deviceSigningErrorLockout',
 	'lockout-permanent': 'deviceSigningErrorLockoutPermanent',
 	'biometric-error': 'deviceSigningErrorGeneric',
+	// 49-14 follow-up — both render INLINE (unlike key-invalidated/no-key-provisioned, which
+	// navigate): neither implies the primary signing-key ceremony should restart from scratch, and
+	// neither has a dedicated terminal screen the way no-device-credential (D-18) does. Distinct
+	// copy from deviceSigningErrorGeneric is the entire point (see this file's own header comment
+	// on T-49-USER-7 — a structural precondition failure must never read as "couldn't verify your
+	// biometrics").
+	'recovery-key-invalidated': 'deviceSigningErrorRecoveryKeyInvalidated',
+	'recovery-key-not-registered': 'deviceSigningErrorRecoveryKeyNotRegistered',
 };
 
 /**

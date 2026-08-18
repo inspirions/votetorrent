@@ -219,6 +219,13 @@ const resources = {
 			deviceSigningErrorLockoutPermanent:
 				'Biometric verification is locked. Unlock your device with your PIN, pattern, or password to reset it, then try again.',
 			deviceSigningErrorGeneric: "Couldn't verify your biometrics. Try again.",
+			// 49-14 follow-up (D-16 observability defect + DeleteValid precondition) — distinct from
+			// deviceSigningErrorGeneric on purpose: neither of these is "couldn't verify your
+			// biometrics," and rendering them that way hides the real, structural fault.
+			deviceSigningErrorRecoveryKeyInvalidated:
+				"This device's recovery key can no longer be used — it was invalidated along with your signing key. Contact an administrator to re-invite this device.",
+			deviceSigningErrorRecoveryKeyNotRegistered:
+				'Your recovery key was never registered on this network. Go to Settings and tap "Set Up Secure Signing" while connected to your network, then try recovery again.',
 			signingKeyProvisioningScreenTitle: 'Secure Signing Setup',
 			signingKeyProvisioningFirstRunHeading: 'Set up hardware-backed signing',
 			signingKeyProvisioningFirstRunBody:
@@ -1062,6 +1069,10 @@ const resources = {
 			deviceSigningErrorLockoutPermanent:
 				'La verificación biométrica está bloqueada. Desbloquea tu dispositivo con el PIN, patrón o contraseña para restablecerla, luego inténtalo de nuevo.',
 			deviceSigningErrorGeneric: 'No se pudo verificar tu biometría. Inténtalo de nuevo.',
+			deviceSigningErrorRecoveryKeyInvalidated:
+				'La clave de recuperación de este dispositivo ya no se puede usar — se invalidó junto con tu clave de firma. Contacta a un administrador para volver a invitar este dispositivo.',
+			deviceSigningErrorRecoveryKeyNotRegistered:
+				'Tu clave de recuperación nunca se registró en esta red. Ve a Configuración y toca "Configurar Firma Segura" mientras estás conectado a tu red, luego intenta la recuperación de nuevo.',
 			signingKeyProvisioningScreenTitle: 'Configuración de Firma Segura',
 			signingKeyProvisioningFirstRunHeading: 'Configura la firma respaldada por hardware',
 			signingKeyProvisioningFirstRunBody:

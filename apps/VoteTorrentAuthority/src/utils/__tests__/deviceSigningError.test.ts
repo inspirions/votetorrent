@@ -72,6 +72,49 @@ describe('deviceSigningError (D-13 taxonomy)', () => {
 	});
 });
 
+// 49-14 follow-up (D-16 observability defect + DeleteValid precondition, root-caused on real
+// hardware this session — see 49-14-PROOF-LOG.md's "Follow-up session — prerequisite diagnosis"
+// section). Two NEW classes: `recovery-key-invalidated` (native's `provisionRecoveryKey` now
+// rejects with a distinct code instead of silently regenerating an invalidated alias) and
+// `recovery-key-not-registered` (JS-thrown by `handleRecovery`'s own precondition check, never a
+// native code). Both render INLINE — neither is a navigation class, and both have dedicated,
+// non-generic copy.
+describe('recovery-key-invalidated / recovery-key-not-registered (49-14 follow-up)', () => {
+	test('RECOVERY_KEY_INVALIDATED maps to recovery-key-invalidated', () => {
+		expect(mapDeviceSigningError({ code: 'RECOVERY_KEY_INVALIDATED' })).toBe(
+			'recovery-key-invalidated'
+		);
+	});
+
+	test('RECOVERY_KEY_NOT_REGISTERED maps to recovery-key-not-registered', () => {
+		expect(mapDeviceSigningError({ code: 'RECOVERY_KEY_NOT_REGISTERED' })).toBe(
+			'recovery-key-not-registered'
+		);
+	});
+
+	test('both classes have dedicated, non-generic inline copy keys', () => {
+		expect(DEVICE_SIGNING_ERROR_COPY_KEY['recovery-key-invalidated']).toBe(
+			'deviceSigningErrorRecoveryKeyInvalidated'
+		);
+		expect(DEVICE_SIGNING_ERROR_COPY_KEY['recovery-key-not-registered']).toBe(
+			'deviceSigningErrorRecoveryKeyNotRegistered'
+		);
+		// Neither collapses into the generic "couldn't verify your biometrics" copy — that
+		// collapse is exactly the T-49-USER-7 masking this follow-up exists to prevent.
+		expect(DEVICE_SIGNING_ERROR_COPY_KEY['recovery-key-invalidated']).not.toBe(
+			'deviceSigningErrorGeneric'
+		);
+		expect(DEVICE_SIGNING_ERROR_COPY_KEY['recovery-key-not-registered']).not.toBe(
+			'deviceSigningErrorGeneric'
+		);
+	});
+
+	test('neither class is a navigation class', () => {
+		expect(isNavigationClass('recovery-key-invalidated')).toBe(false);
+		expect(isNavigationClass('recovery-key-not-registered')).toBe(false);
+	});
+});
+
 // 49-14 follow-up (interrupted-handleRecovery Keystore/metadata desync): isSignatureDesyncError
 // is the RESCUE-path predicate — a message-based classification, not part of the code-based
 // taxonomy above (see its own doc comment).
