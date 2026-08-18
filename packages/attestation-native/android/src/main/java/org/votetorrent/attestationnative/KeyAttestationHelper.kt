@@ -9,6 +9,7 @@ import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import android.util.Base64
+import android.util.Log
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
@@ -32,6 +33,16 @@ import java.security.spec.ECGenParameterSpec
 private const val RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE = 49160
 
 private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+
+/**
+ * Gap B observability (49-15) — app-process `Log.i` tag for the raw BiometricPrompt `errorCode`
+ * received at each of the three `onAuthenticationError` call sites, so a real-hardware run can
+ * record which constant (5/10/13) the device actually delivers for a negative-button or BACK-key
+ * dismissal — the question 49-13 left open. 15 chars, under Android's 23-char tag limit. INFO
+ * level only (never `Log.w`/`Log.e`): a cancellation is not a fault, and `leg_cancel`'s
+ * `cancel-no-logged-fault` check counts `" E "` matches in this app's own pid.
+ */
+private const val TAG_SIGNING_REJECT = "VtSigningReject"
 
 /**
  * Phase 49 (D-07) — canonical Authority Keystore aliases, distinct from the Voter app's device
@@ -380,11 +391,29 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 					// D-09 three-way UX classification (AttestationNativeModule.kt owns the final
 					// reject-code contract; this helper surfaces a stable intermediate code per
 					// BiometricPrompt errorCode, per 45-RESEARCH.md Pattern 4's error-code table).
+					//
+					// Gap B (49-15, 49-GAPS.md corrected root cause) — THE CLOSING CHANGE. This is
+					// the ONLY onAuthenticationError this function ever had, and it previously had NO
+					// cancellation branch at all: every dismissal (ERROR_CANCELED/5,
+					// ERROR_USER_CANCELED/10, ERROR_NEGATIVE_BUTTON/13) fell through to
+					// "BIOMETRIC_ERROR", which produceAttestation forwarded verbatim and
+					// mapDeviceSigningError rendered as deviceSigningErrorGeneric — the ONLY signing
+					// prompt a pm-clear device can reach (ProvisionSigningKeyScreen's first-run
+					// produceAttestation call). Adding this branch does NOT touch the two branches
+					// below it, which still fold their two respective codes into a single "LOCKOUT",
+					// exactly as the signWithDeviceKey-area comment (now updated) still protects.
 					val code = when (errorCode) {
+						BiometricPrompt.ERROR_CANCELED,
+						BiometricPrompt.ERROR_USER_CANCELED,
+						BiometricPrompt.ERROR_NEGATIVE_BUTTON -> "CANCELED"
 						BiometricPrompt.ERROR_NO_BIOMETRICS -> "NO_BIOMETRICS_ENROLLED"
 						BiometricPrompt.ERROR_LOCKOUT, BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> "LOCKOUT"
 						else -> "BIOMETRIC_ERROR"
 					}
+					Log.i(
+						TAG_SIGNING_REJECT,
+						"produceAttestation errorCode=$errorCode mapped=$code",
+					)
 					onError(code, RuntimeException(errString.toString()))
 				}
 
@@ -485,13 +514,28 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 						// regenerateAttested collapses both lockout codes into LOCKOUT — this mapping
 						// deliberately splits them (different remediation copy, 49-UI-SPEC.md). Do
 						// NOT retroactively change regenerateAttested's mapping.
+						//
+						// 49-15/Gap B: ERROR_CANCELED (5) added alongside the pre-existing
+						// ERROR_USER_CANCELED (10) / ERROR_NEGATIVE_BUTTON (13) so all three
+						// onAuthenticationError sites in this file classify the same three codes as
+						// CANCELED — but this site is not itself the Gap B fix: a pm-clear device
+						// (every cancel leg's starting state) can never reach signWithDeviceKey, since
+						// it requires an existing provisioning AND a network User. The split/collapse
+						// difference between this site and regenerateAttested's lockout handling — not
+						// the cancellation handling — is what must not be retroactively changed.
 						val code = when (errorCode) {
-							BiometricPrompt.ERROR_USER_CANCELED, BiometricPrompt.ERROR_NEGATIVE_BUTTON -> "CANCELED"
+							BiometricPrompt.ERROR_CANCELED,
+							BiometricPrompt.ERROR_USER_CANCELED,
+							BiometricPrompt.ERROR_NEGATIVE_BUTTON -> "CANCELED"
 							BiometricPrompt.ERROR_NO_BIOMETRICS -> "NO_BIOMETRICS_ENROLLED"
 							BiometricPrompt.ERROR_LOCKOUT -> "LOCKOUT"
 							BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> "LOCKOUT_PERMANENT"
 							else -> "BIOMETRIC_ERROR"
 						}
+						Log.i(
+							TAG_SIGNING_REJECT,
+							"signWithDeviceKey errorCode=$errorCode mapped=$code",
+						)
 						onError(code, RuntimeException(errString.toString()))
 					}
 
@@ -645,11 +689,20 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 						// enrollment, not an absent device credential; NO_DEVICE_CREDENTIAL above
 						// already covers the "nothing configured at all" case for this ceremony).
 						val code = when (errorCode) {
-							BiometricPrompt.ERROR_USER_CANCELED, BiometricPrompt.ERROR_NEGATIVE_BUTTON -> "CANCELED"
+							BiometricPrompt.ERROR_CANCELED,
+							BiometricPrompt.ERROR_USER_CANCELED,
+							BiometricPrompt.ERROR_NEGATIVE_BUTTON -> "CANCELED"
 							BiometricPrompt.ERROR_LOCKOUT -> "LOCKOUT"
 							BiometricPrompt.ERROR_LOCKOUT_PERMANENT -> "LOCKOUT_PERMANENT"
 							else -> "BIOMETRIC_ERROR"
 						}
+						// Named for the public entry point (signWithRecoveryKey), never this private
+						// branch helper's name, so a proof-log reader can match the line to the JS call
+						// that produced it.
+						Log.i(
+							TAG_SIGNING_REJECT,
+							"signWithRecoveryKey errorCode=$errorCode mapped=$code",
+						)
 						onError(code, RuntimeException(errString.toString()))
 					}
 

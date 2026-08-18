@@ -31,8 +31,16 @@ import com.facebook.react.module.annotations.ReactModule
  *     terminal failure).
  *
  * Phase 49 (D-13) extends this taxonomy for [signWithDeviceKey] with three new classes:
- *   - `cancellation`: `CANCELED` (`ERROR_USER_CANCELED`/`ERROR_NEGATIVE_BUTTON`) — a neutral
- *     dismissal, never rendered as an error screen and never logged as a fault (49-UI-SPEC.md).
+ *   - `cancellation`: `CANCELED` (`ERROR_CANCELED`/`ERROR_USER_CANCELED`/`ERROR_NEGATIVE_BUTTON`)
+ *     — a neutral dismissal, never rendered as an error screen and never logged as a fault
+ *     (49-UI-SPEC.md). 49-15/Gap B widened this classification to [produceAttestation] as well
+ *     (via [KeyAttestationHelper.regenerateAttested]'s `onAuthenticationError`) — that is the
+ *     ONLY signing prompt reachable from a `pm clear` device, so it, not [signWithDeviceKey], is
+ *     the site that actually closes Gap B. The raw BiometricPrompt `errorCode` each of the three
+ *     `onAuthenticationError` sites received is logged at INFO under the `VtSigningReject` tag,
+ *     specifically so the emulator-vs-hardware question 49-13 left open (whether a real device
+ *     ever delivers `ERROR_CANCELED`/5 for a negative-button/BACK dismissal, versus 10/13) stays
+ *     answerable from a 49-14 hardware run.
  *   - `LOCKOUT_PERMANENT` is now a DISTINCT recoverable-transient entry, split out from the plain
  *     `LOCKOUT` class above (different remediation copy) — [regenerateAttested]'s own mapping is
  *     NOT retroactively changed to match; it keeps collapsing both lockout codes into `LOCKOUT`.
