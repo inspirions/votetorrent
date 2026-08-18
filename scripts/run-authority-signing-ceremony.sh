@@ -336,6 +336,26 @@ pull_storage_db() {
   echo "${pulldir}"
 }
 
+# capture_signing_reject_line — reads the app-pid-scoped logcat buffer for a
+# VtSigningReject line carrying an `errorCode=` token (KeyAttestationHelper.kt's
+# regenerateAttested/produceAttestation onAuthenticationError override — the only
+# signing prompt a pm-clear device reaches). Matches on the tag plus the
+# `errorCode=` token only, never a specific entry-point name, so this keeps working
+# if the prompt under test ever moves — but the matched line itself is returned
+# verbatim, since which entry point emitted it is itself evidence. Falls back to a
+# package-name grep when `pidof` returns empty, mirroring the existing fault-check
+# fallback below. Echoes the matched line, or nothing if none was found.
+capture_signing_reject_line() {
+  local app_pid line
+  app_pid=$(adb ${ADBD} shell pidof "${PACKAGE}" 2>/dev/null | tr -d '\r' | awk '{print $1}')
+  if [ -n "${app_pid}" ]; then
+    line=$(adb ${ADBD} logcat -d --pid="${app_pid}" 2>/dev/null | grep "VtSigningReject" | grep "errorCode=" | head -1 || true)
+  else
+    line=$(adb ${ADBD} logcat -d 2>/dev/null | grep " ${PACKAGE}" | grep "VtSigningReject" | grep "errorCode=" | head -1 || true)
+  fi
+  printf '%s\n' "${line}"
+}
+
 # ── Leg: provision-local (D-24 leg 1, network-independent half — 49-18 / Gap A) ──
 # The clean-device half of the split ceremony (see header comment). Keeps 49-13's
 # sequence verbatim up through the fingerprint injection and no-spki-error check —
@@ -534,14 +554,17 @@ leg_sign() {
   record_leg "sign-per-use-prompt" "NOT-EXERCISED" "recorded manually in 49-13-PROOF-LOG.md — see leg 1 sub-claim 3"
 }
 
-# ── Leg: cancel (D-24 leg 2) ─────────────────────────────────────────────────
-leg_cancel() {
-  # Reset to a clean identity and re-navigate first (mirrors leg_provision).
-  # Without this, running 'cancel' after a prior 'provision' leg's error
-  # state leaves STALE error text (e.g. a generic biometric-error banner
-  # from an earlier failed attempt) on screen, which the deviceSigningError*
-  # text-absence check below would then false-FAIL on — flagging content
-  # that predates this leg's own dismissal action, not content it caused.
+# ── Leg: cancel (D-24 leg 2 + Gap B closure, 49-18) ──────────────────────────
+# Drives BOTH user-initiated dismissal paths of the first-run provisioning prompt
+# (the only BiometricPrompt sheet a pm-clear device reaches — see 49-GAPS.md Gap B
+# and KeyAttestationHelper.kt's regenerateAttested onAuthenticationError override):
+# the system prompt's own negative ("Cancel") button, and the hardware BACK key
+# (NOT-EXERCISED in 49-13, folded in here per 49-GAPS.md). Each pass re-runs the
+# full reset/relaunch/navigate preamble first — mirrors provision_local. Without
+# this, running a dismissal check on top of a screen still showing a STALE error
+# from an earlier attempt makes the "no error text" assertion meaningless, since
+# it would fail on content that predates the action under test (49-13 Deviation 3).
+leg_cancel_negative_button() {
   reset_identity
   launch_app
   if ! navigate_to_settings; then
@@ -563,6 +586,10 @@ leg_cancel() {
   fi
   sleep 3
   dump=$(dump_ui)
+  if ! text_present "${STR_PROMPT_TITLE}" "${dump}"; then
+    record_leg "cancel-negative-button" "FAIL" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') not observed before attempting dismissal"
+    return
+  fi
   if ! tap_on_text "${STR_NEGATIVE_BUTTON}" "${dump}"; then
     record_leg "cancel-negative-button" "FAIL" "deviceSigningPromptNegativeButton ('${STR_NEGATIVE_BUTTON}') not found to dismiss the prompt"
     return
@@ -601,16 +628,114 @@ leg_cancel() {
   else
     record_leg "cancel-no-logged-fault" "FAIL" "${err_lines} error-level logcat line(s) since dismissal"
   fi
+
+  # Gap B closure: the raw native errorCode must remain recoverable from an
+  # app-pid-scoped VtSigningReject log line, so 49-14's hardware run can record
+  # which BiometricPrompt constant real hardware delivers (5/10/13) instead of
+  # that fact being silently absorbed by the widened CANCELED classification.
+  local reject_line raw_code mapped_code
+  reject_line=$(capture_signing_reject_line)
+  if [ -z "${reject_line}" ]; then
+    record_leg "cancel-errorcode-observability" "FAIL" "no VtSigningReject line found for this dismissal"
+  else
+    raw_code=$(echo "${reject_line}" | grep -o 'errorCode=[0-9-]*' | head -1 | sed 's/errorCode=//')
+    mapped_code=$(echo "${reject_line}" | grep -o 'mapped=[A-Z_]*' | head -1 | sed 's/mapped=//')
+    if [ "${mapped_code}" = "CANCELED" ]; then
+      record_leg "cancel-errorcode-observability" "PASS" "errorCode=${raw_code} mapped=${mapped_code} (raw log: ${reject_line})"
+    else
+      record_leg "cancel-errorcode-observability" "FAIL" "mapped=${mapped_code:-<none>} (expected CANCELED) errorCode=${raw_code:-<none>}; raw log: ${reject_line}"
+    fi
+  fi
+}
+
+leg_cancel_back_key() {
+  reset_identity
+  launch_app
+  if ! navigate_to_settings; then
+    record_leg "cancel-negative-button-back" "FAIL" "could not reach Settings to start the cancel leg from a clean identity"
+    return
+  fi
+  local dump
+  dump=$(dump_ui)
+  if ! tap_on_text "${STR_SETTINGS_ROW}" "${dump}"; then
+    record_leg "cancel-negative-button-back" "FAIL" "could not tap '${STR_SETTINGS_ROW}' row to reach ProvisionSigningKeyScreen"
+    return
+  fi
+  sleep 2
+  dump=$(dump_ui)
+
+  adb ${ADBD} logcat -c
+  if ! tap_on_text "${STR_SETUP_BUTTON}" "${dump}" && ! tap_on_text "Replace Signing Key" "${dump}"; then
+    echo "[ceremony] 'cancel' leg (BACK-key variant): no provisioning/replace action reachable from the current screen — drive to a signing action manually first." >&2
+  fi
+  sleep 3
+  dump=$(dump_ui)
+  if ! text_present "${STR_PROMPT_TITLE}" "${dump}"; then
+    record_leg "cancel-negative-button-back" "FAIL" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') not observed before attempting dismissal"
+    return
+  fi
+  adb ${ADBD} shell input keyevent KEYCODE_BACK
+  record_leg "cancel-negative-button-back" "PASS" "KEYCODE_BACK dispatched, dismissing the prompt"
+  sleep 2
+
+  dump=$(dump_ui)
+  local err_hit=0 s
+  for s in "${STR_ERROR_STRINGS[@]}"; do
+    if text_present "${s}" "${dump}"; then err_hit=1; fi
+  done
+  if [ "${err_hit}" -eq 0 ]; then
+    record_leg "cancel-no-error-text-back" "PASS" "none of the deviceSigningError* EN strings present post-dismissal"
+  else
+    record_leg "cancel-no-error-text-back" "FAIL" "a deviceSigningError* string was rendered post-dismissal"
+  fi
+
+  local app_pid err_lines
+  app_pid=$(adb ${ADBD} shell pidof "${PACKAGE}" 2>/dev/null | tr -d '\r' | awk '{print $1}')
+  if [ -n "${app_pid}" ]; then
+    err_lines=$(adb ${ADBD} logcat -d --pid="${app_pid}" 2>/dev/null | grep -c " E " || true)
+  else
+    err_lines=$(adb ${ADBD} logcat -d 2>/dev/null | grep " ${PACKAGE}" | grep -c " E " || true)
+  fi
+  if [ "${err_lines}" -eq 0 ]; then
+    record_leg "cancel-no-logged-fault-back" "PASS" "0 error-level app-package logcat lines since dismissal"
+  else
+    record_leg "cancel-no-logged-fault-back" "FAIL" "${err_lines} error-level logcat line(s) since dismissal"
+  fi
+
+  local reject_line raw_code mapped_code
+  reject_line=$(capture_signing_reject_line)
+  if [ -z "${reject_line}" ]; then
+    record_leg "cancel-errorcode-observability-back" "FAIL" "no VtSigningReject line found for this dismissal"
+  else
+    raw_code=$(echo "${reject_line}" | grep -o 'errorCode=[0-9-]*' | head -1 | sed 's/errorCode=//')
+    mapped_code=$(echo "${reject_line}" | grep -o 'mapped=[A-Z_]*' | head -1 | sed 's/mapped=//')
+    if [ "${mapped_code}" = "CANCELED" ]; then
+      record_leg "cancel-errorcode-observability-back" "PASS" "errorCode=${raw_code} mapped=${mapped_code} (raw log: ${reject_line})"
+    else
+      record_leg "cancel-errorcode-observability-back" "FAIL" "mapped=${mapped_code:-<none>} (expected CANCELED) errorCode=${raw_code:-<none>}; raw log: ${reject_line}"
+    fi
+  fi
+}
+
+leg_cancel() {
+  leg_cancel_negative_button
+  leg_cancel_back_key
 }
 
 # ── Leg: storage (D-24 leg 4 — no plaintext key residue) ────────────────────
+# Bounded-hex-run fix (T-49-PLAIN, 49-18). A 32-byte private key serializes to
+# exactly 64 hex characters (32*2=64) and MUST still match. The app's own 33-byte
+# compressed P-256 public key serializes to exactly 66 hex characters (33*2=66) and
+# MUST NOT — a 66-char hex run trivially CONTAINS a 64-char run, so the original
+# unbounded `{64}` pattern false-FAILs the instant a real 'deviceUser' row exists
+# (exactly the positive control the check below requires). Bounding the run on
+# BOTH sides by a non-hex character or a string boundary keeps the 64-char private
+# key matching while excluding any run that is part of a longer hex sequence.
+HEX64_BOUNDED_PATTERN='(^|[^0-9a-fA-F])[0-9a-fA-F]{64}([^0-9a-fA-F]|$)'
+
 leg_storage() {
-  local pulldir="${TMPDIR_CEREMONY}/storage"
-  mkdir -p "${pulldir}"
-  local f
-  for f in RKStorage RKStorage-wal RKStorage-shm; do
-    adb ${ADBD} shell "run-as ${PACKAGE} cat databases/${f}" > "${pulldir}/${f}" 2>/dev/null || true
-  done
+  local pulldir
+  pulldir=$(pull_storage_db)
 
   local sqlite_bin
   sqlite_bin=$(command -v sqlite3 || true)
@@ -622,7 +747,7 @@ leg_storage() {
   local rows hex_hits
   rows=$("${sqlite_bin}" "${pulldir}/RKStorage" "select count(*) from catalystLocalStorage;" 2>/dev/null || echo 0)
   hex_hits=$("${sqlite_bin}" "${pulldir}/RKStorage" \
-    "select count(*) from catalystLocalStorage where value regexp '[0-9a-fA-F]{64}';" 2>/dev/null || echo "unknown")
+    "select count(*) from catalystLocalStorage where value regexp '${HEX64_BOUNDED_PATTERN}';" 2>/dev/null || echo "unknown")
 
   echo "[ceremony] storage: ${rows} row(s) scanned in catalystLocalStorage (RKStorage + WAL/SHM pulled to ${pulldir})"
 
@@ -636,19 +761,23 @@ leg_storage() {
   fi
 
   if [ "${hex_hits}" = "unknown" ]; then
-    # regexp() UDF not available in a bare sqlite3 build — fall back to a
-    # simple grep-based scan of the dumped .dump output for a 64-hex run.
+    # regexp() UDF not available in a bare sqlite3 build — fall back to a bounded
+    # grep scan of the dumped .dump output. `-o` prints each match on its own
+    # output line so a subsequent `wc -l` counts true OCCURRENCES, not matching
+    # LINES — the original `grep -ocE` combined `-o` with `-c`, which counts
+    # matching LINES regardless of `-o` and silently under-counts any row with
+    # more than one hit.
     local grep_hits
-    grep_hits=$("${sqlite_bin}" "${pulldir}/RKStorage" ".dump" 2>/dev/null | grep -ocE '[0-9a-fA-F]{64}' || true)
+    grep_hits=$("${sqlite_bin}" "${pulldir}/RKStorage" ".dump" 2>/dev/null | grep -oE "${HEX64_BOUNDED_PATTERN}" | wc -l | tr -d ' ')
     if [ "${grep_hits}" -eq 0 ]; then
-      record_leg "storage-no-plaintext-key" "PASS" "0 rows match a 64-hex-character run (grep fallback, ${rows} rows scanned)"
+      record_leg "storage-no-plaintext-key" "PASS" "0 rows match a bounded 64-hex-character run (grep fallback, ${rows} rows scanned)"
     else
-      record_leg "storage-no-plaintext-key" "FAIL" "${grep_hits} 64-hex-character run(s) found (grep fallback)"
+      record_leg "storage-no-plaintext-key" "FAIL" "${grep_hits} bounded 64-hex-character run(s) found (grep fallback)"
     fi
   elif [ "${hex_hits}" = "0" ]; then
-    record_leg "storage-no-plaintext-key" "PASS" "0 rows match a 64-hex-character run (${rows} rows scanned)"
+    record_leg "storage-no-plaintext-key" "PASS" "0 rows match a bounded 64-hex-character run (${rows} rows scanned)"
   else
-    record_leg "storage-no-plaintext-key" "FAIL" "${hex_hits} row(s) match a 64-hex-character run"
+    record_leg "storage-no-plaintext-key" "FAIL" "${hex_hits} row(s) match a bounded 64-hex-character run"
   fi
 }
 
