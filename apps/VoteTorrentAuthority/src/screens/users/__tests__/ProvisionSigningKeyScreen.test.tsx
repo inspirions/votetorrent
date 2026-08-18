@@ -328,6 +328,17 @@ describe("ProvisionSigningKeyScreen — 49-17 first-run stage 1 (network-indepen
 			activeKeys: [{ key: POST_ATTESTATION_SIGNING_HEX }],
 		};
 		mockProvisioningRecordFixture = { recoveryPublicKeyCompressedHex: RECOVERY_HEX };
+		// Both keys already registered network-side too, so stage 2 is a full no-op — isolates
+		// this test to ONLY the stage-1 idempotency claim (stage 2's own reconciliation coverage
+		// lives in the "stage 2 reconciliation" describe block below).
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [
+				{ key: POST_ATTESTATION_SIGNING_HEX, type: "P", expiration: Date.now() },
+				{ key: RECOVERY_HEX, type: "P", expiration: Date.now() },
+			],
+		});
 
 		const tr = await renderScreen();
 		await press(tr, primaryButton(tr));
@@ -337,6 +348,7 @@ describe("ProvisionSigningKeyScreen — 49-17 first-run stage 1 (network-indepen
 		expect(nativeFake.produceAttestation).not.toHaveBeenCalled();
 		expect(mockPersistProvisionedDeviceUser).not.toHaveBeenCalled();
 		expect(mockPersistDeviceProvisioningRecord).not.toHaveBeenCalled();
+		expect(mockAddKey).not.toHaveBeenCalled();
 	});
 
 	it("(f) a CANCELED rejection during stage 1 renders no InlineError and re-enables the button", async () => {
@@ -362,6 +374,134 @@ describe("ProvisionSigningKeyScreen — 49-17 first-run stage 1 (network-indepen
 
 		const json = JSON.stringify(tr.toJSON());
 		expect(json).toContain("deviceSigningErrorLockoutPermanent");
+	});
+});
+
+describe("ProvisionSigningKeyScreen — 49-17 first-run stage 2 (reconcile against the network User)", () => {
+	// Every case here starts from an already-locally-provisioned device (stage 1 already ran on a
+	// prior visit) so only stage 2's reconciliation is under test.
+	beforeEach(() => {
+		mockDeviceUserFixture = {
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [{ key: POST_ATTESTATION_SIGNING_HEX }],
+		};
+		mockProvisioningRecordFixture = { recoveryPublicKeyCompressedHex: RECOVERY_HEX };
+	});
+
+	it("(a) signing key present, recovery missing: exactly one signed addKey call for the recovery key", async () => {
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [{ key: POST_ATTESTATION_SIGNING_HEX, type: "P", expiration: Date.now() }],
+		});
+		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: "deadbeef" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(nativeFake.provisionRecoveryKey).not.toHaveBeenCalled();
+		expect(mockAddKey).toHaveBeenCalledTimes(1);
+		const [key, sign] = mockAddKey.mock.calls[0]!;
+		expect((key as { key: string }).key).toBe(RECOVERY_HEX);
+		expect(typeof sign).toBe("function");
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningSuccessHeading");
+	});
+
+	it("(b) empty activeKeys: two addKey calls in order — bootstrap (no sign) then signed", async () => {
+		mockGetSummary.mockResolvedValue({ id: "user-1", name: "Officer One", activeKeys: [] });
+		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: "deadbeef" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(mockAddKey).toHaveBeenCalledTimes(2);
+		const [firstKey, firstSign] = mockAddKey.mock.calls[0]!;
+		expect((firstKey as { key: string }).key).toBe(POST_ATTESTATION_SIGNING_HEX);
+		expect(firstSign).toBeUndefined();
+		const [secondKey, secondSign] = mockAddKey.mock.calls[1]!;
+		expect((secondKey as { key: string }).key).toBe(RECOVERY_HEX);
+		expect(typeof secondSign).toBe("function");
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningSuccessHeading");
+	});
+
+	it("(c) both keys present: no addKey call, success renders", async () => {
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [
+				{ key: POST_ATTESTATION_SIGNING_HEX, type: "P", expiration: Date.now() },
+				{ key: RECOVERY_HEX, type: "P", expiration: Date.now() },
+			],
+		});
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(mockAddKey).not.toHaveBeenCalled();
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningSuccessHeading");
+	});
+
+	it("(d) the signed insert's signerKey is the ATTESTED signing key, never a pre-attestation value", async () => {
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [{ key: POST_ATTESTATION_SIGNING_HEX, type: "P", expiration: Date.now() }],
+		});
+		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: "deadbeef" });
+
+		let capturedSignature: { signerKey: string } | undefined;
+		mockAddKey.mockImplementationOnce(async (_key: unknown, sign?: (d: Uint8Array) => Promise<unknown>) => {
+			if (sign) capturedSignature = (await sign(new Uint8Array([1, 2, 3]))) as { signerKey: string };
+		});
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(capturedSignature?.signerKey).toBe(POST_ATTESTATION_SIGNING_HEX);
+		expect(capturedSignature?.signerKey).not.toBe(PRE_ATTESTATION_SIGNING_HEX);
+	});
+
+	it("(e) a fresh user engine is resolved between the two writes — getCurrentUser called at least twice", async () => {
+		mockGetSummary.mockResolvedValue({ id: "user-1", name: "Officer One", activeKeys: [] });
+		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: "deadbeef" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(mockGetCurrentUser.mock.calls.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("(f) never re-calls provisionRecoveryKey on a return visit", async () => {
+		mockGetSummary.mockResolvedValue({ id: "user-1", name: "Officer One", activeKeys: [] });
+		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: "deadbeef" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(nativeFake.provisionRecoveryKey).not.toHaveBeenCalled();
+	});
+
+	it("(g) a cancellation raised by signWithDeviceKey returns silently to idle, no InlineError, local record intact", async () => {
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [{ key: POST_ATTESTATION_SIGNING_HEX, type: "P", expiration: Date.now() }],
+		});
+		nativeFake.signWithDeviceKey.mockRejectedValue(Object.assign(new Error("canceled"), { code: "CANCELED" }));
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).not.toContain("deviceSigningError");
+		expect(mockPersistProvisionedDeviceUser).not.toHaveBeenCalled();
+		expect(mockPersistDeviceProvisioningRecord).not.toHaveBeenCalled();
 	});
 });
 
@@ -414,6 +554,31 @@ describe("ProvisionSigningKeyScreen — 49-10 recovery variant (D-16) and D-18 t
 
 		const json = JSON.stringify(tr.toJSON());
 		expect(json).toContain("signingKeyProvisioningSuccessHeading");
+	});
+
+	it("(c) refreshes the provisioning record with the new attested key and an EMPTY certificateChainBase64 — no produceAttestation on this path", async () => {
+		nativeFake.provisionDeviceKey.mockResolvedValue({
+			publicKeyBase64: "NEW-SIGNING-SPKI-DER-BASE64",
+			publicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+		});
+		nativeFake.provisionRecoveryKey.mockResolvedValue({
+			publicKeyBase64: "RECOVERY-SPKI-DER-BASE64",
+			publicKeyCompressedHex: RECOVERY_KEY_HEX,
+		});
+		nativeFake.signWithRecoveryKey.mockResolvedValue({ signatureHex: "cafebabe" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(nativeFake.produceAttestation).not.toHaveBeenCalled();
+		expect(mockPersistDeviceProvisioningRecord).toHaveBeenCalledWith(
+			expect.objectContaining({
+				recoveryPublicKeyCompressedHex: RECOVERY_KEY_HEX,
+				attestedPublicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+				signingKeyAlias: "VOTETORRENT_AUTHORITY_SIGNING_KEY_V1",
+				certificateChainBase64: [],
+			}),
+		);
 	});
 
 	it("(b) a NO_DEVICE_CREDENTIAL rejection renders the no-recovery heading/body and ZERO buttons", async () => {

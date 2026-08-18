@@ -275,18 +275,60 @@ export default function ProvisionSigningKeyScreen() {
 			// Stage 2 (network-scoped): register whichever keys the network `User` is still
 			// missing. Skipped entirely — landing on the awaiting-network state — when no network
 			// `User` resolves yet (the officer provisioned before creating or joining a network).
-			// TASK 1 SCOPE ENDS HERE: this landed the awaiting-network branch and stage 1's local
-			// ceremony. The reconciliation write-set (49-17 Task 2) fills in below.
 			const networkUserEngine = await tryResolveNetworkUserEngine();
 			if (networkUserEngine === undefined) {
 				setPhase("awaiting-network");
 				return;
 			}
-			// `attestedKeyHex`/`recoveryKeyHex` are consumed by Task 2's reconciliation writes,
-			// landing next in this same plan — referenced here so they are not unused locals in
-			// this intermediate state.
-			void attestedKeyHex;
-			void recoveryKeyHex;
+
+			// Reconcile, do not re-insert: read the network User's CURRENT key set and register
+			// only what is missing. `networks-engine.create()`'s own bootstrap branch already
+			// writes the founding UserKey from `activeKeys[0]` on the create-network path, so a
+			// blind unconditional insert here would violate UserKey.InsertValid's bootstrap
+			// uniqueness guard on that path — this check is what makes a return visit to this
+			// screen safe on either the create-network or join-network path.
+			const summary = await networkUserEngine.getSummary();
+			const existingKeys = new Set((summary?.activeKeys ?? []).map((k) => k.key));
+			const expiration = Date.now() + TEN_YEARS_MS;
+
+			if (!existingKeys.has(attestedKeyHex)) {
+				// The first-key bootstrap branch: no signature required, ONLY legal when this is
+				// genuinely the user's first key (the join-network path, where no bootstrap write
+				// has happened yet). `networks-engine.create()` already exercises this branch on
+				// the create-network path.
+				await networkUserEngine.addKey({ key: attestedKeyHex, type: UserKeyType.p256, expiration });
+			}
+
+			if (!existingKeys.has(recoveryKeyHex)) {
+				// The signed recovery-key insert is the ONLY write in the whole first-run flow
+				// that exercises the in-schema P-256 `SignatureValid` CHECK end to end (D-24 leg
+				// 1's second sub-claim), and its `BiometricPrompt` is a genuine post-provisioning
+				// per-use prompt (D-24 leg 1's third sub-claim). A fresh engine is re-resolved here
+				// (never the `networkUserEngine` local above) so `context.UserKey` binds against
+				// the key set as it stands right now — including the bootstrap add just above, if
+				// one happened — never a stale snapshot (see `resolveFreshUserEngine`'s doc
+				// comment). Public values are sourced from local state, never a fresh native call:
+				// calling `provisionRecoveryKey` again here would regenerate that alias and
+				// invalidate the value the network may already hold.
+				const freshEngine = await resolveFreshUserEngine();
+				await freshEngine.addKey(
+					{ key: recoveryKeyHex, type: UserKeyType.p256, expiration },
+					async (digest: Uint8Array): Promise<Signature> => {
+						const result = (await native.signWithDeviceKey(
+							SIGNING_KEY_ALIAS,
+							base64FromDigestBytes(digest),
+							t("deviceSigningPromptTitle"),
+							t("signingKeyProvisioningPromptSubtitle"),
+							t("deviceSigningPromptNegativeButton"),
+						)) as { signatureHex: string };
+						return {
+							signerUserId: summary?.id ?? "",
+							signerKey: attestedKeyHex,
+							signature: result.signatureHex,
+						};
+					},
+				);
+			}
 
 			setPhase("success");
 		} catch (err) {
@@ -368,6 +410,19 @@ export default function ProvisionSigningKeyScreen() {
 			// Update the persisted local device identity so activeKeys[0] is the replacement key.
 			const displayName = beforeSummary?.name ?? "Device User";
 			await persistProvisionedDeviceUser(displayName, deviceKey.publicKeyCompressedHex);
+
+			// Refresh the 49-16 provisioning record so it never keeps pointing at the previous
+			// (now-invalidated) attested key. `certificateChainBase64` is set to an empty array —
+			// this ceremony calls no `produceAttestation`, so an empty chain is the truthful record
+			// that no chain attests this replacement key; carrying the stale chain forward would be
+			// a repudiation hazard (T-49-RECOV).
+			await persistDeviceProvisioningRecord({
+				recoveryPublicKeyCompressedHex: recoveryKey.publicKeyCompressedHex,
+				attestedPublicKeyCompressedHex: deviceKey.publicKeyCompressedHex,
+				signingKeyAlias: SIGNING_KEY_ALIAS,
+				certificateChainBase64: [],
+				capturedAt: Date.now(),
+			});
 
 			setPhase("success");
 		} catch (err) {
