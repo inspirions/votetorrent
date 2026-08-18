@@ -131,8 +131,23 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 			keyAlias = keyAlias,
 			attestationChallengeBytes = challengeBytes,
 			activity = activity,
-			onResult = { certificateChainBase64 ->
-				finishWithPlayIntegrity(certificateChainBase64, boundDigest, enablePlayIntegrity, promise)
+			onResult = onResult@{ certificateChainBase64 ->
+				// Gap A prerequisite (49-15, D-04/D-08) — regenerateAttested's onResult fires only
+				// AFTER the alias has been deleted+regenerated and the biometric satisfied, so the
+				// alias holds the attested key at exactly this moment. Resolve its public value here,
+				// not from the discarded provisionDeviceKey-time key.
+				val publicKeyCompressedHex: String
+				try {
+					publicKeyCompressedHex = keyAttestationHelper.exportPublicKeyCompressedHex(keyAlias)
+				} catch (e: Exception) {
+					// Fail closed rather than resolve a partial map — an undefined public key in JS
+					// would register a bogus UserKey.PubKey that verify() then fails closed AND
+					// silently against (swallowed exception -> false), the exact shape this phase
+					// exists to eliminate.
+					promise.reject("KEY_ATTESTATION_FAILED", e)
+					return@onResult
+				}
+				finishWithPlayIntegrity(certificateChainBase64, publicKeyCompressedHex, boundDigest, enablePlayIntegrity, promise)
 			},
 			onKeyInvalidatedReassociate = {
 				// D-13 — biometric enrollment changed since key creation; KeyAttestationHelper
@@ -247,6 +262,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 	 */
 	private fun finishWithPlayIntegrity(
 		certificateChainBase64: List<String>,
+		publicKeyCompressedHex: String,
 		boundDigest: String,
 		enablePlayIntegrity: Boolean,
 		promise: Promise,
@@ -263,6 +279,10 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 					putString("integrityToken", integrityToken)
 					putString("androidId", androidId)
 					putDouble("attestationTimeMillis", System.currentTimeMillis().toDouble())
+					// Gap A prerequisite (49-15, D-04/D-08) — the POST-regeneration public key;
+					// see produceAttestation's onResult lambda for why this must be exported here
+					// rather than reused from provisionDeviceKey's earlier resolution.
+					putString("publicKeyCompressedHex", publicKeyCompressedHex)
 				})
 			},
 			onError = { e ->

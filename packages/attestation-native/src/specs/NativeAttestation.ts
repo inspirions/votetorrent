@@ -58,7 +58,19 @@ export interface Spec extends TurboModule {
 	 * UTF-8 bytes of that same string (the Keystore `setAttestationChallenge` payload
 	 * — an intentional asymmetry, see `packages/vote-engine/ATTESTATION-CONTRACT.md`).
 	 * `enablePlayIntegrity` independently gates the Play Integrity Classic leg (D-12).
-	 * Resolves the attestation result map (cert chain + optional integrity token).
+	 * Resolves `{ certificateChainBase64, integrityToken, androidId,
+	 * attestationTimeMillis, publicKeyCompressedHex }` — the last field (49-15, D-04/
+	 * D-08) is the 33-byte compressed SEC1 point, hex-encoded, of the key ACTUALLY
+	 * present under `keyAlias` after this call's delete-and-regenerate cycle. This is
+	 * the **post-regeneration** key: `provisionDeviceKey`'s `publicKeyCompressedHex` is
+	 * invalidated by a subsequent `produceAttestation` call on the same alias (the
+	 * native side deletes and regenerates the alias with a fresh key pair — see
+	 * `KeyAttestationHelper`'s class doc comment). Any caller registering a
+	 * `UserKey.PubKey` after calling `produceAttestation` MUST use this field's value,
+	 * not the earlier `provisionDeviceKey` one — the discarded key would attribute
+	 * every subsequent signature to a `signerKey` that did not produce it, and
+	 * `verify()` swallows exceptions and returns `false`, so it fails closed and
+	 * silently.
 	 * Scaffold (45-01): rejects with a NOT_IMPLEMENTED-class code — no real
 	 * attestation logic yet (lands in 45-02).
 	 */
@@ -95,9 +107,11 @@ export interface Spec extends TurboModule {
 	 * only the subtitle varies (see `49-UI-SPEC.md` §"Native BiometricPrompt string
 	 * contract").
 	 *
-	 * Rejects with one of the typed codes: `CANCELED`, `NO_BIOMETRICS_ENROLLED`,
-	 * `LOCKOUT`, `LOCKOUT_PERMANENT`, `BIOMETRIC_ERROR`, `KEY_INVALIDATED_REASSOCIATE`,
-	 * `NO_KEY_PROVISIONED`, `NO_ACTIVITY`, `INVALID_DIGEST_ENCODING`.
+	 * Rejects with one of the typed codes: `CANCELED` (native
+	 * `ERROR_CANCELED`/`ERROR_USER_CANCELED`/`ERROR_NEGATIVE_BUTTON` all map here — 49-15/
+	 * Gap B), `NO_BIOMETRICS_ENROLLED`, `LOCKOUT`, `LOCKOUT_PERMANENT`, `BIOMETRIC_ERROR`,
+	 * `KEY_INVALIDATED_REASSOCIATE`, `NO_KEY_PROVISIONED`, `NO_ACTIVITY`,
+	 * `INVALID_DIGEST_ENCODING`.
 	 */
 	signWithDeviceKey(
 		keyAlias: string,

@@ -786,6 +786,26 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	}
 
 	/**
+	 * Gap A prerequisite (49-15, D-04/D-08) — reads the certificate CURRENTLY stored under
+	 * [keyAlias] and returns its public key as a 33-byte compressed SEC1 point, hex-encoded. This
+	 * is the value a caller MUST register after [regenerateAttested] runs, because that function
+	 * deletes and regenerates the alias with a fresh key pair — this helper's own class doc comment
+	 * already states that "the regenerated leaf's public key differs from the provision-time key".
+	 * Reuses [spkiToCompressedPointHex] (no second DER parser is introduced): the public key's
+	 * X.509 `encoded` form IS the same SubjectPublicKeyInfo shape that function already parses.
+	 * Same fail-loud posture as [signWithDeviceKey]'s `NO_KEY_PROVISIONED` pre-check — never a
+	 * null/empty-string sentinel on a missing alias.
+	 */
+	fun exportPublicKeyCompressedHex(keyAlias: String): String {
+		if (!keyStore.containsAlias(keyAlias)) {
+			throw IllegalStateException("no key provisioned under alias $keyAlias")
+		}
+		val certificate = keyStore.getCertificate(keyAlias)
+			?: throw IllegalStateException("no certificate for alias $keyAlias")
+		return spkiToCompressedPointHex(certificate.publicKey.encoded)
+	}
+
+	/**
 	 * Shared keygen core for both the placeholder-provision (1) and attested-regeneration (2)
 	 * paths — StrongBox->TEE->(debug-only)stub rungs (D-07). [attestationChallenge] null means
 	 * "placeholder" (Open Q1's provision-time call, no real challenge yet); a non-null array is
