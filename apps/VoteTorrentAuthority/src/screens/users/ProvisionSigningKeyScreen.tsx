@@ -378,6 +378,16 @@ export default function ProvisionSigningKeyScreen() {
 
 			setPhase("success");
 		} catch (err) {
+			// T-49-USER-7 (deviceSigningError.ts:117-118) — the same generic
+			// deviceSigningErrorGeneric copy handleRecovery's catch below warns about applies here
+			// too, and this screen's own `addKey` call above is one of the three distinct real
+			// faults that copy masked in this one real-hardware session (49-14 follow-up ceremony,
+			// 2026-08-18): a rejected `SignatureValid` CHECK, alongside the desync-detection
+			// `SignatureValid` failure and the `revokeKey` `DeleteValid` rejection seen in
+			// handleRecovery below. In every case biometric authentication had already succeeded —
+			// the classified copy alone gave no way to tell that apart from a real engine/schema
+			// rejection. Logging the raw value first is what made any of them diagnosable.
+			console.warn("ProvisionSigningKeyScreen handleFirstRun ceremony failed:", err);
 			handleCeremonyError(err);
 		}
 	}
