@@ -348,30 +348,66 @@ dump_ui() {
   echo "${out}"
 }
 
+# _find_nondegenerate_bounds ATTR LABEL DUMP_FILE — case-insensitive substring match
+# against the given XML attribute (`text` or `content-desc`), returning the FIRST
+# bounds value among all matching nodes that is NOT the degenerate "[0,0][0,0]" sentinel.
+# Bracket-expression note (real bug, found and fixed during 49-13 Task 2):
+# POSIX bracket expressions (`[...]`) do NOT support backslash-escaping — `\[`/`\]`
+# INSIDE a `[...]` class are literal backslash-then-bracket, not an escaped bracket.
+# `[0-9,\[\]]` under BSD/POSIX grep (the actual interpreter this script runs under,
+# confirmed via `grep --version` -> "BSD grep, GNU compatible" — NOT the same grep some
+# interactive dev shells alias) therefore closes the class early at the first literal
+# `]` and silently fails to match every real `bounds="[x1,y1][x2,y2]"` value, making
+# every match fail 100% of the time despite the target text being genuinely present
+# (observed: 12/12 identical false failures against a real, static, already-rendered
+# dump — not a timing issue). `[][0-9,]` is the POSIX-safe form: placing `]`
+# immediately after the opening `[` makes it a literal member of the class instead of
+# closing it.
+_find_nondegenerate_bounds() {
+  local attr="$1" label="$2" dump="$3"
+  local candidates b
+  # 49-14 pipefail note (same bug class as commit 6f1aff2): under this script's
+  # `set -euo pipefail`, an EMPTY match at either grep stage makes the whole pipeline
+  # exit non-zero (pipefail propagates ANY stage's failure, not only the trailing
+  # command's) even though `sed` itself would happily process zero lines — guard with
+  # `|| true` so "no match" degrades to an empty `candidates`, handled below, instead
+  # of aborting the script.
+  candidates=$(grep -io "${attr}=\"[^\"]*${label}[^\"]*\"[^>]*bounds=\"[][0-9,]*\"" "${dump}" \
+    | grep -o 'bounds="[][0-9,]*"' | sed 's/bounds="//;s/"//' || true)
+  while IFS= read -r b; do
+    [ -z "${b}" ] && continue
+    if [ "${b}" != "[0,0][0,0]" ]; then
+      printf '%s\n' "${b}"
+      return 0
+    fi
+  done <<< "${candidates}"
+  return 1
+}
+
 # tap_on_text LABEL DUMP_FILE — case-insensitive substring match against
 # `text=` attributes; taps the matched node's bounds center. Fails loudly
 # (non-zero return, no tap) rather than silently skipping when no node
 # matches — CustomButton uppercases its rendered title, so this matches
 # case-insensitively by design.
+#
+# MIUI fallback (49-14 follow-up session, Redmi 8 finding): this device's bottom
+# tab-bar/button `TextView` labels report `bounds="[0,0][0,0]"` in a uiautomator
+# dump — their icon/text pairing collapses to a zero-size label under MIUI's layout,
+# unlike Samsung. The actually-tappable element is the parent `ViewGroup`, which
+# carries a real `content-desc` (matching the same label text) and correct bounds
+# (confirmed via direct on-device XML inspection, 49-14-PROOF-LOG.md). Rather than
+# walking the XML tree (this script has no XML parser), first look for ANY `text=`
+# match with non-degenerate bounds (Samsung's existing, unregressed path — a device
+# whose FIRST text match is already non-degenerate takes the exact same bounds as
+# before this fix); only if every `text=` match is degenerate (or absent) does this
+# fall back to a `content-desc=` match with non-degenerate bounds.
 tap_on_text() {
   local label="$1" dump="$2"
   local bounds
-  # Bracket-expression note (real bug, found and fixed during 49-13 Task 2):
-  # POSIX bracket expressions (`[...]`) do NOT support backslash-escaping —
-  # `\[`/`\]` INSIDE a `[...]` class are literal backslash-then-bracket, not
-  # an escaped bracket. `[0-9,\[\]]` under BSD/POSIX grep (the actual
-  # interpreter this script runs under, confirmed via `grep --version` ->
-  # "BSD grep, GNU compatible" — NOT the same grep some interactive dev
-  # shells alias) therefore closes the class early at the first literal `]`
-  # and silently fails to match every real `bounds="[x1,y1][x2,y2]"` value,
-  # making every tap_on_text call fail 100% of the time despite the target
-  # text being genuinely present (observed: 12/12 identical false failures
-  # against a real, static, already-rendered dump — not a timing issue).
-  # `[][0-9,]` is the POSIX-safe form: placing `]` immediately after the
-  # opening `[` makes it a literal member of the class instead of closing
-  # it.
-  bounds=$(grep -io "text=\"[^\"]*${label}[^\"]*\"[^>]*bounds=\"[][0-9,]*\"" "${dump}" \
-    | grep -o 'bounds="[][0-9,]*"' | head -1 | sed 's/bounds="//;s/"//')
+  bounds=$(_find_nondegenerate_bounds "text" "${label}" "${dump}" || true)
+  if [ -z "${bounds}" ]; then
+    bounds=$(_find_nondegenerate_bounds "content-desc" "${label}" "${dump}" || true)
+  fi
   if [ -z "${bounds}" ]; then
     return 1
   fi
