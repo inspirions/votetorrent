@@ -43,11 +43,54 @@ import { UserKeyType } from '@votetorrent/vote-core'
 /** AsyncStorage key under which `{ user: User }` is persisted (no key material, Phase 49). */
 export const DEVICE_USER_KEY = 'deviceUser'
 
+/**
+ * AsyncStorage key under which the device provisioning record (49-16) is persisted — a SIBLING
+ * key to `DEVICE_USER_KEY`, never a field folded into that blob. See
+ * `DeviceProvisioningRecord`'s doc comment for why.
+ */
+export const DEVICE_PROVISIONING_KEY = 'deviceSigningProvisioning'
+
 /** Ten years in milliseconds — expiration epoch for the provisioned device key. */
 const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000
 
 interface StoredDeviceUser {
 	user: User
+}
+
+/**
+ * The device-local provisioning artifact captured at the end of a completed 49-04
+ * `provisionDeviceKey` ceremony (49-16, D-08/D-15b).
+ *
+ * **Why this is a separate AsyncStorage key, not extra fields on `deviceUser`:** two consumers
+ * constrain the `deviceUser` blob's shape today — `device-signer.ts` reads
+ * `user.activeKeys[0].key` as the `signerKey` it attributes every signature to, and
+ * `networks-engine.create()` (`packages/vote-engine/src/networks/networks-engine.ts`) reads
+ * `user.activeKeys?.[0]` as the founding `UserKey` it writes through its bootstrap branch.
+ * Putting the recovery key into `activeKeys[1]` would be invisible to both today and a live
+ * hazard the moment either starts iterating over `activeKeys`; putting a cert chain inside the
+ * `User` object would change the shape those two read. A sibling key costs nothing and keeps
+ * both invariants provable.
+ *
+ * **What this is for:** `certificateChainBase64` is the **D-08/D-15b artifact** — captured but
+ * unconsumed by any verifier in this phase, persisted so that D-15b's "leaf + intermediates, no
+ * root" shape claim has something on disk to inspect at all (49-13 recorded D-15b as
+ * NOT-EXERCISED precisely because nothing was ever written).
+ *
+ * **T-49-PLAIN:** every field here is PUBLIC certificate/key material. This record must never
+ * carry a private key, a raw signature, or any other secret — only compressed public keys and
+ * base64-encoded certificate bytes.
+ */
+export interface DeviceProvisioningRecord {
+	/** Compressed SEC1 public key (hex) of the device's D-16 recovery key. */
+	recoveryPublicKeyCompressedHex: string
+	/** Compressed SEC1 public key (hex) of the attested signing key — public material only. */
+	attestedPublicKeyCompressedHex: string
+	/** The stable Keystore alias the attested key was generated under. */
+	signingKeyAlias: string
+	/** Leaf + intermediate certs (base64 DER), no root — the D-08/D-15b shape claim. */
+	certificateChainBase64: string[]
+	/** `Date.now()` at capture time. */
+	capturedAt: number
 }
 
 /**
@@ -117,8 +160,11 @@ export async function persistProvisionedDeviceUser(
  * silently at boot or from an arbitrary screen — the exact silent-plaintext-generation behavior
  * this plan removes. On an already-provisioned device (including one carrying a pre-Phase-49
  * raw-key blob) this is equivalent to `getDeviceUser()`. On a genuinely unprovisioned device it
- * throws, surfacing through each call site's existing error handling (e.g. `AppProvider.tsx`'s
- * re-attach `catch` -> `setInitError`).
+ * rejects with a `code: 'NO_KEY_PROVISIONED'`-tagged error (49-16) — the same code
+ * `device-signer.ts` attaches for the identical condition — so this is now a ROUTABLE
+ * condition: `isDeviceSigningError` recognizes it, and call sites (e.g. `AddNetworkScreen`,
+ * 49-16) route it through the shared `useDeviceSigningErrorHandler` hook to the provisioning
+ * screen rather than falling through to raw-message handling.
  *
  * This is a deliberate, temporary consequence of D-12/D-14, not a bug: until 49-10 lands the
  * provisioning screen, a genuinely fresh install cannot proceed past a call site that needs a
@@ -128,10 +174,34 @@ export async function persistProvisionedDeviceUser(
 export async function getOrCreateDeviceUser(displayName: string): Promise<User> {
 	const user = await getDeviceUser()
 	if (user) return user
-	throw new Error(
+	const err = new Error(
 		`getOrCreateDeviceUser: no device signing key provisioned for "${displayName}" — hardware ` +
 			'key provisioning requires the biometric ProvisionSigningKeyScreen ceremony (D-14).',
-	)
+	) as Error & { code: string }
+	err.code = 'NO_KEY_PROVISIONED'
+	throw err
+}
+
+/**
+ * Persist the device provisioning record captured at the end of a completed 49-04
+ * `provisionDeviceKey` ceremony (D-08/D-15b). Pure persistence: no native calls, no key
+ * generation, no derivation. See `DeviceProvisioningRecord`'s doc comment for the shape contract
+ * and why this lives under its own AsyncStorage key rather than on `deviceUser`.
+ */
+export async function persistDeviceProvisioningRecord(
+	record: DeviceProvisioningRecord,
+): Promise<void> {
+	await AsyncStorage.setItem(DEVICE_PROVISIONING_KEY, JSON.stringify(record))
+}
+
+/**
+ * Read the device provisioning record, or `undefined` if none has ever been written. Pure
+ * persistence — no native calls.
+ */
+export async function getDeviceProvisioningRecord(): Promise<DeviceProvisioningRecord | undefined> {
+	const stored = await AsyncStorage.getItem(DEVICE_PROVISIONING_KEY)
+	if (stored === null) return undefined
+	return JSON.parse(stored) as DeviceProvisioningRecord
 }
 
 /**

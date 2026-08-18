@@ -77,6 +77,10 @@ describe('D-12 source-shape guard: dev-only-key-gen.ts is reachable only via a _
 			path.relative(SRC_ROOT, DEVICE_USER_PATH),
 			path.relative(SRC_ROOT, DEV_ONLY_KEY_GEN_PATH),
 			path.relative(SRC_ROOT, path.join(__dirname, 'dev-only-key-gen.releaseGuard.test.ts')),
+			// 49-16: this suite's own D-12 boundary re-check duplicates this guard's assertion, so
+			// it necessarily contains the literal string too — an intentional second witness, not a
+			// violation.
+			path.relative(SRC_ROOT, path.join(__dirname, 'device-user.provisioning.test.ts')),
 		]);
 		const unexpected = files.filter((f) => !allowed.has(f));
 		expect(unexpected).toEqual([]);
