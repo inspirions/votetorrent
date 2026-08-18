@@ -8,10 +8,29 @@
 #           site) on a booted emulator to observe the facts jest cannot see:
 #           a real BiometricPrompt sheet, a real Keystore-backed P-256
 #           signature accepted by the in-schema SignatureValid CHECK, clean
-#           cancellation, and no plaintext key residue in AsyncStorage.
+#           cancellation (both the negative button AND the BACK key), and no
+#           plaintext key residue in AsyncStorage.
 #
 # Usage   : SERIAL=emulator-5554 ./scripts/run-authority-signing-ceremony.sh <leg>
-#           <leg> one of: provision | sign | cancel | storage | all
+#           <leg> one of: provision-local | provision-register | sign | cancel | storage | all
+#           `provision` is accepted as a deprecated alias for `provision-local`.
+#
+#           49-18 (Gap A's runtime proof vehicle): the onboarding order 49-16/49-17
+#           landed splits provisioning into two network-independent/network-scoped
+#           halves that cannot both complete in one pass on a clean device.
+#           `provision-local` drives the local ceremony from a `pm clear` start and
+#           lands on the awaiting-network state. Between `provision-local` and
+#           `provision-register` there is a REQUIRED, NOT-AUTOMATED operator step:
+#           create or join a network through the real in-app `AddNetworkScreen` flow.
+#           This script deliberately does not drive that screen — it is a six-field
+#           RN form, and this project has recorded that RN TextInputs resist `adb`
+#           taps and report `text=""` to uiautomator, and that `adb input text`
+#           containing two `r` characters triggers an RN reload. Driving it blind
+#           would produce false failures indistinguishable from real ones.
+#           `provision-register` then drives the network-scoped registration half
+#           and asserts the success heading. `all` runs `provision-local`, `cancel`,
+#           and `storage` only; `provision-register` is recorded NOT-EXERCISED under
+#           `all` (it requires the operator-created network precondition above).
 #
 # Prereqs : adb on PATH; a booted EMULATOR (not a real device — this script's
 #           fingerprint injection is emulator-only) with the debug app already
@@ -36,10 +55,14 @@ PROMPT_TIMEOUT=20
 VERDICT_TIMEOUT=60
 
 LEG="${1:-}"
+if [ "${LEG}" = "provision" ]; then
+  echo "[ceremony] NOTE: leg 'provision' is a deprecated alias — the split onboarding order (49-16/49-17) means it now runs 'provision-local'. Use 'provision-local' directly going forward." >&2
+  LEG="provision-local"
+fi
 case "${LEG}" in
-  provision|sign|cancel|storage|all) ;;
+  provision-local|provision-register|sign|cancel|storage|all) ;;
   *)
-    echo "Usage: SERIAL=emulator-5554 $0 <provision|sign|cancel|storage|all>" >&2
+    echo "Usage: SERIAL=emulator-5554 $0 <provision-local|provision-register|sign|cancel|storage|all>" >&2
     exit 1
     ;;
 esac
@@ -48,6 +71,7 @@ esac
 STR_SETTINGS_ROW="Secure Signing"
 STR_SETUP_BUTTON="Set Up Secure Signing"
 STR_SUCCESS_HEADING="Signing key ready"
+STR_AWAITING_NETWORK_HEADING="Secure signing is set up on this device"
 STR_PROMPT_TITLE="Confirm your identity"
 STR_NEGATIVE_BUTTON="Cancel"
 STR_ERROR_STRINGS=(
@@ -299,8 +323,29 @@ navigate_to_settings() {
   return 1
 }
 
-# ── Leg: provision (D-24 leg 1) ──────────────────────────────────────────────
-leg_provision() {
+# pull_storage_db — pulls RKStorage + its WAL/SHM sidecars into a fresh scratch dir and
+# echoes the dir path. Shared by provision-local's on-disk artifact assertions and
+# leg_storage — both read the same AsyncStorage-backed sqlite file via `run-as`.
+pull_storage_db() {
+  local pulldir="${TMPDIR_CEREMONY}/storage-$$-${RANDOM}"
+  mkdir -p "${pulldir}"
+  local f
+  for f in RKStorage RKStorage-wal RKStorage-shm; do
+    adb ${ADBD} shell "run-as ${PACKAGE} cat databases/${f}" > "${pulldir}/${f}" 2>/dev/null || true
+  done
+  echo "${pulldir}"
+}
+
+# ── Leg: provision-local (D-24 leg 1, network-independent half — 49-18 / Gap A) ──
+# The clean-device half of the split ceremony (see header comment). Keeps 49-13's
+# sequence verbatim up through the fingerprint injection and no-spki-error check —
+# every one of those sub-legs PASSed in 49-13 and keeps its exact record_leg name so
+# the two proof logs stay comparable. The terminal assertion changes: under the
+# 49-16/49-17 onboarding order this ceremony lands on the awaiting-network state, not
+# the success heading (that is provision-register's job, after an operator-created
+# network exists) — plus two on-disk artifact assertions the empty pre-49-16/49-17
+# store could never establish.
+provision_local() {
   reset_identity
   launch_app
 
@@ -364,11 +409,120 @@ leg_provision() {
     record_leg "provision-no-spki-error" "PASS" "no INVALID_DIGEST_ENCODING/NO_KEY_PROVISIONED/SPKI error observed"
   fi
 
+  # 49-18 (Gap A's runtime proof vehicle): the local ceremony is network-independent
+  # by design and now terminates on the awaiting-network landing, not the success
+  # heading — the network User's UserKey registration is provision-register's job,
+  # on a later run against an operator-created network.
+  dump=$(dump_ui)
+  if text_present "${STR_AWAITING_NETWORK_HEADING}" "${dump}"; then
+    record_leg "provision-local-awaiting-network" "PASS" "signingKeyProvisioningAwaitingNetworkHeading ('${STR_AWAITING_NETWORK_HEADING}') present — local stage 1 completed on a genuinely network-less device"
+  else
+    record_leg "provision-local-awaiting-network" "FAIL" "signingKeyProvisioningAwaitingNetworkHeading NOT present after satisfying the prompt on a network-less device"
+    return
+  fi
+
+  # Artifact 1 — D-24 leg 4's positive control, unreachable in 49-13 (the store was
+  # always empty). A real 'deviceUser' row must now exist.
+  local pulldir sqlite_bin
+  pulldir=$(pull_storage_db)
+  sqlite_bin=$(command -v sqlite3 || true)
+  if [ -z "${sqlite_bin}" ]; then
+    record_leg "provision-local-device-user-row" "FAIL" "no host sqlite3 available to inspect the pulled RKStorage files"
+    record_leg "provision-local-attestation-chain" "FAIL" "no host sqlite3 available to inspect the pulled RKStorage files"
+    return
+  fi
+
+  local device_user_present
+  device_user_present=$("${sqlite_bin}" "${pulldir}/RKStorage" \
+    "select count(*) from catalystLocalStorage where key = 'deviceUser';" 2>/dev/null || echo 0)
+  if [ "${device_user_present}" = "0" ]; then
+    record_leg "provision-local-device-user-row" "FAIL" "no 'deviceUser' row present after local ceremony completion"
+  else
+    record_leg "provision-local-device-user-row" "PASS" "'deviceUser' row present — D-24 leg 4's positive control, unreachable in 49-13"
+  fi
+
+  # Artifact 2 — D-15b's chain-shape claim, NOT-EXERCISED in 49-13 because nothing
+  # was ever persisted. The deviceSigningProvisioning record's certificateChainBase64
+  # array must exist and be non-empty; record its element count as evidence.
+  local provisioning_value chain_array chain_count
+  provisioning_value=$("${sqlite_bin}" "${pulldir}/RKStorage" \
+    "select value from catalystLocalStorage where key = 'deviceSigningProvisioning' limit 1;" 2>/dev/null || true)
+  if [ -z "${provisioning_value}" ]; then
+    record_leg "provision-local-attestation-chain" "FAIL" "no 'deviceSigningProvisioning' row present after local ceremony completion"
+  else
+    chain_array=$(echo "${provisioning_value}" | grep -o '"certificateChainBase64":\[[^]]*\]' || true)
+    if [ -z "${chain_array}" ] || [ "${chain_array}" = '"certificateChainBase64":[]' ]; then
+      record_leg "provision-local-attestation-chain" "FAIL" "'deviceSigningProvisioning' row present but certificateChainBase64 is empty or missing"
+    else
+      chain_count=$(( $(echo "${chain_array}" | grep -o ',' | wc -l | tr -d ' ') + 1 ))
+      record_leg "provision-local-attestation-chain" "PASS" "certificateChainBase64 present with ${chain_count} element(s) — D-15b's leaf+intermediates shape, first exercised this session"
+    fi
+  fi
+}
+
+# ── Leg: provision-register (D-24 leg 1, network-scoped half — 49-18 / Gap A) ────
+# Deliberately does NOT clear this device's app data first — its whole precondition
+# is a device that already carries a local provisioning record (provision-local)
+# AND a network created/joined through the real in-app flow since. Wiping the
+# identity here would destroy exactly what this leg depends on. See the header
+# comment for why the network-creation step is an explicit, printed operator
+# interlude rather than an automated one.
+provision_register() {
+  echo "[ceremony] 'provision-register' precondition (operator-driven, NOT automated by this script):" >&2
+  echo "[ceremony]   1. 'provision-local' has already completed on this device (deviceUser + deviceSigningProvisioning rows exist)." >&2
+  echo "[ceremony]   2. A network has SINCE been created or joined through the real in-app AddNetworkScreen flow." >&2
+  echo "[ceremony]   This script does not automate network creation — see the header comment." >&2
+
+  local pulldir sqlite_bin device_user_present
+  pulldir=$(pull_storage_db)
+  sqlite_bin=$(command -v sqlite3 || true)
+  if [ -z "${sqlite_bin}" ]; then
+    record_leg "provision-register-precondition" "FAIL" "no host sqlite3 available to verify the 'deviceUser' precondition row"
+    return
+  fi
+  device_user_present=$("${sqlite_bin}" "${pulldir}/RKStorage" \
+    "select count(*) from catalystLocalStorage where key = 'deviceUser';" 2>/dev/null || echo 0)
+  if [ "${device_user_present}" = "0" ]; then
+    record_leg "provision-register-precondition" "FAIL" "no 'deviceUser' row on this device — run 'provision-local' first; running 'provision-register' on an unprovisioned device would produce a meaningless verdict"
+    return
+  fi
+
+  launch_app
+  if ! navigate_to_settings; then
+    record_leg "provision-register-settings-nav" "FAIL" "Settings tab control not found"
+    return
+  fi
+
+  local dump
+  dump=$(dump_ui)
+  if ! tap_on_text "${STR_SETTINGS_ROW}" "${dump}"; then
+    record_leg "provision-register-settings-nav" "FAIL" "could not tap '${STR_SETTINGS_ROW}' row"
+    return
+  fi
+  sleep 2
+
+  adb ${ADBD} logcat -c
+  dump=$(dump_ui)
+  if ! tap_on_text "${STR_SETUP_BUTTON}" "${dump}"; then
+    record_leg "provision-register-setup-tap" "FAIL" "could not tap '${STR_SETUP_BUTTON}' button"
+    return
+  fi
+
+  sleep 3
+  dump=$(dump_ui)
+  if text_present "${STR_PROMPT_TITLE}" "${dump}"; then
+    record_leg "provision-register-prompt-appears" "PASS" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') present — stage 2's signed recovery-key BiometricPrompt"
+  else
+    record_leg "provision-register-prompt-appears" "FAIL" "deviceSigningPromptTitle NOT found — stage 2 did not reach the signed recovery-key prompt"
+  fi
+
+  adb ${ADBD} emu finger touch 1 >/dev/null 2>&1 || true
+
   dump=$(dump_ui)
   if text_present "${STR_SUCCESS_HEADING}" "${dump}"; then
     record_leg "provision-success-heading" "PASS" "signingKeyProvisioningSuccessHeading ('${STR_SUCCESS_HEADING}') present — end-to-end SignatureValidP256 evidence (see 49-13-PROOF-LOG.md)"
   else
-    record_leg "provision-success-heading" "FAIL" "signingKeyProvisioningSuccessHeading NOT present after satisfying the prompt"
+    record_leg "provision-success-heading" "FAIL" "signingKeyProvisioningSuccessHeading NOT present after satisfying the stage-2 prompt"
   fi
 }
 
@@ -502,15 +656,17 @@ leg_storage() {
 preflight
 
 case "${LEG}" in
-  provision) leg_provision ;;
-  sign)      leg_sign ;;
-  cancel)    leg_cancel ;;
-  storage)   leg_storage ;;
+  provision-local)    provision_local ;;
+  provision-register) provision_register ;;
+  sign)                leg_sign ;;
+  cancel)              leg_cancel ;;
+  storage)             leg_storage ;;
   all)
-    leg_provision
+    provision_local
     leg_sign
     leg_cancel
     leg_storage
+    record_leg "provision-register-not-exercised" "NOT-EXERCISED" "requires an operator-created network first — run 'provision-register' directly once one exists"
     ;;
 esac
 
