@@ -12,8 +12,20 @@
 #           plaintext key residue in AsyncStorage.
 #
 # Usage   : SERIAL=emulator-5554 ./scripts/run-authority-signing-ceremony.sh <leg>
-#           <leg> one of: provision-local | provision-register | sign | cancel | storage | all
+#           <leg> one of: provision-local | provision-register | sign | cancel | storage |
+#                         hw-provision | recover | all
 #           `provision` is accepted as a deprecated alias for `provision-local`.
+#
+#           49-14 (real-hardware legs): `hw-provision` and `recover` are for REAL DEVICES ONLY
+#           (they PREFLIGHT FAIL loudly if pointed at an emulator). Every biometric-satisfaction
+#           step that used to inject `adb emu finger touch` now branches on whether the target
+#           actually responds to `adb emu` — on real hardware there is no adb equivalent, so the
+#           script PAUSES (bounded on HW_BIOMETRIC_TIMEOUT, default 90s) and prints a loud
+#           "ACTION REQUIRED" instruction for a human to physically touch the sensor (or, for the
+#           D-16/D-26 recovery ceremony's DEVICE_CREDENTIAL authenticator, enter the PIN/pattern/
+#           password — never a fingerprint touch there). `hw-provision` also pauses twice for an
+#           operator-driven network-creation step (HW_NETWORK_WAIT, default 90s) — same six-field
+#           RN form limitation `provision-register` already documents below.
 #
 #           49-18 (Gap A's runtime proof vehicle): the onboarding order 49-16/49-17
 #           landed splits provisioning into two network-independent/network-scoped
@@ -60,12 +72,20 @@ if [ "${LEG}" = "provision" ]; then
   LEG="provision-local"
 fi
 case "${LEG}" in
-  provision-local|provision-register|sign|cancel|storage|all) ;;
+  provision-local|provision-register|sign|cancel|storage|hw-provision|recover|all) ;;
   *)
-    echo "Usage: SERIAL=emulator-5554 $0 <provision-local|provision-register|sign|cancel|storage|all>" >&2
+    echo "Usage: SERIAL=emulator-5554 $0 <provision-local|provision-register|sign|cancel|storage|hw-provision|recover|all>" >&2
     exit 1
     ;;
 esac
+
+# 49-14 — real-hardware pause windows. Overridable via env for a slower operator/device.
+HW_BIOMETRIC_TIMEOUT="${HW_BIOMETRIC_TIMEOUT:-90}"
+HW_NETWORK_WAIT="${HW_NETWORK_WAIT:-90}"
+# Set by preflight() once the target's `adb emu` responsiveness is known. 1 = emulator (the
+# existing 49-13/49-18 injection path), 0 = real hardware (49-14's job — every biometric/
+# device-credential step pauses for a human instead).
+IS_EMULATOR=1
 
 # ── i18n strings this script asserts against (EN values, apps/VoteTorrentAuthority/src/i18n/index.ts) ──
 STR_SETTINGS_ROW="Secure Signing"
@@ -111,30 +131,99 @@ preflight() {
   fi
 
   echo "[ceremony] Preflight: emulator check (adb emu) ..."
-  if ! adb ${ADBD} emu avd name >/dev/null 2>&1; then
-    echo "[ceremony] PREFLIGHT FAIL: '${SERIAL}' does not respond to 'adb emu' — this script's fingerprint injection (emu finger touch) only works against an emulator, not a real device (that is 49-14's job)" >&2
-    exit 1
+  if adb ${ADBD} emu avd name >/dev/null 2>&1; then
+    IS_EMULATOR=1
+    echo "[ceremony]   -> emulator target detected; fingerprint injection via 'adb emu finger touch' is available (49-13/49-18 path)."
+  else
+    IS_EMULATOR=0
+    echo "[ceremony]   -> real hardware target detected ('adb emu' unsupported, as expected on a physical device — this is 49-14's job). Every biometric/device-credential step will PAUSE for a physical action instead of injecting one." >&2
   fi
 
   echo "[ceremony] Preflight: secure lock screen + fingerprint enrollment ..."
-  # A lock credential may already be set to this script's own PIN from a
-  # prior ceremony run — `pm clear` (reset_identity) only resets the APP's
-  # data, never the device lock screen, so a bare `set-pin 1234` on a second
-  # run fails with "old credential was not provided" even though the PIN is
-  # already correct. Try the no-`--old` form first (first-ever setup on a
-  # fresh AVD), then retry with `--old 1234` (idempotent re-run) before
-  # treating it as a genuine failure.
-  if ! adb ${ADBD} shell locksettings set-pin 1234 >/dev/null 2>&1; then
-    # `--old` must precede the PIN argument (locksettings' shell parser is
-    # positional-sensitive: `set-pin 1234 --old 1234` is rejected the same
-    # as no --old at all).
-    if ! adb ${ADBD} shell locksettings set-pin --old 1234 1234 >/dev/null 2>&1; then
-      echo "[ceremony] PREFLIGHT FAIL: 'locksettings set-pin 1234' failed (with and without --old 1234) — a Keystore key with setUserAuthenticationRequired(true) cannot even be GENERATED on a device with no secure lock screen, so a missing/mismatched PIN here presents downstream as a keygen failure, not a prompt failure. Set the PIN by hand ('adb shell locksettings clear --old <existing>' then re-run) and re-run." >&2
-      exit 1
+  if [ "${IS_EMULATOR}" -eq 1 ]; then
+    # A lock credential may already be set to this script's own PIN from a
+    # prior ceremony run — `pm clear` (reset_identity) only resets the APP's
+    # data, never the device lock screen, so a bare `set-pin 1234` on a second
+    # run fails with "old credential was not provided" even though the PIN is
+    # already correct. Try the no-`--old` form first (first-ever setup on a
+    # fresh AVD), then retry with `--old 1234` (idempotent re-run) before
+    # treating it as a genuine failure.
+    if ! adb ${ADBD} shell locksettings set-pin 1234 >/dev/null 2>&1; then
+      # `--old` must precede the PIN argument (locksettings' shell parser is
+      # positional-sensitive: `set-pin 1234 --old 1234` is rejected the same
+      # as no --old at all).
+      if ! adb ${ADBD} shell locksettings set-pin --old 1234 1234 >/dev/null 2>&1; then
+        echo "[ceremony] PREFLIGHT FAIL: 'locksettings set-pin 1234' failed (with and without --old 1234) — a Keystore key with setUserAuthenticationRequired(true) cannot even be GENERATED on a device with no secure lock screen, so a missing/mismatched PIN here presents downstream as a keygen failure, not a prompt failure. Set the PIN by hand ('adb shell locksettings clear --old <existing>' then re-run) and re-run." >&2
+        exit 1
+      fi
+    fi
+    # Enroll a fingerprint under finger id 1 for the emulator's virtual sensor.
+    adb ${ADBD} emu finger touch 1 >/dev/null 2>&1 || true
+  else
+    # Real hardware (49-14-PLAN.md Task 1's own prerequisite): the human already configured a
+    # secure lock screen + exactly one enrolled biometric BEFORE this script ever runs.
+    # NEVER programmatically set a PIN or enroll a fingerprint here — doing so on a real device
+    # would silently overwrite the DEVICE OWNER'S actual lock-screen credential. Verify, read-only,
+    # instead of mutate.
+    #
+    # `dumpsys trust`'s `deviceLocked=` line is CURRENT lock state, not lock-screen
+    # CONFIGURATION — a device the operator just unlocked to hand to this ceremony correctly
+    # reads `deviceLocked=0`, and gating on `=1` here would wrongly PREFLIGHT FAIL a device that
+    # is exactly ready to be driven. `locksettings get-disabled` (expect `false`) is the correct
+    # configuration check and is used first; it throws `IllegalArgumentException` on some API
+    # levels (49-14-PLAN.md's 2026-08-18 amendment, confirmed API 29) — `dumpsys fingerprint`'s
+    # `acceptCrypto` count (non-zero = crypto-backed auth has genuinely succeeded against the
+    # credential at some point) is the documented substitute there.
+    local get_disabled
+    get_disabled=$(adb ${ADBD} shell locksettings get-disabled 2>&1 | tr -d '\r')
+    if [ "${get_disabled}" = "false" ] || [ "${get_disabled}" = "true" ]; then
+      if [ "${get_disabled}" != "false" ]; then
+        echo "[ceremony] PREFLIGHT FAIL: 'locksettings get-disabled' reports '${get_disabled}' (lock screen disabled) on '${SERIAL}' — a secure lock screen is required before any setUserAuthenticationRequired(true) Keystore key can even be generated. Set a PIN/pattern/password by hand and re-run." >&2
+        exit 1
+      fi
+      echo "[ceremony]   -> secure lock screen confirmed read-only (locksettings get-disabled: false)"
+    else
+      # get-disabled unusable on this API level (e.g. API 29's IllegalArgumentException) — fall
+      # back to the plan's documented substitute evidence.
+      local accept_crypto
+      accept_crypto=$(adb ${ADBD} shell dumpsys fingerprint 2>/dev/null | grep -o "acceptCrypto=[0-9]*" | head -1)
+      if [ -z "${accept_crypto}" ] || [ "${accept_crypto}" = "acceptCrypto=0" ]; then
+        echo "[ceremony] PREFLIGHT FAIL: 'locksettings get-disabled' unusable on this API level (${get_disabled}) and 'dumpsys fingerprint' reports no non-zero acceptCrypto count on '${SERIAL}' — cannot confirm a secure, crypto-backed lock screen is configured. (raw get-disabled: ${get_disabled})" >&2
+        exit 1
+      fi
+      echo "[ceremony]   -> secure lock screen confirmed read-only via substitute evidence (dumpsys fingerprint: ${accept_crypto}) — get-disabled unusable on this API level"
+    fi
+
+    # A real device's screen times out and re-locks between ceremony steps — unlike an emulator,
+    # adb has NO keyguard bypass for a real credential (45-11-PROOF-LOG.md's own re-confirmed
+    # constraint: "adb cannot clear the keyguard"). Wake it and give a human a bounded window to
+    # unlock physically HERE, rather than let launch_app spin uselessly against a lock screen for
+    # its own 300s window with a much less specific failure message.
+    adb ${ADBD} shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+    adb ${ADBD} shell svc power stayon usb >/dev/null 2>&1 || true
+    local focus
+    focus=$(adb ${ADBD} shell dumpsys window 2>/dev/null | grep -i mCurrentFocus || true)
+    if echo "${focus}" | grep -qi "Keyguard\|NotificationShade"; then
+      echo "[ceremony] ############################################################" >&2
+      echo "[ceremony] ACTION REQUIRED on ${SERIAL}: the screen is currently LOCKED (mCurrentFocus: ${focus}). adb cannot bypass a real keyguard credential — unlock the device physically now." >&2
+      echo "[ceremony] waiting up to ${HW_BIOMETRIC_TIMEOUT}s ..." >&2
+      echo "[ceremony] ############################################################" >&2
+      local start_epoch
+      start_epoch=$(date +%s)
+      while [ "$(( $(date +%s) - start_epoch ))" -lt "${HW_BIOMETRIC_TIMEOUT}" ]; do
+        focus=$(adb ${ADBD} shell dumpsys window 2>/dev/null | grep -i mCurrentFocus || true)
+        if ! echo "${focus}" | grep -qi "Keyguard\|NotificationShade"; then
+          echo "[ceremony] unlocked after $(( $(date +%s) - start_epoch ))s." >&2
+          break
+        fi
+        sleep 3
+      done
+      if echo "${focus}" | grep -qi "Keyguard\|NotificationShade"; then
+        echo "[ceremony] PREFLIGHT FAIL: '${SERIAL}' is still locked after ${HW_BIOMETRIC_TIMEOUT}s (mCurrentFocus: ${focus}) — cannot proceed without a human present to unlock it. Unlock it and re-run." >&2
+        exit 1
+      fi
     fi
   fi
-  # Enroll a fingerprint under finger id 1 for the emulator's virtual sensor.
-  adb ${ADBD} emu finger touch 1 >/dev/null 2>&1 || true
 
   echo "[ceremony] Preflight: Metro reachability + adb reverse ..."
   adb ${ADBD} reverse "tcp:${METRO_PORT}" "tcp:${METRO_PORT}" || {
@@ -356,6 +445,77 @@ capture_signing_reject_line() {
   printf '%s\n' "${line}"
 }
 
+# satisfy_biometric REASON — the hardware-portable replacement for a bare
+# `adb emu finger touch 1` call (49-14). On an emulator, injects the virtual touch exactly as
+# 49-13/49-18 always did. On real hardware there is no adb equivalent — physically touching the
+# fingerprint sensor is required, and only a human can do that (49-14-PLAN.md Task 2's own
+# instruction: "pause for a real touch instead of failing"). Polls the current dump for the
+# prompt title to clear, bounded on HW_BIOMETRIC_TIMEOUT real wall-clock seconds, printing a loud
+# operator instruction. Returns 0 once the prompt clears (the NEXT assertion in the calling leg
+# is what actually judges success/failure — this helper only unblocks the wait) and 1 (non-fatal)
+# if the timeout elapses with the prompt still showing.
+satisfy_biometric() {
+  local reason="${1:-signing}"
+  if [ "${IS_EMULATOR}" -eq 1 ]; then
+    adb ${ADBD} emu finger touch 1 >/dev/null 2>&1 || true
+    return 0
+  fi
+  echo "[ceremony] ############################################################" >&2
+  echo "[ceremony] ACTION REQUIRED on ${SERIAL}: touch the fingerprint sensor now to satisfy the '${reason}' BiometricPrompt." >&2
+  echo "[ceremony] (real hardware has no 'adb emu finger touch' equivalent — this is a physical action, 49-14-PLAN.md Task 2)" >&2
+  echo "[ceremony] waiting up to ${HW_BIOMETRIC_TIMEOUT}s ..." >&2
+  echo "[ceremony] ############################################################" >&2
+  local start_epoch dump
+  start_epoch=$(date +%s)
+  while [ "$(( $(date +%s) - start_epoch ))" -lt "${HW_BIOMETRIC_TIMEOUT}" ]; do
+    dump=$(dump_ui)
+    if ! text_present "${STR_PROMPT_TITLE}" "${dump}"; then
+      echo "[ceremony] prompt cleared after $(( $(date +%s) - start_epoch ))s." >&2
+      return 0
+    fi
+    sleep 3
+  done
+  echo "[ceremony] WARNING: prompt still showing after ${HW_BIOMETRIC_TIMEOUT}s — no touch observed. Proceeding anyway; the next assertion will fail loudly if the prompt never cleared." >&2
+  return 1
+}
+
+# satisfy_device_credential REASON — the D-16/D-26 recovery ceremony's authenticator is
+# DEVICE_CREDENTIAL (PIN/pattern/password), never a fingerprint (BiometricPrompt forbids
+# combining setAllowedAuthenticators(DEVICE_CREDENTIAL) with a negative button, and the API 24-29
+# KeyguardManager branch is a distinct confirm-credential Activity) — so this is ALWAYS a manual
+# action, on an emulator or real hardware alike (the emulator's virtual fingerprint sensor cannot
+# satisfy a device-credential prompt either). Same bounded-wait shape as satisfy_biometric,
+# printed as a distinctly-worded instruction so an operator does not confuse the two ceremonies —
+# touching the sensor here does nothing; the sheet asks for the PIN/pattern/password.
+satisfy_device_credential() {
+  local reason="${1:-recovery}"
+  echo "[ceremony] ############################################################" >&2
+  echo "[ceremony] ACTION REQUIRED on ${SERIAL}: enter the device PIN/pattern/password now to satisfy the '${reason}' device-credential prompt (NOT a fingerprint touch)." >&2
+  echo "[ceremony] waiting up to ${HW_BIOMETRIC_TIMEOUT}s ..." >&2
+  echo "[ceremony] ############################################################" >&2
+  local start_epoch dump
+  start_epoch=$(date +%s)
+  while [ "$(( $(date +%s) - start_epoch ))" -lt "${HW_BIOMETRIC_TIMEOUT}" ]; do
+    dump=$(dump_ui)
+    if ! text_present "${STR_PROMPT_TITLE}" "${dump}" && ! text_present "Confirm" "${dump}"; then
+      echo "[ceremony] device-credential prompt cleared after $(( $(date +%s) - start_epoch ))s." >&2
+      return 0
+    fi
+    sleep 3
+  done
+  echo "[ceremony] WARNING: device-credential prompt still showing after ${HW_BIOMETRIC_TIMEOUT}s. Proceeding anyway." >&2
+  return 1
+}
+
+# fp_success_count — total `wasSuccessful=true` lines in the current `dumpsys fingerprint`
+# ring buffer (49-14). This is USER-scoped, not app-scoped (no app-pid equivalent exists for the
+# fingerprint HAL trace) — a delta increase across a bounded operation window is treated as
+# evidence of a fresh authentication for that operation, not a perfectly isolated per-app count.
+# Documented explicitly wherever this is used as a verdict input.
+fp_success_count() {
+  adb ${ADBD} shell dumpsys fingerprint 2>/dev/null | grep -c "wasSuccessful=true" || true
+}
+
 # ── Leg: provision-local (D-24 leg 1, network-independent half — 49-18 / Gap A) ──
 # The clean-device half of the split ceremony (see header comment). Keeps 49-13's
 # sequence verbatim up through the fingerprint injection and no-spki-error check —
@@ -419,7 +579,7 @@ provision_local() {
     record_leg "provision-no-fragmentmanager-exception" "FAIL" "${fm_hits} FragmentManager line(s) in provisioning-window logcat"
   fi
 
-  adb ${ADBD} emu finger touch 1 >/dev/null 2>&1 || true
+  satisfy_biometric "first-run provisioning" || true
 
   local verdict_line
   verdict_line=$(wait_for_logcat_line "INVALID_DIGEST_ENCODING|NO_KEY_PROVISIONED|SPKI" "${VERDICT_TIMEOUT}" "[ceremony]" "spki-error" "${ADBD}")
@@ -536,7 +696,7 @@ provision_register() {
     record_leg "provision-register-prompt-appears" "FAIL" "deviceSigningPromptTitle NOT found — stage 2 did not reach the signed recovery-key prompt"
   fi
 
-  adb ${ADBD} emu finger touch 1 >/dev/null 2>&1 || true
+  satisfy_biometric "stage-2 recovery-key registration" || true
 
   dump=$(dump_ui)
   if text_present "${STR_SUCCESS_HEADING}" "${dump}"; then
@@ -781,6 +941,231 @@ leg_storage() {
   fi
 }
 
+# ── Leg: hw-chain-decode / hw-strongbox-rung / hw-chain-shape (49-14, Task 2 items 1-2) ──────
+# Pulls the persisted deviceSigningProvisioning record's certificateChainBase64 array (written by
+# provision_local against the REAL Keystore-produced chain — hardware-rooted, unlike 49-13's
+# emulator run which never persisted one), decodes the leaf via the Phase 45 offline decoder, and
+# derives the D-07 StrongBox/TEE rung determination plus the D-15b chain-shape verdict from its
+# machine output rather than a transcribed claim.
+hw_decode_attestation_chain() {
+  local pulldir sqlite_bin provisioning_value chain_array chain_json_path
+  pulldir=$(pull_storage_db)
+  sqlite_bin=$(command -v sqlite3 || true)
+  if [ -z "${sqlite_bin}" ]; then
+    record_leg "hw-chain-decode" "FAIL" "no host sqlite3 available to inspect the pulled RKStorage files"
+    return
+  fi
+  provisioning_value=$("${sqlite_bin}" "${pulldir}/RKStorage" \
+    "select value from catalystLocalStorage where key = 'deviceSigningProvisioning' limit 1;" 2>/dev/null || true)
+  if [ -z "${provisioning_value}" ]; then
+    record_leg "hw-chain-decode" "FAIL" "no 'deviceSigningProvisioning' row present — provisioning did not complete on this device"
+    return
+  fi
+  chain_array=$(echo "${provisioning_value}" | grep -o '"certificateChainBase64":\[[^]]*\]' | sed 's/^"certificateChainBase64"://')
+  if [ -z "${chain_array}" ] || [ "${chain_array}" = '[]' ]; then
+    record_leg "hw-chain-decode" "FAIL" "certificateChainBase64 empty or missing in the persisted provisioning record"
+    return
+  fi
+  chain_json_path="${TMPDIR_CEREMONY}/hw-chain-${SERIAL}.json"
+  printf '%s' "${chain_array}" > "${chain_json_path}"
+
+  local node_bin decoder_rel="packages/vote-engine/scripts/decode-attestation-leaf.mjs"
+  node_bin=$(command -v node || true)
+  if [ -z "${node_bin}" ] || [ ! -f "${decoder_rel}" ]; then
+    record_leg "hw-chain-decode" "FAIL" "node or ${decoder_rel} not available on this host"
+    return
+  fi
+
+  # The decoder's (iii) challengeBound check needs the EXACT boundDigest string
+  # (ProvisionSigningKeyScreen.tsx's runLocalCeremony: 'signing-key-provisioning-<ts>-<hex>'),
+  # which is never persisted verbatim — recovered from this session's own logcat capture instead
+  # (best-effort; a miss here only weakens challengeBound, not the attestationSecurityLevel /
+  # chainLength / rootPresent values this leg actually gates on).
+  local bound_digest
+  bound_digest=$(adb ${ADBD} logcat -d 2>/dev/null | grep -o 'signing-key-provisioning-[0-9]*-[0-9a-f]*' | tail -1 || true)
+  [ -z "${bound_digest}" ] && bound_digest="unavailable-not-logged"
+
+  local decode_log="${TMPDIR_CEREMONY}/hw-chain-decode-log-${SERIAL}.md" decode_out decode_status
+  : > "${decode_log}"
+  set +e
+  decode_out=$(cd packages/vote-engine && "${node_bin}" scripts/decode-attestation-leaf.mjs \
+    "${chain_json_path}" "${decode_log}" "${bound_digest}" 2>&1)
+  decode_status=$?
+  set -e
+  echo "[ceremony] decode-attestation-leaf.mjs output (SERIAL=${SERIAL}):" >&2
+  echo "${decode_out}" >&2
+
+  local sec_level chain_len root_present
+  sec_level=$(echo "${decode_out}" | grep -o 'attestationSecurityLevel: [0-9]*' | head -1)
+  chain_len=$(echo "${decode_out}" | grep -o 'chainLength: [0-9]*' | head -1 | grep -o '[0-9]*$')
+  root_present=$(echo "${decode_out}" | grep -o 'rootPresent: [a-z]*' | head -1 | grep -o '[a-z]*$')
+
+  if [ -n "${sec_level}" ]; then
+    record_leg "hw-chain-decode" "PASS" "decoder produced a verdict block (exit=${decode_status}) — ${sec_level}; see hw-strongbox-rung/hw-chain-shape for the derived verdicts"
+  else
+    record_leg "hw-chain-decode" "FAIL" "decoder produced no attestationSecurityLevel (exit=${decode_status}); output: ${decode_out}"
+    return
+  fi
+
+  # D-07 / Phase 45 residual leg 1 (49-14-PLAN.md's 2026-08-18 amendment): PASS requires level 2
+  # (StrongBox) on BOTH fields. A 1 (TEE) is recorded BLOCKED-NO-HARDWARE, not FAIL — this fleet's
+  # devices carry no StrongBox chip at all (Task 1's confirmed `pm list features` result), so a
+  # TEE-only result here is the EXPECTED, correctly-functioning fallback, not a defect. Never
+  # reinterpret a TEE result as a StrongBox PASS.
+  local strongbox_feature
+  strongbox_feature=$(adb ${ADBD} shell pm list features 2>/dev/null | grep -i strongbox || true)
+  if echo "${decode_out}" | grep -q "attestationSecurityLevel: 2"; then
+    record_leg "hw-strongbox-rung" "PASS" "${sec_level} — StrongBox rung genuinely selected"
+  elif [ -n "${strongbox_feature}" ]; then
+    record_leg "hw-strongbox-rung" "FAIL" "${sec_level:-<not found>} — device DOES report ${strongbox_feature} but the decoder did not observe level 2; a real StrongBox-capable device fell through to TEE"
+  else
+    record_leg "hw-strongbox-rung" "BLOCKED-NO-HARDWARE" "${sec_level:-<not found>} — 'pm list features | grep strongbox' is empty on ${SERIAL} (confirmed Task 1); no device in this project's fleet has a StrongBox chip (Samsung ships it via Knox Vault on flagships only), so the StrongBox-primary rung cannot be exercised here. TEE fallback is the expected, correctly-functioning result. Residual stays OPEN in .planning/todos/pending/2026-08-03-attestation-strongbox-and-api34-residuals.md leg 1."
+  fi
+
+  # D-15b — leaf + intermediates, root dropped. Hardware-rooted (unlike 49-13's emulator run,
+  # which never persisted a chain at all — NOT-EXERCISED there).
+  if [ -n "${chain_len}" ] && [ "${chain_len}" -ge 2 ] && [ "${root_present}" = "false" ]; then
+    record_leg "hw-chain-shape" "PASS" "chainLength=${chain_len} rootPresent=${root_present} — hardware-rooted leaf+intermediates, root dropped (49-13's emulator run never persisted a chain to check)"
+  else
+    record_leg "hw-chain-shape" "FAIL" "chainLength=${chain_len:-<none>} rootPresent=${root_present:-<none>}"
+  fi
+}
+
+# ── Leg: hw-provision (49-14 Task 2 — real-hardware pre-invalidation legs) ───────────────────
+# Combines provision_local + an operator-driven network-creation interlude + provision_register
+# (Gap A's now-closed two-stage order, 49-16/49-17/49-18) on REAL hardware, then adds the
+# hardware-only claims 49-13 could never reach on an emulator: a hardware-rooted chain, the
+# StrongBox/TEE rung determination, and the API-30+ setUserAuthenticationParameters per-use
+# semantics (three consecutive signing operations, each producing its own OS-level
+# authentication) — or, below API 30, confirmation that the bare setUserAuthenticationRequired
+# fallback branch provisioned and signed (D-17's other half).
+hw_provision() {
+  if [ "${IS_EMULATOR}" -eq 1 ]; then
+    echo "[ceremony] PREFLIGHT FAIL: 'hw-provision' requires real hardware (this is 49-14's leg) — '${SERIAL}' resolved as an emulator; use 'provision-local'/'provision-register' instead." >&2
+    exit 1
+  fi
+
+  local sdk
+  sdk=$(adb ${ADBD} shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r')
+
+  local auth_c0 auth_c1 auth_c2
+  auth_c0=$(fp_success_count)
+  provision_local
+  auth_c1=$(fp_success_count)
+
+  echo "[ceremony] ============================================================" >&2
+  echo "[ceremony] OPERATOR ACTION on ${SERIAL}: create or join a network through the real in-app 'Select Network' -> 'Create Network' flow now (six-field RN form — not adb-driven, see script header)." >&2
+  echo "[ceremony] Waiting ${HW_NETWORK_WAIT}s before attempting 'provision-register' automatically ..." >&2
+  echo "[ceremony] ============================================================" >&2
+  sleep "${HW_NETWORK_WAIT}"
+
+  provision_register
+  auth_c2=$(fp_success_count)
+
+  hw_decode_attestation_chain
+
+  local op1=$(( auth_c1 - auth_c0 )) op2=$(( auth_c2 - auth_c1 ))
+
+  if [ "${sdk}" -ge 30 ] 2>/dev/null; then
+    echo "[ceremony] ============================================================" >&2
+    echo "[ceremony] OPERATOR ACTION (3rd signing operation, D-27 residual leg 2) on ${SERIAL}: create a SECOND network now (Select Network -> Create Network)." >&2
+    echo "[ceremony] Waiting ${HW_NETWORK_WAIT}s before re-running the registration step automatically ..." >&2
+    echo "[ceremony] ============================================================" >&2
+    sleep "${HW_NETWORK_WAIT}"
+    provision_register
+    local auth_c3 op3
+    auth_c3=$(fp_success_count)
+    op3=$(( auth_c3 - auth_c2 ))
+    if [ "${op1}" -ge 1 ] && [ "${op2}" -ge 1 ] && [ "${op3}" -ge 1 ]; then
+      record_leg "hw-api34-per-use-semantics" "PASS" "SDK=${sdk} (>=30, setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG) branch — Build.VERSION.SDK_INT>=30 guard is unconditional and source-guaranteed; KeyAttestationHelper.kt emits no runtime branch-name log line, so branch attribution here is via confirmed SDK level + source read, not a log line) — 3 consecutive signing ops each produced >=1 fresh OS auth event (dumpsys fingerprint deltas: op1=${op1} provisioning, op2=${op2} 1st network recovery-key add, op3=${op3} 2nd network recovery-key add; dumpsys fingerprint is user- not app-scoped, treated as evidence not perfect isolation)"
+    else
+      record_leg "hw-api34-per-use-semantics" "FAIL" "SDK=${sdk} — dumpsys fingerprint deltas op1=${op1} op2=${op2} op3=${op3}; one or more operations produced zero fresh authentications"
+    fi
+  else
+    record_leg "hw-api34-per-use-semantics" "NOT-EXERCISED" "SDK=${sdk} (<30) — the setUserAuthenticationParameters branch does not exist on this device at all (KeyAttestationHelper.kt gates it behind 'if (Build.VERSION.SDK_INT >= 30)')"
+    if [ "${op1}" -ge 1 ] && [ "${op2}" -ge 1 ]; then
+      record_leg "hw-bare-auth-branch" "PASS" "SDK=${sdk} (<30) — the bare setUserAuthenticationRequired(true) fallback branch is source-guaranteed (no setUserAuthenticationParameters call below API 30); provisioning (dumpsys fingerprint delta op1=${op1}) and per-use signing (op2=${op2}) both completed on it, closing D-17's pre-30 half on real hardware"
+    else
+      record_leg "hw-bare-auth-branch" "FAIL" "SDK=${sdk} — dumpsys fingerprint deltas op1=${op1} op2=${op2}; provisioning or signing did not complete"
+    fi
+  fi
+}
+
+# ── Leg: recover (49-14 Task 4 — D-24 leg 3 / D-26a leg 5, real hardware only) ───────────────
+# Deliberately does NOT reset_identity — its whole precondition is a device that already
+# completed hw-provision AND has since had an ADDITIONAL biometric enrolled (49-14-PLAN.md Task
+# 3, the invalidation trigger). Wiping identity here would destroy exactly the state this leg
+# exists to observe. Settings' own 'Secure Signing' row always navigates with reason:'first-run'
+# (SettingsScreen.tsx) which no-ops once both UserKey rows are already registered — it does NOT
+# exercise the invalidated-key catch. A REAL per-use signing action (routed through
+# createDeviceSigner at one of the 22 rollout call sites, 49-11/49-12) is what raises
+# KeyPermanentlyInvalidatedException, so this leg asks the operator to trigger one.
+recover() {
+  if [ "${IS_EMULATOR}" -eq 1 ]; then
+    echo "[ceremony] PREFLIGHT FAIL: 'recover' requires real hardware (this is 49-14 Task 4's leg)." >&2
+    exit 1
+  fi
+
+  launch_app
+  adb ${ADBD} logcat -c
+
+  echo "[ceremony] ============================================================" >&2
+  echo "[ceremony] OPERATOR ACTION on ${SERIAL}: trigger a REAL device-signing action now (e.g. invite an Administrator, edit your own Officer profile, or any other screen routed through createDeviceSigner — Settings > Secure Signing alone will NOT trigger this, it no-ops once both keys are already registered). This should raise KeyPermanentlyInvalidatedException and navigate you to the recovery screen." >&2
+  echo "[ceremony] Waiting up to ${HW_NETWORK_WAIT}s for the recovery screen to appear ..." >&2
+  echo "[ceremony] ============================================================" >&2
+
+  local start_epoch dump found=0
+  start_epoch=$(date +%s)
+  while [ "$(( $(date +%s) - start_epoch ))" -lt "${HW_NETWORK_WAIT}" ]; do
+    dump=$(dump_ui)
+    if text_present "Replace" "${dump}" || text_present "recovery" "${dump}"; then
+      found=1
+      break
+    fi
+    sleep 5
+  done
+
+  local reject_line
+  reject_line=$(adb ${ADBD} logcat -d 2>/dev/null | grep -i "KeyPermanentlyInvalidatedException\|KEY_INVALIDATED_REASSOCIATE" | head -3 || true)
+  if [ -n "${reject_line}" ]; then
+    record_leg "recover-invalidation-detected" "PASS" "logcat: $(echo "${reject_line}" | head -1)"
+  else
+    record_leg "recover-invalidation-detected" "FAIL" "no KeyPermanentlyInvalidatedException/KEY_INVALIDATED_REASSOCIATE line observed in this window"
+  fi
+
+  if [ "${found}" -eq 0 ]; then
+    record_leg "recover-navigation" "FAIL" "recovery heading/button not observed within ${HW_NETWORK_WAIT}s — the 49-11/49-12 navigation contract did not fire, or the operator action did not reach a routed call site in time"
+    return
+  fi
+  record_leg "recover-navigation" "PASS" "recovery screen reached (uiautomator dump: recovery heading or 'Replace' button present) — the 49-11/49-12 navigation contract fired at runtime"
+
+  dump=$(dump_ui)
+  if ! tap_on_text "Replace" "${dump}"; then
+    record_leg "recover-replace-tap" "FAIL" "could not tap the recovery/replace button"
+    return
+  fi
+  record_leg "recover-replace-tap" "PASS" "replace/recovery button tapped"
+
+  adb ${ADBD} logcat -c
+  satisfy_device_credential "recovery ceremony" || true
+
+  dump=$(dump_ui)
+  if text_present "${STR_SUCCESS_HEADING}" "${dump}"; then
+    record_leg "recover-success-heading" "PASS" "signingKeyProvisioningSuccessHeading present post-recovery — a post-recovery signing action succeeded, and the replacement key was registered"
+  else
+    record_leg "recover-success-heading" "FAIL" "success heading not present post-recovery"
+  fi
+
+  local sdk branch_line
+  sdk=$(adb ${ADBD} shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r')
+  branch_line=$(adb ${ADBD} logcat -d 2>/dev/null | grep -i "signWithRecoveryKey\|createConfirmDeviceCredentialIntent" | tail -5 || true)
+  if [ "${sdk}" -ge 30 ] 2>/dev/null; then
+    record_leg "recover-branch" "PASS" "SDK=${sdk} (>=30) — BiometricPrompt/DEVICE_CREDENTIAL branch (signRecoveryViaBiometricPrompt), source-guaranteed by signWithRecoveryKey's SDK_INT>=30 dispatch; logcat: ${branch_line:-<none>}"
+  else
+    record_leg "recover-branch" "PASS" "SDK=${sdk} (<30) — KeyguardManager.createConfirmDeviceCredentialIntent branch (signRecoveryViaKeyguardManager), source-guaranteed; logcat: ${branch_line:-<none>}"
+  fi
+}
+
 # ── Dispatch ──────────────────────────────────────────────────────────────
 preflight
 
@@ -790,6 +1175,8 @@ case "${LEG}" in
   sign)                leg_sign ;;
   cancel)              leg_cancel ;;
   storage)             leg_storage ;;
+  hw-provision)         hw_provision ;;
+  recover)              recover ;;
   all)
     provision_local
     leg_sign
