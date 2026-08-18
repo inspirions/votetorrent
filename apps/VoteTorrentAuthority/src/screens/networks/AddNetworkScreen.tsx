@@ -18,12 +18,14 @@ import { ElectionType } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
 import { InlineError } from "../../components/InlineError";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 	const { getEngine, networksEngine, selectNetwork } = useApp();
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const [networkName, setNetworkName] = useState("");
 	const [networkImageUrl, setNetworkImageUrl] = useState("");
 	const [authorityName, setAuthorityName] = useState("");
@@ -195,7 +197,18 @@ export default function AddNetworkScreen() {
 			console.info("[network-create] selectNetwork() done");
 		} catch (err) {
 			console.error("handleCreate error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory
+			// (device-signer.ts's exported creator) and is therefore outside the 20-file rollout
+			// inventory — but getOrCreateDeviceUser above is the exact second-half-of-the-
+			// onboarding-cycle site that produced the dead end 49-13 reproduced four times on
+			// device. Route its NO_KEY_PROVISIONED rejection through the same shared hook every
+			// migrated call site uses, rather than re-deriving the mapping here, so the officer
+			// lands on the provisioning screen instead of a raw error string. Any other failure
+			// (validation, commit, network) is "not mine" to the hook and falls through to this
+			// screen's own raw-message handling unchanged.
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
 			return;
 		} finally {
 			// Always clear the in-flight flag so the button re-enables on error/timeout
