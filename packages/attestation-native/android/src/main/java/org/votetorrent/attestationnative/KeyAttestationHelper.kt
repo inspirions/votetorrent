@@ -5,6 +5,7 @@ import android.app.KeyguardManager
 import android.content.Intent
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
@@ -18,6 +19,7 @@ import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.UiThreadUtil
 import java.math.BigInteger
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -249,6 +251,26 @@ class NoStrongBoxOrTeeException(cause: Throwable) : Exception(
 )
 
 /**
+ * 49-14 follow-up (D-16 observability defect) — thrown by [KeyAttestationHelper.generateRecoveryKey]
+ * when the alias already holds a key that Keystore has permanently invalidated
+ * ([KeyPermanentlyInvalidatedException] on [Signature.initSign]). This is precisely the D-16 FAIL
+ * signal: a [KeyAuthenticator.DEVICE_CREDENTIAL]-authenticated key is claimed to survive a
+ * biometric re-enrolment that strands [KeyAuthenticator.BIOMETRIC_STRONG] keys — if it did NOT
+ * survive, that must be observable, not silently masked by regenerating a fresh key under the same
+ * alias (which is what the unconditional-regenerate defect this exception replaces used to do).
+ * Regenerating the recovery alias in response to this state may only ever be an explicit,
+ * separately-triggered recovery-of-the-recovery action — never an implicit side effect of the
+ * normal provisioning/recovery ceremony, which is why [generateRecoveryKey] throws here instead of
+ * deleting and regenerating like [generateProvisionKey]/[regenerateAttested] do for the signing key.
+ */
+class RecoveryKeyInvalidatedException(cause: Throwable) : Exception(
+	"recovery key at this alias has been permanently invalidated (KeyPermanentlyInvalidatedException) " +
+		"— the D-16 device-credential recovery key did NOT survive whatever biometric enrollment " +
+		"change occurred; this is a FAIL signal, not an error to silently regenerate past",
+	cause,
+)
+
+/**
  * KeyAttestationHelper — P-256 StrongBox->TEE->(debug-only)stub keygen, per-use biometric gate,
  * cert-chain export (leaf+intermediates, no root), and KeyPermanentlyInvalidatedException
  * handling (Phase 45-02: D-03/D-06/D-07/D-13/D-15b/D-17).
@@ -289,9 +311,92 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	 * generated once, directly, with no attestation challenge at all: it exists purely to sign a
 	 * replacement key back into `UserKey` when the primary biometric key is invalidated, not to
 	 * produce a verifier-consumed cert chain.
+	 *
+	 * 49-14 follow-up (real-hardware defect, D-24 leg 3 / D-26a leg 5) — **REUSE PATH, deliberately
+	 * added ONLY here, never in the shared [generateKey] core.** The prior unconditional-regenerate
+	 * behavior meant every call — including `ProvisionSigningKeyScreen.tsx`'s `handleRecovery`
+	 * re-resolving "the same alias already provisioned during first-run" — silently REPLACED the
+	 * Keystore entry, so the ceremony destroyed the very key its own `UserKey.DeleteValid` CHECK
+	 * needed to already be registered, and could never observe whether the ORIGINAL key survived a
+	 * biometric re-enrolment (D-16's actual claim). Now: if [keyAlias] already holds a key, this
+	 * function validates it is still usable — via [Signature.initSign], the SAME operation
+	 * [signWithRecoveryKey] already relies on to surface [KeyPermanentlyInvalidatedException] — and
+	 * returns its EXISTING public value rather than regenerating. An invalidated key throws
+	 * [RecoveryKeyInvalidatedException] (see its own doc comment for why that must never be
+	 * silently papered over). Only a genuinely ABSENT alias falls through to a real first-time
+	 * [generateKey] call.
+	 *
+	 * Does NOT touch [generateProvisionKey]/[regenerateAttested]'s signing-key path, which is
+	 * SHARED with this alias's [generateKey] core but whose regenerate-under-the-same-alias
+	 * behavior during recovery (`handleRecovery`'s step 1, `provisionDeviceKey`) is CORRECT and
+	 * must stay unconditional — the signing key alias always names the CURRENT signer, with no
+	 * analogous "was this the same key as before" question to answer.
 	 */
 	fun generateRecoveryKey(keyAlias: String): ProvisionResult {
+		if (keyStore.containsAlias(keyAlias)) {
+			return reuseExistingRecoveryKey(keyAlias)
+		}
 		return generateKey(keyAlias, attestationChallenge = null, authenticator = KeyAuthenticator.DEVICE_CREDENTIAL)
+	}
+
+	/**
+	 * [generateRecoveryKey]'s reuse-path helper — validates the existing [keyAlias] entry is still
+	 * usable and, if so, resolves a [ProvisionResult] describing it WITHOUT any `generateKeyPair()`
+	 * call (no Keystore mutation at all). [Signature.initSign] is the validity probe: per
+	 * [signWithDeviceKey]/[signWithRecoveryKey]'s identical pattern elsewhere in this file, Android
+	 * throws [KeyPermanentlyInvalidatedException] from `initSign()` itself (before any biometric/
+	 * device-credential prompt is ever shown) when the underlying key material is gone — this is
+	 * the SAME check, reused rather than re-derived, so this function's classification of "usable"
+	 * can never drift from what a real sign attempt would discover.
+	 */
+	private fun reuseExistingRecoveryKey(keyAlias: String): ProvisionResult {
+		try {
+			val privateKey = keyStore.getKey(keyAlias, null) as PrivateKey
+			val signature = Signature.getInstance("SHA256withECDSA")
+			signature.initSign(privateKey)
+		} catch (e: KeyPermanentlyInvalidatedException) {
+			throw RecoveryKeyInvalidatedException(e)
+		}
+
+		val certificate = keyStore.getCertificate(keyAlias)
+			?: throw IllegalStateException("no certificate for existing recovery alias $keyAlias")
+		val publicKey = certificate.publicKey
+		return ProvisionResult(
+			publicKeyBase64 = Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP),
+			keyAlias = keyAlias,
+			securityLevel = resolveExistingKeySecurityLevel(keyAlias),
+			publicKeyCompressedHex = spkiToCompressedPointHex(publicKey.encoded),
+		)
+	}
+
+	/**
+	 * Best-effort security-level readback for [reuseExistingRecoveryKey] — [ProvisionResult]'s
+	 * `securityLevel` field is informational only (no caller in `AttestationNativeModule.kt` or the
+	 * JS layer branches on it; confirmed by direct source read before adding this), so a
+	 * best-effort classification here is safe. [KeyInfo.getSecurityLevel] (the precise
+	 * strongbox/TEE/software discriminant [generateKey] itself derives structurally, by which rung
+	 * of its own try/catch cascade succeeded) is API 31+ only; below that, [KeyInfo.isInsideSecureHardware]
+	 * is the coarsest available signal (true for either hardware rung, no strongbox/TEE distinction).
+	 */
+	private fun resolveExistingKeySecurityLevel(keyAlias: String): String {
+		return try {
+			val privateKey = keyStore.getKey(keyAlias, null) as PrivateKey
+			val keyInfo = KeyFactory.getInstance(privateKey.algorithm, ANDROID_KEYSTORE)
+				.getKeySpec(privateKey, KeyInfo::class.java)
+			if (Build.VERSION.SDK_INT >= 31) {
+				when (keyInfo.securityLevel) {
+					KeyProperties.SECURITY_LEVEL_STRONGBOX -> "strongbox"
+					KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "tee"
+					else -> "software"
+				}
+			} else {
+				if (keyInfo.isInsideSecureHardware) "tee" else "software"
+			}
+		} catch (e: Exception) {
+			// Purely informational field (see doc comment above) — never fail the reuse path over
+			// an inability to classify the existing key's hardware backing.
+			"unknown"
+		}
 	}
 
 	/**

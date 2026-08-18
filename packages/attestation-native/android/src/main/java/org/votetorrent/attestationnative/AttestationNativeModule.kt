@@ -90,6 +90,9 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 			// Phase 49 (D-16) — the recovery variant of the shared keygen: one-step, no attestation
 			// challenge, KeyAuthenticator.DEVICE_CREDENTIAL bitmask (API 30+) so this key survives a
 			// biometric re-enrolment that would strand VOTETORRENT_AUTHORITY_SIGNING_KEY_V1.
+			// 49-14 follow-up — now idempotent: an existing, still-usable alias is reused (its
+			// public value returned as-is) rather than unconditionally regenerated. See
+			// KeyAttestationHelper.generateRecoveryKey's doc comment.
 			val result = keyAttestationHelper.generateRecoveryKey(keyAlias)
 			promise.resolve(Arguments.createMap().apply {
 				putString("publicKeyBase64", result.publicKeyBase64)
@@ -97,6 +100,14 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 				putString("securityLevel", result.securityLevel)
 				putString("publicKeyCompressedHex", result.publicKeyCompressedHex)
 			})
+		} catch (e: RecoveryKeyInvalidatedException) {
+			// 49-14 follow-up (D-16 observability defect) — the existing recovery key is
+			// PERMANENTLY invalidated. This is the D-16 FAIL signal: it must reach JS as its own
+			// distinct, classified code — never silently regenerated (that would destroy the very
+			// evidence this signal exists to preserve) and never collapsed into the generic
+			// PROVISION_FAILED/biometric-error bucket a caller would render as
+			// "Couldn't verify your biometrics."
+			promise.reject("RECOVERY_KEY_INVALIDATED", e)
 		} catch (e: NoStrongBoxOrTeeException) {
 			// D-09 terminal, release-only (see class doc comment) — same taxonomy as provisionDeviceKey.
 			promise.reject("NO_STRONGBOX_OR_TEE", e)
