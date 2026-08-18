@@ -231,6 +231,13 @@ const resources = {
 			signingKeyProvisioningAwaitingNetworkBody:
 				'Your signing key is protected by your biometrics. Select or create a network to finish registering it.',
 			signingKeyProvisioningContinueButton: 'Return to App',
+			// 49-14 follow-up: distinct from awaiting-network — the network resolved, but this
+			// device's account on it did not (see ProvisionSigningKeyScreen.tsx's
+			// tryResolveNetworkUserEngine doc comment).
+			signingKeyProvisioningNetworkUserUnresolvedHeading: "We couldn't find your account on this network",
+			signingKeyProvisioningNetworkUserUnresolvedBody:
+				"This device is connected, but your officer account hasn't finished syncing to this network yet. Wait a moment and try again.",
+			signingKeyProvisioningNetworkUserUnresolvedRetryButton: 'Try Again',
 			signingKeyProvisioningRecoveryHeading: 'Your signing key needs to be replaced',
 			signingKeyProvisioningRecoveryBody:
 				"Your device's biometrics changed, which invalidated your previous signing key for security. Verify with your device PIN, pattern, or password to sign in a replacement key.",
@@ -1067,6 +1074,10 @@ const resources = {
 			signingKeyProvisioningAwaitingNetworkBody:
 				'Tu clave de firma está protegida por tu biometría. Selecciona o crea una red para terminar de registrarla.',
 			signingKeyProvisioningContinueButton: 'Volver a la Aplicación',
+			signingKeyProvisioningNetworkUserUnresolvedHeading: 'No pudimos encontrar tu cuenta en esta red',
+			signingKeyProvisioningNetworkUserUnresolvedBody:
+				'Este dispositivo está conectado, pero tu cuenta de funcionario aún no ha terminado de sincronizarse con esta red. Espera un momento e inténtalo de nuevo.',
+			signingKeyProvisioningNetworkUserUnresolvedRetryButton: 'Intentar de Nuevo',
 			signingKeyProvisioningRecoveryHeading: 'Tu clave de firma debe reemplazarse',
 			signingKeyProvisioningRecoveryBody:
 				'La biometría de tu dispositivo cambió, lo que invalidó tu clave de firma anterior por seguridad. Verifica con el PIN, patrón o contraseña de tu dispositivo para firmar una clave de reemplazo.',

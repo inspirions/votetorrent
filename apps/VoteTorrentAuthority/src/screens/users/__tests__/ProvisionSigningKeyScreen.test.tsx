@@ -327,6 +327,60 @@ describe("ProvisionSigningKeyScreen — 49-17 first-run stage 1 (network-indepen
 		expect(mockGoBack).toHaveBeenCalled();
 	});
 
+	it("(h) [49-14 follow-up] lands on network-user-unresolved (NOT awaiting-network) when the network resolves but getCurrentUser rejects — a resolved-network/missing-User-row failure must not be masqueraded as no-network", async () => {
+		mockHappyPathNative();
+		mockGetCurrentUser.mockRejectedValueOnce(new Error("User not found"));
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningNetworkUserUnresolvedHeading");
+		expect(json).not.toContain("signingKeyProvisioningAwaitingNetworkHeading");
+	});
+
+	it("(i) [49-14 follow-up] lands on network-user-unresolved when the network resolves but getCurrentUser resolves undefined (no throw)", async () => {
+		mockHappyPathNative();
+		mockGetCurrentUser.mockResolvedValueOnce(undefined as unknown as typeof mockUserEngine);
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningNetworkUserUnresolvedHeading");
+	});
+
+	it("(j) [49-14 follow-up] the network-user-unresolved retry button re-invokes resolution and can reach success on a subsequent call", async () => {
+		mockHappyPathNative();
+		mockGetCurrentUser.mockRejectedValueOnce(new Error("User not found"));
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [
+				{ key: POST_ATTESTATION_SIGNING_HEX, type: "P", expiration: Date.now() },
+				{ key: RECOVERY_HEX, type: "P", expiration: Date.now() },
+			],
+		});
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+		expect(JSON.stringify(tr.toJSON())).toContain("signingKeyProvisioningNetworkUserUnresolvedHeading");
+
+		// Second call to getCurrentUser (the retry) resolves normally via the default mock.
+		const retryButton = tr.root.findByProps({ testID: "signing-key-provisioning-retry-button" });
+		const pressable = retryButton.findAll((node) => typeof node.props.onPress === "function")[0]!;
+		await renderer.act(async () => pressable.props.onPress());
+		for (let i = 0; i < 6; i++) {
+			// eslint-disable-next-line no-await-in-loop
+			await renderer.act(async () => {
+				await Promise.resolve();
+			});
+		}
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningSuccessHeading");
+	});
+
 	it("(e) re-entry on an already-locally-provisioned device never re-runs the native ceremony", async () => {
 		mockDeviceUserFixture = {
 			id: "user-1",

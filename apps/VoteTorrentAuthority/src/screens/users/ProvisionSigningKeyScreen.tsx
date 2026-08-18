@@ -112,7 +112,16 @@ function getNative(): NativeAttestationSpec {
 	return require("@votetorrent/attestation-native/src/specs/NativeAttestation").default as NativeAttestationSpec;
 }
 
-type ScreenPhase = "idle" | "pending" | "success" | "awaiting-network" | "no-recovery";
+// "network-user-unresolved" (49-14 follow-up): a network resolved, but this device's User row
+// did not — a DISTINCT condition from "no network context at all" (`awaiting-network`). See
+// `tryResolveNetworkUserEngine`'s doc comment.
+type ScreenPhase =
+	| "idle"
+	| "pending"
+	| "success"
+	| "awaiting-network"
+	| "no-recovery"
+	| "network-user-unresolved";
 
 export default function ProvisionSigningKeyScreen() {
 	const insets = useSafeAreaInsets();
@@ -155,20 +164,47 @@ export default function ProvisionSigningKeyScreen() {
 	}
 
 	/**
-	 * Non-throwing sibling of `resolveFreshUserEngine`, used by first-run stage 2. Returns
-	 * `undefined` when `getEngine('network')` itself rejects (no network context exists at all —
-	 * the genuinely network-less `pm clear` case) OR when `getCurrentUser()` resolves nothing (a
-	 * network exists but this device has no `User` row in it yet). Catches broadly rather than
-	 * narrowly around `getCurrentUser()` alone: on a network-less device it is `getEngine('network')`
-	 * itself that fails, not just the call after it.
+	 * Non-throwing sibling of `resolveFreshUserEngine`, used by first-run stage 2.
+	 *
+	 * 49-14 follow-up (root-caused this session, confirmed at source): the PRIOR version of this
+	 * function collapsed EVERY failure mode into the same `undefined` — a genuinely absent network
+	 * ("no network context at all", the expected `pm clear` case) AND a resolved network whose
+	 * `getCurrentUser()` rejects or resolves nothing (a real DB-read failure, or this device's
+	 * `User` row genuinely missing/not-yet-synced). Both rendered the IDENTICAL
+	 * `awaiting-network` UI state with zero diagnostic information — on real hardware (Device B,
+	 * D-26a), this dead-ended the officer across THREE distinct networks with no
+	 * `BiometricPrompt` ever appearing and no way to tell "not synced yet, wait" from "a genuine
+	 * defect".
+	 *
+	 * This version DISTINGUISHES the two failure modes (per the comment on `getEngine('network')`
+	 * below, that first try/catch's narrow scope is deliberate — it is the ONLY thing that may
+	 * legitimately resolve to `'no-network'`):
+	 *   - `getEngine('network')` itself rejects → `'no-network'` (unchanged: still routes to the
+	 *     `awaiting-network` UI — this remains the expected, non-exceptional network-less state).
+	 *   - `getEngine('network')` resolves but `getCurrentUser()` rejects, OR resolves to nothing →
+	 *     `'user-unresolved'`, carrying the underlying error (if any) for future diagnostics. This
+	 *     is a DISTINCT, actionable condition — never silently masqueraded as "no network".
 	 */
-	async function tryResolveNetworkUserEngine(): Promise<IUserEngine | undefined> {
+	async function tryResolveNetworkUserEngine(): Promise<
+		{ kind: "no-network" } | { kind: "resolved"; engine: IUserEngine } | { kind: "user-unresolved"; error: unknown }
+	> {
+		let networkEngine: INetworkEngine;
 		try {
-			const networkEngine = await getEngine<INetworkEngine>("network");
-			const userEngine = await networkEngine.getCurrentUser();
-			return userEngine ?? undefined;
+			networkEngine = await getEngine<INetworkEngine>("network");
 		} catch {
-			return undefined;
+			// Narrow catch, deliberately: only `getEngine('network')` itself failing means "no
+			// network context exists at all" — the genuinely network-less `pm clear` case.
+			return { kind: "no-network" };
+		}
+		try {
+			const userEngine = await networkEngine.getCurrentUser();
+			if (!userEngine) return { kind: "user-unresolved", error: undefined };
+			return { kind: "resolved", engine: userEngine };
+		} catch (err) {
+			// A network context resolved, but this device's `User` row did not — e.g.
+			// `network-engine.ts`'s `getUser` throwing `Error('User not found')`, a real DB-query
+			// fault, or a commit-visibility race. NEVER collapsed into `'no-network'`.
+			return { kind: "user-unresolved", error: err };
 		}
 	}
 
@@ -277,11 +313,19 @@ export default function ProvisionSigningKeyScreen() {
 			// Stage 2 (network-scoped): register whichever keys the network `User` is still
 			// missing. Skipped entirely — landing on the awaiting-network state — when no network
 			// `User` resolves yet (the officer provisioned before creating or joining a network).
-			const networkUserEngine = await tryResolveNetworkUserEngine();
-			if (networkUserEngine === undefined) {
+			// 49-14 follow-up: a resolved network whose `User` row didn't resolve is a DISTINCT,
+			// actionable condition — see `tryResolveNetworkUserEngine`'s doc comment — never
+			// silently rendered as the same `awaiting-network` dead end.
+			const resolution = await tryResolveNetworkUserEngine();
+			if (resolution.kind === "no-network") {
 				setPhase("awaiting-network");
 				return;
 			}
+			if (resolution.kind === "user-unresolved") {
+				setPhase("network-user-unresolved");
+				return;
+			}
+			const networkUserEngine = resolution.engine;
 
 			// Reconcile, do not re-insert: read the network User's CURRENT key set and register
 			// only what is missing. `networks-engine.create()`'s own bootstrap branch already
@@ -500,6 +544,37 @@ export default function ProvisionSigningKeyScreen() {
 						title={t("signingKeyProvisioningContinueButton")}
 						backgroundColor={colors.accent}
 						onPress={() => navigation.goBack()}
+					/>
+				</View>
+			</ScrollView>
+		);
+	}
+
+	// 49-14 follow-up: a network resolved, but this device's User row did not — a DISTINCT,
+	// actionable condition from `awaiting-network` (see `tryResolveNetworkUserEngine`'s doc
+	// comment). Retry re-invokes stage 2's resolution directly (the local ceremony already ran,
+	// per the `existingDeviceUser`/`existingRecord` guard, so this is a cheap network-only retry).
+	if (phase === "network-user-unresolved") {
+		return (
+			<ScrollView
+				testID="signing-key-provisioning-screen"
+				style={styles.container}
+				contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+			>
+				<View style={localStyles.iconRow}>
+					<FontAwesome6 name="triangle-exclamation" size={32} color={colors.warning} />
+				</View>
+				<ThemedText type="default" style={{ color: colors.text }}>
+					{t("signingKeyProvisioningNetworkUserUnresolvedHeading")}
+				</ThemedText>
+				<ThemedText type="small" style={[localStyles.body, { color: colors.textSecondary }]}>
+					{t("signingKeyProvisioningNetworkUserUnresolvedBody")}
+				</ThemedText>
+				<View testID="signing-key-provisioning-retry-button">
+					<CustomButton
+						title={t("signingKeyProvisioningNetworkUserUnresolvedRetryButton")}
+						backgroundColor={colors.accent}
+						onPress={() => handleFirstRun()}
 					/>
 				</View>
 			</ScrollView>
