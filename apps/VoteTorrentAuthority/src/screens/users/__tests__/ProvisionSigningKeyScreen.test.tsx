@@ -572,10 +572,25 @@ const RECOVERY_KEY_HEX = "ee" + "55".repeat(32);
 describe("ProvisionSigningKeyScreen — 49-10 recovery variant (D-16) and D-18 terminal state", () => {
 	beforeEach(() => {
 		mockRouteParams = { reason: "invalidated" };
+		// 49-14 follow-up: the recovery key MUST already be a registered, active UserKey for this
+		// ceremony to be reachable at all — UserKey.DeleteValid requires BOTH a valid signer
+		// (clause 1) AND that the revoked row not be the user's LAST key (clause 2), which
+		// together mean revoking OLD_SIGNING_KEY_HEX is only ever legal when RECOVERY_KEY_HEX is
+		// ALREADY present as a second active key. This is the realistic post-49-17 precondition
+		// state (first-run stage 2 already registered the recovery key on a prior visit) — the
+		// UNregistered-recovery-key state is its own dedicated describe block below, proving the
+		// new fail-fast precondition check, not silently modeled as the happy path here.
 		mockGetSummary.mockResolvedValue({
 			id: "user-1",
 			name: "Officer One",
-			activeKeys: [{ key: OLD_SIGNING_KEY_HEX, type: "P", expiration: Date.now() + 1000 }],
+			activeKeys: [
+				{ key: OLD_SIGNING_KEY_HEX, type: "P", expiration: Date.now() + 1000 },
+				{ key: RECOVERY_KEY_HEX, type: "P", expiration: Date.now() + 1000 },
+			],
+		});
+		nativeFake.provisionRecoveryKey.mockResolvedValue({
+			publicKeyBase64: "RECOVERY-SPKI-DER-BASE64",
+			publicKeyCompressedHex: RECOVERY_KEY_HEX,
 		});
 	});
 
@@ -732,6 +747,63 @@ describe("ProvisionSigningKeyScreen — 49-10 recovery variant (D-16) and D-18 t
 
 			expect(mockMarkRecoveryInProgress).not.toHaveBeenCalled();
 			expect(mockClearRecoveryInProgress).not.toHaveBeenCalled();
+		});
+	});
+
+	// 49-14 follow-up (root-caused on real hardware, Device A — see 49-14-PROOF-LOG.md's
+	// "Follow-up session — prerequisite diagnosis" section): the two NEW failure modes this
+	// session closed. Neither reached a `BiometricPrompt` on real hardware — both are detected
+	// before any Keystore mutation.
+	describe("(e) 49-14 follow-up — recovery-key precondition and invalidation", () => {
+		it("fails fast with RECOVERY_KEY_NOT_REGISTERED when the recovery key is not yet an active UserKey, touching NEITHER the Keystore nor the in-progress marker", async () => {
+			// Overrides this describe block's own beforeEach: the network User has ONLY the old
+			// signing key active — the exact state measured on Device A this session
+			// (`activeKeys=[{"key":"02186e2d...","type":"P",...}]`, recovery key absent).
+			mockGetSummary.mockResolvedValue({
+				id: "user-1",
+				name: "Officer One",
+				activeKeys: [{ key: OLD_SIGNING_KEY_HEX, type: "P", expiration: Date.now() + 1000 }],
+			});
+			nativeFake.provisionRecoveryKey.mockResolvedValue({
+				publicKeyBase64: "RECOVERY-SPKI-DER-BASE64",
+				publicKeyCompressedHex: RECOVERY_KEY_HEX,
+			});
+
+			const tr = await renderScreen();
+			await press(tr, primaryButton(tr));
+
+			// Detected BEFORE any Keystore mutation or in-progress marker — the whole point of
+			// checking this precondition first.
+			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled();
+			expect(mockMarkRecoveryInProgress).not.toHaveBeenCalled();
+			expect(mockRevokeKey).not.toHaveBeenCalled();
+			expect(mockAddKey).not.toHaveBeenCalled();
+
+			const json = JSON.stringify(tr.toJSON());
+			expect(json).toContain("deviceSigningErrorRecoveryKeyNotRegistered");
+			// Never the generic biometric-error copy — that collapse is exactly the masking this
+			// follow-up exists to prevent (T-49-USER-7).
+			expect(json).not.toContain("deviceSigningErrorGeneric");
+		});
+
+		it("surfaces RECOVERY_KEY_INVALIDATED (native's provisionRecoveryKey reject) as its own distinct inline copy, never the generic biometric-error message", async () => {
+			nativeFake.provisionRecoveryKey.mockRejectedValue(
+				Object.assign(new Error("recovery key permanently invalidated"), {
+					code: "RECOVERY_KEY_INVALIDATED",
+				}),
+			);
+
+			const tr = await renderScreen();
+			await press(tr, primaryButton(tr));
+
+			// The rejection fires on the very first native call this function makes — nothing
+			// past it should ever run.
+			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled();
+			expect(mockMarkRecoveryInProgress).not.toHaveBeenCalled();
+
+			const json = JSON.stringify(tr.toJSON());
+			expect(json).toContain("deviceSigningErrorRecoveryKeyInvalidated");
+			expect(json).not.toContain("deviceSigningErrorGeneric");
 		});
 	});
 });

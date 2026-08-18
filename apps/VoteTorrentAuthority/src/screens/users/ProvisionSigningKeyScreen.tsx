@@ -388,7 +388,53 @@ export default function ProvisionSigningKeyScreen() {
 		try {
 			const native = getNative();
 
-			// Step 1 — a fresh signing key under the SAME alias (the old one is permanently
+			// Step 1 (precondition check, 49-14 follow-up — root-caused on real hardware, Device
+			// A): resolve the recovery key's current public value and the network User's current
+			// key set BEFORE touching the Keystore at all. `native.provisionRecoveryKey` is now
+			// GENUINELY idempotent (KeyAttestationHelper.kt's `generateRecoveryKey` reuse path,
+			// 49-14 follow-up) — it returns the ALIAS'S EXISTING key rather than regenerating it,
+			// so calling it this early costs nothing and cannot invalidate anything the network
+			// already holds. This replaces the prior comment's FALSE claim that the pre-fix native
+			// call was "idempotent" — it was not: every call unconditionally deleted and
+			// regenerated the Keystore entry, which is what let this ceremony destroy the very key
+			// its own `UserKey.DeleteValid` CHECK depends on (see the 49-14-PROOF-LOG.md follow-up
+			// session for the traced root cause).
+			//
+			// `UserKey.DeleteValid` (votetorrent.qsql) requires BOTH clause 1 (`context.UserKey` —
+			// here, the recovery key — must be a registered, non-expired `UserKey` row) AND clause
+			// 2 (the row being revoked must not be the user's LAST active key). Together these mean
+			// this ceremony can only ever succeed if the recovery key is ALREADY registered as a
+			// SECOND active key beside the one being revoked — a precondition
+			// `ProvisionSigningKeyScreen`'s own first-run stage 2 establishes (49-17-SUMMARY.md),
+			// but ONLY once the officer revisits this screen after a network becomes available. A
+			// device that ran first-run before any network existed (e.g. via "Start Fresh") and
+			// never returned to press "Set Up Secure Signing" again reaches this ceremony with the
+			// recovery key legitimately never registered — this is NOT itself a bug in
+			// `networks-engine.create()`'s bootstrap write, which only ever registers the founding
+			// SIGNING key. Detected and reported HERE, before any Keystore mutation, so a failed
+			// check costs nothing to retry and leaves no interrupted-ceremony residue for the
+			// officer to clean up.
+			const recoveryKey = (await native.provisionRecoveryKey(RECOVERY_KEY_ALIAS)) as {
+				publicKeyCompressedHex: string;
+			};
+			const before = await resolveFreshUserEngine();
+			const beforeSummary = await before.getSummary();
+			const recoveryKeyRegistered = (beforeSummary?.activeKeys ?? []).some(
+				(k) => k.key === recoveryKey.publicKeyCompressedHex,
+			);
+			if (!recoveryKeyRegistered) {
+				throw Object.assign(
+					new Error(
+						"ProvisionSigningKeyScreen.handleRecovery: recovery key is not a registered, " +
+							"active UserKey on this network — UserKey.DeleteValid cannot be satisfied. " +
+							"Complete Secure Signing setup (Settings) while connected to the network first.",
+					),
+					{ code: "RECOVERY_KEY_NOT_REGISTERED" },
+				);
+			}
+			const oldKey = beforeSummary?.activeKeys.find((k) => k.key !== recoveryKey.publicKeyCompressedHex)?.key;
+
+			// Step 2 — a fresh signing key under the SAME alias (the old one is permanently
 			// invalidated; the native side regenerates under this alias, `KeyAttestationHelper.kt`).
 			const deviceKey = (await native.provisionDeviceKey(SIGNING_KEY_ALIAS)) as {
 				publicKeyCompressedHex: string;
@@ -405,17 +451,6 @@ export default function ProvisionSigningKeyScreen() {
 			// `persistProvisionedDeviceUser` and `persistDeviceProvisioningRecord` complete — see
 			// `device-user.ts`'s `DEVICE_RECOVERY_IN_PROGRESS_KEY` doc comment.
 			await markRecoveryInProgress();
-
-			// Re-resolve the recovery key's current public value (idempotent — the same alias
-			// already provisioned during first-run) so the old, invalidated key can be identified
-			// and the replacement's signature can be attributed to the correct signer.
-			const recoveryKey = (await native.provisionRecoveryKey(RECOVERY_KEY_ALIAS)) as {
-				publicKeyCompressedHex: string;
-			};
-
-			const before = await resolveFreshUserEngine();
-			const beforeSummary = await before.getSummary();
-			const oldKey = beforeSummary?.activeKeys.find((k) => k.key !== recoveryKey.publicKeyCompressedHex)?.key;
 
 			// Revoke the invalidated key FIRST, authorized by the recovery key's own signature
 			// (revokeKey binds context.UserKey from `signature.signerKey` directly — unlike
@@ -490,6 +525,13 @@ export default function ProvisionSigningKeyScreen() {
 
 			setPhase("success");
 		} catch (err) {
+			// T-49-USER-7 (deviceSigningError.ts:117-118) — mapDeviceSigningError/handleCeremonyError
+			// below classify this into a UI-safe copy string, which necessarily discards the raw
+			// error. Logging the raw value first is what actually surfaced this file's own D-16/
+			// DeleteValid defect on real hardware (49-14 follow-up) — the generic "Couldn't verify
+			// your biometrics" copy alone gave no way to tell a device-signing rejection from an
+			// engine/schema failure like a rejected `DeleteValid` CHECK.
+			console.warn("ProvisionSigningKeyScreen handleRecovery ceremony failed:", err);
 			handleCeremonyError(err);
 		}
 	}
