@@ -44,12 +44,16 @@ jest.mock('react-native', () => {
 
 jest.mock('../device-user', () => ({
 	getDeviceUser: jest.fn(),
+	// 49-14 follow-up: defaults to "no recovery in progress" so this suite's pre-existing
+	// happy-path/rejection assertions are unaffected; the dedicated coverage for the marker
+	// itself overrides this per-test.
+	isRecoveryInProgress: jest.fn().mockResolvedValue(false),
 }))
 
 import type { User } from '@votetorrent/vote-core'
 import { UserKeyType } from '@votetorrent/vote-core'
 import { createDeviceSigner } from '../device-signer'
-import { getDeviceUser } from '../device-user'
+import { getDeviceUser, isRecoveryInProgress } from '../device-user'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the react-native mock above.
 const { __attestationNativeFake: nativeFake } = require('react-native') as {
@@ -57,6 +61,7 @@ const { __attestationNativeFake: nativeFake } = require('react-native') as {
 }
 
 const mockGetDeviceUser = getDeviceUser as jest.MockedFunction<typeof getDeviceUser>
+const mockIsRecoveryInProgress = isRecoveryInProgress as jest.MockedFunction<typeof isRecoveryInProgress>
 
 const PROVISIONED_USER: User = {
 	id: 'user-1',
@@ -68,6 +73,8 @@ describe('device-signer.ts — hardware rewrite (49-07)', () => {
 	beforeEach(() => {
 		nativeFake.signWithDeviceKey.mockReset()
 		mockGetDeviceUser.mockReset()
+		mockIsRecoveryInProgress.mockReset()
+		mockIsRecoveryInProgress.mockResolvedValue(false)
 	})
 
 	it('(a) base64-encodes the digest and passes the alias + three prompt strings through unchanged', async () => {
@@ -115,5 +122,38 @@ describe('device-signer.ts — hardware rewrite (49-07)', () => {
 
 		await expect(createDeviceSigner('Officer One')).rejects.toMatchObject({ code: 'NO_KEY_PROVISIONED' })
 		expect(nativeFake.signWithDeviceKey).not.toHaveBeenCalled()
+	})
+
+	// 49-14 follow-up (interrupted-handleRecovery Keystore/metadata desync — the PREVENTION half
+	// of the fix): device-signer.ts must fail closed, before any native call, while
+	// handleRecovery's in-progress marker is set.
+	describe('(d) 49-14 follow-up — isRecoveryInProgress fail-closed check', () => {
+		it('rejects KEY_INVALIDATED_REASSOCIATE before any native call when a recovery is in progress', async () => {
+			mockGetDeviceUser.mockResolvedValue(PROVISIONED_USER)
+			mockIsRecoveryInProgress.mockResolvedValue(true)
+
+			await expect(createDeviceSigner('Officer One')).rejects.toMatchObject({
+				code: 'KEY_INVALIDATED_REASSOCIATE',
+			})
+			expect(nativeFake.signWithDeviceKey).not.toHaveBeenCalled()
+		})
+
+		it('signs normally when no recovery is in progress (explicit false, not just the default)', async () => {
+			mockGetDeviceUser.mockResolvedValue(PROVISIONED_USER)
+			mockIsRecoveryInProgress.mockResolvedValue(false)
+			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: 'deadbeef' })
+
+			const sign = await createDeviceSigner('Officer One')
+			await expect(sign(new Uint8Array([1, 2, 3]))).resolves.toMatchObject({ signature: 'deadbeef' })
+			expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1)
+		})
+
+		it('checks the marker AFTER the NO_KEY_PROVISIONED gate (an unprovisioned device is never routed to recovery)', async () => {
+			mockGetDeviceUser.mockResolvedValue(undefined)
+			mockIsRecoveryInProgress.mockResolvedValue(true)
+
+			await expect(createDeviceSigner('Officer One')).rejects.toMatchObject({ code: 'NO_KEY_PROVISIONED' })
+			expect(nativeFake.signWithDeviceKey).not.toHaveBeenCalled()
+		})
 	})
 })

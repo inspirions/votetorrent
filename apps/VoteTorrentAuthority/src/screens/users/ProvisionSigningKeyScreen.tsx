@@ -13,8 +13,10 @@ import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
 import {
+	clearRecoveryInProgress,
 	getDeviceProvisioningRecord,
 	getDeviceUser,
+	markRecoveryInProgress,
 	persistDeviceProvisioningRecord,
 	persistProvisionedDeviceUser,
 } from "../../engines/device-user";
@@ -347,6 +349,19 @@ export default function ProvisionSigningKeyScreen() {
 			const deviceKey = (await native.provisionDeviceKey(SIGNING_KEY_ALIAS)) as {
 				publicKeyCompressedHex: string;
 			};
+
+			// 49-14 follow-up (interrupted-handleRecovery Keystore/metadata desync): the Keystore
+			// alias above is now regenerated, UNPROMPTED, with no user-visible confirmation — but
+			// local storage (`deviceUser.activeKeys[0].key`) and the network `UserKey` still name
+			// the OLD key. Mark this in-progress IMMEDIATELY, before any further step that could be
+			// interrupted (screen timeout, app kill, process death). While this marker is set,
+			// `device-signer.ts`'s `createDeviceSigner` fails closed (`KEY_INVALIDATED_REASSOCIATE`)
+			// for every routine per-use signing call site, rather than risk silently producing a
+			// mismatched signature. Cleared only at the very end of this function, once BOTH
+			// `persistProvisionedDeviceUser` and `persistDeviceProvisioningRecord` complete — see
+			// `device-user.ts`'s `DEVICE_RECOVERY_IN_PROGRESS_KEY` doc comment.
+			await markRecoveryInProgress();
+
 			// Re-resolve the recovery key's current public value (idempotent — the same alias
 			// already provisioned during first-run) so the old, invalidated key can be identified
 			// and the replacement's signature can be attributed to the correct signer.
@@ -423,6 +438,11 @@ export default function ProvisionSigningKeyScreen() {
 				certificateChainBase64: [],
 				capturedAt: Date.now(),
 			});
+
+			// Both paired writes above completed — local metadata is back in sync with the
+			// Keystore alias. Only NOW is it safe to clear the in-progress marker (49-14
+			// follow-up); leaving it set on any earlier failure path is the entire point.
+			await clearRecoveryInProgress();
 
 			setPhase("success");
 		} catch (err) {

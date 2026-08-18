@@ -6,6 +6,7 @@ import type { RootStackParamList } from '../navigation/types';
 import {
 	DEVICE_SIGNING_ERROR_COPY_KEY,
 	isDeviceSigningError,
+	isSignatureDesyncError,
 	mapDeviceSigningError,
 } from '../utils/deviceSigningError';
 
@@ -44,6 +45,19 @@ export function useDeviceSigningErrorHandler(): (err: unknown) => DeviceSigningE
 
 	return useCallback(
 		(err: unknown): DeviceSigningErrorOutcome => {
+			// 49-14 follow-up rescue path: a `SignatureValid` CHECK rejection from an
+			// interrupted `handleRecovery` desync is NOT a `signWithDeviceKey` native-code
+			// rejection — `isDeviceSigningError` below would never recognize it, since it
+			// carries no `code` at all. Recognized separately (message-based, see
+			// `isSignatureDesyncError`'s doc comment) and routed IDENTICALLY to
+			// `key-invalidated`: re-entering `handleRecovery` self-heals the desync regardless
+			// of how stale the local metadata is, or whether this device's interruption
+			// predates the `device-signer.ts` in-progress marker.
+			if (isSignatureDesyncError(err)) {
+				navigation.navigate('ProvisionSigningKey', { reason: 'invalidated' });
+				return { handled: true };
+			}
+
 			// "Not mine": an error without a recognized device-signing `code`
 			// (a plain Error, undefined, {}, or an unrecognized code) is left
 			// entirely alone. The caller keeps its own raw-message fallback.

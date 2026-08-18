@@ -34,7 +34,7 @@
 
 import type { Signature } from '@votetorrent/vote-core'
 import i18n from '../i18n'
-import { getDeviceUser } from './device-user'
+import { getDeviceUser, isRecoveryInProgress } from './device-user'
 // Type-only import — erased at compile time (isolatedModules requires this to be explicit), so
 // it produces NO runtime require of '@votetorrent/attestation-native/src/specs/NativeAttestation'
 // and therefore does not trigger that module's top-level `TurboModuleRegistry.getEnforcing(...)`
@@ -186,6 +186,26 @@ export async function createDeviceSigner (displayName: string): Promise<SignCall
 	if (!signerKey) {
 		const err = new Error('device-signer: device user has no active key — cannot sign') as Error & { code: string }
 		err.code = 'NO_KEY_PROVISIONED'
+		throw err
+	}
+
+	// 49-14 follow-up (interrupted-handleRecovery Keystore/metadata desync): fail CLOSED, before
+	// any native call, if a `handleRecovery` run regenerated the Keystore-resident
+	// `SIGNING_KEY_ALIAS` but was interrupted before its paired `persistProvisionedDeviceUser`
+	// write brought local storage back in sync. Signing anyway would silently produce a
+	// `Signature{signerKey: <OLD>, signature: <produced-by-NEW-key>}` that the schema's
+	// `SignatureValid` CHECK correctly (but non-actionably) rejects — see
+	// `DEVICE_RECOVERY_IN_PROGRESS_KEY`'s doc comment in `device-user.ts`. Reuses the EXISTING
+	// `KEY_INVALIDATED_REASSOCIATE` code — already wired end-to-end through
+	// `deviceSigningError.ts`/`useDeviceSigningErrorHandler.ts` to route the officer back into
+	// `handleRecovery` (`reason: 'invalidated'`), which self-heals regardless of how it got here.
+	if (await isRecoveryInProgress()) {
+		const err = new Error(
+			'device-signer: a signing-key recovery ceremony was started but never completed — the ' +
+				'Keystore alias may no longer match the locally recorded signerKey. Re-run key ' +
+				'recovery before signing.',
+		) as Error & { code: string }
+		err.code = 'KEY_INVALIDATED_REASSOCIATE'
 		throw err
 	}
 

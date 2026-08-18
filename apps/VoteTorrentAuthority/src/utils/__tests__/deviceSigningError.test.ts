@@ -2,6 +2,7 @@ import {
 	CODE_TO_CLASS,
 	DEVICE_SIGNING_ERROR_COPY_KEY,
 	isNavigationClass,
+	isSignatureDesyncError,
 	mapDeviceSigningError,
 } from '../deviceSigningError';
 
@@ -68,5 +69,52 @@ describe('deviceSigningError (D-13 taxonomy)', () => {
 		expect(isNavigationClass('lockout-permanent')).toBe(false);
 		expect(isNavigationClass('biometric-error')).toBe(false);
 		expect(isNavigationClass('no-device-credential')).toBe(false);
+	});
+});
+
+// 49-14 follow-up (interrupted-handleRecovery Keystore/metadata desync): isSignatureDesyncError
+// is the RESCUE-path predicate — a message-based classification, not part of the code-based
+// taxonomy above (see its own doc comment).
+describe('isSignatureDesyncError (49-14 follow-up)', () => {
+	test('recognizes the raw, unwrapped ConstraintError shape observed on real hardware', () => {
+		const err = Object.assign(new Error('CHECK constraint failed: SignatureValid'), {
+			name: 'ConstraintError',
+		});
+		expect(isSignatureDesyncError(err)).toBe(true);
+	});
+
+	test('recognizes the wrapped shape produced by ElectionsEngine.rethrow/NetworkEngine-style catch blocks', () => {
+		const err = new Error('Quereus error (code 19): CHECK constraint failed: SignatureValid');
+		expect(isSignatureDesyncError(err)).toBe(true);
+	});
+
+	test('recognizes a plain string message carrying the same shape', () => {
+		expect(isSignatureDesyncError('CHECK constraint failed: SignatureValid')).toBe(true);
+	});
+
+	test('does NOT match InviteSignatureValid — a different table, different signing path', () => {
+		const err = new Error('CHECK constraint failed: InviteSignatureValid');
+		expect(isSignatureDesyncError(err)).toBe(false);
+	});
+
+	test('does NOT match a CHECK failure unrelated to any signature', () => {
+		const err = new Error('CHECK constraint failed: RevisionDeadlineValid');
+		expect(isSignatureDesyncError(err)).toBe(false);
+	});
+
+	test('does NOT match a SignatureValid-mentioning message with no constraint marker at all', () => {
+		const err = new Error('SignatureValid failed for some unrelated reason');
+		expect(isSignatureDesyncError(err)).toBe(false);
+	});
+
+	test('does NOT match undefined, null, {}, or a device-signing-coded error', () => {
+		expect(isSignatureDesyncError(undefined)).toBe(false);
+		expect(isSignatureDesyncError(null)).toBe(false);
+		expect(isSignatureDesyncError({})).toBe(false);
+		expect(isSignatureDesyncError({ code: 'CANCELED' })).toBe(false);
+	});
+
+	test('does NOT match a generic engine failure (the pass-through case must stay pass-through)', () => {
+		expect(isSignatureDesyncError(new Error('engine write failed'))).toBe(false);
 	});
 });

@@ -27,11 +27,15 @@ import { UserKeyType } from '@votetorrent/vote-core'
 import {
 	DEVICE_USER_KEY,
 	DEVICE_PROVISIONING_KEY,
+	DEVICE_RECOVERY_IN_PROGRESS_KEY,
 	getDeviceUser,
 	getOrCreateDeviceUser,
 	persistProvisionedDeviceUser,
 	persistDeviceProvisioningRecord,
 	getDeviceProvisioningRecord,
+	markRecoveryInProgress,
+	clearRecoveryInProgress,
+	isRecoveryInProgress,
 	type DeviceProvisioningRecord,
 } from '../device-user'
 import { isDeviceSigningError } from '../../utils/deviceSigningError'
@@ -128,6 +132,39 @@ describe('device-user.ts — 49-16 provisioning record + typed unprovisioned rej
 			const provisioningRaw = await AsyncStorage.getItem(DEVICE_PROVISIONING_KEY)
 			expect(provisioningRaw).not.toBeNull()
 			expect(provisioningRaw).toMatch(/certificateChainBase64/)
+		})
+	})
+
+	describe('49-14 follow-up — recovery-in-progress marker (device-signer.ts fail-closed check)', () => {
+		it('isRecoveryInProgress() is false before anything is written', async () => {
+			await expect(isRecoveryInProgress()).resolves.toBe(false)
+		})
+
+		it('markRecoveryInProgress() makes isRecoveryInProgress() true', async () => {
+			await markRecoveryInProgress()
+			await expect(isRecoveryInProgress()).resolves.toBe(true)
+		})
+
+		it('clearRecoveryInProgress() makes isRecoveryInProgress() false again', async () => {
+			await markRecoveryInProgress()
+			await clearRecoveryInProgress()
+			await expect(isRecoveryInProgress()).resolves.toBe(false)
+		})
+
+		it('clearRecoveryInProgress() is a safe no-op when no marker was ever written', async () => {
+			await expect(clearRecoveryInProgress()).resolves.toBeUndefined()
+			await expect(isRecoveryInProgress()).resolves.toBe(false)
+		})
+
+		it('is stored under its own AsyncStorage key, distinct from deviceUser and the provisioning record', async () => {
+			await persistProvisionedDeviceUser('Officer One', 'aa'.repeat(33))
+			await markRecoveryInProgress()
+
+			const markerRaw = await AsyncStorage.getItem(DEVICE_RECOVERY_IN_PROGRESS_KEY)
+			expect(markerRaw).not.toBeNull()
+
+			const deviceUserRaw = await AsyncStorage.getItem(DEVICE_USER_KEY)
+			expect(deviceUserRaw).not.toMatch(/startedAt/)
 		})
 	})
 

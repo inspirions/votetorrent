@@ -126,3 +126,39 @@ export function isDeviceSigningError(err: unknown): boolean {
 	const code = (err as { code?: unknown } | null | undefined)?.code;
 	return typeof code === 'string' && code in CODE_TO_CLASS;
 }
+
+/**
+ * 49-14 follow-up (interrupted-handleRecovery Keystore/metadata desync, filed as
+ * `.planning/todos/pending/2026-08-18-interrupted-handlerecovery-keystore-metadata-desync.md`):
+ * recognizes a Quereus CHECK-constraint rejection naming `SignatureValid` — the schema's own gate
+ * correctly rejecting a signature whose `signerKey` (bound from stale local `deviceUser`
+ * metadata) no longer matches the private key that actually produced it. This is the SHAPE an
+ * interrupted `handleRecovery` leaves behind: `provisionDeviceKey` (step 1, unprompted) already
+ * regenerated the Keystore-resident `SIGNING_KEY_ALIAS`, but the paired
+ * `persistProvisionedDeviceUser` write (the final step) never ran, so `device-signer.ts` signs
+ * with the NEW key while reporting the OLD one.
+ *
+ * Deliberately NOT folded into `DeviceSigningErrorClass`/`CODE_TO_CLASS` above: this failure never
+ * touches `signWithDeviceKey`'s native reject path at all — it fires from the routine per-use call
+ * sites' own engine writes (`ElectionsEngine`/`UserEngine`-style `rethrow` wrapping, or the raw
+ * `ConstraintError` unwrapped when the CHECK is evaluated as a deferred constraint — both shapes
+ * are handled, since this reads the error's MESSAGE, not a `code` field).
+ *
+ * `\bSignatureValid\b` (word-boundary-anchored) deliberately excludes `InviteSignatureValid` (a
+ * different table's, different-signing-path CHECK with the same substring) so this predicate
+ * stays scoped to the device signing key, not every signature-shaped CHECK in the schema.
+ *
+ * This is the RESCUE half of the fix — it works even for a device whose desync PREDATES this
+ * predicate's existence (no `deviceSigningRecoveryInProgress` marker was ever written for it,
+ * e.g. an interruption that happened before this code shipped): the officer's next routine sign
+ * attempt fails this exact way regardless of marker state, and `useDeviceSigningErrorHandler.ts`
+ * routes that failure back into `handleRecovery` (`reason: 'invalidated'`), which self-heals
+ * unconditionally — see `device-user.ts`'s `DEVICE_RECOVERY_IN_PROGRESS_KEY` doc comment for the
+ * PREVENTION half (`device-signer.ts`'s `isRecoveryInProgress()` fail-closed check for FUTURE
+ * interruptions).
+ */
+export function isSignatureDesyncError(err: unknown): boolean {
+	const message = err instanceof Error ? err.message : typeof err === 'string' ? err : undefined;
+	if (message === undefined) return false;
+	return /\bSignatureValid\b/.test(message) && /constraint/i.test(message);
+}

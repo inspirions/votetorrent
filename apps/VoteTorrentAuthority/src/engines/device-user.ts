@@ -50,6 +50,39 @@ export const DEVICE_USER_KEY = 'deviceUser'
  */
 export const DEVICE_PROVISIONING_KEY = 'deviceSigningProvisioning'
 
+/**
+ * AsyncStorage key under which the recovery-in-progress marker is persisted (49-14 follow-up:
+ * `.planning/todos/pending/2026-08-18-interrupted-handlerecovery-keystore-metadata-desync.md`).
+ *
+ * **What this guards against:** `ProvisionSigningKeyScreen.tsx`'s `handleRecovery` performs two
+ * state-mutating steps that are NOT atomic — (1) `provisionDeviceKey` regenerates the
+ * Keystore-resident `SIGNING_KEY_ALIAS` private key, UNPROMPTED, no biometric/device-credential
+ * gate; (2) later, `persistProvisionedDeviceUser` updates local storage so `activeKeys[0].key`
+ * names the new public key. Any interruption between them (screen timeout, app kill, process
+ * death) leaves the Keystore holding a new, never-registered private key while local storage
+ * still names the old, invalidated public key — `device-signer.ts`'s `createDeviceSigner` then
+ * signs with the NEW key while reporting the OLD one, which fails the schema's `SignatureValid`
+ * CHECK with no actionable path back (the raw failure carries no `signWithDeviceKey` reject
+ * `code`, so it bypasses the D-13 taxonomy entirely).
+ *
+ * **The prevention half of the fix:** `handleRecovery` writes this marker immediately after
+ * `provisionDeviceKey` resolves (Keystore alias now regenerated) and clears it only once
+ * `persistProvisionedDeviceUser` + `persistDeviceProvisioningRecord` both complete. While the
+ * marker is present, `device-signer.ts`'s `createDeviceSigner` fails CLOSED with the existing
+ * `KEY_INVALIDATED_REASSOCIATE` code — BEFORE any native signing call — rather than letting a
+ * routine per-use signing action silently attempt (and schema-reject) a mismatched signature.
+ *
+ * **What this does NOT cover:** a device whose desync predates this marker's existence (the
+ * interruption happened before this code shipped) — no marker was ever written for it. That
+ * device's rescue path is the SEPARATE, message-based `isSignatureDesyncError` classification in
+ * `deviceSigningError.ts`, which recognizes the resulting `SignatureValid` CHECK failure itself
+ * and routes the officer back into `handleRecovery` regardless of marker state — `handleRecovery`
+ * re-running is self-healing either way, since it always re-derives the currently-registered
+ * network key from a fresh `getSummary()` read (never from local storage) and unconditionally
+ * overwrites local storage at the end.
+ */
+export const DEVICE_RECOVERY_IN_PROGRESS_KEY = 'deviceSigningRecoveryInProgress'
+
 /** Ten years in milliseconds — expiration epoch for the provisioned device key. */
 const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000
 
@@ -202,6 +235,38 @@ export async function getDeviceProvisioningRecord(): Promise<DeviceProvisioningR
 	const stored = await AsyncStorage.getItem(DEVICE_PROVISIONING_KEY)
 	if (stored === null) return undefined
 	return JSON.parse(stored) as DeviceProvisioningRecord
+}
+
+/**
+ * Mark that `handleRecovery` has regenerated the `SIGNING_KEY_ALIAS` Keystore entry but has not
+ * yet completed the paired local-metadata write that would bring it back in sync (49-14
+ * follow-up). See `DEVICE_RECOVERY_IN_PROGRESS_KEY`'s doc comment for the full rationale.
+ */
+export async function markRecoveryInProgress(): Promise<void> {
+	await AsyncStorage.setItem(DEVICE_RECOVERY_IN_PROGRESS_KEY, JSON.stringify({ startedAt: Date.now() }))
+}
+
+/**
+ * Clear the recovery-in-progress marker. Called ONLY once BOTH `persistProvisionedDeviceUser`
+ * and `persistDeviceProvisioningRecord` have completed at the end of a full `handleRecovery` run
+ * — never earlier, and never on a caught/interrupted path (leaving the marker set on failure is
+ * the entire point: it is what makes the next routine signing attempt fail closed instead of
+ * silently producing a schema-invalid signature).
+ */
+export async function clearRecoveryInProgress(): Promise<void> {
+	await AsyncStorage.removeItem(DEVICE_RECOVERY_IN_PROGRESS_KEY)
+}
+
+/**
+ * Read-only check used by `device-signer.ts`'s `createDeviceSigner` — every one of this app's
+ * ~22 routine per-use signing call sites — BEFORE any native signing call is attempted. `true`
+ * means a `handleRecovery` run regenerated the Keystore alias but never finished re-syncing local
+ * metadata; the caller must fail closed rather than risk signing with a key that no longer
+ * matches the `signerKey` local storage would report.
+ */
+export async function isRecoveryInProgress(): Promise<boolean> {
+	const stored = await AsyncStorage.getItem(DEVICE_RECOVERY_IN_PROGRESS_KEY)
+	return stored !== null
 }
 
 /**

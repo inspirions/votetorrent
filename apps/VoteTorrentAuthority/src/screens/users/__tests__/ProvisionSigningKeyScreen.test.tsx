@@ -115,6 +115,10 @@ let mockDeviceUserFixture: { id: string; name: string; activeKeys: Array<{ key: 
 let mockProvisioningRecordFixture: { recoveryPublicKeyCompressedHex: string } | undefined;
 const mockGetDeviceUser = jest.fn(async () => mockDeviceUserFixture);
 const mockGetDeviceProvisioningRecord = jest.fn(async () => mockProvisioningRecordFixture);
+// 49-14 follow-up: the recovery-in-progress marker (device-user.ts). Exposed as real jest.fn()s
+// (not just no-op stubs) so this suite's own recovery-marker tests can assert call order/count.
+const mockMarkRecoveryInProgress = jest.fn(async () => {});
+const mockClearRecoveryInProgress = jest.fn(async () => {});
 
 jest.mock("../../../engines/device-user", () => ({
 	persistProvisionedDeviceUser: (displayName: string, publicKeyCompressedHex: string) =>
@@ -122,6 +126,8 @@ jest.mock("../../../engines/device-user", () => ({
 	persistDeviceProvisioningRecord: (record: unknown) => mockPersistDeviceProvisioningRecord(record),
 	getDeviceUser: () => mockGetDeviceUser(),
 	getDeviceProvisioningRecord: () => mockGetDeviceProvisioningRecord(),
+	markRecoveryInProgress: () => mockMarkRecoveryInProgress(),
+	clearRecoveryInProgress: () => mockClearRecoveryInProgress(),
 }));
 
 // NOTE: do NOT `{ ...jest.requireActual('react-native') }` — see device-signer.hardware.test.ts's
@@ -605,6 +611,74 @@ describe("ProvisionSigningKeyScreen — 49-10 recovery variant (D-16) and D-18 t
 		// absence of a specific testID (a stray pressable elsewhere would still be a lie).
 		const pressables = tr.root.findAll((node) => typeof node.props.onPress === "function");
 		expect(pressables.length).toBe(0);
+
+		// 49-14 follow-up: this exact failure mode (interrupted AFTER the Keystore alias
+		// regenerated, BEFORE local metadata resynced) is precisely what the in-progress marker
+		// exists to protect against. It must stay SET here, never cleared.
+		expect(mockMarkRecoveryInProgress).toHaveBeenCalledTimes(1);
+		expect(mockClearRecoveryInProgress).not.toHaveBeenCalled();
+	});
+
+	// 49-14 follow-up (interrupted-handleRecovery Keystore/metadata desync — the PREVENTION half
+	// of the fix, plus the Device-A rescue-path precondition).
+	describe("(d) 49-14 follow-up — recovery-in-progress marker", () => {
+		function mockRecoveryHappyPathNative(): void {
+			nativeFake.provisionDeviceKey.mockResolvedValue({
+				publicKeyBase64: "NEW-SIGNING-SPKI-DER-BASE64",
+				publicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+			});
+			nativeFake.provisionRecoveryKey.mockResolvedValue({
+				publicKeyBase64: "RECOVERY-SPKI-DER-BASE64",
+				publicKeyCompressedHex: RECOVERY_KEY_HEX,
+			});
+			nativeFake.signWithRecoveryKey.mockResolvedValue({ signatureHex: "cafebabe" });
+		}
+
+		it("marks recovery in progress immediately after the Keystore alias regenerates, BEFORE either persistence write", async () => {
+			mockRecoveryHappyPathNative();
+
+			const tr = await renderScreen();
+			await press(tr, primaryButton(tr));
+
+			expect(mockMarkRecoveryInProgress).toHaveBeenCalledTimes(1);
+			const markOrder = mockMarkRecoveryInProgress.mock.invocationCallOrder[0]!;
+			const provisionOrder = nativeFake.provisionDeviceKey.mock.invocationCallOrder[0]!;
+			const persistUserOrder = mockPersistProvisionedDeviceUser.mock.invocationCallOrder[0]!;
+			const persistRecordOrder = mockPersistDeviceProvisioningRecord.mock.invocationCallOrder[0]!;
+
+			expect(markOrder).toBeGreaterThan(provisionOrder);
+			expect(markOrder).toBeLessThan(persistUserOrder);
+			expect(markOrder).toBeLessThan(persistRecordOrder);
+		});
+
+		it("clears the marker only once BOTH persistProvisionedDeviceUser and persistDeviceProvisioningRecord complete", async () => {
+			mockRecoveryHappyPathNative();
+
+			const tr = await renderScreen();
+			await press(tr, primaryButton(tr));
+
+			expect(mockClearRecoveryInProgress).toHaveBeenCalledTimes(1);
+			const clearOrder = mockClearRecoveryInProgress.mock.invocationCallOrder[0]!;
+			const persistUserOrder = mockPersistProvisionedDeviceUser.mock.invocationCallOrder[0]!;
+			const persistRecordOrder = mockPersistDeviceProvisioningRecord.mock.invocationCallOrder[0]!;
+
+			expect(clearOrder).toBeGreaterThan(persistUserOrder);
+			expect(clearOrder).toBeGreaterThan(persistRecordOrder);
+
+			const json = JSON.stringify(tr.toJSON());
+			expect(json).toContain("signingKeyProvisioningSuccessHeading");
+		});
+
+		it("never marks recovery in progress on the first-run path (only handleRecovery touches the marker)", async () => {
+			mockRouteParams = { reason: "first-run" };
+			mockHappyPathNative();
+
+			const tr = await renderScreen();
+			await press(tr, primaryButton(tr));
+
+			expect(mockMarkRecoveryInProgress).not.toHaveBeenCalled();
+			expect(mockClearRecoveryInProgress).not.toHaveBeenCalled();
+		});
 	});
 });
 

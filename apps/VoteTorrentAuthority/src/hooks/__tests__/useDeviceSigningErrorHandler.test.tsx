@@ -161,6 +161,34 @@ describe('useDeviceSigningErrorHandler — 49-11 outcome contract', () => {
 		});
 	});
 
+	describe('49-14 follow-up — the SignatureValid desync rescue path', () => {
+		it('a raw, unwrapped ConstraintError-shaped SignatureValid rejection navigates to ProvisionSigningKey with reason: invalidated', () => {
+			const err = Object.assign(new Error('CHECK constraint failed: SignatureValid'), {
+				name: 'ConstraintError',
+			});
+			const outcome = run(err);
+
+			expect(mockNavigate).toHaveBeenCalledTimes(1);
+			expect(mockNavigate).toHaveBeenCalledWith('ProvisionSigningKey', { reason: 'invalidated' });
+			expect(outcome).toEqual({ handled: true });
+		});
+
+		it('the ElectionsEngine.rethrow-wrapped shape also navigates', () => {
+			const outcome = run(new Error('Quereus error (code 19): CHECK constraint failed: SignatureValid'));
+
+			expect(mockNavigate).toHaveBeenCalledTimes(1);
+			expect(mockNavigate).toHaveBeenCalledWith('ProvisionSigningKey', { reason: 'invalidated' });
+			expect(outcome).toEqual({ handled: true });
+		});
+
+		it('an unrelated CHECK failure is NOT routed into recovery — falls through to pass-through', () => {
+			const outcome = run(new Error('CHECK constraint failed: RevisionDeadlineValid'));
+
+			expect(mockNavigate).not.toHaveBeenCalled();
+			expect(outcome).toEqual({ handled: false, message: undefined });
+		});
+	});
+
 	describe('pass-through — the "not mine" case', () => {
 		it('a generic Error yields handled:false, message:undefined, and no navigate call', () => {
 			const outcome = run(new Error('engine write failed'));
