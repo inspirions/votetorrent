@@ -186,8 +186,11 @@ preflight() {
       # get-disabled unusable on this API level (e.g. API 29's IllegalArgumentException) — fall
       # back to the plan's documented substitute evidence.
       local accept_crypto
-      accept_crypto=$(adb ${ADBD} shell dumpsys fingerprint 2>/dev/null | grep -o "acceptCrypto=[0-9]*" | head -1)
-      if [ -z "${accept_crypto}" ] || [ "${accept_crypto}" = "acceptCrypto=0" ]; then
+      # NOTE: dumpsys fingerprint's actual per-device format varies — some builds emit
+      # key=value ("acceptCrypto=2"), others emit JSON ("acceptCrypto":2, as confirmed live on
+      # this project's Redmi 8/API 29). Match both.
+      accept_crypto=$(adb ${ADBD} shell dumpsys fingerprint 2>/dev/null | grep -o '"\?acceptCrypto"\?[:=][0-9]*' | head -1 || true)
+      if [ -z "${accept_crypto}" ] || echo "${accept_crypto}" | grep -q '[:=]0$'; then
         echo "[ceremony] PREFLIGHT FAIL: 'locksettings get-disabled' unusable on this API level (${get_disabled}) and 'dumpsys fingerprint' reports no non-zero acceptCrypto count on '${SERIAL}' — cannot confirm a secure, crypto-backed lock screen is configured. (raw get-disabled: ${get_disabled})" >&2
         exit 1
       fi
@@ -961,7 +964,7 @@ hw_decode_attestation_chain() {
     record_leg "hw-chain-decode" "FAIL" "no 'deviceSigningProvisioning' row present — provisioning did not complete on this device"
     return
   fi
-  chain_array=$(echo "${provisioning_value}" | grep -o '"certificateChainBase64":\[[^]]*\]' | sed 's/^"certificateChainBase64"://')
+  chain_array=$(echo "${provisioning_value}" | grep -o '"certificateChainBase64":\[[^]]*\]' | sed 's/^"certificateChainBase64"://' || true)
   if [ -z "${chain_array}" ] || [ "${chain_array}" = '[]' ]; then
     record_leg "hw-chain-decode" "FAIL" "certificateChainBase64 empty or missing in the persisted provisioning record"
     return
@@ -996,9 +999,9 @@ hw_decode_attestation_chain() {
   echo "${decode_out}" >&2
 
   local sec_level chain_len root_present
-  sec_level=$(echo "${decode_out}" | grep -o 'attestationSecurityLevel: [0-9]*' | head -1)
-  chain_len=$(echo "${decode_out}" | grep -o 'chainLength: [0-9]*' | head -1 | grep -o '[0-9]*$')
-  root_present=$(echo "${decode_out}" | grep -o 'rootPresent: [a-z]*' | head -1 | grep -o '[a-z]*$')
+  sec_level=$(echo "${decode_out}" | grep -o 'attestationSecurityLevel: [0-9]*' | head -1 || true)
+  chain_len=$(echo "${decode_out}" | grep -o 'chainLength: [0-9]*' | head -1 | grep -o '[0-9]*$' || true)
+  root_present=$(echo "${decode_out}" | grep -o 'rootPresent: [a-z]*' | head -1 | grep -o '[a-z]*$' || true)
 
   if [ -n "${sec_level}" ]; then
     record_leg "hw-chain-decode" "PASS" "decoder produced a verdict block (exit=${decode_status}) — ${sec_level}; see hw-strongbox-rung/hw-chain-shape for the derived verdicts"
