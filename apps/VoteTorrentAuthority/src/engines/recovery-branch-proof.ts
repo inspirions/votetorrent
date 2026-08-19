@@ -60,6 +60,13 @@ const PROOF_DIGEST = new Uint8Array(32).fill(0x5a);
 
 export interface RecoveryBranchProofResult {
 	passed: boolean;
+	/**
+	 * Distinguishes "the branch was exercised and failed" from "the branch was never reached".
+	 * Recording a precondition failure as FAIL would put a false negative into the phase record —
+	 * the same void-vs-negative-result distinction that invalidated a `dialTimeout` experiment
+	 * earlier in this phase. A PRECONDITION outcome claims NOTHING about D-26a either way.
+	 */
+	outcome: 'pass' | 'fail' | 'precondition-unmet';
 	sdkInt?: number;
 	branch?: 'keyguard-manager' | 'biometric-prompt-device-credential';
 }
@@ -106,8 +113,9 @@ export async function runRecoveryBranchProof(
 			console.info(`${TAG} recovery key sourced from the provisioning record`);
 		}
 		if (!recoveryPubHex) {
-			console.error(`${TAG} FAIL — no recovery public key available`);
-			return { passed: false, sdkInt, branch };
+			console.error(`${TAG} PRECONDITION — no recovery public key available`);
+			console.info(`${TAG} ========== D-26A LOCAL VERDICT: PRECONDITION-UNMET ==========`);
+			return { passed: false, outcome: 'precondition-unmet', sdkInt, branch };
 		}
 
 		// This raises the real credential UI: KeyguardManager below 30, BiometricPrompt
@@ -126,7 +134,7 @@ export async function runRecoveryBranchProof(
 		const signatureHex = signed?.signatureHex;
 		if (!signatureHex) {
 			console.error(`${TAG} FAIL — native returned no signatureHex`);
-			return { passed: false, sdkInt, branch };
+			return { passed: false, outcome: 'fail', sdkInt, branch };
 		}
 		console.info(`${TAG} signature obtained, hexLen=${signatureHex.length}`);
 
@@ -138,13 +146,22 @@ export async function runRecoveryBranchProof(
 		);
 		console.info(`${TAG} verifySigP256 =`, valid);
 		console.info(`${TAG} ========== D-26A LOCAL VERDICT: ${valid === true ? 'PASS' : 'FAIL'} ==========`);
-		return { passed: valid === true, sdkInt, branch };
+		return { passed: valid === true, outcome: valid === true ? 'pass' : 'fail', sdkInt, branch };
 	} catch (err) {
 		// A cancellation is a legitimate outcome of a human-driven prompt, not a defect — log the
 		// raw value so it is distinguishable from a genuine verification failure (the 49-14 lesson
 		// about generic copy masking real faults).
 		console.error(`${TAG} raw error —`, err);
-		console.info(`${TAG} ========== D-26A LOCAL VERDICT: FAIL ==========`);
-		return { passed: false, sdkInt, branch };
+		// An invalidated recovery key, or a cancelled prompt, means the branch was NEVER REACHED.
+		// Measured on Device B 2026-08-19: the Keystore recovery key reported
+		// `recovery key invalidated — re-association required` while AsyncStorage still held its
+		// public value — an app-record/Keystore divergence, not a branch defect. Classifying that
+		// as FAIL would write a false negative into the D-26a record.
+		const message = String((err as { message?: unknown })?.message ?? err);
+		const isPrecondition = /invalidated|re-association|CANCELED|CANCELLED|USER_CANCELED|NEGATIVE_BUTTON/i.test(message);
+		console.info(
+			`${TAG} ========== D-26A LOCAL VERDICT: ${isPrecondition ? 'PRECONDITION-UNMET' : 'FAIL'} ==========`,
+		);
+		return { passed: false, outcome: isPrecondition ? 'precondition-unmet' : 'fail', sdkInt, branch };
 	}
 }

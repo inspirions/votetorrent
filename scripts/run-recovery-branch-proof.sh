@@ -96,7 +96,7 @@ echo "[d26a-local] ============================================================"
 VERDICT=""
 start_epoch=$(date +%s)
 while [ "$(( $(date +%s) - start_epoch ))" -lt "${VERDICT_TIMEOUT}" ]; do
-  VERDICT="$(adb ${ADBD} logcat -d 2>/dev/null | grep -o 'D-26A LOCAL VERDICT: [A-Z]*' | tail -1 || true)"
+  VERDICT="$(adb ${ADBD} logcat -d 2>/dev/null | grep -o 'D-26A LOCAL VERDICT: [A-Z-]*' | tail -1 || true)"
   [ -n "${VERDICT}" ] && break
   sleep 5
 done
@@ -110,6 +110,14 @@ echo "[d26a-local] ${VERDICT}"
 # ── Branch assertion, MEASURED from the OS, not inferred from the SDK ────────
 # Below API 30 the KeyguardManager path starts the confirm-device-credential activity. Above it,
 # BiometricPrompt starts no such activity, so its ABSENCE is the correct assertion there.
+case "${VERDICT}" in
+  *PRECONDITION-UNMET*)
+    echo "[d26a-local] branch assertion SKIPPED — the branch was never reached, so presence or"
+    echo "[d26a-local]   absence of the activity says nothing."
+    echo "[d26a-local] LEG d26a-local: NOT-EXERCISED"
+    exit 2 ;;
+esac
+
 CDC_HITS="$(adb ${ADBD} logcat -d 2>/dev/null | grep -ci 'CONFIRM_DEVICE_CREDENTIAL' || true)"
 BRANCH_OK=1
 if [ "${SDK}" -lt 30 ] 2>/dev/null; then
@@ -128,7 +136,16 @@ else
   fi
 fi
 
+# PRECONDITION-UNMET is NOT a failure of D-26a — the branch was never reached, so the leg is
+# NOT-EXERCISED and claims nothing either way. Exit 2 so a caller can tell the three apart, and
+# so a blocked run is never recorded as a refutation.
 case "${VERDICT}" in
-  *PASS*) [ "${BRANCH_OK}" -eq 1 ] && exit 0 ; exit 1 ;;
-  *)      exit 1 ;;
+  *PRECONDITION-UNMET*)
+    echo "[d26a-local] LEG d26a-local: NOT-EXERCISED — a precondition blocked the branch (see the raw"
+    echo "[d26a-local]   error under [d26a-local] in logcat). This claims NOTHING about D-26a."
+    exit 2 ;;
+  *PASS*)
+    if [ "${BRANCH_OK}" -eq 1 ]; then exit 0; fi
+    exit 1 ;;
+  *)  exit 1 ;;
 esac
