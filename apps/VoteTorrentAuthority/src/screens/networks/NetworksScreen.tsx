@@ -59,8 +59,10 @@ export default function NetworksScreen() {
 					schema: VOTETORRENT_SCHEMA_SQL,
 					latencyHint: "interactive",
 				},
-				// Joining an existing host → networked transactor (peers expected).
-				mode: "networked",
+				// Joining an existing host: we did NOT provision this strand, so we are
+				// not the founder. `StrandConfig.mode` was deleted in cadre-core 0.11.0
+				// (spike 064); `founder` is the surviving knob and defaults to false.
+				founder: false,
 			});
 		} catch {
 			setJoinError(t("joinFailed"));

@@ -18,6 +18,15 @@
 #
 # Usage    : ./scripts/run-replication-proof.sh
 #            Env vars (all optional):
+#              DRONE_DEBUG=<ns>    — (optional) override the drones' DEBUG namespaces.
+#                                    Default keeps the `:error` surface AND adds
+#                                    `optimystic:db-p2p:libp2p-key-network:*`, which carries
+#                                    `findCluster:done … peers=N addressless=N` and
+#                                    `findCluster:addressless-members` — the direct read-out on
+#                                    whether cohort members have dialable addresses (Optimystic#11).
+#                                    Spike 066: under `:error` alone these are INVISIBLE, and a
+#                                    healthy drone logs ~99 lines, which reads as a dead drone.
+#                                    Widen to `optimystic:db-p2p:*` for a deep dive (~46k lines).
 #              FRESH_EMULATOR=1|0  — (default 1) wipe both emulators to a clean app
 #                                    slate (pm clear + a votetorrent-* LevelDB store
 #                                    wipe, D-11 idiom) before Step 1. Set to 0 to skip
@@ -348,7 +357,7 @@ fi
 # (createLogger's actual base is optimystic:db-p2p:*, NOT the bare db-p2p:* RESEARCH.md cited).
 # DRONE_LOG is retained through the FULL run (no rm -f below) — only the EXIT trap removes it.
 DRONE_LOG=$(mktemp /tmp/drone-full-run-XXXXXX.log)
-DEBUG="optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,optimystic:db-p2p:libp2p-key-network:*}" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
 DRONE_PID=$!
 echo "[run-replication-proof] Drone launched (PID ${DRONE_PID}, DEBUG= cluster-error logging armed), waiting for READY line ..."
 
@@ -425,7 +434,7 @@ echo "[run-replication-proof] Drone strand addr: ${STRAND_ADDR}"
 # host-loopback vs emulator-alias address spaces).
 echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} under Node 22 ..."
 DRONE_B_LOG=$(mktemp /tmp/drone-b-full-run-XXXXXX.log)
-DEBUG="optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error" \
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,optimystic:db-p2p:libp2p-key-network:*}" \
   STRAND_ID="${STRAND_ID}" \
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
   DRONE_BOOTSTRAP_STRAND_ADDR="${STRAND_ADDR}" \
