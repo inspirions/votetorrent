@@ -81,8 +81,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
   const lock = readFileSync(join(repoRoot, 'yarn.lock'), 'utf8')
   const rootPackageJson = readFileSync(join(repoRoot, 'package.json'), 'utf8')
 
-  describe('UPG-06: patched @quereus/quereus 4.11.0 single copy', () => {
-    it('resolves a single @quereus/quereus version, and it is exactly 4.11.0', () => {
+  describe('UPG-06: patched @quereus/quereus 4.14.0 single copy', () => {
+    it('resolves a single @quereus/quereus version, and it is exactly 4.14.0', () => {
       const versions = resolvedVersionsFor(lock, '@quereus/quereus')
       expect(versions.length, 'expected at least one resolved @quereus/quereus block in yarn.lock').to.be.greaterThan(0)
 
@@ -94,19 +94,21 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @quereus/quereus version must be exactly 4.11.0, got ${distinct[0]}`
-      ).to.equal('4.11.0')
+        `Resolved @quereus/quereus version must be exactly 4.14.0, got ${distinct[0]}`
+      ).to.equal('4.14.0')
     })
 
-    it('carries the required 4.11.0 patch (@quereus-quereus-npm-4.11.0-aa7a775655)', () => {
-      const count = (lock.match(/@quereus-quereus-npm-4\.11\.0-aa7a775655/g) ?? []).length
+    it('carries the required 4.14.0 patch (@quereus-quereus-npm-4.14.0-042f7e4e5e)', () => {
+      const count = (lock.match(/@quereus-quereus-npm-4\.14\.0-042f7e4e5e/g) ?? []).length
       expect(
         count,
-        'Expected the @quereus-quereus-npm-4.11.0-aa7a775655 patch locator to be present in yarn.lock. Forward-ported 4.4.1 -> 4.11.0: ' +
-        '(1) the view-qualification half is RETIRED — upstream 4.11.0 ships applyViewSchemaDefault() natively; ' +
-        '(2) the datetime immediate-CHECK coercion restoration — 4.4.1 moved declared-type conversion to the top of the ' +
-        'DML pipeline and deleted constraint-check\'s coerceNewSection, collapsing 4.3.1\'s raw-immediate / coerced-deferred ' +
-        'split. Both are required for the vote-engine suite to pass; see the upstream issue draft in .planning/spikes/026-*'
+        'Expected the @quereus-quereus-npm-4.14.0-042f7e4e5e patch locator to be present in yarn.lock. Forward-ported ' +
+        '4.11.0 -> 4.14.0 (spike 064). The patch now carries ONE concern, not two: the datetime immediate-CHECK ' +
+        'coercion restoration (4.4.1 moved declared-type conversion to the top of the DML pipeline and deleted ' +
+        'constraint-check\'s coerceNewSection, collapsing 4.3.1\'s raw-immediate / coerced-deferred split). Measured, ' +
+        'not assumed: installing 4.14.0 UNPATCHED fails 220 vote-engine tests, 167 of them on exactly this class ' +
+        '(ExpirationValid / SubmittedAtValid `isISODatetime(x) and like(\'%Z\', x)`); re-applying this half alone ' +
+        'takes it to the pre-existing floor. See the upstream issue draft in .planning/spikes/026-*'
       ).to.be.greaterThan(0)
     })
 
@@ -141,8 +143,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
     })
   })
 
-  describe('PUB-02: @optimystic/quereus-plugin-optimystic reconciled to ^0.22.x, dead patches retired', () => {
-    it('resolves a single @optimystic/quereus-plugin-optimystic version, and it is 0.22.x', () => {
+  describe('PUB-02: @optimystic/quereus-plugin-optimystic reconciled to ^0.24.x, dead patches retired', () => {
+    it('resolves a single @optimystic/quereus-plugin-optimystic version, and it is 0.24.x', () => {
       const versions = resolvedVersionsFor(lock, '@optimystic/quereus-plugin-optimystic')
       expect(versions.length, 'expected at least one resolved @optimystic/quereus-plugin-optimystic block in yarn.lock').to.be.greaterThan(0)
 
@@ -154,11 +156,11 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @optimystic/quereus-plugin-optimystic version must be 0.22.x, got ${distinct[0]}`
-      ).to.match(/^0\.22\./)
+        `Resolved @optimystic/quereus-plugin-optimystic version must be 0.24.x, got ${distinct[0]}`
+      ).to.match(/^0\.24\./)
     })
 
-    it('resolves ^0.22.0 in the root package.json dependency declaration', () => {
+    it('resolves ^0.24.0 in the root package.json dependency declaration', () => {
       const parsed = JSON.parse(rootPackageJson) as {
         dependencies?: Record<string, string>
         resolutions?: Record<string, string>
@@ -167,8 +169,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
         parsed.resolutions?.['@optimystic/quereus-plugin-optimystic']
       expect(
         declared,
-        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^0.22.0'
-      ).to.equal('^0.22.0')
+        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^0.24.0'
+      ).to.equal('^0.24.0')
     })
 
     it('has zero references to the dead patch locators (0.13.5 plugin-optimystic patch, 0.7.1 cadre-core patch)', () => {

@@ -164,22 +164,36 @@ describe('createStrandDbFactory — P2P-03 / D-14 / D-07', () => {
   // D-07: peer-gated mode literal
   // -------------------------------------------------------------------------
 
-  it('passes mode "bootstrap" to addStrand when there are no connected peers', async () => {
+  // Spike 064: cadre-core 0.11.0 DELETED `StrandMode` / `StrandConfig.mode` (a
+  // deliberate breaking change). The peer probe survives with its meaning intact —
+  // no control peers means nobody else can have provisioned this strand, so we are
+  // the founder. `founder` must be passed EXPLICITLY on the solo path: it defaults
+  // to false upstream, and a strand founded by nobody never gets its `Strand.Header`.
+  it('passes founder: true to addStrand when there are no connected peers', async () => {
     const node = makeFakeNode({ connections: 0 });
     const factory = createStrandDbFactory(node);
 
     await factory('networkhash123');
 
-    expect(node.addStrand.mock.calls[0][0].mode).toBe('bootstrap');
+    expect(node.addStrand.mock.calls[0][0].founder).toBe(true);
   });
 
-  it('passes mode "networked" to addStrand when peers are connected', async () => {
+  it('passes founder: false to addStrand when peers are connected', async () => {
     const node = makeFakeNode({ connections: 2 });
     const factory = createStrandDbFactory(node);
 
     await factory('networkhash123');
 
-    expect(node.addStrand.mock.calls[0][0].mode).toBe('networked');
+    expect(node.addStrand.mock.calls[0][0].founder).toBe(false);
+  });
+
+  it('never passes the retired `mode` key (cadre-core 0.11.0 deleted it)', async () => {
+    const node = makeFakeNode({ connections: 0 });
+    const factory = createStrandDbFactory(node);
+
+    await factory('networkhash123');
+
+    expect(node.addStrand.mock.calls[0][0].mode).toBeUndefined();
   });
 
   it('derives the strandId from the network hash (D-05) and uses an official strand row', async () => {

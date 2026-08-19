@@ -103,9 +103,20 @@ export interface StrandHost {
  *
  * D-05: strandId is derived directly from the network hash — already unique per
  *       network, so it doubles as the strandId with no extra mapping structure.
- * D-07: mode is peer-gated EXPLICITLY. Omitting it defaults to 'networked', which
- *       hangs a solo node (the network transactor waits for peer round-trips).
- *       'bootstrap' routes schema apply + writes through the local transactor.
+ * D-07: SUPERSEDED by cadre-core 0.11.0 (spike 064). `StrandMode` and
+ *       `StrandConfig.mode` were DELETED upstream — a deliberate breaking change
+ *       ("the repo carries no backwards compatibility"). The solo/networked
+ *       transactor split is gone: every strand now uses the shared path, and the
+ *       backfill gate is armed for every stored strand, which is what upstream
+ *       says closes the "founded alone, never replicates" hole.
+ *       The surviving knob is `founder?: boolean` — whether THIS node provisioned
+ *       the strand. The founder runs the one-time membership bootstrap (writes
+ *       `Strand.Header`, and for a closed strand the founding Member+Manager); a
+ *       joiner leaves it false and receives those rows via Optimystic sync.
+ *       The existing peer probe carries over with its meaning intact: no control
+ *       peers ⇒ nobody else can have provisioned this strand ⇒ we are the founder.
+ *       Reference: sereus v0.11.0 `scripts/lib/published-smoke-scenario.mjs:439`
+ *       passes `founder: true` on the create path.
  * D-14: after `getDatabase()`, `setSchemaPath(['App','main'])` makes bare engine
  *       SQL table names (e.g. `Network`) resolve to `App.Network` first, with
  *       `main` as the fallback for SchemaInit / TidSequence. One call fixes
@@ -120,7 +131,7 @@ export function createStrandDbFactory(node: StrandHost): DbFactory {
 		// D-05: the network hash is already unique per network — use it as the strandId.
 		const strandId = networkHash;
 
-		// D-07: check for peers BEFORE addStrand and pass the mode literal explicitly.
+		// D-07 (0.11.0): check for peers BEFORE addStrand — no peers ⇒ we are the founder.
 		const hasPeers = (node.getControlNode()?.getConnections().length ?? 0) > 0;
 
 		const strand = await node.addStrand({
@@ -131,7 +142,7 @@ export function createStrandDbFactory(node: StrandHost): DbFactory {
 				schema: VOTETORRENT_INNER_DDL,
 				latencyHint: 'interactive',
 			},
-			mode: hasPeers ? 'networked' : 'bootstrap',
+			founder: !hasPeers,
 		});
 
 		// Safe only after addStrand resolves (Pitfall 3). `database` is present once

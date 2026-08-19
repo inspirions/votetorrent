@@ -23,7 +23,7 @@
 		"tsc": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@optimystic/quereus-plugin-crypto": "^0.22.0",
+		"@optimystic/quereus-plugin-crypto": "^0.24.0",
 		"@votetorrent/vote-core": "workspace:*"
 	},
 	"peerDependencies": {

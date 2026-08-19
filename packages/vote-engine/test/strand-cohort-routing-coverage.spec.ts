@@ -183,7 +183,10 @@ const P2P_FRET_PATCH_PREFIX = 'p2p-fret-npm-'
 const P2P_FRET_RESOLUTION_KEY = 'p2p-fret'
 // 260715-keg: the bare-semver resolution the p2p-fret key must now target — `>=0.6.0`, not the
 // `patch:` protocol. Checked via a non-`patch:` prefix + a `^0.<minor>.` shape with minor >= 6.
-const P2P_FRET_MIN_MINOR = 6
+// Spike 064 (four-family bump): @optimystic/db-p2p@0.24.0 REQUIRES `p2p-fret ^1.0.0-beta.1`,
+// so the floor moves off the 0.x line entirely. Expressed as [major, minor] because the
+// original `0.x`-only shape can no longer represent the pin.
+const P2P_FRET_MIN_VERSION: [number, number] = [1, 0]
 
 // Built via concatenation so this spec's own source is not itself a hit.
 const PHASE_41_04_MARKER = '41' + '-04'
@@ -306,21 +309,21 @@ function findP2pFretPatchFile (): string | undefined {
  * patch string fails the first check (it starts with `patch:`); a revert to a bare `0.4.0`/`0.5.0`
  * would fail the second (minor < 6).
  */
-function assertBareResolutionAtLeastMinor (target: string, packageLabel: string, minMinor: number): void {
+function assertBareResolutionAtLeast (target: string, packageLabel: string, min: [number, number]): void {
   expect(
     target.startsWith(PATCH_PROTOCOL_MARKER),
     `Expected the ${packageLabel} resolution to NOT target a patch: protocol reference ` +
     `(found: ${target}) — the local patch is retired in favor of an upstream version bump`
   ).to.equal(false)
-  const match = /^\^?0\.(\d+)\./.exec(target)
+  const match = /^\^?(\d+)\.(\d+)\./.exec(target)
   expect(
     match,
-    `Expected the ${packageLabel} resolution to be a bare 0.x semver range (found: ${target})`
+    `Expected the ${packageLabel} resolution to be a bare semver range (found: ${target})`
   ).to.not.equal(null)
-  const minor = Number((match as RegExpExecArray)[1])
+  const [major, minor] = [Number((match as RegExpExecArray)[1]), Number((match as RegExpExecArray)[2])]
   expect(
-    minor >= minMinor,
-    `Expected the ${packageLabel} resolution minor version to be >= ${minMinor} (found: ${target})`
+    major > min[0] || (major === min[0] && minor >= min[1]),
+    `Expected the ${packageLabel} resolution to be >= ${min[0]}.${min[1]} (found: ${target})`
   ).to.equal(true)
 }
 
@@ -499,7 +502,7 @@ describe('P2P-11/41-06: FRET strand-discovery negotiation gap — malformed // i
       target,
       `Expected a root package.json resolutions entry for the bare "${P2P_FRET_RESOLUTION_KEY}" key`
     ).to.not.equal(undefined)
-    assertBareResolutionAtLeastMinor(target as string, P2P_FRET_RESOLUTION_KEY, P2P_FRET_MIN_MINOR)
+    assertBareResolutionAtLeast(target as string, P2P_FRET_RESOLUTION_KEY, P2P_FRET_MIN_VERSION)
   })
 
   it('260715-keg: keeps exactly one bare p2p-fret resolution key (no range-scoped sibling)', () => {
@@ -575,7 +578,7 @@ describe('P2P-11/41-08: FRET strand registrar-skew — runOnLimitedConnection fi
       `found: ${JSON.stringify(p2pFretKeys)} — a range-scoped sibling key would be silently shadowed`
     ).to.deep.equal([P2P_FRET_RESOLUTION_KEY])
     const target = resolutions[P2P_FRET_RESOLUTION_KEY] as string
-    assertBareResolutionAtLeastMinor(target, P2P_FRET_RESOLUTION_KEY, P2P_FRET_MIN_MINOR)
+    assertBareResolutionAtLeast(target, P2P_FRET_RESOLUTION_KEY, P2P_FRET_MIN_VERSION)
   })
 })
 
