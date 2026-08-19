@@ -19,6 +19,7 @@ import type { RootStackParamList } from "../../navigation/types";
 import { InlineError } from "../../components/InlineError";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
 
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -26,6 +27,7 @@ export default function AddNetworkScreen() {
 	const { getEngine, networksEngine, selectNetwork } = useApp();
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
+	const promptRecoveryKeyRegistrationIfNeeded = useRecoveryKeyRegistrationGate();
 	const [networkName, setNetworkName] = useState("");
 	const [networkImageUrl, setNetworkImageUrl] = useState("");
 	const [authorityName, setAuthorityName] = useState("");
@@ -195,6 +197,22 @@ export default function AddNetworkScreen() {
 			console.info("[network-create] selectNetwork() start");
 			await withTimeout(selectNetwork(networkRef), "select");
 			console.info("[network-create] selectNetwork() done");
+
+			// 49-19 (recovery-key-registration gap): networks-engine.create() registers ONLY the
+			// founding signing key -- its bootstrap branch writes user.activeKeys[0] and has no
+			// analog for a second key -- so the officer's recovery key is still unregistered the
+			// moment this network comes up. Registration lives in ProvisionSigningKeyScreen's
+			// stage 2, which needs a resolvable network User and therefore CANNOT run before this
+			// point; until now nothing brought the officer back to it, leaving them one biometric
+			// enrolment away from a stranded device (addKey needs a valid signing key, and only
+			// the recovery key can replace an invalidated one -- a closed loop whose only recorded
+			// escape was a destructive `pm clear`). Measured unregistered on BOTH fleet devices.
+			//
+			// The ceremony is idempotent and reconciling (it registers only what is missing), so
+			// routing into it here is safe; the gate keeps us from showing it when there is
+			// nothing to do. Deliberately AFTER selectNetwork: the network is fully established
+			// and stays selected, so declining leaves a usable network rather than a dead end.
+			await promptRecoveryKeyRegistrationIfNeeded();
 		} catch (err) {
 			console.error("handleCreate error:", err);
 			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory

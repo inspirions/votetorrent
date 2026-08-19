@@ -162,6 +162,11 @@ describe('D-09/D-13/D-14 rollout completeness: every createDeviceSigner call sit
 		}
 		const allowed = new Set([
 			path.join('hooks', 'useDeviceSigningErrorHandler.ts'),
+			// 49-19: the recovery-key-registration gate. Added as a HOOK, deliberately, so the
+			// create/join trigger honours this contract instead of scattering the navigation
+			// target across AddNetworkScreen and NetworkDetailsScreen (which is exactly the
+			// per-screen duplication this test exists to prevent).
+			path.join('hooks', 'useRecoveryKeyRegistrationGate.ts'),
 			path.join('screens', 'settings', 'SettingsScreen.tsx'),
 		]);
 		for (const rel of matches) {
