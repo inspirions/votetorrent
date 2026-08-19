@@ -8,6 +8,11 @@
 //
 // Do NOT add `export * from './networks/index.js'` here — that would
 // double-export MockNetworksEngine alongside NetworksEngine.
+// 49-D26a-LOCAL: the canonical P-256 verifier, exported so on-device proofs can assert a real
+// Keystore signature against THE SAME function the schema's SignatureValidP256 CHECK calls.
+// Verifying with a hand-rolled noble call instead would prove nothing about schema agreement —
+// which is the whole point of the encoding contract (base64url digest / hex sig / hex key).
+export { verifySigP256 } from './database/initialize.js'
 export { NetworksEngine } from './networks/networks-engine.js'
 export { NetworkEngine } from './network/network-engine.js'
 export { ElectionsEngine, peekNextElectionTid } from './elections/elections-engine.js'

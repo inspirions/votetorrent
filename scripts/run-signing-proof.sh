@@ -54,6 +54,7 @@ export const SIGNING_PROOF_ENABLED = true;
 export const STRAND_PERSISTENCE_PROOF_ENABLED = false;
 export const USE_STUB_ATTESTATION_VERIFIER = false;
 export const REGISTRANT_SEED_ENABLED = false;
+export const RECOVERY_BRANCH_PROOF_ENABLED = false;
 EOF
 echo "[run-signing-proof] SIGNING_PROOF_ENABLED=true"
 

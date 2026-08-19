@@ -326,6 +326,10 @@ describe('schema-sql.ts regeneration freshness lock (47-01 / D-16)', () => {
     'run-dial-probe.sh',
     'run-signing-proof.sh',
     'run-replication-proof.sh',
+    // 49-D26a-LOCAL: added with RECOVERY_BRANCH_PROOF_ENABLED. A new flag-writing script that
+    // is NOT listed here would escape this lock entirely and be free to drift — the exact
+    // failure mode the lock was written to catch.
+    'run-recovery-branch-proof.sh',
   ]
 
   /** The `export const NAME` identifiers in a source blob, in order of appearance. */
