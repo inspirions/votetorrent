@@ -47,6 +47,7 @@
  * (`relayReservation=true` on both) and their circuit addresses are observable. There is simply no
  * path that seeds a relay-only peer's `/p2p-circuit` address into the control-peer address book.
  *
+ * Filed upstream: https://github.com/gotchoices/Optimystic/issues/12 (2026-08-19)
  * Draft: `.planning/spikes/066-multipeer-device-verdict-0_24/issues/db-p2p-relay-only-peer-has-no-address-seed.md`
  *
  * THIS SPEC IS A RED LOCK, NOT A PASSING FEATURE TEST. Each assertion pins a mechanism that is
