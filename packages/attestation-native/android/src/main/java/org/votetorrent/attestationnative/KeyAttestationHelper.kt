@@ -688,7 +688,8 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	 * (no credential exists at all) than the coarser OS-version truth, and it applies on every API
 	 * level, so it is checked first.
 	 *
-	 * The API 30+ branch is proven by D-24 leg 3 on real hardware (Pixel 8) in 49-14; compilation is
+	 * The API 30+ branch is proven by D-24 leg 3 on real hardware (Samsung SM-M166P, API 36) in
+	 * 49-14; compilation is
 	 * not evidence of it. `promptNegativeButton` is now unused on every path (kept as a parameter
 	 * for ABI stability).
 	 */
@@ -775,7 +776,8 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 		// D-26/49-RESEARCH.md "Pitfall 1" — BiometricPrompt.PromptInfo.Builder THROWS at build()
 		// time if setNegativeButtonText is combined with setAllowedAuthenticators(DEVICE_CREDENTIAL)
 		// — the platform forbids the combination outright. promptNegativeButton is therefore NOT
-		// passed to this builder at all (it is used only by the KeyguardManager branch below).
+		// passed to this builder at all (and is now unused on every path — see the doc block
+		// above; the branch that once consumed it was removed with the pre-API-30 fallback).
 		val promptInfo = BiometricPrompt.PromptInfo.Builder()
 			.setTitle(promptTitle)
 			.setSubtitle(promptSubtitle)

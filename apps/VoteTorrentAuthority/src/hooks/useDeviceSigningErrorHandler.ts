@@ -102,6 +102,17 @@ export function useDeviceSigningErrorHandler(): (err: unknown) => DeviceSigningE
 					navigation.navigate('ProvisionSigningKey', { reason: 'invalidated' });
 					return { handled: true };
 
+				case 'recovery-unsupported-os':
+					// Same shape as `no-device-credential` above: a terminal class that
+					// deliberately has NO entry in DEVICE_SIGNING_ERROR_COPY_KEY and is not
+					// one of isNavigationClass's pair. Without an explicit case it would fall
+					// through to `default:` and evaluate t(undefined), rendering an empty
+					// InlineError. The provisioning screen owns the only surface that explains
+					// this condition (its terminal recovery-unsupported-os body), so route
+					// there rather than trying to phrase it inline.
+					navigation.navigate('ProvisionSigningKey', { reason: 'invalidated' });
+					return { handled: true };
+
 				default:
 					// The four inline classes: no-biometrics-enrolled, lockout,
 					// lockout-permanent, biometric-error.

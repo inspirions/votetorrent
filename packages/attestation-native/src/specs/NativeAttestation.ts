@@ -166,7 +166,8 @@ export interface Spec extends TurboModule {
 	 * OS-version check and any ceremony begins.
 	 * `RECOVERY_UNSUPPORTED_OS` (D-26a rescope) — see above.
 	 *
-	 * **Unproven at runtime** — the API 30+ branch is proven by D-24 leg 3 on the Pixel 8 in 49-14.
+	 * **Unproven at runtime** — the API 30+ branch is proven by D-24 leg 3 on real hardware
+	 * (Samsung SM-M166P, API 36) in 49-14.
 	 * Compilation is not evidence of it.
 	 */
 	signWithRecoveryKey(
