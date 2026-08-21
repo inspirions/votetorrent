@@ -1,6 +1,7 @@
 import {
 	CODE_TO_CLASS,
 	DEVICE_SIGNING_ERROR_COPY_KEY,
+	isDeviceSigningError,
 	isNavigationClass,
 	isSignatureDesyncError,
 	mapDeviceSigningError,
@@ -41,11 +42,12 @@ describe('deviceSigningError (D-13 taxonomy)', () => {
 		expect(mapDeviceSigningError({ code: 'CANCELED' })).toBe('cancellation');
 	});
 
-	test('DEVICE_SIGNING_ERROR_COPY_KEY has no entry for cancellation, key-invalidated, no-key-provisioned, or no-device-credential', () => {
+	test('DEVICE_SIGNING_ERROR_COPY_KEY has no entry for cancellation, key-invalidated, no-key-provisioned, no-device-credential, or recovery-unsupported-os', () => {
 		expect(DEVICE_SIGNING_ERROR_COPY_KEY['cancellation']).toBeUndefined();
 		expect(DEVICE_SIGNING_ERROR_COPY_KEY['key-invalidated']).toBeUndefined();
 		expect(DEVICE_SIGNING_ERROR_COPY_KEY['no-key-provisioned']).toBeUndefined();
 		expect(DEVICE_SIGNING_ERROR_COPY_KEY['no-device-credential']).toBeUndefined();
+		expect(DEVICE_SIGNING_ERROR_COPY_KEY['recovery-unsupported-os']).toBeUndefined();
 	});
 
 	test('DEVICE_SIGNING_ERROR_COPY_KEY has an entry for each of the four inline-rendered classes', () => {
@@ -69,6 +71,33 @@ describe('deviceSigningError (D-13 taxonomy)', () => {
 		expect(isNavigationClass('lockout-permanent')).toBe(false);
 		expect(isNavigationClass('biometric-error')).toBe(false);
 		expect(isNavigationClass('no-device-credential')).toBe(false);
+		expect(isNavigationClass('recovery-unsupported-os')).toBe(false);
+	});
+});
+
+// Plan 19 (D-26a rescope, 2026-08-21): the native `signWithRecoveryKey` now rejects
+// `RECOVERY_UNSUPPORTED_OS` on API < 30, before any ceremony starts — a terminal class,
+// deliberately absent from the inline copy map, and not a navigation class (there is no
+// ceremony on the provisioning screen that could resolve it).
+describe('recovery-unsupported-os (49-19, D-26a rescope)', () => {
+	test('RECOVERY_UNSUPPORTED_OS maps to recovery-unsupported-os', () => {
+		expect(mapDeviceSigningError({ code: 'RECOVERY_UNSUPPORTED_OS' })).toBe('recovery-unsupported-os');
+	});
+
+	test('DEVICE_SIGNING_ERROR_COPY_KEY has no entry for recovery-unsupported-os — it renders a terminal screen, never InlineError', () => {
+		expect(DEVICE_SIGNING_ERROR_COPY_KEY['recovery-unsupported-os']).toBeUndefined();
+	});
+
+	test('isNavigationClass is false for recovery-unsupported-os — no ceremony exists to route to', () => {
+		expect(isNavigationClass('recovery-unsupported-os')).toBe(false);
+	});
+
+	test('isDeviceSigningError recognizes RECOVERY_UNSUPPORTED_OS as a device-signing rejection', () => {
+		expect(isDeviceSigningError({ code: 'RECOVERY_UNSUPPORTED_OS' })).toBe(true);
+	});
+
+	test('a near-miss code (RECOVERY_UNSUPPORTED, no _OS suffix) still maps to biometric-error — exact match, not prefix match', () => {
+		expect(mapDeviceSigningError({ code: 'RECOVERY_UNSUPPORTED' })).toBe('biometric-error');
 	});
 });
 
