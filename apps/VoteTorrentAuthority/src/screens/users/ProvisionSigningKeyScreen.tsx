@@ -58,10 +58,10 @@ import type { DeviceSigningErrorClass } from "../../utils/deviceSigningError";
  * challenge nonce in this ceremony, so the bound digest is self-issued over a locally generated
  * nonce plus the new key's own public value.
  *
- * DEVICE-PROOF HONESTY: jest cannot exercise the real Android Keystore, `BiometricPrompt`, or
- * `KeyguardManager`. This screen's own test suite proves the JS-side wiring and rendering against
- * a faked native module ONLY — not that provisioning works on real hardware. That proof is D-24
- * leg 1 (49-13/49-18) and leg 3 (49-14).
+ * DEVICE-PROOF HONESTY: jest cannot exercise the real Android Keystore or `BiometricPrompt`. This
+ * screen's own test suite proves the JS-side wiring and rendering against a faked native module
+ * ONLY — not that provisioning works on real hardware. That proof is D-24 leg 1 (49-13/49-18) and
+ * leg 3 (49-14).
  */
 
 type ProvisionReason = "first-run" | "invalidated";
@@ -115,13 +115,22 @@ function getNative(): NativeAttestationSpec {
 // "network-user-unresolved" (49-14 follow-up): a network resolved, but this device's User row
 // did not — a DISTINCT condition from "no network context at all" (`awaiting-network`). See
 // `tryResolveNetworkUserEngine`'s doc comment.
+//
+// "recovery-unsupported-os" (49-19/49-21, D-26a rescope): the recovery ceremony rejected because
+// on-device recovery is supported on Android 11 and newer and explicitly unsupported below it — a
+// DISTINCT terminal phase from "no-recovery", not a reuse of it, because the cause and therefore
+// the copy differ: "no-recovery" means this device's screen lock was removed (a device
+// configuration fact), while this phase means the OS version itself cannot authorize the recovery
+// key regardless of screen-lock state. Reusing "no-recovery"'s copy here would tell an officer
+// with a perfectly good screen lock to go re-add one they never removed.
 type ScreenPhase =
 	| "idle"
 	| "pending"
 	| "success"
 	| "awaiting-network"
 	| "no-recovery"
-	| "network-user-unresolved";
+	| "network-user-unresolved"
+	| "recovery-unsupported-os";
 
 export default function ProvisionSigningKeyScreen() {
 	const insets = useSafeAreaInsets();
@@ -489,9 +498,12 @@ export default function ProvisionSigningKeyScreen() {
 			const expiration = Date.now() + TEN_YEARS_MS;
 
 			// Register the replacement key via the signed subsequent-key path, authorized by the
-			// SAME recovery key (D-16/D-26): BiometricPrompt's DEVICE_CREDENTIAL authenticator on
-			// API 30+, KeyguardManager below it — entirely a native branch, same four JS strings
-			// either way.
+			// SAME recovery key (D-16/D-26a): `BiometricPrompt` + `DEVICE_CREDENTIAL` on Android 11
+			// and newer. Below that version the native layer rejects `RECOVERY_UNSUPPORTED_OS`
+			// before any prompt is ever shown (49-19), which this function's catch block routes to
+			// the terminal `recovery-unsupported-os` phase (49-21) rather than reaching this call at
+			// all. `promptNegativeButton` is now unused on every path — recovery signing is either
+			// `BiometricPrompt`-driven (API 30+) or rejected before a prompt exists (below it).
 			const userEngineAfterRevoke = await resolveFreshUserEngine();
 			await userEngineAfterRevoke.addKey(
 				{ key: deviceKey.publicKeyCompressedHex, type: UserKeyType.p256, expiration },
@@ -550,7 +562,12 @@ export default function ProvisionSigningKeyScreen() {
 	 * Shared catch-path classification (D-13). `cancellation` silently restores the pre-press
 	 * state — no `InlineError`, no logged fault. D-18's terminal `no-device-credential` class
 	 * replaces the ENTIRE recovery body with the no-recovery message and renders no button at
-	 * all — see the render branch below. Every other class renders inline and re-enables the
+	 * all — see the render branch below. `recovery-unsupported-os` (49-19/49-21, D-26a rescope)
+	 * is the second terminal class: also zero-button, but reached only on a device below Android
+	 * 11, where the native layer rejects before any prompt — kept ordered AFTER
+	 * `no-device-credential` because a device with no screen lock at all is a more specific truth
+	 * than an unsupported OS version, mirroring the native layer's own check ordering
+	 * (`isDeviceSecure` before the SDK gate). Every other class renders inline and re-enables the
 	 * button.
 	 */
 	function handleCeremonyError(err: unknown): void {
@@ -561,6 +578,10 @@ export default function ProvisionSigningKeyScreen() {
 		}
 		if (cls === "no-device-credential") {
 			setPhase("no-recovery");
+			return;
+		}
+		if (cls === "recovery-unsupported-os") {
+			setPhase("recovery-unsupported-os");
 			return;
 		}
 		setErrorClass(cls);
@@ -648,6 +669,26 @@ export default function ProvisionSigningKeyScreen() {
 				</ThemedText>
 				<ThemedText type="small" style={[localStyles.body, { color: colors.text }]}>
 					{t("signingKeyProvisioningNoRecoveryBody")}
+				</ThemedText>
+			</ScrollView>
+		);
+	}
+
+	// D-26a rescope terminal state (49-19/49-21): recovery is unsupported on this device's Android
+	// version. Distinct from `no-recovery` above — same zero-button shape, different cause and
+	// therefore different copy (see the `ScreenPhase` union comment). No icon, no button.
+	if (phase === "recovery-unsupported-os") {
+		return (
+			<ScrollView
+				testID="signing-key-provisioning-screen"
+				style={styles.container}
+				contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+			>
+				<ThemedText type="default" style={{ color: colors.error }}>
+					{t("signingKeyProvisioningRecoveryUnsupportedOsHeading")}
+				</ThemedText>
+				<ThemedText type="small" style={[localStyles.body, { color: colors.text }]}>
+					{t("signingKeyProvisioningRecoveryUnsupportedOsBody")}
 				</ThemedText>
 			</ScrollView>
 		);

@@ -253,6 +253,9 @@ const resources = {
 			signingKeyProvisioningNoRecoveryHeading: 'This device no longer has a screen lock',
 			signingKeyProvisioningNoRecoveryBody:
 				'Both your signing key and its recovery key were protected by your device\'s screen lock, which has been removed. They cannot be recovered on this device — ask an officer to invite this device again.',
+			signingKeyProvisioningRecoveryUnsupportedOsHeading: "Recovery isn't available on this Android version",
+			signingKeyProvisioningRecoveryUnsupportedOsBody:
+				"Replacing a signing key requires Android 11 or newer. This device runs an older version, so its signing key can't be replaced here — ask an officer to invite this device again.",
 			settingsSigningKeyRow: 'Secure Signing',
 			warningIrrevocableAction: 'WARNING: This is an irrevocable action; proceed with caution.',
 			typeIConfirm: 'Type "I confirm" to continue',
@@ -1097,6 +1100,9 @@ const resources = {
 			signingKeyProvisioningNoRecoveryHeading: 'Este dispositivo ya no tiene bloqueo de pantalla',
 			signingKeyProvisioningNoRecoveryBody:
 				'Tanto tu clave de firma como su clave de recuperación estaban protegidas por el bloqueo de pantalla de tu dispositivo, que fue eliminado. No se pueden recuperar en este dispositivo — pídele a un funcionario que invite a este dispositivo nuevamente.',
+			signingKeyProvisioningRecoveryUnsupportedOsHeading: 'La recuperación no está disponible en esta versión de Android',
+			signingKeyProvisioningRecoveryUnsupportedOsBody:
+				'Reemplazar una clave de firma requiere Android 11 o una versión más reciente. Este dispositivo usa una versión anterior, por lo que su clave de firma no se puede reemplazar aquí — pídele a un funcionario que invite a este dispositivo nuevamente.',
 			settingsSigningKeyRow: 'Firma Segura',
 			warningIrrevocableAction:
 				'¡ATENCIÓN: Esta es una acción irrevocable; proceda con precaución.',
