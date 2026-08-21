@@ -147,24 +147,27 @@ export interface Spec extends TurboModule {
 	 * contract for `digestBase64` (plain base64 of raw digest bytes, never base64url, never
 	 * UTF-8-of-a-string).
 	 *
-	 * On API 30+ this authenticates via `BiometricPrompt` with
+	 * Recovery is supported ONLY on API 30+, where this authenticates via `BiometricPrompt` with
 	 * `setAllowedAuthenticators(DEVICE_CREDENTIAL)` — no negative button, since the platform
-	 * forbids combining a negative button with a device-credential authenticator. Below API 30
-	 * (D-26 — `androidx.biometric` 1.1.0 already supports the API; `DEVICE_CREDENTIAL` via
-	 * `BiometricPrompt` is unavailable below API 30 regardless of library version), this
-	 * authenticates via `KeyguardManager.createConfirmDeviceCredentialIntent` instead.
-	 * `promptNegativeButton` is therefore IGNORED on the API 30+ branch and used only by the
-	 * `KeyguardManager` branch — callers pass the same four strings in both cases.
+	 * forbids combining a negative button with a device-credential authenticator.
+	 * `promptNegativeButton` is IGNORED on every path (kept as a parameter for ABI stability).
 	 *
-	 * Rejects with one of `signWithDeviceKey`'s typed codes, plus one new D-18 terminal code:
-	 * `NO_DEVICE_CREDENTIAL` — the device has no screen lock configured at all, so no recovery
-	 * ceremony (on either API branch) can succeed. Distinct from `BIOMETRIC_ERROR`, which implies a
-	 * ceremony was actually attempted and failed; this device state is checked BEFORE either
-	 * ceremony begins.
+	 * **Recovery is explicitly unsupported below API 30 (D-26a rescope, 2026-08-21).** The native
+	 * layer rejects `RECOVERY_UNSUPPORTED_OS` before obtaining a key handle or launching any UI —
+	 * measured, not assumed: the recovery key is auth-per-use below API 30, and the only
+	 * below-API-30 authentication mechanism available to this app is a time-bound one that cannot
+	 * authorize an auth-per-use key (n=2, Redmi 8 / API 29 — see
+	 * `.planning/todos/pending/2026-08-19-d26-keyguard-fallback-cannot-authorize-per-use-key.md`).
 	 *
-	 * **Unproven at runtime on both API branches** — the API 30+ branch is proven by D-24 leg 3 on
-	 * the Pixel 8 and the API 24-29 branch by D-26a leg 5 on the Redmi 8, both in 49-14.
-	 * Compilation is not evidence of either.
+	 * Rejects with one of `signWithDeviceKey`'s typed codes, plus two further terminal codes:
+	 * `NO_DEVICE_CREDENTIAL` (D-18) — the device has no screen lock configured at all, so no
+	 * recovery ceremony can succeed regardless of API level. Distinct from `BIOMETRIC_ERROR`, which
+	 * implies a ceremony was actually attempted and failed; this device state is checked BEFORE the
+	 * OS-version check and any ceremony begins.
+	 * `RECOVERY_UNSUPPORTED_OS` (D-26a rescope) — see above.
+	 *
+	 * **Unproven at runtime** — the API 30+ branch is proven by D-24 leg 3 on the Pixel 8 in 49-14.
+	 * Compilation is not evidence of it.
 	 */
 	signWithRecoveryKey(
 		keyAlias: string,

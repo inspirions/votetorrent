@@ -54,6 +54,13 @@ import com.facebook.react.module.annotations.ReactModule
  *     re-provisioning ceremony that CAN succeed. Removing the lock screen destroys both the
  *     primary signing key and the recovery key (the device credential IS the lock screen, D-18's
  *     boundary); there is no on-device ceremony this code could route the caller into.
+ *
+ * Plan 19 (D-26a rescope, 2026-08-21) adds one further TERMINAL class to [signWithRecoveryKey]:
+ *   - `RECOVERY_UNSUPPORTED_OS`: the device's `Build.VERSION.SDK_INT` is below the minimum
+ *     required for a recovery ceremony to ever complete (measured — see
+ *     [KeyAttestationHelper.signWithRecoveryKey]'s doc comment). TERMINAL, not routing, for the
+ *     same reason as `NO_DEVICE_CREDENTIAL`: no on-device ceremony exists that this code could
+ *     route the caller into.
  */
 @ReactModule(name = AttestationNativeModule.NAME)
 class AttestationNativeModule(reactContext: ReactApplicationContext) :

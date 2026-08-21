@@ -1,8 +1,6 @@
 package org.votetorrent.attestationnative
 
-import android.app.Activity
 import android.app.KeyguardManager
-import android.content.Intent
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
@@ -15,7 +13,6 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
-import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.UiThreadUtil
 import java.math.BigInteger
@@ -26,15 +23,16 @@ import java.security.PrivateKey
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 
-/**
- * Request code for the API 24-29 [KeyguardManager.createConfirmDeviceCredentialIntent] fallback
- * (D-26) — scoped to this module (an arbitrary but stable value unlikely to collide with any
- * other `startActivityForResult` call in the host app) so [ActivityEventListener.onActivityResult]
- * can distinguish this ceremony's result from any other in-flight activity result.
- */
-private const val RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE = 49160
-
 private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+
+/**
+ * D-26a rescope (2026-08-21) — the minimum API level at which [KeyAttestationHelper.
+ * signWithRecoveryKey] can complete a recovery ceremony. Below this level the function rejects
+ * `RECOVERY_UNSUPPORTED_OS` before obtaining any key handle or launching any UI — see that
+ * function's doc comment for the measured cause. Named so the threshold has one place, not a bare
+ * `30` literal at each call site.
+ */
+private const val MIN_SDK_FOR_DEVICE_CREDENTIAL_RECOVERY = 30
 
 /**
  * Gap B observability (49-15) — app-process `Log.i` tag for the raw BiometricPrompt `errorCode`
@@ -312,7 +310,7 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	 * replacement key back into `UserKey` when the primary biometric key is invalidated, not to
 	 * produce a verifier-consumed cert chain.
 	 *
-	 * 49-14 follow-up (real-hardware defect, D-24 leg 3 / D-26a leg 5) — **REUSE PATH, deliberately
+	 * 49-14 follow-up (real-hardware defect surfaced during D-24 leg 3) — **REUSE PATH, deliberately
 	 * added ONLY here, never in the shared [generateKey] core.** The prior unconditional-regenerate
 	 * behavior meant every call — including `ProvisionSigningKeyScreen.tsx`'s `handleRecovery`
 	 * re-resolving "the same alias already provisioned during first-run" — silently REPLACED the
@@ -655,31 +653,44 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	}
 
 	/**
-	 * (Phase 49, D-16/D-26/D-18) Produce a device-credential-authenticated, hardware-backed P-256
+	 * (Phase 49, D-16/D-26a/D-18) Produce a device-credential-authenticated, hardware-backed P-256
 	 * signature over [digestBytes] using the recovery key under [keyAlias]. Mirrors
-	 * [signWithDeviceKey]'s shape exactly (same [NO_KEY_PROVISIONED]-before-any-prompt check, same
+	 * [signWithDeviceKey]'s shape (same [NO_KEY_PROVISIONED]-before-any-prompt check, same
 	 * [KeyPermanentlyInvalidatedException]-first catch ordering, same [derToCompactLowS]/
-	 * `SHA256withECDSA` [Signature] setup) — ONLY the authentication mechanism branches, by API
-	 * level:
+	 * `SHA256withECDSA` [Signature] setup).
 	 *
-	 * - API 30+ ([signRecoveryViaBiometricPrompt]): [BiometricPrompt] with
-	 *   `setAllowedAuthenticators(DEVICE_CREDENTIAL)` and NO negative button — the platform
-	 *   forbids setting a negative button together with a device-credential authenticator.
-	 * - API 24-29 ([signRecoveryViaKeyguardManager]): [BiometricPrompt] cannot request
-	 *   device-credential-only authentication at all below API 30, independent of the Keystore
-	 *   key's own flags (D-26, 49-RESEARCH.md "Pitfall 1") — falls back to
-	 *   [KeyguardManager.createConfirmDeviceCredentialIntent].
+	 * Recovery is supported ONLY on API 30+, via [signRecoveryViaBiometricPrompt] — [BiometricPrompt]
+	 * with `setAllowedAuthenticators(DEVICE_CREDENTIAL)` and NO negative button (the platform
+	 * forbids combining a negative button with a device-credential authenticator). Recovery is
+	 * **explicitly unsupported below API 30**: the function rejects the TERMINAL code
+	 * `RECOVERY_UNSUPPORTED_OS` before obtaining a key handle or initializing a [Signature] at all,
+	 * immediately after the `containsAlias` check.
 	 *
-	 * Before EITHER branch: [KeyguardManager.isDeviceSecure] is checked. A device with no screen
-	 * lock at all emits the distinct TERMINAL code `NO_DEVICE_CREDENTIAL` (D-18) rather than
-	 * attempting a ceremony that cannot succeed — removing the lock screen destroys this key too
-	 * (the device credential IS the lock screen, D-18's boundary), so no retry can fix this state.
-	 * A generic `BIOMETRIC_ERROR` here would show the officer a retry affordance for something no
-	 * retry can fix.
+	 * **D-26a rescope, 2026-08-21 — measured, not assumed.** [generateRecoveryKey] creates this key
+	 * below API 30 with `setUserAuthenticationRequired(true)` and deliberately no keygen call that
+	 * would grant it a positive authentication-validity window — an AUTH-PER-USE key, satisfiable
+	 * only through a `CryptoObject`-bound authentication. The platform's `KeyguardManager`
+	 * confirm-device-credential intent flow performs a TIME-BOUND authentication and authorizes only
+	 * keys with a positive validity duration — it cannot authorize an auth-per-use key. This was the
+	 * prior below-API-30 fallback path, and it was measured non-functional (n=2, Redmi 8 / API 29,
+	 * both after a clean `pm clear`): the OS launched the confirm-device-credential ceremony, the
+	 * credential was entered, the activity returned `RESULT_OK`, and `signature.sign()` threw
+	 * `SignatureException: KeyStoreException: Key user not authenticated`. See
+	 * `.planning/todos/pending/2026-08-19-d26-keyguard-fallback-cannot-authorize-per-use-key.md` for
+	 * the full measurement. Giving the recovery key a positive validity duration below API 30 was
+	 * considered and REJECTED — it trades per-use binding for a timed auth window on the very key
+	 * this phase exists to protect (the same property D-10 rejected for the primary signing key) —
+	 * and must never be reintroduced.
 	 *
-	 * **Neither branch has been exercised at runtime by this plan** — the API 30+ branch is proven
-	 * by D-24 leg 3 on the Pixel 8 and the API 24-29 branch by D-26a leg 5 on the Redmi 8, both in
-	 * 49-14. Compilation is not evidence of either.
+	 * Before either the OS-version check or the API 30+ ceremony: [KeyguardManager.isDeviceSecure]
+	 * is checked. A device with no screen lock at all emits the distinct TERMINAL code
+	 * `NO_DEVICE_CREDENTIAL` (D-18) rather than `RECOVERY_UNSUPPORTED_OS` — a more specific truth
+	 * (no credential exists at all) than the coarser OS-version truth, and it applies on every API
+	 * level, so it is checked first.
+	 *
+	 * The API 30+ branch is proven by D-24 leg 3 on real hardware (Pixel 8) in 49-14; compilation is
+	 * not evidence of it. `promptNegativeButton` is now unused on every path (kept as a parameter
+	 * for ABI stability).
 	 */
 	fun signWithRecoveryKey(
 		keyAlias: String,
@@ -694,7 +705,8 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	) {
 		val keyguardManager = ContextCompat.getSystemService(reactContext, KeyguardManager::class.java)
 		if (keyguardManager == null || !keyguardManager.isDeviceSecure) {
-			// D-18 terminal state, checked BEFORE either ceremony branch begins.
+			// D-18 terminal state, checked BEFORE the OS-version check and either ceremony branch —
+			// a more specific truth than an unsupported OS version, and applicable on every API level.
 			onError("NO_DEVICE_CREDENTIAL", IllegalStateException("device has no screen lock configured"))
 			return
 		}
@@ -703,6 +715,20 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 		// simply never have been provisioned yet.
 		if (!keyStore.containsAlias(keyAlias)) {
 			onError("NO_KEY_PROVISIONED", IllegalStateException("no recovery key provisioned under alias $keyAlias"))
+			return
+		}
+
+		// D-26a rescope, load-bearing order: this OS-version check runs BEFORE any key handle is
+		// obtained or Signature initialized, exactly like the NO_DEVICE_CREDENTIAL check above and
+		// the D-18 precedent — below API 30 no ceremony can ever complete (see this function's doc
+		// comment for the measured cause), so no ceremony work should be attempted at all.
+		if (Build.VERSION.SDK_INT < MIN_SDK_FOR_DEVICE_CREDENTIAL_RECOVERY) {
+			onError("RECOVERY_UNSUPPORTED_OS", IllegalStateException(
+				"recovery is unsupported below API $MIN_SDK_FOR_DEVICE_CREDENTIAL_RECOVERY: the " +
+					"recovery key is auth-per-use and KeyguardManager's time-bound " +
+					"confirm-device-credential authentication cannot authorize it " +
+					"(measured SDK_INT=${Build.VERSION.SDK_INT})",
+			))
 			return
 		}
 
@@ -724,28 +750,15 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 			return
 		}
 
-		if (Build.VERSION.SDK_INT >= 30) {
-			signRecoveryViaBiometricPrompt(
-				signature = signature,
-				digestBytes = digestBytes,
-				activity = activity,
-				promptTitle = promptTitle,
-				promptSubtitle = promptSubtitle,
-				onResult = onResult,
-				onError = onError,
-			)
-		} else {
-			signRecoveryViaKeyguardManager(
-				signature = signature,
-				digestBytes = digestBytes,
-				activity = activity,
-				keyguardManager = keyguardManager,
-				promptTitle = promptTitle,
-				promptSubtitle = promptSubtitle,
-				onResult = onResult,
-				onError = onError,
-			)
-		}
+		signRecoveryViaBiometricPrompt(
+			signature = signature,
+			digestBytes = digestBytes,
+			activity = activity,
+			promptTitle = promptTitle,
+			promptSubtitle = promptSubtitle,
+			onResult = onResult,
+			onError = onError,
+		)
 	}
 
 	/** API 30+ branch of [signWithRecoveryKey] — see that function's doc comment for the shape. */
@@ -821,68 +834,6 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 		}
 	}
 
-	/**
-	 * API 24-29 branch of [signWithRecoveryKey] — see that function's doc comment for the shape.
-	 * Launches [KeyguardManager.createConfirmDeviceCredentialIntent] for a result and completes
-	 * the ALREADY-INITIALIZED [signature] with the raw digest bytes on success. The
-	 * [ActivityEventListener] is scoped to [RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE] and
-	 * unregisters itself the instant it fires — the check-then-remove-then-act ordering
-	 * (`reactContext.removeActivityEventListener(this)` before any callback is invoked) is what
-	 * makes this listener a single-shot despite the ActivityEventListener API itself being
-	 * register-once/fire-many, so it cannot leak across configuration changes or double-fire for
-	 * one ceremony.
-	 */
-	private fun signRecoveryViaKeyguardManager(
-		signature: Signature,
-		digestBytes: ByteArray,
-		activity: FragmentActivity,
-		keyguardManager: KeyguardManager,
-		promptTitle: String,
-		promptSubtitle: String,
-		onResult: (String) -> Unit,
-		onError: (code: String, throwable: Throwable?) -> Unit,
-	) {
-		val intent = keyguardManager.createConfirmDeviceCredentialIntent(promptTitle, promptSubtitle)
-		if (intent == null) {
-			// isDeviceSecure() was already confirmed true by the caller immediately before this —
-			// this branch should be unreachable in practice, but is a real (if narrow) TOCTOU
-			// window if the device's credential state changes between the two calls.
-			onError(
-				"NO_DEVICE_CREDENTIAL",
-				IllegalStateException("createConfirmDeviceCredentialIntent returned null despite isDeviceSecure() == true"),
-			)
-			return
-		}
-
-		lateinit var listener: ActivityEventListener
-		listener = object : ActivityEventListener {
-			override fun onActivityResult(act: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
-				if (requestCode != RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE) return
-				reactContext.removeActivityEventListener(this)
-				if (resultCode == Activity.RESULT_OK) {
-					try {
-						signature.update(digestBytes)
-						val derSignature = signature.sign()
-						val compact = derToCompactLowS(derSignature)
-						onResult(compact.joinToString("") { b -> "%02x".format(b) })
-					} catch (e: Exception) {
-						onError("BIOMETRIC_ERROR", e)
-					}
-				} else {
-					// Cancelled/dismissed — the same neutral dismissal as the BiometricPrompt
-					// branch's CANCELED class, not an error (49-UI-SPEC.md).
-					onError("CANCELED", null)
-				}
-			}
-
-			override fun onNewIntent(intent: Intent) {
-				// Not applicable to a startActivityForResult flow — required by the interface only.
-			}
-		}
-		reactContext.addActivityEventListener(listener)
-		activity.startActivityForResult(intent, RECOVERY_KEY_CONFIRM_CREDENTIAL_REQUEST_CODE)
-	}
-
 	/** (3) D-15b — export leaf+intermediates only; drop the trailing root (verifier pins its own). */
 	private fun exportCertificateChain(keyAlias: String): List<String> {
 		val chain = keyStore.getCertificateChain(keyAlias)
@@ -943,17 +894,25 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 					}
 					setUserAuthenticationParameters(0, bitmask) // 0 = per-use (D-06/D-10), both variants
 				}
-				// else: pre-API-30 fallback (D-26, resolved at planning from RESEARCH Open Question
-				// 2). Below API 30 there is no way to request a specific authenticator at the
-				// KeyGenParameterSpec/BiometricPrompt API surface — a bare-auth key can still be
-				// created via setUserAuthenticationRequired(true) alone (no
-				// setUserAuthenticationParameters call, no validity-duration call), but which
-				// authenticator satisfies it at USE time is decided by how the key is EXERCISED, not
-				// how it was created. For KeyAuthenticator.DEVICE_CREDENTIAL on API 24-29 that means
-				// KeyguardManager.createConfirmDeviceCredentialIntent (see signWithRecoveryKey) —
-				// BiometricPrompt cannot request device-credential-only authentication at all below
-				// API 30, independent of this key's flags. Proven by D-26a leg 5 on the Redmi 8
-				// (API 29) in 49-14, not by this comment.
+				// else: pre-API-30 (D-26a rescope, 2026-08-21). Below API 30 there is no way to
+				// request a specific authenticator at the KeyGenParameterSpec/BiometricPrompt API
+				// surface — a bare-auth key can still be created via
+				// setUserAuthenticationRequired(true) alone (no setUserAuthenticationParameters
+				// call, no positive-validity-duration keygen call), which makes it auth-per-use.
+				// There is no API this app is willing to use that can authorize an auth-per-use key
+				// below API 30 — measured: the platform's confirm-device-credential intent flow
+				// performs a time-bound authentication and cannot satisfy it (n=2, Redmi 8 / API 29
+				// — see
+				// .planning/todos/pending/2026-08-19-d26-keyguard-fallback-cannot-authorize-per-use-key.md).
+				// So below API 30, signWithRecoveryKey rejects RECOVERY_UNSUPPORTED_OS rather than
+				// attempting a ceremony. The key is still generated here so the provisioning flow
+				// stays uniform across API levels — DO NOT change any keygen call in this function
+				// (setUserAuthenticationRequired, setInvalidatedByBiometricEnrollment,
+				// setUserAuthenticationParameters, setIsStrongBoxBacked all stay byte-identical) and
+				// DO NOT add a positive authentication-validity-duration keygen call here — that
+				// rejected alternative trades per-use binding for a timed auth window on the very
+				// key this phase exists to protect (the same property D-10 rejected for the primary
+				// signing key).
 				if (strongBox) {
 					setIsStrongBoxBacked(true) // D-07 — try StrongBox first
 				}
