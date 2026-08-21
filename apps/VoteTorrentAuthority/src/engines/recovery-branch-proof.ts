@@ -2,11 +2,11 @@
  * recovery-branch-proof.ts — D-26a leg 5, LOCAL half (49-CONTEXT D-26/D-26a)
  *
  * WHY THIS EXISTS
- * D-26a requires the `KeyguardManager` recovery branch (API 24-29) to be demonstrated on the
- * Redmi 8. As originally specified, that leg is folded into D-24 leg 3's revoke-then-add
- * ceremony, whose success criterion is a replacement key landing in the network `UserKey`
- * table — so it cannot run until a network exists whose `User` resolves with BOTH keys
- * registered. That precondition has been blocked behind an unrelated P2P/relay chain.
+ * D-26a requires the device-credential recovery branch to be demonstrated on the fleet. As
+ * originally specified, that leg is folded into D-24 leg 3's revoke-then-add ceremony, whose
+ * success criterion is a replacement key landing in the network `UserKey` table — so it cannot
+ * run until a network exists whose `User` resolves with BOTH keys registered. That precondition
+ * has been blocked behind an unrelated P2P/relay chain.
  *
  * But the branch itself needs no network. Splitting the leg:
  *
@@ -23,13 +23,26 @@
  * hand-rolled noble verify would prove nothing about schema agreement.
  * It does NOT prove the DB write path. Do not record it as closing D-24 leg 3.
  *
- * BRANCH ATTRIBUTION IS MEASURED, NOT INFERRED
- * The ceremony script's existing `recover-branch` sub-leg records PASS for SDK<30 on
- * "source-guaranteed" dispatch — it would print PASS on a device where the KeyguardManager path
- * never executed. Below API 30 that path calls
- * `KeyguardManager.createConfirmDeviceCredentialIntent` via `startActivityForResult`, and an OS
- * activity launch is observable in logcat independently of anything this app logs. The
- * accompanying script gates on that, so the branch is measured.
+ * D-26A RESCOPED 2026-08-21 — API 30+ ONLY
+ * Recovery is supported on API 30+ via `BiometricPrompt` + `DEVICE_CREDENTIAL`. Below API 30 it
+ * is explicitly UNSUPPORTED: measured n=2 on Device B (Redmi 8, API 29) after a clean `pm clear`,
+ * the recovery key is auth-per-use below API 30 and the OS confirm-device-credential API performs
+ * a time-bound authentication that cannot authorize it, producing `RESULT_OK` followed by
+ * `KeyStoreException: Key user not authenticated`. 49-19 removed the sub-API-30 dispatch branch
+ * from the native layer entirely; `signWithRecoveryKey` now rejects with
+ * `code: 'RECOVERY_UNSUPPORTED_OS'` below API 30 BEFORE any key handle or UI. See
+ * `.planning/todos/pending/2026-08-19-d26-keyguard-fallback-cannot-authorize-per-use-key.md` for
+ * the n=2 measurement and the rescope decision. Whether the branch executes AT ALL below API 30
+ * was itself settled by measurement, not inference — the `d26a-branch` OS
+ * `CONFIRM_DEVICE_CREDENTIAL` activity, observed twice on hardware before the rescope, is the
+ * measurement that produced this decision and is preserved in the phase's proof log. This
+ * module's remaining value is exercising the API 30+ path (the only one that still exists)
+ * without a network.
+ *
+ * BRANCH ATTRIBUTION IS MEASURED, NOT INFERRED (API 30+)
+ * The ceremony script's `recover-branch` leg asserts the SDK>=30 `BiometricPrompt` dispatch by
+ * source guarantee. Below API 30 the leg is now `N/A` — there is no branch left to measure or
+ * infer, since the native layer terminally rejects before any dispatch decision.
  */
 
 import { verifySigP256 } from '@votetorrent/vote-engine/rn';
@@ -65,10 +78,16 @@ export interface RecoveryBranchProofResult {
 	 * Recording a precondition failure as FAIL would put a false negative into the phase record —
 	 * the same void-vs-negative-result distinction that invalidated a `dialTimeout` experiment
 	 * earlier in this phase. A PRECONDITION outcome claims NOTHING about D-26a either way.
+	 *
+	 * `unsupported-os` extends that same reasoning one step further: below API 30 the branch does
+	 * not merely go unreached by a stalled precondition — it DOES NOT EXIST on this OS version
+	 * (D-26a RESCOPED 2026-08-21; `signWithRecoveryKey` rejects `RECOVERY_UNSUPPORTED_OS` before
+	 * any key handle or UI). A run that observes this claims nothing about D-26a either way and is
+	 * not a defect — it is the terminal, by-design outcome of an unsupported OS version.
 	 */
-	outcome: 'pass' | 'fail' | 'precondition-unmet';
+	outcome: 'pass' | 'fail' | 'precondition-unmet' | 'unsupported-os';
 	sdkInt?: number;
-	branch?: 'keyguard-manager' | 'biometric-prompt-device-credential';
+	branch?: 'unsupported-below-api-30' | 'biometric-prompt-device-credential';
 }
 
 /**
@@ -92,7 +111,7 @@ export async function runRecoveryBranchProof(
 	sdkInt: number,
 	prompts: { title: string; subtitle: string; negative: string },
 ): Promise<RecoveryBranchProofResult> {
-	const branch = sdkInt >= 30 ? 'biometric-prompt-device-credential' : 'keyguard-manager';
+	const branch = sdkInt >= 30 ? 'biometric-prompt-device-credential' : 'unsupported-below-api-30';
 	console.info(`${TAG} starting`, JSON.stringify({ sdkInt, branch, recoveryKeyAlias }));
 
 	try {
@@ -118,10 +137,11 @@ export async function runRecoveryBranchProof(
 			return { passed: false, outcome: 'precondition-unmet', sdkInt, branch };
 		}
 
-		// This raises the real credential UI: KeyguardManager below 30, BiometricPrompt
-		// DEVICE_CREDENTIAL at 30+. A human must satisfy it with the DEVICE CREDENTIAL
-		// (PIN/pattern/password) — never a fingerprint; the fingerprint is what invalidated the
-		// signing key in the first place.
+		// This raises the real credential UI: BiometricPrompt DEVICE_CREDENTIAL at API 30+, the only
+		// branch that still exists (D-26a RESCOPED 2026-08-21). Below API 30 `signWithRecoveryKey`
+		// rejects with `RECOVERY_UNSUPPORTED_OS` before reaching any UI. A human must satisfy the
+		// prompt with the DEVICE CREDENTIAL (PIN/pattern/password) — never a fingerprint; the
+		// fingerprint is what invalidated the signing key in the first place.
 		console.info(`${TAG} ACTION REQUIRED — satisfy the DEVICE CREDENTIAL prompt (not a fingerprint)`);
 		const signed = (await native.signWithRecoveryKey(
 			recoveryKeyAlias,
@@ -152,6 +172,18 @@ export async function runRecoveryBranchProof(
 		// raw value so it is distinguishable from a genuine verification failure (the 49-14 lesson
 		// about generic copy masking real faults).
 		console.error(`${TAG} raw error —`, err);
+		// D-26a RESCOPED 2026-08-21: below API 30, recovery does not exist at all — 49-19 removed the
+		// sub-API-30 dispatch branch from the native layer, and `signWithRecoveryKey` now rejects with
+		// an exact `code: 'RECOVERY_UNSUPPORTED_OS'` before any key handle or UI. Classify on the
+		// exact code, never a message regex, so an unrelated error whose message happens to mention
+		// the words cannot be misclassified into this bucket. This check runs BEFORE the
+		// `isPrecondition` regex below — the run claims NOTHING about D-26a either way, and is not a
+		// defect: it is the terminal, by-design outcome of an unsupported OS version.
+		const errCode = (err as { code?: unknown })?.code;
+		if (errCode === 'RECOVERY_UNSUPPORTED_OS') {
+			console.info(`${TAG} ========== D-26A LOCAL VERDICT: UNSUPPORTED-OS ==========`);
+			return { passed: false, outcome: 'unsupported-os', sdkInt, branch };
+		}
 		// An invalidated recovery key, or a cancelled prompt, means the branch was NEVER REACHED.
 		// Measured on Device B 2026-08-19: the Keystore recovery key reported
 		// `recovery key invalidated — re-association required` while AsyncStorage still held its

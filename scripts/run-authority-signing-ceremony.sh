@@ -520,10 +520,12 @@ satisfy_biometric() {
 
 # satisfy_device_credential REASON — the D-16/D-26 recovery ceremony's authenticator is
 # DEVICE_CREDENTIAL (PIN/pattern/password), never a fingerprint (BiometricPrompt forbids
-# combining setAllowedAuthenticators(DEVICE_CREDENTIAL) with a negative button, and the API 24-29
-# KeyguardManager branch is a distinct confirm-credential Activity) — so this is ALWAYS a manual
-# action, on an emulator or real hardware alike (the emulator's virtual fingerprint sensor cannot
-# satisfy a device-credential prompt either). Same bounded-wait shape as satisfy_biometric,
+# combining setAllowedAuthenticators(DEVICE_CREDENTIAL) with a negative button) — so this is
+# ALWAYS a manual action, on an emulator or real hardware alike (the emulator's virtual
+# fingerprint sensor cannot satisfy a device-credential prompt either). D-26a RESCOPED
+# 2026-08-21: recovery is supported on API 30+ only; below API 30 `signWithRecoveryKey` now
+# rejects with RECOVERY_UNSUPPORTED_OS before this prompt would ever be reached. Same bounded-wait
+# shape as satisfy_biometric,
 # printed as a distinctly-worded instruction so an operator does not confuse the two ceremonies —
 # touching the sensor here does nothing; the sheet asks for the PIN/pattern/password.
 satisfy_device_credential() {
@@ -1201,7 +1203,14 @@ recover() {
   if [ "${sdk}" -ge 30 ] 2>/dev/null; then
     record_leg "recover-branch" "PASS" "SDK=${sdk} (>=30) — BiometricPrompt/DEVICE_CREDENTIAL branch (signRecoveryViaBiometricPrompt), source-guaranteed by signWithRecoveryKey's SDK_INT>=30 dispatch; logcat: ${branch_line:-<none>}"
   else
-    record_leg "recover-branch" "PASS" "SDK=${sdk} (<30) — KeyguardManager.createConfirmDeviceCredentialIntent branch (signRecoveryViaKeyguardManager), source-guaranteed; logcat: ${branch_line:-<none>}"
+    # D-26a RESCOPED 2026-08-21: recovery is unsupported below API 30. 49-19 deleted the
+    # pre-49-19 sub-API-30 dispatch function from the native layer entirely (grep confirms zero
+    # hits in packages/attestation-native/) — signWithRecoveryKey now rejects with
+    # RECOVERY_UNSUPPORTED_OS before any ceremony, key handle, or UI. There is no branch left to
+    # execute below API 30, so this leg is N/A rather than PASS — a PASS here would assert the
+    # execution of a function that no longer exists.
+    local removed_fn_evidence="signRecoveryViaKeyguardManager no longer exists (removed by 49-19)"
+    record_leg "recover-branch" "N/A" "SDK=${sdk} (<30) — recovery is unsupported below API 30 by decision (2026-08-21, D-26a RESCOPED); ${removed_fn_evidence}; signWithRecoveryKey rejects RECOVERY_UNSUPPORTED_OS before any ceremony"
   fi
 }
 

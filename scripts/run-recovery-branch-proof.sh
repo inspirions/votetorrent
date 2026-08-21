@@ -20,15 +20,26 @@
 #
 #           Does NOT close D-24 leg 3. Record it as D-26a-LOCAL.
 #
-# BRANCH ATTRIBUTION IS MEASURED, NOT INFERRED
-#           The existing `recover` leg's `recover-branch` sub-assertion records PASS for SDK<30 on
+# D-26A RESCOPED 2026-08-21 — API 30+ ONLY
+#           Recovery is supported on API 30+ via BiometricPrompt DEVICE_CREDENTIAL. Below API 30 it
+#           is explicitly UNSUPPORTED: measured n=2 on Device B (Redmi 8, API 29) after a clean
+#           `pm clear`, the recovery key is auth-per-use below API 30 and the OS
+#           confirm-device-credential API performs a time-bound authentication that cannot
+#           authorize it (RESULT_OK followed by KeyStoreException: Key user not authenticated).
+#           49-19 removed the sub-API-30 dispatch branch from the native layer entirely; the app
+#           now rejects with RECOVERY_UNSUPPORTED_OS below API 30 before any key handle or UI. See
+#           .planning/todos/pending/2026-08-19-d26-keyguard-fallback-cannot-authorize-per-use-key.md
+#           for the n=2 measurement and the rescope decision.
+#
+# BRANCH ATTRIBUTION IS MEASURED, NOT INFERRED (API 30+, the only branch left)
+#           The existing `recover` leg's `recover-branch` sub-assertion records PASS for SDK>=30 on
 #           "source-guaranteed" dispatch — it captures the logcat but never gates on it, so it
-#           would print PASS on a device where the KeyguardManager path never executed. Below API
-#           30 that path launches `KeyguardManager.createConfirmDeviceCredentialIntent` via
-#           `startActivityForResult`; an OS activity launch is visible in logcat independently of
-#           anything the app logs. This script GATES on that, and on API 30+ gates on its ABSENCE
-#           (the BiometricPrompt path starts no such activity). That is the fix for the soft
-#           assertion.
+#           would print PASS on a device where the BiometricPrompt path never executed. This
+#           script GATES on the ABSENCE of a CONFIRM_DEVICE_CREDENTIAL activity on API 30+ (the
+#           BiometricPrompt path starts no such activity — that activity was the SIGNATURE of the
+#           now-removed sub-API-30 branch, historically distinguishable in logcat independently of
+#           anything the app logs). Below API 30 there is no branch left to measure or infer; the
+#           script reports N/A rather than PASS/FAIL for that SDK range.
 #
 # Usage   : SERIAL=<serial> ./scripts/run-recovery-branch-proof.sh
 #           Requires a human at the device: the prompt must be satisfied with the DEVICE
@@ -36,6 +47,9 @@
 #
 # Exit    : 0 — verdict PASS and the branch assertion held
 #           1 — verdict FAIL, timeout, or branch assertion failed
+#           2 — verdict PRECONDITION-UNMET (branch never reached; claims nothing about D-26a)
+#           3 — verdict UNSUPPORTED-OS (recovery unsupported below API 30 by decision, D-26a
+#               RESCOPED 2026-08-21; claims nothing about D-26a)
 #
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -108,8 +122,10 @@ fi
 echo "[d26a-local] ${VERDICT}"
 
 # ── Branch assertion, MEASURED from the OS, not inferred from the SDK ────────
-# Below API 30 the KeyguardManager path starts the confirm-device-credential activity. Above it,
-# BiometricPrompt starts no such activity, so its ABSENCE is the correct assertion there.
+# API 30+ is the only branch that still exists (D-26a RESCOPED 2026-08-21): BiometricPrompt
+# starts no confirm-device-credential activity, so its ABSENCE is the correct assertion there.
+# Below API 30 there is nothing left to measure — recovery is unsupported by decision, and the
+# runner is expected to report UNSUPPORTED-OS rather than exercising any branch at all.
 case "${VERDICT}" in
   *PRECONDITION-UNMET*)
     echo "[d26a-local] branch assertion SKIPPED — the branch was never reached, so presence or"
@@ -121,12 +137,7 @@ esac
 CDC_HITS="$(adb ${ADBD} logcat -d 2>/dev/null | grep -ci 'CONFIRM_DEVICE_CREDENTIAL' || true)"
 BRANCH_OK=1
 if [ "${SDK}" -lt 30 ] 2>/dev/null; then
-  if [ "${CDC_HITS}" -gt 0 ]; then
-    echo "[d26a-local] LEG d26a-branch: PASS — SDK=${SDK} (<30) and the OS launched CONFIRM_DEVICE_CREDENTIAL (${CDC_HITS} line(s)); the KeyguardManager branch demonstrably executed"
-  else
-    echo "[d26a-local] LEG d26a-branch: FAIL — SDK=${SDK} (<30) but NO CONFIRM_DEVICE_CREDENTIAL activity was observed; the KeyguardManager branch did NOT run (this is exactly the case the old source-inferred assertion would have passed)"
-    BRANCH_OK=0
-  fi
+  echo "[d26a-local] LEG d26a-branch: N/A — SDK=${SDK} (<30); on-device recovery is unsupported below API 30 by decision (2026-08-21, D-26a RESCOPED), so the local runner is expected to report UNSUPPORTED-OS on this device rather than exercise any branch. This is not a PASS or a FAIL."
 else
   if [ "${CDC_HITS}" -eq 0 ]; then
     echo "[d26a-local] LEG d26a-branch: PASS — SDK=${SDK} (>=30) and no CONFIRM_DEVICE_CREDENTIAL activity, consistent with the BiometricPrompt DEVICE_CREDENTIAL branch"
@@ -137,13 +148,19 @@ else
 fi
 
 # PRECONDITION-UNMET is NOT a failure of D-26a — the branch was never reached, so the leg is
-# NOT-EXERCISED and claims nothing either way. Exit 2 so a caller can tell the three apart, and
-# so a blocked run is never recorded as a refutation.
+# NOT-EXERCISED and claims nothing either way. UNSUPPORTED-OS is likewise not a failure — the
+# branch does not exist on this OS version by decision (D-26a RESCOPED 2026-08-21). Exit
+# non-zero-but-distinguishable codes so a caller can tell all the outcomes apart, and so neither a
+# blocked run nor an unsupported-OS run is ever recorded as a refutation.
 case "${VERDICT}" in
   *PRECONDITION-UNMET*)
     echo "[d26a-local] LEG d26a-local: NOT-EXERCISED — a precondition blocked the branch (see the raw"
     echo "[d26a-local]   error under [d26a-local] in logcat). This claims NOTHING about D-26a."
     exit 2 ;;
+  *UNSUPPORTED-OS*)
+    echo "[d26a-local] LEG d26a-local: N/A — recovery is unsupported below API 30 by decision"
+    echo "[d26a-local]   (2026-08-21, D-26a RESCOPED). This claims NOTHING about D-26a on this device."
+    exit 3 ;;
   *PASS*)
     if [ "${BRANCH_OK}" -eq 1 ]; then exit 0; fi
     exit 1 ;;

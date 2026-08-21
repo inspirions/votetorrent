@@ -21,9 +21,10 @@ AppRegistry.registerComponent(appName, () => App);
 // strand runner on the shared PROOF_CHAIN_REF_KEY (see
 // 37-DIAGNOSIS-boolean-default-reattach.md "Secondary finding").
 // D-26a LOCAL half (49-CONTEXT D-26/D-26a). Dev-only; no-op unless
-// __DEV__ && RECOVERY_BRANCH_PROOF_ENABLED (committed default false). Proves the
-// KeyguardManager (API 24-29) / BiometricPrompt DEVICE_CREDENTIAL (30+) recovery branch
-// signs and that the schema's own verifier accepts it -- WITHOUT needing a network.
+// __DEV__ && RECOVERY_BRANCH_PROOF_ENABLED (committed default false). Proves the API 30+
+// BiometricPrompt DEVICE_CREDENTIAL recovery path signs and that the schema's own verifier
+// accepts it -- WITHOUT needing a network. Below API 30 recovery is unsupported (D-26a
+// RESCOPED 2026-08-21), so the runner records UNSUPPORTED-OS.
 // Driven by scripts/run-recovery-branch-proof.sh. Logs under [d26a-local].
 import {runRecoveryBranchProofRunner} from './src/engines/recovery-branch-proof-runner';
 runRecoveryBranchProofRunner();
