@@ -12,10 +12,10 @@
  * invisible without this suite's fixtures deliberately using DIFFERENT pre/post-attestation hex
  * values).
  *
- * DEVICE-PROOF HONESTY: jest cannot exercise the real Android Keystore, the real
- * `BiometricPrompt`, or `KeyguardManager` — this suite proves the JS-side wiring and rendering
- * against a faked native module ONLY. That the ceremony works on real hardware is D-24 leg 1
- * (49-13/49-18) and leg 3 (49-14), not this file.
+ * DEVICE-PROOF HONESTY: jest cannot exercise the real Android Keystore or the real
+ * `BiometricPrompt` — this suite proves the JS-side wiring and rendering against a faked native
+ * module ONLY. That the ceremony works on real hardware is D-24 leg 1 (49-13/49-18) and leg 3
+ * (49-14), not this file.
  *
  * The native TurboModule bridge is faked the same way `device-signer.hardware.test.ts` and
  * `real-attestation-producer.test.ts` fake it: react-native's `TurboModuleRegistry.getEnforcing`
@@ -684,6 +684,43 @@ describe("ProvisionSigningKeyScreen — 49-10 recovery variant (D-16) and D-18 t
 		// 49-14 follow-up: this exact failure mode (interrupted AFTER the Keystore alias
 		// regenerated, BEFORE local metadata resynced) is precisely what the in-progress marker
 		// exists to protect against. It must stay SET here, never cleared.
+		expect(mockMarkRecoveryInProgress).toHaveBeenCalledTimes(1);
+		expect(mockClearRecoveryInProgress).not.toHaveBeenCalled();
+	});
+
+	it("(b2) 49-21 — a RECOVERY_UNSUPPORTED_OS rejection renders the recovery-unsupported-os heading/body and ZERO buttons, distinct from the no-recovery pair", async () => {
+		nativeFake.provisionDeviceKey.mockResolvedValue({
+			publicKeyBase64: "NEW-SIGNING-SPKI-DER-BASE64",
+			publicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+		});
+		nativeFake.provisionRecoveryKey.mockResolvedValue({
+			publicKeyBase64: "RECOVERY-SPKI-DER-BASE64",
+			publicKeyCompressedHex: RECOVERY_KEY_HEX,
+		});
+		nativeFake.signWithRecoveryKey.mockRejectedValue(
+			Object.assign(new Error("recovery unsupported on this OS version"), { code: "RECOVERY_UNSUPPORTED_OS" }),
+		);
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningRecoveryUnsupportedOsHeading");
+		expect(json).toContain("signingKeyProvisioningRecoveryUnsupportedOsBody");
+
+		// The two terminal states must never collapse into one — this is the assertion that keeps
+		// a regression from silently telling an API<30 officer to restore a screen lock they never
+		// removed.
+		expect(json).not.toContain("signingKeyProvisioningNoRecoveryHeading");
+
+		// D-26a rescope: no action affordance at all — assert the rendered button COUNT, not just
+		// the absence of a specific testID (a stray pressable elsewhere would still be a lie).
+		const pressables = tr.root.findAll((node) => typeof node.props.onPress === "function");
+		expect(pressables.length).toBe(0);
+
+		// The ceremony was interrupted after the Keystore alias may already have been regenerated —
+		// same reasoning as the (b) NO_DEVICE_CREDENTIAL case above: the in-progress marker must
+		// stay SET, never cleared.
 		expect(mockMarkRecoveryInProgress).toHaveBeenCalledTimes(1);
 		expect(mockClearRecoveryInProgress).not.toHaveBeenCalled();
 	});
