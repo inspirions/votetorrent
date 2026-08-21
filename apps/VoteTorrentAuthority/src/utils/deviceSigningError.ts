@@ -42,7 +42,11 @@ export type DeviceSigningErrorClass =
 	| 'no-key-provisioned' // navigate, never inline — detected BEFORE any prompt
 	| 'no-device-credential' // D-18 terminal — no recovery possible
 	| 'recovery-key-invalidated' // 49-14 follow-up — the D-16 FAIL signal, inline-rendered
-	| 'recovery-key-not-registered'; // 49-14 follow-up — DeleteValid precondition unmet, inline-rendered
+	| 'recovery-key-not-registered' // 49-14 follow-up — DeleteValid precondition unmet, inline-rendered
+	| 'recovery-unsupported-os'; // 49-19, D-26a rescope terminal state — recovery is supported on
+	// API 30+ and explicitly unsupported below it; sibling in shape to 'no-device-credential'
+	// (both terminal, both absent from the copy map), distinct in cause (OS version, not device
+	// configuration).
 
 /**
  * Native reject code -> UI class. Reused verbatim from Phase 45's taxonomy
@@ -72,6 +76,13 @@ export const CODE_TO_CLASS: Record<string, DeviceSigningErrorClass> = {
 	// mechanism deliberately (a `code` field on a plain thrown Error) rather than introducing a
 	// second classification mechanism alongside it.
 	RECOVERY_KEY_NOT_REGISTERED: 'recovery-key-not-registered',
+	// 49-19, D-26a rescope — native reject code raised by KeyAttestationHelper.kt's
+	// signWithRecoveryKey BEFORE any ceremony starts (before obtaining a key handle or launching
+	// any UI), on API < 30 only. Measured cause: below API 30 the recovery key is auth-per-use,
+	// and KeyguardManager's time-bound confirm-device-credential authentication cannot authorize
+	// an auth-per-use key (measured n=2 on a Redmi 8 / API 29 — see
+	// .planning/todos/pending/2026-08-19-d26-keyguard-fallback-cannot-authorize-per-use-key.md).
+	RECOVERY_UNSUPPORTED_OS: 'recovery-unsupported-os',
 };
 
 /**
@@ -95,12 +106,14 @@ export function mapDeviceSigningError(err: unknown): DeviceSigningErrorClass {
  * on the calling screen, PLUS the two `recovery-key-*` classes 49-14 added
  * — see their own entries below for why those render inline too).
  *
- * `cancellation`, `key-invalidated`, `no-key-provisioned`, and
- * `no-device-credential` are DELIBERATELY ABSENT from this map — that
- * absence IS the contract, not an omission: `cancellation` renders nothing
- * (silent dismissal), and the other three always navigate (to
- * `ProvisionSigningKey` or a terminal no-recovery screen) rather than
- * rendering inline.
+ * `cancellation`, `key-invalidated`, `no-key-provisioned`,
+ * `no-device-credential`, and `recovery-unsupported-os` are DELIBERATELY
+ * ABSENT from this map — that absence IS the contract, not an omission:
+ * `cancellation` renders nothing (silent dismissal); `key-invalidated` and
+ * `no-key-provisioned` always navigate (to `ProvisionSigningKey`) rather
+ * than rendering inline; `no-device-credential` and `recovery-unsupported-os`
+ * (49-19, D-26a rescope) each render a terminal no-recovery screen body
+ * (49-21) rather than an `InlineError`.
  */
 export const DEVICE_SIGNING_ERROR_COPY_KEY: Partial<Record<DeviceSigningErrorClass, string>> = {
 	'no-biometrics-enrolled': 'deviceSigningErrorNoBiometricsEnrolled',
@@ -123,6 +136,14 @@ export const DEVICE_SIGNING_ERROR_COPY_KEY: Partial<Record<DeviceSigningErrorCla
  * must never be rendered inline (there is no `InlineError` copy for it —
  * see `DEVICE_SIGNING_ERROR_COPY_KEY` above), it must route the officer to
  * the provisioning/recovery screen instead.
+ *
+ * `recovery-unsupported-os` (49-19, D-26a rescope) is deliberately NOT a
+ * navigation class, even though — like `key-invalidated` — it too carries no
+ * inline copy. Unlike `key-invalidated`, there is no ceremony on the
+ * provisioning screen that could succeed for it: recovery is unsupported on
+ * this OS version, full stop, so routing there would strand the officer at a
+ * dead end. The screen this class reaches instead renders a terminal body in
+ * place of the recovery body (49-21).
  */
 export function isNavigationClass(c: DeviceSigningErrorClass): boolean {
 	return c === 'key-invalidated' || c === 'no-key-provisioned';
