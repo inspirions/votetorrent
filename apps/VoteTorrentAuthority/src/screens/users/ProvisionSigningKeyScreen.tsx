@@ -398,6 +398,34 @@ export default function ProvisionSigningKeyScreen() {
 			}
 
 			setPhase("success");
+
+			// Dev-only read-back: re-resolve the network `User` AFTER the writes above and emit
+			// its key set. This is the measurement the recovery-key-registration proof needs and
+			// the only place it can be taken -- the registered keys are `UserKey` rows in the
+			// strand DB, not AsyncStorage, and the local `deviceUser.activeKeys` blob is
+			// single-element by design (see the gate hook's comment). A fresh engine is resolved
+			// rather than reusing `networkUserEngine`/`summary` above, both of which hold the
+			// PRE-write snapshot this read-back exists to disprove.
+			//
+			// Wrapped in its own try/catch and placed AFTER `setPhase("success")` so a failed
+			// probe can never turn a completed ceremony into a reported failure -- an instrument
+			// must not be able to fail the product it measures. Safe to log: compressed PUBLIC
+			// keys only. __DEV__-gated so release builds stay silent.
+			if (__DEV__) {
+				try {
+					const afterSummary = await (await resolveFreshUserEngine()).getSummary();
+					console.log(
+						"[ceremony-registered-keys]",
+						JSON.stringify({
+							activeKeys: (afterSummary?.activeKeys ?? []).map((k) => k.key),
+							attested: attestedKeyHex,
+							recovery: recoveryKeyHex,
+						}),
+					);
+				} catch (probeErr) {
+					console.log("[ceremony-registered-keys]", JSON.stringify({ readBackFailed: String(probeErr) }));
+				}
+			}
 		} catch (err) {
 			// T-49-USER-7 (deviceSigningError.ts:117-118) — the same generic
 			// deviceSigningErrorGeneric copy handleRecovery's catch below warns about applies here

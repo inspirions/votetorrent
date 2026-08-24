@@ -2,7 +2,10 @@ import { useCallback } from "react";
 import { useNavigation } from "@react-navigation/native";
 import type { INetworkEngine } from "@votetorrent/vote-core";
 import { useApp } from "../providers/AppProvider";
-import { shouldPromptRecoveryKeyRegistration } from "../engines/recovery-key-registration";
+import {
+	shouldPromptRecoveryKeyRegistration,
+	type RegisteredKeyHolder,
+} from "../engines/recovery-key-registration";
 import type { NavigationProp } from "../navigation/types";
 
 /**
@@ -39,11 +42,39 @@ export function useRecoveryKeyRegistrationGate(): () => Promise<boolean> {
 	const { getEngine } = useApp();
 
 	return useCallback(async () => {
+		let observed: RegisteredKeyHolder | undefined;
 		const needed = await shouldPromptRecoveryKeyRegistration(async () => {
 			const engine = await getEngine<INetworkEngine>("network");
 			const userEngine = await engine.getCurrentUser();
-			return userEngine ? await userEngine.getSummary() : undefined;
+			observed = userEngine ? await userEngine.getSummary() : undefined;
+			return observed;
 		});
+		// Dev-only instrument: emit the gate's INPUTS alongside its verdict so an on-device run
+		// can tell the three outcomes apart, which the navigation alone cannot. A gate that does
+		// not fire is ambiguous by construction -- "the recovery key is already registered"
+		// (nothing to do) and "no network User resolved" (a DISTINCT condition, see
+		// `needsRecoveryKeyRegistration`'s doc comment) both return false and both look like
+		// silence from outside.
+		//
+		// The AsyncStorage `deviceUser.activeKeys` blob is NOT a substitute instrument: it is
+		// single-element BY DESIGN (`persistProvisionedDeviceUser` writes exactly one key, and
+		// `device-user.ts` documents why the recovery key must not land in `activeKeys[1]`), so
+		// reading it back would report the signing key alone whether or not registration
+		// succeeded. The network `User`'s key set, logged here, is where a registered recovery
+		// key actually appears.
+		//
+		// Safe to log: compressed PUBLIC keys only, never key material. __DEV__-gated so release
+		// builds stay silent.
+		if (__DEV__) {
+			console.log(
+				"[ceremony-recovery-gate]",
+				JSON.stringify({
+					needed,
+					networkUserResolved: observed !== undefined,
+					activeKeys: (observed?.activeKeys ?? []).map((k) => k.key),
+				}),
+			);
+		}
 		if (needed) {
 			navigation.navigate("ProvisionSigningKey", { reason: "first-run" });
 		}
