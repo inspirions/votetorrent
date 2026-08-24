@@ -206,6 +206,17 @@ restore_flags() {
   # D-08 (diagnose-first): DRONE_LOG is deliberately retained through the ENTIRE run
   # (no rm -f before the verdict poll) so the drone's real cluster-protocol error is
   # captured, not discarded. This EXIT trap is the ONLY place it is removed.
+  #
+  # SPIKE-073: set KEEP_DRONE_LOGS to a directory to COPY both drone logs there before
+  # they are removed. Without this the logs die with the run, and a post-mortem that
+  # needs them (spike 066's whole method; spike 073's T2/T3/T4 read-out) has to re-run
+  # the ~20-minute harness just to get the file back.
+  if [ -n "${KEEP_DRONE_LOGS:-}" ]; then
+    mkdir -p "${KEEP_DRONE_LOGS}" 2>/dev/null || true
+    [ -n "${DRONE_LOG}" ] && cp "${DRONE_LOG}" "${KEEP_DRONE_LOGS}/drone-a.log" 2>/dev/null || true
+    [ -n "${DRONE_B_LOG}" ] && cp "${DRONE_B_LOG}" "${KEEP_DRONE_LOGS}/drone-b.log" 2>/dev/null || true
+    echo "[run-replication-proof] Drone logs copied to ${KEEP_DRONE_LOGS}" >&2
+  fi
   if [ -n "${DRONE_LOG}" ]; then
     rm -f "${DRONE_LOG}" 2>/dev/null || true
   fi
