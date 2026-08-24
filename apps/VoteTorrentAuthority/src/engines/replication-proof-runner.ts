@@ -100,13 +100,21 @@ function resolveBootstrapNodes(addr: string): string[] {
 // In solo bootstrap mode (harness Step 1) the drone address has not been injected yet,
 // so CONTROL_ADDR is still the placeholder. Boot with NO bootstrap node — the runner is
 // genuinely solo (CF-02 bootstrap mode), creates the proof network, and emits strandId=.
-// proof-0242: BOTH drones' control addrs. Reserving a circuit on drone-B (below) requires a
-// live control connection to drone-B first, and control-mesh discovery did not propagate
-// drone-A's peer list to the devices in the 2026-08-24 run — drone-B saw only drone-A.
-const BOOTSTRAP_NODES = [
-  ...resolveBootstrapNodes(CONTROL_ADDR),
-  ...resolveBootstrapNodes(CONTROL_ADDR_B),
-];
+// proof-0242 run-2: this stays DRONE-A ONLY, deliberately.
+//
+// Run 2 tried seeding the control mesh from BOTH drones on the theory that reserving a circuit
+// on drone-B needed a control connection to it first. That is false — `CONTROL_RELAY_LISTEN_ADDRS`
+// below drives @libp2p/circuit-relay-v2's *configured* reservation path, which dials the relay's
+// own multiaddr directly and needs no control-network membership. And the two-bootstrap posture
+// actively BROKE the run, earlier than the baseline: both devices died during boot with
+// `BlockUnavailableError: Block PuWls…5fc is unavailable (claimed-elsewhere)` before a relay
+// reservation was ever established (drone-B logged `Failed sync request` for that same block,
+// drone-A logged `pull:failed` + `restore failed`). Widening the control-DB cluster across two
+// drones made ownership of a control block unresolvable for a joining peer.
+//
+// Keep the control mesh single-seeded (drone-B is cross-bootstrapped to drone-A already, so the
+// mesh still converges) and get the n=4 breadth purely from the relay listenAddrs.
+const BOOTSTRAP_NODES = resolveBootstrapNodes(CONTROL_ADDR);
 
 // D-05 (41-02, P2P-11 wall #8 fix): relay-qualified per-drone listenAddrs. One
 // `${addr}/p2p-circuit` entry per KNOWN drone (drone-A + drone-B) routes through
