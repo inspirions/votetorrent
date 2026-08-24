@@ -14,6 +14,7 @@ import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 export function ReviseUserScreen() {
 	const { user, userEngine } = useRoute().params as {
@@ -93,7 +94,7 @@ export function ReviseUserScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={[styles.container, { backgroundColor: colors.background }]}>
 				<View style={[styles.section, styles.detailContainer]}>
 					<ThemedText type="defaultSemiBold">{t("id")}:</ThemedText>
@@ -160,7 +161,7 @@ export function ReviseUserScreen() {
 					backgroundColor={colors.success}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

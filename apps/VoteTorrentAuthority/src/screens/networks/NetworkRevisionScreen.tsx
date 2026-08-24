@@ -23,6 +23,7 @@ import { useApp } from "../../providers/AppProvider";
 import { globalStyles } from "../../theme/styles";
 import type { NavigationProp } from "../../navigation/types";
 import { ElectionType, type INetworkEngine } from "@votetorrent/vote-core";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 export default function NetworkRevisionScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -123,7 +124,7 @@ export default function NetworkRevisionScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container}>
 				<View style={styles.section}>
 					<CustomTextInput
@@ -242,7 +243,7 @@ export default function NetworkRevisionScreen() {
 					onPress={onPropose}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

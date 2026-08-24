@@ -23,12 +23,14 @@ import { CustomTextInput } from "../../components/CustomTextInput";
 import { globalStyles } from "../../theme/styles";
 import { formatDate } from "../../utils/displayUtils";
 import { OfficerCard } from "./components/OfficerCard";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 /** Shape the (forthcoming) real authority engine will provide for invited authorities. */
 type InvitedAuthority = { name: string; status: "sent" | "unsent" };
 
 export default function AuthorityDetailsScreen() {
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { colors } = useTheme() as ExtendedTheme;
 	const { authority } = useRoute().params as { authority: Authority };
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -186,7 +188,7 @@ export default function AuthorityDetailsScreen() {
 	}
 
 	return (
-		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 }}>
+		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 + keyboardInset }}>
 			<InlineError message={errorMessage} />
 			<View style={styles.section}>
 				<View style={styles.imageContainer}>

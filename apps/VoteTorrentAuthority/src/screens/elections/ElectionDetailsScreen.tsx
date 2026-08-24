@@ -17,6 +17,7 @@ import { InfoCard } from "../../components/InfoCard";
 import { formatDate } from "../../utils/displayUtils";
 import { getLocalKeyholders } from "../../engines/local-keyholders";
 import type { NavigationProp } from "../../navigation/types";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 /**
  * ElectionDetailsScreen — Figma parity #13/#18/#19 per Phase 9 plan 09-14.
@@ -38,6 +39,7 @@ import type { NavigationProp } from "../../navigation/types";
  */
 export default function ElectionDetailsScreen() {
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { electionEngine } = useRoute().params as { electionEngine: IElectionEngine };
 	const [electionDetails, setElectionDetails] = useState<ElectionDetails | null>(null);
 	const [ballots, setBallots] = useState<BallotSummary[]>([]);
@@ -146,7 +148,7 @@ export default function ElectionDetailsScreen() {
 	return (
 		<ScrollView
 			style={styles.container}
-			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
+			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}>
 
 			{/* SC6 error state — surfaces load failures inline (D-19) */}
 			<View style={styles.section}>

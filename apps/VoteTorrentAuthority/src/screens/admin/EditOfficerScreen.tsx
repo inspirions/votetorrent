@@ -21,6 +21,7 @@ import { globalStyles } from "../../theme/styles";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 export default function EditOfficerScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -242,7 +243,7 @@ export default function EditOfficerScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container}>
 				<View style={styles.section}>
 					{isEditing ? (
@@ -312,7 +313,7 @@ export default function EditOfficerScreen() {
 					onPress={handleSave}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

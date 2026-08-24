@@ -28,6 +28,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 type AuthorityInvitationParams = {
 	mode: "send" | "accept";
@@ -299,7 +300,7 @@ export default function AuthorityInvitationScreen() {
 	const seedInvite = invite?.invite;
 	const invitationKey = (seedInvite as any)?.key ?? (seedInvite as any)?.inviteKey ?? invitationId;
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
 					{/* Inviting context */}
@@ -404,7 +405,7 @@ export default function AuthorityInvitationScreen() {
 				acceptLabel={t("accept")}
 				rejectLabel={t("reject")}
 			/>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

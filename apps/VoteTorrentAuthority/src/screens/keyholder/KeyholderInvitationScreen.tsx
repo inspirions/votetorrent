@@ -25,6 +25,7 @@ import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 type KeyholderInvitationParams = {
 	mode: "send" | "accept";
@@ -252,7 +253,7 @@ export function KeyholderInvitationScreen() {
 	// Accept mode
 	const seedInvite = invite?.invite;
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container}>
 				<View style={styles.section}>
 					<ThemedText type="title" style={styles.sectionTitle}>
@@ -287,7 +288,7 @@ export function KeyholderInvitationScreen() {
 				acceptLabel={t("accept")}
 				rejectLabel={t("decline")}
 			/>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

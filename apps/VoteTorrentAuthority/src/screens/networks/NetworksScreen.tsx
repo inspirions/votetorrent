@@ -16,10 +16,12 @@ import { CustomButton } from "../../components/CustomButton";
 import { globalStyles } from "../../theme/styles";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 export default function NetworksScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { networksEngine } = useApp();
 	const { node } = useCadreNode();
 	const [recentNetworkRefs, setRecentNetworkRefs] = useState<NetworkReference[]>([]);
@@ -114,7 +116,7 @@ export default function NetworksScreen() {
 	return (
 		<ScrollView
 			style={styles.container}
-			contentContainerStyle={{ paddingBottom: insets.bottom + 16 }}
+			contentContainerStyle={{ paddingBottom: insets.bottom + 16 + keyboardInset }}
 		>
 			<View style={styles.section}>
 				<ThemedText type="defaultSemiBold" style={styles.section}>

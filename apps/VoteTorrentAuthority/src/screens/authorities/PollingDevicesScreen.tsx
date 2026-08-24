@@ -30,6 +30,7 @@ import {
 // one authorities-tree consumer and imports it rather than forking a second
 // confirmation card.
 import { LifecycleConfirmCard } from "../registration/components/LifecycleConfirmCard";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 // A stable no-op for the (non-optional) CustomButton.onPress prop when a gate
 // is unmet — belt-and-suspenders alongside `disabled`, mirroring
@@ -57,6 +58,7 @@ const NOOP = () => {};
  */
 export default function PollingDevicesScreen() {
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
@@ -231,7 +233,7 @@ export default function PollingDevicesScreen() {
 	}
 
 	return (
-		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
+		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}>
 			<View style={styles.section}>
 				<InlineError message={errorMessage} />
 			</View>

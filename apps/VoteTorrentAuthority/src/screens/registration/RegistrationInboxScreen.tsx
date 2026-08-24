@@ -31,6 +31,7 @@ import { RegistrationRequestRow } from "./components/RegistrationRequestRow";
 import { TransparencyStatsCard } from "./components/TransparencyStatsCard";
 import type { RootStackParamList } from "../../navigation/types";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 // D-12: this screen previously carried a screen-local loosely-typed
 // navigation widening because RootStackParamList did not yet carry
@@ -59,6 +60,7 @@ const REGISTRATION_REQUESTS_PAGE_SIZE = 25;
  */
 export default function RegistrationInboxScreen() {
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
@@ -312,7 +314,7 @@ export default function RegistrationInboxScreen() {
 	return (
 		<ScrollView
 			style={styles.container}
-			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}
 		>
 			<View style={styles.section} testID="registration-inbox-error">
 				<InlineError message={errorMessage} />

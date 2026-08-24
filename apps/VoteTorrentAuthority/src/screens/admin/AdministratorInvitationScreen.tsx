@@ -29,6 +29,7 @@ import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 type AdministratorInvitationParams = {
 	mode: "send" | "accept";
@@ -265,7 +266,7 @@ export default function AdministratorInvitationScreen() {
 		.map((scope: Scope) => scopeDescriptions[scope] ?? t(`scope_${scope}`))
 		.join(", ");
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
 					{seedInvite ? (
@@ -340,7 +341,7 @@ export default function AdministratorInvitationScreen() {
 				acceptLabel={t("accept")}
 				rejectLabel={t("reject")}
 			/>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

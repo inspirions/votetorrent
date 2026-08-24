@@ -9,6 +9,7 @@ import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { globalStyles } from "../../theme/styles";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { useApp } from "../../providers/AppProvider";
@@ -246,7 +247,7 @@ export default function AddNetworkScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView ref={scrollViewRef} style={styles.container}>
 				<ThemedText type="defaultSemiBold" style={styles.sectionTitle}>
 					{t("createNewNetwork")}
@@ -421,7 +422,7 @@ export default function AddNetworkScreen() {
 					onPress={handleCreate}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

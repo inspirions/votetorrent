@@ -25,6 +25,7 @@ import { LifecycleConfirmCard } from "../registration/components/LifecycleConfir
 import { scopeDescriptions } from "@votetorrent/vote-core";
 import type { AuthorityPeer, IAuthorityConfigEngine } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 // A stable no-op for the (non-optional) CustomButton.onPress prop when a gate
 // is unmet — belt-and-suspenders alongside `disabled`, mirroring
@@ -80,6 +81,7 @@ export function isDuplicatePeerId(peers: AuthorityPeer[], candidate: string): bo
 
 export default function AuthorityPeersScreen() {
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
@@ -236,7 +238,7 @@ export default function AuthorityPeersScreen() {
 		<ScrollView
 			testID="authority-peers-screen"
 			style={styles.container}
-			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}
 		>
 			<View style={styles.section}>
 				<InlineError message={errorMessage} />

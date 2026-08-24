@@ -17,6 +17,7 @@ import { Footer } from "../../components/Footer";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 export function RevokeKeyScreen() {
 	const { user, userEngine } = useRoute().params as { user: User; userEngine: IUserEngine };
@@ -150,7 +151,7 @@ export function RevokeKeyScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container}>
 				<View style={[styles.section, styles.detailContainer]}>
 					<View style={styles.detail}>
@@ -262,7 +263,7 @@ export function RevokeKeyScreen() {
 					disabled={!isSigned || selectedKeys.size === 0 || isRevoking}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

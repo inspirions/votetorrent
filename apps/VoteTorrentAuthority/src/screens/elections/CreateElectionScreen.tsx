@@ -21,6 +21,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 // Phase 9 plan 09-12 (ELECUI-03) — Single-scroll New Election form.
 // Phase 20 plan 20-06 (EUI-02, EUI-03) — type radio + per-field inline validation.
@@ -300,7 +301,7 @@ export function CreateElectionScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView
 				style={styles.container}
 				contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
@@ -405,7 +406,7 @@ export function CreateElectionScreen() {
 					forceDarkText={true}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

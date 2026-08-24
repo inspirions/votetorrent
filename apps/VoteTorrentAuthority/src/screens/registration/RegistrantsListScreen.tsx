@@ -23,6 +23,7 @@ import { REGISTRANT_STATUS_META } from "./registrant-display";
 import { RegistrantRow } from "./components/RegistrantRow";
 import type { RootStackParamList } from "../../navigation/types";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 // D-08: this screen previously carried a screen-local loosely-typed
 // navigation widening because RootStackParamList did not yet carry a
@@ -99,6 +100,7 @@ function widenDistrictOptions(
  */
 export default function RegistrantsListScreen() {
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
@@ -259,7 +261,7 @@ export default function RegistrantsListScreen() {
 	return (
 		<ScrollView
 			style={styles.container}
-			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}
 		>
 			<View style={styles.section} testID="registrants-list-error">
 				<InlineError message={errorMessage} />
