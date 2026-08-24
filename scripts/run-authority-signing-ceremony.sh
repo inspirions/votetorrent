@@ -64,6 +64,10 @@ ADBD="-s ${SERIAL}"
 METRO_PORT="${METRO_PORT:-8081}"
 DUMP_TIMEOUT=30
 PROMPT_TIMEOUT=20
+# How long observe_biometric_prompt watches for the sheet after the tap (harness fix, defect 1).
+PROMPT_OBSERVE_TIMEOUT="${PROMPT_OBSERVE_TIMEOUT:-15}"
+# How long wait_for_text_onscreen polls for a terminal heading before giving up (harness fix).
+HEADING_WAIT_TIMEOUT="${HEADING_WAIT_TIMEOUT:-30}"
 VERDICT_TIMEOUT=60
 
 LEG="${1:-}"
@@ -504,18 +508,55 @@ satisfy_biometric() {
   echo "[ceremony] (real hardware has no 'adb emu finger touch' equivalent — this is a physical action, 49-14-PLAN.md Task 2)" >&2
   echo "[ceremony] waiting up to ${HW_BIOMETRIC_TIMEOUT}s ..." >&2
   echo "[ceremony] ############################################################" >&2
-  local start_epoch dump
+
+  # 2026-08-24 harness fix — a CLEARED SHEET IS NOT A SUCCESSFUL AUTHENTICATION. This function used
+  # to return 0 the moment the prompt vanished, which a CANCEL does exactly as well as a touch. On
+  # 2026-08-24 a cancelled prompt reported a cheerful `prompt cleared after 31s` and the run only
+  # failed two legs later, with the real reason (`RuntimeException: Fingerprint operation canceled
+  # by user`) buried in logcat. Sample the monotonic crypto-auth counter across the wait and report
+  # what actually happened, so the cancel is visible AT the point it occurs.
+  local auth_before
+  auth_before=$(fp_success_count)
+
+  local start_epoch dump cleared=0
   start_epoch=$(date +%s)
   while [ "$(( $(date +%s) - start_epoch ))" -lt "${HW_BIOMETRIC_TIMEOUT}" ]; do
     dump=$(dump_ui)
     if ! text_present "${STR_PROMPT_TITLE}" "${dump}"; then
+      cleared=1
       echo "[ceremony] prompt cleared after $(( $(date +%s) - start_epoch ))s." >&2
-      return 0
+      break
     fi
     sleep 3
   done
-  echo "[ceremony] WARNING: prompt still showing after ${HW_BIOMETRIC_TIMEOUT}s — no touch observed. Proceeding anyway; the next assertion will fail loudly if the prompt never cleared." >&2
-  return 1
+
+  if [ "${cleared}" -eq 0 ]; then
+    record_leg "biometric-satisfied" "FAIL" "'${reason}': prompt STILL SHOWING after ${HW_BIOMETRIC_TIMEOUT}s — no physical touch observed"
+    return 1
+  fi
+
+  # The sheet is gone. Now establish WHY. acceptCrypto is monotonic and increments only on a
+  # CryptoObject-backed success, so it distinguishes a real authentication from a cancel/dismiss —
+  # verified 2026-08-24: a cancelled prompt left it unchanged, a successful one moved it by exactly 1.
+  local auth_after delta
+  auth_after=$(fp_success_count)
+  if echo "${auth_before}" | grep -qE '^[0-9]+$' && echo "${auth_after}" | grep -qE '^[0-9]+$'; then
+    delta=$(( auth_after - auth_before ))
+    if [ "${delta}" -ge 1 ]; then
+      record_leg "biometric-satisfied" "PASS" "'${reason}': authenticated for real (acceptCrypto ${auth_before} -> ${auth_after})"
+      return 0
+    fi
+    # Name the cause when the OS logged one; a bare counter delta of 0 is enough to fail on either way.
+    local why
+    why=$(adb ${ADBD} logcat -d 2>/dev/null \
+      | grep -aoE "canceled by user|ERROR_USER_CANCELED|ERROR_NEGATIVE_BUTTON|ERROR_CANCELED|ERROR_TIMEOUT|ERROR_LOCKOUT[A-Z_]*" \
+      | tail -1 || true)
+    record_leg "biometric-satisfied" "FAIL" "'${reason}': the sheet was DISMISSED WITHOUT AUTHENTICATING (acceptCrypto unchanged at ${auth_after}${why:+, OS reason: ${why}}) — every later leg in this ceremony is now measuring an ABORTED run, not the product"
+    return 1
+  fi
+
+  record_leg "biometric-satisfied" "NOT-EXERCISED" "'${reason}': prompt cleared, but the acceptCrypto counter was unreadable (samples: '${auth_before}' '${auth_after}') so success vs cancel could not be established — instrument gap"
+  return 0
 }
 
 # satisfy_device_credential REASON — the D-16/D-26 recovery ceremony's authenticator is
@@ -548,13 +589,132 @@ satisfy_device_credential() {
   return 1
 }
 
-# fp_success_count — total `wasSuccessful=true` lines in the current `dumpsys fingerprint`
-# ring buffer (49-14). This is USER-scoped, not app-scoped (no app-pid equivalent exists for the
-# fingerprint HAL trace) — a delta increase across a bounded operation window is treated as
-# evidence of a fresh authentication for that operation, not a perfectly isolated per-app count.
-# Documented explicitly wherever this is used as a verdict input.
+# fp_success_count — count of crypto-backed fingerprint authentications (2026-08-24 harness fix,
+# defect 3). This is USER-scoped, not app-scoped (no app-pid equivalent exists for the fingerprint
+# HAL trace) — a delta increase across a bounded operation window is treated as evidence of a
+# fresh authentication for that operation, not a perfectly isolated per-app count. Documented
+# explicitly wherever this is used as a verdict input.
+#
+# WAS: `grep -c "wasSuccessful=true"` over the whole dumpsys output. That parses the
+# AuthSessionCoordinator trace, which is a BOUNDED RING — measured at exactly 100 entries
+# (#320..#419) on a Pixel 7 Pro. It saturates and then EVICTS, so it is not monotonic and deltas
+# across it are meaningless: the 2026-08-24 run recorded `op1=1 op2=-1 op3=0` and FAILed a leg on
+# a device that had in fact authenticated once per operation. A negative delta is arithmetic proof
+# the old counter could not be used this way.
+#
+# NOW: `acceptCrypto` from the per-enrolment `"prints":[{...}]` JSON — a monotonic lifetime count
+# of CryptoObject-backed authentications, which is exactly what a per-use Keystore key requires
+# (and is already trusted by this script's own preflight as substitute evidence). Verified on the
+# same run: 4 -> 7 across the three signing operations, i.e. +1 each.
+#
+# Emits nothing when the counter cannot be read, so callers can distinguish "no auth" from
+# "instrument unavailable" instead of silently scoring a 0.
 fp_success_count() {
-  adb ${ADBD} shell dumpsys fingerprint 2>/dev/null | grep -c "wasSuccessful=true" || true
+  # Both shapes observed in the wild: JSON ("acceptCrypto":7) and key=value (acceptCrypto=7).
+  # `grep -a` because dumpsys output can carry bytes that make grep treat the stream as binary
+  # and silently suppress matches. Emits NOTHING when the counter cannot be read, so callers can
+  # distinguish "instrument unavailable" from "zero authentications" instead of scoring a 0.
+  adb ${ADBD} shell dumpsys fingerprint 2>/dev/null \
+    | grep -ao '"\?acceptCrypto"\?[:=][0-9]*' | head -1 | grep -ao '[0-9]*$' | head -1 || true
+}
+
+# ── dismiss_logbox / wait_for_text_onscreen (2026-08-24 harness fix) ──────────────────────────
+# `provision-local-awaiting-network` FAILed twice on 2026-08-24 while the app was demonstrably in
+# the correct state: a manual `uiautomator dump` seconds later showed
+# `text="Secure signing is set up on this device"`, BOTH AsyncStorage rows were written, and the
+# persisted chain decoded to a full D-07 PASS. The assertion was a SINGLE dump at a fixed offset.
+#
+# Two things make that unreliable, and these helpers address both:
+#   * Timing — one dump at one instant, with no retry (dump_ui retries a FAILED dump, but a dump
+#     that succeeds against a not-yet-settled screen is not a failure it can see).
+#   * React Native's LogBox — the run's dump also carried `"Open debugger to view warnings."` and
+#     `"RETURN TO APP"`, and logcat showed the dumper `Skipping invisible child` for a full-screen
+#     (1440x3120) node. That is consistent with LogBox's overlay sitting on top of the app content.
+#     LogBox is RAISED BY THE EXPECTED WARNING in this very scenario
+#     (`Failed to load base engines: NoNetworkEstablishedError` on a deliberately network-less
+#     device), so the leg testing the network-less state is the one most likely to be obscured.
+#     NOTE: the overlay is the leading SUSPECT, not a confirmed cause; the polling above is correct
+#     regardless, and dismissing an overlay that is not there is a no-op.
+#
+# Checks for the wanted text FIRST on every pass, so a dump that contains both the heading and the
+# LogBox furniture passes immediately instead of being needlessly dismissed and re-dumped.
+
+dismiss_logbox() {
+  local dump="$1" marker
+  for marker in "RETURN TO APP" "Open debugger to view warnings."; do
+    if text_present "${marker}" "${dump}"; then
+      echo "[ceremony]   -> RN LogBox overlay detected ('${marker}') — dismissing before re-asserting" >&2
+      # tap_on_text needs a non-degenerate node; fall back to BACK, which LogBox also honours.
+      if ! tap_on_text "RETURN TO APP" "${dump}"; then
+        adb ${ADBD} shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+      fi
+      sleep 1
+      return 0
+    fi
+  done
+  return 1
+}
+
+# wait_for_text_onscreen LABEL [TIMEOUT] — poll for LABEL, clearing LogBox out of the way.
+# Strictly more tolerant than a single dump and never less: a product that genuinely never renders
+# LABEL still fails, just TIMEOUT later.
+wait_for_text_onscreen() {
+  local label="$1" timeout="${2:-${HEADING_WAIT_TIMEOUT}}"
+  local start_epoch dump
+  start_epoch=$(date +%s)
+  while :; do
+    dump=$(dump_ui)
+    if text_present "${label}" "${dump}"; then
+      return 0
+    fi
+    dismiss_logbox "${dump}" || true
+    [ "$(( $(date +%s) - start_epoch ))" -ge "${timeout}" ] && break
+    sleep 2
+  done
+  return 1
+}
+
+# ── observe_biometric_prompt (2026-08-24 harness fix, defect 1) ───────────────────────────────
+# Replaces a `sleep 3; dump_ui; text_present` one-shot that raced the operator. On real hardware
+# a human satisfies the sheet in ~2s, so by the time the single post-tap uiautomator dump landed
+# the sheet was already GONE — producing `prompt-appears: FAIL` immediately followed by
+# `prompt cleared after 2s`, three times in the 2026-08-24 Pixel 7 Pro run, on a device where the
+# prompt demonstrably appeared and authenticated.
+#
+# Polls three independent sources, cheapest first, and accepts the FIRST that fires:
+#   (a) `dumpsys window`  — a live `BiometricPrompt` window. ~100ms, so it can poll fast enough to
+#                           catch a sheet a human dismisses in 2s (uiautomator alone cannot: one
+#                           dump costs 1-2s and can transiently fail, see dump_ui).
+#   (b) logcat since tap  — BOTH call sites `adb logcat -c` immediately before tapping, so the
+#                           buffer is clean; a BiometricPrompt window line or a
+#                           requestReason=BiometricPromptAuthentication event is proof the sheet
+#                           existed even if every poll missed it live.
+#   (c) uiautomator       — the original title assertion, still the strongest UI-level evidence
+#                           when the sheet is caught on screen. Tried once on the (a) path so the
+#                           leg keeps reporting the title when it can.
+# Echoes the evidence string; returns 0 if observed, 1 if not.
+observe_biometric_prompt() {
+  local deadline=$(( $(date +%s) + PROMPT_OBSERVE_TIMEOUT ))
+  local evidence=""
+  while [ "$(date +%s)" -lt "${deadline}" ]; do
+    if adb ${ADBD} shell dumpsys window 2>/dev/null | grep -q "BiometricPrompt"; then
+      evidence="live BiometricPrompt window observed in dumpsys window"
+      local d
+      d=$(dump_ui)
+      if text_present "${STR_PROMPT_TITLE}" "${d}"; then
+        evidence="deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') present on screen; live BiometricPrompt window in dumpsys window"
+      fi
+      echo "${evidence}"
+      return 0
+    fi
+    if adb ${ADBD} logcat -d 2>/dev/null | grep -qE "u0 BiometricPrompt|requestReason=BiometricPromptAuthentication"; then
+      echo "BiometricPrompt session evidenced in logcat since the tap (sheet satisfied faster than the poll interval)"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "no BiometricPrompt observed on screen, in dumpsys window, or in logcat within ${PROMPT_OBSERVE_TIMEOUT}s of the tap"
+  return 1
 }
 
 # ── Leg: provision-local (D-24 leg 1, network-independent half — 49-18 / Gap A) ──
@@ -603,12 +763,11 @@ provision_local() {
   fi
 
   # Leg 1 sub-claim 1: the OS BiometricPrompt sheet appears.
-  sleep 3
-  dump=$(dump_ui)
-  if text_present "${STR_PROMPT_TITLE}" "${dump}"; then
-    record_leg "provision-prompt-appears" "PASS" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') present in post-tap dump"
+  local prompt_evidence
+  if prompt_evidence=$(observe_biometric_prompt); then
+    record_leg "provision-prompt-appears" "PASS" "${prompt_evidence}"
   else
-    record_leg "provision-prompt-appears" "FAIL" "deviceSigningPromptTitle NOT found in post-tap dump — no biometric sheet observed"
+    record_leg "provision-prompt-appears" "FAIL" "${prompt_evidence}"
   fi
 
   # FragmentManager / main-thread exception check (the 45-11 defect class).
@@ -634,9 +793,37 @@ provision_local() {
   # by design and now terminates on the awaiting-network landing, not the success
   # heading — the network User's UserKey registration is provision-register's job,
   # on a later run against an operator-created network.
-  dump=$(dump_ui)
-  if text_present "${STR_AWAITING_NETWORK_HEADING}" "${dump}"; then
+  # 2026-08-24 harness fix, defect 2 — stash THIS ceremony's boundDigest for the challengeBound
+  # check. UNCONDITIONAL and ahead of the awaiting-network assertion on purpose: the digest is
+  # evidence about the ceremony, not about the heading, and an earlier revision nested it inside
+  # that assertion's PASS branch — so a flaky uiautomator dump lost the digest too, turning one
+  # marginal check into two failures. Placement and selection both matter, and that revision got
+  # both wrong:
+  #   * AFTER the terminal assertion, not right after satisfy_biometric. `satisfy_biometric`
+  #     returns as soon as the sheet DISAPPEARS, which a CANCEL does just as well as a success —
+  #     observed 2026-08-24, where a cancelled first attempt was followed by a successful retry
+  #     whose digest did not exist yet at the old capture point.
+  #   * `tail -1`, not `head -1`. On exactly that retry the persisted chain comes from the LAST
+  #     attestation, not the first; `head -1` captured the cancelled attempt's digest and the
+  #     decoder then correctly reported challengeBound:false against a perfectly good chain.
+  # Scoping to this function is what keeps `tail -1` safe: the buffer was cleared immediately
+  # before the setup tap and is never cleared again inside provision_local, so it contains this
+  # ceremony's digests and no later provision-register ones.
+  # (The app emits this only under __DEV__ — see ProvisionSigningKeyScreen.tsx. Before that line
+  # existed nothing emitted the digest at all and the check could never pass on any device.)
+  local captured_digest
+  captured_digest=$(adb ${ADBD} logcat -d 2>/dev/null \
+    | grep -ao 'signing-key-provisioning-[0-9]*-[0-9a-f]*' | tail -1 || true)
+  if [ -n "${captured_digest}" ]; then
+    printf '%s' "${captured_digest}" > "${TMPDIR_CEREMONY}/bound-digest.txt"
+    echo "[ceremony]   -> captured this run's boundDigest for the challengeBound check (${captured_digest})" >&2
+  else
+    echo "[ceremony]   -> WARNING: no boundDigest seen in the provisioning window. Is this a __DEV__ build? challengeBound will be reported NOT-EXERCISED rather than false." >&2
+  fi
+
+  if wait_for_text_onscreen "${STR_AWAITING_NETWORK_HEADING}"; then
     record_leg "provision-local-awaiting-network" "PASS" "signingKeyProvisioningAwaitingNetworkHeading ('${STR_AWAITING_NETWORK_HEADING}') present — local stage 1 completed on a genuinely network-less device"
+
   else
     record_leg "provision-local-awaiting-network" "FAIL" "signingKeyProvisioningAwaitingNetworkHeading NOT present after satisfying the prompt on a network-less device"
     return
@@ -729,18 +916,16 @@ provision_register() {
     return
   fi
 
-  sleep 3
-  dump=$(dump_ui)
-  if text_present "${STR_PROMPT_TITLE}" "${dump}"; then
-    record_leg "provision-register-prompt-appears" "PASS" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') present — stage 2's signed recovery-key BiometricPrompt"
+  local prompt_evidence
+  if prompt_evidence=$(observe_biometric_prompt); then
+    record_leg "provision-register-prompt-appears" "PASS" "stage 2's signed recovery-key BiometricPrompt — ${prompt_evidence}"
   else
-    record_leg "provision-register-prompt-appears" "FAIL" "deviceSigningPromptTitle NOT found — stage 2 did not reach the signed recovery-key prompt"
+    record_leg "provision-register-prompt-appears" "FAIL" "stage 2 did not reach the signed recovery-key prompt — ${prompt_evidence}"
   fi
 
   satisfy_biometric "stage-2 recovery-key registration" || true
 
-  dump=$(dump_ui)
-  if text_present "${STR_SUCCESS_HEADING}" "${dump}"; then
+  if wait_for_text_onscreen "${STR_SUCCESS_HEADING}"; then
     record_leg "provision-success-heading" "PASS" "signingKeyProvisioningSuccessHeading ('${STR_SUCCESS_HEADING}') present — end-to-end SignatureValidP256 evidence (see 49-13-PROOF-LOG.md)"
   else
     record_leg "provision-success-heading" "FAIL" "signingKeyProvisioningSuccessHeading NOT present after satisfying the stage-2 prompt"
@@ -1023,7 +1208,15 @@ hw_decode_attestation_chain() {
   # (best-effort; a miss here only weakens challengeBound, not the attestationSecurityLevel /
   # chainLength / rootPresent values this leg actually gates on).
   local bound_digest
-  bound_digest=$(adb ${ADBD} logcat -d 2>/dev/null | grep -o 'signing-key-provisioning-[0-9]*-[0-9a-f]*' | tail -1 || true)
+  if [ -s "${TMPDIR_CEREMONY}/bound-digest.txt" ]; then
+    bound_digest=$(cat "${TMPDIR_CEREMONY}/bound-digest.txt")
+  else
+    # Fallback for a leg run standalone (no provision_local in this process). Unscoped, so this
+    # is best-effort: `tail -1` matches the retry case above, but if a later provision-register
+    # ceremony has since run, its digest wins and challengeBound will read false. The scoped
+    # capture above is the reliable path; this exists only so the leg degrades rather than dies.
+    bound_digest=$(adb ${ADBD} logcat -d 2>/dev/null | grep -ao 'signing-key-provisioning-[0-9]*-[0-9a-f]*' | tail -1 || true)
+  fi
   [ -z "${bound_digest}" ] && bound_digest="unavailable-not-logged"
 
   local decode_log="${TMPDIR_CEREMONY}/hw-chain-decode-log-${SERIAL}.md" decode_out decode_status
@@ -1041,8 +1234,21 @@ hw_decode_attestation_chain() {
   chain_len=$(echo "${decode_out}" | grep -o 'chainLength: [0-9]*' | head -1 | grep -o '[0-9]*$' || true)
   root_present=$(echo "${decode_out}" | grep -o 'rootPresent: [a-z]*' | head -1 | grep -o '[a-z]*$' || true)
 
+  # challengeBound is reported as its own leg (defect 2). When the expected digest could not be
+  # captured the decoder necessarily compares against the placeholder and returns false — that is
+  # an ABSENT MEASUREMENT, not a failed binding, and must never be recorded as the latter.
+  local challenge_bound
+  challenge_bound=$(echo "${decode_out}" | grep -o 'challengeBound: [a-z]*' | head -1 | grep -o '[a-z]*$' || true)
+  if [ "${bound_digest}" = "unavailable-not-logged" ]; then
+    record_leg "hw-challenge-bound" "NOT-EXERCISED" "this run's boundDigest was never captured (the app emits it only under __DEV__), so the decoder had nothing to compare the leaf challenge against — instrument gap, NOT a binding failure"
+  elif [ "${challenge_bound}" = "true" ]; then
+    record_leg "hw-challenge-bound" "PASS" "the attestation leaf's challenge is byte-identical to the boundDigest THIS ceremony generated (${bound_digest})"
+  else
+    record_leg "hw-challenge-bound" "FAIL" "leaf challenge does NOT match this run's boundDigest (${bound_digest}) — a stale or replayed chain"
+  fi
+
   if [ -n "${sec_level}" ]; then
-    record_leg "hw-chain-decode" "PASS" "decoder produced a verdict block (exit=${decode_status}) — ${sec_level}; see hw-strongbox-rung/hw-chain-shape for the derived verdicts"
+    record_leg "hw-chain-decode" "PASS" "decoder produced a verdict block (exit=${decode_status}) — ${sec_level}; see hw-strongbox-rung/hw-chain-shape/hw-challenge-bound for the derived verdicts (a non-zero exit here only reflects the decoder folding challengeBound into its own gate)"
   else
     record_leg "hw-chain-decode" "FAIL" "decoder produced no attestationSecurityLevel (exit=${decode_status}); output: ${decode_out}"
     return
@@ -1105,6 +1311,17 @@ hw_provision() {
 
   hw_decode_attestation_chain
 
+  # fp_success_count emits nothing if the counter could not be read (defect-3 fix). Empty vars
+  # evaluate to 0 in bash arithmetic, which would silently manufacture a "zero fresh
+  # authentications" FAIL out of a missing instrument — check before doing the subtraction.
+  local c
+  for c in "${auth_c0}" "${auth_c1}" "${auth_c2}"; do
+    if ! echo "${c}" | grep -qE '^[0-9]+$'; then
+      record_leg "hw-api34-per-use-semantics" "NOT-EXERCISED" "acceptCrypto counter unreadable on this device (samples: '${auth_c0}' '${auth_c1}' '${auth_c2}') — cannot measure per-operation authentication deltas; this is an instrument gap, NOT evidence about the product"
+      return
+    fi
+  done
+
   local op1=$(( auth_c1 - auth_c0 )) op2=$(( auth_c2 - auth_c1 ))
 
   if [ "${sdk}" -ge 30 ] 2>/dev/null; then
@@ -1116,18 +1333,22 @@ hw_provision() {
     provision_register
     local auth_c3 op3
     auth_c3=$(fp_success_count)
+    if ! echo "${auth_c3}" | grep -qE '^[0-9]+$'; then
+      record_leg "hw-api34-per-use-semantics" "NOT-EXERCISED" "acceptCrypto counter unreadable after the 3rd operation (sample: '${auth_c3}') — instrument gap, not a product result"
+      return
+    fi
     op3=$(( auth_c3 - auth_c2 ))
     if [ "${op1}" -ge 1 ] && [ "${op2}" -ge 1 ] && [ "${op3}" -ge 1 ]; then
-      record_leg "hw-api34-per-use-semantics" "PASS" "SDK=${sdk} (>=30, setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG) branch — Build.VERSION.SDK_INT>=30 guard is unconditional and source-guaranteed; KeyAttestationHelper.kt emits no runtime branch-name log line, so branch attribution here is via confirmed SDK level + source read, not a log line) — 3 consecutive signing ops each produced >=1 fresh OS auth event (dumpsys fingerprint deltas: op1=${op1} provisioning, op2=${op2} 1st network recovery-key add, op3=${op3} 2nd network recovery-key add; dumpsys fingerprint is user- not app-scoped, treated as evidence not perfect isolation)"
+      record_leg "hw-api34-per-use-semantics" "PASS" "SDK=${sdk} (>=30, setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG) branch — Build.VERSION.SDK_INT>=30 guard is unconditional and source-guaranteed; KeyAttestationHelper.kt emits no runtime branch-name log line, so branch attribution here is via confirmed SDK level + source read, not a log line) — 3 consecutive signing ops each produced >=1 fresh crypto-backed OS auth event (dumpsys fingerprint acceptCrypto deltas: op1=${op1} provisioning, op2=${op2} 1st network recovery-key add, op3=${op3} 2nd network recovery-key add; acceptCrypto is a monotonic lifetime counter and is user- not app-scoped, treated as evidence not perfect isolation)"
     else
-      record_leg "hw-api34-per-use-semantics" "FAIL" "SDK=${sdk} — dumpsys fingerprint deltas op1=${op1} op2=${op2} op3=${op3}; one or more operations produced zero fresh authentications"
+      record_leg "hw-api34-per-use-semantics" "FAIL" "SDK=${sdk} — acceptCrypto deltas op1=${op1} op2=${op2} op3=${op3}; one or more operations produced zero fresh authentications"
     fi
   else
     record_leg "hw-api34-per-use-semantics" "NOT-EXERCISED" "SDK=${sdk} (<30) — the setUserAuthenticationParameters branch does not exist on this device at all (KeyAttestationHelper.kt gates it behind 'if (Build.VERSION.SDK_INT >= 30)')"
     if [ "${op1}" -ge 1 ] && [ "${op2}" -ge 1 ]; then
-      record_leg "hw-bare-auth-branch" "PASS" "SDK=${sdk} (<30) — the bare setUserAuthenticationRequired(true) fallback branch is source-guaranteed (no setUserAuthenticationParameters call below API 30); provisioning (dumpsys fingerprint delta op1=${op1}) and per-use signing (op2=${op2}) both completed on it, closing D-17's pre-30 half on real hardware"
+      record_leg "hw-bare-auth-branch" "PASS" "SDK=${sdk} (<30) — the bare setUserAuthenticationRequired(true) fallback branch is source-guaranteed (no setUserAuthenticationParameters call below API 30); provisioning (acceptCrypto delta op1=${op1}) and per-use signing (op2=${op2}) both completed on it, closing D-17's pre-30 half on real hardware"
     else
-      record_leg "hw-bare-auth-branch" "FAIL" "SDK=${sdk} — dumpsys fingerprint deltas op1=${op1} op2=${op2}; provisioning or signing did not complete"
+      record_leg "hw-bare-auth-branch" "FAIL" "SDK=${sdk} — acceptCrypto deltas op1=${op1} op2=${op2}; provisioning or signing did not complete"
     fi
   fi
 }
