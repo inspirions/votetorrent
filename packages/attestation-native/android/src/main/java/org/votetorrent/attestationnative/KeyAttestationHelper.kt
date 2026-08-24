@@ -20,6 +20,7 @@ import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.ProviderException
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 
@@ -43,6 +44,18 @@ private const val MIN_SDK_FOR_DEVICE_CREDENTIAL_RECOVERY = 30
  * `cancel-no-logged-fault` check counts `" E "` matches in this app's own pid.
  */
 private const val TAG_SIGNING_REJECT = "VtSigningReject"
+
+/**
+ * D-07 rung observability — which rung [KeyAttestationHelper.generateKey] actually landed on, and
+ * WHY it stepped down. Without this, a TEE result is indistinguishable between "no StrongBox chip
+ * on this device" (expected) and "StrongBox chip present but it rejected our key request"
+ * (a defect). 14 chars, under Android's 23-char tag limit.
+ *
+ * Unlike [TAG_SIGNING_REJECT] this does emit at `Log.w` for the downgrade case — a silent security
+ * rung downgrade IS a fault worth surfacing. It stays clear of `Log.e`/`" E "` so it cannot
+ * perturb `leg_cancel`'s `cancel-no-logged-fault` check, which counts `" E "` in this app's pid.
+ */
+private const val TAG_KEYGEN_RUNG = "VtKeygenRung"
 
 /**
  * Phase 49 (D-07) — canonical Authority Keystore aliases, distinct from the Voter app's device
@@ -292,10 +305,18 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	private val keyStore: KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
 
 	/**
-	 * (1) Placeholder-provision (Open Q1): generate the P-256 key ONCE with an empty attestation
-	 * challenge and no biometric prompt — Android requires SOME setAttestationChallenge(...) call
-	 * to obtain an attestation-carrying cert chain at all, but mere key CREATION does not itself
-	 * require a fresh biometric (that gate applies at key USE time in [regenerateAttested]).
+	 * (1) Placeholder-provision (Open Q1): generate the P-256 key ONCE with NO attestation
+	 * challenge and no biometric prompt. Mere key CREATION does not require a fresh biometric —
+	 * that gate applies at key USE time in [regenerateAttested].
+	 *
+	 * This deliberately produces a NON-attested key. An earlier revision passed a zero-length
+	 * challenge here, on the belief that "Android requires SOME setAttestationChallenge(...) call
+	 * to obtain an attestation-carrying cert chain at all". That belief was wrong in a way only
+	 * StrongBox hardware exposes: an empty challenge is a REQUEST for attestation carrying an
+	 * INVALID challenge, which KeyMint rejects with ATTESTATION_CHALLENGE_MISSING (measured on a
+	 * Pixel 7 Pro / Titan M2 — see [generateKey]). It is also moot: the placeholder's chain is
+	 * never exported, because [regenerateAttested] deletes and regenerates this alias with the
+	 * real utf8(BOUND_DIGEST) challenge before exporting anything.
 	 */
 	fun generateProvisionKey(keyAlias: String): ProvisionResult {
 		return generateKey(keyAlias, attestationChallenge = null, authenticator = KeyAuthenticator.BIOMETRIC_STRONG)
@@ -879,7 +900,23 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 				setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1")) // D-03 — P-256 only;
 				// secp256k1 is NOT supported for hardware key attestation.
 				setDigests(KeyProperties.DIGEST_SHA256)
-				setAttestationChallenge(attestationChallenge ?: ByteArray(0))
+				// D-07 / StrongBox: `setAttestationChallenge(null)` means "no attestation cert" —
+				// a zero-length challenge is NOT the same thing, it requests attestation and
+				// supplies an INVALID challenge. TEE tolerates the empty array; StrongBox does
+				// not. Measured on a Pixel 7 Pro (cheetah, API 37, Titan M2), the coalesce this
+				// replaced made StrongBox keygen fail outright:
+				//   keymint-service.citadel: StartAttestKey: ATTESTATION_CHALLENGE_MISSING
+				//   keystore2: Error::Km(ATTESTATION_CHALLENGE_MISSING)
+				//   -> java.security.ProviderException: Failed to generate key pair.
+				// with the param dump showing `ATTESTATION_CHALLENGE, value: Blob([])`.
+				// So only ASK for attestation when there is a real challenge to bind it to. The
+				// placeholder key does not need an attestation-carrying chain: [regenerateAttested]
+				// deletes and regenerates this alias with the real utf8(BOUND_DIGEST) before any
+				// chain is exported. This also makes the D-16 DEVICE_CREDENTIAL key behave as its
+				// own doc comment already claims ("no attestation challenge at all").
+				if (attestationChallenge != null) {
+					setAttestationChallenge(attestationChallenge)
+				}
 				setUserAuthenticationRequired(true) // D-17
 				// D-17/D-13 — KeyPermanentlyInvalidatedException trigger. Governs ONLY
 				// biometric-auth keys (KeyAuthenticator.BIOMETRIC_STRONG) — this is precisely why a
@@ -927,6 +964,7 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 			val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
 			generator.initialize(buildSpec(strongBox = true))
 			val keyPair = generator.generateKeyPair()
+			Log.i(TAG_KEYGEN_RUNG, "StrongBox rung selected (attested=${attestationChallenge != null})")
 			return ProvisionResult(
 				publicKeyBase64 = Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP),
 				keyAlias = keyAlias,
@@ -934,7 +972,26 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 				publicKeyCompressedHex = spkiToCompressedPointHex(keyPair.public.encoded),
 			)
 		} catch (e: StrongBoxUnavailableException) {
-			// Fall through to the TEE rung below.
+			// The ordinary, expected rung step-down: this device has no StrongBox chip at all.
+			Log.i(TAG_KEYGEN_RUNG, "StrongBox unavailable on this device — stepping down to TEE")
+		} catch (e: ProviderException) {
+			// A StrongBox chip IS present but rejected THIS key request (bad/unsupported params,
+			// KeyMint errors such as ATTESTATION_CHALLENGE_MISSING, provisioning faults, ...).
+			// Previously only StrongBoxUnavailableException was caught, so any such failure
+			// escaped `generateKey` entirely and skipped the TEE rung — leaving a StrongBox
+			// device strictly WORSE OFF than a TEE-only one, with provisioning dead rather than
+			// degraded. The D-07 ladder is supposed to degrade, so step down here too.
+			//
+			// Logged at W, with the exception, ON PURPOSE: this branch silently downgrades the
+			// security rung, and a silent downgrade would masquerade as "this device has no
+			// StrongBox". Anything diagnosing a rung result MUST check for this line before
+			// concluding a TEE result reflects the hardware.
+			Log.w(
+				TAG_KEYGEN_RUNG,
+				"StrongBox present but REJECTED this key request — stepping down to TEE. " +
+					"This is a rung DOWNGRADE, not an absent chip; the resulting key is TEE-backed.",
+				e,
+			)
 		}
 
 		// TEE rung.
@@ -972,7 +1029,11 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 		val spec = KeyGenParameterSpec.Builder(keyAlias, KeyProperties.PURPOSE_SIGN).apply {
 			setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
 			setDigests(KeyProperties.DIGEST_SHA256)
-			setAttestationChallenge(attestationChallenge ?: ByteArray(0))
+			// Same null-vs-empty distinction as [generateKey] — kept identical so the debug stub
+			// rung cannot diverge from the hardware rungs in what it asks the Keystore for.
+			if (attestationChallenge != null) {
+				setAttestationChallenge(attestationChallenge)
+			}
 			setUserAuthenticationRequired(true)
 			setInvalidatedByBiometricEnrollment(true)
 			if (Build.VERSION.SDK_INT >= 30) {
