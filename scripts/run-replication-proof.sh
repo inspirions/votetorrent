@@ -517,40 +517,24 @@ trap 'restore_flags; git checkout -- '"${CONFIG_FILE}"' 2>/dev/null || true' EXI
 # The device emulator reaches the host at 10.0.2.2; replace the host IP in the addr.
 # The drone emits its loopback (127.0.0.1) ws multiaddr; the Android emulator reaches the
 # host loopback at 10.0.2.2. Rewrite either loopback/wildcard host to the emulator alias.
-# proof-0242: BOTH drones' control addrs are injected. The previous "only drone-A's control
-# addr is injected — the control network is unaffected by the n=4 strand-cohort growth"
-# reasoning was WRONG on this substrate: the device derives its relay-qualified listenAddrs
-# from the CONTROL addrs, so a single control addr meant a single circuit reservation (all on
-# drone-A) and drone-B never had a path to either device (measured 2026-08-24: drone-B control
-# stuck at peers=2, zero mentions of either device).
+# Only drone-A's control addr is injected (CONTROL_ADDR) — the control network is
+# unaffected by the n=4 strand-cohort growth (D-04); only the strand cohort (below)
+# needs both drones' addresses.
 DRONE_ADDR_FOR_DEVICE=$(echo "${DRONE_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
-DRONE_B_ADDR_FOR_DEVICE=$(echo "${DRONE_B_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 # Apply the same host-IP rewrite for the strand addresses (Pitfall 2: separate addresses, separate nodes).
 STRAND_ADDR_FOR_DEVICE=$(echo "${STRAND_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 STRAND_B_ADDR_FOR_DEVICE=$(echo "${STRAND_B_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 # Use a temp marker that is not a regex special char.
-python3 - "${CONFIG_FILE}" "${DRONE_ADDR_FOR_DEVICE}" "${STRAND_ADDR_FOR_DEVICE}" "${STRAND_B_ADDR_FOR_DEVICE}" "${DRONE_B_ADDR_FOR_DEVICE}" << 'PYEOF'
+python3 - "${CONFIG_FILE}" "${DRONE_ADDR_FOR_DEVICE}" "${STRAND_ADDR_FOR_DEVICE}" "${STRAND_B_ADDR_FOR_DEVICE}" << 'PYEOF'
 import sys
-path, control_addr, strand_addr, strand_addr_b, control_addr_b = (
-    sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-)
+path, control_addr, strand_addr, strand_addr_b = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 content = open(path).read()
 import re
 # Inject CONTROL_ADDR (control-network bootstrap — drone-A's control node).
-# NOTE: CONTROL_ADDR_B is a distinct constant name, so anchor on the exact
-# `const CONTROL_ADDR = '` form — a looser pattern would also match CONTROL_ADDR_B.
 new_content = re.sub(
     r"(const CONTROL_ADDR = ')[^']*(')",
     r"\g<1>" + control_addr + r"\g<2>",
     content,
-    count=1,
-)
-# proof-0242: inject CONTROL_ADDR_B (drone-B's control node) so the device both KNOWS
-# drone-B (control bootstrap) and RESERVES a circuit on it (relay-qualified listenAddrs).
-new_content = re.sub(
-    r"(const CONTROL_ADDR_B = ')[^']*(')",
-    r"\g<1>" + control_addr_b + r"\g<2>",
-    new_content,
     count=1,
 )
 # Inject STRAND_BOOTSTRAP_ADDR (strand-cohort bootstrap — drone-A's strand node).
@@ -571,7 +555,6 @@ new_content = re.sub(
 )
 open(path, 'w').write(new_content)
 print(f"[run-replication-proof] CONTROL_ADDR in runner injected: {control_addr}")
-print(f"[run-replication-proof] CONTROL_ADDR_B in runner injected: {control_addr_b}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR in runner injected: {strand_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR_B in runner injected: {strand_addr_b}")
 PYEOF
