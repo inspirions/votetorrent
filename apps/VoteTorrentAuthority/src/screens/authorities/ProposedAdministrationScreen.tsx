@@ -22,6 +22,7 @@ import type {
 import { scopeDescriptions } from "@votetorrent/vote-core";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { useApp } from "../../providers/AppProvider";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
@@ -72,6 +73,8 @@ export default function ProposedAdministrationScreen() {
 	const [isLoading, setIsLoading] = useState(true);
 	const [authority, setAuthority] = useState<Authority | null>(null);
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isProposing, setIsProposing] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Header title (Phase 7 D-14 inherited pattern)
 	useLayoutEffect(() => {
@@ -172,12 +175,14 @@ export default function ProposedAdministrationScreen() {
 	const sliderMax = useMemo(() => Math.max(1, officerCount), [officerCount]);
 
 	// ADM-02: PROPOSE calls proposeAdmin with a device-signer callback.
-	// D-01: private key stays app-side (createDeviceSigner closes over it).
+	// The private key lives in Android Keystore and never enters JS; the signer
+	// callback only relays the digest to Keystore's `SHA256withECDSA` and returns
+	// the signature (see `device-signer.ts`'s own header for the current contract).
 	// D-03: the admin digest is computed ENGINE-SIDE inside proposeAdmin —
 	//       the app no longer recomputes sha256(...) independently.
-	// WR-10: secp256k1.sign v2 defaults (prehash:true) inside createDeviceSigner.
 	const handlePropose = async () => {
 		setErrorMessage("");
+		setIsProposing(true);
 		try {
 			const networkEngine = await getEngine<INetworkEngine>("network");
 			if (!networkEngine) {
@@ -222,7 +227,11 @@ export default function ProposedAdministrationScreen() {
 			await authorityEngine.proposeAdmin(proposal, sign);
 			navigation.goBack();
 		} catch (err) {
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+		} finally {
+			setIsProposing(false);
 		}
 	};
 
@@ -324,8 +333,9 @@ export default function ProposedAdministrationScreen() {
 			<InlineError message={errorMessage} />
 			<Footer>
 				<CustomButton
-					title={t("propose")}
+					title={isProposing ? `${t("propose")}…` : t("propose")}
 					icon="floppy-disk"
+					disabled={isProposing}
 					backgroundColor={colors.success}
 					forceDarkText={true}
 					onPress={handlePropose}

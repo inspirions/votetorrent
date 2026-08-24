@@ -7,12 +7,22 @@ import { EngineFactory } from "../engines/engine-factory";
 import { LocalStorageReact } from "@votetorrent/vote-engine/rn";
 import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
+import { createDeviceSigner } from "../engines/device-signer";
+import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
+import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
 import { useCadreNode } from "./CadreNodeProvider";
 
 interface AppContextType {
 	networksEngine?: INetworksEngine;
 	getEngine: <T>(engineName: string, initParams?: any) => Promise<T>;
 	hasEngine: (engineName: string) => boolean;
+	/**
+	 * D-09: the device-attestation capability probe (bare boolean — no ctx, no
+	 * network, no data). Consumed by 47-16's inline banner and 47-19's
+	 * AttestationProvisioningStatusScreen so neither has to reach past the
+	 * context boundary into EngineFactory directly.
+	 */
+	isAttestationVerifierProvisioned: () => boolean;
 	isInitialized: boolean;
 	hasNetwork: boolean;
 	/**
@@ -64,6 +74,38 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// hasEngine delegates to factory's cache (SWAP-01).
 	const hasEngine = useCallback((engineName: string) => {
 		return engineFactoryRef.current?.hasEngine(engineName) ?? false;
+	}, []);
+
+	// 48-22 Task 2: DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY. attachSyncBindings() is a no-op
+	// unless DEV_REGISTRATION_SYNC_REST_BASE_URL is explicitly set (no hardcoded default), so a
+	// normal build is byte-identically unaffected. Called exactly once, at the point engines
+	// become available (getEngine is stable via useCallback's [] dep array above); the try/catch
+	// is defense-in-depth on top of the attachment's own internal no-throw guards — a missing or
+	// misconfigured dev sync target must never fail app boot.
+	//
+	// WR-17: `__DEV__`-gated at this CALL SITE as well as inside the harness itself. Two things
+	// change. (1) A release build never invokes the harness at all, so editing
+	// `DEV_REGISTRATION_SYNC_REST_BASE_URL` alone can no longer turn a shipped app into a live
+	// outbound sync client — the hazard plan 48-32's commit 70c40b7 demonstrated in practice
+	// before 4c1b231 reverted it. (2) The `console.error` below no longer runs unconditionally in
+	// release builds; a dev-only harness's failure is a dev-only diagnostic. The gate is
+	// duplicated (here and in `attachSyncBindings`) on purpose: this one keeps the call out of the
+	// release path, the other keeps the harness inert even if some future caller forgets.
+	useEffect(() => {
+		if (!__DEV__) return;
+		try {
+			attachSyncBindings(getEngine);
+		} catch (err) {
+			console.error("attachSyncBindings (dev/device-proof only) failed:", err);
+		}
+	}, [getEngine]);
+
+	// D-09: passthrough to the factory's capability probe. The `?? false`
+	// fallback is deliberate: if the factory ref is somehow absent, report NOT
+	// provisioned — the conservative direction, which surfaces the setup
+	// warning rather than falsely claiming the verifier is ready.
+	const isAttestationVerifierProvisioned = useCallback(() => {
+		return engineFactoryRef.current?.isAttestationVerifierProvisioned() ?? false;
 	}, []);
 
 	// Activate a network at runtime (create / picker "Select") without a reboot.
@@ -148,6 +190,22 @@ export function AppProvider({ children }: PropsWithChildren) {
 						factory.setCurrentUser(user);
 						await networksEng.open(network, user);
 						await factory.getEngine("network", network);
+						// 47-23: __DEV__-guarded, flag-gated registrant fixture. No-op in
+						// release and whenever REGISTRANT_SEED_ENABLED is false (committed
+						// default). Awaited HERE — rather than fired from index.js — so
+						// exactly one Quereus context ever touches the store (the factory's
+						// own), matching the voter app's VoterAppProvider precedent for the
+						// same placement.
+						// A LAZY factory, never a resolved signer: createDeviceSigner reads
+						// the device private key out of AsyncStorage and throws when the
+						// device user is absent/corrupt. Resolving it here ran that read on
+						// every release cold start for a call that always no-ops, and let a
+						// signer failure abort a SUCCESSFUL re-attach into "Failed to load
+						// network". maybeSeedRegistrantFixtures now invokes this only after
+						// its own __DEV__/flag gate, inside its own try/catch.
+						await maybeSeedRegistrantFixtures(networksEng, network, user, () =>
+							createDeviceSigner(user.name),
+						);
 						// Pitfall 4: setHasNetwork is called by AppProvider (not the factory).
 						setHasNetwork(true);
 						// RE-ATTACH FIX: clear any initError from a previous failed attempt so
@@ -240,6 +298,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 				networksEngine: networksEngine ?? undefined,
 				getEngine,
 				hasEngine,
+				isAttestationVerifierProvisioned,
 				isInitialized,
 				hasNetwork,
 				selectNetwork,

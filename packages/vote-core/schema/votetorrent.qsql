@@ -244,12 +244,39 @@ declare schema main
 		-- explicit escape hatch for the carried DEBT-11 ad-hoc/system-derived signing ceremonies
 		-- (election-engine.ts submitBallotForConfirmation's initially-unsigned header row,
 		-- signature-tasks-engine.ts finalizeBallot's per-question/option rows, elections-engine.ts
-		-- debugSeedPendingTasks) that intentionally carry no real crypto — those call sites are the ONLY
+		-- debugSeedPendingTasks, and -- WR-07, added by Phase 48 --
+		-- signature-tasks-engine.ts seedRegistrantSignatureTasks's per-request AdminSigning('vrg')
+		-- row) that intentionally carry no real crypto — those call sites are the ONLY
 		-- ones permitted to bind IsPlaceholderSignature = true; every other producer leaves it at its
 		-- default (false) and must supply a real, verifiable signature.
+		-- Why the seedRegistrantSignatureTasks producer is correct here (WR-07): the seed step runs
+		-- at INBOX-READ time, before the reviewing officer has decided anything, so there is no
+		-- officer decision for a real signature to cover yet. The officer's real crypto arrives
+		-- later, at completeSignature, as a SEPARATE OfficerSignature row over this SAME Digest —
+		-- never as a mutation of this row (AdminSigning is InsertOnly check on update, delete
+		-- (false)). The placeholder therefore stands in for "not yet signed", not for
+		-- "signed by something unverifiable". When the user holds no active key the row also binds
+		-- SignerKey = '0'.repeat(66); SignerKeyValid is a stub (see above), so that placeholder key
+		-- is not load-bearing either. This entry exists because an allowlist that silently omits a
+		-- producer of a security-relevant flag is worse than no allowlist.
+		--
+		-- 49-02 (D-02/D-03): curve-branched. `new.SignerKey` may be a P-256 Authority-app device
+		-- key (D-01) or a secp256k1 key (every pre-49-02 producer) -- resolve the curve from the
+		-- signer's PERSISTED UserKey.Type, defaulting to secp256k1 ('M') when the key is not
+		-- registered in UserKey. The 'M' default is load-bearing, not arbitrary: SignerKeyValid
+		-- above is a documented D-13 stub precisely because some device/test signer keys are
+		-- never inserted into UserKey, and those rows must keep verifying exactly as they did
+		-- before this plan -- defaulting to 'P' here would fail closed on every one of them.
 		constraint SignatureValid check (
 			context.IsPlaceholderSignature = true
-				or SignatureValid(new.Digest, new.Signature, new.SignerKey)
+				or (
+					coalesce((select K.Type from UserKey K where K.PubKey = new.SignerKey), 'M') = 'P'
+					and SignatureValidP256(new.Digest, new.Signature, new.SignerKey)
+				)
+				or (
+					coalesce((select K.Type from UserKey K where K.PubKey = new.SignerKey), 'M') <> 'P'
+					and SignatureValid(new.Digest, new.Signature, new.SignerKey)
+				)
 		)
 	)
 		with context ( now datetime, IsSignerKeyValid boolean, IsPlaceholderSignature boolean );
@@ -272,12 +299,27 @@ declare schema main
 		-- own Digest (the officer counter-signs the session digest, not a private per-officer digest).
 		-- IsPlaceholderSignature: the same narrow DEBT-11 carve-out as AdminSigning.SignatureValid,
 		-- propagated through the shared SigningEngine.sign() seam.
+		--
+		-- 49-02 (D-02/D-03): same curve-branch discriminant and 'M' default as
+		-- AdminSigning.SignatureValid above (see its comment for the full rationale) -- the
+		-- referenced-session digest subquery is kept IDENTICAL in both curve branches.
 		constraint SignatureValid check (
 			context.IsPlaceholderSignature = true
-				or SignatureValid(
-					(select Digest from AdminSigning where Nonce = new.SigningNonce),
-					new.Signature,
-					new.SignerKey
+				or (
+					coalesce((select K.Type from UserKey K where K.PubKey = new.SignerKey), 'M') = 'P'
+					and SignatureValidP256(
+						(select Digest from AdminSigning where Nonce = new.SigningNonce),
+						new.Signature,
+						new.SignerKey
+					)
+				)
+				or (
+					coalesce((select K.Type from UserKey K where K.PubKey = new.SignerKey), 'M') <> 'P'
+					and SignatureValid(
+						(select Digest from AdminSigning where Nonce = new.SigningNonce),
+						new.Signature,
+						new.SignerKey
+					)
 				)
 		)
 	)
@@ -631,11 +673,47 @@ declare schema main
 					and K.PubKey <> new.PubKey
 			)
 	),
+		-- 49-05 (D-20): extends the pre-existing two-clause DeleteValid (signer non-expired;
+		-- not the last key) with a third AND'd clause verifying a REAL signature over the
+		-- canonical revoke pre-image Digest(old.UserId, old.PubKey) -- the single formula also
+		-- defined TS-side by UserEngine.getRevokeKeyDigest, so the engine and the schema can
+		-- never drift. Shape selected by 49-03's empirical probe
+		-- (quereus-delete-check-semantics.spec.ts VERDICT: extend-DeleteValid) -- installed
+		-- Quereus 4.11.0 proved `check on delete` fires ONLY on DELETE (never INSERT/UPDATE --
+		-- quereus#23 stays fixed) and can safely call `SignatureValid(Digest(old...), ...)`.
+		-- Curve-branched per 49-02 (D-02/D-03), mirroring SignatureValid's own discriminant
+		-- above: resolves the verifying curve from the EXISTING signer's persisted
+		-- UserKey.Type (context.UserKey), defaulting to 'M' (secp256k1) when unregistered --
+		-- the same default AdminSigning/OfficerSignature use, and immaterial here in practice
+		-- because the FIRST clause already requires context.UserKey to be a registered,
+		-- non-expired UserKey row for this user. Digest(old.UserId, old.PubKey) is TEXT-only
+		-- (no datetime column), so this is NOT the Registrant/Association deferred-CHECK
+		-- Expiration-coercion trap (49-02 Deviation 2) -- and DeleteValid already carries two
+		-- pre-existing EXISTS subqueries, so this adds no NEW deferred-promotion risk either.
 		constraint DeleteValid check on delete (
 				-- must be a non-expired key for the user
 				exists (select 1 from UserKey K where K.UserId = old.UserId and K.PubKey = context.UserKey and K.Expiration > context.now)
 					-- and not the last key for the user
 					and exists (select 1 from UserKey K where K.UserId = old.UserId and K.PubKey <> old.PubKey)
+					-- and a real signature over the canonical revoke pre-image
+					and (
+						(
+							coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), 'M') = 'P'
+							and SignatureValidP256(
+								Digest(old.UserId, old.PubKey),
+								context.Signature,
+								context.UserKey
+							)
+						)
+						or (
+							coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), 'M') <> 'P'
+							and SignatureValid(
+								Digest(old.UserId, old.PubKey),
+								context.Signature,
+								context.UserKey
+							)
+						)
+					)
 		),
 		-- 999.1 R-02/D-11/Pitfall 3: real in-schema verification via the shared SignatureValid UDF,
 		-- gated by a bootstrap discriminant that MIRRORS InsertValid's own first branch exactly
@@ -648,15 +726,38 @@ declare schema main
 		-- IsSignatureValid stays declared (unused by this CHECK) for backward-compatible binding
 		-- from other raw-SQL seeders across the suite; producers accepting a real signature no
 		-- longer assert it hardcoded true (R-04) -- see UserEngine.addKey.
+		--
+		-- 49-02 (D-02/D-03): curve-branched. `new.Type` describes the curve of the KEY BEING
+		-- INSERTED, but the curve that must actually verify the signature bytes is the EXISTING
+		-- signer's own curve (`context.UserKey`), which may differ in this permanently
+		-- mixed-curve system (D-03) -- a P-256 Authority officer key can countersign a new
+		-- secp256k1 key and vice versa. The discriminant therefore resolves from the PERSISTED
+		-- `UserKey.Type` of the verifying key, not from `new.Type`: `coalesce((select K.Type
+		-- from UserKey K where K.PubKey = context.UserKey), new.Type)` -- a registered signer
+		-- uses its own recorded curve, and an unregistered/legacy signer falls back to the new
+		-- row's own type, which preserves every existing (pre-49-02) test path exactly. Do not
+		-- "simplify" this back to `new.Type` -- that would verify a P-256 signer's countersignature
+		-- of a new secp256k1 key against the WRONG curve and fail closed and silently.
 		constraint SignatureValid check (
 			(
 				(select count(*) from UserKey K where K.UserId = new.UserId) = 1
 				and context.UserKey is null
 			)
-			or SignatureValid(
-				Digest(new.UserId, new.PubKey, new.Type, new.Expiration),
-				context.Signature,
-				context.UserKey
+			or (
+				coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), new.Type) = 'P'
+				and SignatureValidP256(
+					Digest(new.UserId, new.PubKey, new.Type, new.Expiration),
+					context.Signature,
+					context.UserKey
+				)
+			)
+			or (
+				coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), new.Type) <> 'P'
+				and SignatureValid(
+					Digest(new.UserId, new.PubKey, new.Type, new.Expiration),
+					context.Signature,
+					context.UserKey
+				)
 			)
 		),
 		constraint NoUpdate check on update (false),
@@ -1019,6 +1120,7 @@ declare schema main
 							or ( SignatureType = 'election' and exists (select 1 from ElectionSignatureTaskExtension E where E.TaskId = new.Id))
 							or ( SignatureType = 'election-revision' and exists (select 1 from ElectionRevisionSignatureTaskExtension ER where ER.TaskId = new.Id))
 							or ( SignatureType = 'ballot' and exists (select 1 from BallotSignatureTaskExtension B where B.TaskId = new.Id))
+							or ( SignatureType = 'registrant' and exists (select 1 from RegistrantSignatureTaskExtension R where R.TaskId = new.Id))
 					) )
 		),
 		constraint MutationValid check on insert, update (context.IsMutationValid = true)
@@ -1225,6 +1327,40 @@ declare schema main
 
 	index BallotSignatureTaskBallot on BallotSignatureTaskExtension (BallotId);
 
+	-- D-05. This is the FIRST signature-extension table whose FK target (RegistrationRequest) is
+	-- NOT a ProposedX table -- that is correct; the extension pattern only needs a stable row with
+	-- a digest to bind to. Do not "fix" this asymmetry by reshaping RegistrationRequest.
+	table RegistrantSignatureTaskExtension (
+		TaskId text primary key, -- references Task.Id
+		RequestId text, -- references RegistrationRequest.Id
+		constraint TaskIdValid check (exists (select 1 from Task T where T.Id = new.TaskId and T.Type = 'signature' and T.SignatureType = 'registrant')),
+		constraint RequestIdValid check (exists (select 1 from RegistrationRequest R where R.Id = new.RequestId)),
+		constraint MutationValid check on insert, update (
+			exists (
+				select 1 from Task T join AdminSigning A on A.Nonce = T.SigningNonce and A.Scope = 'vrg'
+					join RegistrationRequest R on R.Id = new.RequestId
+						where T.Id = new.TaskId and T.Type = 'signature' and T.SignatureType = 'registrant'
+							and T.IsCompleted = false
+							and A.Digest = Digest(
+								context.Tid, R.Id, R.AuthorityId, R.RequesterKey, R.IssuerType, R.BridgeId, R.PayloadCid, R.SubmittedAt
+							)
+			)
+			-- if the registration request change has been fully signed, no uncompleted tasks should be left
+			and not exists (
+				select 1 from Task T join AdminSigning A on A.Nonce = T.SigningNonce
+					join AdminSignature ASig on ASig.SigningNonce = A.Nonce
+						where T.Id = new.TaskId and T.IsCompleted = false
+			)
+		),
+		constraint DeleteValid check on delete (
+			not exists (select 1 from Task T where T.Id = old.TaskId)
+				or exists (select 1 from Task T where T.Id = old.TaskId and T.IsCompleted = true)
+		)
+	)
+		with context ( Tid int );
+
+	index RegistrantSignatureTaskRequest on RegistrantSignatureTaskExtension (RequestId);
+
 	table OnboardingTaskExtension (
 		TaskId text primary key, -- references Task.Id
 		OnboardingId text, -- references Onboarding.Id
@@ -1251,12 +1387,194 @@ declare schema main
 		union all select 'network' as Code
 		union all select 'election' as Code
 		union all select 'election-revision' as Code
-		union all select 'ballot' as Code;
+		union all select 'ballot' as Code
+		union all select 'registrant' as Code;
 
 	-- ═══════════════════════════════════════════════════════════════════════
 	-- Registration
 	-- Voter registration, device association + attestation, authority peers, polling devices
 	-- ═══════════════════════════════════════════════════════════════════════
+
+	view RegistrationRequestStatus as
+		select 'p' as Code, 'Pending' as Name
+		union all select 'a' as Code, 'Approved' as Name
+		union all select 'r' as Code, 'Rejected' as Name;
+
+	view RegistrationRequestIssuer as
+		select 'registrant' as Code, 'Registrant' as Name
+		union all select 'bridge' as Code, 'Bridge' as Name;
+
+	-- D-03 registry: the bounded, append-only allowlist of bridge keys authorized to submit
+	-- RegistrationRequest rows on another person's behalf. RevokedAt is shipped so
+	-- RegistrationRequest.BridgeIdValid can honestly enforce revocation, but no revoke ceremony
+	-- ships this phase (48-07 implements registerBridgeKey/listBridgeKeys only) -- do not add one
+	-- and do not remove the column because nothing writes it yet.
+	table RegistrationBridgeKey (
+		Id text primary key, -- 32 byte random id
+		AuthorityId text,
+		Label text, -- human-readable importer name, surfaced in the inbox (48-14)
+		BridgeKey text, -- the bridge's public key
+		RevokedAt datetime null,
+		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
+		constraint RevokedAtValid check (RevokedAt is null or (isISODatetime(RevokedAt) and like('%Z', RevokedAt))),
+		constraint CantDelete check on delete (false),
+		constraint MutationValid check on insert, update (
+			exists (
+				select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+					where A.Nonce = context.SigningNonce
+						and A.AuthorityId = new.AuthorityId
+						and A.Scope = 'vrg'
+						and A.Digest = Digest(
+							context.Tid, new.Id, new.AuthorityId, new.Label, new.BridgeKey, new.RevokedAt
+						)
+			)
+		)
+	)
+		with context ( SigningNonce text, Tid int );
+
+	-- D-02/D-03/D-06/D-07 intake row. Authorized on INSERT SOLELY by the requester's own
+	-- signature (SignatureValid below) -- NO User FK, NO IsUserValid gate (D-02/D-04). This is
+	-- deliberately NOT a ProposedX-shaped table; see votetorrent.qsql's ProposedOfficer (:411) for
+	-- the shape this table must NOT have.
+	--
+	-- SubmittedAt vs ReceivedAt (L-3): SubmittedAt is SUPPLIED BY THE SUBMITTER -- it is DG-1's
+	-- seventh argument, so it must be a value the signer already knew at signing time (an offline
+	-- courier binding depends on this). ReceivedAt is the AUTHORITY'S OWN OBSERVATION of intake
+	-- time, written by the engine with toIsoZDatetime, and is deliberately inside NO digest at all.
+	-- Do not collapse these two columns back into one -- see the plan's <digest_register>.
+	table RegistrationRequest (
+		Id text primary key, -- 32 byte random id
+		AuthorityId text,
+		RequesterKey text, -- the requester's (or bridge's) public key
+		IssuerType text default 'registrant', -- references RegistrationRequestIssuer(Code)
+		BridgeId text null, -- references RegistrationBridgeKey.Id when IssuerType = 'bridge'
+		Payload text, -- JSON RegisterInit
+		PayloadCid text, -- content-addressed hash of Payload
+		Status text default 'p', -- references RegistrationRequestStatus(Code)
+		SubmittedAt datetime, -- submitter-supplied, inside DG-1 (see comment above)
+		ReceivedAt datetime, -- authority-observed intake time, inside NO digest (see comment above)
+		RequesterSignature text,
+		VerificationCid text null, -- content-addressed hash of the structured verification record (D-07)
+		DecidedAt datetime null,
+		DecidingOfficerUserId text null,
+		RejectionReason text null,
+		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
+		constraint StatusValid check (Status in (select Code from RegistrationRequestStatus)),
+		constraint IssuerTypeValid check (IssuerType in (select Code from RegistrationRequestIssuer)),
+		-- D-03 machine-distinguishability gate: a bridge assertion is distinguishable from a
+		-- voter's own act at the data layer, not merely in the UI.
+		constraint BridgeIdValid check (
+			(IssuerType = 'registrant' and BridgeId is null)
+				or (IssuerType = 'bridge' and exists (
+					select 1 from RegistrationBridgeKey B where B.Id = new.BridgeId and B.BridgeKey = new.RequesterKey and B.RevokedAt is null
+				))
+		),
+		-- payload's digest-boundness is what makes DG-1 cover the payload transitively
+		constraint PayloadCidValid check (PayloadCid = Digest(Payload)),
+		-- SubmittedAt validates an UNTRUSTED, submitter-supplied value (L-3), not an engine-written one
+		constraint SubmittedAtValid check (isISODatetime(SubmittedAt) and like('%Z', SubmittedAt)),
+		-- ReceivedAt is written by the engine with toIsoZDatetime
+		constraint ReceivedAtValid check (isISODatetime(ReceivedAt) and like('%Z', ReceivedAt)),
+		-- Absolute plausibility bound only -- NOT the relative skew window (that is engine-side,
+		-- 48-07). Arithmetic-free lexicographic comparison over fixed-width canonical ISO-Z strings.
+		constraint SubmittedAtSaneValid check on insert (
+			SubmittedAt >= '2024-01-01T00:00:00.000Z' and SubmittedAt < '2100-01-01T00:00:00.000Z'
+		),
+		constraint DecidedAtValid check (DecidedAt is null or (isISODatetime(DecidedAt) and like('%Z', DecidedAt))),
+		-- D-02 -- the ONLY authorization gate on INSERT. No User FK, no UserId/UserKey context
+		-- param, no IsUserValid gate. Unqualified so it re-evaluates on UPDATE.
+		-- 49-02 (D-02/D-03) audit verdict: RequesterKey is PROVABLY voter/bridge-side only, never
+		-- an Authority-app device key -- deliberately left secp256k1-only, NOT curve-branched.
+		-- registration-engine.ts submitRegistrationRequest is called exclusively by the
+		-- requesting party (the registrant's own device, see
+		-- VoteTorrentVoter ConfirmationScreen.tsx-style self-service submission) or by an
+		-- allowlisted RegistrationBridgeKey holder (an external paper-form-intake operator key,
+		-- registered in its own RegistrationBridgeKey table -- never in UserKey, never the
+		-- Authority app's own signing key). No Authority-app call site ever signs a
+		-- RegistrationRequest with its own device key; the Authority app only ever DECIDES on one
+		-- (RegistrationRequest.DecisionValid, a separate CHECK, out of this constraint's scope).
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt),
+				RequesterSignature,
+				RequesterKey
+			)
+		),
+		constraint IdImmutable check on update (new.Id = old.Id),
+		constraint PayloadImmutable check on update (new.Payload = old.Payload),
+		-- WR-08: every remaining IDENTITY column is now immutable too. SignatureValid above is
+		-- deliberately unqualified so it re-evaluates on UPDATE -- but it verifies
+		-- Digest(Id, AuthorityId, RequesterKey, IssuerType, BridgeId, PayloadCid, SubmittedAt)
+		-- against RequesterSignature AND RequesterKey, both COLUMNS OF THE SAME ROW. An UPDATE that
+		-- changed AuthorityId, RequesterKey and RequesterSignature TOGETHER therefore still
+		-- satisfied it (the attacker simply signs the new tuple with their own key) and, with a
+		-- 'vrg' AdminSignature at the NEW authority, satisfied DecisionValid as well. Given this
+		-- phase frames these CHECKs as THE authorization boundary, the omission was a real
+		-- defense-in-depth gap; Registrant already carries AuthorityIdImmutable, this table did not.
+		-- Note the interaction with the engine-side CR-02 refusal, which compares the payload
+		-- against RegistrationRequest.AuthorityId: without AuthorityIdImmutable, rewriting that
+		-- column was the last remaining way to move a request between authorities after intake.
+		--
+		-- WHY THERE IS NO SubmittedAtImmutable, and it is not an omission: SubmittedAt is the
+		-- seventh argument of the SignatureValid digest above, and that CHECK is unqualified, so it
+		-- re-runs on every UPDATE. With RequesterKey and RequesterSignature now immutable, an
+		-- attacker can no longer re-sign a rewritten tuple, so SignatureValid pins SubmittedAt (and
+		-- Id/AuthorityId/IssuerType/BridgeId/PayloadCid) transitively. A literal
+		-- `new.SubmittedAt = old.SubmittedAt` CHECK is ALSO not expressible here: `new.*` sees the
+		-- raw bound Z-suffixed value while `old.*` is read back Temporal-coerced (Z stripped,
+		-- trailing fractional zeros dropped -- T-42-03/T-42-06), so the two never compare equal and
+		-- the constraint would reject every legitimate decision. This was confirmed empirically, not
+		-- assumed: the constraint was written, and the whole registrant accept AND reject suite went
+		-- red with `CHECK constraint failed: SubmittedAtImmutable`.
+		--
+		-- WHY THERE IS NO ReceivedAtImmutable, stated as an OPEN RESIDUAL rather than a conclusion:
+		-- ReceivedAt is inside NO digest, so the transitive argument above does not reach it -- and
+		-- it is both the anti-backdating sort key (registration-request-query.ts's order key) and
+		-- the basis of D-09's published median time-to-decision, so a rewrite would flatter the
+		-- authority's own responsiveness figure. It is blocked by the SAME datetime-coercion
+		-- asymmetry (a literal equality CHECK fails identically, also confirmed by running it), and
+		-- no format-insensitive comparison is available: Quereus rejects the two-operand `is` form,
+		-- and a prefix/`like` workaround would still admit a sub-second rewrite. What holds today is
+		-- ENGINE-side only: the two decision ceremonies are the only writers, and both rebind
+		-- ReceivedAt to its unchanged value via restoreCanonicalDatetime. Closing this properly needs
+		-- either a Quereus-level datetime comparison primitive or ReceivedAt folded into a digest.
+		-- BridgeId needs NULL-SAFE equality: it is null on every registrant-issued row, and
+		-- `null = null` is null (not true), which would make a plain `=` reject every legitimate
+		-- decision on a non-bridge request. Quereus's parser does NOT accept the two-operand
+		-- `x is y` form (only `is null` / `is not null`), so the equality is spelled out as an
+		-- explicit disjunction. The asymmetric cases still fail closed: null -> non-null (or the
+		-- reverse) leaves the first disjunct false and the second null, so the CHECK does not pass.
+		constraint AuthorityIdImmutable check on update (new.AuthorityId = old.AuthorityId),
+		constraint RequesterKeyImmutable check on update (new.RequesterKey = old.RequesterKey),
+		constraint RequesterSignatureImmutable check on update (new.RequesterSignature = old.RequesterSignature),
+		constraint IssuerTypeImmutable check on update (new.IssuerType = old.IssuerType),
+		constraint BridgeIdImmutable check on update (
+			(new.BridgeId is null and old.BridgeId is null) or new.BridgeId = old.BridgeId
+		),
+		constraint PayloadCidImmutable check on update (new.PayloadCid = old.PayloadCid),
+		-- D-06: a rejected request is a permanent, attributable record
+		constraint NoDelete check on delete (false),
+		-- D-06/D-07: the ONLY legal update to this table is a signed pending->decided transition
+		constraint DecisionValid check on update (
+			old.Status = 'p'
+				and new.Status in ('a', 'r')
+				and exists (
+					select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+						where A.Nonce = context.SigningNonce
+							and A.AuthorityId = new.AuthorityId
+							and A.Scope = 'vrg'
+							and A.Digest = Digest(
+								context.Tid, new.Id, new.Status, new.VerificationCid, new.DecidedAt, new.DecidingOfficerUserId, new.RejectionReason
+							)
+				)
+		)
+	)
+		-- At INSERT no signing session exists, so only Tid is meaningful -- 48-07 still binds both
+		-- declared params. Do not "fix" the insert path by inventing a ceremony, and do not add a
+		-- third context param.
+		with context ( SigningNonce text, Tid int );
+
+	index RegistrationRequestAuthorityStatus on RegistrationRequest (AuthorityId, Status);
 
 	view RegistrantStatus as
 		select 'a' as Code, 'Active' as Name
@@ -1279,8 +1597,35 @@ declare schema main
 		constraint ExpirationFuture check on insert (Expiration > context.now),
 		constraint IdImmutable check on update (new.Id = old.Id),
 		constraint AuthorityIdImmutable check on update (new.AuthorityId = old.AuthorityId),
+		-- 49-02 (D-02/D-03) audit finding: SignorKey is NOT always a voter-side key -- this row is
+		-- signed either by the registrant's OWN device key (VoteTorrentVoter's self-service
+		-- registration path, ConfirmationScreen.tsx, secp256k1 by design) OR by the reviewing
+		-- Authority officer's device key (signature-tasks-engine.ts finalizeRegistrantApproval's
+		-- officer-approval path, which becomes P-256 this phase) -- genuinely mixed-curve.
+		--
+		-- UNLIKE AdminSigning/OfficerSignature/UserKey, this does NOT use a UserKey.Type lookup
+		-- discriminant -- empirically, adding ANY correlated subquery here promotes this CHECK
+		-- from an immediate (non-deferred) evaluation to Quereus's DEFERRED constraint queue,
+		-- whose row snapshot re-derives `new.Expiration` through a Temporal round-trip that
+		-- strips the trailing `Z` (the same class of trap recorded in this project's Quereus
+		-- deferred-CHECK memory). `Digest(Id, ..., Expiration)` recomputed against that
+		-- Z-stripped snapshot no longer matches the digest the caller pre-signed with the raw
+		-- Z-suffixed value (registration-engine.ts createRegistrant step 1), so EVERY insert --
+		-- secp256k1 included -- started failing closed when this was first tried with a
+		-- coalesce((select ...)) discriminant (confirmed empirically: the full registration
+		-- suite went red, not just the P-256 cases). Trying both curves directly needs no
+		-- subquery, stays a non-deferred CHECK, and is not a weaker check: an ECDSA signature
+		-- essentially never verifies against the wrong curve's point/generator by chance (the
+		-- same assumption Task 2's wrong-curve-rejection case already empirically proved for
+		-- UserKey) -- so this only ever accepts a genuinely valid signature on ONE of the two
+		-- curves, exactly like the discriminant form, just without the lookup.
 		constraint SignatureValid check (
 			SignatureValid(
+				Digest(Id, AuthorityId, PrivateCid, PublicCid, SelectiveCid, Status, Expiration),
+				Signature,
+				SignorKey
+			)
+			or SignatureValidP256(
 				Digest(Id, AuthorityId, PrivateCid, PublicCid, SelectiveCid, Status, Expiration),
 				Signature,
 				SignorKey
@@ -1495,8 +1840,23 @@ declare schema main
 		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId and R.Status = 'a')),
 		constraint ExpirationValid check (isISODatetime(Expiration) and like('%Z', Expiration)),
 		constraint ExpirationFuture check on insert (Expiration > context.now),
+		-- 49-02 (D-02/D-03) audit finding: same reasoning as Registrant.SignatureValid above --
+		-- SignorKey is either the registrant's own device key (VoteTorrentVoter self-service
+		-- association, secp256k1) or the reviewing Authority officer's device key (Authority-app
+		-- association ceremony, becomes P-256 this phase) -- mixed-curve. Same subquery-free
+		-- "try both curves" form as Registrant.SignatureValid, for the SAME empirically-found
+		-- reason: a UserKey.Type lookup discriminant here promotes this CHECK to Quereus's
+		-- deferred queue, whose Expiration re-derivation no longer matches the pre-signed digest
+		-- (association-engine.ts associate()'s row-level signature, computed before insert with
+		-- the raw Z-suffixed value) -- see Registrant.SignatureValid's comment for the full
+		-- empirical finding.
 		constraint SignatureValid check (
 			SignatureValid(
+				Digest(RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration),
+				Signature,
+				SignorKey
+			)
+			or SignatureValidP256(
 				Digest(RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration),
 				Signature,
 				SignorKey
@@ -1640,6 +2000,65 @@ declare schema main
 		constraint NoUpdate check on update (false)
 	)
 		with context ( SigningNonce text, Tid int );
+
+	-- Authority-held, unsigned, InsertOnly access trail for RegistrantPrivate reads (D-01/D-02).
+	-- Not replicated to the public Election Network -- same posture as RegistrantPrivate itself.
+	-- Fields holds a JSON array of the revealed PRIVATE attribute NAMES only, never their values.
+	-- One row is written per screen-visit (D-14): a single audit row records the set of private
+	-- fields revealed during that visit, flushed on unmount/background rather than per-field-tap.
+	--
+	-- Accountability, deterrence, and regulatory posture -- NOT a security control. This table
+	-- records app-mediated access only: reads happen on the officer's own device against a local
+	-- Quereus/LevelDB file, and an officer who queries that file directly (or pulls the LevelDB
+	-- store off the device) bypasses the app entirely, so no row is written for that access. It
+	-- neither prevents nor restricts anything; it exists so app-mediated PII reveals are
+	-- accountable after the fact.
+	table RegistrantAccessEvent (
+		RegistrantId text, -- references Registrant.Id
+		ViewerUserId text, -- the officer's User.Id who viewed the private tier
+		Sequence integer not null, -- per-registrant monotonic ordering key (coalesce(max(Sequence),-1)+1)
+		Timestamp datetime, -- Z-suffixed ISO (toIsoZDatetime); NOT nowCanonicalDatetime(), which lacks the trailing Z the CHECK below requires
+		Fields text, -- JSON array of revealed private attribute NAMES -- never values
+		primary key (RegistrantId, Sequence),
+		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId)),
+		constraint TimestampValid check (isISODatetime(Timestamp) and like('%Z', Timestamp)),
+		constraint InsertOnly check on update, delete (false)
+	)
+		with context ( Tid int, now datetime );
+
+	view AttestationVerdictResult as
+		select 'pass' as Code, 'Pass' as Name
+		union all select 'fail' as Code, 'Fail' as Name;
+
+	-- Authority-held, unsigned, InsertOnly store for device-attestation verdicts (D-03). Persists
+	-- PlayIntegrityVerifier.verify()'s otherwise-transient { ok, reason } result, which today is
+	-- never written anywhere. AssociationPrivate cannot carry it after the fact: that table is
+	-- InsertOnly and its Cid commits to a fixed digest tuple over the device-produced attestation
+	-- data, so folding an authority-computed judgement in would conflate the two. Sequence is
+	-- monotonic per (RegistrantId, DeviceKey) so re-verifications accumulate over time rather than
+	-- overwriting. Verdict is a text code referencing AttestationVerdictResult(Code) -- a
+	-- boolean-default column here would hit the quereus 4.x re-attach ALTER-COLUMN coercion class
+	-- (see the schema's ElectionRegistrationField comment above). Deliberately carries NO
+	-- foreign-key CHECK against Association/AssociationPrivate: a FAIL verdict is written before
+	-- the associate() ceremony throws, at a point where no Association row exists yet on that
+	-- path, so such a CHECK would make recording a failed verification structurally impossible --
+	-- destroying exactly the record this table exists to keep. RegistrantIdValid deliberately does
+	-- NOT require R.Status = 'a' (unlike Association's own existence CHECK): a verdict must stay
+	-- readable after a registrant is later suspended or revoked.
+	table AttestationVerdict (
+		RegistrantId text, -- references Registrant.Id
+		DeviceKey text, -- the device's public key, as attested (no FK -- see comment above)
+		Sequence integer not null, -- per (RegistrantId, DeviceKey) monotonic ordering key
+		Verdict text, -- references AttestationVerdictResult(Code)
+		Reason text null, -- the verifier's {reason} string, if any
+		VerifiedAt datetime, -- Z-suffixed ISO (toIsoZDatetime); NOT nowCanonicalDatetime(), which lacks the trailing Z the CHECK below requires
+		primary key (RegistrantId, DeviceKey, Sequence),
+		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId)),
+		constraint VerdictValid check (Verdict in (select Code from AttestationVerdictResult)),
+		constraint VerifiedAtValid check (isISODatetime(VerifiedAt) and like('%Z', VerifiedAt)),
+		constraint InsertOnly check on update, delete (false)
+	)
+		with context ( Tid int, now datetime );
 
 	view RegistrantTier as
 		select 'public' as Code, 'Public' as Name

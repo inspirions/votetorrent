@@ -6,7 +6,7 @@
  *     the inline `invalidBootstrapAddress` error is shown, node.addStrand is NOT
  *     called, and NO exception escapes (the node never crashes).
  *   - A valid multiaddr → strandId decoded from the /p2p component → node.addStrand
- *     is called exactly once with mode 'networked' and the official strand row
+ *     is called exactly once with founder: false and the official strand row
  *     (Type 'o', MemberPrivateKey null, Id = decoded peer id).
  *
  * The screen is rendered for real (no production behavior is altered). Its heavy
@@ -204,7 +204,7 @@ describe('NetworksScreen bootstrap join — NETOP-03 / T-22-09 guard', () => {
     expect(hasInvalidAddrError(tr)).toBe(true);
   });
 
-  it('valid multiaddr decodes the /p2p strandId and calls addStrand once with mode "networked" and an official strand row', async () => {
+  it('valid multiaddr decodes the /p2p strandId and calls addStrand once with founder: false and an official strand row', async () => {
     const tr = await renderScreen();
     const PEER = '12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X';
     const addr = `/ip4/127.0.0.1/tcp/4001/ws/p2p/${PEER}`;
@@ -219,11 +219,12 @@ describe('NetworksScreen bootstrap join — NETOP-03 / T-22-09 guard', () => {
     expect(mockAddStrand).toHaveBeenCalledTimes(1);
     const config = mockAddStrand.mock.calls[0][0] as {
       strandRow: { Id: string; MemberPrivateKey: null; Type: string };
-      mode: string;
+      founder: boolean;
       sAppConfig: { schema: string };
     };
     expect(config.strandRow).toEqual({ Id: PEER, MemberPrivateKey: null, Type: 'o' });
-    expect(config.mode).toBe('networked');
+    // Spike 064: joining an existing host — we did not provision the strand.
+    expect(config.founder).toBe(false);
     expect(config.sAppConfig.schema).toBe('declare schema main {}');
 
     // No inline error on the success path.

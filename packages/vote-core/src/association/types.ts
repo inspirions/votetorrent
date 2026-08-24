@@ -1,6 +1,6 @@
 import type { Signature } from '../common/index.js'
 import type { IBuilder } from '../common/builder.js'
-import type { AssociateInit, Association, AttestationChallenge, DeviceAttestation } from './models.js'
+import type { AssociateInit, Association, AttestationChallenge, AttestationVerdict, DeviceAttestation } from './models.js'
 
 /**
  * D-01/D-19: every mutating method's signing parameter is a `Signature` OR a
@@ -46,8 +46,44 @@ export interface IAssociationEngine {
   /** Public Association row read. */
   getAssociation(registrantId: string, deviceKey: string): Promise<Association | undefined>
 
+  /**
+   * Array variant of {@link getAssociation} — every public `Association` row
+   * bound to `registrantId`. Carries the IDENTICAL Phase-42 D-04
+   * information-disclosure boundary as the point read: at most `DeviceHash`,
+   * never `AssociationPrivate.DeviceId`.
+   */
+  getAssociations(registrantId: string): Promise<Association[]>
+
+  /**
+   * D-11 inspect half (paired with the existing `removeAttestationChallenge`
+   * expire half): every outstanding `AttestationChallenge`. `registrantId` is
+   * an OPTIONAL narrowing predicate — omitted returns all outstanding
+   * challenges.
+   */
+  getAttestationChallenges(registrantId?: string): Promise<AttestationChallenge[]>
+
   /** 'vrg'-signed delete. */
   removeAssociation(registrantId: string, deviceKey: string, signatureOrCallback: SignatureOrCallback): Promise<void>
+
+  /**
+   * D-03: append-only, UNSIGNED write (D-02 — no `seedSignedMutation`,
+   * following the `InviteCancellation` precedent, not `UserEvent`). Called
+   * by `associate()` unconditionally on both the pass and the fail path —
+   * it records a judgement, it does not make one.
+   */
+  recordAttestationVerdict(registrantId: string, deviceKey: string, verification: AttestationVerification): Promise<void>
+
+  /**
+   * `deviceKey` is an OPTIONAL narrowing predicate — omitted returns every
+   * verdict for the registrant across all its device keys. Results are
+   * ordered `DeviceKey` asc then `Sequence` asc, so the LAST element of a
+   * narrowed result is the most recent verdict. An EMPTY result for a
+   * device that has an `Association` row means no verifier ever ran for it
+   * (the `AttestationRequired=0` path) — `Association.attestationCid` is
+   * non-null on both the attested and the non-attested path (Phase 45
+   * D-14a..D-14e), so its presence proves nothing.
+   */
+  getAttestationVerdicts(registrantId: string, deviceKey?: string): Promise<AttestationVerdict[]>
 }
 
 export interface IAssociationAssociateBuilder extends IBuilder<AssociateInit, void> {

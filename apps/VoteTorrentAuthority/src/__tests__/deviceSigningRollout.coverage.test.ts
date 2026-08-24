@@ -1,0 +1,180 @@
+/**
+ * deviceSigningRollout.coverage.test.ts — the D-09/D-13/D-14 completeness gate (49-12).
+ *
+ * 49-11 built the shared `useDeviceSigningErrorHandler` hook and routed 8 call-site files.
+ * 49-12 routed the remaining 9. This test is what keeps that rollout complete GOING FORWARD:
+ * it derives its inventory of `createDeviceSigner` call sites from the source tree itself
+ * (never a hardcoded list), so a future call site added without routing fails THIS suite
+ * instead of silently reopening the dead-end gap 49-UI-SPEC.md's degradation clause warns
+ * about (an officer whose key is invalidated lands on a raw, unroutable error string with no
+ * path back to recovery).
+ *
+ * Reconciliation this test encodes (so a future reader does not conclude the rollout is short):
+ *   - 22 non-test files under `src` reference `device-signer` in some form.
+ *   - 20 of those actually INVOKE `createDeviceSigner(` (a call expression, not a comment).
+ *   - 17 of the 20 route through `useDeviceSigningErrorHandler` (8 from 49-11, 9 from 49-12).
+ *   - 3 of the 20 are named, justified exemptions (`ROLLOUT_EXEMPT` below).
+ *   - 2 files (`engines/registrant-dev-seed.ts`, `engines/signing-proof.ts`) reference
+ *     `createDeviceSigner` only in prose comments, never as a call — they are correctly
+ *     excluded from the 20-file invocation inventory by this test's comment-stripping walk,
+ *     and are NOT part of the 22/20/17/3 arithmetic below (22 = 20 invokers + 2 comment-only).
+ *
+ * Convention mirrors this workspace's other release-guard-style source-inspection tests (see
+ * `engines/__tests__/`): reads files as TEXT rather than importing them, so it fails on what is
+ * ACTUALLY on disk (and therefore what `git add` would stage / what Metro would bundle), not on
+ * some transformed in-memory representation. (Deliberately not naming a sibling guard test's own
+ * filename in prose here — one of those siblings greps the whole `src` tree for its own subject
+ * string and a literal filename mention above would trip on itself.)
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+
+const SRC_ROOT = path.join(__dirname, '..');
+
+/**
+ * The three files that invoke `createDeviceSigner(` but must NEVER route through
+ * `useDeviceSigningErrorHandler`. Each entry carries the one-line rationale from
+ * 49-12-PLAN.md's objective table. Adding a fourth entry here is a deliberate,
+ * reviewable act — not a silent omission — because test 4 below re-derives the
+ * invocation set from the tree and asserts every non-exempt member routes.
+ */
+const ROLLOUT_EXEMPT: string[] = [
+	// Its call constructs the LAZY factory thunk; it never resolves a signer and
+	// never signs. D-14 is explicit that no signer is resolved and this screen is
+	// never auto-navigated-to during provider construction or cold start —
+	// AppProvider.tsx's own comment records that doing so can turn a successful
+	// re-attach into a spurious "Failed to load network". Navigating from here is
+	// precisely the forbidden behavior.
+	'providers/AppProvider.tsx',
+	// Device-proof harness with no UI surface and no navigation context. Same
+	// class of exemption as D-11's dev-seed carve-out.
+	'engines/persistence-proof.ts',
+	// Its own header declares it "DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY
+	// (D-01)", it is not a component (no hooks available), and
+	// BulkImportSyncScreen.tsx deliberately never surfaces this binding's error
+	// text (T-48-20-02). Routing here would violate an existing security
+	// decision.
+	'screens/registration/attach-sync-bindings.ts',
+];
+
+/** Recursively lists every `.ts`/`.tsx` file under `dir`, excluding `__tests__` segments. */
+function listSourceFiles(dir: string): string[] {
+	const entries = fs.readdirSync(dir, { withFileTypes: true });
+	const files: string[] = [];
+	for (const entry of entries) {
+		if (entry.name === '__tests__') continue;
+		const full = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			files.push(...listSourceFiles(full));
+		} else if (/\.(ts|tsx)$/.test(entry.name)) {
+			files.push(full);
+		}
+	}
+	return files;
+}
+
+/**
+ * Strips `//` line comments and `/* ... *\/` block comments from source text so a
+ * prose mention of `createDeviceSigner(` inside documentation (e.g.
+ * `registrant-dev-seed.ts`'s "`createDeviceSigner` reads the device's raw...") is
+ * never mistaken for a real call expression. Deliberately simple (no string-literal
+ * awareness) — sufficient for this codebase's actual comment shapes, matching the
+ * precision level a sibling release-guard source-shape test elsewhere in this
+ * directory already uses for a comparable assertion.
+ */
+function stripComments(source: string): string {
+	return source
+		.replace(/\/\*[\s\S]*?\*\//g, '')
+		.split('\n')
+		.map((line) => line.replace(/\/\/.*$/, ''))
+		.join('\n');
+}
+
+describe('D-09/D-13/D-14 rollout completeness: every createDeviceSigner call site routes through useDeviceSigningErrorHandler', () => {
+	const allFiles = listSourceFiles(SRC_ROOT);
+
+	// The hook itself and the taxonomy it wraps reference `createDeviceSigner` only
+	// in doc comments (if at all) — exclude the hook file explicitly per the plan's
+	// walk spec so it never accidentally satisfies its own invariant.
+	const DEVICE_SIGNER_IMPL = path.join(SRC_ROOT, 'engines', 'device-signer.ts');
+
+	const invokingFiles = allFiles
+		.filter((f) => f !== DEVICE_SIGNER_IMPL)
+		.filter((f) => {
+			const stripped = stripComments(fs.readFileSync(f, 'utf8'));
+			return /createDeviceSigner\(/.test(stripped);
+		})
+		.map((f) => path.relative(SRC_ROOT, f))
+		.sort();
+
+	it('the call-site inventory has exactly 20 members (fail loud, with the full list, if this drifts)', () => {
+		if (invokingFiles.length !== 20) {
+			throw new Error(
+				`Expected exactly 20 createDeviceSigner(...) call-site files, found ` +
+					`${invokingFiles.length}:\n${invokingFiles.join('\n')}`,
+			);
+		}
+		expect(invokingFiles).toHaveLength(20);
+	});
+
+	it('ROLLOUT_EXEMPT has exactly 3 entries', () => {
+		expect(ROLLOUT_EXEMPT).toHaveLength(3);
+	});
+
+	it('every entry in ROLLOUT_EXEMPT is actually present in the collected invocation set (no stale exemptions)', () => {
+		for (const exempt of ROLLOUT_EXEMPT) {
+			expect(invokingFiles).toContain(exempt);
+		}
+	});
+
+	it('every non-exempt invoking file references useDeviceSigningErrorHandler', () => {
+		const exemptSet = new Set(ROLLOUT_EXEMPT);
+		const offenders: string[] = [];
+		for (const rel of invokingFiles) {
+			if (exemptSet.has(rel)) continue;
+			const source = fs.readFileSync(path.join(SRC_ROOT, rel), 'utf8');
+			if (!/useDeviceSigningErrorHandler/.test(source)) {
+				offenders.push(rel);
+			}
+		}
+		if (offenders.length > 0) {
+			throw new Error(
+				`The following createDeviceSigner call site(s) do NOT route through ` +
+					`useDeviceSigningErrorHandler: ${offenders.join(', ')}. An unrouted site ` +
+					`leaves an officer with no path forward on key invalidation — either route ` +
+					`it through the shared hook or add it to ROLLOUT_EXEMPT with a written reason.`,
+			);
+		}
+		expect(offenders).toEqual([]);
+	});
+
+	it('the ProvisionSigningKey navigation target is referenced from exactly the hook and the Settings entry point (no per-screen duplicate)', () => {
+		const pattern = /navigate\(["']ProvisionSigningKey["']/;
+		const offenders: string[] = [];
+		const matches: string[] = [];
+		for (const f of allFiles) {
+			const rel = path.relative(SRC_ROOT, f);
+			const source = fs.readFileSync(f, 'utf8');
+			if (pattern.test(source)) {
+				matches.push(rel);
+			}
+		}
+		const allowed = new Set([
+			path.join('hooks', 'useDeviceSigningErrorHandler.ts'),
+			// 49-19: the recovery-key-registration gate. Added as a HOOK, deliberately, so the
+			// create/join trigger honours this contract instead of scattering the navigation
+			// target across AddNetworkScreen and NetworkDetailsScreen (which is exactly the
+			// per-screen duplication this test exists to prevent).
+			path.join('hooks', 'useRecoveryKeyRegistrationGate.ts'),
+			path.join('screens', 'settings', 'SettingsScreen.tsx'),
+		]);
+		for (const rel of matches) {
+			if (!allowed.has(rel)) offenders.push(rel);
+		}
+		expect(offenders).toEqual([]);
+		// Also assert the allowed set is fully accounted for — a missing entry here
+		// would mean the navigation contract silently regressed to zero sites.
+		expect(matches.sort()).toEqual([...allowed].sort());
+	});
+});

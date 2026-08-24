@@ -1,7 +1,7 @@
 import { bytesToHex } from '@noble/curves/utils.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { utf8ToBytes } from '@noble/hashes/utils.js'
-import { asText, digestToBytes, nowCanonicalDatetime } from '../utils.js'
+import { asText, digestToBytes, nowCanonicalDatetime, SEQUENCE_ALLOCATION_ATTEMPTS } from '../utils.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
@@ -12,6 +12,8 @@ import type {
   AssociateInit,
   Association,
   AttestationChallenge,
+  AttestationVerdict,
+  AttestationVerdictCode,
   AttestationVerification,
   IAssociationAssociateBuilder,
   IAssociationEngine,
@@ -276,11 +278,32 @@ export class AssociationEngine implements IAssociationEngine {
     // D-07 seam — verify BEFORE opening any transaction; no row written on rejection.
     if (attestationRequired) {
       const verification: AttestationVerification = await this.verifier.verify(challenge, attestation)
-      if (!verification.ok) {
-        throw new Error(
-          `AssociationEngine.associate: attestation verification failed${verification.reason ? `: ${verification.reason}` : ''}`
-        )
+
+      // D-03/T-47-11/T-47-12 (LOCKED ORDER — do not reorder): the verdict is
+      // recorded HERE, unconditionally on both the pass and the fail path,
+      // BEFORE the fail-closed gate below AND before `await ctx.db.exec('BEGIN')`
+      // further down — recording failures is the entire point of D-03, and an
+      // insert placed after the throw or inside the transaction would record
+      // nothing on the fail path (the transaction is never opened there, and a
+      // ROLLBACK would erase it anyway). The record's own outcome is CAPTURED,
+      // never let to influence the gate directly: a storage failure must never
+      // be able to mask or re-shape the "attestation verification failed"
+      // rejection (a caller distinguishing "attestation rejected" from
+      // "storage error" would mis-classify a rejected device), and on the pass
+      // path a record failure must never be silently swallowed.
+      let recordError: unknown
+      try {
+        await this.recordAttestationVerdict(registrantId, deviceKey, verification)
+      } catch (err) {
+        recordError = err
       }
+
+      if (!verification.ok) {
+        const message = `AssociationEngine.associate: attestation verification failed${verification.reason ? `: ${verification.reason}` : ''}`
+        throw recordError !== undefined ? new Error(message, { cause: recordError }) : new Error(message)
+      }
+
+      if (recordError !== undefined) throw recordError
     }
 
     // D-06 device-uniqueness (authority-side — needs the private DeviceId).
@@ -455,6 +478,66 @@ export class AssociationEngine implements IAssociationEngine {
     }
   }
 
+  /**
+   * Array variant of `getAssociation` — every public `Association` row bound
+   * to `registrantId`. Same column list as the point read, hence the same
+   * D-04 information-disclosure boundary by construction.
+   */
+  async getAssociations (registrantId: string): Promise<Association[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: Association[] = []
+    try {
+      for await (const row of ctx.db.eval(
+        'select RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration, SignorKey, Signature from Association where RegistrantId = :registrantId',
+        { registrantId }
+      )) {
+        out.push({
+          registrantId: asText(row.RegistrantId, 'Association.RegistrantId'),
+          deviceKey: asText(row.DeviceKey, 'Association.DeviceKey'),
+          deviceHash: row.DeviceHash == null ? undefined : asText(row.DeviceHash, 'Association.DeviceHash'),
+          attestationCid: row.AttestationCid == null ? undefined : asText(row.AttestationCid, 'Association.AttestationCid'),
+          expiration: toIsoZDatetime(row.Expiration as string),
+          signorKey: asText(row.SignorKey, 'Association.SignorKey'),
+          signature: asText(row.Signature, 'Association.Signature')
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getAssociations')
+    }
+  }
+
+  /**
+   * D-11 inspect half: every outstanding `AttestationChallenge`, optionally
+   * narrowed to one registrant. Pairs with `removeAttestationChallenge` (the
+   * expire half) — a removed challenge disappears from this read for free.
+   */
+  async getAttestationChallenges (registrantId?: string): Promise<AttestationChallenge[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: AttestationChallenge[] = []
+    try {
+      const sql = registrantId === undefined
+        ? 'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration from AttestationChallenge'
+        : 'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration from AttestationChallenge where RegistrantId = :registrantId'
+      const params: Record<string, string> = registrantId === undefined ? {} : { registrantId }
+      for await (const row of ctx.db.eval(sql, params)) {
+        out.push({
+          nonce: asText(row.Nonce, 'AttestationChallenge.Nonce'),
+          authorityId: asText(row.AuthorityId, 'AttestationChallenge.AuthorityId'),
+          registrantId: asText(row.RegistrantId, 'AttestationChallenge.RegistrantId'),
+          deviceKey: asText(row.DeviceKey, 'AttestationChallenge.DeviceKey'),
+          electionId: row.ElectionId == null ? undefined : asText(row.ElectionId, 'AttestationChallenge.ElectionId'),
+          expiration: toIsoZDatetime(row.Expiration as string)
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getAttestationChallenges')
+    }
+  }
+
   /** 'vrg'-signed delete. */
   async removeAssociation (registrantId: string, deviceKey: string, signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.requireCtx('removeAssociation')
@@ -488,6 +571,160 @@ export class AssociationEngine implements IAssociationEngine {
       )
     } catch (err) {
       this.rethrow(err, 'removeAssociation')
+    }
+  }
+
+  // ---------- D-03: attestation verdict store ----------
+
+  /**
+   * D-03: append-only, UNSIGNED insert — no `seedSignedMutation`,
+   * `SigningNonce`, `AdminSigning`, or `Digest(...)` ceremony (D-02),
+   * following the `InviteCancellation` precedent, not `UserEvent`.
+   * `Sequence` is monotonic per `(RegistrantId, DeviceKey)` so
+   * re-verifications accumulate rather than overwrite. Called
+   * unconditionally from `associate()` on both the pass and the fail path.
+   * Persisting a verdict neither authorizes nor blocks anything — the
+   * fail-closed control is `associate()`'s own `if (!verification.ok) throw`.
+   */
+  async recordAttestationVerdict (registrantId: string, deviceKey: string, verification: AttestationVerification): Promise<void> {
+    this.requireCtx('recordAttestationVerdict')
+    const ctx = this.ctx!
+    try {
+      // Text code, never a boolean — a boolean-shaped bind fails VerdictValid.
+      const verdict = verification.ok ? 'pass' : 'fail'
+      // Z-suffixed, required by VerifiedAtValid's like('%Z', VerifiedAt); the
+      // context `now` param stays Z-less (nowCanonicalDatetime()) — the same
+      // split every other like('%Z', X)-checked datetime column in this
+      // codebase uses (Association.Expiration, AttestationChallenge.Expiration,
+      // the private device-association row's own attestation-time column,
+      // 47-07's RegistrantAccessEvent.Timestamp). Do NOT bind
+      // nowCanonicalDatetime() into this column.
+      const verifiedAt = toIsoZDatetime(Date.now())
+
+      // Sequence allocation is a read-then-insert with no enclosing
+      // transaction, so two overlapping calls read the same `max(Sequence)`
+      // and the loser violates `primary key (RegistrantId, DeviceKey,
+      // Sequence)`. Here a lost row is a lost VERDICT — potentially a lost
+      // FAIL verdict — so it retries rather than letting the row vanish.
+      // Same discipline as `recordRegistrantAccessEvent`: on failure, probe
+      // for our own row (below) and otherwise retry only if the high-water
+      // mark ADVANCED. Deliberately does not sniff the driver's error text
+      // for "primary key". Known imprecision, accepted: a non-race failure
+      // that coincides with an unrelated writer advancing the counter is
+      // still retried, costing at most SEQUENCE_ALLOCATION_ATTEMPTS attempts
+      // before the original error is rethrown.
+      const readNextSequence = async (): Promise<number> => {
+        const seqRow = await ctx.db
+          .prepare('select coalesce(max(Sequence), -1) + 1 as n from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey')
+          .get({ registrantId, deviceKey })
+        return Number(seqRow?.n ?? 0)
+      }
+
+      // "Did the counter move?" is NOT "did another writer win?" — our own
+      // row moves it too. If `db.exec` rejects AFTER the row landed (project
+      // memory records intermittent `stale revision: rev 1 vs rev 1`
+      // rejections from @optimystic/db-p2p 0.18), a bare high-water test
+      // reads our own row as someone else's and appends a SECOND copy at
+      // sequence + 1. `AttestationVerdict` is
+      // `constraint InsertOnly check on update, delete (false)`, so a
+      // duplicated pass/fail judgement can never be removed from the table
+      // that exists to keep those judgements honest. The
+      // fresh-Tid-per-attempt note above rules out Tid replay, not row
+      // duplication. Same fix as `recordRegistrantAccessEvent`.
+      //
+      // NOTE `stripZ`: `VerifiedAt` round-trips WITHOUT the trailing `Z` that
+      // `VerifiedAtValid`'s like('%Z', VerifiedAt) requires on the way IN, so
+      // comparing the read value raw against the bound value never matches —
+      // the probe would answer "not ours" every time and silently reinstate
+      // the duplicate it exists to prevent.
+      const stripZ = (value: string): string => value.endsWith('Z') ? value.slice(0, -1) : value
+      const ownRowLanded = async (seq: number): Promise<boolean> => {
+        const row = await ctx.db
+          .prepare('select Verdict, Reason, VerifiedAt from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey and Sequence = :sequence')
+          .get({ registrantId, deviceKey, sequence: seq })
+        if (row === null || row === undefined) return false
+        const reason = verification.reason ?? null
+        const rowReason = row.Reason === null || row.Reason === undefined ? null : String(row.Reason)
+        return String(row.Verdict ?? '') === verdict &&
+          rowReason === reason &&
+          stripZ(String(row.VerifiedAt ?? '')) === stripZ(verifiedAt)
+      }
+
+      for (let attempt = 0; attempt < SEQUENCE_ALLOCATION_ATTEMPTS; attempt++) {
+        const sequence = await readNextSequence()
+        // A fresh Tid per attempt — never replayed into a second insert.
+        const tid = await allocateTid(ctx.db, 'association')
+
+        try {
+          await ctx.db.exec(
+            `insert into AttestationVerdict (RegistrantId, DeviceKey, Sequence, Verdict, Reason, VerifiedAt)
+             with context Tid = ${tid}, now = :now
+             values (:registrantId, :deviceKey, :sequence, :verdict, :reason, :verifiedAt)`,
+            {
+              registrantId,
+              deviceKey,
+              sequence,
+              verdict,
+              reason: verification.reason ?? null,
+              verifiedAt,
+              now: nowCanonicalDatetime()
+            }
+          )
+          return
+        } catch (err) {
+          if (attempt + 1 >= SEQUENCE_ALLOCATION_ATTEMPTS) throw err
+          // Both probes are fresh round trips issued immediately after a
+          // storage failure — exactly when they are most likely to fail too.
+          // Their rejection must never REPLACE the insert error the caller
+          // needs, so the whole diagnosis collapses to `throw err`.
+          let anotherWriterWon: boolean
+          try {
+            if (await ownRowLanded(sequence)) return
+            anotherWriterWon = (await readNextSequence()) > sequence
+          } catch {
+            throw err
+          }
+          if (!anotherWriterWon) throw err
+        }
+      }
+    } catch (err) {
+      this.rethrow(err, 'recordAttestationVerdict')
+    }
+  }
+
+  /**
+   * `deviceKey` is an OPTIONAL narrowing predicate. Results are ordered
+   * `DeviceKey` asc then `Sequence` asc — the LAST element of a narrowed
+   * read is the most recent verdict (the ordering contract 47-15/47-16
+   * render "the latest verdict" from). T-47-05: projects only
+   * `AttestationVerdict`'s own six columns — no column from the private,
+   * authority-held device-association row, and no join; `DeviceKey` is
+   * already public via `Association`.
+   */
+  async getAttestationVerdicts (registrantId: string, deviceKey?: string): Promise<AttestationVerdict[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: AttestationVerdict[] = []
+    try {
+      const sql = deviceKey === undefined
+        ? 'select RegistrantId, DeviceKey, Sequence, Verdict, Reason, VerifiedAt from AttestationVerdict where RegistrantId = :registrantId order by DeviceKey asc, Sequence asc'
+        : 'select RegistrantId, DeviceKey, Sequence, Verdict, Reason, VerifiedAt from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey order by DeviceKey asc, Sequence asc'
+      const params: Record<string, string> = deviceKey === undefined ? { registrantId } : { registrantId, deviceKey }
+      for await (const row of ctx.db.eval(sql, params)) {
+        out.push({
+          registrantId: asText(row.RegistrantId, 'AttestationVerdict.RegistrantId'),
+          deviceKey: asText(row.DeviceKey, 'AttestationVerdict.DeviceKey'),
+          sequence: Number(row.Sequence),
+          verdict: asText(row.Verdict, 'AttestationVerdict.Verdict') as AttestationVerdictCode,
+          // undefined, never null — the model declares `reason?: string`.
+          reason: row.Reason == null ? undefined : asText(row.Reason, 'AttestationVerdict.Reason'),
+          // CR-02: a datetime read-back is Z-stripped; re-stamp it.
+          verifiedAt: toIsoZDatetime(row.VerifiedAt as string)
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getAttestationVerdicts')
     }
   }
 

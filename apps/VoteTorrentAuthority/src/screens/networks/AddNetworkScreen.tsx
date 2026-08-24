@@ -9,6 +9,7 @@ import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { globalStyles } from "../../theme/styles";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { useApp } from "../../providers/AppProvider";
@@ -17,12 +18,17 @@ import type { IDefaultUserEngine, INetworksEngine, NetworkInit, NetworkReference
 import { ElectionType } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
 import { InlineError } from "../../components/InlineError";
+import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
 
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 	const { getEngine, networksEngine, selectNetwork } = useApp();
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
+	const promptRecoveryKeyRegistrationIfNeeded = useRecoveryKeyRegistrationGate();
 	const [networkName, setNetworkName] = useState("");
 	const [networkImageUrl, setNetworkImageUrl] = useState("");
 	const [authorityName, setAuthorityName] = useState("");
@@ -135,7 +141,7 @@ export default function AddNetworkScreen() {
 							init: {
 								name: adminName,
 								title: adminTitle,
-								scopes: ["rn", "rad", "iad", "uai", "mel", "ceb"],
+								scopes: [...FOUNDING_OFFICER_SCOPES],
 							},
 						},
 					],
@@ -192,9 +198,45 @@ export default function AddNetworkScreen() {
 			console.info("[network-create] selectNetwork() start");
 			await withTimeout(selectNetwork(networkRef), "select");
 			console.info("[network-create] selectNetwork() done");
+
+			// 49-19 (recovery-key-registration gap): networks-engine.create() registers ONLY the
+			// founding signing key -- its bootstrap branch writes user.activeKeys[0] and has no
+			// analog for a second key -- so the officer's recovery key is still unregistered the
+			// moment this network comes up. Registration lives in ProvisionSigningKeyScreen's
+			// stage 2, which needs a resolvable network User and therefore CANNOT run before this
+			// point; until now nothing brought the officer back to it, leaving them one biometric
+			// enrolment away from a stranded device (addKey needs a valid signing key, and only
+			// the recovery key can replace an invalidated one -- a closed loop whose only recorded
+			// escape was a destructive `pm clear`). Measured unregistered on BOTH fleet devices.
+			//
+			// The ceremony is idempotent and reconciling (it registers only what is missing), so
+			// routing into it here is safe; the gate keeps us from showing it when there is
+			// nothing to do. Deliberately AFTER selectNetwork: the network is fully established
+			// and stays selected, so declining leaves a usable network rather than a dead end.
+			//
+			// The `return` is load-bearing, and is why this mirrors NetworkDetailsScreen's join
+			// path rather than calling the gate for its side effect: the `navigation.goBack()`
+			// at the end of this function is UNCONDITIONAL, so without it the ceremony screen the
+			// gate just pushed is popped straight back off and the officer lands on Add Network
+			// again -- the gate's whole point undone one statement later. Measured on real
+			// hardware (Pixel 7 Pro, 2026-08-24): the gate logged `needed: true` and navigated,
+			// and the device still sat on Add Network. `finally` still runs on this path, so the
+			// in-flight flag is cleared exactly as it is on every other exit.
+			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
 		} catch (err) {
 			console.error("handleCreate error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory
+			// (device-signer.ts's exported creator) and is therefore outside the 20-file rollout
+			// inventory — but getOrCreateDeviceUser above is the exact second-half-of-the-
+			// onboarding-cycle site that produced the dead end 49-13 reproduced four times on
+			// device. Route its NO_KEY_PROVISIONED rejection through the same shared hook every
+			// migrated call site uses, rather than re-deriving the mapping here, so the officer
+			// lands on the provisioning screen instead of a raw error string. Any other failure
+			// (validation, commit, network) is "not mine" to the hook and falls through to this
+			// screen's own raw-message handling unchanged.
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
 			return;
 		} finally {
 			// Always clear the in-flight flag so the button re-enables on error/timeout
@@ -205,7 +247,7 @@ export default function AddNetworkScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView ref={scrollViewRef} style={styles.container}>
 				<ThemedText type="defaultSemiBold" style={styles.sectionTitle}>
 					{t("createNewNetwork")}
@@ -380,7 +422,7 @@ export default function AddNetworkScreen() {
 					onPress={handleCreate}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

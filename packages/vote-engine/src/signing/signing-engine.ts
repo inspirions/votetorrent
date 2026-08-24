@@ -59,38 +59,80 @@ export class SigningEngine implements ISigningEngine {
 		// system-derived callers (SignatureTasksEngine.finalizeBallot's per-question/option
 		// rows) pass true. Every other caller (real officer-supplied Signature) defaults to
 		// false, so OfficerSignature.SignatureValid's UDF actually verifies the signature.
+		//
+		// WR-07: the schema-side allowlist (votetorrent.qsql, AdminSigning.SignatureValid) now names
+		// a fourth producer of `IsPlaceholderSignature = true` — SignatureTasksEngine's
+		// seedRegistrantSignatureTasks, which binds the flag DIRECTLY on its `insert into
+		// AdminSigning`, NOT through this method. It is recorded here so the two allowlists stay in
+		// agreement about which call sites are permitted to set the flag; it does not reach this
+		// `sign()` seam, and no `sign()` caller was added by that path. Reason it is correct there:
+		// the seeded row is "not yet signed" — the officer's real crypto arrives later as a separate
+		// OfficerSignature row over the same Digest (see the schema comment for the full rationale).
 		const isPlaceholderSignature = options?.isPlaceholderSignature ?? false;
 		try {
 			// AUTH-08: BEGIN/COMMIT/ROLLBACK envelope around OfficerSignature
 			// insert + threshold check + (optional) AdminSignature insert.
 			if (ownsTransaction) await this.ctx.db.exec('BEGIN');
 			try {
+				// WR-05: idempotency probe on OfficerSignature's primary key, (SigningNonce, UserId).
+				//
+				// The defect this closes: every ceremony that calls sign() and THEN does more work
+				// (SignatureTasksEngine.completeSignature's registrant finalize is the sharpest case,
+				// but finalizeBallot's per-row signing and register()'s inner path have the same
+				// shape) commits this row before that later work runs. If the later work throws for
+				// ANY reason — a CHECK failure, a transient storage error — the task stays
+				// incomplete while this row is already committed, and the retry died here on
+				// `UNIQUE constraint failed: OfficerSignature PK`. The officer could never complete
+				// that ceremony again by retrying it. 48-34 narrowed the TRIGGER (its acceptability
+				// gate moved the requester-choosable refusals ahead of sign()); this closes the
+				// mechanism itself.
+				//
+				// Why skipping is correct rather than merely convenient: OfficerSignature is
+				// `InsertOnly check on update, delete (false)`, so the FIRST signature at
+				// (nonce, userId) is the only one that can ever exist — an UPDATE is not an option
+				// the schema offers. Re-running sign() therefore cannot change what is recorded; it
+				// can only throw or no-op. This makes it no-op, and the threshold logic below then
+				// runs against the true count exactly as it would have on the first call (that count
+				// already includes this row), so the AdminSignature outcome is unchanged.
+				//
+				// What this deliberately does NOT do: it does not compare the supplied
+				// signature/signerKey against the stored ones, and it must not start doing so
+				// silently. A second call with DIFFERENT bytes is not a conflict to resolve here —
+				// the stored row stands, because the schema says it stands.
+				const existingOfficerSignature = await this.ctx.db
+					.prepare(
+						'select 1 as x from OfficerSignature where SigningNonce = :nonce and UserId = :userId',
+					)
+					.get({ nonce, userId: signature.signerUserId });
+
 				// AUTH-06: bind :signerKey (not :key) — the previous binding silently
 				// dropped the signer's public key. The SQL placeholder is :signerKey;
 				// the JS object key now matches.
-				await this.ctx.db.exec(
-					`insert into OfficerSignature (
-						SigningNonce,
-						UserId,
-						SignerKey,
-						Signature
-					)
-					with context now = :now, IsSignerKeyValid = true, IsOfficerValid = true, IsPlaceholderSignature = :isPlaceholderSignature
-					values (
-						:nonce,
-						:userId,
-						:signerKey,
-						:signature
-					)`,
-					{
-						nonce,
-						userId: signature.signerUserId,
-						signerKey: signature.signerKey,
-						signature: signature.signature,
-						now: nowCanonicalDatetime(),
-						isPlaceholderSignature,
-					},
-				);
+				if (!existingOfficerSignature) {
+					await this.ctx.db.exec(
+						`insert into OfficerSignature (
+							SigningNonce,
+							UserId,
+							SignerKey,
+							Signature
+						)
+						with context now = :now, IsSignerKeyValid = true, IsOfficerValid = true, IsPlaceholderSignature = :isPlaceholderSignature
+						values (
+							:nonce,
+							:userId,
+							:signerKey,
+							:signature
+						)`,
+						{
+							nonce,
+							userId: signature.signerUserId,
+							signerKey: signature.signerKey,
+							signature: signature.signature,
+							now: nowCanonicalDatetime(),
+							isPlaceholderSignature,
+						},
+					);
+				}
 
 				// Get the scope for the current signing session
 				const scopeRes = await this.ctx.db
@@ -161,8 +203,13 @@ export class SigningEngine implements ISigningEngine {
 							// threshold outcome is unchanged. The prior ROLLBACK here silently
 							// dropped the officer's signature while still reporting success.
 							if (ownsTransaction) await this.ctx.db.exec('COMMIT');
+							// WR-05: the parenthetical now states which of the two cases this is, because
+							// the idempotency probe above added a second way to reach here. Previously
+							// it could only mean "a concurrent officer got here first and this call's
+							// NEW OfficerSignature row is still preserved"; it can now also mean "this
+							// same officer is retrying and their EXISTING row was reused".
 							console.warn(
-								`SigningEngine.sign: threshold already reached for nonce ${nonce}; AdminSignature row exists (this officer's OfficerSignature was still recorded).`,
+								`SigningEngine.sign: threshold already reached for nonce ${nonce}; AdminSignature row exists (this officer's OfficerSignature is recorded — ${existingOfficerSignature ? 'it already existed and was reused (idempotent retry)' : 'it was inserted by this call'}).`,
 							);
 							return true;
 						}

@@ -69,32 +69,65 @@ interface LocalConfigKeyProviderConfig {
 Today, `apps/VoteTorrentAuthority/src/engines/attestation-keys.generated.ts`
 ships the two key fields (`PLAY_CONSOLE_DECRYPTION_KEY_BASE64`,
 `PLAY_CONSOLE_VERIFICATION_KEY_BASE64`) as **empty strings** — the committed
-default is UNPROVISIONED, not a usable secret. Because the keys are absent,
-`engine-factory.ts`'s `'association'` case **fails closed**: it refuses to
-construct the real `PlayIntegrityVerifier` (throwing at construction) unless
-the explicit `__DEV__ && USE_STUB_ATTESTATION_VERIFIER` dev gate is active.
-This replaced an earlier all-zero placeholder-key default, which — combined
-with the pre-fix verifier — allowed a full Play Integrity bypass (CR-01/CR-03).
-The verifier stays fail-closed until you supply the real values from step 1.4.
+default is UNPROVISIONED, not a usable secret. As of D-09 (Phase 47), an
+absent key pair no longer blocks construction: `engine-factory.ts`'s
+`'association'` case **does** construct the real `PlayIntegrityVerifier`,
+threading the unprovisioned state into its `keysProvisioned` constructor
+argument. `PlayIntegrityVerifier.verify()` then returns `{ ok: false, reason:
+'Play Console key material is not provisioned — see SETUP.md' }` as the FIRST
+thing it checks, and `associate()` turns that `{ ok: false }` into a thrown
+error — so the associate ceremony (binding a new device to a registrant)
+still fails closed. Association and registrant **reads and administration
+continue to work normally** with no keys provisioned; only the write path
+(`associate()`) is gated. This replaced an earlier all-zero placeholder-key
+default, which — combined with the pre-fix verifier — allowed a full Play
+Integrity bypass (CR-01/CR-03). The verifier stays fail-closed until you
+supply the real values from step 1.4.
 
 **Do this:**
 
 1. Base64-encode the two downloaded key files.
-2. **NEVER commit the real key values into git.** Follow the same
-   git-ignored, default-safe convention this codebase already uses for
-   dev-only secrets (`proof-flags.generated.ts`'s pattern: a git-tracked file
-   holding a safe/placeholder default, with the real value supplied outside
-   version control at build/deploy time — e.g. an environment variable, a
-   secrets manager, or a local `.gitignore`'d config file read at app-start).
-3. Supply the real values as the two exported constants
-   `PLAY_CONSOLE_DECRYPTION_KEY_BASE64` and `PLAY_CONSOLE_VERIFICATION_KEY_BASE64`
-   in `apps/VoteTorrentAuthority/src/engines/attestation-keys.generated.ts`
-   (or via the out-of-band secure-config mechanism from step 2) — `engine-factory.ts`
-   reads them into `LocalConfigKeyProviderConfig` when it constructs
-   `LocalConfigKeyProvider`. Once both are non-empty the `'association'` case
-   stops failing closed and builds the real verifier. This is a config-only
-   change — the seam's shape (`IIntegrityKeyProvider`) never changes, so no
-   verifier code needs to be touched.
+2. **Inject them at build/deploy time. Do NOT edit the tracked file in place.**
+   The two constants live in
+   `apps/VoteTorrentAuthority/src/engines/attestation-keys.generated.ts`, which
+   is **git-tracked**, and whose committed values are empty on purpose. Supply
+   the real values from outside version control — a CI secret, a secrets
+   manager, or a `.gitignore`d local config consumed by your build — and have
+   that mechanism write the file only inside the ephemeral build workspace,
+   restoring the empty default afterwards. `engine-factory.ts` reads whatever
+   is there into `LocalConfigKeyProviderConfig` when it constructs
+   `LocalConfigKeyProvider`; once both are non-empty, `verify()` stops
+   short-circuiting on the provisioning check and the `'association'` case's
+   verifier is fully live. This is a config-only change — the seam's shape
+   (`IIntegrityKeyProvider`) never changes, so no verifier code is touched.
+
+   > **Why not just edit it and remember not to commit it?** Because this
+   > codebase already has evidence that "remember not to commit it" fails.
+   > `proof-flags.generated.ts` — previously cited right here as the pattern to
+   > follow — routinely shows up modified in `git status` whenever a run
+   > script's EXIT trap does not fire. The same accident applied to this file
+   > commits a live Play Console decryption key.
+
+3. **The guard.**
+   `apps/VoteTorrentAuthority/src/engines/__tests__/attestation-keys.secretGuard.test.ts`
+   fails whenever `PLAY_CONSOLE_DECRYPTION_KEY_BASE64` or
+   `PLAY_CONSOLE_VERIFICATION_KEY_BASE64` is non-empty in the tracked file, and
+   also flags any long base64-looking literal elsewhere in it. It runs with the
+   rest of the app suite, so CI rejects a commit carrying key material. If you
+   provision locally for a manual test, expect that test to go red — that
+   redness IS the signal that your working tree now holds a secret. Clear the
+   values (or `git checkout --` the file) before committing; never weaken the
+   guard to make it green.
+
+   **Still open (47-REVIEW WR-10):** that guard is a DETECTION control, not a
+   prevention one. There is as yet no build-time injection step in this repo,
+   so "make the safe path the only path" is not fully delivered — adding one
+   (codegen from an env var, or a `.gitignore`d local module) needs a
+   build-tooling decision this runbook does not make for you. Note that the
+   obvious shortcut — a statically-imported, `.gitignore`d
+   `attestation-keys.local.ts` — does NOT work here: Metro resolves static
+   imports at bundle time and a missing module breaks the build, while dynamic
+   `require()` breaks Metro outright (Phase 16-07).
 
 ## 4. Pinned hardware root + revoked-serial snapshots (D-04 offline posture)
 

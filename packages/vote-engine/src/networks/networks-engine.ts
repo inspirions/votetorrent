@@ -118,7 +118,15 @@ export class NetworksEngine implements INetworksEngine {
 			scopes: officerScopesJson,
 			userName: user.name,
 			userImageRef: userImageRefJson,
-			keyType: 'user',
+			// 49-02 bugfix: this was hardcoded to the literal string 'user' — a value
+			// that is not any valid UserKeyType code ('M'/'Y'/'P') — so the founding
+			// user's UserKey.Type never actually reflected the key's real curve. That
+			// went unnoticed while every founding key was secp256k1 (any non-'P' value
+			// happened to route UserKey.SignatureValid's curve-branch correctly by
+			// accident), but a P-256 founding key would silently mis-dispatch to the
+			// wrong verifier on its own SECOND key insert (D-02/D-03). Must be
+			// `firstKey.type` — the actual UserKeyType code from the caller.
+			keyType: firstKey.type,
 			keyValue: firstKey.key,
 			expiration: toCanonicalDatetime(firstKey.expiration),
 			now: nowCanonicalDatetime(),
@@ -332,7 +340,36 @@ export class NetworksEngine implements INetworksEngine {
 		//   in-memory already prepared same session → initDB SKIPPED (already declared) → gate passes → re-attach OK
 		//   persistent fresh handle (restart)       → initDB runs (binds LevelDB vtab catalog) → gate passes if initialized
 		//   persistent genuinely uninitialized      → initDB runs (creates vtab bindings) → D-05 gate throws (no marker)
-		if (!db.declaredSchemaManager.hasDeclaredSchema('main')) {
+		//
+		// STRAND RE-ATTACH FIX: the matrix above is written for the rnDbFactory/in-memory
+		// backend, where the schema is declared under `main`. On the cadre-core STRAND backend
+		// StrandDatabase.executeSchema() applies the schema under `App`, so hasDeclaredSchema('main')
+		// is false on EVERY strand re-attach — including a perfectly healthy one — and initDB would
+		// declare a SECOND `main` schema over the same tree://default/{table} collections. The
+		// Quereus differ then diffs that fresh `main` declaration against tables that already carry
+		// their constraints and re-emits every named constraint, failing on the first one:
+		//   QuereusError: Failed to execute DDL: ALTER TABLE Network ADD constraint CantDelete
+		//                 check on delete (false)
+		//   Cannot add constraint 'CantDelete' to table 'Network': a constraint with that name already exists
+		// which surfaced as "Failed to load network" on every app restart (Try Again re-ran the same
+		// DDL, so only Start Fresh escaped it — losing the operator's session each launch).
+		//
+		// createContext() (the CREATE path) already gates on `App` for exactly this reason and its
+		// comment flags the pitfall verbatim: "use 'App' not 'main'; 'main' would never match on the
+		// strand path and the bug persists". open() was missing the same gate. Check `App` FIRST.
+		//
+		// Unqualified TABLE reads still resolve on the strand path (Quereus searches the schema path
+		// `App, main`), so isSchemaInitialized's marker lookup below works without initDB. Only VIEWS
+		// need the `main` re-declaration, which declareViewsInMain() below already handles.
+		const isStrandDb = db.declaredSchemaManager.hasDeclaredSchema('App');
+		if (isStrandDb) {
+			// Strand re-attach: schema already applied under `App`. Do NOT run initDB.
+			// ensureTidSequence is INSERT OR IGNORE — idempotent, safe on an established store.
+			// markSchemaInitialized is deliberately NOT called here: planting the marker is the
+			// CREATE path's job, so a genuinely uninitialized strand store still fails the D-05
+			// gate below rather than being silently promoted to "initialized".
+			await ensureTidSequence(db);
+		} else if (!db.declaredSchemaManager.hasDeclaredSchema('main')) {
 			await initDB(db);           // declare schema main {...} + apply: creates vtab bindings, binds LevelDB data.
 			// initDB also declares the SchemaInit catalog (NO row) — 14-03 on-device fix: a fresh Quereus
 			// handle does not auto-restore the catalog from LevelDB, so isSchemaInitialized's marker lookup
@@ -360,7 +397,7 @@ export class NetworksEngine implements INetworksEngine {
 		// Re-declare views in `main` (idempotent) so engine reads resolve after re-attach.
 		// No-op safety: on the in-memory/rnDbFactory path the views already live in `main`
 		// (initDB declared schema main), so `create view if not exists` does nothing.
-		if (db.declaredSchemaManager.hasDeclaredSchema('App')) {
+		if (isStrandDb) {
 			await declareViewsInMain(db);
 		}
 

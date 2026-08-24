@@ -580,9 +580,15 @@ describe('UserEngine', () => {
       // Build a real secp256k1 signature for the revoke operation (UKEY-02 impl).
       // SIGNER = FIRST key (remains after revoke); KEY BEING REVOKED = secondPub.
       // This satisfies DeleteValid: context.UserKey = firstPub which still exists after delete.
+      //
+      // 49-05 (D-20): sign the ENGINE's canonical revoke pre-image
+      // (Digest(UserId, PubKey), via getRevokeKeyDigest) rather than the old
+      // ad hoc "revokeKey" + key prefix string — this is a DELIBERATE
+      // breaking change to test-locked behavior (RESEARCH.md Pitfall 5), not
+      // a regression; do not "restore" the old format.
       const revokePrivBytes = firstPrivBytes
-      const revokePayloadBytes = new TextEncoder().encode(`revokeKey:${secondPub}`)
-      const revokeSigBytes = secp256k1.sign(sha256(revokePayloadBytes), revokePrivBytes)
+      const revokeDigestBytes = await engine.getRevokeKeyDigest(secondPub)
+      const revokeSigBytes = secp256k1.sign(revokeDigestBytes, revokePrivBytes)
       const revokeSigHex = bytesToHex(revokeSigBytes)
       const revokeSignature: Signature = {
         signature: revokeSigHex,
@@ -831,8 +837,14 @@ describe('UserEngine', () => {
       // 4) revokeKey — Event 'RK', Sequence 3
       // UKEY-02: sign with the FIRST key (createPub) so context.UserKey = createPub,
       // which still exists in UserKey after revoking addedPub → DeleteValid passes.
+      //
+      // 49-05 (D-20): sign the ENGINE's canonical revoke pre-image
+      // (Digest(UserId, PubKey), via getRevokeKeyDigest) rather than the old
+      // ad hoc "revokeKey" + key prefix string — a DELIBERATE breaking change
+      // to test-locked behavior (RESEARCH.md Pitfall 5), not a regression.
+      const historyRevokeDigestBytes = await engine.getRevokeKeyDigest(addedPub)
       const historyRevokeSig: Signature = {
-        signature: bytesToHex(secp256k1.sign(sha256(new TextEncoder().encode(`revokeKey:${addedPub}`)), createPrivBytes)),
+        signature: bytesToHex(secp256k1.sign(historyRevokeDigestBytes, createPrivBytes)),
         signerKey: bytesToHex(secp256k1.getPublicKey(createPrivBytes)),
         signerUserId: user.id
       }
@@ -1194,6 +1206,8 @@ function makeStubUserEngine (opts?: { failOn?: 'create' | 'addKey' | 'revise' | 
     revokeKey: fail === 'revokeKey'
       ? async () => { throw new Error('stub failure') }
       : async () => undefined,
+    // 49-05 (D-20): stub parity with IUserEngine.getRevokeKeyDigest.
+    getRevokeKeyDigest: async () => new Uint8Array(32),
     connectDevice: async () => ({ multiAddress: '', token: '' }),
     getHistory: async function * () { /* empty */ },
     getSummary: async () => undefined,
@@ -1824,9 +1838,18 @@ describe('UserRevokeKeyBuilder', () => {
   it('REAL ENGINE: engine.revokeKey(payload) and engine.buildRevokeKey().fromPayload(payload).commit() produce structurally identical observable state', async () => {
     const { engine: eng1 } = await createUserEngineForExistingNetwork()
     const payload = makeFullBuilder(eng1).toEngineInput()
+    // 49-05 (D-20): sign the ENGINE's canonical revoke pre-image
+    // (Digest(UserId, PubKey)) rather than the old ad hoc "revokeKey" + key
+    // prefix string — a DELIBERATE breaking change to test-locked behavior
+    // (RESEARCH.md Pitfall 5), not a regression. `payload` ('e'.repeat(66))
+    // is not a real registered UserKey, so this delete affects 0 rows and
+    // DeleteValid never fires either way — the point of this case is
+    // structural parity between the two commit paths, not signature
+    // verification.
+    const revokeDigestBytes = await eng1.getRevokeKeyDigest(payload)
     const pairPriv = secp256k1.utils.randomSecretKey()
     const pairSig: Signature = {
-      signature: bytesToHex(secp256k1.sign(sha256(new TextEncoder().encode(`revokeKey:${payload}`)), pairPriv)),
+      signature: bytesToHex(secp256k1.sign(revokeDigestBytes, pairPriv)),
       signerKey: bytesToHex(secp256k1.getPublicKey(pairPriv)),
       signerUserId: 'parity-test-user'
     }

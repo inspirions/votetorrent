@@ -20,6 +20,15 @@ AppRegistry.registerComponent(appName, () => App);
 // when strand mode is on this standalone solo call is redundant and races the
 // strand runner on the shared PROOF_CHAIN_REF_KEY (see
 // 37-DIAGNOSIS-boolean-default-reattach.md "Secondary finding").
+// D-26a LOCAL half (49-CONTEXT D-26/D-26a). Dev-only; no-op unless
+// __DEV__ && RECOVERY_BRANCH_PROOF_ENABLED (committed default false). Proves the API 30+
+// BiometricPrompt DEVICE_CREDENTIAL recovery path signs and that the schema's own verifier
+// accepts it -- WITHOUT needing a network. Below API 30 recovery is unsupported (D-26a
+// RESCOPED 2026-08-21), so the runner records UNSUPPORTED-OS.
+// Driven by scripts/run-recovery-branch-proof.sh. Logs under [d26a-local].
+import {runRecoveryBranchProofRunner} from './src/engines/recovery-branch-proof-runner';
+runRecoveryBranchProofRunner();
+
 import {runPersistenceProof} from './src/engines/persistence-proof-runner';
 import {STRAND_PERSISTENCE_PROOF_ENABLED} from './src/engines/proof-flags.generated';
 if (!STRAND_PERSISTENCE_PROOF_ENABLED) {

@@ -113,6 +113,31 @@ describe('ElectionAttestationPolicy', () => {
     expect(policy).to.be.undefined
   })
 
+  it('removeElectionAttestationPolicy deletes the row via a mel-scoped signed-DELETE ceremony; getElectionAttestationPolicy reverts to undefined', async () => {
+    const { auth, engine, sign, electionId } = await setup()
+
+    // Deliberately seed `false` (AttestationRequired = 0) — the DELETE digest
+    // binds this OLD value, so a hardcoded/Boolean-mis-coerced `1` would fail
+    // the CHECK. A `true`-seeded variant would pass even against a hardcoded
+    // `1`, making this test a tautology rather than a real guard on T-46-01.
+    await engine.setElectionAttestationPolicy(electionId, false, sign)
+
+    await engine.removeElectionAttestationPolicy(electionId, sign)
+
+    const row = await auth.ctx.db
+      .prepare('select count(*) as n from ElectionAttestationPolicy where ElectionId = :electionId')
+      .get({ electionId })
+    expect(Number(row?.n)).to.equal(0)
+
+    const policy = await engine.getElectionAttestationPolicy(electionId)
+    expect(policy).to.be.undefined
+
+    const signingRow = await auth.ctx.db
+      .prepare(`select Scope from AdminSigning where AuthorityId = :id and Scope = 'mel' order by Nonce desc limit 1`)
+      .get({ id: auth.authority.id })
+    expect(signingRow?.Scope).to.equal('mel')
+  })
+
   describe('wrong-scope rejection (schema CHECK, not app-layer-only)', () => {
     it('rejects an ElectionAttestationPolicy insert whose ceremony was signed under vrg instead of mel', async () => {
       const { auth, electionId } = await setup()
@@ -140,6 +165,36 @@ describe('ElectionAttestationPolicy', () => {
         .prepare('select count(*) as n from ElectionAttestationPolicy where ElectionId = :electionId')
         .get({ electionId })
       expect(Number(row?.n)).to.equal(0)
+    })
+
+    it('rejects a removeElectionAttestationPolicy DELETE whose ceremony was signed under vrg instead of mel', async () => {
+      const { auth, engine, sign, electionId } = await setup()
+      // Seed a real row (attestationRequired=false) so there is something to attempt to delete.
+      await engine.setElectionAttestationPolicy(electionId, false, sign)
+
+      const tid = Date.now() + Math.floor(Math.random() * 100_000)
+      const digestExpr = "select Digest(:tid, :electionId, :attestationRequired, 'delete') as d"
+      const digestParams = { tid, electionId, attestationRequired: 0 }
+      // Correct digest (matches the stored OLD value) — the ONLY thing wrong is the scope.
+      const { nonce } = await seedSignedMutationFixture(auth.ctx, auth.authority.id, 'vrg', tid, digestExpr, digestParams, auth.user)
+
+      let caught: unknown
+      try {
+        await auth.ctx.db.exec(
+          `delete from ElectionAttestationPolicy
+           with context SigningNonce = :nonce, Tid = ${tid}
+           where ElectionId = :electionId`,
+          { electionId, nonce }
+        )
+      } catch (err) {
+        caught = err
+      }
+      expect(caught, 'expected the vrg-scoped removeElectionAttestationPolicy ceremony to be rejected by ElectionAttestationPolicy.DeleteValid (requires mel)').to.be.instanceOf(Error)
+
+      const row = await auth.ctx.db
+        .prepare('select count(*) as n from ElectionAttestationPolicy where ElectionId = :electionId')
+        .get({ electionId })
+      expect(Number(row?.n)).to.equal(1)
     })
   })
 })

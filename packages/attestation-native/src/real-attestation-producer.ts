@@ -63,9 +63,29 @@ if (probeResult !== PROBE_EXPECTED) {
 }
 
 /**
- * Stable module-level Keystore alias (D-13 requires a STABLE alias so enrollment-change
- * invalidation is detectable — the native side deletes/regenerates under this SAME alias on
- * `KeyPermanentlyInvalidatedException`, per 45-02's `KeyAttestationHelper`).
+ * Stable module-level Keystore alias.
+ *
+ * CORRECTED 2026-08-24 — the previous rationale here ("D-13 requires a STABLE alias so
+ * enrollment-change invalidation is detectable") was a non-sequitur and is removed. The ALIAS is
+ * stable; the KEY UNDER IT IS NOT. `produce()` below calls native `produceAttestation`, which
+ * routes to `KeyAttestationHelper.regenerateAttested` — and that function `deleteEntry`s this
+ * alias and generates a brand-new key pair BEFORE it ever calls `initSign`. So the key that gets
+ * signed with is always microseconds old, no biometric enrolment can invalidate it, and the
+ * `KeyPermanentlyInvalidatedException` catch on that path is unreachable. Alias stability buys
+ * nothing for invalidation detection.
+ *
+ * What the stable alias actually buys: one well-known slot, so a ceremony never strands an
+ * orphaned key under a generated name, and so `exportPublicKeyCompressedHex` has a fixed address
+ * to read the post-regeneration key back from.
+ *
+ * The security property this path actually provides is KEY NON-REUSE — no attested key survives
+ * across ceremonies — which is stronger than detect-then-recover. Do not re-introduce an
+ * invalidation-detection claim here. Full analysis:
+ * `.planning/todos/pending/2026-08-03-attestation-d13-key-invalidation-leg.md`.
+ *
+ * (`setInvalidatedByBiometricEnrollment(true)` remains load-bearing for the AUTHORITY app's
+ * persistent signing key, reached via `signWithDeviceKey`, which does NOT regenerate first — that
+ * is D-24 leg 3, hardware-proven 2026-08-18.)
  */
 const KEY_ALIAS = 'VOTETORRENT_DEVICE_KEY_V1'
 

@@ -17,6 +17,7 @@ import { InfoCard } from "../../components/InfoCard";
 import { formatDate } from "../../utils/displayUtils";
 import { getLocalKeyholders } from "../../engines/local-keyholders";
 import type { NavigationProp } from "../../navigation/types";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 /**
  * ElectionDetailsScreen — Figma parity #13/#18/#19 per Phase 9 plan 09-14.
@@ -32,10 +33,13 @@ import type { NavigationProp } from "../../navigation/types";
  *       · signing rows per keyholder (SIGN accent / SHARE warning CustomButton pills)
  *       · ADJUST REVISION → EditElectionRevision
  *   6.  Ballot Templates section (one InfoCard per template with Questions subtitle)
- *   7.  More section (collapsible) + filter-authorities input
+ *   7.  Registration Policy entry (InfoCard -> RegistrationPolicy) — Phase 46 (D-01)
+ *   8.  Registrants entry (InfoCard -> RegistrantsList, election filter pre-applied) — Phase 47 plan 47-21 (D-07/D-08)
+ *   9.  More section (collapsible) + filter-authorities input
  */
 export default function ElectionDetailsScreen() {
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { electionEngine } = useRoute().params as { electionEngine: IElectionEngine };
 	const [electionDetails, setElectionDetails] = useState<ElectionDetails | null>(null);
 	const [ballots, setBallots] = useState<BallotSummary[]>([]);
@@ -144,7 +148,7 @@ export default function ElectionDetailsScreen() {
 	return (
 		<ScrollView
 			style={styles.container}
-			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
+			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}>
 
 			{/* SC6 error state — surfaces load failures inline (D-19) */}
 			<View style={styles.section}>
@@ -375,7 +379,52 @@ export default function ElectionDetailsScreen() {
 				)}
 			</View>
 
-			{/* 7. More section (collapsible) + filter-authorities input */}
+			{/* 7. Registration Policy entry — Phase 46 (D-01): one InfoCard placed after
+			    Ballot Templates and before More, navigating to the single RegistrationPolicy
+			    route (Fields/Disclosure/Attestation sections). */}
+			<View style={styles.section} testID="election-details-registration-policy-entry">
+				<InfoCard
+					title={t("registrationPolicyEntryTitle")}
+					icon="chevron-right"
+					onPress={() =>
+						navigation.navigate("RegistrationPolicy", {
+							electionEngine,
+							electionId: election.id,
+							authorityId: election.authorityId,
+						} as any)
+					}
+				/>
+			</View>
+
+			{/* 8. Registrants entry — Phase 47 plan 47-21 (D-07/D-08): this IS the
+			    election roster. It navigates to the same RegistrantsList route the
+			    authority-wide roster uses (AuthorityDetailsScreen), with an
+			    election-scoped filter pre-applied below. There is deliberately no
+			    second roster screen, no second engine method and no second route.
+			    Sits beside Phase 46's Registration Policy entry because both are
+			    election-scoped registration surfaces — the policy defines what is
+			    collected, the roster shows who registered under it. The election's
+			    title is passed because RegistrantsListScreen interpolates it into
+			    its header title; it is public election metadata already rendered
+			    on this screen — the ONLY non-identifier in any Phase 47 route
+			    param (T-47-21-01). */}
+			<View style={styles.section} testID="election-details-registrants-entry">
+				<InfoCard
+					title={t("registrantListScreenTitle")}
+					icon="chevron-right"
+					// NavigationProp (navigation/types.ts) already types params
+					// loosely, so the type-escape cast the two neighbouring calls
+					// carry adds nothing here — it is deliberately omitted.
+					onPress={() =>
+						navigation.navigate("RegistrantsList", {
+							authorityId: election.authorityId,
+							electionFilter: { electionId: election.id, electionTitle: election.title },
+						})
+					}
+				/>
+			</View>
+
+			{/* 9. More section (collapsible) + filter-authorities input */}
 			<View style={styles.section}>
 				<ChipButton label={t("more")} onPress={() => setMoreOpen((v) => !v)} />
 				{moreOpen && (

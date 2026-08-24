@@ -164,3 +164,52 @@ export interface AssociateInit {
 
   attestation: DeviceAttestation
 }
+
+/**
+ * D-03: text-code union mirroring the schema's `AttestationVerdictResult`
+ * view (`Code` column: 'pass' | 'fail') — the same string-literal-union
+ * precedent `RegistrantStatus` (registration/models.ts) uses for a schema
+ * text-code column. The schema stores a TEXT code rather than a boolean
+ * column because a `boolean default` column hits the quereus 4.x re-attach
+ * ALTER-COLUMN coercion class (votetorrent.qsql:1661-1662's documented
+ * rationale for this exact table).
+ */
+export type AttestationVerdictCode = 'pass' | 'fail'
+
+/**
+ * D-03: durably persists `IAttestationVerifier.verify()`'s otherwise
+ * transient `{ ok, reason }` result. `AssociationPrivate` cannot carry it
+ * after the fact: that table is `InsertOnly` and its `Cid` commits to a
+ * fixed digest tuple over the device-produced attestation data, so folding
+ * an authority-computed judgement into it would conflate the two. Multiple
+ * rows accumulate per `(registrantId, deviceKey)` as `sequence` advances,
+ * so re-verifications over time are representable. It is a record of a
+ * judgement already made — it is not consulted by any code path and does
+ * not gate, block, or prevent an association (D-03/T-47-03); the
+ * fail-closed control is `associate()`'s own `if (!verification.ok) throw`.
+ */
+export interface AttestationVerdict {
+  /** references Registrant.id */
+  registrantId: string
+
+  /** the device's public key, as attested */
+  deviceKey: string
+
+  /**
+   * Per-(registrantId, deviceKey) monotonic ordering key, ASCENDING — the
+   * last element of a `deviceKey`-narrowed read is the most recent verdict.
+   */
+  sequence: number
+
+  verdict: AttestationVerdictCode
+
+  /** The verifier's transient {reason} string, if any; absent on most passes */
+  reason?: string
+
+  /**
+   * When the authority computed this judgement — NOT
+   * AssociationPrivate.attestationTime, which is when the device produced
+   * the attestation.
+   */
+  verifiedAt: Timestamp | string
+}
