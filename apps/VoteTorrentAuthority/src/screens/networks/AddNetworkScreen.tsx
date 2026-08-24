@@ -212,7 +212,16 @@ export default function AddNetworkScreen() {
 			// routing into it here is safe; the gate keeps us from showing it when there is
 			// nothing to do. Deliberately AFTER selectNetwork: the network is fully established
 			// and stays selected, so declining leaves a usable network rather than a dead end.
-			await promptRecoveryKeyRegistrationIfNeeded();
+			//
+			// The `return` is load-bearing, and is why this mirrors NetworkDetailsScreen's join
+			// path rather than calling the gate for its side effect: the `navigation.goBack()`
+			// at the end of this function is UNCONDITIONAL, so without it the ceremony screen the
+			// gate just pushed is popped straight back off and the officer lands on Add Network
+			// again -- the gate's whole point undone one statement later. Measured on real
+			// hardware (Pixel 7 Pro, 2026-08-24): the gate logged `needed: true` and navigated,
+			// and the device still sat on Add Network. `finally` still runs on this path, so the
+			// in-flight flag is cleared exactly as it is on every other exit.
+			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
 		} catch (err) {
 			console.error("handleCreate error:", err);
 			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory

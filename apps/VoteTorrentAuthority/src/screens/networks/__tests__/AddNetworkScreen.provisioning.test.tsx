@@ -29,6 +29,7 @@ jest.mock("react-i18next", () => ({
 }));
 
 const mockNavigate = jest.fn();
+const mockGoBack = jest.fn();
 jest.mock("@react-navigation/native", () => ({
 	useTheme: () => ({
 		colors: {
@@ -48,17 +49,32 @@ jest.mock("@react-navigation/native", () => ({
 			light: "sentinel-light",
 		},
 	}),
-	useNavigation: () => ({ navigate: mockNavigate, goBack: jest.fn() }),
+	useNavigation: () => ({ navigate: mockNavigate, goBack: mockGoBack }),
 }));
 
 const mockGetOrCreateDeviceUser = jest.fn();
+// `getDeviceProvisioningRecord` is what the recovery-key gate reads to learn this device's
+// recovery key. It must be on the mock: without it the real module's export is simply absent,
+// `deviceNeedsRecoveryKeyRegistration` swallows the resulting TypeError, and the gate resolves
+// false -- which would silently make the goBack-suppression specs below pass for the wrong
+// reason (nothing to route to, rather than routing correctly suppressed).
+const mockGetDeviceProvisioningRecord = jest.fn(async () => undefined as unknown);
 jest.mock("../../../engines/device-user", () => ({
 	getOrCreateDeviceUser: (...args: unknown[]) => mockGetOrCreateDeviceUser(...args),
+	getDeviceProvisioningRecord: () => mockGetDeviceProvisioningRecord(),
 }));
 
 const mockGetDefaultUser = jest.fn(async () => ({ name: "Device User" }));
 const mockDefaultUserEngine = { get: mockGetDefaultUser };
-const mockGetEngine = jest.fn(async () => mockDefaultUserEngine);
+// The recovery-key gate resolves getEngine("network") -> getCurrentUser() -> getSummary(); the
+// screen itself resolves getEngine("defaultUser"). A single catch-all engine cannot serve both,
+// so dispatch on the name the caller actually asked for.
+const mockGetSummary = jest.fn(async () => ({ id: "u1", activeKeys: [] as Array<{ key: string }> }));
+const mockGetCurrentUser = jest.fn(async () => ({ getSummary: mockGetSummary }) as unknown);
+const mockNetworkEngine = { getCurrentUser: () => mockGetCurrentUser() };
+const mockGetEngine = jest.fn(async (name?: string) =>
+	name === "network" ? mockNetworkEngine : mockDefaultUserEngine,
+);
 const mockNetworksEngine = { buildCreate: jest.fn() };
 const mockSelectNetwork = jest.fn();
 jest.mock("../../../providers/AppProvider", () => ({
@@ -172,5 +188,90 @@ describe("AddNetworkScreen — 49-16 Gap A closure: routes NO_KEY_PROVISIONED th
 
 		expect(mockGetOrCreateDeviceUser).not.toHaveBeenCalled();
 		expect(inlineErrorMessage(tr)).toBe("mustSignBeforeCreating");
+	});
+});
+
+/**
+ * 49-19 follow-up, MEASURED ON REAL HARDWARE (Pixel 7 Pro, 2026-08-24).
+ *
+ * `handleCreate` ends in an UNCONDITIONAL `navigation.goBack()`. The recovery-key gate pushes
+ * the ceremony screen; that `goBack()` then popped it straight back off, landing the officer on
+ * Add Network again -- so the gate correctly logged `needed: true`, correctly navigated, and the
+ * officer still ended up with an unregistered recovery key. The fix mirrors NetworkDetailsScreen's
+ * join path (`if (await promptRecoveryKeyRegistrationIfNeeded()) return;`).
+ *
+ * WHY THE ORIGINAL SUITE COULD NOT SEE IT: `goBack` was an inline `jest.fn()` created fresh on
+ * every `useNavigation()` call, so nothing could assert against it, and no spec exercised a
+ * SUCCESSFUL create at all -- every existing spec drives a `getOrCreateDeviceUser` rejection and
+ * never reaches the gate. Asserting `navigate` alone is exactly the blind spot: it was called,
+ * on device, and undone one statement later.
+ */
+describe("AddNetworkScreen — 49-19: the recovery-key ceremony survives handleCreate's goBack", () => {
+	const SIGNING_KEY = "03f450ccccbaefd2efe218d8eb8c2f84677aaed1fa7bc19b9dbcac96e6ef7d86ab";
+	const RECOVERY_KEY = "036d541206f2fb5d6c67e0a39b615eebf8ada784a8b12dcab550c901305b6fcf3a";
+
+	function armSuccessfulCreate() {
+		mockGetOrCreateDeviceUser.mockResolvedValue({
+			id: "u1",
+			name: "Device User",
+			activeKeys: [{ key: SIGNING_KEY, type: "P", expiration: Date.now() + 1000 }],
+		});
+		mockNetworksEngine.buildCreate.mockReturnValue({
+			update: () => ({
+				isValid: () => true,
+				errors: () => [],
+				commit: async () => ({ init: { hash: "net-hash" } }),
+			}),
+		});
+	}
+
+	beforeEach(() => {
+		jest.clearAllMocks();
+		mockGetDefaultUser.mockResolvedValue({ name: "Device User" });
+		armSuccessfulCreate();
+	});
+
+	it("does NOT goBack when the gate routes into the ceremony — the device-measured defect", async () => {
+		// The exact state measured on hardware: the provisioning record holds the recovery key,
+		// while the network User that create() just bootstrapped holds the signing key alone.
+		mockGetDeviceProvisioningRecord.mockResolvedValue({
+			recoveryPublicKeyCompressedHex: RECOVERY_KEY,
+		});
+		mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [{ key: SIGNING_KEY }] });
+
+		const tr = await renderScreen();
+		await pressSignThenCreate(tr);
+
+		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "first-run" });
+		// The assertion the original suite lacked. Before the fix this was 1, and the ceremony
+		// screen the line above pushed was popped straight back off.
+		expect(mockGoBack).not.toHaveBeenCalled();
+	});
+
+	it("still goes back when the recovery key is already registered — the gate must not strand the officer on this screen", async () => {
+		mockGetDeviceProvisioningRecord.mockResolvedValue({
+			recoveryPublicKeyCompressedHex: RECOVERY_KEY,
+		});
+		mockGetSummary.mockResolvedValue({
+			id: "u1",
+			activeKeys: [{ key: SIGNING_KEY }, { key: RECOVERY_KEY }],
+		});
+
+		const tr = await renderScreen();
+		await pressSignThenCreate(tr);
+
+		expect(mockNavigate).not.toHaveBeenCalled();
+		expect(mockGoBack).toHaveBeenCalledTimes(1);
+	});
+
+	it("still goes back when the device has no provisioning record at all — an unprovisioned device is not a registration gap", async () => {
+		mockGetDeviceProvisioningRecord.mockResolvedValue(undefined);
+		mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [{ key: SIGNING_KEY }] });
+
+		const tr = await renderScreen();
+		await pressSignThenCreate(tr);
+
+		expect(mockNavigate).not.toHaveBeenCalled();
+		expect(mockGoBack).toHaveBeenCalledTimes(1);
 	});
 });
