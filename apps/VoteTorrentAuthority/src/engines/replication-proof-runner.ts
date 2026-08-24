@@ -59,6 +59,21 @@ const PROOF_NETWORK_STORE = 'replication-proof-strand';
 // (D-07 automated injection). Placeholder boots solo (no crash — CF-02 bootstrap mode).
 const CONTROL_ADDR = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
 
+// SECOND drone's CONTROL-node ws multiaddr (drone-B). The harness injects this per-run
+// alongside CONTROL_ADDR.
+//
+// Why this exists (proof-0242 root cause). Before this constant the runner derived BOTH the
+// control-mesh bootstrap set AND the relay-qualified listenAddrs from CONTROL_ADDR alone, so
+// the device only ever knew — and only ever reserved a circuit on — drone-A. The 2026-08-24
+// n=4 run measured the consequence directly: `relayAddrsPerDroneCount=3`, but all three were
+// the SAME drone-A control relay (port 55134) in three IP forms, zero reservations on drone-B;
+// drone-B's control node topped out at `peers=2` (itself + drone-A) and logged ZERO mentions of
+// either device. With no path from drone-B to either device the n=4 cohort cannot complete.
+//
+// Placeholder-aware exactly like CONTROL_ADDR — a single-drone or solo run degrades to the
+// previous one-relay behaviour rather than crashing.
+const CONTROL_ADDR_B = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
+
 // Strand-cohort bootstrap address — the drone's strand-node ws multiaddr. The harness
 // injects this per-run (REPL-01 / 23-06). Separate from CONTROL_ADDR — these are DIFFERENT
 // libp2p nodes on the drone with different ephemeral ports (Pitfall 2). Placeholder boots
@@ -85,7 +100,13 @@ function resolveBootstrapNodes(addr: string): string[] {
 // In solo bootstrap mode (harness Step 1) the drone address has not been injected yet,
 // so CONTROL_ADDR is still the placeholder. Boot with NO bootstrap node — the runner is
 // genuinely solo (CF-02 bootstrap mode), creates the proof network, and emits strandId=.
-const BOOTSTRAP_NODES = resolveBootstrapNodes(CONTROL_ADDR);
+// proof-0242: BOTH drones' control addrs. Reserving a circuit on drone-B (below) requires a
+// live control connection to drone-B first, and control-mesh discovery did not propagate
+// drone-A's peer list to the devices in the 2026-08-24 run — drone-B saw only drone-A.
+const BOOTSTRAP_NODES = [
+  ...resolveBootstrapNodes(CONTROL_ADDR),
+  ...resolveBootstrapNodes(CONTROL_ADDR_B),
+];
 
 // D-05 (41-02, P2P-11 wall #8 fix): relay-qualified per-drone listenAddrs. One
 // `${addr}/p2p-circuit` entry per KNOWN drone (drone-A + drone-B) routes through
@@ -97,10 +118,14 @@ const BOOTSTRAP_NODES = resolveBootstrapNodes(CONTROL_ADDR);
 // or [one entry], never a crash. Probe 1 (41-01): cadre-core forwards ONE shared
 // network object to the control node AND every strand, so this ONE array must
 // carry BOTH drones' qualified addrs (no per-node-type override exists).
-const STRAND_RELAY_LISTEN_ADDRS = [
-  ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR),
-  ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR_B),
-].map((addr) => `${addr}/p2p-circuit`);
+//
+// proof-0242: the array that used to live here (`STRAND_RELAY_LISTEN_ADDRS`, built from the
+// two STRAND addrs) was DEAD CODE — computed and never read, because 41-11 repointed
+// `network.listenAddrs` at CONTROL_RELAY_LISTEN_ADDRS below and cadre-core 0.10.0 then
+// removed the `strandNetwork` override the split depended on. It is deleted rather than
+// re-wired: one relay is CORRECT on this substrate (upstream gives each strand node its own
+// derived transport peerId, so the wall #9 shared-PeerId collision the split existed to dodge
+// is gone). The real defect was breadth, not relay type — see CONTROL_RELAY_LISTEN_ADDRS.
 
 // P2P-11 (41-11, wall #9 — shared-PeerId strand-relay collision): the control node reserves
 // through the drone's CONTROL relay, a DISTINCT relay identity from the strand node's STRAND
@@ -109,9 +134,16 @@ const STRAND_RELAY_LISTEN_ADDRS = [
 // connections[0]) can no longer misroute strand streams to the control connection (41-10
 // diagnosis §5 — the cadre-core strandNetwork patch unlocks the per-node-type override Probe 1
 // proved did not exist before). Placeholder-aware (degrades to [] — no crash, solo boot).
-const CONTROL_RELAY_LISTEN_ADDRS = resolveBootstrapNodes(CONTROL_ADDR).map(
-  (addr) => `${addr}/p2p-circuit`,
-);
+//
+// proof-0242: this now carries ONE `${addr}/p2p-circuit` entry per KNOWN DRONE, not just
+// drone-A. That breadth is the whole point of the D-05/41-02 'configured'-reservation path,
+// and deriving it from CONTROL_ADDR alone silently reduced the n=4 topology to a single relay
+// (measured: relayAddrsPerDroneCount=3, all three the same drone-A relay in three IP forms).
+// reservationConcurrency below is sized to this array's length, so it grows with it.
+const CONTROL_RELAY_LISTEN_ADDRS = [
+  ...resolveBootstrapNodes(CONTROL_ADDR),
+  ...resolveBootstrapNodes(CONTROL_ADDR_B),
+].map((addr) => `${addr}/p2p-circuit`);
 
 // Poll constants (consistent with dial-probe.ts connection-poll shape).
 // PEER_POLL_MAX: 3 ticks × 1 s = 3 s peer-connection wait (exits early when peers appear).
