@@ -28,7 +28,11 @@ import com.facebook.react.module.annotations.ReactModule
  *     `BuildConfig.DEBUG`/`__DEV__` short-circuits the software/stub rung via
  *     [KeyAttestationHelper], D-07/D-09, so the emulator is never blocked) and
  *     `KEY_INVALIDATED_REASSOCIATE` (D-13 — routed to forced re-association, not a plain
- *     terminal failure).
+ *     terminal failure). **CORRECTED 2026-08-24: [produceAttestation] never emits
+ *     `KEY_INVALIDATED_REASSOCIATE`** — its arm was removed as provably dead
+ *     ([KeyAttestationHelper.regenerateAttested] regenerates the key before signing with it, so
+ *     nothing can invalidate it). The code is still emitted, for real, by [signWithDeviceKey] and
+ *     [signWithRecoveryKey], which sign with a persistent key.
  *
  * Phase 49 (D-13) extends this taxonomy for [signWithDeviceKey] with three new classes:
  *   - `cancellation`: `CANCELED` (`ERROR_CANCELED`/`ERROR_USER_CANCELED`/`ERROR_NEGATIVE_BUTTON`)
@@ -166,15 +170,6 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 					return@onResult
 				}
 				finishWithPlayIntegrity(certificateChainBase64, publicKeyCompressedHex, boundDigest, enablePlayIntegrity, promise)
-			},
-			onKeyInvalidatedReassociate = {
-				// D-13 — biometric enrollment changed since key creation; KeyAttestationHelper
-				// already deleted + regenerated a fresh placeholder key. The JS caller must
-				// restart the two-step D-11 ceremony from provisionDeviceKey().
-				promise.reject(
-					"KEY_INVALIDATED_REASSOCIATE",
-					"biometric enrollment changed since this key was created — key invalidated, re-association required",
-				)
 			},
 			onError = { code, throwable ->
 				promise.reject(code, throwable)

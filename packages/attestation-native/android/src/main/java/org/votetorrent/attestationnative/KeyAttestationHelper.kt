@@ -424,14 +424,23 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	 * ATTESTATION-CONTRACT.md §3; this helper does NOT re-derive them), then force a fresh
 	 * biometric via [BiometricPrompt.authenticate] bound to a [Signature] over the new key (D-06)
 	 * before exporting the cert chain. BiometricPrompt is callback-based, not synchronously
-	 * returnable — results are delivered via [onResult]/[onKeyInvalidatedReassociate]/[onError].
+	 * returnable — results are delivered via [onResult]/[onError].
+	 *
+	 * **This function cannot surface [KeyPermanentlyInvalidatedException], by construction** — and
+	 * so, unlike [signWithDeviceKey]/[signWithRecoveryKey], it takes no re-association callback.
+	 * `setAttestationChallenge` is a KEYGEN-TIME parameter: the challenge is baked into the
+	 * attestation certificate when the key pair is created and cannot be rebound afterwards. So
+	 * answering a new challenge REQUIRES a new key, which is why the delete+regenerate below is
+	 * unconditional rather than a recovery step. The key this function signs with is therefore
+	 * always microseconds old, created AFTER any biometric enrolment the user could have made, and
+	 * nothing can have invalidated it. See
+	 * `.planning/todos/pending/2026-08-03-attestation-d13-key-invalidation-leg.md`.
 	 */
 	fun regenerateAttested(
 		keyAlias: String,
 		attestationChallengeBytes: ByteArray,
 		activity: FragmentActivity,
 		onResult: (List<String>) -> Unit,
-		onKeyInvalidatedReassociate: () -> Unit,
 		onError: (code: String, throwable: Throwable?) -> Unit,
 	) {
 		try {
@@ -456,23 +465,26 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 			val privateKey = keyStore.getKey(keyAlias, null) as PrivateKey
 			signature = Signature.getInstance("SHA256withECDSA")
 			signature.initSign(privateKey)
-		} catch (e: KeyPermanentlyInvalidatedException) {
-			// D-13 — the device's biometric enrollment changed since this alias's key was
-			// created (new fingerprint/face added, or all biometrics removed). NOT a plain
-			// failed-match (that surfaces as onAuthenticationFailed/ERROR_LOCKOUT instead).
-			// Delete the invalidated key, regenerate a fresh (non-attested) placeholder so the
-			// alias has something to re-provision from, and route the caller into forced
-			// re-association — do NOT continue this produceAttestation call.
-			try {
-				keyStore.deleteEntry(keyAlias)
-				generateKey(keyAlias, attestationChallenge = null)
-			} catch (cleanupError: Exception) {
-				// Best-effort cleanup only — the re-association flow re-provisions regardless of
-				// whether this regeneration succeeds.
-			}
-			onKeyInvalidatedReassociate()
-			return
 		} catch (e: Exception) {
+			// NO `catch (e: KeyPermanentlyInvalidatedException)` HERE — REMOVED 2026-08-24 as
+			// provably dead code, do not re-add it. It sat above this generic catch and claimed to
+			// implement D-13 (delete the invalidated key, regenerate, route into forced
+			// re-association), but it could never run: `initSign` above operates on the key
+			// generated ~microseconds earlier by THIS call, so no biometric enrolment the user
+			// could have performed is able to invalidate it. Its cleanup arm was worse than inert
+			// — it would have replaced the attested key with a NON-attested placeholder.
+			//
+			// The dead branch also mis-stated the design. Regeneration is not recovery: it is
+			// mandatory, because `setAttestationChallenge` can only be supplied at keygen (see the
+			// doc comment above). The security property this path actually provides is KEY
+			// NON-REUSE — no attested key survives across ceremonies — which is strictly stronger
+			// than detect-then-recover.
+			//
+			// `KeyPermanentlyInvalidatedException` IS handled, for real and on reachable paths, in
+			// `signWithDeviceKey` and `signWithRecoveryKey`, which sign with a PERSISTENT key they
+			// do not regenerate first. That is where the hardware proof lives (D-24 leg 3,
+			// `49-14-PROOF-LOG.md` §F). Should the impossible somehow occur here, it lands in this
+			// generic catch as `KEY_ATTESTATION_FAILED` — fail-closed, which is correct.
 			onError("KEY_ATTESTATION_FAILED", e)
 			return
 		}
