@@ -242,6 +242,18 @@ export default function ProvisionSigningKeyScreen() {
 		// `boundDigest` since nothing verifies this binding this phase (T-49-PLAIN: only the
 		// public cert chain itself is persisted, never key material).
 		const boundDigest = `signing-key-provisioning-${Date.now()}-${deviceKey.publicKeyCompressedHex}`;
+		// Dev-only: emit the digest so the on-device ceremony harness can verify that the
+		// challenge baked into the attestation leaf is the one THIS run generated. It cannot be
+		// recovered any other way — `produceAttestation` immediately deletes and regenerates the
+		// alias (see the comment below), so the `deviceKey.publicKeyCompressedHex` this string
+		// embeds belongs to a key that no longer exists and is never persisted. Without this line
+		// `run-authority-signing-ceremony.sh`'s challengeBound check compares the real challenge
+		// against the literal string `unavailable-not-logged` and can never pass, on any device.
+		// Safe to log: the digest is self-issued, non-secret, and contains only a timestamp and a
+		// PUBLIC key — never key material. __DEV__-gated so release builds stay silent.
+		if (__DEV__) {
+			console.log("[ceremony-bound-digest]", boundDigest);
+		}
 		const attestation = (await native.produceAttestation(
 			SIGNING_KEY_ALIAS,
 			boundDigest,
