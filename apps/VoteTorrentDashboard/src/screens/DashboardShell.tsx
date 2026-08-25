@@ -48,6 +48,7 @@ import type { SnapshotFreshness } from '../lifecycle/freshness.js';
 import { forgetNetwork } from '../lifecycle/forget-network.js';
 import { performOfficerSwap } from '../lifecycle/officer-swap.js';
 import type { SingleFlightTransport } from '../lifecycle/officer-swap.js';
+import { AdvisoryDisclosure, PreviewAsControl, PreviewAsProvider } from './PreviewAsControl.js';
 import { PanelGrid } from './PanelGrid.js';
 import './shell.css';
 
@@ -254,6 +255,7 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 	const forgetConfirmDisabled = forgetConfirmationInput.trim() !== activeNetwork.authorityName.trim();
 
 	return (
+		<PreviewAsProvider realScopes={grantedScopes}>
 		<div className="sh-layout">
 			<div className="sh-topbar">
 				<div className="sh-identity">
@@ -307,6 +309,7 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 						{t('snapshot.refreshCta')}
 					</button>
 
+					<PreviewAsControl /><AdvisoryDisclosure />
 					<div className="sh-kebab">
 						<button
 							type="button"
@@ -413,6 +416,7 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 				</div>
 			) : null}
 		</div>
+		</PreviewAsProvider>
 	);
 }
 

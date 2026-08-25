@@ -27,6 +27,7 @@ import type { Database } from '@quereus/quereus';
 import type { ScopeCode } from '../auth/capabilities.js';
 import { CAPABILITIES } from '../auth/capabilities.js';
 import { evaluate } from '../auth/gate.js';
+import { useEffectiveScopes } from './GrantedScopesContext.js';
 import { PanelFrame } from './panels/PanelFrame.js';
 import { PANEL_REGISTRY } from './panels/registry.js';
 import { t } from '../i18n/copy.js';
@@ -41,6 +42,7 @@ export interface PanelGridProps {
 }
 
 export function PanelGrid({ db, grantedScopes, revealDenied, onToggleReveal, snapshotInstant }: PanelGridProps) {
+	const effective = useEffectiveScopes();
 	return (
 		<div className="sh-panel-grid-wrap">
 			<button type="button" className="sh-reveal-toggle" aria-pressed={revealDenied} onClick={onToggleReveal}>
@@ -48,7 +50,7 @@ export function PanelGrid({ db, grantedScopes, revealDenied, onToggleReveal, sna
 			</button>
 			<div className="panel-grid">
 				{CAPABILITIES.map((capability) => {
-					const evaluation = evaluate(capability, grantedScopes);
+					const evaluation = evaluate(capability, effective);
 					const Component = PANEL_REGISTRY[capability.id];
 
 					if (evaluation.visible) {
