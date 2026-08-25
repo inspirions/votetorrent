@@ -3,6 +3,8 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { enginePreflight } from './engine-preflight.js';
 import { t } from './i18n/copy.js';
+import { listNetworks } from './db/networks-registry.js';
+import { Bootstrap } from './screens/Bootstrap';
 
 declare global {
 	interface Window {
@@ -18,10 +20,16 @@ const { exportCount: engineExportCount, exportNames: engineExportNames } = engin
 window.__DASHBOARD__ = Object.freeze({ engineExportCount, engineExportNames });
 
 function App() {
-	// First real consumer of the copy table — proves the import path works
-	// through both Vite and tsc. This placeholder screen is replaced by the
-	// real bootstrap flow in a later plan; the copy itself does not change
-	// (contract C2 — this plan owns the table, no later plan edits it).
+	// listNetworks() is synchronous (localStorage-backed), so this decision
+	// is made directly at render time with no loading state. An empty
+	// registry means this browser holds no network yet — render the
+	// bootstrap flow. 50-09 replaces the branch below with the real shell +
+	// router; the copy itself does not change (contract C2 — this plan owns
+	// the table, no later plan edits it).
+	if (listNetworks().length === 0) {
+		return <Bootstrap />;
+	}
+
 	return (
 		<main>
 			<h1>{t('bootstrap.emptyNetworksHeading')}</h1>
