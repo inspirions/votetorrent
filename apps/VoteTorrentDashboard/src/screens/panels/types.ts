@@ -1,0 +1,40 @@
+/**
+ * types.ts — the panel contract (contract C7) consumed by 50-09, 50-10 and
+ * 50-11.
+ *
+ * `PanelProps` deliberately carries NO `evaluation` field. `evaluate()`'s
+ * result (src/auth/gate.js) lives in 50-09's `PanelGrid`, which is the only
+ * place that calls `evaluate()` and the only place that composes
+ * `PanelFrame` around a panel. A panel component never sees an evaluation
+ * and makes no gating decision of its own — do not "fix" this interface by
+ * widening it to carry one; that would let a panel render its own denied
+ * state, which is exactly the thing `PanelFrame`'s structural guard exists
+ * to centralize.
+ *
+ * `db` is typed from `@quereus/quereus` directly, NOT from 50-05's
+ * `src/db/open-db.js`. That keeps this contract free of a wave-3 sibling
+ * dependency — this file's only job is the shape of props a panel receives,
+ * not how a Database handle was constructed. `db` is nullable because a
+ * panel can mount before a network is bootstrapped; a panel that receives
+ * `null` renders its own empty state.
+ */
+import type { FC } from 'react';
+import type { Database } from '@quereus/quereus';
+import type { Capability } from '../../auth/capabilities.js';
+
+export interface PanelProps {
+	capability: Capability;
+	db: Database | null;
+	/**
+	 * The canonical 19-character instant this browser's snapshot was taken
+	 * at. Supplied by the shell, threaded down through 50-09's `PanelGrid`
+	 * (which already holds it for the freshness indicator) — a panel never
+	 * reads it from anywhere else. Optional: its absence means no snapshot
+	 * instant is available yet, and a consumer that cares (only 50-10's
+	 * Elections lifecycle pill does) falls back to the current instant.
+	 * Eight of the nine panels ignore this prop entirely.
+	 */
+	snapshotInstant?: string | null;
+}
+
+export type PanelComponent = FC<PanelProps>;
