@@ -189,6 +189,31 @@ key, which the authority extracted from the credCert during §2 and stored.
 > pins the verifier against CAPTURED PRODUCER OUTPUT — not against values recomputed from the
 > verifier itself, which would agree by construction.
 
+> **PROVEN ON HARDWARE 2026-08-25** — iPhone 13, iOS 26.x, App Attest *development* environment.
+> The shipping producer ran end-to-end (`attestKey` -> `generateAssertion` -> POP), and its output
+> was verified by the real authority verifiers: `verifyCrossSign` PASSES on the device's own bytes,
+> and `verifyAppAttest` PASSES against Apple's real root (fetched out-of-band, SHA-256
+> `1cb9823b…c932`). Fixture and regression suite: `vote-engine/test/ios-hardware-attestation.spec.ts`
+> (10 tests, 5 of them negative controls); the run itself is
+> `.planning/spikes/085-ios-hardware-capability-probe/produce-result-2026-08-25.json`.
+>
+> Two defects had to be fixed to get there, neither visible to any static check:
+>
+> 1. **`provisionDeviceKey()` read the wrong native field.** It returned `publicKeyBase64`, which
+>    iOS never resolves — so `challenge.deviceKey` was `undefined` and no iOS ceremony could start.
+>    The two platforms genuinely differ (Android: SPKI DER; iOS: compressed SEC1 hex, because §3.4
+>    compares it and `verifyCrossSign` parses it as a P-256 point), so the read is now platform-
+>    branched and fails closed on an absent field.
+> 2. **An invalidated `K_vote` was unrecoverable.** `loadKey(tag:) ?? create…` kept returning a key
+>    destroyed by biometric re-enrolment — it still loads and still yields a public key, and fails
+>    only at signing. The device was permanently wedged: attest a key, never sign with it. Native
+>    now probes liveness without raising a prompt (`interactionNotAllowed`) and re-mints ONLY on a
+>    positive invalidation signal, reporting `reprovisioned: true`. Measured on this device:
+>    `CryptoTokenKit:-3` -> deleted -> fresh key -> ceremony succeeded.
+>
+> Still UNPROVEN: the `production` App Attest environment (needs a paid Team ID, ROADMAP 51-04), and
+> the app's own pinned-root table, which ships empty by design (SETUP.md §4d).
+
 > **Implemented 2026-08-25** in `083-ios-native-parity-surface/ios/AttestationNativeModule.swift`:
 > `produceAttestation(keyAlias, boundDigest, assertionDigest, enableDeviceCheck)`. The Android
 > ABI-parity leftover `boundDigestUtf8Base64` (which iOS never used) is gone, and the native

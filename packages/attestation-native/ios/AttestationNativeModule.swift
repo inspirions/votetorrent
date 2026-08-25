@@ -100,6 +100,87 @@ class AttestationNativeModule: NSObject {
     return (item as! SecKey)
   }
 
+  // MARK: - Invalidated-key recovery (measured 2026-08-25)
+
+  /// What a stored key can still DO, as opposed to whether it is merely present.
+  ///
+  /// These are not the same question, and conflating them wedged this app permanently. A Secure
+  /// Enclave key destroyed by a biometric re-enrolment (`.biometryCurrentSet`) still satisfies
+  /// `SecItemCopyMatching` and still yields a public key from `SecKeyCopyPublicKey` — it fails only
+  /// at the moment of signing. So `loadKey(tag:) ?? create...` kept handing back a DEAD key forever:
+  /// every ceremony would attest a key the device can never sign with, with no path back. Measured
+  /// on an iPhone 13, 2026-08-25 — the vote key survived a Face ID change, `provisionDeviceKey`
+  /// happily returned its public bytes, App Attest attested it, and only the §4 possession signature
+  /// failed (CryptoTokenKit -3). Android never reaches this state because its path deletes and
+  /// regenerates on every call.
+  private enum KeyLiveness {
+    case usable
+    case invalidated
+    /// Could not tell. Treated as usable — see `provisionDeviceKey`. NEVER delete on this.
+    case indeterminate
+  }
+
+  /// Probe a key's liveness WITHOUT raising a biometric prompt.
+  ///
+  /// `provisionDeviceKey` is documented as key-creation-only and must never prompt, so this attaches
+  /// an `LAContext` with `interactionNotAllowed` and attempts a signature over a throwaway digest.
+  /// The point is the ERROR, not the signature:
+  ///
+  ///   * a LIVE biometry-gated key refuses for want of UI  -> `errSecInteractionNotAllowed` /
+  ///     `LAError.notInteractive`, i.e. the key is fine, it just needs a prompt we deliberately
+  ///     withheld;
+  ///   * a DESTROYED key refuses because it no longer exists -> CryptoTokenKit -3 /
+  ///     `errSecItemNotFound`.
+  ///
+  /// Anything else is `.indeterminate`. That asymmetry is deliberate and load-bearing: a false
+  /// positive here DELETES a voter's device identity and forces a re-association, so this reports
+  /// `.invalidated` only on a positive, specific signal and never on a generic failure.
+  private func probeKeyLiveness(tag: String) -> (liveness: KeyLiveness, detail: String) {
+    let context = LAContext()
+    context.interactionNotAllowed = true
+
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassKey,
+      kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
+      kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+      kSecReturnRef as String: true,
+      kSecUseAuthenticationContext as String: context
+    ]
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    if status == errSecItemNotFound { return (.invalidated, "load:errSecItemNotFound") }
+    guard status == errSecSuccess, let key = item else { return (.indeterminate, "load:OSStatus \(status)") }
+
+    var error: Unmanaged<CFError>?
+    // Content is irrelevant — only whether the Enclave will engage with the key at all.
+    let scratch = Data(repeating: 0, count: 32)
+    if SecKeyCreateSignature(key as! SecKey, .ecdsaSignatureDigestX962SHA256,
+                             scratch as CFData, &error) != nil {
+      // A key that signs with no interaction at all is alive (and simply not biometry-gated).
+      return (.usable, "signed-without-interaction")
+    }
+    let err = error!.takeRetainedValue() as Error as NSError
+    let detail = "\(err.domain):\(err.code)"
+
+    // DOMAIN FIRST — the code spaces overlap (see signWith's identical warning).
+    if err.domain == "CryptoTokenKit" && err.code == -3 { return (.invalidated, detail) }
+    if err.domain == NSOSStatusErrorDomain && err.code == Int(errSecItemNotFound) { return (.invalidated, detail) }
+    // The key is alive and correctly demanding the prompt we withheld.
+    if err.code == Int(errSecInteractionNotAllowed) || err.code == LAError.notInteractive.rawValue {
+      return (.usable, detail)
+    }
+    return (.indeterminate, detail)
+  }
+
+  private func deleteKey(tag: String) {
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassKey,
+      kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
+      kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom
+    ]
+    SecItemDelete(query as CFDictionary)
+  }
+
   /// 33-byte compressed SEC1 point, hex — the `publicKeyCompressedHex` contract (D-04/D-08).
   /// `SecKeyCopyExternalRepresentation` yields UNCOMPRESSED X9.62 (0x04‖X‖Y); compression is ours
   /// to do. Getting this wrong registers a `UserKey.PubKey` that can never verify, and `verify()`
@@ -154,7 +235,23 @@ class AttestationNativeModule: NSObject {
       }
       do {
         UserDefaults.standard.set(keyId, forKey: Self.appAttestKeyIdDefaultsKey)
-        let voteKey = try self.loadKey(tag: Self.voteKeyTag)
+
+        // Recover from a destroyed vote key instead of handing it back forever. Only a POSITIVE
+        // invalidation signal deletes; `.indeterminate` keeps the existing key, because wrongly
+        // deleting a live one destroys the voter's device identity.
+        var existing = self.loadKey(tag: Self.voteKeyTag)
+        var reprovisioned = false
+        var probeDetail = "no-existing-key"
+        if existing != nil {
+          let probe = self.probeKeyLiveness(tag: Self.voteKeyTag)
+          probeDetail = probe.detail
+          if probe.liveness == .invalidated {
+            self.deleteKey(tag: Self.voteKeyTag)
+            existing = nil
+            reprovisioned = true
+          }
+        }
+        let voteKey = try existing
           ?? self.createSecureEnclaveKey(tag: Self.voteKeyTag, requireBiometry: true)
         guard let pub = SecKeyCopyPublicKey(voteKey) else {
           reject("KEY_ERROR", "could not derive the vote key's public key", nil); return
@@ -162,7 +259,13 @@ class AttestationNativeModule: NSObject {
         resolve([
           "publicKeyCompressedHex": try self.compressedHex(from: pub),
           "appAttestKeyId": keyId,
-          "keyAlias": keyAlias
+          "keyAlias": keyAlias,
+          // TRUE means K_vote CHANGED: any challenge already issued against the previous key is
+          // void, and an existing Association no longer describes this device.
+          "reprovisioned": reprovisioned,
+          // The raw probe verdict, carried so a failure can be diagnosed from captured output
+          // rather than re-derived from a guess about what the Enclave returns.
+          "voteKeyProbe": probeDetail
         ])
       } catch {
         reject("KEY_ERROR", error.localizedDescription, error)

@@ -215,7 +215,13 @@ function getPlatformOS(): string {
 
 /** Package-local two-method producer shape (D-08 — structurally, not nominally, typed). */
 interface RealAttestationProducer {
-	provisionDeviceKey(): Promise<{ publicKey: string }>
+	/**
+	 * `reprovisioned` is TRUE when the native side found the stored vote key DESTROYED (a biometric
+	 * re-enrolment) and minted a replacement. The device key has therefore CHANGED: any challenge
+	 * already issued against the old one is void, and any existing Association no longer describes
+	 * this device. `voteKeyProbe` carries the raw liveness verdict for diagnostics.
+	 */
+	provisionDeviceKey(): Promise<{ publicKey: string; reprovisioned?: boolean; voteKeyProbe?: string }>
 	produce(challenge: AttestationChallenge): Promise<DeviceAttestation>
 }
 
@@ -362,8 +368,41 @@ export function createRealAttestationProducer(opts: {
 	return {
 		async provisionDeviceKey() {
 			const native = getNative()
-			const result = (await native.provisionDeviceKey(KEY_ALIAS)) as { publicKeyBase64: string; keyAlias: string }
-			return { publicKey: result.publicKeyBase64 }
+			const result = (await native.provisionDeviceKey(KEY_ALIAS)) as {
+				publicKeyBase64?: string
+				publicKeyCompressedHex?: string
+				keyAlias: string
+				reprovisioned?: boolean
+				voteKeyProbe?: string
+			}
+
+			// The two platforms hand back DIFFERENT key encodings, and the caller (ConfirmationScreen)
+			// feeds this value straight into `issueAttestationChallenge` as `challenge.deviceKey` — so
+			// picking the wrong field poisons every digest downstream of it.
+			//
+			//   Android — `publicKeyBase64`, the X.509 SPKI DER. The Android verifier only ever
+			//             re-hashes this string, so its encoding is unconstrained; it is the shipped,
+			//             hardware-proven value and is deliberately left alone.
+			//   iOS     — `publicKeyCompressedHex`. NOT a free choice, constrained twice over:
+			//             `produceIos`'s §3.4 obligation compares it against native's
+			//             `publicKeyCompressedHex`, and the authority parses `challenge.deviceKey` as a
+			//             P-256 point (`hexToBytes(expect.deviceKey)` in `verifyCrossSign`) to check
+			//             proof-of-possession. Only the compressed hex satisfies both — and the iOS
+			//             native side does not RESOLVE `publicKeyBase64` at all.
+			const isIos = getPlatformOS() === 'ios'
+			const publicKey = isIos ? result.publicKeyCompressedHex : result.publicKeyBase64
+			// Fail closed. Reading an absent field yields `undefined`, which flows on as a challenge
+			// bound to the string "undefined" and surfaces only as an opaque signature failure at the
+			// authority. That is precisely how the iOS field mismatch survived a clean typecheck, a
+			// green unit test and a successful bundle: nothing here ever asserted the field was there.
+			if (typeof publicKey !== 'string' || publicKey === '') {
+				throw new Error(
+					`provisionDeviceKey: native resolved no ${isIos ? 'publicKeyCompressedHex' : 'publicKeyBase64'} ` +
+						`(got: ${Object.keys(result).join(', ') || 'no keys'}) — refusing to issue a challenge ` +
+						'against an undefined device key.',
+				)
+			}
+			return { publicKey, reprovisioned: result.reprovisioned, voteKeyProbe: result.voteKeyProbe }
 		},
 
 		async produce(challenge: AttestationChallenge): Promise<DeviceAttestation> {
