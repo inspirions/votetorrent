@@ -327,38 +327,35 @@ class AttestationNativeModule: NSObject {
                                           digest as CFData, &error) as Data? else {
       let err = error!.takeRetainedValue() as Error as NSError
       // LAError.userCancel / .userFallback / .biometryLockout map onto the Android code table.
+      // DOMAIN FIRST — these code spaces OVERLAP, measured 2026-08-25 (spike 085 leg 7):
+      //
+      //     LAError.userFallback            = -3   (com.apple.LocalAuthentication)
+      //     key invalidated by re-enrolment = -3   (CryptoTokenKit)
+      //
+      // Matching on the raw code alone reports an INVALIDATED KEY as CANCELED — a permanent,
+      // recoverable-by-re-provisioning condition disguised as "the user tapped cancel", so the app
+      // would retry forever instead of re-provisioning. An earlier revision of this fix had exactly
+      // that bug: it checked CryptoTokenKit only in `default`, which `-3` never reached because the
+      // CANCELED case matched first. Do not collapse this back into a single switch on `err.code`.
       let code: String
+      if err.domain == "CryptoTokenKit" {
+        // -3 is the observed invalidation code. Other CryptoTokenKit failures are token-level
+        // faults with no better mapping than the generic bucket.
+        code = err.code == -3 ? "KEY_INVALIDATED_REASSOCIATE" : "BIOMETRIC_ERROR"
+      } else {
       switch err.code {
       case Int(errSecUserCanceled), LAError.userCancel.rawValue, LAError.systemCancel.rawValue,
            LAError.appCancel.rawValue, LAError.userFallback.rawValue:
+        // MEASURED: cancelling the prompt yields com.apple.LocalAuthentication code -2
+        // (LAError.userCancel) — this mapping is correct.
         code = "CANCELED"
       case LAError.biometryNotEnrolled.rawValue: code = "NO_BIOMETRICS_ENROLLED"
       case LAError.biometryLockout.rawValue:     code = "LOCKOUT_PERMANENT"
-      default:
-        // MEASURED 2026-08-25 (spike 085 leg 7, iPhone 13 / iOS 26.6.1). A key invalidated by a
-        // biometric-set change does NOT surface as `errSecItemNotFound`, which is what this
-        // mapping originally assumed from the documentation. What actually comes back is:
-        //
-        //     domain = "CryptoTokenKit"   code = -3
-        //
-        // and the keychain entry still LOADS fine (`SecItemCopyMatching` succeeds, and the public
-        // key is still readable) — only the signing operation fails. So neither "is the key
-        // present?" nor `errSecItemNotFound` detects invalidation; the failure is visible only at
-        // use, and only under this domain/code pair.
-        //
-        // Left in the `default` arm rather than a `case` because `CryptoTokenKit` error codes are
-        // not a public constant set — matching on the domain string is the honest way to express
-        // "this is what iOS actually returned", and a bare `case -3` would collide with any other
-        // API that happens to use -3.
-        if err.domain == "CryptoTokenKit" && err.code == -3 {
-          code = "KEY_INVALIDATED_REASSOCIATE"
-        } else if err.code == Int(errSecItemNotFound) {
-          // Retained: the key genuinely being absent is a different condition, and on other iOS
-          // versions invalidation may yet surface this way. Both map to the same recovery action.
-          code = "KEY_INVALIDATED_REASSOCIATE"
-        } else {
-          code = "BIOMETRIC_ERROR"
-        }
+      // A genuinely absent key. Distinct from invalidation (see above) but the same recovery
+      // action, and it may be how other iOS versions surface invalidation.
+      case Int(errSecItemNotFound):              code = "KEY_INVALIDATED_REASSOCIATE"
+      default:                                   code = "BIOMETRIC_ERROR"
+      }
       }
       reject(code, err.localizedDescription, err)
       return
