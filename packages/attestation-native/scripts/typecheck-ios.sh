@@ -11,6 +11,17 @@
 # (DCAppAttestService is iOS 14+), so a macOS-SDK pass would prove less than it appears to.
 #
 # Skips cleanly (exit 0) where no Xcode is installed, so it can live in CI on Linux runners.
+#
+# KNOWN BLIND SPOT — MEASURED 2026-08-25. The SHIM below defines RCTPromiseResolveBlock and
+# RCTPromiseRejectBlock so the module can typecheck without RN headers. That means this gate
+# CANNOT detect a MISSING `import React` in the module: the shim silently supplies exactly the
+# types the real build would demand from React, so the file passes here and fails under
+# `xcodebuild` with "cannot find type 'RCTPromiseResolveBlock' in scope". That is not a
+# hypothetical — it is precisely what happened the first time this package was actually podded
+# into the voter app, after this gate had been reporting PASS for the entire phase.
+#
+# Treat a PASS here as "the Apple SDK APIs still line up", NOT as "this compiles in an app".
+# The only authoritative gate is an `xcodebuild` of an app that pods this package.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

@@ -26,6 +26,14 @@
 //
 
 import Foundation
+// RCTPromiseResolveBlock / RCTPromiseRejectBlock live here. Guarded by canImport so the
+// standalone `typecheck:ios` gate (which has no RN headers and supplies its own typealiases)
+// still runs — but note that gate CANNOT catch a missing import: see scripts/typecheck-ios.sh.
+// The authoritative check that this file compiles as the app compiles it is an actual
+// `xcodebuild` of an app that pods this package.
+#if canImport(React)
+import React
+#endif
 import DeviceCheck
 import CryptoKit
 import LocalAuthentication
