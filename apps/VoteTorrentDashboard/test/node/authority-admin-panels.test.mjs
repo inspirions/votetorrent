@@ -19,12 +19,17 @@ const REPO_ROOT = path.resolve(APP_ROOT, '..', '..');
 const PANELS_DIR = path.join(APP_ROOT, 'src', 'screens', 'panels');
 const SCHEMA_PATH = path.join(REPO_ROOT, 'packages', 'vote-core', 'schema', 'votetorrent.qsql');
 
-/** The Authority Administration panel files this suite covers. Extended to
- * all six (plus the two tier-2 panels) by the next task in this same plan;
- * a later edit that quietly shrinks this list fails the length assertion
- * below.
+/** All six Authority Administration panel files this suite covers. A later
+ * edit that quietly shrinks this list fails the length assertion below.
  * @type {string[]} */
-export const FILES = ['NetworkSettingsPanel.tsx', 'AuthorityProfilePanel.tsx', 'AuthorityPeersPanel.tsx', 'AdministrationOfficersPanel.tsx'];
+export const FILES = [
+	'NetworkSettingsPanel.tsx',
+	'AuthorityProfilePanel.tsx',
+	'AuthorityPeersPanel.tsx',
+	'AdministrationOfficersPanel.tsx',
+	'KeyholdersPanel.tsx',
+	'InviteAuthoritiesPanel.tsx',
+];
 
 /** Strip `//` and `/* *\/`-style comment lines -- same shape as
  * registry.test.mjs / election-ops-panels.test.mjs.
@@ -70,16 +75,23 @@ for (const file of FILES) {
 	STRIPPED[file] = stripComments(RAW[file]);
 }
 
-test('FILES names exactly the four tier-1 Authority Administration panels landed by this task', () => {
-	assert.equal(FILES.length, 4);
-	assert.deepEqual(FILES, ['NetworkSettingsPanel.tsx', 'AuthorityProfilePanel.tsx', 'AuthorityPeersPanel.tsx', 'AdministrationOfficersPanel.tsx']);
+test('FILES names exactly the six Authority Administration panels', () => {
+	assert.equal(FILES.length, 6);
+	assert.deepEqual(FILES, [
+		'NetworkSettingsPanel.tsx',
+		'AuthorityProfilePanel.tsx',
+		'AuthorityPeersPanel.tsx',
+		'AdministrationOfficersPanel.tsx',
+		'KeyholdersPanel.tsx',
+		'InviteAuthoritiesPanel.tsx',
+	]);
 });
 
 // --- 1. No mutating affordance ----------------------------------------------
 
 const CONTROL_RE = /<button|<form|<input|<select|<textarea|onClick|onSubmit|onChange|href=/;
 
-test('no <button>, <form>, <input>, <select>, <textarea>, onClick, onSubmit, onChange or href= in any of the four files', () => {
+test('no <button>, <form>, <input>, <select>, <textarea>, onClick, onSubmit, onChange or href= in any of the six files', () => {
 	for (const file of FILES) {
 		assert.doesNotMatch(STRIPPED[file], CONTROL_RE, `${file} contains a control affordance`);
 	}
@@ -222,4 +234,54 @@ test('AdministrationOfficersPanel.tsx invents no role/group concept around Title
 
 test('AdministrationOfficersPanel.tsx renders Scopes as chips', () => {
 	assert.match(STRIPPED['AdministrationOfficersPanel.tsx'], /aa-scope/);
+});
+
+// --- Task 3: no key material in the two tier-2 panels --------------------------
+
+const TIER2_FILES = ['KeyholdersPanel.tsx', 'InviteAuthoritiesPanel.tsx'];
+const KEY_MATERIAL_RE = /UserKey|PubKey|PrivateKey|ReleaseKey|SignerKey|InviteKey|InviteSignature|Signature/i;
+
+test('no key-material column in either tier-2 panel -- InviteKey/InviteSignature are real InviteSlot columns, excluded on purpose', () => {
+	for (const file of TIER2_FILES) {
+		assert.doesNotMatch(STRIPPED[file], KEY_MATERIAL_RE, `${file} references a key-material column`);
+	}
+});
+
+test('positive control: the key-material matcher hits a synthetic InviteKey reference', () => {
+	const fixture = `<dd>{row.InviteKey}</dd>`;
+	assert.match(fixture, KEY_MATERIAL_RE, 'matcher is inert -- it must hit its own positive-control fixture');
+});
+
+// --- Task 3: no ceremony affordance ---------------------------------------------
+
+// Assertion 6 (over all six files, including these two) already pins that the
+// only `t(...)` call either file may make is `t(capability.emptyKey)` -- no
+// second copy key can smuggle in a call-to-action sentence. This assertion
+// covers the remaining surface: no literal JSX text node may read as an
+// invite-shaped call-to-action ("Invite", "Send", "Create", "Add an
+// authority", etc). Schema-column `<dt>` labels (binding decision A) are
+// exempt by construction -- none of them contain these words.
+const CEREMONY_CTA_RE = /\binvite\b|\bsend\b|\bcreate\b|\badd\b/i;
+
+test('neither tier-2 file renders literal JSX text that reads as an invite-shaped call-to-action', () => {
+	for (const file of TIER2_FILES) {
+		const literalTextNodes = [...STRIPPED[file].matchAll(/<[a-zA-Z][\w-]*(?:\s[^>]*)?>([^<>{}]*)<\//g)]
+			.map((m) => m[1].trim())
+			.filter((s) => /[A-Za-z]{2,}/.test(s));
+		for (const text of literalTextNodes) {
+			assert.doesNotMatch(text, CEREMONY_CTA_RE, `${file} renders "${text}", which reads as a ceremony call-to-action`);
+		}
+	}
+});
+
+test('positive control: the ceremony call-to-action matcher hits a synthetic "Invite an authority" fixture', () => {
+	assert.match('Invite an authority', CEREMONY_CTA_RE, 'matcher is inert -- it must hit its own positive-control fixture');
+});
+
+// --- Task 3: tier is not restated as prose --------------------------------------
+
+test('neither tier-2 file names "tier", "engine-delegated" or "schema CHECK" outside comments -- the tier pill is the only place that fact is surfaced', () => {
+	for (const file of TIER2_FILES) {
+		assert.doesNotMatch(STRIPPED[file], /\btier\b|engine-delegated|schema CHECK/i, `${file} restates tier as prose`);
+	}
 });

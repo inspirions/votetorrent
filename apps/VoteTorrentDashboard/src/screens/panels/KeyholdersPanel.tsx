@@ -1,19 +1,100 @@
 /**
- * KeyholdersPanel.tsx — stub. Filled by 50-11 (Authority Administration).
+ * KeyholdersPanel.tsx -- the `ik` panel body (tier 2, zero schema
+ * enforcement sites).
  *
- * Renders only its own body content — this panel does not wrap or import
- * the shared chrome component (contract C7: that frame is composed around
- * this panel by 50-09's `PanelGrid`, which is the only place that calls
- * `evaluate()`). No database query, no action
- * affordance, no gating decision — this is the honest Empty state: no
- * snapshot has been bootstrapped yet at this wave, so there is genuinely
- * nothing to show.
+ * Renders its own body content only -- this panel does not wrap or import
+ * the shared chrome component (contract C7). Issues its own read from an
+ * effect against `props.db`, owned by this component alone (see
+ * `NetworkSettingsPanel.tsx`'s header for the shared reasoning, not
+ * repeated per file).
+ *
+ * THIS PANEL NAMES PEOPLE, NEVER KEY MATERIAL. A `Keyholder` row in the
+ * schema carries `(ElectionId, ElectionRevision, UserId)` and nothing
+ * else -- there is no key column to leak, and this component must never
+ * grow a field that would create one. Displaying that someone holds a key
+ * share is a governance fact about the election; it is not, and must never
+ * become, exposure of the share itself. The panel's own name invites that
+ * confusion, which is exactly why this comment exists.
+ *
+ * The empty state here is EXPECTED in every real Phase 50 snapshot, not an
+ * unfinished panel: a `Keyholder` row needs an `Election`, an
+ * `ElectionRevision` and an accepted keyholder invite, and the keyholder
+ * invite ceremony is out of scope for this phase (see
+ * `authority-admin-queries.js`'s `fetchKeyholders` JSDoc for the full
+ * reasoning). Do not "fix" this by inventing a way to populate it.
  */
+import { useEffect, useState } from 'react';
 import type { PanelComponent } from './types.js';
 import { t } from '../../i18n/copy.js';
+import { fetchKeyholders } from './authority-admin-queries.js';
+import './authority-admin.css';
 
-const KeyholdersPanel: PanelComponent = ({ capability }) => (
-	<p className="panel-empty">{t(capability.emptyKey)}</p>
-);
+const EM_DASH = '—';
+
+type KeyholderRow = Awaited<ReturnType<typeof fetchKeyholders>>[number];
+
+interface KeyholdersState {
+	status: 'loading' | 'ready' | 'error';
+	rows: KeyholderRow[];
+}
+
+const KeyholdersPanel: PanelComponent = ({ capability, db }) => {
+	const [state, setState] = useState<KeyholdersState>({ status: 'loading', rows: [] });
+
+	useEffect(() => {
+		let mounted = true;
+
+		if (!db) {
+			setState({ status: 'ready', rows: [] });
+			return () => {
+				mounted = false;
+			};
+		}
+
+		setState({ status: 'loading', rows: [] });
+		const boundDb = db;
+
+		(async () => {
+			try {
+				const rows = await fetchKeyholders(boundDb);
+				if (mounted) setState({ status: 'ready', rows });
+			} catch (err) {
+				console.error('KeyholdersPanel: read failed:', err instanceof Error ? err.message : String(err));
+				if (mounted) setState({ status: 'error', rows: [] });
+			}
+		})();
+
+		return () => {
+			mounted = false;
+		};
+	}, [db]);
+
+	if (!db || state.status === 'loading') return null;
+
+	if (state.status === 'error' || state.rows.length === 0) {
+		return <p className="aa-empty">{t(capability.emptyKey)}</p>;
+	}
+
+	return (
+		<>
+			{state.rows.map((row) => (
+				<div className="aa-row" key={`${row.ElectionId}:${row.ElectionRevision}:${row.UserId}`}>
+					<dl className="aa-kv">
+						<dt>Name</dt>
+						<dd>{row.Name ?? EM_DASH}</dd>
+						<dt>UserId</dt>
+						<dd className="aa-mono">{row.UserId}</dd>
+						<dt>ElectionId</dt>
+						<dd className="aa-mono">{row.ElectionId}</dd>
+						<dt>ElectionRevision</dt>
+						<dd>{row.ElectionRevision}</dd>
+						<dt>KeyholderThreshold</dt>
+						<dd>{row.KeyholderThreshold ?? EM_DASH}</dd>
+					</dl>
+				</div>
+			))}
+		</>
+	);
+};
 
 export default KeyholdersPanel;
