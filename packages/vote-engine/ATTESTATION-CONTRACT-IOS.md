@@ -5,6 +5,21 @@ This document locks the **iOS** one. Read the Android contract first — §1 her
 identical to §1 there, and the whole design is "keep everything that can be kept, and state
 precisely where iOS cannot follow."
 
+> **PROVEN ON REAL HARDWARE, 2026-08-25** (spike 085 — iPhone 13 / iOS 26.6.1, free personal team,
+> Apple team `94TY7UR2W5`). A genuine Apple App Attest attestation was produced on-device and
+> verified end to end by `verifyAppAttest` with the **real Apple App Attest Root CA** pinned:
+> `ok=true`. The §2 `clientDataHash` derivation, the credCert nonce OID, the keyId binding, the
+> rpIdHash, the counter and the aaguid all hold against Apple's own bytes. The vendored 104-line
+> CBOR decoder parsed a real 5,873-byte attestation object.
+>
+> Also measured: **App Attest works under a FREE personal team** — no paid Apple Developer Program
+> membership was needed to produce or verify an attestation. And a build with **no entitlements file
+> at all** received a `development` attestation (aaguid `appattestdevelop`, receipt `sandbox`), so
+> the absence of the entitlement does NOT imply production — the provisioning profile decides.
+>
+> Still unproven: the §3 assertion and §4 proof-of-possession against real bytes (the probe produced
+> a real assertion but over placeholder digests), and the biometric-invalidation behaviour.
+
 **Status:** the wire format below is implemented by
 `src/association/verifiers/app-attest.ts` + `verifiers/app-attest-assertion.ts` and covered by
 `test/app-attest-verifier.spec.ts` against SYNTHETIC fixtures. It has **never seen a real device** —
