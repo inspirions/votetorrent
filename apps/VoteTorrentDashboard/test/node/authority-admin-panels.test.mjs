@@ -1,0 +1,225 @@
+/**
+ * authority-admin-panels.test.mjs -- source-level assertions over the six
+ * Authority Administration panel bodies: no mutating affordance, no
+ * invented copy, no key material, no self-gating. `node --test` cannot
+ * import `.tsx`, so this file reads each source as TEXT, in
+ * `test/node/registry.test.mjs`'s (50-06) shape, and strips `//` / `/* *\/`
+ * comment lines before matching an unfiltered scan would be tripped by this
+ * plan's own explanatory comments.
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const APP_ROOT = path.resolve(__dirname, '..', '..');
+const REPO_ROOT = path.resolve(APP_ROOT, '..', '..');
+const PANELS_DIR = path.join(APP_ROOT, 'src', 'screens', 'panels');
+const SCHEMA_PATH = path.join(REPO_ROOT, 'packages', 'vote-core', 'schema', 'votetorrent.qsql');
+
+/** The Authority Administration panel files this suite covers. Extended to
+ * all six (plus the two tier-2 panels) by the next task in this same plan;
+ * a later edit that quietly shrinks this list fails the length assertion
+ * below.
+ * @type {string[]} */
+export const FILES = ['NetworkSettingsPanel.tsx', 'AuthorityProfilePanel.tsx', 'AuthorityPeersPanel.tsx', 'AdministrationOfficersPanel.tsx'];
+
+/** Strip `//` and `/* *\/`-style comment lines -- same shape as
+ * registry.test.mjs / election-ops-panels.test.mjs.
+ * @param {string} source @returns {string} */
+function stripComments(source) {
+	return source
+		.split('\n')
+		.filter((line) => {
+			const trimmed = line.trim();
+			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
+		})
+		.join('\n');
+}
+
+/** Parse the set of schema column identifiers: column declarations inside
+ * `table` blocks (leading whitespace, an identifier, a recognised column
+ * type keyword) plus `as <Name>` aliases inside `view` blocks.
+ * @param {string} source @returns {Set<string>} */
+function extractSchemaColumnIdentifiers(source) {
+	const identifiers = new Set();
+	const colRe = /^[ \t]*([A-Z][A-Za-z0-9]*)[ \t]+(text|integer|datetime|boolean)\b/gm;
+	for (const m of source.matchAll(colRe)) identifiers.add(m[1]);
+	const asRe = /\bas\s+([A-Z][A-Za-z0-9]*)\b/g;
+	for (const m of source.matchAll(asRe)) identifiers.add(m[1]);
+	return identifiers;
+}
+
+/** Extract every literal `<dt>...</dt>` text node.
+ * @param {string} source @returns {string[]} */
+function extractDtLabels(source) {
+	return [...source.matchAll(/<dt>([^<]*)<\/dt>/g)].map((m) => m[1].trim()).filter((s) => s.length > 0);
+}
+
+const SCHEMA_SOURCE = readFileSync(SCHEMA_PATH, 'utf8');
+const SCHEMA_COLUMN_IDENTIFIERS = extractSchemaColumnIdentifiers(SCHEMA_SOURCE);
+
+/** @type {Record<string, string>} */
+const RAW = {};
+/** @type {Record<string, string>} */
+const STRIPPED = {};
+for (const file of FILES) {
+	RAW[file] = readFileSync(path.join(PANELS_DIR, file), 'utf8');
+	STRIPPED[file] = stripComments(RAW[file]);
+}
+
+test('FILES names exactly the four tier-1 Authority Administration panels landed by this task', () => {
+	assert.equal(FILES.length, 4);
+	assert.deepEqual(FILES, ['NetworkSettingsPanel.tsx', 'AuthorityProfilePanel.tsx', 'AuthorityPeersPanel.tsx', 'AdministrationOfficersPanel.tsx']);
+});
+
+// --- 1. No mutating affordance ----------------------------------------------
+
+const CONTROL_RE = /<button|<form|<input|<select|<textarea|onClick|onSubmit|onChange|href=/;
+
+test('no <button>, <form>, <input>, <select>, <textarea>, onClick, onSubmit, onChange or href= in any of the four files', () => {
+	for (const file of FILES) {
+		assert.doesNotMatch(STRIPPED[file], CONTROL_RE, `${file} contains a control affordance`);
+	}
+});
+
+test('positive control: the control matcher hits a synthetic fixture', () => {
+	const fixture = `<button onClick={go}>Add peer</button>`;
+	assert.match(fixture, CONTROL_RE, 'matcher is inert -- it must hit its own positive-control fixture');
+});
+
+// --- 2. No unreachable panel state (comments included) ----------------------
+
+test('no "read-only", "readonly", "writable", "disabled" or "◐" anywhere in the six files, comments included', () => {
+	for (const file of FILES) {
+		assert.doesNotMatch(RAW[file], /read-only|readonly|writable|disabled|◐/i, `${file} names the unreachable panel state`);
+	}
+});
+
+// --- 3. No raw HTML seam -----------------------------------------------------
+
+test('no dangerouslySetInnerHTML in any of the six files', () => {
+	for (const file of FILES) {
+		assert.doesNotMatch(STRIPPED[file], /dangerouslySetInnerHTML/, `${file} contains an injection surface`);
+	}
+});
+
+// --- 4. No self-gating -------------------------------------------------------
+
+test('no import of ../../auth/gate.js, no evaluate(, no grantedScopes reference in any of the six files', () => {
+	for (const file of FILES) {
+		assert.doesNotMatch(STRIPPED[file], /auth\/gate\.js|evaluate\(|grantedScopes/, `${file} makes its own visibility decision`);
+	}
+});
+
+// --- 4b. No self-composition (50-06 contract C7) -----------------------------
+
+const PANEL_FRAME_RE = /PanelFrame/;
+
+test('none of the six files references PanelFrame -- 50-09\'s PanelGrid composes the frame', () => {
+	for (const file of FILES) {
+		assert.doesNotMatch(STRIPPED[file], PANEL_FRAME_RE, `${file} imports or renders PanelFrame`);
+	}
+});
+
+test('positive control: the PanelFrame-detection matcher hits a synthetic self-wrapping import', () => {
+	const fixture = `import PanelFrame from './PanelFrame.tsx';`;
+	assert.match(fixture, PANEL_FRAME_RE, 'matcher is inert -- it must hit its own positive-control fixture');
+});
+
+// --- 5. No shared prefetch ----------------------------------------------------
+
+/** @type {Record<string, string>} */
+const FETCHER_NAMES = {
+	'NetworkSettingsPanel.tsx': 'fetchNetworkSettings',
+	'AuthorityProfilePanel.tsx': 'fetchAuthorityProfile',
+	'AuthorityPeersPanel.tsx': 'fetchAuthorityPeers',
+	'AdministrationOfficersPanel.tsx': 'fetchAdministrationOfficers',
+	'KeyholdersPanel.tsx': 'fetchKeyholders',
+	'InviteAuthoritiesPanel.tsx': 'fetchAuthorityInvites',
+};
+
+test('each file contains exactly one fetcher call, and it is its own', () => {
+	for (const file of FILES) {
+		const fetcherName = FETCHER_NAMES[/** @type {keyof typeof FETCHER_NAMES} */ (file)];
+		const importMatches = [...STRIPPED[file].matchAll(/from ['"]\.\/authority-admin-queries\.js['"]/g)];
+		assert.equal(importMatches.length, 1, `${file} must import authority-admin-queries.js exactly once`);
+		const callMatches = [...STRIPPED[file].matchAll(new RegExp(`\\b${fetcherName}\\(`, 'g'))];
+		assert.equal(callMatches.length, 1, `${file} must call ${fetcherName} exactly once`);
+		for (const otherName of Object.values(FETCHER_NAMES)) {
+			if (otherName === fetcherName) continue;
+			assert.doesNotMatch(STRIPPED[file], new RegExp(`\\b${otherName}\\(`), `${file} calls ${otherName}, which is not its own fetcher`);
+		}
+	}
+});
+
+// --- 6. Empty state wired to the frozen table ---------------------------------
+
+test('each file contains t(capability.emptyKey) and no other t( call', () => {
+	for (const file of FILES) {
+		const tCalls = [...STRIPPED[file].matchAll(/\bt\(([^)]*)\)/g)].map((m) => m[1].trim());
+		assert.ok(tCalls.length >= 1, `${file} must call t(...) at least once`);
+		for (const arg of tCalls) {
+			assert.equal(arg, 'capability.emptyKey', `${file} calls t(${arg}), which is not capability.emptyKey`);
+		}
+	}
+});
+
+// --- 7. Labels are schema identifiers (binding decision A) --------------------
+
+test('every <dt> label in the six files is a schema column identifier parsed from votetorrent.qsql', () => {
+	for (const file of FILES) {
+		const labels = extractDtLabels(STRIPPED[file]);
+		for (const label of labels) {
+			assert.ok(SCHEMA_COLUMN_IDENTIFIERS.has(label), `${file} renders <dt>${label}</dt>, which is not a schema column identifier`);
+		}
+	}
+});
+
+test('positive control: the label extractor reports a literal invented label as not-a-column', () => {
+	const fixture = `<dt>Relay servers</dt>`;
+	const labels = extractDtLabels(fixture);
+	assert.deepEqual(labels, ['Relay servers']);
+	assert.ok(!SCHEMA_COLUMN_IDENTIFIERS.has('Relay servers'), 'a label check that cannot detect invented copy is not a label check');
+});
+
+// --- 8. CSS scoping ------------------------------------------------------------
+
+test('every class selector in authority-admin.css starts with aa-, and the file has no hex colour literal', () => {
+	const cssPath = path.join(PANELS_DIR, 'authority-admin.css');
+	const css = readFileSync(cssPath, 'utf8');
+	const stripped = css
+		.split('\n')
+		.filter((line) => {
+			const trimmed = line.trim();
+			return !(trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//'));
+		})
+		.join('\n');
+	const classSelectors = [...stripped.matchAll(/\.([A-Za-z][\w-]*)/g)].map((m) => m[1]);
+	assert.ok(classSelectors.length >= 5, 'expected at least 5 class selectors in authority-admin.css');
+	for (const cls of classSelectors) {
+		assert.ok(cls.startsWith('aa-'), `.${cls} does not start with aa-`);
+	}
+	assert.doesNotMatch(stripped, /#[0-9a-fA-F]{3,6}/, 'authority-admin.css contains a hex colour literal');
+});
+
+// --- Registry untouched, still nine, sibling panels untouched ------------------
+
+test('registry.ts still declares exactly 9 *Panel.tsx files on disk', () => {
+	const registrySource = readFileSync(path.join(PANELS_DIR, 'registry.ts'), 'utf8');
+	const importMatches = [...registrySource.matchAll(/from\s+'\.\/(\w+Panel)'/g)].map((m) => m[1]);
+	assert.equal(importMatches.length, 9);
+});
+
+// --- No role/group concept invented around Officer.Title -----------------------
+
+test('AdministrationOfficersPanel.tsx invents no role/group concept around Title', () => {
+	const source = STRIPPED['AdministrationOfficersPanel.tsx'];
+	assert.doesNotMatch(source, /\brole\b|permission group|user group/i);
+});
+
+test('AdministrationOfficersPanel.tsx renders Scopes as chips', () => {
+	assert.match(STRIPPED['AdministrationOfficersPanel.tsx'], /aa-scope/);
+});
