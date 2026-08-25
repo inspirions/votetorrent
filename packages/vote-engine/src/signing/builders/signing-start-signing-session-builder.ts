@@ -29,8 +29,16 @@ import {
   BuilderValidationError
 } from '@votetorrent/vote-core'
 
-/** Valid Scope values for compile-time-safe runtime validation. */
-const VALID_SCOPES: readonly string[] = ['rn', 'rad', 'vrg', 'iad', 'rnp', 'uai', 'ceb', 'mel', 'cap']
+/**
+ * Valid Scope values for compile-time-safe runtime validation.
+ *
+ * Mirrors the schema's `view Scope` (schema/votetorrent.qsql:56-69) exactly.
+ * Corrected 2026-08-25: previously carried `'rnp'` (never in the view, so the
+ * database always rejected it) and omitted `'ik'` (added to the view 2026-07-30),
+ * which would have turned away a keyholder-invite signing session routed through
+ * this builder.
+ */
+const VALID_SCOPES: readonly string[] = ['rn', 'rad', 'vrg', 'iad', 'uai', 'ceb', 'mel', 'cap', 'ik']
 
 type Draft = { authorityId?: string; digestArgs?: AdminDigestArgs | null; scope?: Scope; signature?: Signature; nonce?: string }
 type DraftValidator = (draft: Readonly<Draft>) => BuilderError[]

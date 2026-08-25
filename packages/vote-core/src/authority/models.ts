@@ -151,13 +151,20 @@ export type SentOfficerInvite = OfficerInit & {
   type: 'of'
 }
 
-/** Scope codes representing different officer privileges */
+/**
+ * Scope codes representing different officer privileges.
+ *
+ * This union MUST stay identical to the schema's `view Scope`
+ * (schema/votetorrent.qsql:56-69) and to `scopeDescriptions` below.
+ * `Officer.ScopesValid` / `ProposedOfficer.ScopesValid` reject any code the
+ * view does not define, so a union-only code type-checks and fails at runtime
+ * (this is what happened to `'rnp'`, removed 2026-08-25).
+ */
 export type Scope =
  | 'rn'
  | 'rad'
  | 'vrg'
  | 'iad'
- | 'rnp'
  | 'uai'
  | 'ceb'
  | 'mel'

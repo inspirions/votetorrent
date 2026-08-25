@@ -39,20 +39,22 @@ import type { RootStackParamList } from "../../navigation/types";
  * packages/vote-core/src/authority/models.ts:134–143. Used to render the 9
  * Threshold Policies rows in a stable order (D-03).
  *
- * Note: scopeDescriptions in vote-core defines 8/9 entries (rnp missing per
- * models.ts:145–154). The render below falls back to the t("scope_rnp")
- * i18n key when scopeDescriptions[scope] is undefined.
+ * Corrected 2026-08-25: the list now mirrors the schema's `view Scope`
+ * (votetorrent.qsql:56-69) exactly — `'rnp'` removed (never in the view, so
+ * every ThresholdPolicy this screen wrote for it was unrepresentable) and the
+ * missing `'ik'` added. NOTE this array is not cosmetic: it also drives the
+ * ThresholdPolicies payload sent to proposeAdmin below.
  */
 const SCOPE_ORDER: Scope[] = [
 	"rn",
 	"rad",
 	"vrg",
 	"iad",
-	"rnp",
 	"uai",
 	"ceb",
 	"mel",
 	"cap",
+	"ik",
 ];
 
 export default function ProposedAdministrationScreen() {

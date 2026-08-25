@@ -431,8 +431,6 @@ const resources = {
 			// Phase 8 plan 08-02 — Proposed Administration screen (AUTHUI-03)
 			thresholdPolicies: 'Threshold Policies',
 			addAdministrator: 'Add Administrator',
-			// Fallback for missing scopeDescriptions[rnp] (vote-core defines 8/9 — D-03)
-			scope_rnp: 'Revise Network Policies',
 			loading: 'Loading...',
 			// Phase 8 plan 08-03 — OfficerDetails + Invitation screens (AUTHUI-04, 05, 06)
 			administrator: 'Administrator',
@@ -1248,7 +1246,6 @@ const resources = {
 			// Phase 8 plan 08-02 — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			thresholdPolicies: 'Políticas de Umbral', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			addAdministrator: 'Agregar Administrador', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			scope_rnp: 'Revisar Políticas de Red', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			loading: 'Cargando...', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			// Phase 8 plan 08-03 — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			administrator: 'Administrador', // Phase 11 plan 11-01 (D-11) — Spanish backfill.

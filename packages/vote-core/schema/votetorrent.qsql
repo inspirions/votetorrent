@@ -106,7 +106,7 @@ declare schema main
 	table Admin (
 		AuthorityId text,
 		EffectiveAt datetime,
-		ThresholdPolicies text default '[]', -- json array of { scope: string, threshold: integer } - if not set for a scope, 1 is assumed
+		ThresholdPolicies text default '[]', -- json array of { policy: string (Scope), threshold: integer } - if not set for a scope, 1 is assumed
 		primary key (AuthorityId, EffectiveAt),
 		constraint OfficerRequired check on update (
 			exists (select 1 from Officer O where O.AuthorityId = new.AuthorityId and O.AdminEffectiveAt = new.EffectiveAt
@@ -115,7 +115,23 @@ declare schema main
 		),
 		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
 		constraint EffectiveAtValid check (EffectiveAt is not null),
-		-- TODO: constraint ThresholdPoliciesValid check (valid json array of { scope: string, threshold: integer })
+		-- Each entry is { policy: <a `view Scope` code>, threshold: <integer >= 1> }.
+		-- `policy` names the scope being GOVERNED (how many officer signatures an action
+		-- at that scope needs), not a scope that governs. cast(...as text) on the extracted
+		-- policy mirrors InviteResult.SlotCidValid's 36-01 Probe 3b finding; the threshold
+		-- needs no cast (json_extract returns a real integer) but typeof alone would admit 0.
+		-- The explicit `is null` guard is load-bearing: without it a misnamed field (e.g.
+		-- `{scope:...}` instead of `{policy:...}`) extracts NULL, and `NULL not in (...)`
+		-- is NULL rather than true, so the row silently passes.
+		constraint ThresholdPoliciesValid check (
+			not exists (
+				select 1 from json_each(ThresholdPolicies)
+				where json_extract(value, '$.policy') is null
+					or cast(json_extract(value, '$.policy') as text) not in (select Code from Scope)
+					or typeof(json_extract(value, '$.threshold')) <> 'integer'
+					or json_extract(value, '$.threshold') < 1
+			)
+		),
 		constraint MutationValid check (
 			-- Initial admin for the first authority - no invite, no signing
 			(
@@ -445,7 +461,23 @@ declare schema main
 		primary key (AuthorityId, EffectiveAt),
 		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
 		constraint EffectiveAtValid check on insert, update (EffectiveAt is not null),
-		--constraint ThresholdPoliciesValid check (...), -- TODO: constraint
+		-- Each entry is { policy: <a `view Scope` code>, threshold: <integer >= 1> }.
+		-- `policy` names the scope being GOVERNED (how many officer signatures an action
+		-- at that scope needs), not a scope that governs. cast(...as text) on the extracted
+		-- policy mirrors InviteResult.SlotCidValid's 36-01 Probe 3b finding; the threshold
+		-- needs no cast (json_extract returns a real integer) but typeof alone would admit 0.
+		-- The explicit `is null` guard is load-bearing: without it a misnamed field (e.g.
+		-- `{scope:...}` instead of `{policy:...}`) extracts NULL, and `NULL not in (...)`
+		-- is NULL rather than true, so the row silently passes.
+		constraint ThresholdPoliciesValid check (
+			not exists (
+				select 1 from json_each(ThresholdPolicies)
+				where json_extract(value, '$.policy') is null
+					or cast(json_extract(value, '$.policy') as text) not in (select Code from Scope)
+					or typeof(json_extract(value, '$.threshold')) <> 'integer'
+					or json_extract(value, '$.threshold') < 1
+			)
+		),
 		constraint UserValid check (context.IsUserValid = true)
 	)
 		with context ( UserId text, UserKey text, Signature text, Tid int, now datetime, IsUserValid boolean );

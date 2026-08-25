@@ -377,10 +377,10 @@ export class UserEngine implements IUserEngine {
    * T-18-01 mitigation: userId and scope are bound ONLY via the params object
    * `{ userId, scope }` — never string-interpolated into the SQL statement.
    *
-   * NOTE: The Scope TS type includes 'rnp' but the DB Scope view does not
-   * list it (existing schema inconsistency, not introduced here). The query
-   * is correct as-is; an Officer with 'rnp' in their Scopes JSON would have
-   * failed the ScopesValid CHECK at insert time — no special handling needed.
+   * NOTE (resolved 2026-08-25): the TS Scope union previously declared 'rnp',
+   * which the DB's `view Scope` never defined. That drift has been removed —
+   * the union, `scopeDescriptions` and `view Scope` now carry the same nine
+   * codes, so no scope reaching this query can be unrepresentable in the view.
    *
    * T-18-02 mitigation: Scope match uses exact equality (json_each value = :scope,
    * not LIKE), and the join is restricted to CurrentAdmin — prevents false-positive
