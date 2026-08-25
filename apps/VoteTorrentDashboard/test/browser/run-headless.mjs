@@ -11,6 +11,15 @@
  * cannot fire is not a guard, and this is the phase's single most important
  * guard.
  *
+ * `--tier3` / `--prove-drift` (50-12): the D-20 model↔DOM cross-check, added
+ * at this file's natural extension point rather than a named comment left by
+ * 50-05 — no such literal marker exists in the as-built file; this is
+ * recorded as a finding in 50-12-SUMMARY.md rather than invented here. Both
+ * flags run ONLY the tier-3 flow (three `gate-matrix.html` page loads) and
+ * return before the tier-2 db-gate/shell-gate phases below — they are
+ * separate CI invocations, exactly like `--prove-trap` is a separate
+ * invocation of the tier-2 flow, never combined in one run.
+ *
  * `import { chromium } from 'playwright'` — the FULL package, never the
  * lighter core-only sibling package, and never a hardcoded system-Chrome
  * binary path option (Pitfall 6: the spikes' macOS path does not exist on
@@ -27,6 +36,8 @@ const APP_ROOT = path.resolve(__dirname, '..', '..');
 const PORT = process.env.DASHBOARD_GATE_PORT ?? '5181';
 const BASE = `http://localhost:${PORT}`;
 const PROVE_TRAP = process.argv.includes('--prove-trap');
+const TIER3 = process.argv.includes('--tier3');
+const PROVE_DRIFT = process.argv.includes('--prove-drift');
 
 /** @returns {Promise<import('node:child_process').ChildProcess>} */
 async function startViteDevServer() {
@@ -138,6 +149,334 @@ async function runOnShellGatePage(page, url, label) {
 	return res;
 }
 
+/**
+ * 50-12's sibling of `runOnPage` / `runOnShellGatePage` above, reading
+ * `gate-matrix.tsx`'s DISTINCT `__GATE_MATRIX__` / `__GATE_MATRIX_DONE__`
+ * readout names, for the SAME reason: the tier-3 gate must never be
+ * confused with either tier-2 gate.
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} url
+ * @param {string} label
+ */
+async function runOnGateMatrixPage(page, url, label) {
+	/** @type {string[]} */
+	const lines = [];
+	page.on('console', (m) => lines.push(`[${m.type()}] ${m.text()}`));
+	page.on('pageerror', (e) => lines.push(`[pageerror] ${e.message}`));
+	await page.goto(url, { waitUntil: 'load' });
+	await page
+		.waitForFunction(() => /** @type {any} */ (window).__GATE_MATRIX_DONE__ === true, null, { timeout: 60_000 })
+		.catch(() => {});
+	const res = await page.evaluate(() => /** @type {any} */ (window).__GATE_MATRIX__ ?? null);
+
+	console.log(`\n===== ${label} =====`);
+	for (const l of lines) console.log(l);
+	if (!res) {
+		console.log('NO RESULT');
+		return { res: null, lines };
+	}
+	if (res.crashed) {
+		console.log('CRASHED:\n' + res.crashed);
+		return { res, lines };
+	}
+	for (const e of res.log ?? []) {
+		console.log(`${String(e.ms).padStart(8)}ms  ${String(e.category).toUpperCase().padEnd(9)} ${e.message}`);
+	}
+	console.log(`RUNGS: ${res.passed}/${res.total}`);
+	return { res, lines };
+}
+
+/** The five `<measured_facts>` scope-set fixture ids, in `<measured_facts>`'s own order. */
+const TIER3_SCOPE_SET_IDS = ['real-all-nine', 'vrg-only', 'election-ops', 'authority-admin', 'no-scopes'];
+/** The three lifecycle phase ids -- D-17 says the rendered panel set must not depend on which one is active. */
+const TIER3_PHASE_IDS = ['organizing', 'running', 'released'];
+/** Per-scope-set expected visible-capability counts, from `<measured_facts>`. @type {Record<string, number>} */
+const TIER3_EXPECTED_VISIBLE = {
+	'real-all-nine': 9,
+	'vrg-only': 1,
+	'election-ops': 3,
+	'authority-admin': 6,
+	'no-scopes': 0,
+};
+
+/**
+ * Drives all 20 (or, under `--prove-drift`, exactly 1) rungs against an
+ * already-mounted `gate-matrix.html?mode=matrix` page, via its
+ * `window.__GATE_MATRIX_RUN__` seam. Every call is individually try/caught
+ * so a thrown rung becomes a recorded failure (assertion I) rather than
+ * crashing the whole runner.
+ *
+ * Iterating IN-PAGE against one shared mounted tree (rather than one page
+ * load per rung) is deliberate: this tier asserts model↔DOM agreement, not
+ * persistence. 50-VALIDATION.md's two-page rule binds PERSISTENCE claims
+ * and is 50-05's tier-2 job; this loop must not imply it re-proves that --
+ * the tier-2 db-gate/shell-gate phases above are what prove persistence, and
+ * this loop proves something orthogonal to it.
+ *
+ * @param {import('playwright').Page} page
+ * @param {boolean} proveDrift
+ */
+async function driveTier3Rungs(page, proveDrift) {
+	/** @type {any[]} */
+	const rungs = [];
+
+	/** @param {[string, string, boolean, string?]} args */
+	async function callRung(args) {
+		try {
+			const result = await page.evaluate(
+				([scopeSetId, phaseId, reveal, driftAs]) =>
+					/** @type {any} */ (window).__GATE_MATRIX_RUN__(scopeSetId, phaseId, reveal, driftAs),
+				args,
+			);
+			rungs.push(result);
+		} catch (err) {
+			rungs.push({
+				scopeSetId: args[0],
+				phaseId: args[1],
+				reveal: args[2],
+				threw: String(/** @type {any} */ (err)?.message ?? err),
+			});
+		}
+	}
+
+	if (proveDrift) {
+		await callRung(['election-ops', 'organizing', true, 'authority-admin']);
+		return rungs;
+	}
+
+	// 15 headline combinations: 5 scope sets x 3 phases, reveal=1 -- denied
+	// panels render as frames with no body, so assertion B can be the strong
+	// form (frame present, body absent).
+	for (const scopeSetId of TIER3_SCOPE_SET_IDS) {
+		for (const phaseId of TIER3_PHASE_IDS) {
+			// eslint-disable-next-line no-await-in-loop -- deliberately sequential against one shared page/root, see this function's header
+			await callRung([scopeSetId, phaseId, true]);
+		}
+	}
+	// 5 additional rungs, one per scope set, phase=organizing, reveal=0 --
+	// a denied panel's FRAME must be entirely absent, not just its body.
+	for (const scopeSetId of TIER3_SCOPE_SET_IDS) {
+		// eslint-disable-next-line no-await-in-loop
+		await callRung([scopeSetId, 'organizing', false]);
+	}
+	return rungs;
+}
+
+/**
+ * Assertions A-I over the driven rungs. Returns a structured verdict rather
+ * than throwing, so the caller can print the full spike-078-style summary
+ * table before deciding the process exit code.
+ *
+ * @param {any[]} rungs
+ */
+function assertTier3(rungs) {
+	/** @type {string[]} */
+	const failures = [];
+	let headlineComparisons = 0;
+	let headlinePassed = 0;
+
+	const headline = rungs.filter((r) => r.reveal === true);
+	const revealOff = rungs.filter((r) => r.reveal === false);
+
+	for (const rung of rungs) {
+		if (rung.threw) {
+			failures.push(`${rung.scopeSetId}/${rung.phaseId}: rung threw: ${rung.threw}`);
+			continue;
+		}
+		const expectReal = rung.scopeSetId === 'real-all-nine';
+
+		// A/B — model<->DOM agreement, and reveal semantics.
+		for (const modelEntry of rung.model ?? []) {
+			const domEntry = (rung.dom ?? []).find((/** @type {any} */ d) => d.id === modelEntry.id);
+			const isHeadline = rung.reveal === true;
+			if (isHeadline) headlineComparisons += 1;
+			if (!domEntry) {
+				failures.push(`${rung.scopeSetId}/${rung.phaseId}/${modelEntry.id}: no DOM entry`);
+				continue;
+			}
+			if (domEntry.bodyPresent === modelEntry.visible) {
+				if (isHeadline) headlinePassed += 1;
+			} else {
+				failures.push(
+					`${rung.scopeSetId}/${rung.phaseId}/${modelEntry.id}: model.visible=${modelEntry.visible} but dom.bodyPresent=${domEntry.bodyPresent}`,
+				);
+			}
+			if (rung.reveal === true && !domEntry.framePresent) {
+				failures.push(`${rung.scopeSetId}/${rung.phaseId}/${modelEntry.id}: reveal=1 but frame absent`);
+			}
+			if (rung.reveal === false && !modelEntry.visible && domEntry.framePresent) {
+				failures.push(`${rung.scopeSetId}/${rung.phaseId}/${modelEntry.id}: reveal=0 denied capability still has a frame`);
+			}
+		}
+
+		// F — badge wording, exact strings, keyed by scopeSetId (not reveal).
+		const expectedBadgeText = expectReal ? 'answered by the database' : 'simulated scope set';
+		const expectedBadgeClass = expectReal ? 'pv-badge--real' : 'pv-badge--sim';
+		if (rung.badgeText !== expectedBadgeText) {
+			failures.push(`${rung.scopeSetId}/${rung.phaseId}: badgeText="${rung.badgeText}", expected "${expectedBadgeText}"`);
+		}
+		if (!String(rung.badgeClass ?? '').includes(expectedBadgeClass)) {
+			failures.push(`${rung.scopeSetId}/${rung.phaseId}: badgeClass="${rung.badgeClass}", missing "${expectedBadgeClass}"`);
+		}
+
+		// G — disclosure present on every rung.
+		if (!rung.disclosurePresent) {
+			failures.push(`${rung.scopeSetId}/${rung.phaseId}: disclosure not present`);
+		}
+	}
+
+	// C — expected visible counts per scope set (headline rungs only).
+	for (const scopeSetId of TIER3_SCOPE_SET_IDS) {
+		const rung = headline.find((r) => r.scopeSetId === scopeSetId);
+		const visibleCount = (rung?.model ?? []).filter((/** @type {any} */ m) => m.visible).length;
+		if (visibleCount !== TIER3_EXPECTED_VISIBLE[scopeSetId]) {
+			failures.push(`${scopeSetId}: expected ${TIER3_EXPECTED_VISIBLE[scopeSetId]} visible, got ${visibleCount}`);
+		}
+	}
+
+	// D — phase invariance: the visible id SET is identical across all three phases, per scope set.
+	for (const scopeSetId of TIER3_SCOPE_SET_IDS) {
+		/** @type {Set<string>[]} */
+		const sets = TIER3_PHASE_IDS.map((phaseId) => {
+			const rung = headline.find((r) => r.scopeSetId === scopeSetId && r.phaseId === phaseId);
+			return new Set((rung?.model ?? []).filter((/** @type {any} */ m) => m.visible).map((/** @type {any} */ m) => m.id));
+		});
+		const [first, ...rest] = sets;
+		for (const [i, s] of rest.entries()) {
+			const same = first && s.size === first.size && [...first].every((id) => s.has(id));
+			if (!same) {
+				failures.push(`${scopeSetId}: phase invariance broken between ${TIER3_PHASE_IDS[0]} and ${TIER3_PHASE_IDS[i + 1]}`);
+			}
+		}
+	}
+
+	// E — discrimination: vrg-only and authority-admin must not render the same panel set.
+	const vrgOnly = headline.find((r) => r.scopeSetId === 'vrg-only' && r.phaseId === 'organizing');
+	const authorityAdmin = headline.find((r) => r.scopeSetId === 'authority-admin' && r.phaseId === 'organizing');
+	const vrgVisible = new Set((vrgOnly?.model ?? []).filter((/** @type {any} */ m) => m.visible).map((/** @type {any} */ m) => m.id));
+	const adminVisible = new Set(
+		(authorityAdmin?.model ?? []).filter((/** @type {any} */ m) => m.visible).map((/** @type {any} */ m) => m.id),
+	);
+	const discriminates = vrgVisible.size !== adminVisible.size || [...vrgVisible].some((id) => !adminVisible.has(id));
+	if (!discriminates) {
+		failures.push('discrimination: vrg-only and authority-admin rendered the identical panel set');
+	}
+
+	// Summary table, spike-078 style.
+	console.log('\n--- tier-3 matrix ---');
+	console.log('scopeSet'.padEnd(18) + 'phase'.padEnd(12) + 'reveal'.padEnd(8) + 'granted'.padEnd(9) + 'visible'.padEnd(9) + 'domBodies'.padEnd(11) + 'badge');
+	for (const rung of rungs) {
+		if (rung.threw) {
+			console.log(`${String(rung.scopeSetId).padEnd(18)}${String(rung.phaseId).padEnd(12)}${String(rung.reveal).padEnd(8)}THREW: ${rung.threw}`);
+			continue;
+		}
+		const grantedCount = (rung.effective ?? []).length;
+		const visibleCount = (rung.model ?? []).filter((/** @type {any} */ m) => m.visible).length;
+		const domBodyCount = (rung.dom ?? []).filter((/** @type {any} */ d) => d.bodyPresent).length;
+		console.log(
+			String(rung.scopeSetId).padEnd(18) +
+				String(rung.phaseId).padEnd(12) +
+				String(rung.reveal).padEnd(8) +
+				String(grantedCount).padEnd(9) +
+				String(visibleCount).padEnd(9) +
+				String(domBodyCount).padEnd(11) +
+				`${rung.badgeText} (${rung.badgeClass})`,
+		);
+	}
+	console.log(revealOff.length ? `reveal=0 rungs: ${revealOff.length}` : '');
+
+	return { ok: failures.length === 0, failures, headlineComparisons, headlinePassed };
+}
+
+/**
+ * `--tier3` / `--prove-drift`'s entry point. Runs entirely on its own —
+ * never combined with the tier-2 db-gate/shell-gate flow in one invocation.
+ *
+ * @param {import('playwright').BrowserContext} ctx
+ */
+async function runTier3(ctx) {
+	const page1 = await ctx.newPage();
+	const { res: seedRes } = await runOnGateMatrixPage(page1, `${BASE}/test/browser/gate-matrix.html?mode=seed`, 'TIER-3 PAGE 1 — seed');
+	await page1.close();
+	const seedOk = seedRes && !seedRes.crashed && seedRes.passed === seedRes.total;
+	if (!seedOk) {
+		console.log('\nTIER-3: FAIL (gate-matrix seed failed)');
+		process.exitCode = 1;
+		return;
+	}
+
+	const page2 = await ctx.newPage();
+	/** @type {string[]} */
+	const matrixLines = [];
+	page2.on('pageerror', (e) => matrixLines.push(`[pageerror] ${e.message}`));
+	const { res: mountRes } = await runOnGateMatrixPage(
+		page2,
+		`${BASE}/test/browser/gate-matrix.html?mode=matrix`,
+		'TIER-3 PAGE 2 — matrix (mount)',
+	);
+	const mountOk = mountRes && !mountRes.crashed && mountRes.passed === mountRes.total;
+	if (!mountOk) {
+		console.log('\nTIER-3: FAIL (gate-matrix mount failed)');
+		await page2.close();
+		process.exitCode = 1;
+		return;
+	}
+
+	const rungs = await driveTier3Rungs(page2, PROVE_DRIFT);
+	const pageErrors = matrixLines.filter((l) => l.startsWith('[pageerror]'));
+	await page2.close();
+
+	if (PROVE_DRIFT) {
+		const rung = rungs[0];
+		const divergent = (rung?.model ?? []).filter((/** @type {any} */ m) => {
+			const domEntry = (rung.dom ?? []).find((/** @type {any} */ d) => d.id === m.id);
+			return domEntry && domEntry.bodyPresent !== m.visible;
+		});
+		console.log(`\n--prove-drift rung: scopeSetId=election-ops, driftAs=authority-admin, effective(model)=${JSON.stringify(rung?.effective)}`);
+		if (divergent.length === 0) {
+			console.log(
+				'\nTIER-3 --prove-drift: FAIL — cross-check is inert: a deliberately mismatched scope set was not detected',
+			);
+			process.exitCode = 1;
+			return;
+		}
+		console.log(
+			`\nTIER-3 --prove-drift: PASS — the deliberately mismatched scope set was correctly detected as a FAILURE (diverged: ${divergent.map((/** @type {any} */ d) => d.id).join(', ')})`,
+		);
+		process.exitCode = 0;
+		return;
+	}
+
+	const verdict = assertTier3(rungs);
+
+	const page3 = await ctx.newPage();
+	const { res: freshRes } = await runOnGateMatrixPage(
+		page3,
+		`${BASE}/test/browser/gate-matrix.html?mode=fresh`,
+		'TIER-3 PAGE 3 — fresh (a preview must never survive a reload)',
+	);
+	await page3.close();
+	const freshOk = freshRes && !freshRes.crashed && freshRes.badgeText === 'answered by the database' && freshRes.disclosurePresent === true;
+	if (!freshOk) {
+		verdict.failures.push(`mode=fresh: badgeText="${freshRes?.badgeText}", disclosurePresent=${freshRes?.disclosurePresent}`);
+		verdict.ok = false;
+	}
+
+	if (pageErrors.length > 0) {
+		verdict.failures.push(`page emitted ${pageErrors.length} pageerror(s): ${pageErrors.join(' | ')}`);
+		verdict.ok = false;
+	}
+
+	console.log(`\n${verdict.headlinePassed}/${verdict.headlineComparisons} headline model<->DOM comparisons passed`);
+	console.log(`${rungs.filter((r) => !r.threw).length}/${rungs.length} rungs completed without throwing`);
+	if (verdict.failures.length) {
+		console.log('FAILURES:\n  ' + verdict.failures.join('\n  '));
+	}
+	console.log(`\nTIER-3: ${verdict.ok ? 'PASS' : 'FAIL'} (${rungs.length}/${rungs.length} rungs, ${verdict.headlinePassed}/${verdict.headlineComparisons} headline comparisons)`);
+	process.exitCode = verdict.ok ? 0 : 1;
+}
+
 async function main() {
 	const viteChild = await startViteDevServer();
 	let browser;
@@ -145,6 +484,13 @@ async function main() {
 		browser = await chromium.launch({ headless: true });
 		// One persistent context so IndexedDB survives between the two page loads.
 		const ctx = await browser.newContext();
+
+		// --tier3 / --prove-drift run ONLY the tier-3 flow and return here --
+		// see this file's header note. Everything below this block is the
+		// unchanged 50-05/50-09 tier-2 flow.
+		if (TIER3 || PROVE_DRIFT) {
+			return await runTier3(ctx);
+		}
 
 		// Page load 1 — seed. Its own, dedicated ctx.newPage() call.
 		const page1 = await ctx.newPage();
