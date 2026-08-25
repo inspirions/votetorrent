@@ -19,6 +19,13 @@ import {
   parseSnapshot,
   serializeSnapshot
 } from '../src/bootstrap/snapshot-codec.js'
+import {
+  buildManifest,
+  buildSnapshot,
+  computeContentDigest,
+  computeSchemaHash,
+  verifySnapshot
+} from '../src/bootstrap/snapshot-manifest.js'
 import { SNAPSHOT_FORMAT_VERSION } from '../src/bootstrap/snapshot-types.js'
 import type { BootstrapSnapshot, SnapshotManifest, SnapshotTables } from '../src/bootstrap/snapshot-types.js'
 
@@ -241,5 +248,186 @@ describe('snapshot codec', () => {
       expect(result.ok).to.equal(false)
       if (!result.ok) expect(result.detail).to.equal('snapshot: payload is not valid JSON')
     })
+  })
+})
+
+describe('snapshot manifest and verifier', () => {
+  /** Deep-clone a positive-control envelope so each test mutates its own copy. */
+  function cloneEnvelope (envelope: BootstrapSnapshot): BootstrapSnapshot {
+    return JSON.parse(JSON.stringify(envelope)) as BootstrapSnapshot
+  }
+
+  function makeGoodEnvelope (): BootstrapSnapshot {
+    const tables = makeTables()
+    // Plant the PII canary as a genuine row value so every negative case
+    // below can assert it never leaks into a `detail` string.
+    const tablesWithCanary: SnapshotTables = {
+      ...tables,
+      Authority: [...tables.Authority, { Id: 'auth-canary', Name: PII_CANARY, Active: true, Notes: null }]
+    }
+    return buildSnapshot({ networkHash: 'net-hash-verify', tables: tablesWithCanary })
+  }
+
+  it('1. buildManifest includes a zero-row table with count 0, never omitted', () => {
+    const manifest = buildManifest({ Empty: [], NonEmpty: [{ a: 1 }] })
+    expect(manifest.Empty).to.equal(0)
+    expect(manifest.NonEmpty).to.equal(1)
+    expect(Object.keys(manifest)).to.include('Empty')
+  })
+
+  it('2. computeSchemaHash is stable across repeat calls and differs for an altered schema string', () => {
+    const a = computeSchemaHash()
+    const b = computeSchemaHash()
+    expect(a).to.equal(b)
+    const altered = computeSchemaHash('declare schema main {}')
+    expect(altered).to.not.equal(a)
+  })
+
+  it('3. buildSnapshot produces a canonical generatedAt, the right formatVersion, and verifySnapshot accepts it (positive control)', () => {
+    const envelope = makeGoodEnvelope()
+    expect(envelope.generatedAt).to.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/)
+    expect(envelope.generatedAt).to.not.include('Z')
+    expect(envelope.generatedAt.length).to.equal(19)
+    expect(envelope.formatVersion).to.equal(SNAPSHOT_FORMAT_VERSION)
+    const result = verifySnapshot(envelope)
+    expect(result.ok).to.equal(true)
+  })
+
+  it('4. round trip: buildSnapshot -> serializeSnapshot -> parseSnapshot -> verifySnapshot returns ok:true', () => {
+    const envelope = makeGoodEnvelope()
+    const parsed = parseSnapshot(serializeSnapshot(envelope))
+    expect(parsed.ok).to.equal(true)
+    if (parsed.ok) {
+      const result = verifySnapshot(parsed.envelope)
+      expect(result.ok).to.equal(true)
+    }
+  })
+
+  it('5. truncation: dropping rows from one table while manifest stays untouched fails manifest-mismatch, detail names table + both counts, no PII leak', () => {
+    const good = makeGoodEnvelope()
+    const truncated = cloneEnvelope(good)
+    truncated.tables.Authority = [truncated.tables.Authority[0]!]
+    const result = verifySnapshot(truncated)
+    expect(result.ok).to.equal(false)
+    if (!result.ok) {
+      expect(result.reason).to.equal('manifest-mismatch')
+      expect(result.detail).to.include('Authority')
+      expect(result.detail).to.not.include(PII_CANARY)
+    }
+  })
+
+  it('6. corruption: changing exactly one cell value (row counts unchanged) fails digest-mismatch', () => {
+    const good = makeGoodEnvelope()
+    const corrupted = cloneEnvelope(good)
+    corrupted.tables.Authority[0]!.Name = 'A Different Name Entirely'
+    const result = verifySnapshot(corrupted)
+    expect(result.ok).to.equal(false)
+    if (!result.ok) expect(result.reason).to.equal('digest-mismatch')
+  })
+
+  it('7a. a table dropped entirely from tables while present in manifest fails manifest-mismatch', () => {
+    const good = makeGoodEnvelope()
+    const dropped = cloneEnvelope(good)
+    delete (dropped.tables as Record<string, unknown>).Election
+    const result = verifySnapshot(dropped)
+    expect(result.ok).to.equal(false)
+    if (!result.ok) expect(result.reason).to.equal('manifest-mismatch')
+  })
+
+  it('7b. an extra table present in tables but absent from manifest fails manifest-mismatch', () => {
+    const good = makeGoodEnvelope()
+    const extra = cloneEnvelope(good)
+    ;(extra.tables as Record<string, unknown>).Extra = [{ a: 1 }]
+    const result = verifySnapshot(extra)
+    expect(result.ok).to.equal(false)
+    if (!result.ok) expect(result.reason).to.equal('manifest-mismatch')
+  })
+
+  it('8. schema drift: an altered schemaHash fails schema-hash-mismatch BEFORE any manifest or digest comparison runs', () => {
+    const good = makeGoodEnvelope()
+    const drifted = cloneEnvelope(good)
+    drifted.schemaHash = 'not-the-real-schema-hash'
+    // ALSO manifest-broken — proves step 5 short-circuits ahead of step 6.
+    delete (drifted.tables as Record<string, unknown>).Election
+    const result = verifySnapshot(drifted)
+    expect(result.ok).to.equal(false)
+    if (!result.ok) expect(result.reason).to.equal('schema-hash-mismatch')
+  })
+
+  it('9. format drift: formatVersion 2 fails format-version-mismatch', () => {
+    const good = makeGoodEnvelope()
+    const drifted = cloneEnvelope(good)
+    ;(drifted as { formatVersion: number }).formatVersion = 2
+    const result = verifySnapshot(drifted)
+    expect(result.ok).to.equal(false)
+    if (!result.ok) expect(result.reason).to.equal('format-version-mismatch')
+  })
+
+  it('10. datetime: a generatedAt with a trailing Z (the classic landmine) fails non-canonical-generated-at', () => {
+    const good = makeGoodEnvelope()
+    const zSuffixed = cloneEnvelope(good)
+    zSuffixed.generatedAt = '2026-08-25T12:00:00Z'
+    const result = verifySnapshot(zSuffixed)
+    expect(result.ok).to.equal(false)
+    if (!result.ok) expect(result.reason).to.equal('non-canonical-generated-at')
+  })
+
+  it('11. out-of-band anchor: expectedDigest mismatch fails digest-mismatch even on an internally consistent envelope; matching expectedDigest passes', () => {
+    const good = makeGoodEnvelope()
+    const mismatched = verifySnapshot(good, { expectedDigest: 'not-the-real-digest' })
+    expect(mismatched.ok).to.equal(false)
+    if (!mismatched.ok) expect(mismatched.reason).to.equal('digest-mismatch')
+
+    const matched = verifySnapshot(good, { expectedDigest: good.digest })
+    expect(matched.ok).to.equal(true)
+  })
+
+  it('12. cross-network: a non-matching expectedNetworkHash fails network-hash-mismatch', () => {
+    const good = makeGoodEnvelope()
+    const result = verifySnapshot(good, { expectedNetworkHash: 'a-different-network-hash' })
+    expect(result.ok).to.equal(false)
+    if (!result.ok) expect(result.reason).to.equal('network-hash-mismatch')
+  })
+
+  it('13. ordering proof: simultaneously truncated AND bit-flipped fails manifest-mismatch, not digest-mismatch (step 6 precedes step 7)', () => {
+    const good = makeGoodEnvelope()
+    const multiFault = cloneEnvelope(good)
+    multiFault.tables.Authority = [multiFault.tables.Authority[0]!] // truncation
+    multiFault.tables.Election[0]!.AuthorityId = 'a-bit-flipped-value' // corruption elsewhere
+    const result = verifySnapshot(multiFault)
+    expect(result.ok).to.equal(false)
+    if (!result.ok) expect(result.reason).to.equal('manifest-mismatch')
+  })
+
+  it('14. no detail string from any negative case above contains the planted PII canary', () => {
+    const good = makeGoodEnvelope()
+    const cases: BootstrapSnapshot[] = []
+
+    const truncated = cloneEnvelope(good)
+    truncated.tables.Authority = [truncated.tables.Authority[0]!]
+    cases.push(truncated)
+
+    const corrupted = cloneEnvelope(good)
+    corrupted.tables.Authority[0]!.Name = 'Something Else'
+    cases.push(corrupted)
+
+    const dropped = cloneEnvelope(good)
+    delete (dropped.tables as Record<string, unknown>).Election
+    cases.push(dropped)
+
+    const drifted = cloneEnvelope(good)
+    drifted.schemaHash = 'wrong'
+    cases.push(drifted)
+
+    for (const envelope of cases) {
+      const result = verifySnapshot(envelope)
+      expect(result.ok).to.equal(false)
+      if (!result.ok) expect(result.detail).to.not.include(PII_CANARY)
+    }
+  })
+
+  it('15. computeContentDigest is deterministic for identical tables', () => {
+    const tables = makeTables()
+    expect(computeContentDigest(tables)).to.equal(computeContentDigest(tables))
   })
 })
