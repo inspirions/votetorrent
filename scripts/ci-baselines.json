@@ -1,0 +1,53 @@
+{
+  "_readme": [
+    "These are MEASURED baselines, not targets. Each number here was captured by actually",
+    "running the named command and reading its output on the date recorded in the entry's",
+    "measuredOn field.",
+    "Changing any number in this file is a deliberate act that belongs in the SAME commit as",
+    "whatever changed the underlying measurement (a fix, a new test, a dependency bump). This",
+    "file is never edited to make a red CI run go green without that accompanying change.",
+    "A DROP in a failure count is as much a reason to investigate as a RISE. A failure that",
+    "disappeared without a commit that fixed it is a signal, not a free pass — see voteEngine's",
+    "exact (not floor) check on both count and titles.",
+    "scripts/assert-ci-baselines.mjs reads this file by import.meta.url, never mutates it, and",
+    "has no 'update the baseline' mode. Updating a baseline is a human, reviewed commit."
+  ],
+  "voteEngine": {
+    "command": "yarn workspace @votetorrent/vote-engine test",
+    "measuredOn": "2026-08-26",
+    "minPassing": 1411,
+    "expectedFailing": 8,
+    "knownFailureTitles": [
+      "AuthorityEngine schema constraints - InviteSlot table should reject update or delete of InviteSlot (InsertOnly)",
+      "AuthorityEngine admin signing flow should reject update or delete of AdminSigning (InsertOnly)",
+      "D-01 compat gate: cid()/cid_decode registration + Wave 0 open-question probes Probe 3b: the bare RESEARCH Pattern 3 form json_extract(cid_decode(x),\"$.codec\")='raw' under-accepts even VALID input — Plan 02 must use cast(...as text)",
+      "post-peerId-patch blocker 2: cadre-core hardcodes clusterSize and drops allowUnvalidatedSmallCluster both createLibp2pNode call sites still hardcode clusterSize: 3",
+      "Optimystic plugin — composite-PK DELETE derives the wrong storage key (no-op delete) BUG: DELETE key (extractPrimaryKey on compacted PK-only oldKeyValues) does NOT match the stored key",
+      "Optimystic plugin — composite-PK DELETE derives the wrong storage key (no-op delete) CONTROL: single-column PK at index 0 is unaffected (explains why only composite PKs break)",
+      "P2P-11 residual: a relay-only peer has no address SEED (db-p2p 0.24.0) BLOCKER: findCluster sources a record's multiaddrs solely from what THIS node already knows",
+      "P2P-11 residual: a relay-only peer has no address SEED (db-p2p 0.24.0) documents the exact installed version this residual was measured against"
+    ],
+    "note": "Human shorthand for the 8 verbatim titles above, in order: InsertOnly x2 (AuthorityEngine InviteSlot + AdminSigning), a CID probe (D-01 compat gate Probe 3b), cadre-core clusterSize (post-peerId-patch blocker 2), Optimystic composite-PK x2 (DELETE storage-key bug + its single-column control), P2P-11 residual x2 (findCluster addressless-seeding blocker + its installed-version tripwire). All 8 are pre-existing and unchanged across this phase. minPassing was re-measured live during 50-13 at 1411 (up from an earlier phase-history figure of 1356 recorded before this wave's plans landed additional passing tests) — see the 50-13 SUMMARY's Deviations section."
+  },
+  "dashboardTier1": {
+    "command": "yarn workspace votetorrent-dashboard test:node",
+    "minPassing": 326,
+    "maxFailing": 0,
+    "maxSeconds": 45,
+    "note": "50-04's original local budget was 5s at 12 tests. The suite has grown to 326 tests across 50-05/50-08/50-09/50-12, and a live re-run during 50-13 measured ~17.5s internal / ~18s wall on this machine three times in a row. maxSeconds was therefore set to 45 (not the phase-history figure of 15, which is now stale and would fail on a clean run before any CI slowness is even added) to give real CI headroom over the current measured cost. The bound exists to keep tier 1 a fast gate -- exceeding it is a signal the tier is drifting into something else, not a number to raise reflexively. See the 50-13 SUMMARY's Deviations section for the full measurement."
+  },
+  "authorityTypecheck": {
+    "command": "yarn workspace votetorrent-authority typecheck",
+    "measuredOn": "2026-08-25",
+    "maxErrors": 51,
+    "note": "This is a ceiling, not a floor: the producer half added to apps/VoteTorrentAuthority by this phase must introduce none. A drop below 51 means someone fixed something and the ceiling should be lowered in that same commit, not silently absorbed."
+  },
+  "notEnforcedHere": {
+    "voterJest": {
+      "failingSuites": 4,
+      "cause": "uint8arrays",
+      "measuredOn": "2026-08-25",
+      "reason": "This phase (the authority web dashboard) touches nothing in apps/VoteTorrentVoter. Importing an unrelated red baseline into a gate whose whole value is trustworthiness would make the gate less useful, not more. Recorded here, and echoed to every CI run's job summary, precisely so it cannot be silently forgotten -- it is not this phase's to fix, and it is not this workflow's to run."
+    }
+  }
+}
