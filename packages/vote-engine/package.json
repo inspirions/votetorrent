@@ -19,6 +19,14 @@
 		"./rn": {
 			"types": "./dist/rn-entry.d.ts",
 			"import": "./dist/rn-entry.js"
+		},
+		"./browser": {
+			"types": "./dist/browser-entry.d.ts",
+			"import": "./dist/browser-entry.js"
+		},
+		"./bootstrap": {
+			"types": "./dist/bootstrap/index.d.ts",
+			"import": "./dist/bootstrap/index.js"
 		}
 	},
 	"scripts": {

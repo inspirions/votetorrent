@@ -139,21 +139,103 @@ function stripComments (src: string): string {
   return noBlockComments.replace(/\/\/.*$/gm, '')
 }
 
-/** Line-anchored import/export-from regex — never crosses a statement boundary. */
-const FROM_CLAUSE_RE = /^\s*(?:import|export)\b[^;\n]*?\bfrom\s*['"]([^'"]+)['"]/gm
-/** Line-anchored side-effect import regex (`import '...'`). */
-const SIDE_EFFECT_RE = /^\s*import\s+['"]([^'"]+)['"]/gm
+/**
+ * Declaration keywords that, immediately following `import`/`export`
+ * (+ optional `type`), mark the statement as NOT a from-clause import/export
+ * (e.g. `export const X = ...`, `export function f() {}`, `export default
+ * class {}`) — these must never trigger the from-clause accumulator below.
+ */
+const DECLARATION_KEYWORDS = new Set([
+  'const', 'let', 'var', 'function', 'class', 'interface', 'enum',
+  'namespace', 'abstract', 'declare', 'default'
+])
 
-/** Extract every import/export-from specifier from stripped source. */
+/**
+ * Extract every import/export-from specifier (plus bare side-effect imports)
+ * from stripped source.
+ *
+ * This is a bracket-depth-aware line accumulator, NOT a single `[\s\S]*?`
+ * regex spanning arbitrary text (that shape is exactly what this plan's
+ * `<read_first>` warns against — it can walk clean past unrelated code
+ * hunting for a distant `from`). Instead: identify each line that begins a
+ * genuine `import`/`export` statement, accumulate forward ONLY while braces
+ * are unbalanced (bounded to 30 lines), then look for a `from '...'` clause
+ * in the accumulated buffer. A statement with balanced/absent braces and no
+ * `from` on the same accumulated buffer (e.g. a bare `export { A, B }`
+ * re-export, or `export type Foo = { a: string }`) is correctly recorded as
+ * having no specifier — matching real language semantics, not a heuristic
+ * guess.
+ *
+ * `export type Foo = ...` (a type ALIAS, no specifier) is deliberately
+ * distinguished from `export type { Foo } from '...'` (a type RE-EXPORT):
+ * both start `export type `, but only the second's next token is `{`/`*`.
+ * A naive regex without this line-shape discrimination misclassifies
+ * `export type DbFactory = (h: string) => Promise<Database>`
+ * (`packages/vote-engine/src/types.ts`) as an unterminated from-clause hunt.
+ */
 function extractSpecifiers (strippedSrc: string): string[] {
+  const lines = strippedSrc.split('\n')
   const specifiers: string[] = []
-  for (const re of [FROM_CLAUSE_RE, SIDE_EFFECT_RE]) {
-    re.lastIndex = 0
-    let m: RegExpExecArray | null
-    while ((m = re.exec(strippedSrc)) !== null) {
-      specifiers.push(m[1])
+  let i = 0
+
+  while (i < lines.length) {
+    const line = lines[i]
+    const startMatch = line.match(/^\s*(import|export)\s+(type\s+)?(\S)/)
+    if (!startMatch) { i++; continue }
+
+    const keyword = startMatch[1]
+    const nextChar = startMatch[3]
+
+    if (nextChar !== '{' && nextChar !== '*' && nextChar !== "'" && nextChar !== '"') {
+      // Next token is a bare identifier (not `{`, `*`, or a quote). Either a
+      // declaration keyword (`const`/`function`/...) or, for `export`, any
+      // other bare identifier (`export type Foo = ...`, `export Foo` is not
+      // valid syntax outside `export default`) — neither is a from-clause
+      // statement. `import Foo from '...'` (default import) is the one
+      // legitimate bare-identifier case and falls through below.
+      const wordMatch = line.match(/^\s*(?:import|export)\s+(?:type\s+)?([A-Za-z_$][\w$]*)/)
+      const word = wordMatch ? wordMatch[1] : ''
+      if (DECLARATION_KEYWORDS.has(word) || keyword === 'export') {
+        i++
+        continue
+      }
     }
+
+    if (nextChar === "'" || nextChar === '"') {
+      const sideMatch = line.match(/^\s*import\s*['"]([^'"]+)['"]/)
+      if (sideMatch) {
+        specifiers.push(sideMatch[1])
+        i++
+        continue
+      }
+    }
+
+    // From-clause candidate (named/star/default import, or a from-reexport).
+    // Accumulate forward only while braces are unbalanced, bounded to 30
+    // lines so a genuinely malformed/unresolvable statement fails fast
+    // rather than silently consuming the rest of the file.
+    let buffer = line
+    let depth = (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length
+    let j = i
+    const maxLines = 30
+    while (depth > 0 && j - i < maxLines && j + 1 < lines.length) {
+      j++
+      buffer += '\n' + lines[j]
+      depth += (lines[j].match(/\{/g) ?? []).length - (lines[j].match(/\}/g) ?? []).length
+    }
+
+    let m = buffer.match(/\bfrom\s*['"]([^'"]+)['"]/)
+    if (!m && j + 1 < lines.length && /^\s*from\s*['"]/.test(lines[j + 1])) {
+      // Rare style: `from '...'` on its own line after the closing brace.
+      j++
+      buffer += '\n' + lines[j]
+      m = buffer.match(/\bfrom\s*['"]([^'"]+)['"]/)
+    }
+
+    if (m) specifiers.push(m[1])
+    i = j + 1
   }
+
   return specifiers
 }
 
