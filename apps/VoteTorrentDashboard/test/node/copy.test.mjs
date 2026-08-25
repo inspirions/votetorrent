@@ -1,0 +1,77 @@
+/**
+ * Tier-1 assertions over `src/i18n/copy.js`'s `COPY` table and `t()` helper.
+ *
+ * Browser-free, no display -- plain node:test. Each test below corresponds 1:1 to a
+ * `<behavior>` bullet in 50-04-PLAN.md Task 2.
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const { COPY, t } = await import('../../src/i18n/copy.js');
+
+test('t("bootstrap.cta") returns exactly "Redeem Code"', () => {
+	assert.equal(t('bootstrap.cta'), 'Redeem Code');
+});
+
+test('t("gate.badgeReal") and t("gate.badgeSimulated") return the D-18 binding wording', () => {
+	assert.equal(t('gate.badgeReal'), 'answered by the database');
+	assert.equal(t('gate.badgeSimulated'), 'simulated scope set');
+});
+
+test('t("network.forgetConfirmBody", {...}) interpolates and leaves no residual {{', () => {
+	const result = t('network.forgetConfirmBody', { authorityName: 'Acme County' });
+	assert.ok(result.includes('Acme County'), 'expected interpolated value in output');
+	assert.ok(!result.includes('{{'), 'expected no residual {{ placeholder marker');
+});
+
+test('t("does.not.exist") throws an Error naming the missing key', () => {
+	assert.throws(
+		() => t('does.not.exist'),
+		(err) => err instanceof Error && err.message.includes('does.not.exist'),
+	);
+});
+
+test('t("network.forgetConfirmBody") with no params throws naming the unresolved placeholder', () => {
+	assert.throws(
+		() => t('network.forgetConfirmBody'),
+		(err) => err instanceof Error && err.message.includes('authorityName'),
+	);
+});
+
+test('every value in COPY is a non-empty string', () => {
+	for (const [key, value] of Object.entries(COPY)) {
+		assert.equal(typeof value, 'string', `COPY.${key} must be a string`);
+		assert.ok(value.length > 0, `COPY.${key} must be non-empty`);
+	}
+});
+
+test('no COPY value contains a GSD decision ID (D-\\d{2})', () => {
+	const pattern = /\bD-\d{2}\b/;
+	for (const [key, value] of Object.entries(COPY)) {
+		assert.ok(!pattern.test(value), `COPY.${key} must not contain a decision ID: "${value}"`);
+	}
+});
+
+test('no COPY value contains a GSD phase number ("Phase \\d+")', () => {
+	const pattern = /\bPhase\s+\d+\b/;
+	for (const [key, value] of Object.entries(COPY)) {
+		assert.ok(!pattern.test(value), `COPY.${key} must not contain a phase number: "${value}"`);
+	}
+});
+
+test('no COPY value matches /read-only/i (D-17: no read-only panel state exists)', () => {
+	const pattern = /read-only/i;
+	for (const [key, value] of Object.entries(COPY)) {
+		assert.ok(!pattern.test(value), `COPY.${key} must not mention "read-only": "${value}"`);
+	}
+});
+
+test('COPY is frozen -- assigning a new key throws in strict mode', () => {
+	// COPY's JSDoc type is `Record<string, string>`, which TS permits assigning
+	// into via its index signature -- this is a RUNTIME check of Object.freeze's
+	// strict-mode behavior, not a compile-time one, so no @ts-expect-error is
+	// expected here.
+	assert.throws(() => {
+		COPY.__newKey__ = 'nope';
+	});
+});
