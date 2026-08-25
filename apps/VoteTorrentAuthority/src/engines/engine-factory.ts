@@ -41,7 +41,6 @@ import {
 } from '@votetorrent/vote-engine/rn';
 import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn';
 import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
-import { exportDatabaseSnapshot } from '../services/dashboard-bootstrap-producer';
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory';
 import type { StrandHost } from './rn-db-factory';
 import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated';
@@ -283,9 +282,23 @@ export class EngineFactory {
 	 * makes no writes, and this read path must not become the precedent that erodes
 	 * that rule: no `getDatabase()` is added here, and `ctx` itself is never
 	 * returned.
+	 *
+	 * The producer module is imported LAZILY (dynamic `import()`, not a
+	 * top-level `import`) rather than alongside this file's other engine
+	 * imports above. `dashboard-bootstrap-producer.ts` pulls in
+	 * `@votetorrent/vote-engine/bootstrap`, whose `snapshot-codec.ts` transitively
+	 * reaches `database/initialize.ts`'s module-scope crypto-plugin registration
+	 * (`FunctionFlags.UTF8` read at import time) — harmless in the real app, but
+	 * `rn-db-factory.test.ts` virtual-mocks `@quereus/quereus` with a narrower
+	 * surface that doesn't include `FunctionFlags`, so a top-level import here
+	 * broke that PRE-EXISTING suite purely by being reachable from this file's
+	 * module graph, without this method ever being called. Deferring the import
+	 * to call time keeps every non-dashboard consumer of `EngineFactory`
+	 * byte-for-byte unaffected by Phase 50's new dependency.
 	 */
 	async exportDashboardSnapshot(): Promise<BootstrapSnapshot> {
 		const ctx = this.requireEstablishedCtx();
+		const { exportDatabaseSnapshot } = await import('../services/dashboard-bootstrap-producer');
 		return exportDatabaseSnapshot(ctx.db, this.currentNetworkHash!);
 	}
 
