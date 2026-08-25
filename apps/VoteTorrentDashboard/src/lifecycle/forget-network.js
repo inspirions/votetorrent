@@ -44,11 +44,112 @@
  * officer's local copy is the officer choosing to end it, through this
  * module. A browser that is never told to forget a network keeps that
  * network's whole database, registrant PII included, indefinitely.
+ *
+ * A REAL-BROWSER SETTLE RACE, FOUND BY THE TIER-2 GATE (Task 4), NOT
+ * REPRODUCIBLE UNDER `fake-indexeddb`: in a genuine browser, an UN-AWAITED
+ * background operation left over from the very read that produced the `db`
+ * handle passed into `deleteNetworkDb` (a query-planner statistics write,
+ * observed empirically -- the resurrected shell carries exactly the two
+ * system stores such a write would need, and nothing else) can still be
+ * in flight the moment `deleteNetworkDb`'s own delete-then-confirm sequence
+ * completes. Because the underlying store plugin transparently reopens
+ * (and, per IndexedDB's own no-version-supplied semantics, thereby
+ * RECREATES) a database by name on any access, this background write can
+ * silently resurrect an EMPTY shell of the just-deleted database moments
+ * after `deleteNetworkDb` itself reported success. `fake-indexeddb` has no
+ * such shared-connection-singleton plugin internals to race against, which
+ * is exactly why this was invisible to every tier-1 test in this project.
+ *
+ * `deleteNetworkDbSettled` (below) is NOT a second destructive
+ * implementation -- it calls the ONE sanctioned `deleteNetworkDb` primitive,
+ * possibly more than once, and verifies against the SAME
+ * `indexedDB.databases()` truth `assertNetworkForgotten` already trusts.
+ * Between rounds it yields to the browser's task queue via a `MessageChannel`
+ * round trip -- a real macrotask, like the background write it is waiting
+ * out, but NOT `setTimeout`: this file holds itself to the same no-timer
+ * discipline as `freshness.js` (D-22), and a `MessageChannel` port round
+ * trip is not a polling interval, a subscription or a liveness construct --
+ * it is a single bounded wait inside one destructive action, never
+ * repeating once that action either completes or gives up. Bounded at
+ * `DELETE_SETTLE_MAX_ROUNDS` rounds; a genuine failure to converge is a
+ * `DeleteBlockedError`, the SAME name `deleteNetworkDb` itself uses, so a
+ * caller never has to distinguish "blocked on the first attempt" from
+ * "would not stay deleted after settling."
  */
 
 import { deleteNetworkDb, dbNameFor } from '../db/open-db.js';
 import { clearRowCounts, readRowCountsRecord } from '../db/reattach.js';
 import { findNetwork, removeNetwork, listNetworks } from '../db/networks-registry.js';
+
+/** How many delete-then-settle rounds `deleteNetworkDbSettled` will run
+ * before giving up and reporting `DeleteBlockedError`. Empirically the
+ * observed resurrection converges within 1-3 rounds; this leaves a wide
+ * margin without risking an unbounded loop. */
+const DELETE_SETTLE_MAX_ROUNDS = 8;
+/** How many macrotask round trips to wait, per round, before re-checking. */
+const DELETE_SETTLE_YIELDS_PER_ROUND = 40;
+
+/**
+ * Yield once to the browser's task queue via a `MessageChannel` round trip
+ * -- a real macrotask, the same category of task a background IndexedDB
+ * write completes as, without adding `setTimeout` to this file (see the
+ * header's D-22 note above).
+ *
+ * @returns {Promise<void>}
+ */
+function yieldToTaskQueue() {
+	return new Promise((resolve) => {
+		const channel = new MessageChannel();
+		channel.port2.onmessage = () => resolve(undefined);
+		channel.port1.postMessage(null);
+	});
+}
+
+/**
+ * Call the sanctioned `deleteNetworkDb` primitive, then verify against
+ * `indexedDB.databases()` that the database actually stayed gone --
+ * re-deleting (bounded) if a real-browser settle race resurrected an empty
+ * shell in the moment after a reported-successful delete. See the file
+ * header's "real-browser settle race" note.
+ *
+ * A rejection from `deleteNetworkDb` ITSELF (e.g. a genuinely blocked
+ * delete on the first attempt) is never caught here -- it propagates
+ * immediately, exactly as a bare `deleteNetworkDb` call would.
+ *
+ * @param {string} networkHash
+ * @param {import('../db/open-db.js').DeleteNetworkDbOptions} [options]
+ * @returns {Promise<void>}
+ */
+async function deleteNetworkDbSettled(networkHash, options) {
+	await deleteNetworkDb(networkHash, options);
+
+	// `indexedDB.databases()` absence is non-fatal -- see the same note in
+	// `assertNetworkForgotten` below. Nothing further to verify here.
+	if (typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function') {
+		return;
+	}
+
+	const name = dbNameFor(networkHash);
+	let remaining = await indexedDB.databases();
+	let round = 0;
+	while (remaining.some((entry) => entry.name === name) && round < DELETE_SETTLE_MAX_ROUNDS) {
+		for (let y = 0; y < DELETE_SETTLE_YIELDS_PER_ROUND; y += 1) {
+			// eslint-disable-next-line no-await-in-loop -- deliberately serial, waiting out a real macrotask each time
+			await yieldToTaskQueue();
+		}
+		await deleteNetworkDb(networkHash);
+		remaining = await indexedDB.databases();
+		round += 1;
+	}
+
+	if (remaining.some((entry) => entry.name === name)) {
+		const err = new Error(
+			`deleteNetworkDbSettled: "${name}" is still listed by indexedDB.databases() after ${DELETE_SETTLE_MAX_ROUNDS} settle-and-retry rounds`,
+		);
+		err.name = 'DeleteBlockedError';
+		throw err;
+	}
+}
 
 /** The officer typed a confirmation that does not match the network's
  * `authorityName`. Never carries either value -- both are snapshot content. */
@@ -120,10 +221,13 @@ export async function forgetNetwork(options) {
 		throw new ForgetConfirmationMismatchError();
 	}
 
-	// 3. Delete the database. No exception-handling wraps this call -- a
-	//    rejection (most importantly DeleteBlockedError) must leave this
-	//    function by propagation, never be converted into a success shape.
-	await deleteNetworkDb(networkHash, timeoutMs === undefined ? { db } : { db, timeoutMs });
+	// 3. Delete the database, settling out the real-browser resurrection
+	//    race documented in the file header. No exception-handling wraps
+	//    this call -- a rejection (most importantly DeleteBlockedError,
+	//    whether from the first attempt or from settling never converging)
+	//    must leave this function by propagation, never be converted into a
+	//    success shape.
+	await deleteNetworkDbSettled(networkHash, timeoutMs === undefined ? { db } : { db, timeoutMs });
 
 	// 4. Explicit clear, even though step 3 already clears this key --
 	//    contract 6's clear-on-delete obligation stays local to this file
