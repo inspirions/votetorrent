@@ -111,8 +111,19 @@ const execAsync = promisify(exec);
 // crypto plugin's own internal quereus-version scheme is FIXED upstream.
 // What remains is VT-side: packages/attestation-native depends on
 // quereus-plugin-crypto without declaring @quereus/quereus itself.
+//
+// Phase 50-04: the root `resolutions` entry for @optimystic/quereus-plugin-crypto
+// is a floating `^0.24.0` range, and upstream published a 0.24.2 patch release
+// sometime before this plan ran. `yarn.lock` at this plan's starting commit had
+// ALREADY re-resolved every consumer to the single unified 0.24.2 copy (verified:
+// `git show HEAD:yarn.lock` contains zero `0.24.0` entries and one `0.24.2` entry)
+// -- this KNOWN_ALLOWED value was already stale before apps/VoteTorrentDashboard
+// existed. Re-keyed 0.24.0 -> 0.24.2 to match the actual (still single-copy, still
+// benign) resolved state; `yarn why @optimystic/quereus-plugin-crypto` confirms
+// every consumer (cadre-core, quereus-plugin-sereus, attestation-native,
+// vote-engine, and now votetorrent-dashboard) resolves the SAME 0.24.2 descriptor.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:0.24.0',
+  '@optimystic/quereus-plugin-crypto@npm:0.24.2',
 ]);
 
 // The ✘ marker (U+2718)
