@@ -662,6 +662,18 @@ const resources = {
 			registrantLifecycleKeepCurrentExpiration: 'Keep Current Expiration',
 			registrantLifecycleConfirmRenewal: 'Confirm Renewal',
 			registrantLifecycleConfirmReinstatement: 'Confirm Reinstatement',
+			// 50-UI-SPEC.md § Copywriting Contract — dashboardSignInCode* group (the RN
+			// authority app's "Producer screen" copy rows, verbatim). No phase number or
+			// decision ID may appear in these strings — see the module carrying
+			// mintDashboardSignInCode for why.
+			dashboardSignInCodeTitle: 'Dashboard Sign-In Code',
+			dashboardSignInCodeBody: "Show this code to the officer signing in to the web dashboard. It's single-use and expires in {{minutes}} minutes.",
+			dashboardSignInCodeGenerateButton: 'Generate New Code',
+			dashboardSignInCodeUsed: 'This code has been used.',
+			dashboardSignInCodeExpired: 'This code has expired. Generate a new one.',
+			dashboardSignInCodeCopyButton: 'Copy Code',
+			dashboardSignInCodeCountdown: 'Expires in {{remaining}}',
+			dashboardSignInCodeIdle: 'Generate a code to sign an officer in to the web dashboard.',
 			// Phase 47 (D-01/D-02/D-14) — registrantAccessTrail* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantAccessTrailSectionTitle: 'Access History',
 			// D-01: load-bearing framing — accountability/transparency, NOT a security control. Do not paraphrase.
@@ -1499,6 +1511,18 @@ const resources = {
 			registrantLifecycleKeepCurrentExpiration: 'Mantener Vencimiento Actual',
 			registrantLifecycleConfirmRenewal: 'Confirmar Renovación',
 			registrantLifecycleConfirmReinstatement: 'Confirmar Reincorporación',
+			// 50-UI-SPEC.md § Copywriting Contract — dashboardSignInCode* group (the RN
+			// authority app's "Producer screen" copy rows, verbatim). No phase number or
+			// decision ID may appear in these strings — see the module carrying
+			// mintDashboardSignInCode for why.
+			dashboardSignInCodeTitle: 'Código de Inicio de Sesión del Panel',
+			dashboardSignInCodeBody: 'Muestre este código al funcionario que inicia sesión en el panel web. Es de un solo uso y vence en {{minutes}} minutos.',
+			dashboardSignInCodeGenerateButton: 'Generar Nuevo Código',
+			dashboardSignInCodeUsed: 'Este código ya ha sido usado.',
+			dashboardSignInCodeExpired: 'Este código ha vencido. Genere uno nuevo.',
+			dashboardSignInCodeCopyButton: 'Copiar Código',
+			dashboardSignInCodeCountdown: 'Vence en {{remaining}}',
+			dashboardSignInCodeIdle: 'Genere un código para iniciar sesión a un funcionario en el panel web.',
 			// Phase 47 (D-01/D-02/D-14) — registrantAccessTrail* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantAccessTrailSectionTitle: 'Historial de Acceso',
 			// D-01: load-bearing framing — accountability/transparency, NOT a security control. Do not paraphrase.

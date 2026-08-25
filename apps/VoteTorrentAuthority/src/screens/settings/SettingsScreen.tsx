@@ -333,6 +333,19 @@ export default function SettingsScreen() {
 					/>
 				</View>
 
+				{/* 50-07 (D-09) — the dashboard bearer sign-in code producer entry,
+				    placed adjacent to the two device-level provisioning rows above for
+				    the same reason: it exports only data the officer's own device
+				    already holds. Deliberately NOT scope-gated: gating it would hide
+				    the feature from exactly the officer who needs it. */}
+				<View testID="settings-dashboard-signin-code-entry">
+					<InfoCard
+						title={t("dashboardSignInCodeTitle")}
+						icon="chevron-right"
+						onPress={() => navigation.navigate("DashboardSignInCode")}
+					/>
+				</View>
+
 				<ThemedText type="subtitle" style={styles.networkTitle}>
 					{currentNetwork}
 				</ThemedText>

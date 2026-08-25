@@ -64,6 +64,7 @@ import RegistrantDetailScreen from "../screens/registration/RegistrantDetailScre
 import AttestationProvisioningStatusScreen from "../screens/registration/AttestationProvisioningStatusScreen";
 // Phase 49 plan 49-10 (D-14) — the officer-facing signing-key provisioning/recovery screen.
 import ProvisionSigningKeyScreen from "../screens/users/ProvisionSigningKeyScreen";
+import DashboardSignInCodeScreen from "../screens/dashboard/DashboardSignInCodeScreen";
 import PollingDevicesScreen from "../screens/authorities/PollingDevicesScreen";
 import AuthorityPeersScreen from "../screens/authorities/AuthorityPeersScreen";
 import { CreateElectionScreen } from "../screens/elections/CreateElectionScreen";
@@ -529,6 +530,15 @@ export const RootNavigator = () => {
 				name="ProvisionSigningKey"
 				component={ProvisionSigningKeyScreen}
 				options={{ title: t("signingKeyProvisioningScreenTitle") }}
+			/>
+			{/* 50-07 (D-03/D-05/D-09) — the dashboard bearer sign-in code producer
+			    screen. Pushed from Settings, so it uses the same non-modal
+			    options={{ title }} shape as ProvisionSigningKey above, never
+			    presentation:"modal", never a CloseButton headerLeft. */}
+			<Stack.Screen
+				name="DashboardSignInCode"
+				component={DashboardSignInCodeScreen}
+				options={{ title: t("dashboardSignInCodeTitle") }}
 			/>
 			<Stack.Screen
 				name="PollingDevices"

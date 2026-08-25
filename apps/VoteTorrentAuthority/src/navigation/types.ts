@@ -115,6 +115,11 @@ export type RootStackParamList = {
 	// (see 49-UI-SPEC.md), since visually and copy-wise it is the identical variant — only *how*
 	// the screen was reached differs, not what it renders.
 	ProvisionSigningKey: { reason: 'first-run' | 'invalidated' };
+	// 50-07 (D-03/D-05/D-09) — the authority-app producer screen for the web
+	// dashboard's bearer sign-in code. No params: the screen reads its staged
+	// record straight out of AsyncStorage (dashboard-signin-code.ts) and
+	// resolves the live network snapshot through useApp() itself.
+	DashboardSignInCode: undefined;
 	// Phase 9 plan 09-01 — type entries for routes whose screens land in later
 	// plans (CreateElection in 09-02, CreateBallot in 09-04). Stack.Screen
 	// registration is deferred; only the type signature is added here so the
