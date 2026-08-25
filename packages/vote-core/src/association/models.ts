@@ -62,10 +62,67 @@ export interface AttestationChallenge {
  */
 export interface IOSAttestationDetails {
   type: 'iOS'
-  /** Public key specifically for iOS Secure Enclave */
+  /**
+   * The Secure Enclave P-256 VOTING key (`K_vote`), 33-byte compressed SEC1 point, hex-encoded —
+   * the same `UserKey.PubKey` form Android registers. This MUST equal the `AttestationChallenge`'s
+   * `deviceKey`; `AssociationAssociateBuilder.validateNonceCrossField` enforces it.
+   *
+   * Note this is NOT the attested key. Apple's App Attest key (`K_att`, identified by
+   * `appAttestKeyId`) cannot sign arbitrary payloads — only `generateAssertion` — so it can never
+   * be the voting key. The two are bound by `assertion`; see
+   * `packages/vote-engine/ATTESTATION-CONTRACT-IOS.md` §0/§3.
+   */
   secureEnclavePublicKey: string
-  /** Optional token from Apple's DeviceCheck API */
+  /**
+   * Optional token from Apple's DeviceCheck API.
+   *
+   * UNUSED under integrity bar A (the settled decision): DeviceCheck requires an authority→Apple
+   * round trip, which would break D-04's offline verifier posture. Retained so a future switch to
+   * bar B is a flag rather than a model change. See ATTESTATION-CONTRACT-IOS.md §9.
+   */
   deviceCheckToken?: string
+
+  // ---- App Attest cross-sign (ATTESTATION-CONTRACT-IOS.md §3/§4) ----
+
+  /** App Attest key id — base64 SHA-256 of `K_att`'s public key. Apple's credential identifier. */
+  appAttestKeyId: string
+  /**
+   * Base64 CBOR `{ signature, authenticatorData }` from `DCAppAttestService.generateAssertion` —
+   * THE CROSS-SIGN. This is what lets the attested app vouch that `K_vote` is its voting key.
+   * Without it `K_vote` is an unattested key and the attestation proves nothing about the thing
+   * doing the voting.
+   */
+  assertion: string
+  /**
+   * Assertion replay counter, read from the assertion's `authenticatorData`. Must be STRICTLY
+   * greater than any counter previously stored for this `appAttestKeyId`; at association time there
+   * is no stored value, so it must be >= 1.
+   */
+  assertionCounter: number
+  /**
+   * Proof of possession of `K_vote` (§4): a 64-byte compact low-S `r||s` hex signature by `K_vote`
+   * itself over `SHA256(utf8(POP_DIGEST))`.
+   *
+   * REQUIRED, and with no Android counterpart: neither the attestation nor the assertion proves the
+   * device holds `K_vote`'s private key — both are signed by `K_att`.
+   */
+  popSignature: string
+  /**
+   * The `BOUND_DIGEST` (`Digest(challenge.nonce, challenge.deviceKey)`, base64url) this ceremony
+   * answered — iOS's analogue of `AndroidAttestationDetails.nonce`, and what makes the iOS
+   * attestation checkable by the builder's cross-field anti-relay validator.
+   *
+   * The verifier RECOMPUTES this from authority-held values and never trusts the submitted value;
+   * it is carried so a mismatch is caught early and legibly rather than as an opaque signature
+   * failure.
+   */
+  boundDigest: string
+  /**
+   * Which App Attest environment produced the attestation. MUST match the credCert `aaguid`
+   * (`appattestdevelop` vs `appattest` + 7 zero bytes) — a `development` attestation must NEVER be
+   * accepted by a production authority, and the aaguid is the only thing distinguishing them.
+   */
+  environment: 'development' | 'production'
 }
 
 /**
