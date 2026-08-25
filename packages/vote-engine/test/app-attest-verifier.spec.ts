@@ -299,9 +299,12 @@ function buildCrossSign (mutate: CrossSignMutation = {}): {
   const counter = mutate.zeroCounter === true ? 0 : (mutate.replayCounter === true ? 1 : 5)
   authData[36] = counter
 
+  // `prehash: true` — Apple signs SHA256(nonce), not the nonce itself. Verified against a real
+  // device assertion in spike 085; signing with `prehash: false` here would reproduce the exact
+  // blind spot that let the original bug through a green suite.
   const assertionNonce = sha256(authData, sha256(utf8(assertionDigest)))
   const signingKey = mutate.assertionByWrongKey === true ? p256.utils.randomSecretKey() : kAttPriv
-  const assertionSig = p256.sign(assertionNonce, signingKey, { prehash: false, format: 'der' })
+  const assertionSig = p256.sign(assertionNonce, signingKey, { prehash: true, format: 'der' })
 
   const popBound = recomputeChallengeDigest(CHALLENGE_NONCE, deviceKey)
   const popDigest = mutate.popOverWrongDigest === true

@@ -17,8 +17,14 @@ precisely where iOS cannot follow."
 > at all** received a `development` attestation (aaguid `appattestdevelop`, receipt `sandbox`), so
 > the absence of the entitlement does NOT imply production — the provisioning profile decides.
 >
-> Still unproven: the §3 assertion and §4 proof-of-possession against real bytes (the probe produced
-> a real assertion but over placeholder digests), and the biometric-invalidation behaviour.
+> **§3 and §4 are ALSO hardware-proven** (spike 085 run 2, real digests injected):
+> `verifyCrossSign -> ok=true`, a real Apple assertion binding a real Secure Enclave voting key with
+> a real proof-of-possession signature. That run found a genuine bug in §3.3's implementation — the
+> assertion signature is DOUBLE-hashed and was being verified as single-hashed, which a synthetic
+> fixture could not catch because it generated signatures the same wrong way. See §3.3.
+>
+> Still unproven: biometric-set invalidation (`.biometryCurrentSet`) and the `LAError` code table —
+> neither is Team-ID-blocked; they need a deliberate Face ID re-enrolment.
 
 **Status:** the wire format below is implemented by
 `src/association/verifiers/app-attest.ts` + `verifiers/app-attest-assertion.ts` and covered by
@@ -144,14 +150,22 @@ intentional and load-bearing: **one rule** ("hash the UTF-8 of the base64url str
 
 ### 3.3 What Apple returns
 
-CBOR `{ signature: bytes, authenticatorData: bytes }`, where the signature is over
+CBOR `{ signature: bytes, authenticatorData: bytes }`, where
 
 ```
 assertionNonce = SHA256( authenticatorData ‖ clientDataHash )
 ```
 
-— the same construction as §2, verified against `K_att`'s public key, which the authority extracted
-from the credCert during §2 and stored.
+and the signature is a standard **ECDSA-SHA256 signature over `assertionNonce`** — so the digest
+actually signed is `SHA256(assertionNonce)`, a **second** hash. Verified against `K_att`'s public
+key, which the authority extracted from the credCert during §2 and stored.
+
+> **This is NOT the same shape as §2, despite appearances.** In §2 the nonce is compared as a value
+> (it sits in the credCert extension); here it is *signed*, and signing hashes it again. Implementing
+> this with the nonce as the final digest (`prehash: false`) produces a verifier that rejects every
+> real Apple assertion — and, because a synthetic fixture will happily generate signatures the same
+> wrong way, a fully green test suite. That is exactly what happened; it was caught only by a real
+> device assertion (spike 085, run 2). Verify against hardware before trusting this section.
 
 ### 3.4 Producer call order (this order is required)
 

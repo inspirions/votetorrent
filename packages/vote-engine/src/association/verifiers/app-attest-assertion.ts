@@ -107,14 +107,25 @@ export function verifyCrossSign (
       return { ok: false, reason: `assertion counter ${counter} is not greater than the last seen counter ${floor} — replay` }
     }
 
-    // ---- §8.9 signature over SHA256(authData || SHA256(utf8(ASSERTION_DIGEST))) ----
+    // ---- §8.9 assertion signature ----
+    //
+    // nonce = SHA256(authenticatorData || clientDataHash), and the signature is a standard
+    // ECDSA-SHA256 signature OVER THAT NONCE — i.e. the signed digest is SHA256(nonce), a SECOND
+    // hash. Hence `prehash: true` here, passing the nonce as the message.
+    //
+    // This cost a real bug. The first implementation passed the nonce with `prehash: false`,
+    // treating it as the final digest, and every synthetic test passed — because the test fixture
+    // *generated* signatures the same wrong way. A self-consistent fixture cannot catch a
+    // misunderstanding it shares with the code. It was caught only when a REAL assertion from a
+    // real iPhone (spike 085, run 2) failed to verify, and a four-way construction trial
+    // (`diag-assertion.ts`) settled which message Apple actually signs. Do not "simplify" this back.
     const clientDataHash = sha256(utf8(assertionDigest))
     const assertionNonce = sha256(authenticatorData, clientDataHash)
     // Apple returns the assertion signature in DER. K_att's key is P-256.
     let assertionOk: boolean
     try {
       assertionOk = p256.verify(signature, assertionNonce, expect.appAttestPublicKeyRaw, {
-        prehash: false, format: 'der', lowS: false
+        prehash: true, format: 'der', lowS: false
       })
     } catch {
       assertionOk = false
