@@ -72,6 +72,13 @@ module.exports = {
       '<rootDir>/node_modules/@votetorrent/vote-engine/dist/index.js',
     '^@votetorrent/vote-engine/rn$':
       '<rootDir>/node_modules/@votetorrent/vote-engine/dist/rn-entry.js',
+    // 50-07 (D-07/D-13): the browser-facing bootstrap barrel. Jest's CJS
+    // resolver does not follow the package's "exports" map for this
+    // subpath (same class of gap the "./rn" mapper above already works
+    // around), so `@votetorrent/vote-engine/bootstrap` must be mapped
+    // explicitly to its built entry point.
+    '^@votetorrent/vote-engine/bootstrap$':
+      '<rootDir>/node_modules/@votetorrent/vote-engine/dist/bootstrap/index.js',
     // ESM-only transitive deps of @quereus/quereus — map to their main entry for CJS resolver.
     '^inheritree$': '<rootDir>/node_modules/inheritree/dist/index.js',
     '^moat-maker$': '<rootDir>/node_modules/moat-maker/build/index.js',

@@ -40,6 +40,8 @@ import {
 	AuthorityConfigEngine,
 } from '@votetorrent/vote-engine/rn';
 import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn';
+import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
+import { exportDatabaseSnapshot } from '../services/dashboard-bootstrap-producer';
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory';
 import type { StrandHost } from './rn-db-factory';
 import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated';
@@ -263,6 +265,28 @@ export class EngineFactory {
 	 */
 	isAttestationVerifierProvisioned(): boolean {
 		return this.playConsoleKeysProvisioned;
+	}
+
+	/**
+	 * 50-07 (D-07/D-09/D-13): the dashboard producer's snapshot seam. Calls
+	 * `requireEstablishedCtx()` and passes `ctx.db` — together with the
+	 * currently-established network's hash — to `exportDatabaseSnapshot`,
+	 * returning the resulting 50-02 envelope.
+	 *
+	 * Preserves the SAME security rule `isAttestationVerifierProvisioned` and every
+	 * sibling method above it already hold: the factory keeps `ctx` internal, and
+	 * the caller (ultimately `DashboardSignInCodeScreen` via `AppProvider`) receives
+	 * a snapshot VALUE, never a `Database` handle. That distinction is load-bearing
+	 * here specifically because tier-2 authorization (`iad` / `ik`) has zero schema
+	 * sites — it exists only as `context.Is*Valid` checks inside the engine layer —
+	 * so a caller holding a raw `Database` handle would silently lose it. Phase 50
+	 * makes no writes, and this read path must not become the precedent that erodes
+	 * that rule: no `getDatabase()` is added here, and `ctx` itself is never
+	 * returned.
+	 */
+	async exportDashboardSnapshot(): Promise<BootstrapSnapshot> {
+		const ctx = this.requireEstablishedCtx();
+		return exportDatabaseSnapshot(ctx.db, this.currentNetworkHash!);
 	}
 
 	// ---------- private helpers ----------

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import type { PropsWithChildren } from "react";
 import type { INetworksEngine, IDefaultUserEngine, NetworkReference } from "@votetorrent/vote-core";
+import type { BootstrapSnapshot } from "@votetorrent/vote-engine/bootstrap";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { hideSplash } from "react-native-splash-view";
 import { EngineFactory } from "../engines/engine-factory";
@@ -34,6 +35,17 @@ interface AppContextType {
 	 * the init effect), so a freshly-created or just-selected network appeared "not selected".
 	 */
 	selectNetwork: (networkRef: NetworkReference) => Promise<void>;
+	/**
+	 * 50-07 (D-07/D-09/D-13): export the whole local database, for the currently
+	 * established network, as a verified 50-02 snapshot envelope. Consumed by
+	 * `DashboardSignInCodeScreen`, which never imports `EngineFactory` directly —
+	 * this passthrough is that screen's ONLY path to a snapshot, mirroring
+	 * `isAttestationVerifierProvisioned`'s existing factory-ref passthrough shape.
+	 * Rejects with a `NoNetworkEstablishedError` (see `engine-factory.ts`) when no
+	 * network is yet selected; the screen detects that with
+	 * `isNoNetworkEstablishedError` and renders `NoNetwork`, never a raw message.
+	 */
+	exportDashboardSnapshot: () => Promise<BootstrapSnapshot>;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -106,6 +118,15 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// warning rather than falsely claiming the verifier is ready.
 	const isAttestationVerifierProvisioned = useCallback(() => {
 		return engineFactoryRef.current?.isAttestationVerifierProvisioned() ?? false;
+	}, []);
+
+	// 50-07: passthrough to the factory's snapshot seam (see AppContextType's doc
+	// comment above). No fallback default here — unlike the boolean probe above,
+	// there is no safe "conservative" snapshot value to return if the ref is
+	// somehow absent, so an absent factory ref surfaces as a rejected promise
+	// rather than a silently empty snapshot.
+	const exportDashboardSnapshot = useCallback(async (): Promise<BootstrapSnapshot> => {
+		return engineFactoryRef.current!.exportDashboardSnapshot();
 	}, []);
 
 	// Activate a network at runtime (create / picker "Select") without a reboot.
@@ -302,6 +323,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 				isInitialized,
 				hasNetwork,
 				selectNetwork,
+				exportDashboardSnapshot,
 			}}
 		>
 			{children}
