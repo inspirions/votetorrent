@@ -334,10 +334,31 @@ class AttestationNativeModule: NSObject {
         code = "CANCELED"
       case LAError.biometryNotEnrolled.rawValue: code = "NO_BIOMETRICS_ENROLLED"
       case LAError.biometryLockout.rawValue:     code = "LOCKOUT_PERMANENT"
-      // A key destroyed by a biometric-set change surfaces here — the `.biometryCurrentSet`
-      // analogue of Android's KEY_INVALIDATED_REASSOCIATE.
-      case Int(errSecItemNotFound):              code = "KEY_INVALIDATED_REASSOCIATE"
-      default:                                   code = "BIOMETRIC_ERROR"
+      default:
+        // MEASURED 2026-08-25 (spike 085 leg 7, iPhone 13 / iOS 26.6.1). A key invalidated by a
+        // biometric-set change does NOT surface as `errSecItemNotFound`, which is what this
+        // mapping originally assumed from the documentation. What actually comes back is:
+        //
+        //     domain = "CryptoTokenKit"   code = -3
+        //
+        // and the keychain entry still LOADS fine (`SecItemCopyMatching` succeeds, and the public
+        // key is still readable) — only the signing operation fails. So neither "is the key
+        // present?" nor `errSecItemNotFound` detects invalidation; the failure is visible only at
+        // use, and only under this domain/code pair.
+        //
+        // Left in the `default` arm rather than a `case` because `CryptoTokenKit` error codes are
+        // not a public constant set — matching on the domain string is the honest way to express
+        // "this is what iOS actually returned", and a bare `case -3` would collide with any other
+        // API that happens to use -3.
+        if err.domain == "CryptoTokenKit" && err.code == -3 {
+          code = "KEY_INVALIDATED_REASSOCIATE"
+        } else if err.code == Int(errSecItemNotFound) {
+          // Retained: the key genuinely being absent is a different condition, and on other iOS
+          // versions invalidation may yet surface this way. Both map to the same recovery action.
+          code = "KEY_INVALIDATED_REASSOCIATE"
+        } else {
+          code = "BIOMETRIC_ERROR"
+        }
       }
       reject(code, err.localizedDescription, err)
       return
