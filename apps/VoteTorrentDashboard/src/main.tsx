@@ -2,6 +2,7 @@ import './app.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { enginePreflight } from './engine-preflight.js';
+import { t } from './i18n/copy.js';
 
 declare global {
 	interface Window {
@@ -17,10 +18,14 @@ const { exportCount: engineExportCount, exportNames: engineExportNames } = engin
 window.__DASHBOARD__ = Object.freeze({ engineExportCount, engineExportNames });
 
 function App() {
-	// TODO(Task 2): replace this placeholder text with t('bootstrap.emptyNetworksHeading')
-	// and t('bootstrap.emptyNetworksBody') from ./i18n/copy.js.
+	// First real consumer of the copy table — proves the import path works
+	// through both Vite and tsc. This placeholder screen is replaced by the
+	// real bootstrap flow in a later plan; the copy itself does not change
+	// (contract C2 — this plan owns the table, no later plan edits it).
 	return (
 		<main>
+			<h1>{t('bootstrap.emptyNetworksHeading')}</h1>
+			<p>{t('bootstrap.emptyNetworksBody')}</p>
 			<p>vote-engine browser exports: {engineExportCount}</p>
 		</main>
 	);
