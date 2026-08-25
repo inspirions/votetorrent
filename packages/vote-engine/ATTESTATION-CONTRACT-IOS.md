@@ -176,6 +176,19 @@ key, which the authority extracted from the credCert during §2 and stored.
    `attestKey` with §2's hash, then `generateAssertion` with §3.2's hash.
 5. JS calls `signWithDeviceKey` over §4's digest to prove possession of `K_vote`.
 
+> **JS producer implemented 2026-08-25** in
+> `packages/attestation-native/src/real-attestation-producer.ts`: `produce()` now branches on
+> `Platform.OS` and `produceIos()` executes steps 1-5 in this order. Before that the producer was
+> Android-shaped with NO platform branch at all — it passed `boundDigestUtf8Base64` into the
+> `assertionDigest` slot, parsed `androidId`/`integrityToken`, and hardcoded
+> `platformDetails.type: 'Android'`, so no iOS ceremony could ever have succeeded. The native module
+> and the verifier were both complete; only the seam between them was missing.
+>
+> `ASSERTION_DIGEST` and `POP_DIGEST` exist in two independent implementations (device producer,
+> authority verifier) that must never drift. `vote-engine/test/ios-producer-verifier-agreement.spec.ts`
+> pins the verifier against CAPTURED PRODUCER OUTPUT — not against values recomputed from the
+> verifier itself, which would agree by construction.
+
 > **Implemented 2026-08-25** in `083-ios-native-parity-surface/ios/AttestationNativeModule.swift`:
 > `produceAttestation(keyAlias, boundDigest, assertionDigest, enableDeviceCheck)`. The Android
 > ABI-parity leftover `boundDigestUtf8Base64` (which iOS never used) is gone, and the native

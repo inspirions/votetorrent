@@ -13,7 +13,7 @@
 import 'reflect-metadata'
 import { X509Certificate, X509ChainBuilder } from '@peculiar/x509'
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { cborDecode, type CborValue } from './cbor.js'
+import { cborDecode, type CborValue } from '@votetorrent/vote-core'
 import { decodeAppleNonceExtension, APPLE_NONCE_OID } from './apple-nonce-extension.js'
 
 export interface AppAttestVerification {

@@ -17,7 +17,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { p256 } from '@noble/curves/nist.js'
 import { digestFields, resolveHasher, resolveOutputEncoder } from '@optimystic/quereus-plugin-crypto'
-import { cborDecode } from './cbor.js'
+import { cborDecode } from '@votetorrent/vote-core'
 import { recomputeChallengeDigest } from './digest-binding.js'
 
 const hasher = resolveHasher('sha256')
