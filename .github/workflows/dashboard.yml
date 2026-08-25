@@ -1,0 +1,456 @@
+name: Dashboard gates
+
+# This workflow wires the dashboard's three already-built test tiers into a
+# permanent CI gate. A reader coming to this file cold needs four things this
+# file cannot say anywhere else:
+#
+# (a) What each tier can and cannot prove. Tier 1 (job `logic-gate`) is a fast
+#     browser-free suite over pure logic modules -- it proves NOTHING about
+#     persistence, quota, eviction, cross-tab locking, or structured-clone
+#     edges, and it CANNOT catch a missing `setDefaultVtabName`: every
+#     in-session assertion passes while nothing was actually written to
+#     IndexedDB. That is exactly why job `logic-gate`'s name says so
+#     explicitly, and why tiers 2 and 3 exist as a separate, independent job
+#     against real headless Chrome.
+# (b) The two `--prove-*` modes (`--prove-trap` for tier 2, `--prove-drift`
+#     for tier 3) are INERTNESS CONTROLS, not extra gates. Each one runs the
+#     real gate against a deliberately broken fixture and INVERTS the
+#     expectation: exit 0 means the inner run genuinely FAILED. A green
+#     workflow run in which either control did NOT fire is a broken gate
+#     masquerading as a pass, not a real pass -- this file greps the whole
+#     browser-gates log for the substring "is inert" and fails the job if it
+#     is absent from either control's output.
+# (c) The three measured baselines this phase closes, and which one this
+#     workflow enforces. `packages/vote-engine` is enforced exactly (8 known
+#     failures, verbatim titles) because this phase edited that package
+#     twice. `apps/VoteTorrentAuthority`'s typecheck is enforced as a ceiling
+#     because this phase added files there. `apps/VoteTorrentVoter`'s jest
+#     suite (4 failing on uint8arrays) is recorded in scripts/ci-baselines.json
+#     and echoed to every `baselines` job run, but deliberately NOT run here:
+#     this phase touches nothing in the voter, and importing an unrelated red
+#     baseline into a gate whose entire value is trustworthiness would make
+#     the gate less useful, not more.
+# (d) This workflow reads NO repository secret and publishes nothing. Every
+#     step is either a local command or a diagnostic-only upload gated on
+#     failure.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  # No `paths` / `paths-ignore` filter: the gates always run on every push and
+  # pull request. A path filter was considered and declined -- skip semantics
+  # are one more place a verdict can be misread ("no run" silently read as
+  # "passed"), and this workflow is fast enough that the runner-minute cost of
+  # always running it is the right trade. Reopen this only if runner-minute
+  # cost becomes the dominant complaint.
+  #
+  # Only the plain `pull_request` event above is used. Its target-scoped
+  # sibling event (the one whose name appends "_target") is intentionally
+  # absent and must stay absent: that event runs with a write-scoped token
+  # against the base repo's secrets while checking out the PR head's
+  # untrusted code, which would let a fork-submitted PR execute arbitrary
+  # code with elevated permissions. `pull_request` checks out and runs with
+  # the fork's own limited, read-only token instead.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dashboard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =========================================================================
+  # Job 1 -- Tier 1: fast, browser-free logic gate.
+  # =========================================================================
+  logic-gate:
+    name: "Tier 1 - logic gate (no browser, proves nothing about persistence)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # setup-node's built-in dependency-cache option is intentionally
+          # left unset: pointing it at yarn shells out to the runner's global
+          # Yarn 1.22.22, which hard-errors against this repo's
+          # `packageManager: yarn@4.7.0` pin. Yarn's own global cache is
+          # restored via actions/cache below instead.
+          #
+          # node-version floats at '22' rather than being pinned tighter,
+          # mirroring build-android.yml. This is safe here specifically
+          # because every tier-1-reachable dashboard module is ESM `.js` with
+          # JSDoc types under `checkJs`, not `.ts` -- so there is no
+          # type-stripping behavior (flagged on Node 22.15 locally, unflagged
+          # on CI's 22.18) for a floating minor version to diverge on. Pinning
+          # tighter than the local dev machine would recreate exactly the
+          # divergence that module-format contract exists to prevent.
+
+      # Corepack MUST be enabled before anything invokes `yarn` -- see the
+      # comment on setup-node above; this mirrors build-android.yml verbatim.
+      - name: Enable Corepack (pinned Yarn 4.7.0)
+        run: |
+          set -euo pipefail
+          corepack enable
+          echo "RECEIPT toolchain node=$(node --version) yarn=$(yarn --version)" | tee -a ci-receipt.txt
+
+      - name: Cache Yarn global cache
+        uses: actions/cache@v4
+        with:
+          # .yarnrc.yml sets enableGlobalCache: true, so downloads land in the
+          # global folder rather than a per-project .yarn/cache.
+          path: ~/.yarn/berry/cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install workspace dependencies
+        run: |
+          set -euo pipefail
+          yarn install --immutable
+
+      # Workspace packages publish their entrypoints from dist/ (e.g.
+      # @votetorrent/vote-engine exports ./browser -> ./dist/browser-entry.js),
+      # and dist/ is gitignored. A clean CI checkout therefore has no dist/,
+      # and the dashboard's typecheck/build would fail to resolve
+      # @votetorrent/vote-engine/browser without this step. Scoped to
+      # packages/* on purpose -- apps/* must NOT be built here.
+      - name: Build workspace packages
+        run: |
+          set -euo pipefail
+          yarn workspaces foreach -At --include 'packages/*' run build
+
+      # Widening KNOWN_ALLOWED in scripts/check-peer-requirements.mjs to make
+      # this pass is FORBIDDEN. This step exiting 0 is an honest acceptance
+      # criterion -- it is the only signal left after .yarnrc.yml's
+      # project-wide YN0086 discard silences the raw install-time summary. If
+      # this fires on a real change, that is the finding, not a false alarm
+      # to work around.
+      - name: Peer requirements
+        run: |
+          set -euo pipefail
+          yarn lint:peers
+          echo "RECEIPT peers-clean" | tee -a ci-receipt.txt
+
+      - name: Typecheck
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-dashboard typecheck
+          echo "RECEIPT dashboard-typecheck" | tee -a ci-receipt.txt
+
+      - name: Copy discipline
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-dashboard lint
+          echo "RECEIPT dashboard-copy-lint" | tee -a ci-receipt.txt
+
+      - name: Build and polyfill assertion
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-dashboard build
+          yarn workspace votetorrent-dashboard assert:no-polyfills
+          echo "RECEIPT dashboard-build-no-polyfills" | tee -a ci-receipt.txt
+
+      # The tier-1 test runner's own exit code IS trustworthy here (unlike
+      # vote-engine's and the authority typecheck's, both of which carry known
+      # pre-existing non-zero exits) -- but the checker, not the exit code
+      # alone, is still the verdict, because it also enforces the passing
+      # floor and the time budget and prints the RECEIPT line.
+      - name: Tier 1 - dashboard logic suite
+        run: |
+          set -euo pipefail
+          T1_START=$SECONDS
+          yarn workspace votetorrent-dashboard test:node 2>&1 | tee tier1.log
+          T1_ELAPSED=$((SECONDS-T1_START))
+          node scripts/assert-ci-baselines.mjs tier1 tier1.log "$T1_ELAPSED" | tee -a ci-receipt.txt
+
+      - name: Receipts
+        run: |
+          set -euo pipefail
+          node scripts/assert-ci-baselines.mjs receipts ci-receipt.txt \
+            toolchain peers-clean dashboard-typecheck dashboard-copy-lint \
+            dashboard-build-no-polyfills tier1-logic
+
+  # =========================================================================
+  # Job 2 -- Tiers 2 and 3: headless Chrome, persistence then model vs DOM.
+  # No `needs:` -- independent of logic-gate, so a tier-2/3 failure is visible
+  # even when tier 1 is red, and each job's verdict stands on its own.
+  # =========================================================================
+  browser-gates:
+    name: "Tiers 2 and 3 - headless Chrome (persistence, then model vs DOM)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable Corepack (pinned Yarn 4.7.0)
+        run: |
+          set -euo pipefail
+          corepack enable
+          echo "RECEIPT toolchain node=$(node --version) yarn=$(yarn --version)" | tee -a ci-receipt.txt
+
+      - name: Cache Yarn global cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.yarn/berry/cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install workspace dependencies
+        run: |
+          set -euo pipefail
+          yarn install --immutable
+
+      - name: Build workspace packages
+        run: |
+          set -euo pipefail
+          yarn workspaces foreach -At --include 'packages/*' run build
+
+      # This step runs FIRST, before anything else in this job, on purpose: a
+      # stripped inertness control would otherwise be invisible behind four
+      # green gate runs. It asserts the gate's own source still carries every
+      # invariant this workflow depends on.
+      - name: Gate-source integrity
+        run: |
+          set -euo pipefail
+          G=apps/VoteTorrentDashboard/test/browser/run-headless.mjs
+          fail=0
+          for banned in playwright-core executablePath 'Applications/Google Chrome' 'reload()'; do
+            if grep -q -- "$banned" "$G"; then
+              echo "::error::gate-source-intact: forbidden pattern '$banned' found in $G"
+              fail=1
+            fi
+          done
+          # grep -c exits non-zero when the count is zero; a zero here IS the
+          # failure condition we want to report (not crash past), so the
+          # count is read inside a subshell with errexit disabled rather than
+          # relying on an unconditional fallback (reserved solely for the
+          # browser inventory probe below).
+          newpage_count=$(set +e; grep -c 'newPage()' "$G"; true)
+          if [ "$newpage_count" -lt 6 ]; then
+            echo "::error::gate-source-intact: expected at least 6 newPage() calls (50-09's six fresh loads), found $newpage_count"
+            fail=1
+          fi
+          for required in prove-trap prove-drift tier3; do
+            if ! grep -q -- "$required" "$G"; then
+              echo "::error::gate-source-intact: expected mode '$required' not found in $G"
+              fail=1
+            fi
+          done
+          inert_count=$(set +e; grep -c 'is inert' "$G"; true)
+          if [ "$inert_count" -lt 2 ]; then
+            echo "::error::gate-source-intact: expected at least 2 occurrences of 'is inert' (both inertness messages), found $inert_count"
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::gate-source-intact FAILED -- an inertness control or fresh-page-load invariant may have been stripped from $G"
+            exit 1
+          fi
+          echo "RECEIPT gate-source-intact" | tee -a ci-receipt.txt
+
+      # Record what the image already carries BEFORE installing anything --
+      # this closes research assumption A4 ([ASSUMED — not verified against
+      # the actual runner image]) with an observation instead of a guess.
+      # This is the one place in this whole file where a command's failure is
+      # unconditionally swallowed: it is a diagnostic probe, not a gate, and
+      # its output is informational only.
+      - name: Browser inventory (pre-install probe)
+        run: |
+          set -euo pipefail
+          which -a google-chrome chromium chromium-browser || true
+
+      # nmHoistingLimits: workspaces means no hoisted devDependency may be
+      # assumed -- the browser is driven only through the dashboard
+      # workspace's own declared `playwright`, via its own `exec`.
+      #
+      # The browser binary is DELIBERATELY NOT CACHED. A restored
+      # ~/.cache/ms-playwright is a mutable trust surface inside the one gate
+      # whose entire value is trustworthiness, and roughly a minute of
+      # download is the right price for that. Reopen this only if the
+      # download becomes the dominant cost, and then only with a cache key
+      # that pins the resolved playwright version.
+      - name: Install Chromium
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-dashboard exec playwright install --with-deps chromium
+          PW_VERSION=$(yarn workspace votetorrent-dashboard exec playwright --version)
+          echo "RECEIPT chromium-installed playwright=${PW_VERSION} preexisting=see-browser-inventory-step-above" | tee -a ci-receipt.txt
+
+      # Tier 2 runs before tier 3 on purpose: the first Vite boot warms
+      # node_modules/.vite. The three later runner invocations (prove-trap,
+      # tier3, prove-drift) each spawn their own dev server and would
+      # otherwise each pay a cold optimizeDeps.
+      - name: Tier 2 - persistence (six fresh page loads)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          node test/browser/run-headless.mjs 2>&1 | tee ../../tier2.log
+          if grep -q 'is inert' ../../tier2.log; then
+            echo "::error::tier2-persistence: 'is inert' appeared in a run that was not an inertness-control invocation"
+            exit 1
+          fi
+          echo "RECEIPT tier2-persistence" | tee -a ../../ci-receipt.txt
+
+      # Exit 0 here means the inner two-page run genuinely FAILED with
+      # setDefaultVtabName deliberately omitted -- a guard that cannot fire is
+      # not a guard, and this trap is invisible to every same-session
+      # assertion tier 1 could ever run.
+      - name: Tier 2 inertness control (--prove-trap)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          node test/browser/run-headless.mjs --prove-trap 2>&1 | tee ../../prove-trap.log
+          if grep -q 'is inert' ../../prove-trap.log; then
+            echo "::error::tier2-inertness-fired: --prove-trap reported 'is inert' -- the trap did NOT fire, the gate is inert"
+            exit 1
+          fi
+          echo "RECEIPT tier2-inertness-fired" | tee -a ../../ci-receipt.txt
+
+      - name: Tier 3 - model vs DOM cross-check
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          node test/browser/run-headless.mjs --tier3 2>&1 | tee ../../tier3.log
+          if ! grep -q '20/20' ../../tier3.log || ! grep -q '135/135' ../../tier3.log; then
+            echo "::error::tier3-model-dom: expected stdout to contain 20/20 rungs and 135/135 headline comparisons"
+            exit 1
+          fi
+          if grep -q 'is inert' ../../tier3.log; then
+            echo "::error::tier3-model-dom: 'is inert' appeared in a run that was not an inertness-control invocation"
+            exit 1
+          fi
+          echo "RECEIPT tier3-model-dom" | tee -a ../../ci-receipt.txt
+
+      # Exit 0 here means the runner correctly detected a deliberately
+      # mismatched scope set as a divergence.
+      - name: Tier 3 inertness control (--prove-drift)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          node test/browser/run-headless.mjs --prove-drift 2>&1 | tee ../../prove-drift.log
+          if grep -q 'is inert' ../../prove-drift.log; then
+            echo "::error::tier3-inertness-fired: --prove-drift reported 'is inert' -- the drift was NOT detected, the cross-check is inert"
+            exit 1
+          fi
+          echo "RECEIPT tier3-inertness-fired" | tee -a ../../ci-receipt.txt
+
+      - name: Upload gate evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-browser-gate-evidence-${{ github.sha }}
+          path: |
+            tier2.log
+            prove-trap.log
+            tier3.log
+            prove-drift.log
+            ci-receipt.txt
+          retention-days: 14
+
+      - name: Receipts
+        run: |
+          set -euo pipefail
+          node scripts/assert-ci-baselines.mjs receipts ci-receipt.txt \
+            toolchain gate-source-intact chromium-installed tier2-persistence \
+            tier2-inertness-fired tier3-model-dom tier3-inertness-fired
+
+  # =========================================================================
+  # Job 3 -- Phase-close baselines: vote-engine suite + authority typecheck.
+  # No `needs:` -- runs independently of the other two jobs.
+  # =========================================================================
+  baselines:
+    name: "Phase-close baselines - vote-engine suite and authority typecheck"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable Corepack (pinned Yarn 4.7.0)
+        run: |
+          set -euo pipefail
+          corepack enable
+          echo "RECEIPT toolchain node=$(node --version) yarn=$(yarn --version)" | tee -a ci-receipt.txt
+
+      - name: Cache Yarn global cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.yarn/berry/cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install workspace dependencies
+        run: |
+          set -euo pipefail
+          yarn install --immutable
+
+      - name: Build workspace packages
+        run: |
+          set -euo pipefail
+          yarn workspaces foreach -At --include 'packages/*' run build
+
+      # This runs BEFORE any verdict the checker produces below is trusted --
+      # the same discipline --prove-trap applies to the tier-2 gate.
+      - name: Prove the baseline checker can fail
+        run: |
+          set -euo pipefail
+          node scripts/assert-ci-baselines.mjs selftest
+          echo "RECEIPT baseline-checker-selftest" | tee -a ci-receipt.txt
+
+      # The vote-engine suite exits non-zero BY DESIGN (8 known pre-existing
+      # failures) -- this step must capture the log without letting that exit
+      # code end the job, and must not unconditionally swallow its own exit
+      # status (that would also hide a genuine crash). The checker is the
+      # verdict, not this exit code: its
+      # "no mocha summary found" branch is what stops a mocha that crashed
+      # before running anything from sailing through this deliberately
+      # tolerated non-zero exit.
+      - name: vote-engine suite
+        run: |
+          set -euo pipefail
+          if ! yarn workspace @votetorrent/vote-engine test 2>&1 | tee vote-engine.log; then
+            echo "mocha exited non-zero (expected: known failures); the checker decides"
+          fi
+          node scripts/assert-ci-baselines.mjs vote-engine vote-engine.log | tee -a ci-receipt.txt
+
+      # apps/VoteTorrentAuthority has 51 known pre-existing tsc errors, so
+      # `tsc --noEmit` also exits non-zero by design. This is a CEILING: the
+      # producer half this phase added to that app must introduce none.
+      - name: Authority typecheck ceiling
+        run: |
+          set -euo pipefail
+          if ! yarn workspace votetorrent-authority typecheck 2>&1 | tee authority-tsc.log; then
+            echo "tsc exited non-zero (expected: known errors); the checker decides"
+          fi
+          node scripts/assert-ci-baselines.mjs authority-typecheck authority-tsc.log | tee -a ci-receipt.txt
+
+      # Recorded, deliberately not run -- this phase touches nothing in the
+      # voter, and importing an unrelated red baseline into this gate would
+      # make it less trustworthy, not more. Echoed to the run summary so it
+      # cannot be silently forgotten.
+      - name: Record the baseline not enforced here
+        run: |
+          set -euo pipefail
+          node -e "
+            const b = JSON.parse(require('fs').readFileSync('scripts/ci-baselines.json', 'utf8'));
+            const v = b.notEnforcedHere.voterJest;
+            console.log('NOT ENFORCED HERE — apps/VoteTorrentVoter jest: ' + v.failingSuites + ' suite(s) failing on ' + v.cause + ' (measured ' + v.measuredOn + '). ' + v.reason);
+          " | tee -a "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+
+      - name: Receipts
+        run: |
+          set -euo pipefail
+          node scripts/assert-ci-baselines.mjs receipts ci-receipt.txt \
+            toolchain baseline-checker-selftest vote-engine-baseline authority-typecheck-baseline
