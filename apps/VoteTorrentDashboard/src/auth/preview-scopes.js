@@ -35,7 +35,7 @@ import { CAPABILITIES, SCOPE_CODES } from './capabilities.js';
 
 /**
  * @typedef {object} PreviewState
- * @property {ReadonlyArray<ScopeCode>} realScopes - the officer's actual granted scopes, fixed for the lifetime of this state chain
+ * @property {ReadonlyArray<ScopeCode>} realScopes - the officer's actual granted scopes. NOT fixed for the lifetime of this state chain: `resyncRealScopes` advances this baseline whenever the database-answered set changes, even while `touched` is true, so `resetToReal` always has a current target to fall back to.
  * @property {ReadonlyArray<ScopeCode>} selected - the scope set currently being previewed (equal to `realScopes` until the first toggle)
  * @property {boolean} touched - STICKY, not a set comparison. Set to `true`
  *   the moment ANY `toggleScope` call happens, and cleared ONLY by
@@ -150,37 +150,45 @@ export function resetToReal(state) {
  * this entry point is not a validation bypass, so an unknown code throws
  * naming it regardless of `touched`.
  *
- * - If `state.touched` is true, the officer is mid-preview: returns `state`
- *   UNCHANGED (same reference) — a late-arriving real-scope read must never
- *   yank an in-progress preview out from under them. `resetToReal` remains
- *   the only operation that clears `touched`.
- * - Otherwise, if the normalised `nextRealScopes` is set-equal (by value, in
+ * - If the normalised `nextRealScopes` is set-equal (by value, in
  *   `CAPABILITIES` order) to `state.realScopes`, returns `state` UNCHANGED
  *   (same reference) — referential stability matters here: the caller is a
  *   React effect that calls `setState` with this result, and returning a
- *   fresh-but-equal object on every render would loop.
- * - Otherwise, returns a freshly created state (via `createPreviewState`,
- *   so it is byte-identical to calling it directly): previewing exactly the
- *   new `realScopes`, not yet touched.
+ *   fresh-but-equal object on every render would loop. This covers both the
+ *   touched and untouched cases.
+ * - Otherwise, if `state.touched` is true, the officer is mid-preview:
+ *   returns a NEW frozen state whose `realScopes` baseline advances to the
+ *   new `nextRealScopes` while `selected` and `touched` carry forward
+ *   UNCHANGED — the in-progress preview is not yanked out from under them,
+ *   but `resetToReal` (which reads `state.realScopes`) now has a real
+ *   baseline to fall back to instead of whatever was in effect at the
+ *   moment of the first toggle. Freezing the baseline here used to strand a
+ *   fully-privileged officer at zero panels forever: `DashboardShell` mounts
+ *   `realScopes: []` and fills it in asynchronously, so one click before
+ *   `readGrantedScopes` resolved permanently froze `resetToReal`'s target at
+ *   `[]`, with no operation short of a page reload that recovered it.
+ * - Otherwise (untouched, and scopes differ), returns a freshly created
+ *   state (via `createPreviewState`, so it is byte-identical to calling it
+ *   directly): previewing exactly the new `realScopes`, not yet touched.
  *
  * @param {PreviewState} state
  * @param {ReadonlyArray<ScopeCode>} nextRealScopes
  * @returns {PreviewState}
  */
 export function resyncRealScopes(state, nextRealScopes) {
-	// Validate/normalise unconditionally, BEFORE the touched short-circuit --
-	// an officer mid-preview still deserves the same validation guarantee a
+	// Validate/normalise unconditionally, BEFORE any branch below -- an
+	// officer mid-preview still deserves the same validation guarantee a
 	// fresh state gets; silently accepting an invalid code while touched
 	// would be a quiet bypass of the one validator this module has.
 	const next = createPreviewState(nextRealScopes);
-	if (state.touched) {
-		return state;
-	}
-	const unchanged =
+	const sameRealScopes =
 		next.realScopes.length === state.realScopes.length &&
 		next.realScopes.every((code, index) => code === state.realScopes[index]);
-	if (unchanged) {
+	if (sameRealScopes) {
 		return state;
+	}
+	if (state.touched) {
+		return freeze({ realScopes: next.realScopes, selected: state.selected, touched: true });
 	}
 	return next;
 }
