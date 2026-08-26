@@ -139,7 +139,16 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 		return () => {
 			cancelled = true;
 		};
-	}, [activeNetwork?.networkHash]);
+		// officerUserId AND bootstrappedAt, not networkHash alone. This effect
+		// READS activeNetwork.officerUserId to compute grantedScopes, and a
+		// successful officer swap replaces the registry entry's officerUserId
+		// and bootstrappedAt while KEEPING the same networkHash -- so with a
+		// hash-only dependency the effect never re-ran, never re-attached, and
+		// left db at null with no scopes for the rest of the page's life.
+		// PanelGrid's remount key already includes both, so the grid remounted
+		// around a dead handle. A dependency list must cover everything the
+		// effect body reads.
+	}, [activeNetwork?.networkHash, activeNetwork?.officerUserId, activeNetwork?.bootstrappedAt]);
 
 	// Unmount-only cleanup, distinct from the per-network effect above.
 	useEffect(
@@ -216,17 +225,15 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 				return;
 			}
 			swapDialogRef.current?.close();
-			// Session termination, not cosmetics: close the handle, drop the
-			// granted scopes and clear the pending swap so `PanelGrid`
-			// remounts under a fresh key (network hash + officer id +
-			// bootstrappedAt) and no panel retains a prior-officer row in
-			// local component state.
-			if (dbRef.current) {
-				await closeNetworkDb(dbRef.current);
-				dbRef.current = null;
-			}
-			setDb(null);
-			setGrantedScopes([]);
+			// Session termination happens in ONE place: refreshing `networks`
+			// advances this entry's officerUserId and bootstrappedAt, and the
+			// attach effect above keys on both -- so it tears the old handle
+			// down and re-attaches as the new officer on its own. Doing it
+			// here as well meant two owners for one transition, and it was the
+			// one that ran: the effect's hash-only dependency never fired, so
+			// the local `setDb(null)` / `setGrantedScopes([])` were the LAST
+			// word and the session simply ended. `PanelGrid` still remounts
+			// under a fresh key, so no panel retains a prior-officer row.
 			setNetworks(listNetworks());
 			setPendingSwap(null);
 			setToast(t('snapshot.verifiedToast'));
