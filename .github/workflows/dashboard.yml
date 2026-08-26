@@ -235,19 +235,19 @@ jobs:
           # relying on an unconditional fallback (reserved solely for the
           # browser inventory probe below).
           newpage_count=$(set +e; grep -c 'newPage()' "$G"; true)
-          if [ "$newpage_count" -lt 6 ]; then
-            echo "::error::gate-source-intact: expected at least 6 newPage() calls (50-09's six fresh loads), found $newpage_count"
+          if [ "$newpage_count" -lt 8 ]; then
+            echo "::error::gate-source-intact: expected at least 8 newPage() calls (50-14's eight fresh loads, six from 50-09 plus the composed-shell leg), found $newpage_count"
             fail=1
           fi
-          for required in prove-trap prove-drift tier3; do
+          for required in prove-trap prove-drift tier3 prove-blank; do
             if ! grep -q -- "$required" "$G"; then
               echo "::error::gate-source-intact: expected mode '$required' not found in $G"
               fail=1
             fi
           done
           inert_count=$(set +e; grep -c 'is inert' "$G"; true)
-          if [ "$inert_count" -lt 2 ]; then
-            echo "::error::gate-source-intact: expected at least 2 occurrences of 'is inert' (both inertness messages), found $inert_count"
+          if [ "$inert_count" -lt 3 ]; then
+            echo "::error::gate-source-intact: expected at least 3 occurrences of 'is inert' (all three inertness messages, including 50-14's --prove-blank), found $inert_count"
             fail=1
           fi
           if [ "$fail" -ne 0 ]; then
@@ -288,7 +288,16 @@ jobs:
       # node_modules/.vite. The three later runner invocations (prove-trap,
       # tier3, prove-drift) each spawn their own dev server and would
       # otherwise each pay a cold optimizeDeps.
-      - name: Tier 2 - persistence (six fresh page loads)
+      # This step now runs the default eight page loads: 50-09's original six
+      # (db-gate seed/verify, shell-gate restore-seed/restore-verify,
+      # forget/forget-verify) plus 50-14's composed-shell leg
+      # (compose-seed/compose-verify), which mounts the real, production
+      # DashboardShell across a genuinely fresh page boundary and asserts the
+      # nine-panel/real-badge readout -- the rung that would have caught
+      # CR-01. Asserting on the compose readout's own PASS line (not merely
+      # on the absence of "is inert") is deliberate: absence-of-a-string is
+      # not evidence the composed leg ran at all.
+      - name: Tier 2 - persistence (eight fresh page loads)
         working-directory: apps/VoteTorrentDashboard
         run: |
           set -euo pipefail
@@ -297,7 +306,12 @@ jobs:
             echo "::error::tier2-persistence: 'is inert' appeared in a run that was not an inertness-control invocation"
             exit 1
           fi
+          if ! grep -q 'compose-gate leg (composed DashboardShell, nine populated panels): PASS' ../../tier2.log; then
+            echo "::error::tier2-persistence: the composed-shell leg's own PASS verdict line was not found in tier2.log"
+            exit 1
+          fi
           echo "RECEIPT tier2-persistence" | tee -a ../../ci-receipt.txt
+          echo "RECEIPT compose-shell" | tee -a ../../ci-receipt.txt
 
       # Exit 0 here means the inner two-page run genuinely FAILED with
       # setDefaultVtabName deliberately omitted -- a guard that cannot fire is
@@ -313,6 +327,21 @@ jobs:
             exit 1
           fi
           echo "RECEIPT tier2-inertness-fired" | tee -a ../../ci-receipt.txt
+
+      # Exit 0 here means the composed-shell leg's own nine-panel assertion
+      # genuinely FAILED for an officer the database grants nothing -- the
+      # composed rung's own inertness control (50-14), receipted separately,
+      # in the same shape as the two pre-existing controls above/below.
+      - name: Composed shell inertness control (--prove-blank)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          node test/browser/run-headless.mjs --prove-blank 2>&1 | tee ../../prove-blank.log
+          if grep -q 'is inert' ../../prove-blank.log; then
+            echo "::error::compose-inertness-fired: --prove-blank reported 'is inert' -- an officer the database grants nothing still reported the full panel set, the composed rung is inert"
+            exit 1
+          fi
+          echo "RECEIPT compose-inertness-fired" | tee -a ../../ci-receipt.txt
 
       - name: Tier 3 - model vs DOM cross-check
         working-directory: apps/VoteTorrentDashboard
@@ -350,6 +379,7 @@ jobs:
           path: |
             tier2.log
             prove-trap.log
+            prove-blank.log
             tier3.log
             prove-drift.log
             ci-receipt.txt
@@ -360,7 +390,8 @@ jobs:
           set -euo pipefail
           node scripts/assert-ci-baselines.mjs receipts ci-receipt.txt \
             toolchain gate-source-intact chromium-installed tier2-persistence \
-            tier2-inertness-fired tier3-model-dom tier3-inertness-fired
+            tier2-inertness-fired compose-shell compose-inertness-fired \
+            tier3-model-dom tier3-inertness-fired
 
   # =========================================================================
   # Job 3 -- Phase-close baselines: vote-engine suite + authority typecheck.

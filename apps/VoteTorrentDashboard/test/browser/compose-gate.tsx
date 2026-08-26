@@ -67,7 +67,7 @@ import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import type { SnapshotRow, SnapshotTables } from '@votetorrent/vote-engine/bootstrap';
 import { redeemAndBootstrap } from '../../src/lifecycle/bootstrap.js';
 import { deleteNetworkDb } from '../../src/db/open-db.js';
-import { findNetwork, removeNetwork, upsertNetwork } from '../../src/db/networks-registry.js';
+import { findNetwork, listNetworks, removeNetwork, upsertNetwork } from '../../src/db/networks-registry.js';
 import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import { t } from '../../src/i18n/copy.js';
 import { DashboardShell } from '../../src/screens/DashboardShell.js';
@@ -162,11 +162,30 @@ function settleUntilPanels(maxFrames: number): Promise<number> {
 }
 
 async function runComposeSeed() {
-	await rung('1 · delete any prior compose-gate database, row-count record and registry entry for a clean slate', async () => {
-		await deleteNetworkDb(COMPOSE_NETWORK_HASH, { storage: localStorage });
-		removeNetwork(COMPOSE_NETWORK_HASH, localStorage);
-		return 'clean slate';
-	});
+	await rung(
+		'1 · delete any prior compose-gate database, row-count record and registry entry for a clean slate -- and clear EVERY OTHER registry entry too',
+		async () => {
+			await deleteNetworkDb(COMPOSE_NETWORK_HASH, { storage: localStorage });
+			// `DashboardShell` has no "which network" prop -- it always shows
+			// `networks[0]` from the registry, by design (the switcher is how an
+			// officer picks a DIFFERENT one). `run-headless.mjs`'s default run
+			// shares ONE persistent browser context across every gate's page
+			// loads, and one sibling gate's own fixture (shell-gate's
+			// `SECOND_HASH` network) is DELIBERATELY never forgotten -- it is
+			// the survival half of that gate's own negative control. Left in
+			// place, it would sit ahead of this page's network in the registry
+			// array and `compose-verify` would silently mount the WRONG
+			// network's data. Clearing every other entry here (their
+			// underlying IndexedDB data is untouched -- only the small
+			// inventory record goes) makes this gate's own network the only,
+			// and therefore first, entry, regardless of which other gates ran
+			// earlier in the same shared context or in what order.
+			for (const entry of listNetworks(localStorage)) {
+				removeNetwork(entry.networkHash, localStorage);
+			}
+			return 'clean slate';
+		},
+	);
 
 	const envelope = composeEnvelope();
 	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });

@@ -20,6 +20,18 @@
  * separate CI invocations, exactly like `--prove-trap` is a separate
  * invocation of the tier-2 flow, never combined in one run.
  *
+ * `--prove-blank` (50-14): the composed-shell gate's own inertness control.
+ * Runs ONLY the compose-gate flow (`compose-seed`, then
+ * `compose-verify&officer=none`) and returns before the tier-2
+ * db-gate/shell-gate phases below, exactly like `--prove-trap` and
+ * `--tier3`/`--prove-drift` are their own separate invocations. It INVERTS
+ * the expectation: the underlying compose run, against an officer the
+ * database grants nothing, must FAIL its nine-panel assertion. If it
+ * passes, the composed rung cannot discriminate a real officer from one the
+ * database denies everything to — the gate is inert — and this script exits
+ * non-zero with an explicit "is inert" message, in the same shape as the two
+ * existing inertness controls above.
+ *
  * `import { chromium } from 'playwright'` — the FULL package, never the
  * lighter core-only sibling package, and never a hardcoded system-Chrome
  * binary path option (Pitfall 6: the spikes' macOS path does not exist on
@@ -38,6 +50,7 @@ const BASE = `http://localhost:${PORT}`;
 const PROVE_TRAP = process.argv.includes('--prove-trap');
 const TIER3 = process.argv.includes('--tier3');
 const PROVE_DRIFT = process.argv.includes('--prove-drift');
+const PROVE_BLANK = process.argv.includes('--prove-blank');
 
 /** @returns {Promise<import('node:child_process').ChildProcess>} */
 async function startViteDevServer() {
@@ -146,6 +159,45 @@ async function runOnShellGatePage(page, url, label) {
 	}
 	console.log(`RUNGS: ${res.passed}/${res.total}`);
 	if (res.failed?.length) console.log('FAILED: ' + res.failed.join(' | '));
+	return res;
+}
+
+/**
+ * 50-14's sibling of `runOnPage` / `runOnShellGatePage` above, reading
+ * `compose-gate.tsx`'s DISTINCT `__COMPOSE_GATE__` / `__COMPOSE_GATE_DONE__`
+ * readout names, for the SAME reason: the composed-shell gate must never be
+ * confused with either tier-2 gate or the tier-3 matrix.
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} url
+ * @param {string} label
+ */
+async function runOnComposeGatePage(page, url, label) {
+	/** @type {string[]} */
+	const lines = [];
+	page.on('console', (m) => lines.push(`[${m.type()}] ${m.text()}`));
+	page.on('pageerror', (e) => lines.push(`[pageerror] ${e.message}`));
+	await page.goto(url, { waitUntil: 'load' });
+	await page
+		.waitForFunction(() => /** @type {any} */ (window).__COMPOSE_GATE_DONE__ === true, null, { timeout: 60_000 })
+		.catch(() => {});
+	const res = await page.evaluate(() => /** @type {any} */ (window).__COMPOSE_GATE__ ?? null);
+	await page.close();
+
+	console.log(`\n===== ${label} =====`);
+	for (const l of lines) console.log(l);
+	if (!res) {
+		console.log('NO RESULT');
+		return null;
+	}
+	if (res.crashed) {
+		console.log('CRASHED:\n' + res.crashed);
+		return res;
+	}
+	for (const e of res.log ?? []) {
+		console.log(`${String(e.ms).padStart(8)}ms  ${String(e.category).toUpperCase().padEnd(9)} ${e.message}`);
+	}
+	console.log(`RUNGS: ${res.passed}/${res.total}  panels: ${res.panels}  badge: ${res.badgeText} (${res.badgeClass})`);
 	return res;
 }
 
@@ -477,6 +529,52 @@ async function runTier3(ctx) {
 	process.exitCode = verdict.ok ? 0 : 1;
 }
 
+/**
+ * `--prove-blank`'s entry point (50-14). Runs entirely on its own -- never
+ * combined with the tier-2/tier-3 flows in one invocation, exactly like
+ * `--prove-trap` and `--tier3`/`--prove-drift` are their own separate runs.
+ *
+ * @param {import('playwright').BrowserContext} ctx
+ */
+async function runProveBlank(ctx) {
+	const page1 = await ctx.newPage();
+	const seedRes = await runOnComposeGatePage(
+		page1,
+		`${BASE}/test/browser/compose-gate.html?phase=compose-seed`,
+		'PROVE-BLANK PAGE 1 — compose-seed',
+	);
+	const seedOk = seedRes && !seedRes.crashed && seedRes.passed === seedRes.total;
+	if (!seedOk) {
+		console.log('\nPROVE-BLANK: FAIL (compose-seed itself failed -- the inertness control could not run)');
+		process.exitCode = 1;
+		return;
+	}
+
+	const page2 = await ctx.newPage();
+	const verifyRes = await runOnComposeGatePage(
+		page2,
+		`${BASE}/test/browser/compose-gate.html?phase=compose-verify&officer=none`,
+		'PROVE-BLANK PAGE 2 — compose-verify&officer=none (deliberately scope-less officer)',
+	);
+	const underlyingRunPassed = verifyRes && !verifyRes.crashed && verifyRes.passed === verifyRes.total;
+
+	// INVERTED: the underlying run against a scope-less officer must FAIL its
+	// nine-panel assertion. If it passed, this rung cannot tell a real
+	// officer from one the database denies everything to -- the gate is
+	// inert, in the same shape as the two pre-existing inertness controls.
+	if (underlyingRunPassed) {
+		console.log(
+			'\nCOMPOSE GATE --prove-blank: FAIL — the composed rung is inert: an officer the database grants nothing still reported the full panel set',
+		);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(
+		`\nCOMPOSE GATE --prove-blank: PASS — the scope-less officer genuinely failed the nine-panel assertion (panels: ${verifyRes?.panels})`,
+	);
+	process.exitCode = 0;
+}
+
 async function main() {
 	const viteChild = await startViteDevServer();
 	let browser;
@@ -484,6 +582,12 @@ async function main() {
 		browser = await chromium.launch({ headless: true });
 		// One persistent context so IndexedDB survives between the two page loads.
 		const ctx = await browser.newContext();
+
+		// --prove-blank runs ONLY the compose-gate flow and returns here -- see
+		// this file's header note.
+		if (PROVE_BLANK) {
+			return await runProveBlank(ctx);
+		}
 
 		// --tier3 / --prove-drift run ONLY the tier-3 flow and return here --
 		// see this file's header note. Everything below this block is the
@@ -594,13 +698,58 @@ async function main() {
 		console.log('restore-verify:', `${restoreVerifyRes.passed}/${restoreVerifyRes.total}`);
 		console.log('forget:', `${forgetRes.passed}/${forgetRes.total}`, '| forget-verify:', `${forgetVerifyRes?.passed}/${forgetVerifyRes?.total}`);
 
+		// ---------------------------------------------------------------
+		// 50-14 extension: the composed-shell leg. Two MORE fresh page loads,
+		// each its own ctx.newPage(), against the SAME persistent context --
+		// eight page loads total in the default run. This is the rung that
+		// mounts the real, production DashboardShell (never a control or a
+		// grid harnessed by hand) and would have caught CR-01.
+		// ---------------------------------------------------------------
+
+		const page7 = await ctx.newPage();
+		const composeSeedRes = await runOnComposeGatePage(
+			page7,
+			`${BASE}/test/browser/compose-gate.html?phase=compose-seed`,
+			'PHASE 7 — composed shell: compose-seed',
+		);
+		const composeSeedOk = composeSeedRes && !composeSeedRes.crashed && composeSeedRes.passed === composeSeedRes.total;
+		if (!composeSeedOk) {
+			return finishRun(false, 'compose-seed failed', PROVE_TRAP);
+		}
+
+		// A brand-new ctx.newPage() call against a brand-new JS realm -- the
+		// same fresh-page-boundary discipline every other verify phase in
+		// this file already holds to.
+		const page8 = await ctx.newPage();
+		const composeVerifyRes = await runOnComposeGatePage(
+			page8,
+			`${BASE}/test/browser/compose-gate.html?phase=compose-verify`,
+			'PHASE 8 — composed shell: compose-verify (fresh page load, zero interaction)',
+		);
+		const composeVerifyOk =
+			composeVerifyRes &&
+			!composeVerifyRes.crashed &&
+			composeVerifyRes.passed === composeVerifyRes.total &&
+			composeVerifyRes.panels === 9;
+
+		console.log('\n--- cross-phase (compose-gate) ---');
+		console.log(
+			'compose-verify:',
+			`${composeVerifyRes?.passed}/${composeVerifyRes?.total}`,
+			'| panels:',
+			composeVerifyRes?.panels,
+			'| badge:',
+			composeVerifyRes?.badgeText,
+		);
+
 		console.log('\n=== SUMMARY ===');
 		console.log('db-gate leg (D-11 re-attach):', dbGateOk ? 'PASS' : 'FAIL');
 		console.log('shell-gate leg (restored snapshot + forget network):', forgetVerifyOk ? 'PASS' : 'FAIL');
+		console.log('compose-gate leg (composed DashboardShell, nine populated panels):', composeVerifyOk ? 'PASS' : 'FAIL');
 
 		return finishRun(
-			dbGateOk && forgetVerifyOk,
-			forgetVerifyOk ? 'all six phases passed' : 'shell-gate phase failed',
+			dbGateOk && forgetVerifyOk && composeVerifyOk,
+			composeVerifyOk ? 'all eight phases passed' : 'compose-gate phase failed',
 			PROVE_TRAP,
 		);
 	} finally {
