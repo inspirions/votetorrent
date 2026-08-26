@@ -1,10 +1,15 @@
 /**
  * PanelGrid.tsx — the nine-panel grid, in `CAPABILITIES`' frozen order.
  *
- * `grantedScopes` arrives strictly as a PROP, never computed here — this
- * seam is unchanged from 50-06's own gate contract, precisely so a later
+ * The scope set `evaluate()` is asked about arrives from exactly ONE place —
+ * `useEffectiveScopes()` — and is never computed here. This seam is
+ * unchanged in spirit from 50-06's own gate contract, precisely so a
  * "preview as" control can vary it without editing this file and without
- * this gate ever being stubbed. `snapshotInstant` is an ADDITION beside it,
+ * this gate ever being stubbed. There is deliberately NO `grantedScopes`
+ * prop beside that hook: one existed, was threaded in by `DashboardShell`,
+ * and was never read — a dead second source of the same answer that made a
+ * real defect (the provider freezing an empty real-scope set) hard to see
+ * from the call site. `snapshotInstant` is an ADDITION beside it,
  * not a replacement: the 19-character canonical instant this browser's
  * snapshot was taken at, supplied by `DashboardShell` (which already holds
  * it for the freshness indicator) and passed straight through to every
@@ -24,7 +29,6 @@
  * rendered.
  */
 import type { Database } from '@quereus/quereus';
-import type { ScopeCode } from '../auth/capabilities.js';
 import { CAPABILITIES } from '../auth/capabilities.js';
 import { evaluate } from '../auth/gate.js';
 import { useEffectiveScopes } from './GrantedScopesContext.js';
@@ -34,14 +38,13 @@ import { t } from '../i18n/copy.js';
 
 export interface PanelGridProps {
 	db: Database | null;
-	grantedScopes: ReadonlyArray<ScopeCode>;
 	revealDenied: boolean;
 	onToggleReveal: () => void;
 	/** The instant this browser's snapshot was taken at — see the file header. */
 	snapshotInstant?: string | null;
 }
 
-export function PanelGrid({ db, grantedScopes, revealDenied, onToggleReveal, snapshotInstant }: PanelGridProps) {
+export function PanelGrid({ db, revealDenied, onToggleReveal, snapshotInstant }: PanelGridProps) {
 	const effective = useEffectiveScopes();
 	return (
 		<div className="sh-panel-grid-wrap">

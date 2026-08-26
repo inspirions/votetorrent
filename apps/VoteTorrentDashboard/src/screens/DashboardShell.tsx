@@ -357,7 +357,6 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 						<PanelGrid
 							key={`${activeNetwork.networkHash}:${activeNetwork.officerUserId}:${activeNetwork.bootstrappedAt}`}
 							db={db}
-							grantedScopes={grantedScopes}
 							revealDenied={revealDenied}
 							onToggleReveal={() => setRevealDenied((value) => !value)}
 							snapshotInstant={activeNetwork.bootstrappedAt}

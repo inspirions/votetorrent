@@ -142,6 +142,34 @@ test('PanelGrid.tsx calls useEffectiveScopes() and still imports evaluate from .
 	assert.equal((STRIPPED.grid.match(/from ['"]\.\.\/auth\/gate\.js['"]/g) ?? []).length, 1);
 });
 
+test('PreviewAsProvider re-seeds from realScopes in an effect, not only in the useState initializer', () => {
+	// The defect this pins: `useState(() => createPreviewState(realScopes))`
+	// alone runs on the FIRST render only, and `DashboardShell` supplies `[]`
+	// there because the officer's scopes are read asynchronously. Without a
+	// re-seed the provider froze an empty set and every capability evaluated
+	// as denied. The effect must also be guarded on the sticky `touched` flag
+	// so a late arrival cannot discard an in-progress preview.
+	assert.match(STRIPPED.control, /useEffect\(/, 'PreviewAsProvider has no effect at all');
+	assert.match(STRIPPED.control, /prev\.touched\s*\?\s*prev\s*:\s*createPreviewState\(realScopes\)/);
+	assert.match(STRIPPED.control, /\}, \[realKey\]\);/);
+});
+
+test('positive control: the re-seed matcher does NOT hit an initializer-only fixture', () => {
+	const fixture = 'const [state, setState] = useState(() => createPreviewState(realScopes));';
+	assert.doesNotMatch(fixture, /prev\.touched\s*\?\s*prev\s*:\s*createPreviewState\(realScopes\)/, 'matcher is inert');
+});
+
+test('PanelGrid.tsx takes no grantedScopes prop -- the context hook is its only scope source', () => {
+	// A dead prop that duplicated the context value is what made the frozen
+	// empty-scope defect above hard to see from `DashboardShell`'s call site.
+	assert.doesNotMatch(STRIPPED.grid, /grantedScopes/);
+	assert.doesNotMatch(STRIPPED.shell, /grantedScopes=\{/);
+});
+
+test('positive control: the dead-prop matcher hits a synthetic <PanelGrid grantedScopes={x} /> fixture', () => {
+	assert.match('<PanelGrid grantedScopes={scopes} />', /grantedScopes=\{/, 'matcher is inert');
+});
+
 test('DashboardShell.tsx renders PreviewAsProvider, PreviewAsControl and AdvisoryDisclosure', () => {
 	assert.match(STRIPPED.shell, /<PreviewAsProvider/);
 	assert.match(STRIPPED.shell, /<PreviewAsControl/);
