@@ -76,6 +76,55 @@ export interface DashboardShellProps {
 	onSwapContextConsumed?: () => void;
 }
 
+/**
+ * MODULE-LEVEL (survives across DashboardShell mounts, unlike component
+ * state or a ref): a strict FIFO chain of every open/close operation against
+ * a given networkHash's IndexedDB database, so any number of overlapping
+ * DashboardShell instances (including React StrictMode's deliberate
+ * double-invocation of effects, which this project runs everywhere -- see
+ * `main.tsx`) can never race each other's opens and closes against the same
+ * underlying database.
+ *
+ * WHY THIS EXISTS (found by 50-18's compose-swap browser leg, not assumed):
+ * `main.tsx` unmounts DashboardShell entirely while `Bootstrap` is shown, and
+ * both an explicit snapshot-refresh round trip AND a confirmed D-14 swap's
+ * cancel-then-retry round trip take EXACTLY that path -- shell unmounts,
+ * Bootstrap mounts, Bootstrap's `onAlreadyBootstrapped` fires, shell
+ * remounts, all for the SAME networkHash. The unmount-only cleanup below
+ * fires `closeNetworkDb` but cannot block React's commit to wait for it, so
+ * a fast round trip can open a BRAND NEW handle to the same IndexedDB
+ * database while a prior instance's close (or, under StrictMode, more than
+ * one prior instance's) is still in flight. A single "last close" slot was
+ * tried first and was NOT sufficient -- StrictMode's double mount/unmount of
+ * BOTH the outgoing and incoming instances can leave more than one close
+ * outstanding at once, and a single slot only ever waits for the latest one.
+ * Observed failure mode either way: `createIndex ... One of the specified
+ * object stores was not found` -- connections racing the same database's
+ * schema reconcile. Every open and close for a given hash is now queued onto
+ * the SAME chain, so they always run one at a time, in the order requested.
+ */
+const dbLifecycleChains = new Map<string, Promise<unknown>>();
+
+/**
+ * Queue `task` onto networkHash `hash`'s FIFO chain -- it will not start
+ * until every previously-queued open/close for that SAME hash has settled,
+ * regardless of how many DashboardShell instances (real or StrictMode
+ * phantom) queued them. A prior task's rejection is swallowed before
+ * chaining (never awaited by the caller here) so one failed close/open can
+ * never permanently wedge the queue for that network.
+ *
+ * @template T
+ * @param {string} hash
+ * @param {() => Promise<T>} task
+ * @returns {Promise<T>}
+ */
+function withNetworkDbLifecycleLock<T>(hash: string, task: () => Promise<T>): Promise<T> {
+	const prior = dbLifecycleChains.get(hash) ?? Promise.resolve();
+	const next = prior.catch(() => undefined).then(task);
+	dbLifecycleChains.set(hash, next);
+	return next;
+}
+
 interface PendingSwap {
 	networkHash: string;
 	pastedCode: string;
@@ -97,6 +146,11 @@ export function DashboardShell({
 	const [grantedScopes, setGrantedScopes] = useState<ScopeCode[]>([]);
 	const [attachError, setAttachError] = useState<unknown>(null);
 	const dbRef = useRef<Database | null>(null);
+	// The networkHash the CURRENT dbRef.current handle actually belongs to --
+	// tracked separately from `activeNetwork` because the unmount cleanup
+	// below runs after this component's own state/props are gone, and needs
+	// to know which entry in `closingHandlesByNetwork` to register.
+	const dbNetworkHashRef = useRef<string | undefined>(undefined);
 
 	const [revealDenied, setRevealDenied] = useState(false);
 	const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -132,18 +186,30 @@ export function DashboardShell({
 		setAttachError(null);
 
 		async function attach() {
-			if (dbRef.current) {
-				await closeNetworkDb(dbRef.current);
+			if (dbRef.current && dbNetworkHashRef.current) {
+				const priorHandle = dbRef.current;
+				const priorHash = dbNetworkHashRef.current;
 				dbRef.current = null;
+				dbNetworkHashRef.current = undefined;
+				await withNetworkDbLifecycleLock(priorHash, () => closeNetworkDb(priorHandle));
 			}
 			if (!activeNetwork) return;
+			if (cancelled) return;
 			try {
-				const handle = await attachNetworkDb(activeNetwork.networkHash);
+				// Queued onto the SAME per-network lock a close registers --
+				// this open cannot start until every previously-queued
+				// open/close for this hash (including one a just-unmounted
+				// sibling instance registered) has settled. See
+				// `withNetworkDbLifecycleLock`'s module-level doc comment.
+				const handle = await withNetworkDbLifecycleLock(activeNetwork.networkHash, () =>
+					attachNetworkDb(activeNetwork.networkHash),
+				);
 				if (cancelled) {
-					await closeNetworkDb(handle);
+					await withNetworkDbLifecycleLock(activeNetwork.networkHash, () => closeNetworkDb(handle));
 					return;
 				}
 				dbRef.current = handle;
+				dbNetworkHashRef.current = activeNetwork.networkHash;
 				const scopes = await readGrantedScopes(handle, activeNetwork.officerUserId);
 				if (cancelled) return;
 				setDb(handle);
@@ -170,11 +236,20 @@ export function DashboardShell({
 	}, [activeNetwork?.networkHash, activeNetwork?.officerUserId, activeNetwork?.bootstrappedAt]);
 
 	// Unmount-only cleanup, distinct from the per-network effect above.
+	// Queues the close onto the SAME per-network FIFO lock the attach effect
+	// uses, so a fast remount for the SAME network (an explicit refresh, or a
+	// swap's Bootstrap<->shell round trip -- and React StrictMode's own
+	// deliberate double-invocation of every effect) can never open a new
+	// handle before this close has actually run. See
+	// `withNetworkDbLifecycleLock`'s module-level doc comment.
 	useEffect(
 		() => () => {
-			if (dbRef.current) {
-				void closeNetworkDb(dbRef.current);
+			if (dbRef.current && dbNetworkHashRef.current) {
+				const handle = dbRef.current;
+				const hash = dbNetworkHashRef.current;
 				dbRef.current = null;
+				dbNetworkHashRef.current = undefined;
+				void withNetworkDbLifecycleLock(hash, () => closeNetworkDb(handle));
 			}
 		},
 		[],
