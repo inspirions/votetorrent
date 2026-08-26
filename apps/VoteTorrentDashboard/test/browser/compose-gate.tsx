@@ -379,10 +379,23 @@ async function runComposeVerify() {
 }
 
 // ---------------------------------------------------------------------------
-// compose-swap (Task 3 / D-14): a real browser drives a different officer's
-// code through the REAL Bootstrap form, sees the confirmation, confirms it,
-// and observes the dashboard come back under the new officer -- then raises
-// the dialog a second time with a THIRD officer's code and declines it.
+// compose-swap (Task 3 / D-14, single-use armed by Task 4 / CR-02): a real
+// browser drives a different officer's code through the REAL Bootstrap form,
+// sees the confirmation, confirms it, and observes the dashboard come back
+// under the new officer -- then raises the dialog a second time with a THIRD
+// officer's code and declines it.
+//
+// Both fake transports this leg arms rely on `makeFakeTransport`'s
+// SINGLE-USE-BY-DEFAULT semantics (50-20/D-14): a secret's `ok` result can be
+// consumed by the wire exactly once, mirroring the real backend. This leg
+// asserts that property directly -- dedicated rungs assert the confirmed
+// swap's code (`SECRET_SWAP`) reaches the transport's `redeem` exactly once,
+// both right after classification and again after the confirm dialog
+// resolves (proving the confirm pass replays the single-flight cache rather
+// than redeeming a second time), and the cancel leg's code (`SECRET_CANCEL`)
+// is asserted spent at most once too. Without this, the leg could report a
+// green D-14 end-to-end proof while structurally being unable to see a
+// double-spend regression -- see `bootstrap-envelope.js`'s own header.
 // ---------------------------------------------------------------------------
 
 /**
@@ -561,25 +574,27 @@ async function runComposeSwap() {
 
 	const root = createRoot(container);
 	await rung('2 · mount the harness -- Bootstrap and DashboardShell wired exactly like main.tsx, starting on the already-bootstrapped shell', async () => {
-		// NOT wrapped in StrictMode, unlike every sibling mount in this file --
-		// deliberately, and recorded rather than silently done. This leg is the
-		// ONE rung in this suite that puts a SINGLE page through repeated real
+		// Wrapped in StrictMode, matching every sibling mount in this file
+		// (CR-04). This leg was previously the ONE rung in this suite mounted
+		// WITHOUT StrictMode: it puts a SINGLE page through repeated real
 		// unmount/remount cycles of the composed shell (Bootstrap<->shell, once
-		// per code entry) against the SAME IndexedDB database. StrictMode's
-		// dev-only double-invocation of every effect (stripped in the actual
-		// production build `vite build` ships, which is what a real officer's
-		// browser runs) compounds each of those cycles into two overlapping
-		// mount/unmount pairs instead of one, and was observed -- empirically,
-		// not assumed -- to occasionally corrupt the per-network attach lock's
-		// bookkeeping under that compounding (a `MisuseError` from a panel
-		// querying a handle a stale phantom instance had already closed,
-		// non-deterministically, roughly 1 run in 3). `DashboardShell.tsx`'s
-		// new `withNetworkDbLifecycleLock` still serializes every REAL
-		// open/close for a given network hash -- that is the production fix,
-		// asserted structurally in `refresh-swap.test.mjs`-adjacent coverage --
-		// but a harness that also fights StrictMode's artificial doubling on
-		// TOP of that is testing a scenario the shipped app never runs.
-		root.render(<ComposeSwapApp />);
+		// per code entry) against the SAME IndexedDB database, and was observed
+		// -- empirically, not assumed -- failing roughly 1 run in 3 with a
+		// `MisuseError` under StrictMode's dev-only double-invocation of every
+		// effect, while two of the four destructive open/close paths
+		// (`forgetNetwork` and both `performOfficerSwap` call sites) still ran
+		// OUTSIDE the per-network attach lock. Plan 50-22 brought all four
+		// destructive/lifecycle families inside `withNetworkDbLifecycleLock`.
+		// StrictMode is restored here, and this leg is required to pass FIVE
+		// consecutive `--swap-only` runs (run-headless.mjs) as the behavioural
+		// evidence that the lock -- not the removal of StrictMode -- is the
+		// fix. A failure here must be reported, never worked around by
+		// re-removing StrictMode, adding a retry, or widening a frame budget.
+		root.render(
+			<StrictMode>
+				<ComposeSwapApp />
+			</StrictMode>,
+		);
 		return 'mounted';
 	});
 
@@ -590,9 +605,14 @@ async function runComposeSwap() {
 
 	// ---- Confirmed swap: a SECOND officer's code -------------------------
 	const officer2Envelope = composeEnvelope(OFFICER_2_ID);
-	activeFakeTransport = makeFakeTransport({
+	// singleUse defaults to true (bootstrap-envelope.js) -- relied on
+	// deliberately: the production backend enforces exactly-once redemption,
+	// and this leg's new wire-call-count rungs (below) assert that property
+	// directly against this double's own `calls` array.
+	const swapTransport = makeFakeTransport({
 		codeToResult: { [SECRET_SWAP]: { status: 'ok', snapshot: officer2Envelope } },
 	});
+	activeFakeTransport = swapTransport;
 
 	await rung('4 · open the switcher and choose "+ Redeem another code"', async () => {
 		await openRedeemAnother();
@@ -622,7 +642,18 @@ async function runComposeSwap() {
 		return heading;
 	});
 
-	await rung('7 · confirm the swap', async () => {
+	await rung(
+		'7 · the wire was reached exactly once for SECRET_SWAP after classification (CR-02) -- the confirm dialog was built from a single-flight cache, not a second redemption',
+		async () => {
+			const count = swapTransport.calls.filter((code) => code === SECRET_SWAP).length;
+			if (count !== 1) {
+				throw new Error(`expected exactly 1 call to redeem(SECRET_SWAP) after classification, observed ${count}`);
+			}
+			return `calls: ${count}`;
+		},
+	);
+
+	await rung('8 · confirm the swap', async () => {
 		const dialog = document.querySelectorAll<HTMLDialogElement>('dialog.sh-dialog')[1];
 		const confirmBtn = dialog?.querySelector<HTMLButtonElement>('.sh-dialog-cta--primary');
 		if (!confirmBtn) throw new Error('swap confirm button not found');
@@ -630,7 +661,7 @@ async function runComposeSwap() {
 		return 'confirmed';
 	});
 
-	await rung('8 · the swap resolves without a DeleteBlockedError -- the registry names the NEW officer', async () => {
+	await rung('9 · the swap resolves without a DeleteBlockedError -- the registry names the NEW officer', async () => {
 		await waitUntil(
 			() => findNetwork(COMPOSE_NETWORK_HASH, localStorage)?.officerUserId === OFFICER_2_ID,
 			240,
@@ -643,7 +674,18 @@ async function runComposeSwap() {
 		return JSON.stringify(entry);
 	});
 
-	await rung('9 · the panel grid re-renders for the NEW officer -- nine populated panels, zero denied, the real badge', async () => {
+	await rung(
+		'10 · the wire is STILL reached exactly once for SECRET_SWAP after the confirmed swap -- the confirm pass also replayed rather than redeeming again',
+		async () => {
+			const count = swapTransport.calls.filter((code) => code === SECRET_SWAP).length;
+			if (count !== 1) {
+				throw new Error(`expected exactly 1 call to redeem(SECRET_SWAP) after the confirmed swap, observed ${count}`);
+			}
+			return `calls: ${count}`;
+		},
+	);
+
+	await rung('11 · the panel grid re-renders for the NEW officer -- nine populated panels, zero denied, the real badge', async () => {
 		// A confirmed swap re-attaches through the SAME per-network FIFO lock
 		// (withNetworkDbLifecycleLock in DashboardShell.tsx) that also serializes
 		// against this leg's own prior mounts -- a generous budget accounts for
@@ -662,12 +704,16 @@ async function runComposeSwap() {
 
 	// ---- Cancel rung: a THIRD officer's code, declined --------------------
 	const officer3Envelope = composeEnvelope(OFFICER_3_ID);
-	activeFakeTransport = makeFakeTransport({
+	// singleUse defaults to true (bootstrap-envelope.js) -- relied on
+	// deliberately, same as the confirmed-swap transport above: a declined
+	// swap must not have spent its code more than once either.
+	const cancelTransport = makeFakeTransport({
 		codeToResult: { [SECRET_CANCEL]: { status: 'ok', snapshot: officer3Envelope } },
 	});
+	activeFakeTransport = cancelTransport;
 	const beforeCancel = findNetwork(COMPOSE_NETWORK_HASH, localStorage);
 
-	await rung('10 · raise the dialog again with a THIRD officer\'s code, then decline it (the native Esc path, never a direct state reset)', async () => {
+	await rung('12 · raise the dialog again with a THIRD officer\'s code, then decline it (the native Esc path, never a direct state reset)', async () => {
 		await openRedeemAnother();
 		const input = await waitForElement<HTMLInputElement>('#dashboard-signin-code', 60);
 		typeIntoCodeInput(input, `${SECRET_CANCEL}.${officer3Envelope.digest}`);
@@ -682,7 +728,7 @@ async function runComposeSwap() {
 		return 'declined';
 	});
 
-	await rung('11 · the registry entry and the previously-bootstrapped data are BYTE-IDENTICAL to before the decline', async () => {
+	await rung('13 · the registry entry and the previously-bootstrapped data are BYTE-IDENTICAL to before the decline', async () => {
 		await waitUntil(
 			() => document.querySelectorAll<HTMLDialogElement>('dialog.sh-dialog')[1]?.hasAttribute('open') === false,
 			300,
@@ -694,11 +740,11 @@ async function runComposeSwap() {
 				`registry entry changed after a decline -- before=${JSON.stringify(beforeCancel)} after=${JSON.stringify(afterCancel)}`,
 			);
 		}
-		// The dialog raised in rung 10 belongs to a DashboardShell instance
+		// The dialog raised in rung 12 belongs to a DashboardShell instance
 		// that only just remounted (the Bootstrap<->shell round trip its own
 		// already-bootstrapped classification took) -- its own attach is
-		// still queued behind the same per-network FIFO lock rung 9 waited
-		// out. Settle before reading panel counts, same reason as rung 9.
+		// still queued behind the same per-network FIFO lock rung 11 waited
+		// out. Settle before reading panel counts, same reason as rung 11.
 		await settleUntilPanels(900);
 		const count = document.querySelectorAll('.panel').length;
 		const denied = document.querySelectorAll('.panel--denied').length;
@@ -708,10 +754,191 @@ async function runComposeSwap() {
 		return 'unchanged';
 	});
 
+	await rung(
+		'14 · a declined swap did not spend SECRET_CANCEL more than once -- the wire was reached at most once',
+		async () => {
+			const count = cancelTransport.calls.filter((code) => code === SECRET_CANCEL).length;
+			if (count > 1) {
+				throw new Error(`expected redeem(SECRET_CANCEL) to be called at most once, observed ${count}`);
+			}
+			return `calls: ${count}`;
+		},
+	);
+
 	win.__COMPOSE_GATE__ = {
 		phase: PHASE,
 		passed: steps.filter((s) => s.ok).length,
 		total: steps.length,
+		log: LOG,
+	};
+	win.__COMPOSE_GATE_DONE__ = true;
+}
+
+// ---------------------------------------------------------------------------
+// compose-preview-race (Task 3 / CR-01, D-18): a real page load that touches
+// the "Preview as" control DURING an in-flight attach -- the window neither
+// the zero-interaction compose-verify leg above nor the tier-3 matrix
+// (synchronous scopes) ever exercises. Runs LAST in the default sequence
+// (PHASE 10), after compose-swap, so the registry entry names the
+// swapped-in officer -- this phase asserts only that an entry exists, not
+// which officer it names.
+// ---------------------------------------------------------------------------
+
+/**
+ * Task 3's window-sample helper: resolves on the FIRST animation frame that
+ * finds at least one checkbox inside `.pv-control`, or once `maxFrames`
+ * frames have elapsed with none ever appearing -- NEVER a fixed sleep. The
+ * caller decides pass/fail from the returned NodeList (possibly empty) and
+ * the frame count it took.
+ */
+function firstFrameCheckboxes(maxFrames: number): Promise<{ boxes: NodeListOf<HTMLInputElement>; frames: number }> {
+	return new Promise((resolve) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			const boxes = document.querySelectorAll<HTMLInputElement>('.pv-control input[type="checkbox"]');
+			if (boxes.length > 0 || frames >= maxFrames) {
+				resolve({ boxes, frames });
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
+async function runComposePreviewRace() {
+	await rung(
+		'1 · a registry entry exists for the compose-gate network -- this phase runs after the swap leg, so it names the swapped-in officer, not the founding one',
+		async () => {
+			const entry = findNetwork(COMPOSE_NETWORK_HASH, localStorage);
+			if (!entry) {
+				throw new Error('no registry entry for the compose-gate network -- an earlier phase must seed it first');
+			}
+			return `officerUserId: ${entry.officerUserId}`;
+		},
+	);
+
+	const container = document.getElementById('root');
+	if (!container) {
+		await rung('2 · #root element not found', async () => {
+			throw new Error('compose-gate.html is missing #root');
+		});
+		win.__COMPOSE_GATE__ = { phase: PHASE, passed: steps.filter((s) => s.ok).length, total: steps.length, log: LOG };
+		win.__COMPOSE_GATE_DONE__ = true;
+		return;
+	}
+
+	const root = createRoot(container);
+	await rung('2 · mount the production DashboardShell -- no scope set supplied by this page', async () => {
+		root.render(
+			<StrictMode>
+				<DashboardShell onRedeemAnother={() => {}} />
+			</StrictMode>,
+		);
+		return 'mounted';
+	});
+
+	let sampledCheckboxCount = 0;
+	let sampledDisabledCount = 0;
+	await rung(
+		'3 · the window sample: on the first animation frame after the mount commits, every checkbox inside .pv-control is disabled',
+		async () => {
+			const { boxes, frames } = await firstFrameCheckboxes(120);
+			sampledCheckboxCount = boxes.length;
+			if (sampledCheckboxCount === 0) {
+				throw new Error(`no checkboxes found inside .pv-control within ${frames} frames`);
+			}
+			sampledDisabledCount = Array.from(boxes).filter((box) => box.disabled).length;
+			if (sampledDisabledCount !== sampledCheckboxCount) {
+				throw new Error(
+					`expected all ${sampledCheckboxCount} checkboxes disabled on the sampled frame, observed ${sampledDisabledCount} disabled (frame ${frames})`,
+				);
+			}
+			return `checkboxes: ${sampledCheckboxCount}, disabled: ${sampledDisabledCount} (frame ${frames})`;
+		},
+	);
+
+	await rung('4 · a click during the window changes nothing -- a disabled input does not toggle', async () => {
+		const first = document.querySelector<HTMLInputElement>('.pv-control input[type="checkbox"]');
+		if (!first) throw new Error('no checkbox found to click');
+		const before = first.checked;
+		first.click();
+		if (first.checked !== before) {
+			throw new Error(`checkbox toggled from ${before} to ${first.checked} despite being disabled`);
+		}
+		return `checked unchanged: ${before}`;
+	});
+
+	let observedPanelCount = 0;
+	await rung(
+		'5 · settle: a bounded rAF poll until at least one panel section renders, or the frame cap is reached',
+		async () => {
+			observedPanelCount = await settleUntilPanels(180);
+			if (observedPanelCount !== CAPABILITIES.length) {
+				throw new Error(`expected ${CAPABILITIES.length} panels after settling, observed ${observedPanelCount}`);
+			}
+			return `panels: ${observedPanelCount}`;
+		},
+	);
+
+	await rung(
+		'6 · the checkboxes are now ENABLED -- the window re-opened once the scopes resolved (positive control proving rung 3 sampled a real transition)',
+		async () => {
+			const boxes = document.querySelectorAll<HTMLInputElement>('.pv-control input[type="checkbox"]');
+			const enabledCount = Array.from(boxes).filter((box) => !box.disabled).length;
+			if (boxes.length === 0 || enabledCount !== boxes.length) {
+				throw new Error(`expected all ${boxes.length} checkboxes enabled, observed ${enabledCount} enabled`);
+			}
+			return `enabled: ${enabledCount}/${boxes.length}`;
+		},
+	);
+
+	await rung(
+		'7 · toggling one checkbox OFF drops the panel count and the badge carries the simulated class -- the preview is genuinely doing something',
+		async () => {
+			const first = document.querySelector<HTMLInputElement>('.pv-control input[type="checkbox"]');
+			if (!first) throw new Error('no checkbox found to toggle');
+			first.click();
+			await settleUntilPanels(180);
+			const count = document.querySelectorAll('.panel').length;
+			const badge = document.querySelector('.pv-badge');
+			if (count >= CAPABILITIES.length) {
+				throw new Error(`expected panel count to drop below ${CAPABILITIES.length}, observed ${count}`);
+			}
+			if (!badge?.className.includes('pv-badge--sim')) {
+				throw new Error(`expected the simulated badge class, observed "${badge?.className}"`);
+			}
+			return `panels: ${count}, badge: ${badge?.className}`;
+		},
+	);
+
+	await rung(
+		'8 · Reset returns the officer to the full nine-panel set, zero denied, the real badge -- the end-to-end CR-01 assertion',
+		async () => {
+			const resetBtn = document.querySelector<HTMLButtonElement>('.pv-reset');
+			if (!resetBtn) throw new Error('reset button not found');
+			resetBtn.click();
+			await settleUntilPanels(180);
+			const count = document.querySelectorAll('.panel').length;
+			const denied = document.querySelectorAll('.panel--denied').length;
+			const badge = document.querySelector('.pv-badge');
+			if (count !== CAPABILITIES.length) throw new Error(`expected ${CAPABILITIES.length} panels, observed ${count}`);
+			if (denied !== 0) throw new Error(`expected 0 denied panel sections, observed ${denied}`);
+			if (!badge?.className.includes('pv-badge--real')) {
+				throw new Error(`expected the real-answer badge class, observed "${badge?.className}"`);
+			}
+			return `panels: ${count}, denied: ${denied}, badge: ${badge?.className}`;
+		},
+	);
+
+	win.__COMPOSE_GATE__ = {
+		phase: PHASE,
+		passed: steps.filter((s) => s.ok).length,
+		total: steps.length,
+		sampledCheckboxCount,
+		sampledDisabledCount,
+		panels: observedPanelCount,
 		log: LOG,
 	};
 	win.__COMPOSE_GATE_DONE__ = true;
@@ -725,6 +952,8 @@ async function main() {
 		await runComposeVerify();
 	} else if (PHASE === 'compose-swap') {
 		await runComposeSwap();
+	} else if (PHASE === 'compose-preview-race') {
+		await runComposePreviewRace();
 	} else {
 		throw new Error(`compose-gate: unknown phase "${PHASE}"`);
 	}
