@@ -87,8 +87,9 @@ function ok(message) {
 //    gate proves nothing. Run this BEFORE touching the build.
 // ---------------------------------------------------------------------------
 /** One fixture per matcher. A gate with an unexercised matcher proves nothing
- * about the thing that matcher is the only defence against. */
-const POSITIVE_CONTROLS = [
+ * about the thing that matcher is the only defence against.
+ * @type {ReadonlyArray<readonly [string, RegExp, string]>} */
+const POSITIVE_CONTROLS = /** @type {ReadonlyArray<readonly [string, RegExp, string]>} */ ([
 	['node:crypto (the original enumerated builtin)', NODE_TOKEN_RE, 'import c from "node:crypto";'],
 	['node:worker_threads (outside the old eight-builtin list)', NODE_TOKEN_RE, 'import w from "node:worker_threads";'],
 	['node:http (outside the old eight-builtin list)', NODE_TOKEN_RE, 'const h = await import("node:http");'],
@@ -99,7 +100,7 @@ const POSITIVE_CONTROLS = [
 	['env read, aliased', ENV_READ_RE, 'const env = import.meta.env;'],
 	['vite define entry', VITE_DEFINE_RE, 'export default defineConfig({ define: { __X__: "1" } });'],
 	['vite envPrefix entry', VITE_ENV_PREFIX_RE, 'export default defineConfig({ envPrefix: "APP_" });'],
-];
+]);
 for (const [label, matcher, fixture] of POSITIVE_CONTROLS) {
 	if (!matcher.test(fixture)) {
 		fail(
