@@ -1,8 +1,28 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { t } from '../i18n/copy.js';
 import { BOOTSTRAP_PHASES, copyKeysForOutcome, redeemAndBootstrap } from '../lifecycle/bootstrap.js';
+import type { RedeemAndBootstrapResult } from '../lifecycle/bootstrap.js';
 import { createRestBootstrapTransport } from '../transport/bootstrap-transport-client.js';
+import { createSingleFlightTransport } from '../lifecycle/officer-swap.js';
+import type { SingleFlightTransport } from '../lifecycle/officer-swap.js';
+import type { IBootstrapTransport } from '@votetorrent/vote-engine/bootstrap';
+
+/** The context handed to `onAlreadyBootstrapped` when a code redeems cleanly
+ * (D-05/D-13 verified) for a network this browser already holds. It carries
+ * the SAME single-flight transport instance whose cache already holds the
+ * verified envelope from the classify call above -- a caller (`DashboardShell`)
+ * replays it to recover that envelope and classify it, without spending the
+ * single-use code a second time. `networkHash` is included for convenience
+ * (bootstrap.js's `already-bootstrapped` outcome names it), but the envelope
+ * itself -- and therefore the officer identity `classifyRedemption` needs --
+ * is only recoverable through a replay of `transport`. */
+export interface AlreadyBootstrappedContext {
+	networkHash?: string;
+	pastedCode: string;
+	transport: SingleFlightTransport;
+	reset: () => void;
+}
 
 /**
  * Bootstrap.tsx -- UI-SPEC Screens & States row 1: idle, submitting,
@@ -25,6 +45,12 @@ import { createRestBootstrapTransport } from '../transport/bootstrap-transport-c
  * read, never a build-time one, and the only zero-configuration answer that
  * respects the gate. A real multi-origin deployment story is future work,
  * not decided by this plan.
+ *
+ * `createTransport` (below) is an INJECTION POINT ONLY -- for tests and the
+ * composed browser gate to drive this real screen without a live endpoint.
+ * It changes nothing about where a production build gets its base URL from
+ * (still `window.location.origin`, read only when `createTransport` is
+ * absent) and introduces no build-time env read of its own.
  */
 const BOOTSTRAP_BASE_URL = window.location.origin;
 
@@ -34,9 +60,37 @@ type ScreenState =
 	| { kind: 'error'; outcome: string; reason?: string }
 	| { kind: 'ok' };
 
-export function Bootstrap() {
+export interface BootstrapProps {
+	/** Called exactly once, with the `ok` result, after a successful
+	 * bootstrap. Optional -- omitting it keeps today's placeholder landing
+	 * state. */
+	onComplete?: (result: Extract<RedeemAndBootstrapResult, { outcome: 'ok' }>) => void;
+	/** Called instead of routing to the generic error state when a code
+	 * redeems cleanly for a network this browser already holds. Carries the
+	 * SAME single-flight transport instance whose cache already holds the
+	 * verified envelope, so a caller can classify and, on confirmation,
+	 * replace -- without the single-use code being spent a second time.
+	 * Optional -- omitting it leaves the existing `already-bootstrapped`
+	 * error state exactly as it was. */
+	onAlreadyBootstrapped?: (context: AlreadyBootstrappedContext) => void;
+	/** Injection point for tests and the composed browser gate. Defaults to
+	 * `createRestBootstrapTransport({ baseUrl: window.location.origin })`. */
+	createTransport?: () => IBootstrapTransport;
+}
+
+export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }: BootstrapProps = {}) {
 	const [pastedCode, setPastedCode] = useState('');
 	const [state, setState] = useState<ScreenState>({ kind: 'idle' });
+	// Holds the CURRENT attempt's single-flight decorator so the unmount
+	// cleanup below can reset() it -- a cancelled or abandoned classification
+	// must never leave a redeemable whole-database snapshot sitting in memory.
+	const singleFlightRef = useRef<{ reset: () => void } | null>(null);
+
+	useEffect(() => {
+		return () => {
+			singleFlightRef.current?.reset();
+		};
+	}, []);
 
 	const submitting = state.kind === 'in-flight';
 
@@ -57,9 +111,18 @@ export function Bootstrap() {
 		// database -- report "couldn't reach the authority app" for something
 		// that happened entirely inside this browser, AFTER a successful
 		// redemption had already burned a single-use code.
-		let transport;
+		let transport: SingleFlightTransport;
 		try {
-			transport = createRestBootstrapTransport({ baseUrl: BOOTSTRAP_BASE_URL });
+			const inner = createTransport
+				? createTransport()
+				: createRestBootstrapTransport({ baseUrl: BOOTSTRAP_BASE_URL });
+			// EVERY PATH WRAPS THE TRANSPORT -- the property that lets a
+			// classify-then-confirm sequence (D-14) share ONE spent code instead
+			// of two: `createSingleFlightTransport` caches only an `ok` result,
+			// never a refusal, and never persists it.
+			const singleFlight = createSingleFlightTransport(inner);
+			singleFlightRef.current = singleFlight;
+			transport = singleFlight.transport;
 		} catch {
 			setState({ kind: 'error', outcome: 'transport-unreachable' });
 			return;
@@ -73,6 +136,24 @@ export function Bootstrap() {
 			});
 			if (result.outcome === 'ok') {
 				setState({ kind: 'ok' });
+				onComplete?.(result);
+				return;
+			}
+			if (result.outcome === 'already-bootstrapped' && onAlreadyBootstrapped) {
+				// The single-flight cache already holds the verified `ok` result
+				// from step 2 above -- `redeemAndBootstrap`'s own registry check
+				// (step 4) is what turned that into `already-bootstrapped`, not a
+				// refusal from the transport. Handing the SAME transport instance
+				// (and its `reset`) to the caller is what lets a confirmed swap
+				// replay that cached envelope instead of redeeming the single-use
+				// code a second time.
+				const singleFlight = singleFlightRef.current;
+				onAlreadyBootstrapped({
+					networkHash: 'networkHash' in result ? result.networkHash : undefined,
+					pastedCode,
+					transport,
+					reset: singleFlight ? singleFlight.reset : () => {},
+				});
 				return;
 			}
 			setState({

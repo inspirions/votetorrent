@@ -94,7 +94,7 @@ export const BOOTSTRAP_PHASES = Object.freeze(
  *   | { outcome: 'code-refused', status: import('@votetorrent/vote-engine/bootstrap').BootstrapRedemptionStatus }
  *   | { outcome: 'transport-unreachable' }
  *   | { outcome: 'verify-failed', reason: import('@votetorrent/vote-engine/bootstrap').SnapshotVerifyFailureReason }
- *   | { outcome: 'already-bootstrapped' }
+ *   | { outcome: 'already-bootstrapped', networkHash: string }
  *   | { outcome: 'restore-incomplete' }
  *   | { outcome: 'officer-indeterminate' }
  * } RedeemAndBootstrapResult
@@ -211,7 +211,11 @@ export async function redeemAndBootstrap(options) {
 	//    path has exactly one implementation.
 	const existing = findNetwork(envelope.networkHash, storage);
 	if (existing && !replace) {
-		return { outcome: 'already-bootstrapped' };
+		// `networkHash` is included so a caller (Bootstrap.tsx's
+		// `onAlreadyBootstrapped` seam) can identify which network this is
+		// without a redundant transport replay just to read it back off the
+		// envelope it already redeemed.
+		return { outcome: 'already-bootstrapped', networkHash: envelope.networkHash };
 	}
 	if (existing && replace) {
 		// `handoverDb` closes first, inside deleteNetworkDb. A caller holding an

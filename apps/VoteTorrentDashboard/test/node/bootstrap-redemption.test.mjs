@@ -13,10 +13,14 @@
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { deleteNetworkDb, closeNetworkDb, dbNameFor } from '../../src/db/open-db.js';
 import { readRowCounts, readRowCountsRecord, attachNetworkDb } from '../../src/db/reattach.js';
 import { findNetwork, listNetworks } from '../../src/db/networks-registry.js';
 import { BOOTSTRAP_OUTCOME_CODES, redeemAndBootstrap, copyKeysForOutcome } from '../../src/lifecycle/bootstrap.js';
+import { createSingleFlightTransport } from '../../src/lifecycle/officer-swap.js';
 import {
 	buildFixtureEnvelope,
 	withDroppedRows,
@@ -29,6 +33,9 @@ import {
 } from '../fixtures/bootstrap-envelope.js';
 import { t } from '../../src/i18n/copy.js';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const APP_ROOT = path.resolve(__dirname, '..', '..');
 
 const SECRET = 'a'.repeat(40);
 
@@ -341,7 +348,46 @@ test('redeemAndBootstrap: redeeming for a networkHash already in the registry wi
 	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: baseline.envelope } } });
 	const result = await redeemAndBootstrap({ pastedCode: codeFor(baseline.envelope), transport, storage: baseline.storage });
 	assert.equal(result.outcome, 'already-bootstrapped');
+	// 50-18: the outcome now names the network -- Bootstrap.tsx's
+	// `onAlreadyBootstrapped` seam hands this straight to its caller without a
+	// redundant transport replay just to read it back off the envelope.
+	assert.ok(result.outcome === 'already-bootstrapped' && result.networkHash === baseline.envelope.networkHash);
 	await assertByteIntact(baseline);
+	await deleteNetworkDb(baseline.envelope.networkHash);
+});
+
+// ---------------------------------------------------------------------------
+// 50-18 D-14: the classify-then-confirm seam, exercised at the function
+// level -- Bootstrap.tsx wraps every transport in createSingleFlightTransport
+// and hands the SAME instance to onAlreadyBootstrapped, so the whole
+// classify-then-confirm sequence (an `already-bootstrapped` redemption,
+// followed by a caller replaying the cached envelope) spends the single-use
+// code exactly once.
+// ---------------------------------------------------------------------------
+
+test('D-14 seam: a single-flight-wrapped transport lets an already-bootstrapped redemption be replayed by a caller without spending the code twice', async () => {
+	const baseline = await bootstrapFixtureNetwork();
+	const inner = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: baseline.envelope } } });
+	const singleFlight = createSingleFlightTransport(inner);
+
+	// The classify pass, exactly as Bootstrap.tsx's handleSubmit performs it.
+	const result = await redeemAndBootstrap({
+		pastedCode: codeFor(baseline.envelope),
+		transport: singleFlight.transport,
+		storage: baseline.storage,
+	});
+	assert.equal(result.outcome, 'already-bootstrapped');
+	assert.equal(singleFlight.innerCallCount, 1);
+
+	// A caller (DashboardShell) replays the SAME transport to recover the
+	// verified envelope for classification -- this must NOT reach the wire a
+	// second time.
+	const replay = await singleFlight.transport.redeem(SECRET);
+	assert.equal(replay.status, 'ok');
+	assert.deepEqual(replay.snapshot, baseline.envelope);
+	assert.equal(singleFlight.innerCallCount, 1, 'innerCallCount must still be exactly 1 after the replay');
+	assert.equal(inner.calls.length, 1, 'the underlying transport must have been called exactly once');
+
 	await deleteNetworkDb(baseline.envelope.networkHash);
 });
 
@@ -423,4 +469,124 @@ test('copyKeysForOutcome: total over every non-"ok" outcome and every verify-fai
 
 test('copyKeysForOutcome: throws naming the outcome for an unmapped value', () => {
 	assert.throws(() => copyKeysForOutcome('not-a-real-outcome'), /unmapped outcome/);
+});
+
+// ---------------------------------------------------------------------------
+// 50-18 source-level wiring: `node --test` cannot import `.tsx`, so
+// `Bootstrap.tsx` and `main.tsx` are read as TEXT here -- the same idiom
+// `shell-wiring.test.mjs` and `preview-control.test.mjs` already established.
+// Every matcher below is paired with an inertness control.
+// ---------------------------------------------------------------------------
+
+/** @param {string} source @returns {string} */
+function stripComments(source) {
+	return source
+		.split('\n')
+		.filter((line) => {
+			const trimmed = line.trim();
+			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
+		})
+		.join('\n');
+}
+
+const BOOTSTRAP_TSX = readFileSync(path.join(APP_ROOT, 'src', 'screens', 'Bootstrap.tsx'), 'utf8');
+const BOOTSTRAP_CODE = stripComments(BOOTSTRAP_TSX);
+const MAIN_TSX = readFileSync(path.join(APP_ROOT, 'src', 'main.tsx'), 'utf8');
+const MAIN_CODE = stripComments(MAIN_TSX);
+
+test('Bootstrap: all three new props are optional -- destructured with a default empty object, so <Bootstrap /> with no props still compiles', () => {
+	assert.match(BOOTSTRAP_CODE, /export function Bootstrap\(\{ onComplete, onAlreadyBootstrapped, createTransport \}: BootstrapProps = \{\}\)/);
+	assert.match(BOOTSTRAP_CODE, /onComplete\?:/);
+	assert.match(BOOTSTRAP_CODE, /onAlreadyBootstrapped\?:/);
+	assert.match(BOOTSTRAP_CODE, /createTransport\?:/);
+});
+
+test('inertness control: the optional-props matcher does not accept a required-props signature', () => {
+	const fixture = 'export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }: BootstrapProps)';
+	assert.doesNotMatch(
+		fixture,
+		/export function Bootstrap\(\{ onComplete, onAlreadyBootstrapped, createTransport \}: BootstrapProps = \{\}\)/,
+		'matcher is inert',
+	);
+});
+
+test('Bootstrap: every transport -- injected or the real REST default -- is wrapped in createSingleFlightTransport before use', () => {
+	assert.match(BOOTSTRAP_CODE, /const singleFlight = createSingleFlightTransport\(inner\);/);
+	// The wrap happens INSIDE the branch that already covers both
+	// `createTransport?.()` and the `createRestBootstrapTransport` default --
+	// assert the wrap is downstream of both, not duplicated per branch.
+	const wrapAt = BOOTSTRAP_CODE.indexOf('createSingleFlightTransport(inner)');
+	const injectedAt = BOOTSTRAP_CODE.indexOf('createTransport()');
+	const defaultAt = BOOTSTRAP_CODE.indexOf('createRestBootstrapTransport({ baseUrl: BOOTSTRAP_BASE_URL })');
+	assert.ok(wrapAt > injectedAt && injectedAt >= 0, 'the wrap must follow the injected-transport branch');
+	assert.ok(wrapAt > defaultAt && defaultAt >= 0, 'the wrap must follow the default-transport branch');
+});
+
+test('inertness control: the wrap matcher does not accept an unwrapped transport assignment', () => {
+	const fixture = 'transport = createRestBootstrapTransport({ baseUrl: BOOTSTRAP_BASE_URL });';
+	assert.doesNotMatch(fixture, /const singleFlight = createSingleFlightTransport\(inner\);/, 'matcher is inert');
+});
+
+test("Bootstrap: 'already-bootstrapped' is branched BEFORE the generic error-state mapping, and only calls onAlreadyBootstrapped when supplied", () => {
+	const alreadyBootstrappedAt = BOOTSTRAP_CODE.indexOf("result.outcome === 'already-bootstrapped'");
+	const genericErrorAt = BOOTSTRAP_CODE.indexOf('setState({\n\t\t\t\tkind:');
+	assert.ok(alreadyBootstrappedAt >= 0, 'could not locate the already-bootstrapped branch');
+	assert.match(BOOTSTRAP_CODE, /result\.outcome === 'already-bootstrapped' && onAlreadyBootstrapped/);
+	// A generic setState({ kind: 'error', ... }) call exists further down for
+	// every OTHER non-ok outcome.
+	assert.match(BOOTSTRAP_CODE, /kind: 'error',\s*outcome: result\.outcome,/);
+	const genericAt = BOOTSTRAP_CODE.indexOf("kind: 'error',\n\t\t\t\toutcome: result.outcome,");
+	assert.ok(genericAt > alreadyBootstrappedAt, 'the already-bootstrapped branch must precede the generic error mapping');
+});
+
+test('inertness control: the already-bootstrapped-guard matcher does not accept an unconditional branch', () => {
+	const fixture = "if (result.outcome === 'already-bootstrapped') {";
+	assert.doesNotMatch(fixture, /result\.outcome === 'already-bootstrapped' && onAlreadyBootstrapped/, 'matcher is inert');
+});
+
+test("Bootstrap: onComplete is called exactly once, on the 'ok' outcome, with the result", () => {
+	assert.match(BOOTSTRAP_CODE, /if \(result\.outcome === 'ok'\) \{\s*setState\(\{ kind: 'ok' \}\);\s*onComplete\?\.\(result\);/);
+});
+
+test('inertness control: the onComplete matcher does not accept a call outside the ok branch', () => {
+	const fixture = "onAlreadyBootstrapped?.(context);\nif (result.outcome === 'ok') {\n\tsetState({ kind: 'ok' });\n}";
+	assert.doesNotMatch(
+		fixture,
+		/if \(result\.outcome === 'ok'\) \{\s*setState\(\{ kind: 'ok' \}\);\s*onComplete\?\.\(result\);/,
+		'matcher is inert',
+	);
+});
+
+test('Bootstrap: reset() is registered as an unmount cleanup, so a cancelled classification never leaves a redeemable snapshot in memory', () => {
+	assert.match(BOOTSTRAP_CODE, /useEffect\(\(\) => \{\s*return \(\) => \{\s*singleFlightRef\.current\?\.reset\(\);/);
+});
+
+test('inertness control: the unmount-reset matcher does not accept a reset call outside a cleanup function', () => {
+	const fixture = 'singleFlightRef.current?.reset();';
+	assert.doesNotMatch(
+		fixture,
+		/useEffect\(\(\) => \{\s*return \(\) => \{\s*singleFlightRef\.current\?\.reset\(\);/,
+		'matcher is inert',
+	);
+});
+
+test('main.tsx: contains no setInterval or setTimeout, and the D-22 polling carve-out comment is gone', () => {
+	assert.equal((MAIN_CODE.match(/setInterval|setTimeout/g) ?? []).length, 0);
+	assert.doesNotMatch(MAIN_TSX, /ONE `setInterval`/);
+	assert.doesNotMatch(MAIN_TSX, /THIS IS NOT A LIVENESS MECHANISM/);
+});
+
+test('inertness control: the zero-timer matcher hits a synthetic setInterval fixture', () => {
+	assert.ok((('window.setInterval(() => {}, 500);').match(/setInterval|setTimeout/g) ?? []).length > 0, 'matcher is inert');
+});
+
+test('main.tsx: Bootstrap is rendered with onComplete and onAlreadyBootstrapped, and DashboardShell receives the resulting swap context', () => {
+	assert.match(MAIN_CODE, /<Bootstrap onComplete=\{handleBootstrapComplete\} onAlreadyBootstrapped=\{handleAlreadyBootstrapped\} \/>/);
+	assert.match(MAIN_CODE, /pendingSwapContext=\{swapContext\}/);
+	assert.match(MAIN_CODE, /onSwapContextConsumed=\{handleSwapContextConsumed\}/);
+});
+
+test('inertness control: the shell-wiring matcher does not accept the old, prop-less DashboardShell call site', () => {
+	const fixture = 'return <DashboardShell onRedeemAnother={handleRedeemAnother} />;';
+	assert.doesNotMatch(fixture, /pendingSwapContext=\{swapContext\}/, 'matcher is inert');
 });
