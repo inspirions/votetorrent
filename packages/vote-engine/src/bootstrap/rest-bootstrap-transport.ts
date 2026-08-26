@@ -100,7 +100,17 @@ export class RestBootstrapTransport implements IBootstrapTransport {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.headers = options.headers ?? {}
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    const impl = options.fetchImpl ?? (globalThis as { fetch?: FetchLike }).fetch
+    // The global `fetch` MUST be bound to `globalThis` at capture. Native
+    // `fetch` is a Window/WorkerGlobalScope method with a Web IDL brand
+    // check on its receiver, and it is stored here and later invoked as
+    // `this.fetchImpl(...)` — a call whose receiver is the transport
+    // instance, not the global. Unbound, every browser throws
+    // `TypeError: Failed to execute 'fetch' on 'Window': Illegal invocation`
+    // before the request is ever sent, which `requestJson`'s catch then
+    // reports as an unreachable endpoint. Node's `fetch` has no such brand
+    // check, so the Node conformance spec cannot observe this — do not
+    // remove the bind because the tests still pass without it.
+    const impl = options.fetchImpl ?? (globalThis as { fetch?: FetchLike }).fetch?.bind(globalThis)
     if (impl === undefined) {
       throw new Error('RestBootstrapTransport: no fetchImpl was supplied and globalThis.fetch is unavailable on this host')
     }
@@ -196,7 +206,10 @@ export class RestBootstrapTransport implements IBootstrapTransport {
 
     let response: Response
     try {
-      response = await this.fetchImpl(url, {
+      // Invoked through a local binding so the receiver is never `this` —
+      // see the constructor's note on the Web IDL brand check.
+      const fetchImpl = this.fetchImpl
+      response = await fetchImpl(url, {
         method: requestInit.method,
         headers,
         body,
