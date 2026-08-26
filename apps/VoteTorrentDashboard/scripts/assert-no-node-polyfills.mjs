@@ -122,7 +122,30 @@ for (const benign of BENIGN_FIXTURES) {
 		fail(`matcher is indiscriminate — NODE_TOKEN_RE matched the benign fixture ${JSON.stringify(benign)}.`);
 	}
 }
-ok(`${POSITIVE_CONTROLS.length} positive control(s) matched and ${BENIGN_FIXTURES.length} benign fixture(s) did not — matchers are live and discriminating.`);
+
+/** ENV_READ_RE is deliberately broad (`import.meta.env` with no `.VITE_`
+ * requirement, per WR-07) — broad enough that it could plausibly be "fixed"
+ * back to uselessness by narrowing it if it ever flagged legitimate code. A
+ * negative control pins that it does NOT fire on ordinary code that merely
+ * mentions "env" or "import.meta" without reading the env object itself,
+ * proving the matcher discriminates rather than merely matching everything. */
+const ENV_BENIGN_FIXTURES = [
+	'const env = process.env.NODE_ENV;',
+	'const meta = { import: { meta: "x" } };',
+	'// import.meta.env is read elsewhere, not here',
+	'const url = new URL(import.meta.url);',
+];
+for (const benign of ENV_BENIGN_FIXTURES) {
+	const stripped = stripCommentLines(benign);
+	if (ENV_READ_RE.test(stripped)) {
+		fail(`matcher is indiscriminate — ENV_READ_RE matched the benign fixture ${JSON.stringify(benign)}.`);
+	}
+}
+
+ok(
+	`${POSITIVE_CONTROLS.length} positive control(s) matched, ${BENIGN_FIXTURES.length} NODE_TOKEN_RE benign fixture(s) and ` +
+		`${ENV_BENIGN_FIXTURES.length} ENV_READ_RE benign fixture(s) did not — matchers are live and discriminating.`,
+);
 
 // ---------------------------------------------------------------------------
 // 2. Spawn `vite build` and capture output.
