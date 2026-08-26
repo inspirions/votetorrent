@@ -137,7 +137,11 @@ async function deleteNetworkDbSettled(networkHash, options) {
 			// eslint-disable-next-line no-await-in-loop -- deliberately serial, waiting out a real macrotask each time
 			await yieldToTaskQueue();
 		}
-		await deleteNetworkDb(networkHash);
+		// The SAME options as the first attempt. Passing none reverted to the
+		// 5000ms default and, more importantly, dropped the storage adapter --
+		// so a caller that injected one had its row-count record cleared from
+		// `globalThis.localStorage` instead on eight of nine attempts.
+		await deleteNetworkDb(networkHash, options);
 		remaining = await indexedDB.databases();
 		round += 1;
 	}
@@ -227,7 +231,7 @@ export async function forgetNetwork(options) {
 	//    whether from the first attempt or from settling never converging)
 	//    must leave this function by propagation, never be converted into a
 	//    success shape.
-	await deleteNetworkDbSettled(networkHash, timeoutMs === undefined ? { db } : { db, timeoutMs });
+	await deleteNetworkDbSettled(networkHash, timeoutMs === undefined ? { db, storage } : { db, storage, timeoutMs });
 
 	// 4. Explicit clear, even though step 3 already clears this key --
 	//    contract 6's clear-on-delete obligation stays local to this file

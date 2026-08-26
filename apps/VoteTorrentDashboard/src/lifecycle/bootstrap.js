@@ -222,7 +222,7 @@ export async function redeemAndBootstrap(options) {
 		return { outcome: 'already-bootstrapped' };
 	}
 	if (existing && replace) {
-		await deleteNetworkDb(envelope.networkHash);
+		await deleteNetworkDb(envelope.networkHash, { storage });
 	}
 
 	// 5. Apply the schema.
@@ -285,7 +285,7 @@ export async function redeemAndBootstrap(options) {
 			// failure to delete must not replace it with a less informative
 			// one. The worst case is the orphan this block exists to prevent --
 			// no worse than the previous behaviour, and now the exception.
-			await deleteNetworkDb(envelope.networkHash).catch(() => undefined);
+			await deleteNetworkDb(envelope.networkHash, { storage }).catch(() => undefined);
 		}
 	}
 }
