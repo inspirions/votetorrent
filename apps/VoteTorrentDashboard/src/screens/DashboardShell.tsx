@@ -12,21 +12,23 @@
  * phase; a ticking age beside static data would imply a liveness this
  * dashboard does not have.
  *
- * THE OFFICER-SWAP DIALOG'S CURRENT REACHABILITY, STATED HONESTLY: this
- * file builds the full officer-swap confirm dialog and its confirmed path
- * (`performOfficerSwap`, then closing the handle, clearing granted scopes
- * and the selection, and remounting `PanelGrid` under a key derived from
- * `networkHash:officerUserId:bootstrappedAt`), and `pendingSwap` is the
- * seam a caller populates to raise it. Nothing in this wave populates it:
- * `src/screens/Bootstrap.tsx` (50-08, frozen) always calls
- * `redeemAndBootstrap` with no `replace` flag and exposes no completion
- * callback, so a code for an ALREADY-HELD network can only ever resolve as
- * `already-bootstrapped` through that screen today — burning the single-use
- * code without ever surfacing the verified envelope this dialog needs to
- * classify. Closing that gap requires a change to `Bootstrap.tsx` itself
- * (an injectable transport, or a completion callback), which is out of
- * this plan's scope (50-08's file). Recorded here and in the plan's
- * SUMMARY rather than silently pretended away.
+ * THE OFFICER-SWAP DIALOG'S REACHABILITY (50-18 closed this; history kept
+ * for the next reader). Through 50-17, this file built the full officer-swap
+ * confirm dialog and its confirmed path, and `pendingSwap` was the seam a
+ * caller populated to raise it -- but nothing populated it: `Bootstrap.tsx`
+ * exposed no completion callback and no injectable transport, so a code for
+ * an ALREADY-HELD network could only ever resolve as `already-bootstrapped`,
+ * burning the single-use code without ever surfacing the verified envelope
+ * this dialog needs to classify. 50-18 gave `Bootstrap.tsx` an
+ * `onAlreadyBootstrapped` seam carrying the SAME single-flight transport
+ * whose cache already holds that envelope; `main.tsx` forwards it here as
+ * `pendingSwapContext`, and the effect below replays the transport (no
+ * second redemption -- the single-use code is spent exactly once),
+ * classifies it, and populates `pendingSwap` for `officer-swap`, silently
+ * performs a `same-officer-refresh` (no confirmation needed to replace an
+ * officer's own data with their own newer copy), and fails closed --
+ * WITHOUT deleting anything -- for `officer-indeterminate` or the
+ * structurally-unreachable `new-network`.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { Database } from '@quereus/quereus';
@@ -46,8 +48,10 @@ import { listNetworks } from '../db/networks-registry.js';
 import { formatStaleThreshold, snapshotFreshness } from '../lifecycle/freshness.js';
 import type { SnapshotFreshness } from '../lifecycle/freshness.js';
 import { forgetNetwork } from '../lifecycle/forget-network.js';
-import { performOfficerSwap } from '../lifecycle/officer-swap.js';
+import { classifyRedemption, performOfficerSwap, OfficerIndeterminateError } from '../lifecycle/officer-swap.js';
 import type { SingleFlightTransport } from '../lifecycle/officer-swap.js';
+import { splitSignInCode } from '../transport/bootstrap-transport-client.js';
+import type { AlreadyBootstrappedContext } from './Bootstrap.js';
 import { AdvisoryDisclosure, PreviewAsControl, PreviewAsProvider } from './PreviewAsControl.js';
 import { PanelGrid } from './PanelGrid.js';
 import './shell.css';
@@ -59,6 +63,17 @@ export interface DashboardShellProps {
 	 * this network; called with no argument (the switcher's "+ Redeem another
 	 * code" row), it is an ordinary first bootstrap. */
 	onRedeemAnother: (refreshTargetNetworkHash?: string) => void;
+	/** The officer-swap context `main.tsx` hands over the moment `Bootstrap`'s
+	 * `onAlreadyBootstrapped` fires -- `null` when no swap is pending. This
+	 * shell replays the carried single-flight transport, classifies the
+	 * result, and either raises the confirm dialog (`officer-swap`), performs
+	 * a silent same-officer refresh, or fails closed (`officer-indeterminate`
+	 * / the structurally-unreachable `new-network`). */
+	pendingSwapContext?: AlreadyBootstrappedContext | null;
+	/** Called once `pendingSwapContext` has been classified (regardless of
+	 * outcome), so the caller can clear it and avoid reprocessing the same
+	 * context on a later render. */
+	onSwapContextConsumed?: () => void;
 }
 
 interface PendingSwap {
@@ -69,7 +84,11 @@ interface PendingSwap {
 	authorityName: string;
 }
 
-export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
+export function DashboardShell({
+	onRedeemAnother,
+	pendingSwapContext = null,
+	onSwapContextConsumed,
+}: DashboardShellProps) {
 	const [networks, setNetworks] = useState<NetworkRegistryEntry[]>(() => listNetworks());
 	const [activeNetworkHash, setActiveNetworkHash] = useState<string | undefined>(() => networks[0]?.networkHash);
 	const activeNetwork = networks.find((entry) => entry.networkHash === activeNetworkHash);
@@ -268,6 +287,119 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 			swapDialogRef.current?.showModal();
 		}
 	}, [pendingSwap]);
+
+	// Classify an incoming `pendingSwapContext` the moment `main.tsx` hands one
+	// over -- replaying the SAME single-flight transport (no second
+	// redemption: the single-use code is spent exactly once across
+	// classify-then-confirm) and routing per `classifyRedemption`'s four-row
+	// table. `officer-swap` raises the existing confirm dialog;
+	// `same-officer-refresh` needs no confirmation -- the officer is
+	// replacing their own data with their own newer copy -- and runs
+	// immediately; `officer-indeterminate` and the structurally-unreachable
+	// `new-network` fail closed WITHOUT ever calling `performOfficerSwap`, so
+	// nothing is deleted on either path.
+	useEffect(() => {
+		if (!pendingSwapContext) return undefined;
+		// Captured into a local so TS's null-narrowing survives the closure
+		// below -- `pendingSwapContext` itself is a prop and TS cannot prove a
+		// re-render won't null it out between now and when `classify` runs.
+		const swapContext = pendingSwapContext;
+		let cancelled = false;
+
+		async function classify() {
+			try {
+				const { secret } = splitSignInCode(swapContext.pastedCode);
+				const redemption = await swapContext.transport.redeem(secret);
+				if (redemption.status !== 'ok' || !redemption.snapshot) {
+					// `createSingleFlightTransport` caches ONLY an `ok` result --
+					// reaching here would mean the cache was cleared between
+					// `Bootstrap.tsx` handing this context over and this effect
+					// running. Fail closed rather than guess why.
+					if (!cancelled) {
+						setSwapError(new Error('pendingSwapContext: replay did not return a cached ok redemption'));
+					}
+					return;
+				}
+				const envelope = redemption.snapshot;
+				const classification = classifyRedemption({ envelope });
+				if (cancelled) return;
+
+				switch (classification.kind) {
+					case 'officer-swap':
+						setPendingSwap({
+							networkHash: classification.networkHash,
+							pastedCode: swapContext.pastedCode,
+							transport: swapContext.transport,
+							incomingOfficerUserId: classification.incomingOfficerUserId ?? '',
+							authorityName: classification.authorityName,
+						});
+						break;
+					case 'same-officer-refresh': {
+						// HAND THE HANDLE OVER BEFORE THE SWAP, same reason as
+						// handleConfirmSwap: an open connection blocks
+						// indexedDB.deleteDatabase.
+						const handoverDb = dbRef.current ?? undefined;
+						dbRef.current = null;
+						setDb(null);
+						const result = await performOfficerSwap({
+							networkHash: classification.networkHash,
+							pastedCode: swapContext.pastedCode,
+							transport: swapContext.transport,
+							db: handoverDb,
+						});
+						if (cancelled) return;
+						if (result.outcome !== 'ok') {
+							// eslint-disable-next-line no-console
+							console.error('performOfficerSwap (same-officer-refresh) did not complete:', result.outcome);
+							setSwapError(result);
+							break;
+						}
+						// Same single owner of the transition as the confirmed-swap
+						// path: refreshing `networks` advances bootstrappedAt, and
+						// the attach effect above (keyed on it) tears down and
+						// re-attaches on its own.
+						setNetworks(listNetworks());
+						setToast(t('snapshot.verifiedToast'));
+						break;
+					}
+					case 'officer-indeterminate': {
+						// Fails closed -- performOfficerSwap is never called, so
+						// nothing is deleted for an envelope this shell cannot
+						// attribute to a single officer.
+						const err = new OfficerIndeterminateError(classification.networkHash);
+						// eslint-disable-next-line no-console
+						console.error('pendingSwapContext classified as officer-indeterminate:', err.name);
+						setSwapError(err);
+						break;
+					}
+					case 'new-network': {
+						// Structurally unreachable from this seam:
+						// `pendingSwapContext` only ever arrives via
+						// `already-bootstrapped`, which by definition means the
+						// registry already holds this hash. Fail loudly rather than
+						// silently falling through.
+						const err = new Error(
+							`pendingSwapContext: unexpected 'new-network' classification for held network "${classification.networkHash}"`,
+						);
+						// eslint-disable-next-line no-console
+						console.error(err.name, err.message);
+						setSwapError(err);
+						break;
+					}
+					default:
+						break;
+				}
+			} finally {
+				if (!cancelled) onSwapContextConsumed?.();
+			}
+		}
+
+		void classify();
+
+		return () => {
+			cancelled = true;
+		};
+	}, [pendingSwapContext, onSwapContextConsumed]);
 
 	if (!activeNetwork) {
 		return null;

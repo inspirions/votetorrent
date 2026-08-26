@@ -16,6 +16,7 @@
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import { deleteNetworkDb, closeNetworkDb } from '../../src/db/open-db.js';
 import { attachNetworkDb, readRowCounts, rowCountsKeyFor } from '../../src/db/reattach.js';
@@ -792,4 +793,215 @@ test('a cancelled swap (classification computed, performOfficerSwap never called
 	assert.doesNotThrow(() => assertNetworkStateUnchanged(before, after));
 
 	await deleteNetworkDb(baseline.envelope.networkHash);
+});
+
+// ---------------------------------------------------------------------------
+// WR-11 -- the handle no longer blocks the delete. `performOfficerSwap` ->
+// `refreshNetwork` -> `redeemAndBootstrap({ replace: true })` deletes the
+// network's database; `deleteNetworkDb` refuses to resolve on `onblocked`
+// and rejects `DeleteBlockedError` after its timeout instead. A caller
+// holding an open connection MUST hand it over via the `db` option, or the
+// swap races its own delete and fails, burning the officer's single-use
+// code (this is exactly what `DashboardShell.tsx`'s `handleConfirmSwap`
+// used to do before 50-18).
+//
+// HONESTY NOTE, checked empirically before writing this suite (not assumed):
+// `db-delete.test.mjs`'s own blocked-delete case proves `deleteNetworkDb`
+// rejects `DeleteBlockedError` for a competing connection -- but ONLY for a
+// RAW `indexedDB.open()` connection held open directly. A Quereus `Database`
+// returned by `attachNetworkDb` (the shape `dbRef.current` actually is in
+// `DashboardShell.tsx`) does NOT hold `fake-indexeddb`'s delete open the same
+// way: a spike of `attachNetworkDb` + an un-forwarded `deleteNetworkDb` call
+// resolved in ~2ms, never blocking, even with the Quereus handle's own
+// `isOpen` reporting `true`. This matches this project's other recorded
+// `fake-indexeddb` gaps (D-20's own rationale; 50-17's settle-race note) --
+// connection-lifecycle edges are exactly what `fake-indexeddb` does not
+// reproduce. The PRE-FIX `DeleteBlockedError` this plan's SUMMARY must record
+// is therefore the one `db-delete.test.mjs` already observes for the
+// underlying primitive (WR-11's OWN failure was witnessed in
+// `test/browser/run-headless.mjs`'s real-Chrome `compose-swap` leg, Task 3 --
+// that is the tier this specific regression is only reproducible at). What
+// IS provable here, deterministically, at tier-1: the forwarded handle is
+// actually closed, in the right place, as part of a swap that succeeds.
+// ---------------------------------------------------------------------------
+
+test('performOfficerSwap: a handed-over db handle is closed (via deleteNetworkDb) as part of a swap that succeeds', async () => {
+	const baseline = await bootstrapFixtureNetwork();
+	const swapEnvelope = buildSwapOfficerEnvelope(baseline.envelope);
+
+	// The exact shape DashboardShell.tsx hands over: an attachNetworkDb
+	// handle, still open, to the SAME network the swap is about to replace.
+	const handoverHandle = await attachNetworkDb(baseline.envelope.networkHash, {
+		storage: baseline.storage,
+		expectedCounts: {},
+	});
+	let closeCallCount = 0;
+	const originalClose = handoverHandle.close.bind(handoverHandle);
+	handoverHandle.close = async (...args) => {
+		closeCallCount += 1;
+		return originalClose(...args);
+	};
+
+	const inner = makeFakeTransport({ codeToResult: { [SECRET_2]: { status: 'ok', snapshot: swapEnvelope } } });
+	const singleFlight = createSingleFlightTransport(inner);
+	const result = await performOfficerSwap({
+		networkHash: baseline.envelope.networkHash,
+		pastedCode: codeFor(swapEnvelope, SECRET_2),
+		transport: singleFlight.transport,
+		storage: baseline.storage,
+		db: handoverHandle,
+	});
+
+	assert.equal(result.outcome, 'ok');
+	assert.equal(closeCallCount, 1, 'the handed-over handle must be closed exactly once, as part of the delete step');
+
+	const entryAfterSwap = findNetwork(baseline.envelope.networkHash, baseline.storage);
+	assert.equal(entryAfterSwap?.officerUserId, 'u2');
+
+	await deleteNetworkDb(baseline.envelope.networkHash);
+});
+
+test('inertness control: without the db option, performOfficerSwap never closes a handle it was never handed', async () => {
+	const baseline = await bootstrapFixtureNetwork();
+	const swapEnvelope = buildSwapOfficerEnvelope(baseline.envelope);
+
+	const untouchedHandle = await attachNetworkDb(baseline.envelope.networkHash, {
+		storage: baseline.storage,
+		expectedCounts: {},
+	});
+	let closeCallCount = 0;
+	const originalClose = untouchedHandle.close.bind(untouchedHandle);
+	untouchedHandle.close = async (...args) => {
+		closeCallCount += 1;
+		return originalClose(...args);
+	};
+
+	const inner = makeFakeTransport({ codeToResult: { [SECRET_2]: { status: 'ok', snapshot: swapEnvelope } } });
+	const singleFlight = createSingleFlightTransport(inner);
+	// db intentionally omitted -- this handle is a bystander, not handed over.
+	const result = await performOfficerSwap({
+		networkHash: baseline.envelope.networkHash,
+		pastedCode: codeFor(swapEnvelope, SECRET_2),
+		transport: singleFlight.transport,
+		storage: baseline.storage,
+	});
+
+	assert.equal(result.outcome, 'ok');
+	assert.equal(closeCallCount, 0, "a handle that was never handed over must never be closed by someone else's swap");
+
+	await closeNetworkDb(untouchedHandle);
+	await deleteNetworkDb(baseline.envelope.networkHash);
+});
+
+test('the db option is forwarded at every hop: performOfficerSwap -> refreshNetwork -> redeemAndBootstrap -> deleteNetworkDb (source-level pin, paired with the behavioural proof above)', async () => {
+	const OFFICER_SWAP_SRC = readFileSync(new URL('../../src/lifecycle/officer-swap.js', import.meta.url), 'utf8');
+	const REFRESH_SRC = readFileSync(new URL('../../src/lifecycle/refresh.js', import.meta.url), 'utf8');
+	const BOOTSTRAP_SRC = readFileSync(new URL('../../src/lifecycle/bootstrap.js', import.meta.url), 'utf8');
+
+	// Hop 1: performOfficerSwap forwards its own `db` option to refreshNetwork.
+	assert.match(OFFICER_SWAP_SRC, /refreshNetwork\(\{[\s\S]{0,200}?db: handoverDb\s*\}\)/);
+	// Hop 2: refreshNetwork forwards ITS `db` option to redeemAndBootstrap.
+	assert.match(REFRESH_SRC, /redeemAndBootstrap\(\{[\s\S]{0,200}?db: handoverDb,?\s*\}\)/);
+	// Hop 3: redeemAndBootstrap forwards ITS `db` option to deleteNetworkDb,
+	// on the replace path only.
+	assert.match(BOOTSTRAP_SRC, /deleteNetworkDb\(envelope\.networkHash, \{ storage, db: handoverDb \}\)/);
+});
+
+test('inertness control: the per-hop forwarding matchers do not accept a hop that drops the option', () => {
+	assert.doesNotMatch('await refreshNetwork({ networkHash, pastedCode, transport });', /refreshNetwork\(\{[\s\S]{0,200}?db: handoverDb\s*\}\)/);
+	assert.doesNotMatch(
+		'await redeemAndBootstrap({ pastedCode, transport, replace: true });',
+		/redeemAndBootstrap\(\{[\s\S]{0,200}?db: handoverDb,?\s*\}\)/,
+	);
+	assert.doesNotMatch(
+		'await deleteNetworkDb(envelope.networkHash, { storage });',
+		/deleteNetworkDb\(envelope\.networkHash, \{ storage, db: handoverDb \}\)/,
+	);
+});
+
+// ---------------------------------------------------------------------------
+// WR-10 -- DashboardShell.tsx source-level wiring. `node --test` cannot
+// import `.tsx`; the same idiom `shell-wiring.test.mjs` established. Every
+// matcher here is paired with an inertness control.
+// ---------------------------------------------------------------------------
+
+/** @param {string} source @returns {string} */
+function stripShellComments(source) {
+	return source
+		.split('\n')
+		.filter((line) => {
+			const trimmed = line.trim();
+			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
+		})
+		.join('\n');
+}
+
+const SHELL_TSX = readFileSync(new URL('../../src/screens/DashboardShell.tsx', import.meta.url), 'utf8');
+const SHELL_CODE = stripShellComments(SHELL_TSX);
+
+test('DashboardShell: accepts pendingSwapContext and onSwapContextConsumed, both optional', () => {
+	assert.match(SHELL_CODE, /pendingSwapContext\?: AlreadyBootstrappedContext \| null;/);
+	assert.match(SHELL_CODE, /onSwapContextConsumed\?: \(\) => void;/);
+	assert.match(SHELL_CODE, /pendingSwapContext = null,/);
+});
+
+test('inertness control: the optional-prop matcher does not accept a required prop', () => {
+	assert.doesNotMatch('pendingSwapContext: AlreadyBootstrappedContext | null;', /pendingSwapContext\?: AlreadyBootstrappedContext \| null;/);
+});
+
+test("DashboardShell: an 'officer-swap' classification populates pendingSwap (raises the existing dialog); a 'same-officer-refresh' classification calls performOfficerSwap directly, with no dialog", () => {
+	const effectBody = SHELL_CODE.slice(
+		SHELL_CODE.indexOf('if (!pendingSwapContext) return undefined;'),
+		SHELL_CODE.indexOf('if (!activeNetwork) {'),
+	);
+	assert.ok(effectBody.length > 0, 'could not locate the swap-context classification effect');
+
+	const officerSwapCase = effectBody.slice(effectBody.indexOf("case 'officer-swap':"), effectBody.indexOf("case 'same-officer-refresh':"));
+	assert.match(officerSwapCase, /setPendingSwap\(\{/);
+	assert.doesNotMatch(officerSwapCase, /await performOfficerSwap\(/, "officer-swap must raise the dialog, not swap directly");
+
+	const sameOfficerCase = effectBody.slice(effectBody.indexOf("case 'same-officer-refresh':"), effectBody.indexOf("case 'officer-indeterminate':"));
+	assert.match(sameOfficerCase, /await performOfficerSwap\(\{/);
+	assert.doesNotMatch(sameOfficerCase, /setPendingSwap\(/, 'same-officer-refresh must not raise the confirm dialog');
+});
+
+test('inertness control: the officer-swap-no-swap-call matcher hits a synthetic fixture that swaps directly', () => {
+	const fixture = "case 'officer-swap':\n\tawait performOfficerSwap({ networkHash });\n\tbreak;";
+	assert.match(fixture, /await performOfficerSwap\(/, 'matcher is inert');
+});
+
+test("DashboardShell: 'officer-indeterminate' and 'new-network' never call performOfficerSwap -- nothing is ever deleted on either path", () => {
+	const effectBody = SHELL_CODE.slice(
+		SHELL_CODE.indexOf('if (!pendingSwapContext) return undefined;'),
+		SHELL_CODE.indexOf('if (!activeNetwork) {'),
+	);
+	const indeterminateCase = effectBody.slice(effectBody.indexOf("case 'officer-indeterminate':"), effectBody.indexOf("case 'new-network':"));
+	const newNetworkCase = effectBody.slice(effectBody.indexOf("case 'new-network':"), effectBody.indexOf('default:'));
+	assert.doesNotMatch(indeterminateCase, /performOfficerSwap/);
+	assert.doesNotMatch(newNetworkCase, /performOfficerSwap/);
+	assert.match(indeterminateCase, /OfficerIndeterminateError/);
+});
+
+test('inertness control: the no-swap-call matcher hits a synthetic fixture that DOES call performOfficerSwap', () => {
+	assert.match("case 'officer-indeterminate':\n\tawait performOfficerSwap({});\n\tbreak;", /performOfficerSwap/, 'matcher is inert');
+});
+
+test('DashboardShell: the same-officer-refresh path hands its open handle over BEFORE calling performOfficerSwap, mirroring handleConfirmSwap', () => {
+	const sameOfficerCase = SHELL_CODE.slice(SHELL_CODE.indexOf("case 'same-officer-refresh':"), SHELL_CODE.indexOf("case 'officer-indeterminate':"));
+	const handoverAt = sameOfficerCase.indexOf('const handoverDb = dbRef.current');
+	const swapCallAt = sameOfficerCase.indexOf('await performOfficerSwap(');
+	assert.ok(handoverAt >= 0 && swapCallAt >= 0, 'could not locate both the handover and the swap call in the same-officer-refresh case');
+	assert.ok(handoverAt < swapCallAt, 'the handle must be taken BEFORE the swap call');
+	assert.match(sameOfficerCase, /db: handoverDb,/);
+});
+
+test('inertness control: the handover-order matcher does not accept a close-after-swap fixture', () => {
+	const fixture = [
+		"case 'same-officer-refresh': {",
+		'const result = await performOfficerSwap({ networkHash, pastedCode, transport });',
+		'const handoverDb = dbRef.current;',
+	].join('\n');
+	const handoverAt = fixture.indexOf('const handoverDb = dbRef.current');
+	const swapCallAt = fixture.indexOf('await performOfficerSwap(');
+	assert.ok(!(handoverAt >= 0 && swapCallAt >= 0 && handoverAt < swapCallAt), 'matcher is inert');
 });
