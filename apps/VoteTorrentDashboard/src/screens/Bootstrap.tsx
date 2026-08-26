@@ -85,10 +85,24 @@ export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }
 	// cleanup below can reset() it -- a cancelled or abandoned classification
 	// must never leave a redeemable whole-database snapshot sitting in memory.
 	const singleFlightRef = useRef<{ reset: () => void } | null>(null);
+	// Guards the unmount reset below (D-14). Set to true IMMEDIATELY BEFORE
+	// `onAlreadyBootstrapped` is called: from that point on, the single-flight
+	// cache belongs to the caller (DashboardShell), which replays it to
+	// recover the verified envelope without spending the single-use code a
+	// second time. React commits this component's unmount as part of the SAME
+	// transition that mounts DashboardShell, and unmount destructors run
+	// BEFORE the newly-mounted tree's effects -- so an unconditional reset()
+	// here would null the cache out from under the very caller it was just
+	// handed to. An abandoned or cancelled classification -- one that was
+	// NEVER handed off -- is still reset on unmount, so a redeemable
+	// whole-database snapshot never outlives this screen.
+	const handedOffRef = useRef(false);
 
 	useEffect(() => {
 		return () => {
-			singleFlightRef.current?.reset();
+			if (!handedOffRef.current) {
+				singleFlightRef.current?.reset();
+			}
 		};
 	}, []);
 
@@ -97,6 +111,12 @@ export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }
 	async function handleSubmit(event: FormEvent<HTMLFormElement>) {
 		event.preventDefault();
 		if (submitting) return;
+		// A fresh attempt is always resettable on unmount, even if a PRIOR
+		// attempt on this same mounted screen was handed off (which cannot
+		// actually happen -- a handoff calls onAlreadyBootstrapped and this
+		// component un-mounts -- but a retry after a local failure must not
+		// inherit a stale handoff flag).
+		handedOffRef.current = false;
 
 		setState({ kind: 'in-flight', phase: BOOTSTRAP_PHASES[0] });
 
@@ -148,6 +168,10 @@ export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }
 				// replay that cached envelope instead of redeeming the single-use
 				// code a second time.
 				const singleFlight = singleFlightRef.current;
+				// Ordering is the whole point: the callback synchronously triggers
+				// main.tsx's state update, so anything AFTER it may already be
+				// racing the commit. Set the guard before, not after.
+				handedOffRef.current = true;
 				onAlreadyBootstrapped({
 					networkHash: 'networkHash' in result ? result.networkHash : undefined,
 					pastedCode,
