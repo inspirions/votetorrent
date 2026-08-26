@@ -105,7 +105,16 @@ const CONSOLE_SITES = readdirSync(PANELS_DIR)
 	.map((/** @type {string} */ name) => ({ name, source: readFileSync(path.join(PANELS_DIR, name), 'utf8') }))
 	.concat([{ name: 'DashboardShell.tsx', source: SHELL }]);
 
-const RAW_MESSAGE_RE = /console\.error\([^)]*err(or)?\s*instanceof\s*Error\s*\?\s*err(or)?\.message/;
+// Widened per RF-03: the original matcher was keyed to the ternary shape
+// `err instanceof Error ? err.message : ...` and missed the shape actually
+// present at DashboardShell.tsx:623, `console.error(err.name, err.message)` --
+// a plain two-argument call with no ternary at all. Rather than enumerate
+// every call shape, this now matches ANY bare `err.message` / `error.message`
+// property read appearing inside a `console.error(...)` call's argument list
+// (single-line calls only, matching this matcher's existing `[^)]*` scope) --
+// the ternary shape is a strict subset of this (it also contains the bare
+// `err.message` token), so no case the old matcher caught is lost.
+const RAW_MESSAGE_RE = /console\.error\([^)]*\berr(or)?\.message\b/;
 
 test('no panel and not the shell logs a raw database error MESSAGE to the console', () => {
 	// `err` comes from a query against tables full of registrant information,

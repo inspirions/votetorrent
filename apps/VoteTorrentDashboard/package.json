@@ -14,6 +14,7 @@
 		"typecheck": "tsc --noEmit",
 		"lint": "node scripts/lint-copy.mjs",
 		"assert:no-polyfills": "node scripts/assert-no-node-polyfills.mjs",
+		"assert:no-test-harness-in-dist": "node scripts/assert-no-test-harness-in-dist.mjs",
 		"capabilities:generate": "node scripts/generate-capabilities.mjs",
 		"clean": "rm -rf dist node_modules"
 	},

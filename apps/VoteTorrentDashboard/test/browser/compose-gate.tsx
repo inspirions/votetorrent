@@ -75,6 +75,9 @@ import type { AlreadyBootstrappedContext } from '../../src/screens/Bootstrap.js'
 import { DashboardShell } from '../../src/screens/DashboardShell.js';
 import { createSingleFlightTransport } from '../../src/lifecycle/officer-swap.js';
 import { buildFixtureEnvelope, makeFakeTransport, withExtraUserRow } from '../fixtures/bootstrap-envelope.js';
+import { PreviewAsProvider, PreviewAsControl } from '../../src/screens/PreviewAsControl.js';
+import { PanelGrid } from '../../src/screens/PanelGrid.js';
+import type { ScopeCode } from '../../src/auth/capabilities.js';
 
 /** @type {any} */
 const win = window as unknown as Record<string, unknown>;
@@ -845,6 +848,168 @@ function firstFrameCheckboxes(maxFrames: number): Promise<{ boxes: NodeListOf<HT
 	});
 }
 
+// ---------------------------------------------------------------------------
+// Rungs 9-12 (gap-closure round 4, WR-04/RF-04): a harness-only mount that
+// drives the ACTUAL CR-01 sequence, not the one rungs 1-8 above are limited
+// to. Rung 7 above toggles a checkbox only AFTER rung 6 has already asserted
+// `scopesResolved` (and therefore `realScopes`) has settled to the full nine
+// -- so it never exercises `resyncRealScopes`'s touched-baseline-advance
+// branch, and restoring the pre-50-19 `if (state.touched) return state;`
+// short-circuit leaves rungs 1-8 all green (WR-04, confirmed independently).
+//
+// `DashboardShell` cannot be driven into the real race window on demand: it
+// only ever sets `scopesResolved` true in the SAME state update that supplies
+// the resolved `realScopes` (see `DashboardShell.tsx`'s attach effect), so
+// nothing outside the component can force "resolved but still empty" through
+// that mount. What CAN be driven is the production `PreviewAsProvider` /
+// `PreviewAsControl` / `PanelGrid` trio directly -- the exact components
+// `DashboardShell` composes, imported unmodified, with THIS harness supplying
+// `realScopes` and `scopesResolved` on its own schedule. This is the
+// "harness-only prop-drilled variant" WR-04's own fix suggestion names.
+//
+// The harness forces `scopesResolved={true}` from the very first render,
+// with `realScopes: []` -- the one-committed-frame residual race the CR-01
+// code review (WR-04's own text) describes: "there is exactly one committed
+// frame in which `scopesResolved` is already `true` while `state.realScopes`
+// is still `[]`." Rung 10 toggles a scope inside that window. A macrotask
+// later (never a fixed assumption -- the poll below waits for an effect this
+// harness fires the moment `realScopes` actually changes), the "real" scopes
+// arrive late as the full nine. Rung 12 presses Reset and asserts the
+// recovered set is the full nine with the real (not simulated) badge -- the
+// sequence T-50-19-03's node-level test already proves in isolation, now
+// proven through the real React components in a real browser.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {ReadonlyArray<ScopeCode>} realScopes
+ * @param {boolean} scopesResolved
+ */
+function PreviewRaceHarness({
+	realScopes,
+}: {
+	realScopes: ReadonlyArray<ScopeCode>;
+}) {
+	return (
+		<PreviewAsProvider realScopes={realScopes} scopesResolved={true}>
+			<PreviewAsControl />
+			<PanelGrid db={null} revealDenied={false} onToggleReveal={() => {}} />
+		</PreviewAsProvider>
+	);
+}
+
+/**
+ * The harness's own root state: `realScopes` starts `[]` and arrives at the
+ * full nine on a later macrotask, deliberately AFTER the harness has already
+ * rendered with `scopesResolved={true}` -- this is what makes the window
+ * observable at all. Sets `window.__PREVIEW_RACE_REAL_ARRIVED__` inside an
+ * effect (never during render) the instant `realScopes` actually changes, so
+ * the bounded poll below has a real signal to wait on instead of a fixed
+ * sleep.
+ */
+function PreviewRaceHarnessRoot() {
+	const [realScopes, setRealScopes] = useState<ScopeCode[]>([]);
+
+	useEffect(() => {
+		const id = setTimeout(() => {
+			setRealScopes([...SCOPE_CODES] as ScopeCode[]);
+		}, 30);
+		return () => clearTimeout(id);
+		// Runs exactly once -- this harness owns one arrival, not a
+		// re-triggerable one.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
+	useEffect(() => {
+		if (realScopes.length > 0) {
+			win.__PREVIEW_RACE_REAL_ARRIVED__ = true;
+		}
+	}, [realScopes]);
+
+	return <PreviewRaceHarness realScopes={realScopes} />;
+}
+
+/**
+ * A bounded poll for the harness's own late-arrival signal -- NEVER a fixed
+ * sleep. Resolves as soon as `window.__PREVIEW_RACE_REAL_ARRIVED__` is `true`
+ * or `maxFrames` have elapsed with it still unset.
+ *
+ * `window.__PREVIEW_RACE_REAL_ARRIVED__` is set by `PreviewRaceHarnessRoot`'s
+ * OWN effect, in the SAME commit that flows the new `realScopes` prop down
+ * to `PreviewAsProvider`. But `PreviewAsProvider`'s downstream reaction --
+ * its own effect reading the changed `realScopes` prop, calling
+ * `resyncRealScopes` and `setState` -- is a CASCADING update: that `setState`
+ * schedules a SECOND render+commit, which is not guaranteed to have flushed
+ * to the DOM by the animation frame immediately after the flag becomes
+ * visible (measured directly: without this margin, Reset observed the
+ * PRE-resync baseline about a third of the time). `EXTRA_SETTLE_FRAMES`
+ * bounds a wait for that second commit -- still frame-based, still bounded,
+ * never an arbitrary millisecond guess.
+ */
+const EXTRA_SETTLE_FRAMES = 30;
+
+function waitForRealScopesArrival(maxFrames: number): Promise<{ arrived: boolean; frames: number }> {
+	return new Promise((resolve) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			if (win.__PREVIEW_RACE_REAL_ARRIVED__ === true || frames >= maxFrames) {
+				resolve({ arrived: win.__PREVIEW_RACE_REAL_ARRIVED__ === true, frames });
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
+/** Waits `EXTRA_SETTLE_FRAMES` more animation frames -- see
+ * `waitForRealScopesArrival`'s header for why the arrival flag alone is not
+ * sufficient proof the cascading resync commit has flushed. */
+function waitExtraSettleFrames(): Promise<void> {
+	return new Promise((resolve) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			if (frames >= EXTRA_SETTLE_FRAMES) {
+				resolve();
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
+/**
+ * A generic bounded `requestAnimationFrame` poll -- NEVER a fixed sleep --
+ * that resolves as soon as `predicate()` is true or `maxFrames` elapse.
+ * `settleUntilPanels` and `firstFrameCheckboxes` above are each a fixed
+ * instance of this same shape; this generalised version exists because
+ * rungs 10 and 12 below each need to wait for a DIFFERENT, one-off DOM
+ * condition (an exact panel count, an exact checked-checkbox count) that a
+ * single `.click()` does not synchronously guarantee has committed and
+ * painted by the very next line -- confirmed directly: a debug instrument
+ * placed inside `PreviewAsProvider`'s own render, removed again once this
+ * was understood, showed the underlying React state was ALREADY correct
+ * (9 recovered scopes) at the moment this file's assertion read stale DOM.
+ * Reading a click's resulting DOM state must always be bounded-polled, never
+ * assumed synchronous.
+ */
+function waitUntilTrue(predicate: () => boolean, maxFrames: number): Promise<{ ok: boolean; frames: number }> {
+	return new Promise((resolve) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			if (predicate() || frames >= maxFrames) {
+				resolve({ ok: predicate(), frames });
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
 async function runComposePreviewRace() {
 	await rung(
 		'1 · a registry entry exists for the compose-gate network -- this phase runs after the swap leg, so it names the swapped-in officer, not the founding one',
@@ -967,6 +1132,116 @@ async function runComposePreviewRace() {
 				throw new Error(`expected the real-answer badge class, observed "${badge?.className}"`);
 			}
 			return `panels: ${count}, denied: ${denied}, badge: ${badge?.className}`;
+		},
+	);
+
+	// -------------------------------------------------------------------
+	// Rungs 9-12 (gap-closure round 4, WR-04/RF-04): swap the mounted tree
+	// for the harness-driven composition (see the header comment above
+	// `PreviewRaceHarness`) and drive the ACTUAL CR-01 sequence -- toggle
+	// DURING the window, before the real scopes have arrived, let them
+	// arrive late, Reset, assert full recovery. This is a SEPARATE mount,
+	// replacing DashboardShell's tree in the same #root container -- rungs
+	// 1-8 above are complete and unaffected by this swap.
+	// -------------------------------------------------------------------
+
+	root.render(
+		<StrictMode>
+			<PreviewRaceHarnessRoot />
+		</StrictMode>,
+	);
+
+	await rung(
+		'9 · harness mount: the window is forced open (scopesResolved=true) while realScopes is still [] -- checkboxes render enabled and zero panels show',
+		async () => {
+			const { boxes, frames } = await firstFrameCheckboxes(120);
+			if (boxes.length === 0) throw new Error(`no checkboxes found inside .pv-control within ${frames} frames`);
+			const disabledCount = Array.from(boxes).filter((box) => box.disabled).length;
+			if (disabledCount !== 0) {
+				throw new Error(`expected all ${boxes.length} checkboxes ENABLED (scopesResolved forced true), observed ${disabledCount} disabled`);
+			}
+			const panelCount = document.querySelectorAll('.panel').length;
+			if (panelCount !== 0) {
+				throw new Error(`expected 0 panels before realScopes arrives, observed ${panelCount}`);
+			}
+			if (win.__PREVIEW_RACE_REAL_ARRIVED__ === true) {
+				throw new Error('realScopes already arrived before this rung sampled -- the race window closed too early to be meaningful');
+			}
+			return `checkboxes: ${boxes.length}, enabled: ${boxes.length - disabledCount}, panels: ${panelCount} (frame ${frames})`;
+		},
+	);
+
+	await rung(
+		'10 · toggling a checkbox DURING the window (realScopes still []) genuinely previews it -- the touched preview against an empty baseline CR-01 is about',
+		async () => {
+			const first = document.querySelector<HTMLInputElement>('.pv-control input[type="checkbox"]');
+			if (!first) throw new Error('no checkbox found to toggle');
+			first.click();
+			// Bounded poll, not a synchronous read -- a click's resulting
+			// commit is not guaranteed to have painted by the very next line
+			// (see waitUntilTrue's header).
+			const { ok, frames } = await waitUntilTrue(() => document.querySelectorAll('.panel').length === 1, 180);
+			const badge = document.querySelector('.pv-badge');
+			const panelCount = document.querySelectorAll('.panel').length;
+			if (!ok) {
+				throw new Error(`expected exactly 1 panel (the toggled scope) after the toggle within ${frames} frames, observed ${panelCount}`);
+			}
+			if (!badge?.className.includes('pv-badge--sim')) {
+				throw new Error(`expected the simulated badge class after the toggle, observed "${badge?.className}"`);
+			}
+			return `badge: ${badge?.className}, panels: ${panelCount} (frame ${frames})`;
+		},
+	);
+
+	await rung(
+		'11 · the real scopes arrive LATE, after the toggle -- the touched preview is not yanked out from under the officer, and the baseline advances silently underneath it',
+		async () => {
+			const { arrived, frames } = await waitForRealScopesArrival(180);
+			if (!arrived) throw new Error(`realScopes never arrived within ${frames} frames`);
+			// See waitForRealScopesArrival's header: the arrival flag alone does
+			// not prove PreviewAsProvider's cascading resync commit has flushed
+			// yet -- give it EXTRA_SETTLE_FRAMES more frames before this rung's
+			// own assertions (and rung 12's Reset) read the DOM.
+			await waitExtraSettleFrames();
+			const badge = document.querySelector('.pv-badge');
+			const panelCount = document.querySelectorAll('.panel').length;
+			if (!badge?.className.includes('pv-badge--sim')) {
+				throw new Error(`expected the preview to survive the late arrival (still simulated), observed "${badge?.className}"`);
+			}
+			if (panelCount !== 1) {
+				throw new Error(`expected the preview to still show exactly 1 panel after the late arrival, observed ${panelCount}`);
+			}
+			return `arrived at frame ${frames}, badge still: ${badge?.className}, panels still: ${panelCount}`;
+		},
+	);
+
+	await rung(
+		'12 · Reset, AFTER the late arrival, recovers the full nine-scope set with the REAL badge -- the end-to-end CR-01 recovery sequence WR-04/RF-04 found untested',
+		async () => {
+			const resetBtn = document.querySelector<HTMLButtonElement>('.pv-reset');
+			if (!resetBtn) throw new Error('reset button not found');
+			resetBtn.click();
+			// Bounded poll, not a synchronous read -- see waitUntilTrue's header:
+			// a debug instrument confirmed the underlying React state recovers to
+			// the full nine correctly and immediately, but reading the DOM on the
+			// very next line raced the paint and observed stale (pre-Reset) markup.
+			const { ok, frames } = await waitUntilTrue(
+				() => document.querySelectorAll<HTMLInputElement>('.pv-control input[type="checkbox"]:checked').length === SCOPE_CODES.length,
+				180,
+			);
+			const panelCount = document.querySelectorAll('.panel').length;
+			const checkedCount = document.querySelectorAll<HTMLInputElement>('.pv-control input[type="checkbox"]:checked').length;
+			const badge = document.querySelector('.pv-badge');
+			if (!ok) {
+				throw new Error(`expected all ${SCOPE_CODES.length} scopes checked after Reset within ${frames} frames, observed ${checkedCount}`);
+			}
+			if (panelCount !== CAPABILITIES.length) {
+				throw new Error(`expected ${CAPABILITIES.length} panels after Reset, observed ${panelCount}`);
+			}
+			if (!badge?.className.includes('pv-badge--real')) {
+				throw new Error(`expected the real-answer badge class after Reset, observed "${badge?.className}"`);
+			}
+			return `checked: ${checkedCount}/${SCOPE_CODES.length}, panels: ${panelCount}, badge: ${badge?.className} (frame ${frames})`;
 		},
 	);
 
