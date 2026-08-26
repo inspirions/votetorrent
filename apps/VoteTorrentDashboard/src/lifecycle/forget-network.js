@@ -234,8 +234,23 @@ export async function forgetNetwork(options) {
 	// 2. Typed confirmation, trimmed, exact case-sensitive equality against
 	//    the entry's OWN authorityName -- never the value the officer typed,
 	//    and never the expected value, appear in the thrown error.
+	//
+	//    AN EMPTY EXPECTED VALUE CONFIRMS NOTHING, AND IS REFUSED HERE RATHER
+	//    THAN QUIETLY SATISFIED. `bootstrap.js` derives authorityName as
+	//    `typeof authorityRow?.Name === 'string' ? authorityRow.Name : ''`, so
+	//    it is '' whenever the snapshot carries no Authority row or a
+	//    non-string Name, and the registry validator accepts '' (it only
+	//    requires a string). `'' !== ''` is false, so an EMPTY input passed the
+	//    confirmation -- the one thing standing between a stray click and
+	//    irreversible deletion of the officer's whole local copy. The refusal
+	//    lives in this module, not only in the component, because this is the
+	//    function that actually deletes.
+	const expected = entry.authorityName.trim();
+	if (expected.length === 0) {
+		throw new ForgetConfirmationMismatchError();
+	}
 	const typed = String(typedConfirmation ?? '').trim();
-	if (typed !== entry.authorityName.trim()) {
+	if (typed !== expected) {
 		throw new ForgetConfirmationMismatchError();
 	}
 

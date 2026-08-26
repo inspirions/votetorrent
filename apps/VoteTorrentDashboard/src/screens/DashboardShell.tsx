@@ -273,7 +273,13 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 		return null;
 	}
 
-	const forgetConfirmDisabled = forgetConfirmationInput.trim() !== activeNetwork.authorityName.trim();
+	// An EMPTY expected name leaves nothing to confirm against, so the
+	// destructive control stays disabled rather than being enabled on open by
+	// an untouched input. `forgetNetwork` refuses the same case independently;
+	// this is the affordance, that is the guarantee.
+	const forgetExpectedName = activeNetwork.authorityName.trim();
+	const forgetConfirmDisabled =
+		forgetExpectedName.length === 0 || forgetConfirmationInput.trim() !== forgetExpectedName;
 
 	return (
 		<PreviewAsProvider realScopes={grantedScopes}>

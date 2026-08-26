@@ -159,3 +159,18 @@ test('an unrecognised attach failure gets its OWN copy, not the verification wor
 	assert.match(CODE, /t\('snapshot\.errorAttachBody'\)/);
 	assert.match(CODE, /t\('snapshot\.errorVerificationHeading'\)/);
 });
+
+// --- Forget confirmation (WR-18) -----------------------------------------------
+
+test('the forget dialog stays disabled when there is no expected name to confirm against', () => {
+	assert.match(CODE, /forgetExpectedName\.length === 0 \|\| forgetConfirmationInput\.trim\(\) !== forgetExpectedName/);
+});
+
+test('inertness control: the old comparison, which enabled the button on open for an empty name, is rejected', () => {
+	const fixture = 'const forgetConfirmDisabled = forgetConfirmationInput.trim() !== activeNetwork.authorityName.trim();';
+	assert.doesNotMatch(
+		fixture,
+		/forgetExpectedName\.length === 0 \|\| forgetConfirmationInput\.trim\(\) !== forgetExpectedName/,
+		'matcher is inert',
+	);
+});
