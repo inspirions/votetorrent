@@ -61,3 +61,35 @@ test('handleConfirmSwap does not also tear the session down locally -- the re-ke
 test('inertness control: the two-owners matcher hits a synthetic setGrantedScopes([]) fixture', () => {
 	assert.match('setGrantedScopes([]);', /setGrantedScopes\(\[\]\)/, 'matcher is inert');
 });
+
+const HANDOVER_RE = /const handoverDb = dbRef\.current \?\? undefined;[\s\S]{0,400}?db: handoverDb,/;
+
+test('handleConfirmSwap hands its open handle to performOfficerSwap BEFORE the swap runs', () => {
+	// performOfficerSwap -> refreshNetwork -> redeemAndBootstrap({ replace:
+	// true }) deletes this exact database, and indexedDB.deleteDatabase blocks
+	// while any connection is open -- deleteNetworkDb deliberately refuses to
+	// resolve on onblocked and throws DeleteBlockedError after its timeout. The
+	// shell used to close its handle only AFTER the swap returned, so it raced
+	// its own delete and every confirmed swap failed, burning the officer's
+	// single-use code.
+	assert.match(CODE, HANDOVER_RE);
+
+	// And the handover must precede the call, not follow it.
+	const handoverAt = CODE.indexOf('const handoverDb = dbRef.current');
+	const swapCallAt = CODE.indexOf('await performOfficerSwap(');
+	assert.ok(handoverAt >= 0 && swapCallAt >= 0, 'could not locate both the handover and the swap call');
+	assert.ok(handoverAt < swapCallAt, 'the handle is taken AFTER the swap call -- the delete is still racing it');
+});
+
+test('inertness control: the handover matcher does NOT accept a close-after-the-swap fixture', () => {
+	const fixture = [
+		'const result = await performOfficerSwap({ networkHash, pastedCode, transport });',
+		'if (dbRef.current) { await closeNetworkDb(dbRef.current); dbRef.current = null; }',
+	].join('\n');
+	assert.doesNotMatch(fixture, HANDOVER_RE, 'matcher is inert');
+});
+
+test('every destructive call site that can hold a handle passes it: forgetNetwork and performOfficerSwap alike', () => {
+	assert.match(CODE, /forgetNetwork\(\{[\s\S]{0,200}?db: dbRef\.current \?\? undefined,/);
+	assert.match(CODE, /performOfficerSwap\(\{[\s\S]{0,200}?db: handoverDb,/);
+});

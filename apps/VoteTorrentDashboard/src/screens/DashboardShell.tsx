@@ -214,11 +214,25 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 
 	async function handleConfirmSwap() {
 		if (!pendingSwap) return;
+		// HAND THE HANDLE OVER BEFORE THE SWAP, NEVER AFTER.
+		// `performOfficerSwap` -> `refreshNetwork` -> `redeemAndBootstrap({
+		// replace: true })` deletes this exact database, and
+		// `indexedDB.deleteDatabase` blocks while any connection is open --
+		// `deleteNetworkDb` deliberately refuses to resolve on `onblocked` and
+		// throws `DeleteBlockedError` after its timeout. This function used to
+		// close `dbRef.current` only AFTER the swap returned, so the shell was
+		// racing its own delete and every confirmed swap failed, burning the
+		// officer's single-use code. `forgetNetwork` already got this right by
+		// passing `{ db }`; this path is the one that forgot.
+		const handoverDb = dbRef.current ?? undefined;
+		dbRef.current = null;
+		setDb(null);
 		try {
 			const result = await performOfficerSwap({
 				networkHash: pendingSwap.networkHash,
 				pastedCode: pendingSwap.pastedCode,
 				transport: pendingSwap.transport,
+				db: handoverDb,
 			});
 			if (result.outcome !== 'ok') {
 				setSwapError(result);

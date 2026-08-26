@@ -256,6 +256,10 @@ export function classifyRedemption({ envelope, storage }) {
  *   `classifyRedemption`'s envelope came from.
  * @property {import('../db/networks-registry.js').StorageAdapter} [storage]
  * @property {(phase: string) => void} [onPhase]
+ * @property {import('@quereus/quereus').Database} [db] - an already-open handle to this
+ *   network, handed over so the replace path's delete closes it first. `forgetNetwork`
+ *   already passes its handle this way; this path is the one that did not, and every
+ *   confirmed swap failed on `DeleteBlockedError` because of it.
  */
 
 /**
@@ -269,9 +273,9 @@ export function classifyRedemption({ envelope, storage }) {
  * @returns {Promise<import('./bootstrap.js').RedeemAndBootstrapResult>}
  */
 export async function performOfficerSwap(options) {
-	const { networkHash, pastedCode, transport, storage, onPhase } = options;
+	const { networkHash, pastedCode, transport, storage, onPhase, db: handoverDb } = options;
 	try {
-		return await refreshNetwork({ networkHash, pastedCode, transport, storage, onPhase });
+		return await refreshNetwork({ networkHash, pastedCode, transport, storage, onPhase, db: handoverDb });
 	} finally {
 		// Runs on completion AND on a thrown failure -- either way, the
 		// cached snapshot must not survive this attempt.

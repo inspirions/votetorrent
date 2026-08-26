@@ -93,6 +93,10 @@ export function copyKeyForPhase(phase) {
  * @property {boolean} [replace] - 50-09's refresh/officer-swap paths only; no UI in this phase.
  * @property {(phase: string) => void} [onPhase]
  * @property {string} [expectedNetworkHash] - supplied by 50-09's replace paths; omitted on a first redemption.
+ * @property {import('@quereus/quereus').Database} [db] - an already-open handle to the network being
+ *   REPLACED, handed over so step 4's delete closes it first. `indexedDB.deleteDatabase` blocks while
+ *   any connection is open, so a caller that holds one and does not hand it over is racing its own
+ *   delete. Ignored on a first bootstrap, where there is nothing to replace.
  */
 
 /**
@@ -117,7 +121,7 @@ export function copyKeyForPhase(phase) {
  * @returns {Promise<RedeemAndBootstrapResult>}
  */
 export async function redeemAndBootstrap(options) {
-	const { pastedCode, transport, storage, replace = false, onPhase = () => {}, expectedNetworkHash } = options;
+	const { pastedCode, transport, storage, replace = false, onPhase = () => {}, expectedNetworkHash, db: handoverDb } = options;
 
 	// 1. Split -- no transport object is constructed before this succeeds.
 	/** @type {string} */
@@ -222,7 +226,12 @@ export async function redeemAndBootstrap(options) {
 		return { outcome: 'already-bootstrapped' };
 	}
 	if (existing && replace) {
-		await deleteNetworkDb(envelope.networkHash, { storage });
+		// `handoverDb` closes first, inside deleteNetworkDb. A caller holding an
+		// open connection to exactly this database and NOT handing it over
+		// guarantees `DeleteBlockedError` -- the delete cannot proceed while
+		// any connection is open, and this primitive deliberately refuses to
+		// resolve on `onblocked`.
+		await deleteNetworkDb(envelope.networkHash, { storage, db: handoverDb });
 	}
 
 	// 5. Apply the schema.

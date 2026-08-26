@@ -156,6 +156,8 @@ export function assertNetworkStateUnchanged(before, after) {
  * @property {import('@votetorrent/vote-engine/bootstrap').IBootstrapTransport} transport
  * @property {import('../db/networks-registry.js').StorageAdapter} [storage]
  * @property {(phase: string) => void} [onPhase]
+ * @property {import('@quereus/quereus').Database} [db] - an already-open handle to this network,
+ *   handed over so the replace path's delete closes it first rather than racing it.
  */
 
 /**
@@ -166,7 +168,7 @@ export function assertNetworkStateUnchanged(before, after) {
  * @returns {Promise<import('./bootstrap.js').RedeemAndBootstrapResult>}
  */
 export async function refreshNetwork(options) {
-	const { networkHash, pastedCode, transport, storage, onPhase } = options;
+	const { networkHash, pastedCode, transport, storage, onPhase, db: handoverDb } = options;
 
 	// A code for an unheld network is a BOOTSTRAP, not a refresh -- the shell
 	// routes it to Bootstrap.tsx instead. Reaching this function for an
@@ -185,6 +187,7 @@ export async function refreshNetwork(options) {
 		replace: true,
 		expectedNetworkHash: networkHash,
 		onPhase,
+		db: handoverDb,
 	});
 
 	if (result.outcome !== 'ok') {
