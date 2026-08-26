@@ -19,6 +19,12 @@ import renderer from "react-test-renderer";
 
 jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
 
+const mockSetString = jest.fn();
+jest.mock("@react-native-clipboard/clipboard", () => ({
+	__esModule: true,
+	default: { setString: (...args: unknown[]) => mockSetString(...(args as [])), getString: async () => "", hasString: async () => false },
+}));
+
 // The real `Footer` reads `useSafeAreaInsets`, which throws outside a
 // SafeAreaProvider. Zero insets keep the real Footer (and therefore the real
 // button tree this suite presses) in the render.
@@ -167,6 +173,36 @@ describe("DashboardSignInCodeScreen — the export is never one press away", () 
 		// column -- and must never reach the officer's screen.
 		expect(json).not.toContain("unsupported value type");
 		expect(json).not.toContain("Registrant.LegalName");
+	});
+
+	it("copying the code and then leaving the screen clears the clipboard", async () => {
+		const tr = await renderScreen();
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+		await pressByTitle(tr, "dashboardSignInCodeCopyButton");
+		expect(mockSetString).toHaveBeenCalledWith("abc.def");
+
+		mockSetString.mockClear();
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		mounted.length = 0;
+		expect(mockSetString).toHaveBeenCalledWith("");
+	});
+
+	it("inertness control: leaving WITHOUT copying does not touch the clipboard at all", async () => {
+		// A blanket clear-on-unmount would wipe whatever the officer copied
+		// somewhere else; only a copy this screen made is ever cleared.
+		const tr = await renderScreen();
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+
+		mockSetString.mockClear();
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		mounted.length = 0;
+		expect(mockSetString).not.toHaveBeenCalled();
 	});
 
 	it("cancelling withdraws the confirmation without exporting anything", async () => {

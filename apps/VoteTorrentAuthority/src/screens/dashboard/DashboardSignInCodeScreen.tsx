@@ -25,7 +25,7 @@
  * `ScrollView` with `globalStyles` is the whole layout.
  */
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
@@ -66,6 +66,31 @@ export default function DashboardSignInCodeScreen() {
 	// Ticks once a second purely to re-render the live countdown; carries no
 	// data of its own.
 	const [nowTick, setNowTick] = useState(() => Date.now());
+
+	// THE CLIPBOARD OUTLIVES THE CODE UNLESS SOMEONE ENDS IT. `Clipboard
+	// .setString(record.code)` puts a credential that unlocks the entire
+	// authority database onto the SYSTEM clipboard, where it survives the
+	// code's expiry, survives app backgrounding, appears in the Android 13+
+	// clipboard preview and in clipboard-history utilities, and on older
+	// Android is readable by any app holding READ_CLIPBOARD. Nothing used to
+	// clear it — not expiry, not redemption, not leaving the screen.
+	//
+	// `copiedRef` is what keeps this honest: the clear only ever runs if THIS
+	// screen is the one that wrote the code there. Clearing unconditionally
+	// would wipe whatever the officer copied somewhere else, which is a
+	// different kind of rude.
+	//
+	// NOT DONE, and worth knowing: this app's clipboard module (v1.x) exposes
+	// `setString`/`setStrings` only — there is no sensitive-content flag to
+	// opt into here, so the copy is an ordinary clipboard write for as long as
+	// it is on the clipboard.
+	const copiedRef = useRef(false);
+
+	const clearCopiedCode = useCallback(() => {
+		if (!copiedRef.current) return;
+		copiedRef.current = false;
+		Clipboard.setString("");
+	}, []);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -130,13 +155,10 @@ export default function DashboardSignInCodeScreen() {
 	const handleDiscard = useCallback(async () => {
 		setErrorMessage("");
 		setConfirming(false);
+		clearCopiedCode();
 		await clearStagedSignInCode();
 		setRecord(undefined);
-	}, []);
-
-	if (!hasNetwork) {
-		return <NoNetwork />;
-	}
+	}, [clearCopiedCode]);
 
 	const isRedeemed = record?.redeemedAt !== undefined;
 	// Countdown arithmetic — DISPLAY ONLY. The stored `expiresAt` is canonical
@@ -148,6 +170,16 @@ export default function DashboardSignInCodeScreen() {
 	const expiresAtMillis = record !== undefined ? Date.parse(`${record.expiresAt}Z`) : undefined;
 	const isExpired =
 		record !== undefined && !isRedeemed && expiresAtMillis !== undefined && expiresAtMillis <= nowTick;
+
+	useEffect(() => {
+		if (isExpired || isRedeemed) clearCopiedCode();
+	}, [isExpired, isRedeemed, clearCopiedCode]);
+
+	useEffect(() => () => clearCopiedCode(), [clearCopiedCode]);
+
+	if (!hasNetwork) {
+		return <NoNetwork />;
+	}
 
 	const screenState: "idle" | "generated" | "used" | "expired" =
 		record === undefined ? "idle" : isRedeemed ? "used" : isExpired ? "expired" : "generated";
@@ -184,7 +216,10 @@ export default function DashboardSignInCodeScreen() {
 							<CustomButton
 								title={t("dashboardSignInCodeCopyButton")}
 								icon="copy"
-								onPress={() => Clipboard.setString(record.code)}
+								onPress={() => {
+									Clipboard.setString(record.code);
+									copiedRef.current = true;
+								}}
 							/>
 						</>
 					) : null}
