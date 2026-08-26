@@ -64,6 +64,15 @@ export const COPY = Object.freeze({
 	'snapshot.errorVerificationHeading': "Couldn't verify the new snapshot.",
 	'snapshot.errorVerificationBody':
 		"The transferred data didn't match its checksum, so nothing was replaced — your existing data is unchanged. Try refreshing again.",
+	// The banner for an attach failure this shell does NOT recognise as an
+	// integrity problem -- a corrupt row-count record, a DDL reconcile error, a
+	// storage quota refusal, a plugin registration failure. Distinct wording
+	// from the verification family on purpose: telling an officer their data
+	// failed its checksum when the database simply would not open is a
+	// different, wrong answer.
+	'snapshot.errorAttachHeading': "Couldn't open this browser's copy of the data.",
+	'snapshot.errorAttachBody':
+		'Nothing was changed. Refresh the snapshot to rebuild this browser’s copy from the authority app.',
 	'snapshot.errorSchemaMismatchHeading': 'This authority app is running a different version.',
 	'snapshot.errorSchemaMismatchBody':
 		'Update the authority app or this dashboard so both match, then try again.',

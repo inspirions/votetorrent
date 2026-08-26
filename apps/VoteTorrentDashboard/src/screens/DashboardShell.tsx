@@ -366,10 +366,39 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 				</nav>
 
 				<main>
-					{attachError instanceof MissingRowCountsError || attachError instanceof RowCountMismatchError ? (
+					{/*
+					 * THE BANNER IS THE DEFAULT FOR ANY ATTACH FAILURE, and the
+					 * panel grid is reserved for a CLEAN attach. It used to be
+					 * the other way round: only MissingRowCountsError and
+					 * RowCountMismatchError got a banner, so every other failure
+					 * -- InvalidRowCountRecordError from a corrupt record, a
+					 * Quereus DDL reconcile error, a QuotaExceededError, a
+					 * structured-clone failure, a plugin registration error --
+					 * left `db` at null and fell through to render the grid,
+					 * where every panel showed its own empty copy. An officer
+					 * whose local store failed to open was told, in plain
+					 * language, that their authority has no registrants. For
+					 * election infrastructure that is the worst available
+					 * confusion.
+					 *
+					 * The two integrity errors keep the verification wording;
+					 * anything else gets its own, because "your data failed its
+					 * checksum" is a wrong answer for a database that simply
+					 * would not open.
+					 */}
+					{attachError ? (
 						<div className="sh-error-banner">
-							<p>{t('snapshot.errorVerificationHeading')}</p>
-							<p>{t('snapshot.errorVerificationBody')}</p>
+							{attachError instanceof MissingRowCountsError || attachError instanceof RowCountMismatchError ? (
+								<>
+									<p>{t('snapshot.errorVerificationHeading')}</p>
+									<p>{t('snapshot.errorVerificationBody')}</p>
+								</>
+							) : (
+								<>
+									<p>{t('snapshot.errorAttachHeading')}</p>
+									<p>{t('snapshot.errorAttachBody')}</p>
+								</>
+							)}
 							<button type="button" className="sh-refresh-cta" onClick={() => onRedeemAnother(activeNetwork.networkHash)}>
 								{t('snapshot.refreshCta')}
 							</button>

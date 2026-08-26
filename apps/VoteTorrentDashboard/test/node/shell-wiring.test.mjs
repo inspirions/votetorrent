@@ -125,3 +125,37 @@ test('every console.error in a panel logs the error CLASS instead -- and there a
 	);
 	assert.equal(withClassLogging.length, 9, 'expected exactly the nine panel bodies to log an error class');
 });
+
+// --- Attach-failure banner (WR-16) ---------------------------------------------
+
+test('the error banner is the DEFAULT for any attachError, and PanelGrid is reserved for a clean attach', () => {
+	// Only two error classes used to reach a banner; every other attach failure
+	// -- a corrupt row-count record, a Quereus DDL reconcile error, a quota
+	// refusal, a plugin registration error -- fell through to the grid with a
+	// null handle, and every panel then showed its own "No registrants yet."
+	// For election infrastructure, "database broken" presented as "zero
+	// registrants" is the worst available confusion.
+	assert.match(CODE, /\{attachError \? \(/);
+	assert.doesNotMatch(
+		CODE,
+		/\{attachError instanceof MissingRowCountsError \|\| attachError instanceof RowCountMismatchError \? \(\s*<div className="sh-error-banner">/,
+	);
+});
+
+test('inertness control: the old two-class-only condition would be rejected by the matcher above', () => {
+	const fixture = '{attachError instanceof MissingRowCountsError || attachError instanceof RowCountMismatchError ? (\n\t<div className="sh-error-banner">';
+	assert.doesNotMatch(fixture, /\{attachError \? \(/, 'matcher is inert');
+	assert.match(
+		fixture,
+		/\{attachError instanceof MissingRowCountsError \|\| attachError instanceof RowCountMismatchError \? \(\s*<div className="sh-error-banner">/,
+		'the old-shape matcher is inert',
+	);
+});
+
+test('an unrecognised attach failure gets its OWN copy, not the verification wording', () => {
+	// "Your data failed its checksum" is a wrong answer for a database that
+	// simply would not open.
+	assert.match(CODE, /t\('snapshot\.errorAttachHeading'\)/);
+	assert.match(CODE, /t\('snapshot\.errorAttachBody'\)/);
+	assert.match(CODE, /t\('snapshot\.errorVerificationHeading'\)/);
+});
