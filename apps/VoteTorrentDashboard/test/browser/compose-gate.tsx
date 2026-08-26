@@ -423,6 +423,43 @@ function waitForElement<T extends Element>(selector: string, maxFrames: number):
 	});
 }
 
+/**
+ * Bounded `requestAnimationFrame` poll that RESOLVES either way -- `true` if
+ * `predicate` became true, `false` if the whole budget was burned without it.
+ *
+ * `waitUntil` below is for assertions whose passing case is "this happened".
+ * This one is for the opposite shape: assertions whose passing case is "this
+ * NEVER happened", where burning the full budget IS the evidence and a
+ * rejection would be nonsense. Round 3's CR-02 rung needs exactly this, and
+ * needs it badly: the second, unguarded `handleConfirmSwap` invocation is
+ * queued BEHIND the first on the per-network FIFO lock, so it cannot even
+ * begin until the first completes -- and the first writes the registry from
+ * INSIDE `redeemAndBootstrap`, well before its own lock task settles. A rung
+ * that waited only for the registry to name the incoming officer therefore
+ * read the wire-call count BEFORE the second invocation had run at all, and
+ * reported one call no matter what. That version of this rung was measured
+ * green against a deliberately unguarded `handleConfirmSwap`; it was inert,
+ * and this helper is why it no longer is.
+ */
+function waitForOrTimeout(predicate: () => boolean, maxFrames: number): Promise<boolean> {
+	return new Promise((resolve) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			if (predicate()) {
+				resolve(true);
+				return;
+			}
+			if (frames >= maxFrames) {
+				resolve(false);
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
 /** Bounded `requestAnimationFrame` poll for an arbitrary predicate. */
 function waitUntil(predicate: () => boolean, maxFrames: number, label: string): Promise<void> {
 	return new Promise((resolve, reject) => {
@@ -1171,6 +1208,113 @@ async function runComposeGuards() {
 			if (panels !== CAPABILITIES.length) throw new Error(`expected ${CAPABILITIES.length} panels for network B, observed ${panels}`);
 			if (denied !== 0) throw new Error(`expected 0 denied panel sections, observed ${denied}`);
 			return `panels: ${panels}, banners: ${banners}, denied: ${denied}`;
+		},
+	);
+
+	// ---- CR-02: the swap confirm CTA must spend a single-use code ONCE ----
+	// Each leg re-selects the network it needs, so the legs are order-
+	// independent and none of them inherits another's end state.
+
+	await rung('7 · switch back to network A -- the confirmed-swap leg drives the network the shell is actually attached to', async () => {
+		await selectNetworkByName(GUARD_AUTHORITY_A);
+		await waitUntil(
+			() => document.querySelector('.sh-authority-name')?.textContent === GUARD_AUTHORITY_A,
+			300,
+			'the topbar names network A',
+		);
+		await settleUntilPanels(900);
+		return `active: ${document.querySelector('.sh-authority-name')?.textContent}`;
+	});
+
+	const swapWire = await armGuardSwapContext(
+		GUARD_SECRET_SWAP,
+		guardEnvelope(GUARD_NETWORK_A, GUARD_AUTHORITY_A, GUARD_OFFICER_2_ID),
+	);
+
+	await rung('8 · a DIFFERENT officer\'s code for network A raises the replace-and-continue confirmation', async () => {
+		const dialog = await waitForSwapDialogOpen(600);
+		const heading = dialog.querySelector('h2')?.textContent;
+		if (heading !== t('network.swapConfirmHeading')) {
+			throw new Error(`dialog heading "${heading}", expected the value of t('network.swapConfirmHeading')`);
+		}
+		const wireCalls = swapWire.calls.filter((code) => code === GUARD_SECRET_SWAP).length;
+		if (wireCalls !== 1) throw new Error(`expected 1 wire call to arm the context, observed ${wireCalls}`);
+		return `dialog open, wire calls so far: ${wireCalls}`;
+	});
+
+	await rung(
+		'9 · DOUBLE-CLICK the confirm CTA in one synchronous burst -- exactly what an impatient officer, or a trackpad, produces',
+		async () => {
+			const dialog = document.querySelectorAll<HTMLDialogElement>('dialog.sh-dialog')[1];
+			const cta = dialog?.querySelector<HTMLButtonElement>('.sh-dialog-cta--primary');
+			if (!cta) throw new Error('swap confirm button not found');
+			// Count what actually DISPATCHED. A rung that clicks twice but only
+			// ever dispatches once would be inert without ever saying so -- and
+			// `disabled` is exactly the property the fix adds, so this control
+			// also records that the SECOND click was refused by the platform
+			// rather than by luck.
+			let dispatched = 0;
+			cta.addEventListener('click', () => { dispatched += 1; }, true);
+			cta.click();
+			const disabledAfterFirst = cta.disabled;
+			cta.click();
+			return `dispatched: ${dispatched}, disabled after the first click: ${disabledAfterFirst}`;
+		},
+	);
+
+	await rung(
+		'10 · CR-02: the single-use code reached the wire exactly ONCE across both clicks -- a second redemption is a real double-spend the backend answers "used"',
+		async () => {
+			const countCalls = () => swapWire.calls.filter((code) => code === GUARD_SECRET_SWAP).length;
+			await waitUntil(
+				() => findNetwork(GUARD_NETWORK_A, localStorage)?.officerUserId === GUARD_OFFICER_2_ID,
+				900,
+				'the swap landed and the registry names the incoming officer',
+			);
+			// THE REGISTRY UPDATE IS NOT A SETTLING POINT for this assertion.
+			// `redeemAndBootstrap` writes the registry from inside the FIRST
+			// invocation's lock task, so a second, unguarded invocation -- queued
+			// behind that task -- has not even started at this moment. Wait for
+			// the second wire call SPECIFICALLY, resolving early the instant one
+			// lands (fail fast) and otherwise burning the whole budget, which is
+			// what makes "exactly one" a measurement rather than a race.
+			const secondCallLanded = await waitForOrTimeout(() => countCalls() > 1, 240);
+			const wireCalls = countCalls();
+			if (secondCallLanded) {
+				throw new Error(
+					`a SECOND redeem(GUARD_SECRET_SWAP) reached the wire -- the officer's single-use code was spent twice (CR-02); calls: ${wireCalls}`,
+				);
+			}
+			if (wireCalls !== 1) {
+				throw new Error(
+					`redeem(GUARD_SECRET_SWAP) reached the wire ${wireCalls} times -- the officer's single-use code was spent more than once (CR-02)`,
+				);
+			}
+			return `wire calls: ${wireCalls}`;
+		},
+	);
+
+	await rung(
+		'11 · positive control (NOT a CR-02 discriminator -- measured green in both directions): the guarded swap still LANDED cleanly, nine panels for the incoming officer',
+		async () => {
+			// HONEST LABEL. This rung was written expecting the second, doomed
+			// invocation's `code-refused` to surface as a swap-failure banner, and
+			// it does not: `setSwapError` from that invocation is swallowed by the
+			// re-attach the FIRST invocation's `setNetworks` triggers, whose reset
+			// block now clears `swapError` (CR-01). Measured directly -- with the
+			// CR-02 guard deliberately removed this rung still passes while rung 10
+			// fails. It is kept as a positive control that the guard did not break
+			// the swap it guards, and is NOT counted as evidence for CR-02. Rung 10
+			// is the only rung in this phase that discriminates that fix.
+			await waitForOrTimeout(() => swapErrorBanners().length > 0, 240);
+			await settleUntilPanels(900);
+			const panels = document.querySelectorAll('.panel').length;
+			const banners = swapErrorBanners().length;
+			const denied = document.querySelectorAll('.panel--denied').length;
+			if (banners !== 0) throw new Error(`observed ${banners} swap-failure banner(s) after a confirmed swap -- panels: ${panels}`);
+			if (panels !== CAPABILITIES.length) throw new Error(`expected ${CAPABILITIES.length} panels, observed ${panels}`);
+			if (denied !== 0) throw new Error(`expected 0 denied panel sections, observed ${denied}`);
+			return `panels: ${panels}, banners: ${banners}, officer: ${findNetwork(GUARD_NETWORK_A, localStorage)?.officerUserId}`;
 		},
 	);
 

@@ -181,6 +181,36 @@ export function DashboardShell({
 	const [pendingSwap, setPendingSwap] = useState<PendingSwap | null>(null);
 	const [swapError, setSwapError] = useState<unknown>(null);
 	const swapDialogRef = useRef<HTMLDialogElement | null>(null);
+	// ONE CONFIRMED ATTEMPT PER RAISED DIALOG, EVER (CR-02). The confirm CTA
+	// spends a SINGLE-USE code, and `performOfficerSwap` empties the
+	// single-flight cache in a `finally` that runs on success AND on failure
+	// (`officer-swap.js`) -- so the SECOND press of that button reaches
+	// `redeemAndBootstrap` with a cold cache, falls through to the real wire,
+	// and the backend answers `used`. The officer's code is burned.
+	//
+	// TWO STATES, DELIBERATELY, BECAUSE THEY GUARD DIFFERENT THINGS:
+	//   - the REF is the correctness guard. A double-click dispatches both
+	//     clicks from the same task; a `useState` flag cannot help, because
+	//     the second handler closure was created by a render in which the
+	//     flag was still false. Only a ref is already true by then.
+	//   - the STATE is the affordance. It disables the CTA so the officer is
+	//     not shown a control that does nothing (in-flight) or that would
+	//     spend a spent code (after a terminal failure).
+	//
+	// IT IS NOT CLEARED ON FAILURE, AND THAT IS THE POINT. The failure this
+	// file anticipates is `DeleteBlockedError`, a transient timeout -- so the
+	// dialog deliberately stays open with the error rendered, which used to
+	// invite a retry that COULD NOT SUCCEED: the cache was already gone, so
+	// the retry hit the wire and burned the code for nothing. Round 3 named
+	// the choice explicitly: either the cache survives a failure, or no retry
+	// is offered. `performOfficerSwap`'s unconditional reset is a security
+	// property of that module (a redeemable whole-database snapshot must not
+	// outlive an attempt), so this is the other half: after one attempt the
+	// CTA stays disabled, and the officer's route forward is a NEW code.
+	// Cleared only where a genuinely fresh attempt begins -- a new
+	// `pendingSwap`, or a cancel.
+	const swapAttemptedRef = useRef(false);
+	const [swapAttempted, setSwapAttempted] = useState(false);
 
 	// Computed at mount and re-computed only when the ACTIVE NETWORK or its
 	// OWN `bootstrappedAt` changes (i.e. after a successful swap) -- never on
@@ -348,7 +378,13 @@ export function DashboardShell({
 	}
 
 	async function handleConfirmSwap() {
-		if (!pendingSwap) return;
+		// The ref, not the state, is what makes this re-entrancy-safe -- see
+		// `swapAttemptedRef`'s declaration above. Read and set BEFORE the first
+		// `await`, so a second click dispatched from the same task cannot get
+		// past it.
+		if (!pendingSwap || swapAttemptedRef.current) return;
+		swapAttemptedRef.current = true;
+		setSwapAttempted(true);
 		// Captured into a local BEFORE the awaits below -- `pendingSwap` is
 		// component state and this async function keeps running after a
 		// re-render could have changed or cleared it, but the handed-off
@@ -416,6 +452,10 @@ export function DashboardShell({
 		pendingSwap?.transport.reset();
 		setPendingSwap(null);
 		setSwapError(null);
+		// A cancel ends this attempt entirely (the cache is reset above), so
+		// the next raised dialog starts from a clean guard.
+		swapAttemptedRef.current = false;
+		setSwapAttempted(false);
 		swapDialogRef.current?.close();
 	}
 
@@ -483,6 +523,11 @@ export function DashboardShell({
 						// the attach effect above cannot see (no registry field
 						// changes when a dialog merely opens).
 						setSwapError(null);
+						// A FRESH classification is a fresh attempt on a fresh,
+						// unspent code -- re-arm the one-attempt guard (CR-02) here,
+						// the same transition that clears the stale error above.
+						swapAttemptedRef.current = false;
+						setSwapAttempted(false);
 						setPendingSwap({
 							networkHash: classification.networkHash,
 							pastedCode: swapContext.pastedCode,
@@ -788,7 +833,12 @@ export function DashboardShell({
 				<p>{t('network.swapConfirmBody', { authorityName: pendingSwap?.authorityName ?? '' })}</p>
 				{swapError ? <p className="sh-dialog-error">{(swapError as { name?: string })?.name ?? 'error'}</p> : null}
 				<div className="sh-dialog-actions">
-					<button type="button" className="sh-dialog-cta--primary" onClick={handleConfirmSwap}>
+					<button
+						type="button"
+						className="sh-dialog-cta--primary"
+						disabled={swapAttempted}
+						onClick={handleConfirmSwap}
+					>
 						{t('network.swapConfirmCta')}
 					</button>
 				</div>
