@@ -22,11 +22,12 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SHELL = readFileSync(path.resolve(__dirname, '..', '..', 'src', 'screens', 'DashboardShell.tsx'), 'utf8');
 
-/** Drop whole-line comments, so prose ABOUT a defect is never read as the defect. */
+/** Drop whole-line comments, so prose ABOUT a defect is never read as the defect.
+ * @param {string} source @returns {string} */
 function stripComments(source) {
 	return source
 		.split('\n')
-		.filter((line) => {
+		.filter((/** @type {string} */ line) => {
 			const trimmed = line.trim();
 			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
 		})
