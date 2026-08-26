@@ -401,15 +401,18 @@ test('makeFakeTransport: a refused secret is never consumed -- it returns the SA
 });
 
 // ---------------------------------------------------------------------------
-// 50-18 D-14: the classify-then-confirm seam, exercised at the function
+// 50-18/50-20 D-14: the classify-then-confirm seam, exercised at the function
 // level -- Bootstrap.tsx wraps every transport in createSingleFlightTransport
 // and hands the SAME instance to onAlreadyBootstrapped, so the whole
 // classify-then-confirm sequence (an `already-bootstrapped` redemption,
 // followed by a caller replaying the cached envelope) spends the single-use
-// code exactly once.
+// code exactly once. The inner transport is SINGLE-USE (50-20's new
+// default), so this pair of tests can distinguish "handed off, not reset" --
+// which must succeed -- from "reset before replay" -- which must fail
+// exactly as production did before the handoff guard existed.
 // ---------------------------------------------------------------------------
 
-test('D-14 seam: a single-flight-wrapped transport lets an already-bootstrapped redemption be replayed by a caller without spending the code twice', async () => {
+test('D-14 handoff: a HANDED-OFF single-flight cache is replayed by a caller without a reset in between, so the single-use inner transport is spent exactly once', async () => {
 	const baseline = await bootstrapFixtureNetwork();
 	const inner = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: baseline.envelope } } });
 	const singleFlight = createSingleFlightTransport(inner);
@@ -425,12 +428,40 @@ test('D-14 seam: a single-flight-wrapped transport lets an already-bootstrapped 
 
 	// A caller (DashboardShell) replays the SAME transport to recover the
 	// verified envelope for classification -- this must NOT reach the wire a
-	// second time.
+	// second time. NO reset() call happens here: this is the handoff, and
+	// Bootstrap.tsx's handedOffRef guard is what keeps its unmount cleanup
+	// from calling it.
 	const replay = await singleFlight.transport.redeem(SECRET);
 	assert.equal(replay.status, 'ok');
 	assert.deepEqual(replay.snapshot, baseline.envelope);
 	assert.equal(singleFlight.innerCallCount, 1, 'innerCallCount must still be exactly 1 after the replay');
 	assert.equal(inner.calls.length, 1, 'the underlying transport must have been called exactly once');
+
+	await deleteNetworkDb(baseline.envelope.networkHash);
+});
+
+test('D-14 regression witness: the OLD production sequence -- classify, reset, then replay -- reaches the single-use inner transport a second time and comes back used, spending the code for nothing', async () => {
+	const baseline = await bootstrapFixtureNetwork();
+	const inner = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: baseline.envelope } } });
+	const singleFlight = createSingleFlightTransport(inner);
+
+	const result = await redeemAndBootstrap({
+		pastedCode: codeFor(baseline.envelope),
+		transport: singleFlight.transport,
+		storage: baseline.storage,
+	});
+	assert.equal(result.outcome, 'already-bootstrapped');
+	assert.equal(singleFlight.innerCallCount, 1);
+
+	// This is what Bootstrap.tsx's unconditional unmount cleanup did BEFORE
+	// the handedOffRef guard existed -- reset() between the classify and the
+	// caller's replay, nulling the single-flight cache.
+	singleFlight.reset();
+
+	const replay = await singleFlight.transport.redeem(SECRET);
+	assert.equal(replay.status, 'used', 'a reset before replay must fall through to the single-use inner transport, which is now spent');
+	assert.equal(singleFlight.innerCallCount, 2, 'the reset forces a genuine second call to the inner transport');
+	assert.equal(inner.calls.length, 2);
 
 	await deleteNetworkDb(baseline.envelope.networkHash);
 });
@@ -601,15 +632,54 @@ test('inertness control: the onComplete matcher does not accept a call outside t
 	);
 });
 
-test('Bootstrap: reset() is registered as an unmount cleanup, so a cancelled classification never leaves a redeemable snapshot in memory', () => {
-	assert.match(BOOTSTRAP_CODE, /useEffect\(\(\) => \{\s*return \(\) => \{\s*singleFlightRef\.current\?\.reset\(\);/);
+// ---------------------------------------------------------------------------
+// 50-20 D-14: the unmount cleanup no longer resets unconditionally -- a
+// handed-off cache belongs to its caller. Each matcher below is paired with
+// an inertness control.
+// ---------------------------------------------------------------------------
+
+test('Bootstrap: reset() is registered as an unmount cleanup GUARDED by handedOffRef, so a cancelled classification never leaves a redeemable snapshot in memory but a handed-off one survives', () => {
+	assert.match(
+		BOOTSTRAP_CODE,
+		/useEffect\(\(\) => \{\s*return \(\) => \{\s*if \(!handedOffRef\.current\) \{\s*singleFlightRef\.current\?\.reset\(\);/,
+	);
 });
 
-test('inertness control: the unmount-reset matcher does not accept a reset call outside a cleanup function', () => {
-	const fixture = 'singleFlightRef.current?.reset();';
+test('inertness control: the guarded-unmount-reset matcher rejects the OLD unconditional reset shape', () => {
+	const fixture = "useEffect(() => {\n\t\treturn () => {\n\t\t\tsingleFlightRef.current?.reset();\n\t\t};\n\t}, []);";
 	assert.doesNotMatch(
 		fixture,
-		/useEffect\(\(\) => \{\s*return \(\) => \{\s*singleFlightRef\.current\?\.reset\(\);/,
+		/useEffect\(\(\) => \{\s*return \(\) => \{\s*if \(!handedOffRef\.current\) \{\s*singleFlightRef\.current\?\.reset\(\);/,
+		'matcher is inert',
+	);
+});
+
+test('Bootstrap: handedOffRef.current is set to true strictly BEFORE the onAlreadyBootstrapped( call, with no statement between them', () => {
+	const guardAt = BOOTSTRAP_CODE.indexOf('handedOffRef.current = true;');
+	const callAt = BOOTSTRAP_CODE.indexOf('onAlreadyBootstrapped({');
+	assert.ok(guardAt >= 0, 'could not locate handedOffRef.current = true;');
+	assert.ok(callAt >= 0, 'could not locate the onAlreadyBootstrapped( call');
+	assert.ok(guardAt < callAt, 'the handoff guard must be set BEFORE onAlreadyBootstrapped is called');
+	const between = BOOTSTRAP_CODE.slice(guardAt + 'handedOffRef.current = true;'.length, callAt).trim();
+	assert.equal(between, '', 'no statement may sit between the guard and the call');
+});
+
+test('inertness control: the guard-ordering matcher does not accept the guard placed AFTER the call', () => {
+	const fixture = 'onAlreadyBootstrapped({\n\tfoo: 1,\n});\nhandedOffRef.current = true;';
+	const guardAt = fixture.indexOf('handedOffRef.current = true;');
+	const callAt = fixture.indexOf('onAlreadyBootstrapped({');
+	assert.ok(!(guardAt < callAt), 'matcher is inert -- this fixture must NOT satisfy the before-ordering check');
+});
+
+test('Bootstrap: handleSubmit clears handedOffRef.current to false right after the submitting guard, so a retry after a failure is treated as fresh', () => {
+	assert.match(BOOTSTRAP_CODE, /if \(submitting\) return;\s*handedOffRef\.current = false;/);
+});
+
+test('inertness control: the handleSubmit-clear matcher does not accept a clear that precedes the submitting guard', () => {
+	const fixture = 'handedOffRef.current = false;\nif (submitting) return;';
+	assert.doesNotMatch(
+		fixture,
+		/if \(submitting\) return;\s*handedOffRef\.current = false;/,
 		'matcher is inert',
 	);
 });
