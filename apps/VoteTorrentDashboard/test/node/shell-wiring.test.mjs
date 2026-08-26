@@ -62,7 +62,7 @@ test('inertness control: the two-owners matcher hits a synthetic setGrantedScope
 	assert.match('setGrantedScopes([]);', /setGrantedScopes\(\[\]\)/, 'matcher is inert');
 });
 
-const HANDOVER_RE = /const handoverDb = dbRef\.current \?\? undefined;[\s\S]{0,400}?db: handoverDb,/;
+const HANDOVER_RE = /const handoverDb = dbRef\.current \?\? undefined;[\s\S]{0,600}?db: handoverDb,/;
 
 test('handleConfirmSwap hands its open handle to performOfficerSwap BEFORE the swap runs', () => {
 	// performOfficerSwap -> refreshNetwork -> redeemAndBootstrap({ replace:
@@ -74,9 +74,11 @@ test('handleConfirmSwap hands its open handle to performOfficerSwap BEFORE the s
 	// single-use code.
 	assert.match(CODE, HANDOVER_RE);
 
-	// And the handover must precede the call, not follow it.
+	// And the handover must precede the call, not follow it. The call is now
+	// reached through withNetworkDbLifecycleLock (CR-04), so this looks for
+	// performOfficerSwap( itself rather than an immediately-preceding await.
 	const handoverAt = CODE.indexOf('const handoverDb = dbRef.current');
-	const swapCallAt = CODE.indexOf('await performOfficerSwap(');
+	const swapCallAt = CODE.indexOf('performOfficerSwap(', handoverAt);
 	assert.ok(handoverAt >= 0 && swapCallAt >= 0, 'could not locate both the handover and the swap call');
 	assert.ok(handoverAt < swapCallAt, 'the handle is taken AFTER the swap call -- the delete is still racing it');
 });

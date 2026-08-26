@@ -102,6 +102,19 @@ export interface DashboardShellProps {
  * object stores was not found` -- connections racing the same database's
  * schema reconcile. Every open and close for a given hash is now queued onto
  * the SAME chain, so they always run one at a time, in the order requested.
+ *
+ * FOUR OPERATION FAMILIES SHARE THIS ONE QUEUE (CR-04, 50-22): attach
+ * (`attachNetworkDb`), close (`closeNetworkDb`), forget (`forgetNetwork` --
+ * delete-and-remove), and swap/refresh (`performOfficerSwap` -- delete then
+ * recreate, from both `handleConfirmSwap` and the classify effect's
+ * same-officer-refresh branch). Forget and swap/refresh are the two most
+ * destructive operations the app performs against a given `networkHash`, and
+ * before this they ran OUTSIDE the queue entirely -- able to race an attach or
+ * close from another (real or StrictMode-phantom) `DashboardShell` instance
+ * for the SAME hash. `compose-gate.tsx`'s compose-swap browser leg reproduced
+ * this as a roughly-1-in-3 `MisuseError` and was "fixed" by removing
+ * `StrictMode` from that one mount -- A HARNESS CHANGE IS NOT AN ACCEPTABLE
+ * SUBSTITUTE for closing this coverage gap in the product itself.
  */
 const dbLifecycleChains = new Map<string, Promise<unknown>>();
 
@@ -279,11 +292,16 @@ export function DashboardShell({
 	async function handleConfirmForget() {
 		if (!activeNetwork) return;
 		try {
-			const result = await forgetNetwork({
-				networkHash: activeNetwork.networkHash,
-				typedConfirmation: forgetConfirmationInput,
-				db: dbRef.current ?? undefined,
-			});
+			// Queued onto the SAME per-network lock attach/close/swap already
+			// share -- see `withNetworkDbLifecycleLock`'s module-level doc
+			// comment (CR-04).
+			const result = await withNetworkDbLifecycleLock(activeNetwork.networkHash, () =>
+				forgetNetwork({
+					networkHash: activeNetwork.networkHash,
+					typedConfirmation: forgetConfirmationInput,
+					db: dbRef.current ?? undefined,
+				}),
+			);
 			dbRef.current = null;
 			setDb(null);
 			forgetDialogRef.current?.close();
@@ -327,12 +345,17 @@ export function DashboardShell({
 		dbRef.current = null;
 		setDb(null);
 		try {
-			const result = await performOfficerSwap({
-				networkHash: pendingSwap.networkHash,
-				pastedCode: pendingSwap.pastedCode,
-				transport: pendingSwap.transport,
-				db: handoverDb,
-			});
+			// Queued onto the SAME per-network lock attach/close/forget already
+			// share -- see `withNetworkDbLifecycleLock`'s module-level doc
+			// comment (CR-04).
+			const result = await withNetworkDbLifecycleLock(pendingSwap.networkHash, () =>
+				performOfficerSwap({
+					networkHash: pendingSwap.networkHash,
+					pastedCode: pendingSwap.pastedCode,
+					transport: pendingSwap.transport,
+					db: handoverDb,
+				}),
+			);
 			if (result.outcome !== 'ok') {
 				setSwapError(result);
 				swapTransport.reset();
@@ -436,12 +459,17 @@ export function DashboardShell({
 						const handoverDb = dbRef.current ?? undefined;
 						dbRef.current = null;
 						setDb(null);
-						const result = await performOfficerSwap({
-							networkHash: classification.networkHash,
-							pastedCode: swapContext.pastedCode,
-							transport: swapContext.transport,
-							db: handoverDb,
-						});
+						// Queued onto the SAME per-network lock attach/close/forget
+						// already share -- see `withNetworkDbLifecycleLock`'s
+						// module-level doc comment (CR-04).
+						const result = await withNetworkDbLifecycleLock(classification.networkHash, () =>
+							performOfficerSwap({
+								networkHash: classification.networkHash,
+								pastedCode: swapContext.pastedCode,
+								transport: swapContext.transport,
+								db: handoverDb,
+							}),
+						);
 						if (cancelled) return;
 						if (result.outcome !== 'ok') {
 							// eslint-disable-next-line no-console
