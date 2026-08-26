@@ -215,3 +215,44 @@ test('the surfaced swap-error banner renders through t() with the two new copy k
 	assert.match(CODE, /t\('network\.swapErrorHeading'\)/);
 	assert.match(CODE, /t\('network\.swapErrorBody'\)/);
 });
+
+// --- Handed-off transport cache ownership (D-14 continuity, 50-22) -------------
+
+const RESET_CALL_RE = /\.reset\(\)/g;
+
+test('the handed-off single-flight cache is reset on at least 7 terminal call sites', () => {
+	// handleCancelSwap (unchanged) + the classify catch clause + the
+	// fail-closed replay branch + officer-indeterminate + new-network + BOTH
+	// routes of same-officer-refresh + all three terminal routes of
+	// handleConfirmSwap. The one path that must NOT reset is 'officer-swap'
+	// -- the confirm dialog still needs the cached envelope.
+	const matches = CODE.match(RESET_CALL_RE) ?? [];
+	assert.ok(matches.length >= 7, `expected at least 7 .reset() call sites, found ${matches.length}`);
+});
+
+const OFFICER_SWAP_CASE_RE = /case 'officer-swap':[\s\S]*?break;/;
+
+test("the officer-swap case body resets nothing -- the confirm dialog still needs the cached envelope", () => {
+	const match = CODE.match(OFFICER_SWAP_CASE_RE);
+	assert.ok(match, 'could not locate the officer-swap case');
+	assert.doesNotMatch(match[0], /\.reset\(\)/);
+});
+
+test('inertness control: the officer-swap-no-reset matcher DOES flag a fixture with a reset call inside that case', () => {
+	const fixture = "case 'officer-swap':\n\tsetPendingSwap({ networkHash });\n\tswapContext.transport.reset();\n\tbreak;";
+	const match = fixture.match(OFFICER_SWAP_CASE_RE);
+	assert.ok(match);
+	assert.match(match[0], /\.reset\(\)/, 'matcher is inert -- it correctly flags the misplaced reset');
+});
+
+const CLASSIFY_FINALLY_RE = /\} finally \{\s*if \(!cancelled\) onSwapContextConsumed\?\.\(\);\s*\}/;
+
+test("classify()'s finally block contains no reset call -- officer-swap falls through the SAME finally and must keep its cache", () => {
+	assert.match(CODE, CLASSIFY_FINALLY_RE);
+});
+
+test('inertness control: the finally-no-reset matcher rejects a fixture where reset was moved into finally (which would break the confirm path)', () => {
+	const fixture =
+		'} finally {\n\t\t\t\tswapContext.transport.reset();\n\t\t\t\tif (!cancelled) onSwapContextConsumed?.();\n\t\t\t}';
+	assert.doesNotMatch(fixture, CLASSIFY_FINALLY_RE, 'matcher is inert');
+});
