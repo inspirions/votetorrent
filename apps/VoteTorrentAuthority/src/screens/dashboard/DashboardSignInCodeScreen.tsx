@@ -6,6 +6,19 @@
  * `NetworksScreen.tsx`'s own "not yet wired (no camera dependency)" comment for
  * the concrete precedent this decision follows.
  *
+ * GENERATING IS A BLOCKING TWO-STEP, DELIBERATELY. Pressing the generate
+ * button raises an in-screen confirmation naming exactly what is about to
+ * leave the device; only the second press calls `exportDashboardSnapshot()`.
+ * This is the one action in this app that copies the ENTIRE local database,
+ * registrant information included, into a bearer-readable artifact — every
+ * other authority action that touches authority data goes through a signing
+ * ceremony behind a hardware-bound key and a biometric prompt. This app has no
+ * reusable "prove the officer is present" primitive to call here (the
+ * biometric gate is bound to a signing operation, not exposed standalone), so
+ * a blocking confirmation is the floor, NOT the equivalent. An unattended
+ * unlocked device is still the standing threat; closing that properly needs a
+ * presence check this screen cannot currently express.
+ *
  * This screen has no text input, so — unlike `AddNetworkScreen.tsx`, whose
  * import/hook block this screen otherwise mirrors — `KeyboardAvoidingScreen`
  * and `CustomTextInput` are deliberately OMITTED. Do not "restore" either: a
@@ -41,6 +54,10 @@ export default function DashboardSignInCodeScreen() {
 	const [record, setRecord] = useState<StagedSignInCode | undefined>(undefined);
 	const [errorMessage, setErrorMessage] = useState<string>("");
 	const [generating, setGenerating] = useState(false);
+	// The confirmation step in front of the export. `false` is the resting
+	// state, so nothing about this screen's normal render implies an export is
+	// pending.
+	const [confirming, setConfirming] = useState(false);
 	// Distinct from errorMessage: "no network selected yet" is the expected
 	// first-run state (mirrors TasksScreen/SettingsScreen's own convention), so
 	// it renders the friendly <NoNetwork /> empty state rather than an error
@@ -67,6 +84,7 @@ export default function DashboardSignInCodeScreen() {
 
 	const handleGenerate = useCallback(async () => {
 		setErrorMessage("");
+		setConfirming(false);
 		setGenerating(true);
 		try {
 			const snapshot = await exportDashboardSnapshot();
@@ -85,6 +103,15 @@ export default function DashboardSignInCodeScreen() {
 		}
 	}, [exportDashboardSnapshot]);
 
+	const handleRequestGenerate = useCallback(() => {
+		setErrorMessage("");
+		setConfirming(true);
+	}, []);
+
+	const handleCancelGenerate = useCallback(() => {
+		setConfirming(false);
+	}, []);
+
 	// The ONE path in this app that reaches `clearStagedSignInCode`. Without
 	// it a staged export sat in AsyncStorage indefinitely, so the officer had
 	// no way to end the exposure window early. Deliberately unconfirmed: it is
@@ -93,6 +120,7 @@ export default function DashboardSignInCodeScreen() {
 	// action below it.
 	const handleDiscard = useCallback(async () => {
 		setErrorMessage("");
+		setConfirming(false);
 		await clearStagedSignInCode();
 		setRecord(undefined);
 	}, []);
@@ -166,18 +194,40 @@ export default function DashboardSignInCodeScreen() {
 				</View>
 			</ScrollView>
 			<InlineError message={errorMessage} />
+			{confirming ? (
+				<View style={styles.section} testID="dashboard-signin-code-confirm">
+					<ThemedText type="defaultSemiBold" style={styles.body}>
+						{t("dashboardSignInCodeConfirmHeading")}
+					</ThemedText>
+					<ThemedText type="default" style={styles.body}>
+						{t("dashboardSignInCodeConfirmBody")}
+					</ThemedText>
+				</View>
+			) : null}
 			<Footer>
-				{screenState !== "generated" ? (
+				{screenState !== "generated" && !confirming ? (
 					<CustomButton
 						title={t("dashboardSignInCodeGenerateButton")}
 						icon="key"
 						disabled={generating}
 						backgroundColor={colors.important}
 						forceDarkText={true}
-						onPress={handleGenerate}
+						onPress={handleRequestGenerate}
 					/>
 				) : null}
-				{record !== undefined ? (
+				{confirming ? (
+					<>
+						<CustomButton
+							title={t("dashboardSignInCodeGenerateButton")}
+							icon="key"
+							disabled={generating}
+							backgroundColor={colors.error}
+							onPress={handleGenerate}
+						/>
+						<CustomButton title={t("cancel")} size="thin" onPress={handleCancelGenerate} />
+					</>
+				) : null}
+				{record !== undefined && !confirming ? (
 					<CustomButton
 						title={t("dashboardSignInCodeDiscardButton")}
 						icon="trash"
