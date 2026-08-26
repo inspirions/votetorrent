@@ -372,7 +372,13 @@ export function DashboardShell({
 	// replacing their own data with their own newer copy -- and runs
 	// immediately; `officer-indeterminate` and the structurally-unreachable
 	// `new-network` fail closed WITHOUT ever calling `performOfficerSwap`, so
-	// nothing is deleted on either path.
+	// nothing is deleted on either path. That table describes the four
+	// SUCCESSFUL classification outcomes, not the whole space: ANY rejection
+	// along the way -- a malformed code, a transport failure, a refused
+	// replay, or a throw from `performOfficerSwap` on the same-officer-refresh
+	// branch (reached AFTER `dbRef.current` has already been relinquished) --
+	// is caught below and surfaced as its own banner (CR-03), never left to
+	// escape as an unhandled promise rejection.
 	useEffect(() => {
 		if (!pendingSwapContext) return undefined;
 		// Captured into a local so TS's null-narrowing survives the closure
@@ -464,6 +470,15 @@ export function DashboardShell({
 					default:
 						break;
 				}
+			} catch (err) {
+				// A rejection anywhere in the try above -- a malformed code
+				// from splitSignInCode, a transport failure, a refused replay,
+				// or a throw from performOfficerSwap on the
+				// same-officer-refresh branch -- lands here instead of
+				// escaping unhandled. See the main region below: a swapError
+				// set with no pendingSwap open renders its own banner instead
+				// of letting PanelGrid stand in for a database failure.
+				if (!cancelled) setSwapError(err);
 			} finally {
 				if (!cancelled) onSwapContextConsumed?.();
 			}
@@ -612,6 +627,23 @@ export function DashboardShell({
 									<p>{t('snapshot.errorAttachBody')}</p>
 								</>
 							)}
+							<button type="button" className="sh-refresh-cta" onClick={() => onRedeemAnother(activeNetwork.networkHash)}>
+								{t('snapshot.refreshCta')}
+							</button>
+						</div>
+					) : swapError && !pendingSwap ? (
+						/*
+						 * A CLASSIFICATION failure must never be represented by
+						 * nine panels each quietly showing their own empty copy
+						 * -- the same reasoning as the attach banner above, for
+						 * a different failure surface. This branch renders ONLY
+						 * when no swap dialog is open: a confirmed-swap failure
+						 * belongs in the dialog the officer is already looking
+						 * at, and continues to render there unchanged.
+						 */
+						<div className="sh-error-banner">
+							<p>{t('network.swapErrorHeading')}</p>
+							<p>{t('network.swapErrorBody')}</p>
 							<button type="button" className="sh-refresh-cta" onClick={() => onRedeemAnother(activeNetwork.networkHash)}>
 								{t('snapshot.refreshCta')}
 							</button>

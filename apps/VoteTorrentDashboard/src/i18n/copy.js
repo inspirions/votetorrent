@@ -90,6 +90,16 @@ export const COPY = Object.freeze({
 	'network.swapConfirmBody':
 		"A different officer's code was just redeemed for {{authorityName}}. Continuing replaces this browser's existing copy and signs you in as the new officer.",
 	'network.swapConfirmCta': 'Replace and continue',
+	// The surfaced swap-failure banner (CR-03, 50-22): renders in the main
+	// region -- not the swap dialog -- when classifying an incoming code
+	// fails before (or without) ever opening the confirm dialog, so the
+	// panel grid can never stand in for a failed replacement. Deliberately
+	// distinct from `snapshot.errorAttachHeading`/`Body`: "couldn't open
+	// this browser's copy of the data" is a wrong answer for a code that
+	// was refused.
+	'network.swapErrorHeading': "This browser's data couldn't be replaced.",
+	'network.swapErrorBody':
+		"The sign-in code couldn't be used to replace this browser's data. Ask the authority app for a new code and try again.",
 	'chrome.moreOptionsAriaLabel': 'More options',
 
 	// Authorization gate and preview control
