@@ -296,6 +296,42 @@ test('redeemAndBootstrap: a restore that lands short of the manifest produces re
 	await deleteNetworkDb(envelope.networkHash);
 });
 
+test('redeemAndBootstrap: an envelope whose networkHash disagrees with its own Network.Hash row is refused as network-hash-mismatch', async () => {
+	// The digest covers `tables` only, so on a FIRST bootstrap (no
+	// expectedNetworkHash) `envelope.networkHash` is unauthenticated -- yet it
+	// becomes the database name, the row-count key and the registry primary
+	// key. This envelope carries the AUTHENTIC table content under a different
+	// declared identity and verifies clean on digest, manifest and schema hash;
+	// only the cross-check catches it.
+	const authentic = buildFixtureEnvelope();
+	const relabelled = buildSnapshot({
+		networkHash: 'an-identity-the-tables-never-claimed',
+		tables: authentic.tables,
+		generatedAt: authentic.generatedAt,
+	});
+	assert.equal(relabelled.digest, authentic.digest, 'the relabelled envelope must be digest-identical, or this test proves nothing');
+
+	const storage = makeFakeStorage();
+	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: relabelled } } });
+	const result = await redeemAndBootstrap({ pastedCode: codeFor(relabelled), transport, storage });
+
+	assert.equal(result.outcome, 'verify-failed');
+	assert.equal(result.reason, 'network-hash-mismatch');
+	assert.equal(findNetwork(relabelled.networkHash, storage), undefined);
+	const listed = await indexedDB.databases();
+	assert.equal(listed.some((db) => db.name === dbNameFor(relabelled.networkHash)), false);
+});
+
+test('positive control: the SAME fixture with its own matching networkHash bootstraps cleanly', async () => {
+	const envelope = buildFixtureEnvelope();
+	await deleteNetworkDb(envelope.networkHash).catch(() => {});
+	const storage = makeFakeStorage();
+	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });
+	const result = await redeemAndBootstrap({ pastedCode: codeFor(envelope), transport, storage });
+	assert.equal(result.outcome, 'ok');
+	await deleteNetworkDb(envelope.networkHash);
+});
+
 // ---------------------------------------------------------------------------
 // already-bootstrapped / D-08 two networks
 // ---------------------------------------------------------------------------

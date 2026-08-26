@@ -168,6 +168,33 @@ export async function redeemAndBootstrap(options) {
 		return { outcome: 'verify-failed', reason: verified.reason };
 	}
 
+	// 3.1 CROSS-CHECK THE ENVELOPE'S OWN networkHash AGAINST THE DIGEST-COVERED
+	//     TABLE CONTENT. The digest covers `tables` only -- deliberately, and
+	//     correctly, for a corruption check. But on a FIRST bootstrap
+	//     `expectedNetworkHash` is absent, so `envelope.networkHash` is an
+	//     entirely unauthenticated field, and this function then uses it as the
+	//     IndexedDB database name, the row-count storage key and the registry
+	//     primary key. A transport or endpoint that can observe or replay a
+	//     legitimate envelope could therefore re-serve the AUTHENTIC table
+	//     content under an attacker-chosen identity and have it verify clean:
+	//     digest, manifest and schema hash all match. The browser would then
+	//     file the real authority's data under the wrong identity, while the
+	//     panels went on showing the (digest-covered) `Network.Hash` that no
+	//     longer matched either the registry key or the database name.
+	//
+	//     The envelope shape is frozen, so the containment is to require the
+	//     unauthenticated field to AGREE with the authenticated content it
+	//     claims to describe. Skipped when the snapshot carries no single
+	//     `Network` row to check against -- silence is not evidence, and
+	//     refusing there would reject legitimate partial fixtures.
+	const networkRows = envelope.tables.Network ?? [];
+	if (networkRows.length === 1) {
+		const declaredHash = /** @type {Record<string, unknown>} */ (networkRows[0]).Hash;
+		if (typeof declaredHash === 'string' && declaredHash !== envelope.networkHash) {
+			return { outcome: 'verify-failed', reason: 'network-hash-mismatch' };
+		}
+	}
+
 	// 3.5 Derive the officer identity from the VERIFIED envelope's own User
 	//     rows, in memory, BEFORE anything is deleted -- see this module's
 	//     header deviation note. The schema admits exactly one User by
