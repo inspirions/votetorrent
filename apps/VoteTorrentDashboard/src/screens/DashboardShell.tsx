@@ -620,7 +620,7 @@ export function DashboardShell({
 							`pendingSwapContext: unexpected 'new-network' classification for held network "${classification.networkHash}"`,
 						);
 						// eslint-disable-next-line no-console
-						console.error(err.name, err.message);
+						console.error(err.name);
 						setSwapError(err);
 						swapContext.transport.reset();
 						break;
