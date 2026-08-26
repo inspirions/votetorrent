@@ -50,6 +50,28 @@
  * no key backup or restore feature exists anywhere in this repo, and the
  * browser holds nothing to sign with (D-04).
  *
+ * WHAT IS PERSISTED, AND FOR HOW LONG. The staged record is an ORDINARY
+ * `AsyncStorage` value — on Android that is the RKStorage SQLite file:
+ * unencrypted, included in ADB backups where `allowBackup` is set, and readable
+ * from any root or forensic image. It therefore holds the serialized snapshot
+ * (an authority's whole database, registrant PII included) for the SHORTEST
+ * window this design allows, and never one moment longer:
+ * {@link redeemStagedSignInCode} blanks `snapshotJson` the instant a code stops
+ * being redeemable — on the successful redemption itself, and on an expiry
+ * refusal — and {@link clearStagedSignInCode} drops the record outright and is
+ * wired to a discard control on the producer screen. A spent or expired code
+ * must never leave a plaintext copy of the voter roll sitting beside the bearer
+ * secret that unlocks it: the secret's entire security value is that
+ * short-expiry plus single-use bound the exposure window, and leaving the
+ * payload behind removes both bounds for anyone with storage access, who then
+ * does not need the code at all.
+ *
+ * THE RESIDUAL, STATED PLAINLY: between mint and redemption the payload IS in
+ * the clear in AsyncStorage. Moving it behind the platform keystore /
+ * EncryptedSharedPreferences, or regenerating it on demand at redemption time
+ * instead of staging it, is the real fix and is deliberately not attempted
+ * here — the redemption path has no engine handle to regenerate from.
+ *
  * No GSD phase number or decision ID may appear in any string this module can
  * surface to a user — code comments only.
  */
@@ -94,7 +116,12 @@ export interface StagedSignInCode {
 	 * staged exports can never collide, and safe under the filesystem binding's
 	 * `assertSafeBootstrapIdentifier` pattern. */
 	snapshotName: string;
-	/** `serializeSnapshot(snapshot)` — the exact bytes a filesystem/REST binding couriers. */
+	/** `serializeSnapshot(snapshot)` — the exact bytes a filesystem/REST binding
+	 * couriers, and an authority's WHOLE DATABASE in the clear. Blanked to `''`
+	 * by {@link redeemStagedSignInCode} the moment the code stops being
+	 * redeemable (successful redemption, or an expiry refusal) — see the module
+	 * header's "what is persisted, and for how long". A reader must therefore
+	 * treat `''` as "the payload is gone", not as "the mint produced nothing". */
 	snapshotJson: string;
 	/** Set the instant a redemption succeeds. Present iff the code has been redeemed. */
 	redeemedAt?: string;
@@ -172,6 +199,19 @@ export async function readStagedSignInCode(): Promise<StagedSignInCode | undefin
 /** Drops the staged record (idle-state reset). */
 export async function clearStagedSignInCode(): Promise<void> {
 	await AsyncStorage.removeItem(STAGED_CODE_STORAGE_KEY);
+}
+
+/**
+ * Re-persist `record` with its snapshot payload blanked, leaving every other
+ * field (including `expiresAt` and `redeemedAt`) exactly as it was — so the
+ * record still answers the 'used'/'expired' question, without the whole
+ * database sitting behind that answer. A no-op when the payload is already
+ * gone, so a repeated refusal does not rewrite storage on every attempt.
+ */
+async function dropStagedPayload(record: StagedSignInCode): Promise<void> {
+	if (record.snapshotJson === '') return;
+	const stripped: StagedSignInCode = { ...record, snapshotJson: '' };
+	await AsyncStorage.setItem(STAGED_CODE_STORAGE_KEY, JSON.stringify(stripped));
 }
 
 const SECRET_PATTERN = /^[0-9a-f]{40}$/;
@@ -252,10 +292,18 @@ export async function redeemStagedSignInCode(
 			return { status: 'used' };
 		}
 		if (nowCanonical >= record.expiresAt) {
+			// An expired code can never be redeemed again, so its payload has no
+			// remaining purpose — drop it, but KEEP the record so a second
+			// attempt still answers 'expired' rather than the weaker 'unknown'.
+			await dropStagedPayload(record);
 			return { status: 'expired' };
 		}
 
-		const redeemed: StagedSignInCode = { ...record, redeemedAt: nowCanonical };
+		// Persist `redeemedAt` and drop the payload in the SAME write: the code
+		// is spent from this instant, so the plaintext database beside it is
+		// pure liability. `parseSnapshot` below reads the in-memory `record`,
+		// which still carries the bytes this call is about to return.
+		const redeemed: StagedSignInCode = { ...record, redeemedAt: nowCanonical, snapshotJson: '' };
 		await AsyncStorage.setItem(STAGED_CODE_STORAGE_KEY, JSON.stringify(redeemed));
 
 		const parsed = parseSnapshot(record.snapshotJson);

@@ -27,6 +27,7 @@ import { useApp } from "../../providers/AppProvider";
 import { isNoNetworkEstablishedError } from "../../engines/engine-factory";
 import {
 	DASHBOARD_SIGNIN_CODE_SPAN_MINUTES,
+	clearStagedSignInCode,
 	mintDashboardSignInCode,
 	readStagedSignInCode,
 } from "../../services/dashboard-signin-code";
@@ -83,6 +84,18 @@ export default function DashboardSignInCodeScreen() {
 			setGenerating(false);
 		}
 	}, [exportDashboardSnapshot]);
+
+	// The ONE path in this app that reaches `clearStagedSignInCode`. Without
+	// it a staged export sat in AsyncStorage indefinitely, so the officer had
+	// no way to end the exposure window early. Deliberately unconfirmed: it is
+	// the SAFE direction (it destroys a credential and a copy of data the
+	// device still holds elsewhere), which is the opposite of the generate
+	// action below it.
+	const handleDiscard = useCallback(async () => {
+		setErrorMessage("");
+		await clearStagedSignInCode();
+		setRecord(undefined);
+	}, []);
 
 	if (!hasNetwork) {
 		return <NoNetwork />;
@@ -153,8 +166,8 @@ export default function DashboardSignInCodeScreen() {
 				</View>
 			</ScrollView>
 			<InlineError message={errorMessage} />
-			{screenState !== "generated" ? (
-				<Footer>
+			<Footer>
+				{screenState !== "generated" ? (
 					<CustomButton
 						title={t("dashboardSignInCodeGenerateButton")}
 						icon="key"
@@ -163,8 +176,17 @@ export default function DashboardSignInCodeScreen() {
 						forceDarkText={true}
 						onPress={handleGenerate}
 					/>
-				</Footer>
-			) : null}
+				) : null}
+				{record !== undefined ? (
+					<CustomButton
+						title={t("dashboardSignInCodeDiscardButton")}
+						icon="trash"
+						size="thin"
+						disabled={generating}
+						onPress={handleDiscard}
+					/>
+				) : null}
+			</Footer>
 		</View>
 	);
 }

@@ -674,6 +674,7 @@ const resources = {
 			dashboardSignInCodeCopyButton: 'Copy Code',
 			dashboardSignInCodeCountdown: 'Expires in {{remaining}}',
 			dashboardSignInCodeIdle: 'Generate a code to sign an officer in to the web dashboard.',
+			dashboardSignInCodeDiscardButton: 'Discard Staged Code',
 			// Phase 47 (D-01/D-02/D-14) — registrantAccessTrail* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantAccessTrailSectionTitle: 'Access History',
 			// D-01: load-bearing framing — accountability/transparency, NOT a security control. Do not paraphrase.
@@ -1523,6 +1524,7 @@ const resources = {
 			dashboardSignInCodeCopyButton: 'Copiar Código',
 			dashboardSignInCodeCountdown: 'Vence en {{remaining}}',
 			dashboardSignInCodeIdle: 'Genere un código para iniciar sesión a un funcionario en el panel web.',
+			dashboardSignInCodeDiscardButton: 'Descartar Código Preparado',
 			// Phase 47 (D-01/D-02/D-14) — registrantAccessTrail* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantAccessTrailSectionTitle: 'Historial de Acceso',
 			// D-01: load-bearing framing — accountability/transparency, NOT a security control. Do not paraphrase.
