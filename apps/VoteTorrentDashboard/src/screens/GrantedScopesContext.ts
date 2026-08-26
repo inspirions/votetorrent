@@ -32,6 +32,12 @@ export interface GrantedScopesValue {
 	badgeKey: 'gate.badgeReal' | 'gate.badgeSimulated';
 	toggle: (code: ScopeCode) => void;
 	reset: () => void;
+	/** True once the officer's real scopes have been answered by the
+	 * database at least once for the currently active network. Before that
+	 * moment the previewed set is not a preview of anything, and a click
+	 * would latch a baseline the database never supplied — see
+	 * `PreviewAsControl.tsx`'s `disabled={!scopesResolved}` wiring. */
+	scopesResolved: boolean;
 }
 
 function noop(): void {
@@ -46,6 +52,9 @@ const DEFAULT_VALUE: GrantedScopesValue = Object.freeze({
 	badgeKey: 'gate.badgeReal',
 	toggle: noop,
 	reset: noop,
+	// Fail-safe: a consumer rendered outside a provider has no
+	// database-answered scopes to preview, so it must never appear resolved.
+	scopesResolved: false,
 });
 
 export const GrantedScopesContext = createContext<GrantedScopesValue>(DEFAULT_VALUE);

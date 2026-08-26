@@ -53,6 +53,16 @@ export interface PreviewAsProviderProps {
 	 * nothing for a fully-privileged officer. Treat this prop as a live
 	 * value, never as a mount-time constant. */
 	realScopes: ReadonlyArray<ScopeCode>;
+	/** True once the officer's real, database-granted scopes have resolved
+	 * at least once for the currently active network. REQUIRED —
+	 * deliberately, so TypeScript forces every mount site to make an
+	 * explicit decision instead of silently inheriting a permissive
+	 * default. Before this is true, the nine checkboxes and the Reset
+	 * control are `disabled`: a click during the multi-second attach
+	 * window used to latch a preview against an empty `realScopes: []`
+	 * baseline, and the officer had no way back short of reloading the
+	 * page. */
+	scopesResolved: boolean;
 	children: ReactNode;
 }
 
@@ -62,7 +72,7 @@ export interface PreviewAsProviderProps {
  * unable to outlive the page (T-50-12-04); the tier-3 `mode=fresh` page
  * load proves it across a genuinely fresh page boundary.
  */
-export function PreviewAsProvider({ realScopes, children }: PreviewAsProviderProps) {
+export function PreviewAsProvider({ realScopes, scopesResolved, children }: PreviewAsProviderProps) {
 	const [state, setState] = useState(() => createPreviewState(realScopes));
 
 	// Re-seed when the officer's real scopes actually arrive (or change). The
@@ -87,15 +97,19 @@ export function PreviewAsProvider({ realScopes, children }: PreviewAsProviderPro
 			badgeKey: badgeKey(state) as 'gate.badgeReal' | 'gate.badgeSimulated',
 			toggle: (code: ScopeCode) => setState((prev) => toggleScope(prev, code)),
 			reset: () => setState((prev) => resetToReal(prev)),
+			// Published unchanged — this provider does not gate `toggle` or
+			// `reset` in the state model, only whether the control renders
+			// them as clickable (see PreviewAsControl's `disabled` wiring).
+			scopesResolved,
 		}),
-		[state],
+		[state, scopesResolved],
 	);
 
 	return <GrantedScopesContext.Provider value={value}>{children}</GrantedScopesContext.Provider>;
 }
 
 export function PreviewAsControl() {
-	const { effective, simulated, toggle, reset } = usePreview();
+	const { effective, simulated, toggle, reset, scopesResolved } = usePreview();
 
 	// Class and copy key are derived from this SAME `simulated` boolean in
 	// one statement each, right here, rather than reading two independent
@@ -109,6 +123,9 @@ export function PreviewAsControl() {
 
 	return (
 		<fieldset className="pv-control">
+			{/* Inert until scopesResolved: a click before the officer's real
+			 * scopes arrive used to latch a preview against an empty baseline,
+			 * and the officer had no way back short of reloading the page. */}
 			<legend>{t('preview.title')}</legend>
 			{CAPABILITIES.map((capability) => (
 				<div key={capability.id} className="pv-row">
@@ -117,6 +134,7 @@ export function PreviewAsControl() {
 						type="checkbox"
 						checked={effective.includes(capability.scope)}
 						onChange={() => toggle(capability.scope)}
+						disabled={!scopesResolved}
 					/>
 					<label htmlFor={`pv-scope-${capability.id}`}>{t(capability.titleKey)}</label>
 					<span className="pv-scope" title={capability.schemaName}>
@@ -125,7 +143,7 @@ export function PreviewAsControl() {
 				</div>
 			))}
 			<span className={`pv-badge ${badgeModifierClass}`}>{t(badgeCopyKey)}</span>
-			<button type="button" className="pv-reset" onClick={reset}>
+			<button type="button" className="pv-reset" onClick={reset} disabled={!scopesResolved}>
 				{t('gate.resetScopesCta')}
 			</button>
 		</fieldset>

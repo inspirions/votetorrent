@@ -195,7 +195,10 @@ function Tree({
 	phaseId: string;
 }) {
 	return (
-		<PreviewAsProvider realScopes={REAL_SCOPES}>
+		// This tier-3 harness supplies its scope set synchronously (REAL_SCOPES
+		// is a constant, never arriving asynchronously), so no attach window
+		// exists here to close -- scopesResolved is always true.
+		<PreviewAsProvider realScopes={REAL_SCOPES} scopesResolved={true}>
 			<PreviewAsControl />
 			<AdvisoryDisclosure />
 			<PanelGrid
