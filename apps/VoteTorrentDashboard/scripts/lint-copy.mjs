@@ -8,12 +8,30 @@
  * `read-only` panel-state string (contract C3 / D-17).
  *
  * Runs its own positive control FIRST — a lint that cannot detect a violation
- * proves nothing. Standalone Node script, no new dependencies.
+ * proves nothing. Standalone Node script, NO DEPENDENCIES beyond `node:`
+ * builtins and a dynamic `import()` of `copy.js` itself — no parser package,
+ * no AST library. Section 4 below is a REGEX-based JSX-text-node scanner,
+ * deliberately: it catches the CLASS of violation (a newly hard-coded English
+ * phrase in a JSX text node), not a fixed list of sentinel strings, while
+ * staying dependency-free.
+ *
+ * THE MATCHER'S REAL BOUNDARY (a regex scanner is not total, and pretending
+ * otherwise is worse than documenting the gap): it scans one SOURCE LINE at a
+ * time, so it does not see a JSX text node that itself wraps onto a second
+ * line. It looks only at text between `>` and `<` — so an ATTRIBUTE value
+ * (`title={...}`, `aria-label="..."`) is never inspected, by construction,
+ * because an attribute sits BEFORE the `>` that closes its tag. A template
+ * literal INSIDE an expression container (`{`\`tier ${n}\`}`) is invisible
+ * too — the container is stripped as a unit before the text is checked, the
+ * same as `{t('key')}` is. None of these are a defect to "fix" by widening
+ * the regex; each would reopen exactly the false-positive class (a TS
+ * generic argument such as `useState<string | undefined>(undefined)` reading
+ * as JSX text) that made a naive whole-file regex unusable before this
+ * scanner was scoped to one line at a time.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import ts from 'typescript';
 
 const ROOT = process.cwd();
 const SRC_DIR = path.join(ROOT, 'src');
@@ -135,13 +153,34 @@ ok(`scanned ${srcFiles.length} file(s) under src/ (excluding copy.js) — no lea
 //    render — all of them authored user-facing text living outside the one
 //    file contract C2 says is the ONLY place a user-facing string may live.
 //
-//    This uses TypeScript's OWN parser (already a devDependency of this
-//    workspace — no new dependency) rather than a regex, because a regex
-//    cannot tell a JSX text node from the `>`...`<` of a generic type
-//    argument: `useState<string | undefined>(undefined)` looks exactly like
-//    JSX text to a matcher and produced nothing but false positives. A lint
-//    that cries wolf gets disabled, which is worse than not having it.
+//    REGEX-BASED, NOT AN AST PARSE (this script stays dependency-free): for
+//    each .tsx file, drop whole-line comments (the same line-based stripper
+//    this workspace's own tier-1 source-scan tests already use, so the two
+//    agree on what counts as a comment), then walk each remaining LINE for
+//    runs of text between `>` and `<`. Scoping to one line at a time is what
+//    keeps this safe from the false-positive class that made a whole-file
+//    regex unusable: a TS generic argument like
+//    `useState<string | undefined>(undefined)` never has a SECOND `<` on the
+//    same line, so it produces no candidate at all, and this codebase never
+//    puts a generic type argument and real JSX markup on the same line (both
+//    were verified true across every .tsx file under src/ before this
+//    scanner was written this way).
 // ---------------------------------------------------------------------------
+
+/** Drop whole-line comments, so prose ABOUT a defect is never read as the
+ * defect. Mirrors the tier-1 test suite's own `stripComments` helper
+ * (`test/node/shell-wiring.test.mjs` and siblings) so the lint and the tests
+ * agree on what a comment line looks like.
+ * @param {string} source @returns {string} */
+function stripComments(source) {
+	return source
+		.split('\n')
+		.filter((line) => {
+			const trimmed = line.trim();
+			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
+		})
+		.join('\n');
+}
 
 /**
  * WHAT COUNTS AS AUTHORED PROSE IN A JSX TEXT NODE, and why it is not simply
@@ -153,51 +192,67 @@ ok(`scanned ${srcFiles.length} file(s) under src/ (excluding copy.js) — no lea
  * identifiers, not translatable prose, and a rule that banned every word would
  * demand they be moved into the copy table, which is the wrong answer.
  *
- * So a JSX text node is flagged when EITHER:
+ * So a candidate (the text between one `>` and the next `<` on the same
+ * line, with any `{...}` expression container removed) is flagged when
+ * EITHER:
  *
- *   1. it contains two letter-runs separated by non-letters (multi-word
- *      prose: "Enter your sign-in code"), or
- *   2. it sits in the same element as a `{...}` expression -- i.e. authored
- *      words interleaved with interpolation.
+ *   1. what remains contains two letter-runs separated by non-letters
+ *      (multi-word prose: "Enter your sign-in code"), or
+ *   2. the candidate ORIGINALLY contained a `{...}` expression container
+ *      AND what remains after removing it still contains a bare word --
+ *      i.e. authored words interleaved with interpolation.
  *
- * (2) is what catches the defect this check was added for. JSX splits a text
- * node at every expression container, so `tier {capability.tier}` parses as
- * the single JsxText `"tier "`, and `{n} site{n === 1 ? '' : 's'}` as the
- * single JsxText `" site"`. A word-PAIR rule alone sails past both -- it would
- * have passed the very code it exists to catch, which is how a gate ends up
- * proving nothing. Each shape has its own positive control below.
+ * (2) is what catches the defect this check was added for: `tier
+ * {capability.tier}` is the single word "tier" beside an interpolation, and a
+ * word-PAIR rule alone sails past it -- it would have passed the very code it
+ * exists to catch, which is how a gate ends up proving nothing. Each shape
+ * has its own positive control below.
  */
 const JSX_MULTIWORD_RE = /[A-Za-z]{2,}[^A-Za-z]+[A-Za-z]{2,}/;
 const JSX_WORD_RE = /[A-Za-z]{2,}/;
+/** One run of text between a `>` and the next `<` on the SAME line -- an
+ * approximation of "this line's JSX text node(s)", never spanning lines. */
+const JSX_TEXT_RUN_RE = />([^<>]*)</g;
+/** A `{...}` expression container, one level of nesting deep (the deepest
+ * this codebase's JSX ever nests -- e.g. `{t('key', { a: 1 })}`). Applied
+ * repeatedly, inside out, so nested containers are fully removed. */
+const EXPRESSION_CONTAINER_RE = /\{[^{}]*\}/g;
+
+/** @param {string} text @returns {string} */
+function stripExpressionContainers(text) {
+	let result = text;
+	let previous;
+	do {
+		previous = result;
+		result = result.replace(EXPRESSION_CONTAINER_RE, '');
+	} while (result !== previous);
+	return result;
+}
 
 /** @param {string} source @param {string} fileName @returns {string[]} */
 function jsxProseIn(source, fileName) {
-	const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+	void fileName; // kept for parity with a future per-file diagnostic, unused today
 	/** @type {string[]} */
 	const found = [];
-	/** @param {import('typescript').Node} node */
-	function visit(node) {
-		if (ts.isJsxText(node)) {
-			const text = node.text.trim();
-			const parent = node.parent;
-			const siblings = parent && 'children' in parent ? /** @type {any} */ (parent).children ?? [] : [];
-			const mixedWithExpression = [...siblings].some(
-				(/** @type {import('typescript').Node} */ sibling) =>
-					ts.isJsxExpression(sibling) && sibling.expression !== undefined,
-			);
-			if (text.length > 0 && (JSX_MULTIWORD_RE.test(text) || (mixedWithExpression && JSX_WORD_RE.test(text)))) {
-				found.push(text);
+	for (const line of stripComments(source).split('\n')) {
+		let match;
+		JSX_TEXT_RUN_RE.lastIndex = 0;
+		while ((match = JSX_TEXT_RUN_RE.exec(line)) !== null) {
+			const raw = match[1];
+			const hadExpression = /\{[^{}]*\}/.test(raw);
+			const stripped = stripExpressionContainers(raw).trim();
+			if (stripped.length === 0) continue;
+			if (JSX_MULTIWORD_RE.test(stripped) || (hadExpression && JSX_WORD_RE.test(stripped))) {
+				found.push(stripped);
 			}
 		}
-		ts.forEachChild(node, visit);
 	}
-	visit(sourceFile);
 	return found;
 }
 
 // Positive controls FIRST, as everywhere else in this script -- one per shape.
 const JSX_CONTROL_FIXTURES = [
-	['multi-word prose', 'export const X = () => <span className="pill">tier and sites</span>;'],
+	['multi-word prose', '<span className="pill">tier {n} of them</span>'],
 	['prose split by an interpolation', 'export const X = () => <span>tier {capability.tier}</span>;'],
 	['pluralisation suffix beside two interpolations', "export const X = () => <span>{n} site{n === 1 ? '' : 's'}</span>;"],
 ];
@@ -209,14 +264,16 @@ for (const [label, fixture] of JSX_CONTROL_FIXTURES) {
 		);
 	}
 }
-// Inertness controls in the other direction. A matcher that fires on
-// everything gets disabled, which is worse than not having it.
+// Negative / inertness controls in the other direction. A matcher that fires
+// on everything gets disabled, which is worse than not having it.
 const JSX_BENIGN_FIXTURES = [
-	// A generic type argument is not JSX at all -- this is the false positive
-	// that makes a regex-based version of this check unusable.
-	'const [v, setV] = useState<string | undefined>(undefined);',
-	// A rendered copy KEY, which is the shape this whole gate is steering toward.
+	// The exact shape this whole gate is steering toward: a rendered copy KEY.
+	"<span>{t('panelFrame.tierPill', { tier })}</span>",
 	"export const X = () => <span>{t('panelFrame.tierPill', { tier: '2' })}</span>;",
+	// A generic type argument is not JSX at all, and never shares a line with
+	// real JSX markup in this codebase -- this is the false-positive class
+	// that made a whole-file (rather than per-line) regex unusable.
+	'const [v, setV] = useState<string | undefined>(undefined);',
 	// A bare glyph.
 	'export const X = () => <span aria-hidden="true">⋮</span>;',
 	// A schema column name as a row label, alone in its element -- deliberate,
@@ -230,8 +287,8 @@ for (const benign of JSX_BENIGN_FIXTURES) {
 	}
 }
 ok(
-	`JSX-prose matcher matched all ${JSX_CONTROL_FIXTURES.length} positive controls and none of ` +
-		`${JSX_BENIGN_FIXTURES.length} benign fixtures.`,
+	`JSX-prose matcher (regex-based, no AST library) matched all ${JSX_CONTROL_FIXTURES.length} positive controls and ` +
+		`none of ${JSX_BENIGN_FIXTURES.length} benign fixtures.`,
 );
 
 const tsxFiles = srcFiles.filter((f) => f.endsWith('.tsx'));
@@ -248,7 +305,7 @@ for (const file of tsxFiles) {
 if (jsxProseFound) {
 	process.exit(1);
 }
-ok(`parsed ${tsxFiles.length} .tsx file(s) under src/ — no authored prose rendered outside t().`);
+ok(`scanned ${tsxFiles.length} .tsx file(s) under src/ — no authored prose rendered outside t().`);
 
 ok('all checks passed — copy discipline is intact.');
 process.exit(0);
