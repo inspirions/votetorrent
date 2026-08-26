@@ -197,7 +197,20 @@ export function toSchemaOrderedRow(tableSchema, rowObject) {
  *     maintained structure this schema declares stays consistent -- a no-op
  *     when it declares none.
  *
- * Returns a `{ [tableName]: appliedCount }` map. Never logs.
+ * Returns a `{ [tableName]: appliedCount }` map — the count
+ * `applyExternalRowChanges` REPORTED BACK, never the number of rows
+ * submitted. Those two agree today (this seam reports one change per
+ * submitted row) and the difference has therefore never bitten, but the map
+ * said `appliedCount` while carrying `rows.length`, which would claim a full
+ * apply the first time the seam applied fewer than it was given — a
+ * de-duplicated upsert onto an existing primary key being the obvious case.
+ * A returned value must be the thing its name says it is, before someone
+ * trusts it.
+ *
+ * No equality assertion is added here: `assertRestoreMatchesManifest` performs
+ * the real check independently, with an exact `count(*)` per table, and a
+ * second assertion over the same fact in a different place would just be two
+ * things to keep in step. Never logs.
  *
  * @param {import('@quereus/quereus').Database} db
  * @param {import('@votetorrent/vote-engine/bootstrap').BootstrapSnapshot} envelope
@@ -243,7 +256,7 @@ export async function applySnapshotTables(db, envelope) {
 			);
 		}
 
-		applied[tableName] = rows.length;
+		applied[tableName] = allChanges.length;
 	}
 
 	return applied;

@@ -19,6 +19,9 @@
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createNetworkDb, closeNetworkDb, deleteNetworkDb } from '../../src/db/open-db.js';
 import { readRowCounts } from '../../src/db/reattach.js';
 import {
@@ -35,6 +38,9 @@ import {
 	withDroppedRows,
 	BLOB_ROUNDTRIP_BYTES,
 } from '../fixtures/bootstrap-envelope.js';
+
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 test('module exports RESTORE_BATCH_ROWS as a positive integer', () => {
 	assert.equal(typeof RESTORE_BATCH_ROWS, 'number');
@@ -72,6 +78,39 @@ test('applySnapshotTables: lands every table exactly matching the manifest, incl
 
 	await closeNetworkDb(db);
 	await deleteNetworkDb(hash);
+});
+
+test('applySnapshotTables: the returned map is the APPLIED count reported by the seam, not the submitted row count', async () => {
+	// The JSDoc said `appliedCount` while the implementation returned
+	// `rows.length` -- the number SUBMITTED. The two agree in this environment
+	// (the seam reports one change per submitted row), which is exactly why
+	// this never bit; the point is that the value now comes from the seam's
+	// own answer, so it stays true if that ever stops holding.
+	const hash = 'restore-applied-count';
+	await deleteNetworkDb(hash).catch(() => {});
+	const db = await createNetworkDb(hash);
+	const envelope = buildFixtureEnvelope();
+
+	const applied = await applySnapshotTables(db, envelope);
+	const live = await readRowCounts(db, Object.keys(envelope.manifest));
+
+	// The returned map must agree with what is ACTUALLY in the database, which
+	// is the only claim a caller could reasonably read it as making.
+	for (const table of Object.keys(envelope.manifest)) {
+		assert.equal(applied[table], live[table], `applied vs live for ${table}`);
+	}
+
+	// Source assertion, because the equality above cannot distinguish the two
+	// values while they coincide: the implementation must not be reading
+	// `rows.length` for this map.
+	const source = readFileSync(
+		path.resolve(__dirname, '..', '..', 'src', 'lifecycle', 'snapshot-restore.js'),
+		'utf8',
+	);
+	assert.doesNotMatch(source, /applied\[tableName\] = rows\.length/);
+	assert.match(source, /applied\[tableName\] = allChanges\.length/);
+
+	await deleteNetworkDb(hash, { db });
 });
 
 test('applySnapshotTables: a blob column round-trips byte-identical', async () => {
