@@ -171,6 +171,57 @@ function hasPressableTitled(tr: renderer.ReactTestRenderer, title: string): bool
 	return tr.root.findAll((node) => typeof node.props?.onPress === "function" && node.props?.title === title).length > 0;
 }
 
+/**
+ * The helper for GATE assertions. Unlike `pressByTitle`, which invokes
+ * `onPress` unconditionally so flow tests can drive the screen forward, this
+ * helper honours the rendered `disabled` prop: if the matched pressable is
+ * disabled, it returns a sentinel WITHOUT ever calling `onPress`, so a test
+ * using this helper proves the gate actually blocks the action rather than
+ * merely proving the screen state didn't change for some other reason.
+ * `pressByTitle` deliberately bypasses `disabled` for the flow tests above
+ * that need to reach the post-confirmation code paths; this helper is the
+ * one that must be used whenever the assertion's whole point IS the gate.
+ */
+async function pressByTitleHonoringDisabled(
+	tr: renderer.ReactTestRenderer,
+	title: string,
+): Promise<"pressed" | "refused-disabled"> {
+	const target = tr.root
+		.findAll((node) => typeof node.props?.onPress === "function" && node.props?.title === title)
+		.find(Boolean);
+	if (!target) throw new Error(`no pressable titled "${title}" is rendered`);
+	if (target.props?.disabled === true) {
+		return "refused-disabled";
+	}
+	await renderer.act(async () => {
+		target.props.onPress();
+	});
+	await renderer.act(async () => {
+		await Promise.resolve();
+	});
+	return "pressed";
+}
+
+/**
+ * Returns the confirm-step's own generate pressable node (without pressing
+ * it), so a test can read `props.disabled` directly off it. Asserts exactly
+ * one such node is rendered -- the structural control confirming the three
+ * gate assertions below cannot silently be reading the wrong button (during
+ * the confirm step, the non-confirming generate button is not rendered at
+ * all, so exactly one node should carry this title).
+ */
+function findConfirmPressable(tr: renderer.ReactTestRenderer) {
+	const matches = tr.root.findAll(
+		(node) => typeof node.props?.onPress === "function" && node.props?.title === "dashboardSignInCodeGenerateButton",
+	);
+	if (matches.length !== 1) {
+		throw new Error(
+			`expected exactly one pressable titled "dashboardSignInCodeGenerateButton" during the confirm step, found ${matches.length}`,
+		);
+	}
+	return matches[0];
+}
+
 /** Types `text` into the confirm step's typed-confirmation input. */
 async function typeConfirmText(tr: renderer.ReactTestRenderer, text: string): Promise<void> {
 	const input = tr.root.findByType(TextInput);
@@ -199,10 +250,13 @@ async function renderScreen(): Promise<renderer.ReactTestRenderer> {
 }
 
 /** Drives the screen through both confirmation taps, typing the confirm
- * phrase in between (mirrors the real officer flow; the harness's direct
- * `onPress` invocation does not itself honor the button's `disabled` prop,
- * so typing here documents intent even though it is not load-bearing for
- * these particular assertions). */
+ * phrase in between (mirrors the real officer flow). This helper uses
+ * `pressByTitle`, which deliberately BYPASSES the `disabled` prop, so it can
+ * reach the post-confirmation flow tests below even if a future edit left
+ * the gate open by mistake. The gate itself -- that the confirm control
+ * really is disabled until the phrase is typed correctly -- is asserted
+ * separately by the three named tests using `pressByTitleHonoringDisabled`
+ * and `findConfirmPressable`, not by this helper. */
 async function confirmAndGenerate(tr: renderer.ReactTestRenderer): Promise<void> {
 	await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
 	await typeConfirmText(tr, "iConfirm");
@@ -232,6 +286,47 @@ describe("DashboardSignInCodeScreen — the export cannot be reached without a p
 		expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
 		expect(mockExportDashboardSnapshot).not.toHaveBeenCalled();
 		expect(() => tr.root.findByProps({ testID: "dashboard-signin-code-confirm" })).not.toThrow();
+	});
+
+	it("structural control: exactly one pressable carries the generate title during the confirm step", async () => {
+		const tr = await renderScreen();
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+
+		// findConfirmPressable throws unless exactly one match exists -- not
+		// throwing here IS the assertion.
+		expect(() => findConfirmPressable(tr)).not.toThrow();
+	});
+
+	it("the confirm control is disabled until the confirmation phrase is typed", async () => {
+		const tr = await renderScreen();
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+
+		expect(findConfirmPressable(tr).props.disabled).toBe(true);
+
+		await typeConfirmText(tr, "iConfirm");
+
+		expect(findConfirmPressable(tr).props.disabled).toBe(false);
+	});
+
+	it("a wrong phrase does not open the gate", async () => {
+		const tr = await renderScreen();
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+
+		await typeConfirmText(tr, "iconfirm");
+
+		expect(findConfirmPressable(tr).props.disabled).toBe(true);
+	});
+
+	it("pressing without confirming exports nothing, honouring `disabled`", async () => {
+		const tr = await renderScreen();
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+
+		const outcome = await pressByTitleHonoringDisabled(tr, "dashboardSignInCodeGenerateButton");
+
+		expect(outcome).toBe("refused-disabled");
+		expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+		expect(mockExportDashboardSnapshot).not.toHaveBeenCalled();
+		expect(callOrder).toEqual([]);
 	});
 
 	it("the full happy path: confirm -> signer resolves -> export and mint each exactly once, signer strictly BEFORE export", async () => {
