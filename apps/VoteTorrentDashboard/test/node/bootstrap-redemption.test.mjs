@@ -357,6 +357,50 @@ test('redeemAndBootstrap: redeeming for a networkHash already in the registry wi
 });
 
 // ---------------------------------------------------------------------------
+// 50-20: makeFakeTransport is single-use by default, mirroring the real
+// backend's `{ status: 'used' }` response for a second redemption of the
+// same secret (dashboard-signin-code.ts:391). A refusal is never consumed.
+// ---------------------------------------------------------------------------
+
+test('makeFakeTransport: single-use by default -- a second redeem of the SAME secret returns used, and calls.length is 2', async () => {
+	const envelope = buildFixtureEnvelope();
+	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });
+
+	const first = await transport.redeem(SECRET);
+	assert.equal(first.status, 'ok');
+
+	const second = await transport.redeem(SECRET);
+	assert.equal(second.status, 'used');
+	assert.equal(transport.calls.length, 2);
+});
+
+test('makeFakeTransport: negative control -- singleUse: false restores the old replay-forever behaviour, proving the flag above is load-bearing', async () => {
+	const envelope = buildFixtureEnvelope();
+	const transport = makeFakeTransport({
+		codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } },
+		singleUse: false,
+	});
+
+	const first = await transport.redeem(SECRET);
+	assert.equal(first.status, 'ok');
+
+	const second = await transport.redeem(SECRET);
+	assert.equal(second.status, 'ok', 'with singleUse: false the second call must still replay ok');
+	assert.equal(transport.calls.length, 2);
+});
+
+test('makeFakeTransport: a refused secret is never consumed -- it returns the SAME refusal on the first and second call', async () => {
+	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'expired' } } });
+
+	const first = await transport.redeem(SECRET);
+	assert.equal(first.status, 'expired');
+
+	const second = await transport.redeem(SECRET);
+	assert.equal(second.status, 'expired', 'a refusal must not be consumed by singleUse tracking');
+	assert.equal(transport.calls.length, 2);
+});
+
+// ---------------------------------------------------------------------------
 // 50-18 D-14: the classify-then-confirm seam, exercised at the function
 // level -- Bootstrap.tsx wraps every transport in createSingleFlightTransport
 // and hands the SAME instance to onAlreadyBootstrapped, so the whole

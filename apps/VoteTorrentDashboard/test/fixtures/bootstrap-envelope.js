@@ -236,20 +236,52 @@ export function withCaseCollidingRegistrant(env) {
  * bindings; the filesystem binding is Node-only and barrel-excluded, so this
  * workspace must not reach for it.
  *
- * @param {{ codeToResult: Record<string, import('@votetorrent/vote-engine/bootstrap').BootstrapRedemptionResult | Error> }} options
+ * SINGLE-USE BY DEFAULT (50-20 / D-14): the real backend
+ * (`dashboard-signin-code.ts:391`) redeems a bearer code exactly once -- a
+ * second successful redemption of the same secret returns `{ status: 'used'
+ * }`, never the original `ok` payload again. Before 50-20 this double
+ * replayed the SAME `ok` result forever, so no test built on it could ever
+ * observe the shipped defect where `Bootstrap.tsx`'s unmount cleanup reset
+ * the single-flight cache it had just handed off, causing `DashboardShell`'s
+ * replay to reach a would-be-cached `inner` a second time -- and a green
+ * browser gate could report D-14 end to end while that class of double-spend
+ * was invisible to it. `singleUse: true` closes that blind spot for every
+ * future harness built on this fixture, not only the ones this round
+ * happens to touch. A refusal (`expired` / `used` / `unknown`) or an `Error`
+ * mapping is NEVER consumed -- it behaves identically on every call, exactly
+ * as the real backend does for a code it never accepted; only an accepted
+ * `ok` marks a secret spent.
+ *
+ * Pass `singleUse: false` to restore the old replay-forever behaviour ONLY
+ * when a test genuinely drives two independent, intentional redemptions of
+ * the SAME secret constant (e.g. two unrelated bootstraps that happen to
+ * share a literal secret string) -- name the reason at the call site.
+ *
+ * @param {{ codeToResult: Record<string, import('@votetorrent/vote-engine/bootstrap').BootstrapRedemptionResult | Error>, singleUse?: boolean }} options
  * @returns {import('@votetorrent/vote-engine/bootstrap').IBootstrapTransport & { calls: string[] }}
  */
-export function makeFakeTransport({ codeToResult }) {
+export function makeFakeTransport({ codeToResult, singleUse = true }) {
 	/** @type {string[]} */
 	const calls = [];
+	/** The set of secrets already served an `ok` result -- consulted only
+	 * when `singleUse` is active. A refusal never enters this set. */
+	/** @type {Set<string>} */
+	const spent = new Set();
 	return {
 		calls,
 		/** @param {string} code */
 		async redeem(code) {
+			// Pushed FIRST, unconditionally, so `calls` stays an honest record of
+			// every call regardless of outcome.
 			calls.push(code);
+			if (singleUse && spent.has(code)) {
+				return { status: 'used' };
+			}
 			const result = codeToResult[code];
 			if (result instanceof Error) throw result;
-			return result ?? { status: 'unknown' };
+			const resolved = result ?? { status: 'unknown' };
+			if (resolved.status === 'ok') spent.add(code);
+			return resolved;
 		},
 		async pullSnapshot() {
 			throw new Error('makeFakeTransport: pullSnapshot must not be called in Phase 50 (first bootstrap only)');
