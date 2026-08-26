@@ -1318,6 +1318,83 @@ async function runComposeGuards() {
 		},
 	);
 
+	// ---- WR-10: the same missing in-flight guard, on the forget path ----
+	// A second `forgetNetwork` for a hash the first invocation already removed
+	// throws `UnknownNetworkError` and sets `forgetError` on a dialog the first
+	// invocation already closed -- an error state the officer can NEVER see, on
+	// a destructive action. Because it is invisible in the DOM by construction,
+	// the observable is `handleConfirmForget`'s own `console.error`, which only
+	// its `catch` reaches: with the guard, the second invocation never runs and
+	// nothing is logged; without it, exactly one failure is logged. That is a
+	// real runtime side effect of the second invocation, not a source string.
+	const forgetFailures: string[] = [];
+	const realConsoleError = console.error;
+
+	await rung('12 · switch to network B and open its forget dialog through the real kebab menu', async () => {
+		await selectNetworkByName(GUARD_AUTHORITY_B);
+		await waitUntil(
+			() => document.querySelector('.sh-authority-name')?.textContent === GUARD_AUTHORITY_B,
+			300,
+			'the topbar names network B',
+		);
+		const kebab = document.querySelector<HTMLButtonElement>('.sh-kebab-button');
+		if (!kebab) throw new Error('kebab button not found');
+		kebab.click();
+		const forgetItem = await waitForElement<HTMLButtonElement>('.sh-kebab-item--destructive', 300);
+		forgetItem.click();
+		const input = await waitForElement<HTMLInputElement>('#sh-forget-confirmation', 300);
+		typeIntoCodeInput(input, GUARD_AUTHORITY_B);
+		await waitUntil(
+			() => document.querySelector<HTMLButtonElement>('.sh-dialog-cta--destructive')?.disabled === false,
+			300,
+			'the typed confirmation enabled the destructive CTA',
+		);
+		return `forget dialog armed for ${GUARD_AUTHORITY_B}`;
+	});
+
+	await rung('13 · DOUBLE-CLICK the destructive CTA in one synchronous burst', async () => {
+		const cta = document.querySelector<HTMLButtonElement>('.sh-dialog-cta--destructive');
+		if (!cta) throw new Error('forget confirm button not found');
+		console.error = (...args: unknown[]) => {
+			if (String(args[0]).startsWith('forgetNetwork failed:')) forgetFailures.push(args.map(String).join(' '));
+			realConsoleError(...args);
+		};
+		let dispatched = 0;
+		cta.addEventListener('click', () => { dispatched += 1; }, true);
+		cta.click();
+		const disabledAfterFirst = cta.disabled;
+		cta.click();
+		return `dispatched: ${dispatched}, disabled after the first click: ${disabledAfterFirst}`;
+	});
+
+	await rung(
+		'14 · WR-10: exactly ONE forgetNetwork ran -- network B is gone, network A survives, and no invisible failure was logged for a second, doomed invocation',
+		async () => {
+			try {
+				await waitUntil(() => findNetwork(GUARD_NETWORK_B, localStorage) === undefined, 900, 'network B was forgotten');
+				// Same shape as rung 10: the passing case is "a second invocation
+				// never ran", so give it its full chance before declaring it absent.
+				const secondRan = await waitForOrTimeout(() => forgetFailures.length > 0, 240);
+				if (secondRan) {
+					throw new Error(
+						`a SECOND forgetNetwork invocation ran and failed on a dialog the first had already closed (WR-10): ${forgetFailures.join(' | ')}`,
+					);
+				}
+				if (!findNetwork(GUARD_NETWORK_A, localStorage)) {
+					throw new Error('network A was removed too -- a forget reached the wrong network');
+				}
+				await settleUntilPanels(900);
+				const panels = document.querySelectorAll('.panel').length;
+				if (panels !== CAPABILITIES.length) {
+					throw new Error(`expected network A's ${CAPABILITIES.length} panels after the forget, observed ${panels}`);
+				}
+				return `remaining: ${listNetworks(localStorage).map((entry) => entry.authorityName).join(',')}, logged failures: ${forgetFailures.length}, panels: ${panels}`;
+			} finally {
+				console.error = realConsoleError;
+			}
+		},
+	);
+
 	win.__COMPOSE_GATE__ = {
 		phase: PHASE,
 		passed: steps.filter((s) => s.ok).length,

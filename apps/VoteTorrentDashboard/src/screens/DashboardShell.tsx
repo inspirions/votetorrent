@@ -177,6 +177,19 @@ export function DashboardShell({
 	const [forgetConfirmationInput, setForgetConfirmationInput] = useState('');
 	const [forgetError, setForgetError] = useState<unknown>(null);
 	const forgetDialogRef = useRef<HTMLDialogElement | null>(null);
+	// The forget path's twin of `swapAttemptedRef` below (WR-10): same defect,
+	// same ref-plus-state shape, DIFFERENT lifetime. Two clicks inside the
+	// `await` window queued two `forgetNetwork` calls on the lock; the second
+	// ran after the registry entry was already gone, threw `UnknownNetworkError`
+	// and set `forgetError` on a dialog the first invocation had already closed
+	// -- an error state the officer can never see, on a destructive action.
+	//
+	// Cleared in a `finally`, unlike the swap's, and that difference is
+	// deliberate: a failed forget burns nothing (no single-use code is spent,
+	// the network stays listed and the dialog stays open), so a retry is a
+	// legitimate affordance here and must remain available.
+	const forgettingRef = useRef(false);
+	const [forgetting, setForgetting] = useState(false);
 
 	const [pendingSwap, setPendingSwap] = useState<PendingSwap | null>(null);
 	const [swapError, setSwapError] = useState<unknown>(null);
@@ -343,7 +356,13 @@ export function DashboardShell({
 	}
 
 	async function handleConfirmForget() {
-		if (!activeNetwork) return;
+		// The ref, not the state, is what makes this re-entrancy-safe -- a
+		// double-click dispatches both clicks from the same task, before any
+		// re-render could have disabled the control. See `forgettingRef`'s
+		// declaration above (WR-10).
+		if (!activeNetwork || forgettingRef.current) return;
+		forgettingRef.current = true;
+		setForgetting(true);
 		try {
 			// Queued onto the SAME per-network lock attach/close/swap already
 			// share -- see `withNetworkDbLifecycleLock`'s module-level doc
@@ -374,6 +393,11 @@ export function DashboardShell({
 			// eslint-disable-next-line no-console
 			console.error('forgetNetwork failed:', (err as { name?: string })?.name, activeNetwork.networkHash);
 			setForgetError(err);
+		} finally {
+			// Released on BOTH outcomes -- a failed forget is retryable (see the
+			// declaration note), so the officer must get the control back.
+			forgettingRef.current = false;
+			setForgetting(false);
 		}
 	}
 
@@ -636,7 +660,7 @@ export function DashboardShell({
 	// this is the affordance, that is the guarantee.
 	const forgetExpectedName = activeNetwork.authorityName.trim();
 	const forgetConfirmDisabled =
-		forgetExpectedName.length === 0 || forgetConfirmationInput.trim() !== forgetExpectedName;
+		forgetting || forgetExpectedName.length === 0 || forgetConfirmationInput.trim() !== forgetExpectedName;
 
 	return (
 		<PreviewAsProvider realScopes={grantedScopes} scopesResolved={scopesResolved}>
