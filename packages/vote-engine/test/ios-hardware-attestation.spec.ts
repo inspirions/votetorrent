@@ -13,13 +13,22 @@
  * `createRealAttestationProducer().produce(challenge)` — on 2026-08-25. The fixture is that run's
  * verbatim output.
  *
- * The chain step (§2) is deliberately NOT asserted here. It needs Apple's real root, which this
- * repo ships empty on purpose and fails closed on (SETUP.md §4d); pinning a downloaded root inside
- * a test would quietly undo that decision. §2 is verified out-of-band by
- * `.planning/spikes/085-ios-hardware-capability-probe/verify-produce-output.ts --apple-root`.
- * What IS asserted here is the producer/verifier seam: §3's assertion over ASSERTION_DIGEST and
- * §4's proof-of-possession over POP_DIGEST, both recomputed by the verifier from the challenge
- * alone.
+ * §3 (the assertion over ASSERTION_DIGEST) and §4 (proof-of-possession over POP_DIGEST) are
+ * asserted here, both recomputed by the verifier from the challenge alone.
+ *
+ * §2 — THE CHAIN — is now asserted here too, as of 2026-08-26. It previously was not, on the
+ * stated grounds that it "needs Apple's real root, which this repo ships empty on purpose", and
+ * that pinning a downloaded root in a test "would quietly undo that decision". The first half was
+ * true and has changed: the production anchor is now provisioned and human-verified in
+ * `apps/VoteTorrentAuthority/src/engines/appattest-keys.generated.ts`. The second half does not
+ * apply to a fixture that `src/` cannot reach — see `fixtures/attestation/apple-app-attest-root.ts`
+ * for why the src/test split is what preserved the decision, not the absence of the bytes.
+ *
+ * That leaves §2 the most load-bearing test in this file. It is the only assertion anywhere in the
+ * repo that a chain Apple ACTUALLY ISSUED verifies under the shipped verifier and terminates at
+ * Apple's ACTUAL anchor. A synthetic CA cannot prove it by construction: the fixture and the
+ * verifier would simply share whichever understanding is wrong, which is exactly how the
+ * double-hashed assertion survived 31 green tests.
  */
 import 'reflect-metadata'
 import { expect } from 'chai'
@@ -28,7 +37,12 @@ import { fileURLToPath } from 'node:url'
 import { X509Certificate } from '@peculiar/x509'
 import { cborDecode, type CborValue } from '@votetorrent/vote-core'
 import { verifyCrossSign } from '../src/association/verifiers/app-attest-assertion.js'
+import { verifyAppAttest } from '../src/association/verifiers/app-attest.js'
+import { AppAttestVerifier } from '../src/association/app-attest-verifier.js'
 import { recomputeChallengeDigest } from '../src/association/verifiers/digest-binding.js'
+import { APPLE_APP_ATTEST_ROOT_DER, APPLE_APP_ATTEST_ROOT_SHA256 } from './fixtures/attestation/apple-app-attest-root.js'
+import { generateAppleRootCa } from './fixtures/attestation/apple-app-attest-ca.js'
+import { createHash } from 'node:crypto'
 
 const APP_ID = '94TY7UR2W5.org.votetorrent.voter'
 
@@ -135,6 +149,104 @@ describe('iOS App Attest — REAL hardware bytes (iPhone 13, 2026-08-25)', () =>
       const replay = verifyCrossSign(b64(pd.assertion), pd.popSignature, { ...expectations, previousCounter: 1 })
       expect(replay.ok).to.equal(false)
       expect(replay.reason).to.match(/replay/)
+    })
+  })
+
+  // ---- §2: the chain, against Apple's REAL anchor (added 2026-08-26) ----
+  describe('\u00a72 chain \u2014 real Apple bytes against the real Apple root', () => {
+    const boundDigest = recomputeChallengeDigest(challenge.nonce, challenge.deviceKey)
+    const expectedClientDataHash = new Uint8Array(
+      createHash('sha256').update(new TextEncoder().encode(boundDigest)).digest()
+    )
+    const keyId = b64(pd.appAttestKeyId)
+    const attObj = b64(fixture.attestation.attestationStatement)
+
+    it('the fixture root is the anchor the app pins (same fingerprint literal)', () => {
+      // Cross-file drift guard. The production anchor lives in the authority app and cannot be
+      // imported from here; the shared literal is what links them. Refreshing one without the
+      // other breaks this pair rather than silently testing a root nobody ships.
+      const actual = createHash('sha256').update(APPLE_APP_ATTEST_ROOT_DER).digest('hex')
+      expect(actual).to.equal(APPLE_APP_ATTEST_ROOT_SHA256)
+      expect(APPLE_APP_ATTEST_ROOT_SHA256)
+        .to.equal('1cb9823ba28ba6ad2d33a006941de2ae4f513ef1d4e831b9f7e0fa7b6242c932')
+    })
+
+    it('verifies a chain Apple actually issued, terminating at Apple\u2019s actual root', async () => {
+      const r = await verifyAppAttest(attObj, {
+        appId: APP_ID,
+        expectedClientDataHash,
+        keyId,
+        pinnedRootsDer: [APPLE_APP_ATTEST_ROOT_DER],
+        environment: 'development'
+      })
+      expect(r.reason ?? '').to.equal('')
+      expect(r.ok).to.equal(true)
+    })
+
+    it('rejects the same real attestation under a DIFFERENT anchor', async () => {
+      // The negative control that gives the test above its meaning. Without it, a verifier that
+      // ignored the pinned pool entirely would pass identically. The chain here is Apple's real
+      // one \u2014 only the anchor is wrong \u2014 so this isolates the pinned-terminus check,
+      // which spike 081 identified as the ONLY guard against a self-supplied trust anchor.
+      //
+      // The anchor is a well-formed CA that simply is not Apple's, which is the actual attack
+      // shape. An earlier version of this test instead flipped one byte of the REAL root and
+      // pinned that, and it passed-as-accepted \u2014 correctly. `X509ChainBuilder` matches an
+      // issuer by name and KEY, and the terminus check then compares the built terminus against
+      // the pinned pool, so supplying a mutated root and pinning that same mutated root is
+      // self-consistent by construction. It also tells you something worth keeping: a root's own
+      // self-signature is not load-bearing \u2014 the trust sits in its public key.
+      const otherCa = await generateAppleRootCa('CN=Not Apple App Attest Root CA')
+      const r = await verifyAppAttest(attObj, {
+        appId: APP_ID,
+        expectedClientDataHash,
+        keyId,
+        pinnedRootsDer: [new Uint8Array(otherCa.cert.rawData)],
+        environment: 'development'
+      })
+      expect(r.ok).to.equal(false)
+    })
+
+    it('rejects a real attestation against an EMPTY pinned pool (fail closed, not fail open)', async () => {
+      const r = await verifyAppAttest(attObj, {
+        appId: APP_ID,
+        expectedClientDataHash,
+        keyId,
+        pinnedRootsDer: [],
+        environment: 'development'
+      })
+      expect(r.ok).to.equal(false)
+    })
+  })
+
+  // ---- the composed verifier, end to end, on real bytes ----
+  describe('AppAttestVerifier \u2014 both halves over one real device submission', () => {
+    it('accepts the real hardware attestation with the real root pinned', async () => {
+      // The whole point of the phase, in one assertion: attestation + cross-sign + POP, composed as
+      // the app composes them, over bytes an iPhone produced, anchored to Apple. Everything else in
+      // this suite tests a piece.
+      const verifier = new AppAttestVerifier([APPLE_APP_ATTEST_ROOT_DER], APP_ID, 'development')
+      const r = await verifier.verify(challenge, fixture.attestation)
+      expect(r.reason ?? '').to.equal('')
+      expect(r.ok).to.equal(true)
+    })
+
+    it('a PRODUCTION authority refuses this development attestation', async () => {
+      // The asymmetry that matters for shipping: these exact bytes, which are valid, must NOT be
+      // accepted by a production authority. The credCert aaguid is the only thing separating them.
+      const verifier = new AppAttestVerifier([APPLE_APP_ATTEST_ROOT_DER], APP_ID, 'production')
+      const r = await verifier.verify(challenge, fixture.attestation)
+      expect(r.ok).to.equal(false)
+      expect(r.reason).to.match(/development attestation is never accepted in production/)
+    })
+
+    it('reports the unprovisioned root FIRST, even on otherwise-valid real bytes', async () => {
+      // The state the authority app ships in today for the App ID half. A valid submission must
+      // still be refused, and the reason must name the configuration rather than the device.
+      const verifier = new AppAttestVerifier([], APP_ID, 'development')
+      const r = await verifier.verify(challenge, fixture.attestation)
+      expect(r.ok).to.equal(false)
+      expect(r.reason).to.match(/root material is not provisioned/)
     })
   })
 

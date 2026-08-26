@@ -35,6 +35,8 @@ import {
 	AssociationEngine,
 	PlayIntegrityVerifier,
 	StubAttestationVerifier,
+	AppAttestVerifier,
+	PlatformDispatchingAttestationVerifier,
 	LocalConfigKeyProvider,
 	RegistrationEngine,
 	AuthorityConfigEngine,
@@ -52,6 +54,12 @@ import {
 	PLAY_CONSOLE_DECRYPTION_KEY_BASE64,
 	PLAY_CONSOLE_VERIFICATION_KEY_BASE64,
 } from './attestation-keys.generated';
+import {
+	PINNED_APP_ATTEST_ROOTS_DER,
+	APPLE_APP_ID,
+	APP_ATTEST_ENVIRONMENT,
+	APP_ATTEST_PROVISIONED,
+} from './appattest-keys.generated';
 
 /**
  * Thrown when an engine is requested before any network has been opened.
@@ -261,6 +269,16 @@ export class EngineFactory {
 	 * Consumed by `AttestationProvisioningStatusScreen` (47-19) and the inline
 	 * banner on the challenge-admin surface (47-16), both via AppProvider's
 	 * `isAttestationVerifierProvisioned` passthrough.
+	 *
+	 * SCOPE, since Phase 51 wired a second platform in: this reports the
+	 * ANDROID half only. It is deliberately NOT widened to
+	 * `playConsoleKeysProvisioned && APP_ATTEST_PROVISIONED` — the two halves
+	 * fail closed independently inside the dispatcher, so an authority with
+	 * working Play Console keys and no Apple root verifies Android devices
+	 * correctly and should not be told its verifier is unprovisioned. Surfacing
+	 * the iOS half is a UI change (a per-platform banner on
+	 * AttestationProvisioningStatusScreen), not a factory change, and is not
+	 * done here.
 	 */
 	isAttestationVerifierProvisioned(): boolean {
 		return this.playConsoleKeysProvisioned;
@@ -489,15 +507,49 @@ export class EngineFactory {
 				// because 47-03's `keysProvisioned` parameter defaults to `true`. This is
 				// why engine-factory.association.test.ts asserts the argument COUNT, not
 				// just its value.
+				//
+				// Phase 51: the injected verifier is the PLATFORM DISPATCHER, never a
+				// bare PlayIntegrityVerifier. `PlayIntegrityVerifier` hard-gates on
+				// `platformDetails?.type === 'Android'` and rejects everything else —
+				// correct fail-closed behaviour that must NOT be relaxed — so before
+				// this wiring an iOS submission was rejected by the Android verifier's
+				// platform gate and the entire iOS half (pinned-root chain, aaguid
+				// environment gate, credCert nonce binding, assertion replay counter,
+				// K_vote proof-of-possession) was code the running app never reached.
+				//
+				// Each half keeps its OWN fail-closed provisioning gate, exactly as
+				// D-09 requires: absent Play Console keys disable only the Android
+				// branch, and an absent Apple root / App ID disables only the iOS one.
+				// Neither can mask the other, because the dispatcher routes once, up
+				// front, on the discriminant.
+				//
+				// CRITICAL, both halves: omitting the LAST constructor argument
+				// silently RE-ENABLES that verifier, because `keysProvisioned` (47-03)
+				// and `rootsProvisioned` (Phase 51) each default to `true`. This is why
+				// engine-factory.association.test.ts asserts the argument COUNT on both,
+				// not just its value.
+				const androidVerifier: IAttestationVerifier = new PlayIntegrityVerifier(
+					this.integrityKeyProvider,
+					PINNED_HARDWARE_ROOTS_DER,
+					this.expectedAppIdentity,
+					REVOKED_ATTESTATION_SERIALS,
+					this.playConsoleKeysProvisioned
+				);
+				// `NO_PRIOR_ASSERTIONS` is the AppAttestVerifier default for the
+				// counter store and is correct here: this is a pure association-time
+				// verifier, so no App Attest key has a stored counter yet. Passing a
+				// real store would be the change if assertions are ever verified
+				// outside association.
+				const iosVerifier: IAttestationVerifier = new AppAttestVerifier(
+					PINNED_APP_ATTEST_ROOTS_DER,
+					APPLE_APP_ID,
+					APP_ATTEST_ENVIRONMENT,
+					undefined,
+					APP_ATTEST_PROVISIONED
+				);
 				const verifier: IAttestationVerifier = useStub
 					? new StubAttestationVerifier()
-					: new PlayIntegrityVerifier(
-							this.integrityKeyProvider,
-							PINNED_HARDWARE_ROOTS_DER,
-							this.expectedAppIdentity,
-							REVOKED_ATTESTATION_SERIALS,
-							this.playConsoleKeysProvisioned
-					  );
+					: new PlatformDispatchingAttestationVerifier(androidVerifier, iosVerifier);
 				return new AssociationEngine(ctx, verifier);
 			}
 

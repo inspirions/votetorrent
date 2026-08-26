@@ -27,6 +27,12 @@
  */
 import type { AttestationChallenge, AttestationVerification, DeviceAttestation, IAttestationVerifier } from '@votetorrent/vote-core'
 import { Buffer } from 'buffer'
+// STATIC import, matching every sibling verifier (`verifiers/app-attest.ts`,
+// `verifiers/key-attestation.ts`). This was a dynamic `require('node:crypto')` until the file was
+// wired into the RN authority app: Metro cannot follow a dynamic require, and the app's
+// metro.config.js aliases the `node:crypto` SPECIFIER to `polyfills/node-crypto.js`, so the
+// require form resolved to nothing on device while passing every Node test.
+import { createHash } from 'node:crypto'
 import { verifyAppAttest } from './verifiers/app-attest.js'
 import { verifyCrossSign } from './verifiers/app-attest-assertion.js'
 import { recomputeChallengeDigest } from './verifiers/digest-binding.js'
@@ -69,6 +75,14 @@ export class AppAttestVerifier implements IAttestationVerifier {
   async verify (challenge: AttestationChallenge, attestation: DeviceAttestation): Promise<AttestationVerification> {
     if (!this.rootsProvisioned || this.pinnedRootsDer.length === 0) {
       return { ok: false, reason: 'Apple App Attest root material is not provisioned — see SETUP.md' }
+    }
+
+    // The App ID is the SECOND piece of config with no safe default. An empty one still "works":
+    // `verifyAppAttest` compares rpIdHash against SHA256('') and rejects with "attestation is for a
+    // different app" — a reason that blames the device for a deployment mistake. Reported here, next
+    // to the root gate, so an unprovisioned authority names what it is missing.
+    if (this.appId === '') {
+      return { ok: false, reason: 'Apple App ID (<teamId>.<bundleId>) is not provisioned — see SETUP.md' }
     }
 
     const ios = attestation.platformDetails?.type === 'iOS' ? attestation.platformDetails : undefined
@@ -150,10 +164,6 @@ export class AppAttestVerifier implements IAttestationVerifier {
 }
 
 function sha256 (data: Uint8Array): Uint8Array {
-  // `node:crypto` is already a dependency of the sibling verifiers; kept local so this module has
-  // no wider surface than they do.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { createHash } = require('node:crypto') as typeof import('node:crypto')
   return new Uint8Array(createHash('sha256').update(data).digest())
 }
 

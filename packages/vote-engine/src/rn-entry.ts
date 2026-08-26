@@ -49,6 +49,12 @@ export { AuthorityConfigEngine } from './authority-config/authority-config-engin
 export { AssociationEngine } from './association/association-engine.js'
 export { PlayIntegrityVerifier } from './association/play-integrity-verifier.js'
 export { StubAttestationVerifier } from './association/stub-attestation-verifier.js'
+// Phase 51: the iOS half of that same seam. `engine-factory.ts` constructs BOTH platform
+// verifiers and injects the dispatcher — never a bare PlayIntegrityVerifier — so an iOS
+// submission is routed rather than rejected by the Android verifier's platform gate.
+export { AppAttestVerifier, NO_PRIOR_ASSERTIONS } from './association/app-attest-verifier.js'
+export type { IAssertionCounterStore } from './association/app-attest-verifier.js'
+export { PlatformDispatchingAttestationVerifier } from './association/platform-dispatching-verifier.js'
 export { LocalConfigKeyProvider } from './association/key-provider.js'
 export type { IIntegrityKeyProvider } from './association/key-provider.js'
 export type { ExpectedAppIdentity } from './association/verifiers/app-identity.js'
