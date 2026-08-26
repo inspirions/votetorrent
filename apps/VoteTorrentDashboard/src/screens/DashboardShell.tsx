@@ -157,6 +157,10 @@ export function DashboardShell({
 
 	const [db, setDb] = useState<Database | null>(null);
 	const [grantedScopes, setGrantedScopes] = useState<ScopeCode[]>([]);
+	// Gates the "Preview as" control's nine checkboxes and Reset button --
+	// true only once grantedScopes has resolved at least once for the
+	// active network (D-18); re-closed on every re-attach.
+	const [scopesResolved, setScopesResolved] = useState(false);
 	const [attachError, setAttachError] = useState<unknown>(null);
 	const dbRef = useRef<Database | null>(null);
 	// The networkHash the CURRENT dbRef.current handle actually belongs to --
@@ -196,6 +200,7 @@ export function DashboardShell({
 		let cancelled = false;
 		setDb(null);
 		setGrantedScopes([]);
+		setScopesResolved(false);
 		setAttachError(null);
 
 		async function attach() {
@@ -227,6 +232,7 @@ export function DashboardShell({
 				if (cancelled) return;
 				setDb(handle);
 				setGrantedScopes(scopes);
+				setScopesResolved(true);
 			} catch (err) {
 				if (!cancelled) setAttachError(err);
 			}
@@ -551,7 +557,7 @@ export function DashboardShell({
 		forgetExpectedName.length === 0 || forgetConfirmationInput.trim() !== forgetExpectedName;
 
 	return (
-		<PreviewAsProvider realScopes={grantedScopes}>
+		<PreviewAsProvider realScopes={grantedScopes} scopesResolved={scopesResolved}>
 		<div className="sh-layout">
 			<div className="sh-topbar">
 				<div className="sh-identity">
