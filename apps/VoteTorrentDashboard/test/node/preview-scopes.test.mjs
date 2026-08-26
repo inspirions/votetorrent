@@ -18,6 +18,7 @@ import {
 	createPreviewState,
 	toggleScope,
 	resetToReal,
+	resyncRealScopes,
 	isSimulated,
 	effectiveScopes,
 	badgeKey,
@@ -129,6 +130,74 @@ test('createPreviewState(["zzz"]) throws an Error naming zzz', () => {
 test('createPreviewState accepts duplicates and normalises them', () => {
 	const s = createPreviewState(['vrg', 'vrg']);
 	assert.deepEqual(effectiveScopes(s), ['vrg']);
+});
+
+// --- resyncRealScopes (CR-01: the officer's real scopes arrive asynchronously) ---
+
+test('resyncRealScopes: untouched + same real scopes returns the SAME object reference', () => {
+	const s0 = createPreviewState(['vrg', 'mel']);
+	const s1 = resyncRealScopes(s0, ['vrg', 'mel']);
+	assert.equal(s1, s0);
+});
+
+test('resyncRealScopes: untouched + different real scopes returns a NEW state deep-equal to createPreviewState(next)', () => {
+	const s0 = createPreviewState(['vrg']);
+	const s1 = resyncRealScopes(s0, ['vrg', 'mel']);
+	assert.notEqual(s1, s0);
+	assert.deepEqual(s1, createPreviewState(['vrg', 'mel']));
+	assert.equal(isSimulated(s1), false);
+	assert.equal(badgeKey(s1), 'gate.badgeReal');
+});
+
+test('resyncRealScopes: the CR-01 transition -- an empty real-scope state re-synced to all nine yields 9 effective scopes and the real badge', () => {
+	const s0 = createPreviewState([]);
+	const s1 = resyncRealScopes(s0, SCOPE_CODES);
+	assert.equal(effectiveScopes(s1).length, 9);
+	assert.equal(badgeKey(s1), 'gate.badgeReal');
+});
+
+test('resyncRealScopes: touched + different real scopes returns the SAME reference -- an in-progress preview is never yanked out', () => {
+	const s0 = createPreviewState(['vrg']);
+	const touched = toggleScope(s0, 'mel');
+	const resynced = resyncRealScopes(touched, ['ceb']);
+	assert.equal(resynced, touched);
+	assert.deepEqual(effectiveScopes(resynced), effectiveScopes(touched));
+	assert.equal(isSimulated(resynced), true);
+});
+
+test('positive control: the SAME input with touched false DOES change -- proves the touched guard above is load-bearing, not a function that never changes anything', () => {
+	const s0 = createPreviewState(['vrg']);
+	const resynced = resyncRealScopes(s0, ['ceb']);
+	assert.notEqual(resynced, s0);
+	assert.deepEqual(effectiveScopes(resynced), ['ceb']);
+});
+
+test('resyncRealScopes: order-insensitive -- untouched, next real scopes equal to the current set in a different order returns the SAME reference', () => {
+	const s0 = createPreviewState(['vrg', 'mel']);
+	const s1 = resyncRealScopes(s0, ['mel', 'vrg']);
+	assert.equal(s1, s0);
+});
+
+test('resyncRealScopes: duplicates in nextRealScopes normalise exactly as createPreviewState does', () => {
+	const s0 = createPreviewState(['vrg']);
+	const s1 = resyncRealScopes(s0, ['vrg', 'vrg']);
+	assert.equal(s1, s0);
+});
+
+test('resyncRealScopes: validation parity -- an unknown scope code throws an Error naming it, exactly as createPreviewState does, and is not bypassable while touched', () => {
+	const s0 = createPreviewState(['vrg']);
+	assert.throws(() => resyncRealScopes(s0, /** @type {any} */ (['zzz'])), /zzz/);
+	const touched = toggleScope(s0, 'mel');
+	assert.throws(() => resyncRealScopes(touched, /** @type {any} */ (['zzz'])), /zzz/);
+});
+
+test('resyncRealScopes: returned states are frozen; the input state is left unchanged', () => {
+	const s0 = createPreviewState(['vrg']);
+	const s1 = resyncRealScopes(s0, ['vrg', 'mel']);
+	assert.ok(Object.isFrozen(s1));
+	assert.ok(Object.isFrozen(s1.selected));
+	assert.ok(Object.isFrozen(s1.realScopes));
+	assert.deepEqual(effectiveScopes(s0), ['vrg']);
 });
 
 /** The five `<measured_facts>` scope sets, harness fixture ids -- never rendered.

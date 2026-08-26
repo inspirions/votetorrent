@@ -28,6 +28,7 @@ import {
 	createPreviewState,
 	toggleScope,
 	resetToReal,
+	resyncRealScopes,
 	isSimulated,
 	effectiveScopes,
 	badgeKey,
@@ -64,16 +65,16 @@ export interface PreviewAsProviderProps {
 export function PreviewAsProvider({ realScopes, children }: PreviewAsProviderProps) {
 	const [state, setState] = useState(() => createPreviewState(realScopes));
 
-	// Re-seed when the officer's real scopes actually arrive (or change).
-	// Guarded on `touched`, which is the state model's own sticky flag: an
-	// officer who is midway through a preview never has it yanked out from
-	// under them by a late-arriving read, and `resetToReal` is still the one
-	// operation that clears the flag. The dependency is the JOINED scope
-	// string rather than the array identity, so a re-render that produces an
-	// equal-but-new array does not re-seed.
+	// Re-seed when the officer's real scopes actually arrive (or change). The
+	// decision itself — touched-guard, referential stability, validation —
+	// lives entirely in the pure, tier-1-tested `resyncRealScopes`; this
+	// effect body is a single `setState` call with no branch of its own, so
+	// there is no second, independently-drifting copy of that decision. The
+	// dependency is the JOINED scope string rather than the array identity,
+	// so a re-render that produces an equal-but-new array does not re-seed.
 	const realKey = realScopes.join(',');
 	useEffect(() => {
-		setState((prev) => (prev.touched ? prev : createPreviewState(realScopes)));
+		setState((prev) => resyncRealScopes(prev, realScopes));
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- realKey IS realScopes, by value
 	}, [realKey]);
 

@@ -20,9 +20,10 @@
  * adds a write path must re-verify this deliberately rather than inherit it
  * silently.
  *
- * Six exports: `createPreviewState`, `toggleScope`, `resetToReal`,
- * `isSimulated`, `effectiveScopes`, `badgeKey`. Every returned state is
- * deep-frozen; `toggleScope` and `resetToReal` never mutate their input.
+ * Seven exports: `createPreviewState`, `toggleScope`, `resetToReal`,
+ * `resyncRealScopes`, `isSimulated`, `effectiveScopes`, `badgeKey`. Every
+ * returned state is deep-frozen; `toggleScope`, `resetToReal` and
+ * `resyncRealScopes` never mutate their input.
  * Plain ESM with JSDoc types (no React, no database handle, no import of
  * `./gate.js`) — this directory is walked by
  * `test/node/gate-contract.test.mjs`, which rejects TypeScript here.
@@ -130,6 +131,58 @@ export function toggleScope(state, code) {
  */
 export function resetToReal(state) {
 	return freeze({ realScopes: state.realScopes, selected: state.realScopes, touched: false });
+}
+
+/**
+ * Re-seed a preview state when the officer's REAL scopes change after the
+ * state was created — the entry point `PreviewAsControl.tsx`'s effect
+ * delegates to. This exists because the officer's real scopes arrive
+ * ASYNCHRONOUSLY: `DashboardShell` renders its `PreviewAsProvider` with `[]`
+ * on first render, and only fills `realScopes` in once `attachNetworkDb` and
+ * `readGrantedScopes` resolve. A `useState` lazy initializer runs on the
+ * FIRST render only, so seeding from it alone froze `realScopes: []`
+ * forever — every capability evaluated as denied for a fully-privileged
+ * officer. This function is the pure decision a React effect calls on every
+ * render where the real scopes might have changed.
+ *
+ * `nextRealScopes` is ALWAYS validated and normalised through the same path
+ * `createPreviewState` uses (by constructing one and comparing against it) —
+ * this entry point is not a validation bypass, so an unknown code throws
+ * naming it regardless of `touched`.
+ *
+ * - If `state.touched` is true, the officer is mid-preview: returns `state`
+ *   UNCHANGED (same reference) — a late-arriving real-scope read must never
+ *   yank an in-progress preview out from under them. `resetToReal` remains
+ *   the only operation that clears `touched`.
+ * - Otherwise, if the normalised `nextRealScopes` is set-equal (by value, in
+ *   `CAPABILITIES` order) to `state.realScopes`, returns `state` UNCHANGED
+ *   (same reference) — referential stability matters here: the caller is a
+ *   React effect that calls `setState` with this result, and returning a
+ *   fresh-but-equal object on every render would loop.
+ * - Otherwise, returns a freshly created state (via `createPreviewState`,
+ *   so it is byte-identical to calling it directly): previewing exactly the
+ *   new `realScopes`, not yet touched.
+ *
+ * @param {PreviewState} state
+ * @param {ReadonlyArray<ScopeCode>} nextRealScopes
+ * @returns {PreviewState}
+ */
+export function resyncRealScopes(state, nextRealScopes) {
+	// Validate/normalise unconditionally, BEFORE the touched short-circuit --
+	// an officer mid-preview still deserves the same validation guarantee a
+	// fresh state gets; silently accepting an invalid code while touched
+	// would be a quiet bypass of the one validator this module has.
+	const next = createPreviewState(nextRealScopes);
+	if (state.touched) {
+		return state;
+	}
+	const unchanged =
+		next.realScopes.length === state.realScopes.length &&
+		next.realScopes.every((code, index) => code === state.realScopes[index]);
+	if (unchanged) {
+		return state;
+	}
+	return next;
 }
 
 /**

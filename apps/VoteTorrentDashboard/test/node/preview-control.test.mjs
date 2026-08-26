@@ -116,10 +116,11 @@ test('PreviewAsControl.tsx imports nothing from ../auth/gate.js -- it decides no
 	assert.equal((STRIPPED.control.match(/from ['"]\.\.\/auth\/gate\.js['"]/g) ?? []).length, 0);
 });
 
-test('PreviewAsControl.tsx imports toggleScope, resetToReal and badgeKey from ../auth/preview-scopes.js', () => {
+test('PreviewAsControl.tsx imports toggleScope, resetToReal, resyncRealScopes and badgeKey from ../auth/preview-scopes.js', () => {
 	assert.match(STRIPPED.control, /from ['"]\.\.\/auth\/preview-scopes\.js['"]/);
 	assert.match(STRIPPED.control, /\btoggleScope\b/);
 	assert.match(STRIPPED.control, /\bresetToReal\b/);
+	assert.match(STRIPPED.control, /\bresyncRealScopes\b/);
 	assert.match(STRIPPED.control, /\bbadgeKey\b/);
 });
 
@@ -142,21 +143,23 @@ test('PanelGrid.tsx calls useEffectiveScopes() and still imports evaluate from .
 	assert.equal((STRIPPED.grid.match(/from ['"]\.\.\/auth\/gate\.js['"]/g) ?? []).length, 1);
 });
 
-test('PreviewAsProvider re-seeds from realScopes in an effect, not only in the useState initializer', () => {
+test('PreviewAsProvider re-seeds from realScopes in an effect via resyncRealScopes, not only in the useState initializer', () => {
 	// The defect this pins: `useState(() => createPreviewState(realScopes))`
 	// alone runs on the FIRST render only, and `DashboardShell` supplies `[]`
 	// there because the officer's scopes are read asynchronously. Without a
 	// re-seed the provider froze an empty set and every capability evaluated
-	// as denied. The effect must also be guarded on the sticky `touched` flag
-	// so a late arrival cannot discard an in-progress preview.
+	// as denied. The re-seed DECISION (including the sticky `touched` guard
+	// so a late arrival cannot discard an in-progress preview) lives in the
+	// pure, tier-1-tested `resyncRealScopes` (../auth/preview-scopes.js) --
+	// this effect must delegate to it, not re-implement the decision inline.
 	assert.match(STRIPPED.control, /useEffect\(/, 'PreviewAsProvider has no effect at all');
-	assert.match(STRIPPED.control, /prev\.touched\s*\?\s*prev\s*:\s*createPreviewState\(realScopes\)/);
+	assert.match(STRIPPED.control, /resyncRealScopes\(prev,\s*realScopes\)/);
 	assert.match(STRIPPED.control, /\}, \[realKey\]\);/);
 });
 
 test('positive control: the re-seed matcher does NOT hit an initializer-only fixture', () => {
 	const fixture = 'const [state, setState] = useState(() => createPreviewState(realScopes));';
-	assert.doesNotMatch(fixture, /prev\.touched\s*\?\s*prev\s*:\s*createPreviewState\(realScopes\)/, 'matcher is inert');
+	assert.doesNotMatch(fixture, /resyncRealScopes\(prev,\s*realScopes\)/, 'matcher is inert');
 });
 
 test('PanelGrid.tsx takes no grantedScopes prop -- the context hook is its only scope source', () => {
