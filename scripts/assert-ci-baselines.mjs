@@ -288,9 +288,42 @@ function evaluateTier1(log, elapsedSecondsArg, baselines) {
 // authority typecheck ceiling
 // ---------------------------------------------------------------------------
 
+/**
+ * The marker the workflow appends after running tsc, carrying the compiler's
+ * real exit status. It exists because a CLEAN `tsc --noEmit` prints NOTHING,
+ * which is byte-identical to a log from a compiler that never ran -- so
+ * "contains no diagnostics" cannot, on its own, distinguish "someone fixed
+ * everything" from "the step crashed". See evaluateAuthorityTypecheck.
+ */
+const TSC_RAN_CLEAN_RE = /^TSC-RAN exit=0$/m;
+
 function evaluateAuthorityTypecheck(log, baselines) {
   const cfg = baselines.authorityTypecheck;
   const count = (log.match(/error TS\d+/g) || []).length;
+
+  // THE VACUOUS-PASS GUARD, which this check did not have while its two
+  // siblings did (evaluateVoteEngine's "no mocha summary found",
+  // evaluateTier1's "no tier1 summary found"). An empty or crashed log yields
+  // count = 0, which is <= the ceiling, so the check PASSED -- and helpfully
+  // emitted a ::notice:: suggesting someone lower the ceiling. The workflow
+  // step deliberately swallows tsc's exit code and hands the verdict here, so
+  // nothing else could catch it.
+  //
+  // Evidence the compiler ran is EITHER at least one diagnostic OR the
+  // workflow's explicit exit=0 marker. Requiring only the former would fail a
+  // genuinely clean typecheck, which is the outcome this ceiling exists to
+  // encourage.
+  if (count === 0 && !TSC_RAN_CLEAN_RE.test(log)) {
+    return {
+      ok: false,
+      problems: [
+        'no tsc diagnostics AND no "TSC-RAN exit=0" marker -- the typecheck did not run. ' +
+          'A clean run prints nothing, so the workflow must append that marker for a zero-error ' +
+          'log to be distinguishable from an empty or crashed one',
+      ],
+    };
+  }
+
   const problems = [];
   if (count > cfg.maxErrors) {
     problems.push(
@@ -528,6 +561,27 @@ function runSelftest() {
       'authority-typecheck under ceiling (notice)',
       true,
       evaluateAuthorityTypecheck(buildTscLog(Math.max(0, tcCeiling - 2)), baselines),
+    );
+
+    // 16a. authority-typecheck, VACUOUS (empty log) -- the case that matters
+    //      most, and the one cases 14-16 could never reach.
+    check('authority-typecheck vacuous (empty log)', false, evaluateAuthorityTypecheck('', baselines));
+
+    // 16b. authority-typecheck, the compiler crashed: no diagnostics, and the
+    //      marker reports a non-zero exit.
+    check(
+      'authority-typecheck crashed (marker, non-zero exit, no diagnostics)',
+      false,
+      evaluateAuthorityTypecheck('Cannot find module typescript\nTSC-RAN exit=1\n', baselines),
+    );
+
+    // 16c. authority-typecheck, genuinely CLEAN: zero diagnostics, marker says
+    //      exit=0. Must pass -- this is the outcome the ceiling encourages, and
+    //      the guard above must not punish it.
+    check(
+      'authority-typecheck genuinely clean (marker, exit=0, no diagnostics)',
+      true,
+      evaluateAuthorityTypecheck('TSC-RAN exit=0\n', baselines),
     );
 
     // 17. receipts, complete set
