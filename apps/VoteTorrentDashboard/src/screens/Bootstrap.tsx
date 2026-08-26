@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { t } from '../i18n/copy.js';
-import { BOOTSTRAP_PHASES, copyKeyForPhase, copyKeysForOutcome, redeemAndBootstrap } from '../lifecycle/bootstrap.js';
+import { BOOTSTRAP_PHASES, copyKeysForOutcome, redeemAndBootstrap } from '../lifecycle/bootstrap.js';
 import { createRestBootstrapTransport } from '../transport/bootstrap-transport-client.js';
 
 /**
@@ -130,7 +130,7 @@ export function Bootstrap() {
 			{/* NEVER `{state.phase}`: those are BOOTSTRAP_PHASES' machine
 			    identifiers ("applying-schema" and friends), and an aria-live
 			    region is the last place a machine identifier belongs. */}
-			{state.kind === 'in-flight' ? <p aria-live="polite">{t(copyKeyForPhase(state.phase))}</p> : null}
+			{state.kind === 'in-flight' ? <p aria-live="polite">{t(`bootstrap.phase.${state.phase}`)}</p> : null}
 			{errorCopy ? (
 				<div role="alert">
 					<h2>{t(errorCopy.headingKey)}</h2>

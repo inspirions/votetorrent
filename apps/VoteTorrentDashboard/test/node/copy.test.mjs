@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { COPY, t } = await import('../../src/i18n/copy.js');
-const { BOOTSTRAP_PHASES, copyKeyForPhase } = await import('../../src/lifecycle/bootstrap.js');
+const { BOOTSTRAP_PHASES } = await import('../../src/lifecycle/bootstrap.js');
 
 test('t("bootstrap.cta") returns exactly "Redeem Code"', () => {
 	assert.equal(t('bootstrap.cta'), 'Redeem Code');
@@ -77,20 +77,30 @@ test('COPY is frozen -- assigning a new key throws in strict mode', () => {
 	});
 });
 
-test('copyKeyForPhase is total over BOOTSTRAP_PHASES and every key it returns exists in COPY', () => {
+test('every BOOTSTRAP_PHASES member has a matching bootstrap.phase.<value> key in COPY, derived mechanically -- never a hand-written phase list', () => {
 	// The defect this pins: the screen rendered `{state.phase}` directly, so
 	// the officer saw the literal machine identifiers "submitting",
-	// "applying-schema" and friends in an aria-live region.
+	// "applying-schema" and friends in an aria-live region. The expectation
+	// here is built from the imported BOOTSTRAP_PHASES array itself, exactly
+	// mirroring the template Bootstrap.tsx applies
+	// (`` `bootstrap.phase.${state.phase}` ``) -- a hand-written list of five
+	// strings in this test would not catch a drift between the two.
 	for (const phase of BOOTSTRAP_PHASES) {
-		const key = copyKeyForPhase(phase);
-		assert.ok(key in COPY, `copyKeyForPhase("${phase}") returned "${key}", which is not a COPY key`);
+		const key = `bootstrap.phase.${phase}`;
+		assert.ok(key in COPY, `expected COPY to have a "${key}" key for BOOTSTRAP_PHASES member "${phase}"`);
 		assert.ok(t(key).length > 0);
 	}
 });
 
-test('copyKeyForPhase throws naming an unmapped phase, so a new phase cannot silently render raw', () => {
+test('t(`bootstrap.phase.<unmapped>`) throws naming the key, so a new phase cannot silently render raw', () => {
 	assert.throws(
-		() => copyKeyForPhase('a-phase-nobody-mapped'),
-		(err) => err instanceof Error && err.message.includes('a-phase-nobody-mapped'),
+		() => t('bootstrap.phase.not-a-phase'),
+		(err) => err instanceof Error && err.message.includes('bootstrap.phase.not-a-phase'),
 	);
+});
+
+test('panelFrame.tierPill, panelFrame.sitePill and panelFrame.sitesPill exist and interpolate their placeholders', () => {
+	assert.equal(t('panelFrame.tierPill', { tier: '2' }), 'tier 2');
+	assert.equal(t('panelFrame.sitePill', { count: '1' }), '1 site');
+	assert.equal(t('panelFrame.sitesPill', { count: '3' }), '3 sites');
 });

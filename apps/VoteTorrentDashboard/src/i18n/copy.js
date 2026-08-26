@@ -45,15 +45,19 @@ export const COPY = Object.freeze({
 	'bootstrap.errorTransportHeading': "Couldn't reach the authority app.",
 	'bootstrap.errorTransportBody': 'Check that the code was generated recently and try again.',
 	'bootstrap.errorTransportCta': 'Retry',
-	// One key per BOOTSTRAP_PHASES member. The screen renders these through
-	// `copyKeyForPhase`, which is total over that frozen vocabulary -- adding a
-	// phase without a key here is a loud error, never a machine identifier on
+	// One key per BOOTSTRAP_PHASES member, named `bootstrap.phase.<value>` --
+	// keyed by the EXACT machine value (`bootstrap.phase.applying-schema` and
+	// so on), so the screen looks a phase up with a mechanical template
+	// (`` `bootstrap.phase.${state.phase}` ``) rather than through a
+	// hand-maintained mapping table that could drift out of step with
+	// BOOTSTRAP_PHASES. `t()` throws on an unknown key, so a phase added
+	// without a key here is a loud error, never a machine identifier on
 	// screen.
-	'bootstrap.phaseSubmitting': 'Sending your code…',
-	'bootstrap.phaseVerifying': 'Checking the data against your code…',
-	'bootstrap.phaseApplyingSchema': 'Preparing this browser…',
-	'bootstrap.phaseSeeding': 'Copying the data into this browser…',
-	'bootstrap.phaseSuccess': 'Done.',
+	'bootstrap.phase.submitting': 'Sending your code…',
+	'bootstrap.phase.verifying': 'Checking the data against your code…',
+	'bootstrap.phase.applying-schema': 'Preparing this browser…',
+	'bootstrap.phase.seeding': 'Copying the data into this browser…',
+	'bootstrap.phase.success': 'Done.',
 
 	// Snapshot freshness, refresh and verification
 	'snapshot.refreshCta': 'Refresh snapshot',
