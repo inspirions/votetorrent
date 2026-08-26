@@ -774,6 +774,176 @@ async function runComposeSwap() {
 	win.__COMPOSE_GATE_DONE__ = true;
 }
 
+// ---------------------------------------------------------------------------
+// compose-preview-race (Task 3 / CR-01, D-18): a real page load that touches
+// the "Preview as" control DURING an in-flight attach -- the window neither
+// the zero-interaction compose-verify leg above nor the tier-3 matrix
+// (synchronous scopes) ever exercises. Runs LAST in the default sequence
+// (PHASE 10), after compose-swap, so the registry entry names the
+// swapped-in officer -- this phase asserts only that an entry exists, not
+// which officer it names.
+// ---------------------------------------------------------------------------
+
+/**
+ * Task 3's window-sample helper: resolves on the FIRST animation frame that
+ * finds at least one checkbox inside `.pv-control`, or once `maxFrames`
+ * frames have elapsed with none ever appearing -- NEVER a fixed sleep. The
+ * caller decides pass/fail from the returned NodeList (possibly empty) and
+ * the frame count it took.
+ */
+function firstFrameCheckboxes(maxFrames: number): Promise<{ boxes: NodeListOf<HTMLInputElement>; frames: number }> {
+	return new Promise((resolve) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			const boxes = document.querySelectorAll<HTMLInputElement>('.pv-control input[type="checkbox"]');
+			if (boxes.length > 0 || frames >= maxFrames) {
+				resolve({ boxes, frames });
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
+async function runComposePreviewRace() {
+	await rung(
+		'1 · a registry entry exists for the compose-gate network -- this phase runs after the swap leg, so it names the swapped-in officer, not the founding one',
+		async () => {
+			const entry = findNetwork(COMPOSE_NETWORK_HASH, localStorage);
+			if (!entry) {
+				throw new Error('no registry entry for the compose-gate network -- an earlier phase must seed it first');
+			}
+			return `officerUserId: ${entry.officerUserId}`;
+		},
+	);
+
+	const container = document.getElementById('root');
+	if (!container) {
+		await rung('2 · #root element not found', async () => {
+			throw new Error('compose-gate.html is missing #root');
+		});
+		win.__COMPOSE_GATE__ = { phase: PHASE, passed: steps.filter((s) => s.ok).length, total: steps.length, log: LOG };
+		win.__COMPOSE_GATE_DONE__ = true;
+		return;
+	}
+
+	const root = createRoot(container);
+	await rung('2 · mount the production DashboardShell -- no scope set supplied by this page', async () => {
+		root.render(
+			<StrictMode>
+				<DashboardShell onRedeemAnother={() => {}} />
+			</StrictMode>,
+		);
+		return 'mounted';
+	});
+
+	let sampledCheckboxCount = 0;
+	let sampledDisabledCount = 0;
+	await rung(
+		'3 · the window sample: on the first animation frame after the mount commits, every checkbox inside .pv-control is disabled',
+		async () => {
+			const { boxes, frames } = await firstFrameCheckboxes(120);
+			sampledCheckboxCount = boxes.length;
+			if (sampledCheckboxCount === 0) {
+				throw new Error(`no checkboxes found inside .pv-control within ${frames} frames`);
+			}
+			sampledDisabledCount = Array.from(boxes).filter((box) => box.disabled).length;
+			if (sampledDisabledCount !== sampledCheckboxCount) {
+				throw new Error(
+					`expected all ${sampledCheckboxCount} checkboxes disabled on the sampled frame, observed ${sampledDisabledCount} disabled (frame ${frames})`,
+				);
+			}
+			return `checkboxes: ${sampledCheckboxCount}, disabled: ${sampledDisabledCount} (frame ${frames})`;
+		},
+	);
+
+	await rung('4 · a click during the window changes nothing -- a disabled input does not toggle', async () => {
+		const first = document.querySelector<HTMLInputElement>('.pv-control input[type="checkbox"]');
+		if (!first) throw new Error('no checkbox found to click');
+		const before = first.checked;
+		first.click();
+		if (first.checked !== before) {
+			throw new Error(`checkbox toggled from ${before} to ${first.checked} despite being disabled`);
+		}
+		return `checked unchanged: ${before}`;
+	});
+
+	let observedPanelCount = 0;
+	await rung(
+		'5 · settle: a bounded rAF poll until at least one panel section renders, or the frame cap is reached',
+		async () => {
+			observedPanelCount = await settleUntilPanels(180);
+			if (observedPanelCount !== CAPABILITIES.length) {
+				throw new Error(`expected ${CAPABILITIES.length} panels after settling, observed ${observedPanelCount}`);
+			}
+			return `panels: ${observedPanelCount}`;
+		},
+	);
+
+	await rung(
+		'6 · the checkboxes are now ENABLED -- the window re-opened once the scopes resolved (positive control proving rung 3 sampled a real transition)',
+		async () => {
+			const boxes = document.querySelectorAll<HTMLInputElement>('.pv-control input[type="checkbox"]');
+			const enabledCount = Array.from(boxes).filter((box) => !box.disabled).length;
+			if (boxes.length === 0 || enabledCount !== boxes.length) {
+				throw new Error(`expected all ${boxes.length} checkboxes enabled, observed ${enabledCount} enabled`);
+			}
+			return `enabled: ${enabledCount}/${boxes.length}`;
+		},
+	);
+
+	await rung(
+		'7 · toggling one checkbox OFF drops the panel count and the badge carries the simulated class -- the preview is genuinely doing something',
+		async () => {
+			const first = document.querySelector<HTMLInputElement>('.pv-control input[type="checkbox"]');
+			if (!first) throw new Error('no checkbox found to toggle');
+			first.click();
+			await settleUntilPanels(180);
+			const count = document.querySelectorAll('.panel').length;
+			const badge = document.querySelector('.pv-badge');
+			if (count >= CAPABILITIES.length) {
+				throw new Error(`expected panel count to drop below ${CAPABILITIES.length}, observed ${count}`);
+			}
+			if (!badge?.className.includes('pv-badge--sim')) {
+				throw new Error(`expected the simulated badge class, observed "${badge?.className}"`);
+			}
+			return `panels: ${count}, badge: ${badge?.className}`;
+		},
+	);
+
+	await rung(
+		'8 · Reset returns the officer to the full nine-panel set, zero denied, the real badge -- the end-to-end CR-01 assertion',
+		async () => {
+			const resetBtn = document.querySelector<HTMLButtonElement>('.pv-reset');
+			if (!resetBtn) throw new Error('reset button not found');
+			resetBtn.click();
+			await settleUntilPanels(180);
+			const count = document.querySelectorAll('.panel').length;
+			const denied = document.querySelectorAll('.panel--denied').length;
+			const badge = document.querySelector('.pv-badge');
+			if (count !== CAPABILITIES.length) throw new Error(`expected ${CAPABILITIES.length} panels, observed ${count}`);
+			if (denied !== 0) throw new Error(`expected 0 denied panel sections, observed ${denied}`);
+			if (!badge?.className.includes('pv-badge--real')) {
+				throw new Error(`expected the real-answer badge class, observed "${badge?.className}"`);
+			}
+			return `panels: ${count}, denied: ${denied}, badge: ${badge?.className}`;
+		},
+	);
+
+	win.__COMPOSE_GATE__ = {
+		phase: PHASE,
+		passed: steps.filter((s) => s.ok).length,
+		total: steps.length,
+		sampledCheckboxCount,
+		sampledDisabledCount,
+		panels: observedPanelCount,
+		log: LOG,
+	};
+	win.__COMPOSE_GATE_DONE__ = true;
+}
+
 async function main() {
 	log('start', `compose-gate phase=${PHASE} officer=${OFFICER_NONE ? 'none' : 'real'}`);
 	if (PHASE === 'compose-seed') {
@@ -782,6 +952,8 @@ async function main() {
 		await runComposeVerify();
 	} else if (PHASE === 'compose-swap') {
 		await runComposeSwap();
+	} else if (PHASE === 'compose-preview-race') {
+		await runComposePreviewRace();
 	} else {
 		throw new Error(`compose-gate: unknown phase "${PHASE}"`);
 	}

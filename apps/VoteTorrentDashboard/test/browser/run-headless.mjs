@@ -823,16 +823,45 @@ async function main() {
 		console.log('\n--- cross-phase (compose-swap) ---');
 		console.log('compose-swap:', `${composeSwapRes?.passed}/${composeSwapRes?.total}`);
 
+		// ---------------------------------------------------------------
+		// 50-24 extension: the preview-race leg (CR-01 / D-18). ONE more fresh
+		// page load, its own ctx.newPage() call, LAST in the default run so no
+		// existing phase number changes -- ten page loads total. Touches the
+		// "Preview as" control DURING an in-flight attach: the window neither
+		// compose-verify (zero interaction) nor the tier-3 matrix (synchronous
+		// scopes) ever exercises. Runs after compose-swap, so the registry
+		// entry names the swapped-in officer -- compose-gate.tsx's own rung 1
+		// asserts only that an entry exists, not which officer it names.
+		// ---------------------------------------------------------------
+
+		const page10 = await ctx.newPage();
+		const previewRaceRes = await runOnComposeGatePage(
+			page10,
+			`${BASE}/test/browser/compose-gate.html?phase=compose-preview-race`,
+			'PHASE 10 — composed shell: compose-preview-race (CR-01 -- the preview control during an in-flight attach)',
+		);
+		const previewRaceOk = previewRaceRes && !previewRaceRes.crashed && previewRaceRes.passed === previewRaceRes.total;
+
+		console.log('\n--- cross-phase (compose-preview-race) ---');
+		console.log('compose-preview-race:', `${previewRaceRes?.passed}/${previewRaceRes?.total}`);
+
 		console.log('\n=== SUMMARY ===');
 		console.log('db-gate leg (D-11 re-attach):', dbGateOk ? 'PASS' : 'FAIL');
 		console.log('shell-gate leg (restored snapshot + forget network):', forgetVerifyOk ? 'PASS' : 'FAIL');
 		console.log('compose-gate leg (composed DashboardShell, nine populated panels):', composeVerifyOk ? 'PASS' : 'FAIL');
 		console.log('compose-swap leg (D-14 officer-swap confirm + cancel):', composeSwapOk ? 'PASS' : 'FAIL');
+		console.log('compose-preview-race leg (CR-01, the preview control during an in-flight attach):', previewRaceOk ? 'PASS' : 'FAIL');
 
-		const allOk = dbGateOk && forgetVerifyOk && composeVerifyOk && composeSwapOk;
+		const allOk = dbGateOk && forgetVerifyOk && composeVerifyOk && composeSwapOk && previewRaceOk;
 		return finishRun(
 			allOk,
-			allOk ? 'all nine phases passed' : !composeSwapOk ? 'compose-swap phase failed' : 'compose-gate phase failed',
+			allOk
+				? 'all ten phases passed'
+				: !previewRaceOk
+					? 'compose-preview-race phase failed'
+					: !composeSwapOk
+						? 'compose-swap phase failed'
+						: 'compose-gate phase failed',
 			PROVE_TRAP,
 		);
 	} finally {
