@@ -32,6 +32,19 @@
  * non-zero with an explicit "is inert" message, in the same shape as the two
  * existing inertness controls above.
  *
+ * `--swap-only` (50-24): cheap repetition of the ONE leg that drives
+ * repeated real unmount/remount cycles of the composed shell (Bootstrap<->
+ * shell, once per code entry) against the SAME IndexedDB database --
+ * `compose-gate.tsx`'s compose-swap phase, now mounted under `<StrictMode>`
+ * (CR-04). Runs ONLY `compose-seed` then `compose-swap` (compose-swap needs
+ * a freshly-seeded founding-officer registry entry to drive its swap
+ * against) and returns before the tier-2 db-gate/shell-gate phases below,
+ * exactly like `--prove-trap`, `--tier3`/`--prove-drift` and `--prove-blank`
+ * are their own separate invocations. It does NOT loop internally --
+ * repetition is the operator's job (`for i in 1 2 3 4 5; do node
+ * test/browser/run-headless.mjs --swap-only || exit 1; done`), so it is
+ * unambiguous which individual run failed.
+ *
  * `import { chromium } from 'playwright'` — the FULL package, never the
  * lighter core-only sibling package, and never a hardcoded system-Chrome
  * binary path option (Pitfall 6: the spikes' macOS path does not exist on
@@ -51,6 +64,7 @@ const PROVE_TRAP = process.argv.includes('--prove-trap');
 const TIER3 = process.argv.includes('--tier3');
 const PROVE_DRIFT = process.argv.includes('--prove-drift');
 const PROVE_BLANK = process.argv.includes('--prove-blank');
+const SWAP_ONLY = process.argv.includes('--swap-only');
 
 /** @returns {Promise<import('node:child_process').ChildProcess>} */
 async function startViteDevServer() {
@@ -575,6 +589,43 @@ async function runProveBlank(ctx) {
 	process.exitCode = 0;
 }
 
+/**
+ * `--swap-only` (50-24): self-contained, cheap repetition of the compose-swap
+ * leg alone, modelled on `runProveBlank` above. `compose-swap` needs a
+ * founding-officer registry entry already in place, so this seeds ONE fresh
+ * page (`compose-seed`) before driving the swap leg on a SECOND fresh page --
+ * both against the SAME persistent context, same as every other pairing in
+ * this file. Exits non-zero if either page's readout is missing, crashed, or
+ * reports fewer passed rungs than total.
+ *
+ * @param {import('playwright').BrowserContext} ctx
+ */
+async function runSwapOnly(ctx) {
+	const page1 = await ctx.newPage();
+	const seedRes = await runOnComposeGatePage(
+		page1,
+		`${BASE}/test/browser/compose-gate.html?phase=compose-seed`,
+		'SWAP-ONLY PAGE 1 — compose-seed',
+	);
+	const seedOk = seedRes && !seedRes.crashed && seedRes.passed === seedRes.total;
+	if (!seedOk) {
+		console.log('\nCOMPOSE GATE --swap-only: FAIL (compose-seed itself failed -- the swap leg could not run)');
+		process.exitCode = 1;
+		return;
+	}
+
+	const page2 = await ctx.newPage();
+	const swapRes = await runOnComposeGatePage(
+		page2,
+		`${BASE}/test/browser/compose-gate.html?phase=compose-swap`,
+		'SWAP-ONLY PAGE 2 — compose-swap (StrictMode-mounted, D-14 officer-swap confirm + cancel)',
+	);
+	const swapOk = swapRes && !swapRes.crashed && swapRes.passed === swapRes.total;
+
+	console.log(`\nCOMPOSE GATE --swap-only: ${swapOk ? 'PASS' : 'FAIL'} (rungs: ${swapRes?.passed}/${swapRes?.total})`);
+	process.exitCode = swapOk ? 0 : 1;
+}
+
 async function main() {
 	const viteChild = await startViteDevServer();
 	let browser;
@@ -587,6 +638,13 @@ async function main() {
 		// this file's header note.
 		if (PROVE_BLANK) {
 			return await runProveBlank(ctx);
+		}
+
+		// --swap-only runs ONLY the compose-seed + compose-swap pairing and
+		// returns here -- see this file's header note. Cheap repeat invocation
+		// for the CR-04 five-consecutive-runs evidence.
+		if (SWAP_ONLY) {
+			return await runSwapOnly(ctx);
 		}
 
 		// --tier3 / --prove-drift run ONLY the tier-3 flow and return here --

@@ -574,25 +574,27 @@ async function runComposeSwap() {
 
 	const root = createRoot(container);
 	await rung('2 · mount the harness -- Bootstrap and DashboardShell wired exactly like main.tsx, starting on the already-bootstrapped shell', async () => {
-		// NOT wrapped in StrictMode, unlike every sibling mount in this file --
-		// deliberately, and recorded rather than silently done. This leg is the
-		// ONE rung in this suite that puts a SINGLE page through repeated real
+		// Wrapped in StrictMode, matching every sibling mount in this file
+		// (CR-04). This leg was previously the ONE rung in this suite mounted
+		// WITHOUT StrictMode: it puts a SINGLE page through repeated real
 		// unmount/remount cycles of the composed shell (Bootstrap<->shell, once
-		// per code entry) against the SAME IndexedDB database. StrictMode's
-		// dev-only double-invocation of every effect (stripped in the actual
-		// production build `vite build` ships, which is what a real officer's
-		// browser runs) compounds each of those cycles into two overlapping
-		// mount/unmount pairs instead of one, and was observed -- empirically,
-		// not assumed -- to occasionally corrupt the per-network attach lock's
-		// bookkeeping under that compounding (a `MisuseError` from a panel
-		// querying a handle a stale phantom instance had already closed,
-		// non-deterministically, roughly 1 run in 3). `DashboardShell.tsx`'s
-		// new `withNetworkDbLifecycleLock` still serializes every REAL
-		// open/close for a given network hash -- that is the production fix,
-		// asserted structurally in `refresh-swap.test.mjs`-adjacent coverage --
-		// but a harness that also fights StrictMode's artificial doubling on
-		// TOP of that is testing a scenario the shipped app never runs.
-		root.render(<ComposeSwapApp />);
+		// per code entry) against the SAME IndexedDB database, and was observed
+		// -- empirically, not assumed -- failing roughly 1 run in 3 with a
+		// `MisuseError` under StrictMode's dev-only double-invocation of every
+		// effect, while two of the four destructive open/close paths
+		// (`forgetNetwork` and both `performOfficerSwap` call sites) still ran
+		// OUTSIDE the per-network attach lock. Plan 50-22 brought all four
+		// destructive/lifecycle families inside `withNetworkDbLifecycleLock`.
+		// StrictMode is restored here, and this leg is required to pass FIVE
+		// consecutive `--swap-only` runs (run-headless.mjs) as the behavioural
+		// evidence that the lock -- not the removal of StrictMode -- is the
+		// fix. A failure here must be reported, never worked around by
+		// re-removing StrictMode, adding a retry, or widening a frame budget.
+		root.render(
+			<StrictMode>
+				<ComposeSwapApp />
+			</StrictMode>,
+		);
 		return 'mounted';
 	});
 
