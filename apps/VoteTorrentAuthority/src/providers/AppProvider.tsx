@@ -11,6 +11,7 @@ import { getOrCreateDeviceUser } from "../engines/device-user";
 import { createDeviceSigner } from "../engines/device-signer";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
+import { registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
 import { useCadreNode } from "./CadreNodeProvider";
 
 interface AppContextType {
@@ -139,6 +140,16 @@ export function AppProvider({ children }: PropsWithChildren) {
 		}
 		return factory.exportDashboardSnapshot();
 	}, []);
+
+	// 50-15 (CR-03): register this callback as the redemption-time regeneration
+	// fallback, so `dashboard-signin-code.ts` never needs to have persisted the
+	// payload to answer a redemption — see `registerDashboardSnapshotProvider`'s
+	// own doc comment. Unregister on unmount so a torn-down provider is never
+	// left dangling.
+	useEffect(() => {
+		registerDashboardSnapshotProvider(exportDashboardSnapshot);
+		return () => registerDashboardSnapshotProvider(undefined);
+	}, [exportDashboardSnapshot]);
 
 	// Activate a network at runtime (create / picker "Select") without a reboot.
 	// Mirrors the boot re-attach block below so behavior is identical to a restart.

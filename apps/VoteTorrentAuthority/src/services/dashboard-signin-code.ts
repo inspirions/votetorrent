@@ -50,27 +50,32 @@
  * no key backup or restore feature exists anywhere in this repo, and the
  * browser holds nothing to sign with (D-04).
  *
- * WHAT IS PERSISTED, AND FOR HOW LONG. The staged record is an ORDINARY
- * `AsyncStorage` value — on Android that is the RKStorage SQLite file:
- * unencrypted, included in ADB backups where `allowBackup` is set, and readable
- * from any root or forensic image. It therefore holds the serialized snapshot
- * (an authority's whole database, registrant PII included) for the SHORTEST
- * window this design allows, and never one moment longer:
- * {@link redeemStagedSignInCode} blanks `snapshotJson` the instant a code stops
- * being redeemable — on the successful redemption itself, and on an expiry
- * refusal — and {@link clearStagedSignInCode} drops the record outright and is
- * wired to a discard control on the producer screen. A spent or expired code
- * must never leave a plaintext copy of the voter roll sitting beside the bearer
- * secret that unlocks it: the secret's entire security value is that
- * short-expiry plus single-use bound the exposure window, and leaving the
- * payload behind removes both bounds for anyone with storage access, who then
- * does not need the code at all.
+ * WHAT IS PERSISTED, AND FOR HOW LONG. `AsyncStorage` is an ORDINARY
+ * on-device value — on Android that is the RKStorage SQLite file: unencrypted,
+ * included in ADB backups where `allowBackup` is set, and readable from any
+ * root or forensic image. The whole-database payload (`snapshotJson`) is
+ * therefore NEVER written there, at any point in a code's lifetime — not at
+ * mint, not while the code is live, not after it is spent. It lives ONLY in
+ * the module-level {@link stagedSnapshotJson} variable, in this process's
+ * memory, for exactly as long as the code that unlocks it is redeemable:
+ * {@link mintDashboardSignInCode} sets it and persists a record with the
+ * payload OMITTED; {@link redeemStagedSignInCode} reads it (or, if this
+ * process restarted and lost it, asks the registered
+ * {@link registerDashboardSnapshotProvider} provider to regenerate an
+ * equivalent snapshot, accepted only on an exact digest match with the one the
+ * officer is holding on paper) and clears it the instant the code stops being
+ * redeemable — on a successful redemption, and on an expiry refusal. At that
+ * same instant the PERSISTED record itself collapses to a tombstone —
+ * `{ code, secret, digest, expiresAt, mintedAt, redeemedAt? }` — dropping even
+ * `snapshotName`, so nothing about the record continues to describe an export
+ * that no longer exists. {@link clearStagedSignInCode} drops the record
+ * outright and is wired to a discard control on the producer screen.
  *
- * THE RESIDUAL, STATED PLAINLY: between mint and redemption the payload IS in
- * the clear in AsyncStorage. Moving it behind the platform keystore /
- * EncryptedSharedPreferences, or regenerating it on demand at redemption time
- * instead of staging it, is the real fix and is deliberately not attempted
- * here — the redemption path has no engine handle to regenerate from.
+ * A spent or expired code must never leave a plaintext copy of the voter roll
+ * sitting beside the bearer secret that unlocks it: the secret's entire
+ * security value is that short-expiry plus single-use bound the exposure
+ * window, and leaving the payload behind removes both bounds for anyone with
+ * storage access, who then does not need the code at all.
  *
  * No GSD phase number or decision ID may appear in any string this module can
  * surface to a user — code comments only.
@@ -114,15 +119,21 @@ export interface StagedSignInCode {
 	mintedAt: string;
 	/** `snapshot-` + the first 16 characters of `secret` — a per-code filename so two
 	 * staged exports can never collide, and safe under the filesystem binding's
-	 * `assertSafeBootstrapIdentifier` pattern. */
+	 * `assertSafeBootstrapIdentifier` pattern. Present on the value
+	 * {@link mintDashboardSignInCode} returns and on the persisted record WHILE
+	 * the code is still live; dropped from the persisted record the moment the
+	 * code stops being redeemable (see {@link toTombstone}) since a spent
+	 * record no longer names anything worth staging. */
 	snapshotName: string;
 	/** `serializeSnapshot(snapshot)` — the exact bytes a filesystem/REST binding
-	 * couriers, and an authority's WHOLE DATABASE in the clear. Blanked to `''`
-	 * by {@link redeemStagedSignInCode} the moment the code stops being
-	 * redeemable (successful redemption, or an expiry refusal) — see the module
-	 * header's "what is persisted, and for how long". A reader must therefore
-	 * treat `''` as "the payload is gone", not as "the mint produced nothing". */
-	snapshotJson: string;
+	 * couriers, and an authority's WHOLE DATABASE in the clear. Present ONLY on
+	 * the value {@link mintDashboardSignInCode} RETURNS — it is held in the
+	 * module-level {@link stagedSnapshotJson} variable, in memory only, and is
+	 * NEVER written to `AsyncStorage` at any point in the code's lifetime. See
+	 * the module header's "what is persisted, and for how long". A reader must
+	 * therefore never expect this field to be present on a value read back via
+	 * {@link readStagedSignInCode}. */
+	snapshotJson?: string;
 	/** Set the instant a redemption succeeds. Present iff the code has been redeemed. */
 	redeemedAt?: string;
 	/** Set by {@link stageForFilesystemBinding} (in-memory only — that function performs
@@ -143,11 +154,89 @@ function toCanonical(date: Date): string {
 }
 
 /**
+ * THE in-memory-only payload slot. AsyncStorage on Android is the unencrypted
+ * RKStorage SQLite file, and this payload is an authority's whole database
+ * including registrant PII — it must never reach that file, so it lives here,
+ * in this process's memory, instead. {@link mintDashboardSignInCode} sets it;
+ * {@link redeemStagedSignInCode} clears it the instant the code it belongs to
+ * stops being redeemable (a successful redemption, or an expiry refusal);
+ * {@link clearStagedSignInCode} clears it on an explicit discard. A second
+ * mint overwrites it, which is also why a superseded code's payload becomes
+ * unreachable immediately (see {@link StagedSignInCode}'s security note).
+ */
+let stagedSnapshotJson: string | undefined;
+
+/**
+ * Registered by the app shell (see `AppProvider.tsx`) so a redemption that
+ * finds no in-memory payload — a cold start, or any process restart between
+ * mint and redemption — can regenerate an equivalent snapshot rather than
+ * ever having persisted one. The regenerated snapshot is accepted only when
+ * its digest EXACTLY matches the one the officer is holding on paper (the
+ * code's right half); anything else is treated as "no payload available",
+ * never as "close enough". Pass `undefined` to unregister (e.g. on unmount).
+ */
+type DashboardSnapshotProvider = () => Promise<BootstrapSnapshot>;
+let dashboardSnapshotProvider: DashboardSnapshotProvider | undefined;
+
+export function registerDashboardSnapshotProvider(provider: DashboardSnapshotProvider | undefined): void {
+	dashboardSnapshotProvider = provider;
+}
+
+/**
+ * TEST-ONLY. Resets the two module-level, in-memory-only slots
+ * ({@link stagedSnapshotJson} and the registered provider) WITHOUT touching
+ * `AsyncStorage` — the two live in this module's process memory, which
+ * `AsyncStorage.clear()` cannot reach, and Jest does not otherwise reset
+ * module-level state between tests in the same file. Used to simulate a
+ * process restart between mint and redemption: the persisted record survives
+ * (it was never in memory), the in-memory payload does not. Never called by
+ * production code.
+ */
+export function __resetInMemoryStateForTests(): void {
+	stagedSnapshotJson = undefined;
+	dashboardSnapshotProvider = undefined;
+}
+
+/** The shape actually written to `AsyncStorage` while a code is still live —
+ * every {@link StagedSignInCode} field EXCEPT the in-memory-only payload. */
+type PersistedStagedRecord = Omit<StagedSignInCode, 'snapshotJson'>;
+
+/** The shape written to `AsyncStorage` once a code stops being redeemable —
+ * see the module header's "what is persisted, and for how long". Deliberately
+ * drops `snapshotName` too: a spent record no longer names anything worth
+ * staging, and the acceptance contract is that its keys are EXACTLY this set. */
+type TombstoneRecord = Pick<StagedSignInCode, 'code' | 'secret' | 'digest' | 'expiresAt' | 'mintedAt'> & {
+	redeemedAt?: string;
+};
+
+/**
+ * Reduce `record` to its tombstone shape (see {@link TombstoneRecord}) —
+ * `redeemedAt` is included only when the caller supplies one, so an expired
+ * (never-redeemed) tombstone and a used (redeemed) tombstone differ by
+ * exactly that one key, and neither carries `snapshotName` or any trace of
+ * the payload.
+ */
+function toTombstone(record: StagedSignInCode, redeemedAt?: string): TombstoneRecord {
+	return {
+		code: record.code,
+		secret: record.secret,
+		digest: record.digest,
+		expiresAt: record.expiresAt,
+		mintedAt: record.mintedAt,
+		...(redeemedAt !== undefined ? { redeemedAt } : {}),
+	};
+}
+
+/**
  * Mint a new bearer sign-in code for `snapshot` and persist it as the ONE
  * staged record, replacing whatever was staged before (see the security note on
  * {@link StagedSignInCode} above — the replaced code becomes instantly
  * unredeemable). `options` exist ONLY so tests can pin the span and the clock;
  * production callers pass nothing.
+ *
+ * The RETURNED record carries `snapshotJson` in memory (so
+ * `stageForFilesystemBinding` works unchanged in the same session); the
+ * PERSISTED record never does — see the module header.
  */
 export async function mintDashboardSignInCode(
 	snapshot: BootstrapSnapshot,
@@ -180,12 +269,26 @@ export async function mintDashboardSignInCode(
 		snapshotJson,
 	};
 
-	await AsyncStorage.setItem(STAGED_CODE_STORAGE_KEY, JSON.stringify(record));
+	// The payload lives in memory ONLY — a second mint overwrites it,
+	// instantly stranding whatever the first mint staged.
+	stagedSnapshotJson = snapshotJson;
+
+	const persisted: PersistedStagedRecord = {
+		code,
+		secret,
+		digest,
+		expiresAt,
+		mintedAt,
+		snapshotName,
+	};
+	await AsyncStorage.setItem(STAGED_CODE_STORAGE_KEY, JSON.stringify(persisted));
 	return record;
 }
 
 /** Reads the one staged record. Returns `undefined` on absent or unparseable
- * content — NEVER throws, so a screen can always fall back to the idle state. */
+ * content — NEVER throws, so a screen can always fall back to the idle state.
+ * The returned value never carries `snapshotJson` — that field only ever
+ * exists on the value {@link mintDashboardSignInCode} returns directly. */
 export async function readStagedSignInCode(): Promise<StagedSignInCode | undefined> {
 	try {
 		const raw = await AsyncStorage.getItem(STAGED_CODE_STORAGE_KEY);
@@ -196,22 +299,10 @@ export async function readStagedSignInCode(): Promise<StagedSignInCode | undefin
 	}
 }
 
-/** Drops the staged record (idle-state reset). */
+/** Drops the staged record (idle-state reset) and clears the in-memory payload. */
 export async function clearStagedSignInCode(): Promise<void> {
+	stagedSnapshotJson = undefined;
 	await AsyncStorage.removeItem(STAGED_CODE_STORAGE_KEY);
-}
-
-/**
- * Re-persist `record` with its snapshot payload blanked, leaving every other
- * field (including `expiresAt` and `redeemedAt`) exactly as it was — so the
- * record still answers the 'used'/'expired' question, without the whole
- * database sitting behind that answer. A no-op when the payload is already
- * gone, so a repeated refusal does not rewrite storage on every attempt.
- */
-async function dropStagedPayload(record: StagedSignInCode): Promise<void> {
-	if (record.snapshotJson === '') return;
-	const stripped: StagedSignInCode = { ...record, snapshotJson: '' };
-	await AsyncStorage.setItem(STAGED_CODE_STORAGE_KEY, JSON.stringify(stripped));
 }
 
 const SECRET_PATTERN = /^[0-9a-f]{40}$/;
@@ -269,8 +360,16 @@ let redemptionChain: Promise<unknown> = Promise.resolve();
  *   3. `now >= expiresAt` (RAW STRING comparison — canonical form sorts
  *      lexicographically; NEVER `Date.parse` either side, since two strings
  *      that parse to the same instant are still different values) -> `'expired'`
- *   4. Otherwise: set `redeemedAt`, persist, and return `'ok'` with the
- *      snapshot parsed from the record's `snapshotJson`.
+ *   4. Otherwise, RESOLVE THE PAYLOAD (this order is load-bearing — see below)
+ *      BEFORE stamping `redeemedAt`: prefer the in-memory
+ *      {@link stagedSnapshotJson}; if it is absent (a cold start lost it),
+ *      call the registered {@link registerDashboardSnapshotProvider} provider
+ *      and accept the result only on an EXACT `digest` match with the
+ *      record's. A miss of either kind -> `'unknown'`, WITHOUT writing
+ *      anything — a failure to produce the payload must never burn the
+ *      code's single use. Only once a matching payload is in hand: set
+ *      `redeemedAt`, persist the tombstone, and return `'ok'` with the
+ *      snapshot.
  *
  * `snapshot` is OMITTED on every refusal — 50-03's `BootstrapRedemptionResult`
  * states it is present iff the status is `'ok'`, and a caller must not be able
@@ -292,24 +391,51 @@ export async function redeemStagedSignInCode(
 			return { status: 'used' };
 		}
 		if (nowCanonical >= record.expiresAt) {
-			// An expired code can never be redeemed again, so its payload has no
-			// remaining purpose — drop it, but KEEP the record so a second
-			// attempt still answers 'expired' rather than the weaker 'unknown'.
-			await dropStagedPayload(record);
+			// An expired code can never be redeemed again, so the in-memory
+			// payload (if any) has no remaining purpose — drop it, and collapse
+			// the persisted record to its tombstone, but KEEP the tombstone so a
+			// second attempt still answers 'expired' rather than the weaker
+			// 'unknown'.
+			stagedSnapshotJson = undefined;
+			await AsyncStorage.setItem(STAGED_CODE_STORAGE_KEY, JSON.stringify(toTombstone(record)));
 			return { status: 'expired' };
 		}
 
-		// Persist `redeemedAt` and drop the payload in the SAME write: the code
-		// is spent from this instant, so the plaintext database beside it is
-		// pure liability. `parseSnapshot` below reads the in-memory `record`,
-		// which still carries the bytes this call is about to return.
-		const redeemed: StagedSignInCode = { ...record, redeemedAt: nowCanonical, snapshotJson: '' };
-		await AsyncStorage.setItem(STAGED_CODE_STORAGE_KEY, JSON.stringify(redeemed));
+		// PAYLOAD RESOLUTION, strictly before the `redeemedAt` stamp below — see
+		// this function's doc comment on why the order is load-bearing. Never
+		// write anything on a miss of either kind: a failed regeneration or an
+		// unregistered provider must not burn the code's single use.
+		let resolvedSnapshotJson: string | undefined = stagedSnapshotJson;
+		if (resolvedSnapshotJson === undefined) {
+			if (dashboardSnapshotProvider === undefined) {
+				return { status: 'unknown' };
+			}
+			let regenerated: BootstrapSnapshot;
+			try {
+				regenerated = await dashboardSnapshotProvider();
+			} catch {
+				// A regeneration failure is "no payload available", not a crash —
+				// the code must remain live for a subsequent attempt.
+				return { status: 'unknown' };
+			}
+			// Never `'ok'` with bytes the code's out-of-band digest does not pin.
+			if (regenerated.digest !== record.digest) {
+				return { status: 'unknown' };
+			}
+			resolvedSnapshotJson = serializeSnapshot(regenerated);
+		}
 
-		const parsed = parseSnapshot(record.snapshotJson);
+		const parsed = parseSnapshot(resolvedSnapshotJson);
 		if (!parsed.ok) {
 			throw new Error(`dashboard-signin-code: could not parse the staged snapshot (key ${STAGED_CODE_STORAGE_KEY})`);
 		}
+
+		// Stamp `redeemedAt` and collapse to the tombstone in the SAME write:
+		// the code is spent from this instant, so nothing describing the export
+		// belongs in storage beyond that instant.
+		stagedSnapshotJson = undefined;
+		await AsyncStorage.setItem(STAGED_CODE_STORAGE_KEY, JSON.stringify(toTombstone(record, nowCanonical)));
+
 		return { status: 'ok', snapshot: parsed.envelope };
 	});
 
@@ -338,13 +464,21 @@ interface FilesystemCodeRecordDocument {
  * Throws if `record.stagedAt` is already set (two independent single-use
  * claims for one code could otherwise diverge), then marks `record.stagedAt`
  * in place — an in-memory-only mutation, not a persisted write — so a SECOND
- * call with the SAME record object throws.
+ * call with the SAME record object throws. Also throws if `record.snapshotJson`
+ * is absent — only the value {@link mintDashboardSignInCode} returns directly
+ * carries it (see the module header); a record read back via
+ * {@link readStagedSignInCode} never does, and staging that would emit a
+ * filesystem document with no content.
  */
 export function stageForFilesystemBinding(
 	record: StagedSignInCode,
 ): Array<{ path: string; contents: string }> {
 	if (record.stagedAt !== undefined) {
 		throw new Error('dashboard-signin-code: stageForFilesystemBinding called twice for the same record');
+	}
+	const { snapshotJson } = record;
+	if (snapshotJson === undefined) {
+		throw new Error('dashboard-signin-code: stageForFilesystemBinding requires the in-memory mint result, not a re-read record');
 	}
 
 	const codeDocument: FilesystemCodeRecordDocument = {
@@ -354,8 +488,8 @@ export function stageForFilesystemBinding(
 
 	const documents = [
 		{ path: `codes/${record.secret}.json`, contents: JSON.stringify(codeDocument) },
-		{ path: `snapshots/${record.snapshotName}.json`, contents: record.snapshotJson },
-		{ path: 'snapshots/current.json', contents: record.snapshotJson },
+		{ path: `snapshots/${record.snapshotName}.json`, contents: snapshotJson },
+		{ path: 'snapshots/current.json', contents: snapshotJson },
 	];
 
 	record.stagedAt = toCanonical(new Date());

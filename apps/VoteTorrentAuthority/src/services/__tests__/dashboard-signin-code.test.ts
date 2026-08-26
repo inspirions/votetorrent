@@ -1,5 +1,7 @@
 /**
- * dashboard-signin-code.test.ts — Task 2 of 50-07.
+ * dashboard-signin-code.test.ts — Task 2 of 50-07, extended by Task 1 of
+ * 50-15 (CR-03 gap closure: the payload must NEVER be persisted, not even
+ * between mint and redemption — see the module header this suite exercises).
  *
  * DECLARED BLIND SPOT: this spec exercises no transport binding (neither the
  * filesystem binding nor a REST binding is constructed here) and no real wall
@@ -11,7 +13,11 @@
  * Uses the real AsyncStorage jest mock mapped in `jest.config.js`
  * (`@react-native-async-storage/async-storage/jest/async-storage-mock.js`) and
  * clears it between cases, mirroring `device-user.provisioning.test.ts`'s
- * convention.
+ * convention. `__resetInMemoryStateForTests()` additionally clears the
+ * module's two in-memory-only slots (the staged payload and the registered
+ * snapshot provider) — neither lives in AsyncStorage, so `AsyncStorage.clear()`
+ * alone cannot reach them, and without this reset one test's mint could leak
+ * its in-memory payload into a later "cold start" test.
  */
 
 import * as fs from 'fs';
@@ -21,10 +27,12 @@ import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import {
 	DASHBOARD_SIGNIN_CODE_SPAN_MINUTES,
+	__resetInMemoryStateForTests,
 	clearStagedSignInCode,
 	mintDashboardSignInCode,
 	readStagedSignInCode,
 	redeemStagedSignInCode,
+	registerDashboardSnapshotProvider,
 	splitDashboardSignInCode,
 	stageForFilesystemBinding,
 } from '../dashboard-signin-code';
@@ -42,6 +50,7 @@ function makeFixtureSnapshot(marker: string = PII_CANARY): BootstrapSnapshot {
 
 beforeEach(async () => {
 	await AsyncStorage.clear();
+	__resetInMemoryStateForTests();
 });
 
 describe('mintDashboardSignInCode', () => {
@@ -189,18 +198,32 @@ async function allStoredText(): Promise<string> {
 	return entries.join('\n');
 }
 
-describe('the staged payload does not outlive the code that unlocks it', () => {
-	test('positive control: between mint and redemption the whole-database payload IS in storage', async () => {
+describe('the staged payload NEVER touches AsyncStorage — the CR-03 core', () => {
+	test('mint: the RAW AsyncStorage string does not contain the PII canary or the "snapshotJson" substring, but DOES contain secret/digest/expiresAt/mintedAt', async () => {
 		const snapshot = makeFixtureSnapshot();
-		await mintDashboardSignInCode(snapshot, { now: new Date('2026-01-01T00:00:00.000Z') });
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
 
-		// This is the residual the module header states plainly. It is asserted
-		// here so the two tests below cannot pass vacuously against a mint that
-		// never staged anything in the first place.
-		expect(await allStoredText()).toContain(PII_CANARY);
+		// Positive control first: the RETURNED (in-memory) record still carries
+		// the payload, so `stageForFilesystemBinding` keeps working this session.
+		// A canary that never fired here would prove nothing below.
+		expect(minted.snapshotJson).toBeDefined();
+		expect(minted.snapshotJson).toContain(PII_CANARY);
+
+		const raw = await AsyncStorage.getItem('votetorrent.dashboardBootstrap.stagedCode');
+		expect(raw).not.toBeNull();
+		expect(raw).not.toContain(PII_CANARY);
+		expect(raw).not.toContain('snapshotJson');
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+
+		// The record still answers "does this code exist, and is it live?" honestly.
+		expect(raw).toContain(minted.secret);
+		expect(raw).toContain(minted.digest);
+		expect(raw).toContain(minted.expiresAt);
+		expect(raw).toContain(minted.mintedAt);
 	});
 
-	test('a successful redemption blanks snapshotJson in the SAME write that stamps redeemedAt', async () => {
+	test('a successful redemption stamps redeemedAt and collapses the record to EXACTLY the tombstone key set, in the same write', async () => {
 		const snapshot = makeFixtureSnapshot();
 		const mintNow = new Date('2026-01-01T00:00:00.000Z');
 		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
@@ -209,25 +232,61 @@ describe('the staged payload does not outlive the code that unlocks it', () => {
 		expect(result.status).toBe('ok');
 		expect(result.snapshot).toEqual(snapshot);
 
+		const raw = await AsyncStorage.getItem('votetorrent.dashboardBootstrap.stagedCode');
+		expect(raw).not.toBeNull();
+		expect(raw).not.toContain(PII_CANARY);
+		expect(raw).not.toContain('snapshotJson');
+		expect(raw).not.toContain('snapshotName');
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+
+		const parsed = JSON.parse(raw!) as Record<string, unknown>;
+		expect(Object.keys(parsed).sort()).toEqual(
+			['code', 'digest', 'expiresAt', 'mintedAt', 'redeemedAt', 'secret'].sort(),
+		);
+		expect(parsed.redeemedAt).toBeDefined();
+
 		const persisted = await readStagedSignInCode();
 		expect(persisted?.redeemedAt).toBeDefined();
-		expect(persisted?.snapshotJson).toBe('');
-		expect(await allStoredText()).not.toContain(PII_CANARY);
+		expect(persisted?.snapshotJson).toBeUndefined();
 	});
 
-	test('an expiry refusal drops the payload but KEEPS the record, so a second attempt still answers "expired"', async () => {
+	test('an expiry refusal drops the record to the tombstone shape (no redeemedAt) but KEEPS it, so a second attempt still answers "expired"', async () => {
 		const snapshot = makeFixtureSnapshot();
 		const mintNow = new Date('2026-01-01T00:00:00.000Z');
 		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
 		const pastExpiry = new Date(mintNow.getTime() + (DASHBOARD_SIGNIN_CODE_SPAN_MINUTES + 1) * 60_000);
 
 		expect((await redeemStagedSignInCode(minted.secret, { now: pastExpiry })).status).toBe('expired');
-		expect((await readStagedSignInCode())?.snapshotJson).toBe('');
+
+		const raw = await AsyncStorage.getItem('votetorrent.dashboardBootstrap.stagedCode');
+		expect(raw).not.toContain(PII_CANARY);
+		expect(raw).not.toContain('snapshotJson');
+		expect(raw).not.toContain('snapshotName');
 		expect(await allStoredText()).not.toContain(PII_CANARY);
+
+		const parsed = JSON.parse(raw!) as Record<string, unknown>;
+		expect(Object.keys(parsed).sort()).toEqual(['code', 'digest', 'expiresAt', 'mintedAt', 'secret'].sort());
+		expect(parsed.redeemedAt).toBeUndefined();
 
 		// Dropping the payload must not weaken the refusal to 'unknown' --
 		// 'expired' tells the officer to generate a new code; 'unknown' does not.
 		expect((await redeemStagedSignInCode(minted.secret, { now: pastExpiry })).status).toBe('expired');
+	});
+
+	test('a wrong-secret redemption attempt does not tombstone or clear the live record', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
+		const withinExpiry = new Date(mintNow.getTime() + 60_000);
+
+		const wrongResult = await redeemStagedSignInCode('f'.repeat(40), { now: withinExpiry });
+		expect(wrongResult.status).toBe('unknown');
+
+		// The legitimate secret still redeems successfully afterwards — a wrong
+		// guess must not have disturbed the live record.
+		const okResult = await redeemStagedSignInCode(minted.secret, { now: withinExpiry });
+		expect(okResult.status).toBe('ok');
+		expect(okResult.snapshot).toEqual(snapshot);
 	});
 
 	test('clearStagedSignInCode leaves nothing behind, and the producer screen is the one caller that reaches it', () => {
@@ -237,6 +296,76 @@ describe('the staged payload does not outlive the code that unlocks it', () => {
 		);
 		expect(screenSource).toContain('clearStagedSignInCode');
 		expect(screenSource).toContain('dashboardSignInCodeDiscardButton');
+	});
+});
+
+describe('registerDashboardSnapshotProvider — the regeneration fallback for a cold start', () => {
+	test('no provider registered, and the in-memory payload is gone (simulated restart): redemption of an otherwise-live code returns "unknown" and does NOT stamp redeemedAt', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
+
+		// Simulate a process restart: the persisted record survives (it was
+		// never in memory to begin with), the in-memory payload does not.
+		__resetInMemoryStateForTests();
+
+		const result = await redeemStagedSignInCode(minted.secret, { now: new Date(mintNow.getTime() + 60_000) });
+		expect(result.status).toBe('unknown');
+		expect(result.snapshot).toBeUndefined();
+
+		const persisted = await readStagedSignInCode();
+		expect(persisted?.redeemedAt).toBeUndefined();
+	});
+
+	test('a registered provider whose regenerated snapshot digest MATCHES the record: redemption returns "ok" with that snapshot', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
+		__resetInMemoryStateForTests();
+
+		// A fresh snapshot built from IDENTICAL tables produces an IDENTICAL
+		// digest (the digest covers `tables` only) — this is the regeneration
+		// path's whole premise: the database has not changed since minting.
+		registerDashboardSnapshotProvider(async () => makeFixtureSnapshot());
+
+		const result = await redeemStagedSignInCode(minted.secret, { now: new Date(mintNow.getTime() + 60_000) });
+		expect(result.status).toBe('ok');
+		expect(result.snapshot?.digest).toBe(minted.digest);
+
+		const persisted = await readStagedSignInCode();
+		expect(persisted?.redeemedAt).toBeDefined();
+	});
+
+	test('a registered provider whose regenerated snapshot digest DIFFERS from the record: redemption returns "unknown", does NOT stamp redeemedAt, and returns no snapshot', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
+		__resetInMemoryStateForTests();
+
+		// A DIFFERENT marker means a DIFFERENT digest — the database changed
+		// since minting. Never `'ok'` with bytes the code's out-of-band digest
+		// does not pin.
+		registerDashboardSnapshotProvider(async () => makeFixtureSnapshot('a-different-marker-entirely'));
+
+		const result = await redeemStagedSignInCode(minted.secret, { now: new Date(mintNow.getTime() + 60_000) });
+		expect(result.status).toBe('unknown');
+		expect(result.snapshot).toBeUndefined();
+
+		const persisted = await readStagedSignInCode();
+		expect(persisted?.redeemedAt).toBeUndefined();
+	});
+
+	test('registerDashboardSnapshotProvider(undefined) unregisters — a subsequent redemption with no in-memory payload returns "unknown"', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
+		__resetInMemoryStateForTests();
+
+		registerDashboardSnapshotProvider(async () => makeFixtureSnapshot());
+		registerDashboardSnapshotProvider(undefined);
+
+		const result = await redeemStagedSignInCode(minted.secret, { now: new Date(mintNow.getTime() + 60_000) });
+		expect(result.status).toBe('unknown');
 	});
 });
 
