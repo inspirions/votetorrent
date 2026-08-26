@@ -177,7 +177,7 @@ test('inertness control: the old comparison, which enabled the button on open fo
 
 // --- Surfaced classify() failure (CR-03) ----------------------------------------
 
-const CLASSIFY_CATCH_RE = /\} catch \(err\) \{\s*if \(!cancelled\) setSwapError\(err\);\s*\} finally \{/;
+const CLASSIFY_CATCH_RE = /\} catch \(err\) \{\s*if \(!cancelled\) setSwapError\(err\);[\s\S]{0,80}?\} finally \{/;
 
 test('classify() has a catch clause that surfaces the failure via setSwapError, positioned before the finally', () => {
 	// Every throwing call inside classify() -- splitSignInCode on a malformed

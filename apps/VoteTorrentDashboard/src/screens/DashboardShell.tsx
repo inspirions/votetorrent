@@ -308,6 +308,11 @@ export function DashboardShell({
 
 	async function handleConfirmSwap() {
 		if (!pendingSwap) return;
+		// Captured into a local BEFORE the awaits below -- `pendingSwap` is
+		// component state and this async function keeps running after a
+		// re-render could have changed or cleared it, but the handed-off
+		// single-flight cache must still be reset on every terminal path.
+		const swapTransport = pendingSwap.transport;
 		// HAND THE HANDLE OVER BEFORE THE SWAP, NEVER AFTER.
 		// `performOfficerSwap` -> `refreshNetwork` -> `redeemAndBootstrap({
 		// replace: true })` deletes this exact database, and
@@ -330,6 +335,7 @@ export function DashboardShell({
 			});
 			if (result.outcome !== 'ok') {
 				setSwapError(result);
+				swapTransport.reset();
 				return;
 			}
 			swapDialogRef.current?.close();
@@ -345,8 +351,10 @@ export function DashboardShell({
 			setNetworks(listNetworks());
 			setPendingSwap(null);
 			setToast(t('snapshot.verifiedToast'));
+			swapTransport.reset();
 		} catch (err) {
 			setSwapError(err);
+			swapTransport.reset();
 		}
 	}
 
@@ -387,6 +395,11 @@ export function DashboardShell({
 		const swapContext = pendingSwapContext;
 		let cancelled = false;
 
+		// OWNERSHIP OF THE HANDED-OFF SINGLE-FLIGHT CACHE: it holds a
+		// redeemable whole-database snapshot, `Bootstrap` deliberately does
+		// NOT reset it once handed off (D-14), and this component resets it
+		// on every terminal path below EXCEPT `officer-swap`, which is still
+		// waiting for the officer to confirm.
 		async function classify() {
 			try {
 				const { secret } = splitSignInCode(swapContext.pastedCode);
@@ -399,6 +412,7 @@ export function DashboardShell({
 					if (!cancelled) {
 						setSwapError(new Error('pendingSwapContext: replay did not return a cached ok redemption'));
 					}
+					swapContext.transport.reset();
 					return;
 				}
 				const envelope = redemption.snapshot;
@@ -433,6 +447,7 @@ export function DashboardShell({
 							// eslint-disable-next-line no-console
 							console.error('performOfficerSwap (same-officer-refresh) did not complete:', result.outcome);
 							setSwapError(result);
+							swapContext.transport.reset();
 							break;
 						}
 						// Same single owner of the transition as the confirmed-swap
@@ -441,6 +456,7 @@ export function DashboardShell({
 						// re-attaches on its own.
 						setNetworks(listNetworks());
 						setToast(t('snapshot.verifiedToast'));
+						swapContext.transport.reset();
 						break;
 					}
 					case 'officer-indeterminate': {
@@ -451,6 +467,7 @@ export function DashboardShell({
 						// eslint-disable-next-line no-console
 						console.error('pendingSwapContext classified as officer-indeterminate:', err.name);
 						setSwapError(err);
+						swapContext.transport.reset();
 						break;
 					}
 					case 'new-network': {
@@ -465,6 +482,7 @@ export function DashboardShell({
 						// eslint-disable-next-line no-console
 						console.error(err.name, err.message);
 						setSwapError(err);
+						swapContext.transport.reset();
 						break;
 					}
 					default:
@@ -479,6 +497,7 @@ export function DashboardShell({
 				// set with no pendingSwap open renders its own banner instead
 				// of letting PanelGrid stand in for a database failure.
 				if (!cancelled) setSwapError(err);
+				swapContext.transport.reset();
 			} finally {
 				if (!cancelled) onSwapContextConsumed?.();
 			}
