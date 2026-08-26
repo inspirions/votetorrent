@@ -664,11 +664,20 @@ describe('P2P-11/41-10: strand-relay-routing diagnosis — Node D-02 gate probe 
     }
   })
 
-  it('the diagnosis doc is present and cites the key installed-dist + app-source file:line anchors', () => {
+  it('the diagnosis doc is present and cites the key installed-dist + app-source file:line anchors', function () {
     const diagnosisPath = join(
       REPO_ROOT, '.planning', 'phases', '41-multi-peer-relay-close-published-substrate',
       '41-10-STRAND-RELAY-ROUTING-DIAGNOSIS.md'
     )
+    // `.planning` is a nested git repo the outer repo gitignores (zero tracked files in the outer
+    // tree). On a developer machine that has cloned/initialized it, this assertion runs for real.
+    // On a fresh CI checkout (or any clone without the nested repo) `.planning` does not exist at
+    // all, so this test is un-runnable there rather than false — skip it VISIBLY (mocha reports it
+    // as pending) instead of letting it silently pass or hard-fail a machine that was never in a
+    // position to have the doc.
+    if (!existsSync(diagnosisPath)) {
+      this.skip()
+    }
     expect(existsSync(diagnosisPath), `Expected ${diagnosisPath}`).to.equal(true)
     const doc = readFileSync(diagnosisPath, 'utf8')
     for (const anchor of [

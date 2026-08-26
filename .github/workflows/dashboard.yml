@@ -417,13 +417,22 @@ jobs:
       # "no mocha summary found" branch is what stops a mocha that crashed
       # before running anything from sailing through this deliberately
       # tolerated non-zero exit.
+      #
+      # --ci selects ci-baselines.json's voteEngine.ciMinPassing floor, which
+      # is deliberately one lower than the local minPassing: `.planning/` is a
+      # nested, gitignored git repo with zero tracked files in the outer tree,
+      # so it never exists on this checkout. One test (strand-cohort-routing-
+      # coverage.spec.ts's diagnosis-doc check) guards on that and calls
+      # this.skip() when absent, reporting as pending here instead of passing
+      # -- visibly, never a silent pass. The failing count and titles are
+      # unaffected in both environments.
       - name: vote-engine suite
         run: |
           set -euo pipefail
           if ! yarn workspace @votetorrent/vote-engine test 2>&1 | tee vote-engine.log; then
             echo "mocha exited non-zero (expected: known failures); the checker decides"
           fi
-          node scripts/assert-ci-baselines.mjs vote-engine vote-engine.log | tee -a ci-receipt.txt
+          node scripts/assert-ci-baselines.mjs vote-engine vote-engine.log --ci | tee -a ci-receipt.txt
 
       # apps/VoteTorrentAuthority has 51 known pre-existing tsc errors, so
       # `tsc --noEmit` also exits non-zero by design. This is a CEILING: the

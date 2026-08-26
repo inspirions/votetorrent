@@ -16,7 +16,12 @@
  * dashboard.yml's `if ! ...; then echo "... the checker decides"; fi` guards).
  *
  * Five subcommands:
- *   vote-engine <logfile>              -- exact failure count + title match, passing floor
+ *   vote-engine <logfile> [--ci]       -- exact failure count + title match, passing floor.
+ *                                          `--ci` selects ciBaselines.voteEngine.ciMinPassing
+ *                                          over minPassing: a fresh CI checkout has no
+ *                                          .planning/ (nested, gitignored repo), so one test
+ *                                          skips there instead of passing -- see ci-baselines
+ *                                          .json's voteEngine.note for the full explanation.
  *   tier1 <logfile> <elapsedSeconds>   -- dashboard test:node floor + time budget
  *   authority-typecheck <logfile>      -- tsc error-count ceiling
  *   receipts <receiptfile> <marker...> -- anti-silent-green marker presence check
@@ -172,8 +177,17 @@ function multisetDiff(observed, known) {
   return { unexpected, missing };
 }
 
-function evaluateVoteEngine(log, baselines) {
+function evaluateVoteEngine(log, baselines, opts = {}) {
   const cfg = baselines.voteEngine;
+  const ci = Boolean(opts.ci);
+  // CI never has `.planning/` (a nested, gitignored git repo with zero tracked files in the
+  // outer tree), so one test (strand-cohort-routing-coverage.spec.ts's diagnosis-doc check)
+  // guards on existsSync and calls this.skip() there instead of hard-failing an environment
+  // that could never have the file. That moves it from passing into pending on CI only -- the
+  // failing count and title set are unaffected in both environments, which is why only the
+  // floor picks between two committed numbers instead of the whole check branching.
+  const floor = ci ? cfg.ciMinPassing : cfg.minPassing;
+  const floorName = ci ? 'ciMinPassing' : 'minPassing';
   const summary = parseMochaSummary(log);
   if (!summary) {
     return { ok: false, problems: ['no mocha summary found'] };
@@ -204,14 +218,14 @@ function evaluateVoteEngine(log, baselines) {
       `known failing title(s) not observed (disappeared): ${missing.map((t) => JSON.stringify(t)).join(', ')}`,
     );
   }
-  if (summary.passing < cfg.minPassing) {
-    problems.push(`passing=${summary.passing} is below the floor minPassing=${cfg.minPassing}`);
+  if (summary.passing < floor) {
+    problems.push(`passing=${summary.passing} is below the floor ${floorName}=${floor}`);
   }
 
   return {
     ok: problems.length === 0,
     problems,
-    receipt: `RECEIPT vote-engine-baseline passing=${summary.passing} failing=${summary.failing}`,
+    receipt: `RECEIPT vote-engine-baseline passing=${summary.passing} failing=${summary.failing} ci=${ci}`,
   };
 }
 
@@ -431,6 +445,35 @@ function runSelftest() {
       evaluateVoteEngine('mocha crashed before running anything\nsegmentation fault\n', baselines),
     );
 
+    const veCiFloor = baselines.voteEngine.ciMinPassing;
+
+    // 7a. vote-engine, --ci mode healthy at the LOWER ci floor (one fewer passing than local,
+    //     because the .planning-guarded test reports pending instead of passing on CI)
+    check(
+      'vote-engine ci-mode healthy at ciMinPassing',
+      true,
+      evaluateVoteEngine(buildMochaLog(veCiFloor, veExpectedFailing, knownTitles), baselines, { ci: true }),
+    );
+
+    // 7b. vote-engine, --ci mode still enforces its own floor, not the local (higher) one
+    check(
+      'vote-engine ci-mode below ciMinPassing',
+      false,
+      evaluateVoteEngine(
+        buildMochaLog(Math.max(0, veCiFloor - 50), veExpectedFailing, knownTitles),
+        baselines,
+        { ci: true },
+      ),
+    );
+
+    // 7c. vote-engine, non-ci mode at exactly ciMinPassing must FAIL against the higher local
+    //     floor -- proves the two floors are not silently interchangeable
+    check(
+      'vote-engine non-ci mode rejects the ci floor',
+      false,
+      evaluateVoteEngine(buildMochaLog(veCiFloor, veExpectedFailing, knownTitles), baselines, { ci: false }),
+    );
+
     const t1Floor = baselines.dashboardTier1.minPassing;
     const t1MaxSeconds = baselines.dashboardTier1.maxSeconds;
 
@@ -539,9 +582,10 @@ function main() {
 
   switch (cmd) {
     case 'vote-engine': {
-      const [logfile] = args;
-      if (!logfile) fail('usage: assert-ci-baselines.mjs vote-engine <logfile>');
-      const result = evaluateVoteEngine(readLogSafe(logfile), loadBaselines());
+      const [logfile, ...rest] = args;
+      const ci = rest.includes('--ci');
+      if (!logfile) fail('usage: assert-ci-baselines.mjs vote-engine <logfile> [--ci]');
+      const result = evaluateVoteEngine(readLogSafe(logfile), loadBaselines(), { ci });
       if (!result.ok) fail(`vote-engine baseline check FAILED:\n  - ${result.problems.join('\n  - ')}`);
       printNotices(result.notices);
       emitReceipt(result.receipt);

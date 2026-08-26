@@ -16,6 +16,7 @@
     "command": "yarn workspace @votetorrent/vote-engine test",
     "measuredOn": "2026-08-26",
     "minPassing": 1411,
+    "ciMinPassing": 1410,
     "expectedFailing": 8,
     "knownFailureTitles": [
       "AuthorityEngine schema constraints - InviteSlot table should reject update or delete of InviteSlot (InsertOnly)",
@@ -27,7 +28,7 @@
       "P2P-11 residual: a relay-only peer has no address SEED (db-p2p 0.24.0) BLOCKER: findCluster sources a record's multiaddrs solely from what THIS node already knows",
       "P2P-11 residual: a relay-only peer has no address SEED (db-p2p 0.24.0) documents the exact installed version this residual was measured against"
     ],
-    "note": "Human shorthand for the 8 verbatim titles above, in order: InsertOnly x2 (AuthorityEngine InviteSlot + AdminSigning), a CID probe (D-01 compat gate Probe 3b), cadre-core clusterSize (post-peerId-patch blocker 2), Optimystic composite-PK x2 (DELETE storage-key bug + its single-column control), P2P-11 residual x2 (findCluster addressless-seeding blocker + its installed-version tripwire). All 8 are pre-existing and unchanged across this phase. minPassing was re-measured live during 50-13 at 1411 (up from an earlier phase-history figure of 1356 recorded before this wave's plans landed additional passing tests) — see the 50-13 SUMMARY's Deviations section."
+    "note": "Human shorthand for the 8 verbatim titles above, in order: InsertOnly x2 (AuthorityEngine InviteSlot + AdminSigning), a CID probe (D-01 compat gate Probe 3b), cadre-core clusterSize (post-peerId-patch blocker 2), Optimystic composite-PK x2 (DELETE storage-key bug + its single-column control), P2P-11 residual x2 (findCluster addressless-seeding blocker + its installed-version tripwire). All 8 are pre-existing and unchanged across this phase. minPassing was re-measured live during 50-13 at 1411 (up from an earlier phase-history figure of 1356 recorded before this wave's plans landed additional passing tests) — see the 50-13 SUMMARY's Deviations section. ciMinPassing is deliberately one LOWER than minPassing, not a copy-paste slip: `.planning/` is a nested git repo the outer repo gitignores (zero tracked files in the outer tree), so a fresh CI checkout never has it. `test/strand-cohort-routing-coverage.spec.ts`'s 'the diagnosis doc is present...' test now guards on `existsSync(.planning/...)` and calls `this.skip()` when absent, so on CI it reports as one of the pending tests instead of a passing one -- visibly, not silently. expectedFailing stays exactly 8 in BOTH environments; only the passing/pending split moves. The checker's `vote-engine` subcommand takes an explicit `--ci` flag (the workflow always passes it) and picks ciMinPassing over minPassing when set, rather than sniffing a CI env var, so the choice is visible in the workflow file and reproducible outside it."
   },
   "dashboardTier1": {
     "command": "yarn workspace votetorrent-dashboard test:node",
