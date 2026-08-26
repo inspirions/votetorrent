@@ -295,3 +295,33 @@ test('inertness control: the performOfficerSwap-lock matcher rejects a bare (unw
 	const fixture = 'const result = await performOfficerSwap({ networkHash, pastedCode, transport, db });';
 	assert.doesNotMatch(fixture, PERFORM_OFFICER_SWAP_INSIDE_LOCK_RE, 'matcher is inert');
 });
+
+// --- scopesResolved: closing the attach-window on first attach AND every re-attach (D-18, 50-23) ---
+
+const SCOPES_RESOLVED_PROVIDER_RE = /<PreviewAsProvider realScopes=\{grantedScopes\} scopesResolved=\{scopesResolved\}>/;
+
+test('DashboardShell passes scopesResolved to PreviewAsProvider alongside realScopes', () => {
+	// PreviewAsProviderProps.scopesResolved is a REQUIRED prop (50-23 Task 1)
+	// -- a mount site that omits it fails typecheck, not just this matcher.
+	assert.match(CODE, SCOPES_RESOLVED_PROVIDER_RE);
+});
+
+test('inertness control: the provider-prop matcher does NOT accept the old single-prop opening tag', () => {
+	const fixture = '<PreviewAsProvider realScopes={grantedScopes}>';
+	assert.doesNotMatch(fixture, SCOPES_RESOLVED_PROVIDER_RE, 'matcher is inert');
+});
+
+const SCOPES_RESOLVED_RESET_RE = /setGrantedScopes\(\[\]\);\s*\n\s*setScopesResolved\(false\);/;
+
+test("the attach effect's reset block sets scopesResolved false immediately after clearing grantedScopes -- a re-attach genuinely re-closes the window", () => {
+	// Co-located with setGrantedScopes([]) rather than the effect's own
+	// `setDb(null);` line above it, so the assertion is anchored to the
+	// SAME reset block a network switch, an officer swap, or a refresh all
+	// run through -- not merely present somewhere in the file.
+	assert.match(CODE, SCOPES_RESOLVED_RESET_RE);
+});
+
+test('inertness control: the reset-block matcher does NOT accept a fixture where only setGrantedScopes([]) appears', () => {
+	const fixture = 'setDb(null);\n\t\tsetGrantedScopes([]);\n\t\tsetAttachError(null);';
+	assert.doesNotMatch(fixture, SCOPES_RESOLVED_RESET_RE, 'matcher is inert');
+});
