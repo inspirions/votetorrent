@@ -79,6 +79,17 @@ test('positive control: the default-effective matcher hits a synthetic fixture',
 	assert.match(fixture, /effective:\s*Object\.freeze\(\[\]\)/, 'matcher is inert');
 });
 
+// --- scopesResolved: closing the attach-window click gap (D-18, 50-23) ---------
+
+test('GrantedScopesContext.ts DEFAULT_VALUE sets scopesResolved to false -- fail-safe outside a provider', () => {
+	assert.match(STRIPPED.context, /scopesResolved:\s*false/);
+});
+
+test('positive control: the DEFAULT_VALUE scopesResolved matcher does NOT accept a permissive true default', () => {
+	const fixture = 'scopesResolved: true,';
+	assert.doesNotMatch(fixture, /scopesResolved:\s*false/, 'matcher is inert');
+});
+
 // --- PreviewAsControl.tsx -----------------------------------------------------
 
 test('PreviewAsControl renders a fieldset legended "preview.title" and drives its rows from CAPABILITIES.map', () => {
@@ -122,6 +133,59 @@ test('PreviewAsControl.tsx imports toggleScope, resetToReal, resyncRealScopes an
 	assert.match(STRIPPED.control, /\bresetToReal\b/);
 	assert.match(STRIPPED.control, /\bresyncRealScopes\b/);
 	assert.match(STRIPPED.control, /\bbadgeKey\b/);
+});
+
+// --- scopesResolved: the attach-window inputs stay inert until resolved --------
+
+const CHECKBOX_DISABLED_RE = /type="checkbox"[\s\S]{0,150}?disabled=\{!scopesResolved\}/;
+
+test('each checkbox input renders disabled={!scopesResolved}', () => {
+	assert.match(STRIPPED.control, CHECKBOX_DISABLED_RE);
+});
+
+test('inertness control: the checkbox-disabled matcher does NOT accept the pre-fix element (no disabled attribute)', () => {
+	const fixture = [
+		'<input',
+		'	id={`pv-scope-${capability.id}`}',
+		'	type="checkbox"',
+		'	checked={effective.includes(capability.scope)}',
+		'	onChange={() => toggle(capability.scope)}',
+		'/>',
+	].join('\n');
+	assert.doesNotMatch(fixture, CHECKBOX_DISABLED_RE, 'matcher is inert');
+});
+
+const RESET_DISABLED_RE = /className="pv-reset"[\s\S]{0,120}?disabled=\{!scopesResolved\}/;
+
+test('the reset button renders disabled={!scopesResolved}', () => {
+	assert.match(STRIPPED.control, RESET_DISABLED_RE);
+});
+
+test('inertness control: the reset-disabled matcher does NOT accept the pre-fix button (no disabled attribute)', () => {
+	const fixture = '<button type="button" className="pv-reset" onClick={reset}>';
+	assert.doesNotMatch(fixture, RESET_DISABLED_RE, 'matcher is inert');
+});
+
+test('PreviewAsProviderProps declares scopesResolved: boolean as a REQUIRED member', () => {
+	// Required (no `?`) so TypeScript forces every mount site to make an
+	// explicit decision instead of silently inheriting a permissive default.
+	assert.match(STRIPPED.control, /scopesResolved:\s*boolean;/);
+	assert.doesNotMatch(STRIPPED.control, /scopesResolved\?:\s*boolean/);
+});
+
+test('inertness control: the required-prop matcher does NOT accept an optional declaration', () => {
+	const fixture = 'scopesResolved?: boolean;';
+	assert.doesNotMatch(fixture, /scopesResolved:\s*boolean;/, 'matcher is inert');
+});
+
+test('the provider destructures scopesResolved from its props and carries it unchanged onto the context value', () => {
+	assert.match(STRIPPED.control, /function PreviewAsProvider\(\{\s*realScopes,\s*scopesResolved,\s*children\s*\}/);
+	assert.match(STRIPPED.control, /scopesResolved,\s*\n\s*\}\),\s*\n\s*\[state,\s*scopesResolved\]/);
+});
+
+test('inertness control: the context-value matcher does NOT accept a memo whose deps omit scopesResolved', () => {
+	const fixture = '\t\t}),\n\t\t[state],\n\t);';
+	assert.doesNotMatch(fixture, /scopesResolved,\s*\n\s*\}\),\s*\n\s*\[state,\s*scopesResolved\]/, 'matcher is inert');
 });
 
 // --- AdvisoryDisclosure.tsx ----------------------------------------------------
