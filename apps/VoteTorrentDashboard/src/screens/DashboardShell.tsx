@@ -139,7 +139,16 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 		return () => {
 			cancelled = true;
 		};
-	}, [activeNetwork?.networkHash]);
+		// officerUserId AND bootstrappedAt, not networkHash alone. This effect
+		// READS activeNetwork.officerUserId to compute grantedScopes, and a
+		// successful officer swap replaces the registry entry's officerUserId
+		// and bootstrappedAt while KEEPING the same networkHash -- so with a
+		// hash-only dependency the effect never re-ran, never re-attached, and
+		// left db at null with no scopes for the rest of the page's life.
+		// PanelGrid's remount key already includes both, so the grid remounted
+		// around a dead handle. A dependency list must cover everything the
+		// effect body reads.
+	}, [activeNetwork?.networkHash, activeNetwork?.officerUserId, activeNetwork?.bootstrappedAt]);
 
 	// Unmount-only cleanup, distinct from the per-network effect above.
 	useEffect(
@@ -205,28 +214,40 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 
 	async function handleConfirmSwap() {
 		if (!pendingSwap) return;
+		// HAND THE HANDLE OVER BEFORE THE SWAP, NEVER AFTER.
+		// `performOfficerSwap` -> `refreshNetwork` -> `redeemAndBootstrap({
+		// replace: true })` deletes this exact database, and
+		// `indexedDB.deleteDatabase` blocks while any connection is open --
+		// `deleteNetworkDb` deliberately refuses to resolve on `onblocked` and
+		// throws `DeleteBlockedError` after its timeout. This function used to
+		// close `dbRef.current` only AFTER the swap returned, so the shell was
+		// racing its own delete and every confirmed swap failed, burning the
+		// officer's single-use code. `forgetNetwork` already got this right by
+		// passing `{ db }`; this path is the one that forgot.
+		const handoverDb = dbRef.current ?? undefined;
+		dbRef.current = null;
+		setDb(null);
 		try {
 			const result = await performOfficerSwap({
 				networkHash: pendingSwap.networkHash,
 				pastedCode: pendingSwap.pastedCode,
 				transport: pendingSwap.transport,
+				db: handoverDb,
 			});
 			if (result.outcome !== 'ok') {
 				setSwapError(result);
 				return;
 			}
 			swapDialogRef.current?.close();
-			// Session termination, not cosmetics: close the handle, drop the
-			// granted scopes and clear the pending swap so `PanelGrid`
-			// remounts under a fresh key (network hash + officer id +
-			// bootstrappedAt) and no panel retains a prior-officer row in
-			// local component state.
-			if (dbRef.current) {
-				await closeNetworkDb(dbRef.current);
-				dbRef.current = null;
-			}
-			setDb(null);
-			setGrantedScopes([]);
+			// Session termination happens in ONE place: refreshing `networks`
+			// advances this entry's officerUserId and bootstrappedAt, and the
+			// attach effect above keys on both -- so it tears the old handle
+			// down and re-attaches as the new officer on its own. Doing it
+			// here as well meant two owners for one transition, and it was the
+			// one that ran: the effect's hash-only dependency never fired, so
+			// the local `setDb(null)` / `setGrantedScopes([])` were the LAST
+			// word and the session simply ended. `PanelGrid` still remounts
+			// under a fresh key, so no panel retains a prior-officer row.
 			setNetworks(listNetworks());
 			setPendingSwap(null);
 			setToast(t('snapshot.verifiedToast'));
@@ -252,7 +273,13 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 		return null;
 	}
 
-	const forgetConfirmDisabled = forgetConfirmationInput.trim() !== activeNetwork.authorityName.trim();
+	// An EMPTY expected name leaves nothing to confirm against, so the
+	// destructive control stays disabled rather than being enabled on open by
+	// an untouched input. `forgetNetwork` refuses the same case independently;
+	// this is the affordance, that is the guarantee.
+	const forgetExpectedName = activeNetwork.authorityName.trim();
+	const forgetConfirmDisabled =
+		forgetExpectedName.length === 0 || forgetConfirmationInput.trim() !== forgetExpectedName;
 
 	return (
 		<PreviewAsProvider realScopes={grantedScopes}>
@@ -345,10 +372,39 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 				</nav>
 
 				<main>
-					{attachError instanceof MissingRowCountsError || attachError instanceof RowCountMismatchError ? (
+					{/*
+					 * THE BANNER IS THE DEFAULT FOR ANY ATTACH FAILURE, and the
+					 * panel grid is reserved for a CLEAN attach. It used to be
+					 * the other way round: only MissingRowCountsError and
+					 * RowCountMismatchError got a banner, so every other failure
+					 * -- InvalidRowCountRecordError from a corrupt record, a
+					 * Quereus DDL reconcile error, a QuotaExceededError, a
+					 * structured-clone failure, a plugin registration error --
+					 * left `db` at null and fell through to render the grid,
+					 * where every panel showed its own empty copy. An officer
+					 * whose local store failed to open was told, in plain
+					 * language, that their authority has no registrants. For
+					 * election infrastructure that is the worst available
+					 * confusion.
+					 *
+					 * The two integrity errors keep the verification wording;
+					 * anything else gets its own, because "your data failed its
+					 * checksum" is a wrong answer for a database that simply
+					 * would not open.
+					 */}
+					{attachError ? (
 						<div className="sh-error-banner">
-							<p>{t('snapshot.errorVerificationHeading')}</p>
-							<p>{t('snapshot.errorVerificationBody')}</p>
+							{attachError instanceof MissingRowCountsError || attachError instanceof RowCountMismatchError ? (
+								<>
+									<p>{t('snapshot.errorVerificationHeading')}</p>
+									<p>{t('snapshot.errorVerificationBody')}</p>
+								</>
+							) : (
+								<>
+									<p>{t('snapshot.errorAttachHeading')}</p>
+									<p>{t('snapshot.errorAttachBody')}</p>
+								</>
+							)}
 							<button type="button" className="sh-refresh-cta" onClick={() => onRedeemAnother(activeNetwork.networkHash)}>
 								{t('snapshot.refreshCta')}
 							</button>
@@ -357,7 +413,6 @@ export function DashboardShell({ onRedeemAnother }: DashboardShellProps) {
 						<PanelGrid
 							key={`${activeNetwork.networkHash}:${activeNetwork.officerUserId}:${activeNetwork.bootstrappedAt}`}
 							db={db}
-							grantedScopes={grantedScopes}
 							revealDenied={revealDenied}
 							onToggleReveal={() => setRevealDenied((value) => !value)}
 							snapshotInstant={activeNetwork.bootstrappedAt}

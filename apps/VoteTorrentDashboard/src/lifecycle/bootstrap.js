@@ -59,6 +59,32 @@ export const BOOTSTRAP_PHASES = Object.freeze(
 	/** @type {const} */ (['submitting', 'verifying', 'applying-schema', 'seeding', 'success']),
 );
 
+/** The copy key for each `BOOTSTRAP_PHASES` member. Lives here, beside the
+ * vocabulary it maps, for the same reason `copyKeysForOutcome` does: the
+ * screen must never render a machine identifier, and a phase added without a
+ * key must be a loud error rather than a raw string on screen. */
+const PHASE_COPY_KEYS = Object.freeze({
+	submitting: 'bootstrap.phaseSubmitting',
+	verifying: 'bootstrap.phaseVerifying',
+	'applying-schema': 'bootstrap.phaseApplyingSchema',
+	seeding: 'bootstrap.phaseSeeding',
+	success: 'bootstrap.phaseSuccess',
+});
+
+/**
+ * Total over `BOOTSTRAP_PHASES`; throws naming the phase for anything else.
+ *
+ * @param {string} phase
+ * @returns {string}
+ */
+export function copyKeyForPhase(phase) {
+	const key = /** @type {Record<string, string>} */ (PHASE_COPY_KEYS)[phase];
+	if (key === undefined) {
+		throw new Error(`copyKeyForPhase: unmapped phase "${phase}"`);
+	}
+	return key;
+}
+
 /**
  * @typedef {object} RedeemAndBootstrapOptions
  * @property {string} pastedCode
@@ -67,6 +93,10 @@ export const BOOTSTRAP_PHASES = Object.freeze(
  * @property {boolean} [replace] - 50-09's refresh/officer-swap paths only; no UI in this phase.
  * @property {(phase: string) => void} [onPhase]
  * @property {string} [expectedNetworkHash] - supplied by 50-09's replace paths; omitted on a first redemption.
+ * @property {import('@quereus/quereus').Database} [db] - an already-open handle to the network being
+ *   REPLACED, handed over so step 4's delete closes it first. `indexedDB.deleteDatabase` blocks while
+ *   any connection is open, so a caller that holds one and does not hand it over is racing its own
+ *   delete. Ignored on a first bootstrap, where there is nothing to replace.
  */
 
 /**
@@ -91,7 +121,7 @@ export const BOOTSTRAP_PHASES = Object.freeze(
  * @returns {Promise<RedeemAndBootstrapResult>}
  */
 export async function redeemAndBootstrap(options) {
-	const { pastedCode, transport, storage, replace = false, onPhase = () => {}, expectedNetworkHash } = options;
+	const { pastedCode, transport, storage, replace = false, onPhase = () => {}, expectedNetworkHash, db: handoverDb } = options;
 
 	// 1. Split -- no transport object is constructed before this succeeds.
 	/** @type {string} */
@@ -142,6 +172,33 @@ export async function redeemAndBootstrap(options) {
 		return { outcome: 'verify-failed', reason: verified.reason };
 	}
 
+	// 3.1 CROSS-CHECK THE ENVELOPE'S OWN networkHash AGAINST THE DIGEST-COVERED
+	//     TABLE CONTENT. The digest covers `tables` only -- deliberately, and
+	//     correctly, for a corruption check. But on a FIRST bootstrap
+	//     `expectedNetworkHash` is absent, so `envelope.networkHash` is an
+	//     entirely unauthenticated field, and this function then uses it as the
+	//     IndexedDB database name, the row-count storage key and the registry
+	//     primary key. A transport or endpoint that can observe or replay a
+	//     legitimate envelope could therefore re-serve the AUTHENTIC table
+	//     content under an attacker-chosen identity and have it verify clean:
+	//     digest, manifest and schema hash all match. The browser would then
+	//     file the real authority's data under the wrong identity, while the
+	//     panels went on showing the (digest-covered) `Network.Hash` that no
+	//     longer matched either the registry key or the database name.
+	//
+	//     The envelope shape is frozen, so the containment is to require the
+	//     unauthenticated field to AGREE with the authenticated content it
+	//     claims to describe. Skipped when the snapshot carries no single
+	//     `Network` row to check against -- silence is not evidence, and
+	//     refusing there would reject legitimate partial fixtures.
+	const networkRows = envelope.tables.Network ?? [];
+	if (networkRows.length === 1) {
+		const declaredHash = /** @type {Record<string, unknown>} */ (networkRows[0]).Hash;
+		if (typeof declaredHash === 'string' && declaredHash !== envelope.networkHash) {
+			return { outcome: 'verify-failed', reason: 'network-hash-mismatch' };
+		}
+	}
+
 	// 3.5 Derive the officer identity from the VERIFIED envelope's own User
 	//     rows, in memory, BEFORE anything is deleted -- see this module's
 	//     header deviation note. The schema admits exactly one User by
@@ -169,12 +226,34 @@ export async function redeemAndBootstrap(options) {
 		return { outcome: 'already-bootstrapped' };
 	}
 	if (existing && replace) {
-		await deleteNetworkDb(envelope.networkHash);
+		// `handoverDb` closes first, inside deleteNetworkDb. A caller holding an
+		// open connection to exactly this database and NOT handing it over
+		// guarantees `DeleteBlockedError` -- the delete cannot proceed while
+		// any connection is open, and this primitive deliberately refuses to
+		// resolve on `onblocked`.
+		await deleteNetworkDb(envelope.networkHash, { storage, db: handoverDb });
 	}
 
 	// 5. Apply the schema.
+	//
+	// EVERYTHING FROM HERE IS PROVISIONAL UNTIL STEP 10. `createNetworkDb`
+	// runs `prepareDb`, which applies the schema and marks the store
+	// initialized -- so the moment this line returns, an IndexedDB database
+	// exists on disk. If seeding then fails, the old code returned or threw
+	// with only `closeNetworkDb` in the `finally`, leaving that database
+	// schema-initialized, partly populated with registrant rows, and with NO
+	// registry entry (step 10 never ran). That orphan was unreachable by every
+	// cleanup path this app has: `forgetNetwork` throws `UnknownNetworkError`
+	// for a hash the registry does not list, and the menu that would call it
+	// only renders for a listed network -- so the officer had no way to remove
+	// registrant information a failed bootstrap left in their browser. It also
+	// wedged retries: a second code for the same network found no registry
+	// entry, so no delete happened, `createNetworkDb` re-opened the stale
+	// database, and upserts cannot REDUCE a row count -- a re-issued snapshot
+	// with fewer rows in any table failed the manifest re-check forever.
 	onPhase('applying-schema');
 	const db = await createNetworkDb(envelope.networkHash);
+	let committed = false;
 	try {
 		// 6. Seed, then re-check EXACTLY against the manifest.
 		onPhase('seeding');
@@ -205,9 +284,18 @@ export async function redeemAndBootstrap(options) {
 		// invisible) rather than a listed one with no expectation record
 		// (which attachNetworkDb would reject on sight).
 		onPhase('success');
+		committed = true;
 		return { outcome: 'ok', network };
 	} finally {
 		await closeNetworkDb(db);
+		if (!committed) {
+			// Best-effort, and deliberately swallowed: this cleanup runs while
+			// an outcome or an exception is already on its way out, and a
+			// failure to delete must not replace it with a less informative
+			// one. The worst case is the orphan this block exists to prevent --
+			// no worse than the previous behaviour, and now the exception.
+			await deleteNetworkDb(envelope.networkHash, { storage }).catch(() => undefined);
+		}
 	}
 }
 

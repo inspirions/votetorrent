@@ -60,6 +60,20 @@
  * such shared-connection-singleton plugin internals to race against, which
  * is exactly why this was invisible to every tier-1 test in this project.
  *
+ * THAT ATTRIBUTION IS NOT SETTLED, AND IS RECORDED AS UNSETTLED. Code review
+ * observed that the evidence above -- "the resurrected shell carries exactly
+ * the two system stores such a write would need, and nothing else" -- fits an
+ * equally simple alternative: `listObjectStores`, exported from
+ * `src/db/open-db.js` and called by both the tier-1 suite and the tier-2
+ * gate, used a bare `indexedDB.open(name)`, which CREATES a database that
+ * does not exist. That probe no longer creates (it checks
+ * `indexedDB.databases()` first), so the two explanations are now
+ * distinguishable -- but the settle-race measurement has NOT been re-run
+ * since, so the background-write story above is a hypothesis this file still
+ * carries, not a conclusion. `deleteNetworkDbSettled` stays either way: it is
+ * bounded, it calls the one sanctioned primitive, and it verifies against the
+ * same truth `assertNetworkForgotten` trusts.
+ *
  * `deleteNetworkDbSettled` (below) is NOT a second destructive
  * implementation -- it calls the ONE sanctioned `deleteNetworkDb` primitive,
  * possibly more than once, and verifies against the SAME
@@ -137,7 +151,11 @@ async function deleteNetworkDbSettled(networkHash, options) {
 			// eslint-disable-next-line no-await-in-loop -- deliberately serial, waiting out a real macrotask each time
 			await yieldToTaskQueue();
 		}
-		await deleteNetworkDb(networkHash);
+		// The SAME options as the first attempt. Passing none reverted to the
+		// 5000ms default and, more importantly, dropped the storage adapter --
+		// so a caller that injected one had its row-count record cleared from
+		// `globalThis.localStorage` instead on eight of nine attempts.
+		await deleteNetworkDb(networkHash, options);
 		remaining = await indexedDB.databases();
 		round += 1;
 	}
@@ -216,8 +234,23 @@ export async function forgetNetwork(options) {
 	// 2. Typed confirmation, trimmed, exact case-sensitive equality against
 	//    the entry's OWN authorityName -- never the value the officer typed,
 	//    and never the expected value, appear in the thrown error.
+	//
+	//    AN EMPTY EXPECTED VALUE CONFIRMS NOTHING, AND IS REFUSED HERE RATHER
+	//    THAN QUIETLY SATISFIED. `bootstrap.js` derives authorityName as
+	//    `typeof authorityRow?.Name === 'string' ? authorityRow.Name : ''`, so
+	//    it is '' whenever the snapshot carries no Authority row or a
+	//    non-string Name, and the registry validator accepts '' (it only
+	//    requires a string). `'' !== ''` is false, so an EMPTY input passed the
+	//    confirmation -- the one thing standing between a stray click and
+	//    irreversible deletion of the officer's whole local copy. The refusal
+	//    lives in this module, not only in the component, because this is the
+	//    function that actually deletes.
+	const expected = entry.authorityName.trim();
+	if (expected.length === 0) {
+		throw new ForgetConfirmationMismatchError();
+	}
 	const typed = String(typedConfirmation ?? '').trim();
-	if (typed !== entry.authorityName.trim()) {
+	if (typed !== expected) {
 		throw new ForgetConfirmationMismatchError();
 	}
 
@@ -227,7 +260,7 @@ export async function forgetNetwork(options) {
 	//    whether from the first attempt or from settling never converging)
 	//    must leave this function by propagation, never be converted into a
 	//    success shape.
-	await deleteNetworkDbSettled(networkHash, timeoutMs === undefined ? { db } : { db, timeoutMs });
+	await deleteNetworkDbSettled(networkHash, timeoutMs === undefined ? { db, storage } : { db, storage, timeoutMs });
 
 	// 4. Explicit clear, even though step 3 already clears this key --
 	//    contract 6's clear-on-delete obligation stays local to this file

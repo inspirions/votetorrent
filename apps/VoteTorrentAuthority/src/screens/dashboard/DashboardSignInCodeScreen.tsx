@@ -6,13 +6,26 @@
  * `NetworksScreen.tsx`'s own "not yet wired (no camera dependency)" comment for
  * the concrete precedent this decision follows.
  *
+ * GENERATING IS A BLOCKING TWO-STEP, DELIBERATELY. Pressing the generate
+ * button raises an in-screen confirmation naming exactly what is about to
+ * leave the device; only the second press calls `exportDashboardSnapshot()`.
+ * This is the one action in this app that copies the ENTIRE local database,
+ * registrant information included, into a bearer-readable artifact — every
+ * other authority action that touches authority data goes through a signing
+ * ceremony behind a hardware-bound key and a biometric prompt. This app has no
+ * reusable "prove the officer is present" primitive to call here (the
+ * biometric gate is bound to a signing operation, not exposed standalone), so
+ * a blocking confirmation is the floor, NOT the equivalent. An unattended
+ * unlocked device is still the standing threat; closing that properly needs a
+ * presence check this screen cannot currently express.
+ *
  * This screen has no text input, so — unlike `AddNetworkScreen.tsx`, whose
  * import/hook block this screen otherwise mirrors — `KeyboardAvoidingScreen`
  * and `CustomTextInput` are deliberately OMITTED. Do not "restore" either: a
  * `ScrollView` with `globalStyles` is the whole layout.
  */
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
@@ -27,6 +40,7 @@ import { useApp } from "../../providers/AppProvider";
 import { isNoNetworkEstablishedError } from "../../engines/engine-factory";
 import {
 	DASHBOARD_SIGNIN_CODE_SPAN_MINUTES,
+	clearStagedSignInCode,
 	mintDashboardSignInCode,
 	readStagedSignInCode,
 } from "../../services/dashboard-signin-code";
@@ -40,6 +54,10 @@ export default function DashboardSignInCodeScreen() {
 	const [record, setRecord] = useState<StagedSignInCode | undefined>(undefined);
 	const [errorMessage, setErrorMessage] = useState<string>("");
 	const [generating, setGenerating] = useState(false);
+	// The confirmation step in front of the export. `false` is the resting
+	// state, so nothing about this screen's normal render implies an export is
+	// pending.
+	const [confirming, setConfirming] = useState(false);
 	// Distinct from errorMessage: "no network selected yet" is the expected
 	// first-run state (mirrors TasksScreen/SettingsScreen's own convention), so
 	// it renders the friendly <NoNetwork /> empty state rather than an error
@@ -48,6 +66,31 @@ export default function DashboardSignInCodeScreen() {
 	// Ticks once a second purely to re-render the live countdown; carries no
 	// data of its own.
 	const [nowTick, setNowTick] = useState(() => Date.now());
+
+	// THE CLIPBOARD OUTLIVES THE CODE UNLESS SOMEONE ENDS IT. `Clipboard
+	// .setString(record.code)` puts a credential that unlocks the entire
+	// authority database onto the SYSTEM clipboard, where it survives the
+	// code's expiry, survives app backgrounding, appears in the Android 13+
+	// clipboard preview and in clipboard-history utilities, and on older
+	// Android is readable by any app holding READ_CLIPBOARD. Nothing used to
+	// clear it — not expiry, not redemption, not leaving the screen.
+	//
+	// `copiedRef` is what keeps this honest: the clear only ever runs if THIS
+	// screen is the one that wrote the code there. Clearing unconditionally
+	// would wipe whatever the officer copied somewhere else, which is a
+	// different kind of rude.
+	//
+	// NOT DONE, and worth knowing: this app's clipboard module (v1.x) exposes
+	// `setString`/`setStrings` only — there is no sensitive-content flag to
+	// opt into here, so the copy is an ordinary clipboard write for as long as
+	// it is on the clipboard.
+	const copiedRef = useRef(false);
+
+	const clearCopiedCode = useCallback(() => {
+		if (!copiedRef.current) return;
+		copiedRef.current = false;
+		Clipboard.setString("");
+	}, []);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -66,6 +109,7 @@ export default function DashboardSignInCodeScreen() {
 
 	const handleGenerate = useCallback(async () => {
 		setErrorMessage("");
+		setConfirming(false);
 		setGenerating(true);
 		try {
 			const snapshot = await exportDashboardSnapshot();
@@ -76,17 +120,45 @@ export default function DashboardSignInCodeScreen() {
 				setHasNetwork(false);
 				return;
 			}
-			// Never render a raw engine error message — surface it through the
-			// same InlineError affordance every other screen in this app uses.
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			// A COPY-TABLE STRING, and the error CLASS to the console. The
+			// comment here used to say "never render a raw engine error
+			// message" while the line below rendered exactly that. On this
+			// screen it mattered more than usual: the reachable errors come
+			// from `exportDatabaseSnapshot`, whose messages name internal
+			// schema structure ("unsupported value type in <Table>.<Column>",
+			// "failed to read table <Table>"), and from an absent engine
+			// factory, which surfaced as "Cannot read properties of null
+			// (reading 'exportDashboardSnapshot')" in the officer's face.
+			// eslint-disable-next-line no-console
+			console.error("DashboardSignInCodeScreen: generating a code failed:", (error as { name?: string })?.name ?? "Error");
+			setErrorMessage(t("dashboardSignInCodeGenerateFailed"));
 		} finally {
 			setGenerating(false);
 		}
 	}, [exportDashboardSnapshot]);
 
-	if (!hasNetwork) {
-		return <NoNetwork />;
-	}
+	const handleRequestGenerate = useCallback(() => {
+		setErrorMessage("");
+		setConfirming(true);
+	}, []);
+
+	const handleCancelGenerate = useCallback(() => {
+		setConfirming(false);
+	}, []);
+
+	// The ONE path in this app that reaches `clearStagedSignInCode`. Without
+	// it a staged export sat in AsyncStorage indefinitely, so the officer had
+	// no way to end the exposure window early. Deliberately unconfirmed: it is
+	// the SAFE direction (it destroys a credential and a copy of data the
+	// device still holds elsewhere), which is the opposite of the generate
+	// action below it.
+	const handleDiscard = useCallback(async () => {
+		setErrorMessage("");
+		setConfirming(false);
+		clearCopiedCode();
+		await clearStagedSignInCode();
+		setRecord(undefined);
+	}, [clearCopiedCode]);
 
 	const isRedeemed = record?.redeemedAt !== undefined;
 	// Countdown arithmetic — DISPLAY ONLY. The stored `expiresAt` is canonical
@@ -98,6 +170,16 @@ export default function DashboardSignInCodeScreen() {
 	const expiresAtMillis = record !== undefined ? Date.parse(`${record.expiresAt}Z`) : undefined;
 	const isExpired =
 		record !== undefined && !isRedeemed && expiresAtMillis !== undefined && expiresAtMillis <= nowTick;
+
+	useEffect(() => {
+		if (isExpired || isRedeemed) clearCopiedCode();
+	}, [isExpired, isRedeemed, clearCopiedCode]);
+
+	useEffect(() => () => clearCopiedCode(), [clearCopiedCode]);
+
+	if (!hasNetwork) {
+		return <NoNetwork />;
+	}
 
 	const screenState: "idle" | "generated" | "used" | "expired" =
 		record === undefined ? "idle" : isRedeemed ? "used" : isExpired ? "expired" : "generated";
@@ -134,7 +216,10 @@ export default function DashboardSignInCodeScreen() {
 							<CustomButton
 								title={t("dashboardSignInCodeCopyButton")}
 								icon="copy"
-								onPress={() => Clipboard.setString(record.code)}
+								onPress={() => {
+									Clipboard.setString(record.code);
+									copiedRef.current = true;
+								}}
 							/>
 						</>
 					) : null}
@@ -153,18 +238,49 @@ export default function DashboardSignInCodeScreen() {
 				</View>
 			</ScrollView>
 			<InlineError message={errorMessage} />
-			{screenState !== "generated" ? (
-				<Footer>
+			{confirming ? (
+				<View style={styles.section} testID="dashboard-signin-code-confirm">
+					<ThemedText type="defaultSemiBold" style={styles.body}>
+						{t("dashboardSignInCodeConfirmHeading")}
+					</ThemedText>
+					<ThemedText type="default" style={styles.body}>
+						{t("dashboardSignInCodeConfirmBody")}
+					</ThemedText>
+				</View>
+			) : null}
+			<Footer>
+				{screenState !== "generated" && !confirming ? (
 					<CustomButton
 						title={t("dashboardSignInCodeGenerateButton")}
 						icon="key"
 						disabled={generating}
 						backgroundColor={colors.important}
 						forceDarkText={true}
-						onPress={handleGenerate}
+						onPress={handleRequestGenerate}
 					/>
-				</Footer>
-			) : null}
+				) : null}
+				{confirming ? (
+					<>
+						<CustomButton
+							title={t("dashboardSignInCodeGenerateButton")}
+							icon="key"
+							disabled={generating}
+							backgroundColor={colors.error}
+							onPress={handleGenerate}
+						/>
+						<CustomButton title={t("cancel")} size="thin" onPress={handleCancelGenerate} />
+					</>
+				) : null}
+				{record !== undefined && !confirming ? (
+					<CustomButton
+						title={t("dashboardSignInCodeDiscardButton")}
+						icon="trash"
+						size="thin"
+						disabled={generating}
+						onPress={handleDiscard}
+					/>
+				) : null}
+			</Footer>
 		</View>
 	);
 }

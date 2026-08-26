@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { COPY, t } = await import('../../src/i18n/copy.js');
+const { BOOTSTRAP_PHASES, copyKeyForPhase } = await import('../../src/lifecycle/bootstrap.js');
 
 test('t("bootstrap.cta") returns exactly "Redeem Code"', () => {
 	assert.equal(t('bootstrap.cta'), 'Redeem Code');
@@ -74,4 +75,22 @@ test('COPY is frozen -- assigning a new key throws in strict mode', () => {
 	assert.throws(() => {
 		COPY.__newKey__ = 'nope';
 	});
+});
+
+test('copyKeyForPhase is total over BOOTSTRAP_PHASES and every key it returns exists in COPY', () => {
+	// The defect this pins: the screen rendered `{state.phase}` directly, so
+	// the officer saw the literal machine identifiers "submitting",
+	// "applying-schema" and friends in an aria-live region.
+	for (const phase of BOOTSTRAP_PHASES) {
+		const key = copyKeyForPhase(phase);
+		assert.ok(key in COPY, `copyKeyForPhase("${phase}") returned "${key}", which is not a COPY key`);
+		assert.ok(t(key).length > 0);
+	}
+});
+
+test('copyKeyForPhase throws naming an unmapped phase, so a new phase cannot silently render raw', () => {
+	assert.throws(
+		() => copyKeyForPhase('a-phase-nobody-mapped'),
+		(err) => err instanceof Error && err.message.includes('a-phase-nobody-mapped'),
+	);
 });

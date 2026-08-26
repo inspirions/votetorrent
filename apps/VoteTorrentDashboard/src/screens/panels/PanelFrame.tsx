@@ -37,12 +37,20 @@ export function PanelFrame({ capability, evaluation, children }: PanelFrameProps
 				<span className="pill pill-scope" title={capability.schemaName}>
 					{capability.scope}
 				</span>
-				<span className="pill pill-tier">tier {capability.tier}</span>
+				{/* Both pills render through `t()`. They used to be authored
+				    English -- "tier", "site", and the add-an-s pluralisation
+				    rule -- living outside the frozen copy table that contract
+				    C2 makes the ONLY place a user-facing string may live. The
+				    Spanish locale the producer half ships had no path to
+				    translate either word. */}
+				<span className="pill pill-tier">{t('panelFrame.tierPill', { tier: String(capability.tier) })}</span>
 				<span
 					className="pill pill-sites"
 					title={capability.siteCountCaveat ?? undefined}
 				>
-					{capability.sites} site{capability.sites === 1 ? '' : 's'}
+					{t(capability.sites === 1 ? 'panelFrame.sitePill' : 'panelFrame.sitesPill', {
+						count: String(capability.sites),
+					})}
 				</span>
 			</div>
 			{/*

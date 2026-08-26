@@ -205,6 +205,41 @@ test('snapshotFreshness: returns the full shape, absolute byte-identical to the 
 // forget-network.js — the centrepiece negative + its positive control
 // ---------------------------------------------------------------------------
 
+test('forgetNetwork: an EMPTY authorityName confirms nothing -- an empty input is refused, not satisfied', async () => {
+	// bootstrap.js derives authorityName as '' whenever the snapshot has no
+	// Authority row or a non-string Name, and the registry validator accepts
+	// ''. `'' !== ''` is false, so an empty input used to PASS the typed
+	// confirmation -- the only thing between a stray click and irreversible
+	// deletion of the officer's whole local copy.
+	const hash = 'forget-empty-expected';
+	const { storage, counts } = await setupNetwork(hash, '');
+
+	for (const typed of ['', '   ', 'anything']) {
+		// eslint-disable-next-line no-await-in-loop
+		await assert.rejects(
+			() => forgetNetwork({ networkHash: hash, typedConfirmation: typed, storage }),
+			(/** @type {any} */ err) => err instanceof ForgetConfirmationMismatchError,
+			`typedConfirmation ${JSON.stringify(typed)} was accepted against an empty expected name`,
+		);
+	}
+
+	// Measured, not inferred from the throw: everything is still here.
+	assert.ok(findNetwork(hash, storage));
+	assert.deepEqual((await readRowCountsRecord(hash, storage))?.counts, counts);
+	const reopened = await attachNetworkDb(hash, { storage });
+	assert.deepEqual(await readRowCounts(reopened, Object.keys(counts)), counts);
+	await closeNetworkDb(reopened);
+	await deleteNetworkDb(hash, { storage });
+});
+
+test('positive control: a NON-empty authorityName still forgets when typed exactly', async () => {
+	const hash = 'forget-empty-control';
+	const { storage } = await setupNetwork(hash, 'Nonempty Authority');
+	const result = await forgetNetwork({ networkHash: hash, typedConfirmation: 'Nonempty Authority', storage });
+	assert.equal(result.networkHash, hash);
+	assert.equal(findNetwork(hash, storage), undefined);
+});
+
 test('forgetNetwork: a typed confirmation that does not match authorityName throws, and the database still exists afterward -- measured, not just by the throw', async () => {
 	const hash = 'forget-mismatch';
 	const { storage, counts } = await setupNetwork(hash, 'Mismatch Authority');

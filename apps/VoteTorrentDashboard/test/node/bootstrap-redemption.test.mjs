@@ -13,7 +13,7 @@
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deleteNetworkDb, closeNetworkDb } from '../../src/db/open-db.js';
+import { deleteNetworkDb, closeNetworkDb, dbNameFor } from '../../src/db/open-db.js';
 import { readRowCounts, readRowCountsRecord, attachNetworkDb } from '../../src/db/reattach.js';
 import { findNetwork, listNetworks } from '../../src/db/networks-registry.js';
 import { BOOTSTRAP_OUTCOME_CODES, redeemAndBootstrap, copyKeysForOutcome } from '../../src/lifecycle/bootstrap.js';
@@ -280,6 +280,55 @@ test('redeemAndBootstrap: a restore that lands short of the manifest produces re
 	const entry = findNetwork(envelope.networkHash, storage);
 	assert.equal(entry, undefined);
 
+	// AND -- no orphan database is left behind. A schema-initialized,
+	// partly-populated database with no registry entry is unreachable by every
+	// cleanup path this app has (forgetNetwork throws UnknownNetworkError for
+	// an unlisted hash), so the officer would have no way to remove the
+	// registrant rows a failed bootstrap put in their browser. It also wedges
+	// retries, because upserts cannot reduce a row count.
+	const listed = await indexedDB.databases();
+	assert.equal(
+		listed.some((db) => db.name === dbNameFor(envelope.networkHash)),
+		false,
+		'a failed restore left an orphan IndexedDB database behind',
+	);
+
+	await deleteNetworkDb(envelope.networkHash);
+});
+
+test('redeemAndBootstrap: an envelope whose networkHash disagrees with its own Network.Hash row is refused as network-hash-mismatch', async () => {
+	// The digest covers `tables` only, so on a FIRST bootstrap (no
+	// expectedNetworkHash) `envelope.networkHash` is unauthenticated -- yet it
+	// becomes the database name, the row-count key and the registry primary
+	// key. This envelope carries the AUTHENTIC table content under a different
+	// declared identity and verifies clean on digest, manifest and schema hash;
+	// only the cross-check catches it.
+	const authentic = buildFixtureEnvelope();
+	const relabelled = buildSnapshot({
+		networkHash: 'an-identity-the-tables-never-claimed',
+		tables: authentic.tables,
+		generatedAt: authentic.generatedAt,
+	});
+	assert.equal(relabelled.digest, authentic.digest, 'the relabelled envelope must be digest-identical, or this test proves nothing');
+
+	const storage = makeFakeStorage();
+	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: relabelled } } });
+	const result = await redeemAndBootstrap({ pastedCode: codeFor(relabelled), transport, storage });
+
+	assert.equal(result.outcome, 'verify-failed');
+	assert.equal(result.reason, 'network-hash-mismatch');
+	assert.equal(findNetwork(relabelled.networkHash, storage), undefined);
+	const listed = await indexedDB.databases();
+	assert.equal(listed.some((db) => db.name === dbNameFor(relabelled.networkHash)), false);
+});
+
+test('positive control: the SAME fixture with its own matching networkHash bootstraps cleanly', async () => {
+	const envelope = buildFixtureEnvelope();
+	await deleteNetworkDb(envelope.networkHash).catch(() => {});
+	const storage = makeFakeStorage();
+	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });
+	const result = await redeemAndBootstrap({ pastedCode: codeFor(envelope), transport, storage });
+	assert.equal(result.outcome, 'ok');
 	await deleteNetworkDb(envelope.networkHash);
 });
 

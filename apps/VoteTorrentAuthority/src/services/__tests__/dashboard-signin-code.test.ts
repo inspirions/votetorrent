@@ -181,6 +181,65 @@ describe('redeemStagedSignInCode — expired / used / unknown, each with a posit
 	});
 });
 
+/** Every value AsyncStorage currently holds, concatenated — so a canary scan
+ * cannot be fooled by the payload moving to a different key. */
+async function allStoredText(): Promise<string> {
+	const keys = await AsyncStorage.getAllKeys();
+	const entries = await Promise.all(keys.map((k) => AsyncStorage.getItem(k)));
+	return entries.join('\n');
+}
+
+describe('the staged payload does not outlive the code that unlocks it', () => {
+	test('positive control: between mint and redemption the whole-database payload IS in storage', async () => {
+		const snapshot = makeFixtureSnapshot();
+		await mintDashboardSignInCode(snapshot, { now: new Date('2026-01-01T00:00:00.000Z') });
+
+		// This is the residual the module header states plainly. It is asserted
+		// here so the two tests below cannot pass vacuously against a mint that
+		// never staged anything in the first place.
+		expect(await allStoredText()).toContain(PII_CANARY);
+	});
+
+	test('a successful redemption blanks snapshotJson in the SAME write that stamps redeemedAt', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
+
+		const result = await redeemStagedSignInCode(minted.secret, { now: new Date(mintNow.getTime() + 60_000) });
+		expect(result.status).toBe('ok');
+		expect(result.snapshot).toEqual(snapshot);
+
+		const persisted = await readStagedSignInCode();
+		expect(persisted?.redeemedAt).toBeDefined();
+		expect(persisted?.snapshotJson).toBe('');
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+	});
+
+	test('an expiry refusal drops the payload but KEEPS the record, so a second attempt still answers "expired"', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const minted = await mintDashboardSignInCode(snapshot, { now: mintNow });
+		const pastExpiry = new Date(mintNow.getTime() + (DASHBOARD_SIGNIN_CODE_SPAN_MINUTES + 1) * 60_000);
+
+		expect((await redeemStagedSignInCode(minted.secret, { now: pastExpiry })).status).toBe('expired');
+		expect((await readStagedSignInCode())?.snapshotJson).toBe('');
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+
+		// Dropping the payload must not weaken the refusal to 'unknown' --
+		// 'expired' tells the officer to generate a new code; 'unknown' does not.
+		expect((await redeemStagedSignInCode(minted.secret, { now: pastExpiry })).status).toBe('expired');
+	});
+
+	test('clearStagedSignInCode leaves nothing behind, and the producer screen is the one caller that reaches it', () => {
+		const screenSource = fs.readFileSync(
+			path.join(__dirname, '..', '..', 'screens', 'dashboard', 'DashboardSignInCodeScreen.tsx'),
+			'utf8',
+		);
+		expect(screenSource).toContain('clearStagedSignInCode');
+		expect(screenSource).toContain('dashboardSignInCodeDiscardButton');
+	});
+});
+
 describe('stageForFilesystemBinding', () => {
 	const FS_TRANSPORT_SOURCE = fs.readFileSync(
 		path.join(

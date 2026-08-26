@@ -31,6 +31,7 @@ import {
 	listObjectStores,
 	deleteNetworkDb,
 } from '../../src/db/open-db.js';
+import { readRowCountsRecord, writeRowCounts } from '../../src/db/reattach.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OPEN_DB_SOURCE = path.resolve(__dirname, '..', '..', 'src', 'db', 'open-db.js');
@@ -126,6 +127,56 @@ test('deleteNetworkDb: on a name still held open by another connection, rejects 
 	await deleteNetworkDb(hash); // clean slate for the following positive control
 });
 
+/** A `Map`-backed localStorage-shaped fake -- Node 22 has no real `localStorage`. */
+function makeFakeStorage() {
+	/** @type {Map<string, string>} */
+	const map = new Map();
+	return {
+		getItem: (/** @type {string} */ k) => (map.has(k) ? /** @type {string} */ (map.get(k)) : null),
+		setItem: (/** @type {string} */ k, /** @type {string} */ v) => {
+			map.set(k, v);
+		},
+		removeItem: (/** @type {string} */ k) => {
+			map.delete(k);
+		},
+	};
+}
+
+test('deleteNetworkDb: a BLOCKED delete leaves the row-count record intact, and honours the injected storage adapter', async () => {
+	// Two defects in one ordering. The clear used to run BEFORE the delete, so
+	// a blocked delete threw -- correctly -- with the integrity record already
+	// gone: the network still listed, its data including registrant rows still
+	// on disk, and now permanently un-attachable because attachNetworkDb raises
+	// MissingRowCountsError forever after. And the clear was called with no
+	// storage argument, so it always fell back to globalThis.localStorage and
+	// every caller that injected an adapter silently failed to clear anything.
+	const hash = 'db-delete-blocked-record';
+	const storage = makeFakeStorage();
+	await deleteNetworkDb(hash, { storage }).catch(() => {});
+	await writeRowCounts(hash, { Authority: 1 }, storage);
+
+	const blockingConn = await new Promise((resolve, reject) => {
+		const req = indexedDB.open(dbNameFor(hash));
+		req.onupgradeneeded = () => req.result.createObjectStore('probe');
+		req.onsuccess = () => resolve(req.result);
+		req.onerror = () => reject(req.error);
+	});
+
+	await assert.rejects(
+		() => deleteNetworkDb(hash, { timeoutMs: 200, storage }),
+		/** @param {any} err */ (err) => err.name === 'DeleteBlockedError',
+	);
+
+	const survived = await readRowCountsRecord(hash, storage);
+	assert.deepEqual(survived?.counts, { Authority: 1 }, 'a blocked delete destroyed the integrity record');
+
+	// Positive control: once the blocker lets go, a SUCCESSFUL delete does
+	// clear it -- and clears it from the INJECTED adapter, not localStorage.
+	blockingConn.close();
+	await deleteNetworkDb(hash, { storage });
+	assert.equal(await readRowCountsRecord(hash, storage), undefined);
+});
+
 test('positive control: ordinary create -> delete -> recreate cycle succeeds (the rejections above are discriminating)', async () => {
 	const hash = 'db-delete-cycle';
 	await deleteNetworkDb(hash).catch(() => {});
@@ -137,6 +188,34 @@ test('positive control: ordinary create -> delete -> recreate cycle succeeds (th
 	const row = await db2.prepare('select count(*) as c from Authority').get({});
 	assert.equal(row?.c, 0);
 	await deleteNetworkDb(hash, { db: db2 });
+});
+
+test('listObjectStores: probing a network that does not exist returns [] and does NOT create the database', async () => {
+	// `indexedDB.open(name)` with no version CREATES the database. This
+	// function is exported from src/, so probing a deleted or never-created
+	// network used to resurrect an empty shell -- which then appeared in
+	// indexedDB.databases(), exactly the condition deleteNetworkDb's
+	// post-delete confirmation and assertNetworkForgotten treat as failure.
+	const hash = 'db-listobjectstores-absent';
+	await deleteNetworkDb(hash).catch(() => {});
+
+	assert.deepEqual(await listObjectStores(hash), []);
+
+	const listed = await indexedDB.databases();
+	assert.equal(
+		listed.some((db) => db.name === dbNameFor(hash)),
+		false,
+		'listObjectStores created the database it was asked to inspect',
+	);
+});
+
+test('positive control: listObjectStores on a REAL bootstrapped database still reports its stores', async () => {
+	const hash = 'db-listobjectstores-present';
+	await deleteNetworkDb(hash).catch(() => {});
+	const db = await createNetworkDb(hash);
+	const names = await listObjectStores(hash);
+	assert.ok(names.length > 50, `expected >50 object stores, got ${names.length}`);
+	await deleteNetworkDb(hash, { db });
 });
 
 test('openStoreHandle: applies setDefaultVtabName in the mandatory registration order', async () => {

@@ -9,6 +9,15 @@
  *
  * Transcribed verbatim from 50-UI-SPEC.md's Copywriting Contract.
  *
+ * The "no later plan adds a key" rule above is a rule about PLANS, and it held:
+ * the table was complete for every screen this phase built. It is not a rule
+ * that a defect may not be fixed. Code review found user-facing text rendered
+ * OUTSIDE this table in two places -- the raw machine phase codes in
+ * `screens/Bootstrap.tsx` and the `tier`/`site(s)` pills in
+ * `screens/panels/PanelFrame.tsx` -- and the fix for each is a key here, which
+ * is exactly what contract C2 demands. Every such addition is recorded in a
+ * comment beside the keys it adds.
+ *
  * Contract C3 (D-17): there is deliberately NO `read-only` / `◐` panel-state string in
  * this table. Nothing in this phase is writable -- every panel in this phase is either
  * fully visible (granted scope) or fully hidden (withheld scope) -- so a read-only
@@ -36,6 +45,15 @@ export const COPY = Object.freeze({
 	'bootstrap.errorTransportHeading': "Couldn't reach the authority app.",
 	'bootstrap.errorTransportBody': 'Check that the code was generated recently and try again.',
 	'bootstrap.errorTransportCta': 'Retry',
+	// One key per BOOTSTRAP_PHASES member. The screen renders these through
+	// `copyKeyForPhase`, which is total over that frozen vocabulary -- adding a
+	// phase without a key here is a loud error, never a machine identifier on
+	// screen.
+	'bootstrap.phaseSubmitting': 'Sending your code…',
+	'bootstrap.phaseVerifying': 'Checking the data against your code…',
+	'bootstrap.phaseApplyingSchema': 'Preparing this browser…',
+	'bootstrap.phaseSeeding': 'Copying the data into this browser…',
+	'bootstrap.phaseSuccess': 'Done.',
 
 	// Snapshot freshness, refresh and verification
 	'snapshot.refreshCta': 'Refresh snapshot',
@@ -46,6 +64,15 @@ export const COPY = Object.freeze({
 	'snapshot.errorVerificationHeading': "Couldn't verify the new snapshot.",
 	'snapshot.errorVerificationBody':
 		"The transferred data didn't match its checksum, so nothing was replaced — your existing data is unchanged. Try refreshing again.",
+	// The banner for an attach failure this shell does NOT recognise as an
+	// integrity problem -- a corrupt row-count record, a DDL reconcile error, a
+	// storage quota refusal, a plugin registration failure. Distinct wording
+	// from the verification family on purpose: telling an officer their data
+	// failed its checksum when the database simply would not open is a
+	// different, wrong answer.
+	'snapshot.errorAttachHeading': "Couldn't open this browser's copy of the data.",
+	'snapshot.errorAttachBody':
+		'Nothing was changed. Refresh the snapshot to rebuild this browser’s copy from the authority app.',
 	'snapshot.errorSchemaMismatchHeading': 'This authority app is running a different version.',
 	'snapshot.errorSchemaMismatchBody':
 		'Update the authority app or this dashboard so both match, then try again.',
@@ -69,6 +96,15 @@ export const COPY = Object.freeze({
 	'gate.resetScopesCta': 'Reset to my scopes',
 	'gate.revealDeniedCta': 'Reveal denied panels',
 	'preview.title': 'Preview as',
+	// Panel-frame pills. `tier`, `site` and the English pluralisation rule were
+	// authored user-facing prose living outside this table -- and lint-copy.mjs
+	// could not see them, because it scans for a fixed sentinel list rather
+	// than for arbitrary literals. The singular and plural are SEPARATE keys,
+	// not a suffix computed in the component, so a locale whose plural is not
+	// formed by adding a letter has somewhere to put its own answer.
+	'panelFrame.tierPill': 'tier {{tier}}',
+	'panelFrame.sitePill': '{{count}} site',
+	'panelFrame.sitesPill': '{{count}} sites',
 
 	// Navigation groups and lifecycle pill
 	'nav.groupElectionOperations': 'Election Operations',

@@ -21,7 +21,9 @@
  * `await import('./reattach.js')` inside `deleteNetworkDb`, not with an injected
  * option — the row-count clear is not optional or swappable per call site the
  * way `options.db` is, so an injected parameter would just move the same
- * dependency to every caller instead of removing it.
+ * dependency to every caller instead of removing it. WHICH STORAGE that clear
+ * writes to IS per-call-site, though, and arrives as `options.storage`; see
+ * `deleteNetworkDb`'s own note.
  */
 
 import { Database, registerPlugin } from '@quereus/quereus';
@@ -135,12 +137,34 @@ export async function closeNetworkDb(db) {
  * tables + 13 index stores + `__catalog__` + `__stats__`. Both the tier-1 node
  * suite and the tier-2 browser gate use this.
  *
+ * A PROBE MUST NOT CREATE WHAT IT PROBES. `indexedDB.open(name)` with no
+ * version CREATES the database when it does not exist. This function is
+ * exported from `src/`, so calling it for a network that was deleted, or was
+ * never bootstrapped, used to resurrect an empty shell that then showed up in
+ * `indexedDB.databases()` — precisely the condition `deleteNetworkDb`'s
+ * post-delete confirmation and `assertNetworkForgotten` both treat as a hard
+ * failure. The existence check below is what makes an absent database read as
+ * "no stores" instead of "no stores, and now it exists".
+ *
+ * Absent `indexedDB.databases()` (a handful of older browsers, some test
+ * doubles) is non-fatal and falls through to the open — the same posture
+ * `deleteNetworkDb` and `assertNetworkForgotten` already take.
+ *
  * @param {string} networkHash
  * @returns {Promise<string[]>}
  */
-export function listObjectStores(networkHash) {
+export async function listObjectStores(networkHash) {
+	const name = dbNameFor(networkHash);
+
+	if (typeof indexedDB.databases === 'function') {
+		const known = await indexedDB.databases();
+		if (!known.some((entry) => entry.name === name)) {
+			return [];
+		}
+	}
+
 	return new Promise((resolve, reject) => {
-		const request = indexedDB.open(dbNameFor(networkHash));
+		const request = indexedDB.open(name);
 		request.onerror = () => reject(request.error);
 		request.onsuccess = () => {
 			const names = [...request.result.objectStoreNames];
@@ -154,6 +178,9 @@ export function listObjectStores(networkHash) {
  * @typedef {object} DeleteNetworkDbOptions
  * @property {import('@quereus/quereus').Database} [db] - an already-open handle to close first
  * @property {number} [timeoutMs] - how long to wait out an `onblocked` delete before giving up (default 5000)
+ * @property {import('./networks-registry.js').StorageAdapter} [storage] - which storage the
+ *   row-count clear writes to. Omitting it falls back to `globalThis.localStorage`, which is
+ *   correct in the browser and WRONG for any caller that injected an adapter.
  */
 
 /**
@@ -175,15 +202,11 @@ export function listObjectStores(networkHash) {
  * @returns {Promise<void>}
  */
 export async function deleteNetworkDb(networkHash, options = {}) {
-	const { db, timeoutMs = 5000 } = options;
+	const { db, timeoutMs = 5000, storage } = options;
 
 	if (db) {
 		await closeNetworkDb(db);
 	}
-
-	// Lazy import — see the file-header import-cycle note.
-	const { clearRowCounts } = await import('./reattach.js');
-	await clearRowCounts(networkHash);
 
 	const name = dbNameFor(networkHash);
 
@@ -233,4 +256,23 @@ export async function deleteNetworkDb(networkHash, options = {}) {
 		}
 	}
 	// indexedDB.databases() absence is non-fatal — just skip the confirmation.
+
+	// THE CLEAR RUNS LAST, AND ONLY AFTER A CONFIRMED DELETE. It used to run
+	// FIRST. If the delete then blocked or errored, this function threw —
+	// correctly — but the integrity record was already gone: the network was
+	// still listed (`forgetNetwork`'s registry removal never ran), its data
+	// including registrant information was still on disk, and it was now
+	// permanently un-attachable, because `attachNetworkDb` raises
+	// `MissingRowCountsError` on every subsequent load. That is the opposite
+	// of `forget-network.js`'s own stated rule — prefer the recoverable
+	// inconsistency over the invisible one — so the ordering now matches it.
+	//
+	// `storage` is threaded through rather than defaulted here: called with no
+	// adapter, `clearRowCounts` falls back to `globalThis.localStorage`, so
+	// every caller that injected one silently failed to clear the record it
+	// believed it had cleared.
+	//
+	// Lazy import — see the file-header import-cycle note.
+	const { clearRowCounts } = await import('./reattach.js');
+	await clearRowCounts(networkHash, storage);
 }

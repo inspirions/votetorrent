@@ -440,9 +440,18 @@ jobs:
       - name: Authority typecheck ceiling
         run: |
           set -euo pipefail
-          if ! yarn workspace votetorrent-authority typecheck 2>&1 | tee authority-tsc.log; then
-            echo "tsc exited non-zero (expected: known errors); the checker decides"
+          # The TSC-RAN marker carries the compiler's REAL exit status into the
+          # log the checker reads. Without it, a clean `tsc --noEmit` (which
+          # prints nothing) is byte-identical to a log from a step that
+          # crashed before running anything -- and the checker, seeing zero
+          # diagnostics, would pass vacuously and suggest lowering the ceiling.
+          tsc_status=0
+          yarn workspace votetorrent-authority typecheck > authority-tsc.log 2>&1 || tsc_status=$?
+          cat authority-tsc.log
+          if [ "$tsc_status" -ne 0 ]; then
+            echo "tsc exited $tsc_status (expected: known errors); the checker decides"
           fi
+          echo "TSC-RAN exit=${tsc_status}" | tee -a authority-tsc.log
           node scripts/assert-ci-baselines.mjs authority-typecheck authority-tsc.log | tee -a ci-receipt.txt
 
       # Recorded, deliberately not run -- this phase touches nothing in the

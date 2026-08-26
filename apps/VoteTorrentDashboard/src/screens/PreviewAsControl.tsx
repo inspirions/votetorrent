@@ -20,7 +20,7 @@
  * component's own module boundary; both still live in their own dedicated
  * files exactly as the plan's artifact list requires.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { CAPABILITIES } from '../auth/capabilities.js';
 import type { ScopeCode } from '../auth/capabilities.js';
@@ -41,10 +41,16 @@ export { AdvisoryDisclosure } from './AdvisoryDisclosure.js';
 
 export interface PreviewAsProviderProps {
 	/** The officer's real, database-granted scopes — the as-built expression
-	 * `DashboardShell.tsx` already computes via `readGrantedScopes`. Fixed
-	 * for the lifetime of this provider instance; `PanelGrid`'s remount key
-	 * (network hash + officer id + bootstrappedAt) is what re-creates it
-	 * when the underlying officer actually changes. */
+	 * `DashboardShell.tsx` already computes via `readGrantedScopes`.
+	 *
+	 * ARRIVES ASYNCHRONOUSLY, AND THAT IS THE WHOLE POINT OF THE EFFECT
+	 * BELOW. `DashboardShell` renders this provider with `[]` on its first
+	 * render and only fills the array in once `attachNetworkDb` and
+	 * `readGrantedScopes` resolve. A `useState` lazy initializer runs on the
+	 * first render ONLY, so seeding from it alone froze `realScopes: []`
+	 * forever: every capability evaluated as denied and the grid rendered
+	 * nothing for a fully-privileged officer. Treat this prop as a live
+	 * value, never as a mount-time constant. */
 	realScopes: ReadonlyArray<ScopeCode>;
 	children: ReactNode;
 }
@@ -57,6 +63,19 @@ export interface PreviewAsProviderProps {
  */
 export function PreviewAsProvider({ realScopes, children }: PreviewAsProviderProps) {
 	const [state, setState] = useState(() => createPreviewState(realScopes));
+
+	// Re-seed when the officer's real scopes actually arrive (or change).
+	// Guarded on `touched`, which is the state model's own sticky flag: an
+	// officer who is midway through a preview never has it yanked out from
+	// under them by a late-arriving read, and `resetToReal` is still the one
+	// operation that clears the flag. The dependency is the JOINED scope
+	// string rather than the array identity, so a re-render that produces an
+	// equal-but-new array does not re-seed.
+	const realKey = realScopes.join(',');
+	useEffect(() => {
+		setState((prev) => (prev.touched ? prev : createPreviewState(realScopes)));
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- realKey IS realScopes, by value
+	}, [realKey]);
 
 	const value: GrantedScopesValue = useMemo(
 		() => ({

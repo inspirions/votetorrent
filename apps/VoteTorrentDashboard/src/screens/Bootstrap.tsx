@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { t } from '../i18n/copy.js';
-import { BOOTSTRAP_PHASES, copyKeysForOutcome, redeemAndBootstrap } from '../lifecycle/bootstrap.js';
+import { BOOTSTRAP_PHASES, copyKeyForPhase, copyKeysForOutcome, redeemAndBootstrap } from '../lifecycle/bootstrap.js';
 import { createRestBootstrapTransport } from '../transport/bootstrap-transport-client.js';
 
 /**
@@ -45,8 +45,27 @@ export function Bootstrap() {
 		if (submitting) return;
 
 		setState({ kind: 'in-flight', phase: BOOTSTRAP_PHASES[0] });
+
+		// SCOPED TO THE CONSTRUCTION CALL, DELIBERATELY.
+		// `createRestBootstrapTransport` throws synchronously on a missing
+		// baseUrl -- treat exactly like an unreachable transport rather than
+		// letting the app crash on a misconfigured deployment. Wrapping the
+		// whole redemption in this same catch, as an earlier version did, made
+		// every LOCAL failure -- a blocked IndexedDB delete, an
+		// applyExternalRowChanges failure, an invalid registry entry, a missing
+		// row-count record, anything Quereus raises while preparing the
+		// database -- report "couldn't reach the authority app" for something
+		// that happened entirely inside this browser, AFTER a successful
+		// redemption had already burned a single-use code.
+		let transport;
 		try {
-			const transport = createRestBootstrapTransport({ baseUrl: BOOTSTRAP_BASE_URL });
+			transport = createRestBootstrapTransport({ baseUrl: BOOTSTRAP_BASE_URL });
+		} catch {
+			setState({ kind: 'error', outcome: 'transport-unreachable' });
+			return;
+		}
+
+		try {
 			const result = await redeemAndBootstrap({
 				pastedCode,
 				transport,
@@ -61,11 +80,18 @@ export function Bootstrap() {
 				outcome: result.outcome,
 				reason: 'reason' in result ? result.reason : undefined,
 			});
-		} catch {
-			// createRestBootstrapTransport throws synchronously on a missing
-			// baseUrl -- treat exactly like an unreachable transport rather
-			// than letting the app crash on a misconfigured deployment.
-			setState({ kind: 'error', outcome: 'transport-unreachable' });
+		} catch (err) {
+			// `redeemAndBootstrap` returns an outcome for every EXPECTED
+			// refusal, so reaching here means something local went wrong after
+			// the code was spent. Report it in the verification family, whose
+			// action ("Try another code") is the right one and whose body is
+			// true on this screen -- it only ever performs a FIRST bootstrap, so
+			// there is no prior copy that could have been replaced. Log the
+			// error CLASS only: the message can carry row content, and the
+			// snapshot carries registrant information.
+			// eslint-disable-next-line no-console
+			console.error('redeemAndBootstrap failed after a spent code:', (err as { name?: string })?.name ?? 'Error');
+			setState({ kind: 'error', outcome: 'restore-incomplete' });
 		}
 	}
 
@@ -101,7 +127,10 @@ export function Bootstrap() {
 					{t('bootstrap.cta')}
 				</button>
 			</form>
-			{state.kind === 'in-flight' ? <p aria-live="polite">{state.phase}</p> : null}
+			{/* NEVER `{state.phase}`: those are BOOTSTRAP_PHASES' machine
+			    identifiers ("applying-schema" and friends), and an aria-live
+			    region is the last place a machine identifier belongs. */}
+			{state.kind === 'in-flight' ? <p aria-live="polite">{t(copyKeyForPhase(state.phase))}</p> : null}
 			{errorCopy ? (
 				<div role="alert">
 					<h2>{t(errorCopy.headingKey)}</h2>

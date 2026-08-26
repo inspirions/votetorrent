@@ -200,7 +200,6 @@ function Tree({
 			<AdvisoryDisclosure />
 			<PanelGrid
 				db={db}
-				grantedScopes={REAL_SCOPES}
 				revealDenied={reveal}
 				onToggleReveal={() => {}}
 				snapshotInstant={INSTANTS[phaseId] ?? INSTANTS.organizing}

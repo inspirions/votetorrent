@@ -258,7 +258,16 @@ function evaluateTier1(log, elapsedSecondsArg, baselines) {
       problems: ['no tier1 summary found (expected "# pass N" / "# fail N" or the bare spec-reporter fallback)'],
     };
   }
-  const elapsed = Number(elapsedSecondsArg);
+  // `Number('')` is 0, and 0 is finite -- so a bare Number() coercion turns an
+  // UNSET shell variable into a perfectly valid "0 seconds elapsed" and the
+  // budget passes on the strength of a value nobody measured. An empty or
+  // whitespace-only argument must land on NaN like any other malformed input.
+  const elapsed =
+    typeof elapsedSecondsArg === 'number'
+      ? elapsedSecondsArg
+      : typeof elapsedSecondsArg === 'string' && elapsedSecondsArg.trim() !== ''
+        ? Number(elapsedSecondsArg)
+        : Number.NaN;
   const problems = [];
   if (summary.failing > cfg.maxFailing) {
     problems.push(`fail=${summary.failing} exceeds maxFailing=${cfg.maxFailing}`);
@@ -266,7 +275,18 @@ function evaluateTier1(log, elapsedSecondsArg, baselines) {
   if (summary.passing < cfg.minPassing) {
     problems.push(`pass=${summary.passing} is below the floor minPassing=${cfg.minPassing}`);
   }
-  if (Number.isFinite(elapsed) && elapsed > cfg.maxSeconds) {
+  // A NON-FINITE elapsed is a FAILURE, never a waiver. `Number.isFinite(elapsed)
+  // && elapsed > max` skipped the budget entirely for a malformed argument -- an
+  // empty string from an unset shell variable, or a SECONDS arithmetic that
+  // produced nothing -- with no diagnostic at all. The receipt still printed
+  // (`seconds=NaN`), so the run looked normal while the time bound had silently
+  // ceased to exist.
+  if (!Number.isFinite(elapsed)) {
+    problems.push(
+      `elapsedSeconds argument is not a finite number (got ${JSON.stringify(elapsedSecondsArg)}) -- ` +
+        `the maxSeconds=${cfg.maxSeconds} budget cannot be evaluated, and an unevaluatable budget is not a passed one`,
+    );
+  } else if (elapsed > cfg.maxSeconds) {
     problems.push(`elapsed=${elapsed}s exceeds maxSeconds=${cfg.maxSeconds}`);
   }
   const notices = [];
@@ -288,9 +308,42 @@ function evaluateTier1(log, elapsedSecondsArg, baselines) {
 // authority typecheck ceiling
 // ---------------------------------------------------------------------------
 
+/**
+ * The marker the workflow appends after running tsc, carrying the compiler's
+ * real exit status. It exists because a CLEAN `tsc --noEmit` prints NOTHING,
+ * which is byte-identical to a log from a compiler that never ran -- so
+ * "contains no diagnostics" cannot, on its own, distinguish "someone fixed
+ * everything" from "the step crashed". See evaluateAuthorityTypecheck.
+ */
+const TSC_RAN_CLEAN_RE = /^TSC-RAN exit=0$/m;
+
 function evaluateAuthorityTypecheck(log, baselines) {
   const cfg = baselines.authorityTypecheck;
   const count = (log.match(/error TS\d+/g) || []).length;
+
+  // THE VACUOUS-PASS GUARD, which this check did not have while its two
+  // siblings did (evaluateVoteEngine's "no mocha summary found",
+  // evaluateTier1's "no tier1 summary found"). An empty or crashed log yields
+  // count = 0, which is <= the ceiling, so the check PASSED -- and helpfully
+  // emitted a ::notice:: suggesting someone lower the ceiling. The workflow
+  // step deliberately swallows tsc's exit code and hands the verdict here, so
+  // nothing else could catch it.
+  //
+  // Evidence the compiler ran is EITHER at least one diagnostic OR the
+  // workflow's explicit exit=0 marker. Requiring only the former would fail a
+  // genuinely clean typecheck, which is the outcome this ceiling exists to
+  // encourage.
+  if (count === 0 && !TSC_RAN_CLEAN_RE.test(log)) {
+    return {
+      ok: false,
+      problems: [
+        'no tsc diagnostics AND no "TSC-RAN exit=0" marker -- the typecheck did not run. ' +
+          'A clean run prints nothing, so the workflow must append that marker for a zero-error ' +
+          'log to be distinguishable from an empty or crashed one',
+      ],
+    };
+  }
+
   const problems = [];
   if (count > cfg.maxErrors) {
     problems.push(
@@ -507,6 +560,18 @@ function runSelftest() {
     // 13. tier1, vacuous
     check('tier1 vacuous', false, evaluateTier1('nothing resembling a summary here\n', 1, baselines));
 
+    // 13a-13c. tier1, malformed elapsed argument -- an unset shell variable
+    //          (empty string), a non-numeric word, and an omitted argument. Each
+    //          used to make the time budget silently disappear.
+    check('tier1 elapsed empty string', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), '', baselines));
+    check('tier1 elapsed non-numeric', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), 'not-a-number', baselines));
+    check('tier1 elapsed undefined', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), undefined, baselines));
+
+    // 13d. positive control for the three above: a well-formed elapsed at the
+    //      exact budget still passes, so the new guard is not just rejecting
+    //      everything.
+    check('tier1 elapsed exactly at the budget', true, evaluateTier1(buildTier1LogHash(t1Floor, 0), String(t1MaxSeconds), baselines));
+
     const tcCeiling = baselines.authorityTypecheck.maxErrors;
 
     // 14. authority-typecheck, exactly at the ceiling
@@ -528,6 +593,27 @@ function runSelftest() {
       'authority-typecheck under ceiling (notice)',
       true,
       evaluateAuthorityTypecheck(buildTscLog(Math.max(0, tcCeiling - 2)), baselines),
+    );
+
+    // 16a. authority-typecheck, VACUOUS (empty log) -- the case that matters
+    //      most, and the one cases 14-16 could never reach.
+    check('authority-typecheck vacuous (empty log)', false, evaluateAuthorityTypecheck('', baselines));
+
+    // 16b. authority-typecheck, the compiler crashed: no diagnostics, and the
+    //      marker reports a non-zero exit.
+    check(
+      'authority-typecheck crashed (marker, non-zero exit, no diagnostics)',
+      false,
+      evaluateAuthorityTypecheck('Cannot find module typescript\nTSC-RAN exit=1\n', baselines),
+    );
+
+    // 16c. authority-typecheck, genuinely CLEAN: zero diagnostics, marker says
+    //      exit=0. Must pass -- this is the outcome the ceiling encourages, and
+    //      the guard above must not punish it.
+    check(
+      'authority-typecheck genuinely clean (marker, exit=0, no diagnostics)',
+      true,
+      evaluateAuthorityTypecheck('TSC-RAN exit=0\n', baselines),
     );
 
     // 17. receipts, complete set

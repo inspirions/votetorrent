@@ -337,7 +337,15 @@ export default function SettingsScreen() {
 				    placed adjacent to the two device-level provisioning rows above for
 				    the same reason: it exports only data the officer's own device
 				    already holds. Deliberately NOT scope-gated: gating it would hide
-				    the feature from exactly the officer who needs it. */}
+				    the feature from exactly the officer who needs it.
+
+				    THAT REASONING COVERS SCOPE ONLY, AND THIS ROW IS NOT THE GATE.
+				    Navigating here must stay cheap; what is expensive is the export
+				    itself, which is why the destination screen — not this row — puts a
+				    blocking confirmation naming the whole database in front of
+				    `exportDashboardSnapshot()`. Whether the registrant-facing scopes
+				    should ALSO be required to mint a whole-database code is a separate,
+				    still-open decision; it is not settled by the sentence above. */}
 				<View testID="settings-dashboard-signin-code-entry">
 					<InfoCard
 						title={t("dashboardSignInCodeTitle")}
