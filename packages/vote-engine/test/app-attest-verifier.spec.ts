@@ -22,7 +22,7 @@ import { p256 } from '@noble/curves/nist.js'
 import type { AttestationChallenge, DeviceAttestation } from '@votetorrent/vote-core'
 import { verifyAppAttest } from '../src/association/verifiers/app-attest.js'
 import { verifyCrossSign, computeAssertionDigest, computePopDigest } from '../src/association/verifiers/app-attest-assertion.js'
-import { cborEncode, cborDecode, type CborValue } from '@votetorrent/vote-core'
+import { cborEncode, cborDecode, CBOR_MAX_NESTING_DEPTH, CBOR_MAX_INPUT_BYTES, type CborValue } from '@votetorrent/vote-core'
 import { encodeAppleNonceExtension, APPLE_NONCE_OID } from '../src/association/verifiers/apple-nonce-extension.js'
 import { recomputeChallengeDigest } from '../src/association/verifiers/digest-binding.js'
 import { AppAttestVerifier } from '../src/association/app-attest-verifier.js'
@@ -74,6 +74,10 @@ interface AttestationMutation {
   droppedIntermediate?: boolean
   attackerSuppliedRoot?: boolean
   forgedIntermediateSameName?: boolean
+  /** T-51-10: a chain whose signatures are all intact but whose credCert is out of date. */
+  expiredCredCert?: boolean
+  notYetValidCredCert?: boolean
+  expiredIntermediate?: boolean
 }
 
 interface AttestationFixture {
@@ -84,13 +88,19 @@ interface AttestationFixture {
   attestedKeys: CryptoKeyPair
 }
 
+const ONE_YEAR = 365 * 24 * 60 * 60 * 1000
 const DEVICE_KEY_FOR_ATTESTATION = 'phase51-vote-public-key'
 const BOUND_DIGEST = recomputeChallengeDigest(CHALLENGE_NONCE, DEVICE_KEY_FOR_ATTESTATION)
 const CLIENT_DATA_HASH = sha256(utf8(BOUND_DIGEST))
 
 async function buildAttestation (mutate: AttestationMutation = {}): Promise<AttestationFixture> {
   const root = await generateAppleRootCa()
-  const intermediate = await issueCert({ issuer: root, name: 'CN=Test Apple App Attest CA 1', serialNumber: '02', isCa: true })
+  const intermediate = await issueCert({
+    issuer: root, name: 'CN=Test Apple App Attest CA 1', serialNumber: '02', isCa: true,
+    ...(mutate.expiredIntermediate === true
+      ? { notBefore: new Date(Date.now() - 2 * ONE_YEAR), notAfter: new Date(Date.now() - ONE_YEAR) }
+      : {})
+  })
 
   const attestedKeys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']) as CryptoKeyPair
   const keyId = await keyIdForPublicKey(attestedKeys.publicKey)
@@ -106,7 +116,13 @@ async function buildAttestation (mutate: AttestationMutation = {}): Promise<Atte
 
   const credCert = await issueCert({
     issuer: intermediate, name: 'CN=Test App Attest credCert', serialNumber: '03',
-    isCa: false, subjectKeys: attestedKeys, extraExtensions: [nonceExt]
+    isCa: false, subjectKeys: attestedKeys, extraExtensions: [nonceExt],
+    ...(mutate.expiredCredCert === true
+      ? { notBefore: new Date(Date.now() - 2 * ONE_YEAR), notAfter: new Date(Date.now() - ONE_YEAR) }
+      : {}),
+    ...(mutate.notYetValidCredCert === true
+      ? { notBefore: new Date(Date.now() + ONE_YEAR), notAfter: new Date(Date.now() + 2 * ONE_YEAR) }
+      : {})
   })
 
   let attackerRoot: TestCertificate | undefined
@@ -185,6 +201,39 @@ describe('CBOR (App Attest subset)', () => {
     const withTrailer = new Uint8Array([...encoded, 0xff])
     expect(() => cborDecode(withTrailer)).to.throw(/trailing bytes/)
   })
+
+  // ---- T-51-09 resource bounds (phase 51 retroactive-STRIDE audit) ----
+  //
+  // These parse attacker-supplied bytes, so "it throws eventually" is not the property under test —
+  // it must throw for the STATED reason, at a bounded cost, before recursion can exhaust the stack.
+  describe('resource bounds on hostile input', () => {
+    it('rejects nesting deeper than the limit — 0x81 is one byte per level', () => {
+      // Each 0x81 is "array of 1", so N bytes buys N stack frames. This is the actual DoS vector;
+      // a declared-but-absent LENGTH is already self-limiting because the Reader runs out of input.
+      const bomb = new Uint8Array(CBOR_MAX_NESTING_DEPTH + 8).fill(0x81)
+      expect(() => cborDecode(bomb)).to.throw(/nesting deeper than/)
+    })
+
+    it('accepts nesting up to the limit (control — the bound is not simply off)', () => {
+      // Without this, a decoder that rejected EVERYTHING would pass the test above.
+      const deep = new Uint8Array(CBOR_MAX_NESTING_DEPTH).fill(0x81)
+      const atLimit = new Uint8Array([...deep, 0x00]) // innermost item: uint 0
+      expect(() => cborDecode(atLimit)).to.not.throw()
+    })
+
+    it('rejects an oversized payload before decoding it', () => {
+      const huge = new Uint8Array(CBOR_MAX_INPUT_BYTES + 1)
+      expect(() => cborDecode(huge)).to.throw(/exceeds the .* limit/)
+    })
+
+    it('still accepts a real-sized attestation object (control — the size cap is not too tight)', () => {
+      // A genuine App Attest object measured 5,873 bytes on an iPhone 13; the cap must clear it by a
+      // wide margin or this control becomes an availability bug.
+      const realistic = cborEncode(new Map<CborValue, CborValue>([['authData', new Uint8Array(8192)]]))
+      expect(realistic.length).to.be.lessThan(CBOR_MAX_INPUT_BYTES)
+      expect(() => cborDecode(realistic)).to.not.throw()
+    })
+  })
 })
 
 describe('verifyAppAttest — the attestation half', () => {
@@ -252,6 +301,30 @@ describe('verifyAppAttest — the attestation half', () => {
     const r = await runAttestation({ forgedIntermediateSameName: true })
     expect(r.ok).to.equal(false)
     expect(r.reason).to.match(/pinned Apple App Attest root/)
+  })
+
+  // ---- T-51-10 certificate validity window (phase 51 retroactive-STRIDE audit) ----
+  //
+  // Each chain below is cryptographically PERFECT — it builds to the pinned root and every link
+  // signature verifies — and is merely outside its validity window. Before this check the verifier
+  // accepted all of them, because `verify({ signatureOnly: true })` skips validity by design. The
+  // Android sibling (`key-attestation.ts`) had always rejected them; the asymmetry was undocumented.
+  it('rejects an EXPIRED credCert even though the chain and signatures are intact', async () => {
+    const r = await runAttestation({ expiredCredCert: true })
+    expect(r.ok).to.equal(false)
+    expect(r.reason).to.match(/expired or not yet valid/)
+  })
+
+  it('rejects a NOT-YET-VALID credCert (clock-skew / post-dated cert)', async () => {
+    const r = await runAttestation({ notYetValidCredCert: true })
+    expect(r.ok).to.equal(false)
+    expect(r.reason).to.match(/expired or not yet valid/)
+  })
+
+  it('rejects an expired INTERMEDIATE, not just the leaf', async () => {
+    const r = await runAttestation({ expiredIntermediate: true })
+    expect(r.ok).to.equal(false)
+    expect(r.reason).to.match(/expired or not yet valid/)
   })
 })
 

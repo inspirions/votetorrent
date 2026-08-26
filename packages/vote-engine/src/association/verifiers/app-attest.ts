@@ -110,6 +110,19 @@ export async function verifyAppAttest (
       const okSig = await path[i]!.verify({ publicKey: path[i + 1]!.publicKey, signatureOnly: true })
       if (!okSig) return { ok: false, reason: `certificate path signature failed at link ${i}` }
     }
+    // Expiry across the validated path. A cryptographically intact chain is not a VALID one: every
+    // `verify()` above passes `signatureOnly: true`, which deliberately skips the validity window, so
+    // without this an attestation signed by a long-expired credCert (or under an expired
+    // intermediate) is accepted indefinitely. The Android sibling has always checked this
+    // (`key-attestation.ts`); iOS did not, and the asymmetry was never a documented decision —
+    // T-51-10, found by the phase 51 retroactive-STRIDE audit. The pinned root is included on
+    // purpose: an expired trust anchor should fail closed, not be waved through.
+    const now = new Date()
+    for (const cert of path) {
+      if (now < cert.notBefore || now > cert.notAfter) {
+        return { ok: false, reason: 'a certificate in the App Attest chain is expired or not yet valid' }
+      }
+    }
 
     // ---- STEP 2/3: nonce = SHA256(authData || clientDataHash) ----
     // clientDataHash is ALREADY a hash and is concatenated RAW — never re-hashed.

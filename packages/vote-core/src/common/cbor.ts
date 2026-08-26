@@ -42,7 +42,27 @@ class Reader {
   }
 }
 
-function decodeItem (r: Reader): CborValue {
+/**
+ * Resource bounds on attacker-controlled input (T-51-09, phase 51 retroactive-STRIDE audit).
+ *
+ * This decoder parses bytes an untrusted device submits, so both limits below are security controls,
+ * not tidiness. The vector is NESTING, not length: `0x81` ("array of 1") is a single byte, so an
+ * N-byte payload of them recurses N deep and exhausts the stack. A declared-but-absent length is
+ * already self-limiting — the Reader throws `truncated` as soon as it runs past the end — so it is
+ * depth, plus a ceiling on how much we agree to look at, that need stating.
+ *
+ * Both are far above anything real: App Attest nests ~4 deep, and a genuine attestation object
+ * measured 5,873 bytes on an iPhone 13.
+ */
+export const CBOR_MAX_NESTING_DEPTH = 32
+export const CBOR_MAX_INPUT_BYTES = 1 << 20 // 1 MiB
+
+function decodeItem (r: Reader, depth: number): CborValue {
+  // Checked on ENTRY to each nested item, so the limit is reached before the next stack frame is
+  // pushed rather than after — the throw must not itself be the thing that overflows.
+  if (depth > CBOR_MAX_NESTING_DEPTH) {
+    throw new Error(`CBOR: nesting deeper than ${CBOR_MAX_NESTING_DEPTH}`)
+  }
   const ib = r.u8()
   const major = ib >> 5
   const ai = ib & 0x1f
@@ -54,13 +74,13 @@ function decodeItem (r: Reader): CborValue {
     case 4: {
       const n = r.uint(ai)
       const arr: CborValue[] = []
-      for (let i = 0; i < n; i++) arr.push(decodeItem(r))
+      for (let i = 0; i < n; i++) arr.push(decodeItem(r, depth + 1))
       return arr
     }
     case 5: {
       const n = r.uint(ai)
       const m = new Map<CborValue, CborValue>()
-      for (let i = 0; i < n; i++) { const k = decodeItem(r); m.set(k, decodeItem(r)) }
+      for (let i = 0; i < n; i++) { const k = decodeItem(r, depth + 1); m.set(k, decodeItem(r, depth + 1)) }
       return m
     }
     default: throw new Error(`CBOR: unsupported major type ${major}`)
@@ -68,8 +88,11 @@ function decodeItem (r: Reader): CborValue {
 }
 
 export function cborDecode (buf: Uint8Array): CborValue {
+  if (buf.length > CBOR_MAX_INPUT_BYTES) {
+    throw new Error(`CBOR: input of ${buf.length} bytes exceeds the ${CBOR_MAX_INPUT_BYTES}-byte limit`)
+  }
   const r = new Reader(buf)
-  const v = decodeItem(r)
+  const v = decodeItem(r, 0)
   if (r.offset !== buf.length) throw new Error(`CBOR: ${buf.length - r.offset} trailing bytes`)
   return v
 }

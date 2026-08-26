@@ -59,6 +59,13 @@ export async function issueCert (opts: {
   isCa: boolean
   extraExtensions?: Extension[]
   subjectKeys?: CryptoKeyPair
+  /**
+   * Validity window overrides. Default to +/- a year (i.e. currently valid) so every existing caller
+   * is unaffected; supplied only by the T-51-10 expiry negative controls, which need a chain that is
+   * cryptographically perfect and merely out of date.
+   */
+  notBefore?: Date
+  notAfter?: Date
 }): Promise<TestCertificate> {
   const keys = opts.subjectKeys ?? await generateKeyPair()
   const extensions: Extension[] = [new BasicConstraintsExtension(opts.isCa, opts.isCa ? 1 : undefined, true)]
@@ -67,8 +74,8 @@ export async function issueCert (opts: {
     serialNumber: opts.serialNumber,
     subject: opts.name,
     issuer: opts.issuer.cert.subject,
-    notBefore: new Date(Date.now() - ONE_YEAR_MS),
-    notAfter: new Date(Date.now() + ONE_YEAR_MS),
+    notBefore: opts.notBefore ?? new Date(Date.now() - ONE_YEAR_MS),
+    notAfter: opts.notAfter ?? new Date(Date.now() + ONE_YEAR_MS),
     signingAlgorithm: SIGNING_ALGORITHM,
     publicKey: keys.publicKey,
     signingKey: opts.issuer.privateKey,

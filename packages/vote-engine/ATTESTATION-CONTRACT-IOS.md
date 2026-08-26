@@ -237,8 +237,17 @@ popSignature = signWithDeviceKey(keyAlias, base64(SHA256(utf8(POP_DIGEST))))
 bytes**, never base64url, never UTF-8-of-a-string. The result is 64-byte compact low-S `r‖s` hex
 (see `SignatureEncoding.swift`, proven 17/17 in spike 083).
 
-The verifier checks `popSignature` against the submitted `deviceKey` under `@noble/curves` v2
-defaults (`prehash: true`, `lowS: true`, `format: 'compact'`).
+The verifier checks `popSignature` against the submitted `deviceKey` with
+`prehash: FALSE, lowS: true, format: 'compact'`.
+
+`prehash: false` is NOT the `@noble/curves` v2 default, and the deviation is load-bearing. The device
+signs with `.ecdsaSignatureDigestX962SHA256` over the 32 bytes `SHA256(utf8(POP_DIGEST))`, so those
+bytes ARE the ECDSA digest — there is no second hash. Passing `prehash: true` would hash them again
+and reject every genuine signature. (Corrected 2026-08-26: this line and §8 rule 11 both said
+`prehash: true`, contradicting the shipped code. The code is right and is now hardware-proven —
+`verifyCrossSign` accepts a real iPhone 13 POP signature, `ios-hardware-attestation.spec.ts`. Note
+this is the OPPOSITE of the assertion check in §3.3, which genuinely does need `prehash: true`; that
+asymmetry is why the two must be stated separately.)
 
 > **This has no Android counterpart, and that is a finding, not an oversight — see §6.**
 
@@ -337,7 +346,9 @@ All must pass; a single passing half never authorizes association (D-01's spirit
 
 **Possession half:**
 11. `popSignatureHex` verifies over `SHA256(utf8(POP_DIGEST))` against `challenge.deviceKey` with
-    `prehash: true, lowS: true, format: 'compact'`.
+    `prehash: false, lowS: true, format: 'compact'` — those bytes are already the ECDSA digest, so
+    hashing them again rejects every genuine signature. See §4; contrast rule 9's assertion check,
+    which does use `prehash: true`.
 
 **Error discipline:** identical to the Android verifiers — every failure is a structured
 `{ ok: false, reason }`, never a throw, never a silent false-reject.
