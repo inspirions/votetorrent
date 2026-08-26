@@ -95,9 +95,18 @@ export default function DashboardSignInCodeScreen() {
 				setHasNetwork(false);
 				return;
 			}
-			// Never render a raw engine error message — surface it through the
-			// same InlineError affordance every other screen in this app uses.
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			// A COPY-TABLE STRING, and the error CLASS to the console. The
+			// comment here used to say "never render a raw engine error
+			// message" while the line below rendered exactly that. On this
+			// screen it mattered more than usual: the reachable errors come
+			// from `exportDatabaseSnapshot`, whose messages name internal
+			// schema structure ("unsupported value type in <Table>.<Column>",
+			// "failed to read table <Table>"), and from an absent engine
+			// factory, which surfaced as "Cannot read properties of null
+			// (reading 'exportDashboardSnapshot')" in the officer's face.
+			// eslint-disable-next-line no-console
+			console.error("DashboardSignInCodeScreen: generating a code failed:", (error as { name?: string })?.name ?? "Error");
+			setErrorMessage(t("dashboardSignInCodeGenerateFailed"));
 		} finally {
 			setGenerating(false);
 		}

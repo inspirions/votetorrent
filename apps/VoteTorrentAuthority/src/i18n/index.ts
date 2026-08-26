@@ -675,6 +675,7 @@ const resources = {
 			dashboardSignInCodeCountdown: 'Expires in {{remaining}}',
 			dashboardSignInCodeIdle: 'Generate a code to sign an officer in to the web dashboard.',
 			dashboardSignInCodeDiscardButton: 'Discard Staged Code',
+			dashboardSignInCodeGenerateFailed: "Couldn't generate a code. Try again.",
 			dashboardSignInCodeConfirmHeading: 'Export this authority’s whole database?',
 			dashboardSignInCodeConfirmBody:
 				'Generating a code copies everything this device holds for this network — including registrant information — into a single-use export. Anyone who reads the code can pull that copy into a web browser. Only continue if you are handing the code to an officer you trust, right now.',
@@ -1528,6 +1529,7 @@ const resources = {
 			dashboardSignInCodeCountdown: 'Vence en {{remaining}}',
 			dashboardSignInCodeIdle: 'Genere un código para iniciar sesión a un funcionario en el panel web.',
 			dashboardSignInCodeDiscardButton: 'Descartar Código Preparado',
+			dashboardSignInCodeGenerateFailed: 'No se pudo generar un código. Inténtelo de nuevo.',
 			dashboardSignInCodeConfirmHeading: '¿Exportar toda la base de datos de esta autoridad?',
 			dashboardSignInCodeConfirmBody:
 				'Generar un código copia todo lo que este dispositivo guarda de esta red — incluida la información de los registrantes — en una exportación de un solo uso. Cualquiera que lea el código puede llevar esa copia a un navegador web. Continúe solo si va a entregar el código a un funcionario de confianza, ahora mismo.',

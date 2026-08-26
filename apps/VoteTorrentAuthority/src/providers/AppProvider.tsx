@@ -126,7 +126,18 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// somehow absent, so an absent factory ref surfaces as a rejected promise
 	// rather than a silently empty snapshot.
 	const exportDashboardSnapshot = useCallback(async (): Promise<BootstrapSnapshot> => {
-		return engineFactoryRef.current!.exportDashboardSnapshot();
+		// An EXPLICIT, NAMED failure rather than a non-null assertion. `!` made
+		// an absent factory ref surface as "Cannot read properties of null
+		// (reading 'exportDashboardSnapshot')" -- a message the producer screen
+		// then rendered to the officer verbatim. Named here so a caller can log
+		// the class and show its own copy.
+		const factory = engineFactoryRef.current;
+		if (!factory) {
+			const error = new Error("AppProvider: the engine factory is not ready; cannot export a dashboard snapshot");
+			error.name = "EngineFactoryUnavailableError";
+			throw error;
+		}
+		return factory.exportDashboardSnapshot();
 	}, []);
 
 	// Activate a network at runtime (create / picker "Select") without a reboot.

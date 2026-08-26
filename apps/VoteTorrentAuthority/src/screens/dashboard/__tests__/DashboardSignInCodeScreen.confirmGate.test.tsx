@@ -152,6 +152,23 @@ describe("DashboardSignInCodeScreen — the export is never one press away", () 
 		expect(mockMint).toHaveBeenCalledTimes(1);
 	});
 
+	it("a failing export renders a copy-table key, never the raw engine message", async () => {
+		const raw = new Error("dashboard-bootstrap-producer: unsupported value type in Registrant.LegalName");
+		raw.name = "SnapshotExportError";
+		mockExportDashboardSnapshot.mockRejectedValueOnce(raw);
+
+		const tr = await renderScreen();
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("dashboardSignInCodeGenerateFailed");
+		// The raw message names internal schema structure -- a table and a
+		// column -- and must never reach the officer's screen.
+		expect(json).not.toContain("unsupported value type");
+		expect(json).not.toContain("Registrant.LegalName");
+	});
+
 	it("cancelling withdraws the confirmation without exporting anything", async () => {
 		const tr = await renderScreen();
 		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
