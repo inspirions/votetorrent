@@ -10,10 +10,11 @@
  * path back to recovery).
  *
  * Reconciliation this test encodes (so a future reader does not conclude the rollout is short):
- *   - 22 non-test files under `src` reference `device-signer` in some form.
- *   - 20 of those actually INVOKE `createDeviceSigner(` (a call expression, not a comment).
- *   - 17 of the 20 route through `useDeviceSigningErrorHandler` (8 from 49-11, 9 from 49-12).
- *   - 3 of the 20 are named, justified exemptions (`ROLLOUT_EXEMPT` below).
+ *   - 23 non-test files under `src` reference `device-signer` in some form.
+ *   - 21 of those actually INVOKE `createDeviceSigner(` (a call expression, not a comment).
+ *   - 18 of the 21 route through `useDeviceSigningErrorHandler` (8 from 49-11, 9 from 49-12,
+ *     1 from 50-15's `DashboardSignInCodeScreen.tsx` — the CR-04 presence-proof gate).
+ *   - 3 of the 21 are named, justified exemptions (`ROLLOUT_EXEMPT` below).
  *   - 2 files (`engines/registrant-dev-seed.ts`, `engines/signing-proof.ts`) reference
  *     `createDeviceSigner` only in prose comments, never as a call — they are correctly
  *     excluded from the 20-file invocation inventory by this test's comment-stripping walk,
@@ -108,14 +109,14 @@ describe('D-09/D-13/D-14 rollout completeness: every createDeviceSigner call sit
 		.map((f) => path.relative(SRC_ROOT, f))
 		.sort();
 
-	it('the call-site inventory has exactly 20 members (fail loud, with the full list, if this drifts)', () => {
-		if (invokingFiles.length !== 20) {
+	it('the call-site inventory has exactly 21 members (fail loud, with the full list, if this drifts)', () => {
+		if (invokingFiles.length !== 21) {
 			throw new Error(
-				`Expected exactly 20 createDeviceSigner(...) call-site files, found ` +
+				`Expected exactly 21 createDeviceSigner(...) call-site files, found ` +
 					`${invokingFiles.length}:\n${invokingFiles.join('\n')}`,
 			);
 		}
-		expect(invokingFiles).toHaveLength(20);
+		expect(invokingFiles).toHaveLength(21);
 	});
 
 	it('ROLLOUT_EXEMPT has exactly 3 entries', () => {
