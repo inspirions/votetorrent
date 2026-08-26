@@ -62,7 +62,7 @@ test('inertness control: the two-owners matcher hits a synthetic setGrantedScope
 	assert.match('setGrantedScopes([]);', /setGrantedScopes\(\[\]\)/, 'matcher is inert');
 });
 
-const HANDOVER_RE = /const handoverDb = dbRef\.current \?\? undefined;[\s\S]{0,400}?db: handoverDb,/;
+const HANDOVER_RE = /const handoverDb = dbRef\.current \?\? undefined;[\s\S]{0,600}?db: handoverDb,/;
 
 test('handleConfirmSwap hands its open handle to performOfficerSwap BEFORE the swap runs', () => {
 	// performOfficerSwap -> refreshNetwork -> redeemAndBootstrap({ replace:
@@ -74,9 +74,11 @@ test('handleConfirmSwap hands its open handle to performOfficerSwap BEFORE the s
 	// single-use code.
 	assert.match(CODE, HANDOVER_RE);
 
-	// And the handover must precede the call, not follow it.
+	// And the handover must precede the call, not follow it. The call is now
+	// reached through withNetworkDbLifecycleLock (CR-04), so this looks for
+	// performOfficerSwap( itself rather than an immediately-preceding await.
 	const handoverAt = CODE.indexOf('const handoverDb = dbRef.current');
-	const swapCallAt = CODE.indexOf('await performOfficerSwap(');
+	const swapCallAt = CODE.indexOf('performOfficerSwap(', handoverAt);
 	assert.ok(handoverAt >= 0 && swapCallAt >= 0, 'could not locate both the handover and the swap call');
 	assert.ok(handoverAt < swapCallAt, 'the handle is taken AFTER the swap call -- the delete is still racing it');
 });
@@ -173,4 +175,123 @@ test('inertness control: the old comparison, which enabled the button on open fo
 		/forgetExpectedName\.length === 0 \|\| forgetConfirmationInput\.trim\(\) !== forgetExpectedName/,
 		'matcher is inert',
 	);
+});
+
+// --- Surfaced classify() failure (CR-03) ----------------------------------------
+
+const CLASSIFY_CATCH_RE = /\} catch \(err\) \{\s*if \(!cancelled\) setSwapError\(err\);[\s\S]{0,80}?\} finally \{/;
+
+test('classify() has a catch clause that surfaces the failure via setSwapError, positioned before the finally', () => {
+	// Every throwing call inside classify() -- splitSignInCode on a malformed
+	// code, transport.redeem rejecting, classifyRedemption, and a throw from
+	// performOfficerSwap on the same-officer-refresh branch -- used to escape
+	// as an unhandled promise rejection, leaving db === null with no banner
+	// and no dialog while PanelGrid rendered nine panels each showing their
+	// own empty copy.
+	assert.match(CODE, CLASSIFY_CATCH_RE);
+});
+
+test('inertness control: the classify-catch matcher does NOT accept a bare try/finally with no catch', () => {
+	const fixture = 'try {\n\t\t\t\t// work\n\t\t\t} finally {\n\t\t\t\tif (!cancelled) onSwapContextConsumed?.();\n\t\t\t}';
+	assert.doesNotMatch(fixture, CLASSIFY_CATCH_RE, 'matcher is inert');
+});
+
+const MAIN_REGION_SWAP_ERROR_RE = /\{attachError \? \([\s\S]{0,900}?\) : swapError && !pendingSwap \? \(/;
+
+test('the main region renders a dedicated banner for a surfaced swapError only when no swap dialog is pending', () => {
+	// A classification failure must never be represented by nine panels each
+	// showing their own empty copy -- an officer whose database failed must
+	// never be told their authority has no registrants. The banner only
+	// applies when no swap dialog is open: a confirmed-swap failure belongs
+	// in the dialog the officer is already looking at.
+	assert.match(CODE, MAIN_REGION_SWAP_ERROR_RE);
+});
+
+test('inertness control: the main-region matcher does NOT accept the old attachError-or-grid-only shape', () => {
+	const fixture =
+		'{attachError ? (\n\t\t\t\t\t\t<div className="sh-error-banner">\n\t\t\t\t\t\t\tstuff\n\t\t\t\t\t\t</div>\n\t\t\t\t\t) : (\n\t\t\t\t\t\t<PanelGrid';
+	assert.doesNotMatch(fixture, MAIN_REGION_SWAP_ERROR_RE, 'matcher is inert');
+});
+
+test('the surfaced swap-error banner renders through t() with the two new copy keys', () => {
+	assert.match(CODE, /t\('network\.swapErrorHeading'\)/);
+	assert.match(CODE, /t\('network\.swapErrorBody'\)/);
+});
+
+// --- Handed-off transport cache ownership (D-14 continuity, 50-22) -------------
+
+const RESET_CALL_RE = /\.reset\(\)/g;
+
+test('the handed-off single-flight cache is reset on at least 7 terminal call sites', () => {
+	// handleCancelSwap (unchanged) + the classify catch clause + the
+	// fail-closed replay branch + officer-indeterminate + new-network + BOTH
+	// routes of same-officer-refresh + all three terminal routes of
+	// handleConfirmSwap. The one path that must NOT reset is 'officer-swap'
+	// -- the confirm dialog still needs the cached envelope.
+	const matches = CODE.match(RESET_CALL_RE) ?? [];
+	assert.ok(matches.length >= 7, `expected at least 7 .reset() call sites, found ${matches.length}`);
+});
+
+const OFFICER_SWAP_CASE_RE = /case 'officer-swap':[\s\S]*?break;/;
+
+test("the officer-swap case body resets nothing -- the confirm dialog still needs the cached envelope", () => {
+	const match = CODE.match(OFFICER_SWAP_CASE_RE);
+	assert.ok(match, 'could not locate the officer-swap case');
+	assert.doesNotMatch(match[0], /\.reset\(\)/);
+});
+
+test('inertness control: the officer-swap-no-reset matcher DOES flag a fixture with a reset call inside that case', () => {
+	const fixture = "case 'officer-swap':\n\tsetPendingSwap({ networkHash });\n\tswapContext.transport.reset();\n\tbreak;";
+	const match = fixture.match(OFFICER_SWAP_CASE_RE);
+	assert.ok(match);
+	assert.match(match[0], /\.reset\(\)/, 'matcher is inert -- it correctly flags the misplaced reset');
+});
+
+const CLASSIFY_FINALLY_RE = /\} finally \{\s*if \(!cancelled\) onSwapContextConsumed\?\.\(\);\s*\}/;
+
+test("classify()'s finally block contains no reset call -- officer-swap falls through the SAME finally and must keep its cache", () => {
+	assert.match(CODE, CLASSIFY_FINALLY_RE);
+});
+
+test('inertness control: the finally-no-reset matcher rejects a fixture where reset was moved into finally (which would break the confirm path)', () => {
+	const fixture =
+		'} finally {\n\t\t\t\tswapContext.transport.reset();\n\t\t\t\tif (!cancelled) onSwapContextConsumed?.();\n\t\t\t}';
+	assert.doesNotMatch(fixture, CLASSIFY_FINALLY_RE, 'matcher is inert');
+});
+
+// --- Every destructive db path queued onto the per-network lock (CR-04) --------
+
+const FORGET_INSIDE_LOCK_RE = /withNetworkDbLifecycleLock\([^,]+,\s*\(\) =>\s*forgetNetwork\(/;
+
+test('forgetNetwork is called only from inside withNetworkDbLifecycleLock', () => {
+	// CR-04: withNetworkDbLifecycleLock serialized exactly attachNetworkDb and
+	// closeNetworkDb. It did NOT wrap handleConfirmForget -> forgetNetwork ->
+	// deleteNetworkDbSettled -> indexedDB.deleteDatabase, one of the two most
+	// destructive open/close operations in the app against the same
+	// networkHash.
+	assert.match(CODE, FORGET_INSIDE_LOCK_RE);
+	const forgetCallCount = (CODE.match(/forgetNetwork\(/g) ?? []).length;
+	assert.equal(forgetCallCount, 1, 'expected exactly one forgetNetwork( call site');
+});
+
+test('inertness control: the forget-lock matcher rejects a bare (unwrapped) forgetNetwork call', () => {
+	const fixture = 'const result = await forgetNetwork({ networkHash, typedConfirmation, db });';
+	assert.doesNotMatch(fixture, FORGET_INSIDE_LOCK_RE, 'matcher is inert');
+});
+
+const PERFORM_OFFICER_SWAP_INSIDE_LOCK_RE = /withNetworkDbLifecycleLock\([^,]+,\s*\(\) =>\s*performOfficerSwap\(/g;
+
+test('both performOfficerSwap call sites are wrapped in withNetworkDbLifecycleLock, and there are exactly two', () => {
+	// CR-04: neither the handleConfirmSwap call site nor the classify
+	// effect's same-officer-refresh call site was queued onto the lock that
+	// already serializes attach and close for the same networkHash.
+	const wrapped = CODE.match(PERFORM_OFFICER_SWAP_INSIDE_LOCK_RE) ?? [];
+	assert.equal(wrapped.length, 2, `expected exactly 2 wrapped performOfficerSwap call sites, found ${wrapped.length}`);
+	const totalCallSites = (CODE.match(/performOfficerSwap\(/g) ?? []).length;
+	assert.equal(totalCallSites, 2, `expected exactly 2 performOfficerSwap( call sites total, found ${totalCallSites}`);
+});
+
+test('inertness control: the performOfficerSwap-lock matcher rejects a bare (unwrapped) call', () => {
+	const fixture = 'const result = await performOfficerSwap({ networkHash, pastedCode, transport, db });';
+	assert.doesNotMatch(fixture, PERFORM_OFFICER_SWAP_INSIDE_LOCK_RE, 'matcher is inert');
 });

@@ -104,3 +104,14 @@ test('panelFrame.tierPill, panelFrame.sitePill and panelFrame.sitesPill exist an
 	assert.equal(t('panelFrame.sitePill', { count: '1' }), '1 site');
 	assert.equal(t('panelFrame.sitesPill', { count: '3' }), '3 sites');
 });
+
+// --- Surfaced swap-failure banner (CR-03, 50-22) --------------------------------
+
+test('t("network.swapErrorHeading") and t("network.swapErrorBody") resolve to non-empty strings with no residual {{', () => {
+	const heading = t('network.swapErrorHeading');
+	const body = t('network.swapErrorBody');
+	assert.ok(heading.length > 0, 'expected a non-empty heading');
+	assert.ok(body.length > 0, 'expected a non-empty body');
+	assert.ok(!heading.includes('{{'), 'expected no residual {{ placeholder marker in heading');
+	assert.ok(!body.includes('{{'), 'expected no residual {{ placeholder marker in body');
+});

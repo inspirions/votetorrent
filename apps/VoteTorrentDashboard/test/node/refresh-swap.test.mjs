@@ -961,7 +961,10 @@ test("DashboardShell: an 'officer-swap' classification populates pendingSwap (ra
 	assert.doesNotMatch(officerSwapCase, /await performOfficerSwap\(/, "officer-swap must raise the dialog, not swap directly");
 
 	const sameOfficerCase = effectBody.slice(effectBody.indexOf("case 'same-officer-refresh':"), effectBody.indexOf("case 'officer-indeterminate':"));
-	assert.match(sameOfficerCase, /await performOfficerSwap\(\{/);
+	// The call is reached through withNetworkDbLifecycleLock (CR-04, 50-22),
+	// so this matches performOfficerSwap( itself rather than an
+	// immediately-preceding await.
+	assert.match(sameOfficerCase, /performOfficerSwap\(\{/);
 	assert.doesNotMatch(sameOfficerCase, /setPendingSwap\(/, 'same-officer-refresh must not raise the confirm dialog');
 });
 
@@ -989,7 +992,9 @@ test('inertness control: the no-swap-call matcher hits a synthetic fixture that 
 test('DashboardShell: the same-officer-refresh path hands its open handle over BEFORE calling performOfficerSwap, mirroring handleConfirmSwap', () => {
 	const sameOfficerCase = SHELL_CODE.slice(SHELL_CODE.indexOf("case 'same-officer-refresh':"), SHELL_CODE.indexOf("case 'officer-indeterminate':"));
 	const handoverAt = sameOfficerCase.indexOf('const handoverDb = dbRef.current');
-	const swapCallAt = sameOfficerCase.indexOf('await performOfficerSwap(');
+	// performOfficerSwap( itself, not an immediately-preceding await -- the
+	// call is now reached through withNetworkDbLifecycleLock (CR-04, 50-22).
+	const swapCallAt = sameOfficerCase.indexOf('performOfficerSwap(');
 	assert.ok(handoverAt >= 0 && swapCallAt >= 0, 'could not locate both the handover and the swap call in the same-officer-refresh case');
 	assert.ok(handoverAt < swapCallAt, 'the handle must be taken BEFORE the swap call');
 	assert.match(sameOfficerCase, /db: handoverDb,/);

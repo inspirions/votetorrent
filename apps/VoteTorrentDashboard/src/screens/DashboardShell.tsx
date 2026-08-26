@@ -102,6 +102,19 @@ export interface DashboardShellProps {
  * object stores was not found` -- connections racing the same database's
  * schema reconcile. Every open and close for a given hash is now queued onto
  * the SAME chain, so they always run one at a time, in the order requested.
+ *
+ * FOUR OPERATION FAMILIES SHARE THIS ONE QUEUE (CR-04, 50-22): attach
+ * (`attachNetworkDb`), close (`closeNetworkDb`), forget (`forgetNetwork` --
+ * delete-and-remove), and swap/refresh (`performOfficerSwap` -- delete then
+ * recreate, from both `handleConfirmSwap` and the classify effect's
+ * same-officer-refresh branch). Forget and swap/refresh are the two most
+ * destructive operations the app performs against a given `networkHash`, and
+ * before this they ran OUTSIDE the queue entirely -- able to race an attach or
+ * close from another (real or StrictMode-phantom) `DashboardShell` instance
+ * for the SAME hash. `compose-gate.tsx`'s compose-swap browser leg reproduced
+ * this as a roughly-1-in-3 `MisuseError` and was "fixed" by removing
+ * `StrictMode` from that one mount -- A HARNESS CHANGE IS NOT AN ACCEPTABLE
+ * SUBSTITUTE for closing this coverage gap in the product itself.
  */
 const dbLifecycleChains = new Map<string, Promise<unknown>>();
 
@@ -279,11 +292,16 @@ export function DashboardShell({
 	async function handleConfirmForget() {
 		if (!activeNetwork) return;
 		try {
-			const result = await forgetNetwork({
-				networkHash: activeNetwork.networkHash,
-				typedConfirmation: forgetConfirmationInput,
-				db: dbRef.current ?? undefined,
-			});
+			// Queued onto the SAME per-network lock attach/close/swap already
+			// share -- see `withNetworkDbLifecycleLock`'s module-level doc
+			// comment (CR-04).
+			const result = await withNetworkDbLifecycleLock(activeNetwork.networkHash, () =>
+				forgetNetwork({
+					networkHash: activeNetwork.networkHash,
+					typedConfirmation: forgetConfirmationInput,
+					db: dbRef.current ?? undefined,
+				}),
+			);
 			dbRef.current = null;
 			setDb(null);
 			forgetDialogRef.current?.close();
@@ -308,6 +326,11 @@ export function DashboardShell({
 
 	async function handleConfirmSwap() {
 		if (!pendingSwap) return;
+		// Captured into a local BEFORE the awaits below -- `pendingSwap` is
+		// component state and this async function keeps running after a
+		// re-render could have changed or cleared it, but the handed-off
+		// single-flight cache must still be reset on every terminal path.
+		const swapTransport = pendingSwap.transport;
 		// HAND THE HANDLE OVER BEFORE THE SWAP, NEVER AFTER.
 		// `performOfficerSwap` -> `refreshNetwork` -> `redeemAndBootstrap({
 		// replace: true })` deletes this exact database, and
@@ -322,14 +345,20 @@ export function DashboardShell({
 		dbRef.current = null;
 		setDb(null);
 		try {
-			const result = await performOfficerSwap({
-				networkHash: pendingSwap.networkHash,
-				pastedCode: pendingSwap.pastedCode,
-				transport: pendingSwap.transport,
-				db: handoverDb,
-			});
+			// Queued onto the SAME per-network lock attach/close/forget already
+			// share -- see `withNetworkDbLifecycleLock`'s module-level doc
+			// comment (CR-04).
+			const result = await withNetworkDbLifecycleLock(pendingSwap.networkHash, () =>
+				performOfficerSwap({
+					networkHash: pendingSwap.networkHash,
+					pastedCode: pendingSwap.pastedCode,
+					transport: pendingSwap.transport,
+					db: handoverDb,
+				}),
+			);
 			if (result.outcome !== 'ok') {
 				setSwapError(result);
+				swapTransport.reset();
 				return;
 			}
 			swapDialogRef.current?.close();
@@ -345,8 +374,10 @@ export function DashboardShell({
 			setNetworks(listNetworks());
 			setPendingSwap(null);
 			setToast(t('snapshot.verifiedToast'));
+			swapTransport.reset();
 		} catch (err) {
 			setSwapError(err);
+			swapTransport.reset();
 		}
 	}
 
@@ -372,7 +403,13 @@ export function DashboardShell({
 	// replacing their own data with their own newer copy -- and runs
 	// immediately; `officer-indeterminate` and the structurally-unreachable
 	// `new-network` fail closed WITHOUT ever calling `performOfficerSwap`, so
-	// nothing is deleted on either path.
+	// nothing is deleted on either path. That table describes the four
+	// SUCCESSFUL classification outcomes, not the whole space: ANY rejection
+	// along the way -- a malformed code, a transport failure, a refused
+	// replay, or a throw from `performOfficerSwap` on the same-officer-refresh
+	// branch (reached AFTER `dbRef.current` has already been relinquished) --
+	// is caught below and surfaced as its own banner (CR-03), never left to
+	// escape as an unhandled promise rejection.
 	useEffect(() => {
 		if (!pendingSwapContext) return undefined;
 		// Captured into a local so TS's null-narrowing survives the closure
@@ -381,6 +418,11 @@ export function DashboardShell({
 		const swapContext = pendingSwapContext;
 		let cancelled = false;
 
+		// OWNERSHIP OF THE HANDED-OFF SINGLE-FLIGHT CACHE: it holds a
+		// redeemable whole-database snapshot, `Bootstrap` deliberately does
+		// NOT reset it once handed off (D-14), and this component resets it
+		// on every terminal path below EXCEPT `officer-swap`, which is still
+		// waiting for the officer to confirm.
 		async function classify() {
 			try {
 				const { secret } = splitSignInCode(swapContext.pastedCode);
@@ -393,6 +435,7 @@ export function DashboardShell({
 					if (!cancelled) {
 						setSwapError(new Error('pendingSwapContext: replay did not return a cached ok redemption'));
 					}
+					swapContext.transport.reset();
 					return;
 				}
 				const envelope = redemption.snapshot;
@@ -416,17 +459,23 @@ export function DashboardShell({
 						const handoverDb = dbRef.current ?? undefined;
 						dbRef.current = null;
 						setDb(null);
-						const result = await performOfficerSwap({
-							networkHash: classification.networkHash,
-							pastedCode: swapContext.pastedCode,
-							transport: swapContext.transport,
-							db: handoverDb,
-						});
+						// Queued onto the SAME per-network lock attach/close/forget
+						// already share -- see `withNetworkDbLifecycleLock`'s
+						// module-level doc comment (CR-04).
+						const result = await withNetworkDbLifecycleLock(classification.networkHash, () =>
+							performOfficerSwap({
+								networkHash: classification.networkHash,
+								pastedCode: swapContext.pastedCode,
+								transport: swapContext.transport,
+								db: handoverDb,
+							}),
+						);
 						if (cancelled) return;
 						if (result.outcome !== 'ok') {
 							// eslint-disable-next-line no-console
 							console.error('performOfficerSwap (same-officer-refresh) did not complete:', result.outcome);
 							setSwapError(result);
+							swapContext.transport.reset();
 							break;
 						}
 						// Same single owner of the transition as the confirmed-swap
@@ -435,6 +484,7 @@ export function DashboardShell({
 						// re-attaches on its own.
 						setNetworks(listNetworks());
 						setToast(t('snapshot.verifiedToast'));
+						swapContext.transport.reset();
 						break;
 					}
 					case 'officer-indeterminate': {
@@ -445,6 +495,7 @@ export function DashboardShell({
 						// eslint-disable-next-line no-console
 						console.error('pendingSwapContext classified as officer-indeterminate:', err.name);
 						setSwapError(err);
+						swapContext.transport.reset();
 						break;
 					}
 					case 'new-network': {
@@ -459,11 +510,22 @@ export function DashboardShell({
 						// eslint-disable-next-line no-console
 						console.error(err.name, err.message);
 						setSwapError(err);
+						swapContext.transport.reset();
 						break;
 					}
 					default:
 						break;
 				}
+			} catch (err) {
+				// A rejection anywhere in the try above -- a malformed code
+				// from splitSignInCode, a transport failure, a refused replay,
+				// or a throw from performOfficerSwap on the
+				// same-officer-refresh branch -- lands here instead of
+				// escaping unhandled. See the main region below: a swapError
+				// set with no pendingSwap open renders its own banner instead
+				// of letting PanelGrid stand in for a database failure.
+				if (!cancelled) setSwapError(err);
+				swapContext.transport.reset();
 			} finally {
 				if (!cancelled) onSwapContextConsumed?.();
 			}
@@ -612,6 +674,23 @@ export function DashboardShell({
 									<p>{t('snapshot.errorAttachBody')}</p>
 								</>
 							)}
+							<button type="button" className="sh-refresh-cta" onClick={() => onRedeemAnother(activeNetwork.networkHash)}>
+								{t('snapshot.refreshCta')}
+							</button>
+						</div>
+					) : swapError && !pendingSwap ? (
+						/*
+						 * A CLASSIFICATION failure must never be represented by
+						 * nine panels each quietly showing their own empty copy
+						 * -- the same reasoning as the attach banner above, for
+						 * a different failure surface. This branch renders ONLY
+						 * when no swap dialog is open: a confirmed-swap failure
+						 * belongs in the dialog the officer is already looking
+						 * at, and continues to render there unchanged.
+						 */
+						<div className="sh-error-banner">
+							<p>{t('network.swapErrorHeading')}</p>
+							<p>{t('network.swapErrorBody')}</p>
 							<button type="button" className="sh-refresh-cta" onClick={() => onRedeemAnother(activeNetwork.networkHash)}>
 								{t('snapshot.refreshCta')}
 							</button>
