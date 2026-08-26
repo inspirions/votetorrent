@@ -218,6 +218,59 @@ test('positive control: listObjectStores on a REAL bootstrapped database still r
 	await deleteNetworkDb(hash, { db });
 });
 
+test('listObjectStores: immediately after deleteNetworkDb, returns [] and indexedDB.databases() no longer lists the name -- the exact sequence assertNetworkForgotten performs', async () => {
+	const hash = 'db-listobjectstores-post-delete';
+	await deleteNetworkDb(hash).catch(() => {});
+	const db = await createNetworkDb(hash);
+
+	// Positive control first: while the database is real and open, the probe
+	// reports its stores -- this test is not vacuous.
+	const beforeDelete = await listObjectStores(hash);
+	assert.ok(beforeDelete.length > 50, `expected >50 object stores before delete, got ${beforeDelete.length}`);
+
+	await deleteNetworkDb(hash, { db });
+
+	assert.deepEqual(
+		await listObjectStores(hash),
+		[],
+		'listObjectStores must report [] immediately after a confirmed delete',
+	);
+	const listed = await indexedDB.databases();
+	assert.equal(
+		listed.some((entry) => entry.name === dbNameFor(hash)),
+		false,
+		'the probe call itself must not resurrect the just-deleted database',
+	);
+});
+
+test('listObjectStores: when indexedDB.databases is unavailable, falls back to the open() path -- the fallback branch is actually entered, not dead code with an alibi', async () => {
+	const hash = 'db-listobjectstores-fallback';
+	await deleteNetworkDb(hash).catch(() => {});
+	const db = await createNetworkDb(hash);
+
+	const originalDatabases = indexedDB.databases;
+	// `databases` lives on FDBFactory.prototype, not as an own property, so a
+	// plain `delete` is a no-op here -- shadow it with an own-property
+	// assignment first, exactly as an environment that never implemented
+	// `indexedDB.databases()` would present to this function.
+	// @ts-expect-error -- deliberately stubbing to a non-function for this test
+	indexedDB.databases = undefined;
+	try {
+		assert.equal(typeof indexedDB.databases, 'undefined', 'stub did not take -- test would be vacuous');
+		const names = await listObjectStores(hash);
+		assert.ok(names.length > 50, `fallback path expected >50 object stores, got ${names.length}`);
+	} finally {
+		// Restore the prototype method by removing the shadowing own property.
+		// `delete indexedDB.databases` fails tsc's TS2790 ('databases' is not
+		// declared optional on the IDBFactory type this repo's lib.dom targets),
+		// so go through Reflect.deleteProperty, which needs no type exemption.
+		Reflect.deleteProperty(indexedDB, 'databases');
+		assert.equal(indexedDB.databases, originalDatabases, 'indexedDB.databases was not correctly restored');
+	}
+
+	await deleteNetworkDb(hash, { db });
+});
+
 test('openStoreHandle: applies setDefaultVtabName in the mandatory registration order', async () => {
 	const hash = 'db-delete-order';
 	await deleteNetworkDb(hash).catch(() => {});

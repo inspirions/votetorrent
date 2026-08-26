@@ -331,7 +331,34 @@ async function runForgetVerify() {
 		return 'absent';
 	});
 
-	await rung('3 · attachNetworkDb rejects, by name, for the forgotten network', async () => {
+	// WR-06 real-browser proof, placed BEFORE rung 3's attachNetworkDb attempt
+	// deliberately: rung 3 below is itself known to open a raw handle and
+	// re-declare the schema before its own NotBootstrappedError check fires
+	// (see 50-17-SUMMARY.md's "carried-forward finding" on attachNetworkDb),
+	// which would otherwise leave a resurrected database in place BEFORE this
+	// rung ever ran, confounding whether ITS probe or something upstream
+	// created it. Ordered here, this rung isolates exactly one question: does
+	// `listObjectStores`, called on a network rungs 1-2 just confirmed absent,
+	// resurrect it by itself? This is the one thing `fake-indexeddb` cannot
+	// stand in for — a real browser's shared store-plugin connection
+	// singleton is exactly the thing under test here.
+	await rung('3 · listObjectStores probes the forgotten network without resurrecting it', async () => {
+		const stores = await listObjectStores(PRIMARY_HASH);
+		if (stores.length !== 0) {
+			throw new Error(`expected [] for a forgotten network, got ${stores.length} store(s): ${stores.join(', ')}`);
+		}
+		if (typeof indexedDB.databases !== 'function') {
+			return 'listObjectStores returned [] (indexedDB.databases() unavailable to re-confirm — non-fatal)';
+		}
+		const remaining = await indexedDB.databases();
+		const name = dbNameFor(PRIMARY_HASH);
+		if (remaining.some((entry) => entry.name === name)) {
+			throw new Error(`the probe itself resurrected "${name}" — indexedDB.databases() lists it after the probe ran`);
+		}
+		return 'still absent after the probe';
+	});
+
+	await rung('4 · attachNetworkDb rejects, by name, for the forgotten network', async () => {
 		let threw = false;
 		/** @type {string | undefined} */
 		let errorName;
@@ -346,7 +373,7 @@ async function runForgetVerify() {
 		return errorName ?? 'error';
 	});
 
-	await rung('4 · the neighbouring network from the forget page survived, and still attaches with its counts', async () => {
+	await rung('5 · the neighbouring network from the forget page survived, and still attaches with its counts', async () => {
 		const entry = findNetwork(SECOND_HASH, localStorage);
 		if (!entry) throw new Error('the neighbouring network is missing — a forget must delete exactly one network');
 		const db = await attachNetworkDb(SECOND_HASH);

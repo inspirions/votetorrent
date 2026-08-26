@@ -138,13 +138,21 @@ export async function closeNetworkDb(db) {
  * suite and the tier-2 browser gate use this.
  *
  * A PROBE MUST NOT CREATE WHAT IT PROBES. `indexedDB.open(name)` with no
- * version CREATES the database when it does not exist. This function is
+ * version CREATES the database when it does not exist: per the WHATWG
+ * IndexedDB spec's "opening a database" steps
+ * (https://www.w3.org/TR/IndexedDB/#opening — "if db was not found ... let db
+ * be a new database" — mirrored by MDN's `IDBFactory.open()` docs, "if the
+ * database does not exist ... it is created"), an omitted `version` argument
+ * does not exempt this: the algorithm creates the database record first and
+ * only then resolves the requested version against it. This function is
  * exported from `src/`, so calling it for a network that was deleted, or was
  * never bootstrapped, used to resurrect an empty shell that then showed up in
  * `indexedDB.databases()` — precisely the condition `deleteNetworkDb`'s
  * post-delete confirmation and `assertNetworkForgotten` both treat as a hard
  * failure. The existence check below is what makes an absent database read as
- * "no stores" instead of "no stores, and now it exists".
+ * "no stores" instead of "no stores, and now it exists" — it is LOAD-BEARING,
+ * not an optimisation, because both of those callers ask this question
+ * specifically about databases that are supposed to be gone.
  *
  * Absent `indexedDB.databases()` (a handful of older browsers, some test
  * doubles) is non-fatal and falls through to the open — the same posture
