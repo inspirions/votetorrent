@@ -61,7 +61,7 @@
  * never reach the production Vite build (see `run-headless.mjs`'s dist scan
  * and this repo's `assert:no-polyfills` step).
  */
-import { StrictMode, useState } from 'react';
+import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import type { IBootstrapTransport, SnapshotRow, SnapshotTables } from '@votetorrent/vote-engine/bootstrap';
@@ -73,7 +73,8 @@ import { t } from '../../src/i18n/copy.js';
 import { Bootstrap } from '../../src/screens/Bootstrap.js';
 import type { AlreadyBootstrappedContext } from '../../src/screens/Bootstrap.js';
 import { DashboardShell } from '../../src/screens/DashboardShell.js';
-import { buildFixtureEnvelope, makeFakeTransport } from '../fixtures/bootstrap-envelope.js';
+import { createSingleFlightTransport } from '../../src/lifecycle/officer-swap.js';
+import { buildFixtureEnvelope, makeFakeTransport, withExtraUserRow } from '../fixtures/bootstrap-envelope.js';
 
 /** @type {any} */
 const win = window as unknown as Record<string, unknown>;
@@ -944,6 +945,244 @@ async function runComposePreviewRace() {
 	win.__COMPOSE_GATE_DONE__ = true;
 }
 
+// ---------------------------------------------------------------------------
+// compose-guards (gap-closure round 3): the two Criticals and the twin Warning
+// that round 3 found, all of which are about STATE THAT IS NEVER WRITTEN or a
+// HANDLER THAT RUNS TWICE -- properties with no source-text signature, which is
+// exactly why roughly thirty tier-1 `assert.match(CODE, /.../)` matchers and
+// ten green browser phases all shipped past them. Every rung below drives a
+// real state transition on the production `DashboardShell` and reads the answer
+// out of the DOM, the real registry, or the fake transport's own honest call
+// log -- never out of a source string.
+//
+// This phase seeds BOTH of its own networks and clears the registry first, so
+// it depends on no earlier phase; it runs LAST in the default sequence because
+// it ends destructively (it forgets one of its own two networks on purpose).
+//
+// It reaches `DashboardShell`'s classify seam by supplying `pendingSwapContext`
+// DIRECTLY, exactly as `src/main.tsx` does. That is deliberate, not a shortcut:
+// PHASE 9 (compose-swap) already proves the Bootstrap -> shell half of that
+// handoff end to end through the real form, and driving the form again here
+// would REMOUNT `DashboardShell` between legs -- resetting `activeNetworkHash`
+// to `networks[0]` and destroying the very cross-network state CR-01 is about.
+// The transport handed over is the real `createSingleFlightTransport`, warmed
+// with one real `ok` redemption exactly as `redeemAndBootstrap` warms it.
+// ---------------------------------------------------------------------------
+
+/** Two networks, so a failure raised on one can be observed NOT to follow the officer to the other. */
+const GUARD_NETWORK_A = 'compose-guards-network-a';
+const GUARD_NETWORK_B = 'compose-guards-network-b';
+/** Distinct authority names -- the topbar and the switcher rows render these, so they are how a rung tells which network is actually active. */
+const GUARD_AUTHORITY_A = 'Guard County A';
+const GUARD_AUTHORITY_B = 'Guard County B';
+/** Four secrets, all distinct from every sibling gate's and from each other; 40 lowercase hex characters, the format `splitSignInCode` requires. */
+const GUARD_SECRET_SEED_A = '1'.repeat(40);
+const GUARD_SECRET_SEED_B = '2'.repeat(40);
+const GUARD_SECRET_INDETERMINATE = '3'.repeat(40);
+const GUARD_SECRET_SWAP = '4'.repeat(40);
+/** The incoming officer of this phase's confirmed swap. */
+const GUARD_OFFICER_2_ID = 'compose-guards-officer-2';
+
+/**
+ * A structurally real envelope for `networkHash`, naming `authorityName` and
+ * granting `userId` all nine scopes -- rebuilt through `buildSnapshot` so
+ * manifest/digest/schemaHash stay internally consistent, same discipline as
+ * `composeEnvelope` above. Parameterizing the AUTHORITY NAME is what
+ * `composeEnvelope` does not do, and this phase needs two networks a rung can
+ * tell apart on screen.
+ */
+function guardEnvelope(networkHash: string, authorityName: string, userId: string) {
+	const base = buildFixtureEnvelope();
+	const tables: SnapshotTables = {
+		...base.tables,
+		Authority: (base.tables.Authority ?? []).map((row: SnapshotRow) => ({ ...row, Name: authorityName })),
+		Officer: (base.tables.Officer ?? []).map((row: SnapshotRow) => ({
+			...row,
+			UserId: userId,
+			Scopes: JSON.stringify(SCOPE_CODES),
+		})),
+		User: (base.tables.User ?? []).map((row: SnapshotRow) => ({ ...row, Id: userId })),
+		Network: (base.tables.Network ?? []).map((row: SnapshotRow) => ({ ...row, Hash: networkHash })),
+	};
+	return buildSnapshot({ networkHash, tables, generatedAt: base.generatedAt });
+}
+
+/**
+ * The seam a rung uses to hand `DashboardShell` a swap context, wired exactly
+ * like `main.tsx`'s own `pendingSwapContext` prop. Assigned from an effect (not
+ * a render body) so StrictMode's setup/cleanup/setup leaves it correctly set.
+ */
+let pushGuardSwapContext: ((context: AlreadyBootstrappedContext | null) => void) | null = null;
+
+function GuardsApp() {
+	const [swapContext, setSwapContext] = useState<AlreadyBootstrappedContext | null>(null);
+	useEffect(() => {
+		pushGuardSwapContext = setSwapContext;
+		return () => {
+			pushGuardSwapContext = null;
+		};
+	}, []);
+	return (
+		<DashboardShell
+			onRedeemAnother={() => {}}
+			pendingSwapContext={swapContext}
+			onSwapContextConsumed={() => setSwapContext(null)}
+		/>
+	);
+}
+
+/**
+ * Arm ONE swap context: a fresh fake wire transport, wrapped in the REAL
+ * single-flight decorator, warmed with exactly one `ok` redemption the way
+ * `redeemAndBootstrap` warms it, then handed to the shell. Returns the INNER
+ * fake, whose `calls` array is the honest record of how many times the wire was
+ * actually reached -- the only place a double-spend is visible.
+ */
+async function armGuardSwapContext(secret: string, envelope: ReturnType<typeof guardEnvelope>) {
+	const inner = makeFakeTransport({ codeToResult: { [secret]: { status: 'ok', snapshot: envelope } } });
+	const single = createSingleFlightTransport(inner);
+	const first = await single.transport.redeem(secret);
+	if (first.status !== 'ok') {
+		throw new Error(`arm: expected the fixture transport to return "ok", got "${first.status}"`);
+	}
+	if (!pushGuardSwapContext) throw new Error('arm: GuardsApp is not mounted');
+	pushGuardSwapContext({
+		networkHash: envelope.networkHash,
+		pastedCode: `${secret}.${envelope.digest}`,
+		transport: single.transport,
+		reset: single.reset,
+	});
+	return inner;
+}
+
+/**
+ * The SWAP-failure banners specifically. `.sh-error-banner` is shared with the
+ * attach-failure banner, so a rung that merely counted that class could not
+ * tell the two apart -- match on the banner's own heading, through `t()`.
+ */
+function swapErrorBanners() {
+	return Array.from(document.querySelectorAll('.sh-error-banner')).filter(
+		(banner) => banner.querySelector('p')?.textContent === t('network.swapErrorHeading'),
+	);
+}
+
+/** Open the network switcher and choose the row whose name matches -- the real UI path, never a direct state write. */
+async function selectNetworkByName(authorityName: string) {
+	const switcherButton = document.querySelector<HTMLButtonElement>('.sh-switcher-button');
+	if (!switcherButton) throw new Error('switcher button not found');
+	switcherButton.click();
+	await waitForElement('.sh-switcher-row', 300);
+	const row = Array.from(document.querySelectorAll<HTMLButtonElement>('.sh-switcher-row')).find(
+		(candidate) => candidate.querySelector('.sh-switcher-row-name')?.textContent === authorityName,
+	);
+	if (!row) throw new Error(`no switcher row named "${authorityName}"`);
+	row.click();
+}
+
+async function runComposeGuards() {
+	const envelopeA = guardEnvelope(GUARD_NETWORK_A, GUARD_AUTHORITY_A, FOUNDING_OFFICER_ID);
+	const envelopeB = guardEnvelope(GUARD_NETWORK_B, GUARD_AUTHORITY_B, FOUNDING_OFFICER_ID);
+
+	await rung('1 · clean slate: delete both guard databases and clear EVERY registry entry -- this phase depends on no earlier one', async () => {
+		await deleteNetworkDb(GUARD_NETWORK_A, { storage: localStorage });
+		await deleteNetworkDb(GUARD_NETWORK_B, { storage: localStorage });
+		for (const entry of listNetworks(localStorage)) {
+			removeNetwork(entry.networkHash, localStorage);
+		}
+		return 'clean slate';
+	});
+
+	const seedR = await rung('2 · seed TWO networks through the shipped restore path -- A first, so the shell opens on it', async () => {
+		for (const [secret, envelope] of [
+			[GUARD_SECRET_SEED_A, envelopeA],
+			[GUARD_SECRET_SEED_B, envelopeB],
+		] as const) {
+			const transport = makeFakeTransport({ codeToResult: { [secret]: { status: 'ok', snapshot: envelope } } });
+			// eslint-disable-next-line no-await-in-loop -- the two bootstraps must land in registry order
+			const result = await redeemAndBootstrap({ pastedCode: `${secret}.${envelope.digest}`, transport, storage: localStorage });
+			if (result.outcome !== 'ok') throw new Error(`seeding ${envelope.networkHash}: expected "ok", got "${result.outcome}"`);
+		}
+		const names = listNetworks(localStorage).map((entry) => entry.authorityName);
+		if (names.length !== 2 || names[0] !== GUARD_AUTHORITY_A) {
+			throw new Error(`expected exactly two entries with "${GUARD_AUTHORITY_A}" first, got ${JSON.stringify(names)}`);
+		}
+		return JSON.stringify(names);
+	});
+
+	const container = document.getElementById('root');
+	if (!seedR.ok || !container) {
+		await rung('3 · cannot mount', async () => {
+			throw new Error(container ? 'seeding failed' : 'compose-gate.html is missing #root');
+		});
+		win.__COMPOSE_GATE__ = { phase: PHASE, passed: steps.filter((s) => s.ok).length, total: steps.length, log: LOG };
+		win.__COMPOSE_GATE_DONE__ = true;
+		return;
+	}
+
+	const root = createRoot(container);
+	await rung('3 · mount the production DashboardShell, wired to a pendingSwapContext seam exactly as main.tsx wires it', async () => {
+		root.render(
+			<StrictMode>
+				<GuardsApp />
+			</StrictMode>,
+		);
+		return 'mounted';
+	});
+
+	await rung('4 · settle: network A renders its nine panels, and the topbar names A', async () => {
+		const count = await settleUntilPanels(300);
+		const name = document.querySelector('.sh-authority-name')?.textContent;
+		if (count !== CAPABILITIES.length) throw new Error(`expected ${CAPABILITIES.length} panels, observed ${count}`);
+		if (name !== GUARD_AUTHORITY_A) throw new Error(`topbar names "${name}", expected "${GUARD_AUTHORITY_A}"`);
+		return `panels: ${count}, active: ${name}`;
+	});
+
+	// ---- CR-01: a swap failure on network A must not follow the officer to B ----
+
+	await rung(
+		'5 · CR-01 precondition: an officer-indeterminate classification for network A replaces A\'s grid with the swap-failure banner',
+		async () => {
+			await armGuardSwapContext(GUARD_SECRET_INDETERMINATE, withExtraUserRow(envelopeA));
+			await waitUntil(() => swapErrorBanners().length === 1, 300, 'the swap-failure banner rendered for network A');
+			const panels = document.querySelectorAll('.panel').length;
+			if (panels !== 0) throw new Error(`expected the banner to REPLACE the grid, but ${panels} panels are still rendered`);
+			return `banners: 1, panels: ${panels}`;
+		},
+	);
+
+	await rung(
+		'6 · CR-01: switch to network B -- B renders its own nine panels and ZERO swap-failure banners (a stale swapError would blank a healthy network)',
+		async () => {
+			await selectNetworkByName(GUARD_AUTHORITY_B);
+			await waitUntil(
+				() => document.querySelector('.sh-authority-name')?.textContent === GUARD_AUTHORITY_B,
+				300,
+				'the topbar names network B',
+			);
+			await settleUntilPanels(900);
+			const panels = document.querySelectorAll('.panel').length;
+			const banners = swapErrorBanners().length;
+			const denied = document.querySelectorAll('.panel--denied').length;
+			if (banners !== 0) {
+				throw new Error(
+					`network B is rendering ${banners} swap-failure banner(s) raised by network A -- panels: ${panels} (CR-01: swapError was never cleared)`,
+				);
+			}
+			if (panels !== CAPABILITIES.length) throw new Error(`expected ${CAPABILITIES.length} panels for network B, observed ${panels}`);
+			if (denied !== 0) throw new Error(`expected 0 denied panel sections, observed ${denied}`);
+			return `panels: ${panels}, banners: ${banners}, denied: ${denied}`;
+		},
+	);
+
+	win.__COMPOSE_GATE__ = {
+		phase: PHASE,
+		passed: steps.filter((s) => s.ok).length,
+		total: steps.length,
+		log: LOG,
+	};
+	win.__COMPOSE_GATE_DONE__ = true;
+}
+
 async function main() {
 	log('start', `compose-gate phase=${PHASE} officer=${OFFICER_NONE ? 'none' : 'real'}`);
 	if (PHASE === 'compose-seed') {
@@ -954,6 +1193,8 @@ async function main() {
 		await runComposeSwap();
 	} else if (PHASE === 'compose-preview-race') {
 		await runComposePreviewRace();
+	} else if (PHASE === 'compose-guards') {
+		await runComposeGuards();
 	} else {
 		throw new Error(`compose-gate: unknown phase "${PHASE}"`);
 	}

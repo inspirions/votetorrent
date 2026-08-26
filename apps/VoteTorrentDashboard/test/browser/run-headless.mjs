@@ -45,6 +45,17 @@
  * test/browser/run-headless.mjs --swap-only || exit 1; done`), so it is
  * unambiguous which individual run failed.
  *
+ * `--guards-only` (gap-closure round 3): runs ONLY `compose-gate.tsx`'s
+ * compose-guards phase, the leg that owns round 3's CR-01 (a stale `swapError`
+ * blanking a DIFFERENT, healthy network), CR-02 (a double-click on the swap
+ * confirm CTA genuinely redeeming a single-use code twice) and WR-10 (the same
+ * missing in-flight guard on the forget path). That phase seeds BOTH of its own
+ * networks and clears the registry first, so unlike `--swap-only` it needs no
+ * companion seed page and is a SINGLE page load -- which makes it cheap enough
+ * to use as the mutation harness those three fixes were validated with (revert
+ * a fix, run this, watch the named rung go red). Returns before the tier-2
+ * db-gate/shell-gate phases below, exactly like every other flag above.
+ *
  * `import { chromium } from 'playwright'` — the FULL package, never the
  * lighter core-only sibling package, and never a hardcoded system-Chrome
  * binary path option (Pitfall 6: the spikes' macOS path does not exist on
@@ -65,6 +76,7 @@ const TIER3 = process.argv.includes('--tier3');
 const PROVE_DRIFT = process.argv.includes('--prove-drift');
 const PROVE_BLANK = process.argv.includes('--prove-blank');
 const SWAP_ONLY = process.argv.includes('--swap-only');
+const GUARDS_ONLY = process.argv.includes('--guards-only');
 
 /** @returns {Promise<import('node:child_process').ChildProcess>} */
 async function startViteDevServer() {
@@ -626,6 +638,26 @@ async function runSwapOnly(ctx) {
 	process.exitCode = swapOk ? 0 : 1;
 }
 
+/**
+ * `--guards-only` (gap-closure round 3): a SINGLE page load. compose-guards
+ * seeds both of its own networks and clears the registry first, so it needs no
+ * companion seed page -- see this file's header note.
+ *
+ * @param {import('playwright').BrowserContext} ctx
+ */
+async function runGuardsOnly(ctx) {
+	const page1 = await ctx.newPage();
+	const guardsRes = await runOnComposeGatePage(
+		page1,
+		`${BASE}/test/browser/compose-gate.html?phase=compose-guards`,
+		'GUARDS-ONLY PAGE 1 — compose-guards (CR-01 stale swapError, CR-02 double-confirm, WR-10 double-forget)',
+	);
+	const guardsOk = guardsRes && !guardsRes.crashed && guardsRes.passed === guardsRes.total;
+
+	console.log(`\nCOMPOSE GATE --guards-only: ${guardsOk ? 'PASS' : 'FAIL'} (rungs: ${guardsRes?.passed}/${guardsRes?.total})`);
+	process.exitCode = guardsOk ? 0 : 1;
+}
+
 async function main() {
 	const viteChild = await startViteDevServer();
 	let browser;
@@ -645,6 +677,13 @@ async function main() {
 		// for the CR-04 five-consecutive-runs evidence.
 		if (SWAP_ONLY) {
 			return await runSwapOnly(ctx);
+		}
+
+		// --guards-only runs ONLY the compose-guards page and returns here --
+		// see this file's header note. The mutation harness round 3's CR-01 /
+		// CR-02 / WR-10 fixes were each validated against, in both directions.
+		if (GUARDS_ONLY) {
+			return await runGuardsOnly(ctx);
 		}
 
 		// --tier3 / --prove-drift run ONLY the tier-3 flow and return here --
@@ -845,23 +884,49 @@ async function main() {
 		console.log('\n--- cross-phase (compose-preview-race) ---');
 		console.log('compose-preview-race:', `${previewRaceRes?.passed}/${previewRaceRes?.total}`);
 
+		// ---------------------------------------------------------------
+		// Gap-closure round 3: the compose-guards leg. ONE more fresh page
+		// load, its own ctx.newPage() call, LAST in the default run so no
+		// existing phase number changes -- eleven page loads total. It seeds
+		// BOTH of its own networks and clears the registry first (it depends
+		// on no earlier phase), and it must run last because it ends
+		// destructively, forgetting one of its own two networks on purpose.
+		// Owns CR-01 (a stale swapError blanking a DIFFERENT, healthy
+		// network), CR-02 (a double-click genuinely redeeming a single-use
+		// code twice) and WR-10 (the same missing guard on the forget path).
+		// ---------------------------------------------------------------
+
+		const page11 = await ctx.newPage();
+		const guardsRes = await runOnComposeGatePage(
+			page11,
+			`${BASE}/test/browser/compose-gate.html?phase=compose-guards`,
+			'PHASE 11 — composed shell: compose-guards (CR-01 stale swapError, CR-02 double-confirm, WR-10 double-forget)',
+		);
+		const guardsOk = guardsRes && !guardsRes.crashed && guardsRes.passed === guardsRes.total;
+
+		console.log('\n--- cross-phase (compose-guards) ---');
+		console.log('compose-guards:', `${guardsRes?.passed}/${guardsRes?.total}`);
+
 		console.log('\n=== SUMMARY ===');
 		console.log('db-gate leg (D-11 re-attach):', dbGateOk ? 'PASS' : 'FAIL');
 		console.log('shell-gate leg (restored snapshot + forget network):', forgetVerifyOk ? 'PASS' : 'FAIL');
 		console.log('compose-gate leg (composed DashboardShell, nine populated panels):', composeVerifyOk ? 'PASS' : 'FAIL');
 		console.log('compose-swap leg (D-14 officer-swap confirm + cancel):', composeSwapOk ? 'PASS' : 'FAIL');
 		console.log('compose-preview-race leg (CR-01, the preview control during an in-flight attach):', previewRaceOk ? 'PASS' : 'FAIL');
+		console.log('compose-guards leg (stale swapError across networks, double-confirm, double-forget):', guardsOk ? 'PASS' : 'FAIL');
 
-		const allOk = dbGateOk && forgetVerifyOk && composeVerifyOk && composeSwapOk && previewRaceOk;
+		const allOk = dbGateOk && forgetVerifyOk && composeVerifyOk && composeSwapOk && previewRaceOk && guardsOk;
 		return finishRun(
 			allOk,
 			allOk
-				? 'all ten phases passed'
-				: !previewRaceOk
-					? 'compose-preview-race phase failed'
-					: !composeSwapOk
-						? 'compose-swap phase failed'
-						: 'compose-gate phase failed',
+				? 'all eleven phases passed'
+				: !guardsOk
+					? 'compose-guards phase failed'
+					: !previewRaceOk
+						? 'compose-preview-race phase failed'
+						: !composeSwapOk
+							? 'compose-swap phase failed'
+							: 'compose-gate phase failed',
 			PROVE_TRAP,
 		);
 	} finally {

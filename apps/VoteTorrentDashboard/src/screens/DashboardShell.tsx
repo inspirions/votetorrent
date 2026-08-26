@@ -202,6 +202,23 @@ export function DashboardShell({
 		setGrantedScopes([]);
 		setScopesResolved(false);
 		setAttachError(null);
+		// `swapError` GETS THE SAME RESET DISCIPLINE AS `attachError`, and for
+		// the same reason: the branch in the main region below renders a banner
+		// INSTEAD of `PanelGrid` whenever `swapError && !pendingSwap`, so a
+		// stale value does not merely add a message -- it decides whether the
+		// officer sees any panels at all. Every path that sets `swapError`
+		// (the fail-closed replay, `officer-indeterminate`, `new-network`, the
+		// classify `catch`, and a failed `same-officer-refresh`) does so with
+		// NO dialog open, so `handleCancelSwap` -- reachable only from the swap
+		// dialog's own `onCancel` -- could never clear any of them. A
+		// classification failure on network A therefore latched, survived a
+		// switcher click, and rendered A's failure over network B's nine
+		// healthy panels: the phase's headline symptom (zero panels for a
+		// fully-privileged officer) arriving from an entirely different
+		// network's error. This effect re-runs on exactly the transitions that
+		// should clear it -- a switch to another network, and a swap that
+		// actually landed (both change the dependency list below).
+		setSwapError(null);
 
 		async function attach() {
 			if (dbRef.current && dbNetworkHashRef.current) {
@@ -379,6 +396,14 @@ export function DashboardShell({
 			// under a fresh key, so no panel retains a prior-officer row.
 			setNetworks(listNetworks());
 			setPendingSwap(null);
+			// A swap that SUCCEEDED after an earlier failure must not show the
+			// success toast and the failure banner at the same time. The attach
+			// effect above also clears it (this `setNetworks` advances
+			// `bootstrappedAt`, which it keys on), but a success path that
+			// depends on a sibling effect's dependency list to un-say a failure
+			// is exactly the kind of implicit ownership this file has been bitten
+			// by; say it here, where the success is known.
+			setSwapError(null);
 			setToast(t('snapshot.verifiedToast'));
 			swapTransport.reset();
 		} catch (err) {
@@ -450,6 +475,14 @@ export function DashboardShell({
 
 				switch (classification.kind) {
 					case 'officer-swap':
+						// A PRIOR attempt's error renders inside this very dialog
+						// (`sh-dialog-error` below), and nothing else clears it when a
+						// FRESH `pendingSwap` is raised -- an officer would be shown
+						// the previous failure's error class in the dialog they are
+						// being asked to confirm. Cleared here, on the one transition
+						// the attach effect above cannot see (no registry field
+						// changes when a dialog merely opens).
+						setSwapError(null);
 						setPendingSwap({
 							networkHash: classification.networkHash,
 							pastedCode: swapContext.pastedCode,
@@ -489,6 +522,10 @@ export function DashboardShell({
 						// the attach effect above (keyed on it) tears down and
 						// re-attaches on its own.
 						setNetworks(listNetworks());
+						// Same reason as the confirmed-swap success path below: a
+						// refresh that succeeded must not leave a prior failure's
+						// banner standing over the data it just replaced.
+						setSwapError(null);
 						setToast(t('snapshot.verifiedToast'));
 						swapContext.transport.reset();
 						break;
