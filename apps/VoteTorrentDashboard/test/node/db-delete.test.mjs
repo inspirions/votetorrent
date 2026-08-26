@@ -190,6 +190,34 @@ test('positive control: ordinary create -> delete -> recreate cycle succeeds (th
 	await deleteNetworkDb(hash, { db: db2 });
 });
 
+test('listObjectStores: probing a network that does not exist returns [] and does NOT create the database', async () => {
+	// `indexedDB.open(name)` with no version CREATES the database. This
+	// function is exported from src/, so probing a deleted or never-created
+	// network used to resurrect an empty shell -- which then appeared in
+	// indexedDB.databases(), exactly the condition deleteNetworkDb's
+	// post-delete confirmation and assertNetworkForgotten treat as failure.
+	const hash = 'db-listobjectstores-absent';
+	await deleteNetworkDb(hash).catch(() => {});
+
+	assert.deepEqual(await listObjectStores(hash), []);
+
+	const listed = await indexedDB.databases();
+	assert.equal(
+		listed.some((db) => db.name === dbNameFor(hash)),
+		false,
+		'listObjectStores created the database it was asked to inspect',
+	);
+});
+
+test('positive control: listObjectStores on a REAL bootstrapped database still reports its stores', async () => {
+	const hash = 'db-listobjectstores-present';
+	await deleteNetworkDb(hash).catch(() => {});
+	const db = await createNetworkDb(hash);
+	const names = await listObjectStores(hash);
+	assert.ok(names.length > 50, `expected >50 object stores, got ${names.length}`);
+	await deleteNetworkDb(hash, { db });
+});
+
 test('openStoreHandle: applies setDefaultVtabName in the mandatory registration order', async () => {
 	const hash = 'db-delete-order';
 	await deleteNetworkDb(hash).catch(() => {});

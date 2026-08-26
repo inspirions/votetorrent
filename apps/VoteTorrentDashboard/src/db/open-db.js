@@ -137,12 +137,34 @@ export async function closeNetworkDb(db) {
  * tables + 13 index stores + `__catalog__` + `__stats__`. Both the tier-1 node
  * suite and the tier-2 browser gate use this.
  *
+ * A PROBE MUST NOT CREATE WHAT IT PROBES. `indexedDB.open(name)` with no
+ * version CREATES the database when it does not exist. This function is
+ * exported from `src/`, so calling it for a network that was deleted, or was
+ * never bootstrapped, used to resurrect an empty shell that then showed up in
+ * `indexedDB.databases()` — precisely the condition `deleteNetworkDb`'s
+ * post-delete confirmation and `assertNetworkForgotten` both treat as a hard
+ * failure. The existence check below is what makes an absent database read as
+ * "no stores" instead of "no stores, and now it exists".
+ *
+ * Absent `indexedDB.databases()` (a handful of older browsers, some test
+ * doubles) is non-fatal and falls through to the open — the same posture
+ * `deleteNetworkDb` and `assertNetworkForgotten` already take.
+ *
  * @param {string} networkHash
  * @returns {Promise<string[]>}
  */
-export function listObjectStores(networkHash) {
+export async function listObjectStores(networkHash) {
+	const name = dbNameFor(networkHash);
+
+	if (typeof indexedDB.databases === 'function') {
+		const known = await indexedDB.databases();
+		if (!known.some((entry) => entry.name === name)) {
+			return [];
+		}
+	}
+
 	return new Promise((resolve, reject) => {
-		const request = indexedDB.open(dbNameFor(networkHash));
+		const request = indexedDB.open(name);
 		request.onerror = () => reject(request.error);
 		request.onsuccess = () => {
 			const names = [...request.result.objectStoreNames];

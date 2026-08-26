@@ -60,6 +60,20 @@
  * such shared-connection-singleton plugin internals to race against, which
  * is exactly why this was invisible to every tier-1 test in this project.
  *
+ * THAT ATTRIBUTION IS NOT SETTLED, AND IS RECORDED AS UNSETTLED. Code review
+ * observed that the evidence above -- "the resurrected shell carries exactly
+ * the two system stores such a write would need, and nothing else" -- fits an
+ * equally simple alternative: `listObjectStores`, exported from
+ * `src/db/open-db.js` and called by both the tier-1 suite and the tier-2
+ * gate, used a bare `indexedDB.open(name)`, which CREATES a database that
+ * does not exist. That probe no longer creates (it checks
+ * `indexedDB.databases()` first), so the two explanations are now
+ * distinguishable -- but the settle-race measurement has NOT been re-run
+ * since, so the background-write story above is a hypothesis this file still
+ * carries, not a conclusion. `deleteNetworkDbSettled` stays either way: it is
+ * bounded, it calls the one sanctioned primitive, and it verifies against the
+ * same truth `assertNetworkForgotten` trusts.
+ *
  * `deleteNetworkDbSettled` (below) is NOT a second destructive
  * implementation -- it calls the ONE sanctioned `deleteNetworkDb` primitive,
  * possibly more than once, and verifies against the SAME
