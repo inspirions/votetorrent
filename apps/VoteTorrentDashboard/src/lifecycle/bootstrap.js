@@ -59,6 +59,32 @@ export const BOOTSTRAP_PHASES = Object.freeze(
 	/** @type {const} */ (['submitting', 'verifying', 'applying-schema', 'seeding', 'success']),
 );
 
+/** The copy key for each `BOOTSTRAP_PHASES` member. Lives here, beside the
+ * vocabulary it maps, for the same reason `copyKeysForOutcome` does: the
+ * screen must never render a machine identifier, and a phase added without a
+ * key must be a loud error rather than a raw string on screen. */
+const PHASE_COPY_KEYS = Object.freeze({
+	submitting: 'bootstrap.phaseSubmitting',
+	verifying: 'bootstrap.phaseVerifying',
+	'applying-schema': 'bootstrap.phaseApplyingSchema',
+	seeding: 'bootstrap.phaseSeeding',
+	success: 'bootstrap.phaseSuccess',
+});
+
+/**
+ * Total over `BOOTSTRAP_PHASES`; throws naming the phase for anything else.
+ *
+ * @param {string} phase
+ * @returns {string}
+ */
+export function copyKeyForPhase(phase) {
+	const key = /** @type {Record<string, string>} */ (PHASE_COPY_KEYS)[phase];
+	if (key === undefined) {
+		throw new Error(`copyKeyForPhase: unmapped phase "${phase}"`);
+	}
+	return key;
+}
+
 /**
  * @typedef {object} RedeemAndBootstrapOptions
  * @property {string} pastedCode

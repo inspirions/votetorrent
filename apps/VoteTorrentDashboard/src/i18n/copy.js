@@ -9,6 +9,15 @@
  *
  * Transcribed verbatim from 50-UI-SPEC.md's Copywriting Contract.
  *
+ * The "no later plan adds a key" rule above is a rule about PLANS, and it held:
+ * the table was complete for every screen this phase built. It is not a rule
+ * that a defect may not be fixed. Code review found user-facing text rendered
+ * OUTSIDE this table in two places -- the raw machine phase codes in
+ * `screens/Bootstrap.tsx` and the `tier`/`site(s)` pills in
+ * `screens/panels/PanelFrame.tsx` -- and the fix for each is a key here, which
+ * is exactly what contract C2 demands. Every such addition is recorded in a
+ * comment beside the keys it adds.
+ *
  * Contract C3 (D-17): there is deliberately NO `read-only` / `◐` panel-state string in
  * this table. Nothing in this phase is writable -- every panel in this phase is either
  * fully visible (granted scope) or fully hidden (withheld scope) -- so a read-only
@@ -36,6 +45,15 @@ export const COPY = Object.freeze({
 	'bootstrap.errorTransportHeading': "Couldn't reach the authority app.",
 	'bootstrap.errorTransportBody': 'Check that the code was generated recently and try again.',
 	'bootstrap.errorTransportCta': 'Retry',
+	// One key per BOOTSTRAP_PHASES member. The screen renders these through
+	// `copyKeyForPhase`, which is total over that frozen vocabulary -- adding a
+	// phase without a key here is a loud error, never a machine identifier on
+	// screen.
+	'bootstrap.phaseSubmitting': 'Sending your code…',
+	'bootstrap.phaseVerifying': 'Checking the data against your code…',
+	'bootstrap.phaseApplyingSchema': 'Preparing this browser…',
+	'bootstrap.phaseSeeding': 'Copying the data into this browser…',
+	'bootstrap.phaseSuccess': 'Done.',
 
 	// Snapshot freshness, refresh and verification
 	'snapshot.refreshCta': 'Refresh snapshot',
