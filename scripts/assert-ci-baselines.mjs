@@ -258,7 +258,16 @@ function evaluateTier1(log, elapsedSecondsArg, baselines) {
       problems: ['no tier1 summary found (expected "# pass N" / "# fail N" or the bare spec-reporter fallback)'],
     };
   }
-  const elapsed = Number(elapsedSecondsArg);
+  // `Number('')` is 0, and 0 is finite -- so a bare Number() coercion turns an
+  // UNSET shell variable into a perfectly valid "0 seconds elapsed" and the
+  // budget passes on the strength of a value nobody measured. An empty or
+  // whitespace-only argument must land on NaN like any other malformed input.
+  const elapsed =
+    typeof elapsedSecondsArg === 'number'
+      ? elapsedSecondsArg
+      : typeof elapsedSecondsArg === 'string' && elapsedSecondsArg.trim() !== ''
+        ? Number(elapsedSecondsArg)
+        : Number.NaN;
   const problems = [];
   if (summary.failing > cfg.maxFailing) {
     problems.push(`fail=${summary.failing} exceeds maxFailing=${cfg.maxFailing}`);
@@ -266,7 +275,18 @@ function evaluateTier1(log, elapsedSecondsArg, baselines) {
   if (summary.passing < cfg.minPassing) {
     problems.push(`pass=${summary.passing} is below the floor minPassing=${cfg.minPassing}`);
   }
-  if (Number.isFinite(elapsed) && elapsed > cfg.maxSeconds) {
+  // A NON-FINITE elapsed is a FAILURE, never a waiver. `Number.isFinite(elapsed)
+  // && elapsed > max` skipped the budget entirely for a malformed argument -- an
+  // empty string from an unset shell variable, or a SECONDS arithmetic that
+  // produced nothing -- with no diagnostic at all. The receipt still printed
+  // (`seconds=NaN`), so the run looked normal while the time bound had silently
+  // ceased to exist.
+  if (!Number.isFinite(elapsed)) {
+    problems.push(
+      `elapsedSeconds argument is not a finite number (got ${JSON.stringify(elapsedSecondsArg)}) -- ` +
+        `the maxSeconds=${cfg.maxSeconds} budget cannot be evaluated, and an unevaluatable budget is not a passed one`,
+    );
+  } else if (elapsed > cfg.maxSeconds) {
     problems.push(`elapsed=${elapsed}s exceeds maxSeconds=${cfg.maxSeconds}`);
   }
   const notices = [];
@@ -539,6 +559,18 @@ function runSelftest() {
 
     // 13. tier1, vacuous
     check('tier1 vacuous', false, evaluateTier1('nothing resembling a summary here\n', 1, baselines));
+
+    // 13a-13c. tier1, malformed elapsed argument -- an unset shell variable
+    //          (empty string), a non-numeric word, and an omitted argument. Each
+    //          used to make the time budget silently disappear.
+    check('tier1 elapsed empty string', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), '', baselines));
+    check('tier1 elapsed non-numeric', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), 'not-a-number', baselines));
+    check('tier1 elapsed undefined', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), undefined, baselines));
+
+    // 13d. positive control for the three above: a well-formed elapsed at the
+    //      exact budget still passes, so the new guard is not just rejecting
+    //      everything.
+    check('tier1 elapsed exactly at the budget', true, evaluateTier1(buildTier1LogHash(t1Floor, 0), String(t1MaxSeconds), baselines));
 
     const tcCeiling = baselines.authorityTypecheck.maxErrors;
 
