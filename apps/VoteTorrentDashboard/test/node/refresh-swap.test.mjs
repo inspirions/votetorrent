@@ -105,6 +105,127 @@ function makeVanishingRowCountsStorage(rowCountsKey) {
 	};
 }
 
+/**
+ * A storage double that can be told, at an explicit point in a test, to start
+ * reporting `rowCountsKey`'s stored record with its `counts` object forced to
+ * `{}` -- the EDGE CASE the "vanished" double does not exercise: a record
+ * that is PRESENT (not `undefined`) but whose `counts` is already empty.
+ * `refresh.js`'s `tableNames.length === 0` guard must catch this branch too,
+ * distinctly from the `!record` branch. Writes land in the real map; `_raw`
+ * bypasses the lens, exactly like {@link makeVanishingRowCountsStorage}.
+ *
+ * @param {string} rowCountsKey
+ */
+function makeEmptyCountsRowCountsStorage(rowCountsKey) {
+	/** @type {Map<string, string>} */
+	const map = new Map();
+	let emptied = false;
+	return {
+		getItem: (/** @type {string} */ key) => {
+			if (key === rowCountsKey && emptied) {
+				const raw = map.has(key) ? map.get(key) : undefined;
+				if (raw === undefined) return null;
+				const parsed = JSON.parse(/** @type {string} */ (raw));
+				return JSON.stringify({ ...parsed, counts: {} });
+			}
+			return map.has(key) ? map.get(key) : null;
+		},
+		setItem: (/** @type {string} */ key, /** @type {string} */ value) => {
+			map.set(key, value);
+		},
+		removeItem: (/** @type {string} */ key) => {
+			map.delete(key);
+		},
+		/** Test-only: start reporting `rowCountsKey`'s record with empty `counts`. */
+		_empty: () => {
+			emptied = true;
+		},
+		/** Test-only: read the underlying map, bypassing the lens. @returns {string | null} */
+		_raw: (/** @type {string} */ key) => (map.has(key) ? /** @type {string} */ (map.get(key)) : null),
+	};
+}
+
+/**
+ * A storage double that can be told, at an explicit point in a test, to start
+ * reporting `rowCountsKey`'s stored record with ONE table's count nudged by
+ * +1 relative to what is actually stored -- simulating a GENUINE divergence
+ * between the persisted record and live counts, as opposed to the record
+ * being absent or empty. Armed with `_corrupt()` AFTER the swap's own write
+ * has already landed in the real map, so `redeemAndBootstrap`'s step 9 write
+ * is unaffected -- only `refresh.js`'s OWN post-swap read sees the corrupted
+ * value. `_raw` bypasses the lens and reads the real, uncorrupted map.
+ *
+ * @param {string} rowCountsKey
+ */
+function makeCorruptingRowCountsStorage(rowCountsKey) {
+	/** @type {Map<string, string>} */
+	const map = new Map();
+	let corrupt = false;
+	return {
+		getItem: (/** @type {string} */ key) => {
+			if (key === rowCountsKey && corrupt) {
+				const raw = map.has(key) ? map.get(key) : undefined;
+				if (raw === undefined) return null;
+				const parsed = JSON.parse(/** @type {string} */ (raw));
+				const tables = Object.keys(parsed.counts);
+				const corrupted = { ...parsed.counts, [tables[0]]: parsed.counts[tables[0]] + 1 };
+				return JSON.stringify({ ...parsed, counts: corrupted });
+			}
+			return map.has(key) ? map.get(key) : null;
+		},
+		setItem: (/** @type {string} */ key, /** @type {string} */ value) => {
+			map.set(key, value);
+		},
+		removeItem: (/** @type {string} */ key) => {
+			map.delete(key);
+		},
+		/** Test-only: start returning a corrupted `counts` for `rowCountsKey`. */
+		_corrupt: () => {
+			corrupt = true;
+		},
+		/** Test-only: read the underlying (uncorrupted) map. @returns {string | null} */
+		_raw: (/** @type {string} */ key) => (map.has(key) ? /** @type {string} */ (map.get(key)) : null),
+	};
+}
+
+/**
+ * A storage double that records the ORDER of every `getItem`/`setItem`/
+ * `removeItem` call as a monotonically increasing sequence number, so a test
+ * can assert "this read happened after that write" directly from the
+ * recorded sequence -- never as a proxy for ordering such as "the record was
+ * non-empty", which would pass even if the read raced the write.
+ *
+ * @returns {{ getItem: (key: string) => string | null, setItem: (key: string, value: string) => void, removeItem: (key: string) => void, _log: () => Array<{ op: 'get' | 'set' | 'remove', key: string, seq: number }>, _reset: () => void }}
+ */
+function makeSequenceTrackingStorage() {
+	/** @type {Map<string, string>} */
+	const map = new Map();
+	/** @type {Array<{ op: 'get' | 'set' | 'remove', key: string, seq: number }>} */
+	let log = [];
+	let seq = 0;
+	return {
+		getItem: (key) => {
+			log.push({ op: 'get', key, seq: seq++ });
+			return map.has(key) ? /** @type {string} */ (map.get(key)) : null;
+		},
+		setItem: (key, value) => {
+			log.push({ op: 'set', key, seq: seq++ });
+			map.set(key, value);
+		},
+		removeItem: (key) => {
+			log.push({ op: 'remove', key, seq: seq++ });
+			map.delete(key);
+		},
+		/** Test-only: the recorded call sequence so far. */
+		_log: () => log.slice(),
+		/** Test-only: clear the recorded sequence (but not the underlying map) so a
+		 * test can isolate the storage traffic of ONE call under test. */
+		_reset: () => {
+			log = [];
+		},
+	};
+}
+
 /** @param {import('@votetorrent/vote-engine/bootstrap').BootstrapSnapshot} envelope @param {string} [secret] */
 function codeFor(envelope, secret = SECRET) {
 	return `${secret}.${envelope.digest}`;
@@ -357,6 +478,31 @@ test('refreshNetwork: transport-unreachable leaves the network byte-intact', asy
 	await deleteNetworkDb(envelope.networkHash);
 });
 
+test('refreshNetwork: a verify-failed refusal writes the row-count key exactly zero times, counted directly from the storage adapter\'s own log -- not inferred from the byte-intact snapshot comparison', async () => {
+	const { envelope, storage: baseStorage, tableNames } = await bootstrapFixtureNetwork();
+	// Swap the fixture's plain fake storage for a sequence-tracking one, seeded
+	// with the same underlying data, so this test measures storage TRAFFIC
+	// directly rather than reusing the outcome-comparison instrument the other
+	// byte-intact tests already use.
+	const storage = makeSequenceTrackingStorage();
+	for (const key of baseStorage._keys()) {
+		storage.setItem(key, /** @type {string} */ (baseStorage.getItem(key)));
+	}
+	storage._reset();
+
+	const rowCountsKey = rowCountsKeyFor(envelope.networkHash);
+	const transport = makeFakeTransport({ codeToResult: { [SECRET_2]: { status: 'ok', snapshot: envelope } } });
+	const wrongDigestCode = `${SECRET_2}.${'z'.repeat(43)}`;
+	const result = await refreshNetwork({ networkHash: envelope.networkHash, pastedCode: wrongDigestCode, transport, storage });
+
+	assert.equal(result.outcome, 'verify-failed');
+	const setOpsOnRowCountsKey = storage._log().filter((entry) => entry.op === 'set' && entry.key === rowCountsKey);
+	assert.equal(setOpsOnRowCountsKey.length, 0, 'a refused refresh must write the row-count key zero times');
+
+	await deleteNetworkDb(envelope.networkHash);
+	void tableNames;
+});
+
 test('refreshNetwork: officer-indeterminate leaves the network byte-intact', async () => {
 	const { envelope, storage, tableNames } = await bootstrapFixtureNetwork();
 	const before = await captureNetworkState(envelope.networkHash, storage, tableNames);
@@ -443,6 +589,145 @@ test('refreshNetwork: RowCountRecordNotUpdatedError names the network when the p
 	const persisted = JSON.parse(/** @type {string} */ (storage._raw(key)));
 	assert.deepEqual(persisted.counts, newSnapshot.manifest);
 	assert.notDeepEqual(persisted.counts, {});
+
+	await deleteNetworkDb(envelope.networkHash);
+});
+
+test('refreshNetwork: a PRESENT record whose counts are already {} (not absent) also throws RowCountRecordNotUpdatedError -- the tableNames.length === 0 branch, distinct from the !record branch', async () => {
+	const envelope = buildFixtureEnvelope();
+	await deleteNetworkDb(envelope.networkHash).catch(() => undefined);
+	const key = rowCountsKeyFor(envelope.networkHash);
+	const storage = makeEmptyCountsRowCountsStorage(key);
+
+	const bootstrapTransport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });
+	const bootstrapResult = await redeemAndBootstrap({ pastedCode: codeFor(envelope), transport: bootstrapTransport, storage });
+	assert.equal(bootstrapResult.outcome, 'ok');
+	storage._empty();
+
+	const newSnapshot = buildRefreshedEnvelope(envelope);
+	const refreshTransport = makeFakeTransport({ codeToResult: { [SECRET_2]: { status: 'ok', snapshot: newSnapshot } } });
+
+	await assert.rejects(
+		() => refreshNetwork({ networkHash: envelope.networkHash, pastedCode: codeFor(newSnapshot, SECRET_2), transport: refreshTransport, storage }),
+		(/** @type {any} */ err) => {
+			assert.ok(err instanceof RowCountRecordNotUpdatedError);
+			assert.equal(err.networkHash, envelope.networkHash);
+			return true;
+		},
+	);
+
+	// The underlying (uncorrupted) stored value is still the full manifest --
+	// redeemAndBootstrap's own step 9 wrote it during the swap, and
+	// refreshNetwork itself never touched storage on this throwing path.
+	const persisted = JSON.parse(/** @type {string} */ (storage._raw(key)));
+	assert.deepEqual(persisted.counts, newSnapshot.manifest);
+
+	await deleteNetworkDb(envelope.networkHash);
+});
+
+test('refreshNetwork: a genuine divergence between the post-swap record and live counts still throws, and never writes a repair value', async () => {
+	const envelope = buildFixtureEnvelope();
+	await deleteNetworkDb(envelope.networkHash).catch(() => undefined);
+	const key = rowCountsKeyFor(envelope.networkHash);
+	const storage = makeCorruptingRowCountsStorage(key);
+
+	const bootstrapTransport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });
+	const bootstrapResult = await redeemAndBootstrap({ pastedCode: codeFor(envelope), transport: bootstrapTransport, storage });
+	assert.equal(bootstrapResult.outcome, 'ok');
+
+	const newSnapshot = buildRefreshedEnvelope(envelope);
+	const refreshTransport = makeFakeTransport({ codeToResult: { [SECRET_2]: { status: 'ok', snapshot: newSnapshot } } });
+
+	// Arm the corruption AFTER bootstrapping -- the swap's own step 9 write
+	// (inside the refreshNetwork call below) still lands the CORRECT new
+	// manifest in the real map; only refresh.js's OWN post-swap read of that
+	// record is lied to, simulating a genuine divergence discovered after a
+	// swap that otherwise landed cleanly.
+	storage._corrupt();
+
+	const beforeKeys = Object.keys(JSON.parse(/** @type {string} */ (storage._raw(key))).counts);
+
+	await assert.rejects(
+		() => refreshNetwork({ networkHash: envelope.networkHash, pastedCode: codeFor(newSnapshot, SECRET_2), transport: refreshTransport, storage }),
+		(/** @type {any} */ err) => {
+			assert.ok(err instanceof RowCountRecordNotUpdatedError);
+			assert.equal(err.networkHash, envelope.networkHash);
+			return true;
+		},
+	);
+
+	// The stored record (bypassing the corruption lens) is left no weaker than
+	// it was BEFORE this call -- same table set, because redeemAndBootstrap's
+	// own step 9 write is the only write that happened, and it wrote the
+	// correct new manifest, never an emptier "repair" value.
+	const afterKeys = Object.keys(JSON.parse(/** @type {string} */ (storage._raw(key))).counts);
+	assert.ok(afterKeys.length >= beforeKeys.length, 'the stored record must never shrink');
+	assert.deepEqual(afterKeys.sort(), Object.keys(newSnapshot.manifest).sort());
+
+	await deleteNetworkDb(envelope.networkHash);
+});
+
+test('refreshNetwork: throws the unheld-network programming error, naming the hash, without touching storage', async () => {
+	const envelope = buildFixtureEnvelope();
+	await deleteNetworkDb(envelope.networkHash).catch(() => undefined);
+	const storage = makeFakeStorage();
+	const transport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });
+
+	await assert.rejects(
+		() => refreshNetwork({ networkHash: envelope.networkHash, pastedCode: codeFor(envelope), transport, storage }),
+		(/** @type {any} */ err) => {
+			assert.ok(err instanceof Error);
+			assert.ok(!(err instanceof RowCountRecordNotUpdatedError), 'expected the programming-error path, not the row-count path');
+			assert.ok(err.message.includes(envelope.networkHash), 'expected the error to name the network hash');
+			assert.ok(err.message.includes('bootstrap, not a refresh'));
+			return true;
+		},
+	);
+
+	// A refusal this early must not have touched storage at all.
+	assert.deepEqual(storage._keys(), []);
+});
+
+test('refreshNetwork: on the happy path, the post-swap record read happens strictly AFTER redeemAndBootstrap\'s own write, and refreshNetwork performs no write of its own', async () => {
+	const envelope = buildFixtureEnvelope();
+	await deleteNetworkDb(envelope.networkHash).catch(() => undefined);
+	const storage = makeSequenceTrackingStorage();
+	const bootstrapTransport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });
+	const bootstrapResult = await redeemAndBootstrap({ pastedCode: codeFor(envelope), transport: bootstrapTransport, storage });
+	assert.equal(bootstrapResult.outcome, 'ok');
+
+	const rowCountsKey = rowCountsKeyFor(envelope.networkHash);
+	// Isolate the storage traffic of the refreshNetwork call under test --
+	// the initial bootstrap's own reads/writes are not what this assertion is about.
+	storage._reset();
+
+	const newSnapshot = buildRefreshedEnvelope(envelope);
+	const refreshTransport = makeFakeTransport({ codeToResult: { [SECRET_2]: { status: 'ok', snapshot: newSnapshot } } });
+	const result = await refreshNetwork({
+		networkHash: envelope.networkHash,
+		pastedCode: codeFor(newSnapshot, SECRET_2),
+		transport: refreshTransport,
+		storage,
+	});
+	assert.equal(result.outcome, 'ok');
+
+	const log = storage._log();
+	const setOps = log.filter((entry) => entry.op === 'set' && entry.key === rowCountsKey);
+	// Exactly ONE write of the row-count key across the whole refreshNetwork
+	// call -- redeemAndBootstrap's own step 9. refreshNetwork itself never
+	// calls writeRowCounts (also grep-enforced: see the plan's acceptance
+	// criteria), so a positive control that merely checked "the record is
+	// correct afterwards" would be satisfiable by a function that wrote a
+	// SECOND, redundant, correct value -- this counts the writes directly.
+	assert.equal(setOps.length, 1, `expected exactly one write of the row-count key, saw ${setOps.length}`);
+
+	const getOpsAfterSwapWrite = log.filter(
+		(entry) => entry.op === 'get' && entry.key === rowCountsKey && entry.seq > setOps[0].seq,
+	);
+	assert.ok(
+		getOpsAfterSwapWrite.length >= 1,
+		'expected refreshNetwork to read the row-count record AFTER redeemAndBootstrap wrote it, not before',
+	);
 
 	await deleteNetworkDb(envelope.networkHash);
 });
