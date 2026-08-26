@@ -87,6 +87,15 @@ export const COPY = Object.freeze({
 	'gate.resetScopesCta': 'Reset to my scopes',
 	'gate.revealDeniedCta': 'Reveal denied panels',
 	'preview.title': 'Preview as',
+	// Panel-frame pills. `tier`, `site` and the English pluralisation rule were
+	// authored user-facing prose living outside this table -- and lint-copy.mjs
+	// could not see them, because it scans for a fixed sentinel list rather
+	// than for arbitrary literals. The singular and plural are SEPARATE keys,
+	// not a suffix computed in the component, so a locale whose plural is not
+	// formed by adding a letter has somewhere to put its own answer.
+	'panelFrame.tierPill': 'tier {{tier}}',
+	'panelFrame.sitePill': '{{count}} site',
+	'panelFrame.sitesPill': '{{count}} sites',
 
 	// Navigation groups and lifecycle pill
 	'nav.groupElectionOperations': 'Election Operations',
