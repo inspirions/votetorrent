@@ -39,7 +39,7 @@
 
 import { redeemAndBootstrap } from './bootstrap.js';
 import { closeNetworkDb } from '../db/open-db.js';
-import { attachNetworkDb, readRowCounts, readRowCountsRecord, writeRowCounts } from '../db/reattach.js';
+import { attachNetworkDb, readRowCounts, readRowCountsRecord } from '../db/reattach.js';
 import { findNetwork } from '../db/networks-registry.js';
 
 /** The post-swap row-count record (contract 6's obligation to 50-05) was
@@ -176,12 +176,6 @@ export async function refreshNetwork(options) {
 		throw new Error(`refreshNetwork: no registry entry for network "${networkHash}" -- this is a bootstrap, not a refresh`);
 	}
 
-	// The table set does not change across a refresh (same schema) -- read
-	// BEFORE the swap so the post-swap check below knows what to re-read
-	// even if the record itself is missing or diverges after the swap.
-	const priorRecord = await readRowCountsRecord(networkHash, storage);
-	const tableNames = priorRecord ? Object.keys(priorRecord.counts) : [];
-
 	// 50-08's ONE destructive implementation, verify-before-delete already
 	// baked in. Writing a second one here is forbidden by 50-08's handoff.
 	const result = await redeemAndBootstrap({
@@ -204,7 +198,26 @@ export async function refreshNetwork(options) {
 	// (or this whole call would have rejected before reaching `outcome: 'ok'`
 	// at all). Read the live counts and the persisted record independently
 	// and compare -- if they already agree, the obligation was discharged by
-	// the single implementation above, and nothing more is written here.
+	// the single implementation above, and nothing is written here.
+	//
+	// THE TABLE SET COMES FROM THE FRESHLY-WRITTEN RECORD, NEVER FROM A
+	// PRIOR ONE, AND THIS FUNCTION NEVER WRITES A REPAIR VALUE. Both of
+	// those are the same defect from two directions. Deriving `tableNames`
+	// from a possibly-absent PRE-swap record yielded `[]` whenever the
+	// registry entry survived but the row-count key did not, and
+	// `readRowCounts(db, [])` is `{}` -- which never matches the correct
+	// ~60-table manifest step 9 just wrote, so the divergence branch ran and
+	// OVERWROTE that correct record with `{}`. `assertRowCounts` then
+	// iterates zero keys and returns clean, silently disabling this
+	// network's truncation check from then on. An absent or empty record is
+	// therefore reported, never "repaired": there is nothing here that is
+	// more trustworthy than what step 9 already persisted.
+	const record = await readRowCountsRecord(networkHash, storage);
+	const tableNames = Object.keys(record?.counts ?? {});
+	if (!record || tableNames.length === 0) {
+		throw new RowCountRecordNotUpdatedError(networkHash);
+	}
+
 	const db = await attachNetworkDb(networkHash, { storage, expectedCounts: {} });
 	/** @type {Record<string, number>} */
 	let liveCounts;
@@ -214,14 +227,12 @@ export async function refreshNetwork(options) {
 		await closeNetworkDb(db);
 	}
 
-	const record = await readRowCountsRecord(networkHash, storage);
-	if (record && sameShape(record.counts, liveCounts)) {
+	if (sameShape(record.counts, liveCounts)) {
 		return result;
 	}
 
-	// Absent or divergent: repair, then throw loudly. A regression in the
-	// replace path must surface as a named error, never as a silently
-	// unverifiable network left for `attachNetworkDb` to discover later.
-	await writeRowCounts(networkHash, liveCounts, storage);
+	// Divergent: throw loudly. A regression in the replace path must surface
+	// as a named error, never as a silently unverifiable network left for
+	// `attachNetworkDb` to discover later.
 	throw new RowCountRecordNotUpdatedError(networkHash);
 }

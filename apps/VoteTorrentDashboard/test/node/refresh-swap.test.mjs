@@ -66,25 +66,28 @@ function makeFakeStorage() {
 }
 
 /**
- * A storage double whose FIRST read of `rowCountsKey` succeeds normally
- * (refresh.js's own pre-swap "prior record" capture), and whose every
- * SUBSEQUENT read of that one key returns `null` -- simulating the record
- * vanishing between the swap and refresh.js's own post-swap check. Writes
- * always land in the real underlying map.
+ * A storage double that can be told, at an explicit point in a test, to start
+ * reporting `rowCountsKey` as absent -- simulating the row-count record not
+ * surviving to refresh.js's post-swap check while the registry entry does.
+ * Writes ALWAYS land in the real underlying map, and `_raw` reads that map
+ * directly, so a test can distinguish "the reader could not see it" from
+ * "something overwrote it".
+ *
+ * Deliberately armed by an explicit `_vanish()` call rather than by counting
+ * reads: a read-count trigger silently couples the instrument to how many
+ * times the implementation happens to read the key, which is exactly how the
+ * previous version of this double kept passing after refresh.js stopped
+ * reading it pre-swap.
  *
  * @param {string} rowCountsKey
  */
 function makeVanishingRowCountsStorage(rowCountsKey) {
 	/** @type {Map<string, string>} */
 	const map = new Map();
-	let getCallsForKey = 0;
+	let vanished = false;
 	return {
 		getItem: (/** @type {string} */ key) => {
-			if (key === rowCountsKey) {
-				getCallsForKey += 1;
-				if (getCallsForKey === 1) return map.has(key) ? map.get(key) : null;
-				return null;
-			}
+			if (key === rowCountsKey && vanished) return null;
 			return map.has(key) ? map.get(key) : null;
 		},
 		setItem: (/** @type {string} */ key, /** @type {string} */ value) => {
@@ -93,6 +96,12 @@ function makeVanishingRowCountsStorage(rowCountsKey) {
 		removeItem: (/** @type {string} */ key) => {
 			map.delete(key);
 		},
+		/** Test-only: start reporting `rowCountsKey` as absent from here on. */
+		_vanish: () => {
+			vanished = true;
+		},
+		/** Test-only: read the underlying map, bypassing the vanish. @returns {string | null} */
+		_raw: (/** @type {string} */ key) => (map.has(key) ? /** @type {string} */ (map.get(key)) : null),
 	};
 }
 
@@ -410,6 +419,7 @@ test('refreshNetwork: RowCountRecordNotUpdatedError names the network when the p
 	const bootstrapTransport = makeFakeTransport({ codeToResult: { [SECRET]: { status: 'ok', snapshot: envelope } } });
 	const bootstrapResult = await redeemAndBootstrap({ pastedCode: codeFor(envelope), transport: bootstrapTransport, storage });
 	assert.equal(bootstrapResult.outcome, 'ok');
+	storage._vanish();
 
 	const newSnapshot = buildRefreshedEnvelope(envelope);
 	const refreshTransport = makeFakeTransport({ codeToResult: { [SECRET_2]: { status: 'ok', snapshot: newSnapshot } } });
@@ -422,6 +432,17 @@ test('refreshNetwork: RowCountRecordNotUpdatedError names the network when the p
 			return true;
 		},
 	);
+
+	// AND -- the anti-repair property this rejection exists to protect. The
+	// old implementation derived its table set from a possibly-absent PRIOR
+	// record, so an unreadable key produced `readRowCounts(db, [])` === `{}`,
+	// and it then WROTE that `{}` over the correct manifest the swap had just
+	// persisted. `assertRowCounts` iterates zero keys, so the network's
+	// truncation check was silently disabled from then on. The stored record
+	// must still be the real manifest, never an empty object.
+	const persisted = JSON.parse(/** @type {string} */ (storage._raw(key)));
+	assert.deepEqual(persisted.counts, newSnapshot.manifest);
+	assert.notDeepEqual(persisted.counts, {});
 
 	await deleteNetworkDb(envelope.networkHash);
 });
