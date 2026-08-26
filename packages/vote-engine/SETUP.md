@@ -195,6 +195,60 @@ Google revocation-list change notification if one becomes available) shrinks
 the window at the cost of more frequent app releases/updates to authority
 peers.
 
+
+### 4d. Pinned Apple App Attest root (iOS, Phase 51 — NOT YET PROVISIONED)
+
+`AppAttestVerifier` is the iOS counterpart of `PlayIntegrityVerifier` and holds the same offline
+posture: the Apple trust anchor is an INJECTED, bundled, committed snapshot, never fetched at
+verify-time.
+
+**It is currently EMPTY, deliberately.**
+`apps/VoteTorrentVoter/src/engines/appattest-roots.generated.ts` ships with no certificate, and the
+verifier fails closed on an empty pool:
+
+```
+Apple App Attest root material is not provisioned — see SETUP.md
+```
+
+That reason is returned FIRST, before any other check, so an unprovisioned deployment can never
+report a misleading downstream failure instead (the same D-09 discipline `PlayIntegrityVerifier`
+uses for Play Console keys).
+
+**Provisioning the root.**
+
+Apple publishes a single long-lived root as a static PEM — there is no JSON endpoint and no
+rotation feed, unlike Google's:
+
+```
+curl -O https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem
+```
+
+Before embedding it, verify **both** properties — this step is why the file is not auto-generated:
+
+```
+# 1. genuinely self-signed: subject must equal issuer
+openssl x509 -in Apple_App_Attestation_Root_CA.pem -noout -subject -issuer
+
+# 2. fingerprint matches the value Apple publishes on its certificate-authority page,
+#    checked OUT OF BAND (a different network path / a colleague), not from the same download
+openssl x509 -in Apple_App_Attestation_Root_CA.pem -noout -fingerprint -sha256
+```
+
+Then strip the PEM header/footer/newlines and paste the base64 DER body into
+`APPLE_APP_ATTEST_ROOTS_BASE64`.
+
+> **Do not skip the out-of-band check.** A trust anchor is the one value in this system where a
+> wrong-but-well-formed input does not fail — it silently redefines what "genuine Apple hardware"
+> means. Everything else in the attestation path fails loudly when it is wrong.
+
+**What is still unproven on iOS.**
+
+The verifier, the wire format (`ATTESTATION-CONTRACT-IOS.md`) and the Swift TurboModule are all
+implemented and covered by tests, but **every fixture is synthetic**. `DCAppAttestService` requires
+a signed build from a registered Apple Developer team and a physical iPhone —
+`isSupported` is `false` on the Simulator, always. See
+`.planning/todos/pending/2026-08-25-ios-appattest-team-id-and-entitlement.md`.
+
 ## 5. Deferred follow-ups (explicitly deferred, not dropped)
 
 ### 5a. Real-device golden capture (D-09)

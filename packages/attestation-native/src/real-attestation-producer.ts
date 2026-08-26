@@ -16,7 +16,8 @@
  */
 
 import { digestFields, resolveHasher, resolveOutputEncoder } from '@optimystic/quereus-plugin-crypto'
-import type { AttestationChallenge, DeviceAttestation } from '@votetorrent/vote-core'
+import { cborDecode, type CborValue } from '@votetorrent/vote-core'
+import type { AttestationChallenge, DeviceAttestation, IOSAttestationDetails } from '@votetorrent/vote-core'
 // Type-only import — erased at compile time (isolatedModules requires this to be explicit), so
 // it produces NO runtime require of './specs/NativeAttestation' and therefore does not trigger
 // that module's top-level `TurboModuleRegistry.getEnforcing(...)` call. The runtime value is
@@ -119,8 +120,9 @@ function getNative(): NativeAttestationSpec {
 type Base64GlobalEnv = {
 	TextEncoder: new () => { encode(input: string): Uint8Array }
 	btoa: (data: string) => string
+	atob: (data: string) => string
 }
-const { TextEncoder: TextEncoderCtor, btoa: btoaFn } = globalThis as unknown as Base64GlobalEnv
+const { TextEncoder: TextEncoderCtor, btoa: btoaFn, atob: atobFn } = globalThis as unknown as Base64GlobalEnv
 
 /**
  * Base64-encode the UTF-8 bytes of a string (STANDARD alphabet, no URL-safe substitution) — the
@@ -136,10 +138,215 @@ function base64FromUtf8(value: string): string {
 	return btoaFn(binary)
 }
 
+/** Standard-alphabet base64 of raw bytes (NOT base64url) — `signWithDeviceKey`'s digest contract. */
+function base64FromBytes(bytes: Uint8Array): string {
+	let binary = ''
+	for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!)
+	return btoaFn(binary)
+}
+
+/** Decode standard-alphabet base64 to bytes. */
+function bytesFromBase64(value: string): Uint8Array {
+	const binary = atobFn(value)
+	const out = new Uint8Array(binary.length)
+	for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i)
+	return out
+}
+
+// ---- iOS domain-separation tags (ATTESTATION-CONTRACT-IOS.md §3.1 / §4) ----
+// These strings are part of the wire contract. The authority RECOMPUTES both digests from its own
+// held values; changing a tag here without changing the verifier silently breaks every iOS
+// association with an opaque signature failure.
+const IOS_ASSERTION_TAG = 'votetorrent/ios-assertion/v1'
+const IOS_POP_TAG = 'votetorrent/ios-pop/v1'
+
+/**
+ * §3.1 ASSERTION_DIGEST — the value `generateAssertion` cross-signs, binding `K_vote` to the
+ * attested identity. Field 3 restates the vote key even though BOUND_DIGEST already commits to it,
+ * so the binding is self-evident to a verifier holding the submitted key rather than transitive.
+ *
+ * Computed HERE, in JS, and passed to Swift finished — `digestFields`' length-prefixed, type-tagged
+ * encoding must never be re-derived in a second language (SIGN-05). Mirrors
+ * `verifyAssertion`'s recomputation in vote-engine.
+ */
+export function computeAssertionDigest(boundDigest: string, voteKeyCompressedHex: string): string {
+	return digestFields([IOS_ASSERTION_TAG, boundDigest, voteKeyCompressedHex], hasher, encode) as string
+}
+
+/**
+ * §4 POP_DIGEST — proof that the device holds `K_vote`'s PRIVATE key. Neither the attestation nor
+ * the assertion proves this: both are signed by `K_att`. Without it a device could attest and
+ * assert over a `K_vote` it does not control. No Android counterpart (§6).
+ */
+export function computePopDigest(boundDigest: string): string {
+	return digestFields([IOS_POP_TAG, boundDigest], hasher, encode) as string
+}
+
+/**
+ * Read the replay counter out of an App Attest assertion.
+ *
+ * The assertion is CBOR `{ signature, authenticatorData }`; `authenticatorData` is
+ * `rpIdHash(32) || flags(1) || counter(4 big-endian)`. The byte offsets below are the SAME ones
+ * `verifyAssertion` uses (`app-attest-assertion.ts` §8.10) — they must stay in step.
+ *
+ * The authority does NOT trust this value: it reads its own counter from the assertion. Carrying it
+ * lets `AssociationAssociateBuilder` reject a malformed submission early and legibly.
+ */
+function readAssertionCounter(assertionBase64: string): number {
+	const decoded = cborDecode(bytesFromBase64(assertionBase64))
+	if (!(decoded instanceof Map)) throw new Error('iOS assertion is not a CBOR map')
+	const authenticatorData = (decoded as Map<CborValue, CborValue>).get('authenticatorData')
+	if (!(authenticatorData instanceof Uint8Array) || authenticatorData.length < 37) {
+		throw new Error('iOS assertion authenticatorData is missing or too short')
+	}
+	return ((authenticatorData[33]! << 24) >>> 0) + (authenticatorData[34]! << 16) +
+		(authenticatorData[35]! << 8) + authenticatorData[36]!
+}
+
+/**
+ * `Platform.OS`, read through a scoped require for the SAME reason `getNative()` uses one: this
+ * module's top-level evaluation is kept pure so importing it under Node/jest (for
+ * `computeBoundDigest` and the D-16b probe) never touches the React Native runtime.
+ */
+function getPlatformOS(): string {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires -- deliberate lazy require, see above.
+	return (require('react-native') as { Platform: { OS: string } }).Platform.OS
+}
+
 /** Package-local two-method producer shape (D-08 — structurally, not nominally, typed). */
 interface RealAttestationProducer {
-	provisionDeviceKey(): Promise<{ publicKey: string }>
+	/**
+	 * `reprovisioned` is TRUE when the native side found the stored vote key DESTROYED (a biometric
+	 * re-enrolment) and minted a replacement. The device key has therefore CHANGED: any challenge
+	 * already issued against the old one is void, and any existing Association no longer describes
+	 * this device. `voteKeyProbe` carries the raw liveness verdict for diagnostics.
+	 */
+	provisionDeviceKey(): Promise<{ publicKey: string; reprovisioned?: boolean; voteKeyProbe?: string }>
 	produce(challenge: AttestationChallenge): Promise<DeviceAttestation>
+}
+
+/**
+ * iOS production path (ATTESTATION-CONTRACT-IOS.md §3.4). Deliberately a separate function rather
+ * than inline branches: almost nothing about the iOS ceremony resembles Android's. Android's
+ * Keystore key both carries the attestation AND signs votes; Apple's App Attest key can ONLY
+ * produce assertions, so iOS manages TWO keys and must cross-sign them together (§0).
+ *
+ * Call order is REQUIRED and encoded here:
+ *   1. BOUND_DIGEST, then ASSERTION_DIGEST (both in JS, both passed down finished).
+ *   2. produceAttestation — native does attestKey (§2) then generateAssertion (§3.2).
+ *   3. signWithDeviceKey over POP_DIGEST (§4) — a SEPARATE call, because it needs the biometric
+ *      prompt the App Attest path never raises.
+ */
+async function produceIos(
+	native: NativeAttestationSpec,
+	challenge: AttestationChallenge,
+	boundDigest: string,
+	enableDeviceCheck: boolean,
+): Promise<DeviceAttestation> {
+	// challenge.deviceKey IS K_vote in compressed SEC1 hex — the same form provisionDeviceKey
+	// returned and the authority issued the challenge against.
+	const assertionDigest = computeAssertionDigest(boundDigest, challenge.deviceKey)
+
+	const result = (await native.produceAttestation(KEY_ALIAS, boundDigest, assertionDigest, enableDeviceCheck)) as {
+		attestationObjectBase64: string
+		assertionBase64: string
+		appAttestKeyId: string
+		publicKeyCompressedHex: string
+		attestationTimeMillis: number
+		deviceCheckToken: string
+	}
+
+	// §3.4 CALLER OBLIGATION. Native reads whatever key currently sits under the vote alias; if that
+	// is not the key we hashed into assertionDigest, the assertion binds the WRONG key and the
+	// authority rejects with an opaque "K_vote is not bound to this attestation". Catch it here,
+	// where the message can say what actually happened. This is reachable in practice: a biometric
+	// re-enrolment invalidates the vote key, and a re-provision mints a different one.
+	if (result.publicKeyCompressedHex !== challenge.deviceKey) {
+		throw new Error(
+			'iOS attestation aborted: the vote key under the alias no longer matches the key this ' +
+				'challenge was issued against (the device key was likely re-provisioned after a ' +
+				'biometric change). Request a fresh challenge for the current key.',
+		)
+	}
+
+	// §4 proof of possession — signWithDeviceKey takes PLAIN base64 of the RAW 32 digest bytes,
+	// never base64url and never UTF-8-of-a-string (its byte contract is identical on both platforms).
+	const popDigest = computePopDigest(boundDigest)
+	const popInput = base64FromBytes(hasher(new TextEncoderCtor().encode(popDigest)))
+	const pop = (await native.signWithDeviceKey(
+		KEY_ALIAS,
+		popInput,
+		'Confirm your device',
+		'Prove this device holds your voting key',
+		'Cancel',
+	)) as { signatureHex: string }
+
+	const { certificateChain, environment } = readAttestationObject(result.attestationObjectBase64)
+
+	const platformDetails: IOSAttestationDetails = {
+		type: 'iOS',
+		secureEnclavePublicKey: challenge.deviceKey,
+		appAttestKeyId: result.appAttestKeyId,
+		assertion: result.assertionBase64,
+		assertionCounter: readAssertionCounter(result.assertionBase64),
+		popSignature: pop.signatureHex,
+		boundDigest,
+		environment,
+	}
+	// Bar A excludes DeviceCheck (it would need an authority->Apple round trip, breaking the offline
+	// verifier posture). Native returns '' when the leg is off; omit the field rather than submit an
+	// empty string that reads as "a token was produced".
+	if (result.deviceCheckToken !== '') platformDetails.deviceCheckToken = result.deviceCheckToken
+
+	return {
+		publicKey: challenge.deviceKey,
+		// iOS has no stable device id by design; the App Attest key id IS the app-install identity,
+		// which is exactly what DeviceAttestation.deviceId documents for this platform.
+		deviceId: result.appAttestKeyId,
+		attestationTime: result.attestationTimeMillis,
+		attestationStatement: result.attestationObjectBase64,
+		certificateChain,
+		platformDetails,
+	}
+}
+
+/**
+ * Pull the two things the model needs out of the CBOR attestation object: `x5c` (so
+ * `DeviceAttestation.certificateChain` carries the chain, §7) and the environment implied by the
+ * authData `aaguid`.
+ *
+ * The environment is DERIVED, never assumed. Measured 2026-08-25 (spike 085): a build with no
+ * entitlements file still received a `development` attestation — the provisioning profile decides,
+ * not the plist and not a documented default. The aaguid is the only thing that distinguishes the
+ * two, and a development attestation must NEVER be accepted by a production authority.
+ */
+function readAttestationObject(attestationObjectBase64: string): {
+	certificateChain: string[]
+	environment: 'development' | 'production'
+} {
+	const decoded = cborDecode(bytesFromBase64(attestationObjectBase64))
+	if (!(decoded instanceof Map)) throw new Error('iOS attestation object is not a CBOR map')
+	const map = decoded as Map<CborValue, CborValue>
+
+	const attStmt = map.get('attStmt')
+	if (!(attStmt instanceof Map)) throw new Error('iOS attestation object has no attStmt map')
+	const x5c = (attStmt as Map<CborValue, CborValue>).get('x5c')
+	if (!Array.isArray(x5c) || x5c.length === 0) throw new Error('iOS attestation attStmt.x5c is missing or empty')
+	const certificateChain = (x5c as CborValue[]).map(c => {
+		if (!(c instanceof Uint8Array)) throw new Error('iOS attestation x5c entry is not a byte string')
+		return base64FromBytes(c)
+	})
+
+	const authData = map.get('authData')
+	if (!(authData instanceof Uint8Array) || authData.length < 53) {
+		throw new Error('iOS attestation authData is missing or too short to carry an aaguid')
+	}
+	// authData: rpIdHash(32) | flags(1) | counter(4) | aaguid(16) | credIdLen(2) | credId...
+	let aaguid = ''
+	for (let i = 37; i < 53; i++) aaguid += String.fromCharCode(authData[i]!)
+	const environment = aaguid.startsWith('appattestdevelop') ? 'development' : 'production'
+
+	return { certificateChain, environment }
 }
 
 /**
@@ -148,24 +355,74 @@ interface RealAttestationProducer {
  * this package holds NO app-level flag constant; the boolean is the ONLY injection point (D-12),
  * wired by the app call site (45-08's `resolvePlayIntegrityEnabled()`).
  */
-export function createRealAttestationProducer(opts: { enablePlayIntegrity: boolean }): RealAttestationProducer {
+export function createRealAttestationProducer(opts: {
+	enablePlayIntegrity: boolean
+	/**
+	 * iOS DeviceCheck leg, the analogue of `enablePlayIntegrity` (D-12). Defaults to FALSE: integrity
+	 * bar A (the settled decision, spike 082) excludes DeviceCheck because it requires an
+	 * authority->Apple round trip that would break D-04's offline verifier posture. Present so a
+	 * future move to bar B is a flag, not a code change.
+	 */
+	enableDeviceCheck?: boolean
+}): RealAttestationProducer {
 	return {
 		async provisionDeviceKey() {
 			const native = getNative()
-			const result = (await native.provisionDeviceKey(KEY_ALIAS)) as { publicKeyBase64: string; keyAlias: string }
-			return { publicKey: result.publicKeyBase64 }
+			const result = (await native.provisionDeviceKey(KEY_ALIAS)) as {
+				publicKeyBase64?: string
+				publicKeyCompressedHex?: string
+				keyAlias: string
+				reprovisioned?: boolean
+				voteKeyProbe?: string
+			}
+
+			// The two platforms hand back DIFFERENT key encodings, and the caller (ConfirmationScreen)
+			// feeds this value straight into `issueAttestationChallenge` as `challenge.deviceKey` — so
+			// picking the wrong field poisons every digest downstream of it.
+			//
+			//   Android — `publicKeyBase64`, the X.509 SPKI DER. The Android verifier only ever
+			//             re-hashes this string, so its encoding is unconstrained; it is the shipped,
+			//             hardware-proven value and is deliberately left alone.
+			//   iOS     — `publicKeyCompressedHex`. NOT a free choice, constrained twice over:
+			//             `produceIos`'s §3.4 obligation compares it against native's
+			//             `publicKeyCompressedHex`, and the authority parses `challenge.deviceKey` as a
+			//             P-256 point (`hexToBytes(expect.deviceKey)` in `verifyCrossSign`) to check
+			//             proof-of-possession. Only the compressed hex satisfies both — and the iOS
+			//             native side does not RESOLVE `publicKeyBase64` at all.
+			const isIos = getPlatformOS() === 'ios'
+			const publicKey = isIos ? result.publicKeyCompressedHex : result.publicKeyBase64
+			// Fail closed. Reading an absent field yields `undefined`, which flows on as a challenge
+			// bound to the string "undefined" and surfaces only as an opaque signature failure at the
+			// authority. That is precisely how the iOS field mismatch survived a clean typecheck, a
+			// green unit test and a successful bundle: nothing here ever asserted the field was there.
+			if (typeof publicKey !== 'string' || publicKey === '') {
+				throw new Error(
+					`provisionDeviceKey: native resolved no ${isIos ? 'publicKeyCompressedHex' : 'publicKeyBase64'} ` +
+						`(got: ${Object.keys(result).join(', ') || 'no keys'}) — refusing to issue a challenge ` +
+						'against an undefined device key.',
+				)
+			}
+			return { publicKey, reprovisioned: result.reprovisioned, voteKeyProbe: result.voteKeyProbe }
 		},
 
 		async produce(challenge: AttestationChallenge): Promise<DeviceAttestation> {
+			// BOUND_DIGEST is IDENTICAL on both platforms (ATTESTATION-CONTRACT-IOS.md §1) — it is the
+			// one value the two contracts share. Everything after this point diverges.
+			const boundDigest = computeBoundDigest(challenge.nonce, challenge.deviceKey)
+			const native = getNative()
+
+			if (getPlatformOS() === 'ios') {
+				return await produceIos(native, challenge, boundDigest, opts.enableDeviceCheck ?? false)
+			}
+
+			// ---- Android ----
 			// Three distinct nonce forms (Pitfall 5) — never reuse one variable for two:
 			//   (1) challenge.nonce            — RAW authority nonce, used ONLY for platformDetails.nonce below.
 			//   (2) boundDigest                — BOUND_DIGEST base64url string, sent AS-IS to Play Integrity setNonce (§2).
 			//   (3) boundDigestUtf8Base64      — base64(utf8(BOUND_DIGEST)), sent to Keystore setAttestationChallenge (§3).
 			// Do not symmetrize (2) and (3) — this asymmetry is intentional and matches the shipped verifier exactly.
-			const boundDigest = computeBoundDigest(challenge.nonce, challenge.deviceKey)
 			const boundDigestUtf8Base64 = base64FromUtf8(boundDigest)
 
-			const native = getNative()
 			const result = (await native.produceAttestation(KEY_ALIAS, boundDigest, boundDigestUtf8Base64, opts.enablePlayIntegrity)) as {
 				certificateChainBase64: string[]
 				integrityToken: string

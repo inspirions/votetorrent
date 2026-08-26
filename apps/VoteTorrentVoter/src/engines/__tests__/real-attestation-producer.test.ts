@@ -43,7 +43,13 @@ jest.mock('react-native', () => {
 	const attestationNativeFake = {
 		provisionDeviceKey: jest.fn(),
 		produceAttestation: jest.fn(),
+		signWithDeviceKey: jest.fn(),
 	}
+	// `produce()` branches on Platform.OS, and the react-native JEST PRESET reports 'ios' — so
+	// before this state existed, every "Android" assertion below was silently exercising the iOS
+	// branch. (It went unnoticed only because the suite could not even load: see jest.config.js's
+	// `uint8arrays` mapping.) Platform is therefore pinned PER TEST, never inherited.
+	const platformState = { OS: 'android' as string }
 	const actualTurboModuleRegistry = actual.TurboModuleRegistry as { getEnforcing: (name: string) => unknown }
 	const turboModuleRegistryProxy = new Proxy(actualTurboModuleRegistry, {
 		get(target, prop, receiver) {
@@ -53,21 +59,30 @@ jest.mock('react-native', () => {
 			return Reflect.get(target, prop, receiver)
 		},
 	})
+	const platformProxy = new Proxy(actual.Platform as object, {
+		get(target, prop, receiver) {
+			if (prop === 'OS') return platformState.OS
+			return Reflect.get(target, prop, receiver)
+		},
+	})
 	return new Proxy(actual, {
 		get(target, prop, receiver) {
 			if (prop === 'TurboModuleRegistry') return turboModuleRegistryProxy
+			if (prop === 'Platform') return platformProxy
 			if (prop === '__attestationNativeFake') return attestationNativeFake
+			if (prop === '__platformState') return platformState
 			return Reflect.get(target, prop, receiver)
 		},
 	})
 })
 
 import type { AttestationChallenge } from '@votetorrent/vote-core'
-import { computeBoundDigest, createRealAttestationProducer } from '@votetorrent/attestation-native'
+import { computeAssertionDigest, computeBoundDigest, createRealAttestationProducer } from '@votetorrent/attestation-native'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the react-native mock above.
-const { __attestationNativeFake: nativeFake } = require('react-native') as {
-	__attestationNativeFake: { provisionDeviceKey: jest.Mock; produceAttestation: jest.Mock }
+const { __attestationNativeFake: nativeFake, __platformState: platformState } = require('react-native') as {
+	__attestationNativeFake: { provisionDeviceKey: jest.Mock; produceAttestation: jest.Mock; signWithDeviceKey: jest.Mock }
+	__platformState: { OS: string }
 }
 
 describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression guard)', () => {
@@ -88,8 +103,12 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 	}
 
 	beforeEach(() => {
+		// Every assertion in THIS describe is about the Android branch — say so, rather than
+		// inheriting whatever the preset happens to report.
+		platformState.OS = 'android'
 		nativeFake.provisionDeviceKey.mockReset().mockResolvedValue(fakeProvisionResult)
 		nativeFake.produceAttestation.mockReset().mockResolvedValue(fakeProduceResult)
+		nativeFake.signWithDeviceKey.mockReset()
 	})
 
 	describe('two-step seam ordering (D-11)', () => {
@@ -189,4 +208,87 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 			expect(computeBoundDigest('probe-nonce-v1', 'probe-devicekey-v1')).toBe('epUx8O72zVpRIQl1WGnqZSQpvFJjJPPZtmgqJBcUfzI')
 		})
 	})
+
+	/**
+	 * iOS branch — ATTESTATION-CONTRACT-IOS.md §3.4 / §4.
+	 *
+	 * These guard the seam that a clean `tsc`, a green suite and a successful bundle all missed:
+	 * the two platforms resolve DIFFERENT native field names, and nothing asserted which one was
+	 * read. Reading the absent one yielded `undefined`, which would have been issued as
+	 * `challenge.deviceKey` and only surfaced as an opaque signature failure at the authority.
+	 *
+	 * Deliberately NOT covered here: the CBOR happy path (x5c extraction, aaguid environment,
+	 * assertion counter). Those need an attestation object, and a CBOR fixture hand-authored by the
+	 * same person who wrote the parser proves only that the two agree. They are pinned instead
+	 * against REAL bytes captured from an iPhone — see `ios-hardware-attestation.spec.ts`.
+	 */
+	describe('iOS branch (ATTESTATION-CONTRACT-IOS.md §3.4 / §4)', () => {
+		// Compressed SEC1: 0x02/0x03 prefix + 32-byte X. The authority parses challenge.deviceKey as
+		// exactly this (`hexToBytes(expect.deviceKey)` in verifyCrossSign), which is WHY iOS cannot
+		// use the Android field.
+		const IOS_VOTE_KEY_HEX = '02' + 'ab'.repeat(32)
+		const iosChallenge: AttestationChallenge = { ...challenge, deviceKey: IOS_VOTE_KEY_HEX }
+		const iosProvisionResult = {
+			publicKeyCompressedHex: IOS_VOTE_KEY_HEX,
+			appAttestKeyId: 'fake-appattest-key-id',
+			keyAlias: 'VOTETORRENT_DEVICE_KEY_V1',
+		}
+
+		beforeEach(() => {
+			platformState.OS = 'ios'
+			nativeFake.provisionDeviceKey.mockReset().mockResolvedValue(iosProvisionResult)
+			nativeFake.produceAttestation.mockReset()
+			nativeFake.signWithDeviceKey.mockReset()
+		})
+
+		it('provisionDeviceKey() returns publicKeyCompressedHex — the field iOS native actually resolves', async () => {
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			const { publicKey } = await producer.provisionDeviceKey()
+			expect(publicKey).toBe(IOS_VOTE_KEY_HEX)
+		})
+
+		it('provisionDeviceKey() fails CLOSED when native resolves only the Android-shaped fields', async () => {
+			// The exact defect: iOS `provisionDeviceKey` resolves { publicKeyCompressedHex,
+			// appAttestKeyId, keyAlias } and no `publicKeyBase64` at all. Reading the Android field
+			// returned undefined silently.
+			nativeFake.provisionDeviceKey.mockResolvedValue(fakeProvisionResult)
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await expect(producer.provisionDeviceKey()).rejects.toThrow(/publicKeyCompressedHex/)
+		})
+
+		it('produce() passes ASSERTION_DIGEST as the third native argument, not the Android base64(utf8(...)) form', async () => {
+			// Mismatch the returned key so the call aborts at the §3.4 gate — the produceAttestation
+			// arguments are already captured by then, so this asserts the binding without needing a
+			// fabricated attestation object.
+			nativeFake.produceAttestation.mockResolvedValue({ publicKeyCompressedHex: '03' + 'cd'.repeat(32) })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: true })
+			await expect(producer.produce(iosChallenge)).rejects.toThrow()
+
+			const [keyAlias, boundDigestArg, thirdArg, enableDeviceCheckArg] =
+				nativeFake.produceAttestation.mock.calls[0] as [string, string, string, boolean]
+			const expectedBoundDigest = computeBoundDigest(iosChallenge.nonce, iosChallenge.deviceKey)
+
+			expect(keyAlias).toBe('VOTETORRENT_DEVICE_KEY_V1')
+			expect(boundDigestArg).toBe(expectedBoundDigest)
+			// §3.1 — the cross-sign digest committing K_vote to the attested identity. On Android this
+			// same slot carries base64(utf8(BOUND_DIGEST)); sending that here would produce an
+			// assertion binding nothing.
+			expect(thirdArg).toBe(computeAssertionDigest(expectedBoundDigest, IOS_VOTE_KEY_HEX))
+			expect(thirdArg).not.toBe(Buffer.from(expectedBoundDigest, 'utf8').toString('base64'))
+			// D-12 analogue: enablePlayIntegrity must NOT leak into the DeviceCheck slot. Bar A leaves
+			// DeviceCheck off, and this producer was constructed with enablePlayIntegrity: true.
+			expect(enableDeviceCheckArg).toBe(false)
+		})
+
+		it('§3.4: aborts, legibly and before any biometric prompt, when native returns a different vote key', async () => {
+			nativeFake.produceAttestation.mockResolvedValue({ publicKeyCompressedHex: '03' + 'cd'.repeat(32) })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+
+			await expect(producer.produce(iosChallenge)).rejects.toThrow(/re-provisioned|no longer matches/)
+			// Reachable in practice (a biometric re-enrolment invalidates K_vote), so it must not
+			// raise a Face ID prompt the user cannot make succeed.
+			expect(nativeFake.signWithDeviceKey).not.toHaveBeenCalled()
+		})
+	})
+
 })
