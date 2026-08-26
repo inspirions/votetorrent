@@ -60,19 +60,43 @@
  * such shared-connection-singleton plugin internals to race against, which
  * is exactly why this was invisible to every tier-1 test in this project.
  *
- * THAT ATTRIBUTION IS NOT SETTLED, AND IS RECORDED AS UNSETTLED. Code review
- * observed that the evidence above -- "the resurrected shell carries exactly
- * the two system stores such a write would need, and nothing else" -- fits an
- * equally simple alternative: `listObjectStores`, exported from
- * `src/db/open-db.js` and called by both the tier-1 suite and the tier-2
- * gate, used a bare `indexedDB.open(name)`, which CREATES a database that
- * does not exist. That probe no longer creates (it checks
- * `indexedDB.databases()` first), so the two explanations are now
- * distinguishable -- but the settle-race measurement has NOT been re-run
- * since, so the background-write story above is a hypothesis this file still
- * carries, not a conclusion. `deleteNetworkDbSettled` stays either way: it is
- * bounded, it calls the one sanctioned primitive, and it verifies against the
- * same truth `assertNetworkForgotten` trusts.
+ * THIS COMPETING EXPLANATION WAS TESTED AND REJECTED (50-17 Task 2,
+ * 2026-08-26). Code review observed that the evidence above -- "the
+ * resurrected shell carries exactly the two system stores such a write would
+ * need, and nothing else" -- fits an equally simple alternative:
+ * `listObjectStores`, exported from `src/db/open-db.js` and called by both
+ * the tier-1 suite and the tier-2 gate, used a bare `indexedDB.open(name)`,
+ * which CREATES a database that does not exist.
+ *
+ * With `listObjectStores` corrected to check `indexedDB.databases()` before
+ * ever opening (50-17 Task 1 -- it now cannot create anything), this file's
+ * step 3 was temporarily reverted to the bare, pre-50-09 `deleteNetworkDb`
+ * call (no settle/retry) and `test/browser/run-headless.mjs` was run FIVE
+ * consecutive times against that reverted state. All five runs reproduced
+ * the race deterministically: `assertNetworkForgotten` and a direct
+ * `indexedDB.databases()` read both reported the database still present
+ * within 5-10ms of the confirmed-successful delete, and the corrected,
+ * non-creating `listObjectStores` (shell-gate.js's dedicated WR-06 rung, run
+ * BEFORE any other probe touches the network) independently confirmed the
+ * SAME resurrected shell, carrying EXACTLY `__catalog__` and `__stats__` and
+ * nothing else, on all five runs -- identical to the original evidence. Since
+ * this probe cannot itself create a database, and it observed the shell
+ * already present at the moment it ran, the corrected-probe explanation is
+ * REFUTED: something other than `listObjectStores` recreates those two
+ * stores in the window after a reported-successful delete. The
+ * background-write account survives contact with the corrected probe.
+ *
+ * `deleteNetworkDbSettled` was then restored and the settle path re-measured
+ * three separate times: it converges after exactly 2 rounds on every run
+ * (well inside `DELETE_SETTLE_MAX_ROUNDS`'s margin), and the full
+ * `test/browser/run-headless.mjs` gate passed 3/3 consecutive times in that
+ * restored state. `deleteNetworkDbSettled` stays: it is bounded, it calls
+ * the one sanctioned primitive, and it verifies against the same truth
+ * `assertNetworkForgotten` trusts.
+ *
+ * Full experiment log (5 retry-disabled runs + 3 restored-state confirmation
+ * runs, exact per-run rung output) is recorded in
+ * `.planning/phases/50-authority-web-dashboard-separate-web-project/50-17-SUMMARY.md`.
  *
  * `deleteNetworkDbSettled` (below) is NOT a second destructive
  * implementation -- it calls the ONE sanctioned `deleteNetworkDb` primitive,
