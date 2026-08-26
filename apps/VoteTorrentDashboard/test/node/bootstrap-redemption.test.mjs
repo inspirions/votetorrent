@@ -13,7 +13,7 @@
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deleteNetworkDb, closeNetworkDb } from '../../src/db/open-db.js';
+import { deleteNetworkDb, closeNetworkDb, dbNameFor } from '../../src/db/open-db.js';
 import { readRowCounts, readRowCountsRecord, attachNetworkDb } from '../../src/db/reattach.js';
 import { findNetwork, listNetworks } from '../../src/db/networks-registry.js';
 import { BOOTSTRAP_OUTCOME_CODES, redeemAndBootstrap, copyKeysForOutcome } from '../../src/lifecycle/bootstrap.js';
@@ -279,6 +279,19 @@ test('redeemAndBootstrap: a restore that lands short of the manifest produces re
 	assert.equal(record, undefined);
 	const entry = findNetwork(envelope.networkHash, storage);
 	assert.equal(entry, undefined);
+
+	// AND -- no orphan database is left behind. A schema-initialized,
+	// partly-populated database with no registry entry is unreachable by every
+	// cleanup path this app has (forgetNetwork throws UnknownNetworkError for
+	// an unlisted hash), so the officer would have no way to remove the
+	// registrant rows a failed bootstrap put in their browser. It also wedges
+	// retries, because upserts cannot reduce a row count.
+	const listed = await indexedDB.databases();
+	assert.equal(
+		listed.some((db) => db.name === dbNameFor(envelope.networkHash)),
+		false,
+		'a failed restore left an orphan IndexedDB database behind',
+	);
 
 	await deleteNetworkDb(envelope.networkHash);
 });

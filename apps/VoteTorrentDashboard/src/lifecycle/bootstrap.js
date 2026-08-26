@@ -199,8 +199,25 @@ export async function redeemAndBootstrap(options) {
 	}
 
 	// 5. Apply the schema.
+	//
+	// EVERYTHING FROM HERE IS PROVISIONAL UNTIL STEP 10. `createNetworkDb`
+	// runs `prepareDb`, which applies the schema and marks the store
+	// initialized -- so the moment this line returns, an IndexedDB database
+	// exists on disk. If seeding then fails, the old code returned or threw
+	// with only `closeNetworkDb` in the `finally`, leaving that database
+	// schema-initialized, partly populated with registrant rows, and with NO
+	// registry entry (step 10 never ran). That orphan was unreachable by every
+	// cleanup path this app has: `forgetNetwork` throws `UnknownNetworkError`
+	// for a hash the registry does not list, and the menu that would call it
+	// only renders for a listed network -- so the officer had no way to remove
+	// registrant information a failed bootstrap left in their browser. It also
+	// wedged retries: a second code for the same network found no registry
+	// entry, so no delete happened, `createNetworkDb` re-opened the stale
+	// database, and upserts cannot REDUCE a row count -- a re-issued snapshot
+	// with fewer rows in any table failed the manifest re-check forever.
 	onPhase('applying-schema');
 	const db = await createNetworkDb(envelope.networkHash);
+	let committed = false;
 	try {
 		// 6. Seed, then re-check EXACTLY against the manifest.
 		onPhase('seeding');
@@ -231,9 +248,18 @@ export async function redeemAndBootstrap(options) {
 		// invisible) rather than a listed one with no expectation record
 		// (which attachNetworkDb would reject on sight).
 		onPhase('success');
+		committed = true;
 		return { outcome: 'ok', network };
 	} finally {
 		await closeNetworkDb(db);
+		if (!committed) {
+			// Best-effort, and deliberately swallowed: this cleanup runs while
+			// an outcome or an exception is already on its way out, and a
+			// failure to delete must not replace it with a less informative
+			// one. The worst case is the orphan this block exists to prevent --
+			// no worse than the previous behaviour, and now the exception.
+			await deleteNetworkDb(envelope.networkHash).catch(() => undefined);
+		}
 	}
 }
 
