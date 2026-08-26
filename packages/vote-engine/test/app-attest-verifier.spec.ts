@@ -520,6 +520,26 @@ describe('AppAttestVerifier — composed IAttestationVerifier', () => {
     expect(r.reason).to.match(/not provisioned/)
   })
 
+  it('reports an unprovisioned App ID as CONFIG, not as an app-identity mismatch', async () => {
+    // An empty appId does not fail the way missing config should. It flows all the way into
+    // `verifyAppAttest`, which compares rpIdHash against SHA256('') and rejects with
+    // "attestation is for a different app" — a reason that blames a genuine device for a
+    // deployment mistake, and sends whoever reads the log hunting a bundle-id mismatch that
+    // does not exist.
+    const r = await new AppAttestVerifier([new Uint8Array([1])], '', 'development')
+      .verify(challenge, iosAttestation())
+    expect(r.ok).to.equal(false)
+    expect(r.reason).to.match(/App ID .* is not provisioned/)
+    // The negative half of the claim: it must NOT surface as the app-identity reason.
+    expect(r.reason).to.not.match(/different app/)
+  })
+
+  it('checks the root gate BEFORE the App ID gate, so a wholly unconfigured authority names the anchor', async () => {
+    const r = await new AppAttestVerifier([], '', 'development').verify(challenge, iosAttestation())
+    expect(r.ok).to.equal(false)
+    expect(r.reason).to.match(/root material is not provisioned/)
+  })
+
   it('rejects a non-iOS attestation (fail closed)', async () => {
     const android = { ...iosAttestation(), platformDetails: { type: 'Android', safetyNetAttestation: 'x', keystorePublicKey: 'k', nonce: 'n' } } as unknown as DeviceAttestation
     const r = await verifier().verify(challenge, android)

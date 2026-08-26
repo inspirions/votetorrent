@@ -26,14 +26,16 @@
 //
 
 import Foundation
-// RCTPromiseResolveBlock / RCTPromiseRejectBlock live here. Guarded by canImport so the
-// standalone `typecheck:ios` gate (which has no RN headers and supplies its own typealiases)
-// still runs — but note that gate CANNOT catch a missing import: see scripts/typecheck-ios.sh.
-// The authoritative check that this file compiles as the app compiles it is an actual
-// `xcodebuild` of an app that pods this package.
-#if canImport(React)
+// RCTPromiseResolveBlock / RCTPromiseRejectBlock live here.
+//
+// PLAIN import, deliberately. This was `#if canImport(React) / import React / #endif` until
+// 2026-08-26, to let the standalone `typecheck:ios` gate run without RN headers. That guard was
+// load-bearing for the gate's blind spot rather than for any real build: React is always present
+// when this file is compiled inside an app, so the conditional could only ever mask its absence.
+// The gate now compiles a stand-in MODULE named React and proves, on every run, that stripping
+// this line makes it fail — so the guard is no longer needed and its removal is what gives that
+// proof teeth. See scripts/typecheck-ios.sh, and `typecheck:ios:app` for the authoritative build.
 import React
-#endif
 import DeviceCheck
 import CryptoKit
 import LocalAuthentication

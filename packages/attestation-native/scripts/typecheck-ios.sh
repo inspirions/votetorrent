@@ -2,28 +2,44 @@
 #
 # typecheck-ios.sh — compile-gate the iOS TurboModule without an Xcode project.
 #
-# The Swift here cannot be exercised at runtime without an Apple Developer Team ID and a physical
-# iPhone (DCAppAttestService.isSupported is false on the Simulator, always). A typecheck is
-# therefore the ONLY automated signal available, and it is worth having: it catches API drift when
-# the iOS SDK moves, which is otherwise invisible until someone finally builds the app.
-#
 # It typechecks against the real iOS SDK, not macOS — availability annotations differ
 # (DCAppAttestService is iOS 14+), so a macOS-SDK pass would prove less than it appears to.
 #
 # Skips cleanly (exit 0) where no Xcode is installed, so it can live in CI on Linux runners.
 #
-# KNOWN BLIND SPOT — MEASURED 2026-08-25. The SHIM below defines RCTPromiseResolveBlock and
-# RCTPromiseRejectBlock so the module can typecheck without RN headers. That means this gate
-# CANNOT detect a MISSING `import React` in the module: the shim silently supplies exactly the
-# types the real build would demand from React, so the file passes here and fails under
-# `xcodebuild` with "cannot find type 'RCTPromiseResolveBlock' in scope". That is not a
-# hypothetical — it is precisely what happened the first time this package was actually podded
-# into the voter app, after this gate had been reporting PASS for the entire phase.
+# ---------------------------------------------------------------------------------------------
+# HOW THIS GATE WAS UNSOUND, AND WHAT CHANGED (2026-08-26)
 #
-# Treat a PASS here as "the Apple SDK APIs still line up", NOT as "this compiles in an app".
-# The only authoritative gate is an `xcodebuild` of an app that pods this package.
+# The previous version wrote a shim declaring RCTPromiseResolveBlock / RCTPromiseRejectBlock at
+# GLOBAL scope and compiled it alongside the module. Those are precisely the two types a missing
+# `import React` leaves undefined — so the gate supplied the very thing it existed to check. It
+# reported PASS for the whole of Phase 51 while the Swift could not compile inside a real app, and
+# the defect surfaced only when the package was first podded into the voter app, as
+# "cannot find type 'RCTPromiseResolveBlock' in scope".
+#
+# The fix is not to delete the stand-ins — without them there is no standalone gate at all — but to
+# put them where React puts them: inside a MODULE NAMED React. The module sources are then compiled
+# with `-I` against it, so:
+#
+#   * with `import React` present, the types resolve and the file typechecks;
+#   * with `import React` missing, they are NOT in scope, and the gate FAILS — the same failure the
+#     real build gives, for the same reason.
+#
+# And because "this gate cannot fail" is the exact bug being fixed, the script no longer asks you to
+# take that on trust: STEP 3 runs a NEGATIVE CONTROL on every invocation. It strips `import React`
+# from a copy of the source and requires that copy to FAIL. If the control PASSES, the gate has
+# become blind again and this script reports FAIL and says so, rather than reporting a green tick it
+# has not earned.
+#
+# SCOPE, still. A PASS here means "the Apple SDK APIs line up and the React import is real". It is
+# not a substitute for compiling against React's actual headers — for that, see
+# `typecheck:ios:app`, which builds the voter app with CocoaPods and needs no signing identity.
+# ---------------------------------------------------------------------------------------------
 set -uo pipefail
 cd "$(dirname "$0")/.."
+
+TARGET="arm64-apple-ios15.1"
+SOURCES=(ios/AttestationNativeModule.swift ios/SignatureEncoding.swift)
 
 if [ -z "${DEVELOPER_DIR:-}" ]; then
   for candidate in /Applications/Xcode*.app; do
@@ -37,24 +53,83 @@ if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
 fi
 
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-SHIM=$(mktemp -t rnshim.XXXXXX).swift
-cat > "$SHIM" <<'SWIFT'
-// React Native supplies these two at build time; stand-ins so the module can be typechecked
-// standalone, without the RN headers or an Xcode project.
+WORK=$(mktemp -d -t rnstub.XXXXXX)
+trap 'rm -rf "$WORK"' EXIT
+
+# ---- STEP 1: build a stand-in `React` MODULE (not global typealiases) ----
+cat > "$WORK/React.swift" <<'SWIFT'
+// Stand-in for React Native's Swift-visible surface, for the standalone typecheck ONLY.
+//
+// These MUST live in a module named React rather than at global scope. That is the entire
+// mechanism by which this gate can detect a missing `import React` — the failure mode that made
+// the previous version of this script report PASS on code that could not build.
 import Foundation
 public typealias RCTPromiseResolveBlock = (Any?) -> Void
 public typealias RCTPromiseRejectBlock = (String?, String?, Error?) -> Void
 SWIFT
 
-xcrun --sdk iphoneos swiftc -typecheck \
-  -target arm64-apple-ios15.1 -sdk "$SDK" \
-  ios/AttestationNativeModule.swift ios/SignatureEncoding.swift "$SHIM"
-STATUS=$?
-rm -f "$SHIM"
-
-if [ $STATUS -eq 0 ]; then
-  echo "typecheck-ios: PASS against $(basename "$SDK")"
-else
-  echo "typecheck-ios: FAIL"
+if ! xcrun --sdk iphoneos swiftc -emit-module \
+      -module-name React \
+      -target "$TARGET" -sdk "$SDK" \
+      -emit-module-path "$WORK/React.swiftmodule" \
+      "$WORK/React.swift" 2>"$WORK/react.err"; then
+  echo "typecheck-ios: FAIL — could not build the stand-in React module"
+  cat "$WORK/react.err"
+  exit 1
 fi
-exit $STATUS
+
+# ---- STEP 2: typecheck the real sources against it ----
+xcrun --sdk iphoneos swiftc -typecheck \
+  -target "$TARGET" -sdk "$SDK" -I "$WORK" \
+  "${SOURCES[@]}"
+STATUS=$?
+
+if [ $STATUS -ne 0 ]; then
+  echo "typecheck-ios: FAIL"
+  exit $STATUS
+fi
+
+# ---- STEP 3: NEGATIVE CONTROL — prove this gate can still fail ----
+# A gate is only worth its green tick if it is demonstrably sensitive to the defect it targets.
+# Strip `import React` from a COPY and require that copy to be rejected.
+CONTROL="$WORK/control"
+mkdir -p "$CONTROL"
+for src in "${SOURCES[@]}"; do
+  cp "$src" "$CONTROL/$(basename "$src")"
+done
+# Remove the import and any `#if canImport(React)` guard around it, so the control genuinely has
+# no path to those types.
+/usr/bin/sed -i '' -E '/^[[:space:]]*import React[[:space:]]*$/d; /^[[:space:]]*#if canImport\(React\)[[:space:]]*$/d' \
+  "$CONTROL/AttestationNativeModule.swift"
+
+if ! grep -qE '^[[:space:]]*import React[[:space:]]*$' ios/AttestationNativeModule.swift; then
+  echo "typecheck-ios: FAIL — ios/AttestationNativeModule.swift has no top-level 'import React'."
+  echo "  The negative control below cannot mean anything without it, and the real build needs it."
+  exit 1
+fi
+
+CONTROL_SOURCES=()
+for src in "${SOURCES[@]}"; do
+  CONTROL_SOURCES+=("$CONTROL/$(basename "$src")")
+done
+
+xcrun --sdk iphoneos swiftc -typecheck \
+  -target "$TARGET" -sdk "$SDK" -I "$WORK" \
+  "${CONTROL_SOURCES[@]}" >"$WORK/control.out" 2>&1
+CONTROL_STATUS=$?
+
+if [ $CONTROL_STATUS -eq 0 ]; then
+  echo "typecheck-ios: FAIL — the negative control PASSED."
+  echo
+  echo "  A copy of AttestationNativeModule.swift with 'import React' removed still typechecked."
+  echo "  That means the RCTPromise* types are reachable without importing React — the stand-ins"
+  echo "  have leaked back into global scope, or something else now declares them. This gate is"
+  echo "  blind again in exactly the way it was before 2026-08-26."
+  echo
+  echo "  Do NOT silence this by deleting the control. Find what is vending those types."
+  exit 1
+fi
+
+echo "typecheck-ios: PASS against $(basename "$SDK")"
+echo "typecheck-ios: negative control correctly FAILED without 'import React' (gate is sensitive)"
+exit 0
