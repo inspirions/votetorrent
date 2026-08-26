@@ -256,3 +256,40 @@ test('inertness control: the finally-no-reset matcher rejects a fixture where re
 		'} finally {\n\t\t\t\tswapContext.transport.reset();\n\t\t\t\tif (!cancelled) onSwapContextConsumed?.();\n\t\t\t}';
 	assert.doesNotMatch(fixture, CLASSIFY_FINALLY_RE, 'matcher is inert');
 });
+
+// --- Every destructive db path queued onto the per-network lock (CR-04) --------
+
+const FORGET_INSIDE_LOCK_RE = /withNetworkDbLifecycleLock\([^,]+,\s*\(\) =>\s*forgetNetwork\(/;
+
+test('forgetNetwork is called only from inside withNetworkDbLifecycleLock', () => {
+	// CR-04: withNetworkDbLifecycleLock serialized exactly attachNetworkDb and
+	// closeNetworkDb. It did NOT wrap handleConfirmForget -> forgetNetwork ->
+	// deleteNetworkDbSettled -> indexedDB.deleteDatabase, one of the two most
+	// destructive open/close operations in the app against the same
+	// networkHash.
+	assert.match(CODE, FORGET_INSIDE_LOCK_RE);
+	const forgetCallCount = (CODE.match(/forgetNetwork\(/g) ?? []).length;
+	assert.equal(forgetCallCount, 1, 'expected exactly one forgetNetwork( call site');
+});
+
+test('inertness control: the forget-lock matcher rejects a bare (unwrapped) forgetNetwork call', () => {
+	const fixture = 'const result = await forgetNetwork({ networkHash, typedConfirmation, db });';
+	assert.doesNotMatch(fixture, FORGET_INSIDE_LOCK_RE, 'matcher is inert');
+});
+
+const PERFORM_OFFICER_SWAP_INSIDE_LOCK_RE = /withNetworkDbLifecycleLock\([^,]+,\s*\(\) =>\s*performOfficerSwap\(/g;
+
+test('both performOfficerSwap call sites are wrapped in withNetworkDbLifecycleLock, and there are exactly two', () => {
+	// CR-04: neither the handleConfirmSwap call site nor the classify
+	// effect's same-officer-refresh call site was queued onto the lock that
+	// already serializes attach and close for the same networkHash.
+	const wrapped = CODE.match(PERFORM_OFFICER_SWAP_INSIDE_LOCK_RE) ?? [];
+	assert.equal(wrapped.length, 2, `expected exactly 2 wrapped performOfficerSwap call sites, found ${wrapped.length}`);
+	const totalCallSites = (CODE.match(/performOfficerSwap\(/g) ?? []).length;
+	assert.equal(totalCallSites, 2, `expected exactly 2 performOfficerSwap( call sites total, found ${totalCallSites}`);
+});
+
+test('inertness control: the performOfficerSwap-lock matcher rejects a bare (unwrapped) call', () => {
+	const fixture = 'const result = await performOfficerSwap({ networkHash, pastedCode, transport, db });';
+	assert.doesNotMatch(fixture, PERFORM_OFFICER_SWAP_INSIDE_LOCK_RE, 'matcher is inert');
+});
