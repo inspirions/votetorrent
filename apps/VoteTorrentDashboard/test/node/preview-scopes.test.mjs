@@ -156,20 +156,69 @@ test('resyncRealScopes: the CR-01 transition -- an empty real-scope state re-syn
 	assert.equal(badgeKey(s1), 'gate.badgeReal');
 });
 
-test('resyncRealScopes: touched + different real scopes returns the SAME reference -- an in-progress preview is never yanked out', () => {
+// A prior round's suite asserted that a touched resync returns its input
+// state UNCHANGED (same reference) when the real scopes differ, and treated
+// that as the intended contract. It was the mechanism by which a
+// fully-privileged officer who clicked the preview control before the
+// database read resolved got stranded at zero panels forever: the frozen
+// `realScopes: []` baseline meant Reset could never route back to reality.
+// That case is deleted below, not supplemented -- restoring it should turn
+// the recovery test that replaces it red.
+
+test('resyncRealScopes: touched + different real scopes adopts the NEW baseline while leaving the preview intact', () => {
 	const s0 = createPreviewState(['vrg']);
 	const touched = toggleScope(s0, 'mel');
 	const resynced = resyncRealScopes(touched, ['ceb']);
-	assert.equal(resynced, touched);
+	assert.notEqual(resynced, touched);
 	assert.deepEqual(effectiveScopes(resynced), effectiveScopes(touched));
 	assert.equal(isSimulated(resynced), true);
+	assert.deepEqual(resynced.realScopes, ['ceb']);
 });
 
-test('positive control: the SAME input with touched false DOES change -- proves the touched guard above is load-bearing, not a function that never changes anything', () => {
+test('resyncRealScopes: touched + set-equal real scopes still returns the SAME reference', () => {
+	const s0 = createPreviewState(['vrg']);
+	const touched = toggleScope(s0, 'mel');
+	const resynced = resyncRealScopes(touched, ['vrg']);
+	assert.equal(resynced, touched);
+});
+
+test('positive control: the SAME input with touched false DOES change -- proves the baseline-advance branch above is load-bearing, not a function that never changes anything', () => {
 	const s0 = createPreviewState(['vrg']);
 	const resynced = resyncRealScopes(s0, ['ceb']);
 	assert.notEqual(resynced, s0);
 	assert.deepEqual(effectiveScopes(resynced), ['ceb']);
+});
+
+test('the CR-01 recovery sequence: toggle-early -> real-scopes-resolve -> Reset lands on the CURRENT real scopes, not the stale baseline', () => {
+	const s0 = createPreviewState([]);
+	const touched = toggleScope(s0, 'vrg');
+	const resynced = resyncRealScopes(touched, SCOPE_CODES);
+	const reset = resetToReal(resynced);
+	assert.deepEqual(effectiveScopes(reset), createPreviewState(SCOPE_CODES).realScopes);
+	assert.equal(effectiveScopes(reset).length, 9);
+	assert.equal(isSimulated(reset), false);
+	assert.equal(badgeKey(reset), 'gate.badgeReal');
+});
+
+test('inertness control: the OLD frozen-baseline branch, driven through the same recovery sequence, yields ZERO effective scopes -- proving the recovery test above discriminates rather than passing vacuously', () => {
+	/** Reproduces the prior round's touched branch: returns the input state
+	 * completely unchanged whenever `touched` is true, regardless of whether
+	 * the real scopes differ.
+	 * @param {import('../../src/auth/preview-scopes.js').PreviewState} state
+	 * @param {ReadonlyArray<import('../../src/auth/capabilities.js').ScopeCode>} nextRealScopes
+	 */
+	function oldResyncRealScopes(state, nextRealScopes) {
+		if (state.touched) {
+			return state;
+		}
+		return resyncRealScopes(state, nextRealScopes);
+	}
+
+	const s0 = createPreviewState([]);
+	const touched = toggleScope(s0, 'vrg');
+	const staleResynced = oldResyncRealScopes(touched, SCOPE_CODES);
+	const reset = resetToReal(staleResynced);
+	assert.equal(effectiveScopes(reset).length, 0);
 });
 
 test('resyncRealScopes: order-insensitive -- untouched, next real scopes equal to the current set in a different order returns the SAME reference', () => {
