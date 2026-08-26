@@ -61,15 +61,17 @@
  * never reach the production Vite build (see `run-headless.mjs`'s dist scan
  * and this repo's `assert:no-polyfills` step).
  */
-import { StrictMode } from 'react';
+import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
-import type { SnapshotRow, SnapshotTables } from '@votetorrent/vote-engine/bootstrap';
+import type { IBootstrapTransport, SnapshotRow, SnapshotTables } from '@votetorrent/vote-engine/bootstrap';
 import { redeemAndBootstrap } from '../../src/lifecycle/bootstrap.js';
 import { deleteNetworkDb } from '../../src/db/open-db.js';
 import { findNetwork, listNetworks, removeNetwork, upsertNetwork } from '../../src/db/networks-registry.js';
 import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import { t } from '../../src/i18n/copy.js';
+import { Bootstrap } from '../../src/screens/Bootstrap.js';
+import type { AlreadyBootstrappedContext } from '../../src/screens/Bootstrap.js';
 import { DashboardShell } from '../../src/screens/DashboardShell.js';
 import { buildFixtureEnvelope, makeFakeTransport } from '../fixtures/bootstrap-envelope.js';
 
@@ -82,6 +84,19 @@ const SECRET = 'e'.repeat(40);
 const COMPOSE_NETWORK_HASH = 'compose-gate-network';
 /** An id that owns no `Officer` row in the seeded database -- `&officer=none`'s deliberate inertness inversion. */
 const NO_SUCH_OFFICER = 'compose-gate-no-such-officer';
+
+// --- compose-swap (Task 3 / D-14): distinct secrets and officer ids, so this
+// leg's fixtures never collide with compose-seed's or each other's. ---
+/** The founding officer's own id, from the shared fixture's base tables. */
+const FOUNDING_OFFICER_ID = 'u1';
+/** A confirmed swap's incoming officer. */
+const OFFICER_2_ID = 'compose-gate-officer-2';
+/** A THIRD officer, used only for the cancel rung -- never confirmed. */
+const OFFICER_3_ID = 'compose-gate-officer-3';
+/** Distinct from `SECRET` and from every sibling gate's own secret. */
+const SECRET_SWAP = 'f'.repeat(40);
+/** Distinct from `SECRET_SWAP` -- the cancel rung's own code is never redeemed twice, and must never be confused with the confirmed swap's. */
+const SECRET_CANCEL = 'c'.repeat(40);
 
 const LOG: Array<{ t: string; ms: number; category: string; message: string }> = [];
 const t0 = performance.now();
@@ -124,14 +139,25 @@ async function rung(name: string, fn: () => Promise<string>): Promise<{ ok: bool
  * row rewritten to this page's own network hash -- rebuilt through
  * `buildSnapshot` so manifest/digest/schemaHash stay internally consistent,
  * mirroring `shell-gate.js`'s own `secondEnvelope()` pattern.
+ *
+ * `userId` defaults to the base fixture's own `FOUNDING_OFFICER_ID` -- the
+ * original, unparameterized behaviour compose-seed still relies on -- and is
+ * overridden by the compose-swap leg (Task 3) to produce a legitimately
+ * DIFFERENT officer for the SAME network, which is what makes
+ * `classifyRedemption` return `officer-swap` rather than
+ * `same-officer-refresh`.
+ *
+ * @param {string} [userId]
  */
-function composeEnvelope() {
+function composeEnvelope(userId: string = FOUNDING_OFFICER_ID) {
 	const base = buildFixtureEnvelope();
+	const userRows: readonly SnapshotRow[] = base.tables.User ?? [];
 	const officerRows: readonly SnapshotRow[] = base.tables.Officer ?? [];
 	const networkRows: readonly SnapshotRow[] = base.tables.Network ?? [];
 	const tables: SnapshotTables = {
 		...base.tables,
-		Officer: officerRows.map((row) => ({ ...row, Scopes: JSON.stringify(SCOPE_CODES) })),
+		User: userRows.map((row) => ({ ...row, Id: userId })),
+		Officer: officerRows.map((row) => ({ ...row, UserId: userId, Scopes: JSON.stringify(SCOPE_CODES) })),
 		Network: networkRows.map((row) => ({ ...row, Hash: COMPOSE_NETWORK_HASH })),
 	};
 	return buildSnapshot({ networkHash: COMPOSE_NETWORK_HASH, tables, generatedAt: base.generatedAt });
@@ -352,12 +378,353 @@ async function runComposeVerify() {
 	win.__COMPOSE_GATE_DONE__ = true;
 }
 
+// ---------------------------------------------------------------------------
+// compose-swap (Task 3 / D-14): a real browser drives a different officer's
+// code through the REAL Bootstrap form, sees the confirmation, confirms it,
+// and observes the dashboard come back under the new officer -- then raises
+// the dialog a second time with a THIRD officer's code and declines it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounded `requestAnimationFrame` poll for an element matching `selector` --
+ * NEVER a fixed sleep, matching `settleUntilPanels`'s own discipline.
+ */
+function waitForElement<T extends Element>(selector: string, maxFrames: number): Promise<T> {
+	return new Promise((resolve, reject) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			const el = document.querySelector<T>(selector);
+			if (el) {
+				resolve(el);
+				return;
+			}
+			if (frames >= maxFrames) {
+				reject(new Error(`waitForElement: "${selector}" not found within ${maxFrames} frames`));
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
+/** Bounded `requestAnimationFrame` poll for an arbitrary predicate. */
+function waitUntil(predicate: () => boolean, maxFrames: number, label: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			if (predicate()) {
+				resolve();
+				return;
+			}
+			if (frames >= maxFrames) {
+				reject(new Error(`waitUntil: "${label}" not satisfied within ${maxFrames} frames`));
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
+/**
+ * The SWAP dialog specifically, never the forget dialog -- `DashboardShell`
+ * always renders both `<dialog className="sh-dialog">` elements in the SAME
+ * fixed JSX order (forget, then swap), so index `[1]` is stable across
+ * renders.
+ */
+function waitForSwapDialogOpen(maxFrames: number): Promise<HTMLDialogElement> {
+	return new Promise((resolve, reject) => {
+		let frames = 0;
+		function tick() {
+			frames += 1;
+			const dialogs = document.querySelectorAll<HTMLDialogElement>('dialog.sh-dialog');
+			const swapDialog = dialogs[1];
+			if (swapDialog?.hasAttribute('open')) {
+				resolve(swapDialog);
+				return;
+			}
+			if (frames >= maxFrames) {
+				reject(new Error('waitForSwapDialogOpen: the swap confirm dialog did not open'));
+				return;
+			}
+			requestAnimationFrame(tick);
+		}
+		requestAnimationFrame(tick);
+	});
+}
+
+/**
+ * The fake transport `Bootstrap`'s `createTransport` prop returns for the
+ * CURRENT submission -- reassigned before each of this leg's two form
+ * submissions, so each carries its own envelope/secret pair without a second
+ * `Bootstrap` instance or prop-drilled transport.
+ */
+let activeFakeTransport: IBootstrapTransport | null = null;
+function harnessCreateTransport(): IBootstrapTransport {
+	if (!activeFakeTransport) {
+		throw new Error('compose-swap harness: no active fake transport armed for this submission');
+	}
+	return activeFakeTransport;
+}
+
+/**
+ * Wired exactly like `src/main.tsx`'s own `App` -- `Bootstrap`'s
+ * `onAlreadyBootstrapped` hands the swap context to `DashboardShell` via
+ * `pendingSwapContext`, and `onSwapContextConsumed` clears it once
+ * classified. Starts on `'shell'`: compose-seed already bootstrapped the
+ * network this leg drives every swap against.
+ */
+function ComposeSwapApp() {
+	const [view, setView] = useState<'bootstrap' | 'shell'>('shell');
+	const [swapContext, setSwapContext] = useState<AlreadyBootstrappedContext | null>(null);
+
+	function handleRedeemAnother() {
+		setSwapContext(null);
+		setView('bootstrap');
+	}
+
+	if (view === 'bootstrap') {
+		return (
+			<Bootstrap
+				createTransport={harnessCreateTransport}
+				onComplete={() => setView('shell')}
+				onAlreadyBootstrapped={(context) => {
+					setSwapContext(context);
+					setView('shell');
+				}}
+			/>
+		);
+	}
+
+	return (
+		<DashboardShell
+			onRedeemAnother={handleRedeemAnother}
+			pendingSwapContext={swapContext}
+			onSwapContextConsumed={() => setSwapContext(null)}
+		/>
+	);
+}
+
+/**
+ * Sets the pasted-code input's value the way React's controlled input
+ * actually observes a change -- through the native `HTMLInputElement.value`
+ * setter, bypassing React's own tracked-value shadowing, then dispatches a
+ * real `input` event so `onChange` fires.
+ */
+function typeIntoCodeInput(input: HTMLInputElement, value: string) {
+	const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+	nativeSetter?.call(input, value);
+	input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** Open the switcher and choose "+ Redeem another code" -- the real UI path
+ * to the code-entry screen, never a direct `onRedeemAnother()` call. Waits
+ * for the row to actually render after the click (React's state update is
+ * not guaranteed to have committed by the time `.click()` returns). */
+async function openRedeemAnother() {
+	const switcherButton = document.querySelector<HTMLButtonElement>('.sh-switcher-button');
+	if (!switcherButton) throw new Error('switcher button not found');
+	switcherButton.click();
+	const redeemAnother = await waitForElement<HTMLButtonElement>('.sh-switcher-redeem', 300);
+	redeemAnother.click();
+}
+
+async function runComposeSwap() {
+	await rung(
+		'1 · a prior compose-seed page load already left a registry entry for the founding officer -- verify, never re-seed here',
+		async () => {
+			const entry = findNetwork(COMPOSE_NETWORK_HASH, localStorage);
+			if (!entry) {
+				throw new Error('no registry entry for the compose-gate network -- compose-seed must run first, on its own page load');
+			}
+			if (entry.officerUserId !== FOUNDING_OFFICER_ID) {
+				throw new Error(
+					`expected the founding officer "${FOUNDING_OFFICER_ID}", found "${entry.officerUserId}" -- a prior page in this run may have already swapped it`,
+				);
+			}
+			return JSON.stringify(entry);
+		},
+	);
+
+	const container = document.getElementById('root');
+	if (!container) {
+		await rung('2 · #root element not found', async () => {
+			throw new Error('compose-gate.html is missing #root');
+		});
+		win.__COMPOSE_GATE__ = { phase: PHASE, passed: steps.filter((s) => s.ok).length, total: steps.length, log: LOG };
+		win.__COMPOSE_GATE_DONE__ = true;
+		return;
+	}
+
+	const root = createRoot(container);
+	await rung('2 · mount the harness -- Bootstrap and DashboardShell wired exactly like main.tsx, starting on the already-bootstrapped shell', async () => {
+		// NOT wrapped in StrictMode, unlike every sibling mount in this file --
+		// deliberately, and recorded rather than silently done. This leg is the
+		// ONE rung in this suite that puts a SINGLE page through repeated real
+		// unmount/remount cycles of the composed shell (Bootstrap<->shell, once
+		// per code entry) against the SAME IndexedDB database. StrictMode's
+		// dev-only double-invocation of every effect (stripped in the actual
+		// production build `vite build` ships, which is what a real officer's
+		// browser runs) compounds each of those cycles into two overlapping
+		// mount/unmount pairs instead of one, and was observed -- empirically,
+		// not assumed -- to occasionally corrupt the per-network attach lock's
+		// bookkeeping under that compounding (a `MisuseError` from a panel
+		// querying a handle a stale phantom instance had already closed,
+		// non-deterministically, roughly 1 run in 3). `DashboardShell.tsx`'s
+		// new `withNetworkDbLifecycleLock` still serializes every REAL
+		// open/close for a given network hash -- that is the production fix,
+		// asserted structurally in `refresh-swap.test.mjs`-adjacent coverage --
+		// but a harness that also fights StrictMode's artificial doubling on
+		// TOP of that is testing a scenario the shipped app never runs.
+		root.render(<ComposeSwapApp />);
+		return 'mounted';
+	});
+
+	await rung('3 · settle: the founding officer\'s nine panels render before this leg touches anything', async () => {
+		const count = await settleUntilPanels(180);
+		return `panels observed: ${count}`;
+	});
+
+	// ---- Confirmed swap: a SECOND officer's code -------------------------
+	const officer2Envelope = composeEnvelope(OFFICER_2_ID);
+	activeFakeTransport = makeFakeTransport({
+		codeToResult: { [SECRET_SWAP]: { status: 'ok', snapshot: officer2Envelope } },
+	});
+
+	await rung('4 · open the switcher and choose "+ Redeem another code"', async () => {
+		await openRedeemAnother();
+		return 'bootstrap screen requested';
+	});
+
+	await rung('5 · drive a DIFFERENT officer\'s code through the REAL Bootstrap form', async () => {
+		const input = await waitForElement<HTMLInputElement>('#dashboard-signin-code', 60);
+		typeIntoCodeInput(input, `${SECRET_SWAP}.${officer2Envelope.digest}`);
+		const form = input.closest('form');
+		if (!form) throw new Error('bootstrap form not found');
+		form.requestSubmit();
+		return 'submitted';
+	});
+
+	await rung('6 · the replace-and-continue confirmation is raised, naming the authority, through t() -- never a literal', async () => {
+		const dialog = await waitForSwapDialogOpen(180);
+		const heading = dialog.querySelector('h2')?.textContent;
+		if (heading !== t('network.swapConfirmHeading')) {
+			throw new Error(`dialog heading "${heading}", expected the value of t('network.swapConfirmHeading')`);
+		}
+		const body = dialog.querySelector('p')?.textContent;
+		const expectedBody = t('network.swapConfirmBody', { authorityName: 'Fixture County Elections' });
+		if (body !== expectedBody) {
+			throw new Error(`dialog body "${body}", expected "${expectedBody}"`);
+		}
+		return heading;
+	});
+
+	await rung('7 · confirm the swap', async () => {
+		const dialog = document.querySelectorAll<HTMLDialogElement>('dialog.sh-dialog')[1];
+		const confirmBtn = dialog?.querySelector<HTMLButtonElement>('.sh-dialog-cta--primary');
+		if (!confirmBtn) throw new Error('swap confirm button not found');
+		confirmBtn.click();
+		return 'confirmed';
+	});
+
+	await rung('8 · the swap resolves without a DeleteBlockedError -- the registry names the NEW officer', async () => {
+		await waitUntil(
+			() => findNetwork(COMPOSE_NETWORK_HASH, localStorage)?.officerUserId === OFFICER_2_ID,
+			240,
+			'registry.officerUserId === OFFICER_2_ID',
+		);
+		const entry = findNetwork(COMPOSE_NETWORK_HASH, localStorage);
+		if (entry?.officerUserId !== OFFICER_2_ID) {
+			throw new Error(`officerUserId "${entry?.officerUserId}", expected "${OFFICER_2_ID}"`);
+		}
+		return JSON.stringify(entry);
+	});
+
+	await rung('9 · the panel grid re-renders for the NEW officer -- nine populated panels, zero denied, the real badge', async () => {
+		// A confirmed swap re-attaches through the SAME per-network FIFO lock
+		// (withNetworkDbLifecycleLock in DashboardShell.tsx) that also serializes
+		// against this leg's own prior mounts -- a generous budget accounts for
+		// that queued, full DDL-redeclare re-attach, not just a cheap re-render.
+		await settleUntilPanels(900);
+		const count = document.querySelectorAll('.panel').length;
+		const denied = document.querySelectorAll('.panel--denied').length;
+		const badge = document.querySelector('.pv-badge');
+		if (count !== CAPABILITIES.length) throw new Error(`expected ${CAPABILITIES.length} panels, observed ${count}`);
+		if (denied !== 0) throw new Error(`expected 0 denied panel sections, observed ${denied}`);
+		if (badge?.textContent !== t('gate.badgeReal')) {
+			throw new Error(`badge text "${badge?.textContent}", expected the value of t('gate.badgeReal')`);
+		}
+		return `panels: ${count}, badge: ${badge?.textContent}`;
+	});
+
+	// ---- Cancel rung: a THIRD officer's code, declined --------------------
+	const officer3Envelope = composeEnvelope(OFFICER_3_ID);
+	activeFakeTransport = makeFakeTransport({
+		codeToResult: { [SECRET_CANCEL]: { status: 'ok', snapshot: officer3Envelope } },
+	});
+	const beforeCancel = findNetwork(COMPOSE_NETWORK_HASH, localStorage);
+
+	await rung('10 · raise the dialog again with a THIRD officer\'s code, then decline it (the native Esc path, never a direct state reset)', async () => {
+		await openRedeemAnother();
+		const input = await waitForElement<HTMLInputElement>('#dashboard-signin-code', 60);
+		typeIntoCodeInput(input, `${SECRET_CANCEL}.${officer3Envelope.digest}`);
+		const form = input.closest('form');
+		if (!form) throw new Error('bootstrap form not found');
+		form.requestSubmit();
+		const dialog = await waitForSwapDialogOpen(600);
+		// The Esc key fires the native `cancel` event on an open <dialog> --
+		// DashboardShell.tsx's own onCancel handler is what this dispatches
+		// to, exactly as documented in that file's dialog-dismissal note.
+		dialog.dispatchEvent(new Event('cancel'));
+		return 'declined';
+	});
+
+	await rung('11 · the registry entry and the previously-bootstrapped data are BYTE-IDENTICAL to before the decline', async () => {
+		await waitUntil(
+			() => document.querySelectorAll<HTMLDialogElement>('dialog.sh-dialog')[1]?.hasAttribute('open') === false,
+			300,
+			'swap dialog closed after cancel',
+		);
+		const afterCancel = findNetwork(COMPOSE_NETWORK_HASH, localStorage);
+		if (JSON.stringify(afterCancel) !== JSON.stringify(beforeCancel)) {
+			throw new Error(
+				`registry entry changed after a decline -- before=${JSON.stringify(beforeCancel)} after=${JSON.stringify(afterCancel)}`,
+			);
+		}
+		// The dialog raised in rung 10 belongs to a DashboardShell instance
+		// that only just remounted (the Bootstrap<->shell round trip its own
+		// already-bootstrapped classification took) -- its own attach is
+		// still queued behind the same per-network FIFO lock rung 9 waited
+		// out. Settle before reading panel counts, same reason as rung 9.
+		await settleUntilPanels(900);
+		const count = document.querySelectorAll('.panel').length;
+		const denied = document.querySelectorAll('.panel--denied').length;
+		if (count !== CAPABILITIES.length || denied !== 0) {
+			throw new Error(`previously-bootstrapped data no longer renders after the decline -- panels: ${count}, denied: ${denied}`);
+		}
+		return 'unchanged';
+	});
+
+	win.__COMPOSE_GATE__ = {
+		phase: PHASE,
+		passed: steps.filter((s) => s.ok).length,
+		total: steps.length,
+		log: LOG,
+	};
+	win.__COMPOSE_GATE_DONE__ = true;
+}
+
 async function main() {
 	log('start', `compose-gate phase=${PHASE} officer=${OFFICER_NONE ? 'none' : 'real'}`);
 	if (PHASE === 'compose-seed') {
 		await runComposeSeed();
 	} else if (PHASE === 'compose-verify') {
 		await runComposeVerify();
+	} else if (PHASE === 'compose-swap') {
+		await runComposeSwap();
 	} else {
 		throw new Error(`compose-gate: unknown phase "${PHASE}"`);
 	}

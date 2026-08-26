@@ -742,14 +742,39 @@ async function main() {
 			composeVerifyRes?.badgeText,
 		);
 
+		// ---------------------------------------------------------------
+		// 50-18 extension: the compose-swap leg. ONE more fresh page load,
+		// its own ctx.newPage() call, against the SAME persistent context --
+		// nine page loads total in the default run. This drives a different
+		// officer's code through the REAL Bootstrap form and the REAL
+		// classify-then-confirm seam (D-14), the direct evidence that gap was
+		// genuinely closed rather than declared closed: it runs on the SAME
+		// production DashboardShell the compose-verify leg above already
+		// proves renders nine real panels, so a swap that lands here is a
+		// swap that lands in the shipped app.
+		// ---------------------------------------------------------------
+
+		const page9 = await ctx.newPage();
+		const composeSwapRes = await runOnComposeGatePage(
+			page9,
+			`${BASE}/test/browser/compose-gate.html?phase=compose-swap`,
+			'PHASE 9 — composed shell: compose-swap (D-14 officer-swap confirm + cancel, through the real form)',
+		);
+		const composeSwapOk = composeSwapRes && !composeSwapRes.crashed && composeSwapRes.passed === composeSwapRes.total;
+
+		console.log('\n--- cross-phase (compose-swap) ---');
+		console.log('compose-swap:', `${composeSwapRes?.passed}/${composeSwapRes?.total}`);
+
 		console.log('\n=== SUMMARY ===');
 		console.log('db-gate leg (D-11 re-attach):', dbGateOk ? 'PASS' : 'FAIL');
 		console.log('shell-gate leg (restored snapshot + forget network):', forgetVerifyOk ? 'PASS' : 'FAIL');
 		console.log('compose-gate leg (composed DashboardShell, nine populated panels):', composeVerifyOk ? 'PASS' : 'FAIL');
+		console.log('compose-swap leg (D-14 officer-swap confirm + cancel):', composeSwapOk ? 'PASS' : 'FAIL');
 
+		const allOk = dbGateOk && forgetVerifyOk && composeVerifyOk && composeSwapOk;
 		return finishRun(
-			dbGateOk && forgetVerifyOk && composeVerifyOk,
-			composeVerifyOk ? 'all eight phases passed' : 'compose-gate phase failed',
+			allOk,
+			allOk ? 'all nine phases passed' : !composeSwapOk ? 'compose-swap phase failed' : 'compose-gate phase failed',
 			PROVE_TRAP,
 		);
 	} finally {

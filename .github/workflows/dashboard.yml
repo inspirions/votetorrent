@@ -235,8 +235,8 @@ jobs:
           # relying on an unconditional fallback (reserved solely for the
           # browser inventory probe below).
           newpage_count=$(set +e; grep -c 'newPage()' "$G"; true)
-          if [ "$newpage_count" -lt 8 ]; then
-            echo "::error::gate-source-intact: expected at least 8 newPage() calls (50-14's eight fresh loads, six from 50-09 plus the composed-shell leg), found $newpage_count"
+          if [ "$newpage_count" -lt 9 ]; then
+            echo "::error::gate-source-intact: expected at least 9 newPage() calls (50-14's eight fresh loads, six from 50-09 plus the composed-shell leg, plus 50-18's compose-swap leg), found $newpage_count"
             fail=1
           fi
           for required in prove-trap prove-drift tier3 prove-blank; do
