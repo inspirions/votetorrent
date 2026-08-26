@@ -174,3 +174,44 @@ test('inertness control: the old comparison, which enabled the button on open fo
 		'matcher is inert',
 	);
 });
+
+// --- Surfaced classify() failure (CR-03) ----------------------------------------
+
+const CLASSIFY_CATCH_RE = /\} catch \(err\) \{\s*if \(!cancelled\) setSwapError\(err\);\s*\} finally \{/;
+
+test('classify() has a catch clause that surfaces the failure via setSwapError, positioned before the finally', () => {
+	// Every throwing call inside classify() -- splitSignInCode on a malformed
+	// code, transport.redeem rejecting, classifyRedemption, and a throw from
+	// performOfficerSwap on the same-officer-refresh branch -- used to escape
+	// as an unhandled promise rejection, leaving db === null with no banner
+	// and no dialog while PanelGrid rendered nine panels each showing their
+	// own empty copy.
+	assert.match(CODE, CLASSIFY_CATCH_RE);
+});
+
+test('inertness control: the classify-catch matcher does NOT accept a bare try/finally with no catch', () => {
+	const fixture = 'try {\n\t\t\t\t// work\n\t\t\t} finally {\n\t\t\t\tif (!cancelled) onSwapContextConsumed?.();\n\t\t\t}';
+	assert.doesNotMatch(fixture, CLASSIFY_CATCH_RE, 'matcher is inert');
+});
+
+const MAIN_REGION_SWAP_ERROR_RE = /\{attachError \? \([\s\S]{0,900}?\) : swapError && !pendingSwap \? \(/;
+
+test('the main region renders a dedicated banner for a surfaced swapError only when no swap dialog is pending', () => {
+	// A classification failure must never be represented by nine panels each
+	// showing their own empty copy -- an officer whose database failed must
+	// never be told their authority has no registrants. The banner only
+	// applies when no swap dialog is open: a confirmed-swap failure belongs
+	// in the dialog the officer is already looking at.
+	assert.match(CODE, MAIN_REGION_SWAP_ERROR_RE);
+});
+
+test('inertness control: the main-region matcher does NOT accept the old attachError-or-grid-only shape', () => {
+	const fixture =
+		'{attachError ? (\n\t\t\t\t\t\t<div className="sh-error-banner">\n\t\t\t\t\t\t\tstuff\n\t\t\t\t\t\t</div>\n\t\t\t\t\t) : (\n\t\t\t\t\t\t<PanelGrid';
+	assert.doesNotMatch(fixture, MAIN_REGION_SWAP_ERROR_RE, 'matcher is inert');
+});
+
+test('the surfaced swap-error banner renders through t() with the two new copy keys', () => {
+	assert.match(CODE, /t\('network\.swapErrorHeading'\)/);
+	assert.match(CODE, /t\('network\.swapErrorBody'\)/);
+});
