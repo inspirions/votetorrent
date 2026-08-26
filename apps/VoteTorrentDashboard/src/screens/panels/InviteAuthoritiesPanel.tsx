@@ -58,7 +58,14 @@ const InviteAuthoritiesPanel: PanelComponent = ({ capability, db }) => {
 				const rows = await fetchAuthorityInvites(boundDb);
 				if (mounted) setState({ status: 'ready', rows });
 			} catch (err) {
-				console.error('InviteAuthoritiesPanel: read failed:', err instanceof Error ? err.message : String(err));
+				// The error CLASS only, never the message. `err` comes from a query
+				// against tables full of registrant information, and Quereus and its
+				// constraint layer routinely embed the offending row and column values
+				// in an error message. The browser console is a durable, exportable,
+				// screenshot-able sink; a message must name table names, column names
+				// and integer counts only.
+				// eslint-disable-next-line no-console
+				console.error('InviteAuthoritiesPanel: read failed:', (err as { name?: string })?.name ?? 'Error');
 				if (mounted) setState({ status: 'error', rows: [] });
 			}
 		})();

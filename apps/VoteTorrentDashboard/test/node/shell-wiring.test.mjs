@@ -15,7 +15,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -92,4 +92,36 @@ test('inertness control: the handover matcher does NOT accept a close-after-the-
 test('every destructive call site that can hold a handle passes it: forgetNetwork and performOfficerSwap alike', () => {
 	assert.match(CODE, /forgetNetwork\(\{[\s\S]{0,200}?db: dbRef\.current \?\? undefined,/);
 	assert.match(CODE, /performOfficerSwap\(\{[\s\S]{0,200}?db: handoverDb,/);
+});
+
+// --- Panel console hygiene (WR-12) --------------------------------------------
+
+const PANELS_DIR = path.resolve(__dirname, '..', '..', 'src', 'screens', 'panels');
+/** Every panel body, plus the shell -- the ten console.error call sites this app ships. */
+const CONSOLE_SITES = readdirSync(PANELS_DIR)
+	.filter((/** @type {string} */ name) => name.endsWith('.tsx'))
+	.map((/** @type {string} */ name) => ({ name, source: readFileSync(path.join(PANELS_DIR, name), 'utf8') }))
+	.concat([{ name: 'DashboardShell.tsx', source: SHELL }]);
+
+const RAW_MESSAGE_RE = /console\.error\([^)]*err(or)?\s*instanceof\s*Error\s*\?\s*err(or)?\.message/;
+
+test('no panel and not the shell logs a raw database error MESSAGE to the console', () => {
+	// `err` comes from a query against tables full of registrant information,
+	// and Quereus and its constraint layer routinely embed the offending row
+	// and column values in an error message. The browser console is a durable,
+	// exportable, screenshot-able sink.
+	const offenders = CONSOLE_SITES.filter((f) => RAW_MESSAGE_RE.test(stripComments(f.source))).map((f) => f.name);
+	assert.deepEqual(offenders, [], `these files log a raw error message: ${offenders.join(', ')}`);
+});
+
+test('inertness control: the raw-message matcher hits the exact shape all nine panels used to carry', () => {
+	const fixture = "console.error('RegistrationsPanel: a read failed:', err instanceof Error ? err.message : String(err));";
+	assert.match(fixture, RAW_MESSAGE_RE, 'matcher is inert');
+});
+
+test('every console.error in a panel logs the error CLASS instead -- and there are nine of them', () => {
+	const withClassLogging = CONSOLE_SITES.filter((f) =>
+		/console\.error\([^)]*\)\?\.name \?\? 'Error'\)/.test(stripComments(f.source)),
+	);
+	assert.equal(withClassLogging.length, 9, 'expected exactly the nine panel bodies to log an error class');
 });
