@@ -63,6 +63,33 @@ function bytesEqual (a: ArrayBuffer, b: ArrayBuffer): boolean {
 }
 
 /**
+ * Decode `challenge.deviceKey` (Android's stored encoding: SubjectPublicKeyInfo
+ * DER, base64) into the raw SPKI `Uint8Array` — or `undefined` if the value is
+ * not valid base64 or does not look like a DER SEQUENCE. This is a FAIL-CLOSED
+ * helper: a value this function cannot decode must be treated by the caller as
+ * a REJECT, never as "no check applies" (T-51-02-02). Deliberately does not
+ * attempt a full ASN.1 parse of the SPKI structure — the byte-for-byte compare
+ * against the leaf's own `publicKey.rawData` is what actually proves the
+ * binding; this only guards against silently comparing against garbage.
+ */
+function decodeAndroidDeviceKeySpki (deviceKeyBase64: string): Uint8Array | undefined {
+  // Reject anything that is not plain base64 (with optional padding) up
+  // front — `Buffer.from(str, 'base64')` silently ignores invalid
+  // characters rather than throwing, which would otherwise let a malformed
+  // value decode to a plausible-looking but meaningless byte string.
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(deviceKeyBase64) || deviceKeyBase64.length % 4 !== 0) {
+    return undefined
+  }
+  const bytes = new Uint8Array(Buffer.from(deviceKeyBase64, 'base64'))
+  // SubjectPublicKeyInfo is always a DER SEQUENCE (tag 0x30); anything else
+  // cannot possibly be an SPKI structure.
+  if (bytes.length === 0 || bytes[0] !== 0x30) {
+    return undefined
+  }
+  return bytes
+}
+
+/**
  * Normalize an ASN.1-decoded OCTET STRING value to `Uint8Array`. `@peculiar`
  * decodes top-level OCTET STRING fields as `OctetString` (with `.buffer`) but
  * nested ones (e.g. `AttestationPackageInfo.packageName`) as a raw
@@ -194,6 +221,29 @@ export async function verifyKeyAttestation (
     const attestedSignatureDigests = attestationApplicationId.signatureDigests.map((digest) => certDigestBytesToHex(asBytes(digest)))
     if (!attestedSignatureDigests.some((hex) => allowedCertDigests.has(hex))) {
       return { ok: false, reason: 'attestationApplicationId signature digest does not match any allowlisted signing-certificate digest for this app (WR-03)' }
+    }
+
+    // 4b-2. Leaf public key must BE challenge.deviceKey (T-51-02-01, folded
+    // 2026-08-25 defect). Check 4 above proves the challenge was ANSWERED
+    // for challenge.deviceKey (attestationChallenge == Digest(nonce,
+    // deviceKey)) — it does NOT prove the ATTESTED KEY IS that device key.
+    // Without this check, an attacker holding a genuine TEE/StrongBox key
+    // K_hw on a real device could bind the challenge digest to a DIFFERENT,
+    // exportable key K_soft and register K_soft as the voting key: every
+    // check above still passes because none of them look at the leaf's own
+    // public key, and the resulting association would appear
+    // hardware-backed while the actual voting key is exportable and
+    // shareable. Compare `leaf.publicKey.rawData` (already-parsed SPKI DER —
+    // do NOT re-parse DER by hand) against `challenge.deviceKey` decoded
+    // from Android's stored encoding (SPKI DER base64).
+    const deviceKeySpki = decodeAndroidDeviceKeySpki(challenge.deviceKey)
+    if (deviceKeySpki === undefined) {
+      return { ok: false, reason: 'challenge deviceKey could not be decoded as SPKI DER base64 — rejecting rather than treating the leaf-key binding check as inapplicable' }
+    }
+    const leafSpki = new Uint8Array(leaf.publicKey.rawData)
+    const leafKeyBound = leafSpki.length === deviceKeySpki.length && timingSafeEqual(leafSpki, deviceKeySpki)
+    if (!leafKeyBound) {
+      return { ok: false, reason: 'attested leaf certificate public key is not the challenge deviceKey — the attestation proves a hardware key exists, but not that it is the registered voting key' }
     }
 
     // 4c. WR-04: assert the attested key was hardware-GENERATED (not imported)

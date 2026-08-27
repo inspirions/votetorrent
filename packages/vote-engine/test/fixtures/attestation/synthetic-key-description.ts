@@ -34,6 +34,31 @@ import { SYNTHETIC_APP_PACKAGE, SYNTHETIC_SIGNING_CERT_SHA256 } from './syntheti
 
 export { SecurityLevel } from '@peculiar/asn1-android'
 
+const DEVICE_KEY_GEN_ALGORITHM = { name: 'ECDSA', namedCurve: 'P-256' } as const
+
+export interface SyntheticAndroidDeviceKeyPair {
+  /** The generated keypair — pass to `buildSyntheticKeyDescription({ leafKeyPair })` so the leaf certificate embeds this exact public key. */
+  keyPair: CryptoKeyPair
+  /** `deviceKeySpkiBase64`'s value — Android's `challenge.deviceKey` encoding (SubjectPublicKeyInfo DER, base64) that `verifyKeyAttestation`'s 4b-2 check compares the leaf's own public key against. */
+  deviceKeySpkiBase64: string
+}
+
+/**
+ * Generate a fresh P-256 keypair and its Android-shaped `challenge.deviceKey`
+ * encoding (51-02): SPKI DER, base64. Use the returned `keyPair` as
+ * `buildSyntheticKeyDescription`'s `leafKeyPair` and the returned
+ * `deviceKeySpkiBase64` as the `AttestationChallenge.deviceKey` value, so the
+ * leaf certificate `verifyKeyAttestation` parses embeds EXACTLY the key the
+ * challenge names — required since 51-02's leaf-pubkey binding check (4b-2)
+ * rejects any chain whose leaf key differs from `challenge.deviceKey`.
+ */
+export async function generateAndroidDeviceKeyPair (): Promise<SyntheticAndroidDeviceKeyPair> {
+  const keyPair = await crypto.subtle.generateKey(DEVICE_KEY_GEN_ALGORITHM, true, ['sign', 'verify'])
+  const spki = await crypto.subtle.exportKey('spki', keyPair.publicKey)
+  const deviceKeySpkiBase64 = Buffer.from(spki).toString('base64')
+  return { keyPair, deviceKeySpkiBase64 }
+}
+
 export interface SyntheticKeyDescriptionOptions {
   /** The test root (from `generateTestRootCa()`) the synthetic chain is issued under. */
   root: TestCertificate
@@ -61,6 +86,15 @@ export interface SyntheticKeyDescriptionOptions {
   origin?: number
   /** The hardware-enforced key `purpose` set. Defaults to [SIGN(2)]; override (e.g. [VERIFY(3)]) to exercise the WR-04 no-sign negative. */
   purpose?: number[]
+  /**
+   * Embed this EXACT keypair as the leaf certificate's subject key instead
+   * of generating a fresh random one (51-02). Pass the SAME keypair whose
+   * SPKI-DER-base64 encoding was used as `challenge.deviceKey` so
+   * `verifyKeyAttestation`'s leaf-pubkey binding check (4b-2) accepts the
+   * chain. Default: generate a fresh P-256 pair (pre-51-02 behavior) — the
+   * leaf's key will then NOT match any `challenge.deviceKey`.
+   */
+  leafKeyPair?: CryptoKeyPair
 }
 
 export interface SyntheticKeyDescriptionResult {
@@ -151,7 +185,8 @@ export async function buildSyntheticKeyDescription (options: SyntheticKeyDescrip
     issuer: signer,
     subjectName: 'CN=VoteTorrent Test Attestation Leaf',
     serialNumber: options.serialNumber,
-    extensions: options.extensionOnNonLeafOnly === true ? [] : [extension]
+    extensions: options.extensionOnNonLeafOnly === true ? [] : [extension],
+    keyPair: options.leafKeyPair
   })
 
   const chainDer: Uint8Array[] = [new Uint8Array(leaf.cert.rawData)]

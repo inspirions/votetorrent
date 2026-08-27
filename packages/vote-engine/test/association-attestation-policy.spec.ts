@@ -46,6 +46,7 @@ import { randomTestKeyPair } from './fixtures/keys.js'
 import { generateSyntheticJweKeyMaterial, SYNTHETIC_EXPECTED_APP_IDENTITY } from './fixtures/attestation/synthetic-jwe.js'
 import { generateTestRootCa } from './fixtures/attestation/test-root-ca.js'
 import { buildSyntheticDeviceAttestation } from './fixtures/attestation/synthetic-device-attestation.js'
+import { generateAndroidDeviceKeyPair } from './fixtures/attestation/synthetic-key-description.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
 import type { EngineContext } from '../src/types.js'
 
@@ -174,9 +175,14 @@ describe('associate() — election-terms attestation policy gate (D-14c, Assumpt
       const { verifier, jweKeys, testRoot } = await buildRealVerifier()
 
       const engine = new AssociationEngine(auth.ctx, verifier)
-      const deviceKey = nextDeviceKey()
+      // 51-02: verifyKeyAttestation's leaf-pubkey binding check (4b-2) requires
+      // the leaf certificate's embedded public key to equal challenge.deviceKey
+      // — use a real generated keypair + its SPKI-base64 encoding, and embed
+      // that SAME keypair in the synthetic chain, rather than an opaque
+      // `nextDeviceKey()` string.
+      const { keyPair, deviceKeySpkiBase64: deviceKey } = await generateAndroidDeviceKeyPair()
       const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign, electionId)
-      const attestation = await buildSyntheticDeviceAttestation({ challenge, jweKeys, testRoot })
+      const attestation = await buildSyntheticDeviceAttestation({ challenge, jweKeys, testRoot, overrides: { leafKeyPair: keyPair } })
 
       await engine.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation }, sign)
 

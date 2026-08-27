@@ -35,6 +35,7 @@ import { PlayIntegrityVerifier } from '../src/association/play-integrity-verifie
 import type { IIntegrityKeyProvider } from '../src/association/key-provider.js'
 import { generateTestRootCa } from './fixtures/attestation/test-root-ca.js'
 import { buildSyntheticDeviceAttestation } from './fixtures/attestation/synthetic-device-attestation.js'
+import { generateAndroidDeviceKeyPair } from './fixtures/attestation/synthetic-key-description.js'
 import {
   buildDefaultSyntheticPayload,
   buildForgedHs256Jwe,
@@ -285,9 +286,13 @@ describe('PlayIntegrityVerifier class — D-09 keysProvisioned fail-closed reloc
   })
 
   it('(b) positive control: the normal path still runs to completion when provisioned', async () => {
-    const challenge = makeChallenge()
+    // 51-02: the leaf certificate's embedded public key must equal
+    // challenge.deviceKey (verifyKeyAttestation's 4b-2 binding check), so the
+    // challenge and the synthetic chain must share the SAME generated keypair.
+    const { keyPair, deviceKeySpkiBase64 } = await generateAndroidDeviceKeyPair()
+    const challenge = makeChallenge({ deviceKey: deviceKeySpkiBase64 })
     const { verifier, jweKeys, testRoot } = await buildClassVerifier(true)
-    const attestation = await buildSyntheticDeviceAttestation({ challenge, jweKeys, testRoot })
+    const attestation = await buildSyntheticDeviceAttestation({ challenge, jweKeys, testRoot, overrides: { leafKeyPair: keyPair } })
     const result = await verifier.verify(challenge, attestation)
     // This is what stops (a) from passing vacuously against a fixture that
     // was broken all along, and proves the guard does not short-circuit the
@@ -346,9 +351,11 @@ describe('PlayIntegrityVerifier class — D-09 keysProvisioned fail-closed reloc
   })
 
   it('(e) default-arity lock: the three-argument constructor form leaves the verifier provisioned', async () => {
-    const challenge = makeChallenge()
+    // 51-02: see (b)'s comment — the leaf key must match challenge.deviceKey.
+    const { keyPair, deviceKeySpkiBase64 } = await generateAndroidDeviceKeyPair()
+    const challenge = makeChallenge({ deviceKey: deviceKeySpkiBase64 })
     const { verifier, jweKeys, testRoot } = await buildClassVerifier()
-    const attestation = await buildSyntheticDeviceAttestation({ challenge, jweKeys, testRoot })
+    const attestation = await buildSyntheticDeviceAttestation({ challenge, jweKeys, testRoot, overrides: { leafKeyPair: keyPair } })
     const result = await verifier.verify(challenge, attestation)
     // Locks the `= true` default so association-attestation-policy.spec.ts:140
     // and authority-transport.spec.ts's existing 3-argument construction

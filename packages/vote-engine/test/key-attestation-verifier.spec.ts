@@ -24,7 +24,7 @@ import type { AttestationChallenge } from '@votetorrent/vote-core'
 // Wave-4 target — does not exist yet. This import failing IS the RED gate.
 import { verifyKeyAttestation } from '../src/association/verifiers/key-attestation.js'
 import { generateTestRootCa } from './fixtures/attestation/test-root-ca.js'
-import { buildSyntheticKeyDescription } from './fixtures/attestation/synthetic-key-description.js'
+import { buildSyntheticKeyDescription, generateAndroidDeviceKeyPair } from './fixtures/attestation/synthetic-key-description.js'
 import { SYNTHETIC_EXPECTED_APP_IDENTITY } from './fixtures/attestation/synthetic-jwe.js'
 
 const hasher = resolveHasher('sha256')
@@ -41,6 +41,24 @@ function makeChallenge (overrides?: Partial<AttestationChallenge>): AttestationC
   }
 }
 
+/**
+ * 51-02: build a challenge whose `deviceKey` is a REAL SPKI-DER-base64
+ * encoded P-256 public key, plus the matching keypair to embed as the
+ * synthetic leaf's own subject key (`buildSyntheticKeyDescription`'s
+ * `leafKeyPair`). Required whenever a test needs `verifyKeyAttestation` to
+ * reach a check AT OR AFTER the new 4b-2 leaf-pubkey binding check — i.e.
+ * every `ok:true` case, plus the revoked-serial (5) and WR-04 (4c) negatives,
+ * which fire only once 4b-2 has already passed. Tests exercising a check
+ * BEFORE 4b-2 (root validation, leaf-only-trust, D-06 digest binding, WR-03)
+ * are unaffected and keep using the plain `device-key-1` shape from
+ * `makeChallenge()`.
+ */
+async function makeChallengeWithMatchingLeafKey (overrides?: Partial<AttestationChallenge>): Promise<{ challenge: AttestationChallenge, leafKeyPair: CryptoKeyPair }> {
+  const { keyPair, deviceKeySpkiBase64 } = await generateAndroidDeviceKeyPair()
+  const challenge = makeChallenge({ deviceKey: deviceKeySpkiBase64, ...overrides })
+  return { challenge, leafKeyPair: keyPair }
+}
+
 /** The exact wire-format this plan locks: attestationChallenge = utf8(base64url(Digest(nonce, deviceKey))). */
 function boundChallengeBytes (challenge: Pick<AttestationChallenge, 'nonce' | 'deviceKey'>): Uint8Array {
   const encoded = digestFields([challenge.nonce, challenge.deviceKey], hasher, encode) as string
@@ -50,11 +68,12 @@ function boundChallengeBytes (challenge: Pick<AttestationChallenge, 'nonce' | 'd
 describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
   it('returns ok:true for a TEE-backed chain bound to the challenge digest', async () => {
     const root = await generateTestRootCa()
-    const challenge = makeChallenge()
+    const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()
     const { chainDer } = await buildSyntheticKeyDescription({
       root,
       securityLevel: SecurityLevel.trustedEnvironment,
-      attestationChallenge: boundChallengeBytes(challenge)
+      attestationChallenge: boundChallengeBytes(challenge),
+      leafKeyPair
     })
 
     const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
@@ -63,11 +82,12 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
 
   it('returns ok:true for a StrongBox-backed chain (also accepted under the balanced bar)', async () => {
     const root = await generateTestRootCa()
-    const challenge = makeChallenge()
+    const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()
     const { chainDer } = await buildSyntheticKeyDescription({
       root,
       securityLevel: SecurityLevel.strongBox,
-      attestationChallenge: boundChallengeBytes(challenge)
+      attestationChallenge: boundChallengeBytes(challenge),
+      leafKeyPair
     })
 
     const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
@@ -76,12 +96,13 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
 
   it('parses a KeyMint-schema leaf (v300/v400) the same as legacy Keymaster', async () => {
     const root = await generateTestRootCa()
-    const challenge = makeChallenge()
+    const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()
     const { chainDer } = await buildSyntheticKeyDescription({
       root,
       securityLevel: SecurityLevel.trustedEnvironment,
       attestationChallenge: boundChallengeBytes(challenge),
-      useKeyMintSchema: true
+      useKeyMintSchema: true,
+      leafKeyPair
     })
 
     const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
@@ -163,11 +184,12 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
 
   it('rejects a chain whose leaf serial is on the revoked/suspended list (T-43-08)', async () => {
     const root = await generateTestRootCa()
-    const challenge = makeChallenge()
+    const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()
     const { chainDer, serials } = await buildSyntheticKeyDescription({
       root,
       securityLevel: SecurityLevel.trustedEnvironment,
-      attestationChallenge: boundChallengeBytes(challenge)
+      attestationChallenge: boundChallengeBytes(challenge),
+      leafKeyPair
     })
     const revokedSerials = new Set<string>([serials.leaf])
 
@@ -208,12 +230,13 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
 
   it('rejects an IMPORTED key (origin !== KM_ORIGIN_GENERATED) — WR-04', async () => {
     const root = await generateTestRootCa()
-    const challenge = makeChallenge()
+    const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()
     const { chainDer } = await buildSyntheticKeyDescription({
       root,
       securityLevel: SecurityLevel.trustedEnvironment,
       attestationChallenge: boundChallengeBytes(challenge),
-      origin: 2 // KM_ORIGIN_IMPORTED
+      origin: 2, // KM_ORIGIN_IMPORTED
+      leafKeyPair
     })
 
     const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
@@ -223,12 +246,13 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
 
   it('rejects a key whose hardware-enforced purpose does not include SIGN (WR-04)', async () => {
     const root = await generateTestRootCa()
-    const challenge = makeChallenge()
+    const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()
     const { chainDer } = await buildSyntheticKeyDescription({
       root,
       securityLevel: SecurityLevel.trustedEnvironment,
       attestationChallenge: boundChallengeBytes(challenge),
-      purpose: [3] // KeyPurpose.VERIFY only — not SIGN
+      purpose: [3], // KeyPurpose.VERIFY only — not SIGN
+      leafKeyPair
     })
 
     const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
@@ -249,5 +273,66 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
     const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
     expect(result.ok).to.equal(false)
     expect(result.reason).to.match(/attestationApplicationId|app/i)
+  })
+
+  describe('leaf public key binding (folded 2026-08-25 defect)', () => {
+    it('positive control: a leaf whose public key equals challenge.deviceKey, passing every other check, returns ok:true', async () => {
+      const root = await generateTestRootCa()
+      const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()
+      const { chainDer } = await buildSyntheticKeyDescription({
+        root,
+        securityLevel: SecurityLevel.trustedEnvironment,
+        attestationChallenge: boundChallengeBytes(challenge),
+        leafKeyPair
+      })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
+      expect(result.ok).to.equal(true)
+    })
+
+    it('rejects a cryptographically-perfect chain whose LEAF public key is a DIFFERENT key than challenge.deviceKey', async () => {
+      // The exact attack this check closes: an attacker holding a genuine
+      // TEE/StrongBox key K_hw on a real device binds the challenge digest
+      // to a DIFFERENT, exportable key K_soft (challenge.deviceKey = K_soft)
+      // instead of K_hw. Every check up to and including the digest binding
+      // (4) and the app-identity binding (4b) passes — none of them look at
+      // the leaf's own public key — so without this check the attestation
+      // would appear hardware-backed while the actual registered voting key
+      // (K_soft) is not.
+      const root = await generateTestRootCa()
+      // K_soft: the key the challenge claims is being registered.
+      const { deviceKeySpkiBase64: kSoft } = await generateAndroidDeviceKeyPair()
+      // K_hw: the DIFFERENT key the leaf certificate actually attests.
+      const { keyPair: kHw } = await generateAndroidDeviceKeyPair()
+      const challenge = makeChallenge({ deviceKey: kSoft })
+      const { chainDer } = await buildSyntheticKeyDescription({
+        root,
+        securityLevel: SecurityLevel.trustedEnvironment,
+        // The digest binding (check 4) is computed over challenge.deviceKey
+        // (K_soft) — it passes. Only the LEAF's embedded key differs (K_hw).
+        attestationChallenge: boundChallengeBytes(challenge),
+        leafKeyPair: kHw
+      })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
+      expect(result.ok).to.equal(false)
+      expect(result.reason).to.match(/not the challenge deviceKey/i)
+      // Never-log rule: the reason must carry no key bytes.
+      expect(result.reason).to.not.match(/[A-Za-z0-9+/]{20,}/)
+    })
+
+    it('REJECTS (fail-closed) when challenge.deviceKey cannot be decoded as SPKI DER base64 — never silently skips the check', async () => {
+      const root = await generateTestRootCa()
+      const challenge = makeChallenge({ deviceKey: 'not-valid-base64-spki!!!' })
+      const { chainDer } = await buildSyntheticKeyDescription({
+        root,
+        securityLevel: SecurityLevel.trustedEnvironment,
+        attestationChallenge: boundChallengeBytes(challenge)
+      })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
+      expect(result.ok).to.equal(false)
+      expect(result.reason).to.match(/could not be decoded|spki/i)
+    })
   })
 })

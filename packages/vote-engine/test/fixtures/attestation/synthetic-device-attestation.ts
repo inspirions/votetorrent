@@ -40,6 +40,15 @@ export interface BuildSyntheticDeviceAttestationOverrides {
   deviceId?: string
   publicKey?: string
   keystorePublicKey?: string
+  /**
+   * Embed this EXACT keypair as the Key Attestation leaf certificate's
+   * subject key (51-02), instead of a freshly generated random one. Pass the
+   * SAME keypair whose SPKI-DER-base64 encoding is `challenge.deviceKey` so
+   * `verifyKeyAttestation`'s leaf-pubkey binding check (4b-2) accepts the
+   * chain — required for any ACCEPTING (ok:true) scenario since that check
+   * landed. See `synthetic-key-description.ts`'s `generateAndroidDeviceKeyPair()`.
+   */
+  leafKeyPair?: CryptoKeyPair
 }
 
 export interface BuildSyntheticDeviceAttestationOptions {
@@ -75,7 +84,8 @@ export async function buildSyntheticDeviceAttestation (options: BuildSyntheticDe
   const { chainDer } = await buildSyntheticKeyDescription({
     root: testRoot,
     securityLevel: overrides?.securityLevel ?? SecurityLevel.trustedEnvironment,
-    attestationChallenge: attestationChallengeBytes
+    attestationChallenge: attestationChallengeBytes,
+    leafKeyPair: overrides?.leafKeyPair
   })
   // PlayIntegrityVerifier.verify base64-decodes DeviceAttestation.certificateChain
   // entries before parsing DER (play-integrity-verifier.ts:38) — encode accordingly.
