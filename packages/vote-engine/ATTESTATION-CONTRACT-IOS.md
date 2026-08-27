@@ -275,7 +275,16 @@ nothing — defeating it requires defeating App Attest's app-integrity guarantee
 
 ---
 
-## 6. A gap this contract surfaced in the ANDROID verifier
+## 6. A gap this contract surfaced in the ANDROID verifier — CLOSED 2026-08-27 (plan 51-02)
+
+> **Update:** the gap described below is now closed. `verifyKeyAttestation` gained check `4b-2`
+> (`packages/vote-engine/src/association/verifiers/key-attestation.ts`), which compares the leaf
+> certificate's SubjectPublicKeyInfo against `challenge.deviceKey` in constant time and fails closed
+> on an undecodable key. Mutation-proven in `test/key-attestation-verifier.spec.ts`'s
+> `leaf public key binding (folded 2026-08-25 defect)` describe block. See
+> `ATTESTATION-CONTRACT.md` §4 rule 7 / §4a for the authoritative record. The analysis below is kept
+> for historical context (why the gap existed and why it made the iOS transitive-trust argument
+> below relevant) but no longer describes the shipped verifier's behavior.
 
 While deriving §4 it became clear that **`verifyKeyAttestation` never compares the attested leaf
 certificate's public key to `challenge.deviceKey`.** It checks the attestation challenge equals
@@ -291,8 +300,9 @@ open hole. But it means Android relies on the *same* transitive-trust argument i
 one property, which makes the iOS gap in §5 smaller than it first appears.
 
 **Recommended (Android, separate from iOS work):** compare the leaf certificate's public key to
-`challenge.deviceKey` in `verifyKeyAttestation`. Filed as a follow-up, not fixed here — this
-document specifies iOS and does not change shipped Android behaviour.
+`challenge.deviceKey` in `verifyKeyAttestation`. ~~Filed as a follow-up, not fixed here — this
+document specifies iOS and does not change shipped Android behaviour.~~ Fixed in plan 51-02 — see
+the update note above.
 
 ---
 
