@@ -242,6 +242,18 @@ export class AssociationEngine implements IAssociationEngine {
    *    `RegistrationEngine.createRegistrant`'s two-digest pattern) — THEN
    *    `AssociationPrivate` (`AssociationCidMatch` needs the public row to
    *    already exist). COMMIT, ROLLBACK on any failure.
+   * 5. D-11 (51-05): AFTER step 4's transaction COMMITs, DELETE the matched
+   *    `AttestationChallenge` row under its own `'vrg'`-signed delete ceremony,
+   *    in a SEPARATE transaction — a replay with the same nonce then fails at
+   *    step 1's lookup. NOT folded into step 4's transaction: `AssociationPrivate
+   *    .ChallengeValid` is a deferred (subquery) CHECK that Quereus evaluates
+   *    against the transaction's FINAL row state at COMMIT, so deleting the
+   *    challenge inside that same transaction made the already-satisfied CHECK
+   *    fail (empirically confirmed via TDD). A failure in step 4 never reaches
+   *    this step at all, so the challenge is trivially left intact for the
+   *    device to retry — single-use is enforced by BOTH this consumption AND
+   *    the pre-existing Association primary-key collision (D-06).
+   *
    * D-10 (51-05): `AttestationChallenge` carries no `Expiration` — the challenge
    * no longer supplies an expiration value. `Association`/`AssociationPrivate.Expiration`
    * are computed here from `INTERIM_ASSOCIATION_VALIDITY_DAYS`, a PLACEHOLDER
@@ -461,6 +473,50 @@ export class AssociationEngine implements IAssociationEngine {
         await ctx.db.exec('ROLLBACK')
         throw innerErr
       }
+
+      // ---- D-11 (51-05): consume the challenge — its OWN transaction, run ONLY after the
+      // Association/AssociationPrivate write above has durably COMMITted. This is NOT folded
+      // into that transaction (a deliberate deviation from the original plan text, which asked
+      // for the delete inside the same BEGIN/COMMIT): AssociationPrivate.ChallengeValid is a
+      // subquery ("deferred") CHECK, and empirically (via TDD — every associate() test failed
+      // with "CHECK constraint failed: ChallengeValid" once the in-transaction delete was added)
+      // Quereus evaluates deferred CHECKs against the transaction's FINAL row state at COMMIT,
+      // not per-statement. Deleting AttestationChallenge inside the same transaction as the
+      // AssociationPrivate insert made that already-satisfied CHECK fail at commit — the exact
+      // "deferred-CHECK sibling-row visibility" class this project has hit before (quereus #25).
+      //
+      // Consequence: the write and the consumption are two honest, sequential transactions, not
+      // one atomic unit. A crash in the narrow window between them would leave a used-but-not-
+      // yet-deleted challenge — NOT a live replay vector, because a second associate() attempt
+      // for the same (registrantId, deviceKey) is independently rejected by the Association
+      // primary-key collision (D-06 structural — proven in association.spec.ts's "replay-reject"
+      // suite). Single-use is therefore enforced by TWO independent layers (PK collision +
+      // this consumption), not by this delete alone.
+      //
+      // Modeled on removeAttestationChallenge's existing 'vrg'-signed delete ceremony shape,
+      // called with its OWN transaction (no `ownsTransaction: false` — the outer BEGIN/COMMIT
+      // above has already closed).
+      const consumeTid = await allocateTid(ctx.db, 'association')
+      // NOTE: `challengeNonce` (not `nonce`) — avoids the seedSignedMutation reserved-bind
+      // collision (see issueAttestationChallenge's doc comment).
+      const consumeDigestExpr = "select Digest(:tid, :challengeNonce, 'delete') as d"
+      const consumeDigestParams = { tid: consumeTid, challengeNonce: nonce }
+      const consumeNonce = await seedSignedMutation(
+        ctx,
+        challenge.authorityId,
+        'vrg',
+        consumeTid,
+        consumeDigestExpr,
+        consumeDigestParams,
+        this.resolveSign(signatureOrCallback)
+      )
+      // D-10 (51-05): the `with context` clause's `now` param is GONE from this table.
+      await ctx.db.exec(
+        `delete from AttestationChallenge
+         with context SigningNonce = :signingNonce, Tid = ${consumeTid}
+         where Nonce = :nonce`,
+        { nonce, signingNonce: consumeNonce }
+      )
     } catch (err) {
       this.rethrow(err, 'associate')
     }
