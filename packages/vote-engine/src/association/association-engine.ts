@@ -606,13 +606,14 @@ export class AssociationEngine implements IAssociationEngine {
       // and the loser violates `primary key (RegistrantId, DeviceKey,
       // Sequence)`. Here a lost row is a lost VERDICT — potentially a lost
       // FAIL verdict — so it retries rather than letting the row vanish.
-      // Same discipline as `recordRegistrantAccessEvent`: on failure, probe
-      // for our own row (below) and otherwise retry only if the high-water
-      // mark ADVANCED. Deliberately does not sniff the driver's error text
-      // for "primary key". Known imprecision, accepted: a non-race failure
-      // that coincides with an unrelated writer advancing the counter is
-      // still retried, costing at most SEQUENCE_ALLOCATION_ATTEMPTS attempts
-      // before the original error is rethrown.
+      // Broadly the same discipline as `recordRegistrantAccessEvent`: on
+      // failure, probe for our own row (below) before retrying. Deliberately
+      // does not sniff the driver's error text for "primary key". UNLIKE the
+      // sibling, this method retries UNCONDITIONALLY on any failure where our
+      // own row did not land (not only when the high-water mark advanced) —
+      // see the retry loop's own comment for why that gate does not transfer
+      // here. Bounded by SEQUENCE_ALLOCATION_ATTEMPTS attempts before the
+      // original error is rethrown.
       const readNextSequence = async (): Promise<number> => {
         const seqRow = await ctx.db
           .prepare('select coalesce(max(Sequence), -1) + 1 as n from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey')
@@ -632,12 +633,37 @@ export class AssociationEngine implements IAssociationEngine {
       // fresh-Tid-per-attempt note above rules out Tid replay, not row
       // duplication. Same fix as `recordRegistrantAccessEvent`.
       //
-      // NOTE `stripZ`: `VerifiedAt` round-trips WITHOUT the trailing `Z` that
-      // `VerifiedAtValid`'s like('%Z', VerifiedAt) requires on the way IN, so
-      // comparing the read value raw against the bound value never matches —
-      // the probe would answer "not ours" every time and silently reinstate
-      // the duplicate it exists to prevent.
-      const stripZ = (value: string): string => value.endsWith('Z') ? value.slice(0, -1) : value
+      // WR-01 FIX (folded 2026-08-25 defect, 51-02): `VerifiedAt` round-trips
+      // through Quereus's `datetime` normalization, which BOTH drops the
+      // trailing `Z` that `VerifiedAtValid`'s like('%Z', VerifiedAt) requires
+      // on the way in, AND strips trailing zeros from the fractional seconds
+      // — a bound `...:31.910Z` comes back as `...:31.91`. The prior `stripZ`
+      // helper only undid the first transform, so comparing the two as TEXT
+      // still failed whenever `Date.now()` landed on a millisecond ending in
+      // zero (~1 in 10 calls): the probe answered "not ours", the retry ran,
+      // and a SECOND copy of the same verdict was appended to a table
+      // declared `constraint InsertOnly check on update, delete (false)`,
+      // where it could never be removed. This is the EXACT bug
+      // `recordRegistrantAccessEvent` already found and fixed for
+      // `RegistrantAccessEvent.Timestamp` (see that method's `sameInstant`
+      // comment) — `recordAttestationVerdict` had only received the
+      // Z-stripping half of that fix, not the semantic-instant half.
+      //
+      // Comparing instants sidesteps every formatting question: parse both
+      // sides to epoch milliseconds, appending `Z` to the stored value
+      // because Quereus stores UTC without a designator and `new Date()`
+      // would otherwise read it as LOCAL time.
+      const asInstant = (value: string): number => {
+        const withZone = value.endsWith('Z') ? value : `${value}Z`
+        return new Date(withZone).getTime()
+      }
+      const sameInstant = (stored: string, bound: string): boolean => {
+        const a = asInstant(stored)
+        const b = asInstant(bound)
+        // An unparseable value must never compare equal — that would report a
+        // foreign row as ours and DROP a legitimate verdict write.
+        return !Number.isNaN(a) && !Number.isNaN(b) && a === b
+      }
       const ownRowLanded = async (seq: number): Promise<boolean> => {
         const row = await ctx.db
           .prepare('select Verdict, Reason, VerifiedAt from AttestationVerdict where RegistrantId = :registrantId and DeviceKey = :deviceKey and Sequence = :sequence')
@@ -647,7 +673,7 @@ export class AssociationEngine implements IAssociationEngine {
         const rowReason = row.Reason === null || row.Reason === undefined ? null : String(row.Reason)
         return String(row.Verdict ?? '') === verdict &&
           rowReason === reason &&
-          stripZ(String(row.VerifiedAt ?? '')) === stripZ(verifiedAt)
+          sameInstant(String(row.VerifiedAt ?? ''), verifiedAt)
       }
 
       for (let attempt = 0; attempt < SEQUENCE_ALLOCATION_ATTEMPTS; attempt++) {
@@ -673,18 +699,28 @@ export class AssociationEngine implements IAssociationEngine {
           return
         } catch (err) {
           if (attempt + 1 >= SEQUENCE_ALLOCATION_ATTEMPTS) throw err
-          // Both probes are fresh round trips issued immediately after a
-          // storage failure — exactly when they are most likely to fail too.
-          // Their rejection must never REPLACE the insert error the caller
+          // The probe is a fresh round trip issued immediately after a
+          // storage failure — exactly when it is most likely to fail too.
+          // Its rejection must never REPLACE the insert error the caller
           // needs, so the whole diagnosis collapses to `throw err`.
-          let anotherWriterWon: boolean
           try {
             if (await ownRowLanded(sequence)) return
-            anotherWriterWon = (await readNextSequence()) > sequence
           } catch {
             throw err
           }
-          if (!anotherWriterWon) throw err
+          // Our own row did NOT land at `sequence`. Unlike
+          // `recordRegistrantAccessEvent`'s stricter "only retry if the
+          // high-water mark advanced" gate, `recordAttestationVerdict`
+          // retries UNCONDITIONALLY here (still bounded by
+          // SEQUENCE_ALLOCATION_ATTEMPTS above): the sibling's gate exists to
+          // avoid wasting attempts on a deterministic, non-transient failure,
+          // but this table is a permanent audit trail
+          // (`constraint InsertOnly`) and a rejected pass/fail judgement that
+          // never landed is worth one more attempt with a freshly re-derived
+          // sequence rather than surfacing a possibly-transient storage error
+          // to `associate()`. The next loop iteration re-reads
+          // `readNextSequence()` before retrying, so this never reuses the
+          // sequence that just failed.
         }
       }
     } catch (err) {
