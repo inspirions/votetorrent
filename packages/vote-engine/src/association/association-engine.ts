@@ -8,6 +8,7 @@ import { toIsoZDatetime, toDeferredCheckDatetime, resolveSign as resolveSignHelp
 import { verifySig, verifySigP256 } from '../database/initialize.js'
 import { StubAttestationVerifier } from './stub-attestation-verifier.js'
 import { AssociationAssociateBuilder } from './builders/association-associate-builder.js'
+import { resolveRecordValidity as resolveRecordValidityFromPolicy } from './record-validity.js'
 import type { EngineContext } from '../types.js'
 import type {
   AssociateInit,
@@ -66,16 +67,6 @@ interface AssociationRequestRow {
 function sha256Hex (input: string): string {
   return bytesToHex(sha256(utf8ToBytes(input)))
 }
-
-/**
- * D-10/D-12 INTERIM (51-05): `AttestationChallenge.Expiration` was removed (D-10), so
- * `associate()` no longer has a challenge-supplied expiration to reuse for
- * `Association`/`AssociationPrivate.Expiration`. This is a PLACEHOLDER validity window that
- * plan 51-09 (D-12) replaces with a read of the authority-owned `ElectionRecordValidityPolicy`
- * row. Deliberately NOT a ten-year window — see `ConfirmationScreen.tsx:150`'s `TEN_YEARS_MS`
- * "dev posture", the exact anti-pattern D-12 exists to retire.
- */
-const INTERIM_ASSOCIATION_VALIDITY_DAYS = 365
 
 /**
  * L-3 skew-guard bounds for `submitAssociationRequest`'s submitter-supplied `SubmittedAt`
@@ -166,6 +157,29 @@ export class AssociationEngine implements IAssociationEngine {
       throw new Error('computeAssociationPrivateCid: cid(Digest(...)) returned null — crypto plugin not registered?')
     }
     return row.c as string
+  }
+
+  /**
+   * D-12 — thin per-instance wrapper around the shared `resolveRecordValidity` helper
+   * (`./record-validity.js`), which runs, field for field, the EXACT select-then-fallback shape
+   * modeled on the EXISTING `ElectionAttestationPolicy` read above (`associate()`'s `policyRow`
+   * lookup):
+   *
+   *   select RegistrantValidityDays, AssociationValidityDays
+   *     from ElectionRecordValidityPolicy where ElectionId = :electionId
+   *
+   * A failure of that SELECT itself PROPAGATES (rejects `associate()`), never silently defaults —
+   * the only silent-default case is "no row for this election, or `electionId` is `undefined`",
+   * which falls back to the shared module's CONSERVATIVE named constants
+   * (`DEFAULT_REGISTRANT_VALIDITY_DAYS`/`DEFAULT_ASSOCIATION_VALIDITY_DAYS`), never a permissive
+   * window. Lifted into a shared free function — rather than kept inline here — so
+   * `SignatureTasksEngine.finalizeRegistrantApproval` (the `Registrant`/`RegistrantPrivate`
+   * expiration site) reads the SAME `ElectionRecordValidityPolicy` row without constructing an
+   * `AssociationEngine` instance from `signature-tasks-engine.ts` (see 51-09-SUMMARY.md's "chosen
+   * mechanism" note — the plan's other option).
+   */
+  private async resolveRecordValidity (electionId: string | undefined): Promise<{ registrantExpiration: string; associationExpiration: string }> {
+    return resolveRecordValidityFromPolicy(this.ctx!, electionId)
   }
 
   // ---------- D-03: attestation-challenge issuance / removal ----------
@@ -305,13 +319,15 @@ export class AssociationEngine implements IAssociationEngine {
    *    device to retry — single-use is enforced by BOTH this consumption AND
    *    the pre-existing Association primary-key collision (D-06).
    *
-   * D-10 (51-05): `AttestationChallenge` carries no `Expiration` — the challenge
-   * no longer supplies an expiration value. `Association`/`AssociationPrivate.Expiration`
-   * are computed here from `INTERIM_ASSOCIATION_VALIDITY_DAYS`, a PLACEHOLDER
-   * this method owns only until plan 51-09 (D-12) replaces it with a read of
-   * the authority-owned `ElectionRecordValidityPolicy` row. This is
-   * deliberately NOT a ten-year window — see `ConfirmationScreen.tsx:150`'s
-   * `TEN_YEARS_MS` "dev posture", the exact anti-pattern D-12 exists to retire.
+   * D-10/D-12 (51-09): `AttestationChallenge` carries no `Expiration` — the challenge no longer
+   * supplies an expiration value. `Association`/`AssociationPrivate.Expiration` are computed here
+   * from the authority's OWN per-election `ElectionRecordValidityPolicy` row (via
+   * `resolveRecordValidity`, above), with a CONSERVATIVE named-constant fallback when no such row
+   * exists. The expiration is authority policy, per election — it does NOT derive from the
+   * challenge, and `AssociateInit` deliberately still carries no expiration field: the voter does
+   * not propose the validity window of a record the authority signs. This is deliberately NOT a
+   * ten-year window — see `ConfirmationScreen.tsx:150`'s `TEN_YEARS_MS` "dev posture", the exact
+   * anti-pattern D-12 exists to retire.
    */
   async associate (init: AssociateInit, signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.requireCtx('associate')
@@ -395,12 +411,13 @@ export class AssociationEngine implements IAssociationEngine {
       }
     }
 
-    // D-10/D-12 INTERIM (51-05): the challenge no longer carries an expiration (D-10 removed
-    // `AttestationChallenge.Expiration`). Plan 51-09 (D-12) replaces this placeholder with a
-    // read of the authority-owned `ElectionRecordValidityPolicy` row. Do NOT change this to a
-    // ten-year window — see `ConfirmationScreen.tsx:150`'s `TEN_YEARS_MS`, the exact "dev
-    // posture" anti-pattern D-12 exists to retire.
-    const expiration = toIsoZDatetime(new Date(Date.now() + INTERIM_ASSOCIATION_VALIDITY_DAYS * 86400000).toISOString())
+    // D-10/D-12 (51-09): the challenge no longer carries an expiration (D-10 removed
+    // `AttestationChallenge.Expiration`) — read the authority-owned per-election
+    // `ElectionRecordValidityPolicy` row instead (conservative named-constant fallback when no
+    // such row exists). Do NOT change this to a ten-year window — see
+    // `ConfirmationScreen.tsx:150`'s `TEN_YEARS_MS`, the exact "dev posture" anti-pattern D-12
+    // exists to retire.
+    const { associationExpiration: expiration } = await this.resolveRecordValidity(challenge.electionId)
     const expirationDeferred = toDeferredCheckDatetime(expiration)
     const attestationTime = toIsoZDatetime(attestation.attestationTime)
     const attestationTimeDeferred = toDeferredCheckDatetime(attestationTime)

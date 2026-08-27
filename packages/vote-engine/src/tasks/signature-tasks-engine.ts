@@ -30,6 +30,7 @@ import { BALLOT_HEADER_TID } from '../election/election-engine.js'
 import { CompleteSignatureBuilder } from './builders/index.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { RegistrationEngine } from '../registration/registration-engine.js'
+import { resolveRecordValidity } from '../association/record-validity.js'
 
 /**
  * CR-04 (T-48-33-02/03) — the identifier-free tally a registrant seed pass returns and the
@@ -1458,6 +1459,22 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // AdminSigning.UserIdValid requires merely that the signer be some officer at that authority —
     // it does not require a 'vrg'-scoped officer specifically (Phase 999.1).
     const decisionNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
+
+    // D-12 (51-09): the authority OWNS the validity of a record it signs — a submitter-proposed
+    // expiration (e.g. `ConfirmationScreen.tsx:150`'s ten-year "dev posture" window) is IGNORED
+    // here, never trusted. Read through the SAME `ElectionRecordValidityPolicy`-backed helper
+    // `AssociationEngine.associate()` reads for the Association/AssociationPrivate expiration
+    // (`../association/record-validity.js`) so both record-validity sites agree, then override
+    // ALL THREE `RegisterInit` expiration fields BEFORE `register()` runs below — `register()`'s
+    // own digests are computed from `init` at call time, so overriding here (rather than after)
+    // keeps the digest and the stored row in agreement by construction; no separate re-signing
+    // step is needed.
+    const { registrantExpiration } = await resolveRecordValidity(ctx, init.electionId)
+    init.registrant.expiration = registrantExpiration
+    init.private.expiration = registrantExpiration
+    if (init.selective) {
+      init.selective.expiration = registrantExpiration
+    }
 
     // register()-then-decide ordering: register() opens its own BEGIN/COMMIT envelope and cannot
     // share a transaction with the decision UPDATE below, so the two are ordered register()-then-
