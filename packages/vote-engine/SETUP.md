@@ -196,48 +196,64 @@ the window at the cost of more frequent app releases/updates to authority
 peers.
 
 
-### 4d. Pinned Apple App Attest root (iOS, Phase 51 — PROVISIONED 2026-08-26)
+### 4d. Pinned Apple App Attest root (iOS, Phase 51 — PROVISIONED 2026-08-26/2026-08-27)
 
 `AppAttestVerifier` is the iOS counterpart of `PlayIntegrityVerifier` and holds the same offline
 posture: the Apple trust anchor is an INJECTED, bundled, committed snapshot, never fetched at
 verify-time.
 
-**The root is now embedded** in `apps/VoteTorrentAuthority/src/engines/appattest-keys.generated.ts`.
-`APPLE_APP_ID` is still empty, so `APP_ATTEST_PROVISIONED` remains `false` and the iOS branch still
-fails closed — on the App ID rather than on the anchor:
+**The root is embedded** in `apps/VoteTorrentAuthority/src/engines/appattest-keys.generated.ts`.
+**`APPLE_APP_ID` is now committed too (D-13, 2026-08-27)** at the FREE PERSONAL TEAM value
+`94TY7UR2W5.org.votetorrent.voter`, so `APP_ATTEST_PROVISIONED` is `true` and the iOS branch no
+longer fails closed on missing config:
 
 ```
-Apple App Attest root material is not provisioned — see SETUP.md   (root half — now satisfied)
-Apple App ID (<teamId>.<bundleId>) is not provisioned — see SETUP.md   (still outstanding)
+Apple App Attest root material is not provisioned — see SETUP.md   (root half — satisfied 2026-08-26)
+Apple App ID (<teamId>.<bundleId>) is not provisioned — see SETUP.md   (App ID half — satisfied 2026-08-27, D-13)
 ```
 
 Those reasons are returned FIRST, before any other check, so an unprovisioned deployment can never
 report a misleading downstream failure instead (the same D-09 discipline `PlayIntegrityVerifier`
 uses for Play Console keys), and they are separate so the message names which half is missing.
 
+**The committed App ID is a PERSONAL team's, not a shipping identity, and that is a deliberately
+accepted risk (D-13), not an oversight.** A shipped authority built from this tree would treat that
+personal team's builds as the legitimate App Attest attestation producer. The mitigation that
+actually prevents a real release from carrying it is machine-enforced, not this document:
+`scripts/fastlane/vt_appattest_release_gate.rb` (D-14) fails the `build_apk` and `build_aab`
+Fastlane lanes — and the iOS `beta`/`release` lanes — while `APPLE_APP_ID` still equals the
+personal-team value, or is empty, or `APP_ATTEST_ENVIRONMENT` is not the literal `'production'`. Run
+`fastlane android verify_appattest_config` to check it without building. The paid-team swap (the
+only thing that actually clears the gate for a real release) is tracked in
+`.planning/todos/pending/2026-08-25-ios-appattest-team-id-and-entitlement.md`.
+
 > **The file moved.** Until this section was corrected it named
 > `apps/VoteTorrentVoter/src/engines/appattest-roots.generated.ts`. The voter is the attestation
 > PRODUCER and never holds a trust anchor; the AUTHORITY is what verifies, and its `EngineFactory`
 > is what injects the roots. The voter-side copy was imported by nothing and has been removed.
 
-**Two more values live in the same file, and both must be set.** An empty root pool is not the only
-way this stays unprovisioned:
+**Two more values live in the same file, and both are now set.** An empty root pool is not the only
+way this could go back to unprovisioned:
 
-| Constant | Meaning | Unprovisioned behaviour |
+| Constant | Meaning | Current state |
 |---|---|---|
-| `APPLE_APP_ATTEST_ROOTS_BASE64` | Apple's trust anchor | `root material is not provisioned` |
-| `APPLE_APP_ID` | `<teamId>.<bundleId>` of the **voter** app | `Apple App ID (<teamId>.<bundleId>) is not provisioned` |
-| `APP_ATTEST_ENVIRONMENT` | `production` (the strict default) | n/a — has a safe default |
+| `APPLE_APP_ATTEST_ROOTS_BASE64` | Apple's trust anchor | provisioned 2026-08-26 |
+| `APPLE_APP_ID` | `<teamId>.<bundleId>` of the **voter** app | committed 2026-08-27 at the free-team value (D-13) |
+| `APP_ATTEST_ENVIRONMENT` | `production` (the strict, and only committed, value) | the literal `'production'` (D-15) |
 
 `APPLE_APP_ID` is reported as its own configuration error rather than being allowed to flow into the
 `rpIdHash === SHA256(appId)` check, where an empty value rejects every genuine device with
 "attestation is for a different app" — blaming the device for a deployment mistake.
 
-`APP_ATTEST_ENVIRONMENT` defaults to `production` and should stay there. Spike 085 measured that the
-**provisioning profile** decides the environment, not the entitlement plist: a build with no
-entitlements file at all still received a `development` attestation, while TestFlight/App Store
-builds get `production` regardless. Flipping this to `development` to make a test device work
-accepts every sideloaded build.
+`APP_ATTEST_ENVIRONMENT` stays the literal `'production'` in the committed tree (D-15) and should
+never be edited there. Spike 085 measured that the **provisioning profile** decides the environment,
+not the entitlement plist: a build with no entitlements file at all still received a `development`
+attestation, while TestFlight/App Store builds get `production` regardless. Do not flip the committed
+constant to `development` to "make a test device work" — that accepts every sideloaded build. If you
+need a dev-only authority build that talks to a development-environment attestation (for example, to
+exercise the free-team proof end-to-end), build a purpose-built local variant with this one constant
+flipped, run it, and never commit that change; `scripts/fastlane/vt_appattest_release_gate.rb` (D-14)
+fails any Fastlane publish lane while it is not the literal `'production'`.
 
 **Provisioning the root.**
 
