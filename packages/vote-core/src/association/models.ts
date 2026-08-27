@@ -270,3 +270,93 @@ export interface AttestationVerdict {
    */
   verifiedAt: Timestamp | string
 }
+
+/** ********* Association Request protocol (Phase 51) ***********/
+
+/**
+ * AssociationRequestStatus(Code) — Pending / Challenge issued / Associated /
+ * Rejected, mirrors `view AssociationRequestStatus` (51-01).
+ *
+ * `'c'` (challenge issued) has NO `RegistrationRequestStatus` counterpart:
+ * association is not single-round-trip like registration. The authority
+ * must hand the device a nonce BEFORE the device can attest, because the
+ * nonce is bound INTO the attestation itself — `expectedNonce =
+ * SHA256(authData||clientDataHash)` on iOS, `attestationChallenge ==
+ * Digest(nonce, deviceKey)` on Android (D-18). So a request necessarily
+ * passes through an intermediate state between submission and its terminal
+ * decision.
+ */
+export type AssociationRequestStatus = 'p' | 'c' | 'a' | 'r'
+
+/**
+ * What a device supplies to submit an association request (D-02/D-18).
+ * Deliberately carries NO `userId`, `userKey`, or `IsUserValid` field — a
+ * prospective registrant's device has a P-256 device keypair but no `User`
+ * row and no officer scope. The row's own requester-key self-signature
+ * (`SignatureValid`, `Digest(Id, AuthorityId, RegistrantId, DeviceKey,
+ * ElectionId, SubmittedAt)` per 51-01) is the entire authorization gate —
+ * this is the `ProposedX` `with context (UserId, UserKey, ..., IsUserValid)`
+ * envelope D-02 explicitly rejects.
+ *
+ * `submittedAt` is **submitter-chosen, required, canonical ISO-Z** (trailing
+ * `Z`), and inside the signed digest above. The engine neither generates
+ * nor rewrites it — an engine-generated value would make the signer's own
+ * signature unverifiable, since the signer could not have known it at
+ * signing time (mirrors `RegistrationRequestInit.submittedAt`'s documented
+ * rule verbatim).
+ *
+ * Field order matches the `SignatureValid` digest argument order exactly:
+ * `id, authorityId, registrantId, deviceKey, electionId?, submittedAt`.
+ */
+export interface AssociationRequestInit {
+  id: string
+  authorityId: string
+  registrantId: string
+  deviceKey: string
+  electionId?: string
+  submittedAt: string
+}
+
+/**
+ * D-18: the second voter-to-authority message, submitted once the device
+ * has answered the authority-issued challenge. `attestation` reuses the
+ * EXISTING `DeviceAttestation` type declared above in this same file — it
+ * is NOT re-declared here.
+ *
+ * This answer maps 1:1 onto the existing `AssociateInit` the unchanged
+ * `associate()` already consumes: deliberately, `registrantId` and
+ * `deviceKey` are NOT carried on this type. They are read from the
+ * persisted `AssociationRequest` row (looked up by `requestId`) rather than
+ * accepted from the wire, so a second message structurally cannot re-point
+ * an answer at a different registrant or device than the one that
+ * submitted the original request.
+ */
+export interface AssociationAttestationAnswer {
+  requestId: string
+  nonce: string
+  attestation: DeviceAttestation
+  deviceHash?: string
+}
+
+/**
+ * Backs the D-06 read-only association-request status screen.
+ *
+ * `receivedAt` is authority-observed at intake and inside no digest;
+ * mirrors `RegistrationRequestRead.receivedAt`'s documented rule — surface
+ * it BESIDE `submittedAt` and never substitute one for the other, since a
+ * submitter-chosen `submittedAt` may diverge from when the authority
+ * actually received the request.
+ */
+export interface AssociationRequestRead {
+  requestId: string
+  authorityId: string
+  registrantId: string
+  deviceKey: string
+  electionId?: string
+  status: AssociationRequestStatus
+  challengeNonce?: string
+  submittedAt: string
+  receivedAt: string
+  decidedAt?: string
+  rejectionReason?: string
+}

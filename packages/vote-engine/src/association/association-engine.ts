@@ -11,6 +11,10 @@ import type { EngineContext } from '../types.js'
 import type {
   AssociateInit,
   Association,
+  AssociationAttestationAnswer,
+  AssociationRequestInit,
+  AssociationRequestRead,
+  AssociationRequestStatus,
   AttestationChallenge,
   AttestationVerdict,
   AttestationVerdictCode,
@@ -772,5 +776,34 @@ export class AssociationEngine implements IAssociationEngine {
 
   private rethrow (err: unknown, method: string): never {
     return rethrowHelper(err, 'AssociationEngine', method)
+  }
+
+  // ---------- 51-04: stub bodies for the widened IAssociationEngine ----------
+  // Land here so packages/vote-engine compiles at the end of wave 2 (51-04). Real
+  // bodies land in 51-08 (both submit legs) and 51-09 (the driver + both reads).
+
+  async submitAssociationRequest (_init: AssociationRequestInit, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
+    // CONTRACT STUB — replaced by 51-08 (ceremony-free self-signed intake)
+    throw new Error('submitAssociationRequest is not implemented')
+  }
+
+  async submitAssociationAttestation (_answer: AssociationAttestationAnswer, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
+    // CONTRACT STUB — replaced by 51-08 (D-18 second leg)
+    throw new Error('submitAssociationAttestation is not implemented')
+  }
+
+  async processPendingAssociationRequests (_authorityId: string, _signatureOrCallback: SignatureOrCallback): Promise<{ challengesIssued: number; associated: number; rejected: number }> {
+    // CONTRACT STUB — replaced by 51-09 (D-05/D-19 automatic driver)
+    throw new Error('processPendingAssociationRequests is not implemented')
+  }
+
+  async listAssociationRequests (_authorityId: string, _status?: AssociationRequestStatus): Promise<AssociationRequestRead[]> {
+    // CONTRACT STUB — replaced by 51-09 (D-06 read-only list)
+    throw new Error('listAssociationRequests is not implemented')
+  }
+
+  async getAssociationRequest (_requestId: string): Promise<AssociationRequestRead | undefined> {
+    // CONTRACT STUB — replaced by 51-09 (D-06 read-only point read)
+    throw new Error('getAssociationRequest is not implemented')
   }
 }

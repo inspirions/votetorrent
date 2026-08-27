@@ -1,6 +1,16 @@
 import type { Signature } from '../common/index.js'
 import type { IBuilder } from '../common/builder.js'
-import type { AssociateInit, Association, AttestationChallenge, AttestationVerdict, DeviceAttestation } from './models.js'
+import type {
+  AssociateInit,
+  Association,
+  AssociationAttestationAnswer,
+  AssociationRequestInit,
+  AssociationRequestRead,
+  AssociationRequestStatus,
+  AttestationChallenge,
+  AttestationVerdict,
+  DeviceAttestation
+} from './models.js'
 
 /**
  * D-01/D-19: every mutating method's signing parameter is a `Signature` OR a
@@ -84,6 +94,51 @@ export interface IAssociationEngine {
    * D-14a..D-14e), so its presence proves nothing.
    */
   getAttestationVerdicts(registrantId: string, deviceKey?: string): Promise<AttestationVerdict[]>
+
+  /**
+   * D-02/D-18: submit a self-signed association request. Returns the
+   * assigned request id. Parameter list matches
+   * `IRegistrationEngine.submitRegistrationRequest` exactly, so a transport
+   * binding can delegate 1:1 with no shape translation. Carries no
+   * `userId`/`userKey`/`IsUserValid` parameter — the row's own
+   * requester-key self-signature is the only authorization gate; this INSERT
+   * runs no `seedSignedMutation`/`AdminSigning` ceremony.
+   *
+   * Timestamp contract mirrors 48-02 L-3: the engine takes `SubmittedAt`
+   * from `init.submittedAt` verbatim and generates none of its own.
+   */
+  submitAssociationRequest(init: AssociationRequestInit, requesterKey: string, signatureOrCallback: SignatureOrCallback): Promise<string>
+
+  /**
+   * D-18: the second, distinct voter-to-authority message — answering the
+   * challenge the authority issued for `answer.requestId`. NOT a widened
+   * `submitAssociationRequest` call; the self-signed ask and the self-signed
+   * attestation-answer assert structurally different things with different
+   * validity rules.
+   */
+  submitAssociationAttestation(answer: AssociationAttestationAnswer, requesterKey: string, signatureOrCallback: SignatureOrCallback): Promise<void>
+
+  /**
+   * D-06 read-only status-screen list. `status` is an OPTIONAL narrowing
+   * predicate — omitted returns every request for the authority.
+   */
+  listAssociationRequests(authorityId: string, status?: AssociationRequestStatus): Promise<AssociationRequestRead[]>
+
+  /** Returns `undefined` for an unknown id, never throws. */
+  getAssociationRequest(requestId: string): Promise<AssociationRequestRead | undefined>
+
+  /**
+   * D-05/D-19: the automatic authority-side driver — picks up pending
+   * requests, issues challenges, and processes challenge-answered requests
+   * through the unchanged `associate()` (verify + sign + write). Runs under
+   * a `'vrg'`-scoped ceremony (an officer key must be present to sign;
+   * D-05 is "automatic, not officer-approved", not "unattended"). NO
+   * approve/reject-decision method exists on this interface — D-05 states
+   * processing is authority-VERIFIED, not officer-APPROVED, so there is no
+   * per-request decision to model (mirrors `IRegistrationEngine`'s own D-06
+   * "deliberately no approve method" rationale).
+   */
+  processPendingAssociationRequests(authorityId: string, signatureOrCallback: SignatureOrCallback): Promise<{ challengesIssued: number; associated: number; rejected: number }>
 }
 
 export interface IAssociationAssociateBuilder extends IBuilder<AssociateInit, void> {

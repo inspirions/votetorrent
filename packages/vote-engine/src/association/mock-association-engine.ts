@@ -2,6 +2,10 @@ import { AssociationAssociateBuilder } from './builders/association-associate-bu
 import type {
   AssociateInit,
   Association,
+  AssociationAttestationAnswer,
+  AssociationRequestInit,
+  AssociationRequestRead,
+  AssociationRequestStatus,
   AttestationChallenge,
   AttestationVerdict,
   AttestationVerification,
@@ -158,5 +162,34 @@ export class MockAssociationEngine implements IAssociationEngine {
     return this.verdicts
       .filter((v) => v.registrantId === registrantId && (deviceKey === undefined || v.deviceKey === deviceKey))
       .sort((a, b) => (a.deviceKey < b.deviceKey ? -1 : a.deviceKey > b.deviceKey ? 1 : a.sequence - b.sequence))
+  }
+
+  // ---------- 51-04: stub bodies for the widened IAssociationEngine ----------
+  // 51-08/51-09 own mock parity — a half-real mock that silently succeeds here
+  // would be worse than one that throws.
+
+  async submitAssociationRequest (_init: AssociationRequestInit, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
+    // CONTRACT STUB — replaced by 51-08 (ceremony-free self-signed intake)
+    throw new Error('submitAssociationRequest is not implemented')
+  }
+
+  async submitAssociationAttestation (_answer: AssociationAttestationAnswer, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
+    // CONTRACT STUB — replaced by 51-08 (D-18 second leg)
+    throw new Error('submitAssociationAttestation is not implemented')
+  }
+
+  async processPendingAssociationRequests (_authorityId: string, _signatureOrCallback: SignatureOrCallback): Promise<{ challengesIssued: number; associated: number; rejected: number }> {
+    // CONTRACT STUB — replaced by 51-09 (D-05/D-19 automatic driver)
+    throw new Error('processPendingAssociationRequests is not implemented')
+  }
+
+  async listAssociationRequests (_authorityId: string, _status?: AssociationRequestStatus): Promise<AssociationRequestRead[]> {
+    // CONTRACT STUB — replaced by 51-09 (D-06 read-only list)
+    throw new Error('listAssociationRequests is not implemented')
+  }
+
+  async getAssociationRequest (_requestId: string): Promise<AssociationRequestRead | undefined> {
+    // CONTRACT STUB — replaced by 51-09 (D-06 read-only point read)
+    throw new Error('getAssociationRequest is not implemented')
   }
 }
