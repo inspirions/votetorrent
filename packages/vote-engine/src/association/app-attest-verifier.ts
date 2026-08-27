@@ -69,7 +69,15 @@ export class AppAttestVerifier implements IAttestationVerifier {
      * Mirrors `PlayIntegrityVerifier`'s D-09 fail-closed gate: when the Apple root snapshot has not
      * been provisioned, report THAT first so no downstream reason can mask it.
      */
-    private readonly rootsProvisioned: boolean = true
+    private readonly rootsProvisioned: boolean = true,
+    /**
+     * OPTIONAL injected "now" for `verifyAppAttest`'s STEP 1 chain-validity check. Defaults to
+     * `undefined`, which makes `verifyAppAttest` fall back to the real wall clock — PRODUCTION
+     * BEHAVIOUR IS UNCHANGED. This exists solely so specs replaying a REAL captured Apple App
+     * Attest chain can pin verification to the chain's capture time instead of decaying as wall-
+     * clock time passes; nothing in the shipped app ever sets it.
+     */
+    private readonly now?: Date
   ) {}
 
   async verify (challenge: AttestationChallenge, attestation: DeviceAttestation): Promise<AttestationVerification> {
@@ -128,7 +136,8 @@ export class AppAttestVerifier implements IAttestationVerifier {
       expectedClientDataHash,
       keyId,
       pinnedRootsDer: this.pinnedRootsDer,
-      environment: this.environment
+      environment: this.environment,
+      now: this.now
     })
     if (!attestationResult.ok) return attestationResult
 

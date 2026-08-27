@@ -34,6 +34,17 @@ export interface AppAttestExpectations {
   pinnedRootsDer: Uint8Array[]
   /** 'development' expects aaguid `appattestdevelop`; 'production' expects `appattest` + 7 zero bytes. */
   environment: 'development' | 'production'
+  /**
+   * OPTIONAL injected "now" for the STEP 1 chain-validity window check. Defaults to `new Date()`,
+   * so PRODUCTION BEHAVIOUR IS UNCHANGED — a genuinely expired chain is still rejected at runtime.
+   *
+   * This seam exists ONLY so a spec replaying a REAL captured Apple App Attest chain (short-lived
+   * leaf certs) can verify it at its CAPTURE time instead of decaying as wall-clock time passes.
+   * It is NOT a way to disable expiry checking in production — nothing in the shipped app ever
+   * passes this field, and `app-attest-verifier.ts`'s negative controls prove the check still
+   * fires when a chain is genuinely outside its validity window at the injected time.
+   */
+  now?: Date
 }
 
 const AAGUID_DEVELOPMENT = new TextEncoder().encode('appattestdevelop')
@@ -117,7 +128,7 @@ export async function verifyAppAttest (
     // (`key-attestation.ts`); iOS did not, and the asymmetry was never a documented decision —
     // T-51-10, found by the phase 51 retroactive-STRIDE audit. The pinned root is included on
     // purpose: an expired trust anchor should fail closed, not be waved through.
-    const now = new Date()
+    const now = expect.now ?? new Date()
     for (const cert of path) {
       if (now < cert.notBefore || now > cert.notAfter) {
         return { ok: false, reason: 'a certificate in the App Attest chain is expired or not yet valid' }

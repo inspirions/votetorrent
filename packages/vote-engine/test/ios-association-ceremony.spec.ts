@@ -55,12 +55,22 @@ const fixture = JSON.parse(
     'utf8'
   )
 ) as {
+  startedAt: string
   challenge: { nonce: string, deviceKey: string }
   attestation: DeviceAttestation
 }
 
 const APP_ID = '94TY7UR2W5.org.votetorrent.voter'
 const FUTURE_REGISTRANT_EXPIRATION = '2099-01-01T00:00:00.000Z'
+
+/**
+ * The real device's own capture timestamp. Apple App Attest development-environment leaf certs are
+ * short-lived, so a fixed real-hardware fixture inevitably crosses its own validity window as
+ * wall-clock time passes. Every test in this file replays the SAME real hardware capture, so the
+ * whole file verifies at capture time rather than at `new Date()`. Nothing in the shipped verifier
+ * ever passes an injected `now`; see `app-attest.ts`'s `now?: Date` doc for why this seam exists.
+ */
+const FIXTURE_CAPTURED_AT = new Date(fixture.startedAt)
 
 function makeRealSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
   const { privateHex, publicHex } = randomTestKeyPair()
@@ -133,7 +143,7 @@ async function setupIosCeremony (environment: 'development' | 'production' = 'de
       new Set<string>(),
       false
     ),
-    new AppAttestVerifier([APPLE_APP_ATTEST_ROOT_DER], APP_ID, environment)
+    new AppAttestVerifier([APPLE_APP_ATTEST_ROOT_DER], APP_ID, environment, undefined, true, FIXTURE_CAPTURED_AT)
   )
 
   return { auth, registrantId, engine: new AssociationEngine(auth.ctx, verifier), sign }

@@ -49,6 +49,7 @@ const APP_ID = '94TY7UR2W5.org.votetorrent.voter'
 const fixture = JSON.parse(
   readFileSync(fileURLToPath(new URL('./fixtures/attestation/ios-hardware-2026-08-25.json', import.meta.url)), 'utf8')
 ) as {
+  startedAt: string
   ok: boolean
   reprovisioned: boolean
   voteKeyProbe: string
@@ -74,6 +75,16 @@ const fixture = JSON.parse(
 const b64 = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, 'base64'))
 const pd = fixture.attestation.platformDetails
 const challenge = fixture.challenge
+
+/**
+ * The real device's own capture timestamp, read from the fixture rather than hardcoded. Apple App
+ * Attest development-environment leaf certs are short-lived (this chain's credCert is valid for
+ * only 3 days), so a fixed real-hardware fixture inevitably crosses its own validity window as
+ * wall-clock time passes. Verifying at CAPTURE time — not `new Date()` — lets this spec keep
+ * proving chain structure and signatures against genuine Apple bytes without decaying. Nothing in
+ * the shipped verifier ever passes an injected `now`; see `app-attest.ts`'s `now?: Date` doc.
+ */
+const FIXTURE_CAPTURED_AT = new Date(fixture.startedAt)
 
 /** K_att's public key, read out of the credCert exactly as `verifyAppAttest` reads it on success. */
 function attestedPublicKeyRaw (): Uint8Array {
@@ -177,10 +188,27 @@ describe('iOS App Attest — REAL hardware bytes (iPhone 13, 2026-08-25)', () =>
         expectedClientDataHash,
         keyId,
         pinnedRootsDer: [APPLE_APP_ATTEST_ROOT_DER],
-        environment: 'development'
+        environment: 'development',
+        now: FIXTURE_CAPTURED_AT
       })
       expect(r.reason ?? '').to.equal('')
       expect(r.ok).to.equal(true)
+    })
+
+    it('NEGATIVE CONTROL: still rejects this same real chain when "now" is genuinely outside its validity window', async () => {
+      // Proves the capture-time seam did not quietly disable expiry checking. Without this, a
+      // seam that can no longer fail would be worse than the freshness problem it fixes.
+      const farFuture = new Date('2030-01-01T00:00:00.000Z')
+      const r = await verifyAppAttest(attObj, {
+        appId: APP_ID,
+        expectedClientDataHash,
+        keyId,
+        pinnedRootsDer: [APPLE_APP_ATTEST_ROOT_DER],
+        environment: 'development',
+        now: farFuture
+      })
+      expect(r.ok).to.equal(false)
+      expect(r.reason).to.match(/expired or not yet valid/)
     })
 
     it('rejects the same real attestation under a DIFFERENT anchor', async () => {
@@ -225,10 +253,21 @@ describe('iOS App Attest — REAL hardware bytes (iPhone 13, 2026-08-25)', () =>
       // The whole point of the phase, in one assertion: attestation + cross-sign + POP, composed as
       // the app composes them, over bytes an iPhone produced, anchored to Apple. Everything else in
       // this suite tests a piece.
-      const verifier = new AppAttestVerifier([APPLE_APP_ATTEST_ROOT_DER], APP_ID, 'development')
+      const verifier = new AppAttestVerifier(
+        [APPLE_APP_ATTEST_ROOT_DER], APP_ID, 'development', undefined, true, FIXTURE_CAPTURED_AT
+      )
       const r = await verifier.verify(challenge, fixture.attestation)
       expect(r.reason ?? '').to.equal('')
       expect(r.ok).to.equal(true)
+    })
+
+    it('NEGATIVE CONTROL: the composed verifier still rejects when "now" is genuinely outside the chain’s validity window', async () => {
+      const verifier = new AppAttestVerifier(
+        [APPLE_APP_ATTEST_ROOT_DER], APP_ID, 'development', undefined, true, new Date('2030-01-01T00:00:00.000Z')
+      )
+      const r = await verifier.verify(challenge, fixture.attestation)
+      expect(r.ok).to.equal(false)
+      expect(r.reason).to.match(/expired or not yet valid/)
     })
 
     it('a PRODUCTION authority refuses this development attestation', async () => {
