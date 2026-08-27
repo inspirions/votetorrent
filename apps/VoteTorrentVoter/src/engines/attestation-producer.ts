@@ -31,9 +31,18 @@
  * predicate is `__DEV__ && USE_REAL_ATTESTATION_PRODUCER`, so it is unconditionally
  * `false` in a release build no matter the flag's value, and the release rung below is
  * completely unchanged.
+ *
+ * Plan 11 addition (D-02/D-18): the voter's self-signed association-request messages must
+ * carry a signature that verifies directly against the P-256 key `provisionDeviceKey()`
+ * returned (the schema's own check compares the signature to that exact public key, not to
+ * any registered identity). `signDeviceKeyDigest` is the seam for that — OPTIONAL on the
+ * interface because the real hardware-backed producer does not implement it yet (wiring a
+ * real per-digest P-256 signature through the native biometric-gated signing call is a
+ * follow-up, not solved by this call-site adoption plan; see plan 11's SUMMARY "Known Gap").
+ * A caller must treat its absence as "cannot self-sign," never silently skip it.
  */
 
-import type { AttestationChallenge, DeviceAttestation } from '@votetorrent/vote-core'
+import type { AttestationChallenge, DeviceAttestation, Signature } from '@votetorrent/vote-core'
 import { createRealAttestationProducer } from '@votetorrent/attestation-native'
 import { USE_STUB_PLAY_INTEGRITY, USE_REAL_ATTESTATION_PRODUCER } from './proof-flags.generated'
 
@@ -44,10 +53,16 @@ import { USE_STUB_PLAY_INTEGRITY, USE_REAL_ATTESTATION_PRODUCER } from './proof-
  *   (2) `produce(challenge)` — answers an already-issued challenge bound to that key.
  * Phase 45's real producer (Play Integrity token + hardware Keystore key attestation)
  * implements this exact shape.
+ *
+ * `signDeviceKeyDigest` (plan 11 addition, OPTIONAL) signs an arbitrary digest under the
+ * SAME key `provisionDeviceKey()` returned, for the voter's self-signed association-request
+ * submissions (D-02/D-18) — never for anything a schema `AdminSigning`/officer ceremony
+ * verifies.
  */
 export interface AttestationProducer {
 	provisionDeviceKey(): Promise<{ publicKey: string }>
 	produce(challenge: AttestationChallenge): Promise<DeviceAttestation>
+	signDeviceKeyDigest?(digest: Uint8Array): Promise<Signature>
 }
 
 /**
@@ -63,6 +78,17 @@ export interface AttestationProducer {
 export const StubAttestationProducer: AttestationProducer = {
 	async provisionDeviceKey(): Promise<{ publicKey: string }> {
 		return { publicKey: 'STUB_DEVICE_PUBLIC_KEY_PLACEHOLDER_NOT_REAL' }
+	},
+
+	// Plan 11 (D-02/D-18): a clearly-non-real placeholder signature — never a real cryptographic
+	// signature, and never something a schema SignatureValid check will accept. Dev-only, mirrors
+	// the other STUB_* placeholder values in this file.
+	async signDeviceKeyDigest(_digest: Uint8Array): Promise<Signature> {
+		return {
+			signature: 'STUB_DEVICE_KEY_SIGNATURE_PLACEHOLDER_NOT_REAL',
+			signerKey: 'STUB_DEVICE_PUBLIC_KEY_PLACEHOLDER_NOT_REAL',
+			signerUserId: '',
+		}
 	},
 
 	async produce(challenge: AttestationChallenge): Promise<DeviceAttestation> {
