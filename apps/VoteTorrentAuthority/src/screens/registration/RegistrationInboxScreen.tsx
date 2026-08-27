@@ -370,6 +370,21 @@ export default function RegistrationInboxScreen() {
 				/>
 			</View>
 
+			{/* Phase 51 plan 51-10 (D-06/D-19) — the concrete tap sequence into
+			    AssociationRequestStatusScreen, the read-only association-request
+			    status screen: Registration Requests (this screen) -> this chip ->
+			    AssociationRequestStatus. Placed beside
+			    the Bulk Import / Sync chip above (both authority-wide, both reached
+			    from here) rather than adding a new menu location. Unconditional on
+			    canWrite/scope, matching the Bulk Import / Sync chip's own posture:
+			    this screen is read-only regardless of scope. */}
+			<View style={styles.section} testID="registration-inbox-association-request-status">
+				<ChipButton
+					label={t("associationRequestStatusInboxButton")}
+					onPress={() => navigation.navigate("AssociationRequestStatus", { authorityId })}
+				/>
+			</View>
+
 			<View style={styles.section} testID="registration-inbox-filters">
 				<View testID="registration-inbox-search">
 					<CustomTextInput

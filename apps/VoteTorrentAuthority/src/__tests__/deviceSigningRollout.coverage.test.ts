@@ -10,15 +10,17 @@
  * path back to recovery).
  *
  * Reconciliation this test encodes (so a future reader does not conclude the rollout is short):
- *   - 23 non-test files under `src` reference `device-signer` in some form.
- *   - 21 of those actually INVOKE `createDeviceSigner(` (a call expression, not a comment).
- *   - 18 of the 21 route through `useDeviceSigningErrorHandler` (8 from 49-11, 9 from 49-12,
+ *   - 24 non-test files under `src` reference `device-signer` in some form.
+ *   - 22 of those actually INVOKE `createDeviceSigner(` (a call expression, not a comment).
+ *   - 18 of the 22 route through `useDeviceSigningErrorHandler` (8 from 49-11, 9 from 49-12,
  *     1 from 50-15's `DashboardSignInCodeScreen.tsx` — the CR-04 presence-proof gate).
- *   - 3 of the 21 are named, justified exemptions (`ROLLOUT_EXEMPT` below).
+ *   - 4 of the 22 are named, justified exemptions (`ROLLOUT_EXEMPT` below) — 51-10 added the
+ *     4th, `screens/registration/attach-association-sync-bindings.ts`, the SAME exemption class
+ *     as its registration sibling below.
  *   - 2 files (`engines/registrant-dev-seed.ts`, `engines/signing-proof.ts`) reference
  *     `createDeviceSigner` only in prose comments, never as a call — they are correctly
- *     excluded from the 20-file invocation inventory by this test's comment-stripping walk,
- *     and are NOT part of the 22/20/17/3 arithmetic below (22 = 20 invokers + 2 comment-only).
+ *     excluded from the invocation inventory by this test's comment-stripping walk, and are NOT
+ *     part of the 24/22/18/4/2 arithmetic above (24 = 22 invokers + 2 comment-only).
  *
  * Convention mirrors this workspace's other release-guard-style source-inspection tests (see
  * `engines/__tests__/`): reads files as TEXT rather than importing them, so it fails on what is
@@ -34,7 +36,7 @@ import * as path from 'path';
 const SRC_ROOT = path.join(__dirname, '..');
 
 /**
- * The three files that invoke `createDeviceSigner(` but must NEVER route through
+ * The four files that invoke `createDeviceSigner(` but must NEVER route through
  * `useDeviceSigningErrorHandler`. Each entry carries the one-line rationale from
  * 49-12-PLAN.md's objective table. Adding a fourth entry here is a deliberate,
  * reviewable act — not a silent omission — because test 4 below re-derives the
@@ -57,6 +59,13 @@ const ROLLOUT_EXEMPT: string[] = [
 	// text (T-48-20-02). Routing here would violate an existing security
 	// decision.
 	'screens/registration/attach-sync-bindings.ts',
+	// 51-10: the SAME exemption class as its registration sibling immediately
+	// above — "DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY (D-01/D-19)", not a
+	// component (no hooks available), and the combined "rest" binding it
+	// composes onto never surfaces a caught error's message anywhere
+	// (T-51-10-03/T-48-20-02). Routing here would need the same security
+	// decision to be violated a second time.
+	'screens/registration/attach-association-sync-bindings.ts',
 ];
 
 /** Recursively lists every `.ts`/`.tsx` file under `dir`, excluding `__tests__` segments. */
@@ -109,18 +118,18 @@ describe('D-09/D-13/D-14 rollout completeness: every createDeviceSigner call sit
 		.map((f) => path.relative(SRC_ROOT, f))
 		.sort();
 
-	it('the call-site inventory has exactly 21 members (fail loud, with the full list, if this drifts)', () => {
-		if (invokingFiles.length !== 21) {
+	it('the call-site inventory has exactly 22 members (fail loud, with the full list, if this drifts)', () => {
+		if (invokingFiles.length !== 22) {
 			throw new Error(
-				`Expected exactly 21 createDeviceSigner(...) call-site files, found ` +
+				`Expected exactly 22 createDeviceSigner(...) call-site files, found ` +
 					`${invokingFiles.length}:\n${invokingFiles.join('\n')}`,
 			);
 		}
-		expect(invokingFiles).toHaveLength(21);
+		expect(invokingFiles).toHaveLength(22);
 	});
 
-	it('ROLLOUT_EXEMPT has exactly 3 entries', () => {
-		expect(ROLLOUT_EXEMPT).toHaveLength(3);
+	it('ROLLOUT_EXEMPT has exactly 4 entries', () => {
+		expect(ROLLOUT_EXEMPT).toHaveLength(4);
 	});
 
 	it('every entry in ROLLOUT_EXEMPT is actually present in the collected invocation set (no stale exemptions)', () => {

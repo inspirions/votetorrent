@@ -11,6 +11,7 @@ import { getOrCreateDeviceUser } from "../engines/device-user";
 import { createDeviceSigner } from "../engines/device-signer";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
+import { attachAssociationSyncBindings } from "../screens/registration/attach-association-sync-bindings";
 import { registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
 import { useCadreNode } from "./CadreNodeProvider";
 
@@ -104,12 +105,25 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// release builds; a dev-only harness's failure is a dev-only diagnostic. The gate is
 	// duplicated (here and in `attachSyncBindings`) on purpose: this one keeps the call out of the
 	// release path, the other keeps the harness inert even if some future caller forgets.
+	//
+	// 51-10 Task 3: `attachAssociationSyncBindings()` is called in the SAME effect, immediately
+	// AFTER `attachSyncBindings()` — ordering is load-bearing (see
+	// `attach-association-sync-bindings.ts`'s own header): it composes onto the "rest" binding
+	// `attachSyncBindings()` just registered, via `bulk-import-sync-model.ts`'s registry seam, so
+	// the registration handle must exist before the association attachment captures it. Sequencing
+	// both calls inside one effect (rather than two separate effects) makes that order a property
+	// of the source, not an assumption about React's effect-scheduling order across two hooks.
 	useEffect(() => {
 		if (!__DEV__) return;
 		try {
 			attachSyncBindings(getEngine);
 		} catch (err) {
 			console.error("attachSyncBindings (dev/device-proof only) failed:", err);
+		}
+		try {
+			attachAssociationSyncBindings(getEngine);
+		} catch (err) {
+			console.error("attachAssociationSyncBindings (dev/device-proof only) failed:", err);
 		}
 	}, [getEngine]);
 

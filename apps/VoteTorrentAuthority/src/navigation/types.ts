@@ -115,6 +115,14 @@ export type RootStackParamList = {
 	// (see 49-UI-SPEC.md), since visually and copy-wise it is the identical variant — only *how*
 	// the screen was reached differs, not what it renders.
 	ProvisionSigningKey: { reason: 'first-run' | 'invalidated' };
+	// Phase 51 plan 51-10 (D-06/D-19) — the route for AssociationRequestStatusScreen, the
+	// read-only association-request status screen. Deliberately placed OUTSIDE the
+	// RegistrationInbox..RegistrantsList block above (phase48Routes.test.tsx's T-48-21-01
+	// param-hygiene gate) and the RegistrantsList..EditBallot block above that
+	// (phase47Routes.test.tsx's T-47-21-01 gate) for the SAME reason ProvisionSigningKey
+	// sits here: adding a param name inside either scanned span would spuriously widen
+	// that gate's allow-list rather than proving anything about THIS route's own hygiene.
+	AssociationRequestStatus: { authorityId: string };
 	// 50-07 (D-03/D-05/D-09) — the authority-app producer screen for the web
 	// dashboard's bearer sign-in code. No params: the screen reads its staged
 	// record straight out of AsyncStorage (dashboard-signin-code.ts) and

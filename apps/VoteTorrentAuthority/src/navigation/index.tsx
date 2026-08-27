@@ -58,6 +58,8 @@ import RegistrationRequestApprovalScreen from "../screens/registration/Registrat
 // imported accordingly (a Rule-1 fix: the plan's "default imports" language
 // does not hold for this one file).
 import { BulkImportSyncScreen } from "../screens/registration/BulkImportSyncScreen";
+// Phase 51 plan 51-10 (D-06/D-19) — the read-only association-request status screen.
+import AssociationRequestStatusScreen from "../screens/registration/AssociationRequestStatusScreen";
 // Phase 47 plan 47-21 (D-08) — the five Phase 47 screen modules.
 import RegistrantsListScreen from "../screens/registration/RegistrantsListScreen";
 import RegistrantDetailScreen from "../screens/registration/RegistrantDetailScreen";
@@ -500,6 +502,14 @@ export const RootNavigator = () => {
 				name="BulkImportSync"
 				component={BulkImportSyncScreen}
 				options={{ title: t("bulkImportSyncScreenTitle") }}
+			/>
+			{/* Phase 51 plan 51-10 (D-06/D-19) — the read-only association-request status
+			    screen, bound ONLY here, mirroring AttestationProvisioningStatus's own
+			    binding-site convention. */}
+			<Stack.Screen
+				name="AssociationRequestStatus"
+				component={AssociationRequestStatusScreen}
+				options={{ title: t("associationRequestStatusScreenTitle") }}
 			/>
 			{/* Phase 47 plan 47-21 (D-07/D-08/D-09) — the five Phase 47 routes. These are
 			    pushes from within existing modal screens, so they use the

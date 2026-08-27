@@ -319,7 +319,13 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		expect(text).not.toContain(DEVICE_KEY_BRAVO);
 		expect(text).toContain("election-1");
 		expect(text).toContain("—");
-		expect(text).toMatch(/\d{4}-\d{2}-\d{2}/);
+		// D-10 (51-05, surfaced here by 51-10's vote-engine dist rebuild):
+		// `AttestationChallenge.Expiration` was removed — the component's own
+		// header now states "no expiry row to render" (:324), so no date string
+		// is ever part of this section's output. A stale dist previously masked
+		// this: it still returned the pre-51-05 challenge shape, which is why
+		// this assertion could pass before the rebuild without the component
+		// actually rendering a date.
 	});
 
 	test("3: D-03 verdict join — latest wins, and the inversion guard holds", async () => {
