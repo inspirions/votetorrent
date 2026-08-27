@@ -60,6 +60,27 @@ function sha256Hex (input: string): string {
 const INTERIM_ASSOCIATION_VALIDITY_DAYS = 365
 
 /**
+ * L-3 skew-guard bounds for `submitAssociationRequest`'s submitter-supplied `SubmittedAt`
+ * (51-08 Task 1). SAME VALUES, SAME rationale, and the SAME named-constant discipline as
+ * `RegistrationEngine`'s identically-named module constants (`registration-engine.ts:91/101`) —
+ * declared as siblings here rather than imported because the registration copy is not exported
+ * (WR-04 consolidated the datetime/ceremony HELPERS into `ceremony-helpers.js`, not these two
+ * plan-specific bound constants). A later change to either bound has to move the test that pins
+ * it, not just a comment.
+ *
+ * +5 minutes forward: a submitter's device clock is not the authority's own (this project has a
+ * recorded ~45s emulator/host clock-skew failure — project memory: device proof clock skew — so
+ * the tolerance is deliberately an order of magnitude wider than that observed drift).
+ */
+const SUBMITTED_AT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
+
+/**
+ * -30 days backward: mirrors `RegistrationEngine`'s identical bound — an offline courier (51-06)
+ * may legitimately deliver a staged, already-signed request well after it was signed.
+ */
+const SUBMITTED_AT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
  * AssociationEngine — Phase 42-04 (D-03..D-07, D-01/D-02) implementation.
  *
  * Unwired `(ctx?: EngineContext)` constructor per the `ElectionsEngine`/
@@ -848,9 +869,129 @@ export class AssociationEngine implements IAssociationEngine {
   // Land here so packages/vote-engine compiles at the end of wave 2 (51-04). Real
   // bodies land in 51-08 (both submit legs) and 51-09 (the driver + both reads).
 
-  async submitAssociationRequest (_init: AssociationRequestInit, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
-    // CONTRACT STUB — replaced by 51-08 (ceremony-free self-signed intake)
-    throw new Error('submitAssociationRequest is not implemented')
+  /**
+   * D-02: the ceremony-free self-signed intake — the voter's ONLY write path into the
+   * association flow after D-01. Deliberately runs NO `seedSignedMutation`, creates NO
+   * `AdminSigning`/`AdminSignature`/`SigningNonce` row, touches no `User` row and references no
+   * `IsUserValid` — the requester's own signature under `requesterKey` (the device key) is the
+   * entire authorization gate. `requesterKey` is bound to `AssociationRequest.DeviceKey` (the
+   * same column `init.deviceKey` describes) — see the pre-flight guard below for why both must
+   * agree rather than silently preferring one.
+   *
+   * Allocates Tids through a NEW `'association-request'` allocator namespace, distinct from the
+   * `'association'` namespace `issueAttestationChallenge`/`associate`/`removeAttestationChallenge`/
+   * `removeAssociation` draw from (mirrors 48-07's `'registration-request'` beside
+   * `'registration'`) — a Tid is never reused across a ceremony-bearing write and this
+   * ceremony-free one. `AssociationRequest`'s own `with context (SigningNonce, Tid)` INSERT-time
+   * `Tid` is inert (no INSERT-time CHECK references `context.Tid` — only the D-18 UPDATE
+   * transitions do), but a value must still be supplied.
+   */
+  async submitAssociationRequest (init: AssociationRequestInit, requesterKey: string, signatureOrCallback: SignatureOrCallback): Promise<string> {
+    this.requireCtx('submitAssociationRequest')
+    const ctx = this.ctx!
+    try {
+      // Pre-flight guard: produces an ATTRIBUTABLE error only. SignatureValid remains the actual
+      // enforcement boundary (a mismatched DeviceKey fails signature verification regardless) —
+      // this guard exists so a caller who bound the two independently gets a clear diagnosis
+      // instead of an opaque "signature invalid" from deep inside the INSERT.
+      if (init.deviceKey !== requesterKey) {
+        throw new Error(
+          `submitAssociationRequest: init.deviceKey (${init.deviceKey}) does not match requesterKey (${requesterKey}) — AssociationRequest.DeviceKey must be the same key that authorizes the insert`
+        )
+      }
+
+      // A NEW allocator namespace, distinct from 'association' above — see doc comment.
+      const tid = await allocateTid(ctx.db, 'association-request')
+
+      // Defensive renames (rowAuthorityId, not authorityId) — this method runs no
+      // seedSignedMutation today, but a future refactor that adds one must not silently collide
+      // with its reserved bind names (nonce/authorityId/adminEffectiveAt/scope/userId/signerKey/
+      // signature/now — see issueAttestationChallenge's NOTE).
+      const rowAuthorityId = init.authorityId
+      const registrantId = init.registrantId
+      const deviceKey = requesterKey
+      const electionId = init.electionId ?? null
+
+      // L-3 (mirrors RegistrationEngine.submitRegistrationRequest): SubmittedAt is the
+      // SUBMITTER's own value, bound VERBATIM. NEVER toIsoZDatetime(new Date()) /
+      // nowCanonicalDatetime() here — an engine-generated value would make an offline courier's
+      // own pre-resolved signature unverifiable, since the signer could not have known it at
+      // signing time.
+      const submittedAt = init.submittedAt
+      if (Number.isNaN(Date.parse(submittedAt))) {
+        // Attributable-error guard only; the schema's SignatureValid/SubmittedAt-shaped CHECKs remain the enforcement.
+        throw new Error(`submitAssociationRequest: init.submittedAt does not parse as a date: ${submittedAt}`)
+      }
+
+      // ReceivedAt: the AUTHORITY's OWN observation of intake time, inside NO digest.
+      const receivedAt = toIsoZDatetime(Date.now())
+
+      // Skew guard: BOUNDS the submitter-supplied SubmittedAt, does not authenticate it — inside
+      // the window it remains a submitter-chosen value covered only by the submitter's own
+      // signature.
+      const submittedAtMs = Date.parse(submittedAt)
+      const receivedAtMs = Date.parse(receivedAt)
+      if (submittedAtMs - receivedAtMs > SUBMITTED_AT_MAX_FUTURE_SKEW_MS) {
+        throw new Error(
+          `submitAssociationRequest: submittedAt (${submittedAt}) is more than ${SUBMITTED_AT_MAX_FUTURE_SKEW_MS}ms ahead of receivedAt (${receivedAt})`
+        )
+      }
+      if (receivedAtMs - submittedAtMs > SUBMITTED_AT_MAX_AGE_MS) {
+        throw new Error(
+          `submitAssociationRequest: submittedAt (${submittedAt}) is more than ${SUBMITTED_AT_MAX_AGE_MS}ms before receivedAt (${receivedAt})`
+        )
+      }
+
+      // D-02's ONLY authorization gate — AssociationRequest.SignatureValid, field for field
+      // (51-01's landed digest tuple): Digest(Id, AuthorityId, RegistrantId, DeviceKey,
+      // ElectionId, SubmittedAt). NO context.Tid — unlike RegistrationRequest's DG-1, this CHECK
+      // is UNQUALIFIED so it re-evaluates on the D-18 UPDATE transitions too (51-01's schema
+      // comment), and a Tid changes per statement.
+      const digestRow = await ctx.db
+        .prepare('select Digest(:id, :rowAuthorityId, :registrantId, :deviceKey, :electionId, :submittedAt) as d')
+        .get({
+          id: init.id,
+          rowAuthorityId,
+          registrantId,
+          deviceKey,
+          electionId,
+          submittedAt
+        })
+      if (!digestRow || digestRow.d == null) {
+        throw new Error('submitAssociationRequest: Digest() returned null — crypto plugin not registered?')
+      }
+      const digestBytes = digestToBytes(digestRow.d)
+      const signature = await this.resolveSign(signatureOrCallback)(digestBytes)
+      // D-02/D-04: `signature.signerUserId` is NEVER read here — a prospective registrant has no
+      // user id, the field is a type artifact on this path, and touching it is how a User
+      // dependency would creep back in.
+
+      // No signing session exists at INSERT — SigningNonce binds null (D-02: run NO
+      // seedSignedMutation, create NO AdminSigning row).
+      await ctx.db.exec(
+        `insert into AssociationRequest (
+          Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce, SubmittedAt, ReceivedAt, DecidedAt, RejectionReason, RequesterSignature
+        )
+        with context SigningNonce = :signingNonce, Tid = ${tid}
+        values (:id, :rowAuthorityId, :registrantId, :deviceKey, :electionId, :status, null, :submittedAt, :receivedAt, null, null, :requesterSignature)`,
+        {
+          id: init.id,
+          rowAuthorityId,
+          registrantId,
+          deviceKey,
+          electionId,
+          status: 'p',
+          submittedAt,
+          receivedAt,
+          requesterSignature: signature.signature,
+          signingNonce: null
+        }
+      )
+
+      return init.id
+    } catch (err) {
+      this.rethrow(err, 'submitAssociationRequest')
+    }
   }
 
   async submitAssociationAttestation (_answer: AssociationAttestationAnswer, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
