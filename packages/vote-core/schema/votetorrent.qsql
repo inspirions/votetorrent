@@ -2344,6 +2344,44 @@ declare schema main
 		)
 	)
 		with context ( SigningNonce text, Tid int );
+
+	-- D-12: authority-owned, per-election source of Registrant/Association/AssociationPrivate
+	-- validity. This replaces TWO prior sources, neither of which the authority chose: the
+	-- AttestationChallenge.Expiration that associate() reused (association-engine.ts:325), and
+	-- ConfirmationScreen.tsx:150's TEN_YEARS_MS, self-described as "dev posture". Single row per
+	-- election (PK = ElectionId); 'mel'-scoped like ElectionAttestationPolicy, because it is
+	-- per-election policy, not per-registration-request policy ('vrg'). Both payload columns MUST
+	-- stay `integer default` (NEVER `boolean default` -- Quereus v4 re-attach ALTER COLUMN
+	-- landmine, project_quereus_v4_reattach_boolean_default_alter_column) and NEVER `number`
+	-- (bound integers coerce to blobs and break Digest-gated CHECKs,
+	-- project_quereus_number_column_digest_coercion).
+	table ElectionRecordValidityPolicy (
+		ElectionId text primary key, -- references Election.Id
+		RegistrantValidityDays integer default 365,
+		AssociationValidityDays integer default 365,
+		constraint ElectionIdValid check (exists (select 1 from Election E where E.Id = new.ElectionId)),
+		constraint MutationValid check on insert, update (
+			exists (
+				select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+					join Election E on E.Id = new.ElectionId
+					where A.Nonce = context.SigningNonce
+						and A.AuthorityId = E.AuthorityId
+						and A.Scope = 'mel'
+						and A.Digest = Digest(context.Tid, new.ElectionId, new.RegistrantValidityDays, new.AssociationValidityDays)
+			)
+		),
+		constraint DeleteValid check on delete (
+			exists (
+				select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+					join Election E on E.Id = old.ElectionId
+					where A.Nonce = context.SigningNonce
+						and A.AuthorityId = E.AuthorityId
+						and A.Scope = 'mel'
+						and A.Digest = Digest(context.Tid, old.ElectionId, old.RegistrantValidityDays, old.AssociationValidityDays, 'delete')
+			)
+		)
+	)
+		with context ( SigningNonce text, Tid int );
 }
 
 apply schema main;
