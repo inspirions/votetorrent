@@ -1436,6 +1436,17 @@ declare schema main
 		select 'registrant' as Code, 'Registrant' as Name
 		union all select 'bridge' as Code, 'Bridge' as Name;
 
+	-- D-18 status vocabulary for AssociationRequest. Unlike RegistrationRequestStatus, this has a
+	-- FOURTH code ('c', Challenge Issued) -- the D-18 challenge-echo state that has no
+	-- RegistrationRequest counterpart, because association is not single-round-trip: the authority
+	-- must hand the device a fresh authority-signed nonce before the device can produce a valid
+	-- attestation.
+	view AssociationRequestStatus as
+		select 'p' as Code, 'Pending' as Name
+		union all select 'c' as Code, 'Challenge Issued' as Name
+		union all select 'a' as Code, 'Associated' as Name
+		union all select 'r' as Code, 'Rejected' as Name;
+
 	-- D-03 registry: the bounded, append-only allowlist of bridge keys authorized to submit
 	-- RegistrationRequest rows on another person's behalf. RevokedAt is shipped so
 	-- RegistrationRequest.BridgeIdValid can honestly enforce revocation, but no revoke ceremony
@@ -1607,6 +1618,111 @@ declare schema main
 		with context ( SigningNonce text, Tid int );
 
 	index RegistrationRequestAuthorityStatus on RegistrationRequest (AuthorityId, Status);
+
+	-- D-02/D-18 intake row for the associate-device ceremony. Authorized on INSERT SOLELY by the
+	-- requester's own signature (SignatureValid below) -- NO User FK, NO UserId/UserKey context
+	-- param, NO IsUserValid gate. A prospective registrant has a device keypair but no User row and
+	-- no officer scope; this is deliberately NOT a ProposedX-shaped table (see ProposedOfficer at
+	-- :411 for the shape this table must NOT have).
+	--
+	-- Association is NOT single-round-trip like RegistrationRequest: the authority must hand the
+	-- device a fresh authority-signed nonce (the 'p' -> 'c' transition below) before the device can
+	-- produce a valid platform attestation, so this table has TWO legal signed UPDATE transitions
+	-- instead of RegistrationRequest.DecisionValid's one.
+	table AssociationRequest (
+		Id text primary key, -- 32 byte random id
+		AuthorityId text,
+		RegistrantId text,
+		DeviceKey text, -- the device's freshly-provisioned voting public key (secp256k1 or P-256)
+		ElectionId text null,
+		Status text, -- references AssociationRequestStatus(Code)
+		ChallengeNonce text null, -- written by the 'p' -> 'c' transition; the AttestationChallenge.Nonce
+			-- the device must answer. Deliberately carries NO foreign-key CHECK against
+			-- AttestationChallenge: 51-05 (D-11) makes associate() DELETE that row inside the SAME
+			-- transaction that writes the 'c' -> 'a' transition below, so an exists(...) CHECK here
+			-- would fail on the very update it is meant to describe.
+		SubmittedAt datetime, -- submitter-supplied, inside SignatureValid's digest (see RegistrationRequest's
+			-- SubmittedAt-vs-ReceivedAt comment for why these two columns are never collapsed into one)
+		ReceivedAt datetime, -- authority-observed intake time, inside NO digest
+		DecidedAt datetime null,
+		RejectionReason text null,
+		RequesterSignature text,
+		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
+		constraint StatusValid check (exists (select 1 from AssociationRequestStatus S where S.Code = new.Status)),
+		-- D-02 -- the ONLY authorization gate on INSERT. No account-linkage foreign key, no
+		-- per-account identity context parameter, no delegated-validity gate anywhere on this table.
+		-- Unqualified so it re-evaluates on UPDATE too. Mixed-curve, subquery-free "try both curves"
+		-- form (Pattern 3): the iOS device key is a 33-byte compressed P-256 SEC1 point while the
+		-- Android/secp256k1 keys are the same width, so no width discriminant is possible. A
+		-- key-type-lookup discriminant subquery is explicitly forbidden here -- it promotes this
+		-- CHECK to Quereus's DEFERRED queue, whose row-snapshot re-derivation strips the trailing 'Z'
+		-- from SubmittedAt and breaks the pre-signed digest (see Association.SignatureValid's comment
+		-- for the full empirical finding). The digest tuple carries ONLY immutable columns, so this
+		-- unqualified re-evaluation still holds after both UPDATE transitions below.
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest(Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, SubmittedAt),
+				RequesterSignature,
+				DeviceKey
+			)
+			or SignatureValidP256(
+				Digest(Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, SubmittedAt),
+				RequesterSignature,
+				DeviceKey
+			)
+		),
+		constraint IdImmutable check on update (new.Id = old.Id),
+		constraint AuthorityIdImmutable check on update (new.AuthorityId = old.AuthorityId),
+		constraint RegistrantIdImmutable check on update (new.RegistrantId = old.RegistrantId),
+		constraint DeviceKeyImmutable check on update (new.DeviceKey = old.DeviceKey),
+		-- ElectionId is nullable -- a plain `=` between two NULLs is NOT treated as satisfying this
+		-- CHECK (same empirical finding as RegistrationRequest.BridgeIdImmutable), so this needs the
+		-- same null-safe disjunctive form.
+		constraint ElectionIdImmutable check on update (
+			(new.ElectionId is null and old.ElectionId is null) or new.ElectionId = old.ElectionId
+		),
+		constraint SubmittedAtImmutable check on update (new.SubmittedAt = old.SubmittedAt),
+		constraint ReceivedAtImmutable check on update (new.ReceivedAt = old.ReceivedAt),
+		constraint RequesterSignatureImmutable check on update (new.RequesterSignature = old.RequesterSignature),
+		-- D-06: a rejected request is a permanent, attributable record (mirrors RegistrationRequest.NoDelete)
+		constraint NoDelete check on delete (false),
+		-- D-18/D-05: the ONLY legal updates to this table are the two signed transitions below, each
+		-- 'vrg'-scoped and gated on an AdminSignature the voter structurally cannot produce.
+		constraint TransitionValid check on update (
+			(
+				-- D-18 challenge-echo: authority issues a fresh nonce, moving 'p' -> 'c'
+				old.Status = 'p'
+					and new.Status = 'c'
+					and new.ChallengeNonce is not null
+					and exists (
+						select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+							where A.Nonce = context.SigningNonce
+								and A.AuthorityId = new.AuthorityId
+								and A.Scope = 'vrg'
+								and A.Digest = Digest(context.Tid, new.Id, new.Status, new.ChallengeNonce)
+					)
+			)
+			or (
+				-- Terminal decision: authority verifies + signs + writes, moving 'c' -> 'a'/'r'. A
+				-- 'p' -> 'a' skip is rejected: without the 'c' transition no challenge nonce exists, so
+				-- no attestation could have been bound.
+				old.Status = 'c'
+					and new.Status in ('a', 'r')
+					and exists (
+						select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+							where A.Nonce = context.SigningNonce
+								and A.AuthorityId = new.AuthorityId
+								and A.Scope = 'vrg'
+								and A.Digest = Digest(context.Tid, new.Id, new.Status, new.DecidedAt, new.RejectionReason)
+					)
+			)
+		)
+	)
+		-- At INSERT no signing session exists, so only Tid is meaningful. Do not add a `now datetime`
+		-- context param -- nothing in this table compares against context.now.
+		with context ( SigningNonce text, Tid int );
+
+	index AssociationRequestAuthorityStatus on AssociationRequest (AuthorityId, Status);
 
 	view RegistrantStatus as
 		select 'a' as Code, 'Active' as Name
