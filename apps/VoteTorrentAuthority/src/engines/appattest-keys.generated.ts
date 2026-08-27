@@ -1,4 +1,4 @@
-// appattest-keys.generated.ts — PARTIALLY PROVISIONED.
+// appattest-keys.generated.ts — PROVISIONED (free personal team, D-13).
 //
 // Bundled, clearly-labeled config for the offline iOS App Attest verifier
 // (Phase 51), the exact sibling of `attestation-roots.generated.ts` +
@@ -8,13 +8,17 @@
 //   1. Apple's App Attest trust-anchor root certificate — PROVISIONED
 //      2026-08-26. Verification record in the constant's own doc comment.
 //   2. The App ID (`<teamId>.<bundleId>`) every attestation and assertion is
-//      pinned to — NOT provisioned; needs a Team ID (ROADMAP 51-04).
-//   3. Which App Attest environment this authority accepts — defaulted to the
-//      strict value (`production`).
+//      pinned to — COMMITTED 2026-08-27 at the FREE PERSONAL TEAM value
+//      (D-13). See that constant's doc comment for the accepted risk and its
+//      mitigation.
+//   3. Which App Attest environment this authority accepts — the literal
+//      strict value (`production`, D-15).
 //
-// So `APP_ATTEST_PROVISIONED` below is still FALSE and the iOS branch still
-// fails closed: one of its two required values is missing. That is the intended
-// state, not an oversight — see that constant.
+// So `APP_ATTEST_PROVISIONED` below is now TRUE and the iOS branch no longer
+// fails closed on missing config. The remaining accepted proof debt (paid
+// Team ID, production attestations, a shipping signed build) is tracked in
+// `.planning/todos/pending/2026-08-25-ios-appattest-team-id-and-entitlement.md`
+// and enforced by `scripts/fastlane/vt_appattest_release_gate.rb` (D-14).
 //
 // This file lives in the AUTHORITY app because the authority is what VERIFIES.
 // A near-identical empty file previously sat in `apps/VoteTorrentVoter/src/
@@ -99,12 +103,21 @@ export const PINNED_APP_ATTEST_ROOTS_DER: Uint8Array[] = APPLE_APP_ATTEST_ROOTS_
  * `rpIdHash === SHA256(appId)`, and the assertion half re-checks it, so a wrong
  * value here fail-closed rejects every genuine device.
  *
- * Empty until a Team ID exists. Spike 085 measured App Attest working on the
- * free personal team `94TY7UR2W5`, but that is not a shipping identity
- * (7-day profiles, no TestFlight); ROADMAP 51-04 tracks the paid Team ID. Fill
- * this in as e.g. `ABCDE12345.org.votetorrent.voter`.
+ * COMMITTED 2026-08-27 (D-13) as the FREE PERSONAL TEAM value `94TY7UR2W5`,
+ * deliberately, for a runnable end-to-end proof — spike 085 measured App
+ * Attest working on this team (`isSupported`/`generateKey`/`attestKey`/
+ * `generateAssertion` all OK on a real iPhone 13, 2026-08-25). This is not a
+ * shipping identity (7-day profiles, no TestFlight) and carries an accepted
+ * risk that was raised and explicitly overridden: a shipped authority built
+ * from this tree would treat THIS personal team's builds as the legitimate
+ * attestation producer. The `'production'` environment gate below bounds the
+ * blast radius, and the mitigation that actually prevents a real release
+ * shipping this value is `scripts/fastlane/vt_appattest_release_gate.rb`
+ * (D-14), which fails `build_apk`/`build_aab` while this constant equals the
+ * personal-team value. The paid-team swap is tracked in
+ * `.planning/todos/pending/2026-08-25-ios-appattest-team-id-and-entitlement.md`.
  */
-export const APPLE_APP_ID = '';
+export const APPLE_APP_ID = '94TY7UR2W5.org.votetorrent.voter';
 
 /**
  * Which App Attest environment this authority accepts.

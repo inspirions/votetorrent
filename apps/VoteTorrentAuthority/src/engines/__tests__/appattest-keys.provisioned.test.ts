@@ -70,25 +70,30 @@ describe('Apple App Attest root — embedded trust anchor', () => {
 	});
 });
 
-describe('App Attest configuration — the remaining unprovisioned half', () => {
-	it('APPLE_APP_ID is still empty (needs a Team ID — ROADMAP 51-04)', () => {
-		// This test documents a KNOWN-INCOMPLETE state on purpose. When a Team ID
-		// arrives and the App ID is filled in, this test SHOULD fail — that is the
-		// signal to update it and the one below, not a regression. Deleting it
-		// instead would let the config silently drift back to unprovisioned.
-		expect(APPLE_APP_ID).toBe('');
+describe('App Attest configuration — provisioned on the free personal team (D-13)', () => {
+	it('APPLE_APP_ID is the committed free-team value and has not drifted back to empty', () => {
+		// D-13 committed this deliberately for a runnable proof. An empty App ID
+		// fail-closes every genuine device (the App ID gate in
+		// `AppAttestVerifier.verify` returns first), so a silent drift back to ''
+		// would look like the old, correct unprovisioned state instead of the
+		// regression it now is. This asserts that drift never happens unnoticed.
+		expect(APPLE_APP_ID).toBe('94TY7UR2W5.org.votetorrent.voter');
 	});
 
-	it('APP_ATTEST_PROVISIONED is false while EITHER required value is missing', () => {
-		// The root alone is not enough. Both the anchor and the App ID have no safe
-		// default, so the gate requires both — and the iOS branch keeps failing
-		// closed until then.
-		expect(APP_ATTEST_PROVISIONED).toBe(false);
+	it('APP_ATTEST_PROVISIONED is true now that both required values are present', () => {
+		// Both the root and the App ID have no safe default; both are now present.
+		// This does not assert the App ID is a SAFE value to ship — that is D-14's
+		// job (`scripts/fastlane/vt_appattest_release_gate.rb`), which fails a
+		// release build while this constant equals the personal-team value.
+		expect(APP_ATTEST_PROVISIONED).toBe(true);
 	});
 
-	it('the environment default is the STRICT one', () => {
+	it("the environment default is still the STRICT one, and the App ID has not silently drifted to another team's value", () => {
 		// 'development' here would accept every sideloaded build, and the credCert
-		// aaguid is the only thing separating the two environments.
+		// aaguid is the only thing separating the two environments. Read together
+		// with the assertion above, this also guards against APPLE_APP_ID
+		// silently drifting to a DIFFERENT team's identifier rather than staying
+		// pinned to the committed free-team value.
 		expect(APP_ATTEST_ENVIRONMENT).toBe('production');
 	});
 });
