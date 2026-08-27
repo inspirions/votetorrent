@@ -795,6 +795,20 @@ const resources = {
 			registrationRequestEmptyBodyNoFilters:
 				'Requests submitted through any sync method will appear here for review.',
 			registrationRequestBulkImportSyncButton: 'Bulk Import / Sync',
+			// Phase 51 (D-06/D-19) — associationRequestStatus* group. Genuinely
+			// control-free screen copy — no approve/reject/retry/sync strings here.
+			associationRequestStatusScreenTitle: 'Association Requests',
+			associationRequestStatusEmptyHeading: 'No association requests yet',
+			associationRequestStatusEmptyBody:
+				'Requests submitted by a device, or picked up by Sync Now, will appear here.',
+			associationRequestStatusPendingLabel: 'Pending',
+			associationRequestStatusChallengeIssuedLabel: 'Challenge Issued',
+			associationRequestStatusAssociatedLabel: 'Associated',
+			associationRequestStatusRejectedLabel: 'Rejected',
+			associationRequestStatusSubmittedAtLabel: 'Submitted',
+			associationRequestStatusReceivedAtLabel: 'Received',
+			associationRequestStatusChallengeIssuedNote: 'A challenge has been issued for this request.',
+			registrationInboxAssociationRequestStatusButton: 'Association Requests',
 			registrationRequestPreviouslyRejectedFlag: 'Previously rejected',
 			registrationRequestReceivedAtLabel: 'Received',
 			registrationRequestClaimedSubmittedAtLabel: 'Claimed sent',
@@ -1648,6 +1662,19 @@ const resources = {
 			registrationRequestEmptyBodyNoFilters:
 				'Las solicitudes enviadas por cualquier método de sincronización aparecerán aquí para revisión.',
 			registrationRequestBulkImportSyncButton: 'Importación Masiva / Sincronizar',
+			// Fase 51 (D-06/D-19) — grupo associationRequestStatus*.
+			associationRequestStatusScreenTitle: 'Solicitudes de Asociación',
+			associationRequestStatusEmptyHeading: 'Aún no hay solicitudes de asociación',
+			associationRequestStatusEmptyBody:
+				'Las solicitudes enviadas por un dispositivo, o recogidas por Sincronizar Ahora, aparecerán aquí.',
+			associationRequestStatusPendingLabel: 'Pendiente',
+			associationRequestStatusChallengeIssuedLabel: 'Desafío Emitido',
+			associationRequestStatusAssociatedLabel: 'Asociada',
+			associationRequestStatusRejectedLabel: 'Rechazada',
+			associationRequestStatusSubmittedAtLabel: 'Enviada',
+			associationRequestStatusReceivedAtLabel: 'Recibida',
+			associationRequestStatusChallengeIssuedNote: 'Se ha emitido un desafío para esta solicitud.',
+			registrationInboxAssociationRequestStatusButton: 'Solicitudes de Asociación',
 			registrationRequestPreviouslyRejectedFlag: 'Rechazada anteriormente',
 			registrationRequestReceivedAtLabel: 'Recibida',
 			registrationRequestClaimedSubmittedAtLabel: 'Envío declarado',
