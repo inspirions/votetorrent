@@ -9,14 +9,20 @@
  *
  * D-07: in `__DEV__` the boot effect AWAITS `seedDevNetwork(...)` BEFORE opening the network (so
  * the seeded network exists when the voter reads it — never fire-and-forget), then captures the
- * seed's returned `electionId`/`sign` onto context as `seededElectionId`/`sign` — the register
- * seam `ConfirmationScreen` (44-08) reads.
+ * seed's returned `electionId` onto context as `seededElectionId` — the registration seam
+ * (`ConfirmationScreen`) reads it as `RegisterInit.electionId`.
  *
  * The `lifecycleState`/`getElection`/`getBallot` mock-data-backed election/ballot read surface is
  * UNCHANGED (Phase 44's scope is the registration flow only, per 44-CONTEXT.md's Phase Boundary —
  * swapping the election/ballot surface for a real engine is a later phase's concern). The
  * `isRegistered`/`registeredAt`/`hasVoted` mock booleans are REMOVED — the real registration flow
  * (real `Registrant` rows via `RegistrationEngine`) replaces them (D-02).
+ *
+ * 51-12 (D-09/D-20): does NOT capture `seedDevNetwork`'s `sign` (the founding-officer device
+ * signer) onto context — `ConfirmationScreen.tsx` was rewritten by 51-11 to never destructure
+ * `useVoterApp().sign`, so exposing it here is dead plumbing that only offers a future
+ * contributor a convenient, officer-capable signer to wire back into a reintroduced admin-signed
+ * ceremony (T-51-12-02).
  *
  * MUST have a `CadreNodeProvider` ancestor (mounted in `App.tsx`) — `useCadreNode()` throws
  * otherwise, mirroring the authority app's requirement.
@@ -31,7 +37,6 @@ import {LocalStorageReact} from '@votetorrent/vote-engine/rn';
 import {rnDbFactory} from '../engines/rn-db-factory';
 import {getOrCreateDeviceUser} from '../engines/device-user';
 import {seedDevNetwork} from '../engines/dev-seed';
-import type {SignCallback} from '../engines/device-signer';
 import {useCadreNode} from './CadreNodeProvider';
 import type {LifecycleState, MockBallot, MockElection, VoterAppContextType} from './types';
 import {LIFECYCLE_CONTENT, mockBallot, mockElection} from './mockData';
@@ -54,10 +59,11 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// array includes initNonce; setIsInitialized(false) alone cannot re-fire it.
 	const [initNonce, setInitNonce] = useState(0);
 
-	// D-07: the dev-seeded election id + device sign callback, captured from seedDevNetwork's
-	// return once the boot effect resolves. Only populated in __DEV__ (undefined otherwise).
+	// D-07: the dev-seeded election id, captured from seedDevNetwork's return once the boot
+	// effect resolves. Only populated in __DEV__ (undefined otherwise). 51-12 (D-09/D-20): does
+	// NOT also capture seedDevNetwork's `sign` (the founding-officer device signer) — see the
+	// module doc comment above.
 	const [seededElectionId, setSeededElectionId] = useState<string | undefined>(undefined);
-	const [sign, setSign] = useState<SignCallback | undefined>(undefined);
 
 	// D-03: one lifecycle state, defaulted to 'Upcoming', with a setter exposed through context
 	// so Phase 40's __DEV__ cycler can drive it. UNCHANGED from the mock provider — the
@@ -131,9 +137,8 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 						await factory.getEngine('network', seeded.networkReference);
 						setHasNetwork(true);
 						setSeededElectionId(seeded.electionId);
-						// Function values need the useState updater form — otherwise React
-						// treats the argument as a lazy initializer and invokes it.
-						setSign(() => seeded.sign);
+						// 51-12 (D-09/D-20): deliberately does NOT also capture seeded.sign onto
+						// context — see the module doc comment above.
 						// Clear any initError from a previous failed attempt so the error
 						// screen is not shown when a retry succeeds.
 						setInitError(null);
@@ -237,7 +242,6 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				hasEngine,
 				selectNetwork,
 				seededElectionId,
-				sign,
 			}}>
 			{children}
 		</VoterAppContext.Provider>

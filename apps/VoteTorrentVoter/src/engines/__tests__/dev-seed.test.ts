@@ -7,7 +7,7 @@
  * `seedDevNetwork`'s own `NetworksEngine`, rather than through the RN
  * CadreNode boot. No on-device dependency.
  *
- * Asserts the five behaviors this plan's `must_haves` require:
+ * Asserts the five 44-06 behaviors, plus 51-12's D-09/D-20 scope-drop guard:
  *   1. A founding-officer-signed register() persists a real Registrant.
  *   2. register() signed by an UNREGISTERED key is rejected (AdminSigning /
  *      MutationValid / UserIdValid).
@@ -16,6 +16,9 @@
  *   4. A required-tier-violating submission throws FieldPolicyViolationError.
  *   5. A conforming submission succeeds and creates a RegistrantSelective row
  *      for 'party'.
+ *   6. (51-12, D-09/D-20) The seeded officer's Scopes is exactly ['mel'] — the
+ *      registration-ceremony scope is deliberately withheld from the device's
+ *      own voter identity.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage'
@@ -94,7 +97,26 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 			.prepare('select UserId, Scopes from Officer where UserId = :userId')
 			.get({ userId: seeded.deviceUser.id })
 		expect(officerRow).toBeTruthy()
-		expect(JSON.parse(officerRow!.Scopes as string)).toContain('vrg')
+		expect(JSON.parse(officerRow!.Scopes as string)).toEqual(['mel'])
+	})
+
+	it('does NOT grant the officer the registration-ceremony scope — a regression re-granting it is exactly the D-01 defect this phase closed (D-09/D-20)', async () => {
+		const { seeded, ctx } = await setup()
+
+		const officerRow = await ctx.db
+			.prepare('select Scopes from Officer where UserId = :userId')
+			.get({ userId: seeded.deviceUser.id })
+		expect(officerRow).toBeTruthy()
+		const scopes = JSON.parse(officerRow!.Scopes as string) as string[]
+		// The authority's own registration-ceremony scope ("Validate registrations",
+		// votetorrent.qsql:59) is deliberately withheld from the device's own voter
+		// identity — granting it is what let the voter app run the authority's
+		// admin-signed ceremony (D-01, 51-CONTEXT.md). 'mel' ("Manage Elections")
+		// stays per D-20 — this seed's own election + policy-row ceremonies need it,
+		// and D-12's ElectionRecordValidityPolicy row is 'mel'-scoped. Deleting this
+		// test later would be an obvious removal of a guard.
+		expect(scopes).not.toContain('vrg')
+		expect(scopes).toContain('mel')
 	})
 
 	it('getElectionRegistrationFields(electionId) is non-empty (Pitfall 5 — policy actually loaded)', async () => {
