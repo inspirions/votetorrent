@@ -62,6 +62,15 @@ export interface MockAssociationEngineOptions {
 export class MockAssociationEngine implements IAssociationEngine {
   private readonly challenges = new Map<string, AttestationChallenge>()
   private readonly associations = new Map<string, Association>()
+  /**
+   * D-02/D-18 mock parity — keyed by requestId. Both `submitAssociationRequest` and
+   * `submitAssociationAttestation` below verify no signature, enforce no CHECK, and apply no
+   * skew bound (the mock's declared blind spot — real enforcement is proven only against
+   * `AssociationEngine`'s schema-backed CHECKs, e.g. `association-request.spec.ts`). This map
+   * also stands in for the real engine's `pendingAttestationAnswers` staging map.
+   */
+  private readonly associationRequests = new Map<string, AssociationRequestRead>()
+  private readonly stagedAttestationAnswers = new Map<string, AssociationAttestationAnswer>()
   /** D-03 in-memory parity — append-only, ordered; an array (not a Map) mirrors the real store's shape. */
   private readonly verdicts: AttestationVerdict[] = []
   private readonly attestationRequired: boolean
@@ -167,14 +176,36 @@ export class MockAssociationEngine implements IAssociationEngine {
   // 51-08/51-09 own mock parity — a half-real mock that silently succeeds here
   // would be worse than one that throws.
 
-  async submitAssociationRequest (_init: AssociationRequestInit, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
-    // CONTRACT STUB — replaced by 51-08 (ceremony-free self-signed intake)
-    throw new Error('submitAssociationRequest is not implemented')
+  /**
+   * D-02 mock parity — verifies no signature, enforces no CHECK, applies no skew bound. Stores
+   * the row in-memory (keyed by `init.id`) so a mock-driven screen test has something to read
+   * back; real enforcement (zero-ceremony INSERT, skew window, mixed-curve SignatureValid) is
+   * proven only against the real `AssociationEngine` (`association-request.spec.ts`). Never
+   * calls `signatureOrCallback` and fabricates no `Signature`.
+   */
+  async submitAssociationRequest (init: AssociationRequestInit, requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<string> {
+    this.associationRequests.set(init.id, {
+      requestId: init.id,
+      authorityId: init.authorityId,
+      registrantId: init.registrantId,
+      deviceKey: requesterKey,
+      electionId: init.electionId,
+      status: 'p',
+      submittedAt: init.submittedAt,
+      receivedAt: new Date().toISOString()
+    })
+    return init.id
   }
 
-  async submitAssociationAttestation (_answer: AssociationAttestationAnswer, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
-    // CONTRACT STUB — replaced by 51-08 (D-18 second leg)
-    throw new Error('submitAssociationAttestation is not implemented')
+  /**
+   * D-18 mock parity — verifies no signature, enforces no CHECK, applies no skew bound. Unlike
+   * `AssociationEngine.submitAssociationAttestation`, this does NOT re-validate `Status`/
+   * `ChallengeNonce`/`requesterKey` against the stored request (the mock's declared blind spot —
+   * see class doc). Stages the answer in-memory; never calls `signatureOrCallback` and
+   * fabricates no `Signature`.
+   */
+  async submitAssociationAttestation (answer: AssociationAttestationAnswer, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
+    this.stagedAttestationAnswers.set(answer.requestId, answer)
   }
 
   async processPendingAssociationRequests (_authorityId: string, _signatureOrCallback: SignatureOrCallback): Promise<{ challengesIssued: number; associated: number; rejected: number }> {

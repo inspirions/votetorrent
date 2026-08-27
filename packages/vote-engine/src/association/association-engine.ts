@@ -5,6 +5,7 @@ import { asText, digestToBytes, nowCanonicalDatetime, SEQUENCE_ALLOCATION_ATTEMP
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
+import { verifySig, verifySigP256 } from '../database/initialize.js'
 import { StubAttestationVerifier } from './stub-attestation-verifier.js'
 import { AssociationAssociateBuilder } from './builders/association-associate-builder.js'
 import type { EngineContext } from '../types.js'
@@ -32,6 +33,23 @@ import type {
  * `IAssociationEngine`'s (unexported) `SignatureOrCallback` shape structurally.
  */
 type SignatureOrCallback = Signature | ((digest: Uint8Array) => Promise<Signature>)
+
+/**
+ * The persisted `AssociationRequest` row shape `validateStagedAttestationAnswer` (51-08 Task 2)
+ * loads and returns. Deliberately NOT exported from `@votetorrent/vote-core` — this is an
+ * engine-internal load result, not a wire type; `AssociationRequestRead` (vote-core) remains the
+ * public read shape. 51-09's driver (`processPendingAssociationRequests`, same class/file) calls
+ * `validateStagedAttestationAnswer` again on every staged document and consumes this same shape.
+ */
+interface AssociationRequestRow {
+  id: string
+  authorityId: string
+  registrantId: string
+  deviceKey: string
+  electionId?: string
+  status: AssociationRequestStatus
+  challengeNonce?: string
+}
 
 // 999.1 D-01/D-02: AssociationEngine mutations allocate Tids through the
 // shared durable, peer-safe allocator (`../database/tid-allocator.js`,
@@ -106,6 +124,18 @@ const SUBMITTED_AT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
  * `PollingDevice.DeviceHash` document.
  */
 export class AssociationEngine implements IAssociationEngine {
+  /**
+   * D-18: same-process holding pen for a validated staged attestation answer, keyed by
+   * `requestId`. NOT the durable home for an in-flight answer — that is the TRANSPORT's staging
+   * area (`readStagedAttestations`, 51-06), which is where 51-09's driver actually reads answers
+   * from in a real multi-process deployment. This map exists only because
+   * `submitAssociationAttestation` needs somewhere to put a validated answer within a single
+   * `AssociationEngine` instance's lifetime (e.g. same-process tests); a second table is
+   * explicitly rejected by D-18, and `AssociationRequest.TransitionValid` admits only the two
+   * 'vrg'-signed UPDATE transitions, neither of which this staging step is.
+   */
+  private readonly pendingAttestationAnswers = new Map<string, AssociationAttestationAnswer>()
+
   constructor (
     private readonly ctx?: EngineContext,
     private readonly verifier: IAttestationVerifier = new StubAttestationVerifier()
@@ -994,9 +1024,127 @@ export class AssociationEngine implements IAssociationEngine {
     }
   }
 
-  async submitAssociationAttestation (_answer: AssociationAttestationAnswer, _requesterKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
-    // CONTRACT STUB — replaced by 51-08 (D-18 second leg)
-    throw new Error('submitAssociationAttestation is not implemented')
+  /**
+   * D-18: the second, distinct voter-to-authority message — stages an answer to the challenge
+   * the authority issued for `answer.requestId`. ALL validation lives in
+   * `validateStagedAttestationAnswer` below (T-51-08-09) — this method is a THIN caller of it, so
+   * that 51-09's driver, which calls the SAME helper again on every staged document before
+   * building an `AssociateInit`, keeps this check on the production path rather than a
+   * pre-filter the driver could bypass.
+   *
+   * Writes NO `Association`, `AssociationPrivate` or `AttestationVerdict` row, and runs NO
+   * `seedSignedMutation` — verification, signing and the two-row write remain `associate()`'s
+   * (51-09's driver) job, not this intake leg's.
+   */
+  async submitAssociationAttestation (answer: AssociationAttestationAnswer, requesterKey: string, signatureOrCallback: SignatureOrCallback): Promise<void> {
+    this.requireCtx('submitAssociationAttestation')
+    try {
+      const row = await this.validateStagedAttestationAnswer(answer, requesterKey, signatureOrCallback)
+      // Stage the validated answer where the driver will find it — see pendingAttestationAnswers'
+      // own doc comment for the transport-staging-area division this deliberately does NOT paper
+      // over.
+      this.pendingAttestationAnswers.set(row.id, answer)
+    } catch (err) {
+      this.rethrow(err, 'submitAssociationAttestation')
+    }
+  }
+
+  /**
+   * validateStagedAttestationAnswer(answer, requesterKey, signatureOrCallback) —
+   * D-18's SHARED validation gate. Loads the `AssociationRequest` row by `answer.requestId` and
+   * either THROWS or returns it. Called by `submitAssociationAttestation` above AND, by name, by
+   * 51-09's `processPendingAssociationRequests` driver on every staged document before building
+   * an `AssociateInit` — a rename breaks 51-09 (recorded verbatim in the plan SUMMARY).
+   *
+   * `registrantId`/`deviceKey`/`electionId` are read from THE PERSISTED ROW, never from
+   * `answer` — `AssociationAttestationAnswer` does not even carry those fields — which is the
+   * structural reason a second message cannot re-point an answer at a different registrant or
+   * device (T-51-08-03).
+   *
+   * Rejects (throws) when:
+   *   1. the row is missing;
+   *   2. `Status !== 'c'` (nothing to answer yet, or already terminal);
+   *   3. `requesterKey !== row.DeviceKey` (the answer must come from the same key that made the ask);
+   *   4. `answer.nonce !== row.ChallengeNonce` (T-51-08-04 replay/wrong-nonce guard);
+   *   5. the self-signature does not verify under `requesterKey`.
+   *
+   * ENGINE-SIDE ONLY verification (T-51-08-06, accepted risk) — declared here rather than left
+   * implicit: the staged answer is not itself a schema row (`AssociationRequest.TransitionValid`
+   * admits only the two 'vrg'-signed UPDATE transitions, neither of which this staging step is),
+   * so there is NO schema CHECK behind this self-signature verification. Uses the same
+   * `verifySig`/`verifySigP256` primitives (`../database/initialize.js`) the schema's
+   * `SignatureValid`/`SignatureValidP256` UDFs call, mixed-curve "try both" exactly like the
+   * schema's own `or` form — neither curve is privileged.
+   *
+   * The digest tuple, field for field: `Digest(RequestId, Nonce, AttestationJson, DeviceHash)`
+   * where `AttestationJson = JSON.stringify(answer.attestation)` — mirrors `associate()`'s own
+   * `attestationDetailsJson` precedent for turning a `DeviceAttestation`-shaped object into a
+   * digestible string. Any party (including 51-06's transport bindings) that wants to reproduce
+   * this digest independently must serialize `answer.attestation` with the SAME `JSON.stringify`
+   * call — object key ORDER matters to the digest, matching every other JSON-digest site in this
+   * codebase.
+   */
+  private async validateStagedAttestationAnswer (
+    answer: AssociationAttestationAnswer,
+    requesterKey: string,
+    signatureOrCallback: SignatureOrCallback
+  ): Promise<AssociationRequestRow> {
+    const ctx = this.ctx!
+    const row = await ctx.db
+      .prepare('select Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce from AssociationRequest where Id = :requestId')
+      .get({ requestId: answer.requestId })
+    if (!row) {
+      throw new Error(`validateStagedAttestationAnswer: AssociationRequest not found for requestId=${answer.requestId}`)
+    }
+
+    const status = asText(row.Status, 'AssociationRequest.Status') as AssociationRequestStatus
+    const deviceKey = asText(row.DeviceKey, 'AssociationRequest.DeviceKey')
+    const registrantId = asText(row.RegistrantId, 'AssociationRequest.RegistrantId')
+    const authorityId = asText(row.AuthorityId, 'AssociationRequest.AuthorityId')
+    const electionId = row.ElectionId == null ? undefined : asText(row.ElectionId, 'AssociationRequest.ElectionId')
+    const challengeNonce = row.ChallengeNonce == null ? undefined : asText(row.ChallengeNonce, 'AssociationRequest.ChallengeNonce')
+
+    if (status !== 'c') {
+      throw new Error(
+        `validateStagedAttestationAnswer: AssociationRequest ${answer.requestId} is not awaiting an attestation answer (Status=${status}, expected 'c')`
+      )
+    }
+    if (requesterKey !== deviceKey) {
+      throw new Error(
+        `validateStagedAttestationAnswer: requesterKey (${requesterKey}) does not match the persisted AssociationRequest.DeviceKey — an answer must come from the same key that made the ask`
+      )
+    }
+    if (answer.nonce !== challengeNonce) {
+      throw new Error(
+        `validateStagedAttestationAnswer: answer.nonce does not match the persisted ChallengeNonce for requestId=${answer.requestId}`
+      )
+    }
+
+    // No schema CHECK behind this — see this method's doc comment (T-51-08-06).
+    const attestationJson = JSON.stringify(answer.attestation)
+    const digestRow = await ctx.db
+      .prepare('select Digest(:requestId, :nonce, :attestationJson, :deviceHash) as d')
+      .get({
+        requestId: answer.requestId,
+        nonce: answer.nonce,
+        attestationJson,
+        deviceHash: answer.deviceHash ?? null
+      })
+    if (!digestRow || digestRow.d == null) {
+      throw new Error('validateStagedAttestationAnswer: Digest() returned null for the answer self-signature — crypto plugin not registered?')
+    }
+    const digestBytes = digestToBytes(digestRow.d)
+    const signature = await this.resolveSign(signatureOrCallback)(digestBytes)
+    const signatureValid =
+      verifySig(digestRow.d, signature.signature, requesterKey) ||
+      verifySigP256(digestRow.d, signature.signature, requesterKey)
+    if (!signatureValid) {
+      throw new Error(
+        'validateStagedAttestationAnswer: self-signature does not verify under requesterKey (no schema CHECK behind this — engine-side only, T-51-08-06)'
+      )
+    }
+
+    return { id: answer.requestId, authorityId, registrantId, deviceKey, electionId, status, challengeNonce }
   }
 
   async processPendingAssociationRequests (_authorityId: string, _signatureOrCallback: SignatureOrCallback): Promise<{ challengesIssued: number; associated: number; rejected: number }> {
