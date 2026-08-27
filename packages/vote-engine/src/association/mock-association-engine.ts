@@ -208,18 +208,57 @@ export class MockAssociationEngine implements IAssociationEngine {
     this.stagedAttestationAnswers.set(answer.requestId, answer)
   }
 
-  async processPendingAssociationRequests (_authorityId: string, _signatureOrCallback: SignatureOrCallback): Promise<{ challengesIssued: number; associated: number; rejected: number }> {
-    // CONTRACT STUB — replaced by 51-09 (D-05/D-19 automatic driver)
-    throw new Error('processPendingAssociationRequests is not implemented')
+  /**
+   * D-05/D-19 mock parity — unlike the real engine, the mock holds NO `IAssociationRequestIntake`
+   * (it has no filesystem/REST transport at all): it drives directly off its own in-memory
+   * `associationRequests`/`stagedAttestationAnswers` maps, so this method's signature stays the
+   * narrower 2-arg `IAssociationEngine` shape verbatim (no widening needed here — the widening is
+   * specific to the real engine's transport-agnostic-but-engine-layer `IAssociationRequestIntake`
+   * dependency; see `association-engine.ts`'s doc comment). Never calls `signatureOrCallback` for
+   * verification (the mock enforces no CHECK and applies no skew bound — the class doc's declared
+   * blind spot), and always records a `'pass'` verdict (mock parity divergence 1).
+   */
+  async processPendingAssociationRequests (authorityId: string, signatureOrCallback: SignatureOrCallback): Promise<{ challengesIssued: number; associated: number; rejected: number }> {
+    let challengesIssued = 0
+    let associated = 0
+    let rejected = 0
+
+    for (const [requestId, request] of this.associationRequests) {
+      if (request.authorityId !== authorityId || request.status !== 'p') continue
+      const nonce = crypto.randomUUID()
+      await this.issueAttestationChallenge(request.registrantId, request.deviceKey, signatureOrCallback, request.electionId)
+      this.associationRequests.set(requestId, { ...request, status: 'c', challengeNonce: nonce })
+      challengesIssued++
+    }
+
+    for (const [requestId, answer] of this.stagedAttestationAnswers) {
+      const request = this.associationRequests.get(requestId)
+      if (!request || request.authorityId !== authorityId || request.status !== 'c') continue
+      try {
+        await this.associate(
+          { registrantId: request.registrantId, deviceKey: request.deviceKey, deviceHash: answer.deviceHash, nonce: request.challengeNonce ?? answer.nonce, attestation: answer.attestation },
+          signatureOrCallback
+        )
+        this.associationRequests.set(requestId, { ...request, status: 'a', decidedAt: new Date().toISOString() })
+        associated++
+      } catch {
+        // GENERIC rejection reason — mock parity with the real engine's never-leak-a-verifier-
+        // reason discipline (T-51-09-03).
+        this.associationRequests.set(requestId, { ...request, status: 'r', decidedAt: new Date().toISOString(), rejectionReason: 'attestation-verification-failed' })
+        rejected++
+      }
+    }
+
+    return { challengesIssued, associated, rejected }
   }
 
-  async listAssociationRequests (_authorityId: string, _status?: AssociationRequestStatus): Promise<AssociationRequestRead[]> {
-    // CONTRACT STUB — replaced by 51-09 (D-06 read-only list)
-    throw new Error('listAssociationRequests is not implemented')
+  /** D-06 mock parity — filters the in-memory map; no signature verification, no ordering guarantee beyond Map insertion order. */
+  async listAssociationRequests (authorityId: string, status?: AssociationRequestStatus): Promise<AssociationRequestRead[]> {
+    return [...this.associationRequests.values()].filter((r) => r.authorityId === authorityId && (status === undefined || r.status === status))
   }
 
-  async getAssociationRequest (_requestId: string): Promise<AssociationRequestRead | undefined> {
-    // CONTRACT STUB — replaced by 51-09 (D-06 read-only point read)
-    throw new Error('getAssociationRequest is not implemented')
+  /** D-06 mock parity — returns `undefined` for an unknown id rather than throwing. */
+  async getAssociationRequest (requestId: string): Promise<AssociationRequestRead | undefined> {
+    return this.associationRequests.get(requestId)
   }
 }

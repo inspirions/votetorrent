@@ -4,12 +4,19 @@ import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { asText, digestToBytes, nowCanonicalDatetime, SEQUENCE_ALLOCATION_ATTEMPTS } from '../utils.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { allocateTid } from '../database/tid-allocator.js'
-import { toIsoZDatetime, toDeferredCheckDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
+import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, restoreCanonicalDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { verifySig, verifySigP256 } from '../database/initialize.js'
 import { StubAttestationVerifier } from './stub-attestation-verifier.js'
 import { AssociationAssociateBuilder } from './builders/association-associate-builder.js'
 import { resolveRecordValidity as resolveRecordValidityFromPolicy } from './record-validity.js'
 import type { EngineContext } from '../types.js'
+// 51-09 Task 2: `IAssociationRequestIntake`/`StagedAttestation` are declared in the FILESYSTEM
+// transport module (deliberately, per that file's own doc comment — "transport-agnostic despite
+// living in the filesystem module for now"). This is a TYPE-ONLY import of that shared interface,
+// never a value import and never a concrete transport binding — the driver below never
+// constructs, imports as a value, or depends on `FilesystemAssociationTransport` itself, so it
+// never drags `node:fs` toward the RN bundle.
+import type { IAssociationRequestIntake, StagedAttestation } from './transport/filesystem-association-transport.js'
 import type {
   AssociateInit,
   Association,
@@ -1164,18 +1171,271 @@ export class AssociationEngine implements IAssociationEngine {
     return { id: answer.requestId, authorityId, registrantId, deviceKey, electionId, status, challengeNonce }
   }
 
-  async processPendingAssociationRequests (_authorityId: string, _signatureOrCallback: SignatureOrCallback): Promise<{ challengesIssued: number; associated: number; rejected: number }> {
-    // CONTRACT STUB — replaced by 51-09 (D-05/D-19 automatic driver)
-    throw new Error('processPendingAssociationRequests is not implemented')
+  /**
+   * D-05/D-19 — the automatic authority-side processing driver. Turns the persisted D-02/D-18
+   * intake into real records by orchestrating the two UNCHANGED engine methods
+   * (`issueAttestationChallenge`, `associate`) across both legs of the D-18 challenge round-trip.
+   * No `Task` row, no `SignatureType` reference, and no per-request human decision anywhere in this
+   * method — D-05 is explicit that processing is automatic and authority-VERIFIED, not
+   * officer-APPROVED. An officer key must still be present to SIGN (the `'vrg'` ceremonies below),
+   * which is why D-19 sites the trigger in the existing "Sync Now" mechanism rather than a
+   * background poller.
+   *
+   * LEG 1 (pending 'p' rows): for each, call the UNCHANGED `issueAttestationChallenge` — the
+   * `'vrg'` ceremony, run HERE, on the authority side, with an officer key the voter does not
+   * hold — then write the `'p' -> 'c'` signed transition and publish a `'c'` decision notice
+   * carrying the fresh `challengeNonce`.
+   *
+   * LEG 2 (challenge-issued 'c' rows with a staged answer): for each staged document belonging to
+   * THIS authority's still-'c' rows, validate the envelope through 51-08's SHARED
+   * `validateStagedAttestationAnswer` helper — never a re-implemented nonce/deviceKey/status check
+   * — build an `AssociateInit` from the PERSISTED ROW (registrantId, deviceKey) plus the staged
+   * answer's wire fields (nonce, attestation, deviceHash), and call the UNCHANGED `associate()`.
+   * On success: `'c' -> 'a'`. On EITHER the envelope validation or `associate()` itself throwing: a
+   * `'c' -> 'r'` transition carrying a GENERIC rejection-reason class — never a raw verifier reason
+   * or `err.message` — and processing continues with the remaining staged documents; one bad
+   * answer never stalls the batch (T-51-09-07).
+   *
+   * Idempotent by construction: LEG 1 only selects `Status = 'p'` rows (a row the previous run
+   * already transitioned to `'c'` is invisible to a second run), and LEG 2 only matches a staged
+   * document to a row that is STILL `Status = 'c'` (a row the previous run already resolved to
+   * `'a'`/`'r'` is invisible too) — re-running this method over the same input issues no duplicate
+   * challenge and creates no duplicate `Association`.
+   *
+   * Both signed transitions explicitly rebind `SubmittedAt`/`ReceivedAt` on every UPDATE — an
+   * unqualified CHECK on this table re-evaluates against a Z-stripped row snapshot when a
+   * timestamp column is left unbound (this project's own recorded partial-UPDATE trap).
+   *
+   * WIDENED BEYOND `IAssociationEngine`'s vote-core interface (Rule 3 — blocking-issue fix,
+   * documented in 51-09-SUMMARY.md): 51-04's declared signature is 2-arg
+   * (`authorityId, signatureOrCallback`). `IAssociationRequestIntake` is declared in the
+   * filesystem-transport module named in this file's own type-only import above, an
+   * ENGINE-layer file — `@votetorrent/vote-core` cannot type-reference it without inverting the
+   * package dependency direction (vote-engine already depends on vote-core, never the reverse).
+   * The intake is therefore an OPTIONAL third parameter here: type-compatible with the narrower
+   * `IAssociationEngine` signature (an extra optional parameter does not break `implements`), but
+   * REQUIRED at runtime — a call that omits it throws immediately, below, rather than reaching a
+   * bare `undefined.readStagedAttestations` a layer away from its cause.
+   */
+  async processPendingAssociationRequests (
+    authorityId: string,
+    signatureOrCallback: SignatureOrCallback,
+    intake?: IAssociationRequestIntake
+  ): Promise<{ challengesIssued: number; associated: number; rejected: number }> {
+    this.requireCtx('processPendingAssociationRequests')
+    if (!intake) {
+      throw new Error(
+        'processPendingAssociationRequests: an IAssociationRequestIntake is required — this parameter widens IAssociationEngine\'s declared (2-arg) signature and cannot be defaulted (see 51-09-SUMMARY.md)'
+      )
+    }
+    const ctx = this.ctx!
+    let challengesIssued = 0
+    let associated = 0
+    let rejected = 0
+    try {
+      // ---------------- LEG 1: pending ('p') rows -> issue challenge, transition to 'c' ----------------
+      const pendingRows: Array<{ id: string; registrantId: string; deviceKey: string; electionId?: string }> = []
+      for await (const row of ctx.db.eval(
+        "select Id, RegistrantId, DeviceKey, ElectionId from AssociationRequest where AuthorityId = :rowAuthorityId and Status = 'p'",
+        { rowAuthorityId: authorityId }
+      )) {
+        pendingRows.push({
+          id: asText(row.Id, 'AssociationRequest.Id'),
+          registrantId: asText(row.RegistrantId, 'AssociationRequest.RegistrantId'),
+          deviceKey: asText(row.DeviceKey, 'AssociationRequest.DeviceKey'),
+          electionId: row.ElectionId == null ? undefined : asText(row.ElectionId, 'AssociationRequest.ElectionId')
+        })
+      }
+
+      for (const row of pendingRows) {
+        // D-01/D-03: the 'vrg' challenge-issuance ceremony runs HERE — nothing in this method may
+        // accept a voter-supplied signer.
+        const challenge = await this.issueAttestationChallenge(row.registrantId, row.deviceKey, signatureOrCallback, row.electionId)
+
+        const rowBefore = await ctx.db
+          .prepare('select SubmittedAt, ReceivedAt from AssociationRequest where Id = :id')
+          .get({ id: row.id })
+        if (!rowBefore) {
+          throw new Error(`processPendingAssociationRequests: AssociationRequest ${row.id} disappeared between the leg-1 select and the transition UPDATE`)
+        }
+        // CRITICAL — partial-UPDATE trap: explicitly rebind BOTH untouched timestamp columns.
+        const submittedAt = restoreCanonicalDatetime(rowBefore.SubmittedAt as string)
+        const receivedAt = restoreCanonicalDatetime(rowBefore.ReceivedAt as string)
+
+        const tid = await allocateTid(ctx.db, 'association-request')
+        // TransitionValid's challenge-echo clause, field for field: Digest(context.Tid, new.Id, new.Status, new.ChallengeNonce).
+        const digestExpr = 'select Digest(:tid, :requestId, :status, :challengeNonce) as d'
+        const digestParams = { tid, requestId: row.id, status: 'c', challengeNonce: challenge.nonce }
+        const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
+
+        await ctx.db.exec(
+          `update AssociationRequest
+           with context SigningNonce = :signingNonce, Tid = ${tid}
+           set Status = :status, ChallengeNonce = :challengeNonce, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+           where Id = :requestId`,
+          { requestId: row.id, status: 'c', challengeNonce: challenge.nonce, submittedAt, receivedAt, signingNonce }
+        )
+
+        await intake.publishDecision({ requestId: row.id, status: 'c', challengeNonce: challenge.nonce, decidedAt: toIsoZDatetime(Date.now()) })
+        challengesIssued++
+      }
+
+      // ---------------- LEG 2: challenge-issued ('c') rows with a staged answer ----------------
+      const stagedAnswers: StagedAttestation[] = await intake.readStagedAttestations()
+      for (const doc of stagedAnswers) {
+        const rowC = await ctx.db
+          .prepare(
+            "select Id, ChallengeNonce, SubmittedAt, ReceivedAt from AssociationRequest where Id = :id and AuthorityId = :rowAuthorityId and Status = 'c'"
+          )
+          .get({ id: doc.requestId, rowAuthorityId: authorityId })
+        if (!rowC) {
+          // Not one of THIS authority's still-'c' rows (a different authority's request, or a row
+          // this method already resolved on a prior run) — this batch is scoped to `authorityId`,
+          // and idempotency relies on this skip.
+          continue
+        }
+
+        // LEG 2 MANDATORY GATE (T-51-08-09/T-51-09-10): route every staged answer through 51-08's
+        // shared `validateStagedAttestationAnswer` BEFORE building an `AssociateInit` — never a
+        // re-implemented nonce/deviceKey/status check. This is what keeps the self-signature check
+        // on the production driver path rather than a bypassable pre-filter (the `e64e112` defect
+        // class this phase exists to eliminate). `associate()`'s real attestation verification
+        // remains the load-bearing gate for the attestation itself; this helper gates the ENVELOPE.
+        let validated: { registrantId: string; deviceKey: string } | undefined
+        // GENERIC rejection-reason vocabulary (T-51-09-03) — never a raw verifier `reason` or
+        // `err.message` crosses to a notice a device reads, mirroring `ConfirmationScreen`'s
+        // existing `classifyAttestationFailure` voter-side discipline.
+        let rejectionReason: string | undefined
+        try {
+          const loaded = await this.validateStagedAttestationAnswer(doc.answer, doc.requesterKey, doc.signature)
+          validated = { registrantId: loaded.registrantId, deviceKey: loaded.deviceKey }
+        } catch {
+          rejectionReason = 'envelope-validation-failed'
+        }
+
+        if (validated) {
+          // T-51-09-02: registrantId/deviceKey come from the PERSISTED ROW (via
+          // validateStagedAttestationAnswer's own row load), never the wire — only nonce,
+          // attestation and deviceHash come from the staged document.
+          const associateInit: AssociateInit = {
+            registrantId: validated.registrantId,
+            deviceKey: validated.deviceKey,
+            deviceHash: doc.answer.deviceHash,
+            nonce: asText(rowC.ChallengeNonce, 'AssociationRequest.ChallengeNonce'),
+            attestation: doc.answer.attestation
+          }
+          try {
+            // THE DRIVER CALLS THIS UNCHANGED — no reimplementation of verification, verdict
+            // recording, the two-row write, or D-11's challenge consumption.
+            await this.associate(associateInit, signatureOrCallback)
+          } catch {
+            rejectionReason = 'attestation-verification-failed'
+          }
+        }
+
+        const submittedAt = restoreCanonicalDatetime(rowC.SubmittedAt as string)
+        const receivedAt = restoreCanonicalDatetime(rowC.ReceivedAt as string)
+        const tid2 = await allocateTid(ctx.db, 'association-request')
+        const decidedAt = toIsoZDatetime(Date.now())
+        // `new.DecidedAt` is a datetime column inside TransitionValid's deferred (subquery)
+        // clause — the digest argument MUST use toDeferredCheckDatetime, never the raw ISO-Z value
+        // bound into the stored column below.
+        const decidedAtDeferred = toDeferredCheckDatetime(decidedAt)
+        const finalStatus = rejectionReason === undefined ? 'a' : 'r'
+        const rejectionReasonBind = rejectionReason ?? null
+
+        // TransitionValid's decision clause, field for field: Digest(context.Tid, new.Id,
+        // new.Status, new.DecidedAt, new.RejectionReason).
+        const digestExpr2 = 'select Digest(:tid, :requestId, :status, :decidedAtDeferred, :rejectionReason) as d'
+        const digestParams2 = { tid: tid2, requestId: doc.requestId, status: finalStatus, decidedAtDeferred, rejectionReason: rejectionReasonBind }
+        const signingNonce2 = await seedSignedMutation(ctx, authorityId, 'vrg', tid2, digestExpr2, digestParams2, this.resolveSign(signatureOrCallback))
+
+        await ctx.db.exec(
+          `update AssociationRequest
+           with context SigningNonce = :signingNonce, Tid = ${tid2}
+           set Status = :status, DecidedAt = :decidedAt, RejectionReason = :rejectionReason, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+           where Id = :requestId`,
+          { requestId: doc.requestId, status: finalStatus, decidedAt, rejectionReason: rejectionReasonBind, submittedAt, receivedAt, signingNonce: signingNonce2 }
+        )
+
+        if (finalStatus === 'a') {
+          await intake.publishDecision({ requestId: doc.requestId, status: 'a', decidedAt })
+          associated++
+        } else {
+          await intake.publishDecision({ requestId: doc.requestId, status: 'r', reason: rejectionReasonBind ?? undefined, decidedAt })
+          rejected++
+        }
+      }
+
+      return { challengesIssued, associated, rejected }
+    } catch (err) {
+      this.rethrow(err, 'processPendingAssociationRequests')
+    }
   }
 
-  async listAssociationRequests (_authorityId: string, _status?: AssociationRequestStatus): Promise<AssociationRequestRead[]> {
-    // CONTRACT STUB — replaced by 51-09 (D-06 read-only list)
-    throw new Error('listAssociationRequests is not implemented')
+  /**
+   * D-06 — read-only, ordered newest-`submittedAt`-first (id as the tiebreak) so the status screen
+   * does not render a shuffling list. SELECT-and-map only: no `insert`/`update`/`delete`/
+   * `seedSignedMutation` anywhere in this method or `getAssociationRequest` below.
+   */
+  async listAssociationRequests (authorityId: string, status?: AssociationRequestStatus): Promise<AssociationRequestRead[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: AssociationRequestRead[] = []
+    try {
+      // Reserved bind-name trap: never `:limit`/`:desc`/`:group`/`:order`/`:type` — `:rowStatus`
+      // (not `:status`) sidesteps it defensively, mirroring this file's other `row`-prefixed binds.
+      const sql = status === undefined
+        ? `select Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce, SubmittedAt, ReceivedAt, DecidedAt, RejectionReason
+             from AssociationRequest where AuthorityId = :rowAuthorityId order by SubmittedAt desc, Id desc`
+        : `select Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce, SubmittedAt, ReceivedAt, DecidedAt, RejectionReason
+             from AssociationRequest where AuthorityId = :rowAuthorityId and Status = :rowStatus order by SubmittedAt desc, Id desc`
+      const params: Record<string, string> = status === undefined
+        ? { rowAuthorityId: authorityId }
+        : { rowAuthorityId: authorityId, rowStatus: status }
+      for await (const row of ctx.db.eval(sql, params)) {
+        out.push(this.mapAssociationRequestRow(row))
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'listAssociationRequests')
+    }
   }
 
-  async getAssociationRequest (_requestId: string): Promise<AssociationRequestRead | undefined> {
-    // CONTRACT STUB — replaced by 51-09 (D-06 read-only point read)
-    throw new Error('getAssociationRequest is not implemented')
+  /** D-06 — the single-row counterpart of `listAssociationRequests`. Returns `undefined` for an
+   * unknown id rather than throwing, so the read-only screen's fail-conservative resolver has a
+   * value to render. */
+  async getAssociationRequest (requestId: string): Promise<AssociationRequestRead | undefined> {
+    if (!this.ctx) return undefined
+    try {
+      const row = await this.ctx.db
+        .prepare(
+          `select Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce, SubmittedAt, ReceivedAt, DecidedAt, RejectionReason
+             from AssociationRequest where Id = :id`
+        )
+        .get({ id: requestId })
+      if (!row) return undefined
+      return this.mapAssociationRequestRow(row)
+    } catch (err) {
+      this.rethrow(err, 'getAssociationRequest')
+    }
+  }
+
+  /** Shared row->`AssociationRequestRead` mapper for both D-06 reads above. */
+  private mapAssociationRequestRow (row: Record<string, unknown>): AssociationRequestRead {
+    return {
+      requestId: asText(row.Id, 'AssociationRequest.Id'),
+      authorityId: asText(row.AuthorityId, 'AssociationRequest.AuthorityId'),
+      registrantId: asText(row.RegistrantId, 'AssociationRequest.RegistrantId'),
+      deviceKey: asText(row.DeviceKey, 'AssociationRequest.DeviceKey'),
+      electionId: row.ElectionId == null ? undefined : asText(row.ElectionId, 'AssociationRequest.ElectionId'),
+      status: asText(row.Status, 'AssociationRequest.Status') as AssociationRequestStatus,
+      challengeNonce: row.ChallengeNonce == null ? undefined : asText(row.ChallengeNonce, 'AssociationRequest.ChallengeNonce'),
+      // CR-02/T-42-06: a plain SELECT read-back of a datetime column is Z-stripped; re-stamp it.
+      submittedAt: reZuluDatetime(asText(row.SubmittedAt, 'AssociationRequest.SubmittedAt')),
+      receivedAt: reZuluDatetime(asText(row.ReceivedAt, 'AssociationRequest.ReceivedAt')),
+      decidedAt: row.DecidedAt == null ? undefined : reZuluDatetime(asText(row.DecidedAt, 'AssociationRequest.DecidedAt')),
+      rejectionReason: row.RejectionReason == null ? undefined : asText(row.RejectionReason, 'AssociationRequest.RejectionReason')
+    }
   }
 }
