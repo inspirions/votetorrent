@@ -170,8 +170,6 @@ const DISPLAY_NAME = "Jane Voter";
 const DEVICE_KEY_ALPHA = "devicekey-alpha-0000000000";
 const DEVICE_KEY_BRAVO = "devicekey-bravo-1111111111";
 
-const FUTURE_EXPIRATION = new Date(Date.now() + 3_600_000).toISOString();
-
 // ---------------------------------------------------------------------------
 // T-47-12 fixture: 47-08 made the mock's associate() record a 'pass' verdict,
 // so the mock alone cannot reproduce the real engine's AttestationRequired=0
@@ -213,7 +211,6 @@ async function seedEngine(
 		const challenge = await engine.issueAttestationChallenge(
 			registrantId,
 			pair.deviceKey,
-			FUTURE_EXPIRATION,
 			sig,
 		);
 		await engine.associate(

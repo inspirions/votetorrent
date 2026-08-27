@@ -64,7 +64,6 @@ function nextDeviceKey (): string {
 }
 
 const FUTURE_REGISTRANT_EXPIRATION = Date.now() + 365 * 86_400_000
-const FUTURE_CHALLENGE_EXPIRATION = new Date(Date.now() + 10 * 60_000).toISOString()
 
 function makeDeviceAttestation (overrides?: Partial<DeviceAttestation>): DeviceAttestation {
   deviceSeq += 1
@@ -126,7 +125,7 @@ describe('AttestationVerdict store (D-03)', () => {
     it('pass path: exactly one AttestationVerdict row, Verdict=pass, Sequence=0, Reason null', async () => {
       const { auth, registrantId, engine, sign } = await setupAssociationTest()
       const deviceKey = nextDeviceKey()
-      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
       const attestation = makeDeviceAttestation()
 
       await engine.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation }, sign)
@@ -147,7 +146,7 @@ describe('AttestationVerdict store (D-03)', () => {
       const { auth, registrantId, sign } = await setupAssociationTest()
       const engine = new AssociationEngine(auth.ctx, rejectingVerifier)
       const deviceKey = nextDeviceKey()
-      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
       const attestation = makeDeviceAttestation()
 
       let threw = false
@@ -175,7 +174,7 @@ describe('AttestationVerdict store (D-03)', () => {
       const { auth, registrantId, sign } = await setupAssociationTest()
       const engine = new AssociationEngine(auth.ctx, rejectingVerifier)
       const deviceKey = nextDeviceKey()
-      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
       const attestation = makeDeviceAttestation()
 
       try {
@@ -205,12 +204,12 @@ describe('AttestationVerdict store (D-03)', () => {
       const { auth, registrantId: passRegistrantId, sign } = await setupAssociationTest()
       const passEngine = new AssociationEngine(auth.ctx)
       const deviceKeyPass = nextDeviceKey()
-      const passChallenge = await passEngine.issueAttestationChallenge(passRegistrantId, deviceKeyPass, FUTURE_CHALLENGE_EXPIRATION, sign)
+      const passChallenge = await passEngine.issueAttestationChallenge(passRegistrantId, deviceKeyPass, sign)
       await passEngine.associate({ registrantId: passRegistrantId, deviceKey: deviceKeyPass, nonce: passChallenge.nonce, attestation: makeDeviceAttestation() }, sign)
 
       const failEngine = new AssociationEngine(auth.ctx, rejectingVerifier)
       const deviceKeyFail = nextDeviceKey()
-      const failChallenge = await failEngine.issueAttestationChallenge(passRegistrantId, deviceKeyFail, FUTURE_CHALLENGE_EXPIRATION, sign)
+      const failChallenge = await failEngine.issueAttestationChallenge(passRegistrantId, deviceKeyFail, sign)
       try {
         await failEngine.associate({ registrantId: passRegistrantId, deviceKey: deviceKeyFail, nonce: failChallenge.nonce, attestation: makeDeviceAttestation() }, sign)
       } catch {
@@ -242,7 +241,7 @@ describe('AttestationVerdict store (D-03)', () => {
 
       const engine = new AssociationEngine(auth.ctx, throwIfCalledVerifier)
       const deviceKey = nextDeviceKey()
-      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign, electionId)
+      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign, electionId)
       const attestation = makeDeviceAttestation()
 
       // Resolving (not throwing) is itself the proof that verify() never ran.
@@ -269,7 +268,7 @@ describe('AttestationVerdict store (D-03)', () => {
         const { auth, registrantId, sign } = await setupAssociationTest()
         const engine = new ThrowingVerdictEngine(auth.ctx, rejectingVerifier)
         const deviceKey = nextDeviceKey()
-        const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+        const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
         const attestation = makeDeviceAttestation()
 
         let caught: Error | undefined
@@ -289,7 +288,7 @@ describe('AttestationVerdict store (D-03)', () => {
         const { auth, registrantId, sign } = await setupAssociationTest()
         const engine = new ThrowingVerdictEngine(auth.ctx)
         const deviceKey = nextDeviceKey()
-        const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+        const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
         const attestation = makeDeviceAttestation()
 
         let caught: Error | undefined
@@ -634,7 +633,7 @@ describe('AttestationVerdict store (D-03)', () => {
     it('never touches AssociationPrivate: its Cid is unchanged by further verdicts', async () => {
       const { auth, registrantId, engine, sign } = await setupAssociationTest()
       const deviceKey = nextDeviceKey()
-      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
       await engine.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation: makeDeviceAttestation() }, sign)
 
       const before = await auth.ctx.db
@@ -708,7 +707,7 @@ describe('AttestationVerdict store (D-03)', () => {
       // produce a 'pass' verdict from associate() — fail-path behavior is
       // proven against the real engine only (tests above).
       const deviceKey = nextDeviceKey()
-      const challenge = await mock.issueAttestationChallenge('mock-assoc-registrant', deviceKey, FUTURE_CHALLENGE_EXPIRATION, { signerUserId: 'u', signerKey: 'k', signature: 's' })
+      const challenge = await mock.issueAttestationChallenge('mock-assoc-registrant', deviceKey, { signerUserId: 'u', signerKey: 'k', signature: 's' })
       await mock.associate(
         { registrantId: 'mock-assoc-registrant', deviceKey, nonce: challenge.nonce, attestation: makeDeviceAttestation() },
         { signerUserId: 'u', signerKey: 'k', signature: 's' }
@@ -732,7 +731,7 @@ describe('AttestationVerdict store (D-03)', () => {
       const deviceKey = nextDeviceKey()
       const sig: Signature = { signerUserId: 'u', signerKey: 'k', signature: 's' }
 
-      const challenge = await mock.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sig)
+      const challenge = await mock.issueAttestationChallenge(registrantId, deviceKey, sig)
       await mock.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation: makeDeviceAttestation() }, sig)
 
       // The association itself is still written — only the verdict is skipped.
@@ -749,7 +748,7 @@ describe('AttestationVerdict store (D-03)', () => {
       const sig: Signature = { signerUserId: 'u', signerKey: 'k', signature: 's' }
 
       for (const mock of [new MockAssociationEngine(), new MockAssociationEngine({}), new MockAssociationEngine({ attestationRequired: true })]) {
-        const challenge = await mock.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sig)
+        const challenge = await mock.issueAttestationChallenge(registrantId, deviceKey, sig)
         await mock.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation: makeDeviceAttestation() }, sig)
         expect(await mock.getAttestationVerdicts(registrantId, deviceKey)).to.have.lengthOf(1)
       }

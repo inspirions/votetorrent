@@ -129,7 +129,6 @@ beforeAll(() => {
 const REGISTRANT_ID = "registrant-1";
 const DEVICE_KEY_ALPHA = "devicekey-alpha-0000000000";
 const DEVICE_KEY_BRAVO = "devicekey-bravo-1111111111";
-const FUTURE_EXPIRATION = new Date(Date.now() + 3_600_000).toISOString();
 const SEED_SIGN = { signature: "seed-sig", signerKey: "seed-key", signerUserId: "seed-user" };
 
 // ---------------------------------------------------------------------------
@@ -252,12 +251,11 @@ function assertNoCreateLanguage(tr: renderer.ReactTestRenderer) {
 
 async function seedChallenge(
 	engine: any,
-	opts: { deviceKey: string; electionId?: string; expiration?: string; registrantId?: string }
+	opts: { deviceKey: string; electionId?: string; registrantId?: string }
 ) {
 	return engine.issueAttestationChallenge(
 		opts.registrantId ?? REGISTRANT_ID,
 		opts.deviceKey,
-		opts.expiration ?? FUTURE_EXPIRATION,
 		SEED_SIGN,
 		opts.electionId
 	);

@@ -148,7 +148,6 @@ export default function ConfirmationScreen() {
 				registrantIdRef.current = registrantId;
 			}
 			const expiration = Date.now() + TEN_YEARS_MS;
-			const challengeExpiration = new Date(expiration).toISOString();
 
 			// Pattern 4 tier mapping — name -> public, contact/dob/address -> private, party -> selective.
 			// WR-04: only furnish details that actually have a value. Furnishing an empty
@@ -187,7 +186,6 @@ export default function ConfirmationScreen() {
 			const challenge = await associationEngine.issueAttestationChallenge(
 				registrantId,
 				p256DeviceKey,
-				challengeExpiration,
 				sign,
 				seededElectionId,
 			);

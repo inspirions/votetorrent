@@ -30,11 +30,14 @@ export interface IAssociationEngine {
    * policy (T-45-03). Omitted / `undefined` binds a null `ElectionId`, which
    * `associate()`'s fail-closed policy gate (Assumption A5) always treats as
    * attestation-required.
+   *
+   * D-10 (51-05): no `expiration` parameter — `AttestationChallenge` carries
+   * no `Expiration` column. Single-use is enforced by D-11 consumption in
+   * `associate()`, not by a TTL.
    */
   issueAttestationChallenge(
     registrantId: string,
     deviceKey: string,
-    expiration: string,
     signatureOrCallback: SignatureOrCallback,
     electionId?: string
   ): Promise<AttestationChallenge>

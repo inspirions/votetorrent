@@ -54,7 +54,6 @@ function nextDeviceKey (): string {
 }
 
 const FUTURE_REGISTRANT_EXPIRATION = Date.now() + 365 * 86_400_000
-const FUTURE_CHALLENGE_EXPIRATION = new Date(Date.now() + 10 * 60_000).toISOString()
 
 function makeDeviceAttestation (overrides?: Partial<DeviceAttestation>): DeviceAttestation {
   deviceSeq += 1
@@ -107,7 +106,7 @@ async function associateDevice (
 ): Promise<{ deviceKey: string; attestation: DeviceAttestation }> {
   const deviceKey = overrides?.deviceKey ?? nextDeviceKey()
   const attestation = overrides?.attestation ?? makeDeviceAttestation()
-  const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+  const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
   await engine.associate({ registrantId, deviceKey, deviceHash: overrides?.deviceHash, nonce: challenge.nonce, attestation }, sign)
   return { deviceKey, attestation }
 }
@@ -181,8 +180,8 @@ describe('AssociationEngine read surface', () => {
       const { auth, registrantId: registrantA, engine, sign } = await setupAssociationTest()
       const registrantB = await seedRegistrant(auth, sign)
 
-      const challengeA = await engine.issueAttestationChallenge(registrantA, nextDeviceKey(), FUTURE_CHALLENGE_EXPIRATION, sign)
-      const challengeB = await engine.issueAttestationChallenge(registrantB, nextDeviceKey(), FUTURE_CHALLENGE_EXPIRATION, sign)
+      const challengeA = await engine.issueAttestationChallenge(registrantA, nextDeviceKey(), sign)
+      const challengeB = await engine.issueAttestationChallenge(registrantB, nextDeviceKey(), sign)
 
       const all = await engine.getAttestationChallenges()
       expect(all.length).to.be.at.least(2)
@@ -197,8 +196,8 @@ describe('AssociationEngine read surface', () => {
 
     it('a removed challenge disappears from the read — the D-11 expire half is visible through the inspect half', async () => {
       const { registrantId, engine, sign } = await setupAssociationTest()
-      const challenge1 = await engine.issueAttestationChallenge(registrantId, nextDeviceKey(), FUTURE_CHALLENGE_EXPIRATION, sign)
-      const challenge2 = await engine.issueAttestationChallenge(registrantId, nextDeviceKey(), FUTURE_CHALLENGE_EXPIRATION, sign)
+      const challenge1 = await engine.issueAttestationChallenge(registrantId, nextDeviceKey(), sign)
+      const challenge2 = await engine.issueAttestationChallenge(registrantId, nextDeviceKey(), sign)
 
       await engine.removeAttestationChallenge(challenge1.nonce, sign)
 
@@ -216,8 +215,8 @@ describe('AssociationEngine read surface', () => {
         .get({ authorityId: elec.authority.id })
       const electionId = electionRow!.Id as string
 
-      const withElection = await engine.issueAttestationChallenge(registrantId, nextDeviceKey(), FUTURE_CHALLENGE_EXPIRATION, sign, electionId)
-      const withoutElection = await engine.issueAttestationChallenge(registrantId, nextDeviceKey(), FUTURE_CHALLENGE_EXPIRATION, sign)
+      const withElection = await engine.issueAttestationChallenge(registrantId, nextDeviceKey(), sign, electionId)
+      const withoutElection = await engine.issueAttestationChallenge(registrantId, nextDeviceKey(), sign)
 
       const rows = await engine.getAttestationChallenges(registrantId)
       const rowWith = rows.find((r) => r.nonce === withElection.nonce)
@@ -242,7 +241,7 @@ describe('AssociationEngine read surface', () => {
 
       async function mockAssociate (registrantId: string): Promise<string> {
         const deviceKey = nextDeviceKey()
-        const challenge = await mock.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, dummySig)
+        const challenge = await mock.issueAttestationChallenge(registrantId, deviceKey, dummySig)
         await mock.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation: makeDeviceAttestation() }, dummySig)
         return deviceKey
       }
@@ -266,8 +265,8 @@ describe('AssociationEngine read surface', () => {
       const registrantB = nextRegistrantId()
       const dummySig: Signature = { signature: 'a'.repeat(128), signerKey: 'b'.repeat(66), signerUserId: 'user-1' }
 
-      const challengeA = await mock.issueAttestationChallenge(registrantA, nextDeviceKey(), FUTURE_CHALLENGE_EXPIRATION, dummySig)
-      const challengeB = await mock.issueAttestationChallenge(registrantB, nextDeviceKey(), FUTURE_CHALLENGE_EXPIRATION, dummySig)
+      const challengeA = await mock.issueAttestationChallenge(registrantA, nextDeviceKey(), dummySig)
+      const challengeB = await mock.issueAttestationChallenge(registrantB, nextDeviceKey(), dummySig)
 
       const all = await mock.getAttestationChallenges()
       expect(all.map((c) => c.nonce).sort()).to.deep.equal([challengeA.nonce, challengeB.nonce].sort())

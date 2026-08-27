@@ -36,7 +36,6 @@ function makeChallenge (overrides?: Partial<AttestationChallenge>): AttestationC
     authorityId: 'authority-1',
     registrantId: 'registrant-1',
     deviceKey: 'device-key-1',
-    expiration: new Date(Date.now() + 60_000).toISOString(),
     ...overrides
   }
 }

@@ -1960,11 +1960,13 @@ declare schema main
 			-- InsertValid's Digest below, lockstep with AssociationEngine.issueAttestationChallenge's
 			-- digestExpr (45-04). Nullable so a null-electionId challenge still binds :electionId=null
 			-- and passes InsertValid identically on both sides.
-		Expiration datetime, -- short TTL
+		-- D-10 (51-05): Expiration REMOVED. doc/registration.md contains no AttestationChallenge
+		-- table at all and defines no challenge expiry -- the column, ExpirationValid,
+		-- ExpirationFuture and context.now (used by nothing else in this table) were entirely an
+		-- implementation invention. Single-use is now enforced by D-11: associate() DELETEs this
+		-- row inside its own transaction the moment a challenge is answered, rather than by a TTL.
 		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
 		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId and R.Status = 'a')),
-		constraint ExpirationValid check (isISODatetime(Expiration) and like('%Z', Expiration)),
-		constraint ExpirationFuture check on insert (Expiration > context.now),
 		constraint InsertValid check on insert (
 			exists (
 				select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
@@ -1972,7 +1974,7 @@ declare schema main
 						and A.AuthorityId = new.AuthorityId
 						and A.Scope = 'vrg'
 						and A.Digest = Digest(
-							context.Tid, new.Nonce, new.AuthorityId, new.RegistrantId, new.DeviceKey, new.ElectionId, new.Expiration
+							context.Tid, new.Nonce, new.AuthorityId, new.RegistrantId, new.DeviceKey, new.ElectionId
 						)
 			)
 		),
@@ -1989,7 +1991,7 @@ declare schema main
 		),
 		constraint NoUpdate check on update (false)
 	)
-		with context ( SigningNonce text, Tid int, now datetime );
+		with context ( SigningNonce text, Tid int );
 
 	table Association (
 		RegistrantId text,

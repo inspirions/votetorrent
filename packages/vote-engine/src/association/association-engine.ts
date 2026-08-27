@@ -50,6 +50,16 @@ function sha256Hex (input: string): string {
 }
 
 /**
+ * D-10/D-12 INTERIM (51-05): `AttestationChallenge.Expiration` was removed (D-10), so
+ * `associate()` no longer has a challenge-supplied expiration to reuse for
+ * `Association`/`AssociationPrivate.Expiration`. This is a PLACEHOLDER validity window that
+ * plan 51-09 (D-12) replaces with a read of the authority-owned `ElectionRecordValidityPolicy`
+ * row. Deliberately NOT a ten-year window — see `ConfirmationScreen.tsx:150`'s `TEN_YEARS_MS`
+ * "dev posture", the exact anti-pattern D-12 exists to retire.
+ */
+const INTERIM_ASSOCIATION_VALIDITY_DAYS = 365
+
+/**
  * AssociationEngine — Phase 42-04 (D-03..D-07, D-01/D-02) implementation.
  *
  * Unwired `(ctx?: EngineContext)` constructor per the `ElectionsEngine`/
@@ -119,7 +129,6 @@ export class AssociationEngine implements IAssociationEngine {
   async issueAttestationChallenge (
     registrantId: string,
     deviceKey: string,
-    expiration: string,
     signatureOrCallback: SignatureOrCallback,
     electionId?: string
   ): Promise<AttestationChallenge> {
@@ -137,8 +146,6 @@ export class AssociationEngine implements IAssociationEngine {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const nonce: string = (globalThis as any).crypto.randomUUID()
-      const expirationZ = toIsoZDatetime(expiration)
-      const expirationDeferred = toDeferredCheckDatetime(expirationZ)
       const electionIdValue = electionId ?? null
 
       // NOTE: bind names `challengeNonce`/`challengeAuthorityId` (NOT `nonce`/`authorityId`) —
@@ -148,36 +155,36 @@ export class AssociationEngine implements IAssociationEngine {
       // colliding keys would have been the challenge's own Nonce/AuthorityId). `electionId`
       // does NOT collide with seedSignedMutation's reserved set (nonce/authorityId/signature).
       //
-      // D-14a: `:electionId` sits in the IDENTICAL slot (between deviceKey and expiration) as
-      // the schema's welded `AttestationChallenge.InsertValid` `Digest(...)` — both sides MUST
-      // move together (45-04 atomicity requirement); a slot mismatch fails every insert.
-      const digestExpr = 'select Digest(:tid, :challengeNonce, :challengeAuthorityId, :registrantId, :deviceKey, :electionId, :expirationDeferred) as d'
-      const digestParams = { tid, challengeNonce: nonce, challengeAuthorityId: authorityId, registrantId, deviceKey, electionId: electionIdValue, expirationDeferred }
+      // D-10 (51-05): the trailing `expiration`/`expirationDeferred` argument is GONE — removed
+      // in lockstep with the schema's `AttestationChallenge.InsertValid` `Digest(...)` (D-10).
+      // `:electionId` is now the LAST slot in this 6-argument tuple; both sides moved together
+      // in the same commit (45-04/51-05 atomicity requirement) — a slot/arity mismatch fails
+      // every insert.
+      const digestExpr = 'select Digest(:tid, :challengeNonce, :challengeAuthorityId, :registrantId, :deviceKey, :electionId) as d'
+      const digestParams = { tid, challengeNonce: nonce, challengeAuthorityId: authorityId, registrantId, deviceKey, electionId: electionIdValue }
       const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
 
       await ctx.db.exec(
-        `insert into AttestationChallenge (Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration)
-         with context SigningNonce = :signingNonce, Tid = ${tid}, now = :now
-         values (:nonce, :authorityId, :registrantId, :deviceKey, :electionId, :expiration)`,
+        `insert into AttestationChallenge (Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId)
+         with context SigningNonce = :signingNonce, Tid = ${tid}
+         values (:nonce, :authorityId, :registrantId, :deviceKey, :electionId)`,
         {
           nonce,
           authorityId,
           registrantId,
           deviceKey,
           electionId: electionIdValue,
-          expiration: expirationZ,
-          signingNonce,
-          now: nowCanonicalDatetime()
+          signingNonce
         }
       )
 
-      return { nonce, authorityId, registrantId, deviceKey, electionId: electionIdValue ?? undefined, expiration: expirationZ }
+      return { nonce, authorityId, registrantId, deviceKey, electionId: electionIdValue ?? undefined }
     } catch (err) {
       this.rethrow(err, 'issueAttestationChallenge')
     }
   }
 
-  /** D-03: authority deletes a consumed/expired challenge ('vrg'-signed delete). */
+  /** D-03: authority deletes a consumed/stale challenge ('vrg'-signed delete). */
   async removeAttestationChallenge (nonce: string, signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.requireCtx('removeAttestationChallenge')
     const ctx = this.ctx!
@@ -196,11 +203,13 @@ export class AssociationEngine implements IAssociationEngine {
       const digestParams = { tid, challengeNonce: nonce }
       const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
 
+      // D-10 (51-05): the `with context` clause's `now` param is GONE — `context.now` was used
+      // by nothing in this table except the removed `ExpirationFuture` CHECK.
       await ctx.db.exec(
         `delete from AttestationChallenge
-         with context SigningNonce = :signingNonce, Tid = ${tid}, now = :now
+         with context SigningNonce = :signingNonce, Tid = ${tid}
          where Nonce = :nonce`,
-        { nonce, signingNonce, now: nowCanonicalDatetime() }
+        { nonce, signingNonce }
       )
     } catch (err) {
       this.rethrow(err, 'removeAttestationChallenge')
@@ -233,11 +242,13 @@ export class AssociationEngine implements IAssociationEngine {
    *    `RegistrationEngine.createRegistrant`'s two-digest pattern) — THEN
    *    `AssociationPrivate` (`AssociationCidMatch` needs the public row to
    *    already exist). COMMIT, ROLLBACK on any failure.
-   *
-   * `Association`/`AssociationPrivate.Expiration` reuse the matched
-   * `AttestationChallenge.Expiration` — `AssociateInit` carries no
-   * independent expiration field, and the challenge's expiration is the
-   * only expiration value in scope at associate time.
+   * D-10 (51-05): `AttestationChallenge` carries no `Expiration` — the challenge
+   * no longer supplies an expiration value. `Association`/`AssociationPrivate.Expiration`
+   * are computed here from `INTERIM_ASSOCIATION_VALIDITY_DAYS`, a PLACEHOLDER
+   * this method owns only until plan 51-09 (D-12) replaces it with a read of
+   * the authority-owned `ElectionRecordValidityPolicy` row. This is
+   * deliberately NOT a ten-year window — see `ConfirmationScreen.tsx:150`'s
+   * `TEN_YEARS_MS` "dev posture", the exact anti-pattern D-12 exists to retire.
    */
   async associate (init: AssociateInit, signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.requireCtx('associate')
@@ -246,7 +257,7 @@ export class AssociationEngine implements IAssociationEngine {
 
     const challengeRow = await ctx.db
       .prepare(
-        'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration from AttestationChallenge where Nonce = :nonce and RegistrantId = :registrantId and DeviceKey = :deviceKey'
+        'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId from AttestationChallenge where Nonce = :nonce and RegistrantId = :registrantId and DeviceKey = :deviceKey'
       )
       .get({ nonce, registrantId, deviceKey })
     if (!challengeRow) {
@@ -261,12 +272,7 @@ export class AssociationEngine implements IAssociationEngine {
       deviceKey: asText(challengeRow.DeviceKey, 'AttestationChallenge.DeviceKey'),
       // D-14a: null (unset) ElectionId reads back as undefined — associate()'s policy gate
       // (below) treats a missing electionId as fail-closed attestation-required (Assumption A5).
-      electionId: challengeRow.ElectionId == null ? undefined : asText(challengeRow.ElectionId, 'AttestationChallenge.ElectionId'),
-      // Read back from a plain SELECT — Quereus's stored canonical form lacks the
-      // trailing `Z` (see `toIsoZDatetime`'s doc comment); re-Z-suffix it here so the
-      // verifier (and every downstream expiration/digest computation) sees the
-      // correct absolute instant, not a `new Date(...)`-local-time misinterpretation.
-      expiration: toIsoZDatetime(challengeRow.Expiration as string)
+      electionId: challengeRow.ElectionId == null ? undefined : asText(challengeRow.ElectionId, 'AttestationChallenge.ElectionId')
     }
 
     // D-14c/A5/CR-03 (LOCKED, fail-closed): read the election's attestation policy and skip
@@ -326,7 +332,12 @@ export class AssociationEngine implements IAssociationEngine {
       }
     }
 
-    const expiration = toIsoZDatetime(challenge.expiration)
+    // D-10/D-12 INTERIM (51-05): the challenge no longer carries an expiration (D-10 removed
+    // `AttestationChallenge.Expiration`). Plan 51-09 (D-12) replaces this placeholder with a
+    // read of the authority-owned `ElectionRecordValidityPolicy` row. Do NOT change this to a
+    // ten-year window — see `ConfirmationScreen.tsx:150`'s `TEN_YEARS_MS`, the exact "dev
+    // posture" anti-pattern D-12 exists to retire.
+    const expiration = toIsoZDatetime(new Date(Date.now() + INTERIM_ASSOCIATION_VALIDITY_DAYS * 86400000).toISOString())
     const expirationDeferred = toDeferredCheckDatetime(expiration)
     const attestationTime = toIsoZDatetime(attestation.attestationTime)
     const attestationTimeDeferred = toDeferredCheckDatetime(attestationTime)
@@ -523,8 +534,8 @@ export class AssociationEngine implements IAssociationEngine {
     const out: AttestationChallenge[] = []
     try {
       const sql = registrantId === undefined
-        ? 'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration from AttestationChallenge'
-        : 'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration from AttestationChallenge where RegistrantId = :registrantId'
+        ? 'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId from AttestationChallenge'
+        : 'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId from AttestationChallenge where RegistrantId = :registrantId'
       const params: Record<string, string> = registrantId === undefined ? {} : { registrantId }
       for await (const row of ctx.db.eval(sql, params)) {
         out.push({
@@ -532,8 +543,7 @@ export class AssociationEngine implements IAssociationEngine {
           authorityId: asText(row.AuthorityId, 'AttestationChallenge.AuthorityId'),
           registrantId: asText(row.RegistrantId, 'AttestationChallenge.RegistrantId'),
           deviceKey: asText(row.DeviceKey, 'AttestationChallenge.DeviceKey'),
-          electionId: row.ElectionId == null ? undefined : asText(row.ElectionId, 'AttestationChallenge.ElectionId'),
-          expiration: toIsoZDatetime(row.Expiration as string)
+          electionId: row.ElectionId == null ? undefined : asText(row.ElectionId, 'AttestationChallenge.ElectionId')
         })
       }
       return out
@@ -599,8 +609,8 @@ export class AssociationEngine implements IAssociationEngine {
       // Z-suffixed, required by VerifiedAtValid's like('%Z', VerifiedAt); the
       // context `now` param stays Z-less (nowCanonicalDatetime()) — the same
       // split every other like('%Z', X)-checked datetime column in this
-      // codebase uses (Association.Expiration, AttestationChallenge.Expiration,
-      // the private device-association row's own attestation-time column,
+      // codebase uses (Association.Expiration, the private device-association
+      // row's own attestation-time column,
       // 47-07's RegistrantAccessEvent.Timestamp). Do NOT bind
       // nowCanonicalDatetime() into this column.
       const verifiedAt = toIsoZDatetime(Date.now())

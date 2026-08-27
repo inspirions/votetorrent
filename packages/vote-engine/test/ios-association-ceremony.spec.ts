@@ -61,7 +61,6 @@ const fixture = JSON.parse(
 
 const APP_ID = '94TY7UR2W5.org.votetorrent.voter'
 const FUTURE_REGISTRANT_EXPIRATION = '2099-01-01T00:00:00.000Z'
-const FUTURE_CHALLENGE_EXPIRATION = '2099-01-01T00:00:00.000Z'
 
 function makeRealSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
   const { privateHex, publicHex } = randomTestKeyPair()
@@ -144,7 +143,7 @@ async function setupIosCeremony (environment: 'development' | 'production' = 'de
 async function issuePinnedChallenge (c: Ceremony): Promise<void> {
   await withPinnedUuid(fixture.challenge.nonce, async () => {
     await c.engine.issueAttestationChallenge(
-      c.registrantId, fixture.challenge.deviceKey, FUTURE_CHALLENGE_EXPIRATION, c.sign
+      c.registrantId, fixture.challenge.deviceKey, c.sign
     )
   })
 }

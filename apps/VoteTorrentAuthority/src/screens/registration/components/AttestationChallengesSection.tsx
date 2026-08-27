@@ -321,13 +321,8 @@ export function AttestationChallengesSection({
 										</ThemedText>
 									</View>
 
-									<View testID={`${testIDPrefix}-expiry-${c.nonce}`} style={localStyles.row}>
-										<ThemedText type="tiny">
-											{t("attestationChallengeExpiryLabel") +
-												": " +
-												toDisplayTimestamp(c.expiration)}
-										</ThemedText>
-									</View>
+									{/* D-10 (51-05): AttestationChallenge.Expiration removed — no expiry row to render.
+									    Single-use is now enforced by D-11 consumption in associate(), not a TTL. */}
 
 									{/* D-03: verdict is the only honest signal; never reads the non-null identifier field.
 									    T-47-12: omitted entirely when the verdict list could not be read — see `verdicts`. */}

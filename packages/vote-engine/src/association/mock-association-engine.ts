@@ -73,7 +73,6 @@ export class MockAssociationEngine implements IAssociationEngine {
   async issueAttestationChallenge (
     registrantId: string,
     deviceKey: string,
-    expiration: string,
     _signatureOrCallback: SignatureOrCallback,
     electionId?: string
   ): Promise<AttestationChallenge> {
@@ -83,8 +82,7 @@ export class MockAssociationEngine implements IAssociationEngine {
       authorityId: 'mock-authority',
       registrantId,
       deviceKey,
-      electionId,
-      expiration
+      electionId
     }
     this.challenges.set(nonce, challenge)
     return challenge
@@ -110,13 +108,14 @@ export class MockAssociationEngine implements IAssociationEngine {
     const sig = typeof signatureOrCallback === 'function'
       ? await signatureOrCallback(new Uint8Array())
       : signatureOrCallback
-    const challenge = this.challenges.get(init.nonce)
     this.associations.set(key, {
       registrantId: init.registrantId,
       deviceKey: init.deviceKey,
       deviceHash: init.deviceHash,
       attestationCid: `mock-attestation-cid-${key}`,
-      expiration: challenge?.expiration ?? new Date(Date.now() + 3_600_000).toISOString(),
+      // D-10 (51-05): AttestationChallenge no longer carries an expiration to reuse; the mock
+      // stands in with a fixed 1-hour window (it holds no ElectionRecordValidityPolicy store).
+      expiration: new Date(Date.now() + 3_600_000).toISOString(),
       signorKey: sig.signerKey,
       signature: sig.signature
     })

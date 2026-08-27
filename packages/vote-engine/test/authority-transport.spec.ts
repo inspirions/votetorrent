@@ -53,7 +53,6 @@ function nextDeviceKey (): string {
 }
 
 const FUTURE_REGISTRANT_EXPIRATION = Date.now() + 365 * 86_400_000
-const FUTURE_CHALLENGE_EXPIRATION = new Date(Date.now() + 10 * 60_000).toISOString()
 
 describe('authority-transport (D-11/D-03): full round-trip against the real PlayIntegrityVerifier, no P2P', () => {
   it('accepting synthetic DeviceAttestation: transport.submitAssociate succeeds and writes Association + AssociationPrivate', async () => {
@@ -85,7 +84,7 @@ describe('authority-transport (D-11/D-03): full round-trip against the real Play
     // that SAME keypair in the synthetic chain, rather than an opaque
     // `nextDeviceKey()` string.
     const { keyPair, deviceKeySpkiBase64: deviceKey } = await generateAndroidDeviceKeyPair()
-    const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+    const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
     await transport.sendChallenge(challenge) // documented no-op (D-03)
 
     const attestation = await buildSyntheticDeviceAttestation({ challenge, jweKeys, testRoot, overrides: { leafKeyPair: keyPair } })
@@ -130,7 +129,7 @@ describe('authority-transport (D-11/D-03): full round-trip against the real Play
     const transport = new LocalAuthorityTransport(engine)
 
     const deviceKey = nextDeviceKey()
-    const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+    const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
 
     const attestation = await buildSyntheticDeviceAttestation({
       challenge,
@@ -181,7 +180,7 @@ describe('authority-transport (D-11/D-03): full round-trip against the real Play
     const transport = new LocalAuthorityTransport(engine)
 
     const deviceKey = nextDeviceKey()
-    const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+    const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
 
     const attestation = await buildSyntheticDeviceAttestation({
       challenge,
@@ -232,7 +231,7 @@ describe('authority-transport (D-11/D-03): full round-trip against the real Play
     const transport = new LocalAuthorityTransport(engine)
 
     const deviceKey = nextDeviceKey()
-    const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, FUTURE_CHALLENGE_EXPIRATION, sign)
+    const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
 
     const attestation = await buildSyntheticDeviceAttestation({
       challenge,

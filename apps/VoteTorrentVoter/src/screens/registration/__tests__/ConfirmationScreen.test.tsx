@@ -73,7 +73,6 @@ const SEEDED_ELECTION_ID = 'election-1';
 interface IssueChallengeCall {
 	registrantId: string;
 	deviceKey: string;
-	expiration: string;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	signatureOrCallback: any;
 	electionId?: string;
@@ -83,19 +82,17 @@ const mockIssueAttestationChallenge = jest.fn(
 	async (
 		registrantId: string,
 		deviceKey: string,
-		expiration: string,
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		signatureOrCallback: any,
 		electionId?: string,
 	) => {
 		callOrder.push('issueAttestationChallenge');
-		issueChallengeCalls.push({registrantId, deviceKey, expiration, signatureOrCallback, electionId});
+		issueChallengeCalls.push({registrantId, deviceKey, signatureOrCallback, electionId});
 		return {
 			nonce: CHALLENGE_NONCE,
 			authorityId: 'authority-1',
 			registrantId,
 			deviceKey,
-			expiration: '2100-01-01T00:00:00Z',
 		};
 	},
 );
@@ -317,7 +314,7 @@ describe('ConfirmationScreen (REG-04/D-03/D-05/D-09/D-11)', () => {
 		expect(capturedSetDeviceKey).toBe(P256_PUB);
 	});
 
-	it('threads sign as arg 4 and seededElectionId as the trailing arg 5 to issueAttestationChallenge (D-11/45-04)', async () => {
+	it('threads sign as arg 3 and seededElectionId as the trailing arg 4 to issueAttestationChallenge (D-11/45-04/D-10)', async () => {
 		const tr = renderScreen();
 		await pressConfirm(tr);
 

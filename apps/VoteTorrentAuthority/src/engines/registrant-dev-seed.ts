@@ -423,7 +423,6 @@ export async function seedRegistrantFixtures(
 	// Guarded: reuse an existing outstanding challenge for the same
 	// (registrant, deviceKey) pair rather than issuing a duplicate on a
 	// resumed run.
-	const challengeExpiration = new Date(Date.now() + 7 * 86_400_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 	const firstChallengeDeviceKey = `${SEED_ID_PREFIX}-device-0`
 	const secondChallengeDeviceKey = `${SEED_ID_PREFIX}-device-1`
 	async function ensureChallenge(forRegistrantId: string, deviceKey: string): Promise<{ nonce: string }> {
@@ -436,7 +435,6 @@ export async function seedRegistrantFixtures(
 		const issued = await associationEngine.issueAttestationChallenge(
 			forRegistrantId,
 			deviceKey,
-			challengeExpiration,
 			sign,
 			electionId,
 		)

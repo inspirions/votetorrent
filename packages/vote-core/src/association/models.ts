@@ -52,8 +52,9 @@ export interface AttestationChallenge {
    */
   electionId?: string
 
-  /** Short TTL */
-  expiration: Timestamp | string
+  // D-10 (51-05): no `expiration` field — `AttestationChallenge` carries no `Expiration`
+  // column. doc/registration.md defines no challenge expiry; single-use is enforced by D-11
+  // consumption in `associate()`, not by a TTL.
 }
 
 /**

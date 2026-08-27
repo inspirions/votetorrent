@@ -84,7 +84,6 @@ jest.mock('@votetorrent/vote-engine/rn', () => {
 			registrantId,
 			deviceKey,
 			electionId: 'election-1',
-			expiration: '2999-01-01T00:00:00.000Z',
 		}),
 	)
 	const associateMock = jest.fn(async () => undefined)
