@@ -51,6 +51,7 @@
 		"react-native": "0.78.0"
 	},
 	"devDependencies": {
+		"@quereus/store": "^4.14.0",
 		"@types/mocha": "^10.0.10",
 		"@types/node": "^22.13.10",
 		"@types/uuid": "^11.0.0",
