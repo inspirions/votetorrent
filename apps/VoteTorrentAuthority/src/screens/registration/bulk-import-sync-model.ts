@@ -246,3 +246,127 @@ export function toSyncErrorRefs(
 	}
 	return refs;
 }
+
+// ---------------------------------------------------------------------------
+// D-19 — the association processing trigger, composed onto the SAME "rest"
+// binding registration already uses.
+// ---------------------------------------------------------------------------
+
+/**
+ * D-19 SHAPE DECISION (51-10): `SyncBindingId` stays exactly
+ * `"filesystem" | "rest" | "peer"` — NO fourth `"association"` member was
+ * added. `BulkImportSyncScreen.tsx` is untouched by this plan and renders
+ * exactly three cards, each with its own "Sync Now" press wired to
+ * `runSync(id)`; a fourth `SyncBindingId` with no card ever calling
+ * `runSync("association")` would register a binding NOTHING in the running
+ * app ever invokes — the exact "correct code, unreachable by the app"
+ * defect class this phase is scored against (`e64e112`, the Phase 48
+ * registration stack the voter never referenced). D-19 also says ONE
+ * trigger, and a fourth card would itself be a NEW pressable control, which
+ * is what the rejected-alternatives note in `51-CONTEXT.md` calls out.
+ *
+ * Instead, `attach-association-sync-bindings.ts` COMPOSES onto the existing
+ * `"rest"` id through this module's own registry seam
+ * (`resolveSyncBinding`/`registerSyncBinding` — exactly the "attached by
+ * whichever host CAN construct them" mechanism this file's header already
+ * documents): it resolves whatever `"rest"` handle registration's
+ * `attach-sync-bindings.ts` already registered, wraps it so `syncNow()`
+ * calls the ORIGINAL handle first and then drives association processing,
+ * merges the two `TransportSyncReport`s with `mergeTransportSyncReports`
+ * below, and re-registers the combined handle under the SAME `"rest"` id.
+ * The REST card's existing "Sync Now" press is therefore the one press that
+ * now drives both legs. `TransportSyncReport` keeps its 4 fields unchanged
+ * — merging counts and concatenating `errorItemIds` needs no new field.
+ *
+ * Composition ordering is load-bearing: `attach-sync-bindings.ts` must
+ * attach FIRST (registering the real registration `"rest"` handle) before
+ * `attach-association-sync-bindings.ts` attaches (capturing that handle as
+ * its `previous`, then overwriting the registry entry with the combined
+ * one). `AppProvider.tsx` sequences the two calls in that order.
+ */
+export function mergeTransportSyncReports(
+	a: TransportSyncReport,
+	b: TransportSyncReport,
+): TransportSyncReport {
+	return {
+		syncedAt: b.syncedAt,
+		imported: a.imported + b.imported,
+		pending: a.pending + b.pending,
+		errorItemIds: [...a.errorItemIds, ...b.errorItemIds],
+	};
+}
+
+/**
+ * The D-19 ordering/pre-filter discipline (T-51-10-09), extracted as a pure,
+ * plain-TypeScript helper so it is directly unit-testable without a
+ * renderer, an engine, or a network call — `attach-association-sync-bindings.ts`
+ * supplies the real staged-document reads, the real engine submit calls, and
+ * the real driver call; this function owns only the ORDER and the
+ * unconditional-driver-call guarantee.
+ *
+ * ORDERING, AND WHAT IS AND IS NOT LOAD-BEARING: `submitRequest` and
+ * `submitAttestation` STAGE and PRE-FILTER only; they mutate nothing in the
+ * transport intake a caller's `processPending` reads from, so a real driver
+ * (`processPendingAssociationRequests`, 51-09) independently RE-READS and
+ * RE-VALIDATES every staged document through its own
+ * `validateStagedAttestationAnswer` check (51-08). A pre-filter rejection
+ * here therefore does not — and must not be read as — preventing the driver
+ * from seeing the document. `processPending` is called EXACTLY ONCE,
+ * UNCONDITIONALLY, after both loops — regardless of whether either loop
+ * produced an error. Do NOT add a branch that skips `processPending` when
+ * `errorItemIds` is non-empty: that is precisely how a security check
+ * becomes correct code the running app never reaches.
+ *
+ * Both staged-read calls are independently fail-conservative: a rejected
+ * `readStagedRequests`/`readStagedAttestations` is treated as an empty
+ * batch (an honest, empty sync), never a thrown error that would abort the
+ * unconditional `processPending` call below.
+ */
+export async function runAssociationSync<TReq, TAtt>(params: {
+	readStagedRequests: () => Promise<readonly TReq[]>;
+	readStagedAttestations: () => Promise<readonly TAtt[]>;
+	requestIdOf: (doc: TReq) => string;
+	attestationIdOf: (doc: TAtt) => string;
+	submitRequest: (doc: TReq) => Promise<unknown>;
+	submitAttestation: (doc: TAtt) => Promise<unknown>;
+	processPending: () => Promise<unknown>;
+}): Promise<TransportSyncReport> {
+	const errorItemIds: string[] = [];
+	let imported = 0;
+
+	let stagedRequests: readonly TReq[] = [];
+	try {
+		stagedRequests = await params.readStagedRequests();
+	} catch {
+		stagedRequests = [];
+	}
+	for (const doc of stagedRequests) {
+		try {
+			await params.submitRequest(doc);
+			imported += 1;
+		} catch {
+			errorItemIds.push(params.requestIdOf(doc));
+		}
+	}
+
+	let stagedAttestations: readonly TAtt[] = [];
+	try {
+		stagedAttestations = await params.readStagedAttestations();
+	} catch {
+		stagedAttestations = [];
+	}
+	for (const doc of stagedAttestations) {
+		try {
+			await params.submitAttestation(doc);
+			imported += 1;
+		} catch {
+			errorItemIds.push(params.attestationIdOf(doc));
+		}
+	}
+
+	// UNCONDITIONAL — see the doc comment above. No branch above this line
+	// may return early or otherwise skip this call.
+	await params.processPending();
+
+	return { syncedAt: new Date().toISOString(), imported, pending: 0, errorItemIds };
+}
