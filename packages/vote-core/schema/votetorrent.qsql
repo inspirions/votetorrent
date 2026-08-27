@@ -1681,8 +1681,23 @@ declare schema main
 		constraint ElectionIdImmutable check on update (
 			(new.ElectionId is null and old.ElectionId is null) or new.ElectionId = old.ElectionId
 		),
-		constraint SubmittedAtImmutable check on update (new.SubmittedAt = old.SubmittedAt),
-		constraint ReceivedAtImmutable check on update (new.ReceivedAt = old.ReceivedAt),
+		-- WHY THERE IS NO SubmittedAtImmutable, and it is not an omission (same empirical finding
+		-- RegistrationRequest.SubmittedAt's comment records, confirmed again here by running it):
+		-- `new.*` sees the raw bound Z-suffixed value while `old.*` is read back Temporal-coerced
+		-- (Z stripped, trailing fractional zeros dropped) inside an UPDATE's row-constraint
+		-- evaluation, so a literal `new.SubmittedAt = old.SubmittedAt` CHECK never compares equal
+		-- and rejects every legitimate D-18 transition. SubmittedAt is instead pinned
+		-- TRANSITIVELY: it is the sixth argument of the unqualified SignatureValid digest above,
+		-- and with DeviceKey/RequesterSignature/Id/AuthorityId/RegistrantId/ElectionId all
+		-- immutable, an attacker cannot rewrite SubmittedAt without also re-signing under a key
+		-- other than the original DeviceKey, which SignatureValid rejects.
+		--
+		-- WHY THERE IS NO ReceivedAtImmutable, stated as an OPEN RESIDUAL rather than a
+		-- conclusion (mirrors RegistrationRequest's identical residual): ReceivedAt is inside NO
+		-- digest, so the transitive argument above does not reach it, and it is blocked by the
+		-- SAME datetime-coercion asymmetry (a literal equality CHECK fails identically). What
+		-- holds today is ENGINE-side only: both D-18 transitions are the only writers, and both
+		-- must rebind ReceivedAt to its unchanged value via restoreCanonicalDatetime.
 		constraint RequesterSignatureImmutable check on update (new.RequesterSignature = old.RequesterSignature),
 		-- D-06: a rejected request is a permanent, attributable record (mirrors RegistrationRequest.NoDelete)
 		constraint NoDelete check on delete (false),
