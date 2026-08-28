@@ -1191,10 +1191,15 @@ export class AssociationEngine implements IAssociationEngine {
    * `validateStagedAttestationAnswer` helper — never a re-implemented nonce/deviceKey/status check
    * — build an `AssociateInit` from the PERSISTED ROW (registrantId, deviceKey) plus the staged
    * answer's wire fields (nonce, attestation, deviceHash), and call the UNCHANGED `associate()`.
-   * On success: `'c' -> 'a'`. On EITHER the envelope validation or `associate()` itself throwing: a
-   * `'c' -> 'r'` transition carrying a GENERIC rejection-reason class — never a raw verifier reason
-   * or `err.message` — and processing continues with the remaining staged documents; one bad
-   * answer never stalls the batch (T-51-09-07).
+   * On success: `'c' -> 'a'`. If `associate()` itself throws — the REQUESTER's own attestation
+   * failing — a `'c' -> 'r'` transition carrying a GENERIC rejection-reason class, never a raw
+   * verifier reason or `err.message`. Processing continues with the remaining staged documents;
+   * one bad answer never stalls the batch (T-51-09-07).
+   *
+   * An ENVELOPE validation failure is NOT a decision (CR-05, 51-REVIEW). It means the document
+   * did not come from the requester, so it is SKIPPED and the row is left in `'c'` — see the
+   * catch block itself for why deciding on it would be a permanent, unrecoverable denial of
+   * service on the honest voter's request.
    *
    * Idempotent by construction: LEG 1 only selects `Status = 'p'` rows (a row the previous run
    * already transitioned to `'c'` is invisible to a second run), and LEG 2 only matches a staged
@@ -1309,8 +1314,28 @@ export class AssociationEngine implements IAssociationEngine {
         try {
           const loaded = await this.validateStagedAttestationAnswer(doc.answer, doc.requesterKey, doc.signature)
           validated = { registrantId: loaded.registrantId, deviceKey: loaded.deviceKey }
-        } catch {
-          rejectionReason = 'envelope-validation-failed'
+        } catch (envelopeErr) {
+          // CR-05 (51-REVIEW): SKIP, never DECIDE.
+          //
+          // Every way this gate throws — a self-signature that does not verify under
+          // `requesterKey`, a `requesterKey` that is not the row's `DeviceKey`, a nonce that is
+          // not the row's `ChallengeNonce` — means the SAME thing: this document is not an
+          // answer from this requester at all. The staging channel is explicitly untrusted (a
+          // drop directory anyone with filesystem access can write to, or a bridge whose own
+          // header says it verifies nothing), and pending request ids are enumerable, so
+          // letting such a document DECIDE the row hands any attacker a permanent denial of
+          // service: `AssociationRequest` has `NoDelete` and `TransitionValid` admits no
+          // `'r' -> *` transition, so the honest voter's request would be dead forever and
+          // they would have to start over with a new request id.
+          //
+          // Skipping leaves the row in 'c', so the genuine answer can still land on a later
+          // sync. The 'r' path below is retained for the case that IS the requester's own
+          // decision: `associate()` failing on their own attestation.
+          console.warn(
+            `AssociationEngine.processPendingAssociationRequests: skipping a staged answer for requestId=${doc.requestId} whose envelope did not validate (not an answer from this requester) — the request stays 'c'`,
+            envelopeErr instanceof Error ? envelopeErr.message : String(envelopeErr)
+          )
+          continue
         }
 
         if (validated) {

@@ -421,7 +421,7 @@ describe('processPendingAssociationRequests — the D-05 automatic authority-sid
     expect(after, 'row counts must be UNCHANGED by the idempotent second run').to.deep.equal(before)
   })
 
-  it('rejects a staged answer whose nonce and requester key both match the persisted row but whose self-signature is FORGED — the driver, not just the intake pre-filter, runs the check', async () => {
+  it('SKIPS a staged answer whose nonce and requester key both match the persisted row but whose self-signature is FORGED — the driver, not just the intake pre-filter, runs the check — and the honest answer still lands afterwards (CR-05)', async () => {
     const s = await setup()
     const deviceKeyPair = randomTestKeyPair()
     const requestId = await submitDeviceRequest(s, deviceKeyPair)
@@ -447,13 +447,27 @@ describe('processPendingAssociationRequests — the D-05 automatic authority-sid
     const result = await driveOnce(s)
     const afterAssociationCount = await countRows(s.auth.ctx, 'Association')
 
-    expect(result.rejected, 'the forged answer must be rejected').to.equal(1)
+    // The forged document must not associate ANYTHING — that is the driver's own
+    // `validateStagedAttestationAnswer` call doing its job.
     expect(result.associated).to.equal(0)
-    expect(afterAssociationCount, 'zero Association rows after a forged-signature rejection').to.equal(beforeAssociationCount)
+    expect(afterAssociationCount, 'zero Association rows after a forged-signature envelope').to.equal(beforeAssociationCount)
 
+    // CR-05: and it must not DECIDE the row either. A forged envelope is not an answer from
+    // this requester, the staging channel is unauthenticated, and `AssociationRequest` has
+    // `NoDelete` with no `'r' -> *` transition — so a rejection here would be a permanent,
+    // unrecoverable denial of service that any attacker who learned the requestId could inflict.
+    expect(result.rejected, 'a forged envelope must be SKIPPED, never counted as a decision').to.equal(0)
     const row = await s.auth.ctx.db.prepare('select Status, RejectionReason from AssociationRequest where Id = :id').get({ id: requestId })
-    expect(row?.Status).to.equal('r')
-    expect(row?.RejectionReason).to.equal('envelope-validation-failed')
+    expect(row?.Status, "the request must stay 'c' so the genuine answer can still land").to.equal('c')
+    expect(row?.RejectionReason).to.equal(null)
+
+    // THE proof that the DoS is closed: the honest device answers afterwards and succeeds.
+    await stageAnswer(s, requestId, deviceKeyPair, makeDeviceAttestation())
+    const second = await driveOnce(s)
+    expect(second.associated, 'the genuine answer must still be able to associate').to.equal(1)
+    expect(second.rejected).to.equal(0)
+    const finalRow = await s.auth.ctx.db.prepare('select Status from AssociationRequest where Id = :id').get({ id: requestId })
+    expect(finalRow?.Status).to.equal('a')
   })
 
   it('listAssociationRequests(authorityId) returns every request for that authority as AssociationRequestRead', async () => {
