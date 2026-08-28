@@ -40,9 +40,12 @@ const sha256 = (...parts: Uint8Array[]): Uint8Array => {
 }
 const utf8 = (s: string): Uint8Array => new TextEncoder().encode(s)
 
+// NOTE: no `Buffer` here — see the same note in `verifiers/app-attest.ts` (CR-01). `Buffer` is
+// not a Hermes global and is not imported by this module; `timingSafeEqual` takes any
+// ArrayBufferView on Node and indexes `a[i]` in the RN shim, so `Uint8Array` works on both.
 function bytesEqual (a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b))
+  return timingSafeEqual(a, b)
 }
 
 function hexToBytes (hex: string): Uint8Array {

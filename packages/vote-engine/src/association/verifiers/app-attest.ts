@@ -54,9 +54,17 @@ const AAGUID_PRODUCTION = (() => {
   return b
 })()
 
+// NOTE: `Buffer` is deliberately NOT used here. `Buffer` is not a Hermes global, and this
+// module has no `import { Buffer } from 'buffer'` — a bare `Buffer.from` would raise
+// `ReferenceError: Buffer is not defined` on device, be swallowed by the outer fail-closed
+// `catch`, and reject every genuine attestation with a misleading reason (CR-01). Node's
+// `timingSafeEqual` accepts any ArrayBufferView, and the RN shim
+// (`apps/VoteTorrentAuthority/polyfills/node-crypto.js`) indexes `a[i] ^ b[i]`, so a plain
+// `Uint8Array` is the correct argument on BOTH runtimes. Same fix as
+// `verifiers/key-attestation.ts`'s `bytesEqual`.
 function bytesEqual (a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b))
+  return timingSafeEqual(a, b)
 }
 
 function sha256 (...parts: Uint8Array[]): Uint8Array {

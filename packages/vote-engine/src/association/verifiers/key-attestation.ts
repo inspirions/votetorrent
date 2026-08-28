@@ -5,6 +5,11 @@ import { X509Certificate, X509ChainBuilder } from '@peculiar/x509'
 import { AsnConvert } from '@peculiar/asn1-schema'
 import { AttestationApplicationId, KeyDescription, KeyMintKeyDescription, SecurityLevel } from '@peculiar/asn1-android'
 import { timingSafeEqual } from 'node:crypto'
+// `Buffer` MUST be imported explicitly — it is NOT a Hermes global (CR-01). `metro.config.js`
+// aliases the `buffer` SPECIFIER, which only helps an explicit import; nothing installs a
+// global. Without this, `decodeAndroidDeviceKeySpki` throws `ReferenceError` on device and the
+// outer fail-closed catch rejects every genuine Android attestation.
+import { Buffer } from 'buffer'
 import type { AttestationChallenge, AttestationVerification } from '@votetorrent/vote-core'
 import { recomputeChallengeDigest } from './digest-binding.js'
 import { certDigestBytesToHex, type ExpectedAppIdentity } from './app-identity.js'
