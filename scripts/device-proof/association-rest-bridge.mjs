@@ -103,7 +103,11 @@
  * (lexicographic order == arrival order), persisted the same way.
  *
  * Usage:
- *   node scripts/device-proof/association-rest-bridge.mjs [--port 8791] [--host 0.0.0.0] [--staging-dir <path>]
+ *   node scripts/device-proof/association-rest-bridge.mjs [--port 8791] [--host 127.0.0.1] [--staging-dir <path>]
+ *
+ * `--host` defaults to LOOPBACK. Reaching this bridge from a physical phone needs an
+ * explicit `--host <lan-ip>` (or `0.0.0.0`) — exposing an unauthenticated server on every
+ * interface is a deliberate act, not a default (CR-04).
  */
 
 import { createServer } from 'node:http'
@@ -118,10 +122,50 @@ const __dirname = path.dirname(__filename)
 const REPO_ROOT = path.resolve(__dirname, '..', '..')
 
 // ---------------------------------------------------------------------------
+// Untrusted-identifier guard (CR-04, 51-REVIEW).
+//
+// Every id this bridge turns into a filename arrives in an UNAUTHENTICATED HTTP
+// POST body, on a server the ceremony script tells you to bind to a LAN address
+// so a physical phone can reach it. `path.join` does NOT normalize away a
+// traversal — it RESOLVES it — so without this an attacker on the LAN can write
+// attacker-controlled JSON to any `*.json` path the bridge process can reach
+// (a LaunchAgent, a package.json, a tsconfig.json inside the checkout).
+//
+// Deliberately a verbatim port of the production sibling's guard,
+// `assertSafeIdentifier` in
+// `packages/vote-engine/src/association/transport/filesystem-association-transport.ts`,
+// so the two cannot drift. Must run BEFORE any `path.join`, never after.
+const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/
+
+function assertSafeIdentifier (value, label) {
+  if (typeof value !== 'string') {
+    throw new Error(`association-rest-bridge: ${label} must be a string (got: ${typeof value})`)
+  }
+  if (value === '.' || value === '..' || value.includes('..')) {
+    throw new Error(
+      `association-rest-bridge: ${label} may not be '.', '..', or contain a '..' path-traversal segment (got: ${JSON.stringify(value)})`
+    )
+  }
+  if (!SAFE_IDENTIFIER_PATTERN.test(value)) {
+    throw new Error(
+      `association-rest-bridge: ${label} must match ${SAFE_IDENTIFIER_PATTERN.toString()} (got: ${JSON.stringify(value)})`
+    )
+  }
+}
+
+// Cap on a single request body. Unbounded concatenation of every chunk lets one
+// LAN client exhaust this process's memory; a staged association document is a
+// few kB, so 1 MiB is generous.
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
+// ---------------------------------------------------------------------------
 // CLI args — no dependency (no `commander`/`yargs`); a handful of `--flag value` pairs.
 // ---------------------------------------------------------------------------
 function parseArgs (argv) {
-  const args = { port: 8791, host: '0.0.0.0', stagingDir: undefined }
+  // CR-04: default to loopback. Exposing this unauthenticated server on every
+  // interface must be a deliberate act — `run-two-party-ceremony.sh` always passes
+  // `--host` explicitly, so the D-17 ceremony is unaffected by this default.
+  const args = { port: 8791, host: '127.0.0.1', stagingDir: undefined }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--port') args.port = Number(argv[++i])
@@ -226,9 +270,11 @@ function createStagingStore (stagingDir) {
   }
 
   async function stageDoc (dir, id, doc) {
-    // Document ids may carry no filesystem-hostile characters in practice
-    // (UUIDs), but this is dev-only tooling reading its own app's output —
-    // never internet-facing input — so no extra escaping is applied here.
+    // CR-04: `id` comes straight out of an unauthenticated POST body, and this
+    // server can be bound to a LAN address. Validate BEFORE the join — see
+    // `assertSafeIdentifier`'s comment at the top of this file. A missing id
+    // (which used to produce `undefined.json`) is rejected here too.
+    assertSafeIdentifier(id, 'document id')
     await writeFile(path.join(dir, `${id}.json`), JSON.stringify(doc, null, 2), 'utf8')
   }
 
@@ -296,7 +342,16 @@ function sendJson (res, status, body) {
 
 async function readJsonBody (req) {
   const chunks = []
-  for await (const chunk of req) chunks.push(chunk)
+  let total = 0
+  for await (const chunk of req) {
+    total += chunk.length
+    if (total > MAX_REQUEST_BODY_BYTES) {
+      // CR-04: bound the read. Without this one LAN client can exhaust memory
+      // by streaming forever into a `chunks` array nothing ever caps.
+      throw new Error(`association-rest-bridge: request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes`)
+    }
+    chunks.push(chunk)
+  }
   const raw = Buffer.concat(chunks).toString('utf8')
   if (raw.length === 0) return {}
   return JSON.parse(raw)
