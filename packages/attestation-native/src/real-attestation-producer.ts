@@ -504,15 +504,31 @@ export function createRealAttestationProducer(opts: {
 		/**
 		 * D-02/D-18 (plan 51-14, closing 51-11/51-13's Known Gap): sign an arbitrary caller-supplied
 		 * digest under whichever key currently sits under `KEY_ALIAS`, via the existing
-		 * `native.signWithDeviceKey` — the SAME primitive `produceIos` already calls for its §4
-		 * proof-of-possession step, reused verbatim here rather than re-derived. Does NOT
-		 * regenerate/reprovision the key: `signWithDeviceKey` deliberately never does that itself
-		 * (module doc comment above, `:88`), and this method never calls `produceAttestation`.
+		 * `native.signWithDeviceKey`. Does NOT regenerate/reprovision the key: `signWithDeviceKey`
+		 * deliberately never does that itself (module doc comment above, `:88`), and this method
+		 * never calls `produceAttestation`.
 		 *
-		 * Digest contract (`:141`'s `base64FromBytes`, NOT `base64FromUtf8`): PLAIN standard-alphabet
-		 * base64 of the RAW digest bytes the caller supplies — never base64url, never
-		 * UTF-8-of-a-string. The caller (`ConfirmationScreen`'s `associationSign`) already passes the
-		 * raw `Digest()` bytes it computed; this method must not re-encode or re-hash them.
+		 * PLATFORM ASYMMETRY — load-bearing, do NOT collapse to one code path (found while writing
+		 * this method's own test, plan 51-14 Task 1/2):
+		 *   - `verifySigP256`/`SignatureValid` (the eventual verifier, `initialize.ts`) call
+		 *     `@noble/curves`' `verify()` with its DEFAULT `prehash: true` — i.e. it treats the
+		 *     caller-supplied `digest` as a MESSAGE and hashes it ONCE (sha256) internally before
+		 *     checking. The produced signature must equal `ECDSA_sign(sha256(digest), privateKey)`.
+		 *   - ANDROID's native `signWithDeviceKey` uses `Signature.getInstance("SHA256withECDSA")`
+		 *     (`device-signer.ts`'s "WR-10 prehash contract" comment) — it HASHES INTERNALLY, so the
+		 *     caller passes `digest` AS-IS (`base64FromBytes(digest)`) and native's own internal hash
+		 *     produces exactly `ECDSA_sign(sha256(digest), privateKey)`. This matches `produceIos`'s
+		 *     sibling call for §4 POP on Android's side of that flow (there is none — POP is iOS-only).
+		 *   - iOS's native `signWithDeviceKey` uses `.ecdsaSignatureDigestX962SHA256`
+		 *     (`AttestationNativeModule.swift`'s `signWith`), which signs an ALREADY-HASHED 32-byte
+		 *     value with NO internal hash — passing `digest` AS-IS there would sign
+		 *     `ECDSA_sign(digest, privateKey)` (missing the sha256 step), silently failing
+		 *     verification only opaquely at the authority (both are 32 bytes, so nothing type-level
+		 *     catches it). `produceIos`'s own POP call (`:274-276` above) already compensates for this
+		 *     by pre-hashing (`base64FromBytes(hasher(...))`) before calling native — this method must
+		 *     do the SAME for its own caller-supplied `digest`.
+		 * Digest contract otherwise unchanged: PLAIN standard-alphabet base64 (NOT base64url, NOT
+		 * UTF-8-of-a-string) of whichever 32 raw bytes are actually being signed.
 		 */
 		async signDeviceKeyDigest(digest: Uint8Array): Promise<Signature> {
 			const native = getNative()
@@ -526,7 +542,9 @@ export function createRealAttestationProducer(opts: {
 				;({ publicKey: signerKey } = await doProvisionDeviceKey())
 			}
 
-			const digestBase64 = base64FromBytes(digest)
+			// See this method's platform-asymmetry doc comment above — iOS must pre-hash, Android must not.
+			const bytesToSign = getPlatformOS() === 'ios' ? hasher(digest) : digest
+			const digestBase64 = base64FromBytes(bytesToSign)
 			const result = (await native.signWithDeviceKey(
 				KEY_ALIAS,
 				digestBase64,
