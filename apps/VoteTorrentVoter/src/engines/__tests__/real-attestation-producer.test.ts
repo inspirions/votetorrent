@@ -78,6 +78,10 @@ jest.mock('react-native', () => {
 
 import type { AttestationChallenge } from '@votetorrent/vote-core'
 import { computeAssertionDigest, computeBoundDigest, createRealAttestationProducer } from '@votetorrent/attestation-native'
+// Plan 51-14 (Task 2): real p256 crypto (NOT a mock) so the discrimination assertions below prove
+// something — `verify()` is the exact function `packages/vote-engine/src/database/initialize.ts`'s
+// `verifySigP256` wraps for the schema-level P-256 check.
+import { generatePrivateKey, getPublicKey, sign as p256Sign, verify as p256Verify } from '@optimystic/quereus-plugin-crypto'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the react-native mock above.
 const { __attestationNativeFake: nativeFake, __platformState: platformState } = require('react-native') as {
@@ -288,6 +292,110 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 			// Reachable in practice (a biometric re-enrolment invalidates K_vote), so it must not
 			// raise a Face ID prompt the user cannot make succeed.
 			expect(nativeFake.signWithDeviceKey).not.toHaveBeenCalled()
+		})
+	})
+
+	/**
+	 * `signDeviceKeyDigest` — D-02/D-18 (plan 51-14, closing the 51-11/51-13 Known Gap). Platform-
+	 * agnostic: unlike `produce()`, this method never branches on `Platform.OS` — it always goes
+	 * straight to `native.signWithDeviceKey`, the SAME primitive `produceIos`'s §4 POP step already
+	 * calls. Exercised here on the iOS branch because that is EXACTLY the D-17 ceremony's shape: the
+	 * key `provisionDeviceKey()` resolves (`publicKeyCompressedHex`) is byte-identical to what
+	 * `ConfirmationScreen` assigns to `AssociationRequestInit.deviceKey` — so binding the test's
+	 * "correct key" to that SAME resolved value proves the exact real-world claim (D-02: "the
+	 * association-request self-signature must verify directly against the P-256 key
+	 * provisionDeviceKey() returned").
+	 */
+	describe('signDeviceKeyDigest (D-02/D-18, plan 51-14)', () => {
+		const SIGN_VOTE_KEY_HEX = '02' + 'ef'.repeat(32)
+
+		beforeEach(() => {
+			platformState.OS = 'ios'
+			nativeFake.provisionDeviceKey.mockReset().mockResolvedValue({
+				publicKeyCompressedHex: SIGN_VOTE_KEY_HEX,
+				appAttestKeyId: 'fake-appattest-key-id',
+				keyAlias: 'VOTETORRENT_DEVICE_KEY_V1',
+			})
+			nativeFake.produceAttestation.mockReset()
+			nativeFake.signWithDeviceKey.mockReset()
+		})
+
+		it('signs via native.signWithDeviceKey using PLAIN base64 of the RAW digest bytes (never base64url, never the digest re-encoded)', async () => {
+			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: 'ab'.repeat(64) })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await producer.provisionDeviceKey()
+
+			const digest = Uint8Array.from({ length: 32 }, (_, i) => i)
+			await producer.signDeviceKeyDigest(digest)
+
+			expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1)
+			const [keyAlias, digestBase64] = nativeFake.signWithDeviceKey.mock.calls[0] as [string, string, string, string, string]
+			expect(keyAlias).toBe('VOTETORRENT_DEVICE_KEY_V1')
+			// PLAIN standard-alphabet base64 of the raw bytes — decoding it back must reproduce the
+			// exact input bytes.
+			expect(Buffer.from(digestBase64, 'base64')).toEqual(Buffer.from(digest))
+			// NOT base64url: this digest is short/random enough that a real base64url encoding of the
+			// same bytes would differ syntactically whenever the raw bytes end in `+`/`/`-triggering
+			// values — assert the two known-differing alphabet characters are absent only if produced
+			// by a wrong (base64url) encoder, i.e. assert equality against the STANDARD encoder's own
+			// output rather than a heuristic.
+			expect(digestBase64).toBe(Buffer.from(digest).toString('base64'))
+			// Never calls the attestation/regeneration path — signWithDeviceKey deliberately does not
+			// regenerate the key first (module doc comment, `:88`).
+			expect(nativeFake.produceAttestation).not.toHaveBeenCalled()
+		})
+
+		it('the returned signature verifies against the SAME P-256 key AssociationRequest.DeviceKey binds — and discriminates against a different key', async () => {
+			// Real p256 keypairs — NOT the mock's opaque strings — so verification below proves
+			// something rather than trivially passing.
+			const correctPrivateKeyHex = generatePrivateKey('p256', 'hex') as string
+			const correctPublicKeyHex = getPublicKey(correctPrivateKeyHex, 'p256', 'hex', 'hex') as string
+			const wrongPrivateKeyHex = generatePrivateKey('p256', 'hex') as string
+			const wrongPublicKeyHex = getPublicKey(wrongPrivateKeyHex, 'p256', 'hex', 'hex') as string
+			expect(wrongPublicKeyHex).not.toBe(correctPublicKeyHex)
+
+			nativeFake.provisionDeviceKey.mockResolvedValue({
+				publicKeyCompressedHex: correctPublicKeyHex,
+				appAttestKeyId: 'fake-appattest-key-id',
+				keyAlias: 'VOTETORRENT_DEVICE_KEY_V1',
+			})
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			// This IS `p256DeviceKey` in ConfirmationScreen's ceremony — the exact value assigned to
+			// `AssociationRequestInit.deviceKey`.
+			const { publicKey: associationRequestDeviceKey } = await producer.provisionDeviceKey()
+			expect(associationRequestDeviceKey).toBe(correctPublicKeyHex)
+
+			const digest = Uint8Array.from({ length: 32 }, (_, i) => (i * 7) % 256)
+			// Fake native's signature is produced with the CORRECT private key — this is what a real
+			// StrongBox/Secure-Enclave-resident key would do; the JS layer never sees the private key.
+			const signatureHex = p256Sign(digest, correctPrivateKeyHex, 'p256', 'bytes', 'hex', 'hex') as string
+			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex })
+
+			const signature = await producer.signDeviceKeyDigest(digest)
+
+			expect(signature.signature).toBe(signatureHex)
+			expect(signature.signerKey).toBe(associationRequestDeviceKey)
+			// D-02/D-04: no user id on a prospective registrant's self-signature.
+			expect(signature.signerUserId).toBe('')
+
+			// RED first: the SAME signature must NOT verify under a DIFFERENT device key — proves this
+			// assertion is discriminating, not vacuously true.
+			expect(p256Verify(digest, signature.signature, wrongPublicKeyHex, 'p256', 'bytes', 'hex', 'hex')).toBe(false)
+			// GREEN: the signature verifies under the SAME key the association request binds
+			// (`AssociationRequest.DeviceKey` / `associationRequestDeviceKey` above).
+			expect(p256Verify(digest, signature.signature, associationRequestDeviceKey, 'p256', 'bytes', 'hex', 'hex')).toBe(true)
+		})
+
+		it('falls back to resolving the current key via native.provisionDeviceKey when called before this producer instance provisioned one (a persistent hardware key from a prior session)', async () => {
+			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: 'cd'.repeat(64) })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			// Deliberately do NOT call provisionDeviceKey() first.
+			const digest = Uint8Array.from({ length: 32 }, () => 7)
+
+			const signature = await producer.signDeviceKeyDigest(digest)
+
+			expect(nativeFake.provisionDeviceKey).toHaveBeenCalledTimes(1)
+			expect(signature.signerKey).toBe(SIGN_VOTE_KEY_HEX)
 		})
 	})
 
