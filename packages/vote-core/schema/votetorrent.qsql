@@ -1946,11 +1946,13 @@ declare schema main
 
 	-- Authority-issued device-attestation challenge. Before a device can Associate, the authority issues
 	-- a one-time nonce bound to (RegistrantId, DeviceKey); the device's platform attestation (iOS App
-	-- Attest / Android Play Integrity) must answer this exact nonce. Short-lived (Expiration). One-time
-	-- use is structural, not a cross-row check: the resulting Association PK is (RegistrantId, DeviceKey),
-	-- so one satisfied challenge cannot yield a second association, and the nonce is bound to a single
-	-- registrant+device so it cannot be replayed elsewhere. The authority deletes the challenge once
-	-- consumed. Issuance/deletion are authority-authorized under the 'vrg' scope.
+	-- Attest / Android Play Integrity) must answer this exact nonce. THERE IS NO TTL: one-time use is
+	-- enforced by associate() DELETING this row once a challenge is answered (D-11), and the earlier
+	-- "Short-lived (Expiration)" wording here contradicted the D-10 note twenty lines below that removed
+	-- the column (WR-12, 51-REVIEW). One-time use is additionally structural, not a cross-row check: the
+	-- resulting Association PK is (RegistrantId, DeviceKey), so one satisfied challenge cannot yield a
+	-- second association, and the nonce is bound to a single registrant+device so it cannot be replayed
+	-- elsewhere. Issuance/deletion are authority-authorized under the 'vrg' scope.
 	table AttestationChallenge (
 		Nonce text primary key, -- random challenge nonce the device must attest against
 		AuthorityId text, -- issuing authority

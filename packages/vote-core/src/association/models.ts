@@ -27,8 +27,13 @@ export interface Association {
  * Authority-issued device-attestation challenge (D-03). Before a device can
  * Associate, the authority issues a one-time nonce bound to
  * (RegistrantId, DeviceKey); the device's platform attestation must answer
- * this exact nonce. Short-lived (expiration). One-time use is structural
- * (the Association PK + nonce binding prevent replay) — no cross-row CHECK.
+ * this exact nonce.
+ *
+ * THERE IS NO TTL. One-time use is enforced by `associate()` DELETING the
+ * challenge row once it is answered (D-11); the earlier "Short-lived
+ * (expiration)" wording sat directly above a field list that no longer has
+ * one (WR-12, 51-REVIEW). It is additionally structural — the Association PK
+ * plus the nonce binding prevent replay — with no cross-row CHECK.
  */
 export interface AttestationChallenge {
   /** Random challenge nonce the device must attest against */
