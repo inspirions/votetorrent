@@ -94,7 +94,18 @@ echo "$NEG_OUT"
 echo
 
 if [ "$MAIN_EXIT" -eq 0 ] && [ "$NEG_EXIT" -eq 1 ]; then
-	echo "FINAL VERDICT: PASS (baseline=$RESOLVED_BASELINE db=$DB_PATH schema=$OLD_SCHEMA_FILE; negative control correctly failed as expected, exit=1)"
+	# WR-11 (51-REVIEW): the verdict names what WAS and what was NOT established.
+	# "PASS" alone was read downstream as "the D-10 schema change was PROVEN safe on a real
+	# on-disk store". It was not. What is established is narrower, and the negative control is
+	# narrower still: every genuinely STRUCTURAL incompatibility probed against this pinned
+	# Quereus (PK column type change, adding a NOT NULL column with no default to a populated
+	# table, boolean -> text) reconciled SILENTLY, so the control had to fall back to a
+	# syntactically invalid DDL string. That proves the harness can report a PARSE failure. It
+	# does NOT prove the harness can detect a RECONCILE incompatibility — the only class D-10's
+	# column removal could plausibly hit.
+	echo "FINAL VERDICT: NO-REGRESSION (baseline=$RESOLVED_BASELINE db=$DB_PATH schema=$OLD_SCHEMA_FILE)"
+	echo "  ESTABLISHED: re-attach did not throw; the pre-existing rows are still readable at the exact seeded count; no 'ALTER COLUMN' appeared in any error; the Expiration column is absent."
+	echo "  NOT ESTABLISHED: that a SILENT reconcile incompatibility would have been detected. The negative control (exit=1, as required) exercises only the PARSE-failure path."
 	exit 0
 else
 	echo "FINAL VERDICT: FAIL (baseline=$RESOLVED_BASELINE db=$DB_PATH schema=$OLD_SCHEMA_FILE; main_exit=$MAIN_EXIT neg_exit=$NEG_EXIT — neg_exit must be exactly 1)"

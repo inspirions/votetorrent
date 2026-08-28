@@ -46,6 +46,16 @@
 // proves the harness's FAIL path fires for real rather than always printing
 // PASS.
 //
+// WR-11 (51-REVIEW) — WHAT THIS HARNESS DOES NOT ESTABLISH. Because the control
+// is reduced to a PARSE failure, this harness cannot detect a RECONCILE
+// incompatibility — which is the only class D-10's column removal could
+// plausibly hit. Its result is therefore a NO-REGRESSION observation ("re-attach
+// did not throw, the rows are still readable, the column is gone"), NOT a proof
+// that the D-10 schema change is safe on a real on-disk store, and
+// `run-reattach-proof.sh`'s final line says so in those words. Anyone wanting a
+// real reconcile assertion must dump the POST-REATTACH table schema and diff it
+// against the expected DDL rather than relying on an exception being raised.
+//
 // STORAGE. Neither `@quereus/plugin-leveldb` nor any other new package is
 // installed for this. A minimal Node `fs`-backed `KVStoreProvider` is
 // implemented below (`FsKVStoreProvider`), wrapping `@quereus/store`'s own
@@ -478,6 +488,12 @@ async function runReopen (dbPath) {
 	} catch (error) {
 		thrownMessage = error?.message ?? String(error)
 	}
+	// WR-11 (51-REVIEW): on the happy path `thrownMessage` is empty, so this assertion passes
+	// WITHOUT INSPECTING ANYTHING the reconcile actually did. It is a NEGATIVE assertion about
+	// the error text — "if re-attach threw, it was not an ALTER COLUMN rejection" — and nothing
+	// more. Do not read a `true` here as "the reconcile emitted no ALTER COLUMN"; only a `false`
+	// carries information. Reported as-is rather than removed, because it is exactly the
+	// D-05b/D-15 regression signal when re-attach DOES throw.
 	assertions.noAlterColumn = !thrownMessage.includes('ALTER COLUMN')
 
 	if (negativeControl) {
