@@ -195,6 +195,27 @@ describe('iOS App Attest — REAL hardware bytes (iPhone 13, 2026-08-25)', () =>
       expect(r.ok).to.equal(true)
     })
 
+    it('WR-09/WR-08: every non-leaf in the real Apple path is a CA, and the attested key is a 65-byte uncompressed P-256 point', async () => {
+      // Both checks were ADDED by the 51-REVIEW fixes, so this asserts they do not reject the
+      // genuine Apple hierarchy — the failure mode a fail-closed guard has. There is no negative
+      // control for the WR-08 shape here: reaching STEP 5 with a malformed SPKI requires a
+      // credCert that Apple itself signed, so the guard is unreachable through a chain-validated
+      // path and is defence in depth behind STEP 1. (WR-09 DOES have a negative control, on the
+      // Android sibling, where the fixtures can mint a non-CA intermediate:
+      // `key-attestation-verifier.spec.ts`.)
+      const r = await verifyAppAttest(attObj, {
+        appId: APP_ID,
+        expectedClientDataHash,
+        keyId,
+        pinnedRootsDer: [APPLE_APP_ATTEST_ROOT_DER],
+        environment: 'development',
+        now: FIXTURE_CAPTURED_AT
+      })
+      expect(r.ok, r.reason ?? '').to.equal(true)
+      expect(r.attestedPublicKeyRaw, 'the returned point must be exactly 65 bytes').to.have.lengthOf(65)
+      expect(r.attestedPublicKeyRaw![0], 'uncompressed-point tag').to.equal(0x04)
+    })
+
     it('NEGATIVE CONTROL: still rejects this same real chain when "now" is genuinely outside its validity window', async () => {
       // Proves the capture-time seam did not quietly disable expiry checking. Without this, a
       // seam that can no longer fail would be worse than the freshness problem it fixes.

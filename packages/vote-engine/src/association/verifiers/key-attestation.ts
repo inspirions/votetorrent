@@ -1,7 +1,7 @@
 // `@peculiar/x509`'s internal DI container (tsyringe) requires this polyfill
 // to be loaded before any of its exports are used — must be the first import.
 import 'reflect-metadata'
-import { X509Certificate, X509ChainBuilder } from '@peculiar/x509'
+import { BasicConstraintsExtension, X509Certificate, X509ChainBuilder } from '@peculiar/x509'
 import { AsnConvert } from '@peculiar/asn1-schema'
 import { AttestationApplicationId, KeyDescription, KeyMintKeyDescription, SecurityLevel } from '@peculiar/asn1-android'
 import { timingSafeEqual } from 'node:crypto'
@@ -149,6 +149,17 @@ export async function verifyKeyAttestation (
       pinnedRootCerts.some((r) => bytesEqual(r.rawData, chainRoot.rawData))
     if (!terminatesAtPinnedRoot) {
       return { ok: false, reason: 'no verifiable certificate chain path to a pinned Google hardware root' }
+    }
+
+    // WR-09 (51-REVIEW): every NON-LEAF position is being trusted as an ISSUER, so each must
+    // actually carry `basicConstraints: CA=true`. Chain BUILDING verifies signatures; it does not
+    // assert CA-ness, and neither did anything here. Mirrors the same loop in the iOS sibling
+    // (`verifiers/app-attest.ts`) — defence in depth rather than a demonstrated break.
+    for (let i = 1; i < chain.length; i++) {
+      const bc = chain[i]!.getExtension(BasicConstraintsExtension)
+      if (bc == null || !bc.ca) {
+        return { ok: false, reason: `certificate at chain position ${i} is not a CA — refusing to treat it as an issuer` }
+      }
     }
 
     // Expiry check across the validated chain.

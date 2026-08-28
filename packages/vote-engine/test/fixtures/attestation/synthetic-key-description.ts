@@ -76,6 +76,9 @@ export interface SyntheticKeyDescriptionOptions {
   extensionOnNonLeafOnly?: boolean
   /** Whether to interpose an intermediate CA between the leaf and the root. Default true (the realistic KeyStore.getCertificateChain() shape). */
   includeIntermediate?: boolean
+  /** Mint the intermediate WITHOUT `basicConstraints: CA=true` — exercises WR-09's
+   * refusal to treat a non-CA certificate as an issuer. Default true (a real CA). */
+  intermediateIsCa?: boolean
   /** The package name embedded in the software-enforced `attestationApplicationId`. Defaults to `SYNTHETIC_APP_PACKAGE`; override to exercise the WR-03 wrong-app negative. */
   appPackageName?: string
   /** The signing-cert SHA-256 digests embedded in `attestationApplicationId`. Defaults to `[SYNTHETIC_SIGNING_CERT_SHA256]`; override to exercise the WR-03 wrong-signature negative. */
@@ -175,7 +178,7 @@ export async function buildSyntheticKeyDescription (options: SyntheticKeyDescrip
     intermediate = await issueCert({
       issuer: options.root,
       subjectName: 'CN=VoteTorrent Test Attestation Intermediate',
-      ca: true,
+      ca: options.intermediateIsCa ?? true,
       extensions: options.extensionOnNonLeafOnly === true ? [extension] : []
     })
     signer = intermediate

@@ -79,6 +79,26 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
     expect(result.ok).to.equal(true)
   })
 
+  it('WR-09: rejects a chain whose intermediate is NOT a CA — a non-CA may never be treated as an issuer', async () => {
+    // Chain BUILDING verifies signatures; `signatureOnly: true` deliberately skips
+    // basicConstraints, so nothing here asserted CA-ness before. This is defence in depth (no
+    // exploit is constructible against Google's real hierarchy), but "we could not build an
+    // exploit" is not the same property as "a non-CA can never be an issuer".
+    const root = await generateTestRootCa()
+    const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()
+    const { chainDer } = await buildSyntheticKeyDescription({
+      root,
+      securityLevel: SecurityLevel.trustedEnvironment,
+      attestationChallenge: boundChallengeBytes(challenge),
+      leafKeyPair,
+      intermediateIsCa: false
+    })
+
+    const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
+    expect(result.ok).to.equal(false)
+    expect(result.reason).to.contain('is not a CA')
+  })
+
   it('returns ok:true for a StrongBox-backed chain (also accepted under the balanced bar)', async () => {
     const root = await generateTestRootCa()
     const { challenge, leafKeyPair } = await makeChallengeWithMatchingLeafKey()

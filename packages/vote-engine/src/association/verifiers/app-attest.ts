@@ -11,7 +11,7 @@
  * Step numbering in the comments is Apple's, so the code can be diffed against the doc.
  */
 import 'reflect-metadata'
-import { X509Certificate, X509ChainBuilder } from '@peculiar/x509'
+import { BasicConstraintsExtension, X509Certificate, X509ChainBuilder } from '@peculiar/x509'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { cborDecode, type CborValue } from '@votetorrent/vote-core'
 import { decodeAppleNonceExtension, APPLE_NONCE_OID } from './apple-nonce-extension.js'
@@ -128,6 +128,19 @@ export async function verifyAppAttest (
     for (let i = 0; i < path.length - 1; i++) {
       const okSig = await path[i]!.verify({ publicKey: path[i + 1]!.publicKey, signatureOnly: true })
       if (!okSig) return { ok: false, reason: `certificate path signature failed at link ${i}` }
+    }
+    // WR-09 (51-REVIEW): CA-ness is the other half of what "validation" means, and
+    // `signatureOnly: true` above deliberately skips it — the same reason the expiry loop below
+    // had to be re-added by hand. Every NON-LEAF position in the path is being trusted as an
+    // ISSUER, so each must actually carry `basicConstraints: CA=true`. Defence in depth: no
+    // exploit is constructible against Apple's own hierarchy (an App Attest leaf key can only
+    // produce assertions, never certificate signatures), but "we could not build an exploit" is
+    // not the same property as "a non-CA can never be treated as an issuer".
+    for (let i = 1; i < path.length; i++) {
+      const bc = path[i]!.getExtension(BasicConstraintsExtension)
+      if (bc == null || !bc.ca) {
+        return { ok: false, reason: `certificate at path position ${i} is not a CA — refusing to treat it as an issuer` }
+      }
     }
     // Expiry across the validated path. A cryptographically intact chain is not a VALID one: every
     // `verify()` above passes `signatureOnly: true`, which deliberately skips the validity window, so
