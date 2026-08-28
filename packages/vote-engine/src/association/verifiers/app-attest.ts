@@ -164,6 +164,17 @@ export async function verifyAppAttest (
     const attestedPublicKeyRaw = new Uint8Array(credCert.publicKey.rawData)
     // `publicKey.rawData` is SPKI DER; the raw X9.62 point is its trailing BIT STRING contents.
     // For P-256 SPKI that is the last 65 bytes (0x04 || X(32) || Y(32)).
+    //
+    // WR-08 (51-REVIEW): validate the shape BEFORE slicing. `subarray` with a NEGATIVE start
+    // silently counts from the END rather than throwing, so an SPKI shorter than 65 bytes yielded
+    // a truncated slice that was then compared in STEP 5 AND returned as `attestedPublicKeyRaw`
+    // for `app-attest-assertion.ts` to hand to `p256.verify`. It failed closed, but the reported
+    // reason blamed the assertion rather than the malformed key, and the keyId comparison was
+    // performed against garbage. Checking the uncompressed-point tag (0x04) also rejects a
+    // compressed or non-EC key rather than hashing whatever bytes happened to be there.
+    if (attestedPublicKeyRaw.length < 65 || attestedPublicKeyRaw[attestedPublicKeyRaw.length - 65] !== 0x04) {
+      return { ok: false, reason: 'credCert public key is not an uncompressed P-256 point (SPKI is too short, or its trailing point does not begin with 0x04)' }
+    }
     const rawPoint = attestedPublicKeyRaw.subarray(attestedPublicKeyRaw.length - 65)
     const computedKeyId = sha256(rawPoint)
     if (!bytesEqual(computedKeyId, expect.keyId)) {
