@@ -230,6 +230,44 @@ describe('AssociationEngine', () => {
       const association = await engine.getAssociation(registrantId, deviceKey)
       expect(association!.deviceHash).to.equal(deviceHash)
     })
+
+    it('WR-01: refuses a submitted deviceHash that is not sha256(attestation.deviceId), and writes no row', async () => {
+      // `Association.DeviceHash` feeds the public `AssociationDeviceHash` transparency index —
+      // the mechanism for spotting one physical device across registrants. It arrives here off
+      // the wire (`doc.answer.deviceHash`), and no schema CHECK binds it to
+      // `AssociationPrivate.DeviceId`, so a fabricated value could manufacture a collision or
+      // hide a real one. The engine derives the value itself and refuses a disagreeing one.
+      const { auth, registrantId, engine, sign } = await setupAssociationTest()
+      const deviceKey = nextDeviceKey()
+      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
+      const attestation = makeDeviceAttestation()
+      const fabricated = sha256Hex('some-other-device-id')
+      expect(fabricated).to.not.equal(sha256Hex(attestation.deviceId))
+
+      let thrown: unknown
+      try {
+        await engine.associate({ registrantId, deviceKey, deviceHash: fabricated, nonce: challenge.nonce, attestation }, sign)
+      } catch (err) { thrown = err }
+
+      expect(thrown, 'a fabricated deviceHash must be refused').to.be.instanceOf(Error)
+      expect((thrown as Error).message).to.contain('authority-derived')
+      const written = await auth.ctx.db
+        .prepare('select count(*) as n from Association where RegistrantId = :registrantId and DeviceKey = :deviceKey')
+        .get({ registrantId, deviceKey })
+      expect(written?.n, 'no Association row may be written').to.equal(0)
+    })
+
+    it('WR-01: the published deviceHash is the authority-derived one, and omitting it publishes null', async () => {
+      const { registrantId, engine, sign } = await setupAssociationTest()
+      const deviceKey = nextDeviceKey()
+      const challenge = await engine.issueAttestationChallenge(registrantId, deviceKey, sign)
+      const attestation = makeDeviceAttestation()
+
+      // Omitted — the transparency toggle is OFF, so nothing is published.
+      await engine.associate({ registrantId, deviceKey, nonce: challenge.nonce, attestation }, sign)
+      const association = await engine.getAssociation(registrantId, deviceKey)
+      expect(association!.deviceHash, 'an omitted deviceHash must publish nothing').to.equal(undefined)
+    })
   })
 
   describe('associate — seam-reject (D-07)', () => {

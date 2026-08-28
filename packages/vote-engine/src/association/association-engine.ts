@@ -404,6 +404,26 @@ export class AssociationEngine implements IAssociationEngine {
 
     // D-06 device-uniqueness (authority-side — needs the private DeviceId).
     const deviceIdHash = sha256Hex(attestation.deviceId)
+
+    // WR-01 (51-REVIEW): `Association.DeviceHash` is AUTHORITY-DERIVED, never taken from the wire.
+    //
+    // The schema documents it as "sha256 hash of the device's ID" and the public
+    // `AssociationDeviceHash` index is the TRANSPARENCY mechanism for spotting one physical
+    // device across registrants — but no CHECK binds the column to `AssociationPrivate.DeviceId`.
+    // `init.deviceHash` reaches here from `doc.answer.deviceHash`, i.e. off the wire, so a voter
+    // who published `sha256("some-other-device-id")` could manufacture a collision or hide a real
+    // one, and the index would faithfully report the fabrication.
+    //
+    // The submitted field is therefore treated as a BOOLEAN TOGGLE ("publish my device hash"),
+    // and the VALUE published is always the one derived here. A submitted value that disagrees is
+    // rejected rather than silently corrected, so a caller that computed it differently gets an
+    // attributable error instead of a row that does not say what they think it says.
+    if (deviceHash !== undefined && deviceHash !== deviceIdHash) {
+      throw new Error(
+        'AssociationEngine.associate: init.deviceHash does not equal sha256(attestation.deviceId) — Association.DeviceHash is authority-derived and may not be chosen by the submitter (WR-01)'
+      )
+    }
+    const publishedDeviceHash = deviceHash === undefined ? null : deviceIdHash
     const conflictingRow = await ctx.db
       .prepare('select RegistrantId from AssociationPrivate where DeviceId = :deviceId and RegistrantId <> :registrantId limit 1')
       .get({ deviceId: attestation.deviceId, registrantId })
@@ -452,7 +472,7 @@ export class AssociationEngine implements IAssociationEngine {
         const associationTid = await allocateTid(ctx.db, 'association')
         const rowDigestRow = await ctx.db
           .prepare('select Digest(:registrantId, :deviceKey, :deviceHash, :attestationCid, :expiration) as d')
-          .get({ registrantId, deviceKey, deviceHash: deviceHash ?? null, attestationCid: cid, expiration })
+          .get({ registrantId, deviceKey, deviceHash: publishedDeviceHash, attestationCid: cid, expiration })
         if (!rowDigestRow || rowDigestRow.d == null) {
           throw new Error('AssociationEngine.associate: Digest() returned null for Association row-level signature — crypto plugin not registered?')
         }
@@ -463,7 +483,7 @@ export class AssociationEngine implements IAssociationEngine {
           tid: associationTid,
           registrantId,
           deviceKey,
-          deviceHash: deviceHash ?? null,
+          deviceHash: publishedDeviceHash,
           attestationCid: cid,
           expirationDeferred,
           rowSignorKey: rowSignature.signerKey,
@@ -487,7 +507,7 @@ export class AssociationEngine implements IAssociationEngine {
           {
             registrantId,
             deviceKey,
-            deviceHash: deviceHash ?? null,
+            deviceHash: publishedDeviceHash,
             attestationCid: cid,
             expiration,
             signorKey: rowSignature.signerKey,
