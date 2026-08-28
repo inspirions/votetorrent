@@ -2,6 +2,7 @@ import type { AssociationAttestationAnswer, AssociationRequestInit, Signature } 
 import type { IAssociationRequestTransport, AssociationDecisionNotice } from './association-request-transport.js'
 import { assertKnownAssociationStatus } from './association-request-transport.js'
 import { digestToBytes } from '../../utils.js'
+import { computeAssociationAttestationDigest, computeAssociationRequestDigest } from './association-request-digest.js'
 
 /**
  * rest-association-transport.ts — the D-08 pull-based REST binding, one of
@@ -23,13 +24,18 @@ import { digestToBytes } from '../../utils.js'
  * small standalone Node service, never inside the app bundle. None is added
  * in this phase.
  *
- * **3. Zero new dependencies.** This file uses only the Node/RN built-in
- * `fetch` and `AbortSignal.timeout`. No promise-based HTTP-client package and
- * no server-side web framework may be added for this file's sake — none
- * exists anywhere in this monorepo today, and adding one for a single JSON
- * round-trip is unwarranted — this codebase has a documented aversion to new
- * React Native bundling risk (Phase 44's `@peculiar` device-boot wall cost
- * two plans to unstick).
+ * **3. Zero new dependencies.** For transport this file uses only the Node/RN
+ * built-in `fetch` and `AbortSignal.timeout`. No promise-based HTTP-client
+ * package and no server-side web framework may be added for this file's sake
+ * — none exists anywhere in this monorepo today, and adding one for a single
+ * JSON round-trip is unwarranted — this codebase has a documented aversion to
+ * new React Native bundling risk (Phase 44's `@peculiar` device-boot wall
+ * cost two plans to unstick). The one non-transport import,
+ * `./association-request-digest.js` (item 8b), pulls in
+ * `@optimystic/quereus-plugin-crypto`, which is already a direct dependency
+ * of this package and already bundles on device via
+ * `verifiers/digest-binding.ts` — it is not a new dependency and adds no new
+ * bundling risk.
  *
  * **4. What makes a fetched document trustworthy here.** An `https://`
  * `baseUrl` is the expectation for any real deployment (`http://` is
@@ -66,7 +72,21 @@ import { digestToBytes } from '../../utils.js'
  * request-submission endpoints. Each leg's handshake echoes back the field
  * the requester signed over, and the binding REJECTS a divergence before
  * signing anything: leg 1 checks `submittedAt`, leg 2 checks `requestId` and
- * `nonce`. Without this a hostile endpoint chooses what the device signs.
+ * `nonce`.
+ *
+ * **8b. THE ECHO CHECKS ARE NOT WHAT STOPS A HOSTILE ENDPOINT (CR-03).** An
+ * echo is satisfied by any endpoint that hands back a value out of the very
+ * request body it was just given, so on its own it proves NOTHING about the
+ * `digest` sitting beside it. What actually stops a hostile or MITM'd
+ * endpoint from choosing the 32 bytes the device's HARDWARE key signs is the
+ * LOCAL RECOMPUTATION on both legs: `association-request-digest.ts` rebuilds
+ * the engine's own digest tuple from values the client already holds, and
+ * this binding refuses to sign a handshake digest that does not match it
+ * byte for byte. The echo checks are kept because they name the divergence
+ * more precisely than a digest mismatch can, but they are a diagnostic, not
+ * the control. Never remove the recomputation and leave the echoes in place
+ * believing they cover it — an unverified server-chosen digest is a blind
+ * signing oracle over the Secure Enclave / StrongBox key.
  *
  * **9. This is the D-17 hardware-ceremony carrier.** This binding is the
  * ONLY viable carrier for a real two-party App Attest / Play Integrity
@@ -177,6 +197,34 @@ export class RestAssociationTransport implements IAssociationRequestTransport {
   }
 
   /**
+   * CR-03: refuse to sign 32 bytes the endpoint chose.
+   *
+   * `expected` is recomputed locally from values the client already holds; `received` is what
+   * the digest handshake returned. They are compared as BYTES, not as strings, because the wire
+   * form is not pinned to one encoding — `digestToBytes` accepts both the 43-char base64url the
+   * SQL `Digest()` emits and a 64-char hex rendering of the same 32 bytes, and a string compare
+   * would reject an honest endpoint that used the other one.
+   *
+   * A malformed `received` throws out of `digestToBytes` with its own loud message; that is the
+   * correct outcome here too, so it is deliberately not caught.
+   *
+   * Neither the digest bytes nor any signature is ever put in the message (module rule).
+   */
+  private assertDigestMatchesLocalRecomputation (received: string, expected: string, site: string): void {
+    const receivedBytes = digestToBytes(received)
+    const expectedBytes = digestToBytes(expected)
+    let diff = receivedBytes.length ^ expectedBytes.length
+    for (let i = 0; i < Math.min(receivedBytes.length, expectedBytes.length); i++) {
+      diff |= receivedBytes[i]! ^ expectedBytes[i]!
+    }
+    if (diff !== 0) {
+      throw new Error(
+        `RestAssociationTransport.${site}: the digest handshake returned a digest that does not match the tuple this client computed locally — refusing to sign endpoint-chosen bytes with the device key`
+      )
+    }
+  }
+
+  /**
    * Submits an association request (leg 1). Resolves the digest via an
    * engine-authoritative handshake (R-1) rather than reimplementing
    * `Digest()` client-side (it is the schema's function, and a TypeScript
@@ -188,6 +236,17 @@ export class RestAssociationTransport implements IAssociationRequestTransport {
     requesterKey: string,
     signatureOrCallback: SignatureOrCallback
   ): Promise<string> {
+    // Pre-flight, BEFORE any network call: the engine binds `DeviceKey = requesterKey`, and so
+    // does the leg-1 digest tuple this binding recomputes below. Mirroring
+    // `AssociationEngine.submitAssociationRequest`'s own guard means a caller who bound the two
+    // independently gets an attributable error instead of an opaque digest mismatch — and the
+    // hostile-endpoint round trip never happens at all.
+    if (init.deviceKey !== requesterKey) {
+      throw new Error(
+        `RestAssociationTransport.submitRequest: init.deviceKey (${init.deviceKey}) does not match requesterKey (${requesterKey}) — the digest tuple binds requesterKey into the DeviceKey position, so the two must agree`
+      )
+    }
+
     // --- R-1: digest handshake -------------------------------------------
     const handshake = await this.requestJson<DigestHandshakeResponseBody>('/association-requests/digest', {
       method: 'POST',
@@ -219,6 +278,16 @@ export class RestAssociationTransport implements IAssociationRequestTransport {
         "RestAssociationTransport.submitRequest: the digest handshake's submittedAt echo diverges from init.submittedAt — the endpoint digested a tuple the requester did not sign"
       )
     }
+
+    // --- CR-03: the digest must be one this client can derive itself ------
+    // The submittedAt echo above is a diagnostic, NOT a control (see header 8b): the endpoint
+    // could satisfy it by handing back the value it was just given. This is the check that
+    // actually pins the bytes.
+    this.assertDigestMatchesLocalRecomputation(
+      handshake.digest,
+      computeAssociationRequestDigest(init, requesterKey),
+      'submitRequest'
+    )
 
     // --- Resolve the signature ---------------------------------------------
     const digestBytes = digestToBytes(handshake.digest)
@@ -288,6 +357,15 @@ export class RestAssociationTransport implements IAssociationRequestTransport {
         "RestAssociationTransport.submitAttestation: the digest handshake's nonce echo diverges from answer.nonce — the endpoint digested a tuple the requester did not sign"
       )
     }
+
+    // --- CR-03: the digest must be one this client can derive itself ------
+    // Same reasoning as leg 1 (header 8b): the requestId/nonce echoes above are diagnostics,
+    // and this is the check that stops the endpoint choosing what the hardware key signs.
+    this.assertDigestMatchesLocalRecomputation(
+      handshake.digest,
+      computeAssociationAttestationDigest(answer),
+      'submitAttestation'
+    )
 
     // --- Resolve the signature ---------------------------------------------
     const digestBytes = digestToBytes(handshake.digest)

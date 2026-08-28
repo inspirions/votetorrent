@@ -52,25 +52,25 @@
  * ============================================================================
  * 4. DECLARED BLIND SPOT — narrower than it looks
  * ============================================================================
- * `createDigestIssuer()` below is a TEST-LOCAL CANONICAL STAND-IN, not the
- * schema's real `Digest()` SQL function. This suite proves the two real
- * bindings agree WITH EACH OTHER and with one issuer; it does NOT prove
- * either agrees with the schema's `SignatureValid` CHECK. For leg 1 the
- * field order reproduced here IS the real, load-bearing order recorded in
- * `51-01-SUMMARY.md` ("Digest Argument Orders — load-bearing for
- * 51-08/51-09 — reproduce field-for-field"): `Id, AuthorityId, RegistrantId,
- * DeviceKey, ElectionId, SubmittedAt`. Reproducing it here is still a JS
- * reimplementation, not an invocation of the schema's own `Digest()`
- * function, so the same declared blind spot applies. For leg 2 (the
- * attestation answer) NO schema `SignatureValid`-style CHECK exists yet at
- * all — `doc/registration.md` describes the answer as consumed directly by
- * `associate()`, not staged in its own signed table — so the field order
- * used here (`requestId, nonce, requesterKey`) is entirely INVENTED for this
- * suite's own internal consistency and carries no schema authority
- * whatsoever. Closing that gap for either leg, if it is ever closed, is
- * 51-08/51-09's job (an offline pre-resolved-signature round-trip against
- * the real schema, exactly as `registration-request.spec.ts` already does
- * for registration) — not this suite's.
+ * NARROWED BY CR-03 (51-REVIEW). `createDigestIssuer()` below used to be a test-local
+ * stand-in — a `sha256` over a `field=value` join, with leg 2's field order entirely
+ * invented. It is no longer. Both legs now go through
+ * `src/association/transport/association-request-digest.ts`, the SAME pure helper
+ * `RestAssociationTransport` uses to reject an endpoint-chosen digest, whose parity with a
+ * LIVE `select Digest(...)` is asserted byte-for-byte in `association-request-digest.spec.ts`.
+ * The field orders are consequently the real, load-bearing ones:
+ *   - leg 1 — `Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, SubmittedAt`
+ *     (`AssociationRequest.SignatureValid`, recorded in `51-01-SUMMARY.md`);
+ *   - leg 2 — `RequestId, Nonce, AttestationJson, DeviceHash`, matching
+ *     `AssociationEngine.validateStagedAttestationAnswer` and the bridge
+ *     (`scripts/device-proof/association-rest-bridge.mjs`). Leg 2 still has NO schema
+ *     `SignatureValid`-style CHECK behind it — it is engine-enforced only (T-51-08-06) — but
+ *     the order is now the engine's, not this suite's invention.
+ * What REMAINS a blind spot: this suite still does not drive a real `AssociationEngine` write,
+ * so it does not prove a delivered signature satisfies the schema's `SignatureValid` CHECK
+ * end to end. That is 51-08/51-09's job (an offline pre-resolved-signature round-trip against
+ * the real schema, exactly as `registration-request.spec.ts` already does for registration) —
+ * not this suite's.
  *
  * ============================================================================
  * 5. WHAT THIS SUITE DELIBERATELY DOES NOT ASSERT
@@ -107,6 +107,11 @@ import type { AssociationAttestationAnswer, AssociationRequestInit, DeviceAttest
 import { FilesystemAssociationTransport } from '../src/association/transport/filesystem-association-transport.js'
 import type { StagedAssociationRequest, StagedAttestation, AssociationDecisionDocument } from '../src/association/transport/filesystem-association-transport.js'
 import { RestAssociationTransport } from '../src/association/transport/rest-association-transport.js'
+import {
+  computeAssociationAttestationDigest,
+  computeAssociationRequestDigest
+} from '../src/association/transport/association-request-digest.js'
+import { digestToBytes } from '../src/utils.js'
 import type { IAssociationRequestTransport } from '../src/association/transport/association-request-transport.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 
@@ -121,9 +126,11 @@ import { randomTestKeyPair } from './fixtures/keys.js'
 // (mirroring the device's own self-signature), though this suite does not
 // enforce that equality structurally.
 //
-// Leg 2 has no schema-defined digest at all (see header §4) — its field order
-// is an invented, test-local stand-in that exists only so both bindings can
-// be driven identically.
+// Leg 2 has no schema CHECK behind it, but it DOES have a load-bearing engine-side order:
+// `Digest(RequestId, Nonce, AttestationJson, DeviceHash)`, from
+// `AssociationEngine.validateStagedAttestationAnswer` and served by the bridge. Both orders
+// below are documentation of what the shared helper computes — the helper, not these arrays,
+// is what actually produces the bytes (CR-03).
 // ---------------------------------------------------------------------------
 const REQUEST_DIGEST_FIELD_ORDER = Object.freeze([
   'id',
@@ -137,7 +144,8 @@ const REQUEST_DIGEST_FIELD_ORDER = Object.freeze([
 const ATTESTATION_DIGEST_FIELD_ORDER = Object.freeze([
   'requestId',
   'nonce',
-  'requesterKey'
+  'attestationJson',
+  'deviceHash'
 ] as const)
 
 // ---------------------------------------------------------------------------
@@ -171,39 +179,36 @@ interface DigestIssuer {
  * `submittedAt` is never generated, defaulted, or re-derived here — a
  * missing or malformed one is a fixture bug and throws loudly.
  */
-function computeCanonicalRequestDigest (init: AssociationRequestInit): { input: Record<string, string>; digest: Uint8Array } {
+function computeCanonicalRequestDigest (init: AssociationRequestInit, requesterKey: string): { input: Record<string, string>; digest: Uint8Array } {
   if (typeof init.submittedAt !== 'string' || init.submittedAt.length === 0 || !init.submittedAt.endsWith('Z')) {
     throw new Error(
       `computeCanonicalRequestDigest: init.submittedAt must be a non-empty Z-suffixed string (fixture bug), got ${JSON.stringify(init.submittedAt)}`
     )
   }
-  const input: Record<string, string> = {}
-  for (const field of REQUEST_DIGEST_FIELD_ORDER) {
-    let value: string
-    switch (field) {
-      case 'id': value = init.id; break
-      case 'authorityId': value = init.authorityId; break
-      case 'registrantId': value = init.registrantId; break
-      case 'deviceKey': value = init.deviceKey; break
-      case 'electionId': value = init.electionId ?? ''; break
-      case 'submittedAt': value = init.submittedAt; break
-    }
-    input[field] = value
+  // `requesterKey`, not `init.deviceKey`, occupies the DeviceKey position — that is what the
+  // engine binds. Every fixture in this file sets them equal; the parameter exists so the
+  // equality is visible rather than assumed.
+  const input: Record<string, string> = {
+    id: init.id,
+    authorityId: init.authorityId,
+    registrantId: init.registrantId,
+    deviceKey: requesterKey,
+    electionId: init.electionId ?? '',
+    submittedAt: init.submittedAt
   }
-  const line = REQUEST_DIGEST_FIELD_ORDER.map((field) => `${field}=${input[field]}`).join('\n')
-  const digest = sha256(utf8ToBytes(line))
+  const digest = digestToBytes(computeAssociationRequestDigest(init, requesterKey))
   return { input, digest }
 }
 
-/** The pure leg-2 digest computation (invented, test-local — see header §4). */
-function computeCanonicalAttestationDigest (answer: AssociationAttestationAnswer, requesterKey: string): { input: Record<string, string>; digest: Uint8Array } {
+/** The pure leg-2 digest computation — the engine's own tuple (see header §4). */
+function computeCanonicalAttestationDigest (answer: AssociationAttestationAnswer): { input: Record<string, string>; digest: Uint8Array } {
   const input: Record<string, string> = {
     requestId: answer.requestId,
     nonce: answer.nonce,
-    requesterKey
+    attestationJson: JSON.stringify(answer.attestation),
+    deviceHash: answer.deviceHash ?? ''
   }
-  const line = ATTESTATION_DIGEST_FIELD_ORDER.map((field) => `${field}=${input[field]}`).join('\n')
-  const digest = sha256(utf8ToBytes(line))
+  const digest = digestToBytes(computeAssociationAttestationDigest(answer))
   return { input, digest }
 }
 
@@ -214,11 +219,10 @@ function createDigestIssuer (): DigestIssuer {
   const attestationCounts = new Map<string, number>()
 
   function issueRequest (init: AssociationRequestInit, requesterKey: string): RequestDigestRecord {
-    void requesterKey // not a digest input on this leg — see header §4/module-B comment.
     requestCounts.set(init.id, (requestCounts.get(init.id) ?? 0) + 1)
     const existing = requestRecords.get(init.id)
     if (existing !== undefined) return existing
-    const { input, digest } = computeCanonicalRequestDigest(init)
+    const { input, digest } = computeCanonicalRequestDigest(init, requesterKey)
     const record: RequestDigestRecord = { submittedAt: init.submittedAt, input, digest }
     requestRecords.set(init.id, record)
     return record
@@ -238,7 +242,8 @@ function createDigestIssuer (): DigestIssuer {
     attestationCounts.set(answer.requestId, (attestationCounts.get(answer.requestId) ?? 0) + 1)
     const existing = attestationRecords.get(answer.requestId)
     if (existing !== undefined) return existing
-    const { input, digest } = computeCanonicalAttestationDigest(answer, requesterKey)
+    void requesterKey // leg 2's engine tuple does not include it — DeviceHash occupies that slot.
+    const { input, digest } = computeCanonicalAttestationDigest(answer)
     const record: AttestationDigestRecord = { input, digest }
     attestationRecords.set(answer.requestId, record)
     return record
@@ -634,7 +639,7 @@ export function runAssociationRequestTransportConformance (testCase: Conformance
 
       const verification = secp256k1.verify(
         hexToBytes(record.signature.signature),
-        computeCanonicalRequestDigest(record.init).digest,
+        computeCanonicalRequestDigest(record.init, record.requesterKey).digest,
         hexToBytes(record.requesterKey)
       )
       expect(verification, 'the delivered signature must verify against the digest the receiving side issued').to.equal(true)
@@ -750,7 +755,7 @@ export function runAssociationRequestTransportConformance (testCase: Conformance
 
       // --- leg 1: submitRequest with an ALREADY-RESOLVED Signature ---------
       const init = makeInit(signer.publicHex)
-      const requestDigest = computeCanonicalRequestDigest(init).digest
+      const requestDigest = computeCanonicalRequestDigest(init, signer.publicHex).digest
       const preResolvedRequestSignature = await signer.sign(requestDigest)
       await binding.transport.submitRequest(init, signer.publicHex, preResolvedRequestSignature)
       const deliveredRequest = (await binding.deliveredRequests()).find((r) => r.requestId === init.id)
@@ -759,7 +764,7 @@ export function runAssociationRequestTransportConformance (testCase: Conformance
 
       // --- leg 2: submitAttestation with an ALREADY-RESOLVED Signature -----
       const answer = makeAttestationAnswer()
-      const attestationDigest = computeCanonicalAttestationDigest(answer, signer.publicHex).digest
+      const attestationDigest = computeCanonicalAttestationDigest(answer).digest
       const preResolvedAttestationSignature = await signer.sign(attestationDigest)
       await binding.transport.submitAttestation(answer, signer.publicHex, preResolvedAttestationSignature)
       const deliveredAttestation = (await binding.deliveredAttestations()).find((r) => r.requestId === answer.requestId)
