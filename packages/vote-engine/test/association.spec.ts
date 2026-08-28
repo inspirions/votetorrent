@@ -23,7 +23,7 @@ import {
   BuilderAlreadyCommittedError,
   BuilderValidationError
 } from '@votetorrent/vote-core'
-import type { AttestationChallenge, AttestationVerification, DeviceAttestation, IAttestationVerifier, Signature, Scope } from '@votetorrent/vote-core'
+import type { AssociationRequestInit, AttestationChallenge, AttestationVerification, DeviceAttestation, IAttestationVerifier, Signature, Scope } from '@votetorrent/vote-core'
 import { AssociationEngine } from '../src/association/association-engine.js'
 import { MockAssociationEngine } from '../src/association/mock-association-engine.js'
 import { StubAttestationVerifier } from '../src/association/stub-attestation-verifier.js'
@@ -501,6 +501,38 @@ describe('AssociationEngine', () => {
         threw = true
       }
       expect(threw, 'expected a second associate() for the same key to throw (mock replay parity)').to.be.true
+    })
+
+    it("WR-04: the 'c' row's challengeNonce is the nonce of an ACTUALLY ISSUED challenge", async () => {
+      // The real engine enforces `answer.nonce !== challengeNonce -> throw`. The mock used to
+      // publish a second, unrelated UUID and discard the challenge it had just minted, so a
+      // screen that paired a 'c' row's nonce with getAttestationChallenges() validated an
+      // inconsistent state under the mock and would have failed against the real engine.
+      const mock = new MockAssociationEngine()
+      const dummySig: Signature = { signature: 'a'.repeat(128), signerKey: 'b'.repeat(66), signerUserId: 'user-1' }
+      const authorityId = 'mock-authority-wr04'
+      const registrantId = nextRegistrantId()
+      const deviceKey = nextDeviceKey()
+
+      const requestId = await mock.submitAssociationRequest(
+        {
+          id: 'mock-request-wr04',
+          authorityId,
+          registrantId,
+          deviceKey,
+          submittedAt: new Date().toISOString()
+        } as AssociationRequestInit,
+        deviceKey,
+        dummySig
+      )
+
+      const result = await mock.processPendingAssociationRequests(authorityId, dummySig)
+      expect(result.challengesIssued).to.equal(1)
+
+      const row = await mock.getAssociationRequest(requestId)
+      expect(row?.status).to.equal('c')
+      const issued = await mock.getAttestationChallenges(registrantId)
+      expect(issued.map((c) => c.nonce), "the published challengeNonce must be one getAttestationChallenges() returns").to.include(row!.challengeNonce)
     })
   })
 })

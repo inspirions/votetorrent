@@ -225,9 +225,14 @@ export class MockAssociationEngine implements IAssociationEngine {
 
     for (const [requestId, request] of this.associationRequests) {
       if (request.authorityId !== authorityId || request.status !== 'p') continue
-      const nonce = crypto.randomUUID()
-      await this.issueAttestationChallenge(request.registrantId, request.deviceKey, signatureOrCallback, request.electionId)
-      this.associationRequests.set(requestId, { ...request, status: 'c', challengeNonce: nonce })
+      // WR-04 (51-REVIEW): publish the nonce the challenge ACTUALLY carries. This used to mint a
+      // second, unrelated UUID and discard `issueAttestationChallenge`'s return value, so the
+      // request's `challengeNonce` and `getAttestationChallenges()` never agreed — inverting the
+      // one invariant the real engine enforces (`association-engine.ts`:
+      // `answer.nonce !== challengeNonce` -> throw). A screen driven by the mock could pair the
+      // two, pass here, and fail against the real engine.
+      const challenge = await this.issueAttestationChallenge(request.registrantId, request.deviceKey, signatureOrCallback, request.electionId)
+      this.associationRequests.set(requestId, { ...request, status: 'c', challengeNonce: challenge.nonce })
       challengesIssued++
     }
 
