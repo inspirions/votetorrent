@@ -17,7 +17,7 @@
 
 import { digestFields, resolveHasher, resolveOutputEncoder } from '@optimystic/quereus-plugin-crypto'
 import { cborDecode, type CborValue } from '@votetorrent/vote-core'
-import type { AttestationChallenge, DeviceAttestation, IOSAttestationDetails } from '@votetorrent/vote-core'
+import type { AttestationChallenge, DeviceAttestation, IOSAttestationDetails, Signature } from '@votetorrent/vote-core'
 // Type-only import — erased at compile time (isolatedModules requires this to be explicit), so
 // it produces NO runtime require of './specs/NativeAttestation' and therefore does not trigger
 // that module's top-level `TurboModuleRegistry.getEnforcing(...)` call. The runtime value is
@@ -213,7 +213,19 @@ function getPlatformOS(): string {
 	return (require('react-native') as { Platform: { OS: string } }).Platform.OS
 }
 
-/** Package-local two-method producer shape (D-08 — structurally, not nominally, typed). */
+/**
+ * Package-local three-method producer shape (D-08 — structurally, not nominally, typed).
+ *
+ * `signDeviceKeyDigest` (plan 51-14, closing the Known Gap flagged by 51-11/51-13): signs an
+ * arbitrary caller-supplied digest under whichever key currently sits under `KEY_ALIAS`, via the
+ * existing `native.signWithDeviceKey` (Phase 49, D-06/D-04) — the SAME primitive `produceIos`
+ * already calls for its §4 proof-of-possession step. This is wiring, not new native work. It is
+ * the seam `apps/VoteTorrentVoter/src/engines/attestation-producer.ts`'s `AttestationProducer`
+ * interface declares (optionally, for structural flexibility) so the voter's self-signed
+ * association-request/attestation-answer submissions (D-02/D-18) can sign directly under the
+ * hardware-backed P-256 device key instead of throwing "Device attestation signer is not
+ * available yet" (`ConfirmationScreen.tsx`'s guard).
+ */
 interface RealAttestationProducer {
 	/**
 	 * `reprovisioned` is TRUE when the native side found the stored vote key DESTROYED (a biometric
@@ -223,6 +235,7 @@ interface RealAttestationProducer {
 	 */
 	provisionDeviceKey(): Promise<{ publicKey: string; reprovisioned?: boolean; voteKeyProbe?: string }>
 	produce(challenge: AttestationChallenge): Promise<DeviceAttestation>
+	signDeviceKeyDigest(digest: Uint8Array): Promise<Signature>
 }
 
 /**
@@ -365,45 +378,70 @@ export function createRealAttestationProducer(opts: {
 	 */
 	enableDeviceCheck?: boolean
 }): RealAttestationProducer {
-	return {
-		async provisionDeviceKey() {
-			const native = getNative()
-			const result = (await native.provisionDeviceKey(KEY_ALIAS)) as {
-				publicKeyBase64?: string
-				publicKeyCompressedHex?: string
-				keyAlias: string
-				reprovisioned?: boolean
-				voteKeyProbe?: string
-			}
+	// Cache of the CURRENT device public key, set by `provisionDeviceKey()` and refreshed by
+	// `produce()` when the key under `KEY_ALIAS` changes (Android's `produceAttestation` always
+	// rotates it — D-13 key non-reuse; iOS's does not, in the ordinary path). `signDeviceKeyDigest`
+	// (plan 51-14) reads this to report an honest `Signature.signerKey` without an extra native
+	// round trip on its hot path. Scoped to ONE producer instance/ceremony — `resolveAttestationProducer()`
+	// is called fresh per `ConfirmationScreen.onConfirm()` attempt, so this never leaks across ceremonies.
+	//
+	// IMPORTANT — this field is cosmetic for cryptographic PURPOSES on the association path:
+	// `association-engine.ts`'s `submitAssociationRequest`/`validateStagedAttestationAnswer` verify
+	// the raw signature bytes against the caller-supplied `requesterKey` argument
+	// (`ConfirmationScreen`'s `p256DeviceKey`, captured once at ceremony start), never against this
+	// `signerKey` field. On ANDROID specifically, because `produceAttestation` unconditionally
+	// deletes-and-regenerates the key, a `signDeviceKeyDigest` call made AFTER `produce()` (the
+	// second association call site, `submitAttestation`) signs with the POST-rotation key while
+	// `requesterKey` still names the PRE-rotation one — the authority-side verification then fails
+	// closed. This is a real, load-bearing latent gap, NOT fixed by this cache (see plan 51-14
+	// SUMMARY's "Known Gaps" — it needs either an architectural change to Android's key non-reuse
+	// design or `ConfirmationScreen` re-deriving `p256DeviceKey` post-`produce()`, both out of this
+	// plan's scope). It does NOT affect iOS/D-17: `produceIos` throws before ever reaching this cache
+	// update if the vote key was reprovisioned out from under it (§3.4 CALLER OBLIGATION below).
+	let currentDeviceKey: string | undefined
 
-			// The two platforms hand back DIFFERENT key encodings, and the caller (ConfirmationScreen)
-			// feeds this value straight into `issueAttestationChallenge` as `challenge.deviceKey` — so
-			// picking the wrong field poisons every digest downstream of it.
-			//
-			//   Android — `publicKeyBase64`, the X.509 SPKI DER. The Android verifier only ever
-			//             re-hashes this string, so its encoding is unconstrained; it is the shipped,
-			//             hardware-proven value and is deliberately left alone.
-			//   iOS     — `publicKeyCompressedHex`. NOT a free choice, constrained twice over:
-			//             `produceIos`'s §3.4 obligation compares it against native's
-			//             `publicKeyCompressedHex`, and the authority parses `challenge.deviceKey` as a
-			//             P-256 point (`hexToBytes(expect.deviceKey)` in `verifyCrossSign`) to check
-			//             proof-of-possession. Only the compressed hex satisfies both — and the iOS
-			//             native side does not RESOLVE `publicKeyBase64` at all.
-			const isIos = getPlatformOS() === 'ios'
-			const publicKey = isIos ? result.publicKeyCompressedHex : result.publicKeyBase64
-			// Fail closed. Reading an absent field yields `undefined`, which flows on as a challenge
-			// bound to the string "undefined" and surfaces only as an opaque signature failure at the
-			// authority. That is precisely how the iOS field mismatch survived a clean typecheck, a
-			// green unit test and a successful bundle: nothing here ever asserted the field was there.
-			if (typeof publicKey !== 'string' || publicKey === '') {
-				throw new Error(
-					`provisionDeviceKey: native resolved no ${isIos ? 'publicKeyCompressedHex' : 'publicKeyBase64'} ` +
-						`(got: ${Object.keys(result).join(', ') || 'no keys'}) — refusing to issue a challenge ` +
-						'against an undefined device key.',
-				)
-			}
-			return { publicKey, reprovisioned: result.reprovisioned, voteKeyProbe: result.voteKeyProbe }
-		},
+	async function doProvisionDeviceKey(): Promise<{ publicKey: string; reprovisioned?: boolean; voteKeyProbe?: string }> {
+		const native = getNative()
+		const result = (await native.provisionDeviceKey(KEY_ALIAS)) as {
+			publicKeyBase64?: string
+			publicKeyCompressedHex?: string
+			keyAlias: string
+			reprovisioned?: boolean
+			voteKeyProbe?: string
+		}
+
+		// The two platforms hand back DIFFERENT key encodings, and the caller (ConfirmationScreen)
+		// feeds this value straight into `issueAttestationChallenge` as `challenge.deviceKey` — so
+		// picking the wrong field poisons every digest downstream of it.
+		//
+		//   Android — `publicKeyBase64`, the X.509 SPKI DER. The Android verifier only ever
+		//             re-hashes this string, so its encoding is unconstrained; it is the shipped,
+		//             hardware-proven value and is deliberately left alone.
+		//   iOS     — `publicKeyCompressedHex`. NOT a free choice, constrained twice over:
+		//             `produceIos`'s §3.4 obligation compares it against native's
+		//             `publicKeyCompressedHex`, and the authority parses `challenge.deviceKey` as a
+		//             P-256 point (`hexToBytes(expect.deviceKey)` in `verifyCrossSign`) to check
+		//             proof-of-possession. Only the compressed hex satisfies both — and the iOS
+		//             native side does not RESOLVE `publicKeyBase64` at all.
+		const isIos = getPlatformOS() === 'ios'
+		const publicKey = isIos ? result.publicKeyCompressedHex : result.publicKeyBase64
+		// Fail closed. Reading an absent field yields `undefined`, which flows on as a challenge
+		// bound to the string "undefined" and surfaces only as an opaque signature failure at the
+		// authority. That is precisely how the iOS field mismatch survived a clean typecheck, a
+		// green unit test and a successful bundle: nothing here ever asserted the field was there.
+		if (typeof publicKey !== 'string' || publicKey === '') {
+			throw new Error(
+				`provisionDeviceKey: native resolved no ${isIos ? 'publicKeyCompressedHex' : 'publicKeyBase64'} ` +
+					`(got: ${Object.keys(result).join(', ') || 'no keys'}) — refusing to issue a challenge ` +
+					'against an undefined device key.',
+			)
+		}
+		currentDeviceKey = publicKey
+		return { publicKey, reprovisioned: result.reprovisioned, voteKeyProbe: result.voteKeyProbe }
+	}
+
+	return {
+		provisionDeviceKey: doProvisionDeviceKey,
 
 		async produce(challenge: AttestationChallenge): Promise<DeviceAttestation> {
 			// BOUND_DIGEST is IDENTICAL on both platforms (ATTESTATION-CONTRACT-IOS.md §1) — it is the
@@ -412,7 +450,11 @@ export function createRealAttestationProducer(opts: {
 			const native = getNative()
 
 			if (getPlatformOS() === 'ios') {
-				return await produceIos(native, challenge, boundDigest, opts.enableDeviceCheck ?? false)
+				const attestation = await produceIos(native, challenge, boundDigest, opts.enableDeviceCheck ?? false)
+				// produceIos already threw (§3.4 CALLER OBLIGATION) if the vote key under KEY_ALIAS did
+				// not match challenge.deviceKey — reaching here means the two are proven equal.
+				currentDeviceKey = challenge.deviceKey
+				return attestation
 			}
 
 			// ---- Android ----
@@ -428,6 +470,18 @@ export function createRealAttestationProducer(opts: {
 				integrityToken: string
 				androidId: string
 				attestationTimeMillis: number
+				// 49-15/D-04/D-08 — the POST-regeneration key ACTUALLY under KEY_ALIAS after this call's
+				// delete-and-regenerate cycle (NativeAttestation.ts's produceAttestation doc comment).
+				// Optional here only because pre-49-15 fakes/fixtures may omit it; when present it is the
+				// only trustworthy source for "what key is under the alias right now."
+				publicKeyCompressedHex?: string
+			}
+
+			// Keep the cache honest even though it does NOT fix the requesterKey mismatch this
+			// rotation causes for a POST-produce() signDeviceKeyDigest call on Android — see this
+			// factory's `currentDeviceKey` doc comment above.
+			if (typeof result.publicKeyCompressedHex === 'string' && result.publicKeyCompressedHex !== '') {
+				currentDeviceKey = result.publicKeyCompressedHex
 			}
 
 			return {
@@ -444,6 +498,53 @@ export function createRealAttestationProducer(opts: {
 					// validateNonceCrossField rejects BOUND_DIGEST here with NONCE_MISMATCH).
 					nonce: challenge.nonce,
 				},
+			}
+		},
+
+		/**
+		 * D-02/D-18 (plan 51-14, closing 51-11/51-13's Known Gap): sign an arbitrary caller-supplied
+		 * digest under whichever key currently sits under `KEY_ALIAS`, via the existing
+		 * `native.signWithDeviceKey` — the SAME primitive `produceIos` already calls for its §4
+		 * proof-of-possession step, reused verbatim here rather than re-derived. Does NOT
+		 * regenerate/reprovision the key: `signWithDeviceKey` deliberately never does that itself
+		 * (module doc comment above, `:88`), and this method never calls `produceAttestation`.
+		 *
+		 * Digest contract (`:141`'s `base64FromBytes`, NOT `base64FromUtf8`): PLAIN standard-alphabet
+		 * base64 of the RAW digest bytes the caller supplies — never base64url, never
+		 * UTF-8-of-a-string. The caller (`ConfirmationScreen`'s `associationSign`) already passes the
+		 * raw `Digest()` bytes it computed; this method must not re-encode or re-hash them.
+		 */
+		async signDeviceKeyDigest(digest: Uint8Array): Promise<Signature> {
+			const native = getNative()
+			let signerKey = currentDeviceKey
+			if (signerKey === undefined) {
+				// Defensive fallback only — the real ceremony (ConfirmationScreen) always calls
+				// provisionDeviceKey() first. But the device key is a PERSISTENT hardware key that can
+				// already exist under KEY_ALIAS from a prior app session even when THIS producer
+				// instance never provisioned it; resolve it honestly rather than sign under an alias we
+				// cannot name the public key for.
+				;({ publicKey: signerKey } = await doProvisionDeviceKey())
+			}
+
+			const digestBase64 = base64FromBytes(digest)
+			const result = (await native.signWithDeviceKey(
+				KEY_ALIAS,
+				digestBase64,
+				'Confirm this request',
+				'Sign this request with your device key',
+				'Cancel',
+			)) as { signatureHex: string }
+
+			return {
+				// Already compact, low-S hex (`derToCompactLowS`, 49-04) — do NOT re-normalize, mirrors
+				// `apps/VoteTorrentAuthority/src/engines/device-signer.ts`'s identical contract.
+				signature: result.signatureHex,
+				signerKey,
+				// D-02/D-04: a prospective registrant/association-request self-signer has no user id —
+				// association-engine.ts's `submitAssociationRequest` documents that `signerUserId` is
+				// NEVER read on this path. Mirrors `StubAttestationProducer.signDeviceKeyDigest`'s
+				// identical empty-string convention.
+				signerUserId: '',
 			}
 		},
 	}

@@ -35,11 +35,18 @@
  * Plan 11 addition (D-02/D-18): the voter's self-signed association-request messages must
  * carry a signature that verifies directly against the P-256 key `provisionDeviceKey()`
  * returned (the schema's own check compares the signature to that exact public key, not to
- * any registered identity). `signDeviceKeyDigest` is the seam for that — OPTIONAL on the
- * interface because the real hardware-backed producer does not implement it yet (wiring a
- * real per-digest P-256 signature through the native biometric-gated signing call is a
- * follow-up, not solved by this call-site adoption plan; see plan 11's SUMMARY "Known Gap").
- * A caller must treat its absence as "cannot self-sign," never silently skip it.
+ * any registered identity). `signDeviceKeyDigest` is the seam for that.
+ *
+ * Plan 51-14 CLOSED the gap plan 11/51-11/51-13 flagged: the real hardware-backed producer
+ * (`createRealAttestationProducer`, `@votetorrent/attestation-native`) now implements
+ * `signDeviceKeyDigest` via the existing `native.signWithDeviceKey` TurboModule call (the same
+ * primitive the iOS path already used for its §4 proof-of-possession step) — it is no longer
+ * stub-only. The method stays declared OPTIONAL on this interface for structural flexibility
+ * (a caller-supplied producer/test fixture that only implements `provisionDeviceKey`/`produce`
+ * remains valid TypeScript, e.g. `attestation-producer.test.ts`'s drop-in-override fixtures) —
+ * but any producer actually used for the association ceremony MUST implement it. A caller must
+ * treat its absence as "cannot self-sign," never silently skip it (`ConfirmationScreen.tsx`'s
+ * `associationSign` guard does exactly this, unchanged by 51-14).
  */
 
 import type { AttestationChallenge, DeviceAttestation, Signature } from '@votetorrent/vote-core'
@@ -54,10 +61,11 @@ import { USE_STUB_PLAY_INTEGRITY, USE_REAL_ATTESTATION_PRODUCER } from './proof-
  * Phase 45's real producer (Play Integrity token + hardware Keystore key attestation)
  * implements this exact shape.
  *
- * `signDeviceKeyDigest` (plan 11 addition, OPTIONAL) signs an arbitrary digest under the
- * SAME key `provisionDeviceKey()` returned, for the voter's self-signed association-request
- * submissions (D-02/D-18) — never for anything a schema `AdminSigning`/officer ceremony
- * verifies.
+ * `signDeviceKeyDigest` (plan 11 addition, declared OPTIONAL — see this file's header comment)
+ * signs an arbitrary digest under the SAME key `provisionDeviceKey()` returned, for the
+ * voter's self-signed association-request submissions (D-02/D-18) — never for anything a
+ * schema `AdminSigning`/officer ceremony verifies. Implemented by BOTH concrete producers
+ * (`StubAttestationProducer` below, and the real hardware-backed producer as of plan 51-14).
  */
 export interface AttestationProducer {
 	provisionDeviceKey(): Promise<{ publicKey: string }>
