@@ -268,3 +268,70 @@ describe('D-12 record validity — ElectionRecordValidityPolicy', () => {
     expect(DEFAULT_REGISTRANT_VALIDITY_DAYS).to.not.equal(7)
   })
 })
+
+// ---------------------------------------------------------------------------
+// WR-10 (51-REVIEW) — policy-column coercion. Unit-level: a stub ctx whose policy read returns
+// each malformed shape, so the assertions are about the coercion itself rather than about what
+// the schema currently permits to be written.
+// ---------------------------------------------------------------------------
+
+describe('resolveRecordValidity — policy column coercion (WR-10, 51-REVIEW)', () => {
+  function ctxReturning (row: Record<string, unknown> | undefined): EngineContext {
+    return {
+      db: {
+        prepare: () => ({ get: async () => row })
+      }
+    } as unknown as EngineContext
+  }
+
+  it('an explicit NULL column falls back to the conservative default, not to a zero-day window', async () => {
+    // Number(null) === 0 put the expiration at NOW, so the deferred
+    // `ExpirationFuture check on insert (Expiration > context.now)` on both Association and
+    // AssociationPrivate failed at COMMIT — every associate() for that election dying with an
+    // opaque CHECK-constraint error several layers from its cause.
+    const result = await resolveRecordValidity(
+      ctxReturning({ RegistrantValidityDays: null, AssociationValidityDays: null }),
+      'election-1'
+    )
+    const associationDays = (Date.parse(result.associationExpiration) - Date.now()) / DAY_MS
+    const registrantDays = (Date.parse(result.registrantExpiration) - Date.now()) / DAY_MS
+    expect(associationDays).to.be.closeTo(DEFAULT_ASSOCIATION_VALIDITY_DAYS, DAY_TOLERANCE)
+    expect(registrantDays).to.be.closeTo(DEFAULT_REGISTRANT_VALIDITY_DAYS, DAY_TOLERANCE)
+  })
+
+  it('an undecodable column throws an error NAMING the column, not a RangeError from new Date(NaN)', async () => {
+    let thrown: unknown
+    try {
+      await resolveRecordValidity(
+        ctxReturning({ RegistrantValidityDays: 365, AssociationValidityDays: 'not-a-number' }),
+        'election-1'
+      )
+    } catch (err) { thrown = err }
+    expect(thrown).to.be.instanceOf(Error)
+    expect((thrown as Error).name, 'must not be the unclassified RangeError: Invalid time value').to.not.equal('RangeError')
+    expect((thrown as Error).message).to.contain('AssociationValidityDays')
+  })
+
+  it('a negative or zero column throws rather than silently producing a PAST expiration', async () => {
+    for (const bad of [-1, 0]) {
+      let thrown: unknown
+      try {
+        await resolveRecordValidity(
+          ctxReturning({ RegistrantValidityDays: bad, AssociationValidityDays: 365 }),
+          'election-1'
+        )
+      } catch (err) { thrown = err }
+      expect(thrown, `RegistrantValidityDays=${bad} must be refused`).to.be.instanceOf(Error)
+      expect((thrown as Error).message).to.contain('RegistrantValidityDays')
+    }
+  })
+
+  it('a valid positive integer is still honoured unchanged', async () => {
+    const result = await resolveRecordValidity(
+      ctxReturning({ RegistrantValidityDays: 7, AssociationValidityDays: 30 }),
+      'election-1'
+    )
+    expect((Date.parse(result.registrantExpiration) - Date.now()) / DAY_MS).to.be.closeTo(7, DAY_TOLERANCE)
+    expect((Date.parse(result.associationExpiration) - Date.now()) / DAY_MS).to.be.closeTo(30, DAY_TOLERANCE)
+  })
+})

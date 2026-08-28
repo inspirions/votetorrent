@@ -37,6 +37,34 @@ export interface RecordValidity {
 }
 
 /**
+ * WR-10 (51-REVIEW): validate a policy column AT THE READ, so the error names the policy row.
+ *
+ * `ElectionRecordValidityPolicy` declares both columns `integer default 365` with no `not null`
+ * and no range CHECK, and the previous `Number(...)` coercion trusted whatever came back:
+ *   - an explicit NULL gave `Number(null) === 0`, so the expiration was NOW and the deferred
+ *     `ExpirationFuture check on insert (Expiration > context.now)` on BOTH `Association` and
+ *     `AssociationPrivate` failed at COMMIT — every `associate()` for that election dying with an
+ *     opaque CHECK-constraint error several layers from its cause;
+ *   - a missing/undecodable value gave `NaN`, and `new Date(NaN).toISOString()` throws
+ *     `RangeError: Invalid time value` — an unclassified crash rather than a structured rejection;
+ *   - a negative value silently produced a PAST expiration with the same opaque CHECK failure.
+ *
+ * A NULL column is treated as "unset" and falls back to the conservative default (the same
+ * outcome as no policy row at all, which is what a NULL honestly means). Anything present but
+ * unusable throws HERE, naming the column and the value.
+ */
+function requirePositiveDays (value: unknown, column: string, fallback: number): number {
+  if (value == null) return fallback
+  const n = Number(value)
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    throw new Error(
+      `resolveRecordValidity: ElectionRecordValidityPolicy.${column} is ${JSON.stringify(value)} — must be a positive integer number of days`
+    )
+  }
+  return n
+}
+
+/**
  * D-12 — resolves per-election record validity from the authority-owned
  * `ElectionRecordValidityPolicy` table. Modeled on `AssociationEngine.associate()`'s EXISTING
  * fail-closed-by-rejection `select AttestationRequired from ElectionAttestationPolicy where
@@ -60,10 +88,10 @@ export async function resolveRecordValidity (
 
   const registrantValidityDays = policyRow == null
     ? DEFAULT_REGISTRANT_VALIDITY_DAYS
-    : Number(policyRow.RegistrantValidityDays)
+    : requirePositiveDays(policyRow.RegistrantValidityDays, 'RegistrantValidityDays', DEFAULT_REGISTRANT_VALIDITY_DAYS)
   const associationValidityDays = policyRow == null
     ? DEFAULT_ASSOCIATION_VALIDITY_DAYS
-    : Number(policyRow.AssociationValidityDays)
+    : requirePositiveDays(policyRow.AssociationValidityDays, 'AssociationValidityDays', DEFAULT_ASSOCIATION_VALIDITY_DAYS)
 
   const registrantExpiration = toIsoZDatetime(new Date(Date.now() + registrantValidityDays * MS_PER_DAY).toISOString())
   const associationExpiration = toIsoZDatetime(new Date(Date.now() + associationValidityDays * MS_PER_DAY).toISOString())
