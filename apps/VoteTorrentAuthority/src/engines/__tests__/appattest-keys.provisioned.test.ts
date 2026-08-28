@@ -71,13 +71,23 @@ describe('Apple App Attest root — embedded trust anchor', () => {
 });
 
 describe('App Attest configuration — provisioned on the free personal team (D-13)', () => {
-	it('APPLE_APP_ID is the committed free-team value and has not drifted back to empty', () => {
-		// D-13 committed this deliberately for a runnable proof. An empty App ID
-		// fail-closes every genuine device (the App ID gate in
-		// `AppAttestVerifier.verify` returns first), so a silent drift back to ''
-		// would look like the old, correct unprovisioned state instead of the
-		// regression it now is. This asserts that drift never happens unnoticed.
-		expect(APPLE_APP_ID).toBe('94TY7UR2W5.org.votetorrent.voter');
+	it('APPLE_APP_ID is provisioned as <teamId>.<bundleId> for THIS app, and has not drifted back to empty', () => {
+		// D-13 committed a real App ID deliberately, for a runnable proof. An empty App ID
+		// fail-closes every genuine device (the App ID gate in `AppAttestVerifier.verify`
+		// returns first), so a silent drift back to '' would look like the old, correct
+		// unprovisioned state instead of the regression it now is. This asserts that drift
+		// never happens unnoticed.
+		//
+		// WR-03 (51-REVIEW): asserts the INVARIANT, not the current literal. Pinning the exact
+		// free-personal-team string made this test and D-14's release gate
+		// (`scripts/fastlane/vt_appattest_release_gate.rb`, which refuses to build WHILE the
+		// constant holds that value) mutually exclusive — there was no value of APPLE_APP_ID for
+		// which both were green, so performing the tracked paid-team swap would have turned a
+		// green suite red and this assertion's own comment would have read as a regression
+		// rather than the intended change. The two gates now divide the work cleanly: this one
+		// owns "provisioned and belongs to this app", the fastlane gate owns "shippable".
+		expect(APPLE_APP_ID).toMatch(/^[A-Z0-9]{10}\.[a-z0-9.]+$/);
+		expect(APPLE_APP_ID.endsWith('.org.votetorrent.voter')).toBe(true);
 	});
 
 	it('APP_ATTEST_PROVISIONED is true now that both required values are present', () => {
@@ -88,12 +98,14 @@ describe('App Attest configuration — provisioned on the free personal team (D-
 		expect(APP_ATTEST_PROVISIONED).toBe(true);
 	});
 
-	it("the environment default is still the STRICT one, and the App ID has not silently drifted to another team's value", () => {
+	it('the environment default is still the STRICT one', () => {
 		// 'development' here would accept every sideloaded build, and the credCert
-		// aaguid is the only thing separating the two environments. Read together
-		// with the assertion above, this also guards against APPLE_APP_ID
-		// silently drifting to a DIFFERENT team's identifier rather than staying
-		// pinned to the committed free-team value.
+		// aaguid is the only thing separating the two environments.
+		//
+		// WR-03: this test no longer also claims to guard the App ID against drifting to
+		// another TEAM's identifier. It never could — it does not read APPLE_APP_ID — and after
+		// the assertion above was loosened to an invariant, a team-id swap is an EXPECTED
+		// change. What still cannot drift is the bundle id, which the assertion above pins.
 		expect(APP_ATTEST_ENVIRONMENT).toBe('production');
 	});
 });
