@@ -509,6 +509,74 @@ describe('processPendingAssociationRequests — the D-05 automatic authority-sid
     expect(association, 'the Association row really did commit').to.not.be.undefined
   })
 
+  it('WR-06: one failing LEG 1 row does not stall the remaining rows, and its orphaned challenge is retracted', async () => {
+    // LEG 1 had no per-row try, so a single row throwing anywhere in the transition propagated
+    // out of the whole method and skipped every remaining pending row AND all of LEG 2 for that
+    // sync. issueAttestationChallenge also COMMITS its AttestationChallenge row before the
+    // 'p' -> 'c' UPDATE, so the failure additionally left a live orphan nonce behind.
+    const s = await setup()
+    const poisonPair = randomTestKeyPair()
+    const healthyPair = randomTestKeyPair()
+    const poisonId = await submitDeviceRequest(s, poisonPair)
+    const healthyId = await submitDeviceRequest(s, healthyPair)
+
+    // Fail exactly ONE row, exactly at its signed 'p' -> 'c' UPDATE — i.e. after its challenge
+    // has already committed but before the transition lands. That is the window the orphan lives
+    // in. Injected at the db seam rather than by feeding the engine a bad value, so the engine's
+    // own code path is unmodified.
+    const realDb = s.auth.ctx.db
+    const poisonedDb = new Proxy(realDb, {
+      get (target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver)
+        if (prop === 'exec') {
+          return async (sql: string, params?: Record<string, unknown>) => {
+            if (typeof sql === 'string' && sql.includes('update AssociationRequest') && params?.requestId === poisonId) {
+              throw new Error('simulated LEG 1 transition failure')
+            }
+            return (value as typeof realDb.exec).call(target, sql, params as never)
+          }
+        }
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value
+      }
+    }) as typeof realDb
+    const poisonedCtx: EngineContext = { ...s.auth.ctx, db: poisonedDb }
+
+    const retracted: string[] = []
+    class ObservingEngine extends AssociationEngine {
+      override async removeAttestationChallenge (
+        nonce: string,
+        signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>)
+      ): Promise<void> {
+        retracted.push(nonce)
+        return super.removeAttestationChallenge(nonce, signatureOrCallback)
+      }
+    }
+
+    const engine = new ObservingEngine(poisonedCtx)
+    const result = await engine.processPendingAssociationRequests(s.auth.authority.id, s.officerSign, s.transport)
+
+    // The healthy row was still processed — the whole point.
+    expect(result.challengesIssued, 'the healthy row must still be transitioned').to.equal(1)
+    const healthyRow = await realDb.prepare('select Status from AssociationRequest where Id = :id').get({ id: healthyId })
+    expect(healthyRow?.Status).to.equal('c')
+
+    // The poisoned row is untouched and retryable, not stuck mid-ceremony.
+    const poisonRow = await realDb.prepare('select Status from AssociationRequest where Id = :id').get({ id: poisonId })
+    expect(poisonRow?.Status, "a failed LEG 1 row stays 'p' so the next sync can retry it").to.equal('p')
+
+    // And the challenge it had already committed was retracted rather than left as a live orphan.
+    expect(retracted.length, 'exactly the orphaned challenge must be retracted').to.equal(1)
+    const remaining = await s.engine.getAttestationChallenges(s.registrantId)
+    expect(
+      remaining.some((c) => c.deviceKey === poisonPair.publicHex),
+      'no live AttestationChallenge may remain for the failed row'
+    ).to.equal(false)
+    expect(
+      remaining.some((c) => c.deviceKey === healthyPair.publicHex),
+      "the healthy row's challenge must survive"
+    ).to.equal(true)
+  })
+
   it('listAssociationRequests(authorityId) returns every request for that authority as AssociationRequestRead', async () => {
     const s = await setup()
     const deviceA = randomTestKeyPair()

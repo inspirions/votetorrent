@@ -1220,7 +1220,9 @@ export class AssociationEngine implements IAssociationEngine {
    * LEG 1 (pending 'p' rows): for each, call the UNCHANGED `issueAttestationChallenge` — the
    * `'vrg'` ceremony, run HERE, on the authority side, with an officer key the voter does not
    * hold — then write the `'p' -> 'c'` signed transition and publish a `'c'` decision notice
-   * carrying the fresh `challengeNonce`.
+   * carrying the fresh `challengeNonce`. Per-row isolated, like LEG 2 (WR-06, 51-REVIEW): a row
+   * that throws leaves that row at `'p'`, retracts the challenge it may already have committed,
+   * and the batch continues — one bad row never stalls the remaining rows or all of LEG 2.
    *
    * LEG 2 (challenge-issued 'c' rows with a staged answer): for each staged document belonging to
    * THIS authority's still-'c' rows, validate the envelope through 51-08's SHARED
@@ -1289,36 +1291,82 @@ export class AssociationEngine implements IAssociationEngine {
       }
 
       for (const row of pendingRows) {
+        // WR-06 (51-REVIEW): per-row isolation for the TRANSITION, mirroring LEG 2's. This
+        // method's doc comment promises "one bad answer never stalls the batch (T-51-09-07)",
+        // but that only held for LEG 2 — LEG 1 had no per-row try, so a single row throwing
+        // anywhere below propagated through `this.rethrow` and skipped every remaining pending
+        // row AND ALL OF LEG 2 for that sync. It also left the challenge that had ALREADY
+        // committed as a permanent orphan.
+        //
+        // Narrower than 51-REVIEW's sketch, deliberately: that sketch isolated
+        // `issueAttestationChallenge` too, which would swallow an officer-key/authorization
+        // failure — see the note on that call below for why it must stay batch-fatal.
         // D-01/D-03: the 'vrg' challenge-issuance ceremony runs HERE — nothing in this method may
         // accept a voter-supplied signer.
+        //
+        // DELIBERATELY OUTSIDE the per-row try below. A failure to issue the challenge is a
+        // SIGNING-AUTHORITY failure, not a bad row: the officer key is absent, wrong, or not
+        // authorized for 'vrg', which is true of every other row too. It must stay loud and
+        // batch-fatal — `AdminSigning.UserIdValid` failing structurally is one of this phase's
+        // own asserted properties, and swallowing it per-row would turn a security-relevant
+        // misconfiguration into a silent no-op sync.
         const challenge = await this.issueAttestationChallenge(row.registrantId, row.deviceKey, signatureOrCallback, row.electionId)
 
-        const rowBefore = await ctx.db
-          .prepare('select SubmittedAt, ReceivedAt from AssociationRequest where Id = :id')
-          .get({ id: row.id })
-        if (!rowBefore) {
-          throw new Error(`processPendingAssociationRequests: AssociationRequest ${row.id} disappeared between the leg-1 select and the transition UPDATE`)
+        try {
+
+          const rowBefore = await ctx.db
+            .prepare('select SubmittedAt, ReceivedAt from AssociationRequest where Id = :id')
+            .get({ id: row.id })
+          if (!rowBefore) {
+            throw new Error(`processPendingAssociationRequests: AssociationRequest ${row.id} disappeared between the leg-1 select and the transition UPDATE`)
+          }
+          // CRITICAL — partial-UPDATE trap: explicitly rebind BOTH untouched timestamp columns.
+          const submittedAt = restoreCanonicalDatetime(rowBefore.SubmittedAt as string)
+          const receivedAt = restoreCanonicalDatetime(rowBefore.ReceivedAt as string)
+
+          const tid = await allocateTid(ctx.db, 'association-request')
+          // TransitionValid's challenge-echo clause, field for field: Digest(context.Tid, new.Id, new.Status, new.ChallengeNonce).
+          const digestExpr = 'select Digest(:tid, :requestId, :status, :challengeNonce) as d'
+          const digestParams = { tid, requestId: row.id, status: 'c', challengeNonce: challenge.nonce }
+          const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
+
+          await ctx.db.exec(
+            `update AssociationRequest
+             with context SigningNonce = :signingNonce, Tid = ${tid}
+             set Status = :status, ChallengeNonce = :challengeNonce, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+             where Id = :requestId`,
+            { requestId: row.id, status: 'c', challengeNonce: challenge.nonce, submittedAt, receivedAt, signingNonce }
+          )
+
+          await intake.publishDecision({ requestId: row.id, status: 'c', challengeNonce: challenge.nonce, decidedAt: toIsoZDatetime(Date.now()) })
+          challengesIssued++
+        } catch (legOneErr) {
+          // The AttestationChallenge row has already COMMITTED (issueAttestationChallenge runs its
+          // own ceremony). Whether it is now an ORPHAN depends on WHERE this threw:
+          //   - before/at the 'p' -> 'c' UPDATE  -> the row is still 'p', nothing references the
+          //     challenge, and leaving it would accumulate a live nonce with no expiry (D-10
+          //     removed the column) and no consumer, plus the next run would mint another;
+          //   - at publishDecision, AFTER the UPDATE committed -> the row IS 'c' and DOES
+          //     reference this nonce. Retracting it there would strand a 'c' row whose challenge
+          //     no longer exists, and the voter's genuine answer would then fail in associate().
+          // So read the status back and retract only in the first case. Both the read and the
+          // retraction are best-effort: neither may stall the batch.
+          let stillPending = false
+          try {
+            const statusRow = await ctx.db
+              .prepare('select Status from AssociationRequest where Id = :id')
+              .get({ id: row.id })
+            stillPending = statusRow?.Status === 'p'
+          } catch { /* cannot tell — leave the challenge alone, the conservative choice */ }
+          if (stillPending) {
+            await this.removeAttestationChallenge(challenge.nonce, signatureOrCallback).catch(() => {})
+          }
+          console.warn(
+            `AssociationEngine.processPendingAssociationRequests: LEG 1 failed for requestId=${row.id} after the challenge was issued (orphan retracted: ${String(stillPending)}); the batch continues`,
+            legOneErr instanceof Error ? legOneErr.message : String(legOneErr)
+          )
+          continue
         }
-        // CRITICAL — partial-UPDATE trap: explicitly rebind BOTH untouched timestamp columns.
-        const submittedAt = restoreCanonicalDatetime(rowBefore.SubmittedAt as string)
-        const receivedAt = restoreCanonicalDatetime(rowBefore.ReceivedAt as string)
-
-        const tid = await allocateTid(ctx.db, 'association-request')
-        // TransitionValid's challenge-echo clause, field for field: Digest(context.Tid, new.Id, new.Status, new.ChallengeNonce).
-        const digestExpr = 'select Digest(:tid, :requestId, :status, :challengeNonce) as d'
-        const digestParams = { tid, requestId: row.id, status: 'c', challengeNonce: challenge.nonce }
-        const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
-
-        await ctx.db.exec(
-          `update AssociationRequest
-           with context SigningNonce = :signingNonce, Tid = ${tid}
-           set Status = :status, ChallengeNonce = :challengeNonce, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
-           where Id = :requestId`,
-          { requestId: row.id, status: 'c', challengeNonce: challenge.nonce, submittedAt, receivedAt, signingNonce }
-        )
-
-        await intake.publishDecision({ requestId: row.id, status: 'c', challengeNonce: challenge.nonce, decidedAt: toIsoZDatetime(Date.now()) })
-        challengesIssued++
       }
 
       // ---------------- LEG 2: challenge-issued ('c') rows with a staged answer ----------------
