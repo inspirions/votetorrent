@@ -297,6 +297,23 @@ export function mergeTransportSyncReports(
 }
 
 /**
+ * WR-07 helper: resolve an optional "already imported" predicate to a plain boolean.
+ * An absent predicate means "unknown", and so does one that throws — both fall through to
+ * attempting the submit, which is the pre-WR-07 behaviour. Only an explicit `true` skips.
+ */
+async function skipsAsAlreadyImported<TDoc>(
+	predicate: ((doc: TDoc) => Promise<boolean>) | undefined,
+	doc: TDoc,
+): Promise<boolean> {
+	if (!predicate) return false;
+	try {
+		return await predicate(doc);
+	} catch {
+		return false;
+	}
+}
+
+/**
  * The D-19 ordering/pre-filter discipline (T-51-10-09), extracted as a pure,
  * plain-TypeScript helper so it is directly unit-testable without a
  * renderer, an engine, or a network call — `attach-association-sync-bindings.ts`
@@ -321,6 +338,22 @@ export function mergeTransportSyncReports(
  * `readStagedRequests`/`readStagedAttestations` is treated as an empty
  * batch (an honest, empty sync), never a thrown error that would abort the
  * unconditional `processPending` call below.
+ *
+ * WR-07 (51-REVIEW) — RE-OFFERED DOCUMENTS ARE NOT ERRORS. The staged reads
+ * take no cursor and nothing ever deletes a staged document, so EVERY
+ * document ever staged is re-offered on EVERY sync. Without the two optional
+ * `alreadyImported*` predicates below, the second press of "Sync Now"
+ * reported the first press's successful import as a sync ERROR — a duplicate
+ * primary key on the request leg, a `Status !== 'c'` rejection on the
+ * attestation leg — and kept doing so forever, for every previously-imported
+ * document, drowning the genuine-error signal from the second press onward.
+ *
+ * A predicate returning `true` makes the document a silent no-op: neither
+ * counted as an import nor recorded as an error, because neither is true of
+ * a document a previous run already handled. Supplying them is OPTIONAL and
+ * omitting them preserves the old behaviour exactly. A predicate that THROWS
+ * is treated as "unknown" and the submit is attempted as before — a broken
+ * predicate must never silently swallow a document.
  */
 export async function runAssociationSync<TReq, TAtt>(params: {
 	readStagedRequests: () => Promise<readonly TReq[]>;
@@ -330,6 +363,11 @@ export async function runAssociationSync<TReq, TAtt>(params: {
 	submitRequest: (doc: TReq) => Promise<unknown>;
 	submitAttestation: (doc: TAtt) => Promise<unknown>;
 	processPending: () => Promise<unknown>;
+	/** WR-07: true when a previous sync already imported this request — skip, do not error. */
+	alreadyImportedRequest?: (doc: TReq) => Promise<boolean>;
+	/** WR-07: true when this attestation is not actionable now (already decided, or not yet
+	 * challenged) — skip, do not error. The driver re-reads every staged document regardless. */
+	alreadyImportedAttestation?: (doc: TAtt) => Promise<boolean>;
 }): Promise<TransportSyncReport> {
 	const errorItemIds: string[] = [];
 	let imported = 0;
@@ -341,6 +379,7 @@ export async function runAssociationSync<TReq, TAtt>(params: {
 		stagedRequests = [];
 	}
 	for (const doc of stagedRequests) {
+		if (await skipsAsAlreadyImported(params.alreadyImportedRequest, doc)) continue;
 		try {
 			await params.submitRequest(doc);
 			imported += 1;
@@ -356,6 +395,7 @@ export async function runAssociationSync<TReq, TAtt>(params: {
 		stagedAttestations = [];
 	}
 	for (const doc of stagedAttestations) {
+		if (await skipsAsAlreadyImported(params.alreadyImportedAttestation, doc)) continue;
 		try {
 			await params.submitAttestation(doc);
 			imported += 1;

@@ -120,6 +120,9 @@ interface AssociationIntakeEngine {
 		signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>),
 		intake: RestBridgeAssociationIntake,
 	): Promise<{ challengesIssued: number; associated: number; rejected: number }>;
+	/** WR-07 (51-REVIEW): the idempotency read. Resolves `undefined` for an unknown id rather
+	 * than throwing, so it is safe to call speculatively on every staged document. */
+	getAssociationRequest(requestId: string): Promise<{ status: string } | undefined>;
 }
 
 /**
@@ -243,6 +246,25 @@ export function attachAssociationSyncBindings(getEngine: <T>(engineName: string)
 					engine.submitAssociationRequest(doc.init, doc.requesterKey, doc.signature),
 				submitAttestation: (doc) =>
 					engine.submitAssociationAttestation(doc.answer, doc.requesterKey, doc.signature),
+				// WR-07: the bridge's staged reads take no cursor and nothing ever deletes a staged
+				// document, so every document from every previous sync is re-offered on every press
+				// of Sync Now. Before these predicates, press 2 reported press 1's successful import
+				// as a sync ERROR — a duplicate `AssociationRequest.Id` on the request leg, a
+				// `Status !== 'c'` rejection on the attestation leg — forever, for every previously
+				// imported document, drowning the genuine-error signal.
+				//
+				// Neither predicate weakens anything: both submit calls are STAGE-and-PRE-FILTER
+				// only, and `processPending` below independently re-reads and re-validates every
+				// staged document through `validateStagedAttestationAnswer`.
+				alreadyImportedRequest: async (doc) =>
+					(await engine.getAssociationRequest(doc.requestId)) !== undefined,
+				alreadyImportedAttestation: async (doc) => {
+					// An attestation answer is actionable ONLY against a row awaiting one. A missing
+					// row, or one already decided ('a'/'r'), or one not yet challenged ('p'), is not
+					// an error to report on this leg — it is simply not this document's turn.
+					const row = await engine.getAssociationRequest(doc.requestId);
+					return row === undefined || row.status !== "c";
+				},
 				processPending: async () => {
 					// UNCONDITIONAL — called every time, regardless of what happened in the two loops
 					// above, and regardless of whether an authority id was observed this run. See

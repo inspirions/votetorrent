@@ -267,6 +267,74 @@ describe("runAssociationSync", () => {
 		expect(processPendingCalls).toBe(1);
 	});
 
+	it("WR-07: a re-offered document an alreadyImported predicate claims is neither imported nor an error", async () => {
+		// Staged reads take no cursor and nothing deletes a staged document, so every previously
+		// imported document is re-offered on every Sync Now. Before this, press 2 reported press
+		// 1's success as a sync error (duplicate primary key / Status !== 'c') forever.
+		const submitted: string[] = [];
+		let processPendingCalls = 0;
+
+		const report = await runAssociationSync<ReqDoc, AttDoc>({
+			readStagedRequests: async () => [{ requestId: "req-old" }, { requestId: "req-new" }],
+			readStagedAttestations: async () => [{ requestId: "att-old" }, { requestId: "att-new" }],
+			requestIdOf: (d) => d.requestId,
+			attestationIdOf: (d) => d.requestId,
+			submitRequest: async (d) => {
+				submitted.push("req:" + d.requestId);
+			},
+			submitAttestation: async (d) => {
+				submitted.push("att:" + d.requestId);
+			},
+			processPending: async () => {
+				processPendingCalls += 1;
+			},
+			alreadyImportedRequest: async (d) => d.requestId === "req-old",
+			alreadyImportedAttestation: async (d) => d.requestId === "att-old",
+		});
+
+		expect(submitted).toEqual(["req:req-new", "att:att-new"]);
+		expect(report.imported).toBe(2);
+		expect(report.errorItemIds).toEqual([]);
+		expect(processPendingCalls).toBe(1);
+	});
+
+	it("WR-07: an alreadyImported predicate that THROWS falls back to attempting the submit", async () => {
+		// A broken predicate must never silently swallow a document.
+		const submitted: string[] = [];
+		const report = await runAssociationSync<ReqDoc, AttDoc>({
+			readStagedRequests: async () => [{ requestId: "req-1" }],
+			readStagedAttestations: async () => [],
+			requestIdOf: (d) => d.requestId,
+			attestationIdOf: (d) => d.requestId,
+			submitRequest: async (d) => {
+				submitted.push(d.requestId);
+			},
+			submitAttestation: async () => {},
+			processPending: async () => {},
+			alreadyImportedRequest: async () => {
+				throw new Error("engine read failed");
+			},
+		});
+
+		expect(submitted).toEqual(["req-1"]);
+		expect(report.imported).toBe(1);
+		expect(report.errorItemIds).toEqual([]);
+	});
+
+	it("WR-07: omitting the predicates preserves the previous behaviour exactly", async () => {
+		const report = await runAssociationSync<ReqDoc, AttDoc>({
+			readStagedRequests: async () => [{ requestId: "req-1" }],
+			readStagedAttestations: async () => [{ requestId: "att-1" }],
+			requestIdOf: (d) => d.requestId,
+			attestationIdOf: (d) => d.requestId,
+			submitRequest: async () => {},
+			submitAttestation: async () => {},
+			processPending: async () => {},
+		});
+		expect(report.imported).toBe(2);
+		expect(report.errorItemIds).toEqual([]);
+	});
+
 	it("errorItemIds never carries a payload value, only the identifier the caller supplies via requestIdOf/attestationIdOf", async () => {
 		const report = await runAssociationSync<ReqDoc, AttDoc>({
 			readStagedRequests: async () => [{ requestId: "req-1" }],
