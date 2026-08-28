@@ -265,8 +265,31 @@ asymmetry is why the two must be stated separately.)
 | The device holds `K_vote`'s private key | §4 `popSignature` | **Cryptographic** |
 | **`K_vote` is hardware-backed / non-exportable** | — | **NOT PROVEN** |
 | **The OS is untampered / not jailbroken** | — | **NOT PROVEN** (spike 082: no iOS equivalent at any price) |
+| **This is a device that has not already associated another registrant (D-06)** | — | **NOT PROVEN — and structurally unprovable at Bar A** (see below) |
 
-The two "NOT PROVEN" rows are the honest cost of iOS support and belong in the threat model.
+The three "NOT PROVEN" rows are the honest cost of iOS support and belong in the threat model.
+
+### 5.1 D-06 device-uniqueness is ENFORCED ON ANDROID ONLY
+
+`AssociationEngine.associate`'s D-06 guard looks for another registrant already holding the same
+`AssociationPrivate.DeviceId`. On iOS that column carries the **App Attest key id**, because iOS
+has no stable device id by design. A key id is the **app-install** identity, not the device:
+
+- `provisionDeviceKey` calls `DCAppAttestService.generateKey()` unconditionally and overwrites the
+  stored id;
+- `attestKey` may be called only **once per key**, so a re-attestation *requires* a fresh key id
+  (§9, "Re-attestation cadence") — the very property D-13's key-non-reuse claim rests on.
+
+So the same physical iPhone yields a **different** `deviceId` on every ceremony. The D-06 lookup
+can never match, the conflict branch is never entered, and no `PollingDevice` waiver is ever
+demanded. A voter can associate registrant A and registrant B from one phone with no signal
+anywhere.
+
+This is an **accepted limitation**, recorded here rather than left implied by a guard that reads as
+if it applied to both platforms. Closing it needs either a durable iOS device identity (none exists
+at Bar A — DeviceCheck's per-device bits would be the bar-B candidate, and Bar A excludes it) or a
+policy flag that refuses iOS where uniqueness is required. `ElectionAttestationPolicy` carries no
+such column today, so that is a schema change, not a verifier change.
 
 `K_vote`'s hardware backing rests on a **transitive trust** argument: App Attest proves the app is
 genuine and unmodified, and a genuine build of this app only ever puts a
@@ -371,7 +394,9 @@ All must pass; a single passing half never authorizes association (D-01's spirit
 - DeviceCheck. Bar A (spike 082) excludes it; `deviceCheckToken` remains in the model for a future
   bar-B switch.
 - Re-attestation cadence. `attestKey` is **once per key**, so a new `generateKey` is required per
-  ceremony — which grants D-13's key-non-reuse property structurally.
+  ceremony — which grants D-13's key-non-reuse property structurally, and which is *also* why D-06
+  device-uniqueness cannot work on iOS (§5.1).
+- D-06 device-uniqueness / Sybil resistance on iOS. Enforced on Android only — see §5.1.
 - Assertion use **after** association (ongoing request integrity). This document covers the
   association ceremony only; the counter rule in §8.10 is written so that a later per-request
   assertion scheme can extend it without a format change.

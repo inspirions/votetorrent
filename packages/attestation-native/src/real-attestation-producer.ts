@@ -315,6 +315,13 @@ async function produceIos(
 		publicKey: challenge.deviceKey,
 		// iOS has no stable device id by design; the App Attest key id IS the app-install identity,
 		// which is exactly what DeviceAttestation.deviceId documents for this platform.
+		//
+		// WR-02 (51-REVIEW): app-install identity is NOT device identity, and the difference is
+		// load-bearing downstream. `provisionDeviceKey` regenerates this id on every run and
+		// `attestKey` is once-per-key, so the same phone presents a different value each ceremony.
+		// `AssociationEngine.associate`'s D-06 device-uniqueness guard keys on exactly this field
+		// and is therefore INERT on iOS — see ATTESTATION-CONTRACT-IOS.md §5.1. Do not treat this
+		// value as a Sybil control.
 		deviceId: result.appAttestKeyId,
 		attestationTime: result.attestationTimeMillis,
 		attestationStatement: result.attestationObjectBase64,

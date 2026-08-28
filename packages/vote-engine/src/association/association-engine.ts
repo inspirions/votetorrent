@@ -403,6 +403,22 @@ export class AssociationEngine implements IAssociationEngine {
     }
 
     // D-06 device-uniqueness (authority-side — needs the private DeviceId).
+    //
+    // WR-02 (51-REVIEW) — THIS CHECK IS STRUCTURALLY INERT ON iOS. It keys on
+    // `AssociationPrivate.DeviceId`, which on iOS is the App Attest key id
+    // (`real-attestation-producer.ts`: "iOS has no stable device id by design"). An App Attest
+    // key id is an APP-INSTALL identity, not a device identity: `provisionDeviceKey` calls
+    // `DCAppAttestService.generateKey()` unconditionally and overwrites the stored id, and
+    // `attestKey` may be called only ONCE per key — so a re-attestation REQUIRES a fresh key id
+    // (ATTESTATION-CONTRACT-IOS.md §9). The same physical iPhone therefore presents a DIFFERENT
+    // `deviceId` for every ceremony, this lookup never matches, and no `PollingDevice` waiver is
+    // ever demanded. The Sybil control this comment and the schema comment both describe is
+    // enforced on ANDROID ONLY.
+    //
+    // Do not read a passing iOS association as evidence that device uniqueness held. Closing this
+    // needs either a durable iOS device identity (none exists at Bar A) or a policy flag that
+    // refuses iOS where uniqueness is required — `ElectionAttestationPolicy` has no such column
+    // today, so it is a schema change, not a local fix.
     const deviceIdHash = sha256Hex(attestation.deviceId)
 
     // WR-01 (51-REVIEW): `Association.DeviceHash` is AUTHORITY-DERIVED, never taken from the wire.
