@@ -90,6 +90,7 @@ import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import type { EngineContext } from '../src/types.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
 import type {
+  AssociateInit,
   AssociationAttestationAnswer,
   AssociationRequestInit,
   AttestationChallenge,
@@ -468,6 +469,44 @@ describe('processPendingAssociationRequests — the D-05 automatic authority-sid
     expect(second.rejected).to.equal(0)
     const finalRow = await s.auth.ctx.db.prepare('select Status from AssociationRequest where Id = :id').get({ id: requestId })
     expect(finalRow?.Status).to.equal('a')
+  })
+
+  it("WR-05: when associate() throws AFTER the Association row committed (D-11 consumption failure), the request is decided 'a', never 'r'", async () => {
+    // associate() is deliberately TWO sequential transactions: the Association/AssociationPrivate
+    // write commits, then D-11's challenge consumption runs in its own transaction and is
+    // documented as able to fail independently. The driver wrapped the whole call in one catch,
+    // so a signing hiccup or transient store error in the CONSUME step signed a 'c' -> 'r'
+    // transition while the authority held a valid Association row - and with NoDelete and no
+    // 'r' -> 'a' transition, the two records could never be reconciled.
+    //
+    // Modelled exactly: a subclass that runs the REAL associate() to completion and then throws.
+    class ConsumeFailingEngine extends AssociationEngine {
+      override async associate (
+        init: AssociateInit,
+        signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>)
+      ): Promise<void> {
+        await super.associate(init, signatureOrCallback)
+        throw new Error('simulated D-11 challenge-consumption failure (post-commit)')
+      }
+    }
+
+    const s = await setup()
+    const deviceKeyPair = randomTestKeyPair()
+    const requestId = await submitDeviceRequest(s, deviceKeyPair)
+    await driveOnce(s)
+    await stageAnswer(s, requestId, deviceKeyPair, makeDeviceAttestation())
+
+    const failingEngine = new ConsumeFailingEngine(s.auth.ctx)
+    const result = await failingEngine.processPendingAssociationRequests(s.auth.authority.id, s.officerSign, s.transport)
+
+    expect(result.rejected, 'a post-commit failure must NOT be recorded as a rejection').to.equal(0)
+    expect(result.associated).to.equal(1)
+
+    const row = await s.auth.ctx.db.prepare('select Status from AssociationRequest where Id = :id').get({ id: requestId })
+    expect(row?.Status, "the voter must not be told they were rejected while an Association row exists").to.equal('a')
+
+    const association = await s.engine.getAssociation(s.registrantId, deviceKeyPair.publicHex)
+    expect(association, 'the Association row really did commit').to.not.be.undefined
   })
 
   it('listAssociationRequests(authorityId) returns every request for that authority as AssociationRequestRead', async () => {

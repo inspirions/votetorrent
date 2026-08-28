@@ -1389,8 +1389,48 @@ export class AssociationEngine implements IAssociationEngine {
             // THE DRIVER CALLS THIS UNCHANGED — no reimplementation of verification, verdict
             // recording, the two-row write, or D-11's challenge consumption.
             await this.associate(associateInit, signatureOrCallback)
-          } catch {
-            rejectionReason = 'attestation-verification-failed'
+          } catch (associateErr) {
+            // WR-05 (51-REVIEW): `associate()` is DELIBERATELY two sequential transactions — the
+            // Association/AssociationPrivate write commits, and only then does D-11's challenge
+            // consumption run in its own transaction (see the long comment at that seam for the
+            // deferred-CHECK reason it cannot be folded in). So a throw out of `associate()` does
+            // NOT imply nothing was written: a signing hiccup, an allocator collision or a
+            // transient store error in the CONSUME step raises after the association is already
+            // durable.
+            //
+            // Deciding 'r' in that case tells the voter they were rejected while the authority
+            // holds a valid Association row — and because `AssociationRequest` has `NoDelete` and
+            // no `'r' -> 'a'` transition, the two records could never be reconciled. So re-read
+            // the association before deciding: only its ABSENCE is a genuine failure.
+            let alreadyAssociated: Association | undefined
+            let recheckFailed = false
+            try {
+              alreadyAssociated = await this.getAssociation(validated.registrantId, validated.deviceKey)
+            } catch {
+              recheckFailed = true
+            }
+            if (recheckFailed) {
+              // Cannot tell whether the write landed. An unrecoverable 'r' must never be
+              // manufactured out of uncertainty (same principle as the envelope skip above), so
+              // leave the row in 'c' for the next sync to resolve.
+              console.warn(
+                `AssociationEngine.processPendingAssociationRequests: associate() threw for requestId=${doc.requestId} and the association re-read ALSO failed — leaving the request in 'c' rather than recording an unrecoverable rejection`,
+                associateErr instanceof Error ? associateErr.message : String(associateErr)
+              )
+              continue
+            }
+            if (alreadyAssociated === undefined) {
+              rejectionReason = 'attestation-verification-failed'
+            } else {
+              // The write landed; the consume step failed. The voter IS associated — decide 'a'
+              // and leave the orphaned challenge for a later cleanup. Single-use is still
+              // enforced by the Association primary-key collision (D-06 structural), not by that
+              // delete alone, so an un-consumed challenge is not a replay vector.
+              console.warn(
+                `AssociationEngine.processPendingAssociationRequests: associate() threw for requestId=${doc.requestId} AFTER the Association row committed (D-11 challenge consumption failed) — deciding 'a' and leaving an orphaned AttestationChallenge`,
+                associateErr instanceof Error ? associateErr.message : String(associateErr)
+              )
+            }
           }
         }
 
