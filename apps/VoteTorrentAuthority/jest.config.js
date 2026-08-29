@@ -1,5 +1,21 @@
 module.exports = {
   preset: 'react-native',
+  // 2026-08-29 (Phase 51 Nyquist audit). Jest's implicit per-test budget is 5000ms, which this
+  // app's render-heavy screen/navigation suites cannot hold on a COLD cache: a clean
+  // `yarn jest --clearCache && yarn jest` runs ~98 suites whose Babel transforms all miss at
+  // once, and whichever suite loses the worker-scheduler lottery blows the default and fails.
+  // Measured repeatedly this session: suites that time out in the full cold run pass solo, still
+  // cold, with large margin (ProvisionSigningKeyScreen 4.134s total / 2285ms for its slowest
+  // test; the navigation suites ~23s each). So this is parallel-worker CPU contention, NOT a
+  // hang and NOT a perf regression -- isolated cold times are stable and fast.
+  //
+  // Patching files one at a time was whack-a-mole: budgeting the five known offenders simply
+  // moved the failure onto the next-unluckiest suite (ProvisionSigningKeyScreen, then
+  // RegistrationRequestApprovalScreen), because the defect is the global default, not any one
+  // file. This sets a contention-tolerant floor for every suite. Files needing more than this
+  // (the four navigation suites, at 60_000) still override locally and document their own
+  // measurement.
+  testTimeout: 30_000,
   // cadre-core-node.smoke.spec.ts (STR-02 D-12/D-13) is a dedicated
   // Node-environment test that imports the REAL @serfab/cadre-core with no
   // virtual mock — it must run ONLY under jest.node.config.js (testEnvironment
