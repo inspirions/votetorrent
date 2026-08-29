@@ -35,6 +35,7 @@
 		"all:voter": "yarn workspace votetorrent-voter ios && yarn workspace votetorrent-voter android",
 		"lint:peers": "node scripts/check-peer-requirements.mjs",
 		"lint:stubs": "bash scripts/lint-stubs.sh",
+		"verify:security-controls": "node scripts/verify-security-controls.mjs all .planning/phases/52-bootstrap-rendezvous-service",
 		"postinstall": "node scripts/check-peer-requirements.mjs"
 	},
 	"devDependencies": {
