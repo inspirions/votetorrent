@@ -1,19 +1,21 @@
 import type { IBootstrapTransport, BootstrapRedemptionResult } from './bootstrap-transport.js'
-import { assertKnownBootstrapRedemptionStatus, assertCanonicalBootstrapDatetime } from './bootstrap-transport.js'
-import { parseSnapshot } from './snapshot-codec.js'
-import type { BootstrapSnapshot } from './snapshot-types.js'
+import { assertKnownBootstrapRedemptionStatus } from './bootstrap-transport.js'
+import type { SealedPayload } from './sealed-payload.js'
+import { deriveBootstrapKeys } from './sealed-payload.js'
 
 /**
  * rest-bootstrap-transport.ts — the D-06 pull-only REST binding,
  * `IBootstrapTransport`'s SECOND real binding (the first is the filesystem
  * binding, `filesystem-bootstrap-transport.ts`).
  *
- * **1. PULL BY DESIGN.** This binding only ever calls OUT. It does not
- * host an inbound webhook receiver and it never binds a port. Neither the
- * browser dashboard nor the React Native authority app can listen. Where a
- * real receiver would belong: a small standalone Node service, never
- * inside an app bundle. **None is added in this phase** — D-06 states
- * plainly that the receiver service is not built here.
+ * **1. THIS BINDING ONLY EVER CALLS OUT.** It does not host an inbound
+ * webhook receiver and it never binds a port — neither the browser dashboard
+ * nor the React Native authority app can listen, and that constraint is
+ * unchanged. What HAS changed is the other end: the receiver this binding
+ * calls is the standalone bootstrap rendezvous service built in this phase,
+ * a small Node service outside every app bundle, exactly where such a
+ * receiver belongs. A later reader must not restore the old sentence
+ * claiming no such service exists.
  *
  * **2. Zero new dependencies.** Global `fetch` and `AbortSignal.timeout`
  * only. `axios`, `node-fetch`, `express` and `fastify` are deliberately
@@ -27,19 +29,33 @@ import type { BootstrapSnapshot } from './snapshot-types.js'
  * **4. What makes a fetched snapshot trustworthy.** An `https://` `baseUrl`
  * and a configured bearer header protect transit and authorize NOTHING.
  * The trust anchor is 50-02's manifest row-count + content digest + schema
- * hash, verified by the CONSUMER after this binding returns. A binding
- * that trusted the endpoint instead of the content check would be trusting
- * the network.
+ * hash, verified by the CONSUMER after this binding returns — against an
+ * `expectedDigest` read off the officer's phone out of band, never against
+ * anything this binding fetched. A binding that trusted the endpoint
+ * instead of the content check would be trusting the network.
  *
- * **5. The locked wire protocol**, mirrored by the test-only `node:http`
- * server in this package's conformance spec:
- *   - B-1 `POST {baseUrl}/bootstrap/redemptions` with body `{ code }` ->
- *     `{ status, snapshot? }`.
- *   - B-2 `GET {baseUrl}/bootstrap/snapshot` with `?since={generatedAt}` —
- *     the parameter OMITTED entirely when there is no value, exactly as
- *     `pollDecisions` omits its cursor -> `{ snapshot }` or
- *     `{ snapshot: null }` when nothing is newer. One JSON path, no 204
- *     special case.
+ * Relatedly, and forced rather than preferred (D-04): this binding transmits
+ * the DERIVED LOOKUP HALF of the code, never the raw secret. `redeem` is
+ * handed the secret because the filesystem binding legitimately needs it as
+ * a path segment, but the moment a network is involved, sending it would put
+ * the private half's derivation input into the receiver's hands — it could
+ * then derive the payload's decryption key from the very request that asks
+ * for the payload, and the sealing would be theatre. See
+ * `secretToLookupId` below, which returns the lookup half and discards the
+ * private half in the same expression.
+ *
+ * **5. The locked wire protocol**, mirrored by the test-only receiver in
+ * this package's conformance spec:
+ *   - B-1 `POST {baseUrl}/bootstrap/redemptions` with body `{ lookupId }`
+ *     -> `{ status, sealed? }`, where `sealed` is present if and only if
+ *     `status === 'ok'` and is returned to the caller UNOPENED.
+ *
+ * There is exactly one route. A second, cursor-shaped `GET
+ * {baseUrl}/bootstrap/snapshot` route (B-2) existed alongside it and was
+ * REMOVED together with the seam's pull-style method under D-07; the
+ * rendezvous service deliberately serves no such route. It must not be
+ * restored here: a keyless pull has no out-of-band digest to verify against,
+ * and a shared current document has no single key that opens it.
  *
  * No sentence in this file claims any scope is enforced here. This binding
  * never logs.
@@ -55,11 +71,44 @@ const DEFAULT_TIMEOUT_MS = 15_000
 
 interface RedemptionResponseBody {
   status?: unknown
-  snapshot?: unknown
+  sealed?: unknown
 }
 
-interface SnapshotResponseBody {
-  snapshot?: unknown
+/** Anchored lowercase-hex, used to screen the bearer secret BEFORE it is
+ * decoded. See `secretToLookupId` for why the screening has to come first. */
+const HEX_SECRET_PATTERN = /^[0-9a-f]+$/
+
+/**
+ * Derive the D-04 lookup half of a bearer secret — the only half this
+ * binding is allowed to transmit.
+ *
+ * The shape check runs BEFORE the decode, and the thrown message names the
+ * OBSERVED LENGTH ONLY, never the value: the same discipline
+ * `assertKnownBootstrapRedemptionStatus` follows, applied to a value that is
+ * a bearer credential.
+ *
+ * The hex decode is a local loop rather than `@noble/hashes`'s `hexToBytes`
+ * on purpose. That helper's `RangeError` embeds two characters of the
+ * offending string in its message, and here the offending string IS the
+ * bearer secret — a leak into any log or error surface that ever renders it.
+ *
+ * `deriveBootstrapKeys` returns both halves; this function reads the lookup
+ * half straight off the returned object and lets the private half go out of
+ * scope in the same expression. It is never bound to a variable, never
+ * stored on the instance, and never logged.
+ */
+function secretToLookupId (code: string): string {
+  if (typeof code !== 'string' || code.length === 0 || code.length % 2 !== 0 || !HEX_SECRET_PATTERN.test(code)) {
+    const observed = typeof code === 'string' ? code.length : -1
+    throw new Error(
+      `RestBootstrapTransport.redeem: code must be an even-length lowercase-hex secret (observed length ${observed})`
+    )
+  }
+  const bytes = new Uint8Array(code.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(code.slice(i * 2, i * 2 + 2), 16)
+  }
+  return deriveBootstrapKeys(bytes).lookupId
 }
 
 export interface RestBootstrapTransportOptions {
@@ -118,67 +167,45 @@ export class RestBootstrapTransport implements IBootstrapTransport {
   }
 
   /**
-   * Redeem a bearer bootstrap code via B-1. The response's `status` is
-   * narrowed through the seam's shared guard — never a local re-declared
-   * status set and never an `as BootstrapRedemptionStatus` coercion. On
-   * `'ok'` the response's `snapshot` member is structurally validated with
-   * 50-02's codec and returned; on any refusal `snapshot` is omitted, and a
-   * refusal that still carries a snapshot is thrown as a source defect —
-   * it must surface here, not downstream.
+   * Redeem a bearer bootstrap code via B-1.
+   *
+   * The lookup half is derived FIRST, before any socket is touched, so a
+   * malformed code is refused locally and never reaches the network — and so
+   * the raw secret is never what this binding sends (D-04, header rule 4).
+   *
+   * The response's `status` is narrowed through the seam's shared guard —
+   * never a local re-declared status set and never an
+   * `as BootstrapRedemptionStatus` coercion. On `'ok'` the response's
+   * `sealed` member is returned UNOPENED; on any refusal `sealed` is
+   * omitted, and a refusal that still carries a sealed payload is thrown as
+   * a source defect — it must surface here, not downstream.
    */
   async redeem (code: string): Promise<BootstrapRedemptionResult> {
+    const lookupId = secretToLookupId(code)
     const body = await this.requestJson<RedemptionResponseBody>('/bootstrap/redemptions', {
       method: 'POST',
-      body: { code }
+      body: { lookupId }
     })
     const status = assertKnownBootstrapRedemptionStatus(body.status, 'RestBootstrapTransport.redeem')
 
     if (status === 'ok') {
-      if (body.snapshot === undefined || body.snapshot === null) {
-        throw new Error("RestBootstrapTransport.redeem: response status was 'ok' but the response carried no snapshot")
+      if (body.sealed === undefined || body.sealed === null) {
+        throw new Error("RestBootstrapTransport.redeem: response status was 'ok' but the response carried no sealed payload")
       }
-      const parsed = parseSnapshot(JSON.stringify(body.snapshot))
-      if (!parsed.ok) {
-        throw new Error(`RestBootstrapTransport.redeem: response snapshot is malformed (${parsed.reason})`)
-      }
-      return { status: 'ok', snapshot: parsed.envelope }
+      // A CAST, NOT A VALIDATION — and deliberately so (seam rule 5). This
+      // binding is a courier: it deserialized its own transport encoding and
+      // stops there. `unsealPayload`, above the seam, performs the
+      // structural check and owns the `malformed-wrapper` refusal. A field
+      // check added here would move that judgement into the courier.
+      return { status: 'ok', sealed: body.sealed as SealedPayload }
     }
 
-    if (body.snapshot !== undefined && body.snapshot !== null) {
+    if (body.sealed !== undefined && body.sealed !== null) {
       // A source that refuses and still ships data is a defect that must
       // surface here, not be silently forwarded downstream.
-      throw new Error(`RestBootstrapTransport.redeem: response status was '${status}' but the response still carried a snapshot`)
+      throw new Error(`RestBootstrapTransport.redeem: response status was '${status}' but the response still carried a sealed payload`)
     }
     return { status }
-  }
-
-  /**
-   * The pull-cursor-shaped refresh path via B-2. `sinceGeneratedAt` is
-   * guarded through the seam's canonical-datetime check when present (a
-   * `Z`-suffixed cursor is rejected, never silently normalised) and is
-   * OMITTED entirely from the query string when absent — never sent as the
-   * literal string `undefined`. `{ snapshot: null }` maps to `undefined`;
-   * otherwise the response is parsed with 50-02's codec, its
-   * `generatedAt` is guarded, and it is returned VERBATIM — no filtering,
-   * re-sorting, re-serializing, or re-digesting. Any client-side
-   * re-decision about freshness beyond the guard belongs to the consumer.
-   */
-  async pullSnapshot (sinceGeneratedAt?: string): Promise<BootstrapSnapshot | undefined> {
-    let path = '/bootstrap/snapshot'
-    if (sinceGeneratedAt !== undefined) {
-      const since = assertCanonicalBootstrapDatetime(sinceGeneratedAt, 'RestBootstrapTransport.pullSnapshot')
-      path = `${path}?since=${encodeURIComponent(since)}`
-    }
-    const body = await this.requestJson<SnapshotResponseBody>(path, { method: 'GET' })
-    if (body.snapshot === undefined || body.snapshot === null) {
-      return undefined
-    }
-    const parsed = parseSnapshot(JSON.stringify(body.snapshot))
-    if (!parsed.ok) {
-      throw new Error(`RestBootstrapTransport.pullSnapshot: response snapshot is malformed (${parsed.reason})`)
-    }
-    assertCanonicalBootstrapDatetime(parsed.envelope.generatedAt, 'RestBootstrapTransport.pullSnapshot')
-    return parsed.envelope
   }
 
   /**

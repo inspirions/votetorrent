@@ -21,6 +21,7 @@ import { readRowCounts, readRowCountsRecord, attachNetworkDb } from '../../src/d
 import { findNetwork, listNetworks } from '../../src/db/networks-registry.js';
 import { BOOTSTRAP_OUTCOME_CODES, redeemAndBootstrap, copyKeysForOutcome } from '../../src/lifecycle/bootstrap.js';
 import { createSingleFlightTransport } from '../../src/lifecycle/officer-swap.js';
+import { redeemSignInCode } from '../../src/transport/bootstrap-transport-client.js';
 import {
 	buildFixtureEnvelope,
 	withDroppedRows,
@@ -431,7 +432,12 @@ test('D-14 handoff: a HANDED-OFF single-flight cache is replayed by a caller wit
 	// second time. NO reset() call happens here: this is the handoff, and
 	// Bootstrap.tsx's handedOffRef guard is what keeps its unmount cleanup
 	// from calling it.
-	const replay = await singleFlight.transport.redeem(SECRET);
+	// Replayed through `redeemSignInCode`, not the raw transport: the raw
+	// result carries a SEALED wrapper (D-06), and the envelope only exists
+	// above that seam. This asserts strictly more than the old raw-result
+	// deepEqual did -- the replay must UNSEAL correctly with the same code's
+	// key AND must not reach the wire a second time to do it.
+	const replay = await redeemSignInCode(singleFlight.transport, SECRET);
 	assert.equal(replay.status, 'ok');
 	assert.deepEqual(replay.snapshot, baseline.envelope);
 	assert.equal(singleFlight.innerCallCount, 1, 'innerCallCount must still be exactly 1 after the replay');

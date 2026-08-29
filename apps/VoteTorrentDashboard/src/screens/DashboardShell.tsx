@@ -50,7 +50,7 @@ import type { SnapshotFreshness } from '../lifecycle/freshness.js';
 import { forgetNetwork } from '../lifecycle/forget-network.js';
 import { classifyRedemption, performOfficerSwap, OfficerIndeterminateError } from '../lifecycle/officer-swap.js';
 import type { SingleFlightTransport } from '../lifecycle/officer-swap.js';
-import { splitSignInCode } from '../transport/bootstrap-transport-client.js';
+import { splitSignInCode, redeemSignInCode } from '../transport/bootstrap-transport-client.js';
 import type { AlreadyBootstrappedContext } from './Bootstrap.js';
 import { AdvisoryDisclosure, PreviewAsControl, PreviewAsProvider } from './PreviewAsControl.js';
 import { PanelGrid } from './PanelGrid.js';
@@ -521,7 +521,13 @@ export function DashboardShell({
 		async function classify() {
 			try {
 				const { secret } = splitSignInCode(swapContext.pastedCode);
-				const redemption = await swapContext.transport.redeem(secret);
+				// Routed through `redeemSignInCode` rather than calling
+				// `transport.redeem` directly: the transport now returns a SEALED
+				// payload (D-06), and `redeemSignInCode` is the one shared place
+				// that opens one. Calling the transport directly here would need a
+				// second unseal site, and a second definition of what "opened
+				// correctly" means. The catch below already covers its refusal.
+				const redemption = await redeemSignInCode(swapContext.transport, secret);
 				if (redemption.status !== 'ok' || !redemption.snapshot) {
 					// `createSingleFlightTransport` caches ONLY an `ok` result --
 					// reaching here would mean the cache was cleared between

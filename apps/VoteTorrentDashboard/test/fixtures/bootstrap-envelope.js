@@ -24,7 +24,8 @@
  *     as the past-Expiration case above already demonstrates).
  */
 
-import { buildSnapshot, encodeBlobValue } from '@votetorrent/vote-engine/bootstrap';
+import { buildSnapshot, encodeBlobValue, sealPayload } from '@votetorrent/vote-engine/bootstrap';
+import { secretToKeySplit } from '../../src/transport/bootstrap-transport-client.js';
 
 /** @type {string} */
 export const FIXTURE_NETWORK_HASH = 'bootstrap-fixture-network';
@@ -227,14 +228,29 @@ export function withCaseCollidingRegistrant(env) {
 }
 
 /**
- * An in-memory `IBootstrapTransport` double whose `redeem` returns a
- * caller-supplied `BootstrapRedemptionResult` (or throws when the mapped
- * value is an `Error`), and whose `pullSnapshot` throws if called -- Phase
- * 50's first bootstrap never pulls. Typed through the IMPORTED
- * `BootstrapRedemptionResult` -- never re-declared, never cast. This double
- * exists because 50-03's own conformance suite already proves both real
- * bindings; the filesystem binding is Node-only and barrel-excluded, so this
- * workspace must not reach for it.
+ * The PLAINTEXT-shaped result a caller hands `makeFakeTransport`. Deliberately
+ * a fixture-local typedef rather than the seam's `BootstrapRedemptionResult`:
+ * under D-06 the seam carries a SEALED wrapper, but this double's
+ * `codeToResult` API stays plaintext-shaped so every existing call site keeps
+ * writing `{ status: 'ok', snapshot: envelope }` unchanged. The sealing
+ * happens on the way out of `redeem`, below.
+ * @typedef {{ status: import('@votetorrent/vote-engine/bootstrap').BootstrapRedemptionStatus, snapshot?: import('@votetorrent/vote-engine/bootstrap').BootstrapSnapshot }} FakeRedemptionResult
+ */
+
+/**
+ * An in-memory `IBootstrapTransport` double whose `redeem` resolves a
+ * caller-supplied plaintext result (or throws when the mapped value is an
+ * `Error`) and SEALS it on the way out, exactly as a real binding's source
+ * would have staged it. This double exists because 50-03's own conformance
+ * suite already proves both real bindings; the filesystem binding is
+ * Node-only and barrel-excluded, so this workspace must not reach for it.
+ *
+ * IT SEALS WITH THE SAME DERIVATION THE CONSUMER UNSEALS WITH --
+ * `secretToKeySplit`, imported from the production module rather than
+ * re-implemented here. So a mismatch between the two sides can only be a
+ * defect in `deriveBootstrapKeys` itself, which 52-01's known-answer vectors
+ * already pin against an independent implementation. A locally re-derived key
+ * would instead make this double capable of agreeing with a broken consumer.
  *
  * SINGLE-USE BY DEFAULT (50-20 / D-14): the real backend
  * (`dashboard-signin-code.ts:391`) redeems a bearer code exactly once -- a
@@ -257,7 +273,7 @@ export function withCaseCollidingRegistrant(env) {
  * the SAME secret constant (e.g. two unrelated bootstraps that happen to
  * share a literal secret string) -- name the reason at the call site.
  *
- * @param {{ codeToResult: Record<string, import('@votetorrent/vote-engine/bootstrap').BootstrapRedemptionResult | Error>, singleUse?: boolean }} options
+ * @param {{ codeToResult: Record<string, FakeRedemptionResult | Error>, singleUse?: boolean }} options
  * @returns {import('@votetorrent/vote-engine/bootstrap').IBootstrapTransport & { calls: string[] }}
  */
 export function makeFakeTransport({ codeToResult, singleUse = true }) {
@@ -280,11 +296,17 @@ export function makeFakeTransport({ codeToResult, singleUse = true }) {
 			const result = codeToResult[code];
 			if (result instanceof Error) throw result;
 			const resolved = result ?? { status: 'unknown' };
-			if (resolved.status === 'ok') spent.add(code);
-			return resolved;
-		},
-		async pullSnapshot() {
-			throw new Error('makeFakeTransport: pullSnapshot must not be called in Phase 50 (first bootstrap only)');
+			if (resolved.status !== 'ok' || !resolved.snapshot) {
+				return { status: resolved.status };
+			}
+			spent.add(code);
+			// Sealed HERE, on the way out -- a courier hands back a wrapper it
+			// never opened, and the consumer opens it. The `codeToResult` API
+			// above stays plaintext so no call site had to move.
+			return {
+				status: 'ok',
+				sealed: sealPayload(JSON.stringify(resolved.snapshot), secretToKeySplit(code)),
+			};
 		},
 	};
 }

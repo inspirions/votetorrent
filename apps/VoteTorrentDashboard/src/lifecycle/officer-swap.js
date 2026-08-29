@@ -30,9 +30,14 @@
  * NOT CONVENIENCES:
  *   - At most ONE entry, keyed by the secret, held in module-local memory
  *     for the duration of one user-initiated attempt.
- *   - NEVER PERSISTED -- the cached value is a whole-database snapshot
- *     including registrant PII; it must not reach `localStorage`,
- *     `sessionStorage`, IndexedDB or any log.
+ *   - NEVER PERSISTED -- the cached value is a SEALED whole-database
+ *     snapshot, and it is held next to the secret that opens it (the cache
+ *     is keyed by that secret). Sealed bytes plus the key that opens them
+ *     are exactly a redeemable payload, so sealing changes NOTHING about
+ *     this rule: it is unchanged in force and unchanged in reason. It must
+ *     not reach `localStorage`, `sessionStorage`, IndexedDB or any log.
+ *     Nobody may weaken this paragraph on the grounds that the payload is
+ *     now encrypted.
  *   - REFUSALS ARE NEVER CACHED -- `expired`, `used` and `unknown` pass
  *     straight through every time, so the decorator can never turn a
  *     refused code into an accepted one.
@@ -135,14 +140,6 @@ export function createSingleFlightTransport(inner) {
 				cached = { secret, result };
 			}
 			return result;
-		},
-		async pullSnapshot() {
-			// Phase 50 never pulls (see refresh.js's header). A decorator that
-			// silently forwarded this would be a way around that rule, so it
-			// throws BY NAME instead.
-			throw new Error(
-				'createSingleFlightTransport: pullSnapshot must never be called -- Phase 50 has no refreshable session credential',
-			);
 		},
 		reset,
 	};

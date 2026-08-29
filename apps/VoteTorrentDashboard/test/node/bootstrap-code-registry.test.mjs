@@ -16,10 +16,13 @@ import {
 	SIGNIN_CODE_PATTERN,
 	InvalidSignInCodeError,
 	BootstrapTransportUnreachableError,
+	SealedPayloadUnreadableError,
 	splitSignInCode,
+	secretToKeySplit,
 	createRestBootstrapTransport,
 	redeemSignInCode,
 } from '../../src/transport/bootstrap-transport-client.js';
+import { sealPayload } from '@votetorrent/vote-engine/bootstrap';
 import {
 	NETWORKS_REGISTRY_KEY,
 	InvalidNetworkRegistryError,
@@ -34,6 +37,45 @@ const DIGEST = 'b'.repeat(43);
 const VALID_CODE = `${SECRET}.${DIGEST}`;
 
 const PII_CANARY = 'PII-CANARY-9f3a';
+
+// Four DISTINCT 40-lowercase-hex secrets, plus two more for the negative
+// cases. The shape is required, not cosmetic: `redeemSignInCode` derives the
+// D-04 key split from the secret before it calls anything, so a placeholder
+// like `'secret-ok'` can no longer reach a transport at all.
+const SECRET_OK = 'a1'.repeat(20);
+const SECRET_EXPIRED = 'b2'.repeat(20);
+const SECRET_USED = 'c3'.repeat(20);
+const SECRET_UNKNOWN = 'd4'.repeat(20);
+const SECRET_BOOM = 'e5'.repeat(20);
+const SECRET_OTHER = 'f6'.repeat(20);
+
+/** A structurally valid envelope, carrying the PII canary in a table row so a
+ * leak of decrypted content into an error message would be visible. */
+const CANARY_ENVELOPE = {
+	formatVersion: 1,
+	networkHash: 'n1',
+	schemaHash: 'fake-schema-hash',
+	generatedAt: '2026-01-01T00:00:00',
+	manifest: { Registrant: 1 },
+	digest: 'fake-digest',
+	tables: { Registrant: [{ Id: 'r1', Name: PII_CANARY }] },
+};
+
+/**
+ * Build an `ok` transport result whose payload is sealed under `sealingSecret`
+ * -- which is normally the same secret the consumer will redeem with, and
+ * deliberately a DIFFERENT one in the wrong-key case below. Seals through the
+ * production `secretToKeySplit`, so the two sides cannot drift.
+ * @param {string} sealingSecret
+ * @param {Record<string, unknown>} envelope
+ * @returns {{ status: 'ok', sealed: import('@votetorrent/vote-engine/bootstrap').SealedPayload }}
+ */
+function sealedOk(sealingSecret, envelope = CANARY_ENVELOPE) {
+	return {
+		status: 'ok',
+		sealed: sealPayload(JSON.stringify(envelope), secretToKeySplit(sealingSecret)),
+	};
+}
 
 /** A tiny Map-backed localStorage-shaped fake -- Node 22 has no real `localStorage`. */
 function makeFakeStorage() {
@@ -55,6 +97,10 @@ function makeFakeStorage() {
  * caller-supplied result for a matching secret, or throws when the result is
  * an `Error` instance -- covering both the refusal path and the thrown
  * transport-failure path with one shape.
+ *
+ * The results it is handed are ALREADY SEALED (see `sealedOk`), because under
+ * D-06 that is what a courier carries: the double is a courier and never
+ * holds plaintext, exactly like the two real bindings.
  * @param {Record<string, import('@votetorrent/vote-engine/bootstrap').BootstrapRedemptionResult | Error>} codeToResult
  * @returns {import('@votetorrent/vote-engine/bootstrap').IBootstrapTransport & { calls: string[] }}
  */
@@ -69,9 +115,6 @@ function makeFakeTransport(codeToResult) {
 			const result = codeToResult[code];
 			if (result instanceof Error) throw result;
 			return result ?? { status: 'unknown' };
-		},
-		async pullSnapshot() {
-			throw new Error('makeFakeTransport: pullSnapshot must not be called in Phase 50');
 		},
 	};
 }
@@ -205,43 +248,91 @@ test('createRestBootstrapTransport: requires an explicit non-empty baseUrl', () 
 	assert.throws(() => createRestBootstrapTransport({ baseUrl: '' }), TypeError);
 	const transport = createRestBootstrapTransport({ baseUrl: 'https://bootstrap.example.org' });
 	assert.equal(typeof transport.redeem, 'function');
-	assert.equal(typeof transport.pullSnapshot, 'function');
 });
 
-test('redeemSignInCode: returns every one of the four transport statuses distinctly (no collapsing)', async () => {
+test('redeemSignInCode: returns every one of the four transport statuses distinctly (no collapsing), unsealing the ok payload', async () => {
 	const transport = makeFakeTransport({
-		'secret-ok': {
-			status: 'ok',
-			snapshot: {
-				formatVersion: 1,
-				networkHash: 'n1',
-				schemaHash: 'fake-schema-hash',
-				generatedAt: '2026-01-01T00:00:00',
-				manifest: {},
-				digest: 'fake-digest',
-				tables: {},
-			},
-		},
-		'secret-expired': { status: 'expired' },
-		'secret-used': { status: 'used' },
-		'secret-unknown': { status: 'unknown' },
+		[SECRET_OK]: sealedOk(SECRET_OK),
+		[SECRET_EXPIRED]: { status: 'expired' },
+		[SECRET_USED]: { status: 'used' },
+		[SECRET_UNKNOWN]: { status: 'unknown' },
 	});
-	assert.equal((await redeemSignInCode(transport, 'secret-ok')).status, 'ok');
-	assert.equal((await redeemSignInCode(transport, 'secret-expired')).status, 'expired');
-	assert.equal((await redeemSignInCode(transport, 'secret-used')).status, 'used');
-	assert.equal((await redeemSignInCode(transport, 'secret-unknown')).status, 'unknown');
+	const ok = await redeemSignInCode(transport, SECRET_OK);
+	assert.equal(ok.status, 'ok');
+	// The sealed wrapper became a plaintext envelope ABOVE the seam -- this is
+	// the D-06 consumer step, and it is the only place in the dashboard that
+	// performs it.
+	assert.equal(ok.snapshot?.networkHash, 'n1');
+	assert.equal((await redeemSignInCode(transport, SECRET_EXPIRED)).status, 'expired');
+	assert.equal((await redeemSignInCode(transport, SECRET_USED)).status, 'used');
+	assert.equal((await redeemSignInCode(transport, SECRET_UNKNOWN)).status, 'unknown');
+});
+
+test('redeemSignInCode: a malformed secret is refused BEFORE the transport is reached -- the double records no call', async () => {
+	// Positive control: the four-status test above proves a well-formed secret
+	// DOES reach this same double.
+	const transport = makeFakeTransport({ [SECRET_OK]: sealedOk(SECRET_OK) });
+	for (const bad of ['not-40-hex', 'A1'.repeat(20), 'a1'.repeat(19), PII_CANARY]) {
+		await assert.rejects(
+			() => redeemSignInCode(transport, bad),
+			(err) => {
+				assert.ok(err instanceof InvalidSignInCodeError);
+				assert.equal(err.name, 'InvalidSignInCodeError');
+				assert.ok(!err.message.includes(bad), 'the refusal must not echo the rejected secret');
+				assert.ok(!err.message.includes(PII_CANARY));
+				return true;
+			},
+		);
+	}
+	assert.equal(transport.calls.length, 0, 'a malformed secret must never reach the transport');
+});
+
+test('redeemSignInCode: a payload sealed under a DIFFERENT secret raises SealedPayloadUnreadableError, leaking neither secret, no ciphertext run, and no PII', async () => {
+	const wrongKeyed = sealedOk(SECRET_OTHER);
+	const transport = makeFakeTransport({
+		[SECRET_OK]: wrongKeyed,
+		// Positive control in the same double: correctly sealed under its own
+		// secret, this opens.
+		[SECRET_USED]: sealedOk(SECRET_USED),
+	});
+
+	const control = await redeemSignInCode(transport, SECRET_USED);
+	assert.equal(control.status, 'ok');
+	assert.equal(control.snapshot?.networkHash, 'n1');
+
+	await assert.rejects(
+		() => redeemSignInCode(transport, SECRET_OK),
+		(err) => {
+			assert.ok(err instanceof SealedPayloadUnreadableError);
+			assert.equal(err.name, 'SealedPayloadUnreadableError');
+			// It is distinguishable from BOTH neighbours by class.
+			assert.ok(!(err instanceof BootstrapTransportUnreachableError));
+			assert.ok(!(err instanceof InvalidSignInCodeError));
+			// Neither secret.
+			assert.ok(!err.message.includes(SECRET_OK));
+			assert.ok(!err.message.includes(SECRET_OTHER));
+			// No base64url run from the wrapper -- neither nonce nor ciphertext.
+			assert.ok(!err.message.includes(wrongKeyed.sealed.nonce));
+			assert.ok(!err.message.includes(wrongKeyed.sealed.ciphertext.slice(0, 12)));
+			// No registrant content.
+			assert.ok(!err.message.includes(PII_CANARY));
+			// It DOES name the structural reason -- the whole point of the class.
+			assert.match(err.message, /authentication-failed/);
+			return true;
+		},
+	);
 });
 
 test('redeemSignInCode: a thrown transport error becomes BootstrapTransportUnreachableError, naming neither the secret nor any payload', async () => {
 	const transport = makeFakeTransport({
-		'secret-boom': new Error(`upstream failure containing ${PII_CANARY} and the secret secret-boom`),
+		[SECRET_BOOM]: new Error(`upstream failure containing ${PII_CANARY} and the secret ${SECRET_BOOM}`),
 	});
 	await assert.rejects(
-		() => redeemSignInCode(transport, 'secret-boom'),
+		() => redeemSignInCode(transport, SECRET_BOOM),
 		(err) => {
 			assert.ok(err instanceof BootstrapTransportUnreachableError);
 			assert.equal(err.name, 'BootstrapTransportUnreachableError');
-			assert.ok(!err.message.includes('secret-boom'));
+			assert.ok(!err.message.includes(SECRET_BOOM));
 			assert.ok(!err.message.includes(PII_CANARY));
 			return true;
 		},

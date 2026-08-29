@@ -88,7 +88,7 @@ import {
 	serializeSnapshot,
 } from '@votetorrent/vote-engine/bootstrap';
 import type {
-	BootstrapRedemptionResult,
+	BootstrapRedemptionStatus,
 	BootstrapSnapshot,
 } from '@votetorrent/vote-engine/bootstrap';
 
@@ -346,6 +346,25 @@ export function splitDashboardSignInCode(code: string): { secret: string; digest
 let redemptionChain: Promise<unknown> = Promise.resolve();
 
 /**
+ * The result of a PRODUCER-SIDE staged-code redemption.
+ *
+ * Deliberately declared HERE rather than borrowed from the bootstrap transport
+ * seam. `redeemStagedSignInCode` is not a transport: it resolves a staged code
+ * to a plaintext envelope in memory, on the phone, on the trusted side of the
+ * boundary. It only ever shared the seam's shape by coincidence, and the seam
+ * has since moved on — a courier now carries a SEALED wrapper, which is
+ * precisely the thing this function is not doing. Reusing the seam's type here
+ * would silently re-couple a producer to a courier contract that no longer
+ * describes it.
+ *
+ * `snapshot` is present IF AND ONLY IF `status === 'ok'`.
+ */
+type StagedSignInCodeRedemption = {
+	status: BootstrapRedemptionStatus;
+	snapshot?: BootstrapSnapshot;
+};
+
+/**
  * The PRODUCER-side authority for a code's expiry and single-use state.
  * Whichever binding eventually fronts this app (filesystem or REST) delegates
  * its redemption claim here; a staged filesystem copy additionally carries its
@@ -371,15 +390,14 @@ let redemptionChain: Promise<unknown> = Promise.resolve();
  *      `redeemedAt`, persist the tombstone, and return `'ok'` with the
  *      snapshot.
  *
- * `snapshot` is OMITTED on every refusal — 50-03's `BootstrapRedemptionResult`
- * states it is present iff the status is `'ok'`, and a caller must not be able
- * to consume a partial artifact.
+ * `snapshot` is OMITTED on every refusal: it is present if and only if the
+ * status is `'ok'`, so a caller can never consume a partial artifact.
  */
 export async function redeemStagedSignInCode(
 	secret: string,
 	options?: { now?: Date },
-): Promise<BootstrapRedemptionResult> {
-	const attempt = redemptionChain.then(async (): Promise<BootstrapRedemptionResult> => {
+): Promise<StagedSignInCodeRedemption> {
+	const attempt = redemptionChain.then(async (): Promise<StagedSignInCodeRedemption> => {
 		const now = options?.now ?? new Date();
 		const nowCanonical = toCanonical(now);
 

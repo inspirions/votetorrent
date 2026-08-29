@@ -2,8 +2,7 @@ import { mkdir, readFile, writeFile, link, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { IBootstrapTransport, BootstrapRedemptionResult } from './bootstrap-transport.js'
 import { assertCanonicalBootstrapDatetime } from './bootstrap-transport.js'
-import { parseSnapshot } from './snapshot-codec.js'
-import type { BootstrapSnapshot } from './snapshot-types.js'
+import type { SealedPayload } from './sealed-payload.js'
 
 /**
  * filesystem-bootstrap-transport.ts — the D-06 Node-only filesystem
@@ -23,16 +22,22 @@ import type { BootstrapSnapshot } from './snapshot-types.js'
  *   - `{rootDir}/codes/{code}.json` — the code record: the code's
  *     `expiresAt` (19-char canonical, no `Z`) and the snapshot filename it
  *     grants.
- *   - `{rootDir}/snapshots/{name}.json` — a serialized 50-02 envelope.
+ *   - `{rootDir}/snapshots/{name}.json` — a serialized SEALED WRAPPER
+ *     (`{v, nonce, ciphertext}`): the 50-02 envelope sealed under the
+ *     `contentKey` derived from that code's secret (D-04/D-05). It is NOT a
+ *     serialized envelope, and this module never turns it back into one.
  *   - `{rootDir}/redeemed/{code}.marker` — the single-use marker. Its
  *     EXISTENCE is the single-use fact.
- *   - `{rootDir}/snapshots/current.json` — what `pullSnapshot` reads.
  *
  * **The trust posture, stated as a negative.** This module verifies
  * nothing and decides nothing about a snapshot's content. It couriers
- * whatever the staging side placed on disk unchanged; 50-02's
- * `verifySnapshot`, run by the CONSUMER, is the entire trust anchor. No
- * sentence in this file claims any scope is enforced here.
+ * whatever the staging side placed on disk unchanged; the consumer's
+ * unseal -> parse -> `verifySnapshot({ expectedDigest })` sequence, run
+ * entirely ABOVE this seam, is the whole trust anchor. Since
+ * the document on disk is sealed under a key this binding never derives, it
+ * now CANNOT inspect what it couriers even if it wanted to — the strictest
+ * form of the posture this paragraph already claimed. No sentence in this
+ * file claims any scope is enforced here.
  */
 
 /** Validates an untrusted identifier before it is ever used to construct a
@@ -108,8 +113,8 @@ export class FilesystemBootstrapTransport implements IBootstrapTransport {
    *
    * Order of checks: unknown (no code record) -> expired (canonical
    * `expiresAt` not strictly in the future) -> used (the single-use marker
-   * already exists) -> ok (the granted snapshot is read and returned
-   * verbatim).
+   * already exists) -> ok (the granted SEALED document is read and returned
+   * verbatim, unopened).
    */
   async redeem (code: string): Promise<BootstrapRedemptionResult> {
     assertSafeBootstrapIdentifier(code, 'code')
@@ -146,45 +151,24 @@ export class FilesystemBootstrapTransport implements IBootstrapTransport {
       text = await readFile(snapshotPath, 'utf8')
     } catch {
       // Each call reads exactly one named document, so there is nothing to
-      // skip past: a malformed or absent granted snapshot is a thrown
+      // skip past: a malformed or absent granted document is a thrown
       // Error, not a silent skip. The filename only — never document
       // content.
-      throw new Error(`FilesystemBootstrapTransport.redeem: could not read the granted snapshot document ${record.snapshotFile}.json`)
+      throw new Error(`FilesystemBootstrapTransport.redeem: could not read the granted sealed payload document ${record.snapshotFile}.json`)
     }
-    const parsed = parseSnapshot(text)
-    if (!parsed.ok) {
-      throw new Error(`FilesystemBootstrapTransport.redeem: granted snapshot document ${record.snapshotFile}.json is malformed (${parsed.reason})`)
-    }
-    return { status: 'ok', snapshot: parsed.envelope }
-  }
-
-  /**
-   * Reads `{rootDir}/snapshots/current.json`. `ENOENT` -> `undefined`
-   * (nothing has been staged yet, not a fault). When `sinceGeneratedAt` is
-   * supplied, returns `undefined` unless the current snapshot's
-   * `generatedAt` is strictly greater than it — a raw string comparison,
-   * never a Date-parsing conversion on either side: two strings that parse
-   * to the same instant are still different values, and a `Z`-suffixed
-   * input must be rejected by the guard rather than silently normalised.
-   */
-  async pullSnapshot (sinceGeneratedAt?: string): Promise<BootstrapSnapshot | undefined> {
-    let text: string
+    let parsed: unknown
     try {
-      text = await readFile(join(this.snapshotsDir, 'current.json'), 'utf8')
-    } catch (err) {
-      if (isEnoent(err)) return undefined
-      throw err
+      parsed = JSON.parse(text)
+    } catch {
+      // The filename only — never the document text. The document is a
+      // sealed wrapper whose ciphertext covers registrant PII.
+      throw new Error(`FilesystemBootstrapTransport.redeem: could not parse the granted sealed payload document ${record.snapshotFile}.json`)
     }
-    const parsed = parseSnapshot(text)
-    if (!parsed.ok) {
-      throw new Error(`FilesystemBootstrapTransport.pullSnapshot: current snapshot document is malformed (${parsed.reason})`)
-    }
-    const generatedAt = assertCanonicalBootstrapDatetime(parsed.envelope.generatedAt, 'FilesystemBootstrapTransport.pullSnapshot')
-    if (sinceGeneratedAt !== undefined) {
-      const since = assertCanonicalBootstrapDatetime(sinceGeneratedAt, 'FilesystemBootstrapTransport.pullSnapshot')
-      if (!(generatedAt > since)) return undefined
-    }
-    return parsed.envelope
+    // A CAST, NOT A VALIDATION — and deliberately so (seam rule 5). This
+    // binding deserialized its own on-disk encoding and stops there. No
+    // field check on the wrapper belongs here: `unsealPayload`, above the
+    // seam, validates and owns the `malformed-wrapper` refusal.
+    return { status: 'ok', sealed: parsed as SealedPayload }
   }
 
   /**

@@ -1,4 +1,4 @@
-import type { BootstrapSnapshot } from './snapshot-types.js'
+import type { SealedPayload } from './sealed-payload.js'
 
 /**
  * bootstrap-transport.ts — the D-06 bootstrap-transport seam.
@@ -26,17 +26,30 @@ import type { BootstrapSnapshot } from './snapshot-types.js'
  * no key to leak.
  *
  * **4. The trust anchor.** An `https://` origin, a configured bearer
- * header, and a filesystem permission bit authorize NOTHING. The only thing
- * that makes a delivered snapshot trustworthy is 50-02's manifest
- * row-count + content digest + schema-hash verification (`verifySnapshot`),
- * performed by the CONSUMER after this seam returns. A binding that trusted
- * its endpoint instead of the content check would be trusting the network.
+ * header, and a filesystem permission bit authorize NOTHING. What a
+ * delivered payload has to survive happens entirely on the CONSUMER side of
+ * this seam, in this order: the consumer UNSEALS the wrapper with the
+ * `contentKey` derived from its own copy of the code, then parses, then runs
+ * 50-02's manifest row-count + content digest + schema-hash verification
+ * (`verifySnapshot`) against the `expectedDigest` it read out of band.
+ * Unsealing proves only that the payload was sealed by someone holding the
+ * secret; it does NOT prove the payload is the snapshot the officer's screen
+ * described. Only `expectedDigest` does that, and it remains the trust
+ * anchor. A binding that trusted its endpoint instead of that content check
+ * would be trusting the network.
  *
  * **5. Couriers do not reject.** Neither binding inspects, repairs,
  * re-serializes, or re-digests a delivered payload. Tampering must remain
  * detectable at the same point, with the same evidence, through either
  * binding; a binding that re-computed the digest over mutated bytes would
- * launder a tampered payload into a verifiable one.
+ * launder a tampered payload into a verifiable one. A binding MAY
+ * deserialize its own transport encoding — turning the JSON text it read off
+ * a socket or a disk into a JS object is how it got a value at all — but it
+ * may not validate, repair or interpret that wrapper's fields. Structural
+ * judgement about a wrapper belongs to `unsealPayload`, above this seam,
+ * which owns `malformed-wrapper`; a courier that pre-screened wrapper
+ * members would be deciding, on the consumer's behalf, which refusals the
+ * consumer is allowed to see.
  *
  * **6. No ceremony, no scope claim.** No sentence in this file claims that
  * any scope is enforced here.
@@ -114,25 +127,63 @@ export function assertCanonicalBootstrapDatetime (value: unknown, where: string)
 }
 
 /**
- * The result of a redemption attempt. `snapshot` is present IF AND ONLY IF
+ * The result of a redemption attempt. `sealed` is present IF AND ONLY IF
  * `status === 'ok'` — every binding must omit it on a refusal so a caller
  * cannot accidentally consume a partial artifact.
+ *
+ * **`sealed` is an OUTER wrapper around the 50-02 envelope, never a modified
+ * envelope.** `snapshot-types.ts` is frozen: sealing wraps a serialized
+ * `BootstrapSnapshot` whole and returns it whole, adding confidentiality
+ * against the courier and changing nothing about integrity. No envelope
+ * field name, and nothing about the digest's scope, moves because of it.
+ *
+ * **The courier does not open it (D-06).** A binding returns these bytes
+ * unread. The sequence that turns them back into a `BootstrapSnapshot` —
+ * `unsealPayload` with the `contentKey`, then `parseSnapshot`, then
+ * `verifySnapshot({ expectedDigest })` — lives entirely ABOVE this seam, in
+ * the consumer. A binding that unsealed here would hold the plaintext voter
+ * roll inside the courier, which is precisely what D-06 forbids: the whole
+ * point of sealing is that the party carrying the payload cannot read it.
  */
 export interface BootstrapRedemptionResult {
   status: BootstrapRedemptionStatus
-  snapshot?: BootstrapSnapshot
+  sealed?: SealedPayload
 }
 
 /**
- * D-06: the bootstrap-transport seam. Two methods, both pull-only,
- * mirroring `IRegistrationRequestTransport`'s `submitRequest`/
- * `pollDecisions` shape.
+ * D-06: the bootstrap-transport seam. **ONE method.** A binding redeems a
+ * bearer code and couriers back a sealed wrapper; there is nothing else it
+ * is asked to do.
+ *
+ * **Why the removed pull-style method costs nothing and reserves nothing
+ * (D-07).** A second, cursor-shaped pull-style method once sat here. It never
+ * had a live caller — the only implementations outside the two bindings were
+ * doubles that threw by name. Restoring it would be wrong on three separate
+ * counts, so a later reader must not treat its absence as an oversight:
+ *
+ *   - A pull-style refresh arrives with NO out-of-band digest to check it
+ *     against. `expectedDigest` reaches the browser on the officer's phone
+ *     screen, attached to one minted code; a later unattended pull has no
+ *     such anchor, so verification would collapse from "this is the snapshot
+ *     the officer described" to mere self-consistency — the envelope's own
+ *     `digest` field checking the envelope's own bytes, which whoever
+ *     controls the payload also controls.
+ *   - Under sealing it is additionally incoherent. A payload is sealed under
+ *     the `contentKey` derived from ONE code's secret, so a shared
+ *     "current" document has no single key that opens it. There is no
+ *     coherent thing for a keyless pull to return.
+ *   - The two-bindings rule (48 D-01, restated by 50 D-06) is a rule about
+ *     BINDINGS, not about method count: one method with two real bindings,
+ *     exercised by one shared conformance body, satisfies it exactly as two
+ *     methods did.
+ *
+ * A future refreshable session credential — a deferred decision that belongs
+ * with the relay service — needs a credential argument and a different
+ * signature anyway. Nothing here is a placeholder held open for it.
  *
  * **Pull-by-design.** Neither the browser dashboard nor the React Native
  * authority app can listen; nothing here binds a port or hosts a webhook
- * receiver. If a push receiver is ever wanted it belongs in a small
- * standalone Node service (precedent: `packages/p2p-probe-host`), never
- * inside an app bundle. None is added in this phase.
+ * receiver. A binding only ever calls OUT.
  */
 export interface IBootstrapTransport {
   /**
@@ -145,19 +196,4 @@ export interface IBootstrapTransport {
    * redemptions can never both observe it absent.
    */
   redeem(code: string): Promise<BootstrapRedemptionResult>
-
-  /**
-   * The pull-cursor-shaped refresh path (50-09's manual refresh, D-12),
-   * mirroring `pollDecisions`'s contract: safe to call with a stale value,
-   * re-delivery is permitted, loss is not. Returns `undefined` when the
-   * source has nothing whose `generatedAt` is strictly greater than
-   * `sinceGeneratedAt`.
-   *
-   * This method carries NO session credential: D-05's code is one-shot,
-   * and a refreshable session credential is a deferred decision that
-   * belongs with the relay service. Its safety therefore rests entirely on
-   * the consumer's manifest+digest+schema-hash verification, not on who
-   * answered.
-   */
-  pullSnapshot(sinceGeneratedAt?: string): Promise<BootstrapSnapshot | undefined>
 }

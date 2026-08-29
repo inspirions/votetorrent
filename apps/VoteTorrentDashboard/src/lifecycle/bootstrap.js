@@ -29,6 +29,7 @@ import {
 	redeemSignInCode,
 	InvalidSignInCodeError,
 	BootstrapTransportUnreachableError,
+	SealedPayloadUnreadableError,
 } from '../transport/bootstrap-transport-client.js';
 import { verifySnapshot } from '@votetorrent/vote-engine/bootstrap';
 import { nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
@@ -125,15 +126,46 @@ export async function redeemAndBootstrap(options) {
 		throw err;
 	}
 
-	// 2. Redeem the SECRET half only.
+	// 2. Redeem the SECRET half only. `redeemSignInCode` is the sealing
+	//    boundary (D-06): what it returns is already OPENED, so everything
+	//    below this point consumes a plaintext envelope exactly as before.
+	//
+	//    THE THREE-WAY MAPPING OF ITS THREE FAILURE CLASSES:
+	//      - BootstrapTransportUnreachableError -> 'transport-unreachable'
+	//        (unchanged: nothing arrived)
+	//      - SealedPayloadUnreadableError       -> 'verify-failed',
+	//        reason 'malformed-envelope'
+	//      - InvalidSignInCodeError             -> 'invalid-code'
+	//      - anything else                      -> rethrow
+	//
+	//    On the middle mapping: a payload that will not open under the code's
+	//    OWN key is a payload this browser cannot authenticate, which is the
+	//    `verify-failed` family by meaning, not by convenience.
+	//    `'malformed-envelope'` is an existing member of the frozen
+	//    `SnapshotVerifyFailureReason` union and is already routed to the
+	//    verification copy family (`VERIFICATION_REASONS` in
+	//    `copyKeysForOutcome` below), so NO new outcome code and NO new copy
+	//    key is introduced here. Refusal copy is a later plan's work and must
+	//    not be pre-empted from this line.
+	//
+	//    `InvalidSignInCodeError` cannot normally reach here -- step 1 already
+	//    split and validated the same secret -- but `redeemSignInCode`
+	//    re-derives from it, so the mapping is stated rather than left to a
+	//    rethrow that would surface as an unhandled rejection.
 	onPhase('submitting');
-	/** @type {import('@votetorrent/vote-engine/bootstrap').BootstrapRedemptionResult} */
+	/** @type {import('../transport/bootstrap-transport-client.js').OpenedRedemption} */
 	let redemption;
 	try {
 		redemption = await redeemSignInCode(transport, secret);
 	} catch (err) {
 		if (err instanceof BootstrapTransportUnreachableError) {
 			return { outcome: 'transport-unreachable' };
+		}
+		if (err instanceof SealedPayloadUnreadableError) {
+			return { outcome: 'verify-failed', reason: 'malformed-envelope' };
+		}
+		if (err instanceof InvalidSignInCodeError) {
+			return { outcome: 'invalid-code' };
 		}
 		throw err;
 	}

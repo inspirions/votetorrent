@@ -326,12 +326,6 @@ test('createSingleFlightTransport: reset() clears the cache -- a third call afte
 	assert.equal(inner.calls.length, 2);
 });
 
-test('createSingleFlightTransport: the transport\'s pull-style method throws by name', async () => {
-	const inner = makeFakeTransport({ codeToResult: {} });
-	const singleFlight = createSingleFlightTransport(inner);
-	await assert.rejects(() => singleFlight.transport.pullSnapshot());
-});
-
 test('createSingleFlightTransport: takes no storage argument at all -- structurally cannot persist the cache', () => {
 	assert.equal(createSingleFlightTransport.length, 1);
 });

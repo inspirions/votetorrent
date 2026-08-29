@@ -8,14 +8,35 @@
  * D-06's claim is that `IBootstrapTransport`'s real bindings are
  * INTERCHANGEABLE. The only evidence for interchangeability is that the SAME
  * assertions ran against both. This file makes that mechanically true, not
- * merely claimed: six conformance cases are written EXACTLY ONCE, inside one
+ * merely claimed: five conformance cases are written EXACTLY ONCE, inside one
  * exported function delimited by a matching pair of numbered-comment
  * sentinels (see below). That function is called exactly ONCE per entry, in
- * a loop over a two-entry binding table. Six case literals therefore produce
- * TWELVE passing tests. If an executor ever duplicates the body per binding
+ * a loop over a two-entry binding table. Five case literals therefore produce
+ * TEN passing tests. If an executor ever duplicates the body per binding
  * instead of sharing it, the case count inside the sentinel region rises
- * above six and the structural regression gate fails: a duplicated body is a
+ * above five and the structural regression gate fails: a duplicated body is a
  * GATE FAILURE, not a style preference.
+ *
+ * ============================================================================
+ * 1b. WHAT CHANGED, AND WHY THE CASE COUNT DROPPED
+ * ============================================================================
+ * Under D-06 the bindings courier SEALED WRAPPERS, not envelopes: a binding
+ * returns `{ status, sealed? }` and never opens what it carries. This suite
+ * therefore SEALS AT THE SOURCE — inside each factory's `stageCode`, so the
+ * shared body never has to know how a binding stores things — and UNSEALS IN
+ * THE SHARED BODY, through the single `openDelivered` helper that expresses
+ * the consumer half of D-06 exactly once. Tampering is likewise applied at
+ * the source: unseal, mutate, re-seal, write back, so what the courier
+ * carries is a legitimately-sealed payload with mutated content.
+ *
+ * The sixth case (a cursor-shaped freshness/re-delivery case over a pull-style
+ * method) is GONE, with the method itself, under D-07. It must not come back:
+ * a keyless pull has no out-of-band digest to verify against, and a shared
+ * current document has no single key that opens it.
+ *
+ * The REST factory's receiver here is an in-test stand-in. `52-13` repoints
+ * `makeRestBinding` at the real rendezvous service; this file must stay green
+ * against the stand-in until then and must not pre-empt that work.
  *
  * ============================================================================
  * 2. NO THIRD SLOT
@@ -55,9 +76,12 @@ import { join, dirname } from 'node:path'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { expect } from 'chai'
-import type { IBootstrapTransport } from '../src/bootstrap/bootstrap-transport.js'
+import type { IBootstrapTransport, BootstrapRedemptionResult } from '../src/bootstrap/bootstrap-transport.js'
 import { FilesystemBootstrapTransport } from '../src/bootstrap/filesystem-bootstrap-transport.js'
 import { RestBootstrapTransport } from '../src/bootstrap/rest-bootstrap-transport.js'
+import { deriveBootstrapKeys, sealPayload, unsealPayload } from '../src/bootstrap/sealed-payload.js'
+import type { BootstrapKeySplit, SealedPayload } from '../src/bootstrap/sealed-payload.js'
+import { parseSnapshot } from '../src/bootstrap/snapshot-codec.js'
 import { buildSnapshot, verifySnapshot } from '../src/bootstrap/snapshot-manifest.js'
 import type { BootstrapSnapshot, SnapshotTables } from '../src/bootstrap/snapshot-types.js'
 
@@ -103,10 +127,17 @@ function buildFixtureSnapshot (generatedAt?: string): BootstrapSnapshot {
   })
 }
 
+/** The fixed 32-hex prefix of every conformance code; the remaining 8 hex
+ * digits are the sequence counter, so successive calls differ. */
+const CODE_PREFIX_HEX = 'c0de51ec7e57a1b2c3d4e5f60718293a'
+
 let codeSeq = 0
+/** A 40-character lowercase-hex code. The SHAPE is fixed, not cosmetic: the
+ * REST binding derives the `lookupId` it transmits from these bytes (D-04),
+ * and the filesystem binding uses the same string as a path segment. */
 function nextCode (): string {
   codeSeq += 1
-  return `bootstrap-conf-code-${Date.now()}-${codeSeq}`
+  return `${CODE_PREFIX_HEX}${codeSeq.toString(16).padStart(8, '0')}`
 }
 
 /** A canonical (19-char, no `Z`) datetime strictly in the past. */
@@ -120,12 +151,52 @@ function canonicalFuture (): string {
   return new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 19)
 }
 
-/** A canonical datetime strictly BEFORE `generatedAt`, for the stale-cursor
- * leg of case 5. This test-only helper is exempt from the binding files'
- * own no-Date-parsing rule — it exists purely to construct a fixture value. */
-function canonicalBefore (generatedAt: string, deltaMs = 60_000): string {
-  const asDate = new Date(`${generatedAt}Z`)
-  return new Date(asDate.getTime() - deltaMs).toISOString().slice(0, 19)
+/**
+ * The D-04 key split for a conformance code. Hex-decoded with a LOCAL loop
+ * rather than a library helper: `@noble/hashes`'s `hexToBytes` embeds two
+ * characters of the offending string in its `RangeError`, and the offending
+ * string here would be a bearer secret.
+ */
+function keysForCode (code: string): BootstrapKeySplit {
+  const bytes = new Uint8Array(code.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(code.slice(i * 2, i * 2 + 2), 16)
+  }
+  return deriveBootstrapKeys(bytes)
+}
+
+/** Seal an envelope under a code's own `contentKey` — what a producer stages,
+ * and what a courier is then given to carry unopened. */
+function sealFor (code: string, envelope: BootstrapSnapshot): SealedPayload {
+  return sealPayload(JSON.stringify(envelope), keysForCode(code))
+}
+
+/**
+ * The CONSUMER HALF OF D-06, expressed exactly once: a delivered result
+ * carries an unopened wrapper, and only the code's own key turns it back into
+ * an envelope. Every case that needs an envelope goes through here, so no
+ * case can accidentally assert against something a courier had already
+ * opened.
+ *
+ * `verifySnapshot` is deliberately NOT called here — the order is unseal,
+ * then parse, then verify, and the verify step belongs to the individual
+ * cases that make a claim about it.
+ */
+function openDelivered (result: BootstrapRedemptionResult, code: string): BootstrapSnapshot {
+  expect(result.sealed, 'a delivered ok result must carry a sealed payload').to.not.equal(undefined)
+  const opened = unsealPayload(result.sealed, keysForCode(code))
+  expect(
+    opened.ok,
+    `expected unsealPayload to succeed (reason if failed: ${opened.ok ? '' : opened.reason})`
+  ).to.equal(true)
+  const plaintext = opened.ok ? opened.plaintext : ''
+  const parsed = parseSnapshot(plaintext)
+  expect(
+    parsed.ok,
+    `expected parseSnapshot to succeed on the unsealed plaintext (reason if failed: ${parsed.ok ? '' : parsed.reason})`
+  ).to.equal(true)
+  if (!parsed.ok) throw new Error('unreachable: parseSnapshot failure already asserted')
+  return parsed.envelope
 }
 
 // ---------------------------------------------------------------------------
@@ -142,13 +213,17 @@ interface StageCodeOptions {
 interface ConformanceHarness {
   readonly label: string
   readonly transport: IBootstrapTransport
+  /** Stages a code granting `opts.snapshot`. The envelope is SEALED here,
+   * inside the factory, under the code's own `contentKey` — so the shared
+   * body never has to know how a binding stores things. */
   stageCode: (code: string, opts: StageCodeOptions) => Promise<void>
-  stageCurrentSnapshot: (envelope: BootstrapSnapshot) => Promise<void>
   /** Mutates a cell value (never the row count, the `digest`, or the
-   * `manifest`) of the MOST RECENTLY staged code's snapshot, in place on
-   * the source. Isolates the digest check: row counts stay consistent so
-   * the manifest check still passes, and only the recomputed content
-   * digest disagrees with the untouched `digest` field. */
+   * `manifest`) of the MOST RECENTLY staged code's snapshot, AT THE SOURCE:
+   * unseal, mutate, re-seal, write back — before the courier ever sees it,
+   * which is precisely what the tampering case is about. Isolates the digest
+   * check: row counts stay consistent so the manifest check still passes, and
+   * only the recomputed content digest disagrees with the untouched `digest`
+   * field. */
   tamperStagedTableContent: () => Promise<void>
   /** Arranges for the source to fail genuinely (not merely refuse) on the
    * next `redeem` call, and returns the code to redeem to trigger it. */
@@ -175,6 +250,7 @@ async function makeFilesystemBinding (): Promise<ConformanceHarness> {
   const transport = new FilesystemBootstrapTransport({ rootDir })
   let snapshotFileSeq = 0
   let lastSnapshotFile: string | undefined
+  let lastStagedCode: string | undefined
 
   return {
     label: 'filesystem',
@@ -182,28 +258,34 @@ async function makeFilesystemBinding (): Promise<ConformanceHarness> {
     async stageCode (code, opts) {
       snapshotFileSeq += 1
       const snapshotFile = `snap-${snapshotFileSeq}`
-      await writeFile(join(snapshotsDir, `${snapshotFile}.json`), JSON.stringify(opts.snapshot), 'utf8')
+      // The document on disk is a SEALED WRAPPER, never an envelope — the
+      // binding reads it, deserializes it, and carries it unopened.
+      await writeFile(join(snapshotsDir, `${snapshotFile}.json`), JSON.stringify(sealFor(code, opts.snapshot)), 'utf8')
       await writeFile(join(codesDir, `${code}.json`), JSON.stringify({ expiresAt: opts.expiresAt, snapshotFile }), 'utf8')
       lastSnapshotFile = snapshotFile
-    },
-    async stageCurrentSnapshot (envelope) {
-      await writeFile(join(snapshotsDir, 'current.json'), JSON.stringify(envelope), 'utf8')
+      lastStagedCode = code
     },
     async tamperStagedTableContent () {
-      if (lastSnapshotFile === undefined) {
+      if (lastSnapshotFile === undefined || lastStagedCode === undefined) {
         throw new Error('makeFilesystemBinding.tamperStagedTableContent: no snapshot has been staged yet')
       }
       const filePath = join(snapshotsDir, `${lastSnapshotFile}.json`)
-      const parsed = JSON.parse(await readFile(filePath, 'utf8')) as { tables: { User: Array<{ Name: string }> } }
+      const keys = keysForCode(lastStagedCode)
+      const opened = unsealPayload(JSON.parse(await readFile(filePath, 'utf8')), keys)
+      if (!opened.ok) {
+        throw new Error(`makeFilesystemBinding.tamperStagedTableContent: staged document would not open (${opened.reason})`)
+      }
+      const parsed = JSON.parse(opened.plaintext) as { tables: { User: Array<{ Name: string }> } }
       parsed.tables.User[0]!.Name = `${parsed.tables.User[0]!.Name}-tampered`
-      await writeFile(filePath, JSON.stringify(parsed), 'utf8')
+      // Re-sealed, so what the courier carries is a legitimately sealed
+      // payload with mutated content — the tampering happened at the source.
+      await writeFile(filePath, JSON.stringify(sealPayload(JSON.stringify(parsed), keys)), 'utf8')
     },
     async makeFailingSource () {
-      // A corrupted (not merely absent) granted-snapshot document is a
-      // genuine source fault the binding cannot refuse its way past — it
-      // must throw. The code and snapshot-file names below are never
-      // derived from or containing one another, so neither leaks into the
-      // other's error text.
+      // A corrupted (not merely absent) granted document is a genuine source
+      // fault the binding cannot refuse its way past — it must throw. The
+      // code and snapshot-file names below are never derived from or
+      // containing one another, so neither leaks into the other's error text.
       const code = nextCode()
       const snapshotFile = 'snap-corrupted'
       await writeFile(join(snapshotsDir, `${snapshotFile}.json`), 'not valid json {{{', 'utf8')
@@ -222,13 +304,16 @@ async function makeFilesystemBinding (): Promise<ConformanceHarness> {
 // ---------------------------------------------------------------------------
 interface StoredCode {
   expiresAt: string
-  snapshot: BootstrapSnapshot
+  sealed: SealedPayload
   redeemed: boolean
 }
 
 async function makeRestBinding (): Promise<ConformanceHarness> {
+  // KEYED BY `lookupId`, NEVER BY THE RAW CODE. The stand-in must model what
+  // the real rendezvous service will see: the binding transmits only the
+  // derived lookup half (D-04/D-10), so a receiver that could find a record
+  // by raw secret would be modelling a protocol this phase forbids.
   const codes = new Map<string, StoredCode>()
-  let current: BootstrapSnapshot | undefined
   let lastStagedCode: string | undefined
   let forceFailure = false
 
@@ -260,9 +345,9 @@ async function makeRestBinding (): Promise<ConformanceHarness> {
       const url = req.url ?? '/'
 
       if (method === 'POST' && url === '/bootstrap/redemptions') {
-        const body = parsedBody as { code?: unknown }
-        const code = typeof body.code === 'string' ? body.code : ''
-        const record = codes.get(code)
+        const body = parsedBody as { lookupId?: unknown }
+        const lookupId = typeof body.lookupId === 'string' ? body.lookupId : ''
+        const record = codes.get(lookupId)
         if (record === undefined) {
           send(res, 200, { status: 'unknown' })
           return
@@ -277,22 +362,7 @@ async function makeRestBinding (): Promise<ConformanceHarness> {
           return
         }
         record.redeemed = true
-        send(res, 200, { status: 'ok', snapshot: record.snapshot })
-        return
-      }
-
-      if (method === 'GET' && url.startsWith('/bootstrap/snapshot')) {
-        const parsedUrl = new URL(url, 'http://127.0.0.1')
-        const since = parsedUrl.searchParams.get('since')
-        if (current === undefined) {
-          send(res, 200, { snapshot: null })
-          return
-        }
-        if (since !== null && !(current.generatedAt > since)) {
-          send(res, 200, { snapshot: null })
-          return
-        }
-        send(res, 200, { snapshot: current })
+        send(res, 200, { status: 'ok', sealed: record.sealed })
         return
       }
 
@@ -316,22 +386,29 @@ async function makeRestBinding (): Promise<ConformanceHarness> {
     label: 'rest',
     transport,
     async stageCode (code, opts) {
-      codes.set(code, { expiresAt: opts.expiresAt, snapshot: opts.snapshot, redeemed: false })
+      codes.set(keysForCode(code).lookupId, {
+        expiresAt: opts.expiresAt,
+        sealed: sealFor(code, opts.snapshot),
+        redeemed: false
+      })
       lastStagedCode = code
-    },
-    async stageCurrentSnapshot (envelope) {
-      current = envelope
     },
     async tamperStagedTableContent () {
       if (lastStagedCode === undefined) {
         throw new Error('makeRestBinding.tamperStagedTableContent: no snapshot has been staged yet')
       }
-      const record = codes.get(lastStagedCode)
+      const keys = keysForCode(lastStagedCode)
+      const record = codes.get(keys.lookupId)
       if (record === undefined) {
         throw new Error('makeRestBinding.tamperStagedTableContent: staged code record is missing')
       }
-      const users = record.snapshot.tables.User as unknown as Array<{ Name: string }>
-      users[0]!.Name = `${users[0]!.Name}-tampered`
+      const opened = unsealPayload(record.sealed, keys)
+      if (!opened.ok) {
+        throw new Error(`makeRestBinding.tamperStagedTableContent: staged payload would not open (${opened.reason})`)
+      }
+      const parsed = JSON.parse(opened.plaintext) as { tables: { User: Array<{ Name: string }> } }
+      parsed.tables.User[0]!.Name = `${parsed.tables.User[0]!.Name}-tampered`
+      record.sealed = sealPayload(JSON.stringify(parsed), keys)
     },
     async makeFailingSource () {
       forceFailure = true
@@ -370,14 +447,18 @@ export function runBootstrapTransportConformance (testCase: ConformanceCase): vo
       await binding.close()
     })
 
-    it('redeems a staged code and couriers the envelope through verbatim', async () => {
+    // "Verbatim" is now a STRONGER claim than it was: the envelope is sealed
+    // at the source, carried by a courier that never opens it, and unsealed
+    // here — so equality below proves it survived sealing AND couriering
+    // unchanged, not merely that a courier copied an object.
+    it('redeems a staged code and couriers the sealed envelope through verbatim', async () => {
       const code = nextCode()
       const snapshot = buildFixtureSnapshot()
       await binding.stageCode(code, { expiresAt: canonicalFuture(), snapshot })
 
       const result = await binding.transport.redeem(code)
       expect(result.status).to.equal('ok')
-      const delivered = result.snapshot!
+      const delivered = openDelivered(result, code)
       expect(delivered.networkHash).to.equal(snapshot.networkHash)
       expect(delivered.schemaHash).to.equal(snapshot.schemaHash)
       expect(delivered.generatedAt).to.equal(snapshot.generatedAt)
@@ -401,9 +482,19 @@ export function runBootstrapTransportConformance (testCase: ConformanceCase): vo
       const first = await binding.transport.redeem(code)
       expect(first.status).to.equal('ok')
 
+      // A cheap, permanent D-04 canary: what the courier carried is a
+      // WRAPPER, with exactly the three wrapper members and nothing else. An
+      // envelope leaking back into this slot — or a binding "helpfully"
+      // annotating the wrapper — fails here immediately.
+      expect(Object.keys(first.sealed as unknown as Record<string, unknown>).sort()).to.deep.equal([
+        'ciphertext',
+        'nonce',
+        'v'
+      ])
+
       const second = await binding.transport.redeem(code)
       expect(second.status).to.equal('used')
-      expect(second.snapshot).to.equal(undefined)
+      expect(second.sealed).to.equal(undefined)
     })
 
     it('refuses expired and unknown codes with their own distinguishable reasons, alongside a fresh success', async () => {
@@ -411,12 +502,12 @@ export function runBootstrapTransportConformance (testCase: ConformanceCase): vo
       await binding.stageCode(expiredCode, { expiresAt: canonicalPast(), snapshot: buildFixtureSnapshot() })
       const expiredResult = await binding.transport.redeem(expiredCode)
       expect(expiredResult.status).to.equal('expired')
-      expect(expiredResult.snapshot).to.equal(undefined)
+      expect(expiredResult.sealed).to.equal(undefined)
 
       const unknownCode = nextCode() // never staged
       const unknownResult = await binding.transport.redeem(unknownCode)
       expect(unknownResult.status).to.equal('unknown')
-      expect(unknownResult.snapshot).to.equal(undefined)
+      expect(unknownResult.sealed).to.equal(undefined)
 
       expect(expiredResult.status).to.not.equal(unknownResult.status)
 
@@ -426,7 +517,7 @@ export function runBootstrapTransportConformance (testCase: ConformanceCase): vo
       await binding.stageCode(freshCode, { expiresAt: canonicalFuture(), snapshot: freshSnapshot })
       const freshResult = await binding.transport.redeem(freshCode)
       expect(freshResult.status).to.equal('ok')
-      expect(freshResult.snapshot).to.deep.equal(freshSnapshot)
+      expect(openDelivered(freshResult, freshCode)).to.deep.equal(freshSnapshot)
     })
 
     it('delivers a tampered payload unchanged and stays detectable, without laundering it', async () => {
@@ -438,7 +529,7 @@ export function runBootstrapTransportConformance (testCase: ConformanceCase): vo
 
       const result = await binding.transport.redeem(code)
       expect(result.status).to.equal('ok')
-      const delivered = result.snapshot!
+      const delivered = openDelivered(result, code)
       // The binding did not recompute the digest over the mutated content.
       expect(delivered.digest).to.equal(snapshot.digest)
 
@@ -451,33 +542,8 @@ export function runBootstrapTransportConformance (testCase: ConformanceCase): vo
       const cleanSnapshot = buildFixtureSnapshot()
       await binding.stageCode(cleanCode, { expiresAt: canonicalFuture(), snapshot: cleanSnapshot })
       const cleanResult = await binding.transport.redeem(cleanCode)
-      const cleanVerified = verifySnapshot(cleanResult.snapshot!)
+      const cleanVerified = verifySnapshot(openDelivered(cleanResult, cleanCode))
       expect(cleanVerified.ok, 'an untampered redemption must verify clean').to.equal(true)
-    })
-
-    it("honours the canonical freshness cursor and permits re-delivery on pullSnapshot", async () => {
-      const current = buildFixtureSnapshot()
-      await binding.stageCurrentSnapshot(current)
-
-      const initial = await binding.transport.pullSnapshot(undefined)
-      expect(initial).to.deep.equal(current)
-
-      const atCurrent = await binding.transport.pullSnapshot(current.generatedAt)
-      expect(atCurrent).to.equal(undefined)
-
-      const older = canonicalBefore(current.generatedAt)
-      const stale1 = await binding.transport.pullSnapshot(older)
-      expect(stale1).to.deep.equal(current)
-      const stale2 = await binding.transport.pullSnapshot(older)
-      expect(stale2).to.deep.equal(current)
-
-      let rejectedZSuffixed = false
-      try {
-        await binding.transport.pullSnapshot(`${current.generatedAt}Z`)
-      } catch {
-        rejectedZSuffixed = true
-      }
-      expect(rejectedZSuffixed, 'a Z-suffixed cursor must be rejected, never silently normalised').to.equal(true)
     })
 
     it('leaks neither the bearer code nor snapshot content in a source-failure error message', async () => {
@@ -562,7 +628,7 @@ describe('bootstrap transport conformance: structure', () => {
     expect(thisFileSource.split(REGION_END_MARKER).length - 1).to.equal(1)
 
     const region = thisFileSource.slice(start, end)
-    expect((region.match(/\bit\s*\(/g) ?? []).length).to.equal(6)
+    expect((region.match(/\bit\s*\(/g) ?? []).length).to.equal(5)
     expect(thisFileSource.split(CONFORMANCE_FN_NAME).length - 1).to.equal(2)
 
     expect(/testCase\.label\s*===/.test(region)).to.equal(false)
