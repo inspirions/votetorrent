@@ -46,6 +46,20 @@ export interface ServiceConfig {
 	sweepIntervalSeconds: number
 	dataDir: string
 	distDir: string
+	/**
+	 * The dashboard's **source** root — `apps/VoteTorrentDashboard/src` — used
+	 * only to detect a `dist/` that is older than the code it was built from.
+	 * `undefined` (the default) disables staleness detection and leaves the
+	 * self-consistency checks on `distDir` active.
+	 */
+	distSourceDir?: string
+	/**
+	 * The deliberate opt-in that permits serving a `dist/` older than
+	 * `distSourceDir`. Default `false`: a stale build silently serving old
+	 * JavaScript against a new API is a failure this service refuses to start
+	 * into.
+	 */
+	allowStaleDist: boolean
 	logMode: 'production' | 'development'
 }
 
@@ -69,6 +83,8 @@ export const ENV_ALLOW_NON_LOOPBACK = 'BOOTSTRAP_RENDEZVOUS_ALLOW_NON_LOOPBACK'
 export const ENV_UPLOAD_TOKEN = 'BOOTSTRAP_RENDEZVOUS_UPLOAD_TOKEN'
 export const ENV_DATA_DIR = 'BOOTSTRAP_RENDEZVOUS_DATA_DIR'
 export const ENV_DIST_DIR = 'BOOTSTRAP_RENDEZVOUS_DIST_DIR'
+export const ENV_DIST_SOURCE_DIR = 'BOOTSTRAP_RENDEZVOUS_DIST_SOURCE_DIR'
+export const ENV_ALLOW_STALE_DIST = 'BOOTSTRAP_RENDEZVOUS_ALLOW_STALE_DIST'
 export const ENV_MAX_UPLOAD_BYTES = 'BOOTSTRAP_RENDEZVOUS_MAX_UPLOAD_BYTES'
 export const ENV_GRACE_WINDOW_MINUTES = 'BOOTSTRAP_RENDEZVOUS_GRACE_WINDOW_MINUTES'
 export const ENV_SWEEP_INTERVAL_SECONDS = 'BOOTSTRAP_RENDEZVOUS_SWEEP_INTERVAL_SECONDS'
@@ -181,6 +197,10 @@ export function loadServiceConfig (env: Record<string, string | undefined>): Ser
 	const uploadToken = requireString(env, ENV_UPLOAD_TOKEN, 'the shared bearer secret the mint side sends with every upload')
 	const dataDir = requireString(env, ENV_DATA_DIR, 'a writable directory for records, ciphertext and claim markers')
 	const distDir = requireString(env, ENV_DIST_DIR, "the path to the dashboard's built dist/ directory")
+	const rawDistSourceDir = env[ENV_DIST_SOURCE_DIR]
+	const distSourceDir =
+		rawDistSourceDir === undefined || rawDistSourceDir.trim() === '' ? undefined : rawDistSourceDir.trim()
+	const allowStaleDist = parseOptIn(env[ENV_ALLOW_STALE_DIST], ENV_ALLOW_STALE_DIST)
 	const maxUploadBytes = parseInteger(env, ENV_MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_BYTES)
 	const graceWindowMinutes = parseInteger(env, ENV_GRACE_WINDOW_MINUTES, DEFAULT_GRACE_WINDOW_MINUTES)
 	const sweepIntervalSeconds = parseInteger(env, ENV_SWEEP_INTERVAL_SECONDS, DEFAULT_SWEEP_INTERVAL_SECONDS)
@@ -203,6 +223,8 @@ export function loadServiceConfig (env: Record<string, string | undefined>): Ser
 		sweepIntervalSeconds,
 		dataDir,
 		distDir,
+		distSourceDir,
+		allowStaleDist,
 		logMode
 	}
 }

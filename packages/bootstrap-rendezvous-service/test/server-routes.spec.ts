@@ -16,6 +16,7 @@ import {
 	type ServiceContext
 } from '../src/http.js'
 import { createRendezvousStores, type RendezvousStores } from '../src/store.js'
+import { createFixtureDist } from './helpers/fixture-dist.js'
 import type { SweeperOptions } from '../src/sweeper.js'
 import { BOOTSTRAP_RENDEZVOUS_ROUTES, startService, type RouteTableEntry } from '../src/server.js'
 import { handleUpload } from '../src/routes/upload.js'
@@ -47,6 +48,8 @@ function makeConfig (dataDir: string): ServiceConfig {
 		sweepIntervalSeconds: 60,
 		dataDir,
 		distDir: join(dataDir, 'dist'),
+		distSourceDir: undefined,
+		allowStaleDist: false,
 		logMode: 'development'
 	}
 }
@@ -495,7 +498,9 @@ describe('runMain', () => {
 		return {
 			BOOTSTRAP_RENDEZVOUS_UPLOAD_TOKEN: 'test-upload-token',
 			BOOTSTRAP_RENDEZVOUS_DATA_DIR: mkdtempSync(join(tmpdir(), 'bootstrap-rendezvous-main-')),
-			BOOTSTRAP_RENDEZVOUS_DIST_DIR: mkdtempSync(join(tmpdir(), 'bootstrap-rendezvous-main-dist-'))
+			// 52-04's startup provenance gate refuses a directory with no index.html
+			// BY DESIGN, so runMain must be handed a real built dashboard shape here.
+			BOOTSTRAP_RENDEZVOUS_DIST_DIR: createFixtureDist().distDir
 		}
 	}
 

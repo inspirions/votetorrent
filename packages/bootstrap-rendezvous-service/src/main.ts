@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url'
 import { ServiceConfigError, loadServiceConfig } from './config.js'
 import { createServiceLogger, errorClass } from './logging.js'
 import { startService } from './server.js'
+import { DistProvenanceError, assertDistProvenance } from './static.js'
 
 /**
  * main.ts — the deployable entrypoint behind the package's `start` script.
@@ -26,6 +27,11 @@ export async function runMain (
 
 	try {
 		const config = loadServiceConfig(env)
+		// The dist gate runs here, between parsing the environment and binding
+		// the socket. A broken, stale or source-root-pointed build directory
+		// therefore refuses to listen at all, rather than coming up healthy and
+		// serving old JavaScript against a new API.
+		assertDistProvenance(config)
 		const service = await startService(config)
 
 		const shutdown = (): void => {
@@ -39,9 +45,15 @@ export async function runMain (
 
 		return 0
 	} catch (err) {
+		// A `DistProvenanceError` message is service-authored in exactly the
+		// same sense as a `ServiceConfigError` one — it names operator-supplied
+		// paths and the remedy, never a foreign error's text — and a
+		// misconfigured or stale build directory *is* an invalid configuration,
+		// so it maps onto the existing fatal event rather than a new one.
+		const serviceAuthored = err instanceof ServiceConfigError || err instanceof DistProvenanceError
 		logger.fatal(
-			err instanceof ServiceConfigError ? 'config-invalid' : 'startup-failed',
-			err instanceof ServiceConfigError ? err.message : errorClass(err)
+			serviceAuthored ? 'config-invalid' : 'startup-failed',
+			serviceAuthored ? (err as Error).message : errorClass(err)
 		)
 		return 1
 	}
