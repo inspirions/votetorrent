@@ -339,7 +339,7 @@ export default function DashboardSignInCodeScreen() {
 							<ThemedText type="default" style={styles.body}>
 								{t("dashboardSignInCodeBody", { minutes: DASHBOARD_SIGNIN_CODE_SPAN_MINUTES })}
 							</ThemedText>
-							<ThemedText type="defaultSemiBold" style={styles.code} selectable numberOfLines={1}>
+							<ThemedText type="defaultSemiBold" style={styles.code} selectable>
 								{record.code}
 							</ThemedText>
 							<ThemedText type="small" style={styles.countdown}>
@@ -427,9 +427,15 @@ const localStyles = StyleSheet.create({
 	body: {
 		marginBottom: 16,
 	},
+	// The code is 84 characters (a 40-hex id, a dot, a 43-char base64url
+	// secret). At 18px monospace that cannot fit one line on a phone, so
+	// numberOfLines={1} clipped it and the officer had to scroll to read the
+	// value they are meant to read aloud or hand over. It wraps instead, and
+	// lineHeight is explicit so two lines never collide.
 	code: {
 		fontFamily: "monospace",
-		fontSize: 18,
+		fontSize: 16,
+		lineHeight: 24,
 		marginBottom: 8,
 	},
 	countdown: {

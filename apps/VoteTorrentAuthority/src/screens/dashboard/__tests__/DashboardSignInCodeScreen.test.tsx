@@ -460,6 +460,38 @@ describe("DashboardSignInCodeScreen — the export cannot be reached without a p
 		expect(json).toContain("abc.def");
 	});
 
+	// UAT finding, hardware 2026-08-29: the code rendered with
+	// `numberOfLines={1}`. A real code is 84 characters (a 40-hex id, a dot and
+	// a 43-char base64url secret) and at 18px monospace that cannot fit one
+	// line on a phone, so it was clipped and the officer had to scroll to read
+	// the value they are meant to hand over. No test looked at how the code was
+	// rendered, only that it was PRESENT -- which is why it shipped. This pins
+	// the rendering, not the presence.
+	it("the code is rendered in full: a realistic 84-character code is not line-clamped, so no part of it needs scrolling to read", async () => {
+		const realisticCode = `${"a1b2c3d4".repeat(5)}.${"Z".repeat(43)}`;
+		expect(realisticCode).toHaveLength(84);
+		mockMint.mockResolvedValueOnce({
+			...MINTED_RECORD,
+			code: realisticCode,
+		});
+
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		// Found by PROPS, not by component type, so this stays true whether or
+		// not ThemedText is mocked here.
+		const codeNode = tr.root.findAll(
+			(node) => node.props?.children === realisticCode && node.props?.selectable === true,
+		)[0];
+		expect(codeNode).toBeDefined();
+
+		// The whole code is in the tree, and nothing clamps it to one line.
+		expect(JSON.stringify(tr.toJSON())).toContain(realisticCode);
+		expect(codeNode?.props.numberOfLines).toBeUndefined();
+		// It stays selectable, so an officer can still select the text by hand.
+		expect(codeNode?.props.selectable).toBe(true);
+	});
+
 	it("cancellation exports nothing: the signer rejects CANCELED -> no export, no error banner, screen back at idle", async () => {
 		mockSignerFn.mockRejectedValueOnce(Object.assign(new Error("canceled"), { code: "CANCELED" }));
 
