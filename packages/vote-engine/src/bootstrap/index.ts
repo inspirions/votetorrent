@@ -24,3 +24,34 @@ export type { RestBootstrapTransportOptions } from './rest-bootstrap-transport.j
 export * from './snapshot-types.js'
 export * from './snapshot-codec.js'
 export * from './snapshot-manifest.js'
+
+/**
+ * Phase 52 (D-04/D-05) — the bootstrap key split and the sealed-payload
+ * wrapper. A NAMED export list — deliberately not a wildcard re-export.
+ *
+ * The deterministic, nonce-injecting seal entry point is DELIBERATELY absent
+ * from this list. Keeping it off the `@votetorrent/vote-engine/bootstrap`
+ * subpath makes it unreachable from either app, so no production caller can
+ * ever pin an AES-GCM nonce (a repeated nonce under one key forfeits both
+ * confidentiality and authentication). Its absence is asserted by G-2 in
+ * `test/sealed-payload.spec.ts`, which greps THIS FILE for that symbol name —
+ * so do not name it here, not even in prose. Tests reach it, and only it, by
+ * deep source path.
+ */
+export {
+  BOOTSTRAP_CONTENT_LABEL,
+  BOOTSTRAP_LOOKUP_LABEL,
+  BOOTSTRAP_SECRET_MIN_BYTES,
+  SEALED_PAYLOAD_FORMAT_VERSION,
+  SEALED_PAYLOAD_KEY_BYTES,
+  SEALED_PAYLOAD_NONCE_BYTES,
+  deriveBootstrapKeys,
+  sealPayload,
+  unsealPayload
+} from './sealed-payload.js'
+export type {
+  BootstrapKeySplit,
+  SealedPayload,
+  SealedUnsealFailureReason,
+  SealedUnsealResult
+} from './sealed-payload.js'
