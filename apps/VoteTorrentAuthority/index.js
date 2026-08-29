@@ -50,6 +50,14 @@ runReplicationProof();
 import {runSigningProofRunner} from './src/engines/signing-proof-runner';
 runSigningProofRunner();
 
+// Phase 52 (D-05) dev-only sealed-payload Hermes proof. Fire-and-forget; no-op unless
+// __DEV__ && SEALED_PAYLOAD_PROOF_ENABLED (see proof-flags.generated.ts). Proves
+// @noble/ciphers resolves, evaluates and computes byte-correct AES-256-GCM under Hermes;
+// the wrapper it emits is cross-decrypted host-side by scripts/lib/seal-kat-verify.mjs.
+// Driven by scripts/run-sealed-payload-proof.sh. Logs under [seal-kat].
+import {runSealedPayloadProofRunner} from './src/engines/sealed-payload-proof-runner';
+runSealedPayloadProofRunner();
+
 // Phase 37 (STR-02) dev-only on-device strand persistence proof. Fire-and-forget; no-op
 // unless __DEV__ && STRAND_PERSISTENCE_PROOF_ENABLED (see proof-flags.generated.ts). Boots its
 // own bootstrap/solo CadreNode and calls the existing runPersistenceProof(node), which emits

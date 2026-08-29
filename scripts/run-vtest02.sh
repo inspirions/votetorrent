@@ -113,6 +113,7 @@ export const STRAND_PERSISTENCE_PROOF_ENABLED = false;
 export const USE_STUB_ATTESTATION_VERIFIER = false;
 export const REGISTRANT_SEED_ENABLED = false;
 export const RECOVERY_BRANCH_PROOF_ENABLED = false;
+export const SEALED_PAYLOAD_PROOF_ENABLED = false;
 EOF
 }
 trap restore_flags EXIT
@@ -154,6 +155,7 @@ export const STRAND_PERSISTENCE_PROOF_ENABLED = ${STRAND_FLAG};
 export const USE_STUB_ATTESTATION_VERIFIER = false;
 export const REGISTRANT_SEED_ENABLED = false;
 export const RECOVERY_BRANCH_PROOF_ENABLED = false;
+export const SEALED_PAYLOAD_PROOF_ENABLED = false;
 EOF
 
 # D-11: Fresh LevelDB reset — isolates the 4.x proof from any 3.x-written data.
