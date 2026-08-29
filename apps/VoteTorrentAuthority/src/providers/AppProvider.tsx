@@ -12,7 +12,7 @@ import { createDeviceSigner } from "../engines/device-signer";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
 import { attachAssociationSyncBindings } from "../screens/registration/attach-association-sync-bindings";
-import { registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
+import { purgeLegacyStagedPayload, registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
 import { useCadreNode } from "./CadreNodeProvider";
 
 interface AppContextType {
@@ -155,11 +155,39 @@ export function AppProvider({ children }: PropsWithChildren) {
 		return factory.exportDashboardSnapshot();
 	}, []);
 
+	// The one-shot startup sweep of PRE-FIX staged sign-in-code records. Two of
+	// two real devices checked were still carrying a whole-database payload in
+	// AsyncStorage, ~15 hours past that code's own expiry, because nothing in
+	// the tree ever rewrites the key for an expired code nobody tries to
+	// redeem. The sweep is a byte-identical no-op on every record a current
+	// build can write and never throws, so it is safe to run unconditionally
+	// here — an empty dependency array, once, on mount.
+	//
+	// The single log line carries the closed outcome token and NOTHING else:
+	// never a record field, never a byte of the payload. It exists so the
+	// on-device evidence that the sweep ran is visible in logcat without
+	// pulling the RKStorage database off the device. The `clean` and `absent`
+	// outcomes are silent — they are the overwhelmingly common case and would
+	// only add noise to every cold start.
+	useEffect(() => {
+		void purgeLegacyStagedPayload().then((outcome) => {
+			if (outcome === "legacy-payload" || outcome === "unreadable") {
+				console.warn(`AppProvider: staged sign-in-code sweep outcome: ${outcome}`);
+			}
+		});
+	}, []);
+
 	// 50-15 (CR-03): register this callback as the redemption-time regeneration
 	// fallback, so `dashboard-signin-code.ts` never needs to have persisted the
 	// payload to answer a redemption — see `registerDashboardSnapshotProvider`'s
 	// own doc comment. Unregister on unmount so a torn-down provider is never
 	// left dangling.
+	//
+	// FILESYSTEM-BINDING PATH ONLY. This registration is NOT live wiring for
+	// the rendezvous service: on that path the phone seals and uploads at mint
+	// and holds no payload, so there is never anything to regenerate and this
+	// callback is never reached. It is retained for the filesystem binding and
+	// is harmless to leave registered.
 	useEffect(() => {
 		registerDashboardSnapshotProvider(exportDashboardSnapshot);
 		return () => registerDashboardSnapshotProvider(undefined);

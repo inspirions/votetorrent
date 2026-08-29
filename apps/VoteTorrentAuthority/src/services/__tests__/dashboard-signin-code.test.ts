@@ -23,21 +23,76 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
+import { hexToBytes } from '@noble/curves/utils.js';
+import {
+	buildSnapshot,
+	deriveBootstrapKeys,
+	serializeSnapshot,
+	unsealPayload,
+} from '@votetorrent/vote-engine/bootstrap';
 import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import {
 	DASHBOARD_SIGNIN_CODE_SPAN_MINUTES,
 	__resetInMemoryStateForTests,
 	clearStagedSignInCode,
 	mintDashboardSignInCode,
+	purgeLegacyStagedPayload,
 	readStagedSignInCode,
 	redeemStagedSignInCode,
 	registerDashboardSnapshotProvider,
 	splitDashboardSignInCode,
 	stageForFilesystemBinding,
 } from '../dashboard-signin-code';
+import type { BootstrapUploadRequest } from '../dashboard-signin-code';
 
 const PII_CANARY = 'PII-CANARY-9f3a';
+
+/** The ONE AsyncStorage key this module writes, spelled out literally the same
+ * way the pre-existing cases already spell it — so a rename goes red here
+ * rather than silently moving the payload to a key no canary scan watches. */
+const STAGED_CODE_KEY = 'votetorrent.dashboardBootstrap.stagedCode';
+
+/** A distinctive upstream failure message. It must NEVER reach the error this
+ * module throws, nor the line it logs: the discipline is to carry the error
+ * CLASS only, never the message. */
+const UPSTREAM_MESSAGE_CANARY = 'UPSTREAM-DETAIL-CANARY-4b2e';
+
+/**
+ * An uploader that ACKS (resolves) and records what it was handed — plus, as
+ * the D-03 ordering proof, what `AsyncStorage` held at the instant it was
+ * called. Reading storage from INSIDE the uploader body is the whole point: it
+ * observes the ordering directly rather than inferring it from a later state.
+ */
+function makeRecordingUploader(): {
+	uploader: (request: BootstrapUploadRequest) => Promise<void>;
+	requests: BootstrapUploadRequest[];
+	storageAtUploadTime: Array<string | null>;
+} {
+	const requests: BootstrapUploadRequest[] = [];
+	const storageAtUploadTime: Array<string | null> = [];
+	async function uploader(request: BootstrapUploadRequest): Promise<void> {
+		storageAtUploadTime.push(await AsyncStorage.getItem(STAGED_CODE_KEY));
+		requests.push(request);
+	}
+	return { uploader, requests, storageAtUploadTime };
+}
+
+/** An uploader that REJECTS with an error carrying a distinctive `name` AND a
+ * distinctive message, so the class-only logging discipline is observable
+ * rather than assumed. */
+function makeRejectingUploader(name: string): {
+	uploader: (request: BootstrapUploadRequest) => Promise<void>;
+	requests: BootstrapUploadRequest[];
+} {
+	const requests: BootstrapUploadRequest[] = [];
+	async function uploader(request: BootstrapUploadRequest): Promise<void> {
+		requests.push(request);
+		const error = new Error(`refused: ${UPSTREAM_MESSAGE_CANARY}`);
+		error.name = name;
+		throw error;
+	}
+	return { uploader, requests };
+}
 
 function makeFixtureSnapshot(marker: string = PII_CANARY): BootstrapSnapshot {
 	return buildSnapshot({
@@ -241,7 +296,7 @@ describe('the staged payload NEVER touches AsyncStorage — the CR-03 core', () 
 
 		const parsed = JSON.parse(raw!) as Record<string, unknown>;
 		expect(Object.keys(parsed).sort()).toEqual(
-			['code', 'digest', 'expiresAt', 'mintedAt', 'redeemedAt', 'secret'].sort(),
+			['code', 'digest', 'expiresAt', 'lookupId', 'mintedAt', 'redeemedAt', 'secret'].sort(),
 		);
 		expect(parsed.redeemedAt).toBeDefined();
 
@@ -265,7 +320,9 @@ describe('the staged payload NEVER touches AsyncStorage — the CR-03 core', () 
 		expect(await allStoredText()).not.toContain(PII_CANARY);
 
 		const parsed = JSON.parse(raw!) as Record<string, unknown>;
-		expect(Object.keys(parsed).sort()).toEqual(['code', 'digest', 'expiresAt', 'mintedAt', 'secret'].sort());
+		expect(Object.keys(parsed).sort()).toEqual(
+			['code', 'digest', 'expiresAt', 'lookupId', 'mintedAt', 'secret'].sort(),
+		);
 		expect(parsed.redeemedAt).toBeUndefined();
 
 		// Dropping the payload must not weaken the refusal to 'unknown' --
@@ -378,13 +435,16 @@ describe('stageForFilesystemBinding', () => {
 		'utf8',
 	);
 
-	test('emits the exact relative paths and code-record field names the shipped filesystem binding reads', async () => {
+	test('emits exactly TWO documents — the dead snapshots/current.json plaintext copy is gone', async () => {
 		// Source-level gate against the binding's OWN module: a rename on either
 		// side goes red here, not silently.
 		expect(FS_TRANSPORT_SOURCE).toContain('expiresAt');
 		expect(FS_TRANSPORT_SOURCE).toContain('snapshotFile');
 		expect(FS_TRANSPORT_SOURCE).toContain("join(this.rootDir, 'codes')");
 		expect(FS_TRANSPORT_SOURCE).toContain("join(this.rootDir, 'snapshots')");
+		// ...extended: the binding no longer mentions the shared document at
+		// all, so a re-introduction on EITHER side goes red here.
+		expect(FS_TRANSPORT_SOURCE).not.toContain('current.json');
 
 		const snapshot = makeFixtureSnapshot();
 		const minted = await mintDashboardSignInCode(snapshot, { now: new Date('2026-01-01T00:00:00.000Z') });
@@ -394,16 +454,46 @@ describe('stageForFilesystemBinding', () => {
 		expect(paths).toEqual([
 			`codes/${minted.secret}.json`,
 			`snapshots/${minted.snapshotName}.json`,
-			'snapshots/current.json',
 		]);
+		// Asserted BY NAME, not merely by array length: this document was a
+		// second full-plaintext copy of the authority's whole database on disk,
+		// and its only reader was removed from the seam.
+		expect(paths).not.toContain('snapshots/current.json');
+	});
+
+	test('the code record is unchanged: exactly expiresAt + snapshotFile, spelled the binding\'s way', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const minted = await mintDashboardSignInCode(snapshot, { now: new Date('2026-01-01T00:00:00.000Z') });
+		const docs = stageForFilesystemBinding(minted);
 
 		const codeDoc = JSON.parse(docs[0]!.contents);
 		expect(Object.keys(codeDoc).sort()).toEqual(['expiresAt', 'snapshotFile']);
 		expect(codeDoc.expiresAt).toBe(minted.expiresAt);
 		expect(codeDoc.snapshotFile).toBe(minted.snapshotName);
+	});
 
-		expect(docs[1]!.contents).toBe(minted.snapshotJson);
-		expect(docs[2]!.contents).toBe(minted.snapshotJson);
+	test('the snapshot document is a SEALED WRAPPER that unseals to the envelope, and the hex round trip reproduces the mint own key split', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const minted = await mintDashboardSignInCode(snapshot, { now: new Date('2026-01-01T00:00:00.000Z') });
+		const docs = stageForFilesystemBinding(minted);
+
+		const wrapper = JSON.parse(docs[1]!.contents);
+		expect(Object.keys(wrapper).sort()).toEqual(['ciphertext', 'nonce', 'v']);
+
+		// THE GUARD that makes the hex round trip safe: keys derived from the
+		// rendered hex must reproduce the split the mint derived from the RAW
+		// bytes. Without this, a future encoding change would silently produce
+		// a document the binding cannot open — the exact hazard the mint path
+		// forbids the round trip in order to avoid.
+		const keys = deriveBootstrapKeys(hexToBytes(minted.secret));
+		expect(keys.lookupId).toBe(minted.lookupId);
+
+		const result = unsealPayload(wrapper, keys);
+		expect(result.ok).toBe(true);
+		expect(result.ok ? result.plaintext : undefined).toBe(minted.snapshotJson);
+
+		// Negative control: the staged document is ciphertext, not the envelope.
+		expect(docs[1]!.contents).not.toContain(PII_CANARY);
 	});
 
 	test('calling it twice for the same record throws', async () => {
@@ -411,6 +501,45 @@ describe('stageForFilesystemBinding', () => {
 		const minted = await mintDashboardSignInCode(snapshot);
 		stageForFilesystemBinding(minted);
 		expect(() => stageForFilesystemBinding(minted)).toThrow();
+	});
+
+	test('a re-read record (no in-memory payload) is still refused', async () => {
+		const snapshot = makeFixtureSnapshot();
+		await mintDashboardSignInCode(snapshot);
+		const reRead = (await readStagedSignInCode())!;
+		expect(reRead.snapshotJson).toBeUndefined();
+		expect(() => stageForFilesystemBinding(reRead)).toThrow(/in-memory mint result/);
+	});
+});
+
+describe('the REST-dead paths are marked, not left looking live', () => {
+	const MARKER = 'FILESYSTEM-BINDING PATH ONLY.';
+
+	test('the service module marks BOTH REST-dead entry points', () => {
+		const serviceSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard-signin-code.ts'), 'utf8');
+		const occurrences = serviceSource.split(MARKER).length - 1;
+		expect(occurrences).toBeGreaterThanOrEqual(2);
+		// Positive control: this is the file it thinks it is.
+		expect(serviceSource).toContain('export async function redeemStagedSignInCode');
+		expect(serviceSource).toContain('export function registerDashboardSnapshotProvider');
+	});
+
+	test('the AppProvider registration site is marked too, so it does not read as live REST wiring', () => {
+		const appProviderSource = fs.readFileSync(
+			path.join(__dirname, '..', '..', 'providers', 'AppProvider.tsx'),
+			'utf8',
+		);
+		expect(appProviderSource).toContain(MARKER);
+		// Positive control.
+		expect(appProviderSource).toContain('registerDashboardSnapshotProvider');
+	});
+
+	test("52-05's redemption-result type is CONSUMED, never redeclared: exactly one declaration in the file", () => {
+		const serviceSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard-signin-code.ts'), 'utf8');
+		const declarations = serviceSource.match(/type StagedSignInCodeRedemption/g) ?? [];
+		expect(declarations).toHaveLength(1);
+		// ...and the superseded seam type is gone from this file entirely.
+		expect(serviceSource).not.toContain('BootstrapRedemptionResult');
 	});
 });
 
@@ -433,5 +562,402 @@ describe('PII / secret non-leakage', () => {
 		await redeemStagedSignInCode(minted.secret, { now: withinExpiry });
 		const usedResult = await redeemStagedSignInCode(minted.secret, { now: withinExpiry });
 		expect(JSON.stringify(usedResult)).not.toContain(minted.secret);
+	});
+});
+
+describe('mintDashboardSignInCode — the D-03 seal-and-push path', () => {
+	test('ORDERING: the uploader is handed the sealed wrapper BEFORE anything about the code reaches AsyncStorage', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader, requests, storageAtUploadTime } = makeRecordingUploader();
+
+		const minted = await mintDashboardSignInCode(snapshot, {
+			now: new Date('2026-01-01T00:00:00.000Z'),
+			uploader,
+		});
+
+		expect(requests).toHaveLength(1);
+		// The uploader read storage from INSIDE its own body. On a first-ever
+		// mint it must have observed nothing staged — that is the D-03 ordering
+		// property asserted directly rather than inferred.
+		expect(storageAtUploadTime).toEqual([null]);
+		// Positive control: after the ack a record DOES exist, so the `null`
+		// above is an ordering fact and not a storage mock that never works.
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).not.toBeNull();
+		expect(minted.lookupId).toBe(requests[0]!.lookupId);
+	});
+
+	test('the seal wraps the REAL payload: it unseals, under keys derived from the minted secret, to exactly serializeSnapshot(snapshot)', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader, requests } = makeRecordingUploader();
+		const minted = await mintDashboardSignInCode(snapshot, { uploader });
+
+		const request = requests[0]!;
+		const keys = deriveBootstrapKeys(hexToBytes(minted.secret));
+		const result = unsealPayload(request.sealed, keys);
+		expect(result.ok).toBe(true);
+		expect(result.ok ? result.plaintext : undefined).toBe(serializeSnapshot(snapshot));
+
+		// Negative control: what actually crosses the wire is ciphertext, not
+		// the payload in a costume.
+		expect(JSON.stringify(request.sealed)).not.toContain(PII_CANARY);
+	});
+
+	test('request shape: exactly expiresAt/lookupId/sealed on a first mint, with revokeLookupId ABSENT rather than present-and-undefined', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const now = new Date('2026-01-01T00:00:00.000Z');
+		const { uploader, requests } = makeRecordingUploader();
+		const minted = await mintDashboardSignInCode(snapshot, { now, uploader });
+
+		const request = requests[0]!;
+		expect(Object.keys(request).sort()).toEqual(['expiresAt', 'lookupId', 'sealed']);
+		expect('revokeLookupId' in request).toBe(false);
+
+		expect(Object.keys(request.sealed).sort()).toEqual(['ciphertext', 'nonce', 'v']);
+		expect(request.lookupId).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect(request.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
+		expect(request.expiresAt.endsWith('Z')).toBe(false);
+		expect(request.expiresAt).toBe(minted.expiresAt);
+	});
+
+	test('D-12: a second mint carries revokeLookupId equal to the FIRST mint lookupId, and the first mint carries no such key', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader, requests } = makeRecordingUploader();
+
+		const first = await mintDashboardSignInCode(snapshot, { uploader });
+		const second = await mintDashboardSignInCode(snapshot, { uploader });
+
+		expect(requests).toHaveLength(2);
+		// Positive control on the FIRST request: absence, not undefined.
+		expect('revokeLookupId' in requests[0]!).toBe(false);
+		expect(requests[1]!.revokeLookupId).toBe(requests[0]!.lookupId);
+		expect(requests[1]!.revokeLookupId).not.toBe(requests[1]!.lookupId);
+		expect(requests[0]!.lookupId).toBe(first.lookupId);
+		expect(requests[1]!.lookupId).toBe(second.lookupId);
+	});
+
+	test('D-12 across a MIXED history: a filesystem-path mint followed by a push mint still revokes the filesystem mint lookupId', async () => {
+		const snapshot = makeFixtureSnapshot();
+		// No uploader — the filesystem path. `lookupId` is persisted on the LIVE
+		// record too, which is what makes the chain survive a mixed history.
+		const filesystemMint = await mintDashboardSignInCode(snapshot);
+		expect(filesystemMint.lookupId).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+		const { uploader, requests } = makeRecordingUploader();
+		await mintDashboardSignInCode(snapshot, { uploader });
+
+		expect(requests[0]!.revokeLookupId).toBe(filesystemMint.lookupId);
+	});
+
+	test('D-11: after the ack the stored record carries no payload, no snapshotName, and EXACTLY the tombstone key set plus lookupId', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader } = makeRecordingUploader();
+		const minted = await mintDashboardSignInCode(snapshot, {
+			now: new Date('2026-01-01T00:00:00.000Z'),
+			uploader,
+		});
+
+		const raw = await AsyncStorage.getItem(STAGED_CODE_KEY);
+		expect(raw).not.toBeNull();
+		expect(raw).not.toContain(PII_CANARY);
+		expect(raw).not.toContain('snapshotJson');
+		expect(raw).not.toContain('snapshotName');
+		// Whole-database scan, not a targeted key check: a payload that moved to
+		// a different key would sail straight past the three assertions above.
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+
+		const parsed = JSON.parse(raw!) as Record<string, unknown>;
+		expect(Object.keys(parsed).sort()).toEqual(
+			['code', 'digest', 'expiresAt', 'lookupId', 'mintedAt', 'secret'].sort(),
+		);
+		// No `redeemedAt` — the code has not been redeemed; this record simply
+		// never carried anything more than the tombstone shape.
+		expect(parsed.redeemedAt).toBeUndefined();
+		expect(parsed.lookupId).toBe(minted.lookupId);
+	});
+
+	test('D-11: the RETURNED push-path record carries no in-memory payload, so stageForFilesystemBinding refuses it — the no-uploader path is the paired positive control', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader } = makeRecordingUploader();
+
+		const pushed = await mintDashboardSignInCode(snapshot, { uploader });
+		expect(pushed.snapshotJson).toBeUndefined();
+		expect(JSON.stringify(pushed)).not.toContain(PII_CANARY);
+		expect(() => stageForFilesystemBinding(pushed)).toThrow(/in-memory mint result/);
+
+		// Positive control: the filesystem path is untouched by the push path.
+		const staged = await mintDashboardSignInCode(snapshot);
+		expect(staged.snapshotJson).toBeDefined();
+		expect(staged.snapshotJson).toContain(PII_CANARY);
+		expect(() => stageForFilesystemBinding(staged)).not.toThrow();
+	});
+
+	test('a refused upload is ATOMIC: storage is byte-identical, the thrown error leaks nothing, and the prior code still redeems', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const now = new Date('2026-01-01T00:00:00.000Z');
+		const recording = makeRecordingUploader();
+
+		const codeA = await mintDashboardSignInCode(snapshot, { now, uploader: recording.uploader });
+		const before = await AsyncStorage.getItem(STAGED_CODE_KEY);
+		const allBefore = await allStoredText();
+
+		const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		const rejecting = makeRejectingUploader('UpstreamRefusedError');
+		let thrown: Error | undefined;
+		try {
+			await mintDashboardSignInCode(snapshot, { now, uploader: rejecting.uploader });
+		} catch (err) {
+			thrown = err as Error;
+		}
+
+		expect(thrown).toBeDefined();
+		expect(thrown!.name).toBe('BootstrapUploadFailedError');
+		expect(thrown!.message).not.toContain(UPSTREAM_MESSAGE_CANARY);
+		expect(thrown!.message).not.toContain(codeA.secret);
+		expect(thrown!.message).not.toContain(codeA.lookupId);
+		expect(thrown!.message).not.toContain(rejecting.requests[0]!.lookupId);
+		expect(thrown!.message).not.toContain(rejecting.requests[0]!.sealed.ciphertext);
+		// No `cause` chain either: a `cause` is the vector by which a raw
+		// upstream message reaches a log line or a crash report.
+		expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
+
+		// The log line carries the error CLASS and nothing else.
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const warned = warnSpy.mock.calls[0]!.map(String).join(' ');
+		expect(warned).toContain('UpstreamRefusedError');
+		expect(warned).not.toContain(UPSTREAM_MESSAGE_CANARY);
+		expect(warned).not.toContain(PII_CANARY);
+		warnSpy.mockRestore();
+
+		// Storage is byte-identical to what it was before the failed attempt.
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).toBe(before);
+		expect(await allStoredText()).toBe(allBefore);
+
+		// ...and code A is still redeemable. A push-path record is persisted in
+		// the tombstone shape while its code is live, so this takes the
+		// regeneration branch — which is why the provider is registered here,
+		// exactly as the app shell registers it on mount.
+		registerDashboardSnapshotProvider(async () => makeFixtureSnapshot());
+		const redeemed = await redeemStagedSignInCode(codeA.secret, {
+			now: new Date(now.getTime() + 60_000),
+		});
+		expect(redeemed.status).toBe('ok');
+		expect(redeemed.snapshot?.digest).toBe(codeA.digest);
+	});
+
+	test('a refused upload leaves the PREVIOUS filesystem-path mint in-memory payload intact, with no regeneration provider involved', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const now = new Date('2026-01-01T00:00:00.000Z');
+		const codeA = await mintDashboardSignInCode(snapshot, { now });
+
+		const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		const rejecting = makeRejectingUploader('UpstreamRefusedError');
+		await expect(
+			mintDashboardSignInCode(snapshot, { now, uploader: rejecting.uploader }),
+		).rejects.toThrow();
+		warnSpy.mockRestore();
+
+		// NO provider is registered, so an 'ok' here can only have come from the
+		// untouched in-memory payload — the failure path assigned nothing to it.
+		const redeemed = await redeemStagedSignInCode(codeA.secret, {
+			now: new Date(now.getTime() + 60_000),
+		});
+		expect(redeemed.status).toBe('ok');
+		expect(redeemed.snapshot).toEqual(snapshot);
+	});
+
+	test('a FIRST-EVER mint whose upload is refused leaves storage empty — an officer never holds a half-minted code', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		const rejecting = makeRejectingUploader('UpstreamRefusedError');
+
+		await expect(
+			mintDashboardSignInCode(snapshot, { uploader: rejecting.uploader }),
+		).rejects.toThrow();
+		warnSpy.mockRestore();
+
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).toBeNull();
+		const ourKeys = (await AsyncStorage.getAllKeys()).filter((k) =>
+			k.startsWith('votetorrent.dashboardBootstrap'),
+		);
+		expect(ourKeys).toEqual([]);
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+	});
+});
+
+describe('D-13 — the ten-minute span is unchanged', () => {
+	test('DASHBOARD_SIGNIN_CODE_SPAN_MINUTES is 10, and a default-options mint expires exactly 600000 ms after it was minted', async () => {
+		expect(DASHBOARD_SIGNIN_CODE_SPAN_MINUTES).toBe(10);
+
+		const minted = await mintDashboardSignInCode(makeFixtureSnapshot());
+		expect(Date.parse(`${minted.expiresAt}Z`) - Date.parse(`${minted.mintedAt}Z`)).toBe(600_000);
+	});
+
+	test('the producer screen interpolates the constant, never a literal number', () => {
+		const screenSource = fs.readFileSync(
+			path.join(__dirname, '..', '..', 'screens', 'dashboard', 'DashboardSignInCodeScreen.tsx'),
+			'utf8',
+		);
+		expect(screenSource).toContain('DASHBOARD_SIGNIN_CODE_SPAN_MINUTES');
+		// Positive control: this is the file it thinks it is.
+		expect(screenSource).toContain('dashboardSignInCodeDiscardButton');
+	});
+});
+
+describe('purgeLegacyStagedPayload — the D-28 startup sweep', () => {
+	/** A record in the PRE-FIX shape. It is seeded with `setItem` directly
+	 * because no fixture and no code path in the current tree can produce one:
+	 * `PersistedStagedRecord`'s `Omit` made this shape unwritable, which is
+	 * precisely why the devices already carrying one are stranded. */
+	async function seedLegacyRecord(extra: Record<string, unknown> = {}): Promise<string> {
+		const legacy = {
+			code: `${'a'.repeat(40)}.${'b'.repeat(43)}`,
+			secret: 'a'.repeat(40),
+			digest: 'b'.repeat(43),
+			expiresAt: '2026-01-01T00:10:00',
+			mintedAt: '2026-01-01T00:00:00',
+			snapshotName: 'snapshot-aaaaaaaaaaaaaaaa',
+			snapshotJson: JSON.stringify({
+				formatVersion: 1,
+				tables: { Registrant: [{ Id: 'r-1', Name: PII_CANARY }] },
+				padding: 'x'.repeat(4096),
+			}),
+			...extra,
+		};
+		const raw = JSON.stringify(legacy);
+		await AsyncStorage.setItem(STAGED_CODE_KEY, raw);
+		return raw;
+	}
+
+	test('the core case: a seeded pre-fix record is collapsed to a tombstone, proven by reading storage BACK', async () => {
+		const seeded = await seedLegacyRecord();
+		// Positive control: the canary really is in storage before the sweep.
+		expect(seeded).toContain(PII_CANARY);
+		expect(await allStoredText()).toContain(PII_CANARY);
+
+		const outcome = await purgeLegacyStagedPayload();
+
+		// STORAGE FIRST, deliberately. D-11 is a property of what remains on the
+		// device, not of what the function returned; asserting the returned enum
+		// before the read-back would let a sweep that classified correctly and
+		// then wrote nothing sail through, and would make this case's mutation
+		// proof fail on the token rather than on the payload.
+		const raw = await AsyncStorage.getItem(STAGED_CODE_KEY);
+		expect(raw).not.toBeNull();
+		expect(raw).not.toContain(PII_CANARY);
+		expect(raw).not.toContain('snapshotJson');
+		expect(raw).not.toContain('snapshotName');
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+
+		const parsed = JSON.parse(raw!) as Record<string, unknown>;
+		// No `lookupId` — a pre-fix record never had one, so the tombstone must
+		// have the key ABSENT rather than present-and-undefined.
+		expect(Object.keys(parsed).sort()).toEqual(
+			['code', 'digest', 'expiresAt', 'mintedAt', 'secret'].sort(),
+		);
+
+		expect(outcome).toBe('legacy-payload');
+	});
+
+	test('the record SURVIVES as a tombstone rather than being deleted, so the device can still answer precisely', async () => {
+		await seedLegacyRecord();
+		expect(await purgeLegacyStagedPayload()).toBe('legacy-payload');
+
+		const parsed = JSON.parse((await AsyncStorage.getItem(STAGED_CODE_KEY))!) as Record<string, unknown>;
+		expect(parsed.code).toBe(`${'a'.repeat(40)}.${'b'.repeat(43)}`);
+		expect(parsed.secret).toBe('a'.repeat(40));
+		expect(parsed.digest).toBe('b'.repeat(43));
+		expect(parsed.expiresAt).toBe('2026-01-01T00:10:00');
+	});
+
+	test('a REDEEMED legacy record keeps its redeemedAt', async () => {
+		await seedLegacyRecord({ redeemedAt: '2026-01-01T00:05:00' });
+		expect(await purgeLegacyStagedPayload()).toBe('legacy-payload');
+
+		const raw = await AsyncStorage.getItem(STAGED_CODE_KEY);
+		expect(raw).not.toContain(PII_CANARY);
+		const parsed = JSON.parse(raw!) as Record<string, unknown>;
+		expect(Object.keys(parsed).sort()).toEqual(
+			['code', 'digest', 'expiresAt', 'mintedAt', 'redeemedAt', 'secret'].sort(),
+		);
+		expect(parsed.redeemedAt).toBe('2026-01-01T00:05:00');
+	});
+
+	test('the clean case is a BYTE-IDENTICAL no-op on a record a current build wrote — the paired positive control', async () => {
+		await mintDashboardSignInCode(makeFixtureSnapshot(), { now: new Date('2026-01-01T00:00:00.000Z') });
+		const before = await AsyncStorage.getItem(STAGED_CODE_KEY);
+
+		expect(await purgeLegacyStagedPayload()).toBe('clean');
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).toBe(before);
+	});
+
+	test('idempotence: sweeping a swept record returns "clean" and changes nothing further', async () => {
+		await seedLegacyRecord();
+		expect(await purgeLegacyStagedPayload()).toBe('legacy-payload');
+		const afterFirst = await AsyncStorage.getItem(STAGED_CODE_KEY);
+
+		expect(await purgeLegacyStagedPayload()).toBe('clean');
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).toBe(afterFirst);
+	});
+
+	test('absent: empty storage returns "absent" and writes nothing', async () => {
+		expect(await purgeLegacyStagedPayload()).toBe('absent');
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).toBeNull();
+	});
+
+	test('unreadable: an unparseable value that still contains the canary is REMOVED outright', async () => {
+		await AsyncStorage.setItem(STAGED_CODE_KEY, `{not json at all ${PII_CANARY}`);
+		expect(await allStoredText()).toContain(PII_CANARY);
+
+		expect(await purgeLegacyStagedPayload()).toBe('unreadable');
+
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).toBeNull();
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+	});
+
+	test('it NEVER throws — a crash here would take app start with it', async () => {
+		// Absent.
+		await expect(purgeLegacyStagedPayload()).resolves.toBeDefined();
+		// Unparseable.
+		await AsyncStorage.setItem(STAGED_CODE_KEY, 'not json');
+		await expect(purgeLegacyStagedPayload()).resolves.toBe('unreadable');
+		// A legacy record missing `expiresAt` entirely.
+		await AsyncStorage.setItem(
+			STAGED_CODE_KEY,
+			JSON.stringify({ code: 'x.y', secret: 'x', digest: 'y', snapshotJson: PII_CANARY }),
+		);
+		await expect(purgeLegacyStagedPayload()).resolves.toBe('legacy-payload');
+		expect(await allStoredText()).not.toContain(PII_CANARY);
+		// A JSON scalar, not an object.
+		await AsyncStorage.setItem(STAGED_CODE_KEY, '42');
+		await expect(purgeLegacyStagedPayload()).resolves.toBeDefined();
+		// A JSON null.
+		await AsyncStorage.setItem(STAGED_CODE_KEY, 'null');
+		await expect(purgeLegacyStagedPayload()).resolves.toBeDefined();
+	});
+
+	test('the app shell CALLS the sweep on mount — not merely defines it', () => {
+		const appProviderSource = fs.readFileSync(
+			path.join(__dirname, '..', '..', 'providers', 'AppProvider.tsx'),
+			'utf8',
+		);
+		// Imported from this very module...
+		expect(appProviderSource).toMatch(
+			/import\s*\{[^}]*purgeLegacyStagedPayload[^}]*\}\s*from\s*"\.\.\/services\/dashboard-signin-code"/,
+		);
+		// ...and referenced inside a useEffect, not just imported. The slice
+		// between `useEffect(` and the sweep reference is what proves the call
+		// site is inside an effect body rather than dead top-level prose.
+		const effectIndex = appProviderSource.indexOf('purgeLegacyStagedPayload()');
+		expect(effectIndex).toBeGreaterThan(-1);
+		const precedingEffect = appProviderSource.lastIndexOf('useEffect(', effectIndex);
+		expect(precedingEffect).toBeGreaterThan(-1);
+		// No `return` between the effect's opening and the sweep call — this
+		// project has shipped a gate that logged "needed" and then sat behind an
+		// unconditional early return, which made it inert.
+		const effectPrelude = appProviderSource.slice(precedingEffect, effectIndex);
+		expect(effectPrelude).not.toMatch(/\breturn\b/);
+
+		// Positive control: this is the file it thinks it is.
+		expect(appProviderSource).toContain('registerDashboardSnapshotProvider');
 	});
 });
