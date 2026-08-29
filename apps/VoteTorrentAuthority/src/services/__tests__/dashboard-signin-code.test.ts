@@ -52,6 +52,12 @@ const PII_CANARY = 'PII-CANARY-9f3a';
  * rather than silently moving the payload to a key no canary scan watches. */
 const STAGED_CODE_KEY = 'votetorrent.dashboardBootstrap.stagedCode';
 
+/** The SECOND key this module writes — the pending-revoke marker a discard
+ * leaves behind. Spelled literally for the same reason as the key above: a
+ * rename must go red here rather than silently move the marker to a key no
+ * canary scan watches. */
+const PENDING_REVOKE_KEY = 'votetorrent.dashboardBootstrap.pendingRevoke';
+
 /** A distinctive upstream failure message. It must NEVER reach the error this
  * module throws, nor the line it logs: the discipline is to carry the error
  * CLASS only, never the message. */
@@ -781,6 +787,223 @@ describe('mintDashboardSignInCode — the D-03 seal-and-push path', () => {
 		);
 		expect(ourKeys).toEqual([]);
 		expect(await allStoredText()).not.toContain(PII_CANARY);
+	});
+});
+
+describe('D-12 REACHABILITY — a discard must not sever the revoke chain', () => {
+	/**
+	 * THE POINT OF THIS BLOCK. The revoke was implemented and unit-tested while
+	 * being unreachable from the product: the mint reads the prior `lookupId`
+	 * off the staged record, `clearStagedSignInCode` destroys that record, and
+	 * the producer screen renders no generate control while a code is live —
+	 * so the officer MUST discard before re-minting, and the pre-existing
+	 * "second mint" test only passed because it minted twice with no discard in
+	 * between, a sequence the screen makes impossible. Every case below drives
+	 * the real sequence through `clearStagedSignInCode` rather than seeding a
+	 * marker by hand.
+	 */
+	test('THE OFFICER SEQUENCE — mint A, DISCARD, mint B: B carries revokeLookupId === A.lookupId (paired positive control: A carries no such key)', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader, requests } = makeRecordingUploader();
+
+		const codeA = await mintDashboardSignInCode(snapshot, {
+			now: new Date('2026-01-01T00:00:00.000Z'),
+			uploader,
+		});
+		// The discard is the step the screen forces and the step that used to
+		// sever the chain. Nothing here reaches into storage directly.
+		await clearStagedSignInCode();
+		const codeB = await mintDashboardSignInCode(snapshot, {
+			now: new Date('2026-01-01T00:02:00.000Z'),
+			uploader,
+		});
+
+		expect(requests).toHaveLength(2);
+		// Positive control, so the suite cannot pass vacuously: a FIRST-EVER
+		// mint sends no revoke at all — the key ABSENT, not present-and-undefined.
+		expect('revokeLookupId' in requests[0]!).toBe(false);
+		expect(Object.keys(requests[0]!).sort()).toEqual(['expiresAt', 'lookupId', 'sealed']);
+
+		// ...and the mint after the discard carries exactly A's lookupId.
+		expect(requests[1]!.revokeLookupId).toBe(codeA.lookupId);
+		expect(requests[1]!.lookupId).toBe(codeB.lookupId);
+		expect(requests[1]!.revokeLookupId).not.toBe(requests[1]!.lookupId);
+		expect(Object.keys(requests[1]!).sort()).toEqual([
+			'expiresAt',
+			'lookupId',
+			'revokeLookupId',
+			'sealed',
+		]);
+	});
+
+	test('the marker a discard leaves holds EXACTLY { expiresAt, lookupId } — no code, secret, digest, snapshotName or payload, under a whole-store canary', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader } = makeRecordingUploader();
+		const codeA = await mintDashboardSignInCode(snapshot, {
+			now: new Date('2026-01-01T00:00:00.000Z'),
+			uploader,
+		});
+
+		await clearStagedSignInCode();
+
+		const raw = await AsyncStorage.getItem(PENDING_REVOKE_KEY);
+		expect(raw).not.toBeNull();
+		const parsed = JSON.parse(raw!) as Record<string, unknown>;
+		// KEY-SET EQUALITY, not a spot check: a future field added to this
+		// marker has to come here and argue for itself.
+		expect(Object.keys(parsed).sort()).toEqual(['expiresAt', 'lookupId']);
+		expect(parsed.lookupId).toBe(codeA.lookupId);
+		expect(parsed.expiresAt).toBe(codeA.expiresAt);
+		expect(typeof parsed.expiresAt).toBe('string');
+		expect((parsed.expiresAt as string).length).toBe(19);
+		expect((parsed.expiresAt as string).endsWith('Z')).toBe(false);
+
+		// The credential the discard exists to destroy is GONE from the marker,
+		// by value and not merely by key name.
+		expect(raw).not.toContain(codeA.secret);
+		expect(raw).not.toContain(codeA.digest);
+		expect(raw).not.toContain(codeA.code);
+		expect(raw).not.toContain(codeA.snapshotName);
+		expect(raw).not.toContain('snapshotJson');
+		expect(raw).not.toContain(PII_CANARY);
+
+		// The staged record itself is really gone — the marker is an addition to
+		// the discard, never a softening of it.
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).toBeNull();
+
+		// WHOLE-STORE canary: the secret and the payload are absent from EVERY
+		// key, so a credential that merely moved keys cannot sail past the
+		// targeted assertions above.
+		const everything = await allStoredText();
+		expect(everything).not.toContain(codeA.secret);
+		expect(everything).not.toContain(codeA.digest);
+		expect(everything).not.toContain(PII_CANARY);
+		expect(everything).not.toContain('snapshotJson');
+		// ...and the only keys this module now owns are the two named ones.
+		const ourKeys = (await AsyncStorage.getAllKeys())
+			.filter((k) => k.startsWith('votetorrent.dashboardBootstrap'))
+			.sort();
+		expect(ourKeys).toEqual([PENDING_REVOKE_KEY]);
+	});
+
+	test('a discard of a PRE-lookupId record writes NO marker (paired positive control: a current record does)', async () => {
+		// A record shaped exactly as a build before `lookupId` was persisted
+		// wrote it. There is nothing the service could revoke, so an empty
+		// marker — indistinguishable from a real pending revoke — must not
+		// appear.
+		await AsyncStorage.setItem(
+			STAGED_CODE_KEY,
+			JSON.stringify({
+				code: `${'a'.repeat(40)}.${'b'.repeat(43)}`,
+				secret: 'a'.repeat(40),
+				digest: 'b'.repeat(43),
+				expiresAt: '2026-01-01T00:10:00',
+				mintedAt: '2026-01-01T00:00:00',
+			}),
+		);
+		await clearStagedSignInCode();
+		expect(await AsyncStorage.getItem(PENDING_REVOKE_KEY)).toBeNull();
+
+		// ...and a mint that follows it sends no revoke either.
+		const { uploader, requests } = makeRecordingUploader();
+		await mintDashboardSignInCode(makeFixtureSnapshot(), { uploader });
+		expect('revokeLookupId' in requests[0]!).toBe(false);
+
+		// Positive control: the same discard on a CURRENT record does write one,
+		// so the `toBeNull()` above is a fact about the legacy shape and not a
+		// marker path that never works.
+		await clearStagedSignInCode();
+		expect(await AsyncStorage.getItem(PENDING_REVOKE_KEY)).not.toBeNull();
+	});
+
+	test('the marker is dropped once its revoke has been DELIVERED, and a later failed mint does not resurrect it', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader, requests } = makeRecordingUploader();
+
+		const codeA = await mintDashboardSignInCode(snapshot, { uploader });
+		await clearStagedSignInCode();
+		const codeB = await mintDashboardSignInCode(snapshot, { uploader });
+		expect(requests[1]!.revokeLookupId).toBe(codeA.lookupId);
+
+		// Delivered, therefore dropped — A must not be revoked a second time on
+		// every subsequent upload for the rest of the device's life.
+		expect(await AsyncStorage.getItem(PENDING_REVOKE_KEY)).toBeNull();
+
+		// A refused mint must not put it back.
+		const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		const rejecting = makeRejectingUploader('UpstreamRefusedError');
+		await expect(mintDashboardSignInCode(snapshot, { uploader: rejecting.uploader })).rejects.toThrow();
+		warnSpy.mockRestore();
+		expect(await AsyncStorage.getItem(PENDING_REVOKE_KEY)).toBeNull();
+
+		// The chain still advances: discard B, mint C, and C revokes B — not the
+		// long-since-delivered A.
+		await clearStagedSignInCode();
+		await mintDashboardSignInCode(snapshot, { uploader });
+		expect(requests[2]!.revokeLookupId).toBe(codeB.lookupId);
+		expect(requests[2]!.revokeLookupId).not.toBe(codeA.lookupId);
+	});
+
+	test('a REFUSED mint after a discard leaves the marker intact, so the next mint still carries the revoke', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader, requests } = makeRecordingUploader();
+		const codeA = await mintDashboardSignInCode(snapshot, { uploader });
+		await clearStagedSignInCode();
+		const markerBefore = await AsyncStorage.getItem(PENDING_REVOKE_KEY);
+
+		const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		const rejecting = makeRejectingUploader('UpstreamRefusedError');
+		await expect(mintDashboardSignInCode(snapshot, { uploader: rejecting.uploader })).rejects.toThrow();
+		warnSpy.mockRestore();
+
+		// The refused attempt DID carry the revoke — proof the marker fed it —
+		// and the marker is byte-identical afterwards because the revoke was
+		// never acknowledged.
+		expect(rejecting.requests[0]!.revokeLookupId).toBe(codeA.lookupId);
+		expect(await AsyncStorage.getItem(PENDING_REVOKE_KEY)).toBe(markerBefore);
+		expect(await AsyncStorage.getItem(STAGED_CODE_KEY)).toBeNull();
+
+		// ...so the retry still revokes A. A refused upload must not silently
+		// consume the one chance to retire a code the service is still holding.
+		await mintDashboardSignInCode(snapshot, { uploader });
+		expect(requests[1]!.revokeLookupId).toBe(codeA.lookupId);
+		expect(await AsyncStorage.getItem(PENDING_REVOKE_KEY)).toBeNull();
+	});
+
+	test('an EXPIRED marker still produces a revoke — the phone never decides on the service behalf that a code has lapsed', async () => {
+		const snapshot = makeFixtureSnapshot();
+		const { uploader, requests } = makeRecordingUploader();
+		const mintNow = new Date('2026-01-01T00:00:00.000Z');
+		const codeA = await mintDashboardSignInCode(snapshot, { now: mintNow, uploader });
+		await clearStagedSignInCode();
+
+		// Well past A's own expiry. The expiry DECISION belongs to the service,
+		// whose clock is not this phone's, so suppressing the revoke here could
+		// leave live at the service a code this phone has already forgotten.
+		const longAfter = new Date(mintNow.getTime() + (DASHBOARD_SIGNIN_CODE_SPAN_MINUTES + 120) * 60_000);
+		await mintDashboardSignInCode(snapshot, { now: longAfter, uploader });
+
+		expect(requests[1]!.revokeLookupId).toBe(codeA.lookupId);
+	});
+
+	test('a live staged record still wins over a marker, and an undelivered marker is not dropped by a mint that did not use it', async () => {
+		const snapshot = makeFixtureSnapshot();
+		// Reachable only through the filesystem path (no uploader), which is the
+		// one way a staged record and a marker can coexist: a discard removes
+		// the record, and a push mint clears the marker on its ack.
+		const codeA = await mintDashboardSignInCode(snapshot);
+		await clearStagedSignInCode();
+		const codeB = await mintDashboardSignInCode(snapshot); // no uploader: nothing delivered
+
+		const { uploader, requests } = makeRecordingUploader();
+		await mintDashboardSignInCode(snapshot, { uploader });
+
+		// The LIVE record wins — it is the newer of the two facts.
+		expect(requests[0]!.revokeLookupId).toBe(codeB.lookupId);
+		// ...and A's marker, whose revoke was never delivered, survives rather
+		// than being dropped by an upload that did not carry it.
+		const marker = JSON.parse((await AsyncStorage.getItem(PENDING_REVOKE_KEY))!) as Record<string, unknown>;
+		expect(marker.lookupId).toBe(codeA.lookupId);
 	});
 });
 

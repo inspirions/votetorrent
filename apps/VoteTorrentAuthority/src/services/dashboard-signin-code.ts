@@ -104,6 +104,18 @@
  * needs it to revoke this code at the rendezvous service, which cannot infer
  * that two codes belong to one authority.
  *
+ * It is kept ACROSS A DISCARD too, and that is not the same statement. The
+ * producer screen shows no generate control while a code is live, so the
+ * sequence an officer actually performs is mint -> DISCARD -> mint — and
+ * {@link clearStagedSignInCode} destroys the very record the next mint would
+ * read the prior `lookupId` from. So a discard leaves behind a
+ * {@link PendingRevokeMarker} under its own key, carrying the `lookupId` and
+ * `expiresAt` and NOTHING ELSE: never the `code`, the `secret`, the `digest`,
+ * the `snapshotName` or the payload. A discard is supposed to destroy a
+ * credential; a marker that kept the secret alive would be a worse defect than
+ * the missing revoke it exists to fix. The marker is dropped once an upload has
+ * actually delivered its revoke, and survives a refused one.
+ *
  * A spent or expired code must never leave a plaintext copy of the voter roll
  * sitting beside the bearer secret that unlocks it: the secret's entire
  * security value is that short-expiry plus single-use bound the exposure
@@ -134,6 +146,13 @@ import type {
 export const DASHBOARD_SIGNIN_CODE_SPAN_MINUTES = 10;
 
 const STAGED_CODE_STORAGE_KEY = 'votetorrent.dashboardBootstrap.stagedCode';
+
+/**
+ * The pending-revoke marker's key — a SECOND, deliberately separate key rather
+ * than a field on the staged record, because the fact it holds has to OUTLIVE
+ * that record's destruction. See {@link PendingRevokeMarker}.
+ */
+const PENDING_REVOKE_STORAGE_KEY = 'votetorrent.dashboardBootstrap.pendingRevoke';
 
 /**
  * The staged sign-in code record. AT MOST ONE exists at a time, BY
@@ -337,6 +356,124 @@ function toTombstone(record: StagedSignInCode, redeemedAt?: string): TombstoneRe
 }
 
 /**
+ * WHAT SURVIVES A DISCARD, and why anything does.
+ *
+ * A second mint revokes the first AT THE SERVICE by riding a `revokeLookupId`
+ * on the new upload: the service cannot infer that two codes belong to one
+ * authority — it is handed nothing that correlates them — so revocation has to
+ * be explicit and phone-driven. That chain reads the prior `lookupId` off the
+ * staged record. But {@link clearStagedSignInCode} DESTROYS the staged record,
+ * and the producer screen offers no generate control while a code is live, so
+ * the sequence an officer actually performs is mint -> DISCARD -> mint. Without
+ * this marker the second mint finds no prior record, sends no `revokeLookupId`,
+ * and the discarded code stays redeemable at the service until its own expiry —
+ * the phone has forgotten a code the service still holds and honours, which is
+ * precisely the hazard the revoke exists to close. The revoke path would be
+ * implemented, tested, and unreachable.
+ *
+ * The marker is the MINIMUM that keeps that chain alive, and nothing more. Both
+ * of its fields were already handed to the service in the clear at upload time,
+ * so retaining them past a discard discloses nothing the service does not
+ * already hold. It must NEVER carry `code`, `secret`, `digest`, `snapshotName`
+ * or `snapshotJson`: a discard's stated purpose is that it destroys a
+ * credential, so preserving the bearer secret past one would be a strictly
+ * worse defect than the missing revoke it is meant to fix. That is exactly why
+ * this is a separate key with a separate two-field shape and NOT a
+ * {@link TombstoneRecord} — a tombstone keeps `code`, `secret` and `digest`.
+ *
+ * AT MOST ONE marker exists, mirroring the at-most-one staged record: a later
+ * discard overwrites an earlier marker, because only one revoke can ride one
+ * upload.
+ */
+interface PendingRevokeMarker {
+	/** The base64url (43-character) `lookupId` of the code a discard destroyed. */
+	lookupId: string;
+	/** The discarded code's own 19-char canonical `expiresAt`, no `Z` — recorded
+	 * as the FACT of when the named code stops mattering, and deliberately NOT
+	 * used to suppress a revoke: the expiry DECISION belongs to the service,
+	 * whose clock is not this phone's, so a phone that skipped a revoke it
+	 * judged moot could leave live at the service a code it had already
+	 * forgotten. A revoke that arrives after expiry is harmless; one that is
+	 * never sent is the defect. Optional purely for read-side robustness — a
+	 * marker missing this field still names a code that must be revoked, and
+	 * discarding the whole marker over an absent diagnostic field would trade a
+	 * security property for a cosmetic one. */
+	expiresAt?: string;
+}
+
+/**
+ * Reads the pending-revoke marker. NEVER throws: an absent, unreadable or
+ * shapeless marker is simply "no revoke pending", which degrades the revoke
+ * chain rather than failing a mint.
+ */
+async function readPendingRevoke(): Promise<PendingRevokeMarker | undefined> {
+	try {
+		const raw = await AsyncStorage.getItem(PENDING_REVOKE_STORAGE_KEY);
+		if (raw === null) {
+			return undefined;
+		}
+		const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+		if (typeof parsed !== 'object' || parsed === null) {
+			return undefined;
+		}
+		const { lookupId, expiresAt } = parsed;
+		if (typeof lookupId !== 'string' || lookupId.length === 0) {
+			return undefined;
+		}
+		return {
+			lookupId,
+			...(typeof expiresAt === 'string' ? { expiresAt } : {}),
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Record `record`'s `lookupId` as the revoke the NEXT mint must carry. NEVER
+ * throws and never blocks the discard that calls it: a discard destroys a
+ * credential, and failing to destroy it because a marker write faulted would be
+ * strictly worse than losing one revoke. A fault is reported by error CLASS
+ * only — never the upstream message.
+ */
+async function writePendingRevoke(record: StagedSignInCode): Promise<void> {
+	if (typeof record.lookupId !== 'string' || record.lookupId.length === 0) {
+		// A record written by a PRE-`lookupId` build names nothing the service
+		// could revoke. Write NO marker at all rather than an empty one, which
+		// would be indistinguishable from a real pending revoke.
+		return;
+	}
+	const marker: PendingRevokeMarker = {
+		lookupId: record.lookupId,
+		// Conditional-spread, exactly like `toTombstone`'s: absent, never
+		// present-and-undefined.
+		...(typeof record.expiresAt === 'string' ? { expiresAt: record.expiresAt } : {}),
+	};
+	try {
+		await AsyncStorage.setItem(PENDING_REVOKE_STORAGE_KEY, JSON.stringify(marker));
+	} catch (error) {
+		console.warn(
+			'dashboard-signin-code: could not record the pending revoke;',
+			error instanceof Error ? error.name : typeof error,
+		);
+	}
+}
+
+/** Drops the pending-revoke marker once its revoke has been DELIVERED. NEVER
+ * throws: a failed removal only means the next mint re-sends the same revoke,
+ * which the service treats identically. */
+async function clearPendingRevoke(): Promise<void> {
+	try {
+		await AsyncStorage.removeItem(PENDING_REVOKE_STORAGE_KEY);
+	} catch (error) {
+		console.warn(
+			'dashboard-signin-code: could not drop the delivered revoke marker;',
+			error instanceof Error ? error.name : typeof error,
+		);
+	}
+}
+
+/**
  * Mint a new bearer sign-in code for `snapshot` and persist it as the ONE
  * staged record, replacing whatever was staged before (see the security note on
  * {@link StagedSignInCode} above — the replaced code becomes instantly
@@ -371,7 +508,15 @@ export async function mintDashboardSignInCode(
 	// the superseded code, and the service cannot infer it. Reading first also
 	// means the failure path below has nothing to undo.
 	const previous = await readStagedSignInCode();
-	const previousLookupId = previous?.lookupId;
+	// ...and, when there is no live record to read it from, fall back to the
+	// marker a DISCARD left behind. This fallback is what makes the revoke
+	// REACHABLE AT ALL rather than merely implemented: the producer screen shows
+	// no generate control while a code is live, so every re-mint in the real
+	// product goes through a discard first — and a discard destroys the record
+	// the line above reads. Read only when the record yields nothing, so a live
+	// record always wins; the marker is the older fact of the two.
+	const pendingRevoke = previous?.lookupId === undefined ? await readPendingRevoke() : undefined;
+	const previousLookupId = previous?.lookupId ?? pendingRevoke?.lookupId;
 
 	// The secret, generated in one confined block. Deliberately
 	// `crypto.getRandomValues` raw output, NEVER `secp256k1.utils.randomSecretKey()`
@@ -480,6 +625,24 @@ export async function mintDashboardSignInCode(
 		STAGED_CODE_STORAGE_KEY,
 		JSON.stringify({ ...toTombstone(record), lookupId: keys.lookupId }),
 	);
+
+	// The revoke this upload carried has now been DELIVERED, so the marker that
+	// held it has done its job. Two deliberate constraints on this removal:
+	//
+	//   - It happens AFTER the record write, never before. A crash in between
+	//     leaves the marker in place and the next mint re-sends the same
+	//     revoke, which the service treats identically — the safe direction.
+	//   - It happens ONLY when the revoke actually came FROM the marker
+	//     (`pendingRevoke` is read above only in that case). If it came from a
+	//     live staged record instead, the marker still names an older code
+	//     whose revoke has never been delivered, and it must survive to be
+	//     attempted again rather than be dropped undelivered.
+	//
+	// A REFUSED upload never reaches this line at all, so a failed mint leaves
+	// the marker intact and the revoke is attempted again next time.
+	if (pendingRevoke !== undefined) {
+		await clearPendingRevoke();
+	}
 
 	// Strip the payload from the RETURNED value by omission, so the key is
 	// genuinely absent rather than present-and-undefined: nothing a caller can
@@ -600,9 +763,26 @@ export async function purgeLegacyStagedPayload(): Promise<LegacyStagedPayloadSwe
 	return 'legacy-payload';
 }
 
-/** Drops the staged record (idle-state reset) and clears the in-memory payload. */
+/**
+ * Drops the staged record (idle-state reset) and clears the in-memory payload,
+ * preserving ONLY the discarded code's `lookupId` — in a separate
+ * {@link PendingRevokeMarker}, never a tombstone — so the next mint can still
+ * revoke that code at the rendezvous service. See {@link PendingRevokeMarker}
+ * for why the marker exists, and for why it carries nothing else: the
+ * credential this function's caller means to destroy must not survive it.
+ *
+ * ORDER IS LOAD-BEARING. The marker is written BEFORE the record is removed,
+ * so the fact is captured while the record that carries it still exists. The
+ * marker write can neither block nor fail the discard: destroying the
+ * credential is the point, and it must happen even if nothing about the revoke
+ * could be recorded.
+ */
 export async function clearStagedSignInCode(): Promise<void> {
 	stagedSnapshotJson = undefined;
+	const record = await readStagedSignInCode();
+	if (record !== undefined) {
+		await writePendingRevoke(record);
+	}
 	await AsyncStorage.removeItem(STAGED_CODE_STORAGE_KEY);
 }
 
