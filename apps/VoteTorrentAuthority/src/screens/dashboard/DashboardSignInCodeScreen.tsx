@@ -57,6 +57,11 @@ import {
 	readStagedSignInCode,
 } from "../../services/dashboard-signin-code";
 import type { StagedSignInCode } from "../../services/dashboard-signin-code";
+import {
+	createBootstrapUploadHandle,
+	isBootstrapUploadConfigured,
+	uploadFailureCopyKey,
+} from "../../services/bootstrap-upload";
 
 export default function DashboardSignInCodeScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -66,7 +71,22 @@ export default function DashboardSignInCodeScreen() {
 
 	const [record, setRecord] = useState<StagedSignInCode | undefined>(undefined);
 	const [errorMessage, setErrorMessage] = useState<string>("");
-	const [generating, setGenerating] = useState(false);
+	// The generate sequence's phase. `signing` covers the biometric and the
+	// whole-database export; `uploading` covers the seal and the network round
+	// trip, which happen together inside `mintDashboardSignInCode`.
+	const [generatePhase, setGeneratePhase] = useState<"idle" | "signing" | "uploading">("idle");
+	// DERIVED, so every `disabled={generating ...}` expression below is
+	// byte-identical to what the confirm-gate tests already pin. Widening the
+	// state without deriving this would have quietly re-opened a gate.
+	const generating = generatePhase !== "idle";
+	// The ref is the CORRECTNESS guard; the phase above is the FEEDBACK. A
+	// state write schedules no synchronous render, so two presses dispatched in
+	// one tick both read the same closure and a state-only guard cannot close
+	// that gap; a ref mutation is visible to every subsequent call in the same
+	// tick. The window here is now a network round trip rather than a local
+	// computation, so it is wide enough to hit by accident — and two mints
+	// would emit two revokes, retiring a code the officer may still be holding.
+	const generatingRef = useRef(false);
 	// The confirmation step in front of the export. `false` is the resting
 	// state, so nothing about this screen's normal render implies an export is
 	// pending.
@@ -127,10 +147,31 @@ export default function DashboardSignInCodeScreen() {
 	}, []);
 
 	const handleGenerate = useCallback(async () => {
+		if (generatingRef.current) return;
+		generatingRef.current = true;
 		setErrorMessage("");
 		setConfirming(false);
 		setConfirmText("");
-		setGenerating(true);
+		setGeneratePhase("signing");
+
+		// THE CONFIGURATION CHECK BELONGS HERE, not inside the uploader.
+		// Reaching the uploader means the biometric has already been raised and
+		// the entire database already exported; spending both on an attempt
+		// that provably cannot succeed is a worse experience than an immediate
+		// refusal. The uploader keeps its own identical refusal as the second
+		// layer — this screen is a courtesy, never the enforcement point.
+		if (!isBootstrapUploadConfigured()) {
+			setErrorMessage(t(uploadFailureCopyKey("not-configured")));
+			generatingRef.current = false;
+			setGeneratePhase("idle");
+			return;
+		}
+
+		// Created before the `try` so the `catch` can read the classification
+		// off it. The reason cannot travel on the error: the mint deliberately
+		// attaches no `cause`, because a `cause` is the vector by which a raw
+		// upstream message reaches a log line or a crash report.
+		const handle = createBootstrapUploadHandle();
 		try {
 			// PRESENCE PROOF, BEFORE anything is exported or minted. Every other
 			// authority action that touches authority data goes through this
@@ -162,7 +203,20 @@ export default function DashboardSignInCodeScreen() {
 			await signer(challengeDigest);
 
 			const snapshot = await exportDashboardSnapshot();
-			const minted = await mintDashboardSignInCode(snapshot);
+			// Set BEFORE the mint, because the mint now seals the export and
+			// sends it in one call — which is why the in-flight copy names
+			// sealing as well as sending. A string that named only the network
+			// would be describing the shorter half of the wait.
+			setGeneratePhase("uploading");
+			// The uploader is passed UNCONDITIONALLY. A branch that omitted it
+			// would take the filesystem-binding path instead, persisting a
+			// payload locally and handing the officer a code no browser could
+			// ever redeem — the exact failure this sequence exists to end.
+			const minted = await mintDashboardSignInCode(snapshot, { uploader: handle.upload });
+			// THE FAIL-CLOSED POINT. This line is reachable only after the mint
+			// resolves, and the mint resolves only after the service has
+			// acknowledged the upload — so no code can reach the officer's eyes
+			// before the browser can redeem it.
 			setRecord(minted);
 		} catch (error) {
 			if (isNoNetworkEstablishedError(error)) {
@@ -182,9 +236,23 @@ export default function DashboardSignInCodeScreen() {
 			// (reading 'exportDashboardSnapshot')" in the officer's face.
 			// eslint-disable-next-line no-console
 			console.error("DashboardSignInCodeScreen: generating a code failed:", (error as { name?: string })?.name ?? "Error");
-			setErrorMessage(outcome.message ?? t("dashboardSignInCodeGenerateFailed"));
+			// A MINT THAT SUCCEEDED BUT COULD NOT SEND IS NOT A MINT THAT
+			// FAILED, and the remedies differ, so this branch never falls back
+			// on `dashboardSignInCodeGenerateFailed`. The classification is
+			// read off the handle THIS call created rather than off the error,
+			// which by contract carries no detail at all. `unreachable` is the
+			// safe default for an unclassified failure: its remedy — check the
+			// service is running, then try again — is the correct advice when
+			// nothing more specific is known.
+			const uploadFailed = (error as { name?: string })?.name === "BootstrapUploadFailedError";
+			setErrorMessage(
+				uploadFailed
+					? t(uploadFailureCopyKey(handle.lastFailureReason() ?? "unreachable"))
+					: (outcome.message ?? t("dashboardSignInCodeGenerateFailed")),
+			);
 		} finally {
-			setGenerating(false);
+			generatingRef.current = false;
+			setGeneratePhase("idle");
 		}
 	}, [exportDashboardSnapshot, handleDeviceSigningError, t]);
 
@@ -248,6 +316,17 @@ export default function DashboardSignInCodeScreen() {
 					<ThemedText type="title" style={styles.sectionTitle}>
 						{t("dashboardSignInCodeTitle")}
 					</ThemedText>
+
+					{/* OUTSIDE the screenState branches, deliberately. During a
+					    re-mint the screen is in the generated state showing the
+					    PRIOR code, and an indicator that only rendered in the
+					    idle state would be invisible in exactly the case where
+					    the officer most needs to know something is happening. */}
+					{generatePhase === "uploading" ? (
+						<ThemedText type="default" style={styles.body} testID="dashboard-signin-code-uploading">
+							{t("dashboardSignInCodeUploading")}
+						</ThemedText>
+					) : null}
 
 					{screenState === "idle" ? (
 						<ThemedText type="default" style={styles.body}>

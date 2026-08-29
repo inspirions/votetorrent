@@ -679,6 +679,18 @@ const resources = {
 			dashboardSignInCodeConfirmHeading: 'Export this authority’s whole database?',
 			dashboardSignInCodeConfirmBody:
 				'Generating a code copies everything this device holds for this network — including registrant information — into a single-use export. Anyone who reads the code can pull that copy into a web browser. Only continue if you are handing the code to an officer you trust, right now.',
+			// The sealed-upload sequence. The code is shown ONLY after the sign-in
+			// service confirms it received the export, so these five strings cover
+			// the wait and the four ways it can end without a code.
+			dashboardSignInCodeUploading: 'Sealing the code and sending it to the sign-in service.',
+			dashboardSignInCodeUploadFailed:
+				"Couldn't send the export to the sign-in service, so no new code was created. Check that the sign-in service is running, then try again.",
+			dashboardSignInCodeUploadRefused:
+				'The sign-in service refused this device, so no new code was created. Check the upload token the service was set up with.',
+			dashboardSignInCodeUploadTooLarge:
+				'This authority’s data is larger than the sign-in service will accept, so no new code was created. Ask whoever runs the service to raise its limit.',
+			dashboardSignInCodeUploadNotConfigured:
+				'No sign-in service address is set on this build, so no code was created. The service address has to be set up before a code can be generated.',
 			// Phase 47 (D-01/D-02/D-14) — registrantAccessTrail* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantAccessTrailSectionTitle: 'Access History',
 			// D-01: load-bearing framing — accountability/transparency, NOT a security control. Do not paraphrase.
@@ -1547,6 +1559,17 @@ const resources = {
 			dashboardSignInCodeConfirmHeading: '¿Exportar toda la base de datos de esta autoridad?',
 			dashboardSignInCodeConfirmBody:
 				'Generar un código copia todo lo que este dispositivo guarda de esta red — incluida la información de los registrantes — en una exportación de un solo uso. Cualquiera que lea el código puede llevar esa copia a un navegador web. Continúe solo si va a entregar el código a un funcionario de confianza, ahora mismo.',
+			// La secuencia de envío sellado. El código se muestra SOLO después de que
+			// el servicio de inicio de sesión confirme que recibió la exportación.
+			dashboardSignInCodeUploading: 'Sellando el código y enviándolo al servicio de inicio de sesión.',
+			dashboardSignInCodeUploadFailed:
+				'No se pudo enviar la exportación al servicio de inicio de sesión, así que no se creó ningún código nuevo. Compruebe que el servicio de inicio de sesión esté en marcha e inténtelo de nuevo.',
+			dashboardSignInCodeUploadRefused:
+				'El servicio de inicio de sesión rechazó este dispositivo, así que no se creó ningún código nuevo. Revise la clave de envío con la que se configuró el servicio.',
+			dashboardSignInCodeUploadTooLarge:
+				'Los datos de esta autoridad superan lo que el servicio de inicio de sesión acepta, así que no se creó ningún código nuevo. Pida a quien administra el servicio que aumente su límite.',
+			dashboardSignInCodeUploadNotConfigured:
+				'Esta versión no tiene configurada la dirección del servicio de inicio de sesión, así que no se creó ningún código. Hay que configurar la dirección del servicio antes de poder generar un código.',
 			// Phase 47 (D-01/D-02/D-14) — registrantAccessTrail* group; copy verbatim from 47-UI-SPEC.md § Copywriting Contract.
 			registrantAccessTrailSectionTitle: 'Historial de Acceso',
 			// D-01: load-bearing framing — accountability/transparency, NOT a security control. Do not paraphrase.

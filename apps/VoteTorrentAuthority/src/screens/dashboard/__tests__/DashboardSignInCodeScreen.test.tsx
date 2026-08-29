@@ -23,6 +23,17 @@
  * own suite). Device-proof honesty for the real prompt belongs to this
  * project's on-device ceremony practice (see `50-15-PLAN.md`'s
  * `<human-check>`), not to this file.
+ *
+ * The upload cases added for the sealed-push sequence inherit that blind spot
+ * and widen it. `bootstrap-upload` is mocked here too, so these cases prove
+ * the SCREEN'S STATE MACHINE and its copy selection — which phase renders
+ * when, which key is chosen for which classification, that nothing is
+ * rendered before the mint resolves — and prove NOTHING about a real HTTP
+ * round trip, a real rendezvous service, a real seal, or a real biometric.
+ * Emulator results are not evidence for the last of those either: real
+ * devices return `ERROR_NEGATIVE_BUTTON 13` / `ERROR_USER_CANCELED 10` where
+ * an emulator returns a generic `ERROR_CANCELED 5`. The hardware leg is what
+ * closes all of it; nothing in this file substitutes for it.
  * ============================================================================
  *
  * Mocking pattern mirrored from `RegistrationRequestApprovalScreen.test.tsx`
@@ -135,23 +146,121 @@ jest.mock("../../../engines/device-signer", () => ({
 	createDeviceSigner: (...args: unknown[]) => mockCreateDeviceSigner(...(args as [string])),
 }));
 
-const mockMint = jest.fn(async () => ({
-	code: "abc.def",
-	secret: "a".repeat(40),
+/** The code the officer would read out. Deliberately a DIFFERENT canary from
+ * the secret below, so "no code is rendered" and "no secret is rendered" fail
+ * independently rather than one standing in for the other. */
+const CODE_CANARY = "abc.def";
+const SECRET_CANARY = "5ecre7canary5ecre7canary5ecre7canary0000";
+
+/** The push-path return shape. `snapshotJson` is ABSENT: after the producer
+ * core landed, a mint given an uploader strips the payload from what it
+ * returns, so a double still carrying it would model a shape production can
+ * no longer produce. */
+const MINTED_RECORD = {
+	code: CODE_CANARY,
+	secret: SECRET_CANARY,
 	digest: "def",
+	lookupId: "lookupIdlookupIdlookupIdlookupIdlookupIdAAA",
 	expiresAt: "2099-01-01T00:00:00",
 	mintedAt: "2099-01-01T00:00:00",
 	snapshotName: "snapshot-aaaa",
-	snapshotJson: "{}",
-}));
+};
+
+/** Every options bag the mint was handed, in call order. */
+const mintOptions: Array<Record<string, unknown>> = [];
+/** When set, the mint returns THIS promise instead of resolving, so a test
+ * can hold the upload in flight and observe the tree mid-sequence. */
+let pendingMint: { promise: Promise<unknown>; resolve: (value: unknown) => void } | undefined;
+
+const mockMint = jest.fn(async (_snapshot: unknown, options?: Record<string, unknown>) => {
+	callOrder.push("mint");
+	mintOptions.push(options ?? {});
+	if (pendingMint !== undefined) return pendingMint.promise;
+	return MINTED_RECORD;
+});
 const mockClear = jest.fn(async () => undefined);
+const mockRead = jest.fn(async (): Promise<unknown> => undefined);
 
 jest.mock("../../../services/dashboard-signin-code", () => ({
 	DASHBOARD_SIGNIN_CODE_SPAN_MINUTES: 10,
-	mintDashboardSignInCode: (...args: unknown[]) => mockMint(...(args as [])),
-	readStagedSignInCode: async () => undefined,
+	mintDashboardSignInCode: (...args: unknown[]) => mockMint(...(args as [unknown])),
+	readStagedSignInCode: (...args: unknown[]) => mockRead(...(args as [])),
 	clearStagedSignInCode: (...args: unknown[]) => mockClear(...(args as [])),
 }));
+
+// ---------------------------------------------------------------------------
+// The uploader seam. Only the two functions that would touch the network (or
+// read a dev-time constant) are replaced; `uploadFailureCopyKey` is the REAL
+// one, via `requireActual`. Reproducing its mapping here would let the screen
+// and the service drift apart silently and still pass — the assertion that
+// matters is that the screen picks the key the shipped map actually returns.
+// ---------------------------------------------------------------------------
+let uploadConfigured = true;
+let lastFailureReason: string | undefined;
+
+const mockUpload = jest.fn(async () => undefined);
+const uploadHandle = {
+	upload: mockUpload,
+	lastFailureReason: () => lastFailureReason,
+};
+const mockCreateUploadHandle = jest.fn(() => uploadHandle);
+const mockIsUploadConfigured = jest.fn(() => uploadConfigured);
+
+jest.mock("../../../services/bootstrap-upload", () => {
+	const actual = jest.requireActual("../../../services/bootstrap-upload");
+	return {
+		...actual,
+		isBootstrapUploadConfigured: (...args: unknown[]) => mockIsUploadConfigured(...(args as [])),
+		createBootstrapUploadHandle: (...args: unknown[]) => mockCreateUploadHandle(...(args as [])),
+	};
+});
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { uploadFailureCopyKey } = require("../../../services/bootstrap-upload");
+
+/** Every upload copy key the screen can select, so a case can assert that
+ * exactly one of them is rendered and the other three are not. */
+const UPLOAD_KEYS: readonly string[] = [
+	"dashboardSignInCodeUploadFailed",
+	"dashboardSignInCodeUploadRefused",
+	"dashboardSignInCodeUploadTooLarge",
+	"dashboardSignInCodeUploadNotConfigured",
+];
+
+const UPLOAD_ERROR_MESSAGE_CANARY = "the sealed payload upload was refused talking to some-internal-host:9099";
+
+/** The error the mint throws when its uploader rejects: a fixed message, the
+ * shipped name, and deliberately no `cause`. */
+function uploadFailure(): Error {
+	const failure = new Error(UPLOAD_ERROR_MESSAGE_CANARY);
+	failure.name = "BootstrapUploadFailedError";
+	return failure;
+}
+
+/** The NEXT mint records its options and its call order exactly as a real one
+ * would, then throws the upload failure — so the failure path is still proven
+ * to have been handed an uploader. */
+function failNextMint(reason: string): void {
+	lastFailureReason = reason;
+	mockMint.mockImplementationOnce(async (_snapshot: unknown, options?: Record<string, unknown>) => {
+		callOrder.push("mint");
+		mintOptions.push(options ?? {});
+		throw uploadFailure();
+	});
+}
+
+function deferMint(): { resolve: (value: unknown) => void } {
+	let resolve!: (value: unknown) => void;
+	const promise = new Promise<unknown>((res) => {
+		resolve = res;
+	});
+	pendingMint = { promise, resolve };
+	return { resolve };
+}
+
+function isUploadingVisible(tr: renderer.ReactTestRenderer): boolean {
+	return tr.root.findAll((node) => node.props?.testID === "dashboard-signin-code-uploading").length > 0;
+}
 
 /** Press the first pressable whose rendered title matches `title`. */
 async function pressByTitle(tr: renderer.ReactTestRenderer, title: string): Promise<void> {
@@ -266,6 +375,10 @@ async function confirmAndGenerate(tr: renderer.ReactTestRenderer): Promise<void>
 beforeEach(() => {
 	jest.clearAllMocks();
 	callOrder.length = 0;
+	mintOptions.length = 0;
+	pendingMint = undefined;
+	uploadConfigured = true;
+	lastFailureReason = undefined;
 });
 
 afterEach(async () => {
@@ -337,7 +450,11 @@ describe("DashboardSignInCodeScreen — the export cannot be reached without a p
 		expect(mockSignerFn).toHaveBeenCalledTimes(1);
 		expect(mockExportDashboardSnapshot).toHaveBeenCalledTimes(1);
 		expect(mockMint).toHaveBeenCalledTimes(1);
-		expect(callOrder).toEqual(["createDeviceSigner", "signer-invoked", "exportDashboardSnapshot"]);
+		// The mint now pushes its own label, so the sequence is four long. The
+		// property this case has always existed to pin is unchanged and still
+		// asserted by the SAME array equality: the biometric strictly precedes
+		// the export.
+		expect(callOrder).toEqual(["createDeviceSigner", "signer-invoked", "exportDashboardSnapshot", "mint"]);
 
 		const json = JSON.stringify(tr.toJSON());
 		expect(json).toContain("abc.def");
@@ -446,5 +563,255 @@ describe("DashboardSignInCodeScreen — the export cannot be reached without a p
 		expect(mockExportDashboardSnapshot).not.toHaveBeenCalled();
 		expect(() => tr.root.findByProps({ testID: "dashboard-signin-code-confirm" })).toThrow();
 		expect(hasPressableTitled(tr, "dashboardSignInCodeGenerateButton")).toBe(true);
+	});
+});
+
+describe("the code is shown only after the service acknowledges the upload", () => {
+	it("the in-flight phase is visible while the mint is pending, and NO code is rendered yet", async () => {
+		const gate = deferMint();
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		// Mid-sequence: the officer can see something is happening, and there
+		// is nothing on screen to read out.
+		expect(isUploadingVisible(tr)).toBe(true);
+		const midFlight = JSON.stringify(tr.toJSON());
+		expect(midFlight).toContain("dashboardSignInCodeUploading");
+		expect(midFlight).not.toContain(CODE_CANARY);
+		expect(midFlight).not.toContain(SECRET_CANARY);
+		expect(hasPressableTitled(tr, "dashboardSignInCodeCopyButton")).toBe(false);
+
+		await renderer.act(async () => {
+			gate.resolve(MINTED_RECORD);
+			await Promise.resolve();
+		});
+
+		expect(isUploadingVisible(tr)).toBe(false);
+		const settled = JSON.stringify(tr.toJSON());
+		expect(settled).toContain(CODE_CANARY);
+		expect(hasPressableTitled(tr, "dashboardSignInCodeCopyButton")).toBe(true);
+		expect(callOrder).toEqual(["createDeviceSigner", "signer-invoked", "exportDashboardSnapshot", "mint"]);
+	});
+
+	it("the in-flight phase clears on the REJECT exit too — a stuck indicator is a shipped defect", async () => {
+		failNextMint("unreachable");
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		expect(isUploadingVisible(tr)).toBe(false);
+	});
+
+	it("the mint is always handed an uploader, and it is the handle's own upload member", async () => {
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		expect(mockCreateUploadHandle).toHaveBeenCalledTimes(1);
+		expect(mintOptions).toHaveLength(1);
+		expect(typeof mintOptions[0].uploader).toBe("function");
+		// Not merely "a function": the exact member of the handle this attempt
+		// created. A different function would be an uploader the screen cannot
+		// read a failure reason from.
+		expect(mintOptions[0].uploader).toBe(mockUpload);
+	});
+
+	it("even a FAILING attempt was handed an uploader — the filesystem path is never reached as a silent fallback", async () => {
+		failNextMint("refused");
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		expect(mintOptions).toHaveLength(1);
+		expect(mintOptions[0].uploader).toBe(mockUpload);
+	});
+
+	it("fails closed on a first-ever mint: no code, no secret, no copy control, no discard control", async () => {
+		failNextMint("unreachable");
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		expect(mockMint).toHaveBeenCalledTimes(1);
+		const json = JSON.stringify(tr.toJSON());
+		// Four independent negatives. A single "does not contain" can pass for
+		// the wrong reason — an empty tree, a crashed render, a renamed
+		// testID — so each affordance is asserted absent on its own terms.
+		expect(json).not.toContain(CODE_CANARY);
+		expect(json).not.toContain(SECRET_CANARY);
+		expect(hasPressableTitled(tr, "dashboardSignInCodeCopyButton")).toBe(false);
+		expect(hasPressableTitled(tr, "dashboardSignInCodeDiscardButton")).toBe(false);
+		// The paired positive control: the tree really did render, and it
+		// really is back at the idle state — so the four negatives above are
+		// facts about a live screen, not about an empty one.
+		expect(hasPressableTitled(tr, "dashboardSignInCodeGenerateButton")).toBe(true);
+		expect(json).toContain("dashboardSignInCodeIdle");
+	});
+
+	it("a failed re-mint leaves the PRIOR record intact and governing the screen, beside an upload banner", async () => {
+		// REACHABILITY NOTE, and it is load-bearing. The shipped footer renders
+		// no generate control while a live code is on screen
+		// (`screenState !== "generated"`), so "a re-mint attempted while a live
+		// code is displayed" is not reachable through this UI at all and no
+		// test can stage it without changing the render tree. What IS reachable
+		// — and what actually carries the property — is a re-mint over a prior
+		// record that is no longer live. The invariant proven here is the one
+		// that matters either way: a refused upload does not clear, replace or
+		// disturb the prior record, and the officer is told plainly that no new
+		// code was created.
+		mockRead.mockResolvedValueOnce({
+			code: "prior.code",
+			secret: "p".repeat(40),
+			digest: "code",
+			lookupId: "priorLookupIdpriorLookupIdpriorLookupIdAAA",
+			expiresAt: "2000-01-01T00:00:00",
+			mintedAt: "2000-01-01T00:00:00",
+			snapshotName: "snapshot-prior",
+		});
+
+		const tr = await renderScreen();
+		// Pre-flight: the prior record really is present and governing.
+		expect(JSON.stringify(tr.toJSON())).toContain("dashboardSignInCodeExpired");
+		expect(hasPressableTitled(tr, "dashboardSignInCodeDiscardButton")).toBe(true);
+
+		failNextMint("unreachable");
+		await confirmAndGenerate(tr);
+
+		const json = JSON.stringify(tr.toJSON());
+		// The prior record survived untouched — it is still what the screen is
+		// rendering, and its discard control is still offered.
+		expect(json).toContain("dashboardSignInCodeExpired");
+		expect(hasPressableTitled(tr, "dashboardSignInCodeDiscardButton")).toBe(true);
+		// No new code was created, and the banner is an UPLOAD one, not the
+		// generic generate failure.
+		expect(json).not.toContain(CODE_CANARY);
+		expect(json).not.toContain(SECRET_CANARY);
+		expect(json).toContain("dashboardSignInCodeUploadFailed");
+		expect(json).not.toContain("dashboardSignInCodeGenerateFailed");
+	});
+});
+
+describe("the upload copy family is disjoint from the generic generate failure", () => {
+	const REASON_CASES: ReadonlyArray<[string, string]> = [
+		["unauthorized", "dashboardSignInCodeUploadRefused"],
+		["too-large", "dashboardSignInCodeUploadTooLarge"],
+		["not-configured", "dashboardSignInCodeUploadNotConfigured"],
+		["unreachable", "dashboardSignInCodeUploadFailed"],
+	];
+
+	it("control: the four expected keys are exactly what the shipped map returns for those four reasons", () => {
+		for (const [reason, key] of REASON_CASES) {
+			expect(uploadFailureCopyKey(reason)).toBe(key);
+		}
+	});
+
+	it.each(REASON_CASES)("a %s failure renders %s and no other upload key, and never the generic key", async (reason, expectedKey) => {
+		failNextMint(reason);
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain(expectedKey);
+		expect(json).not.toContain("dashboardSignInCodeGenerateFailed");
+		for (const other of UPLOAD_KEYS.filter((key) => key !== expectedKey)) {
+			expect(json).not.toContain(other);
+		}
+	});
+
+	it("the control in the opposite direction: a failing EXPORT still renders the generic key and NO upload key", async () => {
+		const raw = new Error("dashboard-bootstrap-producer: unsupported value type in Registrant.LegalName");
+		raw.name = "SnapshotExportError";
+		mockExportDashboardSnapshot.mockRejectedValueOnce(raw);
+
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("dashboardSignInCodeGenerateFailed");
+		for (const key of UPLOAD_KEYS) {
+			expect(json).not.toContain(key);
+		}
+	});
+
+	it("an unclassified upload failure still lands on a copy key, never on an empty banner", async () => {
+		// The handle reports nothing (the mint attaches no `cause`, so there is
+		// no other source of detail). The screen must still choose a key.
+		failNextMint("unreachable");
+		lastFailureReason = undefined;
+
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		expect(JSON.stringify(tr.toJSON())).toContain("dashboardSignInCodeUploadFailed");
+	});
+});
+
+describe("one mint per confirmation, and no ceremony that cannot succeed", () => {
+	it("two presses dispatched in ONE act, with no await between them, mint exactly once", async () => {
+		deferMint();
+		const tr = await renderScreen();
+		await pressByTitle(tr, "dashboardSignInCodeGenerateButton");
+		await typeConfirmText(tr, "iConfirm");
+
+		// Both dispatches inside a single act callback with no intervening
+		// await: React has not re-rendered between them, so the rendered
+		// `disabled` prop CANNOT be what stopped the second press. Only a ref
+		// checked and set before the first await can.
+		const target = findConfirmPressable(tr);
+		await renderer.act(async () => {
+			target.props.onPress();
+			target.props.onPress();
+		});
+		await renderer.act(async () => {
+			await Promise.resolve();
+		});
+
+		expect(mockCreateDeviceSigner).toHaveBeenCalledTimes(1);
+		expect(mockMint).toHaveBeenCalledTimes(1);
+		expect(mockCreateUploadHandle).toHaveBeenCalledTimes(1);
+	});
+
+	it("an unconfigured upload target refuses BEFORE the ceremony — no biometric, no export, no mint", async () => {
+		uploadConfigured = false;
+
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+		expect(mockExportDashboardSnapshot).not.toHaveBeenCalled();
+		expect(mockMint).not.toHaveBeenCalled();
+		expect(callOrder).toEqual([]);
+		expect(JSON.stringify(tr.toJSON())).toContain("dashboardSignInCodeUploadNotConfigured");
+	});
+
+	it("the refusal leaves the screen usable: the generate control is back and not stuck disabled", async () => {
+		uploadConfigured = false;
+
+		const tr = await renderScreen();
+		await confirmAndGenerate(tr);
+
+		expect(isUploadingVisible(tr)).toBe(false);
+		const outcome = await pressByTitleHonoringDisabled(tr, "dashboardSignInCodeGenerateButton");
+		expect(outcome).toBe("pressed");
+	});
+});
+
+describe("the error CLASS discipline holds on the upload path", () => {
+	it("exactly one console.error is emitted, carrying the class and never the message", async () => {
+		const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+		try {
+			failNextMint("unauthorized");
+			const tr = await renderScreen();
+			await confirmAndGenerate(tr);
+
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			const args = errorSpy.mock.calls.flat();
+			// The paired positive control: one whole argument IS the shipped
+			// error name, so the spy is reading the right call.
+			expect(args).toContain("BootstrapUploadFailedError");
+			const haystack = args.map((arg) => String(arg)).join(" | ");
+			expect(haystack).not.toContain(UPLOAD_ERROR_MESSAGE_CANARY);
+			expect(haystack).not.toContain("some-internal-host");
+			// And nothing from the error reaches the officer's face either.
+			expect(JSON.stringify(tr.toJSON())).not.toContain("some-internal-host");
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });
