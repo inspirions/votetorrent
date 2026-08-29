@@ -34,6 +34,12 @@
 export const COPY = Object.freeze({
 	// Bootstrap and networks
 	'bootstrap.heading': 'Enter your sign-in code',
+	// The FIELD label, deliberately not the page heading. Both were
+	// `bootstrap.heading` until live UAT, so the officer read "Enter your
+	// sign-in code" twice on one screen -- once as the title and again as the
+	// label under it. A label still has to exist and stay associated with the
+	// input for screen readers; it just must not restate the title.
+	'bootstrap.codeFieldLabel': 'Sign-in code',
 	'bootstrap.cta': 'Redeem Code',
 	'bootstrap.emptyNetworksHeading': 'No networks yet',
 	'bootstrap.emptyNetworksBody':

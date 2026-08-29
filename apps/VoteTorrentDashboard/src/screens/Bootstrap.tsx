@@ -7,6 +7,7 @@ import { createRestBootstrapTransport } from '../transport/bootstrap-transport-c
 import { createSingleFlightTransport } from '../lifecycle/officer-swap.js';
 import type { SingleFlightTransport } from '../lifecycle/officer-swap.js';
 import type { IBootstrapTransport } from '@votetorrent/vote-engine/bootstrap';
+import './bootstrap.css';
 
 /** The context handed to `onAlreadyBootstrapped` when a code redeems cleanly
  * (D-05/D-13 verified) for a network this browser already holds. It carries
@@ -215,9 +216,9 @@ export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }
 
 	if (state.kind === 'ok') {
 		return (
-			<main>
-				<h1>{t('bootstrap.emptyNetworksHeading')}</h1>
-				<p>{t('bootstrap.emptyNetworksBody')}</p>
+			<main className="bs-screen">
+				<h1 className="bs-title">{t('bootstrap.emptyNetworksHeading')}</h1>
+				<p className="bs-empty-body">{t('bootstrap.emptyNetworksBody')}</p>
 				{/* 50-09 replaces this placeholder with the real network shell. */}
 			</main>
 		);
@@ -226,11 +227,12 @@ export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }
 	const errorCopy = state.kind === 'error' ? copyKeysForOutcome(state.outcome, state.reason, state.status) : undefined;
 
 	return (
-		<main>
-			<h1>{t('bootstrap.heading')}</h1>
-			<form onSubmit={handleSubmit}>
-				<label htmlFor="dashboard-signin-code">{t('bootstrap.heading')}</label>
+		<main className="bs-screen">
+			<h1 className="bs-title">{t('bootstrap.heading')}</h1>
+			<form className="bs-form" onSubmit={handleSubmit}>
+				<label className="bs-label" htmlFor="dashboard-signin-code">{t('bootstrap.codeFieldLabel')}</label>
 				<input
+					className="bs-input"
 					id="dashboard-signin-code"
 					name="dashboard-signin-code"
 					type="text"
@@ -241,19 +243,23 @@ export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }
 					onChange={(event) => setPastedCode(event.target.value)}
 					disabled={submitting}
 				/>
-				<button type="submit" disabled={submitting}>
+				<button className="bs-cta" type="submit" disabled={submitting}>
 					{t('bootstrap.cta')}
 				</button>
 			</form>
 			{/* NEVER `{state.phase}`: those are BOOTSTRAP_PHASES' machine
 			    identifiers ("applying-schema" and friends), and an aria-live
 			    region is the last place a machine identifier belongs. */}
-			{state.kind === 'in-flight' ? <p aria-live="polite">{t(`bootstrap.phase.${state.phase}`)}</p> : null}
+			{state.kind === 'in-flight' ? (
+				<p className="bs-status" aria-live="polite">
+					{t(`bootstrap.phase.${state.phase}`)}
+				</p>
+			) : null}
 			{errorCopy ? (
-				<div role="alert">
-					<h2>{t(errorCopy.headingKey)}</h2>
-					<p>{t(errorCopy.bodyKey)}</p>
-					<p>{t(errorCopy.ctaKey)}</p>
+				<div className="bs-alert" role="alert">
+					<h2 className="bs-alert-heading">{t(errorCopy.headingKey)}</h2>
+					<p className="bs-alert-body">{t(errorCopy.bodyKey)}</p>
+					<p className="bs-alert-cta">{t(errorCopy.ctaKey)}</p>
 				</div>
 			) : null}
 		</main>

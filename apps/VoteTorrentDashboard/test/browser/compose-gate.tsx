@@ -69,12 +69,13 @@
  * green run here is evidence about TEXT CONTENT and STATE, and is not evidence
  * that any screen looks right.
  *
- * Separately and specifically: `src/screens/Bootstrap.tsx` has no `className`
- * anywhere and there is no `bootstrap.css`, so the refusal copy above lands on
- * unstyled native controls. That is a real, known, adjacent defect, it is
- * explicitly out of scope for the phase that added `compose-refusal`, and NO
- * rung in this file can detect it. Do not read `compose-refusal` passing as
- * proof to the contrary.
+ * Separately and specifically: `src/screens/Bootstrap.tsx` shipped with no
+ * `className` anywhere and no `bootstrap.css`, so the refusal copy above landed
+ * on unstyled native controls -- a real, adjacent defect that survived until
+ * live UAT reported it, because NO rung in this file could detect it. It now
+ * carries both, but nothing here changed: this page still loads no stylesheet,
+ * so `compose-refusal` passing is not evidence that the screen is styled, and
+ * would not have been evidence that it was not.
  *
  * Reproduces the sibling gates' `rung()` / readout convention under ITS OWN
  * distinct names, `window.__COMPOSE_GATE__` / `window.__COMPOSE_GATE_DONE__`,
