@@ -4078,7 +4078,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@noble/ciphers@npm:^2.0.1":
+"@noble/ciphers@npm:2.2.0":
   version: 2.2.0
   resolution: "@noble/ciphers@npm:2.2.0"
   checksum: 10c0/56396fa9b2cd7863999d9d70c6cbfcc03db9644cbbac9bb9d383d18f701bee3eb09f36878d8252a763c8d1fb6f0807339e06e2d28f18b14c525133c57c14508d
@@ -6772,6 +6772,20 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@votetorrent/bootstrap-rendezvous-service@workspace:packages/bootstrap-rendezvous-service":
+  version: 0.0.0-use.local
+  resolution: "@votetorrent/bootstrap-rendezvous-service@workspace:packages/bootstrap-rendezvous-service"
+  dependencies:
+    "@types/mocha": "npm:^10.0.10"
+    "@types/node": "npm:^22.13.10"
+    "@votetorrent/vote-engine": "workspace:*"
+    chai: "npm:^5.2.0"
+    mocha: "npm:^11.5.0"
+    ts-node: "npm:^10.8.1"
+    typescript: "npm:^5.6.3"
+  languageName: unknown
+  linkType: soft
+
 "@votetorrent/vote-core@npm:^0.0.1, @votetorrent/vote-core@workspace:*, @votetorrent/vote-core@workspace:packages/vote-core":
   version: 0.0.0-use.local
   resolution: "@votetorrent/vote-core@workspace:packages/vote-core"
@@ -6790,6 +6804,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@votetorrent/vote-engine@workspace:packages/vote-engine"
   dependencies:
+    "@noble/ciphers": "npm:2.2.0"
     "@noble/curves": "npm:2.2.0"
     "@noble/hashes": "npm:2.2.0"
     "@optimystic/quereus-plugin-crypto": "npm:^0.24.2"
@@ -21723,6 +21738,7 @@ __metadata:
     "@libp2p/websockets": "npm:^10"
     "@multiformats/multiaddr": "npm:^13.0.1"
     "@multiformats/multiaddr-v12": "npm:@multiformats/multiaddr@12.5.1"
+    "@noble/ciphers": "npm:^2"
     "@noble/curves": "npm:^2"
     "@noble/hashes": "npm:^2"
     "@optimystic/db-core": "npm:^0.24.2"
@@ -21789,6 +21805,8 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "votetorrent-dashboard@workspace:apps/VoteTorrentDashboard"
   dependencies:
+    "@noble/ciphers": "npm:^2"
+    "@noble/hashes": "npm:^2"
     "@optimystic/quereus-plugin-crypto": "npm:^0.24.2"
     "@quereus/isolation": "npm:4.14.0"
     "@quereus/plugin-indexeddb": "npm:4.14.0"

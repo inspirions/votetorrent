@@ -19,6 +19,8 @@
 		"clean": "rm -rf dist node_modules"
 	},
 	"dependencies": {
+		"@noble/ciphers": "^2",
+		"@noble/hashes": "^2",
 		"@optimystic/quereus-plugin-crypto": "^0.24.2",
 		"@quereus/isolation": "4.14.0",
 		"@quereus/plugin-indexeddb": "4.14.0",
