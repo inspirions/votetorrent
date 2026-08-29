@@ -22,7 +22,14 @@ import path from "path";
 // app, so the FIRST test in this file pays the whole module-graph cost — see
 // phase48Routes.test.tsx's identical comment; the render breadth *is* the
 // proof, so raise the timeout rather than shortening the render.
-jest.setTimeout(30_000);
+//
+// 2026-08-29 re-measurement (Phase 51 Nyquist audit): 30_000 was still
+// insufficient — a `yarn jest --clearCache && yarn jest` full run clocked
+// this file at 32.817s (cold), while solo cold (no other worker contention)
+// it took 23.235s. Root cause is parallel-worker CPU contention across ~98
+// suites cold-transforming Babel simultaneously, not a hang — isolated cold
+// time is stable. Raised again, with headroom above the observed worst case.
+jest.setTimeout(60_000);
 
 jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
 

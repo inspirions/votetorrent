@@ -27,6 +27,21 @@
 import React from "react";
 import renderer from "react-test-renderer";
 
+// 2026-08-29 (Phase 51 Nyquist audit): this file has no jest.mock of the
+// heavy engine seam, but "peer card renders below both proven bindings,
+// always" still exercises the same real-render machinery as the navigation
+// route suites (see e.g. phase47Routes.test.tsx's identical note). Solo cold
+// (clean --clearCache, no other worker contention) the whole 39-test file
+// takes 3.679s — comfortably inside Jest's 5s default. Under a full
+// `yarn jest --clearCache && yarn jest` run (98 suites, ~10-core host, all
+// cold-transforming Babel at once), this specific test exceeded the 5s
+// default. Root cause is parallel-worker CPU contention, not a hang or a
+// regression in the screen itself — isolated cold time is stable and an
+// order of magnitude under budget. Raised explicitly, matching the
+// navigation-suite convention, rather than relying on the un-stated 5s
+// default.
+jest.setTimeout(30_000);
+
 // ---------------------------------------------------------------------------
 // Mutable module-level slots. Prefixed `mock` so babel-plugin-jest-hoist allows the jest.mock()
 // factories below to close over them despite being declared outside the factory's own scope.
