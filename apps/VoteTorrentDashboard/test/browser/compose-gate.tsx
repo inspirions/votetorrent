@@ -51,6 +51,31 @@
  * inertness control, proving this rung can discriminate rather than
  * passing regardless of what the database actually answered.
  *
+ * `compose-refusal` (52-12 / D-25) drives THREE real submissions -- one per
+ * redemption status the service can refuse with (`unknown`, `used`,
+ * `expired`) -- through the REAL `Bootstrap` form in ONE page load, and
+ * measures the `[role="alert"]` each one rendered. It asserts every observed
+ * heading and body against `t()` of that status's copy key, never a literal,
+ * then compares the three CROSS-status: two families that converged would pass
+ * every per-status rung and fail only here. `&conflate=1` drives the SAME
+ * status three times so that distinctness rung MUST fail, which is what
+ * `run-headless.mjs --prove-conflated` inverts around -- an always-green rung
+ * proves nothing.
+ *
+ * WHAT THIS TIER CANNOT SEE -- READ BEFORE QUOTING A GREEN RUN AS EVIDENCE:
+ * `compose-gate.html` loads NO stylesheet. It has no `app.css` link, so every
+ * `var(--...)` in this app resolves to the empty string and this gate is blind
+ * to ALL styling: colour, spacing, layout, focus rings, contrast, the lot. A
+ * green run here is evidence about TEXT CONTENT and STATE, and is not evidence
+ * that any screen looks right.
+ *
+ * Separately and specifically: `src/screens/Bootstrap.tsx` has no `className`
+ * anywhere and there is no `bootstrap.css`, so the refusal copy above lands on
+ * unstyled native controls. That is a real, known, adjacent defect, it is
+ * explicitly out of scope for the phase that added `compose-refusal`, and NO
+ * rung in this file can detect it. Do not read `compose-refusal` passing as
+ * proof to the contrary.
+ *
  * Reproduces the sibling gates' `rung()` / readout convention under ITS OWN
  * distinct names, `window.__COMPOSE_GATE__` / `window.__COMPOSE_GATE_DONE__`,
  * so this gate can never be confused with the others. Every step renders
@@ -65,7 +90,7 @@ import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import type { IBootstrapTransport, SnapshotRow, SnapshotTables } from '@votetorrent/vote-engine/bootstrap';
-import { redeemAndBootstrap } from '../../src/lifecycle/bootstrap.js';
+import { BOOTSTRAP_OUTCOME_CODES, redeemAndBootstrap } from '../../src/lifecycle/bootstrap.js';
 import { deleteNetworkDb } from '../../src/db/open-db.js';
 import { findNetwork, listNetworks, removeNetwork, upsertNetwork } from '../../src/db/networks-registry.js';
 import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
@@ -102,6 +127,25 @@ const SECRET_SWAP = 'f'.repeat(40);
 /** Distinct from `SECRET_SWAP` -- the cancel rung's own code is never redeemed twice, and must never be confused with the confirmed swap's. */
 const SECRET_CANCEL = 'c'.repeat(40);
 
+// --- compose-refusal (52-12 / D-25): three refusal statuses driven through the
+// REAL Bootstrap form in ONE page load. Three DISTINCT secrets, one per
+// status, following this file's rule that no two legs (and here, no two rungs)
+// share a secret: `makeFakeTransport` is single-use by default, so a shared
+// secret would turn the second rung's intended status into `used` and quietly
+// manufacture a passing distinctness check out of a broken one. ---
+/** `unknown` -- the service holds no record under this code. */
+const SECRET_REFUSE_UNKNOWN = '1'.repeat(40);
+/** `used` -- the record exists and its single use is spent. */
+const SECRET_REFUSE_USED = '2'.repeat(40);
+/** `expired` -- the record exists, its span has passed. */
+const SECRET_REFUSE_EXPIRED = '3'.repeat(40);
+/** `&conflate=1`'s three codes: three DISTINCT secrets all mapped to the SAME
+ * status, so the inversion changes only the INPUT -- never the product code and
+ * never an assertion -- and `singleUse` cannot interfere. */
+const SECRET_CONFLATE_A = '4'.repeat(40);
+const SECRET_CONFLATE_B = '5'.repeat(40);
+const SECRET_CONFLATE_C = '6'.repeat(40);
+
 const LOG: Array<{ t: string; ms: number; category: string; message: string }> = [];
 const t0 = performance.now();
 function log(category: string, message: string) {
@@ -111,6 +155,10 @@ function log(category: string, message: string) {
 const params = new URLSearchParams(location.search);
 const PHASE = params.get('phase') ?? 'compose-seed';
 const OFFICER_NONE = params.get('officer') === 'none';
+/** `&conflate=1` (52-12): drive the SAME status three times, so the
+ * distinctness rung MUST fail. `run-headless.mjs --prove-conflated` inverts the
+ * verdict around it -- an always-green distinctness rung is itself a failure. */
+const CONFLATE = params.get('conflate') === '1';
 
 const stepsEl = document.getElementById('steps');
 const steps: Array<{ name: string; el: HTMLElement; ok: boolean }> = [];
@@ -1679,6 +1727,240 @@ async function runComposeGuards() {
 	win.__COMPOSE_GATE_DONE__ = true;
 }
 
+// ===========================================================================
+// compose-refusal (52-12 / D-25): three real refusals, one page load.
+//
+// WHY ONE PAGE LOAD AND NOT THREE: a per-status rung passes even when two
+// copy families are accidentally identical. Only a CROSS-status comparison can
+// see convergence, and that needs all three observations in one place.
+//
+// WHAT IS REAL HERE: the REAL `Bootstrap` component, the REAL form, the REAL
+// `redeemAndBootstrap` -> `copyKeysForOutcome` -> `t()` path. Nothing about the
+// copy lookup is re-implemented by the harness; every expected string is
+// resolved through the frozen copy table's own `t()`, never a literal, so this
+// leg measures WIRING and RENDERING, not the harness's own opinion of the copy.
+// ===========================================================================
+
+/**
+ * The status each of this leg's three codes is answered with, and the exact
+ * text its alert must carry.
+ *
+ * EVERY expectation is resolved through the frozen copy table's own `t()`,
+ * by literal key, at this one place -- never a copied string literal. A copy
+ * change therefore moves the expectation with it; a WIRING change (the wrong
+ * family selected for a status) still fails, which is the defect this leg
+ * exists to catch.
+ *
+ * `&conflate=1` rewrites the STATUSES only -- never the product code and never
+ * an assertion.
+ */
+function refusalPlan(): ReadonlyArray<{ secret: string; status: 'unknown' | 'used' | 'expired'; expectedHeading: string; expectedBody: string }> {
+	const timedOut = {
+		status: 'expired' as const,
+		expectedHeading: t('bootstrap.errorCodeTimedOutHeading'),
+		expectedBody: t('bootstrap.errorCodeTimedOutBody'),
+	};
+	if (CONFLATE) {
+		// The inertness inversion: the SAME status three times, on three
+		// distinct secrets so `singleUse` cannot interfere. Rungs 3-5 then
+		// assert only that an alert rendered, leaving rung 6 to fail on three
+		// identical observations.
+		return [
+			{ secret: SECRET_CONFLATE_A, ...timedOut },
+			{ secret: SECRET_CONFLATE_B, ...timedOut },
+			{ secret: SECRET_CONFLATE_C, ...timedOut },
+		];
+	}
+	return [
+		{
+			secret: SECRET_REFUSE_UNKNOWN,
+			status: 'unknown',
+			expectedHeading: t('bootstrap.errorCodeNotRecognizedHeading'),
+			expectedBody: t('bootstrap.errorCodeNotRecognizedBody'),
+		},
+		{
+			secret: SECRET_REFUSE_USED,
+			status: 'used',
+			expectedHeading: t('bootstrap.errorCodeAlreadyUsedHeading'),
+			expectedBody: t('bootstrap.errorCodeAlreadyUsedBody'),
+		},
+		{ secret: SECRET_REFUSE_EXPIRED, ...timedOut },
+	];
+}
+
+async function runComposeRefusal() {
+	// The digest half comes from a REAL envelope, so every pasted code
+	// satisfies SIGNIN_CODE_PATTERN and reaches the transport. A locally
+	// malformed code would exercise INVALID_CODE_KEYS instead and prove nothing
+	// whatsoever about the three refusal families.
+	const envelope = composeEnvelope();
+	const plan = refusalPlan();
+
+	await rung('1 · clean slate: clear EVERY registry entry, so no sibling phase\'s network can route a submission elsewhere', async () => {
+		for (const entry of listNetworks(localStorage)) {
+			removeNetwork(entry.networkHash, localStorage);
+		}
+		return `entries remaining: ${listNetworks(localStorage).length}`;
+	});
+
+	// ONE transport holding all three codes: a refusal never marks a secret
+	// spent (`makeFakeTransport`'s `spent` set is only written for `ok`), and
+	// the three secrets are distinct anyway.
+	const refusalTransport = makeFakeTransport({
+		codeToResult: Object.fromEntries(plan.map((leg) => [leg.secret, { status: leg.status }])),
+	});
+	activeFakeTransport = refusalTransport;
+
+	const container = document.getElementById('root');
+	if (!container) {
+		await rung('2 · cannot mount', async () => {
+			throw new Error('compose-gate.html is missing #root');
+		});
+		win.__COMPOSE_GATE__ = { phase: PHASE, passed: steps.filter((s) => s.ok).length, total: steps.length, log: LOG };
+		win.__COMPOSE_GATE_DONE__ = true;
+		return;
+	}
+
+	const root = createRoot(container);
+	const mounted = await rung('2 · mount the REAL Bootstrap screen alone (no DashboardShell -- a refusal never commits a network) and confirm the code input rendered', async () => {
+		root.render(
+			<StrictMode>
+				<Bootstrap createTransport={harnessCreateTransport} />
+			</StrictMode>,
+		);
+		const input = await waitForElement<HTMLInputElement>('#dashboard-signin-code', 180);
+		return `input present: ${input.id}`;
+	});
+
+	/** Observations collected across rungs 3-5, compared cross-status in 6-7. */
+	const observed: Array<{ status: string; heading: string; body: string }> = [];
+
+	/**
+	 * Drive ONE code through the real form and read back what the alert
+	 * actually rendered.
+	 *
+	 * THE STALE-ALERT TRAP, and why the wait below is explicit: the alert from
+	 * the PREVIOUS submission is still in the DOM when the next one starts. A
+	 * naive `waitForElement('[role="alert"]')` would resolve instantly against
+	 * it and report the previous rung's text as this rung's -- three rungs all
+	 * "passing" while measuring one submission. That is precisely how a
+	 * three-status distinctness check goes silently inert, so this waits for
+	 * the old alert to CLEAR first (the screen drops it on the in-flight
+	 * re-render) and only then for a new one to appear. Bounded rAF polls
+	 * throughout -- never a fixed sleep.
+	 */
+	async function driveRefusal(secret: string): Promise<{ heading: string; body: string }> {
+		const previousAlert = document.querySelector('[role="alert"]');
+		const input = await waitForElement<HTMLInputElement>('#dashboard-signin-code', 180);
+		typeIntoCodeInput(input, `${secret}.${envelope.digest}`);
+		const form = input.closest('form');
+		if (!form) throw new Error('bootstrap form not found');
+		form.requestSubmit();
+
+		if (previousAlert) {
+			await waitUntil(
+				() => !document.contains(previousAlert),
+				300,
+				'the previous submission\'s alert to clear before reading the next one',
+			);
+		}
+		// A submission that renders NO alert within the bounded poll fails the
+		// rung -- an absent element is never a pass.
+		const alert = await waitForElement<HTMLElement>('[role="alert"]', 300);
+		const heading = alert.querySelector('h2')?.textContent ?? '';
+		const body = alert.querySelector('p')?.textContent ?? '';
+		if (heading.length === 0 || body.length === 0) {
+			throw new Error(`the alert rendered with an empty heading (${JSON.stringify(heading)}) or body (${JSON.stringify(body)})`);
+		}
+		return { heading, body };
+	}
+
+	for (const [index, leg] of plan.entries()) {
+		const rungNumber = index + 3;
+		// eslint-disable-next-line no-await-in-loop -- the three submissions are strictly sequential through ONE form
+		await rung(
+			`${rungNumber} · drive the "${leg.status}" code through the REAL Bootstrap form and read the rendered alert`,
+			async () => {
+				if (!mounted.ok) throw new Error('the screen never mounted -- nothing to drive');
+				const { heading, body } = await driveRefusal(leg.secret);
+				observed.push({ status: leg.status, heading, body });
+				if (CONFLATE) {
+					// The inversion asserts only that an alert rendered. Leaving
+					// the copy assertion in would fail HERE rather than at the
+					// distinctness rung, and would prove nothing about whether
+					// that rung can discriminate.
+					return `alert observed (conflate mode): ${heading}`;
+				}
+				if (heading !== leg.expectedHeading) {
+					throw new Error(`the "${leg.status}" alert rendered the heading "${heading}", expected the copy table's own "${leg.expectedHeading}"`);
+				}
+				if (body !== leg.expectedBody) {
+					throw new Error(`the "${leg.status}" alert rendered the body "${body}", expected the copy table's own "${leg.expectedBody}"`);
+				}
+				return heading;
+			},
+		);
+	}
+
+	await rung(
+		'6 · DISTINCTNESS across all three: no two statuses rendered the same heading, and no two rendered the same body',
+		async () => {
+			if (observed.length !== 3) {
+				throw new Error(`expected 3 observations, collected ${observed.length} -- an earlier rung did not produce an alert`);
+			}
+			for (const field of ['heading', 'body'] as const) {
+				const seen = new Map<string, string>();
+				for (const entry of observed) {
+					const value = entry[field];
+					const collidedWith = seen.get(value);
+					if (collidedWith !== undefined) {
+						throw new Error(
+							`the "${collidedWith}" and "${entry.status}" refusals rendered the SAME ${field}: "${value}" -- an officer cannot tell the two conditions apart`,
+						);
+					}
+					seen.set(value, entry.status);
+				}
+				if (seen.size !== 3) {
+					throw new Error(`expected 3 distinct ${field}s, observed ${seen.size}`);
+				}
+			}
+			return `3 distinct headings, 3 distinct bodies`;
+		},
+	);
+
+	await rung(
+		'7 · no machine identifier reached the DOM -- asserted on what the browser actually PAINTED, not on what the copy table holds',
+		async () => {
+			// Derived, never hand-typed: every outcome code (all hyphenated, so
+			// no false positives) plus the three refusal statuses. `'ok'` is
+			// excluded -- a two-letter substring match fires on ordinary prose.
+			const forbidden = [...BOOTSTRAP_OUTCOME_CODES.filter((code) => code !== 'ok'), 'unknown', 'expired', 'used'];
+			const fixture = 'the service answered unknown';
+			if (!forbidden.some((token) => fixture.includes(token))) {
+				throw new Error('matcher is inert -- the positive-control fixture did not trip it');
+			}
+			for (const entry of observed) {
+				for (const value of [entry.heading, entry.body]) {
+					for (const token of forbidden) {
+						if (value.toLowerCase().includes(token)) {
+							throw new Error(`the "${entry.status}" alert painted the machine identifier "${token}": "${value}"`);
+						}
+					}
+				}
+			}
+			return `${observed.length * 2} rendered strings, none carrying a machine identifier`;
+		},
+	);
+
+	win.__COMPOSE_GATE__ = {
+		phase: PHASE,
+		passed: steps.filter((s) => s.ok).length,
+		total: steps.length,
+		log: LOG,
+	};
+	win.__COMPOSE_GATE_DONE__ = true;
+}
+
 async function main() {
 	log('start', `compose-gate phase=${PHASE} officer=${OFFICER_NONE ? 'none' : 'real'}`);
 	if (PHASE === 'compose-seed') {
@@ -1691,6 +1973,8 @@ async function main() {
 		await runComposePreviewRace();
 	} else if (PHASE === 'compose-guards') {
 		await runComposeGuards();
+	} else if (PHASE === 'compose-refusal') {
+		await runComposeRefusal();
 	} else {
 		throw new Error(`compose-gate: unknown phase "${PHASE}"`);
 	}

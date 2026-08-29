@@ -519,6 +519,10 @@ function buildFixtureEnvelopeForSecondNetwork() {
 // copyKeysForOutcome totality
 // ---------------------------------------------------------------------------
 
+/** The three non-`ok` members of the closed redemption-status vocabulary --
+ * the statuses `copyKeysForOutcome`'s `'code-refused'` arm is total over. */
+const ALL_REFUSAL_STATUSES = /** @type {const} */ (['unknown', 'used', 'expired']);
+
 const ALL_VERIFY_REASONS = /** @type {const} */ ([
 	'malformed-envelope',
 	'format-version-mismatch',
@@ -538,6 +542,21 @@ test('copyKeysForOutcome: total over every non-"ok" outcome and every verify-fai
 				assert.doesNotThrow(() => t(keys.headingKey));
 				assert.doesNotThrow(() => t(keys.bodyKey));
 				assert.doesNotThrow(() => t(keys.ctaKey));
+			}
+			continue;
+		}
+		if (outcome === 'code-refused') {
+			// D-25: this outcome is the only one that carries a redemption
+			// status, and it now REQUIRES one -- calling it bare throws by
+			// design (pinned in `copy.test.mjs`, where the refusal-family
+			// distinctness and machine-identifier assertions also live; they
+			// are deliberately not duplicated here). Totality for this arm
+			// means every non-`ok` status resolves.
+			for (const status of ALL_REFUSAL_STATUSES) {
+				const keys = copyKeysForOutcome(outcome, undefined, status);
+				assert.doesNotThrow(() => t(keys.headingKey), `code-refused/${status} heading`);
+				assert.doesNotThrow(() => t(keys.bodyKey), `code-refused/${status} body`);
+				assert.doesNotThrow(() => t(keys.ctaKey), `code-refused/${status} cta`);
 			}
 			continue;
 		}

@@ -57,7 +57,15 @@ const BOOTSTRAP_BASE_URL = window.location.origin;
 type ScreenState =
 	| { kind: 'idle' }
 	| { kind: 'in-flight'; phase: string }
-	| { kind: 'error'; outcome: string; reason?: string }
+	// `status` is the redemption status the SERVICE answered, and it is present
+	// only for `outcome: 'code-refused'` -- the one member of
+	// `RedeemAndBootstrapResult` that carries one. It is LOAD-BEARING, not
+	// decorative: `copyKeysForOutcome` selects one of three distinct refusal
+	// families from it and THROWS if a `code-refused` arrives without it,
+	// rather than degrading to the generic invalid-code copy. Dropping this
+	// field is how an officer stops being able to tell a typo from a spent code
+	// from a stale one.
+	| { kind: 'error'; outcome: string; reason?: string; status?: string }
 	| { kind: 'ok' };
 
 export interface BootstrapProps {
@@ -184,6 +192,11 @@ export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }
 				kind: 'error',
 				outcome: result.outcome,
 				reason: 'reason' in result ? result.reason : undefined,
+				// Read defensively, exactly as `reason` above is -- an `in`-guard
+				// on the discriminated union, never a cast. Only `code-refused`
+				// carries a status; every other outcome leaves it undefined,
+				// which is what `copyKeysForOutcome` expects of them.
+				status: 'status' in result ? result.status : undefined,
 			});
 		} catch (err) {
 			// `redeemAndBootstrap` returns an outcome for every EXPECTED
@@ -210,7 +223,7 @@ export function Bootstrap({ onComplete, onAlreadyBootstrapped, createTransport }
 		);
 	}
 
-	const errorCopy = state.kind === 'error' ? copyKeysForOutcome(state.outcome, state.reason) : undefined;
+	const errorCopy = state.kind === 'error' ? copyKeysForOutcome(state.outcome, state.reason, state.status) : undefined;
 
 	return (
 		<main>

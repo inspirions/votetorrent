@@ -56,6 +56,23 @@
  * a fix, run this, watch the named rung go red). Returns before the tier-2
  * db-gate/shell-gate phases below, exactly like every other flag above.
  *
+ * `--refusal-only` (52-12 / D-25): runs ONLY `compose-gate.tsx`'s
+ * compose-refusal phase -- a SINGLE page load that drives three real
+ * submissions (one per redemption status the service can refuse with) through
+ * the REAL Bootstrap form and fails if any two rendered the same heading or the
+ * same body. It clears the registry itself, so it needs no companion seed page.
+ * Returns before the tier-2 db-gate/shell-gate phases below, exactly like every
+ * other flag above.
+ *
+ * `--prove-conflated` (52-12): compose-refusal's own inertness control, in the
+ * same shape as `--prove-trap` and `--prove-blank`. Runs the SAME single page
+ * with `&conflate=1`, which drives the SAME status three times -- changing the
+ * INPUT only, never the product code and never an assertion -- and INVERTS the
+ * expectation: the distinctness rung MUST fail. If it passes, that rung cannot
+ * tell three refusal families apart from one repeated three times, which would
+ * make the whole D-25 leg decorative, and this script exits non-zero with an
+ * explicit "is inert" message.
+ *
  * `import { chromium } from 'playwright'` — the FULL package, never the
  * lighter core-only sibling package, and never a hardcoded system-Chrome
  * binary path option (Pitfall 6: the spikes' macOS path does not exist on
@@ -77,6 +94,8 @@ const PROVE_DRIFT = process.argv.includes('--prove-drift');
 const PROVE_BLANK = process.argv.includes('--prove-blank');
 const SWAP_ONLY = process.argv.includes('--swap-only');
 const GUARDS_ONLY = process.argv.includes('--guards-only');
+const REFUSAL_ONLY = process.argv.includes('--refusal-only');
+const PROVE_CONFLATED = process.argv.includes('--prove-conflated');
 
 /** @returns {Promise<import('node:child_process').ChildProcess>} */
 async function startViteDevServer() {
@@ -658,6 +677,57 @@ async function runGuardsOnly(ctx) {
 	process.exitCode = guardsOk ? 0 : 1;
 }
 
+/**
+ * `--refusal-only` (52-12 / D-25): a SINGLE page load. compose-refusal clears
+ * the registry itself and commits no network, so unlike `--swap-only` it needs
+ * no companion seed page -- see this file's header note.
+ *
+ * @param {import('playwright').BrowserContext} ctx
+ */
+async function runRefusalOnly(ctx) {
+	const page1 = await ctx.newPage();
+	const refusalRes = await runOnComposeGatePage(
+		page1,
+		`${BASE}/test/browser/compose-gate.html?phase=compose-refusal`,
+		'REFUSAL-ONLY PAGE 1 — compose-refusal (D-25: three real refusals, one page load, distinctness measured on rendered DOM text)',
+	);
+	const refusalOk = refusalRes && !refusalRes.crashed && refusalRes.passed === refusalRes.total;
+
+	console.log(`\nCOMPOSE GATE --refusal-only: ${refusalOk ? 'PASS' : 'FAIL'} (rungs: ${refusalRes?.passed}/${refusalRes?.total})`);
+	process.exitCode = refusalOk ? 0 : 1;
+}
+
+/**
+ * `--prove-conflated` (52-12): compose-refusal's inertness control, modelled on
+ * `runProveBlank` above. ONE page, `&conflate=1`, INVERTED verdict.
+ *
+ * @param {import('playwright').BrowserContext} ctx
+ */
+async function runProveConflated(ctx) {
+	const page1 = await ctx.newPage();
+	const refusalRes = await runOnComposeGatePage(
+		page1,
+		`${BASE}/test/browser/compose-gate.html?phase=compose-refusal&conflate=1`,
+		'PROVE-CONFLATED PAGE 1 — compose-refusal&conflate=1 (the SAME status driven three times)',
+	);
+	const underlyingRunPassed = refusalRes && !refusalRes.crashed && refusalRes.passed === refusalRes.total;
+
+	// INVERTED: three identical refusals must FAIL the distinctness rung. If
+	// they passed, that rung cannot tell three distinct copy families from one
+	// repeated three times -- the D-25 leg would be decorative.
+	if (underlyingRunPassed) {
+		console.log(
+			'\nCOMPOSE GATE --prove-conflated: FAIL — the distinctness rung is inert: the SAME refusal status driven three times still reported three distinct families, so this rung cannot detect a conflated copy table',
+		);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(
+		`\nCOMPOSE GATE --prove-conflated: PASS — the conflated run genuinely FAILED the distinctness rung (rungs: ${refusalRes?.passed}/${refusalRes?.total})`,
+	);
+	process.exitCode = 0;
+}
+
 async function main() {
 	const viteChild = await startViteDevServer();
 	let browser;
@@ -684,6 +754,19 @@ async function main() {
 		// CR-02 / WR-10 fixes were each validated against, in both directions.
 		if (GUARDS_ONLY) {
 			return await runGuardsOnly(ctx);
+		}
+
+		// --refusal-only runs ONLY the compose-refusal page and returns here --
+		// see this file's header note. A single page load; it clears the
+		// registry itself and commits no network.
+		if (REFUSAL_ONLY) {
+			return await runRefusalOnly(ctx);
+		}
+
+		// --prove-conflated runs ONLY the conflated compose-refusal page and
+		// returns here, with an INVERTED verdict -- see this file's header note.
+		if (PROVE_CONFLATED) {
+			return await runProveConflated(ctx);
 		}
 
 		// --tier3 / --prove-drift run ONLY the tier-3 flow and return here --
@@ -886,11 +969,13 @@ async function main() {
 
 		// ---------------------------------------------------------------
 		// Gap-closure round 3: the compose-guards leg. ONE more fresh page
-		// load, its own ctx.newPage() call, LAST in the default run so no
-		// existing phase number changes -- eleven page loads total. It seeds
-		// BOTH of its own networks and clears the registry first (it depends
-		// on no earlier phase), and it must run last because it ends
-		// destructively, forgetting one of its own two networks on purpose.
+		// load, its own ctx.newPage() call, appended in the default run so no
+		// existing phase number changes. It seeds BOTH of its own networks and
+		// clears the registry first (it depends on no earlier phase), and it
+		// ends DESTRUCTIVELY, forgetting one of its own two networks on
+		// purpose -- so only a phase that likewise depends on no earlier one
+		// may follow it. PHASE 12 (compose-refusal) satisfies that: it clears
+		// the registry itself and commits nothing.
 		// Owns CR-01 (a stale swapError blanking a DIFFERENT, healthy
 		// network), CR-02 (a double-click genuinely redeeming a single-use
 		// code twice) and WR-10 (the same missing guard on the forget path).
@@ -907,6 +992,26 @@ async function main() {
 		console.log('\n--- cross-phase (compose-guards) ---');
 		console.log('compose-guards:', `${guardsRes?.passed}/${guardsRes?.total}`);
 
+		// ---------------------------------------------------------------
+		// 52-12 extension: the refusal-copy leg (D-25). ONE more fresh page
+		// load, its own ctx.newPage() call, LAST in the default run so no
+		// existing phase number changes -- twelve page loads total. It clears
+		// the registry itself and commits nothing, so it depends on no earlier
+		// phase and leaves nothing behind. Drives three real refusals through
+		// the real Bootstrap form and fails if any two rendered the same text.
+		// ---------------------------------------------------------------
+
+		const page12 = await ctx.newPage();
+		const refusalRes = await runOnComposeGatePage(
+			page12,
+			`${BASE}/test/browser/compose-gate.html?phase=compose-refusal`,
+			'PHASE 12 — composed shell: compose-refusal (D-25 -- three distinct refusal families, measured on rendered DOM text)',
+		);
+		const refusalOk = refusalRes && !refusalRes.crashed && refusalRes.passed === refusalRes.total;
+
+		console.log('\n--- cross-phase (compose-refusal) ---');
+		console.log('compose-refusal:', `${refusalRes?.passed}/${refusalRes?.total}`);
+
 		console.log('\n=== SUMMARY ===');
 		console.log('db-gate leg (D-11 re-attach):', dbGateOk ? 'PASS' : 'FAIL');
 		console.log('shell-gate leg (restored snapshot + forget network):', forgetVerifyOk ? 'PASS' : 'FAIL');
@@ -914,19 +1019,22 @@ async function main() {
 		console.log('compose-swap leg (D-14 officer-swap confirm + cancel):', composeSwapOk ? 'PASS' : 'FAIL');
 		console.log('compose-preview-race leg (CR-01, the preview control during an in-flight attach):', previewRaceOk ? 'PASS' : 'FAIL');
 		console.log('compose-guards leg (stale swapError across networks, double-confirm, double-forget):', guardsOk ? 'PASS' : 'FAIL');
+		console.log('compose-refusal leg (D-25 refusal-copy distinctness, measured on rendered DOM text):', refusalOk ? 'PASS' : 'FAIL');
 
-		const allOk = dbGateOk && forgetVerifyOk && composeVerifyOk && composeSwapOk && previewRaceOk && guardsOk;
+		const allOk = dbGateOk && forgetVerifyOk && composeVerifyOk && composeSwapOk && previewRaceOk && guardsOk && refusalOk;
 		return finishRun(
 			allOk,
 			allOk
-				? 'all eleven phases passed'
-				: !guardsOk
-					? 'compose-guards phase failed'
-					: !previewRaceOk
-						? 'compose-preview-race phase failed'
-						: !composeSwapOk
-							? 'compose-swap phase failed'
-							: 'compose-gate phase failed',
+				? 'all twelve phases passed'
+				: !refusalOk
+					? 'compose-refusal phase failed'
+					: !guardsOk
+						? 'compose-guards phase failed'
+						: !previewRaceOk
+							? 'compose-preview-race phase failed'
+							: !composeSwapOk
+								? 'compose-swap phase failed'
+								: 'compose-gate phase failed',
 			PROVE_TRAP,
 		);
 	} finally {

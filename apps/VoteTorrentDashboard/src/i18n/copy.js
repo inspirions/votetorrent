@@ -39,9 +39,55 @@ export const COPY = Object.freeze({
 	'bootstrap.emptyNetworksBody':
 		"Redeem a sign-in code from the authority app to bring this browser's copy of a network's data up to date.",
 	'bootstrap.errorInvalidCodeHeading': "That code isn't valid.",
+	// NARROWED to the case it now actually covers: a pasted string that failed
+	// the local shape check and NEVER LEFT THIS BROWSER. Its old value hedged
+	// across staleness and prior redemption, so it answered three service
+	// refusals as well -- and was a wrong answer for all four; see the
+	// refusal-family comment below. A code that was never sent to anything
+	// cannot have been spent or gone stale, so the only honest next action here
+	// is a local one.
 	'bootstrap.errorInvalidCodeBody':
-		'It may have expired or already been used. Ask the officer for a new one.',
+		'A sign-in code is two parts joined by a dot. Copy the whole code from the authority app and paste it again.',
 	'bootstrap.errorInvalidCodeCta': 'Try another code',
+	// --- The three refusal families ---------------------------------------
+	//
+	// WHAT DEFECT THIS CLOSES: one hedging sentence was the dashboard's answer
+	// to three different service refusals AND to a locally malformed paste. An
+	// officer reading it could not tell a typo from a code whose single use was
+	// already spent from one that simply sat too long, and the single action it
+	// offered -- ask for a new code -- is the wrong instruction for the first
+	// of those.
+	//
+	// WHY THIS PRECISION IS AVAILABLE AT ALL -- READ THIS BEFORE SHORTENING THE
+	// SERVICE'S RETENTION WINDOW: the rendezvous service erases a code's
+	// ciphertext as soon as it is served, but deliberately KEEPS the
+	// payload-free record for a grace window past the code's expiry. That
+	// retention is the only reason a late redemption is still answered
+	// precisely ("already redeemed" / "timed out") instead of collapsing to the
+	// weakest answer, "no record here". These three keys are what that
+	// retention buys. Shorten the window and this file quietly regresses to one
+	// hedge for every refusal -- the exact defect above -- with no test to
+	// notice, because each key would still resolve.
+	//
+	// WHY THE WORDS ARE WHAT THEY ARE: the refusal copy is walked by a test
+	// (`test/node/copy.test.mjs`) that forbids any machine identifier -- every
+	// outcome code, plus the literal status values a service can answer -- from
+	// appearing in a string an officer reads. That is why this says "not
+	// recognized", "timed out" and "already been redeemed" rather than echoing
+	// the wire vocabulary. "Redeemed" also matches `bootstrap.cta`.
+	//
+	// All three families reuse `bootstrap.errorInvalidCodeCta` as their action
+	// button; a fourth key with an identical value would buy no locale
+	// flexibility and add a drift surface.
+	'bootstrap.errorCodeNotRecognizedHeading': "That code isn't recognized.",
+	'bootstrap.errorCodeNotRecognizedBody':
+		'Check what you pasted for a typo first — a mistyped code looks exactly like this. If it matches the authority app character for character, ask the officer to generate a new code.',
+	'bootstrap.errorCodeAlreadyUsedHeading': 'That code has already been redeemed.',
+	'bootstrap.errorCodeAlreadyUsedBody':
+		'Each sign-in code works only once, so retrying this one will never succeed. Ask the officer to generate a fresh code in the authority app.',
+	'bootstrap.errorCodeTimedOutHeading': 'That code timed out.',
+	'bootstrap.errorCodeTimedOutBody':
+		'Sign-in codes stop working a few minutes after they are made. Ask the officer for a fresh code and paste it right away, or this will happen again.',
 	'bootstrap.errorTransportHeading': "Couldn't reach the authority app.",
 	'bootstrap.errorTransportBody': 'Check that the code was generated recently and try again.',
 	'bootstrap.errorTransportCta': 'Retry',

@@ -31,7 +31,7 @@ import {
 	BootstrapTransportUnreachableError,
 	SealedPayloadUnreadableError,
 } from '../transport/bootstrap-transport-client.js';
-import { verifySnapshot } from '@votetorrent/vote-engine/bootstrap';
+import { verifySnapshot, KNOWN_BOOTSTRAP_REDEMPTION_STATUS_CODES } from '@votetorrent/vote-engine/bootstrap';
 import { nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
 import { createNetworkDb, closeNetworkDb, deleteNetworkDb } from '../db/open-db.js';
 import { writeRowCounts } from '../db/reattach.js';
@@ -355,6 +355,68 @@ const SCHEMA_MISMATCH_KEYS = Object.freeze({
 	ctaKey: 'bootstrap.errorInvalidCodeCta',
 });
 
+// --- The three refusal families (D-25) --------------------------------------
+//
+// One family per redemption status the service can answer, rather than one
+// hedge for all three. These exist because the service ANSWERS the three
+// distinguishably, and it can still do so late because it keeps a
+// payload-free record for a grace window past the code's own expiry (D-16) --
+// without that retention a late redemption would degrade to the weakest
+// answer, "no record here", and all three of these constants would collapse
+// back into one. The same argument is recorded in `src/i18n/copy.js` beside
+// the strings themselves; it is stated twice on purpose, because the mapping
+// and the copy are separately tempting to "simplify".
+//
+// Each borrows `bootstrap.errorInvalidCodeCta` ("Try another code"), the
+// table's generic try-a-different-code action, exactly as the two
+// verification-flavoured families above do.
+
+const NOT_RECOGNIZED_KEYS = Object.freeze({
+	headingKey: 'bootstrap.errorCodeNotRecognizedHeading',
+	bodyKey: 'bootstrap.errorCodeNotRecognizedBody',
+	ctaKey: 'bootstrap.errorInvalidCodeCta',
+});
+
+const ALREADY_USED_KEYS = Object.freeze({
+	headingKey: 'bootstrap.errorCodeAlreadyUsedHeading',
+	bodyKey: 'bootstrap.errorCodeAlreadyUsedBody',
+	ctaKey: 'bootstrap.errorInvalidCodeCta',
+});
+
+const TIMED_OUT_KEYS = Object.freeze({
+	headingKey: 'bootstrap.errorCodeTimedOutHeading',
+	bodyKey: 'bootstrap.errorCodeTimedOutBody',
+	ctaKey: 'bootstrap.errorInvalidCodeCta',
+});
+
+/** Status value -> copy family. Keyed by the EXACT wire value, so selection is
+ * a lookup rather than a `switch` over three hand-written string literals that
+ * nothing would check against the vocabulary. */
+const REFUSAL_KEYS_BY_STATUS = Object.freeze({
+	unknown: NOT_RECOGNIZED_KEYS,
+	used: ALREADY_USED_KEYS,
+	expired: TIMED_OUT_KEYS,
+});
+
+// IMPORT-TIME TOTALITY CHECK against the vocabulary's own exported set.
+// `'ok'` is not a refusal and deliberately has no family, so it is added here
+// rather than to the map. A FIFTH status added to
+// `KNOWN_BOOTSTRAP_REDEMPTION_STATUS_CODES` without a copy family must be an
+// error the moment this module loads -- not an unlabelled render, and not a
+// silent fall-through discovered by an officer.
+{
+	const covered = new Set([...Object.keys(REFUSAL_KEYS_BY_STATUS), 'ok']);
+	const missing = [...KNOWN_BOOTSTRAP_REDEMPTION_STATUS_CODES].filter((code) => !covered.has(code));
+	const extra = [...covered].filter((code) => !KNOWN_BOOTSTRAP_REDEMPTION_STATUS_CODES.has(code));
+	if (missing.length > 0 || extra.length > 0) {
+		throw new Error(
+			'bootstrap.js: the refusal copy map has drifted from KNOWN_BOOTSTRAP_REDEMPTION_STATUS_CODES -- ' +
+				`statuses with no copy family: [${missing.join(', ')}]; ` +
+				`mapped values outside the vocabulary: [${extra.join(', ')}]`,
+		);
+	}
+}
+
 /** The "checksum" family (50-02's steps 6-8: manifest, digest, out-of-band digest). */
 const VERIFICATION_REASONS = new Set(['malformed-envelope', 'manifest-mismatch', 'digest-mismatch']);
 /** The "wrong version" family (50-02's steps 2-3, 5: format version, canonical
@@ -368,15 +430,52 @@ const SCHEMA_MISMATCH_REASONS = new Set(['format-version-mismatch', 'schema-hash
  * blank screen. `outcome: 'ok'` has no error copy and also throws (the
  * screen never calls this for `'ok'`; it renders the success state instead).
  *
+ * `status` is the THIRD positional parameter, deliberately -- every existing
+ * `(outcome, reason)` call site and test keeps working unchanged. It is
+ * REQUIRED for, and meaningful only for, `'code-refused'`: that is the one
+ * outcome carrying a `status` (see `RedeemAndBootstrapResult`), and it is what
+ * selects which of the three D-25 refusal families the officer reads.
+ *
  * @param {string} outcome
  * @param {string} [reason]
+ * @param {string} [status] - the redemption status, for `'code-refused'` only.
  * @returns {CopyKeys}
  */
-export function copyKeysForOutcome(outcome, reason) {
+export function copyKeysForOutcome(outcome, reason, status) {
 	switch (outcome) {
 		case 'invalid-code':
-		case 'code-refused':
+			// NO LONGER SHARED WITH 'code-refused'. `'invalid-code'` is a pasted
+			// string that failed the local shape check and never left this
+			// browser; the three refusal families answer things the SERVICE said.
 			return INVALID_CODE_KEYS;
+		case 'code-refused':
+			// THE LOAD-BEARING LINE OF THIS FUNCTION. A missing status THROWS
+			// rather than falling back to INVALID_CODE_KEYS. That fallback is
+			// exactly the pre-D-25 behaviour -- one hedging sentence for all
+			// three refusals -- and a caller that forgot to plumb the status
+			// would silently reinstate it, invisibly, for every officer. A
+			// caller that forgets is a programming error, so it is loud.
+			if (status === undefined) {
+				throw new Error(
+					'copyKeysForOutcome: outcome "code-refused" requires a status -- ' +
+						'the redemption status selects which refusal copy family the officer reads, ' +
+						'and defaulting would silently re-conflate all three',
+				);
+			}
+			// A refusal carrying `ok` is a contradiction: the caller mis-mapped a
+			// successful redemption into the refusal path. There is no family to
+			// render for it, so say so rather than inventing one.
+			if (status === 'ok') {
+				throw new Error(
+					'copyKeysForOutcome: status "ok" is not a refusal -- a "code-refused" outcome carrying it means the caller mis-mapped a successful redemption',
+				);
+			}
+			if (Object.prototype.hasOwnProperty.call(REFUSAL_KEYS_BY_STATUS, status)) {
+				return REFUSAL_KEYS_BY_STATUS[/** @type {'unknown'|'used'|'expired'} */ (status)];
+			}
+			// Same posture as `assertKnownBootstrapRedemptionStatus` at the wire:
+			// name the offending value and refuse, never coerce.
+			throw new Error(`copyKeysForOutcome: unmapped redemption status "${status}" for outcome "code-refused"`);
 		case 'transport-unreachable':
 			return TRANSPORT_KEYS;
 		case 'verify-failed':
