@@ -4690,49 +4690,49 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@quereus/isolation@npm:^4.14.0":
-  version: 4.14.0
-  resolution: "@quereus/isolation@npm:4.14.0"
+"@quereus/isolation@npm:^4.17.1":
+  version: 4.17.1
+  resolution: "@quereus/isolation@npm:4.17.1"
   dependencies:
-    "@quereus/quereus": "npm:^4.14.0"
+    "@quereus/quereus": "npm:^4.17.1"
   peerDependencies:
-    "@quereus/quereus": ^4.14.0
-  checksum: 10c0/7e506fae362c7a2c4805f0da3c32d2fb594d53dbe4aa3f37527022f033fd3f251970739cfb25c237a486ade65093ff5c39b94655804f459d298883c0d3ac411d
+    "@quereus/quereus": ^4.17.1
+  checksum: 10c0/8b0d0904996c1b32d5a754e9b283fb45232532ca043ea158a0732088d9ccc801e681b0a31a939ddfa02553301c0125a47bdcb04327c4eda552fcf07700440198
   languageName: node
   linkType: hard
 
-"@quereus/plugin-indexeddb@npm:4.14.0":
-  version: 4.14.0
-  resolution: "@quereus/plugin-indexeddb@npm:4.14.0"
+"@quereus/plugin-indexeddb@npm:4.17.1":
+  version: 4.17.1
+  resolution: "@quereus/plugin-indexeddb@npm:4.17.1"
   dependencies:
-    "@quereus/quereus": "npm:^4.14.0"
-    "@quereus/store": "npm:^4.14.0"
+    "@quereus/quereus": "npm:^4.17.1"
+    "@quereus/store": "npm:^4.17.1"
   peerDependencies:
-    "@quereus/isolation": ^4.14.0
-    "@quereus/quereus": ^4.14.0
-    "@quereus/store": ^4.14.0
-  checksum: 10c0/92320f3aa9b5febd9e9c9ff90acb073427fabda406a58af91313ce5a9cb9239a5204606393359182e278a7d5d183755e5525f0bb347de3331ce0fec911e21853
+    "@quereus/isolation": ^4.17.1
+    "@quereus/quereus": ^4.17.1
+    "@quereus/store": ^4.17.1
+  checksum: 10c0/6a84217521968f83f647c7612d9fa8547f3af2710893537052314d7c9c5ce909b46ffd89a36ca3f96473e065e25d5896a8f2941d06c284ca19e360a9345db25c
   languageName: node
   linkType: hard
 
-"@quereus/plugin-react-native-leveldb@npm:^4.14.0":
-  version: 4.14.0
-  resolution: "@quereus/plugin-react-native-leveldb@npm:4.14.0"
+"@quereus/plugin-react-native-leveldb@npm:^4.17.1":
+  version: 4.17.1
+  resolution: "@quereus/plugin-react-native-leveldb@npm:4.17.1"
   dependencies:
-    "@quereus/quereus": "npm:^4.14.0"
-    "@quereus/store": "npm:^4.14.0"
+    "@quereus/quereus": "npm:^4.17.1"
+    "@quereus/store": "npm:^4.17.1"
   peerDependencies:
-    "@quereus/isolation": ^4.14.0
-    "@quereus/quereus": ^4.14.0
-    "@quereus/store": ^4.14.0
+    "@quereus/isolation": ^4.17.1
+    "@quereus/quereus": ^4.17.1
+    "@quereus/store": ^4.17.1
     rn-leveldb: ^3.11.0
-  checksum: 10c0/23e30f198981e0e10c3142d98ee09a3ea3dd1966f3c88073d1a4fb7a4b197df762c28e0cbc0cddd39b44632ebf7779e0988d3872881b29bcee7e58aa5cf61b3f
+  checksum: 10c0/88ba442d85d8e49bd7d66ee6b5812993926569b91b1e84578108603cde00fe9a6bd12afd5db7d9c29d907ac49dad71bc01481c8283bb34da13761266d1f4a116
   languageName: node
   linkType: hard
 
-"@quereus/quereus@npm:4.14.0":
-  version: 4.14.0
-  resolution: "@quereus/quereus@npm:4.14.0"
+"@quereus/quereus@npm:4.17.1":
+  version: 4.17.1
+  resolution: "@quereus/quereus@npm:4.17.1"
   dependencies:
     debug: "npm:^4.4.3"
     fast-json-patch: "npm:^3.1.1"
@@ -4740,13 +4740,13 @@ __metadata:
     moat-maker: "npm:^2.2.0"
     temporal-polyfill: "npm:^0.3.0"
     uint8arrays: "npm:^6.1.1"
-  checksum: 10c0/1054cd48bfc55f59a07cea7019060d65d338173e122438695506c33dace7b294d4dfd6a92ac6e58f583cee74748dd2ac035ae786b9297b27d8200c7acaa0f9ef
+  checksum: 10c0/90c2e4b55de6dffad8166be8e08b247d7179e4c9a8365f4fdcb4123045a005b76d08aec16362a28c749269e71cfb734ada9acccc0f7c1dae5df9da9ecbf27696
   languageName: node
   linkType: hard
 
-"@quereus/quereus@patch:@quereus/quereus@npm%3A4.14.0#~/.yarn/patches/@quereus-quereus-npm-4.14.0-042f7e4e5e.patch":
-  version: 4.14.0
-  resolution: "@quereus/quereus@patch:@quereus/quereus@npm%3A4.14.0#~/.yarn/patches/@quereus-quereus-npm-4.14.0-042f7e4e5e.patch::version=4.14.0&hash=3534ae"
+"@quereus/quereus@patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch":
+  version: 4.17.1
+  resolution: "@quereus/quereus@patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch::version=4.17.1&hash=47050e"
   dependencies:
     debug: "npm:^4.4.3"
     fast-json-patch: "npm:^3.1.1"
@@ -4754,20 +4754,20 @@ __metadata:
     moat-maker: "npm:^2.2.0"
     temporal-polyfill: "npm:^0.3.0"
     uint8arrays: "npm:^6.1.1"
-  checksum: 10c0/2804ed2cfac10298af5eef7af07541eb52370a672c538c9533b539b3f9668e300554f5de252e1f614247dd5649d1121543b8a78bb83919d602b15f71a60d2576
+  checksum: 10c0/1bfce151b5aeb5e49309b94dd13ff56639bfedd76742224833336b65cd191bfe0248104f8da193b63d2bc0adc1049f7c56dfdf889bddb74eafac230ea8f9bbdf
   languageName: node
   linkType: hard
 
-"@quereus/store@npm:^4.14.0":
-  version: 4.14.0
-  resolution: "@quereus/store@npm:4.14.0"
+"@quereus/store@npm:^4.17.1":
+  version: 4.17.1
+  resolution: "@quereus/store@npm:4.17.1"
   dependencies:
-    "@quereus/isolation": "npm:^4.14.0"
-    "@quereus/quereus": "npm:^4.14.0"
+    "@quereus/isolation": "npm:^4.17.1"
+    "@quereus/quereus": "npm:^4.17.1"
   peerDependencies:
-    "@quereus/isolation": ^4.14.0
-    "@quereus/quereus": ^4.14.0
-  checksum: 10c0/433e44085ea304a7e18b019e7dc129ffd1d15c42a335215c57a66bc1acae55f86280bbd96cda9e1460b6356c24ee909ce306860c6c63c6a52506916616594199
+    "@quereus/isolation": ^4.17.1
+    "@quereus/quereus": ^4.17.1
+  checksum: 10c0/148d78a0e2edbfd54e7e976d1273c7495106d19e32b2f92194bce47602e813acc61e21da615f770ea27793b76b10534768b7f0ab195731058a1906d37fff84d3
   languageName: node
   linkType: hard
 
@@ -6664,8 +6664,8 @@ __metadata:
     "@peculiar/asn1-android": "npm:^2.8.0"
     "@peculiar/asn1-schema": "npm:^2.8.0"
     "@peculiar/x509": "npm:^2.0.0"
-    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.14.0#~/.yarn/patches/@quereus-quereus-npm-4.14.0-042f7e4e5e.patch"
-    "@quereus/store": "npm:^4.14.0"
+    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch"
+    "@quereus/store": "npm:^4.17.1"
     "@react-native-async-storage/async-storage": "npm:^2.1.2"
     "@types/mocha": "npm:^10.0.10"
     "@types/node": "npm:^22.13.10"
@@ -21531,10 +21531,10 @@ __metadata:
     "@optimystic/db-p2p": "npm:^0.25.1"
     "@optimystic/db-p2p-storage-rn": "npm:^0.25.1"
     "@optimystic/quereus-plugin-optimystic": "npm:^0.25.1"
-    "@quereus/isolation": "npm:^4.14.0"
-    "@quereus/plugin-react-native-leveldb": "npm:^4.14.0"
-    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.14.0#~/.yarn/patches/@quereus-quereus-npm-4.14.0-042f7e4e5e.patch"
-    "@quereus/store": "npm:^4.14.0"
+    "@quereus/isolation": "npm:^4.17.1"
+    "@quereus/plugin-react-native-leveldb": "npm:^4.17.1"
+    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch"
+    "@quereus/store": "npm:^4.17.1"
     "@react-native-async-storage/async-storage": "npm:^2.1.2"
     "@react-native-clipboard/clipboard": "npm:^1.16.3"
     "@react-native-community/cli": "npm:^15.1.0"
@@ -21594,10 +21594,10 @@ __metadata:
     "@noble/ciphers": "npm:^2"
     "@noble/hashes": "npm:^2"
     "@optimystic/quereus-plugin-crypto": "npm:^0.25.1"
-    "@quereus/isolation": "npm:4.14.0"
-    "@quereus/plugin-indexeddb": "npm:4.14.0"
-    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.14.0#~/.yarn/patches/@quereus-quereus-npm-4.14.0-042f7e4e5e.patch"
-    "@quereus/store": "npm:4.14.0"
+    "@quereus/isolation": "npm:4.17.1"
+    "@quereus/plugin-indexeddb": "npm:4.17.1"
+    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch"
+    "@quereus/store": "npm:4.17.1"
     "@types/node": "npm:^22.10.2"
     "@types/react": "npm:19.2.17"
     "@types/react-dom": "npm:^19.0.0"
@@ -21631,10 +21631,10 @@ __metadata:
     "@optimystic/db-p2p": "npm:^0.25.1"
     "@optimystic/db-p2p-storage-rn": "npm:^0.25.1"
     "@optimystic/quereus-plugin-optimystic": "npm:^0.25.1"
-    "@quereus/isolation": "npm:^4.14.0"
-    "@quereus/plugin-react-native-leveldb": "npm:^4.14.0"
-    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.14.0#~/.yarn/patches/@quereus-quereus-npm-4.14.0-042f7e4e5e.patch"
-    "@quereus/store": "npm:^4.14.0"
+    "@quereus/isolation": "npm:^4.17.1"
+    "@quereus/plugin-react-native-leveldb": "npm:^4.17.1"
+    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch"
+    "@quereus/store": "npm:^4.17.1"
     "@react-native-async-storage/async-storage": "npm:^2.1.2"
     "@react-native-community/cli": "npm:^15.1.0"
     "@react-native-community/cli-platform-android": "npm:^15.1.0"

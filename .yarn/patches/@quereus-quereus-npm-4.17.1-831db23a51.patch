@@ -1,8 +1,8 @@
 diff --git a/dist/src/runtime/emit/dml-executor.js b/dist/src/runtime/emit/dml-executor.js
-index 6f86ac6da0d4cd16dd8411acf2d555b1b3100ca8..e87b09f432672ad2f8930b07a97ad585f4ce9943 100644
+index b11e72b9b708c53468b61abed785c3e7a9ee1de7..c800d2baf255dd7fd60eee95d642ad95e488da43 100644
 --- a/dist/src/runtime/emit/dml-executor.js
 +++ b/dist/src/runtime/emit/dml-executor.js
-@@ -588,14 +588,16 @@ export function emitDmlExecutor(plan, ctx) {
+@@ -607,14 +607,16 @@ export function emitDmlExecutor(plan, ctx) {
          await assertTransitiveRestrictsForParentMutation(rctx.db, tableSchema, 'update', existingRow, updatedRow, plan.lensRouted);
          // Extract the primary key from existing row
          const keyValues = pkColumnIndicesInSchema.map(idx => existingRow[idx]);
@@ -22,7 +22,7 @@ index 6f86ac6da0d4cd16dd8411acf2d555b1b3100ca8..e87b09f432672ad2f8930b07a97ad585
              mutationStatement: vtab.wantStatements ?
                  buildUpdateStatement(tableSchema, updatedRow, keyValues, contextRow) : undefined
          };
-@@ -914,10 +916,11 @@ export function emitDmlExecutor(plan, ctx) {
+@@ -934,10 +936,11 @@ export function emitDmlExecutor(plan, ctx) {
              // can fall back to per-constraint defaultConflict directives. The memory
              // module treats undefined as ABORT when no constraint default is set.
              onConflict: plan.onConflict,
@@ -38,7 +38,7 @@ index 6f86ac6da0d4cd16dd8411acf2d555b1b3100ca8..e87b09f432672ad2f8930b07a97ad585
              mutationStatement
          };
          if (REPR_STRICT)
-@@ -1099,10 +1102,10 @@ export function emitDmlExecutor(plan, ctx) {
+@@ -1120,10 +1123,10 @@ export function emitDmlExecutor(plan, ctx) {
              // can fall back to per-constraint defaultConflict directives. The memory
              // module treats undefined as ABORT when no constraint default is set.
              onConflict: plan.onConflict,
@@ -54,10 +54,10 @@ index 6f86ac6da0d4cd16dd8411acf2d555b1b3100ca8..e87b09f432672ad2f8930b07a97ad585
          };
          if (REPR_STRICT)
 diff --git a/dist/src/runtime/emit/insert.js b/dist/src/runtime/emit/insert.js
-index 66bb4d95ebc0e025ef6c60860b7c7b2807851a7f..31ad9addf3bb6267cece3435ced6581f59eb003e 100644
+index 66bb4d95ebc0e025ef6c60860b7c7b2807851a7f..43a7bd1355d0828810630a03477e1d42b3a6f505 100644
 --- a/dist/src/runtime/emit/insert.js
 +++ b/dist/src/runtime/emit/insert.js
-@@ -15,8 +15,26 @@ export function emitInsert(plan, ctx) {
+@@ -15,8 +15,28 @@ export function emitInsert(plan, ctx) {
      // column's type (e.g. `insert into b select j from a` for a JSON column) is
      // left alone — provided the value in hand also inhabits that type, since the
      // source's announcement is an inference, not a guarantee. See buildRowCoercion.
@@ -76,18 +76,20 @@ index 66bb4d95ebc0e025ef6c60860b7c7b2807851a7f..31ad9addf3bb6267cece3435ced6581f
 +    // Restore 4.3.1 semantics: leave the NEW row RAW here so immediate CHECKs see
 +    // the value as provided, and let the storage layer coerce as it did in 4.3.1
 +    // (see the matching `preCoerced: false` restorations in dml-executor.js).
-+    // Upstream issue: gotchoices/quereus — "datetime Z-stripped before immediate CHECK".
++    // Upstream issue: gotchoices/quereus#28 — "datetime Z-stripped before immediate CHECK".
 +    // Remove this patch once upstream settles raw-vs-coerced for immediate CHECKs.
-+    // Forward-ported 4.11.0 -> 4.14.0 (spike 064): site unchanged; 4.14.0 added a
-+    // FOURTH `preCoerced: true` in dml-executor.js on the DELETE path, which is
-+    // correctly left alone (its key cells come from the scanned OLD row).
++    // Forward-ported 4.11.0 -> 4.14.0 (spike 064) -> 4.17.1 (2026-09-01): all four
++    // anchor sites verbatim at each hop. 4.17.1's only dml-executor.js change is the
++    // additive `countUpdateCall` work-counter; the DELETE path's fourth
++    // `preCoerced: true` is correctly left alone (its key cells come from the
++    // scanned OLD row).
 +    // ---------------------------------------------------------------------------
 +    const coerceNewRow = undefined;
      async function* run(_ctx, sourceValue) {
          for await (const sourceRow of sourceValue) {
              // Convert source row to flat OLD/NEW format
 diff --git a/dist/src/runtime/emit/update.js b/dist/src/runtime/emit/update.js
-index e998c86440748562aec36ed2a12ad18b24e5c90d..e5f9e1d0b5747ac5f79d68443f1e316dfe6835cd 100644
+index e998c86440748562aec36ed2a12ad18b24e5c90d..95e71b96dd7e6d6f1a6a3f76a928a9f449a141aa 100644
 --- a/dist/src/runtime/emit/update.js
 +++ b/dist/src/runtime/emit/update.js
 @@ -48,21 +48,17 @@ export function emitUpdate(plan, ctx) {
@@ -116,7 +118,7 @@ index e998c86440748562aec36ed2a12ad18b24e5c90d..e5f9e1d0b5747ac5f79d68443f1e316d
 +    // columns); both are disabled so an immediate CHECK on UPDATE evaluates the
 +    // assigned value as provided, exactly as on 4.3.1. Storage coerces instead
 +    // (`preCoerced: false` in dml-executor.js).
-+    // Forward-ported 4.4.1 -> 4.11.0 -> 4.14.0 (spikes 060, 064).
++    // Forward-ported 4.4.1 -> 4.11.0 -> 4.14.0 (spikes 060, 064) -> 4.17.1.
 +    // ---------------------------------------------------------------------------
 +    const coerceRegular = undefined;
 +    const coerceGenerated = undefined;
@@ -124,7 +126,7 @@ index e998c86440748562aec36ed2a12ad18b24e5c90d..e5f9e1d0b5747ac5f79d68443f1e316d
      // so tearing the phase-2 context down does not evict the streaming source slot (the
      // context map is keyed by descriptor identity).
 diff --git a/dist/src/runtime/row-constraints.js b/dist/src/runtime/row-constraints.js
-index fe52e105af9484a5107293a5608f08032e1eefa0..d1657208d3ce9a703545de12e45b3f72be668672 100644
+index fe52e105af9484a5107293a5608f08032e1eefa0..388d0b632fc1b3a5ed370d2c4878ff63957574ed 100644
 --- a/dist/src/runtime/row-constraints.js
 +++ b/dist/src/runtime/row-constraints.js
 @@ -3,6 +3,8 @@ import { RowOpFlag } from '../schema/table.js';
@@ -145,10 +147,11 @@ index fe52e105af9484a5107293a5608f08032e1eefa0..d1657208d3ce9a703545de12e45b3f72
              continue;
          }
          // Resolve without a per-row microtask hop (see runtime/async-util.ts).
-@@ -263,3 +265,33 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
+@@ -263,3 +265,35 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
      return { skip: false };
  }
  //# sourceMappingURL=row-constraints.js.map
++
 +/**
 + * VoteTorrent patch (datetime-immediate-check-coercion), part 2 of 2.
 + * Verbatim port of 4.3.1's `coerceNewSection` (deleted in 4.4.1). Snapshot the flat
@@ -158,7 +161,8 @@ index fe52e105af9484a5107293a5608f08032e1eefa0..d1657208d3ce9a703545de12e45b3f72
 + * value, preserving the existing error semantics — the row's own performInsert remains
 + * the authoritative place that throws MISMATCH.
 + *
-+ * Forward-ported 4.11.0 -> 4.14.0 (spike 064): 4.14.0 no longer imports
++ * Forward-ported 4.11.0 -> 4.14.0 (spike 064) -> 4.17.1: this module is byte-identical
++ * across 4.14.0 and 4.17.1, so the port is verbatim. 4.14.0 onwards does not import
 + * `validateAndParse` into this module, so the import is added explicitly above.
 + */
 +function coerceNewSection(row, tableSchema) {

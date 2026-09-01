@@ -4,7 +4,7 @@
  * Phase 40 CI regression locks — three lockfile/manifest invariants for the
  * published-package stack that no existing spec covers:
  *
- *   UPG-06 — patched @quereus/quereus 4.3.1 single copy. Extends
+ *   UPG-06 — patched @quereus/quereus 4.17.1 single copy. Extends
  *            quereus-single-copy-regression.spec.ts (UPG-03, "single copy,
  *            4.x") to the phase-specific version+patch: the resolved version
  *            must be exactly 4.3.1, the required forward-ported patch locator
@@ -81,8 +81,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
   const lock = readFileSync(join(repoRoot, 'yarn.lock'), 'utf8')
   const rootPackageJson = readFileSync(join(repoRoot, 'package.json'), 'utf8')
 
-  describe('UPG-06: patched @quereus/quereus 4.14.0 single copy', () => {
-    it('resolves a single @quereus/quereus version, and it is exactly 4.14.0', () => {
+  describe('UPG-06: patched @quereus/quereus 4.17.1 single copy', () => {
+    it('resolves a single @quereus/quereus version, and it is exactly 4.17.1', () => {
       const versions = resolvedVersionsFor(lock, '@quereus/quereus')
       expect(versions.length, 'expected at least one resolved @quereus/quereus block in yarn.lock').to.be.greaterThan(0)
 
@@ -94,28 +94,34 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @quereus/quereus version must be exactly 4.14.0, got ${distinct[0]}`
-      ).to.equal('4.14.0')
+        `Resolved @quereus/quereus version must be exactly 4.17.1, got ${distinct[0]}`
+      ).to.equal('4.17.1')
     })
 
-    it('carries the required 4.14.0 patch (@quereus-quereus-npm-4.14.0-042f7e4e5e)', () => {
-      const count = (lock.match(/@quereus-quereus-npm-4\.14\.0-042f7e4e5e/g) ?? []).length
+    it('carries the required 4.17.1 patch (@quereus-quereus-npm-4.17.1-831db23a51)', () => {
+      const count = (lock.match(/@quereus-quereus-npm-4\.17\.1-831db23a51/g) ?? []).length
       expect(
         count,
-        'Expected the @quereus-quereus-npm-4.14.0-042f7e4e5e patch locator to be present in yarn.lock. Forward-ported ' +
-        '4.11.0 -> 4.14.0 (spike 064). The patch now carries ONE concern, not two: the datetime immediate-CHECK ' +
-        'coercion restoration (4.4.1 moved declared-type conversion to the top of the DML pipeline and deleted ' +
-        'constraint-check\'s coerceNewSection, collapsing 4.3.1\'s raw-immediate / coerced-deferred split). Measured, ' +
-        'not assumed: installing 4.14.0 UNPATCHED fails 220 vote-engine tests, 167 of them on exactly this class ' +
-        '(ExpirationValid / SubmittedAtValid `isISODatetime(x) and like(\'%Z\', x)`); re-applying this half alone ' +
-        'takes it to the pre-existing floor. See the upstream issue draft in .planning/spikes/026-*'
+        'Expected the @quereus-quereus-npm-4.17.1-831db23a51 patch locator to be present in yarn.lock. Forward-ported ' +
+        '4.11.0 -> 4.14.0 (spike 064) -> 4.17.1 (2026-09-01). The 4.17.1 hop was VERBATIM: all seven anchor sites ' +
+        'matched exactly once, insert.js / update.js / row-constraints.js are byte-identical to 4.14.0, and the only ' +
+        'dml-executor.js change is the additive countUpdateCall work-counter (which shifts the three flipped ' +
+        '`preCoerced` sites by ~20 lines and leaves the DELETE path\'s fourth site correctly untouched). The patch ' +
+        'carries ONE concern: the datetime immediate-CHECK coercion restoration (4.4.1 moved declared-type ' +
+        'conversion to the top of the DML pipeline and deleted constraint-check\'s coerceNewSection, collapsing ' +
+        '4.3.1\'s raw-immediate / coerced-deferred split). Measured on 4.17.1, not carried forward: installing ' +
+        'UNPATCHED gives 1396 passing / 264 failing, and 225 of those 264 are exactly this class ' +
+        '(ExpirationValid / SubmittedAtValid `isISODatetime(x) and like(\'%Z\', x)`); re-applying the patch returns ' +
+        'the suite to its known floor. The 4.14.0 figures were 220/167 — the class grew with the suite, not with ' +
+        'the defect. Upstream issue: gotchoices/quereus#28, still OPEN, so this patch is not yet retirable.'
       ).to.be.greaterThan(0)
     })
 
-    it('has zero references to superseded quereus patch locators (4.2.1-64e8a4bca7, 4.3.1-6814ac0861)', () => {
+    it('has zero references to superseded quereus patch locators (4.2.1-64e8a4bca7, 4.3.1-6814ac0861, 4.14.0-042f7e4e5e)', () => {
       const supersededCounts = {
         '4.2.1-64e8a4bca7': (lock.match(/4\.2\.1-64e8a4bca7/g) ?? []).length,
         '4.3.1-6814ac0861': (lock.match(/4\.3\.1-6814ac0861/g) ?? []).length,
+        '4.14.0-042f7e4e5e': (lock.match(/4\.14\.0-042f7e4e5e/g) ?? []).length,
       }
       const residue = Object.entries(supersededCounts).filter(([, n]) => n > 0)
       expect(
