@@ -53,6 +53,7 @@ REPO_ROOT = File.expand_path("../..", __dir__)
 ANDROID_FASTFILE = File.join(REPO_ROOT, "apps", "VoteTorrentAuthority", "android", "fastlane", "Fastfile")
 IOS_FASTFILE     = File.join(REPO_ROOT, "apps", "VoteTorrentAuthority", "ios", "fastlane", "Fastfile")
 VOTER_ANDROID_FASTFILE = File.join(REPO_ROOT, "apps", "VoteTorrentVoter", "android", "fastlane", "Fastfile")
+VOTER_IOS_FASTFILE = File.join(REPO_ROOT, "apps", "VoteTorrentVoter", "ios", "fastlane", "Fastfile")
 
 GENERATED_RELATIVE = File.join("apps", "VoteTorrentAuthority", "src", "engines", "appattest-keys.generated.ts")
 
@@ -196,6 +197,17 @@ class VtAppAttestReleaseGateTest < Minitest::Test
   # 51-VALIDATION.md note is that this exclusion is intentional.
   def test_voter_android_fastfile_does_not_require_the_gate
     text = File.read(VOTER_ANDROID_FASTFILE)
+    refute_match(/vt_appattest_release_gate/, text)
+  end
+
+  # Closes the gap the Android case above left open: until now nothing would have caught
+  # a Voter iOS Fastfile that wrongly required this gate, because no VOTER_IOS_FASTFILE
+  # constant existed. The Voter is gated by its own team check
+  # (scripts/fastlane/vt_team_gate.rb) instead, because the Voter embeds no
+  # APPLE_APP_ID — the Authority embeds it and is the verifier that pins the Voter's
+  # identity — so this gate would pass while proving nothing about the Voter's own team.
+  def test_voter_ios_fastfile_does_not_require_the_gate
+    text = File.read(VOTER_IOS_FASTFILE)
     refute_match(/vt_appattest_release_gate/, text)
   end
 end

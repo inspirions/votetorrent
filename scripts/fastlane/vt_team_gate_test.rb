@@ -54,12 +54,41 @@ GENERATED_RELATIVE = File.join(
   "apps", "VoteTorrentAuthority", "src", "engines", "appattest-keys.generated.ts"
 )
 
+# The Voter's iOS Fastfile did not exist when 55-03 wrote this test file (its lanes are
+# built by 55-04). Only once the real file exists can these wiring assertions run against
+# it instead of erroring or being vacuous — hence the two tests near the bottom of this
+# class rather than in 55-03.
+VOTER_IOS_FASTFILE = File.join(REPO_ROOT, "apps", "VoteTorrentVoter", "ios", "fastlane", "Fastfile")
+
 class VtTeamGateTest < Minitest::Test
   def setup
     FastlaneCore::UI.last_success_message = nil
   end
 
   # --- helpers ---------------------------------------------------------------------
+
+  # Verbatim copy of scripts/fastlane/vt_appattest_release_gate_test.rb's lane_body
+  # (lines 88-104 there) — brace-counts do/end to slice a lane body out of raw Fastfile
+  # text, so a renamed or deleted lane fails loudly (refute_nil) rather than silently
+  # matching nothing. Do not re-derive or "improve" this; a divergent second copy is a
+  # maintenance trap.
+  def lane_body(fastfile_text, lane_name)
+    lines = fastfile_text.lines
+    start_idx = lines.index { |l| l =~ /^\s*lane\s+:#{Regexp.escape(lane_name)}\s+do\s*$/ }
+    refute_nil start_idx, "lane :#{lane_name} not found in Fastfile"
+    depth = 1
+    body = []
+    i = start_idx + 1
+    while i < lines.length && depth > 0
+      line = lines[i]
+      depth += line.scan(/\bdo\b/).size
+      depth -= line.scan(/\bend\b/).size
+      break if depth <= 0
+      body << line
+      i += 1
+    end
+    body.join
+  end
 
   def with_fixture_repo(debug_team:, release_team:, app_id: "6849Q7KVP5.org.votetorrent.voter")
     pbxproj_text = <<~PBXPROJ
@@ -288,5 +317,19 @@ class VtTeamGateTest < Minitest::Test
       end
       assert_match(/ZZZZ999999/, err.message)
     end
+  end
+
+  # --- Wiring: the Voter's real iOS lanes must call this gate FIRST ----------------
+
+  def test_voter_ios_beta_lane_calls_the_team_gate
+    body = lane_body(File.read(VOTER_IOS_FASTFILE), "beta")
+    assert_match(/VtTeamGate\.assert_team!\(REPO_ROOT\)/, body)
+    refute_match(/VtAppAttestReleaseGate/, body)
+  end
+
+  def test_voter_ios_release_lane_calls_the_team_gate
+    body = lane_body(File.read(VOTER_IOS_FASTFILE), "release")
+    assert_match(/VtTeamGate\.assert_team!\(REPO_ROOT\)/, body)
+    refute_match(/VtAppAttestReleaseGate/, body)
   end
 end
