@@ -12,11 +12,10 @@ platform :ios do
   desc "Push a new beta build to TestFlight"
   lane :beta do
     VtAppAttestReleaseGate.assert_releasable!(REPO_ROOT)
-    setup_ci if ENV['CI']
 
-    # Ensure we're on the latest provisioning profiles
-    get_provisioning_profile
-    
+    # Provisioning comes from Xcode automatic signing; this lane creates and
+    # downloads nothing at Apple.
+
     # Increment build number
     increment_build_number
     
@@ -37,11 +36,10 @@ platform :ios do
   desc "Push a new release build to the App Store"
   lane :release do
     VtAppAttestReleaseGate.assert_releasable!(REPO_ROOT)
-    setup_ci if ENV['CI']
 
-    # Ensure we're on the latest provisioning profiles
-    get_provisioning_profile
-    
+    # Provisioning comes from Xcode automatic signing; this lane creates and
+    # downloads nothing at Apple.
+
     # Increment build number
     increment_build_number
     

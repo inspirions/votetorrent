@@ -18,6 +18,8 @@
 		"build:apk": "cd android && bundle exec fastlane android build_apk",
 		"build:apk:dev": "cd android && bundle exec fastlane android build_apk_dev",
 		"build:aab": "cd android && bundle exec fastlane android build_aab",
+		"release:ios:beta": "cd ios && bundle exec fastlane ios beta",
+		"release:ios:release": "cd ios && bundle exec fastlane ios release",
 		"clean": "rm -rf node_modules"
 	},
 	"dependencies": {
