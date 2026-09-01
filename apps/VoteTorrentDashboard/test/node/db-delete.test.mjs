@@ -20,8 +20,7 @@ import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { isSchemaInitialized } from '@votetorrent/vote-engine/browser';
 import {
 	dbNameFor,
@@ -33,8 +32,7 @@ import {
 } from '../../src/db/open-db.js';
 import { readRowCountsRecord, writeRowCounts } from '../../src/db/reattach.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const OPEN_DB_SOURCE = path.resolve(__dirname, '..', '..', 'src', 'db', 'open-db.js');
+const OPEN_DB_SOURCE = dashboardSrc('db', 'open-db.js');
 
 test('dbNameFor: exact template, no q2 prefix', () => {
 	assert.equal(dbNameFor('abc123'), 'votetorrent-abc123');

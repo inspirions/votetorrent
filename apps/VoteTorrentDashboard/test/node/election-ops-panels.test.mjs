@@ -9,13 +9,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 import { COPY } from '../../src/i18n/copy.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
-const PANELS_DIR = path.join(APP_ROOT, 'src', 'screens', 'panels');
+const PANELS_DIR = dashboardSrc('screens', 'panels');
 
 const FILES = ['RegistrationsPanel.tsx', 'ElectionsPanel.tsx', 'BallotsQuestionsPanel.tsx', 'LifecyclePill.tsx'];
 
@@ -223,7 +221,7 @@ function walkSourceFiles(dir) {
 }
 
 test('no module outside src/screens/panels/ imports from src/reads/', () => {
-	const srcDir = path.join(APP_ROOT, 'src');
+	const srcDir = dashboardSrc();
 	/** @type {string[]} */
 	const offenders = [];
 	for (const file of walkSourceFiles(srcDir)) {

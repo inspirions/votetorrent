@@ -17,10 +17,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SHELL = readFileSync(path.resolve(__dirname, '..', '..', 'src', 'screens', 'DashboardShell.tsx'), 'utf8');
+const SHELL = readFileSync(dashboardSrc('screens', 'DashboardShell.tsx'), 'utf8');
 
 /** Drop whole-line comments, so prose ABOUT a defect is never read as the defect.
  * @param {string} source @returns {string} */
@@ -98,7 +97,7 @@ test('every destructive call site that can hold a handle passes it: forgetNetwor
 
 // --- Panel console hygiene (WR-12) --------------------------------------------
 
-const PANELS_DIR = path.resolve(__dirname, '..', '..', 'src', 'screens', 'panels');
+const PANELS_DIR = dashboardSrc('screens', 'panels');
 /** Every panel body, plus the shell -- the ten console.error call sites this app ships. */
 const CONSOLE_SITES = readdirSync(PANELS_DIR)
 	.filter((/** @type {string} */ name) => name.endsWith('.tsx'))

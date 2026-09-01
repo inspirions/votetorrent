@@ -29,11 +29,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardRoot, dashboardSrc, workspacePath } from '../../../../scripts/lib/source-paths.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DASHBOARD_ROOT = path.resolve(__dirname, '..', '..');
-const AUTHORITY_DASHBOARD_DIR = path.resolve(DASHBOARD_ROOT, '..', 'VoteTorrentAuthority', 'src', 'screens', 'dashboard');
+const DASHBOARD_ROOT = dashboardRoot();
+const AUTHORITY_DASHBOARD_DIR = workspacePath('apps/VoteTorrentAuthority', 'src', 'screens', 'dashboard');
 
 /** Same idiom as `preview-scopes.test.mjs` / `lint-copy.mjs` /
  * `assert-no-node-polyfills.mjs` -- drop whole-line comments so prose ABOUT a
@@ -113,7 +112,7 @@ test('...but the comment-stripped source does not -- comments must be dropped be
 // 3. The real gate: scan both sign-in surfaces, comments stripped, and fail
 //    if a QR/camera/barcode affordance appears anywhere in the actual code.
 // ---------------------------------------------------------------------------
-const BOOTSTRAP_SCREEN_PATH = path.join(DASHBOARD_ROOT, 'src', 'screens', 'Bootstrap.tsx');
+const BOOTSTRAP_SCREEN_PATH = dashboardSrc('screens', 'Bootstrap.tsx');
 
 /** @returns {Array<{ name: string; path: string; source: string }>} */
 function collectSignInSurfaceFiles() {

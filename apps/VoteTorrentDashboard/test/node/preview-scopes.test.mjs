@@ -11,8 +11,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
 	createPreviewState,
@@ -25,10 +23,9 @@ import {
 } from '../../src/auth/preview-scopes.js';
 import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import { evaluate } from '../../src/auth/gate.js';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
-const MODULE_PATH = path.join(APP_ROOT, 'src', 'auth', 'preview-scopes.js');
+const MODULE_PATH = dashboardSrc('auth', 'preview-scopes.js');
 const RAW = readFileSync(MODULE_PATH, 'utf8');
 
 /** Same shape as gate.test.mjs's own helper — strip `//` and `/* *\/`-style

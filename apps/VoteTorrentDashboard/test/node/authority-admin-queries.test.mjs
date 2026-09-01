@@ -10,8 +10,11 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { Database } from '@quereus/quereus';
 import { prepareDb } from '@votetorrent/vote-engine/browser';
+
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 import { seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
 import {
@@ -229,11 +232,7 @@ test('fetchKeyholders: db === null resolves []', async () => {
 });
 
 test('fetchKeyholders: source text names no key-material column -- a keyholder is an identity here, never key material', async () => {
-	const { readFileSync } = await import('node:fs');
-	const { fileURLToPath } = await import('node:url');
-	const path = await import('node:path');
-	const __dirname = path.dirname(fileURLToPath(import.meta.url));
-	const source = readFileSync(path.join(__dirname, '..', '..', 'src', 'screens', 'panels', 'authority-admin-queries.js'), 'utf8');
+	const source = readFileSync(dashboardSrc('screens', 'panels', 'authority-admin-queries.js'), 'utf8');
 	assert.doesNotMatch(source, /UserKey|PubKey|PrivateKey|ReleaseKey|SignerKey|Signature/i);
 });
 

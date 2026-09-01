@@ -8,14 +8,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardRoot, dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 import { evaluate } from '../../src/auth/gate.js';
 import { CAPABILITIES } from '../../src/auth/capabilities.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
-const SRC_DIR = path.join(APP_ROOT, 'src');
+const APP_ROOT = dashboardRoot();
+const SRC_DIR = dashboardSrc();
 
 const REGISTRATIONS = CAPABILITIES.find((c) => c.id === 'registrations');
 if (!REGISTRATIONS) throw new Error('fixture error: no "registrations" capability found');

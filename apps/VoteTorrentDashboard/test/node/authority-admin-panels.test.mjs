@@ -11,13 +11,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardSrc, workspacePath } from '../../../../scripts/lib/source-paths.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
-const REPO_ROOT = path.resolve(APP_ROOT, '..', '..');
-const PANELS_DIR = path.join(APP_ROOT, 'src', 'screens', 'panels');
-const SCHEMA_PATH = path.join(REPO_ROOT, 'packages', 'vote-core', 'schema', 'votetorrent.qsql');
+const PANELS_DIR = dashboardSrc('screens', 'panels');
+const SCHEMA_PATH = workspacePath('packages/vote-core', 'schema', 'votetorrent.qsql');
 
 /** All six Authority Administration panel files this suite covers. A later
  * edit that quietly shrinks this list fails the length assertion below.

@@ -17,6 +17,7 @@ import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import { deleteNetworkDb, closeNetworkDb } from '../../src/db/open-db.js';
 import { attachNetworkDb, readRowCounts, rowCountsKeyFor } from '../../src/db/reattach.js';
@@ -888,9 +889,9 @@ test('inertness control: without the db option, performOfficerSwap never closes 
 });
 
 test('the db option is forwarded at every hop: performOfficerSwap -> refreshNetwork -> redeemAndBootstrap -> deleteNetworkDb (source-level pin, paired with the behavioural proof above)', async () => {
-	const OFFICER_SWAP_SRC = readFileSync(new URL('../../src/lifecycle/officer-swap.js', import.meta.url), 'utf8');
-	const REFRESH_SRC = readFileSync(new URL('../../src/lifecycle/refresh.js', import.meta.url), 'utf8');
-	const BOOTSTRAP_SRC = readFileSync(new URL('../../src/lifecycle/bootstrap.js', import.meta.url), 'utf8');
+	const OFFICER_SWAP_SRC = readFileSync(dashboardSrc('lifecycle', 'officer-swap.js'), 'utf8');
+	const REFRESH_SRC = readFileSync(dashboardSrc('lifecycle', 'refresh.js'), 'utf8');
+	const BOOTSTRAP_SRC = readFileSync(dashboardSrc('lifecycle', 'bootstrap.js'), 'utf8');
 
 	// Hop 1: performOfficerSwap forwards its own `db` option to refreshNetwork.
 	assert.match(OFFICER_SWAP_SRC, /refreshNetwork\(\{[\s\S]{0,200}?db: handoverDb\s*\}\)/);
@@ -930,7 +931,7 @@ function stripShellComments(source) {
 		.join('\n');
 }
 
-const SHELL_TSX = readFileSync(new URL('../../src/screens/DashboardShell.tsx', import.meta.url), 'utf8');
+const SHELL_TSX = readFileSync(dashboardSrc('screens', 'DashboardShell.tsx'), 'utf8');
 const SHELL_CODE = stripShellComments(SHELL_TSX);
 
 test('DashboardShell: accepts pendingSwapContext and onSwapContextConsumed, both optional', () => {

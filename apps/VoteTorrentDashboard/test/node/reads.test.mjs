@@ -8,7 +8,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { Database } from '@quereus/quereus';
 import { prepareDb } from '@votetorrent/vote-engine/browser';
 
@@ -18,9 +17,9 @@ import * as ballots from '../../src/reads/ballots.js';
 import * as registrations from '../../src/reads/registrations.js';
 import { seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
 import { seedElectionSurface, SEED_ELECTION, SEED_EXPECTED_COUNTS } from '../fixtures/seed-election-surface.js';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const READS_DIR = path.resolve(__dirname, '..', '..', 'src', 'reads');
+const READS_DIR = dashboardSrc('reads');
 
 /** @returns {Promise<import('@quereus/quereus').Database>} */
 async function foundingOnlyDb() {

@@ -8,14 +8,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 import { CAPABILITIES } from '../../src/auth/capabilities.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
-const PANELS_DIR = path.join(APP_ROOT, 'src', 'screens', 'panels');
-const REGISTRY_PATH = path.join(PANELS_DIR, 'registry.ts');
+const PANELS_DIR = dashboardSrc('screens', 'panels');
+const REGISTRY_PATH = dashboardSrc('screens', 'panels', 'registry.ts');
 
 const EXPECTED_COMPONENTS = [
 	'RegistrationsPanel',

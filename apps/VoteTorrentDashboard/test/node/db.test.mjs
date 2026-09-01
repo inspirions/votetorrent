@@ -18,8 +18,7 @@ import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { createNetworkDb, closeNetworkDb, deleteNetworkDb, listObjectStores, openStoreHandle } from '../../src/db/open-db.js';
 import {
 	attachNetworkDb,
@@ -35,8 +34,7 @@ import {
 } from '../../src/db/reattach.js';
 import { GATE_NETWORK_HASH, SEED_TABLES, EXPECTED_COUNTS, seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REATTACH_SOURCE = path.resolve(__dirname, '..', '..', 'src', 'db', 'reattach.js');
+const REATTACH_SOURCE = dashboardSrc('db', 'reattach.js');
 
 /** A tiny Map-backed localStorage-shaped fake — Node 22 has no real `localStorage`. */
 function makeFakeStorage() {

@@ -14,8 +14,7 @@ import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { deleteNetworkDb, closeNetworkDb, dbNameFor } from '../../src/db/open-db.js';
 import { readRowCounts, readRowCountsRecord, attachNetworkDb } from '../../src/db/reattach.js';
 import { findNetwork, listNetworks } from '../../src/db/networks-registry.js';
@@ -34,9 +33,6 @@ import {
 } from '../fixtures/bootstrap-envelope.js';
 import { t } from '../../src/i18n/copy.js';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
 
 const SECRET = 'a'.repeat(40);
 
@@ -589,9 +585,9 @@ function stripComments(source) {
 		.join('\n');
 }
 
-const BOOTSTRAP_TSX = readFileSync(path.join(APP_ROOT, 'src', 'screens', 'Bootstrap.tsx'), 'utf8');
+const BOOTSTRAP_TSX = readFileSync(dashboardSrc('screens', 'Bootstrap.tsx'), 'utf8');
 const BOOTSTRAP_CODE = stripComments(BOOTSTRAP_TSX);
-const MAIN_TSX = readFileSync(path.join(APP_ROOT, 'src', 'main.tsx'), 'utf8');
+const MAIN_TSX = readFileSync(dashboardSrc('main.tsx'), 'utf8');
 const MAIN_CODE = stripComments(MAIN_TSX);
 
 test('Bootstrap: all three new props are optional -- destructured with a default empty object, so <Bootstrap /> with no props still compiles', () => {

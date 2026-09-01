@@ -9,8 +9,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
 	extractFromSchema,
@@ -20,9 +18,6 @@ import {
 } from '../../scripts/generate-capabilities.mjs';
 import { CAPABILITIES, PANEL_GROUPS, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import { t } from '../../src/i18n/copy.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
 
 const SCHEMA_TEXT = readFileSync(SCHEMA_PATH, 'utf8');
 

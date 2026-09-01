@@ -20,8 +20,7 @@ import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { createNetworkDb, closeNetworkDb, deleteNetworkDb } from '../../src/db/open-db.js';
 import { readRowCounts } from '../../src/db/reattach.js';
 import {
@@ -39,8 +38,6 @@ import {
 	BLOB_ROUNDTRIP_BYTES,
 } from '../fixtures/bootstrap-envelope.js';
 
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 test('module exports RESTORE_BATCH_ROWS as a positive integer', () => {
 	assert.equal(typeof RESTORE_BATCH_ROWS, 'number');
@@ -103,10 +100,7 @@ test('applySnapshotTables: the returned map is the APPLIED count reported by the
 	// Source assertion, because the equality above cannot distinguish the two
 	// values while they coincide: the implementation must not be reading
 	// `rows.length` for this map.
-	const source = readFileSync(
-		path.resolve(__dirname, '..', '..', 'src', 'lifecycle', 'snapshot-restore.js'),
-		'utf8',
-	);
+	const source = readFileSync(dashboardSrc('lifecycle', 'snapshot-restore.js'), 'utf8');
 	assert.doesNotMatch(source, /applied\[tableName\] = rows\.length/);
 	assert.match(source, /applied\[tableName\] = allChanges\.length/);
 

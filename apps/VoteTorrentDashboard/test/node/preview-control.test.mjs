@@ -12,11 +12,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardRoot, dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
-const SCREENS_DIR = path.join(APP_ROOT, 'src', 'screens');
+const APP_ROOT = dashboardRoot();
+const SCREENS_DIR = dashboardSrc('screens');
 
 /** Same shape as gate.test.mjs's own helper.
  * @param {string} source @returns {string} */

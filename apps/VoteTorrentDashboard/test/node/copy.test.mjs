@@ -8,15 +8,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardRoot, dashboardSrc, moduleUrl } from '../../../../scripts/lib/source-paths.mjs';
 
-const { COPY, t } = await import('../../src/i18n/copy.js');
-const { BOOTSTRAP_PHASES, BOOTSTRAP_OUTCOME_CODES, copyKeysForOutcome } = await import(
-	'../../src/lifecycle/bootstrap.js'
+// The specifier passed to `import()` is now a runtime-computed `file://` URL
+// (moduleUrl(dashboardSrc(...))) rather than a literal relative string, so
+// TypeScript can no longer resolve the imported module's shape from the call
+// site alone -- the destructured bindings would silently widen to `any`. The
+// `@type {typeof import('literal/path')}` JSDoc cast below is erased at
+// runtime (the actual bytes still come from the resolver-built URL); it only
+// restores the static type that the literal specifier used to give for free.
+const { COPY, t } = /** @type {typeof import('../../src/i18n/copy.js')} */ (
+	await import(moduleUrl(dashboardSrc('i18n', 'copy.js')))
 );
+const { BOOTSTRAP_PHASES, BOOTSTRAP_OUTCOME_CODES, copyKeysForOutcome } =
+	/** @type {typeof import('../../src/lifecycle/bootstrap.js')} */ (
+		await import(moduleUrl(dashboardSrc('lifecycle', 'bootstrap.js')))
+	);
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
+const APP_ROOT = dashboardRoot();
 
 test('t("bootstrap.cta") returns exactly "Redeem Code"', () => {
 	assert.equal(t('bootstrap.cta'), 'Redeem Code');

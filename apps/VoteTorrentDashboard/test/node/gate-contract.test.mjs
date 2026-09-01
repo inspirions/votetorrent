@@ -17,10 +17,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dashboardRoot } from '../../../../scripts/lib/source-paths.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = path.resolve(__dirname, '..', '..');
+const APP_ROOT = dashboardRoot();
 
 test('fake-indexeddb: the shim round-trips a record across a close/reopen in one process', async () => {
 	// Honesty note (50-VALIDATION.md): this proves the ENGINE's use of the IDB
