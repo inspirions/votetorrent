@@ -167,22 +167,22 @@ class VtAppAttestReleaseGateTest < Minitest::Test
 
   def test_android_build_apk_lane_calls_the_gate
     body = lane_body(File.read(ANDROID_FASTFILE), "build_apk")
-    assert_match(/VtAppAttestReleaseGate\.assert_releasable!\(REPO_ROOT\)/, body)
+    assert_match(/^[ \t]*VtAppAttestReleaseGate\.assert_releasable!\(REPO_ROOT\)/, body)
   end
 
   def test_android_build_aab_lane_calls_the_gate
     body = lane_body(File.read(ANDROID_FASTFILE), "build_aab")
-    assert_match(/VtAppAttestReleaseGate\.assert_releasable!\(REPO_ROOT\)/, body)
+    assert_match(/^[ \t]*VtAppAttestReleaseGate\.assert_releasable!\(REPO_ROOT\)/, body)
   end
 
   def test_ios_beta_lane_calls_the_gate
     body = lane_body(File.read(IOS_FASTFILE), "beta")
-    assert_match(/VtAppAttestReleaseGate\.assert_releasable!\(REPO_ROOT\)/, body)
+    assert_match(/^[ \t]*VtAppAttestReleaseGate\.assert_releasable!\(REPO_ROOT\)/, body)
   end
 
   def test_ios_release_lane_calls_the_gate
     body = lane_body(File.read(IOS_FASTFILE), "release")
-    assert_match(/VtAppAttestReleaseGate\.assert_releasable!\(REPO_ROOT\)/, body)
+    assert_match(/^[ \t]*VtAppAttestReleaseGate\.assert_releasable!\(REPO_ROOT\)/, body)
   end
 
   # Non-publish lanes must NOT be forced through the gate (they can't produce a
