@@ -1,0 +1,92 @@
+# @votetorrent/ui-web
+
+Shared web UI package for `apps/VoteTorrentDashboard` (the authority dashboard) and the public
+no-login election view (`apps/VoteTorrentPublic`, 53-06). Web only — the two React Native apps
+(`VoteTorrentAuthority`, `VoteTorrentVoter`) are out of scope and never consume this package.
+
+Ships as source, consumed as `workspace:*`. No build step, no `dist/`.
+
+## Consumer recipe (D-16)
+
+Rules with the measured reason attached, not prose — follow every step below to add a new
+consumer.
+
+### 1. Add the dependency
+
+In the consuming app's `package.json` `dependencies`:
+
+```json
+"@votetorrent/ui-web": "workspace:*"
+```
+
+### 2. Add `resolve.dedupe` to the app's `vite.config.ts`
+
+```ts
+resolve: { dedupe: ['react', 'react-dom'] },
+```
+
+This is per-**app** config — a shared package cannot enforce its own correctness for a consumer
+that omits it.
+
+Measured reason: this repo has no hoisted React (`.yarnrc.yml` sets `nmHoistingLimits: workspaces`;
+`node_modules/react` does not exist at the root). Each workspace owns its own `19.0.0` copy, and
+this package declares `react`/`react-dom` in both `peerDependencies` and `devDependencies` — the
+same on-disk layout that breaks *without* `dedupe`. `dedupe` is what makes it safe.
+
+A duplicate React is harmless for purely presentational components — spike 089 measured a
+dedupe-removed control passing 18/18 against a zero-hook component. It bites only at the **hook
+dispatcher**: the same control dropped to 8/12 once a single `useState` was involved, in a build
+that still exited 0. The failure surfaces long after the commit that caused it — add this line from
+the app's first commit, not after the first hook lands.
+
+53-12's repo-root static assertion (D-21) will make this line mandatory for every consumer of this
+package; a comment merely discussing `dedupe` will not satisfy it, because that assertion strips
+comment lines before scanning.
+
+### 3. Import the stylesheet
+
+```
+@votetorrent/ui-web/tokens.css
+```
+
+One import per app. The canonical import form (an `index.html` `<link>` versus an import inside
+`app.css`/`main.tsx`) is fixed by 53-03 (D-15) — this section is updated there. Do not guess a form
+now.
+
+### 4. Import the right subpath
+
+- `@votetorrent/ui-web` — plain-JS values, importable from `node --test` with no bundler.
+- `@votetorrent/ui-web/components` — React components, bundler-only.
+
+Importing `@votetorrent/ui-web/components` under plain Node throws `ERR_MODULE_NOT_FOUND` — Vite
+resolves a `./Name.js` specifier to a same-named `.tsx` file via its extension probing; plain Node
+does not perform that probe. That throw is intended: it is what keeps a `.tsx` re-export out of the
+bundler-less `node --test` tier.
+
+### 5. Extend the shared tsconfig base
+
+```json
+"extends": "../../packages/ui-web/tsconfig.base.json"
+```
+
+By **relative path**, not by package specifier — a package-specifier `extends` would require a
+fourth key in this package's `exports` map, and this package's own gate proves that map stays at
+exactly three keys. `tsconfig.base.json` carries the full `compilerOptions` block (14 options); no
+consumer redeclares any of them.
+
+### 6. Binding rule: never hoist React
+
+`react`/`react-dom` must NEVER appear in the root `package.json` (any dependency field) or the root
+`resolutions`. The loud `Rollup failed to resolve import "react/jsx-runtime"` failure tempts you
+into hoisting React to fix it — don't. The hoisted shape builds green and dies at the first hook,
+which is strictly worse than the loud failure it "fixes".
+
+This package declares `react`/`react-dom` in **both** `peerDependencies` and `devDependencies`.
+Peer alone fails `tsc` with `TS2875: This JSX tag requires the module path 'react/jsx-runtime' to
+exist` — the package needs a local React to resolve and typecheck itself. This is the same on-disk
+layout that breaks *without* `dedupe` (step 2) — `dedupe` is what makes it safe.
+
+### 7. Not provided: a shared vite-config factory
+
+Declined at D-16. A shared package reaching into build config fights any consumer needing an
+override. Revisit only if a fourth consumer appears.

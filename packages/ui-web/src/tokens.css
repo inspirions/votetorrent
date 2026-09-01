@@ -1,0 +1,23 @@
+/**
+ * @votetorrent/ui-web/tokens.css
+ *
+ * D-15 ownership header — read before adding a rule here.
+ *
+ * Belongs in this file (populated in 53-03, not this plan):
+ *   - The `:root` design-token block (colors, spacing, typography custom
+ *     properties shared across every consuming web app).
+ *   - Base/reset rules that apply to every consumer regardless of layout:
+ *     `html`/`body`/`#root`, the bare `body` rule, `:focus-visible`, and the
+ *     `button, a[role="button"]` base rule.
+ *
+ * Does NOT belong in this file:
+ *   - Per-app layout and component styles. Concretely, the dashboard's
+ *     `.layout` rule, its `@media (max-width: 900px)` collapse, and
+ *     `.panel-grid` stay in the dashboard's own `src/app.css` — they describe
+ *     that app's specific screen composition, not a token or a base reset any
+ *     consumer needs.
+ *
+ * This plan (53-02) creates this file as an empty placeholder with only this
+ * header. Moving any CSS into it is 53-03's work (D-15) — do not move CSS here
+ * in this plan.
+ */

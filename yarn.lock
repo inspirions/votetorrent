@@ -6639,6 +6639,23 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@votetorrent/ui-web@workspace:packages/ui-web":
+  version: 0.0.0-use.local
+  resolution: "@votetorrent/ui-web@workspace:packages/ui-web"
+  dependencies:
+    "@types/node": "npm:^22.10.2"
+    "@types/react": "npm:19.2.17"
+    "@types/react-dom": "npm:^19.0.0"
+    react: "npm:19.0.0"
+    react-dom: "npm:19.0.0"
+    typescript: "npm:^5.6.3"
+    vite: "npm:^7.0.0"
+  peerDependencies:
+    react: 19.0.0
+    react-dom: 19.0.0
+  languageName: unknown
+  linkType: soft
+
 "@votetorrent/vote-core@npm:^0.0.1, @votetorrent/vote-core@workspace:*, @votetorrent/vote-core@workspace:packages/vote-core":
   version: 0.0.0-use.local
   resolution: "@votetorrent/vote-core@workspace:packages/vote-core"

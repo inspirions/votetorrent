@@ -1,0 +1,36 @@
+{
+	"name": "@votetorrent/ui-web",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "Shared web UI package for the authority dashboard and the public no-login election view",
+	"exports": {
+		".": "./src/index.js",
+		"./components": "./src/components.js",
+		"./tokens.css": "./src/tokens.css"
+	},
+	"sideEffects": [
+		"*.css"
+	],
+	"scripts": {
+		"test": "node --test --test-concurrency=1 test/*.test.mjs",
+		"typecheck": "tsc --noEmit",
+		"clean": "rm -rf node_modules"
+	},
+	"peerDependencies": {
+		"react": "19.0.0",
+		"react-dom": "19.0.0"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.2",
+		"@types/react": "19.2.17",
+		"@types/react-dom": "^19.0.0",
+		"react": "19.0.0",
+		"react-dom": "19.0.0",
+		"typescript": "^5.6.3",
+		"vite": "^7.0.0"
+	},
+	"engines": {
+		"node": ">=20.19"
+	}
+}
