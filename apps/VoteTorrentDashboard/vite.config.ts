@@ -8,8 +8,31 @@ import react from '@vitejs/plugin-react';
 // (`@votetorrent/vote-engine/browser`), never to add a polyfill here. A build that
 // silently shims a Node builtin has failed the zero-polyfill bar that
 // `scripts/assert-no-node-polyfills.mjs` exists to enforce.
+//
+// D-16 amendment (53-02): this config now carries a `resolve` key below. `resolve.dedupe`
+// is NOT `resolve.alias` — it adds no module redirection and shims nothing; it forces a
+// single copy of two packages this app already depends on directly. Do not read the bare
+// `resolve` key as evidence the rule above was relaxed: `resolve.alias`, a `define`, and an
+// envPrefix/Node-builtin-shimming plugin remain forbidden, verbatim.
+//
+// Why `dedupe` is here: this repo has no hoisted React (`.yarnrc.yml` sets
+// `nmHoistingLimits: workspaces`), each workspace owns its own `19.0.0` copy, and
+// `@votetorrent/ui-web` declares `react`/`react-dom` in both `peerDependencies` and
+// `devDependencies` — the same on-disk layout that breaks *without* dedupe. `dedupe` is
+// what makes it safe.
+//
+// The failure it prevents, with the measured signature (spike 089): a duplicate React is
+// harmless for purely presentational components — the dedupe-removed control passed 18/18
+// against a zero-hook component — and bites only at the **hook dispatcher**, dropping the
+// same control to 8/12 once one `useState` was involved, in a build that still exits 0.
+// Deleting this line fails no build; it fails at the first hook in a shared component.
+//
+// 53-12's repo-root assertion (D-21) will make this line mandatory for every workspace
+// declaring `@votetorrent/ui-web`; a comment merely discussing `dedupe` will not satisfy it,
+// because that assertion strips comment lines before scanning.
 export default defineConfig({
 	plugins: [react()],
+	resolve: { dedupe: ['react', 'react-dom'] },
 	server: { port: 5180, strictPort: true },
 	preview: { port: 5180, strictPort: true },
 	build: { target: 'es2022', sourcemap: true },
