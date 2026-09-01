@@ -1,8 +1,9 @@
 /*
  * panels.css — panel card / header / pill-row / body / denied-ghost styling.
- * Built entirely from app.css's custom properties: no new hex literal, no
- * new spacing value. The grid layout and the 900px sidebar collapse belong
- * to app.css (`.layout`, `.panel-grid`) and are not restated here.
+ * Built entirely from `@votetorrent/ui-web`'s tokens.css custom properties:
+ * no new hex literal, no new spacing value. The grid layout and the 900px
+ * sidebar collapse belong to the dashboard's own app.css (`.layout`,
+ * `.panel-grid`, per D-15) and are not restated here.
  *
  * `.panel-body` deliberately carries no CSS rule that would hide it while
  * leaving it present in markup — a denied panel's body is not emitted to

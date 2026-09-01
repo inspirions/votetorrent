@@ -1,9 +1,9 @@
 /*
  * election-ops.css -- Row / key-value / timeline / count-grid styling for
- * the three Election Operations panels, built ONLY from app.css's custom
- * properties: no new hex literal, no new raw spacing value. Declares only
- * what panels.css does not -- no `.panel`, `.panel-body` or
- * `.panel--denied` rule lives here.
+ * the three Election Operations panels, built ONLY from `@votetorrent/ui-web`'s
+ * tokens.css custom properties: no new hex literal, no new raw spacing
+ * value. Declares only what panels.css does not -- no `.panel`,
+ * `.panel-body` or `.panel--denied` rule lives here.
  *
  * The three lifecycle pill modifiers use NEUTRAL tones only. `50-UI-SPEC.md`
  * reserves --ok/--warn/--primary for named states these are not, and the

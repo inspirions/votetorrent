@@ -1,7 +1,8 @@
 /*
  * preview-as.css -- styling for the "Preview as" control and its two badge
- * states, plus the advisory-gate disclosure. Built ONLY from app.css's
- * custom properties: no hex literal, no new raw spacing value.
+ * states, plus the advisory-gate disclosure. Built ONLY from
+ * `@votetorrent/ui-web`'s tokens.css custom properties: no hex literal, no
+ * new raw spacing value.
  *
  * The real-answer and simulated-answer badge tones are each used exactly
  * once, on `.pv-badge--real` and `.pv-badge--sim` respectively --

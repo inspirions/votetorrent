@@ -2,9 +2,9 @@
  * authority-admin.css -- styling for the six Authority Administration panel
  * bodies (Network Settings, Authority Profile, Authority Peers,
  * Administration & Officers, Keyholders, Invite Authorities). Built ONLY
- * from app.css's custom properties: no new hex literal, no new raw spacing
- * value. Declares only what panels.css does not -- no `.panel`,
- * `.panel-body` or `.panel--denied` rule lives here.
+ * from `@votetorrent/ui-web`'s tokens.css custom properties: no new hex
+ * literal, no new raw spacing value. Declares only what panels.css does
+ * not -- no `.panel`, `.panel-body` or `.panel--denied` rule lives here.
  *
  * Every class here is `aa-`-prefixed. This is DELIBERATE: global CSS has no
  * module boundary, and 50-10 fills the other three panel stubs in this SAME

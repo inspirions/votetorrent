@@ -13,12 +13,12 @@
  * see it. Nothing here changes a single line of behaviour -- this file and the
  * `className` attributes that reference it are the whole change.
  *
- * Built from `app.css`'s custom properties ONLY: no new hex literal, no raw
- * spacing value outside the scale. `app.css` declares exactly one `:root`
- * token set and no `prefers-color-scheme` block anywhere in this app, so
- * there is no second theme to satisfy -- referencing tokens rather than
- * literals is what makes this file follow one automatically if it is ever
- * added.
+ * Built from `@votetorrent/ui-web`'s tokens.css custom properties ONLY: no
+ * new hex literal, no raw spacing value outside the scale. `tokens.css`
+ * declares exactly one `:root` token set and no `prefers-color-scheme`
+ * block anywhere in this app, so there is no second theme to satisfy --
+ * referencing tokens rather than literals is what makes this file follow
+ * one automatically if it is ever added.
  *
  * Every class selector is `bs-`-prefixed. Global CSS has no module boundary
  * and this app already carries five sibling namespaces (`sh-`, `pv-`,
@@ -117,9 +117,9 @@
 	color-scheme: dark;
 }
 
-/* `app.css` already declares the global `:focus-visible` outline in `--primary`
- * and it is deliberately not overridden here -- this rule only adds the border
- * tint underneath it. */
+/* `@votetorrent/ui-web`'s tokens.css already declares the global
+ * `:focus-visible` outline in `--primary` and it is deliberately not
+ * overridden here -- this rule only adds the border tint underneath it. */
 .bs-input:focus-visible {
 	border-color: var(--primary);
 }

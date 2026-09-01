@@ -6,9 +6,10 @@
  *
  * Every class in this file is prefixed `sh-` — a disjoint namespace next to
  * 50-06's `panel*` classes, 50-10's `election-ops.css` and 50-11's `aa-`
- * prefix, by agreement. Built from `app.css`'s custom properties ONLY: no
- * new color literal, no new spacing value, and the panel grid rule / 900px
- * collapse (both already declared in `app.css`) are not restated here.
+ * prefix, by agreement. Built from `@votetorrent/ui-web`'s tokens.css
+ * custom properties ONLY: no new color literal, no new spacing value, and
+ * the panel grid rule / 900px collapse (both declared in the dashboard's
+ * own `app.css`, per D-15) are not restated here.
  *
  * This file declares no rule for a partial-access or fully-mutable panel
  * state — neither exists in this phase (D-17, contract 9): every panel is
