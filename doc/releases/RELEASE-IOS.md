@@ -209,3 +209,45 @@ reveal procedure, no markup and no commands.
 
 The paid-team attestation proof is tracked as an open item in the project's planning
 notes; it is not closed, in progress, or scheduled by this document.
+
+## 8. Revealing the iOS section on the download page
+
+`web/join.html` already carries the iOS/TestFlight download card, wrapped in a single
+HTML comment delimited by the sentinels `VT_IOS_JOIN_SECTION_BEGIN` and
+`VT_IOS_JOIN_SECTION_END`. `grep` for those two tokens to find it. It is a comment
+rather than a CSS-based hide because a comment cannot be revealed by a stale
+stylesheet, a DevTools display toggle, or a crawler, and `./publish html` ships HTML
+without `styles.css`.
+
+**Do this only after** a build has actually been accepted and is installable on
+TestFlight (section 5). At the time this section was written, no signed build existed
+and nothing had been uploaded; the page's current claims are true and must stay true
+until that changes.
+
+**The edit is two line deletions, not one:** delete the line carrying the `<!--`
+opener (`VT_IOS_JOIN_SECTION_BEGIN`) and the line carrying the `-->` closer
+(`VT_IOS_JOIN_SECTION_END`). A single-line reveal was rejected because it would
+require collapsing the whole section onto one unreviewable physical line.
+
+**Replace the placeholder link.** Substitute the literal `TESTFLIGHT_LINK_PENDING`
+with the public TestFlight invite URL copied from App Store Connect itself — never
+from an email or a chat message, and never invented. No `testflight.apple.com` URL is
+present anywhere in the repo today, deliberately, so a stale or wrong invite code
+cannot ship by accident.
+
+**Fix the surrounding claims in the same change, or the page contradicts itself.**
+`web/join.html:42` ("iOS builds are not yet available for outside testing.", line
+number will drift) must be replaced with an accurate sentence, and the two
+`p.build-note` "Android only" notes (currently `:28`, `:35`) must be revisited.
+Revealing the card while those three statements still stand is a **worse** outcome
+than leaving it hidden.
+
+**Publish with `./publish main`**, not `./publish html` — the new card relies on
+`.info-box`/`.download-card`/`.app-download`/`.build-note` rules that live in
+`styles.css`, and an HTML-only publish would ship the markup against a possibly stale
+stylesheet (`index.html` requests `styles.css?v=3`; bump that query string if the CSS
+itself changes).
+
+**Verify afterwards:** `VT_IOS_JOIN_SECTION_BEGIN` and `VT_IOS_JOIN_SECTION_END` no
+longer appear in `web/join.html`, and `TESTFLIGHT_LINK_PENDING` no longer appears
+anywhere in the file.
