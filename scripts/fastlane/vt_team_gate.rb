@@ -59,7 +59,15 @@ module VtTeamGate
     # Quote-tolerant on purpose: a blanked-out `DEVELOPMENT_TEAM = "";` must be captured as
     # an empty value and REJECTED below, not silently skipped as "no match" — a regex that
     # stops matching is exactly the fail-open failure mode this gate exists to avoid.
-    matches = text.scan(/DEVELOPMENT_TEAM\s*=\s*"?([^;"\s]*)"?\s*;/).flatten
+    #
+    # Line-anchored on purpose: unanchored, a commented-out `/* DEVELOPMENT_TEAM = X; */`
+    # counted as a real assignment. With the SAME value on both, a live Debug entry plus a
+    # commented Release entry gave matches.length == 2 and uniq.length == 1 — clearing both
+    # guards below and PASSING, while only one config actually carried a team. That is
+    # precisely the drift this gate exists to catch. `[ \t]` not `\s`: Ruby's `\s` matches
+    # newlines, which would let `^` anchor on a preceding line and scan across into this
+    # one, reopening the hole. Covered by the commented-out fixtures in the test file.
+    matches = text.scan(/^[ \t]*DEVELOPMENT_TEAM\s*=\s*"?([^;"\s]*)"?\s*;/).flatten
 
     if matches.length < 2
       UI.user_error!(

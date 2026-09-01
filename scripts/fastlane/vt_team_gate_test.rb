@@ -332,4 +332,84 @@ class VtTeamGateTest < Minitest::Test
     assert_match(/^[ \t]*VtTeamGate\.assert_team!\(REPO_ROOT\)/, body)
     refute_match(/VtAppAttestReleaseGate/, body)
   end
+
+  # --- Comment-blindness: a commented-out setting is NOT a live assignment ---------
+  #
+  # The scan was once unanchored, so `/* DEVELOPMENT_TEAM = X; */` counted as real. With
+  # the same value commented in one config and live in the other, matches.length == 2 and
+  # uniq.length == 1 cleared both guards and the gate PASSED with only one live entry.
+  # These three fixtures pin both directions of that bug plus the >2 branch.
+
+  def test_refuses_a_release_team_that_is_only_a_block_comment
+    pbxproj_text = <<~PBXPROJ
+      /* Begin XCBuildConfiguration section */
+      		13B07F941A680F5B00A75B9A /* Debug */ = {
+      			buildSettings = {
+      				DEVELOPMENT_TEAM = 6849Q7KVP5;
+      			};
+      		};
+      		13B07F951A680F5B00A75B9A /* Release */ = {
+      			buildSettings = {
+      				/* DEVELOPMENT_TEAM = 6849Q7KVP5; */
+      			};
+      		};
+      /* End XCBuildConfiguration section */
+    PBXPROJ
+    with_raw_fixture_repo(pbxproj_text: pbxproj_text) do |repo|
+      err = assert_raises(FastlaneCore::UI::Error) do
+        VtTeamGate.assert_team!(repo)
+      end
+      assert_match(/found only 1/, err.message)
+    end
+  end
+
+  def test_ignores_a_stale_commented_out_team_alongside_two_live_ones
+    pbxproj_text = <<~PBXPROJ
+      /* Begin XCBuildConfiguration section */
+      		13B07F941A680F5B00A75B9A /* Debug */ = {
+      			buildSettings = {
+      				/* DEVELOPMENT_TEAM = 94TY7UR2W5; */
+      				DEVELOPMENT_TEAM = 6849Q7KVP5;
+      			};
+      		};
+      		13B07F951A680F5B00A75B9A /* Release */ = {
+      			buildSettings = {
+      				DEVELOPMENT_TEAM = 6849Q7KVP5;
+      			};
+      		};
+      /* End XCBuildConfiguration section */
+    PBXPROJ
+    with_raw_fixture_repo(pbxproj_text: pbxproj_text) do |repo|
+      VtTeamGate.assert_team!(repo)
+      assert_match(/consistent/, FastlaneCore::UI.last_success_message)
+    end
+  end
+
+  def test_refuses_three_live_development_team_lines_that_disagree
+    pbxproj_text = <<~PBXPROJ
+      /* Begin XCBuildConfiguration section */
+      		13B07F941A680F5B00A75B9A /* Debug */ = {
+      			buildSettings = {
+      				DEVELOPMENT_TEAM = 6849Q7KVP5;
+      			};
+      		};
+      		13B07F951A680F5B00A75B9A /* Release */ = {
+      			buildSettings = {
+      				DEVELOPMENT_TEAM = 6849Q7KVP5;
+      			};
+      		};
+      		13B07F961A680F5B00A75B9A /* Profile */ = {
+      			buildSettings = {
+      				DEVELOPMENT_TEAM = ZZZZ999999;
+      			};
+      		};
+      /* End XCBuildConfiguration section */
+    PBXPROJ
+    with_raw_fixture_repo(pbxproj_text: pbxproj_text) do |repo|
+      err = assert_raises(FastlaneCore::UI::Error) do
+        VtTeamGate.assert_team!(repo)
+      end
+      assert_match(/disagree/, err.message)
+    end
+  end
 end
