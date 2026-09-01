@@ -36,6 +36,7 @@
 		"lint:peers": "node scripts/check-peer-requirements.mjs",
 		"lint:stubs": "bash scripts/lint-stubs.sh",
 		"verify:security-controls": "node scripts/verify-security-controls.mjs all .planning/phases/52-bootstrap-rendezvous-service",
+		"verify:relay-smoke": "node scripts/assert-relay-smoke.mjs",
 		"postinstall": "node scripts/check-peer-requirements.mjs"
 	},
 	"devDependencies": {
