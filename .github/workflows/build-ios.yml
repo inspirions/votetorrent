@@ -136,3 +136,172 @@ jobs:
             require "./scripts/fastlane/vt_team_gate"
             VtTeamGate.assert_team!(Dir.pwd)
           '
+
+  # ===========================================================================
+  # Job 2 -- archive: an UNSIGNED device archive per app (D-02), matrixed
+  # over both apps (D-05), asserting the JS bundle landed in the built .app
+  # (D-03). Gated behind ruby-gates (fail-closed static gate before any
+  # expensive build step) -- a 10x-billed macOS matrix is exactly the trade
+  # that gating is for. dashboard.yml deliberately uses no `needs:` so each
+  # of its verdicts stands alone; that reasoning does not transfer here
+  # because both of its jobs are cheap Linux jobs, unlike this one.
+  # ===========================================================================
+  archive:
+    name: "Unsigned archive - ${{ matrix.app.name }}"
+    runs-on: macos-15
+    needs: ruby-gates
+    # Bounded deliberately: RESEARCH's Pitfall 1 warning sign for an
+    # incomplete signing-disable is a very slow archive step, and an
+    # unbounded hang on a 10x-billed runner is the expensive failure mode
+    # this timeout exists to cut off.
+    timeout-minutes: 60
+    strategy:
+      # D-05: Voter and Authority each have their own Xcode project and
+      # Podfile and can break independently -- one app's failure must not
+      # hide the other's result.
+      fail-fast: false
+      matrix:
+        app:
+          - name: voter
+            dir: apps/VoteTorrentVoter
+            scheme: VoteTorrentVoter
+          - name: authority
+            dir: apps/VoteTorrentAuthority
+            scheme: VoteTorrentAuthority
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail closed, never a silent fallback to whatever Xcode the image
+      # ships by default -- an unannounced image change becomes a loud red
+      # job with its own inventory dump, not a silent toolchain swap.
+      # [ASSUMED: Xcode 26.3 is present on the macos-15 image -- cited from
+      # the actions/runner-images macos-15 README via RESEARCH, not executed
+      # here.]
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          XCODE_PATH="/Applications/Xcode_26.3.app/Contents/Developer"
+          if [ ! -d "$XCODE_PATH" ]; then
+            echo "::error::$XCODE_PATH not found on this runner image. Installed Xcode versions:"
+            ls -d /Applications/Xcode* || true
+            exit 1
+          fi
+          sudo xcode-select --switch "$XCODE_PATH"
+          xcodebuild -version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # No `cache: yarn` here, matching build-android.yml and
+          # dashboard.yml: setup-node's yarn cache shells out to
+          # `yarn cache dir` using the runner's global Yarn 1.22.22, which
+          # hard-errors against this repo's `packageManager: yarn@4.7.0` pin.
+
+      # Corepack MUST be enabled before anything invokes `yarn`.
+      - name: Enable Corepack (pinned Yarn 4.7.0)
+        run: |
+          corepack enable
+          yarn --version
+
+      - name: Cache Yarn global cache
+        uses: actions/cache@v4
+        with:
+          # .yarnrc.yml sets enableGlobalCache: true, so downloads land in
+          # the global folder rather than a per-project .yarn/cache.
+          path: ~/.yarn/berry/cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install workspace dependencies
+        run: yarn install --immutable
+
+      # Workspace packages publish their entrypoints from dist/ (e.g.
+      # @votetorrent/vote-engine exports ./rn -> ./dist/rn-entry.js), and
+      # dist/ is gitignored. A clean CI checkout therefore has no dist/, and
+      # Metro fails to resolve @votetorrent/vote-engine/rn during bundling.
+      #
+      # Scoped to packages/* on purpose: apps/* must NOT be built here,
+      # because votetorrent-authority's `build` script shells into gradle.
+      - name: Build workspace packages
+        run: yarn workspaces foreach -At --include 'packages/*' run build
+
+      # Pods/ is gitignored, so this step is mandatory. This deliberately
+      # uses the runner's preinstalled CocoaPods rather than `bundle exec`:
+      # this repo's Gemfile.lock pins BUNDLED WITH 1.17.2 against the
+      # runner's modern Ruby. `bundle exec` remains the admin's local
+      # release path. Must run after yarn install: the Podfile's first
+      # statement shells out to `node` to require.resolve
+      # react-native/scripts/react_native_pods.rb.
+      - name: CocoaPods install
+        working-directory: ${{ matrix.app.dir }}/ios
+        run: |
+          pod --version
+          pod install
+
+      # D-02: archive from the .xcworkspace (never .xcodeproj -- -project
+      # would silently omit every CocoaPods-vendored native module,
+      # including AttestationNative, and the bundle assertion below could
+      # still pass on an archive missing native functionality) with all
+      # three signing-disable settings TOGETHER. CODE_SIGNING_ALLOWED=NO
+      # alone is not reliable: both apps' project-level pbxproj carry a
+      # "CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer" default
+      # that CODE_SIGNING_ALLOWED=NO does not reliably override, and the
+      # symptom is a very slow archive or an explicit "no signing
+      # certificate" error. The xcodebuild flag that auto-manages
+      # provisioning profiles via an authenticated Developer Portal call is
+      # omitted deliberately and PERMANENTLY, never added even to "help"
+      # signing along -- that authenticated call is exactly what D-01
+      # forecloses. -configuration Release is what
+      # makes the React Native bundling phase run -- that phase branches
+      # only on $CONFIGURATION/$PLATFORM_NAME, never on signing state, so a
+      # signing-disabled Release archive still bundles.
+      - name: Archive (unsigned)
+        working-directory: ${{ matrix.app.dir }}/ios
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -workspace "${{ matrix.app.scheme }}.xcworkspace" \
+            -scheme "${{ matrix.app.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$RUNNER_TEMP/${{ matrix.app.scheme }}.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee "$RUNNER_TEMP/xcodebuild-${{ matrix.app.name }}.log"
+
+      # D-03: fail the job if the archived .app has no JS bundle -- a
+      # release archive missing main.jsbundle would install (if it were
+      # signed) and then fail to start. Two distinct failures, both
+      # diagnosable: a missing .app dumps the archive layout (this half --
+      # where Xcode relocates the product inside the .xcarchive -- is the
+      # UNPROVEN part; see 55-05-PLAN.md <limitations_and_unproven>), and a
+      # missing main.jsbundle means Metro bundling did not run.
+      - name: Verify the archive carries the JS bundle
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/${{ matrix.app.scheme }}.xcarchive/Products/Applications/${{ matrix.app.scheme }}.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::${{ matrix.app.name }} archive layout is not what was expected -- no .app at $APP"
+            find "$RUNNER_TEMP/${{ matrix.app.scheme }}.xcarchive" -maxdepth 4
+            exit 1
+          fi
+          if [ ! -f "$APP/main.jsbundle" ]; then
+            echo "::error::${{ matrix.app.name }} archive has no JS bundle -- Metro bundling did not run"
+            exit 1
+          fi
+          echo "Bundle size: $(du -h "$APP/main.jsbundle" | cut -f1)"
+
+      # The .xcarchive itself is deliberately NOT uploaded (unsigned and
+      # therefore not installable -- publishing it as an artifact would
+      # invite exactly the "here is the iOS build" misreading D-01 exists to
+      # prevent, and it carries dSYMs and is large). Only the xcodebuild log
+      # is kept, and only on failure, as a diagnostic.
+      - name: Upload xcodebuild log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-${{ matrix.app.name }}-${{ github.sha }}
+          path: ${{ runner.temp }}/xcodebuild-${{ matrix.app.name }}.log
+          retention-days: 14
