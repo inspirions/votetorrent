@@ -267,6 +267,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = VoteTorrentVoter/VoteTorrentVoter.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 6849Q7KVP5;
 				ENABLE_BITCODE = NO;
@@ -296,6 +297,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = VoteTorrentVoter/VoteTorrentVoter.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 6849Q7KVP5;
 				INFOPLIST_FILE = VoteTorrentVoter/Info.plist;
