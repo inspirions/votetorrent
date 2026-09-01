@@ -39,19 +39,19 @@ async function seededDb() {
 
 // --- Coverage: capability.tables subset of module TABLES_READ --------------
 
-test('coverage: registrations TABLES_READ covers all 12 vrg tables from capabilities.js', () => {
+test('coverage: registrations TABLES_READ covers all 13 vrg tables from capabilities.js', () => {
 	const capability = CAPABILITIES.find((c) => c.id === 'registrations');
 	assert.ok(capability);
-	assert.equal(capability.tables.length, 12);
+	assert.equal(capability.tables.length, 13);
 	for (const table of capability.tables) {
 		assert.ok(registrations.TABLES_READ.includes(table), `registrations.TABLES_READ missing ${table}`);
 	}
 });
 
-test('coverage: elections TABLES_READ covers all 7 mel tables from capabilities.js', () => {
+test('coverage: elections TABLES_READ covers all 8 mel tables from capabilities.js', () => {
 	const capability = CAPABILITIES.find((c) => c.id === 'elections');
 	assert.ok(capability);
-	assert.equal(capability.tables.length, 7);
+	assert.equal(capability.tables.length, 8);
 	for (const table of capability.tables) {
 		assert.ok(elections.TABLES_READ.includes(table), `elections.TABLES_READ missing ${table}`);
 	}
@@ -111,7 +111,7 @@ test('SQL validity (founding-only): every read function resolves without throwin
 	const roster = await registrations.readRegistrantRoster(db);
 	assert.deepEqual(roster, { rows: [], total: 0 });
 	const surfaceCounts = await registrations.readRegistrationSurfaceCounts(db, 'nonexistent');
-	assert.equal(surfaceCounts.length, 12);
+	assert.equal(surfaceCounts.length, 13);
 	assert.ok(surfaceCounts.every((entry) => entry.count === 0));
 	assert.equal(await registrations.hasAnyRegistrationData(db), false);
 });
@@ -236,7 +236,7 @@ test('readRegistrantRoster returns { rows: [], total: 0 } on the seeded database
 test('readRegistrationSurfaceCounts returns one entry per vrg table with RegistrationBridgeKey=1 and PollingDevice=1 seeded, everything else 0', async () => {
 	const db = await seededDb();
 	const entries = await registrations.readRegistrationSurfaceCounts(db, SEED_ELECTION.id);
-	assert.equal(entries.length, 12);
+	assert.equal(entries.length, 13);
 	const byTable = Object.fromEntries(entries.map((e) => [e.table, e.count]));
 	assert.equal(byTable.RegistrationBridgeKey, SEED_EXPECTED_COUNTS.RegistrationBridgeKey);
 	assert.equal(byTable.PollingDevice, SEED_EXPECTED_COUNTS.PollingDevice);
@@ -245,6 +245,7 @@ test('readRegistrationSurfaceCounts returns one entry per vrg table with Registr
 	assert.equal(byTable.RegistrantSelective, 0);
 	assert.equal(byTable.Association, 0);
 	assert.equal(byTable.AssociationPrivate, 0);
+	assert.equal(byTable.AssociationRequest, 0);
 	assert.equal(byTable.AttestationChallenge, 0);
 	assert.equal(byTable.ElectionRegistrant, 0);
 	assert.equal(byTable.RegistrantPublic, 0);

@@ -156,6 +156,7 @@ export async function readRegistrantRoster(db, limit = ROSTER_PAGE_SIZE) {
 // RegistrantSelective, AssociationPrivate, Association, AttestationChallenge).
 const SURFACE_COUNT_QUERIES = Object.freeze({
 	Association: 'select count(*) as c from Association',
+	AssociationRequest: 'select count(*) as c from AssociationRequest',
 	AssociationPrivate: 'select count(*) as c from AssociationPrivate',
 	AttestationChallenge: 'select count(*) as c from AttestationChallenge',
 	ElectionRegistrant: 'select count(*) as c from ElectionRegistrant where ElectionId = :electionId',
@@ -172,7 +173,7 @@ const SURFACE_COUNT_QUERIES = Object.freeze({
 /**
  * One `{ table, count }` entry per `vrg` table, in `capability.tables`
  * order (i.e. `TABLES_READ` order) -- the positive control that proves the
- * counts are really being read, and the section that makes all twelve
+ * counts are really being read, and the section that makes all thirteen
  * tables visible in the panel.
  *
  * @param {import('@quereus/quereus').Database} db

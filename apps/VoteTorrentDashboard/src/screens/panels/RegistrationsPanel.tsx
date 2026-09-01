@@ -1,6 +1,6 @@
 /**
  * RegistrationsPanel.tsx -- the `vrg` panel body, the deepest of the three
- * per the registration-weighting constraint (16 of 41 enforcement sites,
+ * per the registration-weighting constraint (18 of 45 enforcement sites,
  * 39% of the whole authorization surface, all twelve `vrg` tables covered).
  *
  * Renders no control of any kind (rule R2). Never selects a private-tier
