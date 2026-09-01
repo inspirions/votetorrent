@@ -143,8 +143,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
     })
   })
 
-  describe('PUB-02: @optimystic/quereus-plugin-optimystic reconciled to ^0.24.x, dead patches retired', () => {
-    it('resolves a single @optimystic/quereus-plugin-optimystic version, and it is 0.24.x', () => {
+  describe('PUB-02: @optimystic/quereus-plugin-optimystic reconciled to ^0.25.x, dead patches retired', () => {
+    it('resolves a single @optimystic/quereus-plugin-optimystic version, and it is 0.25.x', () => {
       const versions = resolvedVersionsFor(lock, '@optimystic/quereus-plugin-optimystic')
       expect(versions.length, 'expected at least one resolved @optimystic/quereus-plugin-optimystic block in yarn.lock').to.be.greaterThan(0)
 
@@ -156,11 +156,11 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @optimystic/quereus-plugin-optimystic version must be 0.24.x, got ${distinct[0]}`
-      ).to.match(/^0\.24\./)
+        `Resolved @optimystic/quereus-plugin-optimystic version must be 0.25.x, got ${distinct[0]}`
+      ).to.match(/^0\.25\./)
     })
 
-    it('resolves ^0.24.0 in the root package.json dependency declaration', () => {
+    it('resolves ^0.25.1 in the root package.json dependency declaration', () => {
       const parsed = JSON.parse(rootPackageJson) as {
         dependencies?: Record<string, string>
         resolutions?: Record<string, string>
@@ -169,8 +169,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
         parsed.resolutions?.['@optimystic/quereus-plugin-optimystic']
       expect(
         declared,
-        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^0.24.0'
-      ).to.equal('^0.24.0')
+        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^0.25.1'
+      ).to.equal('^0.25.1')
     })
 
     it('has zero references to the dead patch locators (0.13.5 plugin-optimystic patch, 0.7.1 cadre-core patch)', () => {

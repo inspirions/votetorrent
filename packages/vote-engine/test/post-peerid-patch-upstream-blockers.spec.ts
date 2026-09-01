@@ -139,9 +139,6 @@ const CLUSTER_POLICY_KEY_MARKER = 'clusterPolicy'
 
 // ── Issue 3 markers — gossipsub / libp2p-3 Stream incompatibility ───────────────────────────────
 const GOSSIPSUB_PKG = ['@chainsafe', 'libp2p-gossipsub', 'package.json']
-const GOSSIPSUB_NESTED_IFACE = [
-  '@chainsafe', 'libp2p-gossipsub', 'node_modules', '@libp2p', 'interface', 'package.json',
-]
 const HOST_IFACE_STREAM_DTS = ['@libp2p', 'interface', 'dist', 'src', 'stream.d.ts']
 const MESSAGE_STREAM_MARKER = 'interface Stream extends ' + 'MessageStream'
 const DUPLEX_STREAM_MARKER = 'interface Stream extends ' + 'Duplex'
@@ -298,75 +295,53 @@ describe('post-peerId-patch blocker 2: cadre-core hardcodes clusterSize and drop
   })
 })
 
-describe('post-peerId-patch blocker 3: db-p2p pairs libp2p 3.x with a gossipsub built for libp2p 2.x', () => {
-  it('gossipsub still depends on a @libp2p/interface major older than the host copy', () => {
-    const gossipPkgPath = resolveInstalled(...GOSSIPSUB_PKG)
-    expect(gossipPkgPath, 'Expected @chainsafe/libp2p-gossipsub to be installed').to.not.equal(undefined)
-    const gossipPkg = JSON.parse(readFileSync(gossipPkgPath as string, 'utf8')) as {
+describe('post-peerId-patch blocker 3 CLOSED: db-p2p no longer ships gossipsub at all', () => {
+  // Was: db-p2p paired `@chainsafe/libp2p-gossipsub@14` (compiled against the libp2p-2 duplex
+  // `Stream`) with `libp2p@3` (whose `Stream extends MessageStream` has no .source/.sink), so every
+  // outbound gossipsub stream threw `fns.shift(...) is not a function`. Filed as
+  // gotchoices/Optimystic#9.
+  //
+  // RESOLVED not by re-pairing but by REMOVAL: `@optimystic/db-p2p@0.25.1` dropped the gossipsub
+  // dependency outright, and with it the 21 packages it dragged in. The three assertions below used
+  // to prove the skew still existed; they now prove it cannot come back silently. A failure here
+  // means gossipsub re-entered the tree — re-read Optimystic#9 before assuming that is safe.
+  it('db-p2p declares no @chainsafe/libp2p-gossipsub dependency', () => {
+    const dbP2pPkgPath = resolveInstalled('@optimystic', 'db-p2p', 'package.json')
+    expect(dbP2pPkgPath, 'Expected @optimystic/db-p2p to be installed').to.not.equal(undefined)
+    const pkg = JSON.parse(readFileSync(dbP2pPkgPath as string, 'utf8')) as {
+      version: string
       dependencies?: Record<string, string>
     }
-    const gossipIfaceRange = gossipPkg.dependencies?.['@libp2p/interface']
-    expect(gossipIfaceRange, 'Expected gossipsub to declare an @libp2p/interface dependency').to.not.equal(undefined)
+    const deps = pkg.dependencies ?? {}
 
-    const hostIfacePath = resolveInstalled('@libp2p', 'interface', 'package.json')
-    expect(hostIfacePath, 'Expected a host @libp2p/interface copy to be installed').to.not.equal(undefined)
-    const hostIfaceVersion = (JSON.parse(readFileSync(hostIfacePath as string, 'utf8')) as { version: string }).version
-
+    expect(deps.libp2p, 'Expected db-p2p to still depend on libp2p').to.not.equal(undefined)
+    expect(majorOf(deps.libp2p as string) >= 3, 'Expected db-p2p to still be on libp2p 3.x or later').to.equal(true)
     expect(
-      majorOf(gossipIfaceRange as string) < majorOf(hostIfaceVersion),
-      'gossipsub\'s @libp2p/interface range (' + String(gossipIfaceRange) + ') is no longer behind the ' +
-      'host copy (' + hostIfaceVersion + '). The major skew may be resolved — re-run the device n=4 ' +
-      'proof, confirm the `fns.shift(...) is not a function` errors are gone from the drone logs, and ' +
-      'close .planning/quick/260731-fm3-file-upstream-issues-for-post-peerid-pat/issues/' +
-      'db-p2p-gossipsub-libp2p3-stream-incompatibility.md.',
-    ).to.equal(true)
+      deps['@chainsafe/libp2p-gossipsub'],
+      'db-p2p ' + pkg.version + ' has re-introduced a @chainsafe/libp2p-gossipsub dependency. That is the ' +
+      'exact pairing gotchoices/Optimystic#9 documents as broken under libp2p 3 — verify the new range is ' +
+      'libp2p-3 aware before accepting it, and restore the skew assertions this block replaced.',
+    ).to.equal(undefined)
   })
 
-  it('the host Stream is a MessageStream while gossipsub\'s nested copy still expects a Duplex', () => {
+  it('no @chainsafe/libp2p-gossipsub copy is installed anywhere in the tree', () => {
+    expect(
+      resolveInstalled(...GOSSIPSUB_PKG),
+      'A @chainsafe/libp2p-gossipsub copy is installed again. Nothing in the stack should pull it since ' +
+      'db-p2p 0.25.1 dropped it; find the new dependant before trusting this tree.',
+    ).to.equal(undefined)
+  })
+
+  it('the host @libp2p/interface still defines the libp2p-3 MessageStream shape that made the pairing impossible', () => {
+    // Kept as the anchor for WHY the removal was the fix: if the host Stream ever goes back to a
+    // duplex, the original pairing stops being incompatible and this whole block needs re-deriving.
     const hostStreamDts = resolveInstalled(...HOST_IFACE_STREAM_DTS)
     expect(hostStreamDts, 'Expected @libp2p/interface dist/src/stream.d.ts to be installed').to.not.equal(undefined)
     const hostSrc = readFileSync(hostStreamDts as string, 'utf8')
     expect(
       hostSrc.includes(MESSAGE_STREAM_MARKER),
-      'Expected the host @libp2p/interface to define `' + MESSAGE_STREAM_MARKER + '` (the libp2p-3 ' +
-      'shape with no .source/.sink). If this changed, re-verify the gossipsub issue draft\'s mechanism.',
-    ).to.equal(true)
-
-    // The nested v2 copy is the one gossipsub was compiled against — a Duplex with .source/.sink.
-    const nestedPkg = resolveInstalled(...GOSSIPSUB_NESTED_IFACE)
-    if (nestedPkg === undefined) {
-      // No nested copy => the skew is gone. That is the fixed state, not the tracked defect.
-      expect.fail(
-        'gossipsub no longer carries a nested @libp2p/interface copy — the major skew appears resolved. ' +
-        'Re-run the device n=4 proof and close the db-p2p-gossipsub-libp2p3-stream-incompatibility.md draft.',
-      )
-    }
-    const nestedConnDts = join(dirname(nestedPkg as string), 'dist', 'src', 'connection.d.ts')
-    expect(existsSync(nestedConnDts), 'Expected the nested @libp2p/interface connection.d.ts').to.equal(true)
-    expect(
-      readFileSync(nestedConnDts, 'utf8').includes(DUPLEX_STREAM_MARKER),
-      'Expected gossipsub\'s nested @libp2p/interface to define `' + DUPLEX_STREAM_MARKER + '` — the ' +
-      'libp2p-2 duplex shape whose absence at runtime causes `fns.shift(...) is not a function`.',
-    ).to.equal(true)
-  })
-
-  it('db-p2p still declares the incompatible pairing in its own manifest', () => {
-    const dbP2pPkgPath = resolveInstalled('@optimystic', 'db-p2p', 'package.json')
-    expect(dbP2pPkgPath, 'Expected @optimystic/db-p2p to be installed').to.not.equal(undefined)
-    const pkg = JSON.parse(readFileSync(dbP2pPkgPath as string, 'utf8')) as {
-      dependencies?: Record<string, string>
-    }
-    const deps = pkg.dependencies ?? {}
-    const libp2pRange = deps.libp2p
-    const gossipRange = deps['@chainsafe/libp2p-gossipsub']
-
-    expect(libp2pRange, 'Expected db-p2p to depend on libp2p').to.not.equal(undefined)
-    expect(gossipRange, 'Expected db-p2p to depend on @chainsafe/libp2p-gossipsub').to.not.equal(undefined)
-    expect(
-      majorOf(libp2pRange as string) >= 3 && majorOf(gossipRange as string) <= 14,
-      'db-p2p\'s libp2p (' + String(libp2pRange) + ') / gossipsub (' + String(gossipRange) + ') pairing ' +
-      'changed. If gossipsub moved past 14 (libp2p-3 aware) or was dropped, this blocker is likely ' +
-      'FIXED — close the db-p2p-gossipsub-libp2p3-stream-incompatibility.md draft.',
+      'Expected the host @libp2p/interface to define `' + MESSAGE_STREAM_MARKER + '`. If the host Stream ' +
+      'reverted to `' + DUPLEX_STREAM_MARKER + '`, re-derive this block from Optimystic#9.',
     ).to.equal(true)
   })
 })
