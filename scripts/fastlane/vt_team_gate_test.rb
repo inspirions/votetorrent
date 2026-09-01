@@ -323,13 +323,13 @@ class VtTeamGateTest < Minitest::Test
 
   def test_voter_ios_beta_lane_calls_the_team_gate
     body = lane_body(File.read(VOTER_IOS_FASTFILE), "beta")
-    assert_match(/VtTeamGate\.assert_team!\(REPO_ROOT\)/, body)
+    assert_match(/^[ \t]*VtTeamGate\.assert_team!\(REPO_ROOT\)/, body)
     refute_match(/VtAppAttestReleaseGate/, body)
   end
 
   def test_voter_ios_release_lane_calls_the_team_gate
     body = lane_body(File.read(VOTER_IOS_FASTFILE), "release")
-    assert_match(/VtTeamGate\.assert_team!\(REPO_ROOT\)/, body)
+    assert_match(/^[ \t]*VtTeamGate\.assert_team!\(REPO_ROOT\)/, body)
     refute_match(/VtAppAttestReleaseGate/, body)
   end
 end
