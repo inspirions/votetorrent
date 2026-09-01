@@ -1,4 +1,4 @@
-// appattest-keys.generated.ts — PROVISIONED (free personal team, D-13).
+// appattest-keys.generated.ts — PROVISIONED (paid Apple Developer Program team).
 //
 // Bundled, clearly-labeled config for the offline iOS App Attest verifier
 // (Phase 51), the exact sibling of `attestation-roots.generated.ts` +
@@ -8,17 +8,18 @@
 //   1. Apple's App Attest trust-anchor root certificate — PROVISIONED
 //      2026-08-26. Verification record in the constant's own doc comment.
 //   2. The App ID (`<teamId>.<bundleId>`) every attestation and assertion is
-//      pinned to — COMMITTED 2026-08-27 at the FREE PERSONAL TEAM value
-//      (D-13). See that constant's doc comment for the accepted risk and its
-//      mitigation.
+//      pinned to — now the PAID Apple Developer Program team, swapped
+//      2026-09-01, which RETIRES D-13's accepted risk. See that constant's own
+//      doc comment for what changed and what is still unproven.
 //   3. Which App Attest environment this authority accepts — the literal
 //      strict value (`production`, D-15).
 //
-// So `APP_ATTEST_PROVISIONED` below is now TRUE and the iOS branch no longer
-// fails closed on missing config. The remaining accepted proof debt (paid
-// Team ID, production attestations, a shipping signed build) is tracked in
-// `.planning/todos/pending/2026-08-25-ios-appattest-team-id-and-entitlement.md`
-// and enforced by `scripts/fastlane/vt_appattest_release_gate.rb` (D-14).
+// So `APP_ATTEST_PROVISIONED` below is TRUE and the iOS branch no longer fails
+// closed on missing config. `scripts/fastlane/vt_appattest_release_gate.rb`
+// (D-14) — which failed every release lane while the personal-team value sat
+// here — now CLEARS. The proof debt that remains is a real signed build
+// producing a `production` attestation on paid-team hardware; see
+// `.planning/todos/completed/2026-08-25-ios-appattest-team-id-and-entitlement.md`.
 //
 // This file lives in the AUTHORITY app because the authority is what VERIFIES.
 // A near-identical empty file previously sat in `apps/VoteTorrentVoter/src/
@@ -103,21 +104,32 @@ export const PINNED_APP_ATTEST_ROOTS_DER: Uint8Array[] = APPLE_APP_ATTEST_ROOTS_
  * `rpIdHash === SHA256(appId)`, and the assertion half re-checks it, so a wrong
  * value here fail-closed rejects every genuine device.
  *
- * COMMITTED 2026-08-27 (D-13) as the FREE PERSONAL TEAM value `94TY7UR2W5`,
- * deliberately, for a runnable end-to-end proof — spike 085 measured App
- * Attest working on this team (`isSupported`/`generateKey`/`attestKey`/
- * `generateAssertion` all OK on a real iPhone 13, 2026-08-25). This is not a
- * shipping identity (7-day profiles, no TestFlight) and carries an accepted
- * risk that was raised and explicitly overridden: a shipped authority built
- * from this tree would treat THIS personal team's builds as the legitimate
- * attestation producer. The `'production'` environment gate below bounds the
- * blast radius, and the mitigation that actually prevents a real release
- * shipping this value is `scripts/fastlane/vt_appattest_release_gate.rb`
- * (D-14), which fails `build_apk`/`build_aab` while this constant equals the
- * personal-team value. The paid-team swap is tracked in
- * `.planning/todos/pending/2026-08-25-ios-appattest-team-id-and-entitlement.md`.
+ * SWAPPED 2026-09-01 to the PAID Apple Developer Program team `6849Q7KVP5`
+ * (confirmed by the project owner; the same team already carried in the
+ * authority app's `DEVELOPMENT_TEAM`). This RETIRES D-13's accepted risk.
+ * Until now this held the FREE PERSONAL TEAM value
+ * `94TY7UR2W5.org.votetorrent.voter`, committed deliberately on 2026-08-27 so
+ * spike 085's real-iPhone-13 proof could run end to end — and a shipped
+ * authority built from that tree would have treated that personal team's builds
+ * as the legitimate attestation producer.
+ * `scripts/fastlane/vt_appattest_release_gate.rb` (D-14) enforced that as a hard
+ * build failure, and it now clears.
+ *
+ * WHAT THIS VALUE HAS AND HAS NOT BEEN PROVEN AGAINST. The bytes that prove the
+ * pipeline works on real hardware (`vote-engine/test/ios-hardware-attestation.spec.ts`,
+ * spike 085) were produced under the PERSONAL team, so those fixtures still pin
+ * `94TY7UR2W5` and MUST NOT be rewritten to match this constant — they are a
+ * recording of a real Secure Enclave, not configuration. No attestation has yet
+ * been produced under `6849Q7KVP5`; the first paid-team device build is what
+ * confirms this value against a live `rpIdHash`.
+ *
+ * A MISTYPED TEAM ID CLEARS EVERY AUTOMATED GATE HERE. The release gate only
+ * checks that this is not the personal value; the unit test only checks the
+ * shape and the bundle id (WR-03). Ten wrong-but-well-formed characters reject
+ * every genuine iPhone with an App ID mismatch and nothing upstream complains.
+ * Verify against developer.apple.com -> Membership details before editing.
  */
-export const APPLE_APP_ID = '94TY7UR2W5.org.votetorrent.voter';
+export const APPLE_APP_ID = '6849Q7KVP5.org.votetorrent.voter';
 
 /**
  * Which App Attest environment this authority accepts.

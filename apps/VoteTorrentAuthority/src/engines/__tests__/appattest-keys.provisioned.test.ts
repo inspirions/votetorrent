@@ -70,7 +70,7 @@ describe('Apple App Attest root — embedded trust anchor', () => {
 	});
 });
 
-describe('App Attest configuration — provisioned on the free personal team (D-13)', () => {
+describe('App Attest configuration — provisioned on the paid Apple Developer Program team', () => {
 	it('APPLE_APP_ID is provisioned as <teamId>.<bundleId> for THIS app, and has not drifted back to empty', () => {
 		// D-13 committed a real App ID deliberately, for a runnable proof. An empty App ID
 		// fail-closes every genuine device (the App ID gate in `AppAttestVerifier.verify`

@@ -28,7 +28,12 @@ module VtAppAttestReleaseGate
     "apps", "VoteTorrentAuthority", "src", "engines", "appattest-keys.generated.ts"
   )
 
-  TODO_PATH = ".planning/todos/pending/2026-08-25-ios-appattest-team-id-and-entitlement.md"
+  # The 2026-08-25 todo this used to name was CLOSED on 2026-09-01 when the paid Team ID
+  # `6849Q7KVP5` was swapped in and this gate began to clear. It moved to todos/completed/,
+  # so pointing an error message at it would send a reader to a file describing a solved
+  # problem. The successor tracks the one piece of iOS attestation debt that is left: no
+  # attestation has yet been produced under the paid team.
+  TODO_PATH = ".planning/todos/pending/2026-09-01-ios-appattest-paid-team-device-proof.md"
 
   # The one public entry point. Call this as the FIRST statement of any lane that
   # produces a distributable artifact.
@@ -52,7 +57,7 @@ module VtAppAttestReleaseGate
         "(#{PERSONAL_TEAM_APP_ID}), committed under D-13 for a runnable proof only.\n\n" \
         "A release build carrying this value would treat that personal team's builds as\n" \
         "the legitimate App Attest attestation producer — not shippable.\n\n" \
-        "The paid-team swap is tracked in:\n  #{TODO_PATH}\n\n" \
+        "Context on why this value was ever committed, and the remaining debt:\n  #{TODO_PATH}\n\n" \
         "Fix: obtain a paid Apple Developer Program Team ID, update APPLE_APP_ID in\n  #{GENERATED_FILE_RELATIVE}\n" \
         "to the paid team's <teamId>.<bundleId>, and re-run this gate."
       )

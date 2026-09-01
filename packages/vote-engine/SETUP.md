@@ -196,16 +196,16 @@ the window at the cost of more frequent app releases/updates to authority
 peers.
 
 
-### 4d. Pinned Apple App Attest root (iOS, Phase 51 — PROVISIONED 2026-08-26/2026-08-27)
+### 4d. Pinned Apple App Attest root (iOS, Phase 51 — PROVISIONED 2026-08-26; paid team 2026-09-01)
 
 `AppAttestVerifier` is the iOS counterpart of `PlayIntegrityVerifier` and holds the same offline
 posture: the Apple trust anchor is an INJECTED, bundled, committed snapshot, never fetched at
 verify-time.
 
 **The root is embedded** in `apps/VoteTorrentAuthority/src/engines/appattest-keys.generated.ts`.
-**`APPLE_APP_ID` is now committed too (D-13, 2026-08-27)** at the FREE PERSONAL TEAM value
-`94TY7UR2W5.org.votetorrent.voter`, so `APP_ATTEST_PROVISIONED` is `true` and the iOS branch no
-longer fails closed on missing config:
+**`APPLE_APP_ID` is committed alongside it**, and as of **2026-09-01** it holds the **paid Apple
+Developer Program team** value `6849Q7KVP5.org.votetorrent.voter`. `APP_ATTEST_PROVISIONED` is
+`true` and the iOS branch does not fail closed on missing config:
 
 ```
 Apple App Attest root material is not provisioned — see SETUP.md   (root half — satisfied 2026-08-26)
@@ -216,16 +216,32 @@ Those reasons are returned FIRST, before any other check, so an unprovisioned de
 report a misleading downstream failure instead (the same D-09 discipline `PlayIntegrityVerifier`
 uses for Play Console keys), and they are separate so the message names which half is missing.
 
-**The committed App ID is a PERSONAL team's, not a shipping identity, and that is a deliberately
-accepted risk (D-13), not an oversight.** A shipped authority built from this tree would treat that
-personal team's builds as the legitimate App Attest attestation producer. The mitigation that
-actually prevents a real release from carrying it is machine-enforced, not this document:
-`scripts/fastlane/vt_appattest_release_gate.rb` (D-14) fails the `build_apk` and `build_aab`
-Fastlane lanes — and the iOS `beta`/`release` lanes — while `APPLE_APP_ID` still equals the
-personal-team value, or is empty, or `APP_ATTEST_ENVIRONMENT` is not the literal `'production'`. Run
-`fastlane android verify_appattest_config` to check it without building. The paid-team swap (the
-only thing that actually clears the gate for a real release) is tracked in
-`.planning/todos/pending/2026-08-25-ios-appattest-team-id-and-entitlement.md`.
+**D-13's accepted risk is now retired.** From 2026-08-27 to 2026-09-01 this constant deliberately
+held the FREE PERSONAL TEAM value `94TY7UR2W5.org.votetorrent.voter`, so that spike 085's real
+iPhone 13 proof could run end to end; the accepted consequence was that an authority built from
+that tree would treat a personal team's builds as the legitimate App Attest producer. The mitigation
+was machine-enforced rather than documentary — `scripts/fastlane/vt_appattest_release_gate.rb`
+(D-14) failed the `build_apk`/`build_aab` lanes and the iOS `beta`/`release` lanes for as long as
+that value stood. With the paid Team ID in place, **that gate now clears**. Check it without
+building:
+
+```
+fastlane android verify_appattest_config
+```
+
+**Two cautions survive the swap.**
+
+1. **The hardware fixtures still pin the personal team, on purpose.**
+   `vote-engine/test/ios-hardware-attestation.spec.ts` replays bytes a real Secure Enclave produced
+   under `94TY7UR2W5`. That is a recording, not configuration — rewriting its `APP_ID` to match the
+   committed constant would invalidate the only end-to-end hardware proof this project has.
+2. **A mistyped Team ID clears every automated gate.** The release gate only asserts the value is
+   not the personal one, and `appattest-keys.provisioned.test.ts` only asserts the shape and the
+   bundle id (WR-03). Ten wrong-but-well-formed characters fail-closed reject every genuine iPhone
+   with an App ID mismatch, and nothing upstream reports the real cause. Verify the Team ID against
+   developer.apple.com → Membership details before editing it. A local cross-check on a machine that
+   can sign for the team: `security find-certificate -a -c "Apple Development" -p | openssl x509
+   -noout -subject` prints the Team ID in the `OU` field.
 
 > **The file moved.** Until this section was corrected it named
 > `apps/VoteTorrentVoter/src/engines/appattest-roots.generated.ts`. The voter is the attestation
@@ -238,7 +254,7 @@ way this could go back to unprovisioned:
 | Constant | Meaning | Current state |
 |---|---|---|
 | `APPLE_APP_ATTEST_ROOTS_BASE64` | Apple's trust anchor | provisioned 2026-08-26 |
-| `APPLE_APP_ID` | `<teamId>.<bundleId>` of the **voter** app | committed 2026-08-27 at the free-team value (D-13) |
+| `APPLE_APP_ID` | `<teamId>.<bundleId>` of the **voter** app | paid team `6849Q7KVP5`, swapped 2026-09-01 (retires D-13) |
 | `APP_ATTEST_ENVIRONMENT` | `production` (the strict, and only committed, value) | the literal `'production'` (D-15) |
 
 `APPLE_APP_ID` is reported as its own configuration error rather than being allowed to flow into the
