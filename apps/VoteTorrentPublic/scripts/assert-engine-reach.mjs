@@ -219,6 +219,7 @@ for (const filePath of emittedJs) {
 // Real scan, positive half: every derived marker must be present in the
 // emitted JavaScript.
 // ---------------------------------------------------------------------------
+/** @type {Array<{ index: number, marker: string }>} */
 const missingMarkers = [];
 MARKERS.forEach((marker, index) => {
 	if (!concatenatedJs.includes(marker)) {
