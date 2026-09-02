@@ -17,9 +17,13 @@
  * renders non-empty output:
  *   - `AdvisoryDisclosure` receives `variant="authority"` — the dashboard's
  *     own voice (D-07).
- *   - `LifecyclePill` receives the determinate phase `"running"` — it
+ *   - `LifecyclePill` receives the determinate phase `"voting"` — it
  *     returns `null` for a `null` phase, and a rung that accepted an empty
- *     container would be inert.
+ *     container would be inert. (`"voting"` is 54-02's rename of the retired
+ *     mid-election id; this harness was not updated with it, which left the
+ *     dashboard workspace typecheck red for two waves — the browser gate
+ *     could not see it because Vite's esbuild transform strips types without
+ *     checking them. Logged as DEF-54-01, closed here by 54-07.)
  *   - `DetailsToggle` — 53-05's designated hook-calling component — is
  *     mounted in its interactive form. `DetailsToggle`'s own props (summary,
  *     children, defaultOpen) carry no room for an extra DOM attribute on its
@@ -136,7 +140,7 @@ function UiGateHarness() {
 				<AdvisoryDisclosure variant="authority" />
 			</div>
 			<div data-ui-gate="LifecyclePill">
-				<LifecyclePill phase="running" />
+				<LifecyclePill phase="voting" />
 			</div>
 			<DetailsToggleHarness />
 		</div>
