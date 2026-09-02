@@ -17,6 +17,8 @@ import {
 	workspacePath,
 	dashboardSrc,
 	uiWebSrc,
+	webDataRoot,
+	webDataSrc,
 	moduleUrl,
 } from '../../../../scripts/lib/source-paths.mjs';
 
@@ -112,4 +114,19 @@ test('containment refuses a path that escapes the repository', () => {
 	assert.doesNotThrow(() => readFileSync(schemaPath, 'utf8'));
 	const contents = readFileSync(schemaPath, 'utf8');
 	assert.ok(contents.includes('declare schema main'));
+});
+
+test('webDataRoot/webDataSrc are nameable before packages/web-data exists (D-03)', () => {
+	assert.doesNotThrow(() => webDataSrc('open-db.js'));
+	assert.equal(webDataSrc('open-db.js'), path.join(repoRoot, 'packages', 'web-data', 'src', 'open-db.js'));
+	assert.equal(webDataRoot('package.json'), path.join(repoRoot, 'packages', 'web-data', 'package.json'));
+	assert.equal(webDataSrc(), path.join(repoRoot, 'packages', 'web-data', 'src'));
+	// Deliberately no existence assertion: correct in wave 1, wrong from 54-03 onward.
+});
+
+test('webDataSrc containment refuses a path that escapes the repository', () => {
+	assert.throws(() => webDataSrc('..', '..', '..', '..', 'etc', 'passwd'));
+
+	// Discriminating half: a legitimate call must NOT throw.
+	assert.doesNotThrow(() => webDataSrc('open-db.js'));
 });

@@ -156,6 +156,26 @@ export function publicSrc(...segs) {
 }
 
 /**
+ * `packages/web-data` does not exist yet as of Phase 54 wave 1. This function
+ * is named here deliberately so 54-03's move repoints a call argument rather
+ * than re-deriving a root. Pure joining, no existence check. This root is
+ * JSX-free by charter and is therefore deliberately NOT added to
+ * `scripts/lint-copy.mjs`'s `ROOTS` list — that scanner fails (rather than
+ * skips) a root that walks to zero `.tsx` files.
+ *
+ * @param {...string} segs
+ * @returns {string}
+ */
+export function webDataRoot(...segs) {
+	return workspacePath('packages/web-data', ...segs);
+}
+
+/** @param {...string} segs @returns {string} */
+export function webDataSrc(...segs) {
+	return webDataRoot('src', ...segs);
+}
+
+/**
  * Returns the `file://` href string for a dynamic `import()` call, built
  * with `pathToFileURL` (never string concatenation) so idioms 2 and 3 have
  * a resolver-shaped form.
