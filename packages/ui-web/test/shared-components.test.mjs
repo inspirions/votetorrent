@@ -133,11 +133,12 @@ test("t('advisory.nosuchvariant.body') throws naming the exact missing key -- D-
 });
 
 // ===========================================================================
-// (f) COPY still holds exactly 73 keys; spot-checked untouched keys unchanged.
+// (f) COPY still holds exactly 83 keys (73 + the ten public.*/advisory.public.body
+// keys 53-07 added under D-08); spot-checked untouched keys unchanged.
 // ===========================================================================
 
-test('COPY holds exactly 73 keys, and three spot-checked untouched keys still hold their exact values', () => {
-	assert.equal(Object.keys(COPY).length, 73);
+test('COPY holds exactly 83 keys, and three spot-checked untouched keys still hold their exact values', () => {
+	assert.equal(Object.keys(COPY).length, 83);
 	assert.equal(COPY['lifecycle.organizing'], 'Being organized');
 	assert.equal(COPY['panelFrame.tierPill'], 'tier {{tier}}');
 	assert.equal(COPY['bootstrap.heading'], 'Enter your sign-in code');

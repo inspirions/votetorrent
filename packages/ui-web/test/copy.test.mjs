@@ -18,30 +18,57 @@ import { uiWebSrc } from '../../../scripts/lib/source-paths.mjs';
 import { COPY, t } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
-// Total key count (D-05, D-09). 73, not 70 -- the older published breakdown
-// omits the three `panelFrame.*Pill` keys, which exist and are consumed by
-// PanelFrame.tsx. Written as a bare literal so a future "fix" that deletes
+// Total key count (D-05, D-09, D-08). 83, not 73 -- 53-07 (D-08) added
+// exactly ten `public.*`/`advisory.public.body` keys for
+// `apps/VoteTorrentPublic`'s election shell, on top of the 73 the table
+// carried after 53-05's `gate.advisoryDisclosure` -> `advisory.authority.body`
+// rename. Written as a bare literal so a future "fix" that deletes any of
 // them is caught by a failure message that names the reason.
 // ---------------------------------------------------------------------------
 
-test('COPY has exactly 73 keys (not 70 -- panelFrame.tierPill/sitePill/sitesPill are real, consumed keys)', () => {
+test('COPY has exactly 83 keys (73 pre-53-07, plus the ten public-voice keys 53-07 added under D-08)', () => {
 	assert.equal(
 		Object.keys(COPY).length,
-		73,
-		'expected 73 -- if this reads 70, the three panelFrame.*Pill keys were wrongly deleted; ' +
-			'they are consumed by src/screens/panels/PanelFrame.tsx and must not be removed',
+		83,
+		'expected 83 -- if this reads 73, the ten public.*/advisory.public.body keys 53-07 added were ' +
+			'wrongly deleted; they are consumed by apps/VoteTorrentPublic/src/screens/ElectionShell.tsx ' +
+			'and must not be removed. If it reads 70, the three panelFrame.*Pill keys were wrongly ' +
+			'deleted -- they are consumed by src/screens/panels/PanelFrame.tsx',
 	);
 });
 
 // ===========================================================================
-// D-25/D-07 (53-05): the key-set-identity check against 8326185d, narrowed
-// to a NAMED SINGLE DELTA rather than a blanket key-set-equality check.
-// `gate.advisoryDisclosure` was renamed to `advisory.authority.body` in
-// this plan; the other 72 keys keep D-09's byte-identical guarantee. This
-// is stronger than a bare count check: a second, unrelated key added or
-// removed later still fails this test, even though the total might
-// coincidentally still read 73.
+// D-25/D-07 (53-05, extended by 53-07/D-08): the key-set-identity check
+// against 8326185d, narrowed to a NAMED SET OF DELTAS rather than a blanket
+// key-set-equality check. `gate.advisoryDisclosure` was renamed to
+// `advisory.authority.body` in 53-05; 53-07 then added exactly the ten
+// `public.*`/`advisory.public.body` keys named in NEW_53_07_KEYS below. The
+// other 72 pre-move keys keep D-09's byte-identical guarantee untouched.
+// This is stronger than a bare count check: a second, unrelated key added
+// or removed later still fails this test, even though the total might
+// coincidentally still read 83.
 // ===========================================================================
+
+/**
+ * The ten `public.*`/`advisory.public.body` keys 53-07 added under D-08 --
+ * every one of them mounted by `apps/VoteTorrentPublic/src/screens/ElectionShell.tsx`.
+ * `advisory.public.body` resolves `AdvisoryDisclosure`'s `advisory.${variant}.body`
+ * template for `variant="public"`; the other nine are this app's own
+ * chrome/address/placeholder/disclosure copy.
+ * @type {ReadonlyArray<string>}
+ */
+const NEW_53_07_KEYS = Object.freeze([
+	'advisory.public.body',
+	'public.chrome.appName',
+	'public.election.addressLabel',
+	'public.election.unreadableAddress.title',
+	'public.election.unreadableAddress.body',
+	'public.election.slot.title',
+	'public.election.slot.lifecycle',
+	'public.election.slot.timeline',
+	'public.details.summary',
+	'public.details.body',
+]);
 
 /**
  * The exact 73 keys at `8326185d` (`git show
@@ -126,20 +153,21 @@ const PRE_MOVE_KEYS = Object.freeze([
 	'panels.inviteAuthorities.empty',
 ]);
 
-test('D-25/D-07: the ONLY key-set change since 8326185d is gate.advisoryDisclosure -> advisory.authority.body -- no other key added or removed', () => {
+test('D-25/D-07/D-08: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body and the ten NEW_53_07_KEYS additions -- no other key added or removed', () => {
 	const currentKeys = new Set(Object.keys(COPY));
-	const expectedKeys = new Set(
-		PRE_MOVE_KEYS.map((k) => (k === 'gate.advisoryDisclosure' ? 'advisory.authority.body' : k)),
-	);
+	const expectedKeys = new Set([
+		...PRE_MOVE_KEYS.map((k) => (k === 'gate.advisoryDisclosure' ? 'advisory.authority.body' : k)),
+		...NEW_53_07_KEYS,
+	]);
 
 	const added = [...currentKeys].filter((k) => !expectedKeys.has(k));
 	const removed = [...expectedKeys].filter((k) => !currentKeys.has(k));
 
-	assert.deepEqual(added, [], `unexpected key(s) added beyond the single D-07 rename: ${added.join(', ')}`);
+	assert.deepEqual(added, [], `unexpected key(s) added beyond the D-07 rename and the D-08 additions: ${added.join(', ')}`);
 	assert.deepEqual(
 		removed,
 		[],
-		`unexpected key(s) missing beyond the single D-07 rename: ${removed.join(', ')}`,
+		`unexpected key(s) missing beyond the D-07 rename and the D-08 additions: ${removed.join(', ')}`,
 	);
 });
 

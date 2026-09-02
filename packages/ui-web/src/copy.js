@@ -251,6 +251,51 @@ export const COPY = Object.freeze({
 	'panels.keyholders.empty': 'No keyholders yet.',
 	'panels.inviteAuthorities.title': 'Invite Authorities',
 	'panels.inviteAuthorities.empty': 'No invitations yet.',
+
+	// --- Public election view (53-07, D-08) -------------------------------
+	//
+	// Exactly ten keys, added because apps/VoteTorrentPublic's ElectionShell
+	// actually mounts every one of them -- never speculatively (D-08). Every
+	// value below was authored FRESH for a no-login audience and was NEVER
+	// produced by find-and-replacing `advisory.authority.body` or any
+	// `gate.*`/`bootstrap.*` string (D-07); `packages/ui-web/test/public-voice.test.mjs`
+	// lints this block for banned lexemes (officer/permission/scope/login
+	// words/account/dashboard/snapshot/simulated) and for any shared 6-word
+	// run with the authority-voiced corpus.
+	//
+	// `advisory.public.body` is the sibling `AdvisoryDisclosure`'s
+	// `advisory.${variant}.body` template resolves for `variant="public"` --
+	// deliberately absent since 53-05 (it threw by name until this key
+	// landed, which was the mechanism, not a gap). It must read true on BOTH
+	// the shipped election-less page and 53-07's harness page, so it makes
+	// no claim tied to any one election.
+	'advisory.public.body':
+		"Anyone can open this page and see the same election record — nothing here is shown differently for different visitors, and nothing you do on this page changes what the record says.",
+	'public.chrome.appName': 'VoteTorrent Public Election View',
+	'public.election.addressLabel': 'Election address',
+	// unreadableAddress.*: this app holds no election data at all, so it
+	// cannot say an election does not exist -- only that the ADDRESS in the
+	// link could not be read. It must not tell the reader to sign in, and
+	// must not ask them to contact anyone by role name -- it names the link
+	// itself as the thing to check.
+	'public.election.unreadableAddress.title': "This link's election address isn't readable.",
+	'public.election.unreadableAddress.body':
+		"The part of this link that names an election doesn't match the expected form, so this page can't tell which election it points to. Check the link for a typo, or ask whoever shared it to send it again.",
+	// slot.* are SLOT LABELS -- the name of the thing whose place is held --
+	// never a status message. None may say "loading"/"fetching"/"please
+	// wait"/"updating": a placeholder here is not evidence of an in-flight
+	// request, because none exists (D-18).
+	'public.election.slot.title': 'Election title',
+	'public.election.slot.lifecycle': 'Lifecycle phase',
+	'public.election.slot.timeline': 'Election timeline',
+	'public.details.summary': 'About this view',
+	// The one structural fact this page can honestly state with no election
+	// loaded: a lifecycle phase, when shown, is computed from an election's
+	// own published timeline, never picked by anyone -- it makes no claim
+	// about where that timeline comes from, because in this phase it comes
+	// from nowhere.
+	'public.details.body':
+		'When an election is shown here, its lifecycle — being organized, running, or results released — is computed from that election’s own published timeline. Nobody picks it by hand; it follows from the dates the election itself publishes.',
 });
 
 /**
