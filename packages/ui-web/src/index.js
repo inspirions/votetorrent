@@ -10,9 +10,8 @@
  * that transitively imports a `.tsx` file, belongs behind the separate
  * `./components` subpath (see src/components.js), never here.
  *
- * This barrel exports nothing yet. It is a deliberately empty, correctly
- * shaped placeholder — populating it is later Phase 53 work, not this plan's:
- *   - `copy.js` (the shared copy table) lands in 53-04 (D-05/D-09/D-10/D-11).
+ * `copy.js` (the shared copy table, D-05/D-09/D-10/D-11) landed in 53-04 and is
+ * re-exported below. Still pending, later Phase 53 work, not this plan's:
  *   - `lifecycle/election-phase.js` lands in 53-05 (D-01/D-02/D-07).
  *
  * Do not merge this barrel with `./components` — the split under `./exports`
@@ -21,4 +20,4 @@
  * silent success that only breaks a consumer at build/typecheck time.
  */
 
-export {};
+export { COPY, t } from './copy.js';
