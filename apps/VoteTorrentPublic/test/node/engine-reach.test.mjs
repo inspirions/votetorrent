@@ -140,7 +140,9 @@ test('sanity: dist/ (if present from a prior local build) is not itself a src/ f
 	// root that includes build output.
 	const srcRoot = publicSrc();
 	assert.ok(!srcRoot.includes(`${path.sep}dist${path.sep}`), 'publicSrc() must never resolve into dist/');
-	if (statSync(srcRoot, { throwIfNoEntry: false })) {
-		assert.ok(true);
-	}
+	// WR-12 (Phase 53 review): the prior `if (...) { assert.ok(true); }` block
+	// was a literal no-op — it contributed to publicTier1's minPassing count
+	// while asserting nothing. Assert what this test was presumably meant to:
+	// publicSrc() resolves to a real, existing directory.
+	assert.ok(statSync(srcRoot, { throwIfNoEntry: false })?.isDirectory(), `${srcRoot} must exist and be a directory`);
 });
