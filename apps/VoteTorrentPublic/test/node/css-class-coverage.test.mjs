@@ -15,7 +15,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -27,6 +27,21 @@ const UI_WEB_ROOT_DIR = uiWebRoot();
 const componentClassNamesModule = await import(pathToFileURL(uiWebSrc('component-class-names.js')).href);
 /** @type {Readonly<Record<string, ReadonlyArray<string>>>} */
 const COMPONENT_CLASS_NAMES = componentClassNamesModule.COMPONENT_CLASS_NAMES;
+
+/** @param {string} dir @returns {string[]} */
+function walkAll(dir) {
+	/** @type {string[]} */
+	const out = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const full = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			out.push(...walkAll(full));
+		} else {
+			out.push(full);
+		}
+	}
+	return out;
+}
 
 test('real check: every rendered class name in apps/VoteTorrentPublic/src resolves to a real CSS selector', () => {
 	const { missing, renderedCount, declaredCount } = checkClassNameCoverage({
@@ -45,7 +60,32 @@ test('sanity: the five CR-01 selectors are all declared and rendered (the specif
 		uiWebRootDir: UI_WEB_ROOT_DIR,
 		componentClassNames: COMPONENT_CLASS_NAMES,
 	});
-	for (const cls of ['pv-disclosure', 'lifecycle-pill', 'lifecycle-pill--organizing', 'election-title', 'dt-toggle-group']) {
+	const probes = ['pv-disclosure', 'lifecycle-pill', 'lifecycle-pill--pre', 'election-title', 'dt-toggle-group'];
+
+	// Guard against a stale probe name passing VACUOUSLY (I-14):
+	// `missing` can only ever contain names that are both declared and
+	// rendered, so once a name like `lifecycle-pill--organizing` stops
+	// existing anywhere, it is not in `missing` either -- and
+	// `!missing.includes(name)` then passes while proving nothing. This is
+	// the repo's standing "a probe that can go stale is a probe that passes
+	// vacuously" failure. Every probe name below must be demonstrably real --
+	// either declared in COMPONENT_CLASS_NAMES's flattened union, or present
+	// as a literal substring in at least one file under publicSrc() -- before
+	// it is asserted not-missing. A stale probe name then fails LOUDLY,
+	// naming itself, instead of silently proving nothing.
+	const declaredUniverse = new Set(Object.values(COMPONENT_CLASS_NAMES).flat());
+	for (const cls of probes) {
+		const declaredSomewhere = declaredUniverse.has(cls);
+		const renderedSomewhere = walkAll(publicSrc()).some((file) => readFileSync(file, 'utf8').includes(cls));
+		assert.ok(
+			declaredSomewhere || renderedSomewhere,
+			`CR-01 probe "${cls}" exists nowhere (not in COMPONENT_CLASS_NAMES, not as a literal under src/) -- ` +
+				`this is CR-01's regression probe list, and a name that no longer exists anywhere makes the ` +
+				`probe below inert rather than green`,
+		);
+	}
+
+	for (const cls of probes) {
 		assert.ok(!missing.includes(cls), `${cls} regressed — this is exactly CR-01's original defect`);
 	}
 });
@@ -104,7 +144,7 @@ test('benign control: a rendered class WITH a matching CSS selector is not repor
 
 test('inertness control: a mounted shared component with no CSS import for its class names is reported missing', () => {
 	const appSrcDir = makeFixtureAppSrc({
-		tsx: "import { LifecyclePill } from '@votetorrent/ui-web/components';\nexport function Fixture() { return <LifecyclePill phase=\"running\" />; }",
+		tsx: "import { LifecyclePill } from '@votetorrent/ui-web/components';\nexport function Fixture() { return <LifecyclePill phase=\"voting\" />; }",
 		css: '.unrelated { color: red; }',
 	});
 	try {
@@ -114,7 +154,7 @@ test('inertness control: a mounted shared component with no CSS import for its c
 			componentClassNames: COMPONENT_CLASS_NAMES,
 		});
 		assert.ok(missing.includes('lifecycle-pill'), `expected "lifecycle-pill" to be reported missing, got: ${missing.join(', ')}`);
-		assert.ok(missing.includes('lifecycle-pill--running'));
+		assert.ok(missing.includes('lifecycle-pill--voting'));
 	} finally {
 		rmSync(appSrcDir, { recursive: true, force: true });
 	}

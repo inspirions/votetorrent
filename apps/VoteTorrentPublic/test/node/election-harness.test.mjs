@@ -10,8 +10,8 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { publicSrc, publicRoot, repoRoot } from '../../../../scripts/lib/source-paths.mjs';
-import { computeElectionPhase, PHASE_IDS } from '../../../../packages/ui-web/src/lifecycle/election-phase.js';
-import { FIXTURE_ELECTION, FIXTURE_INSTANTS } from '../fixtures/election-fixture.js';
+import { derivePhase, PHASE_IDS } from '../../../../packages/ui-web/src/lifecycle/election-phase.js';
+import { FIXTURE_ELECTION, FIXTURE_ELECTION_TIMELINE_JSON, FIXTURE_INSTANTS } from '../fixtures/election-fixture.js';
 
 /** @param {string} source @returns {string} */
 function stripCommentLines(source) {
@@ -40,22 +40,58 @@ function walkAll(dir) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Fixture coherence, total over PHASE_IDS.
+// 1. Fixture coherence, total over PHASE_IDS, over BOTH live timeline shapes
+//    (Phase 54, D-08 / contract C6).
 // ---------------------------------------------------------------------------
 
-test('every PHASE_IDS member computes its own phase from FIXTURE_ELECTION.timeline at its own FIXTURE_INSTANTS entry, with reason === null', () => {
+test('every PHASE_IDS member derives its own phase from FIXTURE_ELECTION.timeline at its own FIXTURE_INSTANTS entry, from BOTH the object and JSON-string timeline shapes, with indeterminate === false and zero conflicts', () => {
 	assert.ok(PHASE_IDS.length > 0, 'sanity: PHASE_IDS must be non-empty');
-	for (const id of PHASE_IDS) {
-		const result = computeElectionPhase(FIXTURE_ELECTION.timeline, FIXTURE_INSTANTS[id]);
-		assert.equal(result.phase, id, `FIXTURE_INSTANTS.${id} did not compute phase "${id}" (got ${JSON.stringify(result)})`);
-		assert.equal(result.reason, null, `FIXTURE_INSTANTS.${id} carried a non-null reason: ${result.reason}`);
+	/** @type {Array<[string, unknown]>} */
+	const shapes = [
+		['object', FIXTURE_ELECTION.timeline],
+		['json-string', FIXTURE_ELECTION_TIMELINE_JSON],
+	];
+	for (const [shapeLabel, timeline] of shapes) {
+		for (const id of PHASE_IDS) {
+			const result = derivePhase(FIXTURE_ELECTION, timeline, FIXTURE_INSTANTS[id]);
+			assert.equal(
+				result.phase,
+				id,
+				`[${shapeLabel}] FIXTURE_INSTANTS.${id} did not derive phase "${id}" (got ${JSON.stringify(result)})`,
+			);
+			assert.equal(
+				result.indeterminate,
+				false,
+				`[${shapeLabel}] FIXTURE_INSTANTS.${id} derived indeterminate === true (got ${JSON.stringify(result)})`,
+			);
+			assert.deepEqual(
+				result.conflicts,
+				[],
+				`[${shapeLabel}] FIXTURE_INSTANTS.${id} derived a non-empty conflicts array: ${JSON.stringify(result.conflicts)}`,
+			);
+		}
 	}
 });
 
+test('FIXTURE_ELECTION_TIMELINE_JSON is JSON.parse-equivalent to FIXTURE_ELECTION.timeline (the derived-not-duplicated construction in election-fixture.js is verifiable, not merely intended)', () => {
+	assert.deepEqual(JSON.parse(FIXTURE_ELECTION_TIMELINE_JSON), FIXTURE_ELECTION.timeline);
+});
+
+// D-08's tripwire. It DID trip during Phase 54: PHASE_IDS grew a fourth
+// member (`closed`), and this assertion went red until 54-05 extended
+// FIXTURE_INSTANTS to four entries (see election-fixture.js). That is
+// D-08's whole point -- a fourth phase must trip this test LOUDLY, and the
+// answer is extending the fixture, never narrowing this comparison. Any
+// future attempt to make this pass by relaxing the set-equality assertion
+// below (rather than extending the fixture) is a regression of D-08.
 test('Object.keys(FIXTURE_INSTANTS) equals PHASE_IDS as a set (a fourth phase in Phase 54 would fail this loudly, not skip silently)', () => {
 	const instantKeys = new Set(Object.keys(FIXTURE_INSTANTS));
 	const phaseIds = new Set(PHASE_IDS);
 	assert.deepEqual([...instantKeys].sort(), [...phaseIds].sort());
+});
+
+test('PHASE_IDS does not contain "indeterminate" (contract C1: an indeterminate outcome has no derivable instant, and admitting it to PHASE_IDS would make the set-equality assertion above unsatisfiable without weakening it)', () => {
+	assert.ok(!PHASE_IDS.includes('indeterminate'), `PHASE_IDS must not contain "indeterminate", got: ${JSON.stringify(PHASE_IDS)}`);
 });
 
 // ---------------------------------------------------------------------------

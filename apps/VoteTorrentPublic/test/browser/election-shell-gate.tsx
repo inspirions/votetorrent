@@ -11,9 +11,9 @@
  * grading what it renders is 53-09's runner's job, not this page's. A
  * harness that graded itself would be a rung nobody else could invert.
  *
- * `?phase=organizing|running|released` selects which of
- * `FIXTURE_INSTANTS`' three canonical instants this page renders against,
- * defaulting to `running`. This is THIS PAGE's own URL parameter, read by
+ * `?phase=pre|voting|settling|closed` selects which of
+ * `FIXTURE_INSTANTS`' four canonical instants this page renders against,
+ * defaulting to `voting`. This is THIS PAGE's own URL parameter, read by
  * this file only — it is never forwarded into `ElectionShell`'s own
  * address, which is why `search` is passed explicitly below rather than
  * left to default to `window.location.search` (T-53-07-04's harness-side
@@ -146,10 +146,10 @@ type FixturePhase = keyof typeof FIXTURE_INSTANTS;
 function resolvePhase(): FixturePhase {
 	const params = new URLSearchParams(window.location.search);
 	const requested = params.get('phase');
-	if (requested === 'organizing' || requested === 'running' || requested === 'released') {
+	if (requested === 'pre' || requested === 'voting' || requested === 'settling' || requested === 'closed') {
 		return requested;
 	}
-	return 'running';
+	return 'voting';
 }
 
 const phase = resolvePhase();
