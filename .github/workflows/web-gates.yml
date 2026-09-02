@@ -16,8 +16,12 @@ name: Web gates
 #     discipline lint (D-06), the repo-root `@votetorrent/ui-web` dedupe/gate
 #     consumer assertion (D-21), the `@votetorrent/ui-web` package's own
 #     typecheck and tier-1 suite, and the public election view's typecheck,
-#     tier-1 suite, build, polyfill-purity check, gate build and
-#     harness-in-dist scan.
+#     tier-1 suite, build, polyfill-purity check, gate build,
+#     harness-in-dist scan and D-13 engine-reach artefact proof (both halves:
+#     schema bytes present, zero DB-opening symbols). It also runs the
+#     dashboard's D-15/D-23 tokens-in-dist post-build check, proving the
+#     shared tokens stylesheet's declarations reached the dashboard's shipped
+#     production CSS.
 # (b) The FOUR `--prove-*` modes this workflow runs (`--prove-trap` for tier
 #     2, `--prove-drift` for tier 3, and the shared browser-gate runner's own
 #     `--prove-no-dedupe` / `--prove-token-missing`) are INERTNESS CONTROLS,
@@ -247,12 +251,38 @@ jobs:
           yarn workspace votetorrent-public assert:no-test-harness-in-dist
           echo "RECEIPT public-no-harness-in-dist" | tee -a ci-receipt.txt
 
+      # D-13's artefact half: proves the ~132 KB schema really reaches the
+      # public app's browser bundle AND that zero DB-opening symbols
+      # (initDB, prepareDb, registerDbPlugins, isSchemaInitialized, indexedDB,
+      # @quereus/plugin-indexeddb) reach it. This script spawns its own `vite
+      # build` internally, so it does not depend on the build step above --
+      # placed here only to sit beside this job's other public-app steps.
+      # test/node/engine-reach.test.mjs (already run above, tier1-public)
+      # covers only the INTENT over src/; this is the only artefact-level
+      # proof and was, until this commit, never invoked by any workflow.
+      - name: Public app engine-reach (D-13, both halves)
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-public assert:engine-reach
+          echo "RECEIPT public-engine-reach" | tee -a ci-receipt.txt
+
       - name: Build and polyfill assertion
         run: |
           set -euo pipefail
           yarn workspace votetorrent-dashboard build
           yarn workspace votetorrent-dashboard assert:no-polyfills
           echo "RECEIPT dashboard-build-no-polyfills" | tee -a ci-receipt.txt
+          # D-15/D-23 post-build bytes-in-dist gate: proves the canonical
+          # `@import '@votetorrent/ui-web/tokens.css';` actually resolved
+          # into the dashboard's shipped production CSS (all 31 declared
+          # names present). Requires the fresh dist/ this step just built --
+          # this is a post-build check, deliberately not part of tier 1's
+          # test:node. New in this phase and never invoked until this commit.
+          # A separate RECEIPT marker (not folded into the one above) so a
+          # future reordering that skips this line cannot hide behind the
+          # polyfill receipt's own green.
+          yarn workspace votetorrent-dashboard assert:tokens-in-dist
+          echo "RECEIPT dashboard-tokens-in-dist" | tee -a ci-receipt.txt
 
       # This assertion exists on disk at HEAD and CI has never run it; 53-08
       # extended it with the `ui-gate` and `__UI_GATE__` tokens, so it now
@@ -281,10 +311,10 @@ jobs:
           set -euo pipefail
           node scripts/assert-ci-baselines.mjs receipts ci-receipt.txt \
             toolchain peers-clean dashboard-typecheck copy-lint-3root \
-            dashboard-build-no-polyfills dashboard-no-harness-in-dist \
+            dashboard-build-no-polyfills dashboard-tokens-in-dist dashboard-no-harness-in-dist \
             ui-web-typecheck ui-web-consumers tier1-ui-web \
             public-typecheck tier1-public public-build-no-polyfills \
-            public-no-harness-in-dist tier1-logic
+            public-no-harness-in-dist public-engine-reach tier1-logic
 
   # =========================================================================
   # Job 2 -- Tiers 2 and 3: headless Chrome, persistence then model vs DOM.
