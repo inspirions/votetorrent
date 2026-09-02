@@ -115,6 +115,7 @@ export const GATE_DONE_GLOBAL = '__UI_GATE_DONE__';
 export const RUNG_IDS = Object.freeze([
 	'harness-readout',
 	'shared-components-mounted',
+	'resolved-component-styles',
 	'token-declared-values',
 	'base-rule-used-values',
 	'identity:hook-mounted',
@@ -122,6 +123,33 @@ export const RUNG_IDS = Object.freeze([
 	'identity:same-use-state',
 	'identity:same-internals',
 	'identity:no-dispatcher-error',
+]);
+
+/**
+ * `resolved-component-styles` (CR-01, 53-CR01's gap-closure round). Where
+ * `shared-components-mounted` above only asserts a harness wrapper has a
+ * non-empty child (true regardless of styling — this is exactly how CR-01's
+ * defect survived every existing rung), this rung reads a declared CSS
+ * property off the component's OWN rendered element and requires it to match
+ * the value `packages/ui-web/src/components.css` declares for it. Each
+ * `selector` below is queried as a DESCENDANT of the harness's
+ * `[data-ui-gate="<gate>"]` wrapper first (both harnesses wrap
+ * `AdvisoryDisclosure`/`LifecyclePill` in an extra harness-only element,
+ * since each renders a childless text node); if that finds nothing, the
+ * wrapper element itself is tried (both harnesses tag `DetailsToggle`'s own
+ * `.dt-toggle-group` root directly, with no extra wrapper).
+ *
+ * `expected` values are transcribed from `components.css` as authored in the
+ * same commit that added this rung — this table going red on an unrelated,
+ * deliberate CSS edit is a signal to update the table, not to silence the
+ * rung.
+ *
+ * @type {ReadonlyArray<{ gate: string, selector: string, cssProperty: string, expected: string }>}
+ */
+const RESOLVED_STYLE_CHECKS = Object.freeze([
+	Object.freeze({ gate: 'LifecyclePill', selector: '.lifecycle-pill', cssProperty: 'borderTopStyle', expected: 'solid' }),
+	Object.freeze({ gate: 'AdvisoryDisclosure', selector: '.pv-disclosure', cssProperty: 'fontSize', expected: '12px' }),
+	Object.freeze({ gate: 'DetailsToggle', selector: '.dt-toggle-group', cssProperty: 'flexDirection', expected: 'column' }),
 ]);
 
 /**
@@ -510,6 +538,7 @@ async function runGatePassLenient({ appDir, buildConfigRel, buildEnv, distAbs, e
 
 		runHarnessReadoutRung(readout);
 		await runSharedComponentsRung(page, readout);
+		await runResolvedStyleRung(page);
 		const tokenCount = await runTokenRungs(page);
 		await runIdentityRungs(page, readout, lines);
 
@@ -652,6 +681,45 @@ async function runSharedComponentsRung(page, readout) {
 		'shared-components-mounted',
 		problems.length === 0,
 		problems.length === 0 ? `${names.length}/${names.length} components mounted and non-empty` : problems.join('; '),
+	);
+}
+
+/**
+ * `resolved-component-styles` (CR-01, see `RESOLVED_STYLE_CHECKS`'s own
+ * header for the full rationale). Reads each check's `cssProperty` off the
+ * component's OWN rendered element — never the harness's
+ * `[data-ui-gate]` wrapper directly, unless that wrapper element IS the
+ * component's own root (`DetailsToggle`'s `.dt-toggle-group`, tagged directly
+ * by both harnesses).
+ *
+ * @param {import('playwright').Page} page
+ */
+async function runResolvedStyleRung(page) {
+	/** @type {string[]} */
+	const problems = [];
+	for (const check of RESOLVED_STYLE_CHECKS) {
+		// eslint-disable-next-line no-await-in-loop -- sequential DOM reads against the one shared page, mirrors runSharedComponentsRung's own discipline
+		const value = await page.evaluate((c) => {
+			const wrapper = document.querySelector(`[data-ui-gate="${c.gate}"]`);
+			if (wrapper == null) return null;
+			const el = wrapper.querySelector(c.selector) ?? (wrapper.matches(c.selector) ? wrapper : null);
+			if (el == null) return null;
+			return /** @type {any} */ (getComputedStyle(el))[c.cssProperty];
+		}, check);
+		if (value == null) {
+			problems.push(`${check.gate}: "${check.selector}" not found under [data-ui-gate="${check.gate}"]`);
+			continue;
+		}
+		if (value !== check.expected) {
+			problems.push(`${check.gate}: ${check.cssProperty}=${JSON.stringify(value)}, expected ${JSON.stringify(check.expected)}`);
+		}
+	}
+	record(
+		'resolved-component-styles',
+		problems.length === 0,
+		problems.length === 0
+			? `${RESOLVED_STYLE_CHECKS.length}/${RESOLVED_STYLE_CHECKS.length} resolved styles matched`
+			: problems.join('; '),
 	);
 }
 
@@ -1247,6 +1315,7 @@ async function main() {
 
 		runHarnessReadoutRung(readout);
 		await runSharedComponentsRung(page, readout);
+		await runResolvedStyleRung(page);
 		const tokenCount = await runTokenRungs(page);
 		await runIdentityRungs(page, readout, lines);
 
