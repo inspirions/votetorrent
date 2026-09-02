@@ -1,8 +1,12 @@
 /**
  * preview-control.test.mjs — source-level assertions over the "Preview as"
- * control, its provider, the advisory disclosure, `GrantedScopesContext.ts`,
- * `preview-as.css`, and the bounded wiring into 50-09's `DashboardShell.tsx`
- * / `PanelGrid.tsx`. `node --test` cannot import `.tsx`, so this suite reads
+ * control, its provider, `GrantedScopesContext.ts`, `preview-as.css`, and
+ * the bounded wiring into 50-09's `DashboardShell.tsx` / `PanelGrid.tsx`.
+ * The advisory disclosure component itself moved to packages/ui-web in
+ * 53-05 (D-01/D-02/D-07) -- its own source assertions moved with it into
+ * packages/ui-web/test/shared-components.test.mjs; what remains here is the
+ * dashboard's own wiring guarantee that its shell mounts it with an
+ * explicit voice. `node --test` cannot import `.tsx`, so this suite reads
  * each file as TEXT and strips `//` / `/* *\/`-style comment lines where a
  * behavior item says "comment-stripped" — the same shape
  * `test/node/registry.test.mjs` (50-06) and
@@ -12,7 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { dashboardRoot, dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { dashboardRoot, dashboardSrc, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 const APP_ROOT = dashboardRoot();
 const SCREENS_DIR = dashboardSrc('screens');
@@ -45,11 +49,10 @@ function walkFiles(dir) {
 	return out;
 }
 
-/** The six files this suite reads — the four this plan creates, plus the two 50-09 files this plan's bounded edit touches. @type {Record<string, string>} */
+/** The five files this suite reads — the three of this plan's own files that remain in the dashboard, plus the two 50-09 files this plan's bounded edit touches. `AdvisoryDisclosure.tsx` moved to packages/ui-web in 53-05 (D-01/D-02/D-07); its source assertions moved with it into packages/ui-web/test/shared-components.test.mjs. @type {Record<string, string>} */
 const FILES = {
 	context: 'GrantedScopesContext.ts',
 	control: 'PreviewAsControl.tsx',
-	disclosure: 'AdvisoryDisclosure.tsx',
 	css: 'preview-as.css',
 	shell: 'DashboardShell.tsx',
 	grid: 'PanelGrid.tsx',
@@ -187,17 +190,13 @@ test('inertness control: the context-value matcher does NOT accept a memo whose 
 	assert.doesNotMatch(fixture, /scopesResolved,\s*\n\s*\}\),\s*\n\s*\[state,\s*scopesResolved\]/, 'matcher is inert');
 });
 
-// --- AdvisoryDisclosure.tsx ----------------------------------------------------
-
-test('AdvisoryDisclosure.tsx renders gate.advisoryDisclosure exactly once with no branch around it', () => {
-	assert.equal((STRIPPED.disclosure.match(/gate\.advisoryDisclosure/g) ?? []).length, 1);
-	assert.doesNotMatch(STRIPPED.disclosure, /\?|&&|isSimulated|simulated/);
-});
-
-test('positive control: the branch-around-disclosure matcher hits a synthetic {simulated && ...} fixture', () => {
-	const fixture = "{simulated && <p>{t('gate.advisoryDisclosure')}</p>}";
-	assert.match(fixture, /\?|&&|isSimulated|simulated/, 'matcher is inert');
-});
+// --- AdvisoryDisclosure.tsx ------------------------------------------------
+//
+// `AdvisoryDisclosure.tsx` itself moved to packages/ui-web in 53-05
+// (D-01/D-02/D-07) -- its own no-branch/no-fallback source assertions moved
+// with it into packages/ui-web/test/shared-components.test.mjs. What stays
+// here is the dashboard's OWN wiring guarantee: that its production shell
+// mounts the component with an explicit voice, never a bare zero-prop tag.
 
 // --- Wiring: the bounded shell edit --------------------------------------------
 
@@ -236,26 +235,38 @@ test('positive control: the dead-prop matcher hits a synthetic <PanelGrid grante
 	assert.match('<PanelGrid grantedScopes={scopes} />', /grantedScopes=\{/, 'matcher is inert');
 });
 
-test('DashboardShell.tsx renders PreviewAsProvider, PreviewAsControl and AdvisoryDisclosure', () => {
+test('DashboardShell.tsx renders PreviewAsProvider, PreviewAsControl and an explicit-voice AdvisoryDisclosure', () => {
+	// Tightened in 53-05 (D-07): the shell must STATE its voice, not merely
+	// mount the component -- a zero-prop <AdvisoryDisclosure /> no longer
+	// compiles (the prop is required), but a wiring regression that added a
+	// permissive default back to the component would slip past a matcher
+	// that only checked the tag was present.
 	assert.match(STRIPPED.shell, /<PreviewAsProvider/);
 	assert.match(STRIPPED.shell, /<PreviewAsControl/);
-	assert.match(STRIPPED.shell, /<AdvisoryDisclosure/);
+	assert.match(STRIPPED.shell, /<AdvisoryDisclosure variant="authority"/);
+});
+
+test('inertness control: the explicit-voice matcher does NOT accept a bare zero-prop mount', () => {
+	const fixture = '<PreviewAsControl /><AdvisoryDisclosure />';
+	assert.doesNotMatch(fixture, /<AdvisoryDisclosure variant="authority"/, 'matcher is inert');
 });
 
 // --- Elevation-of-privilege confinement (T-50-12-01) ---------------------------
 
 const CONFINEMENT_RE = /preview|simulat|effectiveScopes|GrantedScopesContext/i;
 
-test('no file under src/db, src/transport or src/lifecycle mentions preview, simulat, effectiveScopes or GrantedScopesContext, comment-stripped', () => {
-	// Comment-stripped, per this behavior group's own header -- 50-10's
-	// election-phase.js documents (in prose) why it does NOT add a phase
-	// picker, using the word "simulation"; that is a design note, not a
-	// leak of this plan's previewed value into a lifecycle module.
-	const DIRS = ['src/db', 'src/transport', 'src/lifecycle'];
+test('no file under src/db, src/transport, src/lifecycle or the shared package\'s lifecycle mentions preview, simulat, effectiveScopes or GrantedScopesContext, comment-stripped', () => {
+	// Comment-stripped, per this behavior group's own header -- election-
+	// phase.js documents (in prose) why it does NOT add a phase picker,
+	// using the word "simulation"; that is a design note, not a leak of
+	// this plan's previewed value into a lifecycle module. 53-05 (D-01/D-02)
+	// moved election-phase.js to packages/ui-web/src/lifecycle -- this walk
+	// follows it there via uiWebSrc('lifecycle'), or this confinement
+	// guarantee would silently cover less than it did before the move.
+	const DIRS = [dashboardSrc('db'), dashboardSrc('transport'), dashboardSrc('lifecycle'), uiWebSrc('lifecycle')];
 	/** @type {string[]} */
 	const offenders = [];
-	for (const rel of DIRS) {
-		const abs = path.join(APP_ROOT, rel);
+	for (const abs of DIRS) {
 		for (const file of walkFiles(abs)) {
 			if (CONFINEMENT_RE.test(stripComments(readFileSync(file, 'utf8')))) {
 				offenders.push(path.relative(APP_ROOT, file));
@@ -271,14 +282,14 @@ test('positive control: the confinement matcher hits a synthetic "const s = effe
 
 // --- Storage hygiene and unreachable-state hygiene -----------------------------
 
-test('the four new src/screens/ files contain no localStorage, sessionStorage, indexedDB or writeRowCounts reference', () => {
+test('the three new src/screens/ files contain no localStorage, sessionStorage, indexedDB or writeRowCounts reference', () => {
 	const RE = /localStorage|sessionStorage|indexedDB|writeRowCounts/;
-	for (const key of ['context', 'control', 'disclosure', 'css']) {
+	for (const key of ['context', 'control', 'css']) {
 		assert.doesNotMatch(STRIPPED[key], RE, `${FILES[key]} references storage`);
 	}
 });
 
-test('none of the four new files or the two edited shell files names read-only, ◐ or writable -- comments included', () => {
+test('none of the three new files or the two edited shell files names read-only, ◐ or writable -- comments included', () => {
 	const RE = /read-only|◐|writable/i;
 	for (const key of Object.keys(FILES)) {
 		assert.doesNotMatch(RAW[key], RE, `${FILES[key]} names the unreachable panel state`);

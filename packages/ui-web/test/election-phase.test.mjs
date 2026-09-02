@@ -1,15 +1,19 @@
 /**
  * election-phase.test.mjs -- exhaustive boundary, fail-closed and
- * positive-control tests for `src/lifecycle/election-phase.js`, plus the
- * seed fixture's row-count and negative-control assertions.
+ * positive-control tests for `src/lifecycle/election-phase.js`.
  *
- * In-memory `new Database()` + `prepareDb` (no IndexedDB) -- these run
- * against the real 59-table schema, not a mock.
+ * Moved verbatim (32 cases, D-25) from this module's dashboard test file in
+ * 53-05 -- these tests' SUBJECT is the moved module itself. The two
+ * remaining seed-fixture cases stayed behind under an honest new filename
+ * in the dashboard (their subject is the dashboard's OWN fixtures against a
+ * real database, not this module).
+ *
+ * This file adds no in-process database and no fixture import of any kind
+ * -- none of these 32 cases needs one, and adding one would give this
+ * package a dependency the moved module does not have.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Database } from '@quereus/quereus';
-import { prepareDb } from '@votetorrent/vote-engine/browser';
 
 import {
 	ELECTION_EVENT_ORDER,
@@ -18,10 +22,8 @@ import {
 	resolveComparisonInstant,
 	computeElectionPhase,
 	phaseCopyKey,
-} from '../../src/lifecycle/election-phase.js';
-import { t } from '@votetorrent/ui-web';
-import { seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
-import { seedElectionSurface, SEED_EXPECTED_COUNTS } from '../fixtures/seed-election-surface.js';
+} from '../src/lifecycle/election-phase.js';
+import { t } from '../src/copy.js';
 
 const TIMELINE = Object.freeze({
 	votingStarts: '2026-11-03T08:00:00',
@@ -258,40 +260,3 @@ test('phaseCopyKey(null) returns null', () => {
 	assert.equal(phaseCopyKey(null), null);
 });
 
-// --- Seed fixture ------------------------------------------------------------
-
-test('seedElectionSurface: row counts match SEED_EXPECTED_COUNTS on a founding-seeded database', async () => {
-	const db = new Database();
-	await prepareDb(db);
-	await seedFoundingAuthority(db);
-	await seedElectionSurface(db);
-
-	for (const [table, expected] of Object.entries(SEED_EXPECTED_COUNTS)) {
-		// eslint-disable-next-line no-await-in-loop
-		const row = await db.prepare(`select count(*) as c from ${table}`).get({});
-		assert.equal(row?.c, expected, `expected ${expected} rows in ${table}, got ${row?.c}`);
-	}
-});
-
-test('seedElectionSurface: negative control -- a nonce-less Election insert fails naming InsertValid on the same database where the ceremony path succeeds', async () => {
-	const db = new Database();
-	await prepareDb(db);
-	await seedFoundingAuthority(db);
-	await seedElectionSurface(db);
-
-	await assert.rejects(
-		() =>
-			db.exec(
-				`insert into Election (Id,AuthorityId,Title,Date,RevisionDeadline,BallotDeadline,Type)
-				 with context SigningNonce = null, Tid = 999, now = '2026-03-01T00:00:00'
-				 values ('e2','a1','Unsigned Election','2026-11-03T00:00:00','2026-10-01T00:00:00','2026-10-01T00:00:00','o')`,
-			),
-		/InsertValid/,
-	);
-
-	// The ceremony path on this SAME database already succeeded above --
-	// re-confirm the row is still there, proving the rejection above is
-	// discriminating rather than a broken/poisoned fixture.
-	const row = await db.prepare(`select count(*) as c from Election`).get({});
-	assert.equal(row?.c, 1);
-});

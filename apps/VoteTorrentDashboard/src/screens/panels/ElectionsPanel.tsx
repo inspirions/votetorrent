@@ -7,7 +7,7 @@
  * hook, no import from another screen. `resolveComparisonInstant` supplies
  * the `nowCanonicalDatetime()` fallback when the prop is absent; that
  * branch is unit-tested in `packages/ui-web/test/election-phase.test.mjs`
- * (moved there in 53-05, D-01/D-02/D-25) and is not duplicated here.
+ * (moved there alongside the module itself) and is not duplicated here.
  *
  * Renders no control of any kind (rule R2) and issues its own reads from an
  * effect against `props.db` (rule R6) -- see `RegistrationsPanel.tsx`'s

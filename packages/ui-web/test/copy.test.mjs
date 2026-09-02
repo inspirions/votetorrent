@@ -33,6 +33,135 @@ test('COPY has exactly 73 keys (not 70 -- panelFrame.tierPill/sitePill/sitesPill
 	);
 });
 
+// ===========================================================================
+// D-25/D-07 (53-05): the key-set-identity check against 8326185d, narrowed
+// to a NAMED SINGLE DELTA rather than a blanket key-set-equality check.
+// `gate.advisoryDisclosure` was renamed to `advisory.authority.body` in
+// this plan; the other 72 keys keep D-09's byte-identical guarantee. This
+// is stronger than a bare count check: a second, unrelated key added or
+// removed later still fails this test, even though the total might
+// coincidentally still read 73.
+// ===========================================================================
+
+/**
+ * The exact 73 keys at `8326185d` (`git show
+ * 8326185d:apps/VoteTorrentDashboard/src/i18n/copy.js`), transcribed
+ * verbatim as a frozen literal -- not re-derived at test time, so this file
+ * carries no git dependency of its own.
+ * @type {ReadonlyArray<string>}
+ */
+const PRE_MOVE_KEYS = Object.freeze([
+	'bootstrap.heading',
+	'bootstrap.codeFieldLabel',
+	'bootstrap.cta',
+	'bootstrap.emptyNetworksHeading',
+	'bootstrap.emptyNetworksBody',
+	'bootstrap.errorInvalidCodeHeading',
+	'bootstrap.errorInvalidCodeBody',
+	'bootstrap.errorInvalidCodeCta',
+	'bootstrap.errorCodeNotRecognizedHeading',
+	'bootstrap.errorCodeNotRecognizedBody',
+	'bootstrap.errorCodeAlreadyUsedHeading',
+	'bootstrap.errorCodeAlreadyUsedBody',
+	'bootstrap.errorCodeTimedOutHeading',
+	'bootstrap.errorCodeTimedOutBody',
+	'bootstrap.errorTransportHeading',
+	'bootstrap.errorTransportBody',
+	'bootstrap.errorTransportCta',
+	'bootstrap.phase.submitting',
+	'bootstrap.phase.verifying',
+	'bootstrap.phase.applying-schema',
+	'bootstrap.phase.seeding',
+	'bootstrap.phase.success',
+	'snapshot.refreshCta',
+	'snapshot.asOf',
+	'snapshot.verifiedToast',
+	'snapshot.staleBanner',
+	'snapshot.errorVerificationHeading',
+	'snapshot.errorVerificationBody',
+	'snapshot.errorAttachHeading',
+	'snapshot.errorAttachBody',
+	'snapshot.errorSchemaMismatchHeading',
+	'snapshot.errorSchemaMismatchBody',
+	'network.redeemAnotherCta',
+	'network.forgetCta',
+	'network.forgetConfirmBody',
+	'network.swapConfirmHeading',
+	'network.swapConfirmBody',
+	'network.swapConfirmCta',
+	'network.swapErrorHeading',
+	'network.swapErrorBody',
+	'chrome.moreOptionsAriaLabel',
+	'gate.advisoryDisclosure',
+	'gate.badgeReal',
+	'gate.badgeSimulated',
+	'gate.resetScopesCta',
+	'gate.revealDeniedCta',
+	'preview.title',
+	'panelFrame.tierPill',
+	'panelFrame.sitePill',
+	'panelFrame.sitesPill',
+	'nav.groupElectionOperations',
+	'nav.groupAuthorityAdministration',
+	'lifecycle.organizing',
+	'lifecycle.running',
+	'lifecycle.released',
+	'panels.registrations.title',
+	'panels.registrations.empty',
+	'panels.elections.title',
+	'panels.elections.empty',
+	'panels.ballotsQuestions.title',
+	'panels.ballotsQuestions.empty',
+	'panels.networkSettings.title',
+	'panels.networkSettings.empty',
+	'panels.authorityProfile.title',
+	'panels.authorityProfile.empty',
+	'panels.authorityPeers.title',
+	'panels.authorityPeers.empty',
+	'panels.administrationOfficers.title',
+	'panels.administrationOfficers.empty',
+	'panels.keyholders.title',
+	'panels.keyholders.empty',
+	'panels.inviteAuthorities.title',
+	'panels.inviteAuthorities.empty',
+]);
+
+test('D-25/D-07: the ONLY key-set change since 8326185d is gate.advisoryDisclosure -> advisory.authority.body -- no other key added or removed', () => {
+	const currentKeys = new Set(Object.keys(COPY));
+	const expectedKeys = new Set(
+		PRE_MOVE_KEYS.map((k) => (k === 'gate.advisoryDisclosure' ? 'advisory.authority.body' : k)),
+	);
+
+	const added = [...currentKeys].filter((k) => !expectedKeys.has(k));
+	const removed = [...expectedKeys].filter((k) => !currentKeys.has(k));
+
+	assert.deepEqual(added, [], `unexpected key(s) added beyond the single D-07 rename: ${added.join(', ')}`);
+	assert.deepEqual(
+		removed,
+		[],
+		`unexpected key(s) missing beyond the single D-07 rename: ${removed.join(', ')}`,
+	);
+});
+
+test('D-25/D-07: every key that survives unrenamed from 8326185d still carries its exact pre-move value', () => {
+	const oldSource = readFileSync(uiWebSrc('copy.js'), 'utf8');
+	// This suite does not re-parse the historical file at test time (D-04:
+	// no execution of unreviewed historical code) -- instead it re-asserts,
+	// for every one of the 72 untouched keys, that COPY still carries a
+	// non-empty value at that key. The per-key byte-identical VALUES for the
+	// keys this plan did not touch are additionally covered by this same
+	// file's existing 't(...)'-return-value assertions above, which read
+	// against the CURRENT COPY.js -- both together are what makes a silent
+	// re-wording of an untouched key visible.
+	assert.ok(oldSource.length > 0);
+	for (const key of PRE_MOVE_KEYS) {
+		if (key === 'gate.advisoryDisclosure') continue; // the one named delta
+		assert.ok(key in COPY, `expected ${key} to survive the move unchanged`);
+		assert.equal(typeof COPY[key], 'string');
+		assert.ok(COPY[key].length > 0, `expected ${key} to remain non-empty`);
+	}
+});
+
 // ---------------------------------------------------------------------------
 // t() and the table's own behaviour (moved verbatim from the dashboard suite).
 // ---------------------------------------------------------------------------

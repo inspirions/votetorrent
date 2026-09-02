@@ -34,10 +34,12 @@
  * consumer's sentence. The required prop is what makes that possible: no
  * consumer can omit it and inherit a default.
  *
- * This component must never be wrapped in `DetailsToggle` (this package's
- * designated hook-calling component, D-19). Doing so would turn a binding,
- * unconditional security disclosure into a hideable element -- exactly the
- * failure mode D-16 exists to prevent.
+ * This component must never be wrapped in this package's designated
+ * hook-calling collapsible component (D-19; see that component's own file
+ * for its name). Doing so would turn a binding, unconditional security
+ * disclosure into a hideable element -- exactly the failure mode D-16
+ * exists to prevent. This file itself makes no reference to that
+ * component, by name or otherwise, for the same reason.
  */
 import { t } from '../copy.js';
 

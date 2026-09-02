@@ -17,7 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { dashboardRoot } from '../../../../scripts/lib/source-paths.mjs';
+import { dashboardRoot, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 const APP_ROOT = dashboardRoot();
 
@@ -89,7 +89,12 @@ test('module-format contract (C1): no .ts/.tsx file exists under a tier-1-reacha
 	// type stripping is flagged on Node 22.15 but unflagged from 22.18, so a
 	// .ts module in one of these directories produces a gate that behaves
 	// differently on CI and on a workstation.
+	// Repo-relative dashboard dirs, plus the shared package's own lifecycle
+	// dir since election-phase.js followed there in 53-05 (D-01/D-02) --
+	// ONLY that one package directory: src/components/ holds .tsx
+	// deliberately and must not be added here.
 	const GOVERNED_DIRS = ['src/db', 'src/transport', 'src/auth', 'src/i18n', 'src/lifecycle'];
+	const GOVERNED_ABS_DIRS = [uiWebSrc('lifecycle')];
 
 	/** @param {string[]} paths */
 	function findTsViolations(paths) {
@@ -124,6 +129,10 @@ test('module-format contract (C1): no .ts/.tsx file exists under a tier-1-reacha
 	for (const relDir of GOVERNED_DIRS) {
 		const absDir = path.join(APP_ROOT, relDir);
 		if (!existsSync(absDir)) continue; // skip dirs that don't exist yet at this wave
+		allFiles.push(...walkFiles(absDir).map((f) => path.relative(APP_ROOT, f)));
+	}
+	for (const absDir of GOVERNED_ABS_DIRS) {
+		if (!existsSync(absDir)) continue;
 		allFiles.push(...walkFiles(absDir).map((f) => path.relative(APP_ROOT, f)));
 	}
 

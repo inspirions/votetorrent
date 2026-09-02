@@ -1,7 +1,12 @@
 /**
  * election-ops-panels.test.mjs -- source-level assertions over the three
- * Election Operations panel bodies plus `LifecyclePill.tsx`: no mutating
- * affordance, no forbidden column, no dropped panel state, copy-keys-only.
+ * Election Operations panel bodies: no mutating affordance, no forbidden
+ * column, no dropped panel state, copy-keys-only. `LifecyclePill.tsx`
+ * itself moved to packages/ui-web in 53-05 (D-01/D-02) -- its own
+ * null-phase-guard assertion moved with it into
+ * packages/ui-web/test/shared-components.test.mjs; what remains here is
+ * `ElectionsPanel.tsx mounts LifecyclePill`, whose subject is the
+ * dashboard's OWN mount site, not the pill's internals.
  * `node --test` cannot import `.tsx`, so this file reads each source as
  * TEXT, in `test/node/registry.test.mjs`'s (50-06) shape.
  */
@@ -15,7 +20,7 @@ import { COPY } from '@votetorrent/ui-web';
 
 const PANELS_DIR = dashboardSrc('screens', 'panels');
 
-const FILES = ['RegistrationsPanel.tsx', 'ElectionsPanel.tsx', 'BallotsQuestionsPanel.tsx', 'LifecyclePill.tsx'];
+const FILES = ['RegistrationsPanel.tsx', 'ElectionsPanel.tsx', 'BallotsQuestionsPanel.tsx'];
 
 /** Strip `//` and `/* *\/`-style comment lines -- same shape as registry.test.mjs. @param {string} source @returns {string} */
 function stripComments(source) {
@@ -293,9 +298,6 @@ test('BallotsQuestionsPanel imports from ../../reads/ballots.js and selectActive
 	assert.match(STRIPPED['BallotsQuestionsPanel.tsx'], /selectActiveElection[\s\S]*from ['"]\.\.\/\.\.\/reads\/elections\.js['"]/);
 });
 
-// --- LifecyclePill renders nothing for a null phase --------------------------
-
-test('LifecyclePill.tsx returns null for a null phase', () => {
-	assert.match(STRIPPED['LifecyclePill.tsx'], /if \(key === null\)/);
-	assert.match(STRIPPED['LifecyclePill.tsx'], /return null/);
-});
+// LifecyclePill's own null-phase-guard assertion moved to
+// packages/ui-web/test/shared-components.test.mjs in 53-05, alongside the
+// component itself.
