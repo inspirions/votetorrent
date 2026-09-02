@@ -294,7 +294,12 @@ jobs:
   browser-gates:
     name: "Tiers 2 and 3 - headless Chrome (persistence, then model vs DOM)"
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Raised from 30 (53-13): this job now performs two additional production
+    # builds, two gate builds and four mutated production/gate rebuilds on top
+    # of the four legacy dashboard-only legs. The bound exists to catch a
+    # hang, not to be a target -- if a real run approaches it, that is a
+    # finding about the gate's cost, not a number to raise again.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -329,7 +334,10 @@ jobs:
       # This step runs FIRST, before anything else in this job, on purpose: a
       # stripped inertness control would otherwise be invisible behind four
       # green gate runs. It asserts the gate's own source still carries every
-      # invariant this workflow depends on.
+      # invariant this workflow depends on. Generalised (53-13) to guard BOTH
+      # runners this job now invokes -- the legacy dashboard-only
+      # run-headless.mjs, unchanged below, and the shared
+      # packages/ui-web/scripts/run-ui-gates.mjs, added below it.
       - name: Gate-source integrity
         run: |
           set -euo pipefail
@@ -351,19 +359,93 @@ jobs:
             echo "::error::gate-source-intact: expected at least 9 newPage() calls (50-14's eight fresh loads, six from 50-09 plus the composed-shell leg, plus 50-18's compose-swap leg), found $newpage_count"
             fail=1
           fi
-          for required in prove-trap prove-drift tier3 prove-blank; do
+          for required in prove-trap prove-drift tier3 prove-blank prove-conflated; do
             if ! grep -q -- "$required" "$G"; then
               echo "::error::gate-source-intact: expected mode '$required' not found in $G"
               fail=1
             fi
           done
-          inert_count=$(set +e; grep -c 'is inert' "$G"; true)
-          if [ "$inert_count" -lt 3 ]; then
-            echo "::error::gate-source-intact: expected at least 3 occurrences of 'is inert' (all three inertness messages, including 50-14's --prove-blank), found $inert_count"
+          # Comment-filtered, not bare: a bare `grep -c` counts this file's own
+          # header prose ("is inert" appears in three explanatory sentences
+          # before it ever appears in a real emission site), so a floor of 3
+          # was satisfiable by comments alone -- a self-invalidating gate.
+          # Measured at HEAD: bare 9, comment-filtered 4 (the four real
+          # emission sites: --prove-drift, --prove-blank, --prove-conflated,
+          # --prove-trap). `prove-conflated` is asserted above as a required
+          # mode but this job runs no step invoking it -- carried forward as
+          # this plan's one recorded finding for the phase-close review.
+          inert_count=$(set +e; grep -n 'is inert' "$G" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+          if [ "$inert_count" -lt 4 ]; then
+            echo "::error::gate-source-intact: expected at least 4 comment-filtered occurrences of 'is inert' in $G (the four real emission sites), found $inert_count"
+            fail=1
+          fi
+
+          # Second block: the shared browser-gate runner both apps invoke.
+          # Both blocks always run regardless of the first block's outcome --
+          # one combined fail flag, checked once at the very end -- so a
+          # planted violation in either file is reported in the same run,
+          # never masked by the other file's own failure.
+          U=packages/ui-web/scripts/run-ui-gates.mjs
+          if [ ! -f "$U" ]; then
+            echo "::error::gate-source-intact: $U does not exist"
+            fail=1
+          fi
+          # startViteDevServer / executablePath / channel: 'chrome' have no
+          # legitimate reason to appear in this file at all, in code OR
+          # comment -- zero occurrences is the bar. The dev-server ban is the
+          # load-bearing one: `vite dev` is proven blind to all four package
+          # shapes this phase built, and a runner that quietly acquired a
+          # dev-server transport would report green on a build that cannot
+          # ship.
+          for banned in startViteDevServer executablePath "channel: 'chrome'"; do
+            if grep -q -- "$banned" "$U"; then
+              echo "::error::gate-source-intact: forbidden pattern '$banned' found in $U"
+              fail=1
+            fi
+          done
+          # `vite dev` legitimately appears in this file's OWN prose
+          # explaining why it is disqualified as a transport -- comment-
+          # filtered so that explanatory prose cannot itself trip the ban,
+          # while a real dev-server invocation (never inside a comment)
+          # still would.
+          vitedev_count=$(set +e; grep -n 'vite dev' "$U" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+          if [ "$vitedev_count" -gt 0 ]; then
+            echo "::error::gate-source-intact: 'vite dev' found outside a comment in $U -- a dev-server transport must never be reachable code"
+            fail=1
+          fi
+          # `playwright-core` legitimately appears once, as a plain path
+          # string resolving the installed version for the Chromium receipt
+          # line -- never as an import/require specifier that would let this
+          # file launch a browser through playwright-core directly, bypassing
+          # the declared `playwright` dependency this job installs.
+          if grep -qE "(from|require\()[[:space:]]*['\"]playwright-core['\"]" "$U"; then
+            echo "::error::gate-source-intact: $U imports playwright-core directly -- forbidden transport"
+            fail=1
+          fi
+          for required in prove-no-dedupe prove-token-missing; do
+            if ! grep -q -- "$required" "$U"; then
+              echo "::error::gate-source-intact: expected mode '$required' not found in $U"
+              fail=1
+            fi
+          done
+          # Measured at HEAD: comment-filtered 3 (the generic finishRun
+          # branch, unused by either control, plus one dedicated line per
+          # control) -- see 53-11-SUMMARY.md's own recorded filter/count.
+          u_inert_count=$(set +e; grep -n 'is inert' "$U" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+          if [ "$u_inert_count" -lt 3 ]; then
+            echo "::error::gate-source-intact: expected at least 3 comment-filtered occurrences of 'is inert' in $U, found $u_inert_count"
+            fail=1
+          fi
+          # 53-12's canonical-runner invariant, restated where CI can see it:
+          # a forked second copy of this runner is how one app ends up gated
+          # by a runner nobody is maintaining.
+          runner_count=$(find . -name 'run-ui-gates.mjs' -not -path '*/node_modules/*' | wc -l | tr -d ' ')
+          if [ "$runner_count" != "1" ]; then
+            echo "::error::gate-source-intact: expected exactly one run-ui-gates.mjs outside node_modules, found $runner_count"
             fail=1
           fi
           if [ "$fail" -ne 0 ]; then
-            echo "::error::gate-source-intact FAILED -- an inertness control or fresh-page-load invariant may have been stripped from $G"
+            echo "::error::gate-source-intact FAILED -- an inertness control, a banned transport, or the canonical-runner invariant may have been compromised"
             exit 1
           fi
           echo "RECEIPT gate-source-intact" | tee -a ci-receipt.txt
@@ -380,8 +462,18 @@ jobs:
           which -a google-chrome chromium chromium-browser || true
 
       # nmHoistingLimits: workspaces means no hoisted devDependency may be
-      # assumed -- the browser is driven only through the dashboard
-      # workspace's own declared `playwright`, via its own `exec`.
+      # assumed. Two declarations of `playwright` are installed below: the
+      # dashboard workspace's own (for the legacy run-headless.mjs, driven via
+      # its own `exec`), and packages/ui-web's own (53-08 declares it there so
+      # ONE declaration serves both consuming apps' invocations of the shared
+      # run-ui-gates.mjs -- Node resolves that script's own `import
+      # 'playwright'` relative to the SCRIPT's location, not the invoking
+      # app's cwd). Both are pinned at the same version, so the second
+      # install is a same-version no-op against the shared
+      # ~/.cache/ms-playwright browser cache; two DIFFERENT versions would
+      # mean two browser downloads and two possible behaviours, and printing
+      # both resolved versions into the receipt is where that skew becomes
+      # visible instead of silent.
       #
       # The browser binary is DELIBERATELY NOT CACHED. A restored
       # ~/.cache/ms-playwright is a mutable trust surface inside the one gate
@@ -393,8 +485,10 @@ jobs:
         run: |
           set -euo pipefail
           yarn workspace votetorrent-dashboard exec playwright install --with-deps chromium
-          PW_VERSION=$(yarn workspace votetorrent-dashboard exec playwright --version)
-          echo "RECEIPT chromium-installed playwright=${PW_VERSION} preexisting=see-browser-inventory-step-above" | tee -a ci-receipt.txt
+          DASH_PW_VERSION=$(yarn workspace votetorrent-dashboard exec playwright --version)
+          yarn workspace @votetorrent/ui-web exec playwright install --with-deps chromium
+          UI_WEB_PW_VERSION=$(yarn workspace @votetorrent/ui-web exec playwright --version)
+          echo "RECEIPT chromium-installed dashboard-playwright=${DASH_PW_VERSION} ui-web-playwright=${UI_WEB_PW_VERSION} preexisting=see-browser-inventory-step-above" | tee -a ci-receipt.txt
 
       # Tier 2 runs before tier 3 on purpose: the first Vite boot warms
       # node_modules/.vite. The three later runner invocations (prove-trap,
@@ -483,17 +577,153 @@ jobs:
           fi
           echo "RECEIPT tier3-inertness-fired" | tee -a ../../ci-receipt.txt
 
+      # The shared runner's own healthy-flow leg for the dashboard, run once
+      # per consuming app (53-13, D-19/D-20/D-21). Never `vite dev`: the same
+      # build+serveDist+chromium transport `main()` uses -- see Gate-source
+      # integrity above. `RECEIPT ui-gates ...`'s own `rungs=`/`passed=` pair
+      # is the positive verdict line asserted below -- absence-of-a-string
+      # ("is inert" not present) is not evidence the leg ran at all; a
+      # rungs==passed>=9 result is.
+      - name: Dashboard shared-runner gate (gate:ui)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:ui 2>&1 | tee ../../ui-gate-dashboard.log
+          if grep -q 'is inert' ../../ui-gate-dashboard.log; then
+            echo "::error::ui-gate-dashboard: 'is inert' appeared in a run that was not an inertness-control invocation"
+            exit 1
+          fi
+          line=$(grep -oE 'RECEIPT ui-gates app=[^ ]+ rungs=[0-9]+ passed=[0-9]+' ../../ui-gate-dashboard.log | tail -1)
+          if [ -z "$line" ]; then
+            echo "::error::ui-gate-dashboard: no RECEIPT ui-gates summary line found -- cannot confirm the leg ran at all"
+            exit 1
+          fi
+          rungs=$(echo "$line" | grep -oE 'rungs=[0-9]+' | cut -d= -f2)
+          passed=$(echo "$line" | grep -oE 'passed=[0-9]+' | cut -d= -f2)
+          if [ "$rungs" != "$passed" ] || [ "$rungs" -lt 9 ]; then
+            echo "::error::ui-gate-dashboard: rungs=$rungs passed=$passed -- expected passed==rungs and rungs>=9"
+            exit 1
+          fi
+          grep -q 'gate-config=' ../../ui-gate-dashboard.log && grep -q 'gate-dist=' ../../ui-gate-dashboard.log && grep -q 'gate-entry=' ../../ui-gate-dashboard.log && grep -q 'port=5183' ../../ui-gate-dashboard.log
+          echo "RECEIPT ui-gate-dashboard" | tee -a ../../ci-receipt.txt
+
+      # The public app's SECOND invocation of the identical runner, against
+      # its own gate build (dist-gate/, port 5191) -- proving the shared
+      # runner over both consumers with none of a build matrix's risk to the
+      # job's own required-check name (see header (e)).
+      - name: Public app shared-runner gate (test:browser)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          # test:browser bakes in --gate-config/--gate-dist/--gate-entry/--port
+          # and builds internally (no --skip-build) -- a separate `build:gate`
+          # here would only rebuild the same output a second time.
+          yarn test:browser 2>&1 | tee ../../ui-gate-public.log
+          if grep -q 'is inert' ../../ui-gate-public.log; then
+            echo "::error::ui-gate-public: 'is inert' appeared in a run that was not an inertness-control invocation"
+            exit 1
+          fi
+          line=$(grep -oE 'RECEIPT ui-gates app=[^ ]+ rungs=[0-9]+ passed=[0-9]+' ../../ui-gate-public.log | tail -1)
+          if [ -z "$line" ]; then
+            echo "::error::ui-gate-public: no RECEIPT ui-gates summary line found -- cannot confirm the leg ran at all"
+            exit 1
+          fi
+          rungs=$(echo "$line" | grep -oE 'rungs=[0-9]+' | cut -d= -f2)
+          passed=$(echo "$line" | grep -oE 'passed=[0-9]+' | cut -d= -f2)
+          if [ "$rungs" != "$passed" ] || [ "$rungs" -lt 9 ]; then
+            echo "::error::ui-gate-public: rungs=$rungs passed=$passed -- expected passed==rungs and rungs>=9"
+            exit 1
+          fi
+          # A public leg that silently ran on the dashboard's defaults would
+          # emit no config line at all -- this app's own `test:browser` script
+          # already bakes in its four non-default flags, so nothing here
+          # duplicates them; the banner is only asserted.
+          grep -q 'gate-config=vite.gate.config.ts' ../../ui-gate-public.log
+          grep -q 'gate-dist=dist-gate' ../../ui-gate-public.log
+          grep -q 'gate-entry=election-shell-gate.html' ../../ui-gate-public.log
+          grep -q 'port=5191' ../../ui-gate-public.log
+          echo "RECEIPT ui-gate-public" | tee -a ../../ci-receipt.txt
+
+      # Four D-20 negative controls, one per control per app. Each rebuilds a
+      # genuinely mutated production (dedupe) or gate (token) build at BUILD
+      # TIME -- never `dist/` edited after the fact, never anything mutated
+      # at runtime -- and each INVERTS the expectation: exit 0 means the
+      # inner run genuinely failed in the measured shape. 5181 is both
+      # run-headless.mjs's dev-server port and the public app's dev/preview
+      # port; the workflow never starts the public app's dev or preview
+      # server (`vite dev` is never a gate) and every step here is
+      # sequential, so the two can never bind concurrently -- a future editor
+      # who adds a preview server should read this sentence before doing so.
+      #
+      # Dedupe control, exit 0 means: a rebuild with `resolve.dedupe` removed
+      # genuinely failed the five `identity:` rungs in the measured PARTIAL
+      # shape (both D-23 token rungs still passing) -- a duplicate React
+      # reaching the hook dispatcher, not a crashed page.
+      - name: Dashboard dedupe inertness control (--prove-no-dedupe)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:prove-no-dedupe 2>&1 | tee ../../ui-gate-dashboard-prove-no-dedupe.log
+          if grep -q 'is inert' ../../ui-gate-dashboard-prove-no-dedupe.log; then
+            echo "::error::ui-gate-dashboard-dedupe-control-fired: --prove-no-dedupe reported 'is inert' -- the mutated build still passed every rung, the dedupe control did NOT fire"
+            exit 1
+          fi
+          echo "RECEIPT ui-gate-dashboard-dedupe-control-fired" | tee -a ../../ci-receipt.txt
+
+      # Token control, exit 0 means: a rebuild with the shared tokens
+      # stylesheet's reference removed genuinely failed the two D-23 token
+      # rungs while all five identity rungs still passed -- a resolved
+      # computed CSS custom-property value going missing, not a crashed page.
+      - name: Dashboard token inertness control (--prove-token-missing)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:prove-token-missing 2>&1 | tee ../../ui-gate-dashboard-prove-token-missing.log
+          if grep -q 'is inert' ../../ui-gate-dashboard-prove-token-missing.log; then
+            echo "::error::ui-gate-dashboard-token-control-fired: --prove-token-missing reported 'is inert' -- the mutated build still passed every rung, the token control did NOT fire"
+            exit 1
+          fi
+          echo "RECEIPT ui-gate-dashboard-token-control-fired" | tee -a ../../ci-receipt.txt
+
+      - name: Public app dedupe inertness control (--prove-no-dedupe)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn gate:prove-no-dedupe 2>&1 | tee ../../ui-gate-public-prove-no-dedupe.log
+          if grep -q 'is inert' ../../ui-gate-public-prove-no-dedupe.log; then
+            echo "::error::ui-gate-public-dedupe-control-fired: --prove-no-dedupe reported 'is inert' -- the mutated build still passed every rung, the dedupe control did NOT fire"
+            exit 1
+          fi
+          echo "RECEIPT ui-gate-public-dedupe-control-fired" | tee -a ../../ci-receipt.txt
+
+      - name: Public app token inertness control (--prove-token-missing)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn gate:prove-token-missing 2>&1 | tee ../../ui-gate-public-prove-token-missing.log
+          if grep -q 'is inert' ../../ui-gate-public-prove-token-missing.log; then
+            echo "::error::ui-gate-public-token-control-fired: --prove-token-missing reported 'is inert' -- the mutated build still passed every rung, the token control did NOT fire"
+            exit 1
+          fi
+          echo "RECEIPT ui-gate-public-token-control-fired" | tee -a ../../ci-receipt.txt
+
       - name: Upload gate evidence on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: dashboard-browser-gate-evidence-${{ github.sha }}
+          name: web-browser-gate-evidence-${{ github.sha }}
           path: |
             tier2.log
             prove-trap.log
             prove-blank.log
             tier3.log
             prove-drift.log
+            ui-gate-dashboard.log
+            ui-gate-public.log
+            ui-gate-dashboard-prove-no-dedupe.log
+            ui-gate-dashboard-prove-token-missing.log
+            ui-gate-public-prove-no-dedupe.log
+            ui-gate-public-prove-token-missing.log
             ci-receipt.txt
           retention-days: 14
 
@@ -503,7 +733,10 @@ jobs:
           node scripts/assert-ci-baselines.mjs receipts ci-receipt.txt \
             toolchain gate-source-intact chromium-installed tier2-persistence \
             tier2-inertness-fired compose-shell compose-inertness-fired \
-            tier3-model-dom tier3-inertness-fired
+            tier3-model-dom tier3-inertness-fired \
+            ui-gate-dashboard ui-gate-public \
+            ui-gate-dashboard-dedupe-control-fired ui-gate-dashboard-token-control-fired \
+            ui-gate-public-dedupe-control-fired ui-gate-public-token-control-fired
 
   # =========================================================================
   # Job 3 -- Phase-close baselines: vote-engine suite + authority typecheck.
