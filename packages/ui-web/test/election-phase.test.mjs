@@ -72,7 +72,7 @@ test('PHASE_IDS is the frozen four-element array in chronological order', () => 
 });
 
 test("PHASE_IDS does NOT contain 'indeterminate'", () => {
-	assert.ok(!PHASE_IDS.includes(INDETERMINATE_PHASE));
+	assert.ok(!(/** @type {ReadonlyArray<string>} */ (PHASE_IDS)).includes(INDETERMINATE_PHASE));
 });
 
 test('Object.keys(PHASE_OPENED_BY) deep-equals PHASE_IDS.slice(1) -- the walk and the vocabulary cannot diverge', () => {
@@ -145,8 +145,7 @@ test('derivePhase (number timeline): boundary walk agrees with the string form a
 // --- derivePhase: indeterminate cases ----------------------------------------
 
 test('derivePhase: a timeline missing closed, with now after tallyingStarts, is indeterminate with firedRule "closed"', () => {
-	const timeline = { ...FULL_TIMELINE };
-	delete timeline.closed;
+	const { closed: _closed, ...timeline } = FULL_TIMELINE;
 	const result = derivePhase({}, timeline, '2026-11-04T00:00:00');
 	assert.equal(result.phase, INDETERMINATE_PHASE);
 	assert.equal(result.indeterminate, true);
@@ -154,16 +153,14 @@ test('derivePhase: a timeline missing closed, with now after tallyingStarts, is 
 });
 
 test('derivePhase: a timeline missing votingStarts, with now after tallyingStarts, is a CONFIDENT settling (rung 5)', () => {
-	const timeline = { ...FULL_TIMELINE };
-	delete timeline.votingStarts;
+	const { votingStarts: _votingStarts, ...timeline } = FULL_TIMELINE;
 	const result = derivePhase({}, timeline, '2026-11-04T00:00:00');
 	assert.equal(result.phase, 'settling');
 	assert.equal(result.indeterminate, false);
 });
 
 test('derivePhase: a timeline missing votingStarts, with now BEFORE tallyingStarts, is indeterminate with firedRule "votingStarts"', () => {
-	const timeline = { ...FULL_TIMELINE };
-	delete timeline.votingStarts;
+	const { votingStarts: _votingStarts, ...timeline } = FULL_TIMELINE;
 	const result = derivePhase({}, timeline, '2026-11-03T10:00:00');
 	assert.equal(result.phase, INDETERMINATE_PHASE);
 	assert.equal(result.indeterminate, true);
@@ -221,6 +218,7 @@ test('computeElectionPhase returns indeterminate (NOT the retired phase: null) f
 });
 
 test('computeElectionPhase and derivePhase agree on every boundary fixture -- the alias cannot silently diverge', () => {
+	/** @type {Array<[string, unknown]>} */
 	const cases = [
 		['2026-11-03T07:59:59', FULL_TIMELINE],
 		['2026-11-03T08:00:00', FULL_TIMELINE],
@@ -319,7 +317,10 @@ test('every phase derivePhase can return is a member of PHASE_IDS or is INDETERM
 		derivePhase({}, FULL_TIMELINE, 'not-a-date'),
 	];
 	for (const { phase } of samples) {
-		assert.ok(PHASE_IDS.includes(phase) || phase === INDETERMINATE_PHASE, `unexpected phase: ${phase}`);
+		assert.ok(
+			(/** @type {ReadonlyArray<string>} */ (PHASE_IDS)).includes(phase) || phase === INDETERMINATE_PHASE,
+			`unexpected phase: ${phase}`,
+		);
 	}
 });
 
