@@ -28,14 +28,10 @@
  * example.
  */
 
-import { CAPABILITIES } from '../auth/capabilities.js';
+import { CAPABILITY_TABLES } from './capability-tables.js';
 
-const CAPABILITY = /** @type {NonNullable<ReturnType<typeof CAPABILITIES.find>>} */ (
-	CAPABILITIES.find((c) => c.id === 'registrations')
-);
-
-/** The twelve `vrg` tables this module covers, read from `capabilities.js`. @type {ReadonlyArray<string>} */
-export const TABLES_READ = Object.freeze([...CAPABILITY.tables]);
+/** The thirteen `vrg` tables this module covers -- read from `capability-tables.js`'s generated `CAPABILITY_TABLES.registrations` field rather than re-declared here, so there is exactly one list (that generator, `generate-capabilities.mjs`, is the same schema-parse run that also emits `capabilities.js`). @type {ReadonlyArray<string>} */
+export const TABLES_READ = Object.freeze([...CAPABILITY_TABLES.registrations]);
 
 /** The registrant roster page bound -- a PRIVACY control first, a
  * performance one second: a borrowed or shoulder-surfed browser exposes at

@@ -21,7 +21,7 @@ import {
 	readElectionOverview,
 	readElectionPolicies,
 	countElections,
-} from '../../reads/elections.js';
+} from '@votetorrent/web-data/officer';
 import {
 	ELECTION_EVENT_ORDER,
 	computeElectionPhase,

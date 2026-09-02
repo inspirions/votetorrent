@@ -16,14 +16,10 @@
  * as `:grp`, never `:group`.
  */
 
-import { CAPABILITIES } from '../auth/capabilities.js';
+import { CAPABILITY_TABLES } from './capability-tables.js';
 
-const CAPABILITY = /** @type {NonNullable<ReturnType<typeof CAPABILITIES.find>>} */ (
-	CAPABILITIES.find((c) => c.id === 'ballotsQuestions')
-);
-
-/** The four `ceb` tables this module covers, read from `capabilities.js`. @type {ReadonlyArray<string>} */
-export const TABLES_READ = Object.freeze([...CAPABILITY.tables]);
+/** The four `ceb` tables this module covers, read from `capability-tables.js`'s generated `CAPABILITY_TABLES.ballotsQuestions` field -- so there is exactly one list. @type {ReadonlyArray<string>} */
+export const TABLES_READ = Object.freeze([...CAPABILITY_TABLES.ballotsQuestions]);
 
 /**
  * @typedef {object} BallotRow

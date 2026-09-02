@@ -9,8 +9,10 @@
  * `RegistrantSelective`, the raw intake payload and its content hash on
  * `RegistrationRequest`, the unbounded authority-specific field bag on
  * `RegistrantPublic`, and every payload column on the private association
- * table never reach `src/reads/registrations.js`, let alone this component
- * -- see that module's own header for the exact column allowlist.
+ * table never reach `@votetorrent/web-data`'s `src/officer/registrations.js`
+ * (moved out of this workspace's own `src/reads/` by 54-03b), let alone
+ * this component -- see that module's own header for the exact column
+ * allowlist.
  *
  * Issues its own reads from an effect against `props.db` (rule R6) --
  * nothing pre-fetches on its behalf. 50-09's `PanelGrid` mounts this
@@ -27,8 +29,8 @@ import {
 	readRegistrantRoster,
 	readRegistrationSurfaceCounts,
 	hasAnyRegistrationData,
-} from '../../reads/registrations.js';
-import { selectActiveElection } from '../../reads/elections.js';
+	selectActiveElection,
+} from '@votetorrent/web-data/officer';
 import './election-ops.css';
 
 // Field labels reproduced VERBATIM from the schema (rule R1: a column name

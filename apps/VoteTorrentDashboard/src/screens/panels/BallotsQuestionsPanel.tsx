@@ -9,8 +9,7 @@
 import { useEffect, useState } from 'react';
 import type { PanelComponent } from './types.js';
 import { t } from '@votetorrent/ui-web';
-import { readBallots, readQuestions, countBallotSigningTasks } from '../../reads/ballots.js';
-import { selectActiveElection } from '../../reads/elections.js';
+import { readBallots, readQuestions, countBallotSigningTasks, selectActiveElection } from '@votetorrent/web-data/officer';
 import './election-ops.css';
 
 // Field labels reproduced VERBATIM from the schema (rule R1), rendered as

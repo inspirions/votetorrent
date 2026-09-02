@@ -30,14 +30,10 @@
  * UI-SPEC is explicit that multi-election navigation is a later phase.
  */
 
-import { CAPABILITIES } from '../auth/capabilities.js';
+import { CAPABILITY_TABLES } from './capability-tables.js';
 
-const CAPABILITY = /** @type {NonNullable<ReturnType<typeof CAPABILITIES.find>>} */ (
-	CAPABILITIES.find((c) => c.id === 'elections')
-);
-
-/** The seven `mel` tables this module covers -- read from `capabilities.js`'s generated `tables` field rather than re-declared here, so there is exactly one list. @type {ReadonlyArray<string>} */
-export const TABLES_READ = Object.freeze([...CAPABILITY.tables]);
+/** The eight `mel` tables this module covers -- read from `capability-tables.js`'s generated `CAPABILITY_TABLES.elections` field rather than re-declared here, so there is exactly one list (that generator, `generate-capabilities.mjs`, is the same schema-parse run that also emits `capabilities.js`). @type {ReadonlyArray<string>} */
+export const TABLES_READ = Object.freeze([...CAPABILITY_TABLES.elections]);
 
 /**
  * @typedef {object} ActiveElection
