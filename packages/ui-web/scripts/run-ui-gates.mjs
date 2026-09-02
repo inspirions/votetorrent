@@ -205,6 +205,18 @@ const KNOWN_FLAGS = new Set([
 ]);
 
 /**
+ * WR-05 (Phase 53 review): the five flags below take a value. This file's own
+ * header states "An unknown flag is never silently ignored" -- a TRUNCATED
+ * value-taking flag (missing its value entirely, or immediately followed by
+ * another known flag) is the same class of silent failure: `argv[(i += 1)]`
+ * previously read `undefined` or the next flag's own text as if it were this
+ * flag's value, and `opts.gateConfig ?? DEFAULT_GATE_CONFIG_REL` in `main()`
+ * then silently substituted the dashboard's own layout default for a
+ * consumer that asked for something else and never got it.
+ */
+const VALUE_FLAGS = new Set(['--app', '--gate-config', '--gate-dist', '--gate-entry', '--port']);
+
+/**
  * @param {string[]} argv
  */
 function parseArgs(argv) {
@@ -225,6 +237,12 @@ function parseArgs(argv) {
 		if (!KNOWN_FLAGS.has(arg)) {
 			process.stderr.write(
 				`[run-ui-gates] unrecognised argument "${arg}" — every flag must be one of ${[...KNOWN_FLAGS].join(', ')}. An unknown flag is never silently ignored.\n`,
+			);
+			process.exit(2);
+		}
+		if (VALUE_FLAGS.has(arg) && (i + 1 >= argv.length || KNOWN_FLAGS.has(argv[i + 1]))) {
+			process.stderr.write(
+				`[run-ui-gates] ${arg} requires a value — a missing value must never fall back to a default.\n`,
 			);
 			process.exit(2);
 		}
@@ -1261,8 +1279,21 @@ async function main() {
 	const gateConfigRel = opts.gateConfig ?? DEFAULT_GATE_CONFIG_REL;
 	const gateDistRel = opts.gateDist ?? DEFAULT_GATE_DIST_REL;
 	const gateEntryName = opts.gateEntry ?? DEFAULT_GATE_ENTRY_NAME;
+	// WR-06 (Phase 53 review): a bare `Number()` coercion here previously (a)
+	// crashed with a raw stack trace on `--port abc` (NaN reaches
+	// `server.listen`) instead of this file's own documented `exit 2`, and (b)
+	// treated `UI_GATE_PORT=''` as `0` (`Number('')` is `0`, not `NaN` --
+	// empty string is NOT nullish so `??` never falls through to the
+	// default), silently binding an OS-assigned port nobody asked for. Both
+	// are validated here, once, before anything downstream ever sees `port`.
 	const portRaw = opts.port ?? process.env.UI_GATE_PORT ?? String(DEFAULT_PORT);
-	const port = Number(portRaw);
+	const port = Number(String(portRaw).trim());
+	if (!Number.isInteger(port) || port < 1 || port > 65535) {
+		process.stderr.write(
+			`[run-ui-gates] --port/UI_GATE_PORT must be an integer 1-65535, got ${JSON.stringify(portRaw)}\n`,
+		);
+		process.exit(2);
+	}
 
 	const gateConfigAbs = resolveWithinApp(appDir, gateConfigRel, '--gate-config');
 	const gateDistAbs = resolveWithinApp(appDir, gateDistRel, '--gate-dist');
