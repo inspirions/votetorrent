@@ -568,27 +568,36 @@ for (const [label, matcher, fixture] of REGEX_POSITIVE_CONTROLS) {
 		fail(`matcher is inert — the "${label}" positive-control fixture did not match. This gate cannot detect a real regression until the matcher is fixed.`);
 	}
 }
-/** A matcher that fires on everything is as useless as one that fires on nothing. */
+/**
+ * A matcher that fires on everything is as useless as one that fires on nothing. Every
+ * matcher (RESOLVE_KEY_RE, DEDUPE_KEY_RE, RUN_UI_GATES_TOKEN_RE) is checked against every
+ * fixture's OWN (comment-stripped) content — never a hard-coded literal copy of it, and
+ * never gated behind a marker substring that only some fixtures happen to contain. The
+ * comment-only fixture (index 1) reduces to `''` after stripping and so trips none of the
+ * three; comment-stripping itself is separately proven by the c2a/c2b inversion fixtures
+ * above.
+ */
 const REGEX_BENIGN_FIXTURES = [
 	"const resolveSomething = 'not a config key at all';",
 	"// resolve: { dedupe: ['react', 'react-dom'] } -- discussed only in a line comment",
 	"const dedupeCount = 2; // not a resolve.dedupe array",
 	'node ../../packages/ui-web/scripts/run-tests-elsewhere.mjs --app .',
 ];
+const REGEX_BENIGN_MATCHERS = /** @type {ReadonlyArray<readonly [string, RegExp]>} */ ([
+	['RESOLVE_KEY_RE', RESOLVE_KEY_RE],
+	['DEDUPE_KEY_RE', DEDUPE_KEY_RE],
+	['RUN_UI_GATES_TOKEN_RE', RUN_UI_GATES_TOKEN_RE],
+]);
 for (const benign of REGEX_BENIGN_FIXTURES) {
 	const stripped = stripCommentLines(benign);
-	if (RESOLVE_KEY_RE.test(stripped) && stripped.includes('not a config key')) {
-		fail(`matcher is indiscriminate — RESOLVE_KEY_RE matched the benign fixture ${JSON.stringify(benign)}.`);
-	}
-	if (DEDUPE_KEY_RE.test(stripped) && stripped.includes('not a resolve.dedupe array')) {
-		fail(`matcher is indiscriminate — DEDUPE_KEY_RE matched the benign fixture ${JSON.stringify(benign)}.`);
-	}
-	if (RUN_UI_GATES_TOKEN_RE.test('node ../../packages/ui-web/scripts/run-tests-elsewhere.mjs --app .')) {
-		fail(`matcher is indiscriminate — RUN_UI_GATES_TOKEN_RE matched a runner with a different filename.`);
+	for (const [name, matcher] of REGEX_BENIGN_MATCHERS) {
+		if (matcher.test(stripped)) {
+			fail(`matcher is indiscriminate — ${name} matched the benign fixture ${JSON.stringify(benign)} (comment-stripped: ${JSON.stringify(stripped)}).`);
+		}
 	}
 }
 ok(
-	`${REGEX_POSITIVE_CONTROLS.length} regex positive control(s) matched, ${REGEX_BENIGN_FIXTURES.length} benign fixture(s) did not — the checker matchers are live and discriminating.`,
+	`${REGEX_POSITIVE_CONTROLS.length} regex positive control(s) matched, ${REGEX_BENIGN_FIXTURES.length} benign fixture(s) x ${REGEX_BENIGN_MATCHERS.length} matcher(s) each did not — the checker matchers are live and discriminating.`,
 );
 
 // ---------------------------------------------------------------------------
