@@ -30,4 +30,12 @@ export default mergeConfig(base, {
 			input: fileURLToPath(new URL('./test/browser/election-shell-gate.html', import.meta.url)),
 		},
 	},
+	// 53-09: the fourth point of packages/ui-web/README.md's harness contract
+	// (build.outDir/build.rollupOptions.input/build.emptyOutDir/publicDir:
+	// false) — this app has no public/ directory today, so this override is
+	// currently a no-op in practice, but its absence would silently start
+	// copying one into dist-gate/ the moment a public/ directory is ever
+	// added, which is exactly the kind of drift the contract exists to
+	// foreclose rather than to catch after the fact.
+	publicDir: false,
 });

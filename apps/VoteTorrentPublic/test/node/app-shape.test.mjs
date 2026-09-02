@@ -127,14 +127,45 @@ test('positive control: a stylesheet with the import positioned AFTER a layout r
 // ---------------------------------------------------------------------------
 // 6. The declared browser gate (the D-21 hook).
 // ---------------------------------------------------------------------------
-test('package.json declares a test:browser script pointing at a file under test/browser/ that exists on disk', () => {
+// 53-09 repoints test:browser from 53-06's `node test/browser/run-gate.mjs`
+// stub to a real invocation of the shared runner
+// (packages/ui-web/scripts/run-ui-gates.mjs, D-19) — a script that lives
+// OUTSIDE test/browser/, unlike the legacy stub this assertion originally
+// governed. This rung now accepts EITHER shape: a legacy-style direct
+// invocation of a file under test/browser/, or a shared-runner invocation
+// naming `run-ui-gates.mjs` (asserted to exist on disk) plus a
+// `--gate-entry <file>` value that itself resolves under test/browser/ — so
+// a future accidental revert to a missing/broken legacy path is still
+// caught, and so is a shared-runner invocation whose `--gate-entry` names a
+// harness file that was never actually created.
+test('package.json declares a test:browser script naming a real gate target that exists on disk (either a legacy test/browser/ file, or the shared run-ui-gates.mjs runner plus a --gate-entry harness file under test/browser/)', () => {
 	const manifest = JSON.parse(readFileSync(publicRoot('package.json'), 'utf8'));
 	assert.ok('test:browser' in manifest.scripts, 'package.json scripts must declare test:browser');
 	const scriptValue = manifest.scripts['test:browser'];
-	const match = scriptValue.match(/test\/browser\/([\w.-]+)/);
-	assert.ok(match, `test:browser script value "${scriptValue}" does not reference a path under test/browser/`);
-	const targetPath = publicRoot('test', 'browser', match[1]);
-	assert.ok(existsSync(targetPath), `test:browser's declared target ${targetPath} does not exist on disk — a declared script pointing at a missing file is exactly the failure this catches`);
+
+	const legacyMatch = scriptValue.match(/test\/browser\/([\w.-]+)/);
+	if (legacyMatch) {
+		const targetPath = publicRoot('test', 'browser', legacyMatch[1]);
+		assert.ok(existsSync(targetPath), `test:browser's declared target ${targetPath} does not exist on disk — a declared script pointing at a missing file is exactly the failure this catches`);
+		return;
+	}
+
+	assert.match(scriptValue, /run-ui-gates\.mjs/, `test:browser script value "${scriptValue}" names neither a test/browser/ path nor the shared run-ui-gates.mjs runner`);
+	const runnerPath = path.join(repoRoot, 'packages', 'ui-web', 'scripts', 'run-ui-gates.mjs');
+	assert.ok(existsSync(runnerPath), `the shared runner ${runnerPath} does not exist on disk`);
+
+	const gateEntryMatch = scriptValue.match(/--gate-entry\s+(\S+)/);
+	assert.ok(gateEntryMatch, `test:browser script value "${scriptValue}" invokes run-ui-gates.mjs but names no --gate-entry`);
+	const entryPath = publicRoot('test', 'browser', gateEntryMatch[1]);
+	assert.ok(existsSync(entryPath), `test:browser's --gate-entry target ${entryPath} does not exist on disk`);
+});
+
+test('inertness control: a --gate-entry value naming a nonexistent file would fail the assertion above', () => {
+	const fixtureScript = 'node ../../packages/ui-web/scripts/run-ui-gates.mjs --app . --gate-entry nonexistent-gate.html';
+	const gateEntryMatch = fixtureScript.match(/--gate-entry\s+(\S+)/);
+	assert.ok(gateEntryMatch);
+	const entryPath = publicRoot('test', 'browser', gateEntryMatch[1]);
+	assert.equal(existsSync(entryPath), false, 'sanity: this fixture path must not exist, or the control proves nothing');
 });
 
 // ---------------------------------------------------------------------------
