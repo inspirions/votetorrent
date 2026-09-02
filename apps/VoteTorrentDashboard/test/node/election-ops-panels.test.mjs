@@ -131,13 +131,25 @@ test('positive control: the authored-prose extractor reports a literal sentence 
 // --- No new copy key ----------------------------------------------------------
 
 const COPY_KEYS = new Set(Object.keys(COPY));
+// The five `lifecycle.*` keys, as they stand in packages/ui-web/src/copy.js
+// after 54-02's rename (D-06/D-07) -- `organizing`/`running`/`released`
+// became `pre`/`voting`/`settling`/`closed` plus the standing
+// `indeterminate` sentinel, not the insertion of a fourth into an unchanged
+// set. None of the four panel files below calls any `lifecycle.*` key
+// literally today (`LifecyclePill` moved to `packages/ui-web` in 53-05, and
+// it -- not a panel -- is what calls `t(phaseCopyKey(phase))`), so these
+// entries are listed but currently unexercised by the loop below; the
+// `COPY_KEYS.has(key)` half two lines down still catches an allow-listed key
+// naming a phase that no longer exists, for the day a panel does call one.
 const ALLOWED_T_KEYS = new Set([
 	'panels.registrations.empty',
 	'panels.elections.empty',
 	'panels.ballotsQuestions.empty',
-	'lifecycle.organizing',
-	'lifecycle.running',
-	'lifecycle.released',
+	'lifecycle.pre',
+	'lifecycle.voting',
+	'lifecycle.settling',
+	'lifecycle.closed',
+	'lifecycle.indeterminate',
 ]);
 
 test('every literal t(...) argument across the four files is in the exact allow-list and exists in the frozen COPY table', () => {
