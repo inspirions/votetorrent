@@ -3,8 +3,11 @@
  * lint-copy.mjs — the D-06 three-root copy-discipline gate; the repo-root
  * `lint:copy` script (and the dashboard's own `lint` delegates to it).
  *
- * Relocated from `apps/VoteTorrentDashboard/scripts/lint-copy.mjs` (53-10).
- * That single-root script proved only the dashboard's own `src/` clean; the
+ * Relocated (53-10) from the dashboard workspace's own former single-root
+ * script, at the file this replaced -- see this plan's SUMMARY for the exact
+ * prior path, deliberately not restated here so this comment does not itself
+ * become a dangling reference once that file is gone. That single-root
+ * script proved only the dashboard's own `src/` clean; the
  * shared copy table (`packages/ui-web/src/copy.js`) now serves THREE roots —
  * `packages/ui-web/src`, `apps/VoteTorrentDashboard/src` and
  * `apps/VoteTorrentPublic/src` — and a lint that only ever looked at one of
