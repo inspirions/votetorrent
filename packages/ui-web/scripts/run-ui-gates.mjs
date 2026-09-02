@@ -1076,6 +1076,19 @@ async function runProveNoDedupe({ appDir, gateConfigRel, gateDistAbs, gateEntryN
 		return;
 	}
 	console.log(`[--prove-no-dedupe] mutation report: ${JSON.stringify(report)}`);
+	// WR-08 (Phase 53 review): this control previously logged the report and
+	// asserted NOTHING about it, unlike its `--prove-token-missing` sibling
+	// (`report.removals >= 1` below). `writeMutationReportPlugin` is called
+	// with `{ mutation, removedDedupe, selfReference }` (see
+	// vite.mutant.config.ts in both consumers) -- require the report to
+	// actually record a non-empty `removedDedupe` array naming the real
+	// mutation, so a no-op report can never be waved through silently.
+	if (report.mutation !== 'no-dedupe' || !Array.isArray(report.removedDedupe) || report.removedDedupe.length === 0) {
+		console.log(`\n${PREFIX} the mutation report does not record a removed dedupe array — a no-op, not an inert gate`);
+		console.log(`  report=${JSON.stringify(report)}`);
+		process.exitCode = 1;
+		return;
+	}
 
 	// The inverted assertion: the SAME gate, against the mutant build.
 	const mutantRun = await runGatePassLenient({ appDir, buildConfigRel: null, distAbs: mutantOutDirAbs, entryName: gateEntryName, port });
