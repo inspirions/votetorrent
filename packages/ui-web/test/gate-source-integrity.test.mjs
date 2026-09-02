@@ -27,13 +27,42 @@ function stripComments(source) {
 	return source.replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
-test('(1) run-ui-gates.mjs contains zero occurrences of `styleSheets`', () => {
-	assert.equal((runnerSource.match(/styleSheets/g) ?? []).length, 0);
+/**
+ * Strips the ONE labelled exception region 53-11 (D-20) deliberately added —
+ * `readStyleSheetCountWitness`'s body — before scanning for `styleSheets`.
+ * That function is `--prove-token-missing`'s STANDING WITNESS that a naive
+ * `document.styleSheets.length` check would have passed on a deliberately
+ * broken, token-less build (see the runner's own header note on why counting
+ * loaded style resources is otherwise blind); it is not the main D-23 probe
+ * this check (1) exists to keep honest, and it is bounded by test (1c) below
+ * so this exception cannot silently grow to swallow a real regression.
+ * @param {string} source
+ * @returns {string}
+ */
+function stripStyleSheetWitnessException(source) {
+	return source.replace(/async function readStyleSheetCountWitness\([\s\S]*?\n\}\n/, '');
+}
+
+test('(1) run-ui-gates.mjs contains zero occurrences of `styleSheets` outside the labelled prove-token-missing witness exception', () => {
+	const scoped = stripStyleSheetWitnessException(runnerSource);
+	assert.equal((scoped.match(/styleSheets/g) ?? []).length, 0);
 });
 
 test('(1b) inertness control: the styleSheets matcher DOES fire on a planted fixture', () => {
 	const fixture = 'const ok = document.styleSheets.length === 1;';
 	assert.ok((fixture.match(/styleSheets/g) ?? []).length > 0, 'matcher must be able to detect the real regression shape');
+});
+
+test('(1c) the witness exception region itself exists and contains EXACTLY one occurrence of styleSheets — bounding the exception so it cannot silently grow to swallow a real regression', () => {
+	const witnessMatch = runnerSource.match(/async function readStyleSheetCountWitness\([\s\S]*?\n\}\n/);
+	assert.ok(witnessMatch, 'expected the labelled readStyleSheetCountWitness function to exist');
+	const count = (witnessMatch[0].match(/styleSheets/g) ?? []).length;
+	assert.equal(count, 1);
+});
+
+test('(1d) sanity: the witness exception is not the whole file — stripping it still leaves the real RUNG_IDS declaration reachable', () => {
+	const scoped = stripStyleSheetWitnessException(runnerSource);
+	assert.match(scoped, /RUNG_IDS = Object\.freeze\(/);
 });
 
 test('(2) run-ui-gates.mjs contains zero occurrences of the template-literal record(...) call form', () => {

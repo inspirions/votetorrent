@@ -94,9 +94,10 @@ import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readdirSync, existsSync, readFileSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { serveDist } from './lib/serve-dist.mjs';
 import { parseTokensCss, normaliseTokenValue, hexToRgb, compareToken, BASE_RULE_CHECKS } from './lib/tokens.mjs';
+import { readMutationReport } from './mutations.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -151,10 +152,17 @@ const DEFAULT_GATE_ENTRY_NAME = 'ui-gate.html';
 const DEFAULT_PORT = 5183;
 
 /**
- * The inversion seam. 53-11 adds exactly two entries here — see this file's
- * header "THE INVERSION SEAM" note for the full contract each must satisfy.
+ * The inversion seam (53-11, D-20). Exactly two entries, one per control —
+ * `--prove-no-dedupe` (the dashboard's D-19 seam, spike 089's measured
+ * 19/19 -> 8/12 partial-failure shape) and `--prove-token-missing` (D-23's
+ * resolved-computed-value probe, the only observation that can see a token
+ * layer whose reference was removed). See this file's header "THE INVERSION
+ * SEAM" note for the full contract each control must satisfy.
  */
-const INVERSION_CONTROLS = Object.freeze({});
+const INVERSION_CONTROLS = Object.freeze({
+	'--prove-no-dedupe': Object.freeze({ mutation: 'no-dedupe', inversionId: '--prove-no-dedupe' }),
+	'--prove-token-missing': Object.freeze({ mutation: 'token-missing', inversionId: '--prove-token-missing' }),
+});
 
 const KNOWN_FLAGS = new Set([
 	'--app',
@@ -164,13 +172,15 @@ const KNOWN_FLAGS = new Set([
 	'--port',
 	'--skip-build',
 	'--list-rungs',
+	'--prove-no-dedupe',
+	'--prove-token-missing',
 ]);
 
 /**
  * @param {string[]} argv
  */
 function parseArgs(argv) {
-	/** @type {{ app: string, gateConfig: string | null, gateDist: string | null, gateEntry: string | null, port: string | null, skipBuild: boolean, listRungs: boolean }} */
+	/** @type {{ app: string, gateConfig: string | null, gateDist: string | null, gateEntry: string | null, port: string | null, skipBuild: boolean, listRungs: boolean, proveNoDedupe: boolean, proveTokenMissing: boolean }} */
 	const opts = {
 		app: '.',
 		gateConfig: null,
@@ -179,6 +189,8 @@ function parseArgs(argv) {
 		port: null,
 		skipBuild: false,
 		listRungs: false,
+		proveNoDedupe: false,
+		proveTokenMissing: false,
 	};
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i];
@@ -209,6 +221,12 @@ function parseArgs(argv) {
 				break;
 			case '--list-rungs':
 				opts.listRungs = true;
+				break;
+			case '--prove-no-dedupe':
+				opts.proveNoDedupe = true;
+				break;
+			case '--prove-token-missing':
+				opts.proveTokenMissing = true;
 				break;
 			default:
 				break;
@@ -250,6 +268,17 @@ function record(id, passed, detail) {
 		throw new Error(`record(): "${id}" is not a member of RUNG_IDS`);
 	}
 	rungs.push({ id, passed, detail });
+}
+
+/**
+ * Empties the module-level `rungs` array (53-11, D-20) — the two `--prove-*`
+ * controls each drive TWO full gate passes in one process (a healthy
+ * baseline leg, then a mutant leg), and every rung function above records
+ * into this ONE shared array via `record()`. Never called by the normal
+ * (non-control) flow, which runs exactly one pass per process.
+ */
+function resetRungs() {
+	rungs.length = 0;
 }
 
 /**
@@ -330,6 +359,185 @@ function resolveGateEntry(gateDistDir, gateEntryName) {
 		process.exit(2);
 	}
 	return path.relative(gateDistDir, matches[0]);
+}
+
+/**
+ * Spawns `vite build --config <configRel>` with `cwd: appDir` and an
+ * additional `env` (53-11, D-20) — the lenient sibling of `buildGateEntry`
+ * above, used ONLY by the two `--prove-*` controls' mutant-build step. Unlike
+ * `buildGateEntry`, this NEVER calls `process.exit`: a control must
+ * distinguish "the mutant build failed" from every other precondition
+ * failure, each with its own message, and an abrupt exit would collapse all
+ * of them into one exit code with no attribution.
+ *
+ * @param {string} appDir
+ * @param {string} configRel
+ * @param {Record<string, string>} env
+ * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
+ */
+function spawnViteBuild(appDir, configRel, env) {
+	const viteBin = path.join(appDir, 'node_modules', 'vite', 'bin', 'vite.js');
+	return new Promise((resolvePromise) => {
+		let stdout = '';
+		let stderr = '';
+		const child = spawn(process.execPath, [viteBin, 'build', '--config', configRel], {
+			cwd: appDir,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			env: { ...process.env, ...env },
+		});
+		child.stdout?.on('data', (d) => {
+			stdout += String(d);
+			process.stdout.write(`[vite build --config ${configRel}] ${d}`);
+		});
+		child.stderr?.on('data', (d) => {
+			stderr += String(d);
+			process.stderr.write(`[vite build --config ${configRel}] ${d}`);
+		});
+		child.on('error', (err) => resolvePromise({ code: 1, stdout, stderr: stderr + String(err) }));
+		child.on('exit', (code) => resolvePromise({ code: code ?? 1, stdout, stderr }));
+	});
+}
+
+/**
+ * Resolves the DISTINCT React installations reachable from `appDir` (53-11,
+ * D-20's `--prove-no-dedupe` precondition (2)): the app's own
+ * `node_modules/react` and the shared `@votetorrent/ui-web` package's own
+ * `node_modules/react`. Every candidate is resolved with `fs.realpathSync`
+ * and de-duplicated on the realpath — spike 089's FIRST copy-counter
+ * followed the `@votetorrent/ui-web` symlink recursively and reported 5
+ * copies where `find` said 3 (`.planning/spikes/089-.../README.md` step 7).
+ * This function refuses to repeat that: it resolves the `@votetorrent/ui-web`
+ * symlink exactly ONCE (to find that package's own `node_modules/react`) and
+ * never walks further into anything it finds there.
+ *
+ * @param {string} appDir
+ * @returns {string[]} distinct realpaths, in resolution order
+ */
+function resolveReactCopies(appDir) {
+	/** @type {string[]} */
+	const candidates = [];
+
+	const appReactPkg = path.join(appDir, 'node_modules', 'react', 'package.json');
+	if (existsSync(appReactPkg)) {
+		candidates.push(path.dirname(appReactPkg));
+	}
+
+	const uiWebLink = path.join(appDir, 'node_modules', '@votetorrent', 'ui-web');
+	if (existsSync(uiWebLink)) {
+		// Resolve the symlink exactly once — never descend into whatever else
+		// lives inside the resolved target directory.
+		const uiWebReal = realpathSync(uiWebLink);
+		const uiWebReactPkg = path.join(uiWebReal, 'node_modules', 'react', 'package.json');
+		if (existsSync(uiWebReactPkg)) {
+			candidates.push(path.dirname(uiWebReactPkg));
+		}
+	}
+
+	const realpaths = candidates.map((p) => realpathSync(p));
+	return [...new Set(realpaths)];
+}
+
+/**
+ * The lenient sibling of `main()`'s own build+serve+drive+rung sequence
+ * (53-11, D-20), used ONLY by the two `--prove-*` controls. Every failure is
+ * RETURNED as a labelled result rather than causing `process.exit` — a
+ * control must distinguish "the build failed" from "the entry could not be
+ * resolved" from "the port was bound" from "the wrong shape fired", and an
+ * abrupt exit would collapse all of them into one exit code. Reuses every
+ * REAL rung function (`runOnPage`, `runHarnessReadoutRung`,
+ * `runSharedComponentsRung`, `runTokenRungs`, `runIdentityRungs`) and the
+ * same `serveDist`/`chromium` transport `main()` uses — never `vite dev`,
+ * never a second copy of any rung.
+ *
+ * @param {{ appDir: string, buildConfigRel: string | null, buildEnv?: Record<string, string>, distAbs: string, entryName: string, port: number, extraPageWork?: (page: import('playwright').Page) => Promise<any> }} opts
+ */
+async function runGatePassLenient({ appDir, buildConfigRel, buildEnv, distAbs, entryName, port, extraPageWork }) {
+	resetRungs();
+
+	if (buildConfigRel) {
+		const buildResult = await spawnViteBuild(appDir, buildConfigRel, buildEnv ?? {});
+		if (buildResult.code !== 0) {
+			return {
+				ok: false,
+				stage: 'build',
+				message: `build (--config ${buildConfigRel}) exited with code ${buildResult.code}`,
+			};
+		}
+	}
+
+	if (!existsSync(distAbs)) {
+		return { ok: false, stage: 'dist-missing', message: `gate dist directory "${distAbs}" does not exist` };
+	}
+
+	/** @param {string} dir @returns {string[]} */
+	function walk(dir) {
+		/** @type {string[]} */
+		const out = [];
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) out.push(...walk(full));
+			else if (entry.name === entryName) out.push(full);
+		}
+		return out;
+	}
+	const matches = walk(distAbs);
+	if (matches.length !== 1) {
+		return {
+			ok: false,
+			stage: 'entry-resolution',
+			message: `expected exactly one "${entryName}" under "${distAbs}", found ${matches.length}`,
+		};
+	}
+	const entryRel = path.relative(distAbs, matches[0]);
+
+	let serverHandle;
+	let browser;
+	try {
+		try {
+			serverHandle = await serveDist(distAbs, port);
+		} catch (err) {
+			const code = /** @type {any} */ (err)?.code;
+			if (code === 'EADDRINUSE') {
+				return { ok: false, stage: 'port', message: `port ${port} is already bound` };
+			}
+			throw err;
+		}
+
+		browser = await chromium.launch({ headless: true });
+		const page = await browser.newPage();
+		const url = `${serverHandle.url}/${entryRel}`;
+		const { readout, lines } = await runOnPage(page, url, `control app=${path.basename(appDir)} dist=${path.basename(distAbs)}`);
+
+		runHarnessReadoutRung(readout);
+		await runSharedComponentsRung(page, readout);
+		const tokenCount = await runTokenRungs(page);
+		await runIdentityRungs(page, readout, lines);
+
+		let extra;
+		if (extraPageWork) {
+			extra = await extraPageWork(page);
+		}
+
+		await page.close();
+		printSummaryTable();
+
+		const snapshot = rungs.slice();
+		const passed = snapshot.filter((r) => r.passed).length;
+		return {
+			ok: true,
+			readout,
+			lines,
+			tokenCount,
+			rungs: snapshot,
+			total: snapshot.length,
+			passed,
+			allPassed: passed === snapshot.length,
+			extra,
+		};
+	} finally {
+		await browser?.close();
+		await serverHandle?.close();
+	}
 }
 
 /**
@@ -664,14 +872,294 @@ function finishRun(underlyingRunPassed, reason, inversionId) {
 		process.exitCode = underlyingRunPassed ? 0 : 1;
 		return;
 	}
-	// 53-11 supplies real inversion ids via INVERSION_CONTROLS; this branch is
-	// unreachable from this plan's own call sites (which always pass null).
+	// 53-11 populated INVERSION_CONTROLS, but its own two controls
+	// (runProveNoDedupe/runProveTokenMissing) print their OWN dedicated
+	// "is inert"/"genuinely failed" lines rather than routing through this
+	// generic branch — the plan's own accounting requirement is that "is
+	// inert" appears in source EXACTLY TWICE MORE than before this plan, once
+	// per control; sharing this one generic line between both controls would
+	// not add two new occurrences. This branch is therefore still
+	// unreachable from any call site in this file today, kept for shape
+	// parity with run-headless.mjs's own finishRun and available to a future
+	// control whose accounting needs differ.
 	if (underlyingRunPassed) {
 		console.log(`\nUI GATES ${inversionId}: FAIL — gate is inert (${reason})`);
 		process.exitCode = 1;
 		return;
 	}
 	console.log(`\nUI GATES ${inversionId}: PASS — the underlying run genuinely failed (${reason})`);
+	process.exitCode = 0;
+}
+
+/**
+ * WITNESS-ONLY EXCEPTION (D-20/D-23, 53-11): the one deliberate appearance of
+ * the DOM's loaded-stylesheet count in this file. `gate-source-integrity
+ * .test.mjs`'s check (1) forbids the MAIN token probe from ever reverting to
+ * a vacuous stylesheet-count check (see this file's own header note on why
+ * counting loaded style resources is blind — it stays unchanged even with
+ * every token removed). This function is not that probe: it is
+ * `--prove-token-missing`'s STANDING WITNESS that such a vacuous check WOULD
+ * have passed on a deliberately broken, token-less build — see
+ * `runProveTokenMissing`'s own `prove-token-missing:stylesheets-still-present`
+ * line. The test's own scan strips exactly this comment plus this function's
+ * body before counting, the same way it strips comments elsewhere in this
+ * file; a companion test proves the stripped region contains exactly one
+ * occurrence, so this exception cannot silently grow to swallow a real
+ * regression.
+ *
+ * @param {import('playwright').Page} page
+ * @returns {Promise<number>}
+ */
+async function readStyleSheetCountWitness(page) {
+	return page.evaluate(() => document.styleSheets.length);
+}
+
+/**
+ * `--prove-no-dedupe` (53-11, D-20). Rebuilds the app's own production
+ * config with `resolve.dedupe` removed, reruns the SAME gate against that
+ * mutant build, and requires the MEASURED PARTIAL failure shape spike 089
+ * recorded (19/19 -> 8/12, annotation only, never a hard-coded assertion):
+ * every token rung still passing, at least one `identity:` rung failing, and
+ * the dispatcher-null message captured.
+ *
+ * @param {{ appDir: string, gateConfigRel: string, gateDistAbs: string, gateEntryName: string, port: number }} opts
+ */
+async function runProveNoDedupe({ appDir, gateConfigRel, gateDistAbs, gateEntryName, port }) {
+	const PREFIX = '--prove-no-dedupe: control could not run —';
+
+	// Precondition (1): the app's own healthy gate build/run, in this same invocation.
+	const baseline = await runGatePassLenient({ appDir, buildConfigRel: gateConfigRel, distAbs: gateDistAbs, entryName: gateEntryName, port });
+	if (!baseline.ok) {
+		console.log(`\n${PREFIX} baseline gate build/run did not complete`);
+		console.log(`  stage=${baseline.stage} detail=${baseline.message}`);
+		process.exitCode = 1;
+		return;
+	}
+	if (!baseline.allPassed) {
+		const failed = baseline.rungs.filter((r) => !r.passed).map((r) => r.id);
+		console.log(`\n${PREFIX} baseline gate run did not pass every rung — this control cannot attribute anything to the mutation`);
+		console.log(`  baseline RUNGS: ${baseline.passed}/${baseline.total}  failed: ${failed.join(', ') || 'none'}`);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(`[--prove-no-dedupe] baseline leg: RUNGS: ${baseline.passed}/${baseline.total} (full pass)`);
+
+	// Precondition (2): at least two distinct React copies resolvable.
+	const reactCopies = resolveReactCopies(appDir);
+	if (reactCopies.length < 2) {
+		console.log(`\n${PREFIX} fewer than two distinct React installations are resolvable from this app`);
+		console.log(`  count=${reactCopies.length} realpaths=${JSON.stringify(reactCopies)} — removing dedupe cannot collapse anything; this is a workspace-layout change, not an inert gate`);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(`[--prove-no-dedupe] resolved ${reactCopies.length} distinct React realpaths: ${reactCopies.join(' | ')}`);
+
+	// Precondition (3)+(4): the mutation applies AND the mutant build exits 0.
+	const mutantOutDirAbs = path.join(appDir, 'dist-mutant-no-dedupe');
+	const mutantBuild = await spawnViteBuild(appDir, 'vite.mutant.config.ts', { UI_GATE_MUTATION: 'no-dedupe' });
+	if (mutantBuild.code !== 0) {
+		console.log(`\n${PREFIX} the no-dedupe mutant build failed`);
+		console.log(`  exit code=${mutantBuild.code}`);
+		process.exitCode = 1;
+		return;
+	}
+
+	let report;
+	try {
+		report = readMutationReport(mutantOutDirAbs);
+	} catch (err) {
+		console.log(`\n${PREFIX} ${/** @type {any} */ (err)?.message ?? err}`);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(`[--prove-no-dedupe] mutation report: ${JSON.stringify(report)}`);
+
+	// The inverted assertion: the SAME gate, against the mutant build.
+	const mutantRun = await runGatePassLenient({ appDir, buildConfigRel: null, distAbs: mutantOutDirAbs, entryName: gateEntryName, port });
+	if (!mutantRun.ok) {
+		console.log('\n--prove-no-dedupe: FAIL — wrong failure shape');
+		console.log(`  the mutant leg did not produce a readout — stage=${mutantRun.stage} detail=${mutantRun.message}`);
+		process.exitCode = 1;
+		return;
+	}
+
+	const readoutExists = mutantRun.readout != null;
+	// This runner's readout carries no dedicated `crashed` field (that
+	// concept belongs to run-headless.mjs's compose-gate harness); `readout
+	// == null` (this runner's own "NO RESULT" condition) is the equivalent
+	// signal — a whole-page crash before __UI_GATE_DONE__ was ever set.
+	const crashed = !readoutExists;
+	const identityRungs = mutantRun.rungs.filter((r) => r.id.startsWith('identity:'));
+	// The plan's own invariant is scoped to the two D-23 TOKEN rungs
+	// specifically ("removing dedupe must not disturb styling"), not to
+	// harness-readout/shared-components-mounted. Measured live: this
+	// harness's DetailsToggleHarness (the shared-components-mounted rung's
+	// subject) shares the SAME #root tree as AdvisoryDisclosure/LifecyclePill
+	// with no per-component error boundary, so a real hook-dispatcher throw
+	// inside it unmounts the WHOLE #root tree — harness-readout and
+	// shared-components-mounted going down ALONGSIDE the identity rungs is
+	// therefore part of the genuine measured shape here, not a sign the
+	// control fired wrong. The two token rungs read computed CSS custom
+	// properties directly off document.documentElement, independent of the
+	// React tree, which is why they alone are required to survive.
+	const TOKEN_RUNG_IDS_FOR_DEDUPE = ['token-declared-values', 'base-rule-used-values'];
+	const tokenRungs = mutantRun.rungs.filter((r) => TOKEN_RUNG_IDS_FOR_DEDUPE.includes(r.id));
+	const allTokenRungsPassed = tokenRungs.every((r) => r.passed);
+	const failedIdentity = identityRungs.filter((r) => !r.passed);
+	const dispatcherHit = mutantRun.lines.some((l) => DISPATCHER_NULL_ERROR_RE.test(l));
+
+	console.log(`[--prove-no-dedupe] mutant leg: RUNGS: ${mutantRun.passed}/${mutantRun.total}  (baseline was ${baseline.passed}/${baseline.total}; spike reference 19/19 -> 8/12, annotation only)`);
+	console.log(`[--prove-no-dedupe] readout-exists=${readoutExists} crashed=${crashed} all-token-rungs-passed=${allTokenRungsPassed} failed-identity-rungs=${failedIdentity.map((r) => r.id).join(',') || 'none'} dispatcher-message-observed=${dispatcherHit}`);
+
+	if (mutantRun.allPassed) {
+		console.log('\nUI GATES --prove-no-dedupe: FAIL — gate is inert (the mutated build removing resolve.dedupe still passed every rung — a duplicate React reaching the hook dispatcher was not detected)');
+		process.exitCode = 1;
+		return;
+	}
+
+	const shapeOk = readoutExists && !crashed && allTokenRungsPassed && failedIdentity.length > 0 && dispatcherHit;
+	if (!shapeOk) {
+		/** @type {string[]} */
+		const unmet = [];
+		if (!readoutExists) unmet.push('no readout published (NO RESULT)');
+		if (!allTokenRungsPassed) unmet.push('a token rung also failed');
+		if (failedIdentity.length === 0) unmet.push('no identity rung failed');
+		if (!dispatcherHit) unmet.push('the dispatcher-null message was not observed');
+		console.log('\n--prove-no-dedupe: FAIL — wrong failure shape');
+		console.log(`  unmet: ${unmet.join('; ')}`);
+		process.exitCode = 1;
+		return;
+	}
+
+	console.log('\nUI GATES --prove-no-dedupe: PASS — the underlying run genuinely failed in the measured partial shape');
+	console.log(`  baseline ${baseline.passed}/${baseline.total}, mutant ${mutantRun.passed}/${mutantRun.total}, failed identity rungs: ${failedIdentity.map((r) => r.id).join(', ')}`);
+	process.exitCode = 0;
+}
+
+/**
+ * `--prove-token-missing` (53-11, D-20). Rebuilds the app's own gate build
+ * with the shared tokens stylesheet REFERENCE stripped, reruns the SAME gate
+ * against that mutant build, and requires the MIRROR shape of
+ * `runProveNoDedupe`'s: the mutant build itself exits 0, at least one token
+ * rung fails on a resolved computed value, every `identity:` rung still
+ * passes, and the DOM's loaded-stylesheet count is recorded as the standing
+ * witness that a vacuous sheet-count check would have passed on this build.
+ *
+ * @param {{ appDir: string, gateConfigRel: string, gateDistAbs: string, gateEntryName: string, port: number }} opts
+ */
+async function runProveTokenMissing({ appDir, gateConfigRel, gateDistAbs, gateEntryName, port }) {
+	const PREFIX = '--prove-token-missing: control could not run —';
+	const TOKEN_RUNG_IDS = ['token-declared-values', 'base-rule-used-values'];
+
+	const baseline = await runGatePassLenient({ appDir, buildConfigRel: gateConfigRel, distAbs: gateDistAbs, entryName: gateEntryName, port });
+	if (!baseline.ok) {
+		console.log(`\n${PREFIX} baseline gate build/run did not complete`);
+		console.log(`  stage=${baseline.stage} detail=${baseline.message}`);
+		process.exitCode = 1;
+		return;
+	}
+	if (!baseline.allPassed) {
+		const failed = baseline.rungs.filter((r) => !r.passed).map((r) => r.id);
+		console.log(`\n${PREFIX} baseline gate run did not pass every rung, token half included — this control cannot attribute anything to the mutation`);
+		console.log(`  baseline RUNGS: ${baseline.passed}/${baseline.total}  failed: ${failed.join(', ') || 'none'}`);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(`[--prove-token-missing] baseline leg: RUNGS: ${baseline.passed}/${baseline.total} (full pass, token half included)`);
+
+	const mutantOutDirAbs = path.join(appDir, 'dist-mutant-token-missing');
+	const mutantBuild = await spawnViteBuild(appDir, 'vite.mutant.config.ts', { UI_GATE_MUTATION: 'token-missing' });
+	if (mutantBuild.code !== 0) {
+		console.log(`\n${PREFIX} the token-missing mutant build failed`);
+		console.log(`  exit code=${mutantBuild.code}`);
+		process.exitCode = 1;
+		return;
+	}
+	console.log('[--prove-token-missing] mutant build exited 0 — the token layer\'s absence is invisible to the build, as measured');
+
+	let report;
+	try {
+		report = readMutationReport(mutantOutDirAbs);
+	} catch (err) {
+		console.log(`\n${PREFIX} ${/** @type {any} */ (err)?.message ?? err}`);
+		process.exitCode = 1;
+		return;
+	}
+	if (!(report.removals >= 1)) {
+		console.log(`\n${PREFIX} the mutation report shows zero removals — a no-op, not an inert gate`);
+		console.log(`  report=${JSON.stringify(report)}`);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(`[--prove-token-missing] mutation report: ${JSON.stringify(report)}`);
+
+	const mutantRun = await runGatePassLenient({
+		appDir,
+		buildConfigRel: null,
+		distAbs: mutantOutDirAbs,
+		entryName: gateEntryName,
+		port,
+		extraPageWork: readStyleSheetCountWitness,
+	});
+	if (!mutantRun.ok) {
+		console.log('\n--prove-token-missing: FAIL — wrong failure shape');
+		console.log(`  the mutant leg did not produce a readout — stage=${mutantRun.stage} detail=${mutantRun.message}`);
+		process.exitCode = 1;
+		return;
+	}
+
+	const readoutExists = mutantRun.readout != null;
+	const crashed = !readoutExists;
+
+	if (!readoutExists) {
+		console.log('\n--prove-token-missing: FAIL — wrong failure shape');
+		console.log('  no readout published (NO RESULT) — a dead page has not reproduced this defect');
+		process.exitCode = 1;
+		return;
+	}
+
+	const styleSheetCount = /** @type {number} */ (mutantRun.extra);
+	console.log('prove-token-missing:stylesheets-still-present');
+	console.log(`  count=${styleSheetCount} — this is the vacuous check D-23 replaced: a sheet-count check would have reported this build present/passing even with the whole token layer's reference removed.`);
+
+	if (!(styleSheetCount >= 1)) {
+		console.log(`\n${PREFIX} the standing witness read a loaded-stylesheet count of ${styleSheetCount} on the mutant page`);
+		console.log('  a build with no stylesheet at all is a different mutation than the one requested, and would let a sheet count pass as a real check');
+		process.exitCode = 1;
+		return;
+	}
+
+	const tokenRungs = mutantRun.rungs.filter((r) => TOKEN_RUNG_IDS.includes(r.id));
+	const identityRungs = mutantRun.rungs.filter((r) => r.id.startsWith('identity:'));
+	const failedTokenRungs = tokenRungs.filter((r) => !r.passed);
+	const allIdentityPassed = identityRungs.every((r) => r.passed);
+
+	console.log(`[--prove-token-missing] mutant leg: RUNGS: ${mutantRun.passed}/${mutantRun.total}  (baseline was ${baseline.passed}/${baseline.total})`);
+	console.log(`[--prove-token-missing] readout-exists=${readoutExists} crashed=${crashed} failed-token-rungs=${failedTokenRungs.map((r) => r.id).join(',') || 'none'} all-identity-rungs-passed=${allIdentityPassed}`);
+	if (failedTokenRungs.length > 0) {
+		console.log(`[--prove-token-missing] first failed token rung detail: ${failedTokenRungs[0].id} — ${failedTokenRungs[0].detail}`);
+	}
+
+	if (mutantRun.allPassed) {
+		console.log('\nUI GATES --prove-token-missing: FAIL — gate is inert (the mutated build with the shared token layer\'s reference removed still passed every rung — the token probe could not see it)');
+		process.exitCode = 1;
+		return;
+	}
+
+	const shapeOk = !crashed && failedTokenRungs.length > 0 && allIdentityPassed;
+	if (!shapeOk) {
+		/** @type {string[]} */
+		const unmet = [];
+		if (failedTokenRungs.length === 0) unmet.push('no token rung failed');
+		if (!allIdentityPassed) unmet.push('an identity rung also failed');
+		console.log('\n--prove-token-missing: FAIL — wrong failure shape');
+		console.log(`  unmet: ${unmet.join('; ')}`);
+		process.exitCode = 1;
+		return;
+	}
+
+	console.log('\nUI GATES --prove-token-missing: PASS — the underlying run genuinely failed on a resolved computed value');
+	console.log(`  baseline ${baseline.passed}/${baseline.total}, mutant ${mutantRun.passed}/${mutantRun.total}, failed token rungs: ${failedTokenRungs.map((r) => r.id).join(', ')}, stylesheets-still-present=${styleSheetCount}`);
 	process.exitCode = 0;
 }
 
@@ -699,6 +1187,25 @@ async function main() {
 	console.log(`[run-ui-gates] gate-dist=${gateDistRel} (resolved: ${gateDistAbs})`);
 	console.log(`[run-ui-gates] gate-entry=${gateEntryName}`);
 	console.log(`[run-ui-gates] port=${port}`);
+
+	// The two --prove-* controls (53-11, D-20) run ENTIRELY on their own and
+	// return here, before any of the normal build/serve/gate flow below —
+	// never combined with each other or with a normal run in one invocation.
+	const activeControlFlags = Object.keys(INVERSION_CONTROLS).filter(
+		(flag) => (flag === '--prove-no-dedupe' && opts.proveNoDedupe) || (flag === '--prove-token-missing' && opts.proveTokenMissing),
+	);
+	if (activeControlFlags.length > 1) {
+		process.stderr.write(`[run-ui-gates] only one of ${activeControlFlags.join(', ')} may run per invocation\n`);
+		process.exit(2);
+	}
+	if (opts.proveNoDedupe) {
+		await runProveNoDedupe({ appDir, gateConfigRel, gateDistAbs, gateEntryName, port });
+		return;
+	}
+	if (opts.proveTokenMissing) {
+		await runProveTokenMissing({ appDir, gateConfigRel, gateDistAbs, gateEntryName, port });
+		return;
+	}
 
 	if (!opts.skipBuild) {
 		await buildGateEntry(appDir, gateConfigAbs, gateConfigRel);
