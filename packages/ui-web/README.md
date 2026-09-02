@@ -90,3 +90,31 @@ layout that breaks *without* `dedupe` (step 2) — `dedupe` is what makes it saf
 
 Declined at D-16. A shared package reaching into build config fights any consumer needing an
 override. Revisit only if a fourth consumer appears.
+
+## Consuming the design tokens
+
+The canonical import form (D-15, decided in 53-03): make
+
+```css
+@import '@votetorrent/ui-web/tokens.css';
+```
+
+the **first statement** in the consumer's own `app.css`, above that app's own layout rules, with
+only the file-header comment before it. Chosen over an `index.html` `<link>` and over an ESM
+`import` in `main.tsx` for three reasons: it is literally the one import D-15 promises; it keeps
+working through both an `index.html` `<link href="/src/app.css">` and a `main.tsx`
+`import './app.css'` entry path with no change to either; and it fixes cascade order
+deterministically — tokens and base/reset land before any consumer rule, which an ESM import
+ordering across two entry paths cannot guarantee. Vite resolves the bare package specifier through
+its own resolver, honouring the `exports` map from step 3. A CSS `@import` is only valid before any
+other rule in the file, so it must never drift below the consumer's own layout rules.
+
+The consumer's own `app.css` then holds only that app's own layout and component styles — see
+`apps/VoteTorrentDashboard/src/app.css` for the reference shape (`.layout`, its `900px` collapse,
+`.panel-grid`, and nothing else).
+
+For the D-23 token probe's enumeration contract (one declaration per line, no comment inside
+`:root`, no declaration-shaped text in any comment) and the `getComputedStyle` normalisation
+semantics a consumer or a probe needs to know about, see the header of
+`packages/ui-web/src/tokens.css` itself — that file is the single place to correct either if a real
+browser run ever disagrees, so neither is restated here.
