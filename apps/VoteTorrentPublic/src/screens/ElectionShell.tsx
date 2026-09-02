@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react';
 import { t } from '@votetorrent/ui-web';
 import { AdvisoryDisclosure, DetailsToggle, LifecyclePill } from '@votetorrent/ui-web/components';
-import { computeElectionPhase, resolveComparisonInstant } from '@votetorrent/ui-web/lifecycle';
+// computeElectionPhase still has live callers (ElectionsPanel.tsx,
+// gate-matrix.tsx) — 54-07 removes it; do not "tidy" it away for looking unused.
+import { derivePhase, resolveComparisonInstant } from '@votetorrent/ui-web/lifecycle';
 import { AppChrome } from './AppChrome';
 import { parseElectionAddress } from '../election-address.js';
 
@@ -11,7 +13,7 @@ import { parseElectionAddress } from '../election-address.js';
  * `timeline` is `unknown` on purpose: `ElectionRevision.Timeline`
  * (votetorrent.qsql:840,:891) carries a standing `-- TODO: constrain
  * Timeline` and zero CHECK constraints, so it is unvalidated JSON that only
- * `computeElectionPhase` (packages/ui-web/src/lifecycle/election-phase.js)
+ * `derivePhase` (packages/ui-web/src/lifecycle/election-phase.js)
  * is permitted to interpret. Nothing in this file inspects it directly.
  */
 export interface PublicElectionFacts {
@@ -66,7 +68,10 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 			</section>
 		);
 	} else {
-		const { phase } = computeElectionPhase(election?.timeline ?? null, resolveComparisonInstant(at ?? undefined));
+		// `election ?? {}`, never `?? null` — parseTimeline reads
+		// `election.ballotDeadline` unguarded, so `null` throws.
+		const crossCheck = (election ?? {}) as unknown as Parameters<typeof derivePhase>[0];
+		const { phase } = derivePhase(crossCheck, election?.timeline, resolveComparisonInstant(at ?? undefined));
 		body = (
 			<section className="election">
 				{address.status === 'ok' ? (
@@ -82,7 +87,8 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 						<span className="skeleton-label">{t('public.election.slot.title')}</span>
 					</div>
 				)}
-				{phase === null ? (
+				{/* holding measure; 54-12 owns D-10's explicit unknown state */}
+				{phase === null || phase === 'indeterminate' ? (
 					<div className="skeleton" data-slot="lifecycle">
 						<span className="skeleton-label">{t('public.election.slot.lifecycle')}</span>
 					</div>

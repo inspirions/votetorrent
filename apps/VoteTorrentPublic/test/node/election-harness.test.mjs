@@ -91,7 +91,12 @@ test('Object.keys(FIXTURE_INSTANTS) equals PHASE_IDS as a set (a fourth phase in
 });
 
 test('PHASE_IDS does not contain "indeterminate" (contract C1: an indeterminate outcome has no derivable instant, and admitting it to PHASE_IDS would make the set-equality assertion above unsatisfiable without weakening it)', () => {
-	assert.ok(!PHASE_IDS.includes('indeterminate'), `PHASE_IDS must not contain "indeterminate", got: ${JSON.stringify(PHASE_IDS)}`);
+	// Cast to ReadonlyArray<string> before .includes('indeterminate'): PHASE_IDS
+	// is typed as the narrow PhaseId union under strict+checkJs, which does not
+	// admit 'indeterminate' as a comparable member (matches 54-02's own
+	// precedent for this exact class of diagnostic).
+	const ids = /** @type {ReadonlyArray<string>} */ (PHASE_IDS);
+	assert.ok(!ids.includes('indeterminate'), `PHASE_IDS must not contain "indeterminate", got: ${JSON.stringify(PHASE_IDS)}`);
 });
 
 // ---------------------------------------------------------------------------
