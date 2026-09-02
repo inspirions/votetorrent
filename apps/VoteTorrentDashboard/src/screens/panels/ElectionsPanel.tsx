@@ -24,7 +24,7 @@ import {
 } from '@votetorrent/web-data/officer';
 import {
 	ELECTION_EVENT_ORDER,
-	computeElectionPhase,
+	derivePhase,
 	resolveComparisonInstant,
 } from '@votetorrent/ui-web/lifecycle';
 import { toCanonicalDatetime } from '@votetorrent/vote-engine/browser';
@@ -32,6 +32,13 @@ import { LifecyclePill } from '@votetorrent/ui-web/components';
 import './election-ops.css';
 
 const EM_DASH = '—';
+
+// The REDUNDANT NON-COLOUR CUE for the marked timeline row. The
+// `.eo-tl--current` class carries the colour/weight half of the signal; this
+// marker carries the half that survives greyscale, colour-blindness and a
+// screenshot pasted into a monochrome report. Both are required -- a
+// class-driven colour change alone is not a cue every officer can perceive.
+const STAGE_MARKER = '→ ';
 const CANONICAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
 
 // Field labels reproduced VERBATIM from the schema (rule R1), rendered as
@@ -133,7 +140,27 @@ const ElectionsPanel: PanelComponent = ({ capability, db, snapshotInstant }) => 
 
 	const { active, overview, policies, totalElections } = state.data;
 	const atCanonical = resolveComparisonInstant(snapshotInstant);
-	const { phase } = computeElectionPhase(overview.Timeline, atCanonical);
+	// `overview.Timeline` is passed UNMODIFIED: it is the raw column value, a
+	// JSON string in practice, and `derivePhase` parses it itself.
+	// The first argument is the SCHEMA-ENFORCED cross-check row -- it can only
+	// populate the result's cross-check diagnostics, never change the phase.
+	//
+	// Only `{ phase, stage }` is taken. The derivation also returns a populated
+	// cross-check array and two machine diagnostics; those are DELIBERATELY not
+	// rendered. They embed raw, unvalidated Timeline values and English authored
+	// outside the copy table, and an officer-facing timeline-discrepancy view is
+	// broader work nobody has sized. This omission is a decision, not an
+	// oversight -- it is recorded as such in this plan's summary.
+	//
+	// No local default of any kind: an undecidable timeline must reach
+	// `LifecyclePill` untouched so the unknown pill renders. Rendering a
+	// confident phase because a cut-off was absent from an unconstrained blob is
+	// the worst output this panel can produce.
+	const { phase, stage } = derivePhase(
+		{ date: active.Date, ballotDeadline: active.BallotDeadline },
+		overview.Timeline,
+		atCanonical,
+	);
 
 	let timeline: Record<string, unknown> = {};
 	try {
@@ -184,9 +211,14 @@ const ElectionsPanel: PanelComponent = ({ capability, db, snapshotInstant }) => 
 						const normalized = normalizeTimelineValue(timeline[event]);
 						const display = normalized ?? EM_DASH;
 						const isPast = normalized !== null && normalized < atCanonical;
+						// The newest published cut-off that has already passed. It says
+						// exactly that and nothing more: it is a fact about the authority's
+						// published schedule, never about what was counted, checked or
+						// declared -- no such table exists to read.
+						const isCurrent = normalized !== null && event === stage;
 						return (
-							<li key={event} className={isPast ? 'eo-tl--past' : 'eo-tl--future'}>
-								<span>{event}</span>
+							<li key={event} className={isCurrent ? 'eo-tl--current' : isPast ? 'eo-tl--past' : 'eo-tl--future'}>
+								<span>{isCurrent ? `${STAGE_MARKER}${event}` : event}</span>
 								<span>{display}</span>
 							</li>
 						);

@@ -100,6 +100,26 @@
 	color: var(--text);
 }
 
+/*
+ * The newest published cut-off that has already passed. The marked row must
+ * stay legible WITHOUT colour, so the signal is deliberately split: this class
+ * carries the colour/weight/ground half, and `ElectionsPanel.tsx`'s
+ * `STAGE_MARKER` carries the text half that survives greyscale and
+ * colour-blindness. Both are required; neither alone is the cue.
+ *
+ * Four properties, so the computed style is distinct from BOTH neighbours in
+ * more than one property -- `.eo-tl--future` already uses `var(--text)`, so a
+ * colour change alone would leave this row indistinguishable from every
+ * not-yet-reached row. `font-weight` and the padding are the two that do not
+ * depend on hue at all.
+ */
+.eo-tl--current {
+	color: var(--text);
+	font-weight: var(--font-heading-weight);
+	background: var(--surface2);
+	padding: 0 var(--space-xs);
+}
+
 .eo-datum {
 	color: var(--muted);
 	font-size: var(--font-label-size);
