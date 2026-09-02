@@ -1,0 +1,41 @@
+/*
+ * VoteTorrent Public Election View — app.css.
+ *
+ * Design tokens and base/reset rules live in @votetorrent/ui-web's tokens.css
+ * (D-15) — see packages/ui-web/src/tokens.css for the token declarations, the
+ * base/reset rules, and the D-23 probe contract. This file holds only this
+ * app's own layout primitives: a page-level chrome that stacks a header, a
+ * main region and a footer vertically at full viewport height. It declares no
+ * custom property and no root-level variable block — those live in the package.
+ */
+
+@import '@votetorrent/ui-web/tokens.css';
+
+.public-app {
+	display: flex;
+	flex-direction: column;
+	min-height: 100%;
+	padding: var(--space-md);
+	gap: var(--space-lg);
+	background: var(--bg);
+}
+
+.public-app__header {
+	padding: var(--space-md);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	font-size: var(--font-display-size);
+	color: var(--text);
+}
+
+.public-app__main {
+	flex: 1;
+	padding: var(--space-md);
+	color: var(--text);
+}
+
+.public-app__footer {
+	padding: var(--space-md);
+	color: var(--muted);
+}

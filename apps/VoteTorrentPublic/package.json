@@ -1,0 +1,37 @@
+{
+	"name": "votetorrent-public",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "Public, no-login election view for VoteTorrent",
+	"scripts": {
+		"dev": "vite --port 5181 --strictPort",
+		"build": "vite build",
+		"preview": "vite preview --port 5181 --strictPort",
+		"test": "yarn test:node",
+		"test:node": "node --test --test-concurrency=1 test/node/*.test.mjs",
+		"test:browser": "node test/browser/run-gate.mjs",
+		"typecheck": "tsc --noEmit",
+		"assert:no-polyfills": "node scripts/assert-no-node-polyfills.mjs",
+		"assert:engine-reach": "node scripts/assert-engine-reach.mjs",
+		"clean": "rm -rf dist node_modules"
+	},
+	"dependencies": {
+		"@votetorrent/ui-web": "workspace:*",
+		"@votetorrent/vote-engine": "workspace:*",
+		"react": "19.0.0",
+		"react-dom": "19.0.0"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.2",
+		"@types/react": "19.2.17",
+		"@types/react-dom": "^19.0.0",
+		"@vitejs/plugin-react": "^5.0.0",
+		"playwright": "^1.62.1",
+		"typescript": "^5.6.3",
+		"vite": "^7.0.0"
+	},
+	"engines": {
+		"node": ">=20.19"
+	}
+}
