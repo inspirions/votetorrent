@@ -1,5 +1,6 @@
 /**
- * Tier-1 cold -> seed -> read -> re-attach suite for `src/db/reattach.js`.
+ * Tier-1 cold -> seed -> read -> re-attach suite for `@votetorrent/web-data`'s
+ * `reattach.js` (moved out of this workspace's own `src/db/` by 54-03a).
  *
  * Honesty note (50-VALIDATION.md, spike 076's node-suite idiom): this proves
  * the ENGINE's use of the IndexedDB API round-trips within one process via
@@ -18,9 +19,13 @@ import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
-import { createNetworkDb, closeNetworkDb, deleteNetworkDb, listObjectStores, openStoreHandle } from '../../src/db/open-db.js';
+import { webDataSrc } from '../../../../scripts/lib/source-paths.mjs';
 import {
+	createNetworkDb,
+	closeNetworkDb,
+	deleteNetworkDb,
+	listObjectStores,
+	openStoreHandle,
 	attachNetworkDb,
 	readRowCounts,
 	assertRowCounts,
@@ -31,10 +36,10 @@ import {
 	MissingRowCountsError,
 	RowCountMismatchError,
 	InvalidRowCountRecordError,
-} from '../../src/db/reattach.js';
+} from '@votetorrent/web-data/officer';
 import { GATE_NETWORK_HASH, SEED_TABLES, EXPECTED_COUNTS, seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
 
-const REATTACH_SOURCE = dashboardSrc('db', 'reattach.js');
+const REATTACH_SOURCE = webDataSrc('reattach.js');
 
 /** A tiny Map-backed localStorage-shaped fake — Node 22 has no real `localStorage`. */
 function makeFakeStorage() {

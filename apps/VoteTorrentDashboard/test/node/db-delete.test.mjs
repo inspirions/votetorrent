@@ -1,6 +1,7 @@
 /**
- * Tier-1 coverage of `src/db/open-db.js`: open/create/close/delete plus the
- * single-call source assertion on `setDefaultVtabName`.
+ * Tier-1 coverage of `@votetorrent/web-data`'s `open-db.js` (moved out of
+ * this workspace's own `src/db/` by 54-03a): open/create/close/delete plus
+ * the single-call source assertion on `setDefaultVtabName`.
  *
  * Honesty note (50-VALIDATION.md): this tier proves the ENGINE's use of the
  * IndexedDB API round-trips within one process via `fake-indexeddb` — an
@@ -20,7 +21,7 @@ import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { webDataSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { isSchemaInitialized } from '@votetorrent/vote-engine/browser';
 import {
 	dbNameFor,
@@ -29,10 +30,16 @@ import {
 	closeNetworkDb,
 	listObjectStores,
 	deleteNetworkDb,
-} from '../../src/db/open-db.js';
-import { readRowCountsRecord, writeRowCounts } from '../../src/db/reattach.js';
+	readRowCountsRecord,
+	writeRowCounts,
+} from '@votetorrent/web-data/officer';
 
-const OPEN_DB_SOURCE = dashboardSrc('db', 'open-db.js');
+// This test stays in the dashboard workspace deliberately: it is the
+// consumer-side proof that the mandatory setDefaultVtabName call is present
+// in the module the dashboard actually resolves (cross-workspace since
+// 54-03a moved open-db.js into packages/web-data — see that file's own
+// header for the producer-side half of this cross-reference).
+const OPEN_DB_SOURCE = webDataSrc('open-db.js');
 
 test('dbNameFor: exact template, no q2 prefix', () => {
 	assert.equal(dbNameFor('abc123'), 'votetorrent-abc123');

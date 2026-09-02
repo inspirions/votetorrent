@@ -12,7 +12,7 @@
  * to centralize.
  *
  * `db` is typed from `@quereus/quereus` directly, NOT from 50-05's
- * `src/db/open-db.js`. That keeps this contract free of a wave-3 sibling
+ * `open-db.js` (`@votetorrent/web-data` since 54-03a). That keeps this contract free of a wave-3 sibling
  * dependency — this file's only job is the shape of props a panel receives,
  * not how a Database handle was constructed. `db` is nullable because a
  * panel can mount before a network is bootstrapped; a panel that receives

@@ -23,7 +23,8 @@
  * `SigningNonce = null` so no `Digest`-bound CHECK ever evaluates it. The
  * 19-character, no-`Z` canonical form applies only to values THIS DASHBOARD
  * PRODUCES (contract C5's `capturedAt`, which must come from
- * `nowCanonicalDatetime()` — see `../../src/db/reattach.js`).
+ * `nowCanonicalDatetime()` — see `@votetorrent/web-data`'s `reattach.js`,
+ * moved out of this workspace's own `src/db/` by 54-03a).
  */
 
 /** The fixed network hash both gates seed and verify against. @type {string} */

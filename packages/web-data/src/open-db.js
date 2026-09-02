@@ -89,8 +89,10 @@ export async function openStoreHandle(networkHash) {
 	// The argument is written as the literal 'store' (equal to
 	// STORE_MODULE_NAME above) rather than the constant reference, so this
 	// single mandatory call stays mechanically grep-provable by both the
-	// tier-1 source assertion (`test/node/db-delete.test.mjs`) and the
-	// tier-2 gate's trap-proof mode.
+	// tier-1 source assertion — a cross-workspace one since 54-03a moved this
+	// file: `apps/VoteTorrentDashboard/test/node/db-delete.test.mjs`, the
+	// consumer-side proof that the mandatory call is present in the module
+	// the dashboard actually resolves — and the tier-2 gate's trap-proof mode.
 	db.setDefaultVtabName('store');
 
 	return db;

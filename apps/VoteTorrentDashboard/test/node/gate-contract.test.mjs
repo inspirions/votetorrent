@@ -17,7 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { dashboardRoot, dashboardSrc, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { dashboardRoot, uiWebSrc, webDataSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 const APP_ROOT = dashboardRoot();
 
@@ -92,16 +92,16 @@ test('module-format contract (C1): no .ts/.tsx file exists under a tier-1-reacha
 	// Repo-relative dashboard dirs, plus the shared package's own lifecycle
 	// dir since election-phase.js followed there in 53-05 (D-01/D-02) --
 	// ONLY that one package directory: src/components/ holds .tsx
-	// deliberately and must not be added here. src/db is resolver-derived
-	// (GOVERNED_ABS_DIRS) rather than a repo-relative string here, because
-	// D-03 moves it to packages/web-data in 54-03 (54-01) -- this form makes
-	// that a one-argument flip to webDataSrc() rather than a list
-	// restructure. Do not add webDataSrc() to GOVERNED_ABS_DIRS yet -- the
-	// directory does not exist until 54-03 and the entry would be silently
-	// skipped by the existsSync guard below, which is a guarantee that
-	// covers nothing (53-D06).
+	// deliberately and must not be added here. 54-03a moved the dashboard's
+	// `src/db` into `packages/web-data` -- the governed set follows the move:
+	// `'src/db'` is gone from the repo-relative GOVERNED_DIRS list below (that
+	// directory no longer exists in this workspace) and `webDataSrc()` joins
+	// GOVERNED_ABS_DIRS in its place, so this C1 contract keeps covering the
+	// moved connection-layer modules rather than silently narrowing (the
+	// existsSync guard below skips a missing directory rather than failing,
+	// which is a coverage loss, not a crash -- 53-D06).
 	const GOVERNED_DIRS = ['src/transport', 'src/auth', 'src/i18n', 'src/lifecycle'];
-	const GOVERNED_ABS_DIRS = [uiWebSrc('lifecycle'), dashboardSrc('db')];
+	const GOVERNED_ABS_DIRS = [uiWebSrc('lifecycle'), webDataSrc()];
 
 	/** @param {string[]} paths */
 	function findTsViolations(paths) {

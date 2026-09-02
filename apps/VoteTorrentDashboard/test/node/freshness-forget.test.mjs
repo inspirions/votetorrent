@@ -17,9 +17,20 @@
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createNetworkDb, closeNetworkDb, deleteNetworkDb, dbNameFor } from '../../src/db/open-db.js';
-import { attachNetworkDb, readRowCounts, readRowCountsRecord, writeRowCounts } from '../../src/db/reattach.js';
-import { upsertNetwork, findNetwork, removeNetwork, listNetworks } from '../../src/db/networks-registry.js';
+import {
+	createNetworkDb,
+	closeNetworkDb,
+	deleteNetworkDb,
+	dbNameFor,
+	attachNetworkDb,
+	readRowCounts,
+	readRowCountsRecord,
+	writeRowCounts,
+	upsertNetwork,
+	findNetwork,
+	removeNetwork,
+	listNetworks,
+} from '@votetorrent/web-data/officer';
 import { seedFoundingAuthority, SEED_TABLES } from '../fixtures/seed-founding-authority.js';
 import { nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
 import {

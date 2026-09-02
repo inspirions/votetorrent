@@ -23,9 +23,15 @@ import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import { redeemAndBootstrap } from '../../src/lifecycle/bootstrap.js';
 import { forgetNetwork, assertNetworkForgotten } from '../../src/lifecycle/forget-network.js';
 import { snapshotFreshness } from '../../src/lifecycle/freshness.js';
-import { attachNetworkDb, readRowCounts } from '../../src/db/reattach.js';
-import { closeNetworkDb, deleteNetworkDb, dbNameFor, listObjectStores } from '../../src/db/open-db.js';
-import { findNetwork } from '../../src/db/networks-registry.js';
+import {
+	attachNetworkDb,
+	readRowCounts,
+	closeNetworkDb,
+	deleteNetworkDb,
+	dbNameFor,
+	listObjectStores,
+	findNetwork,
+} from '@votetorrent/web-data/officer';
 import { t } from '@votetorrent/ui-web';
 import { buildFixtureEnvelope, makeFakeTransport, FIXTURE_NETWORK_HASH } from '../fixtures/bootstrap-envelope.js';
 

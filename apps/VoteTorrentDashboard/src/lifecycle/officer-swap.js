@@ -67,7 +67,7 @@
  */
 
 import { refreshNetwork } from './refresh.js';
-import { findNetwork } from '../db/networks-registry.js';
+import { findNetwork } from '@votetorrent/web-data/officer';
 
 /** The frozen, closed classification set. */
 export const SWAP_KINDS = Object.freeze(
@@ -193,7 +193,7 @@ function authorityNameFromEnvelope(envelope) {
  * Classify an already-verified envelope against this browser's registry,
  * per the four-row table above.
  *
- * @param {{ envelope: import('@votetorrent/vote-engine/bootstrap').BootstrapSnapshot, storage?: import('../db/networks-registry.js').StorageAdapter }} options
+ * @param {{ envelope: import('@votetorrent/vote-engine/bootstrap').BootstrapSnapshot, storage?: import('@votetorrent/web-data/officer').StorageAdapter }} options
  * @returns {ClassifyRedemptionResult}
  */
 export function classifyRedemption({ envelope, storage }) {
@@ -251,7 +251,7 @@ export function classifyRedemption({ envelope, storage }) {
  * @property {string} pastedCode
  * @property {SingleFlightTransport} transport - the SAME instance
  *   `classifyRedemption`'s envelope came from.
- * @property {import('../db/networks-registry.js').StorageAdapter} [storage]
+ * @property {import('@votetorrent/web-data/officer').StorageAdapter} [storage]
  * @property {(phase: string) => void} [onPhase]
  * @property {import('@quereus/quereus').Database} [db] - an already-open handle to this
  *   network, handed over so the replace path's delete closes it first. `forgetNetwork`

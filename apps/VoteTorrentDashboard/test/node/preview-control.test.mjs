@@ -16,7 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { dashboardRoot, dashboardSrc, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { dashboardRoot, dashboardSrc, uiWebSrc, webDataSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 const APP_ROOT = dashboardRoot();
 const SCREENS_DIR = dashboardSrc('screens');
@@ -255,7 +255,7 @@ test('inertness control: the explicit-voice matcher does NOT accept a bare zero-
 
 const CONFINEMENT_RE = /preview|simulat|effectiveScopes|GrantedScopesContext/i;
 
-test('no file under src/db, src/transport, src/lifecycle or the shared package\'s lifecycle mentions preview, simulat, effectiveScopes or GrantedScopesContext, comment-stripped', () => {
+test('no file under the shared web-data package, src/transport, src/lifecycle or the shared package\'s lifecycle mentions preview, simulat, effectiveScopes or GrantedScopesContext, comment-stripped', () => {
 	// Comment-stripped, per this behavior group's own header -- election-
 	// phase.js documents (in prose) why it does NOT add a phase picker,
 	// using the word "simulation"; that is a design note, not a leak of
@@ -263,7 +263,12 @@ test('no file under src/db, src/transport, src/lifecycle or the shared package\'
 	// moved election-phase.js to packages/ui-web/src/lifecycle -- this walk
 	// follows it there via uiWebSrc('lifecycle'), or this confinement
 	// guarantee would silently cover less than it did before the move.
-	const DIRS = [dashboardSrc('db'), dashboardSrc('transport'), dashboardSrc('lifecycle'), uiWebSrc('lifecycle')];
+	// 54-03a moved the dashboard's src/db into packages/web-data -- a second
+	// instance of the same precedent: dashboardSrc('db') is replaced with
+	// webDataSrc() here, or this walk would crash with ENOENT the moment
+	// src/db stopped existing (walkFiles below has no existsSync guard),
+	// rather than silently narrowing.
+	const DIRS = [webDataSrc(), dashboardSrc('transport'), dashboardSrc('lifecycle'), uiWebSrc('lifecycle')];
 	/** @type {string[]} */
 	const offenders = [];
 	for (const abs of DIRS) {

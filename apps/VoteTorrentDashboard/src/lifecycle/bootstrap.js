@@ -33,9 +33,14 @@ import {
 } from '../transport/bootstrap-transport-client.js';
 import { verifySnapshot, KNOWN_BOOTSTRAP_REDEMPTION_STATUS_CODES } from '@votetorrent/vote-engine/bootstrap';
 import { nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
-import { createNetworkDb, closeNetworkDb, deleteNetworkDb } from '../db/open-db.js';
-import { writeRowCounts } from '../db/reattach.js';
-import { findNetwork, upsertNetwork } from '../db/networks-registry.js';
+import {
+	createNetworkDb,
+	closeNetworkDb,
+	deleteNetworkDb,
+	writeRowCounts,
+	findNetwork,
+	upsertNetwork,
+} from '@votetorrent/web-data/officer';
 import { applySnapshotTables, assertRestoreMatchesManifest, RestoreCountMismatchError } from './snapshot-restore.js';
 
 /** The closed, frozen outcome vocabulary -- the single vocabulary the screen
@@ -78,7 +83,7 @@ export const BOOTSTRAP_PHASES = Object.freeze(
  * @typedef {object} RedeemAndBootstrapOptions
  * @property {string} pastedCode
  * @property {import('@votetorrent/vote-engine/bootstrap').IBootstrapTransport} transport
- * @property {import('../db/networks-registry.js').StorageAdapter} [storage]
+ * @property {import('@votetorrent/web-data/officer').StorageAdapter} [storage]
  * @property {boolean} [replace] - 50-09's refresh/officer-swap paths only; no UI in this phase.
  * @property {(phase: string) => void} [onPhase]
  * @property {string} [expectedNetworkHash] - supplied by 50-09's replace paths; omitted on a first redemption.
@@ -90,7 +95,7 @@ export const BOOTSTRAP_PHASES = Object.freeze(
 
 /**
  * @typedef {
- *   | { outcome: 'ok', network: import('../db/networks-registry.js').NetworkRegistryEntry }
+ *   | { outcome: 'ok', network: import('@votetorrent/web-data/officer').NetworkRegistryEntry }
  *   | { outcome: 'invalid-code' }
  *   | { outcome: 'code-refused', status: import('@votetorrent/vote-engine/bootstrap').BootstrapRedemptionStatus }
  *   | { outcome: 'transport-unreachable' }

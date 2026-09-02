@@ -2,7 +2,7 @@ import './app.css';
 import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { enginePreflight } from './engine-preflight.js';
-import { listNetworks } from './db/networks-registry.js';
+import { listNetworks } from '@votetorrent/web-data/officer';
 import { Bootstrap } from './screens/Bootstrap';
 import type { AlreadyBootstrappedContext } from './screens/Bootstrap';
 import { DashboardShell } from './screens/DashboardShell';

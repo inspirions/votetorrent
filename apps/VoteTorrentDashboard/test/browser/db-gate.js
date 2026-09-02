@@ -1,6 +1,7 @@
 /**
- * Tier-2 gate page driver — imports the PRODUCTION `src/db` modules by
- * relative path, so this gate proves the shipped code, not a copy. Read
+ * Tier-2 gate page driver — imports the PRODUCTION connection-layer modules
+ * from `@votetorrent/web-data/officer` (moved out of this workspace's own
+ * `src/db` by 54-03a), so this gate proves the shipped code, not a copy. Read
  * `?phase=` (`seed` | `verify`), `&expect=` (phase 1's counts, encoded, for
  * phase 2 to compare against) and `&trap=` (only ever `novtab`, only ever
  * reachable from `phase=seed`, only ever used by `run-headless.mjs
@@ -28,8 +29,10 @@ import {
 	deleteNetworkDb,
 	listObjectStores,
 	openStoreHandle,
-} from '../../src/db/open-db.js';
-import { attachNetworkDb, readRowCounts, writeRowCounts } from '../../src/db/reattach.js';
+	attachNetworkDb,
+	readRowCounts,
+	writeRowCounts,
+} from '@votetorrent/web-data/officer';
 import { GATE_NETWORK_HASH, SEED_TABLES, seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
 
 /** @type {any} */
@@ -92,9 +95,10 @@ async function rung(name, fn) {
 /**
  * INTENTIONAL MIS-BUILD — used only by `trap=novtab` (reachable only from
  * `run-headless.mjs --prove-trap`) to prove the gate can still detect a
- * missing `setDefaultVtabName`. The production path (`src/db/open-db.js`)
- * exposes no option to skip the call; this five-line local copy exists
- * solely to exercise the negative case.
+ * missing `setDefaultVtabName`. The production path
+ * (`@votetorrent/web-data`'s `open-db.js`) exposes no option to skip the
+ * call; this five-line local copy exists solely to exercise the negative
+ * case.
  *
  * @param {string} networkHash
  * @returns {Promise<import('@quereus/quereus').Database>}

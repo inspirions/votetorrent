@@ -15,9 +15,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
-import { deleteNetworkDb, closeNetworkDb, dbNameFor } from '../../src/db/open-db.js';
-import { readRowCounts, readRowCountsRecord, attachNetworkDb } from '../../src/db/reattach.js';
-import { findNetwork, listNetworks } from '../../src/db/networks-registry.js';
+import {
+	deleteNetworkDb,
+	closeNetworkDb,
+	dbNameFor,
+	readRowCounts,
+	readRowCountsRecord,
+	attachNetworkDb,
+	findNetwork,
+	listNetworks,
+} from '@votetorrent/web-data/officer';
 import { BOOTSTRAP_OUTCOME_CODES, redeemAndBootstrap, copyKeysForOutcome } from '../../src/lifecycle/bootstrap.js';
 import { createSingleFlightTransport } from '../../src/lifecycle/officer-swap.js';
 import { redeemSignInCode } from '../../src/transport/bootstrap-transport-client.js';

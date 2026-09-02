@@ -115,9 +115,15 @@
  * "would not stay deleted after settling."
  */
 
-import { deleteNetworkDb, dbNameFor } from '../db/open-db.js';
-import { clearRowCounts, readRowCountsRecord } from '../db/reattach.js';
-import { findNetwork, removeNetwork, listNetworks } from '../db/networks-registry.js';
+import {
+	deleteNetworkDb,
+	dbNameFor,
+	clearRowCounts,
+	readRowCountsRecord,
+	findNetwork,
+	removeNetwork,
+	listNetworks,
+} from '@votetorrent/web-data/officer';
 
 /** How many delete-then-settle rounds `deleteNetworkDbSettled` will run
  * before giving up and reporting `DeleteBlockedError`. Empirically the
@@ -155,7 +161,7 @@ function yieldToTaskQueue() {
  * immediately, exactly as a bare `deleteNetworkDb` call would.
  *
  * @param {string} networkHash
- * @param {import('../db/open-db.js').DeleteNetworkDbOptions} [options]
+ * @param {import('@votetorrent/web-data/officer').DeleteNetworkDbOptions} [options]
  * @returns {Promise<void>}
  */
 async function deleteNetworkDbSettled(networkHash, options) {
@@ -227,7 +233,7 @@ export class NetworkStillPresentError extends Error {
  * @property {string} networkHash
  * @property {string} typedConfirmation
  * @property {import('@quereus/quereus').Database} [db] - an already-open handle, closed first
- * @property {import('../db/networks-registry.js').StorageAdapter} [storage]
+ * @property {import('@votetorrent/web-data/officer').StorageAdapter} [storage]
  * @property {number} [timeoutMs] - forwarded to `deleteNetworkDb`'s blocked-delete
  *   timeout; a minor, additive passthrough beyond the five-step ordering above,
  *   present only so a caller (including this file's own test suite) can bound
@@ -243,7 +249,7 @@ export class NetworkStillPresentError extends Error {
  * last one.
  *
  * @param {ForgetNetworkOptions} options
- * @returns {Promise<{ networkHash: string, remaining: import('../db/networks-registry.js').NetworkRegistryEntry[] }>}
+ * @returns {Promise<{ networkHash: string, remaining: import('@votetorrent/web-data/officer').NetworkRegistryEntry[] }>}
  */
 export async function forgetNetwork(options) {
 	const { networkHash, typedConfirmation, db, storage, timeoutMs } = options;
@@ -306,7 +312,7 @@ export async function forgetNetwork(options) {
  * re-deriving what "gone" means.
  *
  * @param {string} networkHash
- * @param {import('../db/networks-registry.js').StorageAdapter} [storage]
+ * @param {import('@votetorrent/web-data/officer').StorageAdapter} [storage]
  * @returns {Promise<void>}
  */
 export async function assertNetworkForgotten(networkHash, storage) {

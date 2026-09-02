@@ -11,9 +11,11 @@
  *
  * Plain ESM `.js` with JSDoc types per contract C1 — this module is not itself
  * imported by a `test/node/*.test.mjs` file, but it lives under no C1-governed
- * directory (`src/db/`, `src/transport/`, `src/auth/`, `src/i18n/`,
- * `src/lifecycle/`), so the extension choice here is a style match with the rest
- * of the tier-1-reachable surface, not a contract requirement.
+ * directory (`src/transport/`, `src/auth/`, `src/i18n/`, `src/lifecycle/` —
+ * `src/db/` moved out of this workspace into `packages/web-data` in 54-03a
+ * and is governed there instead), so the extension choice here is a style
+ * match with the rest of the tier-1-reachable surface, not a contract
+ * requirement.
  */
 import * as voteEngine from '@votetorrent/vote-engine/browser';
 

@@ -21,8 +21,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
-import { createNetworkDb, closeNetworkDb, deleteNetworkDb } from '../../src/db/open-db.js';
-import { readRowCounts } from '../../src/db/reattach.js';
+import { createNetworkDb, closeNetworkDb, deleteNetworkDb, readRowCounts } from '@votetorrent/web-data/officer';
 import {
 	RESTORE_BATCH_ROWS,
 	SnapshotRestoreError,

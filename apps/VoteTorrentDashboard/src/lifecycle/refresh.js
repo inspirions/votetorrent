@@ -38,9 +38,13 @@
  */
 
 import { redeemAndBootstrap } from './bootstrap.js';
-import { closeNetworkDb } from '../db/open-db.js';
-import { attachNetworkDb, readRowCounts, readRowCountsRecord } from '../db/reattach.js';
-import { findNetwork } from '../db/networks-registry.js';
+import {
+	closeNetworkDb,
+	attachNetworkDb,
+	readRowCounts,
+	readRowCountsRecord,
+	findNetwork,
+} from '@votetorrent/web-data/officer';
 
 /** The post-swap row-count record (contract 6's obligation to 50-05) was
  * absent or diverged from the newly verified manifest after a successful
@@ -84,8 +88,8 @@ function sameShape(a, b) {
 /**
  * @typedef {object} NetworkStateSnapshot
  * @property {Record<string, number>} counts
- * @property {import('../db/reattach.js').RowCountsRecord | undefined} record
- * @property {import('../db/networks-registry.js').NetworkRegistryEntry | undefined} registryEntry
+ * @property {import('@votetorrent/web-data/officer').RowCountsRecord | undefined} record
+ * @property {import('@votetorrent/web-data/officer').NetworkRegistryEntry | undefined} registryEntry
  */
 
 /**
@@ -95,7 +99,7 @@ function sameShape(a, b) {
  * use the IDENTICAL instrument across a page boundary.
  *
  * @param {string} networkHash
- * @param {import('../db/networks-registry.js').StorageAdapter} storage
+ * @param {import('@votetorrent/web-data/officer').StorageAdapter} storage
  * @param {string[]} tableNames
  * @returns {Promise<Readonly<NetworkStateSnapshot>>}
  */
@@ -154,7 +158,7 @@ export function assertNetworkStateUnchanged(before, after) {
  * @property {string} networkHash
  * @property {string} pastedCode
  * @property {import('@votetorrent/vote-engine/bootstrap').IBootstrapTransport} transport
- * @property {import('../db/networks-registry.js').StorageAdapter} [storage]
+ * @property {import('@votetorrent/web-data/officer').StorageAdapter} [storage]
  * @property {(phase: string) => void} [onPhase]
  * @property {import('@quereus/quereus').Database} [db] - an already-open handle to this network,
  *   handed over so the replace path's delete closes it first rather than racing it.

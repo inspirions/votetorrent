@@ -36,15 +36,15 @@ import { t } from '@votetorrent/ui-web';
 import type { ScopeCode } from '../auth/capabilities.js';
 import { CAPABILITIES, PANEL_GROUPS } from '../auth/capabilities.js';
 import { readGrantedScopes } from '../auth/is-privileged.js';
-import { closeNetworkDb } from '../db/open-db.js';
 import {
+	closeNetworkDb,
 	attachNetworkDb,
 	MissingRowCountsError,
 	NotBootstrappedError,
 	RowCountMismatchError,
-} from '../db/reattach.js';
-import type { NetworkRegistryEntry } from '../db/networks-registry.js';
-import { listNetworks } from '../db/networks-registry.js';
+	listNetworks,
+} from '@votetorrent/web-data/officer';
+import type { NetworkRegistryEntry } from '@votetorrent/web-data/officer';
 import { formatStaleThreshold, snapshotFreshness } from '../lifecycle/freshness.js';
 import type { SnapshotFreshness } from '../lifecycle/freshness.js';
 import { forgetNetwork } from '../lifecycle/forget-network.js';

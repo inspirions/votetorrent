@@ -56,8 +56,7 @@
  */
 
 import { decodeBlobValue } from '@votetorrent/vote-engine/bootstrap';
-import { readRowCounts } from '../db/reattach.js';
-import { STORE_MODULE_NAME } from '../db/open-db.js';
+import { readRowCounts, STORE_MODULE_NAME } from '@votetorrent/web-data/officer';
 
 /** Chunk size for `applyExternalRowChanges` batches -- bounds peak memory for a
  * large table rather than holding one call's worth of ops for the whole table.

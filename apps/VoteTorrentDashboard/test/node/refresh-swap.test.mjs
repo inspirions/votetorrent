@@ -19,9 +19,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
-import { deleteNetworkDb, closeNetworkDb } from '../../src/db/open-db.js';
-import { attachNetworkDb, readRowCounts, rowCountsKeyFor } from '../../src/db/reattach.js';
-import { findNetwork } from '../../src/db/networks-registry.js';
+import {
+	deleteNetworkDb,
+	closeNetworkDb,
+	attachNetworkDb,
+	readRowCounts,
+	rowCountsKeyFor,
+	findNetwork,
+} from '@votetorrent/web-data/officer';
 import { redeemAndBootstrap } from '../../src/lifecycle/bootstrap.js';
 import { redeemSignInCode } from '../../src/transport/bootstrap-transport-client.js';
 import {

@@ -36,8 +36,14 @@ import { t } from '@votetorrent/ui-web';
 import { PanelGrid } from '../../src/screens/PanelGrid.js';
 import { PreviewAsProvider, PreviewAsControl } from '../../src/screens/PreviewAsControl.js';
 import { AdvisoryDisclosure } from '@votetorrent/ui-web/components';
-import { createNetworkDb, closeNetworkDb, deleteNetworkDb } from '../../src/db/open-db.js';
-import { attachNetworkDb, readRowCounts, writeRowCounts } from '../../src/db/reattach.js';
+import {
+	createNetworkDb,
+	closeNetworkDb,
+	deleteNetworkDb,
+	attachNetworkDb,
+	readRowCounts,
+	writeRowCounts,
+} from '@votetorrent/web-data/officer';
 import { GATE_NETWORK_HASH, SEED_TABLES, seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
 import { seedElectionSurface, SEED_TIMELINE, SEED_EXPECTED_COUNTS } from '../fixtures/seed-election-surface.js';
 

@@ -1,7 +1,8 @@
 /**
  * Tier-1 reason-asserting coverage of the D-13 code split
  * (`src/transport/bootstrap-transport-client.js`) and the D-08/D-10 network
- * registry (`src/db/networks-registry.js`). Every negative is paired, in the
+ * registry (`@votetorrent/web-data`'s `networks-registry.js`, moved out of
+ * this workspace's own `src/db/` by 54-03a). Every negative is paired, in the
  * SAME test, with a positive control -- this project's rule, and the one
  * that was violated twice on 2026-08-25.
  *
@@ -30,7 +31,7 @@ import {
 	findNetwork,
 	upsertNetwork,
 	removeNetwork,
-} from '../../src/db/networks-registry.js';
+} from '@votetorrent/web-data/officer';
 
 const SECRET = 'a'.repeat(40);
 const DIGEST = 'b'.repeat(43);
