@@ -63,19 +63,33 @@ test('rung 4: the real `./tokens.css` subpath resolves to an existing file', () 
 	assert.ok(existsSync(resolvedPath), `expected ${resolvedPath} to exist`);
 });
 
-test('rung 5: the exports map is exactly four keys, in order, mapping to their expected targets', () => {
-	// 53-05 (D-01/D-02) adds `./lifecycle` for election-phase.js, on the
+test('rung 5: the exports map is exactly five keys, in order, mapping to their expected targets', () => {
+	// 53-05 (D-01/D-02) added `./lifecycle` for election-phase.js, on the
 	// plain-JS side of the split (see src/index.js's header for why it is a
-	// separate entry rather than a `.` re-export): it does not merge `.` and
-	// `./components`, so this rung's other assertions (import via `.`,
-	// ERR_MODULE_NOT_FOUND via `./components`, tokens.css resolving) all stay
-	// true unchanged -- only the key count and order grow by one.
+	// separate entry rather than a `.` re-export). 53-11 (D-20) adds
+	// `./mutations` for the shared build-time mutation machinery the two
+	// negative controls need -- also plain-JS, also alongside `.`, never
+	// behind `./components` (it imports no React and is loaded by a Vite
+	// config in a Node process, not by a bundler). Neither addition merges
+	// with `.` or `./components`, so this rung's other assertions (import via
+	// `.`, ERR_MODULE_NOT_FOUND via `./components`, tokens.css resolving) all
+	// stay true unchanged -- only the key count and order grow.
 	const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8'));
-	assert.deepEqual(Object.keys(pkg.exports), ['.', './components', './lifecycle', './tokens.css']);
+	assert.deepEqual(Object.keys(pkg.exports), ['.', './components', './lifecycle', './tokens.css', './mutations']);
 	assert.equal(pkg.exports['.'], './src/index.js');
 	assert.equal(pkg.exports['./components'], './src/components.js');
 	assert.equal(pkg.exports['./lifecycle'], './src/lifecycle/election-phase.js');
 	assert.equal(pkg.exports['./tokens.css'], './src/tokens.css');
+	assert.equal(pkg.exports['./mutations'], './scripts/mutations.mjs');
+});
+
+test('rung 9: the real `./mutations` subpath is Node-importable with no bundler and exposes the frozen mutation set', async () => {
+	const mod = await import('@votetorrent/ui-web/mutations');
+	assert.deepEqual(mod.MUTATIONS, ['no-dedupe', 'token-missing']);
+	assert.equal(typeof mod.resolveMutation, 'function');
+	assert.equal(typeof mod.applyNoDedupe, 'function');
+	assert.equal(typeof mod.stripTokensPlugin, 'function');
+	assert.equal(typeof mod.readMutationReport, 'function');
 });
 
 test('rung 6: react and react-dom are pinned at exactly 19.0.0 in both peerDependencies and devDependencies (TS2875 guard)', () => {

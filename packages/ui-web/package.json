@@ -8,7 +8,8 @@
 		".": "./src/index.js",
 		"./components": "./src/components.js",
 		"./lifecycle": "./src/lifecycle/election-phase.js",
-		"./tokens.css": "./src/tokens.css"
+		"./tokens.css": "./src/tokens.css",
+		"./mutations": "./scripts/mutations.mjs"
 	},
 	"sideEffects": [
 		"*.css"

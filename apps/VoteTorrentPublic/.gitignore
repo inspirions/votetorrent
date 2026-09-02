@@ -1,1 +1,6 @@
 dist-gate
+
+# The root .gitignore's bare `dist` rule matches only an entry named exactly
+# `dist` — it does not match `dist-mutant-*` (53-11, D-20).
+dist-mutant-*
+

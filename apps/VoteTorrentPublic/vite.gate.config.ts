@@ -22,7 +22,17 @@ import base from './vite.config';
 // `dist/` that D-17's scan walks; `yarn build:gate` emits ONLY this harness
 // into `dist-gate/`. `vite.config.ts` itself gains no `rollupOptions.input`
 // of its own, so production stays single-entry.
-export default mergeConfig(base, {
+//
+// `GATE_OVERRIDES` (53-11, D-20) is exported by name, separately from the
+// merged default export, so `vite.mutant.config.ts` can pass `base` and
+// these overrides to `applyNoDedupe` as the two SEPARATE halves that
+// function needs — never a pre-merged object. This is what makes the
+// `GATE CONFIG SELF-REFERENCE` detector possible: a `resolve` block added
+// here (this file's own binding rule already forbids it) would be caught by
+// that detector, not silently absorbed. Adding this export changes no gate
+// behaviour — the default export below merges the identical object it
+// always did.
+export const GATE_OVERRIDES = {
 	build: {
 		outDir: 'dist-gate',
 		emptyOutDir: true,
@@ -38,4 +48,6 @@ export default mergeConfig(base, {
 	// added, which is exactly the kind of drift the contract exists to
 	// foreclose rather than to catch after the fact.
 	publicDir: false,
-});
+};
+
+export default mergeConfig(base, GATE_OVERRIDES);

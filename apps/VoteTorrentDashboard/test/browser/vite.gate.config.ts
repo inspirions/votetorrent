@@ -17,6 +17,17 @@
  *
  * `test/browser/dist` is already covered by the root `.gitignore`'s bare
  * `dist` rule — no `.gitignore` edit needed here.
+ *
+ * `GATE_OVERRIDES` (53-11, D-20) is exported by name, separately from the
+ * merged default export, so `apps/VoteTorrentDashboard/vite.mutant.config.ts`
+ * can pass the production config and these overrides to `applyNoDedupe`
+ * as the two SEPARATE halves that function needs — never a pre-merged
+ * object. This is what makes the `GATE CONFIG SELF-REFERENCE` detector
+ * possible: `applyNoDedupe` merges these overrides onto the ALREADY-mutated
+ * production config itself, rather than trusting a config this file already
+ * merged, so a `resolve.dedupe` re-declared right here would be caught.
+ * Adding this export changes no gate behaviour — the default export below
+ * merges the identical object it always did.
  */
 import { fileURLToPath } from 'node:url';
 import { mergeConfig } from 'vite';
@@ -31,7 +42,7 @@ const APP_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const resolvedBaseConfig =
 	typeof baseConfig === 'function' ? (baseConfig as any)({ command: 'build', mode: 'production' }) : baseConfig;
 
-export default mergeConfig(resolvedBaseConfig, {
+export const GATE_OVERRIDES = {
 	root: APP_ROOT,
 	build: {
 		outDir: fileURLToPath(new URL('./dist', import.meta.url)),
@@ -41,4 +52,6 @@ export default mergeConfig(resolvedBaseConfig, {
 		},
 	},
 	publicDir: false,
-});
+};
+
+export default mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
