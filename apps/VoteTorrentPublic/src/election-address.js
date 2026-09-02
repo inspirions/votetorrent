@@ -67,9 +67,13 @@ export const ELECTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
  * Parse a `location.search`-shaped string into an `ElectionAddress`. Never
- * throws. The returned object is frozen.
+ * throws — the parameter type is deliberately `unknown`, not `string`,
+ * because a hand-edited URL or a caller passing the wrong prop shape is
+ * exactly the hostile input this function must survive without an
+ * uncaught exception; the `typeof` guard below is this function's real
+ * boundary, not its JSDoc type. The returned object is frozen.
  *
- * @param {string} search
+ * @param {unknown} search
  * @returns {Readonly<ElectionAddress>}
  */
 export function parseElectionAddress(search) {

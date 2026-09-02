@@ -2,7 +2,7 @@ import './app.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { enginePreflight } from './engine-preflight.js';
-import { AppChrome } from './screens/AppChrome';
+import { ElectionShell } from './screens/ElectionShell';
 
 declare global {
 	interface Window {
@@ -30,6 +30,8 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
 	<StrictMode>
-		<AppChrome />
+		{/* No props: production supplies no facts, no instant and no
+		    injected search — ElectionShell now renders AppChrome itself. */}
+		<ElectionShell />
 	</StrictMode>,
 );

@@ -39,3 +39,56 @@
 	padding: var(--space-md);
 	color: var(--muted);
 }
+
+/*
+ * ElectionShell (53-07). Uses ONLY tokens the package declares — no literal
+ * colours, so 53-08's D-23 token probe has something real to resolve
+ * against and a missing token layer stays visible rather than papered over.
+ */
+
+.election,
+.election-unreadable {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-sm);
+}
+
+.election-address {
+	color: var(--muted);
+	font-size: var(--font-label-size);
+}
+
+.election-unreadable {
+	padding: var(--space-md);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+}
+
+/*
+ * .skeleton is a STATIC block: fixed height, --surface2 fill, --radius
+ * corner, --border outline. It carries NO animation, NO animation-name, NO
+ * transition, NO @keyframes and NO linear-gradient of any kind — a moving
+ * gradient is exactly what a shimmer is made of, and a shimmer is the
+ * visual assertion of an in-flight fetch that does not exist on this page
+ * (D-18). This block must stay exactly that static.
+ */
+.skeleton {
+	height: var(--space-xl);
+	background: var(--surface2);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+}
+
+.dt-toggle {
+	background: var(--surface);
+	color: var(--text);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: var(--space-sm) var(--space-md);
+}
+
+.dt-body {
+	padding: var(--space-sm) var(--space-md);
+	color: var(--text);
+}
