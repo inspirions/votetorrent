@@ -1,8 +1,9 @@
-name: Dashboard gates
+name: Web gates
 
-# This workflow wires the dashboard's three already-built test tiers into a
-# permanent CI gate. A reader coming to this file cold needs four things this
-# file cannot say anywhere else:
+# This workflow wires `packages/ui-web`'s own suite and both consuming web
+# apps' (the dashboard and the public no-login election view) already-built
+# test tiers into a permanent CI gate. A reader coming to this file cold needs
+# five things this file cannot say anywhere else:
 #
 # (a) What each tier can and cannot prove. Tier 1 (job `logic-gate`) is a fast
 #     browser-free suite over pure logic modules -- it proves NOTHING about
@@ -11,17 +12,28 @@ name: Dashboard gates
 #     in-session assertion passes while nothing was actually written to
 #     IndexedDB. That is exactly why job `logic-gate`'s name says so
 #     explicitly, and why tiers 2 and 3 exist as a separate, independent job
-#     against real headless Chrome.
-# (b) The two `--prove-*` modes (`--prove-trap` for tier 2, `--prove-drift`
-#     for tier 3) are INERTNESS CONTROLS, not extra gates. Each one runs the
-#     real gate against a deliberately broken fixture and INVERTS the
-#     expectation: exit 0 means the inner run genuinely FAILED. A green
-#     workflow run in which either control did NOT fire is a broken gate
-#     masquerading as a pass, not a real pass -- this file greps the whole
-#     browser-gates log for the substring "is inert" and fails the job if it
-#     is absent from either control's output.
+#     against real headless Chrome. Tier 1 also runs the three-root copy-
+#     discipline lint (D-06), the repo-root `@votetorrent/ui-web` dedupe/gate
+#     consumer assertion (D-21), the `@votetorrent/ui-web` package's own
+#     typecheck and tier-1 suite, and the public election view's typecheck,
+#     tier-1 suite, build, polyfill-purity check, gate build and
+#     harness-in-dist scan.
+# (b) The FOUR `--prove-*` modes this workflow runs (`--prove-trap` for tier
+#     2, `--prove-drift` for tier 3, and the shared browser-gate runner's own
+#     `--prove-no-dedupe` / `--prove-token-missing`) are INERTNESS CONTROLS,
+#     not extra gates. Each one runs the real gate against a deliberately
+#     broken fixture, and INVERTS the expectation: exit 0 means the inner run
+#     genuinely FAILED. A green workflow run in which any control did NOT fire
+#     is a broken gate masquerading as a pass, not a real pass -- this file
+#     greps each control's OWN log for the literal substring "is inert" and
+#     fails the job when it is PRESENT, because that sentinel is printed by
+#     the runner precisely when the inner run it was supposed to invert still
+#     passed. The two shared-runner controls rebuild a genuinely mutated
+#     production (or gate) variant at BUILD time -- never `dist/` edited after
+#     the fact, never anything mutated at runtime -- because spike 089
+#     measured a runtime React-identity check as false-negative.
 # (c) The three measured baselines this phase closes, and which one this
-#     workflow enforces. `packages/vote-engine` is enforced exactly (8 known
+#     workflow enforces. `packages/vote-engine` is enforced exactly (9 known
 #     failures, verbatim titles) because this phase edited that package
 #     twice. `apps/VoteTorrentAuthority`'s typecheck is enforced as a ceiling
 #     because this phase added files there. `apps/VoteTorrentVoter`'s jest
@@ -29,10 +41,22 @@ name: Dashboard gates
 #     and echoed to every `baselines` job run, but deliberately NOT run here:
 #     this phase touches nothing in the voter, and importing an unrelated red
 #     baseline into a gate whose entire value is trustworthiness would make
-#     the gate less useful, not more.
+#     the gate less useful, not more. This workflow's tier-1 job enforces
+#     THREE separate tier-1 baselines -- `dashboardTier1`, `uiWebTier1` and
+#     `publicTier1` -- each with its own receipt marker (`tier1-logic`,
+#     `tier1-ui-web`, `tier1-public`) so three tier-1 suites can never satisfy
+#     one receipt requirement between them.
 # (d) This workflow reads NO repository secret and publishes nothing. Every
 #     step is either a local command or a diagnostic-only upload gated on
 #     failure.
+# (e) Why the browser job covers two apps with duplicated steps instead of a
+#     job-level build matrix. Job `browser-gates`'s `name:` is the branch-
+#     protection required check's join key, and a matrixed job's rendered
+#     check-run name is NOT its static `name:` string -- the matrix values are
+#     appended to it, so a required check keyed on the undecorated string
+#     would silently stop reporting the moment a matrix were introduced.
+#     Duplicated, individually named steps inside the one job satisfy "run the
+#     shared runner over both consumers" with none of that risk.
 
 on:
   push:
@@ -57,7 +81,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dashboard-${{ github.ref }}
+  group: web-gates-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -117,7 +141,11 @@ jobs:
       # and dist/ is gitignored. A clean CI checkout therefore has no dist/,
       # and the dashboard's typecheck/build would fail to resolve
       # @votetorrent/vote-engine/browser without this step. Scoped to
-      # packages/* on purpose -- apps/* must NOT be built here.
+      # packages/* on purpose -- apps/* must NOT be built here. packages/ui-web
+      # declares no `build` script of its own (53-02 publishes its source
+      # directly, no bundling step) -- `yarn workspaces foreach` silently
+      # skips a workspace with no matching script, so its presence under
+      # packages/* does not make this step fail.
       - name: Build workspace packages
         run: |
           set -euo pipefail
@@ -141,11 +169,83 @@ jobs:
           yarn workspace votetorrent-dashboard typecheck
           echo "RECEIPT dashboard-typecheck" | tee -a ci-receipt.txt
 
-      - name: Copy discipline
+      # The dashboard's own `lint` script (53-10) is now a DELEGATION to this
+      # identical repo-root script, so this step and `yarn workspace
+      # votetorrent-dashboard lint` produce byte-identical output regardless
+      # of launch directory -- running both here would scan all three roots
+      # twice and invite the false belief that each workspace lints only
+      # itself. This step covers all three: packages/ui-web/src,
+      # apps/VoteTorrentDashboard/src and apps/VoteTorrentPublic/src (D-06).
+      - name: Copy discipline (three roots)
         run: |
           set -euo pipefail
-          yarn workspace votetorrent-dashboard lint
-          echo "RECEIPT dashboard-copy-lint" | tee -a ci-receipt.txt
+          yarn lint:copy
+          echo "RECEIPT copy-lint-3root" | tee -a ci-receipt.txt
+
+      - name: ui-web typecheck
+        run: |
+          set -euo pipefail
+          yarn workspace @votetorrent/ui-web typecheck
+          echo "RECEIPT ui-web-typecheck" | tee -a ci-receipt.txt
+
+      # The D-21 static assertion: every workspace depending on
+      # @votetorrent/ui-web must declare resolve.dedupe: ['react','react-dom']
+      # in its production Vite config AND a script reaching the one shared
+      # browser-gate runner. It runs before any app build in this job by
+      # design -- no browser, no network, no `yarn` invocation of its own --
+      # so a fourth consumer that forgets either requirement is caught here,
+      # structurally, before the behavioural gates below ever run.
+      - name: ui-web consumers (D-21 dedupe/gate assertion)
+        run: |
+          set -euo pipefail
+          yarn assert:ui-web-consumers
+          echo "RECEIPT ui-web-consumers" | tee -a ci-receipt.txt
+
+      # Resolves 53-12's own open question: without this step,
+      # @votetorrent/ui-web's own tier-1 suite (package-shape.test.mjs's
+      # three-way exports split, the ERR_MODULE_NOT_FOUND proof, and the
+      # absent-from-root-package.json React assertion) never runs in CI, and
+      # 53-12's root-hoist rung would be the ONLY CI-reachable coverage of the
+      # never-hoist-React rule. It does now.
+      - name: Tier 1 - ui-web package suite
+        run: |
+          set -euo pipefail
+          T1_START=$SECONDS
+          yarn workspace @votetorrent/ui-web test 2>&1 | tee ui-web-tier1.log
+          T1_ELAPSED=$((SECONDS-T1_START))
+          node scripts/assert-ci-baselines.mjs tier1 ui-web-tier1.log "$T1_ELAPSED" --baseline uiWebTier1 | tee -a ci-receipt.txt
+
+      - name: Public app typecheck
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-public typecheck
+          echo "RECEIPT public-typecheck" | tee -a ci-receipt.txt
+
+      - name: Tier 1 - public app logic suite
+        run: |
+          set -euo pipefail
+          T1_START=$SECONDS
+          yarn workspace votetorrent-public test:node 2>&1 | tee public-tier1.log
+          T1_ELAPSED=$((SECONDS-T1_START))
+          node scripts/assert-ci-baselines.mjs tier1 public-tier1.log "$T1_ELAPSED" --baseline publicTier1 | tee -a ci-receipt.txt
+
+      - name: Public app build and polyfill assertion
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-public build
+          yarn workspace votetorrent-public assert:no-polyfills
+          echo "RECEIPT public-build-no-polyfills" | tee -a ci-receipt.txt
+
+      # The gate build (dist-gate/) is required here because 53-09's
+      # harness-in-dist scan uses dist-gate/ as its cross-build PRESENCE
+      # control: without a gate build to scan, a zero-hit result against
+      # dist/ would be indistinguishable from a matcher that is simply blind.
+      - name: Public app gate build and harness-in-dist scan
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-public build:gate
+          yarn workspace votetorrent-public assert:no-test-harness-in-dist
+          echo "RECEIPT public-no-harness-in-dist" | tee -a ci-receipt.txt
 
       - name: Build and polyfill assertion
         run: |
@@ -153,6 +253,15 @@ jobs:
           yarn workspace votetorrent-dashboard build
           yarn workspace votetorrent-dashboard assert:no-polyfills
           echo "RECEIPT dashboard-build-no-polyfills" | tee -a ci-receipt.txt
+
+      # This assertion exists on disk at HEAD and CI has never run it; 53-08
+      # extended it with the `ui-gate` and `__UI_GATE__` tokens, so it now
+      # guards the new shared-runner harness too.
+      - name: Dashboard harness-in-dist scan
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-dashboard assert:no-test-harness-in-dist
+          echo "RECEIPT dashboard-no-harness-in-dist" | tee -a ci-receipt.txt
 
       # The tier-1 test runner's own exit code IS trustworthy here (unlike
       # vote-engine's and the authority typecheck's, both of which carry known
@@ -171,8 +280,11 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/assert-ci-baselines.mjs receipts ci-receipt.txt \
-            toolchain peers-clean dashboard-typecheck dashboard-copy-lint \
-            dashboard-build-no-polyfills tier1-logic
+            toolchain peers-clean dashboard-typecheck copy-lint-3root \
+            dashboard-build-no-polyfills dashboard-no-harness-in-dist \
+            ui-web-typecheck ui-web-consumers tier1-ui-web \
+            public-typecheck tier1-public public-build-no-polyfills \
+            public-no-harness-in-dist tier1-logic
 
   # =========================================================================
   # Job 2 -- Tiers 2 and 3: headless Chrome, persistence then model vs DOM.
