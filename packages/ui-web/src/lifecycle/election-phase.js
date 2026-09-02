@@ -67,6 +67,15 @@
  */
 
 import { toCanonicalDatetime, nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
+import { PHASE_IDS, phaseCopyKey } from './phase-ids.js';
+
+// Re-exported unchanged (WR-11, Phase 53 review): `PHASE_IDS`/`phaseCopyKey`
+// moved to the dependency-free `./phase-ids.js` sibling so `LifecyclePill.tsx`
+// (a `./components` barrel member) can depend on them without transitively
+// loading `@votetorrent/vote-engine/browser` -- see `phase-ids.js`'s own
+// header. This module's public surface (and every existing
+// `@votetorrent/ui-web/lifecycle` consumer) is unchanged.
+export { PHASE_IDS, phaseCopyKey };
 
 const CANONICAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
 
@@ -82,9 +91,6 @@ export const ELECTION_EVENT_ORDER = Object.freeze([
 ]);
 
 /** @typedef {'organizing' | 'running' | 'released'} PhaseId */
-
-/** @type {ReadonlyArray<PhaseId>} */
-export const PHASE_IDS = Object.freeze(['organizing', 'running', 'released']);
 
 /**
  * Throws when `value` is not a canonical 19-character, no-`Z` datetime,
@@ -191,15 +197,4 @@ export function computeElectionPhase(timelineValue, atCanonical) {
 		return { phase: 'running', reason: null };
 	}
 	return { phase: 'released', reason: null };
-}
-
-/**
- * @param {PhaseId | null} phase
- * @returns {string | null}
- */
-export function phaseCopyKey(phase) {
-	if (phase === 'organizing' || phase === 'running' || phase === 'released') {
-		return `lifecycle.${phase}`;
-	}
-	return null;
 }

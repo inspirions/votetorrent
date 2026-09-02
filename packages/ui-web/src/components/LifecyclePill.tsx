@@ -24,8 +24,17 @@
  * leaving `.lifecycle-pill` with zero rules in `apps/VoteTorrentPublic`,
  * invisible to every gate this phase had built. See
  * `packages/ui-web/README.md`'s "Shared component default styles" section.
+ *
+ * `phaseCopyKey` is imported from `../lifecycle/phase-ids.js`, NOT
+ * `../lifecycle/election-phase.js` (WR-11, Phase 53 review): the latter's
+ * only external dependency is `@votetorrent/vote-engine/browser` -- a
+ * database engine -- and importing it from here would transitively pull that
+ * engine into `./components` (this file's own barrel, per
+ * `src/components.js`), contradicting `src/index.js`'s stated reason for
+ * keeping `./lifecycle` a separate, plain-JS-only exports entry. See
+ * `phase-ids.js`'s own header for the full split rationale.
  */
-import { phaseCopyKey } from '../lifecycle/election-phase.js';
+import { phaseCopyKey } from '../lifecycle/phase-ids.js';
 import { t } from '../copy.js';
 
 export interface LifecyclePillProps {
