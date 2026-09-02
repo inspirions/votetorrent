@@ -72,12 +72,12 @@
  * identity check as false-negative because esbuild hands importers
  * different namespace wrappers around one module) and must print the
  * literal string `is inert` and exit non-zero when the underlying run it
- * inverts still passes. `finishRun(underlyingRunPassed, reason, inversionId)`
- * is implemented now, in the shape of `run-headless.mjs`'s own `finishRun`:
- * with `inversionId === null` it sets `process.exitCode` from
- * `underlyingRunPassed` directly; with a non-null id it inverts and emits
- * the `is inert` verdict line. This plan only ever calls it with `null`;
- * 53-11 supplies the ids.
+ * inverts still passes. `finishRun(underlyingRunPassed, reason)` reports the
+ * NORMAL run's verdict only; `runProveNoDedupe`/`runProveTokenMissing` each
+ * print their own dedicated `is inert`/"genuinely failed" verdict line
+ * directly rather than routing through it (WR-14, Phase 53 review — an
+ * earlier inversion-aware branch on `finishRun` was dead code coupled to a CI
+ * grep floor, and was removed).
  *
  * `import { chromium } from 'playwright'` — the FULL package, never the
  * lighter core-only sibling, and never a hardcoded system-Chrome binary path
@@ -962,36 +962,29 @@ function getPlaywrightVersion() {
 }
 
 /**
- * In the shape of `run-headless.mjs`'s own `finishRun` — see this file's
- * header "THE INVERSION SEAM" note.
+ * Reports the normal (non-control) run's verdict. Named to mirror
+ * `run-headless.mjs`'s own `finishRun` — see this file's header "THE
+ * INVERSION SEAM" note.
+ *
+ * WR-14 (Phase 53 review): this function previously also carried a second,
+ * inversion-aware branch (`inversionId !== null`) that its OWN comment
+ * admitted was "unreachable from any call site in this file today" —
+ * `runProveNoDedupe`/`runProveTokenMissing` print their own dedicated
+ * "is inert"/"genuinely failed" lines rather than routing through it. That
+ * dead branch supplied one of the exactly-three comment-filtered `is inert`
+ * occurrences a CI floor in `web-gates.yml` counted (`>= 3`), making the
+ * floor honest only by accident: deleting the branch as an unrelated,
+ * reasonable cleanup would have failed `Gate-source integrity` for a
+ * non-regression. Removed here; `web-gates.yml`'s floor is lowered to `>= 2`
+ * in the same round, counting only the two real emission sites this
+ * function no longer duplicates.
  *
  * @param {boolean} underlyingRunPassed
  * @param {string} reason
- * @param {string | null} inversionId
  */
-function finishRun(underlyingRunPassed, reason, inversionId) {
-	if (inversionId === null) {
-		console.log(`\nUI GATES: ${underlyingRunPassed ? 'PASS' : 'FAIL'} (${reason})`);
-		process.exitCode = underlyingRunPassed ? 0 : 1;
-		return;
-	}
-	// 53-11 populated INVERSION_CONTROLS, but its own two controls
-	// (runProveNoDedupe/runProveTokenMissing) print their OWN dedicated
-	// "is inert"/"genuinely failed" lines rather than routing through this
-	// generic branch — the plan's own accounting requirement is that "is
-	// inert" appears in source EXACTLY TWICE MORE than before this plan, once
-	// per control; sharing this one generic line between both controls would
-	// not add two new occurrences. This branch is therefore still
-	// unreachable from any call site in this file today, kept for shape
-	// parity with run-headless.mjs's own finishRun and available to a future
-	// control whose accounting needs differ.
-	if (underlyingRunPassed) {
-		console.log(`\nUI GATES ${inversionId}: FAIL — gate is inert (${reason})`);
-		process.exitCode = 1;
-		return;
-	}
-	console.log(`\nUI GATES ${inversionId}: PASS — the underlying run genuinely failed (${reason})`);
-	process.exitCode = 0;
+function finishRun(underlyingRunPassed, reason) {
+	console.log(`\nUI GATES: ${underlyingRunPassed ? 'PASS' : 'FAIL'} (${reason})`);
+	process.exitCode = underlyingRunPassed ? 0 : 1;
 }
 
 /**
@@ -1388,7 +1381,7 @@ async function main() {
 		console.log(
 			`RECEIPT ui-gates app=${path.basename(appDir)} rungs=${rungs.length} passed=${rungs.filter((r) => r.passed).length} playwright=${playwrightVersion} tokens=${tokenCount}`,
 		);
-		finishRun(allPassed, allPassed ? 'all rungs passed' : 'one or more rungs failed', null);
+		finishRun(allPassed, allPassed ? 'all rungs passed' : 'one or more rungs failed');
 	} finally {
 		await browser?.close();
 		await serverHandle?.close();

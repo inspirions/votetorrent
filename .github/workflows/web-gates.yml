@@ -458,12 +458,18 @@ jobs:
               fail=1
             fi
           done
-          # Measured at HEAD: comment-filtered 3 (the generic finishRun
-          # branch, unused by either control, plus one dedicated line per
-          # control) -- see 53-11-SUMMARY.md's own recorded filter/count.
+          # Measured at HEAD: comment-filtered 2 (one dedicated emission line
+          # per --prove-* control). WR-14 (Phase 53 review) removed
+          # finishRun's inversion-aware branch, which was admitted dead code
+          # (unreachable from any call site) yet supplied a THIRD occurrence
+          # this floor used to count -- deleting it as an unrelated,
+          # reasonable cleanup would have failed this check for a
+          # non-regression. The floor is lowered to 2 in the same commit that
+          # removed the branch, so it now counts only the two real emission
+          # sites, not incidental prose coupled to dead code.
           u_inert_count=$(set +e; grep -n 'is inert' "$U" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
-          if [ "$u_inert_count" -lt 3 ]; then
-            echo "::error::gate-source-intact: expected at least 3 comment-filtered occurrences of 'is inert' in $U, found $u_inert_count"
+          if [ "$u_inert_count" -lt 2 ]; then
+            echo "::error::gate-source-intact: expected at least 2 comment-filtered occurrences of 'is inert' in $U, found $u_inert_count"
             fail=1
           fi
           # 53-12's canonical-runner invariant, restated where CI can see it:
