@@ -76,18 +76,48 @@
 }
 
 /*
- * .skeleton is a STATIC block: fixed height, --surface2 fill, --radius
- * corner, --border outline. It carries NO animation, NO animation-name, NO
- * transition, NO @keyframes and NO linear-gradient of any kind — a moving
- * gradient is exactly what a shimmer is made of, and a shimmer is the
- * visual assertion of an in-flight fetch that does not exist on this page
- * (D-18). This block must stay exactly that static.
+ * .skeleton is a STATIC, LABELLED, OBVIOUSLY-EMPTY slot (D-18). Two halves,
+ * and the second was missing until G-53-UAT-01:
+ *
+ * 1. Still. NO animation, NO animation-name, NO transition, NO @keyframes
+ *    and NO linear-gradient of any kind — a moving gradient is exactly what
+ *    a shimmer is made of, and a shimmer is the visual assertion of an
+ *    in-flight fetch that does not exist on this page.
+ * 2. Legible as deliberate. Stillness alone was never sufficient: the
+ *    previous rule painted a --surface2 FILL at a fixed height, which is the
+ *    universal loading-skeleton idiom whether or not it moves, and the
+ *    element carried no visible text at all. A human reading the shipped
+ *    page read three grey bars as content still arriving. So the fill is
+ *    gone in favour of the page ground and a DASHED outline — a dashed
+ *    border reads as "a space left empty on purpose" where a filled block
+ *    reads as "a block that has not been drawn yet" — and the element now
+ *    lays out the slot's own name, which is what actually tells the reader
+ *    what is absent.
+ *
+ * min-height, not height: the label sets the true height, and a fixed height
+ * would clip it at a narrow viewport.
  */
 .skeleton {
-	height: var(--space-xl);
-	background: var(--surface2);
-	border: 1px solid var(--border);
+	display: flex;
+	align-items: center;
+	min-height: var(--space-xl);
+	padding: 0 var(--space-sm);
+	background: var(--bg);
+	border: 1px dashed var(--border);
 	border-radius: var(--radius);
+}
+
+/*
+ * The slot's own name, rendered as real text. It is deliberately NOT an
+ * aria-label on the block above: the shipped defect was exactly that — an
+ * aria-label on a role="presentation" div, which Chromium keeps out of the
+ * accessibility tree entirely, so the label reached sighted readers and
+ * assistive technology alike, which is to say nobody. Visible text is its
+ * own accessible name and needs no ARIA at all.
+ */
+.skeleton-label {
+	color: var(--muted);
+	font-size: var(--font-label-size);
 }
 
 /*

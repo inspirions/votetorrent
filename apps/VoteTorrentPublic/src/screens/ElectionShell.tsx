@@ -78,28 +78,19 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 				{election?.title ? (
 					<p className="election-title">{election.title}</p>
 				) : (
-					<div
-						className="skeleton"
-						data-slot="title"
-						role="presentation"
-						aria-label={t('public.election.slot.title')}
-					/>
+					<div className="skeleton" data-slot="title">
+						<span className="skeleton-label">{t('public.election.slot.title')}</span>
+					</div>
 				)}
 				{phase === null ? (
-					<div
-						className="skeleton"
-						data-slot="lifecycle"
-						role="presentation"
-						aria-label={t('public.election.slot.lifecycle')}
-					/>
+					<div className="skeleton" data-slot="lifecycle">
+						<span className="skeleton-label">{t('public.election.slot.lifecycle')}</span>
+					</div>
 				) : null}
 				{election === null ? (
-					<div
-						className="skeleton"
-						data-slot="timeline"
-						role="presentation"
-						aria-label={t('public.election.slot.timeline')}
-					/>
+					<div className="skeleton" data-slot="timeline">
+						<span className="skeleton-label">{t('public.election.slot.timeline')}</span>
+					</div>
 				) : null}
 			</section>
 		);

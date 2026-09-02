@@ -680,6 +680,33 @@ jobs:
           grep -q 'port=5191' ../../ui-gate-public.log
           echo "RECEIPT ui-gate-public" | tee -a ../../ci-receipt.txt
 
+      # G-53-UAT-01. Every other D-18 check in this workflow asserts the
+      # ABSENCE of motion, and the shipped page satisfied all of them while
+      # still reading as "content loading" to a human -- three unlabelled
+      # grey bars are the loading-skeleton idiom whether or not they move.
+      # This leg asserts the PRESENCE of a visible, accessibility-tree-exposed
+      # slot label on a real rendered page, which is the property that makes a
+      # placeholder read as a deliberate gap. It needs the PRODUCTION build
+      # (dist/, port 5193), not the gate build the leg above produces, so it
+      # builds its own; 5193 is used by nothing else in this workflow.
+      - name: Public app placeholder-label rendering gate
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn build
+          yarn assert:placeholders-labelled 2>&1 | tee ../../placeholders-public.log
+          # The script runs three positive controls and one benign control
+          # before it touches the real page. Assert all four were actually
+          # exercised -- a build that skipped them would otherwise pass here
+          # on the strength of the real scan alone.
+          controls=$(grep -c 'ok   control' ../../placeholders-public.log)
+          if [ "$controls" -ne 4 ]; then
+            echo "::error::placeholders-public: $controls/4 controls reported ok -- the predicate was not proven before the real scan"
+            exit 1
+          fi
+          grep -q '\[assert-placeholders-labelled\] PASS' ../../placeholders-public.log
+          echo "RECEIPT placeholders-public" | tee -a ../../ci-receipt.txt
+
       # Four D-20 negative controls, one per control per app. Each rebuilds a
       # genuinely mutated production (dedupe) or gate (token) build at BUILD
       # TIME -- never `dist/` edited after the fact, never anything mutated

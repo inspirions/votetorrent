@@ -19,6 +19,7 @@
 		"assert:no-polyfills": "node scripts/assert-no-node-polyfills.mjs",
 		"assert:engine-reach": "node scripts/assert-engine-reach.mjs",
 		"assert:no-test-harness-in-dist": "node scripts/assert-no-test-harness-in-dist.mjs",
+		"assert:placeholders-labelled": "node scripts/assert-placeholders-labelled.mjs",
 		"clean": "rm -rf dist dist-gate node_modules"
 	},
 	"dependencies": {
