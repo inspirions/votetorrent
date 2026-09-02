@@ -22,7 +22,13 @@
  *                                          .planning/ (nested, gitignored repo), so one test
  *                                          skips there instead of passing -- see ci-baselines
  *                                          .json's voteEngine.note for the full explanation.
- *   tier1 <logfile> <elapsedSeconds>   -- dashboard test:node floor + time budget
+ *   tier1 <logfile> <elapsedSeconds> [--baseline <key>]
+ *                                      -- named tier1 workspace floor + time budget.
+ *                                         <key> defaults to dashboardTier1 (keeps every
+ *                                         pre-existing two-argument caller working
+ *                                         unchanged); each key carries its own
+ *                                         receiptMarker so three tier-1 runs can never
+ *                                         satisfy one receipt requirement between them.
  *   authority-typecheck <logfile>      -- tsc error-count ceiling
  *   receipts <receiptfile> <marker...> -- anti-silent-green marker presence check
  *   selftest                           -- the checker's own inertness control
@@ -50,9 +56,11 @@ const BASELINES_PATH = path.join(__dirname, 'ci-baselines.json');
 // ---------------------------------------------------------------------------
 
 function loadBaselines() {
-  // Resolved relative to this file's own URL, never process.cwd() -- jobs in
-  // dashboard.yml invoke this script from the repo root AND from
-  // apps/VoteTorrentDashboard alike.
+  // Resolved relative to this file's own URL, never the invoking shell's
+  // working directory -- jobs in web-gates.yml invoke this script from the
+  // repo root AND from a workspace directory (e.g. apps/VoteTorrentDashboard,
+  // apps/VoteTorrentPublic) alike, and a cwd-relative resolution would only
+  // work from one of those.
   return JSON.parse(readFileSync(BASELINES_PATH, 'utf8'));
 }
 
@@ -249,8 +257,49 @@ function parseTier1Summary(log) {
   };
 }
 
-function evaluateTier1(log, elapsedSecondsArg, baselines) {
-  const cfg = baselines.dashboardTier1;
+/**
+ * Resolves and validates a NAMED tier1 baseline key. A missing key, a key that
+ * is not an object, a key missing a finite minPassing/maxFailing/maxSeconds, or
+ * a key with no string receiptMarker are ALL loud failures -- never a fall-back
+ * to dashboardTier1. A fall-back would let one workspace's suite pass by
+ * clearing a DIFFERENT workspace's floor, with a green receipt and no
+ * diagnostic; a checker that invents its own receiptMarker could emit a marker
+ * the workflow's `Receipts` step never required, and the run would go green on
+ * a receipt nobody asked for.
+ */
+function resolveTier1Baseline(baselines, baselineKey) {
+  const knownKeys = Object.keys(baselines);
+  const cfg = baselines[baselineKey];
+  if (cfg === undefined || cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    return {
+      ok: false,
+      problems: [
+        `unknown tier1 baseline key ${JSON.stringify(baselineKey)} -- known baseline keys: ${knownKeys.join(', ') || '(none)'}`,
+      ],
+    };
+  }
+  const problems = [];
+  for (const field of ['minPassing', 'maxFailing', 'maxSeconds']) {
+    if (typeof cfg[field] !== 'number' || !Number.isFinite(cfg[field])) {
+      problems.push(
+        `baseline key ${JSON.stringify(baselineKey)} is malformed: ${field} is not a finite number (got ${JSON.stringify(cfg[field])})`,
+      );
+    }
+  }
+  if (typeof cfg.receiptMarker !== 'string' || cfg.receiptMarker.length === 0) {
+    problems.push(
+      `baseline key ${JSON.stringify(baselineKey)} has no string receiptMarker -- a checker that invents one could ` +
+        `emit a marker the receipts step never required, going green on a receipt nobody asked for`,
+    );
+  }
+  if (problems.length > 0) return { ok: false, problems };
+  return { ok: true, cfg };
+}
+
+function evaluateTier1(log, elapsedSecondsArg, baselines, baselineKey) {
+  const resolved = resolveTier1Baseline(baselines, baselineKey);
+  if (!resolved.ok) return { ok: false, problems: resolved.problems };
+  const cfg = resolved.cfg;
   const summary = parseTier1Summary(log);
   if (!summary) {
     return {
@@ -293,14 +342,14 @@ function evaluateTier1(log, elapsedSecondsArg, baselines) {
   if (summary.passing > cfg.minPassing) {
     notices.push(
       `tier1 passing count ${summary.passing} exceeds the committed floor ${cfg.minPassing} -- ` +
-        `raise dashboardTier1.minPassing deliberately in ci-baselines.json`,
+        `raise ${baselineKey}.minPassing deliberately in ci-baselines.json`,
     );
   }
   return {
     ok: problems.length === 0,
     problems,
     notices,
-    receipt: `RECEIPT tier1-logic pass=${summary.passing} fail=${summary.failing} seconds=${elapsed}`,
+    receipt: `RECEIPT ${cfg.receiptMarker} pass=${summary.passing} fail=${summary.failing} seconds=${elapsed}`,
   };
 }
 
@@ -530,47 +579,136 @@ function runSelftest() {
     const t1Floor = baselines.dashboardTier1.minPassing;
     const t1MaxSeconds = baselines.dashboardTier1.maxSeconds;
 
-    // 8. tier1, healthy
+    // 8. tier1, healthy (retargeted at dashboardTier1 explicitly -- the checker
+    //    no longer hard-codes this key, so every case must name it)
     check(
       'tier1 healthy',
       true,
-      evaluateTier1(buildTier1LogHash(t1Floor, 0), Math.max(1, t1MaxSeconds - 1), baselines),
+      evaluateTier1(buildTier1LogHash(t1Floor, 0), Math.max(1, t1MaxSeconds - 1), baselines, 'dashboardTier1'),
     );
 
     // 9. tier1, failing
-    check('tier1 failing', false, evaluateTier1(buildTier1LogHash(t1Floor, 1), 1, baselines));
+    check('tier1 failing', false, evaluateTier1(buildTier1LogHash(t1Floor, 1), 1, baselines, 'dashboardTier1'));
 
     // 10. tier1, below floor
     check(
       'tier1 below floor',
       false,
-      evaluateTier1(buildTier1LogHash(Math.max(0, t1Floor - 50), 0), 1, baselines),
+      evaluateTier1(buildTier1LogHash(Math.max(0, t1Floor - 50), 0), 1, baselines, 'dashboardTier1'),
     );
 
     // 11. tier1, over budget
     check(
       'tier1 over budget',
       false,
-      evaluateTier1(buildTier1LogHash(t1Floor, 0), t1MaxSeconds + 100, baselines),
+      evaluateTier1(buildTier1LogHash(t1Floor, 0), t1MaxSeconds + 100, baselines, 'dashboardTier1'),
     );
 
     // 12. tier1, spec-reporter fallback form (no leading '#')
-    check('tier1 spec-reporter fallback form', true, evaluateTier1(buildTier1LogBare(t1Floor, 0), 1, baselines));
+    check(
+      'tier1 spec-reporter fallback form',
+      true,
+      evaluateTier1(buildTier1LogBare(t1Floor, 0), 1, baselines, 'dashboardTier1'),
+    );
 
     // 13. tier1, vacuous
-    check('tier1 vacuous', false, evaluateTier1('nothing resembling a summary here\n', 1, baselines));
+    check(
+      'tier1 vacuous',
+      false,
+      evaluateTier1('nothing resembling a summary here\n', 1, baselines, 'dashboardTier1'),
+    );
 
     // 13a-13c. tier1, malformed elapsed argument -- an unset shell variable
     //          (empty string), a non-numeric word, and an omitted argument. Each
     //          used to make the time budget silently disappear.
-    check('tier1 elapsed empty string', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), '', baselines));
-    check('tier1 elapsed non-numeric', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), 'not-a-number', baselines));
-    check('tier1 elapsed undefined', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), undefined, baselines));
+    check('tier1 elapsed empty string', false, evaluateTier1(buildTier1LogHash(t1Floor, 0), '', baselines, 'dashboardTier1'));
+    check(
+      'tier1 elapsed non-numeric',
+      false,
+      evaluateTier1(buildTier1LogHash(t1Floor, 0), 'not-a-number', baselines, 'dashboardTier1'),
+    );
+    check(
+      'tier1 elapsed undefined',
+      false,
+      evaluateTier1(buildTier1LogHash(t1Floor, 0), undefined, baselines, 'dashboardTier1'),
+    );
 
     // 13d. positive control for the three above: a well-formed elapsed at the
     //      exact budget still passes, so the new guard is not just rejecting
     //      everything.
-    check('tier1 elapsed exactly at the budget', true, evaluateTier1(buildTier1LogHash(t1Floor, 0), String(t1MaxSeconds), baselines));
+    check(
+      'tier1 elapsed exactly at the budget',
+      true,
+      evaluateTier1(buildTier1LogHash(t1Floor, 0), String(t1MaxSeconds), baselines, 'dashboardTier1'),
+    );
+
+    // 13e. tier1, keyed evaluator: one healthy + one below-floor case PER
+    //      tier-1 baseline key present in the file, each built from that key's
+    //      OWN floor -- so a key whose floor is nonsense is caught by the
+    //      checker's own control, not just dashboardTier1's.
+    const tier1Keys = Object.keys(baselines).filter((k) => /Tier1$/.test(k));
+    for (const key of tier1Keys) {
+      const floor = baselines[key].minPassing;
+      const maxSeconds = baselines[key].maxSeconds;
+      check(
+        `tier1 (${key}) healthy [keyed]`,
+        true,
+        evaluateTier1(buildTier1LogHash(floor, 0), Math.max(1, maxSeconds - 1), baselines, key),
+      );
+      check(
+        `tier1 (${key}) below floor [keyed]`,
+        false,
+        evaluateTier1(buildTier1LogHash(Math.max(0, floor - 50), 0), 1, baselines, key),
+      );
+    }
+
+    // 13f. tier1, unknown baseline key -- must be REJECTED, never silently
+    //      fall back to dashboardTier1.
+    check(
+      'tier1 unknown baseline key is rejected',
+      false,
+      evaluateTier1(buildTier1LogHash(t1Floor, 0), 1, baselines, 'noSuchTier'),
+    );
+
+    // 13g. tier1, malformed entry (missing minPassing) -- must be REJECTED.
+    {
+      const malformedBaselines = {
+        ...baselines,
+        malformedTier1ForSelftest: { maxFailing: 0, maxSeconds: 10, receiptMarker: 'tier1-malformed' },
+      };
+      check(
+        'tier1 malformed entry (missing minPassing) is rejected',
+        false,
+        evaluateTier1(buildTier1LogHash(10, 0), 1, malformedBaselines, 'malformedTier1ForSelftest'),
+      );
+    }
+
+    // 13h. tier1, missing receiptMarker -- must be REJECTED even though every
+    //      numeric field is well-formed. A checker that invented a marker here
+    //      could satisfy a receipt nobody required.
+    {
+      const noMarkerBaselines = {
+        ...baselines,
+        noMarkerTier1ForSelftest: { minPassing: 5, maxFailing: 0, maxSeconds: 10 },
+      };
+      check(
+        'tier1 missing receiptMarker is rejected',
+        false,
+        evaluateTier1(buildTier1LogHash(5, 0), 1, noMarkerBaselines, 'noMarkerTier1ForSelftest'),
+      );
+    }
+
+    // 13i. tier1, receiptMarker distinctness across the REAL committed file --
+    //      two keys sharing a marker would let one suite's receipt satisfy
+    //      another's requirement, the receipts mechanism's one failure mode.
+    {
+      const markers = tier1Keys.map((k) => baselines[k].receiptMarker);
+      const distinct = new Set(markers).size === markers.length;
+      check('tier1 receiptMarker values are pairwise distinct', true, {
+        ok: distinct,
+        problems: distinct ? [] : [`receiptMarker collision across ${tier1Keys.join(', ')}: ${markers.join(', ')}`],
+      });
+    }
 
     const tcCeiling = baselines.authorityTypecheck.maxErrors;
 
@@ -678,11 +816,26 @@ function main() {
       break;
     }
     case 'tier1': {
-      const [logfile, elapsed] = args;
+      const [logfile, elapsed, ...rest] = args;
       if (!logfile || elapsed === undefined) {
-        fail('usage: assert-ci-baselines.mjs tier1 <logfile> <elapsedSeconds>');
+        fail('usage: assert-ci-baselines.mjs tier1 <logfile> <elapsedSeconds> [--baseline <key>]');
       }
-      const result = evaluateTier1(readLogSafe(logfile), elapsed, loadBaselines());
+      // Default preserves every pre-existing two-argument invocation
+      // (53-02/53-03/53-12) unchanged.
+      let baselineKey = 'dashboardTier1';
+      if (rest.length > 0) {
+        if (rest[0] === '--baseline' && rest.length >= 2) {
+          baselineKey = rest[1];
+          if (rest.length > 2) {
+            fail(`unrecognised argument: ${JSON.stringify(rest[2])} -- an unknown trailing flag silently ` +
+              `ignored into a green run is the same defect the shared runner's argument parser exists to avoid`);
+          }
+        } else {
+          fail(`unrecognised argument: ${JSON.stringify(rest[0])} -- ` +
+            'usage: assert-ci-baselines.mjs tier1 <logfile> <elapsedSeconds> [--baseline <key>]');
+        }
+      }
+      const result = evaluateTier1(readLogSafe(logfile), elapsed, loadBaselines(), baselineKey);
       if (!result.ok) fail(`tier1 baseline check FAILED:\n  - ${result.problems.join('\n  - ')}`);
       printNotices(result.notices);
       emitReceipt(result.receipt);
