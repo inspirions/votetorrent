@@ -1,6 +1,7 @@
 /**
  * tokens.test.mjs — tier-1 proof that `packages/ui-web/src/tokens.css` (D-15) is both
- * correct (the 31 declarations moved verbatim, in order, with their exact values) and
+ * correct (32 declarations: the 31 moved verbatim, in order, with their exact
+ * values, plus the done tone's colour token added by 54-09) and
  * machine-enumerable (D-23's probe reads names AND values straight out of this one
  * file, so there must be no second list anywhere to drift against it).
  *
@@ -66,6 +67,7 @@ const EXPECTED_NAMES = [
 	'--ok',
 	'--warn',
 	'--fail',
+	'--done',
 	'--radius',
 	'--space-xs',
 	'--space-sm',
@@ -101,6 +103,7 @@ const EXPECTED_VALUES = {
 	'--ok': '#22c55e',
 	'--warn': '#f59e0b',
 	'--fail': '#ef4444',
+	'--done': '#64748b',
 	'--radius': '10px',
 	'--space-xs': '4px',
 	'--space-sm': '8px',
@@ -147,16 +150,16 @@ test('benign control: the declaration matcher does not fire on a rule with no cu
 
 // --- Case 2: total enumeration (order AND totality) --------------------------------
 
-test('tokens.css declares exactly the 31 expected names, in the expected order', () => {
+test('tokens.css declares exactly the 32 expected names, in the expected order', () => {
 	const names = extractDeclarations(RAW).map((d) => d.name);
 	assert.deepEqual(names, EXPECTED_NAMES);
 });
 
 // --- Case 3: verbatim values --------------------------------------------------------
 
-test('every one of the 31 name/value pairs matches the literal expected map exactly', () => {
+test('every one of the 32 name/value pairs matches the literal expected map exactly', () => {
 	const declarations = extractDeclarations(RAW);
-	assert.equal(declarations.length, 31);
+	assert.equal(declarations.length, 32);
 	for (const { name, value } of declarations) {
 		assert.equal(value, EXPECTED_VALUES[name], `unexpected value for ${name}`);
 	}
@@ -170,11 +173,11 @@ test('every one of the 31 name/value pairs matches the literal expected map exac
 
 // --- Case 4: no second list to drift -------------------------------------------------
 
-test('the declaration matcher hit count on the raw file equals the count on the block-comment-stripped file, both 31', () => {
+test('the declaration matcher hit count on the raw file equals the count on the block-comment-stripped file, both 32', () => {
 	const rawCount = [...RAW.matchAll(DECLARATION_RE)].length;
 	const strippedCount = [...stripBlockComments(RAW).matchAll(DECLARATION_RE)].length;
-	assert.equal(rawCount, 31);
-	assert.equal(strippedCount, 31);
+	assert.equal(rawCount, 32);
+	assert.equal(strippedCount, 32);
 	assert.equal(rawCount, strippedCount);
 });
 

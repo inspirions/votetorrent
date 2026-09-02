@@ -20,7 +20,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { publicSrc, uiWebRoot, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
-import { checkClassNameCoverage } from '../../../../scripts/lib/css-class-coverage.mjs';
+import {
+	checkClassNameCoverage,
+	collectReachableCssFiles,
+	stripCssComments,
+	extractDeclaredSelectorTokens,
+} from '../../../../scripts/lib/css-class-coverage.mjs';
 
 const UI_WEB_ROOT_DIR = uiWebRoot();
 
@@ -175,4 +180,135 @@ test('a fixture app.css @importing @votetorrent/ui-web/components.css resolves t
 	} finally {
 		rmSync(appSrcDir, { recursive: true, force: true });
 	}
+});
+
+// ===========================================================================
+// The DECLARED-SIDE assertion (54-09).
+//
+// `checkClassNameCoverage` above runs rendered -> declared, which makes it
+// structurally blind to CSS that lands BEFORE its markup -- and that is
+// exactly this phase's situation: the public election view's rules land in
+// wave 3 and the components that mount them land in waves 5 through 8. So
+// this adds the reverse direction, scoped to this phase's own inventory:
+// every class a later render plan will mount must already resolve to a real
+// selector in this app's comment-stripped reachable CSS.
+//
+// What this deliberately does NOT assert: the reverse-reverse direction,
+// declared-but-never-rendered. These rules are three to five waves ahead of
+// their markup, so a declared-but-unrendered class is the EXPECTED state
+// right now, not a defect. The existing rendered -> declared check above
+// brings that direction to bear on each of them automatically as the render
+// plans land -- nothing extra is needed here, and asserting it now would
+// simply be red for a correct reason at the wrong time.
+//
+// Comment stripping is load-bearing rather than incidental. `app.css` is a
+// heavily commented file and this phase's own comment blocks name these
+// classes in prose; without the strip, a class that existed ONLY in a
+// comment would satisfy the assertion. The fixture control below is what
+// proves the strip is really happening.
+// ===========================================================================
+
+/**
+ * Every class name this phase's render plans will mount. Frozen and
+ * hand-listed because it IS the inventory -- there is nothing to derive it
+ * from until the markup exists, which is the whole reason this direction
+ * needs its own check.
+ *
+ * Nineteen, not the twenty the plan's prose says: the plan's own enumeration
+ * lists nineteen names and its verification one-liner checks nineteen. The
+ * count is measured here rather than adopted.
+ * @type {ReadonlyArray<string>}
+ */
+const PHASE_54_PUBLIC_CLASSES = Object.freeze([
+	'status-banner',
+	'status-banner__tone',
+	'status-banner__headline',
+	'status-banner--go',
+	'status-banner--wait',
+	'status-banner--done',
+	'status-banner--bad',
+	'fact-section',
+	'fact-section__heading',
+	'fact-card',
+	'fact-card--gap',
+	'fact-card__label',
+	'fact-card__body',
+	'registrant-roll',
+	'registrant-roll__note',
+	'election-index',
+	'election-index__item',
+	'public-caveats',
+	'public-caveat',
+]);
+
+/**
+ * The one predicate every assertion below shares -- the real check, the
+ * comment-strip control and the inertness control all go through it, so a
+ * control that passes really is exercising the same pipeline the real check
+ * uses rather than a look-alike written beside it.
+ * @param {ReadonlyArray<string>} cssSources
+ * @returns {Set<string>}
+ */
+function declaredTokensFrom(cssSources) {
+	/** @type {Set<string>} */
+	const tokens = new Set();
+	for (const source of cssSources) {
+		for (const token of extractDeclaredSelectorTokens(stripCssComments(source))) tokens.add(token);
+	}
+	return tokens;
+}
+
+const REACHABLE_CSS_FILES = collectReachableCssFiles(publicSrc(), UI_WEB_ROOT_DIR);
+const REACHABLE_CSS_SOURCES = REACHABLE_CSS_FILES.map((file) => readFileSync(file, 'utf8'));
+
+test('sanity: the reachable CSS set is non-empty and includes this app own app.css (an empty set would make every declared-side assertion below vacuously pass)', () => {
+	assert.ok(REACHABLE_CSS_FILES.length > 0, 'expected at least one reachable CSS file');
+	assert.ok(
+		REACHABLE_CSS_FILES.some((f) => f.endsWith('app.css')),
+		`expected app.css among the reachable files, got: ${REACHABLE_CSS_FILES.join(', ')}`,
+	);
+});
+
+test('the phase-54 public class inventory is 19 names with no duplicates -- asserted on itself so a silent deletion from the list is visible rather than shrinking the check', () => {
+	assert.equal(PHASE_54_PUBLIC_CLASSES.length, 19);
+	assert.equal(new Set(PHASE_54_PUBLIC_CLASSES).size, 19, 'the inventory contains a duplicate');
+});
+
+test('declared-side check: every phase-54 public class resolves to a real selector in the comment-stripped reachable CSS', () => {
+	const declared = declaredTokensFrom(REACHABLE_CSS_SOURCES);
+	const missing = PHASE_54_PUBLIC_CLASSES.filter((cls) => !declared.has(cls));
+	assert.deepEqual(
+		missing,
+		[],
+		`these phase-54 classes have no CSS rule, so the render plan that mounts them would render unstyled markup: ${missing.join(', ')}`,
+	);
+});
+
+test('comment-strip control: a class token whose ONLY occurrence is inside a CSS comment is NOT reported as declared -- without this, a rule that exists only in prose would satisfy the check above', () => {
+	const fixture = '/* .only-in-a-comment-fixture is discussed here and nowhere else */\n.a-real-fixture-rule { color: var(--text); }\n';
+	const declared = declaredTokensFrom([fixture]);
+	assert.ok(declared.has('a-real-fixture-rule'), 'sanity: the real rule in the fixture must be found');
+	assert.ok(
+		!declared.has('only-in-a-comment-fixture'),
+		'comment stripping is not happening -- a class named only in a comment was reported as declared',
+	);
+});
+
+test('inertness control: a fabricated class name that is declared nowhere is reported absent by the same predicate the real check uses', () => {
+	const declared = declaredTokensFrom(REACHABLE_CSS_SOURCES);
+	assert.ok(
+		!declared.has('phantom-phase-54-class-that-is-declared-nowhere'),
+		'the declared-side predicate reports an undeclared name as present -- it cannot fail, so it proves nothing above',
+	);
+});
+
+test('the comment strip is load-bearing on the REAL file too: at least one phase-54 class is named in an app.css comment, so a stripless check would have a prose-only path to passing', () => {
+	const appCss = REACHABLE_CSS_SOURCES[REACHABLE_CSS_FILES.findIndex((f) => f.endsWith('app.css'))];
+	const commentText = (appCss.match(/\/\*[\s\S]*?\*\//g) ?? []).join('\n');
+	const namedInProse = PHASE_54_PUBLIC_CLASSES.filter((cls) => commentText.includes(cls));
+	assert.ok(
+		namedInProse.length > 0,
+		'no phase-54 class is mentioned in an app.css comment -- if that is genuinely true the strip is merely defensive here, ' +
+			'but this repo has shipped a self-tripping checker several times and the assumption is worth an assertion',
+	);
 });

@@ -28,6 +28,19 @@
  * four), then the typography roles — size, weight and line height, one
  * triple per role.
  *
+ * The done tone's colour token, added by 54-09 for the public election
+ * view's status banner, sits with the other colours (after the failure tone
+ * and before the corner radius, which is not a colour). Its value is a
+ * slate, and the reason it is its OWN token rather than a reuse of the
+ * muted one is the whole point of adding it: the muted token is already
+ * load-bearing for the de-emphasised treatment that marks a fact with no
+ * source, so reusing it for the terminal status tone would render "this
+ * election is closed" in exactly the same colour as "this fact has no
+ * source" — the one confusion that page's entire gap treatment exists to
+ * prevent. Its name and value are written ONLY as a declaration inside the
+ * :root block below and never restated here in declaration form, per the
+ * third shape rule above.
+ *
  * getComputedStyle semantics (flagged here for 53-08's D-23 probe, not
  * measured by this plan): a custom property's computed value is its
  * specified token sequence, so reading a custom property directly is
@@ -54,6 +67,7 @@
 	--ok: #22c55e;
 	--warn: #f59e0b;
 	--fail: #ef4444;
+	--done: #64748b;
 	--radius: 10px;
 
 	--space-xs: 4px;
