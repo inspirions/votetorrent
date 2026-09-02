@@ -107,3 +107,14 @@ test('(7) every named export of packages/ui-web/src/components.js appears in ui-
 		);
 	}
 });
+
+// --- (8) the harness's stylesheet graph is representative of the shipped page (CR-01) --
+
+test('(8) app.css also contains the @votetorrent/ui-web/components.css @import — CR-01\'s harness-representativeness fix: without it, the runner\'s resolved-component-styles rung would pass on a page where the shared components have no CSS rule at all', () => {
+	assert.match(stripComments(APP_CSS), /@import\s+['"]@votetorrent\/ui-web\/components\.css['"];/);
+});
+
+test('(8 control) the components.css-absence matcher would fire on a fixture app.css missing that import', () => {
+	const fixture = "@import '@votetorrent/ui-web/tokens.css';\n.layout { display: grid; }\n";
+	assert.doesNotMatch(fixture, /@import\s+['"]@votetorrent\/ui-web\/components\.css['"];/, 'sanity: this fixture must not contain the import, or the control proves nothing');
+});
