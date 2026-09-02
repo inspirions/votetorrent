@@ -11,6 +11,7 @@
 		"test": "yarn test:node",
 		"test:node": "node --test --test-concurrency=1 test/node/*.test.mjs",
 		"test:browser": "node test/browser/run-headless.mjs",
+		"gate:ui": "node ../../packages/ui-web/scripts/run-ui-gates.mjs --app .",
 		"typecheck": "tsc --noEmit",
 		"lint": "node scripts/lint-copy.mjs",
 		"assert:no-polyfills": "node scripts/assert-no-node-polyfills.mjs",
