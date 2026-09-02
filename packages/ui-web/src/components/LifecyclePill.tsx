@@ -12,11 +12,18 @@
  * by `ElectionsPanel`, not by the registry.
  *
  * Moved from apps/VoteTorrentDashboard/src/screens/panels/LifecyclePill.tsx
- * into this shared package under D-01/D-02 (53-05). The only change is the
- * two import specifiers below, now direct package-relative siblings rather
- * than a dashboard-relative path -- `.lifecycle-pill` itself stays defined
- * in the dashboard's own `src/screens/panels/election-ops.css` (D-15: each
- * app owns its own component styles).
+ * into this shared package under D-01/D-02 (53-05). The only change at that
+ * time was the two import specifiers below, now direct package-relative
+ * siblings rather than a dashboard-relative path.
+ *
+ * `.lifecycle-pill` and its three modifiers moved again at 53-CR01, into this
+ * package's own `../components.css` (exported as `./components.css`) -- the
+ * D-15 revision: the package that owns a shared component's markup now also
+ * owns that component's default CSS, for exactly the class names it renders.
+ * CR-01 measured the prior rule ("each app owns its own component styles")
+ * leaving `.lifecycle-pill` with zero rules in `apps/VoteTorrentPublic`,
+ * invisible to every gate this phase had built. See
+ * `packages/ui-web/README.md`'s "Shared component default styles" section.
  */
 import { phaseCopyKey } from '../lifecycle/election-phase.js';
 import { t } from '../copy.js';

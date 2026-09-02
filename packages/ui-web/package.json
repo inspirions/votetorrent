@@ -9,6 +9,7 @@
 		"./components": "./src/components.js",
 		"./lifecycle": "./src/lifecycle/election-phase.js",
 		"./tokens.css": "./src/tokens.css",
+		"./components.css": "./src/components.css",
 		"./mutations": "./scripts/mutations.mjs"
 	},
 	"sideEffects": [

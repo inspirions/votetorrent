@@ -43,20 +43,40 @@ the app's first commit, not after the first hook lands.
 package; a comment merely discussing `dedupe` will not satisfy it, because that assertion strips
 comment lines before scanning.
 
-### 3. Import the stylesheet
+### 3. Import the stylesheet(s)
 
 ```
 @votetorrent/ui-web/tokens.css
 ```
 
-One import per app. The canonical import form (an `index.html` `<link>` versus an import inside
-`app.css`/`main.tsx`) is fixed by 53-03 (D-15) — this section is updated there. Do not guess a form
-now.
+One import per app — see "Consuming the design tokens" below for the canonical form and position
+(fixed by 53-03, D-15).
+
+```
+@votetorrent/ui-web/components.css
+```
+
+Added at 53-CR01 (the D-15 revision — see "Shared component default styles" below). Any consumer
+that mounts `@votetorrent/ui-web/components` must ALSO `@import` this stylesheet, immediately after
+`tokens.css`, in that consumer's own `app.css`: it carries the default rules for the class names
+`AdvisoryDisclosure`, `LifecyclePill` and `DetailsToggle` themselves render
+(`.pv-disclosure`, `.lifecycle-pill` + 3 modifiers, `.dt-toggle-group`). A consumer that mounts none
+of those components does not need this import.
 
 ### 4. Import the right subpath
 
 - `@votetorrent/ui-web` — plain-JS values, importable from `node --test` with no bundler.
 - `@votetorrent/ui-web/components` — React components, bundler-only.
+- `@votetorrent/ui-web/lifecycle` — `computeElectionPhase`/`resolveComparisonInstant`, plain-JS,
+  importable from `node --test` with no bundler. Kept out of the `.` barrel because its only
+  external dependency is `@votetorrent/vote-engine/browser`, a database engine — re-exporting it
+  through `.` would load that engine for every consumer of any plain-JS value (measured
+  0.30-0.44s vs 0.02s bare).
+- `@votetorrent/ui-web/tokens.css` / `@votetorrent/ui-web/components.css` — see step 3 above.
+- `@votetorrent/ui-web/mutations` — the shared build-time mutation machinery (`MUTATIONS`,
+  `resolveMutation`, `applyNoDedupe`, `stripTokensPlugin`, `readMutationReport`) the D-20 negative
+  controls need. Plain-JS, loaded by a Vite config in a Node process, never by a bundler — every
+  consumer's `vite.mutant.config.ts` imports it.
 
 Importing `@votetorrent/ui-web/components` under plain Node throws `ERR_MODULE_NOT_FOUND` — Vite
 resolves a `./Name.js` specifier to a same-named `.tsx` file via its extension probing; plain Node
@@ -69,9 +89,11 @@ bundler-less `node --test` tier.
 "extends": "../../packages/ui-web/tsconfig.base.json"
 ```
 
-By **relative path**, not by package specifier — a package-specifier `extends` would require a
-fourth key in this package's `exports` map, and this package's own gate proves that map stays at
-exactly three keys. `tsconfig.base.json` carries the full `compilerOptions` block (14 options); no
+By **relative path**, not by package specifier — a package-specifier `extends` would require a new
+key in this package's `exports` map, and this package's own gate (`test/package-shape.test.mjs`
+rung 5) proves that map's exact key count and order — six as of 53-CR01 (`.`, `./components`,
+`./lifecycle`, `./tokens.css`, `./components.css`, `./mutations`). `tsconfig.base.json` carries the
+full `compilerOptions` block (14 options); no
 consumer redeclares any of them.
 
 ### 6. Binding rule: never hoist React
@@ -109,9 +131,11 @@ ordering across two entry paths cannot guarantee. Vite resolves the bare package
 its own resolver, honouring the `exports` map from step 3. A CSS `@import` is only valid before any
 other rule in the file, so it must never drift below the consumer's own layout rules.
 
-The consumer's own `app.css` then holds only that app's own layout and component styles — see
-`apps/VoteTorrentDashboard/src/app.css` for the reference shape (`.layout`, its `900px` collapse,
-`.panel-grid`, and nothing else).
+The consumer's own `app.css` then holds only that app's own layout and its own classes (classes it
+renders directly, not through a shared component — e.g. `apps/VoteTorrentPublic/src/app.css`'s own
+`.election-title` rule) — see `apps/VoteTorrentDashboard/src/app.css` for the reference layout shape
+(`.layout`, its `900px` collapse, `.panel-grid`, and nothing else). A shared component's OWN default
+styles do not belong here — see "Shared component default styles" below.
 
 For the D-23 token probe's enumeration contract (one declaration per line, no comment inside
 `:root`, no declaration-shaped text in any comment) and the `getComputedStyle` normalisation
@@ -119,11 +143,53 @@ semantics a consumer or a probe needs to know about, see the header of
 `packages/ui-web/src/tokens.css` itself — that file is the single place to correct either if a real
 browser run ever disagrees, so neither is restated here.
 
+## Shared component default styles (D-15 revision, 53-CR01)
+
+D-15 originally read "each app owns its own component styles" (53-03). Code review CR-01 (Phase 53)
+measured the consequence: `apps/VoteTorrentPublic/src/app.css` never authored rules for
+`.pv-disclosure`, `.lifecycle-pill` (+ 3 modifiers) or `.dt-toggle-group` — the class names
+`AdvisoryDisclosure`, `LifecyclePill` and `DetailsToggle` themselves render — so on the shipped
+public page the D-16 binding advisory disclosure and the lifecycle indicator rendered as unstyled
+text, on a page whose entire stated purpose is that its claims can be checked. No gate this phase
+built could see it: the D-19 `shared-components-mounted` rung only asserted
+`childElementCount > 0` on a harness-created wrapper, true regardless of styling.
+
+D-15 is REVISED: **the package that owns a shared component's markup also owns that component's
+default CSS rules, for exactly the class names that component renders — no more, no less.**
+`packages/ui-web/src/components.css` (exported as `./components.css`) carries
+`.pv-disclosure`, `.lifecycle-pill` + its 3 modifiers, and `.dt-toggle-group`. A consumer may still
+override anything in it through the normal CSS cascade (it declares no `!important` anywhere); what
+a consumer may no longer do is forget to author the rule at all. This does NOT reclaim
+`.election-title` (rendered directly by `ElectionShell.tsx`, not by a shared component) or
+`.dt-toggle`/`.dt-body` (already correctly authored, independently, in every current consumer's own
+`app.css` — CR-01 found no gap there, so nothing moves them).
+
+Every consumer that imports `@votetorrent/ui-web/components` must ALSO `@import
+'@votetorrent/ui-web/components.css';` in its own `app.css`, immediately after the `tokens.css`
+import (both are `@import` statements and must stay together at the top of the file, before any
+other rule — see step 3 above). This gate is not yet mechanically enforced the way `resolve.dedupe`
+is (D-21, 53-12) — a future consumer that forgets the import gets unstyled shared components again,
+caught (if at all) by the D-19 resolved-style rung below or the tier-1 class-name coverage check,
+never silently.
+
+Two new checks close the gap CR-01 measured:
+
+- **`resolved-component-styles`** (D-19 browser rung, `packages/ui-web/scripts/run-ui-gates.mjs`):
+  for each shared component with a default rule in `components.css`, reads a declared CSS property
+  off the component's OWN rendered element (never the harness's `[data-ui-gate]` wrapper, which
+  carries no rule of its own) and requires it to match the value `components.css` declares.
+- **CSS class-name coverage** (tier-1, dependency-free, `scripts/lib/css-class-coverage.mjs`): every
+  class name a consumer's own `src/` renders, plus every class name rendered by any
+  `@votetorrent/ui-web/components` export that consumer mounts, must resolve to a real selector
+  somewhere in that consumer's own reachable CSS (every `.css` file under its `src/`, plus any
+  package stylesheet reachable from those files' `@import`s). This is the cheaper, no-browser-needed
+  half — it would have caught all five of CR-01's missing selectors before any browser ever ran.
+
 ## Browser gates (D-19)
 
 The shared browser-gate runner lives at `packages/ui-web/scripts/run-ui-gates.mjs`, with
 `playwright: ^1.62.1` declared as a `packages/ui-web` **devDependency** — not at the repo root, and
-not as a fourth `exports` entry.
+not as an additional `exports` entry.
 
 **Why it lives here, not at the repo root (measured, not assumed).** `.yarnrc.yml` sets
 `nmHoistingLimits: workspaces`, so nothing hoists to the repo root — root `node_modules` carries

@@ -4,8 +4,10 @@
 //
 // Referenced by RELATIVE PATH (e.g. ../../packages/ui-web/tsconfig.base.json),
 // never by package specifier — a package-specifier `extends` would require a
-// fourth key in this package's `exports` map, which Task 2's shape test rung 5
-// forbids (exactly three keys: `.`, `./components`, `./tokens.css`).
+// new key in this package's `exports` map, which `test/package-shape.test.mjs`
+// rung 5 forbids widening without an accompanying test/README update in
+// lockstep. Six keys as of 53-CR01: `.`, `./components`, `./lifecycle`,
+// `./tokens.css`, `./components.css`, `./mutations`.
 //
 // Changing an option here changes it for every web workspace at once.
 //
