@@ -79,9 +79,20 @@ export const SEED_ELECTION = Object.freeze({
 
 /**
  * The election timeline, canonical string form (inherited-spec item 3's
- * "spike 078 shape"). Drives `computeElectionPhase`'s three phases:
- * organizing before `votingStarts`, running from `votingStarts` up to
- * (not including) `tallyingStarts`, released from `tallyingStarts` on.
+ * "spike 078 shape"). `derivePhase` reads these seven cut-offs NEWEST-FIRST
+ * and the boundaries are half-open: `pre` before `votingStarts`, `voting`
+ * from `votingStarts` up to (not including) `tallyingStarts`, `settling`
+ * from `tallyingStarts` up to (not including) `closed`, and `closed` from
+ * `closed` onward. All four phases are already reachable from the seven
+ * events below -- the four-phase model needs NO new timeline event.
+ *
+ * The `ElectionRevision.Timeline` COLUMN stores the JSON **string** form of
+ * this object (`JSON.stringify(SEED_TIMELINE)` at the insert below), and
+ * `readElectionOverview` returns it raw and unparsed. Every consumer --
+ * `ElectionsPanel.tsx`, the tier-3 browser harness and
+ * `test/node/four-phase-alignment.test.mjs` -- therefore exercises
+ * `parseTimeline`'s JSON-string path deliberately, because that is the
+ * shape production carries.
  * @type {Record<string, string>}
  */
 export const SEED_TIMELINE = Object.freeze({
@@ -92,6 +103,36 @@ export const SEED_TIMELINE = Object.freeze({
 	validation: '2026-11-05T00:00:00',
 	certificationStarts: '2026-11-10T00:00:00',
 	closed: '2026-11-20T00:00:00',
+});
+
+/**
+ * One canonical instant per `PHASE_IDS` member, in `PHASE_IDS` order --
+ * chosen so `derivePhase(SEED_ELECTION, SEED_TIMELINE, instant)` returns
+ * that member and nothing else.
+ *
+ * This list exists so the tier-3 browser harness
+ * (`apps/VoteTorrentDashboard/test/browser/gate-matrix.tsx`) and the tier-1
+ * suite read ONE list instead of two: the harness previously carried its own
+ * three-entry `INSTANTS` map, which could drift from both the vocabulary and
+ * this timeline with nothing to notice.
+ * `apps/VoteTorrentDashboard/test/node/four-phase-alignment.test.mjs` binds
+ * the key set to `PHASE_IDS` and each value to `derivePhase`'s real output,
+ * so a renamed or added phase id fails there first.
+ *
+ * The first three values are moved verbatim from that harness map (where
+ * they carried the retired `organizing`/`running`/`released` ids and were
+ * already proven against this very timeline by the `mode=seed` rung); only
+ * `closed` is new, and it must stay after `SEED_TIMELINE.closed`.
+ *
+ * Canonical 19 characters, NO trailing `Z` -- see this file's header for why
+ * a `Z` here would be silently stripped and so would test nothing.
+ * @type {Readonly<Record<string, string>>}
+ */
+export const SEED_PHASE_INSTANTS = Object.freeze({
+	pre: '2026-06-01T00:00:00',
+	voting: '2026-11-03T12:00:00',
+	settling: '2026-11-12T00:00:00',
+	closed: '2026-11-25T00:00:00',
 });
 
 /** Row counts a freshly-run `seedElectionSurface` must leave behind. @type {Record<string, number>} */
