@@ -31,7 +31,7 @@ import {
 	removeNetwork,
 	listNetworks,
 } from '@votetorrent/web-data/officer';
-import { seedFoundingAuthority, SEED_TABLES } from '../fixtures/seed-founding-authority.js';
+import { seedFoundingAuthority, SEED_TABLES } from '../../../../packages/web-data/test/fixtures/seed-founding-authority.js';
 import { nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
 import {
 	STALE_THRESHOLD_HOURS,

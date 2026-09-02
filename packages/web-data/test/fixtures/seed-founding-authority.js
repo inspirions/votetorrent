@@ -1,8 +1,15 @@
 /**
- * The ONE seed both gates use — the tier-1 node suite (`test/node/db.test.mjs`)
- * and the tier-2 browser gate (`test/browser/db-gate.js`) import this SAME
- * module by relative path, so the two tiers can never drift apart (the skill
- * doc's "the SAME module the browser uses" discipline).
+ * The ONE seed every gate uses — this package's own tier-1
+ * `test/reattach.test.mjs`, the dashboard's tier-2 browser gate
+ * (`apps/VoteTorrentDashboard/test/browser/db-gate.js`, `gate-matrix.tsx`)
+ * and its `freshness-forget.test.mjs`/`authority-admin-queries.test.mjs` all
+ * import this SAME module by relative path, so no tier or app can drift
+ * apart from another (the skill doc's "the SAME module the browser uses"
+ * discipline). This fixture moved here, alongside `test/reattach.test.mjs`,
+ * by 54-03b -- before that it lived in the dashboard's own `test/fixtures/`;
+ * the four dashboard consumers now reach it by a longer relative path
+ * instead of the reverse (a package importing an app's test fixture would be
+ * a layering inversion).
  *
  * TEST SCAFFOLDING, NOT A PRODUCTION WRITE PATH. Phase 50's dashboard makes NO
  * writes (D-01); these four rows exist only so the gates have something real
@@ -24,7 +31,7 @@
  * 19-character, no-`Z` canonical form applies only to values THIS DASHBOARD
  * PRODUCES (contract C5's `capturedAt`, which must come from
  * `nowCanonicalDatetime()` — see `@votetorrent/web-data`'s `reattach.js`,
- * moved out of this workspace's own `src/db/` by 54-03a).
+ * moved out of the dashboard's own `src/db/` by 54-03a).
  */
 
 /** The fixed network hash both gates seed and verify against. @type {string} */

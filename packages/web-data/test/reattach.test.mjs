@@ -1,25 +1,30 @@
 /**
- * Tier-1 cold -> seed -> read -> re-attach suite for `@votetorrent/web-data`'s
- * `reattach.js` (moved out of this workspace's own `src/db/` by 54-03a).
+ * reattach.test.mjs -- tier-1 cold -> seed -> read -> re-attach suite for
+ * `@votetorrent/web-data`'s `reattach.js` (moved out of the dashboard's own
+ * `src/db/` by 54-03a; this test file itself moved out of the dashboard's
+ * `test/node/db.test.mjs` by 54-03b, alongside the module it tests -- its
+ * subject was always this package's `reattach.js`, never a dashboard file).
  *
  * Honesty note (50-VALIDATION.md, spike 076's node-suite idiom): this proves
  * the ENGINE's use of the IndexedDB API round-trips within one process via
  * `fake-indexeddb`. It says NOTHING about quota, eviction, cross-tab locking
- * or structured-clone edges — `test/browser/run-headless.mjs`'s two-page
- * headless-Chrome run is the authority for those, and no assertion or test
- * name in this file may suggest otherwise. The object-store-name probe below
- * is an early-warning for mis-routing WITHIN one process, not proof of
- * persistence, and does not discharge the tier-2 obligation.
+ * or structured-clone edges — `apps/VoteTorrentDashboard/test/browser/run-headless.mjs`'s
+ * two-page headless-Chrome run is the authority for those, and no assertion
+ * or test name in this file may suggest otherwise. The object-store-name
+ * probe below is an early-warning for mis-routing WITHIN one process, not
+ * proof of persistence, and does not discharge the tier-2 obligation.
  *
  * Deliberately sequential and stateful against one shared fake IDB in one
  * process (spike 076's node-suite idiom) — do not reorder or parallelise it.
  * `import 'fake-indexeddb/auto'` first, then `node:test` + `node:assert/strict`.
+ * `package.json`'s `test` script runs with `--test-concurrency=1` for
+ * exactly this reason.
  */
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { webDataSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { webDataSrc } from '../../../scripts/lib/source-paths.mjs';
 import {
 	createNetworkDb,
 	closeNetworkDb,
@@ -37,7 +42,7 @@ import {
 	RowCountMismatchError,
 	InvalidRowCountRecordError,
 } from '@votetorrent/web-data/officer';
-import { GATE_NETWORK_HASH, SEED_TABLES, EXPECTED_COUNTS, seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
+import { GATE_NETWORK_HASH, SEED_TABLES, EXPECTED_COUNTS, seedFoundingAuthority } from './fixtures/seed-founding-authority.js';
 
 const REATTACH_SOURCE = webDataSrc('reattach.js');
 

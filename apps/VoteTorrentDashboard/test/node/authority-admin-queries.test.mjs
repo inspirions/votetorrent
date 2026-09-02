@@ -16,7 +16,7 @@ import { prepareDb } from '@votetorrent/vote-engine/browser';
 
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
-import { seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
+import { seedFoundingAuthority } from '../../../../packages/web-data/test/fixtures/seed-founding-authority.js';
 import {
 	seedNetwork,
 	seedAuthorityPeers,

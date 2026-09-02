@@ -31,7 +31,7 @@
  * `SignatureValid(Digest(...), Signature, Key)` CHECK requiring a genuine
  * secp256k1 (or P-256) signature, and this workspace has no signing
  * dependency and may not add one. This is the CHECK doing its job, not a
- * gap to route around -- `src/reads/registrations.js`'s tests cover those
+ * gap to route around -- `officer-reads.test.mjs`'s tests cover those
  * two tables' read paths at the SQL-validity level instead (zero rows,
  * correct shape), never by fabricating a signature.
  */

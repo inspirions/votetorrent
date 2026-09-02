@@ -44,8 +44,8 @@ import {
 	readRowCounts,
 	writeRowCounts,
 } from '@votetorrent/web-data/officer';
-import { GATE_NETWORK_HASH, SEED_TABLES, seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
-import { seedElectionSurface, SEED_TIMELINE, SEED_EXPECTED_COUNTS } from '../fixtures/seed-election-surface.js';
+import { GATE_NETWORK_HASH, SEED_TABLES, seedFoundingAuthority } from '../../../../packages/web-data/test/fixtures/seed-founding-authority.js';
+import { seedElectionSurface, SEED_TIMELINE, SEED_EXPECTED_COUNTS } from '../../../../packages/web-data/test/fixtures/seed-election-surface.js';
 
 declare global {
 	interface Window {

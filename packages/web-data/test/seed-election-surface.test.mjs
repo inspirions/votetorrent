@@ -2,12 +2,14 @@
  * seed-election-surface.test.mjs -- the seed fixture's row-count and
  * negative-control assertions, split out from election-phase.test.mjs in
  * 53-05 (D-25) when election-phase.js itself moved to
- * packages/ui-web/src/lifecycle/election-phase.js. Its subject is the
- * dashboard's OWN test/fixtures/seed-election-surface.js against a real
- * in-memory database, not the moved module -- hence the honest rename: a
- * dashboard file still named election-phase.test.mjs that no longer tests
- * election-phase.js would be exactly the decoy shape D-11 rejects for a
- * re-export shim.
+ * packages/ui-web/src/lifecycle/election-phase.js. Its subject is
+ * `./fixtures/seed-election-surface.js` against a real in-memory database,
+ * not the moved module -- hence the honest rename: a dashboard file still
+ * named election-phase.test.mjs that no longer tests election-phase.js would
+ * be exactly the decoy shape D-11 rejects for a re-export shim. This file
+ * (and the fixture it tests) moved from the dashboard's own `test/` into
+ * this package by 54-03b, alongside the officer read modules that consume
+ * the same seed via `officer-reads.test.mjs`.
  *
  * In-memory `new Database()` + `prepareDb` (no IndexedDB) -- these run
  * against the real 59-table schema, not a mock.
@@ -17,8 +19,8 @@ import assert from 'node:assert/strict';
 import { Database } from '@quereus/quereus';
 import { prepareDb } from '@votetorrent/vote-engine/browser';
 
-import { seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
-import { seedElectionSurface, SEED_EXPECTED_COUNTS } from '../fixtures/seed-election-surface.js';
+import { seedFoundingAuthority } from './fixtures/seed-founding-authority.js';
+import { seedElectionSurface, SEED_EXPECTED_COUNTS } from './fixtures/seed-election-surface.js';
 
 test('seedElectionSurface: row counts match SEED_EXPECTED_COUNTS on a founding-seeded database', async () => {
 	const db = new Database();
