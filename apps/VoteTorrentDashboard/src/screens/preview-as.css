@@ -1,8 +1,7 @@
 /*
  * preview-as.css -- styling for the "Preview as" control and its two badge
- * states, plus the advisory-gate disclosure. Built ONLY from
- * `@votetorrent/ui-web`'s tokens.css custom properties: no hex literal, no
- * new raw spacing value.
+ * states. Built ONLY from `@votetorrent/ui-web`'s tokens.css custom
+ * properties: no hex literal, no new raw spacing value.
  *
  * The real-answer and simulated-answer badge tones are each used exactly
  * once, on `.pv-badge--real` and `.pv-badge--sim` respectively --
@@ -16,6 +15,13 @@
  * boundary, and this file lands in the same wave as `election-ops.css`
  * (`eo-`) and `authority-admin.css` (`aa-`); an unprefixed `.row` or
  * `.badge` here would silently collide with either sibling.
+ *
+ * `.pv-disclosure` (the advisory-gate disclosure `AdvisoryDisclosure`
+ * renders) moved OUT of this file at 53-CR01, into
+ * `packages/ui-web/src/components.css` -- the D-15 revision: the shared
+ * package now owns that class's default rule, not this app. The rule's
+ * text is unchanged, only its location; the dashboard's own `app.css` now
+ * `@import`s `@votetorrent/ui-web/components.css` in its place.
  */
 
 .pv-control {
@@ -81,12 +87,4 @@
 	border-radius: var(--radius);
 	color: var(--text);
 	padding: 0 var(--space-sm);
-}
-
-.pv-disclosure {
-	margin: 0;
-	color: var(--muted);
-	font-size: var(--font-label-size);
-	font-weight: var(--font-label-weight);
-	line-height: var(--font-label-line-height);
 }

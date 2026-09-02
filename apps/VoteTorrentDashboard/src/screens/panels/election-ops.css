@@ -5,9 +5,14 @@
  * value. Declares only what panels.css does not -- no `.panel`,
  * `.panel-body` or `.panel--denied` rule lives here.
  *
- * The three lifecycle pill modifiers use NEUTRAL tones only. `50-UI-SPEC.md`
- * reserves --ok/--warn/--primary for named states these are not, and the
- * accent is explicitly not for pills.
+ * `.lifecycle-pill` and its three modifiers (NEUTRAL tones only --
+ * `50-UI-SPEC.md` reserves --ok/--warn/--primary for named states these are
+ * not, and the accent is explicitly not for pills) moved OUT of this file at
+ * 53-CR01, into `packages/ui-web/src/components.css` -- the D-15 revision:
+ * the shared package now owns `LifecyclePill`'s default rule, not this app.
+ * The rules' text is unchanged, only their location; the dashboard's own
+ * `app.css` now `@import`s `@votetorrent/ui-web/components.css` in their
+ * place.
  */
 
 .eo-section {
@@ -100,30 +105,4 @@
 	font-size: var(--font-label-size);
 	font-weight: var(--font-label-weight);
 	line-height: var(--font-label-line-height);
-}
-
-.lifecycle-pill {
-	display: inline-flex;
-	align-items: center;
-	padding: 0 var(--space-sm);
-	border-radius: var(--radius);
-	background: var(--surface2);
-	border: 1px solid var(--border);
-	color: var(--muted);
-	font-size: var(--font-label-size);
-	font-weight: var(--font-label-weight);
-	line-height: var(--font-label-line-height);
-}
-
-.lifecycle-pill--organizing {
-	opacity: 0.85;
-}
-
-.lifecycle-pill--running {
-	color: var(--text);
-	opacity: 1;
-}
-
-.lifecycle-pill--released {
-	opacity: 0.85;
 }

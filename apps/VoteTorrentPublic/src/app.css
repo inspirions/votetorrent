@@ -7,9 +7,19 @@
  * app's own layout primitives: a page-level chrome that stacks a header, a
  * main region and a footer vertically at full viewport height. It declares no
  * custom property and no root-level variable block — those live in the package.
+ *
+ * `ElectionShell` mounts `AdvisoryDisclosure`, `LifecyclePill` and
+ * `DetailsToggle` (@votetorrent/ui-web/components), so this file also
+ * `@import`s `@votetorrent/ui-web/components.css` (53-CR01, the D-15
+ * revision) for those components' default rules — see
+ * packages/ui-web/src/components.css and packages/ui-web/README.md's
+ * "Shared component default styles" section. `.election-title` below is NOT
+ * one of those: it is rendered directly by `ElectionShell.tsx`, not by a
+ * shared component, so it stays this app's own rule.
  */
 
 @import '@votetorrent/ui-web/tokens.css';
+@import '@votetorrent/ui-web/components.css';
 
 .public-app {
 	display: flex;
@@ -78,6 +88,17 @@
 	background: var(--surface2);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
+}
+
+/*
+ * .election-title -- rendered directly by ElectionShell.tsx (not a shared
+ * component's class), so it stays here per this file's own header.
+ */
+.election-title {
+	margin: 0;
+	font-size: var(--font-heading-size);
+	font-weight: var(--font-heading-weight);
+	color: var(--text);
 }
 
 .dt-toggle {
