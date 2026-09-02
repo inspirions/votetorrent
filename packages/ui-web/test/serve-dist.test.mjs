@@ -9,10 +9,17 @@
  * request answering 403 — proven alongside its negative half (the SAME file
  * read successfully when served from inside the root), so the 403 is
  * containment and not a blanket refusal.
+ *
+ * A sixth case (WR-15) covers the containment gap the lexical `path.relative`
+ * check cannot see: a symlink whose lexical path sits INSIDE the served root
+ * but whose target resolves OUTSIDE it. The lexical check alone passes this
+ * request straight through to `readFile`, which follows the symlink and
+ * serves the outside file's bytes — proven here by a request path that never
+ * contains `..` at all, only a symlink name.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -123,6 +130,42 @@ test('serve-dist: a traversal request escaping the served root answers 403, whil
 			const insideRes = await fetch(`${handle.url}/secret.txt`);
 			assert.equal(insideRes.status, 200);
 			assert.equal(await insideRes.text(), 'inside the root');
+		} finally {
+			await handle.close();
+		}
+	} finally {
+		await rm(parent, { recursive: true, force: true });
+	}
+});
+
+test('serve-dist: a symlink inside the served root pointing OUTSIDE it answers 403, never the target\'s bytes (WR-15)', async () => {
+	// Layout:
+	//   <parent>/
+	//     secret.txt              <- OUTSIDE the served root
+	//     served-root/
+	//       index.html
+	//       escape-link -> ../secret.txt   <- a symlink whose LEXICAL path is
+	//                                          inside served-root; only its
+	//                                          resolved target sits outside it
+	const parent = await mkdtemp(path.join(tmpdir(), 'serve-dist-symlink-'));
+	try {
+		const servedRoot = path.join(parent, 'served-root');
+		await mkdir(servedRoot);
+		await writeFile(path.join(parent, 'secret.txt'), 'outside the root, via a symlink');
+		await writeFile(path.join(servedRoot, 'index.html'), '<!doctype html>');
+		await symlink(path.join('..', 'secret.txt'), path.join(servedRoot, 'escape-link'));
+
+		const handle = await serveDist(servedRoot, TEST_PORT + 5);
+		try {
+			// The request path itself contains no ".." at all -- "escape-link"
+			// lexically resolves to servedRoot/escape-link, which IS inside
+			// rootDir. Only readFile()'s own symlink-following at the OS level
+			// reaches outside. A containment check that stops at path.relative
+			// on the lexical resolution cannot see this.
+			const res = await fetch(`${handle.url}/escape-link`);
+			assert.equal(res.status, 403, 'a symlink resolving outside the served root must answer 403, not serve the target file');
+			const body = await res.text();
+			assert.doesNotMatch(body, /outside the root/, 'the response body must never contain the escaped target\'s bytes');
 		} finally {
 			await handle.close();
 		}

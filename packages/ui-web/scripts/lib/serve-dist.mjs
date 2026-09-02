@@ -24,6 +24,17 @@
  * this server unresolved, because the client-side `new URL()`/`fetch()` call
  * that builds the request already collapses it before the bytes go out.
  *
+ * That lexical containment check alone is NOT sufficient (WR-15): it runs on
+ * the resolved-but-unfollowed request path, so a symlink whose LEXICAL
+ * location sits inside `rootDir` but whose TARGET resolves outside it sails
+ * straight through -- the request path itself need contain no `..` at all.
+ * `readFile`/`stat` then follow that symlink at the OS level and would serve
+ * the outside file's bytes. This module closes that gap with a SECOND
+ * containment check, run on the `realpath()` of the resolved path (which
+ * follows symlinks), after `stat` confirms the entry exists and before
+ * `readFile` ever touches it -- proven by `test/serve-dist.test.mjs`'s
+ * symlink-escape case.
+ *
  * `serveDist(rootDir, port)` takes the port as a required parameter with no
  * default — the runner owns port policy. A bound port is a loud failure,
  * never a silent fallback: this module attaches an `error` listener to the
@@ -34,7 +45,7 @@
  * gated a page nobody asked for.
  */
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 /**
@@ -136,6 +147,34 @@ async function handleRequest(rootDir, req, res) {
 
 	if (stats.isDirectory()) {
 		resolved = path.join(resolved, 'index.html');
+	}
+
+	// Second containment check (WR-15), run on the REALPATH (symlinks
+	// followed) of both sides. The check above only proves the LEXICAL
+	// request path resolves inside rootDir; a symlink at `resolved` (or at
+	// any ancestor of it) can still point somewhere else entirely, and
+	// `readFile` below would happily follow it. `rootDir` is realpath'd too
+	// rather than assumed already-canonical, so a symlinked ancestor of the
+	// served root itself cannot produce a false-positive escape report. A
+	// realpath() failure here (the entry doesn't exist, or a symlink is
+	// dangling) is treated as 404, matching the not-found case below rather
+	// than surfacing as an unrelated 500.
+	let rootReal;
+	let realResolved;
+	try {
+		rootReal = await realpath(rootDir);
+		realResolved = await realpath(resolved);
+	} catch {
+		res.writeHead(404, { 'content-type': 'text/plain' });
+		res.end('not found');
+		return;
+	}
+	const realRelative = path.relative(rootReal, realResolved);
+	const realEscapesRoot = realRelative.startsWith('..' + path.sep) || realRelative === '..' || path.isAbsolute(realRelative);
+	if (realEscapesRoot) {
+		res.writeHead(403, { 'content-type': 'text/plain' });
+		res.end('forbidden: resolved target escapes the served root');
+		return;
 	}
 
 	let body;
