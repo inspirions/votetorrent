@@ -13,6 +13,11 @@
  * Task 2 — explicit named re-exports only, never `export *`, so the surface
  * of this audience is readable at a glance.
  *
+ * 54-06 adds `read-keyholders.js`, the per-row `Keyholder` join `User` roster.
+ * It is exported HERE and nowhere under `src/public/`: that placement is what
+ * makes D-04's audience split structural — the public audience's counterpart to
+ * it, `public/read-keyrelease.js`, answers the same subject with counts alone.
+ *
  * The officer read helpers (`elections.js`, `ballots.js`, `registrations.js`)
  * land here in 54-03b. Same discipline, one addition: each module also
  * exports its own `TABLES_READ` constant, and three modules cannot all
@@ -79,6 +84,8 @@ export {
 	TABLES_READ as REGISTRATIONS_TABLES_READ,
 } from './registrations.js';
 
+export { readKeyholders, TABLES_READ as KEYHOLDER_TABLES_READ } from './read-keyholders.js';
+
 /**
  * @typedef {import('../open-db.js').DeleteNetworkDbOptions} DeleteNetworkDbOptions
  * @typedef {import('../reattach.js').StorageAdapter} StorageAdapter
@@ -95,4 +102,5 @@ export {
  * @typedef {import('./registrations.js').RosterRow} RosterRow
  * @typedef {import('./registrations.js').RosterResult} RosterResult
  * @typedef {import('./registrations.js').SurfaceCountEntry} SurfaceCountEntry
+ * @typedef {import('./read-keyholders.js').KeyholderRosterRow} KeyholderRosterRow
  */

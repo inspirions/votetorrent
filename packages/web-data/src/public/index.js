@@ -66,6 +66,8 @@ export {
 
 export { readRegistrantRoll, TABLES_READ as ROLL_TABLES_READ } from './read-registrant-roll.js';
 
+export { readKeyReleaseProgress, TABLES_READ as KEYRELEASE_TABLES_READ } from './read-keyrelease.js';
+
 /**
  * @typedef {import('../open-db.js').DeleteNetworkDbOptions} DeleteNetworkDbOptions
  * @typedef {import('../reattach.js').StorageAdapter} StorageAdapter
@@ -75,4 +77,5 @@ export { readRegistrantRoll, TABLES_READ as ROLL_TABLES_READ } from './read-regi
  * @typedef {import('./read-election.js').PublicElectionRevision} PublicElectionRevision
  * @typedef {import('./read-election.js').PublicElectionListEntry} PublicElectionListEntry
  * @typedef {import('./read-registrant-roll.js').RegistrantRollRow} RegistrantRollRow
+ * @typedef {import('./read-keyrelease.js').KeyReleaseProgress} KeyReleaseProgress
  */
