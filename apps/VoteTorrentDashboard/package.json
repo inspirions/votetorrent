@@ -33,6 +33,7 @@
 		"@quereus/store": "4.17.1",
 		"@votetorrent/ui-web": "workspace:*",
 		"@votetorrent/vote-engine": "workspace:*",
+		"@votetorrent/web-data": "workspace:*",
 		"react": "19.0.0",
 		"react-dom": "19.0.0"
 	},

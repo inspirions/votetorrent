@@ -30,9 +30,17 @@ import react from '@vitejs/plugin-react';
 // 53-12's repo-root assertion (D-21) will make this line mandatory for every workspace
 // declaring `@votetorrent/ui-web`; a comment merely discussing `dedupe` will not satisfy it,
 // because that assertion strips comment lines before scanning.
+//
+// 54-03a amendment: the same `nmHoistingLimits: workspaces` hazard applies to
+// `@quereus/quereus` and `@quereus/plugin-indexeddb` now that this app depends on
+// `@votetorrent/web-data`, which declares both in peerDependencies + devDependencies (the
+// same on-disk shape that makes React's dedupe entry necessary above). A duplicate
+// `@quereus/quereus` means a second `Database` class identity and a second
+// `@quereus/plugin-indexeddb` module registry — plugin registration or an `instanceof`
+// boundary fails in a build that still exits 0, the same spike-089 signature one stack down.
 export default defineConfig({
 	plugins: [react()],
-	resolve: { dedupe: ['react', 'react-dom'] },
+	resolve: { dedupe: ['react', 'react-dom', '@quereus/quereus', '@quereus/plugin-indexeddb'] },
 	server: { port: 5180, strictPort: true },
 	preview: { port: 5180, strictPort: true },
 	build: { target: 'es2022', sourcemap: true },

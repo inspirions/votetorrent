@@ -8,13 +8,20 @@
  * (the `.Scope = '<code>'` site matcher, the backwards constraint-name walk,
  * the `check on insert, update` ops parser, and the `view Scope as(...);`
  * closed-set read). The markdown-printing tail is discarded; this file emits
- * `src/auth/capabilities.js` instead.
+ * `src/auth/capabilities.js` AND (54-03a) `packages/web-data/src/officer/
+ * capability-tables.js` instead.
  *
- * Two exports plus a CLI tail:
+ * Three exported generators plus a CLI tail, all sharing one schema parse via
+ * the internal `buildCapabilities(schemaText)` helper (never two independent
+ * parse passes — that would be two sources of truth wearing one name):
  *   - `extractFromSchema(schemaText)` — the ported extraction logic.
  *   - `generateSource(schemaText)` — merges the extraction with the
  *     PRESENTATION map (below) and returns the complete text of
  *     `src/auth/capabilities.js`.
+ *   - `generateCapabilityTablesSource(schemaText)` — returns the complete
+ *     text of `packages/web-data/src/officer/capability-tables.js`, the
+ *     data-only per-capability table-name map the moved read modules derive
+ *     `TABLES_READ` from.
  *
  * `generateSource` THROWS, naming the code, if the schema declares a scope
  * absent from PRESENTATION, or PRESENTATION names a scope absent from the
@@ -45,6 +52,23 @@ export const SCHEMA_PATH = path.resolve(
 	'votetorrent.qsql',
 );
 export const OUTPUT_PATH = path.resolve(SCRIPT_DIR, '..', 'src', 'auth', 'capabilities.js');
+
+// Three levels up from apps/VoteTorrentDashboard/scripts to the repo root,
+// then down into the shared web-data package — the second artifact this
+// generator emits from the same schema parse (see `generateCapabilityTablesSource`
+// below). Resolved from `import.meta.url`, never cwd, matching `OUTPUT_PATH`'s
+// own discipline.
+export const CAPABILITY_TABLES_OUTPUT_PATH = path.resolve(
+	SCRIPT_DIR,
+	'..',
+	'..',
+	'..',
+	'packages',
+	'web-data',
+	'src',
+	'officer',
+	'capability-tables.js',
+);
 
 /**
  * The presentation metadata the schema cannot supply: `id` (the binding
@@ -185,14 +209,18 @@ function renderEntry(c) {
 }
 
 /**
- * Merge the schema extraction with `PRESENTATION` and return the complete
- * text of `src/auth/capabilities.js`. Throws, naming the code, on any
- * mismatch between the schema's declared scope set and `PRESENTATION`'s keys.
+ * Merge the schema extraction with `PRESENTATION`, validate the two sets
+ * agree, and return the merged capability records BOTH generated artifacts
+ * derive from — `generateSource` (below) and `generateCapabilityTablesSource`
+ * (below) each call this once, so the schema is parsed exactly one way
+ * regardless of which (or both) outputs are being produced. Throws, naming
+ * the code, on any mismatch between the schema's declared scope set and
+ * `PRESENTATION`'s keys.
  *
  * @param {string} schemaText
- * @returns {string}
+ * @returns {{ declared: { code: string, name: string }[], capabilities: { id: string, scope: string, schemaName: string, tier: 1 | 2, sites: number, tables: string[], siteCountCaveat: string | null, icon: string, group: string, order: number, titleKey: string, emptyKey: string }[] }}
  */
-export function generateSource(schemaText) {
+function buildCapabilities(schemaText) {
 	const { declared, sitesByScope } = extractFromSchema(schemaText);
 
 	const declaredCodes = new Set(declared.map((d) => d.code));
@@ -236,6 +264,20 @@ export function generateSource(schemaText) {
 			};
 		})
 		.sort((a, b) => a.order - b.order);
+
+	return { declared, capabilities };
+}
+
+/**
+ * Merge the schema extraction with `PRESENTATION` and return the complete
+ * text of `src/auth/capabilities.js`. Throws, naming the code, on any
+ * mismatch between the schema's declared scope set and `PRESENTATION`'s keys.
+ *
+ * @param {string} schemaText
+ * @returns {string}
+ */
+export function generateSource(schemaText) {
+	const { declared, capabilities } = buildCapabilities(schemaText);
 
 	const scopeCodeUnion = declared.map((d) => `'${d.code}'`).join('|');
 	const capabilityIdUnion = capabilities.map((c) => `'${c.id}'`).join('|');
@@ -302,10 +344,78 @@ ${scopeCodesArray}
 `;
 }
 
-// CLI tail — write src/auth/capabilities.js from the live schema.
+/**
+ * The second artifact emitted from the SAME schema parse `generateSource`
+ * uses (via `buildCapabilities`, never a second parse pass): a data-only,
+ * zero-import module exporting `CAPABILITY_TABLES`, the per-capability table
+ * name map `packages/web-data`'s moved read modules derive `TABLES_READ`
+ * from. This is the "exactly one list" invariant's second half —
+ * `capabilities.js`'s own `tables` field and this file's `CAPABILITY_TABLES`
+ * must never diverge, because both come from one generator run over one
+ * schema. `capabilities.test.mjs` cross-checks the two deep-equal.
+ *
+ * `capabilities.js` itself carries presentational fields (`icon`, `titleKey`,
+ * `group`, `order`) that make it a dashboard artifact, not a data package
+ * one — this function emits ONLY the table-name map, nothing presentational,
+ * so it can live in a shared package with no UI charter.
+ *
+ * @param {string} schemaText
+ * @returns {string}
+ */
+export function generateCapabilityTablesSource(schemaText) {
+	// Defensive: keep this function's own output in lockstep with
+	// CAPABILITY_TABLES_OUTPUT_PATH's own target filename, so a future rename
+	// of one without the other is caught here rather than producing a file
+	// nothing reads.
+	if (!CAPABILITY_TABLES_OUTPUT_PATH.endsWith('capability-tables.js')) {
+		throw new Error(
+			`generateCapabilityTablesSource: CAPABILITY_TABLES_OUTPUT_PATH no longer ends with 'capability-tables.js' (got ${CAPABILITY_TABLES_OUTPUT_PATH}) — update this function and its output filename together`,
+		);
+	}
+
+	const { capabilities } = buildCapabilities(schemaText);
+
+	const capabilityIdUnion = capabilities.map((c) => `'${c.id}'`).join('|');
+	const entriesBody = capabilities
+		.map((c) => {
+			const tablesLiteral =
+				c.tables.length === 0 ? '[]' : `[${c.tables.map((t) => `'${esc(t)}'`).join(', ')}]`;
+			return `\t${c.id}: Object.freeze(${tablesLiteral}),`;
+		})
+		.join('\n');
+
+	return `/**
+ * AUTO-GENERATED by scripts/generate-capabilities.mjs (from the SAME schema
+ * parse that emits apps/VoteTorrentDashboard/src/auth/capabilities.js) from
+ * packages/vote-core/schema/votetorrent.qsql — do not hand-edit. Run
+ * \`yarn workspace votetorrent-dashboard capabilities:generate\` after any
+ * change to \`view Scope\` or a \`.Scope = '<code>'\` enforcement site, then
+ * commit the result. capabilities.test.mjs's staleness check fails the build
+ * if this file ever drifts from a fresh generation.
+ *
+ * Data-only, zero imports: this is the single source of truth for which
+ * tables each capability's read helpers may query, consumed by
+ * \`packages/web-data\`'s officer read modules to derive \`TABLES_READ\` "so
+ * there is exactly one list" rather than a re-declared, driftable one.
+ */
+
+/** @typedef {${capabilityIdUnion}} CapabilityId */
+
+/** @type {Readonly<Record<CapabilityId, ReadonlyArray<string>>>} */
+export const CAPABILITY_TABLES = Object.freeze({
+${entriesBody}
+});
+`;
+}
+
+// CLI tail — write src/auth/capabilities.js and
+// packages/web-data/src/officer/capability-tables.js from the live schema.
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
 	const schemaText = readFileSync(SCHEMA_PATH, 'utf8');
 	const source = generateSource(schemaText);
 	writeFileSync(OUTPUT_PATH, source, 'utf8');
 	process.stdout.write(`[generate-capabilities] wrote ${OUTPUT_PATH}\n`);
+	const capabilityTablesSource = generateCapabilityTablesSource(schemaText);
+	writeFileSync(CAPABILITY_TABLES_OUTPUT_PATH, capabilityTablesSource, 'utf8');
+	process.stdout.write(`[generate-capabilities] wrote ${CAPABILITY_TABLES_OUTPUT_PATH}\n`);
 }

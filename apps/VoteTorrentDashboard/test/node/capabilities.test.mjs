@@ -13,11 +13,14 @@ import { readFileSync } from 'node:fs';
 import {
 	extractFromSchema,
 	generateSource,
+	generateCapabilityTablesSource,
 	SCHEMA_PATH,
 	OUTPUT_PATH,
+	CAPABILITY_TABLES_OUTPUT_PATH,
 } from '../../scripts/generate-capabilities.mjs';
 import { CAPABILITIES, PANEL_GROUPS, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import { t } from '@votetorrent/ui-web';
+import { CAPABILITY_TABLES } from '@votetorrent/web-data/officer';
 
 const SCHEMA_TEXT = readFileSync(SCHEMA_PATH, 'utf8');
 
@@ -123,6 +126,56 @@ test('staleness check: the committed capabilities.js is byte-identical to a fres
 		fresh,
 		'src/auth/capabilities.js is stale relative to the current schema — re-run `node scripts/generate-capabilities.mjs` (or `yarn workspace votetorrent-dashboard capabilities:generate`) and commit the result. Do NOT hand-edit the output.',
 	);
+});
+
+// --- 54-03a: the second generated artifact, packages/web-data/src/officer/capability-tables.js ---
+
+test('staleness check: the committed capability-tables.js is byte-identical to a fresh generation from the live schema', () => {
+	const committed = readFileSync(CAPABILITY_TABLES_OUTPUT_PATH, 'utf8');
+	const fresh = generateCapabilityTablesSource(SCHEMA_TEXT);
+	assert.equal(
+		committed,
+		fresh,
+		'packages/web-data/src/officer/capability-tables.js is stale relative to the current schema — re-run `node scripts/generate-capabilities.mjs` (or `yarn workspace votetorrent-dashboard capabilities:generate`) and commit the result. Do NOT hand-edit the output.',
+	);
+});
+
+test('CAPABILITY_TABLES (imported through @votetorrent/web-data/officer, its real export surface) deep-equals capabilities.js\'s own tables field for all 9 capabilities — the "exactly one list" invariant', () => {
+	assert.equal(CAPABILITIES.length, 9);
+	for (const c of CAPABILITIES) {
+		assert.ok(c.id in CAPABILITY_TABLES, `CAPABILITY_TABLES is missing capability id "${c.id}"`);
+		assert.deepEqual(
+			CAPABILITY_TABLES[c.id],
+			c.tables,
+			`CAPABILITY_TABLES.${c.id} diverges from CAPABILITIES' own tables field for the same capability`,
+		);
+	}
+});
+
+test('positive control: a synthetic CAPABILITY_TABLES with one table name dropped from one capability is caught by name', () => {
+	// Prove the deep-equality check above actually discriminates, rather than
+	// passing vacuously on any two objects. Build a synthetic copy of the real
+	// map with exactly one table name dropped from one capability, and confirm
+	// the same per-capability comparison reports precisely that capability.
+	const targetId = CAPABILITIES.find((c) => c.tables.length > 0)?.id;
+	assert.ok(targetId, 'fixture is broken: expected at least one capability with a non-empty tables array');
+
+	const synthetic = Object.fromEntries(
+		Object.entries(CAPABILITY_TABLES).map(([id, tables]) => [
+			id,
+			id === targetId ? tables.slice(1) : tables,
+		]),
+	);
+
+	const mismatched = [];
+	for (const c of CAPABILITIES) {
+		try {
+			assert.deepEqual(synthetic[c.id], c.tables);
+		} catch {
+			mismatched.push(c.id);
+		}
+	}
+	assert.deepEqual(mismatched, [targetId], 'the synthetic mutation must be reported for exactly the mutated capability');
 });
 
 test('mutating a returned CAPABILITIES entry throws (each entry and the array are frozen)', () => {

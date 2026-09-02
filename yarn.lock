@@ -6710,6 +6710,24 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@votetorrent/web-data@workspace:*, @votetorrent/web-data@workspace:packages/web-data":
+  version: 0.0.0-use.local
+  resolution: "@votetorrent/web-data@workspace:packages/web-data"
+  dependencies:
+    "@quereus/plugin-indexeddb": "npm:4.17.1"
+    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch"
+    "@types/node": "npm:^22.10.2"
+    "@votetorrent/vote-engine": "workspace:*"
+    fake-indexeddb: "npm:^6.2.5"
+    typescript: "npm:^5.6.3"
+    vite: "npm:^7.0.0"
+  peerDependencies:
+    "@quereus/plugin-indexeddb": 4.17.1
+    "@quereus/quereus": 4.17.1
+    "@votetorrent/vote-engine": "workspace:*"
+  languageName: unknown
+  linkType: soft
+
 "@vue/compiler-core@npm:3.5.35":
   version: 3.5.35
   resolution: "@vue/compiler-core@npm:3.5.35"
@@ -21623,6 +21641,7 @@ __metadata:
     "@vitejs/plugin-react": "npm:^5.0.0"
     "@votetorrent/ui-web": "workspace:*"
     "@votetorrent/vote-engine": "workspace:*"
+    "@votetorrent/web-data": "workspace:*"
     fake-indexeddb: "npm:^6.2.5"
     playwright: "npm:^1.62.1"
     react: "npm:19.0.0"
@@ -21642,6 +21661,7 @@ __metadata:
     "@vitejs/plugin-react": "npm:^5.0.0"
     "@votetorrent/ui-web": "workspace:*"
     "@votetorrent/vote-engine": "workspace:*"
+    "@votetorrent/web-data": "workspace:*"
     playwright: "npm:^1.62.1"
     react: "npm:19.0.0"
     react-dom: "npm:19.0.0"
