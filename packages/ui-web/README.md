@@ -118,3 +118,50 @@ For the D-23 token probe's enumeration contract (one declaration per line, no co
 semantics a consumer or a probe needs to know about, see the header of
 `packages/ui-web/src/tokens.css` itself — that file is the single place to correct either if a real
 browser run ever disagrees, so neither is restated here.
+
+## Browser gates (D-19)
+
+The shared browser-gate runner lives at `packages/ui-web/scripts/run-ui-gates.mjs`, with
+`playwright: ^1.62.1` declared as a `packages/ui-web` **devDependency** — not at the repo root, and
+not as a fourth `exports` entry.
+
+**Why it lives here, not at the repo root (measured, not assumed).** `.yarnrc.yml` sets
+`nmHoistingLimits: workspaces`, so nothing hoists to the repo root — root `node_modules` carries
+`playwright-core` but not `playwright`. A runner at repo-root `scripts/` would therefore need a new
+root-level dependency on a browser driver, on every workspace's resolution path. Each workspace
+instead gets its own `node_modules` under this hoisting limit, so a script at
+`packages/ui-web/scripts/` resolves `playwright` from `packages/ui-web/node_modules` by **file
+location**, independent of the cwd it is invoked from — that file-location resolution is what lets
+ONE declaration serve BOTH the dashboard and the public app. The declared range `^1.62.1` is
+byte-identical to the dashboard's own existing declaration and resolves to the same
+`"playwright@npm:^1.62.1"` lockfile entry — `git diff -- yarn.lock` after adding it gains zero new
+`resolution:` lines.
+
+**Invocation**, run from a consuming app directory:
+
+```
+node ../../packages/ui-web/scripts/run-ui-gates.mjs --app .
+```
+
+**The harness contract every consumer must satisfy** — four numbered requirements:
+
+1. A gate vite config importing and merging the app's own `vite.config.ts`, overriding only
+   `build.outDir`, `build.rollupOptions.input`, `build.emptyOutDir` and `publicDir: false`, and
+   declaring no `dedupe` of its own — its path and its `outDir` are the app's own choice, passed to
+   the runner as `--gate-config` and `--gate-dist` (the dashboard's own
+   `test/browser/vite.gate.config.ts` → `test/browser/dist` are the runner's *defaults* only because
+   it is the first consumer, never because they are canonical).
+2. A harness HTML entry plus a module entry, the HTML filename passed as `--gate-entry` (default
+   `ui-gate.html`).
+3. The entry importing **exactly one** stylesheet — the app's own `src/app.css` — and naming no
+   stylesheet the app itself is responsible for wiring. **Why this is a requirement:** if the
+   harness imported `tokens.css` directly it would render correctly even on an app that forgot the
+   import, and the D-23 probe could never catch the one failure it exists for.
+4. The entry mounting every named export of `@votetorrent/ui-web/components` inside an element
+   carrying `data-ui-gate="<ExportName>"`, driving props so each renders non-empty output, then
+   publishing a frozen `window.__UI_GATE__` and setting `window.__UI_GATE_DONE__ = true`.
+
+`--gate-config`, `--gate-dist`, `--gate-entry` and `--port` (or the `UI_GATE_PORT` environment
+variable) are documented CLI overrides whose defaults are the dashboard's own layout values — see
+`run-ui-gates.mjs`'s own header for the full flag catalogue and the port-policy note (5180/5181
+dev-preview, 5183 the dashboard's gate port, 5191 the public app's).
