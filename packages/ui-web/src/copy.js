@@ -230,6 +230,16 @@ export const COPY = Object.freeze({
 	'lifecycle.organizing': 'Being organized',
 	'lifecycle.running': 'Running',
 	'lifecycle.released': 'Results released',
+	// TEMPORARY (54-02 Task 1 -> Task 2, Rule 3 deviation): the four new
+	// Phase-54 lifecycle.* keys are added early, additively, so
+	// test/election-phase.test.mjs's phaseCopyKey-resolves-via-t() assertion
+	// (Task 1) has real keys to resolve before Task 2 lands. Task 2 replaces
+	// this whole block (these four plus the three above) with the final
+	// five-key set (adds lifecycle.indeterminate, removes the three above).
+	'lifecycle.pre': 'Being organized',
+	'lifecycle.voting': 'Voting',
+	'lifecycle.settling': 'Settling',
+	'lifecycle.closed': 'Closed',
 
 	// Panel titles and empty states, in the UI-SPEC's fixed order (registrations
 	// first, always -- 'vrg' is 39% of the authorization surface)
