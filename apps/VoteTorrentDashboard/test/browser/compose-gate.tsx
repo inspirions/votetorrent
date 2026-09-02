@@ -391,9 +391,9 @@ async function runComposeVerify() {
 
 		await rung('E · the D-16 advisory disclosure is present', async () => {
 			const disclosure = document.querySelector('.pv-disclosure');
-			disclosurePresent = disclosure?.textContent === t('gate.advisoryDisclosure');
+			disclosurePresent = disclosure?.textContent === t('advisory.authority.body');
 			if (!disclosurePresent) {
-				throw new Error(`disclosure text "${disclosure?.textContent}", expected the value of t('gate.advisoryDisclosure')`);
+				throw new Error(`disclosure text "${disclosure?.textContent}", expected the value of t('advisory.authority.body')`);
 			}
 			return 'present';
 		});

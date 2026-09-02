@@ -76,8 +76,9 @@ export async function selectActiveElection(db) {
  * @property {string[]} Tags
  * @property {string} Instructions
  * @property {unknown} Timeline - the RAW column value, untouched. Parsing
- *   the timeline into a phase belongs to `src/lifecycle/election-phase.js`,
- *   not here -- this module reads, it does not interpret.
+ *   the timeline into a phase belongs to
+ *   `packages/ui-web/src/lifecycle/election-phase.js` (moved there in
+ *   53-05, D-01/D-02), not here -- this module reads, it does not interpret.
  * @property {number} KeyholderThreshold
  */
 

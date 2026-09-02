@@ -111,7 +111,10 @@ ok(`COPY is frozen and every one of its ${Object.keys(COPY).length} values passe
 //    has leaked outside the copy table. This is what makes "copy lives in ONE
 //    place" enforceable rather than aspirational as later plans add screens.
 // ---------------------------------------------------------------------------
-const ADVISORY_DISCLOSURE_PREFIX = COPY['gate.advisoryDisclosure'].slice(0, 40);
+// 53-05 renamed gate.advisoryDisclosure -> advisory.authority.body (value
+// byte-identical); note for 53-10, whose three-root rewrite inherits this
+// sentinel prefix under its new key name.
+const ADVISORY_DISCLOSURE_PREFIX = COPY['advisory.authority.body'].slice(0, 40);
 const scanSentinels = [...SENTINEL_STRINGS, ADVISORY_DISCLOSURE_PREFIX];
 
 /** @param {string} dir */

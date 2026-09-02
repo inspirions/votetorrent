@@ -5,9 +5,9 @@
  * `../../src/auth/{gate,capabilities}.js`, the preview state model from
  * `../../src/auth/preview-scopes.js`, `PanelGrid` from
  * `../../src/screens/PanelGrid.tsx`, `PreviewAsProvider`/`PreviewAsControl`
- * from `../../src/screens/PreviewAsControl.tsx`, `AdvisoryDisclosure` from
- * `../../src/screens/AdvisoryDisclosure.tsx`, `t` from
- * `@votetorrent/ui-web`.
+ * from `../../src/screens/PreviewAsControl.tsx`, `AdvisoryDisclosure` and
+ * `computeElectionPhase` from `@votetorrent/ui-web` (moved there in 53-05),
+ * `t` from `@votetorrent/ui-web`.
  *
  * THE ORACLE IS `evaluate`, IMPORTED — NEVER RE-DERIVED. If this file ever
  * computed visibility any other way, the cross-check would be comparing the
@@ -31,11 +31,11 @@ import { evaluate } from '../../src/auth/gate.js';
 import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import type { ScopeCode } from '../../src/auth/capabilities.js';
 import { createPreviewState, toggleScope, effectiveScopes } from '../../src/auth/preview-scopes.js';
-import { computeElectionPhase } from '../../src/lifecycle/election-phase.js';
+import { computeElectionPhase } from '@votetorrent/ui-web/lifecycle';
 import { t } from '@votetorrent/ui-web';
 import { PanelGrid } from '../../src/screens/PanelGrid.js';
 import { PreviewAsProvider, PreviewAsControl } from '../../src/screens/PreviewAsControl.js';
-import { AdvisoryDisclosure } from '../../src/screens/AdvisoryDisclosure.js';
+import { AdvisoryDisclosure } from '@votetorrent/ui-web/components';
 import { createNetworkDb, closeNetworkDb, deleteNetworkDb } from '../../src/db/open-db.js';
 import { attachNetworkDb, readRowCounts, writeRowCounts } from '../../src/db/reattach.js';
 import { GATE_NETWORK_HASH, SEED_TABLES, seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
@@ -200,7 +200,7 @@ function Tree({
 		// exists here to close -- scopesResolved is always true.
 		<PreviewAsProvider realScopes={REAL_SCOPES} scopesResolved={true}>
 			<PreviewAsControl />
-			<AdvisoryDisclosure />
+			<AdvisoryDisclosure variant="authority" />
 			<PanelGrid
 				db={db}
 				revealDenied={reveal}
@@ -234,7 +234,7 @@ function readChrome() {
 	return {
 		badgeText: badgeEl?.textContent ?? null,
 		badgeClass: badgeEl?.className ?? null,
-		disclosurePresent: disclosureEl?.textContent === t('gate.advisoryDisclosure'),
+		disclosurePresent: disclosureEl?.textContent === t('advisory.authority.body'),
 	};
 }
 

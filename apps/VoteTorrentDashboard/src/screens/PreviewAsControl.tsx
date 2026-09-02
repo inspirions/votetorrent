@@ -13,12 +13,13 @@
  * preview of what an officer WOULD see, not a change to what anyone is
  * allowed to do — there is no write path in this phase for it to affect.
  *
- * Also re-exports `AdvisoryDisclosure` (`./AdvisoryDisclosure.js`) so
- * `DashboardShell.tsx`'s bounded wiring edit needs one import line instead
- * of two. This is a disclosed consolidation for that edit's hard line
- * budget, recorded in the plan's summary — not a restructuring of either
- * component's own module boundary; both still live in their own dedicated
- * files exactly as the plan's artifact list requires.
+ * Also re-exports `AdvisoryDisclosure` (now `@votetorrent/ui-web/components`,
+ * moved there in 53-05 under D-01/D-02/D-07) so `DashboardShell.tsx`'s
+ * bounded wiring edit needs one import line instead of two. This is a
+ * disclosed consolidation for that edit's hard line budget, recorded in the
+ * plan's summary — not a restructuring of either component's own module
+ * boundary; `AdvisoryDisclosure` lives in the shared package now, not in
+ * this dashboard, exactly as 53-05's artifact list requires.
  */
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -38,7 +39,7 @@ import type { GrantedScopesValue } from './GrantedScopesContext.js';
 import { t } from '@votetorrent/ui-web';
 import './preview-as.css';
 
-export { AdvisoryDisclosure } from './AdvisoryDisclosure.js';
+export { AdvisoryDisclosure } from '@votetorrent/ui-web/components';
 
 export interface PreviewAsProviderProps {
 	/** The officer's real, database-granted scopes — the as-built expression

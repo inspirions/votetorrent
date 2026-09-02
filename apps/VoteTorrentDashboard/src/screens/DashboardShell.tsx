@@ -723,7 +723,7 @@ export function DashboardShell({
 						{t('snapshot.refreshCta')}
 					</button>
 
-					<PreviewAsControl /><AdvisoryDisclosure />
+					<PreviewAsControl /><AdvisoryDisclosure variant="authority" />
 					<div className="sh-kebab">
 						<button
 							type="button"
