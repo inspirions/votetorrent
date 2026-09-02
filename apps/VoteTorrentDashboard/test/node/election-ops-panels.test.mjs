@@ -208,7 +208,64 @@ test('ElectionsPanel.tsx mounts LifecyclePill', () => {
 	assert.match(STRIPPED['ElectionsPanel.tsx'], /LifecyclePill/);
 });
 
-// --- Panel-owned queries: only src/screens/panels/ imports from src/reads/ -
+// --- Panel-owned queries: only src/screens/panels/ imports the officer -----
+// --- READ SURFACE from @votetorrent/web-data/officer (54-03b) --------------
+//
+// NOTE on scope, discovered while rewriting this walk: 54-03a already moved
+// the audience-neutral CONNECTION layer (createNetworkDb, attachNetworkDb,
+// etc.) into this same `./officer` barrel, and several non-panel production
+// modules (src/lifecycle/*, src/main.tsx, src/screens/DashboardShell.tsx)
+// legitimately import THAT from `@votetorrent/web-data/officer` -- that is
+// correct, already-shipped 54-03a work, not a violation. A specifier-only
+// match (the literal old `.../reads/` shape ported 1:1) would false-positive
+// on all of them. The guarantee this walk actually encodes -- "panel-owned
+// queries: only a panel reaches the read layer" -- is preserved by checking
+// which NAMES a file imports from the barrel, not merely whether it imports
+// the barrel at all.
+
+const OFFICER_IMPORT_RE = /from ['"]@votetorrent\/web-data\/officer['"]/;
+
+/** Every name the officer barrel re-exports from the three moved read modules -- the query surface this walk polices. Deliberately excludes the connection-layer names (createNetworkDb, attachNetworkDb, ...) and CAPABILITY_TABLES, which are audience-neutral / metadata, not a query. @type {ReadonlySet<string>} */
+const OFFICER_READ_SURFACE_NAMES = new Set([
+	'selectActiveElection',
+	'readElectionOverview',
+	'readElectionPolicies',
+	'countElections',
+	'ELECTIONS_TABLES_READ',
+	'readBallots',
+	'readQuestions',
+	'countBallotSigningTasks',
+	'BALLOTS_TABLES_READ',
+	'readRegistrantStatusBreakdown',
+	'readRegistrationRequestBreakdown',
+	'readRegistrantRoster',
+	'readRegistrationSurfaceCounts',
+	'hasAnyRegistrationData',
+	'ROSTER_PAGE_SIZE',
+	'REGISTRATIONS_TABLES_READ',
+]);
+
+/**
+ * The named imports pulled from every `@votetorrent/web-data/officer` import
+ * statement in `source` -- resolves `Foo as Bar` to the real exported name
+ * `Foo`, since that is the name that decides whether the read surface was
+ * reached, not the local alias.
+ *
+ * @param {string} source
+ * @returns {string[]}
+ */
+function officerNamedImports(source) {
+	/** @type {string[]} */
+	const names = [];
+	for (const m of source.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"]@votetorrent\/web-data\/officer['"]/g)) {
+		for (const raw of m[1].split(',')) {
+			const trimmed = raw.trim();
+			if (!trimmed) continue;
+			names.push(trimmed.split(/\s+as\s+/)[0].trim());
+		}
+	}
+	return names;
+}
 
 /** @param {string} dir @returns {string[]} */
 function walkSourceFiles(dir) {
@@ -225,18 +282,31 @@ function walkSourceFiles(dir) {
 	return out;
 }
 
-test('no module outside src/screens/panels/ imports from src/reads/', () => {
+test('no module outside src/screens/panels/ imports an officer read-surface name (a query function or a TABLES_READ constant) from @votetorrent/web-data/officer', () => {
 	const srcDir = dashboardSrc();
 	/** @type {string[]} */
 	const offenders = [];
 	for (const file of walkSourceFiles(srcDir)) {
 		if (file.startsWith(PANELS_DIR)) continue;
-		const contents = readFileSync(file, 'utf8');
-		if (/from ['"].*reads\//.test(contents)) {
+		const contents = stripComments(readFileSync(file, 'utf8'));
+		const imported = officerNamedImports(contents);
+		if (imported.some((name) => OFFICER_READ_SURFACE_NAMES.has(name))) {
 			offenders.push(path.relative(srcDir, file));
 		}
 	}
 	assert.deepEqual(offenders, []);
+});
+
+test('positive control: the read-surface-name matcher fires on a synthetic import of selectActiveElection, so a walk that finds nothing is proven discriminating', () => {
+	const fixture = `import { selectActiveElection } from '@votetorrent/web-data/officer';`;
+	assert.ok(officerNamedImports(fixture).includes('selectActiveElection'));
+});
+
+test('negative control: a synthetic import of ONLY connection-layer names (already legitimate outside panels since 54-03a) does not trip the read-surface matcher', () => {
+	const fixture = `import { createNetworkDb, attachNetworkDb, CAPABILITY_TABLES } from '@votetorrent/web-data/officer';`;
+	const imported = officerNamedImports(fixture);
+	assert.ok(imported.length > 0, 'the parser itself must find names, or this control proves nothing');
+	assert.ok(imported.every((name) => !OFFICER_READ_SURFACE_NAMES.has(name)));
 });
 
 // --- Styling stays on tokens --------------------------------------------------
@@ -285,17 +355,17 @@ test('election-ops.css has no raw px value outside a var(--space-*) reference', 
 
 // --- Each panel imports its own read module ----------------------------------
 
-test('RegistrationsPanel imports from ../../reads/registrations.js', () => {
-	assert.match(STRIPPED['RegistrationsPanel.tsx'], /from ['"]\.\.\/\.\.\/reads\/registrations\.js['"]/);
+test('RegistrationsPanel imports from @votetorrent/web-data/officer', () => {
+	assert.match(STRIPPED['RegistrationsPanel.tsx'], OFFICER_IMPORT_RE);
 });
 
-test('ElectionsPanel imports from ../../reads/elections.js', () => {
-	assert.match(STRIPPED['ElectionsPanel.tsx'], /from ['"]\.\.\/\.\.\/reads\/elections\.js['"]/);
+test('ElectionsPanel imports from @votetorrent/web-data/officer', () => {
+	assert.match(STRIPPED['ElectionsPanel.tsx'], OFFICER_IMPORT_RE);
 });
 
-test('BallotsQuestionsPanel imports from ../../reads/ballots.js and selectActiveElection from ../../reads/elections.js', () => {
-	assert.match(STRIPPED['BallotsQuestionsPanel.tsx'], /from ['"]\.\.\/\.\.\/reads\/ballots\.js['"]/);
-	assert.match(STRIPPED['BallotsQuestionsPanel.tsx'], /selectActiveElection[\s\S]*from ['"]\.\.\/\.\.\/reads\/elections\.js['"]/);
+test('BallotsQuestionsPanel imports readBallots and readQuestions, and selectActiveElection, from @votetorrent/web-data/officer', () => {
+	assert.match(STRIPPED['BallotsQuestionsPanel.tsx'], /readBallots[\s\S]*readQuestions[\s\S]*from ['"]@votetorrent\/web-data\/officer['"]/);
+	assert.match(STRIPPED['BallotsQuestionsPanel.tsx'], /selectActiveElection[\s\S]*from ['"]@votetorrent\/web-data\/officer['"]/);
 });
 
 // LifecyclePill's own null-phase-guard assertion moved to
