@@ -17,7 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { dashboardRoot, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { dashboardRoot, dashboardSrc, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 const APP_ROOT = dashboardRoot();
 
@@ -92,9 +92,16 @@ test('module-format contract (C1): no .ts/.tsx file exists under a tier-1-reacha
 	// Repo-relative dashboard dirs, plus the shared package's own lifecycle
 	// dir since election-phase.js followed there in 53-05 (D-01/D-02) --
 	// ONLY that one package directory: src/components/ holds .tsx
-	// deliberately and must not be added here.
-	const GOVERNED_DIRS = ['src/db', 'src/transport', 'src/auth', 'src/i18n', 'src/lifecycle'];
-	const GOVERNED_ABS_DIRS = [uiWebSrc('lifecycle')];
+	// deliberately and must not be added here. src/db is resolver-derived
+	// (GOVERNED_ABS_DIRS) rather than a repo-relative string here, because
+	// D-03 moves it to packages/web-data in 54-03 (54-01) -- this form makes
+	// that a one-argument flip to webDataSrc() rather than a list
+	// restructure. Do not add webDataSrc() to GOVERNED_ABS_DIRS yet -- the
+	// directory does not exist until 54-03 and the entry would be silently
+	// skipped by the existsSync guard below, which is a guarantee that
+	// covers nothing (53-D06).
+	const GOVERNED_DIRS = ['src/transport', 'src/auth', 'src/i18n', 'src/lifecycle'];
+	const GOVERNED_ABS_DIRS = [uiWebSrc('lifecycle'), dashboardSrc('db')];
 
 	/** @param {string[]} paths */
 	function findTsViolations(paths) {
@@ -102,11 +109,14 @@ test('module-format contract (C1): no .ts/.tsx file exists under a tier-1-reacha
 	}
 
 	// Positive control FIRST — a guard that cannot fire is not a guard.
-	const syntheticViolations = findTsViolations(['src/db/open-db.ts', 'src/db/open-db.js']);
+	// Deliberately built on a governed directory that is NOT moving in 54-03
+	// (src/transport), so Task 3's derivation-discipline scan can run with
+	// zero exemptions and no allowlist to rot.
+	const syntheticViolations = findTsViolations(['src/transport/tx.ts', 'src/transport/tx.js']);
 	assert.deepEqual(
 		syntheticViolations,
-		['src/db/open-db.ts'],
-		'positive control failed: the predicate must flag a synthetic .ts path under src/db/',
+		['src/transport/tx.ts'],
+		'positive control failed: the predicate must flag a synthetic .ts path under src/transport/',
 	);
 
 	/** @param {string} dir @returns {string[]} */
