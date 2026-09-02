@@ -63,11 +63,18 @@ test('rung 4: the real `./tokens.css` subpath resolves to an existing file', () 
 	assert.ok(existsSync(resolvedPath), `expected ${resolvedPath} to exist`);
 });
 
-test('rung 5: the exports map is exactly three keys, in order, mapping to their expected targets', () => {
+test('rung 5: the exports map is exactly four keys, in order, mapping to their expected targets', () => {
+	// 53-05 (D-01/D-02) adds `./lifecycle` for election-phase.js, on the
+	// plain-JS side of the split (see src/index.js's header for why it is a
+	// separate entry rather than a `.` re-export): it does not merge `.` and
+	// `./components`, so this rung's other assertions (import via `.`,
+	// ERR_MODULE_NOT_FOUND via `./components`, tokens.css resolving) all stay
+	// true unchanged -- only the key count and order grow by one.
 	const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8'));
-	assert.deepEqual(Object.keys(pkg.exports), ['.', './components', './tokens.css']);
+	assert.deepEqual(Object.keys(pkg.exports), ['.', './components', './lifecycle', './tokens.css']);
 	assert.equal(pkg.exports['.'], './src/index.js');
 	assert.equal(pkg.exports['./components'], './src/components.js');
+	assert.equal(pkg.exports['./lifecycle'], './src/lifecycle/election-phase.js');
 	assert.equal(pkg.exports['./tokens.css'], './src/tokens.css');
 });
 

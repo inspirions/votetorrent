@@ -56,6 +56,25 @@
  * transcribed here. They belong to `apps/VoteTorrentAuthority`'s own
  * `src/i18n/index.ts` and are owned by plan 50-07. A web bundle must not ship a React
  * Native screen's strings.
+ *
+ * 53-05's key-naming resolution (D-07 vs D-09, this plan's own open question,
+ * resolved in favor of D-07 for this one shared component): (1) the D-07
+ * `variant` prop resolves `advisory.<variant>.body` by TEMPLATE LITERAL, not
+ * a lookup map; (2) `gate.advisoryDisclosure` was RENAMED to
+ * `advisory.authority.body`, its value carried across byte-identical; (3)
+ * this is the ONLY key renamed by this plan -- the other 72 keep D-09's
+ * byte-identical guarantee untouched; (4) the template form is chosen over a
+ * lookup map because a map admits a one-token `?? 'advisory.authority.body'`
+ * fallback that would silently restore the authority voice on the public
+ * app, and no test in this repo could see it -- a template literal has
+ * nowhere to put that token; (5) `advisory.*` is a variant-paired namespace
+ * owned by ONE shared component, whose two members are the two voices of
+ * one sentence and neither exists without the other -- `public.*` remains
+ * the public app's own namespace for keys with NO authority sibling; (6) the
+ * deferred `authority.*`/`public.*`/`shared.*` re-prefixing declined at D-09
+ * remains declined -- this is a scoped exception for one paired variant, not
+ * the first stone of that rewrite. `50-UI-SPEC.md` is NOT the authority for
+ * the `advisory.*` pair; this file's own header is.
  */
 /** @type {Record<string, string>} */
 export const COPY = Object.freeze({
@@ -182,7 +201,13 @@ export const COPY = Object.freeze({
 	'chrome.moreOptionsAriaLabel': 'More options',
 
 	// Authorization gate and preview control
-	'gate.advisoryDisclosure':
+	//
+	// `advisory.authority.body` was `gate.advisoryDisclosure` before 53-05 --
+	// renamed, value byte-identical, under D-07 (see the header note below).
+	// Its sibling `advisory.public.body` arrives fresh, authored for a
+	// no-login audience, when 53-07 mounts the public shell (D-08) -- it is
+	// deliberately absent until then.
+	'advisory.authority.body':
 		"What's shown here follows the officer's permissions, but this dashboard makes no changes and enforces nothing on its own — anyone with this browser's data has the whole database regardless of what's visible.",
 	'gate.badgeReal': 'answered by the database',
 	'gate.badgeSimulated': 'simulated scope set',

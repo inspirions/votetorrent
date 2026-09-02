@@ -11,10 +11,16 @@
  * that a consumer never reaches this subpath from a bundler-less `node --test`
  * tier — not a bug to be "fixed" by merging this barrel into `./index.js`.
  *
- * This barrel re-exports nothing yet. `AdvisoryDisclosure` and `LifecyclePill`
- * arrive in 53-05 (D-01/D-02/D-07), each behind its own `./components/Name.js`
+ * `AdvisoryDisclosure`, `LifecyclePill` and `DetailsToggle` landed in 53-05
+ * (D-01/D-02/D-07/D-12), each behind its own `./components/Name.js`
  * specifier backed by a same-named `.tsx` file — never a `.js` file on disk,
- * or the ERR_MODULE_NOT_FOUND proof stops being real.
+ * or the ERR_MODULE_NOT_FOUND proof stops being real. Only the runtime
+ * value is re-exported here, not the prop-type interfaces: this file has a
+ * plain `.js` extension and a bundler's default JS/JSX loader does not parse
+ * TypeScript-only syntax such as `export type { ... }`, so a type-only
+ * re-export would break parsing rather than merely being redundant.
  */
 
-export {};
+export { AdvisoryDisclosure } from './components/AdvisoryDisclosure.js';
+export { LifecyclePill } from './components/LifecyclePill.js';
+export { DetailsToggle } from './components/DetailsToggle.js';

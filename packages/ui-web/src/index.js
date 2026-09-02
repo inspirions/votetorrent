@@ -11,13 +11,21 @@
  * `./components` subpath (see src/components.js), never here.
  *
  * `copy.js` (the shared copy table, D-05/D-09/D-10/D-11) landed in 53-04 and is
- * re-exported below. Still pending, later Phase 53 work, not this plan's:
- *   - `lifecycle/election-phase.js` lands in 53-05 (D-01/D-02/D-07).
+ * re-exported below. `lifecycle/election-phase.js` landed in 53-05
+ * (D-01/D-02/D-07) but is deliberately NOT re-exported here -- see below.
  *
  * Do not merge this barrel with `./components` — the split under `./exports`
  * in package.json is what makes `ERR_MODULE_NOT_FOUND` the correct, gated
  * behaviour for a `.tsx` re-export reached from plain Node, rather than a
  * silent success that only breaks a consumer at build/typecheck time.
+ *
+ * `election-phase.js`'s only external dependency is
+ * `@votetorrent/vote-engine/browser` -- a database engine. Re-exporting it
+ * through THIS barrel would load that engine in every tier-1 process that
+ * imports `COPY` (measured 0.30-0.44s vs 0.02s bare) for the benefit of only
+ * two bundled `.tsx` consumers. It instead lives behind its own plain-JS
+ * `./lifecycle` exports entry (package.json) -- still Node-importable with
+ * no bundler, just not charged to every consumer of this barrel.
  */
 
 export { COPY, t } from './copy.js';

@@ -7,6 +7,7 @@
 	"exports": {
 		".": "./src/index.js",
 		"./components": "./src/components.js",
+		"./lifecycle": "./src/lifecycle/election-phase.js",
 		"./tokens.css": "./src/tokens.css"
 	},
 	"sideEffects": [
@@ -16,6 +17,9 @@
 		"test": "node --test --test-concurrency=1 test/*.test.mjs",
 		"typecheck": "tsc --noEmit",
 		"clean": "rm -rf node_modules"
+	},
+	"dependencies": {
+		"@votetorrent/vote-engine": "workspace:*"
 	},
 	"peerDependencies": {
 		"react": "19.0.0",
