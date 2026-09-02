@@ -19,8 +19,19 @@
  * plain `.js` extension and a bundler's default JS/JSX loader does not parse
  * TypeScript-only syntax such as `export type { ... }`, so a type-only
  * re-export would break parsing rather than merely being redundant.
+ *
+ * `packageReactIdentity` (53-09, D-19) is NOT a shared component — it is the
+ * package-side React reference publisher the D-19 identity gate compares a
+ * consumer's own React against. It lives at `./react-identity.js`, not
+ * `./components/Name.js`, and deliberately does not match
+ * `run-ui-gates.mjs`'s `parseComponentExportNames` pattern (which only
+ * matches the `./components/Name.js` specifier form): it must never be
+ * treated as a "shared component" subject to the `shared-components-mounted`
+ * rung's mount-and-render check. It belongs on this bundler-only tier for
+ * the same reason as the three components above — it imports `react`.
  */
 
 export { AdvisoryDisclosure } from './components/AdvisoryDisclosure.js';
 export { LifecyclePill } from './components/LifecyclePill.js';
 export { DetailsToggle } from './components/DetailsToggle.js';
+export { packageReactIdentity } from './react-identity.js';

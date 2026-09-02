@@ -34,16 +34,65 @@
  * `mounted` from the `[data-ui-gate]` attribute values ACTUALLY FOUND IN THE
  * DOCUMENT — never from this file's own static render list, so a component
  * that threw during render is reported ABSENT rather than asserted present.
+ *
+ * 53-09 ADDITION — the D-19 React-identity rung's subject. A SEPARATE
+ * `[data-ui-gate="hook-root"]` region is mounted in its OWN React root (a
+ * container `appendChild`-ed to `document.body`, never nested under `#root`)
+ * so a hook-dispatcher render throw in that region cannot unmount or blank
+ * the token-probe/presentational region above — the structural half of the
+ * measured 19/19 → 8/12 PARTIAL failure signature (the runner-side half is
+ * `run-ui-gates.mjs`'s per-rung `try`/`catch`). It mounts `DetailsToggle` a
+ * SECOND time, independent of `DetailsToggleHarness` above (unchanged, still
+ * the `shared-components-mounted` rung's subject): its one `.dt-toggle`
+ * button is what the identity rung clicks, and its body — rendered only
+ * while open — is what makes that click change `[data-ui-gate="hook-root"]`'s
+ * own `textContent`, the real state transition the rung asserts rather than
+ * a mere mount. `computeReactIdentity()` compares this app's own `react`
+ * import against `@votetorrent/ui-web/components`'s `packageReactIdentity()`
+ * and is published as `window.__UI_GATE__.identity`.
  */
 import { StrictMode, useEffect, useRef, useState } from 'react';
+import * as AppReact from 'react';
 import { createRoot } from 'react-dom/client';
 import '../../src/app.css';
-import { AdvisoryDisclosure, LifecyclePill, DetailsToggle } from '@votetorrent/ui-web/components';
+import { AdvisoryDisclosure, LifecyclePill, DetailsToggle, packageReactIdentity } from '@votetorrent/ui-web/components';
 
 const win = window as unknown as Record<string, unknown>;
 
 /** Frame budget for the settle poll below — generous, still bounded. */
 const SETTLE_FRAMES = 60;
+
+/**
+ * React 19's client-internals holder property name — the dispatcher holder
+ * a real hook call reads through. See
+ * `packages/ui-web/src/react-identity.js`'s own header for the measured
+ * reason comparing THIS (not the version string, not a namespace-object
+ * identity) is the sound measure.
+ */
+const CLIENT_INTERNALS_KEY = '__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE';
+
+/**
+ * `sameUseState`/`sameInternals` are the two SOUND measures; the version
+ * string and the namespace-object equality are DECOYS, computed and
+ * published only so the runner's run log can show them true even when
+ * identity reads false — see `react-identity.js`'s own header for the
+ * measured reasons neither may ever gate a verdict.
+ */
+function computeReactIdentity() {
+	const pkg = packageReactIdentity();
+	let appInternals: unknown = null;
+	try {
+		appInternals = (AppReact as unknown as Record<string, unknown>)[CLIENT_INTERNALS_KEY] ?? null;
+	} catch {
+		appInternals = null;
+	}
+	return {
+		sameUseState: AppReact.useState === pkg.useState,
+		sameInternals: appInternals != null && pkg.internals != null && appInternals === pkg.internals,
+		versionsMatch: AppReact.version === pkg.version,
+		sameNamespace: (AppReact as unknown) === pkg.reactNamespace,
+	};
+}
 
 function settle(maxFrames: number): Promise<void> {
 	return new Promise((resolve) => {
@@ -94,6 +143,24 @@ function UiGateHarness() {
 	);
 }
 
+/**
+ * The hook-root region (53-09, D-19) — mounted in ITS OWN root, separate
+ * from `UiGateHarness`'s (see this file's header). Renders `DetailsToggle`
+ * a second time: its single `.dt-toggle` button is the "exactly one button"
+ * the identity rung clicks, and its body — rendered only while open — is
+ * what makes that click change `[data-ui-gate="hook-root"]`'s own
+ * `textContent`.
+ */
+function HookRootHarness() {
+	return (
+		<div data-ui-gate="hook-root">
+			<DetailsToggle summary={<span>hook-root toggle</span>}>
+				<p>hook-root body content for the D-19 identity gate&apos;s click assertion.</p>
+			</DetailsToggle>
+		</div>
+	);
+}
+
 async function main() {
 	const container = document.getElementById('root');
 	let renderError: string | null = null;
@@ -113,6 +180,24 @@ async function main() {
 		renderError = 'ui-gate.html is missing #root';
 	}
 
+	// The hook-root region's own SEPARATE root and container — appended to
+	// document.body, never nested under #root, so a render throw here cannot
+	// unmount or blank the region above (this file's header). A throw here
+	// is deliberately swallowed: identity:hook-mounted reads the DOM
+	// directly and reports this region ABSENT rather than asserting it
+	// present, and the readout below must still publish either way.
+	const hookRootContainer = document.createElement('div');
+	document.body.appendChild(hookRootContainer);
+	try {
+		createRoot(hookRootContainer).render(
+			<StrictMode>
+				<HookRootHarness />
+			</StrictMode>,
+		);
+	} catch {
+		// intentionally swallowed — see comment above.
+	}
+
 	await settle(SETTLE_FRAMES);
 
 	const mounted = [...document.querySelectorAll('[data-ui-gate]')]
@@ -127,6 +212,7 @@ async function main() {
 			component: 'DetailsToggle',
 			initial: detailsButton?.getAttribute('aria-expanded') === 'true',
 		},
+		identity: computeReactIdentity(),
 		error: renderError,
 	});
 	win.__UI_GATE_DONE__ = true;

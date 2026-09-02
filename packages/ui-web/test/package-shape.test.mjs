@@ -116,9 +116,17 @@ test('rung 7: react/react-dom never appear in the root manifest, and @types/reac
 	assert.equal(rootPkg.resolutions?.['@types/react'], '19.2.17');
 });
 
-test('rung 8: every barrel re-export specifier has a sibling .tsx (never a sibling .js), and the two counts agree', () => {
+test('rung 8: every ./components/ barrel re-export specifier has a sibling .tsx (never a sibling .js), and the two counts agree', () => {
+	// Scoped to `./components/*.js` specifiers only (53-09): components.js
+	// also re-exports `packageReactIdentity` from `./react-identity.js`, a
+	// genuinely plain-JS module with no .tsx backing and deliberately outside
+	// the `./components/` subfolder this rung governs — an unscoped regex
+	// would wrongly demand a .tsx sibling for it and wrongly flag the real
+	// react-identity.js file as a "literal .js file defeating the
+	// ERR_MODULE_NOT_FOUND proof", which it does not participate in (it is
+	// plain JS on both the source and the resolved-specifier side by design).
 	const componentsSrc = readFileSync(path.join(PACKAGE_ROOT, 'src', 'components.js'), 'utf8');
-	const specifierRe = /from\s+['"](\.\/[^'"]+\.js)['"]/g;
+	const specifierRe = /from\s+['"](\.\/components\/[^'"]+\.js)['"]/g;
 	const specifiers = [...componentsSrc.matchAll(specifierRe)].map((m) => m[1]);
 
 	const componentsDir = path.join(PACKAGE_ROOT, 'src', 'components');

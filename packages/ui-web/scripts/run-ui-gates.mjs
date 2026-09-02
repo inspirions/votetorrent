@@ -81,10 +81,14 @@
  *
  * `import { chromium } from 'playwright'` — the FULL package, never the
  * lighter core-only sibling, and never a hardcoded system-Chrome binary path
- * (the spikes' macOS Chrome path does not exist on `ubuntu-24.04`). No
- * `channel: 'chrome'` option — `chromium.launch({ headless: true })` works
- * locally at HEAD; the CONTEXT.md caveat about Playwright not running
- * locally is stale (53-08-PLAN.md constraint 3).
+ * (the spikes' macOS Chrome path does not exist on `ubuntu-24.04`). Never
+ * request a named browser channel such as the real-Chrome one — plain
+ * `chromium.launch({ headless: true })` works locally at HEAD; the
+ * CONTEXT.md caveat about Playwright not running locally is stale
+ * (53-08-PLAN.md constraint 3). Reworded (53-09) to avoid this file's own
+ * acceptance criterion tripping on its own header prose — see
+ * `gate-source-integrity.test.mjs`'s comment-stripping discipline for the
+ * same class of self-tripping check this criterion's grep is.
  */
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
@@ -112,7 +116,33 @@ export const RUNG_IDS = Object.freeze([
 	'shared-components-mounted',
 	'token-declared-values',
 	'base-rule-used-values',
+	'identity:hook-mounted',
+	'identity:hook-interaction',
+	'identity:same-use-state',
+	'identity:same-internals',
+	'identity:no-dispatcher-error',
 ]);
+
+/**
+ * The React-identity rung group (D-19, 53-09). Every rung id above is a
+ * STATIC string literal, never a template literal interpolating a value
+ * under test — `gate-source-integrity.test.mjs`'s rung (2) enforces this
+ * structurally, and it applies to these five rungs exactly as it already
+ * applies to the four 53-08 landed.
+ *
+ * A duplicate React is harmless for a purely presentational component; it
+ * bites only at the HOOK DISPATCHER a real `useState` call reads through
+ * (measured signature: `Cannot read properties of null (reading
+ * 'useState')`, 19/19 → 8/12 — see this file's own header). The mount rung
+ * below cannot see that failure by itself: a duplicate React still renders
+ * a hook-bearing component's initial output correctly in every variant
+ * spike 089 measured. The REAL click in `identity:hook-interaction` is what
+ * makes this gate see anything a mount alone could not — it drives a live
+ * state transition through the dispatcher itself, not merely the initial
+ * render.
+ */
+const DISPATCHER_NULL_ERROR_RE =
+	/Cannot read properties of null \(reading '(useState|useRef|useEffect|useContext|useMemo)'\)/;
 
 /** Per-app layout defaults — see this file's header "PER-APP LAYOUT" note. */
 const DEFAULT_GATE_CONFIG_REL = 'test/browser/vite.gate.config.ts';
@@ -330,7 +360,18 @@ async function runOnPage(page, url, label) {
 
 	console.log(`\n===== ${label} =====`);
 	for (const l of lines) console.log(l);
-	return readout;
+	// A missing readout is a DISTINCT verdict from a partial one (a readout
+	// that published but has some rungs failed): a harness that never got far
+	// enough to publish ANYTHING (a whole-page crash before __UI_GATE_DONE__
+	// was ever set) reads "NO RESULT" here, exactly as run-headless.mjs's own
+	// runOnPage already distinguishes the two. Preserving this distinction is
+	// what lets identity:hook-mounted/hook-interaction fail while
+	// harness-readout, token-declared-values and base-rule-used-values still
+	// pass — the measured 19/19 → 8/12 PARTIAL signature (d)(ii) requires.
+	if (readout == null) {
+		console.log('NO RESULT');
+	}
+	return { readout, lines };
 }
 
 /**
@@ -496,6 +537,102 @@ async function runTokenRungs(page) {
 	return tokens.size;
 }
 
+/**
+ * The five `identity:` rungs (D-19, 53-09). Every rung is wrapped in its own
+ * `try`/`catch` and records a failure rather than throwing — a throwing rung
+ * must never suppress the rungs after it, which is the structural half of
+ * the measured PARTIAL failure signature (this file's header "THE INVERSION
+ * SEAM" note; the harness-side half is each harness's own separate root for
+ * the hook-root region).
+ *
+ * Reads `readout.identity` for the four fields the harness publishes: the
+ * two SOUND measures (a hook-function-reference equality and a client-
+ * internals-holder equality) plus a version-string equality and a
+ * namespace-object equality, both carried as decoys and printed in the run
+ * log below by this function ONLY for that logging — never referenced in
+ * any rung's pass/fail condition here.
+ *
+ * @param {import('playwright').Page} page
+ * @param {any} readout
+ * @param {string[]} consoleLines
+ */
+async function runIdentityRungs(page, readout, consoleLines) {
+	try {
+		const mounted = await page.evaluate(() => {
+			const el = document.querySelector('[data-ui-gate="hook-root"]');
+			return el != null && el.childElementCount > 0 && (el.textContent ?? '').trim().length > 0;
+		});
+		record(
+			'identity:hook-mounted',
+			mounted,
+			mounted ? 'hook-root region present with non-empty content' : 'hook-root region missing, empty, or has zero children',
+		);
+	} catch (err) {
+		record('identity:hook-mounted', false, `threw: ${String(/** @type {any} */ (err)?.message ?? err)}`);
+	}
+
+	try {
+		const before = await page.evaluate(() => document.querySelector('[data-ui-gate="hook-root"]')?.textContent ?? '');
+		await page.click('[data-ui-gate="hook-root"] button');
+		await page.waitForFunction(
+			(prevText) => (document.querySelector('[data-ui-gate="hook-root"]')?.textContent ?? '') !== prevText,
+			before,
+			{ timeout: 10_000 },
+		);
+		const after = await page.evaluate(() => document.querySelector('[data-ui-gate="hook-root"]')?.textContent ?? '');
+		const passed = before.length > 0 && after.length > 0 && after !== before;
+		record(
+			'identity:hook-interaction',
+			passed,
+			passed
+				? `real click changed hook-root text (before=${JSON.stringify(before)}, after=${JSON.stringify(after)})`
+				: `before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+		);
+	} catch (err) {
+		record('identity:hook-interaction', false, `threw: ${String(/** @type {any} */ (err)?.message ?? err)}`);
+	}
+
+	try {
+		const sameUseState = readout?.identity?.sameUseState === true;
+		record('identity:same-use-state', sameUseState, `identity.sameUseState=${JSON.stringify(readout?.identity?.sameUseState)}`);
+	} catch (err) {
+		record('identity:same-use-state', false, `threw: ${String(/** @type {any} */ (err)?.message ?? err)}`);
+	}
+
+	try {
+		const sameInternals = readout?.identity?.sameInternals === true;
+		record('identity:same-internals', sameInternals, `identity.sameInternals=${JSON.stringify(readout?.identity?.sameInternals)}`);
+	} catch (err) {
+		record('identity:same-internals', false, `threw: ${String(/** @type {any} */ (err)?.message ?? err)}`);
+	}
+
+	try {
+		const offending = consoleLines.filter((l) => DISPATCHER_NULL_ERROR_RE.test(l));
+		const passed = offending.length === 0;
+		record(
+			'identity:no-dispatcher-error',
+			passed,
+			passed ? 'no null-dispatcher error observed' : `observed: ${offending.join(' | ')}`,
+		);
+	} catch (err) {
+		record('identity:no-dispatcher-error', false, `threw: ${String(/** @type {any} */ (err)?.message ?? err)}`);
+	}
+
+	// --- run-log printing block: the two DECOY fields, logged for
+	// observability only. Neither name may appear in a rung's pass/fail
+	// condition above, in a ternary, or in a boolean expression anywhere in
+	// this file outside this block — `gate-source-integrity.test.mjs`-style
+	// scanning (grep) is what enforces that structurally.
+	const decoyVersionsMatch = readout?.identity?.versionsMatch;
+	const decoySameNamespace = readout?.identity?.sameNamespace;
+	console.log(
+		`[identity] decoy versionsMatch=${JSON.stringify(decoyVersionsMatch)} — recorded only; both React copies report the identical version string in every broken variant spike 089 measured, so this can never gate a verdict.`,
+	);
+	console.log(
+		`[identity] decoy sameNamespace=${JSON.stringify(decoySameNamespace)} — recorded only; a namespace-object comparison false-negatives when a bundler hands two importers different wrappers around one module, so this can never gate a verdict.`,
+	);
+}
+
 function printSummaryTable() {
 	console.log('\n--- ui-gates summary ---');
 	for (const r of rungs) {
@@ -599,11 +736,12 @@ async function main() {
 
 		const page = await browser.newPage();
 		const url = `${serverHandle.url}/${entryRel}`;
-		const readout = await runOnPage(page, url, `app=${path.basename(appDir)}`);
+		const { readout, lines } = await runOnPage(page, url, `app=${path.basename(appDir)}`);
 
 		runHarnessReadoutRung(readout);
 		await runSharedComponentsRung(page, readout);
 		const tokenCount = await runTokenRungs(page);
+		await runIdentityRungs(page, readout, lines);
 
 		await page.close();
 
