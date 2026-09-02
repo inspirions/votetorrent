@@ -367,12 +367,34 @@ test('election-ops.css has no raw px value outside a var(--space-*) reference', 
 
 // --- Each panel imports its own read module ----------------------------------
 
-test('RegistrationsPanel imports from @votetorrent/web-data/officer', () => {
+test('RegistrationsPanel imports its five registration reads, and selectActiveElection, from @votetorrent/web-data/officer', () => {
 	assert.match(STRIPPED['RegistrationsPanel.tsx'], OFFICER_IMPORT_RE);
+	// Naming the functions, not just the specifier: the collapse from two
+	// relative specifiers to one bare one must not cost this test its ability
+	// to say WHICH read surface the panel pulls.
+	for (const name of [
+		'readRegistrantStatusBreakdown',
+		'readRegistrationRequestBreakdown',
+		'readRegistrantRoster',
+		'readRegistrationSurfaceCounts',
+		'hasAnyRegistrationData',
+		'selectActiveElection',
+	]) {
+		assert.ok(
+			officerNamedImports(STRIPPED['RegistrationsPanel.tsx']).includes(name),
+			`RegistrationsPanel.tsx no longer imports ${name} from @votetorrent/web-data/officer`,
+		);
+	}
 });
 
-test('ElectionsPanel imports from @votetorrent/web-data/officer', () => {
+test('ElectionsPanel imports its four election reads from @votetorrent/web-data/officer', () => {
 	assert.match(STRIPPED['ElectionsPanel.tsx'], OFFICER_IMPORT_RE);
+	for (const name of ['selectActiveElection', 'readElectionOverview', 'readElectionPolicies', 'countElections']) {
+		assert.ok(
+			officerNamedImports(STRIPPED['ElectionsPanel.tsx']).includes(name),
+			`ElectionsPanel.tsx no longer imports ${name} from @votetorrent/web-data/officer`,
+		);
+	}
 });
 
 test('BallotsQuestionsPanel imports readBallots and readQuestions, and selectActiveElection, from @votetorrent/web-data/officer', () => {
