@@ -1,98 +1,27 @@
 /**
- * Tier-1 assertions over `src/i18n/copy.js`'s `COPY` table and `t()` helper.
+ * Tier-1 assertions over the DASHBOARD'S USE of `@votetorrent/ui-web`'s `COPY` table
+ * and `t()` helper -- coupling the table to `BOOTSTRAP_PHASES`, `copyKeysForOutcome`
+ * and `Bootstrap.tsx`'s own source wiring, plus the dashboard-tree source scans.
  *
- * Browser-free, no display -- plain node:test. Each test below corresponds 1:1 to a
- * `<behavior>` bullet in 50-04-PLAN.md Task 2.
+ * The table-and-`t()`-only assertions (the ones whose SUBJECT is the table itself,
+ * including the D-25 refusal-family block and the D-10 header-contract assertions)
+ * moved to `packages/ui-web/test/copy.test.mjs` in 53-04 Task 3 (D-25) -- this file
+ * keeps only what couples `COPY`/`t()` to a dashboard module or reads the dashboard's
+ * own source tree.
+ *
+ * Browser-free, no display -- plain node:test.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardRoot, dashboardSrc, moduleUrl, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { COPY, t } from '@votetorrent/ui-web';
 
-// The specifier passed to `import()` is now a runtime-computed `file://` URL
-// (moduleUrl(dashboardSrc(...))) rather than a literal relative string, so
-// TypeScript can no longer resolve the imported module's shape from the call
-// site alone -- the destructured bindings would silently widen to `any`. The
-// `@type {typeof import('literal/path')}` JSDoc cast below is erased at
-// runtime (the actual bytes still come from the resolver-built URL); it only
-// restores the static type that the literal specifier used to give for free.
-const { COPY, t } = /** @type {typeof import('@votetorrent/ui-web')} */ (
-	await import('@votetorrent/ui-web')
-);
 const { BOOTSTRAP_PHASES, BOOTSTRAP_OUTCOME_CODES, copyKeysForOutcome } =
 	/** @type {typeof import('../../src/lifecycle/bootstrap.js')} */ (
 		await import(moduleUrl(dashboardSrc('lifecycle', 'bootstrap.js')))
 	);
-
-const APP_ROOT = dashboardRoot();
-
-test('t("bootstrap.cta") returns exactly "Redeem Code"', () => {
-	assert.equal(t('bootstrap.cta'), 'Redeem Code');
-});
-
-test('t("gate.badgeReal") and t("gate.badgeSimulated") return the D-18 binding wording', () => {
-	assert.equal(t('gate.badgeReal'), 'answered by the database');
-	assert.equal(t('gate.badgeSimulated'), 'simulated scope set');
-});
-
-test('t("network.forgetConfirmBody", {...}) interpolates and leaves no residual {{', () => {
-	const result = t('network.forgetConfirmBody', { authorityName: 'Acme County' });
-	assert.ok(result.includes('Acme County'), 'expected interpolated value in output');
-	assert.ok(!result.includes('{{'), 'expected no residual {{ placeholder marker');
-});
-
-test('t("does.not.exist") throws an Error naming the missing key', () => {
-	assert.throws(
-		() => t('does.not.exist'),
-		(err) => err instanceof Error && err.message.includes('does.not.exist'),
-	);
-});
-
-test('t("network.forgetConfirmBody") with no params throws naming the unresolved placeholder', () => {
-	assert.throws(
-		() => t('network.forgetConfirmBody'),
-		(err) => err instanceof Error && err.message.includes('authorityName'),
-	);
-});
-
-test('every value in COPY is a non-empty string', () => {
-	for (const [key, value] of Object.entries(COPY)) {
-		assert.equal(typeof value, 'string', `COPY.${key} must be a string`);
-		assert.ok(value.length > 0, `COPY.${key} must be non-empty`);
-	}
-});
-
-test('no COPY value contains a GSD decision ID (D-\\d{2})', () => {
-	const pattern = /\bD-\d{2}\b/;
-	for (const [key, value] of Object.entries(COPY)) {
-		assert.ok(!pattern.test(value), `COPY.${key} must not contain a decision ID: "${value}"`);
-	}
-});
-
-test('no COPY value contains a GSD phase number ("Phase \\d+")', () => {
-	const pattern = /\bPhase\s+\d+\b/;
-	for (const [key, value] of Object.entries(COPY)) {
-		assert.ok(!pattern.test(value), `COPY.${key} must not contain a phase number: "${value}"`);
-	}
-});
-
-test('no COPY value matches /read-only/i (D-17: no read-only panel state exists)', () => {
-	const pattern = /read-only/i;
-	for (const [key, value] of Object.entries(COPY)) {
-		assert.ok(!pattern.test(value), `COPY.${key} must not mention "read-only": "${value}"`);
-	}
-});
-
-test('COPY is frozen -- assigning a new key throws in strict mode', () => {
-	// COPY's JSDoc type is `Record<string, string>`, which TS permits assigning
-	// into via its index signature -- this is a RUNTIME check of Object.freeze's
-	// strict-mode behavior, not a compile-time one, so no @ts-expect-error is
-	// expected here.
-	assert.throws(() => {
-		COPY.__newKey__ = 'nope';
-	});
-});
 
 test('every BOOTSTRAP_PHASES member has a matching bootstrap.phase.<value> key in COPY, derived mechanically -- never a hand-written phase list', () => {
 	// The defect this pins: the screen rendered `{state.phase}` directly, so
@@ -116,128 +45,21 @@ test('t(`bootstrap.phase.<unmapped>`) throws naming the key, so a new phase cann
 	);
 });
 
-test('panelFrame.tierPill, panelFrame.sitePill and panelFrame.sitesPill exist and interpolate their placeholders', () => {
-	assert.equal(t('panelFrame.tierPill', { tier: '2' }), 'tier 2');
-	assert.equal(t('panelFrame.sitePill', { count: '1' }), '1 site');
-	assert.equal(t('panelFrame.sitesPill', { count: '3' }), '3 sites');
-});
+// ---------------------------------------------------------------------------
+// D-25: the status a service answers picks a refusal family. This local table
+// describes what `copyKeysForOutcome` (a DASHBOARD function) must select for
+// each status -- it is a selection-logic fixture, not a re-test of the moved
+// table's own content (that content -- the pairwise-different wording, the
+// per-family action token -- is asserted in packages/ui-web/test/copy.test.mjs
+// against the table itself).
+// ---------------------------------------------------------------------------
 
-// --- Surfaced swap-failure banner (CR-03, 50-22) --------------------------------
-
-test('t("network.swapErrorHeading") and t("network.swapErrorBody") resolve to non-empty strings with no residual {{', () => {
-	const heading = t('network.swapErrorHeading');
-	const body = t('network.swapErrorBody');
-	assert.ok(heading.length > 0, 'expected a non-empty heading');
-	assert.ok(body.length > 0, 'expected a non-empty body');
-	assert.ok(!heading.includes('{{'), 'expected no residual {{ placeholder marker in heading');
-	assert.ok(!body.includes('{{'), 'expected no residual {{ placeholder marker in body');
-});
-
-// ===========================================================================
-// D-25: the three refusal families
-//
-// The defect: `bootstrap.errorInvalidCodeBody` read "It may have expired or
-// already been used. Ask the officer for a new one." -- one sentence answering
-// three distinguishable service refusals plus a locally malformed paste. Every
-// assertion below exists to keep the three genuinely apart, because "three
-// different sentences that all say ask for a new code" is the same defect with
-// more words.
-//
-// The bar is THREE DIFFERENT NEXT ACTIONS, so each family declares an action
-// TOKEN and the suite proves that token appears in its own body and in neither
-// of the other two. That makes convergence mechanical to detect rather than a
-// matter of taste.
-//
-// Every assertion is driven off this one table, so a fourth refusal status
-// added later needs ONE row here rather than four scattered edits.
-// ===========================================================================
-
-/** @type {ReadonlyArray<{ status: string, headingKey: string, bodyKey: string, token: string }>} */
-const REFUSAL_FAMILIES = Object.freeze([
-	{
-		status: 'unknown',
-		headingKey: 'bootstrap.errorCodeNotRecognizedHeading',
-		bodyKey: 'bootstrap.errorCodeNotRecognizedBody',
-		// Re-checking the paste is the ONLY action that is right here and wrong
-		// for the other two -- a typo produces exactly this answer.
-		token: 'typo',
-	},
-	{
-		status: 'used',
-		headingKey: 'bootstrap.errorCodeAlreadyUsedHeading',
-		bodyKey: 'bootstrap.errorCodeAlreadyUsedBody',
-		// The fact that makes retrying pointless, as opposed to merely unlucky.
-		token: 'only once',
-	},
-	{
-		status: 'expired',
-		headingKey: 'bootstrap.errorCodeTimedOutHeading',
-		bodyKey: 'bootstrap.errorCodeTimedOutBody',
-		// Promptness: for a spent code delay is irrelevant, for a timed-out one
-		// delay is the whole cause. That is the genuinely different instruction.
-		token: 'right away',
-	},
+/** @type {ReadonlyArray<{ status: string, headingKey: string, bodyKey: string }>} */
+const REFUSAL_STATUS_KEYS = Object.freeze([
+	{ status: 'unknown', headingKey: 'bootstrap.errorCodeNotRecognizedHeading', bodyKey: 'bootstrap.errorCodeNotRecognizedBody' },
+	{ status: 'used', headingKey: 'bootstrap.errorCodeAlreadyUsedHeading', bodyKey: 'bootstrap.errorCodeAlreadyUsedBody' },
+	{ status: 'expired', headingKey: 'bootstrap.errorCodeTimedOutHeading', bodyKey: 'bootstrap.errorCodeTimedOutBody' },
 ]);
-
-test('D-25: every refusal heading and body resolves to a non-empty string carrying no residual {{', () => {
-	for (const family of REFUSAL_FAMILIES) {
-		for (const key of [family.headingKey, family.bodyKey]) {
-			const value = t(key);
-			assert.ok(value.length > 0, `expected ${key} to resolve non-empty`);
-			assert.ok(
-				!value.includes('{{'),
-				`${key} must carry no {{placeholder}} -- t() throws on an unresolved one, and this web bundle has no span value to interpolate (contract C4): "${value}"`,
-			);
-		}
-	}
-});
-
-test('D-25: the three refusal HEADINGS are pairwise different', () => {
-	const seen = new Map();
-	for (const family of REFUSAL_FAMILIES) {
-		const value = t(family.headingKey);
-		const collidesWith = seen.get(value);
-		assert.equal(
-			collidesWith,
-			undefined,
-			`${family.headingKey} and ${collidesWith} resolve to the SAME text ("${value}") -- two refusal conditions would read identically`,
-		);
-		seen.set(value, family.headingKey);
-	}
-	assert.equal(seen.size, 3, `expected 3 distinct headings, observed ${seen.size}`);
-});
-
-test('D-25: the three refusal BODIES are pairwise different', () => {
-	const seen = new Map();
-	for (const family of REFUSAL_FAMILIES) {
-		const value = t(family.bodyKey);
-		const collidesWith = seen.get(value);
-		assert.equal(
-			collidesWith,
-			undefined,
-			`${family.bodyKey} and ${collidesWith} resolve to the SAME text ("${value}") -- two refusal conditions would read identically`,
-		);
-		seen.set(value, family.bodyKey);
-	}
-	assert.equal(seen.size, 3, `expected 3 distinct bodies, observed ${seen.size}`);
-});
-
-test('D-25: each refusal body carries its OWN action token and neither of the other two -- three sentences, three next actions', () => {
-	for (const family of REFUSAL_FAMILIES) {
-		const body = t(family.bodyKey).toLowerCase();
-		assert.ok(
-			body.includes(family.token),
-			`${family.bodyKey} must name its own action token "${family.token}": "${t(family.bodyKey)}"`,
-		);
-		for (const other of REFUSAL_FAMILIES) {
-			if (other === family) continue;
-			assert.ok(
-				!body.includes(other.token),
-				`${family.bodyKey} contains "${other.token}", which belongs to ${other.bodyKey} -- the two families give the same next action`,
-			);
-		}
-	}
-});
 
 /** Every file under `src/`, so the conflated-sentence check below covers the
  * whole surface the behavior bullet names -- not just the copy table. A
@@ -264,11 +86,11 @@ test('D-25: the conflated sentence is REPLACED, not supplemented -- "already bee
 		readFileSync(copyFile, 'utf8').includes('Try another code'),
 		'matcher is inert -- the "Try another code" positive control was not found in copy.js',
 	);
-	const offenders = walkSrc(path.join(APP_ROOT, 'src')).filter((/** @type {string} */ file) =>
+	const offenders = walkSrc(dashboardSrc()).filter((/** @type {string} */ file) =>
 		readFileSync(file, 'utf8').includes('already been used'),
 	);
 	assert.deepEqual(
-		offenders.map((/** @type {string} */ f) => path.relative(APP_ROOT, f)),
+		offenders.map((/** @type {string} */ f) => path.relative(dashboardRoot(), f)),
 		[],
 		'the conflated sentence fragment "already been used" survives -- the old string must be replaced, not moved under a new key or quoted back into a comment',
 	);
@@ -299,12 +121,12 @@ test('D-25: bootstrap.errorInvalidCodeBody now answers the LOCAL malformed-paste
 // ---------------------------------------------------------------------------
 
 test('D-25: the three redemption statuses select three DIFFERENT copy families', () => {
-	const selected = REFUSAL_FAMILIES.map((family) => ({
+	const selected = REFUSAL_STATUS_KEYS.map((family) => ({
 		status: family.status,
 		keys: copyKeysForOutcome('code-refused', undefined, family.status),
 	}));
 	for (const { status, keys } of selected) {
-		const expected = REFUSAL_FAMILIES.find((f) => f.status === status);
+		const expected = REFUSAL_STATUS_KEYS.find((f) => f.status === status);
 		assert.ok(expected, `no declared family for status "${status}"`);
 		assert.equal(keys.headingKey, expected.headingKey, `status "${status}" selected the wrong heading key`);
 		assert.equal(keys.bodyKey, expected.bodyKey, `status "${status}" selected the wrong body key`);
@@ -415,7 +237,7 @@ function reachableCopy() {
 			continue;
 		}
 		if (outcome === 'code-refused') {
-			for (const status of REFUSAL_FAMILIES.map((f) => f.status)) collect(copyKeysForOutcome(outcome, undefined, status));
+			for (const status of REFUSAL_STATUS_KEYS.map((f) => f.status)) collect(copyKeysForOutcome(outcome, undefined, status));
 			continue;
 		}
 		collect(copyKeysForOutcome(outcome));
@@ -461,7 +283,7 @@ test('T-52-12-01: no copy an officer can reach through copyKeysForOutcome contai
 // paired with an inertness control.
 // ---------------------------------------------------------------------------
 
-const BOOTSTRAP_TSX_SOURCE = readFileSync(path.join(APP_ROOT, 'src', 'screens', 'Bootstrap.tsx'), 'utf8');
+const BOOTSTRAP_TSX_SOURCE = readFileSync(dashboardSrc('screens', 'Bootstrap.tsx'), 'utf8');
 const BOOTSTRAP_TSX_CODE = BOOTSTRAP_TSX_SOURCE.split('\n')
 	.filter((line) => {
 		const trimmed = line.trim();
