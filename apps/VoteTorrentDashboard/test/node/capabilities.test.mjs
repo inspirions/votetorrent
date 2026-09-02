@@ -17,7 +17,7 @@ import {
 	OUTPUT_PATH,
 } from '../../scripts/generate-capabilities.mjs';
 import { CAPABILITIES, PANEL_GROUPS, SCOPE_CODES } from '../../src/auth/capabilities.js';
-import { t } from '../../src/i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 
 const SCHEMA_TEXT = readFileSync(SCHEMA_PATH, 'utf8');
 

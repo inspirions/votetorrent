@@ -7,7 +7,7 @@
  * `../../src/screens/PanelGrid.tsx`, `PreviewAsProvider`/`PreviewAsControl`
  * from `../../src/screens/PreviewAsControl.tsx`, `AdvisoryDisclosure` from
  * `../../src/screens/AdvisoryDisclosure.tsx`, `t` from
- * `../../src/i18n/copy.js`.
+ * `@votetorrent/ui-web`.
  *
  * THE ORACLE IS `evaluate`, IMPORTED — NEVER RE-DERIVED. If this file ever
  * computed visibility any other way, the cross-check would be comparing the
@@ -32,7 +32,7 @@ import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import type { ScopeCode } from '../../src/auth/capabilities.js';
 import { createPreviewState, toggleScope, effectiveScopes } from '../../src/auth/preview-scopes.js';
 import { computeElectionPhase } from '../../src/lifecycle/election-phase.js';
-import { t } from '../../src/i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import { PanelGrid } from '../../src/screens/PanelGrid.js';
 import { PreviewAsProvider, PreviewAsControl } from '../../src/screens/PreviewAsControl.js';
 import { AdvisoryDisclosure } from '../../src/screens/AdvisoryDisclosure.js';

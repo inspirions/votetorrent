@@ -95,7 +95,7 @@ import { BOOTSTRAP_OUTCOME_CODES, redeemAndBootstrap } from '../../src/lifecycle
 import { deleteNetworkDb } from '../../src/db/open-db.js';
 import { findNetwork, listNetworks, removeNetwork, upsertNetwork } from '../../src/db/networks-registry.js';
 import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
-import { t } from '../../src/i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import { Bootstrap } from '../../src/screens/Bootstrap.js';
 import type { AlreadyBootstrappedContext } from '../../src/screens/Bootstrap.js';
 import { DashboardShell } from '../../src/screens/DashboardShell.js';

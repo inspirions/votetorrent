@@ -32,7 +32,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import type { Database } from '@quereus/quereus';
-import { t } from '../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import type { ScopeCode } from '../auth/capabilities.js';
 import { CAPABILITIES, PANEL_GROUPS } from '../auth/capabilities.js';
 import { readGrantedScopes } from '../auth/is-privileged.js';

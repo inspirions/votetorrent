@@ -11,7 +11,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
 
-import { COPY } from '../../src/i18n/copy.js';
+import { COPY } from '@votetorrent/ui-web';
 
 const PANELS_DIR = dashboardSrc('screens', 'panels');
 

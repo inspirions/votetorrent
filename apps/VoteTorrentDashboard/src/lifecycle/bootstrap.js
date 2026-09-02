@@ -63,7 +63,7 @@ export const BOOTSTRAP_PHASES = Object.freeze(
 /**
  * NOTE ON PHASE COPY LOOKUP: the screen (`Bootstrap.tsx`) looks up each
  * phase's copy directly, as `` t(`bootstrap.phase.${state.phase}`) `` --
- * `src/i18n/copy.js` carries one `bootstrap.phase.<value>` key per
+ * `packages/ui-web/src/copy.js` carries one `bootstrap.phase.<value>` key per
  * `BOOTSTRAP_PHASES` member, keyed by the exact machine value, so the lookup
  * is a mechanical template rather than a hand-maintained mapping table that
  * could drift out of step with this array. `t()` is total: it throws naming
@@ -363,7 +363,7 @@ const SCHEMA_MISMATCH_KEYS = Object.freeze({
 // payload-free record for a grace window past the code's own expiry (D-16) --
 // without that retention a late redemption would degrade to the weakest
 // answer, "no record here", and all three of these constants would collapse
-// back into one. The same argument is recorded in `src/i18n/copy.js` beside
+// back into one. The same argument is recorded in `packages/ui-web/src/copy.js` beside
 // the strings themselves; it is stated twice on purpose, because the mapping
 // and the copy are separately tempting to "simplify".
 //

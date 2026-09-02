@@ -15,7 +15,7 @@
 import type { ReactNode } from 'react';
 import type { Capability } from '../../auth/capabilities.js';
 import type { GateResult } from '../../auth/gate.js';
-import { t } from '../../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import './panels.css';
 
 export interface PanelFrameProps {

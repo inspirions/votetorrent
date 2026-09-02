@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { t } from '../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import { BOOTSTRAP_PHASES, copyKeysForOutcome, redeemAndBootstrap } from '../lifecycle/bootstrap.js';
 import type { RedeemAndBootstrapResult } from '../lifecycle/bootstrap.js';
 import { createRestBootstrapTransport } from '../transport/bootstrap-transport-client.js';

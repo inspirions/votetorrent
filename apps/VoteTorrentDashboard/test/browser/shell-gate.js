@@ -26,7 +26,7 @@ import { snapshotFreshness } from '../../src/lifecycle/freshness.js';
 import { attachNetworkDb, readRowCounts } from '../../src/db/reattach.js';
 import { closeNetworkDb, deleteNetworkDb, dbNameFor, listObjectStores } from '../../src/db/open-db.js';
 import { findNetwork } from '../../src/db/networks-registry.js';
-import { t } from '../../src/i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import { buildFixtureEnvelope, makeFakeTransport, FIXTURE_NETWORK_HASH } from '../fixtures/bootstrap-envelope.js';
 
 /** @type {any} */

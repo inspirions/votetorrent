@@ -2,8 +2,9 @@
 /**
  * lint-copy.mjs — the D-21 copy-discipline gate; the workspace's `lint` script.
  *
- * Enforces that every user-facing string lives in EXACTLY ONE file
- * (`src/i18n/copy.js`) and that the table itself obeys the standing rules:
+ * Enforces that every user-facing string lives in EXACTLY ONE table
+ * (`@votetorrent/ui-web`'s `packages/ui-web/src/copy.js`) and that the table
+ * itself obeys the standing rules:
  * frozen, non-empty string values, no GSD phase number or decision ID, and no
  * `read-only` panel-state string (contract C3 / D-17).
  *
@@ -35,7 +36,11 @@ import process from 'node:process';
 
 const ROOT = process.cwd();
 const SRC_DIR = path.join(ROOT, 'src');
-const COPY_FILE = path.join(SRC_DIR, 'i18n', 'copy.js');
+// The table no longer lives under this workspace's src/ — it moved to
+// packages/ui-web/src/copy.js (D-11, no shim). This is a display label for
+// the fail()/ok() messages below, not a filesystem path; it is imported by
+// its package specifier, not by a file:// URL.
+const COPY_FILE = '@votetorrent/ui-web (packages/ui-web/src/copy.js)';
 
 /** @param {string} message */
 function fail(message) {
@@ -75,7 +80,7 @@ ok('positive control matched the sentinel fixture — matcher is live.');
 // ---------------------------------------------------------------------------
 // 2. Import COPY and assert its own discipline.
 // ---------------------------------------------------------------------------
-const { COPY } = await import(`file://${COPY_FILE}`);
+const { COPY } = await import('@votetorrent/ui-web');
 
 if (!Object.isFrozen(COPY)) {
 	fail(`${COPY_FILE} exports a COPY object that is not frozen.`);
@@ -133,7 +138,7 @@ for (const file of srcFiles) {
 		if (contents.includes(sentinel)) {
 			process.stderr.write(
 				`[lint-copy] FAIL: ${file} contains the copy-table sentinel string "${sentinel}" — ` +
-					`copy must live only in ${path.relative(ROOT, COPY_FILE)}.\n`,
+					`copy must live only in ${COPY_FILE}.\n`,
 			);
 			leakFound = true;
 		}
@@ -142,7 +147,7 @@ for (const file of srcFiles) {
 if (leakFound) {
 	process.exit(1);
 }
-ok(`scanned ${srcFiles.length} file(s) under src/ (excluding copy.js) — no leaked copy sentinel found.`);
+ok(`scanned ${srcFiles.length} file(s) under src/ — no leaked copy sentinel found.`);
 
 // ---------------------------------------------------------------------------
 // 4. Authored prose rendered as a JSX text node, anywhere under src/.
@@ -297,7 +302,7 @@ for (const file of tsxFiles) {
 	for (const text of jsxProseIn(readFileSync(file, 'utf8'), file)) {
 		process.stderr.write(
 			`[lint-copy] FAIL: ${file} renders the authored text ${JSON.stringify(text)} as a JSX text node — ` +
-				`every user-facing string must come from ${path.relative(ROOT, COPY_FILE)} through t().\n`,
+				`every user-facing string must come from ${COPY_FILE} through t().\n`,
 		);
 		jsxProseFound = true;
 	}

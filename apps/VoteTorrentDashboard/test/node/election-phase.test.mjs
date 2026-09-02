@@ -19,7 +19,7 @@ import {
 	computeElectionPhase,
 	phaseCopyKey,
 } from '../../src/lifecycle/election-phase.js';
-import { t } from '../../src/i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import { seedFoundingAuthority } from '../fixtures/seed-founding-authority.js';
 import { seedElectionSurface, SEED_EXPECTED_COUNTS } from '../fixtures/seed-election-surface.js';
 

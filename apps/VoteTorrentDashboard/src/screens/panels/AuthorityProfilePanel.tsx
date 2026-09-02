@@ -13,7 +13,7 @@
  */
 import { useEffect, useState } from 'react';
 import type { PanelComponent } from './types.js';
-import { t } from '../../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import { fetchAuthorityProfile } from './authority-admin-queries.js';
 import './authority-admin.css';
 

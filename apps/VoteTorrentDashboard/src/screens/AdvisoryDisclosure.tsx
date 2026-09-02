@@ -11,7 +11,7 @@
  * renders. This component is the on-screen statement of exactly that fact,
  * and it must never itself become conditional on the fact it describes.
  */
-import { t } from '../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 
 export function AdvisoryDisclosure() {
 	return <p className="pv-disclosure">{t('gate.advisoryDisclosure')}</p>;

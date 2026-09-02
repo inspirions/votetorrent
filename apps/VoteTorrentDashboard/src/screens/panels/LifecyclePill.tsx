@@ -12,7 +12,7 @@
  * by `ElectionsPanel`, not by the registry.
  */
 import { phaseCopyKey } from '../../lifecycle/election-phase.js';
-import { t } from '../../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 
 export interface LifecyclePillProps {
 	phase: 'organizing' | 'running' | 'released' | null;

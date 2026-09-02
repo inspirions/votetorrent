@@ -35,19 +35,22 @@ test('repoRoot is the workspace root, identified by marker not by hop count', ()
 });
 
 test('dashboardSrc resolves to real bytes, not just a plausible string', () => {
-	const contents = readFileSync(dashboardSrc('i18n', 'copy.js'), 'utf8');
+	// The dashboard's copy table moved to packages/ui-web in 53-04 (D-11, no
+	// shim); this proof needs any real file still under this workspace's own
+	// src/, not specifically the copy table.
+	const contents = readFileSync(dashboardSrc('lifecycle', 'bootstrap.js'), 'utf8');
 	assert.ok(
-		contents.includes('export const COPY'),
-		'dashboardSrc must resolve to the real copy.js, not merely a well-formed path',
+		contents.includes('export const BOOTSTRAP_PHASES'),
+		'dashboardSrc must resolve to the real bootstrap.js, not merely a well-formed path',
 	);
 });
 
 test('resolution is independent of the process working directory', () => {
 	const originalCwd = process.cwd();
 	try {
-		const before = dashboardSrc('i18n', 'copy.js');
+		const before = dashboardSrc('lifecycle', 'bootstrap.js');
 		process.chdir(os.tmpdir());
-		const after = dashboardSrc('i18n', 'copy.js');
+		const after = dashboardSrc('lifecycle', 'bootstrap.js');
 		assert.equal(after, before, 'resolution must not change when cwd changes');
 	} finally {
 		process.chdir(originalCwd);
@@ -95,10 +98,10 @@ test('future roots are nameable before they exist', () => {
 });
 
 test('moduleUrl produces a specifier a dynamic import actually accepts', async () => {
-	const url = moduleUrl(dashboardSrc('i18n', 'copy.js'));
+	const url = moduleUrl(dashboardSrc('lifecycle', 'bootstrap.js'));
 	assert.ok(url.startsWith('file://'), 'moduleUrl must return a file:// href');
 	const ns = await import(url);
-	assert.ok(ns.COPY, 'the dynamically imported module must expose a COPY export');
+	assert.ok(ns.BOOTSTRAP_PHASES, 'the dynamically imported module must expose a BOOTSTRAP_PHASES export');
 });
 
 test('containment refuses a path that escapes the repository', () => {

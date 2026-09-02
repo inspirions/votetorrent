@@ -13,7 +13,7 @@
  * then, `evaluate()` takes no `phaseId` and returns no `inWindow`.
  *
  * `denialReason` is a MACHINE CODE, never a rendered sentence — the copy
- * table (src/i18n/copy.js) is frozen and carries no deny-reason key. The
+ * table (packages/ui-web/src/copy.js) is frozen and carries no deny-reason key. The
  * denied-panel UI communicates the reason with the capability's own
  * scope-code pill, which is data, not copy.
  *

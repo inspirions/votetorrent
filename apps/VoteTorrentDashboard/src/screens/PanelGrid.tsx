@@ -34,7 +34,7 @@ import { evaluate } from '../auth/gate.js';
 import { useEffectiveScopes } from './GrantedScopesContext.js';
 import { PanelFrame } from './panels/PanelFrame.js';
 import { PANEL_REGISTRY } from './panels/registry.js';
-import { t } from '../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 
 export interface PanelGridProps {
 	db: Database | null;

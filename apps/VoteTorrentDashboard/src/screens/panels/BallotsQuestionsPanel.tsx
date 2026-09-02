@@ -8,7 +8,7 @@
  */
 import { useEffect, useState } from 'react';
 import type { PanelComponent } from './types.js';
-import { t } from '../../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import { readBallots, readQuestions, countBallotSigningTasks } from '../../reads/ballots.js';
 import { selectActiveElection } from '../../reads/elections.js';
 import './election-ops.css';

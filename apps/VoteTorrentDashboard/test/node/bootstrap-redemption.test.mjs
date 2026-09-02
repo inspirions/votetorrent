@@ -31,7 +31,7 @@ import {
 	withCaseCollidingRegistrant,
 	makeFakeTransport,
 } from '../fixtures/bootstrap-envelope.js';
-import { t } from '../../src/i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 
 const SECRET = 'a'.repeat(40);

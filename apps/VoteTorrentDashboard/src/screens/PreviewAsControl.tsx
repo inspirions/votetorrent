@@ -35,7 +35,7 @@ import {
 } from '../auth/preview-scopes.js';
 import { GrantedScopesContext, usePreview } from './GrantedScopesContext.js';
 import type { GrantedScopesValue } from './GrantedScopesContext.js';
-import { t } from '../i18n/copy.js';
+import { t } from '@votetorrent/ui-web';
 import './preview-as.css';
 
 export { AdvisoryDisclosure } from './AdvisoryDisclosure.js';

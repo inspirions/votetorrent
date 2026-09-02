@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { dashboardRoot, dashboardSrc, moduleUrl } from '../../../../scripts/lib/source-paths.mjs';
+import { dashboardRoot, dashboardSrc, moduleUrl, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
 
 // The specifier passed to `import()` is now a runtime-computed `file://` URL
 // (moduleUrl(dashboardSrc(...))) rather than a literal relative string, so
@@ -17,8 +17,8 @@ import { dashboardRoot, dashboardSrc, moduleUrl } from '../../../../scripts/lib/
 // `@type {typeof import('literal/path')}` JSDoc cast below is erased at
 // runtime (the actual bytes still come from the resolver-built URL); it only
 // restores the static type that the literal specifier used to give for free.
-const { COPY, t } = /** @type {typeof import('../../src/i18n/copy.js')} */ (
-	await import(moduleUrl(dashboardSrc('i18n', 'copy.js')))
+const { COPY, t } = /** @type {typeof import('@votetorrent/ui-web')} */ (
+	await import('@votetorrent/ui-web')
 );
 const { BOOTSTRAP_PHASES, BOOTSTRAP_OUTCOME_CODES, copyKeysForOutcome } =
 	/** @type {typeof import('../../src/lifecycle/bootstrap.js')} */ (
@@ -256,7 +256,7 @@ function walkSrc(/** @type {string} */ dir) {
 }
 
 test('D-25: the conflated sentence is REPLACED, not supplemented -- "already been used" appears in no file under src/', () => {
-	const copyFile = path.join(APP_ROOT, 'src', 'i18n', 'copy.js');
+	const copyFile = uiWebSrc('copy.js');
 	// Positive control FIRST: the same substring matcher, on the same file,
 	// finds a string that IS present. Without this, a matcher that silently
 	// stopped working (wrong path, empty read) would report a green pass.
