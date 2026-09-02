@@ -72,6 +72,12 @@ of those components does not need this import.
   external dependency is `@votetorrent/vote-engine/browser`, a database engine — re-exporting it
   through `.` would load that engine for every consumer of any plain-JS value (measured
   0.30-0.44s vs 0.02s bare).
+- `@votetorrent/ui-web/facts` — the fact/gap model (`FACTS`, `factsFor`, `headline`,
+  `FACT_GROUPS`, `GAP_IDS`, `FACT_COPY_KEYS`), plain-JS, importable from `node --test` with no
+  bundler. Deliberately **not** reachable through `./lifecycle` — `election-phase.js` imports
+  `@votetorrent/vote-engine/browser`, so routing the fact model through it would load a database
+  engine for a consumer that only wants pure data. `headline` takes `t` as a parameter rather than
+  importing it, which is what keeps this subpath free of any dependency at all.
 - `@votetorrent/ui-web/tokens.css` / `@votetorrent/ui-web/components.css` — see step 3 above.
 - `@votetorrent/ui-web/mutations` — the shared build-time mutation machinery (`MUTATIONS`,
   `resolveMutation`, `applyNoDedupe`, `stripTokensPlugin`, `readMutationReport`) the D-20 negative
@@ -91,9 +97,9 @@ bundler-less `node --test` tier.
 
 By **relative path**, not by package specifier — a package-specifier `extends` would require a new
 key in this package's `exports` map, and this package's own gate (`test/package-shape.test.mjs`
-rung 5) proves that map's exact key count and order — six as of 53-CR01 (`.`, `./components`,
-`./lifecycle`, `./tokens.css`, `./components.css`, `./mutations`). `tsconfig.base.json` carries the
-full `compilerOptions` block (14 options); no
+rung 5) proves that map's exact key count and order — seven as of 54-04 (`.`, `./components`,
+`./lifecycle`, `./facts`, `./tokens.css`, `./components.css`, `./mutations`). `tsconfig.base.json`
+carries the full `compilerOptions` block (14 options); no
 consumer redeclares any of them.
 
 ### 6. Binding rule: never hoist React

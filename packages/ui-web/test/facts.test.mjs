@@ -235,7 +235,7 @@ const INDETERMINATE_PHASE_ID = 'indeterminate';
 
 test('rung 8: PHASE_IDS minus the indeterminate sentinel deep-equals HEADLINE_PHASE_IDS, and HEADLINE_PHASE_IDS deep-equals the four literal ids', () => {
 	assert.deepEqual(
-		PHASE_IDS.filter((id) => id !== INDETERMINATE_PHASE_ID),
+		/** @type {ReadonlyArray<string>} */ (PHASE_IDS).filter((id) => id !== INDETERMINATE_PHASE_ID),
 		[...HEADLINE_PHASE_IDS],
 	);
 	// Asserted in BOTH directions (per this plan's binding constraint): a
@@ -318,6 +318,7 @@ test('rung 10b: pre branch -- null, empty string, Z-suffixed and non-datetime in
 // ===========================================================================
 
 test('rung 11: headline() returns t(textKey) as text and reuses headlineKey\'s tone unchanged, with the recorded t argument matching', () => {
+	/** @type {Array<string>} */
 	const recordedArgs = [];
 	const SENTINEL = '__sentinel__';
 	const spyT = (/** @type {string} */ key) => {
