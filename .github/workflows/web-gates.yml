@@ -686,7 +686,11 @@ jobs:
       # grey bars are the loading-skeleton idiom whether or not they move.
       # This leg asserts the PRESENCE of a visible, accessibility-tree-exposed
       # slot label on a real rendered page, which is the property that makes a
-      # placeholder read as a deliberate gap. It needs the PRODUCTION build
+      # placeholder read as a deliberate gap. It also measures PAINTED
+      # GEOMETRY: the top-level regions of <main> must not touch, which no
+      # stylesheet scan can see because the defect is a container declaring no
+      # gap while its children declare no margin -- no single rule is wrong.
+      # It needs the PRODUCTION build
       # (dist/, port 5193), not the gate build the leg above produces, so it
       # builds its own; 5193 is used by nothing else in this workflow.
       - name: Public app placeholder-label rendering gate
@@ -695,13 +699,13 @@ jobs:
           set -euo pipefail
           yarn build
           yarn assert:placeholders-labelled 2>&1 | tee ../../placeholders-public.log
-          # The script runs three positive controls and one benign control
-          # before it touches the real page. Assert all four were actually
+          # The script runs five positive controls and two benign controls
+          # before it touches the real page. Assert all seven were actually
           # exercised -- a build that skipped them would otherwise pass here
           # on the strength of the real scan alone.
           controls=$(grep -c 'ok   control' ../../placeholders-public.log)
-          if [ "$controls" -ne 4 ]; then
-            echo "::error::placeholders-public: $controls/4 controls reported ok -- the predicate was not proven before the real scan"
+          if [ "$controls" -ne 7 ]; then
+            echo "::error::placeholders-public: $controls/7 controls reported ok -- the predicate was not proven before the real scan"
             exit 1
           fi
           grep -q '\[assert-placeholders-labelled\] PASS' ../../placeholders-public.log

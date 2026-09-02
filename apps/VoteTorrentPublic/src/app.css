@@ -39,8 +39,27 @@
 	color: var(--text);
 }
 
+/*
+ * A flex column with its own gap, not a bare block. `ElectionShell` mounts
+ * three siblings here — the election section (or the unreadable-address
+ * section), `AdvisoryDisclosure`, and `DetailsToggle` — and the advisory MUST
+ * remain a sibling rather than a child of the section (D-16 forbids it from
+ * ever becoming conditional on anything, which nesting it inside `.election`
+ * would eventually invite). A sibling inherits none of `.election`'s own
+ * `gap`, so before this rule the advisory line rendered flush against the
+ * placeholder above it and the toggle below it — 0px on both sides — and
+ * read as one more item crammed into the placeholder stack rather than as a
+ * standing statement about the whole page.
+ *
+ * The gap belongs HERE, on the container, precisely because it must not
+ * depend on what `ElectionShell` chooses to render: any future sibling is
+ * spaced by construction, and no one has to remember to add a margin.
+ */
 .public-app__main {
 	flex: 1;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-md);
 	padding: var(--space-md);
 	color: var(--text);
 }

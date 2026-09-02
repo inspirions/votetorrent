@@ -29,8 +29,18 @@
  * transcribed — a second list here could drift from the copy the app renders
  * and this gate would keep passing against the stale one.
  *
- * Requires a prior `yarn workspace votetorrent-public build`. Runs its three
- * controls BEFORE it touches the real page: a gate whose predicate has not
+ * A second rendered property lives here too, for the same reason and on the
+ * same page load: the top-level regions of `<main>` must not touch. The
+ * advisory disclosure is mounted as a SIBLING of the election section (D-16
+ * forbids it from ever becoming conditional, which nesting would invite), so
+ * it inherits none of that section's own `gap`; it rendered flush against the
+ * placeholder above and the toggle below, 0px on both sides, reading as one
+ * more item in the placeholder stack. That is a geometry defect, invisible to
+ * a stylesheet scan, and it is measured here rather than in a second script
+ * because it needs the identical browser, build and page load.
+ *
+ * Requires a prior `yarn workspace votetorrent-public build`. Runs every
+ * control BEFORE it touches the real page: a gate whose predicate has not
  * been seen refusing something is not evidence.
  */
 import path from 'node:path';
@@ -150,6 +160,49 @@ export function findPlaceholderProblems(records, expected, keyframeCount) {
 	return problems;
 }
 
+/**
+ * @typedef {object} RegionRecord
+ * @property {string} label  a human-readable identifier for the region
+ * @property {number} top
+ * @property {number} bottom
+ */
+
+/**
+ * Consecutive top-level regions of `<main>` must be separated by at least
+ * `minGapPx`. Measured on PAINTED GEOMETRY, never on a declared rule: the
+ * defect this catches is a container that declares no gap while its children
+ * declare no margin, which no single rule is wrong about.
+ *
+ * The threshold is a resolved design token rather than a magic number, so a
+ * page that has lost its token layer entirely fails here loudly instead of
+ * comparing against a silent 0.
+ *
+ * @param {ReadonlyArray<RegionRecord>} regions in document order
+ * @param {number} minGapPx
+ * @returns {string[]}
+ */
+export function findSeparationProblems(regions, minGapPx) {
+	/** @type {string[]} */
+	const problems = [];
+	if (!Number.isFinite(minGapPx) || minGapPx <= 0) {
+		problems.push(`the minimum-separation token did not resolve to a positive length (got ${minGapPx}) — the page has probably lost its token layer`);
+		return problems;
+	}
+	if (regions.length < 2) {
+		problems.push(`<main> rendered ${regions.length} top-level region(s) — fewer than two cannot be checked for separation, and this gate would otherwise pass vacuously`);
+		return problems;
+	}
+	for (let i = 1; i < regions.length; i += 1) {
+		const above = regions[i - 1];
+		const below = regions[i];
+		const gap = below.top - above.bottom;
+		if (gap < minGapPx) {
+			problems.push(`"${above.label}" and "${below.label}" are separated by ${gap}px, under the ${minGapPx}px minimum — regions that touch read as one crowded stack rather than as distinct statements`);
+		}
+	}
+	return problems;
+}
+
 /** @param {Partial<PlaceholderRecord>} over @returns {PlaceholderRecord} */
 function inertRecord(over) {
 	return {
@@ -203,6 +256,43 @@ function runControls() {
 		mustFire: false,
 	});
 
+	// The separation predicate, same discipline: seen refusing the exact
+	// shipped geometry (0px on both sides of the advisory) before it is
+	// trusted, and seen NOT firing on a well-spaced page.
+	controls.push({
+		name: 'positive: two top-level regions that touch',
+		problems: findSeparationProblems(
+			[
+				{ label: 'election', top: 120, bottom: 238 },
+				{ label: 'advisory', top: 238, bottom: 255 },
+			],
+			8,
+		),
+		mustFire: true,
+	});
+	controls.push({
+		name: 'positive: a page whose spacing token did not resolve',
+		problems: findSeparationProblems(
+			[
+				{ label: 'election', top: 120, bottom: 238 },
+				{ label: 'advisory', top: 254, bottom: 271 },
+			],
+			Number.NaN,
+		),
+		mustFire: true,
+	});
+	controls.push({
+		name: 'benign: two well-separated top-level regions',
+		problems: findSeparationProblems(
+			[
+				{ label: 'election', top: 120, bottom: 238 },
+				{ label: 'advisory', top: 254, bottom: 271 },
+			],
+			8,
+		),
+		mustFire: false,
+	});
+
 	let bad = 0;
 	for (const c of controls) {
 		const fired = c.problems.length > 0;
@@ -253,6 +343,21 @@ async function main() {
 				}
 				return n;
 			})();
+			const root = document.documentElement;
+			const minGapRaw = getComputedStyle(root).getPropertyValue('--space-sm').trim();
+			const minGapPx = Number.parseFloat(minGapRaw);
+			const main = document.querySelector('.public-app__main');
+			const regions = main
+				? [...main.children].map((el) => {
+						const r = el.getBoundingClientRect();
+						const cls = el.getAttribute('class');
+						return {
+							label: cls ? `.${cls.split(/\s+/).join('.')}` : el.tagName.toLowerCase(),
+							top: Math.round(r.top),
+							bottom: Math.round(r.bottom),
+						};
+					})
+				: [];
 			const records = [...document.querySelectorAll('[data-slot]')].map((el) => {
 				const cs = getComputedStyle(el);
 				const before = getComputedStyle(el, '::before');
@@ -270,7 +375,7 @@ async function main() {
 					afterBackgroundImage: after.backgroundImage,
 				};
 			});
-			return { keyframeCount, records };
+			return { keyframeCount, records, regions, minGapPx, minGapRaw };
 		});
 
 		if (pageErrors.length > 0) {
@@ -287,11 +392,16 @@ async function main() {
 			exposedToAT: EXPECTED_LABELS[r.slot] !== undefined && ariaSnapshot.includes(EXPECTED_LABELS[r.slot]),
 		}));
 
-		const problems = findPlaceholderProblems(records, EXPECTED_LABELS, raw.keyframeCount);
+		const problems = [
+			...findPlaceholderProblems(records, EXPECTED_LABELS, raw.keyframeCount),
+			...findSeparationProblems(raw.regions, raw.minGapPx),
+		];
 
 		console.log(`${PREFIX} slots declared in COPY: ${Object.keys(EXPECTED_LABELS).join(', ')}`);
 		console.log(`${PREFIX} placeholders rendered:   ${records.map((r) => `${r.slot}="${r.visibleText.trim()}" at=${r.exposedToAT}`).join('  ') || '(none)'}`);
 		console.log(`${PREFIX} @keyframes in page:      ${raw.keyframeCount}`);
+		console.log(`${PREFIX} <main> regions:          ${raw.regions.map((r) => `${r.label}[${r.top}-${r.bottom}]`).join('  ') || '(none)'}`);
+		console.log(`${PREFIX} minimum separation:      ${raw.minGapPx}px (--space-sm: "${raw.minGapRaw}")`);
 
 		if (problems.length > 0) {
 			console.error(`\n${PREFIX} FAIL — ${problems.length} problem(s):`);
@@ -301,7 +411,8 @@ async function main() {
 			process.exit(1);
 		}
 
-		console.log(`\n${PREFIX} PASS — ${records.length}/${Object.keys(EXPECTED_LABELS).length} placeholders render their declared label, are exposed to assistive technology, and carry no motion.`);
+		const gaps = raw.regions.slice(1).map((r, i) => r.top - raw.regions[i].bottom);
+		console.log(`\n${PREFIX} PASS — ${records.length}/${Object.keys(EXPECTED_LABELS).length} placeholders render their declared label, are exposed to assistive technology, and carry no motion; ${raw.regions.length} top-level regions separated by ${gaps.join('/')}px (minimum ${raw.minGapPx}px).`);
 	} finally {
 		await browser.close();
 		await server.close();
