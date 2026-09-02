@@ -13,7 +13,7 @@
 		"test:browser": "node test/browser/run-headless.mjs",
 		"gate:ui": "node ../../packages/ui-web/scripts/run-ui-gates.mjs --app .",
 		"typecheck": "tsc --noEmit",
-		"lint": "node scripts/lint-copy.mjs",
+		"lint": "node ../../scripts/lint-copy.mjs",
 		"assert:no-polyfills": "node scripts/assert-no-node-polyfills.mjs",
 		"assert:no-test-harness-in-dist": "node scripts/assert-no-test-harness-in-dist.mjs",
 		"assert:tokens-in-dist": "node scripts/assert-tokens-in-dist.mjs",
