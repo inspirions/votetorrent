@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { dashboardSrc, uiWebRoot, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
-import { checkClassNameCoverage } from '../../../../scripts/lib/css-class-coverage.mjs';
+import { checkClassNameCoverage, collectMountedPackageComponentClasses } from '../../../../scripts/lib/css-class-coverage.mjs';
 
 const UI_WEB_ROOT_DIR = uiWebRoot();
 
@@ -59,16 +59,57 @@ test('real check: every rendered class name in apps/VoteTorrentDashboard/src res
 	assert.deepEqual(missing, [], `these rendered class names have no matching CSS selector: ${missing.join(', ')}`);
 });
 
-test('sanity: the shared-component classes this app mounts are all declared (pv-disclosure, lifecycle-pill + modifiers, dt-toggle-group)', () => {
+/**
+ * The names the sanity probe below asserts are NOT missing. Every one must
+ * first be proven REAL by the reality guard in the same test.
+ *
+ * The guard, on the run that introduced it, found TWO of the four names it
+ * inherited to be already vacuous, and both had been passing silently:
+ *   - `lifecycle-pill--organizing` -- a phase id 54-02 renamed away;
+ *   - `dt-toggle-group` -- `DetailsToggle` is mounted by this app's
+ *     `test/browser/ui-gate.tsx` harness, NOT by anything under `src/`, and
+ *     `collectMountedPackageComponentClasses` (correctly) only walks `src/`.
+ * The first is replaced by `lifecycle-pill--settling`, the modifier the
+ * dashboard's four-phase panel now actually reaches. The second is dropped:
+ * this app renders no `DetailsToggle` in production, so a dashboard probe on
+ * its classes could never have measured anything. `.dt-toggle-group` itself
+ * stays covered where it IS rendered, by `packages/ui-web`'s own suite.
+ */
+const SANITY_PROBE_CLASSES = ['pv-disclosure', 'lifecycle-pill', 'lifecycle-pill--settling'];
+
+/** The union of class names the mounted `@votetorrent/ui-web/components` exports can render. */
+const MOUNTED_COMPONENT_CLASSES = collectMountedPackageComponentClasses(dashboardSrc(), COMPONENT_CLASS_NAMES);
+
+test('sanity: the shared-component classes this app mounts are all declared, and every probed name is first proven real (pv-disclosure, lifecycle-pill + the settling modifier)', () => {
 	const { missing } = checkClassNameCoverage({
 		appSrcDir: dashboardSrc(),
 		uiWebRootDir: UI_WEB_ROOT_DIR,
 		componentClassNames: COMPONENT_CLASS_NAMES,
 		ignoreClassNames: PRE_EXISTING_UNSTYLED_CLASSES,
 	});
-	for (const cls of ['pv-disclosure', 'lifecycle-pill', 'lifecycle-pill--organizing', 'dt-toggle-group']) {
+	for (const cls of SANITY_PROBE_CLASSES) {
+		// REALITY GUARD, and it must run BEFORE the not-missing assertion.
+		// `missing` is computed as `[...rendered].filter(cls => !declared.has(cls))`,
+		// so it can only ever contain names that EXIST in `rendered`. Once a
+		// probed class name ceases to exist -- a renamed modifier, a retired
+		// phase id -- `!missing.includes(...)` keeps passing while proving
+		// nothing at all. That is this repo's signature vacuity failure, caught
+		// five separate times in phase 54, and it is silent every time: the
+		// probe does not go red, it goes MEANINGLESS.
+		assert.ok(
+			MOUNTED_COMPONENT_CLASSES.has(cls),
+			`"${cls}" is not a class any mounted @votetorrent/ui-web/components export renders -- the not-missing assertion below would pass vacuously`,
+		);
 		assert.ok(!missing.includes(cls), `${cls} regressed`);
 	}
+});
+
+test('control: the reality guard bites -- a fabricated modifier is absent from the mounted-component class set', () => {
+	assert.ok(
+		!MOUNTED_COMPONENT_CLASSES.has('lifecycle-pill--not-a-real-modifier'),
+		'the guard is inert if a name nobody renders is reported as mounted',
+	);
+	assert.ok(MOUNTED_COMPONENT_CLASSES.size > 0, 'sanity: the mounted set must be non-empty for the guard to mean anything');
 });
 
 test('the pre-existing allowlist names only classes that are actually otherwise-missing (no stale entries)', () => {
