@@ -5,12 +5,25 @@
  * What each rung catches:
  *   1. Positive control  — proves a bundler-only `.tsx` re-export barrel
  *      genuinely throws `ERR_MODULE_NOT_FOUND` under plain Node. Uses the
- *      `bundler-only-barrel` fixture, not the real (currently empty)
- *      `./components` barrel, so this is measured rather than assumed.
+ *      `bundler-only-barrel` FIXTURE, not the real `./components` barrel
+ *      (WR-10, Phase 53 review: this barrel is no longer empty — it
+ *      re-exports three `.tsx` components plus `react-identity.js` — so
+ *      rung 3b below exercises the REAL barrel; this rung stays fixture-based
+ *      because it is what proves the matcher/mechanism generically, isolated
+ *      from whatever the real barrel happens to contain today).
  *   2. Benign control    — proves rung 1's matcher discriminates: the
  *      fixture's plain-JS barrel must resolve fine, or rung 1 would pass on
  *      any mistyped fixture path.
- *   3. The real `.` subpath  — Node-importable with no bundler.
+ *   3. The real `.` subpath  — Node-importable with no bundler, and exposes
+ *      real, non-trivial values (`t` a function, `COPY` frozen) — not merely
+ *      "some object" (WR-10: the prior assertion would have passed on a
+ *      barrel exporting nothing at all).
+ *   3b. The real `./components` subpath (WR-10) — genuinely throws
+ *      `ERR_MODULE_NOT_FOUND` under plain Node. Where rung 1 proves the
+ *      mechanism against a fixture, this rung proves the CURRENT, non-empty
+ *      real barrel still exhibits it — the load-bearing claim this file's own
+ *      workflow header calls "the ERR_MODULE_NOT_FOUND proof" no longer rests
+ *      on the fixture and rung 8's static lockstep alone.
  *   4. The real `./tokens.css` subpath — resolves to a file that exists.
  *   4b. The real `./components.css` subpath (53-CR01) — resolves to a file
  *      that exists.
@@ -57,6 +70,29 @@ test('rung 3: the real `.` subpath of @votetorrent/ui-web is Node-importable wit
 	const mod = await import('@votetorrent/ui-web');
 	assert.equal(typeof mod, 'object');
 	assert.notEqual(mod, null);
+	// WR-10 (Phase 53 review): `typeof mod === 'object' && mod !== null` would
+	// pass on a barrel exporting nothing at all. Assert real, non-trivial
+	// values instead.
+	assert.equal(typeof mod.t, 'function');
+	assert.ok(Object.isFrozen(mod.COPY));
+});
+
+test('rung 3b: the real `./components` subpath throws ERR_MODULE_NOT_FOUND under plain Node', async () => {
+	// WR-10 (Phase 53 review): nothing in this suite previously attempted
+	// `import('@votetorrent/ui-web/components')` under plain Node — the
+	// load-bearing "ERR_MODULE_NOT_FOUND proof" this file's own workflow
+	// header claims rested entirely on the fixture (rung 1) and rung 8's
+	// static filename lockstep. The real barrel is no longer empty (it
+	// re-exports AdvisoryDisclosure/LifecyclePill/DetailsToggle plus
+	// react-identity.js, all `.tsx`-or-`.tsx`-dependent), so this exercises
+	// the actual shipped subpath, not just a stand-in fixture.
+	await assert.rejects(
+		() => import('@votetorrent/ui-web/components'),
+		/** @param {NodeJS.ErrnoException} err */ (err) => {
+			assert.equal(err.code, 'ERR_MODULE_NOT_FOUND');
+			return true;
+		},
+	);
 });
 
 test('rung 4: the real `./tokens.css` subpath resolves to an existing file', () => {
