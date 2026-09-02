@@ -466,6 +466,22 @@ function resolveReactCopies(appDir) {
 }
 
 /**
+ * WR-03 (Phase 53 review): `runGatePassLenient` returns a union of a failure
+ * shape and a success shape, discriminated on `ok`. Without an explicit
+ * `@returns` annotation, TypeScript infers `ok` widened to plain `boolean` in
+ * BOTH branches (an object literal's property type widens unless a
+ * contextual type pins it), which silently defeats `if (!x.ok) return;`
+ * narrowing at every call site — the exact shape of the 7 live `TS18048`
+ * ('...possibly undefined') errors this annotation removes. Naming the union
+ * here, once, keeps `ok` a true literal discriminant everywhere this
+ * function's result flows.
+ * @typedef {{ ok: false, stage: string, message: string }} GatePassFailure
+ * @typedef {{ ok: true, readout: any, lines: string[], tokenCount: number,
+ *   rungs: Array<{id: string, passed: boolean, detail: string}>, total: number,
+ *   passed: number, allPassed: boolean, extra: unknown }} GatePassSuccess
+ */
+
+/**
  * The lenient sibling of `main()`'s own build+serve+drive+rung sequence
  * (53-11, D-20), used ONLY by the two `--prove-*` controls. Every failure is
  * RETURNED as a labelled result rather than causing `process.exit` — a
@@ -478,6 +494,7 @@ function resolveReactCopies(appDir) {
  * never a second copy of any rung.
  *
  * @param {{ appDir: string, buildConfigRel: string | null, buildEnv?: Record<string, string>, distAbs: string, entryName: string, port: number, extraPageWork?: (page: import('playwright').Page) => Promise<any> }} opts
+ * @returns {Promise<GatePassFailure | GatePassSuccess>}
  */
 async function runGatePassLenient({ appDir, buildConfigRel, buildEnv, distAbs, entryName, port, extraPageWork }) {
 	resetRungs();
