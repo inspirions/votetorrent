@@ -6,8 +6,14 @@
  * `../../src/auth/preview-scopes.js`, `PanelGrid` from
  * `../../src/screens/PanelGrid.tsx`, `PreviewAsProvider`/`PreviewAsControl`
  * from `../../src/screens/PreviewAsControl.tsx`, `AdvisoryDisclosure` and
- * `computeElectionPhase` from `@votetorrent/ui-web` (moved there in 53-05),
+ * the shared four-phase derivation (`derivePhase`/`PHASE_IDS`) from
+ * `@votetorrent/ui-web` (the lifecycle module moved there in 53-05),
  * `t` from `@votetorrent/ui-web`.
+ *
+ * NO PHASE-ID STRING IS WRITTEN OUT IN THIS FILE. Every phase id comes from
+ * the imported `PHASE_IDS`, and every lifecycle instant from the seed
+ * fixture's `SEED_PHASE_INSTANTS` -- a re-typed literal here is exactly the
+ * fourth hand-maintained vocabulary list 54-07 exists to remove.
  *
  * THE ORACLE IS `evaluate`, IMPORTED — NEVER RE-DERIVED. If this file ever
  * computed visibility any other way, the cross-check would be comparing the
@@ -31,7 +37,7 @@ import { evaluate } from '../../src/auth/gate.js';
 import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import type { ScopeCode } from '../../src/auth/capabilities.js';
 import { createPreviewState, toggleScope, effectiveScopes } from '../../src/auth/preview-scopes.js';
-import { computeElectionPhase } from '@votetorrent/ui-web/lifecycle';
+import { derivePhase, PHASE_IDS } from '@votetorrent/ui-web/lifecycle';
 import { t } from '@votetorrent/ui-web';
 import { PanelGrid } from '../../src/screens/PanelGrid.js';
 import { PreviewAsProvider, PreviewAsControl } from '../../src/screens/PreviewAsControl.js';
@@ -45,7 +51,13 @@ import {
 	writeRowCounts,
 } from '@votetorrent/web-data/officer';
 import { GATE_NETWORK_HASH, SEED_TABLES, seedFoundingAuthority } from '../../../../packages/web-data/test/fixtures/seed-founding-authority.js';
-import { seedElectionSurface, SEED_TIMELINE, SEED_EXPECTED_COUNTS } from '../../../../packages/web-data/test/fixtures/seed-election-surface.js';
+import {
+	seedElectionSurface,
+	SEED_TIMELINE,
+	SEED_EXPECTED_COUNTS,
+	SEED_ELECTION,
+	SEED_PHASE_INSTANTS,
+} from '../../../../packages/web-data/test/fixtures/seed-election-surface.js';
 
 declare global {
 	interface Window {
@@ -71,14 +83,6 @@ const SCOPE_SETS: Readonly<Record<string, ReadonlyArray<ScopeCode>>> = Object.fr
 	'election-ops': ['vrg', 'mel', 'ceb'],
 	'authority-admin': ['rn', 'uai', 'cap', 'rad', 'ik', 'iad'],
 	'no-scopes': [],
-});
-
-/** The three lifecycle phase instants, validated against the seeded
- * `Timeline` by a `mode=seed` rung before anything trusts them. */
-const INSTANTS: Readonly<Record<string, string>> = Object.freeze({
-	organizing: '2026-06-01T00:00:00',
-	running: '2026-11-03T12:00:00',
-	released: '2026-11-12T00:00:00',
 });
 
 const REAL_SCOPES = SCOPE_SETS['real-all-nine'] as ReadonlyArray<ScopeCode>;
@@ -165,14 +169,23 @@ async function runSeed() {
 		return JSON.stringify(counts);
 	});
 
-	await rung('6 · the three lifecycle instants resolve to organizing/running/released against the seeded Timeline', async () => {
+	await rung('6 · the four lifecycle instants each resolve to their own phase against the seeded Timeline', async () => {
+		// The JSON STRING form on purpose: `ElectionRevision.Timeline` stores
+		// `JSON.stringify(SEED_TIMELINE)` and `readElectionOverview` returns it
+		// raw, so this is the shape production carries into `derivePhase`.
 		const timelineJson = JSON.stringify(SEED_TIMELINE);
 		const results: Record<string, string> = {};
-		for (const [phaseId, instant] of Object.entries(INSTANTS)) {
-			const { phase, reason } = computeElectionPhase(timelineJson, instant);
-			results[phaseId] = phase ?? `null (${reason})`;
-			if (phase !== phaseId) {
-				throw new Error(`instant for "${phaseId}" (${instant}) resolved to "${phase ?? reason}", not "${phaseId}"`);
+		for (const [phaseId, instant] of Object.entries(SEED_PHASE_INSTANTS)) {
+			const { phase, stage, firedRule, indeterminate, conflicts } = derivePhase(SEED_ELECTION, timelineJson, instant);
+			results[phaseId] = `${phase} @ ${stage ?? '(no stage)'}`;
+			// Never `reason`: it embeds raw timeline values. `firedRule` and the
+			// conflict CODES are machine diagnostics safe to surface in a harness
+			// message.
+			const codes = conflicts.map((c) => c.code).join(', ');
+			if (phase !== phaseId || indeterminate === true || conflicts.length > 0) {
+				throw new Error(
+					`instant for "${phaseId}" (${instant}) resolved to "${phase}" (fired: ${firedRule ?? 'none'}, indeterminate: ${indeterminate}, conflicts: ${codes || 'none'})`,
+				);
 			}
 		}
 		return JSON.stringify(results);
@@ -211,7 +224,10 @@ function Tree({
 				db={db}
 				revealDenied={reveal}
 				onToggleReveal={() => {}}
-				snapshotInstant={INSTANTS[phaseId] ?? INSTANTS.organizing}
+				// Any single phase would do as the fallback -- assertion D proves
+				// the rendered panel set is phase-invariant -- and `PHASE_IDS[0]`
+				// is chosen over a re-typed id so the choice cannot go stale.
+				snapshotInstant={SEED_PHASE_INSTANTS[phaseId] ?? SEED_PHASE_INSTANTS[PHASE_IDS[0]]}
 			/>
 		</PreviewAsProvider>
 	);
@@ -272,7 +288,11 @@ async function runMatrix() {
 	const root = createRoot(container);
 
 	let currentReveal = false;
-	let currentPhaseId = 'organizing';
+	// `PHASE_IDS[0]`, never a re-typed id: the mount-time phase is overwritten
+	// by the first `__GATE_MATRIX_RUN__` call, and assertion D proves the panel
+	// set does not depend on it -- but a literal here would still be a phase
+	// vocabulary this file maintains by hand.
+	let currentPhaseId: string = PHASE_IDS[0];
 
 	await rung('2 · mount PanelGrid + PreviewAsControl + AdvisoryDisclosure once', async () => {
 		root.render(
@@ -375,7 +395,8 @@ async function runFresh() {
 	await rung('2 · mount with NO toggles applied — a preview must never survive a reload', async () => {
 		root.render(
 			<StrictMode>
-				<Tree db={db} reveal={false} phaseId="organizing" />
+				{/* `PHASE_IDS[0]` for the same reason as `mode=matrix`'s mount-time default. */}
+				<Tree db={db} reveal={false} phaseId={PHASE_IDS[0]} />
 			</StrictMode>,
 		);
 		await settle();

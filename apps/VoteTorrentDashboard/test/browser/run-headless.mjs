@@ -82,6 +82,7 @@ import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PHASE_IDS } from '@votetorrent/ui-web/lifecycle';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(__dirname, '..', '..');
@@ -286,8 +287,15 @@ async function runOnGateMatrixPage(page, url, label) {
 
 /** The five `<measured_facts>` scope-set fixture ids, in `<measured_facts>`'s own order. */
 const TIER3_SCOPE_SET_IDS = ['real-all-nine', 'vrg-only', 'election-ops', 'authority-admin', 'no-scopes'];
-/** The three lifecycle phase ids -- D-17 says the rendered panel set must not depend on which one is active. */
-const TIER3_PHASE_IDS = ['organizing', 'running', 'released'];
+/**
+ * The four lifecycle phase ids -- D-17 says the rendered panel set must not
+ * depend on which one is active. IMPORTED from `@votetorrent/ui-web/lifecycle`
+ * rather than written out, so this loop cannot drift from the one shared
+ * vocabulary the panel, the pill and the seed fixture all read.
+ */
+const TIER3_PHASE_IDS = PHASE_IDS;
+/** The phase the phase-INDEPENDENT rungs run at; any member would do, and taking the first cannot go stale. */
+const TIER3_BASELINE_PHASE_ID = TIER3_PHASE_IDS[0];
 /** Per-scope-set expected visible-capability counts, from `<measured_facts>`. @type {Record<string, number>} */
 const TIER3_EXPECTED_VISIBLE = {
 	'real-all-nine': 9,
@@ -298,7 +306,9 @@ const TIER3_EXPECTED_VISIBLE = {
 };
 
 /**
- * Drives all 20 (or, under `--prove-drift`, exactly 1) rungs against an
+ * Drives `TIER3_SCOPE_SET_IDS.length * (TIER3_PHASE_IDS.length + 1)` rungs
+ * -- one headline rung per scope set x phase, plus one reveal=0 rung per
+ * scope set -- (or, under `--prove-drift`, exactly 1) against an
  * already-mounted `gate-matrix.html?mode=matrix` page, via its
  * `window.__GATE_MATRIX_RUN__` seam. Every call is individually try/caught
  * so a thrown rung becomes a recorded failure (assertion I) rather than
@@ -338,24 +348,26 @@ async function driveTier3Rungs(page, proveDrift) {
 	}
 
 	if (proveDrift) {
-		await callRung(['election-ops', 'organizing', true, 'authority-admin']);
+		await callRung(['election-ops', TIER3_BASELINE_PHASE_ID, true, 'authority-admin']);
 		return rungs;
 	}
 
-	// 15 headline combinations: 5 scope sets x 3 phases, reveal=1 -- denied
-	// panels render as frames with no body, so assertion B can be the strong
-	// form (frame present, body absent).
+	// The headline combinations: every scope set x every phase, reveal=1 --
+	// denied panels render as frames with no body, so assertion B can be the
+	// strong form (frame present, body absent). The count is deliberately not
+	// written out here; `assertTier3` asserts it at runtime instead, so it
+	// cannot go stale the next time either list changes.
 	for (const scopeSetId of TIER3_SCOPE_SET_IDS) {
 		for (const phaseId of TIER3_PHASE_IDS) {
 			// eslint-disable-next-line no-await-in-loop -- deliberately sequential against one shared page/root, see this function's header
 			await callRung([scopeSetId, phaseId, true]);
 		}
 	}
-	// 5 additional rungs, one per scope set, phase=organizing, reveal=0 --
+	// One additional rung per scope set, at the baseline phase, reveal=0 --
 	// a denied panel's FRAME must be entirely absent, not just its body.
 	for (const scopeSetId of TIER3_SCOPE_SET_IDS) {
 		// eslint-disable-next-line no-await-in-loop
-		await callRung([scopeSetId, 'organizing', false]);
+		await callRung([scopeSetId, TIER3_BASELINE_PHASE_ID, false]);
 	}
 	return rungs;
 }
@@ -372,6 +384,18 @@ function assertTier3(rungs) {
 	const failures = [];
 	let headlineComparisons = 0;
 	let headlinePassed = 0;
+
+	// The rung count, asserted at RUNTIME rather than described in a comment
+	// that goes wrong the next time either list changes. It lives inside
+	// `assertTier3` specifically because `--prove-drift` returns from
+	// `driveTier3Rungs` before this call and legitimately drives exactly one.
+	const expectedRungCount = TIER3_SCOPE_SET_IDS.length * (TIER3_PHASE_IDS.length + 1);
+	if (rungs.length !== expectedRungCount) {
+		failures.push(
+			`rung count: drove ${rungs.length}, expected ${expectedRungCount} ` +
+				`(${TIER3_SCOPE_SET_IDS.length} scope sets x (${TIER3_PHASE_IDS.length} phases + 1 reveal=0 rung))`,
+		);
+	}
 
 	const headline = rungs.filter((r) => r.reveal === true);
 	const revealOff = rungs.filter((r) => r.reveal === false);
@@ -449,8 +473,8 @@ function assertTier3(rungs) {
 	}
 
 	// E — discrimination: vrg-only and authority-admin must not render the same panel set.
-	const vrgOnly = headline.find((r) => r.scopeSetId === 'vrg-only' && r.phaseId === 'organizing');
-	const authorityAdmin = headline.find((r) => r.scopeSetId === 'authority-admin' && r.phaseId === 'organizing');
+	const vrgOnly = headline.find((r) => r.scopeSetId === 'vrg-only' && r.phaseId === TIER3_BASELINE_PHASE_ID);
+	const authorityAdmin = headline.find((r) => r.scopeSetId === 'authority-admin' && r.phaseId === TIER3_BASELINE_PHASE_ID);
 	const vrgVisible = new Set((vrgOnly?.model ?? []).filter((/** @type {any} */ m) => m.visible).map((/** @type {any} */ m) => m.id));
 	const adminVisible = new Set(
 		(authorityAdmin?.model ?? []).filter((/** @type {any} */ m) => m.visible).map((/** @type {any} */ m) => m.id),

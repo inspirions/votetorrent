@@ -118,6 +118,7 @@ test('the settling instant lies strictly inside [tallyingStarts, closed) and the
 // ---------------------------------------------------------------------------
 
 test('derivePhase(...).stage is the newest passed cut-off: null at pre, votingStarts at voting, certificationStarts at settling, closed at closed', () => {
+	/** @type {Record<string, string | null>} */
 	const expected = {
 		pre: null,
 		voting: 'votingStarts',
