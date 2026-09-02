@@ -785,8 +785,11 @@ jobs:
           node scripts/assert-ci-baselines.mjs selftest
           echo "RECEIPT baseline-checker-selftest" | tee -a ci-receipt.txt
 
-      # The vote-engine suite exits non-zero BY DESIGN (8 known pre-existing
-      # failures) -- this step must capture the log without letting that exit
+      # The vote-engine suite exits non-zero BY DESIGN (9 known pre-existing
+      # failures, per scripts/ci-baselines.json's voteEngine.expectedFailing --
+      # that file is the single source of truth; this comment restates it only
+      # for a reader scanning this step, not as a second number to keep in
+      # sync) -- this step must capture the log without letting that exit
       # code end the job, and must not unconditionally swallow its own exit
       # status (that would also hide a genuine crash). The checker is the
       # verdict, not this exit code: its

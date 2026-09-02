@@ -7,7 +7,10 @@
  *
  * Why this exists: a test runner's own process exit code is NOT a trustworthy
  * CI verdict in this repo. `yarn workspace @votetorrent/vote-engine test`
- * exits non-zero by design (it carries 8 pre-existing failures); `tsc --noEmit`
+ * exits non-zero by design (its failing count is pinned in
+ * scripts/ci-baselines.json's voteEngine.expectedFailing -- read that value,
+ * do not restate it here, it has drifted from a hard-coded copy before);
+ * `tsc --noEmit`
  * on apps/VoteTorrentAuthority exits non-zero by design (51 pre-existing
  * errors). Both need a checker that reads the actual counts and titles out of
  * a captured log and decides pass/fail against a committed, reviewed contract
