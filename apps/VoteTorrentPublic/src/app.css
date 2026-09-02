@@ -209,13 +209,17 @@
 /*
  * The tone chip. Its TEXT is the page text colour rather than the tone
  * colour, and that is measured rather than stylistic: the done tone against
- * the page background is about 3.98:1, under the 4.5:1 that 12px text needs,
- * while the other three tones clear it comfortably. A per-tone exception
- * would leave one chip visibly lighter than its three siblings for no reason
- * a reader could interpret, so one uniform rule instead -- the tone colour
- * carries the border and the background tint, where the 3:1 UI-component
- * threshold applies and all four pass, and the chip's own word carries the
- * meaning in greyscale.
+ * the page background is 4.03:1, under the 4.5:1 that 12px text needs, while
+ * the other three clear it: the go tone 8.41:1, the wait tone 8.93:1, the bad
+ * tone 5.09:1. (Re-measured here rather than adopted -- the figures this plan
+ * inherited were close but not exact, and the conclusion is unchanged: the
+ * done tone is the only one that fails.)
+ *
+ * A per-tone exception would leave one chip visibly lighter than its three
+ * siblings for no reason a reader could interpret, so one uniform rule
+ * instead -- the tone colour carries the border and the background tint,
+ * where the 3:1 UI-component threshold applies and all four pass, and the
+ * chip's own word carries the meaning in greyscale.
  */
 .status-banner__tone {
 	padding: 0 var(--space-sm);
