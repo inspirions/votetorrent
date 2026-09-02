@@ -227,19 +227,20 @@ export const COPY = Object.freeze({
 	// Navigation groups and lifecycle pill
 	'nav.groupElectionOperations': 'Election Operations',
 	'nav.groupAuthorityAdministration': 'Authority Administration',
-	'lifecycle.organizing': 'Being organized',
-	'lifecycle.running': 'Running',
-	'lifecycle.released': 'Results released',
-	// TEMPORARY (54-02 Task 1 -> Task 2, Rule 3 deviation): the four new
-	// Phase-54 lifecycle.* keys are added early, additively, so
-	// test/election-phase.test.mjs's phaseCopyKey-resolves-via-t() assertion
-	// (Task 1) has real keys to resolve before Task 2 lands. Task 2 replaces
-	// this whole block (these four plus the three above) with the final
-	// five-key set (adds lifecycle.indeterminate, removes the three above).
+	// Phase 54 (D-06/D-10): renamed from the three-phase organizing/running/
+	// released vocabulary to spike 086's four-phase pre/voting/settling/closed
+	// model -- a RENAME of all three prior ids, not an insertion of a fourth
+	// (adjudicated I-12). lifecycle.closed replaces the now-false "Results
+	// released": in the four-phase model the terminal phase opens at the
+	// `closed` event, not at `tallyingStarts`, and this page guarantees (D-13)
+	// no Tally/Certification/Validation table exists, so "released" would name
+	// a result that isn't there. lifecycle.indeterminate is D-10's explicit
+	// unknown-phase state, rendered as a visible pill rather than nothing.
 	'lifecycle.pre': 'Being organized',
 	'lifecycle.voting': 'Voting',
 	'lifecycle.settling': 'Settling',
 	'lifecycle.closed': 'Closed',
+	'lifecycle.indeterminate': 'Phase unknown',
 
 	// Panel titles and empty states, in the UI-SPEC's fixed order (registrations
 	// first, always -- 'vrg' is 39% of the authorization surface)

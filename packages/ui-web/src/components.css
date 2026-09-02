@@ -28,13 +28,21 @@
  * consumer's own component CSS already follows (preview-as.css,
  * election-ops.css).
  *
- * `.pv-disclosure` and `.lifecycle-pill` (+ modifiers) below are transcribed
- * VERBATIM from `apps/VoteTorrentDashboard/src/screens/panels/election-ops.css`
- * and `.../preview-as.css` as they stood before this revision — relocating,
- * not redesigning, so removing the dashboard's own now-duplicate copies
- * changes nothing about how the dashboard renders (see this plan's SUMMARY
- * for the identical-text proof). `.dt-toggle-group` is new: no consumer
- * declared it before CR-01, so its shape here is authored fresh.
+ * `.pv-disclosure` and `.lifecycle-pill` (+ 3 modifiers) below were originally
+ * transcribed VERBATIM from
+ * `apps/VoteTorrentDashboard/src/screens/panels/election-ops.css` and
+ * `.../preview-as.css` as they stood before the D-15 revision — relocating,
+ * not redesigning. `.dt-toggle-group` is new at that same revision: no
+ * consumer declared it before CR-01, so its shape there was authored fresh.
+ *
+ * Phase 54 (D-06/D-10): the modifiers are no longer the relocated dashboard
+ * rules unchanged — five now exist, not three. The `pre` and `closed`
+ * phase rules keep the prior organizing/released reduced-opacity treatment;
+ * the `voting` phase rule keeps the prior running treatment. Two rules below
+ * are genuinely NEW: the `settling` phase rule uses `--warn` at full
+ * opacity (matching 54-UI-SPEC's `wait` tone) and the `indeterminate`
+ * rule uses `--fail` at full opacity (matching the spec's `bad` tone) —
+ * these are the two intervals with no analog in the three-phase model.
  */
 
 .pv-disclosure {
@@ -58,17 +66,27 @@
 	line-height: var(--font-label-line-height);
 }
 
-.lifecycle-pill--organizing {
+.lifecycle-pill--pre {
 	opacity: 0.85;
 }
 
-.lifecycle-pill--running {
+.lifecycle-pill--voting {
 	color: var(--text);
 	opacity: 1;
 }
 
-.lifecycle-pill--released {
+.lifecycle-pill--settling {
+	color: var(--warn);
+	opacity: 1;
+}
+
+.lifecycle-pill--closed {
 	opacity: 0.85;
+}
+
+.lifecycle-pill--indeterminate {
+	color: var(--fail);
+	opacity: 1;
 }
 
 .dt-toggle-group {

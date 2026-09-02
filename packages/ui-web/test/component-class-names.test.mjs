@@ -35,11 +35,11 @@ test('LifecyclePill.tsx contains the base class name and the phase-modifier temp
 	assert.match(LIFECYCLE_SOURCE, /className=\{`lifecycle-pill lifecycle-pill--\$\{phase\}`\}/);
 });
 
-test("LifecyclePillProps' phase union names exactly the three modifiers the manifest declares", () => {
+test("LifecyclePillProps' phase union names exactly the five modifiers the manifest declares", () => {
 	const propsMatch = LIFECYCLE_SOURCE.match(/phase:\s*(.+);/);
 	assert.ok(propsMatch, 'expected to find the `phase:` prop type line in LifecyclePill.tsx');
 	const unionValues = [...propsMatch[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]);
-	assert.deepEqual(unionValues, ['organizing', 'running', 'released']);
+	assert.deepEqual(unionValues, ['pre', 'voting', 'settling', 'closed', 'indeterminate']);
 	const manifestModifiers = COMPONENT_CLASS_NAMES.LifecyclePill.filter((c) => c !== 'lifecycle-pill').map((c) =>
 		c.replace('lifecycle-pill--', ''),
 	);

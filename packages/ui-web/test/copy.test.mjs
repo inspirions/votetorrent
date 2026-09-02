@@ -18,19 +18,22 @@ import { uiWebSrc } from '../../../scripts/lib/source-paths.mjs';
 import { COPY, t } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
-// Total key count (D-05, D-09, D-08). 83, not 73 -- 53-07 (D-08) added
-// exactly ten `public.*`/`advisory.public.body` keys for
-// `apps/VoteTorrentPublic`'s election shell, on top of the 73 the table
-// carried after 53-05's `gate.advisoryDisclosure` -> `advisory.authority.body`
-// rename. Written as a bare literal so a future "fix" that deletes any of
-// them is caught by a failure message that names the reason.
+// Total key count (D-05, D-09, D-08, D-06/54-02). 85, not 73 or 83 -- 53-07
+// (D-08) added exactly ten `public.*`/`advisory.public.body` keys on top of
+// the 73 the table carried after 53-05's `gate.advisoryDisclosure` ->
+// `advisory.authority.body` rename (83 total). 54-02 (D-06/D-10) then
+// RENAMED the three `lifecycle.*` keys (net 0) and ADDED two more
+// (`lifecycle.settling`, `lifecycle.indeterminate`) -- 83 + 2 = 85. Written
+// as a bare literal so a future "fix" that deletes any of them is caught by
+// a failure message that names the reason.
 // ---------------------------------------------------------------------------
 
-test('COPY has exactly 83 keys (73 pre-53-07, plus the ten public-voice keys 53-07 added under D-08)', () => {
+test('COPY has exactly 85 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion)', () => {
 	assert.equal(
 		Object.keys(COPY).length,
-		83,
-		'expected 83 -- if this reads 73, the ten public.*/advisory.public.body keys 53-07 added were ' +
+		85,
+		'expected 85 -- if this reads 83, lifecycle.settling/lifecycle.indeterminate (54-02, D-06/D-10) were ' +
+			'wrongly deleted. If it reads 73, the ten public.*/advisory.public.body keys 53-07 added were ' +
 			'wrongly deleted; they are consumed by apps/VoteTorrentPublic/src/screens/ElectionShell.tsx ' +
 			'and must not be removed. If it reads 70, the three panelFrame.*Pill keys were wrongly ' +
 			'deleted -- they are consumed by src/screens/panels/PanelFrame.tsx',
@@ -38,16 +41,32 @@ test('COPY has exactly 83 keys (73 pre-53-07, plus the ten public-voice keys 53-
 });
 
 // ===========================================================================
-// D-25/D-07 (53-05, extended by 53-07/D-08): the key-set-identity check
-// against 8326185d, narrowed to a NAMED SET OF DELTAS rather than a blanket
-// key-set-equality check. `gate.advisoryDisclosure` was renamed to
-// `advisory.authority.body` in 53-05; 53-07 then added exactly the ten
-// `public.*`/`advisory.public.body` keys named in NEW_53_07_KEYS below. The
-// other 72 pre-move keys keep D-09's byte-identical guarantee untouched.
-// This is stronger than a bare count check: a second, unrelated key added
-// or removed later still fails this test, even though the total might
-// coincidentally still read 83.
+// D-25/D-07 (53-05, extended by 53-07/D-08, extended by 54-02/D-06): the
+// key-set-identity check against 8326185d, narrowed to a NAMED SET OF DELTAS
+// rather than a blanket key-set-equality check. `gate.advisoryDisclosure` was
+// renamed to `advisory.authority.body` in 53-05; 53-07 then added exactly the
+// ten `public.*`/`advisory.public.body` keys named in NEW_53_07_KEYS below.
+// 54-02 then RENAMED `lifecycle.organizing`/`.running`/`.released` to
+// `.pre`/`.voting`/`.closed` (PHASE_54_RENAMES) and ADDED
+// `lifecycle.settling`/`lifecycle.indeterminate` (PHASE_54_ADDITIONS). The
+// other 70 untouched pre-move keys keep D-09's byte-identical guarantee.
+// This is stronger than a bare count check: a second, unrelated key added or
+// removed later still fails this test, even though the total might
+// coincidentally still read 85.
 // ===========================================================================
+
+/**
+ * The three-id -> four-id lifecycle rename 54-02 (D-06, adjudicated I-12)
+ * made. @type {ReadonlyArray<readonly [string, string]>}
+ */
+const PHASE_54_RENAMES = Object.freeze([
+	['lifecycle.organizing', 'lifecycle.pre'],
+	['lifecycle.running', 'lifecycle.voting'],
+	['lifecycle.released', 'lifecycle.closed'],
+]);
+
+/** The two lifecycle keys 54-02 added outright (no prior id to rename from). @type {ReadonlyArray<string>} */
+const PHASE_54_ADDITIONS = Object.freeze(['lifecycle.settling', 'lifecycle.indeterminate']);
 
 /**
  * The ten `public.*`/`advisory.public.body` keys 53-07 added under D-08 --
@@ -153,21 +172,31 @@ const PRE_MOVE_KEYS = Object.freeze([
 	'panels.inviteAuthorities.empty',
 ]);
 
-test('D-25/D-07/D-08: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body and the ten NEW_53_07_KEYS additions -- no other key added or removed', () => {
+test('D-25/D-07/D-08/D-06: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename and the PHASE_54_ADDITIONS additions -- no other key added or removed', () => {
 	const currentKeys = new Set(Object.keys(COPY));
+	const renameMap = new Map(PHASE_54_RENAMES);
 	const expectedKeys = new Set([
-		...PRE_MOVE_KEYS.map((k) => (k === 'gate.advisoryDisclosure' ? 'advisory.authority.body' : k)),
+		...PRE_MOVE_KEYS.map((k) => {
+			if (k === 'gate.advisoryDisclosure') return 'advisory.authority.body';
+			if (renameMap.has(k)) return /** @type {string} */ (renameMap.get(k));
+			return k;
+		}),
 		...NEW_53_07_KEYS,
+		...PHASE_54_ADDITIONS,
 	]);
 
 	const added = [...currentKeys].filter((k) => !expectedKeys.has(k));
 	const removed = [...expectedKeys].filter((k) => !currentKeys.has(k));
 
-	assert.deepEqual(added, [], `unexpected key(s) added beyond the D-07 rename and the D-08 additions: ${added.join(', ')}`);
+	assert.deepEqual(
+		added,
+		[],
+		`unexpected key(s) added beyond the D-07 rename, the D-08 additions and the 54-02 lifecycle changes: ${added.join(', ')}`,
+	);
 	assert.deepEqual(
 		removed,
 		[],
-		`unexpected key(s) missing beyond the D-07 rename and the D-08 additions: ${removed.join(', ')}`,
+		`unexpected key(s) missing beyond the D-07 rename, the D-08 additions and the 54-02 lifecycle changes: ${removed.join(', ')}`,
 	);
 });
 
@@ -175,19 +204,44 @@ test('D-25/D-07: every key that survives unrenamed from 8326185d still carries i
 	const oldSource = readFileSync(uiWebSrc('copy.js'), 'utf8');
 	// This suite does not re-parse the historical file at test time (D-04:
 	// no execution of unreviewed historical code) -- instead it re-asserts,
-	// for every one of the 72 untouched keys, that COPY still carries a
+	// for every one of the untouched keys, that COPY still carries a
 	// non-empty value at that key. The per-key byte-identical VALUES for the
 	// keys this plan did not touch are additionally covered by this same
 	// file's existing 't(...)'-return-value assertions above, which read
 	// against the CURRENT COPY.js -- both together are what makes a silent
 	// re-wording of an untouched key visible.
 	assert.ok(oldSource.length > 0);
+	const renamedKeys = new Set(PHASE_54_RENAMES.map(([oldKey]) => oldKey));
 	for (const key of PRE_MOVE_KEYS) {
-		if (key === 'gate.advisoryDisclosure') continue; // the one named delta
+		if (key === 'gate.advisoryDisclosure') continue; // the D-07 named delta
+		if (renamedKeys.has(key)) continue; // the 54-02 named deltas, checked separately below
 		assert.ok(key in COPY, `expected ${key} to survive the move unchanged`);
 		assert.equal(typeof COPY[key], 'string');
 		assert.ok(COPY[key].length > 0, `expected ${key} to remain non-empty`);
 	}
+});
+
+// ===========================================================================
+// 54-02/D-06: the lifecycle rename's value semantics -- lifecycle.pre CARRIES
+// lifecycle.organizing's exact pre-move value across the rename (the
+// pre-election interval is unchanged), but lifecycle.voting and
+// lifecycle.closed are genuine VALUE CHANGES, not carries (D-06/D-10: the
+// four-phase model gives "Running" and "Results released" different, more
+// accurate meanings -- see this plan's <vocabulary_decision> table).
+// ===========================================================================
+
+test('lifecycle.pre carries lifecycle.organizing\'s exact pre-move value across the 54-02 rename', () => {
+	assert.equal(t('lifecycle.pre'), 'Being organized');
+});
+
+test('lifecycle.voting is a VALUE CHANGE from the retired lifecycle.running ("Running" -> "Voting") -- an election is colloquially still "running" while it settles, so the old word no longer distinguishes the two post-voting phases', () => {
+	assert.equal(t('lifecycle.voting'), 'Voting');
+	assert.notEqual(t('lifecycle.voting'), 'Running');
+});
+
+test('lifecycle.closed is a VALUE CHANGE from the retired lifecycle.released ("Results released" -> "Closed") -- D-13 guarantees no Tally/Certification/Validation table exists, so "released" would name a result that is not there', () => {
+	assert.equal(t('lifecycle.closed'), 'Closed');
+	assert.notEqual(t('lifecycle.closed'), 'Results released');
 });
 
 // ---------------------------------------------------------------------------
