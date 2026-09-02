@@ -298,43 +298,144 @@ function collectMountedPublicKeys(scanDirs) {
 	return mountedKeys;
 }
 
-test('the public-voice key set in COPY equals, in both directions, the set of public-voice keys literally mounted under src/, packages/ui-web/src/components/ and packages/ui-web/src/lifecycle/', (t) => {
+// 54-09 REMOVED the interim dynamic skip 54-05 installed here (I-23). The
+// literal call is deliberately not quoted anywhere in this file, so a
+// reader grepping the suite for a disabled test finds nothing. Its one
+// and only cause -- ~42 `facts.js` keys mounted but not yet declared in
+// COPY -- is gone: `copy.js` now declares all 50 members of
+// `FACT_COPY_KEYS`, `mountedNotDeclared` is empty, and the guard's own
+// `mountedNotDeclared.length > 0` condition can no longer hold. It was
+// removed rather than left in place because a skip whose reason has expired
+// is indistinguishable, in a test report, from a test somebody switched off.
+// The assertion below now runs unconditionally.
+//
+// -- TEMPLATE MOUNT EVIDENCE (54-09) ---------------------------------------
+//
+// `KEY_LITERAL_RE` can only see a key spelled out as a quoted literal, and
+// eight keys are genuinely mounted without ever being spelled out:
+// `facts.js` builds `public.tone.<tone>` and `public.group.<group>` from
+// TEMPLATE EXPRESSIONS over its own frozen `TONES` and `FACT_GROUPS`
+// arrays. They are as mounted as any literal -- `FACT_COPY_KEYS` publishes
+// them, and a render site resolves them through those two functions -- but
+// no literal scan can ever see them. This is the same situation, and takes
+// the same shape of answer, as the `variant="public"` exemption already
+// built into the walk above.
+//
+// The exemption is guarded so it cannot go vacuous, which is the whole
+// difference between an exemption and a hole: a key qualifies only if it is
+// BOTH a member of `FACT_COPY_KEYS` AND its generating template is still
+// present in comment-stripped `facts.js` source. Delete either template and
+// its four keys go straight back to being reported as never mounted.
+const KEY_TEMPLATE_SOURCES = Object.freeze([
+	{ prefix: 'public.tone.', template: 'public.tone.${' },
+	{ prefix: 'public.group.', template: 'public.group.${' },
+]);
+
+const FACTS_SOURCE_STRIPPED = stripCommentLines(readFileSync(uiWebSrc('lifecycle', 'facts.js'), 'utf8'));
+
+/**
+ * Keys emitted by a template expression rather than a literal. Empty unless
+ * the template is really there, so a removed template is a red rung.
+ * @returns {Set<string>}
+ */
+function collectTemplateMountedKeys() {
+	/** @type {Set<string>} */
+	const out = new Set();
+	for (const { prefix, template } of KEY_TEMPLATE_SOURCES) {
+		if (!FACTS_SOURCE_STRIPPED.includes(template)) continue;
+		for (const key of FACT_COPY_KEYS) if (key.startsWith(prefix)) out.add(key);
+	}
+	return out;
+}
+
+// -- PENDING MOUNT, an expiring list (54-09) --------------------------------
+//
+// The eleven keys 54-09 authored that sit OUTSIDE the fact model. They are
+// declared now and mounted later, on purpose: `t()` throws on an unknown
+// key, so the copy has to exist before the screens that render it, and the
+// header of `copy.js` records the amended warrant under which they arrive
+// early. Each is bound BY NAME by a render plan in a later wave -- the
+// index strings and the incomplete-holdings qualifier by the index screen,
+// the two details-toggle labels and the key-release fail-closed line by the
+// fact-card screen, the freshness line and the two standing caveats by the
+// page-voice screen, and the disclosure-policy failure line by the rules
+// card.
+//
+// This list is NOT a relaxation of the assertion, and two properties make
+// that true rather than merely asserted:
+//   - `declaredNotMounted` must be a SUBSET of it. Any other declared key
+//     with no mount site still fails, exactly as before.
+//   - Any member that HAS since been mounted must be deleted from it. A
+//     stale entry fails loudly, naming itself, instead of quietly
+//     forgiving something that no longer needs forgiving. That is what
+//     makes the list shrink to empty as the render plans land, rather than
+//     outliving its reason the way the removed skip would have.
+/** @type {ReadonlyArray<string>} */
+const PENDING_MOUNT_KEYS = Object.freeze([
+	'public.freshness.body',
+	'public.fact.keyrelease.unreadable',
+	'public.caveat.timelineUnvalidated',
+	'public.caveat.readOnly',
+	'public.rules.policyUnreadable',
+	'public.index.viewElectionCta',
+	'public.index.emptyHeading',
+	'public.index.emptyBody',
+	'public.index.someUnreadable',
+	'public.gap.detailsSummary',
+	'public.fact.detailsSummary',
+]);
+
+test('the public-voice key set in COPY equals, in both directions, the set of public-voice keys mounted under src/, packages/ui-web/src/components/ and packages/ui-web/src/lifecycle/ -- as a literal, as the variant="public" template, or as one of facts.js own key templates -- apart from the named PENDING_MOUNT_KEYS still awaiting their render plan', () => {
 	const declaredKeys = new Set(Object.keys(COPY).filter((k) => PUBLIC_VOICE_KEY_RE.test(k)));
 	const scanDirs = [publicSrc(), uiWebRoot('src', 'components'), uiWebRoot('src', 'lifecycle')];
 	const mountedKeys = collectMountedPublicKeys(scanDirs);
+	for (const key of collectTemplateMountedKeys()) mountedKeys.add(key);
 
 	const declaredNotMounted = [...declaredKeys].filter((k) => !mountedKeys.has(k));
 	const mountedNotDeclared = [...mountedKeys].filter((k) => !declaredKeys.has(k));
 
-	// KNOWN INTERIM STATE, discovered empirically during 54-05 execution and
-	// NOT anticipated by the plan: 54-04 (this same wave) already lands
-	// facts.js with ~41 literal public.fact.*/public.gap.*/
-	// public.headline.*/public.registrantRoll.* keys as DATA FIELDS -- the
-	// exact content this widening exists to discover (I-16). 54-09 (wave 3)
-	// has not yet authored COPY's matching entries, and
-	// packages/ui-web/test/public-voice.test.mjs ALREADY hard-pins COPY's
-	// public-voice key set to an exact ten-key list that only 54-09 may
-	// update (54-09's own hand-off contract names all 50 keys it must add).
-	// Neither this plan's rule against relaxing either direction below, nor
-	// its rule against touching a file another plan owns, permits fixing
-	// this by editing copy.js here. So this case SELF-HEALS instead: it
-	// dynamically skips ONLY when every `mountedNotDeclared` entry is one of
-	// facts.js's own already-published `FACT_COPY_KEYS` (i.e. the gap is
-	// confined to exactly this known, expected, self-resolving cause) AND
-	// `declaredNotMounted` is empty -- any OTHER discrepancy, now or after
-	// 54-09 lands, still fails both `assert.deepEqual` calls below for real.
-	const pendingFactsKeys = new Set(FACT_COPY_KEYS);
-	const unexplainedMountedNotDeclared = mountedNotDeclared.filter((k) => !pendingFactsKeys.has(k));
-	if (declaredNotMounted.length === 0 && mountedNotDeclared.length > 0 && unexplainedMountedNotDeclared.length === 0) {
-		t.skip(
-			`waiting on 54-09 to declare ${mountedNotDeclared.length} facts.js-sourced COPY key(s) ` +
-				`(all present in facts.js's own FACT_COPY_KEYS export): ${mountedNotDeclared.join(', ')} -- see 54-05-SUMMARY.md`,
-		);
-		return;
-	}
+	const pending = new Set(PENDING_MOUNT_KEYS);
+	const unexplainedDeclaredNotMounted = declaredNotMounted.filter((k) => !pending.has(k));
 
-	assert.deepEqual(declaredNotMounted, [], `declared public-voice key(s) never mounted: ${declaredNotMounted.join(', ')}`);
+	assert.deepEqual(
+		unexplainedDeclaredNotMounted,
+		[],
+		`declared public-voice key(s) never mounted, and not on the pending-mount list: ${unexplainedDeclaredNotMounted.join(', ')}`,
+	);
 	assert.deepEqual(mountedNotDeclared, [], `mounted public-voice key(s) never declared in COPY: ${mountedNotDeclared.join(', ')}`);
+});
+
+test('the pending-mount list is not stale -- every key on it is still both declared in COPY and genuinely unmounted, so an entry whose render plan has landed fails here instead of quietly forgiving nothing', () => {
+	const declaredKeys = new Set(Object.keys(COPY).filter((k) => PUBLIC_VOICE_KEY_RE.test(k)));
+	const scanDirs = [publicSrc(), uiWebRoot('src', 'components'), uiWebRoot('src', 'lifecycle')];
+	const mountedKeys = collectMountedPublicKeys(scanDirs);
+	for (const key of collectTemplateMountedKeys()) mountedKeys.add(key);
+
+	/** @type {string[]} */
+	const stale = [];
+	for (const key of PENDING_MOUNT_KEYS) {
+		if (!declaredKeys.has(key)) stale.push(`${key}: no longer declared in COPY -- remove it from the list`);
+		else if (mountedKeys.has(key)) stale.push(`${key}: now mounted -- remove it from the list`);
+	}
+	assert.deepEqual(stale, [], `the pending-mount list has stale entries:\n${stale.join('\n')}`);
+});
+
+test('control: the template mount-evidence exemption is real and can fail -- both facts.js key templates are present in comment-stripped source, and each contributes its four keys; a fabricated template contributes none', () => {
+	for (const { template } of KEY_TEMPLATE_SOURCES) {
+		assert.ok(
+			FACTS_SOURCE_STRIPPED.includes(template),
+			`facts.js no longer builds "${template}" -- the exemption for those keys must be deleted, not widened`,
+		);
+	}
+	const templateMounted = collectTemplateMountedKeys();
+	assert.equal(templateMounted.size, 8, `expected 4 tone + 4 group keys, got ${templateMounted.size}`);
+	assert.ok(templateMounted.has('public.tone.go'));
+	assert.ok(templateMounted.has('public.group.outcome'));
+	// Inertness: a prefix whose template does NOT appear in facts.js
+	// contributes nothing, which is what proves the guard is the thing doing
+	// the work rather than the FACT_COPY_KEYS membership alone.
+	assert.ok(!FACTS_SOURCE_STRIPPED.includes('public.__absent_template__.${'));
+	assert.ok(!templateMounted.has('public.headline.voting'), 'headline keys are literals and must not arrive through the template path');
 });
 
 test('control 1: root membership actually drives discovery -- a synthetic key mounted only in a throwaway directory is found when that directory is in scanDirs and absent otherwise', () => {

@@ -16,23 +16,29 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { uiWebSrc } from '../../../scripts/lib/source-paths.mjs';
 import { COPY, t } from '../src/index.js';
+import { FACT_COPY_KEYS, FACTS } from '../src/lifecycle/facts.js';
 
 // ---------------------------------------------------------------------------
-// Total key count (D-05, D-09, D-08, D-06/54-02). 85, not 73 or 83 -- 53-07
+// Total key count (D-05, D-09, D-08, D-06/54-02, 54-09). 146, not 85 -- 53-07
 // (D-08) added exactly ten `public.*`/`advisory.public.body` keys on top of
 // the 73 the table carried after 53-05's `gate.advisoryDisclosure` ->
 // `advisory.authority.body` rename (83 total). 54-02 (D-06/D-10) then
 // RENAMED the three `lifecycle.*` keys (net 0) and ADDED two more
-// (`lifecycle.settling`, `lifecycle.indeterminate`) -- 83 + 2 = 85. Written
-// as a bare literal so a future "fix" that deletes any of them is caught by
-// a failure message that names the reason.
+// (`lifecycle.settling`, `lifecycle.indeterminate`) -- 83 + 2 = 85. 54-09
+// then added the public election view's whole copy table: the 50 keys named
+// by `facts.js`'s own `FACT_COPY_KEYS` export plus the eleven that sit
+// outside the fact model -- 85 + 61 = 146. Written as a bare literal so a
+// future "fix" that deletes any of them is caught by a failure message that
+// names the reason.
 // ---------------------------------------------------------------------------
 
-test('COPY has exactly 85 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion)', () => {
+test('COPY has exactly 146 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion, +61 from 54-09s fact/gap copy table)', () => {
 	assert.equal(
 		Object.keys(COPY).length,
-		85,
-		'expected 85 -- if this reads 83, lifecycle.settling/lifecycle.indeterminate (54-02, D-06/D-10) were ' +
+		146,
+		'expected 146 -- if this reads 85, 54-09s public election view copy table was wrongly deleted; ' +
+			'50 of those keys are named by facts.js FACT_COPY_KEYS and t() throws on any one that is missing. ' +
+			'If it reads 83, lifecycle.settling/lifecycle.indeterminate (54-02, D-06/D-10) were ' +
 			'wrongly deleted. If it reads 73, the ten public.*/advisory.public.body keys 53-07 added were ' +
 			'wrongly deleted; they are consumed by apps/VoteTorrentPublic/src/screens/ElectionShell.tsx ' +
 			'and must not be removed. If it reads 70, the three panelFrame.*Pill keys were wrongly ' +
@@ -48,11 +54,13 @@ test('COPY has exactly 85 keys (73 pre-53-07, +10 public-voice keys under D-08, 
 // ten `public.*`/`advisory.public.body` keys named in NEW_53_07_KEYS below.
 // 54-02 then RENAMED `lifecycle.organizing`/`.running`/`.released` to
 // `.pre`/`.voting`/`.closed` (PHASE_54_RENAMES) and ADDED
-// `lifecycle.settling`/`lifecycle.indeterminate` (PHASE_54_ADDITIONS). The
-// other 70 untouched pre-move keys keep D-09's byte-identical guarantee.
-// This is stronger than a bare count check: a second, unrelated key added or
-// removed later still fails this test, even though the total might
-// coincidentally still read 85.
+// `lifecycle.settling`/`lifecycle.indeterminate` (PHASE_54_ADDITIONS). 54-09
+// then added NEW_54_09_KEYS -- the 50 members of facts.js's own
+// FACT_COPY_KEYS export, IMPORTED rather than transcribed, plus the eleven
+// non-fact keys listed beside them. The other 70 untouched pre-move keys keep
+// D-09's byte-identical guarantee. This is stronger than a bare count check:
+// a second, unrelated key added or removed later still fails this test, even
+// though the total might coincidentally still read 146.
 // ===========================================================================
 
 /**
@@ -88,6 +96,31 @@ const NEW_53_07_KEYS = Object.freeze([
 	'public.details.summary',
 	'public.details.body',
 ]);
+
+/**
+ * The eleven 54-09 keys that sit OUTSIDE the fact model, hand-listed here
+ * because nothing else names them as a set. The other fifty come from
+ * the imported `FACT_COPY_KEYS` -- iterated, never transcribed, because a second
+ * copy of a fifty-name list is a drift surface and `FACT_COPY_KEYS` exists
+ * precisely so no second copy has to exist.
+ * @type {ReadonlyArray<string>}
+ */
+const NEW_54_09_NON_FACT_KEYS = Object.freeze([
+	'public.freshness.body',
+	'public.fact.keyrelease.unreadable',
+	'public.caveat.timelineUnvalidated',
+	'public.caveat.readOnly',
+	'public.rules.policyUnreadable',
+	'public.index.viewElectionCta',
+	'public.index.emptyHeading',
+	'public.index.emptyBody',
+	'public.index.someUnreadable',
+	'public.gap.detailsSummary',
+	'public.fact.detailsSummary',
+]);
+
+/** The full 54-09 delta: the fact model's own contract plus the eleven above. @type {ReadonlyArray<string>} */
+const NEW_54_09_KEYS = Object.freeze([...FACT_COPY_KEYS, ...NEW_54_09_NON_FACT_KEYS]);
 
 /**
  * The exact 73 keys at `8326185d` (`git show
@@ -172,7 +205,16 @@ const PRE_MOVE_KEYS = Object.freeze([
 	'panels.inviteAuthorities.empty',
 ]);
 
-test('D-25/D-07/D-08/D-06: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename and the PHASE_54_ADDITIONS additions -- no other key added or removed', () => {
+test('sanity: the 54-09 delta is 61 keys -- 50 named by facts.js FACT_COPY_KEYS plus 11 non-fact keys, with no overlap between the two (an overlap would silently shrink the delta while every other assertion still passed)', () => {
+	assert.equal(FACT_COPY_KEYS.length, 50, 'facts.js FACT_COPY_KEYS must still publish 50 keys');
+	assert.equal(NEW_54_09_NON_FACT_KEYS.length, 11);
+	const factSet = new Set(FACT_COPY_KEYS);
+	const overlap = NEW_54_09_NON_FACT_KEYS.filter((k) => factSet.has(k));
+	assert.deepEqual(overlap, [], `these keys are counted twice: ${overlap.join(', ')}`);
+	assert.equal(new Set(NEW_54_09_KEYS).size, 61);
+});
+
+test('D-25/D-07/D-08/D-06/54-09: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename, the PHASE_54_ADDITIONS additions and the 61 NEW_54_09_KEYS additions -- no other key added or removed', () => {
 	const currentKeys = new Set(Object.keys(COPY));
 	const renameMap = new Map(PHASE_54_RENAMES);
 	const expectedKeys = new Set([
@@ -183,6 +225,7 @@ test('D-25/D-07/D-08/D-06: the ONLY key-set changes since 8326185d are gate.advi
 		}),
 		...NEW_53_07_KEYS,
 		...PHASE_54_ADDITIONS,
+		...NEW_54_09_KEYS,
 	]);
 
 	const added = [...currentKeys].filter((k) => !expectedKeys.has(k));
@@ -191,12 +234,12 @@ test('D-25/D-07/D-08/D-06: the ONLY key-set changes since 8326185d are gate.advi
 	assert.deepEqual(
 		added,
 		[],
-		`unexpected key(s) added beyond the D-07 rename, the D-08 additions and the 54-02 lifecycle changes: ${added.join(', ')}`,
+		`unexpected key(s) added beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes and the 54-09 delta: ${added.join(', ')}`,
 	);
 	assert.deepEqual(
 		removed,
 		[],
-		`unexpected key(s) missing beyond the D-07 rename, the D-08 additions and the 54-02 lifecycle changes: ${removed.join(', ')}`,
+		`unexpected key(s) missing beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes and the 54-09 delta: ${removed.join(', ')}`,
 	);
 });
 
@@ -539,4 +582,250 @@ test('D-10: the header no longer opens with the single-app framing', () => {
 		!HEADER_SOURCE.includes(FORBIDDEN_SINGLE_APP_OPENER),
 		'the header must not open by naming only the dashboard as this table\'s app',
 	);
+});
+
+// ===========================================================================
+// 54-09: the RESOLUTION GATE for the public election view's fact/gap table.
+//
+// 54-04 landed `facts.js` a wave earlier and deliberately asserted only the
+// SHAPE and COMPLETENESS of `FACT_COPY_KEYS` -- never that a member of it
+// resolves through `t()`, because `copy.js` could not have declared them
+// yet. This is that missing half, and it is written to ITERATE the export
+// rather than to restate it: a transcribed list would drift from the model
+// it is supposed to be checking, which is the whole reason `FACT_COPY_KEYS`
+// is derived at module load instead of hand-written.
+//
+// None of the scans below reads this file's own source, so no comment here
+// can satisfy one of them; every subject is a runtime `COPY` value.
+// ===========================================================================
+
+/**
+ * key -> the `interpolates` array of the `FACTS` entry that emits it as its
+ * `sentenceKey`. Built from the model, never hard-coded: `t()` throws on a
+ * surviving `{{placeholder}}`, so a key whose value interpolates has to be
+ * resolved with real params, and taking those param NAMES from
+ * `interpolates` is what makes a mismatch between the model and the copy
+ * value surface as `t()`'s own named throw instead of as a silent pass.
+ * @type {Map<string, ReadonlyArray<string>>}
+ */
+const INTERPOLATING_FACT_KEYS = new Map();
+for (const entry of FACTS) {
+	if (entry.sentenceKey !== null && entry.interpolates !== null && entry.interpolates.length > 0) {
+		INTERPOLATING_FACT_KEYS.set(entry.sentenceKey, entry.interpolates);
+	}
+}
+
+test('sanity: exactly one FACTS entry emits an interpolating sentence key, and it is the key-release aggregate (if this ever reads 0, the loop below degenerates into a no-placeholder scan and proves nothing about interpolation)', () => {
+	assert.equal(INTERPOLATING_FACT_KEYS.size, 1);
+	assert.ok(INTERPOLATING_FACT_KEYS.has('public.fact.keyrelease.sentence'));
+	assert.deepEqual([...(INTERPOLATING_FACT_KEYS.get('public.fact.keyrelease.sentence') ?? [])], ['released', 'total']);
+});
+
+test('54-09: every one of facts.js FACT_COPY_KEYS 50 members resolves through t() to a non-empty string', () => {
+	assert.ok(FACT_COPY_KEYS.length > 0, 'sanity: an empty FACT_COPY_KEYS would make this loop vacuous');
+	/** @type {string[]} */
+	const offenders = [];
+	for (const key of FACT_COPY_KEYS) {
+		const interpolates = INTERPOLATING_FACT_KEYS.get(key);
+		/** @type {Record<string, unknown>} */
+		const params = {};
+		for (const name of interpolates ?? []) params[name] = '7';
+		let resolved;
+		try {
+			resolved = t(key, params);
+		} catch (err) {
+			offenders.push(`${key}: t() threw -- ${err instanceof Error ? err.message : String(err)}`);
+			continue;
+		}
+		if (resolved.length === 0) offenders.push(`${key}: resolved to the empty string`);
+	}
+	assert.deepEqual(offenders, [], `these FACT_COPY_KEYS members do not resolve:\n${offenders.join('\n')}`);
+});
+
+test('54-09: every NON-interpolating FACT_COPY_KEYS member carries no {{ in its raw COPY value -- a placeholder cannot be smuggled into a key the model says takes no params', () => {
+	/** @type {string[]} */
+	const offenders = [];
+	for (const key of FACT_COPY_KEYS) {
+		if (INTERPOLATING_FACT_KEYS.has(key)) continue;
+		if (String(COPY[key]).includes('{{')) offenders.push(key);
+	}
+	assert.deepEqual(
+		offenders,
+		[],
+		`these keys carry a {{placeholder}} but facts.js declares no interpolates for them, so every render site would throw: ${offenders.join(', ')}`,
+	);
+});
+
+test('positive control: the resolution gate can fail -- t() on a fabricated public.*-shaped key that is deliberately absent throws naming that key', () => {
+	const fabricated = 'public.__absent_control__.sentence';
+	assert.ok(!(fabricated in COPY), 'sanity: the control key must genuinely be absent from COPY');
+	assert.throws(
+		() => t(fabricated),
+		(err) => err instanceof Error && err.message.includes(fabricated),
+		'the resolution gate above is inert if t() does not throw by name on an absent key',
+	);
+});
+
+// ---------------------------------------------------------------------------
+// The four keys 54-11 and 54-13 bind BY NAME. They sit outside
+// `FACT_COPY_KEYS` (facts.js is landed and frozen, and none of these is a
+// field on a FACTS entry), so nothing in this package would gate them
+// otherwise -- and each is a blocking precondition of a later plan, which
+// means a rename here fails a plan that has already been written.
+// ---------------------------------------------------------------------------
+
+/** @type {ReadonlyArray<string>} */
+const DOWNSTREAM_BOUND_KEYS = Object.freeze([
+	'public.index.someUnreadable',
+	'public.gap.detailsSummary',
+	'public.fact.detailsSummary',
+	'public.fact.keyrelease.unreadable',
+]);
+
+test('54-09: the four downstream-bound keys each resolve through t() to a non-empty string carrying no {{', () => {
+	for (const key of DOWNSTREAM_BOUND_KEYS) {
+		const value = t(key);
+		assert.ok(value.length > 0, `expected ${key} to resolve non-empty`);
+		assert.ok(!value.includes('{{'), `${key} must carry no {{placeholder}}: "${value}"`);
+	}
+});
+
+test('54-09: the gap and fact details-toggle summaries are different from each other AND from the page-level public.details.summary -- this is the assertion that catches a well-meaning later merge of the two into one label', () => {
+	const gapSummary = t('public.gap.detailsSummary');
+	const factSummary = t('public.fact.detailsSummary');
+	const pageSummary = t('public.details.summary');
+	assert.notEqual(
+		gapSummary,
+		factSummary,
+		'a gap detail explains why there is no source; a filled fact detail explains what the value means -- one label cannot do both',
+	);
+	assert.notEqual(gapSummary, pageSummary, 'the page-level summary is about the view, not about a card');
+	assert.notEqual(factSummary, pageSummary, 'the page-level summary is about the view, not about a card');
+	assert.equal(new Set([gapSummary, factSummary, pageSummary]).size, 3);
+});
+
+// ---------------------------------------------------------------------------
+// 54-09: the key-release placeholder contract. The render call site feeds
+// `total` from the read's KEYHOLDER COUNT, never from the read's own `total`
+// field (which counts release-key tasks and is zero until one is raised).
+// That call site is already written against these two names, and
+// `facts.js`'s `interpolates` array is frozen and landed, so renaming the
+// placeholder here breaks both. This asserts the names still agree.
+// ---------------------------------------------------------------------------
+
+test('54-09: public.fact.keyrelease.sentence interpolates exactly {{released}} and {{total}} -- the same two names facts.js declares, and no third', () => {
+	const raw = String(COPY['public.fact.keyrelease.sentence']);
+	const found = [...raw.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]).sort();
+	assert.deepEqual(found, ['released', 'total']);
+	const declared = INTERPOLATING_FACT_KEYS.get('public.fact.keyrelease.sentence');
+	assert.ok(declared, 'sanity: facts.js must still declare interpolates for the key-release sentence');
+	assert.deepEqual(
+		found,
+		[...declared].sort(),
+		'the copy value and facts.js interpolates array disagree -- one of them was renamed without the other',
+	);
+	assert.ok(!raw.includes('{{keyholderCount}}'), 'the placeholder is deliberately NOT renamed; see the note beside this key in copy.js');
+});
+
+test('54-09: public.headline.pre.registrationUnknown resolves and does NOT say registration has closed -- the never-guess rule, which spike 088 broke by collapsing an unreadable date into a closed answer', () => {
+	const value = t('public.headline.pre.registrationUnknown');
+	assert.ok(value.length > 0);
+	assert.doesNotMatch(value, /registration has closed/i);
+});
+
+// ---------------------------------------------------------------------------
+// D-12: no internal vocabulary in a string a reader sees without opening the
+// details toggle.
+//
+// Two families, and they are checked separately because they fail for
+// different reasons: the gap enumeration's letters (meaningless outside the
+// source that defines them) and schema table names (jargon on an always-
+// visible card). Table names are PERMITTED in `.detail` values, which render
+// only behind the toggle -- that placement is the whole mitigation, so the
+// scan is scoped to `.sentence` and `.label` rather than run over the table.
+// ---------------------------------------------------------------------------
+
+const GAP_LETTER_PHRASE_RE = /\bgap [A-G]\b/;
+const STANDALONE_LETTER_RE = /(^|[^A-Za-z])[A-G]([^A-Za-z]|$)/;
+
+test('positive control: both gap-letter matchers fire on planted fixtures (an absence check that cannot fail proves nothing)', () => {
+	assert.match('this is gap C and has no table', GAP_LETTER_PHRASE_RE);
+	assert.match('the answer is B here', STANDALONE_LETTER_RE);
+	assert.doesNotMatch('Ballots cast', STANDALONE_LETTER_RE);
+	assert.doesNotMatch('a plain sentence with no letters standing alone', GAP_LETTER_PHRASE_RE);
+});
+
+test('D-12: no COPY value names a gap by its internal letter', () => {
+	/** @type {string[]} */
+	const offenders = [];
+	for (const [key, value] of Object.entries(COPY)) {
+		if (GAP_LETTER_PHRASE_RE.test(value)) offenders.push(`${key}: "${value}"`);
+	}
+	assert.deepEqual(offenders, [], `gap letters reached a reader-visible string:\n${offenders.join('\n')}`);
+});
+
+test('D-12: no .sentence or .label value contains a standalone A-G, so no gap letter can reach a card that is always visible', () => {
+	/** @type {string[]} */
+	const offenders = [];
+	for (const [key, value] of Object.entries(COPY)) {
+		if (!key.endsWith('.sentence') && !key.endsWith('.label')) continue;
+		if (STANDALONE_LETTER_RE.test(value)) offenders.push(`${key}: "${value}"`);
+	}
+	assert.deepEqual(offenders, [], `a standalone letter reached an always-visible string:\n${offenders.join('\n')}`);
+});
+
+/**
+ * Schema table names, checked case-sensitively because the identifier is
+ * what leaks, not the concept -- the gap sentences legitimately use the
+ * lower-case English words (`tally`, `validation`) for the same ideas.
+ * @type {ReadonlyArray<string>}
+ */
+const SCHEMA_TABLE_NAMES = Object.freeze(['Tally', 'Validation', 'Certification', 'Block', 'MerkleNode', 'VoteEntry']);
+
+/**
+ * The two labels where a schema table name is permitted, each with the
+ * reason. `Validation` and `Certification` are also ordinary English nouns,
+ * and they are the words a member of the public actually uses for these two
+ * concepts; the corresponding gap sentences already use them in lower case,
+ * so banning the capitalised form from the card heading directly above would
+ * forbid the identifier while permitting the concept in the very next line.
+ * These two are named individually rather than by a pattern so that the
+ * exception cannot quietly grow: a third label wanting a table name fails
+ * this test and has to argue for itself.
+ * @type {Readonly<Record<string, string>>}
+ */
+const TABLE_NAME_LABEL_EXEMPTIONS = Object.freeze({
+	'public.fact.validation.label': 'Validation',
+	'public.fact.certification.label': 'Certification',
+});
+
+test('positive control: the schema-table-name matcher fires on a planted label and does not fire on a benign one', () => {
+	assert.ok(SCHEMA_TABLE_NAMES.some((n) => 'Merkle root of vote blocks in MerkleNode'.includes(n)));
+	assert.ok(!SCHEMA_TABLE_NAMES.some((n) => 'Cryptographic record of the votes'.includes(n)));
+});
+
+test('D-12: no public.gap.*.sentence and no public.fact.*.label carries a schema table name, apart from the two named label exemptions', () => {
+	/** @type {string[]} */
+	const offenders = [];
+	for (const [key, value] of Object.entries(COPY)) {
+		const isGapSentence = /^public\.gap\..*\.sentence$/.test(key);
+		const isFactLabel = /^public\.fact\..*\.label$/.test(key);
+		if (!isGapSentence && !isFactLabel) continue;
+		for (const name of SCHEMA_TABLE_NAMES) {
+			if (!value.includes(name)) continue;
+			if (TABLE_NAME_LABEL_EXEMPTIONS[key] === name) continue;
+			offenders.push(`${key}: contains "${name}" -- "${value}"`);
+		}
+	}
+	assert.deepEqual(offenders, [], `schema table names reached an always-visible string:\n${offenders.join('\n')}`);
+});
+
+test('the two table-name label exemptions are not stale -- each named key exists and still carries the word it is exempted for (a stale exemption is an exception with nothing behind it)', () => {
+	for (const [key, name] of Object.entries(TABLE_NAME_LABEL_EXEMPTIONS)) {
+		assert.ok(key in COPY, `exempted key ${key} no longer exists -- delete the exemption`);
+		assert.ok(
+			String(COPY[key]).includes(name),
+			`${key} no longer contains "${name}" -- the exemption is now inert and must be deleted`,
+		);
+	}
 });

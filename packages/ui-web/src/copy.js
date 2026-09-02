@@ -28,6 +28,28 @@
  * screen that needs one -- never speculatively -- and each addition is recorded,
  * per the existing convention above, in a comment beside the keys it adds.
  *
+ * D-08, AMENDED for the public election view's fact/gap table (54-09). The
+ * `public.*` block at the bottom of this file now arrives one to five waves
+ * BEFORE the screens that mount it. The "never speculatively" rule is not
+ * waived; it is satisfied by a different warrant, because a speculative key
+ * is one nobody has committed to mounting, and none of these is:
+ *   - 50 of them are named by `FACT_COPY_KEYS`, a frozen, derived, tested
+ *     export of `src/lifecycle/facts.js`. That export is computed from the
+ *     fact model itself, its completeness is asserted in `test/facts.test.mjs`,
+ *     and `test/copy.test.mjs` iterates it -- so the set is a landed contract,
+ *     not a guess about a future screen.
+ *   - the remaining 11 are each named by a locked phase decision or by an
+ *     already-planned call site that binds them BY NAME (see the per-group
+ *     comments beside them).
+ * `t()` throws on an unknown key, so authoring them late would turn every
+ * render plan into a render failure; authoring them here is what makes the
+ * render plans mountable at all. The residual this leaves -- a key that
+ * ships and then is never actually mounted -- is closed by the render plans
+ * themselves, which gate their own output against this same contract, and by
+ * `apps/VoteTorrentPublic/test/node/election-shell.test.mjs`'s bidirectional
+ * declared-vs-mounted case, whose interim allow-list must shrink to empty as
+ * each of the eleven is mounted.
+ *
  * D-07 (variant-prop contract): a component SHARED between the two web apps must
  * not hard-code one consumer's copy key. It takes an explicit `variant` prop and
  * resolves its own key at render time, so `t()`'s throw-on-unknown-key turns a
@@ -265,9 +287,13 @@ export const COPY = Object.freeze({
 
 	// --- Public election view (53-07, D-08) -------------------------------
 	//
-	// Exactly ten keys, added because apps/VoteTorrentPublic's ElectionShell
-	// actually mounts every one of them -- never speculatively (D-08). Every
-	// value below was authored FRESH for a no-login audience and was NEVER
+	// Ten keys when 53-07 landed, because apps/VoteTorrentPublic's
+	// ElectionShell actually mounted every one of them -- never
+	// speculatively (D-08); 54-09 then added sixty-one more under the
+	// amended warrant recorded in this file's header (the fact model's own
+	// derived key contract, plus eleven keys each named by a locked
+	// decision). Every value below was authored FRESH for a no-login
+	// audience and was NEVER
 	// produced by find-and-replacing `advisory.authority.body` or any
 	// `gate.*`/`bootstrap.*` string (D-07); `packages/ui-web/test/public-voice.test.mjs`
 	// lints this block for banned lexemes (officer/permission/scope/login
@@ -280,8 +306,37 @@ export const COPY = Object.freeze({
 	// landed, which was the mechanism, not a gap). It must read true on BOTH
 	// the shipped election-less page and 53-07's harness page, so it makes
 	// no claim tied to any one election.
+	//
+	// REWRITTEN by 54-09. The value shipped by 53-07 was FALSE, and in two
+	// distinct ways, both of them consequences of the same fact: this app's
+	// only data source is the election records this particular browser
+	// already holds.
+	//   (1) It promised that whoever opens the page sees the election
+	//       record. A first-time visitor's browser holds no record at all,
+	//       so for them the page shows nothing -- the promise is not merely
+	//       imprecise, it is wrong for the commonest visitor.
+	//   (2) It promised that the page never shows different visitors
+	//       different things. What any visitor sees depends entirely on
+	//       their own browser's holdings, so two visitors routinely see
+	//       different pages.
+	// It is not enough to note this in a plan: the reason a well-formed
+	// sentence like that one survived review and shipped is that no
+	// automated gate in this repo can see a false word, so the correction
+	// has to live where the next author will read it.
+	//
+	// The replacement carries exactly three claims, and they are the only
+	// three that stay true across the move from today's read-once store to
+	// real-time sync: the page shows the election's OWN PUBLISHED RECORD;
+	// it shows the SAME RECORD to every visitor WHOSE BROWSER HOLDS IT; and
+	// NOTHING DONE HERE CHANGES IT. It deliberately makes no claim about
+	// reach -- how far a record travels, who else can get one, whether the
+	// two web apps share a store. There is no replication layer anywhere in
+	// the web tree, and the origin topology of the two web apps is an open
+	// question, so any sentence about reach would be unverifiable today and
+	// could be falsified whichever way that question resolves. A claim this
+	// page cannot check is the same defect as the one being replaced.
 	'advisory.public.body':
-		"Anyone can open this page and see the same election record — nothing here is shown differently for different visitors, and nothing you do on this page changes what the record says.",
+		"This page shows the election's own published record, exactly as this browser holds it. Every visitor whose browser holds the same record sees the same facts here, and nothing done on this page changes what the record says.",
 	'public.chrome.appName': 'VoteTorrent Public Election View',
 	'public.election.addressLabel': 'Election address',
 	// unreadableAddress.*: this app holds no election data at all, so it
@@ -305,8 +360,322 @@ export const COPY = Object.freeze({
 	// own published timeline, never picked by anyone -- it makes no claim
 	// about where that timeline comes from, because in this phase it comes
 	// from nowhere.
+	//
+	// REWRITTEN by 54-09. The value shipped by 53-07 named THREE phases,
+	// using the retired organizing/running/released vocabulary; the shared
+	// model now derives FOUR, and the three-phase sentence had no word at
+	// all for the one a reader is most likely to meet. Settling -- after
+	// voting closes and before any result is final -- is where a realistic
+	// election spends nearly all of its observable life: measured against
+	// the phase's own sample timeline, 12.96 days settling against 0.54
+	// days voting. A sentence that omits it describes the page's rarest
+	// state and skips its commonest.
+	//
+	// The four words here are the same four the pill renders, so the prose
+	// and the pill cannot disagree: a reader who sees "Settling" on the
+	// pill finds "settling" explained in this paragraph, and a rename of
+	// either would be visible as a disagreement rather than hidden as a
+	// synonym.
 	'public.details.body':
-		'When an election is shown here, its lifecycle — being organized, running, or results released — is computed from that election’s own published timeline. Nobody picks it by hand; it follows from the dates the election itself publishes.',
+		'An election modeled here moves through four phases: being organized, voting, settling — after voting closes and before any result is final — and closed. Nobody picks the phase by hand; it follows from the dates the election itself publishes.',
+
+	// --- Public election view, the fact/gap table (54-09) ------------------
+	//
+	// Sixty-one keys. Fifty of them are exactly the members of
+	// `src/lifecycle/facts.js`'s frozen `FACT_COPY_KEYS` export -- the fact
+	// model's own published contract, iterated (never transcribed) by
+	// `test/copy.test.mjs`, so the two cannot drift. The other eleven sit
+	// outside the fact model and are called out individually below.
+	//
+	// Every value here is subject to the same two lints as the block above
+	// (banned lexemes; no shared 6-word run with the authority-voiced
+	// corpus), which now run over all sixty-seven public-voice values rather
+	// than the original ten, because `test/public-voice.test.mjs` derives
+	// its key set from `FACT_COPY_KEYS` instead of listing it.
+
+	// KNOWN-EXPIRING (D-30). This sentence describes today's implementation
+	// and nothing more: the record was copied into this browser at some
+	// earlier moment and nothing refreshes it. It is scheduled to be
+	// REPLACED, not merely revisited, by whichever phase lands real-time
+	// sync -- this phase builds the seam for that (a change-notification
+	// hook), but landing sync itself is elsewhere and is gated on the peer
+	// network being able to form at all. Two consequences a later reader
+	// must not miss. First, it must not be read as a permanent
+	// architectural statement about how this page works; it is a statement
+	// about how it works TODAY. Second, no automated gate can catch it
+	// going stale -- the data never changes under test, so a sentence
+	// saying "won't update on its own" reads true in every test run
+	// forever, including the run after sync lands. Its expiry is recorded
+	// here because that comment is the only mechanism there is.
+	'public.freshness.body':
+		"This copy of the record was loaded into this browser earlier and won't update on its own.",
+
+	// Tone chip words. These are the REDUNDANT NON-COLOUR CUE for the status
+	// banner: the chip's colour and this word always render together, and
+	// neither may render alone. The word is what survives greyscale, a
+	// monochrome print, and every form of colour blindness -- so it must
+	// stay a short standalone status word and must never be reduced to a
+	// restatement of the headline beside it.
+	'public.tone.go': 'OPEN',
+	'public.tone.wait': 'PENDING',
+	'public.tone.done': 'CLOSED',
+	'public.tone.bad': 'UNKNOWN',
+
+	// Group headings. One per member of `facts.js`'s `FACT_GROUPS`, resolved
+	// mechanically by `groupCopyKey()` -- a group added there without a key
+	// here is a loud throw from `t()`, never a machine identifier on screen.
+	'public.group.electionAndRules': 'The election and its rules',
+	'public.group.ballot': 'The ballot',
+	'public.group.electorate': 'The electorate',
+	'public.group.outcome': 'The outcome',
+
+	// Headlines. One per distinct outcome of `facts.js`'s `headlineKey()`,
+	// which pairs each with a tone.
+	//
+	// `public.headline.pre.registrationUnknown` is the one value here that
+	// is not adopted from the design spec, and it exists to refuse a guess.
+	// Spike 088 collapsed an unreadable registration-end date into
+	// "Registration has closed" -- which is not a cautious answer, it is an
+	// invented one, and the derivation library's standing rule is that a
+	// phase is either derived from readable dates or reported as underived.
+	// This sentence states the one thing that IS derived from the phase
+	// alone (voting has not started) and explicitly declines the one that is
+	// not (whether registration is still open). It must not be reworded back
+	// toward "closed": doing so would restore 088's defect while leaving
+	// every gate green, since a guess and a derivation are indistinguishable
+	// once written down as a sentence.
+	'public.headline.pre.registrationOpen': 'Registration is open',
+	'public.headline.pre.registrationClosed': 'Registration has closed — voting has not started',
+	'public.headline.pre.registrationUnknown':
+		"Voting has not started — whether registration is still open can't be read from this election's schedule.",
+	'public.headline.voting': 'Polls are open',
+	'public.headline.settling': 'Voting has closed — no result is final yet',
+	'public.headline.closed': 'This election is closed',
+	'public.headline.unknown': "This election's schedule can't be read, so its phase is unknown.",
+
+	// Per-fact card labels, one per `FACTS` entry, taken from spike 088's own
+	// label strings and corrected in six places:
+	//   rules       -- was "Election rules", which duplicated its own group
+	//                  heading almost exactly.
+	//   ballot      -- was "The ballot", byte-identical to its group heading,
+	//                  so the card looked like a repeat of the heading above
+	//                  it.
+	//   turnout     -- was "Ballots cast / turnout"; a slashed pair is a
+	//                  label that could not decide, and "turnout" adds
+	//                  nothing a reader of "Ballots cast" does not have.
+	//   receipt     -- was "Verify my vote is included": an imperative naming
+	//                  an affordance this page does not have. The card exists
+	//                  to say that check is unavailable, so its label must
+	//                  not offer it.
+	//   merkle      -- was "Merkle root of vote blocks". The card's own
+	//                  sentence already avoids that vocabulary; a label that
+	//                  reintroduces it puts the jargon back on the always-
+	//                  visible surface.
+	//   timeline/polls are 088 verbatim and deliberately match the wording
+	//                  already shipped elsewhere on the page.
+	//
+	// EXCEPTION, do not "fix" it: `registrantRoll` has no
+	// `public.fact.*.label` key. Its `labelKey` is
+	// `public.registrantRoll.heading`, set that way in `facts.js` (a landed
+	// file) so the roll's heading, body, disclaimer and empty message stay
+	// one namespace rather than being split across two. The asymmetry is
+	// deliberate.
+	'public.fact.identity.label': 'Election',
+	'public.fact.authority.label': 'Who runs this election',
+	'public.fact.governance.label': 'Signed governance trail',
+	'public.fact.rules.label': 'Rules and policies',
+	'public.fact.timeline.label': 'Timeline',
+	'public.fact.registration.label': 'Registration',
+	'public.fact.ballot.label': 'Questions and options',
+	'public.fact.polls.label': 'Polls',
+	'public.fact.electorate.label': 'Eligible electorate',
+	'public.fact.keyholders.label': 'Keyholders',
+	'public.fact.turnout.label': 'Ballots cast',
+	'public.fact.receipt.label': 'Checking your own ballot',
+	'public.fact.merkle.label': 'Cryptographic record of the votes',
+	'public.fact.keyrelease.label': 'Keyholder key release',
+	'public.fact.results.label': 'Results',
+	'public.fact.validation.label': 'Validation report',
+	'public.fact.certification.label': 'Certification',
+
+	// The gap cards: six facts this system does not record anywhere, each
+	// with two strings that are NOT interchangeable.
+	//
+	// `.sentence` renders on the card and is always visible. It is a plain
+	// human sentence: what is missing, and enough of why that a reader who
+	// stops here is not misled.
+	// `.detail` renders only after a reader opens the details toggle. It
+	// carries the technical reason and the specification citation, which is
+	// why a schema table name may appear in a `.detail` value and appears in
+	// no `.sentence` and no `.label`.
+	//
+	// The internal enumeration these gaps come from letters them A through
+	// G. No letter appears in any key name or any value in this table --
+	// not here, not in a heading, not in a detail. A reader has no way to
+	// resolve a letter to a meaning, so it is an identifier leaking out of
+	// the source, not information.
+	'public.gap.turnout.sentence':
+		"How many ballots have been cast isn't shown here — there's no record of vote counts in this system yet.",
+	'public.gap.turnout.detail':
+		"No Vote or VoteEntry table exists; vote and voter entries live in negotiated blocks the schema doesn't model (doc/election.md:95-110).",
+	'public.gap.receipt.sentence':
+		"There's no way on this page to confirm your own ballot was received — that check depends on a private receipt only you hold.",
+	'public.gap.receipt.detail':
+		'The vote nonce is held privately by the voter; nothing on the network can be checked against it (doc/election.md:97).',
+	'public.gap.merkle.sentence': "The cryptographic record tying votes together isn't published here.",
+	'public.gap.merkle.detail': 'No Block or MerkleNode table exists yet (doc/election.md:114).',
+	'public.gap.results.sentence':
+		"Results aren't published on this page — there's no tally recorded anywhere in the system yet.",
+	'public.gap.results.detail': 'No Tally table exists (doc/election.md:124-132).',
+	'public.gap.validation.sentence': 'No validation report or error-margin figure is available here.',
+	'public.gap.validation.detail':
+		'No Validation table exists, and no error-margin statistic is recorded anywhere (doc/election.md:134-153).',
+	'public.gap.certification.sentence': "No signed certification of this election's outcome is available here.",
+	'public.gap.certification.detail':
+		'No Certification table exists; each authority is meant to publish one, but nothing stores it (doc/election.md:155-159).',
+
+	// Key release -- the one entry in the outcome group that is FILLED
+	// rather than gapped, and the only fact on this page carrying live data
+	// during the settling window. It renders on a plain fact card and must
+	// never be given the gap card's dashed, muted, de-emphasised treatment:
+	// it is the counter-example the rest of that group exists to set off.
+	//
+	// `{{released}}` and `{{total}}` are interpolated by `t()` from values
+	// the shell supplies out of the public read. Both placeholder names must
+	// stay byte-identical to the `interpolates` array on this fact's entry
+	// in `facts.js`; the copy test asserts that correspondence in both
+	// directions, and `t()` throws by name on any placeholder left
+	// unresolved.
+	//
+	// THE DENOMINATOR -- the load-bearing half of this note. `{{total}}` is
+	// fed from the read's KEYHOLDER COUNT, and never from the read's own
+	// `total` field. That field counts release-key TASKS, and no task exists
+	// until one is raised, so feeding it would render "0 of 0" for the whole
+	// ~13-day settling window: the emptiest possible answer for the one fact
+	// that is supposed to be non-empty exactly then. The placeholder is
+	// deliberately NOT renamed to match the value it carries, because the
+	// render plan's call site is already written against these two names and
+	// `facts.js`'s `interpolates` array is frozen and landed -- renaming
+	// here would break both. The clean rename touches this file, `facts.js`,
+	// its test and the render component together, and is recorded as
+	// outstanding rather than done. Until then: a later reader who "tidies"
+	// the call site to pass the read's `.total` reintroduces the "0 of 0"
+	// defect, and this comment is what stands between them and it.
+	'public.fact.keyrelease.sentence': '{{released}} of {{total}} keyholders have released their keys.',
+	'public.fact.keyrelease.detail':
+		"This counts keyholders whose key-release task has completed; it doesn't show which keyholder released a key or when (doc/election.md:118-122).",
+	// Fail-closed disclosure for the aggregate above, bound by name at its
+	// render site (it cannot be the entry's `emptyKey`: that field is null
+	// on this fact and `facts.js` is a landed file, so this key sits outside
+	// `FACT_COPY_KEYS`). When the count cannot be read, the card stays and
+	// says so. The alternative considered and rejected was omitting the
+	// card: on a page whose whole subject is what can and cannot be known, a
+	// card that silently disappears is indistinguishable from a fact that
+	// does not exist, which is the one confusion this page is built to
+	// prevent.
+	'public.fact.keyrelease.unreadable':
+		"The number of keyholders who have released their keys couldn't be read, so it isn't shown here.",
+
+	// The voter roll. `.disclaimer` is the one that earns its length: it
+	// tells the reader that what they are looking at is the published
+	// subset, not a redaction of something richer, and it does so WITHOUT
+	// naming the field collection that is never read or the selective-
+	// disclosure mechanism that is out of scope -- both are internal
+	// vocabulary, and this string renders on the card rather than behind the
+	// details toggle, so neither may appear in it.
+	'public.registrantRoll.heading': 'Voter roll',
+	'public.registrantRoll.body':
+		'These are the people registered to vote in this election, as published by the authority.',
+	'public.registrantRoll.disclaimer':
+		'This shows only the publicly named fields — no other registrant detail is shown or read.',
+	'public.registrantRoll.empty': 'No registrants recorded yet.',
+
+	// The two standing caveats. EXACTLY TWO ship, and the count is a
+	// decision rather than an accident: a third candidate -- that some facts
+	// have no source anywhere in the system -- was considered and dropped,
+	// because every gap card on the page already says precisely that about
+	// itself, and a page-level restatement would repeat content already on
+	// screen while adding a second place for it to go stale.
+	//
+	// `public.caveat.readOnly` is REWRITTEN, not adopted. The drafted
+	// version used the words for having no login, which this table's own
+	// lint bans outright -- this app has no such concept to name, and a
+	// public page that mentions one invites the reader to look for it. The
+	// replacement keeps both halves of the original claim (nothing here
+	// changes anything; nothing here asks who you are) in words that belong
+	// to this page. The key NAME is unaffected by the value lint, but the
+	// VALUE must never contain the hyphenated phrase this table forbids in
+	// contract C3 above.
+	'public.caveat.timelineUnvalidated':
+		"This election's schedule is published by its own authority and isn't independently checked here.",
+	'public.caveat.readOnly':
+		'Nothing on this page can be changed, and nothing here asks who you are — it can only show what this browser holds.',
+
+	// The string half of the fail-closed rule for the rules card: when one
+	// of an election's disclosure settings cannot be read, the page says so
+	// instead of quietly rendering one fewer row. The BEHAVIOUR half -- show
+	// nothing for that field and never omit it silently -- belongs to the
+	// render plan; this key exists so that the failure is sayable at all.
+	'public.rules.policyUnreadable':
+		"One of this election's disclosure settings couldn't be read, so nothing for that field is shown.",
+
+	// The index of elections this browser holds.
+	//
+	// `public.index.emptyBody` is REWRITTEN, not adopted, for two
+	// independent reasons and it is worth recording both. The drafted
+	// version told the reader to redeem a code or open a link to a specific
+	// election. First, it used a banned lexeme, so it was red against a lint
+	// that has shipped for some time -- adopted verbatim it would not have
+	// built. Second, and more seriously, its remedy was FALSE: this page
+	// reads only what this browser already holds, so opening someone else's
+	// link resolves nothing, and a page with no records would have offered a
+	// remedy that cannot work. That is the same class of defect as the
+	// advisory sentence rewritten above -- an unverifiable promise in a
+	// well-formed sentence -- caught here before it shipped rather than
+	// after. The replacement states the limit and stops.
+	//
+	// `public.index.someUnreadable` is the qualifier that keeps the empty
+	// label honest, and three things about it are load-bearing.
+	//   (i)   It says only that something held here could not be read. No
+	//         cause, no suggestion that the data exists elsewhere, no
+	//         implication that it would arrive later -- so it stays true
+	//         after real-time sync lands.
+	//   (ii)  It names no internal vocabulary: no store, no registry, no
+	//         state name.
+	//   (iii) Its GATE, which is the part a render site can get wrong: it
+	//         belongs to the loaded result's own completeness flag being
+	//         false, and NEVER to a count of unreadable networks. A registry
+	//         read that throws leaves that count at zero while completeness
+	//         is false, so a count-based gate would let precisely the
+	//         corrupt-registry case render an unqualified "no elections"
+	//         with no qualifier at all -- the exact hole this sentence
+	//         exists to close. A page that is merely still loading cannot
+	//         trip it, and needs no second guard to prevent that: there is
+	//         no result at all while loading, so the flag cannot be false
+	//         then.
+	// It must read sensibly BOTH as the only content of an otherwise empty
+	// index AND directly beside the empty heading and body, because the
+	// empty label is gated on emptiness alone: one network reading fine and
+	// holding nothing while another cannot be read at all renders all three
+	// together.
+	'public.index.viewElectionCta': 'View election',
+	'public.index.emptyHeading': 'This browser holds no elections yet.',
+	'public.index.emptyBody':
+		'This page can only show elections whose records are already stored in this browser, and none are stored here yet.',
+	'public.index.someUnreadable':
+		"Something stored in this browser couldn't be read, so this page may not be showing everything it holds.",
+
+	// The two details-toggle summary labels. TWO KEYS ON PURPOSE, and a
+	// later merge of them into one is the regression the copy test's
+	// pairwise-difference assertion exists to catch. A gap card's detail
+	// explains WHY THERE IS NO SOURCE; a filled card's detail explains WHAT
+	// THE VALUE MEANS. The only wording that serves both -- "More detail" --
+	// throws away exactly the distinction that putting the technical
+	// material behind a toggle was meant to preserve. Neither may collapse
+	// into the page-level `public.details.summary` either: that one is about
+	// the view as a whole, not about a card.
+	'public.gap.detailsSummary': "Why this isn't shown",
+	'public.fact.detailsSummary': 'What this shows',
 });
 
 /**

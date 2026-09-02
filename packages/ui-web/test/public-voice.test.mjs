@@ -19,10 +19,25 @@
  * Neither lint interpolates a value under test into its own name, and
  * neither is an always-true disjunct -- both traps this repo has already
  * hit once, one of which shipped on a completely dead page.
+ *
+ * 54-09 amended this file's imports. It previously read `COPY` and nothing
+ * else; it now also imports one SIBLING MODULE IN THE SAME PACKAGE,
+ * `../src/lifecycle/facts.js`, for its `FACT_COPY_KEYS` export. That is not
+ * the consumer coupling the note above rules out -- the rule is that this
+ * file must not reach into an app workspace's own use of the table, and
+ * `facts.js` is part of the same package as `copy.js`. The reason for the
+ * import is concrete: 54-09 takes the public-voice key set from ten names to
+ * seventy-one, and fifty of those are exactly the members of
+ * `FACT_COPY_KEYS`. Transcribing fifty names here would create a second list
+ * that drifts from the first -- which is the failure `FACT_COPY_KEYS` was
+ * derived (rather than hand-written) to prevent. Deriving the set also means
+ * both lints below now run over all seventy-one values automatically, with
+ * no further edit, which is the point.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { COPY } from '../src/index.js';
+import { FACT_COPY_KEYS } from '../src/lifecycle/facts.js';
 
 // ---------------------------------------------------------------------------
 // Key-set definitions.
@@ -43,20 +58,63 @@ test('sanity: both the public-voice and authority-voice key sets are non-empty (
 	assert.ok(authorityEntries.length > 0, 'expected at least one advisory.authority.*/gate.*/bootstrap.* key');
 });
 
-test('the public-voice key set is exactly the ten keys 53-07 added', () => {
+/**
+ * The ten keys 53-07 added. Still hand-listed, because nothing derives them
+ * and ten names is not a drift surface.
+ * @type {ReadonlyArray<string>}
+ */
+const KEYS_53_07 = Object.freeze([
+	'advisory.public.body',
+	'public.chrome.appName',
+	'public.details.body',
+	'public.details.summary',
+	'public.election.addressLabel',
+	'public.election.slot.lifecycle',
+	'public.election.slot.timeline',
+	'public.election.slot.title',
+	'public.election.unreadableAddress.body',
+	'public.election.unreadableAddress.title',
+]);
+
+/**
+ * The eleven keys 54-09 added that sit OUTSIDE the fact model -- the
+ * freshness line, the two standing caveats, the fail-closed disclosure-policy
+ * note, the four index strings, the two details-toggle summary labels and the
+ * key-release fail-closed line. The other fifty come from `FACT_COPY_KEYS`.
+ * @type {ReadonlyArray<string>}
+ */
+const KEYS_54_09_NON_FACT = Object.freeze([
+	'public.freshness.body',
+	'public.fact.keyrelease.unreadable',
+	'public.caveat.timelineUnvalidated',
+	'public.caveat.readOnly',
+	'public.rules.policyUnreadable',
+	'public.index.viewElectionCta',
+	'public.index.emptyHeading',
+	'public.index.emptyBody',
+	'public.index.someUnreadable',
+	'public.gap.detailsSummary',
+	'public.fact.detailsSummary',
+]);
+
+test('the public-voice key set is exactly the ten keys 53-07 added, plus facts.js FACT_COPY_KEYS, plus the eleven non-fact keys 54-09 added -- derived from the fact model, not transcribed', () => {
 	const keys = publicVoiceEntries.map(([key]) => key).sort();
-	assert.deepEqual(keys, [
-		'advisory.public.body',
-		'public.chrome.appName',
-		'public.details.body',
-		'public.details.summary',
-		'public.election.addressLabel',
-		'public.election.slot.lifecycle',
-		'public.election.slot.timeline',
-		'public.election.slot.title',
-		'public.election.unreadableAddress.body',
-		'public.election.unreadableAddress.title',
-	]);
+	const expected = [...new Set([...KEYS_53_07, ...FACT_COPY_KEYS, ...KEYS_54_09_NON_FACT])].sort();
+	assert.deepEqual(keys, expected);
+});
+
+// MEASURED, not adopted: 71, not the 67 54-09's plan predicted. The plan's
+// own arithmetic is 10 (53-07) + 61 (54-09) = 71; "67" appears several
+// times in that plan and is a slip, not a different set. Nothing downstream
+// depends on the number -- the deep-equal above is the real assertion and
+// it names every key -- but the count is pinned here anyway, because the
+// deep-equal alone would still pass if BOTH sides lost the same fifty keys.
+test('sanity: the derived expectation above is 71 keys and FACT_COPY_KEYS contributes 50 of them (if FACT_COPY_KEYS ever came back empty, the deep-equal above would still pass on a table that had lost fifty values)', () => {
+	assert.equal(FACT_COPY_KEYS.length, 50);
+	assert.equal(KEYS_53_07.length, 10);
+	assert.equal(KEYS_54_09_NON_FACT.length, 11);
+	assert.equal(new Set([...KEYS_53_07, ...FACT_COPY_KEYS, ...KEYS_54_09_NON_FACT]).size, 71);
+	assert.equal(publicVoiceEntries.length, 71);
 });
 
 // ---------------------------------------------------------------------------
