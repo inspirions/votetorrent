@@ -10,8 +10,17 @@
  * landed here in this plan's Task 2 — explicit named re-exports only, never
  * `export *`, so the surface of this audience is readable at a glance and
  * 54-08's scan has a literal list to reason about. It is audience-neutral: it
- * opens a database and selects no application table. Public reads land in a
- * later plan.
+ * opens a database and selects no application table.
+ *
+ * The public read modules landed in 54-06: `read-election.js` (header,
+ * founding revision, election list), `read-registrant-roll.js` (D-18/D-19's
+ * three-column voter roll) and `read-keyrelease.js` (D-14's counts-only
+ * aggregate). Each module's raw SQL constants are deliberately NOT re-exported
+ * here — they exist for that module's own import-time guards and for 54-08's
+ * scan, which imports the modules by path. Each module's `TABLES_READ` IS
+ * re-exported, under a module-qualified name, because three modules cannot all
+ * re-export a binding of that name from one barrel without colliding — the
+ * same convention `officer/index.js` adopted in 54-03b.
  */
 export {
 	STORE_MODULE_NAME,
@@ -48,9 +57,22 @@ export {
 	removeNetwork,
 } from '../networks-registry.js';
 
+export {
+	readPublicElection,
+	readPublicElectionRevision,
+	listPublicElections,
+	TABLES_READ as ELECTION_TABLES_READ,
+} from './read-election.js';
+
+export { readRegistrantRoll, TABLES_READ as ROLL_TABLES_READ } from './read-registrant-roll.js';
+
 /**
  * @typedef {import('../open-db.js').DeleteNetworkDbOptions} DeleteNetworkDbOptions
  * @typedef {import('../reattach.js').StorageAdapter} StorageAdapter
  * @typedef {import('../reattach.js').RowCountsRecord} RowCountsRecord
  * @typedef {import('../networks-registry.js').NetworkRegistryEntry} NetworkRegistryEntry
+ * @typedef {import('./read-election.js').PublicElection} PublicElection
+ * @typedef {import('./read-election.js').PublicElectionRevision} PublicElectionRevision
+ * @typedef {import('./read-election.js').PublicElectionListEntry} PublicElectionListEntry
+ * @typedef {import('./read-registrant-roll.js').RegistrantRollRow} RegistrantRollRow
  */
