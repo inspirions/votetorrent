@@ -21,10 +21,23 @@ name: Web gates
 #     schema bytes present, zero DB-opening symbols). It also runs the
 #     dashboard's D-15/D-23 tokens-in-dist post-build check, proving the
 #     shared tokens stylesheet's declarations reached the dashboard's shipped
-#     production CSS.
-# (b) The FOUR `--prove-*` modes this workflow runs (`--prove-trap` for tier
-#     2, `--prove-drift` for tier 3, and the shared browser-gate runner's own
-#     `--prove-no-dedupe` / `--prove-token-missing`) are INERTNESS CONTROLS,
+#     production CSS. Since 54-18 it additionally runs `packages/web-data`'s
+#     typecheck and tier-1 suite -- the workspace carrying D-05's anonymity
+#     scan, which no workflow ran before that commit because the workspace
+#     did not exist -- and the public app's single-quereus-instance assertion
+#     (I-36), which had likewise sat on disk unrun since 54-11.
+#     The BROWSER job (`browser-gates`) covers, besides the legacy
+#     dashboard-only tiers and the shared runner over both apps, two
+#     STANDALONE public-app drivers added in this phase: D-27's two-handle
+#     live-read gate (`run-live-read-gate.mjs`, its own build, `dist-live`,
+#     port 5192) and the render-fidelity gate (`render-fidelity-gate.mjs`,
+#     `dist-gate` at a 380px viewport with a fixture query parameter, port
+#     5193). Neither is a rung in the shared runner, deliberately: see the
+#     comment on the live-read step for the evidence.
+# (b) The SEVEN `--prove-*` modes this workflow runs (`--prove-trap` for tier
+#     2, `--prove-drift` for tier 3, the shared browser-gate runner's own
+#     `--prove-no-dedupe` / `--prove-token-missing`, and 54-18's three new
+#     ones) are INERTNESS CONTROLS,
 #     not extra gates. Each one runs the real gate against a deliberately
 #     broken fixture, and INVERTS the expectation: exit 0 means the inner run
 #     genuinely FAILED. A green workflow run in which any control did NOT fire
@@ -36,6 +49,30 @@ name: Web gates
 #     production (or gate) variant at BUILD time -- never `dist/` edited after
 #     the fact, never anything mutated at runtime -- because spike 089
 #     measured a runtime React-identity check as false-negative.
+#
+#     The three added by 54-18, and what each one's exit 0 actually means:
+#       - `--prove-frozen` (`run-live-read-gate.mjs`): a re-run of the
+#         IDENTICAL build and the IDENTICAL page with change propagation
+#         disabled AT THE WRITING HANDLE and nothing else changed genuinely
+#         FAILED the live-read gate's DOM-update and freshness rungs, while
+#         the other seven still passed. Measured live: 9/9 healthy, 7/9
+#         inverted.
+#       - `--prove-matchers` (`render-fidelity-gate.mjs`): every one of the
+#         six comparators reported FAIL on a violating input AND PASS on a
+#         healthy one. Both directions, on purpose -- a comparator that fails
+#         on everything satisfies "can go red" and proves nothing. That
+#         two-way standard is stronger than the one-way rule the rest of this
+#         file states, and it is preserved deliberately.
+#       - `--prove-gap-cues-flattened` (same driver): a REBUILD with the
+#         gap-card cue declarations flattened in SOURCE, before vite, genuinely
+#         FAILED the style-divergence rung while every other rung still passed.
+#         This is the half `--prove-matchers` structurally cannot supply: it
+#         drives comparators against synthetic inputs, so it can never see a
+#         shipped stylesheet that stopped carrying the cues.
+#     Note that the first of these three does NOT emit the shared `is inert`
+#     sentinel -- it was authored by 54-15, not by the shared runner -- so its
+#     step asserts that driver's own verdict wording in both directions
+#     instead. The other two do emit the sentinel and are greped for it.
 # (c) The three measured baselines this phase closes, and which one this
 #     workflow enforces. `packages/vote-engine` is enforced exactly (9 known
 #     failures, verbatim titles) because this phase edited that package
@@ -46,10 +83,19 @@ name: Web gates
 #     this phase touches nothing in the voter, and importing an unrelated red
 #     baseline into a gate whose entire value is trustworthiness would make
 #     the gate less useful, not more. This workflow's tier-1 job enforces
-#     THREE separate tier-1 baselines -- `dashboardTier1`, `uiWebTier1` and
-#     `publicTier1` -- each with its own receipt marker (`tier1-logic`,
-#     `tier1-ui-web`, `tier1-public`) so three tier-1 suites can never satisfy
-#     one receipt requirement between them.
+#     FOUR separate tier-1 baselines -- `dashboardTier1`, `uiWebTier1`,
+#     `publicTier1` and `webDataTier1` -- each with its own receipt marker
+#     (`tier1-logic`, `tier1-ui-web`, `tier1-public`, `tier1-web-data`) so
+#     four tier-1 suites can never satisfy one receipt requirement between
+#     them. `webDataTier1` is `packages/web-data`, the workspace carrying
+#     D-05's anonymity scan; its step also asserts two subtest titles are
+#     present in the run log, because a floor is met by ANY passing tests and
+#     therefore cannot on its own protect one file inside a workspace.
+#     All four floors were re-measured against the landed phase 54 by 54-18
+#     (uiWeb 141 -> 201, public 86 -> 348, webData 49 -> 113, dashboard
+#     413 -> 430), each with a term-by-term note in ci-baselines.json. Those
+#     floors had drifted as much as 262 cases below reality, which is never
+#     RED -- it is silent weakening.
 # (d) This workflow reads NO repository secret and publishes nothing. Every
 #     step is either a local command or a diagnostic-only upload gated on
 #     failure.
@@ -211,6 +257,56 @@ jobs:
       # absent-from-root-package.json React assertion) never runs in CI, and
       # 53-12's root-hoist rung would be the ONLY CI-reachable coverage of the
       # never-hoist-React rule. It does now.
+      # packages/web-data did not exist before this phase, so CI has never run
+      # this workspace at all -- and D-05's anonymity scan lives in it. Typecheck
+      # is its OWN step and is never folded into a build: 54-VALIDATION.md
+      # records the measurement that `yarn build` succeeds on this phase's
+      # lifted source while `tsc` fails on it.
+      - name: web-data typecheck
+        run: |
+          set -euo pipefail
+          yarn workspace @votetorrent/web-data typecheck
+          echo "RECEIPT web-data-typecheck" | tee -a ci-receipt.txt
+
+      # The fourth tier-1 baseline, and the one that matters most: this
+      # workspace carries this phase's primary mitigation for its most
+      # sensitive threat, delivered as node --test files in a workspace no
+      # workflow has ever invoked.
+      #
+      # THREE independent failure paths, on purpose. Delete the step -> the
+      # Receipts step below misses `tier1-web-data`. Delete the suite -> the
+      # count drops below `webDataTier1.minPassing`. Skip or gut the one file
+      # -> the two pinned titles below go missing from the log while the count
+      # stays above the floor on the other eight files. A floor is met by ANY
+      # passing tests, so the floor alone cannot protect one file inside the
+      # workspace.
+      #
+      # Both greps target the run LOG, never this workflow file, so the
+      # self-tripping-checker rule does not apply to them. The pinned strings
+      # are deliberately NOT repeated in this comment: quoting the token a
+      # checker hunts for is exactly what produced ten self-tripping checkers
+      # in this phase. Read them from the `if !` lines below, and re-pin them
+      # from a live run if the suite is ever retitled.
+      - name: Tier 1 - web-data package suite (D-05 anonymity scan)
+        run: |
+          set -euo pipefail
+          T1_START=$SECONDS
+          yarn workspace @votetorrent/web-data test 2>&1 | tee web-data-tier1.log
+          T1_ELAPSED=$((SECONDS-T1_START))
+          node scripts/assert-ci-baselines.mjs tier1 web-data-tier1.log "$T1_ELAPSED" --baseline webDataTier1 | tee -a ci-receipt.txt
+          fail=0
+          if ! grep -q 'D-05: zero forbidden-class table names as code across the public entry source set' web-data-tier1.log; then
+            echo "::error::tier1-web-data: D-05's real anonymity scan did not report in this run -- the floor was met by other tests while the scan itself is gone or skipped"
+            fail=1
+          fi
+          if ! grep -q 'control 5 (planted violation in a copy of the real tree)' web-data-tier1.log; then
+            echo "::error::tier1-web-data: D-05's planted-violation control did not report in this run -- a passing scan with no positive control is not evidence the scan can fail"
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+
       - name: Tier 1 - ui-web package suite
         run: |
           set -euo pipefail
@@ -260,6 +356,21 @@ jobs:
       # test/node/engine-reach.test.mjs (already run above, tier1-public)
       # covers only the INTENT over src/; this is the only artefact-level
       # proof and was, until this commit, never invoked by any workflow.
+      # I-36, added by 54-18 as a missing-control finding rather than as
+      # planned scope. `resolve.dedupe`'s two @quereus entries are LOAD-BEARING
+      # PRODUCTION CONFIG: removing them ships TWO on-disk engine roots in a
+      # build that exits 0, so neither the build nor any tier-1 scan can see
+      # it. `assert:single-quereus` has existed on disk since 54-11 and no
+      # workflow has ever invoked it -- the same class of gap this whole plan
+      # exists to close, found one level down. The script runs its own three
+      # controls (two-root positive, one-root benign, no-engine anti-vacuity)
+      # before it reads the real sourcemaps.
+      - name: Public app single-quereus-instance assertion (I-36)
+        run: |
+          set -euo pipefail
+          yarn workspace votetorrent-public assert:single-quereus
+          echo "RECEIPT public-single-quereus" | tee -a ci-receipt.txt
+
       - name: Public app engine-reach (D-13, both halves)
         run: |
           set -euo pipefail
@@ -313,8 +424,9 @@ jobs:
             toolchain peers-clean dashboard-typecheck copy-lint-3root \
             dashboard-build-no-polyfills dashboard-tokens-in-dist dashboard-no-harness-in-dist \
             ui-web-typecheck ui-web-consumers tier1-ui-web \
+            web-data-typecheck tier1-web-data \
             public-typecheck tier1-public public-build-no-polyfills \
-            public-no-harness-in-dist public-engine-reach tier1-logic
+            public-no-harness-in-dist public-engine-reach public-single-quereus tier1-logic
 
   # =========================================================================
   # Job 2 -- Tiers 2 and 3: headless Chrome, persistence then model vs DOM.
@@ -480,6 +592,105 @@ jobs:
             echo "::error::gate-source-intact: expected exactly one run-ui-gates.mjs outside node_modules, found $runner_count"
             fail=1
           fi
+
+          # Third and fourth blocks (54-18): the two STANDALONE drivers this
+          # phase built. They are not rungs in the shared runner (see the
+          # comment on the live-read step in this job), so they get the same
+          # treatment run-headless.mjs gets -- a source-shape check in the
+          # FAST job, before the browser job spends an hour discovering that a
+          # driver lost its inversion mode or acquired a banned transport.
+          # Both blocks share the one combined `fail` flag above, so a
+          # violation in any file is reported in the same run.
+          L=apps/VoteTorrentPublic/test/browser/run-live-read-gate.mjs
+          if [ ! -f "$L" ]; then
+            echo "::error::gate-source-intact: $L does not exist"
+            fail=1
+          fi
+          for banned in executablePath "channel: 'chrome'"; do
+            if grep -q -- "$banned" "$L"; then
+              echo "::error::gate-source-intact: forbidden pattern '$banned' found in $L"
+              fail=1
+            fi
+          done
+          if grep -qE "(from|require\()[[:space:]]*['\"]playwright-core['\"]" "$L"; then
+            echo "::error::gate-source-intact: $L imports playwright-core directly -- forbidden transport"
+            fail=1
+          fi
+          # COMMENT-FILTERED, and this one is not a style choice. This driver's
+          # own header explains, in prose, that a second navigation or a page
+          # reload would prove nothing about the seam -- so it SPELLS the token
+          # this check forbids. Measured at HEAD: raw 1, comment-filtered 0. A
+          # bare ban here would be permanently RED against a correct file,
+          # which is the mirror of the nine green-forever self-tripping
+          # checkers this phase recorded, and the tenth was exactly this shape.
+          l_reload=$(set +e; grep -n 'reload()' "$L" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+          if [ "$l_reload" -gt 0 ]; then
+            echo "::error::gate-source-intact: a page reload appears outside a comment in $L -- 54-15's no-reload claim depends on there being none"
+            fail=1
+          fi
+          # EXACTLY ONE navigation. 54-15's whole claim is that the view
+          # re-rendered within a SINGLE page load; a second load would make the
+          # gate pass on a page that simply re-fetched everything, and this is
+          # the cheapest place in the repo to keep that true.
+          l_goto=$(set +e; grep -n 'page.goto(' "$L" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+          if [ "$l_goto" != "1" ]; then
+            echo "::error::gate-source-intact: expected exactly 1 comment-filtered navigation in $L, found $l_goto -- a second page load voids the single-load claim"
+            fail=1
+          fi
+          l_frozen=$(set +e; grep -n 'prove-frozen' "$L" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+          if [ "$l_frozen" -lt 1 ]; then
+            echo "::error::gate-source-intact: the inversion mode is not reachable code in $L (comment-filtered occurrences: $l_frozen) -- a driver whose control exists only in its header prose has no control"
+            fail=1
+          fi
+
+          R=apps/VoteTorrentPublic/test/browser/render-fidelity-gate.mjs
+          if [ ! -f "$R" ]; then
+            echo "::error::gate-source-intact: $R does not exist"
+            fail=1
+          fi
+          for banned in executablePath "channel: 'chrome'"; do
+            if grep -q -- "$banned" "$R"; then
+              echo "::error::gate-source-intact: forbidden pattern '$banned' found in $R"
+              fail=1
+            fi
+          done
+          if grep -qE "(from|require\()[[:space:]]*['\"]playwright-core['\"]" "$R"; then
+            echo "::error::gate-source-intact: $R imports playwright-core directly -- forbidden transport"
+            fail=1
+          fi
+          r_reload=$(set +e; grep -n 'reload()' "$R" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+          if [ "$r_reload" -gt 0 ]; then
+            echo "::error::gate-source-intact: a page reload appears outside a comment in $R"
+            fail=1
+          fi
+          # Both inversion modes, plus the RUNG NAME the build control inverts.
+          # The third is the one a reader would not think to add: a driver that
+          # renamed that rung would leave the --prove-gap-cues-flattened step
+          # asserting on a rung that no longer exists, and the control would
+          # report "did not run" rather than a pass -- but only after the
+          # browser job had already paid for two full builds.
+          #
+          # THE BOUND ON THIS FLOOR, measured rather than assumed, so nobody
+          # reads it as stronger than it is. A >=1 floor proves the token is
+          # reachable code SOMEWHERE, not that the mode is still wired. A
+          # planted rename of the argument-parsing site alone took
+          # `prove-gap-cues-flattened` from 4 comment-filtered occurrences to
+          # 3, and this check stayed green. It was NOT tightened to an exact
+          # count, which would be brittle against ordinary edits; the real
+          # guard is that the browser job actually RUNS `yarn
+          # gate:prove-gap-cues-flattened`, and this driver exits 2 on an
+          # unrecognised flag rather than ignoring it into a green result.
+          # This block is the cheap early warning, not the sole guard. The
+          # same rename against the live-read driver DID take `prove-frozen`
+          # from 1 to 0 and this check fired -- so its discrimination is real
+          # there, and partial here.
+          for token in prove-matchers prove-gap-cues-flattened gap-card-style-diverges; do
+            n=$(set +e; grep -n -- "$token" "$R" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+            if [ "$n" -lt 1 ]; then
+              echo "::error::gate-source-intact: '$token' is not present as reachable code in $R (comment-filtered occurrences: $n)"
+              fail=1
+            fi
+          done
           if [ "$fail" -ne 0 ]; then
             echo "::error::gate-source-intact FAILED -- an inertness control, a banned transport, or the canonical-runner invariant may have been compromised"
             exit 1
@@ -722,6 +933,20 @@ jobs:
       # sequential, so the two can never bind concurrently -- a future editor
       # who adds a preview server should read this sentence before doing so.
       #
+      # PORT POLICY, restated with 54-18's two additions and one DUPLICATE.
+      # 5180/5181 dev and preview; 5183 the dashboard gate; 5191 the public
+      # app's shared-runner gate; 5192 the live-read gate (54-15, distinct
+      # from 5191 specifically so it and `test:browser` never race a bind);
+      # 5193 is bound by TWO steps in this job -- the placeholder-label
+      # rendering gate and 54-16's render-fidelity gate. That duplication is
+      # deliberate and safe for exactly one reason, stated here rather than
+      # left to be rediscovered: every step in this job runs SEQUENTIALLY, so
+      # the two can never hold the port at the same time, and `serve-dist.mjs`
+      # propagates a listen error rather than silently picking another port,
+      # so a future editor who parallelises this job gets a loud bind failure
+      # rather than a gate quietly measuring the wrong page. If this job is
+      # ever parallelised, give one of the two its own port FIRST.
+      #
       # Dedupe control, exit 0 means: a rebuild with `resolve.dedupe` removed
       # genuinely failed the five `identity:` rungs in the measured PARTIAL
       # shape (both D-23 token rungs still passing) -- a duplicate React
@@ -774,6 +999,115 @@ jobs:
           fi
           echo "RECEIPT ui-gate-public-token-control-fired" | tee -a ../../ci-receipt.txt
 
+      # ---------------------------------------------------------------
+      # 54-18: the two STANDALONE drivers this phase built, and their
+      # controls. They are NOT rungs in run-ui-gates.mjs and that is a
+      # deliberate, evidence-backed choice recorded in 54-18's SUMMARY: the
+      # shared runner drives one page at one URL at the default viewport for
+      # BOTH apps, while these need a different build, a different dist, a
+      # different port, a query parameter and a 380px viewport. Folding them
+      # in would grow the shared runner with public-only machinery the
+      # dashboard leg then inherits. The repo's own precedent for a
+      # standalone driver is run-headless.mjs, which CI gates by source-shape
+      # checks plus log assertions -- the mechanism these two get above, in
+      # `Gate-source integrity`.
+      #
+      # Every step below invokes a NAMED package.json script, never a
+      # hand-typed path: a path typed into a workflow is a path nobody can
+      # reproduce locally the same way.
+      - name: Public app live-read gate (D-27)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn test:live-read 2>&1 | tee ../../live-read-public.log
+          line=$(grep -oE 'RUNGS: [0-9]+/[0-9]+' ../../live-read-public.log | tail -1)
+          if [ -z "$line" ]; then
+            echo "::error::live-read-public: no RUNGS summary line found -- cannot confirm the leg ran at all"
+            exit 1
+          fi
+          passed=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+          total=$(echo "$line" | grep -oE '[0-9]+' | tail -1)
+          if [ "$passed" != "$total" ] || [ "$total" -lt 9 ]; then
+            echo "::error::live-read-public: $line -- expected passed==total and total>=9"
+            exit 1
+          fi
+          echo "RECEIPT live-read-public" | tee -a ../../ci-receipt.txt
+
+      # Exit 0 here means: with change propagation switched OFF at the WRITING
+      # handle and nothing else changed, the gate's DOM-update and freshness
+      # rungs genuinely FAILED and the other seven still passed. This driver
+      # does not emit the shared `is inert` sentinel -- it was authored by
+      # 54-15, not by the shared runner -- so its own verdict wording is
+      # asserted instead, in BOTH directions: the discrimination-failure
+      # phrase must be absent AND the pass banner must be present. Absence of
+      # a string is never on its own evidence that a leg ran.
+      - name: Public app frozen-seam inertness control (--prove-frozen)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn gate:prove-frozen 2>&1 | tee ../../live-read-public-prove-frozen.log
+          if grep -q 'cannot discriminate' ../../live-read-public-prove-frozen.log; then
+            echo "::error::live-read-control-fired: --prove-frozen reported that it cannot discriminate a live seam from a frozen page -- the control did NOT fire"
+            exit 1
+          fi
+          if ! grep -q 'PROVE-FROZEN PASS' ../../live-read-public-prove-frozen.log; then
+            echo "::error::live-read-control-fired: --prove-frozen printed no pass verdict -- the control cannot be confirmed to have run"
+            exit 1
+          fi
+          echo "RECEIPT live-read-control-fired" | tee -a ../../ci-receipt.txt
+
+      - name: Public app render-fidelity gate (D-11/D-14/D-18/D-19)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn test:render-fidelity 2>&1 | tee ../../render-fidelity-public.log
+          if ! grep -q 'RENDER FIDELITY: PASS (6/6 rungs)' ../../render-fidelity-public.log; then
+            echo "::error::render-fidelity-public: the driver did not report all six rungs passing"
+            exit 1
+          fi
+          echo "RECEIPT render-fidelity-public" | tee -a ../../ci-receipt.txt
+
+      # The comparator half. Note the standard this driver sets and this step
+      # preserves: every comparator is run BOTH ways -- required to FAIL on a
+      # violating input AND to PASS on a healthy one. "Can go red" alone is
+      # satisfied by a comparator that fails on everything, which proves
+      # nothing; discrimination is the property worth asserting.
+      - name: Public app render-fidelity comparator control (--prove-matchers)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn gate:prove-matchers 2>&1 | tee ../../render-fidelity-prove-matchers.log
+          if ! grep -q 'comparators reported FAIL on a violating input and PASS on a healthy one' ../../render-fidelity-prove-matchers.log; then
+            echo "::error::render-fidelity-controls-fired: --prove-matchers did not report every comparator discriminating in both directions"
+            exit 1
+          fi
+          echo "RECEIPT render-fidelity-matchers-fired" | tee -a ../../ci-receipt.txt
+
+      # The BUILD half, and the one thing --prove-matchers structurally cannot
+      # supply: it drives comparators against synthetic inputs, so it can
+      # never see a SHIPPED stylesheet that stopped carrying the gap cues.
+      # Exit 0 here means a real rebuild -- the gap-card rule's declaration
+      # body flattened at build time, in source, before vite -- genuinely
+      # FAILED the style-divergence rung while every other rung still passed.
+      #
+      # Kept in its OWN step rather than folded in beside --prove-matchers:
+      # under `set -euo pipefail` a second control in the same step is hidden
+      # behind the first's failure, and one receipt could not say which fired.
+      - name: Public app render-fidelity build control (--prove-gap-cues-flattened)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn gate:prove-gap-cues-flattened 2>&1 | tee ../../render-fidelity-prove-gap-cues.log
+          if grep -q 'is inert' ../../render-fidelity-prove-gap-cues.log; then
+            echo "::error::render-fidelity-controls-fired: --prove-gap-cues-flattened reported 'is inert' -- a rebuild with the gap-card cue declarations flattened still PASSED the style-divergence rung"
+            exit 1
+          fi
+          if ! grep -q 'prove-gap-cues-flattened PASS' ../../render-fidelity-prove-gap-cues.log; then
+            echo "::error::render-fidelity-controls-fired: --prove-gap-cues-flattened printed no pass verdict -- it may have bailed as 'control could not run' or 'MUTATION IS A NO-OP', which are different verdicts and neither is a pass"
+            exit 1
+          fi
+          echo "RECEIPT render-fidelity-controls-fired" | tee -a ../../ci-receipt.txt
+
       - name: Upload gate evidence on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -791,6 +1125,11 @@ jobs:
             ui-gate-dashboard-prove-token-missing.log
             ui-gate-public-prove-no-dedupe.log
             ui-gate-public-prove-token-missing.log
+            live-read-public.log
+            live-read-public-prove-frozen.log
+            render-fidelity-public.log
+            render-fidelity-prove-matchers.log
+            render-fidelity-prove-gap-cues.log
             ci-receipt.txt
           retention-days: 14
 
@@ -801,9 +1140,11 @@ jobs:
             toolchain gate-source-intact chromium-installed tier2-persistence \
             tier2-inertness-fired compose-shell compose-inertness-fired \
             tier3-model-dom tier3-inertness-fired \
-            ui-gate-dashboard ui-gate-public \
+            ui-gate-dashboard ui-gate-public placeholders-public \
             ui-gate-dashboard-dedupe-control-fired ui-gate-dashboard-token-control-fired \
-            ui-gate-public-dedupe-control-fired ui-gate-public-token-control-fired
+            ui-gate-public-dedupe-control-fired ui-gate-public-token-control-fired \
+            live-read-public live-read-control-fired \
+            render-fidelity-public render-fidelity-matchers-fired render-fidelity-controls-fired
 
   # =========================================================================
   # Job 3 -- Phase-close baselines: vote-engine suite + authority typecheck.

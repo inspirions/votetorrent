@@ -310,7 +310,17 @@ export function flattenGapCuesPlugin() {
 				if (!classRe.test(selectorList)) return whole;
 				if (body.trim() === FLATTEN_MARKER) return whole;
 				replacements += 1;
-				selectors.add(String(selectorList).trim());
+				// The captured "selector list" runs from the previous rule's
+				// closing brace, so it carries any comment block sitting above
+				// the rule. Strip comments for the REPORT only -- the emitted
+				// CSS keeps them verbatim, because a mutation that also deleted
+				// documentation would be mutating two things at once.
+				selectors.add(
+					String(selectorList)
+						.replace(/\/\*[\s\S]*?\*\//g, '')
+						.trim()
+						.replace(/\s+/g, ' '),
+				);
 				touched = true;
 				return `${selectorList}{ ${FLATTEN_MARKER} }`;
 			});
