@@ -5,9 +5,15 @@
  * (D-01/D-02/D-07/D-12/D-16/D-19).
  *
  * `node --test` cannot import `.tsx`, so every `.tsx` source read below is
- * read as TEXT and comment-stripped where a behavior item says so — the
- * same idiom `test/node/registry.test.mjs` and
- * `test/node/preview-control.test.mjs` established in the dashboard.
+ * read as TEXT and comment-stripped where a behavior item says so — via
+ * `scripts/lib/strip-comments.mjs`'s shared, character-level
+ * `stripComments` (54-23), not a local line-opening filter. The prior local
+ * filter dropped a line whose TRIMMED form starts with a comment opener,
+ * which lets a JSX brace-wrapped block comment's un-prefixed continuation
+ * lines survive as code; the shared stripper does not have that gap.
+ * Measured over these four files (54-23's own receipt): the old and new
+ * removed-line counts are IDENTICAL, so none of these four files were ever
+ * exposed by that gap — see 54-23-SUMMARY.md.
  * Positive-control-first throughout: every matcher is shown firing on a
  * synthetic fixture before the real scan against production source is
  * trusted.
@@ -20,21 +26,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { COPY, t } from '../src/index.js';
+import { stripComments } from '../../../scripts/lib/strip-comments.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = path.join(HERE, '..', 'src');
 const COMPONENTS_DIR = path.join(SRC_DIR, 'components');
-
-/** Same shape as the dashboard's preview-control.test.mjs / registry.test.mjs. @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 const ADVISORY_RAW = readFileSync(path.join(COMPONENTS_DIR, 'AdvisoryDisclosure.tsx'), 'utf8');
 const ADVISORY_STRIPPED = stripComments(ADVISORY_RAW);

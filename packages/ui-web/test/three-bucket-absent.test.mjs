@@ -25,12 +25,21 @@
  * and the exclusion is what makes the claim precise rather than what makes
  * it pass.
  *
- * Comment stripping is deliberately one-directional: block comments and
- * whole comment LINES are stripped, but a trailing same-line `//` comment
- * is NOT — distinguishing a real trailing comment from a `//` inside a URL
- * or string literal would risk deleting real code and hiding a real
- * occurrence. Over-reporting is the correct failure direction for a
- * zero-occurrence scan.
+ * Comment stripping reads source through `scripts/lib/strip-comments.mjs`'s
+ * shared, character-level, quote-state-tracking `stripComments` (54-23) —
+ * the same implementation every other migrated scan in this group now uses.
+ * It strips block comments, whole comment LINES, AND a trailing same-line
+ * `//` comment, while correctly preserving a `//` sequence inside a string
+ * or URL literal (proven by its own per-form controls in
+ * `strip-comments.test.mjs`). This file's PRIOR local implementation
+ * deliberately left a trailing `//` comment unstripped, reasoning that a
+ * naive (non-quote-aware) trailing-comment stripper risked deleting real
+ * code inside a string. The shared stripper does not carry that risk — it
+ * tracks quote state per line — so that risk no longer applies here.
+ * Over-reporting is still the correct failure direction for a
+ * zero-occurrence scan; the shared stripper does not change that, it only
+ * changes which lines are recognised as comment in the first place. See
+ * 54-23-SUMMARY.md for the measured before/after receipt.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,6 +47,7 @@ import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'n
 import os from 'node:os';
 import path from 'node:path';
 import { workspacePath, uiWebRoot, uiWebSrc } from '../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../scripts/lib/strip-comments.mjs';
 
 /**
  * The hunted identifier, assembled at runtime from two fragments — never a
@@ -73,25 +83,6 @@ function walkScannable(dir) {
 		}
 	}
 	return out;
-}
-
-/**
- * Strip block comments (`gate-source-integrity.test.mjs`'s idiom), then drop
- * whole lines whose trimmed form starts with `//`, `*` or `/*`
- * (`election-harness.test.mjs`'s idiom). Deliberately does NOT strip a
- * trailing same-line `//` comment — see this file's header.
- * @param {string} source
- * @returns {string}
- */
-function stripComments(source) {
-	const withoutBlocks = source.replace(/\/\*[\s\S]*?\*\//g, '');
-	return withoutBlocks
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
 }
 
 // ---------------------------------------------------------------------------
