@@ -215,6 +215,19 @@ test('the URL parameter names reachable anywhere under src/ are exactly the two 
 	const contents = new Map();
 	for (const file of files) contents.set(file, stripCommentLines(readFileSync(file, 'utf8')));
 
+	// D-54-13-01, recorded here rather than fixed by widening the matcher.
+	// This scan resolves EVERY `.get(ident)` / `.getAll(ident)` call site under
+	// src/ back to a string literal, and it cannot tell
+	// `URLSearchParams.prototype.get` from `Map.prototype.get` -- a source scan
+	// has no type information. So ANY Map lookup in this app's src/ resolves to
+	// `<unresolved:...>` and turns this rung red for a reason the diff never
+	// explains. 54-13 hit exactly that when `fact-groups.js` bucketed with a
+	// Map, and rewrote it to bucket by index instead.
+	//
+	// DO NOT "fix" this by narrowing the matcher to URLSearchParams. Narrowing
+	// is the weakening path and it would need type information this scan does
+	// not have. If you are here because a new Map lookup went red: use an index
+	// array, as fact-groups.js does, and leave the gate indiscriminate.
 	const CALL_SITE_RE = /\.(?:get|getAll)\(\s*([\w$]+|(['"`])([\w-]+)\2)\s*\)/g;
 	/** @type {Set<string>} */
 	const resolvedNames = new Set();
@@ -243,15 +256,41 @@ test('the URL parameter names reachable anywhere under src/ are exactly the two 
 
 	const admitted = [ELECTION_ADDRESS_PARAM, NETWORK_ADDRESS_PARAM].sort();
 	assert.equal(admitted.length, 2, 'sanity: the address module must export exactly two parameter-name constants for this scan to be written against');
+
+	// D-54-10-01. These two checks run BEFORE the exact-set deepEqual below,
+	// and that ordering is the whole point rather than a style preference.
+	// They used to sit AFTER it, where they were unreachable: the deepEqual
+	// had already proven the set was exactly ['election'], so every iteration
+	// of the forbidden loop was trivially true. Three assertions, zero
+	// coverage -- the same shape as WR-12's `assert.ok(true)`.
+	//
+	// Run first, they are live and they carry the SPECIFIC diagnostic: a page
+	// that made a phase or time selection URL-reachable fails naming
+	// T-53-07-04, not with an opaque set-inequality dump.
+	for (const name of forbidden) {
+		assert.ok(!resolvedNames.has(name), `"${name}" must not be reachable from the URL anywhere in src/ (T-53-07-04)`);
+	}
+
+	// The other half D-54-10-01 asked for: an UNRESOLVED call site is one this
+	// scan cannot vouch for at all. `.get(SOME_CONST)` whose constant is
+	// defined outside src/ would otherwise reach the deepEqual as the opaque
+	// string `<unresolved:SOME_CONST>` and fail there -- but it would fail as
+	// "the set is wrong" rather than as "this call site is unauditable", and
+	// a reader would go looking for a third parameter name that does not
+	// exist. See the CALL_SITE_RE note above for the Map.prototype.get
+	// false-positive this is the most likely cause of.
+	const unresolved = [...resolvedNames].filter((n) => n.startsWith('<unresolved:'));
+	assert.deepEqual(
+		unresolved,
+		[],
+		`every .get()/.getAll() call site under src/ must resolve to a string literal this scan can audit; unresolvable: ${unresolved.join(', ')}`,
+	);
+
 	assert.deepEqual(
 		[...resolvedNames].sort(),
 		admitted,
 		`expected the URL parameter names in src/ to be exactly ${admitted.join(' + ')}, found: ${[...resolvedNames].join(', ')}`,
 	);
-
-	for (const name of forbidden) {
-		assert.ok(!resolvedNames.has(name), `"${name}" must not be reachable from the URL anywhere in src/ (T-53-07-04)`);
-	}
 });
 
 // ---------------------------------------------------------------------------
