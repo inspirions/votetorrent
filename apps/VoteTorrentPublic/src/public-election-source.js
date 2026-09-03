@@ -104,10 +104,10 @@ import {
  * @type {Readonly<{ READING: 'reading', READY: 'ready', NOT_HELD: 'notHeld', UNREADABLE: 'unreadable' }>}
  */
 export const PUBLIC_ELECTION_STATE = Object.freeze({
-	READING: /** @type {const} */ ('reading'),
-	READY: /** @type {const} */ ('ready'),
-	NOT_HELD: /** @type {const} */ ('notHeld'),
-	UNREADABLE: /** @type {const} */ ('unreadable'),
+	READING: 'reading',
+	READY: 'ready',
+	NOT_HELD: 'notHeld',
+	UNREADABLE: 'unreadable',
 });
 
 /**
@@ -163,6 +163,42 @@ const NOT_HELD_ERROR_NAMES = Object.freeze([
 	'MissingRowCountsError',
 	'RowCountMismatchError',
 ]);
+
+/**
+ * Does this pair of inputs warrant a read at all?
+ *
+ * `false` whenever an election was INJECTED: 53-D17 requires that production
+ * renders the shell with no `election` prop, so that no election fact exists
+ * anywhere in the production import graph, and that the browser harness is the
+ * only supplier of one. A hook that read a database anyway whenever a prop
+ * happened to be present would make every existing browser rung a liar about
+ * what it was measuring. `false` also for any address that does not name BOTH
+ * a network and an election — `readAddressedElection` answers `notHeld` for
+ * those anyway, and not calling it at all is what makes "no database call"
+ * structural rather than incidental.
+ *
+ * Lives here, beside the read it gates, rather than in the hook that consumes
+ * it, for one measured reason: the hook is TypeScript and `node --test` cannot
+ * import a `.ts` module without a type-stripping flag this workspace's runner
+ * does not pass. A predicate that can only be asserted by matching source text
+ * is a predicate that is not really asserted, and this repo has shipped that
+ * mistake. `use-public-election.ts` re-exports this binding, so the hook's
+ * public surface is unchanged.
+ *
+ * @param {{ title?: string | null, timeline?: unknown } | null | undefined} election
+ * @param {{ status?: string, electionId?: string | null, networkHash?: string | null } | null | undefined} address
+ * @returns {boolean}
+ */
+export function shouldReadFor(election, address) {
+	if (election !== null && election !== undefined) return false;
+	if (!address || address.status !== 'ok') return false;
+	return (
+		typeof address.networkHash === 'string' &&
+		address.networkHash !== '' &&
+		typeof address.electionId === 'string' &&
+		address.electionId !== ''
+	);
+}
 
 /** The one prefix every log line in this module carries. @type {string} */
 const LOG_PREFIX = 'public-election-source: a read failed:';

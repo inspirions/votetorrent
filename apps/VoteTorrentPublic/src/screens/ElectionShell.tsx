@@ -1,13 +1,16 @@
 import type { ReactNode } from 'react';
 import { t } from '@votetorrent/ui-web';
 import { AdvisoryDisclosure, DetailsToggle, LifecyclePill } from '@votetorrent/ui-web/components';
-import { derivePhase, resolveComparisonInstant } from '@votetorrent/ui-web/lifecycle';
+import { derivePhase, resolveComparisonInstant, formatInstant } from '@votetorrent/ui-web/lifecycle';
+import { headline, toneCopyKey } from '@votetorrent/ui-web/facts';
 import { AppChrome } from './AppChrome';
 import { ElectionIndex } from './ElectionIndex';
+import { usePublicElection } from './use-public-election';
 import { parseElectionAddress } from '../election-address.js';
 
 /**
- * ElectionShell.tsx — the empty election shell (53-07, D-12/D-14/D-16/D-18).
+ * ElectionShell.tsx — the public election view (53-07 built the empty shell,
+ * D-12/D-14/D-16/D-18; 54-12 made it read for real, D-01/D-02/D-10/D-17/D-26).
  *
  * `timeline` is `unknown` on purpose: `ElectionRevision.Timeline`
  * (votetorrent.qsql:840,:891) carries a standing `-- TODO: constrain
@@ -36,24 +39,109 @@ export interface ElectionShellProps {
 	 * `election` prop at all, so no election fact exists anywhere in the
 	 * production import graph — there is no default fixture and no fallback
 	 * demo timeline here. Only `test/browser/election-shell-gate.tsx`
-	 * supplies one, from `test/fixtures/election-fixture.js`. */
+	 * supplies one, from `test/fixtures/election-fixture.js`. When it IS
+	 * supplied, `usePublicElection` performs no read and opens no database —
+	 * a seam that read anyway would make every existing browser gate a liar. */
 	election?: PublicElectionFacts | null;
 }
 
 /**
- * The empty election shell: chrome words, genuine mounts of the three
- * shared components, inert placeholders (D-18), and an honest
- * unreadable-address state that never echoes the offending value (D-14).
+ * The public election view: chrome words, genuine mounts of the three shared
+ * components, and THREE STRUCTURALLY DISTINCT STATES rendered as different
+ * children of one `<section className="election">` (D-02) —
+ *
+ *   reading  — 53-D18's inert, labelled skeleton slots, kept verbatim. D-02
+ *              AMENDS 53-D18, it does not reverse it. NO status banner here:
+ *              a banner saying "phase unknown" while the read is still in
+ *              flight would make D-10's real state indistinguishable from a
+ *              slow attach, which is the exact confusion D-02 removes.
+ *   notHeld  — an explicit sentence saying this browser holds no usable copy
+ *              of the election this link names. NO banner and NO skeleton: we
+ *              did not fail to read a schedule, we hold no election, and
+ *              claiming `bad` / "phase unknown" here would be a false
+ *              sentence of the kind D-28 exists to catch.
+ *   ready    — the real title and the real derived phase, led by the
+ *              `.status-banner` headline and its tone chip. `unreadable`
+ *              renders the same shape with a null election, so a fault
+ *              surfaces as D-10's explicit unknown rather than as silence.
+ *
+ * WHAT 54-12 DELETED, and why the diff alone will not explain it. 54-05
+ * installed a HOLDING MEASURE at the lifecycle skeleton's guard: it widened
+ * that conditional from `phase === null` to also cover the indeterminate
+ * phase, so the grey bar kept rendering across the four-phase vocabulary
+ * change, and its own comment named this plan as the owner of the
+ * replacement. That guard is now narrowed to the READ STATE and names no
+ * phase at all. An unreadable schedule is answered in words by the banner
+ * (tone `bad`, "this election's schedule can't be read, so its phase is
+ * unknown") plus `LifecyclePill`'s own pill for that phase — D-10. The
+ * divergence from `LifecyclePill`'s former render-nothing behaviour is
+ * warranted by `ElectionRevision.Timeline` carrying zero CHECK constraints
+ * (votetorrent.qsql:891, `-- TODO constrain Timeline`), so a broken schedule
+ * is an EXPECTED input rather than an anomaly, and silence about an expected
+ * input is indistinguishable from a deliberate withholding.
+ *
+ * The one distinction that is easy to lose when editing the branches below:
+ * an address that names NO election is not a browser that fails to hold one.
+ * That page keeps 54-11's index and all three of 53-D18's labelled slots
+ * verbatim; only an ADDRESSED election can be `notHeld`.
  *
  * Exactly ONE `return` statement, deliberately — not style. `AdvisoryDisclosure`'s
  * own header states that the moment it can be conditioned on anything it can
  * be hidden, and `DetailsToggle`'s live hook is what makes the D-19 identity
  * gate and the D-20 dedupe control observable at all. A single return makes
  * both structurally unbranchable: neither can ever sit inside a conditional
- * branch this function takes.
+ * branch this function takes. Every effect, every `await` and every cleanup
+ * closure therefore lives in `use-public-election.ts`, whose own header
+ * records the same constraint from the other side.
  */
 export function ElectionShell({ search, at = null, election = null }: ElectionShellProps) {
 	const address = parseElectionAddress(search ?? window.location.search);
+
+	// Called UNCONDITIONALLY, above the address branch, for the same reason
+	// the advisory is a sibling and not a child: a hook inside a branch is a
+	// hook that can be skipped.
+	const read = usePublicElection({ address, election });
+
+	// `at` is the injected, TEST-ONLY seam (D-24). It is never parsed from the
+	// URL and never defaulted from anything but the real clock.
+	const atCanonical = resolveComparisonInstant(at ?? undefined);
+
+	// `election ?? {}`, never `?? null` — 54-05's measured finding:
+	// parseTimeline(timeline, election = {}) fires its default only for
+	// `undefined` and then reads `election.ballotDeadline` unguarded, so a
+	// `null` throws a TypeError and white-screens the shipped root URL. The
+	// rule applies to the RESOLVED election too, not only to the prop.
+	const shellElection = read.election;
+	const crossCheck = (shellElection ?? {}) as unknown as Parameters<typeof derivePhase>[0];
+	const phaseResult = derivePhase(crossCheck, shellElection?.timeline, atCanonical);
+
+	// D-26's COMPARISON half, at this call site. `phaseResult.at.registrationEnds`
+	// is epoch-ms; the null guard comes FIRST because `formatInstant` returns
+	// the literal '(none)' for null, and feeding that to `headline` would
+	// silently downgrade a real `pre` phase to the registrationUnknown
+	// sentence. Both values below are UTC-canonical 19-character strings, so
+	// `headline`'s boundary test is a lexicographic string compare that cannot
+	// shift with the reader's timezone — the non-obvious half of D-26, and the
+	// reason the DISPLAY formatter (`reader-instant.js`) is a different
+	// function on purpose.
+	const registrationEndsMs = phaseResult.at?.registrationEnds ?? null;
+	const registrationEndsCanonical = registrationEndsMs === null ? null : formatInstant(registrationEndsMs).slice(0, 19);
+	const { text: headlineText, tone } = headline(phaseResult.phase, { registrationEndsCanonical, atCanonical }, t);
+	const toneKey = toneCopyKey(tone);
+
+	// The three branch predicates, named once so each JSX guard below reads as
+	// one fact rather than as a re-derived condition.
+	//
+	// `addressed` is the load-bearing distinction and it is easy to lose: a
+	// link that names no election at all is NOT a browser that fails to hold
+	// one. That page gets 54-11's index plus 53-D18's labelled slots, exactly
+	// as it did before this plan — `assert-placeholders-labelled.mjs` requires
+	// every slot declared in COPY to render on the election-less page, and it
+	// is the only gate that can see a slot silently disappear.
+	const addressed = address.status === 'ok';
+	const holdsNothing = addressed && read.state === 'notHeld';
+	const showBanner = addressed && (read.state === 'ready' || read.state === 'unreadable');
+	const showLifecycleSlot = !addressed || read.state === 'reading';
 
 	let body: ReactNode;
 	if (address.status === 'malformed') {
@@ -67,10 +155,6 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 			</section>
 		);
 	} else {
-		// `election ?? {}`, never `?? null` — parseTimeline reads
-		// `election.ballotDeadline` unguarded, so `null` throws.
-		const crossCheck = (election ?? {}) as unknown as Parameters<typeof derivePhase>[0];
-		const { phase } = derivePhase(crossCheck, election?.timeline, resolveComparisonInstant(at ?? undefined));
 		body = (
 			<section className="election">
 				{address.status === 'ok' ? (
@@ -85,21 +169,51 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 				{address.status === 'missing' || address.status === 'incomplete' ? (
 					<ElectionIndex networkHash={address.networkHash} />
 				) : null}
-				<LifecyclePill phase={phase} />
-				{election?.title ? (
-					<p className="election-title">{election.title}</p>
-				) : (
+				{/* D-02's addressed-but-not-held sentence. Distinct from the
+				    index's own empty label, which answers "this browser holds
+				    no elections AT ALL"; this one answers "this browser holds
+				    no copy of the election you asked for". Deliberately
+				    UNCLASSED: 54-09 declared no selector for this block, and
+				    css-class-coverage reports every rendered class with no
+				    matching selector as missing, so an invented name would be
+				    a red gate — an unclassed element inherits the section's
+				    own type and colour instead. 54-13 may give it a class
+				    TOGETHER WITH its selector. */}
+				{holdsNothing ? <h2>{t('public.election.notHeld.title')}</h2> : null}
+				{holdsNothing ? <p>{t('public.election.notHeld.body')}</p> : null}
+				{/* The status banner: the tone chip and the headline sentence,
+				    and NEITHER MAY RENDER ALONE (app.css's own markup
+				    contract). Colour without a word fails colour-blindness and
+				    greyscale; a word without colour discards the token layer.
+				    Both together are D-17, which is why the tone key's own
+				    resolution is part of the ONE guard rather than a second
+				    conditional inside the block. */}
+				{showBanner && toneKey !== null ? (
+					<div className={`status-banner status-banner--${tone}`}>
+						<span className="status-banner__tone">{t(toneKey)}</span>
+						<p className="status-banner__headline">{headlineText}</p>
+					</div>
+				) : null}
+				<LifecyclePill phase={phaseResult.phase} />
+				{shellElection?.title ? (
+					<p className="election-title">{shellElection.title}</p>
+				) : holdsNothing ? null : (
 					<div className="skeleton" data-slot="title">
 						<span className="skeleton-label">{t('public.election.slot.title')}</span>
 					</div>
 				)}
-				{/* holding measure; 54-12 owns D-10's explicit unknown state */}
-				{phase === null || phase === 'indeterminate' ? (
+				{/* D-10, and the removal of 54-05's holding measure -- see this
+				    component's own header for what that measure was and why
+				    the phase vocabulary is no longer named in this guard at
+				    all. An unreadable schedule now says so IN WORDS through
+				    the banner above, tone `bad`, instead of holding a grey bar
+				    in its place. */}
+				{showLifecycleSlot ? (
 					<div className="skeleton" data-slot="lifecycle">
 						<span className="skeleton-label">{t('public.election.slot.lifecycle')}</span>
 					</div>
 				) : null}
-				{election === null ? (
+				{shellElection === null && !holdsNothing ? (
 					<div className="skeleton" data-slot="timeline">
 						<span className="skeleton-label">{t('public.election.slot.timeline')}</span>
 					</div>

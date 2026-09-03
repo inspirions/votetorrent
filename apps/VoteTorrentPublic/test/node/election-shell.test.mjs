@@ -17,6 +17,7 @@ import { publicSrc, publicRoot, uiWebSrc, uiWebRoot } from '../../../../scripts/
 import { COPY } from '../../../../packages/ui-web/src/index.js';
 import { FACT_COPY_KEYS } from '../../../../packages/ui-web/src/lifecycle/facts.js';
 import { ELECTION_ADDRESS_PARAM, NETWORK_ADDRESS_PARAM } from '../../src/election-address.js';
+import { INDETERMINATE_PHASE } from '../../../../packages/ui-web/src/lifecycle/phase-ids.js';
 
 /** @param {string} source @returns {string} */
 function stripCommentLines(source) {
@@ -787,4 +788,221 @@ test("53-06's invariants survive: app.css's leading @import, no :root/custom pro
 	const chromeSource = readFileSync(publicSrc('screens', 'AppChrome.tsx'), 'utf8');
 	const offendingLines = chromeSource.split('\n').filter((line) => JSX_TEXT_RUN_RE.test(line));
 	assert.deepEqual(offendingLines, [], `AppChrome.tsx contains a JSX text run: ${JSON.stringify(offendingLines)}`);
+});
+
+// ---------------------------------------------------------------------------
+// 12. 54-12 — the real read landed in this shell.
+//
+// Additions, not edits: nothing above this line changed. Each matcher runs its
+// planted-fixture control BEFORE it touches real source, and each control is
+// asserted to FIRE rather than merely to exist.
+// ---------------------------------------------------------------------------
+
+// -- 12a. D-17: the banner carries colour AND a redundant word ---------------
+
+const TONE_CHIP_RE = /status-banner__tone/;
+const TONE_MODIFIER_RE = /status-banner--\$\{\s*tone\s*\}/;
+const TONE_KEY_CALL_RE = /toneCopyKey\(/;
+
+test('positive control: the D-17 banner matchers all fire on a planted complete banner, and the chip matcher goes silent on a planted chip-removed variant', () => {
+	const complete =
+		'<div className={`status-banner status-banner--${tone}`}>' +
+		'<span className="status-banner__tone">{t(toneCopyKey(tone))}</span>' +
+		'<p className="status-banner__headline">{headlineText}</p></div>';
+	assert.match(complete, TONE_CHIP_RE, 'the chip matcher is inert against a planted complete banner');
+	assert.match(complete, TONE_MODIFIER_RE, 'the tone-modifier matcher is inert against a planted complete banner');
+	assert.match(complete, TONE_KEY_CALL_RE, 'the tone-key matcher is inert against a planted complete banner');
+
+	// The failure this control exists for: a banner that kept its colour and
+	// lost its word. Colour alone is invisible in greyscale and to a
+	// colour-blind reader, which is the entire content of D-17.
+	const chipRemoved =
+		'<div className={`status-banner status-banner--${tone}`}>' +
+		'<p className="status-banner__headline">{headlineText}</p></div>';
+	assert.doesNotMatch(chipRemoved, TONE_CHIP_RE, 'the chip matcher cannot tell a chipless banner from a complete one');
+	assert.doesNotMatch(chipRemoved, TONE_KEY_CALL_RE);
+});
+
+test('D-17: ElectionShell.tsx renders the tone chip, the tone modifier interpolated from the derived tone, and resolves the chip word through toneCopyKey', () => {
+	assert.match(SHELL_SOURCE, TONE_CHIP_RE, 'the status banner has no tone chip — the tone would survive only as colour');
+	assert.match(SHELL_SOURCE, TONE_MODIFIER_RE, 'the banner block carries no tone modifier interpolated from `tone`');
+	assert.match(SHELL_SOURCE, TONE_KEY_CALL_RE, 'the chip word is not resolved through toneCopyKey');
+	assert.match(SHELL_SOURCE, /status-banner__headline/, 'the headline sentence carries no class — 54-09 declared `.status-banner__headline` and app.css states the chip and the headline are the banner two children');
+});
+
+// -- 12b. The shell holds no effect, no await and no read -------------------
+
+test('ElectionShell.tsx contains zero useEffect, zero `await ` and zero readAddressedElection — every one of those lives in use-public-election.ts, which is what protects the single-return structure case 1 asserts', () => {
+	for (const [label, needle] of [
+		['useEffect', 'useEffect'],
+		['await', 'await '],
+		['readAddressedElection', 'readAddressedElection'],
+	]) {
+		assert.equal(
+			(SHELL_SOURCE.match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []).length,
+			0,
+			`ElectionShell.tsx names ${label}. The hook owns every effect, every await and every cleanup closure; ` +
+				'inlining one here trips case 1 as a confusing return-count mismatch instead of failing by name here.',
+		);
+	}
+});
+
+// -- 12c. 53-D17: the injected election prop bypasses the read (behavioural) -
+
+// Imported from the plain-JS read seam rather than from the hook, because
+// `node --test` cannot import a `.ts` module without a type-stripping flag
+// this workspace's runner does not pass -- and a predicate that can only be
+// checked by matching source text is a predicate that is not really checked.
+// `use-public-election.ts` re-exports the same binding, which the assertion
+// below pins so the two can never come apart.
+const { shouldReadFor } = await import('../../src/public-election-source.js');
+
+test('the hook really does publish the same predicate: use-public-election.ts re-exports shouldReadFor from the read seam rather than defining a second copy', () => {
+	const hookSource = stripCommentLines(readFileSync(publicSrc('screens', 'use-public-election.ts'), 'utf8'));
+	assert.match(hookSource, /export \{ shouldReadFor \}/, 'the hook does not re-export shouldReadFor');
+	assert.doesNotMatch(hookSource, /function shouldReadFor/, 'the hook defines a SECOND shouldReadFor -- the behavioural assertion below would then be measuring the wrong one');
+});
+
+test('53-D17 behavioural: shouldReadFor is false whenever an election was injected, and true only for a null election with an address naming both a network and an election', () => {
+	assert.equal(typeof shouldReadFor, 'function', 'the read seam must export shouldReadFor so this can be asserted by behaviour rather than by a source matcher');
+	const okAddress = { status: 'ok', networkHash: 'aBcDeF0123456789aBcDeF0123456789', electionId: 'election-0123456789abcdef' };
+
+	assert.equal(shouldReadFor({ title: 'x', timeline: null }, okAddress), false, 'a supplied election must open no database — every existing browser gate depends on it');
+	assert.equal(shouldReadFor(null, okAddress), true, 'a null election with a complete address must read');
+	assert.equal(shouldReadFor(null, { status: 'missing', networkHash: null, electionId: null }), false);
+	assert.equal(shouldReadFor(null, { status: 'incomplete', networkHash: okAddress.networkHash, electionId: null }), false);
+	assert.equal(shouldReadFor(null, null), false);
+});
+
+// -- 12d. 54-05's white-screen trap is not reintroduced ---------------------
+
+const NULL_COALESCE_RE = /\?\?\s*null/;
+const CROSS_CHECK_GUARD_RE = /crossCheck\s*=\s*\(\s*\w+\s*\?\?\s*\{\}\s*\)/;
+
+const DERIVE_PHASE_TRAP_REASON =
+	'54-05 measured this: parseTimeline(timeline, election = {}) fires its default parameter ONLY for `undefined`, and its ' +
+	'body then reads `election.ballotDeadline` unguarded — so a `null` first argument throws a TypeError and WHITE-SCREENS ' +
+	'the shipped root URL. The election prop is optional, so that is a reachable input, not a theoretical one (T-54-12-07).';
+
+test('positive control: the derivePhase null-coalesce matcher fires on a planted `?? null` cross-check and the guard matcher goes silent on it', () => {
+	const planted = 'const crossCheck = (shellElection ?? null) as unknown as Parameters<typeof derivePhase>[0];';
+	assert.match(planted, NULL_COALESCE_RE, 'the null-coalesce matcher is inert against the planted trap');
+	assert.doesNotMatch(planted, CROSS_CHECK_GUARD_RE, 'the guard matcher accepts the planted trap as if it were the safe form');
+	const safe = 'const crossCheck = (shellElection ?? {}) as unknown as Parameters<typeof derivePhase>[0];';
+	assert.match(safe, CROSS_CHECK_GUARD_RE, 'the guard matcher is inert against the real safe form');
+});
+
+test('T-54-12-07: no line in ElectionShell.tsx that names derivePhase or its cross-check argument coalesces to null, and the cross-check itself coalesces to an empty object', () => {
+	const offenders = SHELL_SOURCE.split('\n').filter(
+		(line) => (line.includes('derivePhase') || line.includes('crossCheck')) && NULL_COALESCE_RE.test(line),
+	);
+	assert.deepEqual(offenders, [], `${DERIVE_PHASE_TRAP_REASON}\nOffending line(s): ${JSON.stringify(offenders)}`);
+	assert.match(SHELL_SOURCE, CROSS_CHECK_GUARD_RE, `the derivePhase cross-check no longer guards its first argument. ${DERIVE_PHASE_TRAP_REASON}`);
+});
+
+// -- 12e. This plan's own copy keys are mounted -----------------------------
+//
+// Computed directly rather than relying on case 9 being green overall, so
+// these keys are proven independently of whether some other plan's keys are
+// outstanding (this plan's <interfaces> section 5).
+
+const OWNED_KEY_PREFIXES = Object.freeze(['public.headline.', 'public.tone.', 'public.election.notHeld.']);
+
+test("54-12's own copy keys are mounted and declared in both directions, computed independently of the rest of case 9", () => {
+	const declaredKeys = new Set(Object.keys(COPY).filter((k) => PUBLIC_VOICE_KEY_RE.test(k)));
+	const scanDirs = [publicSrc(), uiWebRoot('src', 'components'), uiWebRoot('src', 'lifecycle')];
+	const mountedKeys = collectMountedPublicKeys(scanDirs);
+	for (const key of collectTemplateMountedKeys()) mountedKeys.add(key);
+
+	/** @param {string} k */
+	const owned = (k) => OWNED_KEY_PREFIXES.some((p) => k.startsWith(p));
+
+	const declaredNotMounted = [...declaredKeys].filter((k) => owned(k) && !mountedKeys.has(k));
+	const mountedNotDeclared = [...mountedKeys].filter((k) => owned(k) && !declaredKeys.has(k));
+
+	// Anti-vacuity: if the prefixes matched nothing at all, both lists would be
+	// empty and this case would prove nothing.
+	const ownedDeclared = [...declaredKeys].filter(owned);
+	assert.ok(ownedDeclared.length >= 13, `expected at least 7 headline + 4 tone + 2 notHeld keys, found ${ownedDeclared.length}`);
+
+	assert.deepEqual(declaredNotMounted, [], `54-12 keys declared but never mounted: ${declaredNotMounted.join(', ')}`);
+	assert.deepEqual(mountedNotDeclared, [], `54-12 keys mounted but never declared: ${mountedNotDeclared.join(', ')}`);
+});
+
+// -- 12f. D-10: the skeleton guard names the read state, never a phase ------
+//
+// The phase name 54-05's holding measure tested against is ASSEMBLED rather
+// than written, so this file's own matcher cannot be satisfied by this file's
+// own prose. The two assertions below pin that: the assembled token really is
+// the phase name (it is a value the shared model can return), and this file's
+// RAW source contains it nowhere as a literal.
+
+const HOLDING_MEASURE_PHASE = ['indeter', 'minate'].join('');
+
+test("self-trip control: the retired holding measure's phase name is assembled, so this file's own raw source contains it nowhere as a literal", () => {
+	// A checker whose own prose quotes the pattern it hunts is permanently
+	// green -- this phase has manufactured that failure seven times. The path
+	// is resolved through source-paths.mjs, never from import.meta.url, per
+	// this file's own header rule.
+	const raw = readFileSync(publicRoot('test', 'node', 'election-shell.test.mjs'), 'utf8');
+	const occurrences = (raw.match(new RegExp(HOLDING_MEASURE_PHASE, 'g')) ?? []).length;
+	assert.equal(occurrences, 0, `the phase name must never appear as a literal in this file, found ${occurrences} occurrence(s)`);
+	// ...and the assembled token really is the phase name the shared model can
+	// return, so the assertion below is not comparing against a typo.
+	assert.equal(HOLDING_MEASURE_PHASE, INDETERMINATE_PHASE, 'the assembled token is not the phase id the lifecycle model publishes');
+});
+
+test('positive control: the holding-measure matcher fires on a planted reinstatement of 54-05 widened condition, and not on the narrowed guard that replaced it', () => {
+	const widened = `{phase === null || phase === '${HOLDING_MEASURE_PHASE}' ? (\n<div className="skeleton" data-slot="lifecycle">`;
+	assert.ok(widened.includes(HOLDING_MEASURE_PHASE), 'fixture sanity: the planted condition must literally name the phase');
+	const narrowed = '{showLifecycleSlot ? (\n<div className="skeleton" data-slot="lifecycle">';
+	assert.ok(!narrowed.includes(HOLDING_MEASURE_PHASE), 'the matcher cannot tell the narrowed guard from the widened one');
+});
+
+test("D-10: 54-05's skeleton holding measure is gone — ElectionShell.tsx names no lifecycle phase at all, and the lifecycle slot is gated on the READ state", () => {
+	assert.ok(
+		!SHELL_SOURCE.includes(HOLDING_MEASURE_PHASE),
+		"ElectionShell.tsx still names the phase 54-05's holding measure tested against. That measure kept the lifecycle " +
+			'skeleton rendering across the four-phase vocabulary change and named 54-12 as the owner of its replacement: an ' +
+			'unreadable schedule must now say so IN WORDS through the status banner, not hold a grey bar in its place (D-10).',
+	);
+	assert.match(SHELL_SOURCE, /showLifecycleSlot\s*=\s*[^;]*read\.state === 'reading'/, 'the lifecycle slot guard does not name the reading state');
+	assert.match(SHELL_SOURCE, /\{showLifecycleSlot \? \(/, 'the lifecycle slot is not gated on that guard');
+});
+
+// -- 12g. D-02: the three states are structurally distinct child sets -------
+
+test('D-02: notHeld, reading and ready are three distinct child sets of the SAME .election section — no branch renders another branch signature element', () => {
+	// One section, not three. All three states are CHILDREN of it, which is
+	// what keeps 54-11's ElectionIndex mount and the unconditional advisory
+	// where 53-D16 and assert-placeholders-labelled.mjs need them.
+	assert.equal((SHELL_SOURCE.match(/<section className="election"/g) ?? []).length, 1, 'the election section was duplicated or replaced');
+
+	// notHeld: two unclassed elements, gated on `holdsNothing`, which is
+	// itself gated on the address naming an election. A link that names NO
+	// election is not a browser that fails to hold one.
+	assert.match(SHELL_SOURCE, /const holdsNothing = addressed && read\.state === 'notHeld'/);
+	assert.match(SHELL_SOURCE, /\{holdsNothing \? <h2>\{t\('public\.election\.notHeld\.title'\)\}<\/h2> : null\}/);
+	assert.match(SHELL_SOURCE, /\{holdsNothing \? <p>\{t\('public\.election\.notHeld\.body'\)\}<\/p> : null\}/);
+
+	// ...and it renders NEITHER a banner NOR a skeleton: we did not fail to
+	// read a schedule, we hold no election, and a `bad` / phase-unknown banner
+	// here would be a false sentence (D-28).
+	assert.match(SHELL_SOURCE, /const showBanner = addressed && \(read\.state === 'ready' \|\| read\.state === 'unreadable'\)/);
+	assert.match(SHELL_SOURCE, /holdsNothing \? null : \(/, 'the title skeleton is not suppressed in the notHeld branch');
+	assert.match(SHELL_SOURCE, /shellElection === null && !holdsNothing \?/, 'the timeline skeleton is not suppressed in the notHeld branch');
+
+	// The election-less page keeps all three of 53-D18's labelled slots, which
+	// is the property assert-placeholders-labelled.mjs measures in a real
+	// browser and no source scan can see.
+	assert.match(SHELL_SOURCE, /const showLifecycleSlot = !addressed \|\| read\.state === 'reading'/);
+});
+
+test('54-11 ElectionIndex mount survives: still imported, still one guarded JSX line, still INSIDE the .election section', () => {
+	assert.match(SHELL_SOURCE, /import \{ ElectionIndex \} from '\.\/ElectionIndex'/);
+	assert.equal((SHELL_SOURCE.match(/<ElectionIndex\b/g) ?? []).length, 1);
+	const sectionOpen = SHELL_SOURCE.indexOf('<section className="election"');
+	const sectionClose = SHELL_SOURCE.indexOf('</section>', sectionOpen);
+	const mountAt = SHELL_SOURCE.indexOf('<ElectionIndex');
+	assert.ok(sectionOpen !== -1 && sectionClose !== -1 && mountAt > sectionOpen && mountAt < sectionClose, 'the ElectionIndex mount moved outside the .election section');
 });

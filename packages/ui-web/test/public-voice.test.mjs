@@ -97,9 +97,19 @@ const KEYS_54_09_NON_FACT = Object.freeze([
 	'public.fact.detailsSummary',
 ]);
 
-test('the public-voice key set is exactly the ten keys 53-07 added, plus facts.js FACT_COPY_KEYS, plus the eleven non-fact keys 54-09 added -- derived from the fact model, not transcribed', () => {
+/**
+ * The two keys 54-12 added: D-02's addressed-but-not-held sentence, mounted
+ * in the same change by `apps/VoteTorrentPublic/src/screens/ElectionShell.tsx`
+ * (so neither is ever a pending-mount entry). Listed here rather than folded
+ * into the 54-09 array above because the provenance of a key is the thing a
+ * later reader most often needs and least often has.
+ * @type {ReadonlyArray<string>}
+ */
+const KEYS_54_12 = Object.freeze(['public.election.notHeld.title', 'public.election.notHeld.body']);
+
+test('the public-voice key set is exactly the ten keys 53-07 added, plus facts.js FACT_COPY_KEYS, plus the eleven non-fact keys 54-09 added, plus the two 54-12 added -- derived from the fact model, not transcribed', () => {
 	const keys = publicVoiceEntries.map(([key]) => key).sort();
-	const expected = [...new Set([...KEYS_53_07, ...FACT_COPY_KEYS, ...KEYS_54_09_NON_FACT])].sort();
+	const expected = [...new Set([...KEYS_53_07, ...FACT_COPY_KEYS, ...KEYS_54_09_NON_FACT, ...KEYS_54_12])].sort();
 	assert.deepEqual(keys, expected);
 });
 
@@ -109,12 +119,13 @@ test('the public-voice key set is exactly the ten keys 53-07 added, plus facts.j
 // depends on the number -- the deep-equal above is the real assertion and
 // it names every key -- but the count is pinned here anyway, because the
 // deep-equal alone would still pass if BOTH sides lost the same fifty keys.
-test('sanity: the derived expectation above is 71 keys and FACT_COPY_KEYS contributes 50 of them (if FACT_COPY_KEYS ever came back empty, the deep-equal above would still pass on a table that had lost fifty values)', () => {
+test('sanity: the derived expectation above is 73 keys and FACT_COPY_KEYS contributes 50 of them (if FACT_COPY_KEYS ever came back empty, the deep-equal above would still pass on a table that had lost fifty values)', () => {
 	assert.equal(FACT_COPY_KEYS.length, 50);
 	assert.equal(KEYS_53_07.length, 10);
 	assert.equal(KEYS_54_09_NON_FACT.length, 11);
-	assert.equal(new Set([...KEYS_53_07, ...FACT_COPY_KEYS, ...KEYS_54_09_NON_FACT]).size, 71);
-	assert.equal(publicVoiceEntries.length, 71);
+	assert.equal(KEYS_54_12.length, 2);
+	assert.equal(new Set([...KEYS_53_07, ...FACT_COPY_KEYS, ...KEYS_54_09_NON_FACT, ...KEYS_54_12]).size, 73);
+	assert.equal(publicVoiceEntries.length, 73);
 });
 
 // ---------------------------------------------------------------------------

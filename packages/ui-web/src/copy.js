@@ -665,6 +665,30 @@ export const COPY = Object.freeze({
 	'public.index.someUnreadable':
 		"Something stored in this browser couldn't be read, so this page may not be showing everything it holds.",
 
+	// --- D-02's addressed-but-not-held sentence (54-12) --------------------
+	//
+	// These two answer a DIFFERENT question from the three `public.index.empty*`
+	// keys above, and the difference is the whole reason they exist as their
+	// own pair rather than as a reuse. The index keys answer "this browser
+	// holds no elections AT ALL", which is a statement about the browser.
+	// These answer "this browser holds no copy of THE ELECTION THIS LINK
+	// NAMES", which is a statement about one addressed record while other
+	// records may well be present. Collapsing the two would make one of the
+	// two situations describable only by a sentence that is false about it.
+	//
+	// Neither may drift toward an error voice. Not holding an addressed
+	// election is an ORDINARY state for an anonymous reader whose browser was
+	// seeded from a different network -- nothing failed, and saying otherwise
+	// would put a fault where there is only an absence (the same distinction
+	// `public-election-source.js` keeps between `notHeld` and `unreadable`).
+	// Neither may offer a remedy either: this page reads only what this
+	// browser already holds, so "open the link again" or "ask for access"
+	// would be an unverifiable promise, which is exactly the defect
+	// `public.index.emptyBody` was rewritten to remove.
+	'public.election.notHeld.title': "This browser doesn't hold this election.",
+	'public.election.notHeld.body':
+		'Nothing has been loaded into this browser for the election this link names, so there is nothing here to show.',
+
 	// The two details-toggle summary labels. TWO KEYS ON PURPOSE, and a
 	// later merge of them into one is the regression the copy test's
 	// pairwise-difference assertion exists to catch. A gap card's detail
