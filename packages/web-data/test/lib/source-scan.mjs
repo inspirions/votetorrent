@@ -41,9 +41,31 @@ export const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs', '.cjs', '.jsx', '.t
  * Extensions a source scan may skip. Enumerated rather than implied by "not in
  * CODE_EXTENSIONS", so that a file type nobody thought about lands in `unknown`
  * and forces a decision instead of being silently skipped.
+ *
+ * EVERY ENTRY IS A DECISION, and the decision is always the same one: a file of
+ * this type cannot reference a schema table as CODE, cannot declare a module
+ * specifier, and cannot carry a SQL string a guard would need to read. The raster
+ * image types are here because `apps/VoteTorrentAuthority/src/assets/images/`
+ * holds three of them and rule C2 walks every product `src` root; skipping them
+ * is correct, but it must be recorded here rather than implied by a catch-all.
+ * A new type is NOT added to this list to make a red gate green — it is added
+ * only after answering "could a table name be written in this file as code?".
  * @type {ReadonlyArray<string>}
  */
-export const NON_CODE_EXTENSIONS = Object.freeze(['.css', '.html', '.md', '.json', '.svg', '.snap']);
+export const NON_CODE_EXTENSIONS = Object.freeze([
+	'.css',
+	'.html',
+	'.md',
+	'.json',
+	'.svg',
+	'.snap',
+	'.png',
+	'.jpg',
+	'.jpeg',
+	'.gif',
+	'.webp',
+	'.ico',
+]);
 
 /** Directory names never walked. */
 const SKIP_DIRS = Object.freeze(['node_modules', 'dist', 'dist-gate', '.git']);
