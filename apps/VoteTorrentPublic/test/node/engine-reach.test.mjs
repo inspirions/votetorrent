@@ -1,22 +1,62 @@
 /**
- * engine-reach.test.mjs — D-13's tier-1, pre-build half.
+ * engine-reach.test.mjs — the tier-1, pre-build half, RECONCILED WITH D-01.
  *
  * Runs before any build, so it catches the INTENT rather than the artefact
  * (`scripts/assert-engine-reach.mjs`'s post-build scan is the expensive,
- * artefact-level half — see this app's Task 2 for the redundancy rationale).
+ * artefact-level half).
+ *
+ * WHAT THIS FILE CLAIMS, AND WHAT IT STOPPED CLAIMING (54-10, I-02)
+ * ----------------------------------------------------------------
+ * Phase 53 built this as D-13's tier-1 half: "the public app opens no
+ * database". D-01 makes that FALSE ON PURPOSE — an anonymous reader's data
+ * comes from an already-bootstrapped browser's own IndexedDB, so the public
+ * page legitimately opens one.
+ *
+ * The claim is therefore narrowed, not dropped, to a DELEGATION RULE:
+ *
+ *   this app never opens a database ITSELF — every database primitive it
+ *   uses arrives through `@votetorrent/web-data/public`, the audience-split
+ *   entry D-04 makes structural.
+ *
+ * That is a strictly more useful claim than the one it replaces. It is also
+ * the reason section 10 of `election-shell.test.mjs` could retire its own
+ * boundary fence with ZERO loss of coverage on the four database-opening
+ * primitives: this file enforced them independently, and still does — the
+ * matcher's term list below is byte-for-byte the one it has always had.
+ *
+ * A DESIGN CONSTRAINT THIS FILE PLACES ON LATER WAVES
+ * ---------------------------------------------------
+ * The real IndexedDB read must go THROUGH `@votetorrent/web-data/public`.
+ * If some later plan finds it MUST name one of these primitives directly in
+ * the app, that is a design smell to raise, not a rung to silence.
  *
  * Every path is resolved through scripts/lib/source-paths.mjs's
- * `publicSrc(...)`/`publicRoot(...)` (53-01) — never re-derived from
- * `import.meta.url`.
+ * `publicSrc(...)`/`publicRoot(...)`/`webDataRoot(...)` (53-01) — never
+ * re-derived from `import.meta.url`.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { publicSrc, publicRoot } from '../../../../scripts/lib/source-paths.mjs';
+import { publicSrc, publicRoot, webDataRoot } from '../../../../scripts/lib/source-paths.mjs';
+import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/browser';
+import { enginePreflight } from '../../src/engine-preflight.js';
 
-/** Same DB-opening symbol matcher as scripts/assert-engine-reach.mjs's dist-level rung. */
-const DB_OPENING_SYMBOL_RE = /\b(initDB|prepareDb|registerDbPlugins|isSchemaInitialized)\b|indexedDB|@quereus\/plugin-indexeddb/;
+/**
+ * The DELEGATION matcher. Its alternation is UNCHANGED from the
+ * prohibition-era matcher it renames: same six terms, same word boundaries,
+ * same two substring branches. Only the meaning of a hit changed — a match
+ * no longer means "this app touched a database", it means "this app reached
+ * AROUND `@votetorrent/web-data` instead of through it".
+ *
+ * It no longer mirrors any rung in `scripts/assert-engine-reach.mjs`: 54-10
+ * retired that script's dist-level symbol scan, because esbuild renames bare
+ * local bindings and an absence assertion on a renameable identifier can pass
+ * on a bundle that genuinely contains the code. This is now the standalone
+ * tier-1 delegation rule, and the artefact-level successor is that script's
+ * module-graph privilege-surface negative.
+ */
+const DIRECT_DB_PRIMITIVE_RE = /\b(initDB|prepareDb|registerDbPlugins|isSchemaInitialized)\b|indexedDB|@quereus\/plugin-indexeddb/;
 
 /** Same line-based comment-stripping idiom the repo's other tier-1 assertions use.
  * @param {string} source @returns {string} */
@@ -38,9 +78,9 @@ function walkAll(dir) {
 		const full = path.join(dir, entry.name);
 		if (entry.isDirectory()) {
 			out.push(...walkAll(full));
-		} else {
-			out.push(full);
+			continue;
 		}
+		out.push(full);
 	}
 	return out;
 }
@@ -49,14 +89,14 @@ function walkAll(dir) {
 // 1. Positive control, first — the matcher must be able to detect the
 //    forbidden symbols before it is trusted to scan real files.
 // ---------------------------------------------------------------------------
-test('positive control: the DB-opening matcher fires on a planted fixture containing each forbidden identifier', () => {
+test('positive control: the direct-DB-primitive matcher fires on a planted fixture containing each forbidden identifier', () => {
 	const fixture =
 		'import { initDB, prepareDb, registerDbPlugins, isSchemaInitialized } from "x";\n' +
 		'const db = indexedDB;\nconst pkg = "@quereus/plugin-indexeddb";';
 	for (const term of ['initDB', 'prepareDb', 'registerDbPlugins', 'isSchemaInitialized', 'indexedDB', '@quereus/plugin-indexeddb']) {
 		assert.ok(fixture.includes(term), `fixture sanity: must literally contain "${term}"`);
 	}
-	assert.match(fixture, DB_OPENING_SYMBOL_RE, 'matcher is inert against the planted fixture');
+	assert.match(fixture, DIRECT_DB_PRIMITIVE_RE, 'matcher is inert against the planted fixture');
 });
 
 // ---------------------------------------------------------------------------
@@ -70,19 +110,25 @@ test('benign control: the matcher does not fire on a comment discussing the abse
 		'// It opens no indexedDB and declares no @quereus/plugin-indexeddb dependency.',
 		'const x = 1;',
 	].join('\n');
-	assert.match(commentOnly, DB_OPENING_SYMBOL_RE, 'sanity: the RAW comment text should still match (it names the words)');
-	assert.doesNotMatch(stripCommentLines(commentOnly), DB_OPENING_SYMBOL_RE, 'comment-stripped source must not trip the matcher');
+	assert.match(commentOnly, DIRECT_DB_PRIMITIVE_RE, 'sanity: the RAW comment text should still match (it names the words)');
+	assert.doesNotMatch(stripCommentLines(commentOnly), DIRECT_DB_PRIMITIVE_RE, 'comment-stripped source must not trip the matcher');
 });
 
 test('benign control: the matcher does not fire on an identifier that merely contains a banned word as a substring', () => {
 	const benign = 'const initDBValue = 1; const prepareDbConfigDefaults = {};';
-	assert.doesNotMatch(benign, DB_OPENING_SYMBOL_RE, 'matcher is indiscriminate against substring-only identifiers');
+	assert.doesNotMatch(benign, DIRECT_DB_PRIMITIVE_RE, 'matcher is indiscriminate against substring-only identifiers');
 });
 
 // ---------------------------------------------------------------------------
-// 3. Real source scan — every file under publicSrc(), comments stripped.
+// 3. The delegation rule — every file under publicSrc(), comments stripped.
+//
+//    Two halves, and they only mean anything together: the app names no
+//    database primitive of its own (3a), AND every specifier it uses to reach
+//    the shared data package is the public subpath (3b). Without 3b the app
+//    could satisfy 3a while importing the officer read surface; without 3a it
+//    could import the right subpath and then hand-roll a raw handle anyway.
 // ---------------------------------------------------------------------------
-test('no file under src/ references a DB-opening symbol, indexedDB, or the indexeddb plugin package', () => {
+test('delegation rule: no file under src/ names a database primitive itself — the app reaches a database only THROUGH the shared package, never around it', () => {
 	const srcRoot = publicSrc();
 	const files = walkAll(srcRoot);
 	assert.ok(files.length > 0, 'expected at least one file under src/');
@@ -90,18 +136,107 @@ test('no file under src/ references a DB-opening symbol, indexedDB, or the index
 	const offenders = [];
 	for (const file of files) {
 		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
-		const match = stripped.match(DB_OPENING_SYMBOL_RE);
+		const match = stripped.match(DIRECT_DB_PRIMITIVE_RE);
 		if (match) {
 			offenders.push(`${file}: "${match[0]}"`);
 		}
 	}
-	assert.deepEqual(offenders, [], `these files reference a DB-opening symbol in real code:\n${offenders.join('\n')}`);
+	assert.deepEqual(
+		offenders,
+		[],
+		'these files open a database DIRECTLY instead of delegating to the audience-split package — the app reached around ' +
+			`@votetorrent/web-data instead of through it (D-01/D-04):\n${offenders.join('\n')}`,
+	);
+});
+
+// -- 3b. The web-data subpath allowlist -------------------------------------
+//
+// The real subpath names are read from the landed manifest, never invented
+// here: if the package ever renames its exports, this file fails loudly
+// rather than silently allowlisting a specifier that no longer exists.
+const WEB_DATA_MANIFEST = JSON.parse(readFileSync(webDataRoot('package.json'), 'utf8'));
+const WEB_DATA_PACKAGE_NAME = WEB_DATA_MANIFEST.name;
+const WEB_DATA_EXPORT_SUBPATHS = Object.keys(WEB_DATA_MANIFEST.exports ?? {});
+const WEB_DATA_PUBLIC_SPECIFIER = `${WEB_DATA_PACKAGE_NAME}/public`;
+const WEB_DATA_OFFICER_SPECIFIER = `${WEB_DATA_PACKAGE_NAME}/officer`;
+
+/** Matches a static `from '...'`, a bare side-effect `import '...'` and a dynamic `import('...')`. */
+const MODULE_SPECIFIER_RE = /(?:\bfrom|\bimport)\s*\(?\s*['"]([^'"]+)['"]/g;
+
+/** @param {string} source @returns {string[]} every specifier that addresses the shared data package. */
+function webDataSpecifiers(source) {
+	/** @type {string[]} */
+	const out = [];
+	const re = new RegExp(MODULE_SPECIFIER_RE.source, 'g');
+	let m;
+	while ((m = re.exec(stripCommentLines(source)))) {
+		const spec = m[1];
+		if (spec === WEB_DATA_PACKAGE_NAME || spec.startsWith(`${WEB_DATA_PACKAGE_NAME}/`)) out.push(spec);
+	}
+	return out;
+}
+
+test('contract check: the shared data package really does publish the two subpaths this allowlist is written against', () => {
+	assert.ok(WEB_DATA_EXPORT_SUBPATHS.includes('./public'), `expected ${WEB_DATA_PACKAGE_NAME} to export "./public", found: ${WEB_DATA_EXPORT_SUBPATHS.join(', ')}`);
+	assert.ok(WEB_DATA_EXPORT_SUBPATHS.includes('./officer'), `expected ${WEB_DATA_PACKAGE_NAME} to export "./officer", found: ${WEB_DATA_EXPORT_SUBPATHS.join(', ')}`);
+});
+
+test('positive control: the subpath allowlist flags an officer-subpath specifier and a bare-package-root specifier', () => {
+	const fixture = [
+		`import { readKeyholders } from '${WEB_DATA_OFFICER_SPECIFIER}';`,
+		`import { openDb } from '${WEB_DATA_PACKAGE_NAME}';`,
+		`const late = await import('${WEB_DATA_OFFICER_SPECIFIER}');`,
+	].join('\n');
+	const found = webDataSpecifiers(fixture);
+	assert.equal(found.length, 3, `expected three web-data specifiers, found: ${found.join(', ')}`);
+	const disallowed = found.filter((s) => s !== WEB_DATA_PUBLIC_SPECIFIER);
+	assert.equal(disallowed.length, 3, 'the allowlist is inert — it accepted an officer subpath or a bare package root');
+});
+
+test('benign control: the subpath allowlist accepts the public subpath and ignores unrelated specifiers', () => {
+	const fixture = [
+		`import { readElection } from '${WEB_DATA_PUBLIC_SPECIFIER}';`,
+		"import { t } from '@votetorrent/ui-web';",
+		"import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/browser';",
+	].join('\n');
+	const found = webDataSpecifiers(fixture);
+	assert.deepEqual(found, [WEB_DATA_PUBLIC_SPECIFIER], `expected exactly the public subpath, found: ${found.join(', ')}`);
+	assert.deepEqual(found.filter((s) => s !== WEB_DATA_PUBLIC_SPECIFIER), []);
+});
+
+test('delegation rule: every shared-data-package specifier under src/ is the public subpath — never the officer subpath, never the bare package root', () => {
+	// VACUOUSLY SATISFIED TODAY, and that is stated rather than hidden:
+	// nothing under src/ imports the package yet, so this scan currently sees
+	// an empty specifier set. Its two controls above are therefore the ONLY
+	// thing proving it is live. It becomes load-bearing the moment the real
+	// read lands, which is exactly why it is written now instead of then.
+	const offenders = [];
+	for (const file of walkAll(publicSrc())) {
+		for (const spec of webDataSpecifiers(readFileSync(file, 'utf8'))) {
+			if (spec !== WEB_DATA_PUBLIC_SPECIFIER) offenders.push(`${file}: "${spec}"`);
+		}
+	}
+	assert.deepEqual(
+		offenders,
+		[],
+		'these files reach the shared data package by a specifier other than its public subpath. The audience split is what ' +
+			`makes the anonymity guarantee structural rather than textual (D-04) — only ${WEB_DATA_PUBLIC_SPECIFIER} may ` +
+			`appear under src/:\n${offenders.join('\n')}`,
+	);
 });
 
 // ---------------------------------------------------------------------------
 // 4. Manifest scan — the structural half of the control.
+//
+//    The banned list is UNCHANGED. Only the claim over it narrows: after
+//    D-01 this app's dependency closure DOES transitively contain
+//    IndexedDB-capable code (through the shared data package), so asserting
+//    that it "declares none of the IndexedDB-capable packages" would be a
+//    green gate over false words — the exact 53-D07 failure. What stays
+//    true, and is worth asserting, is that it declares no DIRECT dependency
+//    on any of them, so it cannot reach around the package to a raw handle.
 // ---------------------------------------------------------------------------
-test('the manifest declares none of the IndexedDB-capable packages', () => {
+test('the manifest declares no DIRECT dependency on an IndexedDB-capable package — the app cannot reach around the shared data package to a raw handle', () => {
 	const manifest = JSON.parse(readFileSync(publicRoot('package.json'), 'utf8'));
 	const declared = { ...(manifest.dependencies ?? {}), ...(manifest.devDependencies ?? {}) };
 	const banned = [
@@ -113,26 +248,110 @@ test('the manifest declares none of the IndexedDB-capable packages', () => {
 		'fake-indexeddb',
 	];
 	const found = banned.filter((dep) => dep in declared);
-	assert.deepEqual(found, [], `manifest declares banned IndexedDB-capable package(s): ${found.join(', ')}`);
+	assert.deepEqual(found, [], `the manifest declares a DIRECT dependency that hands this app a raw database handle: ${found.join(', ')}`);
 });
 
 // ---------------------------------------------------------------------------
-// 5. The positive half, at tier 1 — engine-preflight.js's named import.
+// 5. The positive half, at tier 1 — engine-preflight.js's named import, and
+//    the two counts that make its header rule MECHANICAL rather than
+//    advisory. A wildcard is not the only way `UserEngine` could arrive: a
+//    second named binding in the same brace list would do it just as well,
+//    and nothing before 54-10 forbade one.
 // ---------------------------------------------------------------------------
 const NAMESPACE_IMPORT_RE = /import\s*\*\s*as\s+\w+\s+from/;
+
+const PREFLIGHT_SOURCE_RAW = readFileSync(publicSrc('engine-preflight.js'), 'utf8');
+const PREFLIGHT_SOURCE_STRIPPED = stripCommentLines(PREFLIGHT_SOURCE_RAW);
+
+/** @param {string} strippedSource @returns {number} */
+function countImportStatements(strippedSource) {
+	return (strippedSource.match(/^[ \t]*import\b/gm) ?? []).length;
+}
+
+/** @param {string} strippedSource @returns {number} bindings inside the first `import { ... } from` brace list. */
+function countNamedBindings(strippedSource) {
+	const m = strippedSource.match(/import\s*\{([^}]*)\}\s*from/);
+	if (!m) return 0;
+	return m[1]
+		.split(',')
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0).length;
+}
 
 test('inertness control: the namespace-import matcher fires on a planted "import * as x from \'y\';" fixture', () => {
 	assert.match("import * as x from 'y';", NAMESPACE_IMPORT_RE, 'matcher is inert against a planted namespace import');
 });
 
+test('positive control: the import counters fire on a planted two-import fixture and a planted two-binding fixture', () => {
+	const twoImports = ["import { A } from 'x';", "import { B } from 'y';"].join('\n');
+	assert.equal(countImportStatements(twoImports), 2, 'the import-statement counter is inert against a planted second import');
+
+	const twoBindings = "import { VOTETORRENT_SCHEMA_SQL, UserEngine } from '@votetorrent/vote-engine/browser';";
+	assert.equal(countNamedBindings(twoBindings), 2, 'the binding counter is inert against a planted second named binding');
+
+	// And the counters agree with themselves on the one-of-each shape.
+	const single = "import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/browser';";
+	assert.equal(countImportStatements(single), 1);
+	assert.equal(countNamedBindings(single), 1);
+});
+
 test('engine-preflight.js names VOTETORRENT_SCHEMA_SQL via a named import and contains no namespace import', () => {
-	const source = readFileSync(publicSrc('engine-preflight.js'), 'utf8');
 	assert.match(
-		source,
+		PREFLIGHT_SOURCE_RAW,
 		/import\s*\{[^}]*\bVOTETORRENT_SCHEMA_SQL\b[^}]*\}\s*from\s*['"]@votetorrent\/vote-engine\/browser['"]/,
 		'expected a named import of VOTETORRENT_SCHEMA_SQL from @votetorrent/vote-engine/browser',
 	);
-	assert.doesNotMatch(source, NAMESPACE_IMPORT_RE, 'engine-preflight.js must not use a namespace import');
+	assert.doesNotMatch(PREFLIGHT_SOURCE_RAW, NAMESPACE_IMPORT_RE, 'engine-preflight.js must not use a namespace import');
+});
+
+test('engine-preflight.js contains EXACTLY ONE import statement, whose brace list holds EXACTLY ONE binding — a second binding is how the privilege primitive would arrive without any wildcard', () => {
+	assert.equal(
+		countImportStatements(PREFLIGHT_SOURCE_STRIPPED),
+		1,
+		'engine-preflight.js must contain exactly one import statement — see its header: this module is the schema-reach probe and nothing else',
+	);
+	assert.equal(
+		countNamedBindings(PREFLIGHT_SOURCE_STRIPPED),
+		1,
+		'engine-preflight.js must import exactly one named binding. A second one drags another export of the subpath into an ' +
+			'anonymous page\'s bundle — the officer-scope primitive being the one that matters (D-01: public means no officer identity)',
+	);
+});
+
+// ---------------------------------------------------------------------------
+// 6. The live-value schema-reach assertion — the tier-1 successor to the
+//    boundary fence election-shell.test.mjs retired in 54-10.
+//
+//    The fence proved only that this app had not yet started the next
+//    phase's work, which stops being worth anything the moment the phase
+//    starts. This proves something that stays true forever and is checkable
+//    BEFORE any build: the schema import is real and WHOLE.
+//
+//    Both expectations are derived from the LIVE binding. No byte count and
+//    no line count is written as a literal anywhere in this file, so the
+//    assertion cannot drift into asserting a stale number.
+// ---------------------------------------------------------------------------
+
+/** The same short first line `scripts/assert-engine-reach.mjs` uses as its negative control. */
+const SCHEMA_FIRST_LINE_FIXTURE = 'declare schema main';
+
+test('enginePreflight() reports the LIVE schema value\'s own length and line count, and both are discriminated against a constant-foldable prefix', () => {
+	const { schemaByteLength, schemaLineCount } = enginePreflight();
+
+	assert.equal(schemaByteLength, VOTETORRENT_SCHEMA_SQL.length, 'schemaByteLength must equal the live binding\'s own length');
+	assert.equal(schemaLineCount, VOTETORRENT_SCHEMA_SQL.split('\n').length, 'schemaLineCount must equal the live binding\'s own newline-split length');
+
+	// The discriminating negative: a minifier that constant-folded the
+	// schema's short first line while tree-shaking the real string away would
+	// still satisfy an equality written against a literal. It cannot satisfy
+	// this one.
+	assert.ok(
+		schemaByteLength > SCHEMA_FIRST_LINE_FIXTURE.length,
+		`schemaByteLength (${schemaByteLength}) is no larger than the schema's own first line (${SCHEMA_FIRST_LINE_FIXTURE.length} chars) — ` +
+			'the reported value is consistent with a constant-folded prefix rather than the whole schema',
+	);
+	assert.ok(schemaLineCount > 1, `schemaLineCount (${schemaLineCount}) is consistent with a single-line prefix rather than the whole schema`);
+	assert.ok(VOTETORRENT_SCHEMA_SQL.startsWith(SCHEMA_FIRST_LINE_FIXTURE), 'fixture sanity: the negative control must really be the schema\'s own first line');
 });
 
 test('sanity: dist/ (if present from a prior local build) is not itself a src/ file walked above', () => {
