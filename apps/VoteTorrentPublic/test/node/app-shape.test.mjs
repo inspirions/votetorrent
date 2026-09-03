@@ -277,3 +277,51 @@ test('AppChrome.tsx renders no JSX text run (D-08 admits only the public.* keys 
 	const offendingLines = source.split('\n').filter((line) => JSX_TEXT_RUN_RE.test(line));
 	assert.deepEqual(offendingLines, [], `AppChrome.tsx contains a JSX text run: ${JSON.stringify(offendingLines)}`);
 });
+
+// ---------------------------------------------------------------------------
+// 9. No control byte in any source file under src/ (54-11).
+//
+// Found the hard way rather than anticipated: a stray NUL byte reached a React
+// `key` template literal in `ElectionIndex.tsx`. It ran correctly and typechecked
+// clean, and git classified the whole .tsx file as BINARY -- so every future
+// diff of that file would have shown "Bin 5898 -> 6012 bytes" and nothing else,
+// and every source scan in this repo that reads it as text could behave
+// differently from the one that wrote it. A source tree that cannot be diffed
+// is a source tree whose review is decorative.
+//
+// The scan covers every byte below 0x20 except tab, newline and carriage
+// return, plus DEL -- none of which has any business in a .ts/.tsx/.js/.css
+// file in this app.
+// ---------------------------------------------------------------------------
+
+const CONTROL_BYTE_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+
+test('positive control: the control-byte matcher fires on a planted NUL, on a planted vertical tab and on a planted DEL', () => {
+	for (const [label, planted] of [
+		['NUL', `const key = \`\${a}\u0000\${b}\`;`],
+		['vertical tab', 'const s = "a\u000Bb";'],
+		['DEL', 'const s = "a\u007Fb";'],
+	]) {
+		assert.match(planted, CONTROL_BYTE_RE, `the matcher is inert against a planted ${label}`);
+	}
+});
+
+test('benign control: the matcher does not fire on tabs, newlines or carriage returns, which this repo\'s source is full of', () => {
+	assert.doesNotMatch('\tconst x = 1;\r\n\tconst y = 2;\n', CONTROL_BYTE_RE, 'the matcher would condemn ordinary indented source');
+});
+
+test('no source file under src/ contains a control byte -- a NUL in a template literal makes git treat the whole file as binary, hiding every future diff of it', () => {
+	const files = walkAll(publicSrc());
+	assert.ok(files.length > 0, 'sanity: expected at least one file under src/');
+	const offenders = [];
+	for (const file of files) {
+		const source = readFileSync(file, 'utf8');
+		const m = source.match(CONTROL_BYTE_RE);
+		if (m) {
+			const index = source.indexOf(m[0]);
+			const line = source.slice(0, index).split('\n').length;
+			offenders.push(`${file}:${line} (U+${m[0].charCodeAt(0).toString(16).padStart(4, '0').toUpperCase()})`);
+		}
+	}
+	assert.deepEqual(offenders, [], `these source files contain a control byte: ${offenders.join(', ')}`);
+});
