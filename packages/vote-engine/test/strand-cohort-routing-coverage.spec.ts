@@ -145,7 +145,9 @@ const QUALIFIED_ADDR_TEMPLATE_MARKER = '${addr}' + '/p2p' + '-circuit'
 // Repointed for cadre-core 0.10.0: the 41-11 two-relay split is retired (upstream gave
 // each strand node its OWN derived transport peerId, so one relay is correct), and the
 // surviving single relay-qualified constant is the CONTROL one.
-const LISTEN_ADDRS_BY_IDENTIFIER_MARKER = 'listenAddrs' + ': ' + 'CONTROL_RELAY_LISTEN_ADDRS'
+// Repointed for cadre-core 0.12.0: relays moved from `listenAddrs` to `relayAddrs`, and the
+// constant no longer pre-qualifies its entries (cadre-core appends `/p2p-circuit` itself).
+const RELAY_ADDRS_BY_IDENTIFIER_MARKER = 'relay' + 'Addrs' + ': ' + 'CONTROL_RELAY_ADDRS'
 // The retired per-node-type override. Must NOT reappear: `strandNetwork` is dead config on
 // cadre-core 0.10.0 (zero occurrences in the published types/dist), so re-adding it would
 // silently do nothing while looking load-bearing.
@@ -253,13 +255,16 @@ function assertStrandRelayRoutingIntact (path: string, label: string): void {
 
   expect(
     strippedFullSrc.includes(QUALIFIED_ADDR_TEMPLATE_MARKER),
-    `Expected ${label} to still construct a relay-qualified per-drone listenAddrs entry ` +
-    '(the `${addr}/p2p-circuit` template literal) — not merely a comment reference'
-  ).to.equal(true)
+    `Expected the relay-qualified per-drone template literal to be GONE from ${label}. ` +
+    'cadre-core 0.12.0 rejects a `<relay>/p2p-circuit` entry in network.listenAddrs on a ' +
+    'control node — libp2p dials that relay from inside libp2p.start(), during the bring-up ' +
+    'quiet period that denies exactly that dial. network.relayAddrs takes the BARE relay ' +
+    'addr and appends the suffix itself.'
+  ).to.equal(false)
   expect(
-    body.includes(LISTEN_ADDRS_BY_IDENTIFIER_MARKER),
-    `Expected ${label} network.listenAddrs to still be assigned the qualified-addrs constant by ` +
-    'identifier (STRAND_RELAY_LISTEN_ADDRS), not a bare/direct array literal'
+    body.includes(RELAY_ADDRS_BY_IDENTIFIER_MARKER),
+    `Expected ${label} network.relayAddrs to be assigned the relay-addrs constant by ` +
+    'identifier (CONTROL_RELAY_ADDRS), not a bare/direct array literal'
   ).to.equal(true)
   expect(
     body.includes(DIRECT_ONLY_LISTEN_MARKER),

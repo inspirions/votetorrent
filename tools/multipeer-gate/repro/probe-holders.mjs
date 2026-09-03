@@ -62,8 +62,11 @@ async function peer(name, relays, boots) {
   const n = new CadreNode({
     ...base(boots, await generateKeyPair('Ed25519'), name),
     profile: 'transaction',
+    // cadre-core 0.12.0: relays live in `network.relayAddrs`, not `listenAddrs` — the old
+    // shape is rejected on a control node (it dials the relay during the bring-up quiet
+    // period). `listenAddrs` stays unset so this peer keeps no direct listener.
     network: { transports: [webSockets(), circuitRelayTransport({ reservationConcurrency: Math.max(1, relays.length) })],
-      listenAddrs: relays.map(a => `${a}/p2p-circuit`) },
+      relayAddrs: relays },
   });
   await n.start(); nodes.push({ name, node: n, profile: 'transaction' });
   L(`${name} up ${n.peerId} [transaction, ${relays.length} relay(s)]`); return n;

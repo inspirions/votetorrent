@@ -85,28 +85,34 @@ export function resolveBootstrapNodes(addr: string): string[] {
   return [addr];
 }
 
-// D-05 (41-02, P2P-11 wall #8 fix): relay-qualified per-drone listenAddrs.
-// One `${addr}/p2p-circuit` entry per KNOWN drone routes through
-// @libp2p/circuit-relay-v2's 'configured' reservation path (RESEARCH Pattern 1),
-// which bypasses the one-slot 'discovered' cap that capped the emulator at a
-// reservation with only ONE drone. Routed through the SAME placeholder-aware
-// resolveBootstrapNodes guard used for strandBootstrapNodes below, so a solo/
-// placeholder boot yields [] (degraded, not a crash) — never a bare
-// template-string concat over an unresolved constant.
-const STRAND_RELAY_LISTEN_ADDRS = resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR).map(
-  (addr) => `${addr}/p2p-circuit`,
-);
+// The `STRAND_RELAY_LISTEN_ADDRS` constant that stood here is REMOVED.
+//
+// It was already dead: spike 062 retired the `strandNetwork` per-node-type override on
+// cadre-core 0.10.0 (upstream gave each strand node its own derived transport peerId), and
+// nothing has read this constant since — only its own declaration and a comment referenced it.
+//
+// It is removed rather than left dead because it CONSTRUCTED the relay-qualified
+// `<addr>/p2p-circuit` shape, which cadre-core 0.12.0 now rejects outright on a control node.
+// Leaving it would keep a fatal, load-bearing-looking pattern in a file whose relay config is
+// the exact thing 0.12.0 changed. Relays are named by `network.relayAddrs` below.
 
-// P2P-11 (41-11, wall #9 — shared-PeerId strand-relay collision): the control node reserves
-// through the drone's CONTROL relay, a DISTINCT relay identity from the strand node's STRAND
-// relay (strandNetwork below). Two separate relay servers ⇒ each circuit-relay-v2 server holds
-// only ONE connection per this peer's (shared) PeerId, so hop-connect (server/index.js:230-236
-// connections[0]) can no longer misroute strand-directed streams to the control connection
-// (41-10-STRAND-RELAY-ROUTING-DIAGNOSIS.md §5). Placeholder-aware exactly like
-// STRAND_RELAY_LISTEN_ADDRS — a solo/placeholder boot degrades to [] (no crash).
-const CONTROL_RELAY_LISTEN_ADDRS = resolveBootstrapNodes(CONTROL_ADDR).map(
-  (addr) => `${addr}/p2p-circuit`,
-);
+// cadre-core 0.12.0: relays are named by `network.relayAddrs`, NOT by a relay-qualified
+// `network.listenAddrs` entry — the old shape is now REJECTED at construction on a control
+// node ("network.listenAddrs names a relay directly ... Move the relay to
+// network.relayAddrs, which reserves after bring-up").
+//
+// WHY upstream changed it: a `<relay>/p2p-circuit` listen entry takes libp2p's 'configured'
+// route, which dials the relay from inside `libp2p.start()` — during the bring-up quiet
+// period that denies exactly that dial, so `listen()` fails and the transport manager's
+// FATAL_ALL aborts start. `relayAddrs` takes the 'search' route (one bare `/p2p-circuit`
+// listener, no dial) and CadreNode.start() drives the reservation explicitly once the
+// control database is up. Failure is still fail-fast: a relay that never answers throws
+// RelayReservationFailedError out of start().
+//
+// Entries are the BARE relay addrs; cadre-core appends `/p2p-circuit` itself. Still routed
+// through the placeholder-aware resolveBootstrapNodes guard, so a solo/placeholder boot
+// yields [] (degraded, not a crash).
+const CONTROL_RELAY_ADDRS = resolveBootstrapNodes(CONTROL_ADDR);
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -228,16 +234,16 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
                 // NOT yield N reservations under the default circuitRelayTransport() —
                 // DEFAULT_RESERVATION_CONCURRENCY=1 serializes the reserve queue and
                 // drops any 2nd+ reservation via reserveQueue.clear(). Size concurrency
-                // to the number of known control relays driving CONTROL_RELAY_LISTEN_ADDRS
+                // to the number of known control relays driving CONTROL_RELAY_ADDRS
                 // (never less than 1).
-                reservationConcurrency: Math.max(1, CONTROL_RELAY_LISTEN_ADDRS.length),
+                reservationConcurrency: Math.max(1, CONTROL_RELAY_ADDRS.length),
               }) as unknown as ReturnType<typeof webSockets>,
             ],
             // D-03/D-05: always-on relay reservation-seeking (P2P-08 drone-relay path),
             // relay-qualified — but scoped to the drone's CONTROL relay (P2P-11 41-11).
             // The STRAND relay moves to strandNetwork below, so the control and strand
             // libp2p nodes no longer collide at one relay under this peer's shared PeerId.
-            listenAddrs: CONTROL_RELAY_LISTEN_ADDRS,
+            relayAddrs: CONTROL_RELAY_ADDRS,
             // Permissive gater — allows loopback / emulator host dials (D-11).
             // Per-strand enrollment gating is v2.x scope.
             connectionGater: { denyDialMultiaddr: async () => false },

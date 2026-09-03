@@ -117,6 +117,9 @@ const REPLICATION_TIMEOUT_MS = T(60_000);
 const POLL_MS = T(500);
 const ENROLL_ATTEMPTS = Number(process.env.ENROLL_ATTEMPTS ?? 5);
 const ENROLL_RETRY_MS = T(2_000);
+// 0.12.0 reserves relays AFTER control bring-up, so the enrolment preconditions land late.
+const SETTLE_TIMEOUT_MS = T(60_000);
+const SETTLE_GRACE_MS = T(3_000);
 
 // A single-table schema. StrandDatabase.executeSchema() supplies the
 // `declare schema App { ... } apply schema App;` wrapper itself, so this is raw DDL.
@@ -216,9 +219,16 @@ async function startDrone(name, bootstrapNodes) {
 }
 
 /**
- * A relay-only peer: NO direct listen address, only `<relay>/p2p-circuit` entries. This
- * is the 'configured' reservation path, which is what makes the peer undialable except
- * through a relay — the constraint the whole gate exists to exercise.
+ * A relay-only peer: NO direct listen address, only relays. This is what makes the peer
+ * undialable except through a relay — the constraint the whole gate exists to exercise.
+ *
+ * cadre-core 0.12.0 moved this from `network.listenAddrs` to `network.relayAddrs` and now
+ * REJECTS the old shape on a control node: a `<relay>/p2p-circuit` listen entry makes
+ * libp2p dial the relay from inside `libp2p.start()`, during the bring-up quiet period
+ * that denies exactly that dial. `relayAddrs` takes the 'search' route instead (one bare
+ * `/p2p-circuit` listener) and drives the reservation explicitly AFTER the control
+ * database is up. `listenAddrs` is deliberately left unset so the peer keeps no direct
+ * listener — naming a relay alone does not add one back.
  */
 async function startRelayOnlyPeer(name, relayAddrs, bootstrapNodes) {
   const node = new CadreNode({
@@ -232,11 +242,10 @@ async function startRelayOnlyPeer(name, relayAddrs, bootstrapNodes) {
         // never starts.
         //
         // reservationConcurrency defaults to 1, which serialises and then DROPS the
-        // surplus: N relay-qualified listen addresses alone do NOT yield N reservations.
-        // Size it to the relay count or L2 silently caps at one reservation.
+        // surplus. Kept sized to the relay count: L2 asserts a reservation per relay.
         circuitRelayTransport({ reservationConcurrency: Math.max(1, relayAddrs.length) }),
       ],
-      listenAddrs: relayAddrs.map((a) => `${a}/p2p-circuit`),
+      relayAddrs,
     },
   });
   await withTimeout(node.start(), START_TIMEOUT_MS, `${name} start`);
@@ -535,6 +544,48 @@ async function enrol(owner, joiners) {
   }
 }
 
+/**
+ * Wait for the topology to settle before the enrolment ceremony.
+ *
+ * cadre-core 0.12.0 changed WHEN a relay reservation lands: `network.relayAddrs` takes
+ * libp2p's 'search' route and `CadreNode.start()` drives the reservation explicitly AFTER
+ * the control database is up, where 0.11.0's relay-qualified listen entry reserved from
+ * inside `libp2p.start()`. So `start()` can now return before a relay-only peer has a
+ * circuit address, and enrolment issued in that window reads owner-signed control state
+ * that no one can serve yet — it fails with
+ *   Block default/Revocation is unavailable (peers-unreachable)
+ * which is a TIMING artifact, not a membership verdict.
+ *
+ * `enrol()`'s bounded retry alone is not enough: on 0.12.0 the whole retry budget can
+ * elapse before the reservation lands, so the gate went from deterministic to flaky (it
+ * passed one run and failed the next on an unchanged tree). Gate on the observable
+ * preconditions instead — the founder sees everyone, and every relay-only peer holds a
+ * `/p2p-circuit` address — then let the existing retry cover the residual jitter.
+ *
+ * Returns false on timeout rather than throwing: enrolment still runs, and L3 still
+ * reports the real failure if membership genuinely cannot be established.
+ */
+async function settleTopology(founder, all, relayOnly, ms = SETTLE_TIMEOUT_MS) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const founderPeers = founder.getControlNode().getPeers?.().length ?? 0;
+    const meshed = founderPeers >= all.length - 1
+      && all.every((n) => (n.node.getControlNode().getPeers?.().length ?? 0) >= 1);
+    const reserved = relayOnly.every(({ node }) =>
+      node.getControlNode().getMultiaddrs().map(String).some((a) => a.includes('/p2p-circuit')));
+    if (meshed && reserved) {
+      await new Promise((r) => setTimeout(r, SETTLE_GRACE_MS));  // let the control writes land
+      V(`topology settled (founder sees ${founderPeers}, ${relayOnly.length} reservation(s))`);
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      L(`WARN topology did not settle in ${ms}ms (meshed=${meshed} reserved=${reserved}) — enrolling anyway`);
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────────────
 async function main() {
   L(`config DRONES=${DRONES} RELAYS=${RELAYS} CLUSTER_SIZE=${CLUSTER_SIZE} ` +
@@ -575,6 +626,10 @@ async function main() {
   if (!(await legRelayReservation(peers))) return false;
 
   if (ENROLL) {
+    // Gate on the reservation actually landing — see settleTopology(). Without this the
+    // ceremony races cadre-core 0.12.0's post-bring-up reservation drive and L3 fails
+    // intermittently with `peers-unreachable`, which reads like a membership failure.
+    await settleTopology(droneA, all, peers);
     L('running the invite/enrolment ceremony ...');
     await enrol(droneA, [...drones.slice(1), ...peers]);
   }

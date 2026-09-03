@@ -14,13 +14,13 @@
 		"clean": "rm -rf node_modules"
 	},
 	"peerDependencies": {
-		"@quereus/plugin-indexeddb": "4.17.1",
-		"@quereus/quereus": "4.17.1",
+		"@quereus/plugin-indexeddb": "4.18.0",
+		"@quereus/quereus": "4.18.0",
 		"@votetorrent/vote-engine": "workspace:*"
 	},
 	"devDependencies": {
-		"@quereus/plugin-indexeddb": "4.17.1",
-		"@quereus/quereus": "patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch",
+		"@quereus/plugin-indexeddb": "4.18.0",
+		"@quereus/quereus": "patch:@quereus/quereus@npm%3A4.18.0#~/.yarn/patches/@quereus-quereus-npm-4.18.0-9b9f24c666.patch",
 		"@types/node": "^22.10.2",
 		"@votetorrent/vote-engine": "workspace:*",
 		"fake-indexeddb": "^6.2.5",
