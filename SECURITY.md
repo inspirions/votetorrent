@@ -181,22 +181,32 @@ rather than rediscovered; assessing it is future work.
 
 ### DR-01 — the public election view reads only same-origin data
 
-**Status: ANSWERED 2026-09-03 — the requirement is NOT met and is not intended to be met.** Asked
-whether the two apps would be served from one origin in production, the project owner answered:
-*"they are not supposed to be served from one origin in prod at all."*
+**Status: ANSWERED 2026-09-03, then SUPERSEDED the same day by a design decision.** Asked whether
+the two apps would be served from one origin in production, the project owner answered: *"they are
+not supposed to be served from one origin in prod at all."*
 
-**Consequence, stated plainly: the real-data path described below never activates in production.**
-The public view has **no write path of any kind** — it imports only `listNetworks`,
-`attachNetworkDb`, `closeNetworkDb`, `listPublicElections` and the change-subscription seam from
-`@votetorrent/web-data/public`, and contains no insert, no bootstrap and no registration. Under a
-separate origin nothing can ever populate its IndexedDB, so **every visitor sees the empty state,
-permanently, by construction.**
+**The answer stands; its consequence has changed.** The owner then chose the live-peer data path
+(see `.planning/STATE.md`, decision of 2026-09-03): the public view becomes a libp2p **Edge
+subscriber** that reads the network directly and receives push updates, rather than reading a
+database some other app populated. Liveness and decentralisation are a hard constraint on that
+choice — a published-snapshot or read-only-endpoint compromise was explicitly ruled out.
 
-This is not a defect in any control below; the controls are correct and were verified. It is a gap
-in **D-01**, which fixed the data *source* on a premise the intended deployment does not satisfy.
-D-01 requires revisiting, and the public view needs a real data path — a read-only endpoint, a
-published snapshot, or peer sync — before it can show an election to a stranger. Until then the
-honest empty state is not an edge case; **it is the entire product surface.**
+**Under that design, separate origins is CORRECT rather than fatal.** The public view's IndexedDB
+stops being a store it must be handed and becomes its own local cache of what it read from peers.
+Origin partitioning then isolates the anonymous reader from the officer's data, which is the
+property this section wanted in the first place.
+
+**What is true in the tree TODAY, and must not be read as already fixed:** the public view still
+has **no write path of any kind** — it imports only `listNetworks`, `attachNetworkDb`,
+`closeNetworkDb`, `listPublicElections` and the change-subscription seam from
+`@votetorrent/web-data/public`, and contains no insert, no bootstrap and no registration. It also
+resolves which network to open by reading the **dashboard's** registry key,
+`'votetorrent.dashboard.networks'` (`packages/web-data/src/networks-registry.js:23`). Until the
+Edge-subscriber path ships, every production visitor sees the honest empty state.
+
+This was never a defect in any control below; the controls are correct and were verified. It was a
+gap in **D-01**, which fixed the data *source* on a premise the intended deployment does not
+satisfy. D-01 is superseded by the Edge-subscriber decision.
 
 The paragraphs below are retained unchanged as the analysis that produced this answer.
 
