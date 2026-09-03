@@ -16,6 +16,7 @@ import path from 'node:path';
 import { publicSrc, publicRoot, uiWebSrc, uiWebRoot } from '../../../../scripts/lib/source-paths.mjs';
 import { COPY } from '../../../../packages/ui-web/src/index.js';
 import { FACT_COPY_KEYS } from '../../../../packages/ui-web/src/lifecycle/facts.js';
+import { ELECTION_ADDRESS_PARAM, NETWORK_ADDRESS_PARAM } from '../../src/election-address.js';
 
 /** @param {string} source @returns {string} */
 function stripCommentLines(source) {
@@ -171,10 +172,43 @@ test('no file under src/ or test/ (excluding test/node/*.test.mjs, whose own pos
 });
 
 // ---------------------------------------------------------------------------
-// 6. One URL parameter only, under src/.
+// 6. A CLOSED URL parameter set, under src/.
+//
+// AMENDMENT LEDGER (54-11, wave 6) -------------------------------------------
+//
+// Until now this asserted that "election" was the ONLY parameter name
+// reachable under src/. D-33 makes that claim false by design, and for a
+// stated reason rather than for convenience: a browser holds one store per
+// network and a network holds several elections, so an election id alone
+// resolves only by walking the local networks registry and taking whichever
+// network happened to come first -- an answer that is a function of a local
+// inventory's ORDER, on a page whose entire value is that its claims can be
+// checked. The address therefore names both, and this assertion's subject
+// changes from "one name" to "a CLOSED SET of exactly two".
+//
+// What did NOT change, and is the part carrying the security content: the
+// set is still asserted by `deepEqual` against an explicit list, so a THIRD
+// parameter name still fails here; and the `forbidden` probe below -- the
+// phase/time-selection names of T-53-07-04 and D-24 -- is UNCHANGED and
+// still asserted absent. 54-10 anticipated exactly this amendment when it
+// wrote, in section 10's own vocabulary comment, that the parameter set
+// "deliberately EXCLUDES `election` (and any network parameter a later wave
+// adds): those address WHICH election is shown, not WHICH PHASE it is shown
+// in, and D-33 requires them."
+//
+// The two admitted names are read from `election-address.js`'s own exported
+// constants, never transcribed here, so a rename in that module fails this
+// assertion loudly instead of silently admitting a name nobody declared.
 // ---------------------------------------------------------------------------
 
-test('the only URL parameter name reachable anywhere under src/ is "election" (test/browser/ is excluded from this scan — its own ?phase= selector lives there, never in src/)', () => {
+test('positive control: the closed-parameter-set assertion still REFUSES a third name — an exact deepEqual, not a containment check', () => {
+	const admitted = [ELECTION_ADDRESS_PARAM, NETWORK_ADDRESS_PARAM].sort();
+	const withAThirdName = [...admitted, 'audience'].sort();
+	assert.notDeepEqual(withAThirdName, admitted, 'the amended assertion would admit a third parameter name — it has been widened into a containment check');
+	assert.deepEqual([...admitted].sort(), admitted, 'sanity: the admitted set compares equal to itself');
+});
+
+test('the URL parameter names reachable anywhere under src/ are exactly the two the address module exports — no third name, and none of the phase/time-selection names (test/browser/ is excluded from this scan — its own ?phase= selector lives there, never in src/)', () => {
 	const files = walkAll(publicSrc());
 	/** @type {Map<string, string>} */
 	const contents = new Map();
@@ -206,7 +240,13 @@ test('the only URL parameter name reachable anywhere under src/ is "election" (t
 		}
 	}
 
-	assert.deepEqual([...resolvedNames].sort(), ['election'], `expected the only URL parameter name in src/ to be "election", found: ${[...resolvedNames].join(', ')}`);
+	const admitted = [ELECTION_ADDRESS_PARAM, NETWORK_ADDRESS_PARAM].sort();
+	assert.equal(admitted.length, 2, 'sanity: the address module must export exactly two parameter-name constants for this scan to be written against');
+	assert.deepEqual(
+		[...resolvedNames].sort(),
+		admitted,
+		`expected the URL parameter names in src/ to be exactly ${admitted.join(' + ')}, found: ${[...resolvedNames].join(', ')}`,
+	);
 
 	for (const name of forbidden) {
 		assert.ok(!resolvedNames.has(name), `"${name}" must not be reachable from the URL anywhere in src/ (T-53-07-04)`);
