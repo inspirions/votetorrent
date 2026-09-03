@@ -85,6 +85,43 @@ export class UnknownExtensionError extends Error {
 }
 
 /**
+ * Thrown when an `exclude` entry passed to {@link scannedFilesFor} matches zero
+ * files walked from `roots`. A stale exclusion is the mechanism by which a
+ * moved or renamed file silently re-enters a scan it was meant to stay out of
+ * (or, just as bad, an exclusion nobody notices has stopped doing anything) —
+ * it must be loud rather than a permanently-inert no-op.
+ */
+export class StaleExclusionError extends Error {
+	/** @param {string} entry */
+	constructor(entry) {
+		super(
+			`StaleExclusionError: exclusion "${entry}" matched zero files under the given roots. ` +
+				`Either the excluded path moved/was renamed and the exclusion is now dead, or it never ` +
+				`matched anything. A stale exclusion is a hole nobody is watching — fix the entry or ` +
+				`remove it; do not leave it in place unverified.`,
+		);
+		this.name = 'StaleExclusionError';
+		this.entry = entry;
+	}
+}
+
+/**
+ * Does `file` fall under `exclusionEntry`, either as an exact match or as a
+ * descendant of it treated as a directory? Comparison is on a path-separator
+ * boundary, never a bare string prefix — `.../officer` must not exclude a
+ * sibling `.../officer-notes.js` merely because the strings share a prefix.
+ *
+ * @param {string} file - an absolute path, as returned by {@link walkSourceFiles}
+ * @param {string} exclusionEntry - an absolute path (file or directory)
+ * @returns {boolean}
+ */
+function isExcludedBy(file, exclusionEntry) {
+	if (file === exclusionEntry) return true;
+	const dirPrefix = exclusionEntry.endsWith(path.sep) ? exclusionEntry : exclusionEntry + path.sep;
+	return file.startsWith(dirPrefix);
+}
+
+/**
  * Partition a file list into what a scan reads, what it may skip, and what it
  * does not recognise.
  *
@@ -306,6 +343,59 @@ export function selectItemsOf(sql, selectListOf) {
 const SQL_TABLE_KEYWORDS = Object.freeze(['from', 'join', 'into', 'update']);
 
 /**
+ * The exact sorted absolute file list a scan over `roots` would read, after
+ * `exclude` is applied — the file-set half of what `scanForNames` does, split
+ * out so a test can assert WHAT was scanned and not only what was found.
+ *
+ * `scanForNames` obtains its own file list from this function rather than
+ * re-deriving one, so the two can never disagree — a second "what would be
+ * scanned" implementation next to the real one is exactly how a gate quietly
+ * narrows without anyone noticing.
+ *
+ * Order of operations, stated precisely because ambiguity here is how a gate
+ * quietly narrows:
+ *   1. Walk every root and partition ALL walked files by extension. This is
+ *      unaffected by `exclude` — an unclassified extension inside an excluded
+ *      directory still raises `UnknownExtensionError`. Coverage of the
+ *      extension taxonomy is not something an exclusion may buy its way out of.
+ *   2. Every entry in `exclude` must match at least one walked file (of any
+ *      classification), or this throws `StaleExclusionError` naming the entry.
+ *      A stale exclusion is the mechanism by which a moved file silently
+ *      re-enters a scan, or an exclusion nobody notices stops doing anything.
+ *   3. The `scanned` (code-extension) bucket is filtered by `exclude` and
+ *      returned, sorted.
+ *
+ * Exclusion matching is by exact path equality or by directory containment on
+ * a path-separator boundary — never a bare string prefix, so an entry naming
+ * `.../officer` does not accidentally exclude a sibling `.../officer-notes.js`.
+ *
+ * AN EXCLUSION MUST HAVE A CONTROL PROVING IT IS LOAD-BEARING. This is not a
+ * convention to remember — every caller that adds an entry to its own exclude
+ * list must pair it with a test that copies the excluded content into an
+ * otherwise-clean scan root and asserts the scan reports it. An exclusion with
+ * no such control is unverifiable: nobody can tell "correctly excluded" from
+ * "the matcher never looked here in the first place".
+ *
+ * @param {{ roots: ReadonlyArray<string>, exclude?: ReadonlyArray<string> }} args
+ * @returns {string[]}
+ */
+export function scannedFilesFor({ roots, exclude = [] }) {
+	/** @type {string[]} */
+	const allWalked = [];
+	for (const root of roots) allWalked.push(...walkSourceFiles(root));
+
+	const part = partitionByExtension(allWalked);
+	if (part.unknown.length > 0) throw new UnknownExtensionError(part.unknown);
+
+	for (const entry of exclude) {
+		const matched = allWalked.some((file) => isExcludedBy(file, entry));
+		if (!matched) throw new StaleExclusionError(entry);
+	}
+
+	return part.scanned.filter((file) => !exclude.some((entry) => isExcludedBy(file, entry))).sort();
+}
+
+/**
  * Walk `roots`, fail on any unrecognised extension, strip comments, and report
  * every occurrence of every name in `names` as a whole word.
  *
@@ -319,22 +409,17 @@ const SQL_TABLE_KEYWORDS = Object.freeze(['from', 'join', 'into', 'update']);
  * reaching the public source set as a bare identifier is the same leak by a
  * different spelling.
  *
- * @param {{ roots: ReadonlyArray<string>, names: ReadonlyArray<string> }} args
+ * `exclude` defaults to an empty array, so every existing call site keeps its
+ * current behaviour with no edit. The file list itself comes from
+ * {@link scannedFilesFor} — see that function's doc for the exclusion contract.
+ *
+ * @param {{ roots: ReadonlyArray<string>, names: ReadonlyArray<string>, exclude?: ReadonlyArray<string> }} args
  * @returns {Array<{ file: string, name: string, line: number, text: string, sqlContext: boolean }>}
  */
-export function scanForNames({ roots, names }) {
+export function scanForNames({ roots, names, exclude = [] }) {
 	/** @type {Array<{ file: string, name: string, line: number, text: string, sqlContext: boolean }>} */
 	const offenders = [];
-	/** @type {string[]} */
-	const unknown = [];
-	/** @type {string[]} */
-	const toScan = [];
-	for (const root of roots) {
-		const part = partitionByExtension(walkSourceFiles(root));
-		unknown.push(...part.unknown);
-		toScan.push(...part.scanned);
-	}
-	if (unknown.length > 0) throw new UnknownExtensionError(unknown);
+	const toScan = scannedFilesFor({ roots, exclude });
 
 	const matchers = names.map((name) => /** @type {const} */ ([name, new RegExp(`\\b${name}\\b`)]));
 	for (const file of toScan) {
