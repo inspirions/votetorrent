@@ -36,6 +36,7 @@
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import { stripComments } from './strip-comments.mjs';
 
 /**
  * Strips `/* ... *\/` block comments from a CSS source, mirroring
@@ -51,25 +52,21 @@ export function stripCssComments(source) {
 }
 
 /**
- * Line-based comment stripper for JS/TSX source, the same idiom every other
- * tier-1 checker in this repo uses (`app-shape.test.mjs`'s `stripCommentLines`,
- * `election-ops-panels.test.mjs`'s `stripComments`, etc.) — a match must not
- * be satisfiable by prose in a header comment (this file's own header names
- * `className=` and `@import` in prose above for exactly that reason: every
- * matcher below strips comments FIRST, so neither occurrence above can ever
- * satisfy it).
+ * Comment stripper for JS/TSX source, reading through
+ * `scripts/lib/strip-comments.mjs`'s shared, character-level,
+ * quote-state-tracking `stripComments` (54-23) rather than a local
+ * line-opening filter — a match must not be satisfiable by prose in a
+ * header comment (this file's own header names `className=` and `@import`
+ * in prose above for exactly that reason: every matcher below strips
+ * comments FIRST, so neither occurrence above can ever satisfy it). Kept
+ * under this name for its two existing call sites below; no external
+ * consumer imports this name directly (grepped at 54-23 time).
  *
  * @param {string} source
  * @returns {string}
  */
 export function stripJsCommentLines(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
+	return stripComments(source);
 }
 
 /**

@@ -77,6 +77,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { repoRoot, uiWebSrc, dashboardSrc, publicSrc, moduleUrl } from './lib/source-paths.mjs';
+import { stripComments } from './lib/strip-comments.mjs';
 
 /** @param {string} message */
 function fail(message) {
@@ -301,10 +302,10 @@ function jsxViolations(entries) {
 //    file contract C2 says is the ONLY place a user-facing string may live.
 //
 //    REGEX-BASED, NOT AN AST PARSE (this script stays dependency-free): for
-//    each .tsx file, drop whole-line comments (the same line-based stripper
-//    this workspace's own tier-1 source-scan tests already use, so the two
-//    agree on what counts as a comment), then walk each remaining LINE for
-//    runs of text between `>` and `<`. Scoping to one line at a time is what
+//    each .tsx file, strip comments via scripts/lib/strip-comments.mjs's
+//    shared, character-level stripComments (54-23), then walk each
+//    remaining LINE for runs of text between `>` and `<`. Scoping to one
+//    line at a time is what
 //    keeps this safe from the false-positive class that made a whole-file
 //    regex unusable: a TS generic argument like
 //    `useState<string | undefined>(undefined)` never has a SECOND `<` on the
@@ -313,21 +314,6 @@ function jsxViolations(entries) {
 //    were verified true across every .tsx file under src/ before this
 //    scanner was written this way).
 // ---------------------------------------------------------------------------
-
-/** Drop whole-line comments, so prose ABOUT a defect is never read as the
- * defect. Mirrors the tier-1 test suite's own `stripComments` helper
- * (`test/node/shell-wiring.test.mjs` and siblings) so the lint and the tests
- * agree on what a comment line looks like.
- * @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 /**
  * WHAT COUNTS AS AUTHORED PROSE IN A JSX TEXT NODE, and why it is not simply
