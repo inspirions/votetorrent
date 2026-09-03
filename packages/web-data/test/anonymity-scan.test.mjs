@@ -1,12 +1,24 @@
 /**
  * anonymity-scan.test.mjs — D-05's gate: no table an anonymous reader may not
- * see is referenced, as CODE, anywhere in the public entry's source set.
+ * see is referenced, as CODE, anywhere in the public entry's WHOLE import
+ * closure.
  *
  * WHAT IT ROOTS OVER, AND WHY EACH ROOT IS WHAT IT IS
  * ---------------------------------------------------------------------------
  * Scanned:
  *   - `apps/VoteTorrentPublic/src` — the no-login app's whole source tree.
- *   - `packages/web-data/src/public` — the anonymous audience's read layer.
+ *   - `packages/web-data/src` — the WHOLE package, not just `src/public`. This
+ *     widened (54-20 / I-56) after the verifier found `open-db.js`,
+ *     `reattach.js` and `networks-registry.js` sitting one directory ABOVE
+ *     `src/public/` while still being loaded by the public entry: a forbidden
+ *     table added to any of the three was invisible to this gate. A whole-tree
+ *     root with explicit exclusions is what keeps the NEXT top-level module in
+ *     scope by default — a hand-listed set of "the three files we found" would
+ *     put the next one back outside the gate with nobody noticing. Control 6c
+ *     below plants a forbidden-table statement into a temp copy of
+ *     `reattach.js` and requires it be reported, so this widening's green is
+ *     attributable to the connection layer being clean rather than to it
+ *     still being unread.
  *
  * Deliberately OUTSIDE the root, each an exclusion rather than an oversight:
  *
@@ -22,12 +34,25 @@
  *   - `packages/web-data/src/officer/**`. The officer surface is SUPPOSED to
  *     read officer-only tables. What keeps it off an anonymous page is D-04's
  *     subpath split, asserted in `audience-boundary.test.mjs`, not this scan.
+ *     Control 6b below proves this exclusion is load-bearing the same way
+ *     control 6 does for `classification.js`: copy `officer/registrations.js`
+ *     (the officer module that references forbidden-class tables as code —
+ *     `officer/read-keyholders.js` was rejected as the fixture because its
+ *     officer-only-ness is a JOIN PATTERN over two public-safe tables and it
+ *     names no forbidden table at all, which would make this control pass
+ *     vacuously) into a clean temp root and assert the scan DOES report it.
  *
  *   - `apps/VoteTorrentPublic/test/**`. Fixtures legitimately seed rows and
  *     never ship. The tables 54-16 will seed are public-safe after D-18/D-15,
  *     so this exclusion is not load-bearing today; it is recorded so that if a
  *     fixture ever needs a forbidden table, extending the exclusion is a known
  *     decision rather than a discovery.
+ *
+ * Both `packages/web-data` exclusions are entries in `SCAN_EXCLUSIONS`, applied
+ * via `scannedFilesFor`/`scanForNames` (`./lib/source-scan.mjs`). An exclusion
+ * entry that stops matching anything (a rename, a move) throws
+ * `StaleExclusionError` rather than silently rotting into a permanent hole —
+ * see the stale-exclusion and separator-boundary cases below control 6c.
  *
  * WHAT THIS GATE CANNOT PROVE (carried here from 54-VALIDATION so the limit
  * lives with the code):
@@ -61,8 +86,10 @@ import { fileURLToPath } from 'node:url';
 import { publicSrc, webDataSrc } from '../../../scripts/lib/source-paths.mjs';
 import { CLASSIFICATION, FORBIDDEN_CLASSES, PUBLIC_SAFE_CLASSES } from '../src/classification.js';
 import {
+	StaleExclusionError,
 	partitionByExtension,
 	scanForNames,
+	scannedFilesFor,
 	scanSourceForNames,
 	stripComments,
 	walkSourceFiles,
@@ -91,6 +118,18 @@ const PUBLIC_SAFE_NAMES = Object.freeze(
 const EXPECTED_FORBIDDEN_COUNT = 28;
 const EXPECTED_PUBLIC_SAFE_COUNT = 33;
 const EXPECTED_TABLE_COUNT = 61;
+
+/**
+ * The size of the scanned file set, pinned the same way the table counts above
+ * are: 14 files under the public app's `src` (its 15th file, `app.css`, is a
+ * non-code extension) plus 8 files under `packages/web-data/src` after
+ * `SCAN_EXCLUSIONS` removes `officer/` (5 files) and `classification.js` (1).
+ * CHANGING THIS NUMBER MEANS A ROOT OR AN EXCLUSION CHANGED — DO IT
+ * DELIBERATELY AND SAY WHY IN THE COMMIT. A shrinking count is a module
+ * silently leaving the closure this gate reads; never nudge it to make a red
+ * gate green.
+ */
+const EXPECTED_SCANNED_FILE_COUNT = 22;
 
 // The sentinel literals are ASSEMBLED, never written out, so each appears in
 // this file exactly once — as the comment that delimits the region. A checker
@@ -148,7 +187,23 @@ const PLANTED_NAME = 'ProposedBallot';
  * ───────────────────────────────────────────────────────────────────────────── */
 
 const THIS_FILE = fileURLToPath(import.meta.url);
-const SCAN_ROOTS = Object.freeze([publicSrc(), webDataSrc('public')]);
+
+/**
+ * The whole public import closure: the no-login app's entire source tree, and
+ * the WHOLE `packages/web-data/src` tree (not just `src/public`) minus
+ * `SCAN_EXCLUSIONS`. See the file header for why the second root widened past
+ * `src/public` in 54-20.
+ */
+const SCAN_ROOTS = Object.freeze([publicSrc(), webDataSrc()]);
+
+/**
+ * Exactly two exclusions, each proven load-bearing by its own control (6 for
+ * `classification.js`, 6b for `officer/`) below. Adding a third entry here
+ * without a matching inertness control is exactly the unverifiable state the
+ * exclusion mechanism's own doc (`scannedFilesFor` in `./lib/source-scan.mjs`)
+ * warns against.
+ */
+const SCAN_EXCLUSIONS = Object.freeze([webDataSrc('classification.js'), webDataSrc('officer')]);
 
 // ───────────────────────────────────────────────────────────────────────────
 // 0. The derived set is real. A derived set that goes empty makes every
@@ -363,6 +418,167 @@ test('control 6 (root-choice inertness): the classification file IS reported whe
 });
 
 // ───────────────────────────────────────────────────────────────────────────
+// 6b. Officer-exclusion inertness control, modelled directly on control 6.
+//     `officer/` is deliberately OUTSIDE this scan's root (D-04's subpath
+//     split, not this scan, is what keeps it off an anonymous page). "the
+//     officer directory is excluded" and "the matcher is blind to officer
+//     queries" are indistinguishable without this control.
+// ───────────────────────────────────────────────────────────────────────────
+
+test('control 6b (officer-exclusion inertness): an officer module IS reported when copied inside the scan root', () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), 'vt-anonymity-officer-'));
+	try {
+		const copiedRoot = path.join(tmp, 'public');
+		cpSync(webDataSrc('public'), copiedRoot, { recursive: true });
+		assert.deepEqual(
+			scanForNames({ roots: [copiedRoot], names: FORBIDDEN_NAMES }),
+			[],
+			'baseline copy is not clean before the officer module is copied in',
+		);
+
+		// `officer/registrations.js`, not `officer/read-keyholders.js`: this file
+		// is the one that actually references forbidden-class tables as CODE.
+		// read-keyholders.js joins two PUBLIC-SAFE tables — its officer-only-ness
+		// is a JOIN PATTERN D-04's subpath split guards, not a forbidden table
+		// name, so it names nothing this scan's matcher would ever report and
+		// would make this control pass vacuously regardless of whether the
+		// exclusion is load-bearing.
+		const smuggled = path.join(copiedRoot, path.basename(webDataSrc('officer', 'registrations.js')));
+		copyFileSync(webDataSrc('officer', 'registrations.js'), smuggled);
+
+		const offenders = scanForNames({ roots: [copiedRoot], names: FORBIDDEN_NAMES });
+		assert.ok(
+			offenders.some((o) => o.file === smuggled),
+			'the officer module inside the scan root produced zero offenders — "officer/ is excluded" and ' +
+				'"the matcher is blind to officer queries" are indistinguishable without this control',
+		);
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// 6c. The connection-layer plant — the discriminating control this whole plan
+//     turns on. A real run's green over the widened root must be attributable
+//     to `open-db.js`/`reattach.js`/`networks-registry.js` being clean, not to
+//     the widened root being unread. This proves the widened scan is not inert
+//     by planting a forbidden-table statement into the one connection-layer
+//     module NOT already covered by controls 5/6/6b's `src/public` copies.
+// ───────────────────────────────────────────────────────────────────────────
+
+test('control 6c (connection-layer plant): clean before, exactly one offender after planting into a copy of reattach.js', () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), 'vt-anonymity-connlayer-'));
+	try {
+		const copiedRoot = path.join(tmp, 'web-data-src');
+		cpSync(webDataSrc(), copiedRoot, { recursive: true });
+
+		// (a) The unmodified copy, under the same two exclusions, must scan
+		//     clean — the plant below is provably what causes the failure.
+		const exclude = [path.join(copiedRoot, 'classification.js'), path.join(copiedRoot, 'officer')];
+		assert.deepEqual(
+			scanForNames({ roots: [copiedRoot], names: FORBIDDEN_NAMES, exclude }),
+			[],
+			'an unmodified copy of the connection layer already reports offenders; the plant below would prove nothing',
+		);
+
+		// (b) Plant INSIDE A MULTI-LINE TEMPLATE LITERAL, the same shape as
+		//     control 5's plant and 54-08's control — it proves the scan reads
+		//     real template content and that the line-local stripper does not
+		//     swallow a multi-line template. Spliced in right after
+		//     `readRowCounts` (reattach.js's own `from ${table}` row-count query)
+		//     rather than appended past the file's closing brace, so it sits
+		//     alongside the SQL the file already carries instead of dangling
+		//     after `export`-able code has ended.
+		const victim = path.join(copiedRoot, 'reattach.js');
+		const original = readFileSync(victim, 'utf8');
+		const anchor = 'export async function readRowCounts(db, tableNames) {';
+		const anchorAt = original.indexOf(anchor);
+		assert.ok(anchorAt >= 0, 'reattach.js no longer declares readRowCounts at the expected shape — update the plant anchor');
+		const insertAt = original.indexOf('\n}\n', anchorAt) + '\n}\n'.length;
+		const planted = ['', 'export const PLANTED_CONNECTION_LAYER_SQL = `', `  select Id from ${PLANTED_NAME}`, '  where Id = :id`;', ''].join(
+			'\n',
+		);
+		writeFileSync(victim, original.slice(0, insertAt) + planted + original.slice(insertAt));
+
+		const offenders = scanForNames({ roots: [copiedRoot], names: FORBIDDEN_NAMES, exclude });
+		assert.equal(
+			offenders.length,
+			1,
+			`expected exactly one offender after the connection-layer plant, got ${offenders.length}: ${JSON.stringify(offenders)}`,
+		);
+		assert.equal(offenders[0].file, victim, 'the offender was attributed to the wrong file');
+		assert.equal(offenders[0].name, PLANTED_NAME, 'the offender was attributed to the wrong table');
+		assert.equal(offenders[0].sqlContext, true, 'the planted FROM-position hit was not flagged as SQL context');
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// 6d. Stale-exclusion and separator-boundary behaviour of the exclusion
+//     mechanism itself (`scannedFilesFor` in `./lib/source-scan.mjs`).
+// ───────────────────────────────────────────────────────────────────────────
+
+test('control 6d (stale exclusion): an exclude entry matching zero files throws StaleExclusionError', () => {
+	const bogus = webDataSrc('this-path-does-not-exist.js');
+	assert.throws(
+		() => scannedFilesFor({ roots: [webDataSrc()], exclude: [bogus] }),
+		(err) => err instanceof StaleExclusionError && err.message.includes(bogus),
+		'a stale exclusion did not throw StaleExclusionError naming the offending path',
+	);
+});
+
+test('control 6d (separator-boundary exclusion): excluding "officer" does not exclude a sibling "officer-notes.js"', () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), 'vt-anonymity-boundary-'));
+	try {
+		mkdirSync(path.join(tmp, 'officer'), { recursive: true });
+		writeFileSync(path.join(tmp, 'officer', 'a.js'), 'export const a = 1;\n');
+		writeFileSync(path.join(tmp, 'officer-notes.js'), 'export const b = 1;\n');
+
+		const scanned = scannedFilesFor({ roots: [tmp], exclude: [path.join(tmp, 'officer')] });
+		assert.deepEqual(
+			scanned,
+			[path.join(tmp, 'officer-notes.js')],
+			'excluding "officer" as a directory incorrectly swept up the sibling file "officer-notes.js" ' +
+				'merely because its name shares a string prefix; the comparison must be on a path-separator boundary',
+		);
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// 6e. The pinned scanned-file set: count AND named membership of the three
+//     connection-layer modules. The count proves the set did not shrink; the
+//     membership proves the three files I-56 is about are specifically in it.
+//     A refactor that renames one of the three fails THIS gate and must be
+//     re-approved, rather than sliding through under an unchanged count.
+// ───────────────────────────────────────────────────────────────────────────
+
+test('control 6e (pinned scanned-file set): the widened scan reads EXPECTED_SCANNED_FILE_COUNT files, including the three connection-layer modules by name', () => {
+	const scanned = scannedFilesFor({ roots: SCAN_ROOTS, exclude: SCAN_EXCLUSIONS });
+	assert.equal(
+		scanned.length,
+		EXPECTED_SCANNED_FILE_COUNT,
+		`the scanned file set moved from ${EXPECTED_SCANNED_FILE_COUNT} to ${scanned.length} files. ` +
+			'A root or an exclusion changed. Update this number DELIBERATELY and say why in the commit; ' +
+			'never adjust it to make a red gate green.',
+	);
+	assert.ok(
+		scanned.some((f) => f.endsWith(`${path.sep}open-db.js`)),
+		'open-db.js is not in the scanned set — the connection layer this plan widened for is missing',
+	);
+	assert.ok(
+		scanned.some((f) => f.endsWith(`${path.sep}reattach.js`)),
+		'reattach.js is not in the scanned set — the connection layer this plan widened for is missing',
+	);
+	assert.ok(
+		scanned.some((f) => f.endsWith(`${path.sep}networks-registry.js`)),
+		'networks-registry.js is not in the scanned set — the connection layer this plan widened for is missing',
+	);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
 // 7. Extension coverage. A file type nobody classified is a silent hole.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -427,7 +643,7 @@ test('self-trip guard: outside the fixture region this file contains no forbidde
 // ───────────────────────────────────────────────────────────────────────────
 
 test('D-05: zero forbidden-class table names as code across the public entry source set', () => {
-	const offenders = scanForNames({ roots: SCAN_ROOTS, names: FORBIDDEN_NAMES });
+	const offenders = scanForNames({ roots: SCAN_ROOTS, names: FORBIDDEN_NAMES, exclude: SCAN_EXCLUSIONS });
 	assert.deepEqual(
 		offenders.map((o) => `${o.file}:${o.line} [${o.name}] sqlContext=${o.sqlContext} :: ${o.text}`),
 		[],
