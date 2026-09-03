@@ -59,6 +59,16 @@ import { ElectionShell } from '../../src/screens/ElectionShell';
 import { DetailsToggle, packageReactIdentity } from '@votetorrent/ui-web/components';
 import { FIXTURE_ELECTION, FIXTURE_ELECTION_ID, FIXTURE_INSTANTS } from '../fixtures/election-fixture.js';
 
+// D-33 made the address TWO parameters, so a one-parameter `search` here now
+// resolves to 'incomplete' and would make the shell render the index instead
+// of the fixture election -- silently changing what every 53-09 rung measures.
+// This harness opens NO database in this phase, so the value below is an
+// address-SHAPED constant rather than a fixture network: nothing is ever
+// attached with it. It lives here rather than in
+// `test/fixtures/election-fixture.js` because that file is another plan's
+// territory.
+const GATE_NETWORK_HASH = 'vtx-fixture-network-0001' as const;
+
 declare global {
 	interface Window {
 		__ELECTION_SHELL_GATE__?: Readonly<{
@@ -172,7 +182,7 @@ try {
 	createRoot(rootElement).render(
 		<StrictMode>
 			<ElectionShell
-				search={`?election=${FIXTURE_ELECTION_ID}`}
+				search={`?network=${GATE_NETWORK_HASH}&election=${FIXTURE_ELECTION_ID}`}
 				at={FIXTURE_INSTANTS[phase]}
 				election={FIXTURE_ELECTION}
 			/>
