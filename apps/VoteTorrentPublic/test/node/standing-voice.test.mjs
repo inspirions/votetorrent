@@ -24,19 +24,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { publicSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { COPY } from '../../../../packages/ui-web/src/index.js';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
-/** @param {string} source @returns {string} */
-function stripCommentLines(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
-
-const SHELL = stripCommentLines(readFileSync(publicSrc('screens', 'ElectionShell.tsx'), 'utf8'));
+const SHELL = stripComments(readFileSync(publicSrc('screens', 'ElectionShell.tsx'), 'utf8'));
 
 /**
  * The three statements this plan mounts. `advisory.public.body` is NOT a

@@ -39,20 +39,10 @@ import { extractStaticClassNameTokens } from '../../../../scripts/lib/css-class-
 // READ through `publicSrc()`.
 import { FACTS, FACT_GROUPS, FACT_COPY_KEYS, GAP_IDS, factsFor } from '../../../../packages/ui-web/src/lifecycle/facts.js';
 import { groupFactsForPhase, groupFactList, FactGroupingError } from '../../src/fact-groups.js';
-
-/** @param {string} source @returns {string} */
-function stripCommentLines(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 /** @param {string[]} segs @returns {string} */
-const strippedSrc = (...segs) => stripCommentLines(readFileSync(publicSrc(...segs), 'utf8'));
+const strippedSrc = (...segs) => stripComments(readFileSync(publicSrc(...segs), 'utf8'));
 
 /** `FACT_GROUPS` widened to plain strings. The model types it as a union, and
  * every comparison below is deliberately made against arbitrary strings so a

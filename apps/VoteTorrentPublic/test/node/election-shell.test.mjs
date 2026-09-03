@@ -18,17 +18,7 @@ import { COPY } from '../../../../packages/ui-web/src/index.js';
 import { FACT_COPY_KEYS } from '../../../../packages/ui-web/src/lifecycle/facts.js';
 import { ELECTION_ADDRESS_PARAM, NETWORK_ADDRESS_PARAM } from '../../src/election-address.js';
 import { INDETERMINATE_PHASE } from '../../../../packages/ui-web/src/lifecycle/phase-ids.js';
-
-/** @param {string} source @returns {string} */
-function stripCommentLines(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 /** @param {string} dir @returns {string[]} */
 function walkAll(dir) {
@@ -47,7 +37,7 @@ function walkAll(dir) {
 
 const SHELL_PATH = publicSrc('screens', 'ElectionShell.tsx');
 const SHELL_SOURCE_RAW = readFileSync(SHELL_PATH, 'utf8');
-const SHELL_SOURCE = stripCommentLines(SHELL_SOURCE_RAW);
+const SHELL_SOURCE = stripComments(SHELL_SOURCE_RAW);
 
 // ---------------------------------------------------------------------------
 // 1. Single return.
@@ -110,12 +100,12 @@ const HOOK_CALL_RE = /\buse[A-Z]\w*\(/;
 
 /** @param {string} name @returns {string} the .tsx source of a component re-exported from components.js by that name. */
 function readComponentSource(name) {
-	return stripCommentLines(readFileSync(uiWebSrc('components', `${name}.tsx`), 'utf8'));
+	return stripComments(readFileSync(uiWebSrc('components', `${name}.tsx`), 'utf8'));
 }
 
 /** @returns {string[]} every component name re-exported from packages/ui-web/src/components.js. */
 function listExportedComponentNames() {
-	const barrel = stripCommentLines(readFileSync(uiWebSrc('components.js'), 'utf8'));
+	const barrel = stripComments(readFileSync(uiWebSrc('components.js'), 'utf8'));
 	const names = [];
 	const re = /export\s*\{\s*(\w+)\s*\}\s*from\s*'\.\/components\/\1\.js'/g;
 	let m;
@@ -166,7 +156,7 @@ test('no file under src/ or test/ (excluding test/node/*.test.mjs, whose own pos
 	const files = [...walkAll(publicSrc()), ...walkAll(publicRoot('test'))].filter((f) => !f.startsWith(testNodeDir));
 	const offenders = [];
 	for (const file of files) {
-		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		const stripped = stripComments(readFileSync(file, 'utf8'));
 		if (RAW_HTML_ESCAPE_HATCH_RE.test(stripped)) offenders.push(file);
 	}
 	assert.deepEqual(offenders, [], `these files use the raw-HTML-injection escape hatch: ${offenders.join(', ')}`);
@@ -213,7 +203,7 @@ test('the URL parameter names reachable anywhere under src/ are exactly the two 
 	const files = walkAll(publicSrc());
 	/** @type {Map<string, string>} */
 	const contents = new Map();
-	for (const file of files) contents.set(file, stripCommentLines(readFileSync(file, 'utf8')));
+	for (const file of files) contents.set(file, stripComments(readFileSync(file, 'utf8')));
 
 	// D-54-13-01, recorded here rather than fixed by widening the matcher.
 	// This scan resolves EVERY `.get(ident)` / `.getAll(ident)` call site under
@@ -309,7 +299,7 @@ test('no *.css file under src/ contains @keyframes, animation, animation-name, t
 	assert.ok(cssFiles.length > 0, 'sanity: expected at least one .css file under src/');
 	const offenders = [];
 	for (const file of cssFiles) {
-		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		const stripped = stripComments(readFileSync(file, 'utf8'));
 		if (CSS_ANIMATION_RE.test(stripped)) offenders.push(file);
 	}
 	assert.deepEqual(offenders, [], `these CSS files carry an animation/transition/gradient construct: ${offenders.join(', ')}`);
@@ -411,7 +401,7 @@ const KEY_TEMPLATE_SOURCES = Object.freeze([
 	{ prefix: 'public.group.', template: 'public.group.${' },
 ]);
 
-const FACTS_SOURCE_STRIPPED = stripCommentLines(readFileSync(uiWebSrc('lifecycle', 'facts.js'), 'utf8'));
+const FACTS_SOURCE_STRIPPED = stripComments(readFileSync(uiWebSrc('lifecycle', 'facts.js'), 'utf8'));
 
 /**
  * Keys emitted by a template expression rather than a literal. Empty unless
@@ -691,7 +681,7 @@ test('benign control: the phase-parameter-read matcher does NOT fire on election
 	].join('\n');
 	assert.doesNotMatch(benign, PHASE_PARAM_READ_RE, 'matcher cannot discriminate a phase override from the election address parameter');
 	// And against the real file, not just a hand-written approximation of it.
-	assert.doesNotMatch(stripCommentLines(readFileSync(publicSrc('election-address.js'), 'utf8')), PHASE_PARAM_READ_RE);
+	assert.doesNotMatch(stripComments(readFileSync(publicSrc('election-address.js'), 'utf8')), PHASE_PARAM_READ_RE);
 });
 
 test('positive control: the at-prop mount matcher fires on a planted <ElectionShell at={x} /> and does not fire on the two at forms inside ElectionShell.tsx or on a longer prop name ending in those letters', () => {
@@ -713,7 +703,7 @@ const D24_FAILURE_REASON =
 test('D-24: no file under src/ reads a phase- or time-selection query parameter', () => {
 	const offenders = [];
 	for (const file of walkAll(publicSrc())) {
-		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		const stripped = stripComments(readFileSync(file, 'utf8'));
 		if (PHASE_PARAM_READ_RE.test(stripped)) offenders.push(file);
 	}
 	assert.deepEqual(offenders, [], `these files read a phase/time-selection query parameter: ${offenders.join(', ')}. ${D24_FAILURE_REASON}`);
@@ -724,7 +714,7 @@ test('D-24: no .tsx file under src/ passes an at prop to a mount site — the se
 	assert.ok(tsxFiles.length > 0, 'sanity: expected at least one .tsx file under src/');
 	const offenders = [];
 	for (const file of tsxFiles) {
-		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		const stripped = stripComments(readFileSync(file, 'utf8'));
 		if (AT_PROP_MOUNT_RE.test(stripped)) offenders.push(file);
 	}
 	assert.deepEqual(offenders, [], `these production .tsx files pass the at prop at a mount site: ${offenders.join(', ')}. ${D24_FAILURE_REASON}`);
@@ -742,7 +732,7 @@ test('harness discrimination: test/browser/ DOES exercise both seams — at leas
 	const paramReaders = [];
 	const atMounters = [];
 	for (const file of files) {
-		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		const stripped = stripComments(readFileSync(file, 'utf8'));
 		if (PHASE_PARAM_READ_RE.test(stripped)) paramReaders.push(file);
 		if (file.endsWith('.tsx') && AT_PROP_MOUNT_RE.test(stripped)) atMounters.push(file);
 	}
@@ -913,7 +903,7 @@ test('ElectionShell.tsx contains zero useEffect, zero `await ` and zero readAddr
 const { shouldReadFor } = await import('../../src/public-election-source.js');
 
 test('the hook really does publish the same predicate: use-public-election.ts re-exports shouldReadFor from the read seam rather than defining a second copy', () => {
-	const hookSource = stripCommentLines(readFileSync(publicSrc('screens', 'use-public-election.ts'), 'utf8'));
+	const hookSource = stripComments(readFileSync(publicSrc('screens', 'use-public-election.ts'), 'utf8'));
 	assert.match(hookSource, /export \{ shouldReadFor \}/, 'the hook does not re-export shouldReadFor');
 	assert.doesNotMatch(hookSource, /function shouldReadFor/, 'the hook defines a SECOND shouldReadFor -- the behavioural assertion below would then be measuring the wrong one');
 });

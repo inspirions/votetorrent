@@ -38,20 +38,10 @@ import {
 	ROLL_DISCLOSURE_POLICY,
 	resolveRollColumns,
 } from '../../src/roll-disclosure.js';
-
-/** @param {string} source @returns {string} */
-function stripCommentLines(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 /** @param {...string} segs @returns {string} */
-const strippedSrc = (...segs) => stripCommentLines(readFileSync(publicSrc(...segs), 'utf8'));
+const strippedSrc = (...segs) => stripComments(readFileSync(publicSrc(...segs), 'utf8'));
 
 const ROLL_COMPONENT = strippedSrc('screens', 'RegistrantRoll.tsx');
 const ROLL_DISCLOSURE = strippedSrc('roll-disclosure.js');
