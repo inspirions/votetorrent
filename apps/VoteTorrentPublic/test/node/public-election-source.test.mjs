@@ -78,6 +78,23 @@ const OK_ADDRESS = Object.freeze({
 	electionId: 'election-0123456789abcdef',
 });
 
+/**
+ * The rows the roll read hands back. PRODUCTION-LENGTH by mandate (54-UI-SPEC
+ * Fixture Requirements item 2): first and last each >= 12 characters, district
+ * >= 20. A short stand-in is exactly the blindness this repo has shipped twice.
+ * The second row carries a non-string District so the value-level coercion has
+ * something real to act on.
+ * @type {ReadonlyArray<Readonly<Record<string, unknown>>>}
+ */
+const ROLL_ROWS = Object.freeze([
+	Object.freeze({
+		LastName: 'Vandersteenhoven',
+		FirstName: 'Wilhelmina-Rose',
+		District: 'North Riverbend Ward 7 Precinct 12 (vtx-fixture)',
+	}),
+	Object.freeze({ LastName: 'Okonkwo-Barrington', FirstName: 'Bartholomeus', District: 4207 }),
+]);
+
 /** @param {Partial<Record<string, any>>} [over] */
 function makeDeps(over = {}) {
 	return {
@@ -87,6 +104,7 @@ function makeDeps(over = {}) {
 		readPublicElection: spy(async () => ({ Id: OK_ADDRESS.electionId, Title: 'A Real Stored Title' })),
 		readPublicElectionRevision: spy(async () => ({ Revision: 1, Timeline: '{"votingStarts":"2026-03-01T00:00:00"}' })),
 		readKeyReleaseProgress: spy(async () => ({ released: 3, total: 4, keyholderCount: 5 })),
+		readRegistrantRoll: spy(async () => ROLL_ROWS.map((r) => ({ ...r }))),
 		...over,
 	};
 }
@@ -107,7 +125,7 @@ test('PUBLIC_ELECTION_STATE is frozen and carries exactly the four state strings
 	assert.deepEqual([...Object.values(PUBLIC_ELECTION_STATE)].sort(), ['notHeld', 'reading', 'ready', 'unreadable']);
 });
 
-test('DEFAULT_PUBLIC_SOURCE is frozen, has all six members, and every one is a real function (a stub default is 53-D07 failure mode)', () => {
+test('DEFAULT_PUBLIC_SOURCE is frozen, has all seven members, and every one is a real function (a stub default is 53-D07 failure mode)', () => {
 	assert.ok(Object.isFrozen(DEFAULT_PUBLIC_SOURCE));
 	// 54-13 added the sixth: D-14's counts-only aggregate is read HERE rather
 	// than in a second hook, because this module owns the handle's lifetime
@@ -119,6 +137,10 @@ test('DEFAULT_PUBLIC_SOURCE is frozen, has all six members, and every one is a r
 		'readKeyReleaseProgress',
 		'readPublicElection',
 		'readPublicElectionRevision',
+		// 54-14 added the seventh, for the reason recorded at module header
+		// point 8: the published roll joins the reads that already own the
+		// handle's lifetime rather than becoming a second hook.
+		'readRegistrantRoll',
 	];
 	assert.deepEqual(Object.keys(DEFAULT_PUBLIC_SOURCE).sort(), expected);
 	for (const key of expected) {
@@ -318,6 +340,85 @@ test('T-54-12-02 extended: an unregistered hash reaches the key-release read no 
 	const deps = makeDeps({ findNetwork: spy(() => undefined) });
 	await readAddressedElection(OK_ADDRESS, deps);
 	assert.equal(deps.readKeyReleaseProgress.calls.length, 0, 'the registry gate does not cover the aggregate read');
+});
+
+// ---------------------------------------------------------------------------
+// 6c. D-18/D-19 (54-14) — the published roll: rebuilt row by row against the
+//     published field set, card-local on failure, and behind the same registry
+//     gate as everything else this module reads.
+// ---------------------------------------------------------------------------
+
+test('D-18: the roll is read with the handle this read already owns and the addressed election id, and the rows reach the result in order', async () => {
+	const deps = makeDeps();
+	const result = await readAddressedElection(OK_ADDRESS, deps);
+	assert.equal(result.state, 'ready');
+	assert.equal(deps.readRegistrantRoll.calls.length, 1, 'the roll was not read alongside the election read');
+	assert.equal(deps.readRegistrantRoll.calls[0][0], HANDLE, 'the roll must reuse the handle this read already owns');
+	assert.equal(deps.readRegistrantRoll.calls[0][1], OK_ADDRESS.electionId);
+	assert.equal(/** @type {any} */ (result.roll).length, 2);
+	assert.equal(/** @type {any} */ (result.roll)[0].LastName, ROLL_ROWS[0].LastName, 'the roll rows arrived out of order or altered');
+	assert.ok(Object.isFrozen(result.roll));
+	assert.ok(Object.isFrozen(/** @type {any} */ (result.roll)[0]));
+});
+
+test('D-19: every roll row is REBUILT from the published field set — an extra upstream column never reaches the result, and a non-string value becomes null', async () => {
+	// The planted columns are exactly the ones D-19 forbids: an unconstrained
+	// authority-supplied blob, and a correlation handle back into the
+	// registrant tables. If this module forwarded the upstream row, both would
+	// be sitting on the result.
+	const plantedBlob = 'PLANTED-BLOB-MUST-NOT-REACH-THE-RESULT';
+	const plantedHandle = 'PLANTED-HANDLE-MUST-NOT-REACH-THE-RESULT';
+	const deps = makeDeps({
+		readRegistrantRoll: spy(async () => [
+			{
+				LastName: 'Pemberton-Ashdown',
+				FirstName: 'Marguerite-Annelise',
+				District: 'New Millrace Ward 8 Precinct 31 (vtx-fixture)',
+				ExtraFields: plantedBlob,
+				RegistrantId: plantedHandle,
+			},
+		]),
+	});
+	const result = await readAddressedElection(OK_ADDRESS, deps);
+	const row = /** @type {any} */ (result.roll)[0];
+	assert.deepEqual(Object.keys(row).sort(), ['District', 'FirstName', 'LastName']);
+	const serialised = JSON.stringify(result);
+	assert.ok(!serialised.includes(plantedBlob), 'an unconstrained authority-supplied column was forwarded into the result');
+	assert.ok(!serialised.includes(plantedHandle), 'a correlation handle was forwarded into the result');
+});
+
+test('D-19: a non-string cell becomes null rather than reaching the render layer as a number', async () => {
+	const result = await readAddressedElection(OK_ADDRESS, makeDeps());
+	assert.equal(/** @type {any} */ (result.roll)[1].District, null, 'a non-string value was carried through unchanged');
+	assert.equal(/** @type {any} */ (result.roll)[1].LastName, ROLL_ROWS[1].LastName);
+});
+
+test('D-23 applied to the roll: a THROWING roll read leaves the election ready with a null roll — the fault is card-local, never a page-wide unreadable', async () => {
+	const deps = makeDeps({
+		readRegistrantRoll: spy(async () => {
+			throw namedError('QuereusError', 'synthetic roll failure');
+		}),
+	});
+	const original = console.error;
+	console.error = () => undefined;
+	/** @type {any} */
+	let result;
+	try {
+		result = await readAddressedElection(OK_ADDRESS, deps);
+	} finally {
+		console.error = original;
+	}
+	assert.equal(result.state, 'ready', 'one failed card read must not downgrade a readable election to unreadable');
+	assert.equal(result.roll, null, 'a failed roll read must be null, so the card can render its honest empty state');
+	assert.equal(result.election?.title, 'A Real Stored Title', 'the election facts must survive the roll failure');
+	assert.deepEqual({ ...result.keyRelease }, { released: 3, total: 4, keyholderCount: 5 }, 'the other card read must be unaffected');
+});
+
+test('T-54-12-02 extended again: an unregistered hash reaches the roll read no more than it reaches attachNetworkDb', async () => {
+	const deps = makeDeps({ findNetwork: spy(() => undefined) });
+	await readAddressedElection(OK_ADDRESS, deps);
+	assert.equal(deps.readRegistrantRoll.calls.length, 0, 'the registry gate does not cover the roll read');
+	assert.equal(deps.attachNetworkDb.calls.length, 0, 'sanity: the gate is not covering the attach either');
 });
 
 // ---------------------------------------------------------------------------

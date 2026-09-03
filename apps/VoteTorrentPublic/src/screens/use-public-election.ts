@@ -86,6 +86,12 @@ export interface UsePublicElectionResult {
 	 * see `public-election-source.js` header point 7 for why the read lives
 	 * beside the election read rather than in a second hook. */
 	keyRelease: KeyReleaseProgress | null;
+	/** The published voter roll, or `null` when it could not be read — and
+	 * `null` on every path that opens no database at all, including the
+	 * injected-election seam. The card renders the same honest empty state for
+	 * both; see `public-election-source.js` header point 8 for why this read
+	 * lives beside the election read rather than in a second hook. */
+	roll: ReadonlyArray<Readonly<Record<string, string | null>>> | null;
 }
 
 /** Structural, not imported: `use-public-election.ts` is the only TypeScript
@@ -121,7 +127,13 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 					void closeQuietly(source, next.db);
 					return;
 				}
-				setResolved({ state: next.state, election: next.election, db: next.db, keyRelease: next.keyRelease ?? null });
+				setResolved({
+					state: next.state,
+					election: next.election,
+					db: next.db,
+					keyRelease: next.keyRelease ?? null,
+					roll: next.roll ?? null,
+				});
 			})
 			.catch(() => {
 				// `readAddressedElection` never rejects, so this branch is
@@ -129,7 +141,7 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 				// seam could reintroduce a throw, and the failure mode then
 				// would be a blank page rather than an honest one. It degrades
 				// to the FAULT state, never to the finding.
-				if (!cancelled) setResolved({ state: PUBLIC_ELECTION_STATE.UNREADABLE, election: null, db: null, keyRelease: null });
+				if (!cancelled) setResolved({ state: PUBLIC_ELECTION_STATE.UNREADABLE, election: null, db: null, keyRelease: null, roll: null });
 			});
 
 		return () => {
@@ -145,11 +157,11 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 		// No effect ran, no database was opened, no member of `source` was
 		// called.
 		return election !== null && election !== undefined
-			? { state: PUBLIC_ELECTION_STATE.READY, election, db: null, keyRelease: null }
-			: { state: PUBLIC_ELECTION_STATE.NOT_HELD, election: null, db: null, keyRelease: null };
+			? { state: PUBLIC_ELECTION_STATE.READY, election, db: null, keyRelease: null, roll: null }
+			: { state: PUBLIC_ELECTION_STATE.NOT_HELD, election: null, db: null, keyRelease: null, roll: null };
 	}
 
-	return resolved ?? { state: PUBLIC_ELECTION_STATE.READING, election: null, db: null, keyRelease: null };
+	return resolved ?? { state: PUBLIC_ELECTION_STATE.READING, election: null, db: null, keyRelease: null, roll: null };
 }
 
 /**

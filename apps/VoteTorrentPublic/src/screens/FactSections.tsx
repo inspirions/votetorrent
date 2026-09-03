@@ -1,6 +1,8 @@
 import { t } from '@votetorrent/ui-web';
 import { DetailsToggle } from '@votetorrent/ui-web/components';
 import { groupFactsForPhase } from '../fact-groups.js';
+import { RegistrantRoll } from './RegistrantRoll';
+import type { RegistrantRollRow } from './RegistrantRoll';
 
 /**
  * FactSections.tsx — the body of the public election page: the facts, and,
@@ -67,6 +69,18 @@ import { groupFactsForPhase } from '../fact-groups.js';
  *    renaming it would make `t()` throw. The name is the sentence's, the value
  *    is the keyholder count's.
  *
+ * 7. THE ROLL BRANCH IS SELECTED ON THE DATA TOO, and the field it reads is
+ *    `emptyKey`. That field means "this fact's body is a COLLECTION, which
+ *    can legitimately be empty" -- exactly one entry in the model carries it,
+ *    and the model is what makes that true rather than a hard-coded id here.
+ *    A card whose body is a table also owns its own detail sentence and its
+ *    own empty message, so BOTH the generic details toggle and the generic
+ *    empty path are suppressed on this branch: the roll renders its
+ *    disclaimer visibly above the table, and a second mount through the
+ *    toggle would show the same sentence twice. Selecting on the id instead
+ *    would put a render decision somewhere the model cannot see it, which is
+ *    the same mistake point 5 rejects for the key-release branch.
+ *
  * A FAULT IS NOT AN ABSENCE. When the key-release aggregate could not be
  * read, the card still renders and SAYS SO (D-23, applied to the one fact on
  * this page carrying live data). Dropping the card would make a read fault
@@ -96,6 +110,10 @@ interface FactEntryView {
 	labelKey: string;
 	sentenceKey: string | null;
 	detailKey: string | null;
+	/** Non-null only for a fact whose body is a collection -- see header
+	 * point 7. It is the branch predicate for the roll, never rendered here:
+	 * the component that owns the collection owns its empty message too. */
+	emptyKey: string | null;
 	interpolates: ReadonlyArray<string> | null;
 	gap: string | null;
 }
@@ -108,6 +126,10 @@ export interface FactSectionsProps {
 	/** `null` when the aggregate could not be read, or when no database was
 	 * opened at all. */
 	keyRelease: KeyReleaseProgress | null;
+	/** The published voter roll, or `null` when it could not be read or no
+	 * database was opened. Passed straight through to the roll card, which
+	 * renders the same honest empty state for both. */
+	roll: ReadonlyArray<RegistrantRollRow> | null;
 }
 
 /**
@@ -139,8 +161,19 @@ function factBody(fact: FactEntryView, keyRelease: KeyReleaseProgress | null): s
  * scoped to `ElectionShell.tsx`, which is exactly why this component lives in
  * a different file.
  */
-function FactCard({ fact, keyRelease }: { fact: FactEntryView; keyRelease: KeyReleaseProgress | null }) {
+function FactCard({
+	fact,
+	keyRelease,
+	roll,
+}: {
+	fact: FactEntryView;
+	keyRelease: KeyReleaseProgress | null;
+	roll: ReadonlyArray<RegistrantRollRow> | null;
+}) {
 	const body = factBody(fact, keyRelease);
+	// Header point 7: a collection card owns its own detail sentence and its
+	// own empty message, so the generic toggle below is suppressed for it.
+	const rendersCollection = fact.emptyKey !== null;
 
 	if (fact.gap !== null) {
 		return (
@@ -158,7 +191,8 @@ function FactCard({ fact, keyRelease }: { fact: FactEntryView; keyRelease: KeyRe
 		<article className="fact-card" data-fact-id={fact.id} data-fact-kind="fact">
 			<h3 className="fact-card__label">{t(fact.labelKey)}</h3>
 			{body === null ? null : <p className="fact-card__body">{body}</p>}
-			{fact.detailKey === null ? null : (
+			{rendersCollection ? <RegistrantRoll rows={roll} /> : null}
+			{fact.detailKey === null || rendersCollection ? null : (
 				<DetailsToggle summary={t('public.fact.detailsSummary')}>{t(fact.detailKey)}</DetailsToggle>
 			)}
 		</article>
@@ -175,7 +209,7 @@ function FactCard({ fact, keyRelease }: { fact: FactEntryView; keyRelease: KeyRe
  * has no loading semantics of its own, and the shell is already held to that
  * rule one file over.
  */
-export function FactSections({ phase, keyRelease }: FactSectionsProps) {
+export function FactSections({ phase, keyRelease, roll }: FactSectionsProps) {
 	const groups = groupFactsForPhase(phase);
 	if (groups.length === 0) return null;
 
@@ -185,7 +219,7 @@ export function FactSections({ phase, keyRelease }: FactSectionsProps) {
 				<section className="fact-section" key={group.group} data-fact-group={group.group}>
 					<h2 className="fact-section__heading">{t(group.headingKey)}</h2>
 					{group.facts.map((fact: FactEntryView) => (
-						<FactCard fact={fact} keyRelease={keyRelease} key={fact.id} />
+						<FactCard fact={fact} keyRelease={keyRelease} roll={roll} key={fact.id} />
 					))}
 				</section>
 			))}

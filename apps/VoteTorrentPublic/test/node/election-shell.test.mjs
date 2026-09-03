@@ -409,9 +409,14 @@ function collectTemplateMountedKeys() {
 // 54-13 removed THREE more -- the two details-toggle labels and the
 // key-release fail-closed line -- because `src/screens/FactSections.tsx` now
 // mounts all three as source literals at their call sites. Seven became four.
-// The four that remain belong to the page-voice screen (the freshness line and
-// the two standing caveats) and the rules card (the disclosure-policy failure
-// line), and the list is designed to reach empty when those land.
+//
+// 54-14 removed the disclosure-policy failure line, and this ratchet fired on
+// its own to say so: the staleness rung below went red naming that key the
+// moment `src/screens/RegistrantRoll.tsx` mounted it, before any edit was made
+// here. It renders in the ROLL card rather than the rules card -- the omission
+// it explains happens in that table, and three group sections away it would no
+// longer be attached to the column it is about; the key NAME is unchanged.
+// Four became three.
 //
 // This list is NOT a relaxation of the assertion, and two properties make
 // that true rather than merely asserted:
@@ -427,7 +432,6 @@ const PENDING_MOUNT_KEYS = Object.freeze([
 	'public.freshness.body',
 	'public.caveat.timelineUnvalidated',
 	'public.caveat.readOnly',
-	'public.rules.policyUnreadable',
 ]);
 
 test('the public-voice key set in COPY equals, in both directions, the set of public-voice keys mounted under src/, packages/ui-web/src/components/ and packages/ui-web/src/lifecycle/ -- as a literal, as the variant="public" template, or as one of facts.js own key templates -- apart from the named PENDING_MOUNT_KEYS still awaiting their render plan', () => {

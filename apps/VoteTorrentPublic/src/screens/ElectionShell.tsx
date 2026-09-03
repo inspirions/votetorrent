@@ -229,8 +229,11 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 				    unknown. `keyRelease` is D-14's three numbers, read beside
 				    the election read by the ONE seam that owns the handle's
 				    lifetime; `null` means the aggregate could not be read, and
-				    the card says so instead of disappearing (D-23). */}
-				<FactSections phase={phaseResult.phase} keyRelease={read.keyRelease} />
+				    the card says so instead of disappearing (D-23). `roll` is
+				    the published voter roll (D-18), read by the same seam for
+				    the same reason; `null` means it could not be read, and the
+				    card renders its honest empty state rather than an error. */}
+				<FactSections phase={phaseResult.phase} keyRelease={read.keyRelease} roll={read.roll} />
 			</section>
 		);
 	}

@@ -96,6 +96,24 @@
  *    it (D-23) — a silent omission would make the fault indistinguishable
  *    from a deliberate withholding.
  *
+ * 8. THE PUBLISHED VOTER ROLL IS READ HERE FOR THE SAME REASON, AND ITS ROWS
+ *    ARE REBUILT RATHER THAN FORWARDED. Point 7's whole argument applies
+ *    unchanged -- the shell can own no effect and no await, and a second hook
+ *    would race this handle's close -- so the roll joins the reads that
+ *    already own the handle's lifetime. What is NEW here is the field fence:
+ *    each returned row is rebuilt from `ROLL_FIELDS` and nothing else, so a
+ *    widened upstream select list cannot reach the render layer even if the
+ *    query's own import-time assertion were ever softened. That is the second
+ *    of two independent layers; the first is the select list itself. A
+ *    non-string value becomes null rather than being carried through: all
+ *    three published columns are nullable text with no content constraints,
+ *    and the render layer refuses a non-string child.
+ *
+ *    ITS FAILURE IS ALSO CARD-LOCAL. A roll read that throws yields
+ *    `roll: null` and leaves the state `ready`, and the card renders its
+ *    honest empty state. Downgrading the whole page because one card's read
+ *    failed would be the same false statement point 4 rejects.
+ *
  * WHAT THE `deps` SEAM IS NOT LICENSED TO BECOME. Its default IS the real
  * import surface. A seam whose production default is a stub is precisely
  * 53-D07's failure mode — clean imports, every gate green, false words on the
@@ -111,7 +129,9 @@ import {
 	readPublicElection,
 	readPublicElectionRevision,
 	readKeyReleaseProgress,
+	readRegistrantRoll,
 } from '@votetorrent/web-data/public';
+import { ROLL_FIELDS } from './roll-disclosure.js';
 
 /**
  * The four states this seam can report, and the whole vocabulary the shell
@@ -152,6 +172,7 @@ export const PUBLIC_ELECTION_STATE = Object.freeze({
  * @property {AddressedElectionFacts | null} election
  * @property {any} db  the OPEN handle on `ready`, else null — header point 6.
  * @property {KeyReleaseProgressCounts | null} keyRelease  D-14's three numbers, or null when they could not be read — header point 7.
+ * @property {ReadonlyArray<Readonly<Record<string, string | null>>> | null} roll  the published voter roll, or null when it could not be read — header point 8.
  */
 
 /**
@@ -172,6 +193,7 @@ export const PUBLIC_ELECTION_STATE = Object.freeze({
  * @property {(db: any, electionId: string) => Promise<any>} readPublicElection
  * @property {(db: any, electionId: string) => Promise<any>} readPublicElectionRevision
  * @property {(db: any, electionId: string, revision: number) => Promise<any>} readKeyReleaseProgress
+ * @property {(db: any, electionId: string) => Promise<any>} readRegistrantRoll
  */
 
 /**
@@ -186,6 +208,7 @@ export const DEFAULT_PUBLIC_SOURCE = Object.freeze({
 	readPublicElection,
 	readPublicElectionRevision,
 	readKeyReleaseProgress,
+	readRegistrantRoll,
 });
 
 /**
@@ -255,10 +278,29 @@ function logFailure(err) {
  * @param {AddressedElectionFacts | null} election
  * @param {any} db
  * @param {KeyReleaseProgressCounts | null} [keyRelease]
+ * @param {ReadonlyArray<Readonly<Record<string, string | null>>> | null} [roll]
  * @returns {Readonly<AddressedElectionResult>}
  */
-function freezeResult(state, election, db, keyRelease = null) {
-	return Object.freeze({ state, election, db, keyRelease });
+function freezeResult(state, election, db, keyRelease = null, roll = null) {
+	return Object.freeze({ state, election, db, keyRelease, roll });
+}
+
+/**
+ * Rebuild one roll row from the published field set and nothing else. The
+ * upstream object is never forwarded — see header point 8 — and a value that
+ * is not a string becomes null rather than reaching the render layer as a
+ * number or an object.
+ * @param {any} row
+ * @returns {Readonly<Record<string, string | null>>}
+ */
+function publishedRollRow(row) {
+	/** @type {Record<string, string | null>} */
+	const out = {};
+	for (const field of ROLL_FIELDS) {
+		const value = row === null || row === undefined ? null : row[field];
+		out[field] = typeof value === 'string' ? value : null;
+	}
+	return Object.freeze(out);
 }
 
 /**
@@ -380,6 +422,24 @@ export async function readAddressedElection(address, deps = DEFAULT_PUBLIC_SOURC
 			}
 		}
 
+		// -- 4c. The published voter roll (D-18/D-19), in its OWN try/catch and
+		//        subject to the same card-local rule as 4b: a failure yields
+		//        null and leaves the state `ready`. Every row is REBUILT from
+		//        the published field set, so the render layer receives exactly
+		//        three keys per row no matter what the query returns — header
+		//        point 8.
+		/** @type {ReadonlyArray<Readonly<Record<string, string | null>>> | null} */
+		let roll = null;
+		if (typeof deps.readRegistrantRoll === 'function') {
+			try {
+				const rows = await deps.readRegistrantRoll(db, electionId);
+				roll = Array.isArray(rows) ? Object.freeze(rows.map(publishedRollRow)) : null;
+			} catch (err) {
+				logFailure(err);
+				roll = null;
+			}
+		}
+
 		// -- 5. Shape the result. `Title` normalised to null when it is not a
 		//       string, so an absent column still reports the election rather
 		//       than dropping it. `Timeline` is passed through UNTOUCHED --
@@ -391,7 +451,7 @@ export async function readAddressedElection(address, deps = DEFAULT_PUBLIC_SOURC
 
 		// -- 6. The handle stays OPEN here (header point 6). The caller owns
 		//       closing it.
-		return freezeResult(PUBLIC_ELECTION_STATE.READY, facts, db, keyRelease);
+		return freezeResult(PUBLIC_ELECTION_STATE.READY, facts, db, keyRelease, roll);
 	} catch (err) {
 		// Unreachable by construction today: every step above is already
 		// guarded. It exists because a future edit could reintroduce a throw,
