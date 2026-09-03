@@ -12,17 +12,7 @@ import path from 'node:path';
 import { publicSrc, publicRoot, repoRoot } from '../../../../scripts/lib/source-paths.mjs';
 import { derivePhase, PHASE_IDS } from '../../../../packages/ui-web/src/lifecycle/election-phase.js';
 import { FIXTURE_ELECTION, FIXTURE_ELECTION_TIMELINE_JSON, FIXTURE_INSTANTS } from '../fixtures/election-fixture.js';
-
-/** @param {string} source @returns {string} */
-function stripCommentLines(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 /** @param {string} dir @returns {string[]} */
 function walkAll(dir) {
@@ -113,7 +103,7 @@ test('no file under src/ contains an import specifier reaching test/, election-f
 	const files = walkAll(publicSrc());
 	const offenders = [];
 	for (const file of files) {
-		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		const stripped = stripComments(readFileSync(file, 'utf8'));
 		if (FIXTURE_IMPORT_RE.test(stripped)) offenders.push(file);
 	}
 	assert.deepEqual(offenders, [], `these src/ files reach the test-only fixture: ${offenders.join(', ')}`);
@@ -165,7 +155,7 @@ test('positive control: the specifier list is non-empty on both sides right now 
 // 4. Gate-config inheritance.
 // ---------------------------------------------------------------------------
 
-const GATE_CONFIG_SOURCE = stripCommentLines(readFileSync(publicRoot('vite.gate.config.ts'), 'utf8'));
+const GATE_CONFIG_SOURCE = stripComments(readFileSync(publicRoot('vite.gate.config.ts'), 'utf8'));
 
 test('positive control: a fixture declaring resolve: { dedupe: [] } trips the forbidden-own-resolve matcher', () => {
 	assert.match('export default { resolve: { dedupe: [] } };', /\bresolve\s*:/);
@@ -184,7 +174,7 @@ test('vite.gate.config.ts imports ./vite.config, calls mergeConfig, and declares
 // ---------------------------------------------------------------------------
 
 test('vite.config.ts contains no rollupOptions/input, and package.json\'s build script is exactly "vite build"', () => {
-	const viteConfigSource = stripCommentLines(readFileSync(publicRoot('vite.config.ts'), 'utf8'));
+	const viteConfigSource = stripComments(readFileSync(publicRoot('vite.config.ts'), 'utf8'));
 	assert.doesNotMatch(viteConfigSource, /rollupOptions/);
 	assert.doesNotMatch(viteConfigSource, /\binput\s*:/);
 	const manifest = JSON.parse(readFileSync(publicRoot('package.json'), 'utf8'));

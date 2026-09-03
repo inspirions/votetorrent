@@ -22,20 +22,7 @@ import { readFileSync } from 'node:fs';
 import { publicSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { COPY, t } from '../../../../packages/ui-web/src/index.js';
 import { loadHeldElections, mergeHeldElections, DEFAULT_INDEX_DEPS } from '../../src/election-index-source.js';
-
-/** Same line-based comment-stripping idiom the repo's other tier-1 assertions
- * use. A checker whose own comment quotes the pattern it greps for is
- * permanently green — this has recurred repeatedly in this repo.
- * @param {string} source @returns {string} */
-function stripCommentLines(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 // ---------------------------------------------------------------------------
 // The injected dependency double. Deliberately a hand-rolled recorder rather
@@ -439,7 +426,7 @@ test('DEFAULT_INDEX_DEPS is frozen and holds the four real functions — the dep
 // ---------------------------------------------------------------------------
 
 const SEAM_SOURCE = readFileSync(publicSrc('election-index-source.js'), 'utf8');
-const SEAM_STRIPPED = stripCommentLines(SEAM_SOURCE);
+const SEAM_STRIPPED = stripComments(SEAM_SOURCE);
 
 /** Assembled rather than written whole, so this file's own source never
  * contains the literal it hunts — the self-tripping-checker failure this repo
@@ -485,8 +472,8 @@ test('this test file\'s own RAW source contains zero occurrences of EITHER hunte
 // ===========================================================================
 
 const INDEX_TSX_SOURCE = readFileSync(publicSrc('screens', 'ElectionIndex.tsx'), 'utf8');
-const INDEX_TSX_STRIPPED = stripCommentLines(INDEX_TSX_SOURCE);
-const SHELL_TSX_STRIPPED = stripCommentLines(readFileSync(publicSrc('screens', 'ElectionShell.tsx'), 'utf8'));
+const INDEX_TSX_STRIPPED = stripComments(INDEX_TSX_SOURCE);
+const SHELL_TSX_STRIPPED = stripComments(readFileSync(publicSrc('screens', 'ElectionShell.tsx'), 'utf8'));
 
 // -- The mounted copy keys, and TOTALITY in both directions -----------------
 //

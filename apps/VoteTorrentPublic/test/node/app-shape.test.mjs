@@ -14,21 +14,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { publicRoot, publicSrc, repoRoot } from '../../../../scripts/lib/source-paths.mjs';
-
-/** Same line-based comment-stripping idiom the repo's other tier-1 assertions use.
- * @param {string} source @returns {string} */
-function stripCommentLines(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 const VITE_CONFIG_SOURCE = readFileSync(publicRoot('vite.config.ts'), 'utf8');
-const VITE_CONFIG_STRIPPED = stripCommentLines(VITE_CONFIG_SOURCE);
+const VITE_CONFIG_STRIPPED = stripComments(VITE_CONFIG_SOURCE);
 
 // ---------------------------------------------------------------------------
 // 1. resolve.dedupe (D-16), now FOUR entries (54-11).
@@ -83,7 +72,7 @@ test('discriminating control: a planted dedupe array MISSING the quereus engine 
 });
 
 test('inertness control: a config that only DISCUSSES dedupe in a comment yields no entries at all', () => {
-	const commentOnly = stripCommentLines(`// resolve: { dedupe: ${JSON.stringify([...EXPECTED_DEDUPE])} } is discussed here only\nexport default {};`);
+	const commentOnly = stripComments(`// resolve: { dedupe: ${JSON.stringify([...EXPECTED_DEDUPE])} } is discussed here only\nexport default {};`);
 	assert.equal(extractDedupeEntries(commentOnly), null, 'comment-only mention must not satisfy the extractor');
 });
 
@@ -252,7 +241,7 @@ test('no file under src/ uses the raw-HTML-injection escape hatch (this lands be
 	const files = walkAll(publicSrc());
 	const offenders = [];
 	for (const file of files) {
-		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		const stripped = stripComments(readFileSync(file, 'utf8'));
 		if (RAW_HTML_ESCAPE_HATCH_RE.test(stripped)) offenders.push(file);
 	}
 	assert.deepEqual(offenders, [], `these files use the raw-HTML-injection escape hatch: ${offenders.join(', ')}`);
