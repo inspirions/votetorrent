@@ -17,6 +17,7 @@
 		"gate:prove-token-missing": "node ../../packages/ui-web/scripts/run-ui-gates.mjs --app . --gate-config vite.gate.config.ts --gate-dist dist-gate --gate-entry election-shell-gate.html --port 5191 --prove-token-missing",
 		"typecheck": "tsc --noEmit",
 		"assert:no-polyfills": "node scripts/assert-no-node-polyfills.mjs",
+		"assert:single-quereus": "node scripts/assert-single-quereus-instance.mjs",
 		"assert:engine-reach": "node scripts/assert-engine-reach.mjs",
 		"assert:no-test-harness-in-dist": "node scripts/assert-no-test-harness-in-dist.mjs",
 		"assert:placeholders-labelled": "node scripts/assert-placeholders-labelled.mjs",
