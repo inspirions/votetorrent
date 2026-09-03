@@ -72,6 +72,17 @@ const STRAND_BOOTSTRAP_ADDR = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RES
 // unset, no crash — backward compatible with a single-drone run).
 const STRAND_BOOTSTRAP_ADDR_B = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
 
+// Cadre invite — the base64url-encoded CadreInvite drone-A mints at boot and advertises as
+// PROOF_INVITE=. The harness injects it here per-run, exactly like the addresses above (D-07).
+//
+// Without this the peer boots addressable but UNAUTHORIZED, and drone-A refuses its
+// strand-addr request as a non-member — the P2P-11 root cause found 2026-08-24. Dialing the
+// invite is only HALF the ceremony: the owner must then accept this peer's control peerId
+// (there is no auto-accept in cadre-core 0.12.0), which the harness arranges by handing the
+// peerId marker below to the drone. Placeholder-aware like the addresses: a placeholder skips
+// the ceremony and boots unenrolled, which is the pre-fix behaviour and a deliberate arm.
+const PROOF_INVITE = 'UPDATE_AFTER_DRONE_RESTART';
+
 // resolveBootstrapNodes — placeholder-aware address resolver (mirrors CadreNodeProvider).
 // Returns [] for empty/unset OR placeholder (safe solo boot), [addr] for a real address.
 const BOOTSTRAP_PLACEHOLDER = 'UPDATE_AFTER_DRONE_RESTART';
@@ -283,6 +294,31 @@ export async function runReplicationProof(): Promise<void> {
       await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
     }
     L('relayReservation=', hasRelayReservation());
+
+    // ── 2c. Cadre enrolment — dial the owner's invite (P2P-11 membership gate) ─────────────
+    // Ordering matters: AFTER the relay reservation, because on cadre-core 0.12.0 a
+    // relay-only peer can return from start() before it holds a circuit address, and an
+    // invite dialed in that window reads owner-signed control state nobody can serve yet
+    // (`Block default/Revocation is unavailable (peers-unreachable)`) — a timing artifact,
+    // not a membership verdict. Before the strand work, because the strand-addr request is
+    // exactly what gets refused while this peer is a non-member.
+    //
+    // Emitted UNCONDITIONALLY (like relayReservation= and strandPeers=) so the harness can
+    // key off the marker whether or not the ceremony succeeded, and so an unenrolled run is
+    // legible as such instead of failing later as a mystery cohort failure.
+    if (PROOF_INVITE.includes(BOOTSTRAP_PLACEHOLDER)) {
+      L('enrolInvite=skipped (no invite injected — this peer will be refused as a non-member)');
+    } else {
+      try {
+        await node.dialInvite(node.decodeInvite(PROOF_INVITE));
+        L('enrolInvite=ok');
+      } catch (enrolErr) {
+        // Never fatal: the owner-side acceptPhone is the half that actually confers
+        // membership, and it can still land. Fail loudly in the log, continue the proof, and
+        // let strandPeers= be the authoritative signal.
+        L('enrolInvite=failed', enrolErr);
+      }
+    }
 
     // ── 3. D-03 fresh-state wipe — per-network store ONLY, try/catch, never silent (A1) ─────
     // NEVER call LevelDB.destroyDB('votetorrent-cadre-node') — the peerId store must survive.

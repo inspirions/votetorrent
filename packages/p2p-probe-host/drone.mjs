@@ -23,10 +23,11 @@
  *
  * Exit: Ctrl-C (SIGINT) or `kill <pid>` (SIGTERM) — both gracefully stop the node.
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { CadreNode } from '@serfab/cadre-core';
 import { MemoryRawStorage } from '@optimystic/db-p2p';
 import { webSockets } from '@libp2p/websockets';
+import { generateKeyPair } from '@libp2p/crypto/keys';
 
 const PARTY_ID = 'votetorrent'; // aligned with CadreNodeProvider.tsx line 55 (OQ1 conservative fix)
 const L = (...a) => console.log('[drone]', ...a);
@@ -60,6 +61,16 @@ const DRONE_BOOTSTRAP_CONTROL_ADDR = process.env.DRONE_BOOTSTRAP_CONTROL_ADDR ??
 const DRONE_BOOTSTRAP_STRAND_ADDR = process.env.DRONE_BOOTSTRAP_STRAND_ADDR ?? '';
 
 const node = new CadreNode({
+  // Supply the identity key explicitly instead of letting libp2p mint an ephemeral one:
+  // `getIdentityOwnerKey()` — which owner genesis needs — THROWS on an ephemeral key
+  // ("node identity not resolved"), because that key is internal to libp2p and never
+  // exposed. Without this the drone cannot run genesis, cannot mint an invite, and every
+  // joiner is refused as a non-member: the P2P-11 wall. Matches tools/multipeer-gate.
+  //
+  // Freshly generated per boot is correct here: the harness captures this drone's address
+  // (which carries its peerId) from PROOF_WS_ADDR= on every run, so nothing pins it across
+  // restarts. The DEVICE peerId must be stable (D-05); this host-side drone's need not be.
+  privateKey: await generateKeyPair('Ed25519'),
   controlNetwork: {
     partyId: PARTY_ID,
     bootstrapNodes: DRONE_BOOTSTRAP_CONTROL_ADDR ? [DRONE_BOOTSTRAP_CONTROL_ADDR] : [],
@@ -126,6 +137,180 @@ L('control addrs  =', JSON.stringify(addrs));
 const proofWsAddr = addrs.find(a => a.includes('/ip4/127.0.0.1/') && a.includes('/ws')) ?? addrs[0] ?? '';
 L('PROOF_WS_ADDR=' + proofWsAddr);
 L('READY — update CONTROL_ADDR in dial-probe.ts with the /ip4/10.0.2.2/tcp/<PORT>/ws/p2p/<PEER_ID> addr above, then run ./scripts/run-dial-probe.sh');
+
+// ── CADRE MEMBERSHIP: owner genesis + the invite/accept ceremony ────────────────────────
+//
+// WHY THIS EXISTS (P2P-11 root cause, 2026-08-24, re-confirmed 2026-09-03). Every device
+// n=4 run through 38-21/41-09 failed with the strand cohort never forming. The cause is not
+// addressing, relays or db-p2p: the devices are simply NOT MEMBERS. drone-A refuses their
+// strand-addr requests with
+//     sereus:cadre:strand-addr Refusing strand-addr from non-member <device control peerId>
+// because `isAuthorizedMember` needs a CadrePeer row carrying an anchored voucher, and this
+// harness never ran a ceremony that creates one. Devices were addressable but unauthorized,
+// so their strand nodes received no cohort addresses and replication could never start.
+//
+// cadre-core deliberately never runs owner genesis implicitly — the hosting app owns it — so
+// a harness must do it explicitly or every owner-signed control write (createInvite included)
+// fails. This mirrors tools/multipeer-gate, which is the green n=4 reference for this
+// ceremony; keep the two in step.
+//
+// The ceremony is TWO-SIDED and there is no auto-accept hook in cadre-core 0.12.0: the joiner
+// dials an invite, and the OWNER must then call `acceptPhone` with the joiner's peerId
+// (`AddPhoneOptions.phonePeerId` is documented as "sent by phone when it connects" — the app
+// layer is expected to carry it). Verified empirically against the gate: `dialInvite` alone
+// never authorized a joiner in any observed run; `acceptPhone` fired every time. In-process
+// that is a function call, but here the owner is this Node process and the joiners are RN
+// apps on emulators, so the peerId has to cross a process boundary.
+//
+// It does NOT need a harness round-trip. Every joiner dials this drone's control node to
+// bootstrap, so by the time it needs membership this node already HOLDS its peerId on an
+// inbound connection — `getControlNode().getPeers()` is the channel. Routing peerIds back out
+// through logcat and the host filesystem was the obvious design and the wrong one: the device
+// emits `peerId=` and then issues its strand-addr request seconds later, so a
+// grep-then-write round-trip races the very request it exists to authorize.
+//
+// So: while the enrollment window is open, accept every connected peer that is not yet a
+// member. That is what an open enrollment window MEANS — the connection gater already admits
+// these strangers for exactly this purpose — and it is bounded and dev-harness-only; this
+// drone is throwaway proof infrastructure and is never shipped. DRONE_ENROL_DIR stays as an
+// explicit out-of-band path (drop a file named for a peerId) for manual or scripted enrolment.
+const IS_FOUNDER = !DRONE_BOOTSTRAP_CONTROL_ADDR;
+const DRONE_ENROL_DIR = process.env.DRONE_ENROL_DIR ?? '';
+// A joiner drone (drone-B) redeems the founder's invite; the harness passes it through from
+// the founder's PROOF_INVITE= line. Unset on the founder, which mints its own.
+const DRONE_INVITE = process.env.DRONE_INVITE ?? '';
+// The invite is a bearer credential with no consumed-flag, so ONE invite serves every joiner.
+// What actually expires is the inbound enrollment window `createInvite` opens
+// (DEFAULT_ENROLLMENT_WINDOW_MS = 30 min upstream). Device n=4 runs have been observed at
+// ~39 minutes, so the window must be REFRESHED for the life of the run or late joiners are
+// gated out — `openEnrollmentWindow` exists for exactly that.
+const ENROL_WINDOW_MS = Number(process.env.DRONE_ENROL_WINDOW_MS ?? 60 * 60 * 1000);
+const ENROL_POLL_MS = 2000;
+
+let issuedInvite = null;
+
+if (IS_FOUNDER) {
+  // Owner genesis MUST run while this node is still SOLO. It writes owner-signed control
+  // state; once the control DB is spread across a cohort, that write needs a quorum the
+  // joiners cannot yet serve and it fails with
+  //   Block default/Revocation is unavailable (peers-unreachable)
+  // drone-A boots with empty bootstrapNodes, so "solo" holds here by construction — but this
+  // block must stay ABOVE addStrand and above anything that admits a peer.
+  const owner = node.getIdentityOwnerKey();
+  await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
+  const controlDb = node.getControlDatabase();
+  if (!controlDb) throw new Error('founder has no control database after start()');
+  await controlDb.ensureOwnerKey(owner.publicKeyB64);
+  node.initializeSeedBootstrap(owner.privateKeyB64);
+  L(`owner genesis done (ownerKey=${owner.publicKeyB64.slice(0, 12)}…)`);
+
+  const { invite } = await node.createInvite(undefined, ENROL_WINDOW_MS);
+  issuedInvite = invite;
+  // Machine-readable, like PROOF_WS_ADDR= above: the harness greps this line and injects the
+  // encoded invite into the runner's PROOF_INVITE constant (D-07 injection pattern).
+  L('PROOF_INVITE=' + node.encodeInvite(invite));
+
+  // Keep the window open for the whole run, not just the first 30 minutes.
+  setInterval(() => {
+    try {
+      node.openEnrollmentWindow(Date.now() + ENROL_WINDOW_MS);
+    } catch (e) {
+      L('WARN openEnrollmentWindow failed:', e?.message ?? e);
+    }
+  }, Math.max(60_000, Math.floor(ENROL_WINDOW_MS / 4))).unref?.();
+
+  if (DRONE_ENROL_DIR) {
+    mkdirSync(DRONE_ENROL_DIR, { recursive: true });
+    L('ENROL_WATCH=' + DRONE_ENROL_DIR);
+  }
+  watchForJoiners();
+  L('ENROL_ARMED — accepting connected non-members for the life of this run');
+} else if (DRONE_INVITE) {
+  // A NON-founder drone (drone-B) is a joiner like any device: the founder will accept it
+  // once it connects, but acceptance is only the owner's half. Redeeming the invite is the
+  // joiner's half — it anchors the founder's owner keys in this node's node-local trusted
+  // set (`trustOwnerKeys` with source 'invite'), which is what lets this node VERIFY
+  // owner-signed control state rather than merely being admitted. tools/multipeer-gate runs
+  // both halves for its drone-B; do the same here so the two stay comparable.
+  try {
+    await node.dialInvite(node.decodeInvite(DRONE_INVITE));
+    L('ENROL_DIALED — redeemed the founder invite');
+  } catch (e) {
+    // Not fatal: the founder's acceptPhone can still confer membership. Loud, then continue.
+    L('WARN ENROL_DIAL_FAILED:', e?.message ?? e);
+  }
+}
+
+/**
+ * Accept joiners: every peer connected to the control node that is not yet a member, plus any
+ * peerId dropped into DRONE_ENROL_DIR out-of-band.
+ *
+ * Polling rather than an event subscription: this runs for the whole ~40-minute proof, a
+ * missed `peer:connect` would silently cost the run, and a re-read costs nothing.
+ */
+function watchForJoiners() {
+  const seen = new Set();
+  const selfId = node.peerId?.toString();
+
+  setInterval(async () => {
+    const candidates = new Set();
+
+    // Primary: peers already connected to this control node.
+    try {
+      for (const p of node.getControlNode()?.getPeers?.() ?? []) candidates.add(p.toString());
+    } catch (e) {
+      L('WARN could not enumerate control peers:', e?.message ?? e);
+    }
+
+    // Secondary: explicit out-of-band drops.
+    if (DRONE_ENROL_DIR) {
+      try {
+        for (const f of readdirSync(DRONE_ENROL_DIR)) {
+          if (!f.startsWith('.')) candidates.add(f);
+        }
+      } catch {
+        // dir not there yet, or transiently unreadable — next tick retries
+      }
+    }
+
+    for (const peerId of candidates) {
+      if (peerId === selfId || seen.has(peerId)) continue;
+      seen.add(peerId);
+      try {
+        await node.acceptPhone({ phonePeerId: peerId }, issuedInvite ?? undefined);
+        L('ENROL_ACCEPTED=' + peerId);
+      } catch (e) {
+        // Do NOT drop it from `seen` and retry forever: a genuine rejection would spin. The
+        // harness surfaces this line and the run fails at the membership gate, honestly.
+        L('ENROL_FAILED=' + peerId + ' ' + (e?.message ?? e));
+        continue;
+      }
+      // Verify separately, and never let a failed READ read as a failed ceremony. The
+      // read-back races the control write: in gate runs `isAuthorizedMember` threw
+      // `Block default/Revocation is unavailable (peers-unreachable)` on every attempt for a
+      // joiner that was in fact enrolled, which is what made the gate's own enrolment step
+      // look like it "did not settle" when it had. Confirmation is best-effort; ENROL_ACCEPTED
+      // above is the ceremony's real outcome.
+      void confirmMember(peerId);
+    }
+  }, ENROL_POLL_MS).unref?.();
+}
+
+async function confirmMember(peerId) {
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      if (await node.isAuthorizedMember(peerId)) {
+        L('ENROLLED=' + peerId);
+        return;
+      }
+    } catch (e) {
+      L(`  · membership read for ${peerId} not yet serviceable (attempt ${attempt}): ${e?.message ?? e}`);
+    }
+    await new Promise(r => setTimeout(r, 2000 * attempt));
+  }
+  L('WARN ENROL_UNCONFIRMED=' + peerId + ' — acceptPhone succeeded but membership could not ' +
+    'be read back; treat strandPeers as the authoritative signal');
+}
 
 // P2P-06 replication proof: host the VoteTorrent strand so transaction-profile
 // peers A and B can replicate through this always-on storage cadre (D-01/D-02

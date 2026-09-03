@@ -439,6 +439,23 @@ if [ -z "${STRAND_ADDR}" ]; then
 fi
 echo "[run-replication-proof] Drone strand addr: ${STRAND_ADDR}"
 
+# Capture the cadre invite drone-A minted at genesis (P2P-11 membership gate). Emitted
+# BEFORE PROOF_STRAND_ADDR=, so by here it is already in the log.
+#
+# Without membership every device is refused with `Refusing strand-addr from non-member`,
+# the strand cohort never forms, and the run fails looking like an addressing problem — the
+# root cause found 2026-08-24 and the reason every n=4 run through 41-09 failed. Treat a
+# missing invite as fatal rather than proceeding into that misleading failure.
+DRONE_INVITE=$(grep -m1 -o 'PROOF_INVITE=[A-Za-z0-9_-]*' "${DRONE_LOG}" 2>/dev/null | cut -d= -f2 || true)
+if [ -z "${DRONE_INVITE}" ]; then
+  echo "[run-replication-proof] ERROR: drone did not emit PROOF_INVITE= — owner genesis did not run," >&2
+  echo "[run-replication-proof]        so no device can become a cadre member and the strand cohort" >&2
+  echo "[run-replication-proof]        cannot form. Check the drone log for a genesis error." >&2
+  cat "${DRONE_LOG}" >&2
+  exit 1
+fi
+echo "[run-replication-proof] Drone invite captured (${#DRONE_INVITE} chars)"
+
 # ── STEP 3b: LAUNCH DRONE-B (38-05 / D-04 n=4 topology) ─────────────────────
 # SECOND drone process, cross-bootstrapped to drone-A's control AND strand
 # multiaddrs — exactly the wiring 38-02's two-drone-smoke.mjs proved (peerCount=3
@@ -453,6 +470,7 @@ DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,se
   STRAND_ID="${STRAND_ID}" \
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
   DRONE_BOOTSTRAP_STRAND_ADDR="${STRAND_ADDR}" \
+  DRONE_INVITE="${DRONE_INVITE}" \
   "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_B_LOG}" 2>&1 &
 DRONE_B_PID=$!
 echo "[run-replication-proof] Drone-B launched (PID ${DRONE_B_PID}, DEBUG= cluster-error logging armed, cross-bootstrapped to drone-A), waiting for READY line ..."
@@ -527,9 +545,10 @@ DRONE_ADDR_FOR_DEVICE=$(echo "${DRONE_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4
 STRAND_ADDR_FOR_DEVICE=$(echo "${STRAND_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 STRAND_B_ADDR_FOR_DEVICE=$(echo "${STRAND_B_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 # Use a temp marker that is not a regex special char.
-python3 - "${CONFIG_FILE}" "${DRONE_ADDR_FOR_DEVICE}" "${STRAND_ADDR_FOR_DEVICE}" "${STRAND_B_ADDR_FOR_DEVICE}" << 'PYEOF'
+python3 - "${CONFIG_FILE}" "${DRONE_ADDR_FOR_DEVICE}" "${STRAND_ADDR_FOR_DEVICE}" "${STRAND_B_ADDR_FOR_DEVICE}" "${DRONE_INVITE}" << 'PYEOF'
 import sys
 path, control_addr, strand_addr, strand_addr_b = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+invite = sys.argv[5]
 content = open(path).read()
 import re
 # Inject CONTROL_ADDR (control-network bootstrap — drone-A's control node).
@@ -555,7 +574,40 @@ new_content = re.sub(
     new_content,
     count=1,
 )
+
+# Inject PROOF_INVITE (cadre membership). The invite is base64url-encoded JSON carrying the
+# owner's dialable multiaddrs, and dialInvite DIALS them — so the drone's own 127.0.0.1
+# addresses have to get the same emulator-alias rewrite the constants above get, or the
+# device redeems an invite it can never reach. Decode, rewrite, re-encode.
+import base64, json
+
+def _b64url_decode(s):
+    return base64.urlsafe_b64decode(s + '=' * (-len(s) % 4))
+
+def _b64url_encode(b):
+    return base64.urlsafe_b64encode(b).decode().rstrip('=')
+
+decoded = json.loads(_b64url_decode(invite))
+decoded['ownerAddrs'] = [
+    a.replace('/ip4/127.0.0.1/', '/ip4/10.0.2.2/').replace('/ip4/0.0.0.0/', '/ip4/10.0.2.2/')
+    for a in decoded.get('ownerAddrs', [])
+]
+invite_for_device = _b64url_encode(json.dumps(decoded).encode())
+new_content, n_invite = re.subn(
+    r"(const PROOF_INVITE = ')[^']*(')",
+    r"\g<1>" + invite_for_device + r"\g<2>",
+    new_content,
+    count=1,
+)
+if n_invite != 1:
+    # Fail loudly: a silently-unwritten invite boots every device unenrolled, which fails
+    # later as an unexplained empty strand cohort — the exact misdiagnosis this closes.
+    print('[run-replication-proof] ERROR: PROOF_INVITE constant not found in the runner', file=sys.stderr)
+    sys.exit(1)
+
 open(path, 'w').write(new_content)
+print(f"[run-replication-proof] PROOF_INVITE in runner injected ({len(invite_for_device)} chars, "
+      f"ownerAddrs={decoded['ownerAddrs']})")
 print(f"[run-replication-proof] CONTROL_ADDR in runner injected: {control_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR in runner injected: {strand_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR_B in runner injected: {strand_addr_b}")
