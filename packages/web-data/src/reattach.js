@@ -21,6 +21,7 @@
 
 import { openStoreHandle, closeNetworkDb } from './open-db.js';
 import { registerDbPlugins, initDB, isSchemaInitialized, nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
+import { classOf, UnknownTableError } from './classification.js';
 
 /** A network has no schema-init marker — `createNetworkDb()` was never called for it. */
 export class NotBootstrappedError extends Error {
@@ -225,8 +226,30 @@ const TABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /**
  * Read live per-table row counts. `tableNames` is an allow-list the caller
  * already controls (e.g. `SEED_TABLES`, or `Object.keys(expected)`) — never
- * an arbitrary string interpolated into SQL; each name is additionally
- * shape-checked here before being interpolated.
+ * an arbitrary string interpolated into SQL.
+ *
+ * Each name passes TWO guards before it is interpolated: `TABLE_NAME_RE`'s
+ * identifier shape, then membership in the schema's classified-table set via
+ * `classOf` (`./classification.js`). The interpolation itself is unavoidable
+ * and stays: a table name in `from` position is an identifier, and
+ * identifiers are not bindable as parameters in any SQL engine, Quereus
+ * included — there is no `:table` bind form. The alternative would be 61
+ * hand-written per-table `count(*)` constants, one per schema table, which
+ * would silently drift from `votetorrent.qsql` the moment a table is added
+ * and would defeat `classOf`'s design intent that the schema growing a table
+ * must BREAK this gate rather than quietly bypass a stale constant list. What
+ * makes the interpolation defensible is therefore not the shape check alone
+ * but that the value is drawn from a CLOSED ENUMERATION, not merely from
+ * something identifier-shaped — see the allow-list entry keyed to this
+ * function in `packages/web-data/test/connection-layer-shape.test.mjs`,
+ * which a reader who finds this interpolation should read next.
+ *
+ * `classOf`'s `UnknownTableError` is caught and re-thrown as a `TypeError`
+ * naming the table — the thrown TYPE must stay `TypeError`, unchanged from
+ * before this guard existed, because `public-election-source.js` routes
+ * faults to `NOT_HELD` vs `UNREADABLE` by constructor name, and only three
+ * names route to `NOT_HELD`. An unclassified name continues to surface as a
+ * fault exactly as a non-identifier name always has.
  *
  * @param {import('@quereus/quereus').Database} db
  * @param {string[]} tableNames
@@ -238,6 +261,14 @@ export async function readRowCounts(db, tableNames) {
 	for (const table of tableNames) {
 		if (!TABLE_NAME_RE.test(table)) {
 			throw new TypeError(`readRowCounts: refusing non-identifier table name "${table}"`);
+		}
+		try {
+			classOf(table);
+		} catch (err) {
+			if (err instanceof UnknownTableError) {
+				throw new TypeError(`readRowCounts: refusing table "${table}" — not a classified schema table (see packages/web-data/src/classification.js)`);
+			}
+			throw err;
 		}
 		const row = await db.prepare(`select count(*) as c from ${table}`).get({});
 		counts[table] = Number(row?.c ?? 0);

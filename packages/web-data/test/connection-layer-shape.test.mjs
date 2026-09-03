@@ -66,6 +66,9 @@ import { fileURLToPath } from 'node:url';
 
 import { webDataSrc, repoRoot } from '../../../scripts/lib/source-paths.mjs';
 import { stripComments } from './lib/source-scan.mjs';
+import { readRowCounts } from '../src/reattach.js';
+import { classOf, UnknownTableError } from '../src/classification.js';
+import { SEED_TABLES, EXPECTED_COUNTS } from './fixtures/seed-founding-authority.js';
 
 const THIS_FILE = fileURLToPath(import.meta.url);
 
@@ -261,12 +264,21 @@ export const SQL_INTERPOLATION_ALLOWLIST = Object.freeze([
 /** `SQL_INTERPOLATION_ALLOWLIST.length` must equal this, changed only DELIBERATELY. @type {number} */
 const SQL_INTERPOLATION_ALLOWLIST_ENTRY_COUNT = 1;
 
-/** Measured 54-21: total interpolating templates across the four connection-layer modules. */
-const EXPECTED_TOTAL_INTERPOLATING_TEMPLATES = 22;
+/**
+ * Measured 54-21 Task 1 (before Task 2's guard upgrade): total interpolating
+ * templates across the four connection-layer modules was 22 (1 SQL, 21
+ * error-message text). Task 2 adds ONE more non-SQL interpolating template
+ * -- `readRowCounts`'s new `UnknownTableError` rejection message -- so the
+ * counts below are Task 2's measurement, not Task 1's. Both are recorded
+ * here (rather than only the final number) precisely because a "the count
+ * changed" surprise is the failure mode this pinning exists to catch; the
+ * cause this time is a deliberate, reviewed addition.
+ */
+const EXPECTED_TOTAL_INTERPOLATING_TEMPLATES = 23;
 /** Measured 54-21: of those, exactly one begins with a SQL verb. */
 const EXPECTED_SQL_INTERPOLATING_TEMPLATES = 1;
-/** Measured 54-21: the remainder are error-message text, correctly un-reported. */
-const EXPECTED_NONSQL_INTERPOLATING_TEMPLATES = 21;
+/** Measured 54-21 Task 2: the remainder are error-message text, correctly un-reported. */
+const EXPECTED_NONSQL_INTERPOLATING_TEMPLATES = 22;
 
 // ───────────────────────────────────────────────────────────────────────────
 // 0. The scanned set is exactly the top-level connection-layer modules.
@@ -398,7 +410,78 @@ test('R4 over the connection layer: zero unexempted SQL interpolations, with the
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// 8. Self-trip guard.
+// 8. readRowCounts's own guard -- upgraded from an identifier shape to
+//    membership in the closed classified-table set. `TABLE_NAME_RE` stays as
+//    the first check; `classOf` is the second. A stub `db` is used
+//    throughout: these tests are about which table NAMES the guard lets
+//    through, not about Quereus itself, and an "exploding" stub proves a
+//    rejection happens BEFORE the statement is ever prepared.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A `db` that resolves every count query with 0 -- used to prove a name is ACCEPTED without needing a real Quereus handle. @type {import('@quereus/quereus').Database} */
+const ACCEPTING_STUB_DB = /** @type {any} */ (
+	Object.freeze({
+		prepare: () => ({ get: async () => ({ c: 0 }) }),
+	})
+);
+
+/** A `db` that throws if `prepare` is ever called -- used to prove a rejection happens before the statement is built, not merely that the awaited call eventually fails. @type {import('@quereus/quereus').Database} */
+const EXPLODING_STUB_DB = /** @type {any} */ (
+	Object.freeze({
+		prepare: () => {
+			throw new Error('EXPLODING_STUB_DB: prepare() must not be called -- the guard should have rejected first');
+		},
+	})
+);
+
+test('readRowCounts: every member of SEED_TABLES is a classified table and is accepted', async () => {
+	for (const table of SEED_TABLES) {
+		assert.doesNotThrow(() => classOf(table), `${table} must be classified`);
+	}
+	const counts = await readRowCounts(ACCEPTING_STUB_DB, SEED_TABLES);
+	assert.deepEqual(Object.keys(counts).sort(), [...SEED_TABLES].sort());
+});
+
+test('readRowCounts: every key of EXPECTED_COUNTS is a classified table and is accepted', async () => {
+	const keys = Object.keys(EXPECTED_COUNTS);
+	for (const table of keys) {
+		assert.doesNotThrow(() => classOf(table), `${table} must be classified`);
+	}
+	const counts = await readRowCounts(ACCEPTING_STUB_DB, keys);
+	assert.deepEqual(Object.keys(counts).sort(), keys.sort());
+});
+
+test('readRowCounts: an identifier-shaped but unclassified table name is rejected with a TypeError naming the table', async () => {
+	const unclassified = 'NotARealTable';
+	assert.throws(() => classOf(unclassified), UnknownTableError, 'fixture is invalid: this name must NOT be classified for the test to prove anything');
+
+	await assert.rejects(
+		() => readRowCounts(EXPLODING_STUB_DB, [unclassified]),
+		/** @param {any} err */
+		(err) => {
+			assert.ok(err instanceof TypeError, `expected a TypeError, got ${err?.constructor?.name}`);
+			assert.equal(err.name, 'TypeError');
+			assert.match(err.message, new RegExp(unclassified));
+			return true;
+		},
+	);
+});
+
+test('readRowCounts: a non-identifier table name is still rejected with a TypeError -- the original guard did not regress', async () => {
+	const nonIdentifier = '1; drop table Authority';
+	await assert.rejects(
+		() => readRowCounts(EXPLODING_STUB_DB, [nonIdentifier]),
+		/** @param {any} err */
+		(err) => {
+			assert.ok(err instanceof TypeError, `expected a TypeError, got ${err?.constructor?.name}`);
+			assert.equal(err.name, 'TypeError');
+			return true;
+		},
+	);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// 9. Self-trip guard.
 // ───────────────────────────────────────────────────────────────────────────
 
 const BEGIN_SENTINEL = ['BEGIN', 'CONTROL', 'FIXTURES'].join(' ');
