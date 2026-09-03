@@ -18,20 +18,9 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 const SHELL = readFileSync(dashboardSrc('screens', 'DashboardShell.tsx'), 'utf8');
-
-/** Drop whole-line comments, so prose ABOUT a defect is never read as the defect.
- * @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((/** @type {string} */ line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 const CODE = stripComments(SHELL);
 

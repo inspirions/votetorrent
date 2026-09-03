@@ -15,23 +15,13 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 import { COPY } from '@votetorrent/ui-web';
 
 const PANELS_DIR = dashboardSrc('screens', 'panels');
 
 const FILES = ['RegistrationsPanel.tsx', 'ElectionsPanel.tsx', 'BallotsQuestionsPanel.tsx'];
-
-/** Strip `//` and `/* *\/`-style comment lines -- same shape as registry.test.mjs. @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 /** @type {Record<string, string>} */
 const RAW = {};
@@ -326,13 +316,7 @@ test('negative control: a synthetic import of ONLY connection-layer names (alrea
 test('election-ops.css has zero hex colour literals and declares no .panel/.panel-body/.panel--denied rule', () => {
 	const cssPath = path.join(PANELS_DIR, 'election-ops.css');
 	const css = readFileSync(cssPath, 'utf8');
-	const stripped = css
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//'));
-		})
-		.join('\n');
+	const stripped = stripComments(css);
 	assert.doesNotMatch(stripped, /#[0-9a-fA-F]{3,6}/);
 	assert.doesNotMatch(stripped, /^\.panel\s*\{/m);
 	assert.doesNotMatch(stripped, /^\.panel-body\s*\{/m);
@@ -342,13 +326,7 @@ test('election-ops.css has zero hex colour literals and declares no .panel/.pane
 test('election-ops.css has no raw px value outside a var(--space-*) reference', () => {
 	const cssPath = path.join(PANELS_DIR, 'election-ops.css');
 	const css = readFileSync(cssPath, 'utf8');
-	const stripped = css
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//'));
-		})
-		.join('\n');
+	const stripped = stripComments(css);
 	// Every numeric px literal must be EITHER a `1px` border-width literal
 	// (the same structural constant panels.css's own `.panel`/`.pill`
 	// already hardcode -- a border width is not a spacing-scale value) OR

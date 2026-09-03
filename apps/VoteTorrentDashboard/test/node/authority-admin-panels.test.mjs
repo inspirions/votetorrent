@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardSrc, workspacePath } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 const PANELS_DIR = dashboardSrc('screens', 'panels');
 const SCHEMA_PATH = workspacePath('packages/vote-core', 'schema', 'votetorrent.qsql');
@@ -27,19 +28,6 @@ export const FILES = [
 	'KeyholdersPanel.tsx',
 	'InviteAuthoritiesPanel.tsx',
 ];
-
-/** Strip `//` and `/* *\/`-style comment lines -- same shape as
- * registry.test.mjs / election-ops-panels.test.mjs.
- * @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 /** Parse the set of schema column identifiers: column declarations inside
  * `table` blocks (leading whitespace, an identifier, a recognised column
@@ -199,13 +187,7 @@ test('positive control: the label extractor reports a literal invented label as 
 test('every class selector in authority-admin.css starts with aa-, and the file has no hex colour literal', () => {
 	const cssPath = path.join(PANELS_DIR, 'authority-admin.css');
 	const css = readFileSync(cssPath, 'utf8');
-	const stripped = css
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//'));
-		})
-		.join('\n');
+	const stripped = stripComments(css);
 	const classSelectors = [...stripped.matchAll(/\.([A-Za-z][\w-]*)/g)].map((m) => m[1]);
 	assert.ok(classSelectors.length >= 5, 'expected at least 5 class selectors in authority-admin.css');
 	for (const cls of classSelectors) {

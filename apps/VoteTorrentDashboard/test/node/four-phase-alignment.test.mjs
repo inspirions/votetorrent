@@ -27,14 +27,18 @@
  * `ElectionsPanel.tsx` and `election-ops.css`. `node --test` cannot import a
  * `.tsx`, so those read the sources as TEXT, in the shape
  * `test/node/election-ops-panels.test.mjs` (54-03b's) established. Every
- * source matcher runs over the COMMENT-STRIPPED text: a panel's own
- * explanatory prose must never be able to satisfy -- or defeat -- a matcher.
+ * source matcher runs over the COMMENT-STRIPPED text, via the repository's one
+ * shared character-level stripper (`scripts/lib/strip-comments.mjs`, 54-22): a
+ * panel's own explanatory prose must never be able to satisfy -- or defeat --
+ * a matcher, including prose inside a `{/* ... *}/` JSX comment block, which a
+ * line-opening filter alone would miss (54-25).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 import { derivePhase, PHASE_IDS } from '@votetorrent/ui-web/lifecycle';
 import {
 	SEED_ELECTION,
@@ -150,25 +154,15 @@ test('positive control: with `closed` deleted from the Timeline, the settling in
 // 6. ElectionsPanel.tsx's call site and its settling-stage marker, asserted at
 //    the SOURCE level (`node --test` cannot import a `.tsx`).
 //
-//    Every matcher below runs over the COMMENT-STRIPPED text, in
-//    `test/node/election-ops-panels.test.mjs`'s shape: the panel's own
-//    explanatory prose must never be able to satisfy -- or defeat -- a
-//    matcher. Stripping is line-based, exactly as that file does it.
+//    Every matcher below runs over the COMMENT-STRIPPED text, via the shared
+//    character-level stripper (`scripts/lib/strip-comments.mjs`, 54-22): the
+//    panel's own explanatory prose must never be able to satisfy -- or defeat
+//    -- a matcher, including prose inside a multi-line `{/* ... *}/` JSX
+//    comment block, which a line-opening filter alone would miss (54-25).
 // ---------------------------------------------------------------------------
 
-/** @param {string} source @returns {string} */
-function stripJsComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
-
 const PANEL_PATH = path.join(dashboardSrc('screens', 'panels'), 'ElectionsPanel.tsx');
-const PANEL_STRIPPED = stripJsComments(readFileSync(PANEL_PATH, 'utf8'));
+const PANEL_STRIPPED = stripComments(readFileSync(PANEL_PATH, 'utf8'));
 
 // ASSEMBLED, never written out -- `packages/ui-web/test/three-bucket-absent.test.mjs`'s
 // convention. A checker whose own source contains the identifier it hunts is
