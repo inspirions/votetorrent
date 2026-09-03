@@ -21655,6 +21655,8 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "votetorrent-public@workspace:apps/VoteTorrentPublic"
   dependencies:
+    "@quereus/plugin-indexeddb": "npm:4.17.1"
+    "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.17.1#~/.yarn/patches/@quereus-quereus-npm-4.17.1-831db23a51.patch"
     "@types/node": "npm:^22.10.2"
     "@types/react": "npm:19.2.17"
     "@types/react-dom": "npm:^19.0.0"
