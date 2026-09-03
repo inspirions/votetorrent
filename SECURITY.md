@@ -108,7 +108,8 @@ All four run with one command: `yarn workspace @votetorrent/web-data test`.
 resolve module graphs, and they execute in tier 1 with planted-violation controls. Row 3 is
 **statement-shape asserted** against the exact SQL constants the read layer exports, with each
 control mutating a real constant rather than a synthetic string. **None of the four is
-browser-rendered.**
+browser-rendered** — for the rendered roll, see the browser-tier gate cited in *What these controls
+do not prove* below.
 
 #### What these controls do not prove
 
@@ -124,10 +125,16 @@ guarantee.
   query-shape gate *"reads STATEMENTS, not RESULTS … it cannot see what the render layer does with
   three permitted columns"*, and the roll's own tier-1 gate opens with *"nothing below renders …
   Presence is not rendering — this repo has shipped two defects on exactly that gap"*
-  (`apps/VoteTorrentPublic/test/node/registrant-roll.test.mjs:14-19`). A browser-tier gate for the
-  rendered roll was still being built when this entry was written, and is deliberately not claimed
-  here. Even when it lands, an assertion over one fixture would not be a proof about every
-  authority's data.
+  (`apps/VoteTorrentPublic/test/node/registrant-roll.test.mjs:14-19`). **That gate has since
+  landed** (`apps/VoteTorrentPublic/test/browser/render-fidelity-gate.mjs`, run by
+  `yarn workspace votetorrent-public test:render-fidelity`): against a seeded surface in a real
+  browser, `roll-fields-rendered` finds the three columns and four rows;
+  `roll-hides-extrafields-and-superseded` finds zero occurrences of the `ExtraFields` marker or the
+  superseded record in `document.body.innerHTML`; and `roll-escapes-authority-text` finds zero
+  injected elements from an XSS-shaped registrant name. Every comparator is exercised **both ways**
+  under `--prove-matchers` — failing on a violating input and passing on a healthy one — because a
+  comparator that fails on everything proves nothing. **This is a real rendering proof, and it is
+  still an assertion over one fixture: it is not a proof about every authority's data.**
 - The roll's **read** is data-proven rather than only source-scanned: `readRegistrantRoll` returns
   the expected rows against a real seeded database, and a positive control that removes the
   `RP.Cid = R.PublicCid` pin shows the superseded record would otherwise be published
