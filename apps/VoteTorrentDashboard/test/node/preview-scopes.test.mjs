@@ -24,23 +24,11 @@ import {
 import { CAPABILITIES, SCOPE_CODES } from '../../src/auth/capabilities.js';
 import { evaluate } from '../../src/auth/gate.js';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 const MODULE_PATH = dashboardSrc('auth', 'preview-scopes.js');
 const RAW = readFileSync(MODULE_PATH, 'utf8');
 
-/** Same shape as gate.test.mjs's own helper — strip `//` and `/* *\/`-style
- * comment lines so this module's own JSDoc prose cannot self-invalidate a
- * source-hygiene scan.
- * @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 const STRIPPED = stripComments(RAW);
 
 test('createPreviewState(["vrg"]) starts real: effectiveScopes ["vrg"], not simulated, real badge', () => {

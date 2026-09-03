@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardRoot, dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 import { evaluate } from '../../src/auth/gate.js';
 import { CAPABILITIES } from '../../src/auth/capabilities.js';
@@ -88,22 +89,6 @@ test('denialReason is always a member of the closed set [null, "missing-scope"] 
 // ---------------------------------------------------------------------------
 
 const MUTATION_RE = /\b(insert\s+into|update\s+\S+\s+set|delete\s+from)\b/i;
-
-/** Strip `//` and `/* *\/` comment lines so this test's own JSDoc prose
- * (which quotes "insert into" etc. in file headers) cannot self-invalidate
- * the scan.
- * @param {string} source
- * @returns {string}
- */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 /** @param {string} dir @returns {string[]} */
 function walkFiles(dir) {

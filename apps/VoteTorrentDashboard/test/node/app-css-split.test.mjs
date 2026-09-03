@@ -12,6 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 const APP_CSS_PATH = dashboardSrc('app.css');
 const RAW = readFileSync(APP_CSS_PATH, 'utf8');
@@ -22,21 +23,6 @@ const RAW = readFileSync(APP_CSS_PATH, 'utf8');
  * false-fail this whole file.
  * @type {RegExp} */
 const DECLARATION_RE = /^\t--[a-z0-9-]+: .+;$/gm;
-
-/** Line-based comment stripper, same shape as `election-ops-panels.test.mjs`'s
- * `stripComments` idiom.
- * @param {string} source
- * @returns {string}
- */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//'));
-		})
-		.join('\n');
-}
 
 const STRIPPED = stripComments(RAW);
 
@@ -74,25 +60,27 @@ test('app.css contains zero custom-property DECLARATIONS after the split (refere
 
 // --- Case 3: the canonical import, and its position -----------------------------------
 
+/** The first line whose comment-stripped form is non-blank, read back from the
+ * ORIGINAL (unstripped) source at the same line index -- `stripComments`
+ * preserves line count and position, so this never needs its own line-opening
+ * classification.
+ * @param {string} source @returns {string | undefined} */
+function firstContentLineOf(source) {
+	const original = source.split('\n');
+	const stripped = stripComments(source).split('\n');
+	for (let i = 0; i < stripped.length; i += 1) {
+		if (stripped[i].trim() !== '') return original[i].trim();
+	}
+	return undefined;
+}
+
 test('the first non-comment, non-blank line of app.css is exactly the canonical @import', () => {
-	const firstContentLine = RAW.split('\n').find((line) => {
-		const trimmed = line.trim();
-		if (trimmed === '') return false;
-		if (trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//')) return false;
-		return true;
-	});
-	assert.equal(firstContentLine, "@import '@votetorrent/ui-web/tokens.css';");
+	assert.equal(firstContentLineOf(RAW), "@import '@votetorrent/ui-web/tokens.css';");
 });
 
 test('control: the @import position check would fail if the import were absent entirely', () => {
 	const fixtureWithoutImport = '/* header */\n\n.layout {\n\tdisplay: grid;\n}\n';
-	const firstContentLine = fixtureWithoutImport.split('\n').find((line) => {
-		const trimmed = line.trim();
-		if (trimmed === '') return false;
-		if (trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//')) return false;
-		return true;
-	});
-	assert.notEqual(firstContentLine, "@import '@votetorrent/ui-web/tokens.css';");
+	assert.notEqual(firstContentLineOf(fixtureWithoutImport), "@import '@votetorrent/ui-web/tokens.css';");
 });
 
 // --- Case 4: layout stayed --------------------------------------------------------------
