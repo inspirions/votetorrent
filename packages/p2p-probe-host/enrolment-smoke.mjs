@@ -161,6 +161,25 @@ async function main() {
   if (/ENROL_FAILED=/.test(droneOut)) {
     throw new Error(`drone reported ENROL_FAILED:\n${droneOut.match(/ENROL_FAILED=.*/g)?.join('\n')}`);
   }
+
+  // Exactly-once: the watcher's tick body awaits acceptPhone and a settle delay, so it runs
+  // LONGER than its own poll interval. Without a re-entrancy guard, overlapping ticks each
+  // pass the `settled.has` check before any records the outcome and the SAME peer is accepted
+  // repeatedly (observed on-device: 12 accepts of one peerId) — concurrent writes to
+  // default/CadrePeer, which is what tore a multi-tree commit in the first n=4 device run.
+  // Waiting for the first ENROL_ACCEPTED cannot see this; only the count can.
+  const acceptCounts = new Map();
+  for (const m of droneOut.match(/ENROL_ACCEPTED=\S+/g) ?? []) {
+    acceptCounts.set(m, (acceptCounts.get(m) ?? 0) + 1);
+  }
+  const repeated = [...acceptCounts.entries()].filter(([, n]) => n > 1);
+  if (repeated.length > 0) {
+    throw new Error(
+      'the same peer was accepted more than once — the joiner watcher is re-entrant:\n' +
+        repeated.map(([id, n]) => `  ${n}x ${id}`).join('\n'),
+    );
+  }
+  L(`exactly-once accept verified for ${acceptCounts.size} peer(s)`);
 }
 
 main()

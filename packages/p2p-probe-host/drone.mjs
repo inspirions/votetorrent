@@ -185,7 +185,17 @@ const DRONE_INVITE = process.env.DRONE_INVITE ?? '';
 // ~39 minutes, so the window must be REFRESHED for the life of the run or late joiners are
 // gated out — `openEnrollmentWindow` exists for exactly that.
 const ENROL_WINDOW_MS = Number(process.env.DRONE_ENROL_WINDOW_MS ?? 60 * 60 * 1000);
-const ENROL_POLL_MS = 2000;
+// Poll interval, overridable so a test can drive ticks FASTER than acceptPhone returns —
+// which is the only way to reproduce the re-entrancy race on fast loopback, where the accept
+// completes well inside the default interval. On-device, control-DB contention makes the
+// accept slow enough that the default interval already overlaps.
+const ENROL_POLL_MS = Number(process.env.DRONE_ENROL_POLL_MS ?? 2000);
+// Grace before a newly-seen peer is treated as a phone, so a strand node's delegate grant
+// can land first. Settle time after a successful accept, so the next accept in the same tick
+// does not read through that write's convergence window. Bound on transient accept retries.
+const DELEGATE_GRACE_MS = Number(process.env.DRONE_DELEGATE_GRACE_MS ?? 15000);
+const ENROL_SETTLE_MS = Number(process.env.DRONE_ENROL_SETTLE_MS ?? 4000);
+const ENROL_TRANSIENT_MAX_ATTEMPTS = Number(process.env.DRONE_ENROL_MAX_ATTEMPTS ?? 12);
 
 let issuedInvite = null;
 
@@ -249,10 +259,35 @@ if (IS_FOUNDER) {
  * missed `peer:connect` would silently cost the run, and a re-read costs nothing.
  */
 function watchForJoiners() {
-  const seen = new Set();
+  // Peers whose ceremony reached a DEFINITE outcome (accepted, or refused on the merits).
+  const settled = new Set();
+  // peerId -> epoch ms first observed, so a delegate grant has a tick to land before we
+  // mistake a strand transport for a phone (see the delegate guard below).
+  const firstSeenAt = new Map();
+  // peerId -> count of transient (infrastructure) accept failures, to bound the retries.
+  const transientFailures = new Map();
+  // The tick body awaits (acceptPhone, the settle delay), so it outlives the ENROL_POLL_MS
+  // interval and overlapping invocations would otherwise interleave. `settled` is only
+  // written AFTER the awaited accept — so without these two guards, concurrent ticks all pass
+  // the `settled.has` check before any of them records the outcome, and the same peer is
+  // accepted many times over (observed: 12 accepts of one peerId). That is precisely the
+  // concurrent-CadrePeer-write contention that tore a multi-tree commit. `tickRunning`
+  // serialises the ticks; `inFlight` is the belt-and-braces per-peer claim.
+  let tickRunning = false;
+  const inFlight = new Set();
   const selfId = node.peerId?.toString();
 
+  // A control-DB read/write that could not be SERVED is not a membership verdict — the same
+  // distinction the multipeer gate's L3 draws. `acceptPhone` reads `Revocation`/`CadrePeer`
+  // to evaluate the joiner, so it surfaces cluster unavailability as a throw that looks
+  // exactly like a refusal. Retrying these is the whole point; retrying a real refusal spins.
+  const isTransientControlFailure = (msg) =>
+    /unavailable \((?:peers|cohort)-unreachable\)|could not determine whether it exists|exhausted \d+ retries|unresolved rival action|was not atomic/i.test(msg);
+
   setInterval(async () => {
+    if (tickRunning) return; // a previous tick is still awaiting an accept/settle
+    tickRunning = true;
+    try {
     const candidates = new Set();
 
     // Primary: peers already connected to this control node.
@@ -274,17 +309,60 @@ function watchForJoiners() {
     }
 
     for (const peerId of candidates) {
-      if (peerId === selfId || seen.has(peerId)) continue;
-      seen.add(peerId);
-      try {
-        await node.acceptPhone({ phonePeerId: peerId }, issuedInvite ?? undefined);
-        L('ENROL_ACCEPTED=' + peerId);
-      } catch (e) {
-        // Do NOT drop it from `seen` and retry forever: a genuine rejection would spin. The
-        // harness surfaces this line and the run fails at the membership gate, honestly.
-        L('ENROL_FAILED=' + peerId + ' ' + (e?.message ?? e));
+      if (peerId === selfId || settled.has(peerId)) continue;
+
+      const now = Date.now();
+      if (!firstSeenAt.has(peerId)) {
+        firstSeenAt.set(peerId, now);
+        // Deliberately fall through to the delegate guard rather than accepting on sight.
+      }
+
+      // A member's strand node reserves a circuit here under its OWN derived transport
+      // peerId (cadre-core 0.12.0 strand-transport-key). It is admitted natively by
+      // delegate-admission.js via /sereus/strand-addr/1.0.0 — it is NOT a phone, and
+      // running acceptPhone against it writes a spurious CadrePeer row. In the first n=4
+      // device run that spurious write tore a multi-tree commit: `default/CadrePeer`
+      // persisted while its `_uniq_7.stampid` index did not, unrollbackable.
+      if (node.hasDelegateAdmission?.(peerId)) {
+        settled.add(peerId);
+        L('ENROL_SKIPPED_DELEGATE=' + peerId);
         continue;
       }
+      // The grant lands a beat after the strand node first connects — measured at 11s in the
+      // first n=4 device run (connection 09:59:02.392, grant 09:59:13.162) — so a peer seen
+      // only moments ago may be a delegate whose grant has not arrived yet. The grace period
+      // is set ABOVE that measured latency; a phone waiting an extra few seconds costs
+      // nothing across a ~40-minute proof, whereas accepting early corrupts the control DB.
+      if (now - firstSeenAt.get(peerId) < DELEGATE_GRACE_MS) continue;
+
+      if (inFlight.has(peerId)) continue;
+      inFlight.add(peerId); // claimed BEFORE the await — never check-then-act across it
+      try {
+        await node.acceptPhone({ phonePeerId: peerId }, issuedInvite ?? undefined);
+        settled.add(peerId);
+        inFlight.delete(peerId);
+        L('ENROL_ACCEPTED=' + peerId);
+      } catch (e) {
+        const msg = e?.message ?? String(e);
+        // A control write leaves the DB briefly unreadable until replication reaches a second
+        // holder. Accepts run back-to-back in one tick, so joiner N+1's read lands inside the
+        // window joiner N's write just opened — in the first n=4 device run Peer B failed 33ms
+        // after Peer A was accepted, and never retried, which stranded it as a non-member and
+        // failed the whole proof. Retry the outage; never retry a refusal on the merits.
+        const attempts = (transientFailures.get(peerId) ?? 0) + 1;
+        inFlight.delete(peerId); // released so a later tick may retry it
+        if (isTransientControlFailure(msg) && attempts <= ENROL_TRANSIENT_MAX_ATTEMPTS) {
+          transientFailures.set(peerId, attempts);
+          L(`ENROL_RETRY=${peerId} attempt=${attempts}/${ENROL_TRANSIENT_MAX_ATTEMPTS} (control-DB unavailable, not a refusal) ${msg}`);
+          continue;
+        }
+        settled.add(peerId);
+        L('ENROL_FAILED=' + peerId + ' ' + msg);
+        continue;
+      }
+      // Let this write converge before accepting the next candidate in THIS tick, so we stop
+      // manufacturing the very read outage the retry above now has to absorb.
+      await new Promise(r => setTimeout(r, ENROL_SETTLE_MS));
       // Verify separately, and never let a failed READ read as a failed ceremony. The
       // read-back races the control write: in gate runs `isAuthorizedMember` threw
       // `Block default/Revocation is unavailable (peers-unreachable)` on every attempt for a
@@ -292,6 +370,9 @@ function watchForJoiners() {
       // look like it "did not settle" when it had. Confirmation is best-effort; ENROL_ACCEPTED
       // above is the ceremony's real outcome.
       void confirmMember(peerId);
+    }
+    } finally {
+      tickRunning = false;
     }
   }, ENROL_POLL_MS).unref?.();
 }
