@@ -3,6 +3,7 @@ import { t } from '@votetorrent/ui-web';
 import { AdvisoryDisclosure, DetailsToggle, LifecyclePill } from '@votetorrent/ui-web/components';
 import { derivePhase, resolveComparisonInstant } from '@votetorrent/ui-web/lifecycle';
 import { AppChrome } from './AppChrome';
+import { ElectionIndex } from './ElectionIndex';
 import { parseElectionAddress } from '../election-address.js';
 
 /**
@@ -76,6 +77,13 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 					<p className="election-address">
 						{t('public.election.addressLabel')} <code>{address.electionId}</code>
 					</p>
+				) : null}
+				{/* D-34: an address that does not resolve to ONE election gets the
+				    index of what this browser holds, not an error. The two
+				    statuses enumerated positively rather than negated, so the
+				    condition stays live for 'ok'. */}
+				{address.status === 'missing' || address.status === 'incomplete' ? (
+					<ElectionIndex networkHash={address.networkHash} />
 				) : null}
 				<LifecyclePill phase={phase} />
 				{election?.title ? (

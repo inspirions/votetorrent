@@ -20,6 +20,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { publicSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { COPY, t } from '../../../../packages/ui-web/src/index.js';
 import { loadHeldElections, mergeHeldElections, DEFAULT_INDEX_DEPS } from '../../src/election-index-source.js';
 
 /** Same line-based comment-stripping idiom the repo's other tier-1 assertions
@@ -472,4 +473,223 @@ test('this test file\'s own RAW source contains zero occurrences of EITHER hunte
 	for (const literal of [['@votetorrent', 'web-data', 'officer'].join('/'), ['packages', 'web-data'].join('/')]) {
 		assert.equal(own.split(literal).length - 1, 0, `this file names the hunted literal "${literal}" in its own source`);
 	}
+});
+
+// ===========================================================================
+// SOURCE ASSERTIONS OVER ElectionIndex.tsx AND THE SHELL MOUNT POINT.
+//
+// Every one runs against COMMENT-STRIPPED source and is preceded by a planted
+// positive control, because a checker whose own comment quotes its pattern is
+// permanently green and an assertion never seen refusing anything is not
+// evidence.
+// ===========================================================================
+
+const INDEX_TSX_SOURCE = readFileSync(publicSrc('screens', 'ElectionIndex.tsx'), 'utf8');
+const INDEX_TSX_STRIPPED = stripCommentLines(INDEX_TSX_SOURCE);
+const SHELL_TSX_STRIPPED = stripCommentLines(readFileSync(publicSrc('screens', 'ElectionShell.tsx'), 'utf8'));
+
+// -- The mounted copy keys, and TOTALITY in both directions -----------------
+//
+// This is the mechanism that binds 54-09's final key names without
+// transcribing a guess: a rename, an added key nobody mounts, or a mounted key
+// nobody declared all fail HERE, in the file that owns the mounting. `t()`
+// throws on an unknown key, so a guessed name is a hard render failure at
+// first paint rather than a quiet fallback.
+
+/** @type {RegExp} */
+const INDEX_KEY_LITERAL_RE = /['"`](public\.index\.[\w.]+)['"`]/g;
+
+/** @param {string} source @returns {Set<string>} */
+function indexKeysIn(source) {
+	/** @type {Set<string>} */
+	const out = new Set();
+	const re = new RegExp(INDEX_KEY_LITERAL_RE.source, 'g');
+	let m;
+	while ((m = re.exec(source))) out.add(m[1]);
+	return out;
+}
+
+test('positive control: the index-key extractor finds a planted key literal and ignores an unrelated one', () => {
+	const found = indexKeysIn("t('public.index.plantedProbe'); t('public.chrome.appName');");
+	assert.deepEqual([...found], ['public.index.plantedProbe'], 'the key extractor is inert or over-broad');
+});
+
+test('KEY TOTALITY: the public.index.* key set declared in COPY and the set mounted in ElectionIndex.tsx are EQUAL in both directions', () => {
+	const declared = new Set(Object.keys(COPY).filter((k) => k.startsWith('public.index.')));
+	assert.ok(declared.size > 0, 'sanity: COPY declares no public.index.* key at all — this assertion would pass vacuously');
+	const mounted = indexKeysIn(INDEX_TSX_STRIPPED);
+
+	const declaredNotMounted = [...declared].filter((k) => !mounted.has(k)).sort();
+	const mountedNotDeclared = [...mounted].filter((k) => !declared.has(k)).sort();
+
+	assert.deepEqual(declaredNotMounted, [], `declared public.index.* key(s) this screen never mounts: ${declaredNotMounted.join(', ')}`);
+	assert.deepEqual(mountedNotDeclared, [], `public.index.* key(s) mounted here but never declared in COPY -- t() throws on an unknown key, so this is a hard render failure at first paint: ${mountedNotDeclared.join(', ')}`);
+});
+
+test('every key this screen mounts really resolves through t() -- the copy table answers each one', () => {
+	for (const key of indexKeysIn(INDEX_TSX_STRIPPED)) {
+		assert.equal(typeof t(key), 'string', `t('${key}') did not resolve to a string`);
+		assert.ok(t(key).length > 0, `t('${key}') resolved to an empty string`);
+	}
+});
+
+// -- The two conditions are INDEPENDENT -------------------------------------
+//
+// A source-level check, on purpose: a corrupt registry leaves
+// networksUnreadable at 0, so a counter-based guard would silently pass every
+// DOM test that only ever exercises attach failures.
+
+/** @type {RegExp} */
+const COMPLETENESS_GUARD_RE = /\.complete\s*===\s*false|!\s*[\w.]*\bcomplete\b/;
+/** @type {RegExp} */
+const COUNTER_GUARD_RE = /networksUnreadable/;
+
+/**
+ * Mask the counter where it appears as an object-literal PROPERTY KEY or a
+ * type-annotation field -- declaring the field is not guarding on it, and the
+ * screen's fallback result literal must name every field of the result shape.
+ * Everything else -- a comparison, a ternary test, a bare truthiness check,
+ * a destructure -- survives the mask and is caught.
+ * @param {string} source @returns {string}
+ */
+function maskDeclaredFields(source) {
+	return source.replace(/\bnetworksUnreadable\s*:/g, '__declaredResultField:');
+}
+
+test('positive control: the counter-guard matcher fires on the planted counter-based form, and the completeness-guard matcher does NOT accept it', () => {
+	const counterForm = '{resolved.networksUnreadable > 0 ? <p>{t(\'public.index.someUnreadable\')}</p> : null}';
+	assert.match(counterForm, COUNTER_GUARD_RE, 'the counter matcher is inert — it could not catch the wrong guard');
+	assert.doesNotMatch(counterForm, COMPLETENESS_GUARD_RE, 'the completeness matcher accepts the counter-based form — it discriminates nothing');
+});
+
+test('positive control: the property-key mask does NOT hide a real guard -- every guard form survives it', () => {
+	for (const guardForm of [
+		'{resolved.networksUnreadable > 0 ? <p /> : null}',
+		'{resolved.networksUnreadable ? <p /> : null}',
+		'if (r.networksUnreadable) { render(); }',
+		'const { networksUnreadable } = resolved;',
+	]) {
+		assert.match(maskDeclaredFields(guardForm), COUNTER_GUARD_RE, `the mask swallowed a real guard: ${guardForm}`);
+	}
+});
+
+test('negative control: the property-key mask DOES excuse a bare field declaration, which is what makes the scan usable at all', () => {
+	assert.doesNotMatch(maskDeclaredFields('const fallback = { elections: [], networksUnreadable: 0, complete: false };'), COUNTER_GUARD_RE);
+	assert.doesNotMatch(maskDeclaredFields('	networksUnreadable: number;'), COUNTER_GUARD_RE);
+});
+
+test('positive control: the completeness-guard matcher fires on the correct planted form', () => {
+	assert.match('{resolved !== null && resolved.complete === false ? <p /> : null}', COMPLETENESS_GUARD_RE);
+	assert.match('{resolved !== null && !resolved.complete ? <p /> : null}', COMPLETENESS_GUARD_RE);
+});
+
+test('the qualifier is gated on the result\'s COMPLETENESS FLAG and never on a count of unreadable networks', () => {
+	assert.match(INDEX_TSX_STRIPPED, COMPLETENESS_GUARD_RE, 'ElectionIndex.tsx does not test the completeness flag at all');
+	assert.doesNotMatch(
+		maskDeclaredFields(INDEX_TSX_STRIPPED),
+		COUNTER_GUARD_RE,
+		'ElectionIndex.tsx names the unreadable-network counter. A corrupt registry leaves that counter at 0 while the ' +
+			'completeness flag is false, so a counter-based gate lets precisely the corrupt-registry case render an ' +
+			'unqualified "no elections" with no qualifier at all.',
+	);
+});
+
+test('the empty label is gated on EMPTINESS ALONE -- both empty-state elements share one condition, and it is not the completeness one', () => {
+	const emptyGuards = INDEX_TSX_STRIPPED.match(/indexState === 'empty'/g) ?? [];
+	assert.equal(emptyGuards.length, 2, `expected the heading and the body to be gated on emptiness alone, found ${emptyGuards.length} such guard(s)`);
+});
+
+// -- What this screen may render --------------------------------------------
+
+const RAW_HTML_ESCAPE_HATCH_RE = /dangerouslySetInnerHTML/;
+
+test('positive control: the raw-HTML-injection matcher fires on a planted occurrence', () => {
+	assert.match('<div dangerouslySetInnerHTML={{ __html: x }} />', RAW_HTML_ESCAPE_HATCH_RE, 'matcher is inert');
+});
+
+test('ElectionIndex.tsx uses no raw-HTML escape hatch -- titles are authority-supplied text and JSX text-node escaping is the control', () => {
+	assert.doesNotMatch(INDEX_TSX_STRIPPED, RAW_HTML_ESCAPE_HATCH_RE);
+});
+
+/** @param {string} source @returns {string[]} every class-name token rendered. */
+function renderedClassNames(source) {
+	/** @type {string[]} */
+	const out = [];
+	const re = /className="([^"]*)"/g;
+	let m;
+	while ((m = re.exec(source))) out.push(...m[1].split(/\s+/).filter((token) => token !== ''));
+	return out;
+}
+
+test('positive control: the class-name extractor finds a planted class', () => {
+	assert.deepEqual(renderedClassNames('<p className="planted-class other-planted">x</p>'), ['planted-class', 'other-planted']);
+});
+
+test('ElectionIndex.tsx renders ONLY the two class names the stylesheet already declares -- the three sentence-level elements are deliberately unclassed, so this screen requests no new CSS class', () => {
+	const rendered = [...new Set(renderedClassNames(INDEX_TSX_STRIPPED))].sort();
+	assert.deepEqual(rendered, ['election-index', 'election-index__item'], `unexpected class name(s) rendered: ${rendered.join(', ')}`);
+});
+
+// -- Nothing address-shaped or instant-shaped reaches a text node -----------
+//
+// The row's own identifiers are used to BUILD the link and to key the list;
+// neither may be rendered. Nor may a Date: D-26 makes instant display a
+// reader-local, zone-labelled concern owned by a later plan, and an unlabelled
+// date here would pre-empt it with a different convention.
+
+/** @param {string} source @returns {string[]} the text of every expression container in TEXT position. */
+function textPositionExpressions(source) {
+	/** @type {string[]} */
+	const out = [];
+	const re = />\s*\{([^{}]*)\}\s*</g;
+	let m;
+	while ((m = re.exec(source))) out.push(m[1].trim());
+	return out;
+}
+
+test('positive control: the text-position extractor finds a planted rendered identifier and a planted copy call', () => {
+	const planted = '<div>{election.electionId}</div><p>{t(\'public.index.emptyBody\')}</p>';
+	assert.deepEqual(textPositionExpressions(planted), ['election.electionId', "t('public.index.emptyBody')"], 'the text-position extractor is inert');
+});
+
+test('the ONLY text-producing expressions in ElectionIndex.tsx are the t() calls and the election title -- no id, no hash, no date reaches a text node', () => {
+	const expressions = textPositionExpressions(INDEX_TSX_STRIPPED);
+	assert.ok(expressions.length >= 4, `expected at least the four copy calls in text position, found ${expressions.length}`);
+
+	const copyCalls = expressions.filter((expr) => /^t\('public\.index\.[\w.]+'\)$/.test(expr));
+	assert.equal(copyCalls.length, 4, `expected exactly four copy calls in text position, found ${copyCalls.length}: ${copyCalls.join(' | ')}`);
+
+	const others = expressions.filter((expr) => !/^t\('public\.index\.[\w.]+'\)$/.test(expr));
+	for (const expr of others) {
+		assert.ok(/\btitle\b/.test(expr), `a text-producing expression renders something other than a copy call or the title: "${expr}"`);
+		for (const forbidden of ['electionId', 'networkHash', 'Date', 'date']) {
+			assert.ok(!expr.includes(forbidden), `a text-producing expression renders "${forbidden}": "${expr}"`);
+		}
+	}
+});
+
+// -- The shell mount point, and everything about the shell that must not move
+
+test('ElectionShell.tsx mounts <ElectionIndex exactly once, still has exactly ONE return, and still renders all three labelled skeleton slots (D-02: 53-D18 amended, not reversed)', () => {
+	const mounts = SHELL_TSX_STRIPPED.match(/<ElectionIndex\b/g) ?? [];
+	assert.equal(mounts.length, 1, `expected exactly one <ElectionIndex mount, found ${mounts.length}`);
+
+	const returns = SHELL_TSX_STRIPPED.match(/(^|[^\w.])return\b/g) ?? [];
+	assert.equal(returns.length, 1, `ElectionShell.tsx must keep exactly ONE return statement, found ${returns.length}`);
+
+	const slots = SHELL_TSX_STRIPPED.match(/data-slot="[\w-]+"/g) ?? [];
+	assert.equal(slots.length, 3, `expected all three data-slot skeletons to survive, found ${slots.length}: ${slots.join(', ')}`);
+});
+
+test('the shell forwards the addressed network to the index for SCOPING, and the index never renders it', () => {
+	assert.match(SHELL_TSX_STRIPPED, /<ElectionIndex\s+networkHash=\{address\.networkHash\}/, 'the shell does not forward the addressed network hash');
+});
+
+test('the index mount is gated on the address NOT resolving to one election, by positive enumeration of the two statuses -- never on a condition that can never be false', () => {
+	assert.match(
+		SHELL_TSX_STRIPPED,
+		/address\.status === 'missing' \|\| address\.status === 'incomplete'/,
+		"the mount guard drifted. Inside the shell's non-malformed branch the status can only be 'ok', 'missing' or " +
+			"'incomplete', so a negated guard naming 'malformed' would carry a clause that can never be false.",
+	);
 });

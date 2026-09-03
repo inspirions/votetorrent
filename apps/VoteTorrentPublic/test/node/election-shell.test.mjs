@@ -390,16 +390,20 @@ function collectTemplateMountedKeys() {
 
 // -- PENDING MOUNT, an expiring list (54-09) --------------------------------
 //
-// The eleven keys 54-09 authored that sit OUTSIDE the fact model. They are
+// The keys 54-09 authored that sit OUTSIDE the fact model. They are
 // declared now and mounted later, on purpose: `t()` throws on an unknown
 // key, so the copy has to exist before the screens that render it, and the
 // header of `copy.js` records the amended warrant under which they arrive
-// early. Each is bound BY NAME by a render plan in a later wave -- the
-// index strings and the incomplete-holdings qualifier by the index screen,
+// early. Each is bound BY NAME by a render plan in a later wave --
 // the two details-toggle labels and the key-release fail-closed line by the
 // fact-card screen, the freshness line and the two standing caveats by the
 // page-voice screen, and the disclosure-policy failure line by the rules
 // card.
+//
+// 54-11 removed FOUR entries from this list -- the three index strings and
+// the incomplete-holdings qualifier -- because `src/screens/ElectionIndex.tsx`
+// now mounts them. That is the mechanism working as designed: the list shrinks
+// as the render plans land. Eleven entries became seven.
 //
 // This list is NOT a relaxation of the assertion, and two properties make
 // that true rather than merely asserted:
@@ -417,10 +421,6 @@ const PENDING_MOUNT_KEYS = Object.freeze([
 	'public.caveat.timelineUnvalidated',
 	'public.caveat.readOnly',
 	'public.rules.policyUnreadable',
-	'public.index.viewElectionCta',
-	'public.index.emptyHeading',
-	'public.index.emptyBody',
-	'public.index.someUnreadable',
 	'public.gap.detailsSummary',
 	'public.fact.detailsSummary',
 ]);
