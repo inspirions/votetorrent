@@ -25,11 +25,13 @@ module.exports = {
   testPathIgnorePatterns: [
     '<rootDir>/node_modules/',
     '<rootDir>/src/engines/__tests__/cadre-core-node.smoke.spec.ts',
-    // Phase 39 plan 39-04 (Pitfall 4): replication-proof-runner.test.ts is a Phase 41
-    // P2P-track artifact (cross-peer replication). Phase 41 is PAUSED (P2P-11 open at
-    // 41-11); this Phase 39 app-Jest gate scopes to the 3 in-scope suites only and does
-    // NOT attempt to make the P2P runner pass — that is out of scope here.
-    '<rootDir>/src/engines/__tests__/replication-proof-runner.test.ts',
+    // replication-proof-runner.test.ts was excluded here by Phase 39 plan 39-04 because
+    // "Phase 41 is PAUSED (P2P-11 open at 41-11)". It stayed excluded for months and rotted:
+    // its CadreNode mock lost getMultiaddrs(), so the runner threw at the relay-reservation
+    // marker and its own catch-all swallowed the rest of the proof — 4 of 8 tests red, and
+    // NO live behavioural coverage of the runner at all. That is how the runner drifted
+    // undetected through two cadre-core majors. Repaired and re-enabled 2026-09-03; the
+    // exclusion's premise (a paused P2P track) no longer holds.
   ],
   // Allow Babel to transform ESM-only workspace packages and quereus packages
   // so tests can import them without ESM/CJS resolver failures.

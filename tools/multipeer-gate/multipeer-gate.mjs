@@ -318,33 +318,118 @@ async function legControlMesh(founder, all) {
   return true;
 }
 
-/** L2 — the relay-only peers actually hold circuit reservations. */
-async function legRelayReservation(peers) {
+/**
+ * The distinct RELAY IDENTITIES a peer holds circuit addresses through.
+ *
+ * Identity, never address count. One relay listening on several interfaces yields several
+ * `/p2p-circuit` addresses, so counting addresses reads one relay as breadth.
+ */
+function relayIdsOf(node) {
+  const circuits = controlAddrs(node).filter((a) => a.includes('/p2p-circuit'));
+  return {
+    circuits,
+    ids: new Set(circuits.map((c) => c.split('/p2p-circuit')[0].split('/p2p/').pop())),
+  };
+}
+
+/**
+ * L2 — every relay-only peer is REACHABLE BY EVERY COHORT MEMBER.
+ *
+ * Two distinct things, and the leg used to check neither properly.
+ *
+ * 1. A reservation exists. This asserted `circuits.length >= RELAYS`, which counts
+ *    ADDRESSES: drone-A listens on two interfaces, so at RELAYS=2 its two `/p2p-circuit`
+ *    addresses satisfied the count on their own and the leg passed reporting `2 addr/1
+ *    relay` — printing the shortfall inside its own PASS line. Identities are counted now.
+ *
+ *    But the bar is ONE, not RELAYS — on THIS version. cadre-core 0.12.0's
+ *    `driveRelayReservation` dials every configured relay and asks *the first one that answers*
+ *    for a slot, returning as soon as a single `/p2p-circuit` address appears
+ *    (`requestReservation` returns on first success). Verified against the installed dist.
+ *
+ *    This is a CHANGE, not a constant: on 0.11.0 relays were named by a `<relay>/p2p-circuit`
+ *    `listenAddrs` entry (libp2p's 'configured' route, which reserves with EACH named relay),
+ *    and this gate's README records `peer-A=4 addr/2 relay` from that era. 0.12.0's 'search'
+ *    route yields `2 addr/1 relay` for the same config. So `RELAYS` is how many relays are
+ *    OFFERED, and demanding one reservation per relay would fail a healthy 0.12.0 stack. If a
+ *    later version restores per-relay reservations, raise this bar with it.
+ *
+ * 2. Every other cohort member can actually dial the peer. THIS is wall #8 (38-21: drone-B
+ *    raised `NoValidAddressesError` against Peer A 1312x while drone-A raised none, because
+ *    the peer's reservation had landed with drone-A alone). Given (1), a single reservation
+ *    is expected and fine — but only if the non-reserving drones learn a circuit address for
+ *    the peer and can route through the relay that holds it. A reservation count can never
+ *    show that; the other members' peer stores can. Unchecked, a device run fails here and
+ *    reads as an addressing or consensus fault.
+ */
+async function legRelayReservation(peers, drones) {
   const got = await poll(async () => {
-    const seen = peers.map(({ name, node }) => {
-      const circuits = controlAddrs(node).filter((a) => a.includes('/p2p-circuit'));
-      return { name, circuits };
-    });
-    V(`reservations ${seen.map((s) => `${s.name}=${s.circuits.length}`).join(' ')}`);
-    return seen.every((s) => s.circuits.length >= RELAYS) ? seen : null;
+    const seen = peers.map(({ name, node }) => ({ name, ...relayIdsOf(node) }));
+    V(`reservations ${seen.map((s) => `${s.name}=${s.circuits.length}addr/${s.ids.size}relay`).join(' ')}`);
+    return seen.every((s) => s.ids.size >= 1) ? seen : null;
   }, RESERVATION_TIMEOUT_MS, 'relay reservation');
 
   if (!got) {
-    const seen = peers.map(({ name, node }) =>
-      `${name}=${controlAddrs(node).filter((a) => a.includes('/p2p-circuit')).length}`);
+    const seen = peers.map(({ name, node }) => {
+      const { circuits, ids } = relayIdsOf(node);
+      return `${name}=${circuits.length} addr/${ids.size} relay`;
+    });
     record('L2', 'relay-reservation', 'FAIL',
-      `expected >= ${RELAYS} /p2p-circuit multiaddr(s) per relay-only peer, got ${seen.join(' ')}`);
+      `every relay-only peer needs at least one circuit reservation, got ${seen.join(' ')}. ` +
+      'Distinct relay IDENTITIES are counted, not addresses — several addresses of ONE relay ' +
+      'are not breadth.');
     return false;
   }
 
-  // Distinct RELAY identities, not the same relay in several IP forms — a real trap:
-  // three addresses that are all one relay reads as breadth in a naive count.
-  const detail = got.map((s) => {
-    const relayIds = new Set(s.circuits.map((c) => c.split('/p2p-circuit')[0].split('/p2p/').pop()));
-    return `${s.name}=${s.circuits.length} addr/${relayIds.size} relay`;
-  });
-  record('L2', 'relay-reservation', 'PASS', detail.join(' '));
+  // Phase 2 — the reachability half.
+  const reachable = await poll(async () => {
+    const missing = [];
+    for (const d of drones) {
+      for (const p of peers) {
+        if (!(await holdsCircuitAddrFor(d.node, p.node))) missing.push(`${d.name}->${p.name}`);
+      }
+    }
+    V(`reachability missing=${missing.length ? missing.join(',') : 'none'}`);
+    return missing.length === 0 ? true : null;
+  }, RESERVATION_TIMEOUT_MS, 'cohort reachability');
+
+  if (!reachable) {
+    const missing = [];
+    for (const d of drones) {
+      for (const p of peers) {
+        if (!(await holdsCircuitAddrFor(d.node, p.node))) missing.push(`${d.name}->${p.name}`);
+      }
+    }
+    record('L2', 'relay-reservation', 'FAIL',
+      `reservations landed, but these cohort members hold NO circuit address for a relay-only ` +
+      `peer: ${missing.join(' ')}. Such a member cannot dial that peer at all, so its consensus ` +
+      'votes are silently undeliverable — the 38-21 wall, which a reservation count cannot see.');
+    return false;
+  }
+
+  record('L2', 'relay-reservation', 'PASS',
+    `${got.map((s) => `${s.name}=${s.circuits.length} addr/${s.ids.size} relay`).join(' ')} ` +
+    `· all ${drones.length} cohort member(s) hold a circuit path to each peer`);
   return true;
+}
+
+/**
+ * Does `from` hold at least one `/p2p-circuit` address for `target` — i.e. can it dial it?
+ *
+ * The peer store is the same source `connect()` consults, so this asks the question the
+ * dial layer will ask. A peer absent from the store simply has no addresses: not an error.
+ */
+async function holdsCircuitAddrFor(from, target) {
+  const targetId = target.peerId;
+  if (!targetId) return false;
+  // A relay reaching itself is trivially fine and not what this leg is about.
+  if (from.peerId?.toString() === targetId.toString()) return true;
+  try {
+    const peer = await from.getControlNode()?.peerStore?.get(targetId);
+    return (peer?.addresses ?? []).some((a) => a.multiaddr?.toString().includes('/p2p-circuit'));
+  } catch {
+    return false; // not in the store yet
+  }
 }
 
 /**
@@ -623,7 +708,7 @@ async function main() {
 
   // L1 before any strand work: a broken mesh makes every later leg meaningless.
   if (!(await legControlMesh(droneA, all))) return false;
-  if (!(await legRelayReservation(peers))) return false;
+  if (!(await legRelayReservation(peers, drones))) return false;
 
   if (ENROLL) {
     // Gate on the reservation actually landing — see settleTopology(). Without this the

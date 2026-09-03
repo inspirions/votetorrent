@@ -23,7 +23,7 @@ Node >= 22. Exit `0` when all five legs pass, `1` at the first failure.
 
 ```
 PASS  L1  control-reachability — drone-A=3 drone-B=1 peer-A=1 peer-B=1 (founder >= 3, each >= 1)
-PASS  L2  relay-reservation — peer-A=2 addr/1 relay peer-B=2 addr/1 relay
+PASS  L2  relay-reservation — peer-A=2 addr/1 relay peer-B=2 addr/1 relay · all 2 cohort member(s) hold a circuit path to each peer
 PASS  L3  cadre-authorization — peer-A, peer-B authorized
 PASS  L4  strand-cohort — drone-A=2 drone-B=2 peer-A=2 peer-B=2
 PASS  L5  replication — peer-B observed 'gate-row-8uRzAcLQ'
@@ -58,7 +58,7 @@ than a downstream symptom.
 | leg | asserts |
 |---|---|
 | **L1** control-reachability | every node holds >= 1 control connection; the founder sees all of them |
-| **L2** relay-reservation | each relay-only peer exposes a `/p2p-circuit` multiaddr, counted by **distinct relay identity** |
+| **L2** relay-reservation | each relay-only peer holds >= 1 reservation, counted by **distinct relay identity**; and every cohort member holds a circuit path to every peer |
 | **L3** cadre-authorization | the relay-only peers are **authorized cadre members** |
 | **L4** strand-cohort | every strand node assembles a cohort larger than itself |
 | **L5** replication | `peer-A` writes a row; `peer-B` reads it back |
@@ -95,7 +95,7 @@ All optional.
 | env | default | effect |
 |---|---|---|
 | `DRONES=N` | `2` | number of always-on storage nodes |
-| `RELAYS=1\|2` | `1` | how many relays each peer reserves on |
+| `RELAYS=1\|2` | `1` | how many relays each peer is OFFERED (cadre-core 0.12.0 reserves with the first that answers, so this is not the reservation count) |
 | `CLUSTER_SIZE=N` | `2` | `strandClusterSize` — must be identical on every node |
 | `ENROLL=0\|1` | `1` | run the enrolment ceremony; `0` observes the un-enrolled failure |
 | `ENROLL_ATTEMPTS=N` | `5` | bounded retries for the ceremony |
@@ -129,14 +129,14 @@ Two more traps worth knowing when reading raw logs:
 
 ## Verified behaviour
 
-Measured on `@optimystic/db-p2p@0.24.2` / `@serfab/cadre-core@0.11.0`, macOS, Node 22:
+Re-measured 2026-09-03 on `@optimystic/db-p2p@0.27.0` / `@serfab/cadre-core@0.12.0`, macOS, Node 22:
 
 | configuration | result |
 |---|---|
-| default (`DRONES=2 RELAYS=1 ENROLL=1`) | **PASS**, 3/3 consecutive runs |
+| default (`DRONES=2 RELAYS=1 ENROLL=1`) | **4 PASS / 1 FAIL over 5 runs** — the L3 flake below hits this arm too, so it is not `RELAYS=2`-specific |
 | `ENROLL=0` | **FAIL at L3** — `peer-A=false peer-B=false; owner lists 0 authorized member(s)` |
-| `RELAYS=2` | **FAIL at L3** — `Block default/CadrePeer is unavailable (claimed-elsewhere)` — upstream, see below |
-| `DRONES=3` | **FAIL at L3** — same cause, so breadth is not it |
+| `RELAYS=2` | **3 PASS / 2 FAIL over 5 runs** — every failure at L3, `Block default/Revocation is unavailable (peers-unreachable)`. NOT the old `claimed-elsewhere`; see below |
+| `DRONES=3` | not re-measured on this stack |
 
 The `ENROLL=0` arm is the negative control, and it matters: it is the exact failure mode
 seen in a real n=4 device run, and it proves the gate can actually fail. A green gate
@@ -146,7 +146,36 @@ The default PASS establishes that **the n=4 topology does replicate on these ver
 when peers are properly enrolled — so a deployment that still fails should be checked for
 a missing enrolment ceremony before anything upstream is suspected.
 
-### Root-caused: `RELAYS=2` trips an upstream read-repair deadlock
+### `RELAYS=2` — the read-repair deadlock, FIXED in db-p2p 0.27.0
+
+**Status 2026-09-03: the deadlock this section documented is closed.** `RELAYS=2` reached L5
+and the gate went green on 3 of 5 runs; the old `claimed-elsewhere` signature does not appear
+at all. It is no longer a standing reproduction — `repro/` keeps the regression tests.
+
+Two things changed and they are easy to conflate:
+
+* **The deadlock is gone (0.27.0).** A block held by exactly one cohort member could never gain
+  a second, so the founder's solo owner-genesis write was permanently unreadable by every later
+  joiner. 0.27.0 proofs the solo commit, so the certified-claim path can rescue it. History and
+  the full root cause are kept below.
+* **The relay count no longer behaves the same (cadre-core 0.12.0).** This section's old sample
+  read `peer-A=4 addr/2 relay` — TWO reservations. On 0.12.0 the same configuration yields
+  `2 addr/1 relay`: relays moved from a `<relay>/p2p-circuit` `listenAddrs` entry (libp2p's
+  'configured' route, which reserves with EACH named relay) to `network.relayAddrs` (the
+  'search' route, where `driveRelayReservation` dials every relay but asks *the first that
+  answers* for a slot and returns as soon as one `/p2p-circuit` address appears). So `RELAYS=2`
+  no longer widens reservation breadth, and L2's job changed with it — a single reservation is
+  fine only if the OTHER cohort members can still route to the peer, which L2 now asserts
+  directly rather than inferring from a count.
+
+**What is still open: L3 flakes.** 2 of 5 runs at `RELAYS=2` and 1 of 5 on the default
+`RELAYS=1` arm — worse with breadth, but not specific to it. It fails with
+`Block default/Revocation is unavailable (peers-unreachable)` — a control-DB read that cannot be
+served, not a membership verdict. Same shape as the enrolment flake below. A single green run at
+`RELAYS=2` therefore proves nothing; run it several times.
+
+<details>
+<summary>History — the original root-cause writeup (accurate for db-p2p &lt;= 0.26.0)</summary>
 
 Reserving on a **second** relay is enough to break control-DB reads:
 
@@ -184,13 +213,25 @@ during boot with `BlockUnavailableError`.
 PASS. Until then single-relay is the only posture known to work, which is why `RELAYS` defaults
 to `1` — it works by keeping cohort views below 3, not by avoiding the bug.
 
-### Known flake, handled — same root cause
+</details>
+
+### Known flake, handled — and NO LONGER the same root cause
 
 The enrolment ceremony genuinely fails run-to-run: each step writes owner-signed control state
-and then reads it back, and a read issued once the writer's cohort view has widened past 2 hits
-the deadlock above. `ENROLL_ATTEMPTS` retries with linear backoff, which wins while the view is
-still narrow. This is not masking a defect — a peer that is genuinely un-enrollable exhausts
-every attempt and L3 still fails — but it is the same upstream bug, not a race.
+and then reads it back, and the read can be issued before anyone can serve it —
+`Block default/Revocation is unavailable (peers-unreachable)`. `ENROLL_ATTEMPTS` retries with
+linear backoff. This is not masking a defect: a peer that is genuinely un-enrollable exhausts
+every attempt and L3 still fails.
+
+**This paragraph used to attribute the flake to the read-repair deadlock above. That attribution
+is now falsified** — db-p2p 0.27.0 closed the deadlock and the flake survives it, at ~40% on
+`RELAYS=2` and 20% on `RELAYS=1` (2 of 5 and 1 of 5 runs, 2026-09-03). The old explanation
+also predicted it should NOT occur at a cohort view of 2, which the `RELAYS=1` failures refute.
+It is a genuine settling race, not the same upstream bug,
+and it is unexplained. Two observations for whoever picks it up: the failing read is a THROW, not
+a `false` membership answer, so L3 fails outright where it could keep polling; and `enrol()` has
+been seen exhausting all five attempts on a joiner that WAS in fact enrolled, because only the
+read-back was failing.
 
 Owner genesis is run while the founder is **still solo**, before anyone joins, because the write
 needs a quorum the joiners cannot yet serve. That is also what makes the control database singly
