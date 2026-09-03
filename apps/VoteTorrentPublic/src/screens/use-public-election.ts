@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { enableChangePropagation, subscribeToPublicChanges } from '@votetorrent/web-data/public';
 import {
 	PUBLIC_ELECTION_STATE,
 	DEFAULT_PUBLIC_SOURCE,
@@ -57,6 +58,35 @@ export { shouldReadFor };
  * it open (its own header point 6), because D-27 (54-15) subscribes to that
  * handle's change feed. 54-15 EXTENDS THIS SAME CLEANUP to unsubscribe, so
  * that plan extends one lifecycle rather than adding a second one beside it.
+ *
+ * D-27 LANDED HERE, NOT IN `ElectionShell.tsx`, and the difference matters
+ * enough to record. 54-15's plan named the shell as the file to wire; the shell
+ * on disk holds ZERO effects and ZERO awaits and is held to that by
+ * `election-shell.test.mjs` case 12b, precisely so its single `return` — and
+ * therefore `AdvisoryDisclosure`'s unbranchability — cannot be broken by an
+ * async read. A subscription is an effect with a cleanup, so it belongs in the
+ * one place that already owns an effect with a cleanup over the same handle:
+ * this file, exactly as the paragraph above predicted before either plan was
+ * written.
+ *
+ * THE SUBSCRIPTION SHARES THE ATTACH EFFECT, deliberately. A second effect
+ * would have its own lifetime, and either a listener would outlive the handle
+ * it holds or the handle would close while a listener still pointed at it —
+ * both are the leak this one-effect rule exists to foreclose. `unsubscribe()`
+ * and `stop()` therefore run in THIS cleanup, before the close, in that order.
+ *
+ * WHY A NOTICE ONLY INVALIDATES AND NEVER READS. `dataVersion` is a counter in
+ * the read effect's dependency list; a change notice increments it and nothing
+ * else. If the notice performed a read of its own it would be reading through
+ * a handle whose lifetime this effect owns, racing this cleanup — the same
+ * argument `public-election-source.js` header point 7 makes for the key-release
+ * aggregate, one level up.
+ *
+ * `live` IS NOT RENDERED, and that is a D-29/D-30 decision rather than an
+ * oversight. The freshness line already says plainly that the record was loaded
+ * earlier and does not update on its own. A "live" badge would be true only
+ * while some other handle in this origin happens to be writing, which is
+ * claiming reach the system does not have.
  */
 
 export type PublicElectionState = 'reading' | 'ready' | 'notHeld' | 'unreadable';
@@ -104,6 +134,13 @@ export interface KeyReleaseProgress {
 
 export function usePublicElection({ address, election = null, source = DEFAULT_PUBLIC_SOURCE }: UsePublicElectionArgs): UsePublicElectionResult {
 	const [resolved, setResolved] = useState<UsePublicElectionResult | null>(null);
+	/** D-27's invalidation counter. A change notice increments it; nothing else
+	 * reads it, and it is never rendered. Its ONLY job is to be a dependency of
+	 * the read effect below. */
+	const [dataVersion, setDataVersion] = useState(0);
+	/** Stable across renders, so handing it to the seam does not itself become
+	 * a reason for the effect to re-run. */
+	const bumpDataVersion = useCallback(() => setDataVersion((n) => n + 1), []);
 
 	const reads = shouldReadFor(election, address);
 	// Both effect keys are PRIMITIVE, so an address object rebuilt on every
@@ -116,6 +153,10 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 		if (!reads) return undefined;
 		let cancelled = false;
 		let handle: unknown = null;
+		/** D-27. Both live in THIS closure and are released by THIS cleanup —
+		 * see the module header. */
+		let subscription: { live: boolean; unsubscribe: () => void } | null = null;
+		let propagation: { active: boolean; stop: () => void } | null = null;
 
 		readAddressedElection({ status: 'ok', networkHash: networkKey, electionId: electionKey }, source)
 			.then((next) => {
@@ -123,9 +164,29 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 				if (cancelled) {
 					// The address moved on while the attach was in flight. The
 					// facts are discarded AND the handle is released, so a
-					// superseded read never leaks a connection.
+					// superseded read never leaks a connection. Nothing was
+					// subscribed on this handle — the cleanup has already run,
+					// so starting a subscription here would create one nobody
+					// would ever release.
 					void closeQuietly(source, next.db);
 					return;
+				}
+				if (next.db !== null && next.db !== undefined) {
+					// D-27. Propagation FIRST, so the bridge is listening before
+					// the subscription that consumes it exists; both are started
+					// against the handle this effect owns and released together
+					// below. `enableChangePropagation` is the same function a
+					// WRITER calls — that symmetry is what keeps the browser
+					// gate free of test-only plumbing.
+					propagation = enableChangePropagation(next.db, networkKey);
+					subscription = subscribeToPublicChanges(next.db, bumpDataVersion);
+					if (!subscription.live) {
+						// No identifier, no error text: the fact that this handle
+						// exposes no change channel, and nothing else. The page
+						// still renders; it simply stops updating (D-27's
+						// degrade-to-static).
+						console.debug('use-public-election: this handle exposes no change channel; the view will not update on its own');
+					}
 				}
 				setResolved({
 					state: next.state,
@@ -146,11 +207,15 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 
 		return () => {
 			cancelled = true;
-			// 54-15 EXTENDS THIS CLEANUP to unsubscribe `db.onDataChange`
-			// before the close — one lifecycle, not two.
+			// 54-15: unsubscribe, then stop the bridge, then close — one
+			// lifecycle, not two. Both releases are idempotent, so a cleanup
+			// that runs before the attach resolved is a no-op rather than a
+			// throw.
+			subscription?.unsubscribe();
+			propagation?.stop();
 			void closeQuietly(source, handle);
 		};
-	}, [reads, networkKey, electionKey, source]);
+	}, [reads, networkKey, electionKey, source, dataVersion, bumpDataVersion]);
 
 	if (!reads) {
 		// The injected override, and every address that names no election.
