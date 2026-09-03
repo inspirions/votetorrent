@@ -788,6 +788,41 @@ function sliceThreatModel(text) {
 }
 
 /**
+ * PLAN_SEG -- the plan-segment pattern, and the ONE place it is written.
+ *
+ * A plan id's middle segment is two digits OPTIONALLY followed by a single
+ * lowercase letter: `01`, `08`, `03a`, `03b`. The letter is not decoration and
+ * it is not a naming preference -- when a plan is too large for one executor's
+ * context budget the planner SPLITS it into lettered siblings, and the letter
+ * is then part of the plan id everywhere: the filename, every threat id inside
+ * it, every transfer rationale that names it as an owner, and every
+ * `<phase>-SECURITY.md` register row that cites one of its threats.
+ *
+ * A reader tempted to "simplify" this back to a two-digit-only pattern should
+ * know what that costs, because it was measured: with two-digit-only patterns
+ * this checker collected 17 of the 19 plan files in phase 54 and extracted 0
+ * of the 15 threat rows the two lettered siblings declare -- and reported a
+ * clean EXPLAIN while doing it. An absent plan is indistinguishable from a
+ * plan that declared no threats.
+ *
+ * Widening ONLY the file-collection regex is worse than not widening at all:
+ * the lettered files are then collected and counted, their header satisfies
+ * the table check, and every row inside them is still dropped -- so the plan
+ * count rises, the threat count does not, and the under-count survives behind
+ * a number that moved. That half-fix was reproduced deliberately as this
+ * change's negative control. Every site that decomposes a plan id MUST be
+ * built from this constant.
+ *
+ * Bounded on purpose: ONE optional lowercase letter, never an unbounded run
+ * and never a special case naming a particular plan. "Widened" must not become
+ * "matches anything" -- a two-letter suffix and an uppercase suffix are both
+ * still rejected, and the selftest asserts that as a negative case.
+ *
+ * @type {string}
+ */
+const PLAN_SEG = '\\d{2}[a-z]?';
+
+/**
  * Rows are matched on their leading id cell. The exact shape parsed, taken from
  * `52-08-PLAN.md`'s register and reproduced here so the contract is readable
  * without opening a plan:
@@ -806,9 +841,9 @@ function collectPlanThreats(phaseDirAbs, phaseNum) {
   if (!existsSync(phaseDirAbs)) {
     return { plans, threats, problems: [`EMPTY-CORPUS: phase directory ${phaseDirAbs} does not exist`] };
   }
-  const planRe = new RegExp(`^${phaseNum}-\\d{2}-PLAN\\.md$`);
+  const planRe = new RegExp(`^${phaseNum}-${PLAN_SEG}-PLAN\\.md$`);
   const files = readdirSync(phaseDirAbs).filter((f) => planRe.test(f)).sort();
-  const idRe = new RegExp(`^\\|\\s*(T-${phaseNum}-(\\d{2})-(\\d{2}|SC))\\s*\\|`);
+  const idRe = new RegExp(`^\\|\\s*(T-${phaseNum}-(${PLAN_SEG})-(\\d{2}|SC))\\s*\\|`);
   for (const f of files) {
     const text = readFileSafe(path.join(phaseDirAbs, f));
     if (text === null) continue;
@@ -875,12 +910,12 @@ function normaliseDisposition(cell) {
 function extractOwnerRefs(rationale, phaseNum, selfId) {
   const threatIds = new Set();
   const planIds = new Set();
-  const tRe = new RegExp(`T-${phaseNum}-\\d{2}-(?:\\d{2}|SC)`, 'g');
+  const tRe = new RegExp(`T-${phaseNum}-${PLAN_SEG}-(?:\\d{2}|SC)`, 'g');
   let m;
   while ((m = tRe.exec(rationale)) !== null) {
     if (m[0] !== selfId) threatIds.add(m[0]);
   }
-  const pRe = new RegExp(`(?<!T-)\\b${phaseNum}-(\\d{2})\\b(?!-)`, 'g');
+  const pRe = new RegExp(`(?<!T-)\\b${phaseNum}-(${PLAN_SEG})\\b(?!-)`, 'g');
   while ((m = pRe.exec(rationale)) !== null) planIds.add(`${phaseNum}-${m[1]}`);
   return { threatIds: [...threatIds], planIds: [...planIds] };
 }
@@ -982,7 +1017,7 @@ function rationaleMarkers(text, selfId) {
   const markers = [];
   if (/\bD-\d{2}\b/.test(scrubbed)) markers.push('D-NN');
   if (/[\w./-]+\.[A-Za-z]{2,4}:\d+/.test(scrubbed)) markers.push('path:line');
-  if (/T-\d{2}-\d{2}-(?:\d{2}|SC)/.test(scrubbed)) markers.push('T-id');
+  if (new RegExp(`T-\\d{2}-${PLAN_SEG}-(?:\\d{2}|SC)`).test(scrubbed)) markers.push('T-id');
   if (/\bbecause\b/i.test(scrubbed)) markers.push('because');
   return markers;
 }
@@ -1016,7 +1051,7 @@ function evaluateReconcile(docText, corpus, options) {
 
   // Build the source-threat claim map
   const claimedBy = new Map(); // id -> [register row threat names]
-  const idRe = new RegExp(`T-${phaseNum}-\\d{2}-(?:\\d{2}|SC)`, 'g');
+  const idRe = new RegExp(`T-${phaseNum}-${PLAN_SEG}-(?:\\d{2}|SC)`, 'g');
   for (const row of register.rows) {
     const cell = row.sources;
     if (/^none \(phase-level\)$/i.test(cell.trim())) continue;
@@ -1274,6 +1309,16 @@ function runExplain(phaseDirArg) {
   process.stdout.write(
     `corpus: plans=${corpus.plans.length} threats=${corpus.threats.length} (non-supply-chain=${corpus.threats.filter((t) => !t.isSupplyChain).length})\n`,
   );
+  // Per-file, by name, with each file's own extracted row count. The totals
+  // line above cannot distinguish "collected and parsed" from "collected and
+  // silently contributing zero rows" -- which is exactly the half-fix shape
+  // PLAN_SEG's comment describes. This line makes that distinguishable
+  // without importing anything, and it is EXPLAIN-ONLY output: no verdict,
+  // no problem code, no floor reads it.
+  for (const f of corpus.plans) {
+    const n = corpus.threats.filter((t) => t.planFile === f).length;
+    process.stdout.write(`  plan-file: ${f} rows=${n}\n`);
+  }
   for (const p of corpus.problems) process.stdout.write(`  corpus-problem: ${p}\n`);
 
   const docText = readFileSafe(info.docPath);
@@ -1956,6 +2001,137 @@ function runSelftest() {
       const f = reconFixture('r26b', plans, doc);
       const r = check('26b bad register header', false, evaluateReconcile(f.doc, f.corpus, RECON_OPTS));
       expectToken('26b token', r, 'BAD-REGISTER-HEADER');
+    }
+
+    // -----------------------------------------------------------------
+    // 26c-26f. LETTERED PLAN SIBLINGS (PLAN_SEG).
+    //
+    // A plan too large for one executor's context budget is split into
+    // lettered siblings, and the letter is part of the plan id at every site
+    // that decomposes one. These four cases pin BOTH halves of that: the
+    // lettered file is collected AND its rows are extracted. Asserting only
+    // the first is the half-fix -- collected, counted, and every row silently
+    // dropped -- which was reproduced deliberately against the live phase-54
+    // corpus and reported plans=19 with the threat count unmoved.
+    // -----------------------------------------------------------------
+
+    // 26c. POSITIVE, both halves: a corpus holding a two-digit plan and a
+    //      lettered sibling collects both files AND extracts the lettered
+    //      file's rows, with `plan` carrying the letter so byPlan groups on
+    //      the real id rather than collapsing 90-01a into 90-01.
+    {
+      total++;
+      const plans = {
+        '90-01-PLAN.md': planDoc([['T-90-01-01', 'Tampering', 'thing', 'mitigate', 'Local.']]),
+        '90-01a-PLAN.md': planDoc([
+          ['T-90-01a-01', 'Spoofing', 'lettered', 'mitigate', 'Local.'],
+          ['T-90-01a-SC', 'Tampering', 'installs', 'mitigate', 'None introduced.'],
+        ]),
+      };
+      const f = reconFixture('r26c', plans, securityDoc({ registerRows: [], residualBody: 'n/a' }));
+      if (!f.corpus.plans.includes('90-01a-PLAN.md')) {
+        failures.push(`26c: the lettered plan file was not collected (plans=${JSON.stringify(f.corpus.plans)})`);
+      }
+      if (!f.corpus.plans.includes('90-01-PLAN.md')) {
+        failures.push('26c: widening the pattern lost the plain two-digit plan file');
+      }
+      // The assertion that would have caught the half-fix: the file being in
+      // `plans` proves nothing about whether any row inside it was parsed.
+      const lettered = f.corpus.threats.filter((t) => t.planFile === '90-01a-PLAN.md');
+      if (lettered.length !== 2) {
+        failures.push(`26c: expected 2 threat rows extracted from the lettered plan, got ${lettered.length}`);
+      }
+      if (!f.corpus.threats.some((t) => t.id === 'T-90-01a-01' && t.plan === '90-01a')) {
+        failures.push(
+          `26c: T-90-01a-01 was not extracted with plan '90-01a' (got ${JSON.stringify(f.corpus.threats.map((t) => [t.id, t.plan]))})`,
+        );
+      }
+      if (!f.corpus.threats.some((t) => t.id === 'T-90-01a-SC' && t.isSupplyChain === true)) {
+        failures.push('26c: the lettered supply-chain row was not recognised as supply-chain');
+      }
+      // Sort order, confirmed rather than assumed: the plain plan sorts before
+      // its lettered sibling, and a later plan sorts after both.
+      const ordered = collectPlanThreats(f.dir, '90').plans;
+      if (ordered.join(',') !== '90-01-PLAN.md,90-01a-PLAN.md') {
+        failures.push(`26c: unexpected collection order ${ordered.join(',')}`);
+      }
+    }
+
+    // 26d. NEGATIVE, the pattern stays bounded: a two-letter suffix and an
+    //      uppercase suffix are both rejected. "Widened" must not become
+    //      "matches anything" -- without this, `\d{2}[a-z]*` or `\d{2}\w?`
+    //      would pass 26c just as well and admit filenames nobody intended.
+    {
+      total++;
+      negativeTotal++;
+      const plans = {
+        '90-01-PLAN.md': planDoc([['T-90-01-01', 'Tampering', 'thing', 'mitigate', 'Local.']]),
+        '90-01ab-PLAN.md': planDoc([['T-90-01ab-01', 'Spoofing', 'two letters', 'mitigate', 'Local.']]),
+        '90-01A-PLAN.md': planDoc([['T-90-01A-01', 'Spoofing', 'uppercase', 'mitigate', 'Local.']]),
+        '90-1a-PLAN.md': planDoc([['T-90-1a-01', 'Spoofing', 'one digit', 'mitigate', 'Local.']]),
+      };
+      const f = reconFixture('r26d', plans, securityDoc({ registerRows: [], residualBody: 'n/a' }));
+      const admitted = f.corpus.plans.filter((x) => x !== '90-01-PLAN.md');
+      if (admitted.length !== 0) {
+        failures.push(`26d: the bounded pattern admitted out-of-shape filenames ${JSON.stringify(admitted)}`);
+      } else {
+        negativeRejected++;
+      }
+    }
+
+    // 26e. A TRANSFER whose rationale names the lettered plan id resolves,
+    //      and raises no TRANSFER-UNOWNED. This is site 883 (`pRe`): its
+    //      trailing word-boundary-then-not-a-hyphen guard was CHECKED, not
+    //      assumed, to still behave with a letter present -- `90-01a` inside
+    //      `T-90-01a-01` must not be extracted as a plan reference, and
+    //      `90-01a` standing alone must be.
+    {
+      const plans = {
+        '90-02-PLAN.md': planDoc([
+          [
+            'T-90-02-01',
+            'Tampering',
+            'thing',
+            'mitigate (upstream control)',
+            'The control is on the write side and already exists in `90-01a`.',
+          ],
+        ]),
+        '90-01a-PLAN.md': planDoc([
+          ['T-90-01a-01', 'Tampering', 'thing', 'mitigate', 'Owned here; this is the control 90-02 defers to.'],
+        ]),
+      };
+      const doc = securityDoc({
+        registerRows: [['R1', 'Tampering', 'thing', 'mitigate', 'T-90-01a-01, T-90-02-01', 'MITIGATED', 'x']],
+        residualBody: 'nothing accepted.',
+      });
+      const f = reconFixture('r26e', plans, doc);
+      const r = check('26e lettered transfer owner resolves', true, evaluateReconcile(f.doc, f.corpus, RECON_OPTS));
+      if (String(r?.problems ?? []).includes('TRANSFER-UNOWNED')) {
+        failures.push('26e: a transfer naming a lettered plan as its owner was reported unowned');
+      }
+      // Site 883 directly: the id form must NOT leak a plan reference.
+      const refs = extractOwnerRefs('see T-90-01a-01 and also 90-01a itself', '90', 'T-90-02-01');
+      if (!refs.planIds.includes('90-01a')) failures.push(`26e: extractOwnerRefs missed the bare lettered plan id (${JSON.stringify(refs)})`);
+      if (!refs.threatIds.includes('T-90-01a-01')) failures.push(`26e: extractOwnerRefs missed the lettered threat id (${JSON.stringify(refs)})`);
+      if (refs.planIds.length !== 1) failures.push(`26e: extractOwnerRefs over-extracted plan ids ${JSON.stringify(refs.planIds)}`);
+    }
+
+    // 26f. Site 985: an `accept` justified ONLY by a lettered threat id must
+    //      carry the T-id rationale marker. Without this widening the row is
+    //      reported as carrying no marker and fails ACCEPT-NO-RATIONALE.
+    {
+      total++;
+      const markers = rationaleMarkers(
+        'Accepted; the whole condition is already carried upstream by T-54-03a-05 and nothing here widens it.',
+        'T-90-01-01',
+      );
+      if (!markers.includes('T-id')) {
+        failures.push(`26f: a rationale citing a lettered threat id carried no T-id marker (got ${JSON.stringify(markers)})`);
+      }
+      const none = rationaleMarkers('Accepted; no citation of any kind appears in this sentence at all.', 'T-90-01-01');
+      if (none.includes('T-id')) {
+        failures.push('26f: the T-id marker fired on a rationale citing no threat id -- the probe does not discriminate');
+      }
     }
 
     // 27. LIVE CORPUS. Guarded with existsSync; a missing phase directory FAILS
