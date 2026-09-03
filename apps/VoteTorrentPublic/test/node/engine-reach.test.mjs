@@ -251,15 +251,94 @@ const RAW_HANDLE_PACKAGES = Object.freeze([
  * ONLY on the condition asserted below. @type {ReadonlyArray<string>} */
 const DEDUPE_ONLY_PACKAGES = Object.freeze(['@quereus/quereus', '@quereus/plugin-indexeddb']);
 
+/**
+ * AMENDMENT LEDGER (54-16). Two raw-handle packages are now admitted in
+ * `devDependencies` ONLY, and the narrowing is deliberate rather than a
+ * concession.
+ *
+ * Until 54-16 no fixture in this repo could seed `RegistrantPublic`:
+ * `Registrant.SignatureValid` calls the crypto plugin FOR REAL — it has no
+ * `context.IsSignatureValid` escape hatch — so a roll fixture must hold a
+ * signing primitive, and a tier-1 suite must hold an IndexedDB shim to run at
+ * all. Without them `readRegistrantRoll` stays parse-proven and never
+ * data-proven, which is the coverage gap D-54-08-01 recorded.
+ *
+ * WHAT KEEPS THIS A RULE RATHER THAN A HOLE, in three parts:
+ *   1. `dependencies` stays clean — asserted directly below. A test-only
+ *      package that appears in `dependencies` is a production raw handle no
+ *      matter which list it ALSO appears in.
+ *   2. Nothing under `src/` may IMPORT either package — already asserted by
+ *      section 4b's import scan, which covers every entry of
+ *      `RAW_HANDLE_PACKAGES` including these two, in all three specifier forms,
+ *      and has its own positive control. That scan is the real teeth: a
+ *      manifest entry hands nobody a handle, an import does.
+ *   3. Nothing under `src/` may import the fixtures that DO use them — D-17,
+ *      asserted by `election-harness.test.mjs`.
+ * @type {ReadonlyArray<string>}
+ */
+const TEST_ONLY_PACKAGES = Object.freeze(['@optimystic/quereus-plugin-crypto', 'fake-indexeddb']);
+
+/**
+ * The two manifest comparators, as pure functions over an already-parsed
+ * manifest, so the controls below can exercise the SAME code the real check
+ * runs rather than a re-implementation of it that could pass while the real one
+ * is inert.
+ * @param {{ dependencies?: Record<string, string>, devDependencies?: Record<string, string> }} manifest
+ * @returns {{ unexplained: string[], leakedToRuntime: string[] }}
+ */
+function rawHandleManifestOffenders(manifest) {
+	const runtimeDeps = { ...(manifest.dependencies ?? {}) };
+	const declared = { ...runtimeDeps, ...(manifest.devDependencies ?? {}) };
+	const admitted = [...DEDUPE_ONLY_PACKAGES, ...TEST_ONLY_PACKAGES];
+	return {
+		unexplained: RAW_HANDLE_PACKAGES.filter((dep) => dep in declared && !admitted.includes(dep)),
+		leakedToRuntime: TEST_ONLY_PACKAGES.filter((dep) => dep in runtimeDeps),
+	};
+}
+
+test('positive control: the manifest comparators fire on an unadmitted raw-handle dependency and on a test-only package promoted into dependencies', () => {
+	const unadmitted = rawHandleManifestOffenders({ dependencies: { '@quereus/store': '1.0.0' } });
+	assert.deepEqual(
+		unadmitted.unexplained,
+		['@quereus/store'],
+		'the unadmitted-dependency comparator is inert — it accepted a raw-handle package on no exemption at all',
+	);
+
+	const promoted = rawHandleManifestOffenders({ dependencies: { 'fake-indexeddb': '^6.2.5' } });
+	assert.deepEqual(
+		promoted.leakedToRuntime,
+		['fake-indexeddb'],
+		'the test-only comparator is inert — it accepted a fixture package sitting in production dependencies',
+	);
+});
+
+test('benign control: the manifest comparators accept the app as it stands, with the test-only packages in devDependencies', () => {
+	const benign = rawHandleManifestOffenders({
+		dependencies: { '@quereus/quereus': '4.17.1', '@quereus/plugin-indexeddb': '4.17.1', react: '19.0.0' },
+		devDependencies: { '@optimystic/quereus-plugin-crypto': '^0.25.1', 'fake-indexeddb': '^6.2.5' },
+	});
+	assert.deepEqual(benign, { unexplained: [], leakedToRuntime: [] });
+});
+
 test('the manifest declares no DIRECT dependency on a raw-handle package, EXCEPT the two the single-instance obligation forces — and each of those must appear in resolve.dedupe, which is the only reason it is admitted', () => {
 	const manifest = JSON.parse(readFileSync(publicRoot('package.json'), 'utf8'));
 	const declared = { ...(manifest.dependencies ?? {}), ...(manifest.devDependencies ?? {}) };
+	const { unexplained, leakedToRuntime } = rawHandleManifestOffenders(manifest);
 
-	const unexplained = RAW_HANDLE_PACKAGES.filter((dep) => dep in declared && !DEDUPE_ONLY_PACKAGES.includes(dep));
 	assert.deepEqual(
 		unexplained,
 		[],
 		`the manifest declares a DIRECT dependency that hands this app a raw database handle: ${unexplained.join(', ')}`,
+	);
+
+	// Part 1 of the ledger above: a test-only exemption is only an exemption
+	// while the package stays OUT of `dependencies`. In `dependencies` it is a
+	// production raw handle with a story attached.
+	assert.deepEqual(
+		leakedToRuntime,
+		[],
+		'these packages are admitted for TEST FIXTURES ONLY and must appear in devDependencies, never in ' +
+			`dependencies: ${leakedToRuntime.join(', ')}`,
 	);
 
 	// The condition that makes the exemption a rule rather than a hole: a
