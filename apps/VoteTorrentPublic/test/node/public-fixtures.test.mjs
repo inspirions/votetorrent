@@ -39,29 +39,31 @@ import {
 	closeNetworkDb,
 	deleteNetworkDb,
 	readRegistrantRoll,
+	readKeyReleaseProgress,
+	assertRowCounts,
+	RowCountMismatchError,
 } from '@votetorrent/web-data/public';
-import { seedFoundingAuthority } from '../../../../packages/web-data/test/fixtures/seed-founding-authority.js';
-import {
-	ceremony,
-	seedElectionSurface,
-	SEED_NOW,
-	SEED_ELECTION,
-} from '../../../../packages/web-data/test/fixtures/seed-election-surface.js';
 import {
 	ROLL_REGISTRANTS,
 	ROLL_SUPERSEDED,
 	EXPECTED_ROLL_LAST_NAMES,
 	EXTRA_FIELDS_MARKER,
 	ROLL_EXPECTED_COUNTS,
-	seedRegistrantRoll,
 } from '../fixtures/registrant-roll-fixture.js';
-
-/**
- * A fixed hash distinct from the dashboard's `GATE_NETWORK_HASH`, so the two
- * apps' fake/real IndexedDB databases can never collide.
- * @type {string}
- */
-const FIXTURE_NETWORK_HASH = 'vtxfixture54';
+import {
+	EXPECTED_RELEASED,
+	EXPECTED_TOTAL,
+	EXPECTED_KEYHOLDERS,
+} from '../fixtures/keyrelease-fixture.js';
+import {
+	FIXTURE_NETWORK_HASH,
+	FIXTURE_ELECTION_DB_ID,
+	FIXTURE_REVISION,
+	FIXTURE_SETTLING_INSTANT,
+	PUBLIC_SURFACE_EXPECTED_COUNTS,
+	SEED_TIMELINE,
+	seedPublicSurface,
+} from '../fixtures/seed-public-surface.js';
 
 /** @type {import('@quereus/quereus').Database} */
 let db;
@@ -100,12 +102,10 @@ test('the superseded name cannot match a current one by accident, in either dire
 	}
 });
 
-test('seed: founding authority, election surface, and the vrg-signed registrant roll', async () => {
+test('seed: the whole public surface through the one composition both tiers call', async () => {
 	await deleteNetworkDb(FIXTURE_NETWORK_HASH).catch(() => {});
 	db = await createNetworkDb(FIXTURE_NETWORK_HASH);
-	await seedFoundingAuthority(db);
-	await seedElectionSurface(db);
-	await seedRegistrantRoll(db, ceremony, { electionId: SEED_ELECTION.id, seedNow: SEED_NOW });
+	await seedPublicSurface(db);
 
 	for (const [table, expected] of Object.entries(ROLL_EXPECTED_COUNTS)) {
 		// eslint-disable-next-line no-await-in-loop -- sequential against one shared handle
@@ -122,7 +122,7 @@ test('the reissued registrant genuinely fans out to two public records (D-18)', 
 });
 
 test('readRegistrantRoll returns exactly the four current registrants', async () => {
-	rollRows = await readRegistrantRoll(db, SEED_ELECTION.id);
+	rollRows = await readRegistrantRoll(db, FIXTURE_ELECTION_DB_ID);
 	assert.equal(rollRows.length, 4);
 	assert.deepEqual(
 		rollRows.map((r) => r.LastName).sort(),
@@ -160,7 +160,7 @@ test('positive control: without the Cid pin the same join publishes the supersed
 		"select RP.LastName from ElectionRegistrant ER join Registrant R on R.Id = ER.RegistrantId join RegistrantPublic RP on RP.RegistrantId = R.Id where ER.ElectionId = :electionId and R.Status = 'a'";
 	/** @type {string[]} */
 	const names = [];
-	for await (const r of db.eval(unpinned, { electionId: SEED_ELECTION.id })) {
+	for await (const r of db.eval(unpinned, { electionId: FIXTURE_ELECTION_DB_ID })) {
 		names.push(String(r.LastName));
 	}
 	assert.equal(names.length, 5, 'the unpinned join must fan out to five rows');
@@ -185,6 +185,84 @@ test('every returned District carries the synthetic-data marker', () => {
 	for (const row of rollRows) {
 		assert.ok(String(row.District).includes('vtx-fixture'), `District "${row.District}" is not obviously synthetic`);
 	}
+});
+
+// ---------------------------------------------------------------------------
+// D-14 — the key-release aggregate, and the row-count contract over every table
+// these fixtures newly seed.
+// ---------------------------------------------------------------------------
+
+test('the fixture revision matches the revision the election surface actually inserted', async () => {
+	// `FIXTURE_REVISION` is re-declared in `seed-public-surface.js` because
+	// `seed-election-surface.js` does not export it. This is what makes that
+	// re-declaration a checked mirror rather than a guess: a divergence fails
+	// here instead of surfacing as a silently empty aggregate downstream.
+	const row = await db
+		.prepare('select Revision from ElectionRevision where ElectionId = :eid')
+		.get({ eid: FIXTURE_ELECTION_DB_ID });
+	assert.equal(Number(row?.Revision), FIXTURE_REVISION);
+});
+
+test('the settling instant sits strictly inside the timeline it claims to (D-14)', () => {
+	assert.ok(
+		FIXTURE_SETTLING_INSTANT > SEED_TIMELINE.tallyingStarts,
+		`${FIXTURE_SETTLING_INSTANT} must follow tallyingStarts ${SEED_TIMELINE.tallyingStarts}`,
+	);
+	assert.ok(
+		FIXTURE_SETTLING_INSTANT < SEED_TIMELINE.closed,
+		`${FIXTURE_SETTLING_INSTANT} must precede closed ${SEED_TIMELINE.closed}`,
+	);
+});
+
+test('readKeyReleaseProgress reports a non-zero released strictly below total (D-14)', async () => {
+	const progress = await readKeyReleaseProgress(db, FIXTURE_ELECTION_DB_ID, FIXTURE_REVISION);
+	assert.equal(progress.released, EXPECTED_RELEASED);
+	assert.equal(progress.total, EXPECTED_TOTAL);
+	assert.equal(progress.keyholderCount, EXPECTED_KEYHOLDERS);
+
+	// The two facts that actually matter, asserted RELATIONALLY rather than as
+	// the literals above: `0 of 0` and `N of N` each render a degenerate
+	// sentence that hides an aggregate bug, so a fixture that drifted into
+	// either extreme must fail here even if the literals were updated to match.
+	assert.ok(progress.released > 0, 'released must be non-zero — a stuck-at-zero aggregate would look correct at 0 of 0');
+	assert.ok(
+		progress.released < progress.total,
+		'released must be strictly below total — an aggregate counting tasks instead of completions looks correct at N of N',
+	);
+});
+
+test('the aggregate leaks no key that could identify a keyholder (D-14)', async () => {
+	const progress = await readKeyReleaseProgress(db, FIXTURE_ELECTION_DB_ID, FIXTURE_REVISION);
+	assert.deepEqual(
+		Object.keys(progress).sort(),
+		['keyholderCount', 'released', 'total'],
+		`unexpected key set: ${JSON.stringify(Object.keys(progress))}`,
+	);
+});
+
+test('the merged row-count expectation puts User at 5, not the founding fixture 1', () => {
+	// The spread order in `seed-public-surface.js` is load-bearing. Asserted
+	// here so a wrongly-ordered spread fails at its cause rather than as a
+	// mystery count mismatch below.
+	assert.equal(PUBLIC_SURFACE_EXPECTED_COUNTS.User, 5);
+});
+
+test('assertRowCounts holds over every table the public surface seeds', async () => {
+	// This is how the row-count integrity contract learns about
+	// RegistrantPublic, Task, ReleaseKeyTaskExtension, Keyholder and InviteSlot
+	// without editing `packages/web-data/test/reattach.test.mjs`, which belongs
+	// to another plan.
+	const live = await assertRowCounts(db, PUBLIC_SURFACE_EXPECTED_COUNTS);
+	assert.deepEqual(live, { ...PUBLIC_SURFACE_EXPECTED_COUNTS });
+});
+
+test('positive control: assertRowCounts rejects a deliberately wrong RegistrantPublic count', async () => {
+	// Without this, an expectation object that silently lost its new keys would
+	// still report green — the check would simply have less to check.
+	await assert.rejects(
+		() => assertRowCounts(db, { ...PUBLIC_SURFACE_EXPECTED_COUNTS, RegistrantPublic: 4 }),
+		RowCountMismatchError,
+	);
 });
 
 test('teardown: close the shared handle', async () => {
