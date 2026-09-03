@@ -1,4 +1,4 @@
-# repro — the single-holder corroboration deadlock, and its regression gate
+# repro — upstream Optimystic reproductions, and their regression gates
 
 Originally the evidence for **"a block with one holder can never gain a second, so everything
 written before a cohort reached three is permanently unreadable"** — filed upstream as
@@ -23,7 +23,7 @@ corroboration floor exists to prevent. Upstream made the founding write *prove i
 So the variable was never really holder count. It was whether the block carries a proof — and
 before 0.27.0 the one block guaranteed to be singly held was the one block that had none.
 
-## The three artifacts
+## The corroboration-deadlock artifacts (Optimystic #15, closed)
 
 | file | what it is | needs |
 |---|---|---|
@@ -33,8 +33,25 @@ before 0.27.0 the one block guaranteed to be singly held was the one block that 
 
 ```bash
 npm install                          # from tools/multipeer-gate
-node --test repro/*.test.mjs         # 23 tests, all green on 0.27.0
+node --test repro/*.test.mjs         # 26 tests, all green on 0.27.0
 ```
+
+## The multi-tree tear artifacts (Optimystic #17 / #18, open)
+
+Found by the n=4 on-device replication proof on 2026-09-03, filed the same day. Both issues carry
+these files inline, so the copies here and the copies upstream must not drift apart.
+
+| file | what it is | needs |
+|---|---|---|
+| `legacy-multi-tree-tear.test.mjs` | [#17][17] — a table and the tree enforcing **its own** unique constraint are separate entries in `commitDirtyTreesLegacy`'s sequential sweep, so a failed index sync persists the row without its index and cannot roll back. Exported plugin API only, no mesh | nothing but the package |
+| `probe-rival-conflict.mjs` | [#18][18] — the trigger: `pending conflict: unresolved rival action(s)` exhausting the 10-retry budget (~30-34s per write on-device). **This probe does NOT reproduce it** — it stays green across 4 shapes, which is the point: it narrows where the cause is not | nothing but the package |
+
+[17]: https://github.com/gotchoices/Optimystic/issues/17
+[18]: https://github.com/gotchoices/Optimystic/issues/18
+
+`probe-rival-conflict.mjs` is a probe, not a gate — it is excluded from the `*.test.mjs` glob on
+purpose. A green run of it proves nothing about the product; it only records that the in-process
+mesh does not exercise whatever the device does.
 
 ## Why a green run here means something
 
