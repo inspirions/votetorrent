@@ -464,41 +464,252 @@ test('control 2: the new packages/ui-web/src/lifecycle/ root exists on disk and 
 });
 
 // ---------------------------------------------------------------------------
-// 10. Phase-54 boundary — STAGED retirement (54-05 Task 2 Part A).
+// 10. D-24 — no URL input selects a phase.
 //
-// PHASE_54_FORBIDDEN_RE gives up exactly the two words this phase's model
-// now legitimately owns:
-//   - `derivePhase` is the shell's own derivation as of Part B's repoint
-//     below (src/screens/ElectionShell.tsx).
-//   - `settling` is a real phase id that 54-09's copy and 54-12's render
-//     will both spell out; fencing a word the model uses would manufacture
-//     a mystery failure later.
-// The seven remaining terms stay enforced because they fence something
-// that genuinely has not happened yet: D-01's real IndexedDB read must not
-// appear in public src/ before 54-10 (wave 5) has reconciled
-// engine-preflight.js's deliberate named-import discipline (that file's
-// own header says, in as many words, not to "fix" it back to the
-// dashboard's wildcard shape). 54-10 owns the rest of this retirement,
-// together with assert-engine-reach.mjs's DB_OPENING_SYMBOL_RE.
+// RETIREMENT LEDGER (54-10, wave 5) ------------------------------------------
+//
+// What stood here until now was a single regex asserting ZERO occurrences of
+// a named token list anywhere under src/. Phase 53 built it as a deliberate
+// SCOPE FENCE -- a marker saying "the empty-shell phase has not started on
+// the next phase's territory" -- and never as a security control. D-01 and
+// D-06 move that boundary on purpose, so the fence is obsolete BY DESIGN:
+// this phase IS that territory.
+//
+// The removal is PLANNED WORK owned by 54-10, recorded at
+// `.planning/phases/54-public-no-login-election-view/54-ISSUES.md` I-02 and
+// `54-RESEARCH.md` Pitfall 1. Left in place it would have turned red during
+// waves 6-7 as a mystery CI failure, and the pressure at that moment is to
+// delete it quietly -- which is exactly the thing I-02 exists to prevent.
+//
+// This is the COMPLETION OF A STAGED RETIREMENT, not a second unrelated
+// deletion. 54-05 (wave 2) already dropped two of the nine alternatives for
+// its own forced reason -- the shell's phase-derivation function and one real
+// phase id, both made unsatisfiable by its ElectionShell.tsx repoint -- and
+// left a comment naming 54-10 as the owner of the rest. Seven alternatives
+// remained in force when this plan opened the file.
+//
+// Where each retired term's coverage went, term by term, so a later reader
+// does not have to infer it:
+//
+//   - The four DATABASE-OPENING PRIMITIVES lose NOTHING AT ALL. They are the
+//     terms spelled out in `test/node/engine-reach.test.mjs`'s own matcher --
+//     deliberately not re-spelled in this comment, because a checker's
+//     neighbour quoting the literals another checker hunts is how this repo
+//     has manufactured a permanently-green gate several times in this phase.
+//     That file's source scan enforced those terms INDEPENDENTLY of this one
+//     and SURVIVES; 54-10 narrows it from a prohibition into a DELEGATION
+//     rule -- the app may never open a database itself, and reaches one only
+//     through `@votetorrent/web-data/public` (D-03/D-04).
+//   - The three-bucket term is covered phase-wide, with its own positive
+//     control, by `packages/ui-web/test/three-bucket-absent.test.mjs`
+//     (54-05, D-07).
+//   - The remaining two -- a module filename and a networks-listing function
+//     name -- were pure territory markers with no security content. They go
+//     uncovered, deliberately and on the record.
+//
+// WHAT SECTION 10 PROVES INSTEAD (D-24) --------------------------------------
+//
+// No URL input may choose which lifecycle phase a visitor is shown. The `at`
+// prop stays exactly the injectable, test-only seam Phase 53 built (see
+// `ElectionShell.tsx`'s `at` doc comment and `election-address.js`'s header
+// point 4, which names the same threat as T-53-07-04).
+//
+// The two matchers below run over TWO ROOTS WITH OPPOSITE EXPECTATIONS --
+// zero matches under `src/`, at least one under `test/browser/` -- rather
+// than over one root with an exception list. An exception list is the
+// weakening path, and a shared root would force the whole assertion to be
+// dropped the first time the harness legitimately tripped it. The harness
+// half is also the only thing proving the production half's green is a REAL
+// absence rather than an inert matcher.
 // ---------------------------------------------------------------------------
 
-const PHASE_54_FORBIDDEN_RE = /\b(threeBucket|facts\.js|listPublicNetworks|initDB|prepareDb|registerDbPlugins|indexedDB)\b/;
+/**
+ * The phase/time-selection query-parameter vocabulary D-24 forbids as an
+ * input. Held as a delimited frozen constant so no matcher literal is ever
+ * loose in prose. Deliberately EXCLUDES `election` (and any network
+ * parameter a later wave adds): those address WHICH election is shown, not
+ * WHICH PHASE it is shown in, and D-33 requires them.
+ * @type {ReadonlyArray<string>}
+ */
+const PHASE_SELECTION_PARAM_NAMES = Object.freeze(['phase', 'at', 'now', 'instant', 'asof', 'when', 'time', 'clock']);
 
-test('positive control: the phase-54-boundary matcher fires on a planted initDB occurrence', () => {
-	// Repointed from `derivePhase` (54-05): the narrowed regex above no
-	// longer matches that token, so the old control would have silently
-	// stopped firing -- the exact vacuous-gate failure this repo keeps
-	// re-learning. `initDB` is one of the seven terms still enforced.
-	assert.match('const x = initDB(y);', PHASE_54_FORBIDDEN_RE);
+const PHASE_SELECTION_ALTERNATION = PHASE_SELECTION_PARAM_NAMES.join('|');
+
+/**
+ * Matches a query-parameter READ, never a bare identifier — built
+ * programmatically from the frozen array above so the two can never drift.
+ * Two branches: a `.get`/`.getAll`/`.has` call whose argument is one of the
+ * names in single, double or backtick quotes; and a raw `?name=`/`&name=`
+ * query-string literal. Matching the READ rather than the word is what keeps
+ * an ordinary local variable called `now` or `time` from false-firing.
+ * @type {RegExp}
+ */
+const PHASE_PARAM_READ_RE = new RegExp(
+	`\\.(?:get|getAll|has)\\(\\s*(['"\`])(?:${PHASE_SELECTION_ALTERNATION})\\1\\s*\\)|[?&](?:${PHASE_SELECTION_ALTERNATION})=`,
+	'i',
+);
+
+/**
+ * Matches a JSX attribute of the form `at={`, with optional whitespace either
+ * side of the `=`. Scoped to `.tsx` files only, because only a JSX mount site
+ * can pass the prop.
+ *
+ * The lookbehind is what keeps this from firing on the two `at` forms that
+ * legitimately live INSIDE `ElectionShell.tsx`: the interface field is
+ * `at?:` (a colon, never a brace) and the destructured default is `at = null`
+ * (a null literal, never a brace). It also blocks any longer identifier
+ * ending in those two letters — a `format={...}` prop is not an `at` prop.
+ * @type {RegExp}
+ */
+const AT_PROP_MOUNT_RE = /(?<![\w$.-])at\s*=\s*\{/;
+
+// -- Controls first, before either matcher touches real source --------------
+
+/** One planted line per vocabulary member, cycling the four accepted syntactic
+ * forms, so a term that silently fell out of the fixture fails as a FIXTURE
+ * defect rather than as a matcher defect. */
+const PHASE_PARAM_READ_FIXTURE_LINES = PHASE_SELECTION_PARAM_NAMES.map((name, i) => {
+	const form = i % 4;
+	if (form === 0) return `const a${i} = params.get('${name}');`;
+	if (form === 1) return `const b${i} = searchParams.has("${name}");`;
+	if (form === 2) return `const c${i} = params.getAll(\`${name}\`);`;
+	return `const d${i} = '/index.html?${name}=x';`;
 });
 
-test('zero occurrences under src/ of threeBucket/facts.js/listPublicNetworks/initDB/prepareDb/registerDbPlugins/indexedDB', () => {
+test('positive control: the phase-parameter-read matcher fires on a planted fixture, once per vocabulary member and across all four accepted forms', () => {
+	assert.equal(PHASE_PARAM_READ_FIXTURE_LINES.length, PHASE_SELECTION_PARAM_NAMES.length);
+	PHASE_SELECTION_PARAM_NAMES.forEach((name, i) => {
+		assert.ok(PHASE_PARAM_READ_FIXTURE_LINES[i].includes(name), `fixture sanity: line ${i} must literally contain "${name}"`);
+		assert.match(PHASE_PARAM_READ_FIXTURE_LINES[i], PHASE_PARAM_READ_RE, `matcher is inert against the planted read of "${name}"`);
+	});
+	assert.match(PHASE_PARAM_READ_FIXTURE_LINES.join('\n'), PHASE_PARAM_READ_RE);
+});
+
+test('benign control: the phase-parameter-read matcher does NOT fire on election-address.js\'s real shape — a getAll through a constant, a quoted "election" literal, and the address query string D-33 requires', () => {
+	const benign = [
+		'const values = params.getAll(ELECTION_ADDRESS_PARAM);',
+		"const single = params.get('election');",
+		"const href = '/index.html?election=abc';",
+		'const now = Date.now();',
+		'const time = clock.read();',
+	].join('\n');
+	assert.doesNotMatch(benign, PHASE_PARAM_READ_RE, 'matcher cannot discriminate a phase override from the election address parameter');
+	// And against the real file, not just a hand-written approximation of it.
+	assert.doesNotMatch(stripCommentLines(readFileSync(publicSrc('election-address.js'), 'utf8')), PHASE_PARAM_READ_RE);
+});
+
+test('positive control: the at-prop mount matcher fires on a planted <ElectionShell at={x} /> and does not fire on the two at forms inside ElectionShell.tsx or on a longer prop name ending in those letters', () => {
+	assert.match('<ElectionShell at={FIXTURE_INSTANTS[phase]} />', AT_PROP_MOUNT_RE);
+	assert.match('\t\t\t\tat = { instant }', AT_PROP_MOUNT_RE);
+	assert.doesNotMatch('\tat?: string | null;', AT_PROP_MOUNT_RE);
+	assert.doesNotMatch('export function ElectionShell({ search, at = null, election = null }: ElectionShellProps) {', AT_PROP_MOUNT_RE);
+	assert.doesNotMatch('<Stamp format={iso} />', AT_PROP_MOUNT_RE);
+	assert.doesNotMatch('<LifecyclePill phase={phase} />', AT_PROP_MOUNT_RE);
+});
+
+// -- The production scans: both expect ZERO ---------------------------------
+
+const D24_FAILURE_REASON =
+	'A URL-selectable lifecycle instant would let a link author choose which lifecycle state any visitor is shown — ' +
+	'a false claim about an election\'s state, delivered by a hostile link, on a page whose only value is that its ' +
+	'claims can be checked (D-24; successor to T-53-07-04).';
+
+test('D-24: no file under src/ reads a phase- or time-selection query parameter', () => {
 	const offenders = [];
 	for (const file of walkAll(publicSrc())) {
 		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
-		if (PHASE_54_FORBIDDEN_RE.test(stripped)) offenders.push(file);
+		if (PHASE_PARAM_READ_RE.test(stripped)) offenders.push(file);
 	}
-	assert.deepEqual(offenders, [], `these files reach into Phase 54's territory: ${offenders.join(', ')}`);
+	assert.deepEqual(offenders, [], `these files read a phase/time-selection query parameter: ${offenders.join(', ')}. ${D24_FAILURE_REASON}`);
+});
+
+test('D-24: no .tsx file under src/ passes an at prop to a mount site — the seam stays test-only', () => {
+	const tsxFiles = walkAll(publicSrc()).filter((f) => f.endsWith('.tsx'));
+	assert.ok(tsxFiles.length > 0, 'sanity: expected at least one .tsx file under src/');
+	const offenders = [];
+	for (const file of tsxFiles) {
+		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		if (AT_PROP_MOUNT_RE.test(stripped)) offenders.push(file);
+	}
+	assert.deepEqual(offenders, [], `these production .tsx files pass the at prop at a mount site: ${offenders.join(', ')}. ${D24_FAILURE_REASON}`);
+});
+
+// -- The harness scan: same two matchers, opposite expectation --------------
+
+test('harness discrimination: test/browser/ DOES exercise both seams — at least one file reads a phase-selection parameter and at least one .tsx passes the at prop, so the two production scans above are proving a real absence rather than running an inert matcher', () => {
+	// Asserted over the DIRECTORY, never against a file by name, so later
+	// harness work can relocate or split the gate without breaking this.
+	const harnessDir = publicRoot('test', 'browser');
+	const files = walkAll(harnessDir);
+	assert.ok(files.length > 0, `sanity: expected at least one file under ${harnessDir}`);
+
+	const paramReaders = [];
+	const atMounters = [];
+	for (const file of files) {
+		const stripped = stripCommentLines(readFileSync(file, 'utf8'));
+		if (PHASE_PARAM_READ_RE.test(stripped)) paramReaders.push(file);
+		if (file.endsWith('.tsx') && AT_PROP_MOUNT_RE.test(stripped)) atMounters.push(file);
+	}
+
+	assert.ok(
+		paramReaders.length > 0,
+		`no file under ${harnessDir} reads a phase-selection query parameter. The browser harness is the ONLY sanctioned ` +
+			'consumer of that seam; if it has stopped exercising it, the src/ scan above is no longer proving anything and ' +
+			'must be re-pointed rather than left green.',
+	);
+	assert.ok(
+		atMounters.length > 0,
+		`no .tsx file under ${harnessDir} passes the at prop. Same reasoning: the harness is the only sanctioned consumer ` +
+			'of the injectable instant, and a production-absence scan whose matcher has never been seen to fire on real ' +
+			'code is a vacuous gate.',
+	);
+});
+
+// -- Argument provenance: the instant can never be re-plumbed from the URL --
+//
+// The two scans above would both stay green if somebody parsed the address
+// and handed the result to the instant resolver under a different name. This
+// closes that path in the direction that matters most: every call site's
+// argument text must name the injected binding and must name nothing
+// address-derived.
+
+const INSTANT_CALL_SOURCE = 'resolveComparisonInstant\\(([^)]*)\\)';
+const INSTANT_ARG_FORBIDDEN_RE = /\b(search|address|params|location|URLSearchParams)\b/;
+
+/** @param {string} source @returns {string[]} the argument text of every call site. */
+function instantCallArguments(source) {
+	/** @type {string[]} */
+	const out = [];
+	const re = new RegExp(INSTANT_CALL_SOURCE, 'g');
+	let m;
+	while ((m = re.exec(source))) out.push(m[1]);
+	return out;
+}
+
+test('positive control: the instant-provenance check fires on a planted address-derived argument and on a planted argument that never names the injected binding', () => {
+	const addressDerived = 'const { phase } = derivePhase(x, y, resolveComparisonInstant(parseElectionAddress(search).instant));';
+	const addressArgs = instantCallArguments(addressDerived);
+	assert.equal(addressArgs.length, 1, 'fixture sanity: exactly one planted call site');
+	assert.match(addressArgs[0], INSTANT_ARG_FORBIDDEN_RE, 'the forbidden-provenance matcher is inert against an address-derived argument');
+
+	const urlDerived = 'resolveComparisonInstant(params.get("at") ?? undefined)';
+	const urlArgs = instantCallArguments(urlDerived);
+	assert.equal(urlArgs.length, 1);
+	assert.match(urlArgs[0], INSTANT_ARG_FORBIDDEN_RE);
+
+	const unbound = 'resolveComparisonInstant(fromSomewhereElse)';
+	const unboundArgs = instantCallArguments(unbound);
+	assert.equal(unboundArgs.length, 1);
+	assert.doesNotMatch(unboundArgs[0], /\bat\b/, 'the names-the-binding check is inert against an argument that never names it');
+});
+
+test('D-24 structural: every resolveComparisonInstant call site in ElectionShell.tsx passes the injected at binding and nothing address-derived', () => {
+	const args = instantCallArguments(SHELL_SOURCE);
+	assert.ok(args.length > 0, 'sanity: expected at least one resolveComparisonInstant call site in ElectionShell.tsx');
+	for (const arg of args) {
+		assert.match(arg, /\bat\b/, `a resolveComparisonInstant call site does not pass the injected at binding: "${arg}". ${D24_FAILURE_REASON}`);
+		assert.doesNotMatch(arg, INSTANT_ARG_FORBIDDEN_RE, `a resolveComparisonInstant call site takes an address-derived argument: "${arg}". ${D24_FAILURE_REASON}`);
+	}
 });
 
 // ---------------------------------------------------------------------------
