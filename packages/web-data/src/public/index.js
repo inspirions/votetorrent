@@ -68,6 +68,16 @@ export { readRegistrantRoll, TABLES_READ as ROLL_TABLES_READ } from './read-regi
 
 export { readKeyReleaseProgress, TABLES_READ as KEYRELEASE_TABLES_READ } from './read-keyrelease.js';
 
+// D-27's live-read seam (54-15). ADDITIVE: nothing above changed. The
+// allowlist it exports is DERIVED from the three read modules' own
+// `TABLES_READ` above, so the notification channel this barrel publishes can
+// never be wider than the read channel it publishes beside it.
+export {
+	PUBLIC_SUBSCRIBED_TABLES,
+	subscribeToPublicChanges,
+	enableChangePropagation,
+} from './subscribe.js';
+
 /**
  * @typedef {import('../open-db.js').DeleteNetworkDbOptions} DeleteNetworkDbOptions
  * @typedef {import('../reattach.js').StorageAdapter} StorageAdapter
@@ -78,4 +88,7 @@ export { readKeyReleaseProgress, TABLES_READ as KEYRELEASE_TABLES_READ } from '.
  * @typedef {import('./read-election.js').PublicElectionListEntry} PublicElectionListEntry
  * @typedef {import('./read-registrant-roll.js').RegistrantRollRow} RegistrantRollRow
  * @typedef {import('./read-keyrelease.js').KeyReleaseProgress} KeyReleaseProgress
+ * @typedef {import('./subscribe.js').PublicChangeNotice} PublicChangeNotice
+ * @typedef {import('./subscribe.js').PublicChangeSubscription} PublicChangeSubscription
+ * @typedef {import('./subscribe.js').ChangePropagation} ChangePropagation
  */
