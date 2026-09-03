@@ -51,12 +51,29 @@ if (mutation === 'no-dedupe') {
 			writeMutationReportPlugin({ mutation, removedDedupe: report.removedDedupe, selfReference: report.selfReference }),
 		],
 	});
-} else {
+} else if (mutation === 'token-missing') {
 	// token-missing: the gate build's own shape, unchanged, plus the
 	// token-stripping plugin — no config-level mutation, the mutation is
 	// entirely inside the Vite plugin pipeline.
 	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
 	mutatedConfig = mergeConfig(merged, { plugins: [stripTokensPlugin()] });
+} else {
+	// FAIL-CLOSED, and the reason this is not a bare `else`. Until this
+	// commit the trailing branch treated ANY non-`no-dedupe` value as
+	// `token-missing`, so `UI_GATE_MUTATION=gap-cues-flattened` here would
+	// have silently built a token-stripped variant — measured.
+	//
+	// The dashboard DELIBERATELY has no `gap-cues-flattened` branch: that
+	// mutation flattens the public election view's gap-card rule, and this
+	// app renders no `.fact-card` surface at all, so a branch here would
+	// build something with nothing to mutate. It still needs this throw,
+	// because `resolveMutation()` accepts the name GLOBALLY — the absence of
+	// the branch is only safe while the unhandled case is loud.
+	throw new Error(
+		`vite.mutant.config.ts (VoteTorrentDashboard): UI_GATE_MUTATION="${mutation}" is a known mutation that this app's ` +
+			'mutant config does not handle (this app renders no gap-card surface). Refusing to build rather than silently ' +
+			'producing a different mutation than the one requested.',
+	);
 }
 
 export default mergeConfig(mutatedConfig, {

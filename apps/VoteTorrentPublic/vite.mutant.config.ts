@@ -26,7 +26,13 @@ import { fileURLToPath } from 'node:url';
 import { mergeConfig } from 'vite';
 import baseConfig from './vite.config';
 import { GATE_OVERRIDES } from './vite.gate.config';
-import { resolveMutation, applyNoDedupe, stripTokensPlugin, writeMutationReportPlugin } from '@votetorrent/ui-web/mutations';
+import {
+	resolveMutation,
+	applyNoDedupe,
+	stripTokensPlugin,
+	flattenGapCuesPlugin,
+	writeMutationReportPlugin,
+} from '@votetorrent/ui-web/mutations';
 
 // Throws before Vite does anything if UI_GATE_MUTATION is unset, empty, or unknown.
 const mutation = resolveMutation();
@@ -47,12 +53,31 @@ if (mutation === 'no-dedupe') {
 			writeMutationReportPlugin({ mutation, removedDedupe: report.removedDedupe, selfReference: report.selfReference }),
 		],
 	});
-} else {
+} else if (mutation === 'token-missing') {
 	// token-missing: the gate build's own shape, unchanged, plus the
 	// token-stripping plugin — no config-level mutation, the mutation is
 	// entirely inside the Vite plugin pipeline.
 	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
 	mutatedConfig = mergeConfig(merged, { plugins: [stripTokensPlugin()] });
+} else if (mutation === 'gap-cues-flattened') {
+	// gap-cues-flattened: same shape again, plus the plugin that empties the
+	// gap-card rule's declaration body. Applied to SOURCE before the build,
+	// never to dist and never at runtime.
+	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
+	mutatedConfig = mergeConfig(merged, { plugins: [flattenGapCuesPlugin()] });
+} else {
+	// FAIL-CLOSED, and the reason this is not a bare `else`. Until this
+	// commit the trailing branch treated ANY non-`no-dedupe` value as
+	// `token-missing`. With two mutations that was merely lucky; with three
+	// it is a fail-open — a control believing it had built a cue-flattened
+	// variant would actually be driving a token-stripped one and would report
+	// a shape nobody asked for. `resolveMutation()` validates the name
+	// against MUTATIONS globally, so a name this file does not handle is a
+	// real gap here, not an unknown value, and must say so.
+	throw new Error(
+		`vite.mutant.config.ts (VoteTorrentPublic): UI_GATE_MUTATION="${mutation}" is a known mutation that this app's ` +
+			'mutant config does not handle. Refusing to build rather than silently producing a different mutation than the one requested.',
+	);
 }
 
 export default mergeConfig(mutatedConfig, {

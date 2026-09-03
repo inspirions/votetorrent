@@ -31,9 +31,11 @@ import { mergeConfig } from 'vite';
  * The frozen mutation-name set — the single source of the valid set.
  * Nothing else in this module or its consumers may hard-code a mutation
  * name outside this array.
- * @type {readonly ['no-dedupe', 'token-missing']}
+ * @type {readonly ['no-dedupe', 'token-missing', 'gap-cues-flattened']}
  */
-export const MUTATIONS = Object.freeze(/** @type {const} */ (['no-dedupe', 'token-missing']));
+export const MUTATIONS = Object.freeze(
+	/** @type {const} */ (['no-dedupe', 'token-missing', 'gap-cues-flattened']),
+);
 
 /**
  * Reads `process.env.UI_GATE_MUTATION` and throws when it is unset, empty,
@@ -223,6 +225,115 @@ export function stripTokensPlugin() {
 			writeFileSync(
 				path.join(outDirAbs, '.mutation-report.json'),
 				JSON.stringify({ mutation: 'token-missing', removals, forms: [...forms] }, null, 2),
+			);
+		},
+	};
+}
+
+/**
+ * The gap-card modifier class the public app's stylesheet declares, and the
+ * ONE place this module writes it.
+ *
+ * WHY A CLASS SELECTOR SATISFIES THE OBJECT-LITERAL-PROPERTY-KEY RULE rather
+ * than dodging it. That rule exists because esbuild RENAMES bare local
+ * bindings, so a `typeof someLocal` probe against a minified bundle is
+ * falsely inert — the control passes while proving nothing. The token matched
+ * below is a CSS class selector inside a stylesheet, and no bundler renames a
+ * class selector: renaming it would break every element that carries the
+ * class in the markup. It is stable under minification for exactly the same
+ * reason an object-literal property key is, and for the same reason it is a
+ * faithful target for a build-time mutation.
+ */
+const GAP_MODIFIER_CLASS = 'fact-card--gap';
+
+/** What replaces a flattened rule's declaration body. */
+const FLATTEN_MARKER = '/* declarations flattened by ui-web-mutation-flatten-gap-cues */';
+
+/**
+ * A Vite plugin, `ui-web-mutation-flatten-gap-cues`, that empties the
+ * DECLARATION BODY of every CSS rule whose selector list names the gap-card
+ * modifier class — leaving the selector and its braces intact.
+ *
+ * WHY THE BODY AND NEVER THE CLASS NAME. Deleting the class (from the
+ * stylesheet or the markup) would produce a page with no gap card at all, and
+ * the style-divergence rung would then fail because the pair it compares does
+ * not exist — the right rung failing for the wrong reason, which is
+ * indistinguishable from a crashed page and proves nothing about styling. With
+ * the body emptied, the rule still MATCHES; it simply declares nothing, so the
+ * gap card computes the base `.fact-card` values and all three D-11 cues
+ * (border style, colour, size) collapse together. One mutation, three cues —
+ * which is what makes it a faithful inversion of a rung that requires all
+ * three to diverge.
+ *
+ * `enforce: 'pre'` for the same MEASURED reason `stripTokensPlugin` carries
+ * it: Vite's own CSS handling resolves and inlines `@import`s inside its own
+ * `transform`, so a normal-priority plugin can be handed post-processed CSS
+ * and count zero replacements on a build that still exits 0.
+ *
+ * STANDING RULE, restated here because this is where it is easiest to break:
+ * this runs against SOURCE, before a real `vite build`. It never edits a
+ * built `dist/`, and it never injects anything into a page at runtime.
+ *
+ * `closeBundle` throws `MUTATION IS A NO-OP` on zero replacements, naming the
+ * selector it looked for — a no-op is a DIFFERENT verdict from an inert gate
+ * and the two must never be reported as the same thing.
+ *
+ * @returns {import('vite').Plugin}
+ */
+export function flattenGapCuesPlugin() {
+	let replacements = 0;
+	/** @type {Set<string>} */
+	const selectors = new Set();
+	/** @type {string | null} */
+	let outDirAbs = null;
+
+	// A leaf rule block: a selector list, then a body carrying no nested
+	// `{`. Restricting the body to brace-free text keeps this correct if a
+	// stylesheet later grows an at-rule or a nested block — such a wrapper
+	// simply is not matched, rather than being silently mangled.
+	const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+	// Whole-token match on the class, so `.fact-card--gap-note` (a different
+	// class that merely starts the same way) is never flattened.
+	const classRe = new RegExp(`\\.${escapeRegExp(GAP_MODIFIER_CLASS)}(?![\\w-])`);
+
+	return {
+		name: 'ui-web-mutation-flatten-gap-cues',
+		enforce: 'pre',
+		configResolved(resolvedConfig) {
+			outDirAbs = path.resolve(resolvedConfig.root ?? process.cwd(), resolvedConfig.build.outDir);
+		},
+		transform(code, id) {
+			const bareId = id.split('?')[0];
+			if (!bareId.endsWith('.css')) return null;
+			let touched = false;
+			const out = code.replace(ruleRe, (whole, selectorList, body) => {
+				if (!classRe.test(selectorList)) return whole;
+				if (body.trim() === FLATTEN_MARKER) return whole;
+				replacements += 1;
+				selectors.add(String(selectorList).trim());
+				touched = true;
+				return `${selectorList}{ ${FLATTEN_MARKER} }`;
+			});
+			return touched ? { code: out, map: null } : null;
+		},
+		closeBundle() {
+			if (replacements === 0) {
+				throw new Error(
+					`MUTATION IS A NO-OP: flattenGapCuesPlugin found no CSS rule whose selector list names ".${GAP_MODIFIER_CLASS}", ` +
+						'so no declaration body was flattened and the gap-cues-flattened mutation did not fire. A control run against ' +
+						'an unmutated build would falsely report the gate inert, which is a different verdict entirely.',
+				);
+			}
+			if (!outDirAbs) {
+				throw new Error('flattenGapCuesPlugin: outDir was never resolved (configResolved did not run)');
+			}
+			writeFileSync(
+				path.join(outDirAbs, '.mutation-report.json'),
+				JSON.stringify(
+					{ mutation: 'gap-cues-flattened', removals: replacements, selectors: [...selectors] },
+					null,
+					2,
+				),
 			);
 		},
 	};

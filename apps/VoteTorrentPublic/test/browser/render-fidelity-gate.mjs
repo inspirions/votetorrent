@@ -70,6 +70,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readdirSync } from 'node:fs';
 import { serveDist } from '../../../../packages/ui-web/scripts/lib/serve-dist.mjs';
+import { readMutationReport } from '@votetorrent/ui-web/mutations';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(__dirname, '..', '..');
@@ -78,6 +79,12 @@ const GATE_ENTRY = 'election-shell-gate.html';
 const GATE_CONFIG = 'vite.gate.config.ts';
 const FIXTURE_QUERY = 'fixture=public-surface';
 const DEFAULT_PORT = 5193;
+/** The build-time mutation `--prove-gap-cues-flattened` drives, and its outDir. */
+const GAP_MUTATION = 'gap-cues-flattened';
+const MUTANT_CONFIG = 'vite.mutant.config.ts';
+const MUTANT_DIST = path.join(APP_DIR, `dist-mutant-${GAP_MUTATION}`);
+/** The one rung the gap-cues mutation must invert. Every other rung must survive it. */
+const GAP_RUNG_ID = 'gap-card-style-diverges';
 const LABEL = 'render-fidelity-gate';
 
 /** The narrow viewport the roll rungs measure at. Overflow is only observable
@@ -492,18 +499,28 @@ function runProveMatchers() {
 // The build / serve / launch plumbing, copied in shape from `run-ui-gates.mjs`.
 // ---------------------------------------------------------------------------
 
-async function buildGate() {
+/**
+ * @param {string} [configRel] which vite config to build with (defaults to the healthy gate config)
+ * @param {Record<string,string>} [env] extra environment for the spawned build
+ * @param {boolean} [lenient] resolve with the exit code instead of throwing, for the control's mutant leg
+ */
+async function buildGate(configRel = GATE_CONFIG, env = {}, lenient = false) {
 	const viteBin = path.join(APP_DIR, 'node_modules', 'vite', 'bin', 'vite.js');
 	if (!existsSync(viteBin)) fail(`vite binary not found at ${viteBin} — run \`yarn install\` first.`);
-	await new Promise((resolvePromise, rejectPromise) => {
-		const child = spawn(process.execPath, [viteBin, 'build', '--config', GATE_CONFIG], {
+	return await new Promise((resolvePromise, rejectPromise) => {
+		const child = spawn(process.execPath, [viteBin, 'build', '--config', configRel], {
 			cwd: APP_DIR,
+			env: { ...process.env, ...env },
 			stdio: ['ignore', 'pipe', 'pipe'],
 		});
 		child.stdout?.on('data', (d) => process.stdout.write(`[vite build] ${d}`));
 		child.stderr?.on('data', (d) => process.stderr.write(`[vite build] ${d}`));
 		child.on('error', rejectPromise);
-		child.on('exit', (code) => (code === 0 ? resolvePromise(undefined) : rejectPromise(new Error(`vite build exited ${code}`))));
+		child.on('exit', (code) => {
+			if (lenient) resolvePromise(code ?? 1);
+			else if (code === 0) resolvePromise(0);
+			else rejectPromise(new Error(`vite build --config ${configRel} exited ${code}`));
+		});
 	});
 }
 
@@ -513,7 +530,8 @@ async function buildGate() {
  * HTML input. Two matches is as much a setup error as none.
  * @returns {string}
  */
-function resolveGateEntry() {
+function resolveGateEntry(distAbs = GATE_DIST) {
+	const GATE_DIST = distAbs;
 	if (!existsSync(GATE_DIST)) fail(`gate dist "${GATE_DIST}" does not exist — run \`yarn build:gate\` or drop --skip-build.`);
 	/** @param {string} dir @returns {string[]} */
 	function walk(dir) {
@@ -623,14 +641,136 @@ function readPage(page) {
 	});
 }
 
+/**
+ * `--prove-gap-cues-flattened` — the BUILD-LEVEL half of this gate's negative
+ * control, and the half `--prove-matchers` structurally cannot supply.
+ *
+ * `--prove-matchers` runs every comparator against synthetic inputs, so it
+ * proves the comparators fire. It cannot see a SHIPPED STYLESHEET that
+ * stopped carrying the gap cues, because it never builds or loads one. This
+ * mode closes exactly that gap: it rebuilds a real mutant artefact with the
+ * gap-card rule's declaration body flattened and re-runs the SAME rungs
+ * against it, requiring `gap-card-style-diverges` — and only it — to fail.
+ *
+ * Four verdicts are kept distinct on purpose, because collapsing any two of
+ * them is how a control becomes decorative:
+ *   - CONTROL COULD NOT RUN: the healthy leg did not fully pass, or the
+ *     mutant build failed. Nothing can be attributed to the mutation.
+ *   - MUTATION IS A NO-OP: the mutant build exited 0 but the plugin flattened
+ *     nothing. Distinct from an inert gate: the gate was never tested.
+ *   - WRONG FAILURE SHAPE: the mutant page crashed, went vacuous, or took
+ *     down rungs other than the target. A blank page failing everything is
+ *     not evidence the style rung works.
+ *   - IS INERT: the mutant leg still PASSED the target rung. This prints the
+ *     literal sentinel `web-gates.yml` greps across every control in this
+ *     repo, so it is readable by the mechanism already in place.
+ *
+ * @param {number} port
+ * @param {boolean} skipBuild
+ */
+async function runProveGapCuesFlattened(port, skipBuild) {
+	const PREFIX = `[${LABEL}] --prove-gap-cues-flattened: control could not run —`;
+
+	// Leg 1, the healthy baseline. It must pass EVERY rung, the target rung
+	// included: a control cannot invert a rung that was never passing.
+	if (!skipBuild) await buildGate();
+	const healthy = await driveRungs(GATE_DIST, port);
+	if (!healthy.ok) {
+		process.stderr.write(`\n${PREFIX} the healthy leg did not render: ${healthy.vacuity}\n`);
+		process.exit(1);
+	}
+	const healthyFailed = healthy.results.filter((r) => !r.passed);
+	if (healthyFailed.length > 0 || healthy.results.length !== RUNG_IDS.length) {
+		process.stderr.write(
+			`\n${PREFIX} the healthy leg did not pass every rung, so nothing here can be attributed to the mutation.\n` +
+				`  ran ${healthy.results.length}/${RUNG_IDS.length}, failed: ${healthyFailed.map((r) => r.id).join(', ') || 'none'}\n`,
+		);
+		process.exit(1);
+	}
+	process.stdout.write(`[${LABEL}] healthy leg: ${healthy.results.length}/${RUNG_IDS.length} rungs passed (full pass)\n`);
+
+	// Leg 2, the mutant build. Source is mutated by a Vite plugin before a
+	// real `vite build`; dist is never edited and nothing is injected at
+	// runtime.
+	process.stdout.write(`[${LABEL}] building the ${GAP_MUTATION} mutant via ${MUTANT_CONFIG}\n`);
+	const code = await buildGate(MUTANT_CONFIG, { UI_GATE_MUTATION: GAP_MUTATION }, true);
+	if (code !== 0) {
+		process.stderr.write(`\n${PREFIX} the ${GAP_MUTATION} mutant build exited ${code}\n`);
+		process.exit(1);
+	}
+
+	// Machine-readable proof the mutation fired. Never a log scrape.
+	let report;
+	try {
+		report = readMutationReport(MUTANT_DIST);
+	} catch (err) {
+		process.stderr.write(`\n${PREFIX} ${/** @type {any} */ (err)?.message ?? err}\n`);
+		process.exit(1);
+	}
+	process.stdout.write(`[${LABEL}] mutation report: ${JSON.stringify(report)}\n`);
+	if (report.mutation !== GAP_MUTATION || !Number.isInteger(report.removals) || report.removals < 1) {
+		process.stderr.write(
+			`\n[${LABEL}] MUTATION IS A NO-OP — the mutant build exited 0 but flattened no declaration body.\n` +
+				`  report=${JSON.stringify(report)}\n` +
+				'  This is NOT the same verdict as an inert gate: the gate was never put to the test at all.\n',
+		);
+		process.exit(1);
+	}
+
+	const mutant = await driveRungs(MUTANT_DIST, port);
+	if (!mutant.ok) {
+		process.stderr.write(
+			`\n[${LABEL}] WRONG FAILURE SHAPE — the mutant page did not render at all: ${mutant.vacuity}\n` +
+				'  A crashed or blank page failing every rung is not evidence the style rung discriminates.\n',
+		);
+		process.exit(1);
+	}
+	for (const r of mutant.results) {
+		process.stdout.write(`  mutant  ${r.passed ? 'PASS' : 'FAIL'}  ${r.id}\n            -> ${r.detail}\n`);
+	}
+
+	const target = mutant.results.find((r) => r.id === GAP_RUNG_ID);
+	const collateral = mutant.results.filter((r) => r.id !== GAP_RUNG_ID && !r.passed);
+
+	if (!target) {
+		process.stderr.write(`\n[${LABEL}] WRONG FAILURE SHAPE — the rung "${GAP_RUNG_ID}" did not run on the mutant leg.\n`);
+		process.exit(1);
+	}
+	if (target.passed) {
+		process.stderr.write(
+			`\n[${LABEL}] --prove-gap-cues-flattened: the style-divergence rung is inert — a rebuild with the gap-card ` +
+				`cue declarations flattened still PASSED "${GAP_RUNG_ID}".\n  detail: ${target.detail}\n`,
+		);
+		process.exit(1);
+	}
+	if (collateral.length > 0) {
+		process.stderr.write(
+			`\n[${LABEL}] WRONG FAILURE SHAPE — the mutation took down rungs it has no business touching: ` +
+				`${collateral.map((r) => r.id).join(', ')}\n` +
+				collateral.map((r) => `  ${r.id}: ${r.detail}\n`).join(''),
+		);
+		process.exit(1);
+	}
+
+	process.stdout.write(
+		`\n[${LABEL}] --prove-gap-cues-flattened PASS — a rebuilt product with the gap-card cue declarations flattened ` +
+			`genuinely FAILED "${GAP_RUNG_ID}" while all ${RUNG_IDS.length - 1} other rungs still passed.\n` +
+			`  flattened ${report.removals} rule(s): ${JSON.stringify(report.selectors)}\n` +
+			`  failure detail: ${target.detail}\n`,
+	);
+	process.exit(0);
+}
+
 async function main() {
 	const argv = process.argv.slice(2);
 	let skipBuild = false;
+	let proveGapCues = false;
 	let port = Number(process.env.RENDER_FIDELITY_PORT ?? DEFAULT_PORT);
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i];
 		if (arg === '--skip-build') skipBuild = true;
 		else if (arg === '--prove-matchers') runProveMatchers();
+		else if (arg === '--prove-gap-cues-flattened') proveGapCues = true;
 		else if (arg === '--port') {
 			i += 1;
 			port = Number(argv[i]);
@@ -641,13 +781,41 @@ async function main() {
 	}
 	if (!Number.isInteger(port) || port <= 0) fail(`--port must be a positive integer, got "${port}".`);
 
+	if (proveGapCues) {
+		await runProveGapCuesFlattened(port, skipBuild);
+		return;
+	}
 	if (!skipBuild) await buildGate();
-	const entryRel = resolveGateEntry();
+	await driveAndReport(GATE_DIST, port);
+}
 
+/**
+ * Build/serve/drive one dist and record every rung against it, WITHOUT
+ * exiting. Returns a structured outcome so a control can distinguish
+ * `vacuous` (the readout never published, the harness recorded an error, the
+ * fixture channel is null — i.e. the page did not render at all) from a run
+ * that genuinely produced rung verdicts. That distinction is the whole
+ * difference between "the mutant leg failed the target rung" and "the mutant
+ * leg crashed", and a control that cannot tell them apart reports a pass on
+ * a blank page.
+ *
+ * @param {string} distAbs
+ * @param {number} port
+ * @returns {Promise<{ ok: boolean, vacuity: string | null, results: Array<{id:string,passed:boolean,detail:string}> }>}
+ */
+async function driveRungs(distAbs, port) {
+	rungs.length = 0;
+	/** @type {string | null} */
+	let vacuity = null;
+	/** @param {string} m */
+	const bail = (m) => {
+		vacuity = m;
+	};
+	const entryRel = resolveGateEntry(distAbs);
 	let server;
 	let browser;
 	try {
-		server = await serveDist(GATE_DIST, port);
+		server = await serveDist(distAbs, port);
 		browser = await chromium.launch({ headless: true });
 		const page = await browser.newPage({ viewport: { ...NARROW_VIEWPORT } });
 		/** @type {string[]} */
@@ -676,66 +844,81 @@ async function main() {
 		// null (the default branch) would make every rung below meaningless
 		// rather than failing — so each is a hard stop with its own message.
 		const gate = m.gate;
-		if (gate === null) fail('the harness never published its readout — the page did not finish, so no rung ran.');
-		if (gate === null) return;
-		if (gate.error !== null) fail(`the harness recorded a render/seed error: ${gate.error}`);
-		const fx = gate.fixture;
-		if (fx === null || fx === undefined) fail('the readout carries no fixture channel — the page was not built with the fixture parameter.');
-		if (!Array.isArray(fx.districts) || fx.districts.length === 0) fail('the fixture channel publishes no districts — every data-derived rung would be inert.');
-		if (!Number.isInteger(fx.rollRowCount) || fx.rollRowCount <= 0) fail('the fixture channel publishes no roll row count.');
+		if (gate === null) bail('the harness never published its readout — the page did not finish, so no rung ran.');
+		else if (gate.error !== null) bail(`the harness recorded a render/seed error: ${gate.error}`);
+		else {
+			const fx = gate.fixture;
+			if (fx === null || fx === undefined) bail('the readout carries no fixture channel — the page was not built with the fixture parameter.');
+			else if (!Array.isArray(fx.districts) || fx.districts.length === 0) bail('the fixture channel publishes no districts — every data-derived rung would be inert.');
+			else if (!Number.isInteger(fx.rollRowCount) || fx.rollRowCount <= 0) bail('the fixture channel publishes no roll row count.');
+			else {
+				const longestDistrict = [...fx.districts].sort((a, b) => b.length - a.length)[0];
 
-		const longestDistrict = [...fx.districts].sort((a, b) => b.length - a.length)[0];
+				const fields = evaluateRollFields(m.roll, fx.rollRowCount);
+				record('roll-fields-rendered', fields.passed, fields.detail);
 
-		const fields = evaluateRollFields(m.roll, fx.rollRowCount);
-		record('roll-fields-rendered', fields.passed, fields.detail);
+				const overflow = evaluateRollOverflow(m.roll, longestDistrict);
+				record('roll-overflows-not-clips', overflow.passed, overflow.detail);
 
-		const overflow = evaluateRollOverflow(m.roll, longestDistrict);
-		record('roll-overflows-not-clips', overflow.passed, overflow.detail);
+				const hidden = evaluateHiddenStrings(m.html, [
+					{ label: 'the withheld authority-field marker', needle: fx.extraFieldsMarker },
+					{ label: 'the superseded surname', needle: fx.supersededLastName },
+					{ label: 'the superseded district', needle: fx.supersededDistrict },
+				]);
+				record('roll-hides-extrafields-and-superseded', hidden.passed, hidden.detail);
 
-		const hidden = evaluateHiddenStrings(m.html, [
-			{ label: 'the withheld authority-field marker', needle: fx.extraFieldsMarker },
-			{ label: 'the superseded surname', needle: fx.supersededLastName },
-			{ label: 'the superseded district', needle: fx.supersededDistrict },
-		]);
-		record('roll-hides-extrafields-and-superseded', hidden.passed, hidden.detail);
+				const escaping = evaluateEscaping(
+					{ injectedElementCount: m.roll.injectedElementCount, cellTexts: m.roll.cells.map((c) => c.text) },
+					fx.xssLastName,
+				);
+				record('roll-escapes-authority-text', escaping.passed, escaping.detail);
 
-		const escaping = evaluateEscaping(
-			{ injectedElementCount: m.roll.injectedElementCount, cellTexts: m.roll.cells.map((c) => c.text) },
-			fx.xssLastName,
-		);
-		record('roll-escapes-authority-text', escaping.passed, escaping.detail);
+				// 54-13 DID ship a per-fact hook attribute, so both halves are reported
+				// by fact id rather than by ordinal — that can only tighten this rung.
+				const keyrelease = evaluateKeyReleaseCard(
+					{
+						filledMatches: m.filledCards.filter((c) => matchesNumberPair(c.text, fx.released, fx.total)).map((c) => c.id),
+						gapMatches: m.gapCards.filter((c) => matchesNumberPair(c.text, fx.released, fx.total)).map((c) => c.id),
+						filledTotal: m.filledCards.length,
+						gapTotal: m.gapCards.length,
+					},
+					{ released: fx.released, total: fx.total },
+					KEYRELEASE_FACT_ID,
+				);
+				record('keyrelease-renders-filled-with-nonzero-released', keyrelease.passed, keyrelease.detail);
 
-		// 54-13 DID ship a per-fact hook attribute, so both halves are reported
-		// by fact id rather than by ordinal — that can only tighten this rung.
-		const keyrelease = evaluateKeyReleaseCard(
-			{
-				filledMatches: m.filledCards.filter((c) => matchesNumberPair(c.text, fx.released, fx.total)).map((c) => c.id),
-				gapMatches: m.gapCards.filter((c) => matchesNumberPair(c.text, fx.released, fx.total)).map((c) => c.id),
-				filledTotal: m.filledCards.length,
-				gapTotal: m.gapCards.length,
-			},
-			{ released: fx.released, total: fx.total },
-			KEYRELEASE_FACT_ID,
-		);
-		record('keyrelease-renders-filled-with-nonzero-released', keyrelease.passed, keyrelease.detail);
-
-		// Both cards are taken from the SAME rendered section, so the pair
-		// differs only in the class, the branch attribute and one copy key —
-		// which is what makes the comparison isolate styling from structure.
-		if (m.gapStyle === null || m.plainStyle === null) {
-			record('gap-card-style-diverges', false, `the outcome section did not render both a gap card and a filled card (gap=${JSON.stringify(m.gapStyle)}, filled=${JSON.stringify(m.plainStyle)})`);
-		} else {
-			const style = evaluateGapStyleDivergence(m.gapStyle, m.plainStyle);
-			record('gap-card-style-diverges', style.passed, `${m.gapStyle.id} vs ${m.plainStyle.id}: ${style.detail}`);
+				// Both cards are taken from the SAME rendered section, so the pair
+				// differs only in the class, the branch attribute and one copy key —
+				// which is what makes the comparison isolate styling from structure.
+				if (m.gapStyle === null || m.plainStyle === null) {
+					record('gap-card-style-diverges', false, `the outcome section did not render both a gap card and a filled card (gap=${JSON.stringify(m.gapStyle)}, filled=${JSON.stringify(m.plainStyle)})`);
+				} else {
+					const style = evaluateGapStyleDivergence(m.gapStyle, m.plainStyle);
+					record('gap-card-style-diverges', style.passed, `${m.gapStyle.id} vs ${m.plainStyle.id}: ${style.detail}`);
+				}
+			}
 		}
 	} finally {
 		await browser?.close();
 		await server?.close();
 	}
+	return { ok: vacuity === null, vacuity, results: rungs.map((r) => ({ ...r })) };
+}
+
+/**
+ * The normal, non-inverted run: drive `distAbs`, print every rung, set the
+ * process exit code. A vacuity bail is a hard failure here, exactly as it was
+ * before this function existed.
+ * @param {string} distAbs
+ * @param {number} port
+ */
+async function driveAndReport(distAbs, port) {
+	const outcome = await driveRungs(distAbs, port);
+	if (!outcome.ok) fail(String(outcome.vacuity));
 
 	let failed = 0;
 	for (const id of RUNG_IDS) {
-		const rung = rungs.find((r) => r.id === id);
+		const rung = outcome.results.find((r) => r.id === id);
 		if (!rung) {
 			failed += 1;
 			process.stdout.write(`FAIL  ${id}\n      -> never ran\n`);
