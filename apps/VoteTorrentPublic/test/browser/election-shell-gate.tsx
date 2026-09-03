@@ -50,6 +50,32 @@
  *     There is one readout the runner reads; the other is 53-07's own DOM
  *     read-back record, which grades nothing — both stay assigned, neither
  *     replaces the other.
+ *
+ * 54-16 EXTENSION — the `?fixture=public-surface` branch. ADDITIVE: with the
+ * parameter ABSENT every behaviour above is byte-identical — the default path
+ * still mounts with the prop-supplied fixture election, the hook root still
+ * mounts in its own React root, `__UI_GATE__` still publishes the same fields,
+ * and no existing rung sees a different page. With the parameter PRESENT this
+ * page instead seeds a REAL browser-side database (delete → create → seed →
+ * record the row counts → record the network) and mounts the shell with NO
+ * `election` prop at all, so `shouldReadFor` returns true and the shell takes
+ * its genuine read path. That is the whole point: every rung in
+ * `render-fidelity-gate.mjs` measures rendered output produced from rows, not
+ * from a prop.
+ *
+ * TWO THINGS THIS BRANCH MUST DO THAT ARE EASY TO MISS. The shell's read path
+ * is `findNetwork` → `attachNetworkDb`, and `attachNetworkDb` reads a
+ * persisted row-count record before it will hand back a handle. A branch that
+ * recorded only the network would attach-fail with the missing-counts error,
+ * the shell would render its addressed-but-not-held sentence, and every rung
+ * below would report a defect that is really a missing precondition. And the
+ * seeding handle is CLOSED before the shell mounts: the shell opens its own,
+ * and this page must not hold a second connection against it.
+ *
+ * THIS PAGE STILL CARRIES NO VERDICT OF ITS OWN. `__UI_GATE__.fixture` is a
+ * publication of the FIXTURE's own exported values — never a measurement of
+ * the page — so the gate script compares the DOM against the fixture rather
+ * than against numbers it restated. Grading remains the runner's job.
  */
 import { StrictMode } from 'react';
 import * as AppReact from 'react';
@@ -58,6 +84,24 @@ import '../../src/app.css';
 import { ElectionShell } from '../../src/screens/ElectionShell';
 import { DetailsToggle, packageReactIdentity } from '@votetorrent/ui-web/components';
 import { FIXTURE_ELECTION, FIXTURE_ELECTION_ID, FIXTURE_INSTANTS } from '../fixtures/election-fixture.js';
+import {
+	createNetworkDb,
+	closeNetworkDb,
+	deleteNetworkDb,
+	writeRowCounts,
+	upsertNetwork,
+} from '@votetorrent/web-data/public';
+import { ELECTION_ADDRESS_PARAM, NETWORK_ADDRESS_PARAM } from '../../src/election-address.js';
+import {
+	FIXTURE_ELECTION_DB_ID,
+	FIXTURE_NETWORK_HASH,
+	FIXTURE_SETTLING_INSTANT,
+	PUBLIC_SURFACE_EXPECTED_COUNTS,
+	SEED_NOW,
+	seedPublicSurface,
+} from '../fixtures/seed-public-surface.js';
+import { EXTRA_FIELDS_MARKER, ROLL_REGISTRANTS, ROLL_SUPERSEDED } from '../fixtures/registrant-roll-fixture.js';
+import { EXPECTED_KEYHOLDERS, EXPECTED_RELEASED, EXPECTED_TOTAL } from '../fixtures/keyrelease-fixture.js';
 
 // D-33 made the address TWO parameters, so a one-parameter `search` here now
 // resolves to 'incomplete' and would make the shell render the index instead
@@ -164,10 +208,106 @@ function resolvePhase(): FixturePhase {
 
 const phase = resolvePhase();
 
+/**
+ * This page's OWN second URL parameter (54-16), read by this file only and
+ * never forwarded into `ElectionShell`'s address — the same rule `?phase=`
+ * above already follows. Its one recognised value selects the seeded
+ * public-surface branch; anything else, including absence, leaves this page
+ * exactly as 53-07/53-09 built it.
+ */
+const FIXTURE_PARAM = 'fixture';
+const PUBLIC_SURFACE_FIXTURE = 'public-surface';
+
+function resolveFixtureMode(): boolean {
+	return new URLSearchParams(window.location.search).get(FIXTURE_PARAM) === PUBLIC_SURFACE_FIXTURE;
+}
+
+const fixtureMode = resolveFixtureMode();
+
+/**
+ * The seeded expectations, published so the gate script COMPARES against the
+ * fixture's own exported values rather than restating them. Every field here
+ * is read straight off a fixture export; nothing is measured from the page,
+ * and nothing is a literal this file invented.
+ *
+ * `districts` and `lastNames` are published as whole arrays rather than as a
+ * pre-computed longest/shortest, so the gate derives the decisive
+ * production-length value itself and a fixture edit cannot silently move the
+ * value the gate compares against.
+ */
+const XSS_ROW = ROLL_REGISTRANTS.find((entry) => entry.lastName.includes('<script'));
+
+const fixtureFacts = Object.freeze({
+	released: EXPECTED_RELEASED,
+	total: EXPECTED_TOTAL,
+	keyholders: EXPECTED_KEYHOLDERS,
+	supersededLastName: ROLL_SUPERSEDED.lastName,
+	supersededDistrict: ROLL_SUPERSEDED.district,
+	extraFieldsMarker: EXTRA_FIELDS_MARKER,
+	districts: Object.freeze(ROLL_REGISTRANTS.map((entry) => entry.district)),
+	lastNames: Object.freeze(ROLL_REGISTRANTS.map((entry) => entry.lastName)),
+	xssLastName: XSS_ROW ? XSS_ROW.lastName : null,
+	rollRowCount: ROLL_REGISTRANTS.length,
+});
+
+/**
+ * The address this branch mounts the shell with, built from
+ * `election-address.js`'s OWN exported parameter names rather than from a
+ * query string this file hard-codes — a renamed parameter then breaks the
+ * import instead of silently resolving to the index page.
+ */
+const FIXTURE_SEARCH = `?${NETWORK_ADDRESS_PARAM}=${FIXTURE_NETWORK_HASH}&${ELECTION_ADDRESS_PARAM}=${FIXTURE_ELECTION_DB_ID}`;
+
+/**
+ * Seed a real browser-side database and record the two preconditions the
+ * shell's read path checks BEFORE it opens anything: the networks-registry
+ * entry (the security gate that authorises a store name at all) and the
+ * persisted row-count record (`attachNetworkDb`'s re-attach contract).
+ *
+ * Both are written through the data package's own exported helpers — never by
+ * writing a storage key directly — so a change to either key or record shape
+ * moves this branch with it instead of leaving it asserting against a stale
+ * literal.
+ *
+ * The handle is closed at the end: the shell opens its own, and holding a
+ * second connection here would serve no purpose and would block any later
+ * delete.
+ */
+async function seedFixtureSurface(): Promise<void> {
+	try {
+		await deleteNetworkDb(FIXTURE_NETWORK_HASH);
+	} catch {
+		// A database that was never created is the normal first-run case.
+	}
+	const db = await createNetworkDb(FIXTURE_NETWORK_HASH);
+	try {
+		await seedPublicSurface(db);
+		await writeRowCounts(FIXTURE_NETWORK_HASH, PUBLIC_SURFACE_EXPECTED_COUNTS);
+		upsertNetwork({
+			networkHash: FIXTURE_NETWORK_HASH,
+			authorityName: 'vtx-fixture Authority',
+			domain: 'vtx-fixture.invalid',
+			officerUserId: 'u1',
+			bootstrappedAt: SEED_NOW,
+		});
+	} finally {
+		await closeNetworkDb(db);
+	}
+}
+
 const rootElement = document.getElementById('root');
 if (!rootElement) {
 	throw new Error('election-shell-gate.tsx: #root element not found in election-shell-gate.html');
 }
+
+/**
+ * The same element, re-bound with a non-nullable declared type. The guard
+ * above narrows `rootElement` for the top-level statements that follow it, but
+ * not inside the async fixture mount below — a closure body is checked without
+ * that narrowing. Re-binding once here is the narrowing, rather than a
+ * non-null assertion at the use site.
+ */
+const shellContainer: HTMLElement = rootElement;
 
 /**
  * Wrapped so a render throw here cannot prevent `window.__UI_GATE__` from
@@ -178,18 +318,52 @@ if (!rootElement) {
  * "THE PARTIAL FAILURE SIGNATURE" note).
  */
 let renderError: string | null = null;
-try {
-	createRoot(rootElement).render(
-		<StrictMode>
-			<ElectionShell
-				search={`?network=${GATE_NETWORK_HASH}&election=${FIXTURE_ELECTION_ID}`}
-				at={FIXTURE_INSTANTS[phase]}
-				election={FIXTURE_ELECTION}
-			/>
-		</StrictMode>,
-	);
-} catch (err) {
-	renderError = String((err as { message?: unknown })?.message ?? err);
+// 54-16: the DEFAULT path, unchanged. It is now guarded because the fixture
+// branch mounts a DIFFERENT shell into this same `#root` after an await, and
+// two `createRoot` calls on one container is a React error. With the
+// parameter absent this is the same synchronous mount 53-07/53-09 built.
+if (!fixtureMode) {
+	try {
+		createRoot(rootElement).render(
+			<StrictMode>
+				<ElectionShell
+					search={`?network=${GATE_NETWORK_HASH}&election=${FIXTURE_ELECTION_ID}`}
+					at={FIXTURE_INSTANTS[phase]}
+					election={FIXTURE_ELECTION}
+				/>
+			</StrictMode>,
+		);
+	} catch (err) {
+		renderError = String((err as { message?: unknown })?.message ?? err);
+	}
+}
+
+/**
+ * The fixture branch's mount: NO `election` prop, so `shouldReadFor` returns
+ * true and the shell reads for real; the settling instant, so the page is in
+ * the one phase where a gap card and a filled card render in the SAME
+ * section.
+ *
+ * A seed failure is recorded into `renderError` rather than thrown, so
+ * `__UI_GATE__` still publishes and the gate script reports a named failure
+ * instead of timing out on a page that never finished.
+ */
+async function mountFixtureSurface(): Promise<void> {
+	try {
+		await seedFixtureSurface();
+	} catch (err) {
+		renderError = renderError ?? `fixture seed failed: ${String((err as { message?: unknown })?.message ?? err)}`;
+		return;
+	}
+	try {
+		createRoot(shellContainer).render(
+			<StrictMode>
+				<ElectionShell search={FIXTURE_SEARCH} at={FIXTURE_SETTLING_INSTANT} />
+			</StrictMode>,
+		);
+	} catch (err) {
+		renderError = renderError ?? String((err as { message?: unknown })?.message ?? err);
+	}
 }
 
 // The hook-root region's own SEPARATE root and container — appended to
@@ -218,12 +392,12 @@ try {
  * `.dt-toggle` button — an unscoped selector could resolve on the hook-root
  * instance before `ElectionShell` itself ever committed.
  */
-function settleUntilMounted(maxFrames: number): Promise<void> {
+function settleUntilMounted(maxFrames: number, ready: () => boolean = defaultReady): Promise<void> {
 	return new Promise((resolve) => {
 		let frames = 0;
 		function tick() {
 			frames += 1;
-			if (document.querySelector('#root .dt-toggle') || frames >= maxFrames) {
+			if (ready() || frames >= maxFrames) {
 				resolve();
 				return;
 			}
@@ -233,7 +407,28 @@ function settleUntilMounted(maxFrames: number): Promise<void> {
 	});
 }
 
-settleUntilMounted(120).then(() => {
+/** The default predicate — the exact condition 53-09's scoped selector expressed. */
+function defaultReady(): boolean {
+	return document.querySelector('#root .dt-toggle') !== null;
+}
+
+/**
+ * The fixture branch's predicate (54-16). The shell commits its first render
+ * long before the read resolves, so the default predicate alone would let the
+ * poll finish against an empty page and every roll rung would report a defect
+ * that is really a race. Waiting for the roll's own wrapper is what makes the
+ * measured page the one the data produced. The frame budget is larger for the
+ * same reason: this branch waits on a real IndexedDB attach and four reads.
+ */
+function fixtureReady(): boolean {
+	return defaultReady() && document.querySelector('#root .registrant-roll') !== null;
+}
+
+const mountReady = fixtureMode ? mountFixtureSurface() : Promise.resolve();
+
+mountReady
+	.then(() => (fixtureMode ? settleUntilMounted(900, fixtureReady) : settleUntilMounted(120)))
+	.then(() => {
 	// 53-09: imperative data-ui-gate tagging of ElectionShell's own rendered
 	// output — see wrapForGate's own header for why AdvisoryDisclosure and
 	// LifecyclePill need a wrapper while DetailsToggle's own wrapper is
@@ -302,6 +497,10 @@ settleUntilMounted(120).then(() => {
 		error: renderError,
 		identity: computeReactIdentity(),
 		election: window.__ELECTION_SHELL_GATE__,
+		// 54-16, ADDITIVE and null on the default path so no existing rung
+		// sees a changed readout. On the fixture branch it carries the
+		// FIXTURE's own exported values and nothing measured from the page.
+		fixture: fixtureMode ? fixtureFacts : null,
 	});
 	win.__UI_GATE_DONE__ = true;
-});
+	});

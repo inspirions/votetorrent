@@ -15,6 +15,8 @@
 		"test:browser": "node ../../packages/ui-web/scripts/run-ui-gates.mjs --app . --gate-config vite.gate.config.ts --gate-dist dist-gate --gate-entry election-shell-gate.html --port 5191",
 		"gate:prove-no-dedupe": "node ../../packages/ui-web/scripts/run-ui-gates.mjs --app . --gate-config vite.gate.config.ts --gate-dist dist-gate --gate-entry election-shell-gate.html --port 5191 --prove-no-dedupe",
 		"gate:prove-token-missing": "node ../../packages/ui-web/scripts/run-ui-gates.mjs --app . --gate-config vite.gate.config.ts --gate-dist dist-gate --gate-entry election-shell-gate.html --port 5191 --prove-token-missing",
+		"test:render-fidelity": "node test/browser/render-fidelity-gate.mjs",
+		"gate:prove-matchers": "node test/browser/render-fidelity-gate.mjs --prove-matchers",
 		"typecheck": "tsc --noEmit",
 		"assert:no-polyfills": "node scripts/assert-no-node-polyfills.mjs",
 		"assert:single-quereus": "node scripts/assert-single-quereus-instance.mjs",
