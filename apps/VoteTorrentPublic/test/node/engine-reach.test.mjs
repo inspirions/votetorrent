@@ -236,19 +236,120 @@ test('delegation rule: every shared-data-package specifier under src/ is the pub
 //    true, and is worth asserting, is that it declares no DIRECT dependency
 //    on any of them, so it cannot reach around the package to a raw handle.
 // ---------------------------------------------------------------------------
-test('the manifest declares no DIRECT dependency on an IndexedDB-capable package — the app cannot reach around the shared data package to a raw handle', () => {
+/** Every package that can hand this app a raw database handle. UNCHANGED
+ * from the list 54-10 wrote; only the claim over it moves. @type {ReadonlyArray<string>} */
+const RAW_HANDLE_PACKAGES = Object.freeze([
+	'@quereus/quereus',
+	'@quereus/plugin-indexeddb',
+	'@quereus/store',
+	'@quereus/isolation',
+	'@optimystic/quereus-plugin-crypto',
+	'fake-indexeddb',
+]);
+
+/** The two the single-instance obligation forces into the manifest, admitted
+ * ONLY on the condition asserted below. @type {ReadonlyArray<string>} */
+const DEDUPE_ONLY_PACKAGES = Object.freeze(['@quereus/quereus', '@quereus/plugin-indexeddb']);
+
+test('the manifest declares no DIRECT dependency on a raw-handle package, EXCEPT the two the single-instance obligation forces — and each of those must appear in resolve.dedupe, which is the only reason it is admitted', () => {
 	const manifest = JSON.parse(readFileSync(publicRoot('package.json'), 'utf8'));
 	const declared = { ...(manifest.dependencies ?? {}), ...(manifest.devDependencies ?? {}) };
-	const banned = [
-		'@quereus/quereus',
-		'@quereus/plugin-indexeddb',
-		'@quereus/store',
-		'@quereus/isolation',
-		'@optimystic/quereus-plugin-crypto',
-		'fake-indexeddb',
-	];
-	const found = banned.filter((dep) => dep in declared);
-	assert.deepEqual(found, [], `the manifest declares a DIRECT dependency that hands this app a raw database handle: ${found.join(', ')}`);
+
+	const unexplained = RAW_HANDLE_PACKAGES.filter((dep) => dep in declared && !DEDUPE_ONLY_PACKAGES.includes(dep));
+	assert.deepEqual(
+		unexplained,
+		[],
+		`the manifest declares a DIRECT dependency that hands this app a raw database handle: ${unexplained.join(', ')}`,
+	);
+
+	// The condition that makes the exemption a rule rather than a hole: a
+	// dedupe-only dependency that is NOT in resolve.dedupe is just a raw-handle
+	// dependency with a story attached.
+	const viteConfig = stripCommentLines(readFileSync(publicRoot('vite.config.ts'), 'utf8'));
+	const dedupeMatch = viteConfig.match(/dedupe:\s*\[([^\]]*)\]/);
+	assert.ok(dedupeMatch, 'vite.config.ts declares no resolve.dedupe array at all — the exemption below would be unconditional');
+	const dedupeEntries = dedupeMatch[1].split(',').map((piece) => piece.trim().replace(/^['"`]|['"`]$/g, ''));
+
+	for (const dep of DEDUPE_ONLY_PACKAGES) {
+		if (!(dep in declared)) continue;
+		assert.ok(
+			dedupeEntries.includes(dep),
+			`"${dep}" is declared as a direct dependency but does not appear in resolve.dedupe. The ONLY sanctioned reason ` +
+				'for this app to declare a raw-handle package is to give `dedupe` an entry it can resolve from the project ' +
+				'root; without the dedupe entry it is simply a direct dependency on a raw handle.',
+		);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// 4b. The claim that actually carries the security content now (54-11).
+//
+// AMENDMENT LEDGER. Until 54-11 the manifest scan above was BOTH the story
+// and the enforcement: nothing under `apps/VoteTorrentPublic/node_modules`
+// resolved a quereus package, so no file under src/ could have imported one
+// even if it tried. 54-11's `resolve.dedupe` obligation ends that — the two
+// packages are now resolvable from this app — so the manifest scan alone
+// would be a green gate over a claim it no longer enforces, which is the
+// 53-D07 failure this file's own section-4 comment warns about.
+//
+// The replacement is strictly STRONGER for the threat that matters, because
+// it measures the thing the threat is actually made of: an IMPORT. A manifest
+// entry hands nobody a handle; an import does. This scan would also have
+// caught a transitively-resolvable raw handle, which the manifest scan never
+// could.
+// ---------------------------------------------------------------------------
+
+/** Matches a static `from '...'`, a bare side-effect `import '...'` and a dynamic `import('...')`. */
+const ANY_SPECIFIER_RE = /(?:\bfrom|\bimport)\s*\(?\s*['"]([^'"]+)['"]/g;
+
+/** @param {string} source @returns {string[]} every raw-handle package specifier in the source. */
+function rawHandleSpecifiers(source) {
+	/** @type {string[]} */
+	const out = [];
+	const re = new RegExp(ANY_SPECIFIER_RE.source, 'g');
+	let m;
+	while ((m = re.exec(stripCommentLines(source)))) {
+		const spec = m[1];
+		for (const pkg of RAW_HANDLE_PACKAGES) {
+			if (spec === pkg || spec.startsWith(`${pkg}/`)) out.push(spec);
+		}
+	}
+	return out;
+}
+
+test('positive control: the raw-handle import scan fires on a planted import of every package on the list, in all three specifier forms', () => {
+	const planted = RAW_HANDLE_PACKAGES.map((pkg, i) => {
+		if (i % 3 === 0) return `import { Database } from '${pkg}';`;
+		if (i % 3 === 1) return `import '${pkg}/register';`;
+		return `const late = await import('${pkg}');`;
+	}).join('\n');
+	const found = rawHandleSpecifiers(planted);
+	assert.equal(found.length, RAW_HANDLE_PACKAGES.length, `the scan is inert — found ${found.length} of ${RAW_HANDLE_PACKAGES.length} planted imports`);
+});
+
+test('benign control: the raw-handle import scan ignores the specifiers this app legitimately uses, and does not fire on a comment naming one', () => {
+	const benign = [
+		"import { listNetworks } from '@votetorrent/web-data/public';",
+		"import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/browser';",
+		"import { t } from '@votetorrent/ui-web';",
+		"// this module never imports @quereus/quereus directly",
+	].join('\n');
+	assert.deepEqual(rawHandleSpecifiers(benign), []);
+});
+
+test('delegation rule: no file under src/ IMPORTS a raw-handle package — the two in the manifest exist for resolve.dedupe and are reached only THROUGH the shared data package', () => {
+	const offenders = [];
+	for (const file of walkAll(publicSrc())) {
+		for (const spec of rawHandleSpecifiers(readFileSync(file, 'utf8'))) {
+			offenders.push(`${file}: "${spec}"`);
+		}
+	}
+	assert.deepEqual(
+		offenders,
+		[],
+		'these files import a raw-handle package directly instead of delegating to the audience-split package (D-01/D-04):\n' +
+			offenders.join('\n'),
+	);
 });
 
 // ---------------------------------------------------------------------------

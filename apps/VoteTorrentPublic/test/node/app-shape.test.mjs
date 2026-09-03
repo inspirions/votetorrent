@@ -31,15 +31,71 @@ const VITE_CONFIG_SOURCE = readFileSync(publicRoot('vite.config.ts'), 'utf8');
 const VITE_CONFIG_STRIPPED = stripCommentLines(VITE_CONFIG_SOURCE);
 
 // ---------------------------------------------------------------------------
-// 1. resolve.dedupe (D-16).
+// 1. resolve.dedupe (D-16), now FOUR entries (54-11).
+//
+// REWRITTEN, NOT DELETED. What stood here was an exact-shape regex over the
+// two React entries. 54-11 adds `@quereus/quereus` and
+// `@quereus/plugin-indexeddb`, because this app now reaches a real browser
+// database through `@votetorrent/web-data` and that package declares both in
+// peerDependencies + devDependencies -- the same on-disk shape that makes
+// React's entries necessary, one stack down. A second `@quereus/quereus` copy
+// is a second `Database` class identity and a second plugin registry: it fails
+// at plugin registration or at an `instanceof` boundary, in a build that still
+// exits 0.
+//
+// The assertion is an EXTRACTION now rather than a shape match, so the entry
+// list is compared as data and a drifting entry is named rather than reported
+// as a bare regex miss. Both the original comment-only inertness control and a
+// NEW discriminating control (a planted array missing one quereus entry must
+// NOT satisfy the expectation) run before the real config is touched.
 // ---------------------------------------------------------------------------
-test('vite.config.ts declares resolve.dedupe: [\'react\', \'react-dom\']', () => {
-	assert.match(VITE_CONFIG_STRIPPED, /dedupe:\s*\['react',\s*'react-dom'\]/, 'expected the exact dedupe form');
+
+/** The dedupe entries this app must declare, in order. @type {ReadonlyArray<string>} */
+const EXPECTED_DEDUPE = Object.freeze(['react', 'react-dom', '@quereus/quereus', '@quereus/plugin-indexeddb']);
+
+/** @type {RegExp} */
+const DEDUPE_ARRAY_RE = /dedupe:\s*\[([^\]]*)\]/;
+
+/**
+ * Pull the dedupe array literal's entries out of a config source, as data.
+ * @param {string} source comment-stripped config source
+ * @returns {string[] | null} the entries in declaration order, or null if there is no dedupe array at all.
+ */
+function extractDedupeEntries(source) {
+	const m = source.match(DEDUPE_ARRAY_RE);
+	if (!m) return null;
+	return m[1]
+		.split(',')
+		.map((piece) => piece.trim().replace(/^['"`]|['"`]$/g, ''))
+		.filter((piece) => piece !== '');
+}
+
+test('positive control: the extractor reads a planted four-entry dedupe array as data', () => {
+	const planted = `export default defineConfig({ resolve: { dedupe: ${JSON.stringify([...EXPECTED_DEDUPE])} } });`;
+	assert.deepEqual(extractDedupeEntries(planted), [...EXPECTED_DEDUPE], 'the extractor is inert against a planted array');
 });
 
-test('inertness control: a config that only DISCUSSES dedupe in a comment does not satisfy the matcher', () => {
-	const commentOnly = stripCommentLines('// resolve: { dedupe: [\'react\', \'react-dom\'] } is discussed here only\nexport default {};');
-	assert.doesNotMatch(commentOnly, /dedupe:\s*\['react',\s*'react-dom'\]/, 'comment-only mention must not satisfy the matcher');
+test('discriminating control: a planted dedupe array MISSING the quereus engine entry does not satisfy the expectation', () => {
+	const dropped = [...EXPECTED_DEDUPE].filter((entry) => entry !== '@quereus/quereus');
+	assert.equal(dropped.length, EXPECTED_DEDUPE.length - 1, 'fixture sanity: exactly one entry must have been dropped');
+	const planted = `export default defineConfig({ resolve: { dedupe: ${JSON.stringify(dropped)} } });`;
+	assert.notDeepEqual(extractDedupeEntries(planted), [...EXPECTED_DEDUPE], 'the assertion would accept a config that lost the engine dedupe entry');
+});
+
+test('inertness control: a config that only DISCUSSES dedupe in a comment yields no entries at all', () => {
+	const commentOnly = stripCommentLines(`// resolve: { dedupe: ${JSON.stringify([...EXPECTED_DEDUPE])} } is discussed here only\nexport default {};`);
+	assert.equal(extractDedupeEntries(commentOnly), null, 'comment-only mention must not satisfy the extractor');
+});
+
+test('vite.config.ts declares resolve.dedupe with all FOUR entries in order -- react, react-dom, and the two quereus packages the shared data layer needs a single copy of', () => {
+	assert.deepEqual(
+		extractDedupeEntries(VITE_CONFIG_STRIPPED),
+		[...EXPECTED_DEDUPE],
+		'the dedupe entry list drifted. The quereus entries are NOT unrelated to React: @votetorrent/web-data declares both ' +
+			'quereus packages in peerDependencies + devDependencies, and under nmHoistingLimits: workspaces a second copy is a ' +
+			'second Database class identity -- a failure that shows up at plugin registration or an instanceof boundary, in a ' +
+			'build that still exits 0. Do not delete them as leftovers.',
+	);
 });
 
 // ---------------------------------------------------------------------------
