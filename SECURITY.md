@@ -181,8 +181,24 @@ rather than rediscovered; assessing it is future work.
 
 ### DR-01 — the public election view reads only same-origin data
 
-**Status: OPEN** — awaiting confirmation of the intended production topology. Recorded and
-escalated 2026-09-03; unanswered as of that date. No default has been assumed on anyone's behalf.
+**Status: ANSWERED 2026-09-03 — the requirement is NOT met and is not intended to be met.** Asked
+whether the two apps would be served from one origin in production, the project owner answered:
+*"they are not supposed to be served from one origin in prod at all."*
+
+**Consequence, stated plainly: the real-data path described below never activates in production.**
+The public view has **no write path of any kind** — it imports only `listNetworks`,
+`attachNetworkDb`, `closeNetworkDb`, `listPublicElections` and the change-subscription seam from
+`@votetorrent/web-data/public`, and contains no insert, no bootstrap and no registration. Under a
+separate origin nothing can ever populate its IndexedDB, so **every visitor sees the empty state,
+permanently, by construction.**
+
+This is not a defect in any control below; the controls are correct and were verified. It is a gap
+in **D-01**, which fixed the data *source* on a premise the intended deployment does not satisfy.
+D-01 requires revisiting, and the public view needs a real data path — a read-only endpoint, a
+published snapshot, or peer sync — before it can show an election to a stranger. Until then the
+honest empty state is not an edge case; **it is the entire product surface.**
+
+The paragraphs below are retained unchanged as the analysis that produced this answer.
 
 **The mechanism.** `apps/VoteTorrentPublic` reads election data from the browser's own IndexedDB
 (D-01: an anonymous reader's data comes from an already-bootstrapped browser). IndexedDB is
