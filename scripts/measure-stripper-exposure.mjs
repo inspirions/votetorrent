@@ -16,7 +16,17 @@
  *
  * Subcommands:
  *   report   -- four sections (strippers, exposed subset, leakage rule A,
- *               leakage rule B) plus a reconciliation block.
+ *               leakage rule B) plus a reconciliation block. Always exits 0 --
+ *               this is a REPORTER, not a gate. Nothing in this repo's CI or
+ *               package.json scripts invokes `report` as a pass/fail check;
+ *               `assert` (below) is the subcommand a gate depends on.
+ *   assert   -- the regression GATE. Recomputes the same four sections and
+ *               exits nonzero if Section 1 or 2 exceeds its pinned ceiling, or
+ *               if Section 3 or 4 is not EXACTLY zero. Wired into
+ *               `.github/workflows/web-gates.yml`'s `logic-gate` job as its
+ *               own step, and proven both ways (planted regression -> red,
+ *               removed -> green) by
+ *               `packages/ui-web/test/stripper-exposure-assert.test.mjs`.
  *   selftest -- proves the instrument discriminates on synthetic fixtures,
  *               and that it excludes itself and the shared stripper.
  *
@@ -126,7 +136,10 @@ const SECTION_1_RULE =
 	"(\"startsWith('*')\" OR \"startsWith('/*')\") — the two/three-way check that " +
 	'recurs verbatim across this repo\'s line-opening comment strippers (see ' +
 	'packages/web-data/test/officer-reads.test.mjs:295-301 and ' +
-	'apps/VoteTorrentPublic/test/node/election-shell.test.mjs:23-31 for the shape). ' +
+	'apps/VoteTorrentPublic/test/node/sample-instants.test.mjs:19-25 for the shape; the prior ' +
+	'citation here, apps/VoteTorrentPublic/test/node/election-shell.test.mjs:23-31, was deleted by ' +
+	'54-24 and is stale — verified 2026-09-03 that this replacement range still carries the exact ' +
+	'shape quoted above). ' +
 	'A file matching only ONE half (e.g. a protocol-relative-URL guard that checks ' +
 	"\"startsWith('//')\" alone, with no `*` branch — see " +
 	'packages/bootstrap-rendezvous-service/src/static.ts) is NOT counted: that guard ' +
@@ -582,6 +595,103 @@ function runSelftest() {
 }
 
 // ---------------------------------------------------------------------------
+// assert -- the regression GATE (Nyquist gap closure, 2026-09-03).
+//
+// `report` above is a reporter: it always exits 0, by design, so a widening
+// exposure can be described without ever failing a build. Nothing wired this
+// instrument to a pass/fail verdict until now. `assert` recomputes the same
+// four sections via the same helpers `report` uses and turns them into four
+// independent checks:
+//
+//   Section 1 (line-opening strippers) and Section 2 (the exposed subset) are
+//   asserted against a PINNED CEILING, not an exact value -- Section 1
+//   legitimately grows when an unrelated new file happens to share the naive
+//   two/three-way shape (a config guard, an unrelated repo's stripper, a test
+//   fixture), and an exact-match assertion there would be permanently fragile
+//   against ordinary, unrelated commits.
+//
+//   Section 3 (leakage rule A) and Section 4 (leakage rule B) are asserted
+//   EXACTLY 0 -- after 54-23/54-24/54-25 migrated the authoritative exposed
+//   set (Section 2) onto the shared character-level stripper, no file in the
+//   reachable `.tsx`/`.jsx` set should be read through a line-opening filter
+//   at all. Any nonzero reading here means a scan was re-exposed -- either a
+//   newly added one, or a migrated one that regressed back to the naive form.
+//
+// Ceilings measured against the post-migration baseline (2026-09-03, this
+// repo state): Section 1 = 13, Section 2 = 2. Pinned with headroom of +2 / +1
+// respectively -- enough to absorb one unrelated new file landing in the
+// walked tree (the noise Section 1's own protocol-relative-URL carve-out
+// exists to describe) without silently masking a real regression.
+// ---------------------------------------------------------------------------
+
+const SECTION_1_CEILING = 15;
+const SECTION_2_CEILING = 3;
+
+function runAssert() {
+	const walkRoots = [path.join(repoRoot, 'apps'), path.join(repoRoot, 'packages'), path.join(repoRoot, 'scripts')];
+	const candidateFiles = walkCodeFiles(walkRoots);
+
+	const strippers = findLineOpenerStrippers(candidateFiles);
+	const exposed = findExposedSubset(strippers);
+	const workspaces = workspacesTouchedByExposedSet(exposed);
+	const reachable = reachableTsxJsxFiles(workspaces);
+
+	let ruleATotal = 0;
+	for (const f of reachable) {
+		ruleATotal += jsxMultilineCommentLineCount(readFileSync(f, 'utf8').split('\n'));
+	}
+	let ruleBTotal = 0;
+	for (const f of reachable) {
+		ruleBTotal += ruleBLeakedLineCount(readFileSync(f, 'utf8'));
+	}
+
+	let failures = 0;
+	/**
+	 * @param {string} name
+	 * @param {boolean} ok
+	 * @param {string} detail
+	 */
+	function check(name, ok, detail) {
+		if (ok) {
+			console.log(`  PASS  ${name} (${detail})`);
+		} else {
+			failures += 1;
+			console.log(`  FAIL  ${name} (${detail})`);
+		}
+	}
+
+	console.log('=== ASSERT — regression gate over Sections 1-4 ===');
+	check(
+		`Section 1 (line-opening strippers) count <= pinned ceiling ${SECTION_1_CEILING}`,
+		strippers.length <= SECTION_1_CEILING,
+		`measured ${strippers.length}`,
+	);
+	check(
+		`Section 2 (exposed subset) count <= pinned ceiling ${SECTION_2_CEILING}`,
+		exposed.length <= SECTION_2_CEILING,
+		`measured ${exposed.length}`,
+	);
+	check(
+		'Section 3 (leakage rule A) total is EXACTLY 0',
+		ruleATotal === 0,
+		`measured ${ruleATotal} line(s) over ${reachable.length} reachable file(s)`,
+	);
+	check(
+		'Section 4 (leakage rule B) total is EXACTLY 0',
+		ruleBTotal === 0,
+		`measured ${ruleBTotal} line(s) over ${reachable.length} reachable file(s)`,
+	);
+
+	console.log('');
+	if (failures > 0) {
+		console.error(`ASSERT FAILED: ${failures}/4 check(s) regressed. Run 'report' for the full per-file detail.`);
+		process.exitCode = 1;
+	} else {
+		console.log('ASSERT PASSED: no exposure regression detected against any of the four pinned checks.');
+	}
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -591,11 +701,14 @@ function main() {
 		case 'report':
 			runReport();
 			break;
+		case 'assert':
+			runAssert();
+			break;
 		case 'selftest':
 			runSelftest();
 			break;
 		default:
-			console.error(`unknown subcommand: ${cmd ?? '(none)'}\nusage: measure-stripper-exposure.mjs <report|selftest>`);
+			console.error(`unknown subcommand: ${cmd ?? '(none)'}\nusage: measure-stripper-exposure.mjs <report|assert|selftest>`);
 			process.exitCode = 1;
 	}
 }

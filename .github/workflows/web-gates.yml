@@ -315,6 +315,31 @@ jobs:
           T1_ELAPSED=$((SECONDS-T1_START))
           node scripts/assert-ci-baselines.mjs tier1 ui-web-tier1.log "$T1_ELAPSED" --baseline uiWebTier1 | tee -a ci-receipt.txt
 
+      # Nyquist gap closure (2026-09-03): `scripts/measure-stripper-exposure.mjs report`
+      # (54-22) always exits 0 -- it is a reporter, not a gate -- and before this step
+      # nothing in package.json, this workflow, or any test invoked the instrument as a
+      # pass/fail check at all. That left the property 54-23/54-24/54-25 actually migrated
+      # onto (no scan reads a line-opening-stripped .tsx/.jsx file) asserted by nothing: a
+      # reintroduced naive stripper anywhere in apps/, packages/ or scripts/ would climb the
+      # exposure count while every existing gate stayed green. `assert` recomputes the same
+      # four sections and fails if Section 1 or 2 exceeds its pinned ceiling (13/2 measured,
+      # 15/3 pinned -- a ceiling, not an exact value, since Section 1 legitimately moves when
+      # an unrelated file happens to share its naive two-way shape) or if Section 3 or 4 (the
+      # leakage totals) is not EXACTLY zero. Proven both ways, in both directions, by
+      # packages/ui-web/test/stripper-exposure-assert.test.mjs's own negative control, which
+      # plants a throwaway exposed scan plus a leaking JSX comment, confirms all four checks
+      # go red, removes the plant, and confirms green again -- already run as part of the
+      # ui-web tier-1 step above; this step is the standing regression gate itself.
+      - name: Tier 1 - stripper exposure regression gate (D-05)
+        run: |
+          set -euo pipefail
+          node scripts/measure-stripper-exposure.mjs assert 2>&1 | tee stripper-exposure-assert.log
+          if ! grep -q 'ASSERT PASSED' stripper-exposure-assert.log; then
+            echo "::error::stripper-exposure-assert: no 'ASSERT PASSED' verdict line found in the run log -- the command's own exit code is not, by itself, trusted here"
+            exit 1
+          fi
+          echo "RECEIPT stripper-exposure-assert" | tee -a ci-receipt.txt
+
       - name: Public app typecheck
         run: |
           set -euo pipefail
@@ -424,6 +449,7 @@ jobs:
             toolchain peers-clean dashboard-typecheck copy-lint-3root \
             dashboard-build-no-polyfills dashboard-tokens-in-dist dashboard-no-harness-in-dist \
             ui-web-typecheck ui-web-consumers tier1-ui-web \
+            stripper-exposure-assert \
             web-data-typecheck tier1-web-data \
             public-typecheck tier1-public public-build-no-polyfills \
             public-no-harness-in-dist public-engine-reach public-single-quereus tier1-logic
