@@ -99,6 +99,7 @@ All optional.
 | `CLUSTER_SIZE=N` | `2` | `strandClusterSize` — must be identical on every node |
 | `ENROLL=0\|1` | `1` | run the enrolment ceremony; `0` observes the un-enrolled failure |
 | `ENROLL_ATTEMPTS=N` | `5` | bounded retries for the ceremony |
+| `AUTH_TIMEOUT_MS=N` | `120000` | how long L3 waits for the control database to become readable after the enrolment write. Separate from the ceremony's per-dial timeout |
 | `TIMEOUT_SCALE=N` | `1` | multiply every timeout on a slow machine |
 | `VERBOSE=1` | off | per-poll progress |
 
@@ -133,9 +134,9 @@ Re-measured 2026-09-03 on `@optimystic/db-p2p@0.27.0` / `@serfab/cadre-core@0.12
 
 | configuration | result |
 |---|---|
-| default (`DRONES=2 RELAYS=1 ENROLL=1`) | **4 PASS / 1 FAIL over 5 runs** — the L3 flake below hits this arm too, so it is not `RELAYS=2`-specific |
+| default (`DRONES=2 RELAYS=1 ENROLL=1`) | **PASS**, 4/4 (was 4/5 before the L3 fix) |
 | `ENROLL=0` | **FAIL at L3** — `peer-A=false peer-B=false; owner lists 0 authorized member(s)` |
-| `RELAYS=2` | **3 PASS / 2 FAIL over 5 runs** — every failure at L3, `Block default/Revocation is unavailable (peers-unreachable)`. NOT the old `claimed-elsewhere`; see below |
+| `RELAYS=2` | **PASS**, 8/8 (was 3/5 before the L3 fix — see below). The old `claimed-elsewhere` does not appear at all |
 | `DRONES=3` | not re-measured on this stack |
 
 The `ENROLL=0` arm is the negative control, and it matters: it is the exact failure mode
@@ -168,11 +169,10 @@ Two things changed and they are easy to conflate:
   fine only if the OTHER cohort members can still route to the peer, which L2 now asserts
   directly rather than inferring from a count.
 
-**What is still open: L3 flakes.** 2 of 5 runs at `RELAYS=2` and 1 of 5 on the default
-`RELAYS=1` arm — worse with breadth, but not specific to it. It fails with
-`Block default/Revocation is unavailable (peers-unreachable)` — a control-DB read that cannot be
-served, not a membership verdict. Same shape as the enrolment flake below. A single green run at
-`RELAYS=2` therefore proves nothing; run it several times.
+**The L3 flake is FIXED** (2026-09-03). It was 2 of 5 runs at `RELAYS=2` and 1 of 5 on the
+default arm, always `Block default/Revocation is unavailable (peers-unreachable)` — a control-DB
+read that could not be served, not a membership verdict. Now 8/8 at `RELAYS=2` and 4/4 on the
+default arm, with `ENROLL=0` still failing (in ~17s). See the section below for the two causes.
 
 <details>
 <summary>History — the original root-cause writeup (accurate for db-p2p &lt;= 0.26.0)</summary>
@@ -215,23 +215,32 @@ to `1` — it works by keeping cohort views below 3, not by avoiding the bug.
 
 </details>
 
-### Known flake, handled — and NO LONGER the same root cause
+### The L3 flake — diagnosed and fixed
 
-The enrolment ceremony genuinely fails run-to-run: each step writes owner-signed control state
-and then reads it back, and the read can be issued before anyone can serve it —
-`Block default/Revocation is unavailable (peers-unreachable)`. `ENROLL_ATTEMPTS` retries with
-linear backoff. This is not masking a defect: a peer that is genuinely un-enrollable exhausts
-every attempt and L3 still fails.
+**Not the read-repair deadlock above.** That attribution was carried here for months and is
+falsified: db-p2p 0.27.0 closed the deadlock and the flake survived it, including on `RELAYS=1`,
+which the deadlock explanation says cannot happen at a cohort view of 2.
 
-**This paragraph used to attribute the flake to the read-repair deadlock above. That attribution
-is now falsified** — db-p2p 0.27.0 closed the deadlock and the flake survives it, at ~40% on
-`RELAYS=2` and 20% on `RELAYS=1` (2 of 5 and 1 of 5 runs, 2026-09-03). The old explanation
-also predicted it should NOT occur at a cohort view of 2, which the `RELAYS=1` failures refute.
-It is a genuine settling race, not the same upstream bug,
-and it is unexplained. Two observations for whoever picks it up: the failing read is a THROW, not
-a `false` membership answer, so L3 fails outright where it could keep polling; and `enrol()` has
-been seen exhausting all five attempts on a joiner that WAS in fact enrolled, because only the
-read-back was failing.
+What it actually was, in two parts:
+
+1. **The ceremony stopped running.** `isAuthorizedMember` reads the control database, and that
+   read can fail outright rather than answer. It was the FIRST statement inside each attempt, so
+   once reads started failing every remaining attempt died before reaching `createInvite` — the
+   ceremony that would have fixed things never ran, and the failure was then reported as
+   "membership did not take" on a joiner that had in fact been accepted. A read that cannot be
+   served is now `'unknown'`, distinct from a `false` verdict, and the ceremony proceeds.
+2. **L3 gave up too early.** The enrolment write leaves the control DB briefly unreadable while
+   replication spreads the new revision to a second holder, and that convergence sometimes takes
+   over 30 seconds on loopback. L3's window was 30s (shared, confusingly, with the ceremony's
+   per-dial timeout). It is now its own `AUTH_TIMEOUT_MS`, defaulting to 120s.
+
+Neither is a retry that hides a failure: `ENROLL=0` still fails L3, and a peer that never becomes
+a member still fails it. Re-running the ceremony now happens only on a DEFINITE `false` — an
+`unknown` means it already ran and cannot be confirmed yet, where the old code would storm
+`createInvite`/`acceptPhone` through a read outage to no effect.
+
+Measured 2026-09-03, `RELAYS=2`: 3/5 before → 5/6 with (1) alone → **8/8 with both**; default arm
+4/5 before → **4/4**. `ENROLL=0` still red.
 
 Owner genesis is run while the founder is **still solo**, before anyone joins, because the write
 needs a quorum the joiners cannot yet serve. That is also what makes the control database singly

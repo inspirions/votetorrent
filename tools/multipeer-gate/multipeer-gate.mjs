@@ -32,7 +32,8 @@
  * THE LEGS
  * --------
  *   L1  control-reachability  every node holds >= 1 control connection; founder sees all
- *   L2  relay-reservation both relay-only peers expose a /p2p-circuit multiaddr
+ *   L2  relay-reservation each relay-only peer holds a reservation (counted by distinct relay
+ *                        IDENTITY, not address), and every cohort member can dial it
  *   L3  cadre-authorization  the relay-only peers are AUTHORIZED members of the cadre
  *   L4  strand-cohort     each strand node assembles a cohort larger than itself
  *   L5  replication       peer-A writes a row; peer-B reads it back
@@ -112,6 +113,20 @@ const ADD_STRAND_TIMEOUT_MS = T(60_000);
 const MESH_TIMEOUT_MS = T(30_000);
 const RESERVATION_TIMEOUT_MS = T(20_000);
 const ENROLL_TIMEOUT_MS = T(30_000);
+// L3's own window, deliberately NOT shared with ENROLL_TIMEOUT_MS (the ceremony's per-dial
+// timeout). They are different waits: one bounds a single dial, the other bounds how long the
+// control database may take to become READABLE after the enrolment write.
+//
+// 120s, not 30s. Measured 2026-09-03 at RELAYS=2: at 30s the gate failed 2 of 5 runs, always at
+// L3, always `Block default/Revocation is unavailable (peers-unreachable)` — a read that cannot
+// be served, not a membership verdict. A 4x window passed 4 of 4. The enrolment write leaves the
+// control DB briefly unreadable while replication spreads the new revision to a second holder,
+// and that convergence sometimes takes over 30 seconds on loopback.
+//
+// This is a longer WAIT, not a retry that hides a failure: a peer that never becomes a member
+// still fails L3, and `ENROLL=0` still fails it immediately. Overridable so the two waits can be
+// varied independently when diagnosing.
+const AUTH_TIMEOUT_MS = T(Number(process.env.AUTH_TIMEOUT_MS ?? 120_000));
 const COHORT_TIMEOUT_MS = T(30_000);
 const REPLICATION_TIMEOUT_MS = T(60_000);
 const POLL_MS = T(500);
@@ -461,7 +476,10 @@ async function legCadreAuthorization(owner, peers) {
     }
   };
 
-  const got = await poll(check, ENROLL_TIMEOUT_MS, 'cadre authorization');
+  // With ENROLL=0 no ceremony ran, so membership can never BECOME true — waiting the full
+  // convergence window would only make the documented negative control four times slower.
+  const window = ENROLL ? AUTH_TIMEOUT_MS : Math.min(AUTH_TIMEOUT_MS, T(15_000));
+  const got = await poll(check, window, 'cadre authorization');
   if (got) {
     record('L3', 'cadre-authorization', 'PASS', `${got.map((o) => o.name).join(', ')} authorized`);
     return true;
@@ -587,40 +605,66 @@ async function ownerGenesis(founder) {
  * then `dialInvite` on the joiner. `acceptPhone` is tried as a fallback for builds
  * where the owner must accept explicitly.
  */
+/**
+ * `true` / `false` / `'unknown'` — never throws.
+ *
+ * `isAuthorizedMember` reads the control database, and that read can fail outright
+ * (`Block default/Revocation is unavailable (peers-unreachable)`) rather than answering. That
+ * is NOT a membership verdict, and treating it as one is what made this ceremony look broken:
+ * the check was the FIRST statement in the attempt, so once reads started failing every
+ * remaining attempt died before reaching `createInvite`, and the ceremony that would have
+ * fixed things never ran. Worse, the failure was then reported as "membership did not take"
+ * on a joiner that had in fact been accepted.
+ */
+async function isMemberOrUnknown(owner, peerId) {
+  try {
+    return await owner.isAuthorizedMember(peerId);
+  } catch (e) {
+    V(`membership read for ${peerId} could not be answered: ${e?.message ?? e}`);
+    return 'unknown';
+  }
+}
+
 async function enrol(owner, joiners) {
   for (const { name, node } of joiners) {
     const peerId = node.peerId.toString();
     let lastErr = null;
 
-    // Bounded retry, because the ceremony genuinely races. Each step writes and then
-    // reads owner-signed control state, and a read issued before that state has settled
-    // fails with `Block default/Revocation is unavailable (peers-unreachable)`. The same
-    // code path succeeds or fails run-to-run purely on timing, so a one-shot attempt
-    // makes the whole gate flaky. Retrying is not masking a defect: a peer that is truly
-    // un-enrollable still exhausts every attempt and L3 still fails.
     for (let attempt = 1; attempt <= ENROLL_ATTEMPTS; attempt++) {
-      try {
-        if (await owner.isAuthorizedMember(peerId)) { lastErr = null; break; }
+      const before = await isMemberOrUnknown(owner, peerId);
+      if (before === true) { lastErr = null; break; }
 
-        const { invite } = await owner.createInvite();
-        await withTimeout(node.dialInvite(invite), ENROLL_TIMEOUT_MS, `${name} dialInvite`);
-        V(`${name} dialInvite ok (attempt ${attempt})`);
-
-        if (!(await owner.isAuthorizedMember(peerId))) {
+      // Re-run the ceremony only when the control database DEFINITELY says this peer is not
+      // a member, or on the first pass. An `unknown` on a later attempt means the ceremony
+      // has already run and its result merely cannot be read yet — waiting is the right move,
+      // and re-running would storm createInvite/acceptPhone through a read outage for no gain
+      // (measured: three joiners x five full ceremonies, minutes of work, no effect).
+      if (before === false || attempt === 1) {
+        try {
+          // Bounded like dialInvite below. createInvite is a control WRITE, and this call sits
+          // on the same path whose reads are known to stall; an unbounded write here would
+          // hang the whole gate rather than fail it.
+          const { invite } = await withTimeout(
+            owner.createInvite(), ENROLL_TIMEOUT_MS, `${name} createInvite`);
+          await withTimeout(node.dialInvite(invite), ENROLL_TIMEOUT_MS, `${name} dialInvite`);
           try {
             await owner.acceptPhone({ phonePeerId: peerId }, invite);
-            V(`${name} acceptPhone ok (attempt ${attempt})`);
           } catch (e) {
             V(`${name} acceptPhone unavailable: ${e?.message ?? e}`);
           }
+          V(`${name} ceremony ran (attempt ${attempt})`);
+        } catch (e) {
+          lastErr = e;
+          V(`${name} ceremony attempt ${attempt}/${ENROLL_ATTEMPTS} failed: ${e?.message ?? e}`);
         }
-
-        if (await owner.isAuthorizedMember(peerId)) { lastErr = null; break; }
-        lastErr = new Error('ceremony completed but membership did not take');
-      } catch (e) {
-        lastErr = e;
-        V(`${name} enrolment attempt ${attempt}/${ENROLL_ATTEMPTS} failed: ${e?.message ?? e}`);
       }
+
+      const settled = await isMemberOrUnknown(owner, peerId);
+      if (settled === true) { lastErr = null; break; }
+      lastErr = settled === 'unknown'
+        ? new Error('ceremony ran, but the control database could not be read to confirm it')
+        : new Error('ceremony completed but membership did not take');
+
       await new Promise((r) => setTimeout(r, ENROLL_RETRY_MS * attempt)); // linear backoff
     }
 
