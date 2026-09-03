@@ -170,9 +170,23 @@ function stripJsComments(source) {
 const PANEL_PATH = path.join(dashboardSrc('screens', 'panels'), 'ElectionsPanel.tsx');
 const PANEL_STRIPPED = stripJsComments(readFileSync(PANEL_PATH, 'utf8'));
 
+// ASSEMBLED, never written out -- `packages/ui-web/test/three-bucket-absent.test.mjs`'s
+// convention. A checker whose own source contains the identifier it hunts is
+// permanently green under any repo-wide "this name is gone" scan, and it would
+// make that scan's zero-occurrence claim dishonest. This one names a function
+// 54-07 deleted, so writing it out here would resurrect it in grep.
+const RETIRED_ALIAS = ['compute', 'Election', 'Phase'].join('');
+
+test('this file\'s own source contains zero raw occurrences of the retired alias identifier it hunts (self-trip guard)', () => {
+	const ownSource = readFileSync(new URL(import.meta.url), 'utf8');
+	assert.equal((ownSource.match(new RegExp(RETIRED_ALIAS, 'g')) ?? []).length, 0);
+});
+
 test('ElectionsPanel.tsx calls derivePhase and no longer names the retired bridge alias', () => {
 	assert.match(PANEL_STRIPPED, /derivePhase\(/);
-	assert.doesNotMatch(PANEL_STRIPPED, /computeElectionPhase/);
+	assert.doesNotMatch(PANEL_STRIPPED, new RegExp(RETIRED_ALIAS));
+	// The matcher is proven able to fire, so the assertion above is not vacuous.
+	assert.match(`const { phase } = ${RETIRED_ALIAS}(overview.Timeline, at);`, new RegExp(RETIRED_ALIAS));
 });
 
 test('ElectionsPanel.tsx destructures only phase and stage -- derivePhase\'s diagnostics embed raw Timeline values and must not reach an officer\'s screen or console', () => {

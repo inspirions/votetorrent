@@ -226,6 +226,6 @@ test('src/index.js, comment-stripped, contains neither "vote-engine" nor "electi
 });
 
 test('positive control: the engine-free matcher fires on a synthetic re-export fixture', () => {
-	const fixture = "export { computeElectionPhase } from './lifecycle/election-phase.js';";
+	const fixture = "export { derivePhase } from './lifecycle/election-phase.js';";
 	assert.match(fixture, /election-phase/, 'matcher is inert');
 });

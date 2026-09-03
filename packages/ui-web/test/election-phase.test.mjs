@@ -25,7 +25,6 @@ import {
 	assertCanonicalDatetime,
 	resolveComparisonInstant,
 	derivePhase,
-	computeElectionPhase,
 	parseTimeline,
 	normalizeInstant,
 	phaseCopyKey,
@@ -201,52 +200,6 @@ test('derivePhase: a JSON string that does not parse degrades to indeterminate, 
 	const result = derivePhase({}, '{not json', '2026-11-03T08:00:00');
 	assert.equal(result.phase, INDETERMINATE_PHASE);
 	assert.equal(result.indeterminate, true);
-});
-
-// --- computeElectionPhase: the one-wave bridge alias -------------------------
-
-test('computeElectionPhase(timelineValue, atCanonical) returns { phase, reason } in the NEW vocabulary', () => {
-	const result = computeElectionPhase(FULL_TIMELINE, '2026-11-03T08:00:00');
-	assert.equal(result.phase, 'voting');
-	assert.equal(typeof result.reason, 'string');
-});
-
-test('computeElectionPhase returns indeterminate (NOT the retired phase: null) for a broken timeline', () => {
-	const result = computeElectionPhase(null, '2026-11-03T08:00:00');
-	assert.equal(result.phase, INDETERMINATE_PHASE);
-	assert.notEqual(result.phase, null);
-});
-
-test('computeElectionPhase and derivePhase agree on every boundary fixture -- the alias cannot silently diverge', () => {
-	/** @type {Array<[string, unknown]>} */
-	const cases = [
-		['2026-11-03T07:59:59', FULL_TIMELINE],
-		['2026-11-03T08:00:00', FULL_TIMELINE],
-		['2026-11-03T20:00:00', FULL_TIMELINE],
-		['2026-11-06T07:59:59', FULL_TIMELINE],
-		['2026-11-06T08:00:00', FULL_TIMELINE],
-		['2027-01-01T00:00:00', FULL_TIMELINE],
-		['2026-11-03T08:00:00', FULL_TIMELINE_NUMBERS],
-		['2026-11-03T08:00:00', null],
-		['2026-11-03T08:00:00', '{not json'],
-	];
-	for (const [at, timeline] of cases) {
-		const viaDerivePhase = derivePhase({}, timeline, at);
-		const viaAlias = computeElectionPhase(timeline, at);
-		assert.equal(viaAlias.phase, viaDerivePhase.phase, `phase disagreement at ${at}`);
-		assert.equal(viaAlias.reason, viaDerivePhase.reason, `reason disagreement at ${at}`);
-	}
-});
-
-test('computeElectionPhase\'s body contains no derivation logic of its own (source-shape guard)', () => {
-	const source = readFileSync(uiWebSrc('lifecycle', 'election-phase.js'), 'utf8');
-	const match = source.match(/export function computeElectionPhase\([^)]*\)\s*\{([\s\S]*?)\n\}/);
-	assert.ok(match, 'expected to find computeElectionPhase\'s function body');
-	const body = match[1];
-	assert.doesNotMatch(body, /</);
-	assert.doesNotMatch(body, />=/);
-	assert.doesNotMatch(body, /votingStarts|tallyingStarts|closed/);
-	assert.doesNotMatch(body, /JSON\.parse/);
 });
 
 // --- normalizeInstant --------------------------------------------------------

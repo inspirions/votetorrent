@@ -3,7 +3,7 @@
  * phase, and the small set of pure datetime helpers `ElectionsPanel` needs
  * to render it.
  *
- * Six things a later reader cannot infer:
+ * Five things a later reader cannot infer:
  *
  * 1. The phase is computed from the election's own `ElectionRevision.Timeline`,
  *    never chosen by an officer. Spike 078 shipped three `organizing` /
@@ -49,9 +49,14 @@
  *    values and English sentences authored outside `copy.js`. They cross into
  *    54-12/54-13's render path, which is a copy-table boundary: every
  *    rendered sentence must be routed through `t()` (contract C2).
- * 6. `computeElectionPhase` survives this wave ONLY as a thin delegating
- *    alias over `derivePhase` -- see its own doc comment below for the full
- *    bridge rationale and expiry.
+ *
+ * `derivePhase` is the module's ONE derivation. A one-wave delegating bridge
+ * alias over it existed while the two apps were repointed; it was deleted the
+ * moment its last consumer moved, and nothing here should grow a second entry
+ * point back. A wrapper that takes fewer arguments cannot supply the
+ * schema-enforced cross-check row, so it necessarily reports fewer
+ * discrepancies than the real function does -- which is why the bridge was
+ * time-boxed rather than kept for convenience.
  *
  * FINDING (measured at execution time, 2026-08-26): `toCanonicalDatetime`
  * (packages/vote-engine/src/utils.ts) is not merely a validator -- for any
@@ -91,7 +96,7 @@
  * that 53-05 had moved verbatim from
  * `apps/VoteTorrentDashboard/src/lifecycle/election-phase.js`. This lift is
  * no longer byte-for-byte verbatim -- the sha-verified-verbatim claim the
- * prior header carried does not carry over. Six deliberate deviations from
+ * prior header carried does not carry over. Five deliberate deviations from
  * the 086 source, all D-07's restatement obligation:
  *
  *   (a) `threeBucket()` is omitted entirely (D-07: zero occurrences anywhere
@@ -111,12 +116,10 @@
  *       defensively parsed inside a `try` that degrades to an empty blob --
  *       086 only ever received an already-parsed object, but the real
  *       `ElectionRevision.Timeline` column carries both shapes (point 3
- *       above) and the retired `computeElectionPhase` had its own
- *       `JSON.parse` branch for exactly that reason. Dropping it would
+ *       above) and this project's own retired three-phase derivation had its
+ *       own `JSON.parse` branch for exactly that reason. Dropping it would
  *       silently turn every string-valued timeline into `indeterminate` for
  *       both apps.
- *   (f) `computeElectionPhase` is RETAINED as a thin delegating alias for one
- *       wave -- see its own doc comment below.
  */
 
 import { toCanonicalDatetime, nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
@@ -186,9 +189,11 @@ export const CONFLICT = Object.freeze({
  */
 
 /**
- * The three schema-enforced fields `parseTimeline` cross-checks the
- * unenforced JSON Timeline against. Both optional: a two-argument caller
- * (the `computeElectionPhase` bridge alias) cannot supply either.
+ * The schema-enforced fields `parseTimeline` cross-checks the unenforced JSON
+ * Timeline against. Both are optional because a caller that holds no election
+ * row -- a test fixture, or the retired two-argument bridge wrapper this
+ * module used to export -- can supply neither, and a missing cross-check must
+ * degrade to "no discrepancy reported", never to a thrown error.
  * @typedef {object} ElectionCrossCheckFields
  * @property {unknown} [ballotDeadline]
  * @property {unknown} [date]
@@ -226,8 +231,8 @@ export function assertCanonicalDatetime(value, label) {
 }
 
 /**
- * Resolve the instant `derivePhase`/`computeElectionPhase` compare a timeline
- * against. Returns `provided` unchanged when it is already canonical; falls
+ * Resolve the instant `derivePhase` compares a timeline against. Returns
+ * `provided` unchanged when it is already canonical; falls
  * back to `nowCanonicalDatetime()` when `provided` is `null` or `undefined`
  * (a panel can mount before any snapshot instant exists); throws via
  * `assertCanonicalDatetime` for any other, non-canonical value.
@@ -246,7 +251,7 @@ export function resolveComparisonInstant(provided) {
  * Normalise one raw Timeline value to epoch-ms, or `null`.
  *
  * `Record<ElectionEvent, number>` is the declared TS type, but this project's
- * own prior `computeElectionPhase` accepted `string | number` via
+ * own prior three-phase derivation accepted `string | number` via
  * `toCanonicalDatetime` -- so the declared type is already known not to hold
  * at runtime. Both are accepted here too.
  *
@@ -534,38 +539,3 @@ function iso(ms) {
 }
 
 export { iso as formatInstant };
-
-/**
- * @deprecated Bridge alias, retained for exactly ONE wave (Phase 54, wave 1).
- *
- * It exists solely to keep `apps/VoteTorrentPublic/src/screens/ElectionShell.tsx`
- * compiling across this wave: `apps/VoteTorrentPublic/test/node/election-shell.test.mjs`'s
- * `PHASE_54_FORBIDDEN_RE` still forbids the literal `derivePhase` anywhere
- * under the public app's `src/` until **54-05** (wave 2) narrows that fence
- * and repoints that one call site. 54-05 does NOT delete this alias --
- * `apps/VoteTorrentDashboard/src/screens/panels/ElectionsPanel.tsx` and
- * `apps/VoteTorrentDashboard/test/browser/gate-matrix.tsx` also call it, and
- * their owner is **54-07** (wave 4), which repoints both dashboard call sites
- * and THEN deletes this function -- the alias dies with its LAST consumer,
- * not its first.
- *
- * Its entire body FORWARDS to `derivePhase`. It holds NO derivation logic of
- * its own -- no boundary comparison, no timeline field access, no branch
- * that could disagree with `derivePhase`; if a future reader finds one, this
- * alias has become a second implementation and D-06 ("the ONE shared
- * implementation") is broken. It passes an empty election object for the
- * schema-enforced cross-checks a two-argument caller cannot supply.
- *
- * It now returns `indeterminate` where it once returned `phase: null` --
- * that changed value flows straight into `LifecyclePill`, so both apps begin
- * rendering four phases and D-10's unknown pill during this bridge wave
- * without an app-side edit.
- *
- * @param {unknown} timelineValue
- * @param {string} atCanonical
- * @returns {{ phase: PhaseId | typeof INDETERMINATE_PHASE, reason: string }}
- */
-export function computeElectionPhase(timelineValue, atCanonical) {
-	const result = derivePhase({}, timelineValue, atCanonical);
-	return { phase: result.phase, reason: result.reason };
-}

@@ -67,7 +67,7 @@ of those components does not need this import.
 
 - `@votetorrent/ui-web` — plain-JS values, importable from `node --test` with no bundler.
 - `@votetorrent/ui-web/components` — React components, bundler-only.
-- `@votetorrent/ui-web/lifecycle` — `computeElectionPhase`/`resolveComparisonInstant`, plain-JS,
+- `@votetorrent/ui-web/lifecycle` — `derivePhase`/`resolveComparisonInstant`/`PHASE_IDS`, plain-JS,
   importable from `node --test` with no bundler. Kept out of the `.` barrel because its only
   external dependency is `@votetorrent/vote-engine/browser`, a database engine — re-exporting it
   through `.` would load that engine for every consumer of any plain-JS value (measured

@@ -1,8 +1,6 @@
 import type { ReactNode } from 'react';
 import { t } from '@votetorrent/ui-web';
 import { AdvisoryDisclosure, DetailsToggle, LifecyclePill } from '@votetorrent/ui-web/components';
-// computeElectionPhase still has live callers (ElectionsPanel.tsx,
-// gate-matrix.tsx) — 54-07 removes it; do not "tidy" it away for looking unused.
 import { derivePhase, resolveComparisonInstant } from '@votetorrent/ui-web/lifecycle';
 import { AppChrome } from './AppChrome';
 import { parseElectionAddress } from '../election-address.js';

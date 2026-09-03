@@ -206,7 +206,7 @@ test('the audit trail survives: election-phase.js contains the identifier at lea
 		rawMatches.length >= 1,
 		'the header sentence(s) explaining why the identifier was dropped are D-07\'s audit trail and must not be deleted to make this scan pass -- ' +
 			'deleting them is what would let someone re-add the function unnoticed. ' +
-			`(54-07 will later edit this same file to remove the computeElectionPhase alias -- this case is the standing guard that the audit trail is not carried away with it.) got ${rawMatches.length} raw occurrence(s)`,
+			`(54-07 edited this same file to delete the one-wave bridge alias; this case is the standing guard that the audit trail was not carried away with it, and it held.) got ${rawMatches.length} raw occurrence(s)`,
 	);
 	assert.equal(strippedMatches.length, 0, `expected zero occurrences once comments are stripped (the code itself must not carry the identifier), got ${strippedMatches.length}`);
 });
