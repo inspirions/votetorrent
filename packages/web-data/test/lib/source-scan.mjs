@@ -24,11 +24,29 @@
  * gates must cross — and it is a frozen historical spike record, so coupling a
  * product gate to it would make a historical artifact load-bearing.
  *
- * Deps: node:fs and node:path only.
+ * Deps: node:fs and node:path, plus `scripts/lib/strip-comments.mjs` (54-22) —
+ * this module re-exports `stripComments` from there rather than holding a
+ * second implementation; see that module's JSDoc for the full contract.
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
+
+/**
+ * Re-exported, not re-implemented (54-22). The character-level,
+ * quote-state-tracking stripper below used to live here; it now lives in
+ * `scripts/lib/strip-comments.mjs` as the repository's single implementation,
+ * and this module re-exports the same name so every existing importer of
+ * `stripComments` from `test/lib/source-scan.mjs` keeps resolving unchanged.
+ * D-05's anonymity scan (this package's own controls 3a/3b) is the proof that
+ * TRANSFERS to the shared module rather than being re-derived — see that
+ * module's JSDoc for the full behaviour contract, including the accepted
+ * line-local-string-state limitation.
+ *
+ * @type {(source: string) => string}
+ */
+export { stripComments };
 
 /**
  * Extensions a table name, a module specifier or a SQL string could be written
@@ -144,95 +162,6 @@ export function partitionByExtension(files) {
 		else out.unknown.push(file);
 	}
 	return out;
-}
-
-/**
- * Remove every comment from JavaScript/TypeScript/JSX source, preserving line
- * count and line positions so a reported line number is true to the file.
- *
- * DELIBERATELY STRONGER than the whole-line stripper the repo's other scans use
- * (`assert-no-node-polyfills.mjs`, `election-shell.test.mjs`). Those drop a line
- * that STARTS with `//`, `*` or `/*`. 54-06's read modules explain D-14, D-19
- * and D-22 in prose, and some of that prose sits on the same line as code; a
- * whole-line stripper would leave those explanations visible to a matcher and
- * report the module's own reasoning as a violation.
- *
- * Removes:
- *   - block comments, including multi-line and the JSX brace-wrapped block form
- *   - whole-line `//` comments
- *   - TRAILING `//` comments that follow code on the same line
- *
- * Preserves: a `//` sequence inside a string literal. `https://…` inside a
- * quoted string is the case that actually occurs, and truncating there would
- * delete real code. The line scanner therefore tracks single-quote,
- * double-quote and backtick state with backslash escaping.
- *
- * ACCEPTED LIMITATION, stated so nobody discovers it as a surprise: string state
- * is LINE-LOCAL. A template literal that spans lines is scanned as ordinary code
- * on its continuation lines, so a `//` sequence inside a multi-line template
- * WOULD be stripped. This is accepted because SQL templates contain no `//`, and
- * 54-08's Task 1 planted-violation control plants its violation INSIDE a
- * multi-line template precisely to prove the stripper does not swallow real
- * template content. A regex literal containing `//` is the same accepted class.
- *
- * @param {string} source
- * @returns {string}
- */
-export function stripComments(source) {
-	/** @type {string[]} */
-	const out = [];
-	let inBlock = false;
-	for (const line of source.split('\n')) {
-		let buf = '';
-		let i = 0;
-		/** @type {string | null} */
-		let quote = null;
-		while (i < line.length) {
-			const c = line[i];
-			const c2 = i + 1 < line.length ? line[i + 1] : '';
-			if (inBlock) {
-				if (c === '*' && c2 === '/') {
-					inBlock = false;
-					i += 2;
-					continue;
-				}
-				i += 1;
-				continue;
-			}
-			if (quote !== null) {
-				if (c === '\\') {
-					buf += c + c2;
-					i += 2;
-					continue;
-				}
-				if (c === quote) {
-					quote = null;
-					buf += c;
-					i += 1;
-					continue;
-				}
-				buf += c;
-				i += 1;
-				continue;
-			}
-			if (c === '/' && c2 === '*') {
-				inBlock = true;
-				i += 2;
-				continue;
-			}
-			if (c === '/' && c2 === '/') break; // rest of the line is a comment
-			if (c === "'" || c === '"' || c === '`') {
-				quote = c;
-				buf += c;
-				i += 1;
-				continue;
-			}
-			buf += c;
-			i += 1;
-		}
-		out.push(buf);
-	}
-	return out.join('\n');
 }
 
 /**
