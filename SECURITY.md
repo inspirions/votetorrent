@@ -17,8 +17,9 @@ rediscovered.
 3. **It records no control as CLOSED.** It records decisions, threats, and the gates that bear on
    them. A verdict of "closed" is the phase auditor's to issue and is never issued by this file.
 
-Why it sits at the repository root: `.planning` is gitignored (`.gitignore:101`), so a decision
-recorded only there is invisible to anyone reading the product tree on a fresh checkout.
+Why it sits at the repository root: `.planning` is gitignored (`.gitignore:101`), as is `.claude`
+(`.gitignore:103`), so a decision recorded in either place is invisible to anyone reading the
+product tree on a fresh checkout.
 
 ---
 
@@ -50,9 +51,11 @@ than behind a reveal gate (D-20).
 1. **It is the schema's designated public projection of a registrant**, and is named accordingly —
    the table declaration at `packages/vote-core/schema/votetorrent.qsql:1812` carries the public
    name columns and nothing private.
-2. **Each row is attributable.** The authority signs registrant records under the `vrg` signing
-   ceremony, so a published row is tamper-evident and traceable to an authority rather than being
-   an unattributed dump.
+2. **Each row is attributable.** Registrant records are signed by the authority under the `vrg`
+   ("validate registrations") signing scope — the schema ties a registrant signature task to an
+   `AdminSigning` session with `Scope = 'vrg'`
+   (`packages/vote-core/schema/votetorrent.qsql:1372`) — so a published row is tamper-evident and
+   traceable to an authority rather than being an unattributed dump.
 3. **Published voter rolls are ordinary practice** in many jurisdictions, so publishing one is not
    a novel exposure so much as a choice about which jurisdictional norm this software encodes.
 
@@ -96,10 +99,16 @@ beyond the three columns of PD-01, private key material, or an unsigned `Propose
 |---|---|---|
 | Audience split (structural, primary) | `@votetorrent/web-data` splits by audience into `./public` and `./officer`; nothing reachable from `./public` may reach `./officer` by any specifier form — relative traversal, barrel re-export, deep import, bare subpath or dynamic specifier. Specifiers are resolved, not word-matched; an unparseable dynamic import is a failure. | `packages/web-data/test/audience-boundary.test.mjs`, with planted-violation controls |
 | Forbidden-table source scan | Forbidden names are derived from `CLASSIFICATION` crossed with `FORBIDDEN_CLASSES`, never hand-listed; comments are stripped before matching; a positive control is required so "no leaks" cannot pass vacuously. | `packages/web-data/test/anonymity-scan.test.mjs` |
-| Query shape | The roll's select list is **set-equal** to exactly `LastName`, `FirstName`, `District`. The key-release aggregate's select items must all be `count(`/`sum(` forms, and `Task.UserId`, `Task.Id` and `SigningNonce` are banned across the whole statement, so no row can identify *which* keyholder released. | `packages/web-data/test/query-shape.test.mjs` |
+| Query shape | The roll's select list is **set-equal** to exactly `LastName`, `FirstName`, `District` — set equality, not containment, so a fourth column fails. The key-release aggregate joins `ReleaseKeyTaskExtension` to `Task` because the completion flag lives on the parent (`Task.IsCompleted`, `packages/vote-core/schema/votetorrent.qsql:1138`), and its select items must all be `count(`/`sum(` forms, so no bare column — `Task.Id` included — can appear in the select list at all; `ExtraFields`, `SigningNonce` and `UserId` are additionally banned from **any** clause of a public statement. Together these stop a result identifying *which* keyholder released. | `packages/web-data/test/query-shape.test.mjs` |
 | Classification drift | `CLASSIFICATION`'s key set is set-compared against the `table` declarations parsed live from `packages/vote-core/schema/votetorrent.qsql`, so a newly added table fails on the schema edit rather than on the first read. | `packages/web-data/test/classification-drift.test.mjs` |
 
 All four run with one command: `yarn workspace @votetorrent/web-data test`.
+
+**Proof level of the four rows.** Rows 1, 2 and 4 are **source-scanned** — they read files and
+resolve module graphs, and they execute in tier 1 with planted-violation controls. Row 3 is
+**statement-shape asserted** against the exact SQL constants the read layer exports, with each
+control mutating a real constant rather than a synthetic string. **None of the four is
+browser-rendered.**
 
 #### What these controls do not prove
 
@@ -111,31 +120,48 @@ guarantee.
   anonymous: it cannot see a value reaching the DOM through a variable, a prop or a serialized
   blob, and it cannot see a table it does not know is forbidden, because the classification itself
   could be wrong.
-- The rendering half is covered **separately and only partially**, by assertions over rendered
-  markup driven by a **fixture** (`apps/VoteTorrentPublic/test/node/registrant-roll.test.mjs`, over
-  `apps/VoteTorrentPublic/test/fixtures/registrant-roll-fixture.js`). An assertion about one
-  fixture is not a proof about every authority's data.
+- **Nothing in the table above proves anything about rendering.** The gates say so themselves: the
+  query-shape gate *"reads STATEMENTS, not RESULTS … it cannot see what the render layer does with
+  three permitted columns"*, and the roll's own tier-1 gate opens with *"nothing below renders …
+  Presence is not rendering — this repo has shipped two defects on exactly that gap"*
+  (`apps/VoteTorrentPublic/test/node/registrant-roll.test.mjs:14-19`). A browser-tier gate for the
+  rendered roll was still being built when this entry was written, and is deliberately not claimed
+  here. Even when it lands, an assertion over one fixture would not be a proof about every
+  authority's data.
+- The roll's **read** is data-proven rather than only source-scanned: `readRegistrantRoll` returns
+  the expected rows against a real seeded database, and a positive control that removes the
+  `RP.Cid = R.PublicCid` pin shows the superseded record would otherwise be published
+  (`apps/VoteTorrentPublic/test/node/public-fixtures.test.mjs`). That gate also states its own
+  limit — the result holds **within one process against `fake-indexeddb`**, and says nothing about
+  what reaches a page.
 - **No control here proves the browser's IndexedDB holds only publishable rows.** It holds whatever
   the bootstrap redemption wrote, which is an officer-scoped dataset. The guarantee is entirely
   about **what the page reads**, never about **what the database holds**.
 - A gate proves a line exists and runs in test. It does **not** prove the shipped page routes
   through it. That distinction is called out here rather than assumed because this repository has
   already paid for assuming it — see `scripts/verify-security-controls.mjs:8-24`, which records a
-  security document that marked nine threats closed while none of the nine controls were reachable
-  from any shipping entry point, and which stopped anyone looking for eleven days.
+  security document that marked nine threats CLOSED while the nine controls, though real, correct
+  and unit-tested, were referenced nowhere outside their own package and their spec files: nothing
+  in the shipping app knew they existed. That document stopped anyone looking for eleven days.
 
 ### OB-01 — `AdminSigning.Scope` is not cross-checked against the signing officer's `Officer.Scopes`
 
-**Status: RECORDED — not assessed.** Observed once, outside the scope of the work that found it;
-no impact analysis has been done and no disposition is claimed.
+**Status: RECORDED — not assessed.** Surfaced during phase 54's voter-roll fixture work, then
+re-derived against the schema for this entry. No impact analysis has been done and no disposition is
+claimed.
 
 `AdminSigning` carries a `Scope` column (`packages/vote-core/schema/votetorrent.qsql:240`). Its
 `ScopeValid` constraint checks only that the value exists in the `Scope` view
 (`packages/vote-core/schema/votetorrent.qsql:246`), and its `UserIdValid` constraint checks only
 that the instigating user is an officer of the referenced administration
 (`packages/vote-core/schema/votetorrent.qsql:247-252`). Neither checks that the officer's own
-`Scopes` array contains the scope being exercised. Observed consequence: a `vrg` signing ceremony
-completed for a founding officer whose `Officer.Scopes` was `["mel","ceb"]`.
+`Scopes` array contains the scope being exercised. Observed consequence, in this repo's own
+fixtures: the founding officer is seeded with `Officer.Scopes = ["mel","ceb"]`
+(`packages/web-data/test/fixtures/seed-founding-authority.js:47`), and the registrant-roll fixture
+nonetheless completes `AdminSigning` sessions carrying `Scope = 'vrg'`
+(`apps/VoteTorrentPublic/test/fixtures/registrant-roll-fixture.js:289`). Whether that is a real
+authorization gap, or an intentional separation of a signing session's scope from the instigating
+officer's scope set, has **not** been determined here.
 
 Scope checks against `Officer.Scopes` **do** exist at specific sites — for example
 `packages/vote-core/schema/votetorrent.qsql:113` requires a `rad`-scoped officer — so this is an
@@ -174,10 +200,10 @@ unproven in production**, and the honest-empty-state copy carries substantially 
 the phase that wrote it planned: if the two apps are served from different origins, the empty state
 stops being an edge case and becomes what **every** visitor sees.
 
-**The failure mode if the requirement is not met.** The public view renders its "this browser holds
-no elections" empty state for every visitor, with no error and no technical symptom. That is the
-origin partition working exactly as designed — but it presents as a UI bug, which is what makes it
-expensive to diagnose.
+**The failure mode if the requirement is not met.** The public view renders its empty state —
+*"This browser holds no elections yet."* (`packages/ui-web/src/copy.js:662`) — for every visitor,
+with no error and no technical symptom. That is the origin partition working exactly as designed,
+but it presents as a UI bug, which is what makes it expensive to diagnose.
 
 **Why no gate covers this.** Every gate seeds IndexedDB under its own harness origin by
 construction, so a same-origin harness is green whether or not production is same-origin. This
