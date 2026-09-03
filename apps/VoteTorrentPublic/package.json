@@ -38,7 +38,7 @@
 		"react-dom": "19.0.0"
 	},
 	"devDependencies": {
-		"@optimystic/quereus-plugin-crypto": "^0.25.1",
+		"@optimystic/quereus-plugin-crypto": "^0.27.0",
 		"@types/node": "^22.10.2",
 		"@types/react": "19.2.17",
 		"@types/react-dom": "^19.0.0",

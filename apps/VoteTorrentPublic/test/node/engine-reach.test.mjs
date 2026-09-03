@@ -315,7 +315,7 @@ test('positive control: the manifest comparators fire on an unadmitted raw-handl
 test('benign control: the manifest comparators accept the app as it stands, with the test-only packages in devDependencies', () => {
 	const benign = rawHandleManifestOffenders({
 		dependencies: { '@quereus/quereus': '4.17.1', '@quereus/plugin-indexeddb': '4.17.1', react: '19.0.0' },
-		devDependencies: { '@optimystic/quereus-plugin-crypto': '^0.25.1', 'fake-indexeddb': '^6.2.5' },
+		devDependencies: { '@optimystic/quereus-plugin-crypto': '^0.27.0', 'fake-indexeddb': '^6.2.5' },
 	});
 	assert.deepEqual(benign, { unexplained: [], leakedToRuntime: [] });
 });
