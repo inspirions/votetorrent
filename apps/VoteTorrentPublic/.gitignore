@@ -4,3 +4,8 @@ dist-gate
 # `dist` — it does not match `dist-mutant-*` (53-11, D-20).
 dist-mutant-*
 
+
+# 54-15: D-27's live-read gate build output. Same reason as dist-gate
+# above — the root .gitignore's bare `dist` rule matches only an entry named
+# exactly `dist`.
+dist-live
