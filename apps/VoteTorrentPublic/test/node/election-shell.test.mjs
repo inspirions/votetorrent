@@ -410,13 +410,25 @@ function collectTemplateMountedKeys() {
 // key-release fail-closed line -- because `src/screens/FactSections.tsx` now
 // mounts all three as source literals at their call sites. Seven became four.
 //
-// 54-14 removed the disclosure-policy failure line, and this ratchet fired on
-// its own to say so: the staleness rung below went red naming that key the
-// moment `src/screens/RegistrantRoll.tsx` mounted it, before any edit was made
-// here. It renders in the ROLL card rather than the rules card -- the omission
-// it explains happens in that table, and three group sections away it would no
-// longer be attached to the column it is about; the key NAME is unchanged.
-// Four became three.
+// 54-14 removed the LAST FOUR. The disclosure-policy failure line came out
+// first: the staleness rung below went red naming that key the moment
+// `src/screens/RegistrantRoll.tsx` mounted it, before any edit was made here.
+// It renders in the ROLL card rather than the rules card -- the omission it
+// explains happens in that table, and three group sections away it would no
+// longer be attached to the column it is about; the key NAME is unchanged. The
+// freshness line and the two standing caveats came out with the standing-voice
+// block in `src/screens/ElectionShell.tsx`, which mounts all three as literals
+// between the fact body and the advisory. The ratchet fired unprompted for
+// those three too.
+//
+// THE LIST IS NOW EMPTY, WHICH IS THE END STATE IT WAS BUILT FOR -- and that
+// is a reason to keep the machinery, not to delete it. An empty list makes the
+// case-9 assertion UNCONDITIONAL again: `declaredNotMounted` must be empty
+// outright, with nothing forgiven. Both rungs stay, so a future plan that
+// declares copy ahead of the screen that renders it has to add its key here
+// deliberately, in a diff a reviewer can see, rather than widening an
+// assertion. The staleness rung then expires that entry on its own, exactly as
+// it did three times across this phase.
 //
 // This list is NOT a relaxation of the assertion, and two properties make
 // that true rather than merely asserted:
@@ -428,11 +440,7 @@ function collectTemplateMountedKeys() {
 //     makes the list shrink to empty as the render plans land, rather than
 //     outliving its reason the way the removed skip would have.
 /** @type {ReadonlyArray<string>} */
-const PENDING_MOUNT_KEYS = Object.freeze([
-	'public.freshness.body',
-	'public.caveat.timelineUnvalidated',
-	'public.caveat.readOnly',
-]);
+const PENDING_MOUNT_KEYS = Object.freeze([]);
 
 test('the public-voice key set in COPY equals, in both directions, the set of public-voice keys mounted under src/, packages/ui-web/src/components/ and packages/ui-web/src/lifecycle/ -- as a literal, as the variant="public" template, or as one of facts.js own key templates -- apart from the named PENDING_MOUNT_KEYS still awaiting their render plan', () => {
 	const declaredKeys = new Set(Object.keys(COPY).filter((k) => PUBLIC_VOICE_KEY_RE.test(k)));

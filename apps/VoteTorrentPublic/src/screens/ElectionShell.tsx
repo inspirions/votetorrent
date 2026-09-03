@@ -241,6 +241,44 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 	return (
 		<AppChrome title={t('public.chrome.appName')}>
 			{body}
+			{/* THE STANDING VOICE (D-29, D-32). Note for a later editor: the
+			    tier-1 scans strip only lines that OPEN with a line- or
+			    block-comment marker, so a JSX comment like this one is part of
+			    the scanned source. Nothing in this paragraph may spell a token
+			    those rungs count — the ninth instance of that family in this
+			    phase was manufactured right here and caught before it landed.
+
+			    Three page-level statements, and their placement is load-bearing
+			    rather than aesthetic: AFTER the fact body so a reader meets the
+			    facts first, BEFORE the advisory so the four page-level
+			    statements read as one voice, and OUTSIDE the toggle below so
+			    none of them can ever be collapsed out of view. The block
+			    carries NO CONDITION and introduces no second exit point from
+			    this function — that is the point, and it is the same reasoning
+			    `AdvisoryDisclosure`'s own header gives for itself: a standing
+			    caveat that can be conditioned on anything can be hidden.
+
+			    WHY THESE THREE AND NOT A FOURTH. Both caveats say only things
+			    that stay true once this browser's copy starts syncing — that
+			    the schedule is authority-published and not independently
+			    checked here, and that the page changes nothing and asks nothing
+			    about who is reading. The candidate that was dropped — that some
+			    facts have no source anywhere in the system — is already carried
+			    by every gap card and by the key-release card's own detail text,
+			    so a page-level restatement would repeat content already on
+			    screen and add a second place for it to go stale. The freshness
+			    line is the one string KNOWN IN ADVANCE TO EXPIRE; the copy
+			    table ships it commented as such, and this mount is what a later
+			    sync plan will come looking for.
+
+			    The two class names are 54-09's own, declared for exactly this
+			    block. No heading: no copy key exists for one, and inventing
+			    English here would bypass the shared copy table. */}
+			<section className="public-caveats">
+				<p className="public-caveat">{t('public.freshness.body')}</p>
+				<p className="public-caveat">{t('public.caveat.timelineUnvalidated')}</p>
+				<p className="public-caveat">{t('public.caveat.readOnly')}</p>
+			</section>
 			{/* A sibling of the toggle below, never a child of it — D-16 forbids
 			    the advisory ever becoming conditional on anything, including
 			    being hideable inside a collapsible. */}
