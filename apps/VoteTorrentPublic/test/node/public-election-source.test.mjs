@@ -85,7 +85,8 @@ function makeDeps(over = {}) {
 		attachNetworkDb: spy(async () => HANDLE),
 		closeNetworkDb: spy(() => undefined),
 		readPublicElection: spy(async () => ({ Id: OK_ADDRESS.electionId, Title: 'A Real Stored Title' })),
-		readPublicElectionRevision: spy(async () => ({ Timeline: '{"votingStarts":"2026-03-01T00:00:00"}' })),
+		readPublicElectionRevision: spy(async () => ({ Revision: 1, Timeline: '{"votingStarts":"2026-03-01T00:00:00"}' })),
+		readKeyReleaseProgress: spy(async () => ({ released: 3, total: 4, keyholderCount: 5 })),
 		...over,
 	};
 }
@@ -106,9 +107,19 @@ test('PUBLIC_ELECTION_STATE is frozen and carries exactly the four state strings
 	assert.deepEqual([...Object.values(PUBLIC_ELECTION_STATE)].sort(), ['notHeld', 'reading', 'ready', 'unreadable']);
 });
 
-test('DEFAULT_PUBLIC_SOURCE is frozen, has all five members, and every one is a real function (a stub default is 53-D07 failure mode)', () => {
+test('DEFAULT_PUBLIC_SOURCE is frozen, has all six members, and every one is a real function (a stub default is 53-D07 failure mode)', () => {
 	assert.ok(Object.isFrozen(DEFAULT_PUBLIC_SOURCE));
-	const expected = ['attachNetworkDb', 'closeNetworkDb', 'findNetwork', 'readPublicElection', 'readPublicElectionRevision'];
+	// 54-13 added the sixth: D-14's counts-only aggregate is read HERE rather
+	// than in a second hook, because this module owns the handle's lifetime
+	// and the shell is held to zero effects (see the module header, point 7).
+	const expected = [
+		'attachNetworkDb',
+		'closeNetworkDb',
+		'findNetwork',
+		'readKeyReleaseProgress',
+		'readPublicElection',
+		'readPublicElectionRevision',
+	];
 	assert.deepEqual(Object.keys(DEFAULT_PUBLIC_SOURCE).sort(), expected);
 	for (const key of expected) {
 		assert.equal(typeof (/** @type {any} */ (DEFAULT_PUBLIC_SOURCE)[key]), 'function', `${key} is not a function`);
@@ -241,6 +252,72 @@ test('a non-string Title is normalised to null rather than dropping the election
 	assert.equal(result.state, 'ready');
 	assert.equal(result.election?.title, null);
 	assert.equal(result.election?.timeline, null);
+});
+
+// ---------------------------------------------------------------------------
+// 6b. D-14 (54-13) — the key-release aggregate: three numbers, card-local
+//     failure, and no work-item row anywhere near the result.
+// ---------------------------------------------------------------------------
+
+test('D-14: the key-release aggregate is read with the election revision NUMBER and only its three counts reach the result', async () => {
+	const deps = makeDeps();
+	const result = await readAddressedElection(OK_ADDRESS, deps);
+	assert.equal(result.state, 'ready');
+	assert.equal(deps.readKeyReleaseProgress.calls.length, 1, 'the aggregate was not read alongside the election read');
+	assert.equal(deps.readKeyReleaseProgress.calls[0][0], HANDLE, 'the aggregate must reuse the handle this read already owns');
+	assert.equal(deps.readKeyReleaseProgress.calls[0][1], OK_ADDRESS.electionId);
+	assert.equal(deps.readKeyReleaseProgress.calls[0][2], 1, 'the revision must be bound as the NUMBER the revision row carries');
+	assert.deepEqual(Object.keys(/** @type {any} */ (result.keyRelease)).sort(), ['keyholderCount', 'released', 'total']);
+	assert.deepEqual({ ...(/** @type {any} */ (result.keyRelease)) }, { released: 3, total: 4, keyholderCount: 5 });
+	assert.ok(Object.isFrozen(result.keyRelease));
+});
+
+test('D-14: an extra field the upstream read might grow NEVER reaches the result — the three counts are copied out, never forwarded wholesale', async () => {
+	// The planted field is a work-item identifier of exactly the kind D-14
+	// forbids the render layer from ever seeing. If this module forwarded the
+	// upstream object, it would be sitting on the result.
+	const deps = makeDeps({
+		readKeyReleaseProgress: spy(async () => ({ released: 2, total: 2, keyholderCount: 7, taskUserIdentifier: 'user-0123456789abcdef' })),
+	});
+	const result = await readAddressedElection(OK_ADDRESS, deps);
+	assert.deepEqual(Object.keys(/** @type {any} */ (result.keyRelease)).sort(), ['keyholderCount', 'released', 'total']);
+	assert.ok(!JSON.stringify(result).includes('taskUserIdentifier'), 'an upstream field was forwarded wholesale into the result');
+});
+
+test('D-23 applied to D-14: a THROWING key-release read leaves the election ready with a null aggregate — the fault is card-local, never a page-wide unreadable', async () => {
+	const deps = makeDeps({
+		readKeyReleaseProgress: spy(async () => {
+			throw namedError('QuereusError', 'synthetic aggregate failure');
+		}),
+	});
+	const original = console.error;
+	console.error = () => undefined;
+	/** @type {any} */
+	let result;
+	try {
+		result = await readAddressedElection(OK_ADDRESS, deps);
+	} finally {
+		console.error = original;
+	}
+	assert.equal(result.state, 'ready', 'one failed aggregate must not downgrade a readable election to unreadable');
+	assert.equal(result.keyRelease, null, 'a failed aggregate must be null, so the render layer can SAY the count could not be read');
+	assert.equal(result.election?.title, 'A Real Stored Title', 'the election facts must survive the aggregate failure');
+});
+
+test('a revision row carrying no numeric Revision yields a null aggregate and reaches no aggregate read at all', async () => {
+	const deps = makeDeps({
+		readPublicElectionRevision: spy(async () => ({ Timeline: null })),
+	});
+	const result = await readAddressedElection(OK_ADDRESS, deps);
+	assert.equal(result.state, 'ready');
+	assert.equal(result.keyRelease, null);
+	assert.equal(deps.readKeyReleaseProgress.calls.length, 0, 'the aggregate was read with a non-numeric revision');
+});
+
+test('T-54-12-02 extended: an unregistered hash reaches the key-release read no more than it reaches attachNetworkDb', async () => {
+	const deps = makeDeps({ findNetwork: spy(() => undefined) });
+	await readAddressedElection(OK_ADDRESS, deps);
+	assert.equal(deps.readKeyReleaseProgress.calls.length, 0, 'the registry gate does not cover the aggregate read');
 });
 
 // ---------------------------------------------------------------------------

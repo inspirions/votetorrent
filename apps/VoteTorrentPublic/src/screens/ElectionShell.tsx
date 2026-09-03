@@ -5,6 +5,7 @@ import { derivePhase, resolveComparisonInstant, formatInstant } from '@votetorre
 import { headline, toneCopyKey } from '@votetorrent/ui-web/facts';
 import { AppChrome } from './AppChrome';
 import { ElectionIndex } from './ElectionIndex';
+import { FactSections } from './FactSections';
 import { usePublicElection } from './use-public-election';
 import { parseElectionAddress } from '../election-address.js';
 
@@ -218,6 +219,18 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 						<span className="skeleton-label">{t('public.election.slot.timeline')}</span>
 					</div>
 				) : null}
+				{/* The body between the headline and the advisory: the four fact
+				    groups, gaps rendered INLINE beside the facts they belong to
+				    (D-11) rather than severed into a "not yet available"
+				    section. It renders NOTHING when the phase carries no facts,
+				    so the election-less page, the notHeld page and an
+				    unreadable schedule each keep exactly the shape 54-11 and
+				    54-12 gave them — no empty scaffolding under an explicit
+				    unknown. `keyRelease` is D-14's three numbers, read beside
+				    the election read by the ONE seam that owns the handle's
+				    lifetime; `null` means the aggregate could not be read, and
+				    the card says so instead of disappearing (D-23). */}
+				<FactSections phase={phaseResult.phase} keyRelease={read.keyRelease} />
 			</section>
 		);
 	}

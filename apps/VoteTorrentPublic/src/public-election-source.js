@@ -74,6 +74,28 @@
  * already follows. Nothing derived from an error ever reaches the returned
  * result either: the shell renders copy keys, never diagnostics.
  *
+ * 7. WHY D-14'S KEY-RELEASE AGGREGATE IS READ HERE AND NOT IN THE SHELL.
+ *    `election-shell.test.mjs` case 12b asserts that `ElectionShell.tsx`
+ *    contains ZERO `useEffect`, ZERO `await ` and zero read call, because a
+ *    second `return` in that file is the cheapest way to make
+ *    `AdvisoryDisclosure` conditional by accident. So the shell cannot own an
+ *    async read, and a SECOND hook beside `use-public-election.ts` would be
+ *    worse than no seam at all: this module hands the handle back OPEN and the
+ *    hook's cleanup closes it, so a second effect reading from that same
+ *    handle would race that close. The aggregate is therefore read here,
+ *    inside the one read that already owns the handle's lifetime, and only
+ *    THREE NUMBERS ever leave — never a work-item row, never a user
+ *    identifier, never a signing nonce (D-14; `read-keyrelease.js` header
+ *    point 3 is the upstream half).
+ *
+ *    ITS FAILURE IS CARD-LOCAL, deliberately. A key-release read that throws
+ *    yields `keyRelease: null` and leaves the state `ready`: the election IS
+ *    readable, and downgrading the whole page to `unreadable` because one
+ *    aggregate failed would be a false statement of the same class point 4
+ *    rejects. The render layer then says so on that card rather than dropping
+ *    it (D-23) — a silent omission would make the fault indistinguishable
+ *    from a deliberate withholding.
+ *
  * WHAT THE `deps` SEAM IS NOT LICENSED TO BECOME. Its default IS the real
  * import surface. A seam whose production default is a stub is precisely
  * 53-D07's failure mode — clean imports, every gate green, false words on the
@@ -88,6 +110,7 @@ import {
 	closeNetworkDb,
 	readPublicElection,
 	readPublicElectionRevision,
+	readKeyReleaseProgress,
 } from '@votetorrent/web-data/public';
 
 /**
@@ -128,6 +151,17 @@ export const PUBLIC_ELECTION_STATE = Object.freeze({
  * @property {PublicElectionState} state
  * @property {AddressedElectionFacts | null} election
  * @property {any} db  the OPEN handle on `ready`, else null — header point 6.
+ * @property {KeyReleaseProgressCounts | null} keyRelease  D-14's three numbers, or null when they could not be read — header point 7.
+ */
+
+/**
+ * The ONLY thing D-14 permits to cross out of the key-release read. Declared
+ * structurally here rather than imported, so this module's contract is
+ * readable without opening the data package.
+ * @typedef {object} KeyReleaseProgressCounts
+ * @property {number} released
+ * @property {number} total
+ * @property {number} keyholderCount
  */
 
 /**
@@ -137,6 +171,7 @@ export const PUBLIC_ELECTION_STATE = Object.freeze({
  * @property {(db: any) => any} closeNetworkDb
  * @property {(db: any, electionId: string) => Promise<any>} readPublicElection
  * @property {(db: any, electionId: string) => Promise<any>} readPublicElectionRevision
+ * @property {(db: any, electionId: string, revision: number) => Promise<any>} readKeyReleaseProgress
  */
 
 /**
@@ -150,6 +185,7 @@ export const DEFAULT_PUBLIC_SOURCE = Object.freeze({
 	closeNetworkDb,
 	readPublicElection,
 	readPublicElectionRevision,
+	readKeyReleaseProgress,
 });
 
 /**
@@ -218,10 +254,11 @@ function logFailure(err) {
  * @param {PublicElectionState} state
  * @param {AddressedElectionFacts | null} election
  * @param {any} db
+ * @param {KeyReleaseProgressCounts | null} [keyRelease]
  * @returns {Readonly<AddressedElectionResult>}
  */
-function freezeResult(state, election, db) {
-	return Object.freeze({ state, election, db });
+function freezeResult(state, election, db, keyRelease = null) {
+	return Object.freeze({ state, election, db, keyRelease });
 }
 
 /**
@@ -317,6 +354,32 @@ export async function readAddressedElection(address, deps = DEFAULT_PUBLIC_SOURC
 			return freezeResult(PUBLIC_ELECTION_STATE.UNREADABLE, null, null);
 		}
 
+		// -- 4b. D-14's counts-only aggregate, in its OWN try/catch (header
+		//        point 7). A failure here is CARD-LOCAL: it yields null and
+		//        leaves the state `ready`, because the election itself is
+		//        readable and saying otherwise would be a false statement.
+		//        Only the three numbers are copied out; the returned object is
+		//        never forwarded wholesale, so a future field added upstream
+		//        cannot silently reach the render layer.
+		/** @type {KeyReleaseProgressCounts | null} */
+		let keyRelease = null;
+		const revisionNumber = revision && typeof revision.Revision === 'number' ? revision.Revision : null;
+		if (revisionNumber !== null && typeof deps.readKeyReleaseProgress === 'function') {
+			try {
+				const counts = await deps.readKeyReleaseProgress(db, electionId, revisionNumber);
+				if (counts) {
+					keyRelease = Object.freeze({
+						released: Number(counts.released) || 0,
+						total: Number(counts.total) || 0,
+						keyholderCount: Number(counts.keyholderCount) || 0,
+					});
+				}
+			} catch (err) {
+				logFailure(err);
+				keyRelease = null;
+			}
+		}
+
 		// -- 5. Shape the result. `Title` normalised to null when it is not a
 		//       string, so an absent column still reports the election rather
 		//       than dropping it. `Timeline` is passed through UNTOUCHED --
@@ -328,7 +391,7 @@ export async function readAddressedElection(address, deps = DEFAULT_PUBLIC_SOURC
 
 		// -- 6. The handle stays OPEN here (header point 6). The caller owns
 		//       closing it.
-		return freezeResult(PUBLIC_ELECTION_STATE.READY, facts, db);
+		return freezeResult(PUBLIC_ELECTION_STATE.READY, facts, db, keyRelease);
 	} catch (err) {
 		// Unreachable by construction today: every step above is already
 		// guarded. It exists because a future edit could reintroduce a throw,

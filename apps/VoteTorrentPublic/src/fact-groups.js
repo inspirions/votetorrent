@@ -90,18 +90,29 @@ const EMPTY_GROUPS = Object.freeze([]);
 export function groupFactList(facts) {
 	if (!Array.isArray(facts) || facts.length === 0) return EMPTY_GROUPS;
 
-	// Seeded from `FACT_GROUPS` UP FRONT, so the output order is the model's
-	// declared group order and never the order the facts happened to arrive
-	// in. A map built by insertion would make the page's section order a
-	// function of `FACTS`, which is a different (and unstated) contract.
-	/** @type {Map<string, any[]>} */
-	const buckets = new Map();
-	for (const group of FACT_GROUPS) buckets.set(group, []);
+	// One bucket PER `FACT_GROUPS` ENTRY, in that array's own index order, so
+	// the output order is the model's declared group order and never the order
+	// the facts happened to arrive in. A container built by insertion would
+	// make the page's section order a function of `FACTS`, which is a
+	// different (and unstated) contract.
+	//
+	// A parallel array rather than a `Map`, and that is forced rather than
+	// stylistic: `election-shell.test.mjs`'s closed-URL-parameter-set case
+	// resolves EVERY `.get(identifier)` call site under `src/` back to a
+	// string literal and fails on any it cannot resolve. `Map.prototype.get`
+	// is indistinguishable from `URLSearchParams.prototype.get` to that
+	// matcher, so a map lookup here would report itself as an unresolved
+	// third URL parameter and turn a live D-24 gate red for a reason the diff
+	// would never explain. The gate is right to be indiscriminate; this module
+	// simply has no need of a map.
+	/** @type {any[][]} */
+	const buckets = FACT_GROUPS.map(() => []);
+	const groupNames = /** @type {ReadonlyArray<string>} */ (FACT_GROUPS);
 
 	for (const entry of facts) {
 		const group = entry && typeof entry.group === 'string' ? entry.group : null;
-		const bucket = group === null ? undefined : buckets.get(group);
-		if (bucket === undefined) {
+		const index = group === null ? -1 : groupNames.indexOf(group);
+		if (index < 0) {
 			// The throw PRECEDES the push, which is what makes "exactly one
 			// group" and "no silent default" structural rather than asserted.
 			const id = entry && typeof entry.id === 'string' ? entry.id : '(unnamed fact)';
@@ -109,14 +120,15 @@ export function groupFactList(facts) {
 				`fact ${JSON.stringify(id)} declares a group that is not a FACT_GROUPS member (value type: ${typeof (entry && entry.group)})`,
 			);
 		}
-		bucket.push(entry);
+		buckets[index].push(entry);
 	}
 
 	/** @type {Readonly<FactGroupBucket>[]} */
 	const out = [];
 	let placed = 0;
-	for (const group of FACT_GROUPS) {
-		const bucket = /** @type {any[]} */ (buckets.get(group));
+	for (let index = 0; index < groupNames.length; index += 1) {
+		const group = groupNames[index];
+		const bucket = buckets[index];
 		// An empty group is OMITTED — an empty heading over nothing reads as a
 		// section that failed to load, which is a claim this page must not make.
 		if (bucket.length === 0) continue;

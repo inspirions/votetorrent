@@ -406,6 +406,13 @@ function collectTemplateMountedKeys() {
 // now mounts them. That is the mechanism working as designed: the list shrinks
 // as the render plans land. Eleven entries became seven.
 //
+// 54-13 removed THREE more -- the two details-toggle labels and the
+// key-release fail-closed line -- because `src/screens/FactSections.tsx` now
+// mounts all three as source literals at their call sites. Seven became four.
+// The four that remain belong to the page-voice screen (the freshness line and
+// the two standing caveats) and the rules card (the disclosure-policy failure
+// line), and the list is designed to reach empty when those land.
+//
 // This list is NOT a relaxation of the assertion, and two properties make
 // that true rather than merely asserted:
 //   - `declaredNotMounted` must be a SUBSET of it. Any other declared key
@@ -418,12 +425,9 @@ function collectTemplateMountedKeys() {
 /** @type {ReadonlyArray<string>} */
 const PENDING_MOUNT_KEYS = Object.freeze([
 	'public.freshness.body',
-	'public.fact.keyrelease.unreadable',
 	'public.caveat.timelineUnvalidated',
 	'public.caveat.readOnly',
 	'public.rules.policyUnreadable',
-	'public.gap.detailsSummary',
-	'public.fact.detailsSummary',
 ]);
 
 test('the public-voice key set in COPY equals, in both directions, the set of public-voice keys mounted under src/, packages/ui-web/src/components/ and packages/ui-web/src/lifecycle/ -- as a literal, as the variant="public" template, or as one of facts.js own key templates -- apart from the named PENDING_MOUNT_KEYS still awaiting their render plan', () => {
