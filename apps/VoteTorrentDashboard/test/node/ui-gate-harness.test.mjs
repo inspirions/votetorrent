@@ -12,6 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dashboardRoot, dashboardSrc, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 const UI_GATE_TSX = readFileSync(dashboardRoot('test', 'browser', 'ui-gate.tsx'), 'utf8');
 const VITE_GATE_CONFIG = readFileSync(dashboardRoot('test', 'browser', 'vite.gate.config.ts'), 'utf8');
@@ -19,23 +20,6 @@ const PACKAGE_JSON = JSON.parse(readFileSync(dashboardRoot('package.json'), 'utf
 const APP_CSS = readFileSync(dashboardSrc('app.css'), 'utf8');
 const INDEX_HTML = readFileSync(dashboardRoot('index.html'), 'utf8');
 const COMPONENTS_JS = readFileSync(uiWebSrc('components.js'), 'utf8');
-
-/**
- * Line-based comment stripper, same shape as `app-css-split.test.mjs`'s and
- * `election-ops-panels.test.mjs`'s own `stripComments` idiom — a match must
- * not be satisfiable by prose in a header comment.
- * @param {string} source
- * @returns {string}
- */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//'));
-		})
-		.join('\n');
-}
 
 const UI_GATE_TSX_STRIPPED = stripComments(UI_GATE_TSX);
 const VITE_GATE_CONFIG_STRIPPED = stripComments(VITE_GATE_CONFIG);

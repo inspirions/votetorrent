@@ -15,6 +15,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 import {
 	deleteNetworkDb,
 	closeNetworkDb,
@@ -580,17 +581,6 @@ test('copyKeysForOutcome: throws naming the outcome for an unmapped value', () =
 // `shell-wiring.test.mjs` and `preview-control.test.mjs` already established.
 // Every matcher below is paired with an inertness control.
 // ---------------------------------------------------------------------------
-
-/** @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 const BOOTSTRAP_TSX = readFileSync(dashboardSrc('screens', 'Bootstrap.tsx'), 'utf8');
 const BOOTSTRAP_CODE = stripComments(BOOTSTRAP_TSX);

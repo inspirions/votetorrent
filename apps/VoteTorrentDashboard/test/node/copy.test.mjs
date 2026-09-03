@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardRoot, dashboardSrc, moduleUrl, uiWebSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 import { COPY, t } from '@votetorrent/ui-web';
 
 const { BOOTSTRAP_PHASES, BOOTSTRAP_OUTCOME_CODES, copyKeysForOutcome } =
@@ -284,12 +285,7 @@ test('T-52-12-01: no copy an officer can reach through copyKeysForOutcome contai
 // ---------------------------------------------------------------------------
 
 const BOOTSTRAP_TSX_SOURCE = readFileSync(dashboardSrc('screens', 'Bootstrap.tsx'), 'utf8');
-const BOOTSTRAP_TSX_CODE = BOOTSTRAP_TSX_SOURCE.split('\n')
-	.filter((line) => {
-		const trimmed = line.trim();
-		return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-	})
-	.join('\n');
+const BOOTSTRAP_TSX_CODE = stripComments(BOOTSTRAP_TSX_SOURCE);
 
 test('D-25 wiring: Bootstrap.tsx passes the status as the THIRD argument to copyKeysForOutcome', () => {
 	// Positive control: the file really was read and really is the screen.

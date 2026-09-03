@@ -18,6 +18,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 import { buildSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import {
 	deleteNetworkDb,
@@ -925,19 +926,8 @@ test('inertness control: the per-hop forwarding matchers do not accept a hop tha
 // matcher here is paired with an inertness control.
 // ---------------------------------------------------------------------------
 
-/** @param {string} source @returns {string} */
-function stripShellComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
-
 const SHELL_TSX = readFileSync(dashboardSrc('screens', 'DashboardShell.tsx'), 'utf8');
-const SHELL_CODE = stripShellComments(SHELL_TSX);
+const SHELL_CODE = stripComments(SHELL_TSX);
 
 test('DashboardShell: accepts pendingSwapContext and onSwapContextConsumed, both optional', () => {
 	assert.match(SHELL_CODE, /pendingSwapContext\?: AlreadyBootstrappedContext \| null;/);

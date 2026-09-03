@@ -30,23 +30,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardRoot, dashboardSrc, workspacePath } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 const DASHBOARD_ROOT = dashboardRoot();
 const AUTHORITY_DASHBOARD_DIR = workspacePath('apps/VoteTorrentAuthority', 'src', 'screens', 'dashboard');
-
-/** Same idiom as `preview-scopes.test.mjs` / `lint-copy.mjs` /
- * `assert-no-node-polyfills.mjs` -- drop whole-line comments so prose ABOUT a
- * banned affordance is never read as the affordance itself.
- * @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 /** Any QR/camera/barcode affordance -- an import of a known camera/scanner
  * package, a component name, a permission call, or the bare words

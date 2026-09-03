@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 import { CAPABILITIES } from '../../src/auth/capabilities.js';
 
@@ -26,17 +27,6 @@ const EXPECTED_COMPONENTS = [
 	'KeyholdersPanel',
 	'InviteAuthoritiesPanel',
 ];
-
-/** Strip `//` and `/* *\/`-style comment lines. @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 const registrySource = readFileSync(REGISTRY_PATH, 'utf8');
 const strippedRegistry = stripComments(registrySource);

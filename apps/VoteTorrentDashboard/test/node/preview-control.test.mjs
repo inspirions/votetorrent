@@ -17,21 +17,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardRoot, dashboardSrc, uiWebSrc, webDataSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 const APP_ROOT = dashboardRoot();
 const SCREENS_DIR = dashboardSrc('screens');
-
-/** Same shape as gate.test.mjs's own helper.
- * @param {string} source @returns {string} */
-function stripComments(source) {
-	return source
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*'));
-		})
-		.join('\n');
-}
 
 /** @param {string} dir @returns {string[]} */
 function walkFiles(dir) {
