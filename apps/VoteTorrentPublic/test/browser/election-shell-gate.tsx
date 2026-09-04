@@ -76,12 +76,36 @@
  * publication of the FIXTURE's own exported values — never a measurement of
  * the page — so the gate script compares the DOM against the fixture rather
  * than against numbers it restated. Grading remains the runner's job.
+ *
+ * 56-03 EXTENSION — the `?fixture=not-held` branch. Strictly ADDITIVE, same
+ * rule as the 54-16 extension above: with the parameter ABSENT or set to
+ * `public-surface`, every existing behaviour is byte-identical — no existing
+ * rung sees a changed page or a changed `fixture` readout. With the
+ * parameter set to `not-held` this page seeds the SAME public surface
+ * `seedFixtureSurface()` already seeds (load-bearing: `attachNetworkDb`
+ * refuses a handle with no persisted row-count record, so an unseeded branch
+ * would render the not-held sentence for the WRONG reason — an attach FAULT
+ * masquerading as the finding under test), then mounts the shell with an
+ * election id this surface never seeded (`UNHELD_ELECTION_ID`, production
+ * length) instead of the seeded one. Neither existing ready predicate works
+ * here: `fixtureReady` waits on `.registrant-roll`, which never renders on
+ * this branch, and a "three skeletons present" predicate would also resolve
+ * during the `reading` state, which renders all three frames too — so this
+ * branch waits on an element whose text equals
+ * `COPY['public.election.notHeld.title']` instead. Publishes a THIRD,
+ * separate readout channel, `__UI_GATE__.notHeld` — null on every other
+ * branch — carrying only values this file already has from its own imports
+ * (the requested id, the seeded id, and the slot suffixes derived from
+ * COPY's `public.election.slot.*` keys), never anything measured from the
+ * page. Grading remains the gate script's job, same as the `fixture`
+ * channel.
  */
 import { StrictMode } from 'react';
 import * as AppReact from 'react';
 import { createRoot } from 'react-dom/client';
 import '../../src/app.css';
 import { ElectionShell } from '../../src/screens/ElectionShell';
+import { COPY } from '@votetorrent/ui-web';
 import { DetailsToggle, packageReactIdentity } from '@votetorrent/ui-web/components';
 import { FIXTURE_ELECTION, FIXTURE_ELECTION_ID, FIXTURE_INSTANTS } from '../fixtures/election-fixture.js';
 import {
@@ -98,6 +122,7 @@ import {
 	FIXTURE_SETTLING_INSTANT,
 	PUBLIC_SURFACE_EXPECTED_COUNTS,
 	SEED_NOW,
+	UNHELD_ELECTION_ID,
 	seedPublicSurface,
 } from '../fixtures/seed-public-surface.js';
 import { EXTRA_FIELDS_MARKER, ROLL_REGISTRANTS, ROLL_SUPERSEDED } from '../fixtures/registrant-roll-fixture.js';
@@ -217,12 +242,17 @@ const phase = resolvePhase();
  */
 const FIXTURE_PARAM = 'fixture';
 const PUBLIC_SURFACE_FIXTURE = 'public-surface';
+/** 56-03's third recognised value for this same parameter. @type {string} */
+const NOT_HELD_FIXTURE = 'not-held';
 
-function resolveFixtureMode(): boolean {
-	return new URLSearchParams(window.location.search).get(FIXTURE_PARAM) === PUBLIC_SURFACE_FIXTURE;
+function resolveFixtureParam(): string | null {
+	return new URLSearchParams(window.location.search).get(FIXTURE_PARAM);
 }
 
-const fixtureMode = resolveFixtureMode();
+const fixtureParamValue = resolveFixtureParam();
+const fixtureMode = fixtureParamValue === PUBLIC_SURFACE_FIXTURE;
+/** 56-03: the not-held branch, mutually exclusive with `fixtureMode`. */
+const notHeldMode = fixtureParamValue === NOT_HELD_FIXTURE;
 
 /**
  * The seeded expectations, published so the gate script COMPARES against the
@@ -295,6 +325,36 @@ async function seedFixtureSurface(): Promise<void> {
 	}
 }
 
+/**
+ * The address the not-held branch mounts the shell with (56-03): the SAME
+ * network hash `seedFixtureSurface()` seeds, paired with an election id that
+ * surface never seeds. Built from `election-address.js`'s own exported
+ * parameter names, on the same precedent `FIXTURE_SEARCH` above follows.
+ */
+const NOT_HELD_SEARCH = `?${NETWORK_ADDRESS_PARAM}=${FIXTURE_NETWORK_HASH}&${ELECTION_ADDRESS_PARAM}=${UNHELD_ELECTION_ID}`;
+
+/** The copy-key prefix that declares a placeholder slot — the same prefix
+ * `scripts/assert-placeholders-labelled.mjs` derives its own expected labels
+ * from. @type {string} */
+const SLOT_KEY_PREFIX = 'public.election.slot.';
+
+/**
+ * The not-held branch's own readout, published on `__UI_GATE__.notHeld`
+ * (null on every other branch). Every field is read straight off an import
+ * this file already has — the requested id, the seeded id, and the ordered
+ * slot suffixes derived from COPY's `public.election.slot.*` keys — never a
+ * literal this file invented and never anything measured from the page.
+ */
+const notHeldFacts = Object.freeze({
+	requestedElectionId: UNHELD_ELECTION_ID,
+	seededElectionId: FIXTURE_ELECTION_DB_ID,
+	slotSuffixes: Object.freeze(
+		Object.keys(COPY)
+			.filter((key) => key.startsWith(SLOT_KEY_PREFIX))
+			.map((key) => key.slice(SLOT_KEY_PREFIX.length)),
+	),
+});
+
 const rootElement = document.getElementById('root');
 if (!rootElement) {
 	throw new Error('election-shell-gate.tsx: #root element not found in election-shell-gate.html');
@@ -322,7 +382,10 @@ let renderError: string | null = null;
 // branch mounts a DIFFERENT shell into this same `#root` after an await, and
 // two `createRoot` calls on one container is a React error. With the
 // parameter absent this is the same synchronous mount 53-07/53-09 built.
-if (!fixtureMode) {
+// 56-03 widens the guard to also exclude `notHeldMode`, on the identical
+// reasoning: that branch mounts its own DIFFERENT shell into `#root` after
+// an await too.
+if (!fixtureMode && !notHeldMode) {
 	try {
 		createRoot(rootElement).render(
 			<StrictMode>
@@ -359,6 +422,34 @@ async function mountFixtureSurface(): Promise<void> {
 		createRoot(shellContainer).render(
 			<StrictMode>
 				<ElectionShell search={FIXTURE_SEARCH} at={FIXTURE_SETTLING_INSTANT} />
+			</StrictMode>,
+		);
+	} catch (err) {
+		renderError = renderError ?? String((err as { message?: unknown })?.message ?? err);
+	}
+}
+
+/**
+ * The not-held branch's mount (56-03): seeds the SAME public surface the
+ * fixture branch seeds — load-bearing, see this file's header — then mounts
+ * `ElectionShell` with `NOT_HELD_SEARCH` and no `election` prop, so the read
+ * path resolves the network, fails to find the requested election, and the
+ * shell renders its addressed-but-not-held branch for real.
+ *
+ * A seed failure is recorded into `renderError` rather than thrown, on the
+ * identical precedent `mountFixtureSurface` above follows.
+ */
+async function mountNotHeldSurface(): Promise<void> {
+	try {
+		await seedFixtureSurface();
+	} catch (err) {
+		renderError = renderError ?? `not-held seed failed: ${String((err as { message?: unknown })?.message ?? err)}`;
+		return;
+	}
+	try {
+		createRoot(shellContainer).render(
+			<StrictMode>
+				<ElectionShell search={NOT_HELD_SEARCH} at={FIXTURE_SETTLING_INSTANT} />
 			</StrictMode>,
 		);
 	} catch (err) {
@@ -424,10 +515,36 @@ function fixtureReady(): boolean {
 	return defaultReady() && document.querySelector('#root .registrant-roll') !== null;
 }
 
-const mountReady = fixtureMode ? mountFixtureSurface() : Promise.resolve();
+/**
+ * The not-held branch's own predicate (56-03). Neither existing predicate
+ * works here: `fixtureReady` waits on `.registrant-roll`, which never
+ * renders on this branch, and a "three skeletons present" predicate would
+ * also resolve during the `reading` state, which renders all three frames
+ * too — that race is the single most likely way this branch would report a
+ * false green. Waits instead on an element inside `#root` whose text content
+ * equals `COPY['public.election.notHeld.title']`, read from the shared copy
+ * table rather than transcribed. The frame budget is the same enlarged one
+ * `fixtureReady` uses: this branch also waits on a real IndexedDB attach.
+ */
+const NOT_HELD_TITLE_TEXT = COPY['public.election.notHeld.title'];
+
+function notHeldReady(): boolean {
+	if (!defaultReady()) return false;
+	const candidates = document.querySelectorAll('#root h2, #root p');
+	for (const el of candidates) {
+		if (el.textContent === NOT_HELD_TITLE_TEXT) return true;
+	}
+	return false;
+}
+
+const mountReady = fixtureMode ? mountFixtureSurface() : notHeldMode ? mountNotHeldSurface() : Promise.resolve();
 
 mountReady
-	.then(() => (fixtureMode ? settleUntilMounted(900, fixtureReady) : settleUntilMounted(120)))
+	.then(() => {
+		if (fixtureMode) return settleUntilMounted(900, fixtureReady);
+		if (notHeldMode) return settleUntilMounted(900, notHeldReady);
+		return settleUntilMounted(120);
+	})
 	.then(() => {
 	// 53-09: imperative data-ui-gate tagging of ElectionShell's own rendered
 	// output — see wrapForGate's own header for why AdvisoryDisclosure and
@@ -501,6 +618,11 @@ mountReady
 		// sees a changed readout. On the fixture branch it carries the
 		// FIXTURE's own exported values and nothing measured from the page.
 		fixture: fixtureMode ? fixtureFacts : null,
+		// 56-03, ADDITIVE on the identical precedent: null on every other
+		// branch so no existing rung sees a changed readout. On the not-held
+		// branch it carries this file's own exported facts, never anything
+		// measured from the page.
+		notHeld: notHeldMode ? notHeldFacts : null,
 	});
 	win.__UI_GATE_DONE__ = true;
 	});

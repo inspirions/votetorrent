@@ -36,6 +36,24 @@ export const FIXTURE_NETWORK_HASH = 'vtxfixture54';
 export const FIXTURE_ELECTION_DB_ID = SEED_ELECTION.id;
 
 /**
+ * A production-length election id this surface never seeds — 56-03's D-21
+ * not-held fixture (`test/browser/election-shell-gate.tsx`'s `not-held`
+ * branch). `FIXTURE_ELECTION_DB_ID` above is `SEED_ELECTION.id`, a
+ * 2-character seed token; a not-held id derived from it (or transcribed at
+ * similar length) would be exactly the kind of short fixture
+ * `project_ui_defects_invisible_to_every_tier` names as "too short to fail" —
+ * a real `Election.Id` is a 32-byte random value, and this id is rendered
+ * inside `.election-address code` on the page under measurement, so it must
+ * look like one. 43 characters is the length a SHA-256 content digest
+ * base64url-renders at; the value below is the base64url digest of a fixed,
+ * unrelated string, chosen only for its length and alphabet, not for any
+ * cryptographic property. It conforms to `ELECTION_ID_PATTERN`
+ * (`[A-Za-z0-9_-]{1,128}`) and is never equal to `FIXTURE_ELECTION_DB_ID`.
+ * @type {string}
+ */
+export const UNHELD_ELECTION_ID = 'TZucCxBAf1EXCKWzb01SR9IdrpYq72fIEBOzwUlorNI';
+
+/**
  * The `ElectionRevision.Revision` value `seedElectionSurface` inserts.
  *
  * `seed-election-surface.js` does NOT export it — it is the internal literal
