@@ -32,6 +32,12 @@ import base from './vite.config';
 // (`config.json`, the D-20 favicon set) would inflate that figure with
 // bytes that have nothing to do with whether libp2p bundles.
 //
+// 56-06 audit, confirmed: `public/` now exists (the D-20 favicon set + the
+// D-13 config template) and this override is now LOAD-BEARING rather than
+// hypothetical, for the reason stated above — distinct from the other two
+// gate configs' reasons (they mount no page and dial nothing; this one
+// imports symbols and loads no page at all).
+//
 // Deliberately NOT added to `tsconfig.json`'s `include` array — its siblings
 // `vite.gate.config.ts` and `vite.live.config.ts` are both absent from it
 // too, and this file follows them.

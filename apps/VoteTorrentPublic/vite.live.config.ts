@@ -37,10 +37,11 @@ export const LIVE_OVERRIDES = {
 			input: fileURLToPath(new URL('./test/browser/live-read-gate.html', import.meta.url)),
 		},
 	},
-	// The fourth point of packages/ui-web/README.md's harness contract. This app
-	// has no public/ directory today, so this is currently a no-op in practice
-	// — its absence would silently start copying one into dist-live/ the moment
-	// one is ever added.
+	// The fourth point of packages/ui-web/README.md's harness contract. 56-06
+	// audit: `public/` now exists (the D-20 favicon set + the D-13 config
+	// template), so this override is LOAD-BEARING, not anticipatory. It stays
+	// `false` because `live-read-gate.html` seeds its store directly and
+	// never boots the peer layer — it needs no icons and no `config.json`.
 	publicDir: false,
 };
 

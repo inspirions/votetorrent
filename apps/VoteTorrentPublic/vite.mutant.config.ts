@@ -21,6 +21,11 @@
  * `build.target`, same harness entry, same everything the healthy gate
  * build already uses, or a control run against this bundle would be
  * inverting a different build than the one it claims to invert.
+ *
+ * 56-06 `publicDir` audit: this file declares no `publicDir` key of its
+ * own and must not gain one — it inherits `false` from `GATE_OVERRIDES`
+ * (via `./vite.gate.config`), and "nothing else about the build is
+ * overridden" above already covers this.
  */
 import { fileURLToPath } from 'node:url';
 import { mergeConfig } from 'vite';

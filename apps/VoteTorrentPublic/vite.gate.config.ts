@@ -42,11 +42,14 @@ export const GATE_OVERRIDES = {
 	},
 	// 53-09: the fourth point of packages/ui-web/README.md's harness contract
 	// (build.outDir/build.rollupOptions.input/build.emptyOutDir/publicDir:
-	// false) — this app has no public/ directory today, so this override is
-	// currently a no-op in practice, but its absence would silently start
-	// copying one into dist-gate/ the moment a public/ directory is ever
-	// added, which is exactly the kind of drift the contract exists to
-	// foreclose rather than to catch after the fact.
+	// false). 56-06 audit: `public/` now exists (the D-20 favicon set + the
+	// D-13 config template), which makes this override LOAD-BEARING rather
+	// than anticipatory. It stays `false` because this config's entry is
+	// `election-shell-gate.html`, never `index.html` — the gate mounts
+	// components against fixtures and neither loads icons nor boots the peer
+	// layer, so it needs neither. Keeping it also makes `dist-gate/` a
+	// genuine `publicDir: false` artefact, which Task 3's D-20 assets-gate
+	// negative control depends on: a build that provably omits `public/`.
 	publicDir: false,
 };
 
