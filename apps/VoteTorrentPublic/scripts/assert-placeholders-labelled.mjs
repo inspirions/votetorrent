@@ -46,6 +46,7 @@
 import path from 'node:path';
 import process from 'node:process';
 import { existsSync } from 'node:fs';
+import { writeFile, rm } from 'node:fs/promises';
 import { chromium } from 'playwright';
 import { serveDist } from '../../../packages/ui-web/scripts/lib/serve-dist.mjs';
 import { COPY } from '../../../packages/ui-web/src/index.js';
@@ -53,6 +54,23 @@ import { COPY } from '../../../packages/ui-web/src/index.js';
 const PREFIX = '[assert-placeholders-labelled]';
 const ROOT = process.cwd();
 const DIST = path.join(ROOT, 'dist');
+/**
+ * 56-12: this gate serves the PRODUCTION page, and the production page now
+ * resolves its deployment's bootstrap config at boot (`PublicApp.tsx`). A
+ * gate that served an unconfigured deployment would render the config-fault
+ * box instead of the placeholder page it exists to measure -- it would be
+ * measuring a fault page, not this one. Write a valid config into the served
+ * root before serving, and remove it in the same teardown that closes the
+ * server and the browser, whether or not the run succeeded, so a failed run
+ * never leaves this repo's own `dist/` looking configured. Nothing dials
+ * this address -- the `.invalid` host and the shape of the recipe are the
+ * same one `56-06` handed `56-11` for the identical reason.
+ * @type {string}
+ */
+const DIST_CONFIG_JSON = path.join(DIST, 'config.json');
+const GATE_CONFIG_BODY = JSON.stringify({
+	bootstrapNodes: ['/dns4/gateway.assert-placeholders-labelled.invalid/tcp/443/wss/p2p/12D3KooWAssertPlaceholdersLabelledGatePeerId1'],
+});
 const PORT = 5193;
 
 /** The copy-key prefix that declares a placeholder slot. @type {string} */
@@ -315,6 +333,12 @@ async function main() {
 		process.exit(1);
 	}
 
+	// 56-12: configure the deployment this gate is about to serve — see the
+	// module-level comment beside DIST_CONFIG_JSON for why. Written BEFORE
+	// serveDist and removed in the finally below, whether or not the run
+	// succeeded.
+	await writeFile(DIST_CONFIG_JSON, GATE_CONFIG_BODY);
+
 	const server = await serveDist(DIST, PORT);
 	const browser = await chromium.launch();
 	try {
@@ -416,6 +440,7 @@ async function main() {
 	} finally {
 		await browser.close();
 		await server.close();
+		await rm(DIST_CONFIG_JSON, { force: true });
 	}
 }
 

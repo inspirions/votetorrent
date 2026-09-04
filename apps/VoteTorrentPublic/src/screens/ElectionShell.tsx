@@ -54,6 +54,15 @@ export interface ElectionShellProps {
 	 * MODULE CONSTANT — `source` is one of the hook's effect dependencies, so
 	 * a per-render object here would re-run the read on every commit. */
 	source?: Parameters<typeof usePublicElection>[0]['source'];
+	/** The 56-12/D-13 fault seam. Supplied by `PublicApp.tsx` in production
+	 * and by nothing else — that default (`null`) is what keeps every
+	 * harness page that mounts `ElectionShell` directly byte-identical, since
+	 * none of them pass this prop. `null` means the deployment's bootstrap
+	 * config resolved (or `PublicApp` has not composed this shell at all);
+	 * `'missing'`/`'malformed'` are the two `CONFIG_FAULT` values `56-06`'s
+	 * loader can report. See `PublicApp.tsx`'s `FAULT_COPY_KEYS` for the
+	 * closed set of copy keys the two values resolve to. */
+	configFault?: 'missing' | 'malformed' | null;
 }
 
 /**
@@ -111,13 +120,16 @@ export interface ElectionShellProps {
  * closure therefore lives in `use-public-election.ts`, whose own header
  * records the same constraint from the other side.
  */
-export function ElectionShell({ search, at = null, election = null, source }: ElectionShellProps) {
+export function ElectionShell({ search, at = null, election = null, source, configFault = null }: ElectionShellProps) {
 	const address = parseElectionAddress(search ?? window.location.search);
 
 	// Called UNCONDITIONALLY, above the address branch, for the same reason
 	// the advisory is a sibling and not a child: a hook inside a branch is a
-	// hook that can be skipped.
-	const read = usePublicElection({ address, election, source });
+	// hook that can be skipped. 56-12/D-13: the ADDRESS ARGUMENT is gated on
+	// the fault (null address when a fault is present -- a deployment that
+	// cannot learn where to dial should not attempt a lookup), but the hook
+	// call itself is never wrapped, moved or conditionalised.
+	const read = usePublicElection({ address: configFault === null ? address : null, election, source });
 
 	// 56-12/D-17. Computed ONCE, above the branch predicates: `null` whenever
 	// `read.observedAt` is absent or unusable, in which case `showStaleness`
@@ -174,7 +186,25 @@ export function ElectionShell({ search, at = null, election = null, source }: El
 	const showStaleness = addressed && read.state === 'ready' && read.connection === 'down' && formattedInstant !== null;
 
 	let body: ReactNode;
-	if (address.status === 'malformed') {
+	if (configFault !== null) {
+		// 56-12/D-13. FIRST arm, ahead of every address branch -- a
+		// deployment that cannot learn where to dial cannot attempt a lookup
+		// for ANY address, so showing the normal election/unreadable-address/
+		// index branches would imply a capability that does not exist this
+		// session. Reuses `.election-unreadable` VERBATIM (zero new CSS) --
+		// the same two-element shape `unreadableAddress` below already uses,
+		// distinguished from it and from each other by copy alone. The two
+		// keys are resolved from the SAME closed set `PublicApp.tsx`'s
+		// `FAULT_COPY_KEYS` declares; `configFault`'s own type admits only
+		// the two `CONFIG_FAULT` values, so this template can only ever
+		// produce one of the four keys that map declares.
+		body = (
+			<section className="election-unreadable">
+				<h2>{t(`public.config.${configFault}.title`)}</h2>
+				<p>{t(`public.config.${configFault}.body`)}</p>
+			</section>
+		);
+	} else if (address.status === 'malformed') {
 		// The offending value is never rendered — parseElectionAddress already
 		// returns electionId: null for this status, so there is nothing here
 		// to escape and nothing to leak (T-53-07-02).
@@ -317,9 +347,10 @@ export function ElectionShell({ search, at = null, election = null, source }: El
 			    by every gap card and by the key-release card's own detail text,
 			    so a page-level restatement would repeat content already on
 			    screen and add a second place for it to go stale. The freshness
-			    line is the one string KNOWN IN ADVANCE TO EXPIRE; the copy
-			    table ships it commented as such, and this mount is what a later
-			    sync plan will come looking for.
+			    line (56-12/D-17) is now a PERMANENT architectural statement,
+			    true in both the connected and the disconnected state; it is no
+			    longer scheduled to expire, and the copy table's own comment
+			    records why a later reader must not reinstate an expiry note.
 
 			    The two class names are 54-09's own, declared for exactly this
 			    block. No heading: no copy key exists for one, and inventing

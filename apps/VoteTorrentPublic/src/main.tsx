@@ -2,7 +2,7 @@ import './app.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { enginePreflight } from './engine-preflight.js';
-import { ElectionShell } from './screens/ElectionShell';
+import { PublicApp } from './screens/PublicApp';
 
 declare global {
 	interface Window {
@@ -30,8 +30,13 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
 	<StrictMode>
-		{/* No props: production supplies no facts, no instant and no
-		    injected search — ElectionShell now renders AppChrome itself. */}
-		<ElectionShell />
+		{/* 56-12: production now mounts PublicApp, not a bare ElectionShell,
+		    with no props of its own. PublicApp resolves 56-06's bootstrap
+		    config once at boot and hands ElectionShell a two-valued
+		    configFault (or null) -- the only thing that can suppress the
+		    shell's normal content. Everything ElectionShell itself still
+		    supplies no facts about: no injected election, no instant, no
+		    injected search, no source. */}
+		<PublicApp />
 	</StrictMode>,
 );
