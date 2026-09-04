@@ -21657,9 +21657,16 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "votetorrent-public@workspace:apps/VoteTorrentPublic"
   dependencies:
+    "@libp2p/crypto": "npm:5.1.21"
+    "@libp2p/websockets": "npm:10.1.18"
+    "@optimystic/db-core": "npm:^0.27.0"
+    "@optimystic/db-p2p": "npm:^0.27.0"
+    "@optimystic/db-p2p-storage-web": "npm:^0.27.0"
     "@optimystic/quereus-plugin-crypto": "npm:^0.27.0"
     "@quereus/plugin-indexeddb": "npm:4.18.0"
     "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.18.0#~/.yarn/patches/@quereus-quereus-npm-4.18.0-9b9f24c666.patch"
+    "@serfab/cadre-core": "npm:^0.12.0"
+    "@serfab/quereus-plugin-sereus": "npm:^0.12.0"
     "@types/node": "npm:^22.10.2"
     "@types/react": "npm:19.2.17"
     "@types/react-dom": "npm:^19.0.0"
