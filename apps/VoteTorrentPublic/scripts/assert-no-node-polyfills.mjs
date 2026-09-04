@@ -24,7 +24,24 @@ import path from 'node:path';
 import process from 'node:process';
 
 const ROOT = process.cwd();
-const DIST = path.join(ROOT, 'dist');
+
+/**
+ * 56-02: two OPTIONAL CLI flags, additive only. When neither is passed, argv
+ * and paths are BYTE-IDENTICAL to before this change — the existing
+ * `assert:no-polyfills` invocation (and anything in CI that calls it) is
+ * untouched in behaviour. `--build-config <path>` is appended to the `vite
+ * build` argv as `--config <path>` (omitted entirely when absent);
+ * `--dist <dirname>` is the directory walked and the base of the assets
+ * directory (defaults to `dist`).
+ * @param {string} name
+ */
+function getFlag(name) {
+	const idx = process.argv.indexOf(name);
+	return idx === -1 ? undefined : process.argv[idx + 1];
+}
+const BUILD_CONFIG = getFlag('--build-config');
+const DIST_DIRNAME = getFlag('--dist') ?? 'dist';
+const DIST = path.join(ROOT, DIST_DIRNAME);
 const DIST_ASSETS = path.join(DIST, 'assets');
 
 /**
@@ -91,6 +108,14 @@ function fail(message) {
 function ok(message) {
 	process.stdout.write(`[assert-no-node-polyfills] OK: ${message}\n`);
 }
+
+// A gate whose output cannot tell you WHAT it looked at is a gate whose
+// greens cannot be quoted. Print the effective dist directory and build
+// config before any check runs.
+process.stdout.write(
+	`[assert-no-node-polyfills] INFO: examining dist directory "${DIST_DIRNAME}" (${DIST}), build config: ` +
+		`${BUILD_CONFIG ?? 'default (vite.config.ts)'}.\n`,
+);
 
 // ---------------------------------------------------------------------------
 // 1. Positive control — the matcher must be able to detect impurity, or the
@@ -165,7 +190,9 @@ if (!existsSync(viteBin)) {
 	fail(`vite binary not found at ${viteBin} — run \`yarn install\` first.`);
 }
 
-const buildResult = spawnSync(process.execPath, [viteBin, 'build'], {
+const viteBuildArgs = [viteBin, 'build'];
+if (BUILD_CONFIG) viteBuildArgs.push('--config', BUILD_CONFIG);
+const buildResult = spawnSync(process.execPath, viteBuildArgs, {
 	encoding: 'utf8',
 	cwd: ROOT,
 });
@@ -229,8 +256,17 @@ const emittedJs = emittedFiles.filter((f) => f.endsWith('.js') && f.startsWith(D
 if (emittedJs.length === 0) {
 	fail(`no .js files found under ${DIST_ASSETS} — the build emitted nothing to scan.`);
 }
-if (!emittedFiles.some((f) => f.endsWith('index.html'))) {
-	fail(`no index.html found under ${DIST} — the build did not emit the entry document.`);
+// 56-02: an entry HTML document, not necessarily named `index.html`. The
+// production build's `rollupOptions.input` is implicit and emits
+// `index.html` at the dist root; `vite.closure.config.ts` (and its siblings
+// `vite.live.config.ts`/`vite.gate.config.ts`) point `rollupOptions.input` at
+// a named HTML file under `test/browser/`, which Vite emits at that SAME
+// relative path under the outDir (e.g. `dist-closure/test/browser/
+// libp2p-closure-probe.html`), never renamed to `index.html`. Requiring the
+// literal name would make this check fail on every non-default `--dist`
+// build even though the entry document was genuinely emitted.
+if (!emittedFiles.some((f) => f.endsWith('.html'))) {
+	fail(`no *.html entry document found under ${DIST} — the build did not emit an entry document.`);
 }
 
 let totalBytes = 0;
@@ -253,10 +289,12 @@ for (const filePath of emittedFiles) {
 		fail(`${filePath} contains "${envMatch[0]}" — a build-time value baked into the public bundle.`);
 	}
 }
-ok(`scanned ${emittedFiles.length} emitted text file(s) under dist/ (index.html included, .map excluded) — no Node builtin or env read found.`);
+ok(`scanned ${emittedFiles.length} emitted text file(s) under ${DIST_DIRNAME}/ (index.html included, .map excluded) — no Node builtin or env read found.`);
 
 // ---------------------------------------------------------------------------
-// 5. This app's own manifest must not declare a polyfill package.
+// 5. This app's own manifest must not declare a polyfill package. Hard-coded
+//    to the project root regardless of --dist/--build-config: there is ONE
+//    manifest, regardless of which entry was built.
 // ---------------------------------------------------------------------------
 const DENYLISTED_DEPS = [
 	'buffer',
@@ -336,6 +374,11 @@ if (existsSync(srcDir)) {
 //     the only thing enforcing it — and a comment is not a gate. A `define`
 //     entry bakes a literal with no `import.meta.env` reference for section 6
 //     to find, and a custom `envPrefix` exempts an entire namespace.
+//
+//     56-02: hard-coded to `vite.config.ts` (`base`) regardless of
+//     --build-config — every sibling config, including the closure config,
+//     inherits `base` through `mergeConfig`, so `base`'s own absence of
+//     `define`/`envPrefix` is load-bearing for EVERY build made from it.
 // ---------------------------------------------------------------------------
 const viteConfigPath = path.join(ROOT, 'vite.config.ts');
 if (!existsSync(viteConfigPath)) {
@@ -363,7 +406,7 @@ const moduleCount = moduleCountMatch ? moduleCountMatch[1] : 'unknown';
 const kb = (totalBytes / 1024).toFixed(0);
 process.stdout.write(
 	`[assert-no-node-polyfills] INFO: modules transformed = ${moduleCount}, ` +
-		`emitted dist/assets size = ${kb} KB (raw, not gzip) — no prior measurement to compare against yet.\n`,
+		`emitted ${DIST_DIRNAME}/assets size = ${kb} KB (raw, not gzip) — no prior measurement to compare against yet.\n`,
 );
 
 ok('all checks passed — the bundle needs zero Node polyfills.');

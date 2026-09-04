@@ -42,7 +42,20 @@ import process from 'node:process';
 
 const PREFIX = '[assert-single-quereus]';
 const ROOT = process.cwd();
-const DIST_ASSETS = path.join(ROOT, 'dist', 'assets');
+
+/**
+ * 56-02: two OPTIONAL CLI flags, additive only — same contract as
+ * `assert-no-node-polyfills.mjs`'s. When neither is passed, argv and paths
+ * are BYTE-IDENTICAL to before this change.
+ * @param {string} name
+ */
+function getFlag(name) {
+	const idx = process.argv.indexOf(name);
+	return idx === -1 ? undefined : process.argv[idx + 1];
+}
+const BUILD_CONFIG = getFlag('--build-config');
+const DIST_DIRNAME = getFlag('--dist') ?? 'dist';
+const DIST_ASSETS = path.join(ROOT, DIST_DIRNAME, 'assets');
 
 /** The two packages the single-instance obligation names. @type {ReadonlyArray<string>} */
 const WATCHED_PACKAGES = Object.freeze(['@quereus/quereus', '@quereus/plugin-indexeddb']);
@@ -126,11 +139,19 @@ export function problemsFor(pkg, result) {
 	return problems;
 }
 
+// A gate whose output cannot tell you WHAT it looked at is a gate whose
+// greens cannot be quoted. Print the effective dist directory and build
+// config before any check runs.
+process.stdout.write(
+	`${PREFIX} INFO: examining dist directory "${DIST_DIRNAME}" (${path.join(ROOT, DIST_DIRNAME)}), build config: ` +
+		`${BUILD_CONFIG ?? 'default (vite.config.ts)'}.\n`,
+);
+
 // ---------------------------------------------------------------------------
 // 1. Controls, BEFORE the build. Each one runs the real `analyzeSources` and
 //    the real `problemsFor`, never a look-alike.
 // ---------------------------------------------------------------------------
-const CONTROL_DIR = path.join(ROOT, 'dist', 'assets');
+const CONTROL_DIR = DIST_ASSETS;
 
 /** Two distinct roots — the exact failure this gate exists to catch. */
 const TWO_ROOT_FIXTURE = [
@@ -185,7 +206,9 @@ const viteBin = path.join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
 if (!existsSync(viteBin)) {
 	fail(`vite binary not found at ${viteBin} — run \`yarn install\` first.`);
 }
-const build = spawnSync(process.execPath, [viteBin, 'build'], { encoding: 'utf8', cwd: ROOT });
+const viteBuildArgs = [viteBin, 'build'];
+if (BUILD_CONFIG) viteBuildArgs.push('--config', BUILD_CONFIG);
+const build = spawnSync(process.execPath, viteBuildArgs, { encoding: 'utf8', cwd: ROOT });
 if (build.status !== 0) {
 	fail(`vite build exited ${build.status}.\n--- captured output ---\n${build.stdout ?? ''}\n${build.stderr ?? ''}`);
 }
