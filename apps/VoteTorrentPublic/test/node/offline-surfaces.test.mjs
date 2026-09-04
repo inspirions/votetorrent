@@ -25,22 +25,19 @@
  *       else that could turn a tested loader result into an untested one.
  * Together the two halves cover the same ground a direct hook call would.
  *
- * STAGED SEAM-FENCE COVERAGE (deviation from a literal reading of the plan's
- * own action text, recorded here rather than silently): the plan's Task 2
- * prose asks this file's seam-fence rung to pair the production absence with
- * a discrimination control proving `test/offline/` DOES pass a `source`
- * prop. `test/offline/` is Task 3's own deliverable and does not exist when
- * this file is first written (Task 2), so that pairing is added by Task 3,
- * in the same file, once the harness directory is real. Task 2 ships the
- * PRODUCTION half of the fence now — it is checkable today and does not
- * regress; the discrimination half would be vacuous (or simply absent)
- * before Task 3 lands and is deferred rather than faked.
+ * SEAM-FENCE COVERAGE, LANDED IN TWO STAGES (recorded here rather than
+ * silently): Task 2 shipped the PRODUCTION half of the seam fence (no .tsx
+ * under src/ passes a `source` prop; main.tsx passes no props). The
+ * discrimination pairing that proves that scan is live — `test/offline/`
+ * DOES pass a `source` prop — could not be written honestly until Task 3
+ * landed that directory, so it was added in the same file once Task 3
+ * completed, rather than faked or left vacuous in the interim.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { publicSrc } from '../../../../scripts/lib/source-paths.mjs';
+import { publicSrc, publicRoot } from '../../../../scripts/lib/source-paths.mjs';
 import { COPY } from '../../../../packages/ui-web/src/index.js';
 import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 import { CONFIG_FAULT, loadBootstrapConfig, validateBootstrapConfig } from '../../src/peer/config.js';
@@ -225,8 +222,9 @@ test('D-17: the staleness sentence resolves through the copy table with an asOf 
 });
 
 // ---------------------------------------------------------------------------
-// 6. Seam fences — the production half. See this file's own header for why
-//    the test/offline/ discrimination half is deferred to Task 3.
+// 6. Seam fences — the production half, PLUS the discrimination pairing
+//    (Task 3 has now landed test/offline/, closing the staged gap this
+//    file's own header recorded at Task 2).
 // ---------------------------------------------------------------------------
 
 const SOURCE_PROP_MOUNT_RE = /(?<![\w$.-])source\s*=\s*\{/;
@@ -250,6 +248,18 @@ test('D-17: no .tsx file under src/ passes a source prop to a mount site', () =>
 
 test('D-13/D-17: src/main.tsx mounts PublicApp with no props at all', () => {
 	assert.match(MAIN_SOURCE, /<PublicApp\s*\/>/, 'main.tsx does not mount <PublicApp /> with no props');
+});
+
+test('discrimination: test/offline/ DOES pass a source prop, so the production scan above is measuring a real absence rather than running an inert matcher', () => {
+	const harnessDir = publicRoot('test', 'offline');
+	const files = walkAll(harnessDir);
+	assert.ok(files.length > 0, `sanity: expected at least one file under ${harnessDir}`);
+	const sourceMounters = files.filter((file) => file.endsWith('.tsx') && SOURCE_PROP_MOUNT_RE.test(stripComments(readFileSync(file, 'utf8'))));
+	assert.ok(
+		sourceMounters.length > 0,
+		`no .tsx file under ${harnessDir} passes a source prop. The offline harness is the only sanctioned consumer of the ` +
+			'injectable read seam; if it has stopped exercising it, the src/ scan above is no longer proving anything.',
+	);
 });
 
 // ---------------------------------------------------------------------------
