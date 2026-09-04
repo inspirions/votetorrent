@@ -7,7 +7,9 @@
 	"scripts": {
 		"start": "node drone.mjs",
 		"smoke:enrolment": "node enrolment-smoke.mjs",
-		"proof:wall": "node wall-proof.mjs"
+		"proof:wall": "node wall-proof.mjs",
+		"gateway": "node gateway.mjs",
+		"gateway:cert": "bash scripts/make-gateway-cert.sh"
 	},
 	"dependencies": {
 		"@libp2p/circuit-relay-v2": "^4",
