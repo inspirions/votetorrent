@@ -31,10 +31,10 @@ import { mergeConfig } from 'vite';
  * The frozen mutation-name set — the single source of the valid set.
  * Nothing else in this module or its consumers may hard-code a mutation
  * name outside this array.
- * @type {readonly ['no-dedupe', 'token-missing', 'gap-cues-flattened']}
+ * @type {readonly ['no-dedupe', 'token-missing', 'gap-cues-flattened', 'pill-retone-reverted']}
  */
 export const MUTATIONS = Object.freeze(
-	/** @type {const} */ (['no-dedupe', 'token-missing', 'gap-cues-flattened']),
+	/** @type {const} */ (['no-dedupe', 'token-missing', 'gap-cues-flattened', 'pill-retone-reverted']),
 );
 
 /**
@@ -344,6 +344,157 @@ export function flattenGapCuesPlugin() {
 					null,
 					2,
 				),
+			);
+		},
+	};
+}
+
+/**
+ * The retoned pill's own class, and the ONE place this module writes it.
+ * Declared as a module constant, never inline in a comment, on the identical
+ * precedent `GAP_MODIFIER_CLASS` above states for itself: a class selector is
+ * stable under minification (no bundler renames it, because renaming would
+ * break every element carrying the class in the markup), which is what makes
+ * it a faithful target for a build-time mutation.
+ */
+const PILL_INDETERMINATE_CLASS = 'lifecycle-pill--indeterminate';
+
+/**
+ * The PRE-retone declaration body (56-03 Task 1 removed exactly this text
+ * from `packages/ui-web/src/components.css`). Declared as a module constant
+ * so `revertPillRetonePlugin` restores exactly what was removed, never a
+ * paraphrase of it.
+ */
+const PILL_RETONE_REVERTED_DECLARATIONS = 'color: var(--fail); opacity: 1;';
+
+/**
+ * A Vite plugin, `ui-web-mutation-revert-pill-retone`, that REPLACES the
+ * DECLARATION BODY of every CSS rule whose selector list names
+ * `.lifecycle-pill--indeterminate` with the PRE-retone declarations — the
+ * exact inverse of `flattenGapCuesPlugin` above, which EMPTIES a body. This
+ * mutation restores rather than empties because the retone rung
+ * (`indeterminate-pill-neutral`) asserts a SPECIFIC colour and opacity; an
+ * emptied body would fall through to the `.lifecycle-pill` base rule's
+ * `color: var(--muted)` — a third colour that is neither `--text` nor
+ * `--fail` — and the control would prove nothing about whether the retone
+ * specifically reverted to the pre-retone alarm tone.
+ *
+ * Mirrors `flattenGapCuesPlugin`'s MUTATION SHAPE exactly — the same
+ * leaf-rule regex (a selector list plus a brace-free body) and the same
+ * whole-token class matcher, so a longer class beginning with the same
+ * characters (there is none today, but the rule is general) is never
+ * matched — but NOT its hook. `flattenGapCuesPlugin` runs at `transform`,
+ * `enforce: 'pre'`, because its target (`.fact-card--gap`) is declared
+ * DIRECTLY in the app's own `app.css`. This plugin's target
+ * (`.lifecycle-pill--indeterminate`) is declared in
+ * `packages/ui-web/src/components.css`, which `app.css` only reaches through
+ * a CSS `@import` — measured live: a `transform`-based version, at ANY
+ * enforce priority, is handed either the RAW `app.css` payload (`@import`
+ * still literal, the target rule not yet present) or, if enforce is not
+ * `'pre'`, `app.css`'s FULLY merged content (the target present, but Vite's
+ * own import-inlining reads and concatenates the imported file's bytes
+ * directly rather than routing them back through a second `transform` call
+ * of their own — so a `'pre'` hook never sees a payload that both contains
+ * the target rule and is still unbundled). This plugin instead hooks
+ * `generateBundle`, which runs once Rollup has produced the final emitted
+ * CSS asset with every `@import` already inlined — still inside this SAME
+ * `vite build` invocation, still writing into this mutant's own `outDir`,
+ * never touching an already-written `dist-gate/` and never injecting
+ * anything at runtime.
+ *
+ * `closeBundle` throws `MUTATION IS A NO-OP` on zero replacements — a
+ * control run against an unmutated build would falsely report the gate
+ * inert, a different verdict entirely — and otherwise writes
+ * `.mutation-report.json` into the build's `outDir` recording
+ * `{ mutation: 'pill-retone-reverted', replacements, selectors }`.
+ *
+ * STANDING RULE, restated here on the identical precedent: this runs against
+ * SOURCE, before a real `vite build`. It never edits a built `dist/`, and it
+ * never injects anything into a page at runtime.
+ *
+ * @returns {import('vite').Plugin}
+ */
+export function revertPillRetonePlugin() {
+	let replacements = 0;
+	/** @type {Set<string>} */
+	const selectors = new Set();
+	/** @type {string | null} */
+	let outDirAbs = null;
+
+	const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+	const classRe = new RegExp(`\\.${escapeRegExp(PILL_INDETERMINATE_CLASS)}(?![\\w-])`);
+
+	return {
+		name: 'ui-web-mutation-revert-pill-retone',
+		configResolved(resolvedConfig) {
+			outDirAbs = path.resolve(resolvedConfig.root ?? process.cwd(), resolvedConfig.build.outDir);
+		},
+		// `generateBundle`, NOT `transform` (measured live, the reason
+		// `flattenGapCuesPlugin`'s own `enforce: 'pre'` note does not
+		// transfer here). `.lifecycle-pill--indeterminate` is declared in
+		// `packages/ui-web/src/components.css`, which the app's own
+		// `app.css` only reaches through a CSS `@import` -- unlike
+		// `.fact-card--gap`, which `flattenGapCuesPlugin` matches directly
+		// inside `app.css` itself. A measured `transform` trace (id, whether
+		// the class name is present in that id's own code) showed `pre`
+		// intercepting exactly ONE `.css` id -- `app.css`'s own RAW,
+		// UN-INLINED source, still carrying the literal `@import` line --
+		// and no second `transform` call ever fires for the imported
+		// `components.css` file as its own module: Vite's `@import`
+		// resolution reads and inlines the imported file's bytes directly
+		// via its OWN internal css-import machinery rather than routing them
+		// back through the plugin pipeline's `load`/`transform` hooks. So a
+		// `transform` hook, at ANY enforce priority, never sees a single
+		// `.css` payload that both contains this rule AND is still
+		// unminified/unbundled. `generateBundle` runs once Rollup has
+		// produced the FINAL emitted CSS asset -- imports already inlined,
+		// still inside this SAME `vite build` invocation, still writing into
+		// this mutant's own `outDir`, never touching an already-written
+		// `dist-gate/` and never injecting anything at runtime. The
+		// mutation's shape is otherwise IDENTICAL to `flattenGapCuesPlugin`:
+		// the same leaf-rule regex, the same whole-token class matcher, and
+		// the same no-op / report-write discipline.
+		generateBundle(_options, bundle) {
+			for (const fileName of Object.keys(bundle)) {
+				const item = bundle[fileName];
+				if (!fileName.endsWith('.css') || item.type !== 'asset') continue;
+				const code = typeof item.source === 'string' ? item.source : Buffer.from(item.source).toString('utf8');
+				let touched = false;
+				const out = code.replace(ruleRe, (whole, selectorList, body) => {
+					if (!classRe.test(selectorList)) return whole;
+					if (body.trim() === PILL_RETONE_REVERTED_DECLARATIONS) return whole;
+					replacements += 1;
+					// The captured "selector list" runs from the previous rule's
+					// closing brace, so it carries any comment block sitting above
+					// the rule. Strip comments for the REPORT only -- the emitted
+					// CSS keeps them verbatim, on the identical precedent
+					// flattenGapCuesPlugin follows.
+					selectors.add(
+						String(selectorList)
+							.replace(/\/\*[\s\S]*?\*\//g, '')
+							.trim()
+							.replace(/\s+/g, ' '),
+					);
+					touched = true;
+					return `${selectorList}{ ${PILL_RETONE_REVERTED_DECLARATIONS} }`;
+				});
+				if (touched) item.source = out;
+			}
+		},
+		closeBundle() {
+			if (replacements === 0) {
+				throw new Error(
+					`MUTATION IS A NO-OP: revertPillRetonePlugin found no CSS rule whose selector list names ".${PILL_INDETERMINATE_CLASS}", ` +
+						'so no declaration body was reverted and the pill-retone-reverted mutation did not fire. A control run against ' +
+						'an unmutated build would falsely report the gate inert, which is a different verdict entirely.',
+				);
+			}
+			if (!outDirAbs) {
+				throw new Error('revertPillRetonePlugin: outDir was never resolved (configResolved did not run)');
+			}
+			writeFileSync(
+				path.join(outDirAbs, '.mutation-report.json'),
+				JSON.stringify({ mutation: 'pill-retone-reverted', replacements, selectors: [...selectors] }, null, 2),
 			);
 		},
 	};

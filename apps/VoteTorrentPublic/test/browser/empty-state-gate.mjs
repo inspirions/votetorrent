@@ -43,11 +43,19 @@
  * concurrently with every existing one.
  *
  * FLAGS:
- *   --skip-build       Reuse an existing `dist-gate/` rather than rebuilding.
- *   --prove-matchers   Run every comparator against a violating input AND a
- *                       healthy one, requiring the first to FAIL and the
- *                       second to PASS. Needs no browser and no build.
- *   --port <n>         Override the bound port.
+ *   --skip-build                    Reuse an existing `dist-gate/` rather
+ *                                    than rebuilding.
+ *   --prove-matchers                Run every comparator against a violating
+ *                                    input AND a healthy one, requiring the
+ *                                    first to FAIL and the second to PASS.
+ *                                    Needs no browser and no build.
+ *   --prove-pill-retone-reverted    56-03 Task 3: the build-level negative
+ *                                    control. Rebuilds with the retone
+ *                                    reverted at BUILD time and requires
+ *                                    exactly `indeterminate-pill-neutral` to
+ *                                    invert while the other two rungs
+ *                                    survive.
+ *   --port <n>                      Override the bound port.
  * Any other argument exits 2 naming it — an unknown flag must never be
  * silently ignored into a green run.
  */
@@ -57,6 +65,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readdirSync } from 'node:fs';
 import { serveDist } from '../../../../packages/ui-web/scripts/lib/serve-dist.mjs';
+import { readMutationReport } from '@votetorrent/ui-web/mutations';
 import { COPY } from '../../../../packages/ui-web/src/copy.js';
 import {
 	PHASE_IDS,
@@ -73,6 +82,15 @@ const GATE_CONFIG = 'vite.gate.config.ts';
 const NOT_HELD_QUERY = 'fixture=not-held';
 const DEFAULT_PORT = 5194;
 const LABEL = 'empty-state-gate';
+
+/** The build-time mutation `--prove-pill-retone-reverted` drives, and its outDir. */
+const RETONE_MUTATION = 'pill-retone-reverted';
+const MUTANT_CONFIG = 'vite.mutant.config.ts';
+const MUTANT_DIST = path.join(APP_DIR, `dist-mutant-${RETONE_MUTATION}`);
+/** The one rung the retone-revert mutation must invert. Every other rung must survive it.
+ * Named as a module constant, on the identical precedent `GAP_RUNG_ID` follows in
+ * `render-fidelity-gate.mjs`, so the control cannot drift from the rung it claims to invert. */
+const RETONE_RUNG_ID = 'indeterminate-pill-neutral';
 
 /**
  * Frozen rung-id registry, module-level, single source of truth. `record()`
@@ -573,14 +591,118 @@ async function driveAndReport(distAbs, port) {
 	process.exitCode = failed === 0 ? 0 : 1;
 }
 
+/**
+ * `--prove-pill-retone-reverted` — the BUILD-LEVEL half of the retone's
+ * negative control (56-03 Task 3), on the identical shape
+ * `render-fidelity-gate.mjs`'s `--prove-gap-cues-flattened` uses. See that
+ * function's own header for why the four verdicts (control-could-not-run /
+ * no-op / wrong-failure-shape / inert) are kept distinct.
+ *
+ * @param {number} port
+ * @param {boolean} skipBuild
+ */
+async function runProvePillRetoneReverted(port, skipBuild) {
+	const PREFIX = `[${LABEL}] --prove-pill-retone-reverted: control could not run —`;
+
+	// Leg 1, the healthy baseline. It must pass EVERY rung, the target rung
+	// included: a control cannot invert a rung that was never passing.
+	if (!skipBuild) await buildGate();
+	const healthy = await driveRungs(GATE_DIST, port);
+	if (!healthy.ok) {
+		process.stderr.write(`\n${PREFIX} the healthy leg did not render: ${healthy.vacuity}\n`);
+		process.exit(1);
+	}
+	const healthyFailed = healthy.results.filter((r) => !r.passed);
+	if (healthyFailed.length > 0 || healthy.results.length !== RUNG_IDS.length) {
+		process.stderr.write(
+			`\n${PREFIX} the healthy leg did not pass every rung, so nothing here can be attributed to the mutation.\n` +
+				`  ran ${healthy.results.length}/${RUNG_IDS.length}, failed: ${healthyFailed.map((r) => r.id).join(', ') || 'none'}\n`,
+		);
+		process.exit(1);
+	}
+	process.stdout.write(`[${LABEL}] healthy leg: ${healthy.results.length}/${RUNG_IDS.length} rungs passed (full pass)\n`);
+
+	// Leg 2, the mutant build. Source is mutated by a Vite plugin before a
+	// real `vite build`; dist is never edited and nothing is injected at
+	// runtime.
+	process.stdout.write(`[${LABEL}] building the ${RETONE_MUTATION} mutant via ${MUTANT_CONFIG}\n`);
+	const code = await buildGate(MUTANT_CONFIG, { UI_GATE_MUTATION: RETONE_MUTATION }, true);
+	if (code !== 0) {
+		process.stderr.write(`\n${PREFIX} the ${RETONE_MUTATION} mutant build exited ${code}\n`);
+		process.exit(1);
+	}
+
+	// Machine-readable proof the mutation fired. Never a log scrape.
+	let report;
+	try {
+		report = readMutationReport(MUTANT_DIST);
+	} catch (err) {
+		process.stderr.write(`\n${PREFIX} ${/** @type {any} */ (err)?.message ?? err}\n`);
+		process.exit(1);
+	}
+	process.stdout.write(`[${LABEL}] mutation report: ${JSON.stringify(report)}\n`);
+	if (report.mutation !== RETONE_MUTATION || !Number.isInteger(report.replacements) || report.replacements < 1) {
+		process.stderr.write(
+			`\n[${LABEL}] MUTATION IS A NO-OP — the mutant build exited 0 but reverted no declaration body.\n` +
+				`  report=${JSON.stringify(report)}\n` +
+				'  This is NOT the same verdict as an inert gate: the gate was never put to the test at all.\n',
+		);
+		process.exit(1);
+	}
+
+	const mutant = await driveRungs(MUTANT_DIST, port);
+	if (!mutant.ok) {
+		process.stderr.write(
+			`\n[${LABEL}] WRONG FAILURE SHAPE — the mutant page did not render at all: ${mutant.vacuity}\n` +
+				'  A crashed or blank page failing every rung is not evidence the retone rung discriminates.\n',
+		);
+		process.exit(1);
+	}
+	for (const r of mutant.results) {
+		process.stdout.write(`  mutant  ${r.passed ? 'PASS' : 'FAIL'}  ${r.id}\n            -> ${r.detail}\n`);
+	}
+
+	const target = mutant.results.find((r) => r.id === RETONE_RUNG_ID);
+	const collateral = mutant.results.filter((r) => r.id !== RETONE_RUNG_ID && !r.passed);
+
+	if (!target) {
+		process.stderr.write(`\n[${LABEL}] WRONG FAILURE SHAPE — the rung "${RETONE_RUNG_ID}" did not run on the mutant leg.\n`);
+		process.exit(1);
+	}
+	if (target.passed) {
+		process.stderr.write(
+			`\n[${LABEL}] --prove-pill-retone-reverted: the retone rung is inert — a rebuild with the retone reverted still ` +
+				`PASSED "${RETONE_RUNG_ID}".\n  detail: ${target.detail}\n`,
+		);
+		process.exit(1);
+	}
+	if (collateral.length > 0) {
+		process.stderr.write(
+			`\n[${LABEL}] WRONG FAILURE SHAPE — the mutation took down rungs it has no business touching: ${collateral.map((r) => r.id).join(', ')}\n` +
+				collateral.map((r) => `  ${r.id}: ${r.detail}\n`).join(''),
+		);
+		process.exit(1);
+	}
+
+	process.stdout.write(
+		`\n[${LABEL}] --prove-pill-retone-reverted PASS — a rebuilt product with the retone reverted genuinely FAILED "${RETONE_RUNG_ID}" ` +
+			`while all ${RUNG_IDS.length - 1} other rungs still passed.\n` +
+			`  reverted ${report.replacements} rule(s): ${JSON.stringify(report.selectors)}\n` +
+			`  failure detail: ${target.detail}\n`,
+	);
+	process.exit(0);
+}
+
 async function main() {
 	const argv = process.argv.slice(2);
 	let skipBuild = false;
+	let proveRetoneReverted = false;
 	let port = Number(process.env.EMPTY_STATE_PORT ?? DEFAULT_PORT);
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i];
 		if (arg === '--skip-build') skipBuild = true;
 		else if (arg === '--prove-matchers') runProveMatchers();
+		else if (arg === '--prove-pill-retone-reverted') proveRetoneReverted = true;
 		else if (arg === '--port') {
 			i += 1;
 			port = Number(argv[i]);
@@ -591,6 +713,10 @@ async function main() {
 	}
 	if (!Number.isInteger(port) || port <= 0) fail(`--port must be a positive integer, got "${port}".`);
 
+	if (proveRetoneReverted) {
+		await runProvePillRetoneReverted(port, skipBuild);
+		return;
+	}
 	if (!skipBuild) await buildGate();
 	await driveAndReport(GATE_DIST, port);
 }

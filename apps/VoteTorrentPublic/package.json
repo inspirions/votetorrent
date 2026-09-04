@@ -20,6 +20,7 @@
 		"gate:prove-gap-cues-flattened": "node test/browser/render-fidelity-gate.mjs --prove-gap-cues-flattened",
 		"test:empty-state": "node test/browser/empty-state-gate.mjs",
 		"gate:prove-empty-state-matchers": "node test/browser/empty-state-gate.mjs --prove-matchers",
+		"gate:prove-pill-retone-reverted": "node test/browser/empty-state-gate.mjs --prove-pill-retone-reverted",
 		"test:live-read": "node test/browser/run-live-read-gate.mjs",
 		"gate:prove-frozen": "node test/browser/run-live-read-gate.mjs --prove-frozen",
 		"typecheck": "tsc --noEmit",

@@ -149,11 +149,15 @@ test('rung 4b: the real `./components.css` subpath resolves to an existing file'
 
 test('rung 9: the real `./mutations` subpath is Node-importable with no bundler and exposes the frozen mutation set', async () => {
 	const mod = await import('@votetorrent/ui-web/mutations');
-	assert.deepEqual(mod.MUTATIONS, ['no-dedupe', 'token-missing', 'gap-cues-flattened']);
+	// 56-03 Task 3 adds the fourth mutation name, `pill-retone-reverted` — this
+	// assertion exists to make a silent addition impossible; it is UPDATED
+	// here, not relaxed.
+	assert.deepEqual(mod.MUTATIONS, ['no-dedupe', 'token-missing', 'gap-cues-flattened', 'pill-retone-reverted']);
 	assert.equal(typeof mod.resolveMutation, 'function');
 	assert.equal(typeof mod.applyNoDedupe, 'function');
 	assert.equal(typeof mod.stripTokensPlugin, 'function');
 	assert.equal(typeof mod.flattenGapCuesPlugin, 'function');
+	assert.equal(typeof mod.revertPillRetonePlugin, 'function');
 	assert.equal(typeof mod.writeMutationReportPlugin, 'function');
 	assert.equal(typeof mod.readMutationReport, 'function');
 });
