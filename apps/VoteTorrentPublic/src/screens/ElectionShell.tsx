@@ -57,10 +57,16 @@ export interface ElectionShellProps {
  *              flight would make D-10's real state indistinguishable from a
  *              slow attach, which is the exact confusion D-02 removes.
  *   notHeld  — an explicit sentence saying this browser holds no usable copy
- *              of the election this link names. NO banner and NO skeleton: we
- *              did not fail to read a schedule, we hold no election, and
- *              claiming `bad` / "phase unknown" here would be a false
- *              sentence of the kind D-28 exists to catch.
+ *              of the election this link names, PLUS the same three labelled
+ *              frames the election-less page shows (D-21): `.skeleton`'s
+ *              established meaning was already "space left empty ON PURPOSE,
+ *              nothing is loading" — "no record for this election" is a
+ *              second cause of that same emptiness, not a repurposing of the
+ *              class. Still NO banner: we did not fail to read a schedule,
+ *              we hold no election, and claiming `bad` / "phase unknown"
+ *              here would be a false sentence of the kind D-28 exists to
+ *              catch. The banner distinction is unchanged; only the
+ *              scaffolding parity is new.
  *   ready    — the real title and the real derived phase, led by the
  *              `.status-banner` headline and its tone chip. `unreadable`
  *              renders the same shape with a null election, so a fault
@@ -142,7 +148,7 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 	const addressed = address.status === 'ok';
 	const holdsNothing = addressed && read.state === 'notHeld';
 	const showBanner = addressed && (read.state === 'ready' || read.state === 'unreadable');
-	const showLifecycleSlot = !addressed || read.state === 'reading';
+	const showLifecycleSlot = !addressed || read.state === 'reading' || holdsNothing;
 
 	let body: ReactNode;
 	if (address.status === 'malformed') {
@@ -198,7 +204,7 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 				<LifecyclePill phase={phaseResult.phase} />
 				{shellElection?.title ? (
 					<p className="election-title">{shellElection.title}</p>
-				) : holdsNothing ? null : (
+				) : (
 					<div className="skeleton" data-slot="title">
 						<span className="skeleton-label">{t('public.election.slot.title')}</span>
 					</div>
@@ -214,7 +220,7 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 						<span className="skeleton-label">{t('public.election.slot.lifecycle')}</span>
 					</div>
 				) : null}
-				{shellElection === null && !holdsNothing ? (
+				{shellElection === null ? (
 					<div className="skeleton" data-slot="timeline">
 						<span className="skeleton-label">{t('public.election.slot.timeline')}</span>
 					</div>

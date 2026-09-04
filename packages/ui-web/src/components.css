@@ -84,9 +84,12 @@
 	opacity: 0.85;
 }
 
+/* D-21 retone: on a page whose heading already says no election is held, a
+ * red pill asserts an error that did not occur. `--fail` stays reserved for
+ * a genuine fault (see `.status-banner--bad`, untouched by this rule). */
 .lifecycle-pill--indeterminate {
-	color: var(--fail);
-	opacity: 1;
+	color: var(--text);
+	opacity: 0.85;
 }
 
 .dt-toggle-group {

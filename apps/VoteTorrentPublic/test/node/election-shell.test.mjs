@@ -1017,7 +1017,7 @@ test("D-10: 54-05's skeleton holding measure is gone — ElectionShell.tsx names
 
 // -- 12g. D-02: the three states are structurally distinct child sets -------
 
-test('D-02: notHeld, reading and ready are three distinct child sets of the SAME .election section — no branch renders another branch signature element', () => {
+test('D-02/D-21: notHeld now SHARES its scaffolding with reading and ready — the three states are distinguished by the not-held sentence and the absence of a banner, not by the absence of frames', () => {
 	// One section, not three. All three states are CHILDREN of it, which is
 	// what keeps 54-11's ElectionIndex mount and the unconditional advisory
 	// where 53-D16 and assert-placeholders-labelled.mjs need them.
@@ -1030,17 +1030,28 @@ test('D-02: notHeld, reading and ready are three distinct child sets of the SAME
 	assert.match(SHELL_SOURCE, /\{holdsNothing \? <h2>\{t\('public\.election\.notHeld\.title'\)\}<\/h2> : null\}/);
 	assert.match(SHELL_SOURCE, /\{holdsNothing \? <p>\{t\('public\.election\.notHeld\.body'\)\}<\/p> : null\}/);
 
-	// ...and it renders NEITHER a banner NOR a skeleton: we did not fail to
-	// read a schedule, we hold no election, and a `bad` / phase-unknown banner
-	// here would be a false sentence (D-28).
+	// ...it still renders NO banner: we did not fail to read a schedule, we
+	// hold no election, and a `bad` / phase-unknown banner here would be a
+	// false sentence (D-28). That distinction survives D-21 unchanged.
 	assert.match(SHELL_SOURCE, /const showBanner = addressed && \(read\.state === 'ready' \|\| read\.state === 'unreadable'\)/);
-	assert.match(SHELL_SOURCE, /holdsNothing \? null : \(/, 'the title skeleton is not suppressed in the notHeld branch');
-	assert.match(SHELL_SOURCE, /shellElection === null && !holdsNothing \?/, 'the timeline skeleton is not suppressed in the notHeld branch');
 
-	// The election-less page keeps all three of 53-D18's labelled slots, which
-	// is the property assert-placeholders-labelled.mjs measures in a real
-	// browser and no source scan can see.
+	// D-21: the title and timeline skeletons are NO LONGER suppressed on the
+	// notHeld branch — the old suppression patterns must be ABSENT now.
+	assert.ok(!SHELL_SOURCE.includes("holdsNothing ? null : ("), 'D-21: the title frame must no longer be suppressed on the not-held page');
+	assert.ok(!SHELL_SOURCE.includes('shellElection === null && !holdsNothing'), 'D-21: the timeline frame must no longer be suppressed on the not-held page');
+
+	// The lifecycle slot guard now also admits `holdsNothing`, so all three
+	// labelled frames render together on the not-held page, exactly as they
+	// do on the election-less page — the property
+	// assert-placeholders-labelled.mjs measures in a real browser and no
+	// source scan can see.
 	assert.match(SHELL_SOURCE, /const showLifecycleSlot = !addressed \|\| read\.state === 'reading'/);
+	assert.match(SHELL_SOURCE, /const showLifecycleSlot\s*=\s*[^;]*\bholdsNothing\b/, 'the showLifecycleSlot predicate does not name holdsNothing');
+
+	// RENDERING proof lives elsewhere: this file is a source scan, and a
+	// source scan cannot see whether the frames laid out or whether the
+	// retoned pill's colour actually resolved. See the browser rung built in
+	// 56-03 Task 2 (`test/browser/empty-state-gate.mjs`) for that proof.
 });
 
 test('54-11 ElectionIndex mount survives: still imported, still one guarded JSX line, still INSIDE the .election section', () => {
