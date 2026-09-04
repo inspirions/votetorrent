@@ -190,12 +190,16 @@ NOT-vendored boundary (`@quereus/quereus`, the quereus plugins — these stay
 published) are documented in `vendor/VENDOR.md`.
 
 **Yarn patches.** `.yarn/patches/` holds the patched upstreams, referenced from
-the root `resolutions` and the app/vote-engine manifests:
+the root `resolutions` and the app/vote-engine manifests. Current inventory:
 
-- `@quereus-quereus-npm-3.3.0-*.patch` — applied to `@quereus/quereus@3.3.0`.
-- `@optimystic-quereus-plugin-optimystic-npm-0.13.5-*.patch` — composite-PK
-  support; the rationale is written up in `patches/optimystic-quereus-plugin-composite-pk.md`.
-- `@serfab-cadre-core-npm-0.7.1-*.patch`.
+- `@chainsafe-libp2p-gossipsub-npm-14.1.2-*.patch` — `@multiformats/multiaddr`
+  v13 compatibility (v13 removed the `./convert` subpath export and
+  `Multiaddr#tuples()`; the patch switches to `getComponents()`, which exists
+  on both v12 and v13).
+- `@quereus-quereus-npm-4.18.0-*.patch` — applied to `@quereus/quereus@4.18.0`.
+- `@serfab-cadre-core-npm-0.12.0-*.patch` — the public-observer protocol
+  (Phase 56); the rationale, invariants, and forward-port procedure are
+  written up in `patches/serfab-cadre-core-public-observer.md`.
 
 ### Re-syncing the vendor (maintainer-only)
 
