@@ -9,3 +9,8 @@ dist-mutant-*
 # above — the root .gitignore's bare `dist` rule matches only an entry named
 # exactly `dist`.
 dist-live
+
+# 56-02: the RESEARCH Assumption A2 closure-probe build output. Same reason
+# as dist-gate/dist-live above — the root .gitignore's bare `dist` rule
+# matches only an entry named exactly `dist`.
+dist-closure
