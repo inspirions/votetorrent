@@ -46,10 +46,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { CadreNode } from '@serfab/cadre-core';
+import { CadreNode, collectStrandAddrs, STRAND_ADDR_PROTOCOL } from '@serfab/cadre-core';
+import { createLibp2pNode } from '@optimystic/db-p2p/rn';
 import { webSockets } from '@libp2p/websockets';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
+import { multiaddr } from '@multiformats/multiaddr';
 
 const L = (...a) => console.log('[wall-proof]', ...a);
 
@@ -93,6 +95,7 @@ function resolvePackageInfo(specifier, expectedName) {
 }
 
 const CADRE_CORE_INFO = resolvePackageInfo('@serfab/cadre-core', '@serfab/cadre-core');
+const DB_P2P_INFO = resolvePackageInfo('@optimystic/db-p2p', '@optimystic/db-p2p');
 
 // ── Instrument hygiene: throw, never skip, on a missing member ─────────────────────────────────
 // A future @serfab/* bump could rename/remove one of these TS-`private`-but-real-JS-prototype
@@ -275,6 +278,412 @@ function printRungP(result) {
   L(`RUNG_P=${result.pass ? 'PASS' : 'FAIL'}`);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// TASK 2 — the outsider probe: RUNG_L1 / RUNG_L2 / RUNG_L3 / RUNG_POS / RUNG_RELAY
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Build the outsider libp2p node from the SAME factory 56-05's browser Edge node will use
+ * (`createLibp2pNode` from `@optimystic/db-p2p/rn`), so this probe measures the real client
+ * shape, not a Node-only stand-in.
+ */
+async function buildOutsiderNode(privateKey, networkName) {
+  return await createLibp2pNode({
+    transports: [webSockets()],
+    listenAddrs: [],
+    bootstrapNodes: [],
+    networkName,
+    fretProfile: 'edge',
+    privateKey,
+  });
+}
+
+// How long an 'admit-for-relay' connection may exist without an admitted relay reservation
+// before the gate aborts it (membership-connection-gater.js RELAY_ADMISSION_RESERVE_DEADLINE_MS
+// = 5000ms). Held slightly past that deadline so a genuine durable admission can be told apart
+// from the relay branch's timed partial admission — our probe never requests an actual
+// reservation, so an admit-for-relay connection WILL be dropped by this deadline.
+const RELAY_PARTIAL_CHECK_DELAY_MS = 5300;
+const RELAY_ADMISSION_RESERVE_DEADLINE_MS = 5000; // membership-connection-gater.js's own constant
+
+/**
+ * Race a dialed connection's own 'close' event against `timeoutMs`. Resolves the elapsed ms if
+ * the connection closes first, or `null` if it is still open at the deadline.
+ *
+ * WHY THIS EXISTS, not a blind sleep-then-check: `membership-connection-gater.js`'s own "Deny
+ * timing" note says a plain `deny` verdict can still let the DIALER's `dial()` resolve —
+ * "noise negotiates the muxer in the security handshake's early data, so the dialer's upgrade
+ * may complete before [the deny] hook runs... the dialer sees its 'open' connection close
+ * MOMENTS LATER" — which can be far sooner than the 5s relay-reservation deadline. A blind sleep
+ * would misreport that ordinary deny as a 5s-later RELAY_PARTIAL, mislabeling the wall's real
+ * behaviour. Racing the actual 'close' event measures when the dialer really saw it drop.
+ */
+function raceConnectionClose(conn, timeoutMs) {
+  return new Promise((resolve) => {
+    if (conn.status !== 'open') {
+      resolve(0);
+      return;
+    }
+    const t0 = performance.now();
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      conn.removeEventListener('close', onClose);
+    };
+    const onClose = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(performance.now() - t0);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(null);
+    }, timeoutMs);
+    conn.addEventListener('close', onClose, { once: true });
+  });
+}
+
+/**
+ * Separate an INFRASTRUCTURE dial failure (nothing listening, unreachable host, malformed
+ * target — the dial never reached a peer able to make an admission decision) from a WALL
+ * decision (the peer was reached and refused/reset by the gate). Only the latter is a
+ * classified verdict; the former must propagate as "unclassifiable" so the harness never
+ * misreports "nothing was listening" as "the wall denied it" (<verification> robustness note —
+ * a wall proof that shrugs is worse than no proof).
+ */
+function classifyDialError(err) {
+  const msg = err?.message ?? String(err);
+  const code = err?.code ?? err?.name ?? '';
+  // Includes the @libp2p/websockets transport's own dial-failure text ("Received network error
+  // or non-101 status code.", carried with no `code`/`name`/`cause` at all — confirmed against
+  // the installed transport this session by dialing an unbound loopback port) alongside the
+  // usual Node network error codes.
+  const infra = /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|dial timed out|timed out|no valid addresses|could not connect|AggregateError|network error|non-101 status code/i;
+  if (infra.test(msg) || infra.test(code)) {
+    return { classified: false, reason: msg };
+  }
+  return { classified: true, verdict: `DENIED:${(code || msg).toString().slice(0, 180)}` };
+}
+
+/**
+ * RUNG_L1 primitive: dial the gateway's control-network multiaddr directly and classify the
+ * outcome. `denyInboundEncryptedConnection` denies after the encryption handshake, so the
+ * observable is a dial rejection or an admitted-then-dropped connection — never a wire-level
+ * "why". See `classifyDialError` for the infra/wall split.
+ */
+async function dialGateway(outsider, controlAddr) {
+  const ma = multiaddr(controlAddr);
+  const t0 = performance.now();
+  try {
+    const conn = await outsider.dial(ma);
+    const closedAfterMs = await raceConnectionClose(conn, RELAY_PARTIAL_CHECK_DELAY_MS);
+    const elapsedMs = performance.now() - t0;
+    if (closedAfterMs === null) {
+      // Still open at the deadline: a durable admission.
+      return { classified: true, verdict: 'ADMITTED', elapsedMs, connection: conn };
+    }
+    // Closed before the deadline. Near RELAY_ADMISSION_RESERVE_DEADLINE_MS (5000ms) is the
+    // relay branch's own timed-partial-admission signature; anywhere else (often much sooner)
+    // is an ordinary deny whose abort the dialer observed after its own upgrade had resolved.
+    const nearRelayDeadline = closedAfterMs >= RELAY_ADMISSION_RESERVE_DEADLINE_MS - 500;
+    const verdict = nearRelayDeadline
+      ? `RELAY_PARTIAL:closed-after-${Math.round(closedAfterMs)}ms`
+      : `DENIED:closed-after-${Math.round(closedAfterMs)}ms(receiver-side-abort-raced-dialer-upgrade)`;
+    return { classified: true, verdict, elapsedMs, connection: null };
+  } catch (err) {
+    const elapsedMs = performance.now() - t0;
+    const cls = classifyDialError(err);
+    if (!cls.classified) {
+      return { classified: false, verdict: null, elapsedMs, connection: null, reason: cls.reason };
+    }
+    return { classified: true, verdict: cls.verdict, elapsedMs, connection: null };
+  }
+}
+
+// ── Hand-framed strand-addr wire client ──────────────────────────────────────────────────────
+// Deliberately NOT the unexported `writeFrame`/`readStreamToEnd`/`decodeLengthPrefixedFrame`
+// helpers `control-stream.js` uses internally (nothing under those names is exported from
+// @serfab/cadre-core's index) — this reimplements the SAME 4-byte big-endian length-prefixed
+// JSON framing `control-stream.js` documents, so this harness can read the raw stream-level
+// outcome (open / reset / empty response) that `collectStrandAddrs` (which folds every failure
+// to `[]`) cannot discriminate.
+function encodeFrame(obj) {
+  const body = new TextEncoder().encode(JSON.stringify(obj));
+  const prefix = new Uint8Array(4);
+  new DataView(prefix.buffer).setUint32(0, body.length, false);
+  return { prefix, body };
+}
+
+async function readStreamToEndRaw(stream) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    const bytes = chunk instanceof Uint8Array ? chunk : chunk.subarray();
+    chunks.push(bytes);
+    total += bytes.length;
+  }
+  const data = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) { data.set(c, offset); offset += c.length; }
+  return data;
+}
+
+function decodeFrameRaw(data) {
+  if (data.length < 4) throw new Error(`strand-addr response frame too short (${data.length} bytes)`);
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const len = view.getUint32(0, false);
+  const body = data.subarray(4, 4 + len);
+  return JSON.parse(new TextDecoder().decode(body));
+}
+
+const briefMessage = (err) => (err?.message ?? String(err)).slice(0, 180);
+
+/**
+ * RUNG_L1 + RUNG_L2(a) + RUNG_L3(raw + product-shaped): probe all three layers against ONE
+ * gateway/outsider pair in sequence, since each layer can only be reached once the layer above
+ * it has been. Returns per-layer verdicts; layers below an unreachable one are marked
+ * UNREACHABLE rather than skipped silently.
+ */
+async function probeGateway(outsider, gatewayNode, gatewayPeerId, controlWsAddr) {
+  const l1 = await dialGateway(outsider, controlWsAddr);
+  if (!l1.classified) {
+    return {
+      l1, l2: { verdict: 'UNCLASSIFIABLE:upstream-L1', streamOpened: false },
+      l3: { verdict: 'UNCLASSIFIABLE:upstream-L1', raw: null, collected: null },
+    };
+  }
+  if (!l1.connection) {
+    const unreachable = `UNREACHABLE:L1=${l1.verdict}`;
+    return {
+      l1, l2: { verdict: unreachable, streamOpened: false },
+      l3: { verdict: unreachable, raw: null, collected: null },
+    };
+  }
+
+  // (a) Behavioural L2: does the /sereus/strand-addr stream even open on an admitted connection?
+  let l2;
+  let stream;
+  try {
+    stream = await outsider.dialProtocol(l1.connection.remotePeer, STRAND_ADDR_PROTOCOL, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    l2 = { verdict: 'STREAM_OPENED', streamOpened: true };
+  } catch (err) {
+    l2 = { verdict: `STREAM_RESET:${briefMessage(err)}`, streamOpened: false };
+  }
+
+  let l3;
+  if (!stream) {
+    l3 = { verdict: 'UNREACHABLE:L2_STREAM_DENIED', raw: null, collected: null };
+  } else {
+    let raw = null;
+    try {
+      const { prefix, body } = encodeFrame({ strandId: STRAND_ID });
+      stream.send(prefix);
+      stream.send(body);
+      await stream.close(); // half-close write end — control-stream.js's exchangeFrame shape
+      const bytes = await readStreamToEndRaw(stream);
+      raw = decodeFrameRaw(bytes);
+    } catch (err) {
+      try { stream.abort(err instanceof Error ? err : new Error(String(err))); } catch { /* best effort */ }
+      l3 = { verdict: `ERROR:${briefMessage(err)}`, raw: null, collected: null };
+    }
+
+    if (raw) {
+      // The product-shaped path alongside the raw one — collectStrandAddrs folds failure to
+      // [], so it is recorded for comparison, never as the layer-discriminating signal.
+      let collected = null;
+      try {
+        collected = await collectStrandAddrs(
+          outsider,
+          [{ peerId: gatewayPeerId, addrs: [multiaddr(controlWsAddr)] }],
+          STRAND_ID,
+        );
+      } catch (err) {
+        collected = { error: briefMessage(err) };
+      }
+      l3 = {
+        verdict: (raw.multiaddrs?.length ?? 0) > 0 ? 'SERVED' : 'REFUSED:empty-multiaddrs',
+        raw,
+        collected,
+      };
+    }
+  }
+
+  try { await l1.connection.close(); } catch { /* best effort */ }
+  return { l1, l2, l3 };
+}
+
+// ── Layer 2 source scan (RUNG_L2 direction b) ────────────────────────────────────────────────
+function stripJsComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+function countTokenInFile(filePath, token) {
+  const src = stripJsComments(readFileSync(filePath, 'utf8'));
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matches = src.match(new RegExp(escaped, 'g'));
+  return matches ? matches.length : 0;
+}
+
+/**
+ * Behavioural direction (a) lives in `probeGateway`'s L2 result. This is direction (b): a
+ * comment-stripped source scan proving `authorizeInboundStream` (Optimystic's per-stream
+ * embedder-authorization gate) is consumed ONLY by the four Optimystic control-DB protocol
+ * services and by NOTHING that registers a `/sereus/*` protocol.
+ *
+ * Token choice: NOT the `authorizeInboundStream` option-key literal — that string never appears
+ * in the four service files themselves (they read it indirectly via `createInboundStreamAuthorization`,
+ * confirmed against the installed dist bytes this session) and so cannot serve as the positive
+ * control. `createInboundStreamAuthorization` is the precise, collision-free token: exactly 2
+ * hits (import + call) in each of the four services, and — checked directly against the
+ * installed dist — 0 hits in every module that registers a `/sereus/*` protocol id AND in
+ * `cadre-node.js` itself. (A naive `authorization` substring was tried first and rejected: it
+ * false-positives on the unrelated `./peer-authorization.js` import path shared by
+ * `strand-formation-protocol.js` and `seed-bootstrap.js` — a different subsystem, voucher/token
+ * authorization, not inbound-stream authorization.)
+ *
+ * Built from fragments at runtime so the literal never appears contiguously in this file's own
+ * source — a scanner whose own text matches its pattern is permanently green
+ * (`project_self_tripping_checker_headers`, three recurrences in Phase 53).
+ */
+function scanLayer2SourceUsage() {
+  const token = ['create', 'InboundStream', 'Authorization'].join('');
+  const dbP2pRoot = dirname(DB_P2P_INFO.path);
+  const cadreCoreRoot = dirname(CADRE_CORE_INFO.path);
+
+  const positiveTargets = [
+    ['repo/service.js', join(dbP2pRoot, 'dist/src/repo/service.js')],
+    ['cluster/service.js', join(dbP2pRoot, 'dist/src/cluster/service.js')],
+    ['sync/service.js', join(dbP2pRoot, 'dist/src/sync/service.js')],
+    ['cluster/block-transfer-service.js', join(dbP2pRoot, 'dist/src/cluster/block-transfer-service.js')],
+  ];
+  // Every module registering a /sereus/* protocol id (verified against the installed dist this
+  // session: seed-bootstrap.js, strand-addr-protocol.js, strand-formation-protocol.js,
+  // strand-wake-protocol.js — the full set, plus cadre-node.js itself as the wiring site).
+  const negativeTargets = [
+    ['strand-addr-protocol.js', join(cadreCoreRoot, 'dist/strand-addr-protocol.js')],
+    ['strand-wake-protocol.js', join(cadreCoreRoot, 'dist/strand-wake-protocol.js')],
+    ['strand-formation-protocol.js', join(cadreCoreRoot, 'dist/strand-formation-protocol.js')],
+    ['seed-bootstrap.js', join(cadreCoreRoot, 'dist/seed-bootstrap.js')],
+    ['cadre-node.js', join(cadreCoreRoot, 'dist/cadre-node.js')],
+  ];
+
+  const positiveCounts = Object.fromEntries(positiveTargets.map(([label, path]) => [label, countTokenInFile(path, token)]));
+  const negativeCounts = Object.fromEntries(negativeTargets.map(([label, path]) => [label, countTokenInFile(path, token)]));
+
+  const positivePass = Object.values(positiveCounts).every((c) => c >= 1);
+  const negativePass = Object.values(negativeCounts).every((c) => c === 0);
+
+  return { pass: positivePass && negativePass, positiveCounts, negativeCounts };
+}
+
+/**
+ * RUNG_RELAY: re-run the L1 probe against a SECOND gateway instance, identical except for
+ * `network.enableRelay`, and record what an unauthorized peer actually experiences across 3
+ * consecutive attempts (stability check). `forceBadAddr` is a deliberate robustness-test hook
+ * (`WALL_PROOF_FORCE_BAD_ADDR=1`): it points the dial at an unbound loopback port so the
+ * resulting failure is an INFRASTRUCTURE one, proving the harness reports it as unclassifiable
+ * (exit 1) rather than mislabeling "nothing was listening" as "the wall denied it".
+ */
+async function measureRelayPosture(probeKeyPair, { enableRelay, forceBadAddr = false }) {
+  const label = enableRelay ? 'on' : 'off';
+  L(`RUNG_RELAY: booting a second gateway with network.enableRelay=${enableRelay} (posture=${label}), 3 consecutive attempts...`);
+  const relayGateway = await buildGateway({ enableRelay, seeded: true });
+  activeNodes.add(relayGateway);
+  const outsiderRelay = await buildOutsiderNode(probeKeyPair, 'control-votetorrent');
+  activeLibp2pNodes.add(outsiderRelay);
+  try {
+    const controlAddrs = relayGateway.getControlNode().getMultiaddrs().map((m) => m.toString());
+    const realAddr = controlAddrs.find((a) => a.includes('/ip4/127.0.0.1/') && a.includes('/ws')) ?? controlAddrs[0];
+    if (!realAddr) throw new Error('relay gateway has no control ws multiaddr to dial');
+    // Port 1 is privileged/unbound in every environment this harness runs in — nothing listens
+    // there, which is exactly the infrastructure-failure shape this hook exists to exercise.
+    const dialAddr = forceBadAddr ? '/ip4/127.0.0.1/tcp/1/ws' : realAddr;
+
+    const attempts = [];
+    for (let i = 1; i <= 3; i++) {
+      const attempt = await dialGateway(outsiderRelay, dialAddr);
+      attempts.push(attempt);
+      if (attempt.connection) {
+        try { await attempt.connection.close(); } catch { /* best effort */ }
+      }
+      if (!attempt.classified) break; // no point attempting more once unclassifiable
+    }
+
+    const unclassified = attempts.find((a) => !a.classified);
+    if (unclassified) {
+      return { classified: false, posture: label, reason: unclassified.reason, attempts };
+    }
+    const verdicts = attempts.map((a) => a.verdict);
+    // Compare verdict CLASS (the prefix before the first ':'), not the exact string: two DENIED
+    // attempts a few ms apart in their embedded elapsed-time are still the same outcome, and a
+    // literal-string comparison would report "unstable" on timing jitter alone.
+    const verdictClass = (v) => v.split(':')[0];
+    const stable = verdicts.every((v) => verdictClass(v) === verdictClass(verdicts[0]));
+    return { classified: true, posture: label, verdicts, stable, attempts };
+  } finally {
+    await outsiderRelay.stop();
+    activeLibp2pNodes.delete(outsiderRelay);
+    await relayGateway.stop();
+    activeNodes.delete(relayGateway);
+  }
+}
+
+/**
+ * Turn a measured relay posture into the `RELAY_POSTURE=off|on` recommendation 56-08 consumes.
+ * Advisory, not a security boundary in itself: it reads the SAME measurement the record carries,
+ * so a disagreement is visible by re-reading `wall-proof-record.json` rather than trusting this
+ * summary alone.
+ */
+function decideRelayPosture(onMeasurement) {
+  if (!onMeasurement.classified) {
+    throw new Error('RUNG_RELAY: cannot decide RELAY_POSTURE — the on-posture measurement was unclassifiable');
+  }
+  const { verdicts, stable } = onMeasurement;
+
+  // Zero incremental exposure: relay=true behaves identically to relay=false for this
+  // unauthorized peer (denied, same as the default-posture RUNG_L1 result) — safe to leave on.
+  if (verdicts.every((v) => v.startsWith('DENIED')) && stable) {
+    return {
+      posture: 'on',
+      rationale: `enableRelay=true produced the SAME outcome as enableRelay=false for the ` +
+        `unauthorized outsider (${JSON.stringify(verdicts)}, stable across 3 attempts) — no ` +
+        `incremental exposure measured, so relay may stay on for whatever connectivity benefit ` +
+        `it gives legitimate members.`,
+    };
+  }
+
+  // Bounded exposure: admitted, but the code's documented 5s admit-for-relay expiry actually
+  // fired and dropped the connection. Real but time-boxed — still recommend OFF by default,
+  // since a bound is not the same as zero exposure and 56-04's patch is the intended fix.
+  if (verdicts.every((v) => v.startsWith('RELAY_PARTIAL')) && stable) {
+    return {
+      posture: 'off',
+      rationale: `enableRelay=true bounded the unauthorized outsider to the documented ` +
+        `${RELAY_ADMISSION_RESERVE_DEADLINE_MS}ms admit-for-relay window before an expiry abort ` +
+        `(stable across 3 attempts) — a real but TIME-BOXED exposure, not zero; recommend OFF by ` +
+        `default until 56-04 narrows the wall itself.`,
+    };
+  }
+
+  // Durable/unstable admission: the documented 5s expiry (membership-connection-gater.js's
+  // PendingReserveDeadlines.expire()) did NOT measurably fire. This is a genuine disagreement
+  // between the code's documented intent and observed behaviour — recorded as a finding, not
+  // assumed away — so the conservative posture is OFF until independently reverified.
+  return {
+    posture: 'off',
+    rationale: `enableRelay=true admitted the unauthorized outsider past the documented ` +
+      `${RELAY_ADMISSION_RESERVE_DEADLINE_MS}ms admit-for-relay expiry (verdicts=` +
+      `${JSON.stringify(verdicts)}, stable=${stable}) — PendingReserveDeadlines.expire() should ` +
+      `have aborted this connection and measurably did not in this run. FINDING, not assumption: ` +
+      `keep relay OFF until this is independently reverified against the installed dist.`,
+  };
+}
+
 /**
  * `--self-test`: RUNG_P's inversion. Boots the SAME gateway shape with the owner-genesis/seeding
  * block skipped entirely and requires RUNG_P to FAIL and `admitInboundControlConnection` to
@@ -308,15 +717,19 @@ async function runSelfTest(probePeerId) {
 }
 
 // ── Lifecycle: track every node this process starts so SIGINT/SIGTERM and the outer finally can
-// stop all of them, on the pass and fail paths both (enrolment-smoke.mjs's shape). ────────────
+// stop all of them, on the pass and fail paths both (enrolment-smoke.mjs's shape). Two sets
+// because CadreNode and the outsider OptimysticNode stop through different call shapes but both
+// expose `.stop()`. ──────────────────────────────────────────────────────────────────────────
 const activeNodes = new Set();
+const activeLibp2pNodes = new Set();
 let shuttingDown = false;
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    L(`${sig} — stopping ${activeNodes.size} node(s)...`);
-    await Promise.all([...activeNodes].map((n) => n.stop().catch(() => {})));
+    const all = [...activeLibp2pNodes, ...activeNodes];
+    L(`${sig} — stopping ${all.length} node(s)...`);
+    await Promise.all(all.map((n) => n.stop().catch(() => {})));
     process.exit(1);
   });
 }
@@ -325,13 +738,21 @@ async function main() {
   const args = process.argv.slice(2);
   const preconditionsOnly = args.includes('--preconditions-only');
   const selfTest = args.includes('--self-test');
+  const relayFlagArg = args.find((a) => a.startsWith('--relay='));
+  const relayFlag = relayFlagArg ? relayFlagArg.slice('--relay='.length) : undefined;
+  if (relayFlag !== undefined && relayFlag !== 'on' && relayFlag !== 'off') {
+    throw new Error(`--relay must be 'on' or 'off', got '${relayFlag}'`);
+  }
+  const forceBadAddr = process.env.WALL_PROOF_FORCE_BAD_ADDR === '1';
 
   L(`CADRE_CORE_VERSION=${CADRE_CORE_INFO.version}`);
   L(`CADRE_CORE_PATH=${CADRE_CORE_INFO.path}`);
+  L(`DB_P2P_VERSION=${DB_P2P_INFO.version}`);
+  L(`DB_P2P_PATH=${DB_P2P_INFO.path}`);
 
   // Generated once and reused for the life of the run: RUNG_P vets this peerId at precondition
-  // time, and the same identity becomes the outsider libp2p node's peerId once Task 2's probes
-  // exist, so the whole run measures ONE identity throughout.
+  // time, and the same identity becomes the outsider libp2p node's peerId throughout Task 2's
+  // probes, so the whole run measures ONE identity end to end.
   const probeKeyPair = await generateKeyPair('Ed25519');
   const probePeerId = peerIdFromPrivateKey(probeKeyPair).toString();
   L(`PROBE_PEER_ID=${probePeerId}`);
@@ -356,10 +777,79 @@ async function main() {
       return 1;
     }
 
-    // Task 2 (RUNG_L1/L2/L3/POS/RELAY) and Task 3 (RUNG_F4, record emission) extend here.
-    L('Full-run rungs beyond RUNG_P are not yet implemented in this file (Task 1 scope).');
+    const gatewayPeerId = node.peerId.toString();
+    const controlAddrs = node.getControlNode().getMultiaddrs().map((m) => m.toString());
+    const controlWsAddr = controlAddrs.find((a) => a.includes('/ip4/127.0.0.1/') && a.includes('/ws')) ?? controlAddrs[0];
+    if (!controlWsAddr) throw new Error('gateway control node has no ws multiaddr to dial');
+
+    const outsider = await buildOutsiderNode(probeKeyPair, 'control-votetorrent');
+    activeLibp2pNodes.add(outsider);
+
+    // ── Default (unauthorized) probe: L1/L2/L3 against the gateway RUNG_P just vetted ─────────
+    const defaultProbe = await probeGateway(outsider, node, gatewayPeerId, controlWsAddr);
+    if (!defaultProbe.l1.classified) {
+      L(`RUNG_L1 UNCLASSIFIABLE — ${defaultProbe.l1.reason}`);
+      L('A wall proof that shrugs is worse than no proof; refusing to report a verdict.');
+      return 1;
+    }
+    L(`RUNG_L1=${defaultProbe.l1.verdict} elapsedMs=${Math.round(defaultProbe.l1.elapsedMs)}`);
+    if (result.decision === 'deny' && defaultProbe.l1.verdict === 'ADMITTED') {
+      L('FINDING: wire-level RUNG_L1=ADMITTED disagrees with decision-level admitInboundControlConnection=deny — recording both, preferring neither.');
+    } else {
+      L(`RUNG_L1 decision-level agreement: admitInboundControlConnection=${result.decision}, wire=${defaultProbe.l1.verdict}`);
+    }
+    L(`RUNG_L2.behavioural=${defaultProbe.l2.verdict}`);
+    L(`RUNG_L3=${defaultProbe.l3.verdict}`);
+
+    // ── Layer 2 direction (b): comment-stripped source scan with its own positive control ─────
+    const l2Scan = scanLayer2SourceUsage();
+    L(`RUNG_L2.sourceScan=${l2Scan.pass ? 'PASS' : 'FAIL'} positive=${JSON.stringify(l2Scan.positiveCounts)} negative=${JSON.stringify(l2Scan.negativeCounts)}`);
+    L(`RUNG_L2=behavioural:${defaultProbe.l2.verdict};sourceScan:${l2Scan.pass ? 'PASS' : 'FAIL'}`);
+
+    // ── RUNG_POS: the positive control — makes every refusal above mean something ─────────────
+    await node.acceptPhone({ phonePeerId: probePeerId });
+    const posProbe = await probeGateway(outsider, node, gatewayPeerId, controlWsAddr);
+    const posPass = posProbe.l1.classified && posProbe.l1.verdict === 'ADMITTED'
+      && posProbe.l2.verdict === 'STREAM_OPENED'
+      && posProbe.l3.verdict === 'SERVED';
+    L(`RUNG_POS=${posPass ? 'PASS' : 'FAIL'} l1=${posProbe.l1.verdict} l2=${posProbe.l2.verdict} l3=${posProbe.l3.verdict}`);
+    if (!posPass) {
+      L('RUNG_POS FAILED — no RUNG_L1/L2/L3 verdict above may be reported as evidence: the probe ' +
+        'itself is unproven for an authorized peer, so a refusal cannot be attributed to the gate.');
+      return 1;
+    }
+
+    // ── RUNG_RELAY: the posture decision, on measured behaviour ────────────────────────────────
+    const measuredPosture = relayFlag ?? 'on'; // default run measures 'on' — 'off' is already
+    // covered above by the default (unauthorized) probe against the shared gateway.
+    const relayMeasurement = await measureRelayPosture(probeKeyPair, {
+      enableRelay: measuredPosture === 'on',
+      forceBadAddr,
+    });
+    if (!relayMeasurement.classified) {
+      L(`RUNG_RELAY UNCLASSIFIABLE (posture=${relayMeasurement.posture}) — ${relayMeasurement.reason}`);
+      L('A wall proof that shrugs is worse than no proof; refusing to report a verdict.');
+      return 1;
+    }
+    L(`RUNG_RELAY=${JSON.stringify(relayMeasurement.verdicts)} posture=${relayMeasurement.posture} stable=${relayMeasurement.stable}`);
+    if (measuredPosture === 'on' && relayMeasurement.verdicts.every((v) => v === 'ADMITTED')) {
+      L(`FINDING: enableRelay=true admitted the unauthorized outsider DURABLY past the documented ` +
+        `${RELAY_ADMISSION_RESERVE_DEADLINE_MS}ms admit-for-relay expiry (membership-connection-gater.js's ` +
+        `PendingReserveDeadlines.expire() should have aborted this) — measured, not assumed; see RELAY_POSTURE below.`);
+    }
+    const postureRecommendation = measuredPosture === 'on'
+      ? decideRelayPosture(relayMeasurement)
+      : { posture: 'off', rationale: `--relay=off re-measured the OFF posture standalone: ${JSON.stringify(relayMeasurement.verdicts)} (stable=${relayMeasurement.stable}); the ON posture was not re-measured in this run.` };
+    L(`RELAY_POSTURE=${postureRecommendation.posture} rationale="${postureRecommendation.rationale}"`);
+
+    // Task 3 (RUNG_F4, record emission) extends here.
+    L('RUNG_F4 and record emission are not yet implemented in this file (Task 1+2 scope).');
     return 0;
   } finally {
+    for (const n of activeLibp2pNodes) {
+      await n.stop().catch(() => {});
+    }
+    activeLibp2pNodes.clear();
     await node.stop();
     activeNodes.delete(node);
   }
