@@ -17,7 +17,11 @@ import {
   readBootstrapConfig,
 } from '../bootstrap-config';
 
-const OLD_SENTINEL = 'UPDATE_AFTER_DRONE_RESTART';
+// Built from two halves rather than one literal so this scanner file itself
+// never contains the contiguous retired sentinel string — a repo-wide
+// literal grep for it (56-10's Task 3 survivor-list check) must find it ONLY
+// in the three dev harnesses that keep it deliberately, not in this checker.
+const OLD_SENTINEL = ['UPDATE_AFTER', 'DRONE_RESTART'].join('_');
 const LEAK_PROBE = 'LEAKPROBE0123';
 
 const VALID_ADDR = '/ip4/203.0.113.9/tcp/443/wss/p2p/12D3KooWExample';

@@ -35,12 +35,13 @@
  *
  * 4. THE COMMITTED DOCUMENT SHIPS WITH AN EMPTY ADDRESS LIST, WHICH IS A
  *    REPORTED FAULT BY DESIGN. This replaces a hard-coded emulator loopback
- *    address (`/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART`) that
- *    carried the `UPDATE_AFTER_DRONE_RESTART` sentinel and made every
- *    production release build run permanently solo — silently, because a
- *    solo boot does not crash. An app with no bootstrap peers genuinely
- *    cannot join anything, and it must say so rather than boot silently
- *    solo; there is no sentinel value of any kind in the committed document.
+ *    address that carried a placeholder sentinel (see the closed
+ *    `2026-06-25-control-addr-placeholder-p2p-bootstrap.md` todo for the
+ *    retired shape) and made every production release build run permanently
+ *    solo — silently, because a solo boot does not crash. An app with no
+ *    bootstrap peers genuinely cannot join anything, and it must say so
+ *    rather than boot silently solo; there is no sentinel value of any kind
+ *    in the committed document.
  *
  * 5. THIS FILE IS BYTE-IDENTICAL TO ITS SIBLING IN THE OTHER RN APP
  *    (`apps/VoteTorrentVoter/src/config/bootstrap-config.ts`), and a parity

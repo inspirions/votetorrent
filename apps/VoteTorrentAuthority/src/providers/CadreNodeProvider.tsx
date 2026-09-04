@@ -55,10 +55,10 @@ export function useCadreNode(): CadreNodeContextType {
 // ---------------------------------------------------------------------------
 // D-14: bootstrap addresses now come from `bootstrap.config.json` (app root),
 // parsed and validated by `readBootstrapConfig` (src/config/bootstrap-config.ts)
-// — the same mechanism, document shape and fault taxonomy as the Voter app and
-// the browser's `apps/VoteTorrentPublic/src/peer/config.js` (56-06). The prior
-// pair of hard-coded, sentinel-carrying constants that used to stand here is
-// gone; see `src/config/bootstrap-config.ts`'s own header and
+// — the same mechanism, document shape and fault taxonomy as the sibling RN
+// app and the browser's `apps/VoteTorrentPublic/src/peer/config.js` (56-06).
+// The prior pair of hard-coded, sentinel-carrying constants that used to
+// stand here is gone; see `src/config/bootstrap-config.ts`'s own header and
 // `.planning/todos/completed/` for the retired shape and why it had to go.
 //
 // The committed document ships an EMPTY bootstrapNodes list, which
