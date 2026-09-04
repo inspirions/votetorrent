@@ -137,8 +137,30 @@ const EXPECTED_TABLE_COUNT = 61;
  * the SUBSTANCE of this file's D-05 scan (test 16 below, over the widened
  * 26-file set) before this count was bumped — a passing count bump here is
  * never sufficient on its own; the content check must already be green.
+ *
+ * MOVED FROM 26 TO 28 after Wave 4, deliberately, same reason and same
+ * evidence standard. TWO new files landed inside the public-app scan root,
+ * neither a reclassification of an existing table:
+ *   - `src/peer/strand-read.js` (`56-16`), a fifth connection-layer module;
+ *   - `src/screens/PublicApp.tsx` (`56-12`), a new production composition.
+ * The SUBSTANCE check (test 16 below, `D-05: zero forbidden-class table names
+ * as code`) was already GREEN over the widened 28-file set at the moment this
+ * count moved — control 6e was the sole failing assertion (140 tests, 139
+ * pass). A passing count bump is never sufficient on its own; the content
+ * check must already be green.
+ *
+ * The measured value was read back from the gate's own failure message rather
+ * than derived by counting new modules by hand: an initial bump to 27 was
+ * wrong because it reasoned only about `peer/` and missed `screens/`.
+ *
+ * NOTE FOR THE NEXT PLAN THAT ADDS A FILE UNDER `apps/VoteTorrentPublic/src/`:
+ * this pin is structurally coupled to that WHOLE root, not just `peer/`, and no
+ * single plan's isolated test run can see the drift — only a full
+ * `@votetorrent/web-data` run does. Re-pin it in the SAME commit that adds the
+ * file, verify the substance check first, and read the new number off this
+ * gate's failure message instead of inferring it.
  */
-const EXPECTED_SCANNED_FILE_COUNT = 26;
+const EXPECTED_SCANNED_FILE_COUNT = 28;
 
 // The sentinel literals are ASSEMBLED, never written out, so each appears in
 // this file exactly once — as the comment that delimits the region. A checker
