@@ -11,7 +11,13 @@
  *   This package is a normal yarn workspace — `yarn install` at the repo root installs its deps.
  *   The root `resolutions` pin uint8arrays only for ^5 ranges (Hermes/quereus compat), so
  *   @multiformats/multiaddr's ^6 requirement resolves to a real v6 and strict Node ESM works.
- *   The yarn-patched @serfab/cadre-core (connectionGater pass-through) is what resolves here.
+ *   The connectionGater-pass-through patch this comment used to name was RETIRED at `ca9f1b87`.
+ *   `.yarn/patches/` now carries the gossipsub and quereus patches plus the Phase 56
+ *   `@serfab-cadre-core-npm-0.12.0-*` public-observer patch, which DOES resolve here (same
+ *   workspace, same `@serfab/cadre-core` dependency) but is INERT on this drone: it only takes
+ *   effect on a `CadreNode` configured with a non-empty `publicObserverStrandIds`, and this
+ *   drone sets none — D-03's outer fail-closed layer, observed in the wild. This drone is NOT
+ *   the public gateway; that is `packages/p2p-probe-host/gateway.mjs`.
  *
  * Usage:
  *   cd packages/p2p-probe-host
