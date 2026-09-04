@@ -1134,6 +1134,46 @@ jobs:
           fi
           echo "RECEIPT render-fidelity-controls-fired" | tee -a ../../ci-receipt.txt
 
+      # 56-06: the D-20 favicon-set proof. Exit 0 here means every declared
+      # icon answers 200 with real bytes and the right content-type, driven
+      # explicitly (headless Chromium does not reliably auto-request
+      # favicons) with an anti-vacuity floor -- never a passive network-log
+      # watch that could pass on zero observed requests. `serveDist`
+      # special-cases `/favicon.ico` to an unconditional 204, so this driver
+      # builds no rung on that path; R5 records the trap instead of tripping
+      # over it. Asserting the "5 rungs" count, not just the exit code, is
+      # what stops a run that silently skipped a rung from passing here.
+      - name: Public app D-20 favicon assets gate
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn test:public-assets 2>&1 | tee ../../public-assets.log
+          if ! grep -q '\[public-assets-gate\] PASS — all 5 rungs passed' ../../public-assets.log; then
+            echo "::error::public-assets: the driver did not report all five rungs passing"
+            exit 1
+          fi
+          echo "RECEIPT public-assets" | tee -a ../../ci-receipt.txt
+
+      # The build-level negative control. Exit 0 here means: against
+      # dist-gate/ (a genuine publicDir: false build, never dist/ edited
+      # after the fact), the three ASSET rungs failed and the two control
+      # rungs still passed -- proving this gate can go red, not merely that
+      # it stayed green.
+      - name: Public app D-20 favicon assets absence control (--prove-absent)
+        working-directory: apps/VoteTorrentPublic
+        run: |
+          set -euo pipefail
+          yarn gate:prove-public-assets-absent 2>&1 | tee ../../public-assets-prove-absent.log
+          if grep -q 'CONTROL FAILED' ../../public-assets-prove-absent.log; then
+            echo "::error::public-assets-control-fired: --prove-absent reported CONTROL FAILED -- the asset rungs did not go red against a publicDir:false build"
+            exit 1
+          fi
+          if ! grep -q 'PROVE-ABSENT PASS' ../../public-assets-prove-absent.log; then
+            echo "::error::public-assets-control-fired: --prove-absent printed no pass verdict -- the control cannot be confirmed to have run"
+            exit 1
+          fi
+          echo "RECEIPT public-assets-control-fired" | tee -a ../../ci-receipt.txt
+
       - name: Upload gate evidence on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -1156,6 +1196,8 @@ jobs:
             render-fidelity-public.log
             render-fidelity-prove-matchers.log
             render-fidelity-prove-gap-cues.log
+            public-assets.log
+            public-assets-prove-absent.log
             ci-receipt.txt
           retention-days: 14
 
@@ -1170,7 +1212,8 @@ jobs:
             ui-gate-dashboard-dedupe-control-fired ui-gate-dashboard-token-control-fired \
             ui-gate-public-dedupe-control-fired ui-gate-public-token-control-fired \
             live-read-public live-read-control-fired \
-            render-fidelity-public render-fidelity-matchers-fired render-fidelity-controls-fired
+            render-fidelity-public render-fidelity-matchers-fired render-fidelity-controls-fired \
+            public-assets public-assets-control-fired
 
   # =========================================================================
   # Job 3 -- Phase-close baselines: vote-engine suite + authority typecheck.

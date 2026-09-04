@@ -64,6 +64,12 @@ test('serve-dist: a .css file is served as text/css', async () => {
 	}
 });
 
+// 56-06 note: a consumer app that ships real favicon assets (D-20) must
+// assert delivery of its OWN DECLARED paths (favicon.svg, favicon-32x32.png,
+// etc — see apps/VoteTorrentPublic/test/browser/run-public-assets-gate.mjs),
+// never `/favicon.ico` itself — this server special-cases that one path to
+// a hard-coded 204 unconditionally, so it can never 404 here and a rung
+// built on it would be permanently, vacuously green.
 test('serve-dist: /favicon.ico answers 204 with an empty body', async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'serve-dist-'));
 	try {
@@ -73,6 +79,28 @@ test('serve-dist: /favicon.ico answers 204 with an empty body', async () => {
 			assert.equal(res.status, 204);
 			const body = await res.text();
 			assert.equal(body, '');
+		} finally {
+			await handle.close();
+		}
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test('serve-dist: a .png file is served as image/png', async () => {
+	const dir = await mkdtemp(path.join(tmpdir(), 'serve-dist-'));
+	try {
+		// A minimal-but-structurally-valid 1x1 PNG (signature + IHDR only,
+		// same minimal shape the D-20 asset-shape test's own fixture uses) —
+		// this test only asserts the response's content-type header, not that
+		// the bytes decode as a real image.
+		const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		await writeFile(path.join(dir, 'icon.png'), pngBytes);
+		const handle = await serveDist(dir, TEST_PORT + 6);
+		try {
+			const res = await fetch(`${handle.url}/icon.png`);
+			assert.equal(res.status, 200);
+			assert.equal(res.headers.get('content-type'), 'image/png');
 		} finally {
 			await handle.close();
 		}

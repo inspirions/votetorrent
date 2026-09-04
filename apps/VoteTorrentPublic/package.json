@@ -23,6 +23,8 @@
 		"gate:prove-pill-retone-reverted": "node test/browser/empty-state-gate.mjs --prove-pill-retone-reverted",
 		"test:live-read": "node test/browser/run-live-read-gate.mjs",
 		"gate:prove-frozen": "node test/browser/run-live-read-gate.mjs --prove-frozen",
+		"test:public-assets": "node test/browser/run-public-assets-gate.mjs",
+		"gate:prove-public-assets-absent": "node test/browser/run-public-assets-gate.mjs --prove-absent",
 		"typecheck": "tsc --noEmit",
 		"assert:no-polyfills": "node scripts/assert-no-node-polyfills.mjs",
 		"assert:single-quereus": "node scripts/assert-single-quereus-instance.mjs",
