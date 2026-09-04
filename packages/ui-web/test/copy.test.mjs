@@ -19,25 +19,29 @@ import { COPY, t } from '../src/index.js';
 import { FACT_COPY_KEYS, FACTS } from '../src/lifecycle/facts.js';
 
 // ---------------------------------------------------------------------------
-// Total key count (D-05, D-09, D-08, D-06/54-02, 54-09). 146, not 85 -- 53-07
-// (D-08) added exactly ten `public.*`/`advisory.public.body` keys on top of
-// the 73 the table carried after 53-05's `gate.advisoryDisclosure` ->
+// Total key count (D-05, D-09, D-08, D-06/54-02, 54-09, 56-12). 146, not 85
+// -- 53-07 (D-08) added exactly ten `public.*`/`advisory.public.body` keys on
+// top of the 73 the table carried after 53-05's `gate.advisoryDisclosure` ->
 // `advisory.authority.body` rename (83 total). 54-02 (D-06/D-10) then
 // RENAMED the three `lifecycle.*` keys (net 0) and ADDED two more
 // (`lifecycle.settling`, `lifecycle.indeterminate`) -- 83 + 2 = 85. 54-09
 // then added the public election view's whole copy table: the 50 keys named
 // by `facts.js`'s own `FACT_COPY_KEYS` export plus the eleven that sit
 // outside the fact model -- 85 + 61 = 146. 54-12 then added the two keys of
-// D-02's addressed-but-not-held sentence -- 146 + 2 = 148. Written as a bare
-// literal so a future "fix" that deletes any of them is caught by a failure
-// message that names the reason.
+// D-02's addressed-but-not-held sentence -- 146 + 2 = 148. 56-12 then added
+// six more: Surface 1's staleness badge/body and Surface 3's two-variant
+// config-fault title/body pairs -- 148 + 6 = 154. Written as a bare literal
+// so a future "fix" that deletes any of them is caught by a failure message
+// that names the reason.
 // ---------------------------------------------------------------------------
 
-test('COPY has exactly 148 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion, +61 from 54-09s fact/gap copy table, +2 from 54-12s not-held sentence)', () => {
+test('COPY has exactly 154 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion, +61 from 54-09s fact/gap copy table, +2 from 54-12s not-held sentence, +6 from 56-12s staleness/config-fault copy)', () => {
 	assert.equal(
 		Object.keys(COPY).length,
-		148,
-		'expected 148 -- if this reads 146, 54-12s public.election.notHeld.title/.body were wrongly deleted; ' +
+		154,
+		'expected 154 -- if this reads 148, 56-12s public.staleness.*/public.config.*.title/.body were wrongly deleted; ' +
+			'they are Surfaces 1 and 3 (D-17/D-13) and are mounted by ElectionShell.tsx/PublicApp.tsx, where t() throws ' +
+			'on any one going missing. If it reads 146, 54-12s public.election.notHeld.title/.body were wrongly deleted; ' +
 			'they are D-02s addressed-but-not-held sentence and are mounted by ElectionShell.tsx, where t() throws ' +
 			'on either one going missing. If it reads 85, 54-09s public election view copy table was wrongly deleted; ' +
 			'50 of those keys are named by facts.js FACT_COPY_KEYS and t() throws on any one that is missing. ' +
@@ -219,10 +223,31 @@ const PRE_MOVE_KEYS = Object.freeze([
  */
 const NEW_54_12_KEYS = Object.freeze(['public.election.notHeld.title', 'public.election.notHeld.body']);
 
+/**
+ * The six keys 56-12 added: Surface 1's staleness badge/body (D-17) and
+ * Surface 3's two-variant config-fault title/body pairs (D-13).
+ * @type {ReadonlyArray<string>}
+ */
+const NEW_56_12_KEYS = Object.freeze([
+	'public.staleness.badge',
+	'public.staleness.body',
+	'public.config.missing.title',
+	'public.config.missing.body',
+	'public.config.malformed.title',
+	'public.config.malformed.body',
+]);
+
 test('sanity: the 54-12 delta is 2 keys and neither collides with the 54-09 delta (a collision would silently shrink the delta while every other assertion still passed)', () => {
 	assert.equal(NEW_54_12_KEYS.length, 2);
 	const priorSet = new Set([...NEW_54_09_KEYS, ...NEW_53_07_KEYS, ...PHASE_54_ADDITIONS]);
 	const overlap = NEW_54_12_KEYS.filter((k) => priorSet.has(k));
+	assert.deepEqual(overlap, [], `these keys are counted twice: ${overlap.join(', ')}`);
+});
+
+test('sanity: the 56-12 delta is 6 keys and none collides with any prior delta', () => {
+	assert.equal(NEW_56_12_KEYS.length, 6);
+	const priorSet = new Set([...NEW_54_09_KEYS, ...NEW_53_07_KEYS, ...PHASE_54_ADDITIONS, ...NEW_54_12_KEYS]);
+	const overlap = NEW_56_12_KEYS.filter((k) => priorSet.has(k));
 	assert.deepEqual(overlap, [], `these keys are counted twice: ${overlap.join(', ')}`);
 });
 
@@ -235,7 +260,7 @@ test('sanity: the 54-09 delta is 61 keys -- 50 named by facts.js FACT_COPY_KEYS 
 	assert.equal(new Set(NEW_54_09_KEYS).size, 61);
 });
 
-test('D-25/D-07/D-08/D-06/54-09/54-12: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename, the PHASE_54_ADDITIONS additions, the 61 NEW_54_09_KEYS additions and the two NEW_54_12_KEYS additions -- no other key added or removed', () => {
+test('D-25/D-07/D-08/D-06/54-09/54-12/56-12: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename, the PHASE_54_ADDITIONS additions, the 61 NEW_54_09_KEYS additions, the two NEW_54_12_KEYS additions and the six NEW_56_12_KEYS additions -- no other key added or removed', () => {
 	const currentKeys = new Set(Object.keys(COPY));
 	const renameMap = new Map(PHASE_54_RENAMES);
 	const expectedKeys = new Set([
@@ -248,6 +273,7 @@ test('D-25/D-07/D-08/D-06/54-09/54-12: the ONLY key-set changes since 8326185d a
 		...PHASE_54_ADDITIONS,
 		...NEW_54_09_KEYS,
 		...NEW_54_12_KEYS,
+		...NEW_56_12_KEYS,
 	]);
 
 	const added = [...currentKeys].filter((k) => !expectedKeys.has(k));
@@ -256,12 +282,12 @@ test('D-25/D-07/D-08/D-06/54-09/54-12: the ONLY key-set changes since 8326185d a
 	assert.deepEqual(
 		added,
 		[],
-		`unexpected key(s) added beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes, the 54-09 delta and the 54-12 delta: ${added.join(', ')}`,
+		`unexpected key(s) added beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes, the 54-09 delta, the 54-12 delta and the 56-12 delta: ${added.join(', ')}`,
 	);
 	assert.deepEqual(
 		removed,
 		[],
-		`unexpected key(s) missing beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes, the 54-09 delta and the 54-12 delta: ${removed.join(', ')}`,
+		`unexpected key(s) missing beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes, the 54-09 delta, the 54-12 delta and the 56-12 delta: ${removed.join(', ')}`,
 	);
 });
 

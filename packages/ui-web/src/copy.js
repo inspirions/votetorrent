@@ -393,23 +393,33 @@ export const COPY = Object.freeze({
 	// than the original ten, because `test/public-voice.test.mjs` derives
 	// its key set from `FACT_COPY_KEYS` instead of listing it.
 
-	// KNOWN-EXPIRING (D-30). This sentence describes today's implementation
-	// and nothing more: the record was copied into this browser at some
-	// earlier moment and nothing refreshes it. It is scheduled to be
-	// REPLACED, not merely revisited, by whichever phase lands real-time
-	// sync -- this phase builds the seam for that (a change-notification
-	// hook), but landing sync itself is elsewhere and is gated on the peer
-	// network being able to form at all. Two consequences a later reader
-	// must not miss. First, it must not be read as a permanent
-	// architectural statement about how this page works; it is a statement
-	// about how it works TODAY. Second, no automated gate can catch it
-	// going stale -- the data never changes under test, so a sentence
-	// saying "won't update on its own" reads true in every test run
-	// forever, including the run after sync lands. Its expiry is recorded
-	// here because that comment is the only mechanism there is.
+	// REWRITTEN (56-12, D-17). This is now a PERMANENT ARCHITECTURAL
+	// STATEMENT, not a placeholder scheduled to expire -- the D-30
+	// KNOWN-EXPIRING comment that used to sit here is gone on purpose. The
+	// sentence names both halves of the real behaviour and stays true no
+	// matter which one is active on a given visit: while the change channel
+	// is live it updates on its own, and when it is not it shows the last
+	// version this browser received. A later reader must not reinstate an
+	// expiry note here -- rewriting a sentence that is already correct in
+	// both states would be a regression, not a fix. The disconnected half is
+	// what `public.staleness.badge`/`.body` below make concrete, with an
+	// absolute timestamp; this line makes no claim about WHEN, only that one
+	// of the two states always holds.
 	'public.freshness.body':
-		"This copy of the record was loaded into this browser earlier and won't update on its own.",
+		"This page updates automatically while it's connected to the network, and shows the last version it received when it isn't.",
 
+	// Surface 1 (56-12, D-17): the staleness banner. Same redundant-cue rule
+	// as the tone-chip words directly below -- the badge's colour (`--warn`
+	// in app.css) and this ALL-CAPS word always render together, and neither
+	// may render alone. `{{asOf}}` in `.body` receives an ABSOLUTE,
+	// zone-labelled instant built from `formatReaderInstant()`'s `text` and
+	// `zone` -- never a relative string, because a relative string decays
+	// the instant it is painted and this page never re-renders on its own to
+	// correct it (the same reasoning `use-public-election.ts`'s own header
+	// gives for never rendering `live` as a badge).
+	'public.staleness.badge': 'NOT CONNECTED',
+	'public.staleness.body':
+		"This is the last version of this election your browser received. As of {{asOf}}, it isn't connected to the network.",
 	// Tone chip words. These are the REDUNDANT NON-COLOUR CUE for the status
 	// banner: the chip's colour and this word always render together, and
 	// neither may render alone. The word is what survives greyscale, a
@@ -700,6 +710,24 @@ export const COPY = Object.freeze({
 	// the view as a whole, not about a card.
 	'public.gap.detailsSummary': "Why this isn't shown",
 	'public.fact.detailsSummary': 'What this shows',
+
+	// --- Surface 3 (56-12, D-13): the bootstrap config-fault box -----------
+	//
+	// Two variants, both real, distinguished by copy alone -- reusing
+	// `.election-unreadable` verbatim (zero new CSS). Neither may say "this
+	// browser doesn't hold this election": the real fact in both cases is
+	// that this DEPLOYMENT cannot learn where to dial at all, which is a
+	// different and more specific failure than an absent election record
+	// (`public.election.notHeld.*` above). Both say plainly that the problem
+	// is with how this page was set up, never with the reader's browser or
+	// connection -- there is nothing a reader can do about either variant,
+	// and neither may imply otherwise.
+	'public.config.missing.title': "This page can't be configured to reach the network.",
+	'public.config.missing.body':
+		"The list of network addresses this page needs wasn't found, so it can't look up any election right now. This is a problem with how this page is set up, not with your browser or your connection.",
+	'public.config.malformed.title': "This page's network configuration can't be read.",
+	'public.config.malformed.body':
+		"The list of network addresses this page needs is present but couldn't be understood, so it can't look up any election right now. This is a problem with how this page is set up, not with your browser or your connection.",
 });
 
 /**

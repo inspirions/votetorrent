@@ -192,6 +192,50 @@
  *     sits on the page is a render plan's choice, not a second class.
  * ========================================================================= */
 
+/*
+ * 56-12/D-17: the staleness banner. Renders as the FIRST child of `.election`
+ * (see ElectionShell.tsx's own comment at that mount site). Tokens only —
+ * no hex, no rgba(), no new spacing step, no new font weight — same
+ * discipline as every rule in this block.
+ *
+ * TONE DECISION, measured rather than asserted: `--warn`, never `--fail`.
+ * An absence of connection is not an error — `--fail` stays reserved for a
+ * genuine data fault (`.status-banner--bad`) and for the config-fault
+ * heading, both of which answer a materially different question. The amber
+ * badge against the page ground is the same 8.93:1 contrast the `wait` tone
+ * chip already carries (see `.status-banner__tone`'s own comment above).
+ *
+ * NO MOTION OF ANY KIND: no transition, no animation, no @keyframes, no
+ * linear-gradient. `election-shell.test.mjs` scans every *.css file under
+ * src/ for exactly those, and this app's first sanctioned transition is
+ * 56-14's live-update badge, not this one.
+ */
+.staleness-banner {
+	display: flex;
+	align-items: baseline;
+	gap: var(--space-sm);
+	padding: var(--space-sm) var(--space-md);
+	background: var(--surface2);
+	border: 1px solid var(--warn);
+	border-radius: var(--radius);
+}
+
+.staleness-banner__badge {
+	padding: 0 var(--space-sm);
+	border: 1px solid var(--warn);
+	border-radius: var(--radius);
+	font-size: var(--font-label-size);
+	font-weight: var(--font-label-weight);
+	line-height: var(--font-label-line-height);
+	color: var(--warn);
+}
+
+.staleness-banner__text {
+	margin: 0;
+	font-size: var(--font-body-size);
+	color: var(--text);
+}
+
 .status-banner {
 	display: flex;
 	gap: var(--space-sm);

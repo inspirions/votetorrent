@@ -194,7 +194,31 @@ export const PUBLIC_ELECTION_STATE = Object.freeze({
  * @property {(db: any, electionId: string) => Promise<any>} readPublicElectionRevision
  * @property {(db: any, electionId: string, revision: number) => Promise<any>} readKeyReleaseProgress
  * @property {(db: any, electionId: string) => Promise<any>} readRegistrantRoll
+ * @property {() => string} nowCanonical  56-12/D-17's OBSERVATION clock -- see
+ *   `nowCanonical`'s own header comment below for why this is a third,
+ *   distinct clock from `resolveComparisonInstant` and `formatReaderInstant`.
  */
+
+/**
+ * The current instant, as a canonical 19-character zoneless UTC string.
+ *
+ * This is the OBSERVATION clock, and it is deliberately a third function
+ * rather than a reuse of either of this app's other two clocks:
+ * `resolveComparisonInstant` (`@votetorrent/ui-web/lifecycle`) is the
+ * COMPARISON clock a phase is derived against, and `formatReaderInstant`
+ * (`reader-instant.js`) is the DISPLAY formatter. This one exists so the
+ * moment `use-public-election.ts` observes the connection state can be
+ * captured through the same injectable `source` seam as every other read in
+ * this module, without a harness reaching for either of the other two
+ * clocks. `Date.prototype.toISOString()` always renders UTC with a trailing
+ * `Z` and millisecond precision; slicing to 19 characters keeps the `T`
+ * separator and drops both the milliseconds and the `Z`, producing exactly
+ * the canonical shape `formatReaderInstant` accepts.
+ * @returns {string}
+ */
+function nowCanonical() {
+	return new Date().toISOString().slice(0, 19);
+}
 
 /**
  * The real import surface, and the production default. Never a fixture — see
@@ -209,6 +233,7 @@ export const DEFAULT_PUBLIC_SOURCE = Object.freeze({
 	readPublicElectionRevision,
 	readKeyReleaseProgress,
 	readRegistrantRoll,
+	nowCanonical,
 });
 
 /**

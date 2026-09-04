@@ -105,6 +105,11 @@ function makeDeps(over = {}) {
 		readPublicElectionRevision: spy(async () => ({ Revision: 1, Timeline: '{"votingStarts":"2026-03-01T00:00:00"}' })),
 		readKeyReleaseProgress: spy(async () => ({ released: 3, total: 4, keyholderCount: 5 })),
 		readRegistrantRoll: spy(async () => ROLL_ROWS.map((r) => ({ ...r }))),
+		// 56-12/D-17: unused by readAddressedElection itself (only
+		// use-public-election.ts calls it), but part of PublicSourceDeps'
+		// shape -- included here so every readAddressedElection(address, deps)
+		// call site in this file type-checks against the widened typedef.
+		nowCanonical: spy(() => '2026-01-01T00:00:00'),
 		...over,
 	};
 }
@@ -125,7 +130,7 @@ test('PUBLIC_ELECTION_STATE is frozen and carries exactly the four state strings
 	assert.deepEqual([...Object.values(PUBLIC_ELECTION_STATE)].sort(), ['notHeld', 'reading', 'ready', 'unreadable']);
 });
 
-test('DEFAULT_PUBLIC_SOURCE is frozen, has all seven members, and every one is a real function (a stub default is 53-D07 failure mode)', () => {
+test('DEFAULT_PUBLIC_SOURCE is frozen, has all eight members, and every one is a real function (a stub default is 53-D07 failure mode)', () => {
 	assert.ok(Object.isFrozen(DEFAULT_PUBLIC_SOURCE));
 	// 54-13 added the sixth: D-14's counts-only aggregate is read HERE rather
 	// than in a second hook, because this module owns the handle's lifetime
@@ -134,10 +139,14 @@ test('DEFAULT_PUBLIC_SOURCE is frozen, has all seven members, and every one is a
 		'attachNetworkDb',
 		'closeNetworkDb',
 		'findNetwork',
+		// 56-12/D-17 added the seventh: the OBSERVATION clock, injectable
+		// through this same seam so a harness can capture a fixed instant
+		// rather than the real one.
+		'nowCanonical',
 		'readKeyReleaseProgress',
 		'readPublicElection',
 		'readPublicElectionRevision',
-		// 54-14 added the seventh, for the reason recorded at module header
+		// 54-14 added the eighth, for the reason recorded at module header
 		// point 8: the published roll joins the reads that already own the
 		// handle's lifetime rather than becoming a second hook.
 		'readRegistrantRoll',

@@ -8,6 +8,7 @@ import { ElectionIndex } from './ElectionIndex';
 import { FactSections } from './FactSections';
 import { usePublicElection } from './use-public-election';
 import { parseElectionAddress } from '../election-address.js';
+import { formatReaderInstant } from '../reader-instant.js';
 
 /**
  * ElectionShell.tsx — the public election view (53-07 built the empty shell,
@@ -44,6 +45,15 @@ export interface ElectionShellProps {
 	 * supplied, `usePublicElection` performs no read and opens no database —
 	 * a seam that read anyway would make every existing browser gate a liar. */
 	election?: PublicElectionFacts | null;
+	/** The 56-12/D-17 harness seam over `usePublicElection`'s own read
+	 * dependencies — typed from the hook's own args type rather than a fresh
+	 * interface, so this file gains no new import for it. Defaults to
+	 * `undefined`, which lets `usePublicElection` fall back to its own real
+	 * default. Production renders `<ElectionShell />` with no `source` prop
+	 * at all; only a harness supplies one, and it must hoist that object to a
+	 * MODULE CONSTANT — `source` is one of the hook's effect dependencies, so
+	 * a per-render object here would re-run the read on every commit. */
+	source?: Parameters<typeof usePublicElection>[0]['source'];
 }
 
 /**
@@ -101,13 +111,19 @@ export interface ElectionShellProps {
  * closure therefore lives in `use-public-election.ts`, whose own header
  * records the same constraint from the other side.
  */
-export function ElectionShell({ search, at = null, election = null }: ElectionShellProps) {
+export function ElectionShell({ search, at = null, election = null, source }: ElectionShellProps) {
 	const address = parseElectionAddress(search ?? window.location.search);
 
 	// Called UNCONDITIONALLY, above the address branch, for the same reason
 	// the advisory is a sibling and not a child: a hook inside a branch is a
 	// hook that can be skipped.
-	const read = usePublicElection({ address, election });
+	const read = usePublicElection({ address, election, source });
+
+	// 56-12/D-17. Computed ONCE, above the branch predicates: `null` whenever
+	// `read.observedAt` is absent or unusable, in which case `showStaleness`
+	// below must be false — `t()` throws on an unresolved `{{asOf}}`, and a
+	// thrown formatter would blank the page.
+	const formattedInstant = formatReaderInstant(read.observedAt);
 
 	// `at` is the injected, TEST-ONLY seam (D-24). It is never parsed from the
 	// URL and never defaulted from anything but the real clock.
@@ -149,6 +165,13 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 	const holdsNothing = addressed && read.state === 'notHeld';
 	const showBanner = addressed && (read.state === 'ready' || read.state === 'unreadable');
 	const showLifecycleSlot = !addressed || read.state === 'reading' || holdsNothing;
+	// 56-12/D-17: never on 'reading' (nothing to be stale yet), never on
+	// 'notHeld' (no data exists to be stale), never on a genuinely
+	// 'unreadable' election (that is a DATA fault, answered by the existing
+	// bad-tone status banner, not a connectivity finding) — only a ready
+	// page whose change channel is down, and only when the observed instant
+	// actually formatted.
+	const showStaleness = addressed && read.state === 'ready' && read.connection === 'down' && formattedInstant !== null;
 
 	let body: ReactNode;
 	if (address.status === 'malformed') {
@@ -164,6 +187,27 @@ export function ElectionShell({ search, at = null, election = null }: ElectionSh
 	} else {
 		body = (
 			<section className="election">
+				{/* D-17's staleness banner: FIRST child of `.election`, above
+				    `.election-address` and above the (possibly stale) phase
+				    headline itself. The ordering is load-bearing, not aesthetic:
+				    a reader who meets the phase headline before this warning can
+				    form a belief ("polls are open") that is minutes or hours
+				    old before learning that belief might be stale. It shares
+				    `--warn` with a `wait`-tone `.status-banner` without
+				    collision — different position on the page, a different
+				    word ("NOT CONNECTED" vs "PENDING"), a different question
+				    (connection vs. phase). That is intentional reuse, not a
+				    defect to fix by inventing a fourth colour. Neither child
+				    may render alone — same redundant-cue rule `.status-banner`
+				    states for itself in app.css. */}
+				{showStaleness && formattedInstant ? (
+					<div className="staleness-banner">
+						<span className="staleness-banner__badge">{t('public.staleness.badge')}</span>
+						<p className="staleness-banner__text">
+							{t('public.staleness.body', { asOf: `${formattedInstant.text} (${formattedInstant.zone})` })}
+						</p>
+					</div>
+				) : null}
 				{address.status === 'ok' ? (
 					<p className="election-address">
 						{t('public.election.addressLabel')} <code>{address.electionId}</code>

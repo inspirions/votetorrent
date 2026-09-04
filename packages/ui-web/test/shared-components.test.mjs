@@ -129,10 +129,11 @@ test("t('advisory.nosuchvariant.body') throws naming the exact missing key -- D-
 });
 
 // ===========================================================================
-// (f) COPY still holds exactly 148 keys (73 + the ten public.*/advisory.public.body
+// (f) COPY still holds exactly 154 keys (73 + the ten public.*/advisory.public.body
 // keys 53-07 added under D-08, +2 net from 54-02's lifecycle rename/expansion,
 // +61 from 54-09's public election view fact/gap copy table, +2 from 54-12's
-// D-02 addressed-but-not-held sentence);
+// D-02 addressed-but-not-held sentence, +6 from 56-12's Surface 1/3
+// staleness and config-fault copy);
 // spot-checked untouched keys unchanged.
 //
 // This file is not one 54-09 set out to touch. It carries a SECOND pin on
@@ -143,8 +144,8 @@ test("t('advisory.nosuchvariant.body') throws naming the exact missing key -- D-
 // silently change size under me" is part of that.
 // ===========================================================================
 
-test('COPY holds exactly 148 keys, and three spot-checked untouched keys still hold their exact values', () => {
-	assert.equal(Object.keys(COPY).length, 148);
+test('COPY holds exactly 154 keys, and three spot-checked untouched keys still hold their exact values', () => {
+	assert.equal(Object.keys(COPY).length, 154);
 	// lifecycle.organizing was RENAMED to lifecycle.pre by 54-02 (D-06/I-12),
 	// carrying its exact pre-move value across the rename -- see copy.test.mjs's
 	// own dedicated value-carry test for the full rationale.

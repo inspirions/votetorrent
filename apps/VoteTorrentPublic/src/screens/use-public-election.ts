@@ -82,14 +82,42 @@ export { shouldReadFor };
  * argument `public-election-source.js` header point 7 makes for the key-release
  * aggregate, one level up.
  *
- * `live` IS NOT RENDERED, and that is a D-29/D-30 decision rather than an
- * oversight. The freshness line already says plainly that the record was loaded
- * earlier and does not update on its own. A "live" badge would be true only
- * while some other handle in this origin happens to be writing, which is
- * claiming reach the system does not have.
+ * `connection`/`observedAt` PROMOTE THIS SIGNAL TO RENDERED STATE (56-12,
+ * D-17), superseding the paragraph that used to stand here. What is
+ * rendered, and under which state: `ElectionShell.tsx` renders an amber,
+ * worded staleness banner exactly when `read.state === 'ready'` AND
+ * `read.connection === 'down'` -- never on `reading`, `notHeld` or
+ * `unreadable`, and never as a standing "connected" claim on any other path.
+ * The rendered claim is scoped to the CHANGE CHANNEL this handle exposes,
+ * nothing wider.
+ *
+ * STATE THE LIMIT, NOT A CAVEAT. A live change channel is not proof of mesh
+ * connectivity: `subscription.live` reports only whether the attached handle
+ * exposes an `onDataChange` function, which says nothing about whether any
+ * peer is actually reachable. A browser holding cached rows while the mesh
+ * is unreachable still reports `live` and shows no banner. The missing
+ * conjunct is a running peer feed, and nothing in this production tree
+ * starts one today -- 56-09's reactivity bridge is imported by no production
+ * file, by that plan's own design. `56-14` is the plan that widens this
+ * predicate, once it observes a real peer write landing; until then
+ * `connection` answers the one honest question this hook can answer today
+ * ("does this handle expose a change channel"), and no wider one. No
+ * standing positive "connected" claim is made anywhere on this page -- see
+ * `public.freshness.body`, which stays true in both states.
  */
 
 export type PublicElectionState = 'reading' | 'ready' | 'notHeld' | 'unreadable';
+
+/**
+ * 56-12/D-17. `'unknown'` on every path that observes nothing -- the
+ * injected-election seam, an address naming no election, the `reading`
+ * placeholder, the `catch` degrade and a resolve whose handle was nullish.
+ * `'live'`/`'down'` are set at exactly one site, immediately after the
+ * `subscribeToPublicChanges` call, from the same boolean the pre-existing
+ * `console.debug` guard already reads. See this module's own header for the
+ * limit this signal carries.
+ */
+export type PublicConnectionState = 'unknown' | 'live' | 'down';
 
 export interface PublicElectionAddress {
 	status: string;
@@ -122,6 +150,13 @@ export interface UsePublicElectionResult {
 	 * both; see `public-election-source.js` header point 8 for why this read
 	 * lives beside the election read rather than in a second hook. */
 	roll: ReadonlyArray<Readonly<Record<string, string | null>>> | null;
+	/** 56-12/D-17: the change-channel signal, promoted to rendered state. See
+	 * this module's own header for what it can and cannot see. */
+	connection: PublicConnectionState;
+	/** The canonical instant `connection` was observed at, or `null` when
+	 * `connection` is `'unknown'`. Captured from `source.nowCanonical()` at
+	 * the same site `connection` is set. */
+	observedAt: string | null;
 }
 
 /** Structural, not imported: `use-public-election.ts` is the only TypeScript
@@ -171,6 +206,13 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 					void closeQuietly(source, next.db);
 					return;
 				}
+				// 56-12/D-17. Set at exactly this one site: 'unknown' unless a
+				// subscription was actually created below, in which case the
+				// same boolean the pre-existing console.debug guard reads maps
+				// to 'live'/'down', observed at the moment the subscription was
+				// created.
+				let connection: PublicConnectionState = 'unknown';
+				let observedAt: string | null = null;
 				if (next.db !== null && next.db !== undefined) {
 					// D-27. Propagation FIRST, so the bridge is listening before
 					// the subscription that consumes it exists; both are started
@@ -180,6 +222,8 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 					// gate free of test-only plumbing.
 					propagation = enableChangePropagation(next.db, networkKey);
 					subscription = subscribeToPublicChanges(next.db, bumpDataVersion);
+					connection = subscription.live ? 'live' : 'down';
+					observedAt = source.nowCanonical();
 					if (!subscription.live) {
 						// No identifier, no error text: the fact that this handle
 						// exposes no change channel, and nothing else. The page
@@ -194,6 +238,8 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 					db: next.db,
 					keyRelease: next.keyRelease ?? null,
 					roll: next.roll ?? null,
+					connection,
+					observedAt,
 				});
 			})
 			.catch(() => {
@@ -202,7 +248,16 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 				// seam could reintroduce a throw, and the failure mode then
 				// would be a blank page rather than an honest one. It degrades
 				// to the FAULT state, never to the finding.
-				if (!cancelled) setResolved({ state: PUBLIC_ELECTION_STATE.UNREADABLE, election: null, db: null, keyRelease: null, roll: null });
+				if (!cancelled)
+					setResolved({
+						state: PUBLIC_ELECTION_STATE.UNREADABLE,
+						election: null,
+						db: null,
+						keyRelease: null,
+						roll: null,
+						connection: 'unknown',
+						observedAt: null,
+					});
 			});
 
 		return () => {
@@ -220,13 +275,24 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 	if (!reads) {
 		// The injected override, and every address that names no election.
 		// No effect ran, no database was opened, no member of `source` was
-		// called.
+		// called. 56-12/D-17: 'unknown' on both branches -- no connection was
+		// ever observed here.
 		return election !== null && election !== undefined
-			? { state: PUBLIC_ELECTION_STATE.READY, election, db: null, keyRelease: null, roll: null }
-			: { state: PUBLIC_ELECTION_STATE.NOT_HELD, election: null, db: null, keyRelease: null, roll: null };
+			? { state: PUBLIC_ELECTION_STATE.READY, election, db: null, keyRelease: null, roll: null, connection: 'unknown', observedAt: null }
+			: { state: PUBLIC_ELECTION_STATE.NOT_HELD, election: null, db: null, keyRelease: null, roll: null, connection: 'unknown', observedAt: null };
 	}
 
-	return resolved ?? { state: PUBLIC_ELECTION_STATE.READING, election: null, db: null, keyRelease: null, roll: null };
+	return (
+		resolved ?? {
+			state: PUBLIC_ELECTION_STATE.READING,
+			election: null,
+			db: null,
+			keyRelease: null,
+			roll: null,
+			connection: 'unknown',
+			observedAt: null,
+		}
+	);
 }
 
 /**
