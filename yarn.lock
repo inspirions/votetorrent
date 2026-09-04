@@ -17177,6 +17177,7 @@ __metadata:
   dependencies:
     "@libp2p/circuit-relay-v2": "npm:^4"
     "@libp2p/crypto": "npm:^5"
+    "@libp2p/peer-id": "npm:^6.0.0"
     "@libp2p/websockets": "npm:^10"
     "@optimystic/db-p2p": "npm:^0.27.0"
     "@serfab/cadre-core": "npm:^0.12.0"

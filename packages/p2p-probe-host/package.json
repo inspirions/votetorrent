@@ -6,11 +6,13 @@
 	"description": "Host-side CadreNode drone for the P2P-01 dial proof (dev tooling, Phase 22 reuse).",
 	"scripts": {
 		"start": "node drone.mjs",
-		"smoke:enrolment": "node enrolment-smoke.mjs"
+		"smoke:enrolment": "node enrolment-smoke.mjs",
+		"proof:wall": "node wall-proof.mjs"
 	},
 	"dependencies": {
 		"@libp2p/circuit-relay-v2": "^4",
 		"@libp2p/crypto": "^5",
+		"@libp2p/peer-id": "^6.0.0",
 		"@libp2p/websockets": "^10",
 		"@optimystic/db-p2p": "^0.27.0",
 		"@serfab/cadre-core": "^0.12.0",
