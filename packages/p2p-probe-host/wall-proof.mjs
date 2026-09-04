@@ -44,8 +44,8 @@
  * concurrently with `nx run-many`.
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
 import { CadreNode, collectStrandAddrs, STRAND_ADDR_PROTOCOL } from '@serfab/cadre-core';
 import { createLibp2pNode, RepoClient } from '@optimystic/db-p2p/rn';
 import { webSockets } from '@libp2p/websockets';
@@ -55,10 +55,10 @@ import { multiaddr } from '@multiformats/multiaddr';
 
 const L = (...a) => console.log('[wall-proof]', ...a);
 
-const PARTY_ID = 'votetorrent'; // aligned with drone.mjs / CadreNodeProvider.tsx
+export const PARTY_ID = 'votetorrent'; // aligned with drone.mjs / CadreNodeProvider.tsx
 // A harness-local id — never a real network hash. Distinct from drone.mjs's STRAND_ID env var so
 // the two proof runners never collide if ever run side by side.
-const STRAND_ID = 'wall-proof-strand';
+export const STRAND_ID = 'wall-proof-strand';
 
 // ── Schema: the same votetorrent.qsql wrapper-strip drone.mjs uses (`:36-52`) ──────────────────
 const VOTETORRENT_QSQL_RAW = readFileSync(
@@ -76,7 +76,7 @@ const VOTETORRENT_QSQL = VOTETORRENT_QSQL_RAW
 // `exports` maps with no "require" condition, so CJS resolution throws ERR_PACKAGE_PATH_NOT_EXPORTED.
 // Neither package exposes a `./package.json` export subpath, so walk up from the resolved entry
 // file to find the nearest package.json whose "name" matches.
-function resolvePackageInfo(specifier, expectedName) {
+export function resolvePackageInfo(specifier, expectedName) {
   const entryPath = fileURLToPath(import.meta.resolve(specifier));
   let dir = dirname(entryPath);
   for (let i = 0; i < 8; i++) {
@@ -102,7 +102,7 @@ const DB_P2P_INFO = resolvePackageInfo('@optimystic/db-p2p', '@optimystic/db-p2p
 // methods. Reading it optionally (`?.`) or behind a try/catch would silently fold that into a
 // PASS — exactly the vacuous-pass failure mode T-56-01-01 exists to prevent. requireMethod throws
 // naming the missing member instead.
-function requireMethod(obj, name, label) {
+export function requireMethod(obj, name, label) {
   const fn = obj?.[name];
   if (typeof fn !== 'function') {
     throw new Error(
@@ -131,7 +131,18 @@ function requireMethod(obj, name, label) {
  * phonePeerId })` with NO `issuedInvite` argument writes the `CadrePeer` voucher directly via
  * `authorizePeer` and never touches the enrollment window — that is the seeding path used here.
  */
-async function buildGateway({ enableRelay = false, seeded = true } = {}) {
+// 56-07 additive parameters: `strands` (default preserves the single wall-proof-strand shape;
+// 56-07 passes two entries — S_LISTED and S_UNLISTED — to host both under one gateway) and
+// `configOverrides` (merged at the top level of the `CadreNode` constructor options, sibling to
+// `network`/`profile`/etc. — 56-07 uses it for `publicObserverStrandIds`, which per 56-04's
+// downstream_contract is read at constructor time, immediately after `this.config = config`).
+// Neither default changes a single call site above this refactor.
+export async function buildGateway({
+  enableRelay = false,
+  seeded = true,
+  strands = [{ id: STRAND_ID }],
+  configOverrides = {},
+} = {}) {
   const privateKey = await generateKeyPair('Ed25519');
   const node = new CadreNode({
     privateKey,
@@ -146,20 +157,23 @@ async function buildGateway({ enableRelay = false, seeded = true } = {}) {
     },
     strandClusterSize: 2,
     hibernation: { enabled: false },
+    ...configOverrides,
   });
 
   await node.start();
 
-  await node.addStrand({
-    strandRow: { Id: STRAND_ID, MemberPrivateKey: null, Type: 'o' },
-    sAppConfig: {
-      id: 'org.votetorrent',
-      version: '1.0.0',
-      schema: VOTETORRENT_QSQL,
-      latencyHint: 'interactive',
-    },
-    mode: 'bootstrap',
-  });
+  for (const strand of strands) {
+    await node.addStrand({
+      strandRow: { Id: strand.id, MemberPrivateKey: null, Type: 'o' },
+      sAppConfig: {
+        id: 'org.votetorrent',
+        version: '1.0.0',
+        schema: VOTETORRENT_QSQL,
+        latencyHint: 'interactive',
+      },
+      mode: 'bootstrap',
+    });
+  }
 
   if (seeded) {
     // Owner genesis MUST run while the node is solo — see drone.mjs:202-216 for the same
@@ -287,7 +301,7 @@ function printRungP(result) {
  * (`createLibp2pNode` from `@optimystic/db-p2p/rn`), so this probe measures the real client
  * shape, not a Node-only stand-in.
  */
-async function buildOutsiderNode(privateKey, networkName) {
+export async function buildOutsiderNode(privateKey, networkName) {
   return await createLibp2pNode({
     transports: [webSockets()],
     listenAddrs: [],
@@ -354,7 +368,7 @@ function raceConnectionClose(conn, timeoutMs) {
  * misreports "nothing was listening" as "the wall denied it" (<verification> robustness note —
  * a wall proof that shrugs is worse than no proof).
  */
-function classifyDialError(err) {
+export function classifyDialError(err) {
   const msg = err?.message ?? String(err);
   const code = err?.code ?? err?.name ?? '';
   // Includes the @libp2p/websockets transport's own dial-failure text ("Received network error
@@ -374,7 +388,7 @@ function classifyDialError(err) {
  * observable is a dial rejection or an admitted-then-dropped connection — never a wire-level
  * "why". See `classifyDialError` for the infra/wall split.
  */
-async function dialGateway(outsider, controlAddr) {
+export async function dialGateway(outsider, controlAddr) {
   const ma = multiaddr(controlAddr);
   const t0 = performance.now();
   try {
@@ -410,14 +424,14 @@ async function dialGateway(outsider, controlAddr) {
 // JSON framing `control-stream.js` documents, so this harness can read the raw stream-level
 // outcome (open / reset / empty response) that `collectStrandAddrs` (which folds every failure
 // to `[]`) cannot discriminate.
-function encodeFrame(obj) {
+export function encodeFrame(obj) {
   const body = new TextEncoder().encode(JSON.stringify(obj));
   const prefix = new Uint8Array(4);
   new DataView(prefix.buffer).setUint32(0, body.length, false);
   return { prefix, body };
 }
 
-async function readStreamToEndRaw(stream) {
+export async function readStreamToEndRaw(stream) {
   const chunks = [];
   let total = 0;
   for await (const chunk of stream) {
@@ -431,7 +445,7 @@ async function readStreamToEndRaw(stream) {
   return data;
 }
 
-function decodeFrameRaw(data) {
+export function decodeFrameRaw(data) {
   if (data.length < 4) throw new Error(`strand-addr response frame too short (${data.length} bytes)`);
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const len = view.getUint32(0, false);
@@ -439,15 +453,65 @@ function decodeFrameRaw(data) {
   return JSON.parse(new TextDecoder().decode(body));
 }
 
-const briefMessage = (err) => (err?.message ?? String(err)).slice(0, 180);
+export const briefMessage = (err) => (err?.message ?? String(err)).slice(0, 180);
+
+/**
+ * L2 primitive, factored out of `probeGateway` for 56-07's reuse: open a stream for `protocolId`
+ * on an already-admitted connection and classify STREAM_OPENED vs STREAM_RESET. Additive
+ * extraction only — `probeGateway`'s own STRAND_ADDR_PROTOCOL behaviour is unchanged below.
+ */
+export async function openProtocolStream(outsider, remotePeer, protocolId, timeoutMs = 10_000) {
+  try {
+    const stream = await outsider.dialProtocol(remotePeer, protocolId, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { verdict: 'STREAM_OPENED', streamOpened: true, stream };
+  } catch (err) {
+    return { verdict: `STREAM_RESET:${briefMessage(err)}`, streamOpened: false, stream: null };
+  }
+}
+
+/**
+ * L3 primitive, factored out of `probeGateway` for 56-07's reuse: exchange the same
+ * length-prefixed-JSON `{ strandId }` request/response frame `control-stream.js` documents, over
+ * an already-open stream, for an arbitrary `strandId` (default `STRAND_ID` preserves
+ * `probeGateway`'s pre-refactor behaviour exactly). Works for both `/sereus/strand-addr/1.0.0`
+ * and `/sereus/public-observer/1.0.0` — both handlers speak the identical frame shape.
+ */
+export async function exchangeStrandAddrFrame(stream, strandId = STRAND_ID) {
+  try {
+    const { prefix, body } = encodeFrame({ strandId });
+    stream.send(prefix);
+    stream.send(body);
+    await stream.close(); // half-close write end — control-stream.js's exchangeFrame shape
+    const bytes = await readStreamToEndRaw(stream);
+    const raw = decodeFrameRaw(bytes);
+    return { raw, error: null };
+  } catch (err) {
+    try { stream.abort(err instanceof Error ? err : new Error(String(err))); } catch { /* best effort */ }
+    return { raw: null, error: briefMessage(err) };
+  }
+}
 
 /**
  * RUNG_L1 + RUNG_L2(a) + RUNG_L3(raw + product-shaped): probe all three layers against ONE
  * gateway/outsider pair in sequence, since each layer can only be reached once the layer above
  * it has been. Returns per-layer verdicts; layers below an unreachable one are marked
  * UNREACHABLE rather than skipped silently.
+ *
+ * 56-07 additive parameters (5th, options, arg): `protocolId` (default `STRAND_ADDR_PROTOCOL`,
+ * unchanged) and `strandId` (default `STRAND_ID`, unchanged) let a caller run this exact L1/L2/L3
+ * shape against the public-observer protocol and an arbitrary strandId instead of re-deriving it.
+ * `keepConnectionOpen` (default `false`, unchanged) — when `true`, the L1 connection is returned
+ * open rather than closed, so 56-07's control 2 can run a SECOND protocol exchange (strand-addr)
+ * on the SAME connection the observer probe just opened. None of these change `main()`'s own
+ * unparameterized call site below.
  */
-async function probeGateway(outsider, gatewayNode, gatewayPeerId, controlWsAddr) {
+export async function probeGateway(outsider, gatewayNode, gatewayPeerId, controlWsAddr, {
+  protocolId = STRAND_ADDR_PROTOCOL,
+  strandId = STRAND_ID,
+  keepConnectionOpen = false,
+} = {}) {
   const l1 = await dialGateway(outsider, controlWsAddr);
   if (!l1.classified) {
     return {
@@ -463,36 +527,17 @@ async function probeGateway(outsider, gatewayNode, gatewayPeerId, controlWsAddr)
     };
   }
 
-  // (a) Behavioural L2: does the /sereus/strand-addr stream even open on an admitted connection?
-  let l2;
-  let stream;
-  try {
-    stream = await outsider.dialProtocol(l1.connection.remotePeer, STRAND_ADDR_PROTOCOL, {
-      signal: AbortSignal.timeout(10_000),
-    });
-    l2 = { verdict: 'STREAM_OPENED', streamOpened: true };
-  } catch (err) {
-    l2 = { verdict: `STREAM_RESET:${briefMessage(err)}`, streamOpened: false };
-  }
+  // (a) Behavioural L2: does the stream even open on an admitted connection?
+  const l2 = await openProtocolStream(outsider, l1.connection.remotePeer, protocolId);
 
   let l3;
-  if (!stream) {
+  if (!l2.stream) {
     l3 = { verdict: 'UNREACHABLE:L2_STREAM_DENIED', raw: null, collected: null };
   } else {
-    let raw = null;
-    try {
-      const { prefix, body } = encodeFrame({ strandId: STRAND_ID });
-      stream.send(prefix);
-      stream.send(body);
-      await stream.close(); // half-close write end — control-stream.js's exchangeFrame shape
-      const bytes = await readStreamToEndRaw(stream);
-      raw = decodeFrameRaw(bytes);
-    } catch (err) {
-      try { stream.abort(err instanceof Error ? err : new Error(String(err))); } catch { /* best effort */ }
-      l3 = { verdict: `ERROR:${briefMessage(err)}`, raw: null, collected: null };
-    }
-
-    if (raw) {
+    const { raw, error } = await exchangeStrandAddrFrame(l2.stream, strandId);
+    if (!raw) {
+      l3 = { verdict: `ERROR:${error}`, raw: null, collected: null };
+    } else {
       // The product-shaped path alongside the raw one — collectStrandAddrs folds failure to
       // [], so it is recorded for comparison, never as the layer-discriminating signal.
       let collected = null;
@@ -500,7 +545,8 @@ async function probeGateway(outsider, gatewayNode, gatewayPeerId, controlWsAddr)
         collected = await collectStrandAddrs(
           outsider,
           [{ peerId: gatewayPeerId, addrs: [multiaddr(controlWsAddr)] }],
-          STRAND_ID,
+          strandId,
+          protocolId === STRAND_ADDR_PROTOCOL ? undefined : { protocolId },
         );
       } catch (err) {
         collected = { error: briefMessage(err) };
@@ -513,7 +559,9 @@ async function probeGateway(outsider, gatewayNode, gatewayPeerId, controlWsAddr)
     }
   }
 
-  try { await l1.connection.close(); } catch { /* best effort */ }
+  if (!keepConnectionOpen) {
+    try { await l1.connection.close(); } catch { /* best effort */ }
+  }
   return { l1, l2, l3 };
 }
 
@@ -1150,9 +1198,26 @@ async function main() {
   }
 }
 
-main()
-  .then((code) => process.exit(code ?? 0))
-  .catch((err) => {
-    console.error('[wall-proof] FATAL', err?.stack ?? err);
-    process.exit(1);
-  });
+// ── Main-check guard (56-07 Step A): importing this module (e.g. from `observer-controls.mjs`)
+// must be side-effect free — no proof run, no rung line printed, no `process.exit` call. Only the
+// direct `node wall-proof.mjs [...]` CLI invocation runs `main()`. Resolves `process.argv[1]`
+// against `import.meta.url` rather than comparing raw strings, so this also works if the file is
+// invoked via a relative path or a symlink.
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(resolve(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  main()
+    .then((code) => process.exit(code ?? 0))
+    .catch((err) => {
+      console.error('[wall-proof] FATAL', err?.stack ?? err);
+      process.exit(1);
+    });
+}
