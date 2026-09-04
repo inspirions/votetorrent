@@ -54,10 +54,15 @@ function fakeResponse({ ok, status, body }) {
 function spyFetch(behavior) {
 	/** @type {Array<[string, any]>} */
 	const calls = [];
+	/**
+	 * @param {string} url
+	 * @param {{ credentials: string, cache: string, redirect: string }} init
+	 * @returns {Promise<{ ok: boolean, status: number, text: () => Promise<string> }>}
+	 */
 	const fn = async (url, init) => {
 		calls.push([url, init]);
 		if (behavior.rejectWith) throw behavior.rejectWith;
-		return behavior.response;
+		return /** @type {ReturnType<typeof fakeResponse>} */ (behavior.response);
 	};
 	fn.calls = calls;
 	return fn;
@@ -115,13 +120,12 @@ test('malformed: a 200 response whose body is HTML (the SPA-fallback case) yield
 	assert.equal(result.fault, CONFIG_FAULT.MALFORMED);
 });
 
-for (const [label, value] of [
+for (const [label, parsed] of [
 	['an array', [1, 2, 3]],
-	['a string', '"just a string"'],
-	['null', 'null'],
+	['a string', 'just a string'],
+	['null', null],
 ]) {
 	test(`malformed: a body that parses but is ${label}, not a plain object`, () => {
-		const parsed = JSON.parse(value);
 		const result = validateBootstrapConfig(parsed, { pageProtocol: 'https:' });
 		assert.equal(result.ok, false);
 		assert.equal(result.fault, CONFIG_FAULT.MALFORMED);
