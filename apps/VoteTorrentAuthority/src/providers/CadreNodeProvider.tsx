@@ -12,6 +12,8 @@ import { createScopedRnStorageProvider } from '../engines/storage-guard';
 import { CadreNode } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
+import bootstrapConfigDoc from '../../bootstrap.config.json';
+import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
 
 // ---------------------------------------------------------------------------
 // Context type
@@ -22,6 +24,13 @@ interface CadreNodeContextType {
   node: InstanceType<typeof CadreNode> | null;
   /** Event-driven sync state derived from CadreNodeEvents (D-10 — no polling). */
   syncState: 'connected' | 'syncing' | 'offline';
+  /**
+   * A bootstrap-configuration fault, distinct from being offline: offline
+   * means we could not reach peers, a fault means we were never told which
+   * peers to reach (D-14). `null` when `bootstrap.config.json` parsed to a
+   * valid, non-empty address list.
+   */
+  configFault: BootstrapConfigFault | null;
   /**
    * Returns the number of connected peers for a given strandId.
    * Reads node.getStrand(strandId).connectedPeers ?? 0.
@@ -44,42 +53,43 @@ export function useCadreNode(): CadreNodeContextType {
 }
 
 // ---------------------------------------------------------------------------
-// NETOP-04: configurable control and strand bootstrap addresses.
+// D-14: bootstrap addresses now come from `bootstrap.config.json` (app root),
+// parsed and validated by `readBootstrapConfig` (src/config/bootstrap-config.ts)
+// — the same mechanism, document shape and fault taxonomy as the Voter app and
+// the browser's `apps/VoteTorrentPublic/src/peer/config.js` (56-06). The prior
+// pair of hard-coded, sentinel-carrying constants that used to stand here is
+// gone; see `src/config/bootstrap-config.ts`'s own header and
+// `.planning/todos/completed/` for the retired shape and why it had to go.
 //
-// These constants are the sole configurable inputs for peer reachability.
-// Leaving both as placeholders boots SOLO (no bootstrap peers) — a valid
-// offline/solo node that does NOT crash (resolveBootstrapNodes returns []).
+// The committed document ships an EMPTY bootstrapNodes list, which
+// readBootstrapConfig reports as a fault (kind 'missing', reason
+// 'empty-address-list') rather than a silent solo boot — see configFault
+// below.
 //
-// For the P2P-06 replication proof, the harness overwrites these lines per-run
-// (D-07 pattern, run-replication-proof.sh) and git-checkouts CONFIG_FILE on EXIT.
-// For a production build, a join flow (NETOP-03) supplies the real addresses.
-//
-// CONTROL_ADDR: drone's control-node ws multiaddr (for the control network).
-// STRAND_BOOTSTRAP_ADDR: drone's strand-node ws multiaddr (for cohort formation).
-// These are DIFFERENT libp2p nodes on the drone with different ephemeral ports (Pitfall 2).
+// Correcting a stale claim this block used to carry: the P2P-06 replication
+// proof harness does NOT rewrite this file. `scripts/run-replication-proof.sh`
+// names `src/engines/replication-proof-runner.ts` as its CONFIG_FILE, and that
+// dev harness keeps its own sentinel deliberately (see the plan's threat model
+// / 56-10-SUMMARY.md for the full survivor list).
 // ---------------------------------------------------------------------------
-const CONTROL_ADDR = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
-const STRAND_BOOTSTRAP_ADDR = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
 const PARTY_ID = 'votetorrent';
 
-// Sentinel embedded in the committed default address. libp2p Bootstrap calls
-// peerIdFromString() on the trailing /p2p/<id> segment; this placeholder is not a
-// valid peerId and throws InvalidParametersError, aborting node.start(). Treat it
-// (and an empty/unset address) as "no bootstrap peer configured".
-const BOOTSTRAP_PLACEHOLDER = 'UPDATE_AFTER_DRONE_RESTART';
+const bootstrapConfig = readBootstrapConfig(bootstrapConfigDoc);
 
 /**
- * resolveBootstrapNodes — placeholder-aware bootstrap config selection (P2P-02).
+ * resolveBootstrapNodes — blank-safe single-address guard (P2P-02).
  *
  * Pure + exported for unit testing without booting a real (ESM-only) CadreNode.
  *
- * Returns [] when the address is empty/unset OR still contains the placeholder
- * sentinel — booting a CadreNode with an empty bootstrapNodes array is the valid
- * offline/solo case and does NOT throw (clean cold start, no red toast). Returns
- * [addr] for a real address so the bootstrap dial / real P2P path stays reachable.
+ * Returns [] for an empty, undefined or whitespace-only address — booting a
+ * CadreNode with an empty bootstrapNodes array is the valid offline/solo case
+ * and does NOT throw (clean cold start, no red toast). Returns [addr] for
+ * anything else, so the bootstrap dial / real P2P path stays reachable. The
+ * input source changed (D-14 — a validated config document instead of a
+ * hard-coded constant); this function's signature and contract did not.
  */
 export function resolveBootstrapNodes(addr: string): string[] {
-  if (!addr || addr.includes(BOOTSTRAP_PLACEHOLDER)) {
+  if (!addr || !addr.trim()) {
     return [];
   }
   return [addr];
@@ -110,9 +120,10 @@ export function resolveBootstrapNodes(addr: string): string[] {
 // RelayReservationFailedError out of start().
 //
 // Entries are the BARE relay addrs; cadre-core appends `/p2p-circuit` itself. Still routed
-// through the placeholder-aware resolveBootstrapNodes guard, so a solo/placeholder boot
-// yields [] (degraded, not a crash).
-const CONTROL_RELAY_ADDRS = resolveBootstrapNodes(CONTROL_ADDR);
+// through the blank-safe resolveBootstrapNodes guard per address, so an empty validated
+// address list yields [] (degraded, not a crash) — see configFault above for why an empty
+// list is now a reported fault rather than a silent one.
+const CONTROL_RELAY_ADDRS = bootstrapConfig.addrs.flatMap(resolveBootstrapNodes);
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -147,6 +158,18 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
     let localNode: InstanceType<typeof CadreNode> | null = null;
 
     async function bootNode() {
+      // D-14: a config fault does not block boot — the node still constructs
+      // and starts (degraded, solo), it is just loud about why. Exactly one
+      // console.error, naming only the closed kind/reason tokens — never the
+      // document, never an address (T-56-10-03).
+      if (bootstrapConfig.fault) {
+        console.error(
+          '[CadreNodeProvider] bootstrap config fault:',
+          bootstrapConfig.fault.kind,
+          bootstrapConfig.fault.reason,
+        );
+      }
+
       try {
         // Peer-identity store — 'votetorrent-cadre-node' gives a stable peerId
         // across app restarts (D-06 / T-22-04). This handle is used ONLY for
@@ -192,7 +215,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
 
         localNode = new CadreNode({
           privateKey,
-          controlNetwork: { partyId: PARTY_ID, bootstrapNodes: resolveBootstrapNodes(CONTROL_ADDR) },
+          controlNetwork: { partyId: PARTY_ID, bootstrapNodes: CONTROL_RELAY_ADDRS },
           profile: 'transaction',
           // sApp-schema signing is DISABLED for VoteTorrent — a deliberate project
           // decision, not an oversight.
@@ -338,7 +361,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   );
 
   return (
-    <CadreNodeContext.Provider value={{ node, syncState, connectedPeers }}>
+    <CadreNodeContext.Provider value={{ node, syncState, configFault: bootstrapConfig.fault, connectedPeers }}>
       {children}
     </CadreNodeContext.Provider>
   );

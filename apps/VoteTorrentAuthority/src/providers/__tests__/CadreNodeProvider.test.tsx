@@ -1,5 +1,6 @@
 /**
- * Behavioral tests for CadreNodeProvider — P2P-02 (GAP 1).
+ * Behavioral tests for CadreNodeProvider — P2P-02 (GAP 1) + D-14 config-fault
+ * wiring (56-10).
  *
  * Pins the documented boot invariants from 22-02-SUMMARY.md:
  *   - node.start() is NOT called synchronously during render (T-22-03 / D-06):
@@ -8,6 +9,14 @@
  *   - syncState is event-driven: starts 'offline', listeners registered via on(),
  *     and a 'control:connected' / 'strand:started' event transitions to 'connected'.
  *   - useCadreNode() throws when called outside a CadreNodeProvider.
+ *
+ * D-14 adds: resolveBootstrapNodes keeps its exact one-string/string[]
+ * signature and blank-safe contract; a bootstrap-config fault reaches the
+ * context as `configFault` without blocking boot; the mocked CadreNode
+ * constructor receives `controlNetwork.bootstrapNodes` derived from the
+ * (mocked) config document, proving the wiring is load-bearing; and no
+ * document content — including a recognisable probe value — ever reaches
+ * the context value or a `console.error` call.
  *
  * CadreNode (@serfab/cadre-core) and openOptimysticRNDb / loadOrCreateRNPeerKey /
  * LevelDBRawStorage (@optimystic/db-p2p-storage-rn), plus rn-leveldb and the
@@ -37,6 +46,8 @@ interface FakeCadreNode {
   getStrand: jest.Mock;
   onCalls: Array<[string, Listener]>;
   offCalls: Array<[string, Listener]>;
+  /** The options object the constructor was called with (D-14 wiring proof). */
+  receivedOptions: unknown;
   emit(event: string): void;
   hasListener(event: string): boolean;
 }
@@ -51,8 +62,10 @@ jest.mock(
       private listeners: Record<string, Listener[]> = {};
       public onCalls: Array<[string, Listener]> = [];
       public offCalls: Array<[string, Listener]> = [];
+      public receivedOptions: unknown;
 
-      constructor() {
+      constructor(opts: unknown) {
+        this.receivedOptions = opts;
         mockConstructedNodes.push(this);
       }
 
@@ -244,47 +257,168 @@ describe('CadreNodeProvider — P2P-02 boot invariants', () => {
 });
 
 // ---------------------------------------------------------------------------
-// resolveBootstrapNodes — placeholder-aware bootstrap config (GAP 1, P2P-02).
+// resolveBootstrapNodes — blank-safe single-address guard (D-14, 56-10).
 //
-// The committed default CONTROL_ADDR contains the placeholder sentinel
-// 'UPDATE_AFTER_DRONE_RESTART', which libp2p Bootstrap rejects via
-// peerIdFromString → InvalidParametersError, aborting node.start() and showing
-// a red boot toast on every cold start (UAT Test 1 root cause). The helper
-// returns [] for the placeholder/unset (boot solo — valid, no throw) and
-// [addr] for a real address (real P2P path preserved).
+// D-14 replaced the CONTROL_ADDR/BOOTSTRAP_PLACEHOLDER sentinel with a
+// validated config document (bootstrap-config.ts). resolveBootstrapNodes
+// itself keeps its EXACT signature and contract: one string in, string[]
+// out, [] for empty/blank, never throw. Only the input SOURCE changed — it
+// now receives one already-validated address at a time via
+// `bootstrapConfig.addrs.flatMap(resolveBootstrapNodes)`, rather than one
+// hard-coded constant.
 // ---------------------------------------------------------------------------
-describe('resolveBootstrapNodes — placeholder-aware bootstrap (P2P-02, GAP 1)', () => {
-  it('returns [] for the committed placeholder containing UPDATE_AFTER_DRONE_RESTART', () => {
-    expect(
-      resolveBootstrapNodes('/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART'),
-    ).toEqual([]);
+describe('resolveBootstrapNodes — blank-safe single-address guard (D-14)', () => {
+  it('returns [] for an empty string', () => {
+    expect(resolveBootstrapNodes('')).toEqual([]);
   });
 
-  it('returns [] for an empty / unset address', () => {
-    expect(resolveBootstrapNodes('')).toEqual([]);
+  it('returns [] for undefined', () => {
     expect(resolveBootstrapNodes(undefined as unknown as string)).toEqual([]);
   });
 
-  it('returns the real address in a single-element array (real P2P path preserved)', () => {
-    const real = '/ip4/10.0.2.2/tcp/52345/ws/p2p/12D3KooWReal';
+  it('returns [] for a whitespace-only string', () => {
+    expect(resolveBootstrapNodes('   ')).toEqual([]);
+  });
+
+  it('returns [addr] for a real address', () => {
+    const real = '/ip4/203.0.113.9/tcp/443/wss/p2p/12D3KooWReal';
     expect(resolveBootstrapNodes(real)).toEqual([real]);
   });
 
-  // NETOP-04 strand-address regression lock: resolveBootstrapNodes must work
-  // identically for strand-bootstrap addrs (same function, same semantics).
-  it('NETOP-04: returns [addr] for a real strand multiaddr (strand-address path preserved)', () => {
-    const strandAddr = '/ip4/10.0.2.2/tcp/54321/ws/p2p/12D3KooWStrand';
-    expect(resolveBootstrapNodes(strandAddr)).toEqual([strandAddr]);
+  it('signature lock: still takes exactly one parameter', () => {
+    // A later refactor widening this to take a list would silently break the
+    // D-14 contract — this pins the arity so that regression fails loudly.
+    expect(resolveBootstrapNodes.length).toBe(1);
   });
 
-  it('NETOP-04: returns [] for the STRAND_BOOTSTRAP_ADDR placeholder (solo-safe, no crash)', () => {
-    expect(
-      resolveBootstrapNodes('/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART'),
-    ).toEqual([]);
+  it('is still exported from the module', () => {
+    expect(typeof resolveBootstrapNodes).toBe('function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Config-fault wiring (D-14, 56-10). Each test loads a FRESH instance of the
+// provider module with `bootstrap.config.json` mocked to a specific document,
+// so the module-scope `readBootstrapConfig(bootstrapConfigDoc)` call re-runs
+// against that document. jest.resetModules() clears the module registry
+// (NOT the top-level virtual mocks registered above, which persist).
+// ---------------------------------------------------------------------------
+describe('CadreNodeProvider — config-fault wiring (D-14)', () => {
+  // `bootstrapConfig` is computed at MODULE SCOPE in CadreNodeProvider.tsx (by
+  // design — see its D-14 header comment), so proving a fault reaches the
+  // context for a GIVEN document requires re-requiring the whole module fresh
+  // per document. jest.resetModules() clears the module registry — including
+  // 'react' — which would otherwise hand the freshly-required provider a
+  // SECOND react module instance with its own hook-dispatcher state, crashing
+  // every hook call with "Cannot read properties of null (reading 'useState')"
+  // (the exact multi-copy-React trap memory records for shared components).
+  // Pinning 'react' to the single instance already loaded by this test file
+  // (captured once, before any reset) keeps the dispatcher singular.
+  const actualReact = jest.requireActual('react');
+
+  afterEach(() => {
+    jest.dontMock('../../../bootstrap.config.json');
+    jest.dontMock('react');
   });
 
-  it('NETOP-04: returns [] for empty/unset strand bootstrap addr (default solo boot)', () => {
-    expect(resolveBootstrapNodes('')).toEqual([]);
-    expect(resolveBootstrapNodes(undefined as unknown as string)).toEqual([]);
+  function loadProviderModuleWithDoc(doc: unknown) {
+    jest.resetModules();
+    jest.doMock('react', () => actualReact);
+    jest.doMock('../../../bootstrap.config.json', () => doc, { virtual: true });
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('../CadreNodeProvider');
+  }
+
+  it('a missing/empty document reaches the context as configFault, and node still becomes non-null', async () => {
+    const mod = loadProviderModuleWithDoc({ bootstrapNodes: [] });
+    const captured: { value: ReturnType<typeof mod.useCadreNode> | null } = { value: null };
+
+    function Probe() {
+      captured.value = mod.useCadreNode();
+      return null;
+    }
+
+    await renderer.act(async () => {
+      renderer.create(
+        <mod.CadreNodeProvider>
+          <Probe />
+        </mod.CadreNodeProvider>,
+      );
+      for (let i = 0; i < 10; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+    });
+
+    expect(captured.value!.configFault).toEqual({ kind: 'missing', reason: 'empty-address-list' });
+    // Boot is not blocked by a fault — the node still constructs and starts.
+    expect(captured.value!.node).not.toBeNull();
+  });
+
+  it('a valid document reports configFault: null, and the mocked CadreNode receives the derived bootstrapNodes', async () => {
+    const validAddr = '/ip4/203.0.113.9/tcp/443/wss/p2p/12D3KooWExample';
+    const mod = loadProviderModuleWithDoc({ bootstrapNodes: [validAddr] });
+    const captured: { value: ReturnType<typeof mod.useCadreNode> | null } = { value: null };
+
+    function Probe() {
+      captured.value = mod.useCadreNode();
+      return null;
+    }
+
+    await renderer.act(async () => {
+      renderer.create(
+        <mod.CadreNodeProvider>
+          <Probe />
+        </mod.CadreNodeProvider>,
+      );
+      for (let i = 0; i < 10; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+    });
+
+    expect(captured.value!.configFault).toBeNull();
+    // mockConstructedNodes is the shared, file-scoped capture array the
+    // '@serfab/cadre-core' virtual mock pushes every constructed FakeCadreNode
+    // into (module-level, survives jest.resetModules()). The most recently
+    // constructed instance is this test's node; its receivedOptions is the
+    // exact object the REAL provider passed to `new CadreNode(...)` — this is
+    // the assertion that proves the wiring is load-bearing, not decorative.
+    const lastNode = mockConstructedNodes[mockConstructedNodes.length - 1];
+    const receivedOptions = lastNode.receivedOptions as { controlNetwork: { bootstrapNodes: string[] } };
+    expect(receivedOptions.controlNetwork.bootstrapNodes).toEqual([validAddr]);
+  });
+
+  it('no document echo: a malformed document carrying a recognisable probe never reaches context or console.error', async () => {
+    const LEAK_PROBE = 'LEAKPROBE0123';
+    const mod = loadProviderModuleWithDoc({ bootstrapNodes: [`/ip4/${LEAK_PROBE}/tcp/443/wss`] });
+    const captured: { value: ReturnType<typeof mod.useCadreNode> | null } = { value: null };
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    function Probe() {
+      captured.value = mod.useCadreNode();
+      return null;
+    }
+
+    await renderer.act(async () => {
+      renderer.create(
+        <mod.CadreNodeProvider>
+          <Probe />
+        </mod.CadreNodeProvider>,
+      );
+      for (let i = 0; i < 10; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+    });
+
+    expect(JSON.stringify(captured.value!.configFault)).not.toContain(LEAK_PROBE);
+    for (const call of errorSpy.mock.calls) {
+      for (const arg of call) {
+        expect(String(arg)).not.toContain(LEAK_PROBE);
+      }
+    }
+
+    errorSpy.mockRestore();
   });
 });
