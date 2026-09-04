@@ -45,9 +45,18 @@
  * ANYTHING; it re-materialises rows the origin already validated. There is no
  * engine API for it and, per the paragraph above, there cannot be a SQL one.
  *
- * CONFINEMENT IS MECHANICAL, NOT ASPIRATIONAL. The external-write seam may
- * appear in EXACTLY ONE FILE, this one, pinned by a repo-wide grep in this
- * plan's own verification.
+ * CONFINEMENT IS MECHANICAL, NOT ASPIRATIONAL -- but the claim below has
+ * changed shape since it was written. When this header was first drafted the
+ * external-write seam appeared in EXACTLY ONE FILE, this one, pinned by a
+ * repo-wide grep in that plan's own verification. `56-09` added a SECOND
+ * production site, `apps/VoteTorrentPublic/src/peer/reactivity-bridge.js`
+ * (the peer-replication bridge for the anonymous public reader), with its
+ * own trust-posture argument for its own origin -- a verified threshold
+ * signature over a commit-vote payload, not an out-of-band digest check.
+ * Confinement is now to EXACTLY TWO recorded production sites, pinned by the
+ * standing, non-self-tripping set-equality instrument
+ * `apps/VoteTorrentPublic/test/node/external-write-seam-sites.test.mjs`
+ * rather than by a one-off plan-time grep.
  *
  * RE-ENTRY CONDITION: the panel-actions phase (ROADMAP scope step 3) MUST
  * NOT use this seam for user-initiated writes -- those go through

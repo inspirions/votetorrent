@@ -30,10 +30,13 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { bytesToB64url } from '@optimystic/db-core';
 import { ReactivitySubscriberRegistry, reactivityTailBytes } from '@optimystic/db-p2p';
 import { reactivityTopicId } from '@optimystic/db-core';
 import { PUBLIC_SUBSCRIBED_TABLES } from '@votetorrent/web-data/public';
+import { publicSrc, moduleUrl } from '../../../../scripts/lib/source-paths.mjs';
 import {
 	PeerReplicationError,
 	resolveCohortTopicService,
@@ -366,10 +369,17 @@ test('a complete options object starts successfully and returns a handle with an
 /**
  * Starts the bridge with a fresh service/node/registry and a real
  * `subscribeToPublicChanges` subscription wired onto the same `db`.
+ *
+ * `startPeerReplicationImpl` defaults to the real, imported
+ * `startPeerReplication` — Task 3's isolation control (below) passes the
+ * MUTATED copy's export instead, so the exact same harness drives both the
+ * happy-path behaviour tests above and the source-transform control, and the
+ * two can never silently diverge in what they exercise.
  * @param {any} storeTable
  * @param {(projected: any) => Promise<any[]>} readRows
+ * @param {(options: any) => Promise<any>} [startPeerReplicationImpl]
  */
-async function startHarness(storeTable, readRows) {
+async function startHarness(storeTable, readRows, startPeerReplicationImpl = startPeerReplication) {
 	const { subscribeToPublicChanges } = await import('@votetorrent/web-data/public');
 	const { db } = makeFakeDb({ storeTable });
 	const { node, service, registry } = makeFakeNode();
@@ -377,7 +387,7 @@ async function startHarness(storeTable, readRows) {
 	const notices = [];
 	const subscription = subscribeToPublicChanges(db, (/** @type {any} */ notice) => notices.push(notice));
 	assert.equal(subscription.live, true, 'harness sanity: the fake db must expose a live change channel');
-	const handle = await startPeerReplication({
+	const handle = await startPeerReplicationImpl({
 		db,
 		networkHash: NETWORK_HASH,
 		node,
@@ -551,4 +561,73 @@ test('stop() unregisters from the subscriber registry and withdraws the subscrip
 
 	await handle.stop();
 	assert.equal(service.withdraw.calls.length, 1, 'a second stop() call must be a no-op, not a second withdraw');
+});
+
+// ---------------------------------------------------------------------------
+// 7. `56-09` Task 3 -- the source-transform isolation control.
+//
+// Proves the single `notifyPeerWrite(...)` call site is mechanically
+// removable, and that removing it kills EXACTLY the notify while rows still
+// land. A control that only asserted "no notices" would also pass on a
+// mutated copy that failed to import at all, so this asserts the triple:
+// the transform matched exactly one line, the store still received the
+// applied batch, and the subscription received zero notices.
+//
+// DOES NOT PROVE the browser page re-renders (`56-11`'s liveness proof) and
+// is NOT `56-13`'s D-16 production-variant inversion, which must rebuild a
+// genuinely mutated BUNDLE rather than transform a source copy -- recorded
+// here so a later reader does not double-count this proof.
+// ---------------------------------------------------------------------------
+
+test('the single notifyPeerWrite(...) call site is mechanically removable by a one-line source transform -- exactly one line matched, rows still land, zero notices fire', async () => {
+	const sourcePath = publicSrc('peer', 'reactivity-bridge.js');
+	const source = readFileSync(sourcePath, 'utf8');
+
+	// The exact one-line statement Task 2's own call-site comment pins. A
+	// match count other than one fails LOUDLY here rather than silently
+	// proving nothing.
+	const CALL_LINE_RE = /^\t+notifyPeerWrite\(db, networkHash, table, op\);\n/gm;
+	const matches = source.match(CALL_LINE_RE);
+	assert.equal(
+		matches ? matches.length : 0,
+		1,
+		`the pinned notifyPeerWrite call-site pattern matched ${matches ? matches.length : 0} line(s), not exactly 1`,
+	);
+
+	const mutated = source.replace(CALL_LINE_RE, '');
+	assert.notEqual(mutated, source, 'the transform did not change the source');
+
+	// Written BESIDE the original, under this app's own src/peer/ tree --
+	// never a system temp directory -- so the mutated copy's bare-specifier
+	// imports (@optimystic/db-core, @optimystic/db-p2p,
+	// @votetorrent/web-data/public) still resolve through this app's own
+	// node_modules by the ordinary upward walk. Cleaned up in a `finally`;
+	// never committed.
+	const tmpDir = mkdtempSync(publicSrc('peer', '.tmp-mutant-'));
+	try {
+		const mutantPath = path.join(tmpDir, 'reactivity-bridge.mutant.mjs');
+		writeFileSync(mutantPath, mutated);
+		/** @type {any} */
+		const mutantModule = await import(moduleUrl(mutantPath));
+		assert.equal(typeof mutantModule.startPeerReplication, 'function', 'the mutated copy failed to import cleanly -- this control would prove nothing');
+
+		const storeTable = makeFakeStoreTable(() => [{ op: 'insert', newRow: ['a'] }]);
+		const { registry, notices } = await startHarness(
+			storeTable,
+			async () => [{ table: VALID_TABLE, ops: [{ op: 'upsert', row: ['a'] }] }],
+			mutantModule.startPeerReplication,
+		);
+
+		registry.deliver(TOPIC_ID, makeNotification({ revision: 1 }));
+		await flush();
+
+		assert.equal(
+			storeTable.applyExternalRowChanges.calls.length,
+			1,
+			'the mutated copy never applied the batch at all -- a broken copy would also show zero notices, proving nothing',
+		);
+		assert.equal(notices.length, 0, 'the mutated copy still delivered a notice -- the transform did not isolate the notify call');
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
 });
