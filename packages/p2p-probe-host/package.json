@@ -15,7 +15,7 @@
 		"@libp2p/peer-id": "^6.0.0",
 		"@libp2p/websockets": "^10",
 		"@optimystic/db-p2p": "^0.27.0",
-		"@serfab/cadre-core": "^0.12.0",
+		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.12.0#~/.yarn/patches/@serfab-cadre-core-npm-0.12.0-7ac3a744da.patch",
 		"@serfab/strand-proto": "^0.11.0"
 	}
 }
