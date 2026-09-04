@@ -121,15 +121,24 @@ const EXPECTED_TABLE_COUNT = 61;
 
 /**
  * The size of the scanned file set, pinned the same way the table counts above
- * are: 14 files under the public app's `src` (its 15th file, `app.css`, is a
+ * are: 18 files under the public app's `src` (its 19th file, `app.css`, is a
  * non-code extension) plus 8 files under `packages/web-data/src` after
  * `SCAN_EXCLUSIONS` removes `officer/` (5 files) and `classification.js` (1).
  * CHANGING THIS NUMBER MEANS A ROOT OR AN EXCLUSION CHANGED — DO IT
  * DELIBERATELY AND SAY WHY IN THE COMMIT. A shrinking count is a module
  * silently leaving the closure this gate reads; never nudge it to make a red
  * gate green.
+ *
+ * MOVED FROM 22 TO 26 in `56-09`, deliberately, for a named reason: four new
+ * files landed under `apps/VoteTorrentPublic/src/peer/`, inside this scan's
+ * public-app root, none of them a reclassification of an existing table —
+ * `identity.js` and `edge-node.js` (`56-05`), `config.js` (`56-06`) and
+ * `reactivity-bridge.js` (`56-09` itself). All four were verified to pass
+ * the SUBSTANCE of this file's D-05 scan (test 16 below, over the widened
+ * 26-file set) before this count was bumped — a passing count bump here is
+ * never sufficient on its own; the content check must already be green.
  */
-const EXPECTED_SCANNED_FILE_COUNT = 22;
+const EXPECTED_SCANNED_FILE_COUNT = 26;
 
 // The sentinel literals are ASSEMBLED, never written out, so each appears in
 // this file exactly once — as the comment that delimits the region. A checker
