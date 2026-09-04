@@ -89,9 +89,9 @@
  * gateways in one run — do not run it concurrently with `nx run-many`
  * (`project_voter_emulator_boot_needs_quiet_host`).
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   STRAND_OBSERVER_PROTOCOL,
@@ -121,6 +121,7 @@ const S_ABSENT = `observer-controls-absent-never-hosted-${randomUUID()}`;
 // ── Package-version instrument hygiene: same helper `wall-proof.mjs` uses, imported rather than
 // re-derived (T-56-01-05 / T-56-07-09). ─────────────────────────────────────────────────────────
 const CADRE_CORE_INFO = resolvePackageInfo('@serfab/cadre-core', '@serfab/cadre-core');
+const DB_P2P_INFO = resolvePackageInfo('@optimystic/db-p2p', '@optimystic/db-p2p');
 
 function resolvePatchFilename() {
   const rootPkgPath = fileURLToPath(new URL('../../package.json', import.meta.url));
@@ -413,6 +414,199 @@ async function runG1Phase(relayPosture) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// RUNG_C3_FLIP — the inversion: identical probe, one config value changed, FRESH node (G2)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * G2: identical construction and seeding to G1, with exactly one variable changed —
+ * `publicObserverStrandIds` lists BOTH strands, so the previously-unlisted `S_UNLISTED` is now
+ * observable. The allowlist Set is built at `CadreNode` constructor time (immediately after
+ * `this.config = config`, per `56-04`'s own `<downstream_contract>`), so this genuinely requires a
+ * fresh node — mutating a running one would not exercise the code path that matters.
+ */
+async function runFlipControl(relayPosture) {
+  const gw = await buildGateway({
+    enableRelay: relayPosture === 'on',
+    seeded: true,
+    strands: [{ id: S_LISTED }, { id: S_UNLISTED }],
+    configOverrides: { publicObserverStrandIds: [S_LISTED, S_UNLISTED] },
+  });
+  activeNodes.add(gw);
+  let outsider;
+  try {
+    const probeKeyPair = await generateKeyPair('Ed25519');
+    const controlAddrs = gw.getControlNode().getMultiaddrs().map((m) => m.toString());
+    const controlWsAddr = controlAddrs.find((a) => a.includes('/ip4/127.0.0.1/') && a.includes('/ws')) ?? controlAddrs[0];
+    outsider = await buildOutsiderNode(probeKeyPair, 'control-votetorrent');
+    activeLibp2pNodes.add(outsider);
+
+    const l1 = await dialGateway(outsider, controlWsAddr);
+    if (!l1.classified || !l1.connection) {
+      throw new Error(
+        `RUNG_C3_FLIP: G2 dial did not admit (${l1.verdict ?? l1.reason}) — a non-empty allowlist ` +
+        `should guarantee admission, same as G1; cannot run the inversion without it.`,
+      );
+    }
+    const result = await probeProtocol(outsider, l1.connection.remotePeer, STRAND_OBSERVER_PROTOCOL, S_UNLISTED);
+    try { await l1.connection.close(); } catch { /* best effort */ }
+    return { ...result, gatewayPeerId: gw.peerId.toString() };
+  } finally {
+    if (outsider) {
+      await outsider.stop().catch(() => {});
+      activeLibp2pNodes.delete(outsider);
+    }
+    await gw.stop().catch(() => {});
+    activeNodes.delete(gw);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// RUNG_C3_UNCONFIGURED — D-03's outer fail-closed half (FRESH node, G3)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * G3: identical construction and seeding to G1, both strands hosted, but `publicObserverStrandIds`
+ * is ABSENT entirely (defaults to an empty Set in `buildGateway`/`CadreNode`). Per `56-04`'s patch,
+ * an empty allowlist means the observer handler is never registered — the protocol is never
+ * advertised at all. This is asserted DISTINCT from an empty response: measured this session
+ * against the installed dist, an unconfigured node's `admitPublicObservers()` returns `false`, so
+ * the connection gater falls straight through to the ordinary (pre-patch) admission decision,
+ * which denies a non-member outsider BEFORE protocol negotiation is ever reached — the outsider
+ * never gets far enough to ask. `probeProtocol`'s vocabulary classifies that as
+ * `REFUSED_CONNECTION:<reason>`; a `REFUSED_EMPTY` protocol-level response, or a `SERVED` one,
+ * both throw here rather than being silently accepted as this rung's verdict — collapsing this
+ * into `REFUSED_EMPTY` would erase D-03's two-layer fail-closed distinction.
+ */
+async function runUnconfiguredControl(relayPosture) {
+  const gw = await buildGateway({
+    enableRelay: relayPosture === 'on',
+    seeded: true,
+    strands: [{ id: S_LISTED }, { id: S_UNLISTED }],
+    // No configOverrides: publicObserverStrandIds is absent, defaulting to an empty Set.
+  });
+  activeNodes.add(gw);
+  let outsider;
+  try {
+    const probeKeyPair = await generateKeyPair('Ed25519');
+    const probePeerId = peerIdFromPrivateKey(probeKeyPair).toString();
+    const p2 = await assessPreconditionP2(gw, probePeerId, [S_LISTED, S_UNLISTED], relayPosture);
+    printRungP2(p2, 'RUNG_C3_UNCONFIGURED.precondition');
+    if (!p2.pass) {
+      throw new Error(
+        'RUNG_C3_UNCONFIGURED: G3 preconditions FAILED — an unseeded/mis-seeded G3 would admit ' +
+        'every stranger for a reason unrelated to the allowlist, making this rung meaningless.',
+      );
+    }
+
+    const controlAddrs = gw.getControlNode().getMultiaddrs().map((m) => m.toString());
+    const controlWsAddr = controlAddrs.find((a) => a.includes('/ip4/127.0.0.1/') && a.includes('/ws')) ?? controlAddrs[0];
+    outsider = await buildOutsiderNode(probeKeyPair, 'control-votetorrent');
+    activeLibp2pNodes.add(outsider);
+
+    const l1 = await dialGateway(outsider, controlWsAddr);
+    if (!l1.classified) {
+      throw new Error(`RUNG_C3_UNCONFIGURED: G3 L1 dial UNCLASSIFIABLE — ${l1.reason}.`);
+    }
+
+    let verdict;
+    let layer;
+    if (!l1.connection) {
+      verdict = `REFUSED_CONNECTION:${l1.verdict}`;
+      layer = 'L1-connection';
+    } else {
+      const result = await probeProtocol(outsider, l1.connection.remotePeer, STRAND_OBSERVER_PROTOCOL, S_LISTED);
+      try { await l1.connection.close(); } catch { /* best effort */ }
+      verdict = result.verdict;
+      layer = 'protocol-negotiation';
+    }
+
+    if (verdict === 'REFUSED_EMPTY' || verdict.startsWith('SERVED')) {
+      throw new Error(
+        `RUNG_C3_UNCONFIGURED: got '${verdict}' at layer=${layer} — an unconfigured node must refuse ` +
+        `at the connection or protocol-negotiation layer, never answer the observer protocol at all ` +
+        `(empty or otherwise). Collapsing this into REFUSED_EMPTY would erase D-03's two-layer ` +
+        `fail-closed distinction.`,
+      );
+    }
+
+    return { verdict, layer, gatewayPeerId: gw.peerId.toString() };
+  } finally {
+    if (outsider) {
+      await outsider.stop().catch(() => {});
+      activeLibp2pNodes.delete(outsider);
+    }
+    await gw.stop().catch(() => {});
+    activeNodes.delete(gw);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// RUNG_C3_UNIT — the decision matrix, directly against StrandObserverService, no live node
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * `56-04` made `processObserverRequest` non-private for exactly this: unit-assert the decision
+ * matrix without booting a `CadreNode`. Fixed stub `isObservableStrand`/`getStrandMultiaddrs`
+ * (never a live strand), production-length fixtures throughout
+ * (`project_ui_defects_invisible_to_every_tier` — a three-character fixture cannot fail).
+ */
+async function runUnitMatrix() {
+  const fixedAddrs = [
+    `/ip4/127.0.0.1/tcp/4001/ws/p2p/12D3KooWObserverUnitFixture${randomUUID().replace(/-/g, '').slice(0, 20)}`,
+  ];
+  const listedSet = new Set([S_LISTED]);
+  const service = new StrandObserverService({
+    isObservableStrand: (strandId) => typeof strandId === 'string' && listedSet.has(strandId),
+    getStrandMultiaddrs: (strandId) => (listedSet.has(strandId) ? fixedAddrs : []),
+  });
+
+  const assertions = [];
+  const run = async (label, request) => {
+    let response;
+    let threw = null;
+    try {
+      response = await service.processObserverRequest(request, 'unit-test-remote-peer');
+    } catch (err) {
+      threw = err?.message ?? String(err);
+    }
+    return { label, request, response, threw };
+  };
+
+  // Listed → the addresses.
+  const listed = await run('listed', { strandId: S_LISTED });
+  assertions.push({
+    ...listed,
+    pass: listed.threw === null && listed.response?.multiaddrs?.length === fixedAddrs.length,
+  });
+
+  // Unlisted → empty, no throw.
+  const unlisted = await run('unlisted', { strandId: S_UNLISTED });
+  assertions.push({ ...unlisted, pass: unlisted.threw === null && unlisted.response?.multiaddrs?.length === 0 });
+
+  // Malformed / absent strandId → empty, no throw, in every case.
+  for (const [label, bad] of [['number', 12345], ['emptyString', ''], ['null', null], ['undefined', undefined], ['missingKey', undefined]]) {
+    const request = label === 'missingKey' ? {} : { strandId: bad };
+    const result = await run(`malformed:${label}`, request);
+    assertions.push({ ...result, pass: result.threw === null && result.response?.multiaddrs?.length === 0 });
+  }
+
+  // Lenient-match failure modes D-03 forbids: trailing whitespace, case variant, strict prefix —
+  // all must yield empty (exact-string Set.has only), never the listed strand's addresses.
+  const variants = [
+    ['trailingSpace', `${S_LISTED} `],
+    ['caseVariant', S_LISTED.toUpperCase()],
+    ['prefixOfListed', S_LISTED.slice(0, Math.floor(S_LISTED.length / 2))],
+  ];
+  for (const [label, variant] of variants) {
+    const result = await run(`lenient:${label}`, { strandId: variant });
+    assertions.push({ ...result, pass: result.threw === null && result.response?.multiaddrs?.length === 0 });
+  }
+
+  const pass = assertions.every((a) => a.pass);
+  return { pass, assertions };
+}
+
 // ── Lifecycle tracking, same shape as wall-proof.mjs: every node this process starts, stopped on
 // both the pass and fail paths. ─────────────────────────────────────────────────────────────────
 const activeNodes = new Set();
@@ -430,7 +624,53 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// CLI entry (Task 1 scope: --preconditions-only, --control=2, and the shared G1 phase)
+// Record emission — observer-controls-record.json, mirroring wall-proof-record.json's shape
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/** JSON.stringify replacer: makes BigInt/Uint8Array-bearing rung details always serializable. */
+function jsonSafeReplacer(_key, value) {
+  if (typeof value === 'bigint') return value.toString();
+  if (value instanceof Uint8Array) return `<Uint8Array len=${value.length}>`;
+  return value;
+}
+
+function newRecord(patchFilename, relayPosture, modeInfo, dbP2pInfo) {
+  return {
+    schemaVersion: 1,
+    timestamp: new Date().toISOString(),
+    cadreCoreVersion: CADRE_CORE_INFO.version,
+    cadreCorePath: CADRE_CORE_INFO.path,
+    dbP2pVersion: dbP2pInfo.version,
+    dbP2pPath: dbP2pInfo.path,
+    patchFilename,
+    mode: modeInfo.mode,
+    relayPosture,
+    relayPostureSource: WALL_PROOF_RECORD_PATH,
+    // T-56-07-10: claim only what this harness actually runs. D-05.1 (patch removal) and D-05.4
+    // (byte provenance against the RUNNING gateway) belong to other plans; a reader of this
+    // record must not infer either from the rungs below.
+    fences: {
+      'D-05.1': "NOT claimed here. Patch-removal is 56-13's control and requires a rebuilt browser production variant.",
+      'D-05.4': "NOT claimed here. Running-gateway byte provenance against the RUNNING gateway is 56-08's control; this harness's own MODE discriminator greps its OWN resolved node_modules bytes for a different purpose (refusing to run its controls against unpatched bytes), not the deployed gateway's.",
+    },
+    complete: false,
+    rungs: {},
+  };
+}
+
+function recordRung(record, id, verdict, detail = {}) {
+  record.rungs[id] = { verdict, ...detail };
+}
+
+function writeJsonRecord(record, jsonPath) {
+  const dir = dirname(jsonPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(jsonPath, JSON.stringify(record, jsonSafeReplacer, 2) + '\n');
+  return jsonPath;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// CLI entry
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
 async function main() {
@@ -479,13 +719,40 @@ async function main() {
     }
   }
 
-  const g1 = await runG1Phase(relayPosture);
+  const jsonArgIdx = args.indexOf('--json');
+  const jsonPath = jsonArgIdx !== -1 && args[jsonArgIdx + 1]
+    ? resolve(args[jsonArgIdx + 1])
+    : join(process.cwd(), 'observer-controls-record.json');
+
+  const record = newRecord(patchFilename, relayPosture, modeInfo, DB_P2P_INFO);
+  const bail = (code) => { writeJsonRecord(record, jsonPath); return code; };
+
+  let g1;
+  try {
+    g1 = await runG1Phase(relayPosture);
+  } catch (err) {
+    record.error = err?.stack ?? String(err);
+    L(`FATAL during the G1 phase: ${err?.message ?? err}`);
+    return bail(1);
+  }
+
   let exitCode = 0;
+
+  L(`RUNG_P2=${g1.p2.pass ? 'PASS' : 'FAIL'} gatewayPeerId(G1)=${g1.gatewayPeerId}`);
+  recordRung(record, 'P2', g1.p2.pass ? 'PASS' : 'FAIL', {
+    checks: g1.p2.checks, decision: g1.p2.decision, strandCounts: g1.p2.strandCounts,
+    gatewayPeerId: g1.gatewayPeerId,
+  });
 
   if (control === undefined || control === '2') {
     L(`RUNG_C2_OBSERVER=${g1.c2Observer.verdict} admitInboundControlConnection=${g1.decisionAtObserverProbe} raw=${JSON.stringify(g1.c2Observer.raw)}`);
     L(`RUNG_C2_MEMBERSONLY=${g1.c2MembersOnly.verdict} raw=${JSON.stringify(g1.c2MembersOnly.raw)}`);
     L(`RUNG_C2_POS=${g1.c2Pos.verdict} raw=${JSON.stringify(g1.c2Pos.raw)}`);
+    recordRung(record, 'C2_OBSERVER', g1.c2Observer.verdict, {
+      raw: g1.c2Observer.raw, admitInboundControlConnection: g1.decisionAtObserverProbe,
+    });
+    recordRung(record, 'C2_MEMBERSONLY', g1.c2MembersOnly.verdict, { raw: g1.c2MembersOnly.raw });
+    recordRung(record, 'C2_POS', g1.c2Pos.verdict, { raw: g1.c2Pos.raw });
     if (
       !g1.p2.pass
       || !g1.c2Observer.verdict.startsWith('SERVED')
@@ -497,13 +764,81 @@ async function main() {
     }
   }
 
-  if (control === '3') {
-    // A standalone `--control=3` run still needs G1's C3_LISTED/UNLISTED/ABSENT measurements
-    // (captured above) but does not gate on the control-2 rungs — print them for context only.
-    L(`(context, not gated) RUNG_C2_OBSERVER=${g1.c2Observer.verdict}`);
+  if (control === undefined || control === '3') {
+    // RUNG_C3_LISTED shares RUNG_C2_OBSERVER's own measurement — no re-probe, per the plan's
+    // own instruction ("reuse the same probe function and record the verdict under this rung id
+    // as well, with an explicit note that the two rungs share one measurement").
+    L(`RUNG_C3_LISTED=${g1.c2Observer.verdict} raw=${JSON.stringify(g1.c2Observer.raw)} (shared measurement with RUNG_C2_OBSERVER, not re-probed)`);
+    recordRung(record, 'C3_LISTED', g1.c2Observer.verdict, {
+      raw: g1.c2Observer.raw, sharedMeasurementWith: 'C2_OBSERVER',
+    });
+
+    const unlistedHostedCount = g1.p2.strandCounts[S_UNLISTED];
+    L(`RUNG_C3_UNLISTED=${g1.c3Unlisted.verdict} S_UNLISTED_hostedMultiaddrCount=${unlistedHostedCount} raw=${JSON.stringify(g1.c3Unlisted.raw)} membersOnlyComparison=${g1.c3UnlistedMembersOnly.verdict}`);
+    recordRung(record, 'C3_UNLISTED', g1.c3Unlisted.verdict, {
+      raw: g1.c3Unlisted.raw, hostedMultiaddrCount: unlistedHostedCount,
+      membersOnlyComparison: g1.c3UnlistedMembersOnly.verdict,
+    });
+
+    // The indistinguishability property, recorded explicitly rather than hidden: both an
+    // unlisted-but-hosted strand and a never-hosted one respond with the identical SHAPE
+    // (`{ strandId, multiaddrs: [] }`) — a reader cannot tell "refused" from "not hosted" from the
+    // response alone. Compared by response KEY SHAPE, not full byte-equality, because the echoed
+    // `strandId` field legitimately differs (it echoes what THIS probe asked for).
+    const unlistedShape = JSON.stringify(Object.keys(g1.c3Unlisted.raw ?? {}).sort());
+    const absentShape = JSON.stringify(Object.keys(g1.c3Absent.raw ?? {}).sort());
+    const indistinguishable = g1.c3Unlisted.verdict === 'REFUSED_EMPTY'
+      && g1.c3Absent.verdict === 'REFUSED_EMPTY'
+      && unlistedShape === absentShape;
+    L(`RUNG_C3_ABSENT=${g1.c3Absent.verdict} indistinguishableFromUnlisted=${indistinguishable} raw=${JSON.stringify(g1.c3Absent.raw)} membersOnlyComparison=${g1.c3AbsentMembersOnly.verdict}`);
+    recordRung(record, 'C3_ABSENT', g1.c3Absent.verdict, {
+      raw: g1.c3Absent.raw,
+      indistinguishableFromUnlisted: indistinguishable,
+      membersOnlyComparison: g1.c3AbsentMembersOnly.verdict,
+      note: 'Byte-identical-shape empty response to RUNG_C3_UNLISTED, by construction — recorded as a mechanism property, not hidden.',
+    });
+
+    let flip = { verdict: 'ERROR' };
+    try {
+      flip = await runFlipControl(relayPosture);
+      L(`RUNG_C3_FLIP=${flip.verdict} gatewayPeerId=${flip.gatewayPeerId} raw=${JSON.stringify(flip.raw)}`);
+      recordRung(record, 'C3_FLIP', flip.verdict, { raw: flip.raw, gatewayPeerId: flip.gatewayPeerId });
+    } catch (err) {
+      L(`RUNG_C3_FLIP FAILED: ${err?.message ?? err}`);
+      recordRung(record, 'C3_FLIP', 'ERROR', { error: err?.message ?? String(err) });
+    }
+
+    let unconfigured = { verdict: 'ERROR' };
+    try {
+      unconfigured = await runUnconfiguredControl(relayPosture);
+      L(`RUNG_C3_UNCONFIGURED=${unconfigured.verdict} layer=${unconfigured.layer} gatewayPeerId=${unconfigured.gatewayPeerId}`);
+      recordRung(record, 'C3_UNCONFIGURED', unconfigured.verdict, {
+        layer: unconfigured.layer, gatewayPeerId: unconfigured.gatewayPeerId,
+      });
+    } catch (err) {
+      L(`RUNG_C3_UNCONFIGURED FAILED: ${err?.message ?? err}`);
+      recordRung(record, 'C3_UNCONFIGURED', 'ERROR', { error: err?.message ?? String(err) });
+    }
+
+    const unit = await runUnitMatrix();
+    L(`RUNG_C3_UNIT=${unit.pass ? 'PASS' : 'FAIL'} assertions=${JSON.stringify(unit.assertions.map((a) => ({ label: a.label, pass: a.pass })))}`);
+    recordRung(record, 'C3_UNIT', unit.pass ? 'PASS' : 'FAIL', { assertions: unit.assertions });
+
+    if (
+      g1.c3Unlisted.verdict !== 'REFUSED_EMPTY'
+      || g1.c3Absent.verdict !== 'REFUSED_EMPTY'
+      || !indistinguishable
+      || flip.verdict === 'ERROR' || !flip.verdict.startsWith('SERVED')
+      || unconfigured.verdict === 'ERROR' || unconfigured.verdict === 'REFUSED_EMPTY' || unconfigured.verdict.startsWith('SERVED')
+      || !unit.pass
+    ) {
+      exitCode = 1;
+    }
   }
 
-  L(`RUNG_P2=${g1.p2.pass ? 'PASS' : 'FAIL'}`);
+  record.complete = control === undefined;
+  writeJsonRecord(record, jsonPath);
+  L(`RECORD_JSON=${jsonPath}`);
 
   return exitCode;
 }
