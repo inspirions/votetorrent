@@ -20,3 +20,8 @@ dist-closure
 # produce the honest `missing` fault src/peer/config.js exists to report,
 # never ship a placeholder address — the exact failure class D-13 ends.
 public/config.json
+
+# 56-12: the D-17/D-13 offline gate's build output. Same reason as
+# dist-gate/dist-live above — the root .gitignore's bare `dist` rule matches
+# only an entry named exactly `dist`.
+dist-offline

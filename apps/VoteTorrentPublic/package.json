@@ -35,6 +35,9 @@
 		"assert:engine-reach": "node scripts/assert-engine-reach.mjs",
 		"assert:no-test-harness-in-dist": "node scripts/assert-no-test-harness-in-dist.mjs",
 		"assert:placeholders-labelled": "node scripts/assert-placeholders-labelled.mjs",
+		"build:offline": "vite build --config vite.offline.config.ts",
+		"test:offline": "node test/offline/run-offline-gate.mjs",
+		"gate:prove-offline-matchers": "node test/offline/run-offline-gate.mjs --prove-matchers",
 		"clean": "rm -rf dist dist-gate node_modules"
 	},
 	"dependencies": {
