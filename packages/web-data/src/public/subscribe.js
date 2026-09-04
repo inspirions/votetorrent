@@ -326,6 +326,102 @@ function dispatchRemoteNotice(db, message) {
 }
 
 /**
+ * `notifyPeerWrite(db, networkHash, table, type)` — the notify half of
+ * `56-09`'s replication seam. A peer-replication write applies rows to `db`
+ * through Quereus's external-write seam (`applyExternalRowChanges` /
+ * `Database.ingestExternalRowChanges`), which by upstream's own documented
+ * contract "does NOT emit module data events (the external writer owns
+ * those, including the `remote` flag)". This function is that ownership
+ * discharged: it reuses `dispatchRemoteNotice`'s validated / projected /
+ * never-spread dispatch and the `PUBLIC_SUBSCRIBED_TABLES` allowlist — the
+ * SAME code path an inbound cross-tab broadcast produces — so a peer write
+ * and a cross-tab write travel identically and there is still exactly ONE
+ * place a row image could escape.
+ *
+ * Granularity: this carries TABLE plus the three-valued mutation kind
+ * (`insert`/`update`/`delete`), and NOTHING FINER. There is no table→fact
+ * reverse map in this repo, and none is created here.
+ *
+ * NEVER THROWS. A falsy `db`, a `networkHash` that makes `dbNameFor` throw,
+ * and a table outside `PUBLIC_SUBSCRIBED_TABLES` each return `false` and
+ * deliver nothing.
+ *
+ * @param {any} db the open handle the peer write was applied to.
+ * @param {string} networkHash
+ * @param {string} table
+ * @param {string} type
+ * @returns {boolean} `true` iff a notice was dispatched.
+ */
+export function notifyPeerWrite(db, networkHash, table, type) {
+	if (!db) return false;
+
+	/** @type {string} */
+	let name;
+	try {
+		name = dbNameFor(networkHash);
+	} catch (err) {
+		logFailure(err);
+		return false;
+	}
+
+	if (!isSubscribed(table)) return false;
+
+	// The SAME validated object literal shape `dispatchRemoteNotice` accepts
+	// from an inbound broadcast — never a spread, never enriched with a row.
+	const message = { kind: CHANGE_MESSAGE_KIND, table, type };
+
+	// (a) Local dispatch — delivers to this handle's own subscriptions.
+	dispatchRemoteNotice(db, message);
+
+	// (b) Cross-tab dispatch. WHY A NEW CHANNEL IS OPENED AND CLOSED PER CALL
+	// RATHER THAN CACHED: this function's signature carries no lifecycle, and
+	// this module's `REMOTE_SINKS` discipline is a `WeakMap` precisely so
+	// nothing outlives its handle — a cached channel would be a resource with
+	// no `stop()` to release it, and in Node it would hold the event loop
+	// open (see this file's non-`unref` note on `enableChangePropagation`).
+	// Guarded on BroadcastChannel's presence so its absence degrades only the
+	// cross-tab half, never the local half above.
+	if (typeof BroadcastChannel !== 'undefined') {
+		/** @type {any} */
+		let channel;
+		try {
+			channel = new BroadcastChannel(CHANGE_CHANNEL_PREFIX + name);
+			channel.postMessage(message);
+		} catch (err) {
+			logFailure(err);
+		} finally {
+			try {
+				channel?.close();
+			} catch (err) {
+				logFailure(err);
+			}
+		}
+	}
+
+	// WHY THE ORIGINATING PAGE SEES TWO DELIVERIES, AND THAT IS THE ACCEPTED
+	// COST. A `BroadcastChannel` does not deliver to the object that posted
+	// it, but it DOES deliver to sibling objects in the same page — including
+	// the channel `enableChangePropagation` owns on this SAME handle, whose
+	// `onmessage` runs `dispatchRemoteNotice` again. A notice is idempotent
+	// by construction (it carries no rows; every consumer re-reads), so the
+	// duplication is bounded at exactly two rather than compounding. Two
+	// rejected alternatives: dispatching locally only would leave a second
+	// tab sharing this origin's IndexedDB permanently stale (its own bridge's
+	// apply would be value-identical and therefore report nothing); posting
+	// only would make local delivery silently depend on an unrelated
+	// function (`enableChangePropagation`) having been called on this handle.
+	//
+	// WHY THE ENGINE'S OWN UNDERSCORE-PREFIXED EMITTER ACCESSOR IS NOT USED.
+	// That accessor is covered by no documented contract and would break
+	// silently across a quereus bump — and it is the wrong channel anyway
+	// (this file's header point 3 already measured it as unreachable behind
+	// the isolation wrapper). `subscribeToPublicChanges` reads its own
+	// `REMOTE_SINKS`, which is what `dispatchRemoteNotice` already feeds.
+
+	return true;
+}
+
+/**
  * Start same-origin change propagation for one handle over one network's
  * browser store. BOTH A READER AND A WRITER CALL THIS — that symmetry is not
  * incidental. If only the reader called it, a gate would have to start

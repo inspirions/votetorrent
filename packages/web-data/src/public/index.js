@@ -76,6 +76,7 @@ export {
 	PUBLIC_SUBSCRIBED_TABLES,
 	subscribeToPublicChanges,
 	enableChangePropagation,
+	notifyPeerWrite,
 } from './subscribe.js';
 
 /**

@@ -30,6 +30,15 @@
  *       message is captured and asserted free of the sentinel — the wire
  *       itself, not only what the consumer receives.
  *
+ *   S6  `notifyPeerWrite` (56-09) — THE NOTIFY HALF FOR PEER-REPLICATED
+ *       WRITES. Proves delivery with `remote: true`, the same three-key
+ *       projection and no-row-image guarantee S2 proves for a raw engine
+ *       event, allowlist refusal for a forbidden table, both degrade paths
+ *       (falsy `db`, a `networkHash` that makes `dbNameFor` throw), the raw
+ *       cross-tab wire shape, and the exact-two-deliveries case when both a
+ *       local subscription and this handle's own `enableChangePropagation`
+ *       bridge are active together.
+ *
  * WHAT IT CANNOT PROVE: that a REAL page re-renders when a REAL second handle
  * writes. That is the browser tier — `apps/VoteTorrentPublic/test/browser/
  * run-live-read-gate.mjs`, which mounts the shipped screen against a real
@@ -47,6 +56,7 @@ import assert from 'node:assert/strict';
 
 import { webDataSrc, moduleUrl } from '../../../scripts/lib/source-paths.mjs';
 import { classOf, FORBIDDEN_CLASSES } from '../src/classification.js';
+import { dbNameFor } from '../src/open-db.js';
 import { TABLES_READ as ELECTION_TABLES } from '../src/public/read-election.js';
 import { TABLES_READ as ROLL_TABLES } from '../src/public/read-registrant-roll.js';
 import { TABLES_READ as KEYRELEASE_TABLES } from '../src/public/read-keyrelease.js';
@@ -54,9 +64,20 @@ import { TABLES_READ as KEYRELEASE_TABLES } from '../src/public/read-keyrelease.
 // Resolved through `webDataSrc` rather than hand-derived, so a relocation of
 // the source tree moves a call argument here instead of a `'..', '..'` hop
 // count (D-03).
-const { PUBLIC_SUBSCRIBED_TABLES, subscribeToPublicChanges, enableChangePropagation } = await import(
+const { PUBLIC_SUBSCRIBED_TABLES, subscribeToPublicChanges, enableChangePropagation, notifyPeerWrite } = await import(
 	moduleUrl(webDataSrc('public', 'subscribe.js'))
 );
+
+/**
+ * `subscribe.js`'s own broadcast channel-name prefix (`CHANGE_CHANNEL_PREFIX`),
+ * mirrored here ONLY so S6's wire test can open a raw sibling channel and
+ * inspect exactly what was posted — not exported by the module, and this is
+ * the one test-owned duplicate of it. If this drifts from the real constant,
+ * S6's wire test simply stops receiving anything and fails loudly rather than
+ * silently proving nothing.
+ * @type {string}
+ */
+const TEST_CHANGE_CHANNEL_PREFIX = 'votetorrent-public-change:';
 
 /**
  * S1's control subject. A literal, so this file genuinely names a forbidden
@@ -414,4 +435,190 @@ test('S5: a stopped bridge delivers nothing further', async () => {
 
 	subB.unsubscribe();
 	pb.stop();
+});
+
+// ---------------------------------------------------------------------------
+// S6 — notifyPeerWrite (56-09). Delivery, projection, allowlist refusal, both
+//      degrade paths, the raw wire shape, and the exact duplicate count.
+// ---------------------------------------------------------------------------
+
+/** A task-boundary wait: one MessageChannel round trip past the microtask
+ * queue, then one timer past the task a BroadcastChannel delivers on — the
+ * same two-step S5 already uses. */
+async function pastBroadcastDelivery() {
+	await new Promise((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve(undefined);
+		};
+		channel.port2.postMessage(0);
+	});
+	await new Promise((resolve) => setTimeout(resolve, 25));
+}
+
+test('S6: notifyPeerWrite delivers exactly one notice with remote:true to a live local subscription and returns true; localWrites stays 0', () => {
+	const hash = `s6-basic-${Math.random().toString(36).slice(2)}`;
+	const handle = fakeHandle();
+	/** @type {any[]} */
+	const seen = [];
+	const sub = subscribeToPublicChanges(handle, (/** @type {any} */ n) => seen.push(n));
+
+	const result = notifyPeerWrite(handle, hash, PUBLIC_SUBSCRIBED_TABLES[0], 'update');
+
+	assert.equal(result, true, 'notifyPeerWrite did not report success on a live subscribed handle');
+	assert.equal(seen.length, 1, 'expected exactly one local delivery');
+	assert.equal(seen[0].remote, true, 'a peer write must be marked remote');
+	assert.equal(seen[0].table, PUBLIC_SUBSCRIBED_TABLES[0]);
+	assert.equal(seen[0].type, 'update');
+	assert.equal(sub.stats().localWrites, 0, 'a peer write is remote and must not disturb the "issues no writes" invariant');
+
+	sub.unsubscribe();
+});
+
+test('S6: the delivered notice has EXACTLY the own keys remote,table,type, and a sentinel planted near the call never reaches it', () => {
+	const hash = `s6-projection-${Math.random().toString(36).slice(2)}`;
+	const handle = fakeHandle();
+	// Planted near the call site, on the handle itself — notifyPeerWrite must
+	// never read it, so its presence anywhere in the delivered notice would
+	// prove the projection is a spread rather than a fresh object literal.
+	/** @type {any} */ (handle).plantedNearby = SENTINEL;
+
+	/** @type {any[]} */
+	const seen = [];
+	const sub = subscribeToPublicChanges(handle, (/** @type {any} */ n) => seen.push(n));
+
+	notifyPeerWrite(handle, hash, PUBLIC_SUBSCRIBED_TABLES[0], 'insert');
+
+	assert.equal(seen.length, 1);
+	const notice = seen[0];
+	assert.equal(
+		Object.keys(notice).sort().join(','),
+		'remote,table,type',
+		'the notice carries an own key beyond the three D-27/56-09 permits',
+	);
+	assert.ok(Object.isFrozen(notice), 'the notice is not frozen');
+	assert.ok(!JSON.stringify(notice).includes(SENTINEL), 'the notice carries the planted sentinel — a row-shaped image escaped');
+
+	sub.unsubscribe();
+});
+
+test('S6 POSITIVE CONTROL: a table outside PUBLIC_SUBSCRIBED_TABLES is refused whole — no delivery, returns false', () => {
+	assert.ok(
+		FORBIDDEN_CLASSES.includes(classOf(FORBIDDEN_TABLE)),
+		`this control names ${FORBIDDEN_TABLE} as forbidden, but the classification no longer agrees — the control has rotted`,
+	);
+	const hash = `s6-forbidden-${Math.random().toString(36).slice(2)}`;
+	const handle = fakeHandle();
+	/** @type {any[]} */
+	const seen = [];
+	const sub = subscribeToPublicChanges(handle, (/** @type {any} */ n) => seen.push(n));
+
+	const result = notifyPeerWrite(handle, hash, FORBIDDEN_TABLE, 'update');
+
+	assert.equal(result, false, 'a forbidden table was not refused — the allowlist is bounding notices only, not writes');
+	assert.deepEqual(seen, [], 'a forbidden table produced a notice');
+	assert.equal(sub.stats().localWrites, 0);
+
+	sub.unsubscribe();
+});
+
+test('S6: a falsy db returns false, delivers nothing and throws nothing', () => {
+	assert.doesNotThrow(() => {
+		assert.equal(notifyPeerWrite(null, 'nethash', PUBLIC_SUBSCRIBED_TABLES[0], 'update'), false);
+		assert.equal(notifyPeerWrite(undefined, 'nethash', PUBLIC_SUBSCRIBED_TABLES[0], 'update'), false);
+		assert.equal(notifyPeerWrite(false, 'nethash', PUBLIC_SUBSCRIBED_TABLES[0], 'update'), false);
+	});
+});
+
+test('S6: a networkHash that makes dbNameFor throw (empty string) returns false, delivers nothing and throws nothing', () => {
+	const handle = fakeHandle();
+	/** @type {any[]} */
+	const seen = [];
+	const sub = subscribeToPublicChanges(handle, (/** @type {any} */ n) => seen.push(n));
+
+	assert.doesNotThrow(() => {
+		assert.equal(notifyPeerWrite(handle, '', PUBLIC_SUBSCRIBED_TABLES[0], 'update'), false);
+	});
+	assert.deepEqual(seen, []);
+	assert.equal(sub.stats().localWrites, 0);
+
+	sub.unsubscribe();
+});
+
+test('S6: the cross-tab WIRE carries only { kind, table, type } — a second handle bridged by enableChangePropagation over the same network name receives the notice, and the raw posted message carries no sentinel and no fourth key', async () => {
+	const hash = `s6-wire-${Math.random().toString(36).slice(2)}`;
+	const writer = fakeHandle();
+	const reader = fakeHandle();
+	const readerPropagation = enableChangePropagation(reader, hash);
+	assert.equal(readerPropagation.active, true, 'propagation did not start — BroadcastChannel is unavailable in this runtime');
+
+	// A raw sibling channel on the SAME name, independent of the module, so
+	// the wire itself — not only what a consumer receives — is inspected.
+	const rawChannelName = TEST_CHANGE_CHANNEL_PREFIX + dbNameFor(hash);
+	/** @type {any[]} */
+	const raw = [];
+	const rawChannel = new BroadcastChannel(rawChannelName);
+	rawChannel.onmessage = (/** @type {any} */ event) => raw.push(event.data);
+
+	/** @type {any[]} */
+	const received = [];
+	const sub = subscribeToPublicChanges(reader, (/** @type {any} */ n) => received.push(n));
+
+	const result = notifyPeerWrite(writer, hash, PUBLIC_SUBSCRIBED_TABLES[0], 'delete');
+	assert.equal(result, true);
+
+	await pastBroadcastDelivery();
+
+	assert.equal(received.length, 1, `expected exactly one bridged notice on the reader, got ${received.length}`);
+	assert.equal(received[0].table, PUBLIC_SUBSCRIBED_TABLES[0]);
+	assert.equal(received[0].type, 'delete');
+	assert.equal(received[0].remote, true, 'a bridged notice must be marked remote');
+	assert.equal(Object.keys(received[0]).sort().join(','), 'remote,table,type');
+
+	assert.equal(raw.length, 1, `expected exactly one raw wire message, got ${raw.length}`);
+	assert.equal(
+		Object.keys(raw[0]).sort().join(','),
+		'kind,table,type',
+		'the raw posted message carries a fourth key beyond kind,table,type',
+	);
+	assert.ok(!JSON.stringify(raw[0]).includes(SENTINEL), 'the raw wire message carries a sentinel — a row-shaped image escaped onto the wire');
+
+	rawChannel.close();
+	sub.unsubscribe();
+	readerPropagation.stop();
+	readerPropagation.stop();
+});
+
+test('S6: with both a local subscription AND an active enableChangePropagation on the SAME handle, the originating page receives EXACTLY two deliveries for one notifyPeerWrite call', async () => {
+	const hash = `s6-echo-${Math.random().toString(36).slice(2)}`;
+	const handle = fakeHandle();
+	const propagation = enableChangePropagation(handle, hash);
+	assert.equal(propagation.active, true, 'propagation did not start — BroadcastChannel is unavailable in this runtime');
+
+	/** @type {any[]} */
+	const seen = [];
+	const sub = subscribeToPublicChanges(handle, (/** @type {any} */ n) => seen.push(n));
+
+	const result = notifyPeerWrite(handle, hash, PUBLIC_SUBSCRIBED_TABLES[0], 'insert');
+	assert.equal(result, true);
+
+	await pastBroadcastDelivery();
+
+	assert.equal(
+		seen.length,
+		2,
+		`expected exactly two deliveries (the direct dispatch plus the echo through this handle's own bridge), got ${seen.length}`,
+	);
+	for (const notice of seen) {
+		assert.equal(notice.remote, true);
+		assert.equal(notice.table, PUBLIC_SUBSCRIBED_TABLES[0]);
+		assert.equal(notice.type, 'insert');
+	}
+	assert.equal(sub.stats().localWrites, 0, 'neither delivery may be counted as a local write');
+
+	sub.unsubscribe();
+	propagation.stop();
+	propagation.stop();
 });
