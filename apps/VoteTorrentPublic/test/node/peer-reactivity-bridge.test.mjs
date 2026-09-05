@@ -656,6 +656,10 @@ test('the single notifyPeerWrite(...) call site is mechanically removable by a o
 	try {
 		const mutantPath = path.join(tmpDir, 'reactivity-bridge.mutant.mjs');
 		writeFileSync(mutantPath, mutated);
+		// `reactivity-bridge.js` imports `./fret-routing-probe.js` by a relative specifier (56-20) --
+		// copy it alongside the mutant, under its own real name, so that import still resolves from
+		// this throwaway directory. Never modified; the probe itself is not what this control tests.
+		writeFileSync(path.join(tmpDir, 'fret-routing-probe.js'), readFileSync(publicSrc('peer', 'fret-routing-probe.js'), 'utf8'));
 		/** @type {any} */
 		const mutantModule = await import(moduleUrl(mutantPath));
 		assert.equal(typeof mutantModule.startPeerReplication, 'function', 'the mutated copy failed to import cleanly -- this control would prove nothing');
