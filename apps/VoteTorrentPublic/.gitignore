@@ -25,3 +25,9 @@ public/config.json
 # dist-gate/dist-live above — the root .gitignore's bare `dist` rule matches
 # only an entry named exactly `dist`.
 dist-offline
+
+# 56-11: the mesh-read gate's build output. Same reason as
+# dist-gate/dist-live above — the root .gitignore's bare `dist` rule matches
+# only an entry named exactly `dist`. Also carries two runtime-written files
+# (config.json, gate-expectations.json) the driver writes after the build.
+dist-mesh-read

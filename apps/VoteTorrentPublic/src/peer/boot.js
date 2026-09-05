@@ -63,50 +63,63 @@
  * COLLECTION IDENTITY FOR REACTIVITY (open ground before this plan; no prior
  * plan resolves it). `56-09`'s `startPeerReplication` requires a
  * `collectionId`/`tailId` pair per subscription, and nothing in this repo's
- * production code has ever computed one before this file. Measured this
- * session, from installed bytes, and recorded here so a later reader can
- * re-verify rather than re-derive:
+ * production code has ever computed one before this file — nor, before this
+ * plan, had anything in this repo ever actually RUN this composition in a
+ * real browser at all (see the `db-p2p` browser-runtime defect this same
+ * plan found and patched, `.yarn/patches/@optimystic-db-p2p-*`). Measured
+ * this session, empirically, against a REAL strand connection (not inferred
+ * from types), and recorded here so a later reader can re-verify:
  *
  *   - `@optimystic/quereus-plugin-optimystic`'s vtab module defaults a
  *     table's `collectionUri` to `` `tree://default/${tableSchema.name}` ``
- *     when no explicit `using(...)` clause names one
- *     (`dist/chunk-*.js`, the `create()`/`connect()` path, `args["0"] ||
- *     tree://default/${tableSchema.name}`). `VOTETORRENT_SCHEMA_SQL` has ZERO
- *     `using` clauses (grep-confirmed), so every VoteTorrent table — on the
- *     strand exactly as on the UI's local store — defaults to this URI.
- *   - `CollectionFactory.getCollectionId(options)` returns
- *     `this.parseCollectionId(options.collectionUri)`, and `parseCollectionId`
- *     is a PURE string transform: strip the `tree://` prefix, return the
- *     remaining path unchanged. `CollectionId` is itself a type alias for
- *     `BlockId` (`string`) — there is no hash, no derived digest. So the
- *     collection id for table `T` is exactly the literal string
- *     `` `default/${T}` ``, computable with no plugin instance, no network
- *     call and no private API — `collectionIdForTable` below IS that
- *     one-line transform, not an approximation of it.
- *   - The collection's CURRENT tail id is `IChainHeader.tailId`
- *     (`@optimystic/db-core` `chain-nodes.d.ts`: `{ headId, tailId }`) on the
- *     collection's own HEADER BLOCK — and the header block's id IS the
- *     collection id (`getCollectionId`'s own doc comment: "This is the same
- *     id used as the collection's header block id ... exactly the
- *     CollectionChangeEvent.collectionId value emitted when the collection's
- *     blocks commit"). So the tail id is read by fetching that one block
- *     through the injected node's own `coordinatedRepo` — the same
- *     `IRepo.get({ blockIds })` primitive `56-05`'s `edge-node.js` already
- *     attaches (`Libp2pNodeWithRepo.coordinatedRepo`) — and reading
- *     `.tailId` off the returned block. No private `CollectionFactory`
- *     access, no `ParsedOptimysticOptions` construction: `IRepo` is the one
- *     public seam this needs.
- *   - Every table in `PUBLIC_SUBSCRIBED_TABLES` already has a committed
- *     header block (zero rows or not) by the time this module ever runs,
- *     because `apply schema App` — which BOTH the strand's founding process
- *     and this module's own `connectToStrand` composition run — creates each
- *     table's collection at DECLARE time
- *     (`CollectionFactory.createOrGetCollection`'s own doc comment: "bringing
- *     it into existence when nothing has ever been committed under its
- *     id"). A table whose header block is somehow still missing is a
- *     genuine strand-provisioning defect, not a case to paper over — see
- *     `collectionIdForTable`'s caller, which throws `PeerBootError` naming
- *     the table rather than silently skipping its subscription.
+ *     when no explicit `using(...)` clause names one, and
+ *     `VOTETORRENT_SCHEMA_SQL` has ZERO `using` clauses — confirmed directly
+ *     by reading `collection.id` off the live, already-instantiated
+ *     collection object (see below): it reads exactly `` `default/${T}` ``
+ *     for every table measured.
+ *   - THE COLLECTION ID AND TAIL ID ARE NOT REACHABLE VIA A COLD, UNSYNCED
+ *     `IRepo.get({ blockIds })` CALL — measured directly: calling
+ *     `node.coordinatedRepo.get({ blockIds: ['default/Election'] })` before
+ *     anything else has touched that collection on this connection returns
+ *     `{ state: {} }` with NO `block`, even though a `select 1 from Election`
+ *     over the SAME strand-read handle, moments earlier, succeeds. The two
+ *     paths are NOT the same seam: a bare `IRepo.get` is a raw block fetch
+ *     that returns "not held" for a collection this reader's cache has never
+ *     synced; a SQL statement goes through the vtab's OWN
+ *     `ICollection.sync()` call first, which performs the actual
+ *     discovery/fetch handshake. Calling `.sync()` on the SAME collection
+ *     object the vtab holds, THEN re-issuing the identical `IRepo.get` call,
+ *     returns the full header block (`headId`/`tailId` populated) — verified
+ *     by reading both the pre- and post-sync results back from a running
+ *     strand connection in this session.
+ *   - THE LIVE COLLECTION OBJECT IS REACHABLE, THOUGH UNDOCUMENTED. Every
+ *     class in `@optimystic/quereus-plugin-optimystic`'s compiled output
+ *     assigns its "private" fields with plain `this.field = value` (grep-
+ *     confirmed: no `#`-prefixed field anywhere) — TypeScript's `private` is
+ *     erased at compile time and enforces nothing at runtime. So
+ *     `db.schemaManager.getModule('optimystic').module` is the real
+ *     `OptimysticModule` instance, `.tables` is the real, live `Map` of
+ *     already-instantiated `OptimysticVirtualTable`s keyed by
+ *     `` `${declaringSchemaName}.${tableName}`.toLowerCase() `` (measured:
+ *     `Election`, declared under the sApp schema `App`, keys as
+ *     `'app.election'`), `.collection` on that vtable is the live `Tree`, and
+ *     `.collection` on THAT is the live `ICollection` — the same instance
+ *     the SQL layer reads and writes through. `resolveCollectionState` below
+ *     reaches exactly that path, calls its PUBLIC `sync()` method once, and
+ *     only then reads the header block. THIS IS UNDOCUMENTED INTERNAL API,
+ *     not a stable public contract — a future `@optimystic/*` bump could
+ *     rename or restructure any of these fields with no deprecation notice,
+ *     and this is recorded here, not hidden, so that the next reader who
+ *     hits a broken `resolveCollectionState` starts here rather than
+ *     re-discovering this whole path from scratch. Revisit if/when upstream
+ *     publishes a stable "give me this table's current collectionId/tailId"
+ *     API — see this plan's SUMMARY for the exact upstream ticket this
+ *     should become.
+ *   - A table whose collection is unreachable through this path (no cached
+ *     vtable, or `sync()` never resolves a header block) is a genuine
+ *     strand-provisioning defect, not a case to paper over —
+ *     `resolveCollectionState`'s caller throws `PeerBootError` naming the
+ *     table rather than silently skipping its subscription.
  *   - `startPeerReplication` is therefore called ONCE PER TABLE in
  *     `PUBLIC_SUBSCRIBED_TABLES`, sharing the SAME `readRows` closure across
  *     every subscription (56-16's `createStrandRowSource` deliberately
@@ -116,13 +129,14 @@
  *     the load-bearing reason a per-table collectionId, rather than one
  *     "the" collectionId, is even askable: there is no single shared
  *     collection covering every table.
- *   - IF THIS REASONING IS EVER WRONG — the URI default changes, the header
- *     block does not exist yet, or the tail id this module reads is stale —
- *     the failure surfaces as: no replicated row ever lands (mesh-read gate
- *     rung 5, `test/browser/mesh-read-gate.js`), and separately, rung 10
- *     (store/screen agreement through a freshly attached handle) catches a
- *     silently mis-routed or dead subscription even if some other rung
- *     looked green. Both rungs are this reasoning's standing check.
+ *   - IF THIS REASONING IS EVER WRONG — the internal field names move, the
+ *     header block never resolves, or the tail id this module reads is
+ *     stale — the failure surfaces as: no replicated row ever lands
+ *     (mesh-read gate rung 5, `test/browser/mesh-read-gate.js`), and
+ *     separately, rung 10 (store/screen agreement through a freshly attached
+ *     handle) catches a silently mis-routed or dead subscription even if
+ *     some other rung looked green. Both rungs are this reasoning's standing
+ *     check.
  */
 
 import { loadBootstrapConfig } from './config.js';
@@ -172,28 +186,60 @@ export const PEER_BOOT_STATUS = Object.freeze({
 });
 
 /**
- * The collection id for one table, under the plugin's own default URI
- * scheme. Pure. See this module's header for the citation this is drawn
- * from.
- * @param {string} table
- * @returns {string}
+ * The schema name every VoteTorrent table is declared under on the strand
+ * (the sApp schema `App`, per `strand-read.js`'s own `setSchemaPath(['App',
+ * 'main'])` call) — lowercased, because `OptimysticModule.tables`'s cache
+ * key is `` `${declaringSchemaName}.${tableName}`.toLowerCase() `` (measured
+ * this session; see this module's header).
+ * @type {string}
  */
-function collectionIdForTable(table) {
-	return `default/${table}`;
+const OPTIMYSTIC_MODULE_NAME = 'optimystic';
+const SAPP_SCHEMA_NAME_LOWER = 'app';
+
+/**
+ * Reach the live `ICollection` instance the optimystic vtab module already
+ * holds for `table`, via the undocumented-but-runtime-accessible path this
+ * module's header cites and measures. Returns `undefined` (never throws) when
+ * any step along the path is absent — the caller decides how to name that.
+ * @param {import('@quereus/quereus').Database} strandDb
+ * @param {string} table
+ * @returns {{ id: string, sync: () => Promise<void> } | undefined}
+ */
+function reachLiveCollection(strandDb, table) {
+	const registered = /** @type {any} */ (strandDb.schemaManager.getModule(OPTIMYSTIC_MODULE_NAME));
+	const optimysticModule = registered?.module;
+	const tableKey = `${SAPP_SCHEMA_NAME_LOWER}.${table.toLowerCase()}`;
+	const vtable = optimysticModule?.tables?.get?.(tableKey);
+	const tree = vtable?.collection;
+	return tree?.collection;
 }
 
 /**
- * Fetch a collection's current tail block id through the injected node's own
- * `coordinatedRepo`. Throws `PeerBootError` naming the table when the header
- * block is absent — a strand-provisioning defect this module refuses to
- * paper over with a skipped subscription. See this module's header for why
- * that block is expected to already exist.
+ * Resolve one table's `{ collectionId, tailId }` pair: reach its live
+ * collection object, call its PUBLIC `sync()` once to force the
+ * discovery/fetch handshake a raw block-id `get()` cannot trigger on an
+ * unsynced collection (measured this session — see this module's header),
+ * then read the header block's `tailId` off the injected node's
+ * `coordinatedRepo`. Throws `PeerBootError` naming the table when any step
+ * fails — a strand-provisioning defect this module refuses to paper over
+ * with a skipped subscription.
+ * @param {import('@quereus/quereus').Database} strandDb
  * @param {{ coordinatedRepo: { get(blockGets: { blockIds: string[] }): Promise<Record<string, { block?: { tailId?: string } }>> } }} node
  * @param {string} table
- * @returns {Promise<string>}
+ * @returns {Promise<{ collectionId: string, tailId: string }>}
  */
-async function resolveCollectionTailId(node, table) {
-	const collectionId = collectionIdForTable(table);
+async function resolveCollectionState(strandDb, node, table) {
+	const collection = reachLiveCollection(strandDb, table);
+	if (!collection) {
+		throw new PeerBootError(table, 'no live collection object found for this table -- the strand has not instantiated it');
+	}
+	const collectionId = collection.id;
+	try {
+		await collection.sync();
+	} catch (err) {
+		const name = err && typeof (/** @type {any} */ (err).name) === 'string' ? /** @type {any} */ (err).name : 'Error';
+		throw new PeerBootError(table, `collection.sync() failed while resolving the collection tail (${name})`);
+	}
 	/** @type {Record<string, { block?: { tailId?: string } }>} */
 	let results;
 	try {
@@ -205,9 +251,9 @@ async function resolveCollectionTailId(node, table) {
 	const result = results ? results[collectionId] : undefined;
 	const tailId = result && result.block ? result.block.tailId : undefined;
 	if (!tailId) {
-		throw new PeerBootError(table, `no committed header block for collection "${collectionId}" -- the strand has never declared this table`);
+		throw new PeerBootError(table, `no committed header block for collection "${collectionId}" after sync() -- the strand has never declared this table`);
 	}
-	return tailId;
+	return { collectionId, tailId };
 }
 
 /**
@@ -380,8 +426,11 @@ export async function startPublicPeerBoot(options) {
 		//       module's header for why a per-table collectionId is what the
 		//       question even needs to be, and why sharing `readRows` is safe.
 		for (const table of resolved.subscribedTables) {
-			const collectionIdString = collectionIdForTable(table);
-			const tailId = await resolveCollectionTailId(/** @type {any} */ (edgeNode.node), table);
+			const { collectionId: collectionIdString, tailId } = await resolveCollectionState(
+				strandReadHandle.db,
+				/** @type {any} */ (edgeNode.node),
+				table,
+			);
 			// `startPeerReplication` (56-09) requires `collectionId` as RAW BYTES
 			// (`ReactivitySubscriptionManagerOptions.collectionId: Uint8Array` --
 			// "the collection's stable identity, the collection's id block id, raw

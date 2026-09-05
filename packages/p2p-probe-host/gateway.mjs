@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+// @ts-nocheck -- packages/p2p-probe-host has no tsconfig.json and no typecheck script of its
+// own; this file was never typechecked until 56-11's mesh-read-origin.mjs imported startGateway
+// from apps/VoteTorrentPublic, pulling it into that app's stricter checkJs graph transitively.
+// Untyped by design, not by neglect -- see this file's own header for what it actually is.
 /**
  * packages/p2p-probe-host/gateway.mjs — Phase 56 D-12 public-observer gateway.
  *
@@ -638,7 +642,7 @@ async function runSelfCheck({ node, config, provenanceResult, runtimeJsonPath, c
  *   defaulting identically.
  * @returns {Promise<{
  *   node: import('@serfab/cadre-core').CadreNode,
- *   provenance: unknown,
+ *   provenance: { verdict: string, [key: string]: unknown },
  *   controlAddrs: string[],
  *   controlAddrsDns: string[],
  *   strandAddrs: Record<string, string[]>,

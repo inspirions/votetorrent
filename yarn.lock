@@ -4377,7 +4377,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@optimystic/db-p2p@npm:^0.27.0":
+"@optimystic/db-p2p@npm:0.27.0":
   version: 0.27.0
   resolution: "@optimystic/db-p2p@npm:0.27.0"
   dependencies:
@@ -4412,6 +4412,44 @@ __metadata:
     uint8arraylist: "npm:^2.4.8"
     uint8arrays: "npm:^6.1.1"
   checksum: 10c0/58c6baf4b2b670cc064bc4fbd58f0371683b3652ec3e61ff24db1dfcd0af6cfe649ed2b4433c6deaa090eed277811efe7a6e6d7d68141d3d8de3ceb305f76dae
+  languageName: node
+  linkType: hard
+
+"@optimystic/db-p2p@patch:@optimystic/db-p2p@npm%3A0.27.0#~/.yarn/patches/@optimystic-db-p2p-npm-0.27.0-6a35c23d73.patch":
+  version: 0.27.0
+  resolution: "@optimystic/db-p2p@patch:@optimystic/db-p2p@npm%3A0.27.0#~/.yarn/patches/@optimystic-db-p2p-npm-0.27.0-6a35c23d73.patch::version=0.27.0&hash=f5aa47"
+  dependencies:
+    "@chainsafe/libp2p-noise": "npm:^17.0.0"
+    "@chainsafe/libp2p-yamux": "npm:^8.0.1"
+    "@libp2p/autonat": "npm:^3.0.21"
+    "@libp2p/bootstrap": "npm:^12.0.11"
+    "@libp2p/circuit-relay-v2": "npm:^4.1.3"
+    "@libp2p/crypto": "npm:^5.1.19"
+    "@libp2p/dcutr": "npm:^3.0.21"
+    "@libp2p/identify": "npm:^4.0.10"
+    "@libp2p/interface": "npm:^3.1.0"
+    "@libp2p/kad-dht": "npm:^16.1.3"
+    "@libp2p/peer-id": "npm:^6.0.4"
+    "@libp2p/ping": "npm:^3.0.10"
+    "@libp2p/tcp": "npm:^11.0.10"
+    "@libp2p/websockets": "npm:^10.1.3"
+    "@multiformats/multiaddr": "npm:^13.0.1"
+    "@noble/curves": "npm:^2.0.1"
+    "@noble/hashes": "npm:^2.0.1"
+    "@optimystic/db-core": "npm:^0.27.0"
+    async-mutex: "npm:^0.5.0"
+    debug: "npm:^4.4.3"
+    it-all: "npm:^3.0.9"
+    it-length-prefixed: "npm:^10.0.1"
+    it-pipe: "npm:^3.0.1"
+    it-pushable: "npm:^3.2.3"
+    libp2p: "npm:^3.1.3"
+    multiformats: "npm:^13.4.2"
+    p2p-fret: "npm:^1.0.0-beta.4"
+    protons-runtime: "npm:^6.0.0"
+    uint8arraylist: "npm:^2.4.8"
+    uint8arrays: "npm:^6.1.1"
+  checksum: 10c0/ac043541e2b6b4d979708de154bf227c677ef412152282172d573454f69778a863d161becdc3a2869e0c953806afe5f37c04cf4212a7a61f12b71209669f717e
   languageName: node
   linkType: hard
 
@@ -17200,7 +17238,7 @@ __metadata:
     "@libp2p/crypto": "npm:^5"
     "@libp2p/peer-id": "npm:^6.0.0"
     "@libp2p/websockets": "npm:^10"
-    "@optimystic/db-p2p": "npm:^0.27.0"
+    "@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A0.27.0#~/.yarn/patches/@optimystic-db-p2p-npm-0.27.0-6a35c23d73.patch"
     "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.12.0#~/.yarn/patches/@serfab-cadre-core-npm-0.12.0-7ac3a744da.patch"
     "@serfab/strand-proto": "npm:^0.11.0"
   languageName: unknown
@@ -21588,7 +21626,7 @@ __metadata:
     "@noble/curves": "npm:^2"
     "@noble/hashes": "npm:^2"
     "@optimystic/db-core": "npm:^0.27.0"
-    "@optimystic/db-p2p": "npm:^0.27.0"
+    "@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A0.27.0#~/.yarn/patches/@optimystic-db-p2p-npm-0.27.0-6a35c23d73.patch"
     "@optimystic/db-p2p-storage-rn": "npm:^0.27.0"
     "@optimystic/quereus-plugin-optimystic": "npm:^0.27.0"
     "@quereus/isolation": "npm:^4.18.0"
@@ -21681,7 +21719,7 @@ __metadata:
     "@libp2p/crypto": "npm:5.1.21"
     "@libp2p/websockets": "npm:10.1.18"
     "@optimystic/db-core": "npm:^0.27.0"
-    "@optimystic/db-p2p": "npm:^0.27.0"
+    "@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A0.27.0#~/.yarn/patches/@optimystic-db-p2p-npm-0.27.0-6a35c23d73.patch"
     "@optimystic/db-p2p-storage-web": "npm:^0.27.0"
     "@optimystic/quereus-plugin-crypto": "npm:^0.27.0"
     "@quereus/plugin-indexeddb": "npm:4.18.0"
@@ -21720,7 +21758,7 @@ __metadata:
     "@noble/curves": "npm:^2"
     "@noble/hashes": "npm:^2"
     "@optimystic/db-core": "npm:^0.27.0"
-    "@optimystic/db-p2p": "npm:^0.27.0"
+    "@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A0.27.0#~/.yarn/patches/@optimystic-db-p2p-npm-0.27.0-6a35c23d73.patch"
     "@optimystic/db-p2p-storage-rn": "npm:^0.27.0"
     "@optimystic/quereus-plugin-optimystic": "npm:^0.27.0"
     "@quereus/isolation": "npm:^4.18.0"

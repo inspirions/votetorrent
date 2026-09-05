@@ -78,10 +78,38 @@ function makeFakeDeps(overrides = {}) {
 		},
 	};
 
-	/** @type {{ close: () => Promise<void> }} */
+	// A fake `db.schemaManager.getModule('optimystic').module.tables` map,
+	// mirroring the shape `resolveCollectionState` reaches into: one entry per
+	// subscribed table, keyed `app.<table lowercased>`, each holding a live
+	// `{ id, sync }` collection object two levels down
+	// (`vtable.collection.collection`). `overrides.missingCollectionTables`
+	// simulates a table this strand never instantiated (omit its entry
+	// entirely); `overrides.syncThrowsFor` simulates a `sync()` failure.
+	const optimysticTables = new Map();
+	for (const table of subscribedTables) {
+		if (overrides.missingCollectionTables?.includes(table)) continue;
+		optimysticTables.set(`app.${table.toLowerCase()}`, {
+			collection: {
+				collection: {
+					id: `default/${table}`,
+					sync: overrides.syncThrowsFor?.includes(table)
+						? async () => {
+								throw new Error('sync failed');
+							}
+						: async () => {},
+				},
+			},
+		});
+	}
+	/** @type {{ close: () => Promise<void>, db: any }} */
 	const fakeStrandReadHandle = {
 		close: async () => {
 			calls.push('strandReadHandle.close');
+		},
+		db: {
+			schemaManager: {
+				getModule: (/** @type {string} */ name) => (name === 'optimystic' ? { module: { tables: optimysticTables } } : undefined),
+			},
 		},
 	};
 
@@ -187,10 +215,10 @@ test('STARTED: a missing coordinatedRepo attachment on the constructed node is F
 	assert.equal(result.subject, 'coordinatedRepo');
 });
 
-test('FAILED: a table whose collection header block is absent throws PeerBootError naming the table, and boot reports FAILED with that table as the subject', async () => {
+test('FAILED: a table with no live collection object throws PeerBootError naming the table, and boot reports FAILED with that table as the subject', async () => {
 	const { deps } = makeFakeDeps({
 		subscribedTables: ['TableA'],
-		coordinatedRepoGet: async () => ({}), // no block for any requested id
+		missingCollectionTables: ['TableA'],
 	});
 	const result = await startPublicPeerBoot({ networkHash: 'nh-1', deps });
 	assert.equal(result.status, PEER_BOOT_STATUS.FAILED);
