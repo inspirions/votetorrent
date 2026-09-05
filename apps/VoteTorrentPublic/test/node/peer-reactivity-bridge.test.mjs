@@ -27,12 +27,22 @@
  * `node.reactivitySubscribers.deliver(topicId, n)` — the real socket-delivery
  * seam the forwarder host uses — never by calling anything on the bridge's
  * private `onVerifiedNotification` directly (it is not exported).
+ *
+ * TIME INJECTION (56-17 Task 3). The bounded cold-start retry and the ttl/3
+ * renewal cadence are driven through THREE injectable, optional
+ * `startPeerReplication` options -- `delayFn`, `scheduleInterval`,
+ * `cancelInterval` -- each defaulting to the real timer primitives. Tests
+ * below inject fakes that resolve/record immediately (`delayFn`) or that
+ * capture the scheduled callback for the test to invoke directly
+ * (`scheduleInterval`/`cancelInterval`), so every timing assertion runs with
+ * ZERO real waiting -- no test in this file ever calls the real
+ * `setTimeout`/`setInterval`.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { bytesToB64url } from '@optimystic/db-core';
+import { bytesToB64url, CohortBackoffError } from '@optimystic/db-core';
 import { ReactivitySubscriberRegistry, reactivityTailBytes } from '@optimystic/db-p2p';
 import { reactivityTopicId } from '@optimystic/db-core';
 import { PUBLIC_SUBSCRIBED_TABLES } from '@votetorrent/web-data/public';
@@ -44,7 +54,41 @@ import {
 	resolvePublicStoreModule,
 	applyPeerRowBatch,
 	startPeerReplication,
+	PEER_REGISTER_MAX_ATTEMPTS,
+	PEER_RENEWAL_FRACTION,
 } from '../../src/peer/reactivity-bridge.js';
+
+/**
+ * A `scheduleInterval`/`cancelInterval` pair for tests: `scheduleInterval` never
+ * schedules a REAL timer -- it captures the callback so the test can invoke
+ * it directly (as many times as it likes, with no real elapsed time), and
+ * `cancelInterval` records that it was called with the SAME handle.
+ * @returns {{ scheduleInterval: (fn: () => void, ms: number) => unknown, cancelInterval: any, getTick: () => (() => void), getIntervalMs: () => number }}
+ */
+function makeFakeInterval() {
+	/** @type {(() => void) | undefined} */
+	let tick;
+	/** @type {number | undefined} */
+	let intervalMs;
+	const handle = { fake: 'interval-handle' };
+	const cancelInterval = spy(() => undefined);
+	return {
+		scheduleInterval: (/** @type {() => void} */ fn, /** @type {number} */ ms) => {
+			tick = fn;
+			intervalMs = ms;
+			return handle;
+		},
+		cancelInterval,
+		getTick: () => {
+			if (!tick) throw new Error('scheduleInterval was never called');
+			return tick;
+		},
+		getIntervalMs: () => {
+			if (intervalMs === undefined) throw new Error('scheduleInterval was never called');
+			return intervalMs;
+		},
+	};
+}
 
 /**
  * `ReactivitySubscriberRegistry.deliver` is FIRE-AND-FORGET by upstream's own
@@ -132,13 +176,16 @@ function makeNotification({ revision, invalidation }) {
 /**
  * A fake `CohortTopicService`. `verifyResult` controls every
  * `verifier().verifyMessage(...)` call -- default `'verified'`, the "trust
- * the origin" precondition this module's header names.
- * @param {{ verifyResult?: 'verified' | 'untrusted' }} [opts]
+ * the origin" precondition this module's header names. `registerImpl` /
+ * `renewImpl` let a test control `register()`/`renew()` across MULTIPLE
+ * calls (e.g. fail N times then succeed) -- the default behaviour matches
+ * the original fixture exactly.
+ * @param {{ verifyResult?: 'verified' | 'untrusted', registerImpl?: (req: any) => Promise<any>, renewImpl?: (handle: any) => Promise<void> }} [opts]
  */
 function makeFakeService(opts = {}) {
 	const verifyResult = opts.verifyResult ?? 'verified';
 	const withdraw = spy(async () => undefined);
-	const register = spy(async (/** @type {any} */ req) => ({
+	const defaultRegisterImpl = async (/** @type {any} */ req) => ({
 		topicId: req.topicId,
 		tier: req.tier,
 		primary: new Uint8Array([1]),
@@ -146,10 +193,12 @@ function makeFakeService(opts = {}) {
 		cohortEpoch: new Uint8Array([2]),
 		cohortMembers: [],
 		renewal: {},
-	}));
+	});
+	const register = spy(opts.registerImpl ?? defaultRegisterImpl);
+	const renew = spy(opts.renewImpl ?? (async () => undefined));
 	return {
 		register,
-		renew: spy(async () => undefined),
+		renew,
 		withdraw,
 		lookup: spy(async () => {
 			throw new Error('lookup: not exercised by this fixture');
@@ -630,4 +679,234 @@ test('the single notifyPeerWrite(...) call site is mechanically removable by a o
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
+});
+
+// ---------------------------------------------------------------------------
+// 8. startPeerReplication -- bounded cold-start retry (CohortBackoffError
+//    only), no real waiting: `delayFn` is injected and records its calls.
+// ---------------------------------------------------------------------------
+
+test('startPeerReplication retries a CohortBackoffError, honouring its own afterMs, and succeeds once the cohort accepts', async () => {
+	let calls = 0;
+	const registerImpl = async (/** @type {any} */ req) => {
+		calls += 1;
+		if (calls < 3) throw new CohortBackoffError(1000 * calls);
+		return {
+			topicId: req.topicId,
+			tier: req.tier,
+			primary: new Uint8Array([1]),
+			backups: [],
+			cohortEpoch: new Uint8Array([2]),
+			cohortMembers: [],
+			renewal: {},
+		};
+	};
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node, service } = makeFakeNode({ service: makeFakeService({ registerImpl }) });
+	const delays = /** @type {number[]} */ ([]);
+	const delayFn = spy(async (/** @type {number} */ ms) => {
+		delays.push(ms);
+	});
+	const { scheduleInterval, cancelInterval } = makeFakeInterval();
+
+	const handle = await startPeerReplication({
+		db,
+		networkHash: NETWORK_HASH,
+		node,
+		collectionId: COLLECTION_ID,
+		tailId: TAIL_ID,
+		readRows: async () => [],
+		delayFn,
+		scheduleInterval,
+		cancelInterval,
+	});
+
+	assert.equal(service.register.calls.length, 3, 'expected exactly 3 attempts: 2 backoffs then a success');
+	assert.deepEqual(delays, [1000, 2000], 'each wait must honour the backoff error\'s own afterMs, in order');
+	await handle.stop();
+});
+
+test('startPeerReplication exhausts PEER_REGISTER_MAX_ATTEMPTS on a persistent CohortBackoffError and throws a named PeerReplicationError', async () => {
+	const registerImpl = async () => {
+		throw new CohortBackoffError(500);
+	};
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node, service } = makeFakeNode({ service: makeFakeService({ registerImpl }) });
+	const delayFn = spy(async () => undefined);
+	const { scheduleInterval, cancelInterval } = makeFakeInterval();
+
+	await assert.rejects(
+		startPeerReplication({
+			db,
+			networkHash: NETWORK_HASH,
+			node,
+			collectionId: COLLECTION_ID,
+			tailId: TAIL_ID,
+			readRows: async () => [],
+			delayFn,
+			scheduleInterval,
+			cancelInterval,
+		}),
+		(/** @type {any} */ err) => err instanceof PeerReplicationError && err.subject === 'register',
+	);
+	assert.equal(service.register.calls.length, PEER_REGISTER_MAX_ATTEMPTS);
+	assert.equal(delayFn.calls.length, PEER_REGISTER_MAX_ATTEMPTS - 1, 'a wait happens between attempts, never after the last one');
+});
+
+test('startPeerReplication does NOT retry a non-CohortBackoffError rejection from register() -- it propagates on the first failure', async () => {
+	class SyntheticRegisterError extends Error {}
+	const registerImpl = async () => {
+		throw new SyntheticRegisterError('synthetic, non-backoff failure');
+	};
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node, service } = makeFakeNode({ service: makeFakeService({ registerImpl }) });
+	const delayFn = spy(async () => undefined);
+	const { scheduleInterval, cancelInterval } = makeFakeInterval();
+
+	await assert.rejects(
+		startPeerReplication({
+			db,
+			networkHash: NETWORK_HASH,
+			node,
+			collectionId: COLLECTION_ID,
+			tailId: TAIL_ID,
+			readRows: async () => [],
+			delayFn,
+			scheduleInterval,
+			cancelInterval,
+		}),
+		(/** @type {any} */ err) => err instanceof SyntheticRegisterError,
+	);
+	assert.equal(service.register.calls.length, 1, 'a non-backoff rejection must not be retried');
+	assert.equal(delayFn.calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 9. startPeerReplication -- the ttl/3 renewal cadence, no real waiting: the
+//    interval callback is captured by the fake `scheduleInterval` and invoked
+//    directly by the test.
+// ---------------------------------------------------------------------------
+
+test('after a successful register, the handle schedules a renewal at PEER_RENEWAL_FRACTION of the resolved TTL, never a hard-coded literal', async () => {
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node } = makeFakeNode();
+	const { scheduleInterval, cancelInterval, getIntervalMs } = makeFakeInterval();
+
+	const handle = await startPeerReplication({
+		db,
+		networkHash: NETWORK_HASH,
+		node,
+		collectionId: COLLECTION_ID,
+		tailId: TAIL_ID,
+		readRows: async () => [],
+		delayFn: async () => undefined,
+		scheduleInterval,
+		cancelInterval,
+	});
+
+	// Edge's own resolved TTL (60s) times the substrate's ttl/3 fraction --
+	// this module derives it via db-core's subscriberTtlForProfile, never a
+	// literal 60000/20000 in its own source (see the module header).
+	assert.equal(getIntervalMs(), Math.floor(60_000 * PEER_RENEWAL_FRACTION));
+	await handle.stop();
+});
+
+test('the renewal timer calls manager.renew() on each tick and stops firing after stop()', async () => {
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node, service } = makeFakeNode();
+	const { scheduleInterval, cancelInterval, getTick } = makeFakeInterval();
+
+	const handle = await startPeerReplication({
+		db,
+		networkHash: NETWORK_HASH,
+		node,
+		collectionId: COLLECTION_ID,
+		tailId: TAIL_ID,
+		readRows: async () => [],
+		delayFn: async () => undefined,
+		scheduleInterval,
+		cancelInterval,
+	});
+
+	const tick = getTick();
+	await tick();
+	await tick();
+	assert.equal(service.renew.calls.length, 2, 'expected exactly 2 renew() calls for 2 simulated ticks');
+
+	await handle.stop();
+	assert.equal(cancelInterval.calls.length, 1, 'stop() must clear the renewal timer exactly once');
+
+	// A stray fire after stop() (simulating a real timer's in-flight callback
+	// racing clearInterval) must be a no-op.
+	await tick();
+	assert.equal(service.renew.calls.length, 2, 'renew() must not fire after stop()');
+});
+
+test('a rejecting renew() logs the error NAME only and leaves the timer running -- one failed keep-alive is not a reason to abandon the subscription', async () => {
+	let renewCalls = 0;
+	const renewImpl = async () => {
+		renewCalls += 1;
+		if (renewCalls === 1) {
+			const err = new Error('synthetic renew failure');
+			err.name = 'SyntheticRenewError';
+			throw err;
+		}
+	};
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node } = makeFakeNode({ service: makeFakeService({ renewImpl }) });
+	const { scheduleInterval, cancelInterval, getTick } = makeFakeInterval();
+
+	const handle = await startPeerReplication({
+		db,
+		networkHash: NETWORK_HASH,
+		node,
+		collectionId: COLLECTION_ID,
+		tailId: TAIL_ID,
+		readRows: async () => [],
+		delayFn: async () => undefined,
+		scheduleInterval,
+		cancelInterval,
+	});
+
+	const tick = getTick();
+	const original = console.error;
+	/** @type {any[][]} */
+	const logged = [];
+	console.error = (/** @type {any[]} */ ...args) => logged.push(args);
+	try {
+		await tick();
+		await flush();
+	} finally {
+		console.error = original;
+	}
+	assert.ok(logged.some((args) => args.includes('SyntheticRenewError')), 'the error NAME must have been logged');
+
+	await tick();
+	assert.equal(renewCalls, 2, 'a rejecting renew() must not stop subsequent ticks -- the timer keeps running');
+
+	await handle.stop();
+});
+
+test('stop() clears the renewal timer BEFORE unregistering and withdrawing, and is idempotent', async () => {
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node, service } = makeFakeNode();
+	const { scheduleInterval, cancelInterval } = makeFakeInterval();
+
+	const handle = await startPeerReplication({
+		db,
+		networkHash: NETWORK_HASH,
+		node,
+		collectionId: COLLECTION_ID,
+		tailId: TAIL_ID,
+		readRows: async () => [],
+		delayFn: async () => undefined,
+		scheduleInterval,
+		cancelInterval,
+	});
+
+	await handle.stop();
+	await handle.stop();
+
+	assert.equal(cancelInterval.calls.length, 1, 'the second stop() call must not clear the timer a second time');
+	assert.equal(service.withdraw.calls.length, 1, 'the second stop() call must not withdraw a second time');
 });

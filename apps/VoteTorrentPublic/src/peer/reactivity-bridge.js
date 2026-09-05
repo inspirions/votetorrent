@@ -109,14 +109,67 @@
  * genuinely mutated bundle rather than transforming a source copy — see
  * Task 3's isolation control). Nothing in this module is imported from
  * `main.tsx`.
+ *
+ * 6. THIS MODULE OWNS A RECURRING TIMER (56-17). The substrate schedules
+ *    NOTHING on its own: `RegistrationHandle.renewal` is documented as "the
+ *    ttl/3 ping loop" the SCHEDULER should call
+ *    (`@optimystic/db-core` `dist/src/cohort-topic/registration/renewal.d.ts:38`),
+ *    and nothing in `db-core` or `db-p2p` ever calls it. Without a caller
+ *    driving it, every subscription silently dies one Edge TTL (60s) after
+ *    `register()` — `project_stale_screen_mimics_lost_write`, at the
+ *    transport layer. `startPeerReplication` therefore schedules its OWN
+ *    interval, at `PEER_RENEWAL_FRACTION` (`ttl/3`) of the RESOLVED
+ *    subscriber TTL (read via `subscriberTtlForProfile(profile)`, never a
+ *    hard-coded `60000`/`20000` literal), calling `manager.renew()` on each
+ *    tick. `stop()` clears this timer FIRST, before unregistering and
+ *    withdrawing. This is the recurring OUTBOUND signal
+ *    `56-17-COHORT-TOPIC-POSTURE.md` accounts for when it states what a
+ *    gateway operator (and the serving cohort) can observe about a visitor —
+ *    see that record for the full reasoning and the falsifiable predictions
+ *    this cadence makes. It is separate from, and does not replace,
+ *    `edge-node.js`'s cohort-topic HOST gossip timer, which idles while this
+ *    browser's coord registry stays empty.
  */
 
-import { edgeProfile, reactivityTopicId } from '@optimystic/db-core';
+import { edgeProfile, reactivityTopicId, CohortBackoffError, subscriberTtlForProfile } from '@optimystic/db-core';
 import { ReactivitySubscriptionManager, reactivityTailBytes } from '@optimystic/db-p2p';
 import { PUBLIC_SUBSCRIBED_TABLES, STORE_MODULE_NAME, notifyPeerWrite } from '@votetorrent/web-data/public';
 
 /** The one prefix every log line in this module carries. @type {string} */
 const LOG_PREFIX = 'peer/reactivity-bridge:';
+
+/**
+ * Bound on `register()` attempts against a `CohortBackoffError` (56-17). The
+ * substrate documents this error as the expected cold-start signal — "a
+ * cohort with no willing primary yet" (`@optimystic/db-core`
+ * `dist/src/cohort-topic/service.d.ts:56-60`) — so seeing it once or twice on
+ * boot is normal, not a fault. A cohort that NEVER produces a willing primary
+ * is a misconfiguration and must surface as a named `PeerReplicationError`
+ * rather than retry forever.
+ * @type {5}
+ */
+export const PEER_REGISTER_MAX_ATTEMPTS = 5;
+
+/**
+ * The substrate's own renewal cadence: a participant pings its primary every
+ * `ttl/3` (`@optimystic/db-core` `dist/src/cohort-topic/registration/renewal.d.ts:38`
+ * — "the cadence the scheduler should call `pingLoop` at"). This module
+ * applies the same fraction to the RESOLVED subscriber TTL to derive its own
+ * renewal interval — see `startPeerReplication`'s renewal-scheduling comment
+ * for which value that TTL is read from.
+ * @type {number}
+ */
+export const PEER_RENEWAL_FRACTION = 1 / 3;
+
+/**
+ * A ceiling on any single backoff wait, independent of what a
+ * `CohortBackoffError.afterMs` reports. This is this MODULE's own safety
+ * bound, not a substrate value — it exists so an unusually large or
+ * misbehaving `afterMs` cannot stall one register attempt (and therefore
+ * page boot) for an outsized period.
+ * @type {10000}
+ */
+const REGISTER_BACKOFF_CEILING_MS = 10_000;
 
 /**
  * Chunk size for `applyExternalRowChanges` batches — bounds peak memory for a
@@ -310,6 +363,14 @@ export async function applyPeerRowBatch(db, table, ops) {
  * @property {(projected: { collectionId: string, revision: number, invalidation: boolean | undefined }) => Promise<ReadonlyArray<PeerRowBatch>>} readRows
  *   REQUIRED. No default, no stub, no static variant -- see the module header's "open seam" paragraph.
  * @property {import('@optimystic/db-core').NodeProfile} [profile] defaults to `edgeProfile()`.
+ * @property {(ms: number) => Promise<void>} [delayFn] injectable wait used ONLY between bounded
+ *   `register()` retries (56-17 Task 3); defaults to a real `setTimeout`-backed delay. Tests inject a
+ *   fake that resolves immediately while recording the requested `ms`.
+ * @property {(fn: () => void, ms: number) => unknown} [scheduleInterval] injectable interval primitive
+ *   used ONLY for the ttl/3 renewal cadence; defaults to the real `setInterval`. Tests inject a fake
+ *   that captures the callback instead of scheduling real time.
+ * @property {(handle: unknown) => void} [cancelInterval] the `cancelInterval` counterpart; defaults
+ *   to the real `clearInterval`.
  */
 
 /**
@@ -342,7 +403,27 @@ export async function startPeerReplication(options) {
 	if (!options || typeof options !== 'object') {
 		throw new PeerReplicationError('options', 'startPeerReplication: an options object is required');
 	}
-	const { db, networkHash, node, collectionId, tailId, readRows, profile } = options;
+	const {
+		db,
+		networkHash,
+		node,
+		collectionId,
+		tailId,
+		readRows,
+		profile,
+		delayFn = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+		scheduleInterval = (/** @type {() => void} */ fn, /** @type {number} */ ms) => {
+			const timer = setInterval(fn, ms);
+			// Node timers keep the event loop alive; the renewal cadence should
+			// not pin an otherwise-idle process (mirrors db-p2p's own
+			// `timer.unref?.()` convention). Absent in a browser, where a plain
+			// numeric interval id has no `.unref()` -- the optional call is a
+			// no-op there.
+			/** @type {any} */ (timer).unref?.();
+			return timer;
+		},
+		cancelInterval = (/** @type {unknown} */ handle) => clearInterval(/** @type {any} */ (handle)),
+	} = options;
 
 	if (!db) throw new PeerReplicationError('db', 'startPeerReplication: db is required -- the bridge receives its handle, it never constructs one');
 	if (!networkHash) throw new PeerReplicationError('networkHash', 'startPeerReplication: networkHash is required');
@@ -430,13 +511,52 @@ export async function startPeerReplication(options) {
 	});
 
 	const unregister = registry.register(topicId, manager.onNotification.bind(manager));
-	await manager.register();
+
+	// Bounded cold-start retry (56-17 Task 3): `CohortBackoffError` is the
+	// substrate's own documented "no willing primary right now" signal, not a
+	// fault -- see `PEER_REGISTER_MAX_ATTEMPTS`'s JSDoc. Any OTHER rejection
+	// is not retried; it propagates on the first failure, unchanged.
+	for (let attempt = 1; ; attempt += 1) {
+		try {
+			await manager.register();
+			break;
+		} catch (err) {
+			if (!(err instanceof CohortBackoffError)) {
+				throw err;
+			}
+			if (attempt >= PEER_REGISTER_MAX_ATTEMPTS) {
+				throw new PeerReplicationError(
+					'register',
+					`register() did not succeed after ${attempt} attempts against CohortBackoffError (last afterMs=${err.afterMs}) -- no willing primary`,
+				);
+			}
+			await delayFn(Math.min(err.afterMs, REGISTER_BACKOFF_CEILING_MS));
+		}
+	}
+
+	// ttl/3 renewal cadence (56-17 Task 3, module header point 6): the
+	// EFFECTIVE TTL is READ BACK from the substrate via
+	// `subscriberTtlForProfile(resolvedProfile)` -- the SAME function
+	// `ReactivitySubscriptionManager` itself uses internally to resolve its
+	// own `ttlMs` when none is passed explicitly (`@optimystic/db-p2p`
+	// `dist/src/reactivity/subscription-manager.js:54`) -- never assumed as a
+	// literal `60000`. `manager.registration`/`RegistrationHandle` exposes no
+	// public `ttlMs` field to read back instead (`renewal` is typed `opaque
+	// to applications`), so the resolved PROFILE is the documented source.
+	const ttlMs = subscriberTtlForProfile(resolvedProfile);
+	const renewalIntervalMs = Math.max(1000, Math.floor(ttlMs * PEER_RENEWAL_FRACTION));
 
 	let stopped = false;
+	const renewalTimer = scheduleInterval(() => {
+		if (stopped) return;
+		manager.renew().catch(logFailure);
+	}, renewalIntervalMs);
+
 	/** Idempotent; neither leg throws. @returns {Promise<void>} */
 	const stop = async () => {
 		if (stopped) return;
 		stopped = true;
+		cancelInterval(renewalTimer);
 		try {
 			unregister();
 		} catch (err) {
