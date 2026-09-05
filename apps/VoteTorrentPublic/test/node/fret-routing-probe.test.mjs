@@ -145,6 +145,21 @@ test('probeFretRouting: registrySize is 0 when the fake registry.all() returns a
 	assert.equal(result.registrySize, 0);
 });
 
+test('probeFretRouting: fretPeerIds reads the .id field off each listPeers() record, never String(record) (which would carry through as the literal "[object Object]")', async () => {
+	const node = makeFakeNode({
+		fret: makeFakeFret({
+			listPeersImpl: () => [
+				{ id: '12D3KooWFixturePeerA', metadata: { foo: 'bar' } },
+				{ id: '12D3KooWFixturePeerB', metadata: {} },
+			],
+		}),
+	});
+	const result = await probeFretRouting(node, { topicId: TOPIC_ID, participantId: PARTICIPANT_ID, wantK: 16 });
+	assert.deepEqual(result.fretPeerIds, ['12D3KooWFixturePeerA', '12D3KooWFixturePeerB']);
+	assert.equal(result.fretPeerCount, 2);
+	assert.ok(!result.fretPeerIds.some((id) => id.includes('[object Object]')), 'fretPeerIds carried through the discrimination-destroying "[object Object]" stringification');
+});
+
 // ---------------------------------------------------------------------------
 // Structural-facts-only shape
 // ---------------------------------------------------------------------------
@@ -154,7 +169,11 @@ test('probeFretRouting: every value in the result is a string, a number, a boole
 		fret: makeFakeFret({
 			neighborDistanceImpl: () => 2,
 			assembleCohortImpl: () => ['peer-x', 'peer-y'],
-			listPeersImpl: () => ['peer-x', 'peer-y', 'peer-z'],
+			listPeersImpl: () => [
+				{ id: 'peer-x', metadata: {} },
+				{ id: 'peer-y', metadata: {} },
+				{ id: 'peer-z', metadata: {} },
+			],
 		}),
 		registryAll: () => ['coord-engine-a'],
 		connections: [{ remotePeer: { toString: () => 'peer-x' } }],

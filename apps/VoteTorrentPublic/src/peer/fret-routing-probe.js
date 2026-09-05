@@ -129,9 +129,13 @@ export async function probeFretRouting(node, options) {
 	});
 	const connectionCount = Array.isArray(connectedPeerIds) ? connectedPeerIds.length : 0;
 
+	// `listPeers()` returns `[{ id, metadata }, ...]` (`p2p-fret`
+	// `dist/src/service/fret-service.js:3383-3388`), NOT a plain array of id strings -- reading `.id`
+	// here, never `String(entry)` on the whole record, which would carry through as the
+	// discrimination-destroying `"[object Object]"` literal for every entry.
 	const fretPeerIds = readOrReason(() => {
 		const peers = fret.listPeers();
-		return Array.isArray(peers) ? peers.map((p) => String(p)) : [];
+		return Array.isArray(peers) ? peers.map((p) => String(p && typeof p === 'object' && 'id' in p ? p.id : p)) : [];
 	});
 	const fretPeerCount = Array.isArray(fretPeerIds) ? fretPeerIds.length : 0;
 
