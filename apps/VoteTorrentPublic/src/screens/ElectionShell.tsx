@@ -193,6 +193,21 @@ export function ElectionShell({ search, at = null, election = null, source, conf
 	// page whose change channel is down, and only when the observed instant
 	// actually formatted.
 	const showStaleness = addressed && read.state === 'ready' && read.connection === 'down' && formattedInstant !== null;
+	// 56-14/D-16/D-19: the live-update badge. Guarded on `!== 'down'` rather
+	// than `=== 'live'` -- deliberately, and pinned by `liveness-feedback.test.mjs`
+	// so a later "tidy" to `=== 'live'` is a red test with a reason attached.
+	// The `!==` form preserves the mutual exclusion with the staleness banner
+	// STRUCTURALLY (that banner renders on exactly `'down'`, so the two can
+	// never coexist) without inventing a false negative on `'unknown'`, where
+	// the evidence for the badge -- a remote notice that actually arrived --
+	// is strictly stronger than a boot status that was never observed. No
+	// fact, row or field is named here or anywhere downstream of it: the
+	// notify channel this reacts to carries a table name plus a three-valued
+	// op and nothing finer (56-09's own notify-granularity must-have), and no
+	// table-to-fact reverse map exists to build a finer claim from. There is
+	// also no persistent "connected" chip anywhere on this page -- this
+	// module's own hook header gives the reason, and it has not changed.
+	const showLiveUpdate = addressed && read.state === 'ready' && read.justUpdated && read.connection !== 'down';
 
 	let body: ReactNode;
 	if (configFault !== null) {
@@ -282,6 +297,12 @@ export function ElectionShell({ search, at = null, election = null, source, conf
 					<div className={`status-banner status-banner--${tone}`}>
 						<span className="status-banner__tone">{t(toneKey)}</span>
 						<p className="status-banner__headline">{headlineText}</p>
+						{/* 56-14/D-16/D-19: the live-update badge, the status banner's
+						    trailing chip, after the headline. Conditional -- absent
+						    from the DOM entirely when not showing, never
+						    `opacity: 0` -- so it is never announced to assistive
+						    tech by default and never intercepts a click. */}
+						{showLiveUpdate ? <span className="live-update-badge">{t('public.liveUpdate.badge')}</span> : null}
 					</div>
 				) : null}
 				<LifecyclePill phase={phaseResult.phase} />

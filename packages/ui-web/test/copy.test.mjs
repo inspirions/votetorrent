@@ -30,16 +30,19 @@ import { FACT_COPY_KEYS, FACTS } from '../src/lifecycle/facts.js';
 // outside the fact model -- 85 + 61 = 146. 54-12 then added the two keys of
 // D-02's addressed-but-not-held sentence -- 146 + 2 = 148. 56-12 then added
 // six more: Surface 1's staleness badge/body and Surface 3's two-variant
-// config-fault title/body pairs -- 148 + 6 = 154. Written as a bare literal
-// so a future "fix" that deletes any of them is caught by a failure message
-// that names the reason.
+// config-fault title/body pairs -- 148 + 6 = 154. 56-14 then added ONE more:
+// Surface 5's live-update badge word -- 154 + 1 = 155. Written as a bare
+// literal so a future "fix" that deletes any of them is caught by a failure
+// message that names the reason.
 // ---------------------------------------------------------------------------
 
-test('COPY has exactly 154 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion, +61 from 54-09s fact/gap copy table, +2 from 54-12s not-held sentence, +6 from 56-12s staleness/config-fault copy)', () => {
+test('COPY has exactly 155 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion, +61 from 54-09s fact/gap copy table, +2 from 54-12s not-held sentence, +6 from 56-12s staleness/config-fault copy, +1 from 56-14s live-update badge)', () => {
 	assert.equal(
 		Object.keys(COPY).length,
-		154,
-		'expected 154 -- if this reads 148, 56-12s public.staleness.*/public.config.*.title/.body were wrongly deleted; ' +
+		155,
+		'expected 155 -- if this reads 154, 56-14s public.liveUpdate.badge was wrongly deleted; it is Surface 5 (D-16/D-19) ' +
+			'and is mounted by ElectionShell.tsx, where t() throws on it going missing. If it reads 148, 56-12s ' +
+			'public.staleness.*/public.config.*.title/.body were wrongly deleted; ' +
 			'they are Surfaces 1 and 3 (D-17/D-13) and are mounted by ElectionShell.tsx/PublicApp.tsx, where t() throws ' +
 			'on any one going missing. If it reads 146, 54-12s public.election.notHeld.title/.body were wrongly deleted; ' +
 			'they are D-02s addressed-but-not-held sentence and are mounted by ElectionShell.tsx, where t() throws ' +
@@ -237,6 +240,12 @@ const NEW_56_12_KEYS = Object.freeze([
 	'public.config.malformed.body',
 ]);
 
+/**
+ * The one key 56-14 added: Surface 5's live-update badge word (D-16/D-19).
+ * @type {ReadonlyArray<string>}
+ */
+const NEW_56_14_KEYS = Object.freeze(['public.liveUpdate.badge']);
+
 test('sanity: the 54-12 delta is 2 keys and neither collides with the 54-09 delta (a collision would silently shrink the delta while every other assertion still passed)', () => {
 	assert.equal(NEW_54_12_KEYS.length, 2);
 	const priorSet = new Set([...NEW_54_09_KEYS, ...NEW_53_07_KEYS, ...PHASE_54_ADDITIONS]);
@@ -251,6 +260,13 @@ test('sanity: the 56-12 delta is 6 keys and none collides with any prior delta',
 	assert.deepEqual(overlap, [], `these keys are counted twice: ${overlap.join(', ')}`);
 });
 
+test('sanity: the 56-14 delta is 1 key and does not collide with any prior delta', () => {
+	assert.equal(NEW_56_14_KEYS.length, 1);
+	const priorSet = new Set([...NEW_54_09_KEYS, ...NEW_53_07_KEYS, ...PHASE_54_ADDITIONS, ...NEW_54_12_KEYS, ...NEW_56_12_KEYS]);
+	const overlap = NEW_56_14_KEYS.filter((k) => priorSet.has(k));
+	assert.deepEqual(overlap, [], `these keys are counted twice: ${overlap.join(', ')}`);
+});
+
 test('sanity: the 54-09 delta is 61 keys -- 50 named by facts.js FACT_COPY_KEYS plus 11 non-fact keys, with no overlap between the two (an overlap would silently shrink the delta while every other assertion still passed)', () => {
 	assert.equal(FACT_COPY_KEYS.length, 50, 'facts.js FACT_COPY_KEYS must still publish 50 keys');
 	assert.equal(NEW_54_09_NON_FACT_KEYS.length, 11);
@@ -260,7 +276,7 @@ test('sanity: the 54-09 delta is 61 keys -- 50 named by facts.js FACT_COPY_KEYS 
 	assert.equal(new Set(NEW_54_09_KEYS).size, 61);
 });
 
-test('D-25/D-07/D-08/D-06/54-09/54-12/56-12: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename, the PHASE_54_ADDITIONS additions, the 61 NEW_54_09_KEYS additions, the two NEW_54_12_KEYS additions and the six NEW_56_12_KEYS additions -- no other key added or removed', () => {
+test('D-25/D-07/D-08/D-06/54-09/54-12/56-12/56-14: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename, the PHASE_54_ADDITIONS additions, the 61 NEW_54_09_KEYS additions, the two NEW_54_12_KEYS additions, the six NEW_56_12_KEYS additions and the one NEW_56_14_KEYS addition -- no other key added or removed', () => {
 	const currentKeys = new Set(Object.keys(COPY));
 	const renameMap = new Map(PHASE_54_RENAMES);
 	const expectedKeys = new Set([
@@ -274,6 +290,7 @@ test('D-25/D-07/D-08/D-06/54-09/54-12/56-12: the ONLY key-set changes since 8326
 		...NEW_54_09_KEYS,
 		...NEW_54_12_KEYS,
 		...NEW_56_12_KEYS,
+		...NEW_56_14_KEYS,
 	]);
 
 	const added = [...currentKeys].filter((k) => !expectedKeys.has(k));

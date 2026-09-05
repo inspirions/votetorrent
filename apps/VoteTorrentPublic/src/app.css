@@ -312,6 +312,50 @@
 	border-color: var(--fail);
 }
 
+/*
+ * 56-14/D-16/D-19: the live-update badge. The THIRD and LAST member of this
+ * app's one chip-shape family, after `.status-banner__tone` above and
+ * `.staleness-banner__badge`. Same padding, radius and Label sizing as its
+ * siblings; `--ok`/`--ok` where they carry `--border`/`--text` or
+ * `--warn`/`--warn`. `--ok` against the page ground is the same 8.41:1
+ * contrast the `go` tone chip already carries above — a new usage site, not
+ * a new token. Rendered CONDITIONALLY by `ElectionShell.tsx`: it is ABSENT
+ * FROM THE DOM when not showing, never `opacity: 0`, so it is never
+ * announced to assistive tech by default and never intercepts a click.
+ * Every value below is `var(--token)` -- no hex, no `rgba(`, no new spacing
+ * step, no third font weight.
+ */
+.live-update-badge {
+	padding: 0 var(--space-sm);
+	border: 1px solid var(--ok);
+	border-radius: var(--radius);
+	font-size: var(--font-label-size);
+	font-weight: var(--font-label-weight);
+	line-height: var(--font-label-line-height);
+	color: var(--ok);
+}
+
+/*
+ * This app's FIRST deliberate exception to `.skeleton`'s standing no-motion
+ * rule (app.css's own header above: "NO animation, NO animation-name, NO
+ * transition, NO @keyframes and NO linear-gradient of any kind"), and it
+ * must be narrow: exactly one declaration, on exactly this one selector.
+ * `election-shell.test.mjs` section 7 is narrowed by 56-14 to permit exactly
+ * this single `transition:` declaration, inside this single
+ * `prefers-reduced-motion: no-preference` block, and to fail on a second one
+ * or on this one moved outside the block.
+ *
+ * THE MOTION LIVES IN THE NO-PREFERENCE BLOCK, NOT CANCELLED IN A `reduce`
+ * BLOCK. `reduce` is therefore the DEFAULT (no `transition` rule applies at
+ * all, so mount/unmount is instant) and the fade is an OPT-IN enhancement,
+ * never an opt-out one a reader has to notice and disable.
+ */
+@media (prefers-reduced-motion: no-preference) {
+	.live-update-badge {
+		transition: opacity 200ms ease-out;
+	}
+}
+
 .fact-section {
 	display: flex;
 	flex-direction: column;

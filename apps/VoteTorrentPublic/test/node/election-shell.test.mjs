@@ -284,25 +284,152 @@ test('the URL parameter names reachable anywhere under src/ are exactly the two 
 });
 
 // ---------------------------------------------------------------------------
-// 7. D-18 inertness, CSS side.
+// 7. D-18 inertness, CSS side. NARROWED BY 56-14 (D-16/D-19's live-update
+// badge): `@keyframes`, `animation`, `animation-name` and `linear-gradient`
+// stay at zero, unchanged from 53-D18. `transition:` is split into its own
+// rung, permitted at EXACTLY ONE site: the badge's own sanctioned fade,
+// inside the app's one `prefers-reduced-motion: no-preference` block. This
+// narrows 56-12's own "no transition anywhere in app.css" criterion BY
+// DESIGN, per the UI-SPEC — it is not a relaxation of the surrounding rule,
+// which stays zero-tolerance for the other four constructs.
 // ---------------------------------------------------------------------------
 
-const CSS_ANIMATION_RE = /(@keyframes|animation(?:-name)?\s*:|transition\s*:|linear-gradient\()/;
+const CSS_NO_TRANSITION_ANIMATION_RE = /(@keyframes|animation(?:-name)?\s*:|linear-gradient\()/;
+const CSS_TRANSITION_RE = /transition\s*:[^;]*;/g;
+const REDUCED_MOTION_NO_PREFERENCE_HEADER_RE = /@media\s*\(\s*prefers-reduced-motion\s*:\s*no-preference\s*\)/;
 
-test('positive control: the CSS-animation matcher fires on planted @keyframes and transition fixtures', () => {
-	assert.match('@keyframes shimmer{}', CSS_ANIMATION_RE);
-	assert.match('transition: opacity .3s;', CSS_ANIMATION_RE);
+/**
+ * The one declaration the UI-SPEC sanctions, assembled from its own pieces
+ * rather than spelled out whole — the same discipline section 12f already
+ * uses (`project_self_tripping_checker_headers`).
+ * @type {string}
+ */
+const EXPECTED_TRANSITION_DECLARATION = ['transition', ': ', 'opacity 200ms ease-out', ';'].join('');
+
+/**
+ * Locate the file's `@media (prefers-reduced-motion: no-preference)` block
+ * span by BRACE MATCHING from the media query's own opening `{`, never by a
+ * line-number guess. Returns `null` when no such header exists, or its
+ * braces are unbalanced before EOF.
+ * @param {string} source
+ * @returns {{ start: number, end: number } | null}
+ */
+export function findNoPreferenceBlockSpan(source) {
+	const headerMatch = REDUCED_MOTION_NO_PREFERENCE_HEADER_RE.exec(source);
+	if (!headerMatch) return null;
+	const openBraceIdx = source.indexOf('{', headerMatch.index + headerMatch[0].length);
+	if (openBraceIdx === -1) return null;
+	let depth = 0;
+	for (let i = openBraceIdx; i < source.length; i += 1) {
+		if (source[i] === '{') depth += 1;
+		else if (source[i] === '}') {
+			depth -= 1;
+			if (depth === 0) return { start: openBraceIdx, end: i };
+		}
+	}
+	return null;
+}
+
+/**
+ * The pure, exported comparator this rung is built on — provable in
+ * isolation against a synthetic CSS string, never a file. Reports the
+ * number of `transition:` declarations found, whether the (sole, if
+ * exactly one) declaration's character offset lies inside the single
+ * no-preference block, and whether its text equals the pinned expected
+ * declaration.
+ * @param {string} cssSource
+ * @returns {{ transitionCount: number, insideBlock: boolean, matchesExpected: boolean }}
+ */
+export function evaluateTransitionPlacement(cssSource) {
+	const matches = [...cssSource.matchAll(CSS_TRANSITION_RE)];
+	if (matches.length !== 1) {
+		return { transitionCount: matches.length, insideBlock: false, matchesExpected: false };
+	}
+	const [match] = matches;
+	const span = findNoPreferenceBlockSpan(cssSource);
+	const offset = match.index ?? -1;
+	const insideBlock = span !== null && offset >= span.start && offset < span.end;
+	const matchesExpected = match[0].trim() === EXPECTED_TRANSITION_DECLARATION;
+	return { transitionCount: matches.length, insideBlock, matchesExpected };
+}
+
+test('positive control: the CSS-animation matcher fires on planted @keyframes and linear-gradient fixtures', () => {
+	assert.match('@keyframes shimmer{}', CSS_NO_TRANSITION_ANIMATION_RE);
+	assert.match('linear-gradient(red, blue)', CSS_NO_TRANSITION_ANIMATION_RE);
 });
 
-test('no *.css file under src/ contains @keyframes, animation, animation-name, transition or linear-gradient (D-18)', () => {
+test('positive control: the transition-placement evaluator fires on two differently-shaped violating inputs and passes on a healthy one — three synthetic CSS strings, never a file', () => {
+	const healthy = [
+		'.foo { color: red; }',
+		'@media (prefers-reduced-motion: no-preference) {',
+		'\t.live-update-badge {',
+		`\t\t${EXPECTED_TRANSITION_DECLARATION}`,
+		'\t}',
+		'}',
+	].join('\n');
+	const healthyResult = evaluateTransitionPlacement(healthy);
+	assert.equal(healthyResult.transitionCount, 1, 'fixture sanity: exactly one planted transition');
+	assert.equal(healthyResult.insideBlock, true, 'the evaluator is inert against a correctly-placed transition');
+	assert.equal(healthyResult.matchesExpected, true, 'the evaluator is inert against the pinned declaration text');
+
+	const outsideBlock = [
+		`.live-update-badge { ${EXPECTED_TRANSITION_DECLARATION} }`,
+		'@media (prefers-reduced-motion: no-preference) {',
+		'\t.other { color: blue; }',
+		'}',
+	].join('\n');
+	const outsideResult = evaluateTransitionPlacement(outsideBlock);
+	assert.equal(outsideResult.transitionCount, 1, 'fixture sanity: exactly one planted transition, outside the block');
+	assert.equal(outsideResult.insideBlock, false, 'the evaluator cannot tell a mislocated transition from a correctly placed one');
+
+	const secondTransition = [
+		'@media (prefers-reduced-motion: no-preference) {',
+		`\t.a { ${EXPECTED_TRANSITION_DECLARATION} }`,
+		'\t.b { transition: opacity 100ms linear; }',
+		'}',
+	].join('\n');
+	const secondResult = evaluateTransitionPlacement(secondTransition);
+	assert.equal(secondResult.transitionCount, 2, 'fixture sanity: exactly two planted transitions');
+	assert.equal(secondResult.matchesExpected, false, 'the evaluator cannot tell a second transition from a single sanctioned one');
+});
+
+test('no *.css file under src/ contains @keyframes, animation, animation-name or linear-gradient (D-18)', () => {
 	const cssFiles = walkAll(publicSrc()).filter((f) => f.endsWith('.css'));
 	assert.ok(cssFiles.length > 0, 'sanity: expected at least one .css file under src/');
 	const offenders = [];
 	for (const file of cssFiles) {
 		const stripped = stripComments(readFileSync(file, 'utf8'));
-		if (CSS_ANIMATION_RE.test(stripped)) offenders.push(file);
+		if (CSS_NO_TRANSITION_ANIMATION_RE.test(stripped)) offenders.push(file);
 	}
-	assert.deepEqual(offenders, [], `these CSS files carry an animation/transition/gradient construct: ${offenders.join(', ')}`);
+	assert.deepEqual(offenders, [], `these CSS files carry an animation/gradient construct: ${offenders.join(', ')}`);
+});
+
+test('exactly one transition exists across every *.css under src/, and it lives in app.css (56-14)', () => {
+	const cssFiles = walkAll(publicSrc()).filter((f) => f.endsWith('.css'));
+	/** @type {Array<{ file: string, transitionCount: number }>} */
+	const transitionsByFile = [];
+	for (const file of cssFiles) {
+		const stripped = stripComments(readFileSync(file, 'utf8'));
+		const count = (stripped.match(CSS_TRANSITION_RE) ?? []).length;
+		if (count > 0) transitionsByFile.push({ file, transitionCount: count });
+	}
+	assert.equal(
+		transitionsByFile.length,
+		1,
+		`expected exactly one CSS file to carry a transition, found: ${transitionsByFile.map((t) => `${t.file} (${t.transitionCount})`).join(', ')}`,
+	);
+	assert.equal(transitionsByFile[0].file, publicSrc('app.css'), 'the one sanctioned transition must live in app.css');
+	assert.equal(transitionsByFile[0].transitionCount, 1, 'app.css must carry exactly one transition declaration');
+});
+
+test('56-14: app.css\'s one transition matches the pinned sanctioned declaration and lies inside the single no-preference block, located by brace matching', () => {
+	const appCssStripped = stripComments(readFileSync(publicSrc('app.css'), 'utf8'));
+	const mediaHeaderCount = (appCssStripped.match(/@media\s*\(\s*prefers-reduced-motion/g) ?? []).length;
+	assert.equal(mediaHeaderCount, 1, `expected exactly one prefers-reduced-motion media query in app.css, found ${mediaHeaderCount}`);
+	const result = evaluateTransitionPlacement(appCssStripped);
+	assert.equal(result.transitionCount, 1, 'app.css must carry exactly one transition declaration');
+	assert.equal(result.matchesExpected, true, 'the one transition does not match the pinned sanctioned declaration');
+	assert.equal(result.insideBlock, true, 'the one transition does not lie inside the single no-preference block');
 });
 
 // ---------------------------------------------------------------------------

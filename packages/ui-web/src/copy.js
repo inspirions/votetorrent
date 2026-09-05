@@ -420,6 +420,18 @@ export const COPY = Object.freeze({
 	'public.staleness.badge': 'NOT CONNECTED',
 	'public.staleness.body':
 		"This is the last version of this election your browser received. As of {{asOf}}, it isn't connected to the network.",
+	// Surface 5 (56-14, D-16's UI half / D-19's UI half): the live-update
+	// badge. Same redundant-cue rule as every other chip word in this file --
+	// the badge's colour (`--ok` in app.css) and this ALL-CAPS word always
+	// render together, and neither may render alone. It is a REPORT of an
+	// event this page observed (a peer write landed and was applied), never a
+	// standing claim about the present moment -- it is absent from the DOM
+	// outside a fixed window, and there is no persistent "connected" chip
+	// anywhere on this page. It names no table, no row and no fact: the
+	// notify channel this badge reacts to carries a table name plus a
+	// three-valued op and nothing finer (56-09's own must-have on notify
+	// granularity), and this value must never be widened to imply otherwise.
+	'public.liveUpdate.badge': 'UPDATED',
 	// Tone chip words. These are the REDUNDANT NON-COLOUR CUE for the status
 	// banner: the chip's colour and this word always render together, and
 	// neither may render alone. The word is what survives greyscale, a
