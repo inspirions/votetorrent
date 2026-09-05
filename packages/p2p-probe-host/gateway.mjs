@@ -65,6 +65,9 @@ import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
 import { createLibp2pNode } from '@optimystic/db-p2p/rn';
+// VoteTorrent patch (strand-cohort-topic): the reactivity tier this gateway must be willing at
+// to originate notifications, resolved from the substrate's own export -- never a bare `3`.
+import { Tier } from '@optimystic/db-core';
 
 const L = (...a) => console.log('[gateway]', ...a);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -134,6 +137,45 @@ function loadAndValidateConfig(configPathArg) {
         'measured relay posture.',
     );
   }
+  // VoteTorrent patch (strand-cohort-topic): a REQUIRED node-local decision, on the
+  // `enableRelay` precedent -- no default, no fallback. Absent config ⇒ no `cohortTopic` key
+  // ever reaches `createLibp2pNode` (see the strand-cohort-topic patch record), so a silent
+  // default here would be exactly how a gateway ends up serving with reactivity off while a
+  // gate reports a code-level failure instead of a configuration one.
+  if (config.strandCohortTopic === undefined) {
+    fatal(
+      'config key "strandCohortTopic" is required (absent is fatal — it is the master switch ' +
+        'for reactivity origination and is never defaulted). See gateway.config.example.json ' +
+        'for the required shape.',
+    );
+  }
+  if (
+    typeof config.strandCohortTopic !== 'object' ||
+    config.strandCohortTopic === null ||
+    Array.isArray(config.strandCohortTopic)
+  ) {
+    fatal(
+      'config key "strandCohortTopic" must be an object (present with `enabled: false` is the ' +
+        'fail-closed default). See gateway.config.example.json for the required shape.',
+    );
+  }
+  if (typeof config.strandCohortTopic.enabled !== 'boolean') {
+    fatal(
+      'config key "strandCohortTopic.enabled" is required and must be a boolean ' +
+        '(present-and-false is fine — only an ABSENT or non-boolean value is fatal). See ' +
+        'gateway.config.example.json for the required shape.',
+    );
+  }
+  if (
+    config.strandCohortTopic.enabled === true &&
+    (!Number.isInteger(config.strandCohortTopic.minSigs) || config.strandCohortTopic.minSigs < 1)
+  ) {
+    fatal(
+      'config key "strandCohortTopic.minSigs" is required and must be an integer >= 1 when ' +
+        '"strandCohortTopic.enabled" is true. It is a TWO-SIDED number that must match the ' +
+        'browser\'s exported PUBLIC_COHORT_MIN_SIGS constant — see gateway.config.example.json.',
+    );
+  }
   if (typeof config.tls !== 'object' || config.tls === null) {
     fatal('config key "tls" is required and must be an object with "certPath" and "keyPath".');
   }
@@ -200,6 +242,20 @@ const GATER_BASENAME = 'membership-connection-gater.js';
 // The gater-registration half of the 56-04 patch. Not fragment-split — only the protocol
 // literal is required (by acceptance) to be absent from this file's contiguous source.
 const GATER_POLICY_TOKEN = 'admitPublicObservers';
+// VoteTorrent patch (strand-cohort-topic): the SECOND provenance token. Its value equals the
+// launch-config key name the strand-cohort-topic patch introduces, fragment-joined at runtime
+// following the same discipline `EXPECTED_OBSERVER_PROTOCOL` above uses for its OWN declaration
+// — this constant is never hand-copied as one contiguous literal here. Unlike a wire-protocol
+// id, though, this same key name is unavoidably also a real config-object property elsewhere in
+// this file (`loadAndValidateConfig`, `startGateway`'s `CadreNode` construction) — there is no
+// way to configure or wire the feature without writing that property name literally, so this
+// file's comment-stripped source does still contain the contiguous string elsewhere. Fragment-
+// joining THIS declaration keeps the checker's own comparison from being the place a copy-paste
+// error could silently self-validate, which is the actual lesson
+// (`project_self_tripping_checker_headers`) — it does not (and cannot) make the string vanish
+// from a file that also has to configure the feature it is checking for.
+const COHORT_CONFIG_KEY_FRAGMENTS = ['strand', 'Cohort', 'Topic'];
+const EXPECTED_COHORT_CONFIG_KEY = COHORT_CONFIG_KEY_FRAGMENTS.join('');
 
 /** Recursively list every `*.js` file under `dir` (excludes `*.js.map` — `.js.map` never matches `.endsWith('.js')`). */
 function walkJsFiles(dir) {
@@ -278,15 +334,16 @@ async function checkProvenance(packageRootAbsPath) {
   // The token is IMPORTED from the resolved package's own dist bytes — never a copied literal.
   // A pristine, unpatched 0.12.0 has no such export: this import either throws or resolves to
   // `undefined`, and EITHER outcome is `token-unavailable` — it must never degrade into a
-  // zero-count that reads as clean.
+  // zero-count that reads as clean. `mod` is captured here (not scoped inside the try, as it was
+  // before this patch) because the strand-cohort-topic token below is read from the SAME import.
   const indexPath = resolvePath(packageRootAbsPath, 'dist/index.js');
-  let token;
+  let mod;
   try {
-    const mod = await import(pathToFileURL(indexPath).href);
-    token = mod.STRAND_OBSERVER_PROTOCOL;
+    mod = await import(pathToFileURL(indexPath).href);
   } catch {
-    token = undefined;
+    mod = undefined;
   }
+  const token = mod?.STRAND_OBSERVER_PROTOCOL;
   if (typeof token !== 'string' || token.length === 0) {
     return { verdict: 'FAIL', reason: 'token-unavailable', packageRootAbsPath, version: pkg.version };
   }
@@ -327,6 +384,30 @@ async function checkProvenance(packageRootAbsPath) {
     return { verdict: 'FAIL', reason: 'gater-missing', packageRootAbsPath, version: pkg.version };
   }
 
+  // VoteTorrent patch (strand-cohort-topic): the SECOND patch's own provenance token, read from
+  // the SAME already-imported module object above — never a literal copied into this file. A
+  // copy carrying only 56-04's patch passes every check above (the observer token, its
+  // occurrence count, the gater wiring) and fails HERE, with a reason distinct from every
+  // 56-04-only failure mode, so a caller can tell WHICH patch is missing.
+  const cohortToken = mod?.STRAND_COHORT_TOPIC_CONFIG_KEY;
+  if (typeof cohortToken !== 'string' || cohortToken.length === 0) {
+    return {
+      verdict: 'FAIL',
+      reason: 'cohort-token-unavailable',
+      packageRootAbsPath,
+      version: pkg.version,
+    };
+  }
+  if (cohortToken !== EXPECTED_COHORT_CONFIG_KEY) {
+    return {
+      verdict: 'FAIL',
+      reason: 'cohort-token-mismatch',
+      packageRootAbsPath,
+      version: pkg.version,
+      observedCohortToken: cohortToken,
+    };
+  }
+
   return {
     verdict: 'PASS',
     packageRootAbsPath,
@@ -337,6 +418,9 @@ async function checkProvenance(packageRootAbsPath) {
     // EFFECT_REGISTERED so that rung also checks a value obtained from the package, not a
     // literal declared in this file.
     observedToken: token,
+    // VoteTorrent patch (strand-cohort-topic): the second patch's token, as observed —
+    // threaded into the handoff payload beside the existing provenance fields.
+    observedCohortToken: cohortToken,
   };
 }
 
@@ -514,6 +598,66 @@ async function checkGaterRung(node, config) {
   }
 }
 
+/**
+ * EFFECT_COHORT — proves the strand-cohort-topic patch took effect on the STARTED node, never
+ * the config object it was fed. Reads `node.getStrand(id).libp2pNode.cohortTopicHost` for every
+ * allowlisted strand.
+ *
+ * When `strandCohortTopic.enabled` is true, every allowlisted strand must carry a
+ * `cohortTopicHost` willing at the reactivity tier (`Tier.T3`, resolved from
+ * `@optimystic/db-core`'s own export). `minSigs` is checked ONLY as a recorded fact, never
+ * asserted as a number the host object carries: `createCohortTopicHost`'s returned object today
+ * exposes `service`/`registry`/`protocols`/`profile`/`gossipTransport`/`promoteGate`/
+ * `membershipSource`/`stop` and nothing named `minSigs` — the value is closed over internally.
+ * Asserting a number it never carried would be exactly the precondition-inference this rung
+ * exists to avoid (`feedback_read_back_preconditions_dont_infer`).
+ *
+ * When `strandCohortTopic.enabled` is false, this rung asserts the OPPOSITE — a `cohortTopicHost`
+ * present on any allowlisted strand is a FAILURE — so the fail-closed master switch is proven by
+ * the SAME instrument, not merely believed.
+ */
+function checkCohortRung(node, strandCohortTopicConfig, strandIds) {
+  const enabled = strandCohortTopicConfig?.enabled === true;
+  const strands = {};
+  for (const strandId of strandIds) {
+    const strand = node.getStrand(strandId);
+    if (!strand) {
+      throw new Error(`getStrand(${strandId}) is undefined — cannot check its cohort-topic host`);
+    }
+    const host = strand.libp2pNode?.cohortTopicHost;
+    if (!enabled) {
+      if (host !== undefined) {
+        throw new Error(
+          `strandCohortTopic.enabled is false but strand ${strandId} carries a cohortTopicHost ` +
+            `— the fail-closed master switch did not take effect`,
+        );
+      }
+      strands[strandId] = { hosted: false };
+      continue;
+    }
+    if (!host) {
+      throw new Error(`strandCohortTopic.enabled is true but strand ${strandId} has no cohortTopicHost`);
+    }
+    const profileTiers = host.profile?.willingTiers;
+    const isWillingAtReactivityTier = profileTiers instanceof Set && profileTiers.has(Tier.T3);
+    if (!isWillingAtReactivityTier) {
+      const observed = profileTiers instanceof Set ? [...profileTiers].join(',') : 'undefined';
+      throw new Error(
+        `strand ${strandId}'s cohortTopicHost is not willing at the reactivity tier — observed=${observed}`,
+      );
+    }
+    strands[strandId] = {
+      hosted: true,
+      willingTiers: [...profileTiers],
+      // See the docstring above: minSigs is NOT exposed on the returned host object. Recorded
+      // as an absence of evidence, never as an asserted equality with the configured value.
+      minSigsExposedOnHost: false,
+      minSigsConfigured: strandCohortTopicConfig.minSigs,
+    };
+  }
+  return { enabled, strands };
+}
+
 function resolveCaRootPath() {
   if (process.env.NODE_EXTRA_CA_CERTS) return process.env.NODE_EXTRA_CA_CERTS;
   try {
@@ -600,6 +744,21 @@ async function runSelfCheck({ node, config, provenanceResult, runtimeJsonPath, c
     L('EFFECT_GATER=FAIL ' + effects.gater.error);
   }
 
+  try {
+    effects.cohort = {
+      pass: true,
+      ...checkCohortRung(node, config.strandCohortTopic, config.publicObserverStrandIds),
+    };
+    L(
+      `EFFECT_COHORT=PASS enabled=${effects.cohort.enabled} ` +
+        `strands=${config.publicObserverStrandIds.join(',')}`,
+    );
+  } catch (e) {
+    ok = false;
+    effects.cohort = { pass: false, error: e?.message ?? String(e) };
+    L('EFFECT_COHORT=FAIL ' + effects.cohort.error);
+  }
+
   const payload = {
     schemaVersion: 1,
     status: ok ? 'ok' : 'refused',
@@ -609,12 +768,16 @@ async function runSelfCheck({ node, config, provenanceResult, runtimeJsonPath, c
       verdict: provenanceResult.verdict,
       tokenOccurrences: provenanceResult.occurrenceCount,
       checkedPath: provenanceResult.packageRootAbsPath,
+      // VoteTorrent patch (strand-cohort-topic): the second patch's provenance token, as
+      // observed from the resolved package's own export — threaded beside the existing fields.
+      cohortToken: provenanceResult.observedCohortToken,
     },
     controlAddrs: ok ? [controlAddr] : [],
     controlAddrsDns: ok ? [controlAddrDns] : [],
     strandAddrs: ok ? strandAddrsByStrandId : {},
     publicObserverStrandIds: config.publicObserverStrandIds,
     enableRelay: config.enableRelay,
+    strandCohortTopic: config.strandCohortTopic,
     tls: {
       certPath,
       caRoot: resolveCaRootPath(),
@@ -679,6 +842,17 @@ export async function startGateway(options = {}) {
     strandClusterSize: 2,
     hibernation: { enabled: false },
     publicObserverStrandIds: config.publicObserverStrandIds,
+    // VoteTorrent patch (strand-cohort-topic): the node-local decision about whether this
+    // gateway's strand node originates reactivity notifications. `strandIds` is DERIVED from
+    // `publicObserverStrandIds` rather than a second, independently-editable config key: the
+    // mesh-read origin's per-run override (`mesh-read-origin.mjs`) transcribes every config key
+    // EXCEPT `publicObserverStrandIds`, so a second allowlist would go stale the moment that
+    // override fires — a red gate that would look like a code defect rather than config drift.
+    strandCohortTopic: {
+      enabled: config.strandCohortTopic.enabled,
+      minSigs: config.strandCohortTopic.minSigs,
+      strandIds: config.publicObserverStrandIds,
+    },
     network: {
       transports: [wsTransport],
       listenAddrs,
@@ -752,6 +926,7 @@ export async function startGateway(options = {}) {
 
   L('GATEWAY_CADRE_CORE_PATH=' + provenanceResult.packageRootAbsPath);
   L('GATEWAY_RELAY=' + (config.enableRelay ? 'on' : 'off'));
+  L('GATEWAY_COHORT_TOPIC=' + (config.strandCohortTopic.enabled ? 'on' : 'off'));
   L('GATEWAY_AUTHORIZED_MEMBERS=' + authorizedMembers.length);
   L('GATEWAY_ENROLLMENT_WINDOW_UNTIL=' + node.enrollmentWindowUntil);
   L('GATEWAY_CONTROL_ADDR=' + controlAddr);

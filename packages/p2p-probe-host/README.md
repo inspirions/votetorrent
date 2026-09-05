@@ -99,3 +99,11 @@ this is the harness's key instrument inversion.
 
 CadreNode boot is CPU-heavy and a busy host has previously manufactured false failures — do not run
 `proof:wall` concurrently with `nx run-many` or other CPU-heavy tasks.
+
+## Gateway cohort-topic origination (strand-cohort-topic patch)
+
+`gateway.mjs` also carries a second, node-local `strandCohortTopic` config key (the
+strand-cohort-topic patch): a REQUIRED master switch — never defaulted — for whether this
+gateway's strand node originates reactivity notifications. `--self-check` proves it took effect
+on the STARTED strand node (its `EFFECT_COHORT` rung), not merely that the config was accepted;
+see `doc/public-gateway-deploy.md` for the two-sided `minSigs` requirement.
