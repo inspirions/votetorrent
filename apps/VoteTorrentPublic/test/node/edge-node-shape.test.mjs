@@ -12,7 +12,13 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { strandStorageDbName, createEdgeNode, EdgeNodeConfigError } from '../../src/peer/edge-node.js';
+import { mayServeAsReactivityForwarder } from '@optimystic/db-core';
+import {
+	strandStorageDbName,
+	createEdgeNode,
+	EdgeNodeConfigError,
+	PUBLIC_COHORT_MIN_SIGS,
+} from '../../src/peer/edge-node.js';
 
 // ---------------------------------------------------------------------------
 // strandStorageDbName
@@ -152,11 +158,44 @@ test('createEdgeNode with a valid config calls the injected createLibp2pNode exa
 	assert.strictEqual('listenAddrs' in options, false);
 	assert.strictEqual('hibernation' in options, false);
 
+	// -- cohortTopic: subscriber-only posture (56-17) -----------------------
+	// Each bullet in the plan's <behavior> asserted on its own line so a
+	// single wrong field names itself.
+	const cohortTopic = /** @type {any} */ (options.cohortTopic);
+	assert.strictEqual(cohortTopic.enabled, true);
+	assert.strictEqual(cohortTopic.host.profile.kind, 'edge');
+	assert.strictEqual(cohortTopic.host.profile.willingTiers.size, 0);
+	assert.strictEqual(cohortTopic.host.minSigs, PUBLIC_COHORT_MIN_SIGS);
+	assert.strictEqual(PUBLIC_COHORT_MIN_SIGS, 1);
+	assert.strictEqual('wantK' in cohortTopic, false);
+	// The forwarder-forbidden PROPERTY the empty tier set exists to produce,
+	// not only the field.
+	assert.strictEqual(mayServeAsReactivityForwarder(cohortTopic.host.profile), false);
+
 	assert.ok(handle.node);
 	assert.strictEqual(typeof handle.dbName, 'string');
 	assert.strictEqual(typeof handle.stop, 'function');
 
 	await handle.stop();
+});
+
+test('createEdgeNode never opts this browser into T3 (reactivity push forwarding) -- willingTiers excludes 3', async () => {
+	const { deps, createLibp2pNodeCalls } = makeFakeDeps();
+	const injectedPrivateKey = { publicKey: { raw: new Uint8Array([9, 9, 9]) } };
+	const injectedBootstrapNodes = ['/dns4/gateway.example/tcp/443/wss/p2p/12D3KooWExample'];
+
+	await createEdgeNode(
+		{
+			strandId: VALID_STRAND_ID,
+			networkName: 'test-network',
+			bootstrapNodes: injectedBootstrapNodes,
+			privateKey: /** @type {any} */ (injectedPrivateKey),
+		},
+		deps,
+	);
+
+	const options = /** @type {Record<string, unknown>} */ (createLibp2pNodeCalls[0]);
+	assert.strictEqual(/** @type {any} */ (options.cohortTopic).host.profile.willingTiers.has(3), false);
 });
 
 test('stop() is safe to call twice and swallows errors from both the node stop and the database close', async () => {

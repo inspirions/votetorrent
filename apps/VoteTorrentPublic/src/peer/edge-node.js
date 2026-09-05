@@ -78,22 +78,74 @@
  *
  * WHAT DOES CARRY: `createEdgeNode` returns a `stop()` that is idempotent,
  * safe after a partial or failed start, and swallows errors from both the
- * node stop and the database close — exactly like the RN cleanup. This
- * module registers NO timers and NO polling of any kind: no
- * `setInterval`, no `setTimeout` retry loop, no reconnection backoff.
+ * node stop and the database close — exactly like the RN cleanup.
+ *
+ * THE ONE TIMER THIS MODULE NOW CONSTRUCTS (56-17, re-opening the invariant
+ * this header used to state as absolute — not deleting it, replacing it).
+ * `cohortTopic.enabled: true` below causes `@optimystic/db-p2p`'s
+ * `createCohortTopicHost` to install exactly ONE recurring `setInterval`
+ * (`cohort-topic/host.js:538`), and that timer is OWNED by db-p2p's cohort-
+ * topic host, never by this module: this module constructs the node that
+ * carries it, and nothing here calls `setInterval`/`setTimeout` directly.
+ * Each tick walks the host's own coord registry (`registry.all()`,
+ * `cohort-topic/host.js:515`); with an empty registry — this browser's
+ * steady state, because it publishes no listen address and (see the
+ * `cohortTopic` option below) is willing to serve no tier, so nothing ever
+ * dispatches a coord engine into existence on it — the tick performs ZERO
+ * gossip frames, ZERO membership refreshes and ZERO demotion checks. It is
+ * `unref()`'d on Node (`timer.unref?.()`, `cohort-topic/host.js:542`) and is
+ * a plain numeric interval in a browser (there is no event loop to keep
+ * alive there). This module still adds NO polling, NO reconnection backoff
+ * and NO retry loop of its own — those remain absent, exactly as before.
+ * The subscription RENEWAL cadence (`ttl/3`, the recurring OUTBOUND signal
+ * this posture change actually introduces) belongs to
+ * `reactivity-bridge.js`, named there, not here. Full reasoning and the
+ * falsifiable predictions this posture makes: see
+ * `56-17-COHORT-TOPIC-POSTURE.md`.
+ *
  * Connection state is read from the node's own events by consumers
  * (`56-09`/`56-11`), which also own the `isMounted`-style cancellation
  * guard around this factory — `createEdgeNode` itself is a plain,
  * stateless-between-calls factory function.
+ *
+ * 7. Do not "simplify" `cohortTopic.host` away. A bare `cohortTopic: {
+ *    enabled: true }` with no `host` object is NOT equivalent to what this
+ *    module constructs: `createCohortTopicHost` resolves an omitted profile
+ *    to `coreProfile()` (`cohort-topic/host.js:83`), and
+ *    `libp2p-node-base.js:1186` reads that resolved profile back as the
+ *    node's reactivity posture — an anonymous reader's browser would become
+ *    a T3 reactivity FORWARDER for other readers (D-08/D-09/D-10). The
+ *    `host.profile`/`host.minSigs` object below is the CORE of this
+ *    module's posture, not incidental tuning; see
+ *    `56-17-COHORT-TOPIC-POSTURE.md`.
  */
 
 import { openOptimysticWebDb, IndexedDBRawStorage } from '@optimystic/db-p2p-storage-web';
 import { createLibp2pNode } from '@optimystic/db-p2p/rn';
 import { webSockets } from '@libp2p/websockets';
+import { edgeProfile } from '@optimystic/db-core';
 
 /** Prefix that guarantees a derived name can never equal the package
  * default database name (`'optimystic'`). @type {string} */
 const STRAND_DB_NAME_PREFIX = 'vt-edge-strand-';
+
+/**
+ * `cohortTopic.host.minSigs` for this deployment. The substrate default is
+ * `14` (`k − x`, `@optimystic/db-core` `dist/src/cohort-topic/sig/threshold.js:16`),
+ * presuming a cohort of at least that many signers. This deployment's SERVING
+ * COHORT IS A SINGLE STRAND NODE, so `14` is unsatisfiable — no certificate
+ * this deployment could ever produce would carry 14 distinct signatures, and
+ * holding the default would mean reactivity never works at all. The ORIGIN
+ * must carry this identical number, or every notification fails membership
+ * verification (a subscriber configured for a different `minSigs` than the
+ * cohort that signs its certificates either verifies too little or rejects
+ * everything). Raising it later — as the serving cohort grows — is a
+ * two-sided change: both this constant and the origin's signing threshold
+ * move together. See `56-17-COHORT-TOPIC-POSTURE.md`'s dedicated section for
+ * the full cost/rationale.
+ * @type {1}
+ */
+export const PUBLIC_COHORT_MIN_SIGS = 1;
 
 /**
  * `EdgeNodeConfigError` — thrown for an empty/non-array `bootstrapNodes`
@@ -228,6 +280,21 @@ export async function createEdgeNode(config, deps) {
 			networkName,
 			fretProfile: 'edge',
 			privateKey,
+			// Subscriber-only cohort-topic posture (56-17; see
+			// 56-17-COHORT-TOPIC-POSTURE.md). `host.profile` is what
+			// `libp2p-node-base.js:1186` reads back as this node's reactivity
+			// posture, and the host's own default (unset profile) is
+			// `coreProfile()` -- so omitting this makes an anonymous reader's
+			// browser a T3 reactivity forwarder for other readers
+			// (D-08/D-09/D-10). `wantK` is deliberately left unset so both
+			// sides resolve the same node-base default.
+			cohortTopic: {
+				enabled: true,
+				host: {
+					profile: edgeProfile({ willingTiers: [] }),
+					minSigs: PUBLIC_COHORT_MIN_SIGS,
+				},
+			},
 		});
 	} catch (err) {
 		await db.close?.();
