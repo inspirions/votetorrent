@@ -4,7 +4,7 @@
  * Phase 40 CI regression locks — three lockfile/manifest invariants for the
  * published-package stack that no existing spec covers:
  *
- *   UPG-06 — patched @quereus/quereus 4.3.1 single copy. Extends
+ *   UPG-06 — patched @quereus/quereus 4.18.0 single copy. Extends
  *            quereus-single-copy-regression.spec.ts (UPG-03, "single copy,
  *            4.x") to the phase-specific version+patch: the resolved version
  *            must be exactly 4.3.1, the required forward-ported patch locator
@@ -19,7 +19,7 @@
  *            (adopting a second libp2p matrix from a published dependency).
  *
  *   PUB-02 — @optimystic/quereus-plugin-optimystic reconciled to a single
- *            0.14.x version (off the formerly-patched 0.13.5), and the two
+ *            0.27.x version (off the formerly-patched 0.13.5), and the two
  *            dead patch locators from the pre-de-vendoring state
  *            (@optimystic-quereus-plugin-optimystic-npm-0.13.5,
  *            @serfab-cadre-core-npm-0.7.1) have zero references anywhere in
@@ -81,8 +81,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
   const lock = readFileSync(join(repoRoot, 'yarn.lock'), 'utf8')
   const rootPackageJson = readFileSync(join(repoRoot, 'package.json'), 'utf8')
 
-  describe('UPG-06: patched @quereus/quereus 4.4.1 single copy', () => {
-    it('resolves a single @quereus/quereus version, and it is exactly 4.4.1', () => {
+  describe('UPG-06: patched @quereus/quereus 4.18.0 single copy', () => {
+    it('resolves a single @quereus/quereus version, and it is exactly 4.18.0', () => {
       const versions = resolvedVersionsFor(lock, '@quereus/quereus')
       expect(versions.length, 'expected at least one resolved @quereus/quereus block in yarn.lock').to.be.greaterThan(0)
 
@@ -94,26 +94,43 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @quereus/quereus version must be exactly 4.4.1, got ${distinct[0]}`
-      ).to.equal('4.4.1')
+        `Resolved @quereus/quereus version must be exactly 4.18.0, got ${distinct[0]}`
+      ).to.equal('4.18.0')
     })
 
-    it('carries the required 4.4.1 patch (@quereus-quereus-npm-4.4.1-9ab3363154)', () => {
-      const count = (lock.match(/@quereus-quereus-npm-4\.4\.1-9ab3363154/g) ?? []).length
+    it('carries the required 4.18.0 patch (@quereus-quereus-npm-4.18.0-9b9f24c666)', () => {
+      const count = (lock.match(/@quereus-quereus-npm-4\.18\.0-9b9f24c666/g) ?? []).length
       expect(
         count,
-        'Expected the @quereus-quereus-npm-4.4.1-9ab3363154 patch locator to be present in yarn.lock. It carries TWO fixes: ' +
-        '(1) applyViewDefaults + runBatchedMigrationLoop — npm\'s 4.4.1 still ships applyViewDefaults=0; ' +
-        '(2) the datetime immediate-CHECK coercion restoration — 4.4.1 moved declared-type conversion to the top of the ' +
-        'DML pipeline and deleted constraint-check\'s coerceNewSection, collapsing 4.3.1\'s raw-immediate / coerced-deferred ' +
-        'split. Both are required for the vote-engine suite to pass; see the upstream issue draft in .planning/spikes/026-*'
+        'Expected the @quereus-quereus-npm-4.18.0-9b9f24c666 patch locator to be present in yarn.lock. Forward-ported ' +
+        '4.11.0 -> 4.14.0 (spike 064) -> 4.17.1 -> 4.18.0 (2026-09-03, forced by @serfab/cadre-core 0.12.0, which ' +
+        'requires quereus ^4.18.0). The 4.18.0 hop was NOT verbatim and GREW the patch from four files to five. ' +
+        'Two things moved. (1) update.js: upstream replaced the phase-2 row-level `coerceGenerated = ' +
+        'buildRowCoercion(...)` with a PER-CELL `generatedCoercions` Map read inside the loop, so "disabled" is now ' +
+        'an EMPTY MAP rather than an undefined row-coercer — same net effect only because the `if (coerce)` guard ' +
+        'survives; if a later version drops that guard the edit stops being inert. (2) write-coercion.js is NEW in ' +
+        '4.18.0: a WriteCoercionNode now sits in the row-expansion projection, UPSTREAM of emitInsert, so the row ' +
+        'arrives already converted and disabling the emitters\' own coercers no longer restores 4.3.1 semantics on ' +
+        'its own. Measured: edits 1-4 alone left 73 failing, 49 of them this exact class; adding the write-coercion ' +
+        'edit took it to the known floor. That fifth edit is BROADER than the others — it disables write-path ' +
+        'coercion for every column and type, so a type MISMATCH that used to throw at plan time now surfaces from ' +
+        'the storage layer. The patch still carries ONE concern: the datetime immediate-CHECK coercion restoration ' +
+        '(4.4.1 moved declared-type conversion to the top of the DML pipeline and deleted constraint-check\'s ' +
+        'coerceNewSection, collapsing 4.3.1\'s raw-immediate / coerced-deferred split). Re-measured on 4.18.0, not ' +
+        'carried forward: installing UNPATCHED gives 1395 passing / 265 failing, and 224 of those 265 are exactly ' +
+        'this class (ExpirationValid / SubmittedAtValid `isISODatetime(x) and like(\'%Z\', x)`); re-applying the ' +
+        'patch returns the suite to its known floor. The 4.17.1 figures were 1396/264 with 225 in-class, so the ' +
+        'defect tracks the suite, not the version. Upstream issue: gotchoices/quereus#28, still OPEN, so this patch ' +
+        'is not yet retirable.'
       ).to.be.greaterThan(0)
     })
 
-    it('has zero references to superseded quereus patch locators (4.2.1-64e8a4bca7, 4.3.1-6814ac0861)', () => {
+    it('has zero references to superseded quereus patch locators (4.2.1-64e8a4bca7, 4.3.1-6814ac0861, 4.14.0-042f7e4e5e, 4.17.1-831db23a51)', () => {
       const supersededCounts = {
         '4.2.1-64e8a4bca7': (lock.match(/4\.2\.1-64e8a4bca7/g) ?? []).length,
         '4.3.1-6814ac0861': (lock.match(/4\.3\.1-6814ac0861/g) ?? []).length,
+        '4.14.0-042f7e4e5e': (lock.match(/4\.14\.0-042f7e4e5e/g) ?? []).length,
+        '4.17.1-831db23a51': (lock.match(/4\.17\.1-831db23a51/g) ?? []).length,
       }
       const residue = Object.entries(supersededCounts).filter(([, n]) => n > 0)
       expect(
@@ -141,8 +158,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
     })
   })
 
-  describe('PUB-02: @optimystic/quereus-plugin-optimystic reconciled to ^0.17.x, dead patches retired', () => {
-    it('resolves a single @optimystic/quereus-plugin-optimystic version, and it is 0.17.x', () => {
+  describe('PUB-02: @optimystic/quereus-plugin-optimystic reconciled to ^0.27.x, dead patches retired', () => {
+    it('resolves a single @optimystic/quereus-plugin-optimystic version, and it is 0.27.x', () => {
       const versions = resolvedVersionsFor(lock, '@optimystic/quereus-plugin-optimystic')
       expect(versions.length, 'expected at least one resolved @optimystic/quereus-plugin-optimystic block in yarn.lock').to.be.greaterThan(0)
 
@@ -154,11 +171,11 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @optimystic/quereus-plugin-optimystic version must be 0.17.x, got ${distinct[0]}`
-      ).to.match(/^0\.17\./)
+        `Resolved @optimystic/quereus-plugin-optimystic version must be 0.27.x, got ${distinct[0]}`
+      ).to.match(/^0\.27\./)
     })
 
-    it('resolves ^0.17.0 in the root package.json dependency declaration', () => {
+    it('resolves ^0.27.0 in the root package.json dependency declaration', () => {
       const parsed = JSON.parse(rootPackageJson) as {
         dependencies?: Record<string, string>
         resolutions?: Record<string, string>
@@ -167,8 +184,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
         parsed.resolutions?.['@optimystic/quereus-plugin-optimystic']
       expect(
         declared,
-        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^0.17.0'
-      ).to.equal('^0.17.0')
+        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^0.27.0'
+      ).to.equal('^0.27.0')
     })
 
     it('has zero references to the dead patch locators (0.13.5 plugin-optimystic patch, 0.7.1 cadre-core patch)', () => {

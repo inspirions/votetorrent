@@ -1,0 +1,99 @@
+/*
+ * packages/ui-web/src/components.css — the shared components' OWN default
+ * styles (D-15 revision, 53-CR01).
+ *
+ * D-15 originally read "each app owns its own component styles" (see
+ * LifecyclePill.tsx's now-superseded header note, 53-05). Code review CR-01
+ * (Phase 53) measured the consequence on the shipped public app:
+ * `apps/VoteTorrentPublic/src/app.css` never authored rules for
+ * `.pv-disclosure`, `.lifecycle-pill` (+ 3 modifiers) or `.dt-toggle-group` —
+ * the class names `AdvisoryDisclosure`, `LifecyclePill` and `DetailsToggle`
+ * themselves render — so the D-16 binding advisory disclosure and the
+ * lifecycle indicator rendered as unstyled text on the one page whose entire
+ * purpose is that its claims can be checked. D-15 is REVISED here: the
+ * package that owns a shared component's markup also owns that component's
+ * DEFAULT rules, for exactly the class names that component renders — no
+ * more, no less. A consumer may still override anything below through the
+ * normal cascade (this file uses no `!important` anywhere); what a consumer
+ * may no longer do is forget to author the rule at all.
+ *
+ * This does NOT reclaim `.election-title` (rendered directly by
+ * `ElectionShell.tsx`, not by a shared component — see
+ * `apps/VoteTorrentPublic/src/app.css`'s own rule) or `.dt-toggle`/`.dt-body`
+ * (already correctly authored, independently, in every current consumer's
+ * own app.css — CR-01 found no gap there, so nothing here moves them).
+ *
+ * Uses ONLY this package's own `tokens.css` custom properties — no hex
+ * literal, no new raw spacing value, mirroring the discipline every
+ * consumer's own component CSS already follows (preview-as.css,
+ * election-ops.css).
+ *
+ * `.pv-disclosure` and `.lifecycle-pill` (+ 3 modifiers) below were originally
+ * transcribed VERBATIM from
+ * `apps/VoteTorrentDashboard/src/screens/panels/election-ops.css` and
+ * `.../preview-as.css` as they stood before the D-15 revision — relocating,
+ * not redesigning. `.dt-toggle-group` is new at that same revision: no
+ * consumer declared it before CR-01, so its shape there was authored fresh.
+ *
+ * Phase 54 (D-06/D-10): the modifiers are no longer the relocated dashboard
+ * rules unchanged — five now exist, not three. The `pre` and `closed`
+ * phase rules keep the prior organizing/released reduced-opacity treatment;
+ * the `voting` phase rule keeps the prior running treatment. Two rules below
+ * are genuinely NEW: the `settling` phase rule uses `--warn` at full
+ * opacity (matching 54-UI-SPEC's `wait` tone) and the `indeterminate`
+ * rule uses `--fail` at full opacity (matching the spec's `bad` tone) —
+ * these are the two intervals with no analog in the three-phase model.
+ */
+
+.pv-disclosure {
+	margin: 0;
+	color: var(--muted);
+	font-size: var(--font-label-size);
+	font-weight: var(--font-label-weight);
+	line-height: var(--font-label-line-height);
+}
+
+.lifecycle-pill {
+	display: inline-flex;
+	align-items: center;
+	padding: 0 var(--space-sm);
+	border-radius: var(--radius);
+	background: var(--surface2);
+	border: 1px solid var(--border);
+	color: var(--muted);
+	font-size: var(--font-label-size);
+	font-weight: var(--font-label-weight);
+	line-height: var(--font-label-line-height);
+}
+
+.lifecycle-pill--pre {
+	opacity: 0.85;
+}
+
+.lifecycle-pill--voting {
+	color: var(--text);
+	opacity: 1;
+}
+
+.lifecycle-pill--settling {
+	color: var(--warn);
+	opacity: 1;
+}
+
+.lifecycle-pill--closed {
+	opacity: 0.85;
+}
+
+/* D-21 retone: on a page whose heading already says no election is held, a
+ * red pill asserts an error that did not occur. `--fail` stays reserved for
+ * a genuine fault (see `.status-banner--bad`, untouched by this rule). */
+.lifecycle-pill--indeterminate {
+	color: var(--text);
+	opacity: 0.85;
+}
+
+.dt-toggle-group {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-xs);
+}

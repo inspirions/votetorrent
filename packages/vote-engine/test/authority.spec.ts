@@ -30,14 +30,27 @@ import type {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// 49-08 (D-21): `proposeAdmin`'s `IsUserValid` now genuinely verifies signer/key
+// membership against `UserKey`, so the founding user's key must be a REAL,
+// registered secp256k1 keypair (not the literal placeholder string 'key-1') and
+// `makeRealSignature`/`makeRealSignCallback` must sign with THAT SAME registered
+// private key for any signerUserId they already hold one for — mirrors
+// `test-context.ts`'s `testUserPrivateKeys` pattern. Module-scope map is safe here:
+// mocha runs this suite serially, and `makeUser()` overwrites its id's entry with a
+// fresh key before the next test's network is created.
+const authoritySpecPrivateKeys = new Map<string, string>()
+
 function makeUser (overrides?: Partial<User>): User {
+  const id = overrides?.id ?? 'user-1'
+  const { privateHex, publicHex } = randomTestKeyPair()
+  authoritySpecPrivateKeys.set(id, privateHex)
   return {
-    id: 'user-1',
+    id,
     name: 'Test User',
     imageRef: { url: 'https://img.local/user.png' },
     activeKeys: [
       {
-        key: 'key-1',
+        key: publicHex,
         type: UserKeyType.mobile,
         expiration: Date.now() + 86_400_000
       }
@@ -153,8 +166,11 @@ async function createNetworkAndAuthorityWithoutRadOfficer (): Promise<{
 }
 
 // AUTH-01: real hex-encoded secp256k1 signature for test inputs.
-// Generates a fresh keypair, signs sha256(digestText ?? signerUserId), and
-// returns the hex shapes contractually required by the engine.
+// Signs sha256(digestText ?? signerUserId) using the SAME registered keypair
+// `makeUser()` recorded for `signerUserId` when one exists (49-08 D-21: proposeAdmin's
+// IsUserValid now checks real UserKey membership, so the signer key must be the
+// registered one) — falling back to a fresh, unregistered keypair otherwise (this
+// function's callers that never reach the UserKey/IsUserValid gate are unaffected).
 //
 // 999.1 R-02: this signs ARBITRARY bytes (sha256 of digestText/signerUserId), NOT the
 // actual row Digest the schema's SignatureValid UDF now verifies — kept only for
@@ -163,19 +179,31 @@ async function createNetworkAndAuthorityWithoutRadOfficer (): Promise<{
 // `proposeAdmin`/`saveInviteWithSigning` MUST use `makeRealSignCallback` instead, since
 // those methods compute the real digest engine-side and need to sign THAT.
 function makeRealSignature (signerUserId: string, digestText?: string): Signature {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const registeredPrivateHex = authoritySpecPrivateKeys.get(signerUserId)
+  const { privateHex, publicHex } = registeredPrivateHex
+    ? { privateHex: registeredPrivateHex, publicHex: undefined }
+    : randomTestKeyPair()
   const privBytes = Uint8Array.from(privateHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)))
+  const resolvedPublicHex = publicHex ?? bytesToHex(secp256k1.getPublicKey(privBytes))
   const digestBytes = sha256(new TextEncoder().encode(digestText ?? signerUserId))
   const sig = bytesToHex(secp256k1.sign(digestBytes, privBytes))
-  return { signerUserId, signerKey: publicHex, signature: sig }
+  return { signerUserId, signerKey: resolvedPublicHex, signature: sig }
 }
 
 /**
  * 999.1 R-02: real per-digest sign callback for `proposeAdmin`/`saveInviteWithSigning`
  * (both compute the actual row Digest engine-side and invoke this with the real bytes).
+ *
+ * 49-08 (D-21): uses the SAME registered keypair `makeUser()` recorded for
+ * `signerUserId` when one exists, so `proposeAdmin`'s real `IsUserValid` membership
+ * check (against `UserKey`) passes — falling back to a fresh, unregistered keypair
+ * for any signerUserId `makeUser()` never registered.
  */
 function makeRealSignCallback (signerUserId: string, _unusedDigestTextArg?: string): (digest: Uint8Array) => Promise<Signature> {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const registeredPrivateHex = authoritySpecPrivateKeys.get(signerUserId)
+  const { privateHex, publicHex } = registeredPrivateHex
+    ? { privateHex: registeredPrivateHex, publicHex: bytesToHex(secp256k1.getPublicKey(hexToBytes(registeredPrivateHex))) }
+    : randomTestKeyPair()
   const privBytes = hexToBytes(privateHex)
   return async (digest: Uint8Array): Promise<Signature> => {
     const sigHex = bytesToHex(secp256k1.sign(digest, privBytes))
@@ -476,10 +504,12 @@ describe('AuthorityEngine', () => {
     it('should invoke a sign-callback with non-empty digest bytes and accept the returned Signature', async () => {
       const { authority, authorityEngine } = await createNetworkAndAuthority()
       const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
-      // Use the same keypair that makeRealSignature would use but capture the digest bytes.
+      // 49-08 (D-21): must use 'user-1's REGISTERED founding keypair (not a fresh,
+      // unregistered one) so proposeAdmin's real IsUserValid membership check passes.
       // signerUserId must be 'user-1' — the existing officer in the test fixture (createNetworkAndAuthority).
-      const { privateHex, publicHex } = randomTestKeyPair()
-      const privBytes = Uint8Array.from(privateHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)))
+      const privateHex = authoritySpecPrivateKeys.get('user-1')!
+      const publicHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(privateHex)))
+      const privBytes = hexToBytes(privateHex)
       let callbackDigestBytes: Uint8Array | null = null
 
       const signCallback = async (digestBytes: Uint8Array): Promise<Signature> => {
@@ -2991,7 +3021,11 @@ describe('AuthorityProposeAdminBuilder', () => {
     const digestRow2 = await ctx2.db
       .prepare('select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d')
       .get({ authorityId: authority2.id, effectiveAt: effectiveAtCanon, thresholdPolicies: thresholdPoliciesJson })
-    const { privateHex: priv2, publicHex: pub2 } = randomTestKeyPair()
+    // 49-08 (D-21): must sign with eng2's REGISTERED founding 'user-1' key (not a
+    // fresh, unregistered one) so proposeAdmin's real IsUserValid membership check
+    // passes — createNetworkAndAuthority() above already recorded it.
+    const priv2 = authoritySpecPrivateKeys.get('user-1')!
+    const pub2 = bytesToHex(secp256k1.getPublicKey(hexToBytes(priv2)))
     const realSig2: Signature = {
       signerUserId: 'user-1',
       signerKey: pub2,

@@ -1,0 +1,75 @@
+/*
+ * panels.css — panel card / header / pill-row / body / denied-ghost styling.
+ * Built entirely from `@votetorrent/ui-web`'s tokens.css custom properties:
+ * no new hex literal, no new spacing value. The grid layout and the 900px
+ * sidebar collapse belong to the dashboard's own app.css (`.layout`,
+ * `.panel-grid`, per D-15) and are not restated here.
+ *
+ * `.panel-body` deliberately carries no CSS rule that would hide it while
+ * leaving it present in markup — a denied panel's body is not emitted to
+ * the DOM at all (the frame component's own guard), never merely hidden.
+ */
+
+.panel {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-sm);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: var(--space-md);
+}
+
+.panel--denied {
+	opacity: 0.5;
+}
+
+.panel-header {
+	display: flex;
+	align-items: center;
+	gap: var(--space-sm);
+}
+
+.panel-icon {
+	font-size: var(--font-heading-size);
+	line-height: var(--font-heading-line-height);
+}
+
+.panel-title {
+	margin: 0;
+	font-size: var(--font-heading-size);
+	font-weight: var(--font-heading-weight);
+	line-height: var(--font-heading-line-height);
+	color: var(--text);
+}
+
+.panel-pills {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-xs);
+}
+
+.pill {
+	display: inline-flex;
+	align-items: center;
+	padding: 0 var(--space-sm);
+	border-radius: var(--radius);
+	background: var(--surface2);
+	border: 1px solid var(--border);
+	color: var(--muted);
+	font-size: var(--font-label-size);
+	font-weight: var(--font-label-weight);
+	line-height: var(--font-label-line-height);
+}
+
+.panel-body {
+	color: var(--text);
+	font-size: var(--font-body-size);
+	font-weight: var(--font-body-weight);
+	line-height: var(--font-body-line-height);
+}
+
+.panel-empty {
+	margin: 0;
+	color: var(--muted);
+}

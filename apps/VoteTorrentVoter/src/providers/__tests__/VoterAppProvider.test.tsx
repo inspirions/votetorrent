@@ -5,8 +5,9 @@
  *   - Rendering VoterAppProvider (wrapped in a mocked CadreNodeProvider, mirroring App.tsx's
  *     nesting) flips `isInitialized` to true after the mocked D-07 seed + network open resolve,
  *     and calls `hideSplash`.
- *   - `useVoterApp()` surfaces a real `getEngine` accessor plus `seededElectionId`/`sign`
- *     (captured from `seedDevNetwork`'s return) — NOT the removed `isRegistered` mock boolean.
+ *   - `useVoterApp()` surfaces a real `getEngine` accessor plus `seededElectionId` (captured from
+ *     `seedDevNetwork`'s return) — NOT the removed `isRegistered` mock boolean, and (51-12,
+ *     D-09/D-20) NOT a `sign` field at all — the context type no longer has one.
  *   - A forced `seedDevNetwork` throw renders the recoverable "Try Again" view rather than
  *     silently proceeding with an empty in-memory network (T-44-18).
  *
@@ -69,13 +70,18 @@ const FAKE_NETWORK_INIT: NetworkInit = {
 	relays: [],
 	primaryAuthority: {name: 'Test Authority', domainName: 'test.local'},
 	admin: {
-		officers: [{init: {name: FAKE_USER.name, title: 'Registrar', scopes: ['vrg'] as Scope[]}}],
+		// 51-12 (D-09/D-20): 'mel', not 'vrg' — mirrors the real dev-seed's own narrowed grant.
+		officers: [{init: {name: FAKE_USER.name, title: 'Registrar', scopes: ['mel'] as Scope[]}}],
 		effectiveAt: Date.now(),
 		thresholdPolicies: [],
 	},
 	policies: {timestampAuthorities: [], numberRequiredTSAs: 0, electionType: ElectionType.adhoc},
 };
 
+// `DevSeedResult.sign` is still a required field (dev-seed.ts / dev-seed.test.ts still need the
+// SAME device signer for the seed's own election/policy-row ceremony) — this fixture must still
+// supply one to satisfy the type, even though 51-12 (D-09/D-20) means VoterAppProvider no longer
+// reads it onto context.
 const FAKE_SIGN = async (_digest: Uint8Array): Promise<Signature> => ({
 	signerUserId: FAKE_USER.id,
 	signerKey: FAKE_USER.activeKeys[0]!.key,
@@ -145,7 +151,7 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 		expect(hideSplash).toHaveBeenCalled();
 	});
 
-	it('useVoterApp() exposes a real getEngine accessor plus seededElectionId + sign (not the removed isRegistered mock boolean)', async () => {
+	it('useVoterApp() exposes a real getEngine accessor plus seededElectionId (not the removed isRegistered mock boolean, and NOT a sign field — 51-12/D-09/D-20)', async () => {
 		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
 		const {captured} = renderProvider();
 		await flushBoot();
@@ -154,7 +160,10 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 		expect(typeof captured.value!.hasEngine).toBe('function');
 		expect(typeof captured.value!.selectNetwork).toBe('function');
 		expect(captured.value!.seededElectionId).toBe('test-seeded-election-id');
-		expect(typeof captured.value!.sign).toBe('function');
+		// 51-12 (D-09/D-20): the context has NO `sign` field at all — dead plumbing that would
+		// hand a future contributor an officer-capable signer is removed structurally, not just
+		// left unused.
+		expect((captured.value as unknown as Record<string, unknown>).sign).toBeUndefined();
 		expect((captured.value as unknown as Record<string, unknown>).isRegistered).toBeUndefined();
 		expect((captured.value as unknown as Record<string, unknown>).registeredAt).toBeUndefined();
 		expect((captured.value as unknown as Record<string, unknown>).hasVoted).toBeUndefined();

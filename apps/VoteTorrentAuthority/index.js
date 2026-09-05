@@ -20,6 +20,15 @@ AppRegistry.registerComponent(appName, () => App);
 // when strand mode is on this standalone solo call is redundant and races the
 // strand runner on the shared PROOF_CHAIN_REF_KEY (see
 // 37-DIAGNOSIS-boolean-default-reattach.md "Secondary finding").
+// D-26a LOCAL half (49-CONTEXT D-26/D-26a). Dev-only; no-op unless
+// __DEV__ && RECOVERY_BRANCH_PROOF_ENABLED (committed default false). Proves the API 30+
+// BiometricPrompt DEVICE_CREDENTIAL recovery path signs and that the schema's own verifier
+// accepts it -- WITHOUT needing a network. Below API 30 recovery is unsupported (D-26a
+// RESCOPED 2026-08-21), so the runner records UNSUPPORTED-OS.
+// Driven by scripts/run-recovery-branch-proof.sh. Logs under [d26a-local].
+import {runRecoveryBranchProofRunner} from './src/engines/recovery-branch-proof-runner';
+runRecoveryBranchProofRunner();
+
 import {runPersistenceProof} from './src/engines/persistence-proof-runner';
 import {STRAND_PERSISTENCE_PROOF_ENABLED} from './src/engines/proof-flags.generated';
 if (!STRAND_PERSISTENCE_PROOF_ENABLED) {
@@ -40,6 +49,14 @@ runReplicationProof();
 // __DEV__ && SIGNING_PROOF_ENABLED (see proof-flags.generated.ts). Logs under [spike013].
 import {runSigningProofRunner} from './src/engines/signing-proof-runner';
 runSigningProofRunner();
+
+// Phase 52 (D-05) dev-only sealed-payload Hermes proof. Fire-and-forget; no-op unless
+// __DEV__ && SEALED_PAYLOAD_PROOF_ENABLED (see proof-flags.generated.ts). Proves
+// @noble/ciphers resolves, evaluates and computes byte-correct AES-256-GCM under Hermes;
+// the wrapper it emits is cross-decrypted host-side by scripts/lib/seal-kat-verify.mjs.
+// Driven by scripts/run-sealed-payload-proof.sh. Logs under [seal-kat].
+import {runSealedPayloadProofRunner} from './src/engines/sealed-payload-proof-runner';
+runSealedPayloadProofRunner();
 
 // Phase 37 (STR-02) dev-only on-device strand persistence proof. Fire-and-forget; no-op
 // unless __DEV__ && STRAND_PERSISTENCE_PROOF_ENABLED (see proof-flags.generated.ts). Boots its

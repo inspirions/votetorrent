@@ -1,16 +1,20 @@
 /**
- * Unit tests for ConfirmationScreen (REG-04/D-03/D-05/D-09/D-11) — the Face-ID confirming tap.
- * Fully mocks `@react-navigation/native` (spy-able `popToTop`), `providers/VoterAppProvider`,
- * `providers/RegistrationDraftProvider`, `engines/device-user`, and `engines/attestation-producer`
- * (D-11 two-step seam) so the real ceremony can be exercised without a real navigator/provider/
- * engine tree, mirroring Authority's `NetworksScreen.bootstrap.test.tsx` full-replace mocking
+ * Unit tests for ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18) — the
+ * Face-ID confirming tap. Fully mocks `@react-navigation/native` (spy-able `popToTop`),
+ * `providers/VoterAppProvider`, `providers/RegistrationDraftProvider`, `engines/device-user`,
+ * `engines/device-signer`, `engines/attestation-producer` (D-11 two-step seam), and
+ * `./attach-voter-request-transport` so the rewritten ceremony can be exercised without a real
+ * navigator/provider/engine tree or a real network, mirroring Authority's full-replace mocking
  * pattern.
  *
- * Phase 45-06 (this plan) — asserts the reordered/rebound ceremony: `provisionDeviceKey` runs
- * BEFORE `register`/`issueAttestationChallenge`; `issueAttestationChallenge` and `setDeviceKey`
- * both receive the P-256 pubkey (never the secp256k1 `activeKeys[0]` key); `seededElectionId` is
- * threaded as the trailing arg; and the D-09 three-way failure UX (recoverable-action /
- * recoverable-transient / terminal) renders the correct classified copy + CTA shape.
+ * Plan 11 — asserts the REWRITTEN ceremony: the screen submits a self-signed registration-request
+ * document and a self-signed association-request document (never `register()`/
+ * `issueAttestationChallenge()`/`associate()`/`.commit()`), polls (bounded) for a challenge-issued
+ * decision notice, still runs `producer.produce(challenge)` in the same biometric-last position,
+ * then submits a self-signed attestation-answer document — all through mocked
+ * `IRegistrationRequestTransport`/`IAssociationRequestTransport` interfaces, never a concrete
+ * binding. The officer signer (`useVoterApp().sign`) must never be passed to any transport mock,
+ * proven by IDENTITY comparison, not a string/name check.
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
@@ -46,7 +50,7 @@ jest.mock('react-native/Libraries/Linking/Linking', () => ({
 	sendIntent: (...args: unknown[]) => mockSendIntent(...args),
 }));
 
-// ---- Mocked engine boundary (D-02/D-05): getEngine('network'|'registration'|'association') ----
+// ---- Mocked engine boundary: getEngine('network') ----
 
 const callOrder: string[] = [];
 
@@ -55,107 +59,32 @@ const mockGetDetails = jest.fn(async () => ({
 }));
 const mockNetworkEngine = {getDetails: mockGetDetails};
 
-// Capture every RegisterInit the ceremony submits, so tests can assert the stable
-// registrantId (WR-02) and the furnished field details (WR-04).
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const registerInits: any[] = [];
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockRegister = jest.fn(async (init: any) => {
-	callOrder.push('register');
-	registerInits.push(init);
-});
-const mockRegistrationEngine = {register: mockRegister};
-
-const CHALLENGE_NONCE = 'challenge-nonce-abc';
-const P256_PUB = 'P256_PUB';
-const SEEDED_ELECTION_ID = 'election-1';
-
-interface IssueChallengeCall {
-	registrantId: string;
-	deviceKey: string;
-	expiration: string;
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	signatureOrCallback: any;
-	electionId?: string;
-}
-const issueChallengeCalls: IssueChallengeCall[] = [];
-const mockIssueAttestationChallenge = jest.fn(
-	async (
-		registrantId: string,
-		deviceKey: string,
-		expiration: string,
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		signatureOrCallback: any,
-		electionId?: string,
-	) => {
-		callOrder.push('issueAttestationChallenge');
-		issueChallengeCalls.push({registrantId, deviceKey, expiration, signatureOrCallback, electionId});
-		return {
-			nonce: CHALLENGE_NONCE,
-			authorityId: 'authority-1',
-			registrantId,
-			deviceKey,
-			expiration: '2100-01-01T00:00:00Z',
-		};
-	},
-);
-
-let capturedSetDeviceKey: unknown;
-const mockCommit = jest.fn(async () => {
-	callOrder.push('associate.commit');
-});
-
-interface MockAssociateBuilder {
-	setRegistrantId: jest.Mock<MockAssociateBuilder, [string]>;
-	setDeviceKey: jest.Mock<MockAssociateBuilder, [string]>;
-	setNonce: jest.Mock<MockAssociateBuilder, [string]>;
-	setAttestation: jest.Mock<MockAssociateBuilder, [unknown]>;
-	setSignatureOrCallback: jest.Mock<MockAssociateBuilder, [unknown]>;
-	commit: jest.Mock<Promise<void>, []>;
-}
-
-function makeAssociateBuilder(): MockAssociateBuilder {
-	const builder: MockAssociateBuilder = {
-		setRegistrantId: jest.fn((_registrantId: string) => builder),
-		setDeviceKey: jest.fn((deviceKey: string) => {
-			capturedSetDeviceKey = deviceKey;
-			return builder;
-		}),
-		setNonce: jest.fn((_nonce: string) => builder),
-		setAttestation: jest.fn((_attestation: unknown) => builder),
-		setSignatureOrCallback: jest.fn((_signatureOrCallback: unknown) => builder),
-		commit: mockCommit,
-	};
-	return builder;
-}
-
-const mockAssociationEngine = {
-	issueAttestationChallenge: mockIssueAttestationChallenge,
-	buildAssociate: jest.fn(() => makeAssociateBuilder()),
-};
-
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'network') {
 		return mockNetworkEngine;
 	}
-	if (engineName === 'registration') {
-		return mockRegistrationEngine;
-	}
-	if (engineName === 'association') {
-		return mockAssociationEngine;
-	}
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
 
+const SEEDED_ELECTION_ID = 'election-1';
+const P256_PUB = 'P256_PUB';
+const CHALLENGE_NONCE = 'challenge-nonce-abc';
+const DEVICE_IDENTITY_PUBLIC_KEY = 'DEVICE_IDENTITY_SECP256K1_PUBLIC_KEY';
+
+// The officer signer — must NEVER be passed to any transport mock (identity-compared, not a
+// string check).
 const mockSign = jest.fn(async () => ({
 	signerUserId: 'device-user-1',
 	signerKey: 'device-pub-key',
-	signature: 'stub-signature',
+	signature: 'stub-officer-signature',
 }));
 
 jest.mock('../../../providers/VoterAppProvider', () => ({
 	useVoterApp: () => ({
 		seededElectionId: SEEDED_ELECTION_ID,
+		// Kept on the provider mock (51-12 owns the provider blast radius) even though this
+		// rewritten screen never destructures it — the point under test is that it is never REACHED,
+		// not that the provider stopped exposing it.
 		sign: mockSign,
 		getEngine: mockGetEngine,
 	}),
@@ -187,10 +116,23 @@ jest.mock('../../../providers/RegistrationDraftProvider', () => ({
 const mockGetOrCreateDeviceUser = jest.fn(async (..._args: unknown[]) => ({
 	id: 'device-user-1',
 	name: 'Dev Voter',
-	activeKeys: [{key: 'SECP256K1_DEVICE_KEY_MUST_NOT_BE_USED', type: 'mobile', expiration: 9999999999999}],
+	activeKeys: [{key: DEVICE_IDENTITY_PUBLIC_KEY, type: 'mobile', expiration: 9999999999999}],
 }));
 jest.mock('../../../engines/device-user', () => ({
 	getOrCreateDeviceUser: (...args: unknown[]) => mockGetOrCreateDeviceUser(...args),
+}));
+
+// The voter's OWN device signer (secp256k1, software) — distinct object identity from mockSign
+// (the officer signer) even though both close over the same underlying key in the real app. This
+// distinctness is exactly what the "never passes the officer signer" test proves.
+const mockDeviceSign = jest.fn(async (_digest: Uint8Array) => ({
+	signerUserId: 'device-user-1',
+	signerKey: DEVICE_IDENTITY_PUBLIC_KEY,
+	signature: 'device-identity-signature',
+}));
+const mockCreateDeviceSigner = jest.fn(async (..._args: unknown[]) => mockDeviceSign);
+jest.mock('../../../engines/device-signer', () => ({
+	createDeviceSigner: (...args: unknown[]) => mockCreateDeviceSigner(...args),
 }));
 
 const mockProvisionDeviceKey = jest.fn(async () => {
@@ -207,12 +149,93 @@ const mockProduce = jest.fn(async (challenge: {nonce: string}) => {
 		platformDetails: {type: 'Android' as const, safetyNetAttestation: 'x', keystorePublicKey: P256_PUB, nonce: challenge.nonce},
 	};
 });
+const mockSignDeviceKeyDigest = jest.fn(async (_digest: Uint8Array) => ({
+	signerUserId: '',
+	signerKey: P256_PUB,
+	signature: 'p256-request-signature',
+}));
 const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({
 	provisionDeviceKey: mockProvisionDeviceKey,
 	produce: mockProduce,
+	signDeviceKeyDigest: mockSignDeviceKeyDigest,
 }));
 jest.mock('../../../engines/attestation-producer', () => ({
 	resolveAttestationProducer: (...args: unknown[]) => mockResolveAttestationProducer(...args),
+}));
+
+// ---- Mocked D-08 transport boundary: resolveVoterRequestTransports() ----
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const registrationRequestInits: any[] = [];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const registrationSubmitCalls: any[] = [];
+const mockRegistrationSubmitRequest = jest.fn(
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	async (init: any, requesterKey: string, signatureOrCallback: unknown) => {
+		callOrder.push('registration.submitRequest');
+		registrationRequestInits.push(init);
+		registrationSubmitCalls.push({init, requesterKey, signatureOrCallback});
+		return init.id as string;
+	},
+);
+
+let capturedAssociationRequestId: string | undefined;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const associationSubmitRequestCalls: any[] = [];
+const mockAssociationSubmitRequest = jest.fn(
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	async (init: any, requesterKey: string, signatureOrCallback: unknown) => {
+		callOrder.push('association.submitRequest');
+		capturedAssociationRequestId = init.id;
+		associationSubmitRequestCalls.push({init, requesterKey, signatureOrCallback});
+		return init.id as string;
+	},
+);
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const associationSubmitAttestationCalls: any[] = [];
+const mockAssociationSubmitAttestation = jest.fn(
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	async (answer: any, requesterKey: string, signatureOrCallback: unknown) => {
+		callOrder.push('association.submitAttestation');
+		associationSubmitAttestationCalls.push({answer, requesterKey, signatureOrCallback});
+	},
+);
+
+const mockPollDecisions = jest.fn(async (_sinceCursor?: string) => {
+	callOrder.push('association.pollDecisions');
+	return [
+		{
+			requestId: capturedAssociationRequestId,
+			status: 'c',
+			challengeNonce: CHALLENGE_NONCE,
+			cursor: 'cursor-1',
+		},
+	];
+});
+
+const mockRegistrationTransport = {
+	submitRequest: mockRegistrationSubmitRequest,
+	pollDecisions: jest.fn(async () => []),
+};
+const mockAssociationTransport = {
+	submitRequest: mockAssociationSubmitRequest,
+	submitAttestation: mockAssociationSubmitAttestation,
+	pollDecisions: mockPollDecisions,
+};
+
+type ResolvedTransports = {
+	registrationTransport: typeof mockRegistrationTransport;
+	associationTransport: typeof mockAssociationTransport;
+};
+const mockResolveVoterRequestTransports = jest.fn(
+	(..._args: unknown[]): ResolvedTransports | undefined => ({
+		registrationTransport: mockRegistrationTransport,
+		associationTransport: mockAssociationTransport,
+	}),
+);
+jest.mock('../attach-voter-request-transport', () => ({
+	resolveVoterRequestTransports: (...args: unknown[]) => mockResolveVoterRequestTransports(...args),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -226,32 +249,41 @@ function renderScreen() {
 	return tr;
 }
 
-async function pressConfirm(tr: renderer.ReactTestRenderer, testID = 'confirmation-confirm-face-id') {
+/** Flushes chained microtasks. The rewritten ceremony has more awaited steps than the old one
+ * (device signer resolution, two transport submits, a bounded decision poll, the attestation
+ * submit), and the poll-exhaustion test drives up to MAX_POLL_ATTEMPTS (20) loop iterations — so
+ * this flushes generously rather than counting exact ticks. */
+async function flushMicrotasks(times = 60) {
+	for (let i = 0; i < times; i++) {
+		await Promise.resolve();
+	}
+}
+
+async function pressConfirm(tr: renderer.ReactTestRenderer, testID = 'confirmation-confirm-face-id', flushes = 60) {
 	const cta = tr.root.findByProps({testID});
 	await renderer.act(async () => {
 		cta.props.onPress();
-		// Flush the ceremony's chained microtasks (provisionDeviceKey -> register -> challenge
-		// -> produce -> associate commit).
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
+		await flushMicrotasks(flushes);
 	});
 }
 
 beforeEach(() => {
 	mockPopToTop.mockClear();
 	mockClearDraft.mockClear();
-	mockRegister.mockClear();
-	mockIssueAttestationChallenge.mockClear();
-	mockCommit.mockClear();
-	mockProvisionDeviceKey.mockClear();
-	mockProduce.mockClear();
+	mockSign.mockClear();
+	mockCreateDeviceSigner.mockClear();
+	mockDeviceSign.mockClear();
 	mockGetOrCreateDeviceUser.mockClear();
 	mockSendIntent.mockClear();
+	mockProvisionDeviceKey.mockClear();
+	mockProduce.mockClear();
+	mockSignDeviceKeyDigest.mockClear();
+	mockRegistrationSubmitRequest.mockClear();
+	mockAssociationSubmitRequest.mockClear();
+	mockAssociationSubmitAttestation.mockClear();
+	mockPollDecisions.mockClear();
+	mockResolveVoterRequestTransports.mockClear();
+
 	mockProvisionDeviceKey.mockImplementation(async () => {
 		callOrder.push('provisionDeviceKey');
 		return {publicKey: P256_PUB};
@@ -266,14 +298,32 @@ beforeEach(() => {
 			platformDetails: {type: 'Android' as const, safetyNetAttestation: 'x', keystorePublicKey: P256_PUB, nonce: challenge.nonce},
 		};
 	});
+	mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+		callOrder.push('association.pollDecisions');
+		return [
+			{
+				requestId: capturedAssociationRequestId,
+				status: 'c',
+				challengeNonce: CHALLENGE_NONCE,
+				cursor: 'cursor-1',
+			},
+		];
+	});
+	mockResolveVoterRequestTransports.mockImplementation(() => ({
+		registrationTransport: mockRegistrationTransport,
+		associationTransport: mockAssociationTransport,
+	}));
+
 	callOrder.length = 0;
-	capturedSetDeviceKey = undefined;
-	registerInits.length = 0;
-	issueChallengeCalls.length = 0;
+	capturedAssociationRequestId = undefined;
+	registrationRequestInits.length = 0;
+	registrationSubmitCalls.length = 0;
+	associationSubmitRequestCalls.length = 0;
+	associationSubmitAttestationCalls.length = 0;
 	mockDraft = {...sampleDraft};
 });
 
-describe('ConfirmationScreen (REG-04/D-03/D-05/D-09/D-11)', () => {
+describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)', () => {
 	it("renders the 'You're all set!' heading and the confirm CTA", () => {
 		const tr = renderScreen();
 		const text = JSON.stringify(tr.toJSON());
@@ -289,72 +339,140 @@ describe('ConfirmationScreen (REG-04/D-03/D-05/D-09/D-11)', () => {
 	});
 
 	it(
-		'pressing the CTA drives provisionDeviceKey -> register -> issueAttestationChallenge -> ' +
-			'produce -> associate commit, then clears the draft and pops to top (D-05/D-11)',
+		'pressing the CTA drives: registration submitRequest -> association submitRequest -> ' +
+			'pollDecisions (challenge issued) -> produce -> submitAttestation, in that exact order, ' +
+			'each exactly once, then shows the pending state (D-05/D-11/D-18)',
 		async () => {
 			const tr = renderScreen();
 			await pressConfirm(tr);
 
 			expect(callOrder).toEqual([
 				'provisionDeviceKey',
-				'register',
-				'issueAttestationChallenge',
+				'registration.submitRequest',
+				'association.submitRequest',
+				'association.pollDecisions',
 				'produce',
-				'associate.commit',
+				'association.submitAttestation',
 			]);
+			expect(mockRegistrationSubmitRequest).toHaveBeenCalledTimes(1);
+			expect(mockAssociationSubmitRequest).toHaveBeenCalledTimes(1);
+			expect(mockPollDecisions).toHaveBeenCalledTimes(1);
+			expect(mockProduce).toHaveBeenCalledTimes(1);
+			expect(mockAssociationSubmitAttestation).toHaveBeenCalledTimes(1);
+
+			// Order is also proven via jest's own invocation-call-order counters, not merely the
+			// hand-rolled log above.
+			const orders = [
+				mockRegistrationSubmitRequest.mock.invocationCallOrder[0],
+				mockAssociationSubmitRequest.mock.invocationCallOrder[0],
+				mockPollDecisions.mock.invocationCallOrder[0],
+				mockProduce.mock.invocationCallOrder[0],
+				mockAssociationSubmitAttestation.mock.invocationCallOrder[0],
+			];
+			expect(orders).toEqual([...orders].sort((a, b) => a - b));
+
+			const text = JSON.stringify(tr.toJSON());
+			expect(text).toContain('submitted');
 			expect(mockClearDraft).toHaveBeenCalledTimes(1);
-			expect(mockPopToTop).toHaveBeenCalledTimes(1);
+			// The screen intentionally does NOT pop to top on this pending outcome — see
+			// ConfirmationScreen.tsx's header comment. Popping would imply a decided success this
+			// screen cannot yet prove.
+			expect(mockPopToTop).not.toHaveBeenCalled();
 		},
 	);
 
-	it('binds the challenge + association DeviceKey to the P-256 provisioned key, never the secp256k1 activeKeys[0] key (D-03)', async () => {
+	it('never passes the officer signer (useVoterApp().sign) to any transport mock — identity, not string, comparison (D-01/D-07)', async () => {
 		const tr = renderScreen();
 		await pressConfirm(tr);
 
-		expect(issueChallengeCalls).toHaveLength(1);
-		expect(issueChallengeCalls[0].deviceKey).toBe(P256_PUB);
-		expect(issueChallengeCalls[0].deviceKey).not.toBe('SECP256K1_DEVICE_KEY_MUST_NOT_BE_USED');
-		expect(capturedSetDeviceKey).toBe(P256_PUB);
+		const allArgs = [
+			...registrationSubmitCalls.flatMap(c => [c.requesterKey, c.signatureOrCallback]),
+			...associationSubmitRequestCalls.flatMap(c => [c.requesterKey, c.signatureOrCallback]),
+			...associationSubmitAttestationCalls.flatMap(c => [c.requesterKey, c.signatureOrCallback]),
+		];
+		expect(allArgs).not.toContain(mockSign);
+		expect(mockSign).not.toHaveBeenCalled();
 	});
 
-	it('threads sign as arg 4 and seededElectionId as the trailing arg 5 to issueAttestationChallenge (D-11/45-04)', async () => {
+	it('binds the association request to the P-256 provisioned key, never the secp256k1 device identity key (D-02/D-03)', async () => {
 		const tr = renderScreen();
 		await pressConfirm(tr);
 
-		expect(issueChallengeCalls).toHaveLength(1);
-		expect(issueChallengeCalls[0].signatureOrCallback).toBe(mockSign);
-		expect(issueChallengeCalls[0].electionId).toBe(SEEDED_ELECTION_ID);
+		expect(associationSubmitRequestCalls).toHaveLength(1);
+		expect(associationSubmitRequestCalls[0].init.deviceKey).toBe(P256_PUB);
+		expect(associationSubmitRequestCalls[0].requesterKey).toBe(P256_PUB);
+		expect(associationSubmitRequestCalls[0].init.deviceKey).not.toBe(DEVICE_IDENTITY_PUBLIC_KEY);
 	});
 
-	it('renders a transient-error retry affordance when register() rejects — no clearDraft/popToTop', async () => {
-		mockRegister.mockRejectedValueOnce(new Error('register failed: field policy violation'));
+	it('threads seededElectionId onto the association request and the registration payload (D-11/D-10)', async () => {
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		expect(associationSubmitRequestCalls[0].init.electionId).toBe(SEEDED_ELECTION_ID);
+		expect(registrationRequestInits[0].payload.electionId).toBe(SEEDED_ELECTION_ID);
+	});
+
+	it('the transport resolver returning undefined (both dev gates closed) surfaces the generic failure class and does not crash', async () => {
+		mockResolveVoterRequestTransports.mockReturnValueOnce(undefined);
 
 		const tr = renderScreen();
 		await pressConfirm(tr);
 
 		const text = JSON.stringify(tr.toJSON());
 		expect(text).toContain('Something went wrong verifying your device. Try again.');
-		expect(text).toContain('Try Again');
+		expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
 		expect(mockClearDraft).not.toHaveBeenCalled();
-		expect(mockPopToTop).not.toHaveBeenCalled();
-		// The ceremony must not have proceeded past the failed step.
-		expect(callOrder).toEqual(['provisionDeviceKey']);
 	});
 
-	it('reuses the same registrantId across a retry (WR-02 — no duplicate/orphaned Registrant rows)', async () => {
-		// First attempt: register() succeeds but the later associate commit rejects, so the
-		// ceremony fails mid-flight and the CTA becomes "Try Again".
-		mockCommit.mockRejectedValueOnce(new Error('associate failed: transient'));
+	it('a pollDecisions that never yields a challenge-issued notice within the bounded attempts surfaces the generic failure class', async () => {
+		mockPollDecisions.mockImplementation(async () => {
+			callOrder.push('association.pollDecisions');
+			return [];
+		});
 
 		const tr = renderScreen();
-		await pressConfirm(tr); // attempt 1 — register ok, commit fails
-		await pressConfirm(tr); // attempt 2 — retry of the SAME submission
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 400);
 
-		expect(registerInits).toHaveLength(2);
-		expect(registerInits[0].registrant.id).toBe(registerInits[1].registrant.id);
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('Something went wrong verifying your device. Try again.');
+		expect(mockProduce).not.toHaveBeenCalled();
+		expect(mockAssociationSubmitAttestation).not.toHaveBeenCalled();
+		expect(mockClearDraft).not.toHaveBeenCalled();
+		// Bounded — not unbounded (T-51-11-07).
+		expect(mockPollDecisions.mock.calls.length).toBeGreaterThan(0);
+		expect(mockPollDecisions.mock.calls.length).toBeLessThan(1000);
 	});
 
-	it('does not furnish a blank required field to register (WR-04 — empty required rejected by policy)', async () => {
+	it('a produce() rejection surfaces the generic failure class and submitAttestation is NOT called', async () => {
+		mockProduce.mockRejectedValueOnce(new Error('produce failed: attestation error'));
+
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('Something went wrong verifying your device. Try again.');
+		expect(mockAssociationSubmitAttestation).not.toHaveBeenCalled();
+		expect(mockClearDraft).not.toHaveBeenCalled();
+		expect(mockPopToTop).not.toHaveBeenCalled();
+	});
+
+	it('reuses the same registration-request id across a retry (WR-02 — no duplicate/orphaned rows)', async () => {
+		// First attempt: both requests submit fine but the attestation-answer submit rejects, so the
+		// ceremony fails mid-flight and the CTA becomes "Try Again".
+		mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+
+		const tr = renderScreen();
+		await pressConfirm(tr); // attempt 1 — both submits + poll + produce ok, submitAttestation fails
+		await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2 — retry of the SAME submission
+
+		expect(registrationRequestInits).toHaveLength(2);
+		expect(registrationRequestInits[0].id).toBe(registrationRequestInits[1].id);
+		expect(associationSubmitRequestCalls).toHaveLength(2);
+		expect(associationSubmitRequestCalls[0].init.id).toBe(associationSubmitRequestCalls[1].init.id);
+		expect(associationSubmitRequestCalls[0].init.registrantId).toBe(associationSubmitRequestCalls[1].init.registrantId);
+	});
+
+	it('does not furnish a blank required field on the registration payload (WR-04 — empty required rejected by policy)', async () => {
 		// A blank required private field (email) must NOT be furnished as {name:'email', value:''}
 		// — that would satisfy the engine's name-presence check and slip past policy. With the
 		// empty entry dropped, email is genuinely absent, so validateFieldPolicy rejects it.
@@ -363,27 +481,13 @@ describe('ConfirmationScreen (REG-04/D-03/D-05/D-09/D-11)', () => {
 		const tr = renderScreen();
 		await pressConfirm(tr);
 
-		expect(registerInits).toHaveLength(1);
-		const details = registerInits[0].private.details as Array<{name: string; value: string}>;
+		expect(registrationRequestInits).toHaveLength(1);
+		const details = registrationRequestInits[0].payload.private.details as Array<{name: string; value: string}>;
 		const names = details.map(d => d.name);
 		expect(names).not.toContain('email');
 		expect(names).not.toContain('phone');
 		// No furnished detail is ever an empty-valued placeholder.
 		expect(details.every(d => d.value !== '')).toBe(true);
-	});
-
-	it('renders a transient-error retry affordance when a later step (associate commit) rejects', async () => {
-		mockCommit.mockRejectedValueOnce(new Error('associate failed: attestation verification failed'));
-
-		const tr = renderScreen();
-		await pressConfirm(tr);
-
-		const text = JSON.stringify(tr.toJSON());
-		expect(text).toContain('Something went wrong verifying your device. Try again.');
-		expect(mockClearDraft).not.toHaveBeenCalled();
-		expect(mockPopToTop).not.toHaveBeenCalled();
-		// The ceremony reached (and attempted) the associate commit before rejecting.
-		expect(callOrder).toEqual(['provisionDeviceKey', 'register', 'issueAttestationChallenge', 'produce']);
 	});
 
 	describe('D-09 three-way failure UX', () => {
@@ -402,8 +506,7 @@ describe('ConfirmationScreen (REG-04/D-03/D-05/D-09/D-11)', () => {
 			const setupCta = tr.root.findByProps({testID: 'confirmation-setup-cta'});
 			await renderer.act(async () => {
 				setupCta.props.onPress();
-				await Promise.resolve();
-				await Promise.resolve();
+				await flushMicrotasks(10);
 			});
 			expect(mockSendIntent).toHaveBeenCalledWith('android.settings.BIOMETRIC_ENROLL');
 
@@ -424,9 +527,7 @@ describe('ConfirmationScreen (REG-04/D-03/D-05/D-09/D-11)', () => {
 			const setupCta = tr.root.findByProps({testID: 'confirmation-setup-cta'});
 			await renderer.act(async () => {
 				setupCta.props.onPress();
-				await Promise.resolve();
-				await Promise.resolve();
-				await Promise.resolve();
+				await flushMicrotasks(10);
 			});
 
 			expect(mockSendIntent).toHaveBeenNthCalledWith(1, 'android.settings.BIOMETRIC_ENROLL');

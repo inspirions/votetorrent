@@ -215,7 +215,17 @@ export function makeTestNetworkInit (overrides?: Partial<NetworkInit>): NetworkI
           init: {
             name: 'Admin A',
             title: 'Chair',
-            scopes: ['rn', 'rad', 'iad', 'uai', 'mel', 'ceb'] as Scope[],
+            // WR-22: `'vrg'` added. The registrant ceremony now genuinely requires it (the seed
+            // predicate and the approval gate both test `json_each(O.Scopes)`), and this fixture
+            // was the only place claiming a founding officer holds fewer scopes than the app
+            // actually seeds — `FOUNDING_OFFICER_SCOPES`
+            // (apps/VoteTorrentAuthority/src/utils/foundingOfficerScopes.ts) seeds all NINE codes,
+            // `'vrg'` among them, precisely because a brand-new network's sole officer would
+            // otherwise be locked out of the screens that gate on it. Granting the scope here
+            // makes the fixture officer a LEGITIMATELY authorized one; it does not weaken any
+            // assertion, and the negative case (an officer WITHOUT `'vrg'`) is covered explicitly
+            // in registrant-seeding-scope.spec.ts.
+            scopes: ['rn', 'rad', 'vrg', 'iad', 'uai', 'mel', 'ceb'] as Scope[],
           },
         },
       ],
@@ -1326,4 +1336,76 @@ export async function seedProposedBallot (
   await elec.electionEngine.proposeBallot(ballot)
 
   return { ballotId }
+}
+
+// ---------------------------------------------------------------------------
+// WR-21: a SECOND authority in the SAME database at which the SAME officer
+// (`auth.user`) is also an officer.
+// ---------------------------------------------------------------------------
+
+/**
+ * Materializes a second, real `Authority` row inside the SAME db as `auth`, with `auth.user` as
+ * an officer of it — the "dual-authority officer" case.
+ *
+ * This is the deliberate MIRROR of `registrant-seeding-scope.spec.ts`'s `createForeignAuthority`,
+ * and the difference is the whole point of both. `createForeignAuthority` routes `createAuthority`
+ * through a FOREIGN user's own `EngineContext` precisely so `auth.user` does NOT become an officer
+ * there; this helper routes it through `auth.networkEngine`, so `auth.user` DOES. That is not an
+ * accident of the fixture: `NetworkEngine.createAuthority` binds every inserted `Officer` row's
+ * `UserId` to `ctx.user.id` of whoever calls it (`OfficerInit` carries no per-officer userId — a
+ * real, documented v1.2 limitation), so the calling context IS the choice of who becomes an
+ * officer.
+ *
+ * Why a shared fixture rather than a per-suite copy: WR-21 found the CR-02 regression test proving
+ * its point against an authority id with NO `Authority` row at all — a payload that the unfixed
+ * code would have had stopped anyway by `Registrant`'s own authority-existence CHECK. The case CR-02
+ * actually described is this one: a REAL, locally-known second authority at which the signing
+ * officer is ALSO an officer, so `AdminSigning.UserIdValid` does not accidentally save you and a
+ * genuine cross-authority `Registrant` could be minted.
+ *
+ * `scopes` defaults to `['rad', 'vrg']`. Both are load-bearing and neither is padding: `'rad'` is
+ * required by `Authority.MutationValid` (`votetorrent.qsql:113` is the ONE scope-gated CHECK in the
+ * whole schema, and it gates the authority path), so a sibling without it cannot be created at all;
+ * `'vrg'` makes the sibling a plausible mint target for the registration ceremony, so an
+ * adversarial-payload test naming it fails for the reason under test rather than because the
+ * sibling could never have been a target anyway.
+ */
+export async function addSiblingAuthority (
+  auth: TestAuthorityContext,
+  options?: { name?: string; domainName?: string; scopes?: Scope[] }
+): Promise<string> {
+  const name = options?.name ?? 'Sibling Authority'
+  const domainName = options?.domainName ?? 'sibling.example.com'
+  const scopes = options?.scopes ?? (['rad', 'vrg'] as Scope[])
+
+  // `Authority.MutationValid` digests the admin tuple, so the thresholdPolicies the INVITE commits
+  // to and the ones `createAuthority` binds must be the SAME value — `seedAuthorityInvite`'s
+  // default is `[{policy:'rad',threshold:1}]`, which would silently disagree with a widened scope
+  // list and surface as an opaque "CHECK constraint failed: MutationValid".
+  const thresholdPolicies = scopes.map((policy) => ({ policy, threshold: 1 }))
+
+  const inviteCtx = await seedAuthorityInvite(auth, {
+    name,
+    domainName,
+    admin: { thresholdPolicies: JSON.stringify(thresholdPolicies) },
+    officers: [{ userId: auth.user.id, title: 'Chair', scopes: JSON.stringify(scopes) }],
+  })
+
+  // Routed through auth.networkEngine ON PURPOSE — see the doc comment above.
+  await auth.networkEngine.createAuthority(
+    { name, domainName },
+    {
+      officers: [{ init: { name: 'Sibling Officer', title: 'Chair', scopes } }],
+      effectiveAt: inviteCtx.adminEffectiveAt,
+      thresholdPolicies,
+    },
+    // The same placeholder `inviteSignature` `seedAuthorityInvite`'s own `respondToInvite` call
+    // uses, and that `registration-request-read.spec.ts`'s `createSecondAuthority` already passes
+    // here — this seam is not the one under test.
+    { inviteSlotCid: inviteCtx.inviteSlotCid, inviteSignature: 'a'.repeat(128) }
+  )
+
+  const row = await auth.ctx.db.prepare('select Id from Authority where Name = :n').get({ n: name })
+  if (!row) throw new Error(`addSiblingAuthority: Authority row not found for name=${name}`)
+  return row.Id as string
 }

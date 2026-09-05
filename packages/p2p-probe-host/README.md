@@ -48,3 +48,54 @@ The drone is the host endpoint for `scripts/run-dial-probe.sh`:
 3. Run `./scripts/run-dial-probe.sh` from the repo root.
 
 `scripts/run-dial-probe.sh` parses the machine-readable `PROOF_WS_ADDR=` line and rewrites `127.0.0.1` → `10.0.2.2` for the emulator. See that script's header comments for the full procedure and troubleshooting notes.
+
+## Wall proof (D-07, Phase 56 Plan 01)
+
+`wall-proof.mjs` is the Node-side `@serfab/cadre-core` + `@optimystic/db-p2p` integration harness
+that proves the current admission wall BEFORE `56-04` scopes its patch. It stands a gateway whose
+every unconditional-admit branch is verifiably closed, probes an unauthorized outsider against all
+three gate layers, answers CONTEXT Finding 4, and decides the gateway's relay posture on measured
+behaviour — leaving behind a recorded artifact (`wall-proof-record.json` +
+`.planning/phases/56-public-election-view-as-a-live-libp2p-edge-subscriber/56-01-WALL-PROOF.md`)
+that `56-04` reads to scope its patch.
+
+### Three invocations
+
+```bash
+yarn workspace p2p-probe-host proof:wall --preconditions-only   # boot + RUNG_P only, then exit
+yarn workspace p2p-probe-host proof:wall --self-test             # RUNG_P's inversion (see below)
+yarn workspace p2p-probe-host proof:wall                         # the full rung sequence
+```
+
+`--relay=on|off` forces which relay posture `RUNG_RELAY` measures (default: `on` — `off` is
+already covered by the default unauthorized probe against the shared gateway). `--json <path>`
+overrides where the machine-readable record is written (default `./wall-proof-record.json`).
+
+### What each rung means
+
+| Rung | Kind | Meaning |
+|------|------|---------|
+| `RUNG_P` | assertion | Every one of the eight unconditional-admit branches (interface doc comment on `admitInboundControlConnection`) is verified closed against the probe peer, by direct reads that THROW rather than skip on a missing member. |
+| `RUNG_L1` | measurement | Protocol-blind connection admission — dial the gateway's control multiaddr directly and classify by racing the connection's own `close` event. |
+| `RUNG_L2` | measurement | `authorizeInboundControlStream` — measured behaviourally (does `/sereus/strand-addr` even open on an admitted connection) AND by a comment-stripped source scan with its own positive control. |
+| `RUNG_L3` | measurement | The strand-addr protocol handler's own `isMember` gate — a hand-framed raw exchange alongside the product-shaped `collectStrandAddrs` path. |
+| `RUNG_POS` | assertion | Positive control: seed the outsider itself as an authorized member and re-run L1/L2/L3, requiring ADMITTED/STREAM_OPENED/SERVED. No L1/L2/L3 verdict above may be reported as evidence unless this passes. |
+| `RUNG_RELAY` | measurement | The gateway's relay posture (`network.enableRelay`), measured across 3 consecutive attempts, decided on observed behaviour rather than assumption. |
+| `RUNG_F4` | measurement | CONTEXT Finding 4 — can a peer that already holds valid strand addresses complete a real strand-mesh repo operation? |
+
+`RUNG_P` and `RUNG_POS` are **assertions** — the run fails if they don't hold. `RUNG_L1`/`RUNG_L2`/
+`RUNG_L3`/`RUNG_RELAY`/`RUNG_F4` are **measurements** — an unexpected result there is a *finding* to
+record, not a failure to hide; only an UNCLASSIFIABLE outcome (e.g. an infrastructure dial failure
+misread as a wall decision) fails the run, because a wall proof that shrugs is worse than no proof.
+
+### `--self-test`
+
+Boots the SAME gateway shape with the owner-genesis/seeding block skipped entirely and requires
+`RUNG_P` to FAIL and `admitInboundControlConnection` to return `'admit'` via the resulting
+cold-start/empty-trust-anchor carve-outs. A precondition rung that cannot fail is not a control —
+this is the harness's key instrument inversion.
+
+### Quiet host
+
+CadreNode boot is CPU-heavy and a busy host has previously manufactured false failures — do not run
+`proof:wall` concurrently with `nx run-many` or other CPU-heavy tasks.

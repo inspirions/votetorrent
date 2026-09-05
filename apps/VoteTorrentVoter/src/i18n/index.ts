@@ -21,6 +21,7 @@ const resources = {
 			notifications: 'Notifications',
 			'breadcrumb.home': 'Home',
 			'breadcrumb.ballot': 'Ballot',
+			configNotConfigured: 'Not configured',
 		},
 		home: {
 			headerTitle: 'Vote',
@@ -245,6 +246,7 @@ const resources = {
 			notifications: 'Notificaciones',
 			'breadcrumb.home': 'Inicio',
 			'breadcrumb.ballot': 'Papeleta',
+			configNotConfigured: 'Sin configurar',
 		},
 		home: {
 			headerTitle: 'Votar',

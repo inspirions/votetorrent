@@ -46,6 +46,7 @@ import type {
   UserKeyType,
   User
 } from '@votetorrent/vote-core'
+import { verifyUserKeyMembership } from '../user/verify-user-key.js'
 import { NetworkCreateAuthorityBuilder } from './builders/network-create-authority-builder.js'
 import { NetworkPinAuthorityBuilder } from './builders/network-pin-authority-builder.js'
 import { NetworkUnpinAuthorityBuilder } from './builders/network-unpin-authority-builder.js'
@@ -791,11 +792,16 @@ export class NetworkEngine implements INetworkEngine {
       const timestampAuthoritiesJson = JSON.stringify(
         revision.policies.timestampAuthorities
       )
+      const userId = this.ctx.user?.id ?? null
       const userKey = this.ctx.user?.activeKeys?.[0]?.key ?? null
+      // D-21 (Class B): no Signature is available on this path — proposeRevision's
+      // own public signature carries no signature argument — so registered/unexpired
+      // UserKey membership is the WHOLE of "real IsUserValid" here, not one conjunct.
+      const membership = await verifyUserKeyMembership(this.ctx, userId, userKey)
       await this.ctx.db.exec(
 				`insert into ProposedNetwork
 					(Name, Revision, ImageRef, Relays, TimestampAuthorities, NumberRequiredTSAs, ElectionType)
-				with context UserId = :userId, UserKey = :userKey, Signature = null, Tid = 0, now = :now, IsUserValid = true
+				with context UserId = :userId, UserKey = :userKey, Signature = null, Tid = 0, now = :now, IsUserValid = :isUserValid
 				values
 					(:name, coalesce((select max(Revision) from ProposedNetwork where Name = :name), -1) + 1, :imageRef, :relays, :timestampAuthorities, :numberRequiredTSAs, :electionType)`,
 				{
@@ -805,8 +811,9 @@ export class NetworkEngine implements INetworkEngine {
 				  timestampAuthorities: timestampAuthoritiesJson,
 				  numberRequiredTSAs: revision.policies.numberRequiredTSAs,
 				  electionType: revision.policies.electionType,
-				  userId: this.ctx.user?.id ?? null,
+				  userId,
 				  userKey,
+				  isUserValid: membership.valid,
 				  now: nowCanonicalDatetime()
 				}
       )
@@ -873,11 +880,15 @@ export class NetworkEngine implements INetworkEngine {
 					`No proposed revision found for (${name}, ${revision})`
         )
       }
+      const userId = this.ctx.user?.id ?? null
       const userKey = this.ctx.user?.activeKeys?.[0]?.key ?? null
+      // D-21 (Class B): no Signature is available on this path — same rationale
+      // as proposeRevision above.
+      const membership = await verifyUserKeyMembership(this.ctx, userId, userKey)
       await this.ctx.db.exec(
 				`insert into ProposedNetwork
 					(Name, Revision, ImageRef, Relays, TimestampAuthorities, NumberRequiredTSAs, ElectionType)
-				with context UserId = :userId, UserKey = :userKey, Signature = null, Tid = 0, now = :now, IsUserValid = true
+				with context UserId = :userId, UserKey = :userKey, Signature = null, Tid = 0, now = :now, IsUserValid = :isUserValid
 				values
 					(:name, coalesce((select max(Revision) from ProposedNetwork where Name = :name), -1) + 1, :imageRef, :relays, :timestampAuthorities, :numberRequiredTSAs, :electionType)`,
 				{
@@ -887,8 +898,9 @@ export class NetworkEngine implements INetworkEngine {
 				  timestampAuthorities: source.TimestampAuthorities as string,
 				  numberRequiredTSAs: source.NumberRequiredTSAs as number,
 				  electionType: source.ElectionType as string,
-				  userId: this.ctx.user?.id ?? null,
+				  userId,
 				  userKey,
+				  isUserValid: membership.valid,
 				  now: nowCanonicalDatetime()
 				}
       )

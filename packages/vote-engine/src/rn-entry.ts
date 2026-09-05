@@ -8,6 +8,11 @@
 //
 // Do NOT add `export * from './networks/index.js'` here — that would
 // double-export MockNetworksEngine alongside NetworksEngine.
+// 49-D26a-LOCAL: the canonical P-256 verifier, exported so on-device proofs can assert a real
+// Keystore signature against THE SAME function the schema's SignatureValidP256 CHECK calls.
+// Verifying with a hand-rolled noble call instead would prove nothing about schema agreement —
+// which is the whole point of the encoding contract (base64url digest / hex sig / hex key).
+export { verifySigP256 } from './database/initialize.js'
 export { NetworksEngine } from './networks/networks-engine.js'
 export { NetworkEngine } from './network/network-engine.js'
 export { ElectionsEngine, peekNextElectionTid } from './elections/elections-engine.js'
@@ -23,17 +28,33 @@ export { OnboardingTasksEngine } from './tasks/onboarding-tasks-engine.js'
 export { InvitationEngine } from './invite/invitation-engine.js'
 export { LocalStorageReact } from './local-storage-react.js'
 // Phase 44-02 (D-01, voter-app net-new): the voter app's EngineFactory builds a
-// 'registration' engine case that the authority app never needs — RegistrationEngine
-// was previously reachable only from the default '.' subpath (registration/index.js),
-// which is not RN-safe per this file's own header convention. Export it here so the
-// RN app layer never has to reach past the controlled rn-entry.ts seam.
+// 'registration' engine case — RegistrationEngine was previously reachable only
+// from the default '.' subpath (registration/index.js), which is not RN-safe
+// per this file's own header convention. Export it here so the RN app layer
+// never has to reach past the controlled rn-entry.ts seam. As of Phase 46
+// (D-06) BOTH RN apps (voter + authority) build a 'registration' case, so this
+// single export serves both.
 export { RegistrationEngine } from './registration/registration-engine.js'
+// Phase 47 (D-09/Pattern 2): the authority app's EngineFactory builds an
+// 'authorityConfig' case (AuthorityPeer / PollingDevice administration), so
+// AuthorityConfigEngine must be reachable from this controlled RN-safe seam
+// rather than the default '.' subpath. Export the REAL engine only — per this
+// file's header rule, the Mock sibling class is NOT re-exported here (screen
+// tests reach mocks through the relative dist/ require, and a barrel
+// re-export would pull the Mock siblings in).
+export { AuthorityConfigEngine } from './authority-config/authority-config-engine.js'
 // Phase 43 (D-13/D-14): the device-attestation seam — EngineFactory's
 // 'association' case imports these to construct the real verifier by
 // default, dev-gated to the stub (never a silent prod fallback).
 export { AssociationEngine } from './association/association-engine.js'
 export { PlayIntegrityVerifier } from './association/play-integrity-verifier.js'
 export { StubAttestationVerifier } from './association/stub-attestation-verifier.js'
+// Phase 51: the iOS half of that same seam. `engine-factory.ts` constructs BOTH platform
+// verifiers and injects the dispatcher — never a bare PlayIntegrityVerifier — so an iOS
+// submission is routed rather than rejected by the Android verifier's platform gate.
+export { AppAttestVerifier, NO_PRIOR_ASSERTIONS } from './association/app-attest-verifier.js'
+export type { IAssertionCounterStore } from './association/app-attest-verifier.js'
+export { PlatformDispatchingAttestationVerifier } from './association/platform-dispatching-verifier.js'
 export { LocalConfigKeyProvider } from './association/key-provider.js'
 export type { IIntegrityKeyProvider } from './association/key-provider.js'
 export type { ExpectedAppIdentity } from './association/verifiers/app-identity.js'

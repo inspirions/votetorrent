@@ -1,18 +1,31 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import type { PropsWithChildren } from "react";
 import type { INetworksEngine, IDefaultUserEngine, NetworkReference } from "@votetorrent/vote-core";
+import type { BootstrapSnapshot } from "@votetorrent/vote-engine/bootstrap";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { hideSplash } from "react-native-splash-view";
 import { EngineFactory } from "../engines/engine-factory";
 import { LocalStorageReact } from "@votetorrent/vote-engine/rn";
 import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
+import { createDeviceSigner } from "../engines/device-signer";
+import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
+import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
+import { attachAssociationSyncBindings } from "../screens/registration/attach-association-sync-bindings";
+import { purgeLegacyStagedPayload, registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
 import { useCadreNode } from "./CadreNodeProvider";
 
 interface AppContextType {
 	networksEngine?: INetworksEngine;
 	getEngine: <T>(engineName: string, initParams?: any) => Promise<T>;
 	hasEngine: (engineName: string) => boolean;
+	/**
+	 * D-09: the device-attestation capability probe (bare boolean — no ctx, no
+	 * network, no data). Consumed by 47-16's inline banner and 47-19's
+	 * AttestationProvisioningStatusScreen so neither has to reach past the
+	 * context boundary into EngineFactory directly.
+	 */
+	isAttestationVerifierProvisioned: () => boolean;
 	isInitialized: boolean;
 	hasNetwork: boolean;
 	/**
@@ -24,6 +37,17 @@ interface AppContextType {
 	 * the init effect), so a freshly-created or just-selected network appeared "not selected".
 	 */
 	selectNetwork: (networkRef: NetworkReference) => Promise<void>;
+	/**
+	 * 50-07 (D-07/D-09/D-13): export the whole local database, for the currently
+	 * established network, as a verified 50-02 snapshot envelope. Consumed by
+	 * `DashboardSignInCodeScreen`, which never imports `EngineFactory` directly —
+	 * this passthrough is that screen's ONLY path to a snapshot, mirroring
+	 * `isAttestationVerifierProvisioned`'s existing factory-ref passthrough shape.
+	 * Rejects with a `NoNetworkEstablishedError` (see `engine-factory.ts`) when no
+	 * network is yet selected; the screen detects that with
+	 * `isNoNetworkEstablishedError` and renders `NoNetwork`, never a raw message.
+	 */
+	exportDashboardSnapshot: () => Promise<BootstrapSnapshot>;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -65,6 +89,109 @@ export function AppProvider({ children }: PropsWithChildren) {
 	const hasEngine = useCallback((engineName: string) => {
 		return engineFactoryRef.current?.hasEngine(engineName) ?? false;
 	}, []);
+
+	// 48-22 Task 2: DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY. attachSyncBindings() is a no-op
+	// unless DEV_REGISTRATION_SYNC_REST_BASE_URL is explicitly set (no hardcoded default), so a
+	// normal build is byte-identically unaffected. Called exactly once, at the point engines
+	// become available (getEngine is stable via useCallback's [] dep array above); the try/catch
+	// is defense-in-depth on top of the attachment's own internal no-throw guards — a missing or
+	// misconfigured dev sync target must never fail app boot.
+	//
+	// WR-17: `__DEV__`-gated at this CALL SITE as well as inside the harness itself. Two things
+	// change. (1) A release build never invokes the harness at all, so editing
+	// `DEV_REGISTRATION_SYNC_REST_BASE_URL` alone can no longer turn a shipped app into a live
+	// outbound sync client — the hazard plan 48-32's commit 70c40b7 demonstrated in practice
+	// before 4c1b231 reverted it. (2) The `console.error` below no longer runs unconditionally in
+	// release builds; a dev-only harness's failure is a dev-only diagnostic. The gate is
+	// duplicated (here and in `attachSyncBindings`) on purpose: this one keeps the call out of the
+	// release path, the other keeps the harness inert even if some future caller forgets.
+	//
+	// 51-10 Task 3: `attachAssociationSyncBindings()` is called in the SAME effect, immediately
+	// AFTER `attachSyncBindings()` — ordering is load-bearing (see
+	// `attach-association-sync-bindings.ts`'s own header): it composes onto the "rest" binding
+	// `attachSyncBindings()` just registered, via `bulk-import-sync-model.ts`'s registry seam, so
+	// the registration handle must exist before the association attachment captures it. Sequencing
+	// both calls inside one effect (rather than two separate effects) makes that order a property
+	// of the source, not an assumption about React's effect-scheduling order across two hooks.
+	useEffect(() => {
+		if (!__DEV__) return;
+		try {
+			attachSyncBindings(getEngine);
+		} catch (err) {
+			console.error("attachSyncBindings (dev/device-proof only) failed:", err);
+		}
+		try {
+			attachAssociationSyncBindings(getEngine);
+		} catch (err) {
+			console.error("attachAssociationSyncBindings (dev/device-proof only) failed:", err);
+		}
+	}, [getEngine]);
+
+	// D-09: passthrough to the factory's capability probe. The `?? false`
+	// fallback is deliberate: if the factory ref is somehow absent, report NOT
+	// provisioned — the conservative direction, which surfaces the setup
+	// warning rather than falsely claiming the verifier is ready.
+	const isAttestationVerifierProvisioned = useCallback(() => {
+		return engineFactoryRef.current?.isAttestationVerifierProvisioned() ?? false;
+	}, []);
+
+	// 50-07: passthrough to the factory's snapshot seam (see AppContextType's doc
+	// comment above). No fallback default here — unlike the boolean probe above,
+	// there is no safe "conservative" snapshot value to return if the ref is
+	// somehow absent, so an absent factory ref surfaces as a rejected promise
+	// rather than a silently empty snapshot.
+	const exportDashboardSnapshot = useCallback(async (): Promise<BootstrapSnapshot> => {
+		// An EXPLICIT, NAMED failure rather than a non-null assertion. `!` made
+		// an absent factory ref surface as "Cannot read properties of null
+		// (reading 'exportDashboardSnapshot')" -- a message the producer screen
+		// then rendered to the officer verbatim. Named here so a caller can log
+		// the class and show its own copy.
+		const factory = engineFactoryRef.current;
+		if (!factory) {
+			const error = new Error("AppProvider: the engine factory is not ready; cannot export a dashboard snapshot");
+			error.name = "EngineFactoryUnavailableError";
+			throw error;
+		}
+		return factory.exportDashboardSnapshot();
+	}, []);
+
+	// The one-shot startup sweep of PRE-FIX staged sign-in-code records. Two of
+	// two real devices checked were still carrying a whole-database payload in
+	// AsyncStorage, ~15 hours past that code's own expiry, because nothing in
+	// the tree ever rewrites the key for an expired code nobody tries to
+	// redeem. The sweep is a byte-identical no-op on every record a current
+	// build can write and never throws, so it is safe to run unconditionally
+	// here — an empty dependency array, once, on mount.
+	//
+	// The single log line carries the closed outcome token and NOTHING else:
+	// never a record field, never a byte of the payload. It exists so the
+	// on-device evidence that the sweep ran is visible in logcat without
+	// pulling the RKStorage database off the device. The `clean` and `absent`
+	// outcomes are silent — they are the overwhelmingly common case and would
+	// only add noise to every cold start.
+	useEffect(() => {
+		void purgeLegacyStagedPayload().then((outcome) => {
+			if (outcome === "legacy-payload" || outcome === "unreadable") {
+				console.warn(`AppProvider: staged sign-in-code sweep outcome: ${outcome}`);
+			}
+		});
+	}, []);
+
+	// 50-15 (CR-03): register this callback as the redemption-time regeneration
+	// fallback, so `dashboard-signin-code.ts` never needs to have persisted the
+	// payload to answer a redemption — see `registerDashboardSnapshotProvider`'s
+	// own doc comment. Unregister on unmount so a torn-down provider is never
+	// left dangling.
+	//
+	// FILESYSTEM-BINDING PATH ONLY. This registration is NOT live wiring for
+	// the rendezvous service: on that path the phone seals and uploads at mint
+	// and holds no payload, so there is never anything to regenerate and this
+	// callback is never reached. It is retained for the filesystem binding and
+	// is harmless to leave registered.
+	useEffect(() => {
+		registerDashboardSnapshotProvider(exportDashboardSnapshot);
+		return () => registerDashboardSnapshotProvider(undefined);
+	}, [exportDashboardSnapshot]);
 
 	// Activate a network at runtime (create / picker "Select") without a reboot.
 	// Mirrors the boot re-attach block below so behavior is identical to a restart.
@@ -148,6 +275,22 @@ export function AppProvider({ children }: PropsWithChildren) {
 						factory.setCurrentUser(user);
 						await networksEng.open(network, user);
 						await factory.getEngine("network", network);
+						// 47-23: __DEV__-guarded, flag-gated registrant fixture. No-op in
+						// release and whenever REGISTRANT_SEED_ENABLED is false (committed
+						// default). Awaited HERE — rather than fired from index.js — so
+						// exactly one Quereus context ever touches the store (the factory's
+						// own), matching the voter app's VoterAppProvider precedent for the
+						// same placement.
+						// A LAZY factory, never a resolved signer: createDeviceSigner reads
+						// the device private key out of AsyncStorage and throws when the
+						// device user is absent/corrupt. Resolving it here ran that read on
+						// every release cold start for a call that always no-ops, and let a
+						// signer failure abort a SUCCESSFUL re-attach into "Failed to load
+						// network". maybeSeedRegistrantFixtures now invokes this only after
+						// its own __DEV__/flag gate, inside its own try/catch.
+						await maybeSeedRegistrantFixtures(networksEng, network, user, () =>
+							createDeviceSigner(user.name),
+						);
 						// Pitfall 4: setHasNetwork is called by AppProvider (not the factory).
 						setHasNetwork(true);
 						// RE-ATTACH FIX: clear any initError from a previous failed attempt so
@@ -240,9 +383,11 @@ export function AppProvider({ children }: PropsWithChildren) {
 				networksEngine: networksEngine ?? undefined,
 				getEngine,
 				hasEngine,
+				isAttestationVerifierProvisioned,
 				isInitialized,
 				hasNetwork,
 				selectNetwork,
+				exportDashboardSnapshot,
 			}}
 		>
 			{children}

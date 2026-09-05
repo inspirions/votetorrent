@@ -72,6 +72,17 @@ const STRAND_BOOTSTRAP_ADDR = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RES
 // unset, no crash — backward compatible with a single-drone run).
 const STRAND_BOOTSTRAP_ADDR_B = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
 
+// Cadre invite — the base64url-encoded CadreInvite drone-A mints at boot and advertises as
+// PROOF_INVITE=. The harness injects it here per-run, exactly like the addresses above (D-07).
+//
+// Without this the peer boots addressable but UNAUTHORIZED, and drone-A refuses its
+// strand-addr request as a non-member — the P2P-11 root cause found 2026-08-24. Dialing the
+// invite is only HALF the ceremony: the owner must then accept this peer's control peerId
+// (there is no auto-accept in cadre-core 0.12.0), which the harness arranges by handing the
+// peerId marker below to the drone. Placeholder-aware like the addresses: a placeholder skips
+// the ceremony and boots unenrolled, which is the pre-fix behaviour and a deliberate arm.
+const PROOF_INVITE = 'UPDATE_AFTER_DRONE_RESTART';
+
 // resolveBootstrapNodes — placeholder-aware address resolver (mirrors CadreNodeProvider).
 // Returns [] for empty/unset OR placeholder (safe solo boot), [addr] for a real address.
 const BOOTSTRAP_PLACEHOLDER = 'UPDATE_AFTER_DRONE_RESTART';
@@ -87,20 +98,16 @@ function resolveBootstrapNodes(addr: string): string[] {
 // genuinely solo (CF-02 bootstrap mode), creates the proof network, and emits strandId=.
 const BOOTSTRAP_NODES = resolveBootstrapNodes(CONTROL_ADDR);
 
-// D-05 (41-02, P2P-11 wall #8 fix): relay-qualified per-drone listenAddrs. One
-// `${addr}/p2p-circuit` entry per KNOWN drone (drone-A + drone-B) routes through
-// @libp2p/circuit-relay-v2's 'configured' reservation path (RESEARCH Pattern 1),
-// which bypasses the one-slot 'discovered' cap that capped the emulator at a
-// reservation with only ONE drone (41-01 Node gate reproduced this exactly).
-// Each drone's addr is independently placeholder-aware via resolveBootstrapNodes
-// (mirrors strandBootstrapNodes below) — a single-drone / solo run degrades to []
-// or [one entry], never a crash. Probe 1 (41-01): cadre-core forwards ONE shared
-// network object to the control node AND every strand, so this ONE array must
-// carry BOTH drones' qualified addrs (no per-node-type override exists).
-const STRAND_RELAY_LISTEN_ADDRS = [
-  ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR),
-  ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR_B),
-].map((addr) => `${addr}/p2p-circuit`);
+// The `STRAND_RELAY_LISTEN_ADDRS` constant that stood here is REMOVED.
+//
+// It was already dead: spike 062 retired the `strandNetwork` per-node-type override on
+// cadre-core 0.10.0 (upstream gave each strand node its own derived transport peerId), and
+// nothing has read this constant since — only its own declaration and a comment referenced it.
+//
+// It is removed rather than left dead because it CONSTRUCTED the relay-qualified
+// `<addr>/p2p-circuit` shape, which cadre-core 0.12.0 now rejects outright on a control node.
+// Leaving it would keep a fatal, load-bearing-looking pattern in a file whose relay config is
+// the exact thing 0.12.0 changed. Relays are named by `network.relayAddrs` below.
 
 // P2P-11 (41-11, wall #9 — shared-PeerId strand-relay collision): the control node reserves
 // through the drone's CONTROL relay, a DISTINCT relay identity from the strand node's STRAND
@@ -109,9 +116,23 @@ const STRAND_RELAY_LISTEN_ADDRS = [
 // connections[0]) can no longer misroute strand streams to the control connection (41-10
 // diagnosis §5 — the cadre-core strandNetwork patch unlocks the per-node-type override Probe 1
 // proved did not exist before). Placeholder-aware (degrades to [] — no crash, solo boot).
-const CONTROL_RELAY_LISTEN_ADDRS = resolveBootstrapNodes(CONTROL_ADDR).map(
-  (addr) => `${addr}/p2p-circuit`,
-);
+// cadre-core 0.12.0: relays are named by `network.relayAddrs`, NOT by a relay-qualified
+// `network.listenAddrs` entry — the old shape is now REJECTED at construction on a control
+// node ("network.listenAddrs names a relay directly ... Move the relay to
+// network.relayAddrs, which reserves after bring-up").
+//
+// WHY upstream changed it: a `<relay>/p2p-circuit` listen entry takes libp2p's 'configured'
+// route, which dials the relay from inside `libp2p.start()` — during the bring-up quiet
+// period that denies exactly that dial, so `listen()` fails and the transport manager's
+// FATAL_ALL aborts start. `relayAddrs` takes the 'search' route (one bare `/p2p-circuit`
+// listener, no dial) and CadreNode.start() drives the reservation explicitly once the
+// control database is up. Failure is still fail-fast: a relay that never answers throws
+// RelayReservationFailedError out of start().
+//
+// Entries are the BARE relay addrs; cadre-core appends `/p2p-circuit` itself. Still routed
+// through the placeholder-aware resolveBootstrapNodes guard, so a solo/placeholder boot
+// yields [] (degraded, not a crash).
+const CONTROL_RELAY_ADDRS = resolveBootstrapNodes(CONTROL_ADDR);
 
 // Poll constants (consistent with dial-probe.ts connection-poll shape).
 // PEER_POLL_MAX: 3 ticks × 1 s = 3 s peer-connection wait (exits early when peers appear).
@@ -188,8 +209,8 @@ export async function runReplicationProof(): Promise<void> {
             // PROBE 5 (41-01, EXERCISED): N relay-qualified listenAddrs ALONE do NOT
             // yield N reservations under the default circuitRelayTransport() —
             // DEFAULT_RESERVATION_CONCURRENCY=1 serializes+drops. Size concurrency to
-            // the number of known control relays driving CONTROL_RELAY_LISTEN_ADDRS.
-            reservationConcurrency: Math.max(1, CONTROL_RELAY_LISTEN_ADDRS.length),
+            // the number of known control relays driving CONTROL_RELAY_ADDRS.
+            reservationConcurrency: Math.max(1, CONTROL_RELAY_ADDRS.length),
           }) as unknown as ReturnType<typeof webSockets>,
         ],
         // 38-20/41-02: this runner boots its OWN CadreNode (never CadreNodeProvider's),
@@ -201,34 +222,53 @@ export async function runReplicationProof(): Promise<void> {
         // The STRAND relay moves to strandNetwork below (the cadre-core strandNetwork patch),
         // so the control and strand libp2p nodes no longer reserve at the SAME relay under
         // this peer's shared PeerId — the wall #9 collision.
-        listenAddrs: CONTROL_RELAY_LISTEN_ADDRS,
+        relayAddrs: CONTROL_RELAY_ADDRS,
         // Permissive gater — dev probe only (matches dial-probe.ts / cadre-runtime-ondevice.md).
         connectionGater: { denyDialMultiaddr: async () => false },
       } as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      // STRAND node network override (cadre-core strandNetwork patch, P2P-11 41-11): the
-      // per-strand libp2p node reserves through the drones' STRAND relays — a DISTINCT relay
-      // identity from the control node above — closing the shared-PeerId hop-connect collision
-      // (41-10 diagnosis §5). Unset ⇒ strands would reuse `network` (the pre-fix collision).
-      strandNetwork: {
-        transports: [
-          webSockets(),
-          circuitRelayTransport({
-            reservationConcurrency: Math.max(1, STRAND_RELAY_LISTEN_ADDRS.length),
-          }) as unknown as ReturnType<typeof webSockets>,
-        ],
-        listenAddrs: STRAND_RELAY_LISTEN_ADDRS,
-        connectionGater: { denyDialMultiaddr: async () => false },
-        // REPL-01: strand-cohort bootstrap — the drones' strand-node multiaddrs (injected
-        // per-run). 38-05 (D-04 n=4): both drone-A and drone-B addrs are included so the
-        // emulator dials BOTH voting-member drones; each is independently placeholder-aware
-        // (resolveBootstrapNodes → [] for an unset/placeholder addr), so a single-drone run
-        // (drone-B addr left as placeholder) degrades cleanly to the pre-38-05 behavior.
-        strandBootstrapNodes: [
-          ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR),
-          ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR_B),
-        ],
-      } as any,
+        // On cadre-core 0.10.0 the `strandNetwork` override block is REMOVED.
+        //
+        // It was VT's 41-11 workaround for the shared-peerId circuit-relay-v2 collision: give
+        // strand nodes a SECOND relay identity so the relay could not misroute their streams
+        // onto the control connection. Upstream fixed the ROOT CAUSE instead — each strand
+        // node now derives its OWN transport peerId via
+        // `strandTransportKey(identityKey, strandId)` — so one relay is correct and the
+        // two-relay topology is obsolete.
+        //
+        // IMPORTANT (supersedes the earlier "peer id duplication" framing): a peerId is NO
+        // LONGER the cadre's authority key. Every libp2p node a cadre runs gets its own
+        // transport identity; cadre AUTHORITY is unchanged and stays on the control node,
+        // where the peerId->authority derivation (`ed25519PublicKeyB64FromPeerId`) is a
+        // control-network path only. The collision was never an authority/owner problem —
+        // it was one identity being reused across several libp2p nodes, and it is resolved
+        // by letting each node hold its own id.
+        //
+        // Both keys this block carried are DEAD CONFIG on 0.10.0 (zero occurrences in the
+        // published types/dist):
+        //   - `strandNetwork`        — the key our now-retired yarn-patch added
+        //   - `strandBootstrapNodes` — replaced by `resolveCohortSeed`, which derives strand
+        //     peers from the CONTROL cohort (`queryCadrePeers()` -> siblings with a live
+        //     control connection -> `/sereus/strand-addr/1.0.0` RPC), not from an
+        //     app-supplied strand multiaddr.
+        //
+        // Strand nodes therefore inherit `network` above (the single control relay).
+      // STRAND CLUSTER BREADTH (spike 062 re-run). cadre-core 0.10.0 exposes
+      // `strandClusterSize`; it defaults to DEFAULT_STRAND_CLUSTER_SIZE = 4, described upstream
+      // as "the smallest breadth whose 0.75 super-majority still commits with one holder
+      // offline". That default is why the n=4 proof could form a cohort and still never
+      // replicate: breadth 4 needs ceil(0.75 * 4) = 3 holders to commit, but each peer sees
+      // `strandPeers=1` — a TWO-member cohort — so a commit can never reach quorum. Nothing
+      // errors; the write just never becomes visible, which is exactly the observed signature
+      // (clean logs, silent read-poll timeout).
+      //
+      // MIN_CLUSTER_SIZE is 2, and every node on one strand MUST agree on the value, so this is
+      // set here AND in packages/p2p-probe-host/drone.mjs.
+      //
+      // Trade-off, stated upstream and accepted for a dev proof: at breadth 2 read repair cannot
+      // converge, because a lone corroborator's stale answer is taken as the cluster's truth.
+      // Commit correctness is unaffected — this is replication breadth, not safety.
+      strandClusterSize: 2,
       hibernation: { enabled: false },
     });
 
@@ -254,6 +294,31 @@ export async function runReplicationProof(): Promise<void> {
       await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
     }
     L('relayReservation=', hasRelayReservation());
+
+    // ── 2c. Cadre enrolment — dial the owner's invite (P2P-11 membership gate) ─────────────
+    // Ordering matters: AFTER the relay reservation, because on cadre-core 0.12.0 a
+    // relay-only peer can return from start() before it holds a circuit address, and an
+    // invite dialed in that window reads owner-signed control state nobody can serve yet
+    // (`Block default/Revocation is unavailable (peers-unreachable)`) — a timing artifact,
+    // not a membership verdict. Before the strand work, because the strand-addr request is
+    // exactly what gets refused while this peer is a non-member.
+    //
+    // Emitted UNCONDITIONALLY (like relayReservation= and strandPeers=) so the harness can
+    // key off the marker whether or not the ceremony succeeded, and so an unenrolled run is
+    // legible as such instead of failing later as a mystery cohort failure.
+    if (PROOF_INVITE.includes(BOOTSTRAP_PLACEHOLDER)) {
+      L('enrolInvite=skipped (no invite injected — this peer will be refused as a non-member)');
+    } else {
+      try {
+        await node.dialInvite(node.decodeInvite(PROOF_INVITE));
+        L('enrolInvite=ok');
+      } catch (enrolErr) {
+        // Never fatal: the owner-side acceptPhone is the half that actually confers
+        // membership, and it can still land. Fail loudly in the log, continue the proof, and
+        // let strandPeers= be the authoritative signal.
+        L('enrolInvite=failed', enrolErr);
+      }
+    }
 
     // ── 3. D-03 fresh-state wipe — per-network store ONLY, try/catch, never silent (A1) ─────
     // NEVER call LevelDB.destroyDB('votetorrent-cadre-node') — the peerId store must survive.
@@ -351,11 +416,51 @@ export async function runReplicationProof(): Promise<void> {
       // The shoe-in branch needs SigningNonce/InviteSignature null + count(*)=1 (the per-run
       // wipe guarantees the empty table). 'Authority' resolves to 'App.Authority' via the
       // setSchemaPath set by createStrandDbFactory (D-14).
-      await strandDb.exec(
-        `insert into Authority (Id, Name)
-          with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
-          values ('${proofAuthId}', '${proofNetworkName}');`,
-      );
+      //
+      // IDEMPOTENCE (spike 062). `proofAuthId` is `repl-auth-<peerTail>` — deterministic per
+      // peer — and D-05 deliberately proves the peerId is STABLE across restart while the
+      // strand store SURVIVES the relaunch. So on the harness's D-05 relaunch leg this insert
+      // re-ran against a table that already held this peer's own row and died with
+      // `UNIQUE constraint failed: Authority.Id`, which aborted the write phase and left the
+      // sibling with nothing new to read.
+      //
+      // Re-inserting is also impossible by design once the table is non-empty: `InsertValid`'s
+      // shoe-in branch requires `(select count(*) from Authority) = 1`, so a second Authority
+      // row — this peer's own from a prior boot, OR the sibling's once replication WORKS — is
+      // rejected regardless of the Id. A per-run-unique Id would therefore not have helped.
+      //
+      // The proof's actual question is "did the OTHER peer's row arrive", so this peer having
+      // already contributed its row is SUCCESS, not failure. Check first, insert only when
+      // absent, and treat an Id collision as benign if we lose the race.
+      let alreadyContributed = false;
+      for await (const row of strandDb.eval(
+        `SELECT Id FROM Authority WHERE Id = '${proofAuthId}'`,
+      )) {
+        if (row && row['Id']) {
+          alreadyContributed = true;
+          break;
+        }
+      }
+      if (alreadyContributed) {
+        L('write phase: own row already present, skipping insert (idempotent)', proofAuthId);
+      } else {
+        try {
+          await strandDb.exec(
+            `insert into Authority (Id, Name)
+              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+              values ('${proofAuthId}', '${proofNetworkName}');`,
+          );
+        } catch (insertErr) {
+          const msg = insertErr instanceof Error ? insertErr.message : String(insertErr);
+          // Benign only when it is OUR OWN row that already exists; anything else is a real
+          // write failure and must still surface.
+          if (/UNIQUE constraint failed: Authority\.Id/.test(msg)) {
+            L('write phase: own row raced in, treating as contributed (idempotent)', proofAuthId);
+          } else {
+            throw insertErr;
+          }
+        }
+      }
     } catch (writeErr) {
       // Write phase error — log the error; proof continues to the read phase which will FAIL.
       L('WARN write phase error (proof will FAIL):', writeErr instanceof Error ? writeErr.message : String(writeErr));

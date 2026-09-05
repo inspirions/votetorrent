@@ -9,6 +9,7 @@ import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import type { DefaultUser } from "@votetorrent/vote-core";
 import { IDefaultUserEngine } from "@votetorrent/vote-core";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 export function DefaultUserScreen() {
 	const { defaultUser, defaultUserEngine } = useRoute().params as {
@@ -48,7 +49,7 @@ export function DefaultUserScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={[styles.container, { backgroundColor: colors.background }]}>
 				<CustomTextInput
 					title={t("name")}
@@ -86,7 +87,7 @@ export function DefaultUserScreen() {
 					disabled={!edited}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

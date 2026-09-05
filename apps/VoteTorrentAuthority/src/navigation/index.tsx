@@ -50,6 +50,25 @@ import ProposedElectionScreen from "../screens/tasks/ProposedElectionScreen";
 import ProposedRevisionScreen from "../screens/tasks/ProposedRevisionScreen";
 import ScreenScaffoldsDebugScreen from "../screens/tasks/ScreenScaffoldsDebugScreen";
 import ElectionDetailsScreen from "../screens/elections/ElectionDetailsScreen";
+import RegistrationPolicyScreen from "../screens/elections/RegistrationPolicyScreen";
+// Phase 48 plan 48-21 (D-12) — the three Phase 48 screen modules.
+import RegistrationInboxScreen from "../screens/registration/RegistrationInboxScreen";
+import RegistrationRequestApprovalScreen from "../screens/registration/RegistrationRequestApprovalScreen";
+// BulkImportSyncScreen (48-20) is a named export, not a default export —
+// imported accordingly (a Rule-1 fix: the plan's "default imports" language
+// does not hold for this one file).
+import { BulkImportSyncScreen } from "../screens/registration/BulkImportSyncScreen";
+// Phase 51 plan 51-10 (D-06/D-19) — the read-only association-request status screen.
+import AssociationRequestStatusScreen from "../screens/registration/AssociationRequestStatusScreen";
+// Phase 47 plan 47-21 (D-08) — the five Phase 47 screen modules.
+import RegistrantsListScreen from "../screens/registration/RegistrantsListScreen";
+import RegistrantDetailScreen from "../screens/registration/RegistrantDetailScreen";
+import AttestationProvisioningStatusScreen from "../screens/registration/AttestationProvisioningStatusScreen";
+// Phase 49 plan 49-10 (D-14) — the officer-facing signing-key provisioning/recovery screen.
+import ProvisionSigningKeyScreen from "../screens/users/ProvisionSigningKeyScreen";
+import DashboardSignInCodeScreen from "../screens/dashboard/DashboardSignInCodeScreen";
+import PollingDevicesScreen from "../screens/authorities/PollingDevicesScreen";
+import AuthorityPeersScreen from "../screens/authorities/AuthorityPeersScreen";
 import { CreateElectionScreen } from "../screens/elections/CreateElectionScreen";
 // Phase 9 plan 09-13 (ELECUI-04) — Election Revision screen (Screen C, Figma #16/#17).
 // Aliased to avoid name collision with task-flow EditElectionScreen (imported above on ~line 40).
@@ -445,6 +464,101 @@ export const RootNavigator = () => {
 				name="EditElectionRevision"
 				component={EditElectionRevisionScreen}
 				options={{ title: t("electionRevisionTitle") }}
+			/>
+			{/* Phase 46 (D-01) — RegistrationPolicy: a push from within the election
+			    modal, not a new modal, so it uses the simple non-modal options={{ title }}
+			    shape (the CreateBallot/EditBallot precedent), not ElectionDetails's
+			    presentation:"modal" + CloseButton header shape. */}
+			<Stack.Screen
+				name="RegistrationPolicy"
+				component={RegistrationPolicyScreen}
+				options={{ title: t("registrationPolicyEntryTitle") }}
+			/>
+			{/* Phase 48 plan 48-21 (D-12) — the three Phase 48 routes. Pushes from
+			    within Authority Details / the inbox itself, so they use the same
+			    non-modal options={{ title }} shape as RegistrationPolicy and the
+			    Phase 47 block below — never presentation:"modal", never a
+			    CloseButton headerLeft (that shape is reserved for the
+			    ElectionDetails screen family). RegistrationInbox and
+			    RegistrationRequestApproval additionally set their own title via
+			    setOptions (the static title here is the pre-effect frame);
+			    BulkImportSync is bound ONLY here. No headerRight on any of the
+			    three: the inbox sets ONLY its title via setOptions and renders
+			    its Bulk Import / Sync control in the screen body instead (48-27,
+			    closing 48-UAT.md gap 4 — a locale-dependent header chip left no
+			    room for the title in Spanish), and a duplicate header chip is
+			    exactly what 47-18 removed from AuthorityPeers. */}
+			<Stack.Screen
+				name="RegistrationInbox"
+				component={RegistrationInboxScreen}
+				options={{ title: t("registrationRequestScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="RegistrationRequestApproval"
+				component={RegistrationRequestApprovalScreen}
+				options={{ title: t("registrationRequestApprovalScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="BulkImportSync"
+				component={BulkImportSyncScreen}
+				options={{ title: t("bulkImportSyncScreenTitle") }}
+			/>
+			{/* Phase 51 plan 51-10 (D-06/D-19) — the read-only association-request status
+			    screen, bound ONLY here, mirroring AttestationProvisioningStatus's own
+			    binding-site convention. */}
+			<Stack.Screen
+				name="AssociationRequestStatus"
+				component={AssociationRequestStatusScreen}
+				options={{ title: t("associationRequestStatusScreenTitle") }}
+			/>
+			{/* Phase 47 plan 47-21 (D-07/D-08/D-09) — the five Phase 47 routes. These are
+			    pushes from within existing modal screens, so they use the
+			    RegistrationPolicy/CreateBallot non-modal options={{ title }} shape, never
+			    presentation:"modal", never a CloseButton headerLeft. RegistrantsList,
+			    RegistrantDetail and PollingDevices additionally set their own title via
+			    setOptions (the static title here is the pre-effect frame, and for
+			    PollingDevices is the identical key), while AuthorityPeers and
+			    AttestationProvisioningStatus are bound ONLY here — 47-19 source-gates
+			    attestationProvisioningScreenTitle at zero occurrences in its own file for
+			    exactly this reason. */}
+			<Stack.Screen
+				name="RegistrantsList"
+				component={RegistrantsListScreen}
+				options={{ title: t("registrantListScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="RegistrantDetail"
+				component={RegistrantDetailScreen}
+				options={{ title: t("registrantDetailScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="AttestationProvisioningStatus"
+				component={AttestationProvisioningStatusScreen}
+				options={{ title: t("attestationProvisioningScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="ProvisionSigningKey"
+				component={ProvisionSigningKeyScreen}
+				options={{ title: t("signingKeyProvisioningScreenTitle") }}
+			/>
+			{/* 50-07 (D-03/D-05/D-09) — the dashboard bearer sign-in code producer
+			    screen. Pushed from Settings, so it uses the same non-modal
+			    options={{ title }} shape as ProvisionSigningKey above, never
+			    presentation:"modal", never a CloseButton headerLeft. */}
+			<Stack.Screen
+				name="DashboardSignInCode"
+				component={DashboardSignInCodeScreen}
+				options={{ title: t("dashboardSignInCodeTitle") }}
+			/>
+			<Stack.Screen
+				name="PollingDevices"
+				component={PollingDevicesScreen}
+				options={{ title: t("pollingDeviceScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="AuthorityPeers"
+				component={AuthorityPeersScreen}
+				options={{ title: t("authorityPeerScreenTitle") }}
 			/>
 			{/* BallotDraftProvider is hoisted above the navigator (App.tsx) so all
 			    ballot screens share ONE draft instance (screenLayout gave each

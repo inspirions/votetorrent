@@ -170,12 +170,14 @@ describe('FLOW-02: addTestAuthority() persisted-row compliance', () => {
     }
   })
 
-  it('FLOW-02 Officer.Scopes are all valid Scope codes (rn, rad, iad, uai, mel, ceb, vrg, cap)', async () => {
+  it('FLOW-02 Officer.Scopes are all valid Scope codes (rn, rad, iad, uai, mel, ceb, vrg, cap, ik)', async () => {
     const net = await createTestNetwork()
     const auth = await addTestAuthority(net)
     const db = auth.ctx.db
 
-    const VALID_SCOPES = new Set(['rn', 'rad', 'iad', 'uai', 'mel', 'ceb', 'vrg', 'cap'])
+    // The schema's `view Scope` (schema/votetorrent.qsql:56-69), all nine codes.
+    // 'ik' was added to the view 2026-07-30 and backfilled here 2026-08-25.
+    const VALID_SCOPES = new Set(['rn', 'rad', 'iad', 'uai', 'mel', 'ceb', 'vrg', 'cap', 'ik'])
 
     const officerRows: any[] = []
     for await (const row of db.eval(

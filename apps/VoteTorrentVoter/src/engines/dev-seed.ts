@@ -4,7 +4,7 @@
  *
  * DECISIVE RESEARCH FINDING THIS MODULE OPERATIONALIZES (44-RESEARCH.md Pitfall 1):
  * `RegistrationEngine.register()` signs BOTH the row-level `Registrant.Signature`
- * digest AND the `'vrg'`-scoped `AdminSigning` ceremony with the SAME signer — and
+ * digest AND the `vrg`-scoped `AdminSigning` ceremony with the SAME signer — and
  * `AdminSigning.UserIdValid` requires that signer's `signerUserId` already be a row
  * in `Officer` for the target authority. Neither a throwaway voter keypair nor the
  * libp2p/CadreNode peer key (`loadOrCreateRNPeerKey`) satisfies this — that key is
@@ -125,15 +125,39 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 
 	// ---------- fresh seed ----------
 
-	// (1) Founding-officer network. `admin.officers[0].init.scopes` includes 'vrg'
-	// (Scope.vrg = "Validate registrations", votetorrent.qsql:59 — required by
-	// register()'s AdminSigning ceremony) and 'mel' (Scope.mel = "Manage
-	// Elections" — required by the election + policy-row ceremonies below).
+	// (1) Founding-officer network. `admin.officers[0].init.scopes` is `['mel']`
+	// ONLY (D-09/D-20) — 'vrg' (Scope.vrg = "Validate registrations",
+	// votetorrent.qsql:59) is DELIBERATELY NOT granted here. 'vrg' is the
+	// authority's registration-ceremony scope; granting it to the device's own
+	// user is exactly what let the voter app run the authority's ceremony
+	// (D-01 — see 51-CONTEXT.md / 51-11-SUMMARY.md). 'mel' (Scope.mel = "Manage
+	// Elections") stays — the election + per-tier policy-row ceremonies below
+	// need it, and D-12's `ElectionRecordValidityPolicy` row is 'mel'-scoped.
 	// Officer.InsertValid's first-authority branch needs no invite, no signing
 	// for officer #1 — networksEngine.create(networkInit, deviceUser) makes the
 	// device user that officer directly (the Officer row's UserId binds to the
 	// `user` param, not to anything in OfficerInit — OfficerInit carries no
 	// userId field, see votetorrent.qsql:164-210 / networks-engine.ts:84-125).
+	//
+	// Honesty note (D-09 gate research): `AdminSigning.UserIdValid`
+	// (votetorrent.qsql:247-252) only checks that the signer is SOME Officer
+	// row at this authority+AdminEffectiveAt — it does not join against
+	// `Officer.Scopes` at all, and no engine-side check does either
+	// (`registration-engine.ts`'s own doc comment on `rejectRegistrationRequest`
+	// says so verbatim: "this method never claims the scope is enforced").
+	// Dropping 'vrg' therefore does NOT, by itself, make THIS identity's
+	// `register()` calls fail at `UserIdValid` — the device user remains an
+	// Officer of this authority regardless of which Scopes it carries. What
+	// removing 'vrg' DOES do: it stops this fixture from asserting/documenting
+	// a grant that was only ever needed to imitate the authority's own
+	// ceremony, and keeps a future reader from treating 'vrg' as an obvious,
+	// convenient scope to restore. The real structural backstops against a
+	// reintroduced voter-side ceremony are (a) the comment-stripped source gate
+	// (`no-vrg-ceremony.gate.test.ts`) that fails on any reintroduced
+	// `register(`/`associate(`/`seedSignedMutation`/`issueAttestationChallenge`
+	// call under `apps/VoteTorrentVoter/src`, and (b) the fact that a genuine
+	// (non-dev-seed) voter identity — one never inserted into `Officer` at all —
+	// fails `UserIdValid` for real, which the same gate file also proves.
 	const networkInit: NetworkInit = {
 		name: DEV_SEED_NETWORK_NAME,
 		relays: [],
@@ -147,7 +171,7 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 					init: {
 						name: deviceUser.name,
 						title: 'Registrar',
-						scopes: ['vrg', 'mel'] as Scope[],
+						scopes: ['mel'] as Scope[],
 					},
 				},
 			],
