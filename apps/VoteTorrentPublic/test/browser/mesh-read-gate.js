@@ -174,7 +174,45 @@ function nextTick() {
 }
 
 /**
+ * Minimum wall-clock gap between two evaluations of a `pollUntil` predicate,
+ * in milliseconds. Read the clock, never a timer — this file registers no
+ * `setTimeout` (see the header).
+ *
+ * WHY THIS EXISTS — measured, not defensive. `nextTick()` below resolves on
+ * whichever of a frame or a `MessageChannel` hop arrives first, and the hop
+ * always wins, so an unthrottled `pollUntil` re-ran its predicate roughly
+ * 6,400 times a SECOND. Rung 5's predicate is a full Quereus `select` over
+ * IndexedDB, so a rung that is genuinely failing — as rung 5 does the moment
+ * rung 4's peer boot fails — drove ~300,000 IndexedDB-backed SQL reads through
+ * the renderer in 47 seconds and killed the renderer process outright
+ * ("Target crashed"), before its own 60,000ms budget expired. Measured on
+ * 2026-09-05: `performance.memory.usedJSHeapSize` stayed FLAT at 51.0MB
+ * throughout, so this was never a JS-heap leak — it is renderer-side
+ * exhaustion driven purely by IndexedDB request volume.
+ *
+ * That crash destroyed the instrument: Playwright reported only "Target
+ * crashed", `page.on('pageerror')` never fired, and the gate's real red rungs
+ * — including rung 4's actual named error — were never published at all. A
+ * gate that dies instead of reporting a named red rung measures nothing.
+ *
+ * THIS IS NOT A LOOSENED RUNG. Every rung keeps its exact predicate and its
+ * exact wall-clock budget; only the RATE at which the predicate is re-asked
+ * changes, from ~6,400/s to at most ~62/s. A rung that would have passed still
+ * passes (rung 5 passes on a healthy run in ~50ms — far more than one poll),
+ * and a rung that would have failed still fails, now with its named detail
+ * line intact instead of a dead renderer.
+ * @type {number}
+ */
+const POLL_MIN_INTERVAL_MS = 16;
+
+/**
  * Poll `predicate` until it holds or the wall-clock budget expires.
+ *
+ * The predicate is evaluated at most once per {@link POLL_MIN_INTERVAL_MS} of
+ * real elapsed time. `nextTick()`'s own semantics are deliberately UNCHANGED —
+ * it keeps its frame-or-hop race, so this loop still always makes progress
+ * even in a document that never paints. What is bounded here is how often the
+ * predicate itself (an IndexedDB-backed SQL read, in rungs 5 and 10) is asked.
  * @param {() => (boolean | Promise<boolean>)} predicate
  * @param {number} budgetMs
  * @param {() => string} describe
@@ -183,13 +221,21 @@ function nextTick() {
 async function pollUntil(predicate, budgetMs, describe) {
 	const started = performance.now();
 	let ticks = 0;
+	let checks = 0;
+	let lastCheck = Number.NEGATIVE_INFINITY;
 	while (performance.now() - started < budgetMs) {
-		if (await predicate()) return +(performance.now() - started).toFixed(0);
+		const now = performance.now();
+		if (now - lastCheck >= POLL_MIN_INTERVAL_MS) {
+			lastCheck = now;
+			checks += 1;
+			// eslint-disable-next-line no-await-in-loop
+			if (await predicate()) return +(performance.now() - started).toFixed(0);
+		}
 		// eslint-disable-next-line no-await-in-loop
 		await nextTick();
 		ticks += 1;
 	}
-	throw new Error(`${describe()} (budget ${budgetMs}ms, ${ticks} ticks)`);
+	throw new Error(`${describe()} (budget ${budgetMs}ms, ${ticks} ticks, ${checks} checks)`);
 }
 
 /** @returns {string} the page's rendered text, whitespace-collapsed. */
