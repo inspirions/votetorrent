@@ -1,6 +1,16 @@
 import { useEffect, useState } from 'react';
 import { CONFIG_FAULT, loadBootstrapConfig } from '../peer/config.js';
+// Imported under an alias so a whole-file occurrence count of the peer
+// boot's exported name resolves to this ONE import line -- the same
+// discipline `main.tsx` used before 56-14 moved the call here (see that
+// file's own prior header, and `project_self_tripping_checker_headers`).
+// `bootPeerLayer` is this file's own name for that single import; every
+// other paragraph below describes it as "the peer boot composition" rather
+// than repeating the exported name.
+import { startPublicPeerBoot as bootPeerLayer, PEER_BOOT_STATUS } from '../peer/boot.js';
+import { parseElectionAddress } from '../election-address.js';
 import { ElectionShell } from './ElectionShell';
+import type { PublicPeerFeedState } from './use-public-election';
 
 /**
  * PublicApp.tsx — the production composition (56-12, D-13's fault-UI half).
@@ -41,6 +51,19 @@ import { ElectionShell } from './ElectionShell';
  * statement briefly shown to a reader. Rendering nothing for the (typically
  * sub-second, same-origin) interval before the fetch settles is the honest
  * choice available.
+ *
+ * 56-14 ALSO MOVES THE PEER BOOT COMPOSITION HERE, FROM `main.tsx`. `56-11`
+ * shipped the one production call to it in `main.tsx`, outside React,
+ * because at that wave nothing needed its result beyond starting the
+ * closure. A boot whose result lives outside React can never reach a
+ * component — and `56-14` is the first plan that needs the boot's own result
+ * union (`PEER_BOOT_STATUS`) as the second conjunct of
+ * `use-public-election.ts`'s `connection` predicate. This is a MOVE, not a
+ * duplication: `usePeerFeedStatus` below owns the one call site under
+ * `src/`, and `main.tsx` no longer imports the peer boot composition at all.
+ * The production import graph still reaches `src/peer/boot.js` through THIS
+ * file, which is what keeps the libp2p/strand closure in production
+ * `dist/` — Task 1's own acceptance criteria re-assert that by command.
  */
 
 /**
@@ -119,16 +142,107 @@ export function useBootstrapConfigFault({ loader = loadBootstrapConfig }: UseBoo
 }
 
 /**
+ * The frozen, TOTAL map from every `PEER_BOOT_STATUS` value to its
+ * `PublicPeerFeedState`. Keyed off the IMPORTED `PEER_BOOT_STATUS` object's
+ * own values (`[PEER_BOOT_STATUS.STARTED]`, never a transcribed `'STARTED'`
+ * literal), so a rename upstream fails this file at the declaration site
+ * rather than silently mismapping. Because the map's declared type is
+ * `Record<(typeof PEER_BOOT_STATUS)[keyof typeof PEER_BOOT_STATUS], ...>` and
+ * `usePeerFeedStatus` indexes it with the boot result's own `status` field
+ * (typed from the peer boot composition's own return union), a FIFTH status
+ * value added to that union without a matching entry here is a COMPILE-TIME
+ * missing-key failure, not a runtime fall-through to a silent `'unobserved'`.
+ *
+ * `(unresolved)` -- the boot promise has not settled yet -- is `usePeerFeedStatus`'s
+ * OWN initial state, below, and is not a member of this map at all: nothing
+ * observed yet must not claim either way while a socket is still opening.
+ */
+const PEER_FEED_STATUS_MAP: Readonly<Record<(typeof PEER_BOOT_STATUS)[keyof typeof PEER_BOOT_STATUS], PublicPeerFeedState>> =
+	Object.freeze({
+		// The feed is up.
+		[PEER_BOOT_STATUS.STARTED]: 'running',
+		// This browser could not join; cached rows are genuinely not current.
+		[PEER_BOOT_STATUS.FAILED]: 'stopped',
+		// No dial is possible this session, a strict subset of not connected --
+		// the fault box renders anyway (Surface 3's own composition note), so
+		// this value only keeps the two surfaces internally consistent.
+		[PEER_BOOT_STATUS.CONFIG_FAULT]: 'stopped',
+		// The root, election-less page opened no socket on purpose and has no
+		// election to be stale.
+		[PEER_BOOT_STATUS.NO_ADDRESS]: 'unobserved',
+	});
+
+/** The boot function's own signature -- the injectable seam, same shape as
+ * `UseBootstrapConfigFaultOptions.loader` above. Defaults to the real peer
+ * boot composition (`bootPeerLayer`, this file's own alias for it), so the
+ * hook is exercisable at Node tier with no browser and no build. */
+export interface UsePeerFeedStatusOptions {
+	boot?: typeof bootPeerLayer;
+	networkHash: string | null | undefined;
+	electionId?: string | null | undefined;
+}
+
+/**
+ * Own the one production call site of the peer boot composition under
+ * `src/`, and map its result union to the `connection` predicate's second
+ * conjunct.
+ *
+ * NO `try`/`catch` -- same discipline as `useBootstrapConfigFault`, for the
+ * same reason: the boot's own contract is that it never throws and never
+ * rejects, so a catch here would invent a state nothing can produce.
+ * `stop()` -- present only on a `STARTED` result -- runs in the cleanup,
+ * guarded so a cleanup that fires before the boot resolved (or that resolved
+ * to anything other than `STARTED`) is a no-op rather than a throw.
+ *
+ * TWO ORDERINGS, BOTH HANDLED, same `cancelled`-flag shape
+ * `use-public-election.ts`'s attach effect already uses for the identical
+ * reason: a boot that resolves BEFORE unmount hands its `stop` to the
+ * cleanup below; a boot that resolves AFTER unmount (the cleanup closure
+ * already ran and cannot run again) stops itself inline, right where it
+ * resolved -- otherwise a slow boot outliving a fast unmount would leak a
+ * running Edge node with nothing left to stop it.
+ */
+export function usePeerFeedStatus({ boot = bootPeerLayer, networkHash, electionId }: UsePeerFeedStatusOptions): PublicPeerFeedState {
+	const [peerFeed, setPeerFeed] = useState<PublicPeerFeedState>('unobserved');
+
+	useEffect(() => {
+		let cancelled = false;
+		let stopFn: (() => Promise<void>) | null = null;
+		boot({ networkHash, electionId }).then((result) => {
+			if (cancelled) {
+				if (result.status === PEER_BOOT_STATUS.STARTED) void result.stop();
+				return;
+			}
+			if (result.status === PEER_BOOT_STATUS.STARTED) stopFn = result.stop;
+			setPeerFeed(PEER_FEED_STATUS_MAP[result.status]);
+		});
+		return () => {
+			cancelled = true;
+			void stopFn?.();
+		};
+	}, [boot, networkHash, electionId]);
+
+	return peerFeed;
+}
+
+/**
  * The production entry `main.tsx` mounts in place of a bare `<ElectionShell
- * />`. Resolves the config once at boot and hands `ElectionShell` a
- * two-valued fault, or `null`. Renders NOTHING else -- no `AppChrome`, no
- * advisory, no caveats of its own: those live in the shell, and the fault
- * box must render INSIDE them, not beside them.
+ * />`. Resolves the config once at boot, boots the peer layer once at boot,
+ * and hands `ElectionShell` a two-valued fault (or `null`) plus the observed
+ * peer-feed status. Renders NOTHING else -- no `AppChrome`, no advisory, no
+ * caveats of its own: those live in the shell, and the fault box must render
+ * INSIDE them, not beside them.
+ *
+ * Reads neither `peerId` nor `dbName` off the boot result, and renders no
+ * new element of its own for it -- the peer boot is a resolved STATUS
+ * handed downstream, never a p2p-mechanics surface.
  */
 export function PublicApp() {
 	const fault = useBootstrapConfigFault();
+	const address = parseElectionAddress(window.location.search);
+	const peerFeed = usePeerFeedStatus({ networkHash: address.networkHash, electionId: address.electionId });
 	if (fault === 'pending') return null;
-	return <ElectionShell configFault={fault} />;
+	return <ElectionShell configFault={fault} peerFeed={peerFeed} />;
 }
 
 export default PublicApp;

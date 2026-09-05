@@ -3,13 +3,6 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { enginePreflight } from './engine-preflight.js';
 import { PublicApp } from './screens/PublicApp';
-import { parseElectionAddress } from './election-address.js';
-// Imported under an alias so a whole-file occurrence count of the peer
-// boot's exported name resolves to this ONE import line rather than also
-// matching the call below (a self-tripping-checker trap this deliberately
-// avoids -- see `project_self_tripping_checker_headers`). `bootPeerLayer` is
-// this file's own name for that single import.
-import { startPublicPeerBoot as bootPeerLayer } from './peer/boot.js';
 
 declare global {
 	interface Window {
@@ -37,27 +30,21 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
 	<StrictMode>
-		{/* 56-12: production now mounts PublicApp, not a bare ElectionShell,
-		    with no props of its own. PublicApp resolves 56-06's bootstrap
-		    config once at boot and hands ElectionShell a two-valued
-		    configFault (or null) -- the only thing that can suppress the
-		    shell's normal content. Everything ElectionShell itself still
+		{/* 56-12: production mounts PublicApp, not a bare ElectionShell, with
+		    no props of its own. 56-14 MOVED the one production peer-boot call
+		    site INTO PublicApp.tsx -- a boot whose result lives outside React
+		    can never reach a component, and `PublicApp` is now the thing that
+		    needs the result (the second conjunct of the connection
+		    predicate). PublicApp resolves 56-06's bootstrap config once at
+		    boot, boots the peer layer once at boot, and hands ElectionShell
+		    one resolved deployment fault (or null) plus one observed
+		    peer-feed status -- both resolved ABOVE the shell because the
+		    shell holds no effects. Everything ElectionShell itself still
 		    supplies no facts about: no injected election, no instant, no
-		    injected search, no source. */}
+		    injected search, no source. The production import graph still
+		    reaches `src/peer/boot.js` through PublicApp.tsx, so the
+		    libp2p/strand closure still lands in `dist/` -- see
+		    PublicApp.tsx's own header for the full accounting. */}
 		<PublicApp />
 	</StrictMode>,
 );
-
-// 56-11: put the libp2p/strand closure into the production graph. This is
-// the ONE production call to the peer boot composition -- the same one the
-// mesh-read gate exercises (`test/browser/mesh-read-gate.js`). Never awaited
-// before the render above: the page must paint its honest empty state first
-// and flip when replicated rows land, never block first paint on a peer
-// dial. The boot composition never rejects by its own contract; the
-// `.catch` below is defense in depth only, and logs the error's NAME, never
-// a message that could carry a value.
-const address = parseElectionAddress(window.location.search);
-bootPeerLayer({ networkHash: address.networkHash, electionId: address.electionId }).catch((err: unknown) => {
-	const name = err && typeof (err as { name?: unknown }).name === 'string' ? (err as { name: string }).name : 'Error';
-	console.error('main: peer boot rejected unexpectedly', name);
-});

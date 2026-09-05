@@ -88,22 +88,57 @@ export { shouldReadFor };
  * worded staleness banner exactly when `read.state === 'ready'` AND
  * `read.connection === 'down'` -- never on `reading`, `notHeld` or
  * `unreadable`, and never as a standing "connected" claim on any other path.
- * The rendered claim is scoped to the CHANGE CHANNEL this handle exposes,
- * nothing wider.
  *
- * STATE THE LIMIT, NOT A CAVEAT. A live change channel is not proof of mesh
- * connectivity: `subscription.live` reports only whether the attached handle
- * exposes an `onDataChange` function, which says nothing about whether any
- * peer is actually reachable. A browser holding cached rows while the mesh
- * is unreachable still reports `live` and shows no banner. The missing
- * conjunct is a running peer feed, and nothing in this production tree
- * starts one today -- 56-09's reactivity bridge is imported by no production
- * file, by that plan's own design. `56-14` is the plan that widens this
- * predicate, once it observes a real peer write landing; until then
- * `connection` answers the one honest question this hook can answer today
- * ("does this handle expose a change channel"), and no wider one. No
- * standing positive "connected" claim is made anywhere on this page -- see
+ * `connection` NOW HAS BOTH ITS CONJUNCTS (56-14). `56-12` shipped one --
+ * this handle's own CHANGE CHANNEL, `subscription.live` -- and named the
+ * missing one in this same paragraph before this rewrite: a running PEER
+ * FEED. `56-11` ships that second conjunct as the peer boot composition's
+ * result union, resolved above this hook in `PublicApp.tsx` and handed in here as
+ * `peerFeed: 'unobserved' | 'running' | 'stopped'`. The four-row resolution,
+ * produced at the ONE site below that ever writes the literal `'down'`:
+ *
+ *   | change channel | peerFeed      | connection |
+ *   |----------------|---------------|------------|
+ *   | absent         | any           | 'down'     |
+ *   | present        | 'running'     | 'live'     |
+ *   | present        | 'stopped'     | 'down'     |
+ *   | present        | 'unobserved'  | 'unknown'  |
+ *
+ * `'unobserved'` RESOLVES TO `'unknown'`, NOT `'down'`, AND THAT IS A LIMIT
+ * NAMED HERE RATHER THAN A CAVEAT. Defaulting an unstarted/unobserved peer
+ * feed to `'down'` would render the staleness banner on every page that
+ * never booted a feed at all -- including `test/browser/live-read-gate.js`'s
+ * seeded page, a sibling gate this file cannot repair. Absence of the banner
+ * on `'unknown'` is, as it has been since `56-12`, a claim about NOTHING --
+ * the same argument the UI-SPEC gives for refusing a persistent "connected"
+ * chip.
+ *
+ * WHAT THIS CLOSES. A browser whose Edge node could not be started -- the
+ * peer boot composition returning `FAILED`, or a `CONFIG_FAULT` meaning no
+ * dial is possible this session -- now renders cached rows under an amber
+ * NOT CONNECTED banner instead of presenting them as current.
+ *
+ * THE RESIDUAL THAT SURVIVES, NAMED RATHER THAN DROPPED. A feed that
+ * reported `'running'` and later silently loses every connection without
+ * stopping is still not observed -- this file has no way to tell "nothing
+ * has changed" apart from "nothing can reach us" in that case. Two closures
+ * were considered and REJECTED on the record: (1) a libp2p connection-state
+ * watcher -- a second signal path, which is exactly the p2p-mechanics UI
+ * this phase rules out and which `56-12`'s handoff already forbade; (2) a
+ * no-write-in-N-minutes heuristic -- rejected because there is no expected
+ * write cadence for an election, so a timeout would manufacture a false NOT
+ * CONNECTED on a quiet but healthy page, and a decaying claim is exactly
+ * what the UI-SPEC refuses for the staleness timestamp. No standing
+ * positive "connected" claim is made anywhere on this page -- see
  * `public.freshness.body`, which stays true in both states.
+ *
+ * THE BADGE (D-16's UI half / D-19's UI half, also 56-14). `justUpdated` and
+ * `LIVE_UPDATE_BADGE_MS` below are this hook's OTHER new surface: a
+ * transient report that a REMOTE write landed and was applied, cleared by
+ * one timer this file owns. It is not a connectivity signal and does not
+ * touch `connection` -- see `bumpDataVersion`'s own comment for the
+ * discrimination (`notice.remote`) that makes it fire only on a peer write,
+ * never on a write this page performed itself.
  */
 
 export type PublicElectionState = 'reading' | 'ready' | 'notHeld' | 'unreadable';
@@ -119,6 +154,26 @@ export type PublicElectionState = 'reading' | 'ready' | 'notHeld' | 'unreadable'
  */
 export type PublicConnectionState = 'unknown' | 'live' | 'down';
 
+/**
+ * 56-14. `connection`'s second conjunct -- `56-11`'s peer boot composition
+ * result union, resolved above this hook (`PublicApp.tsx`) and handed in
+ * here. `'unobserved'` is the default and is a FIRST-CLASS value meaning
+ * "nothing was observed either way", never coerced toward `'stopped'`. See
+ * this module's own header for the four-row resolution table and the
+ * residual it does not close.
+ */
+export type PublicPeerFeedState = 'unobserved' | 'running' | 'stopped';
+
+/**
+ * 56-14/D-19 UI half. The UI-SPEC's fixed auto-clear duration for the
+ * live-update badge, in milliseconds. Exported as a named constant -- never
+ * inlined -- so `run-liveness-gate.mjs`'s clearance rung imports the SAME
+ * number this hook schedules its `setTimeout` against, rather than
+ * transcribing one that can drift out from under it. There is no dismiss
+ * control: this page has no other transient UI to model one after.
+ */
+export const LIVE_UPDATE_BADGE_MS = 4000;
+
 export interface PublicElectionAddress {
 	status: string;
 	electionId: string | null;
@@ -132,6 +187,10 @@ export interface UsePublicElectionArgs {
 	election?: AddressedElectionFacts | null;
 	/** The test seam over the real modules; defaults to the real bindings. */
 	source?: PublicSourceDeps;
+	/** 56-14. `connection`'s second conjunct. Defaults to `'unobserved'`,
+	 * which resolves `connection` to `'unknown'` and renders nothing --
+	 * never a false NOT CONNECTED banner on a page that never supplied one. */
+	peerFeed?: PublicPeerFeedState;
 }
 
 export interface UsePublicElectionResult {
@@ -157,6 +216,14 @@ export interface UsePublicElectionResult {
 	 * `connection` is `'unknown'`. Captured from `source.nowCanonical()` at
 	 * the same site `connection` is set. */
 	observedAt: string | null;
+	/** 56-14/D-16 UI half. `true` for `LIVE_UPDATE_BADGE_MS` after a REMOTE
+	 * notice (`notice.remote === true`) landed and was applied; `false` on
+	 * every path that opens no database at all -- the injected-election
+	 * seam, an address naming no election, the `reading` placeholder and the
+	 * `catch` degrade -- and cleared automatically by this hook's own timer.
+	 * Never a standing claim; see `ElectionShell.tsx`'s `showLiveUpdate`
+	 * guard for the one place this is rendered. */
+	justUpdated: boolean;
 }
 
 /** Structural, not imported: `use-public-election.ts` is the only TypeScript
@@ -167,15 +234,59 @@ export interface KeyReleaseProgress {
 	keyholderCount: number;
 }
 
-export function usePublicElection({ address, election = null, source = DEFAULT_PUBLIC_SOURCE }: UsePublicElectionArgs): UsePublicElectionResult {
-	const [resolved, setResolved] = useState<UsePublicElectionResult | null>(null);
+export function usePublicElection({
+	address,
+	election = null,
+	source = DEFAULT_PUBLIC_SOURCE,
+	peerFeed = 'unobserved',
+}: UsePublicElectionArgs): UsePublicElectionResult {
+	const [resolved, setResolved] = useState<Omit<UsePublicElectionResult, 'justUpdated'> | null>(null);
 	/** D-27's invalidation counter. A change notice increments it; nothing else
 	 * reads it, and it is never rendered. Its ONLY job is to be a dependency of
 	 * the read effect below. */
 	const [dataVersion, setDataVersion] = useState(0);
+	/** 56-14. A SEPARATE counter from `dataVersion`: incremented only when a
+	 * notice's `remote` field is strictly `true`, never on a write this page
+	 * performed itself. Its only job is to be the dependency of the timer
+	 * effect below -- it is never rendered and never read for anything else. */
+	const [updateTick, setUpdateTick] = useState(0);
+	/** 56-14/D-16 UI half. The badge's own transient bit, cleared by the timer
+	 * effect below. */
+	const [justUpdated, setJustUpdated] = useState(false);
 	/** Stable across renders, so handing it to the seam does not itself become
-	 * a reason for the effect to re-run. */
-	const bumpDataVersion = useCallback(() => setDataVersion((n) => n + 1), []);
+	 * a reason for the effect to re-run. 56-14: now reads the notice's
+	 * `remote` field -- DEFENSIVELY (`notice?.remote === true`), because this
+	 * callback is invoked by a module (`subscribe.js`) whose contract this
+	 * file does not own -- and bumps a SECOND counter on a remote notice only.
+	 * Never reads `notice.table` or `notice.type`: see
+	 * `<interface_contract>` §2 in 56-14-PLAN.md (no per-fact reach, and
+	 * unbuildable here -- no table-to-fact reverse map exists). */
+	const bumpDataVersion = useCallback((notice?: Readonly<{ remote?: boolean }>) => {
+		setDataVersion((n) => n + 1);
+		if (notice?.remote === true) setUpdateTick((n) => n + 1);
+	}, []);
+
+	/**
+	 * 56-14. The one new effect this file gains, keyed on `updateTick` alone.
+	 * It owns NO handle, NO subscription and NO async work, so there is no
+	 * lifetime for it to desynchronise from -- the one-effect rule stated in
+	 * this module's own header exists to stop a listener outliving the handle
+	 * it holds, and a `clearTimeout` cleanup holds nothing.
+	 *
+	 * A tick of ZERO (nothing observed yet) schedules nothing and sets
+	 * nothing -- the badge cannot appear before an update has ever been
+	 * observed. A FRESH tick restarts the window rather than queueing: the
+	 * cleanup below clears the PREVIOUS timer before a new one is scheduled,
+	 * so consecutive peer writes keep the badge up and it clears
+	 * `LIVE_UPDATE_BADGE_MS` after the LAST one -- the behaviour a reader
+	 * watching a burst of updates expects.
+	 */
+	useEffect(() => {
+		if (updateTick === 0) return undefined;
+		setJustUpdated(true);
+		const timer = setTimeout(() => setJustUpdated(false), LIVE_UPDATE_BADGE_MS);
+		return () => clearTimeout(timer);
+	}, [updateTick]);
 
 	const reads = shouldReadFor(election, address);
 	// Both effect keys are PRIMITIVE, so an address object rebuilt on every
@@ -206,11 +317,14 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 					void closeQuietly(source, next.db);
 					return;
 				}
-				// 56-12/D-17. Set at exactly this one site: 'unknown' unless a
-				// subscription was actually created below, in which case the
-				// same boolean the pre-existing console.debug guard reads maps
-				// to 'live'/'down', observed at the moment the subscription was
-				// created.
+				// 56-12/D-17, widened by 56-14. Set at exactly this one site,
+				// which is the only place the literal 'down' is ever produced:
+				// 'unknown' unless a subscription was actually created below, in
+				// which case BOTH conjuncts name the result -- the change
+				// channel (`subscription.live`, the pre-existing console.debug
+				// guard's own boolean) and the peer feed (`peerFeed`, 56-11's
+				// boot result, resolved above this hook). See this module's own
+				// header for the four-row table this expression implements.
 				let connection: PublicConnectionState = 'unknown';
 				let observedAt: string | null = null;
 				if (next.db !== null && next.db !== undefined) {
@@ -222,7 +336,8 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 					// gate free of test-only plumbing.
 					propagation = enableChangePropagation(next.db, networkKey);
 					subscription = subscribeToPublicChanges(next.db, bumpDataVersion);
-					connection = subscription.live ? 'live' : 'down';
+					connection =
+						!subscription.live || peerFeed === 'stopped' ? 'down' : peerFeed === 'running' ? 'live' : 'unknown';
 					observedAt = source.nowCanonical();
 					if (!subscription.live) {
 						// No identifier, no error text: the fact that this handle
@@ -270,20 +385,25 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 			propagation?.stop();
 			void closeQuietly(source, handle);
 		};
-	}, [reads, networkKey, electionKey, source, dataVersion, bumpDataVersion]);
+	}, [reads, networkKey, electionKey, source, dataVersion, bumpDataVersion, peerFeed]);
 
 	if (!reads) {
 		// The injected override, and every address that names no election.
 		// No effect ran, no database was opened, no member of `source` was
 		// called. 56-12/D-17: 'unknown' on both branches -- no connection was
-		// ever observed here.
+		// ever observed here. 56-14: `justUpdated` is explicitly `false` on
+		// both -- neither branch ever wires `bumpDataVersion` to anything, so
+		// no notice could ever have been observed here either.
 		return election !== null && election !== undefined
-			? { state: PUBLIC_ELECTION_STATE.READY, election, db: null, keyRelease: null, roll: null, connection: 'unknown', observedAt: null }
-			: { state: PUBLIC_ELECTION_STATE.NOT_HELD, election: null, db: null, keyRelease: null, roll: null, connection: 'unknown', observedAt: null };
+			? { state: PUBLIC_ELECTION_STATE.READY, election, db: null, keyRelease: null, roll: null, connection: 'unknown', observedAt: null, justUpdated: false }
+			: { state: PUBLIC_ELECTION_STATE.NOT_HELD, election: null, db: null, keyRelease: null, roll: null, connection: 'unknown', observedAt: null, justUpdated: false };
 	}
 
-	return (
-		resolved ?? {
+	if (resolved === null) {
+		// The `reading` placeholder. 56-14: `justUpdated` is `false` here by
+		// construction -- no subscription has been created yet, so no notice
+		// could have arrived.
+		return {
 			state: PUBLIC_ELECTION_STATE.READING,
 			election: null,
 			db: null,
@@ -291,8 +411,20 @@ export function usePublicElection({ address, election = null, source = DEFAULT_P
 			roll: null,
 			connection: 'unknown',
 			observedAt: null,
-		}
-	);
+			justUpdated: false,
+		};
+	}
+
+	// 56-14. `justUpdated` is merged in from this hook's OWN state rather
+	// than stored on `resolved`, because it changes on its own timer without
+	// the read effect re-running -- storing it on `resolved` would freeze it
+	// at whatever it was the moment the read last settled. Forced `false`
+	// outside the `ready` state (covers the `catch` degrade's `unreadable`
+	// result) so the badge can never be reported on a page that is not
+	// actually showing one -- `ElectionShell.tsx`'s own guard already
+	// requires `read.state === 'ready'`, and this keeps the hook's own
+	// returned value consistent with that even before the shell reads it.
+	return { ...resolved, justUpdated: resolved.state === PUBLIC_ELECTION_STATE.READY ? justUpdated : false };
 }
 
 /**

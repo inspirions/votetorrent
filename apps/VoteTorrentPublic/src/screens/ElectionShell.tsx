@@ -63,6 +63,15 @@ export interface ElectionShellProps {
 	 * loader can report. See `PublicApp.tsx`'s `FAULT_COPY_KEYS` for the
 	 * closed set of copy keys the two values resolve to. */
 	configFault?: 'missing' | 'malformed' | null;
+	/** The 56-14 peer-feed seam over `usePublicElection`'s own read
+	 * dependencies -- typed from the hook's own args type, same idiom as
+	 * `source` above, so this file gains no new import for it. Defaults to
+	 * `undefined`, which lets `usePublicElection` fall back to its own
+	 * `'unobserved'` default. Production supplies it from `PublicApp.tsx`;
+	 * only a harness supplies one otherwise, and every harness that omits it
+	 * sees a byte-identical page -- which is what keeps the existing browser
+	 * gates green. */
+	peerFeed?: Parameters<typeof usePublicElection>[0]['peerFeed'];
 }
 
 /**
@@ -120,7 +129,7 @@ export interface ElectionShellProps {
  * closure therefore lives in `use-public-election.ts`, whose own header
  * records the same constraint from the other side.
  */
-export function ElectionShell({ search, at = null, election = null, source, configFault = null }: ElectionShellProps) {
+export function ElectionShell({ search, at = null, election = null, source, configFault = null, peerFeed }: ElectionShellProps) {
 	const address = parseElectionAddress(search ?? window.location.search);
 
 	// Called UNCONDITIONALLY, above the address branch, for the same reason
@@ -129,7 +138,7 @@ export function ElectionShell({ search, at = null, election = null, source, conf
 	// the fault (null address when a fault is present -- a deployment that
 	// cannot learn where to dial should not attempt a lookup), but the hook
 	// call itself is never wrapped, moved or conditionalised.
-	const read = usePublicElection({ address: configFault === null ? address : null, election, source });
+	const read = usePublicElection({ address: configFault === null ? address : null, election, source, peerFeed });
 
 	// 56-12/D-17. Computed ONCE, above the branch predicates: `null` whenever
 	// `read.observedAt` is absent or unusable, in which case `showStaleness`

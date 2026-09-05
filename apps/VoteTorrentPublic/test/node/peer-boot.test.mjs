@@ -10,7 +10,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -303,10 +303,42 @@ test('src/peer/boot.js contains exactly one occurrence of attachNetworkDb, and z
 	assert.equal((stripped.match(/new Database/g) ?? []).length, 0);
 });
 
-test('src/main.tsx names startPublicPeerBoot exactly once, calls it with no election prop, and diffs additively over the pre-56-11 shape', () => {
+// 56-14 MOVED the one production `startPublicPeerBoot` call site out of
+// `src/main.tsx` and into `src/screens/PublicApp.tsx` -- a boot whose result
+// lives outside React can never reach a component, and `PublicApp.tsx` is the
+// first plan that needs the result (the connection predicate's second
+// conjunct). This is the superseding pair of assertions `56-14-PLAN.md`'s own
+// `<interface_contract>` §4 names: the zero-count below on `main.tsx`, and the
+// exactly-one-count on `PublicApp.tsx` that replaces the retired assertion.
+test('src/main.tsx no longer names startPublicPeerBoot anywhere, and still mounts PublicApp with no props', () => {
 	const source = readFileSync(path.join(APP_ROOT, 'src', 'main.tsx'), 'utf8');
-	const lines = source.split('\n').filter((line) => line.includes('startPublicPeerBoot'));
-	assert.equal(lines.length, 1, 'exactly one occurrence in the whole file, satisfied by the aliased import');
-	assert.equal((source.match(/election=\{/g) ?? []).length, 0);
+	assert.equal((source.match(/startPublicPeerBoot/g) ?? []).length, 0, '56-14 moved the call into PublicApp.tsx; main.tsx must name it nowhere');
 	assert.match(source, /<PublicApp \/>/, 'main.tsx still mounts the root element 56-12 left it mounting');
+});
+
+test('src/screens/PublicApp.tsx names startPublicPeerBoot exactly once (the aliased import, same discipline main.tsx used before this move), calls the peer boot with no election prop, and no third file under src/ names the export at all', () => {
+	const source = readFileSync(path.join(APP_ROOT, 'src', 'screens', 'PublicApp.tsx'), 'utf8');
+	const occurrences = (source.match(/startPublicPeerBoot/g) ?? []).length;
+	assert.equal(occurrences, 1, 'exactly one whole-file occurrence, satisfied by the aliased import line');
+	assert.match(source, /import \{ startPublicPeerBoot as \w+, PEER_BOOT_STATUS \} from '\.\.\/peer\/boot\.js';/, 'the one occurrence must be the aliased import line, not a call or a prose restatement');
+	assert.equal((source.match(/election=\{/g) ?? []).length, 0);
+
+	/** @param {string} dir @returns {string[]} */
+	function walkAll(dir) {
+		/** @type {string[]} */
+		const out = [];
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) out.push(...walkAll(full));
+			else out.push(full);
+		}
+		return out;
+	}
+	const srcRoot = path.join(APP_ROOT, 'src');
+	const thirdFileOffenders = walkAll(srcRoot).filter((file) => {
+		if (file === path.join(APP_ROOT, 'src', 'screens', 'PublicApp.tsx')) return false;
+		if (file === path.join(APP_ROOT, 'src', 'peer', 'boot.js')) return false;
+		return /startPublicPeerBoot/.test(readFileSync(file, 'utf8'));
+	});
+	assert.deepEqual(thirdFileOffenders, [], `a third file under src/ names startPublicPeerBoot: ${thirdFileOffenders.join(', ')}`);
 });
