@@ -51,6 +51,7 @@ const BUILD_CONFIG = 'vite.mesh-read.config.ts';
 const ENTRY_NAME = 'mesh-read-gate.html';
 const ORIGIN_SCRIPT = path.join(APP_ROOT, 'test', 'browser', 'mesh-read-origin.mjs');
 const GATEWAY_CONFIG = path.join(REPO_ROOT, 'packages', 'p2p-probe-host', 'gateway.config.json');
+const EDGE_NODE_SOURCE = path.join(APP_ROOT, 'src', 'peer', 'edge-node.js');
 const PORT = 5197;
 
 /** The D-16 inversion's exact rung ids — exported so `56-13` imports this
@@ -218,6 +219,68 @@ function readContractFromSource() {
 }
 
 /**
+ * The exact integer `PUBLIC_COHORT_MIN_SIGS` this deployment's browser Edge
+ * node is built with, read from a comment-stripped scan of `edge-node.js`'s
+ * own SOURCE — never `import()`ed (that module pulls browser-only packages
+ * and cannot load in this Node process). Companion read to
+ * `readContractFromSource`, same discipline.
+ * @returns {number}
+ */
+function readBrowserCohortMinSigsFromSource() {
+	const source = readFileSync(EDGE_NODE_SOURCE, 'utf8');
+	const stripped = source
+		.split('\n')
+		.filter((line) => !/^\s*[*/]/.test(line))
+		.join('\n');
+	const match = stripped.match(/PUBLIC_COHORT_MIN_SIGS\s*=\s*(\d+)/);
+	if (!match) {
+		throw new PreflightFailedError('cohort-parameter-unreadable: could not find PUBLIC_COHORT_MIN_SIGS in edge-node.js source');
+	}
+	return Number(match[1]);
+}
+
+/**
+ * The one cross-source drift that would produce a red gate for a
+ * configuration reason while looking exactly like a code defect — the
+ * browser's exported cohort threshold and the operator's gateway config's
+ * `strandCohortTopic.minSigs` disagreeing (56-17's `PUBLIC_COHORT_MIN_SIGS`
+ * and 56-18's `strandCohortTopic.minSigs` are a two-sided deployment
+ * parameter; see `56-17-COHORT-TOPIC-POSTURE.md`'s dedicated section).
+ * Refuses BEFORE the origin boots or a browser launches — this is a source-
+ * level read on both sides, so it needs neither.
+ * @returns {void}
+ */
+function checkCohortParameterAgreement() {
+	const browserMinSigs = readBrowserCohortMinSigsFromSource();
+
+	/** @type {any} */
+	let gatewayConfig;
+	try {
+		gatewayConfig = JSON.parse(readFileSync(GATEWAY_CONFIG, 'utf8'));
+	} catch (err) {
+		throw new PreflightFailedError(`cohort-parameter-config-unreadable: ${/** @type {any} */ (err)?.message}`);
+	}
+	if (
+		!gatewayConfig ||
+		typeof gatewayConfig.strandCohortTopic !== 'object' ||
+		gatewayConfig.strandCohortTopic === null ||
+		!Number.isInteger(gatewayConfig.strandCohortTopic.minSigs)
+	) {
+		throw new PreflightFailedError(
+			'cohort-parameter-config-missing-key: gateway config has no strandCohortTopic.minSigs integer key',
+		);
+	}
+
+	const gatewayMinSigs = gatewayConfig.strandCohortTopic.minSigs;
+	if (gatewayMinSigs !== browserMinSigs) {
+		throw new PreflightFailedError(
+			`cohort-parameter-drift: browser PUBLIC_COHORT_MIN_SIGS=${browserMinSigs} !== gateway strandCohortTopic.minSigs=${gatewayMinSigs}`,
+		);
+	}
+	console.log(`[mesh-read-gate] cohort-parameter agreement PASS: minSigs=${browserMinSigs} on both sides`);
+}
+
+/**
  * Spawn the origin and drive it to `ORIGIN_READY`, then re-assert every
  * precondition at THIS consumer boundary — read back, never inferred from
  * the origin's own exit code alone.
@@ -354,6 +417,11 @@ async function main() {
 	let origin = null;
 	let exitCode = 0;
 	try {
+		// Catches the one cross-source drift that would produce a red gate for
+		// a configuration reason -- before the origin boots (CPU-heavy) or a
+		// browser launches. See this function's own module-level docstring.
+		checkCohortParameterAgreement();
+
 		origin = await bootOrigin(strandId);
 		const readout = await runBrowserPhase(origin, strandId);
 
