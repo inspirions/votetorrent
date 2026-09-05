@@ -39,6 +39,9 @@
 		"build:offline": "vite build --config vite.offline.config.ts",
 		"test:offline": "node test/offline/run-offline-gate.mjs",
 		"gate:prove-offline-matchers": "node test/offline/run-offline-gate.mjs --prove-matchers",
+		"build:liveness": "vite build --config vite.liveness.config.ts",
+		"test:liveness": "node test/liveness/run-liveness-gate.mjs",
+		"gate:prove-liveness-matchers": "node test/liveness/run-liveness-gate.mjs --prove-matchers",
 		"clean": "rm -rf dist dist-gate node_modules"
 	},
 	"dependencies": {

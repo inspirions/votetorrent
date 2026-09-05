@@ -54,6 +54,25 @@ export const FIXTURE_ELECTION_DB_ID = SEED_ELECTION.id;
 export const UNHELD_ELECTION_ID = 'TZucCxBAf1EXCKWzb01SR9IdrpYq72fIEBOzwUlorNI';
 
 /**
+ * 56-14's own production-length election id. `FIXTURE_ELECTION_DB_ID` above
+ * is the same short, 2-character seed token `UNHELD_ELECTION_ID`'s own
+ * comment warns against reusing as a rendered/measured id — the liveness
+ * gate (`test/liveness/liveness-gate.tsx`) clones `FIXTURE_ELECTION_DB_ID`'s
+ * own `Election`/`ElectionRevision` rows byte-identical except for the id,
+ * under this value, specifically so its own runner's anti-vacuity check (a
+ * requested election id under 43 characters, or failing
+ * `ELECTION_ID_PATTERN`, is a hard bail) has something real to pass. Same
+ * convention as `UNHELD_ELECTION_ID`: the base64url digest of a fixed,
+ * unrelated string, chosen only for its length and alphabet, and DISTINCT
+ * from `UNHELD_ELECTION_ID`. Colocated here (rather than defined once in the
+ * `.tsx` harness) for the same reason every other fixture constant is here:
+ * `run-liveness-gate.mjs` (a `.mjs` runner) cannot import a `.tsx` module,
+ * and both tiers must agree on the exact same value.
+ * @type {string}
+ */
+export const LIVENESS_ELECTION_ID = 'efzhBNtzJ4CuBQdhHbor9hFAwCtZIxrEL2APZNQIjl0';
+
+/**
  * The `ElectionRevision.Revision` value `seedElectionSurface` inserts.
  *
  * `seed-election-surface.js` does NOT export it — it is the internal literal

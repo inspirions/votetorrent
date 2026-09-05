@@ -31,3 +31,8 @@ dist-offline
 # only an entry named exactly `dist`. Also carries two runtime-written files
 # (config.json, gate-expectations.json) the driver writes after the build.
 dist-mesh-read
+
+# 56-14: the liveness/live-update-badge gate's build output. Same reason as
+# dist-gate/dist-live/dist-offline above — the root .gitignore's bare `dist`
+# rule matches only an entry named exactly `dist`.
+dist-liveness
