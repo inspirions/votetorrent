@@ -626,19 +626,36 @@ async function runSelfCheck({ node, config, provenanceResult, runtimeJsonPath, c
   return { ok, payload };
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-
-  // ── --check-dist: the inversion handle. Runs the SAME decision matrix against an arbitrary
-  // package root and exits on its verdict without booting a node. ────────────────────────────
-  if (args.checkDist) {
-    const packageRoot = resolvePath(process.cwd(), args.checkDist);
-    const result = await checkProvenance(packageRoot);
-    L(formatProvenanceLine(result));
-    process.exit(result.verdict === 'PASS' ? 0 : 1);
-  }
-
-  const { config, configDir } = loadAndValidateConfig(args.config);
+/**
+ * `startGateway(options)` — 56-11's named export. The gateway's ENTIRE boot sequence, extracted
+ * verbatim from what was `main()`'s body, structurally unchanged: same fail-closed order, same
+ * `[gateway] KEY=value` lines, same provenance gate, same member-seeding decision. Nothing here is
+ * new behaviour — this is a REFACTOR (one structural change: a name and a return value), not a
+ * rewrite. See this file's header for the three prohibitions this export must never grow (no
+ * seeding, no fixture, no new flag/config key/listening socket).
+ *
+ * @param {{ config?: string }} [options] `config` is the same `--config` path `parseArgs` accepts,
+ *   defaulting identically.
+ * @returns {Promise<{
+ *   node: import('@serfab/cadre-core').CadreNode,
+ *   provenance: unknown,
+ *   controlAddrs: string[],
+ *   controlAddrsDns: string[],
+ *   strandAddrs: Record<string, string[]>,
+ *   publicObserverStrandIds: string[],
+ *   enableRelay: boolean,
+ *   authorizedMemberCount: number,
+ *   enrollmentWindowUntil: number,
+ *   tls: { certPath: string, caRoot: string | null, spkiSha256Base64: string | null },
+ *   stop: () => Promise<void>,
+ *   config: unknown,
+ *   configDir: string,
+ *   controlAddr: string,
+ *   controlAddrDns: string,
+ * }>}
+ */
+export async function startGateway(options = {}) {
+  const { config, configDir } = loadAndValidateConfig(options.config ?? './gateway.config.json');
 
   // ── D-05 control 4, unconditional: no result from this gateway may be reported without a
   // PROVENANCE=PASS line from THIS process, printed before the first GATEWAY_* line. ─────────
@@ -748,10 +765,59 @@ async function main() {
 
   L('READY — public-observer gateway serving on ' + controlAddr);
 
+  const certPath = resolvePath(configDir, config.tls.certPath);
+
+  return Object.freeze({
+    node,
+    provenance: provenanceResult,
+    controlAddrs: [controlAddr],
+    controlAddrsDns: [controlAddrDns],
+    strandAddrs: strandAddrsByStrandId,
+    publicObserverStrandIds: config.publicObserverStrandIds,
+    enableRelay: config.enableRelay,
+    authorizedMemberCount: authorizedMembers.length,
+    enrollmentWindowUntil: node.enrollmentWindowUntil,
+    tls: {
+      certPath,
+      caRoot: resolveCaRootPath(),
+      spkiSha256Base64: computeSpkiSha256Base64(certPath),
+    },
+    stop: async () => {
+      await node.stop();
+    },
+    // Carried for the CLI entry's own `--self-check` reuse below -- not part of the "at minimum"
+    // contract this plan's callers rely on, but harmless to expose alongside it.
+    config,
+    configDir,
+    controlAddr,
+    controlAddrDns,
+  });
+}
+
+// ── CLI entry ────────────────────────────────────────────────────────────────────────────────
+// Guarded so `import { startGateway } from './gateway.mjs'` (56-11's origin process, in-process)
+// never triggers this boot sequence a second time as a side effect of the import itself. Every
+// fail-closed refusal, every `[gateway] KEY=` line, the provenance gate and the
+// `gateway-runtime.json` emission stay exactly where they were -- this guard is the ONLY
+// structural change to the CLI's own behaviour.
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  // ── --check-dist: the inversion handle. Runs the SAME decision matrix against an arbitrary
+  // package root and exits on its verdict without booting a node. ────────────────────────────
+  if (args.checkDist) {
+    const packageRoot = resolvePath(process.cwd(), args.checkDist);
+    const result = await checkProvenance(packageRoot);
+    L(formatProvenanceLine(result));
+    process.exit(result.verdict === 'PASS' ? 0 : 1);
+  }
+
+  const handle = await startGateway({ config: args.config });
+  const { node, config, controlAddr, controlAddrDns, provenance: provenanceResult, strandAddrs: strandAddrsByStrandId, tls } = handle;
+
   // ── --self-check: prove the runtime configuration took effect, then write the handoff and
   // exit (one-shot verification run, not the long-running service). ─────────────────────────
   if (args.selfCheck) {
-    const certPath = resolvePath(configDir, config.tls.certPath);
     const runtimeJsonPath = resolvePath(process.cwd(), args.runtimeJson);
     const { ok } = await runSelfCheck({
       node,
@@ -761,7 +827,7 @@ async function main() {
       controlAddr,
       controlAddrDns,
       strandAddrsByStrandId,
-      certPath,
+      certPath: tls.certPath,
     });
     await node.stop();
     process.exit(ok ? 0 : 1);
@@ -779,7 +845,13 @@ async function main() {
   setInterval(() => {}, 1 << 30); // stay alive
 }
 
-main().catch((e) => {
-  L('FATAL: unhandled error:', e?.stack ?? e);
-  process.exit(1);
-});
+// `process.argv[1]` is only set when Node loaded this file as the entry module -- an `import()`
+// (relative or bare) never sets it to this file's path. This is the standard `require.main ===
+// module` equivalent for ESM.
+const isCliEntry = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isCliEntry) {
+  main().catch((e) => {
+    L('FATAL: unhandled error:', e?.stack ?? e);
+    process.exit(1);
+  });
+}

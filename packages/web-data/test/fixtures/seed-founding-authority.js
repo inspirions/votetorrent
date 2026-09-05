@@ -62,10 +62,24 @@ export async function seedFoundingAuthority(db) {
 		`insert into Authority (Id, Name, DomainName, ImageRef) ${noCtx} values ('a1','Gate County Elections','gate50.example',null)`,
 	);
 	await db.exec(`insert into User (Id, Name, ImageRef) ${noCtx} values ('u1','Ada Officer',null)`);
+	// `cast(... as datetime)` wraps EFFECTIVE_AT on both inserts below -- the literal TEXT is
+	// byte-identical to before (see this file's header: never change the literal itself), only
+	// its binding is now explicitly typed. This is 56-11's fix for a defect that fixture only
+	// surfaces against a strand-connected (Optimystic-vtab-backed) `Database`, never against the
+	// plugin-indexeddb-backed local store every other consumer of this fixture uses: a bare
+	// datetime string literal in a VALUES clause binds as untyped text until storage, so
+	// Officer's `AdminValid` deferred CHECK -- `exists (select 1 from Admin A where ... A.EffectiveAt
+	// = new.AdminEffectiveAt)` -- compares a properly-decoded `datetime`-affinity value read back
+	// through the Optimystic row codec against an untyped `new.AdminEffectiveAt`, and the two never
+	// compare equal, so the exists() spuriously returns nothing. Verified failing without the cast
+	// and passing with it, via a minimal two-table repro isolating the defect to exactly this shape
+	// (a `new.<datetime column>` compared against another table's stored `datetime` column inside a
+	// deferred CHECK) -- see `56-11-SUMMARY.md`. The plugin-indexeddb path this fixture's other
+	// callers use does not route through that codec, so this cast is a no-op there.
 	await db.exec(
-		`insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies) ${noCtx} values ('a1','${EFFECTIVE_AT}','[]')`,
+		`insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies) ${noCtx} values ('a1',cast('${EFFECTIVE_AT}' as datetime),'[]')`,
 	);
 	await db.exec(
-		`insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes) ${noCtx} values ('a1','${EFFECTIVE_AT}','u1','Clerk','${JSON.stringify(GRANTED_SCOPES)}')`,
+		`insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes) ${noCtx} values ('a1',cast('${EFFECTIVE_AT}' as datetime),'u1','Clerk','${JSON.stringify(GRANTED_SCOPES)}')`,
 	);
 }
