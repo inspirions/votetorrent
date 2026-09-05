@@ -106,7 +106,8 @@ export async function probeFretRouting(node, options) {
 		return { available: false, reason: 'cohort-host-absent' };
 	}
 
-	const opts = options && typeof options === 'object' ? options : {};
+	/** @type {ProbeFretRoutingOptions} */
+	const opts = /** @type {any} */ (options && typeof options === 'object' ? options : {});
 	const topicId = opts.topicId;
 	const participantId = opts.participantId;
 	const wantK = opts.wantK;
@@ -152,6 +153,7 @@ export async function probeFretRouting(node, options) {
 	const clusterWindow = readOrReason(() => Math.max(2, Number(wantK)));
 	const hasNumericClusterWindow = typeof clusterWindow === 'number' && Number.isFinite(clusterWindow);
 
+	/** @type {Uint8Array | undefined} */
 	let tier0CoordBytes;
 	const tier0Coord = await readOrReasonAsync(async () => {
 		const addressing = createTierAddressing(new RingHash());
@@ -160,10 +162,11 @@ export async function probeFretRouting(node, options) {
 	});
 	const hasTier0Coord = tier0CoordBytes instanceof Uint8Array;
 
+	/** @type {Uint8Array | undefined} */
 	let ringCoordBytes;
 	const ringCoord = hasTier0Coord
 		? await readOrReasonAsync(async () => {
-				ringCoordBytes = await hashKey(tier0CoordBytes);
+				ringCoordBytes = await hashKey(/** @type {Uint8Array} */ (tier0CoordBytes));
 				return bytesToB64url(ringCoordBytes);
 			})
 		: 'unavailable: tier0Coord could not be computed';
