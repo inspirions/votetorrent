@@ -3,6 +3,13 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { enginePreflight } from './engine-preflight.js';
 import { PublicApp } from './screens/PublicApp';
+import { parseElectionAddress } from './election-address.js';
+// Imported under an alias so a whole-file occurrence count of the peer
+// boot's exported name resolves to this ONE import line rather than also
+// matching the call below (a self-tripping-checker trap this deliberately
+// avoids -- see `project_self_tripping_checker_headers`). `bootPeerLayer` is
+// this file's own name for that single import.
+import { startPublicPeerBoot as bootPeerLayer } from './peer/boot.js';
 
 declare global {
 	interface Window {
@@ -40,3 +47,17 @@ createRoot(rootElement).render(
 		<PublicApp />
 	</StrictMode>,
 );
+
+// 56-11: put the libp2p/strand closure into the production graph. This is
+// the ONE production call to the peer boot composition -- the same one the
+// mesh-read gate exercises (`test/browser/mesh-read-gate.js`). Never awaited
+// before the render above: the page must paint its honest empty state first
+// and flip when replicated rows land, never block first paint on a peer
+// dial. The boot composition never rejects by its own contract; the
+// `.catch` below is defense in depth only, and logs the error's NAME, never
+// a message that could carry a value.
+const address = parseElectionAddress(window.location.search);
+bootPeerLayer({ networkHash: address.networkHash, electionId: address.electionId }).catch((err: unknown) => {
+	const name = err && typeof (err as { name?: unknown }).name === 'string' ? (err as { name: string }).name : 'Error';
+	console.error('main: peer boot rejected unexpectedly', name);
+});

@@ -159,8 +159,15 @@ const EXPECTED_TABLE_COUNT = 61;
  * `@votetorrent/web-data` run does. Re-pin it in the SAME commit that adds the
  * file, verify the substance check first, and read the new number off this
  * gate's failure message instead of inferring it.
+ *
+ * 56-11 moved this 28 -> 29: it adds exactly one new file under the scanned
+ * root, `apps/VoteTorrentPublic/src/peer/boot.js` (the production peer-layer
+ * composition wired into `main.tsx`). Before re-pinning, test 16 ("D-05: zero
+ * forbidden-class table names as code across the public entry source set")
+ * was confirmed green over the widened 29-file set, per this file's own
+ * discipline above.
  */
-const EXPECTED_SCANNED_FILE_COUNT = 28;
+const EXPECTED_SCANNED_FILE_COUNT = 29;
 
 // The sentinel literals are ASSEMBLED, never written out, so each appears in
 // this file exactly once — as the comment that delimits the region. A checker
