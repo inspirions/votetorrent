@@ -129,10 +129,23 @@
  *    this cadence makes. It is separate from, and does not replace,
  *    `edge-node.js`'s cohort-topic HOST gossip timer, which idles while this
  *    browser's coord registry stays empty.
+ *
+ * 7. THIS MODULE WIRES A DIAGNOSTIC-ONLY PROBE AT THE EXHAUSTED-RETRY SITE
+ *    (56-20). `fret-routing-probe.js`'s `probeFretRouting` reads the exact
+ *    inputs FRET's own in-cluster branch reads -- never dials, never writes,
+ *    installs no timer, and cannot change what is thrown here: the SAME
+ *    `PeerReplicationError` is constructed with the SAME message immediately
+ *    after the probe's one console line is emitted. This exists to turn
+ *    56-19's stopping hypothesis (that this browser's own participant walk
+ *    resolves its root/bootstrap coordinate back to ITSELF) into a
+ *    measurement rather than a reading -- see
+ *    `56-20-SELF-DISPATCH-MEASUREMENT.md` for the verdicts this measurement
+ *    licenses. `56-20` authors no fix here; only `56-21` may act on it.
  */
 
 import { edgeProfile, reactivityTopicId, CohortBackoffError, subscriberTtlForProfile } from '@optimystic/db-core';
-import { ReactivitySubscriptionManager, reactivityTailBytes } from '@optimystic/db-p2p';
+import { ReactivitySubscriptionManager, reactivityTailBytes, peerIdToBytes } from '@optimystic/db-p2p';
+import { probeFretRouting, FRET_ROUTING_PROBE_PREFIX } from './fret-routing-probe.js';
 import { PUBLIC_SUBSCRIBED_TABLES, STORE_MODULE_NAME, notifyPeerWrite } from '@votetorrent/web-data/public';
 
 /** The one prefix every log line in this module carries. @type {string} */
@@ -170,6 +183,22 @@ export const PEER_RENEWAL_FRACTION = 1 / 3;
  * @type {10000}
  */
 const REGISTER_BACKOFF_CEILING_MS = 10_000;
+
+/**
+ * The cohort-topic want-window size actually in force for this registration attempt (56-20's
+ * `fret-routing-probe.js` diagnostic ONLY — this constant is never threaded into the real
+ * registration path, which never sets it either). `edge-node.js` deliberately leaves
+ * `cohortTopic.wantK` unset (56-17, so both this browser and the origin resolve the SAME
+ * default), and that default is db-p2p's own top-level `cohortWantK`, resolved as
+ * `options.cohortTopic?.wantK ?? 16` (`@optimystic/db-p2p` `dist/src/libp2p-node-base.js:177`) —
+ * NOT FRET's own internal `cfg.k` default of 15 (pre-verified fact 5,
+ * `56-20-SELF-DISPATCH-MEASUREMENT.md`), which only applies when a message never carries an
+ * explicit `want_k`, and `FretTopicRouter`'s messages always do. Neither value is exposed on
+ * `node.services.fret` for this module to read back, so this is a measured citation into
+ * installed `dist/`, not a guess -- if a future run's data contradicts it, the run wins.
+ * @type {16}
+ */
+const DIAGNOSTIC_COHORT_WANT_K = 16;
 
 /**
  * Chunk size for `applyExternalRowChanges` batches — bounds peak memory for a
@@ -534,6 +563,27 @@ export async function startPeerReplication(options) {
 				// diagnostic exists to tell that apart from the walk never reaching a willing peer at
 				// all, which registrySize === 0 does not distinguish on its own.
 				const registrySize = node?.cohortTopicHost?.registry?.all?.()?.length ?? 'n/a';
+				// 56-20: a diagnostic-only measurement of the SAME in-cluster branch FRET's own
+				// `routeAct` evaluates for this walk, sampled at the exact moment `register()` gives
+				// up -- before the throw below unwinds the node. `topicId` is the SAME value already
+				// computed above for this registration; `peerIdToBytes` is the SAME encoding
+				// `@optimystic/db-p2p`'s own host uses internally for `self` (never re-derived a
+				// second way). Emitted at `console.error` because `run-mesh-read-gate.mjs` forwards
+				// every page console level into its captured log. Wrapped in its own try/catch, and
+				// caught with `logFailure` (name only), so a probe-preparation failure can never
+				// change what this function throws: the SAME `PeerReplicationError`, with the SAME
+				// subject and message, follows unconditionally.
+				try {
+					const participantId = node && node.peerId ? peerIdToBytes(node.peerId) : new Uint8Array(0);
+					const routingProbe = await probeFretRouting(node, {
+						topicId,
+						participantId,
+						wantK: DIAGNOSTIC_COHORT_WANT_K,
+					});
+					console.error(FRET_ROUTING_PROBE_PREFIX + JSON.stringify(routingProbe));
+				} catch (probeErr) {
+					logFailure(probeErr);
+				}
 				throw new PeerReplicationError(
 					'register',
 					`register() did not succeed after ${attempt} attempts against CohortBackoffError (last afterMs=${err.afterMs}) -- no willing primary (own registrySize=${registrySize})`,
