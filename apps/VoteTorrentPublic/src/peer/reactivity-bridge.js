@@ -141,6 +141,25 @@
  *    measurement rather than a reading -- see
  *    `56-20-SELF-DISPATCH-MEASUREMENT.md` for the verdicts this measurement
  *    licenses. `56-20` authors no fix here; only `56-21` may act on it.
+ *
+ * 8. A SECOND, EARLIER PROBE SAMPLE (56-20 AMENDMENT). `56-20`'s own record
+ *    named its unresolved question: `connectionCount: 0` on both its runs
+ *    could mean either "the ring entry was never backed by a real
+ *    connection" or "a real connection was open earlier and had already
+ *    closed by the exhausted-retry sample, ~20s of elapsed backoff later".
+ *    This module calls `probeFretRouting` a SECOND time, immediately after
+ *    `registry.register(...)` and BEFORE the retry loop's very first
+ *    `register()` attempt -- i.e. before any `CohortBackoffError` backoff has
+ *    elapsed at all, the earliest point in this module's own control flow at
+ *    which the subscription topic is known and a connectionCount reading is
+ *    meaningful. Same restraints as the original call: never dials, never
+ *    writes, installs no timer, wrapped in its own try/catch caught with
+ *    `logFailure` (name only), and cannot change what this function throws.
+ *    Emitted under its OWN prefix, `FRET_ROUTING_PROBE_EARLY_PREFIX`, never
+ *    reusing the original prefix -- two lines sharing one prefix would be
+ *    ambiguous to a driver grepping the log for which sample is which. See
+ *    `56-20-SELF-DISPATCH-MEASUREMENT.md`'s `## Amendment` section for the
+ *    grading rule this earlier sample is evaluated against.
  */
 
 import { edgeProfile, reactivityTopicId, CohortBackoffError, subscriberTtlForProfile } from '@optimystic/db-core';
@@ -150,6 +169,15 @@ import { PUBLIC_SUBSCRIBED_TABLES, STORE_MODULE_NAME, notifyPeerWrite } from '@v
 
 /** The one prefix every log line in this module carries. @type {string} */
 const LOG_PREFIX = 'peer/reactivity-bridge:';
+
+/**
+ * The prefix for the SECOND, EARLIER `probeFretRouting` sample (56-20
+ * AMENDMENT, module header point 8) -- deliberately distinct from
+ * `FRET_ROUTING_PROBE_PREFIX` so a driver grepping the captured log can tell
+ * the pre-retry-loop sample apart from the original exhausted-retry sample.
+ * @type {string}
+ */
+const FRET_ROUTING_PROBE_EARLY_PREFIX = 'FRET_ROUTING_PROBE_EARLY=';
 
 /**
  * Bound on `register()` attempts against a `CohortBackoffError` (56-17). The
@@ -540,6 +568,27 @@ export async function startPeerReplication(options) {
 	});
 
 	const unregister = registry.register(topicId, manager.onNotification.bind(manager));
+
+	// 56-20 AMENDMENT (module header point 8): the SECOND, EARLIER
+	// `probeFretRouting` sample -- taken HERE, before the very first
+	// `register()` attempt below and therefore before any `CohortBackoffError`
+	// backoff has elapsed, as opposed to the ORIGINAL sample further down
+	// (only reached once PEER_REGISTER_MAX_ATTEMPTS is exhausted). `topicId`
+	// is the SAME value already computed above for this registration; never
+	// re-derived a second way. Wrapped in its own try/catch, caught with
+	// `logFailure` (name only), so a probe-preparation failure here can never
+	// change whether or how registration proceeds.
+	try {
+		const earlyParticipantId = node && node.peerId ? peerIdToBytes(node.peerId) : new Uint8Array(0);
+		const earlyRoutingProbe = await probeFretRouting(node, {
+			topicId,
+			participantId: earlyParticipantId,
+			wantK: DIAGNOSTIC_COHORT_WANT_K,
+		});
+		console.error(FRET_ROUTING_PROBE_EARLY_PREFIX + JSON.stringify(earlyRoutingProbe));
+	} catch (probeErr) {
+		logFailure(probeErr);
+	}
 
 	// Bounded cold-start retry (56-17 Task 3): `CohortBackoffError` is the
 	// substrate's own documented "no willing primary right now" signal, not a
