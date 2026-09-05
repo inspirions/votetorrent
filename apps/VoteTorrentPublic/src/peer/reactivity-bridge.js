@@ -525,9 +525,18 @@ export async function startPeerReplication(options) {
 				throw err;
 			}
 			if (attempt >= PEER_REGISTER_MAX_ATTEMPTS) {
+				// registrySize is P1's own observable (56-17-COHORT-TOPIC-POSTURE.md: "the size of
+				// node.cohortTopicHost.registry.all() ... read from the page at any point after
+				// boot"), sampled HERE because a register() exhaustion unwinds the whole boot before
+				// any later code could read it -- a structural fact about this node's OWN coord
+				// registry, never a row value. A non-zero size here would mean this browser was
+				// dispatched an inbound RegisterV1 and instantiated a coord engine (refuting P1); this
+				// diagnostic exists to tell that apart from the walk never reaching a willing peer at
+				// all, which registrySize === 0 does not distinguish on its own.
+				const registrySize = node?.cohortTopicHost?.registry?.all?.()?.length ?? 'n/a';
 				throw new PeerReplicationError(
 					'register',
-					`register() did not succeed after ${attempt} attempts against CohortBackoffError (last afterMs=${err.afterMs}) -- no willing primary`,
+					`register() did not succeed after ${attempt} attempts against CohortBackoffError (last afterMs=${err.afterMs}) -- no willing primary (own registrySize=${registrySize})`,
 				);
 			}
 			await delayFn(Math.min(err.afterMs, REGISTER_BACKOFF_CEILING_MS));

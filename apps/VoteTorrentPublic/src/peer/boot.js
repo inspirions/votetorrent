@@ -470,9 +470,26 @@ export async function startPublicPeerBoot(options) {
 		return { status: PEER_BOOT_STATUS.STARTED, peerId, dbName: edgeNode.dbName, stop };
 	} catch (err) {
 		await unwind();
+		// Diagnostic only (56-19): the FULL message of a boot-time failure, never a row value --
+		// `PeerBootError`/`PeerReplicationError`/`EdgeNodeConfigError` are constructed exclusively
+		// from structural facts (an option name, a table name, an attempt count, a backoff `afterMs`)
+		// and never from a replicated row or a notification payload -- unlike `reactivity-bridge.js`'s
+		// `logFailure`, which logs only a `.name` because ITS callers (`onVerifiedNotification`) can
+		// receive row-shaped data. `startPublicPeerBoot`'s own FAILED result carries `subject` only,
+		// which is not enough to tell "no willing primary after N attempts (afterMs=X)" apart from any
+		// other `subject: "register"` failure -- this line is the ladder's own instrument, not a rung.
+		console.error('peer/boot: FAILED —', /** @type {any} */ (err)?.message ?? String(err));
+		// Widened past `instanceof PeerBootError` (56-19): `createEdgeNode`/`startPeerReplication`
+		// throw their OWN named error classes (`EdgeNodeConfigError`, `PeerReplicationError`), each
+		// already carrying a `subject` naming the option/table/attachment at fault -- the same shape
+		// `PeerBootError` carries, just a different class. Collapsing those to the bare class name
+		// (the old fallback below) discarded the one detail a caller needs to tell "no willing
+		// primary after N attempts" apart from "cohortTopicHost absent" apart from "readRows missing"
+		// -- all three previously surfaced identically as the string "PeerReplicationError". Duck-
+		// typed on the field, not the class, so any future named-subject error class benefits too.
 		const subject =
-			err instanceof PeerBootError
-				? err.subject
+			err && typeof (/** @type {any} */ (err).subject) === 'string'
+				? /** @type {any} */ (err).subject
 				: err && typeof (/** @type {any} */ (err).name) === 'string'
 					? /** @type {any} */ (err).name
 					: 'unknown';

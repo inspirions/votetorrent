@@ -946,6 +946,28 @@ export async function startGateway(options = {}) {
 
   const certPath = resolvePath(configDir, config.tls.certPath);
 
+  // ── EFFECT_COHORT, unconditionally on every boot, never only behind `--self-check` (56-19). ──
+  // D-05.4 requires the ORIGIN's runtime cohort-topic effect to be provable IN THE SAME PROCESS
+  // that seeds and serves a mesh-read run, and `mesh-read-origin.mjs` (56-11) calls `startGateway`
+  // directly -- it never reaches `main()`'s `--self-check` branch below, so that branch alone
+  // left this proof permanently unreachable from the one caller that actually needs it (measured:
+  // absent from every `test:mesh-read` run before this fix). `checkCohortRung` is cheap (pure
+  // reads off the already-started node, no new connection, no new libp2p node) -- unlike
+  // `checkAllowlistRung`/`checkHostedRung`/`checkRegisteredRung`/`checkGaterRung`, which stay
+  // reachable ONLY via `--self-check` (the last of those four stands up a second, dialing libp2p
+  // node and holds a connection past a multi-second relay-admission deadline; running it on every
+  // gate boot, times three for a certification run, was judged not worth the added latency and
+  // surface for a proof this plan's own verification does not require of them). This scoping
+  // decision is recorded, not hidden -- see `56-19-MESH-READ-CERTIFICATION.md`.
+  let cohortEffect;
+  try {
+    cohortEffect = { pass: true, ...checkCohortRung(node, config.strandCohortTopic, config.publicObserverStrandIds) };
+    L(`EFFECT_COHORT=PASS enabled=${cohortEffect.enabled} strands=${config.publicObserverStrandIds.join(',')}`);
+  } catch (e) {
+    cohortEffect = { pass: false, error: e?.message ?? String(e) };
+    L('EFFECT_COHORT=FAIL ' + cohortEffect.error);
+  }
+
   return Object.freeze({
     node,
     provenance: provenanceResult,
@@ -956,6 +978,7 @@ export async function startGateway(options = {}) {
     enableRelay: config.enableRelay,
     authorizedMemberCount: authorizedMembers.length,
     enrollmentWindowUntil: node.enrollmentWindowUntil,
+    cohortEffect,
     tls: {
       certPath,
       caRoot: resolveCaRootPath(),
