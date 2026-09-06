@@ -39,6 +39,20 @@
  * NO DIALING, NO WRITING, NO SUBSCRIPTION, NO TIMER. This module installs no
  * `setInterval`/`setTimeout` and opens no connection; it reads state a
  * running node already holds.
+ *
+ * WIDENED FOR A LIVE CORROBORATION (56-24). `cohortIdsWide`/`cohortSizeWide`
+ * re-assemble the SAME hashed ring coordinate at `WIDE_COHORT_WANTS` — two
+ * orders of magnitude past the measured in-cluster window — so
+ * `56-20`'s Observation §4 (a known second ring member excluded from the
+ * tier-0 cohort) gets a live re-check at a window size that cannot itself be
+ * the reason for the exclusion. This is a read-side parameter to
+ * `fret.assembleCohort(...)` only: it does NOT touch this node's
+ * cohort-topic want-window sizing, exactly like the measured window above.
+ * `fretDiagnostics` copies `fret.getDiagnostics()`'s scalar counters field by
+ * field into a fresh object — the source method's own comment warns a caller
+ * holding the live handle is a tripwire, so this module never hands that
+ * handle out. Neither field changes `cohortIds`/`cohortSize`'s existing
+ * computation or meaning.
  */
 
 import { createTierAddressing, RingHash, bytesToB64url } from '@optimystic/db-core';
@@ -47,6 +61,17 @@ import { hashKey } from 'p2p-fret';
 /** The one prefix every emitted line carries — the driver greps for this.
  * @type {string} */
 export const FRET_ROUTING_PROBE_PREFIX = 'FRET_ROUTING_PROBE=';
+
+/** The wide want-window `cohortIdsWide`/`cohortSizeWide` assemble the SAME
+ * hashed ring coordinate at — two orders of magnitude past every measured
+ * in-cluster window (`16`) this probe family has recorded, so a live
+ * corroboration of `56-20`'s Observation §4 can distinguish "excluded by
+ * window size" (`WINDOW`) from "excluded regardless of window size"
+ * (`MEMBERSHIP`). A read-side parameter to `assembleCohort` only — it does
+ * NOT touch this node's cohort-topic want-window sizing.
+ * @type {2000}
+ */
+export const WIDE_COHORT_WANTS = 2000;
 
 /**
  * Runs `fn`, returning its value, or a named string reason on throw — never
@@ -185,6 +210,39 @@ export async function probeFretRouting(node, options) {
 			: 'unavailable: ringCoord or clusterWindow could not be computed';
 	const cohortSize = Array.isArray(cohortIds) ? cohortIds.length : 0;
 
+	// 56-24: the SAME hashed ring coordinate, re-assembled at WIDE_COHORT_WANTS
+	// (two orders of magnitude past the measured in-cluster window) -- a live
+	// corroboration of 56-20's Observation §4, distinguishing "excluded by
+	// window size" from "excluded regardless of window size".
+	const cohortIdsWide = hasRingCoord
+		? readOrReason(() => {
+				const cohort = fret.assembleCohort(ringCoordBytes, WIDE_COHORT_WANTS);
+				return Array.isArray(cohort) ? cohort.map((id) => String(id)) : [];
+			})
+		: 'unavailable: ringCoord could not be computed';
+	const cohortSizeWide = Array.isArray(cohortIdsWide) ? cohortIdsWide.length : 0;
+
+	// 56-24: `fret.getDiagnostics()` returns the service's OWN live `diag`
+	// object (`p2p-fret` `fret-service.js`'s own comment: returning a shallow
+	// copy would make per-call allocation unrepresentable) -- copied field by
+	// field into a FRESH object here so this module never hands out a
+	// reference a caller could hold and observe mutate underneath it.
+	const fretDiagnostics = readOrReason(() => {
+		const diag = fret.getDiagnostics();
+		if (!diag || typeof diag !== 'object') return 'unavailable: getDiagnostics() did not return an object';
+		return {
+			peersDiscovered: Number(diag.peersDiscovered) || 0,
+			snapshotsFetched: Number(diag.snapshotsFetched) || 0,
+			announcementsSent: Number(diag.announcementsSent) || 0,
+			pingsSent: Number(diag.pingsSent) || 0,
+			pingsOk: Number(diag.pingsOk) || 0,
+			pingsFail: Number(diag.pingsFail) || 0,
+			streamLimit: Number(diag.streamLimit) || 0,
+			maybeActForwarded: Number(diag.maybeActForwarded) || 0,
+			evictions: Number(diag.evictions) || 0,
+		};
+	});
+
 	// The SAME call made with the UNHASHED db-core coordinate `crossCheckCohort` passes
 	// (`@optimystic/db-p2p` `dist/src/cohort-topic/host.js:2092-2097`) — measured to quantify the
 	// raw-vs-hashed discrepancy (pre-verified fact 10), never acted on by this plan.
@@ -233,6 +291,9 @@ export async function probeFretRouting(node, options) {
 		clusterWindow,
 		cohortIds,
 		cohortSize,
+		cohortIdsWide,
+		cohortSizeWide,
+		fretDiagnostics,
 		selfIndex,
 		inCluster,
 		rawCoordCohortSize,

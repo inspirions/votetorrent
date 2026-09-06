@@ -160,11 +160,30 @@
  *    ambiguous to a driver grepping the log for which sample is which. See
  *    `56-20-SELF-DISPATCH-MEASUREMENT.md`'s `## Amendment` section for the
  *    grading rule this earlier sample is evaluated against.
+ *
+ * 9. THE CONNECTION-LIFECYCLE SNAPSHOT AND ITS CONDITIONAL BOUNDED DIAL
+ *    (56-24). At the SAME exhausted-retry site as points 7 and 8, immediately
+ *    after the routing-probe line, this module emits
+ *    `connectionLifecycleSnapshot(node)`'s payload under
+ *    `CONNECTION_LIFECYCLE_PROBE_PREFIX`. Only when that snapshot reports
+ *    `openObserved === 0` -- i.e. the passive tap never saw a completed
+ *    connection -- does it also fire `probeBootstrapDial`'s ONE bounded dial
+ *    and emit its result under the SAME prefix: an already-connected browser
+ *    is never dialled again by a diagnostic. The target peer-id string is
+ *    derived from the routing-probe payload already computed at this site
+ *    (the first `fretPeerIds` entry that is not `selfPeerId`), never
+ *    re-derived a second way; a missing or non-array `fretPeerIds` yields a
+ *    named skip reason rather than an exception. Both emissions are wrapped
+ *    in their own try/catch, caught with `logFailure` (name only), and
+ *    cannot change what this function throws: the SAME `PeerReplicationError`
+ *    follows unconditionally, exactly as points 7 and 8 already guarantee.
+ *    `56-24-CONNECTION-MEASUREMENT.md` is the record this measurement feeds.
  */
 
 import { edgeProfile, reactivityTopicId, CohortBackoffError, subscriberTtlForProfile } from '@optimystic/db-core';
 import { ReactivitySubscriptionManager, reactivityTailBytes, peerIdToBytes } from '@optimystic/db-p2p';
 import { probeFretRouting, FRET_ROUTING_PROBE_PREFIX } from './fret-routing-probe.js';
+import { connectionLifecycleSnapshot, probeBootstrapDial, CONNECTION_LIFECYCLE_PROBE_PREFIX } from './connection-lifecycle-probe.js';
 import { PUBLIC_SUBSCRIBED_TABLES, STORE_MODULE_NAME, notifyPeerWrite } from '@votetorrent/web-data/public';
 
 /** The one prefix every log line in this module carries. @type {string} */
@@ -227,6 +246,42 @@ const REGISTER_BACKOFF_CEILING_MS = 10_000;
  * @type {16}
  */
 const DIAGNOSTIC_COHORT_WANT_K = 16;
+
+/**
+ * Bound for the one conditional bounded dial `probeBootstrapDial` performs
+ * at the exhausted-retry site (56-24 module header point 9). This module's
+ * OWN safety bound, independent of the substrate — mirrors
+ * `REGISTER_BACKOFF_CEILING_MS`'s own reasoning: a diagnostic dial must never
+ * be allowed to stall boot for an unbounded period.
+ * @type {8000}
+ */
+const CONNECTION_LIFECYCLE_DIAL_TIMEOUT_MS = 8000;
+
+/**
+ * Derives the one dial target `probeBootstrapDial` needs from the routing
+ * probe payload the exhausted-retry site already computed — the first
+ * `fretPeerIds` entry that is not `selfPeerId` — never re-derived a second
+ * way. Never throws: a missing or non-array `fretPeerIds`, or a routing
+ * probe that itself reported `available: false`, yields a named skip reason
+ * instead of an exception.
+ * @param {any} routingProbe - the SAME payload already emitted under `FRET_ROUTING_PROBE_PREFIX` at this site.
+ * @returns {{ targetPeerIdString: string, reason: undefined } | { targetPeerIdString: undefined, reason: string }}
+ */
+function deriveDialTargetFromRoutingProbe(routingProbe) {
+	if (!routingProbe || typeof routingProbe !== 'object' || routingProbe.available !== true) {
+		return { targetPeerIdString: undefined, reason: 'routing-probe-unavailable' };
+	}
+	const fretPeerIds = routingProbe.fretPeerIds;
+	if (!Array.isArray(fretPeerIds)) {
+		return { targetPeerIdString: undefined, reason: 'fretPeerIds-not-array' };
+	}
+	const selfPeerId = routingProbe.selfPeerId;
+	const target = fretPeerIds.find((/** @type {any} */ id) => typeof id === 'string' && id !== selfPeerId);
+	if (!target) {
+		return { targetPeerIdString: undefined, reason: 'no-non-self-peer' };
+	}
+	return { targetPeerIdString: target, reason: undefined };
+}
 
 /**
  * Chunk size for `applyExternalRowChanges` batches — bounds peak memory for a
@@ -622,6 +677,7 @@ export async function startPeerReplication(options) {
 				// caught with `logFailure` (name only), so a probe-preparation failure can never
 				// change what this function throws: the SAME `PeerReplicationError`, with the SAME
 				// subject and message, follows unconditionally.
+				let routingProbeForDialDerivation;
 				try {
 					const participantId = node && node.peerId ? peerIdToBytes(node.peerId) : new Uint8Array(0);
 					const routingProbe = await probeFretRouting(node, {
@@ -629,7 +685,33 @@ export async function startPeerReplication(options) {
 						participantId,
 						wantK: DIAGNOSTIC_COHORT_WANT_K,
 					});
+					routingProbeForDialDerivation = routingProbe;
 					console.error(FRET_ROUTING_PROBE_PREFIX + JSON.stringify(routingProbe));
+				} catch (probeErr) {
+					logFailure(probeErr);
+				}
+				// 56-24 (module header point 9): the connection-lifecycle snapshot,
+				// then -- ONLY when it observed no open connection -- the one bounded
+				// conditional dial. Wrapped in its own try/catch; cannot change what
+				// this function throws below.
+				try {
+					const lifecycleSnapshot = await connectionLifecycleSnapshot(node);
+					console.error(CONNECTION_LIFECYCLE_PROBE_PREFIX + JSON.stringify({ kind: 'snapshot', ...lifecycleSnapshot }));
+					if (lifecycleSnapshot && lifecycleSnapshot.openObserved === 0) {
+						const { targetPeerIdString, reason } = deriveDialTargetFromRoutingProbe(routingProbeForDialDerivation);
+						if (targetPeerIdString) {
+							const dialResult = await probeBootstrapDial(node, {
+								targetPeerIdString,
+								timeoutMs: CONNECTION_LIFECYCLE_DIAL_TIMEOUT_MS,
+							});
+							console.error(CONNECTION_LIFECYCLE_PROBE_PREFIX + JSON.stringify({ kind: 'dial', ...dialResult }));
+						} else {
+							console.error(
+								CONNECTION_LIFECYCLE_PROBE_PREFIX +
+									JSON.stringify({ kind: 'dial', dialAttempted: false, dialOutcome: `skipped:${reason}` }),
+							);
+						}
+					}
 				} catch (probeErr) {
 					logFailure(probeErr);
 				}

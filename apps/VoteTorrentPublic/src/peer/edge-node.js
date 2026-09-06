@@ -118,12 +118,29 @@
  *    `host.profile`/`host.minSigs` object below is the CORE of this
  *    module's posture, not incidental tuning; see
  *    `56-17-COHORT-TOPIC-POSTURE.md`.
+ *
+ * 8. THIS MODULE ATTACHES A DIAGNOSTIC-ONLY CONNECTION-LIFECYCLE TAP (56-24).
+ *    The instant `resolvedDeps.createLibp2pNode(...)` resolves,
+ *    `attachConnectionLifecycleTap` (`./connection-lifecycle-probe.js`) is
+ *    called on the constructed node. It attaches listeners and mutates
+ *    nothing on the node itself — state lives in the probe module's own
+ *    `WeakMap`, never on a node property. It adds NO timer and NO polling of
+ *    its own (the standing D-10 posture above is preserved, not re-opened):
+ *    it only reacts to libp2p's own connection/peer events as they fire.
+ *    Its observation window begins only once `createLibp2pNode` has
+ *    RESOLVED, which is AFTER that factory's own internal `node.start()` —
+ *    any event during `node.start()` itself is outside what this tap can
+ *    see, and `56-24-CONNECTION-MEASUREMENT.md` names that residual rather
+ *    than rounding past it. The tap's attach is wrapped so a probe failure
+ *    can never fail node construction; this module builds no fix from
+ *    whatever the tap observes.
  */
 
 import { openOptimysticWebDb, IndexedDBRawStorage } from '@optimystic/db-p2p-storage-web';
 import { createLibp2pNode } from '@optimystic/db-p2p/rn';
 import { webSockets } from '@libp2p/websockets';
 import { edgeProfile } from '@optimystic/db-core';
+import { attachConnectionLifecycleTap } from './connection-lifecycle-probe.js';
 
 /** Prefix that guarantees a derived name can never equal the package
  * default database name (`'optimystic'`). @type {string} */
@@ -299,6 +316,16 @@ export async function createEdgeNode(config, deps) {
 	} catch (err) {
 		await db.close?.();
 		throw err;
+	}
+
+	// 56-24: attach the diagnostic-only connection-lifecycle tap the instant
+	// the node exists -- see this module header's point 8. Wrapped so a probe
+	// failure can never fail node construction; the tap itself never throws,
+	// this guard is belt-and-braces against a future change to the probe.
+	try {
+		attachConnectionLifecycleTap(node, bootstrapNodes);
+	} catch {
+		// Swallowed -- a diagnostic attach failure must never fail node creation.
 	}
 
 	let stopped = false;

@@ -47,6 +47,7 @@ import { ReactivitySubscriberRegistry, reactivityTailBytes } from '@optimystic/d
 import { reactivityTopicId } from '@optimystic/db-core';
 import { PUBLIC_SUBSCRIBED_TABLES } from '@votetorrent/web-data/public';
 import { publicSrc, moduleUrl } from '../../../../scripts/lib/source-paths.mjs';
+import { attachConnectionLifecycleTap, CONNECTION_LIFECYCLE_PROBE_PREFIX } from '../../src/peer/connection-lifecycle-probe.js';
 import {
 	PeerReplicationError,
 	resolveCohortTopicService,
@@ -210,8 +211,13 @@ function makeFakeService(opts = {}) {
 
 /**
  * A fake `OptimysticNode`, exposing only the two untyped attachments this
- * module reads.
- * @param {{ service?: any, registry?: any, omitCohortTopicHost?: boolean, omitSubscribers?: boolean }} [opts]
+ * module reads. `connectionLifecycle`, when supplied, ALSO populates the
+ * seam `probeFretRouting`/`connectionLifecycleSnapshot`/`probeBootstrapDial`
+ * read (`node.services.fret`, `node.peerId`, `node.peerStore`, `node.dial`,
+ * `node.addEventListener`) -- every OTHER test in this file omits it and
+ * exercises the bare `cohortTopicHost`/`reactivitySubscribers` shape alone,
+ * exactly as before 56-24.
+ * @param {{ service?: any, registry?: any, omitCohortTopicHost?: boolean, omitSubscribers?: boolean, connectionLifecycle?: { selfPeerId: string, otherPeerId: string, dialImpl?: (peerId: any, options: any) => Promise<any>, peerStoreAllImpl?: () => Promise<any[]> } }} [opts]
  */
 function makeFakeNode(opts = {}) {
 	const service = opts.service ?? makeFakeService();
@@ -220,6 +226,54 @@ function makeFakeNode(opts = {}) {
 	const node = {};
 	if (!opts.omitCohortTopicHost) node.cohortTopicHost = { service };
 	if (!opts.omitSubscribers) node.reactivitySubscribers = registry;
+
+	if (opts.connectionLifecycle) {
+		const { selfPeerId, otherPeerId, dialImpl, peerStoreAllImpl } = opts.connectionLifecycle;
+		node.peerId = { toString: () => selfPeerId };
+		node.getConnections = () => [];
+		node.services = {
+			fret: {
+				neighborDistance: () => Number.POSITIVE_INFINITY,
+				assembleCohort: () => [],
+				listPeers: () => [
+					{ id: selfPeerId, metadata: {} },
+					{ id: otherPeerId, metadata: {} },
+				],
+				getNetworkSizeEstimate: () => ({ size_estimate: 1, confidence: 0.2, sources: 1 }),
+				getDiagnostics: () => ({
+					peersDiscovered: 0,
+					snapshotsFetched: 0,
+					announcementsSent: 0,
+					pingsSent: 0,
+					pingsOk: 0,
+					pingsFail: 0,
+					streamLimit: 0,
+					maybeActForwarded: 0,
+					evictions: 0,
+				}),
+			},
+		};
+		if (node.cohortTopicHost) node.cohortTopicHost.registry = { all: () => [] };
+		node.peerStore = {
+			all:
+				peerStoreAllImpl ??
+				(async () => [{ id: { toString: () => otherPeerId }, addresses: [], protocols: [], tags: new Map() }]),
+		};
+		node.dial =
+			dialImpl ?? (async () => ({ remotePeer: { toString: () => otherPeerId }, remoteAddr: { toString: () => '/dialed/addr' } }));
+		/** @type {Map<string, Array<(evt: any) => void>>} */
+		const listeners = new Map();
+		node.addEventListener = (/** @type {string} */ name, /** @type {(evt: any) => void} */ fn) => {
+			const arr = listeners.get(name) ?? [];
+			arr.push(fn);
+			listeners.set(name, arr);
+		};
+		/** @param {string} name @param {any} detail */
+		node.__fireConnectionEvent = (name, detail) => {
+			for (const fn of listeners.get(name) ?? []) fn({ detail });
+		};
+	}
+
 	return { node, service, registry };
 }
 
@@ -656,10 +710,13 @@ test('the single notifyPeerWrite(...) call site is mechanically removable by a o
 	try {
 		const mutantPath = path.join(tmpDir, 'reactivity-bridge.mutant.mjs');
 		writeFileSync(mutantPath, mutated);
-		// `reactivity-bridge.js` imports `./fret-routing-probe.js` by a relative specifier (56-20) --
-		// copy it alongside the mutant, under its own real name, so that import still resolves from
-		// this throwaway directory. Never modified; the probe itself is not what this control tests.
+		// `reactivity-bridge.js` imports `./fret-routing-probe.js` (56-20) and
+		// `./connection-lifecycle-probe.js` (56-24) by relative specifiers -- copy
+		// both alongside the mutant, under their own real names, so those imports
+		// still resolve from this throwaway directory. Neither is modified; the
+		// probes themselves are not what this control tests.
 		writeFileSync(path.join(tmpDir, 'fret-routing-probe.js'), readFileSync(publicSrc('peer', 'fret-routing-probe.js'), 'utf8'));
+		writeFileSync(path.join(tmpDir, 'connection-lifecycle-probe.js'), readFileSync(publicSrc('peer', 'connection-lifecycle-probe.js'), 'utf8'));
 		/** @type {any} */
 		const mutantModule = await import(moduleUrl(mutantPath));
 		assert.equal(typeof mutantModule.startPeerReplication, 'function', 'the mutated copy failed to import cleanly -- this control would prove nothing');
@@ -755,6 +812,171 @@ test('startPeerReplication exhausts PEER_REGISTER_MAX_ATTEMPTS on a persistent C
 	);
 	assert.equal(service.register.calls.length, PEER_REGISTER_MAX_ATTEMPTS);
 	assert.equal(delayFn.calls.length, PEER_REGISTER_MAX_ATTEMPTS - 1, 'a wait happens between attempts, never after the last one');
+});
+
+// ---------------------------------------------------------------------------
+// 56-24: the connection-lifecycle snapshot and its conditional bounded dial,
+// emitted from the SAME exhausted-retry site as the existing routing probe.
+// ---------------------------------------------------------------------------
+
+test('the exhausted-retry site emits a CONNECTION_LIFECYCLE_PROBE snapshot line, and fires the conditional dial when the tap observed no open connection', async () => {
+	const registerImpl = async () => {
+		throw new CohortBackoffError(10);
+	};
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node } = makeFakeNode({
+		service: makeFakeService({ registerImpl }),
+		connectionLifecycle: { selfPeerId: 'self-fixture-peer', otherPeerId: 'other-fixture-peer' },
+	});
+	attachConnectionLifecycleTap(node, ['/dns4/gw/tcp/1/tls/ws/p2p/other-fixture-peer']);
+	// Deliberately no `__fireConnectionEvent` call -- the tap's log stays
+	// empty, so `openObserved` reads 0 and the conditional dial must fire.
+
+	const delayFn = spy(async () => undefined);
+	const { scheduleInterval, cancelInterval } = makeFakeInterval();
+	const original = console.error;
+	/** @type {any[][]} */
+	const logged = [];
+	console.error = (/** @type {any[]} */ ...args) => logged.push(args);
+	try {
+		await assert.rejects(
+			startPeerReplication({
+				db,
+				networkHash: NETWORK_HASH,
+				node,
+				collectionId: COLLECTION_ID,
+				tailId: TAIL_ID,
+				readRows: async () => [],
+				delayFn,
+				scheduleInterval,
+				cancelInterval,
+			}),
+			(/** @type {any} */ err) => err instanceof PeerReplicationError && err.subject === 'register',
+		);
+	} finally {
+		console.error = original;
+	}
+
+	const snapshotLine = logged.find(
+		(args) => typeof args[0] === 'string' && args[0].startsWith(CONNECTION_LIFECYCLE_PROBE_PREFIX) && args[0].includes('"kind":"snapshot"'),
+	);
+	assert.ok(snapshotLine, 'expected a CONNECTION_LIFECYCLE_PROBE= snapshot line at the exhausted-retry site');
+
+	const dialLine = logged.find(
+		(args) => typeof args[0] === 'string' && args[0].startsWith(CONNECTION_LIFECYCLE_PROBE_PREFIX) && args[0].includes('"kind":"dial"'),
+	);
+	assert.ok(dialLine, 'expected a CONNECTION_LIFECYCLE_PROBE= dial line when openObserved is 0');
+	const dialPayload = JSON.parse(/** @type {string} */ (dialLine[0]).slice(CONNECTION_LIFECYCLE_PROBE_PREFIX.length));
+	assert.equal(dialPayload.dialAttempted, true);
+	assert.equal(dialPayload.dialOutcome, 'ok');
+});
+
+test('the dial probe is NOT called when the connection-lifecycle tap observed at least one open connection', async () => {
+	const registerImpl = async () => {
+		throw new CohortBackoffError(10);
+	};
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node } = makeFakeNode({
+		service: makeFakeService({ registerImpl }),
+		connectionLifecycle: { selfPeerId: 'self-fixture-peer', otherPeerId: 'other-fixture-peer' },
+	});
+	attachConnectionLifecycleTap(node, ['/dns4/gw/tcp/1/tls/ws/p2p/other-fixture-peer']);
+	/** @type {any} */ (node).__fireConnectionEvent('connection:open', {
+		remotePeer: { toString: () => 'other-fixture-peer' },
+		remoteAddr: { toString: () => '/dialed/addr' },
+		direction: 'outbound',
+		status: 'open',
+	});
+
+	const delayFn = spy(async () => undefined);
+	const { scheduleInterval, cancelInterval } = makeFakeInterval();
+	const original = console.error;
+	/** @type {any[][]} */
+	const logged = [];
+	console.error = (/** @type {any[]} */ ...args) => logged.push(args);
+	try {
+		await assert.rejects(
+			startPeerReplication({
+				db,
+				networkHash: NETWORK_HASH,
+				node,
+				collectionId: COLLECTION_ID,
+				tailId: TAIL_ID,
+				readRows: async () => [],
+				delayFn,
+				scheduleInterval,
+				cancelInterval,
+			}),
+			(/** @type {any} */ err) => err instanceof PeerReplicationError && err.subject === 'register',
+		);
+	} finally {
+		console.error = original;
+	}
+
+	const snapshotLine = logged.find(
+		(args) => typeof args[0] === 'string' && args[0].startsWith(CONNECTION_LIFECYCLE_PROBE_PREFIX) && args[0].includes('"kind":"snapshot"'),
+	);
+	assert.ok(snapshotLine, 'expected a CONNECTION_LIFECYCLE_PROBE= snapshot line regardless of openObserved');
+	assert.ok(snapshotLine[0].includes('"openObserved":1'), 'fixture sanity: the fired connection:open event must be reflected in openObserved');
+
+	const dialLine = logged.find(
+		(args) => typeof args[0] === 'string' && args[0].startsWith(CONNECTION_LIFECYCLE_PROBE_PREFIX) && args[0].includes('"kind":"dial"'),
+	);
+	assert.equal(dialLine, undefined, 'an already-connected browser must never be dialled again by this diagnostic');
+});
+
+test('a fully-degraded connectivity substrate (peerStore.all() and dial() both rejecting) never changes what this function throws: the SAME PeerReplicationError, same subject and message, still follows', async () => {
+	const registerImpl = async () => {
+		throw new CohortBackoffError(10);
+	};
+	const { db } = makeFakeDb({ storeTable: makeFakeStoreTable(() => []) });
+	const { node } = makeFakeNode({
+		service: makeFakeService({ registerImpl }),
+		connectionLifecycle: {
+			selfPeerId: 'self-fixture-peer',
+			otherPeerId: 'other-fixture-peer',
+			peerStoreAllImpl: async () => {
+				throw new Error('synthetic peerStore failure');
+			},
+			dialImpl: async () => {
+				throw new Error('synthetic dial failure');
+			},
+		},
+	});
+	attachConnectionLifecycleTap(node, ['/dns4/gw/tcp/1/tls/ws/p2p/other-fixture-peer']);
+
+	const delayFn = spy(async () => undefined);
+	const { scheduleInterval, cancelInterval } = makeFakeInterval();
+	const original = console.error;
+	console.error = () => undefined;
+	let thrown;
+	try {
+		try {
+			await startPeerReplication({
+				db,
+				networkHash: NETWORK_HASH,
+				node,
+				collectionId: COLLECTION_ID,
+				tailId: TAIL_ID,
+				readRows: async () => [],
+				delayFn,
+				scheduleInterval,
+				cancelInterval,
+			});
+		} catch (err) {
+			thrown = err;
+		}
+	} finally {
+		console.error = original;
+	}
+
+	assert.ok(thrown instanceof PeerReplicationError);
+	assert.equal(/** @type {any} */ (thrown).subject, 'register');
+	assert.match(
+		/** @type {any} */ (thrown).message,
+		/register\(\) did not succeed after \d+ attempts against CohortBackoffError/,
+		'a degraded connection-lifecycle substrate must never change the register-exhaustion error this site already reports',
+	);
 });
 
 test('startPeerReplication does NOT retry a non-CohortBackoffError rejection from register() -- it propagates on the first failure', async () => {

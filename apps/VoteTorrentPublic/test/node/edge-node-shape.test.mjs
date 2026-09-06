@@ -13,6 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mayServeAsReactivityForwarder } from '@optimystic/db-core';
+import { connectionLifecycleSnapshot } from '../../src/peer/connection-lifecycle-probe.js';
 import {
 	strandStorageDbName,
 	createEdgeNode,
@@ -65,7 +66,22 @@ function makeFakeDeps(overrides = {}) {
 	const createLibp2pNodeCalls = [];
 	const stubStorage = {};
 	const stubDb = { closeCalls: 0, close() { stubDb.closeCalls += 1; } };
-	const stubNode = { stopCalls: 0, async stop() { stubNode.stopCalls += 1; } };
+	/** @type {Array<{ name: string, fn: (evt: any) => void }>} */
+	const addEventListenerCalls = [];
+	const stubNode = {
+		stopCalls: 0,
+		async stop() { stubNode.stopCalls += 1; },
+		// 56-24: real `attachConnectionLifecycleTap` (imported by edge-node.js
+		// directly, never injected) is exercised against THIS fake node rather
+		// than mocked out -- `addEventListenerCalls` lets a test assert the tap
+		// actually registered listeners, and `connectionLifecycleSnapshot`
+		// (imported separately below) is the honest way to prove attach ran at
+		// all, since a node lacking `addEventListener` entirely would also
+		// resolve without throwing (see the 'no addEventListener' probe case).
+		addEventListener(/** @type {string} */ name, /** @type {(evt: any) => void} */ fn) {
+			addEventListenerCalls.push({ name, fn });
+		},
+	};
 
 	const defaultImpl = async () => stubNode;
 
@@ -98,6 +114,7 @@ function makeFakeDeps(overrides = {}) {
 		stubDb,
 		stubNode,
 		websocketsSentinel,
+		addEventListenerCalls,
 	};
 }
 
@@ -175,6 +192,60 @@ test('createEdgeNode with a valid config calls the injected createLibp2pNode exa
 	assert.ok(handle.node);
 	assert.strictEqual(typeof handle.dbName, 'string');
 	assert.strictEqual(typeof handle.stop, 'function');
+
+	await handle.stop();
+});
+
+// ---------------------------------------------------------------------------
+// 56-24: the connection-lifecycle tap is attached, and the options object it
+// is attached BESIDE is unchanged by that attachment.
+// ---------------------------------------------------------------------------
+
+test('createEdgeNode attaches the connection-lifecycle tap to the constructed node exactly once, with the caller\'s own bootstrapNodes, and the constructed options object is otherwise unchanged', async () => {
+	const { deps, createLibp2pNodeCalls, addEventListenerCalls, stubNode } = makeFakeDeps();
+	const injectedPrivateKey = { publicKey: { raw: new Uint8Array([9, 9, 9]) } };
+	const injectedBootstrapNodes = ['/dns4/gateway.example/tcp/443/wss/p2p/12D3KooWExample'];
+
+	const handle = await createEdgeNode(
+		{
+			strandId: VALID_STRAND_ID,
+			networkName: 'test-network',
+			bootstrapNodes: injectedBootstrapNodes,
+			privateKey: /** @type {any} */ (injectedPrivateKey),
+		},
+		deps,
+	);
+
+	// The tap really did attach to THIS node: it registered a listener per
+	// tapped event name (the exact count is `connection-lifecycle-probe.js`'s
+	// own concern, not re-pinned here; asserting non-zero plus a snapshot
+	// read is what proves attach happened without re-deriving that module's
+	// own event list).
+	assert.ok(addEventListenerCalls.length > 0, 'attachConnectionLifecycleTap did not register any listeners on the constructed node');
+	assert.strictEqual(handle.node, stubNode);
+
+	const snapshotAfterFirstAttach = await connectionLifecycleSnapshot(handle.node);
+	assert.strictEqual(snapshotAfterFirstAttach.available, true);
+	assert.deepStrictEqual(snapshotAfterFirstAttach.bootstrapNodes, injectedBootstrapNodes);
+
+	// `attachConnectionLifecycleTap`'s own idempotence (a second call on the
+	// SAME node registers no further listeners) is
+	// `connection-lifecycle-probe.test.mjs`'s pinned, negative-controlled
+	// claim -- not re-derived here. What THIS test adds is that
+	// `createEdgeNode`'s wiring site calls it at all, on the RIGHT node, with
+	// the RIGHT bootstrapNodes, which the assertions above already establish.
+
+	// The options object the tap is attached BESIDE must be unchanged: the
+	// exact same twelve-plus-cohortTopic shape the earlier test in this file
+	// already pins, re-asserted here so a future change to the wiring site
+	// cannot silently widen the browser's posture while adding the tap.
+	const options = /** @type {Record<string, unknown>} */ (createLibp2pNodeCalls[0]);
+	const cohortTopic = /** @type {any} */ (options.cohortTopic);
+	assert.strictEqual(cohortTopic.host.profile.willingTiers.size, 0, 'willingTiers must still be empty after the tap is wired');
+	assert.strictEqual(cohortTopic.host.profile.willingTiers.has(3), false, 'willingTiers must still exclude tier 3 after the tap is wired');
+	assert.strictEqual('wantK' in cohortTopic, false, 'wantK must still be absent after the tap is wired');
+	assert.strictEqual(cohortTopic.host.profile.kind, 'edge');
+	assert.strictEqual(cohortTopic.host.minSigs, PUBLIC_COHORT_MIN_SIGS);
 
 	await handle.stop();
 });

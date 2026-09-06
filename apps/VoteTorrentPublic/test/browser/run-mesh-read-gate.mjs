@@ -61,6 +61,29 @@ export const LIVENESS_RUNGS = Object.freeze([9, 10]);
 /** @type {number} */
 export const TOTAL_RUNGS = 10;
 
+/**
+ * `56-24`: the exact `weald` (the `@libp2p/logger` wrapper) namespace list
+ * enabled on the page BEFORE any page script runs, so libp2p's OWN dial-path
+ * diagnostics reach this driver's captured console instead of being
+ * swallowed into a logger nobody enables. Each component name below is
+ * read from the app's OWN resolved `node_modules`, at the exact site named,
+ * never guessed:
+ *   - `libp2p:bootstrap` — `@libp2p/bootstrap` `dist/src/index.js:59` — the
+ *     module whose fire-and-forget dial this measurement is instrumenting.
+ *   - `libp2p:connection-manager` — `libp2p` `dist/src/connection-manager/index.js:55`.
+ *   - `libp2p:connection-manager:dial-queue` — `libp2p`
+ *     `dist/src/connection-manager/dial-queue.js:47` — the actual dial
+ *     attempt path `openConnection` reaches.
+ *   - `libp2p:websockets` — `@libp2p/websockets` `dist/src/index.js:39`.
+ *   - `libp2p:websockets:connection` — `@libp2p/websockets`
+ *     `dist/src/index.js:65`.
+ * An empty string here (this driver's own negative control) disables every
+ * namespace, proving the constant is load-bearing rather than dead config.
+ * @type {string}
+ */
+export const LIBP2P_DIAL_DEBUG_NAMESPACES =
+	'libp2p:bootstrap,libp2p:connection-manager,libp2p:connection-manager:dial-queue,libp2p:websockets,libp2p:websockets:connection';
+
 /** A way this gate could certify something false, named and thrown from
  * anywhere in the run — never a bare `process.exit`, so the origin is
  * always stopped and every opened resource always closed. */
@@ -366,6 +389,24 @@ async function runBrowserPhase(origin, strandId) {
 			args: [`--ignore-certificate-errors-spki-list=${origin.facts.ORIGIN_TLS_SPKI}`],
 		});
 		const context = await browser.newContext();
+		// 56-24: enable weald's browser debug namespaces BEFORE any page script
+		// runs, so libp2p's own dial-path diagnostics reach this driver's
+		// captured console. `weald`'s browser build reads `localStorage`'s
+		// `debug` key at module load (`dist/src/browser.js:190`), so this must
+		// land before `context.newPage()` navigates anywhere. Wrapped so a
+		// storage-denied context can never fail the run; touches nothing else
+		// -- no rung, no pin, no navigation and no exit condition.
+		try {
+			await context.addInitScript((/** @type {string} */ namespaces) => {
+				try {
+					window.localStorage.setItem('debug', namespaces);
+				} catch {
+					// A storage-denied context must never fail this run.
+				}
+			}, LIBP2P_DIAL_DEBUG_NAMESPACES);
+		} catch {
+			// addInitScript itself failing must never fail this run either.
+		}
 		const page = await context.newPage();
 		page.on('console', (m) => lines.push(`[${m.type()}] ${m.text()}`));
 		page.on('pageerror', (e) => lines.push(`[pageerror] ${e.message}`));
