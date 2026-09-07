@@ -2170,17 +2170,25 @@ export class RegistrationEngine implements IRegistrationEngine {
    * `SubmittedAt`. Returns `[]` for a key with no rejections and NEVER
    * throws on an unknown key.
    */
-  async getPriorRejections (requesterKey: string): Promise<PriorRejection[]> {
+  async getPriorRejections (requesterKey: string, excludeRequestId?: string): Promise<PriorRejection[]> {
     if (!this.ctx) return []
     const ctx = this.ctx
     try {
       const out: PriorRejection[] = []
+      // The SQL fragment and its binding are built from the SAME condition so the predicate
+      // can never be present-but-unbound (a vacuous exclusion that would still pass tests) nor
+      // bound-but-absent (a dead parameter). When excludeRequestId is omitted the emitted SQL
+      // is byte-identical to the one-argument form.
+      const hasExclusion = typeof excludeRequestId === 'string' && excludeRequestId.length > 0
+      const excludeClause = hasExclusion ? ' and R.Id != :excludeRequestId' : ''
+      const bindings: Record<string, unknown> = { requesterKey, status: STATUS_REJECTED }
+      if (hasExclusion) bindings.excludeRequestId = excludeRequestId
       for await (const row of ctx.db.eval(
         `select R.Id, R.DecidedAt, R.RejectionReason, R.DecidingOfficerUserId
          from RegistrationRequest R
-         where R.RequesterKey = :requesterKey and R.Status = :status
+         where R.RequesterKey = :requesterKey and R.Status = :status${excludeClause}
          order by R.DecidedAt desc, R.Id desc`,
-        { requesterKey, status: STATUS_REJECTED }
+        bindings
       )) {
         out.push({
           requestId: asText(row.Id, 'RegistrationRequest.Id'),

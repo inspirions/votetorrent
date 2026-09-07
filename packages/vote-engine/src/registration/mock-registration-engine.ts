@@ -690,10 +690,10 @@ export class MockRegistrationEngine implements IRegistrationEngine {
     }
   }
 
-  /** D-06: in-memory parity, key-scoped (not authority-scoped), newest-`decidedAt`-first. */
-  async getPriorRejections (requesterKey: string): Promise<PriorRejection[]> {
+  /** D-06: in-memory parity, key-scoped (not authority-scoped), newest-`decidedAt`-first. `excludeRequestId` mirrors the `other.id !== r.id` idiom from `hasPriorRejections` above — an omitted argument excludes nothing. */
+  async getPriorRejections (requesterKey: string, excludeRequestId?: string): Promise<PriorRejection[]> {
     return [...this.registrationRequests.values()]
-      .filter((r) => r.requesterKey === requesterKey && r.status === 'r')
+      .filter((r) => r.requesterKey === requesterKey && r.status === 'r' && r.id !== excludeRequestId)
       .sort((a, b) => {
         const aAt = a.decidedAt ?? ''
         const bAt = b.decidedAt ?? ''
