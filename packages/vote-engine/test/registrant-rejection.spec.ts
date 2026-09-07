@@ -520,4 +520,55 @@ describe('D-06 reachability — getPriorRejections surfaces the record', () => {
     const rejections = await engine.getPriorRejections(otherRequester.publicHex)
     expect(rejections, "a different requesterKey's history must not leak the other applicant's rejection").to.deep.equal([])
   })
+
+  it('R3: excludes the named request from its own citation — a rejected request must not cite itself', async () => {
+    const auth = await setup()
+    const requester = randomTestKeyPair()
+    const { requestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    await rejectRequest(auth, requestId, { rejectionReason: 'Self-citation must be excluded' })
+
+    const engine = new RegistrationEngine(auth.ctx)
+    const rejections = await engine.getPriorRejections(requester.publicHex, requestId)
+    expect(rejections, "a rejected request's own detail view must not cite itself as a prior rejection").to.deep.equal([])
+  })
+
+  it('R3: a genuine earlier sibling rejection still surfaces when a later request excludes only its own id', async () => {
+    const auth = await setup()
+    const requester = randomTestKeyPair()
+    const { requestId: firstRequestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    await rejectRequest(auth, firstRequestId, { rejectionReason: 'Earlier sibling rejection' })
+
+    const { requestId: secondRequestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    await rejectRequest(auth, secondRequestId, { rejectionReason: 'Later rejection under review' })
+
+    const engine = new RegistrationEngine(auth.ctx)
+    const rejections = await engine.getPriorRejections(requester.publicHex, secondRequestId)
+    expect(rejections.map((r) => r.requestId), 'excluding the second request must still surface the earlier sibling').to.deep.equal([firstRequestId])
+  })
+
+  it('R3: the one-argument call is unchanged — both rejections still surface with no exclusion supplied', async () => {
+    const auth = await setup()
+    const requester = randomTestKeyPair()
+    const { requestId: firstRequestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    await rejectRequest(auth, firstRequestId, { rejectionReason: 'Earlier sibling rejection' })
+
+    const { requestId: secondRequestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    await rejectRequest(auth, secondRequestId, { rejectionReason: 'Later rejection under review' })
+
+    const engine = new RegistrationEngine(auth.ctx)
+    const rejections = await engine.getPriorRejections(requester.publicHex)
+    expect(rejections.map((r) => r.requestId), 'the one-argument form must keep returning both rows, newest-DecidedAt-first').to.deep.equal([secondRequestId, firstRequestId])
+  })
+
+  it('R3: an exclusion id that matches nothing is inert — it must not filter any row', async () => {
+    const auth = await setup()
+    const requester = randomTestKeyPair()
+    const { requestId } = await submitPendingRequest(auth, { requesterKey: requester })
+    await rejectRequest(auth, requestId, { rejectionReason: 'Unknown exclusion id must not filter' })
+
+    const engine = new RegistrationEngine(auth.ctx)
+    const withUnknownExclusion = await engine.getPriorRejections(requester.publicHex, 'no-such-request')
+    const withNoExclusion = await engine.getPriorRejections(requester.publicHex)
+    expect(withUnknownExclusion.map((r) => r.requestId), 'an id matching nothing must not remove any row').to.deep.equal(withNoExclusion.map((r) => r.requestId))
+  })
 })

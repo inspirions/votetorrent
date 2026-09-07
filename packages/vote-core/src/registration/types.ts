@@ -213,9 +213,12 @@ export interface IRegistrationEngine {
    * D-06, newest-first. This is what makes persisted rejections actually
    * reachable by the reviewing officer, and it is keyed by `requesterKey`
    * (not by request id) so a re-application from the same key carries its
-   * history.
+   * history. `excludeRequestId` omits the request currently being viewed so
+   * a rejected request cannot cite itself; it excludes exactly one row by
+   * id — it is not a general-purpose filter and must never be used to hide
+   * a rejection an officer is entitled to see.
    */
-  getPriorRejections(requesterKey: string): Promise<PriorRejection[]>
+  getPriorRejections(requesterKey: string, excludeRequestId?: string): Promise<PriorRejection[]>
 
   /**
    * D-09. Derived from `Status`/`SubmittedAt`/`DecidedAt` with **no new
