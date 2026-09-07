@@ -22,6 +22,7 @@ import { randomTestKeyPair } from './fixtures/keys.js'
 import { AsyncStorage } from './shims/react-native'
 import type {
   AdminDigestArgs,
+  AdminSignatureTask,
   ISigningEngine,
   NetworkInit,
   NetworkReference,
@@ -607,11 +608,16 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
     }
     const engine = new SignatureTasksEngine(networkRef, auth.ctx)
 
-    const task: SignatureTask = {
+    // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
+    // branch; `administration` is required by the AdminSignatureTask type but
+    // never read at runtime here.
+    const task: AdminSignatureTask = {
       type: 'signature',
       userId: auth.user.id,
       network: networkRef,
-      signatureType: 'admin'
+      signatureType: 'admin',
+      authority: auth.authority,
+      administration: { proposed: { officers: [], effectiveAt: Date.now(), thresholdPolicies: [] }, signers: [auth.user.id] }
     }
 
     // getSignatureDigest: should return the stored AdminSigning.Digest as bytes (D-03)
@@ -640,7 +646,20 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
       .get({ nonce })
     expect(Number((countBefore as any)?.c ?? 0), 'OfficerSignature count before accept must be 0').to.equal(0)
 
-    await engine.completeSignature(task, { isAccepted: true, signature })
+    // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable per-digest
+    // callback. This fixture's AdminSigning row does not use the real roster-
+    // covering digest formula, so any promotion attempt legitimately refuses
+    // (roster-mismatch) — recorded and warned, never thrown — and this callback
+    // is never actually invoked.
+    await engine.completeSignature(task, {
+      isAccepted: true,
+      signature,
+      sign: async (d: Uint8Array) => ({
+        signature: bytesToHex(secp.sign(d, privKey) as unknown as Uint8Array),
+        signerKey: pubHex,
+        signerUserId: auth.user.id
+      })
+    })
 
     // Assert 1: OfficerSignature inserted on accept
     const officerRow = await auth.ctx.db
@@ -905,11 +924,16 @@ describe('completeSignature reject-branch (D-12)', () => {
       primaryAuthorityDomainName: 'test.example'
     }
     const tasksEngine = new SignatureTasksEngine(networkRef, auth.ctx)
-    const task: SignatureTask = {
+    // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
+    // branch; `administration` is required by the AdminSignatureTask type but
+    // never read at runtime here.
+    const task: AdminSignatureTask = {
       type: 'signature',
       userId: auth.user.id,
       network: networkRef,
-      signatureType: 'admin'
+      signatureType: 'admin',
+      authority: auth.authority,
+      administration: { proposed: { officers: [], effectiveAt: Date.now(), thresholdPolicies: [] }, signers: [auth.user.id] }
     }
     // 999.1 R-02: completeSignature's accept path drives a REAL OfficerSignature insert —
     // sign the seeded AdminSigning's actual Digest for real.
@@ -917,7 +941,12 @@ describe('completeSignature reject-branch (D-12)', () => {
       .prepare('select Digest from AdminSigning where Nonce = :nonce')
       .get({ nonce })
     const sig = signTestDigestWithFreshKey(auth.user.id, acceptDigestRow!.Digest as string)
-    const acceptResult = { isAccepted: true, signature: sig }
+    // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable per-digest
+    // callback. This fixture's AdminSigning row does not use the real roster-
+    // covering digest formula, so any promotion attempt legitimately refuses
+    // (roster-mismatch) — recorded and warned, never thrown — and this callback
+    // is never actually invoked.
+    const acceptResult = { isAccepted: true, signature: sig, sign: async (_d: Uint8Array) => sig }
 
     await tasksEngine.completeSignature(task, acceptResult)
 

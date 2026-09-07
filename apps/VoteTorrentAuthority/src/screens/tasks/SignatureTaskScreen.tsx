@@ -78,12 +78,17 @@ export default function SignatureTaskScreen() {
 			// with no additional user decision — so it doubles as the reusable
 			// per-digest `sign` callback finalizeBallot uses to REAL-sign each
 			// promoted per-row Question/Option AdminSigning digest. Only `ballot`
-			// signature tasks drive finalizeBallot (IN-02, 39-REVIEW), so `sign` is
-			// narrowed to that type — a no-op for every other signatureType.
+			// signature tasks drive finalizeBallot (IN-02, 39-REVIEW).
+			// 57-08 (Trigger B): `admin` tasks are the second consumer — a co-signer
+			// accepting a pending "Revise Administration" task may complete the 'rad'
+			// threshold, and completeSignature's promotion attempt (applyAdminProposal)
+			// mints two or three distinct digests, so it likewise needs this
+			// re-invocable closure rather than the single pre-computed `signature`
+			// above. `sign` stays a no-op for every OTHER signatureType.
 			await engine.completeSignature(task, {
 				isAccepted: true,
 				signature,
-				sign: task.signatureType === "ballot" ? signer : undefined,
+				sign: task.signatureType === "ballot" || task.signatureType === "admin" ? signer : undefined,
 			});
 			navigation.goBack();
 		} catch (err) {

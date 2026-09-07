@@ -26,6 +26,7 @@ import { digestToBytes } from '../src/utils.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { AsyncStorage } from './shims/react-native'
 import type {
+  AdminSignatureTask,
   Ballot,
   ElectionInit,
   ElectionRevisionInit,
@@ -898,11 +899,19 @@ describe('SignatureTasksEngine', () => {
         throw err
       }
       const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
-      const task: SignatureTask = {
+      // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
+      // branch (to construct a promoting AuthorityEngine); `administration` is
+      // required by the AdminSignatureTask type but never read at runtime here.
+      const task: AdminSignatureTask = {
         type: 'signature',
         userId,
         network: makeNetworkRef(),
-        signatureType: 'admin'
+        signatureType: 'admin',
+        authority: auth.authority,
+        administration: {
+          proposed: { officers: [], effectiveAt: adminEffectiveAt, thresholdPolicies: [] },
+          signers: [userId]
+        }
       }
       // 999.1 R-02: completeSignature drives a REAL OfficerSignature insert — the schema's
       // SignatureValid UDF verifies it against AdminSigning's actual Digest, so this must be
@@ -919,7 +928,19 @@ describe('SignatureTasksEngine', () => {
           signature: realSig,
           signerKey: publicHex,
           signerUserId: userId
-        }
+        },
+        // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable
+        // per-digest callback (the promotion mints two or three distinct
+        // digests). This synthetic fixture's AdminSigning row does not use
+        // the real roster-covering digest formula 57-01/57-07 introduced, so
+        // any promotion attempt legitimately refuses (roster-mismatch) —
+        // recorded and warned by completeSignature's Trigger B branch, never
+        // thrown — and this callback is never actually invoked.
+        sign: async (digest: Uint8Array) => ({
+          signature: bytesToHex(secp256k1.sign(digest, hexToBytes(privateHex))),
+          signerKey: publicHex,
+          signerUserId: userId
+        })
       }
       await engine.completeSignature(task, result)
     })

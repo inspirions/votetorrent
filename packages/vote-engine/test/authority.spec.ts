@@ -2131,6 +2131,139 @@ describe('AuthorityEngine', () => {
         'a promotion that legitimately cannot apply must be RECORDED (lastPromotionOutcome), never silent'
       ).to.equal('unresolvable-officer')
     })
+
+    // -----------------------------------------------------------------
+    // GROUP 4 — Trigger B (completeSignature 'admin' branch), constructed
+    // state (Task 3). Trigger B's NATURAL path is unreachable today:
+    // inherited finding 3 collapses every threshold to 1, so proposeAdmin
+    // (Trigger A) always reaches threshold first and applies the proposal
+    // before any co-signer task could exist.
+    //
+    // A SECOND, independent obstacle surfaced while building this case
+    // (recorded prominently in 57-08-SUMMARY.md, not hidden): the schema's
+    // own `AdminSignatureTaskExtension.MutationValid` CHECK
+    // (votetorrent.qsql:1241-1257) independently recomputes the PRE-57-01
+    // `Digest(Tid, AuthorityId, EffectiveAt, ThresholdPolicies)` formula —
+    // architecturally divorced from 57-01's roster-covering
+    // `Digest(AuthorityId, EffectiveAt, Officers, ThresholdPolicies)` that
+    // proposeAdmin/applyAdminProposal actually use. A Task can therefore
+    // NEVER be legitimately seeded against a real, roster-matching 'rad'
+    // session — only against a legacy-shaped, non-roster AdminSigning +
+    // ProposedAdmin pair (the same shape elections.spec.ts's
+    // "debugSeedPendingTasks"-style fixtures already use). Fixing that
+    // mismatch is a schema change, out of this plan's scope (no schema diff
+    // is permitted). This case therefore proves Trigger B's MECHANICS
+    // genuinely execute — the composed BEGIN / sign() / promote / COMMIT
+    // transaction, with a typed refusal recorded rather than thrown — and
+    // does NOT and CANNOT prove the 'vrg' grant through this path. An
+    // unreachable production path covered by a test that pretends otherwise
+    // would be worse than this honest one.
+    it('Trigger B: completeSignature drives the composed sign+promote transaction, recording (not throwing) the refusal this schema shape forces', async () => {
+      const { auth } = await createPromotionFixture()
+      const nonce = crypto.randomUUID()
+      const taskId = crypto.randomUUID()
+      const tid = Date.now()
+      const now = Date.now()
+      const placeholderSig = 'a'.repeat(128)
+      const thresholdPolicies = '[]'
+      const signerKey = auth.user.activeKeys[0]!.key
+
+      const adminRow = await auth.ctx.db
+        .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
+        .get({ authorityId: auth.authority.id })
+      if (!adminRow) throw new Error('setup: CurrentAdmin not found')
+      const adminEffectiveAt = adminRow.EffectiveAt as string
+
+      // Legacy-shaped ProposedAdmin + AdminSigning pair — the ONLY shape
+      // AdminSignatureTaskExtension.MutationValid's schema CHECK accepts (see
+      // the describe-block comment above). No ProposedOfficer roster exists,
+      // so applyAdminProposal's Step 3 roster-match is EXPECTED to refuse —
+      // that refusal being RECORDED, not thrown, is what this test proves.
+      try {
+        await auth.ctx.db.exec(
+          `insert into ProposedAdmin (AuthorityId, EffectiveAt, ThresholdPolicies)
+           with context IsUserValid = true, Tid = :tid, now = :now,
+                        UserId = :userId, UserKey = :signerKey, Signature = :sig
+           values (:authorityId, :adminEffectiveAt, :thresholdPolicies)`,
+          { authorityId: auth.authority.id, adminEffectiveAt, thresholdPolicies, tid, now, userId: auth.user.id, signerKey, sig: placeholderSig }
+        )
+      } catch {
+        // Idempotent — ProposedAdmin already exists for this (AuthorityId, EffectiveAt) PK.
+      }
+      await auth.ctx.db.exec(
+        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad',
+                 Digest(:tid, :authorityId, :adminEffectiveAt, :thresholdPolicies),
+                 :userId, :signerKey, :sig)`,
+        { nonce, authorityId: auth.authority.id, adminEffectiveAt, thresholdPolicies, tid, now, userId: auth.user.id, signerKey, sig: placeholderSig }
+      )
+
+      await auth.ctx.db.exec('BEGIN')
+      try {
+        await auth.ctx.db.exec(
+          `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
+           with context IsMutationValid = true, Tid = :tid
+           values (:id, :userId, 'signature', 'admin', :nonce, 0)`,
+          { id: taskId, userId: auth.user.id, nonce, tid }
+        )
+        await auth.ctx.db.exec(
+          `insert into AdminSignatureTaskExtension (TaskId, AuthorityId, AdminEffectiveAt)
+           with context Tid = :tid
+           values (:taskId, :authorityId, :adminEffectiveAt)`,
+          { taskId, authorityId: auth.authority.id, adminEffectiveAt, tid }
+        )
+        await auth.ctx.db.exec('COMMIT')
+      } catch (err) {
+        await auth.ctx.db.exec('ROLLBACK')
+        throw err
+      }
+
+      const digestRow = await auth.ctx.db.prepare('select Digest from AdminSigning where Nonce = :nonce').get({ nonce })
+      const digestB64 = digestRow!.Digest as string
+      const signCb = makeTestSignCallback(auth.user)
+      const realSig = await signCb(digestToBytes(digestB64))
+
+      const networkRef = { hash: 'trigger-b-hash', name: 'Trigger B Network', relays: [], primaryAuthorityDomainName: 'trigger-b.example.com' }
+      const tasksEngine = new (await import('../src/tasks/signature-tasks-engine.js')).SignatureTasksEngine(networkRef, auth.ctx)
+      const task = {
+        type: 'signature' as const,
+        userId: auth.user.id,
+        network: networkRef,
+        signatureType: 'admin' as const,
+        authority: auth.authority,
+        administration: { proposed: { officers: [], effectiveAt: adminEffectiveAt, thresholdPolicies: [] }, signers: [auth.user.id] }
+      }
+
+      const warnings: string[] = []
+      const originalWarn = console.warn
+      console.warn = ((...args: unknown[]) => { warnings.push(String(args[0])) }) as typeof console.warn
+      try {
+        await tasksEngine.completeSignature(task, { isAccepted: true, signature: realSig, sign: signCb })
+      } finally {
+        console.warn = originalWarn
+      }
+
+      expect(
+        warnings.some((w) => w.includes('finalize admin') && w.includes('roster-mismatch')),
+        'Trigger B must have ATTEMPTED and RECORDED (not thrown) the promotion refusal'
+      ).to.equal(true)
+
+      const officerSigRow = await auth.ctx.db
+        .prepare('select UserId from OfficerSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      expect(officerSigRow?.UserId, "the officer's real signature must still be committed despite the promotion refusal").to.equal(auth.user.id)
+
+      const adminSigRow = await auth.ctx.db
+        .prepare('select SigningNonce from AdminSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      expect(adminSigRow?.SigningNonce, 'the threshold-reached AdminSignature must still be committed').to.equal(nonce)
+
+      const taskRow = await auth.ctx.db
+        .prepare('select IsCompleted from Task where Id = :id')
+        .get({ id: taskId })
+      expect(taskRow?.IsCompleted, 'the Task must still close').to.satisfy((v: unknown) => v === 1 || v === true)
+    })
   })
 
   // -----------------------------------------------------------------------

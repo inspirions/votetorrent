@@ -5,7 +5,7 @@ import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
-import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError } from '@votetorrent/vote-core'
+import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError } from '@votetorrent/vote-core'
 import type {
   ISigningEngine,
   ISignatureTasksEngine,
@@ -31,6 +31,7 @@ import { CompleteSignatureBuilder } from './builders/index.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { RegistrationEngine } from '../registration/registration-engine.js'
 import { resolveRecordValidity } from '../association/record-validity.js'
+import { AuthorityEngine } from '../authority/authority-engine.js'
 
 /**
  * CR-04 (T-48-33-02/03) — the identifier-free tally a registrant seed pass returns and the
@@ -794,12 +795,66 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       }
     }
 
+    // 57-08 (Trigger B pre-check): the admin accept path REQUIRES the reusable
+    // per-digest callback — applyAdminProposal mints two or three distinct
+    // digests (57-07) and a single pre-computed Signature cannot cover them.
+    // Checked BEFORE sign() below, alongside the registrant guard above, so a
+    // refusable accept never spends the officer's header signature.
+    if (result.isAccepted && task.signatureType === 'admin' && !result.sign) {
+      throw new Error(
+        'SignatureTasksEngine.completeSignature: admin accept requires result.sign (a reusable per-digest signing callback) — the promotion mints two or three distinct digests and cannot be covered by a single pre-computed Signature'
+      )
+    }
+
     // D-12: Branch on result.isAccepted.
     // Accept path only — call sign() to insert OfficerSignature and (at threshold=1)
     // auto-complete AdminSignature. Do NOT call sign() on reject: a rejection that
     // advances the signing session is a critical integrity hole (D-12 threat).
+    let thresholdReached = false
     if (result.isAccepted) {
-      await this.signingEngine.sign(nonce, result.signature)
+      if (task.signatureType === 'admin') {
+        // 57-08 (Trigger B, P7-composed transaction): sign() and the
+        // promotion attempt share ONE explicit transaction. Task 1's P7
+        // probe (57-08-SUMMARY.md) proved an uncommitted AdminSignature row
+        // IS visible on the same handle before COMMIT, so this composition
+        // closes the "threshold reached but administration not applied"
+        // window rather than leaving it open — every OTHER signature type
+        // keeps sign()'s unwrapped, self-owned-transaction shape byte-for-
+        // byte (the `else` branch below is the exact prior call, unchanged).
+        await this.ctx!.db.exec('BEGIN')
+        try {
+          thresholdReached = await this.signingEngine.sign(nonce, result.signature, { ownsTransaction: false })
+          if (thresholdReached) {
+            try {
+              await new AuthorityEngine((task as AdminSignatureTask).authority, this.ctx!).applyAdminProposal(
+                nonce,
+                result.sign!,
+                { ownsTransaction: false }
+              )
+            } catch (promotionErr) {
+              if (promotionErr instanceof AdminPromotionError) {
+                // 57-08 (Trigger B): mirrors Trigger A's (proposeAdmin) discipline
+                // exactly (T-57-08-06) — a co-signer's real, valid signature must
+                // not be destroyed by a promotion that legitimately cannot apply
+                // (e.g. the D-03 .init-officer case). Recorded via console.warn,
+                // never silent, never thrown; the officer's OfficerSignature and
+                // (at threshold) AdminSignature rows still commit below.
+                console.warn(
+                  `SignatureTasksEngine.completeSignature (finalize admin): promotion refused for nonce ${nonce}: ${promotionErr.reason}. The officer's signature itself was NOT affected.`,
+                )
+              } else {
+                throw promotionErr
+              }
+            }
+          }
+          await this.ctx!.db.exec('COMMIT')
+        } catch (err) {
+          await this.ctx!.db.exec('ROLLBACK')
+          this.rethrow(err, 'completeSignature (finalize admin)')
+        }
+      } else {
+        thresholdReached = await this.signingEngine.sign(nonce, result.signature)
+      }
     }
 
     // Ballot finalize branch (D-01, D-08): after sign() succeeds (AdminSignature inserted at
