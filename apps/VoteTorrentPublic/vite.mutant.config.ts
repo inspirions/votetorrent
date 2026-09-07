@@ -37,6 +37,8 @@ import {
 	stripTokensPlugin,
 	flattenGapCuesPlugin,
 	revertPillRetonePlugin,
+	redirectCadreCorePlugin,
+	stripPeerNotifyPlugin,
 	writeMutationReportPlugin,
 } from '@votetorrent/ui-web/mutations';
 
@@ -78,11 +80,28 @@ if (mutation === 'no-dedupe') {
 	// never to dist and never at runtime.
 	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
 	mutatedConfig = mergeConfig(merged, { plugins: [revertPillRetonePlugin()] });
+} else if (mutation === 'cadre-patch-reverted') {
+	// 56-13 Task 1: same shape again, plus the plugin that redirects every
+	// @serfab/cadre-core specifier to a PRISTINE, unpatched copy of the
+	// package. The mutation lives entirely in the Vite plugin pipeline (the
+	// token-missing branch is the precedent) and is a module-RESOLUTION
+	// redirect, never a dist edit — see the plugin's own header for the
+	// measured reason. It throws at plugin construction when
+	// UI_GATE_PRISTINE_CADRE_CORE is unset, so a mutant build with no
+	// redirect target never emits a bundle at all.
+	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
+	mutatedConfig = mergeConfig(merged, { plugins: [redirectCadreCorePlugin()] });
+} else if (mutation === 'notify-disabled') {
+	// 56-13 Task 1: same shape again, plus the plugin that removes the ONE
+	// single-line peer-notify statement from the replication bridge. Applied
+	// to SOURCE before the build, never to dist and never at runtime.
+	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
+	mutatedConfig = mergeConfig(merged, { plugins: [stripPeerNotifyPlugin()] });
 } else {
-	// FAIL-CLOSED, and the reason this is not a bare `else`. Until this
-	// commit the trailing branch treated ANY non-`no-dedupe` value as
-	// `token-missing`. With two mutations that was merely lucky; with three
-	// (now four) it is a fail-open — a control believing it had built one
+	// FAIL-CLOSED, and the reason this is not a bare `else`. Until 53-11 the
+	// trailing branch treated ANY non-`no-dedupe` value as `token-missing`.
+	// With two mutations that was merely lucky; with three (now six) it is a
+	// fail-open — a control believing it had built one
 	// variant would actually be driving a different one and would report a
 	// shape nobody asked for. `resolveMutation()` validates the name against
 	// MUTATIONS globally, so a name this file does not handle is a real gap

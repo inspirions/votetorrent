@@ -31,10 +31,23 @@ import { mergeConfig } from 'vite';
  * The frozen mutation-name set — the single source of the valid set.
  * Nothing else in this module or its consumers may hard-code a mutation
  * name outside this array.
- * @type {readonly ['no-dedupe', 'token-missing', 'gap-cues-flattened', 'pill-retone-reverted']}
+ *
+ * 56-13 appends the last two. Its own plan text anticipated a THREE-element
+ * list (`no-dedupe`, `token-missing`, `gap-cues-flattened`); `pill-retone-reverted`
+ * landed from 56-03 in between, so the two new names are APPENDED to the
+ * four that exist rather than replacing a fourth that is load-bearing for a
+ * shipped control (`gate:prove-pill-retone-reverted`).
+ * @type {readonly ['no-dedupe', 'token-missing', 'gap-cues-flattened', 'pill-retone-reverted', 'cadre-patch-reverted', 'notify-disabled']}
  */
 export const MUTATIONS = Object.freeze(
-	/** @type {const} */ (['no-dedupe', 'token-missing', 'gap-cues-flattened', 'pill-retone-reverted']),
+	/** @type {const} */ ([
+		'no-dedupe',
+		'token-missing',
+		'gap-cues-flattened',
+		'pill-retone-reverted',
+		'cadre-patch-reverted',
+		'notify-disabled',
+	]),
 );
 
 /**
@@ -495,6 +508,286 @@ export function revertPillRetonePlugin() {
 			writeFileSync(
 				path.join(outDirAbs, '.mutation-report.json'),
 				JSON.stringify({ mutation: 'pill-retone-reverted', replacements, selectors: [...selectors] }, null, 2),
+			);
+		},
+	};
+}
+
+/**
+ * The one package specifier `redirectCadreCorePlugin` redirects, and the ONE
+ * place this module writes it.
+ */
+const CADRE_CORE_SPECIFIER = '@serfab/cadre-core';
+
+/**
+ * Resolve `subpath` (`'.'` or `'./x'`) against a package manifest's own
+ * `exports` map, preferring the ESM conditions a Vite build would take, and
+ * falling back to `module`/`main` for a manifest with no `exports` map at
+ * all. Returns a package-relative path, or `null` when the manifest does not
+ * publish that subpath.
+ *
+ * @param {Record<string, any>} manifest
+ * @param {string} subpath
+ * @returns {string | null}
+ */
+function resolveManifestSubpath(manifest, subpath) {
+	/** @param {any} node @returns {string | null} */
+	const pick = (node) => {
+		if (typeof node === 'string') return node;
+		if (!node || typeof node !== 'object') return null;
+		for (const condition of ['import', 'module', 'browser', 'default']) {
+			if (condition in node) {
+				const picked = pick(node[condition]);
+				if (picked) return picked;
+			}
+		}
+		return null;
+	};
+	const exportsMap = manifest?.exports;
+	if (exportsMap && typeof exportsMap === 'object' && !Array.isArray(exportsMap)) {
+		if (subpath in exportsMap) return pick(exportsMap[subpath]);
+		return null;
+	}
+	if (subpath !== '.') return null;
+	return typeof manifest?.module === 'string' ? manifest.module : (manifest?.main ?? null);
+}
+
+/**
+ * A Vite plugin, `ui-web-mutation-redirect-cadre-core`, that redirects every
+ * `@serfab/cadre-core` module specifier — the bare one and every published
+ * subpath — to the corresponding file inside a PRISTINE, unpatched copy of
+ * the package materialised at `process.env.UI_GATE_PRISTINE_CADRE_CORE`.
+ *
+ * WHY A RESOLVER REDIRECT AND NOT A DIST EDIT.
+ * `project_esbuild_minifier_defeats_naive_dist_controls` measured that
+ * esbuild RENAMES bare local bindings, so a dist-level control has to land
+ * on something the minifier cannot rename — and a post-build mutation is not
+ * a build-level difference at all, it is an edit to an artefact the build
+ * already finished producing. A module-resolution redirect is immune to
+ * renaming BY CONSTRUCTION, because it changes WHICH SOURCE THE BUILD READS
+ * rather than what a built file says. This is the same move 56-06 made by
+ * reusing `dist-gate/` as a genuine `publicDir: false` build, and the same
+ * move 56-03 made with a build-time CSS transform.
+ *
+ * WHY REDIRECTING THE ENTRY POINTS IS ENOUGH, and why nobody should
+ * "improve" this into a per-file rewrite: the pristine package's own
+ * internal imports are RELATIVE, so once an entry point resolves inside the
+ * pristine directory every module it pulls in resolves inside it too — the
+ * whole subtree travels with the entry. A per-file rewrite would add surface
+ * with no additional effect and would silently start depending on the
+ * package's internal layout.
+ *
+ * FAIL-CLOSED AT PLUGIN CONSTRUCTION, not at `closeBundle`, for the same
+ * reason `resolveMutation()` throws at module scope: a mutant build that ran
+ * with no redirect target could quietly become a second, healthy shipping
+ * path. An unset or non-existent `UI_GATE_PRISTINE_CADRE_CORE`, a manifest
+ * that is not this package, or a published subpath whose file is missing are
+ * all refusals, never warnings.
+ *
+ * STANDING RULE, restated here on the identical precedent the plugins above
+ * state it: this runs against SOURCE, before a real `vite build`. It never
+ * edits a built `dist/`, and it never injects anything into a page at
+ * runtime.
+ *
+ * `closeBundle` throws `MUTATION IS A NO-OP` on zero redirects — a bundle
+ * whose closure never touched the package at all is a DIFFERENT verdict from
+ * a bundle built against pristine bytes, and reporting the two as the same
+ * thing is exactly the escape hatch this control exists to deny itself.
+ *
+ * @returns {import('vite').Plugin}
+ */
+export function redirectCadreCorePlugin() {
+	const pristineDir = process.env.UI_GATE_PRISTINE_CADRE_CORE;
+	if (!pristineDir) {
+		throw new Error(
+			'UI_GATE_PRISTINE_CADRE_CORE must name the directory holding a pristine, unpatched ' +
+				`${CADRE_CORE_SPECIFIER} package root — it is unset or empty. A mutant build that ran with no ` +
+				'redirect target could quietly become a second, healthy shipping path; this throw is what stops that.',
+		);
+	}
+	const pristineRoot = path.resolve(pristineDir);
+	const manifestPath = path.join(pristineRoot, 'package.json');
+	if (!existsSync(manifestPath)) {
+		throw new Error(
+			`UI_GATE_PRISTINE_CADRE_CORE="${pristineDir}" has no package.json at "${manifestPath}" — refusing to build ` +
+				'rather than emitting a bundle that silently resolved the patched workspace copy after all.',
+		);
+	}
+	/** @type {Record<string, any>} */
+	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+	if (manifest.name !== CADRE_CORE_SPECIFIER) {
+		throw new Error(
+			`UI_GATE_PRISTINE_CADRE_CORE="${pristineDir}" holds package "${manifest.name}", not "${CADRE_CORE_SPECIFIER}".`,
+		);
+	}
+
+	let redirects = 0;
+	/** @type {Set<string>} */
+	const redirected = new Set();
+	/** @type {string | null} */
+	let outDirAbs = null;
+
+	return {
+		name: 'ui-web-mutation-redirect-cadre-core',
+		// `enforce: 'pre'`, on the identical precedent the two plugins above
+		// carry it: a `resolveId` hook must see the specifier BEFORE Vite's own
+		// dependency pre-bundling and alias resolution have already turned it
+		// into an optimized-dep path, or the redirect counts zero on a build
+		// that still exits 0 — a genuine no-op, caught by `closeBundle` below,
+		// but one that costs a whole run to discover.
+		enforce: 'pre',
+		configResolved(resolvedConfig) {
+			outDirAbs = path.resolve(resolvedConfig.root ?? process.cwd(), resolvedConfig.build.outDir);
+		},
+		resolveId(source) {
+			if (source !== CADRE_CORE_SPECIFIER && !source.startsWith(`${CADRE_CORE_SPECIFIER}/`)) return null;
+			const subpath = source === CADRE_CORE_SPECIFIER ? '.' : `.${source.slice(CADRE_CORE_SPECIFIER.length)}`;
+			const relative = resolveManifestSubpath(manifest, subpath);
+			if (!relative) {
+				throw new Error(
+					`ui-web-mutation-redirect-cadre-core: the pristine copy at "${pristineRoot}" publishes no "${subpath}" ` +
+						'subpath, so this build cannot be redirected wholesale. Refusing rather than resolving half the ' +
+						'closure to pristine bytes and half to the patched workspace copy.',
+				);
+			}
+			const target = path.resolve(pristineRoot, relative);
+			if (!existsSync(target)) {
+				throw new Error(
+					`ui-web-mutation-redirect-cadre-core: the pristine copy publishes "${subpath}" as "${relative}", but ` +
+						`"${target}" does not exist.`,
+				);
+			}
+			redirects += 1;
+			redirected.add(subpath);
+			return target;
+		},
+		closeBundle() {
+			if (redirects === 0) {
+				throw new Error(
+					`MUTATION IS A NO-OP: redirectCadreCorePlugin redirected zero "${CADRE_CORE_SPECIFIER}" specifiers, so this ` +
+						'build read the same bytes the healthy build reads and the cadre-patch-reverted mutation did not fire. ' +
+						'A verdict computed from this bundle would describe the healthy build, not the reverted one.',
+				);
+			}
+			if (!outDirAbs) {
+				throw new Error('redirectCadreCorePlugin: outDir was never resolved (configResolved did not run)');
+			}
+			writeFileSync(
+				path.join(outDirAbs, '.mutation-report.json'),
+				JSON.stringify(
+					{
+						mutation: 'cadre-patch-reverted',
+						removals: redirects,
+						redirected: [...redirected],
+						pristineDir: pristineRoot,
+					},
+					null,
+					2,
+				),
+			);
+		},
+	};
+}
+
+/**
+ * The forward-slash-normalised path suffix identifying the ONE module
+ * `stripPeerNotifyPlugin` acts on, and the name of the one call it removes.
+ * Both are module constants rather than inline literals, on the precedent
+ * `GAP_MODIFIER_CLASS` states for itself.
+ */
+const PEER_NOTIFY_MODULE_SUFFIX = 'src/peer/reactivity-bridge.js';
+const PEER_NOTIFY_CALLEE = 'notifyPeerWrite';
+
+/**
+ * A Vite plugin, `ui-web-mutation-strip-peer-notify`, that removes the ONE
+ * complete single-line statement invoking the peer-notify function from the
+ * public app's replication bridge — the statement 56-09 deliberately pinned
+ * to one statement on one line, with no other work on that line, and
+ * deliberately NOT behind a flag, an option or an injected collaborator.
+ *
+ * WHAT THIS PROVES AND WHAT IT DOES NOT. It removes the liveness
+ * ANNOUNCEMENT and nothing else: the replicated rows are still applied, the
+ * store still holds them, and a reader that re-queries still sees them. What
+ * disappears is the data event that tells the UI a peer write landed. That is
+ * why the control which drives this mutation requires EVERY non-liveness rung
+ * to stay green — a build where everything goes red proves the build broke,
+ * not that this statement carries liveness.
+ *
+ * A DIFFERENT, STRONGER CLAIM THAN 56-09's OWN TASK 3. 56-09 already proved
+ * this statement removable by a source transform at the Node tier, against
+ * fakes and without a bundle. That is a weaker sibling claim, and it is NOT
+ * retired by this plugin: it measures the module's behaviour in isolation,
+ * whereas this plugin measures a real browser bundle built from mutated
+ * source. Both stand; neither is a duplicate of the other.
+ *
+ * WHY IT THROWS ON MORE THAN ONE MATCH as well as on zero. An ambiguous
+ * target means the mutation is not the isolated one it claims to be, and a
+ * two-statement removal reported as a one-statement inversion would be worse
+ * than not running the control at all.
+ *
+ * STANDING RULE, restated: this runs against SOURCE, before a real
+ * `vite build`. It never edits a built `dist/`, and it never injects anything
+ * into a page at runtime.
+ *
+ * @returns {import('vite').Plugin}
+ */
+export function stripPeerNotifyPlugin() {
+	let removals = 0;
+	/** @type {string[]} */
+	const removedStatements = [];
+	/** @type {string | null} */
+	let outDirAbs = null;
+
+	// One complete statement on one line: optional leading indentation, an
+	// optional `await`, the callee, a parenthesised argument list carrying no
+	// `;` and no newline, an optional trailing semicolon, and the line break.
+	const statementRe = new RegExp(
+		`^[ \\t]*(?:await[ \\t]+)?${escapeRegExp(PEER_NOTIFY_CALLEE)}[ \\t]*\\([^;\\n]*\\)[ \\t]*;?[ \\t]*\\r?\\n`,
+		'gm',
+	);
+
+	return {
+		name: 'ui-web-mutation-strip-peer-notify',
+		// `enforce: 'pre'` for the same MEASURED reason `stripTokensPlugin`
+		// carries it: a normal-priority plugin can be handed source another
+		// transform already rewrote, and this mutation matches a whole SOURCE
+		// LINE. Running `pre` intercepts the raw, unrewritten module text.
+		enforce: 'pre',
+		configResolved(resolvedConfig) {
+			outDirAbs = path.resolve(resolvedConfig.root ?? process.cwd(), resolvedConfig.build.outDir);
+		},
+		transform(code, id) {
+			const bareId = id.split('?')[0].split(path.sep).join('/');
+			if (!bareId.endsWith(PEER_NOTIFY_MODULE_SUFFIX)) return null;
+			statementRe.lastIndex = 0;
+			const matches = code.match(statementRe);
+			if (!matches || matches.length === 0) return null;
+			removals += matches.length;
+			for (const m of matches) removedStatements.push(m.trim());
+			return { code: code.replace(statementRe, ''), map: null };
+		},
+		closeBundle() {
+			if (removals === 0) {
+				throw new Error(
+					`MUTATION IS A NO-OP: stripPeerNotifyPlugin found no single-line ${PEER_NOTIFY_CALLEE}(...) statement in a ` +
+						`module whose path ends with "${PEER_NOTIFY_MODULE_SUFFIX}", so the notify-disabled mutation did not fire. ` +
+						'A control run against an unmutated build would falsely report the liveness seam inert, which is a ' +
+						'different verdict entirely.',
+				);
+			}
+			if (removals > 1) {
+				throw new Error(
+					`MUTATION IS AMBIGUOUS: stripPeerNotifyPlugin removed ${removals} statements, not 1 — the target is no longer ` +
+						'the isolated one-statement call site 56-09 pinned, so this mutation cannot claim to invert exactly the ' +
+						`liveness announcement. Removed: ${JSON.stringify(removedStatements)}`,
+				);
+			}
+			if (!outDirAbs) {
+				throw new Error('stripPeerNotifyPlugin: outDir was never resolved (configResolved did not run)');
+			}
+			writeFileSync(
+				path.join(outDirAbs, '.mutation-report.json'),
+				JSON.stringify({ mutation: 'notify-disabled', removals: 1, removedStatement: removedStatements[0] }, null, 2),
 			);
 		},
 	};

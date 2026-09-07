@@ -149,17 +149,76 @@ test('rung 4b: the real `./components.css` subpath resolves to an existing file'
 
 test('rung 9: the real `./mutations` subpath is Node-importable with no bundler and exposes the frozen mutation set', async () => {
 	const mod = await import('@votetorrent/ui-web/mutations');
-	// 56-03 Task 3 adds the fourth mutation name, `pill-retone-reverted` — this
-	// assertion exists to make a silent addition impossible; it is UPDATED
-	// here, not relaxed.
-	assert.deepEqual(mod.MUTATIONS, ['no-dedupe', 'token-missing', 'gap-cues-flattened', 'pill-retone-reverted']);
+	// 56-03 Task 3 added the fourth mutation name, `pill-retone-reverted`;
+	// 56-13 Task 1 appends the fifth and sixth — this assertion exists to make
+	// a silent addition impossible; it is UPDATED here, not relaxed.
+	assert.deepEqual(mod.MUTATIONS, [
+		'no-dedupe',
+		'token-missing',
+		'gap-cues-flattened',
+		'pill-retone-reverted',
+		'cadre-patch-reverted',
+		'notify-disabled',
+	]);
 	assert.equal(typeof mod.resolveMutation, 'function');
 	assert.equal(typeof mod.applyNoDedupe, 'function');
 	assert.equal(typeof mod.stripTokensPlugin, 'function');
 	assert.equal(typeof mod.flattenGapCuesPlugin, 'function');
 	assert.equal(typeof mod.revertPillRetonePlugin, 'function');
+	assert.equal(typeof mod.redirectCadreCorePlugin, 'function');
+	assert.equal(typeof mod.stripPeerNotifyPlugin, 'function');
 	assert.equal(typeof mod.writeMutationReportPlugin, 'function');
 	assert.equal(typeof mod.readMutationReport, 'function');
+});
+
+/**
+ * The apps whose mutant config must handle every name in `MUTATIONS`, and —
+ * for each — the names that config deliberately does NOT handle, with the
+ * reason it is a decision rather than a gap.
+ *
+ * `apps/VoteTorrentDashboard/vite.mutant.config.ts` is deliberately absent
+ * from this table: it has the same fail-closed trailing `throw` and correctly
+ * refuses any name it does not handle (56-13 pre-verified fact 3), and it is
+ * not edited by the plan that added the last two names.
+ */
+const MUTANT_CONFIGS = [
+	{
+		label: 'apps/VoteTorrentPublic/vite.mutant.config.ts',
+		file: path.join(PACKAGE_ROOT, '..', '..', 'apps', 'VoteTorrentPublic', 'vite.mutant.config.ts'),
+		unhandled: /** @type {string[]} */ ([]),
+	},
+];
+
+test('rung 9b: every name in `MUTATIONS` is wired into the public app\'s mutant config, or explicitly listed as unhandled (56-13)', async () => {
+	const mod = await import('@votetorrent/ui-web/mutations');
+	for (const { label, file, unhandled } of MUTANT_CONFIGS) {
+		assert.ok(existsSync(file), `expected ${label} to exist at ${file}`);
+		// Comments are STRIPPED before matching: a config whose own comment
+		// merely NAMES a mutation would otherwise satisfy this check forever
+		// while handling nothing — the self-tripping-checker failure this repo
+		// has paid for three times.
+		const stripped = readFileSync(file, 'utf8')
+			.replace(/\/\*[\s\S]*?\*\//g, '')
+			.split('\n')
+			.filter((line) => !/^\s*\/\//.test(line))
+			.join('\n');
+		for (const name of mod.MUTATIONS) {
+			if (unhandled.includes(name)) continue;
+			assert.ok(
+				stripped.includes(`'${name}'`) || stripped.includes(`"${name}"`),
+				`${label} never handles mutation "${name}". A name added to MUTATIONS but never wired fails closed at ` +
+					`BUILD time with an obscure message instead of here, with a clear one. Wire it, or list it in ` +
+					`MUTANT_CONFIGS[].unhandled with the reason.`,
+			);
+		}
+		for (const name of unhandled) {
+			assert.ok(
+				mod.MUTATIONS.includes(name),
+				`${label} lists "${name}" as deliberately unhandled, but it is not a member of MUTATIONS — a stale entry ` +
+					`here would silently excuse a real gap later.`,
+			);
+		}
+	}
 });
 
 test('rung 10: the real `./facts` subpath is Node-importable with no bundler and exposes real, non-trivial values (54-04)', async () => {
