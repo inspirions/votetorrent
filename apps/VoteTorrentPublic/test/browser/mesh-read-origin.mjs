@@ -42,12 +42,102 @@
  * vocabulary of exactly two: `mutate`, `stop`). Error NAMES only ever reach
  * stdout — a Quereus constraint message can carry row values, and this
  * process must never let one reach the pipe.
+ *
+ * TWO ADDITIVE EMISSIONS (`56-13` Task 1), over that same pipe — no new
+ * socket, no new flag, no new config key, and `gateway.mjs` untouched:
+ *
+ *   1. `ORIGIN_PROVENANCE=<verdict>` is emitted FIRST, before this file can
+ *      fatally refuse for any reason, by running `56-08`'s shipped
+ *      `--check-dist` CLI against the `@serfab/cadre-core` package root
+ *      resolved RELATIVE TO `gateway.mjs` (never relative to this app's own
+ *      tree, which is a different workspace copy and would silently check
+ *      the wrong bytes). Only a `PASS` proceeds to `startGateway`. This
+ *      ordering is what lets a control that reverts the patch observe
+ *      `PREFLIGHT_FAILED:origin-provenance` instead of an ambiguous timeout
+ *      or a generic child exit — without it, the strongest control this
+ *      phase can run would fail unattributably.
+ *
+ *   2. `ORIGIN_PEER_CONNECTED=<peerId>` / `ORIGIN_PEER_DISCONNECTED=<peerId>`,
+ *      one line per inbound connection to the started gateway's CONTROL node
+ *      — the node whose multiaddr `ORIGIN_CONTROL_ADDR` advertises and which
+ *      a browser's bootstrap config names. Peer NAMES only: no addresses, no
+ *      durations, no payload beyond each line's own arrival order. This is
+ *      general instrumentation, built unconditionally; a consumer that
+ *      windows these lines per page load is a separate concern and lives
+ *      elsewhere.
  */
+import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { resolve as resolvePath, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import { startGateway } from '../../../../packages/p2p-probe-host/gateway.mjs';
+
+/** The gateway module this origin boots, and the module every provenance
+ * question below is resolved RELATIVE TO. */
+const GATEWAY_MODULE_URL = new URL('../../../../packages/p2p-probe-host/gateway.mjs', import.meta.url);
+const GATEWAY_MODULE_PATH = fileURLToPath(GATEWAY_MODULE_URL);
+const CADRE_CORE_SPECIFIER = '@serfab/cadre-core';
+
+/**
+ * The `@serfab/cadre-core` package ROOT that `gateway.mjs` would resolve.
+ *
+ * `createRequire(<gateway url>).resolve('@serfab/cadre-core')` cannot be used
+ * directly: the package publishes an ESM-only `exports` map with no `require`
+ * condition, so CJS resolution throws `ERR_PACKAGE_PATH_NOT_EXPORTED` —
+ * `gateway.mjs`'s own boot gate records the same finding. What `createRequire`
+ * DOES give, correctly and without hand-rolling anything, is Node's own
+ * ordered `node_modules` candidate list for that module URL
+ * (`require.resolve.paths`). The first candidate holding the package is the
+ * one the gateway's process would load. Resolving from THIS file's own URL
+ * instead would find the app's independent workspace copy
+ * (`nmHoistingLimits: workspaces` — three copies, no root copy) and would
+ * prove nothing about the gateway.
+ *
+ * @returns {string | null}
+ */
+function resolveGatewayCadreCoreRoot() {
+	const req = createRequire(GATEWAY_MODULE_URL);
+	const candidates = req.resolve.paths(CADRE_CORE_SPECIFIER) ?? [];
+	for (const dir of candidates) {
+		const root = join(dir, CADRE_CORE_SPECIFIER);
+		if (existsSync(join(root, 'package.json'))) return root;
+	}
+	return null;
+}
+
+/**
+ * Run `56-08`'s shipped `node gateway.mjs --check-dist <packageRoot>` and
+ * return the verdict it prints. The provenance decision matrix is CONSUMED,
+ * never re-derived here — two copies of a provenance check are two
+ * instruments that diverge silently, and consuming the CLI is also why this
+ * file needs no protocol token of its own.
+ *
+ * @param {string} packageRoot
+ * @returns {Promise<string>} `PASS` or `FAIL:<reason>` or `UNRESOLVED:<reason>`
+ */
+function checkDistVerdict(packageRoot) {
+	return new Promise((resolve) => {
+		const child = spawn(process.execPath, [GATEWAY_MODULE_PATH, '--check-dist', packageRoot], {
+			cwd: dirname(GATEWAY_MODULE_PATH),
+			stdio: ['ignore', 'pipe', 'pipe'],
+		});
+		let out = '';
+		child.stdout.on('data', (d) => {
+			out += d;
+		});
+		child.stderr.on('data', (d) => {
+			out += d;
+		});
+		child.on('error', (err) => resolve(`UNRESOLVED:spawn-failed-${err?.name ?? 'Error'}`));
+		child.on('exit', () => {
+			const match = out.match(/PROVENANCE=([^\s]+)/);
+			resolve(match ? match[1] : 'UNRESOLVED:no-provenance-line');
+		});
+	});
+}
 
 /**
  * Print an `ORIGIN_FATAL:<name>` line naming the offending precondition and
@@ -81,6 +171,18 @@ function parseArgs(argv) {
 }
 
 async function main() {
+	// ── Emission 1, FIRST, before this process can fatally refuse for any
+	// reason at all. See this file's header for why the ordering is what makes
+	// a reverted-patch run attributable rather than an ambiguous timeout.
+	const cadreCoreRoot = resolveGatewayCadreCoreRoot();
+	const provenanceVerdict = cadreCoreRoot
+		? await checkDistVerdict(cadreCoreRoot)
+		: `UNRESOLVED:no-${CADRE_CORE_SPECIFIER}-under-gateway`;
+	console.log('ORIGIN_PROVENANCE=' + provenanceVerdict);
+	if (provenanceVerdict !== 'PASS') {
+		fatal('origin-provenance', `--check-dist on ${cadreCoreRoot ?? '(unresolved)'} reported ${provenanceVerdict}`);
+	}
+
 	const args = parseArgs(process.argv.slice(2));
 
 	const originalConfigPath = resolvePath(process.cwd(), args.config);
@@ -118,6 +220,17 @@ async function main() {
 	if (handle.provenance.verdict !== 'PASS') {
 		fatal('origin-provenance', `provenance.verdict is "${handle.provenance.verdict}", expected "PASS"`);
 	}
+	// The gateway's OWN boot-gate verdict and the pre-boot `--check-dist`
+	// verdict above are two readings of the same decision matrix over the
+	// same package root. They must agree; a disagreement means one of the two
+	// read a different copy, which would make every verdict downstream of
+	// either one unattributable.
+	if (handle.provenance.verdict !== provenanceVerdict) {
+		fatal(
+			'origin-provenance-disagreement',
+			`pre-boot --check-dist said "${provenanceVerdict}" but the gateway's own boot gate said "${handle.provenance.verdict}"`,
+		);
+	}
 	if (!(handle.authorizedMemberCount >= 1)) {
 		fatal('origin-cold-start', `authorizedMemberCount is ${handle.authorizedMemberCount}, expected >= 1`);
 	}
@@ -133,7 +246,11 @@ async function main() {
 		fatal('tls-pin-absent', 'the gateway reported no SPKI pin');
 	}
 
-	console.log('ORIGIN_PROVENANCE=' + handle.provenance.verdict);
+	// ORIGIN_PROVENANCE is NOT re-printed here: it is emitted once, at the top
+	// of main(), and the assertion above already proves the gateway's own boot
+	// gate agrees with it. A second line carrying the same key would let a
+	// consumer that keeps the LAST value silently read a different fact from
+	// one that keeps the FIRST.
 	console.log('ORIGIN_AUTHORIZED_MEMBERS=' + handle.authorizedMemberCount);
 	console.log('ORIGIN_ENROLLMENT_WINDOW_UNTIL=' + handle.enrollmentWindowUntil);
 	console.log('ORIGIN_RELAY=' + (handle.enableRelay ? 'on' : 'off'));
@@ -143,6 +260,27 @@ async function main() {
 	}
 	console.log('ORIGIN_TLS_SPKI=' + handle.tls.spkiSha256Base64);
 	console.log('ORIGIN_TLS_CAROOT=' + (handle.tls.caRoot ?? ''));
+
+	// ── Emission 2: one line per inbound connection to the CONTROL node --
+	// the node whose multiaddr ORIGIN_CONTROL_ADDR advertises. Peer NAMES
+	// only; no addresses, no durations, no payload beyond arrival order.
+	// Attached here, before any strand work, so a connection arriving at any
+	// point in the run is reported. Wrapped so a substrate that does not
+	// expose these events can never fail a run that is otherwise healthy --
+	// this is additive instrumentation, not a precondition.
+	try {
+		const controlNode = handle.node.getControlNode();
+		controlNode.addEventListener('connection:open', (evt) => {
+			const peer = evt?.detail?.remotePeer;
+			if (peer) console.log('ORIGIN_PEER_CONNECTED=' + peer.toString());
+		});
+		controlNode.addEventListener('connection:close', (evt) => {
+			const peer = evt?.detail?.remotePeer;
+			if (peer) console.log('ORIGIN_PEER_DISCONNECTED=' + peer.toString());
+		});
+	} catch (err) {
+		console.log('ORIGIN_PEER_STREAM=unavailable:' + (err && /** @type {any} */ (err).name ? /** @type {any} */ (err).name : 'Error'));
+	}
 
 	// -- Reach the hosted strand's Quereus Database. -------------------------
 	const strand = handle.node.getStrand(args.strandId);
