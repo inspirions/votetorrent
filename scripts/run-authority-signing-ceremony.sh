@@ -124,6 +124,15 @@ any_failed() {
   return 1
 }
 
+# R5a (57-03): shared platform-tag exclusion list for the cancel legs' post-dismissal
+# error-count checks — a name in this set is a platform-emitted tag whose ` E ` lines share the
+# app's pid (StrongBox-fallback keygen noise, GC pauses, ART) but are not evidence of an
+# app-authored fault. Both leg_cancel_negative_button and leg_cancel_back_key read this SAME
+# variable so the two legs cannot drift from each other. Matched against the threadtime-format
+# tag field (` E TagName:`), never a bare substring, so an app-authored message that happens to
+# contain one of these words cannot be excluded by accident.
+PLATFORM_TAG_EXCLUSIONS=' E (KeyStore|Perf|ART):'
+
 # ── Preflights (all fail loudly, none proceed silently) ─────────────────────
 preflight() {
   echo "[ceremony] Preflight: adb device state ..."
@@ -966,7 +975,6 @@ leg_cancel_negative_button() {
   sleep 2
   dump=$(dump_ui)
 
-  adb ${ADBD} logcat -c
   if ! tap_on_text "${STR_SETUP_BUTTON}" "${dump}" && ! tap_on_text "Replace Signing Key" "${dump}"; then
     echo "[ceremony] 'cancel' leg: no provisioning/replace action reachable from the current screen — drive to a signing action manually first." >&2
   fi
@@ -976,6 +984,14 @@ leg_cancel_negative_button() {
     record_leg "cancel-negative-button" "FAIL" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') not observed before attempting dismissal"
     return
   fi
+
+  # R5a: capture the DEVICE clock immediately before dispatching the dismissal — the error window
+  # this leg measures starts HERE, not at the app's cold-boot keygen. A host timestamp would be
+  # wrong: emulator clocks lag the host (see the clock-skew preflight above), which would silently
+  # widen or empty the window.
+  local dismissal_ts
+  dismissal_ts=$(adb ${ADBD} shell date "+%Y-%m-%d %H:%M:%S.000" | tr -d '\r')
+
   if ! tap_on_text "${STR_NEGATIVE_BUTTON}" "${dump}"; then
     record_leg "cancel-negative-button" "FAIL" "deviceSigningPromptNegativeButton ('${STR_NEGATIVE_BUTTON}') not found to dismiss the prompt"
     return
@@ -994,25 +1010,30 @@ leg_cancel_negative_button() {
     record_leg "cancel-no-error-text" "FAIL" "a deviceSigningError* string was rendered post-dismissal"
   fi
 
-  # Scope the error-level check to OUR app's pid — an unscoped `grep " E "`
-  # over the whole system logcat buffer matches heavy unrelated emulator
-  # noise (keystore2 StrongBox-fallback logs, FeatureFlagsImplExport,
-  # ThemeUtils, etc.) and makes this leg's verdict meaningless regardless of
-  # our app's actual behavior (observed: 15 unrelated system E-lines with 0
-  # from our own package). This mirrors the leg's own record_leg message,
-  # which already claims "app-package" scoping — the prior implementation
-  # didn't actually do that.
-  local app_pid err_lines
+  # R5a: window starts at dismissal_ts (captured above, device clock), scoped to our app's pid,
+  # with platform-emitted tags (PLATFORM_TAG_EXCLUSIONS) excluded so a StrongBox-fallback keygen
+  # line or similar cannot fail an app-authored-error leg. Previously this cleared logcat ~11-12s
+  # BEFORE the dismissal (well before this leg even reached it) and counted everything since —
+  # including boot/keygen noise unrelated to the dismissal under test. A read that returns ZERO
+  # lines of ANY level means the window/timestamp is wrong, not that the app was silent —
+  # NOT-EXERCISED, never PASS, in that case.
+  local app_pid post_dismissal_log total_lines err_lines
   app_pid=$(adb ${ADBD} shell pidof "${PACKAGE}" 2>/dev/null | tr -d '\r' | awk '{print $1}')
   if [ -n "${app_pid}" ]; then
-    err_lines=$(adb ${ADBD} logcat -d --pid="${app_pid}" 2>/dev/null | grep -c " E " || true)
+    post_dismissal_log=$(adb ${ADBD} logcat -d -T "${dismissal_ts}" --pid="${app_pid}" 2>/dev/null || true)
   else
-    err_lines=$(adb ${ADBD} logcat -d 2>/dev/null | grep " ${PACKAGE}" | grep -c " E " || true)
+    post_dismissal_log=$(adb ${ADBD} logcat -d -T "${dismissal_ts}" 2>/dev/null | grep " ${PACKAGE}" || true)
   fi
-  if [ "${err_lines}" -eq 0 ]; then
-    record_leg "cancel-no-logged-fault" "PASS" "0 error-level app-package logcat lines since dismissal"
+  total_lines=$(printf '%s\n' "${post_dismissal_log}" | grep -c . || true)
+  if [ "${total_lines}" -eq 0 ]; then
+    record_leg "cancel-no-logged-fault" "NOT-EXERCISED" "post-dismissal log window empty — instrument gap"
   else
-    record_leg "cancel-no-logged-fault" "FAIL" "${err_lines} error-level logcat line(s) since dismissal"
+    err_lines=$(printf '%s\n' "${post_dismissal_log}" | grep " E " | grep -vE "${PLATFORM_TAG_EXCLUSIONS}" | grep -c . || true)
+    if [ "${err_lines}" -eq 0 ]; then
+      record_leg "cancel-no-logged-fault" "PASS" "0 app-authored error-level logcat lines in the post-dismissal window (device-clock T=${dismissal_ts})"
+    else
+      record_leg "cancel-no-logged-fault" "FAIL" "${err_lines} app-authored error-level logcat line(s) in the post-dismissal window (device-clock T=${dismissal_ts})"
+    fi
   fi
 
   # Gap B closure: the raw native errorCode must remain recoverable from an
@@ -1050,7 +1071,6 @@ leg_cancel_back_key() {
   sleep 2
   dump=$(dump_ui)
 
-  adb ${ADBD} logcat -c
   if ! tap_on_text "${STR_SETUP_BUTTON}" "${dump}" && ! tap_on_text "Replace Signing Key" "${dump}"; then
     echo "[ceremony] 'cancel' leg (BACK-key variant): no provisioning/replace action reachable from the current screen — drive to a signing action manually first." >&2
   fi
@@ -1060,6 +1080,13 @@ leg_cancel_back_key() {
     record_leg "cancel-negative-button-back" "FAIL" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') not observed before attempting dismissal"
     return
   fi
+
+  # R5a: capture the DEVICE clock immediately before dispatching the dismissal — see
+  # leg_cancel_negative_button's identical rationale above; the two legs share this shape
+  # deliberately so they cannot drift from each other.
+  local dismissal_ts
+  dismissal_ts=$(adb ${ADBD} shell date "+%Y-%m-%d %H:%M:%S.000" | tr -d '\r')
+
   adb ${ADBD} shell input keyevent KEYCODE_BACK
   record_leg "cancel-negative-button-back" "PASS" "KEYCODE_BACK dispatched, dismissing the prompt"
   sleep 2
@@ -1075,17 +1102,25 @@ leg_cancel_back_key() {
     record_leg "cancel-no-error-text-back" "FAIL" "a deviceSigningError* string was rendered post-dismissal"
   fi
 
-  local app_pid err_lines
+  # R5a: see leg_cancel_negative_button's identical block above for the full rationale
+  # (timestamped window + PLATFORM_TAG_EXCLUSIONS + empty-window NOT-EXERCISED guard).
+  local app_pid post_dismissal_log total_lines err_lines
   app_pid=$(adb ${ADBD} shell pidof "${PACKAGE}" 2>/dev/null | tr -d '\r' | awk '{print $1}')
   if [ -n "${app_pid}" ]; then
-    err_lines=$(adb ${ADBD} logcat -d --pid="${app_pid}" 2>/dev/null | grep -c " E " || true)
+    post_dismissal_log=$(adb ${ADBD} logcat -d -T "${dismissal_ts}" --pid="${app_pid}" 2>/dev/null || true)
   else
-    err_lines=$(adb ${ADBD} logcat -d 2>/dev/null | grep " ${PACKAGE}" | grep -c " E " || true)
+    post_dismissal_log=$(adb ${ADBD} logcat -d -T "${dismissal_ts}" 2>/dev/null | grep " ${PACKAGE}" || true)
   fi
-  if [ "${err_lines}" -eq 0 ]; then
-    record_leg "cancel-no-logged-fault-back" "PASS" "0 error-level app-package logcat lines since dismissal"
+  total_lines=$(printf '%s\n' "${post_dismissal_log}" | grep -c . || true)
+  if [ "${total_lines}" -eq 0 ]; then
+    record_leg "cancel-no-logged-fault-back" "NOT-EXERCISED" "post-dismissal log window empty — instrument gap"
   else
-    record_leg "cancel-no-logged-fault-back" "FAIL" "${err_lines} error-level logcat line(s) since dismissal"
+    err_lines=$(printf '%s\n' "${post_dismissal_log}" | grep " E " | grep -vE "${PLATFORM_TAG_EXCLUSIONS}" | grep -c . || true)
+    if [ "${err_lines}" -eq 0 ]; then
+      record_leg "cancel-no-logged-fault-back" "PASS" "0 app-authored error-level logcat lines in the post-dismissal window (device-clock T=${dismissal_ts})"
+    else
+      record_leg "cancel-no-logged-fault-back" "FAIL" "${err_lines} app-authored error-level logcat line(s) in the post-dismissal window (device-clock T=${dismissal_ts})"
+    fi
   fi
 
   local reject_line raw_code mapped_code
