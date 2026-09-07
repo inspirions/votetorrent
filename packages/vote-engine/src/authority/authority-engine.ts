@@ -118,6 +118,40 @@ export function sortRosterEntries(
 		.sort((a, b) => a.proposedName.localeCompare(b.proposedName));
 }
 
+/**
+ * 57-08 (D-01 trigger half): the outcome of `proposeAdmin`'s own attempt to
+ * promote its proposal when `startSigningSession` reports `thresholdReached`.
+ * Mirrors `SignatureTasksEngine.RegistrantSeedOutcome` / `lastSeedOutcome`'s
+ * shape and discipline exactly: public on `AuthorityEngine` so a test or a
+ * future UI consumer can read it, deliberately NOT added to `IAuthorityEngine`
+ * (no interface change, no UI consumer this round).
+ *
+ * `proposeAdmin`'s contract is to propose — a proposal that is correctly
+ * persisted and correctly signed must survive a promotion that legitimately
+ * cannot apply (a typed `AdminPromotionError`, e.g. the D-03 `.init`-officer
+ * case), so a refusal is RECORDED here rather than thrown. This field is the
+ * channel a caller reads to discover that outcome; it is never silent.
+ */
+export type AdminProposalPromotionOutcome =
+	| { status: 'promoted'; nonce: string; result: AdminPromotionResult }
+	| {
+			status: 'refused';
+			nonce: string;
+			reason: AdminPromotionError['reason'];
+			proposedName?: string;
+	  }
+	| {
+			// Threshold reached but signatureOrCallback was a bare Signature, not a
+			// re-invocable per-digest callback — applyAdminProposal requires a
+			// callback because it mints two or three distinct digests (57-07). This
+			// is a DISTINCT marker from 'refused' (no AdminPromotionError was ever
+			// thrown; the promotion attempt never started). Per Task 1's P8 probe,
+			// authority-propose-admin-builder.ts:154 is the one production
+			// (non-test, non-mock) caller shaped this way today.
+			status: 'skipped-non-callback-signature';
+			nonce: string;
+	  };
+
 export class AuthorityEngine implements IAuthorityEngine {
 	constructor(
 		private readonly authority: Authority,
@@ -128,6 +162,14 @@ export class AuthorityEngine implements IAuthorityEngine {
 	}
 
 	private readonly invitationSpanMinutes: number;
+
+	/**
+	 * 57-08 (D-01 trigger half) — the most recent outcome of `proposeAdmin`'s
+	 * own promotion attempt. Public so a test or a future UI consumer can read
+	 * it; NOT part of `IAuthorityEngine` (no interface change, no UI consumer
+	 * this round — see {@link AdminProposalPromotionOutcome}'s own doc comment).
+	 */
+	lastPromotionOutcome?: AdminProposalPromotionOutcome;
 
 	createOfficerInvite(init: OfficerInit): OfficerInviteShare {
 		// AUTH-01 (D-01/D-04): hex-encoded secp256k1 key material at the
@@ -652,12 +694,72 @@ export class AuthorityEngine implements IAuthorityEngine {
 			// their OWN signature, so completion cannot happen inside this method
 			// (a previously commented-out loop here would have re-applied the
 			// instigator's signature for every signer, which is wrong).
-			await this.signingEngine.startSigningSession(
-				this.authority.id,
-				adminDigestArgs,
-				'rad',
-				signature,
-			);
+			const { nonce, thresholdReached } =
+				await this.signingEngine.startSigningSession(
+					this.authority.id,
+					adminDigestArgs,
+					'rad',
+					signature,
+				);
+
+			// 57-08 (D-01 trigger half, Trigger A): the instigator's own signature
+			// can already reach threshold here — the only administration shape the
+			// current data model supports is threshold 1 (WR-05: every seeded
+			// officer carries ctx.user.id), so proposeAdmin is where the FIRST and,
+			// today, ONLY signature-completing event for a 'rad' session happens.
+			// Promote only when threshold is genuinely reached AND a re-invocable
+			// per-digest callback is available — applyAdminProposal mints two or
+			// three distinct digests (57-07) and a single pre-computed Signature
+			// cannot cover them.
+			if (thresholdReached) {
+				if (typeof signatureOrCallback === 'function') {
+					try {
+						const result = await this.applyAdminProposal(
+							nonce,
+							signatureOrCallback,
+							{ ownsTransaction: true }, // 57-01 already COMMITted ProposedAdmin/
+							// ProposedOfficer above, and startSigningSession's sign() call
+							// (just above) owns and closes its OWN transaction — there is no
+							// open transaction at this point, so this trigger opens its own.
+						);
+						this.lastPromotionOutcome = { status: 'promoted', nonce, result };
+					} catch (promotionErr) {
+						if (promotionErr instanceof AdminPromotionError) {
+							// A promotion that legitimately cannot apply (e.g. the D-03
+							// .init-officer case) must not destroy a correctly persisted,
+							// correctly signed proposal. RECORD the refusal — never silent,
+							// never thrown — proposeAdmin's contract is to propose.
+							this.lastPromotionOutcome = {
+								status: 'refused',
+								nonce,
+								reason: promotionErr.reason,
+								proposedName: promotionErr.proposedName,
+							};
+							console.warn(
+								`AuthorityEngine.proposeAdmin: promotion refused for nonce ${nonce}: ${promotionErr.reason}. The proposal itself was NOT affected — see lastPromotionOutcome.`,
+							);
+						} else {
+							// Any OTHER error is unexpected and must not be downgraded to a
+							// warning.
+							throw promotionErr;
+						}
+					}
+				} else {
+					// Threshold reached but the caller supplied a bare Signature, not a
+					// callback. Per Task 1's P8 probe, this shape has a production
+					// (non-test, non-mock) caller — authority-propose-admin-builder.ts:154
+					// — with no current app-level UI consumer. Record and warn; do NOT
+					// throw and do NOT substitute/reuse the single supplied signature for
+					// the two or three distinct digests the promotion needs to mint.
+					this.lastPromotionOutcome = {
+						status: 'skipped-non-callback-signature',
+						nonce,
+					};
+					console.warn(
+						`AuthorityEngine.proposeAdmin: threshold reached for nonce ${nonce} but a bare Signature (not a re-invocable per-digest callback) was supplied — promotion needs a callback because it mints two or three distinct digests. The proposal itself was NOT affected; this surface cannot promote until it supplies a callback.`,
+					);
+				}
+			}
 		} catch (err) {
 			if (err instanceof QuereusError) {
 				throw new Error(`Quereus error (code ${err.code}): ${err.message}`);

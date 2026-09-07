@@ -362,6 +362,42 @@ async function createPromotionFixture (options?: {
   return { auth, secondUser }
 }
 
+/**
+ * 57-08 — recompute proposeAdmin's exact roster-covering digest (D-02's
+ * sortRosterEntries + the 4-arg Digest() formula) so a test can look up the
+ * ORIGINAL proposal session's nonce by its Digest value, unambiguously, even
+ * when Trigger A (57-08) mints ADDITIONAL 'rad' AdminSigning rows for the
+ * SAME authority under fresh nonces (the Admin-side/officer-side mint
+ * sessions applyAdminProposal creates internally on a successful auto-
+ * promotion). "order by Nonce desc limit 1" cannot distinguish these —
+ * Nonce is a random UUID, not chronological — so any test that needs the
+ * ORIGINAL proposal session specifically must look it up by Digest instead.
+ */
+async function computeRosterDigest (
+  auth: TestAuthorityContext,
+  officers: Array<{ proposedName: string, title: string, scopes: string[] }>,
+  effectiveAt: number,
+  thresholdPolicies: Array<{ policy: string, threshold: number }>
+): Promise<string> {
+  const sortRosterEntriesExported = (AuthorityEngineModule as unknown as {
+    sortRosterEntries?: (entries: typeof officers) => typeof officers
+  }).sortRosterEntries
+  if (typeof sortRosterEntriesExported !== 'function') {
+    throw new Error('computeRosterDigest: authority-engine.ts does not export sortRosterEntries')
+  }
+  const roster = sortRosterEntriesExported(officers)
+  const row = await auth.ctx.db
+    .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
+    .get({
+      authorityId: auth.authority.id,
+      effectiveAt: toCanonicalDatetime(effectiveAt),
+      officers: JSON.stringify(roster),
+      thresholdPolicies: JSON.stringify(thresholdPolicies)
+    })
+  if (!row || row.d == null) throw new Error('computeRosterDigest: Digest() returned null')
+  return row.d as string
+}
+
 // ===========================================================================
 // AuthorityEngine Tests
 // ===========================================================================
@@ -1275,10 +1311,25 @@ describe('AuthorityEngine', () => {
         },
         signers: [auth.user.id]
       }
-      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      // 57-08 (Trigger A): pass a bare Signature, not the callback — Trigger A
+      // only auto-promotes when signatureOrCallback is a function, and this
+      // test exercises applyAdminProposal DIRECTLY, decoupled from any
+      // trigger, exactly as 57-07 designed it. A bare Signature still
+      // persists the proposal + starts the signing session identically.
+      const rosterDigest = await computeRosterDigest(
+        auth,
+        [
+          { proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+        ],
+        effectiveAt,
+        proposal.proposed.thresholdPolicies
+      )
+      const bareSignature = await sig(digestToBytes(rosterDigest))
+      await auth.authorityEngine.proposeAdmin(proposal, bareSignature)
       const nonceRow = await auth.ctx.db
-        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
-        .get({ id: auth.authority.id })
+        .prepare('select Nonce from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: rosterDigest })
       const nonce = nonceRow!.Nonce as string
 
       const engine = auth.authorityEngine as unknown as {
@@ -1312,10 +1363,21 @@ describe('AuthorityEngine', () => {
         },
         signers: [auth.user.id]
       }
-      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      // 57-08 (Trigger A): bare Signature, not the callback — see C1's comment.
+      const rosterDigest = await computeRosterDigest(
+        auth,
+        [
+          { proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+        ],
+        effectiveAt,
+        proposal.proposed.thresholdPolicies
+      )
+      const bareSignature = await sig(digestToBytes(rosterDigest))
+      await auth.authorityEngine.proposeAdmin(proposal, bareSignature)
       const nonceRow = await auth.ctx.db
-        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
-        .get({ id: auth.authority.id })
+        .prepare('select Nonce from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: rosterDigest })
       const nonce = nonceRow!.Nonce as string
 
       const engine = auth.authorityEngine as unknown as {
@@ -1346,10 +1408,18 @@ describe('AuthorityEngine', () => {
         },
         signers: [auth.user.id]
       }
-      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      // 57-08 (Trigger A): bare Signature, not the callback — see C1's comment.
+      const rosterDigest = await computeRosterDigest(
+        auth,
+        [{ proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] }],
+        effectiveAt,
+        proposal.proposed.thresholdPolicies
+      )
+      const bareSignature = await sig(digestToBytes(rosterDigest))
+      await auth.authorityEngine.proposeAdmin(proposal, bareSignature)
       const nonceRow = await auth.ctx.db
-        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
-        .get({ id: auth.authority.id })
+        .prepare('select Nonce from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: rosterDigest })
       const nonce = nonceRow!.Nonce as string
 
       const engine = auth.authorityEngine as unknown as {
@@ -1385,10 +1455,23 @@ describe('AuthorityEngine', () => {
         },
         signers: [auth.user.id]
       }
-      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      // 57-08 (Trigger A): bare Signature, not the callback — see C1's
+      // comment. N1 needs the ORIGINAL roster session to be UNPROMOTED
+      // (it constructs its own genuinely-unsigned copy below); Trigger A
+      // auto-promoting the callback form would leave a live Admin row for
+      // this effectiveAt before N1 even gets there, invalidating its
+      // "zero writes" assertion for a reason unrelated to what N1 tests.
+      const rosterDigest = await computeRosterDigest(
+        auth,
+        [{ proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] }],
+        effectiveAt,
+        proposal.proposed.thresholdPolicies
+      )
+      const bareSignature = await sig(digestToBytes(rosterDigest))
+      await auth.authorityEngine.proposeAdmin(proposal, bareSignature)
       const completedRow = await auth.ctx.db
-        .prepare("select Digest, AdminEffectiveAt from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
-        .get({ id: auth.authority.id })
+        .prepare('select Digest, AdminEffectiveAt from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: rosterDigest })
       if (!completedRow) throw new Error('N1 setup: no completed rad session found')
 
       // 999.1 R-06 finding (recorded in the SUMMARY): sign()'s threshold query
@@ -1452,10 +1535,25 @@ describe('AuthorityEngine', () => {
         },
         signers: [auth.user.id]
       }
-      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      // 57-08 (Trigger A): bare Signature, not the callback — see C1's
+      // comment. N2 tampers with the persisted roster AFTER proposeAdmin
+      // returns and BEFORE promoting; Trigger A auto-promoting the callback
+      // form would apply the (still-correct-at-that-point) roster first,
+      // leaving a live Admin row this test's tamper step cannot retract.
+      const rosterDigest = await computeRosterDigest(
+        auth,
+        [
+          { proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+        ],
+        effectiveAt,
+        proposal.proposed.thresholdPolicies
+      )
+      const bareSignature = await sig(digestToBytes(rosterDigest))
+      await auth.authorityEngine.proposeAdmin(proposal, bareSignature)
       const nonceRow = await auth.ctx.db
-        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
-        .get({ id: auth.authority.id })
+        .prepare('select Nonce from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: rosterDigest })
       const nonce = nonceRow!.Nonce as string
 
       // Tamper with the persisted roster AFTER signing — the signed Digest no
@@ -1574,10 +1672,28 @@ describe('AuthorityEngine', () => {
         },
         signers: [auth.user.id]
       }
-      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      // 57-08 (Trigger A): bare Signature, not the callback — see C1's
+      // comment. N5 needs the ORIGINAL roster session to be UNPROMOTED so
+      // its OWN manual applyAdminProposal call (with the exec monkeypatch
+      // installed below) is what actually drives the officer-insert loop;
+      // an auto-promotion via the callback form would apply it first
+      // (before the monkeypatch exists) and the manual call would then
+      // short-circuit on alreadyApplied, never reaching the injected
+      // failure.
+      const rosterDigest = await computeRosterDigest(
+        auth,
+        [
+          { proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+        ],
+        effectiveAt,
+        proposal.proposed.thresholdPolicies
+      )
+      const bareSignature = await sig(digestToBytes(rosterDigest))
+      await auth.authorityEngine.proposeAdmin(proposal, bareSignature)
       const nonceRow = await auth.ctx.db
-        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
-        .get({ id: auth.authority.id })
+        .prepare('select Nonce from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: rosterDigest })
       const nonce = nonceRow!.Nonce as string
 
       // Neither the digest verification (T-57-07-02) nor any live SCOPE table
@@ -1641,9 +1757,6 @@ describe('AuthorityEngine', () => {
         signers: [auth.user.id]
       }
       await auth.authorityEngine.proposeAdmin(proposal, sig)
-      const sessionRow = await auth.ctx.db
-        .prepare("select Digest from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
-        .get({ id: auth.authority.id })
 
       type RosterEntryForN6 = { proposedName: string; title: string; scopes: string[] }
       const sortRosterEntriesExported = (AuthorityEngineModule as unknown as {
@@ -1666,6 +1779,17 @@ describe('AuthorityEngine', () => {
           officers: officersJson,
           thresholdPolicies: JSON.stringify(thresholdPolicies)
         })
+
+      // 57-08 (Trigger A): look up the session by the recomputed Digest, not
+      // "order by Nonce desc limit 1" — Trigger A auto-promotes this
+      // (perfectly valid, resolvable) roster, minting ADDITIONAL 'rad'
+      // AdminSigning rows (Admin-side/officer-side) under fresh, randomly-
+      // ordered nonces. Nonce is a random UUID, not chronological, so the
+      // old ordering query can no longer reliably pick the ORIGINAL
+      // roster-covering session.
+      const sessionRow = await auth.ctx.db
+        .prepare('select Digest from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: recomputedRow?.d as string })
       expect(recomputedRow?.d, 'the exported sortRosterEntries must reproduce the exact signed Digest').to.equal(sessionRow?.Digest)
     })
   })
