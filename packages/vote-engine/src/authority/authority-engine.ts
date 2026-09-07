@@ -561,29 +561,81 @@ export class AuthorityEngine implements IAuthorityEngine {
 				: verifySig(digestRow.d, signature.signature, signature.signerKey);
 			const isUserValid = membership.valid && signatureValid;
 
-			await this.ctx.db.exec(
-				`insert into ProposedAdmin (
-					AuthorityId,
-					EffectiveAt,
-					ThresholdPolicies
-				)
-					with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
-				values (
-					:authorityId,
-					:effectiveAt,
-					:thresholdPolicies
-				)`,
-				{
-					authorityId: this.authority.id,
-					effectiveAt: effectiveAtCanon,
-					thresholdPolicies: thresholdPoliciesJson,
-					signerUserId: signature.signerUserId,
-					signerKey: signature.signerKey,
-					signature: signature.signature,
-					now: nowCanonicalDatetime(),
-					isUserValid,
-				},
-			);
+			// 57-01 (D-01 propose side, T-57-04): ProposedAdmin + its roster commit
+			// atomically. ProposedAdmin MUST land first — ProposedOfficer.AdminValid
+			// requires the matching ProposedAdmin row to already exist. COMMIT here,
+			// BEFORE calling signingEngine.startSigningSession below — Quereus's
+			// transaction model is flat and startSigningSession calls sign(), which
+			// opens its own transaction by default.
+			const nowCanon = nowCanonicalDatetime();
+			await this.ctx.db.exec('BEGIN');
+			try {
+				await this.ctx.db.exec(
+					`insert into ProposedAdmin (
+						AuthorityId,
+						EffectiveAt,
+						ThresholdPolicies
+					)
+						with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
+					values (
+						:authorityId,
+						:effectiveAt,
+						:thresholdPolicies
+					)`,
+					{
+						authorityId: this.authority.id,
+						effectiveAt: effectiveAtCanon,
+						thresholdPolicies: thresholdPoliciesJson,
+						signerUserId: signature.signerUserId,
+						signerKey: signature.signerKey,
+						signature: signature.signature,
+						now: nowCanon,
+						isUserValid,
+					},
+				);
+
+				// D-03: ProposedOfficerUser deliberately left unpopulated — its
+				// SignatureValid constraint is a permanent `check (true)` stub with
+				// an explicit "role undecided" TODO in the schema, and the 57-01
+				// read-side probe found no TypeScript reader anywhere that depends
+				// on ProposedOfficerUser rows existing (see 57-01-SUMMARY.md).
+				for (const entry of rosterEntries) {
+					await this.ctx.db.exec(
+						`insert into ProposedOfficer (
+							AuthorityId,
+							AdminEffectiveAt,
+							ProposedName,
+							Title,
+							Scopes
+						)
+							with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
+						values (
+							:authorityId,
+							:effectiveAt,
+							:proposedName,
+							:title,
+							:scopes
+						)`,
+						{
+							authorityId: this.authority.id,
+							effectiveAt: effectiveAtCanon,
+							proposedName: entry.proposedName,
+							title: entry.title,
+							scopes: JSON.stringify(entry.scopes),
+							signerUserId: signature.signerUserId,
+							signerKey: signature.signerKey,
+							signature: signature.signature,
+							now: nowCanon,
+							isUserValid,
+						},
+					);
+				}
+
+				await this.ctx.db.exec('COMMIT');
+			} catch (innerErr) {
+				await this.ctx.db.exec('ROLLBACK');
+				throw innerErr;
+			}
 
 			const adminDigestArgs: AdminDigestArgs = {
 				authorityId: this.authority.id,

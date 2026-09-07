@@ -792,6 +792,39 @@ describe('AuthorityEngine', () => {
         })
       expect(storedDigestRow?.Digest).to.not.equal(threeArgDigestRow?.d)
     })
+
+    it('should roll back ProposedAdmin when a roster insert fails (T-57-04 atomicity)', async () => {
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const sig = makeRealSignCallback('user-1')
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: 'user-1', authorityId: authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            // Deliberately invalid scope code — absent from the `Scope` table,
+            // trips ProposedOfficer.ScopesValid.
+            { init: { name: 'Zeta Officer', title: 'Clerk', scopes: ['not-a-real-scope'] as unknown as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: ['user-1']
+      }
+
+      let threw = false
+      try {
+        await authorityEngine.proposeAdmin(proposal, sig)
+      } catch {
+        threw = true
+      }
+      expect(threw, 'proposeAdmin must reject an invalid roster scope').to.be.true
+
+      const row = await ctx.db
+        .prepare('select count(*) as n from ProposedAdmin where AuthorityId = :id and EffectiveAt = :e')
+        .get({ id: authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(row?.n)).to.equal(0)
+    })
   })
 
   // -----------------------------------------------------------------------
