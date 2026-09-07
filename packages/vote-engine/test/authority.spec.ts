@@ -1309,6 +1309,309 @@ describe('AuthorityEngine', () => {
         .get({ id: auth.authority.id, e: toCanonicalDatetime(effectiveAt) })
       expect(Number(officerCountRow?.n)).to.equal(1)
     })
+
+    // -----------------------------------------------------------------
+    // GROUP 3 — refusal negative controls + atomicity (Task 3).
+    // Every case asserts on `err.reason`, never on message text.
+    // -----------------------------------------------------------------
+
+    it('N1: refuses an unsigned session — reason "not-signed", zero writes', async () => {
+      const { auth } = await createPromotionFixture()
+      const sig = makeTestSignCallback(auth.user)
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      const completedRow = await auth.ctx.db
+        .prepare("select Digest, AdminEffectiveAt from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
+        .get({ id: auth.authority.id })
+      if (!completedRow) throw new Error('N1 setup: no completed rad session found')
+
+      // 999.1 R-06 finding (recorded in the SUMMARY): sign()'s threshold query
+      // extracts json_extract(value, '$.scope') while ThresholdPolicies stores
+      // '$.policy' — the lookup always falls back to threshold=1, so a
+      // thresholdPolicies:2 proposal still auto-completes on the instigator's
+      // own signature (AdminSignature IS written). AdminSignature is also
+      // InsertOnly (no delete), so an "unsigned" state cannot be constructed
+      // by proposing threshold=2 and stopping short, nor by deleting the row.
+      // Instead: mint a SECOND AdminSigning row carrying the SAME (already
+      // roster-matching) Digest under a FRESH nonce, and never sign it — this
+      // reproduces "a genuinely unsigned session for an otherwise-valid
+      // roster" without relying on the broken threshold arithmetic.
+      const unsignedNonce = 'n1-unsigned-' + crypto.randomUUID()
+      await auth.ctx.db.exec(
+        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
+        {
+          nonce: unsignedNonce,
+          authorityId: auth.authority.id,
+          adminEffectiveAt: completedRow.AdminEffectiveAt as string,
+          digest: completedRow.Digest as string,
+          now: nowCanonicalDatetime(),
+          ...(await (async () => {
+            const s = await sig(digestToBytes(completedRow.Digest as string))
+            return { userId: s.signerUserId, signerKey: s.signerKey, signature: s.signature }
+          })())
+        }
+      )
+
+      let caught: unknown
+      try {
+        await auth.authorityEngine.applyAdminProposal(unsignedNonce, sig)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as { reason?: string })?.reason, 'N1 must refuse with reason "not-signed"').to.equal('not-signed')
+      const adminRow = await auth.ctx.db
+        .prepare('select count(*) as n from Admin where AuthorityId = :id and EffectiveAt = :e')
+        .get({ id: auth.authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(adminRow?.n), 'N1 must write zero Admin rows').to.equal(0)
+      const officerRow = await auth.ctx.db
+        .prepare('select count(*) as n from Officer where AuthorityId = :id and AdminEffectiveAt = :e')
+        .get({ id: auth.authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(officerRow?.n), 'N1 must write zero Officer rows').to.equal(0)
+    })
+
+    it('N2: refuses a tampered roster — reason "roster-mismatch", zero writes (repudiation control)', async () => {
+      const { auth, secondUser } = await createPromotionFixture()
+      const sig = makeTestSignCallback(auth.user)
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { existing: { userId: secondUser.id, authorityId: auth.authority.id, title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      const nonceRow = await auth.ctx.db
+        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
+        .get({ id: auth.authority.id })
+      const nonce = nonceRow!.Nonce as string
+
+      // Tamper with the persisted roster AFTER signing — the signed Digest no
+      // longer covers this scope value. ProposedOfficer.UserValid applies to
+      // UPDATE too, so the raw update must supply the full mutation context.
+      await auth.ctx.db.exec(
+        `update ProposedOfficer
+         with context UserId = :uid, UserKey = :ukey, Signature = :sigv, Tid = 999999, now = :now, IsUserValid = true
+         set Scopes = :scopes
+         where AuthorityId = :authorityId and AdminEffectiveAt = :effectiveAt and ProposedName = :name`,
+        {
+          authorityId: auth.authority.id,
+          effectiveAt: toCanonicalDatetime(effectiveAt),
+          name: secondUser.name,
+          scopes: JSON.stringify(['vrg', 'uai']),
+          uid: auth.user.id,
+          ukey: '0'.repeat(66),
+          sigv: 'aa'.repeat(64),
+          now: nowCanonicalDatetime()
+        }
+      )
+
+      let caught: unknown
+      try {
+        await auth.authorityEngine.applyAdminProposal(nonce, sig)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as { reason?: string })?.reason, 'N2 must refuse with reason "roster-mismatch"').to.equal('roster-mismatch')
+      const adminRow = await auth.ctx.db
+        .prepare('select count(*) as n from Admin where AuthorityId = :id and EffectiveAt = :e')
+        .get({ id: auth.authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(adminRow?.n), 'N2 must write zero Admin rows').to.equal(0)
+    })
+
+    it('N3: refuses an unresolvable officer — reason "unresolvable-officer", zero writes (rolls back rather than promoting a partial roster)', async () => {
+      const { auth } = await createPromotionFixture()
+      const sig = makeTestSignCallback(auth.user)
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { init: { name: 'Nobody Matches This Name', title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      const nonceRow = await auth.ctx.db
+        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
+        .get({ id: auth.authority.id })
+      const nonce = nonceRow!.Nonce as string
+
+      let caught: unknown
+      try {
+        await auth.authorityEngine.applyAdminProposal(nonce, sig)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as { reason?: string })?.reason, 'N3 must refuse with reason "unresolvable-officer"').to.equal('unresolvable-officer')
+      const adminRow = await auth.ctx.db
+        .prepare('select count(*) as n from Admin where AuthorityId = :id and EffectiveAt = :e')
+        .get({ id: auth.authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(adminRow?.n), 'N3 must roll back — zero Admin rows for this EffectiveAt').to.equal(0)
+    })
+
+    it('N4: refuses a roster with no rad-scoped officer — reason "no-rad-officer", zero writes', async () => {
+      const { auth, secondUser } = await createPromotionFixture()
+      const sig = makeTestSignCallback(auth.user)
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['uai'] as Scope[] } },
+            { existing: { userId: secondUser.id, authorityId: auth.authority.id, title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'uai', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      const nonceRow = await auth.ctx.db
+        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
+        .get({ id: auth.authority.id })
+      const nonce = nonceRow!.Nonce as string
+
+      let caught: unknown
+      try {
+        await auth.authorityEngine.applyAdminProposal(nonce, sig)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as { reason?: string })?.reason, 'N4 must refuse with reason "no-rad-officer"').to.equal('no-rad-officer')
+      const adminRow = await auth.ctx.db
+        .prepare('select count(*) as n from Admin where AuthorityId = :id and EffectiveAt = :e')
+        .get({ id: auth.authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(adminRow?.n)).to.equal(0)
+    })
+
+    it('N5: a failed second Officer insert leaves zero Admin rows (transactional atomicity)', async () => {
+      const { auth, secondUser } = await createPromotionFixture()
+      const sig = makeTestSignCallback(auth.user)
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { existing: { userId: secondUser.id, authorityId: auth.authority.id, title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      const nonceRow = await auth.ctx.db
+        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
+        .get({ id: auth.authority.id })
+      const nonce = nonceRow!.Nonce as string
+
+      // Neither the digest verification (T-57-07-02) nor any live SCOPE table
+      // can be tampered independently of the roster it re-verifies (the whole
+      // roster, including every non-minimum officer's Title/Scopes, is folded
+      // into the ONE digest Step 3 checks) — so a genuine schema-CHECK
+      // rejection isolated to exactly the second Officer row is structurally
+      // unreachable without also tripping the (correctly stricter)
+      // roster-mismatch refusal first. Per the plan's own fallback: stub the
+      // failure at the second Officer insert by intercepting the DB's own
+      // `exec`, proving the surrounding BEGIN/COMMIT/ROLLBACK envelope is
+      // real — the first Officer insert and the Admin insert are inside the
+      // SAME transaction as the second, so a failure there must roll back
+      // all three.
+      const originalExec = auth.ctx.db.exec.bind(auth.ctx.db)
+      let officerInsertCount = 0
+      auth.ctx.db.exec = (async (sql: string, params?: unknown) => {
+        if (typeof sql === 'string' && sql.includes('insert into Officer (')) {
+          officerInsertCount++
+          if (officerInsertCount === 2) {
+            throw new Error('N5 injected failure: second Officer insert')
+          }
+        }
+        return originalExec(sql as never, params as never)
+      }) as typeof auth.ctx.db.exec
+
+      let caught: unknown
+      try {
+        await auth.authorityEngine.applyAdminProposal(nonce, sig)
+      } catch (err) {
+        caught = err
+      } finally {
+        auth.ctx.db.exec = originalExec
+      }
+      expect(caught, 'N5 must reject when the second Officer insert fails').to.exist
+      expect(officerInsertCount, 'N5 setup: the injected failure must have fired on the second Officer insert').to.equal(2)
+      const adminRow = await auth.ctx.db
+        .prepare('select count(*) as n from Admin where AuthorityId = :id and EffectiveAt = :e')
+        .get({ id: auth.authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(adminRow?.n), 'N5: the rollback must leave zero Admin rows — no half-applied administration').to.equal(0)
+      const officerRow = await auth.ctx.db
+        .prepare('select count(*) as n from Officer where AuthorityId = :id and AdminEffectiveAt = :e')
+        .get({ id: auth.authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(officerRow?.n), 'N5: the rollback must leave zero Officer rows, including the FIRST officer').to.equal(0)
+    })
+
+    it('N6: the roster serializer reproduces the exact bytes a fresh proposeAdmin call signed (regression guard)', async () => {
+      const { auth, secondUser } = await createPromotionFixture()
+      const sig = makeTestSignCallback(auth.user)
+      const effectiveAt = Date.now() + 60_000
+      const thresholdPolicies = [{ policy: 'rad' as Scope, threshold: 1 }]
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { existing: { userId: secondUser.id, authorityId: auth.authority.id, title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, sig)
+      const sessionRow = await auth.ctx.db
+        .prepare("select Digest from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
+        .get({ id: auth.authority.id })
+
+      type RosterEntryForN6 = { proposedName: string; title: string; scopes: string[] }
+      const sortRosterEntriesExported = (AuthorityEngineModule as unknown as {
+        sortRosterEntries?: (entries: RosterEntryForN6[]) => RosterEntryForN6[]
+      }).sortRosterEntries
+      if (typeof sortRosterEntriesExported !== 'function') {
+        expect.fail('authority-engine.ts does not export sortRosterEntries')
+        return
+      }
+      const rebuiltRoster = sortRosterEntriesExported([
+        { proposedName: 'Test User', title: 'Chair', scopes: ['rad'] },
+        { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+      ])
+      const officersJson = JSON.stringify(rebuiltRoster)
+      const recomputedRow = await auth.ctx.db
+        .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
+        .get({
+          authorityId: auth.authority.id,
+          effectiveAt: toCanonicalDatetime(effectiveAt),
+          officers: officersJson,
+          thresholdPolicies: JSON.stringify(thresholdPolicies)
+        })
+      expect(recomputedRow?.d, 'the exported sortRosterEntries must reproduce the exact signed Digest').to.equal(sessionRow?.Digest)
+    })
   })
 
   // -----------------------------------------------------------------------
