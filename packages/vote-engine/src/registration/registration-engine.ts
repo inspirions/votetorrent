@@ -22,7 +22,7 @@ import {
   STATUS_REJECTED
 } from './registration-request-query.js'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
-import { isChecklistGateMet, VERIFICATION_CHECKLIST_ITEM_ORDER, verificationCid as computeVerificationCidFor } from '@votetorrent/vote-core'
+import { isChecklistGateMet, VERIFICATION_CHECKLIST_ITEM_ORDER, verificationCid as computeVerificationCidFor, RegistrantAlreadyExistsError } from '@votetorrent/vote-core'
 import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
 import type {
@@ -287,6 +287,17 @@ export class RegistrationEngine implements IRegistrationEngine {
   ): Promise<Registrant> {
     this.requireCtx('createRegistrant')
     const ctx = this.ctx!
+
+    // R2/D-04/D-05: same guard as register() — protects a direct caller of
+    // createRegistrant() too. Kept outside the try/catch below for the same
+    // reason (this.rethrow() would otherwise wrap it into a plain Error).
+    const existingRegistrant = await ctx.db
+      .prepare('select 1 from Registrant where Id = :id')
+      .get({ id: input.id })
+    if (existingRegistrant) {
+      throw new RegistrantAlreadyExistsError(input.id)
+    }
+
     const tid = await allocateTid(ctx.db, 'registration')
     try {
       const status = input.status ?? 'a'
@@ -1134,6 +1145,22 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
 
     const registrantId = init.registrant.id
+
+    // R2/D-04/D-05: idempotency pre-check. A second register() call with the
+    // same registrant.id must fail with a typed, instanceof-checkable error
+    // BEFORE any transaction opens — never by deleting/rotating the existing
+    // row (registration is a multi-step ceremony; a destructive retry risks
+    // key-bound state). Deliberately kept OUTSIDE the try/catch below: this
+    // method's own catch funnels through `this.rethrow()`, which wraps any
+    // plain Error into a fresh `new Error(...)` (ceremony-helpers.ts) and
+    // would destroy the instanceof check callers rely on.
+    const existingRegistrant = await ctx.db
+      .prepare('select 1 from Registrant where Id = :id')
+      .get({ id: registrantId })
+    if (existingRegistrant) {
+      throw new RegistrantAlreadyExistsError(registrantId)
+    }
+
     try {
       await ctx.db.exec('BEGIN')
       try {
