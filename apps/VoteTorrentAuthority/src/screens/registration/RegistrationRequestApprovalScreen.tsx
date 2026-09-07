@@ -276,7 +276,7 @@ export default function RegistrationRequestApprovalScreen() {
 				setChecked(r.verificationChecklist ?? []);
 
 				try {
-					const prior = await reg.getPriorRejections(r.requesterKey);
+					const prior = await reg.getPriorRejections(r.requesterKey, r.requestId);
 					if (!unmountedRef.current) setPriorRejections(prior);
 				} catch (err) {
 					// L-3: rendering nothing here would be indistinguishable from "no

@@ -26,7 +26,13 @@ import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
-const titleKey: Record<SignatureTask["signatureType"], string> = {
+// 'registrant' is deliberately excluded from this map's key type — it can never reach this
+// screen. TasksScreen.tsx's `renderableSignatureTasks` filter and useTaskCount.ts's
+// `renderableSigs` filter both exclude `signatureType === "registrant"` (registrant decisions
+// go through RegistrationRequestApprovalScreen instead), and the two filters change together
+// or not at all. Narrowing here with Exclude<> makes that existing exclusion structurally
+// honest rather than adding an entry that could never be looked up.
+const titleKey: Record<Exclude<SignatureTask["signatureType"], "registrant">, string> = {
 	admin: "adminRevision",
 	authority: "authorityRevision",
 	network: "networkRevision",
@@ -47,7 +53,12 @@ export default function SignatureTaskScreen() {
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	useLayoutEffect(() => {
-		navigation.setOptions({ title: t(titleKey[task.signatureType]) });
+		// Guarded, not cast: 'registrant' tasks never reach this screen (see the titleKey
+		// comment above), but task.signatureType is still typed as the full union, so the
+		// lookup needs this narrowing test to typecheck under strict mode.
+		if (task.signatureType !== "registrant") {
+			navigation.setOptions({ title: t(titleKey[task.signatureType]) });
+		}
 	}, [navigation, t, task.signatureType]);
 
 	// SIGN-02 accept path (D-01/D-03/D-04):

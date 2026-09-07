@@ -129,7 +129,7 @@ let mockTasks: any[] = [taskFor(PENDING_READ)];
 let mockScopes: string[] | undefined = ["vrg"];
 
 const mockGetRegistrationRequest = jest.fn(async (_id: string) => mockCurrentRead);
-const mockGetPriorRejections = jest.fn(async (_requesterKey: string) => {
+const mockGetPriorRejections = jest.fn(async (_requesterKey: string, _excludeRequestId?: string) => {
 	if (mockPriorRejectionsError) throw mockPriorRejectionsError;
 	return mockPriorRejections;
 });
@@ -643,6 +643,12 @@ describe("RegistrationRequestApprovalScreen — Group B (D-07 gate, accept cerem
 		expect(mockGoBack).not.toHaveBeenCalled();
 		expect(exists(tr, "registration-request-approval-error")).toBe(true);
 	});
+
+	it("10c. R3: getPriorRejections is called with the read's own requesterKey AND its own requestId, so the request cannot cite itself", async () => {
+		await renderScreen();
+
+		expect(mockGetPriorRejections.mock.calls[0]).toEqual([PENDING_READ.requesterKey, PENDING_READ.requestId]);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1033,22 +1039,28 @@ describe("RegistrationRequestApprovalScreen — Group I (48-26 gap 4: footer sta
 });
 
 // ---------------------------------------------------------------------------
-// Group G — the untouched-file source gate.
+// Group G — SignatureTaskScreen.tsx's titleKey source gate.
 // ---------------------------------------------------------------------------
+//
+// 57-06 (R4) legitimately touches SignatureTaskScreen.tsx to narrow titleKey's
+// key type with Exclude<SignatureTask["signatureType"], "registrant">, so the
+// file's source now DOES carry the token "registrant" (in the Exclude<> type
+// and its explanatory comments) — the prior "carries no 'registrant' token at
+// all" assertion is now the wrong invariant to check. What must still hold,
+// and is asserted below at the source level since react-test-renderer cannot
+// see a sibling file: the titleKey MAP itself gains no `registrant` entry,
+// and its six existing entries are unchanged.
 
-describe("RegistrationRequestApprovalScreen — Group G (SignatureTaskScreen.tsx left alone)", () => {
-	it("23. SignatureTaskScreen.tsx carries no 'registrant' token and its titleKey record has exactly six entries — asserted at the source level, since react-test-renderer cannot see a file that was never touched", () => {
-		// react-test-renderer proves what RENDERS; it cannot prove a sibling
-		// file was left alone. This is a source-level gate by necessity,
-		// mirroring phase47Routes.test.tsx's own source-gate rationale.
+describe("RegistrationRequestApprovalScreen — Group G (SignatureTaskScreen.tsx titleKey map)", () => {
+	it("23. SignatureTaskScreen.tsx's titleKey record has exactly six entries and none of them is 'registrant' — asserted at the source level, since react-test-renderer cannot see a sibling file", () => {
 		const filePath = path.join(__dirname, "..", "..", "tasks", "SignatureTaskScreen.tsx");
 		const source = fs.readFileSync(filePath, "utf8");
 
-		expect(/registrant/i.test(source)).toBe(false);
-
 		const titleKeyMatch = source.match(/const titleKey:[\s\S]*?= \{([\s\S]*?)\};/);
 		expect(titleKeyMatch).not.toBeNull();
-		const entryCount = (titleKeyMatch![1].match(/^\s*"?[a-zA-Z-]+"?:\s*"[^"]+",?\s*$/gm) ?? []).length;
+		const mapBody = titleKeyMatch![1];
+		const entryCount = (mapBody.match(/^\s*"?[a-zA-Z-]+"?:\s*"[^"]+",?\s*$/gm) ?? []).length;
 		expect(entryCount).toBe(6);
+		expect(/^\s*"?registrant"?:/m.test(mapBody)).toBe(false);
 	});
 });
