@@ -37,6 +37,24 @@
  * scratch directory and used only as a comparison target and a
  * module-resolution redirect target; no manifest gains a dependency and
  * `yarn.lock` is never written.
+ *
+ * ── ONE MEASURED CAVEAT, RECORDED BECAUSE IT COSTS A RUN TO REDISCOVER ────
+ *
+ * An unpacked tarball is a BARE package root: it has no `node_modules` of its
+ * own. That is exactly right for `checkDistVerdict` (which reads the package's
+ * own files) and for `withRevertedProbeHostCadreCore` (which drops the copy
+ * INTO a resolved `node_modules` position, where the surrounding tree supplies
+ * the dependencies). It is NOT sufficient, on its own, for a BUNDLER redirect:
+ * measured live on 2026-09-07, a `vite build` with the `cadre-patch-reverted`
+ * mutation pointed at a bare unpacked directory redirects correctly
+ * (`.mutation-report.json` records `removals: 1`, `redirected: ["."]`) and
+ * then fails resolving the pristine package's OWN bare dependency imports —
+ * `Rollup failed to resolve import "@serfab/quereus-plugin-sereus" from
+ * <pristineDir>/dist/types.js`. That failure is downstream of the mutation,
+ * not a property of it, and any leg that builds a production variant from a
+ * pristine directory must first place that directory somewhere its transitive
+ * bare specifiers resolve. Recorded here as a precondition, not solved here:
+ * the leg that needs it does not run this round.
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';

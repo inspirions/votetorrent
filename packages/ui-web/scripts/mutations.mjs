@@ -24,7 +24,7 @@
  * any verdict — a machine-readable fact, never a log-scrape.
  */
 import path from 'node:path';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mergeConfig } from 'vite';
 
 /**
@@ -672,6 +672,11 @@ export function redirectCadreCorePlugin() {
 			if (!outDirAbs) {
 				throw new Error('redirectCadreCorePlugin: outDir was never resolved (configResolved did not run)');
 			}
+			// `closeBundle` also runs on rollup's ERROR path, where no output
+			// has been written and `outDir` may not exist. Creating it here
+			// keeps a missing directory from masking the build's REAL error
+			// with an ENOENT from this line (measured live).
+			mkdirSync(outDirAbs, { recursive: true });
 			writeFileSync(
 				path.join(outDirAbs, '.mutation-report.json'),
 				JSON.stringify(
@@ -785,6 +790,10 @@ export function stripPeerNotifyPlugin() {
 			if (!outDirAbs) {
 				throw new Error('stripPeerNotifyPlugin: outDir was never resolved (configResolved did not run)');
 			}
+			// Same reason `redirectCadreCorePlugin` does it: `closeBundle`
+			// also runs on rollup's error path, and an ENOENT from this line
+			// would mask the build's real error.
+			mkdirSync(outDirAbs, { recursive: true });
 			writeFileSync(
 				path.join(outDirAbs, '.mutation-report.json'),
 				JSON.stringify({ mutation: 'notify-disabled', removals: 1, removedStatement: removedStatements[0] }, null, 2),

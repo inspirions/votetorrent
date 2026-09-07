@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { mergeConfig } from 'vite';
 import baseConfig from './vite.config';
 import { GATE_OVERRIDES } from './vite.gate.config';
+import { MESH_READ_OVERRIDES } from './vite.mesh-read.config';
 import {
 	resolveMutation,
 	applyNoDedupe,
@@ -81,21 +82,39 @@ if (mutation === 'no-dedupe') {
 	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
 	mutatedConfig = mergeConfig(merged, { plugins: [revertPillRetonePlugin()] });
 } else if (mutation === 'cadre-patch-reverted') {
-	// 56-13 Task 1: same shape again, plus the plugin that redirects every
-	// @serfab/cadre-core specifier to a PRISTINE, unpatched copy of the
-	// package. The mutation lives entirely in the Vite plugin pipeline (the
-	// token-missing branch is the precedent) and is a module-RESOLUTION
-	// redirect, never a dist edit — see the plugin's own header for the
-	// measured reason. It throws at plugin construction when
-	// UI_GATE_PRISTINE_CADRE_CORE is unset, so a mutant build with no
-	// redirect target never emits a bundle at all.
-	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
+	// 56-13 Task 1: same shape as the token-missing branch — the mutation
+	// lives entirely in the Vite plugin pipeline — plus the plugin that
+	// redirects every @serfab/cadre-core specifier to a PRISTINE, unpatched
+	// copy of the package. It is a module-RESOLUTION redirect, never a dist
+	// edit; see the plugin's own header for the measured reason. It throws at
+	// plugin construction when UI_GATE_PRISTINE_CADRE_CORE is unset, so a
+	// mutant build with no redirect target never emits a bundle at all.
+	//
+	// MESH_READ_OVERRIDES, NOT GATE_OVERRIDES, and the reason is MEASURED,
+	// not stylistic. GATE_OVERRIDES builds `election-shell-gate.html`, a
+	// pure-UI entry whose closure contains no peer layer at all: a build made
+	// through it redirects ZERO specifiers and dies on this plugin's own
+	// `MUTATION IS A NO-OP` guard every single time, whatever the package
+	// bytes say — an inversion that can never fire is exactly the
+	// green-that-cannot-fail this mutation exists to prevent. The entry whose
+	// closure actually resolves the package, and the entry the control that
+	// drives this mutation then serves, is the mesh-read gate's. The trailing
+	// outDir/emptyOutDir override below still lands the result in the
+	// mutation-named, gitignored directory, so `dist-mesh-read/` is untouched.
+	const merged = mergeConfig(resolvedBaseConfig, MESH_READ_OVERRIDES);
 	mutatedConfig = mergeConfig(merged, { plugins: [redirectCadreCorePlugin()] });
 } else if (mutation === 'notify-disabled') {
 	// 56-13 Task 1: same shape again, plus the plugin that removes the ONE
 	// single-line peer-notify statement from the replication bridge. Applied
 	// to SOURCE before the build, never to dist and never at runtime.
-	const merged = mergeConfig(resolvedBaseConfig, GATE_OVERRIDES);
+	//
+	// MESH_READ_OVERRIDES for the same MEASURED reason as the branch above,
+	// and one more that is specific to this mutation: the statement it
+	// removes lives in `src/peer/reactivity-bridge.js`, which the shell-gate
+	// entry's closure never imports. Built through GATE_OVERRIDES this
+	// mutation is a permanent no-op; built through the mesh-read entry it
+	// reaches the module the liveness rungs it inverts actually depend on.
+	const merged = mergeConfig(resolvedBaseConfig, MESH_READ_OVERRIDES);
 	mutatedConfig = mergeConfig(merged, { plugins: [stripPeerNotifyPlugin()] });
 } else {
 	// FAIL-CLOSED, and the reason this is not a bare `else`. Until 53-11 the
