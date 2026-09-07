@@ -127,9 +127,10 @@ function makeSignature (signerUserId: string): Signature {
 /**
  * 999.1 R-02: real per-digest signature for `startSigningSession` (PATH A, digestArgs !==
  * null — no callback form exists on this method, see ISigningEngine.startSigningSession).
- * Reproduces the exact `Digest(:authorityId, :effectiveAt, :thresholdPolicies)` formula
- * `SigningEngine.startSigningSession` computes engine-side, then signs it for real —
- * AdminSigning.SignatureValid now verifies these bytes via the in-schema UDF.
+ * Reproduces the exact `Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies)`
+ * formula `SigningEngine.startSigningSession` computes engine-side (57-01/D-02 added the
+ * `officers` field), then signs it for real — AdminSigning.SignatureValid now verifies
+ * these bytes via the in-schema UDF.
  */
 async function realSignAdminDigest (
   ctx: EngineContext,
@@ -138,8 +139,13 @@ async function realSignAdminDigest (
   signerUserId: string
 ): Promise<Signature> {
   const row = await ctx.db
-    .prepare('select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d')
-    .get({ authorityId, effectiveAt: digestArgs.effectiveAt, thresholdPolicies: digestArgs.thresholdPolicies })
+    .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
+    .get({
+      authorityId,
+      effectiveAt: digestArgs.effectiveAt,
+      officers: digestArgs.officers,
+      thresholdPolicies: digestArgs.thresholdPolicies
+    })
   const digestB64 = row!.d as string
   const { privateHex, publicHex } = randomTestKeyPair()
   const sigHex = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
@@ -162,9 +168,12 @@ function signTestDigestWithFreshKey (signerUserId: string, digestB64: string): S
 // ===========================================================================
 
 // D-09: AdminDigestArgs for startSigningSession (replaces raw digest string)
+// 57-01 (D-02): officers added — empty roster serializes to '[]', mirroring
+// thresholdPolicies' empty-array default.
 const testDigestArgs: AdminDigestArgs = {
   authorityId: 'test-authority',
   effectiveAt: 'test-effective-at',
+  officers: '[]',
   thresholdPolicies: '[]'
 }
 

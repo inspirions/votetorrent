@@ -73,6 +73,49 @@ import {
 	AuthoritySaveInviteWithSigningBuilder,
 } from './builders/index.js';
 
+/**
+ * 57-01 (D-02): one entry in the admin roster covered by the 'rad' digest.
+ * `proposedName` mirrors `ProposedOfficer.ProposedName` — the officer's
+ * display name, resolved from `User.Name` for `.existing` selections (see
+ * `AuthorityEngine.resolveAdminRoster`).
+ */
+export interface AdminRosterEntry {
+	proposedName: string;
+	title: string;
+	scopes: Scope[];
+}
+
+/**
+ * 57-01 (D-02): deterministic, byte-stable serialization of an admin roster
+ * for the 'rad' digest. Sorted ascending by `proposedName` (localeCompare)
+ * with a fixed per-entry key order (`proposedName`, `title`, `scopes`) and
+ * `scopes` themselves sorted ascending, so the resulting JSON — and
+ * therefore the digest built from it — is independent of caller input
+ * order. Deliberately NOT the schema's single-row, LIMIT-1-style shortcut
+ * elsewhere in this codebase, which would digest only the first officer
+ * rather than the full roster.
+ *
+ * Deliberately exported as a pure, side-effect-free function (not inlined
+ * into `proposeAdmin`) so roster-order determinism and scope-change
+ * sensitivity are directly unit-testable without a live `proposeAdmin`
+ * round trip — see `authority.spec.ts`'s 'proposeAdmin' D-02 cases.
+ * `ProposedAdmin`/`ProposedOfficer`'s composite primary keys (plus
+ * `ProposedOfficer.CantDelete`) make a second `proposeAdmin` call against
+ * the SAME (authorityId, effectiveAt) structurally impossible, so this pure
+ * function is the only place that property is observable in isolation.
+ */
+export function sortRosterEntries(
+	entries: AdminRosterEntry[],
+): AdminRosterEntry[] {
+	return entries
+		.map((entry) => ({
+			proposedName: entry.proposedName,
+			title: entry.title,
+			scopes: [...entry.scopes].sort(),
+		}))
+		.sort((a, b) => a.proposedName.localeCompare(b.proposedName));
+}
+
 export class AuthorityEngine implements IAuthorityEngine {
 	constructor(
 		private readonly authority: Authority,
@@ -409,6 +452,50 @@ export class AuthorityEngine implements IAuthorityEngine {
 		}
 	}
 
+	/**
+	 * 57-01 (D-01 propose side, D-03): resolve each `OfficerSelection` in a
+	 * `proposeAdmin` roster into an `AdminRosterEntry`. For `.init`, the
+	 * caller-supplied `name`/`title`/`scopes` are taken directly. For
+	 * `.existing`, `ProposedOfficer` is keyed by NAME (not userId), so the
+	 * display name is resolved from `User.Name` — mirroring the bridge
+	 * `ProposedAdministrationScreen.tsx` already uses, not a second one. If
+	 * the `User` row is missing, this throws rather than silently
+	 * substituting the userId as the name (T-57-05).
+	 *
+	 * Returns entries UNSORTED, in caller order — callers needing the
+	 * digest/serialization form must run the result through
+	 * `sortRosterEntries`.
+	 */
+	private async resolveAdminRoster(
+		officers: OfficerSelection[],
+	): Promise<AdminRosterEntry[]> {
+		const entries: AdminRosterEntry[] = [];
+		for (const selection of officers) {
+			if (selection.init) {
+				entries.push({
+					proposedName: selection.init.name,
+					title: selection.init.title,
+					scopes: selection.init.scopes,
+				});
+			} else if (selection.existing) {
+				const userDB = await this.ctx.db
+					.prepare('select Id, Name, ImageRef from User where Id = :id')
+					.get({ id: selection.existing.userId });
+				if (!userDB) {
+					throw new Error(
+						`proposeAdmin: unresolvable officer userId '${selection.existing.userId}' — no matching User row`,
+					);
+				}
+				entries.push({
+					proposedName: userDB.Name as string,
+					title: selection.existing.title,
+					scopes: selection.existing.scopes,
+				});
+			}
+		}
+		return entries;
+	}
+
 	async proposeAdmin(
 		admin: Proposal<AdminInit>,
 		signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>),
@@ -423,16 +510,25 @@ export class AuthorityEngine implements IAuthorityEngine {
 		const effectiveAtCanon = toCanonicalDatetime(admin.proposed.effectiveAt);
 		const tid = await allocateTid(this.ctx.db, 'authority');
 		try {
+			// 57-01 (D-02): resolve + deterministically sort the roster BEFORE
+			// computing the digest, so the digest attests to the FULL roster this
+			// proposal revises — never a single-row, first-officer-only shortcut.
+			const rosterEntries = sortRosterEntries(
+				await this.resolveAdminRoster(admin.proposed.officers),
+			);
+			const officersJson = JSON.stringify(rosterEntries);
+
 			// D-03/D-04: resolve the canonical digest ENGINE-SIDE first — needed both to
 			// hand a sign callback the exact bytes to sign, and (D-21) to independently
 			// re-verify whatever Signature ends up bound, including a pre-supplied one.
 			const digestRow = await this.ctx.db
 				.prepare(
-					'select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d',
+					'select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d',
 				)
 				.get({
 					authorityId: this.authority.id,
 					effectiveAt: effectiveAtCanon,
+					officers: officersJson,
 					thresholdPolicies: thresholdPoliciesJson,
 				});
 			if (!digestRow || digestRow.d == null) {
@@ -492,6 +588,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 			const adminDigestArgs: AdminDigestArgs = {
 				authorityId: this.authority.id,
 				effectiveAt: effectiveAtCanon,
+				officers: officersJson,
 				thresholdPolicies: thresholdPoliciesJson,
 			};
 			// WR-06 (17-REVIEW): proposeAdmin only STARTS the signing session with

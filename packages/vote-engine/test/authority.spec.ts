@@ -3182,9 +3182,18 @@ describe('AuthorityProposeAdminBuilder', () => {
     const ctx2 = (eng2 as unknown as { ctx: EngineContext }).ctx
     const effectiveAtCanon = toCanonicalDatetime(admin.proposed.effectiveAt)
     const thresholdPoliciesJson = JSON.stringify(admin.proposed.thresholdPolicies)
+    // 57-01 (D-02): proposeAdmin now folds the roster into the digest too —
+    // makeAdminProposal()'s single '.init' officer, serialized the same way
+    // sortRosterEntries would (one entry, so ordering is moot).
+    const officersJson2 = JSON.stringify([{ proposedName: 'Admin A', title: 'Chair', scopes: ['rad'] }])
     const digestRow2 = await ctx2.db
-      .prepare('select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d')
-      .get({ authorityId: authority2.id, effectiveAt: effectiveAtCanon, thresholdPolicies: thresholdPoliciesJson })
+      .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
+      .get({
+        authorityId: authority2.id,
+        effectiveAt: effectiveAtCanon,
+        officers: officersJson2,
+        thresholdPolicies: thresholdPoliciesJson
+      })
     // 49-08 (D-21): must sign with eng2's REGISTERED founding 'user-1' key (not a
     // fresh, unregistered one) so proposeAdmin's real IsUserValid membership check
     // passes — createNetworkAndAuthority() above already recorded it.

@@ -240,7 +240,11 @@ export class SigningEngine implements ISigningEngine {
 	 *
 	 * PATH A (digestArgs provided — used by proposeAdmin):
 	 *   Generate a fresh nonce, INSERT AdminSigning with inline
-	 *   Digest(:authorityId, :effectiveAt, :thresholdPolicies) in alphabetical order.
+	 *   Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) in
+	 *   alphabetical order (57-01/D-02: `officers` is the deterministically
+	 *   sorted, serialized admin roster — see `authority-engine.ts`'s
+	 *   `sortRosterEntries` — so a later co-signer's recomputation here
+	 *   matches the producer's digest byte-for-byte).
 	 *
 	 * PATH B (digestArgs is null — used by invite flows via saveInviteWithSigning):
 	 *   Callers must first call generateSigningNonce() to get the nonce, INSERT
@@ -285,7 +289,7 @@ export class SigningEngine implements ISigningEngine {
 
 			if (digestArgs !== null) {
 				// PATH A: inline Digest() — fields in alphabetical order (D-07d)
-				// AdminDigestArgs fields: authorityId, effectiveAt, thresholdPolicies
+				// AdminDigestArgs fields: authorityId, effectiveAt, officers, thresholdPolicies
 				await this.ctx.db.exec(
 					`insert into AdminSigning (
 						Nonce,
@@ -303,7 +307,7 @@ export class SigningEngine implements ISigningEngine {
 						:authorityId,
 						:adminEffectiveAt,
 						:scope,
-						Digest(:authorityId, :effectiveAt, :thresholdPolicies),
+						Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies),
 						:userId,
 						:signerKey,
 						:signature
@@ -314,6 +318,7 @@ export class SigningEngine implements ISigningEngine {
 						adminEffectiveAt: adminDB.EffectiveAt as string,
 						scope,
 						effectiveAt: digestArgs.effectiveAt,
+						officers: digestArgs.officers,
 						thresholdPolicies: digestArgs.thresholdPolicies,
 						userId: signature.signerUserId,
 						signerKey: signature.signerKey,

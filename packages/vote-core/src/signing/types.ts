@@ -3,10 +3,20 @@ import type { Signature } from '../common'
 import type { SigningResult } from './models'
 import type { IBuilder } from '../common/builder.js'
 
-/** D-07c: AdminDigestArgs — fields in alphabetical order per D-07d */
+/**
+ * D-07c: AdminDigestArgs — fields in alphabetical order per D-07d.
+ *
+ * 57-01 (D-02): `officers` carries the deterministically sorted, JSON-
+ * serialized admin roster (see `authority-engine.ts`'s `sortRosterEntries`)
+ * so the 'rad' digest attests to the FULL roster a proposal revises, not
+ * only `thresholdPolicies`. Producer (`AuthorityEngine.proposeAdmin`) and
+ * verifier (`SigningEngine.startSigningSession` PATH A) must serialize and
+ * bind this identically.
+ */
 export interface AdminDigestArgs {
   authorityId: string
   effectiveAt: string
+  officers: string
   thresholdPolicies: string
 }
 
