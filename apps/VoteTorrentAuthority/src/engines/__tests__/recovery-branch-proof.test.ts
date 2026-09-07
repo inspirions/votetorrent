@@ -25,7 +25,7 @@ jest.mock('../device-user', () => ({
 	getDeviceProvisioningRecord: jest.fn(),
 }));
 
-import { runRecoveryBranchProof } from '../recovery-branch-proof';
+import { classifyRecoveryFailure, runRecoveryBranchProof } from '../recovery-branch-proof';
 import { getDeviceProvisioningRecord } from '../device-user';
 
 const mockGetRecord = getDeviceProvisioningRecord as jest.MockedFunction<
@@ -103,5 +103,45 @@ describe('runRecoveryBranchProof — D-26a RESCOPED error classification', () =>
 			sdkInt: 29,
 			branch: 'unsupported-below-api-30',
 		});
+	});
+});
+
+/**
+ * classifyRecoveryFailure — R5c (57-03). The exported, code-first classifier that
+ * `runRecoveryBranchProof`'s catch block now delegates to. Each of the five new precondition
+ * codes is exercised with a GENERIC, non-matching message so a pass here cannot be explained by
+ * the message-regex fallback also matching — only the code path can be responsible for the
+ * `'precondition-unmet'` result.
+ */
+describe('classifyRecoveryFailure — R5c code-first classification', () => {
+	it('classifies RECOVERY_UNSUPPORTED_OS as unsupported-os', () => {
+		const err = Object.assign(new Error('generic message'), { code: 'RECOVERY_UNSUPPORTED_OS' });
+		expect(classifyRecoveryFailure(err)).toBe('unsupported-os');
+	});
+
+	it.each(['CANCELED', 'CANCELLED', 'USER_CANCELED', 'NEGATIVE_BUTTON', 'KEY_INVALIDATED_REASSOCIATE'])(
+		'classifies code %s (with a non-matching message) as precondition-unmet',
+		(code) => {
+			const err = Object.assign(new Error('an unrelated generic message with no keywords'), { code });
+			expect(classifyRecoveryFailure(err)).toBe('precondition-unmet');
+		},
+	);
+
+	it('falls back to the message regex when no code is present', () => {
+		const err = new Error('recovery key invalidated — re-association required');
+		expect(classifyRecoveryFailure(err)).toBe('precondition-unmet');
+	});
+
+	it('negative control — a genuine failure with no matching code or message classifies as fail', () => {
+		const err = new Error('signature verification failed');
+		expect(classifyRecoveryFailure(err)).toBe('fail');
+	});
+
+	it('does not crash on a string throw', () => {
+		expect(classifyRecoveryFailure('a plain string throw')).toBe('fail');
+	});
+
+	it('does not crash on undefined', () => {
+		expect(classifyRecoveryFailure(undefined)).toBe('fail');
 	});
 });
