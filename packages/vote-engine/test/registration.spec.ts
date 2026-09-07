@@ -21,9 +21,10 @@ import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import {
   BuilderAlreadyCommittedError,
-  BuilderValidationError
+  BuilderValidationError,
+  RegistrantAlreadyExistsError
 } from '@votetorrent/vote-core'
-import type { Signature, Scope } from '@votetorrent/vote-core'
+import type { Signature, Scope, RegisterInit } from '@votetorrent/vote-core'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { MockRegistrationEngine } from '../src/registration/mock-registration-engine.js'
 import { RegistrationRegisterBuilder } from '../src/registration/builders/registration-register-builder.js'
@@ -401,6 +402,31 @@ describe('RegistrationEngine', () => {
       expect(row!.lastName).to.equal('Mock')
       expect(row!.district).to.equal('D-1')
     })
+  })
+})
+
+// ===========================================================================
+// register() idempotency — R2/D-04/D-05 (57-02)
+// ===========================================================================
+
+describe('register() idempotency (R2)', () => {
+  it('throws RegistrantAlreadyExistsError on a second register() call with the same registrant.id (D-04: RED-then-green verdict recorded in 57-02-R2-REPRO.md)', async () => {
+    const { auth, engine, sign } = await setupRegistrationTest()
+    const registrantId = nextRegistrantId()
+    const init: RegisterInit = {
+      registrant: { id: registrantId, authorityId: auth.authority.id, expiration: FUTURE_EXPIRATION },
+      private: { expiration: FUTURE_EXPIRATION, details: [] }
+    }
+
+    await engine.register(init, sign)
+
+    let threw = false
+    try {
+      await engine.register(init, sign)
+    } catch (err) {
+      threw = err instanceof RegistrantAlreadyExistsError
+    }
+    expect(threw, 'expected the second register() call to throw RegistrantAlreadyExistsError').to.be.true
   })
 })
 
