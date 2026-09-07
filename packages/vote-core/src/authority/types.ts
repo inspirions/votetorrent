@@ -2,6 +2,7 @@ import type { Proposal, Signature } from '../common'
 import type {
   AuthorityDetails,
   AdminDetails,
+  AdminPromotionResult,
   AuthorityInvite,
   OfficerInvite,
   AdminInit,
@@ -35,6 +36,27 @@ export interface IAuthorityEngine {
   resendInvite(slotCid: string): Promise<string>
   getDetails(): Promise<AuthorityDetails>
   proposeAdmin(admin: Proposal<AdminInit>, signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>)): Promise<void>
+  /**
+   * 57-07 (D-01 promotion half): promote a threshold-reached 'rad'
+   * AdminSigning/AdminSignature session into live Admin + Officer rows.
+   *
+   * Takes a sign CALLBACK ONLY — never a pre-supplied Signature the way
+   * `proposeAdmin` does. This method computes two distinct digests (one
+   * for the promoted Admin row, one shared by every promoted Officer row)
+   * and mints a fresh AdminSigning session for each; a single pre-supplied
+   * Signature could not cover both.
+   *
+   * `options.ownsTransaction` defaults to true. Pass `false` when composing
+   * this call inside a caller's own already-open transaction (57-08).
+   *
+   * Does NOT close R1 by itself — nothing calls this method yet; the
+   * trigger (reacting to a completed 'rad' threshold) is separate work.
+   */
+  applyAdminProposal(
+    nonce: string,
+    sign: (digest: Uint8Array) => Promise<Signature>,
+    options?: { ownsTransaction?: boolean }
+  ): Promise<AdminPromotionResult>
   saveInviteWithSigning(
     invite: AuthorityInvite | OfficerInvite,
     scope: Scope,

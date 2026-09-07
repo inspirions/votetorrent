@@ -1204,7 +1204,7 @@ describe('AuthorityEngine', () => {
     // a fixture/import/SQL error. Must be GREEN by the end of Task 3.
     // -----------------------------------------------------------------
 
-    it('C1 (RED until Task 2): should promote a threshold-reached roster into live Admin + Officer rows', async () => {
+    it('C1: should promote a threshold-reached roster into live Admin + Officer rows', async () => {
       const { auth, secondUser } = await createPromotionFixture()
       const sig = makeTestSignCallback(auth.user)
       const effectiveAt = Date.now() + 60_000
@@ -1221,7 +1221,7 @@ describe('AuthorityEngine', () => {
       }
       await auth.authorityEngine.proposeAdmin(proposal, sig)
       const nonceRow = await auth.ctx.db
-        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' order by Nonce desc limit 1")
+        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
         .get({ id: auth.authority.id })
       const nonce = nonceRow!.Nonce as string
 
@@ -1241,7 +1241,7 @@ describe('AuthorityEngine', () => {
       expect(Number(officerCountRow?.n)).to.equal(2)
     })
 
-    it('C2 (RED until Task 2): a promoted Officer row carries the vrg scope when the proposal granted it', async () => {
+    it('C2: a promoted Officer row carries the vrg scope when the proposal granted it', async () => {
       const { auth, secondUser } = await createPromotionFixture()
       const sig = makeTestSignCallback(auth.user)
       const effectiveAt = Date.now() + 60_000
@@ -1258,7 +1258,7 @@ describe('AuthorityEngine', () => {
       }
       await auth.authorityEngine.proposeAdmin(proposal, sig)
       const nonceRow = await auth.ctx.db
-        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' order by Nonce desc limit 1")
+        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
         .get({ id: auth.authority.id })
       const nonce = nonceRow!.Nonce as string
 
@@ -1276,7 +1276,7 @@ describe('AuthorityEngine', () => {
       expect(JSON.parse(officerRow!.Scopes as string)).to.include('vrg')
     })
 
-    it('C3 (RED until Task 2): promoting the same signing session twice is idempotent', async () => {
+    it('C3: promoting the same signing session twice is idempotent', async () => {
       const { auth } = await createPromotionFixture()
       const sig = makeTestSignCallback(auth.user)
       const effectiveAt = Date.now() + 60_000
@@ -1292,7 +1292,7 @@ describe('AuthorityEngine', () => {
       }
       await auth.authorityEngine.proposeAdmin(proposal, sig)
       const nonceRow = await auth.ctx.db
-        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' order by Nonce desc limit 1")
+        .prepare("select Nonce from AdminSigning where AuthorityId = :id and Scope = 'rad' and not exists (select 1 from InviteSlot where SigningNonce = AdminSigning.Nonce) order by Nonce desc limit 1")
         .get({ id: auth.authority.id })
       const nonce = nonceRow!.Nonce as string
 
@@ -3336,6 +3336,7 @@ function makeStubAuthorityEngine (): IAuthorityEngine {
       }
     },
     async proposeAdmin (): Promise<void> {},
+    async applyAdminProposal () { throw new Error('not implemented') },
     async saveInviteWithSigning (): Promise<void> {},
     async cancelInvite (): Promise<void> {},
     async resendInvite (): Promise<string> { return '' },
