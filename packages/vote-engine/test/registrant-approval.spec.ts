@@ -25,6 +25,7 @@ import { allocateTid } from '../src/database/tid-allocator.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
 import type { EngineContext } from '../src/types.js'
+import { RegistrantAlreadyExistsError } from '@votetorrent/vote-core'
 import type {
   RegisterInit,
   RegistrationRequestInit,
@@ -920,12 +921,19 @@ describe('registrant approval ceremony', () => {
     expect(countsBefore.admin, "R2's seeded row must be unsigned before the accept attempt").to.equal(0)
 
     let thrownMessage: string | undefined
+    let thrownErr: unknown
     try {
       await acceptRequest(engine, auth, r2)
     } catch (err) {
+      thrownErr = err
       thrownMessage = (err as Error).message
     }
     expect(thrownMessage, 'an id-colliding payload must be refused, not silently converged on').to.not.be.undefined
+    // R2/D-04/D-05 (57-02): the refusal is now the typed, instanceof-checkable
+    // RegistrantAlreadyExistsError shared with register()'s own pre-BEGIN guard —
+    // never a raw UNIQUE constraint string, and never a second, differently-worded
+    // ad hoc Error.
+    expect(thrownErr, 'the refusal must be RegistrantAlreadyExistsError, not a raw/ad hoc Error').to.be.instanceOf(RegistrantAlreadyExistsError)
     expect(thrownMessage, 'the refusal must name the refused request').to.include(r2)
 
     const registrantCountAfter = await countRows(auth.ctx, 'select count(*) as n from Registrant')
@@ -959,13 +967,18 @@ describe('registrant approval ceremony', () => {
     // Retryability: a second accept attempt on R2 must throw the SAME refusal, never a UNIQUE
     // constraint violation on OfficerSignature's (SigningNonce, UserId) primary key.
     let secondThrownMessage: string | undefined
+    let secondThrownErr: unknown
     try {
       await acceptRequest(engine, auth, r2)
     } catch (err) {
+      secondThrownErr = err
       secondThrownMessage = (err as Error).message
     }
     expect(secondThrownMessage, 'a refused approval must remain retryable via a second accept attempt').to.not.be.undefined
-    expect(secondThrownMessage, 'the retry must raise the SAME CR-03 refusal fragment').to.include('already-existing Registrant record')
+    // Same instanceof + same named request, not the exact old wording — the retry raises the
+    // SAME refusal CLASS naming the SAME request, per the shared RegistrantAlreadyExistsError.
+    expect(secondThrownErr, 'the retry must raise the SAME RegistrantAlreadyExistsError class').to.be.instanceOf(RegistrantAlreadyExistsError)
+    expect(secondThrownMessage, 'the retry must raise the SAME CR-03 refusal, naming the SAME request').to.include(r2)
     expect(
       secondThrownMessage,
       'a refused approval must stay retryable via accept, not be burned into a PK collision on OfficerSignature'

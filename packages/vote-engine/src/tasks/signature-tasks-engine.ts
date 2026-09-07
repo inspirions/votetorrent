@@ -5,7 +5,7 @@ import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
-import { verificationCid, isChecklistGateMet } from '@votetorrent/vote-core'
+import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError } from '@votetorrent/vote-core'
 import type {
   ISigningEngine,
   ISignatureTasksEngine,
@@ -784,6 +784,12 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       try {
         await this.resolveAcceptableRegistrantApproval(taskRow.Id as string)
       } catch (err) {
+        // R2/D-04/D-05 (57-02): let RegistrantAlreadyExistsError through undecorated —
+        // this.rethrow() below wraps any plain Error into a fresh `new Error(...)` and
+        // would destroy the instanceof check the typed error exists to provide.
+        if (err instanceof RegistrantAlreadyExistsError) {
+          throw err
+        }
         this.rethrow(err, 'completeSignature (registrant pre-check)')
       }
     }
@@ -833,6 +839,12 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       try {
         await this.finalizeRegistrantApproval(taskRow.Id as string, result.decision!, result.sign!)
       } catch (err) {
+        // R2/D-04/D-05 (57-02): see the matching note on the pre-check call site above —
+        // finalizeRegistrantApproval's own defence-in-depth guard, and register() itself,
+        // can both throw RegistrantAlreadyExistsError; do not let this.rethrow() re-wrap it.
+        if (err instanceof RegistrantAlreadyExistsError) {
+          throw err
+        }
         this.rethrow(err, 'completeSignature (finalize registrant)')
       }
     }
@@ -1370,13 +1382,20 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       }
     }
 
+    // R2/D-04/D-05 (57-02): kept as defence-in-depth, NOT redundant — this call runs
+    // BEFORE the header AdminSigning/officer signature is spent (completeSignature calls
+    // this SAME gate ahead of signingEngine.sign(), T-48-34-01/02), so a colliding
+    // registrantId is refused before the officer's signature is consumed. register()'s
+    // OWN pre-BEGIN guard (registration-engine.ts) fires later — only once
+    // finalizeRegistrantApproval actually calls register(), which is after the signature
+    // has already been spent. Throws the SAME typed error register() throws so both
+    // paths are instanceof-identical and there is exactly one message for this condition
+    // (must_haves: "Only ONE error message exists for the already-registered condition").
     const existingRegistrant = await ctx.db
       .prepare('select 1 from Registrant where Id = :id')
       .get({ id: init.registrant.id })
     if (existingRegistrant) {
-      throw new Error(
-        `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} payload names an already-existing Registrant record that this approval did not create`
-      )
+      throw new RegistrantAlreadyExistsError(init.registrant.id, requestId)
     }
 
     return { requestId, authorityId: extRow.AuthorityId, init, submittedAt, receivedAt, decidingOfficerUserId }
