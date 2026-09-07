@@ -133,6 +133,12 @@ any_failed() {
 # contain one of these words cannot be excluded by accident.
 PLATFORM_TAG_EXCLUSIONS=' E (KeyStore|Perf|ART):'
 
+# R5d (57-03): set by dump_ui() alongside its existing stdout (a dump-file path) contract, which
+# stays UNCHANGED for every caller. Callers that need to distinguish "could not observe" from
+# "observed absent" read this immediately after calling dump_ui — see leg_cancel_negative_button /
+# leg_cancel_back_key.
+DUMP_UI_STATUS="ok"
+
 # ── Preflights (all fail loudly, none proceed silently) ─────────────────────
 preflight() {
   echo "[ceremony] Preflight: adb device state ..."
@@ -261,6 +267,40 @@ preflight() {
     exit 1
   fi
 
+  # R5b (57-03): the ceremony attributes device behaviour to source it may not actually be
+  # running. Compare the installed APK's own lastUpdateTime against the newest commit under
+  # packages/attestation-native/android — the native Kotlin surface every leg here exercises — and
+  # abort rather than silently measure a stale build. The human-readable `lastUpdateTime=` string
+  # dumpsys prints is converted to an epoch ON THE DEVICE (its own toybox `date -d`), never
+  # host-side, so this comparison is immune to host/device timezone or date-binary differences —
+  # same reasoning as the clock-skew check just above.
+  echo "[ceremony] Preflight: installed APK freshness vs packages/attestation-native/android ..."
+  local installed_update_str installed_update_epoch newest_source_epoch
+  installed_update_str=$(adb ${ADBD} shell dumpsys package "${PACKAGE}" 2>/dev/null | grep -m1 'lastUpdateTime=' | sed -E 's/^[[:space:]]*lastUpdateTime=//' | tr -d '\r')
+  if [ -n "${installed_update_str}" ]; then
+    installed_update_epoch=$(adb ${ADBD} shell "date -d '${installed_update_str}' +%s" 2>/dev/null | tr -d '\r')
+  fi
+  newest_source_epoch=$(git log -1 --format=%ct -- packages/attestation-native/android 2>/dev/null || true)
+  if [ -z "${installed_update_epoch:-}" ] || ! echo "${installed_update_epoch:-}" | grep -qE '^[0-9]+$' \
+    || [ -z "${newest_source_epoch}" ] || ! echo "${newest_source_epoch}" | grep -qE '^[0-9]+$'; then
+    echo "[ceremony] PREFLIGHT FAIL: could not read a usable installed-APK update time (raw dumpsys value: '${installed_update_str:-<none>}', device epoch: '${installed_update_epoch:-<none>}') or the newest packages/attestation-native/android commit time ('${newest_source_epoch:-<none>}') — an unreadable freshness check is an instrument gap, never a pass. Rebuild and install: 'cd apps/VoteTorrentAuthority/android && ./gradlew installDebug'." >&2
+    exit 1
+  fi
+  if [ "${installed_update_epoch}" -lt "${newest_source_epoch}" ]; then
+    echo "[ceremony] PREFLIGHT FAIL: the installed APK (lastUpdateTime epoch=${installed_update_epoch}) predates the newest packages/attestation-native/android change (committed epoch=${newest_source_epoch}) — this ceremony would measure device behaviour against STALE Kotlin. Rebuild and install: 'cd apps/VoteTorrentAuthority/android && ./gradlew installDebug'." >&2
+    exit 1
+  fi
+  echo "[ceremony]   -> installed APK (lastUpdateTime epoch=${installed_update_epoch}) is at or after the newest attestation-native/android change (epoch=${newest_source_epoch})."
+
+  echo "[ceremony] Preflight: installed build is debuggable (a release APK ignores Metro) ..."
+  local pkg_flags
+  pkg_flags=$(adb ${ADBD} shell dumpsys package "${PACKAGE}" 2>/dev/null | grep -m1 -i 'pkgFlags=' || true)
+  if ! echo "${pkg_flags}" | grep -qi 'DEBUGGABLE'; then
+    echo "[ceremony] PREFLIGHT FAIL: the installed '${PACKAGE}' build does not report DEBUGGABLE (pkgFlags: '${pkg_flags:-<not found>}') — a release APK ignores Metro's live JS bundle, so this ceremony would measure a stale JS bundle in addition to stale native code. Rebuild and install the DEBUG variant: 'cd apps/VoteTorrentAuthority/android && ./gradlew installDebug'." >&2
+    exit 1
+  fi
+  echo "[ceremony]   -> installed build reports DEBUGGABLE."
+
   echo "[ceremony] Preflights OK."
 }
 
@@ -345,19 +385,31 @@ dump_ui() {
   # negative) rather than silently returning a prior ceremony's leftover
   # content as a false positive. Retry up to 3 times (observed under load:
   # a single dump attempt can transiently fail even while the app is
-  # genuinely fully rendered) before giving up and returning whatever (or
-  # empty) content was last captured — callers treat "no match" as the
-  # correct negative either way.
+  # genuinely fully rendered) before giving up.
+  #
+  # R5d (57-03): if all 3 retries still fail to produce a well-formed hierarchy, that is "could
+  # not observe" — NOT the same fact as "observed absent" — and every prior version of this
+  # function returned whatever partial/empty content it last captured with no way for a caller to
+  # tell the two apart, so a genuine instrument gap read as a false negative. The stdout contract
+  # (a dump-file path, unconditionally echoed) is UNCHANGED — existing callers that only ever
+  # treated "no match" as a negative keep doing exactly that. Callers that need the distinction
+  # read the shared DUMP_UI_STATUS variable immediately after calling dump_ui.
   local attempt
+  DUMP_UI_STATUS="unobservable"
   for attempt in 1 2 3; do
     adb ${ADBD} shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1
     adb ${ADBD} shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
     adb ${ADBD} pull /sdcard/window_dump.xml "${out}" >/dev/null 2>&1 || : > "${out}"
     if [ -s "${out}" ] && grep -q "</hierarchy>" "${out}" 2>/dev/null; then
+      DUMP_UI_STATUS="ok"
       break
     fi
     sleep 1
   done
+  if [ "${DUMP_UI_STATUS}" = "unobservable" ]; then
+    echo "[ceremony] WARNING: dump_ui could not obtain a well-formed uiautomator hierarchy after 3 attempts — attempting a dumpsys activity fallback for confirmation." >&2
+    adb ${ADBD} shell dumpsys activity activities 2>/dev/null | grep -i "mResumedActivity\|mCurrentFocus" >&2 || true
+  fi
   echo "${out}"
 }
 
@@ -980,6 +1032,12 @@ leg_cancel_negative_button() {
   fi
   sleep 3
   dump=$(dump_ui)
+  # R5d: a dump_ui miss here used to be indistinguishable from "the prompt title genuinely isn't
+  # there" — record the instrument gap as NOT-EXERCISED instead of a false FAIL.
+  if [ "${DUMP_UI_STATUS}" = "unobservable" ]; then
+    record_leg "cancel-negative-button" "NOT-EXERCISED" "uiautomator could not observe the screen state before attempting dismissal — instrument gap, not a negative result"
+    return
+  fi
   if ! text_present "${STR_PROMPT_TITLE}" "${dump}"; then
     record_leg "cancel-negative-button" "FAIL" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') not observed before attempting dismissal"
     return
@@ -1076,6 +1134,12 @@ leg_cancel_back_key() {
   fi
   sleep 3
   dump=$(dump_ui)
+  # R5d: a dump_ui miss here used to be indistinguishable from "the prompt title genuinely isn't
+  # there" — record the instrument gap as NOT-EXERCISED instead of a false FAIL.
+  if [ "${DUMP_UI_STATUS}" = "unobservable" ]; then
+    record_leg "cancel-negative-button-back" "NOT-EXERCISED" "uiautomator could not observe the screen state before attempting dismissal — instrument gap, not a negative result"
+    return
+  fi
   if ! text_present "${STR_PROMPT_TITLE}" "${dump}"; then
     record_leg "cancel-negative-button-back" "FAIL" "deviceSigningPromptTitle ('${STR_PROMPT_TITLE}') not observed before attempting dismissal"
     return
