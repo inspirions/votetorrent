@@ -32,11 +32,33 @@
  * DELIBERATELY NOT WIRED into a `gate:prove-*` script: `56-13` owns every
  * inversion this gate's design makes possible. Adding one here would be
  * this plan claiming a control it does not run.
+ *
+ * CALLABLE AS A LIBRARY (`56-13` Task 1), behaviour byte-identical. The
+ * driver is `runMeshReadGate(options)`; the CLI entry below is guarded on
+ * `process.argv[1]` exactly as `56-11` guarded `gateway.mjs`, so
+ * `node test/browser/run-mesh-read-gate.mjs` and `yarn test:mesh-read`
+ * behave precisely as `56-11` shipped them. `options` carries a build config
+ * path, a served `outDir`, an origin config path, a port and a strand id,
+ * each defaulting to `56-11`'s own value (`MESH_READ_GATE_DEFAULTS`).
+ *
+ * THREE PROHIBITIONS ON THIS FILE, each load-bearing:
+ *   1. NOTHING MOVES OUT OF IT. `56-11`'s acceptance greps run against this
+ *      path — exactly one `page.goto`, zero reload calls, the
+ *      certificate-pin occurrence set, and zero must-fail vocabulary.
+ *      Relocating the driver into a `lib/` module would silently retire all
+ *      four.
+ *   2. NO `--prove-*` FLAG AND NO MUST-FAIL LIST IS ADDED HERE. Every
+ *      inversion vocabulary item lives in `56-13`'s own control files, so
+ *      `56-11`'s "this plan claims no inversion" property keeps holding for
+ *      the file it was asserted on.
+ *   3. NO PREFLIGHT IS WEAKENED, SKIPPED OR MADE OPTIONAL. There is no
+ *      `options` key that can disable one — that would be the exact bypass
+ *      `T-56-11-01` exists to prevent.
  */
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { randomBytes } from 'node:crypto';
 
@@ -53,6 +75,20 @@ const ORIGIN_SCRIPT = path.join(APP_ROOT, 'test', 'browser', 'mesh-read-origin.m
 const GATEWAY_CONFIG = path.join(REPO_ROOT, 'packages', 'p2p-probe-host', 'gateway.config.json');
 const EDGE_NODE_SOURCE = path.join(APP_ROOT, 'src', 'peer', 'edge-node.js');
 const PORT = 5197;
+
+/**
+ * `56-11`'s own values, exported as the default `options` every caller of
+ * `runMeshReadGate` inherits. A caller that passes nothing gets exactly the
+ * run `yarn test:mesh-read` has always performed.
+ * @type {Readonly<{ buildConfig: string, outDir: string, entryName: string, originConfig: string, port: number }>}
+ */
+export const MESH_READ_GATE_DEFAULTS = Object.freeze({
+	buildConfig: BUILD_CONFIG,
+	outDir: DIST_MESH_READ,
+	entryName: ENTRY_NAME,
+	originConfig: GATEWAY_CONFIG,
+	port: PORT,
+});
 
 /** The D-16 inversion's exact rung ids — exported so `56-13` imports this
  * contract instead of re-typing two integers that can drift.
@@ -87,7 +123,7 @@ export const LIBP2P_DIAL_DEBUG_NAMESPACES =
 /** A way this gate could certify something false, named and thrown from
  * anywhere in the run — never a bare `process.exit`, so the origin is
  * always stopped and every opened resource always closed. */
-class PreflightFailedError extends Error {
+export class PreflightFailedError extends Error {
 	/** @param {string} reason */
 	constructor(reason) {
 		super(`PREFLIGHT_FAILED:${reason}`);
@@ -101,7 +137,7 @@ class PreflightFailedError extends Error {
  * fact map, exposes a line-matching wait primitive for the handshake, and
  * forwards every line (both streams) into this process's own log.
  */
-class OriginController {
+export class OriginController {
 	/** @param {import('node:child_process').ChildProcessWithoutNullStreams} child */
 	constructor(child) {
 		this.child = child;
@@ -183,11 +219,17 @@ class OriginController {
 	}
 }
 
-/** @returns {Promise<void>} */
-function buildGate() {
+/**
+ * The spawned-never-imported `vite build` step, exported so `56-13`'s
+ * controls drive the SAME build this gate drives rather than a second copy
+ * of the recipe.
+ * @param {string} [buildConfig]
+ * @returns {Promise<void>}
+ */
+export function buildGate(buildConfig = BUILD_CONFIG) {
 	return new Promise((resolve, reject) => {
 		const viteBin = path.join(APP_ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
-		const child = spawn(process.execPath, [viteBin, 'build', '--config', BUILD_CONFIG], {
+		const child = spawn(process.execPath, [viteBin, 'build', '--config', buildConfig], {
 			cwd: APP_ROOT,
 			stdio: ['ignore', 'pipe', 'pipe'],
 		});
@@ -195,7 +237,7 @@ function buildGate() {
 		child.stderr?.on('data', (d) => process.stderr.write(`[vite] ${d}`));
 		child.on('error', reject);
 		child.on('exit', (code) =>
-			code === 0 ? resolve(undefined) : reject(new Error(`vite build --config ${BUILD_CONFIG} exited ${code}`)),
+			code === 0 ? resolve(undefined) : reject(new Error(`vite build --config ${buildConfig} exited ${code}`)),
 		);
 	});
 }
@@ -307,11 +349,16 @@ function checkCohortParameterAgreement() {
  * Spawn the origin and drive it to `ORIGIN_READY`, then re-assert every
  * precondition at THIS consumer boundary — read back, never inferred from
  * the origin's own exit code alone.
+ * Exported for `56-13`'s controls. NO PARAMETER CAN DISABLE A PRECONDITION:
+ * every check below is unconditional, and adding an opt-out would be the
+ * bypass `T-56-11-01` exists to prevent.
+ *
  * @param {string} strandId
+ * @param {string} [originConfig]
  * @returns {Promise<OriginController>}
  */
-async function bootOrigin(strandId) {
-	const originChild = spawn(process.execPath, [ORIGIN_SCRIPT, '--config', GATEWAY_CONFIG, '--strand-id', strandId], {
+export async function bootOrigin(strandId, originConfig = GATEWAY_CONFIG) {
+	const originChild = spawn(process.execPath, [ORIGIN_SCRIPT, '--config', originConfig, '--strand-id', strandId], {
 		cwd: APP_ROOT,
 		stdio: ['pipe', 'pipe', 'pipe'],
 	});
@@ -353,19 +400,18 @@ async function bootOrigin(strandId) {
 }
 
 /**
- * @param {OriginController} origin
- * @param {string} strandId
- * @returns {Promise<any>} the page's published readout
+ * Write the two runtime files AFTER the build so `emptyOutDir` cannot erase
+ * them. 56-06's recorded reason: the peerId is minted per run, so a
+ * build-time copy would be stale by construction. Exported so a control can
+ * reuse the writer rather than growing a second, drifting copy of the
+ * payload shape.
+ *
+ * @param {{ outDir: string, origin: OriginController, strandId: string }} args
+ * @returns {{ config: any, expectations: any }}
  */
-async function runBrowserPhase(origin, strandId) {
-	await buildGate();
-	const entryRel = resolveEntry(DIST_MESH_READ, ENTRY_NAME);
-
-	// Write the two runtime files AFTER the build so emptyOutDir cannot erase
-	// them. 56-06's recorded reason: the peerId is minted per run, so a
-	// build-time copy would be stale by construction.
+export function writeGateRuntimeFiles({ outDir, origin, strandId }) {
 	const configJson = { bootstrapNodes: [origin.controlAddrs[0]] };
-	writeFileSync(path.join(DIST_MESH_READ, 'config.json'), JSON.stringify(configJson, null, 2));
+	writeFileSync(path.join(outDir, 'config.json'), JSON.stringify(configJson, null, 2));
 	const gateExpectations = {
 		electionId: origin.facts.ORIGIN_ELECTION_ID,
 		networkHash: strandId,
@@ -373,21 +419,54 @@ async function runBrowserPhase(origin, strandId) {
 		atInstant: origin.facts.ORIGIN_AT_INSTANT,
 		keyholdersBefore: Number(origin.facts.ORIGIN_KEYHOLDERS_BEFORE ?? '0'),
 	};
-	writeFileSync(path.join(DIST_MESH_READ, 'gate-expectations.json'), JSON.stringify(gateExpectations, null, 2));
+	writeFileSync(path.join(outDir, 'gate-expectations.json'), JSON.stringify(gateExpectations, null, 2));
+	return { config: configJson, expectations: gateExpectations };
+}
 
-	const server = await serveDist(DIST_MESH_READ, PORT);
+/**
+ * The SPKI-PINNED browser launch, exported so no control ever hand-rolls a
+ * second launch and quietly drops the pin. The pin, and NOTHING else — a
+ * different certificate still fails, so this gate can still fail on a bad
+ * chain.
+ *
+ * @param {string} spkiPin the origin's reported SPKI, base64 sha256
+ * @returns {Promise<import('playwright').Browser>}
+ */
+export async function launchPinnedBrowser(spkiPin) {
+	if (!spkiPin) throw new PreflightFailedError('tls-pin-absent: refusing to launch a browser with no pin');
+	return await chromium.launch({
+		headless: true,
+		args: [`--ignore-certificate-errors-spki-list=${spkiPin}`],
+	});
+}
+
+/**
+ * @param {OriginController} origin
+ * @param {string} strandId
+ * @param {{ buildConfig?: string, outDir?: string, entryName?: string, port?: number }} [options]
+ * @returns {Promise<any>} the page's published readout
+ */
+export async function runBrowserPhase(origin, strandId, options = {}) {
+	const buildConfig = options.buildConfig ?? MESH_READ_GATE_DEFAULTS.buildConfig;
+	const outDir = options.outDir ?? MESH_READ_GATE_DEFAULTS.outDir;
+	const entryName = options.entryName ?? MESH_READ_GATE_DEFAULTS.entryName;
+	const port = options.port ?? MESH_READ_GATE_DEFAULTS.port;
+
+	await buildGate(buildConfig);
+	const entryRel = resolveEntry(outDir, entryName);
+
+	writeGateRuntimeFiles({ outDir, origin, strandId });
+
+	const server = await serveDist(outDir, port);
 	/** @type {string[]} */
 	const lines = [];
 	/** @type {import('playwright').Browser | undefined} */
 	let browser;
 	try {
-		// The pin, and NOTHING else — a different certificate still fails, so
-		// this gate can still fail on a bad chain. The bare
-		// `--ignore-certificate-errors` is forbidden.
-		browser = await chromium.launch({
-			headless: true,
-			args: [`--ignore-certificate-errors-spki-list=${origin.facts.ORIGIN_TLS_SPKI}`],
-		});
+		// The pin, and NOTHING else. The bare certificate-error override is
+		// forbidden; see `launchPinnedBrowser` above, which is the ONE place a
+		// browser is launched in this gate and in every control built on it.
+		browser = await launchPinnedBrowser(origin.facts.ORIGIN_TLS_SPKI);
 		const context = await browser.newContext();
 		// 56-24: enable weald's browser debug namespaces BEFORE any page script
 		// runs, so libp2p's own dial-path diagnostics reach this driver's
@@ -450,21 +529,42 @@ async function runBrowserPhase(origin, strandId) {
 	}
 }
 
-async function main() {
-	const strandId = `vtx-mesh-read-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
-	console.log(`[mesh-read-gate] strandId=${strandId} port=${PORT} config=${BUILD_CONFIG} out=dist-mesh-read`);
+/**
+ * The driver, callable as a library. Returns a structured result and NEVER
+ * calls `process.exit` — the CLI entry below owns the exit code, so a
+ * control that drives this function can grade the run rather than being
+ * killed by it.
+ *
+ * Every preflight below is unconditional. There is deliberately no
+ * `options` key that can skip, weaken or soften one.
+ *
+ * @param {{ buildConfig?: string, outDir?: string, entryName?: string, originConfig?: string, port?: number, strandId?: string }} [options]
+ * @returns {Promise<Readonly<{ ok: boolean, exitCode: number, strandId: string, readout: any, originFacts: Record<string, string>, controlAddrs: string[], preflightReason: string | null }>>}
+ */
+export async function runMeshReadGate(options = {}) {
+	const buildConfig = options.buildConfig ?? MESH_READ_GATE_DEFAULTS.buildConfig;
+	const outDir = options.outDir ?? MESH_READ_GATE_DEFAULTS.outDir;
+	const entryName = options.entryName ?? MESH_READ_GATE_DEFAULTS.entryName;
+	const originConfig = options.originConfig ?? MESH_READ_GATE_DEFAULTS.originConfig;
+	const port = options.port ?? MESH_READ_GATE_DEFAULTS.port;
+	const strandId = options.strandId ?? `vtx-mesh-read-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
+	console.log(`[mesh-read-gate] strandId=${strandId} port=${port} config=${buildConfig} out=${path.basename(outDir)}`);
 
 	/** @type {OriginController | null} */
 	let origin = null;
 	let exitCode = 0;
+	/** @type {any} */
+	let readout = null;
+	/** @type {string | null} */
+	let preflightReason = null;
 	try {
 		// Catches the one cross-source drift that would produce a red gate for
 		// a configuration reason -- before the origin boots (CPU-heavy) or a
 		// browser launches. See this function's own module-level docstring.
 		checkCohortParameterAgreement();
 
-		origin = await bootOrigin(strandId);
-		const readout = await runBrowserPhase(origin, strandId);
+		origin = await bootOrigin(strandId, originConfig);
+		readout = await runBrowserPhase(origin, strandId, { buildConfig, outDir, entryName, port });
 
 		if (!readout) {
 			console.error('[mesh-read-gate] NO READOUT — the page never published __MESH_READ_GATE__');
@@ -491,6 +591,7 @@ async function main() {
 	} catch (err) {
 		if (err instanceof PreflightFailedError) {
 			console.error(err.message);
+			preflightReason = err.reason;
 		} else {
 			console.error('[mesh-read-gate] RUNGS_FAILED:', err);
 		}
@@ -501,10 +602,31 @@ async function main() {
 		if (origin) await origin.stopAndAwaitExit();
 	}
 
-	if (exitCode !== 0) process.exit(1);
+	return Object.freeze({
+		ok: exitCode === 0,
+		exitCode,
+		strandId,
+		readout,
+		originFacts: origin ? { ...origin.facts } : {},
+		controlAddrs: origin ? [...origin.controlAddrs] : [],
+		preflightReason,
+	});
 }
 
-main().catch((err) => {
-	console.error('[mesh-read-gate] driver error:', err);
-	process.exit(1);
-});
+async function main() {
+	const result = await runMeshReadGate();
+	if (result.exitCode !== 0) process.exit(1);
+}
+
+// `process.argv[1]` is only set when Node loaded this file as the entry
+// module — an `import()` never sets it to this file's path. The ESM
+// equivalent of `require.main === module`, and the same guard `56-11` put on
+// `gateway.mjs`: importing this module for its exports must never boot a run
+// as a side effect of the import itself.
+const isCliEntry = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isCliEntry) {
+	main().catch((err) => {
+		console.error('[mesh-read-gate] driver error:', err);
+		process.exit(1);
+	});
+}
