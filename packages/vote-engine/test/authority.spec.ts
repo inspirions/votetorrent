@@ -5,6 +5,18 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { ElectionType, UserKeyType } from '@votetorrent/vote-core'
 import { expect } from 'chai'
 import { AuthorityEngine } from '../src/authority/authority-engine'
+// 57-01 (D-02): namespace import, deliberately NOT `import { sortRosterEntries }`.
+// Under this suite's real-ESM ts-node config a named import of an export that
+// does not exist yet throws at module-LOAD time (breaking every test in this
+// file, not just the new RED ones); a namespace import tolerates a missing
+// property and just yields `undefined`, which the roster-digest tests below
+// check for explicitly. See the 'proposeAdmin roster + digest (D-01/D-02)'
+// tests for why: ProposedAdmin/ProposedOfficer's composite primary keys (plus
+// ProposedOfficer.CantDelete) make a second proposeAdmin call against the
+// SAME (authorityId, effectiveAt) structurally impossible, so roster-order
+// determinism is tested against this exported pure function directly instead
+// of via two live proposeAdmin round trips.
+import * as AuthorityEngineModule from '../src/authority/authority-engine'
 import { prepareDb } from '../src/database/initialize'
 import { NetworksEngine } from '../src/networks/networks-engine'
 import { nowCanonicalDatetime, toCanonicalDatetime, digestToBytes } from '../src/utils.js'
@@ -627,6 +639,158 @@ describe('AuthorityEngine', () => {
       }
       const msg = (caught as Error)?.message ?? ''
       expect(msg).to.match(/Quereus error|EffectiveAtValid/)
+    })
+
+    // -------------------------------------------------------------------
+    // 57-01 (R1/D-01 propose-side, D-02, D-03): roster persistence + the
+    // roster-covering 'rad' digest. RED at this commit — proposeAdmin does
+    // not yet write ProposedOfficer, and the 'rad' digest does not yet
+    // cover the roster. Must be GREEN by the end of Task 3.
+    //
+    // D-03 read-side probe (recorded verbatim in 57-01-SUMMARY.md):
+    //   `grep -rln "ProposedOfficerUser" packages/*/src apps/*/src packages/vote-engine/test`
+    //   -> packages/vote-engine/src/database/schema-sql.ts (generated schema
+    //      string; not a reader) and packages/web-data/src/classification.js
+    //      (a static table-name -> visibility-CLASS registry that gates
+    //      anonymous reads away from DRAFT tables by name; it never queries
+    //      or consumes ProposedOfficerUser row content). No TypeScript reader
+    //      depends on ProposedOfficerUser rows existing. D-03 HOLDS — left
+    //      unpopulated below.
+    // -------------------------------------------------------------------
+
+    it('should insert one ProposedOfficer row per OfficerSelection (roster persistence, D-01 propose side)', async () => {
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const sig = makeRealSignCallback('user-1')
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: 'user-1', authorityId: authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { init: { name: 'Zeta Officer', title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: ['user-1']
+      }
+      await authorityEngine.proposeAdmin(proposal, sig)
+
+      const countRow = await ctx.db
+        .prepare('select count(*) as n from ProposedOfficer where AuthorityId = :id and AdminEffectiveAt = :e')
+        .get({ id: authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(countRow?.n)).to.equal(2)
+
+      const initRow = await ctx.db
+        .prepare(
+          `select ProposedName, Title, Scopes from ProposedOfficer
+             where AuthorityId = :id and AdminEffectiveAt = :e and ProposedName = :name`
+        )
+        .get({ id: authority.id, e: toCanonicalDatetime(effectiveAt), name: 'Zeta Officer' })
+      expect(initRow?.ProposedName).to.equal('Zeta Officer')
+      expect(initRow?.Title).to.equal('Clerk')
+      expect(JSON.parse(initRow!.Scopes as string)).to.deep.equal(['vrg'])
+    })
+
+    it("should resolve a '.existing' officer's ProposedName from the User table, not the userId (D-01 name bridge)", async () => {
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const sig = makeRealSignCallback('user-1')
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: 'user-1', authorityId: authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { init: { name: 'Zeta Officer', title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: ['user-1']
+      }
+      await authorityEngine.proposeAdmin(proposal, sig)
+
+      const userRow = await ctx.db.prepare('select Name from User where Id = :id').get({ id: 'user-1' })
+      const existingOfficerRows: string[] = []
+      for await (const row of ctx.db.eval(
+        'select ProposedName from ProposedOfficer where AuthorityId = :id and AdminEffectiveAt = :e and Title = :title',
+        { id: authority.id, e: toCanonicalDatetime(effectiveAt), title: 'Chair' }
+      )) {
+        existingOfficerRows.push(row.ProposedName as string)
+      }
+      expect(existingOfficerRows).to.have.length(1)
+      expect(existingOfficerRows[0]).to.equal(userRow?.Name as string)
+    })
+
+    it('should serialize the admin roster deterministically regardless of caller input order (D-02)', () => {
+      type RosterEntryForTest = { proposedName: string; title: string; scopes: string[] }
+      const sortRosterEntries = (AuthorityEngineModule as unknown as {
+        sortRosterEntries?: (entries: RosterEntryForTest[]) => RosterEntryForTest[]
+      }).sortRosterEntries
+      if (typeof sortRosterEntries !== 'function') {
+        expect.fail('authority-engine.ts does not yet export sortRosterEntries (D-02 roster serializer)')
+        return
+      }
+      const chair: RosterEntryForTest = { proposedName: 'Test User', title: 'Chair', scopes: ['rad'] }
+      const clerk: RosterEntryForTest = { proposedName: 'Zeta Officer', title: 'Clerk', scopes: ['vrg'] }
+      const naturalOrder = sortRosterEntries([chair, clerk])
+      const reversedOrder = sortRosterEntries([clerk, chair])
+      expect(JSON.stringify(reversedOrder)).to.equal(JSON.stringify(naturalOrder))
+    })
+
+    it('should change the serialized roster when a scope changes, proving full-roster coverage (D-02)', () => {
+      type RosterEntryForTest = { proposedName: string; title: string; scopes: string[] }
+      const sortRosterEntries = (AuthorityEngineModule as unknown as {
+        sortRosterEntries?: (entries: RosterEntryForTest[]) => RosterEntryForTest[]
+      }).sortRosterEntries
+      if (typeof sortRosterEntries !== 'function') {
+        expect.fail('authority-engine.ts does not yet export sortRosterEntries (D-02 roster serializer)')
+        return
+      }
+      const chair: RosterEntryForTest = { proposedName: 'Test User', title: 'Chair', scopes: ['rad'] }
+      const clerk: RosterEntryForTest = { proposedName: 'Zeta Officer', title: 'Clerk', scopes: ['vrg'] }
+      const baseline = sortRosterEntries([chair, clerk])
+      const clerkWithExtraScope: RosterEntryForTest = { ...clerk, scopes: ['vrg', 'uai'] }
+      const changed = sortRosterEntries([chair, clerkWithExtraScope])
+      expect(JSON.stringify(changed)).to.not.equal(JSON.stringify(baseline))
+    })
+
+    it("should fold the roster into the 'rad' digest, not just thresholdPolicies (D-02 roster coverage, live digest)", async () => {
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const sig = makeRealSignCallback('user-1')
+      const effectiveAt = Date.now() + 60_000
+      const thresholdPolicies = [{ policy: 'rad', threshold: 1 }]
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: 'user-1', authorityId: authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { init: { name: 'Zeta Officer', title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies
+        },
+        signers: ['user-1']
+      }
+      await authorityEngine.proposeAdmin(proposal, sig)
+
+      const storedDigestRow = await ctx.db
+        .prepare(
+          "select Digest from AdminSigning where AuthorityId = :id and Scope = 'rad' order by Nonce desc limit 1"
+        )
+        .get({ id: authority.id })
+      // Counterfactual: what the OLD (roster-blind) formula would have produced
+      // for the SAME authorityId/effectiveAt/thresholdPolicies. If the roster is
+      // genuinely folded into the digest, the real stored digest must differ
+      // from this 3-arg-only value.
+      const threeArgDigestRow = await ctx.db
+        .prepare('select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d')
+        .get({
+          authorityId: authority.id,
+          effectiveAt: toCanonicalDatetime(effectiveAt),
+          thresholdPolicies: JSON.stringify(thresholdPolicies)
+        })
+      expect(storedDigestRow?.Digest).to.not.equal(threeArgDigestRow?.d)
     })
   })
 
