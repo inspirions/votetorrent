@@ -19,7 +19,7 @@ import { AuthorityEngine } from '../src/authority/authority-engine'
 import * as AuthorityEngineModule from '../src/authority/authority-engine'
 import { prepareDb } from '../src/database/initialize'
 import { NetworksEngine } from '../src/networks/networks-engine'
-import { nowCanonicalDatetime, toCanonicalDatetime, digestToBytes } from '../src/utils.js'
+import { nowCanonicalDatetime, toCanonicalDatetime, fromCanonicalDatetime, digestToBytes } from '../src/utils.js'
 import type { EngineContext } from '../src/types.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { createTestNetwork, addTestAuthority, seedAuthorityInvite, seedUserInvite, makeDistinctTestUser, makeTestSignCallback, signInviteResult } from './fixtures/test-context.js'
@@ -240,6 +240,126 @@ async function makeDbOnlyAuthorityEngine (): Promise<{ authorityEngine: Authorit
   const ctx: EngineContext = { db, user: undefined }
   const authorityEngine = new AuthorityEngine(authority, ctx)
   return { authorityEngine, ctx, authority }
+}
+
+/**
+ * T-57-07-04: `Admin.MutationValid` branch 1 and `Officer.InsertValid`
+ * branch 1 both admit a nonce-less write while only ONE `Authority`
+ * row exists. Every promotion fixture below inserts a SECOND,
+ * unrelated `Authority` (via a real invite ceremony, so it is a
+ * genuinely valid row — not a raw-SQL shortcut) so that a passing
+ * promotion test proves the signing-nonce branch admitted the write,
+ * not the branch-1 escape hatch. Also seeds a SECOND real `User` row
+ * (distinct name) via the `seedUserInvite` recipe (`user.spec.ts`'s
+ * `seedKeylessUser`), so a two-officer roster can resolve both
+ * `ProposedName`s uniquely against `User.Name` (D-03's `.existing`
+ * name bridge).
+ *
+ * Module scope (57-08): moved out of `describe('applyAdminProposal
+ * (promotion)')` so `describe('admin promotion trigger (end to end)')`
+ * — a SIBLING top-level block per the plan — can call it too, without
+ * nesting inside 57-07's block.
+ *
+ * 57-08 (Task 1) fixture extension — OPTIONAL, additive. With no `options`
+ * this reproduces 57-07's exact default behaviour byte-for-byte (same
+ * `createTestNetwork()` call, same implicit `Date.now()` effectiveAt, same
+ * `makeTestNetworkInit()` founding-officer scope set), so every 57-07 case
+ * stays green unchanged.
+ *
+ * `foundingEffectiveAt` — thread a founding-administration effective date
+ * into `makeNetworkInit`'s `admin.effectiveAt`. `CurrentAdmin` (votetorrent.qsql
+ * :179-183) filters `EffectiveAt <= datetime('now')` and takes `max(EffectiveAt)`
+ * per authority; canonical datetimes are second-granularity
+ * (`toCanonicalDatetime` = `toISOString().slice(0, 19)`), so a promotion proposed
+ * in the SAME second as the founding admin can be neither "later" nor "not
+ * future" than it. The end-to-end case below passes a founding date ~1h in the
+ * past so its later, still-past promotion date is unambiguously selected by
+ * `CurrentAdmin` (see P5).
+ *
+ * `foundingOfficerScopes` — 57-08 finding, not a 57-07 carryover: this fixture's
+ * `createTestNetwork()` (unlike authority.spec.ts's OWN local `makeNetworkInit()`
+ * used by `createNetworkAndAuthority()`) resolves through test-context.ts's
+ * `makeTestNetworkInit()`, whose founding officer already carries `'vrg'`
+ * (WR-22 — every seeded officer needs it for the registrant-seeding gates that
+ * fixture serves). A genuine RED baseline (P6: `includes('vrg') === false`
+ * BEFORE promotion) is impossible against that default, so the end-to-end case
+ * overrides the founding officer's scopes to the pre-WR-22 set that does NOT
+ * include `'vrg'` — proving the grant is real rather than vacuous. Passing this
+ * option replaces the WHOLE `admin` object passed to `createTestNetwork`
+ * (officers + effectiveAt + thresholdPolicies), because `makeTestNetworkInit`'s
+ * `{...defaults, ...overrides}` spread is shallow — thresholdPolicies stays
+ * `[{policy: 'rad', threshold: 1}]` to match the default exactly.
+ */
+async function createPromotionFixture (options?: {
+  foundingEffectiveAt?: number
+  foundingOfficerScopes?: Scope[]
+}): Promise<{
+  auth: TestAuthorityContext
+  secondUser: User
+}> {
+  const net = options
+    ? await createTestNetwork({
+        network: {
+          admin: {
+            officers: [
+              {
+                init: {
+                  name: 'Admin A',
+                  title: 'Chair',
+                  scopes: options.foundingOfficerScopes ?? (['rn', 'rad', 'vrg', 'iad', 'uai', 'mel', 'ceb'] as Scope[])
+                }
+              }
+            ],
+            effectiveAt: options.foundingEffectiveAt ?? Date.now(),
+            thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+          }
+        }
+      })
+    : await createTestNetwork()
+  const auth = await addTestAuthority(net)
+
+  const branch1CloserName = 'Branch-1 Closer Authority'
+  const secondAuthorityInvite = await seedAuthorityInvite(auth, {
+    name: branch1CloserName,
+    domainName: 'branch1-closer.example.com',
+    officers: [{ userId: auth.user.id, title: 'Inspector', scopes: JSON.stringify(['rad']) }]
+  })
+  await auth.networkEngine.createAuthority(
+    { name: branch1CloserName, domainName: 'branch1-closer.example.com' },
+    {
+      officers: [
+        { init: { name: 'Branch-1 Closer Officer', title: 'Inspector', scopes: ['rad'] as Scope[] } }
+      ],
+      effectiveAt: secondAuthorityInvite.adminEffectiveAt,
+      thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+    },
+    { inviteSlotCid: secondAuthorityInvite.inviteSlotCid, inviteSignature: 'a'.repeat(128) }
+  )
+
+  const authorityCountRow = await auth.ctx.db.prepare('select count(*) as n from Authority').get({})
+  expect(
+    Number(authorityCountRow?.n),
+    'createPromotionFixture must close the branch-1 escape hatch (exactly 2 Authority rows)'
+  ).to.equal(2)
+
+  const secondUser: User = { ...makeDistinctTestUser(), name: 'Second Roster Officer' }
+  const { inviteSlotCid: userInviteSlotCid, inviteSignature: userInviteSignature } =
+    await seedUserInvite(auth, secondUser)
+  const userTid = Date.now() + Math.floor(Math.random() * 100_000)
+  await auth.ctx.db.exec(
+    `insert into User (Id, Name, ImageRef)
+     with context SigningNonce = null, InviteSlotCid = :inviteSlotCid, InviteSignature = :inviteSignature, Tid = ${userTid}
+     values (:userId, :userName, :userImageRef)`,
+    {
+      userId: secondUser.id,
+      userName: secondUser.name,
+      userImageRef: secondUser.imageRef ? JSON.stringify(secondUser.imageRef) : null,
+      inviteSlotCid: userInviteSlotCid,
+      inviteSignature: userInviteSignature
+    }
+  )
+
+  return { auth, secondUser }
 }
 
 // ===========================================================================
@@ -834,70 +954,6 @@ describe('AuthorityEngine', () => {
   // RED promotion cases (GROUP 2, GREEN only once Task 2 lands the method).
   // -----------------------------------------------------------------------
   describe('applyAdminProposal (promotion)', () => {
-    /**
-     * T-57-07-04: `Admin.MutationValid` branch 1 and `Officer.InsertValid`
-     * branch 1 both admit a nonce-less write while only ONE `Authority`
-     * row exists. Every promotion fixture below inserts a SECOND,
-     * unrelated `Authority` (via a real invite ceremony, so it is a
-     * genuinely valid row — not a raw-SQL shortcut) so that a passing
-     * promotion test proves the signing-nonce branch admitted the write,
-     * not the branch-1 escape hatch. Also seeds a SECOND real `User` row
-     * (distinct name) via the `seedUserInvite` recipe (`user.spec.ts`'s
-     * `seedKeylessUser`), so a two-officer roster can resolve both
-     * `ProposedName`s uniquely against `User.Name` (D-03's `.existing`
-     * name bridge).
-     */
-    async function createPromotionFixture (): Promise<{
-      auth: TestAuthorityContext
-      secondUser: User
-    }> {
-      const net = await createTestNetwork()
-      const auth = await addTestAuthority(net)
-
-      const branch1CloserName = 'Branch-1 Closer Authority'
-      const secondAuthorityInvite = await seedAuthorityInvite(auth, {
-        name: branch1CloserName,
-        domainName: 'branch1-closer.example.com',
-        officers: [{ userId: auth.user.id, title: 'Inspector', scopes: JSON.stringify(['rad']) }]
-      })
-      await auth.networkEngine.createAuthority(
-        { name: branch1CloserName, domainName: 'branch1-closer.example.com' },
-        {
-          officers: [
-            { init: { name: 'Branch-1 Closer Officer', title: 'Inspector', scopes: ['rad'] as Scope[] } }
-          ],
-          effectiveAt: secondAuthorityInvite.adminEffectiveAt,
-          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
-        },
-        { inviteSlotCid: secondAuthorityInvite.inviteSlotCid, inviteSignature: 'a'.repeat(128) }
-      )
-
-      const authorityCountRow = await auth.ctx.db.prepare('select count(*) as n from Authority').get({})
-      expect(
-        Number(authorityCountRow?.n),
-        'createPromotionFixture must close the branch-1 escape hatch (exactly 2 Authority rows)'
-      ).to.equal(2)
-
-      const secondUser: User = { ...makeDistinctTestUser(), name: 'Second Roster Officer' }
-      const { inviteSlotCid: userInviteSlotCid, inviteSignature: userInviteSignature } =
-        await seedUserInvite(auth, secondUser)
-      const userTid = Date.now() + Math.floor(Math.random() * 100_000)
-      await auth.ctx.db.exec(
-        `insert into User (Id, Name, ImageRef)
-         with context SigningNonce = null, InviteSlotCid = :inviteSlotCid, InviteSignature = :inviteSignature, Tid = ${userTid}
-         values (:userId, :userName, :userImageRef)`,
-        {
-          userId: secondUser.id,
-          userName: secondUser.name,
-          userImageRef: secondUser.imageRef ? JSON.stringify(secondUser.imageRef) : null,
-          inviteSlotCid: userInviteSlotCid,
-          inviteSignature: userInviteSignature
-        }
-      )
-
-      return { auth, secondUser }
-    }
-
     // -----------------------------------------------------------------
     // GROUP 1 — schema branch digest-shape derivation probes (P1-P4).
     // Raw SQL only; depend on no new engine code. Must be GREEN now.
@@ -1611,6 +1667,345 @@ describe('AuthorityEngine', () => {
           thresholdPolicies: JSON.stringify(thresholdPolicies)
         })
       expect(recomputedRow?.d, 'the exported sortRosterEntries must reproduce the exact signed Digest').to.equal(sessionRow?.Digest)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // 57-08 (D-01, R1 close): admin promotion trigger — wires proposeAdmin's
+  // discarded `thresholdReached` to 57-07's applyAdminProposal (Trigger A),
+  // and proves the granted scope is readable through the screens' own gate
+  // expression. RED at this commit (no trigger exists yet); GREEN after
+  // Task 2. Scope fence: this block does NOT call applyAdminProposal
+  // directly anywhere — that would prove 57-07's method, which 57-07
+  // already proved, not that proposeAdmin's own trigger fires it.
+  // -----------------------------------------------------------------------
+  describe('admin promotion trigger (end to end)', () => {
+    // P5's two offsets, per key fact 2 / the createPromotionFixture doc comment above:
+    // canonical datetimes are second-granularity, so the founding administration must
+    // be moved safely into the past for a same-run promotion to be "later but not future".
+    const FOUNDING_PAST_MS = 60 * 60 * 1000 // ~1h in the past
+    const PROMOTION_PAST_MS = 30 * 60 * 1000 // ~30m in the past — later than founding, still not future
+
+    // -----------------------------------------------------------------
+    // GROUP 2 — P5 (CurrentAdmin timing) and P7 (transaction composition)
+    // probes. Raw SQL only, depend on no new engine code. Must be GREEN now.
+    // -----------------------------------------------------------------
+
+    it('P5a: a FUTURE Admin.EffectiveAt is invisible to getAdminDetails (CurrentAdmin stays on the founding administration)', async () => {
+      const foundingEffectiveAtMs = Date.now() - FOUNDING_PAST_MS
+      const { auth } = await createPromotionFixture({ foundingEffectiveAt: foundingEffectiveAtMs })
+      const before = await auth.authorityEngine.getAdminDetails()
+
+      const tid = Date.now()
+      const futureEffectiveAt = toCanonicalDatetime(Date.now() + 60 * 60 * 1000)
+      const thresholdPolicies = JSON.stringify([{ policy: 'rad', threshold: 1 }])
+      const digestRow = await auth.ctx.db
+        .prepare('select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d')
+        .get({ tid, authorityId: auth.authority.id, effectiveAt: futureEffectiveAt, thresholdPolicies, officerPart: null })
+      const digest = digestRow!.d as string
+
+      const adminRow = await auth.ctx.db
+        .prepare(
+          `select CurrentAdmin.EffectiveAt from CurrentAdmin join Officer
+              on CurrentAdmin.AuthorityId = Officer.AuthorityId
+                and CurrentAdmin.EffectiveAt = Officer.AdminEffectiveAt
+                  where Officer.UserId = :userId and Officer.AuthorityId = :authorityId`
+        )
+        .get({ userId: auth.user.id, authorityId: auth.authority.id })
+      if (!adminRow) throw new Error('P5a: CurrentAdmin/Officer lookup failed for the fixture officer')
+
+      const signCallback = makeTestSignCallback(auth.user)
+      const signature = await signCallback(digestToBytes(digest))
+      const nonce = 'p5a-' + crypto.randomUUID()
+      await auth.ctx.db.exec(
+        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
+        {
+          nonce,
+          authorityId: auth.authority.id,
+          adminEffectiveAt: adminRow.EffectiveAt as string,
+          digest,
+          userId: signature.signerUserId,
+          signerKey: signature.signerKey,
+          signature: signature.signature,
+          now: nowCanonicalDatetime()
+        }
+      )
+      const signing = new (await import('../src/signing/signing-engine.js')).SigningEngine(auth.ctx)
+      const signResult = await signing.sign(nonce, signature, { ownsTransaction: true })
+      expect(signResult, 'P5a setup: threshold=1 must complete on the instigator signature alone').to.equal(true)
+
+      await auth.ctx.db.exec(
+        `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
+         with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = :tid
+         values (:authorityId, :effectiveAt, :thresholdPolicies)`,
+        { nonce, tid, authorityId: auth.authority.id, effectiveAt: futureEffectiveAt, thresholdPolicies }
+      )
+
+      const after = await auth.authorityEngine.getAdminDetails()
+      expect(
+        after.admin.effectiveAt,
+        'P5a: a FUTURE Admin row must be invisible to CurrentAdmin — getAdminDetails must still report the founding administration'
+      ).to.equal(before.admin.effectiveAt)
+    })
+
+    it('P5b: a PAST Admin.EffectiveAt later than the founding administration IS selected by getAdminDetails', async () => {
+      const foundingEffectiveAtMs = Date.now() - FOUNDING_PAST_MS
+      const { auth } = await createPromotionFixture({ foundingEffectiveAt: foundingEffectiveAtMs })
+      const before = await auth.authorityEngine.getAdminDetails()
+
+      const tid = Date.now()
+      const pastLaterEffectiveAt = toCanonicalDatetime(Date.now() - PROMOTION_PAST_MS)
+      const thresholdPolicies = JSON.stringify([{ policy: 'rad', threshold: 1 }])
+      const digestRow = await auth.ctx.db
+        .prepare('select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d')
+        .get({ tid, authorityId: auth.authority.id, effectiveAt: pastLaterEffectiveAt, thresholdPolicies, officerPart: null })
+      const digest = digestRow!.d as string
+
+      const adminRow = await auth.ctx.db
+        .prepare(
+          `select CurrentAdmin.EffectiveAt from CurrentAdmin join Officer
+              on CurrentAdmin.AuthorityId = Officer.AuthorityId
+                and CurrentAdmin.EffectiveAt = Officer.AdminEffectiveAt
+                  where Officer.UserId = :userId and Officer.AuthorityId = :authorityId`
+        )
+        .get({ userId: auth.user.id, authorityId: auth.authority.id })
+      if (!adminRow) throw new Error('P5b: CurrentAdmin/Officer lookup failed for the fixture officer')
+
+      const signCallback = makeTestSignCallback(auth.user)
+      const signature = await signCallback(digestToBytes(digest))
+      const nonce = 'p5b-' + crypto.randomUUID()
+      await auth.ctx.db.exec(
+        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
+        {
+          nonce,
+          authorityId: auth.authority.id,
+          adminEffectiveAt: adminRow.EffectiveAt as string,
+          digest,
+          userId: signature.signerUserId,
+          signerKey: signature.signerKey,
+          signature: signature.signature,
+          now: nowCanonicalDatetime()
+        }
+      )
+      const signing = new (await import('../src/signing/signing-engine.js')).SigningEngine(auth.ctx)
+      const signResult = await signing.sign(nonce, signature, { ownsTransaction: true })
+      expect(signResult, 'P5b setup: threshold=1 must complete on the instigator signature alone').to.equal(true)
+
+      await auth.ctx.db.exec(
+        `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
+         with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = :tid
+         values (:authorityId, :effectiveAt, :thresholdPolicies)`,
+        { nonce, tid, authorityId: auth.authority.id, effectiveAt: pastLaterEffectiveAt, thresholdPolicies }
+      )
+
+      const after = await auth.authorityEngine.getAdminDetails()
+      expect(
+        after.admin.effectiveAt,
+        'P5b: a PAST-but-LATER Admin row must be selected by CurrentAdmin over the founding one'
+      ).to.not.equal(before.admin.effectiveAt)
+      expect(after.admin.effectiveAt).to.equal(fromCanonicalDatetime(pastLaterEffectiveAt))
+    })
+
+    it('P7: transaction-composition — visibility of an uncommitted AdminSignature row on the same handle before COMMIT', async () => {
+      const { auth } = await createPromotionFixture()
+
+      const adminRow = await auth.ctx.db
+        .prepare(
+          `select CurrentAdmin.EffectiveAt from CurrentAdmin join Officer
+              on CurrentAdmin.AuthorityId = Officer.AuthorityId
+                and CurrentAdmin.EffectiveAt = Officer.AdminEffectiveAt
+                  where Officer.UserId = :userId and Officer.AuthorityId = :authorityId`
+        )
+        .get({ userId: auth.user.id, authorityId: auth.authority.id })
+      if (!adminRow) throw new Error('P7: CurrentAdmin/Officer lookup failed for the fixture officer')
+
+      // Arbitrary-content AdminSigning('rad') at threshold 1 — P7 tests sign()'s OWN
+      // transactional visibility, not proposal/promotion digest semantics, so the digest
+      // content itself is unconstrained.
+      const digestRow = await auth.ctx.db.prepare('select Digest(:probe) as d').get({ probe: 'p7-probe' })
+      const digest = digestRow!.d as string
+      const signCallback = makeTestSignCallback(auth.user)
+      const signature = await signCallback(digestToBytes(digest))
+      const nonce = 'p7-' + crypto.randomUUID()
+      await auth.ctx.db.exec(
+        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
+        {
+          nonce,
+          authorityId: auth.authority.id,
+          adminEffectiveAt: adminRow.EffectiveAt as string,
+          digest,
+          userId: signature.signerUserId,
+          signerKey: signature.signerKey,
+          signature: signature.signature,
+          now: nowCanonicalDatetime()
+        }
+      )
+
+      const signing = new (await import('../src/signing/signing-engine.js')).SigningEngine(auth.ctx)
+      await auth.ctx.db.exec('BEGIN')
+      const thresholdReached = await signing.sign(nonce, signature, { ownsTransaction: false })
+      expect(thresholdReached, 'P7 setup: threshold=1 must complete on the instigator signature alone').to.equal(true)
+      const visRow = await auth.ctx.db
+        .prepare('select 1 as x from AdminSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      await auth.ctx.db.exec('COMMIT')
+
+      // P7 VERDICT (pinned empirically, not assumed — see 57-08-SUMMARY.md): the row IS
+      // visible to a same-handle read before COMMIT. Task 3's transaction-composition
+      // decision for the completeSignature 'admin' branch is gated on this.
+      expect(
+        visRow,
+        'P7 verdict: an uncommitted AdminSignature row IS visible on the same handle before COMMIT'
+      ).to.not.be.undefined
+    })
+
+    // P8 — bare-Signature call sites (static analysis, not a DB probe; no `it()` needed).
+    // `grep -rn "\.proposeAdmin(" --include="*.ts" --include="*.tsx" packages/ apps/ | grep -v "/test/"`:
+    //   - packages/vote-engine/src/authority/builders/authority-propose-admin-builder.ts:154
+    //     `await this.engine.proposeAdmin(input.admin, input.signature)` — passes a bare
+    //     `Signature` (Draft.signature is typed `Signature`, never a callback). This IS a
+    //     production (non-test, non-mock) call site: `AuthorityEngine.buildProposeAdmin()`
+    //     exposes it on `IAuthorityEngine`. No app screen currently calls
+    //     `buildProposeAdmin()` (grepped separately — zero hits under apps/), so it has no
+    //     live UI consumer today, but it is reachable engine-API surface, not dead code.
+    //     Escalated per the plan: Task 2 must refuse (not throw on) a bare-Signature
+    //     thresholdReached promotion attempt, recording a distinct outcome marker, and this
+    //     finding is named prominently in 57-08-SUMMARY.md.
+    //   - apps/VoteTorrentAuthority/src/screens/admin/EditOfficerScreen.tsx:121 — callback.
+    //   - apps/VoteTorrentAuthority/src/screens/authorities/ProposedAdministrationScreen.tsx:229 — callback.
+
+    // -----------------------------------------------------------------
+    // GROUP 3 — the end-to-end scope-readability proof. RED at this commit;
+    // Task 2 (Trigger A) must turn both cases GREEN.
+    // -----------------------------------------------------------------
+
+    // Inherited finding 3 (57-07): this case runs at a genuine `threshold: 1` policy, so it
+    // would pass with or without the `$.scope`/`$.policy` extraction defect in
+    // signing-engine.ts:150-176 — it does not depend on that broken behaviour, and it does
+    // not exercise a multi-signature threshold, which is currently unreachable in production.
+    it('grants an officer the vrg scope end to end and the scope is readable through getAdminDetails', async () => {
+      const foundingEffectiveAtMs = Date.now() - FOUNDING_PAST_MS
+      const { auth } = await createPromotionFixture({
+        foundingEffectiveAt: foundingEffectiveAtMs,
+        // Pre-WR-22 scope set — deliberately excludes 'vrg' so the RED baseline below is
+        // genuine (see createPromotionFixture's foundingOfficerScopes doc comment).
+        foundingOfficerScopes: ['rn', 'rad', 'iad', 'uai', 'mel'] as Scope[]
+      })
+
+      // Step 2 (also P6's assertion, inlined): the founding officer must NOT hold 'vrg'
+      // before promotion — a green end-to-end case must be unable to pass without this
+      // having been false first.
+      const before = await auth.authorityEngine.getAdminDetails()
+      const beforeOfficer = before.admin.officers.find((o) => o.userId === auth.user.id)
+      expect(beforeOfficer?.scopes, 'baseline must read a real, non-empty roster').to.not.be.undefined
+      expect(beforeOfficer!.scopes.length, 'baseline must read a real, non-empty roster').to.be.greaterThan(0)
+      expect(beforeOfficer!.scopes.includes('rad' as Scope), 'baseline sanity: the founding officer really carries rad').to.equal(true)
+      expect(beforeOfficer!.scopes.includes('vrg'), 'baseline: vrg must be absent before promotion').to.equal(false)
+
+      // Step 3: propose a roster — the founding officer, .existing, gaining 'vrg' alongside
+      // 'rad' (required: Admin.OfficerRequired fires `check on update`, so a rad-less
+      // administration could never be revised again — 57-07 refuses it as no-rad-officer).
+      const proposedEffectiveAtMs = Date.now() - PROMOTION_PAST_MS
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            {
+              existing: {
+                userId: auth.user.id,
+                authorityId: auth.authority.id,
+                title: 'Chair',
+                scopes: ['rad', 'vrg'] as Scope[]
+              }
+            }
+          ],
+          effectiveAt: proposedEffectiveAtMs,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+
+      // Step 4: the production shape — proposeAdmin alone, with a device-signer callback
+      // (matches EditOfficerScreen.tsx:121). The test does NOT call applyAdminProposal.
+      await auth.authorityEngine.proposeAdmin(proposal, makeTestSignCallback(auth.user))
+
+      // Step 5: the full three-hop hook expression, post-promotion.
+      const after = await auth.authorityEngine.getAdminDetails()
+      const afterOfficer = after.admin.officers.find((o) => o.userId === auth.user.id)
+      expect(
+        afterOfficer?.scopes?.includes('vrg'),
+        "the promoted 'vrg' scope must be readable through getAdminDetails().admin.officers.find(...).scopes"
+      ).to.equal(true)
+      expect(afterOfficer?.title).to.equal('Chair')
+
+      // Step 6: CurrentAdmin actually advanced — not a stale row that happened to satisfy
+      // step 5.
+      expect(
+        after.admin.effectiveAt,
+        'admin.admin.effectiveAt must correspond to the PROPOSED effective date, not the founding one'
+      ).to.equal(fromCanonicalDatetime(toCanonicalDatetime(proposedEffectiveAtMs)))
+      expect(after.admin.effectiveAt).to.not.equal(before.admin.effectiveAt)
+    })
+
+    // D-03's cost made visible instead of silent (inherited finding 4): an `.init` officer
+    // has no matching `User` row, so applyAdminProposal refuses with 'unresolvable-officer'
+    // rather than silently promoting a smaller roster than the one that was signed.
+    it('resolves without destroying the proposal when the roster contains an unpromotable .init officer', async () => {
+      const foundingEffectiveAtMs = Date.now() - FOUNDING_PAST_MS
+      const { auth } = await createPromotionFixture({ foundingEffectiveAt: foundingEffectiveAtMs })
+      const proposedEffectiveAtMs = Date.now() - PROMOTION_PAST_MS
+      const proposedEffectiveAtCanon = toCanonicalDatetime(proposedEffectiveAtMs)
+
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            {
+              existing: {
+                userId: auth.user.id,
+                authorityId: auth.authority.id,
+                title: 'Chair',
+                scopes: ['rad'] as Scope[]
+              }
+            },
+            {
+              init: {
+                name: 'Nobody Nowhere',
+                title: 'Clerk',
+                scopes: ['vrg'] as Scope[]
+              }
+            }
+          ],
+          effectiveAt: proposedEffectiveAtMs,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+
+      // (a) proposeAdmin RESOLVES rather than rejecting.
+      await auth.authorityEngine.proposeAdmin(proposal, makeTestSignCallback(auth.user))
+
+      // (b) the persisted ProposedAdmin and ProposedOfficer rows survive.
+      const proposedAdminRow = await auth.ctx.db
+        .prepare('select 1 as x from ProposedAdmin where AuthorityId = :id and EffectiveAt = :e')
+        .get({ id: auth.authority.id, e: proposedEffectiveAtCanon })
+      expect(proposedAdminRow, 'a refused promotion must not destroy the persisted ProposedAdmin row').to.not.be.undefined
+      const proposedOfficerCountRow = await auth.ctx.db
+        .prepare('select count(*) as n from ProposedOfficer where AuthorityId = :id and AdminEffectiveAt = :e')
+        .get({ id: auth.authority.id, e: proposedEffectiveAtCanon })
+      expect(Number(proposedOfficerCountRow?.n), 'both proposed officer rows must survive').to.equal(2)
+
+      // (c) the engine's recorded promotion outcome reports reason === 'unresolvable-officer'.
+      // Field name Task 2 introduces: AuthorityEngine.lastPromotionOutcome. RED until then.
+      const engineWithOutcome = auth.authorityEngine as unknown as { lastPromotionOutcome?: { reason?: string } }
+      expect(
+        engineWithOutcome.lastPromotionOutcome?.reason,
+        'a promotion that legitimately cannot apply must be RECORDED (lastPromotionOutcome), never silent'
+      ).to.equal('unresolvable-officer')
     })
   })
 
