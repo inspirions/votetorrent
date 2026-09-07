@@ -2181,7 +2181,7 @@ export class RegistrationEngine implements IRegistrationEngine {
       // is byte-identical to the one-argument form.
       const hasExclusion = typeof excludeRequestId === 'string' && excludeRequestId.length > 0
       const excludeClause = hasExclusion ? ' and R.Id != :excludeRequestId' : ''
-      const bindings: Record<string, unknown> = { requesterKey, status: STATUS_REJECTED }
+      const bindings: Record<string, SqlValue> = { requesterKey, status: STATUS_REJECTED }
       if (hasExclusion) bindings.excludeRequestId = excludeRequestId
       for await (const row of ctx.db.eval(
         `select R.Id, R.DecidedAt, R.RejectionReason, R.DecidingOfficerUserId
