@@ -43,7 +43,7 @@
  * error messages never reach the UI.
  */
 import React, {useRef, useState} from 'react';
-import {Linking, Pressable, StyleSheet, Text, View} from 'react-native';
+import {Linking, Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
@@ -333,115 +333,115 @@ export default function ConfirmationScreen() {
 					: null;
 
 	return (
-		<View style={[globalStyles.container, styles.screen, {backgroundColor: colors.background}]}>
-			<View style={styles.centerColumn}>
+		<ScrollView
+			style={[styles.screen, {backgroundColor: colors.background}]}
+			contentContainerStyle={[globalStyles.container, styles.centerColumn]}>
+			<Text
+				style={[
+					styles.heading,
+					{
+						color: colors.text,
+						fontFamily: fonts.medium.fontFamily,
+						fontWeight: fonts.medium.fontWeight,
+						fontSize: typeScale.h2.fontSize,
+						lineHeight: typeScale.h2.lineHeight,
+					},
+				]}>
+				{t('confirmation.heading')}
+			</Text>
+			<Text
+				style={[
+					styles.body,
+					{
+						color: colors.textSecondary,
+						fontFamily: fonts.regular.fontFamily,
+						fontWeight: fonts.regular.fontWeight,
+						fontSize: typeScale.body.fontSize,
+						lineHeight: typeScale.body.lineHeight,
+					},
+				]}>
+				{t('confirmation.body')}
+			</Text>
+			<View style={styles.iconWrap}>
+				<FontAwesome6 name="fingerprint" size={96} color={colors.primary} />
+			</View>
+			<Text
+				style={[
+					styles.caption,
+					{
+						color: colors.textSecondary,
+						fontFamily: fonts.regular.fontFamily,
+						fontWeight: fonts.regular.fontWeight,
+						fontSize: typeScale.caption.fontSize,
+						lineHeight: typeScale.caption.lineHeight,
+					},
+				]}>
+				{t('confirmation.caption')}
+			</Text>
+			{isPending ? (
 				<Text
+					testID="confirmation-pending"
 					style={[
-						styles.heading,
+						styles.error,
 						{
 							color: colors.text,
-							fontFamily: fonts.medium.fontFamily,
-							fontWeight: fonts.medium.fontWeight,
-							fontSize: typeScale.h2.fontSize,
-							lineHeight: typeScale.h2.lineHeight,
-						},
-					]}>
-					{t('confirmation.heading')}
-				</Text>
-				<Text
-					style={[
-						styles.body,
-						{
-							color: colors.textSecondary,
 							fontFamily: fonts.regular.fontFamily,
 							fontWeight: fonts.regular.fontWeight,
 							fontSize: typeScale.body.fontSize,
 							lineHeight: typeScale.body.lineHeight,
 						},
 					]}>
-					{t('confirmation.body')}
+					Your registration has been submitted. We'll let you know once the authority confirms
+					your device.
 				</Text>
-				<View style={styles.iconWrap}>
-					<FontAwesome6 name="fingerprint" size={96} color={colors.primary} />
-				</View>
-				<Text
-					style={[
-						styles.caption,
-						{
-							color: colors.textSecondary,
-							fontFamily: fonts.regular.fontFamily,
-							fontWeight: fonts.regular.fontWeight,
-							fontSize: typeScale.caption.fontSize,
-							lineHeight: typeScale.caption.lineHeight,
-						},
-					]}>
-					{t('confirmation.caption')}
-				</Text>
-				{isPending ? (
-					<Text
-						testID="confirmation-pending"
-						style={[
-							styles.error,
-							{
-								color: colors.text,
-								fontFamily: fonts.regular.fontFamily,
-								fontWeight: fonts.regular.fontWeight,
-								fontSize: typeScale.body.fontSize,
-								lineHeight: typeScale.body.lineHeight,
-							},
-						]}>
-						Your registration has been submitted. We'll let you know once the authority confirms
-						your device.
-					</Text>
-				) : (
-					<>
-						{errorCopy ? (
-							<Text
-								testID="confirmation-error"
-								style={[
-									styles.error,
-									{
-										color: colors.text,
-										fontFamily: fonts.regular.fontFamily,
-										fontWeight: fonts.regular.fontWeight,
-										fontSize: typeScale.body.fontSize,
-										lineHeight: typeScale.body.lineHeight,
-									},
-								]}>
-								{errorCopy}
-							</Text>
-						) : null}
-						{failureClass === 'terminal' ? null : failureClass === 'recoverable-action' ? (
-							<>
-								<Pressable
-									testID="confirmation-setup-cta"
-									onPress={handleSetupDeviceUnlock}
-									style={[styles.cta, {backgroundColor: colors.primary, borderRadius: radii.pill}]}>
-									<Text style={[styles.ctaLabel, {color: colors.light}]}>{t('confirmation.error.setupCta')}</Text>
-								</Pressable>
-								<Pressable
-									testID="confirmation-retry-cta"
-									onPress={onConfirm}
-									disabled={isSubmitting}
-									style={[styles.retryCta, {borderColor: colors.primary, borderRadius: radii.pill}]}>
-									<Text style={[styles.ctaLabel, {color: colors.primary}]}>Try Again</Text>
-								</Pressable>
-							</>
-						) : (
+			) : (
+				<>
+					{errorCopy ? (
+						<Text
+							testID="confirmation-error"
+							style={[
+								styles.error,
+								{
+									color: colors.text,
+									fontFamily: fonts.regular.fontFamily,
+									fontWeight: fonts.regular.fontWeight,
+									fontSize: typeScale.body.fontSize,
+									lineHeight: typeScale.body.lineHeight,
+								},
+							]}>
+							{errorCopy}
+						</Text>
+					) : null}
+					{failureClass === 'terminal' ? null : failureClass === 'recoverable-action' ? (
+						<>
 							<Pressable
-								testID="confirmation-confirm-face-id"
+								testID="confirmation-setup-cta"
+								onPress={handleSetupDeviceUnlock}
+								style={[styles.cta, {backgroundColor: colors.primary, borderRadius: radii.pill}]}>
+								<Text style={[styles.ctaLabel, {color: colors.light}]}>{t('confirmation.error.setupCta')}</Text>
+							</Pressable>
+							<Pressable
+								testID="confirmation-retry-cta"
 								onPress={onConfirm}
 								disabled={isSubmitting}
-								style={[styles.cta, {backgroundColor: colors.primary, borderRadius: radii.pill}]}>
-								<Text style={[styles.ctaLabel, {color: colors.light}]}>
-									{errorCopy ? 'Try Again' : t('confirmation.cta')}
-								</Text>
+								style={[styles.retryCta, {borderColor: colors.primary, borderRadius: radii.pill}]}>
+								<Text style={[styles.ctaLabel, {color: colors.primary}]}>Try Again</Text>
 							</Pressable>
-						)}
-					</>
-				)}
-			</View>
-		</View>
+						</>
+					) : (
+						<Pressable
+							testID="confirmation-confirm-face-id"
+							onPress={onConfirm}
+							disabled={isSubmitting}
+							style={[styles.cta, {backgroundColor: colors.primary, borderRadius: radii.pill}]}>
+							<Text style={[styles.ctaLabel, {color: colors.light}]}>
+								{errorCopy ? 'Try Again' : t('confirmation.cta')}
+							</Text>
+						</Pressable>
+					)}
+				</>
+			)}
+		</ScrollView>
 	);
 }
 
@@ -450,7 +450,7 @@ const styles = StyleSheet.create({
 		flex: 1,
 	},
 	centerColumn: {
-		flex: 1,
+		flexGrow: 1,
 		justifyContent: 'center',
 		alignItems: 'center',
 	},

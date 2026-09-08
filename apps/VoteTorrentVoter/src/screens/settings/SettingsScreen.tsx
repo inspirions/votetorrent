@@ -14,7 +14,7 @@
  * without rendering the full screen tree.
  */
 import React from 'react';
-import {Pressable, StyleSheet, Text, View} from 'react-native';
+import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import {useTranslation} from 'react-i18next';
@@ -51,7 +51,9 @@ export default function SettingsScreen() {
 	];
 
 	return (
-		<View style={[globalStyles.container, styles.screen, {backgroundColor: colors.background}]}>
+		<ScrollView
+			style={[styles.screen, {backgroundColor: colors.background}]}
+			contentContainerStyle={globalStyles.container}>
 			<Text
 				style={[
 					styles.fieldLabel,
@@ -102,7 +104,7 @@ export default function SettingsScreen() {
 					);
 				})}
 			</View>
-		</View>
+		</ScrollView>
 	);
 }
 
