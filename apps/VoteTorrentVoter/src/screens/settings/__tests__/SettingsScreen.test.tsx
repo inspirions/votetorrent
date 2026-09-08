@@ -1,14 +1,19 @@
 /**
- * Unit test for ScanScreen (SCAN-01/I18N-01, 43-01) — locks in the branded `scan.*`
- * "not available yet" placeholder (icon + title + body) and guards against regressing to the
- * generic `common.placeholderBody` copy. Mounts inside VoterAppProvider + ThemeProvider (this
- * screen calls useVoterApp()/useTheme()). No lifecycle-state dependency and no fetch-on-mount,
- * so a single synchronous renderer.act() suffices — no flush() ticks needed.
+ * Unit test for SettingsScreen (57-17/57-18 gap closure — UAT-10 scroll-container regression
+ * guard). No rendered-tree test existed for this screen before this file (57-17-SUMMARY.md's own
+ * "Not verified this session" note: its ScrollView conversion had been proven only by typecheck
+ * and the full-suite green, never by a test that actually mounts the new root).
  *
- * Phase 44-07 (D-02/D-04): `VoterAppProvider` is now a real composition root requiring a
+ * Mounts inside VoterAppProvider + ThemeProvider (this screen calls useVoterApp()/useTheme()),
+ * mirroring ScanScreen.test.tsx's / ValidationDetailsScreen.test.tsx's mounting pattern. Phase
+ * 44-07 (D-02/D-04): `VoterAppProvider` is now a real composition root requiring a
  * `CadreNodeProvider` ancestor — this screen-level test has no need to exercise that boot, so it
- * uses the manual Jest mock at `providers/__mocks__/VoterAppProvider.tsx` (mirrors the authority
- * app's App.test.tsx inert-mock convention).
+ * uses the manual Jest mock at `providers/__mocks__/VoterAppProvider.tsx`.
+ *
+ * Asserts the RENDERED `RCTScrollView` host node (walking the react-test-renderer JSON tree) —
+ * mirrors apps/VoteTorrentAuthority/src/screens/settings/SettingsScreen.scrollContainer.test.tsx,
+ * the canonical model for this gap class — not source text, since a source grep would also pass
+ * on an imported-but-unrendered ScrollView.
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
@@ -19,7 +24,7 @@ import '../../../i18n'; // initializes the global i18next instance useTranslatio
 jest.mock('../../../providers/VoterAppProvider');
 import {VoterAppProvider} from '../../../providers/VoterAppProvider';
 import {lightTheme} from '../../../theme/themes';
-import ScanScreen from '../ScanScreen';
+import SettingsScreen from '../SettingsScreen';
 
 function renderScreen() {
 	let tr!: renderer.ReactTestRenderer;
@@ -27,7 +32,7 @@ function renderScreen() {
 		tr = renderer.create(
 			<ThemeProvider value={lightTheme}>
 				<VoterAppProvider>
-					<ScanScreen />
+					<SettingsScreen />
 				</VoterAppProvider>
 			</ThemeProvider>,
 		);
@@ -46,29 +51,6 @@ function allText(tr: renderer.ReactTestRenderer): string {
 		.join(' | ');
 }
 
-describe('ScanScreen (SCAN-01/I18N-01, branded placeholder)', () => {
-	it('renders the branded scan.* title and body copy', () => {
-		const tr = renderScreen();
-		const text = allText(tr);
-
-		expect(text).toContain('QR scanning coming soon');
-		expect(text).toContain("isn't available yet");
-	});
-
-	it('does not render the generic common.placeholderBody copy (D-01: own identity)', () => {
-		const tr = renderScreen();
-		const text = allText(tr);
-
-		expect(text).not.toContain("This screen isn't built yet");
-	});
-});
-
-/**
- * 57-17/57-18 scroll-container gap closure (mirrors
- * apps/VoteTorrentAuthority/src/screens/settings/SettingsScreen.scrollContainer.test.tsx — the
- * canonical model). Walks the RENDERED react-test-renderer JSON tree for a host node whose
- * `type` is `RCTScrollView`, rather than a source-level grep.
- */
 type TreeNode = {
 	type: string;
 	props: Record<string, unknown>;
@@ -92,7 +74,16 @@ function findHostNodeByType(json: unknown, targetType: string): TreeNode | null 
 	return null;
 }
 
-describe('ScanScreen — scroll container regression guard (57-17/57-18)', () => {
+describe('SettingsScreen — mounts and exposes the language toggle', () => {
+	it('renders the language segment toggle', () => {
+		const tr = renderScreen();
+		const text = allText(tr);
+		expect(text).toContain('English');
+		expect(text).toContain('Español');
+	});
+});
+
+describe('SettingsScreen — scroll container regression guard (57-17/57-18)', () => {
 	it('Test 1: renders a real RCTScrollView host node as its outermost scrollable', () => {
 		const tr = renderScreen();
 		const scrollNode = findHostNodeByType(tr.toJSON(), 'RCTScrollView');

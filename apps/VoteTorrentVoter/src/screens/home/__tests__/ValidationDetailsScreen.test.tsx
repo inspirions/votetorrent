@@ -65,6 +65,38 @@ function allText(tr: renderer.ReactTestRenderer): string {
 		.join(' | ');
 }
 
+/**
+ * 57-17/57-18 scroll-container gap closure (mirrors
+ * apps/VoteTorrentAuthority/src/screens/settings/SettingsScreen.scrollContainer.test.tsx — the
+ * canonical model). Walks the RENDERED react-test-renderer JSON tree for a host node whose
+ * `type` is `RCTScrollView`, rather than a source-level grep. This screen's pre-fetch/no-evidence
+ * early return is a plain (non-scrolling) `View` by design (57-17-SUMMARY.md: no children, nothing
+ * can overflow it) — only the LOADED-content branch (asserted below, reached once `getElection()`
+ * resolves with evidence) is the reachable path this gap concerns.
+ */
+type TreeNode = {
+	type: string;
+	props: Record<string, unknown>;
+	children: Array<TreeNode | string> | null;
+};
+
+function findHostNodeByType(json: unknown, targetType: string): TreeNode | null {
+	if (json === null || json === undefined) return null;
+	const nodes: unknown[] = Array.isArray(json) ? json : [json];
+	for (const node of nodes) {
+		if (node === null || typeof node !== 'object') continue;
+		const typed = node as TreeNode;
+		if (typed.type === targetType) {
+			return typed;
+		}
+		if (typed.children) {
+			const found = findHostNodeByType(typed.children, targetType);
+			if (found) return found;
+		}
+	}
+	return null;
+}
+
 describe('ValidationDetailsScreen (HOME-03/D-11, frame 276:868)', () => {
 	it('renders 3 per-check rows, the N/3 verified count, the fingerprint, and the blockchain line', async () => {
 		const tr = renderScreen();
@@ -102,5 +134,30 @@ describe('ValidationDetailsScreen (HOME-03/D-11, frame 276:868)', () => {
 		const text = allText(tr);
 		expect(text).not.toMatch(/vote now/i);
 		expect(text).not.toMatch(/view validation details/i);
+	});
+
+	describe('scroll container regression guard (57-17/57-18)', () => {
+		it('Test 1: the loaded-content branch renders a real RCTScrollView host node', async () => {
+			const tr = renderScreen();
+			await flush(tr);
+
+			// Precondition — confirm the loaded (not pre-fetch) branch actually rendered.
+			expect(allText(tr)).toContain('2/3 checks verified');
+
+			const scrollNode = findHostNodeByType(tr.toJSON(), 'RCTScrollView');
+			expect(scrollNode).not.toBeNull();
+		});
+
+		it('Test 2 (anti-vacuity): the walker returns null against a View-only synthetic tree', () => {
+			const syntheticTree = {
+				type: 'View',
+				props: {},
+				children: [
+					{type: 'View', props: {}, children: null},
+					{type: 'View', props: {}, children: [{type: 'View', props: {}, children: null}]},
+				],
+			};
+			expect(findHostNodeByType(syntheticTree, 'RCTScrollView')).toBeNull();
+		});
 	});
 });

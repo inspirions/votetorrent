@@ -267,6 +267,38 @@ async function pressConfirm(tr: renderer.ReactTestRenderer, testID = 'confirmati
 	});
 }
 
+/**
+ * 57-17/57-18 scroll-container gap closure (mirrors
+ * apps/VoteTorrentAuthority/src/screens/settings/SettingsScreen.scrollContainer.test.tsx — the
+ * canonical model). Walks the RENDERED react-test-renderer JSON tree looking for a host node
+ * whose `type` is `RCTScrollView`, rather than grepping source text — a source grep would also
+ * pass on an imported-but-unrendered or branch-only `ScrollView`, which is exactly the class of
+ * gap 57-18's static gate cannot see (it only proves reachability at the JSX-source level, not
+ * that a given SCREEN STATE still renders the container it started with).
+ */
+type TreeNode = {
+	type: string;
+	props: Record<string, unknown>;
+	children: Array<TreeNode | string> | null;
+};
+
+function findHostNodeByType(json: unknown, targetType: string): TreeNode | null {
+	if (json === null || json === undefined) return null;
+	const nodes: unknown[] = Array.isArray(json) ? json : [json];
+	for (const node of nodes) {
+		if (node === null || typeof node !== 'object') continue;
+		const typed = node as TreeNode;
+		if (typed.type === targetType) {
+			return typed;
+		}
+		if (typed.children) {
+			const found = findHostNodeByType(typed.children, targetType);
+			if (found) return found;
+		}
+	}
+	return null;
+}
+
 beforeEach(() => {
 	mockPopToTop.mockClear();
 	mockClearDraft.mockClear();
@@ -563,5 +595,51 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 
 			(globalThis as {__DEV__?: boolean}).__DEV__ = originalDev;
 		});
+	});
+});
+
+describe('ConfirmationScreen — scroll container regression guard (57-17/57-18)', () => {
+	it('Test 1: the default (pre-submit) state renders a real RCTScrollView host node as its outermost scrollable', () => {
+		const tr = renderScreen();
+		const scrollNode = findHostNodeByType(tr.toJSON(), 'RCTScrollView');
+		expect(scrollNode).not.toBeNull();
+	});
+
+	it('Test 2 (anti-vacuity): the walker returns null against a View-only synthetic tree', () => {
+		const syntheticTree = {
+			type: 'View',
+			props: {},
+			children: [
+				{type: 'View', props: {}, children: null},
+				{type: 'View', props: {}, children: [{type: 'View', props: {}, children: null}]},
+			],
+		};
+		expect(findHostNodeByType(syntheticTree, 'RCTScrollView')).toBeNull();
+	});
+
+	it('Test 3: the reachable "confirmation-pending" branch still renders inside the RCTScrollView after a successful submit', async () => {
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		// Confirm the pending testID actually rendered (precondition — otherwise Test 3 would be
+		// vacuously true if the ceremony silently failed to reach the pending branch).
+		const pendingNode = tr.root.findByProps({testID: 'confirmation-pending'});
+		expect(pendingNode).toBeDefined();
+
+		const scrollNode = findHostNodeByType(tr.toJSON(), 'RCTScrollView');
+		expect(scrollNode).not.toBeNull();
+	});
+
+	it('Test 4: the reachable "confirmation-error" (transient failure) branch still renders inside the RCTScrollView', async () => {
+		mockProduce.mockRejectedValueOnce({code: 'LOCKOUT'});
+
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		const errorNode = tr.root.findByProps({testID: 'confirmation-error'});
+		expect(errorNode).toBeDefined();
+
+		const scrollNode = findHostNodeByType(tr.toJSON(), 'RCTScrollView');
+		expect(scrollNode).not.toBeNull();
 	});
 });
