@@ -381,16 +381,16 @@ export default function SettingsScreen() {
 					</ThemedText>
 				)}
 
-				<CustomButton
-					title={t("screenScaffoldsDebugTitle")}
-					icon="wrench"
-					size="thin"
-					onPress={() => {
-						navigation.navigate("ScreenScaffoldsDebug");
-					}}
-				/>
 				{__DEV__ && (
 					<>
+						<CustomButton
+							title={t("screenScaffoldsDebugTitle")}
+							icon="wrench"
+							size="thin"
+							onPress={() => {
+								navigation.navigate("ScreenScaffoldsDebug");
+							}}
+						/>
 						<CustomButton
 							title={t("debugSeedTasksTitle")}
 							icon="vial"

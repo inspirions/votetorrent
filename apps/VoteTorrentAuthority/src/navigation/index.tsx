@@ -48,7 +48,6 @@ import EditElectionWithFilterScreen from "../screens/tasks/EditElectionWithFilte
 import EditRevisionFormScreen from "../screens/tasks/EditRevisionFormScreen";
 import ProposedElectionScreen from "../screens/tasks/ProposedElectionScreen";
 import ProposedRevisionScreen from "../screens/tasks/ProposedRevisionScreen";
-import ScreenScaffoldsDebugScreen from "../screens/tasks/ScreenScaffoldsDebugScreen";
 import ElectionDetailsScreen from "../screens/elections/ElectionDetailsScreen";
 import RegistrationPolicyScreen from "../screens/elections/RegistrationPolicyScreen";
 // Phase 48 plan 48-21 (D-12) — the three Phase 48 screen modules.
@@ -78,6 +77,14 @@ import EditBallotScreen from "../screens/ballots/EditBallotScreen";
 import CreateBallotScreen from "../screens/ballots/CreateBallotScreen";
 import EditQuestionScreen from "../screens/ballots/EditQuestionScreen";
 import EditQuestionOption from "../screens/ballots/EditQuestionOption";
+
+// Phase 57 (T-57-16-05) — debug-only scaffold route. Loaded through a
+// __DEV__-guarded require rather than a static import so the module is not a
+// static dependency of the release bundle, and registered below only in dev.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const ScreenScaffoldsDebugScreen: React.ComponentType | undefined = __DEV__
+	? require("../screens/tasks/ScreenScaffoldsDebugScreen").default
+	: undefined;
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator();
@@ -437,11 +444,13 @@ export const RootNavigator = () => {
 				component={ProposedRevisionScreen}
 				options={{ title: t("proposedRevisionTitle") }}
 			/>
-			<Stack.Screen
-				name="ScreenScaffoldsDebug"
-				component={ScreenScaffoldsDebugScreen}
-				options={{ title: t("screenScaffoldsDebugTitle") }}
-			/>
+			{__DEV__ && ScreenScaffoldsDebugScreen ? (
+				<Stack.Screen
+					name="ScreenScaffoldsDebug"
+					component={ScreenScaffoldsDebugScreen}
+					options={{ title: t("screenScaffoldsDebugTitle") }}
+				/>
+			) : null}
 			<Stack.Screen
 				name="ElectionDetails"
 				component={ElectionDetailsScreen}
