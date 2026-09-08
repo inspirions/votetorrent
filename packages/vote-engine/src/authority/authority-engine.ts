@@ -899,18 +899,23 @@ export class AuthorityEngine implements IAuthorityEngine {
 			}
 			for (const { effectiveAtCanon, thresholdPoliciesJson } of proposedAdminRows) {
 				const rosterRaw: AdminRosterEntry[] = [];
-				// 57-13-TASK2-TEMP: Step 3 does not yet read the persisted UserId back
-				// (that is Task 3) — binding `userId: null` for every entry here means
-				// this re-derived roster will NOT match a roster proposeAdmin (Task 2's
-				// producer) signed with a non-null userId. This is the plan's
-				// deliberate expected-RED intermediate between Task 2 and Task 3.
+				// 57-13 (CR-01, fallback carrier — see 57-13-CR01-CARRIER-PROBE.md):
+				// UserId is a plain column on ProposedOfficer itself (added by Task 2),
+				// so it comes back in this SAME select — no second query, no new
+				// exec-mutex hazard (unlike the primary-carrier branch this plan did
+				// NOT take, which would have needed a per-row point lookup issued
+				// AFTER this cursor closed).
 				for await (const officerRow of this.ctx.db.eval(
-					'select ProposedName, Title, Scopes from ProposedOfficer where AuthorityId = :id and AdminEffectiveAt = :e',
+					'select ProposedName, Title, Scopes, UserId from ProposedOfficer where AuthorityId = :id and AdminEffectiveAt = :e',
 					{ id: this.authority.id, e: effectiveAtCanon },
 				)) {
 					rosterRaw.push({
 						proposedName: officerRow.ProposedName as string,
-						userId: null,
+						// 57-13: bind as `?? null`, matching the producer's exact binding
+						// (T-57-13-05) — a mismatch between `null` and `undefined` here
+						// produces a silent `roster-mismatch` refusal that looks like a
+						// tampering detection rather than what it actually is.
+						userId: (officerRow.UserId as string | null) ?? null,
 						title: officerRow.Title as string,
 						scopes: parseJsonOr<Scope[]>(officerRow.Scopes as string, [], 'ProposedOfficer.Scopes'),
 					});
@@ -941,6 +946,16 @@ export class AuthorityEngine implements IAuthorityEngine {
 			// officer proposed as `.init` (no matching User row) cannot be promoted.
 			// Refuse loudly rather than silently promoting a smaller roster than the
 			// one that was signed (T-57-07-07).
+			//
+			// 57-13 (CR-01, HALF-LANDED STATE — do not mistake this for finished):
+			// `matched.rosterEntries` now carries a trustworthy, persisted `userId`
+			// per entry (see `AdminRosterEntry`/`resolveAdminRoster` above), but
+			// Step 4 below does NOT use it yet — it still resolves identity through
+			// `select Id from User where Name = :name`, the same renameable bridge
+			// CR-01 exists to close. 57-14 is the plan that rewrites Step 4 to read
+			// `entry.userId` instead. This comment exists so a reader of this file
+			// between 57-13 and 57-14 landing cannot mistake the half-landed state
+			// for the finished one (the exact failure mode IN-01 was filed for).
 			const resolvedOfficers: Array<{ userId: string; title: string; scopes: Scope[] }> = [];
 			for (const entry of matched.rosterEntries) {
 				const userIds: string[] = [];

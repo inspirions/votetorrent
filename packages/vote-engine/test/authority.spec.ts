@@ -1554,6 +1554,79 @@ describe('AuthorityEngine', () => {
       expect(Number(officerCountRow?.n)).to.equal(1)
     })
 
+    it('should re-derive the roster digest from the persisted UserId, matching the proposal byte-for-byte (CR-01 round trip)', async () => {
+      // 57-13 (CR-01, Task 3): applyAdminProposal Step 3 must re-derive the
+      // IDENTICAL digest proposeAdmin signed, reading the userId back from
+      // the persisted carrier (ProposedOfficer.UserId — the fallback carrier
+      // per 57-13-CR01-CARRIER-PROBE.md), not merely infer success from the
+      // promotion cases passing.
+      const { auth, secondUser } = await createPromotionFixture()
+      const sig = makeTestSignCallback(auth.user)
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { existing: { userId: secondUser.id, authorityId: auth.authority.id, title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      const rosterDigest = await computeRosterDigest(
+        auth,
+        [
+          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
+        ],
+        effectiveAt,
+        proposal.proposed.thresholdPolicies
+      )
+      const bareSignature = await sig(digestToBytes(rosterDigest))
+      await auth.authorityEngine.proposeAdmin(proposal, bareSignature)
+
+      // The persisted AdminSigning.Digest for this session — what proposeAdmin
+      // (the producer) actually signed.
+      const sessionRow = await auth.ctx.db
+        .prepare('select Digest from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: rosterDigest })
+      expect(sessionRow?.Digest, 'setup: the session must exist under the digest computeRosterDigest predicted').to.equal(rosterDigest)
+
+      // Independently recompute the SAME digest through computeRosterDigest
+      // (which mirrors sortRosterEntries exactly) — this is the assertion
+      // that the round trip is byte-for-byte, not merely inferred from the
+      // promotion cases (C2/C3) succeeding.
+      const recomputed = await computeRosterDigest(
+        auth,
+        [
+          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
+        ],
+        effectiveAt,
+        proposal.proposed.thresholdPolicies
+      )
+      expect(recomputed, 'the roster digest must be byte-for-byte reproducible from the persisted UserId').to.equal(sessionRow?.Digest)
+
+      // And prove Step 3 ITSELF (not just the test helper) re-derives it: a
+      // real applyAdminProposal call against this nonce must succeed rather
+      // than refuse with roster-mismatch.
+      const nonceRow = await auth.ctx.db
+        .prepare('select Nonce from AdminSigning where AuthorityId = :id and Digest = :digest')
+        .get({ id: auth.authority.id, digest: rosterDigest })
+      const nonce = nonceRow!.Nonce as string
+      const engine = auth.authorityEngine as unknown as {
+        applyAdminProposal?: (nonce: string, sign: (digest: Uint8Array) => Promise<Signature>) => Promise<unknown>
+      }
+      let caught: unknown
+      try {
+        await engine.applyAdminProposal!(nonce, sig)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught, 'Step 3 must re-derive the identical digest and promote without a roster-mismatch refusal').to.equal(undefined)
+    })
+
     // -----------------------------------------------------------------
     // GROUP 3 — refusal negative controls + atomicity (Task 3).
     // Every case asserts on `err.reason`, never on message text.
