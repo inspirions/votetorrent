@@ -23,7 +23,7 @@
 	"scripts": {
 		"clean": "yarn workspaces foreach -A run clean",
 		"build": "yarn workspaces foreach -A run build",
-		"lint": "node scripts/check-peer-requirements.mjs && yarn workspaces foreach -A run lint",
+		"lint": "node scripts/check-peer-requirements.mjs && node scripts/check-screen-scroll-containers.mjs && yarn workspaces foreach -A run lint",
 		"test": "yarn workspaces foreach -A run test",
 		"start": "yarn workspace votetorrent-authority start",
 		"android": "yarn workspace votetorrent-authority android",
@@ -36,6 +36,7 @@
 		"lint:peers": "node scripts/check-peer-requirements.mjs",
 		"lint:stubs": "bash scripts/lint-stubs.sh",
 		"lint:copy": "node scripts/lint-copy.mjs",
+		"lint:screen-scroll": "node scripts/check-screen-scroll-containers.mjs",
 		"assert:ui-web-consumers": "node scripts/assert-ui-web-dedupe-and-gate.mjs",
 		"verify:security-controls": "node scripts/verify-security-controls.mjs all .planning/phases/52-bootstrap-rendezvous-service",
 		"verify:relay-smoke": "node scripts/assert-relay-smoke.mjs",
