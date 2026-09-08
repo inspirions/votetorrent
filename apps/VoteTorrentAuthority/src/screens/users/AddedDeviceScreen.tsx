@@ -1,4 +1,4 @@
-import { StyleSheet, View } from "react-native";
+import { ScrollView, StyleSheet, View } from "react-native";
 import { globalStyles } from "../../theme/styles";
 import { ThemedText } from "../../components/ThemedText";
 import { useTranslation } from "react-i18next";
@@ -9,7 +9,7 @@ export function AddedDeviceScreen() {
 	const { multiaddress, token } = useRoute().params as { multiaddress: string; token: string };
 
 	return (
-		<View style={styles.container}>
+		<ScrollView style={styles.content} contentContainerStyle={styles.container}>
 			<ThemedText type="defaultSemiBold">{t("deviceAdded")}:</ThemedText>
 			<View style={[styles.section, styles.detailContainer]}>
 				<View style={styles.detail}>
@@ -23,7 +23,7 @@ export function AddedDeviceScreen() {
 					<ThemedText>{token}</ThemedText>
 				</View>
 			</View>
-		</View>
+		</ScrollView>
 	);
 }
 

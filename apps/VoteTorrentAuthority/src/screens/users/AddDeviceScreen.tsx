@@ -1,4 +1,4 @@
-import { StyleSheet, View } from "react-native";
+import { ScrollView, StyleSheet, View } from "react-native";
 import { globalStyles } from "../../theme/styles";
 import { ThemedText } from "../../components/ThemedText";
 import { useTranslation } from "react-i18next";
@@ -19,7 +19,7 @@ export function AddDeviceScreen() {
 
 	return (
 		<View style={styles.content}>
-			<View style={styles.container}>
+			<ScrollView style={styles.content} contentContainerStyle={styles.container}>
 				<ThemedText type="defaultSemiBold">{t("qrInformation")}:</ThemedText>
 				<View style={[styles.section, styles.detailContainer]}>
 					<View style={styles.detail}>
@@ -32,7 +32,7 @@ export function AddDeviceScreen() {
 					</View>
 				</View>
 				<ThemedText type="default">{t("fromOtherDevice")}</ThemedText>
-			</View>
+			</ScrollView>
 			<Footer>
 				<CustomButton
 					title={t("done")}
