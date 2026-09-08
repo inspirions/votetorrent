@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { View, StyleSheet, Switch, TouchableOpacity } from "react-native";
+import { View, ScrollView, StyleSheet, Switch, TouchableOpacity } from "react-native";
 import { useNavigation, useTheme, useFocusEffect } from "@react-navigation/native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import i18n from "../../i18n";
@@ -213,7 +213,11 @@ export default function SettingsScreen() {
 	return (
 		<View style={styles.content}>
 			<InlineError message={settingsError} />
-			<View style={[styles.container, { backgroundColor: colors.background }]}>
+			<ScrollView
+				testID="settings-scroll"
+				style={[styles.content, { backgroundColor: colors.background }]}
+				contentContainerStyle={styles.container}
+			>
 				<View style={[styles.helpIconsRow, { zIndex: 10 }]}>
 					<ThemedText type="default">{t('language')}</ThemedText>
 					<View style={styles.langSelector}>
@@ -400,7 +404,7 @@ export default function SettingsScreen() {
 						) : null}
 					</>
 				)}
-			</View>
+			</ScrollView>
 		</View>
 	);
 }
