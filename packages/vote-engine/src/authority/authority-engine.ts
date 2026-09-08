@@ -88,12 +88,17 @@ export interface AdminRosterEntry {
 }
 
 /**
- * 57-01 (D-02): deterministic, byte-stable serialization of an admin roster
- * for the 'rad' digest. Sorted ascending by `proposedName` (localeCompare)
- * with a fixed per-entry key order (`proposedName`, `title`, `scopes`) and
- * `scopes` themselves sorted ascending, so the resulting JSON — and
- * therefore the digest built from it — is independent of caller input
- * order. Deliberately NOT the schema's single-row, LIMIT-1-style shortcut
+ * 57-01 (D-02), CR-02 (57-12): deterministic, byte-stable serialization of
+ * an admin roster for the 'rad' digest. Sorted ascending by `proposedName`
+ * using a plain ordinal (code-unit) comparison — the same engine-independent
+ * three-way comparison shape `applyAdminProposal` already uses for its
+ * `sortedOfficers` userId sort — with a fixed per-entry key order
+ * (`proposedName`, `title`, `scopes`) and `scopes` themselves sorted
+ * ascending, so the resulting JSON — and therefore the digest built from it
+ * — is independent of caller input order AND of the host runtime's
+ * collation data, because the value is digested and independently
+ * re-derived on another runtime (Hermes app vs Node/mocha engine tests).
+ * Deliberately NOT the schema's single-row, LIMIT-1-style shortcut
  * elsewhere in this codebase, which would digest only the first officer
  * rather than the full roster.
  *
@@ -115,7 +120,9 @@ export function sortRosterEntries(
 			title: entry.title,
 			scopes: [...entry.scopes].sort(),
 		}))
-		.sort((a, b) => a.proposedName.localeCompare(b.proposedName));
+		.sort((a, b) =>
+			a.proposedName < b.proposedName ? -1 : a.proposedName > b.proposedName ? 1 : 0,
+		);
 }
 
 /**

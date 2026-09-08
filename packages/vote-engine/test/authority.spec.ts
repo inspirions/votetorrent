@@ -912,6 +912,25 @@ describe('AuthorityEngine', () => {
       expect(JSON.stringify(changed)).to.not.equal(JSON.stringify(baseline))
     })
 
+    it('should order the roster by code unit, not by locale collation (CR-02)', () => {
+      type RosterEntryForTest = { proposedName: string; title: string; scopes: string[] }
+      const sortRosterEntries = (AuthorityEngineModule as unknown as {
+        sortRosterEntries?: (entries: RosterEntryForTest[]) => RosterEntryForTest[]
+      }).sortRosterEntries
+      if (typeof sortRosterEntries !== 'function') {
+        expect.fail('authority-engine.ts does not yet export sortRosterEntries (D-02 roster serializer)')
+        return
+      }
+      const alice: RosterEntryForTest = { proposedName: 'alice', title: 'Clerk', scopes: ['vrg'] }
+      const bob: RosterEntryForTest = { proposedName: 'Bob', title: 'Chair', scopes: ['rad'] }
+      // Under the removed default `localeCompare`, this pair sorts 'alice' < 'Bob'
+      // (locale collation ignores case). A plain code-unit comparison sorts
+      // uppercase before lowercase, so 'Bob' < 'alice' — the OPPOSITE order.
+      // That makes this assertion discriminating rather than tautological.
+      const ordered = sortRosterEntries([alice, bob])
+      expect(ordered[0]?.proposedName).to.equal('Bob')
+    })
+
     it("should fold the roster into the 'rad' digest, not just thresholdPolicies (D-02 roster coverage, live digest)", async () => {
       const { authority, authorityEngine } = await createNetworkAndAuthority()
       const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
