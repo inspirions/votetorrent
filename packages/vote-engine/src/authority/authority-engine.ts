@@ -673,10 +673,10 @@ export class AuthorityEngine implements IAuthorityEngine {
 
 				// 57-13 (CR-01, D-03 AMENDMENT — see 57-13-CR01-CARRIER-PROBE.md):
 				// D-03 originally left ProposedOfficerUser unpopulated because 57-01's
-				// read-side probe found no reader. That no longer holds — 57-14's
-				// applyAdminProposal Step 4 is a genuinely NEW reader that needs a
-				// stable identity reference instead of the renameable User.Name
-				// bridge — but the carrier probe (Task 1) found ProposedOfficerUser
+				// read-side probe found no reader. That no longer holds — the promote-
+				// side closure's applyAdminProposal Step 4 is a genuinely NEW reader
+				// that needs a stable identity reference instead of the renameable
+				// User.Name bridge — but the carrier probe (Task 1) found ProposedOfficerUser
 				// itself unusable: its UserSignature column is NOT NULL with no
 				// legitimate non-fabricated value available at propose time (Q2),
 				// and an officer seeded through the ordinary invite path has no live
@@ -941,23 +941,32 @@ export class AuthorityEngine implements IAuthorityEngine {
 				throw new AdminPromotionError('roster-mismatch', nonce);
 			}
 
-			// Step 4: reverse 57-01's name bridge — resolve each ProposedName to a
-			// UserId. D-03 consequence: ProposedOfficerUser stays unpopulated, so an
-			// officer proposed as `.init` (no matching User row) cannot be promoted.
-			// Refuse loudly rather than silently promoting a smaller roster than the
-			// one that was signed (T-57-07-07).
-			//
-			// 57-13 (CR-01, HALF-LANDED STATE — do not mistake this for finished):
-			// `matched.rosterEntries` now carries a trustworthy, persisted `userId`
-			// per entry (see `AdminRosterEntry`/`resolveAdminRoster` above), but
-			// Step 4 below does NOT use it yet — it still resolves identity through
-			// `select Id from User where Name = :name`, the same renameable bridge
-			// CR-01 exists to close. 57-14 is the plan that rewrites Step 4 to read
-			// `entry.userId` instead. This comment exists so a reader of this file
-			// between 57-13 and 57-14 landing cannot mistake the half-landed state
-			// for the finished one (the exact failure mode IN-01 was filed for).
+			// Step 4: resolve each roster entry's privilege grant. CR-01 promote-side
+			// closure (this plan): for an entry that carries a signed, persisted
+			// `userId` (57-13), identity comes from THAT value — a single point
+			// lookup confirms the `User` row still exists, and NO query against
+			// `User.Name` is issued on this path. `User.Name` is attacker-controlled
+			// (`UserEngine.revise()` accepts a self-service rename with no signature
+			// and no admin gate, and the column has no uniqueness constraint), so a
+			// grant resolved from it could be retargeted after the proposal was
+			// signed. The name lookup survives ONLY as the null-userId fallback:
+			// `.init` officers have no `User` row and are already unpromotable
+			// (T-57-07-07), and any legacy roster proposed before 57-13 has no
+			// persisted userId to trust instead. Refuse loudly (`unresolvable-officer`)
+			// rather than silently promoting a smaller roster than the one that was
+			// signed, on both branches.
 			const resolvedOfficers: Array<{ userId: string; title: string; scopes: Scope[] }> = [];
 			for (const entry of matched.rosterEntries) {
+				if (entry.userId != null) {
+					const userRow = await this.ctx.db
+						.prepare('select Id from User where Id = :id')
+						.get({ id: entry.userId });
+					if (!userRow) {
+						throw new AdminPromotionError('unresolvable-officer', nonce, entry.proposedName);
+					}
+					resolvedOfficers.push({ userId: entry.userId, title: entry.title, scopes: entry.scopes });
+					continue;
+				}
 				const userIds: string[] = [];
 				for await (const userRow of this.ctx.db.eval('select Id from User where Name = :name', {
 					name: entry.proposedName,
