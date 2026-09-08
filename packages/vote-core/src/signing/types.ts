@@ -12,6 +12,12 @@ import type { IBuilder } from '../common/builder.js'
  * only `thresholdPolicies`. Producer (`AuthorityEngine.proposeAdmin`) and
  * verifier (`SigningEngine.startSigningSession` PATH A) must serialize and
  * bind this identically.
+ *
+ * 57-13 (CR-01): each serialized roster entry now also carries a per-officer
+ * `userId` (`null` for `.init` officers), so the signed digest attests to
+ * WHO receives each scope, not only to the scope set and display name. This
+ * interface's own fields are unchanged — `officers` is still a plain JSON
+ * string — only the shape of the JSON it carries has widened.
  */
 export interface AdminDigestArgs {
   authorityId: string

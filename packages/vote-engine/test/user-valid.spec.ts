@@ -155,7 +155,11 @@ describe('IsUserValid — ProposedAdmin Class A signer/key gate (D-21)', () => {
     // instead of hardcoding it, so this stays correct if the fixture's
     // seeded user name ever changes.
     const userRow = await ctx.db.prepare('select Name from User where Id = :id').get({ id: auth.user.id })
-    const officersJson = JSON.stringify([{ proposedName: userRow?.Name as string, title: 'Chair', scopes: ['rad'] }])
+    // 57-13 (CR-01): sortRosterEntries now serializes an explicit userId key
+    // (null for '.init' officers) — this '.existing' officer's userId must be
+    // supplied here too, or the digest this test pre-computes and signs will
+    // not match what proposeAdmin recomputes engine-side via resolveAdminRoster.
+    const officersJson = JSON.stringify([{ proposedName: userRow?.Name as string, userId: auth.user.id, title: 'Chair', scopes: ['rad'] }])
     const digestRow = await ctx.db
       .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
       .get({

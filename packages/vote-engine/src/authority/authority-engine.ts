@@ -80,9 +80,18 @@ import {
  * `proposedName` mirrors `ProposedOfficer.ProposedName` — the officer's
  * display name, resolved from `User.Name` for `.existing` selections (see
  * `AuthorityEngine.resolveAdminRoster`).
+ *
+ * 57-13 (CR-01, D-03 amendment — see 57-13-CR01-CARRIER-PROBE.md): `userId`
+ * is the stable identity reference the promotion path resolves against
+ * instead of the renameable `User.Name` bridge. It is `null` ONLY for
+ * `.init` officers, which have no `User` row and are already unpromotable
+ * (D-03's original `.init`-officer case). For `.existing` officers it is
+ * `selection.existing.userId` — the SAME value the digest now attests to,
+ * so a rename between propose and promote can no longer retarget a grant.
  */
 export interface AdminRosterEntry {
 	proposedName: string;
+	userId: string | null;
 	title: string;
 	scopes: Scope[];
 }
@@ -93,14 +102,24 @@ export interface AdminRosterEntry {
  * using a plain ordinal (code-unit) comparison — the same engine-independent
  * three-way comparison shape `applyAdminProposal` already uses for its
  * `sortedOfficers` userId sort — with a fixed per-entry key order
- * (`proposedName`, `title`, `scopes`) and `scopes` themselves sorted
- * ascending, so the resulting JSON — and therefore the digest built from it
- * — is independent of caller input order AND of the host runtime's
+ * (`proposedName`, `userId`, `title`, `scopes`) and `scopes` themselves
+ * sorted ascending, so the resulting JSON — and therefore the digest built
+ * from it — is independent of caller input order AND of the host runtime's
  * collation data, because the value is digested and independently
  * re-derived on another runtime (Hermes app vs Node/mocha engine tests).
  * Deliberately NOT the schema's single-row, LIMIT-1-style shortcut
  * elsewhere in this codebase, which would digest only the first officer
  * rather than the full roster.
+ *
+ * 57-13 (CR-01): `userId` is bound as `entry.userId ?? null`, NEVER as a
+ * bare `entry.userId` — `JSON.stringify` DROPS keys whose value is
+ * `undefined`, which would silently emit two different digest shapes for
+ * the same logical roster (T-57-13-05) and reintroduce the exact class of
+ * defect this plan closes. The `userId` tiebreak (for the rare equal-name
+ * case) uses the SAME ordinal `<`/`>`/`0` three-way shape as the primary
+ * `proposedName` sort — introduce no locale-sensitive primitive; 57-12's
+ * `roster-digest-determinism.spec.ts` guard fails the suite if one
+ * reappears in this file.
  *
  * Deliberately exported as a pure, side-effect-free function (not inlined
  * into `proposeAdmin`) so roster-order determinism and scope-change
@@ -117,12 +136,17 @@ export function sortRosterEntries(
 	return entries
 		.map((entry) => ({
 			proposedName: entry.proposedName,
+			userId: entry.userId ?? null,
 			title: entry.title,
 			scopes: [...entry.scopes].sort(),
 		}))
-		.sort((a, b) =>
-			a.proposedName < b.proposedName ? -1 : a.proposedName > b.proposedName ? 1 : 0,
-		);
+		.sort((a, b) => {
+			if (a.proposedName < b.proposedName) return -1;
+			if (a.proposedName > b.proposedName) return 1;
+			const aUserId = a.userId ?? '';
+			const bUserId = b.userId ?? '';
+			return aUserId < bUserId ? -1 : aUserId > bUserId ? 1 : 0;
+		});
 }
 
 /**
@@ -525,6 +549,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 			if (selection.init) {
 				entries.push({
 					proposedName: selection.init.name,
+					userId: null,
 					title: selection.init.title,
 					scopes: selection.init.scopes,
 				});
@@ -539,6 +564,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 				}
 				entries.push({
 					proposedName: userDB.Name as string,
+					userId: selection.existing.userId,
 					title: selection.existing.title,
 					scopes: selection.existing.scopes,
 				});
@@ -645,11 +671,19 @@ export class AuthorityEngine implements IAuthorityEngine {
 					},
 				);
 
-				// D-03: ProposedOfficerUser deliberately left unpopulated — its
-				// SignatureValid constraint is a permanent `check (true)` stub with
-				// an explicit "role undecided" TODO in the schema, and the 57-01
-				// read-side probe found no TypeScript reader anywhere that depends
-				// on ProposedOfficerUser rows existing (see 57-01-SUMMARY.md).
+				// 57-13 (CR-01, D-03 AMENDMENT — see 57-13-CR01-CARRIER-PROBE.md):
+				// D-03 originally left ProposedOfficerUser unpopulated because 57-01's
+				// read-side probe found no reader. That no longer holds — 57-14's
+				// applyAdminProposal Step 4 is a genuinely NEW reader that needs a
+				// stable identity reference instead of the renameable User.Name
+				// bridge — but the carrier probe (Task 1) found ProposedOfficerUser
+				// itself unusable: its UserSignature column is NOT NULL with no
+				// legitimate non-fabricated value available at propose time (Q2),
+				// and an officer seeded through the ordinary invite path has no live
+				// UserKey row at all (Q3). The FALLBACK carrier persists the same
+				// fact directly on ProposedOfficer.UserId instead (a column-only
+				// schema addition, no new constraint) — ProposedOfficerUser itself
+				// stays unpopulated, same as before, just for a different reason.
 				for (const entry of rosterEntries) {
 					await this.ctx.db.exec(
 						`insert into ProposedOfficer (
@@ -657,7 +691,8 @@ export class AuthorityEngine implements IAuthorityEngine {
 							AdminEffectiveAt,
 							ProposedName,
 							Title,
-							Scopes
+							Scopes,
+							UserId
 						)
 							with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
 						values (
@@ -665,7 +700,8 @@ export class AuthorityEngine implements IAuthorityEngine {
 							:effectiveAt,
 							:proposedName,
 							:title,
-							:scopes
+							:scopes,
+							:entryUserId
 						)`,
 						{
 							authorityId: this.authority.id,
@@ -673,6 +709,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 							proposedName: entry.proposedName,
 							title: entry.title,
 							scopes: JSON.stringify(entry.scopes),
+							entryUserId: entry.userId ?? null,
 							signerUserId: signature.signerUserId,
 							signerKey: signature.signerKey,
 							signature: signature.signature,
@@ -862,12 +899,18 @@ export class AuthorityEngine implements IAuthorityEngine {
 			}
 			for (const { effectiveAtCanon, thresholdPoliciesJson } of proposedAdminRows) {
 				const rosterRaw: AdminRosterEntry[] = [];
+				// 57-13-TASK2-TEMP: Step 3 does not yet read the persisted UserId back
+				// (that is Task 3) — binding `userId: null` for every entry here means
+				// this re-derived roster will NOT match a roster proposeAdmin (Task 2's
+				// producer) signed with a non-null userId. This is the plan's
+				// deliberate expected-RED intermediate between Task 2 and Task 3.
 				for await (const officerRow of this.ctx.db.eval(
 					'select ProposedName, Title, Scopes from ProposedOfficer where AuthorityId = :id and AdminEffectiveAt = :e',
 					{ id: this.authority.id, e: effectiveAtCanon },
 				)) {
 					rosterRaw.push({
 						proposedName: officerRow.ProposedName as string,
+						userId: null,
 						title: officerRow.Title as string,
 						scopes: parseJsonOr<Scope[]>(officerRow.Scopes as string, [], 'ProposedOfficer.Scopes'),
 					});

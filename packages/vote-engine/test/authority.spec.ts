@@ -372,10 +372,16 @@ async function createPromotionFixture (options?: {
  * promotion). "order by Nonce desc limit 1" cannot distinguish these —
  * Nonce is a random UUID, not chronological — so any test that needs the
  * ORIGINAL proposal session specifically must look it up by Digest instead.
+ *
+ * 57-13 (CR-01): `officers` now carries `userId` (`null` for `.init`
+ * officers), matching `sortRosterEntries`'s widened serialized shape —
+ * every call site must supply the SAME userId `resolveAdminRoster` would
+ * have resolved for that officer, or the recomputed digest will not match
+ * what `proposeAdmin` actually signed.
  */
 async function computeRosterDigest (
   auth: TestAuthorityContext,
-  officers: Array<{ proposedName: string, title: string, scopes: string[] }>,
+  officers: Array<{ proposedName: string, userId: string | null, title: string, scopes: string[] }>,
   effectiveAt: number,
   thresholdPolicies: Array<{ policy: string, threshold: number }>
 ): Promise<string> {
@@ -849,6 +855,46 @@ describe('AuthorityEngine', () => {
       expect(JSON.parse(initRow!.Scopes as string)).to.deep.equal(['vrg'])
     })
 
+    it('should persist a stable UserId reference for an .existing officer (CR-01 propose side)', async () => {
+      // 57-13 (CR-01, Task 1 carrier probe verdict — fallback: ProposedOfficer.UserId):
+      // the .existing officer's userId must be persisted in the SAME transaction
+      // as the ProposedOfficer row, so promotion no longer has to re-derive
+      // identity from the renameable User.Name bridge. The .init officer's row
+      // must carry a null UserId (no User row exists for it).
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const sig = makeRealSignCallback('user-1')
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: 'user-1', authorityId: authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { init: { name: 'Zeta Officer', title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: ['user-1']
+      }
+      await authorityEngine.proposeAdmin(proposal, sig)
+
+      const existingRow = await ctx.db
+        .prepare(
+          `select UserId from ProposedOfficer
+             where AuthorityId = :id and AdminEffectiveAt = :e and Title = :title`
+        )
+        .get({ id: authority.id, e: toCanonicalDatetime(effectiveAt), title: 'Chair' })
+      expect(existingRow?.UserId, 'the .existing officer row must carry its stable UserId').to.equal('user-1')
+
+      const initRowForUserId = await ctx.db
+        .prepare(
+          `select UserId from ProposedOfficer
+             where AuthorityId = :id and AdminEffectiveAt = :e and ProposedName = :name`
+        )
+        .get({ id: authority.id, e: toCanonicalDatetime(effectiveAt), name: 'Zeta Officer' })
+      expect(initRowForUserId?.UserId, 'an .init officer (no User row) must carry a null UserId').to.equal(null)
+    })
+
     it("should resolve a '.existing' officer's ProposedName from the User table, not the userId (D-01 name bridge)", async () => {
       const { authority, authorityEngine } = await createNetworkAndAuthority()
       const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
@@ -929,6 +975,59 @@ describe('AuthorityEngine', () => {
       // That makes this assertion discriminating rather than tautological.
       const ordered = sortRosterEntries([alice, bob])
       expect(ordered[0]?.proposedName).to.equal('Bob')
+    })
+
+    it('should change the digest when only the officer userId changes (CR-01 identity coverage)', async () => {
+      // 57-13 (CR-01): the signed 'rad' digest must attest to WHO receives each
+      // scope, not merely to the scope set and display name. Two rosters
+      // differing ONLY in userId must produce DIFFERENT Digest(...) values.
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const sortRosterEntries = (AuthorityEngineModule as unknown as {
+        sortRosterEntries?: (entries: Array<{ proposedName: string, userId: string | null, title: string, scopes: string[] }>) =>
+          Array<{ proposedName: string, userId: string | null, title: string, scopes: string[] }>
+      }).sortRosterEntries
+      if (typeof sortRosterEntries !== 'function') {
+        expect.fail('authority-engine.ts does not yet export sortRosterEntries (D-02 roster serializer)')
+        return
+      }
+      const effectiveAt = Date.now() + 60_000
+      const effectiveAtCanon = toCanonicalDatetime(effectiveAt)
+      const thresholdPoliciesJson = JSON.stringify([{ policy: 'rad', threshold: 1 }])
+
+      const rosterA = sortRosterEntries([
+        { proposedName: 'Test User', userId: 'user-1', title: 'Chair', scopes: ['rad'] }
+      ])
+      const rosterB = sortRosterEntries([
+        { proposedName: 'Test User', userId: 'a-completely-different-user-id', title: 'Chair', scopes: ['rad'] }
+      ])
+      expect(JSON.stringify(rosterA)).to.not.equal(
+        JSON.stringify(rosterB),
+        'the userId must be an explicit, never-dropped key so two rosters differing only in userId serialize differently'
+      )
+
+      const digestARow = await ctx.db
+        .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
+        .get({
+          authorityId: authority.id,
+          effectiveAt: effectiveAtCanon,
+          officers: JSON.stringify(rosterA),
+          thresholdPolicies: thresholdPoliciesJson
+        })
+      const digestBRow = await ctx.db
+        .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
+        .get({
+          authorityId: authority.id,
+          effectiveAt: effectiveAtCanon,
+          officers: JSON.stringify(rosterB),
+          thresholdPolicies: thresholdPoliciesJson
+        })
+      expect(digestARow?.d, 'CR-01 setup: digest A must be non-null').to.not.be.null
+      expect(digestBRow?.d, 'CR-01 setup: digest B must be non-null').to.not.be.null
+      expect(
+        digestARow?.d,
+        'two rosters differing ONLY in userId must produce DIFFERENT digests — the signature attests to identity'
+      ).to.not.equal(digestBRow?.d)
     })
 
     it("should fold the roster into the 'rad' digest, not just thresholdPolicies (D-02 roster coverage, live digest)", async () => {
@@ -1338,8 +1437,8 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] },
-          { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
         proposal.proposed.thresholdPolicies
@@ -1386,8 +1485,8 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] },
-          { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
         proposal.proposed.thresholdPolicies
@@ -1430,7 +1529,7 @@ describe('AuthorityEngine', () => {
       // 57-08 (Trigger A): bare Signature, not the callback — see C1's comment.
       const rosterDigest = await computeRosterDigest(
         auth,
-        [{ proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] }],
+        [{ proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
         effectiveAt,
         proposal.proposed.thresholdPolicies
       )
@@ -1482,7 +1581,7 @@ describe('AuthorityEngine', () => {
       // "zero writes" assertion for a reason unrelated to what N1 tests.
       const rosterDigest = await computeRosterDigest(
         auth,
-        [{ proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] }],
+        [{ proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
         effectiveAt,
         proposal.proposed.thresholdPolicies
       )
@@ -1562,8 +1661,8 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] },
-          { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
         proposal.proposed.thresholdPolicies
@@ -1702,8 +1801,8 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, title: 'Chair', scopes: ['rad'] },
-          { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
         proposal.proposed.thresholdPolicies
@@ -1777,7 +1876,7 @@ describe('AuthorityEngine', () => {
       }
       await auth.authorityEngine.proposeAdmin(proposal, sig)
 
-      type RosterEntryForN6 = { proposedName: string; title: string; scopes: string[] }
+      type RosterEntryForN6 = { proposedName: string; userId: string | null; title: string; scopes: string[] }
       const sortRosterEntriesExported = (AuthorityEngineModule as unknown as {
         sortRosterEntries?: (entries: RosterEntryForN6[]) => RosterEntryForN6[]
       }).sortRosterEntries
@@ -1785,9 +1884,12 @@ describe('AuthorityEngine', () => {
         expect.fail('authority-engine.ts does not export sortRosterEntries')
         return
       }
+      // 57-13 (CR-01): userId is now part of the digested shape — rebuild with
+      // the SAME userIds the real proposeAdmin call above resolved, or this
+      // regression guard's recomputed digest will not match.
       const rebuiltRoster = sortRosterEntriesExported([
-        { proposedName: 'Test User', title: 'Chair', scopes: ['rad'] },
-        { proposedName: secondUser.name, title: 'Clerk', scopes: ['vrg'] }
+        { proposedName: 'Test User', userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+        { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
       ])
       const officersJson = JSON.stringify(rebuiltRoster)
       const recomputedRow = await auth.ctx.db
@@ -4677,7 +4779,10 @@ describe('AuthorityProposeAdminBuilder', () => {
     // 57-01 (D-02): proposeAdmin now folds the roster into the digest too —
     // makeAdminProposal()'s single '.init' officer, serialized the same way
     // sortRosterEntries would (one entry, so ordering is moot).
-    const officersJson2 = JSON.stringify([{ proposedName: 'Admin A', title: 'Chair', scopes: ['rad'] }])
+    // 57-13 (CR-01): userId is now part of the digested shape — 'Admin A' is
+    // an '.init' officer (no User row yet), so userId is null, matching
+    // resolveAdminRoster's '.init' branch exactly.
+    const officersJson2 = JSON.stringify([{ proposedName: 'Admin A', userId: null, title: 'Chair', scopes: ['rad'] }])
     const digestRow2 = await ctx2.db
       .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
       .get({

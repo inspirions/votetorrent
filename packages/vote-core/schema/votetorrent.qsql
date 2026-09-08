@@ -488,6 +488,14 @@ declare schema main
 		ProposedName text,
 		Title text,
 		Scopes text default '[]', -- json array of strings
+		-- 57-13 (CR-01, D-03 amendment — see 57-13-CR01-CARRIER-PROBE.md): stable identity
+		-- reference for an '.existing' officer, persisted at propose time so promotion no
+		-- longer has to re-derive identity from the renameable User.Name. null for '.init'
+		-- officers (no matching User row). Deliberately a column only, no constraint
+		-- referencing it (ProposedOfficerUser was probed as the primary carrier and refused
+		-- on both Q2 — no legitimate non-fabricated UserSignature exists at propose time —
+		-- and Q3 — an officer seeded through the ordinary invite path has no UserKey row).
+		UserId text null,
 		primary key (AuthorityId, AdminEffectiveAt, ProposedName),
 		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
 		constraint AdminValid check (exists (select 1 from ProposedAdmin A where A.AuthorityId = new.AuthorityId and A.EffectiveAt = new.AdminEffectiveAt)),
