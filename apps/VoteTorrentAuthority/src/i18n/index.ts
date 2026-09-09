@@ -103,7 +103,9 @@ const resources = {
 			errAuthorityNameRequired: 'Please enter an authority name.',
 			creating: 'Creating…',
 			networkCreateTimeout:
-				'Network creation timed out at the {{step}} step. Check your connection and try again.',
+				'The network did not finish the {{step}} step in time. It may still complete — check your networks list before creating it again.',
+			networkCreateUnconfirmed:
+				'Could not confirm whether the network was created. It may still be finishing — check your networks list before creating it again, so you do not create it twice.',
 			errRelayRequired:
 				'Add at least one relay address under Advanced → Add Relay before creating the network.',
 			validationFailed: 'Validation failed.',
@@ -996,7 +998,9 @@ const resources = {
 			errAuthorityNameRequired: 'Ingrese un nombre de autoridad.',
 			creating: 'Creando…',
 			networkCreateTimeout:
-				'La creación de la red expiró en el paso {{step}}. Verifique su conexión e inténtelo de nuevo.',
+				'La red no completó el paso {{step}} a tiempo. Puede que aún se complete: revise su lista de redes antes de volver a crearla.',
+			networkCreateUnconfirmed:
+				'No se pudo confirmar si la red fue creada. Puede que aún se esté completando: revise su lista de redes antes de volver a crearla, para no crearla dos veces.',
 			errRelayRequired:
 				'Agregue al menos una dirección de relay en Avanzado → Agregar relay antes de crear la red.',
 			validationFailed: 'Error de validación.',
