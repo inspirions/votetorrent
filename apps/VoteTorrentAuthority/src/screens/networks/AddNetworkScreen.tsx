@@ -96,16 +96,24 @@ export default function AddNetworkScreen() {
 	// inline error instead of an infinite silent spinner. The underlying promise can't be
 	// cancelled, but the UI recovers and the user can retry.
 	const CREATE_TIMEOUT_MS = 45000;
-	const withTimeout = <T,>(p: Promise<T>, label: string, ms: number = CREATE_TIMEOUT_MS): Promise<T> => {
-		return Promise.race([
-			p,
-			new Promise<T>((_resolve, reject) =>
-				setTimeout(
-					() => reject(createStepTimeoutError(label, t("networkCreateTimeout", { step: label }))),
-					ms,
-				),
-			),
-		]);
+	const withTimeout = async <T,>(p: Promise<T>, label: string, ms: number = CREATE_TIMEOUT_MS): Promise<T> => {
+		// Clear the losing timer once the race settles. Without this, every call leaves a
+		// live handle (and its closure) alive for the full `ms` -- and handleCreate races
+		// four steps per create. Mirrors resolveNodeDispatch in AppProvider.tsx.
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				p,
+				new Promise<T>((_resolve, reject) => {
+					timer = setTimeout(
+						() => reject(createStepTimeoutError(label, t("networkCreateTimeout", { step: label }))),
+						ms,
+					);
+				}),
+			]);
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
 	};
 
 	// D-01/D-02 (58-04): when `builder.commit()` misses its deadline, `commit()` is still running
