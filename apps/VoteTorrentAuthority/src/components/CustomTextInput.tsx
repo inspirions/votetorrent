@@ -58,12 +58,17 @@ export function CustomTextInput(props: CustomTextInputProps) {
 			)}
 			<View style={styles.inputContainer}>
 				{!value && (
-					<ThemedText
-						style={[styles.placeholder, {color: colors.textSecondary}]}
-						numberOfLines={1}
-						pointerEvents="none">
-						{placeholder || props.title}
-					</ThemedText>
+					// pointerEvents="none" is NOT honored by the underlying Android TextView (it is only
+					// implemented for View-derived native components), so a bare <Text> here is touch-opaque
+					// under its rendered glyphs and swallows taps meant for the TextInput below it -- the
+					// dead zone spans exactly the placeholder string's width. Wrapping in a plain View
+					// (which DOES implement pointerEvents on Android) fixes this; the View absorbs the
+					// absolute positioning and the "none" behaviour, while ThemedText only carries the text.
+					<View style={styles.placeholder} pointerEvents="none">
+						<ThemedText style={{color: colors.textSecondary, fontSize: 14, fontStyle: 'italic'}} numberOfLines={1}>
+							{placeholder || props.title}
+						</ThemedText>
+					</View>
 				)}
 				<TextInput
 					value={value}
@@ -110,8 +115,6 @@ const styles = StyleSheet.create({
 		position: 'absolute',
 		left: 14,
 		top: 12,
-		fontSize: 14,
-		fontStyle: 'italic',
 		zIndex: 1
 	},
 	input: {
