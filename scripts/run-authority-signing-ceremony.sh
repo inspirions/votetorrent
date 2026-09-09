@@ -467,7 +467,7 @@ _find_nondegenerate_bounds() {
 # before this fix); only if every `text=` match is degenerate (or absent) does this
 # fall back to a `content-desc=` match with non-degenerate bounds.
 tap_on_text() {
-  local label="$1" dump="$2"
+  local label="$1" dump="$2" expect="${3:-}"
   local bounds
   bounds=$(_find_nondegenerate_bounds "text" "${label}" "${dump}" || true)
   if [ -z "${bounds}" ]; then
@@ -484,8 +484,40 @@ tap_on_text() {
   y2=$(echo "${bounds}" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\4/')
   cx=$(( (x1 + x2) / 2 ))
   cy=$(( (y1 + y2) / 2 ))
-  adb ${ADBD} shell input tap "${cx}" "${cy}"
-  return 0
+
+  # 57-UAT round 2 (Redmi 8, Android 10 / API 29) — TWO measured defects fixed here.
+  #
+  # (1) PRESS DURATION. An instantaneous `input tap` on this device's RN controls is
+  #     unreliable. Measured A/B inside a reproduced failure: ONE `input tap` on the
+  #     Settings tab was a no-op (the app stayed on Elections), while THREE taps, or a
+  #     single ~120ms press, navigated. A zero-distance `input swipe` gives the press a
+  #     real duration; it is a strict superset of the old behaviour on devices where the
+  #     instantaneous tap already worked.
+  #
+  # (2) DISPATCH != EFFECT. This function used to `return 0` the moment it had dispatched
+  #     a tap, never checking that anything happened. A swallowed tap therefore propagated
+  #     as a SUCCESS, and the leg failed later against a screen it never reached — which is
+  #     the same "could not observe" vs "observed absent" conflation R5(d) exists to fix,
+  #     one step earlier in the flow. Callers may now pass an optional EXPECT string: the
+  #     press is retried until that string is observable, and a genuine miss is reported at
+  #     the point it happens instead of downstream.
+  #
+  # Callers that omit EXPECT keep the previous fire-and-forget contract exactly.
+  local attempt
+  for attempt in 1 2 3; do
+    adb ${ADBD} shell input swipe "${cx}" "${cy}" "${cx}" "${cy}" 120
+    if [ -z "${expect}" ]; then
+      return 0
+    fi
+    sleep 2
+    if text_present "${expect}" "$(dump_ui)"; then
+      return 0
+    fi
+    echo "[ceremony] tap_on_text: pressed '${label}' (attempt ${attempt}/3) but '${expect}' is not yet observable — retrying." >&2
+    sleep 2
+  done
+  echo "[ceremony] ERROR: pressed '${label}' 3 times and '${expect}' never appeared — the press did not take effect." >&2
+  return 1
 }
 
 text_present() {
@@ -506,7 +538,8 @@ navigate_to_settings() {
   # negative.
   for attempt in 1 2 3; do
     dump=$(dump_ui)
-    if tap_on_text "Settings" "${dump}"; then
+    # Verify we actually ARRIVED: the Settings screen is identified by its Secure Signing row.
+    if tap_on_text "Settings" "${dump}" "${STR_SETTINGS_ROW}"; then
       sleep 2
       return 0
     fi
