@@ -39,6 +39,23 @@ function countReplacements(s) {
   return count;
 }
 
+function hasUnpairedSurrogate(s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    const isHigh = c >= 0xd800 && c <= 0xdbff;
+    const isLow = c >= 0xdc00 && c <= 0xdfff;
+    if (isHigh) {
+      const next = s.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      i++; // consume the paired low surrogate
+    } else if (isLow) {
+      // A lone low surrogate not already consumed by a preceding high surrogate.
+      return true;
+    }
+  }
+  return false;
+}
+
 describe.each(COPIES)('hermes-text-decoder conformance (%s)', (_label, Decoder) => {
   describe('CF-A — valid input, default options', () => {
     test('CF-A01 5-byte pure-ASCII input decodes verbatim', () => {
@@ -189,17 +206,202 @@ describe.each(COPIES)('hermes-text-decoder conformance (%s)', (_label, Decoder) 
       expect(typeof Decoder).toBe('function');
     });
   });
+
+  describe('CF-C — malformed input, fatal: false (U+FFFD substitution)', () => {
+    test('CF-C01 an invalid lead byte 0xFF yields exactly one replacement character', () => {
+      const out = new Decoder().decode(bytes(0xff));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C02 a stray continuation byte 0x80 yields exactly one replacement character', () => {
+      const out = new Decoder().decode(bytes(0x80));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C03 overlong-NUL C0 80 yields exactly two replacement characters (C0 fails as lead, then 80 fails as lead)', () => {
+      const out = new Decoder().decode(bytes(0xc0, 0x80));
+      expect(countReplacements(out)).toBe(2);
+      expect(out).toBe('��');
+    });
+
+    test('CF-C04 overlong C1 BF yields exactly two replacement characters (same shape as CF-C03)', () => {
+      const out = new Decoder().decode(bytes(0xc1, 0xbf));
+      expect(countReplacements(out)).toBe(2);
+      expect(out).toBe('��');
+    });
+
+    // PINNED BASELINE DIVERGENCE (CF-C05 … CF-C09): the current decoder emits ONE replacement
+    // character for these five overlong/surrogate/out-of-range 3- and 4-byte sequences, where a
+    // strictly WHATWG-conformant decoder emits three (for 3-byte inputs) or four (for the 4-byte
+    // input). This is a recorded observation of the CURRENT implementation, not a spec quotation —
+    // D-06 requires green against the unmodified decoder, D-04 forbids touching the multi-byte
+    // branches, and this plan forbids any production edit, so the count is pinned as-is rather than
+    // "corrected". 58-03's rewrite must preserve it, since D-04 leaves these branches untouched.
+    // This is a spec-fidelity gap, not a security gap: CF-C15 below proves the malformed code point
+    // is rejected in every one of these cases and never reaches the caller — only the substitution
+    // COUNT differs from WHATWG.
+    test('CF-C05 [PINNED DIVERGENCE] overlong E0 80 80 yields exactly one replacement character (WHATWG/native emit 3)', () => {
+      const out = new Decoder().decode(bytes(0xe0, 0x80, 0x80));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C06 [PINNED DIVERGENCE] overlong F0 80 80 80 yields exactly one replacement character (WHATWG/native emit 4)', () => {
+      const out = new Decoder().decode(bytes(0xf0, 0x80, 0x80, 0x80));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C07 [PINNED DIVERGENCE] surrogate ED A0 80 (U+D800) yields exactly one replacement character (WHATWG/native emit 3)', () => {
+      const out = new Decoder().decode(bytes(0xed, 0xa0, 0x80));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C08 [PINNED DIVERGENCE] surrogate ED BF BF (U+DFFF) yields exactly one replacement character (WHATWG/native emit 3)', () => {
+      const out = new Decoder().decode(bytes(0xed, 0xbf, 0xbf));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C09 [PINNED DIVERGENCE] out-of-range F4 90 80 80 (U+110000) yields exactly one replacement character (WHATWG/native emit 4)', () => {
+      const out = new Decoder().decode(bytes(0xf4, 0x90, 0x80, 0x80));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C10 F5 80 80 80 yields exactly four replacement characters, matching native/WHATWG', () => {
+      const out = new Decoder().decode(bytes(0xf5, 0x80, 0x80, 0x80));
+      expect(countReplacements(out)).toBe(4);
+      expect(out).toBe('����');
+    });
+
+    test('CF-C11 an EOF mid-sequence (E2 82) yields exactly one replacement character', () => {
+      const out = new Decoder().decode(bytes(0xe2, 0x82));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C12 an EOF mid-sequence (C3) yields exactly one replacement character', () => {
+      const out = new Decoder().decode(bytes(0xc3));
+      expect(countReplacements(out)).toBe(1);
+      expect(out).toBe('�');
+    });
+
+    test('CF-C13 E2 82 41 substitutes then re-scans the trailing ASCII byte, not consuming it', () => {
+      const out = new Decoder().decode(bytes(0xe2, 0x82, 0x41));
+      expect(out.length).toBe(2);
+      expect(out).toBe('�A');
+    });
+
+    test('CF-C14 41 FF 42 substitutes only the invalid middle byte, preserving both ASCII bytes', () => {
+      const out = new Decoder().decode(bytes(0x41, 0xff, 0x42));
+      expect(out.length).toBe(3);
+      expect(out).toBe('A�B');
+    });
+
+    test('CF-C15 [security invariant] no output across the CF-C corpus ever contains an unpaired surrogate code unit', () => {
+      const corpus = [
+        bytes(0xff),
+        bytes(0x80),
+        bytes(0xc0, 0x80),
+        bytes(0xc1, 0xbf),
+        bytes(0xe0, 0x80, 0x80),
+        bytes(0xf0, 0x80, 0x80, 0x80),
+        bytes(0xed, 0xa0, 0x80),
+        bytes(0xed, 0xbf, 0xbf),
+        bytes(0xf4, 0x90, 0x80, 0x80),
+        bytes(0xf5, 0x80, 0x80, 0x80),
+        bytes(0xe2, 0x82),
+        bytes(0xc3),
+        bytes(0xe2, 0x82, 0x41),
+        bytes(0x41, 0xff, 0x42),
+      ];
+      const decoder = new Decoder();
+      for (const input of corpus) {
+        const out = decoder.decode(input);
+        expect(hasUnpairedSurrogate(out)).toBe(false);
+      }
+    });
+  });
+
+  describe('CF-F — fatal: true', () => {
+    test('CF-F01 invalid lead byte 0xFF throws TypeError', () => {
+      const decoder = new Decoder('utf-8', { fatal: true });
+      expect(() => decoder.decode(bytes(0xff))).toThrow(TypeError);
+    });
+
+    test('CF-F02 truncated E2 82 throws TypeError', () => {
+      const decoder = new Decoder('utf-8', { fatal: true });
+      expect(() => decoder.decode(bytes(0xe2, 0x82))).toThrow(TypeError);
+    });
+
+    test('CF-F03 surrogate ED A0 80 throws TypeError', () => {
+      const decoder = new Decoder('utf-8', { fatal: true });
+      expect(() => decoder.decode(bytes(0xed, 0xa0, 0x80))).toThrow(TypeError);
+    });
+
+    test('CF-F04 overlong E0 80 80 throws TypeError', () => {
+      const decoder = new Decoder('utf-8', { fatal: true });
+      expect(() => decoder.decode(bytes(0xe0, 0x80, 0x80))).toThrow(TypeError);
+    });
+
+    test('CF-F05 out-of-range F4 90 80 80 throws TypeError', () => {
+      const decoder = new Decoder('utf-8', { fatal: true });
+      expect(() => decoder.decode(bytes(0xf4, 0x90, 0x80, 0x80))).toThrow(TypeError);
+    });
+
+    test('CF-F06 the CF-A01…CF-A04 valid inputs do not throw under fatal:true and match fatal:false results', () => {
+      const fatalDecoder = new Decoder('utf-8', { fatal: true });
+      const nonFatalDecoder = new Decoder('utf-8', { fatal: false });
+      const inputs = [
+        bytes(0x48, 0x65, 0x6c, 0x6c, 0x6f),
+        bytes(0xc3, 0xa9),
+        bytes(0xe2, 0x82, 0xac),
+        bytes(0xf0, 0x9f, 0x98, 0x80),
+      ];
+      for (const input of inputs) {
+        const fatalOut = fatalDecoder.decode(input);
+        const nonFatalOut = nonFatalDecoder.decode(input);
+        expect(fatalOut).toBe(nonFatalOut);
+      }
+    });
+
+    test('CF-F07 a leading BOM is still stripped under fatal:true', () => {
+      const decoder = new Decoder('utf-8', { fatal: true });
+      const out = decoder.decode(bytes(0xef, 0xbb, 0xbf, 0x41));
+      expect(out).toBe('A');
+    });
+  });
 });
 
 describe('CF-X — cross-copy behavioural equivalence', () => {
-  test('CF-X01 the authority and voter copies return strictly equal strings for every CF-A input', () => {
+  test('CF-X01 the authority and voter copies return strictly equal strings for every CF-A and CF-C input', () => {
     const corpus = [
+      // CF-A
       bytes(0x48, 0x65, 0x6c, 0x6c, 0x6f),
       bytes(0xc3, 0xa9),
       bytes(0xe2, 0x82, 0xac),
       bytes(0xf0, 0x9f, 0x98, 0x80),
       new TextEncoder().encode('Hello, é€😀 world — café naïve 123'),
       new Uint8Array(),
+      // CF-C
+      bytes(0xff),
+      bytes(0x80),
+      bytes(0xc0, 0x80),
+      bytes(0xc1, 0xbf),
+      bytes(0xe0, 0x80, 0x80),
+      bytes(0xf0, 0x80, 0x80, 0x80),
+      bytes(0xed, 0xa0, 0x80),
+      bytes(0xed, 0xbf, 0xbf),
+      bytes(0xf4, 0x90, 0x80, 0x80),
+      bytes(0xf5, 0x80, 0x80, 0x80),
+      bytes(0xe2, 0x82),
+      bytes(0xc3),
+      bytes(0xe2, 0x82, 0x41),
+      bytes(0x41, 0xff, 0x42),
     ];
     const authority = new AuthorityDecoder();
     const voter = new VoterDecoder();
