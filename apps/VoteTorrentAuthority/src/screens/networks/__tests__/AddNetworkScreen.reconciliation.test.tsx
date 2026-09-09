@@ -497,4 +497,57 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 		expect(mockSelectNetwork).toHaveBeenCalledWith(ref);
 		expect(mockGoBack).toHaveBeenCalledTimes(1);
 	});
+
+	/** Resource guard for `withTimeout`. The helper races a promise against a `setTimeout`; if the
+	 * losing timer is never cleared it stays armed for the full CREATE_TIMEOUT_MS holding its closure,
+	 * and handleCreate races several steps per create. Nothing behavioural catches that -- rejecting
+	 * an already-settled race is a no-op -- so the only symptom is jest reporting "did not exit",
+	 * which does not fail a run.
+	 *
+	 * Identifies withTimeout's timers BY DELAY rather than by counting all pending timers: this path
+	 * legitimately arms unrelated background timers (measured: 5), so a raw `getTimerCount()`
+	 * assertion would either be brittle against unrelated internals or silently drift. Only
+	 * withTimeout arms a 45s timer here, which makes the delay a precise selector.
+	 *
+	 * Proven load-bearing: with the `clearTimeout` removed, the happy path leaks exactly 3 armed
+	 * 45s timers (one each for the snapshot, commit and select steps) and this spec fails. */
+	it("(10, resource guard) every withTimeout race clears its losing timer -- no 45s timer stays armed after a settled create", async () => {
+		jest.useFakeTimers();
+		// Mirrors CREATE_TIMEOUT_MS in AddNetworkScreen.tsx, which is module-local and not exported.
+		const CREATE_TIMEOUT_MS = 45_000;
+		const ref: NetworkReference = {
+			hash: "net-hash",
+			name: "",
+			primaryAuthorityDomainName: "",
+			relays: [],
+		};
+		armCreate({ kind: "resolve", ref });
+		mockNetworksEngine.getRecentNetworks.mockResolvedValueOnce(BEFORE);
+
+		const tr = await renderScreen();
+		const setSpy = jest.spyOn(global, "setTimeout");
+		const clearSpy = jest.spyOn(global, "clearTimeout");
+
+		const { promise: createPromise } = await signAndPressCreateWithoutAwaiting(tr);
+		await renderer.act(async () => {
+			await createPromise;
+		});
+
+		const armedByWithTimeout = setSpy.mock.calls
+			.map((call, i) => ({ delay: call[1], handle: setSpy.mock.results[i]?.value }))
+			.filter((entry) => entry.delay === CREATE_TIMEOUT_MS)
+			.map((entry) => entry.handle);
+		const clearedHandles = clearSpy.mock.calls.map((call) => call[0]);
+
+		// Load-bearing: proves the create actually ran its withTimeout-wrapped steps, so an empty
+		// leaked-set means "cleared", not "never armed in the first place".
+		expect(mockSelectNetwork).toHaveBeenCalledWith(ref);
+		expect(armedByWithTimeout.length).toBeGreaterThan(0);
+
+		const leaked = armedByWithTimeout.filter((handle) => !clearedHandles.includes(handle));
+		expect(leaked).toEqual([]);
+
+		setSpy.mockRestore();
+		clearSpy.mockRestore();
+	});
 });
