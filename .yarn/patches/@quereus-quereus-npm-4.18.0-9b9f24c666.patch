@@ -214,3 +214,26 @@ index fe52e105af9484a5107293a5608f08032e1eefa0..480cf022bc7d151605b0e072437a4eb5
 +    }
 +    return snapshot;
 +}
+diff --git a/dist/src/runtime/emit/schema-declarative.js b/dist/src/runtime/emit/schema-declarative.js
+index 0000000000000000000000000000000000000000..0000000000000000000000000000000000000000 100644
+--- a/dist/src/runtime/emit/schema-declarative.js
++++ b/dist/src/runtime/emit/schema-declarative.js
+@@ -454,6 +454,18 @@ async function runBatchedMigrationLoop(db, schemaName, migrationStatements) {
+                 const errorMessage = e instanceof Error ? e.message : String(e);
+                 throw new QuereusError(`Failed to execute DDL: ${ddl}\nError: ${errorMessage}`, StatusCode.ERROR, e instanceof Error ? e : undefined);
+             }
++            // VoteTorrent patch (network-create-hangs): a multi-object `apply schema` (VoteTorrent's
++            // sApp schema alone declares 79 tables/views) drives this loop through dozens of
++            // sequential `await`s that, under the optimystic vtab's `network` transactor, resolve
++            // through chained microtasks rather than real macrotask-yielding I/O. A long enough run
++            // of such awaits never lets the JS event loop's macrotask queue (setTimeout/timers)
++            // drain, so any caller racing this DDL against a `setTimeout`-based timeout (e.g.
++            // AddNetworkScreen's CREATE_TIMEOUT_MS) can never see that timeout fire — the operation
++            // looks like an indefinite silent hang instead of a bounded, reportable failure. Yielding
++            // to a real macrotask after every migration statement costs one extra event-loop turn per
++            // object (negligible against the seconds-to-minutes this loop can already take) and
++            // restores the guarantee that a caller's own timeout logic can actually run.
++            await new Promise((resolve) => setTimeout(resolve, 0));
+         }
+     }
+     catch (e) {
