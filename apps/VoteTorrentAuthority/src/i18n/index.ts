@@ -108,6 +108,8 @@ const resources = {
 				'Could not confirm whether the network was created. It may still be finishing — check your networks list before creating it again, so you do not create it twice.',
 			errRelayRequired:
 				'Add at least one relay address under Advanced → Add Relay before creating the network.',
+			errRelayInvalid:
+				'A relay address under Advanced → Add Relay is not a valid multiaddress. Check it and try again — for example /dns4/relay.example.com/tcp/443/wss/p2p/<peer id>.',
 			validationFailed: 'Validation failed.',
 			errTitleRequired: 'Please enter an election title.',
 			errElectionDateRequired: 'Please choose an election date.',
@@ -1003,6 +1005,8 @@ const resources = {
 				'No se pudo confirmar si la red fue creada. Puede que aún se esté completando: revise su lista de redes antes de volver a crearla, para no crearla dos veces.',
 			errRelayRequired:
 				'Agregue al menos una dirección de relay en Avanzado → Agregar relay antes de crear la red.',
+			errRelayInvalid:
+				'Una dirección de relay en Avanzado → Agregar relay no es una multidirección válida. Revísela e inténtelo de nuevo — por ejemplo /dns4/relay.example.com/tcp/443/wss/p2p/<id de par>.',
 			validationFailed: 'Error de validación.',
 			errTitleRequired: 'Ingrese un título para la elección.',
 			errElectionDateRequired: 'Elija una fecha para la elección.',

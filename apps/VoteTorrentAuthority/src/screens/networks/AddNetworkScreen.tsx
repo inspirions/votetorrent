@@ -27,6 +27,7 @@ import {
 	timedOutStep,
 	findLandedNetwork,
 } from "./networkCreateOutcome";
+import { normalizeRelayAddresses, findInvalidRelayAddress } from "../../utils/relayAddressValidation";
 
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -153,6 +154,20 @@ export default function AddNetworkScreen() {
 			}
 			const networksEng = networksEngine as INetworksEngine;
 
+			// R4 (D-11): validate relay addresses BEFORE device identity is resolved, so a
+			// malformed paste can never trigger a biometric/device-key ceremony. Mirrors
+			// NetworksScreen.tsx:36's "parsed/validated BEFORE any use" rule (T-22-09 DoS
+			// mitigation, Security V5) on the JOIN path, extended here to CREATE. The validated
+			// address is still NOT threaded into the rn-db-factory bootstrap-dial call — see
+			// relayAddressValidation.ts's header comment for why that boundary stays closed.
+			const relays = normalizeRelayAddresses(relayAddresses);
+			const invalidRelay = findInvalidRelayAddress(relays);
+			if (invalidRelay !== undefined) {
+				setErrorMessage(t("errRelayInvalid"));
+				setShowAdvanced(true);
+				return;
+			}
+
 			// Resolve device identity (D-02 / generate-on-first-run).
 			const defaultUserEng = await getEngine<IDefaultUserEngine>("defaultUser");
 			const defaultUser = await defaultUserEng.get();
@@ -163,7 +178,10 @@ export default function AddNetworkScreen() {
 			const networkInit: NetworkInit = {
 				name: networkName,
 				imageUrl: networkImageUrl || undefined,
-				relays: relayAddresses.filter(Boolean),
+				// R4 (D-11, T-58-06-02): the SAME array that was just validated above — never
+				// re-derive a second array from relayAddresses here, which would validate one
+				// value and persist another.
+				relays,
 				primaryAuthority: {
 					name: authorityName,
 					domainName: domainName,
