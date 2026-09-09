@@ -575,17 +575,20 @@ function waitForStop({ duration, stopOn }) {
  * @param {Record<string, string | true>} opts
  * @returns {Promise<number>}
  */
-async function cmdCapture(opts) {
+async function cmdCapture(opts, deps = {}) {
+	// Injection seam exists solely so selftest can drive the real start->throw->cleanup path
+	// offline (no Metro, no device). Defaults ARE the production collaborators.
+	const { fetchTargets = fetchMetroTargets, WebSocketImpl = WebSocket } = deps;
 	const outPath = requireOpt(opts, 'out');
 	const targetArg = requireOpt(opts, 'target');
 	const duration = opts.duration && opts.duration !== true ? Number(opts.duration) : null;
 	const stopOn = opts['stop-on'] && opts['stop-on'] !== true ? new RegExp(/** @type {string} */ (opts['stop-on'])) : null;
 
-	const targets = await fetchMetroTargets(opts);
+	const targets = await fetchTargets(opts);
 	const target = resolveTarget(targets, targetArg);
 	if (!target.webSocketDebuggerUrl) throw new Error('resolved target has no webSocketDebuggerUrl');
 
-	const ws = new WebSocket(target.webSocketDebuggerUrl);
+	const ws = new WebSocketImpl(target.webSocketDebuggerUrl);
 	await new Promise((resolve, reject) => {
 		ws.addEventListener('open', () => resolve(undefined));
 		ws.addEventListener('error', (ev) => reject(new Error(`WebSocket error: ${ev.message || ev}`)));
@@ -851,7 +854,7 @@ function bodyLineFor(footer) {
 /**
  * @returns {number}
  */
-function cmdSelftest() {
+async function cmdSelftest() {
 	const built = buildSelftestBundle();
 	const indexed = indexBundleText(built.text);
 	assertEqual(indexed.count, built.count, 'index-bundle count matches the synthesised footer count');
@@ -915,6 +918,56 @@ function cmdSelftest() {
 			`mangled index-bundle ok=false (count=${mangledResult.count}) — exited NON-ZERO as required. PASS.`,
 	);
 
+	// Resource guard for cmdCapture (58-REVIEW Warning 2). Once Profiler.start succeeds the
+	// DEVICE is profiling, so a throw before Profiler.stop must still close the socket -- otherwise
+	// the next capture is silently taken against an already-running profiler. Drives the exact
+	// reachable case the review named: neither --duration nor --stop-on, which makes the real
+	// waitForStop throw. Injects only the socket and the target list; every other collaborator,
+	// including waitForStop itself, is the production one.
+	const captureCloses = [];
+	class SelftestSocket {
+		constructor(url) {
+			this.url = url;
+			this.handlers = {};
+			queueMicrotask(() => this.emit('open'));
+		}
+		addEventListener(type, fn) {
+			(this.handlers[type] = this.handlers[type] || []).push(fn);
+		}
+		emit(type, ev) {
+			for (const fn of this.handlers[type] || []) fn(ev);
+		}
+		send(raw) {
+			const msg = JSON.parse(raw);
+			queueMicrotask(() => this.emit('message', { data: JSON.stringify({ id: msg.id, result: {} }) }));
+		}
+		close() {
+			captureCloses.push(this.url);
+		}
+	}
+	const selftestDeps = {
+		fetchTargets: async () => [{ title: 'selftest-runtime', webSocketDebuggerUrl: 'ws://selftest/invalid' }],
+		WebSocketImpl: SelftestSocket,
+	};
+	let captureThrew = false;
+	try {
+		await cmdCapture({ out: '/dev/null', target: 'selftest-runtime' }, selftestDeps);
+	} catch {
+		captureThrew = true;
+	}
+	assertTruthy(captureThrew, 'capture propagates the no-duration/no-stop-on error');
+	if (captureCloses.length !== 1) {
+		throw new Error(
+			'selftest FAILED [capture cleanup guard]: Profiler.start succeeded and then capture threw, ' +
+				`but ws.close() ran ${captureCloses.length} time(s) instead of once — the socket leaks and ` +
+				'the device profiler is left running (58-REVIEW Warning 2)',
+		);
+	}
+	assertionCount += 1;
+	console.log(
+		'CLEANUP GUARD (capture): Profiler.start then throw — ws.close() ran exactly once. PASS.',
+	);
+
 	console.log(`selftest: ${assertionCount} assertions passed.`);
 	return 0;
 }
@@ -948,7 +1001,7 @@ async function main() {
 				code = await cmdExtractModule(opts);
 				break;
 			case 'selftest':
-				code = cmdSelftest();
+				code = await cmdSelftest();
 				break;
 			default:
 				printUsage();
