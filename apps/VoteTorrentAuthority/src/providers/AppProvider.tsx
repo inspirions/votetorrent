@@ -13,7 +13,7 @@ import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
 import { attachAssociationSyncBindings } from "../screens/registration/attach-association-sync-bindings";
 import { purgeLegacyStagedPayload, registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
-import { useCadreNode } from "./CadreNodeProvider";
+import { useCadreNode, type CadreNodeSettlement } from "./CadreNodeProvider";
 
 interface AppContextType {
 	networksEngine?: INetworksEngine;
@@ -58,6 +58,86 @@ export function useApp() {
 		throw new Error("useApp must be used within an AppProvider");
 	}
 	return context;
+}
+
+// ---------------------------------------------------------------------------
+// D-09 / RESEARCH Open Question 2: the cold-start re-attach race is REMOVED,
+// not survived. Before this plan, the init effect called
+// `factory.setNode(node)` with whatever `node` happened to be on the
+// CURRENT render — on cold start that is unconditionally `null` on the
+// FIRST render, because CadreNode.start() is async and has not resolved
+// yet. That guaranteed first attempt at `node === null` routes to
+// `rnDbFactory` and dies at `networks-engine.ts`'s `isSchemaInitialized`
+// gate. Adding `node` to the effect's dependency array papered over the
+// race with an implicit SECOND attempt once the boot completed — but
+// nothing distinguished "still booting" from "boot already failed", both
+// of which present identically as `node === null` forever, so a failed
+// boot left the app re-attempting on `rnDbFactory` and never noticing.
+//
+// The fix awaits `CadreNodeProvider`'s `nodeSettled` (D-08) BEFORE the
+// first `factory.setNode(...)`, so the unconditional first attempt at
+// `node === null` never runs at all — there is exactly one dispatch,
+// against the backend actually settled on.
+//
+// Open Question 2 — does the await need its own timeout? YES, and this is
+// the answer, not a retry knob: `nodeSettled` awaited unbounded would be a
+// NEW availability defect — a hung `CadreNode.start()` would strand the
+// officer on the splash screen forever, with no error view and therefore
+// no "Try Again" (T-58-05-02). `NODE_SETTLE_TIMEOUT_MS` bounds the wait;
+// the loser of the race RESOLVES to a `'timeout'` status (never rejects),
+// so a merely-slow boot degrades to the solo backend instead of surfacing
+// "Failed to load network" — a worse outcome than attempting solo. 15000ms
+// is three orders above the sub-second solo boot (`.start()` does not
+// block on peer discovery) and one third of `AddNetworkScreen.tsx`'s
+// `CREATE_TIMEOUT_MS = 45000` — the tolerance already applied to a
+// user-initiated wait; a passive cold-start wait must be shorter. This
+// value is a liveness ceiling chosen from reasoning, not a device
+// measurement — 58-08's D-08 re-measure should record the real settle
+// duration so it can be revisited with a number.
+//
+// D-09 also rejects bounded RETRY (`loadAuthoritiesWithRetry.ts` is
+// deliberately not reused here): retrying re-attempts the SAME ambiguous
+// signal this plan removes, it does not resolve it.
+// ---------------------------------------------------------------------------
+const NODE_SETTLE_TIMEOUT_MS = 15000;
+
+type NodeDispatchStatus = "ready" | "failed" | "timeout" | "unavailable";
+
+interface NodeDispatch {
+	status: NodeDispatchStatus;
+	node: CadreNodeSettlement["node"];
+}
+
+/**
+ * Bounded settle-then-dispatch helper (D-09 / Open Question 2). Races
+ * `nodeSettled` against `timeoutMs` and NEVER rejects: `'ready'` carries the
+ * live node (strand dispatch is correct); every other status
+ * (`'failed'` | `'timeout'` | `'unavailable'`) carries `null` (solo dispatch
+ * is correct). `'unavailable'` covers a missing/non-thenable `nodeSettled` —
+ * conservative direction, and it keeps any existing consumer that mocks
+ * `useCadreNode()` without the new field working rather than throwing on
+ * `settled.status`.
+ */
+async function resolveNodeDispatch(
+	nodeSettled: Promise<CadreNodeSettlement> | undefined,
+	timeoutMs: number
+): Promise<NodeDispatch> {
+	if (!nodeSettled || typeof (nodeSettled as { then?: unknown }).then !== "function") {
+		return { status: "unavailable", node: null };
+	}
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const winner = await Promise.race([
+			nodeSettled.then((settlement): NodeDispatch => ({ status: settlement.status, node: settlement.node })),
+			new Promise<NodeDispatch>((resolve) => {
+				timer = setTimeout(() => resolve({ status: "timeout", node: null }), timeoutMs);
+			}),
+		]);
+		return winner;
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
 }
 
 export function AppProvider({ children }: PropsWithChildren) {
@@ -216,7 +296,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// (P2P-06 / SC1 no regression). This is also the precondition for the live-node
 	// peerId marker the proof asserts (P2P-04 / D-05). node is null until the CadreNode
 	// boots → rnDbFactory remains active until that point (solo-safe).
-	const { connectedPeers, node } = useCadreNode();
+	const { connectedPeers, node, nodeSettled } = useCadreNode();
 	useEffect(() => {
 		engineFactoryRef.current?.setGetPeerCount(connectedPeers);
 		engineFactoryRef.current?.setNode(node);
@@ -227,21 +307,30 @@ export function AppProvider({ children }: PropsWithChildren) {
 			try {
 				const factory = engineFactoryRef.current!;
 
-				// RE-ATTACH FIX: Synchronise the current CadreNode state into the factory
-				// before any DbFactory call. The lazy-dispatch DbFactory selects strand vs
-				// solo based on factory.node AT CALL TIME. On cold start, the setNode
-				// effect (dep: [connectedPeers, node]) fires before this effect (effects
-				// run in declaration order) — but because CadreNode.start() is async,
-				// node is still null on the first render and may only become non-null after
-				// this effect has already completed. Adding `node` to this effect's dep
-				// array causes it to re-fire when CadreNode boots; calling setNode(node)
-				// here ensures the factory uses the strand DbFactory for the re-attach
-				// open() call, matching the factory path used during the original create().
-				// Without this, create() (user finished the form AFTER CadreNode booted)
-				// used createStrandDbFactory while cold-start re-attach used rnDbFactory —
-				// two different storage backends — leaving isSchemaInitialized false on the
-				// rnDbFactory side → "Network not opened in this session — use create() first".
-				factory.setNode(node);
+				// RE-ATTACH FIX (D-08/D-09, superseding the prior race-survival shape):
+				// await the CadreNode boot's settlement BEFORE the first DbFactory call,
+				// instead of dispatching on whatever `node` happens to be on the CURRENT
+				// render. The lazy-dispatch DbFactory selects strand vs solo based on
+				// factory.node AT CALL TIME, and on cold start `node` is unconditionally
+				// null on the first render (CadreNode.start() is async and has not
+				// resolved yet) — the old `factory.setNode(node)` here guaranteed a first
+				// attempt against rnDbFactory that died at isSchemaInitialized. The old
+				// fix relied on `node` being in this effect's dependency array to force an
+				// implicit SECOND attempt once boot completed, but nothing distinguished
+				// "still booting" from "boot already failed" (both are `node === null`
+				// forever) — bounded retry (`loadAuthoritiesWithRetry.ts`) was considered
+				// and rejected (D-09): retrying re-attempts the same ambiguous signal
+				// rather than resolving it. `nodeSettled` makes the two states
+				// distinguishable, so there is exactly one dispatch, against the backend
+				// actually settled on — see `resolveNodeDispatch`'s header comment above
+				// for the bound (Open Question 2) that keeps this await from becoming a
+				// hang.
+				const settleStart = Date.now();
+				const dispatch = await resolveNodeDispatch(nodeSettled, NODE_SETTLE_TIMEOUT_MS);
+				// Closed-token diagnostic only: status + elapsed ms, never a hash, an
+				// address, or user data (mirrors CadreNodeProvider.tsx's own discipline).
+				console.info("[AppProvider] node settle:", dispatch.status, Date.now() - settleStart);
+				factory.setNode(dispatch.status === "ready" ? dispatch.node : null);
 
 				const networksEng = factory.getNetworksEngine();
 
@@ -321,15 +410,17 @@ export function AppProvider({ children }: PropsWithChildren) {
 
 		initialize();
 		// CR-02: re-run when initNonce changes so "Try Again" can re-attempt init.
-		// RE-ATTACH FIX: also re-run when node changes (null → CadreNode instance)
-		// so that the factory's DbFactory dispatch is re-evaluated with the correct
-		// node state before the re-attach open() call. This fixes the race where
-		// cold-start initialize() ran with node=null (using rnDbFactory) while
-		// create() ran after CadreNode booted (using createStrandDbFactory) —
-		// different storage backends causing isSchemaInitialized to return false.
-		// NetworksEngine.open() is cache-first (D-06) so re-running on a
-		// successfully-attached network is a cheap no-op (cache hit, no DDL).
-	}, [initNonce, node]);
+		// D-09/D-10: `node` is deliberately OUT of this array — it was the trigger
+		// for the implicit second attempt the settle-then-dispatch fix above
+		// removes. `initNonce` stays: it is the CR-02 "Try Again" affordance and is
+		// now also the recovery path for the (rare) timeout branch, since a bump
+		// re-awaits the by-then-settled `nodeSettled` promise and gets the correct
+		// backend. `nodeSettled` itself is NOT in this array either — it is a
+		// stable ref-held promise (CadreNodeProvider.tsx), so listing it would only
+		// matter if some future consumer reconstructed it per render, which would
+		// re-fire this effect and reintroduce the double attempt this plan removes.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [initNonce]);
 
 	// D-15: only show the spinner while initialization is truly pending.
 	if (!isInitialized) {
