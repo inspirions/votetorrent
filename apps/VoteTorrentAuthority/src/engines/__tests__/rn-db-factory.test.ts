@@ -20,6 +20,25 @@
 jest.mock('rn-leveldb', () => ({ LevelDB: class {}, LevelDBWriteBatch: class {} }), {
   virtual: true,
 });
+// 58-05 Task 3: NOT previously mocked here. Copied from
+// CadreNodeProvider.test.tsx's virtual mock rather than re-derived — the
+// disjointness describe block below drives `createScopedRnStorageProvider`
+// (storage-guard.ts), which imports this module for its own strand-path
+// LevelDB open.
+jest.mock(
+  '@optimystic/db-p2p-storage-rn',
+  () => ({
+    openOptimysticRNDb: jest.fn((cfg: { name: string }) => ({ __openedName: cfg.name })),
+    LevelDBRawStorage: class {
+      db: unknown;
+      constructor(db: unknown) {
+        this.db = db;
+      }
+    },
+    loadOrCreateRNPeerKey: jest.fn(async () => ({ type: 'Ed25519' })),
+  }),
+  { virtual: true },
+);
 // UPDATED @quereus/quereus mock — Database is a jest.fn() constructor so .mock.instances
 // tracks created instances. Each instance gets per-instance jest.fn() method spies so the
 // test can assert registerModule, setDefaultVtabName, setSchemaPath calls on the specific DB.
@@ -88,6 +107,8 @@ jest.mock(
 const { createStrandDbFactory, rnDbFactory } = require('../rn-db-factory');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { EngineFactory } = require('../engine-factory');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { createScopedRnStorageProvider } = require('../storage-guard');
 
 // ---------------------------------------------------------------------------
 // Fakes: a strand DB whose bare table names resolve, and a CadreNode seam.
@@ -356,5 +377,56 @@ describe('rnDbFactory — STORE-01 / D-04 / D-06', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const dbInstance = (Database as jest.Mock).mock.instances[0];
     expect(dbInstance.setSchemaPath).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Backend store-namespace disjointness — RESEARCH Open Question 1, in-process
+// half (58-05 Task 3).
+//
+// What this proves: the solo path's `votetorrent-q2-<hash>` and the strand
+// path's `votetorrent-strand-<hash>` are disjoint for the SAME network hash,
+// so a transient wrong-backend `open()` (T-58-05-01 — the race Plan 58-05
+// Tasks 1/2 remove) cannot mint the store the correct backend later
+// re-attaches to; the namespaces cannot collide.
+//
+// What this does NOT prove: anything about residue already written to disk
+// by a build that shipped the defect. No in-process/jest test can observe an
+// on-disk LevelDB directory — that half is handed to 58-07's device leg, on
+// a device that already ran the defective build.
+// ---------------------------------------------------------------------------
+describe('Backend store-namespace disjointness — RESEARCH Open Question 1 (in-process half, 58-05)', () => {
+  it('derives disjoint store names for the solo and strand backends from the SAME network hash', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { ReactNativeLevelDBProvider } = require('@quereus/plugin-react-native-leveldb');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { openOptimysticRNDb } = require('@optimystic/db-p2p-storage-rn');
+
+    const sameHash = 'sharedhash789';
+
+    // Solo path: rnDbFactory derives `votetorrent-q2-<hash>` (rn-db-factory.ts:50).
+    await rnDbFactory(sameHash);
+    const soloCalls = (ReactNativeLevelDBProvider as jest.Mock).mock.calls;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const soloName: string = (soloCalls[soloCalls.length - 1][0] as any).databaseName;
+
+    // Strand path: createScopedRnStorageProvider() derives
+    // `votetorrent-strand-<scopeId>` (storage-guard.ts:62) — the strandId IS
+    // the network hash (D-05), so invoking it with the SAME hash is the
+    // correct like-for-like comparison.
+    const scopedProvider = createScopedRnStorageProvider();
+    scopedProvider(sameHash);
+    const strandCalls = (openOptimysticRNDb as jest.Mock).mock.calls;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const strandName: string = (strandCalls[strandCalls.length - 1][0] as any).name;
+
+    // Both names are COMPUTED from the same `sameHash` variable — not two
+    // independently hard-coded strings — so this is a live assertion on the
+    // real derivation, not a restatement of it.
+    expect(soloName).toBe(`votetorrent-q2-${sameHash}`);
+    expect(strandName).toBe(`votetorrent-strand-${sameHash}`);
+    expect(soloName).not.toBe(strandName);
+    expect(soloName.startsWith(strandName)).toBe(false);
+    expect(strandName.startsWith(soloName)).toBe(false);
   });
 });
