@@ -21,6 +21,12 @@ import { InlineError } from "../../components/InlineError";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
+import {
+	RECONCILE_TIMEOUT_MS,
+	createStepTimeoutError,
+	timedOutStep,
+	findLandedNetwork,
+} from "./networkCreateOutcome";
 
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -89,16 +95,43 @@ export default function AddNetworkScreen() {
 	// inline error instead of an infinite silent spinner. The underlying promise can't be
 	// cancelled, but the UI recovers and the user can retry.
 	const CREATE_TIMEOUT_MS = 45000;
-	const withTimeout = <T,>(p: Promise<T>, label: string): Promise<T> => {
+	const withTimeout = <T,>(p: Promise<T>, label: string, ms: number = CREATE_TIMEOUT_MS): Promise<T> => {
 		return Promise.race([
 			p,
 			new Promise<T>((_resolve, reject) =>
 				setTimeout(
-					() => reject(new Error(t("networkCreateTimeout", { step: label }))),
-					CREATE_TIMEOUT_MS,
+					() => reject(createStepTimeoutError(label, t("networkCreateTimeout", { step: label }))),
+					ms,
 				),
 			),
 		]);
+	};
+
+	// D-01/D-02 (58-04): when `builder.commit()` misses its deadline, `commit()` is still running
+	// and may still land -- `withTimeout`'s underlying promise "can't be cancelled" (see the
+	// comment above). Reconciling against `getRecentNetworks()` (a bare `localStorage.getItem`,
+	// never `open()` -- see `networkCreateOutcome.ts`'s header comment for why) is the only way to
+	// tell a genuine failure apart from a slow success before reporting anything to the officer.
+	// Own deadline (RECONCILE_TIMEOUT_MS), deliberately shorter than CREATE_TIMEOUT_MS: this runs
+	// after the officer has already waited one full commit budget.
+	const reconcileLandedNetwork = async (
+		eng: INetworksEngine,
+		before: NetworkReference[] | undefined,
+	): Promise<NetworkReference | undefined> => {
+		if (before === undefined) return undefined;
+		console.info("[network-create] reconcile() start");
+		try {
+			const after = await withTimeout(eng.getRecentNetworks(), "reconcile", RECONCILE_TIMEOUT_MS);
+			const landed = findLandedNetwork(before, after, {
+				name: networkName,
+				primaryAuthorityDomainName: domainName,
+			});
+			console.info("[network-create] reconcile() outcome", { landed: Boolean(landed) });
+			return landed;
+		} catch {
+			console.info("[network-create] reconcile() outcome", { landed: false, timedOut: true });
+			return undefined;
+		}
 	};
 
 	const handleCreate = async () => {
@@ -177,20 +210,52 @@ export default function AddNetworkScreen() {
 				if (relayMissing) setShowAdvanced(true);
 				return;
 			}
+			// D-01 (58-04): snapshot the recents list BEFORE commit() so a missed deadline can be
+			// reconciled against it afterward. A failed snapshot must NOT degrade to an empty
+			// array -- with before=[] every pre-existing network would look "new" and reconciliation
+			// could select an unrelated one -- so on failure it stays `undefined`, which forces the
+			// "could not confirm" outcome further down.
+			let recentsSnapshot: NetworkReference[] | undefined;
+			try {
+				recentsSnapshot = await withTimeout(
+					networksEng.getRecentNetworks(),
+					"snapshot",
+					RECONCILE_TIMEOUT_MS,
+				);
+			} catch (snapshotErr) {
+				console.info("[network-create] snapshot() failed", snapshotErr);
+				recentsSnapshot = undefined;
+			}
+
 			// network-create-release-hang: instrument each create step so on-device logcat
 			// pinpoints where a real-device hang occurs (console.info is allowed by the VER-01
 			// stub guard). Race against a timeout so an indefinite stall surfaces an error.
 			console.info("[network-create] commit() start", { network: networkName });
-			const networkEngine = await withTimeout(builder.commit(), "commit");
-			console.info("[network-create] commit() done");
-
-			// Pitfall 4: re-establish currentNetworkHash in the factory by calling
-			// getEngine("network", ref) with the full NetworkReference that the concrete
-			// NetworkEngine exposes via its `init` property. INetworkEngine does not
-			// declare `init` in the interface, so we access it via a cast.
-			// This allows sibling engines (elections, signing, etc.) to resolve the
-			// established ctx immediately after create without a separate open().
-			const networkRef = (networkEngine as unknown as { init: NetworkReference }).init;
+			let networkRef: NetworkReference;
+			try {
+				const networkEngine = await withTimeout(builder.commit(), "commit");
+				console.info("[network-create] commit() done");
+				// Pitfall 4: re-establish currentNetworkHash in the factory by calling
+				// getEngine("network", ref) with the full NetworkReference that the concrete
+				// NetworkEngine exposes via its `init` property. INetworkEngine does not
+				// declare `init` in the interface, so we access it via a cast.
+				// This allows sibling engines (elections, signing, etc.) to resolve the
+				// established ctx immediately after create without a separate open().
+				networkRef = (networkEngine as unknown as { init: NetworkReference }).init;
+			} catch (commitErr) {
+				if (timedOutStep(commitErr) !== "commit") throw commitErr;
+				// D-02: the commit deadline was missed. Reconcile before reporting anything -- a
+				// timely commit and a reconciled-landed commit must produce the identical tail
+				// (selectNetwork -> the recovery-key gate -> goBack), never a duplicated copy of it.
+				const landed = await reconcileLandedNetwork(networksEng, recentsSnapshot);
+				if (!landed) {
+					// D-03: never claim failure, never blame the connection -- only that the
+					// outcome could not be confirmed.
+					setErrorMessage(t("networkCreateUnconfirmed"));
+					return;
+				}
+				networkRef = landed;
+			}
 			// Auto-select the just-created network: bind it AND flip hasNetwork so the
 			// app lands on the populated network home instead of "No network selected".
 			// (selectNetwork re-establishes currentNetworkHash like the old getEngine call,
