@@ -628,11 +628,23 @@ async function cmdCapture(opts) {
 	const startedAt = new Date().toISOString();
 	await send('Profiler.start');
 
-	await waitForStop({ duration, stopOn });
-
-	const stopResult = await send('Profiler.stop');
-	const endedAt = new Date().toISOString();
-	ws.close();
+	// Once Profiler.start succeeds the device is profiling, so every exit path from here
+	// must close the socket -- otherwise a throw between start and stop (e.g. neither
+	// --duration nor --stop-on given) leaks the WebSocket AND leaves the device profiler
+	// running, which silently taints the next capture.
+	let stopResult;
+	let endedAt;
+	try {
+		await waitForStop({ duration, stopOn });
+		stopResult = await send('Profiler.stop');
+		endedAt = new Date().toISOString();
+	} finally {
+		try {
+			ws.close();
+		} catch {
+			/* socket already torn down -- nothing to reclaim */
+		}
+	}
 
 	const profile = stopResult && stopResult.profile;
 	if (!profile || !Array.isArray(profile.samples)) {
