@@ -3,6 +3,17 @@
 // U+FFFD (or throw a TypeError when constructed with { fatal: true }), a
 // leading BOM is stripped unless { ignoreBOM: true }, and overlong/
 // surrogate/out-of-range encodings are rejected.
+//
+// ASSUMPTION A-1 (58-03, D-04): ASCII_CHUNK bounds how many bytes are passed
+// to String.fromCharCode.apply(...) at once. Hermes publishes no
+// Function.prototype.apply argument ceiling. The only concretely documented
+// cross-engine number is JavaScriptCore's hard-coded 65536-argument limit;
+// 4096 is 16x below that, chosen for headroom rather than throughput — the
+// ASCII runs on this path are typically far shorter than 4096 anyway, so a
+// larger chunk buys nothing measurable while enlarging exposure to an
+// unverified limit. This is NOT a verified Hermes constant.
+const ASCII_CHUNK = 4096;
+
 module.exports = class {
   constructor(label = 'utf-8', options = {}) {
     const enc = String(label).toLowerCase().replace('_', '-');
@@ -27,11 +38,15 @@ module.exports = class {
       s += '�';
     };
     while (i < bytes.length) {
-      const b = bytes[i++];
-      if (b < 0x80) {
-        s += String.fromCharCode(b);
+      const start = i;
+      while (i < bytes.length && bytes[i] < 0x80) i++;
+      if (i > start) {
+        for (let c = start; c < i; c += ASCII_CHUNK) {
+          s += String.fromCharCode.apply(null, bytes.subarray(c, Math.min(c + ASCII_CHUNK, i)));
+        }
         continue;
       }
+      const b = bytes[i++];
       let needed, cp, min;
       if (b >= 0xc2 && b < 0xe0) { needed = 1; cp = b & 0x1f; min = 0x80; }
       else if (b >= 0xe0 && b < 0xf0) { needed = 2; cp = b & 0x0f; min = 0x800; }
