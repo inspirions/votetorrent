@@ -98,12 +98,16 @@ jest.mock(
   { virtual: true },
 );
 
+// `mock`-prefixed so the hoisted jest.mock factory below is allowed to reference it
+// (jest hoisting rule). Task 2's settlement-failure case makes this reject once.
+const mockLoadOrCreateRNPeerKey = jest.fn(async () => ({ type: 'Ed25519' }));
+
 jest.mock(
   '@optimystic/db-p2p-storage-rn',
   () => ({
     openOptimysticRNDb: jest.fn(() => ({})),
     LevelDBRawStorage: class {},
-    loadOrCreateRNPeerKey: jest.fn(async () => ({ type: 'Ed25519' })),
+    loadOrCreateRNPeerKey: () => mockLoadOrCreateRNPeerKey(),
   }),
   { virtual: true },
 );
@@ -253,6 +257,82 @@ describe('CadreNodeProvider — P2P-02 boot invariants', () => {
         renderer.create(<Orphan />);
       });
     }).toThrow('useCadreNode must be used within a CadreNodeProvider');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// nodeSettled — D-08/D-09 boot settlement contract (58-05).
+//
+// Run FIRST against the unmodified provider and recorded RED in the SUMMARY:
+// before this plan's change, `nodeSettled` is `undefined` on the context
+// value, so `await captured.value!.nodeSettled` resolves to `undefined` and
+// `.status` reads as `undefined` — a TypeError-free but clearly-wrong shape,
+// not the `{ status: 'ready' | 'failed', node }` this describe block asserts.
+// ---------------------------------------------------------------------------
+describe('CadreNodeProvider — nodeSettled boot settlement (D-08/D-09)', () => {
+  it('guards the pinned Node version: Promise.withResolvers must be a function', () => {
+    expect(typeof Promise.withResolvers).toBe(
+      'function',
+    );
+  });
+
+  it('resolves { status: "ready", node } after a successful boot, where node is the same instance the context exposes', async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+
+    const settlement = await captured.value!.nodeSettled;
+    expect(settlement.status).toBe('ready');
+    expect(settlement.node).not.toBeNull();
+    expect(settlement.node).toBe(captured.value!.node);
+  });
+
+  it('resolves { status: "failed", node: null } when the boot path throws before start() — the swallowed-error exit', async () => {
+    // Drive the catch block: loadOrCreateRNPeerKey is awaited inside the same
+    // try that constructs CadreNode, so making it reject once reaches the
+    // catch without touching the FakeCadreNode class at all.
+    mockLoadOrCreateRNPeerKey.mockRejectedValueOnce(new Error('boot key load failed'));
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const { captured } = renderProvider();
+    await flushBoot();
+
+    const settlement = await captured.value!.nodeSettled;
+    expect(settlement.status).toBe('failed');
+    expect(settlement.node).toBeNull();
+    // The existing diagnostic is preserved, not replaced by the settlement.
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[CadreNodeProvider] Boot error:',
+      expect.stringContaining('boot key load failed'),
+    );
+
+    errorSpy.mockRestore();
+  });
+
+  it('is the same promise object on every render (referential stability)', async () => {
+    const { tr, captured } = renderProvider();
+    const first = captured.value!.nodeSettled;
+
+    // Force a second render via a syncState-driving event after boot.
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    renderer.act(() => {
+      node.emit('control:connected');
+    });
+    const second = captured.value!.nodeSettled;
+
+    expect(second).toBe(first);
+    tr.unmount();
+  });
+
+  it('resolves at most once even though only one exit is reachable per boot (idempotency of the settle path)', async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+
+    // Awaiting twice must yield the same settled value both times — proves
+    // the promise settled exactly once rather than being re-created.
+    const first = await captured.value!.nodeSettled;
+    const second = await captured.value!.nodeSettled;
+    expect(second).toBe(first);
   });
 });
 

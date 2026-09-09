@@ -16,8 +16,43 @@ import bootstrapConfigDoc from '../../bootstrap.config.json';
 import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
 
 // ---------------------------------------------------------------------------
+// `Promise.withResolvers` ambient augmentation (D-08/D-09).
+//
+// Runtime support is already there — polyfilled at `polyfills.bootstrap.js`
+// for Hermes, and native under the repo-pinned Node 22.15.0 (`.nvmrc`), so
+// jest resolves it too. What is missing is the TYPE: the pinned
+// TypeScript@5.0.4 predates the `es2024.promise` lib (added in TS 5.4), so
+// `@react-native/typescript-config`'s `lib` array has no entry that declares
+// it. This augments `PromiseConstructor` project-wide rather than widening
+// `lib`, since the installed compiler has no es2024 lib file to add.
+// ---------------------------------------------------------------------------
+declare global {
+  interface PromiseConstructor {
+    withResolvers<T>(): {
+      promise: Promise<T>;
+      resolve: (value: T | PromiseLike<T>) => void;
+      reject: (reason?: unknown) => void;
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Context type
 // ---------------------------------------------------------------------------
+
+/**
+ * CadreNodeSettlement — the one-time outcome of the boot effect (D-08/D-09).
+ *
+ * `status: 'ready'` implies `node` is the same non-null instance the context
+ * exposes (the strand backend is the correct dispatch). `status: 'failed'`
+ * implies `node` is null (solo is correct). This pair exists because
+ * `node === null` alone is ambiguous — it means BOTH "still booting" and
+ * "boot already failed", and a consumer cannot tell them apart without this.
+ */
+export interface CadreNodeSettlement {
+  status: 'ready' | 'failed';
+  node: InstanceType<typeof CadreNode> | null;
+}
 
 interface CadreNodeContextType {
   /** The live CadreNode instance (null until started). */
@@ -36,6 +71,14 @@ interface CadreNodeContextType {
    * Reads node.getStrand(strandId).connectedPeers ?? 0.
    */
   connectedPeers: (strandId: string) => number;
+  /**
+   * D-08/D-09: a one-time-settling promise reporting whether the CadreNode
+   * boot ended `'ready'` (a live node, strand backend correct) or `'failed'`
+   * (no node, solo backend correct). Resolved exactly once per provider
+   * mount from the boot effect's existing exits, NEVER rejected, and stable
+   * across renders (ref-held) — see `CadreNodeSettlement` above.
+   */
+  nodeSettled: Promise<CadreNodeSettlement>;
 }
 
 const CadreNodeContext = createContext<CadreNodeContextType | null>(null);
@@ -149,6 +192,27 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   const nodeRef = useRef<InstanceType<typeof CadreNode> | null>(null);
   // nodeState is the node instance exposed via context (set after construction).
   const [node, setNode] = useState<InstanceType<typeof CadreNode> | null>(null);
+
+  // D-08/D-09: nodeSettled — a one-time-settling promise resolved from the
+  // boot effect's existing exits (never rejected). Built with
+  // `Promise.withResolvers()` (polyfilled at polyfills.bootstrap.js for
+  // Hermes; native under the repo-pinned Node 22.15.0 `.nvmrc`, so it
+  // resolves in both the device and the jest environment) and held via the
+  // lazy `if (!ref.current)` guard (mirrors AppProvider.tsx's
+  // engineFactoryRef idiom) so the pair is constructed once per mount, not
+  // discarded and rebuilt on every render.
+  const nodeSettledRef = useRef<ReturnType<typeof Promise.withResolvers<CadreNodeSettlement>> | null>(null);
+  if (!nodeSettledRef.current) {
+    nodeSettledRef.current = Promise.withResolvers<CadreNodeSettlement>();
+  }
+  // Idempotency guard: the boot effect's three exits must resolve at most
+  // once even though more than one could technically be reached.
+  const nodeSettledResolvedRef = useRef(false);
+  const settleNode = useCallback((settlement: CadreNodeSettlement) => {
+    if (nodeSettledResolvedRef.current) return;
+    nodeSettledResolvedRef.current = true;
+    nodeSettledRef.current!.resolve(settlement);
+  }, []);
 
   // Boot effect: construct + start the CadreNode.
   // Runs once on mount ([] dep array). node.start() is NOT called in the
@@ -299,9 +363,14 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         if (isMounted) {
           nodeRef.current = localNode;
           setNode(localNode);
+          // D-08/D-09: success exit — the strand backend is now the correct dispatch.
+          settleNode({ status: 'ready', node: localNode });
         } else {
           // Component unmounted before start completed — clean up.
           await localNode.stop().catch(() => undefined);
+          // D-08/D-09: the node was just stopped; resolve 'failed' with null so
+          // the contract stays total (no path leaves nodeSettled pending).
+          settleNode({ status: 'failed', node: null });
         }
       } catch (e) {
         console.error('[CadreNodeProvider] Boot error:', e instanceof Error ? e.stack : String(e));
@@ -310,6 +379,10 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         } catch {
           // ignore stop errors
         }
+        // D-08/D-09: this is the exit that today swallows the error and leaves
+        // `node` null forever with no future trigger — nodeSettled now makes
+        // that "boot already failed" state distinguishable from "still booting".
+        settleNode({ status: 'failed', node: null });
       }
     }
 
@@ -361,7 +434,9 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   );
 
   return (
-    <CadreNodeContext.Provider value={{ node, syncState, configFault: bootstrapConfig.fault, connectedPeers }}>
+    <CadreNodeContext.Provider
+      value={{ node, syncState, configFault: bootstrapConfig.fault, connectedPeers, nodeSettled: nodeSettledRef.current.promise }}
+    >
       {children}
     </CadreNodeContext.Provider>
   );
