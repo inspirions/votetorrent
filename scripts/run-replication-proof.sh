@@ -733,11 +733,20 @@ fi
 SP=$(extract_marker_value "${STRAND_PEERS_LINE}" "strandPeers")
 echo "[run-replication-proof] REPL-01: strandPeers=${SP} on Peer A"
 if [ -z "${SP}" ] || [ "${SP}" -lt 1 ]; then
-  # Phase 30: the runner now waits (bounded) for the LIVE strand connection before emitting
-  # strandPeers=, so a sustained strandPeers=${SP} < 1 is a genuine cohort-formation failure —
-  # fail fast here instead of warn-and-continue into a 120s verdict timeout (REPL-01).
-  echo "[run-replication-proof] FAIL: strandPeers=${SP} < 1 (REPL-01) — strand cohort did not form on Peer A after the runner's bounded wait; aborting before the verdict poll" >&2
-  exit 1
+  # W1b (2026-09-10): NO LONGER FATAL. The Phase-30 premise below — "the runner waits, so a
+  # sustained strandPeers < 1 is a genuine cohort-formation failure" — is FALSE against the
+  # enrolment ceremony added in ad559fa5. The runner's wait is STRAND_PEER_POLL_MAX (was 10s)
+  # while drone.mjs holds each newly-seen peer for DELEGATE_GRACE_MS (15s) before accepting it,
+  # so a peer that connects late reads strandPeers=0 simply because it is NOT YET A MEMBER.
+  # Measured in run 4: drone-A lived 42s, the two peers connected at ~34s and needed grace until
+  # ~49s; this abort killed the drones at 42s and the ceremony never finished. The run then
+  # reported a cohort-formation failure that had not occurred.
+  #
+  # Aborting here also DESTROYS the diagnostics that explain the run: the read-phase row census
+  # and the drone's `DENYING ... not in the materialized authorized set (N member(s))` lines all
+  # come later. Warn and continue to the verdict poll; the verdict still decides pass/fail, so
+  # nothing is hidden — a genuine cohort failure still ends in FAIL, with evidence attached.
+  echo "[run-replication-proof] WARNING: strandPeers=${SP} < 1 on Peer A at sample time (REPL-01) — continuing to the verdict poll so the ceremony can finish and the diagnostics survive" >&2
 else
   echo "[run-replication-proof] REPL-01 cohort signal: strandPeers=${SP} >= 1 on Peer A"
 fi

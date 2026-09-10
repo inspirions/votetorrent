@@ -145,11 +145,23 @@ const CONTROL_RELAY_ADDRS = resolveBootstrapNodes(CONTROL_ADDR);
 const PEER_POLL_MAX = 3;
 const REPL_POLL_MAX = 120;
 const POLL_INTERVAL_MS = 1000;
-// STRAND_PEER_POLL_MAX: 10 ticks × 1 s = 10 s strand-cohort connection wait (Fix A, Phase 30).
+// STRAND_PEER_POLL_MAX: 25 ticks × 1 s = 25 s strand-cohort connection wait (Fix A, Phase 30;
+//   RAISED from 10 by W1b, 2026-09-10).
 //   The write below opens an Optimystic cluster stream to the drone's strand node; that stream
 //   resets ("0/N super-majority") if the strand transport has not connected yet. Wait for the
 //   LIVE strand connection (getConnections().length >= 1) before writing. Exits early on connect.
-const STRAND_PEER_POLL_MAX = 10;
+//
+//   MUST EXCEED the drone's enrolment grace. `drone.mjs` holds each newly-seen peer for
+//   DELEGATE_GRACE_MS (default 15_000, env DRONE_DELEGATE_GRACE_MS) before accepting it, so it
+//   cannot be a member sooner than that. At the old 10 the runner gave up FIVE SECONDS BEFORE the
+//   drone would even accept it, then emitted strandPeers=0 — which the harness read as a genuine
+//   cohort-formation failure and aborted on. A peer cannot join a cohort it is not yet a member of;
+//   the wait has to outlast the ceremony that makes it one.
+//
+//   Kept under jest's 30 s testTimeout so a spec that does spin the full loop still fails on its
+//   assertion rather than on a timeout. If DELEGATE_GRACE_MS is ever raised past ~20 s, this and
+//   that timeout both need revisiting together.
+const STRAND_PEER_POLL_MAX = 25;
 // RELAY_POLL_MAX: 10 ticks × 1 s = 10 s relay-reservation wait (D-09). 38-02's Node-only
 // smoke measured the /p2p-circuit reservation completing in ~1.3s against a live drone
 // relay, so 10s is a generous bound; emitted unconditionally (true or false) after the
