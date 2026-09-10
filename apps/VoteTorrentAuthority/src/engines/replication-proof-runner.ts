@@ -450,6 +450,9 @@ export async function runReplicationProof(): Promise<void> {
               with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
               values ('${proofAuthId}', '${proofNetworkName}');`,
           );
+          // W1b instrumentation (2026-09-10): the success path logged NOTHING, so a run could not
+          // distinguish "this peer inserted its row" from "this peer never reached the write".
+          L('write phase: inserted own row', proofAuthId);
         } catch (insertErr) {
           const msg = insertErr instanceof Error ? insertErr.message : String(insertErr);
           // Benign only when it is OUR OWN row that already exists; anything else is a real
@@ -491,25 +494,48 @@ export async function runReplicationProof(): Promise<void> {
         const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
         const readDb = strandDb ?? await strandDbFactory(PROOF_NETWORK_STORE);
 
+        // W1b instrumentation (2026-09-10). The loop below previously selected ONLY the sibling's
+        // row and swallowed every error with a bare `catch {}`, retrying 120 times in silence — so
+        // a failed run produced no error, no row census, and no way to tell "the sibling's row
+        // never arrived" from "every read threw". Both are now reported. Verdict semantics are
+        // UNCHANGED: the filter that sets `verdict` is applied in JS over the same row set.
+        let readErrCount = 0;
+        let firstReadErr: string | undefined;
+        let lastCensus = '\u0000';
+        let ticks = 0;
         for (let i = 0; i < REPL_POLL_MAX && !verdict; i++) {
+          ticks = i + 1;
           try {
             // `eval` yields rows lazily via AsyncIterableIterator (no `all` on Database).
-            for await (const row of readDb.eval(
-              `SELECT Id FROM Authority WHERE Id LIKE 'repl-auth-%' AND Id != '${proofAuthId}'`,
-            )) {
+            const seen: string[] = [];
+            for await (const row of readDb.eval(`SELECT Id FROM Authority`)) {
               if (row && row['Id']) {
-                verdict = true;
-                break;
+                seen.push(String(row['Id']));
               }
             }
-            if (!verdict) {
-              await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+            // Report the census on CHANGE, and every 15th tick as a heartbeat, so the log shows
+            // what this peer can actually see rather than only what it was hunting for.
+            const census = seen.slice().sort().join(',');
+            if (census !== lastCensus || i % 15 === 0) {
+              L('read tick', i, 'authorityRows=', seen.length, 'ids=', seen.length ? seen : '(none)');
+              lastCensus = census;
             }
-          } catch {
-            // Strand may still be bootstrapping — retry.
+            if (seen.some(id => id.startsWith('repl-auth-') && id !== proofAuthId)) {
+              verdict = true;
+              break;
+            }
+            await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+          } catch (pollErr) {
+            readErrCount++;
+            const msg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+            if (firstReadErr === undefined) {
+              firstReadErr = msg;
+              L('read tick', i, 'FIRST read error:', msg);
+            }
             await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
           }
         }
+        L('read phase done: ticks=', ticks, 'readErrors=', readErrCount, 'firstError=', firstReadErr ?? '(none)');
       } catch (readErr) {
         L('WARN read phase error:', readErr instanceof Error ? readErr.message : String(readErr));
       }
