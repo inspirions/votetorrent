@@ -48,6 +48,21 @@ export function assertPersistentStorage(storage: unknown, scopeId: string): void
  *   `votetorrent-strand`; dev/proof harnesses pass their own so they never touch
  *   production LevelDBs.
  */
+/**
+ * The LevelDB name `createScopedRnStorageProvider` opens for a given prefix + scope.
+ *
+ * Exported so a caller that needs to DESTROY a scope's store derives the name from the same
+ * place the provider does. They were built independently once, and drifted: the replication
+ * proof wiped `votetorrent-<strandId>` while the provider had opened
+ * `votetorrent-replication-strand-<strandId>`. `LevelDB.destroyDB` SUCCEEDS on a database
+ * that does not exist, so the wipe logged success and deleted nothing — every run silently
+ * inherited the previous boot's strand state. Verified on device: the store list holds
+ * `votetorrent-replication-strand-replication-proof-strand`, and no `votetorrent-replication-proof-strand`.
+ */
+export function scopedRnStoreName(namePrefix: string, scopeId: string): string {
+  return `${namePrefix}-${scopeId.replace(/[^a-zA-Z0-9-]/g, '_')}`;
+}
+
 export function createScopedRnStorageProvider(
   namePrefix = 'votetorrent-strand',
 ): (scopeId: string) => LevelDBRawStorage {
@@ -59,7 +74,7 @@ export function createScopedRnStorageProvider(
       db = openOptimysticRNDb({
         openFn: (n, c, e) => new LevelDB(n, c, e),
         WriteBatch: LevelDBWriteBatch,
-        name: `${namePrefix}-${safeId}`,
+        name: scopedRnStoreName(namePrefix, scopeId),
       });
       if (!db) {
         throw new Error(`[storage-guard] LevelDB failed to open for scope '${scopeId}' (${namePrefix}-${safeId})`);

@@ -35,7 +35,7 @@
 
 import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { openOptimysticRNDb, loadOrCreateRNPeerKey } from '@optimystic/db-p2p-storage-rn';
-import { createScopedRnStorageProvider } from './storage-guard';
+import { createScopedRnStorageProvider, scopedRnStoreName } from './storage-guard';
 import { CadreNode } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
@@ -54,6 +54,8 @@ const CADRE_STORE = 'votetorrent-cadre-probe-replication';
 // The per-network strand store name (without the votetorrent- prefix that destroyDB prepends).
 // destroyDB targets ONLY 'votetorrent-' + PROOF_NETWORK_STORE (D-03 / T-23-03-02).
 const PROOF_NETWORK_STORE = 'replication-proof-strand';
+// Store-name prefix for this proof's scoped LevelDBs — used by BOTH the provider and the wipe.
+const PROOF_STORE_PREFIX = 'votetorrent-replication-strand';
 
 // Control address — the drone's control-node ws multiaddr. The harness injects this per-run
 // (D-07 automated injection). Placeholder boots solo (no crash — CF-02 bootstrap mode).
@@ -261,7 +263,7 @@ export async function runReplicationProof(): Promise<void> {
       requireSignedSchemas: false,
       strandFilter: { mode: 'all' },
       // ISO-01 per-scope storage + persistence guardrail (aligned with the app providers).
-      storage: { provider: createScopedRnStorageProvider('votetorrent-replication-strand') },
+      storage: { provider: createScopedRnStorageProvider(PROOF_STORE_PREFIX) },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       // CONTROL node network — reserves through the drone's CONTROL relay (P2P-11 41-11).
       network: {
@@ -389,7 +391,11 @@ export async function runReplicationProof(): Promise<void> {
     // ── 3. D-03 fresh-state wipe — per-network store ONLY, try/catch, never silent (A1) ─────
     // NEVER call LevelDB.destroyDB('votetorrent-cadre-node') — the peerId store must survive.
     try {
-      LevelDB.destroyDB('votetorrent-' + PROOF_NETWORK_STORE);
+      // W1b: derive the name from the SAME helper the provider uses. This wiped
+      // `votetorrent-<strandId>` while the provider opened
+      // `votetorrent-replication-strand-<strandId>` — a name that never existed, so destroyDB
+      // succeeded, the success line was logged, and the store survived every "fresh" run.
+      LevelDB.destroyDB(scopedRnStoreName(PROOF_STORE_PREFIX, PROOF_NETWORK_STORE));
       L('wiped per-network store', PROOF_NETWORK_STORE);
     } catch (wipeErr) {
       // A failed wipe is auditable (logged warning) — proof continues (A1 LOW-conf mitigation).
