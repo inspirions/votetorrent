@@ -35,7 +35,7 @@
 
 import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { openOptimysticRNDb, loadOrCreateRNPeerKey } from '@optimystic/db-p2p-storage-rn';
-import { createScopedRnStorageProvider } from './storage-guard';
+import { createScopedRnStorageProvider, scopedRnStoreName } from './storage-guard';
 import { CadreNode } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
@@ -54,6 +54,8 @@ const CADRE_STORE = 'votetorrent-cadre-probe-replication';
 // The per-network strand store name (without the votetorrent- prefix that destroyDB prepends).
 // destroyDB targets ONLY 'votetorrent-' + PROOF_NETWORK_STORE (D-03 / T-23-03-02).
 const PROOF_NETWORK_STORE = 'replication-proof-strand';
+// Store-name prefix for this proof's scoped LevelDBs — used by BOTH the provider and the wipe.
+const PROOF_STORE_PREFIX = 'votetorrent-replication-strand';
 
 // Control address — the drone's control-node ws multiaddr. The harness injects this per-run
 // (D-07 automated injection). Placeholder boots solo (no crash — CF-02 bootstrap mode).
@@ -145,11 +147,81 @@ const CONTROL_RELAY_ADDRS = resolveBootstrapNodes(CONTROL_ADDR);
 const PEER_POLL_MAX = 3;
 const REPL_POLL_MAX = 120;
 const POLL_INTERVAL_MS = 1000;
-// STRAND_PEER_POLL_MAX: 10 ticks × 1 s = 10 s strand-cohort connection wait (Fix A, Phase 30).
+// STRAND_PEER_POLL_MAX: 25 ticks × 1 s = 25 s strand-cohort connection wait (Fix A, Phase 30;
+//   RAISED from 10 by W1b, 2026-09-10).
 //   The write below opens an Optimystic cluster stream to the drone's strand node; that stream
 //   resets ("0/N super-majority") if the strand transport has not connected yet. Wait for the
 //   LIVE strand connection (getConnections().length >= 1) before writing. Exits early on connect.
-const STRAND_PEER_POLL_MAX = 10;
+//
+//   MUST EXCEED the drone's enrolment grace. `drone.mjs` holds each newly-seen peer for
+//   DELEGATE_GRACE_MS (default 15_000, env DRONE_DELEGATE_GRACE_MS) before accepting it, so it
+//   cannot be a member sooner than that. At the old 10 the runner gave up FIVE SECONDS BEFORE the
+//   drone would even accept it, then emitted strandPeers=0 — which the harness read as a genuine
+//   cohort-formation failure and aborted on. A peer cannot join a cohort it is not yet a member of;
+//   the wait has to outlast the ceremony that makes it one.
+//
+//   Kept under jest's 30 s testTimeout so a spec that does spin the full loop still fails on its
+//   assertion rather than on a timeout. If DELEGATE_GRACE_MS is ever raised past ~20 s, this and
+//   that timeout both need revisiting together.
+const STRAND_PEER_POLL_MAX = 25;
+
+// CONTROL_RETRY_MAX / CONTROL_RETRY_INTERVAL_MS: 24 x 5 s = 120 s budget for a control-DB read or
+//   write that could not be SERVED (W1b, 2026-09-10).
+//
+//   A read that cannot be served is NOT a verdict. A peer that is not yet an authorized cadre
+//   member has its control-DB streams denied by cadre-core's authorizeInboundControlStream(), and
+//   db-p2p surfaces that denial as `Block default/Revocation is unavailable (cohort-unreachable)`
+//   rather than as a permission error (upstream Optimystic#16 — a refusal and an absence are the
+//   same observable). The drone holds each newly-seen peer for DELEGATE_GRACE_MS (15 s) before
+//   accepting it, so this state is EXPECTED for the first seconds of every networked run.
+//
+//   Before this, the write phase converted that throw into an immediate FAIL verdict; the harness's
+//   verdict poll matched it at once and killed the drones ~38 s in — before the ceremony that would
+//   have authorized this peer could finish. The proof failed fast on the exact condition it was
+//   waiting for. Measured across runs 2, 4 and 5.
+//
+//   Same call the multipeer gate made for its L3 flake (commit 1d3f722a, "a read outage is not a
+//   membership verdict"), and the same predicate `packages/p2p-probe-host/drone.mjs` already uses
+//   in isTransientControlFailure() to bound acceptPhone's retries — kept character-identical so the
+//   two cannot drift apart.
+const CONTROL_RETRY_MAX = 24;
+const CONTROL_RETRY_INTERVAL_MS = 5000;
+
+/**
+ * True when a control-DB failure means "could not be served", not "refused on the merits".
+ * Verbatim from drone.mjs's isTransientControlFailure() — change both or neither.
+ */
+const isTransientControlFailure = (msg: string): boolean =>
+  /unavailable \((?:peers|cohort)-unreachable\)|could not determine whether it exists|exhausted \d+ retries|unresolved rival action|was not atomic/i.test(msg);
+
+/**
+ * Run `op` under the transient-control-failure retry budget. A transient failure is retried until
+ * the budget is spent; anything else rethrows immediately, so a genuine defect still surfaces fast.
+ */
+async function withControlRetry<T>(
+  label: string,
+  op: () => Promise<T>,
+  maxAttempts: number = CONTROL_RETRY_MAX,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isTransientControlFailure(msg)) {
+        throw err;
+      }
+      lastErr = err;
+      if (attempt === 0) {
+        L(label, 'control DB not servable yet (expected while enrolment converges), retrying:', msg);
+      }
+      await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
+    }
+  }
+  L(label, 'control DB still not servable after', maxAttempts, 'attempt(s) — giving up');
+  throw lastErr;
+}
 // RELAY_POLL_MAX: 10 ticks × 1 s = 10 s relay-reservation wait (D-09). 38-02's Node-only
 // smoke measured the /p2p-circuit reservation completing in ~1.3s against a live drone
 // relay, so 10s is a generous bound; emitted unconditionally (true or false) after the
@@ -195,7 +267,7 @@ export async function runReplicationProof(): Promise<void> {
       requireSignedSchemas: false,
       strandFilter: { mode: 'all' },
       // ISO-01 per-scope storage + persistence guardrail (aligned with the app providers).
-      storage: { provider: createScopedRnStorageProvider('votetorrent-replication-strand') },
+      storage: { provider: createScopedRnStorageProvider(PROOF_STORE_PREFIX) },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       // CONTROL node network — reserves through the drone's CONTROL relay (P2P-11 41-11).
       network: {
@@ -323,7 +395,11 @@ export async function runReplicationProof(): Promise<void> {
     // ── 3. D-03 fresh-state wipe — per-network store ONLY, try/catch, never silent (A1) ─────
     // NEVER call LevelDB.destroyDB('votetorrent-cadre-node') — the peerId store must survive.
     try {
-      LevelDB.destroyDB('votetorrent-' + PROOF_NETWORK_STORE);
+      // W1b: derive the name from the SAME helper the provider uses. This wiped
+      // `votetorrent-<strandId>` while the provider opened
+      // `votetorrent-replication-strand-<strandId>` — a name that never existed, so destroyDB
+      // succeeded, the success line was logged, and the store survived every "fresh" run.
+      LevelDB.destroyDB(scopedRnStoreName(PROOF_STORE_PREFIX, PROOF_NETWORK_STORE));
       L('wiped per-network store', PROOF_NETWORK_STORE);
     } catch (wipeErr) {
       // A failed wipe is auditable (logged warning) — proof continues (A1 LOW-conf mitigation).
@@ -384,7 +460,22 @@ export async function runReplicationProof(): Promise<void> {
       const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
       // The shared strand ID is the PROOF_NETWORK_STORE constant; both peers join the same strand.
       // OQ3: strandId=<hash> is logged so the harness can launch the drone with STRAND_ID=<hash>.
-      strandDb = await strandDbFactory(PROOF_NETWORK_STORE);
+      // W1b: THE throwing call. Acquiring the strand DB reads the control DB, so it is denied
+      // outright while this peer is still a non-member — this is where the whole write phase was
+      // dying, BEFORE the strandId= marker was even emitted (the WARN precedes strandId= in every
+      // failed run's logcat). Wrapping the presence check and the insert alone left this uncovered
+      // and the retry never fired once.
+      // W1b: retry ONLY when there is a peer to converge WITH. The harness's Step-1 boot is
+      // deliberately solo (peers=0, no drone), so a control-DB failure there is terminal, not
+      // transient — nothing will ever authorize this node. Retrying burned the full 120s budget
+      // in bootstrap mode and the strandId= marker never appeared inside the harness's 240s
+      // window, so the run died at Step 1. Fail fast there exactly as before; retry only in the
+      // networked run, which is the case the budget exists for.
+      strandDb = await withControlRetry(
+        'write phase acquire:',
+        () => strandDbFactory(PROOF_NETWORK_STORE),
+        peerCount > 0 ? CONTROL_RETRY_MAX : 1,
+      );
 
       // Log OQ3 handshake marker before the write so the harness can capture it.
       L('strandId=', PROOF_NETWORK_STORE);
@@ -432,24 +523,36 @@ export async function runReplicationProof(): Promise<void> {
       // The proof's actual question is "did the OTHER peer's row arrive", so this peer having
       // already contributed its row is SUCCESS, not failure. Check first, insert only when
       // absent, and treat an Id collision as benign if we lose the race.
-      let alreadyContributed = false;
-      for await (const row of strandDb.eval(
-        `SELECT Id FROM Authority WHERE Id = '${proofAuthId}'`,
-      )) {
-        if (row && row['Id']) {
-          alreadyContributed = true;
-          break;
+      // W1b: the presence check is a control-DB-backed read and is denied outright while this peer
+      // is still a non-member, so it must run under the transient-failure budget rather than
+      // collapsing the whole write phase into a FAIL verdict on the first throw.
+      const db = strandDb;
+      const alreadyContributed = await withControlRetry('write phase:', async () => {
+        let found = false;
+        for await (const row of db.eval(
+          `SELECT Id FROM Authority WHERE Id = '${proofAuthId}'`,
+        )) {
+          if (row && row['Id']) {
+            found = true;
+            break;
+          }
         }
-      }
+        return found;
+      });
       if (alreadyContributed) {
         L('write phase: own row already present, skipping insert (idempotent)', proofAuthId);
       } else {
         try {
-          await strandDb.exec(
-            `insert into Authority (Id, Name)
-              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
-              values ('${proofAuthId}', '${proofNetworkName}');`,
+          await withControlRetry('write phase insert:', () =>
+            db.exec(
+              `insert into Authority (Id, Name)
+                with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+                values ('${proofAuthId}', '${proofNetworkName}');`,
+            ),
           );
+          // W1b instrumentation (2026-09-10): the success path logged NOTHING, so a run could not
+          // distinguish "this peer inserted its row" from "this peer never reached the write".
+          L('write phase: inserted own row', proofAuthId);
         } catch (insertErr) {
           const msg = insertErr instanceof Error ? insertErr.message : String(insertErr);
           // Benign only when it is OUR OWN row that already exists; anything else is a real
@@ -489,27 +592,54 @@ export async function runReplicationProof(): Promise<void> {
     if (peerCount > 0) {
       try {
         const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
-        const readDb = strandDb ?? await strandDbFactory(PROOF_NETWORK_STORE);
+        const readDb = strandDb ?? await withControlRetry(
+          'read phase:',
+          () => strandDbFactory(PROOF_NETWORK_STORE),
+          peerCount > 0 ? CONTROL_RETRY_MAX : 1,
+        );
 
+        // W1b instrumentation (2026-09-10). The loop below previously selected ONLY the sibling's
+        // row and swallowed every error with a bare `catch {}`, retrying 120 times in silence — so
+        // a failed run produced no error, no row census, and no way to tell "the sibling's row
+        // never arrived" from "every read threw". Both are now reported. Verdict semantics are
+        // UNCHANGED: the filter that sets `verdict` is applied in JS over the same row set.
+        let readErrCount = 0;
+        let firstReadErr: string | undefined;
+        let lastCensus = '\u0000';
+        let ticks = 0;
         for (let i = 0; i < REPL_POLL_MAX && !verdict; i++) {
+          ticks = i + 1;
           try {
             // `eval` yields rows lazily via AsyncIterableIterator (no `all` on Database).
-            for await (const row of readDb.eval(
-              `SELECT Id FROM Authority WHERE Id LIKE 'repl-auth-%' AND Id != '${proofAuthId}'`,
-            )) {
+            const seen: string[] = [];
+            for await (const row of readDb.eval(`SELECT Id FROM Authority`)) {
               if (row && row['Id']) {
-                verdict = true;
-                break;
+                seen.push(String(row['Id']));
               }
             }
-            if (!verdict) {
-              await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+            // Report the census on CHANGE, and every 15th tick as a heartbeat, so the log shows
+            // what this peer can actually see rather than only what it was hunting for.
+            const census = seen.slice().sort().join(',');
+            if (census !== lastCensus || i % 15 === 0) {
+              L('read tick', i, 'authorityRows=', seen.length, 'ids=', seen.length ? seen : '(none)');
+              lastCensus = census;
             }
-          } catch {
-            // Strand may still be bootstrapping — retry.
+            if (seen.some(id => id.startsWith('repl-auth-') && id !== proofAuthId)) {
+              verdict = true;
+              break;
+            }
+            await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+          } catch (pollErr) {
+            readErrCount++;
+            const msg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+            if (firstReadErr === undefined) {
+              firstReadErr = msg;
+              L('read tick', i, 'FIRST read error:', msg);
+            }
             await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
           }
         }
+        L('read phase done: ticks=', ticks, 'readErrors=', readErrCount, 'firstError=', firstReadErr ?? '(none)');
       } catch (readErr) {
         L('WARN read phase error:', readErr instanceof Error ? readErr.message : String(readErr));
       }

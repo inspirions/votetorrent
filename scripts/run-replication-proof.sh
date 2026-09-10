@@ -370,9 +370,17 @@ fi
 # logging (cluster/service.js's this.log.error('error handling cluster protocol message...'))
 # — OFF by default otherwise. Namespace corrected per 38-02-SUMMARY.md's runtime finding
 # (createLogger's actual base is optimystic:db-p2p:*, NOT the bare db-p2p:* RESEARCH.md cited).
+# W1b (2026-09-10): `sereus:cadre:node` ADDED. cadre-core's authorizeInboundControlStream() is the
+# predicate behind every `inbound stream denied ... reason=predicate returned false` line, and it
+# logs the WHY — "DENYING <peer> on <protocol> — not in the materialized authorized set (N
+# member(s))" — on `debug('sereus:cadre:node')` (cadre-node.js:43). The pre-existing
+# `sereus:cadre:*:error` does NOT match that namespace (it matches sereus:cadre:<x>:error), so the
+# one line that explains a denial was filtered out of EVERY run: 214 denials in the 2026-09-10
+# device run, 0 lines of reason. Also enables refreshAuthorizedControlPeers()'s member-count line,
+# which says whether the cold-start carve-out is still open.
 # DRONE_LOG is retained through the FULL run (no rm -f below) — only the EXIT trap removes it.
 DRONE_LOG=$(mktemp /tmp/drone-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,optimystic:db-p2p:libp2p-key-network:*}" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*}" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
 DRONE_PID=$!
 echo "[run-replication-proof] Drone launched (PID ${DRONE_PID}, DEBUG= cluster-error logging armed), waiting for READY line ..."
 
@@ -466,7 +474,7 @@ echo "[run-replication-proof] Drone invite captured (${#DRONE_INVITE} chars)"
 # host-loopback vs emulator-alias address spaces).
 echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} under Node 22 ..."
 DRONE_B_LOG=$(mktemp /tmp/drone-b-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,optimystic:db-p2p:libp2p-key-network:*}" \
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*}" \
   STRAND_ID="${STRAND_ID}" \
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
   DRONE_BOOTSTRAP_STRAND_ADDR="${STRAND_ADDR}" \
@@ -725,11 +733,20 @@ fi
 SP=$(extract_marker_value "${STRAND_PEERS_LINE}" "strandPeers")
 echo "[run-replication-proof] REPL-01: strandPeers=${SP} on Peer A"
 if [ -z "${SP}" ] || [ "${SP}" -lt 1 ]; then
-  # Phase 30: the runner now waits (bounded) for the LIVE strand connection before emitting
-  # strandPeers=, so a sustained strandPeers=${SP} < 1 is a genuine cohort-formation failure —
-  # fail fast here instead of warn-and-continue into a 120s verdict timeout (REPL-01).
-  echo "[run-replication-proof] FAIL: strandPeers=${SP} < 1 (REPL-01) — strand cohort did not form on Peer A after the runner's bounded wait; aborting before the verdict poll" >&2
-  exit 1
+  # W1b (2026-09-10): NO LONGER FATAL. The Phase-30 premise below — "the runner waits, so a
+  # sustained strandPeers < 1 is a genuine cohort-formation failure" — is FALSE against the
+  # enrolment ceremony added in ad559fa5. The runner's wait is STRAND_PEER_POLL_MAX (was 10s)
+  # while drone.mjs holds each newly-seen peer for DELEGATE_GRACE_MS (15s) before accepting it,
+  # so a peer that connects late reads strandPeers=0 simply because it is NOT YET A MEMBER.
+  # Measured in run 4: drone-A lived 42s, the two peers connected at ~34s and needed grace until
+  # ~49s; this abort killed the drones at 42s and the ceremony never finished. The run then
+  # reported a cohort-formation failure that had not occurred.
+  #
+  # Aborting here also DESTROYS the diagnostics that explain the run: the read-phase row census
+  # and the drone's `DENYING ... not in the materialized authorized set (N member(s))` lines all
+  # come later. Warn and continue to the verdict poll; the verdict still decides pass/fail, so
+  # nothing is hidden — a genuine cohort failure still ends in FAIL, with evidence attached.
+  echo "[run-replication-proof] WARNING: strandPeers=${SP} < 1 on Peer A at sample time (REPL-01) — continuing to the verdict poll so the ceremony can finish and the diagnostics survive" >&2
 else
   echo "[run-replication-proof] REPL-01 cohort signal: strandPeers=${SP} >= 1 on Peer A"
 fi
