@@ -809,6 +809,16 @@ export class AuthorityEngine implements IAuthorityEngine {
 				throw new Error(`Quereus error (code ${err.code}): ${err.message}`);
 			} else if (err instanceof MisuseError) {
 				throw new Error(`API misuse: ${err.message}`);
+			} else if (err instanceof Error) {
+				// WR-02: mirror `applyAdminProposal`'s own catch. Without this branch a
+				// re-thrown promotion failure (the `throw promotionErr` in Trigger A
+				// above) was rebuilt as a brand-new, cause-less `Error("Unknown
+				// error: …")`, erasing `instanceof` and the stack. A caller could then
+				// not distinguish "the proposal was never saved" from "the proposal and
+				// its threshold-reached signature were saved correctly; only the
+				// automatic promotion crashed" — and a blind retry collides on
+				// ProposedAdmin's (AuthorityId, EffectiveAt) primary key.
+				throw err;
 			} else {
 				throw new Error(`Unknown error: ${err}`);
 			}

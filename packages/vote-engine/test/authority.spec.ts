@@ -1220,6 +1220,66 @@ describe('AuthorityEngine', () => {
         .get({ id: authority.id, e: toCanonicalDatetime(effectiveAt) })
       expect(Number(row?.n)).to.equal(0)
     })
+
+    it('WR-02: an unexpected promotion error keeps its identity instead of being flattened to "Unknown error"', async () => {
+      // proposeAdmin's Trigger A re-throws any non-AdminPromotionError out of the
+      // promotion attempt (authority-engine.ts:788). Before WR-02 was fixed, its
+      // own outer catch had no `instanceof Error` pass-through, so that error was
+      // rebuilt as a brand-new, cause-less `Error("Unknown error: ...")`. The
+      // caller then could not tell "the proposal was never saved" from "the
+      // proposal and its threshold-reached signature were saved correctly; only
+      // the automatic promotion crashed" — and a retry collides on ProposedAdmin's
+      // (AuthorityId, EffectiveAt) primary key.
+      class PromotionBoom extends Error {
+        constructor() {
+          super('synthetic promotion failure')
+          this.name = 'PromotionBoom'
+        }
+      }
+
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const signCallback = makeRealSignCallback('user-1')
+
+      // Force the promotion attempt to fail with something that is NOT an
+      // AdminPromotionError, NOT a QuereusError and NOT a MisuseError.
+      ;(authorityEngine as unknown as { applyAdminProposal: unknown }).applyAdminProposal =
+        async () => { throw new PromotionBoom() }
+
+      const effectiveAt = Date.now() + 60_000
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [{ existing: { userId: 'user-1', authorityId: authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } }],
+          effectiveAt,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: ['user-1']
+      }
+
+      let thrown: unknown
+      try {
+        await authorityEngine.proposeAdmin(proposal, signCallback)
+      } catch (err) {
+        thrown = err
+      }
+
+      expect(thrown, 'the promotion failure must still surface to the caller').to.not.equal(undefined)
+      expect(
+        thrown instanceof PromotionBoom,
+        `the original error identity must survive the outer catch; got ${(thrown as Error)?.name}: ${(thrown as Error)?.message}`
+      ).to.equal(true)
+      expect(
+        (thrown as Error).message,
+        'the message must not be flattened into the "Unknown error" wrapper'
+      ).to.not.match(/^Unknown error:/)
+
+      // Context for the caller-confusion this finding is about: the proposal
+      // itself DID persist, so a blind retry would collide on the PK.
+      const row = await ctx.db
+        .prepare('select count(*) as n from ProposedAdmin where AuthorityId = :id and EffectiveAt = :e')
+        .get({ id: authority.id, e: toCanonicalDatetime(effectiveAt) })
+      expect(Number(row?.n), 'the proposal was persisted before the promotion attempt failed').to.equal(1)
+    })
   })
 
   // -----------------------------------------------------------------------
@@ -2773,6 +2833,119 @@ describe('AuthorityEngine', () => {
         .prepare('select IsCompleted from Task where Id = :id')
         .get({ id: taskId })
       expect(taskRow?.IsCompleted, 'the Task must still close').to.satisfy((v: unknown) => v === 1 || v === true)
+    })
+
+    it('WR-01: a degraded admin task whose authority join missed records the fault and does NOT destroy the officer signature', async () => {
+      // The task-listing path (signature-tasks-engine.ts, "Extension row missing"
+      // branch) deliberately pushes a BASE SignatureTask when the
+      // AdminSignatureTaskExtension -> Authority join misses. That base still
+      // carries signatureType 'admin' but has NO `authority`. Before WR-01 was
+      // fixed, completeSignature fed that undefined straight into
+      // `new AuthorityEngine(...)`, applyAdminProposal threw a bare TypeError on
+      // `this.authority.id`, and the outer catch ROLLED BACK the whole composed
+      // transaction — discarding the officer's real, just-produced signature.
+      //
+      // This test drives that exact shape and asserts the signature survives.
+      const { auth } = await createPromotionFixture()
+      const nonce = crypto.randomUUID()
+      const taskId = crypto.randomUUID()
+      const tid = Date.now()
+      const now = Date.now()
+      const placeholderSig = 'a'.repeat(128)
+      const thresholdPolicies = '[]'
+      const signerKey = auth.user.activeKeys[0]!.key
+
+      const adminRow = await auth.ctx.db
+        .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
+        .get({ authorityId: auth.authority.id })
+      if (!adminRow) throw new Error('setup: CurrentAdmin not found')
+      const adminEffectiveAt = adminRow.EffectiveAt as string
+
+      try {
+        await auth.ctx.db.exec(
+          `insert into ProposedAdmin (AuthorityId, EffectiveAt, ThresholdPolicies)
+           with context IsUserValid = true, Tid = :tid, now = :now,
+                        UserId = :userId, UserKey = :signerKey, Signature = :sig
+           values (:authorityId, :adminEffectiveAt, :thresholdPolicies)`,
+          { authorityId: auth.authority.id, adminEffectiveAt, thresholdPolicies, tid, now, userId: auth.user.id, signerKey, sig: placeholderSig }
+        )
+      } catch {
+        // Idempotent — ProposedAdmin already exists for this (AuthorityId, EffectiveAt) PK.
+      }
+      await auth.ctx.db.exec(
+        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad',
+                 Digest(:tid, :authorityId, :adminEffectiveAt, :thresholdPolicies),
+                 :userId, :signerKey, :sig)`,
+        { nonce, authorityId: auth.authority.id, adminEffectiveAt, thresholdPolicies, tid, now, userId: auth.user.id, signerKey, sig: placeholderSig }
+      )
+
+      await auth.ctx.db.exec('BEGIN')
+      try {
+        await auth.ctx.db.exec(
+          `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
+           with context IsMutationValid = true, Tid = :tid
+           values (:id, :userId, 'signature', 'admin', :nonce, 0)`,
+          { id: taskId, userId: auth.user.id, nonce, tid }
+        )
+        await auth.ctx.db.exec(
+          `insert into AdminSignatureTaskExtension (TaskId, AuthorityId, AdminEffectiveAt)
+           with context Tid = :tid
+           values (:taskId, :authorityId, :adminEffectiveAt)`,
+          { taskId, authorityId: auth.authority.id, adminEffectiveAt, tid }
+        )
+        await auth.ctx.db.exec('COMMIT')
+      } catch (err) {
+        await auth.ctx.db.exec('ROLLBACK')
+        throw err
+      }
+
+      const digestRow = await auth.ctx.db.prepare('select Digest from AdminSigning where Nonce = :nonce').get({ nonce })
+      const digestB64 = digestRow!.Digest as string
+      const signCb = makeTestSignCallback(auth.user)
+      const realSig = await signCb(digestToBytes(digestB64))
+
+      const networkRef = { hash: 'wr01-hash', name: 'WR-01 Network', relays: [], primaryAuthorityDomainName: 'wr01.example.com' }
+      const tasksEngine = new (await import('../src/tasks/signature-tasks-engine.js')).SignatureTasksEngine(networkRef, auth.ctx)
+
+      // The degraded shape: signatureType 'admin', but NO `authority` field.
+      const degradedTask = {
+        type: 'signature' as const,
+        userId: auth.user.id,
+        network: networkRef,
+        signatureType: 'admin' as const,
+      }
+
+      const warnings: string[] = []
+      const originalWarn = console.warn
+      console.warn = ((...args: unknown[]) => { warnings.push(String(args[0])) }) as typeof console.warn
+      let thrown: unknown
+      try {
+        await tasksEngine.completeSignature(
+          degradedTask as unknown as Parameters<typeof tasksEngine.completeSignature>[0],
+          { isAccepted: true, signature: realSig, sign: signCb }
+        )
+      } catch (err) {
+        thrown = err
+      } finally {
+        console.warn = originalWarn
+      }
+
+      expect(thrown, `completeSignature must not throw on a degraded admin task; threw: ${String(thrown)}`).to.equal(undefined)
+
+      const officerSigRow = await auth.ctx.db
+        .prepare('select UserId from OfficerSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      expect(
+        officerSigRow?.UserId,
+        "the officer's real signature must survive a join-miss — this is WR-01's actual harm"
+      ).to.equal(auth.user.id)
+
+      expect(
+        warnings.some((w) => w.includes('finalize admin') && w.toLowerCase().includes('authority')),
+        'the join-miss must be diagnosable, naming the missing authority — not a bare TypeError'
+      ).to.equal(true)
     })
   })
 

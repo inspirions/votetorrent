@@ -826,11 +826,29 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           thresholdReached = await this.signingEngine.sign(nonce, result.signature, { ownsTransaction: false })
           if (thresholdReached) {
             try {
-              await new AuthorityEngine((task as AdminSignatureTask).authority, this.ctx!).applyAdminProposal(
-                nonce,
-                result.sign!,
-                { ownsTransaction: false }
-              )
+              // WR-01: the task-listing path above deliberately pushes a BASE
+              // SignatureTask — no `authority` — when the
+              // AdminSignatureTaskExtension → Authority join misses, and that base
+              // still carries signatureType 'admin'. Feeding that `undefined`
+              // straight into AuthorityEngine made applyAdminProposal throw a bare
+              // TypeError on `this.authority.id`; because a TypeError is not an
+              // AdminPromotionError it fell to the `throw` below and rolled the
+              // whole composed transaction back, DESTROYING the officer's real,
+              // just-produced signature. Treat a join-miss exactly as T-57-08-06
+              // treats a refused promotion: record it, never silently, never
+              // thrown, so the signature still commits.
+              const adminAuthority = (task as AdminSignatureTask).authority
+              if (adminAuthority?.id === undefined) {
+                console.warn(
+                  `SignatureTasksEngine.completeSignature (finalize admin): promotion skipped for nonce ${nonce}: this task carries no authority, so the AdminSignatureTaskExtension → Authority join must have missed when the task was listed. The officer's signature itself was NOT affected.`,
+                )
+              } else {
+                await new AuthorityEngine(adminAuthority, this.ctx!).applyAdminProposal(
+                  nonce,
+                  result.sign!,
+                  { ownsTransaction: false }
+                )
+              }
             } catch (promotionErr) {
               if (promotionErr instanceof AdminPromotionError) {
                 // 57-08 (Trigger B): mirrors Trigger A's (proposeAdmin) discipline

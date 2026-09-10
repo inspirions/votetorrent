@@ -49,8 +49,11 @@ export interface IAuthorityEngine {
    * `options.ownsTransaction` defaults to true. Pass `false` when composing
    * this call inside a caller's own already-open transaction (57-08).
    *
-   * Does NOT close R1 by itself — nothing calls this method yet; the
-   * trigger (reacting to a completed 'rad' threshold) is separate work.
+   * Both triggers are wired (57-08): `AuthorityEngine.proposeAdmin` calls this
+   * directly when its own 'rad' session reaches threshold (Trigger A), and
+   * `SignatureTasksEngine.completeSignature` calls it inside the composed
+   * sign+promote transaction when a co-signer's signature reaches threshold
+   * (Trigger B).
    */
   applyAdminProposal(
     nonce: string,
