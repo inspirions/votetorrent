@@ -450,7 +450,15 @@ export async function runReplicationProof(): Promise<void> {
       const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
       // The shared strand ID is the PROOF_NETWORK_STORE constant; both peers join the same strand.
       // OQ3: strandId=<hash> is logged so the harness can launch the drone with STRAND_ID=<hash>.
-      strandDb = await strandDbFactory(PROOF_NETWORK_STORE);
+      // W1b: THE throwing call. Acquiring the strand DB reads the control DB, so it is denied
+      // outright while this peer is still a non-member — this is where the whole write phase was
+      // dying, BEFORE the strandId= marker was even emitted (the WARN precedes strandId= in every
+      // failed run's logcat). Wrapping the presence check and the insert alone left this uncovered
+      // and the retry never fired once.
+      strandDb = await withControlRetry(
+        'write phase acquire:',
+        () => strandDbFactory(PROOF_NETWORK_STORE),
+      );
 
       // Log OQ3 handshake marker before the write so the harness can capture it.
       L('strandId=', PROOF_NETWORK_STORE);
