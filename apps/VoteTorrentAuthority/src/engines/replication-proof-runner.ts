@@ -162,6 +162,60 @@ const POLL_INTERVAL_MS = 1000;
 //   assertion rather than on a timeout. If DELEGATE_GRACE_MS is ever raised past ~20 s, this and
 //   that timeout both need revisiting together.
 const STRAND_PEER_POLL_MAX = 25;
+
+// CONTROL_RETRY_MAX / CONTROL_RETRY_INTERVAL_MS: 24 x 5 s = 120 s budget for a control-DB read or
+//   write that could not be SERVED (W1b, 2026-09-10).
+//
+//   A read that cannot be served is NOT a verdict. A peer that is not yet an authorized cadre
+//   member has its control-DB streams denied by cadre-core's authorizeInboundControlStream(), and
+//   db-p2p surfaces that denial as `Block default/Revocation is unavailable (cohort-unreachable)`
+//   rather than as a permission error (upstream Optimystic#16 — a refusal and an absence are the
+//   same observable). The drone holds each newly-seen peer for DELEGATE_GRACE_MS (15 s) before
+//   accepting it, so this state is EXPECTED for the first seconds of every networked run.
+//
+//   Before this, the write phase converted that throw into an immediate FAIL verdict; the harness's
+//   verdict poll matched it at once and killed the drones ~38 s in — before the ceremony that would
+//   have authorized this peer could finish. The proof failed fast on the exact condition it was
+//   waiting for. Measured across runs 2, 4 and 5.
+//
+//   Same call the multipeer gate made for its L3 flake (commit 1d3f722a, "a read outage is not a
+//   membership verdict"), and the same predicate `packages/p2p-probe-host/drone.mjs` already uses
+//   in isTransientControlFailure() to bound acceptPhone's retries — kept character-identical so the
+//   two cannot drift apart.
+const CONTROL_RETRY_MAX = 24;
+const CONTROL_RETRY_INTERVAL_MS = 5000;
+
+/**
+ * True when a control-DB failure means "could not be served", not "refused on the merits".
+ * Verbatim from drone.mjs's isTransientControlFailure() — change both or neither.
+ */
+const isTransientControlFailure = (msg: string): boolean =>
+  /unavailable \((?:peers|cohort)-unreachable\)|could not determine whether it exists|exhausted \d+ retries|unresolved rival action|was not atomic/i.test(msg);
+
+/**
+ * Run `op` under the transient-control-failure retry budget. A transient failure is retried until
+ * the budget is spent; anything else rethrows immediately, so a genuine defect still surfaces fast.
+ */
+async function withControlRetry<T>(label: string, op: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < CONTROL_RETRY_MAX; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isTransientControlFailure(msg)) {
+        throw err;
+      }
+      lastErr = err;
+      if (attempt === 0) {
+        L(label, 'control DB not servable yet (expected while enrolment converges), retrying:', msg);
+      }
+      await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
+    }
+  }
+  L(label, 'control DB still not servable after', CONTROL_RETRY_MAX, 'attempts — giving up');
+  throw lastErr;
+}
 // RELAY_POLL_MAX: 10 ticks × 1 s = 10 s relay-reservation wait (D-09). 38-02's Node-only
 // smoke measured the /p2p-circuit reservation completing in ~1.3s against a live drone
 // relay, so 10s is a generous bound; emitted unconditionally (true or false) after the
@@ -444,23 +498,32 @@ export async function runReplicationProof(): Promise<void> {
       // The proof's actual question is "did the OTHER peer's row arrive", so this peer having
       // already contributed its row is SUCCESS, not failure. Check first, insert only when
       // absent, and treat an Id collision as benign if we lose the race.
-      let alreadyContributed = false;
-      for await (const row of strandDb.eval(
-        `SELECT Id FROM Authority WHERE Id = '${proofAuthId}'`,
-      )) {
-        if (row && row['Id']) {
-          alreadyContributed = true;
-          break;
+      // W1b: the presence check is a control-DB-backed read and is denied outright while this peer
+      // is still a non-member, so it must run under the transient-failure budget rather than
+      // collapsing the whole write phase into a FAIL verdict on the first throw.
+      const db = strandDb;
+      const alreadyContributed = await withControlRetry('write phase:', async () => {
+        let found = false;
+        for await (const row of db.eval(
+          `SELECT Id FROM Authority WHERE Id = '${proofAuthId}'`,
+        )) {
+          if (row && row['Id']) {
+            found = true;
+            break;
+          }
         }
-      }
+        return found;
+      });
       if (alreadyContributed) {
         L('write phase: own row already present, skipping insert (idempotent)', proofAuthId);
       } else {
         try {
-          await strandDb.exec(
-            `insert into Authority (Id, Name)
-              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
-              values ('${proofAuthId}', '${proofNetworkName}');`,
+          await withControlRetry('write phase insert:', () =>
+            db.exec(
+              `insert into Authority (Id, Name)
+                with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+                values ('${proofAuthId}', '${proofNetworkName}');`,
+            ),
           );
           // W1b instrumentation (2026-09-10): the success path logged NOTHING, so a run could not
           // distinguish "this peer inserted its row" from "this peer never reached the write".
@@ -504,7 +567,10 @@ export async function runReplicationProof(): Promise<void> {
     if (peerCount > 0) {
       try {
         const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
-        const readDb = strandDb ?? await strandDbFactory(PROOF_NETWORK_STORE);
+        const readDb = strandDb ?? await withControlRetry(
+          'read phase:',
+          () => strandDbFactory(PROOF_NETWORK_STORE),
+        );
 
         // W1b instrumentation (2026-09-10). The loop below previously selected ONLY the sibling's
         // row and swallowed every error with a bare `catch {}`, retrying 120 times in silence — so
