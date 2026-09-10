@@ -198,9 +198,13 @@ const isTransientControlFailure = (msg: string): boolean =>
  * Run `op` under the transient-control-failure retry budget. A transient failure is retried until
  * the budget is spent; anything else rethrows immediately, so a genuine defect still surfaces fast.
  */
-async function withControlRetry<T>(label: string, op: () => Promise<T>): Promise<T> {
+async function withControlRetry<T>(
+  label: string,
+  op: () => Promise<T>,
+  maxAttempts: number = CONTROL_RETRY_MAX,
+): Promise<T> {
   let lastErr: unknown;
-  for (let attempt = 0; attempt < CONTROL_RETRY_MAX; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       return await op();
     } catch (err) {
@@ -215,7 +219,7 @@ async function withControlRetry<T>(label: string, op: () => Promise<T>): Promise
       await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
     }
   }
-  L(label, 'control DB still not servable after', CONTROL_RETRY_MAX, 'attempts — giving up');
+  L(label, 'control DB still not servable after', maxAttempts, 'attempt(s) — giving up');
   throw lastErr;
 }
 // RELAY_POLL_MAX: 10 ticks × 1 s = 10 s relay-reservation wait (D-09). 38-02's Node-only
@@ -461,9 +465,16 @@ export async function runReplicationProof(): Promise<void> {
       // dying, BEFORE the strandId= marker was even emitted (the WARN precedes strandId= in every
       // failed run's logcat). Wrapping the presence check and the insert alone left this uncovered
       // and the retry never fired once.
+      // W1b: retry ONLY when there is a peer to converge WITH. The harness's Step-1 boot is
+      // deliberately solo (peers=0, no drone), so a control-DB failure there is terminal, not
+      // transient — nothing will ever authorize this node. Retrying burned the full 120s budget
+      // in bootstrap mode and the strandId= marker never appeared inside the harness's 240s
+      // window, so the run died at Step 1. Fail fast there exactly as before; retry only in the
+      // networked run, which is the case the budget exists for.
       strandDb = await withControlRetry(
         'write phase acquire:',
         () => strandDbFactory(PROOF_NETWORK_STORE),
+        peerCount > 0 ? CONTROL_RETRY_MAX : 1,
       );
 
       // Log OQ3 handshake marker before the write so the harness can capture it.
@@ -584,6 +595,7 @@ export async function runReplicationProof(): Promise<void> {
         const readDb = strandDb ?? await withControlRetry(
           'read phase:',
           () => strandDbFactory(PROOF_NETWORK_STORE),
+          peerCount > 0 ? CONTROL_RETRY_MAX : 1,
         );
 
         // W1b instrumentation (2026-09-10). The loop below previously selected ONLY the sibling's
