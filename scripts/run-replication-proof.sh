@@ -684,17 +684,37 @@ if [ -z "${D05_MARKER_LINE}" ]; then
 fi
 echo "[run-replication-proof] D-05 relaunch start marker seen: ${D05_MARKER_LINE}"
 
-# ── D-10: re-reserve-on-relaunch — the force-stop killed the process AND its relay
-# reservation; the relaunched runner must re-establish it before we trust any dial
-# that follows. Re-gate on the SAME RELAY_READY_MARKER, same idiom as the D-09 gate.
-echo "[run-replication-proof] D-10: waiting for relayReservation= marker on Peer A after D-05 relaunch ..."
-wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-d05-relaunch" "-s emulator-5554" > /dev/null
-echo "[run-replication-proof] D-10: relay reservation re-established on Peer A after D-05 relaunch"
+# Capture peerId-after HERE, not after D-10.
+#
+# `peerId=` is emitted once per boot, immediately after `starting` — so by this point it is
+# already in the logcat buffer and will never be written again. Waiting for it with
+# `wait_for_logcat_line` therefore cannot "arrive"; it can only be READ. Worse, every wait for a
+# once-per-boot marker burns its full window (the IN-19 latency noted in logcat-wait.sh: `head`
+# exits on first match but the substitution only returns when adb dies, which for a marker with
+# no "next matching write" means the whole TIMEOUT). Stacking relaunch_and_wait's window and
+# D-10's put the old read ~2x MARKER_TIMEOUT after the line was logged, and `relaunch_and_wait`
+# had just cleared the buffer — so on a chatty boot the 2 MiB ring wraps the line away and the
+# run dies at a checkpoint that has nothing to do with replication. That is exactly how run 15
+# died; run 14 passed the identical gate on timing luck.
+#
+# Read the buffer directly (`logcat -d`), bounded-retry for the case where the relaunched app has
+# not reached the line yet. Same extraction, same comparison, no window to outlive.
+read_logcat_line_now() {
+  local pattern="$1" serial="$2" tries="${3:-24}" i out
+  for i in $(seq 1 "${tries}"); do
+    out=$(adb -s "${serial}" logcat -d 2>/dev/null | grep -v '^--------- ' | grep -E "${pattern}" | head -1)
+    if [ -n "${out}" ]; then printf '%s\n' "${out}"; return 0; fi
+    sleep 5
+  done
+  return 0
+}
 
 echo "[run-replication-proof] D-05: capturing peerId on Peer A after force-stop relaunch ..."
-PEER_ID_LINE_AFTER=$(wait_for_logcat_line "${PEER_ID_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "peerId-after" "-s emulator-5554")
+PEER_ID_LINE_AFTER=$(read_logcat_line_now "${PEER_ID_MARKER}" "emulator-5554")
 if [ -z "${PEER_ID_LINE_AFTER}" ]; then
   echo "[run-replication-proof] ERROR: peerId= marker not seen on Peer A after force-stop relaunch" >&2
+  echo "[run-replication-proof] --- last 20 [replication-proof] lines on Peer A (diagnostic) ---" >&2
+  adb -s emulator-5554 logcat -d 2>/dev/null | grep 'replication-proof' | tail -20 >&2
   exit 1
 fi
 ID_AFTER=$(extract_marker_value "${PEER_ID_LINE_AFTER}" "peerId")
@@ -705,6 +725,14 @@ if [ "${ID_BEFORE}" != "${ID_AFTER}" ]; then
   exit 1
 fi
 echo "[run-replication-proof] D-05 PASS: peerId stable across restart (${ID_AFTER})"
+
+# ── D-10: re-reserve-on-relaunch — the force-stop killed the process AND its relay
+# reservation; the relaunched runner must re-establish it before we trust any dial
+# that follows. Re-gate on the SAME RELAY_READY_MARKER, same idiom as the D-09 gate.
+echo "[run-replication-proof] D-10: waiting for relayReservation= marker on Peer A after D-05 relaunch ..."
+wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-d05-relaunch" "-s emulator-5554" > /dev/null
+echo "[run-replication-proof] D-10: relay reservation re-established on Peer A after D-05 relaunch"
+
 
 # ── D-06: peers >= 1 ───────────────────────────────────────────────────────────
 echo "[run-replication-proof] D-06: waiting for peers= marker on Peer A ..."
