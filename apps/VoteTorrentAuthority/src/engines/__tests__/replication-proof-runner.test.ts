@@ -706,7 +706,12 @@ describe('REPL-01 strand cohort markers', () => {
       for (let i = 0; i < 500 && mockConstructedNodes.length === 0; i++) {
         await new Promise<void>(r => setTimeout(r, 10));
       }
-      const node = mockConstructedNodes[0] as unknown as { listAuthorizedMembers: jest.Mock };
+      const node = mockConstructedNodes[0] as unknown as {
+        listAuthorizedMembers: jest.Mock;
+        _setConnections: (c: FakeConnection[]) => void;
+      };
+      // The gate only runs when this peer has a cohort to be authorized BY — peers=0 skips it.
+      node._setConnections([{} as FakeConnection]);
       let polls = 0;
       node.listAuthorizedMembers.mockImplementation(async () => {
         polls += 1;
@@ -740,7 +745,11 @@ describe('REPL-01 strand cohort markers', () => {
       for (let i = 0; i < 500 && mockConstructedNodes.length === 0; i++) {
         await new Promise<void>(r => setTimeout(r, 10));
       }
-      const node = mockConstructedNodes[0] as unknown as { listAuthorizedMembers: jest.Mock };
+      const node = mockConstructedNodes[0] as unknown as {
+        listAuthorizedMembers: jest.Mock;
+        _setConnections: (c: FakeConnection[]) => void;
+      };
+      node._setConnections([{} as FakeConnection]);
       let polls = 0;
       node.listAuthorizedMembers.mockImplementation(() => {
         polls += 1;

@@ -510,6 +510,25 @@ export async function runReplicationProof(): Promise<void> {
     // rather than failing later as a mystery cohort failure. 45 x 5 s = 225 s, which fits inside
     // the harness's 300 s REPL-01 window (peers= is already logged above, so that window is the
     // one absorbing this wait) and clears run 18's worst observed gap with margin.
+    // SKIPPED when nothing could possibly authorize this peer. The harness's Step 1 is a SOLO
+    // bootstrap boot: no drone, no invite injected (`enrolInvite=skipped`), `peers=0`. There is no
+    // owner to run acceptPhone, so `cadreAuthorized` can never become true and waiting the full
+    // budget is not caution, it is dead time — run 23 spent 122 s of it there and pushed the
+    // `strandId=` handshake past the harness's 420 s Step-1 window, failing a step that was
+    // otherwise healthy (the app was still alive and working when the harness gave up).
+    //
+    // Emitted as `skipped` rather than silently bypassed, so a run that skipped the gate is
+    // legible as that and never mistaken for one that passed it.
+    // Keyed on peer count alone. `peers=0` is the structural case — with no connection there is
+    // nobody to have run acceptPhone and nobody to serve the control read, so the answer cannot
+    // change no matter how long we wait. (An unenrolled peer WITH peers is a different shape: the
+    // gate runs, spends its budget and reports `false`, which is the honest answer and is exactly
+    // how an unenrolled networked run should read.)
+    const canBeAuthorized = peerCount > 0;
+    if (!canBeAuthorized) {
+      L('cadreAuthorized=skipped (peers=0 — no cohort that could authorize this peer)');
+    }
+
     let authGateLoggedError = false;
     // Captured rather than closing over the `let node`, which TS cannot narrow inside a closure.
     const authNode = node;
@@ -546,13 +565,15 @@ export async function runReplicationProof(): Promise<void> {
         return false;
       }
     };
-    const authGateStart = Date.now();
-    let selfAuthorized = await isSelfAuthorized();
-    for (let i = 0; i < AUTH_GATE_POLL_MAX && !selfAuthorized; i++) {
-      await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
-      selfAuthorized = await isSelfAuthorized();
+    if (canBeAuthorized) {
+      const authGateStart = Date.now();
+      let selfAuthorized = await isSelfAuthorized();
+      for (let i = 0; i < AUTH_GATE_POLL_MAX && !selfAuthorized; i++) {
+        await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
+        selfAuthorized = await isSelfAuthorized();
+      }
+      L('cadreAuthorized=', selfAuthorized, 'after', Math.round((Date.now() - authGateStart) / 1000), 's');
     }
-    L('cadreAuthorized=', selfAuthorized, 'after', Math.round((Date.now() - authGateStart) / 1000), 's');
 
     // ── 5. WRITE: create the strand (correct mode now known) + insert the proof row ──────────
     // createStrandDbFactory(node) calls setSchemaPath(['App','main']) internally so bare SQL
