@@ -724,5 +724,42 @@ describe('REPL-01 strand cohort markers', () => {
       expect(node.listAuthorizedMembers.mock.calls.length).toBeGreaterThan(1);
       expect(markers.some((m) => m.startsWith('cadreAuthorized='))).toBe(true);
     }, 60000);
+
+    // Run 19 died exactly here. While this peer is a non-member its control-DB reads are the thing
+    // being denied, and listAuthorizedMembers() does not always throw that denial — it can simply
+    // never settle. An un-raced await blocked the proof for 8+ minutes: no write, no strand, no
+    // verdict, and the harness timed out at REPL-01 while the drones logged 178
+    // NoValidAddressesError against a strand node that could never exist.
+    it('treats a call that never settles as "not yet" instead of hanging forever', async () => {
+      reloadRunnerFullMock();
+      mockConstructedNodes.length = 0;
+
+      const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+      const proof = runReplicationProof();
+
+      for (let i = 0; i < 500 && mockConstructedNodes.length === 0; i++) {
+        await new Promise<void>(r => setTimeout(r, 10));
+      }
+      const node = mockConstructedNodes[0] as unknown as { listAuthorizedMembers: jest.Mock };
+      let polls = 0;
+      node.listAuthorizedMembers.mockImplementation(() => {
+        polls += 1;
+        // First poll never settles; the second answers normally.
+        return polls === 1
+          ? new Promise(() => {})
+          : Promise.resolve([{ peerId: 'fakePeerIdABC123', multiaddr: null }]);
+      });
+
+      await proof;
+      const markers = consoleSpy.mock.calls
+        .filter((args) => args[0] === '[replication-proof]')
+        .map((args) => String(args[1]));
+      consoleSpy.mockRestore();
+
+      // It got past the stalled call and reached a verdict rather than blocking on it.
+      expect(polls).toBeGreaterThan(1);
+      expect(markers.some((m) => m.startsWith('cadreAuthorized='))).toBe(true);
+      expect(markers.some((m) => m.startsWith('strandPeers='))).toBe(true);
+    }, 60000);
   });
 });

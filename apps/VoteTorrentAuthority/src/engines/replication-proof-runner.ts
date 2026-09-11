@@ -228,12 +228,19 @@ async function withControlRetry<T>(
 // bounded wait — never blocks indefinitely, mirrors the strandPeers= polling shape.
 const RELAY_POLL_MAX = 10;
 
-// AUTH_GATE_POLL_MAX: 45 ticks x CONTROL_RETRY_INTERVAL_MS (5 s) = 225 s budget for the owner to
-// accept this peer AND for that membership row to replicate here (section 4b). Sized from run 18's
-// worst measured enrolInvite=ok -> ENROL_ACCEPTED gap (134 s) plus replication headroom, and kept
-// under the harness's 300 s REPL-01 window. Shares CONTROL_RETRY_INTERVAL_MS deliberately: both
-// are waiting on the same convergence, so one knob moves both.
-const AUTH_GATE_POLL_MAX = 45;
+// AUTH_GATE_POLL_MAX: 24 ticks x CONTROL_RETRY_INTERVAL_MS (5 s) = 120 s budget for the owner to
+// accept this peer AND for that membership row to replicate here (section 4b). Run 19 measured the
+// drone accepting BOTH phones within 23-49 s of their gates opening (much faster than run 18's
+// 90/134 s, which were inflated by the same cohort-unreachable stall this gate now rides out), so
+// 225 s bought nothing and starved the write + strand creation that must still finish inside the
+// harness's 300 s REPL-01 window. Shares CONTROL_RETRY_INTERVAL_MS deliberately: both are waiting
+// on the same convergence, so one knob moves both.
+const AUTH_GATE_POLL_MAX = 24;
+
+// AUTH_GATE_CALL_TIMEOUT_MS: deadline for ONE listAuthorizedMembers() call. Deliberately shorter
+// than CONTROL_RETRY_INTERVAL_MS so a stalled call cannot outlive its own poll slot and drag the
+// budget past what the harness allows.
+const AUTH_GATE_CALL_TIMEOUT_MS = 4000;
 
 /**
  * Boot entry point.  Fire-and-forget from index.js after AppRegistry.registerComponent.
@@ -484,7 +491,25 @@ export async function runReplicationProof(): Promise<void> {
     const authNode = node;
     const isSelfAuthorized = async (): Promise<boolean> => {
       try {
-        const members = await authNode.listAuthorizedMembers();
+        // RACED AGAINST A DEADLINE, not merely awaited. Run 19 hung here for 8+ minutes: while
+        // this peer is a non-member its control-DB reads are the thing being denied, and
+        // `listAuthorizedMembers()` does not always THROW that denial — it can simply never
+        // settle. An un-raced await then blocks the proof forever, the strand is never created,
+        // and the harness times out at REPL-01 with no verdict (and the drones spend the whole
+        // window logging NoValidAddressesError against a strand node that will never exist).
+        // A call that does not answer inside one poll interval IS the "not yet" answer.
+        const members = await Promise.race([
+          authNode.listAuthorizedMembers(),
+          new Promise<null>(r => setTimeout(() => r(null), AUTH_GATE_CALL_TIMEOUT_MS)),
+        ]);
+        if (members === null) {
+          if (!authGateLoggedError) {
+            authGateLoggedError = true;
+            L('write gate: listAuthorizedMembers did not answer within',
+              AUTH_GATE_CALL_TIMEOUT_MS, 'ms (expected while enrolment converges)');
+          }
+          return false;
+        }
         return members.some((m) => m.peerId === peerId);
       } catch (err) {
         // While this peer is a non-member its own control-DB reads are the thing being denied, so
