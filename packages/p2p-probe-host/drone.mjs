@@ -34,6 +34,7 @@ import { CadreNode } from '@serfab/cadre-core';
 import { MemoryRawStorage } from '@optimystic/db-p2p';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
+import { multiaddr } from '@multiformats/multiaddr';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 
 const PARTY_ID = 'votetorrent'; // aligned with CadreNodeProvider.tsx line 55 (OQ1 conservative fix)
@@ -156,6 +157,21 @@ L('control addrs  =', JSON.stringify(addrs));
 // rewrites 127.0.0.1 → 10.0.2.2 for the Android emulator host mapping.
 const proofWsAddr = addrs.find(a => a.includes('/ip4/127.0.0.1/') && a.includes('/ws')) ?? addrs[0] ?? '';
 L('PROOF_WS_ADDR=' + proofWsAddr);
+
+// Provenance marker (P2P-11). Asserts at RUNTIME — not by grepping this file, and not from the
+// source tree a bundler may or may not have picked up — that this node registered a transport
+// willing to dial a /p2p-circuit address. This is the exact predicate libp2p's dial path uses
+// (`transportManager.dialTransportForMultiaddr`, filtered at dial-queue.js:351); when it is
+// false every dial to a phone behind emulator NAT dies as NoValidAddressesError before a packet
+// leaves this process, and the drone looks healthy while replicating nothing.
+try {
+  const tm = node.getControlNode()?.components?.transportManager;
+  const probe = proofWsAddr ? multiaddr(proofWsAddr + '/p2p-circuit') : undefined;
+  const dialable = tm && probe ? tm.dialTransportForMultiaddr(probe) != null : undefined;
+  L('CIRCUIT_DIALABLE=' + String(dialable));
+} catch (err) {
+  L('CIRCUIT_DIALABLE=unknown (' + (err?.message ?? err) + ')');
+}
 L('READY — update CONTROL_ADDR in dial-probe.ts with the /ip4/10.0.2.2/tcp/<PORT>/ws/p2p/<PEER_ID> addr above, then run ./scripts/run-dial-probe.sh');
 
 // ── CADRE MEMBERSHIP: owner genesis + the invite/accept ceremony ────────────────────────
