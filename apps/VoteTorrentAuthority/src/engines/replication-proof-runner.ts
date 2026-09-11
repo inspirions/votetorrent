@@ -358,7 +358,31 @@ export async function runReplicationProof(): Promise<void> {
       hibernation: { enabled: false },
     });
 
-    await node.start();
+    // cadre-core 0.13.0 ends start() with driveControlRelayReservation(), which waits on the
+    // supervisor's FIRST attempt (DEFAULT_RELAY_RESERVE_TIMEOUT_MS, 10 s) and THROWS
+    // RelayReservationFailedError if no reservation landed in time. That is fatal to the proof
+    // and should not be: upstream's own comment says "everything above in start() has completed
+    // by the time this runs" and "the retries carry on in the background after this resolves".
+    // So the node IS started and the reservation IS still being pursued — only the WAIT expired.
+    //
+    // Runs 21 and 22 both died here, and always on the D-05 force-stop relaunch rather than the
+    // first boot. That is the D-05 leg's own doing: it restarts the app with a STABLE peerId, so
+    // the relay is still holding that peer's previous reservation and re-granting it takes longer
+    // than the 10 s budget upstream sized for a "healthy dial-plus-reserve [that] is sub-second".
+    //
+    // Swallow ONLY this error, and only by name. Any other start() failure is a real defect and
+    // must still abort. The relayReservation= marker below reports the true state either way, so a
+    // run that genuinely never reserves stays legible as that rather than being hidden here.
+    try {
+      await node.start();
+    } catch (startErr) {
+      const name = (startErr as { name?: string } | undefined)?.name;
+      if (name !== 'RelayReservationFailedError') {
+        throw startErr;
+      }
+      L('start: relay reservation wait expired, continuing (retries run in the background):',
+        startErr instanceof Error ? startErr.message : String(startErr));
+    }
 
     // ── 2. D-05 / P2P-04 peerId marker ──────────────────────────────────────────────────────
     const peerId = node.peerId?.toString() ?? 'unknown';
