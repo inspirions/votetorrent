@@ -228,19 +228,47 @@ async function withControlRetry<T>(
 // bounded wait — never blocks indefinitely, mirrors the strandPeers= polling shape.
 const RELAY_POLL_MAX = 10;
 
-// AUTH_GATE_POLL_MAX: 24 ticks x CONTROL_RETRY_INTERVAL_MS (5 s) = 120 s budget for the owner to
-// accept this peer AND for that membership row to replicate here (section 4b). Run 19 measured the
-// drone accepting BOTH phones within 23-49 s of their gates opening (much faster than run 18's
-// 90/134 s, which were inflated by the same cohort-unreachable stall this gate now rides out), so
-// 225 s bought nothing and starved the write + strand creation that must still finish inside the
-// harness's 300 s REPL-01 window. Shares CONTROL_RETRY_INTERVAL_MS deliberately: both are waiting
-// on the same convergence, so one knob moves both.
-const AUTH_GATE_POLL_MAX = 24;
+// AUTH_GATE_BUDGET_MS: a WALL-CLOCK budget for section 4b, deliberately not a tick count.
+//
+// The previous `AUTH_GATE_POLL_MAX x CONTROL_RETRY_INTERVAL_MS` arithmetic was wrong by
+// construction. Once `isSelfAuthorized()` is raced against AUTH_GATE_CALL_TIMEOUT_MS, a tick
+// costs the sleep PLUS up to that deadline, so the comment's "24 ticks x 5 s = 120 s" actually
+// spent up to 24 x 9 s = 216 s. Run 24 measured it: 151 s on Peer B, 223 s on Peer A. Peer A's
+// extra time pushed its strandPeers= marker 12 s past the harness's 300 s REPL-01 window, so the
+// run was recorded as "marker never emitted" when the marker did arrive — the harness clock
+// failed it, not the product.
+//
+// A deadline cannot drift when the per-call timeout changes; a tick count silently can. Sized so
+// the gate plus the strand build (~90 s observed) plus STRAND_PEER_POLL_MAX still clear the 300 s
+// window with room to spare.
+const AUTH_GATE_BUDGET_MS = 90_000;
 
 // AUTH_GATE_CALL_TIMEOUT_MS: deadline for ONE listAuthorizedMembers() call. Deliberately shorter
 // than CONTROL_RETRY_INTERVAL_MS so a stalled call cannot outlive its own poll slot and drag the
 // budget past what the harness allows.
 const AUTH_GATE_CALL_TIMEOUT_MS = 4000;
+
+/**
+ * One libp2p listen failure per line, stack frames stripped.
+ *
+ * libp2p's `UnsupportedListenAddressesError` (transport-manager's `listen()`) reports EVERY
+ * configured listen entry in a SINGLE message, each followed by a full stack trace. On device
+ * that message runs to several KB and logcat truncates one log record at ~4 KB: run 24's copy was
+ * cut off inside the FIRST entry's stack, so the only address we could read was
+ * `/ip4/0.0.0.0/tcp/0` — and the entry that actually explains the failure was never on screen.
+ * Two hypotheses were built on that fragment before the truncation was noticed.
+ *
+ * Dropping the `at ...` frames keeps the whole address list inside one record. Any other error is
+ * returned as its own lines unchanged, so this is safe on the general write-failure path.
+ */
+function errorLinesWithoutStack(err: unknown): string[] {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg
+    .split('\n')
+    .filter(line => !/^\s*at\s/.test(line))
+    .map(line => line.trimEnd())
+    .filter(line => line.length > 0);
+}
 
 /**
  * Boot entry point.  Fire-and-forget from index.js after AppRegistry.registerComponent.
@@ -567,13 +595,23 @@ export async function runReplicationProof(): Promise<void> {
     };
     if (canBeAuthorized) {
       const authGateStart = Date.now();
+      const authGateDeadline = authGateStart + AUTH_GATE_BUDGET_MS;
       let selfAuthorized = await isSelfAuthorized();
-      for (let i = 0; i < AUTH_GATE_POLL_MAX && !selfAuthorized; i++) {
+      while (!selfAuthorized && Date.now() < authGateDeadline) {
         await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
         selfAuthorized = await isSelfAuthorized();
       }
       L('cadreAuthorized=', selfAuthorized, 'after', Math.round((Date.now() - authGateStart) / 1000), 's');
     }
+
+    // The exact INPUT to cadre-core's strand listen-address resolution, logged per peer.
+    // `strandNodeAddrs` -> `resolveListenAddrs` returns UNDEFINED when neither `network.listenAddrs`
+    // nor `network.relayAddrs` is set, and db-p2p then falls back to its own default
+    // `/ip4/0.0.0.0/tcp/0` — an address neither webSockets() nor circuitRelayTransport() will even
+    // accept for listening, which is fatal under libp2p's default FATAL_ALL. Run 24 failed that way
+    // on Peer A while Peer B started cleanly, on what is supposed to be ONE shared module constant,
+    // so the constant itself is now on the record for both peers.
+    L('controlRelayAddrs=', CONTROL_RELAY_ADDRS, 'controlRelayAddrsCount=', CONTROL_RELAY_ADDRS.length);
 
     // ── 5. WRITE: create the strand (correct mode now known) + insert the proof row ──────────
     // createStrandDbFactory(node) calls setSchemaPath(['App','main']) internally so bare SQL
@@ -698,6 +736,16 @@ export async function runReplicationProof(): Promise<void> {
     } catch (writeErr) {
       // Write phase error — log the error; proof continues to the read phase which will FAIL.
       L('WARN write phase error (proof will FAIL):', writeErr instanceof Error ? writeErr.message : String(writeErr));
+      // The line above is what logcat truncates. Re-emit the same error one line per record with
+      // stacks stripped, so a multi-address listen failure is fully readable (see
+      // errorLinesWithoutStack). Only for errors that actually span lines — a one-line error is
+      // already complete above.
+      const writeErrLines = errorLinesWithoutStack(writeErr);
+      if (writeErrLines.length > 1) {
+        for (const line of writeErrLines) {
+          L('write phase error detail:', line);
+        }
+      }
       // Still emit OQ3 strandId marker for harness capture even on write failure.
       if (!strandDb) {
         L('strandId=', PROOF_NETWORK_STORE);
