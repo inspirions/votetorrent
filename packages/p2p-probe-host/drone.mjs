@@ -33,6 +33,7 @@ import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { CadreNode } from '@serfab/cadre-core';
 import { MemoryRawStorage } from '@optimystic/db-p2p';
 import { webSockets } from '@libp2p/websockets';
+import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 
 const PARTY_ID = 'votetorrent'; // aligned with CadreNodeProvider.tsx line 55 (OQ1 conservative fix)
@@ -91,7 +92,20 @@ const node = new CadreNode({
   requireSignedSchemas: false,
   strandFilter: { mode: 'all' },
   network: {
-    transports: [webSockets()],
+    // circuitRelayTransport() is the DIALER half of circuit-relay-v2, and this node needs it
+    // even though it is itself a relay SERVER (see relayServerInit below). Supplying
+    // `transports` at all REPLACES @optimystic/db-p2p's defaults wholesale —
+    // `libp2p-node-base.ts` does `options.transports ?? defaults.transports` — and it is those
+    // defaults (via createLibp2pNode) that would otherwise carry it. Without it libp2p's dial
+    // queue drops every /p2p-circuit address at the transport filter
+    // (`dialTransportForMultiaddr` finds no transport willing to dial one) and the dial dies as
+    // NoValidAddressesError against a perfectly reachable peer. Invisible on loopback, where
+    // every peer is directly dialable and a circuit addr is never the only route; fatal behind
+    // emulator NAT, where a phone is reachable ONLY through its reservation on the other drone.
+    // Replication-proof run 14: 166 NoValidAddressesError on drone-B targeting the phones while
+    // its own findCluster logged `addressless=0 selfRelayOnly=0` — it held good circuit addrs it
+    // had no transport to use. cadre-core documents the same pairing for RN in types.d.ts.
+    transports: [webSockets(), circuitRelayTransport()],
     listenAddrs: ['/ip4/0.0.0.0/tcp/0/ws'], // ephemeral — avoids EADDRINUSE
     // The storage profile turns the circuit-relay-v2 relay server ON
     // (createControlNode/startStrand derive `relay: profile === 'storage'` in
