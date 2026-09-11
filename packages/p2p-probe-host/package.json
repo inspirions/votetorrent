@@ -16,8 +16,8 @@
 		"@libp2p/crypto": "^5",
 		"@libp2p/peer-id": "^6.0.0",
 		"@libp2p/websockets": "^10",
-		"@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A0.27.0#~/.yarn/patches/@optimystic-db-p2p-npm-0.27.0-6a35c23d73.patch",
-		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.12.0#~/.yarn/patches/@serfab-cadre-core-npm-0.12.0-7ac3a744da.patch&~/.yarn/patches/@serfab-cadre-core-npm-0.12.0-strand-cohort-topic.patch",
+		"@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A1.0.0-beta.2#~/.yarn/patches/@optimystic-db-p2p-npm-1.0.0-beta.2-0973001be9.patch",
+		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch",
 		"@serfab/strand-proto": "^0.11.0"
 	}
 }

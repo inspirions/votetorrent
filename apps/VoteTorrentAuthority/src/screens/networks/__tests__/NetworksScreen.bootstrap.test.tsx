@@ -218,7 +218,7 @@ describe('NetworksScreen bootstrap join — NETOP-03 / T-22-09 guard', () => {
 
     expect(mockAddStrand).toHaveBeenCalledTimes(1);
     const config = mockAddStrand.mock.calls[0][0] as {
-      strandRow: { Id: string; MemberPrivateKey: null; Type: string };
+      strandRow: { Id: string; MemberPrivateKey: null; Type: string; FounderOwnerKey: null };
       founder: boolean;
       sAppConfig: { schema: string };
     };

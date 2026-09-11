@@ -135,7 +135,12 @@ export function createStrandDbFactory(node: StrandHost): DbFactory {
 		const hasPeers = (node.getControlNode()?.getConnections().length ?? 0) > 0;
 
 		const strand = await node.addStrand({
-			strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o' },
+			// FounderOwnerKey is new and REQUIRED in cadre-core 0.13.0: the owner key of the machine
+			// that published the row, used to derive "am I the founder?" for a launch that supplies
+			// no explicit flag. We DO supply `founder` explicitly just below, so null is correct
+			// here rather than merely tolerated — and it is provenance, not content, so
+			// `strandRowMismatches` excludes it from the identical-content comparison.
+			strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null },
 			sAppConfig: {
 				id: 'org.votetorrent',
 				version: '1.0.0',

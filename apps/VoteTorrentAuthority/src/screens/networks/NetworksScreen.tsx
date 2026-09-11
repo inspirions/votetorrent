@@ -54,7 +54,10 @@ export default function NetworksScreen() {
 		}
 		try {
 			await node.addStrand({
-				strandRow: { Id: strandId, MemberPrivateKey: null, Type: "o" },
+				// FounderOwnerKey is new and REQUIRED in cadre-core 0.13.0. This is the JOIN path —
+				// we are connecting to a strand someone else published — so this node is not the
+				// founding machine and null is correct, not merely tolerated.
+				strandRow: { Id: strandId, MemberPrivateKey: null, Type: "o", FounderOwnerKey: null },
 				sAppConfig: {
 					id: "org.votetorrent",
 					version: "1.0.0",
