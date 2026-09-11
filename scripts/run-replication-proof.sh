@@ -142,7 +142,12 @@ MARKER_TIMEOUT=180  # seconds to wait for [replication-proof] starting marker
                     #  that killed all 8 prior 38-05 runs need headroom for a Metro
                     #  rebundle race + slow long-lived-emulator relaunch, on top of the
                     #  new relaunch_and_wait retry)
-STRAND_TIMEOUT=240  # seconds to wait for strandId= marker from bootstrap-mode Peer A
+STRAND_TIMEOUT=420  # seconds to wait for strandId= marker from bootstrap-mode Peer A
+                    # (2026-09-11: raised from 240 — measured 216s on a host whose Metro had
+                    #  grown to 1.6 GB over three back-to-back runs, i.e. 90% of the old budget
+                    #  with nothing wrong. The next run stalled past it and died at Step 1,
+                    #  which reads as a runner crash and is not one. Strand materialization is
+                    #  CPU/IO-heavy and degrades with environment age; budget for the bad case.)
                     # (38-07: raised from 120 — was bumped from 60 in 38-04 for the
                     #  always-on relay-reservation poll + slow strand materialization;
                     #  raised again for the same long-lived-emulator slowness that
