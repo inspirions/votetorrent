@@ -228,6 +228,13 @@ async function withControlRetry<T>(
 // bounded wait — never blocks indefinitely, mirrors the strandPeers= polling shape.
 const RELAY_POLL_MAX = 10;
 
+// AUTH_GATE_POLL_MAX: 45 ticks x CONTROL_RETRY_INTERVAL_MS (5 s) = 225 s budget for the owner to
+// accept this peer AND for that membership row to replicate here (section 4b). Sized from run 18's
+// worst measured enrolInvite=ok -> ENROL_ACCEPTED gap (134 s) plus replication headroom, and kept
+// under the harness's 300 s REPL-01 window. Shares CONTROL_RETRY_INTERVAL_MS deliberately: both
+// are waiting on the same convergence, so one knob moves both.
+const AUTH_GATE_POLL_MAX = 45;
+
 /**
  * Boot entry point.  Fire-and-forget from index.js after AppRegistry.registerComponent.
  * No-op (returns immediately) when REPLICATION_PROOF_ENABLED is false or __DEV__ is false.
@@ -443,6 +450,60 @@ export async function runReplicationProof(): Promise<void> {
       }).getStrand?.(PROOF_NETWORK_STORE)?.libp2pNode?.getMultiaddrs?.() ?? [])
         .map((ma) => String(ma))
         .filter((addr) => addr.includes('/p2p-circuit'));
+
+    // ── 4b. WRITE GATE: wait until the OWNER has actually authorized this peer ──────────────
+    // Run 18 (2026-09-11) failed here, and `enrolInvite=ok` is why. That marker means only that
+    // THIS peer dialed the invite; it says nothing about the owner-side `acceptPhone`, which is
+    // the half that confers membership. Measured gap between the two on the n=4 device run:
+    //
+    //     Peer A  enrolInvite=ok 04:02:18   ->  drone ENROL_ACCEPTED 04:03:48   (90 s)
+    //     Peer B  enrolInvite=ok 04:02:04   ->  drone ENROL_ACCEPTED 04:04:18   (134 s)
+    //
+    // Both peers wrote inside that gap (A by 20 s, B by 81 s), so every cohort stream the write
+    // needed was refused — 572 denials of `.../db-p2p/sync/1.0.0` on drone-A alone, reason
+    // "not in the materialized authorized set". The write still reported success (it commits to a
+    // cohort of nobody and says nothing — upstream Optimystic#19), it was never retried, and both
+    // peers ended the run holding only their own row.
+    //
+    // The gate is `listAuthorizedMembers()` containing THIS peer, not the drone's ENROL_ACCEPTED
+    // line, for two reasons:
+    //  1. It is the SAME predicate the drone's `authorizeInboundControlStream` consults, so the
+    //     proof waits on exactly the condition that was refusing it — not on a proxy for it.
+    //  2. It is observable from the phone. Reading the drone's stdout would mean routing a peerId
+    //     back through logcat, which races (see the P2P-11 notes); and the drone accepting is not
+    //     sufficient anyway — the membership row must REPLICATE here before this peer's own
+    //     streams are honored by the cohort.
+    //
+    // Bounded and non-fatal: emitted unconditionally (true on success, false on timeout) like
+    // relayReservation= and peers=, so a run that never gets authorized stays legible as THAT
+    // rather than failing later as a mystery cohort failure. 45 x 5 s = 225 s, which fits inside
+    // the harness's 300 s REPL-01 window (peers= is already logged above, so that window is the
+    // one absorbing this wait) and clears run 18's worst observed gap with margin.
+    let authGateLoggedError = false;
+    // Captured rather than closing over the `let node`, which TS cannot narrow inside a closure.
+    const authNode = node;
+    const isSelfAuthorized = async (): Promise<boolean> => {
+      try {
+        const members = await authNode.listAuthorizedMembers();
+        return members.some((m) => m.peerId === peerId);
+      } catch (err) {
+        // While this peer is a non-member its own control-DB reads are the thing being denied, so
+        // a throw here IS the "not yet" answer, not a defect. Logged once for legibility.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!authGateLoggedError) {
+          authGateLoggedError = true;
+          L('write gate: control DB not readable yet (expected while enrolment converges):', msg);
+        }
+        return false;
+      }
+    };
+    const authGateStart = Date.now();
+    let selfAuthorized = await isSelfAuthorized();
+    for (let i = 0; i < AUTH_GATE_POLL_MAX && !selfAuthorized; i++) {
+      await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
+      selfAuthorized = await isSelfAuthorized();
+    }
+    L('cadreAuthorized=', selfAuthorized, 'after', Math.round((Date.now() - authGateStart) / 1000), 's');
 
     // ── 5. WRITE: create the strand (correct mode now known) + insert the proof row ──────────
     // createStrandDbFactory(node) calls setSchemaPath(['App','main']) internally so bare SQL
