@@ -175,7 +175,7 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
       ).to.match(/^1\.0\.0-beta\./)
     })
 
-    it('resolves ^1.0.0-beta.2 in the root package.json dependency declaration', () => {
+    it('resolves ^1.0.0-beta.3 in the root package.json dependency declaration', () => {
       const parsed = JSON.parse(rootPackageJson) as {
         dependencies?: Record<string, string>
         resolutions?: Record<string, string>
@@ -184,8 +184,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
         parsed.resolutions?.['@optimystic/quereus-plugin-optimystic']
       expect(
         declared,
-        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^1.0.0-beta.2'
-      ).to.equal('^1.0.0-beta.2')
+        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^1.0.0-beta.3'
+      ).to.equal('^1.0.0-beta.3')
     })
 
     it('has zero references to the dead patch locators (0.13.5 plugin-optimystic patch, 0.7.1 cadre-core patch)', () => {

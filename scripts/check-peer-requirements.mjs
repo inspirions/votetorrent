@@ -142,8 +142,16 @@ const execAsync = promisify(exec);
 // which is exactly what a version-keyed allowlist looks like when it is left behind.
 // NOTE the 0.29.0 line itself was never committed: it sat uncommitted in the working
 // tree from 2026-09-10, so the tracked value was still 0.27.0 two bumps later.
+//
+// @optimystic 1.0.0-beta.2 -> 1.0.0-beta.3 bump (2026-09-14): same single mismatch,
+// re-keyed once more. Re-verified rather than assumed: `yarn why
+// @optimystic/quereus-plugin-crypto` resolves every workspace consumer to one
+// 1.0.0-beta.3 copy, and the cause is still the VT-side one described above
+// (packages/attestation-native depends on quereus-plugin-crypto without declaring
+// @quereus/quereus, so it cannot provide that peer). Unlike the two bumps before it,
+// this line was updated in the same commit as the bump.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.0.0-beta.2',
+  '@optimystic/quereus-plugin-crypto@npm:1.0.0-beta.3',
 ]);
 
 // The ✘ marker (U+2718)

@@ -1,8 +1,8 @@
 diff --git a/dist/src/cluster/cluster-repo.js b/dist/src/cluster/cluster-repo.js
-index b8ec0b34703b9ed63787ea27c1c62006d2beb3c4..074e20043b2a86cdab22e754e08be514a654d637 100644
+index 53e8ca382a67130e7770db8efbe72fc5f67758e6..ec43f1154fb197b2592d60c9a624fe07c9ed5565 100644
 --- a/dist/src/cluster/cluster-repo.js
 +++ b/dist/src/cluster/cluster-repo.js
-@@ -187,12 +187,17 @@ export class ClusterMember {
+@@ -191,12 +191,17 @@ export class ClusterMember {
              membershipAdmissionFraction: this.membershipAdmissionFraction,
              allowUnvalidatedSmallCluster: this.allowUnvalidatedSmallCluster
          });
@@ -23,7 +23,7 @@ index b8ec0b34703b9ed63787ea27c1c62006d2beb3c4..074e20043b2a86cdab22e754e08be514
      }
      /**
       * The resolved super-majority threshold this member runs on. Exposed so the composition root can
-@@ -288,7 +293,7 @@ export class ClusterMember {
+@@ -294,7 +299,7 @@ export class ClusterMember {
              // Remove from pending updates after a short delay to allow concurrent calls to see it
              setTimeout(() => {
                  this.pendingUpdates.delete(record.messageHash);
@@ -32,7 +32,7 @@ index b8ec0b34703b9ed63787ea27c1c62006d2beb3c4..074e20043b2a86cdab22e754e08be514
          }
      }
      async processUpdate(record) {
-@@ -2063,7 +2068,7 @@ export class ClusterMember {
+@@ -2139,7 +2144,7 @@ export class ClusterMember {
          let timer;
          const timeout = new Promise((_, reject) => {
              timer = setTimeout(() => reject(new Error(`reconcile for block ${blockId} timed out after ${ReconcileTimeoutMs}ms`)), ReconcileTimeoutMs);
@@ -41,7 +41,7 @@ index b8ec0b34703b9ed63787ea27c1c62006d2beb3c4..074e20043b2a86cdab22e754e08be514
          });
          return Promise.race([promise, timeout]).finally(() => {
              if (timer)
-@@ -2077,10 +2082,18 @@ export class ClusterMember {
+@@ -2153,10 +2158,18 @@ export class ClusterMember {
          if (!record.message.expiration) {
              return {};
          }

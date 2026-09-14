@@ -15,16 +15,16 @@
 		"@libp2p/circuit-relay-v2": "^4",
 		"@libp2p/crypto": "^5",
 		"@libp2p/websockets": "^10",
-		"@optimystic/db-core": "^1.0.0-beta.2",
-		"@optimystic/db-p2p": "^1.0.0-beta.2",
+		"@optimystic/db-core": "^1.0.0-beta.3",
+		"@optimystic/db-p2p": "^1.0.0-beta.3",
 		"@serfab/cadre-core": "0.13.0",
 		"@serfab/strand-proto": "^0.11.0"
 	},
 	"overrides": {
-		"@optimystic/db-p2p": "^1.0.0-beta.2",
-		"@optimystic/db-core": "^1.0.0-beta.2",
-		"@optimystic/quereus-plugin-optimystic": "^1.0.0-beta.2",
-		"@optimystic/quereus-plugin-crypto": "^1.0.0-beta.2",
+		"@optimystic/db-p2p": "^1.0.0-beta.3",
+		"@optimystic/db-core": "^1.0.0-beta.3",
+		"@optimystic/quereus-plugin-optimystic": "^1.0.0-beta.3",
+		"@optimystic/quereus-plugin-crypto": "^1.0.0-beta.3",
 		"@quereus/quereus": "4.18.0",
 		"@quereus/store": "4.18.0",
 		"@quereus/isolation": "4.18.0"
