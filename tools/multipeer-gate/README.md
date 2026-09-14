@@ -27,14 +27,43 @@ node multiproc-gate.mjs    # one OS process per node — nothing shared but the 
 
 Node >= 22. Exit `0` when every leg passes, `1` at the first failure.
 
+A real summary, from `multiproc-gate.mjs` on db-p2p 0.29.0 / cadre-core 0.12.0:
+
 ```
-PASS  L1  control-reachability — drone-A=3 drone-B=1 peer-A=1 peer-B=1 (founder >= 3, each >= 1)
-PASS  L2  relay-reservation — peer-A=2 addr/1 relay peer-B=2 addr/1 relay · all 2 cohort member(s) hold a circuit path to each peer
-PASS  L3  cadre-authorization — peer-A, peer-B authorized
-PASS  L4  strand-cohort — drone-A=2 drone-B=2 peer-A=2 peer-B=2
-PASS  L5  replication — peer-B observed 'gate-row-8uRzAcLQ'
-MULTIPEER GATE: PASS — all 5 legs green.
+──────────────────────────── SUMMARY ────────────────────────────
+ PASS       L0  dependency-provenance
+ PASS       L1  control-reachability
+ PASS       L2  relay-reservation
+ PASS       L3  cadre-authorization
+ PASS       DD  dial-through-relay
+ PASS       L4  strand-cohort
+ PASS       L5  replication
+ PASS       D1  replication-reverse
+ PASS       D2  convergence-all-members
+ PASS       D3  concurrent-writes
+ FAIL       D4  mutation-propagation
+ PASS       D5  isolation-control
+ FIXED      L6  replication-factor
+ FIXED      L7  late-joiner-convergence
+ FIXED      L8  durability
+─────────────────────────────────────────────────────────────────
+MULTIPROC-GATE: FAIL at D4 (mutation-propagation) — 15 leg(s) ran.
+Shape: one OS process per node, all on this host.
 ```
+
+`FIXED` and `KNOWN-RED` mark the standing reproductions and never decide the verdict; only
+`PASS`/`FAIL` legs do. `FIXED` means a leg kept as a known-red has gone green — worth
+checking whether the defect it watches is actually closed.
+
+Before trusting a red data leg, check the instrument:
+
+```bash
+npm run selftest    # the data legs against ONE node — every line must be green
+```
+
+A leg that has only ever been seen red is an untested assertion, not evidence. The
+self-test removes replication from the picture so a red line there means the harness is
+broken and any gate result depending on that leg should be discarded.
 
 To test a candidate build, point the dependency at it (`npm install
 @optimystic/db-p2p@<version>` / `@serfab/cadre-core@<version>`) and re-run.
@@ -268,8 +297,10 @@ n=4 device symptom, where both peers write and read cleanly and neither sees the
 row — and it is not deterministic: D1 passed on run 1 and failed on run 2 of an unchanged
 tree, so the direction is not merely unsupported, it is unreliable.
 
-**Two peers writing at once is rejected outright.** Cross-process, with each node in its
-own OS process, `D3` fails with a named upstream error:
+**The write path breaks under concurrency and mutation — intermittently, and in more than
+one way.** These are the only legs that ever issue two writes at the same instant, or change
+and remove a row rather than adding one. Across repeated runs of an unchanged tree they
+produced three distinct named failures:
 
 ```
 FAIL  D3  concurrent-writes — a simultaneous write was rejected — peer-B:
@@ -278,8 +309,6 @@ FAIL  D3  concurrent-writes — a simultaneous write was rejected — peer-B:
           confirmed committed at rev 3 and refreshing did not close the gap
 ```
 
-In one process the same leg fails differently, and the census is the point:
-
 ```
 FAIL  D3  concurrent-writes — after two simultaneous writes: peer-B lacks
           '<run>-concurrent-a'='v-peer-A'. Census —
@@ -287,15 +316,34 @@ FAIL  D3  concurrent-writes — after two simultaneous writes: peer-B lacks
           concurrent-b: drone-A='v-peer-B' drone-B='v-peer-B' peer-A='v-peer-B' peer-B='v-peer-B'
 ```
 
-Both drones and `peer-A` hold `concurrent-a`. The only member that never received it is
-`peer-B` — the node that was writing at the same instant. So the two shapes disagree about
-the symptom (a silent non-delivery to the concurrent writer, versus an outright rejection)
-and agree that simultaneous writes are not handled.
+```
+FAIL  D4  mutation-propagation — peer-A could not seed the row: Some peers did not
+          complete: <peer>[blocks:1](in-flight) cause=Transaction rejected by validators
+          (1/2 rejected): content-digest-mismatch, <peer>[blocks:1](in-flight)
+          cause=The stream has been reset
+```
 
-Every write the gate had ever issued before this leg was serialized by the harness, so the
-collection was only ever mutated by one writer at a time — the one case this cannot appear
-in. A presence-only assertion would also have missed it: the leg checks the *value* each
-writer wrote, not merely that a row exists.
+The second is the one to read closely. Both drones **and** `peer-A` hold `concurrent-a`;
+the only member that never received it is `peer-B`, the node that was writing at the same
+instant. A presence-only assertion would have missed it too — the leg checks the *value*
+each writer wrote, not merely that a row exists.
+
+`D3` has also passed, which matters: these are real assertions that go green on a good run,
+not permanently-red markers. Every write the gate issued before these legs existed was
+serialized by the harness, so the collection was only ever mutated by one writer at a time —
+the one case none of this can appear in.
+
+**Across 5 in-process and 3 cross-process runs of an unchanged tree**, one run was green
+end to end (every leg including D1-D5), one failed at `L3` on the pre-existing ceremony
+flake, and the rest failed at one of `D1`, `D3` or `D4`. So the write path is not simply
+broken — it is unreliable, which is the harder thing to see and the reason these legs are
+worth having in the gate rather than in a one-off script.
+
+Every new leg has been observed both green and red, and the leg logic itself is checked
+separately by `npm run selftest`, which runs the data legs against a single node where
+convergence cannot be the variable. That distinction had to be made: `D4` failed on every
+multi-peer run it reached, and nothing in those runs separated "update and delete do not
+converge" from "this leg's SQL is wrong". It is the latter that the self-test rules out.
 
 **The standing reproductions have flipped on 0.29.0.** `L6` (replication factor 4/4, 0 of
 24 blocks singly held), `L7` (late joiner reads the row after joining) and `L8` (data
