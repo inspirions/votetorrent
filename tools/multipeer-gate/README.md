@@ -13,13 +13,19 @@ regression test.
 
 ## Run it
 
+There are **two gates**. They run the same legs over the same node options; they differ
+only in where the nodes live, and that difference is itself a measurement — see
+[Two shapes](#two-shapes-one-process-or-one-process-per-node).
+
 ```bash
 cd tools/multipeer-gate
 npm install
-node multipeer-gate.mjs
+
+node multipeer-gate.mjs    # all nodes in ONE process
+node multiproc-gate.mjs    # one OS process per node — nothing shared but the host
 ```
 
-Node >= 22. Exit `0` when all five legs pass, `1` at the first failure.
+Node >= 22. Exit `0` when every leg passes, `1` at the first failure.
 
 ```
 PASS  L1  control-reachability — drone-A=3 drone-B=1 peer-A=1 peer-B=1 (founder >= 3, each >= 1)
@@ -57,11 +63,59 @@ than a downstream symptom.
 
 | leg | asserts |
 |---|---|
+| **L0** dependency-provenance | the installed tree is the tree `package.json` declares, resolved once |
 | **L1** control-reachability | every node holds >= 1 control connection; the founder sees all of them |
-| **L2** relay-reservation | each relay-only peer holds >= 1 reservation, counted by **distinct relay identity**; and every cohort member holds a circuit path to every peer |
+| **L2** relay-reservation | each relay-only peer holds >= 1 reservation, counted by **distinct relay identity** |
 | **L3** cadre-authorization | the relay-only peers are **authorized cadre members** |
+| **DD** dial-through-relay | every drone holds a circuit address for every peer **and actually dials it** — reported as fresh or reused |
 | **L4** strand-cohort | every strand node assembles a cohort larger than itself |
 | **L5** replication | `peer-A` writes a row; `peer-B` reads it back |
+| **D1** replication-reverse | `peer-B` writes a row; `peer-A` reads it back |
+| **D2** convergence-all | **every** member reads **every** row — not just the one sibling L5 samples |
+| **D3** concurrent-writes | both peers write at the same instant and neither write is lost |
+| **D4** mutation-propagation | an `update` and a `delete` converge, not only an `insert` |
+| **D5** isolation-control | a non-member with a **live database of its own** sees none of it |
+
+Then three **standing reproductions** — recorded, never fatal, so a fix can be verified by
+watching one flip green:
+
+| leg | asserts |
+|---|---|
+| **L6** replication-factor | the row's block is held by >= `CLUSTER_SIZE` nodes, not just one |
+| **L7** late-joiner | a member arriving **after** the write can still read it |
+| **L8** durability | the data survives losing a node that held it |
+
+### Why the D legs exist
+
+`L5` writes one row on `peer-A` and reads it on `peer-B`. One direction, one row, one
+reader, one shot — and until these legs existed it was the **only** data assertion in the
+gate. Each D leg is a property a distributed database has to hold that `L5` passes without
+ever testing:
+
+| `L5` still passes if... | caught by |
+|---|---|
+| the path only works `A -> B` | **D1** |
+| only the sampled sibling ever converges | **D2** |
+| a second, concurrent write is silently lost | **D3** |
+| rows can be inserted but not changed or removed | **D4** |
+| the reader never needed the network at all | **D5** |
+
+This is not hypothetical. The n=4 device runs fail with **both peers writing and reading
+cleanly while neither sees the other's row** — exactly D1/D2, and invisible to L5 in
+whichever direction it happens to sample.
+
+**`DD` runs after `L3`, and the order is the assertion.** Before enrolment the control
+network is a star — `L1` says so in as many words, and the mesh only widens once
+`reconcileControlCohort` runs, which is gated on membership. An earlier reachability check
+tests the harness's own sequence rather than the system: when this check lived inside `L2`
+it passed in one process, where the mesh happened to widen in time, and failed with one
+process per node, where it did not.
+
+`D5` is the control arm and always runs, even after a failure above it. It is an outsider
+in its own party, sharing the process (or the host) with the cohort and sharing no
+membership with it. It first writes and reads back **its own** row — an outsider whose
+database cannot be queried would report "sees nothing" forever and vouch for nothing —
+and then must see none of the cohort's.
 
 ### Why L3 exists
 
@@ -88,6 +142,58 @@ getIdentityOwnerKey → trustOwnerKeys → ensureOwnerKey → initializeSeedBoot
 createInvite → dialInvite → acceptPhone                                           (per joiner)
 ```
 
+## Two shapes: one process, or one process per node
+
+`multipeer-gate.mjs` builds all four nodes inside a single Node process. That is how this
+gate started, it localizes real blockers, and it stays the fast default. But there is a
+class of claim it cannot support, because in one process the nodes share a heap, a module
+registry, a timer wheel and a single libp2p event loop:
+
+- **"`peer-B` read the row `peer-A` wrote"** does not establish that anything was
+  serialized, framed, or put on a socket. Two nodes in one heap can satisfy every data
+  assertion here with no network involved, and nothing in a green run tells the two apart.
+  D5 is the control for this; running the same legs across processes is the proof.
+- **A stream that is never opened cannot fail to open.** The n=4 device runs die during
+  block transfer on `UnexpectedEOFError` and then `NoValidAddressesError` — failures of a
+  real dial between real processes, which an in-process cohort never performs.
+- **One event loop hides scheduling.** Four nodes taking cooperative turns is not four
+  nodes competing for a CPU.
+
+`multiproc-gate.mjs` runs each node as its own `peer-agent.mjs` process, addressed over a
+newline-delimited JSON channel on stdio. Every byte between two nodes then crosses a real
+socket, because there is no other route. The legs are the *same source files*
+(`lib/core-legs.mjs`, `lib/db-legs.mjs`) and the nodes are built from the *same options*
+(`lib/topology.mjs`), so a difference in outcome is a difference in **shape** — which is
+the entire point of having both.
+
+### Going host-to-host
+
+The control channel is a byte pipe, so "another process" and "another machine" are one
+code path. Point any node's agent somewhere else:
+
+```bash
+SPAWN_PEER_A='ssh bench-2 node /opt/multipeer-gate/peer-agent.mjs' \
+SPAWN_PEER_B='ssh bench-3 node /opt/multipeer-gate/peer-agent.mjs' \
+  node multiproc-gate.mjs
+```
+
+`SPAWN_<NAME>` upper-cases the node name and replaces `-` with `_`
+(`peer-A` -> `SPAWN_PEER_A`). The far end needs this package installed and a route back for
+the libp2p sockets; the gate tunnels **control**, never traffic. That adds a real NIC and a
+real NAT, and the summary names the shape so two runs cannot be quoted interchangeably.
+
+### What each shape is worth
+
+| shape | removes | still absent |
+|---|---|---|
+| one process | nothing | shared heap, one event loop, no sockets between nodes |
+| one process per node | the shared heap; nodes must use sockets | real NIC, NAT, mobile scheduler, Hermes |
+| processes on separate hosts | loopback; adds real routing and NAT | mobile scheduler, radio, Hermes |
+| the app on a device | — | — |
+
+**None of the three is a device run.** Say which one you ran; the summary prints it for
+exactly that reason.
+
 ## Knobs
 
 All optional.
@@ -100,7 +206,11 @@ All optional.
 | `ENROLL=0\|1` | `1` | run the enrolment ceremony; `0` observes the un-enrolled failure |
 | `ENROLL_ATTEMPTS=N` | `5` | bounded retries for the ceremony |
 | `AUTH_TIMEOUT_MS=N` | `120000` | how long L3 waits for the control database to become readable after the enrolment write. Separate from the ceremony's per-dial timeout |
+| `DB_LEGS=0\|1` | `1` | run the distributed-database legs D1-D5 |
 | `TIMEOUT_SCALE=N` | `1` | multiply every timeout on a slow machine |
+| `SKIP_PREFLIGHT=1` | off | run against a tree that does **not** match `package.json`, deliberately. Recorded in the summary, so such a result cannot be quoted against the declared versions |
+| `RPC_TIMEOUT_MS=N` | `180000` | *(multiproc only)* how long an agent may take to answer one control request |
+| `SPAWN_<NODE>=cmd` | local | *(multiproc only)* run that node's agent elsewhere, e.g. over `ssh` |
 | `VERBOSE=1` | off | per-poll progress |
 
 `DRONES` is a **discriminator**, not decoration. Only storage-profile nodes serve blocks
@@ -129,6 +239,81 @@ Two more traps worth knowing when reading raw logs:
   relay in three IP forms. L2 reports `N addr/M relay` for exactly this reason.
 
 ## Verified behaviour
+
+### 2026-09-14 — what the new legs found
+
+Measured on `@optimystic/db-p2p@0.29.0` / `@serfab/cadre-core@0.12.0`, macOS, Node 22.
+
+**The declared dependency set is broken, and nothing noticed.** `package.json` declares
+`@optimystic/db-p2p@^1.0.0-beta.3` and `@serfab/cadre-core@0.13.0`; the tree installed in
+this directory was `0.29.0` and `0.12.0`, a whole major behind. `.gitignore` hides
+`package-lock.json`, so nothing in the repository records which tree any past run used.
+Two baselines taken the same day disagreed about which leg failed first for exactly that
+reason. On the declared set, a four-node run with the relay-only constraint *removed* still
+never replicates: `acceptPhone` fails with `collection default/OwnerKey holds committed
+revision 1, but its header block read as absent`, membership never takes, and a row written
+on one node is never seen by another. **L0 exists so this cannot happen silently again.**
+
+**L1-L5 can be entirely green while replication is broken.** In-process run 2:
+
+```
+PASS  L0 L1 L2 L3 DD L4 L5          <- the whole of the old gate's verdict
+FAIL  D1  replication-reverse — peer-B wrote 'gate-45ebc9c3-reverse' and peer-A never saw
+          it in 60000ms (peer-A=absent peer-B='written-by-peer-B')
+```
+
+`L5` had just passed on the *same pair of peers* in the opposite direction. The old gate
+would have reported `PASS — all 5 legs green` on that run. This is the same shape as the
+n=4 device symptom, where both peers write and read cleanly and neither sees the other's
+row — and it is not deterministic: D1 passed on run 1 and failed on run 2 of an unchanged
+tree, so the direction is not merely unsupported, it is unreliable.
+
+**Two peers writing at once is rejected outright.** Cross-process, with each node in its
+own OS process, `D3` fails with a named upstream error:
+
+```
+FAIL  D3  concurrent-writes — a simultaneous write was rejected — peer-B:
+          SyncRevisionStalledError: sync for collection default/GateRow stopped after 2
+          attempts: this client holds rev 2 and would request rev 3, but block <id> is
+          confirmed committed at rev 3 and refreshing did not close the gap
+```
+
+In one process the same leg fails differently, and the census is the point:
+
+```
+FAIL  D3  concurrent-writes — after two simultaneous writes: peer-B lacks
+          '<run>-concurrent-a'='v-peer-A'. Census —
+          concurrent-a: drone-A='v-peer-A' drone-B='v-peer-A' peer-A='v-peer-A' peer-B=absent
+          concurrent-b: drone-A='v-peer-B' drone-B='v-peer-B' peer-A='v-peer-B' peer-B='v-peer-B'
+```
+
+Both drones and `peer-A` hold `concurrent-a`. The only member that never received it is
+`peer-B` — the node that was writing at the same instant. So the two shapes disagree about
+the symptom (a silent non-delivery to the concurrent writer, versus an outright rejection)
+and agree that simultaneous writes are not handled.
+
+Every write the gate had ever issued before this leg was serialized by the harness, so the
+collection was only ever mutated by one writer at a time — the one case this cannot appear
+in. A presence-only assertion would also have missed it: the leg checks the *value* each
+writer wrote, not merely that a row exists.
+
+**The standing reproductions have flipped on 0.29.0.** `L6` (replication factor 4/4, 0 of
+24 blocks singly held), `L7` (late joiner reads the row after joining) and `L8` (data
+survives killing a holder's OS process, 3/4 survivors still hold it) all report `FIXED`.
+Optimystic#15 is closed on this stack; the late-joiner deadlock documented against 0.24.2
+does not reproduce.
+
+**An ordering flaw in this harness, found by the cross-process shape.** The reachability
+check used to live in `L2`, before enrolment. In one process it passed; with one process
+per node it failed — `drone-B` held no circuit address for either peer, and with
+`PEER_DIRECT=1` the dial itself raised
+`NoValidAddressesError: The dial request has no valid addresses for peer`. That was the
+harness, not the system: the control mesh is a star until membership lets it widen, so the
+check was asserting a precondition the design does not promise at that point, and its
+in-process pass was luck. Moved to `DD`, after `L3`, both shapes pass. A 4x timeout scale
+did not change the old result, which is what ruled out simple latency.
+
+### 2026-09-03 — the relay/authorization legs
 
 Re-measured 2026-09-03 on `@optimystic/db-p2p@0.27.0` / `@serfab/cadre-core@0.12.0`, macOS, Node 22:
 
