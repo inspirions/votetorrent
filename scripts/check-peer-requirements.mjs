@@ -133,8 +133,17 @@ const execAsync = promisify(exec);
 // is unchanged and still VT-side: packages/attestation-native depends on
 // quereus-plugin-crypto without declaring @quereus/quereus itself, so it cannot
 // provide that peer.
+//
+// @optimystic 0.29.0 -> 1.0.0-beta.2 bump (2026-09-11, commit eb5302af): same single
+// mismatch, re-keyed again. This value went stale the moment that bump landed and
+// stayed stale because nothing re-runs this guard on a dependency change -- the
+// checker reported the descriptor as `disappeared` (the allowlisted 0.29.0 entry no
+// longer exists) AND as `unexpected` (the real 1.0.0-beta.2 one is not allowlisted),
+// which is exactly what a version-keyed allowlist looks like when it is left behind.
+// NOTE the 0.29.0 line itself was never committed: it sat uncommitted in the working
+// tree from 2026-09-10, so the tracked value was still 0.27.0 two bumps later.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:0.27.0',
+  '@optimystic/quereus-plugin-crypto@npm:1.0.0-beta.2',
 ]);
 
 // The ✘ marker (U+2718)
