@@ -238,15 +238,34 @@ const RELAY_POLL_MAX = 10;
 // run was recorded as "marker never emitted" when the marker did arrive — the harness clock
 // failed it, not the product.
 //
-// A deadline cannot drift when the per-call timeout changes; a tick count silently can. Sized so
-// the gate plus the strand build (~90 s observed) plus STRAND_PEER_POLL_MAX still clear the 300 s
-// window with room to spare.
+// A deadline cannot drift when the per-call timeout changes; a tick count silently can.
+//
+// The sizing premise this comment used to carry — "the gate plus the strand build (~90 s observed)
+// plus STRAND_PEER_POLL_MAX still clear the 300 s window with room to spare" — was FALSE, and run
+// 25 is the run it cost. The ~90 s came from run 24's Peer A, which is the duration of a strand
+// build that FAILED; the healthy builds in the same two runs measured 63 s and 162 s. At 162 s the
+// arithmetic is 90 + 162 + 25 = 277 s plus ~10 s of boot, i.e. the window is already spent, and
+// Peer A was killed 215 s into an acquire its sibling had needed 162 s for.
+//
+// The gate no longer has to clear that window at all: REPL-01 now starts its strand budget at the
+// `controlRelayAddrs=` marker (see run-replication-proof.sh), so this budget and the strand
+// budget are consumed in series rather than out of one pot. Kept at 90 s because that is what the
+// gate itself is worth — it is a convergence sample, not a wait for something that will arrive.
 const AUTH_GATE_BUDGET_MS = 90_000;
 
 // AUTH_GATE_CALL_TIMEOUT_MS: deadline for ONE listAuthorizedMembers() call. Deliberately shorter
 // than CONTROL_RETRY_INTERVAL_MS so a stalled call cannot outlive its own poll slot and drag the
 // budget past what the harness allows.
 const AUTH_GATE_CALL_TIMEOUT_MS = 4000;
+
+// ACQUIRE_HEARTBEAT_MS: cadence of the `acquire pending` marker emitted while the strand acquire
+// is in flight. The acquire is the longest single operation in the proof and, until now, the only
+// one that logged NOTHING between its start (`controlRelayAddrs=`) and its end (`strandId=`).
+// Run 25 died in that silence: the harness killed Peer A mid-acquire, the runner had thrown
+// nothing, and the only surviving evidence that the app was still working was ART's GC lines in
+// logcat — so the run was written up as a hang it never demonstrated. A heartbeat makes "slow"
+// and "stuck" two different observations instead of the same silence.
+const ACQUIRE_HEARTBEAT_MS = 15_000;
 
 /**
  * One libp2p listen failure per line, stack frames stripped.
@@ -640,11 +659,25 @@ export async function runReplicationProof(): Promise<void> {
       // in bootstrap mode and the strandId= marker never appeared inside the harness's 240s
       // window, so the run died at Step 1. Fail fast there exactly as before; retry only in the
       // networked run, which is the case the budget exists for.
-      strandDb = await withControlRetry(
-        'write phase acquire:',
-        () => strandDbFactory(PROOF_NETWORK_STORE),
-        peerCount > 0 ? CONTROL_RETRY_MAX : 1,
-      );
+      //
+      // Heartbeat the acquire (see ACQUIRE_HEARTBEAT_MS). `acquire settled` is emitted from a
+      // `finally`, so a throw reports its duration too — the failure path is exactly where the
+      // number is worth having.
+      const acquireStart = Date.now();
+      const acquireElapsedS = () => Math.round((Date.now() - acquireStart) / 1000);
+      const acquireHeartbeat = setInterval(() => {
+        L('acquire pending', acquireElapsedS(), 's');
+      }, ACQUIRE_HEARTBEAT_MS);
+      try {
+        strandDb = await withControlRetry(
+          'write phase acquire:',
+          () => strandDbFactory(PROOF_NETWORK_STORE),
+          peerCount > 0 ? CONTROL_RETRY_MAX : 1,
+        );
+      } finally {
+        clearInterval(acquireHeartbeat);
+        L('acquire settled', acquireElapsedS(), 's');
+      }
 
       // Log OQ3 handshake marker before the write so the harness can capture it.
       L('strandId=', PROOF_NETWORK_STORE);

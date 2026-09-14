@@ -118,6 +118,31 @@ relaunch_and_wait() {
   echo "[run-replication-proof] relaunch_and_wait: both attempts missed '${what}' on ${serial} — giving up" >&2
   return 0
 }
+
+# read_logcat_line_now PATTERN SERIAL [TRIES]
+#
+# Bounded 5s-interval POLL of the logcat buffer (`logcat -d`), returning the first match
+# immediately. Use this — never wait_for_logcat_line — for any marker the runner emits ONCE
+# PER BOOT.
+#
+# wait_for_logcat_line streams (`adb logcat -e`), and its documented IN-19 latency is that
+# `head` exits on the first match while the command substitution only returns when adb dies —
+# via SIGPIPE on the NEXT matching write, or at the end of the window. A once-per-boot marker
+# has no next matching write, so a SUCCESSFUL capture still burns the entire timeout. That is
+# free when the window is 10s and ruinous when it is 300s: the D-04 captures below sat on two
+# such windows back to back, 600s of dead wall-clock indistinguishable from a stalled device.
+#
+# Echoes the matched line (empty if none arrived within TRIES*5s), same contract as
+# wait_for_logcat_line.
+read_logcat_line_now() {
+  local pattern="$1" serial="$2" tries="${3:-24}" i out
+  for i in $(seq 1 "${tries}"); do
+    out=$(adb -s "${serial}" logcat -d 2>/dev/null | grep -v '^--------- ' | grep -E "${pattern}" | head -1)
+    if [ -n "${out}" ]; then printf '%s\n' "${out}"; return 0; fi
+    sleep 5
+  done
+  return 0
+}
 # replication-proof logs via multi-arg console.log('[replication-proof]', ...) —
 # RN logcat renders each arg quoted and comma-separated. Patterns tolerate the
 # quote/comma between tag and message (same as run-dial-probe.sh).
@@ -135,6 +160,12 @@ RELAY_READY_MARKER='\[replication-proof\].*relayReservation='
 # multiaddrs actually reserved with each known drone — so a wall-#8-class per-drone
 # reservation asymmetry is visible from run #1 without waiting for a FAIL verdict.
 RELAY_ADDRS_PER_DRONE_MARKER='\[replication-proof\].*relayAddrsPerDrone='
+# REPL-01 phase split: `controlRelayAddrs=` is the LAST line the runner emits before the strand
+# acquire and `strandPeers=` the first one after it, so this marker is where the strand budget
+# starts. Before the split, REPL-01's single window opened at the `peers=` read and the ~90s auth
+# gate was charged against it — run 25 killed Peer A 215s into an acquire its sibling completed in
+# 162s, and the run was recorded as a strand-wiring failure that had not occurred.
+ACQUIRE_START_MARKER='\[replication-proof\].*controlRelayAddrs='
 LOGCAT_TIMEOUT=180  # seconds: longer than dial-probe to account for two emulators +
                     # replication latency (A writes → drone → B reads)
 MARKER_TIMEOUT=180  # seconds to wait for [replication-proof] starting marker
@@ -153,8 +184,16 @@ STRAND_TIMEOUT=420  # seconds to wait for strandId= marker from bootstrap-mode P
                     #  raised again for the same long-lived-emulator slowness that
                     #  stalled the D-05 checkpoint in 38-05)
 DRONE_READY_TIMEOUT=60  # seconds to wait for drone READY line (38-07: raised from 30)
-STRAND_PEERS_TIMEOUT=300  # seconds to wait for the REPL-01 strandPeers= marker (38-14:
-                    # dedicated timeout, raised above LOGCAT_TIMEOUT=180 — 38-13 observed
+ACQUIRE_START_TIMEOUT=180  # seconds to reach the ACQUIRE_START_MARKER (controlRelayAddrs=) on
+                    # Peer A. Covers boot + enrolment + the runner's own AUTH_GATE_BUDGET_MS (90s)
+                    # with margin. Polled, so overshooting this costs nothing on a healthy run.
+STRAND_PEERS_TIMEOUT=420  # seconds to wait for the REPL-01 strandPeers= marker, measured FROM
+                    # ACQUIRE_START_MARKER rather than from the peers= read — the auth gate is no
+                    # longer charged against it. Sized to STRAND_TIMEOUT, which budgets the same
+                    # operation (strand materialization) in Step 1 and was itself raised to 420
+                    # after that build measured 216s on an aged host. Measured here: 63s and 90s
+                    # in run 24, 162s in run 25 — the spread is why 300s was not enough.
+                    # (38-14: dedicated timeout, raised above LOGCAT_TIMEOUT=180 — 38-13 observed
                     # the write-phase strandPeers= emit at ~183s, ~3s AFTER the shared
                     # LOGCAT_TIMEOUT expired, so the script died before reaching the
                     # both-peer verdict poll and the trailing D-08 drone-side log capture)
@@ -704,16 +743,6 @@ echo "[run-replication-proof] D-05 relaunch start marker seen: ${D05_MARKER_LINE
 #
 # Read the buffer directly (`logcat -d`), bounded-retry for the case where the relaunched app has
 # not reached the line yet. Same extraction, same comparison, no window to outlive.
-read_logcat_line_now() {
-  local pattern="$1" serial="$2" tries="${3:-24}" i out
-  for i in $(seq 1 "${tries}"); do
-    out=$(adb -s "${serial}" logcat -d 2>/dev/null | grep -v '^--------- ' | grep -E "${pattern}" | head -1)
-    if [ -n "${out}" ]; then printf '%s\n' "${out}"; return 0; fi
-    sleep 5
-  done
-  return 0
-}
-
 echo "[run-replication-proof] D-05: capturing peerId on Peer A after force-stop relaunch ..."
 PEER_ID_LINE_AFTER=$(read_logcat_line_now "${PEER_ID_MARKER}" "emulator-5554")
 if [ -z "${PEER_ID_LINE_AFTER}" ]; then
@@ -757,10 +786,27 @@ echo "[run-replication-proof] D-06 PASS: peers=${N} (>= 1)"
 # to the verdict poll (the both-peer REPLICATION VERDICT is authoritative on PASS/FAIL).
 # A never-emitted marker (wiring broken) IS a hard FAIL + exit 1 (Pitfall 2 fast-fail).
 STRAND_PEERS_MARKER='\[replication-proof\].*strandPeers='
-echo "[run-replication-proof] REPL-01: waiting for strandPeers= marker on Peer A (timeout ${STRAND_PEERS_TIMEOUT}s) ..."
-STRAND_PEERS_LINE=$(wait_for_logcat_line "${STRAND_PEERS_MARKER}" "${STRAND_PEERS_TIMEOUT}" "[run-replication-proof]" "strandPeers" "-s emulator-5554")
+# Phase 1 — reach the START of the acquire. Until this marker lands the runner is still in boot,
+# enrolment and the auth gate, none of which is strand work; charging their cost to the strand
+# budget is what made run 25 unreadable.
+echo "[run-replication-proof] REPL-01: waiting for the acquire-start marker (controlRelayAddrs=) on Peer A (timeout ${ACQUIRE_START_TIMEOUT}s) ..."
+ACQUIRE_START_LINE=$(read_logcat_line_now "${ACQUIRE_START_MARKER}" "emulator-5554" $((ACQUIRE_START_TIMEOUT / 5)))
+if [ -z "${ACQUIRE_START_LINE}" ]; then
+  echo "[run-replication-proof] FAIL: controlRelayAddrs= marker never emitted on Peer A within ${ACQUIRE_START_TIMEOUT}s — the runner never reached the strand acquire (REPL-01 phase 1); the failure is upstream of strand wiring, read the auth gate markers" >&2
+  exit 1
+fi
+echo "[run-replication-proof] REPL-01: acquire started on Peer A: ${ACQUIRE_START_LINE}"
+
+# Phase 2 — the acquire itself, budgeted from here. Polled, not streamed: strandPeers= is a
+# once-per-boot marker and wait_for_logcat_line would burn the full 420s even on success (IN-19,
+# see read_logcat_line_now). The runner heartbeats `acquire pending <n> s` throughout, so a run
+# that spends this budget can be read afterwards as slow-but-alive or genuinely stuck.
+echo "[run-replication-proof] REPL-01: waiting for strandPeers= marker on Peer A (timeout ${STRAND_PEERS_TIMEOUT}s, measured from acquire start) ..."
+STRAND_PEERS_LINE=$(read_logcat_line_now "${STRAND_PEERS_MARKER}" "emulator-5554" $((STRAND_PEERS_TIMEOUT / 5)))
 if [ -z "${STRAND_PEERS_LINE}" ]; then
-  echo "[run-replication-proof] FAIL: strandPeers= marker never emitted on Peer A — strand wiring broken (REPL-01); check STRAND_BOOTSTRAP_ADDR injection" >&2
+  echo "[run-replication-proof] FAIL: strandPeers= marker never emitted on Peer A within ${STRAND_PEERS_TIMEOUT}s of the acquire starting (REPL-01 phase 2)" >&2
+  echo "[run-replication-proof] --- acquire heartbeat on Peer A (was it alive?) ---" >&2
+  adb -s emulator-5554 logcat -d 2>/dev/null | grep -E 'acquire pending|acquire settled|write phase' | tail -10 >&2
   exit 1
 fi
 SP=$(extract_marker_value "${STRAND_PEERS_LINE}" "strandPeers")
@@ -791,14 +837,14 @@ fi
 # does NOT gate the run (warn-and-continue on a miss), since the both-peer REPLICATION
 # VERDICT below remains the authoritative PASS/FAIL signal.
 echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on emulator-5554 (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
-RELAY_ADDRS_LINE_A=$(wait_for_logcat_line "${RELAY_ADDRS_PER_DRONE_MARKER}" "${RELAY_ADDRS_PER_DRONE_TIMEOUT}" "[run-replication-proof]" "relay-addrs-per-drone-A" "-s emulator-5554")
+RELAY_ADDRS_LINE_A=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "emulator-5554" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
 if [ -n "${RELAY_ADDRS_LINE_A}" ]; then
   echo "[run-replication-proof] D-04: relayAddrsPerDrone= on emulator-5554: ${RELAY_ADDRS_LINE_A}"
 else
   echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on emulator-5554 (diagnostic only, not gating)" >&2
 fi
 echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on emulator-5556 (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
-RELAY_ADDRS_LINE_B=$(wait_for_logcat_line "${RELAY_ADDRS_PER_DRONE_MARKER}" "${RELAY_ADDRS_PER_DRONE_TIMEOUT}" "[run-replication-proof]" "relay-addrs-per-drone-B" "-s emulator-5556")
+RELAY_ADDRS_LINE_B=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "emulator-5556" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
 if [ -n "${RELAY_ADDRS_LINE_B}" ]; then
   echo "[run-replication-proof] D-04: relayAddrsPerDrone= on emulator-5556: ${RELAY_ADDRS_LINE_B}"
 else
