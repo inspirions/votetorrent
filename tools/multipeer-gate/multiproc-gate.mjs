@@ -84,8 +84,8 @@ async function boot(name, role, args) {
     role, clusterSize: CLUSTER_SIZE, strandId: STRAND_ID, name, ...args,
   });
   handle.setPeerId(peerId);
-  console.log(`[multiproc-gate] ${name} up   peerId=${peerId}  ` +
-    `[${spec.remote ? `REMOTE via ${spec.source}` : `local pid`} ${spec.remote ? '' : client.child.pid}]` +
+  const where = spec.remote ? `REMOTE via ${spec.source}` : `local pid ${client.child.pid}`;
+  console.log(`[multiproc-gate] ${name} up   peerId=${peerId}  [${where}]` +
     (role === 'peer' ? ` (relay-only, ${args.relayAddrs?.length ?? 0} relay(s))` : ''));
   return handle;
 }

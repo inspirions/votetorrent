@@ -17,6 +17,7 @@
 	"dependencies": {
 		"@libp2p/circuit-relay-v2": "^4",
 		"@libp2p/crypto": "^5",
+		"@libp2p/peer-id": "^6",
 		"@libp2p/websockets": "^10",
 		"@optimystic/db-core": "^1.0.0-beta.3",
 		"@optimystic/db-p2p": "^1.0.0-beta.3",
