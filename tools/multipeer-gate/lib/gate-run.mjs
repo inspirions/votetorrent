@@ -42,7 +42,7 @@ export function loopbackWs(addrs) {
   return addrs.find((a) => a.includes('/ip4/127.0.0.1/') && a.includes('/ws')) ?? addrs[0] ?? '';
 }
 
-export async function runGate({ tag, kind, fabric, shapeNote }) {
+export async function runGate({ tag, kind, fabric }) {
   const runId = `gate-${randomUUID().slice(0, 8)}`;
   const ctx = createContext({ tag, kind, table: GATE_TABLE, runId });
   const { L } = ctx;
