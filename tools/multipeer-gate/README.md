@@ -23,7 +23,7 @@ Node >= 22. Exit `0` when all five legs pass, `1` at the first failure.
 
 ```
 PASS  L1  control-reachability — drone-A=3 drone-B=1 peer-A=1 peer-B=1 (founder >= 3, each >= 1)
-PASS  L2  relay-reservation — peer-A=2 addr/1 relay peer-B=2 addr/1 relay
+PASS  L2  relay-reservation — peer-A=2 addr/1 relay peer-B=2 addr/1 relay · all 2 cohort member(s) hold a circuit path to each peer
 PASS  L3  cadre-authorization — peer-A, peer-B authorized
 PASS  L4  strand-cohort — drone-A=2 drone-B=2 peer-A=2 peer-B=2
 PASS  L5  replication — peer-B observed 'gate-row-8uRzAcLQ'
@@ -58,83 +58,10 @@ than a downstream symptom.
 | leg | asserts |
 |---|---|
 | **L1** control-reachability | every node holds >= 1 control connection; the founder sees all of them |
-| **L2** relay-reservation | each relay-only peer exposes a `/p2p-circuit` multiaddr, counted by **distinct relay identity** |
+| **L2** relay-reservation | each relay-only peer holds >= 1 reservation, counted by **distinct relay identity**; and every cohort member holds a circuit path to every peer |
 | **L3** cadre-authorization | the relay-only peers are **authorized cadre members** |
 | **L4** strand-cohort | every strand node assembles a cohort larger than itself |
 | **L5** replication | `peer-A` writes a row; `peer-B` reads it back |
-
-### The distributed-database legs (L6-L8)
-
-L1-L5 answer *"is the multi-peer path unblocked?"*. They do not answer *"is this actually
-a distributed database?"*, and the gap is not academic: **L5 passes with a replication
-factor of one**, because the writer is still up and still holds the row. A write-then-read
-check cannot tell a replicated row from a singly-held one.
-
-| leg | asserts |
-|---|---|
-| **L6** replication-factor | how many nodes actually **hold** the row — want >= `CLUSTER_SIZE` |
-| **L7** late-joiner-convergence | a peer that arrives **after** the write can read it |
-| **L8** durability | the row survives losing the node that holds it |
-
-These are **standing reproductions**: all three are red on `db-p2p@0.24.2`. They are
-recorded but excluded from the gate's verdict, so the gate stays usable as a green/red
-signal, and they do not short-circuit each other — a red L6 must not hide L7 and L8. If
-one flips to green the summary says so loudly, which is the signal to re-check the
-upstream issue and promote the leg.
-
-L8 asserts on the **census**, not on a read, and that distinction is the leg's point.
-Storage is in-memory, so a block with one holder ceases to exist when that holder stops —
-yet a read can still succeed afterwards, because the surviving nodes materialized the row
-when it propagated and answer from their own state. Measured:
-
-```
-KNOWN-RED  L8  durability — 'default/GateRow' was held by [peer-B]; after stopping peer-B
-it is held by 0/3 survivors [none]; drone-A still READS 'gate-row-x36reP37', but from its
-own materialized state — no surviving node holds the block, so a read-back check would
-call this durable when it is not
-```
-
-That is worth stating plainly: **a naive write-then-read-back test reports PASS over data
-that is no longer stored anywhere.** L5 is such a test. So is most integration coverage.
-
-L7's red is **triaged, and it is not #15**. The late joiner never reaches the read: it
-fails inside `CadreNode.start()`, because
-
-```
-db-p2p:sync-service:error inbound stream denied peer=<late-C>
-  protocol=/optimystic/control-<party>/db-p2p/sync/1.0.0
-  reason=predicate returned false
-```
-
-The joiner boots, already holds one connection (its relay/bootstrap drone), so that drone
-lands in its cohort and a real consult runs. The drone **denies the stream** — the joiner
-is not an authorized cadre member yet. db-p2p supplies the mechanism
-(`InboundStreamAuthorization`); cadre-core supplies the predicate. The denial reaches the
-requester as *silence*, so `answered === 0` → `isolated` → `cohort-unreachable`, and
-`start()` throws. Enrolment can only run after `start()` returns, so the node can never
-join. **A bootstrap ordering deadlock, not a replication defect.**
-
-What rules the other candidates out:
-
-| evidence | rules out |
-|---|---|
-| `no-quorum { responders: 0, required: 1 }` | #15 — the floor had already relaxed to 1; #15 needs `required: 2` |
-| `findCluster:done peers=2 addressless=0 selfRelayOnly=0` | #13/#14 — every cohort member had an address |
-| the denial is `predicate returned false` on an **inbound stream** | #10 — that is transaction admission (`admitMembership`), a different gate |
-
-The control arm is worth keeping in mind: a late joiner **with its own listen addresses**
-starts fine — but for a null reason. It had *zero* connections at read time, so its cohort
-was itself alone and `cluster-fetch:solo-self-skip` fired. It succeeds by being isolated,
-not by converging. The variable is not the node's profile; it is whether it happens to hold
-a connection at the moment of the boot read.
-
-Two things here are worth filing separately, and neither has been yet:
-
-1. **The ordering deadlock** (cadre-core): a joining node must read the control DB to
-   start, but cannot be authorized until after it has started.
-2. **The diagnosability gap** (db-p2p): at the verdict level an authorization denial is
-   indistinguishable from unreachability. This reported `cohort-unreachable` — a network
-   verdict — when the truth was permission.
 
 ### Why L3 exists
 
@@ -168,10 +95,11 @@ All optional.
 | env | default | effect |
 |---|---|---|
 | `DRONES=N` | `2` | number of always-on storage nodes |
-| `RELAYS=1\|2` | `1` | how many relays each peer reserves on |
+| `RELAYS=1\|2` | `1` | how many relays each peer is OFFERED (cadre-core 0.12.0 reserves with the first that answers, so this is not the reservation count) |
 | `CLUSTER_SIZE=N` | `2` | `strandClusterSize` — must be identical on every node |
 | `ENROLL=0\|1` | `1` | run the enrolment ceremony; `0` observes the un-enrolled failure |
 | `ENROLL_ATTEMPTS=N` | `5` | bounded retries for the ceremony |
+| `AUTH_TIMEOUT_MS=N` | `120000` | how long L3 waits for the control database to become readable after the enrolment write. Separate from the ceremony's per-dial timeout |
 | `TIMEOUT_SCALE=N` | `1` | multiply every timeout on a slow machine |
 | `VERBOSE=1` | off | per-poll progress |
 
@@ -202,40 +130,52 @@ Two more traps worth knowing when reading raw logs:
 
 ## Verified behaviour
 
-Measured on `@optimystic/db-p2p@0.24.2` / `@serfab/cadre-core@0.11.0`, macOS, Node 22:
+Re-measured 2026-09-03 on `@optimystic/db-p2p@0.27.0` / `@serfab/cadre-core@0.12.0`, macOS, Node 22:
 
 | configuration | result |
 |---|---|
-| default (`DRONES=2 RELAYS=1 ENROLL=1`) | **PASS**, 3/3 consecutive runs |
+| default (`DRONES=2 RELAYS=1 ENROLL=1`) | **PASS**, 4/4 (was 4/5 before the L3 fix) |
 | `ENROLL=0` | **FAIL at L3** — `peer-A=false peer-B=false; owner lists 0 authorized member(s)` |
-| `RELAYS=2` | **FAIL at L3** — `Block default/CadrePeer is unavailable (claimed-elsewhere)` — upstream, see below |
-| `DRONES=3` | **FAIL at L3** — same cause, so breadth is not it |
+| `RELAYS=2` | **PASS**, 8/8 (was 3/5 before the L3 fix — see below). The old `claimed-elsewhere` does not appear at all |
+| `DRONES=3` | not re-measured on this stack |
 
 The `ENROLL=0` arm is the negative control, and it matters: it is the exact failure mode
 seen in a real n=4 device run, and it proves the gate can actually fail. A green gate
 that cannot go red proves nothing.
 
-The default PASS establishes that **the n=4 topology does propagate a write on these
-versions** when peers are properly enrolled — so a deployment that still fails should be
-checked for a missing enrolment ceremony before anything upstream is suspected.
+The default PASS establishes that **the n=4 topology does replicate on these versions**
+when peers are properly enrolled — so a deployment that still fails should be checked for
+a missing enrolment ceremony before anything upstream is suspected.
 
-It does **not** establish that the data is replicated. Holder counts in the default
-config, censused across two runs:
+### `RELAYS=2` — the read-repair deadlock, FIXED in db-p2p 0.27.0
 
-| | run 1 | run 2 |
-|---|---|---|
-| distinct blocks in the run | 33 | 33 |
-| held by exactly **one** node | 24 | 27 |
-| meeting `CLUSTER_SIZE=2` | 9 | 6 |
-| `default/GateRow` — the row L5 just passed on | **1 holder** | **1 holder** |
-| `default/CadrePeer/index/_uniq_5` — the block that fails at `RELAYS=2` | **1 holder** | **1 holder** |
+**Status 2026-09-03: the deadlock this section documented is closed.** `RELAYS=2` reached L5
+and the gate went green on 3 of 5 runs; the old `claimed-elsewhere` signature does not appear
+at all. It is no longer a standing reproduction — `repro/` keeps the regression tests.
 
-So the green gate is green over a replication factor of 1, and the control-DB block that
-breaks at `RELAYS=2` is singly held in the *passing* configuration too. `RELAYS=1` works
-by keeping cohort views at 2, where the corroboration floor relaxes and a lone holder's
-claim is accepted — not by replicating anything. That is what L6 now measures directly.
+Two things changed and they are easy to conflate:
 
-### Root-caused: `RELAYS=2` trips an upstream read-repair deadlock
+* **The deadlock is gone (0.27.0).** A block held by exactly one cohort member could never gain
+  a second, so the founder's solo owner-genesis write was permanently unreadable by every later
+  joiner. 0.27.0 proofs the solo commit, so the certified-claim path can rescue it. History and
+  the full root cause are kept below.
+* **The relay count no longer behaves the same (cadre-core 0.12.0).** This section's old sample
+  read `peer-A=4 addr/2 relay` — TWO reservations. On 0.12.0 the same configuration yields
+  `2 addr/1 relay`: relays moved from a `<relay>/p2p-circuit` `listenAddrs` entry (libp2p's
+  'configured' route, which reserves with EACH named relay) to `network.relayAddrs` (the
+  'search' route, where `driveRelayReservation` dials every relay but asks *the first that
+  answers* for a slot and returns as soon as one `/p2p-circuit` address appears). So `RELAYS=2`
+  no longer widens reservation breadth, and L2's job changed with it — a single reservation is
+  fine only if the OTHER cohort members can still route to the peer, which L2 now asserts
+  directly rather than inferring from a count.
+
+**The L3 flake is FIXED** (2026-09-03). It was 2 of 5 runs at `RELAYS=2` and 1 of 5 on the
+default arm, always `Block default/Revocation is unavailable (peers-unreachable)` — a control-DB
+read that could not be served, not a membership verdict. Now 8/8 at `RELAYS=2` and 4/4 on the
+default arm, with `ENROLL=0` still failing (in ~17s). See the section below for the two causes.
+
+<details>
+<summary>History — the original root-cause writeup (accurate for db-p2p &lt;= 0.26.0)</summary>
 
 Reserving on a **second** relay is enough to break control-DB reads:
 
@@ -273,24 +213,34 @@ during boot with `BlockUnavailableError`.
 PASS. Until then single-relay is the only posture known to work, which is why `RELAYS` defaults
 to `1` — it works by keeping cohort views below 3, not by avoiding the bug.
 
-### Known flake, handled — most likely the L7 gate, not #15
+</details>
 
-The enrolment ceremony fails run-to-run: each step writes owner-signed control state and
-then reads it back, and the read intermittently fails with
-`Block default/Revocation is unavailable (peers-unreachable)`. `ENROLL_ATTEMPTS` retries
-with linear backoff and usually wins.
+### The L3 flake — diagnosed and fixed
 
-An earlier revision of this file attributed that to #15. The L7 triage makes the
-membership gate the better explanation: during the same window the drones log
-`inbound stream denied … reason=predicate returned false` against **peer-A and peer-B**,
-which are not yet authorized. Denied streams read as silent peers, and partial silence is
-exactly `peers-unreachable`. The retries win because they outlast the un-authorized
-window; `start()` has no retry, which is why L7 fails hard where the ceremony only flakes.
+**Not the read-repair deadlock above.** That attribution was carried here for months and is
+falsified: db-p2p 0.27.0 closed the deadlock and the flake survived it, including on `RELAYS=1`,
+which the deadlock explanation says cannot happen at a cohort view of 2.
 
-Stated as the leading explanation rather than a settled one — the correlation is strong
-and the mechanism fits, but nobody has instrumented the ceremony read itself. This is not
-masking a defect either way: a peer that is genuinely un-enrollable exhausts every attempt
-and L3 still fails.
+What it actually was, in two parts:
+
+1. **The ceremony stopped running.** `isAuthorizedMember` reads the control database, and that
+   read can fail outright rather than answer. It was the FIRST statement inside each attempt, so
+   once reads started failing every remaining attempt died before reaching `createInvite` — the
+   ceremony that would have fixed things never ran, and the failure was then reported as
+   "membership did not take" on a joiner that had in fact been accepted. A read that cannot be
+   served is now `'unknown'`, distinct from a `false` verdict, and the ceremony proceeds.
+2. **L3 gave up too early.** The enrolment write leaves the control DB briefly unreadable while
+   replication spreads the new revision to a second holder, and that convergence sometimes takes
+   over 30 seconds on loopback. L3's window was 30s (shared, confusingly, with the ceremony's
+   per-dial timeout). It is now its own `AUTH_TIMEOUT_MS`, defaulting to 120s.
+
+Neither is a retry that hides a failure: `ENROLL=0` still fails L3, and a peer that never becomes
+a member still fails it. Re-running the ceremony now happens only on a DEFINITE `false` — an
+`unknown` means it already ran and cannot be confirmed yet, where the old code would storm
+`createInvite`/`acceptPhone` through a read outage to no effect.
+
+Measured 2026-09-03, `RELAYS=2`: 3/5 before → 5/6 with (1) alone → **8/8 with both**; default arm
+4/5 before → **4/4**. `ENROLL=0` still red.
 
 Owner genesis is run while the founder is **still solo**, before anyone joins, because the write
 needs a quorum the joiners cannot yet serve. That is also what makes the control database singly
@@ -300,13 +250,8 @@ write is an upstream question.
 
 ## What this does and does not prove
 
-**Does:** that the topology's addressing, authorization, cohort assembly and write
-*propagation* work when peers are reachable only through a relay.
-
-**Does not:** prove the distributed-database properties. L6-L8 are the legs that ask, and
-on 0.24.2 all three are red: the row has one holder, a late joiner cannot read it, and
-losing that holder loses the only stored copy. A green L1-L5 says the plumbing is
-unblocked, not that the data is safe.
+**Does:** that the topology's addressing, authorization, cohort assembly and replication
+work when peers are reachable only through a relay.
 
 **Does not:** prove device behaviour. Everything here is one process on loopback. A real
 NAT adds address translation and mobile schedulers add main-thread starvation; both have

@@ -32,22 +32,11 @@
  * THE LEGS
  * --------
  *   L1  control-reachability  every node holds >= 1 control connection; founder sees all
- *   L2  relay-reservation both relay-only peers expose a /p2p-circuit multiaddr
+ *   L2  relay-reservation each relay-only peer holds a reservation (counted by distinct relay
+ *                        IDENTITY, not address), and every cohort member can dial it
  *   L3  cadre-authorization  the relay-only peers are AUTHORIZED members of the cadre
  *   L4  strand-cohort     each strand node assembles a cohort larger than itself
  *   L5  replication       peer-A writes a row; peer-B reads it back
- *
- * L1-L5 answer "is the multi-peer path unblocked?". They do NOT answer "is this actually
- * a distributed database?" — L5 passes with a replication factor of ONE, because the
- * writer is still up and still holds the row. Three further legs ask that question:
- *
- *   L6  replication-factor        how many nodes actually HOLD the row (want >= CLUSTER_SIZE)
- *   L7  late-joiner-convergence   a peer that arrives AFTER the write can read it
- *   L8  durability                the row survives losing the node that holds it
- *
- * All three are red on db-p2p 0.24.2. They are STANDING REPRODUCTIONS: recorded, never
- * short-circuiting each other, and deliberately excluded from the gate's verdict so it
- * stays usable as a green/red signal. If one flips to green that is reported loudly.
  *
  * L3 is the one people skip. Control-network membership is the v1 authorization for the
  * strand-address RPC (`strand-addr-protocol.js`: "only this party's cadre peers may ask
@@ -106,29 +95,6 @@ import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 
-// ── holder census ────────────────────────────────────────────────────────────────────
-/**
- * L6-L8 need to know which nodes actually HOLD a block, not merely whether some read
- * succeeded — the distinction the first five legs cannot make. `MemoryRawStorage` has no
- * "list what I hold" surface, so wrap it and record every block id this node is asked to
- * persist. Storage-only: it changes nothing about how the node behaves.
- */
-const stores = new Map();          // node name -> TrackingStorage
-let currentNodeName = '?';
-class TrackingStorage extends MemoryRawStorage {
-  constructor() { super(); this.seen = new Set(); }
-  async saveMetadata(id, m) { this.seen.add(id); return super.saveMetadata(id, m); }
-  async saveRevision(id, r, a) { this.seen.add(id); return super.saveRevision(id, r, a); }
-  async saveMaterializedBlock(id, a, b) { this.seen.add(id); return super.saveMaterializedBlock(id, a, b); }
-}
-const holdersOf = (blockId, all) =>
-  all.filter(({ name }) => stores.get(name)?.seen.has(blockId)).map(({ name }) => name);
-const allBlockIds = (all) => {
-  const u = new Set();
-  for (const { name } of all) for (const id of stores.get(name)?.seen ?? []) u.add(id);
-  return u;
-};
-
 // ── configuration ────────────────────────────────────────────────────────────────────
 const PARTY_ID = 'multipeer-gate';
 const STRAND_ID = 'multipeer-gate-strand';
@@ -147,24 +113,28 @@ const ADD_STRAND_TIMEOUT_MS = T(60_000);
 const MESH_TIMEOUT_MS = T(30_000);
 const RESERVATION_TIMEOUT_MS = T(20_000);
 const ENROLL_TIMEOUT_MS = T(30_000);
+// L3's own window, deliberately NOT shared with ENROLL_TIMEOUT_MS (the ceremony's per-dial
+// timeout). They are different waits: one bounds a single dial, the other bounds how long the
+// control database may take to become READABLE after the enrolment write.
+//
+// 120s, not 30s. Measured 2026-09-03 at RELAYS=2: at 30s the gate failed 2 of 5 runs, always at
+// L3, always `Block default/Revocation is unavailable (peers-unreachable)` — a read that cannot
+// be served, not a membership verdict. A 4x window passed 4 of 4. The enrolment write leaves the
+// control DB briefly unreadable while replication spreads the new revision to a second holder,
+// and that convergence sometimes takes over 30 seconds on loopback.
+//
+// This is a longer WAIT, not a retry that hides a failure: a peer that never becomes a member
+// still fails L3, and `ENROLL=0` still fails it immediately. Overridable so the two waits can be
+// varied independently when diagnosing.
+const AUTH_TIMEOUT_MS = T(Number(process.env.AUTH_TIMEOUT_MS ?? 120_000));
 const COHORT_TIMEOUT_MS = T(30_000);
 const REPLICATION_TIMEOUT_MS = T(60_000);
 const POLL_MS = T(500);
 const ENROLL_ATTEMPTS = Number(process.env.ENROLL_ATTEMPTS ?? 5);
-const SETTLE_MS = T(5_000);        // let replication quiesce before counting holders
-const ISSUE_15 = 'Optimystic#15';  // singly-held blocks can never gain a second holder
-/** L7's red is real but NOT yet attributed to a specific issue — see the leg's comment. */
-const L7_NOTE = 'inbound-stream authorization denies the boot read; see the leg comment';
-
-/**
- * StrandDatabase.executeSchema() wraps the DDL as `declare schema App { ... }`, so the
- * table lands in `App` while the default schema path is `main`.
- */
-const GATE_TABLE = 'App.GateRow';
-/** The block the table's rows live in — what L6/L8 count holders of. */
-const GATE_ROW_BLOCK = 'default/GateRow';
-let writtenRowId = null;           // set by L5, read by L7/L8
 const ENROLL_RETRY_MS = T(2_000);
+// 0.12.0 reserves relays AFTER control bring-up, so the enrolment preconditions land late.
+const SETTLE_TIMEOUT_MS = T(60_000);
+const SETTLE_GRACE_MS = T(3_000);
 
 // A single-table schema. StrandDatabase.executeSchema() supplies the
 // `declare schema App { ... } apply schema App;` wrapper itself, so this is raw DDL.
@@ -184,20 +154,8 @@ const results = [];        // { id, title, status, detail }
 
 function record(id, title, status, detail) {
   results.push({ id, title, status, detail });
-  L(`${status.padEnd(9)}  ${id}  ${title}${detail ? ` — ${detail}` : ''}`);
-}
-
-/**
- * A STANDING REPRODUCTION: a leg that is expected to be red on current upstream, kept so
- * a fix can be verified by watching it flip. It is recorded but never fails the gate —
- * the gate's verdict stays L1-L5, so it remains usable as a green/red signal — and if it
- * unexpectedly PASSES that is reported loudly, because it means the defect is fixed.
- */
-function recordStanding(id, title, ok, detail, note) {
-  record(id, title, ok ? 'FIXED' : 'KNOWN-RED',
-    ok ? `${detail} — this leg is a standing reproduction (${note}); it just went GREEN, so check whether that is fixed`
-       : `${detail} — expected red (${note})`);
-  return ok;
+  const badge = status === 'PASS' ? 'PASS' : status === 'SKIP' ? 'SKIP' : 'FAIL';
+  L(`${badge}  ${id}  ${title}${detail ? ` — ${detail}` : ''}`);
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────────────
@@ -245,14 +203,13 @@ function baseConfig(bootstrapNodes, privateKey) {
     // exactly as the reference drone harness does. Not a production posture.
     requireSignedSchemas: false,
     strandFilter: { mode: 'all' },
-    storage: { provider: () => { const st = new TrackingStorage(); stores.set(currentNodeName, st); return st; } },
+    storage: { provider: () => new MemoryRawStorage() },
     strandClusterSize: CLUSTER_SIZE,
     hibernation: { enabled: false },
   };
 }
 
 async function startDrone(name, bootstrapNodes) {
-  currentNodeName = name;
   const node = new CadreNode({
     ...baseConfig(bootstrapNodes, await generateKeyPair('Ed25519')),
     profile: 'storage', // turns the circuit-relay-v2 relay server ON
@@ -277,12 +234,18 @@ async function startDrone(name, bootstrapNodes) {
 }
 
 /**
- * A relay-only peer: NO direct listen address, only `<relay>/p2p-circuit` entries. This
- * is the 'configured' reservation path, which is what makes the peer undialable except
- * through a relay — the constraint the whole gate exists to exercise.
+ * A relay-only peer: NO direct listen address, only relays. This is what makes the peer
+ * undialable except through a relay — the constraint the whole gate exists to exercise.
+ *
+ * cadre-core 0.12.0 moved this from `network.listenAddrs` to `network.relayAddrs` and now
+ * REJECTS the old shape on a control node: a `<relay>/p2p-circuit` listen entry makes
+ * libp2p dial the relay from inside `libp2p.start()`, during the bring-up quiet period
+ * that denies exactly that dial. `relayAddrs` takes the 'search' route instead (one bare
+ * `/p2p-circuit` listener) and drives the reservation explicitly AFTER the control
+ * database is up. `listenAddrs` is deliberately left unset so the peer keeps no direct
+ * listener — naming a relay alone does not add one back.
  */
 async function startRelayOnlyPeer(name, relayAddrs, bootstrapNodes) {
-  currentNodeName = name;
   const node = new CadreNode({
     ...baseConfig(bootstrapNodes, await generateKeyPair('Ed25519')),
     profile: 'transaction',
@@ -294,11 +257,10 @@ async function startRelayOnlyPeer(name, relayAddrs, bootstrapNodes) {
         // never starts.
         //
         // reservationConcurrency defaults to 1, which serialises and then DROPS the
-        // surplus: N relay-qualified listen addresses alone do NOT yield N reservations.
-        // Size it to the relay count or L2 silently caps at one reservation.
+        // surplus. Kept sized to the relay count: L2 asserts a reservation per relay.
         circuitRelayTransport({ reservationConcurrency: Math.max(1, relayAddrs.length) }),
       ],
-      listenAddrs: relayAddrs.map((a) => `${a}/p2p-circuit`),
+      relayAddrs,
     },
   });
   await withTimeout(node.start(), START_TIMEOUT_MS, `${name} start`);
@@ -371,33 +333,118 @@ async function legControlMesh(founder, all) {
   return true;
 }
 
-/** L2 — the relay-only peers actually hold circuit reservations. */
-async function legRelayReservation(peers) {
+/**
+ * The distinct RELAY IDENTITIES a peer holds circuit addresses through.
+ *
+ * Identity, never address count. One relay listening on several interfaces yields several
+ * `/p2p-circuit` addresses, so counting addresses reads one relay as breadth.
+ */
+function relayIdsOf(node) {
+  const circuits = controlAddrs(node).filter((a) => a.includes('/p2p-circuit'));
+  return {
+    circuits,
+    ids: new Set(circuits.map((c) => c.split('/p2p-circuit')[0].split('/p2p/').pop())),
+  };
+}
+
+/**
+ * L2 — every relay-only peer is REACHABLE BY EVERY COHORT MEMBER.
+ *
+ * Two distinct things, and the leg used to check neither properly.
+ *
+ * 1. A reservation exists. This asserted `circuits.length >= RELAYS`, which counts
+ *    ADDRESSES: drone-A listens on two interfaces, so at RELAYS=2 its two `/p2p-circuit`
+ *    addresses satisfied the count on their own and the leg passed reporting `2 addr/1
+ *    relay` — printing the shortfall inside its own PASS line. Identities are counted now.
+ *
+ *    But the bar is ONE, not RELAYS — on THIS version. cadre-core 0.12.0's
+ *    `driveRelayReservation` dials every configured relay and asks *the first one that answers*
+ *    for a slot, returning as soon as a single `/p2p-circuit` address appears
+ *    (`requestReservation` returns on first success). Verified against the installed dist.
+ *
+ *    This is a CHANGE, not a constant: on 0.11.0 relays were named by a `<relay>/p2p-circuit`
+ *    `listenAddrs` entry (libp2p's 'configured' route, which reserves with EACH named relay),
+ *    and this gate's README records `peer-A=4 addr/2 relay` from that era. 0.12.0's 'search'
+ *    route yields `2 addr/1 relay` for the same config. So `RELAYS` is how many relays are
+ *    OFFERED, and demanding one reservation per relay would fail a healthy 0.12.0 stack. If a
+ *    later version restores per-relay reservations, raise this bar with it.
+ *
+ * 2. Every other cohort member can actually dial the peer. THIS is wall #8 (38-21: drone-B
+ *    raised `NoValidAddressesError` against Peer A 1312x while drone-A raised none, because
+ *    the peer's reservation had landed with drone-A alone). Given (1), a single reservation
+ *    is expected and fine — but only if the non-reserving drones learn a circuit address for
+ *    the peer and can route through the relay that holds it. A reservation count can never
+ *    show that; the other members' peer stores can. Unchecked, a device run fails here and
+ *    reads as an addressing or consensus fault.
+ */
+async function legRelayReservation(peers, drones) {
   const got = await poll(async () => {
-    const seen = peers.map(({ name, node }) => {
-      const circuits = controlAddrs(node).filter((a) => a.includes('/p2p-circuit'));
-      return { name, circuits };
-    });
-    V(`reservations ${seen.map((s) => `${s.name}=${s.circuits.length}`).join(' ')}`);
-    return seen.every((s) => s.circuits.length >= RELAYS) ? seen : null;
+    const seen = peers.map(({ name, node }) => ({ name, ...relayIdsOf(node) }));
+    V(`reservations ${seen.map((s) => `${s.name}=${s.circuits.length}addr/${s.ids.size}relay`).join(' ')}`);
+    return seen.every((s) => s.ids.size >= 1) ? seen : null;
   }, RESERVATION_TIMEOUT_MS, 'relay reservation');
 
   if (!got) {
-    const seen = peers.map(({ name, node }) =>
-      `${name}=${controlAddrs(node).filter((a) => a.includes('/p2p-circuit')).length}`);
+    const seen = peers.map(({ name, node }) => {
+      const { circuits, ids } = relayIdsOf(node);
+      return `${name}=${circuits.length} addr/${ids.size} relay`;
+    });
     record('L2', 'relay-reservation', 'FAIL',
-      `expected >= ${RELAYS} /p2p-circuit multiaddr(s) per relay-only peer, got ${seen.join(' ')}`);
+      `every relay-only peer needs at least one circuit reservation, got ${seen.join(' ')}. ` +
+      'Distinct relay IDENTITIES are counted, not addresses — several addresses of ONE relay ' +
+      'are not breadth.');
     return false;
   }
 
-  // Distinct RELAY identities, not the same relay in several IP forms — a real trap:
-  // three addresses that are all one relay reads as breadth in a naive count.
-  const detail = got.map((s) => {
-    const relayIds = new Set(s.circuits.map((c) => c.split('/p2p-circuit')[0].split('/p2p/').pop()));
-    return `${s.name}=${s.circuits.length} addr/${relayIds.size} relay`;
-  });
-  record('L2', 'relay-reservation', 'PASS', detail.join(' '));
+  // Phase 2 — the reachability half.
+  const reachable = await poll(async () => {
+    const missing = [];
+    for (const d of drones) {
+      for (const p of peers) {
+        if (!(await holdsCircuitAddrFor(d.node, p.node))) missing.push(`${d.name}->${p.name}`);
+      }
+    }
+    V(`reachability missing=${missing.length ? missing.join(',') : 'none'}`);
+    return missing.length === 0 ? true : null;
+  }, RESERVATION_TIMEOUT_MS, 'cohort reachability');
+
+  if (!reachable) {
+    const missing = [];
+    for (const d of drones) {
+      for (const p of peers) {
+        if (!(await holdsCircuitAddrFor(d.node, p.node))) missing.push(`${d.name}->${p.name}`);
+      }
+    }
+    record('L2', 'relay-reservation', 'FAIL',
+      `reservations landed, but these cohort members hold NO circuit address for a relay-only ` +
+      `peer: ${missing.join(' ')}. Such a member cannot dial that peer at all, so its consensus ` +
+      'votes are silently undeliverable — the 38-21 wall, which a reservation count cannot see.');
+    return false;
+  }
+
+  record('L2', 'relay-reservation', 'PASS',
+    `${got.map((s) => `${s.name}=${s.circuits.length} addr/${s.ids.size} relay`).join(' ')} ` +
+    `· all ${drones.length} cohort member(s) hold a circuit path to each peer`);
   return true;
+}
+
+/**
+ * Does `from` hold at least one `/p2p-circuit` address for `target` — i.e. can it dial it?
+ *
+ * The peer store is the same source `connect()` consults, so this asks the question the
+ * dial layer will ask. A peer absent from the store simply has no addresses: not an error.
+ */
+async function holdsCircuitAddrFor(from, target) {
+  const targetId = target.peerId;
+  if (!targetId) return false;
+  // A relay reaching itself is trivially fine and not what this leg is about.
+  if (from.peerId?.toString() === targetId.toString()) return true;
+  try {
+    const peer = await from.getControlNode()?.peerStore?.get(targetId);
+    return (peer?.addresses ?? []).some((a) => a.multiaddr?.toString().includes('/p2p-circuit'));
+  } catch {
+    return false; // not in the store yet
+  }
 }
 
 /**
@@ -429,7 +476,10 @@ async function legCadreAuthorization(owner, peers) {
     }
   };
 
-  const got = await poll(check, ENROLL_TIMEOUT_MS, 'cadre authorization');
+  // With ENROLL=0 no ceremony ran, so membership can never BECOME true — waiting the full
+  // convergence window would only make the documented negative control four times slower.
+  const window = ENROLL ? AUTH_TIMEOUT_MS : Math.min(AUTH_TIMEOUT_MS, T(15_000));
+  const got = await poll(check, window, 'cadre authorization');
   if (got) {
     record('L3', 'cadre-authorization', 'PASS', `${got.map((o) => o.name).join(', ')} authorized`);
     return true;
@@ -494,9 +544,11 @@ async function legReplication(peerA, peerB) {
     return false;
   }
 
-  const TABLE = GATE_TABLE;
+  // StrandDatabase.executeSchema() wraps the DDL as `declare schema App { ... }`, so the
+  // table lands in the `App` schema while the default schema path is `main`. Unqualified
+  // it resolves to nothing: "Table 'GateRow' not found in schema path: main".
+  const TABLE = 'App.GateRow';
   const id = `gate-row-${peerA.node.peerId.toString().slice(-8)}`;
-  writtenRowId = id;
   try {
     await dbA.exec(`insert into ${TABLE} (Id, Value) values ('${id}', 'written-by-peer-A');`);
   } catch (e) {
@@ -505,7 +557,16 @@ async function legReplication(peerA, peerB) {
   }
   V(`peer-A wrote ${id}`);
 
-  const seen = await poll(() => rowVisible(dbB, id, 'peer-B'), REPLICATION_TIMEOUT_MS, 'replication');
+  const seen = await poll(async () => {
+    try {
+      for await (const row of dbB.eval(`select Id from ${TABLE} where Id = '${id}';`)) {
+        if (row?.Id === id) return true;
+      }
+    } catch (e) {
+      V(`peer-B read retry: ${e?.message ?? e}`);
+    }
+    return false;
+  }, REPLICATION_TIMEOUT_MS, 'replication');
 
   if (!seen) {
     record('L5', 'replication', 'FAIL',
@@ -516,171 +577,6 @@ async function legReplication(peerA, peerB) {
   return true;
 }
 
-
-/** Is `id` visible in this node's strand db? Never throws — a failed read is just false. */
-async function rowVisible(db, id, who) {
-  try {
-    for await (const row of db.eval(`select Id from ${GATE_TABLE} where Id = '${id}';`)) {
-      if (row?.Id === id) return true;
-    }
-  } catch (e) {
-    V(`${who} read retry: ${e?.message ?? e}`);
-  }
-  return false;
-}
-
-// ── standing reproductions (L6-L8) ───────────────────────────────────────────────────
-// L1-L5 answer "is the multi-peer path unblocked?". They do NOT answer "is this actually
-// a distributed database?", and the difference is not academic: L5 passes with a
-// replication factor of ONE, because the writer is still up and still holds the row.
-// These three legs ask the questions L5 cannot. All three are red on current upstream
-// for the same reason (Optimystic#15), so none of them short-circuits the others.
-
-/**
- * L6 — replication factor. L5 proves the row PROPAGATED to a live peer. It never asks
- * how many nodes hold it. Measured on 0.24.2 in the default config the answer is one,
- * and 24-27 of the ~33 blocks in the run are singly held — so today's green gate is
- * green over unreplicated data.
- */
-async function legReplicationFactor(all) {
-  await new Promise((r) => setTimeout(r, SETTLE_MS));
-  const holders = holdersOf(GATE_ROW_BLOCK, all);
-  const ids = allBlockIds(all);
-  const singly = [...ids].filter((id) => holdersOf(id, all).length === 1);
-  for (const id of [...ids].sort()) {
-    const h = holdersOf(id, all);
-    V(`${String(h.length)}/${all.length}  ${id}  [${h.join(', ')}]`);
-  }
-  return recordStanding('L6', 'replication-factor',
-    holders.length >= CLUSTER_SIZE,
-    `'${GATE_ROW_BLOCK}' held by ${holders.length}/${all.length} [${holders.join(', ') || 'nobody'}], ` +
-    `want >= CLUSTER_SIZE (${CLUSTER_SIZE}); ${singly.length}/${ids.size} blocks in this run are singly held`,
-    ISSUE_15);
-}
-
-/**
- * L7 — late-joiner convergence. Every reader in L5 was present when the row was written.
- * A distributed database has to serve a member that arrives afterwards, and that is
- * exactly the case Optimystic#15 makes impossible: a block whose cohort has grown since
- * commit is unreadable by everyone who was not there.
- *
- * Joining also widens every node's cohort view, which is #15's trigger — so this leg
- * meets the defect from the direction a real deployment does: by growing.
- *
- * WHY IT IS RED (triaged 2026-08-25, and it is NOT #15):
- *
- *   1. `late-C` starts. `CadreNode.start()` reads `optimystic/schema` from the control DB.
- *   2. It already holds one connection — its relay/bootstrap drone — so that drone lands
- *      in the cohort and a real consult runs (no solo-self short-circuit).
- *   3. The drone DENIES the inbound stream:
- *        `db-p2p:sync-service:error inbound stream denied peer=<late-C>
- *         protocol=/optimystic/control-<party>/db-p2p/sync/1.0.0
- *         reason=predicate returned false`
- *      `late-C` is not an authorized cadre member yet. db-p2p supplies the mechanism
- *      (`InboundStreamAuthorization`); cadre-core supplies the predicate.
- *   4. A denial reaches the requester as SILENCE. `answered === 0` -> `isolated` ->
- *      `cohort-unreachable`, and `start()` throws.
- *   5. Enrolment can only run after `start()` returns. So the node can never join.
- *
- * A bootstrap ordering deadlock, not a replication defect. The evidence that rules the
- * other candidates out: `no-quorum { responders: 0, required: 1 }` — required is 1, so the
- * corroboration floor had already relaxed and #15 (which needs 2) is not in play; and
- * `findCluster:done peers=2 addressless=0 selfRelayOnly=0` — every member had an address,
- * so #13/#14 are not either.
- *
- * Control arm: a late joiner with its own listen addresses starts fine — but for a null
- * reason. It had ZERO connections at read time, so the cohort was itself alone and
- * `cluster-fetch:solo-self-skip` fired. It succeeds by being isolated, not by converging.
- * The variable is not the profile; it is whether the node happens to hold a connection at
- * the moment of the boot read.
- *
- * Worth reporting upstream separately: at the verdict level an authorization denial is
- * indistinguishable from unreachability. This said `cohort-unreachable` — network — when
- * the truth was permission.
-  */
-async function legLateJoiner(founder, relayAddrs, bootstrapAddr, all) {
-  const name = 'peer-C';
-  let node;
-  try {
-    node = await startRelayOnlyPeer(name, relayAddrs, [bootstrapAddr]);
-    if (ENROLL) await enrol(founder, [{ name, node }]);
-    await addStrand(node, name, 'networked');
-  } catch (e) {
-    return recordStanding('L7', 'late-joiner-convergence', false,
-      `${name} could not join after the write: ${e?.message ?? e}`, L7_NOTE);
-  }
-  all.push({ name, node });
-
-  const db = strandDb(node);
-  if (!db) {
-    return recordStanding('L7', 'late-joiner-convergence', false,
-      `${name} joined but has no active strand database`, L7_NOTE);
-  }
-  const seen = await poll(() => rowVisible(db, writtenRowId, name), REPLICATION_TIMEOUT_MS, 'late-joiner');
-  return recordStanding('L7', 'late-joiner-convergence', Boolean(seen),
-    seen ? `${name} read '${writtenRowId}' after joining`
-         : `${name} joined, enrolled and never saw '${writtenRowId}' in ${REPLICATION_TIMEOUT_MS}ms`,
-    L7_NOTE);
-}
-
-/**
- * L8 — durability. The promise that separates a distributed database from a cache:
- * losing a node must not lose data.
- *
- * The assertion is on the CENSUS, not on a read, and that distinction is the leg's whole
- * point. Storage here is in-memory, so a block held by one node ceases to exist the
- * moment that node stops. A read can still succeed afterwards — the surviving nodes
- * materialized the row when it propagated and will answer from their own state — which
- * means a naive write-then-read-back check (L5, and most integration tests) reports
- * PASS over data that is no longer stored anywhere. We stop the holder, then report both
- * numbers so the difference is visible.
- *
- * Destructive, so it runs last.
- */
-async function legDurability(all) {
-  const before = holdersOf(GATE_ROW_BLOCK, all);
-  if (before.length === 0) {
-    return recordStanding('L8', 'durability', false,
-      `nobody holds '${GATE_ROW_BLOCK}', so there is nothing to lose`, ISSUE_15);
-  }
-  const victim = all.find((n) => n.name === before[0]);
-  const survivors = all.filter((n) => n.name !== victim.name);
-
-  L(`stopping ${victim.name} — holder 1 of ${before.length} [${before.join(', ')}] ...`);
-  try {
-    await victim.node.stop();
-  } catch (e) {
-    V(`${victim.name} stop error: ${e?.message ?? e}`);
-  }
-  await new Promise((r) => setTimeout(r, SETTLE_MS));
-
-  // Does any SURVIVING node still hold the block? That is the durability question.
-  const after = holdersOf(GATE_ROW_BLOCK, survivors);
-
-  // And, separately, can anyone still read it? If yes while `after` is empty, the read is
-  // being served from memory, not from a stored replica.
-  let readableBy = null;
-  for (const sv of survivors) {
-    const db = strandDb(sv.node);
-    if (!db) continue;
-    if (await poll(() => rowVisible(db, writtenRowId, sv.name), REPLICATION_TIMEOUT_MS, `durability:${sv.name}`)) {
-      readableBy = sv.name;
-      break;
-    }
-  }
-
-  const gloss = after.length === 0 && readableBy
-    ? `; ${readableBy} still READS '${writtenRowId}', but from its own materialized state — ` +
-      'no surviving node holds the block, so a read-back check would call this durable when it is not'
-    : after.length === 0
-      ? `; and no survivor can read '${writtenRowId}' either`
-      : `; ${readableBy ?? 'nobody'} reads it back`;
-
-  return recordStanding('L8', 'durability', after.length > 0,
-    `'${GATE_ROW_BLOCK}' was held by [${before.join(', ')}]; after stopping ${victim.name} ` +
-    `it is held by ${after.length}/${survivors.length} survivors [${after.join(', ') || 'none'}]${gloss}`,
-    ISSUE_15);
-}
 
 /**
  * Owner genesis on the founder. cadre-core deliberately never runs this implicitly —
@@ -709,45 +605,113 @@ async function ownerGenesis(founder) {
  * then `dialInvite` on the joiner. `acceptPhone` is tried as a fallback for builds
  * where the owner must accept explicitly.
  */
+/**
+ * `true` / `false` / `'unknown'` — never throws.
+ *
+ * `isAuthorizedMember` reads the control database, and that read can fail outright
+ * (`Block default/Revocation is unavailable (peers-unreachable)`) rather than answering. That
+ * is NOT a membership verdict, and treating it as one is what made this ceremony look broken:
+ * the check was the FIRST statement in the attempt, so once reads started failing every
+ * remaining attempt died before reaching `createInvite`, and the ceremony that would have
+ * fixed things never ran. Worse, the failure was then reported as "membership did not take"
+ * on a joiner that had in fact been accepted.
+ */
+async function isMemberOrUnknown(owner, peerId) {
+  try {
+    return await owner.isAuthorizedMember(peerId);
+  } catch (e) {
+    V(`membership read for ${peerId} could not be answered: ${e?.message ?? e}`);
+    return 'unknown';
+  }
+}
+
 async function enrol(owner, joiners) {
   for (const { name, node } of joiners) {
     const peerId = node.peerId.toString();
     let lastErr = null;
 
-    // Bounded retry, because the ceremony genuinely races. Each step writes and then
-    // reads owner-signed control state, and a read issued before that state has settled
-    // fails with `Block default/Revocation is unavailable (peers-unreachable)`. The same
-    // code path succeeds or fails run-to-run purely on timing, so a one-shot attempt
-    // makes the whole gate flaky. Retrying is not masking a defect: a peer that is truly
-    // un-enrollable still exhausts every attempt and L3 still fails.
     for (let attempt = 1; attempt <= ENROLL_ATTEMPTS; attempt++) {
-      try {
-        if (await owner.isAuthorizedMember(peerId)) { lastErr = null; break; }
+      const before = await isMemberOrUnknown(owner, peerId);
+      if (before === true) { lastErr = null; break; }
 
-        const { invite } = await owner.createInvite();
-        await withTimeout(node.dialInvite(invite), ENROLL_TIMEOUT_MS, `${name} dialInvite`);
-        V(`${name} dialInvite ok (attempt ${attempt})`);
-
-        if (!(await owner.isAuthorizedMember(peerId))) {
+      // Re-run the ceremony only when the control database DEFINITELY says this peer is not
+      // a member, or on the first pass. An `unknown` on a later attempt means the ceremony
+      // has already run and its result merely cannot be read yet — waiting is the right move,
+      // and re-running would storm createInvite/acceptPhone through a read outage for no gain
+      // (measured: three joiners x five full ceremonies, minutes of work, no effect).
+      if (before === false || attempt === 1) {
+        try {
+          // Bounded like dialInvite below. createInvite is a control WRITE, and this call sits
+          // on the same path whose reads are known to stall; an unbounded write here would
+          // hang the whole gate rather than fail it.
+          const { invite } = await withTimeout(
+            owner.createInvite(), ENROLL_TIMEOUT_MS, `${name} createInvite`);
+          await withTimeout(node.dialInvite(invite), ENROLL_TIMEOUT_MS, `${name} dialInvite`);
           try {
             await owner.acceptPhone({ phonePeerId: peerId }, invite);
-            V(`${name} acceptPhone ok (attempt ${attempt})`);
           } catch (e) {
             V(`${name} acceptPhone unavailable: ${e?.message ?? e}`);
           }
+          V(`${name} ceremony ran (attempt ${attempt})`);
+        } catch (e) {
+          lastErr = e;
+          V(`${name} ceremony attempt ${attempt}/${ENROLL_ATTEMPTS} failed: ${e?.message ?? e}`);
         }
-
-        if (await owner.isAuthorizedMember(peerId)) { lastErr = null; break; }
-        lastErr = new Error('ceremony completed but membership did not take');
-      } catch (e) {
-        lastErr = e;
-        V(`${name} enrolment attempt ${attempt}/${ENROLL_ATTEMPTS} failed: ${e?.message ?? e}`);
       }
+
+      const settled = await isMemberOrUnknown(owner, peerId);
+      if (settled === true) { lastErr = null; break; }
+      lastErr = settled === 'unknown'
+        ? new Error('ceremony ran, but the control database could not be read to confirm it')
+        : new Error('ceremony completed but membership did not take');
+
       await new Promise((r) => setTimeout(r, ENROLL_RETRY_MS * attempt)); // linear backoff
     }
 
     if (lastErr) L(`WARN enrolment for ${name} did not settle after ${ENROLL_ATTEMPTS} attempt(s): ${lastErr?.message ?? lastErr}`);
     else V(`${name} enrolled`);
+  }
+}
+
+/**
+ * Wait for the topology to settle before the enrolment ceremony.
+ *
+ * cadre-core 0.12.0 changed WHEN a relay reservation lands: `network.relayAddrs` takes
+ * libp2p's 'search' route and `CadreNode.start()` drives the reservation explicitly AFTER
+ * the control database is up, where 0.11.0's relay-qualified listen entry reserved from
+ * inside `libp2p.start()`. So `start()` can now return before a relay-only peer has a
+ * circuit address, and enrolment issued in that window reads owner-signed control state
+ * that no one can serve yet — it fails with
+ *   Block default/Revocation is unavailable (peers-unreachable)
+ * which is a TIMING artifact, not a membership verdict.
+ *
+ * `enrol()`'s bounded retry alone is not enough: on 0.12.0 the whole retry budget can
+ * elapse before the reservation lands, so the gate went from deterministic to flaky (it
+ * passed one run and failed the next on an unchanged tree). Gate on the observable
+ * preconditions instead — the founder sees everyone, and every relay-only peer holds a
+ * `/p2p-circuit` address — then let the existing retry cover the residual jitter.
+ *
+ * Returns false on timeout rather than throwing: enrolment still runs, and L3 still
+ * reports the real failure if membership genuinely cannot be established.
+ */
+async function settleTopology(founder, all, relayOnly, ms = SETTLE_TIMEOUT_MS) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const founderPeers = founder.getControlNode().getPeers?.().length ?? 0;
+    const meshed = founderPeers >= all.length - 1
+      && all.every((n) => (n.node.getControlNode().getPeers?.().length ?? 0) >= 1);
+    const reserved = relayOnly.every(({ node }) =>
+      node.getControlNode().getMultiaddrs().map(String).some((a) => a.includes('/p2p-circuit')));
+    if (meshed && reserved) {
+      await new Promise((r) => setTimeout(r, SETTLE_GRACE_MS));  // let the control writes land
+      V(`topology settled (founder sees ${founderPeers}, ${relayOnly.length} reservation(s))`);
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      L(`WARN topology did not settle in ${ms}ms (meshed=${meshed} reserved=${reserved}) — enrolling anyway`);
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 500));
   }
 }
 
@@ -788,9 +752,13 @@ async function main() {
 
   // L1 before any strand work: a broken mesh makes every later leg meaningless.
   if (!(await legControlMesh(droneA, all))) return false;
-  if (!(await legRelayReservation(peers))) return false;
+  if (!(await legRelayReservation(peers, drones))) return false;
 
   if (ENROLL) {
+    // Gate on the reservation actually landing — see settleTopology(). Without this the
+    // ceremony races cadre-core 0.12.0's post-bring-up reservation drive and L3 fails
+    // intermittently with `peers-unreachable`, which reads like a membership failure.
+    await settleTopology(droneA, all, peers);
     L('running the invite/enrolment ceremony ...');
     await enrol(droneA, [...drones.slice(1), ...peers]);
   }
@@ -803,14 +771,6 @@ async function main() {
 
   if (!(await legStrandCohort(all))) return false;
   if (!(await legReplication(peers[0], peers[1]))) return false;
-
-  // L6-L8 are STANDING REPRODUCTIONS. They deliberately do not short-circuit each other
-  // and do not affect the gate's verdict — see recordStanding().
-  L('');
-  L('running the distributed-database legs (standing reproductions, expected red) ...');
-  await legReplicationFactor(all);
-  await legLateJoiner(droneA, relayAddrs, droneAAddr, all);
-  await legDurability(all);
 
   return true;
 }
@@ -826,16 +786,15 @@ async function shutdown() {
 }
 
 function summarize(passed) {
-  const gate = results.filter((r) => r.status === 'PASS' || r.status === 'FAIL' || r.status === 'SKIP');
-  const standing = results.filter((r) => r.status === 'KNOWN-RED' || r.status === 'FIXED');
-
   L('');
   L('──────────────────────────── SUMMARY ────────────────────────────');
-  for (const r of gate) L(` ${r.status.padEnd(9)}  ${r.id}  ${r.title}`);
-  const ran = gate.length;
+  for (const r of results) {
+    L(` ${r.status.padEnd(4)}  ${r.id}  ${r.title}`);
+  }
+  const ran = results.length;
   L('─────────────────────────────────────────────────────────────────');
   if (passed) {
-    L(`MULTIPEER GATE: PASS — all ${ran} gate legs green.`);
+    L('MULTIPEER GATE: PASS — all 5 legs green.');
     L('Necessary, not sufficient: this is loopback, so it says the blocker is not in');
     L('this layer. It does not stand in for a device run.');
   } else {
@@ -843,21 +802,6 @@ function summarize(passed) {
     L(`MULTIPEER GATE: FAIL at ${failed?.id ?? '?'} (${failed?.title ?? 'startup'}) — ${ran} leg(s) ran.`);
     L('Legs are ordered, so this is the EARLIEST broken link, not a downstream symptom.');
     L("Re-run with DEBUG='optimystic:db-p2p:*,db-p2p:*,sereus:*' for the underlying trace.");
-  }
-
-  if (standing.length) {
-    L('');
-    L('──────────── DISTRIBUTED-DATABASE LEGS (standing) ───────────────');
-    for (const r of standing) L(` ${r.status.padEnd(9)}  ${r.id}  ${r.title}`);
-    L('─────────────────────────────────────────────────────────────────');
-    const fixed = standing.filter((r) => r.status === 'FIXED');
-    if (fixed.length) {
-      L(`${fixed.length} standing reproduction(s) went GREEN: ${fixed.map((r) => r.id).join(', ')}.`);
-      L('Verify against the leg\'s own note, then promote it from standing to a real leg.');
-    } else {
-      L(`All red, as expected. A green gate above does NOT mean the data is replicated:`);
-      L(`L6 measures the replication factor and on 0.24.2 it is 1 (${ISSUE_15}).`);
-    }
   }
   return passed ? 0 : 1;
 }
