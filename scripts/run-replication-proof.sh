@@ -853,10 +853,22 @@ fi
 
 # ── BOTH-PEER VERDICT (D-01) ──────────────────────────────────────────────────
 # Poll BOTH serials. A and B emit REPLICATION VERDICT independently.
-echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5554 (${LOGCAT_TIMEOUT}s) ..."
-VERDICT_A=$(wait_for_logcat_line "${VERDICT_TAG}" "${LOGCAT_TIMEOUT}" "[run-replication-proof]" "verdict-A" "-s emulator-5554")
-echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5556 (${LOGCAT_TIMEOUT}s) ..."
-VERDICT_B=$(wait_for_logcat_line "${VERDICT_TAG}" "${LOGCAT_TIMEOUT}" "[run-replication-proof]" "verdict-B" "-s emulator-5556")
+# Polled, not streamed, and budgeted for the LAGGING peer. The verdict is a once-per-boot
+# marker, so wait_for_logcat_line burned its whole window whether or not it matched (IN-19,
+# see read_logcat_line_now) — and worse, the window was LOGCAT_TIMEOUT=180 s measured from
+# whenever the harness happened to arrive here, while the read phase alone runs 120 ticks
+# (~125 s) and the two peers start it minutes apart.
+#
+# Run 26 is what that costs: BOTH peers emitted `REPLICATION VERDICT: FAIL`, Peer A's simply
+# landing ~27 s after its window shut. The harness reported "one or both peers did not emit a
+# verdict" — a statement about the instrument dressed as a statement about the peers. The
+# verdict was FAIL either way there, so nothing was misjudged; on a PASS it would have
+# discarded the pass.
+VERDICT_TIMEOUT=420
+echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5554 (${VERDICT_TIMEOUT}s) ..."
+VERDICT_A=$(read_logcat_line_now "${VERDICT_TAG}" "emulator-5554" $((VERDICT_TIMEOUT / 5)))
+echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5556 (${VERDICT_TIMEOUT}s) ..."
+VERDICT_B=$(read_logcat_line_now "${VERDICT_TAG}" "emulator-5556" $((VERDICT_TIMEOUT / 5)))
 
 # ── D-08: cluster-error capture (diagnose-first, P2P-09) ─────────────────────
 # MUST run BEFORE the verdict-empty guard below: a verdict TIMEOUT (empty
