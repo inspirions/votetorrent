@@ -130,3 +130,4 @@ vendor
 scratchpad/
 # D-07 StrongBox rung probe output (scripts/run-strongbox-rung-probe.sh)
 .probe-out/
+.capture

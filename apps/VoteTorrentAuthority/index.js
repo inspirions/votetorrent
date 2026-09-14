@@ -6,6 +6,16 @@
 // Spike 002 scaffold — see polyfills.bootstrap.js.
 import './polyfills.bootstrap';
 
+// Dev-only arming of the `debug` namespace filter, so Optimystic's diagnostic markers
+// (cluster-tx:read-repair-triggered / cluster-fetch:solo-self-skip / commit:solo-cohort)
+// actually reach logcat. Nothing else enables `debug` on React Native: its browser build
+// reads localStorage (absent on RN) and falls back to process.env.DEBUG (never set by
+// Metro), so those namespaces are silently OFF and a capture greps clean whether or not
+// the code path ran. No-op unless __DEV__ && DEBUG_NAMESPACES is non-empty (committed
+// default ''). Driven by scripts/run-read-repair-capture.sh. Logs under [optidbg].
+import {armDebugNamespaces} from './src/engines/arm-debug-namespaces';
+armDebugNamespaces();
+
 import {AppRegistry} from 'react-native';
 import App from './App';
 import {name as appName} from './app.json';
