@@ -77,16 +77,58 @@
   },
   "authorityTypecheck": {
     "command": "yarn workspace votetorrent-authority typecheck",
-    "measuredOn": "2026-08-25",
-    "maxErrors": 51,
-    "note": "This is a ceiling, not a floor: the producer half added to apps/VoteTorrentAuthority by this phase must introduce none. A drop below 51 means someone fixed something and the ceiling should be lowered in that same commit, not silently absorbed."
+    "measuredOn": "2026-09-15",
+    "maxErrors": 49,
+    "note": "This is a ceiling, not a floor: the producer half added to apps/VoteTorrentAuthority by this phase must introduce none. A drop below 51 means someone fixed something and the ceiling should be lowered in that same commit, not silently absorbed. Lowered 51 -> 49 on 2026-09-15 (commit 46dae0c0, phase 59-11): the tree measured 49, 2 below the recorded ceiling, and this file's own note already required exactly this -- 'a drop below 51 means someone fixed something and the ceiling should be lowered in that same commit, not silently absorbed'. A stale 51 would have hidden up to two phase-59 Authority-side regressions behind headroom nobody was using."
   },
-  "notEnforcedHere": {
-    "voterJest": {
-      "failingSuites": 4,
-      "cause": "uint8arrays",
-      "measuredOn": "2026-08-25",
-      "reason": "This phase (the authority web dashboard) touches nothing in apps/VoteTorrentVoter. Importing an unrelated red baseline into a gate whose whole value is trustworthiness would make the gate less useful, not more. Recorded here, and echoed to every CI run's job summary, precisely so it cannot be silently forgotten -- it is not this phase's to fix, and it is not this workflow's to run."
-    }
+  "voterJest": {
+    "command": "yarn workspace votetorrent-voter test",
+    "measuredOn": "2026-09-15",
+    "measuredAt": "46dae0c0",
+    "maxFailingSuites": 1,
+    "minPassingSuites": 41,
+    "minPassingTests": 321,
+    "maxFailingTests": 2,
+    "knownFailingSuites": [
+      "src/providers/__tests__/VoterAppProvider.test.tsx"
+    ],
+    "knownFailureTitles": [
+      "VoterAppProvider \u2014 real composition root (D-02/D-04/D-07) \u203a boots to isInitialized after the mocked seed resolves, and calls hideSplash",
+      "VoterAppProvider \u2014 real composition root (D-02/D-04/D-07) \u203a useVoterApp() exposes a real getEngine accessor plus seededElectionId (not the removed isRegistered mock boolean, and NOT a sign field \u2014 51-12/D-09/D-20)"
+    ],
+    "note": "Measured live 2026-09-15 at commit 46dae0c0, working tree clean, before phase 59 touched anything: 42 suites (41 passed, 1 failed), 323 tests (321 passed, 2 failed), ~6s warm. This entry SUPERSEDES notEnforcedHere.voterJest, which recorded 4 failing suites on 2026-08-25 (cause: uint8arrays) and had drifted to 1 by 2026-09-15 without anyone updating the file -- notEnforcedHere.voterJest is removed in this same commit. A stale 4-suite allowance would have silently absorbed up to three phase-59 regressions behind a number nobody was checking against reality. The one known-failing suite, VoterAppProvider.test.tsx, is a file 59-08 legitimately touches; scripts/assert-voter-gates.mjs reports (never silently absorbs) a DROP if it starts passing again -- see that script's own run output and 59-11-SUMMARY.md for whether that in fact happened by the time phase 59 closed."
+  },
+  "voterTypecheck": {
+    "command": "yarn workspace votetorrent-voter typecheck",
+    "measuredOn": "2026-09-15",
+    "measuredAt": "46dae0c0",
+    "maxErrors": 44,
+    "knownErrorFiles": {
+      "src/engines/__tests__/real-attestation-producer.test.ts": 15,
+      "src/__tests__/no-vrg-ceremony.gate.test.ts": 9,
+      "src/components/__tests__/ConfigFaultNotice.test.tsx": 4,
+      "__tests__/no-inline-mock-imports.test.ts": 4,
+      "__tests__/i18n-parity.test.ts": 4,
+      "__tests__/hermes-bundle-guard.test.ts": 3,
+      "__tests__/dependency-versions.test.ts": 2,
+      "src/providers/__tests__/RegistrationDraftProvider.test.tsx": 1,
+      "src/engines/storage-guard.ts": 1,
+      "src/engines/__tests__/attestation-producer.test.ts": 1
+    },
+    "note": "Measured live 2026-09-15 at commit 46dae0c0, before phase 59 touched anything: 44 errors, exit 2, grouped by file in knownErrorFiles above (sums to 44). This is a CEILING, not a floor: scripts/assert-voter-gates.mjs attributes every error path to phase 59's own file set (git diff --name-only against the base) and FAILs if any lands there, which survives line-number churn inside a pre-existing-error file far better than a bare count ever could. A drop below 44 is reported as a DROP, not silently absorbed."
+  },
+  "voteCoreTypecheck": {
+    "command": "npx tsc --noEmit -p packages/vote-core/tsconfig.json",
+    "measuredOn": "2026-09-15",
+    "measuredAt": "46dae0c0",
+    "maxErrors": 0,
+    "note": "Measured live 2026-09-15 at commit 46dae0c0: 0 errors, exit 0. vote-core has no committed tsc drift; the ceiling is 0 and stays 0 -- any error here is a phase regression by definition, never a pre-existing one to attribute away."
+  },
+  "voteEngineTypecheck": {
+    "command": "npx tsc --noEmit -p packages/vote-engine/tsconfig.build.json",
+    "measuredOn": "2026-09-15",
+    "measuredAt": "46dae0c0",
+    "maxErrors": 0,
+    "note": "Measured live 2026-09-15 at commit 46dae0c0: 0 errors, exit 0, naming packages/vote-engine/tsconfig.build.json (src only) deliberately -- packages/vote-engine/tsconfig.json additionally includes test/ and measures 143 errors at the same commit, which would gate on nothing if named here. scripts/assert-voter-gates.mjs still runs and reports the tsconfig.json (src+test) count for the record on every invocation, but only tsconfig.build.json's count is gated with a ceiling."
   }
 }
