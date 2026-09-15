@@ -44,6 +44,7 @@
 		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch",
 		"@ungap/structured-clone": "^1.3.1",
 		"@votetorrent/attestation-native": "workspace:*",
+		"@votetorrent/ui-web": "workspace:*",
 		"@votetorrent/vote-core": "workspace:*",
 		"@votetorrent/vote-engine": "workspace:*",
 		"buffer": "^6.0.3",
