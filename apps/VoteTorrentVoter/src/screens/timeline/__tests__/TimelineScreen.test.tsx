@@ -261,6 +261,23 @@ function mockDeviceTimeZone(zone: string): void {
 	}) as unknown as typeof Intl.DateTimeFormat);
 }
 
+/** WR-01 (59-REVIEW-2): forces the zero-arg `Intl.DateTimeFormat()` call — the one
+ * `resolveDeviceTimeZone()` makes — to THROW, simulating a device/Hermes/ICU build where the
+ * resolved-options lookup is unavailable. Every other `Intl` call site in this phase
+ * (`relative-date.ts`'s `dateParts`/`weekdayName`) already guards this with try/catch; this
+ * proves the screen degrades to its documented UTC fallback instead of crashing render, which
+ * would otherwise defeat D-03's "never blank, never silent" guarantee (the voter app has no
+ * ErrorBoundary to catch a render throw). */
+function mockDeviceTimeZoneThrows(): void {
+	jest.spyOn(Intl, 'DateTimeFormat').mockImplementation(((...args: unknown[]) => {
+		if (args.length === 0) {
+			throw new RangeError('resolvedOptions unavailable on this build');
+		}
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		return new (RealDateTimeFormat as any)(...args);
+	}) as unknown as typeof Intl.DateTimeFormat);
+}
+
 beforeEach(() => {
 	// Pins the "device" zone to UTC by default so every PRE-EXISTING test below (written and
 	// reasoned about against UTC-anchored fixtures) stays deterministic regardless of the actual
@@ -867,5 +884,15 @@ describe('TimelineScreen — registration panel re-reads on focus (regression, s
 		// loop (proves it ran only once per refocus).
 		expect(mockListAssociationRequests.mock.calls.length).toBe(callsAfterMount + 1);
 		void tr;
+	});
+});
+
+describe('TimelineScreen — device time-zone resolution degrades safely (WR-01)', () => {
+	it('still renders the timeline when the zero-arg Intl.DateTimeFormat() throws, instead of crashing render', async () => {
+		mockDeviceTimeZoneThrows();
+		const tr = await renderAndFlush();
+		// The rail must still be on screen. Before the fix this line is never reached: the throw
+		// escapes `resolveDeviceTimeZone()` during render and takes the whole screen down.
+		expect(hasTestId(tr, 'timeline-rail')).toBe(true);
 	});
 });

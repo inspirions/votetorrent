@@ -90,8 +90,19 @@ export interface HeaderDateRangeParts {
  * entirely). This reads `Intl.DateTimeFormat().resolvedOptions().timeZone`, not the process
  * clock -- it is exempt from this module's "no ambient clock" contract, which is about `now`,
  * not the offset used to render it. */
-export function resolveDeviceTimeZone(): string {
-	return Intl.DateTimeFormat().resolvedOptions().timeZone;
+export function resolveDeviceTimeZone(): string | undefined {
+	// WR-01 (59-REVIEW-2): guarded exactly like every other `Intl` call site in this phase
+	// (`relative-date.ts`'s `dateParts`/`weekdayName`). A device/Hermes/ICU build where the
+	// zero-arg resolved-options lookup throws must degrade to the documented UTC fallback, NOT
+	// crash render -- the voter app has no ErrorBoundary, so an escaping throw here would blank
+	// the whole screen and defeat D-03's "never blank, never silent" guarantee that this screen
+	// upholds on every other failure path. `undefined` flows into both consumers' own `?? 'UTC'`
+	// defaults, so the fallback stays in one place rather than being restated here.
+	try {
+		return Intl.DateTimeFormat().resolvedOptions().timeZone;
+	} catch {
+		return undefined;
+	}
 }
 
 /** Numeric `YYYY-MM-DD` calendar-day key for `ms` in `timeZone`, read back from
