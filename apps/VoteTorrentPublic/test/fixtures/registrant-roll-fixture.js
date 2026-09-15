@@ -33,6 +33,21 @@
  * short to fail: an 84-character code that clipped silently, and a 7-character
  * name that satisfied a check a production-length one would not. Shortening any
  * value here re-opens that blindness.
+ *
+ * THE DISTRICT DISTRIBUTION IS DELIBERATELY UNBALANCED (`60-08`'s
+ * `render-fidelity-gate.mjs` rung `roll-district-bars-proportional-and-folded`).
+ * One district per row — the shape this fixture used to have — would put
+ * every district's count at exactly one, which is below
+ * `SMALL_DISTRICT_THRESHOLD` (`../../src/roll-disclosure.js`) for all of
+ * them: every district would fold into "Other" and that rung could never
+ * distinguish a SELECTIVE fold (the privacy control D-09 actually specifies)
+ * from a TOTAL one (every district folds regardless of size) or from a
+ * broken chart mount
+ * — all three produce a single "Other" bar. This fixture instead seeds two
+ * districts at or above the exported threshold and two below it, so that
+ * rung can observe the fold firing selectively. Restoring the one-per-row
+ * shape re-opens that blindness; do not "simplify" this distribution back to
+ * it.
  */
 
 import { generatePrivateKey, getPublicKey, sign } from '@optimystic/quereus-plugin-crypto';
@@ -87,13 +102,20 @@ export const EXTRA_FIELDS_MARKER = 'EXTRAFIELDS-MUST-NOT-RENDER';
 const EXTRA_FIELDS_JSON = JSON.stringify({ vtxNeverRender: EXTRA_FIELDS_MARKER });
 
 /**
- * The four registrants whose CURRENT public records make up the roll.
+ * The seven registrants whose CURRENT public records make up the roll, across
+ * 4 districts — two districts at or above `SMALL_DISTRICT_THRESHOLD`
+ * (North Riverbend, three rows; Bracketed Ward, two rows) and two below it
+ * (Southgate Township, New Millrace, one row each), so `60-08`'s C7 rung can
+ * observe D-09's fold firing SELECTIVELY. See this file's header for why that
+ * distribution, not a one-district-per-row shape, is load-bearing.
  *
  * `r-roll-3` is the reissued registrant: this is its CURRENT record, and
  * `ROLL_SUPERSEDED` below is the one it replaced. Both rows persist —
  * `RegistrantPublic.InsertOnly` forbids the update and the delete — so the
  * roll's join genuinely fans out to two rows for that registrant and the
- * `RP.Cid = R.PublicCid` pin is what resolves it back to one.
+ * `RP.Cid = R.PublicCid` pin is what resolves it back to one. Its district
+ * (New Millrace) stays below the fold threshold, so its name is absent from
+ * the rendered chart for a second, independent reason.
  *
  * `r-roll-4` IS THE SECURITY ROW, and its shape is deliberate.
  * `RegistrantPublic` holds authority-supplied text that reaches an anonymous
@@ -101,7 +123,10 @@ const EXTRA_FIELDS_JSON = JSON.stringify({ vtxNeverRender: EXTRA_FIELDS_MARKER }
  * XSS is React's JSX text-node escaping. This row is what makes that control
  * OBSERVABLE rather than assumed: a rung can require both that no `script`
  * element exists under the roll and that this exact string is present as text.
- * NEVER render this value through `dangerouslySetInnerHTML` anywhere.
+ * NEVER render this value through `dangerouslySetInnerHTML` anywhere. Its
+ * district (Bracketed Ward) is kept AT the fold threshold (two rows) so it
+ * SURVIVES the fold and the chart itself becomes an escaping probe, rather
+ * than retiring this control by folding the markup-bearing district away.
  *
  * @type {ReadonlyArray<Readonly<{ id: string, lastName: string, firstName: string, district: string }>>}
  */
@@ -130,6 +155,24 @@ export const ROLL_REGISTRANTS = Object.freeze([
 		firstName: 'Angelicaesther',
 		district: 'Bracketed <b>Ward</b> 5 Precinct 40 (vtx-fixture)',
 	}),
+	Object.freeze({
+		id: 'r-roll-5',
+		lastName: 'Quillfeather-Nwosu',
+		firstName: 'Constantijn-Ade',
+		district: 'North Riverbend Ward 7 Precinct 12 (vtx-fixture)',
+	}),
+	Object.freeze({
+		id: 'r-roll-6',
+		lastName: 'Zephyrington-Adeyemi',
+		firstName: 'Perpetua-Lindiwe',
+		district: 'North Riverbend Ward 7 Precinct 12 (vtx-fixture)',
+	}),
+	Object.freeze({
+		id: 'r-roll-7',
+		lastName: 'Brightwater-Osei',
+		firstName: 'Thaddeus-Emeka',
+		district: 'Bracketed <b>Ward</b> 5 Precinct 40 (vtx-fixture)',
+	}),
 ]);
 
 /**
@@ -152,22 +195,22 @@ export const ROLL_SUPERSEDED = Object.freeze({
 	district: 'Old Millrace Ward 3 Precinct 22 (vtx-fixture)',
 });
 
-/** The four last names `readRegistrantRoll` must return — no more, no fewer. @type {ReadonlyArray<string>} */
+/** The seven last names `readRegistrantRoll` must return — no more, no fewer. @type {ReadonlyArray<string>} */
 export const EXPECTED_ROLL_LAST_NAMES = Object.freeze(ROLL_REGISTRANTS.map((r) => r.lastName));
 
 /**
  * Row counts this fixture leaves behind.
  *
- * `RegistrantPublic` is FIVE, not four: the superseded row is never deleted
+ * `RegistrantPublic` is EIGHT, not seven: the superseded row is never deleted
  * (`InsertOnly check on update, delete (false)`), which is precisely the
  * production condition the roll's `RP.Cid = R.PublicCid` predicate defends
  * against.
  * @type {Readonly<Record<string, number>>}
  */
 export const ROLL_EXPECTED_COUNTS = Object.freeze({
-	Registrant: 4,
-	ElectionRegistrant: 4,
-	RegistrantPublic: 5,
+	Registrant: 7,
+	ElectionRegistrant: 7,
+	RegistrantPublic: 8,
 });
 
 /**
@@ -225,10 +268,10 @@ async function signRegistrantRow(db, row, priv) {
 }
 
 /**
- * Seed four `Registrant` rows, their four `ElectionRegistrant` enrolments and
- * FIVE `RegistrantPublic` rows — one registrant having had its public record
- * REISSUED — behind a real `vrg` signing ceremony and a real secp256k1
- * signature.
+ * Seed seven `Registrant` rows, their seven `ElectionRegistrant` enrolments
+ * and EIGHT `RegistrantPublic` rows — one registrant having had its public
+ * record REISSUED — behind a real `vrg` signing ceremony and a real
+ * secp256k1 signature.
  *
  * `ceremony` IS A PARAMETER, NOT AN IMPORT. The helper lives in
  * `packages/web-data/test/fixtures/seed-election-surface.js`; injecting it
@@ -436,7 +479,7 @@ export async function seedRegistrantRoll(db, ceremony, options) {
 		// snapshot of it — a recorded trap in this project — and the digest
 		// `SignatureValid` recomputes includes `Expiration`. This mirrors
 		// `registration-engine.ts`'s own `updateRegistrantRow`, which rebinds the
-		// same four columns for the same reason.
+		// same 4 columns for the same reason.
 		// eslint-disable-next-line no-await-in-loop
 		await db.exec(
 			`update Registrant

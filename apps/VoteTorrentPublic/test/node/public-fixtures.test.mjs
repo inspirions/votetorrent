@@ -121,9 +121,9 @@ test('the reissued registrant genuinely fans out to two public records (D-18)', 
 	assert.equal(Number(row?.c ?? 0), 2, 'r-roll-3 must have both a superseded and a current public record');
 });
 
-test('readRegistrantRoll returns exactly the four current registrants', async () => {
+test('readRegistrantRoll returns exactly the current registrants', async () => {
 	rollRows = await readRegistrantRoll(db, FIXTURE_ELECTION_DB_ID);
-	assert.equal(rollRows.length, 4);
+	assert.equal(rollRows.length, ROLL_REGISTRANTS.length);
 	assert.deepEqual(
 		rollRows.map((r) => r.LastName).sort(),
 		[...EXPECTED_ROLL_LAST_NAMES].sort(),
@@ -147,7 +147,7 @@ test('the RP.Cid = R.PublicCid pin keeps the superseded record off the roll (D-1
 	assert.equal(matches.length, 0, `superseded record leaked onto the roll: ${JSON.stringify(matches)}`);
 });
 
-test('positive control: without the Cid pin the same join publishes the superseded name (D-18)', async () => {
+test('positive control: without the Cid pin the same join publishes one row more than the roll returns (D-18)', async () => {
 	// The assertion above ("the superseded record is absent") is only meaningful
 	// if the join could have produced it. This runs the SAME three-table join
 	// with `RP.Cid = R.PublicCid` REMOVED and requires the leak to appear — so
@@ -163,7 +163,11 @@ test('positive control: without the Cid pin the same join publishes the supersed
 	for await (const r of db.eval(unpinned, { electionId: FIXTURE_ELECTION_DB_ID })) {
 		names.push(String(r.LastName));
 	}
-	assert.equal(names.length, 5, 'the unpinned join must fan out to five rows');
+	assert.equal(
+		names.length,
+		ROLL_REGISTRANTS.length + 1,
+		'the unpinned join must fan out to one row more than the roll returns — the reissued registrant is the extra row',
+	);
 	assert.ok(
 		names.includes(ROLL_SUPERSEDED.lastName),
 		'the unpinned join must surface the superseded name — otherwise the pinned read proves nothing',
@@ -174,7 +178,11 @@ test('ExtraFields never reaches the read result, though it is seeded non-null (D
 	const seeded = await db
 		.prepare('select count(*) as c from RegistrantPublic where ExtraFields is not null')
 		.get({});
-	assert.equal(Number(seeded?.c ?? 0), 5, 'every seeded public record must carry a non-null ExtraFields');
+	assert.equal(
+		Number(seeded?.c ?? 0),
+		ROLL_REGISTRANTS.length + 1,
+		'every seeded public record must carry a non-null ExtraFields',
+	);
 	assert.ok(
 		!JSON.stringify(rollRows).includes(EXTRA_FIELDS_MARKER),
 		'the ExtraFields marker reached the roll read result',
