@@ -691,6 +691,48 @@ export class AssociationEngine implements IAssociationEngine {
   }
 
   /**
+   * D-23a reverse lookup — every public `Association` row bound to a DEVICE
+   * rather than to a registrant.
+   *
+   * `Association`'s primary key is `(RegistrantId, DeviceKey)` — `DeviceKey`
+   * is the TRAILING column, so filtering on it alone is structurally a SCAN,
+   * not a point lookup. This mirrors the existing `associate()` D-06
+   * device-uniqueness precedent (`select RegistrantId from
+   * AssociationPrivate where DeviceId = ...` above): a deliberate scan at
+   * voter-local row counts, documented inline rather than backed by an
+   * index. An index is NOT added per D-23a.
+   *
+   * Results are ordered `RegistrantId` ascending (mirrors
+   * `getAttestationVerdicts`' documented ordering discipline). Same
+   * seven-column projection and D-04 disclosure boundary as `getAssociation`
+   * / `getAssociations`.
+   */
+  async getAssociationsByDeviceKey (deviceKey: string): Promise<Association[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: Association[] = []
+    try {
+      for await (const row of ctx.db.eval(
+        'select RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration, SignorKey, Signature from Association where DeviceKey = :deviceKey order by RegistrantId asc',
+        { deviceKey }
+      )) {
+        out.push({
+          registrantId: asText(row.RegistrantId, 'Association.RegistrantId'),
+          deviceKey: asText(row.DeviceKey, 'Association.DeviceKey'),
+          deviceHash: row.DeviceHash == null ? undefined : asText(row.DeviceHash, 'Association.DeviceHash'),
+          attestationCid: row.AttestationCid == null ? undefined : asText(row.AttestationCid, 'Association.AttestationCid'),
+          expiration: toIsoZDatetime(row.Expiration as string),
+          signorKey: asText(row.SignorKey, 'Association.SignorKey'),
+          signature: asText(row.Signature, 'Association.Signature')
+        })
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'getAssociationsByDeviceKey')
+    }
+  }
+
+  /**
    * D-11 inspect half: every outstanding `AttestationChallenge`, optionally
    * narrowed to one registrant. Pairs with `removeAttestationChallenge` (the
    * expire half) — a removed challenge disappears from this read for free.

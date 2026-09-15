@@ -148,6 +148,13 @@ export class MockAssociationEngine implements IAssociationEngine {
     return [...this.associations.values()].filter((a) => a.registrantId === registrantId)
   }
 
+  /** D-23a mock parity — filters by device key; sorted copy (never the internal Map by reference) to match the real engine's `registrantId`-ascending ordering. */
+  async getAssociationsByDeviceKey (deviceKey: string): Promise<Association[]> {
+    return [...this.associations.values()]
+      .filter((a) => a.deviceKey === deviceKey)
+      .sort((a, b) => (a.registrantId < b.registrantId ? -1 : a.registrantId > b.registrantId ? 1 : 0))
+  }
+
   async removeAssociation (registrantId: string, deviceKey: string, _signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.associations.delete(`${registrantId}:${deviceKey}`)
   }

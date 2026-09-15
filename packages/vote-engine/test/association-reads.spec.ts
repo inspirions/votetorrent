@@ -175,6 +175,73 @@ describe('AssociationEngine read surface', () => {
     })
   })
 
+  describe('getAssociationsByDeviceKey', () => {
+    it('returns exactly the rows for a device key bound to two different registrants, and a sibling device key\'s row is absent', async () => {
+      const { auth, registrantId: registrantA, engine, sign } = await setupAssociationTest()
+      const registrantB = await seedRegistrant(auth, sign)
+      const sharedDeviceKey = nextDeviceKey()
+      const siblingDeviceKey = nextDeviceKey()
+
+      // PK is (RegistrantId, DeviceKey) — the SAME deviceKey bound to two different
+      // registrants is a legal pair of rows.
+      await associateDevice(engine, registrantA, sign, { deviceKey: sharedDeviceKey })
+      await associateDevice(engine, registrantB, sign, { deviceKey: sharedDeviceKey })
+      await associateDevice(engine, registrantA, sign, { deviceKey: siblingDeviceKey })
+
+      const rows = await engine.getAssociationsByDeviceKey(sharedDeviceKey)
+      expect(rows).to.have.length(2)
+      expect(rows.map((r) => r.registrantId).sort()).to.deep.equal([registrantA, registrantB].sort())
+      expect(rows.every((r) => r.deviceKey === sharedDeviceKey)).to.be.true
+    })
+
+    it('orders results by registrantId ascending, against a deliberately reverse-sorted seeding order', async () => {
+      const { auth, registrantId: registrantA, engine, sign } = await setupAssociationTest()
+      const registrantB = await seedRegistrant(auth, sign)
+      const registrantC = await seedRegistrant(auth, sign)
+      const sharedDeviceKey = nextDeviceKey()
+      const expectedOrder = [registrantA, registrantB, registrantC].sort()
+
+      // Seed in the REVERSE of registrantId-ascending order so the assertion below
+      // cannot pass by insertion accident.
+      await associateDevice(engine, registrantC, sign, { deviceKey: sharedDeviceKey })
+      await associateDevice(engine, registrantB, sign, { deviceKey: sharedDeviceKey })
+      await associateDevice(engine, registrantA, sign, { deviceKey: sharedDeviceKey })
+
+      const rows = await engine.getAssociationsByDeviceKey(sharedDeviceKey)
+      expect(rows.map((r) => r.registrantId)).to.deep.equal(expectedOrder)
+    })
+
+    it('returns [] for a device key with zero Association rows', async () => {
+      const { engine } = await setupAssociationTest()
+      expect(await engine.getAssociationsByDeviceKey(nextDeviceKey())).to.deep.equal([])
+    })
+
+    it('returns [] (not a throw) on an unwired engine', async () => {
+      const unwired = new AssociationEngine()
+      expect(await unwired.getAssociationsByDeviceKey('any-device-key')).to.deep.equal([])
+    })
+
+    it('T-59-03-01: disclosure boundary matches getAssociation\'s — same 7 keys, no deviceId leak', async () => {
+      const { registrantId, engine, sign } = await setupAssociationTest()
+      const attestation = makeDeviceAttestation()
+      const deviceHash = sha256Hex(attestation.deviceId)
+      const { deviceKey } = await associateDevice(engine, registrantId, sign, { deviceHash, attestation })
+
+      const rows = await engine.getAssociationsByDeviceKey(deviceKey)
+      expect(rows).to.have.length(1)
+
+      const boundaryMsg = 'getAssociationsByDeviceKey must not widen getAssociation\'s disclosure boundary'
+      expect(rows[0], boundaryMsg).to.not.have.property('deviceId')
+      expect(Object.keys(rows[0]).sort(), boundaryMsg).to.deep.equal(ASSOCIATION_KEYS.sort())
+
+      const pointRead = await engine.getAssociation(registrantId, deviceKey)
+      expect(pointRead, boundaryMsg).to.not.be.undefined
+      expect(Object.keys(rows[0]).sort(), boundaryMsg).to.deep.equal(Object.keys(pointRead!).sort())
+
+      expect(JSON.stringify(rows), boundaryMsg).to.not.include(attestation.deviceId)
+    })
+  })
+
   describe('getAttestationChallenges', () => {
     it('the no-arg call returns every outstanding challenge; the registrantId call narrows to one registrant', async () => {
       const { auth, registrantId: registrantA, engine, sign } = await setupAssociationTest()
@@ -257,6 +324,38 @@ describe('AssociationEngine read surface', () => {
 
       const rowsB = await mock.getAssociations(registrantB)
       expect(rowsB).to.have.length(1)
+    })
+
+    it('getAssociationsByDeviceKey: mock filters by device key, matches the real engine\'s 7-key shape, and both agree on registrantId-ascending order against the SAME expected array', async () => {
+      const { auth, registrantId: registrantA, engine, sign } = await setupAssociationTest()
+      const registrantB = await seedRegistrant(auth, sign)
+      const registrantC = await seedRegistrant(auth, sign)
+      const sharedDeviceKey = nextDeviceKey()
+      // The SAME expected array both engines' ordering is checked against — not two
+      // independently-written expectations that could each be wrong the same way.
+      const expectedOrder = [registrantA, registrantB, registrantC].sort()
+
+      // Real engine, reverse-seeded.
+      await associateDevice(engine, registrantC, sign, { deviceKey: sharedDeviceKey })
+      await associateDevice(engine, registrantB, sign, { deviceKey: sharedDeviceKey })
+      await associateDevice(engine, registrantA, sign, { deviceKey: sharedDeviceKey })
+      const realRows = await engine.getAssociationsByDeviceKey(sharedDeviceKey)
+      expect(realRows.map((r) => r.registrantId)).to.deep.equal(expectedOrder)
+
+      // Mock engine, same registrant ids, same reverse-seeding order, same shared key.
+      const mock = new MockAssociationEngine()
+      const dummySig: Signature = { signature: 'a'.repeat(128), signerKey: 'b'.repeat(66), signerUserId: 'user-1' }
+      async function mockAssociateWithKey (registrantId: string): Promise<void> {
+        const challenge = await mock.issueAttestationChallenge(registrantId, sharedDeviceKey, dummySig)
+        await mock.associate({ registrantId, deviceKey: sharedDeviceKey, nonce: challenge.nonce, attestation: makeDeviceAttestation() }, dummySig)
+      }
+      await mockAssociateWithKey(registrantC)
+      await mockAssociateWithKey(registrantB)
+      await mockAssociateWithKey(registrantA)
+
+      const mockRows = await mock.getAssociationsByDeviceKey(sharedDeviceKey)
+      expect(mockRows.map((r) => r.registrantId)).to.deep.equal(expectedOrder)
+      expect(Object.keys(mockRows[0]).sort()).to.deep.equal(ASSOCIATION_KEYS.sort())
     })
 
     it('getAttestationChallenges: no-arg returns all issued, registrantId narrows, a removed nonce is absent', async () => {
