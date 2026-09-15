@@ -18,14 +18,18 @@
  */
 import React, {useEffect, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {useTheme} from '@react-navigation/native';
+import {useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
+import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
 import type {ElectionSummary, IElectionsEngine} from '@votetorrent/vote-core';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {TimelineRail} from '../../components/TimelineRail';
-import {deriveTimeline} from '../../timeline';
-import type {TimelineViewModelConfident} from '../../timeline';
+import {InfoDialog} from '../../components/InfoDialog';
+import i18n from '../../i18n';
+import type {TimelineStackParamList} from '../../navigation/types';
+import {STAGE_TITLE_KEY, deriveTimeline} from '../../timeline';
+import type {TimelineStageId, TimelineViewModelConfident} from '../../timeline';
 
 /**
  * D-02's election-identity rule, exported as a pure helper so it is testable without rendering.
@@ -63,6 +67,61 @@ export function pickElectionId(summaries: ElectionSummary[], fallbackId: string 
 	return best?.id;
 }
 
+export interface HeaderDateRangeParts {
+	startDate: string;
+	endDate: string;
+	// Index signature so this type structurally satisfies i18next's `t(key, options)` params
+	// bag (`$Dictionary`) -- a plain interface without one fails TS2345 at the `t()` call site.
+	[key: string]: string;
+}
+
+/** Numeric `YYYY-MM-DD` calendar-day key for `ms` in `timeZone`, read back from
+ * `Intl.DateTimeFormat.formatToParts` (never a formatted/localized string) — mirrors
+ * `src/timeline/relative-date.ts`'s `dateParts` idiom. Locale-independent (uses `'en'`
+ * regardless of the caller's display language) because this key is used only for equality
+ * comparisons, never rendered. */
+function calendarDayKey(ms: number, timeZone: string): string {
+	const parts = new Intl.DateTimeFormat('en', {timeZone, year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(new Date(ms));
+	const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
+	return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+/** The active-language `"March 20"`-shaped month-name-plus-day string for `ms`, or just the
+ * bare day number when `dayOnly` is set (the UI-SPEC's "endDate is the day number alone" same-
+ * month case). Built from `formatToParts`, never string concatenation of a formatted date. */
+function formatHeaderDay(ms: number, language: string, timeZone: string, dayOnly: boolean): string {
+	const options: Intl.DateTimeFormatOptions = dayOnly ? {timeZone, day: 'numeric'} : {timeZone, month: 'long', day: 'numeric'};
+	const parts = new Intl.DateTimeFormat(language, options).formatToParts(new Date(ms));
+	if (dayOnly) {
+		return parts.find(p => p.type === 'day')?.value ?? '';
+	}
+	const month = parts.find(p => p.type === 'month')?.value ?? '';
+	const day = parts.find(p => p.type === 'day')?.value ?? '';
+	return `${month} ${day}`;
+}
+
+/**
+ * UI-SPEC `header.dateRange` (D-20 discretion): the earliest/latest PRESENT timeline instants
+ * (59-06's `rangeStartMs`/`rangeEndMs`), formatted in the active i18n language. Returns `null`
+ * when the present instants collapse to a single calendar day — the date-range line is then
+ * omitted entirely rather than rendering "March 20 - March 20" (a 7-of-10-key timeline still
+ * produces a range from its seven present instants; it is not this function's job to decide
+ * whether the INPUT was indeterminate, only whether the range is degenerate).
+ */
+export function computeHeaderDateRange(rangeStartMs: number, rangeEndMs: number, language: string, timeZone = 'UTC'): HeaderDateRangeParts | null {
+	const startKey = calendarDayKey(rangeStartMs, timeZone);
+	const endKey = calendarDayKey(rangeEndMs, timeZone);
+	if (startKey === endKey) {
+		return null;
+	}
+
+	const sameMonthAndYear = startKey.slice(0, 7) === endKey.slice(0, 7); // 'YYYY-MM' prefix
+	return {
+		startDate: formatHeaderDay(rangeStartMs, language, timeZone, false),
+		endDate: formatHeaderDay(rangeEndMs, language, timeZone, sameMonthAndYear),
+	};
+}
+
 type ScreenState =
 	| {kind: 'loading'}
 	| {kind: 'ready'; title: string; date: number; view: TimelineViewModelConfident}
@@ -73,14 +132,18 @@ export default function TimelineScreen() {
 	// inline mock-data-module import, and no direct election-record read either (D-04 read-scope
 	// fence: this screen touches only the engine chain below).
 	const {getEngine, seededElectionId} = useVoterApp();
-	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
+	const {colors, fonts, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('timeline');
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars -- bound here per D-20; consumed
-	// by the stage-details InfoDialog this screen composes alongside the rail.
 	const {t: tCommon} = useTranslation('common');
+	const navigation = useNavigation<NativeStackNavigationProp<TimelineStackParamList, 'TimelineHome'>>();
 
 	const [state, setState] = useState<ScreenState>({kind: 'loading'});
 	const [reloadNonce, setReloadNonce] = useState(0);
+	// D-20 discretion: neither `see details` nor the row `?` help affordance has a Details route
+	// (59-05 fixed the Timeline stack's param list at five entries) or its own copy, so both open
+	// the same in-place InfoDialog HomeScreen already uses for `onLearnAboutElection` — modal,
+	// not a push, and no new i18n key.
+	const [dialogStageId, setDialogStageId] = useState<TimelineStageId | null>(null);
 
 	// HomeScreen.tsx:50-61's `let live = true` cancellation-guard shape, exactly: an async IIFE
 	// inside the effect, every set* call guarded by `live`, `live = false` in the cleanup. One
@@ -165,10 +228,72 @@ export default function TimelineScreen() {
 		return <View testID="timeline-loading" style={[styles.screen, {backgroundColor: colors.background}]} />;
 	}
 
+	// From here on `state.kind === 'ready'` is narrowed for the rest of the render (both earlier
+	// branches returned above).
+	const dateRange = computeHeaderDateRange(state.view.rangeStartMs, state.view.rangeEndMs, i18n.language);
+	const dialogRow = dialogStageId ? state.view.rows.find(row => row.stageId === dialogStageId) : undefined;
+	const dialogSubtitle = dialogRow
+		? dialogRow.railLabel.kind === 'date'
+			? dialogRow.railLabel.text
+			: dialogRow.railLabel.kind === 'now'
+				? t('rail.now')
+				: ''
+		: '';
+	const dialogBody = dialogRow?.subtitle ? t(dialogRow.subtitle.key, dialogRow.subtitle.params) : '';
+
 	return (
-		<ScrollView style={[styles.screen, {backgroundColor: colors.background}]} contentContainerStyle={styles.content}>
-			<TimelineRail rows={state.view.rows} />
-		</ScrollView>
+		<>
+			<ScrollView style={[styles.screen, {backgroundColor: colors.background}]} contentContainerStyle={styles.content}>
+				<View testID="timeline-header" style={styles.header}>
+					<Text
+						testID="timeline-header-title"
+						style={{
+							color: colors.text,
+							fontFamily: fonts.regular.fontFamily,
+							fontWeight: fonts.regular.fontWeight,
+							fontSize: typeScale.h2.fontSize,
+							lineHeight: typeScale.h2.lineHeight,
+						}}>
+						{state.title}
+					</Text>
+					{dateRange ? (
+						<Text
+							testID="timeline-header-date-range"
+							style={{
+								color: colors.textSecondary,
+								fontFamily: fonts.regular.fontFamily,
+								fontWeight: fonts.regular.fontWeight,
+								fontSize: typeScale.body.fontSize,
+								lineHeight: typeScale.body.lineHeight,
+								marginTop: 8,
+							}}>
+							{t('header.dateRange', dateRange)}
+						</Text>
+					) : null}
+				</View>
+
+				<TimelineRail
+					rows={state.view.rows}
+					onHelp={stageId => setDialogStageId(stageId)}
+					onSeeDetails={stageId => setDialogStageId(stageId)}
+					onEditRegistration={() => navigation.navigate('RegistrationHome')}
+					onViewRegistration={() => navigation.navigate('RegistrationHome')}
+					onPreviewBallot={() => navigation.navigate('Ballot')}
+					onVoteNow={() => navigation.navigate('Ballot')}
+					onViewSubmission={() => navigation.navigate('ReviewSubmit')}
+					onViewKeyholders={() => navigation.navigate('Keyholders')}
+				/>
+			</ScrollView>
+
+			<InfoDialog
+				visible={dialogStageId !== null}
+				title={dialogStageId ? t(STAGE_TITLE_KEY[dialogStageId]) : ''}
+				subtitle={dialogSubtitle}
+				body={dialogBody}
+				closeLabel={tCommon('close')}
+				onClose={() => setDialogStageId(null)}
+			/>
+		</>
 	);
 }
 
@@ -178,6 +303,10 @@ const styles = StyleSheet.create({
 	},
 	content: {
 		padding: 16,
+	},
+	header: {
+		paddingHorizontal: 8,
+		paddingBottom: 16,
 	},
 	centered: {
 		justifyContent: 'center',

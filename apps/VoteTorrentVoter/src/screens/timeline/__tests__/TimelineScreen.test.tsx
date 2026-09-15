@@ -12,6 +12,7 @@
 import React from 'react';
 import renderer from 'react-test-renderer';
 import '../../../i18n';
+import {TimelineRail} from '../../../components/TimelineRail';
 
 const mockNavigate = jest.fn();
 
@@ -33,6 +34,7 @@ jest.mock('@react-navigation/native', () => ({
 		},
 		fonts: {
 			regular: {fontFamily: 'System', fontWeight: '400'},
+			medium: {fontFamily: 'System', fontWeight: '500'},
 			bold: {fontFamily: 'System', fontWeight: '700'},
 		},
 		type: {
@@ -42,7 +44,7 @@ jest.mock('@react-navigation/native', () => ({
 			body: {fontSize: 16, lineHeight: 22},
 			caption: {fontSize: 16, lineHeight: 20},
 		},
-		radii: {pill: 999},
+		radii: {pill: 999, lg: 16},
 	}),
 }));
 
@@ -56,32 +58,35 @@ const SEEDED_ELECTION_ID = 'election-1';
 // days/hours from that anchor. Deliberately NOT a hand-picked absolute date set.
 const ELECTION_DATE = Date.now() + 180 * 86_400_000;
 
-function buildValidTimeline(overrides: Partial<Record<string, number>> = {}): Record<string, number> {
+// `anchor` mirrors dev-seed.ts's own `electionDate` — every offset below is the SAME day/hour
+// delta dev-seed.ts:216-248 uses, just parameterized so header-range tests (Task 2) can anchor
+// the same monotonic shape at an explicit UTC calendar point instead of "now" (determinism).
+function buildValidTimeline(anchor: number = ELECTION_DATE, overrides: Partial<Record<string, number>> = {}): Record<string, number> {
 	return {
-		registrationEnds: ELECTION_DATE - 25 * 86_400_000,
-		ballotsFinal: ELECTION_DATE - 14 * 86_400_000,
-		votingStarts: ELECTION_DATE - 2 * 86_400_000,
-		accruingVotes: ELECTION_DATE - 20 * 3_600_000,
-		hashingVotes: ELECTION_DATE - 16 * 3_600_000,
-		releasingKeys: ELECTION_DATE - 12 * 3_600_000,
-		tallyingStarts: ELECTION_DATE,
-		validation: ELECTION_DATE + 86_400_000,
-		certificationStarts: ELECTION_DATE + 2 * 86_400_000,
-		closed: ELECTION_DATE + 3 * 86_400_000,
+		registrationEnds: anchor - 25 * 86_400_000,
+		ballotsFinal: anchor - 14 * 86_400_000,
+		votingStarts: anchor - 2 * 86_400_000,
+		accruingVotes: anchor - 20 * 3_600_000,
+		hashingVotes: anchor - 16 * 3_600_000,
+		releasingKeys: anchor - 12 * 3_600_000,
+		tallyingStarts: anchor,
+		validation: anchor + 86_400_000,
+		certificationStarts: anchor + 2 * 86_400_000,
+		closed: anchor + 3 * 86_400_000,
 		...overrides,
 	};
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildElectionDetails(timeline: Record<string, number> = buildValidTimeline()): any {
+function buildElectionDetails(timeline: Record<string, number> = buildValidTimeline(), anchor: number = ELECTION_DATE): any {
 	return {
 		election: {
 			id: SEEDED_ELECTION_ID,
 			authorityId: 'authority-1',
 			title: PRODUCTION_ELECTION_TITLE,
-			date: ELECTION_DATE,
-			revisionDeadline: ELECTION_DATE - 30 * 86_400_000,
-			ballotDeadline: ELECTION_DATE - 7 * 86_400_000,
+			date: anchor,
+			revisionDeadline: anchor - 30 * 86_400_000,
+			ballotDeadline: anchor - 7 * 86_400_000,
 			type: 'adhoc',
 		},
 		current: {
@@ -311,5 +316,179 @@ describe('TimelineScreen — D-04/D-12 read-scope source fence', () => {
 		for (const forbidden of ['ElectionCard', 'mockData', 'LIFECYCLE_CONTENT', 'keysReleased', 'checksComplete']) {
 			expect(source).not.toContain(forbidden);
 		}
+	});
+});
+
+// ==== Task 2: header, rail composition, row-action callbacks ====
+
+function textOf(node: renderer.ReactTestInstance): string {
+	return JSON.stringify(node.props.children ?? '');
+}
+
+describe('TimelineScreen — header (Task 2)', () => {
+	it('the 53-char production title renders in full, with no numberOfLines prop', async () => {
+		const tr = await renderAndFlush();
+		const title = tr.root.findByProps({testID: 'timeline-header-title'});
+		expect(title.props.numberOfLines).toBeUndefined();
+		expect(textOf(title)).toContain(PRODUCTION_ELECTION_TITLE);
+	});
+
+	it('same-month/year range -> endDate is the bare day number ("January 3" - "31")', async () => {
+		// Jan 28 2030 UTC anchor: registrationEnds = Jan 3, closed = Jan 31 -- both January 2030.
+		const anchor = Date.UTC(2030, 0, 28);
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+
+		const tr = await renderAndFlush();
+		const range = tr.root.findByProps({testID: 'timeline-header-date-range'});
+		expect(textOf(range)).toContain('January 3');
+		expect(textOf(range)).toContain('31');
+		expect(textOf(range)).not.toContain('January 31');
+	});
+
+	it('cross-month range -> endDate carries its own month name', async () => {
+		// Jan 10 2030 UTC anchor: registrationEnds = Dec 16 2029, closed = Jan 13 2030.
+		const anchor = Date.UTC(2030, 0, 10);
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+
+		const tr = await renderAndFlush();
+		const range = tr.root.findByProps({testID: 'timeline-header-date-range'});
+		expect(textOf(range)).toContain('December 16');
+		expect(textOf(range)).toContain('January 13');
+	});
+
+	it('fewer than two distinct calendar days among present instants -> the date-range line is omitted, title still renders', async () => {
+		const dayAnchor = Date.UTC(2030, 2, 15, 0, 0, 0);
+		const singleDayTimeline: Record<string, number> = {
+			registrationEnds: dayAnchor + 1 * 3_600_000,
+			ballotsFinal: dayAnchor + 2 * 3_600_000,
+			votingStarts: dayAnchor + 3 * 3_600_000,
+			accruingVotes: dayAnchor + 4 * 3_600_000,
+			hashingVotes: dayAnchor + 5 * 3_600_000,
+			releasingKeys: dayAnchor + 6 * 3_600_000,
+			tallyingStarts: dayAnchor + 7 * 3_600_000,
+			validation: dayAnchor + 8 * 3_600_000,
+			certificationStarts: dayAnchor + 9 * 3_600_000,
+			closed: dayAnchor + 10 * 3_600_000,
+		};
+		// buildElectionDetails' generic ballotDeadline formula (anchor - 7 DAYS) assumes a
+		// day-scale anchor; this fixture is hour-scale, so ballotDeadline is set directly here
+		// (just after ballotsFinal) instead of reusing that helper's offset.
+		mockGetElectionDetails.mockImplementation(async () => ({
+			election: {
+				id: SEEDED_ELECTION_ID,
+				authorityId: 'authority-1',
+				title: PRODUCTION_ELECTION_TITLE,
+				date: dayAnchor + 7 * 3_600_000,
+				revisionDeadline: dayAnchor - 30 * 86_400_000,
+				ballotDeadline: dayAnchor + 2.5 * 3_600_000,
+				type: 'adhoc',
+			},
+			current: {
+				electionId: SEEDED_ELECTION_ID,
+				revision: 0,
+				revisionTimestamp: [],
+				tags: [],
+				instructions: '',
+				keyholders: [],
+				timeline: singleDayTimeline,
+				keyholderThreshold: 1,
+			},
+		}));
+
+		const tr = await renderAndFlush();
+		expect(hasTestId(tr, 'timeline-indeterminate')).toBe(false);
+		expect(tr.root.findAllByProps({testID: 'timeline-header-date-range'})).toHaveLength(0);
+		expect(textOf(tr.root.findByProps({testID: 'timeline-header-title'}))).toContain(PRODUCTION_ELECTION_TITLE);
+	});
+
+	it('a 7-of-10-key timeline (pre-D-08 signed row) still produces a range from the seven present instants -- not indeterminate', async () => {
+		const anchor = Date.UTC(2030, 0, 10);
+		const sevenKeyTimeline = buildValidTimeline(anchor);
+		// The three D-08 additions absent -- a pre-D-08 signed row (parseTimeline tolerates a
+		// missing key; MISSING_EVENT degrades per-row, never the whole view-model).
+		delete sevenKeyTimeline.accruingVotes;
+		delete sevenKeyTimeline.hashingVotes;
+		delete sevenKeyTimeline.releasingKeys;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(sevenKeyTimeline, anchor));
+
+		const tr = await renderAndFlush();
+		expect(hasTestId(tr, 'timeline-indeterminate')).toBe(false);
+		const range = tr.root.findByProps({testID: 'timeline-header-date-range'});
+		expect(textOf(range)).toContain('December 16');
+		expect(textOf(range)).toContain('January 13');
+	});
+});
+
+describe('TimelineScreen — rail composition and callback wiring (Task 2)', () => {
+	it('TimelineRail is mounted exactly once in the ready state, zero times in the indeterminate state', async () => {
+		const ready = await renderAndFlush();
+		expect(ready.root.findAllByType(TimelineRail)).toHaveLength(1);
+
+		mockGetElections.mockImplementation(async () => {
+			throw new Error('boom');
+		});
+		const indeterminate = await renderAndFlush();
+		expect(indeterminate.root.findAllByType(TimelineRail)).toHaveLength(0);
+	});
+
+	it('every callback prop TimelineRail declares is bound to a function -- none is undefined', async () => {
+		const tr = await renderAndFlush();
+		const rail = tr.root.findByType(TimelineRail);
+
+		for (const propName of [
+			'onHelp',
+			'onSeeDetails',
+			'onEditRegistration',
+			'onViewRegistration',
+			'onPreviewBallot',
+			'onVoteNow',
+			'onViewSubmission',
+			'onViewKeyholders',
+		]) {
+			expect(typeof rail.props[propName]).toBe('function');
+		}
+	});
+
+	it.each([
+		['onVoteNow', 'Ballot'],
+		['onPreviewBallot', 'Ballot'],
+		['onViewSubmission', 'ReviewSubmit'],
+		['onEditRegistration', 'RegistrationHome'],
+		['onViewRegistration', 'RegistrationHome'],
+		['onViewKeyholders', 'Keyholders'],
+	])('%s navigates to %s', async (propName, routeName) => {
+		const tr = await renderAndFlush();
+		const rail = tr.root.findByType(TimelineRail);
+
+		renderer.act(() => {
+			(rail.props[propName] as () => void)();
+		});
+
+		expect(mockNavigate).toHaveBeenCalledWith(routeName);
+	});
+
+	it('see-details and the row help affordance both open a dialog titled with the stage\'s translated title, and it closes on its close control', async () => {
+		const tr = await renderAndFlush();
+		const rail = tr.root.findByType(TimelineRail);
+
+		renderer.act(() => {
+			(rail.props.onSeeDetails as (stageId: string) => void)('votingStarts');
+		});
+
+		const dialog = tr.root.findByProps({testID: 'info-dialog'});
+		expect(dialog).toBeDefined();
+		expect(JSON.stringify(tr.toJSON())).toContain('Voting Period');
+
+		const close = tr.root.findByProps({testID: 'info-dialog-close'});
+		renderer.act(() => {
+			close.props.onPress();
+		});
+		expect(tr.root.findAllByProps({testID: 'info-dialog'})).toHaveLength(0);
+
+		// The same dialog seam serves the row `?` help affordance.
+		renderer.act(() => {
+			(rail.props.onHelp as (stageId: string) => void)('registrationEnds');
+		});
+		expect(JSON.stringify(tr.toJSON())).toContain('Registration Ends');
 	});
 });
