@@ -1,6 +1,7 @@
 import { t } from '@votetorrent/ui-web';
-import { DetailsToggle } from '@votetorrent/ui-web/components';
+import { BarSeries, DetailsToggle, Meter } from '@votetorrent/ui-web/components';
 import { groupFactsForPhase } from '../fact-groups.js';
+import { foldDistrictCounts } from '../roll-disclosure.js';
 import { RegistrantRoll } from './RegistrantRoll';
 import type { RegistrantRollRow } from './RegistrantRoll';
 
@@ -150,6 +151,16 @@ function factBody(fact: FactEntryView, keyRelease: KeyReleaseProgress | null): s
 	return t(fact.sentenceKey);
 }
 
+/** A ≤24px bar plus its slot gap, agreeing with 60-03's `MAX_BAR_THICKNESS_PX`. */
+const ROLL_CHART_BAR_SLOT_PX = 28;
+/** The UI-SPEC's C7 height cap. */
+const ROLL_CHART_MAX_HEIGHT_PX = 200;
+/** Two slots, so a one- or two-bar chart is not a sliver. */
+const ROLL_CHART_MIN_HEIGHT_PX = 56;
+/** The band reserved for district names on the category axis, so a
+ * production-length name has somewhere to go. */
+const ROLL_CHART_CATEGORY_AXIS_PX = 140;
+
 /**
  * One card. Two sibling branches whose class attributes are STATIC LITERALS,
  * selected by `gap !== null`. They differ only in the class attribute, the
@@ -174,6 +185,11 @@ function FactCard({
 	// Header point 7: a collection card owns its own detail sentence and its
 	// own empty message, so the generic toggle below is suppressed for it.
 	const rendersCollection = fact.emptyKey !== null;
+	// The same predicate `factBody` already uses to select the key-release
+	// card -- it selects WHICH card, exactly as header point 5 requires, and
+	// introduces no new state branch.
+	const rendersKeyRelease = fact.interpolates !== null && fact.sentenceKey !== null;
+	const districtBuckets = rendersCollection ? foldDistrictCounts(roll) : [];
 
 	if (fact.gap !== null) {
 		return (
@@ -191,7 +207,39 @@ function FactCard({
 		<article className="fact-card" data-fact-id={fact.id} data-fact-kind="fact">
 			<h3 className="fact-card__label">{t(fact.labelKey)}</h3>
 			{body === null ? null : <p className="fact-card__body">{body}</p>}
+			{rendersKeyRelease && keyRelease !== null ? (
+				<div className="fact-card__chart">
+					<Meter
+						value={keyRelease.released}
+						total={keyRelease.keyholderCount}
+						variant="compact"
+						emptyCopyKey="public.fact.keyrelease.meterEmpty"
+					/>
+				</div>
+			) : null}
 			{rendersCollection ? <RegistrantRoll rows={roll} /> : null}
+			{districtBuckets.length > 0 ? (
+				<div className="fact-card__chart">
+					<BarSeries
+						data={districtBuckets.map((bucket) => {
+							const label = bucket.label ?? t('public.registrantRoll.chart.otherBucket');
+							return {
+								key: bucket.key,
+								label,
+								value: bucket.count,
+								tooltip: t('public.registrantRoll.chart.tooltip', { district: label, count: String(bucket.count) }),
+							};
+						})}
+						orientation="horizontal"
+						defaultTone="series-1"
+						categoryAxisWidth={ROLL_CHART_CATEGORY_AXIS_PX}
+						height={Math.min(
+							ROLL_CHART_MAX_HEIGHT_PX,
+							Math.max(ROLL_CHART_MIN_HEIGHT_PX, districtBuckets.length * ROLL_CHART_BAR_SLOT_PX),
+						)}
+					/>
+				</div>
+			) : null}
 			{fact.detailKey === null || rendersCollection ? null : (
 				<DetailsToggle summary={t('public.fact.detailsSummary')}>{t(fact.detailKey)}</DetailsToggle>
 			)}

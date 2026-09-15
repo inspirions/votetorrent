@@ -597,11 +597,7 @@ function collectTemplateMountedKeys() {
 //     makes the list shrink to empty as the render plans land, rather than
 //     outliving its reason the way the removed skip would have.
 /** @type {ReadonlyArray<string>} */
-const PENDING_MOUNT_KEYS = Object.freeze([
-	'public.fact.keyrelease.meterEmpty',
-	'public.registrantRoll.chart.tooltip',
-	'public.registrantRoll.chart.otherBucket',
-]);
+const PENDING_MOUNT_KEYS = Object.freeze([]);
 
 test('the public-voice key set in COPY equals, in both directions, the set of public-voice keys mounted under src/, packages/ui-web/src/components/ and packages/ui-web/src/lifecycle/ -- as a literal, as the variant="public" template, or as one of facts.js own key templates -- apart from the named PENDING_MOUNT_KEYS still awaiting their render plan', () => {
 	const declaredKeys = new Set(Object.keys(COPY).filter((k) => PUBLIC_VOICE_KEY_RE.test(k)));

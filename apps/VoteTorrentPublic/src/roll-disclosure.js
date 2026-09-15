@@ -273,15 +273,22 @@ export function foldDistrictCounts(rows, policy = ROLL_DISCLOSURE_POLICY) {
 
 	const dataRows = Array.isArray(rows) ? rows : [];
 
-	/** @type {Map<string, number>} */
-	const named = new Map();
+	// A plain null-prototype dictionary, NEVER a `Map`. `election-shell.test.mjs`'s
+	// URL-parameter scan resolves every `.get(ident)` call site under `src/`
+	// back to a string literal and cannot distinguish `Map.prototype.get`
+	// from `URLSearchParams.prototype.get` — a source scan has no type
+	// information. `fact-groups.js` hit the identical trap and was rewritten
+	// off `Map` for the same reason; property access here is what keeps this
+	// module indiscriminate-scan-safe without narrowing that gate.
+	/** @type {Record<string, number>} */
+	const named = Object.create(null);
 	let unstated = 0;
 
 	for (const row of dataRows) {
 		const value =
 			row !== null && typeof row === 'object' ? /** @type {Record<string, unknown>} */ (row)[DISTRICT_FIELD] : undefined;
 		if (typeof value === 'string' && value !== '') {
-			named.set(value, (named.get(value) ?? 0) + 1);
+			named[value] = (named[value] ?? 0) + 1;
 		} else {
 			unstated += 1;
 		}
@@ -292,7 +299,7 @@ export function foldDistrictCounts(rows, policy = ROLL_DISCLOSURE_POLICY) {
 	// which is exactly the visual instability D-23's silent-redraw rule
 	// exists to prevent.
 	/** @type {Array<{ name: string, count: number, folded: boolean }>} */
-	const namedEntries = [...named.entries()]
+	const namedEntries = Object.entries(named)
 		.sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
 		.map(([name, count]) => ({ name, count, folded: count < SMALL_DISTRICT_THRESHOLD }));
 

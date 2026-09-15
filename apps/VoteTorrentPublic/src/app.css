@@ -418,6 +418,24 @@
 }
 
 /*
+ * The wrapper the two public chart mounts render (C6, C7). Two things a
+ * later reader cannot infer from the declaration alone:
+ *   1. NO transition, animation or overflow declaration lives here, on
+ *      purpose. D-23 makes a public chart's redraw silent, and this file
+ *      already carries exactly one transition site (its own single
+ *      `prefers-reduced-motion` block, above) -- a second one here would
+ *      both violate D-23 and defeat that gate.
+ *   2. It must not clip a mark that spills past it, so the overflow
+ *      behaviour belongs to the shared `.vt-chart*` rules in
+ *      packages/ui-web/src/components.css, never to an app-level override
+ *      here.
+ */
+.fact-card__chart {
+	margin-top: var(--space-sm);
+	min-width: 0;
+}
+
+/*
  * The voter roll scrolls rather than clipping. A production-length roll --
  * real surnames, a real district column -- does not fit a narrow viewport,
  * and this repo has twice shipped a defect that only a realistic fixture
