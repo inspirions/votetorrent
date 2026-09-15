@@ -1,0 +1,156 @@
+/**
+ * chart-geometry-fixtures.js — the single source of the production-length
+ * fixtures `chart-geometry-gate.tsx` (the page) and `run-chart-geometry-gate.mjs`
+ * (the Node driver) both import (60-07, D-24). Because both sides read the
+ * SAME module, the page can never publish its own expectation for the driver
+ * to trivially agree with — `checkVacuity` cross-checks `FIXTURE_META`
+ * against this module's own exports before any rung runs.
+ *
+ * Plain ESM, no JSX, no TypeScript syntax — JSDoc types only, so this file
+ * loads unchanged in the Vite-built browser page and under a bare `node
+ * --test` run with no transform.
+ *
+ * FIXTURE DATA RULE (T-60-07-02, a security property, not a style note):
+ * this module holds aggregate counts and schema enum names ONLY. No
+ * registrant identifier, no person name, no district, no address, and none
+ * of the schema's own private/payload/content-hash column names.
+ * `chart-geometry-harness.test.mjs` enforces the exact banned-name list by
+ * its own separate constant, with its own planted positive control — not
+ * repeated here verbatim, so this header cannot itself trip that scan.
+ *
+ * Every planted zero is deliberate — it is the ANTI-VACUITY control each
+ * geometry comparator in `run-chart-geometry-gate.mjs` requires be present,
+ * named per-fixture below.
+ */
+
+/**
+ * @typedef {{ key: string, label: string, value: number, tone?: 'series-1' | 'series-2' | 'ok' | 'warn' | 'fail', tooltip?: string }} ChartDatum
+ * @typedef {{ seriesKey: string, value: number, tooltip?: string }} StackedSegment
+ * @typedef {{ key: string, label: string, segments: StackedSegment[] }} StackedDatum
+ * @typedef {{ key: string, label: string, tone: 'series-1' | 'series-2' | 'ok' | 'warn' | 'fail' }} ChartSeries
+ * @typedef {{ id: string, value: number, total: number }} MeterFixture
+ */
+
+/**
+ * C1 — the status bars. `RegistrantStatus` codes (`a`/`s`/`r`) reproduced
+ * verbatim from `packages/vote-core/schema/votetorrent.qsql:1750-1753`. The
+ * `r`/Revoked zero is C1's planted positive control: a proportionality
+ * comparator that passes on all three bars regardless of value would be
+ * vacuous, and it is also the D-16 "does a zero-count status still get a
+ * bar" case. The two non-zero values are deliberately distinct and
+ * four-digit-versus-three-digit so the thousands separator is exercised and
+ * equal-height bars cannot pass a proportionality test by accident.
+ * @type {ReadonlyArray<ChartDatum>}
+ */
+export const STATUS_FIXTURE = Object.freeze([
+	Object.freeze({ key: 'a', label: 'Active', value: 1847, tone: 'ok' }),
+	Object.freeze({ key: 's', label: 'Suspended', value: 612, tone: 'warn' }),
+	Object.freeze({ key: 'r', label: 'Revoked', value: 0, tone: 'fail' }),
+]);
+
+/**
+ * C2 — the stacked request bars. `RegistrationRequestStatus` codes (`p`/`a`/`r`)
+ * reproduced verbatim from `packages/vote-core/schema/votetorrent.qsql:1438-1441`,
+ * in the schema's own code order (the real read carries no `order by`). Each
+ * category carries both `registrant` and `bridge` segments; Rejected's
+ * `bridge` segment is C2's planted positive control — a zero-valued segment
+ * that must measure zero height while its category's sum assertion still
+ * holds.
+ * @type {ReadonlyArray<StackedDatum>}
+ */
+export const REQUEST_FIXTURE = Object.freeze([
+	Object.freeze({
+		key: 'p',
+		label: 'Pending',
+		segments: [
+			Object.freeze({ seriesKey: 'registrant', value: 1263 }),
+			Object.freeze({ seriesKey: 'bridge', value: 418 }),
+		],
+	}),
+	Object.freeze({
+		key: 'a',
+		label: 'Approved',
+		segments: [
+			Object.freeze({ seriesKey: 'registrant', value: 902 }),
+			Object.freeze({ seriesKey: 'bridge', value: 77 }),
+		],
+	}),
+	Object.freeze({
+		key: 'r',
+		label: 'Rejected',
+		segments: [
+			Object.freeze({ seriesKey: 'registrant', value: 145 }),
+			Object.freeze({ seriesKey: 'bridge', value: 0 }),
+		],
+	}),
+]);
+
+/**
+ * The two `ChartSeries` C2's stacked bars are keyed by.
+ * @type {ReadonlyArray<ChartSeries>}
+ */
+export const REQUEST_SERIES = Object.freeze([
+	Object.freeze({ key: 'registrant', label: 'Registrant', tone: 'series-1' }),
+	Object.freeze({ key: 'bridge', label: 'Bridge', tone: 'series-2' }),
+]);
+
+/**
+ * C3 — the intake time series. Ten consecutive-hour buckets, each `label`
+ * the full 19-character `strftime('%Y-%m-%dT%H:00:00', …)` boundary Quereus
+ * returns — no trailing `Z`, because that expression yields a 19-character
+ * value without one. Counts at index 2 (`10:00:00`) and index 8
+ * (`16:00:00`) are zero — deliberately INTERIOR empty buckets, C3's planted
+ * positive control: a gap-rendering implementation (one that filters zero
+ * rows, or sets `connectNulls`) cannot pass a mark-count-equals-bucket-count
+ * rung against this fixture.
+ * @type {ReadonlyArray<ChartDatum>}
+ */
+export const INTAKE_FIXTURE = Object.freeze(
+	/** @type {ReadonlyArray<ChartDatum>} */ (
+		[
+			['2026-09-15T08:00:00', 37],
+			['2026-09-15T09:00:00', 52],
+			['2026-09-15T10:00:00', 0],
+			['2026-09-15T11:00:00', 64],
+			['2026-09-15T12:00:00', 91],
+			['2026-09-15T13:00:00', 128],
+			['2026-09-15T14:00:00', 73],
+			['2026-09-15T15:00:00', 46],
+			['2026-09-15T16:00:00', 0],
+			['2026-09-15T17:00:00', 19],
+		].map(([bucketStart, count]) => Object.freeze({ key: String(bucketStart), label: String(bucketStart), value: Number(count) }))
+	),
+);
+
+/**
+ * C5 — the keyholders meters. Three entries covering both extremes (60-VALIDATION's
+ * own naming) plus an interior point: `zero` (0/12), `partial` (7/12, interior),
+ * `full` (12/12). The harness builds each `valueLabel` as `${value} / ${total}`
+ * — the slash form `60-04` settled on, not the UI-SPEC's "N of M" wording,
+ * because "of" would be authored prose with no copy key.
+ * @type {ReadonlyArray<MeterFixture>}
+ */
+export const METER_FIXTURES = Object.freeze([
+	Object.freeze({ id: 'zero', value: 0, total: 12 }),
+	Object.freeze({ id: 'partial', value: 7, total: 12 }),
+	Object.freeze({ id: 'full', value: 12, total: 12 }),
+]);
+
+/**
+ * Echoed by the page's readout so the driver can prove it is asserting
+ * against the SAME fixture revision it renders — never a copy that has
+ * silently drifted. `panelColumnWidthPx` is 420: above `NARROW_CONTAINER_PX`
+ * (400), so the six-tick branch applies. The 280px narrow branch is a
+ * judgement call and is 60-09's screenshot review, not a rung here.
+ * @type {{ version: number, panelColumnWidthPx: number, statusCount: number, requestCategoryCount: number, intakeBucketCount: number, meterCount: number, registrationsCapabilityId: string, keyholdersCapabilityId: string }}
+ */
+export const FIXTURE_META = Object.freeze({
+	version: 1,
+	panelColumnWidthPx: 420,
+	statusCount: STATUS_FIXTURE.length,
+	requestCategoryCount: REQUEST_FIXTURE.length,
+	intakeBucketCount: INTAKE_FIXTURE.length,
+	meterCount: METER_FIXTURES.length,
+	registrationsCapabilityId: 'registrations',
+	keyholdersCapabilityId: 'keyholders',
+});
