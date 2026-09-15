@@ -7,9 +7,11 @@
  * .planning/phases/50-authority-web-dashboard-separate-web-project/50-UI-SPEC.md,
  * which remains the dashboard's design authority.
  *
- * This file is the D-23 token probe's single source of truth: the probe
- * enumerates token names and their declared values straight out of it.
- * That is what the shape rules below exist to guarantee:
+ * This file declares 34 custom properties (32 pre-Phase-60, plus the two
+ * chart series tokens added by 60-01/D-14). It is the D-23 token probe's
+ * single source of truth: the probe enumerates token names and their
+ * declared values straight out of it. That is what the shape rules below
+ * exist to guarantee:
  *   - exactly one custom-property declaration per line, inside the single
  *     :root block below;
  *   - the :root block itself carries no comment of any kind;
@@ -41,6 +43,20 @@
  * :root block below and never restated here in declaration form, per the
  * third shape rule above.
  *
+ * Phase 60 (D-14) adds two chart series tokens, sitting with the other
+ * colours after the done tone and before the corner radius. They are
+ * deliberately NOT a reuse of the five existing status tones (--ok, --warn,
+ * --fail, --done, --primary): measured against this file's own surface tone
+ * with the dataviz skill's validate_palette.js validator, that five-token
+ * set fails three of five checks as a categorical palette — lightness band,
+ * chroma floor, and CVD separation at ΔE 5.7 protan between the ok and warn
+ * tones — so they stay reserved for status and are not repurposed as series
+ * colours (D-15). The two new series tokens were computed against this
+ * file's own surface tone and PASS the same validator in full. Their names
+ * and values are written ONLY as declarations inside the :root block below
+ * and never restated here in declaration form, per the third shape rule
+ * above.
+ *
  * getComputedStyle semantics (flagged here for 53-08's D-23 probe, not
  * measured by this plan): a custom property's computed value is its
  * specified token sequence, so reading a custom property directly is
@@ -68,6 +84,8 @@
 	--warn: #f59e0b;
 	--fail: #ef4444;
 	--done: #64748b;
+	--chart-series-1: #3987e5;
+	--chart-series-2: #d95926;
 	--radius: 10px;
 
 	--space-xs: 4px;
