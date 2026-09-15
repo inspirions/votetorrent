@@ -22,6 +22,7 @@ import { saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { resolveElectionTimeline, CREATE_FALLBACK_DAYS } from "./resolve-election-timeline";
 
 // Phase 9 plan 09-12 (ELECUI-03) — Single-scroll New Election form.
 // Phase 20 plan 20-06 (EUI-02, EUI-03) — type radio + per-field inline validation.
@@ -139,31 +140,13 @@ export function CreateElectionScreen() {
 			const signer = await createDeviceSigner("Device User");
 
 			const now = Date.now();
-			const day = 24 * 60 * 60 * 1000;
-			const parseDateOrFallback = (s: string, fallbackMs: number): number =>
-				s.trim() ? new Date(s).getTime() || fallbackMs : fallbackMs;
 
 			// Resolve the full 10-event timeline ONCE so the builder payload and the
 			// revision-signing seam below sign an IDENTICAL timeline (the digests must match).
-			// The back-half events (tallying → closed) now come from the form when set, and
-			// otherwise default RELATIVE TO votingStarts — not `now` — so pushing the voting
-			// date out keeps votingStarts < accruingVotes < hashingVotes < releasingKeys <
-			// tallyingStarts < certificationStarts satisfied (the ElectionsCreateElectionBuilder
-			// cross-field rule that previously broke).
-			const resolvedVotingStarts = parseDateOrFallback(revision.votingStarts, now + 10 * day);
-			const resolvedTimeline = {
-				registrationEnds: parseDateOrFallback(revision.registrationEnds, now + 2 * day),
-				ballotsFinal: parseDateOrFallback(revision.ballotsFinal, now + 5 * day),
-				votingStarts: resolvedVotingStarts,
-				accruingVotes: resolvedVotingStarts + 1 * day,
-				hashingVotes: resolvedVotingStarts + 2 * day,
-				// R2 fix: this date is already collected by the form and was previously discarded.
-				releasingKeys: parseDateOrFallback(revision.releasingKeys, resolvedVotingStarts + 3 * day),
-				tallyingStarts: parseDateOrFallback(revision.tallyingStarts, resolvedVotingStarts + 4 * day),
-				validation: parseDateOrFallback(revision.validation, resolvedVotingStarts + 5 * day),
-				certificationStarts: parseDateOrFallback(revision.certificationStarts, resolvedVotingStarts + 6 * day),
-				closed: parseDateOrFallback(revision.closed, resolvedVotingStarts + 7 * day),
-			};
+			// resolveElectionTimeline is the single shared construction site both this screen
+			// and EditElectionScreen build through (D-16) — see resolve-election-timeline.ts
+			// for the "relative to votingStarts, not now" rationale.
+			const resolvedTimeline = resolveElectionTimeline(revision, now, CREATE_FALLBACK_DAYS);
 
 			// WR-05: the two required core date fields must actually PARSE — do not let an
 			// unparseable string silently fall back to a fabricated now+N-days timeline in
