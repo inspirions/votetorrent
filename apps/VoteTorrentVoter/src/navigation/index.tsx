@@ -24,6 +24,7 @@ import type {
 	RootTabParamList,
 	ScanStackParamList,
 	SettingsStackParamList,
+	TimelineStackParamList,
 	VoteStackParamList,
 } from './types';
 import HomeScreen from '../screens/home/HomeScreen';
@@ -39,6 +40,8 @@ import RegisterConfirmScreen from '../screens/registration/RegisterConfirmScreen
 import ConfirmationScreen from '../screens/registration/ConfirmationScreen';
 import ScanScreen from '../screens/scan/ScanScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
+import TimelineScreen from '../screens/timeline/TimelineScreen';
+import KeyholdersScreen from '../screens/timeline/KeyholdersScreen';
 import PlaceholderModal from '../components/PlaceholderModal';
 import {RegistrationDraftProvider} from '../providers/RegistrationDraftProvider';
 import {BallotSelectionProvider} from '../providers/BallotSelectionProvider';
@@ -135,6 +138,109 @@ function VoteStackNavigator() {
 				})}
 			/>
 		</VoteStack.Navigator>
+	);
+}
+
+// --- Timeline stack (Phase 59, D-14/D-15/D-22): TimelineHome root, plus the full reachable
+// route closure so a row action pushes WITHIN this stack and Back returns to the rail — the
+// Timeline tab stays highlighted (D-14). Registers the SAME screen components the Vote and
+// Registration stacks already import, with `options` copied verbatim from each screen's existing
+// registration so header titles / headerShown / presentation:'modal' stay byte-identical across
+// stacks. Neither BallotSelectionProvider nor RegistrationDraftProvider is mounted here — both
+// are lifted to AppStateProviders above <Tab.Navigator> (D-22); mounting either inside this
+// function would mint a second, unsynced instance and silently reset a draft started on another
+// tab (see provider-scope.test.tsx's planted negative control).
+const TimelineStack = createNativeStackNavigator<TimelineStackParamList>();
+
+function TimelineStackNavigator() {
+	const {t: tKeyholders} = useTranslation('timeline');
+	const {t: tBallot} = useTranslation('ballot');
+	const {t: tRegistration} = useTranslation('registration');
+
+	return (
+		<TimelineStack.Navigator>
+			{/* headerShown:false — TimelineScreen renders its own election-title-over-date-range
+			    header block per the UI-SPEC; no timeline.headerTitle key exists to feed a native
+			    header. */}
+			<TimelineStack.Screen
+				name="TimelineHome"
+				component={TimelineScreen}
+				options={{headerShown: false}}
+			/>
+			<TimelineStack.Screen
+				name="Ballot"
+				component={BallotScreen}
+				options={{title: tBallot('headerTitle')}}
+			/>
+			<TimelineStack.Screen
+				name="IndividualQuestion"
+				component={IndividualQuestionScreen}
+				options={({navigation}) => ({
+					title: tBallot('individualQuestionTitle'),
+					presentation: 'modal',
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
+			<TimelineStack.Screen
+				name="ReviewSubmit"
+				component={ReviewSubmitScreen}
+				options={{title: tBallot('reviewSubmitTitle')}}
+			/>
+			{/* headerShown:false — RegistrationScreen renders the branded blue NetworkHeader itself. */}
+			<TimelineStack.Screen
+				name="RegistrationHome"
+				component={RegistrationScreen}
+				options={{headerShown: false}}
+			/>
+			<TimelineStack.Screen
+				name="RegistrationInfo"
+				component={PlaceholderModal}
+				options={({navigation}) => ({
+					title: tRegistration('headerTitle'),
+					presentation: 'modal',
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
+			{/* 41-RESEARCH.md Pitfall 3: real screen, headerShown:false — NOT presentation:'modal'
+			    + CloseButton (full-bleed timed interstitial, no swipe-dismiss). */}
+			<TimelineStack.Screen
+				name="DeviceAttestation"
+				component={DeviceAttestationScreen}
+				options={{headerShown: false}}
+			/>
+			{/* Form steps are full-bleed (headerShown:false) — each renders its own
+			    RegisterFormHeader (back-arrow / close / title / subtitle / step dots). */}
+			<TimelineStack.Screen
+				name="RegisterPersonal"
+				component={RegisterPersonalScreen}
+				options={{headerShown: false}}
+			/>
+			<TimelineStack.Screen
+				name="RegisterAddressParty"
+				component={RegisterAddressPartyScreen}
+				options={{headerShown: false}}
+			/>
+			<TimelineStack.Screen
+				name="RegisterConfirm"
+				component={RegisterConfirmScreen}
+				options={{headerShown: false}}
+			/>
+			{/* Pitfall 3: real screen, headerShown:false — NOT presentation:'modal' + CloseButton. */}
+			<TimelineStack.Screen
+				name="Confirmation"
+				component={ConfirmationScreen}
+				options={{headerShown: false}}
+			/>
+			{/* D-15: plain push (default header, back chevron) — mirrors ValidationDetails on the
+			    Vote stack, never presentation:'modal'. */}
+			<TimelineStack.Screen
+				name="Keyholders"
+				component={KeyholdersScreen}
+				options={{title: tKeyholders('keyholders.screenTitle')}}
+			/>
+		</TimelineStack.Navigator>
 	);
 }
 
