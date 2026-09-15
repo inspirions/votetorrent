@@ -151,12 +151,24 @@ function factBody(fact: FactEntryView, keyRelease: KeyReleaseProgress | null): s
 	return t(fact.sentenceKey);
 }
 
-/** A ≤24px bar plus its slot gap, agreeing with 60-03's `MAX_BAR_THICKNESS_PX`. */
-const ROLL_CHART_BAR_SLOT_PX = 28;
-/** The UI-SPEC's C7 height cap. */
-const ROLL_CHART_MAX_HEIGHT_PX = 200;
-/** Two slots, so a one- or two-bar chart is not a sliver. */
-const ROLL_CHART_MIN_HEIGHT_PX = 56;
+/** Margins plus the numeric axis Recharts reserves for itself. This is fixed
+ * overhead: it is spent once, not once per row, so it has to sit OUTSIDE the
+ * per-row term. Folding it in was the original defect -- at three rows the
+ * whole chart was 84px, of which ~46px was chrome, leaving ~12.7px of category
+ * band per row for labels that need three times that. */
+const ROLL_CHART_FIXED_CHROME_PX = 46;
+/** One row's category band. A production-length district name wraps to three
+ * lines in the axis width below, and each line needs ~13px. A bar is still
+ * ≤24px thick (60-03's `MAX_BAR_THICKNESS_PX`); this is the LABEL's budget,
+ * which is the larger of the two and therefore the one that sets the row. */
+const ROLL_CHART_PER_ROW_PX = 40;
+/** The UI-SPEC caps C7 so the chart cannot dominate its fact card. The cap is
+ * expressed in rows rather than a bare pixel count so it stays meaningful if
+ * the per-row budget changes. */
+const ROLL_CHART_MAX_ROWS = 6;
+const ROLL_CHART_MAX_HEIGHT_PX = ROLL_CHART_FIXED_CHROME_PX + ROLL_CHART_MAX_ROWS * ROLL_CHART_PER_ROW_PX;
+/** Two rows, so a one- or two-bar chart is not a sliver. */
+const ROLL_CHART_MIN_HEIGHT_PX = ROLL_CHART_FIXED_CHROME_PX + 2 * ROLL_CHART_PER_ROW_PX;
 /** The band reserved for district names on the category axis, so a
  * production-length name has somewhere to go. */
 const ROLL_CHART_CATEGORY_AXIS_PX = 140;
@@ -235,7 +247,10 @@ function FactCard({
 						categoryAxisWidth={ROLL_CHART_CATEGORY_AXIS_PX}
 						height={Math.min(
 							ROLL_CHART_MAX_HEIGHT_PX,
-							Math.max(ROLL_CHART_MIN_HEIGHT_PX, districtBuckets.length * ROLL_CHART_BAR_SLOT_PX),
+							Math.max(
+								ROLL_CHART_MIN_HEIGHT_PX,
+								ROLL_CHART_FIXED_CHROME_PX + districtBuckets.length * ROLL_CHART_PER_ROW_PX,
+							),
 						)}
 					/>
 				</div>

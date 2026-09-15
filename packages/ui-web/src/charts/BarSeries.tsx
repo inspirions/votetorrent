@@ -78,6 +78,21 @@ export function BarSeries({
 							type="category"
 							dataKey="label"
 							width={categoryAxisWidth}
+							// Every category gets its tick. Recharts' default collision
+							// heuristic silently DROPS a tick's text node entirely when
+							// rows are tight -- a horizontal bar whose own name has
+							// vanished reads as a missing category, not a cramped one.
+							// Forcing all ticks turns that silent omission into visible
+							// overlap, which a geometry rung can actually see.
+							//
+							// NOT load-bearing for the C7 rung as it stands: measured
+							// inert once the caller reserves enough per-row height, and
+							// that height fix alone turns the rung green. It guards the
+							// case the current fixture does not reach -- a caller whose
+							// row count exceeds its own height cap, where per-row space
+							// compresses again and the drop returns. Kept deliberately,
+							// with that limit stated rather than assumed away.
+							interval={0}
 							tick={{ className: 'vt-chart__axis' }}
 							axisLine={{ className: 'vt-chart__grid' }}
 							tickLine={false}
