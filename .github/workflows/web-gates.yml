@@ -1310,18 +1310,10 @@ jobs:
           echo "TSC-RAN exit=${tsc_status}" | tee -a authority-tsc.log
           node scripts/assert-ci-baselines.mjs authority-typecheck authority-tsc.log | tee -a ci-receipt.txt
 
-      # Recorded, deliberately not run -- this phase touches nothing in the
-      # voter, and importing an unrelated red baseline into this gate would
-      # make it less trustworthy, not more. Echoed to the run summary so it
-      # cannot be silently forgotten.
-      - name: Record the baseline not enforced here
-        run: |
-          set -euo pipefail
-          node -e "
-            const b = JSON.parse(require('fs').readFileSync('scripts/ci-baselines.json', 'utf8'));
-            const v = b.notEnforcedHere.voterJest;
-            console.log('NOT ENFORCED HERE — apps/VoteTorrentVoter jest: ' + v.failingSuites + ' suite(s) failing on ' + v.cause + ' (measured ' + v.measuredOn + '). ' + v.reason);
-          " | tee -a "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+      # `notEnforcedHere.voterJest` was superseded by scripts/ci-baselines.json's
+      # `voterJest` entry (59-11) -- the voter suite's floor is now measured and
+      # enforced by scripts/assert-voter-gates.mjs, so this workflow no longer
+      # carries a note about an unenforced allowance that has ceased to exist.
 
       - name: Receipts
         run: |
