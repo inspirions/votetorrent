@@ -39,6 +39,14 @@ import { extractStaticClassNameTokens } from '../../../../scripts/lib/css-class-
 // READ through `publicSrc()`.
 import { FACTS, FACT_GROUPS, FACT_COPY_KEYS, GAP_IDS, factsFor } from '../../../../packages/ui-web/src/lifecycle/facts.js';
 import { groupFactsForPhase, groupFactList, FactGroupingError } from '../../src/fact-groups.js';
+import {
+	ROLL_FIELDS,
+	ROLL_DISCLOSURE_POLICY,
+	resolveRollColumns,
+	foldDistrictCounts,
+	SMALL_DISTRICT_THRESHOLD,
+	DISTRICT_FIELD,
+} from '../../src/roll-disclosure.js';
 import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
 
 /** @param {string[]} segs @returns {string} */
@@ -100,6 +108,23 @@ const FIXTURES = Object.freeze({
 	phases: Object.freeze(['pre', 'voting', 'settling', 'closed']),
 	/** Phases that carry no facts at all. */
 	emptyPhases: Object.freeze(['indeterminate', null, 'nope']),
+	/** D-09's fold: four production-length districts (>= 20 characters,
+	 * carrying the `vtx-fixture` marker per `registrant-roll-fixture.js`'s own
+	 * standard), used as the worked-example table's A/B/C/D. */
+	productionDistricts: Object.freeze([
+		'North Bridgewater Ward 3 (vtx-fixture)',
+		'South Millbrook Township 4 (vtx-fixture)',
+		'East Fairhaven Precinct 9 (vtx-fixture)',
+		'West Colchester Borough 2 (vtx-fixture)',
+	]),
+	/** The declared roll policy with the `District` entry's audience replaced
+	 * by a recognised-but-unsatisfiable code, so the chart's mount guard and
+	 * the table's column resolution degrade together. */
+	withheldDistrictPolicy: Object.freeze(
+		ROLL_DISCLOSURE_POLICY.map((e) =>
+			e.field === DISTRICT_FIELD ? Object.freeze({ field: e.field, audience: 'district' }) : Object.freeze({ field: e.field, audience: e.audience }),
+		),
+	),
 });
 
 /** Matches a COMPUTED class attribute — an opening brace directly after
@@ -519,4 +544,119 @@ test('14. both branches carry a stable id attribute, each kind attribute appears
 	const settling = groupFactsForPhase('settling').flatMap((g) => g.facts);
 	assert.ok(settling.some((f) => f.gap !== null), 'settling renders no gap card — the browser gate would have only one subject');
 	assert.ok(settling.some((f) => f.gap === null), 'settling renders no filled card — the browser gate would have only one subject');
+});
+
+// ---------------------------------------------------------------------------
+// 15. D-09's small-district fold (`foldDistrictCounts`) — executed, not read
+//     as text. Every row of this plan's worked-example table is encoded
+//     verbatim, using production-length districts throughout.
+// ---------------------------------------------------------------------------
+
+const [DIST_A, DIST_B, DIST_C, DIST_D] = FIXTURES.productionDistricts;
+
+/**
+ * Builds a `rows` array from a list of `[district, count]` pairs. A
+ * `district` of `undefined` produces rows with no `District` property at
+ * all — the "unstated" case.
+ * @param {ReadonlyArray<[string | undefined, number]>} spec
+ * @returns {Array<{ District?: string }>}
+ */
+function districtRows(spec) {
+	/** @type {Array<{ District?: string }>} */
+	const rows = [];
+	for (const [district, count] of spec) {
+		for (let i = 0; i < count; i += 1) rows.push(district === undefined ? {} : { District: district });
+	}
+	return rows;
+}
+
+/** @param {ReadonlyArray<Readonly<{ label: string | null, count: number, folded: boolean }>>} buckets */
+const bucketShape = (buckets) => buckets.map((b) => ({ label: b.label, count: b.count, folded: b.folded }));
+
+test('15. sanity: SMALL_DISTRICT_THRESHOLD is 2, ROLL_FIELDS includes DISTRICT_FIELD, and every production district fixture is at least 20 characters', () => {
+	assert.equal(SMALL_DISTRICT_THRESHOLD, 2, "the threshold is not D-09's justified value");
+	assert.ok(ROLL_FIELDS.includes(DISTRICT_FIELD), 'DISTRICT_FIELD disagrees with ROLL_FIELDS');
+	for (const d of FIXTURES.productionDistricts) {
+		assert.ok(d.length >= 20, `production district "${d}" is shorter than 20 characters — too short to catch a real clipping defect`);
+	}
+});
+
+test('16. A=7,B=5,C=1: C folds, and B folds too by the complementary-disclosure guard — A(7), Other(6)', () => {
+	const buckets = foldDistrictCounts(districtRows([[DIST_A, 7], [DIST_B, 5], [DIST_C, 1]]));
+	assert.deepEqual(bucketShape(buckets), [
+		{ label: DIST_A, count: 7, folded: false },
+		{ label: null, count: 6, folded: true },
+	]);
+	assert.ok(!buckets.some((b) => b.label === DIST_B), 'B is still named on the axis — the complementary-disclosure guard did not fire');
+});
+
+test('17. A=7,B=5,C=1,D=1: C and D fold, the bucket already aggregates two groups — A(7), B(5), Other(2)', () => {
+	const buckets = foldDistrictCounts(districtRows([[DIST_A, 7], [DIST_B, 5], [DIST_C, 1], [DIST_D, 1]]));
+	assert.deepEqual(bucketShape(buckets), [
+		{ label: DIST_A, count: 7, folded: false },
+		{ label: DIST_B, count: 5, folded: false },
+		{ label: null, count: 2, folded: true },
+	]);
+});
+
+test('18. A=7,B=5: neither folds — A(7), B(5), no Other bucket', () => {
+	const buckets = foldDistrictCounts(districtRows([[DIST_A, 7], [DIST_B, 5]]));
+	assert.deepEqual(bucketShape(buckets), [
+		{ label: DIST_A, count: 7, folded: false },
+		{ label: DIST_B, count: 5, folded: false },
+	]);
+});
+
+test('19. A=1 alone: the lone group still folds — one unnamed Other(1), never a named bar of one', () => {
+	const buckets = foldDistrictCounts(districtRows([[DIST_A, 1]]));
+	assert.deepEqual(bucketShape(buckets), [{ label: null, count: 1, folded: true }]);
+});
+
+test('20. A=7,B=5, plus 2 unstated rows: the unstated group folds, and B folds too by the guard — A(7), Other(7)', () => {
+	const buckets = foldDistrictCounts([...districtRows([[DIST_A, 7], [DIST_B, 5]]), {}, {}]);
+	assert.deepEqual(bucketShape(buckets), [
+		{ label: DIST_A, count: 7, folded: false },
+		{ label: null, count: 7, folded: true },
+	]);
+	assert.ok(!buckets.some((b) => b.label === DIST_B), 'B is still named on the axis — the complementary-disclosure guard did not fire');
+});
+
+test('21. District withheld by policy: foldDistrictCounts returns an empty array, in lockstep with resolveRollColumns', () => {
+	const rows = districtRows([[DIST_A, 7], [DIST_B, 5]]);
+	assert.deepEqual(foldDistrictCounts(rows, FIXTURES.withheldDistrictPolicy), []);
+	assert.ok(
+		!resolveRollColumns(FIXTURES.withheldDistrictPolicy).columns.includes(DISTRICT_FIELD),
+		'fixture sanity: the withheld policy still permits District — the two disclosure paths would be out of lockstep',
+	);
+});
+
+test('22. robustness: null, undefined and [] never throw and resolve to an empty verdict, and every row whose District is not a non-empty string lands in the folded bucket', () => {
+	for (const input of [null, undefined, []]) {
+		assert.doesNotThrow(() => foldDistrictCounts(/** @type {any} */ (input)));
+		assert.deepEqual(foldDistrictCounts(/** @type {any} */ (input)), []);
+	}
+	const rows = [...districtRows([[DIST_A, 5], [DIST_B, 5]]), { District: null }, { District: '' }, { District: 5 }];
+	/** @type {ReadonlyArray<{ label: string | null, count: number, folded: boolean }>} */
+	let buckets = [];
+	assert.doesNotThrow(() => {
+		buckets = /** @type {any} */ (foldDistrictCounts(/** @type {any} */ (rows)));
+	});
+	const otherBucket = buckets.find((b) => b.label === null);
+	assert.ok(otherBucket, 'no unnamed bucket formed — the three malformed-District rows must land somewhere');
+	assert.ok(
+		otherBucket.count >= 3,
+		`the unnamed bucket's count (${otherBucket.count}) does not include the three malformed-District rows`,
+	);
+});
+
+test("23. determinism: the same rows in a different order fold to a deepEqual result — D-23's silent redraw needs a stable order", () => {
+	const rows = districtRows([[DIST_A, 7], [DIST_B, 5], [DIST_C, 1]]);
+	const shuffled = [...rows].reverse();
+	assert.deepEqual(foldDistrictCounts(rows), foldDistrictCounts(shuffled));
+});
+
+test('24. every returned bucket array and entry is frozen', () => {
+	const buckets = foldDistrictCounts(districtRows([[DIST_A, 7], [DIST_B, 5], [DIST_C, 1]]));
+	assert.ok(Object.isFrozen(buckets), 'the returned array is not frozen');
+	for (const b of buckets) assert.ok(Object.isFrozen(b), 'a bucket entry is not frozen');
 });

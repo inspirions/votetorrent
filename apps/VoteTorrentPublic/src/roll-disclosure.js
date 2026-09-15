@@ -187,3 +187,147 @@ export function resolveRollColumns(policy) {
 
 	return Object.freeze({ columns: Object.freeze(columns), unreadable: Object.freeze(unreadable) });
 }
+
+/**
+ * The field name the small-district fold reads off each roll row (D-09).
+ *
+ * A NAMED CONSTANT RATHER THAN A DERIVATION FROM `ROLL_FIELDS`.
+ * `registrant-roll.test.mjs:125` deep-equals `ROLL_FIELDS` against a frozen
+ * three-element array; restructuring that array to derive from this constant
+ * (or vice versa) would make the two definitions interdependent for no
+ * reason a reviewer could see from either site alone. They agree because both
+ * name the same schema column, not because one is built from the other.
+ * @type {string}
+ */
+export const DISTRICT_FIELD = 'District';
+
+/**
+ * D-09's small-district threshold: a district is folded when its count is
+ * BELOW this value, i.e. exactly one registrant — the case D-09 names
+ * ("that does not make it wise to spotlight a district containing one
+ * registrant").
+ *
+ * WHY NOT A LARGER STATISTICAL-DISCLOSURE-CONTROL VALUE. 5 or 10 are the
+ * usual small-cell thresholds, and both were rejected on measurement, not
+ * taste: the shipped browser fixture (`registrant-roll-fixture.js`) holds
+ * four rows across four distinct districts, so at any threshold 2 or above
+ * every district folds and the chart degenerates to a single "Other" bar on
+ * every small election. A threshold that makes the chart useless for every
+ * small election is not a stronger privacy control; it is a deleted feature.
+ * @type {number}
+ */
+export const SMALL_DISTRICT_THRESHOLD = 2;
+
+/**
+ * @typedef {object} DistrictBucket
+ * @property {string} key a stable, POSITIONAL key for a named bucket
+ *   (`'d' + index`) or the literal `'other'` for the folded bucket — never
+ *   the district's own name, because a district literally named `other`
+ *   would otherwise collide with the bucket React renders beside it.
+ * @property {string | null} label the district name, or `null` for the
+ *   folded bucket — `null` is its only discriminator, and this module
+ *   resolves no copy key for it. The caller supplies the bucket's label.
+ * @property {number} count
+ * @property {boolean} folded
+ */
+
+/**
+ * D-09's small-district fold, and its complementary-disclosure guard
+ * (`T-60-03`, `T-60-06-01`).
+ *
+ * RESOLVES THE DISCLOSURE VERDICT ITSELF, by calling `resolveRollColumns`
+ * inside this function's own body, rather than accepting a pre-resolved
+ * column list. A caller cannot pass a raw array and bypass the policy —
+ * resolving internally makes that structurally impossible. When the
+ * resulting verdict withholds `DISTRICT_FIELD`, this function returns a
+ * frozen empty array: the chart does not render at all, exactly as the roll
+ * table's District column degrades under the same policy.
+ *
+ * THE COMPLEMENTARY-DISCLOSURE GUARD. Folding every district below the
+ * threshold is not sufficient on its own: if exactly one group would fold,
+ * the "Other" bar's length IS that one district's count, and a reader can
+ * pair it back to the one district missing from the axis — the spotlight
+ * D-09 forbids is re-created with an extra step. So while the number of
+ * folded groups is exactly one AND at least one unfolded named district
+ * remains, the smallest unfolded named district (the last entry in the
+ * count-descending, name-ascending ordering) is folded too, until the bucket
+ * aggregates at least two groups or nothing remains to add. When nothing
+ * remains — a roll with a single district — the lone group still folds: an
+ * unnamed bar of length 1 discloses strictly less than a named one.
+ *
+ * NEVER THROWS, matching this module's own doctrine (see the file header,
+ * point 4): a non-array `rows` — including `null` and `undefined` — is
+ * treated as zero rows, and a row whose `DISTRICT_FIELD` value is not a
+ * non-empty string (including `null`, `undefined`, `''` and any non-string)
+ * tallies into a single "unstated" group that is ALWAYS folded — naming it
+ * would be authored prose about a named person, and no copy key exists for
+ * it.
+ *
+ * @param {unknown} rows
+ * @param {unknown} [policy]
+ * @returns {ReadonlyArray<Readonly<DistrictBucket>>}
+ */
+export function foldDistrictCounts(rows, policy = ROLL_DISCLOSURE_POLICY) {
+	const { columns } = resolveRollColumns(policy);
+	if (!columns.includes(DISTRICT_FIELD)) return Object.freeze([]);
+
+	const dataRows = Array.isArray(rows) ? rows : [];
+
+	/** @type {Map<string, number>} */
+	const named = new Map();
+	let unstated = 0;
+
+	for (const row of dataRows) {
+		const value =
+			row !== null && typeof row === 'object' ? /** @type {Record<string, unknown>} */ (row)[DISTRICT_FIELD] : undefined;
+		if (typeof value === 'string' && value !== '') {
+			named.set(value, (named.get(value) ?? 0) + 1);
+		} else {
+			unstated += 1;
+		}
+	}
+
+	// Count descending, then name ascending. The tie-break is not cosmetic:
+	// without it the bar order varies between redraws of identical data,
+	// which is exactly the visual instability D-23's silent-redraw rule
+	// exists to prevent.
+	/** @type {Array<{ name: string, count: number, folded: boolean }>} */
+	const namedEntries = [...named.entries()]
+		.sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+		.map(([name, count]) => ({ name, count, folded: count < SMALL_DISTRICT_THRESHOLD }));
+
+	let foldedGroupCount = namedEntries.filter((e) => e.folded).length + (unstated > 0 ? 1 : 0);
+
+	// The complementary-disclosure guard, written as a loop so it terminates
+	// on its own condition rather than assuming a single pass suffices.
+	while (foldedGroupCount === 1) {
+		let lastUnfoldedIndex = -1;
+		for (let i = namedEntries.length - 1; i >= 0; i -= 1) {
+			if (!namedEntries[i].folded) {
+				lastUnfoldedIndex = i;
+				break;
+			}
+		}
+		if (lastUnfoldedIndex === -1) break; // nothing left to add
+		namedEntries[lastUnfoldedIndex].folded = true;
+		foldedGroupCount += 1;
+	}
+
+	/** @type {DistrictBucket[]} */
+	const out = [];
+	let otherCount = unstated;
+	let anyFolded = unstated > 0;
+	let index = 0;
+	for (const entry of namedEntries) {
+		if (entry.folded) {
+			anyFolded = true;
+			otherCount += entry.count;
+		} else {
+			out.push(Object.freeze({ key: 'd' + index, label: entry.name, count: entry.count, folded: false }));
+			index += 1;
+		}
+	}
+	if (anyFolded) out.push(Object.freeze({ key: 'other', label: null, count: otherCount, folded: true }));
+
+	return Object.freeze(out);
+}
