@@ -373,6 +373,346 @@ export function evaluateGapStyleDivergence(gap, plain) {
 }
 
 // ---------------------------------------------------------------------------
+// D-24 / C6 / C7 / D-09 — the two chart-geometry comparators `60-08` adds.
+//
+// Same discipline as every comparator above: pure functions over values
+// already read out of the page (or, for `deriveDistrictExpectation`, over the
+// harness's `districts` array), exercised by `--prove-matchers` with no
+// browser and no build. Module constants below are the ONLY tolerances these
+// two comparators carry, and each is justified at its own declaration rather
+// than left as a bare number.
+// ---------------------------------------------------------------------------
+
+/** C6: below this measured track width, a one-pixel rounding is a large
+ * fraction of the ratio and the tolerance below cannot be trusted. @type {number} */
+const MIN_TRACK_PX = 40;
+
+/** C6: how far a measured fill/track ratio may diverge from the seeded
+ * released/keyholder ratio and still count as "matches". Chosen so a wrong
+ * denominator (the roll row count in place of the keyholder count) — which
+ * moves the seeded ratio by well over three points — is caught, while a
+ * border or a sub-pixel layout rounding is not. @type {number} */
+const METER_RATIO_TOLERANCE = 0.03;
+
+/** C7: how far a label's measured vertical centre may sit outside a bar's own
+ * `[top, bottom]` span and still count as "on that bar's row". @type {number} */
+const ROW_MATCH_TOLERANCE_PX = 2;
+
+/** C7: how far a bar's measured width/max-width ratio may diverge from its
+ * count/max-count ratio. Chosen to absorb a rounded data-end cap and
+ * sub-pixel scaling without absorbing a one-unit count error at this
+ * fixture's counts. @type {number} */
+const BAR_RATIO_TOLERANCE = 0.04;
+
+/** C7: how far a label's measured box may extend past the chart's own
+ * measured box and still count as unclipped — a sub-pixel layout rounding
+ * allowance, not a licence to hide a genuinely clipped label. @type {number} */
+const CLIP_TOLERANCE_PX = 0.5;
+
+/**
+ * @typedef {{ name: string, count: number }} DistrictExpectationEntry
+ * @typedef {{
+ *   unfolded: ReadonlyArray<Readonly<DistrictExpectationEntry>>,
+ *   foldedNames: ReadonlyArray<string>,
+ *   foldedTotal: number,
+ *   distinctCount: number,
+ *   rowTotal: number,
+ * }} DistrictExpectation
+ */
+
+/**
+ * A pure tally/partition over the harness channel's `districts` array (one
+ * entry per seeded row, duplicates included) against D-09's threshold.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO, because an expectation derived from the
+ * implementation under test proves nothing: it never calls
+ * `foldDistrictCounts`, never orders the `unfolded` list (a comparator that
+ * needs an order must sort it itself), and never models the
+ * complementary-disclosure guard (`roll-disclosure.js`'s "if exactly one
+ * group would fold, fold one more" rule). It reproduces only the POLICY — a
+ * count below the threshold is withheld — never the ALGORITHM.
+ *
+ * @param {unknown} districts
+ * @param {number} threshold
+ * @returns {Readonly<DistrictExpectation>}
+ */
+export function deriveDistrictExpectation(districts, threshold) {
+	const rows = Array.isArray(districts) ? districts : [];
+
+	/** @type {Record<string, number>} */
+	const tally = Object.create(null);
+	for (const value of rows) {
+		if (typeof value === 'string' && value !== '') {
+			tally[value] = (tally[value] ?? 0) + 1;
+		}
+	}
+
+	/** @type {DistrictExpectationEntry[]} */
+	const unfolded = [];
+	/** @type {string[]} */
+	const foldedNames = [];
+	let foldedTotal = 0;
+	const names = Object.keys(tally);
+	for (const name of names) {
+		const count = tally[name];
+		if (count >= threshold) unfolded.push(Object.freeze({ name, count }));
+		else {
+			foldedNames.push(name);
+			foldedTotal += count;
+		}
+	}
+
+	return Object.freeze({
+		unfolded: Object.freeze(unfolded),
+		foldedNames: Object.freeze(foldedNames),
+		foldedTotal,
+		distinctCount: names.length,
+		rowTotal: rows.length,
+	});
+}
+
+/**
+ * C6: the key-release meter's measured fill width divided by its measured
+ * track width equals the seeded released/keyholder ratio, within
+ * `METER_RATIO_TOLERANCE`.
+ *
+ * TWO BLIND SPOTS THIS COMPARATOR CANNOT CLOSE, both stated rather than
+ * hidden (60-08's own objective records the same two):
+ *  - The DENOMINATOR. `60-06` mounts the meter with
+ *    `total={keyRelease.keyholderCount}`, never `keyRelease.total` — but the
+ *    shipped keyrelease fixture seeds both as the SAME number, so no
+ *    measurement here can tell a correct denominator from a wrong one. That
+ *    claim is owned at the source tier by `60-06`'s own grep-for-`.total`
+ *    check.
+ *  - The EXTREMES. The seeded page publishes one ratio (roughly 3 of 5), never
+ *    `value === 0` or `value === total`. Those two extremes are covered by
+ *    this comparator's OWN `--prove-matchers` controls below, not by the
+ *    browser leg.
+ *
+ * Collects every failure rather than short-circuiting, and reports both
+ * measured widths and both ratios on success so a reader can see the rung
+ * actually measured something.
+ *
+ * @param {{ meterCount: number, trackCount: number, fillCount: number, trackWidth: number, fillWidth: number }} m
+ * @param {{ value: number, total: number }} counts
+ * @returns {Verdict}
+ */
+export function evaluateMeterGeometry(m, counts) {
+	/** @type {string[]} */
+	const failures = [];
+	if (m.meterCount !== 1) failures.push(`meter count ${m.meterCount} (want 1) -- the key-release card renders no meter, or more than one`);
+	if (m.trackCount !== 1) failures.push(`track count ${m.trackCount} (want 1)`);
+	if (m.fillCount !== 1) failures.push(`fill count ${m.fillCount} (want 1)`);
+	if (!(counts.value > 0 && counts.value < counts.total)) {
+		failures.push(
+			`seeded ratio ${counts.value}/${counts.total} is an extreme -- an always-empty and an always-full meter both ` +
+				'satisfy an extreme, so this rung would be vacuous against it',
+		);
+	}
+	if (m.trackWidth < MIN_TRACK_PX) failures.push(`track width ${m.trackWidth}px is below the ${MIN_TRACK_PX}px measurement floor`);
+	if (!(m.fillWidth > 0)) failures.push(`fill width ${m.fillWidth}px is not positive -- renders empty regardless of data`);
+	if (!(m.fillWidth < m.trackWidth)) failures.push(`fill width ${m.fillWidth}px is not below track width ${m.trackWidth}px -- renders full regardless of data`);
+	const measuredRatio = m.trackWidth !== 0 ? m.fillWidth / m.trackWidth : Number.NaN;
+	const expectedRatio = counts.total !== 0 ? counts.value / counts.total : Number.NaN;
+	if (!Number.isFinite(measuredRatio) || !Number.isFinite(expectedRatio) || Math.abs(measuredRatio - expectedRatio) > METER_RATIO_TOLERANCE) {
+		failures.push(
+			`measured ratio ${Number.isFinite(measuredRatio) ? measuredRatio.toFixed(3) : measuredRatio} diverges from expected ` +
+				`${Number.isFinite(expectedRatio) ? expectedRatio.toFixed(3) : expectedRatio} by more than ${METER_RATIO_TOLERANCE}`,
+		);
+	}
+	return failures.length === 0
+		? {
+				passed: true,
+				detail: `track ${m.trackWidth}px, fill ${m.fillWidth}px, measured ratio ${measuredRatio.toFixed(3)} vs expected ${expectedRatio.toFixed(3)}`,
+			}
+		: { passed: false, detail: failures.join('; ') };
+}
+
+/**
+ * C7 / D-09: one bar renders per surviving district bucket, every bar is
+ * non-zero-width and proportional to its own count, the fold's selectivity is
+ * observable, no withheld name leaks into the chart, and no label is clipped.
+ *
+ * Every condition is COLLECTED, never short-circuited — including the
+ * anti-vacuity check on `expected` itself, so a single run can report every
+ * way this rung is currently unable to prove anything, not just the first.
+ *
+ * PAIRING IS BY MEASURED GEOMETRY, NEVER BY INDEX: for each surviving
+ * district this function finds the one text matching its name EXACTLY (never
+ * `includes` — a truncation is a substring of the original), locates the one
+ * bar whose row that label's vertical centre falls inside, and finds the one
+ * other text on that same row that parses as the district's count. Nothing
+ * here assumes the product's rendering order.
+ *
+ * @param {{
+ *   chartCount: number,
+ *   bars: ReadonlyArray<{ width: number, top: number, bottom: number }>,
+ *   texts: ReadonlyArray<{ text: string, left: number, right: number, top: number, bottom: number, width: number }>,
+ *   chartBox: { left: number, right: number, top: number, bottom: number } | null,
+ *   markupElementCount: number,
+ * }} m
+ * @param {Readonly<DistrictExpectation>} expected
+ * @returns {Verdict}
+ */
+export function evaluateDistrictBars(m, expected) {
+	/** @type {string[]} */
+	const failures = [];
+	if (m.chartCount !== 1) failures.push(`chart count ${m.chartCount} (want 1) -- the roll card renders no district chart, or more than one`);
+
+	// Anti-vacuity on the EXPECTATION itself, before anything about the page:
+	// this is the condition that makes the rung a real privacy control rather
+	// than a bar counter, and it is why Task 1 rebalanced the fixture.
+	if (expected.unfolded.length < 2 || expected.foldedNames.length < 2) {
+		failures.push(
+			`the fixture no longer holds two districts at or above the fold threshold and two below it ` +
+				`(unfolded=${expected.unfolded.length}, folded=${expected.foldedNames.length}) -- this rung can no longer ` +
+				'distinguish a selective fold from a total one',
+		);
+	}
+
+	const bars = Array.isArray(m.bars) ? m.bars : [];
+	const texts = Array.isArray(m.texts) ? m.texts : [];
+
+	if (bars.length !== expected.unfolded.length + 1) {
+		failures.push(`${bars.length} bar(s) rendered, want ${expected.unfolded.length + 1} (one per surviving district plus "other")`);
+	}
+	if (bars.length >= expected.distinctCount) {
+		failures.push(`${bars.length} bar(s) rendered is not fewer than the ${expected.distinctCount} distinct seeded district(s) -- the fold did not fire`);
+	}
+	if (bars.length < 2) {
+		failures.push(`only ${bars.length} bar(s) rendered -- the fold swallowed everything, indistinguishable from a broken mount`);
+	}
+	const zeroWidthBars = bars.filter((b) => !(b.width > 0));
+	if (zeroWidthBars.length > 0) failures.push(`${zeroWidthBars.length} of ${bars.length} bar(s) measure zero or negative width`);
+
+	/** @param {number} top @param {number} bottom @returns {number} */
+	const rowCenter = (top, bottom) => (top + bottom) / 2;
+	/** @param {number} center @param {{ top: number, bottom: number }} bar @returns {boolean} */
+	const onRow = (center, bar) => center >= bar.top - ROW_MATCH_TOLERANCE_PX && center <= bar.bottom + ROW_MATCH_TOLERANCE_PX;
+	/** @param {string} text @returns {boolean} */
+	const isPureInteger = (text) => /^-?\d+$/.test(text);
+
+	const usedBarIdx = new Set();
+	const usedTextIdx = new Set();
+	/** @type {Array<{ entry: DistrictExpectationEntry, bar: { width: number, top: number, bottom: number }, barIdx: number, nameText: (typeof texts)[number], countText: (typeof texts)[number] }>} */
+	const pairs = [];
+
+	for (const entry of expected.unfolded) {
+		const nameMatches = texts.map((t, i) => ({ t, i })).filter(({ t }) => t.text === entry.name);
+		if (nameMatches.length !== 1) {
+			failures.push(`district "${entry.name}": ${nameMatches.length} text(s) match its name exactly (want 1)`);
+			continue;
+		}
+		const { t: nameText, i: nameIdx } = nameMatches[0];
+		const nameCenter = rowCenter(nameText.top, nameText.bottom);
+		const hostBars = bars.map((b, i) => ({ b, i })).filter(({ b }) => onRow(nameCenter, b));
+		if (hostBars.length !== 1) {
+			failures.push(`district "${entry.name}": its label's vertical centre falls inside ${hostBars.length} bar row(s) (want 1)`);
+			continue;
+		}
+		const { b: bar, i: barIdx } = hostBars[0];
+		const countMatches = texts
+			.map((t, i) => ({ t, i }))
+			.filter(({ i }) => i !== nameIdx)
+			.filter(({ t }) => isPureInteger(t.text) && Number.parseInt(t.text, 10) === entry.count)
+			.filter(({ t }) => onRow(rowCenter(t.top, t.bottom), bar));
+		if (countMatches.length !== 1) {
+			failures.push(`district "${entry.name}": ${countMatches.length} count text(s) on its bar row read as ${entry.count} (want exactly 1)`);
+			continue;
+		}
+		usedBarIdx.add(barIdx);
+		usedTextIdx.add(nameIdx);
+		usedTextIdx.add(countMatches[0].i);
+		pairs.push({ entry, bar, barIdx, nameText, countText: countMatches[0].t });
+	}
+
+	// The "other" bar: exactly one bar left unpaired, and the count text on
+	// its row must equal `expected.foldedTotal` -- the bucket is asserted by
+	// its ARITHMETIC, never by its caller-supplied label wording.
+	const unpairedBarIdx = bars.map((_, i) => i).filter((i) => !usedBarIdx.has(i));
+	if (unpairedBarIdx.length !== 1) {
+		failures.push(`${unpairedBarIdx.length} bar(s) remain unpaired after matching every surviving district (want exactly 1, the "other" bucket)`);
+	} else {
+		const otherBar = bars[unpairedBarIdx[0]];
+		const otherCountMatches = texts
+			.map((t, i) => ({ t, i }))
+			.filter(({ i }) => !usedTextIdx.has(i))
+			.filter(({ t }) => isPureInteger(t.text))
+			.filter(({ t }) => onRow(rowCenter(t.top, t.bottom), otherBar));
+		if (otherCountMatches.length !== 1 || Number.parseInt(otherCountMatches[0].t.text, 10) !== expected.foldedTotal) {
+			failures.push(
+				`"other" bucket: ${otherCountMatches.length} count text(s) on its row (want exactly 1) reading its expected total ${expected.foldedTotal}`,
+			);
+		}
+	}
+
+	// Proportionality, computed only over the matched (unfolded) pairs.
+	if (pairs.length > 0) {
+		const maxPair = pairs.reduce((a, b) => (b.entry.count > a.entry.count ? b : a));
+		const maxCount = maxPair.entry.count;
+		const maxWidth = maxPair.bar.width;
+		if (!(maxWidth > 0)) {
+			failures.push(`the max-count district's bar measures ${maxWidth}px width -- proportionality cannot be assessed`);
+		} else {
+			for (const p of pairs) {
+				const expectedRatio = p.entry.count / maxCount;
+				const measuredRatio = p.bar.width / maxWidth;
+				if (Math.abs(measuredRatio - expectedRatio) > BAR_RATIO_TOLERANCE) {
+					failures.push(
+						`district "${p.entry.name}": bar width ${p.bar.width}px is not proportional to its count ${p.entry.count} ` +
+							`(measured ratio ${measuredRatio.toFixed(3)} vs expected ${expectedRatio.toFixed(3)})`,
+					);
+				}
+			}
+		}
+	}
+
+	// Disclosure: every withheld name absent from the chart's text as a
+	// SUBSTRING -- the stricter direction, because a partial leak is still a
+	// leak. Scope matters: this readout must already be scoped to the chart
+	// subtree, since these names legitimately appear in the roll table above
+	// it -- widening the readout would turn this condition into a permanent
+	// failure, not a reason to delete it.
+	const chartText = texts.map((t) => t.text).join(' ');
+	for (const name of expected.foldedNames) {
+		if (chartText.includes(name)) failures.push(`withheld district "${name}" appears as a substring in the chart's own text`);
+	}
+
+	// Unclipped labels: every text paired above must measure a positive width
+	// and lie inside the chart's own measured box, expanded by
+	// `CLIP_TOLERANCE_PX`. A box extending past the chart's own box is the
+	// observable form of an SVG-clipped label.
+	const clipCandidates = pairs.flatMap((p) => [p.nameText, p.countText]);
+	if (clipCandidates.length > 0) {
+		if (!m.chartBox) {
+			failures.push(`no chart box measured -- cannot confirm ${clipCandidates.length} paired label(s) are unclipped`);
+		} else {
+			const box = m.chartBox;
+			for (const t of clipCandidates) {
+				if (!(t.width > 0)) {
+					failures.push(`label "${t.text}" measures zero width`);
+					continue;
+				}
+				if (t.left < box.left - CLIP_TOLERANCE_PX || t.right > box.right + CLIP_TOLERANCE_PX || t.top < box.top - CLIP_TOLERANCE_PX || t.bottom > box.bottom + CLIP_TOLERANCE_PX) {
+					failures.push(`label "${t.text}" box (${t.left},${t.top})-(${t.right},${t.bottom}) extends past the chart's own box (${box.left},${box.top})-(${box.right},${box.bottom}) -- clipped`);
+				}
+			}
+		}
+	}
+
+	if (m.markupElementCount !== 0) {
+		failures.push(`${m.markupElementCount} markup element(s) (b, i, script, img) reached the chart -- authority-supplied text was parsed as markup instead of text`);
+	}
+
+	return failures.length === 0
+		? {
+				passed: true,
+				detail: `${bars.length} bar(s) (${expected.unfolded.length} named + "other"), proportional within ${BAR_RATIO_TOLERANCE}, ${expected.foldedNames.length} withheld name(s) absent, 0 markup element(s)`,
+			}
+		: { passed: false, detail: failures.join('; ') };
+}
+
+// ---------------------------------------------------------------------------
 // PART C — the matcher positive controls (`--prove-matchers`).
 //
 // Every comparator above is run TWICE: once against an input built to violate
@@ -389,6 +729,52 @@ const HEALTHY_CELLS = [
 const HEALTHY_LONGEST = HEALTHY_CELLS[0].text;
 const CONTROL_MARKER = ['EXTRA', 'FIELDS', 'MUST', 'NOT', 'RENDER'].join('-');
 const CONTROL_HOSTILE = `<${'script'}>controlXss()</${'script'}>`;
+
+// C6/C7 controls' own literals -- assembled at runtime, never a bare literal
+// this file's own `Gate-source integrity` bans could match, and long enough
+// (>= 20 chars, per D-19's production-length rule) to genuinely exercise the
+// clipping condition rather than standing in for it.
+const CTRL_DISTRICT_A = ['Meridian Hollow Ward Twelve', '(control-fixture)'].join(' ');
+const CTRL_DISTRICT_B = ['Cinder Bluff Precinct Nine', '(control-fixture)'].join(' ');
+const CTRL_DISTRICT_C = ['Larkspur Fen Precinct Three', '(control-fixture)'].join(' ');
+const CTRL_DISTRICT_D = ['Foxglove Reach Precinct Five', '(control-fixture)'].join(' ');
+const CTRL_OTHER_LABEL = ['Other', 'district(s)', '(control-fixture)'].join(' ');
+/** Threshold used by every C7 control below -- deliberately not D-09's real
+ * exported constant, so these controls stay independent of any future change
+ * to `SMALL_DISTRICT_THRESHOLD`. @type {number} */
+const CTRL_BARS_THRESHOLD = 2;
+/** A=3 (unfolded), B=2 (unfolded), C=1 and D=1 (both folded) -- two above the
+ * threshold and two below it, matching the shape Task 1 gave the real fixture. */
+const CTRL_BARS_DISTRICTS = Object.freeze([
+	CTRL_DISTRICT_A,
+	CTRL_DISTRICT_A,
+	CTRL_DISTRICT_A,
+	CTRL_DISTRICT_B,
+	CTRL_DISTRICT_B,
+	CTRL_DISTRICT_C,
+	CTRL_DISTRICT_D,
+]);
+const CTRL_BARS_EXPECTED = deriveDistrictExpectation(CTRL_BARS_DISTRICTS, CTRL_BARS_THRESHOLD);
+/** The healthy C7 readout: one bar per surviving district (A, B) plus a
+ * folded "other" bucket whose count equals C + D. @type {{ chartCount: number, bars: Array<{width:number,top:number,bottom:number}>, texts: Array<{text:string,left:number,right:number,top:number,bottom:number,width:number}>, chartBox: {left:number,right:number,top:number,bottom:number}, markupElementCount: number }} */
+const CTRL_BARS_HEALTHY_READOUT = {
+	chartCount: 1,
+	bars: [
+		{ width: 180, top: 0, bottom: 20 },
+		{ width: 120, top: 24, bottom: 44 },
+		{ width: 40, top: 48, bottom: 68 },
+	],
+	texts: [
+		{ text: CTRL_DISTRICT_A, left: 0, right: 180, top: 0, bottom: 20, width: 180 },
+		{ text: '3', left: 182, right: 190, top: 5, bottom: 15, width: 8 },
+		{ text: CTRL_DISTRICT_B, left: 0, right: 120, top: 24, bottom: 44, width: 120 },
+		{ text: '2', left: 122, right: 130, top: 29, bottom: 39, width: 8 },
+		{ text: CTRL_OTHER_LABEL, left: 0, right: 40, top: 48, bottom: 68, width: 40 },
+		{ text: '2', left: 42, right: 50, top: 53, bottom: 63, width: 8 },
+	],
+	chartBox: { left: 0, right: 200, top: 0, bottom: 100 },
+	markupElementCount: 0,
+};
 
 /**
  * @returns {ReadonlyArray<{ label: string, violating: Verdict, healthy: Verdict }>}
@@ -461,6 +847,70 @@ function matcherControls() {
 				{ borderTopStyle: 'dashed', color: 'rgb(141, 151, 168)', fontSize: '12px' },
 				{ borderTopStyle: 'solid', color: 'rgb(233, 236, 242)', fontSize: '14px' },
 			),
+		},
+		{
+			label: 'C6 meter-geometry comparator vs. a fill measuring ~90% of its track while the counts say 60%',
+			violating: evaluateMeterGeometry({ meterCount: 1, trackCount: 1, fillCount: 1, trackWidth: 200, fillWidth: 180 }, { value: 3, total: 5 }),
+			healthy: evaluateMeterGeometry({ meterCount: 1, trackCount: 1, fillCount: 1, trackWidth: 200, fillWidth: 120 }, { value: 3, total: 5 }),
+		},
+		{
+			label: 'C6 meter-geometry comparator vs. a saturated input (value === total) whose fill genuinely fills the track',
+			// The arithmetic "matches" -- fillWidth/trackWidth really is 1.0, the
+			// same as released/total -- and the comparator must still refuse it:
+			// an always-full meter is indistinguishable from a correct one at
+			// this one extreme, so the rung would be vacuous against it.
+			violating: evaluateMeterGeometry({ meterCount: 1, trackCount: 1, fillCount: 1, trackWidth: 200, fillWidth: 200 }, { value: 5, total: 5 }),
+			healthy: evaluateMeterGeometry({ meterCount: 1, trackCount: 1, fillCount: 1, trackWidth: 200, fillWidth: 120 }, { value: 3, total: 5 }),
+		},
+		{
+			label: 'C6 meter-geometry comparator vs. a zero input (value === 0) whose fill genuinely renders empty',
+			violating: evaluateMeterGeometry({ meterCount: 1, trackCount: 1, fillCount: 1, trackWidth: 200, fillWidth: 0 }, { value: 0, total: 5 }),
+			healthy: evaluateMeterGeometry({ meterCount: 1, trackCount: 1, fillCount: 1, trackWidth: 200, fillWidth: 120 }, { value: 3, total: 5 }),
+		},
+		{
+			label: 'C7 district-bars comparator vs. a fold that did not fire (one bar per distinct district, no "other" bucket)',
+			violating: evaluateDistrictBars(
+				{
+					chartCount: 1,
+					bars: [
+						{ width: 180, top: 0, bottom: 20 },
+						{ width: 120, top: 24, bottom: 44 },
+						{ width: 60, top: 48, bottom: 68 },
+						{ width: 60, top: 72, bottom: 92 },
+					],
+					texts: [
+						{ text: CTRL_DISTRICT_A, left: 0, right: 180, top: 0, bottom: 20, width: 180 },
+						{ text: '3', left: 182, right: 190, top: 5, bottom: 15, width: 8 },
+						{ text: CTRL_DISTRICT_B, left: 0, right: 120, top: 24, bottom: 44, width: 120 },
+						{ text: '2', left: 122, right: 130, top: 29, bottom: 39, width: 8 },
+						{ text: CTRL_DISTRICT_C, left: 0, right: 60, top: 48, bottom: 68, width: 60 },
+						{ text: '1', left: 62, right: 70, top: 53, bottom: 63, width: 8 },
+						{ text: CTRL_DISTRICT_D, left: 0, right: 60, top: 72, bottom: 92, width: 60 },
+						{ text: '1', left: 62, right: 70, top: 77, bottom: 87, width: 8 },
+					],
+					chartBox: { left: 0, right: 200, top: 0, bottom: 100 },
+					markupElementCount: 0,
+				},
+				CTRL_BARS_EXPECTED,
+			),
+			healthy: evaluateDistrictBars(CTRL_BARS_HEALTHY_READOUT, CTRL_BARS_EXPECTED),
+		},
+		{
+			label: 'C7 district-bars comparator vs. a readout whose chart text leaks a withheld (folded) district name',
+			violating: evaluateDistrictBars(
+				{
+					...CTRL_BARS_HEALTHY_READOUT,
+					texts: [
+						...CTRL_BARS_HEALTHY_READOUT.texts,
+						// A stray text node under the chart subtree carrying a name that
+						// should have been folded away -- the leak this control proves
+						// the comparator can catch.
+						{ text: CTRL_DISTRICT_C, left: 5, right: 60, top: 200, bottom: 220, width: 55 },
+					],
+				},
+				CTRL_BARS_EXPECTED,
+			),
+			healthy: evaluateDistrictBars(CTRL_BARS_HEALTHY_READOUT, CTRL_BARS_EXPECTED),
 		},
 	]);
 }

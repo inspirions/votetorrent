@@ -48,6 +48,23 @@
  * rung can observe the fold firing selectively. Restoring the one-per-row
  * shape re-opens that blindness; do not "simplify" this distribution back to
  * it.
+ *
+ * ONE MORE CONSTRAINT ON THE EXACT COUNTS, discovered live rather than
+ * planned: `r-roll-4`'s district literally contains the standalone digit `5`
+ * ("...<b>Ward</b> 5 Precinct 40..."), and the existing
+ * `keyrelease-renders-filled-with-nonzero-released` rung scans the WHOLE text
+ * of every filled fact card for the seeded released/total pair (`3`/`5`,
+ * `keyrelease-fixture.js`'s `EXPECTED_RELEASED`/`EXPECTED_TOTAL`) as
+ * standalone numbers. Since `60-06` mounts the district chart INSIDE the same
+ * fact card as the roll table, that card's own bar-count labels AND its
+ * numeric axis ticks (Recharts renders a tick per integer step up to the
+ * largest bar's count) are also scanned — so the largest surviving district's
+ * count must never let a `3` tick appear, or it would combine with
+ * `r-roll-4`'s literal "Ward 5" to falsely satisfy that unrelated rung on the
+ * wrong card. Both surviving districts sit AT the fold threshold (2 rows
+ * each) specifically to keep the axis's largest tick at 2, not 3 or higher —
+ * measured live: at a max bar count of 2 Recharts ticks 0/0.5/1/1.5/2 (no
+ * standalone `3`); at a max of 4 it ticks 0/1/2/3/4 (a `3` IS present).
  */
 
 import { generatePrivateKey, getPublicKey, sign } from '@optimystic/quereus-plugin-crypto';
@@ -102,12 +119,16 @@ export const EXTRA_FIELDS_MARKER = 'EXTRAFIELDS-MUST-NOT-RENDER';
 const EXTRA_FIELDS_JSON = JSON.stringify({ vtxNeverRender: EXTRA_FIELDS_MARKER });
 
 /**
- * The seven registrants whose CURRENT public records make up the roll, across
- * 4 districts — two districts at or above `SMALL_DISTRICT_THRESHOLD`
- * (North Riverbend, three rows; Bracketed Ward, two rows) and two below it
- * (Southgate Township, New Millrace, one row each), so `60-08`'s C7 rung can
- * observe D-09's fold firing SELECTIVELY. See this file's header for why that
- * distribution, not a one-district-per-row shape, is load-bearing.
+ * The six registrants whose CURRENT public records make up the roll, across
+ * 4 districts — two districts AT `SMALL_DISTRICT_THRESHOLD` (North Riverbend,
+ * 2 rows; Bracketed Ward, 2 rows) and two below it (Southgate Township, New
+ * Millrace, 1 row each), so `60-08`'s C7 rung can observe D-09's fold firing
+ * SELECTIVELY — and, since both survivors sit exactly AT the threshold, that
+ * the boundary itself (count == threshold survives, not just count >>
+ * threshold) is what is proven, not merely "big districts survive". See this
+ * file's header for why this distribution, not a one-district-per-row shape,
+ * is load-bearing, and why both survivors are capped at exactly 2 rather than
+ * left larger.
  *
  * `r-roll-3` is the reissued registrant: this is its CURRENT record, and
  * `ROLL_SUPERSEDED` below is the one it replaced. Both rows persist —
@@ -163,12 +184,6 @@ export const ROLL_REGISTRANTS = Object.freeze([
 	}),
 	Object.freeze({
 		id: 'r-roll-6',
-		lastName: 'Zephyrington-Adeyemi',
-		firstName: 'Perpetua-Lindiwe',
-		district: 'North Riverbend Ward 7 Precinct 12 (vtx-fixture)',
-	}),
-	Object.freeze({
-		id: 'r-roll-7',
 		lastName: 'Brightwater-Osei',
 		firstName: 'Thaddeus-Emeka',
 		district: 'Bracketed <b>Ward</b> 5 Precinct 40 (vtx-fixture)',
@@ -195,22 +210,22 @@ export const ROLL_SUPERSEDED = Object.freeze({
 	district: 'Old Millrace Ward 3 Precinct 22 (vtx-fixture)',
 });
 
-/** The seven last names `readRegistrantRoll` must return — no more, no fewer. @type {ReadonlyArray<string>} */
+/** The six last names `readRegistrantRoll` must return — no more, no fewer. @type {ReadonlyArray<string>} */
 export const EXPECTED_ROLL_LAST_NAMES = Object.freeze(ROLL_REGISTRANTS.map((r) => r.lastName));
 
 /**
  * Row counts this fixture leaves behind.
  *
- * `RegistrantPublic` is EIGHT, not seven: the superseded row is never deleted
+ * `RegistrantPublic` is SEVEN, not six: the superseded row is never deleted
  * (`InsertOnly check on update, delete (false)`), which is precisely the
  * production condition the roll's `RP.Cid = R.PublicCid` predicate defends
  * against.
  * @type {Readonly<Record<string, number>>}
  */
 export const ROLL_EXPECTED_COUNTS = Object.freeze({
-	Registrant: 7,
-	ElectionRegistrant: 7,
-	RegistrantPublic: 8,
+	Registrant: 6,
+	ElectionRegistrant: 6,
+	RegistrantPublic: 7,
 });
 
 /**
@@ -268,8 +283,8 @@ async function signRegistrantRow(db, row, priv) {
 }
 
 /**
- * Seed seven `Registrant` rows, their seven `ElectionRegistrant` enrolments
- * and EIGHT `RegistrantPublic` rows — one registrant having had its public
+ * Seed six `Registrant` rows, their six `ElectionRegistrant` enrolments
+ * and SEVEN `RegistrantPublic` rows — one registrant having had its public
  * record REISSUED — behind a real `vrg` signing ceremony and a real
  * secp256k1 signature.
  *
