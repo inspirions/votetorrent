@@ -23,6 +23,7 @@
 import { useEffect, useState } from 'react';
 import type { PanelComponent } from './types.js';
 import { t } from '@votetorrent/ui-web';
+import { BarSeries, StackedBarSeries } from '@votetorrent/ui-web/components';
 import {
 	readRegistrantStatusBreakdown,
 	readRegistrationRequestBreakdown,
@@ -41,6 +42,56 @@ const COL = Object.freeze({
 	expiration: 'Expiration',
 });
 
+// RegistrantStatus codes reproduced VERBATIM from the schema -- a status
+// with no registrants still maps to its own tone, so the bar renders at
+// zero height rather than being dropped. An unknown code resolves to
+// `undefined` and falls through to the chart primitive's own default tone.
+const STATUS_TONE: Readonly<Record<string, 'ok' | 'warn' | 'fail'>> = Object.freeze({
+	a: 'ok',
+	s: 'warn',
+	r: 'fail',
+});
+
+// RegistrationRequestIssuer codes, in the fixed order every C2 datum's two
+// segments are built in.
+const ISSUER_CODES: readonly string[] = Object.freeze(['registrant', 'bridge']);
+
+// RegistrationRequestIssuer codes mapped to chart tones -- colour encodes
+// issuer only (never status), a genuine two-slot categorical.
+const ISSUER_SERIES: Readonly<Record<string, 'series-1' | 'series-2'>> = Object.freeze({
+	registrant: 'series-1',
+	bridge: 'series-2',
+});
+
+// The schema's own RegistrationRequestIssuer display names, reproduced
+// verbatim -- a zero-valued segment (the absent issuer for a status) still
+// needs a label, and no row supplies one for it.
+const ISSUER_NAME: Readonly<Record<string, string>> = Object.freeze({
+	registrant: 'Registrant',
+	bridge: 'Bridge',
+});
+
+// RegistrationRequestStatus's own code sequence. readRegistrationRequestBreakdown
+// carries no `order by`, so without this the category-axis order would be
+// engine-dependent; a status code outside this sequence sorts after it, by
+// code, so an added schema code degrades to a stable position.
+const REQUEST_STATUS_ORDER: readonly string[] = Object.freeze(['p', 'a', 'r']);
+
+function compareRequestStatusCodes(a: string, b: string): number {
+	const ai = REQUEST_STATUS_ORDER.indexOf(a);
+	const bi = REQUEST_STATUS_ORDER.indexOf(b);
+	if (ai !== -1 && bi !== -1) return ai - bi;
+	if (ai !== -1) return -1;
+	if (bi !== -1) return 1;
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// The `series` argument StackedBarSeries needs -- two hues, encoding issuer
+// only; status rides the category axis, so colour never re-encodes it.
+const REQUEST_CHART_SERIES = ISSUER_CODES.map((code) =>
+	Object.freeze({ key: code, label: ISSUER_NAME[code], tone: ISSUER_SERIES[code] }),
+);
+
 interface RegistrationsData {
 	statusBreakdown: Awaited<ReturnType<typeof readRegistrantStatusBreakdown>>;
 	requestBreakdown: Awaited<ReturnType<typeof readRegistrationRequestBreakdown>>;
@@ -58,6 +109,53 @@ type RegistrationsState =
 	| { status: 'loading' }
 	| { status: 'failed' }
 	| { status: 'ready'; data: RegistrationsData };
+
+// A pure reshape of an already-aggregated read -- maps, never filters, so a
+// status with zero registrants still renders as a zero-height mark rather
+// than a missing bar (that read drives FROM RegistrantStatus).
+function toStatusData(rows: RegistrationsData['statusBreakdown']) {
+	return rows.map((row) => ({
+		key: row.Code,
+		label: row.Name,
+		value: row.Count,
+		tone: STATUS_TONE[row.Code],
+		tooltip: t('panels.registrations.statusChart.tooltip', { status: row.Name, count: String(row.Count) }),
+	}));
+}
+
+// A pure pivot of the flat (status, issuer) read into one datum per status
+// with exactly two segments, always -- the absent issuer for a status
+// zero-fills rather than being omitted, so the chart never promises a
+// series it does not draw.
+function toRequestData(rows: RegistrationsData['requestBreakdown']) {
+	const byStatus = new Map<string, { label: string; byIssuer: Map<string, { count: number; issuerName: string }> }>();
+	for (const row of rows) {
+		const entry = byStatus.get(row.Status) ?? { label: row.StatusName, byIssuer: new Map<string, { count: number; issuerName: string }>() };
+		entry.byIssuer.set(row.IssuerType, { count: row.Count, issuerName: row.IssuerName });
+		byStatus.set(row.Status, entry);
+	}
+
+	return [...byStatus.entries()]
+		.sort(([a], [b]) => compareRequestStatusCodes(a, b))
+		.map(([code, entry]) => ({
+			key: code,
+			label: entry.label,
+			segments: ISSUER_CODES.map((issuerCode) => {
+				const found = entry.byIssuer.get(issuerCode);
+				const value = found ? found.count : 0;
+				const issuerName = found ? found.issuerName : ISSUER_NAME[issuerCode];
+				return {
+					seriesKey: issuerCode,
+					value,
+					tooltip: t('panels.registrations.requestChart.tooltip', {
+						status: entry.label,
+						issuer: issuerName,
+						count: String(value),
+					}),
+				};
+			}),
+		}));
+}
 
 const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 	const [state, setState] = useState<RegistrationsState>({ status: 'loading' });
@@ -133,6 +231,7 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 		<>
 			<section className="eo-section">
 				<h4 className="eo-heading">{t('panels.registrations.statusHeading')}</h4>
+				<BarSeries data={toStatusData(statusBreakdown)} />
 				<div className="eo-count-grid">
 					{statusBreakdown.map((row) => (
 						<div key={row.Code}>
@@ -145,6 +244,11 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 
 			<section className="eo-section">
 				<h4 className="eo-heading">{t('panels.registrations.requestsHeading')}</h4>
+				<StackedBarSeries
+					data={toRequestData(requestBreakdown)}
+					series={REQUEST_CHART_SERIES}
+					emptyCopyKey="panels.registrations.requestChart.empty"
+				/>
 				<div className="eo-count-grid">
 					{requestBreakdown.map((row) => {
 						const label = `${row.StatusName} / ${row.IssuerName}`;

@@ -135,7 +135,9 @@ const COPY_KEYS = new Set(Object.keys(COPY));
 // three literal state keys (its fourth state, `.empty`, keeps resolving
 // through the existing `t(capability.emptyKey)` indirection, which is not a
 // literal and so is never a member of this set), and its four new section
-// headings add one literal key each.
+// headings add one literal key each. Grown again for C1/C2: the status and
+// request charts' tooltip strings and C2's empty-frame copy are each a
+// literal `t(...)` call in the panel body.
 const ALLOWED_T_KEYS = new Set([
 	'panels.registrations.empty',
 	'panels.registrations.loading',
@@ -145,6 +147,9 @@ const ALLOWED_T_KEYS = new Set([
 	'panels.registrations.requestsHeading',
 	'panels.registrations.rosterHeading',
 	'panels.registrations.surfaceCountsHeading',
+	'panels.registrations.requestChart.empty',
+	'panels.registrations.statusChart.tooltip',
+	'panels.registrations.requestChart.tooltip',
 	'panels.elections.empty',
 	'panels.ballotsQuestions.empty',
 	'lifecycle.pre',
@@ -227,6 +232,50 @@ test('positive control: a fixture naming only one of the four state keys is repo
 	const fixture = `t('panels.registrations.loading')`;
 	const resolved = namedRegistrationsStateStrings(fixture);
 	assert.equal(resolved.length, 1, 'the helper must report an incomplete fixture as incomplete, or it proves nothing');
+});
+
+// --- Chart inventory (C1, C2, C4/D-05) ---------------------------------------
+
+test('RegistrationsPanel.tsx mounts exactly one BarSeries and one StackedBarSeries, zero Meter, and never disables value labels', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	assert.equal((source.match(/<BarSeries/g) ?? []).length, 1, 'expected exactly one <BarSeries mount');
+	assert.equal((source.match(/<StackedBarSeries/g) ?? []).length, 1, 'expected exactly one <StackedBarSeries mount');
+	assert.equal((source.match(/<Meter/g) ?? []).length, 0, 'the surface-count section (C4/D-05) must stay a table, not a Meter');
+	assert.doesNotMatch(source, /showValueLabels/, 'the mandatory C1 count label must be left at its default, never suppressed');
+});
+
+// --- Every grid survives (D-20) -----------------------------------------------
+
+test('RegistrationsPanel.tsx keeps all three eo-count-grid blocks and the eo-row roster -- every chart sits beside its grid', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	assert.equal((source.match(/eo-count-grid/g) ?? []).length, 3, 'expected exactly three eo-count-grid occurrences');
+	assert.ok(/eo-row/.test(source), 'expected at least one eo-row occurrence (the roster grid)');
+});
+
+// --- The status breakdown is never filtered (D-02) ----------------------------
+
+test('RegistrationsPanel.tsx contains no .filter( -- the status breakdown always renders all three statuses, including zero counts -- with a positive control proving the matcher is discriminating', () => {
+	assert.doesNotMatch(STRIPPED['RegistrationsPanel.tsx'], /\.filter\(/, 'RegistrationsPanel.tsx must never filter a breakdown read');
+	const fixture = `const visible = rows.filter((r) => r.Count > 0);`;
+	assert.match(fixture, /\.filter\(/, 'positive control: the matcher must hit a synthetic rows.filter(...) fixture, or it proves nothing');
+});
+
+// --- Charts are confined to Registrations and Keyholders (D-01) --------------
+
+const CHART_PRIMITIVE_RE = /<BarSeries|<StackedBarSeries|<TimeSeries|<Meter/;
+
+test('no panel body other than RegistrationsPanel.tsx and KeyholdersPanel.tsx mounts a chart primitive', () => {
+	const panelFiles = readdirSync(PANELS_DIR, { withFileTypes: true })
+		.filter((entry) => entry.isFile() && /Panel\.tsx$/.test(entry.name))
+		.map((entry) => entry.name);
+	assert.ok(panelFiles.length > 2, 'the walk must visit more than two panel files, or a green run is vacuous');
+	const offenders = [];
+	for (const file of panelFiles) {
+		if (file === 'RegistrationsPanel.tsx' || file === 'KeyholdersPanel.tsx') continue;
+		const source = stripComments(readFileSync(path.join(PANELS_DIR, file), 'utf8'));
+		if (CHART_PRIMITIVE_RE.test(source)) offenders.push(file);
+	}
+	assert.deepEqual(offenders, [], `chart primitive confined to Registrations/Keyholders, but found in: ${JSON.stringify(offenders)}`);
 });
 
 // --- No decision ID or phase number -----------------------------------------
