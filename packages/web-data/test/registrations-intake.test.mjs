@@ -19,16 +19,25 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { Database } from '@quereus/quereus';
 import { prepareDb } from '@votetorrent/vote-engine/browser';
 import { readRegistrationIntakeSeries, IntakeSeriesReadError, REGISTRATIONS_TABLES_READ } from '@votetorrent/web-data/officer';
 import { seedFoundingAuthority } from './fixtures/seed-founding-authority.js';
 import { webDataSrc } from '../../../scripts/lib/source-paths.mjs';
+import { stripComments } from '../../../scripts/lib/strip-comments.mjs';
 
 const registrationsModule = await import(pathToFileURL(webDataSrc('officer', 'registrations.js')).href);
 const { chooseIntakeBucketUnit, densifyIntakeBuckets, foldDayBucketsIntoWeeks, INTAKE_HOUR_MAX_SPAN_MS, INTAKE_DAY_MAX_SPAN_MS } =
 	registrationsModule;
+
+// The banned column name is ASSEMBLED, never written out, so it appears in
+// this file exactly once -- as the joined literal below. Otherwise this
+// test file's own header/comments could satisfy the matcher it exists to
+// prove is discriminating (the self-tripping-checker failure mode this repo
+// has shipped before).
+const BANNED_TIME_COLUMN = ['Submitted', 'At'].join('');
 
 /** @returns {Promise<import('@quereus/quereus').Database>} */
 async function foundingOnlyDb() {
@@ -257,4 +266,84 @@ test('S6 shape and robustness: a malformed ReceivedAt is excluded, every row has
 		assert.ok(row.bucketStart > previous, 'bucketStart must be strictly ascending');
 		previous = row.bucketStart;
 	}
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// D1-D5 -- the D-04 source assertion (with its code- and comment-position
+// controls) and the T-60-02 class-only error-logging proof.
+// ─────────────────────────────────────────────────────────────────────────
+
+test('D1 D-04 source assertion: comment-stripped module source names ReceivedAt and never the submitter-supplied column', () => {
+	const source = readFileSync(webDataSrc('officer', 'registrations.js'), 'utf8');
+	const stripped = stripComments(source);
+	assert.match(stripped, /ReceivedAt/, 'the module must reference ReceivedAt in code');
+	assert.doesNotMatch(
+		stripped,
+		new RegExp(BANNED_TIME_COLUMN),
+		'the module must never reference the submitter-supplied column in code (D-04)',
+	);
+});
+
+test('D2 code-position positive control: the real INTAKE_DAILY_SQL mutated to name the banned column fires the same matcher', () => {
+	const mutated = registrationsModule.INTAKE_DAILY_SQL.replace('ReceivedAt', BANNED_TIME_COLUMN);
+	assert.match(mutated, new RegExp(BANNED_TIME_COLUMN), 'mutating a real constant to the banned name must be detectable by the same matcher D1 uses');
+});
+
+test('D3 comment-position inertness control: a *-prefixed comment naming the banned column stays inert after stripping', () => {
+	const synthetic = ['/**', ' * ' + BANNED_TIME_COLUMN + ' is named here only as prose, never as code.', ' */', 'const keep = 1;'].join('\n');
+	const stripped = stripComments(synthetic);
+	assert.doesNotMatch(
+		stripped,
+		new RegExp(BANNED_TIME_COLUMN),
+		'a comment-only mention must not trip the matcher -- D1 passes because the identifier is absent from CODE, not because the file happens to contain no prose about it',
+	);
+});
+
+test('D4 error path logs the class only (T-60-02): a schema-less db logs RelationNotFoundError and nothing else', async () => {
+	const db = new Database();
+	const originalConsoleError = console.error;
+	/** @type {unknown[][]} */
+	const calls = [];
+	console.error = (...args) => {
+		calls.push(args);
+	};
+	try {
+		await assert.rejects(
+			() => readRegistrationIntakeSeries(db),
+			(err) => {
+				assert.ok(err instanceof IntakeSeriesReadError);
+				assert.equal(/** @type {any} */ (err).originalName, 'RelationNotFoundError');
+				assert.equal(err.cause, undefined, 'an attached cause would re-export the message the log just withheld');
+				assert.doesNotMatch(err.message, /RegistrationRequest/);
+				assert.doesNotMatch(err.message, /not found/);
+				assert.doesNotMatch(err.message, /schema path/);
+				return true;
+			},
+		);
+	} finally {
+		console.error = originalConsoleError;
+	}
+	assert.equal(calls.length, 1, 'exactly one console.error call');
+	const joined = calls[0].join(' ');
+	assert.match(joined, /RelationNotFoundError/);
+	assert.match(joined, /officer\/registrations intake:/);
+	assert.doesNotMatch(joined, /RegistrationRequest/, 'the raw engine message names the table -- a real leak signal');
+	assert.doesNotMatch(joined, /not found/, 'the raw engine message says "not found" -- a real leak signal');
+	assert.doesNotMatch(joined, /schema path/, 'the raw engine message says "schema path" -- a real leak signal');
+});
+
+test('D5 capture-harness control: the same harness around a raw engine message DOES show the table name', () => {
+	const originalConsoleError = console.error;
+	/** @type {unknown[][]} */
+	const calls = [];
+	console.error = (...args) => {
+		calls.push(args);
+	};
+	try {
+		console.error("Table 'RegistrationRequest' not found in schema path: main");
+	} finally {
+		console.error = originalConsoleError;
+	}
+	assert.equal(calls.length, 1);
+	assert.match(calls[0].join(' '), /RegistrationRequest/, "without this, D4's \"no table name\" assertion would also pass on a broken, non-capturing harness");
 });
