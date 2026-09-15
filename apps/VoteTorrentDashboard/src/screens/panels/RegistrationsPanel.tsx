@@ -23,12 +23,13 @@
 import { useEffect, useState } from 'react';
 import type { PanelComponent } from './types.js';
 import { t } from '@votetorrent/ui-web';
-import { BarSeries, StackedBarSeries } from '@votetorrent/ui-web/components';
+import { BarSeries, StackedBarSeries, TimeSeries } from '@votetorrent/ui-web/components';
 import {
 	readRegistrantStatusBreakdown,
 	readRegistrationRequestBreakdown,
 	readRegistrantRoster,
 	readRegistrationSurfaceCounts,
+	readRegistrationIntakeSeries,
 	hasAnyRegistrationData,
 	selectActiveElection,
 } from '@votetorrent/web-data/officer';
@@ -97,6 +98,7 @@ interface RegistrationsData {
 	requestBreakdown: Awaited<ReturnType<typeof readRegistrationRequestBreakdown>>;
 	roster: Awaited<ReturnType<typeof readRegistrantRoster>>;
 	surfaceCounts: Awaited<ReturnType<typeof readRegistrationSurfaceCounts>>;
+	intakeSeries: Awaited<ReturnType<typeof readRegistrationIntakeSeries>>;
 	empty: boolean;
 }
 
@@ -157,6 +159,26 @@ function toRequestData(rows: RegistrationsData['requestBreakdown']) {
 		}));
 }
 
+// A 19-character bucketStart is the hour form (YYYY-MM-DDTHH:00:00); its
+// axis label is the HH:00 slice. Everything else is the ten-character
+// YYYY-MM-DD form (day or week -- both serialise identically), whose label
+// is the whole string. The read returns no unit field, and this length test
+// is the complete unit handling this panel needs.
+const HOUR_BUCKET_START_LENGTH = 19;
+
+// A pure reshape of the intake read -- `count` is deliberately lower-case,
+// unlike every other read in this module. Zero-count buckets arrive as rows
+// with `count: 0` and pass through untouched, rendering as points on the
+// baseline rather than gaps.
+function toIntakeData(rows: RegistrationsData['intakeSeries']) {
+	return rows.map((row) => ({
+		key: row.bucketStart,
+		label: row.bucketStart.length === HOUR_BUCKET_START_LENGTH ? row.bucketStart.slice(11, 16) : row.bucketStart,
+		value: row.count,
+		tooltip: t('panels.registrations.intakeChart.tooltip', { bucket: row.bucketStart, count: String(row.count) }),
+	}));
+}
+
 const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 	const [state, setState] = useState<RegistrationsState>({ status: 'loading' });
 
@@ -181,11 +203,12 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 				const requestBreakdown = await readRegistrationRequestBreakdown(boundDb);
 				const roster = await readRegistrantRoster(boundDb);
 				const surfaceCounts = await readRegistrationSurfaceCounts(boundDb, electionId);
+				const intakeSeries = await readRegistrationIntakeSeries(boundDb);
 				const anyData = await hasAnyRegistrationData(boundDb);
 				if (!cancelled) {
 					setState({
 						status: 'ready',
-						data: { statusBreakdown, requestBreakdown, roster, surfaceCounts, empty: !anyData },
+						data: { statusBreakdown, requestBreakdown, roster, surfaceCounts, intakeSeries, empty: !anyData },
 					});
 				}
 			} catch (err) {
@@ -224,7 +247,7 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 		return <p className="panel-empty">{t(capability.emptyKey)}</p>;
 	}
 
-	const { statusBreakdown, requestBreakdown, roster, surfaceCounts } = state.data;
+	const { statusBreakdown, requestBreakdown, roster, surfaceCounts, intakeSeries } = state.data;
 	const rosterFigure = `${roster.rows.length} / ${roster.total}`;
 
 	return (
@@ -260,6 +283,10 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 						);
 					})}
 				</div>
+			</section>
+
+			<section className="eo-section">
+				<TimeSeries data={toIntakeData(intakeSeries)} emptyCopyKey="panels.registrations.intakeChart.empty" />
 			</section>
 
 			<section className="eo-section">

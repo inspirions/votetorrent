@@ -137,7 +137,11 @@ const COPY_KEYS = new Set(Object.keys(COPY));
 // literal and so is never a member of this set), and its four new section
 // headings add one literal key each. Grown again for C1/C2: the status and
 // request charts' tooltip strings and C2's empty-frame copy are each a
-// literal `t(...)` call in the panel body.
+// literal `t(...)` call in the panel body. Grown again for C3: the intake
+// chart's tooltip string is a fourth literal `t(...)` call (its empty-frame
+// copy key is a plain string prop, not a `t(...)` call, so it is not matched
+// by this allow-list's own scanning regex, but is still recorded here for
+// the plan's own bookkeeping).
 const ALLOWED_T_KEYS = new Set([
 	'panels.registrations.empty',
 	'panels.registrations.loading',
@@ -150,6 +154,8 @@ const ALLOWED_T_KEYS = new Set([
 	'panels.registrations.requestChart.empty',
 	'panels.registrations.statusChart.tooltip',
 	'panels.registrations.requestChart.tooltip',
+	'panels.registrations.intakeChart.empty',
+	'panels.registrations.intakeChart.tooltip',
 	'panels.elections.empty',
 	'panels.ballotsQuestions.empty',
 	'lifecycle.pre',
@@ -278,6 +284,19 @@ test('no panel body other than RegistrationsPanel.tsx and KeyholdersPanel.tsx mo
 	assert.deepEqual(offenders, [], `chart primitive confined to Registrations/Keyholders, but found in: ${JSON.stringify(offenders)}`);
 });
 
+// --- C3's bucket label is derived from the value's own length, not from a --
+// --- unit the read does not return -----------------------------------------
+
+const EPOCH_STEP_RE = /86400000|604800000/;
+
+test('RegistrationsPanel.tsx declares HOUR_BUCKET_START_LENGTH and derives the intake bucket label from bucketStart.length, never from an epoch-step constant -- with a positive control proving the matcher is discriminating', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	assert.match(source, /HOUR_BUCKET_START_LENGTH/, "RegistrationsPanel.tsx must declare the length constant C3's label derivation is built from");
+	assert.doesNotMatch(source, EPOCH_STEP_RE, 'RegistrationsPanel.tsx must not reintroduce epoch-step inference for the C3 bucket label');
+	const fixture = `const dayStepMs = 86400000;`;
+	assert.match(fixture, EPOCH_STEP_RE, 'positive control: the matcher must hit a synthetic fixture naming one of the banned constants, or it proves nothing');
+});
+
 // --- No decision ID or phase number -----------------------------------------
 
 test('no D-NN decision id or "Phase N" reference in any of the four files, comments included', () => {
@@ -362,6 +381,7 @@ const OFFICER_READ_SURFACE_NAMES = new Set([
 	'readRegistrationRequestBreakdown',
 	'readRegistrantRoster',
 	'readRegistrationSurfaceCounts',
+	'readRegistrationIntakeSeries',
 	'hasAnyRegistrationData',
 	'ROSTER_PAGE_SIZE',
 	'REGISTRATIONS_TABLES_READ',
@@ -465,7 +485,7 @@ test('election-ops.css has no raw px value outside a var(--space-*) reference', 
 
 // --- Each panel imports its own read module ----------------------------------
 
-test('RegistrationsPanel imports its five registration reads, and selectActiveElection, from @votetorrent/web-data/officer', () => {
+test('RegistrationsPanel imports its six registration reads, and selectActiveElection, from @votetorrent/web-data/officer', () => {
 	assert.match(STRIPPED['RegistrationsPanel.tsx'], OFFICER_IMPORT_RE);
 	// Naming the functions, not just the specifier: the collapse from two
 	// relative specifiers to one bare one must not cost this test its ability
@@ -475,6 +495,7 @@ test('RegistrationsPanel imports its five registration reads, and selectActiveEl
 		'readRegistrationRequestBreakdown',
 		'readRegistrantRoster',
 		'readRegistrationSurfaceCounts',
+		'readRegistrationIntakeSeries',
 		'hasAnyRegistrationData',
 		'selectActiveElection',
 	]) {
