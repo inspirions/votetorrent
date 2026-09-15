@@ -357,6 +357,19 @@ function registrationTabBarStyle(route: RouteProp<RootTabParamList, 'Registratio
 		: undefined;
 }
 
+// Timeline-tab routes that HIDE the bottom tab bar (Phase 59, D-13): the Timeline stack now owns
+// the SAME DeviceAttestation/RegisterPersonal/RegisterAddressParty/RegisterConfirm/Confirmation
+// routes the Registration tab already hides the tab bar for (D-14 reuses the same screen
+// components) — the register form is one continuous, un-interruptible process, and that
+// rationale does not change with the entry point. Reuses REGISTRATION_FULLSCREEN_ROUTES verbatim;
+// the fallback is 'TimelineHome' (this stack's own root), not 'RegistrationHome'.
+function timelineTabBarStyle(route: RouteProp<RootTabParamList, 'Timeline'>) {
+	const focused = getFocusedRouteNameFromRoute(route) ?? 'TimelineHome';
+	return REGISTRATION_FULLSCREEN_ROUTES.includes(focused)
+		? ({display: 'none'} as const)
+		: undefined;
+}
+
 // --- AppStateProviders (D-22) — app-scoped state lift ------------------------------------------
 // BallotSelectionProvider and RegistrationDraftProvider used to be mounted PER-STACK
 // (BallotSelectionProvider inside VoteStackNavigator, RegistrationDraftProvider inside
@@ -411,6 +424,26 @@ export function RootNavigator() {
 							<FontAwesome6 name="check-to-slot" size={size} color={color} />
 						),
 					}}
+				/>
+				{/* Phase 59, D-13: the fifth tab, second in the bar (election-centric, adjacent to
+				    Vote) — locked order Vote · Timeline · Registration · Scan · Settings. The
+				    installed FontAwesome6 Free glyphmap contains a literal `timeline` glyph,
+				    classified `solid`-only exactly like the shipping `check-to-slot` glyph above —
+				    the bare form (no iconStyle) already used by every other tab renders it; no
+				    `chart-line` fallback is needed. */}
+				<Tab.Screen
+					name="Timeline"
+					component={TimelineStackNavigator}
+					options={({route}) => ({
+						headerShown: false,
+						tabBarLabel: t('tabTimeline'),
+						tabBarIcon: ({color, size}) => (
+							<FontAwesome6 name="timeline" size={size} color={color} />
+						),
+						// Hide the tab bar while inside the register form flow reached via Timeline
+						// (D-14 duplicates the same routes the Registration tab already hides for).
+						tabBarStyle: timelineTabBarStyle(route),
+					})}
 				/>
 				<Tab.Screen
 					name="Registration"

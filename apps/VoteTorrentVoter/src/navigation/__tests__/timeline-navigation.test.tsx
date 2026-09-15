@@ -28,6 +28,7 @@ import React from 'react';
 import * as fs from 'fs';
 import * as path from 'path';
 import ReactTestRenderer from 'react-test-renderer';
+import {Text} from 'react-native';
 import {NavigationContainer, ThemeProvider, createNavigationContainerRef} from '@react-navigation/native';
 import '../../i18n'; // initializes the global i18next instance useTranslation() reads from
 import i18n from '../../i18n';
@@ -256,13 +257,9 @@ async function mountRootNavigator() {
 	return tr;
 }
 
-// Gate C is written here (Task 2's <files> list per the plan) but SKIPPED until Task 3 lands:
-// `navigationRef.navigate('Timeline')` cannot resolve until the fifth `Tab.Screen` exists on
-// `RootNavigator` (react-navigation logs "not handled by any navigator" and the assertion below
-// would spuriously read the default-focused 'Vote' tab instead of failing loudly) -- Task 2 only
-// builds `TimelineStackNavigator` itself; Task 3 registers it as a Tab.Screen (D-13). Task 3's
-// commit removes this `.skip`.
-describe.skip('Gate C -- push-in-place: the Timeline tab stays highlighted (D-14)', () => {
+// Gate C -- unskipped by Task 3, which registers the fifth `Tab.Screen` (D-13) that
+// `navigationRef.navigate('Timeline')` needs to resolve.
+describe('Gate C -- push-in-place: the Timeline tab stays highlighted (D-14)', () => {
 	it('navigating Timeline -> Keyholders leaves the Timeline TAB focused, with Keyholders focused in the nested stack', async () => {
 		const tr = await mountRootNavigator();
 		expect(tr).toBeTruthy();
@@ -284,5 +281,41 @@ describe.skip('Gate C -- push-in-place: the Timeline tab stays highlighted (D-14
 		expect(nestedState).toBeDefined();
 		const focusedNestedRoute = nestedState!.routes[nestedState!.index ?? 0];
 		expect(focusedNestedRoute.name).toBe('Keyholders');
+	});
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 3 (D-13) -- the fifth Tab.Screen: exact tab order, and the EN/ES label reachable from it.
+// ---------------------------------------------------------------------------------------------
+
+/** Collects every rendered <Text> node's string content into one searchable string. */
+function allText(tr: ReactTestRenderer.ReactTestRenderer): string {
+	return tr.root
+		.findAllByType(Text)
+		.map(node => {
+			const children = node.props.children;
+			return Array.isArray(children) ? children.join('') : String(children ?? '');
+		})
+		.join(' | ');
+}
+
+describe('Task 3 -- the locked five-tab order (D-13)', () => {
+	it('routeNames deep-equals the exact locked order, not a membership check (a Timeline-appended-last regression would pass a membership check)', async () => {
+		await mountRootNavigator();
+		const rootState = navigationRef.getRootState();
+		expect(rootState).toBeDefined();
+		expect(rootState!.routeNames).toEqual(['Vote', 'Timeline', 'Registration', 'Scan', 'Settings']);
+	});
+});
+
+describe('Task 3 -- the Timeline tab renders its EN/ES label (D-13)', () => {
+	it('renders "Timeline" in English, then "Cronograma" after switching to Spanish', async () => {
+		const tr = await mountRootNavigator();
+		expect(allText(tr)).toContain('Timeline');
+
+		await ReactTestRenderer.act(async () => {
+			await i18n.changeLanguage('es');
+		});
+		expect(allText(tr)).toContain('Cronograma');
 	});
 });
