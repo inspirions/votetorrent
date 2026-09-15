@@ -52,26 +52,37 @@ export type SettingsStackParamList = {
 	SettingsHome: undefined;
 };
 
-// Timeline tab (Phase 59, D-14/D-13/D-20) — TYPES ONLY this plan (59-05). The
-// TimelineStackNavigator and its `Tab.Screen` are 59-10's (wave 5), landed here first so 59-08
-// (wave 4) can type TimelineScreen's row-action callbacks without waiting on 59-10, and so 59-09
-// and 59-10 stay file-disjoint. Declaring a route on `RootTabParamList` with no corresponding
-// `Tab.Screen` is legal in React Navigation v7 — the param list is a permission list, not a
-// registration.
+// Timeline tab (Phase 59, D-14/D-13/D-20/D-22). 59-05 landed the outline's five routes as TYPES
+// ONLY; 59-10 (wave 5) builds the `TimelineStackNavigator` + `Tab.Screen` and extends this list
+// ADDITIVELY to the full reachable route closure — the outline's five are not closed under
+// onward navigation (BallotScreen navigates to IndividualQuestion, RegistrationScreen navigates
+// to RegistrationInfo/DeviceAttestation/RegisterPersonal, etc.), and shipping them alone would
+// dead-end the voter mid-flow (a `navigate` to an unregistered route is silently dropped — see
+// D-14 in `59-CONTEXT.md`). All entries stay `undefined` like every other tab's param list —
+// state lives in providers (`BallotSelectionProvider`/`RegistrationDraftProvider`, both lifted
+// above `<Tab.Navigator>` per D-22), never a route param.
 //
-// `Ballot` / `ReviewSubmit` / `RegistrationHome` are D-14's exact route names — 59-10 registers
-// them a SECOND time in this new stack (reusing the same screen components as the Vote/
-// Registration stacks) so a row action pushes within the Timeline stack and Back returns to the
-// rail, per D-14. `TimelineHome` / `Keyholders` resolve the OUTLINE↔PATTERNS naming
-// discrepancy (59-05 preflight) and are binding on 59-10: every existing tab stack names its
-// root `<Tab>Home` (Home, RegistrationHome, ScanHome, SettingsHome) — `Timeline` itself is
-// already taken by the `RootTabParamList` tab entry below — and no existing route carries a
-// `Screen` suffix (the registration root is `RegistrationHome`, not `RegistrationScreen`).
+// `Ballot` / `IndividualQuestion` / `ReviewSubmit` / `RegistrationHome` / `RegistrationInfo` /
+// `DeviceAttestation` / `RegisterPersonal` / `RegisterAddressParty` / `RegisterConfirm` /
+// `Confirmation` are D-14's exact route names — 59-10 registers them a SECOND time in this new
+// stack (reusing the same screen components as the Vote/Registration stacks) so a row action
+// pushes within the Timeline stack and Back returns to the rail. `TimelineHome` / `Keyholders`
+// resolve the OUTLINE↔PATTERNS naming discrepancy (59-05 preflight) and are binding: every
+// existing tab stack names its root `<Tab>Home` (Home, RegistrationHome, ScanHome,
+// SettingsHome) — `Timeline` itself is already taken by the `RootTabParamList` tab entry below
+// — and no existing route carries a `Screen` suffix.
 export type TimelineStackParamList = {
 	TimelineHome: undefined;
 	Ballot: undefined;
+	IndividualQuestion: undefined;
 	ReviewSubmit: undefined;
 	RegistrationHome: undefined;
+	RegistrationInfo: undefined;
+	DeviceAttestation: undefined;
+	RegisterPersonal: undefined;
+	RegisterAddressParty: undefined;
+	RegisterConfirm: undefined;
+	Confirmation: undefined;
 	Keyholders: undefined;
 };
 
