@@ -13,6 +13,7 @@ import React from 'react';
 import renderer from 'react-test-renderer';
 import '../../../i18n';
 import {TimelineRail} from '../../../components/TimelineRail';
+import {TIMELINE_STAGE_IDS} from '../../../timeline';
 
 const mockNavigate = jest.fn();
 
@@ -490,5 +491,139 @@ describe('TimelineScreen — rail composition and callback wiring (Task 2)', () 
 			(rail.props.onHelp as (stageId: string) => void)('registrationEnds');
 		});
 		expect(JSON.stringify(tr.toJSON())).toContain('Registration Ends');
+	});
+});
+
+// ==== Task 3: __DEV__ clock-offset control (D-05) ====
+
+type RailRow = {stageId: string; status: string};
+
+function currentStageId(tr: renderer.ReactTestRenderer): string | undefined {
+	const rail = tr.root.findByType(TimelineRail);
+	const rows = rail.props.rows as RailRow[];
+	return rows.find(row => row.status === 'current')?.stageId;
+}
+
+async function pressClockOffset(tr: renderer.ReactTestRenderer) {
+	const control = tr.root.findByProps({testID: 'timeline-dev-clock-offset'});
+	await renderer.act(async () => {
+		control.props.onPress();
+		await flushMicrotasks(30);
+	});
+}
+
+describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () => {
+	const originalDev = (globalThis as {__DEV__?: boolean}).__DEV__;
+
+	afterEach(() => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = originalDev;
+	});
+
+	it('with __DEV__ false, no control renders and no dev-offset label appears anywhere in the tree', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+		const tr = await renderAndFlush();
+		expect(hasTestId(tr, 'timeline-dev-clock-offset')).toBe(false);
+		expect(JSON.stringify(tr.toJSON())).not.toContain('DEV:');
+	});
+
+	it('with __DEV__ true, the control renders above the header, outside the rail, with a dashed colors.warning border', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+
+		const control = tr.root.findByProps({testID: 'timeline-dev-clock-offset'});
+		const flatStyle = Object.assign({}, ...(Array.isArray(control.props.style) ? control.props.style : [control.props.style]));
+		expect(flatStyle.borderStyle).toBe('dashed');
+		expect(flatStyle.borderColor).toBe('#bcb600'); // colors.warning, per this file's mocked theme
+
+		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
+		expect(textOf(label)).toContain('DEV:');
+	});
+
+	it('starts at the live position: offset 0 (label shows a zero delta) and no row is current against the far-future production fixture', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+
+		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
+		expect(textOf(label)).toContain('0');
+		expect(currentStageId(tr)).toBeUndefined();
+	});
+
+	it('walking the full press cycle makes each of the ten stages current exactly once, collected as a SET (D-09) -- not a spot check', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+
+		const seen = new Set<string>();
+		for (let i = 0; i < TIMELINE_STAGE_IDS.length; i++) {
+			await pressClockOffset(tr);
+			const id = currentStageId(tr);
+			if (id) seen.add(id);
+		}
+
+		expect(seen).toEqual(new Set(TIMELINE_STAGE_IDS));
+	});
+
+	it('wraps back to the live stop after the last stage stop', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+
+		for (let i = 0; i < TIMELINE_STAGE_IDS.length; i++) {
+			await pressClockOffset(tr);
+		}
+		// One more press than there are stages returns to the live stop.
+		await pressClockOffset(tr);
+
+		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
+		expect(textOf(label)).toContain('0');
+		expect(textOf(label)).not.toContain('Registration Ends');
+	});
+
+	it('a 7-of-10-key timeline offers exactly 8 stops (7 stages + live) -- absent instants are skipped, never a dead stop', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const anchor = Date.UTC(2030, 0, 10);
+		const sevenKeyTimeline = buildValidTimeline(anchor);
+		delete sevenKeyTimeline.accruingVotes;
+		delete sevenKeyTimeline.hashingVotes;
+		delete sevenKeyTimeline.releasingKeys;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(sevenKeyTimeline, anchor));
+
+		const tr = await renderAndFlush();
+
+		const seen = new Set<string>();
+		for (let i = 0; i < 7; i++) {
+			await pressClockOffset(tr);
+			const id = currentStageId(tr);
+			if (id) seen.add(id);
+		}
+		expect(seen.size).toBe(7);
+
+		// The 8th press (index 7, zero-based) is the live stop again.
+		await pressClockOffset(tr);
+		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
+		expect(textOf(label)).toContain('0');
+	});
+
+	it("the label at a stage stop names that stage's translated title", async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+
+		await pressClockOffset(tr); // first D-09 stop: registrationEnds
+		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
+		expect(textOf(label)).toContain('Registration Ends');
+	});
+
+	it('never calls setLifecycleState and never imports LIFECYCLE_ORDER; HomeScreen keeps its own cycler untouched', () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require('fs');
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require('path');
+
+		const screenSource: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
+		expect(screenSource).not.toContain('setLifecycleState');
+		expect(screenSource).not.toContain('LIFECYCLE_ORDER');
+
+		const homeSource: string = fs.readFileSync(path.resolve(__dirname, '../../home/HomeScreen.tsx'), 'utf8');
+		expect(homeSource).toContain('nextLifecycleState');
+		expect(homeSource).toContain('LIFECYCLE_ORDER');
+		expect(homeSource).toContain('setLifecycleState');
 	});
 });

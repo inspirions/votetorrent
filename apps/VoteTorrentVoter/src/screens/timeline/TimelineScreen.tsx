@@ -16,7 +16,7 @@
  * `TimelineRail` / `TimelineRow` stay presentational (props only) — this file is the one place on
  * this surface that calls `useVoterApp()` and `useNavigation()`.
  */
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useMemo, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
@@ -145,6 +145,23 @@ export default function TimelineScreen() {
 	// not a push, and no new i18n key.
 	const [dialogStageId, setDialogStageId] = useState<TimelineStageId | null>(null);
 
+	// D-05: the __DEV__-only clock-offset control. `clockOffsetMs` (0 = live) is the ONLY thing
+	// the control ever touches -- it shifts the `now` the rail compares against and nothing else
+	// (never the timeline blob, never the engine read, never a write). `clockStopIndex` is the
+	// cycling position (0 = live, 1..N = the Nth present stage stop in D-09 order) -- tracked
+	// separately from the offset value itself because the offset is recomputed fresh at each
+	// press (`instant + 60_000 - Date.now()` at press time, so a later effect run still lands
+	// close to `instant + 60_000` regardless of how long the re-fetch that follows takes), and an
+	// index survives that recomputation exactly while a raw offset value would not.
+	const [clockOffsetMs, setClockOffsetMs] = useState(0);
+	const [clockStopIndex, setClockStopIndex] = useState(0);
+
+	// Recomputed on every clockOffsetMs/reloadNonce change, using Date.now() AT THAT MOMENT --
+	// never read once and cached, per the "no ambient clock capture" spirit this screen owns
+	// (deriveTimeline itself never reads the clock; this is the one place that does, exactly
+	// once per state change).
+	const nowMs = useMemo(() => Date.now() + clockOffsetMs, [clockOffsetMs, reloadNonce]);
+
 	// HomeScreen.tsx:50-61's `let live = true` cancellation-guard shape, exactly: an async IIFE
 	// inside the effect, every set* call guarded by `live`, `live = false` in the cleanup. One
 	// try/catch over the WHOLE chain — any rejection anywhere (getEngine, getElections,
@@ -169,7 +186,7 @@ export default function TimelineScreen() {
 
 				const view = deriveTimeline({
 					timeline: details.current.timeline,
-					now: Date.now(),
+					now: nowMs,
 					election: {
 						ballotDeadline: details.election.ballotDeadline,
 						date: details.election.date,
@@ -194,7 +211,10 @@ export default function TimelineScreen() {
 		return () => {
 			live = false;
 		};
-	}, [getEngine, seededElectionId, reloadNonce]);
+		// `reloadNonce` stays an explicit dependency (not folded into `nowMs` alone): two presses
+		// close enough in wall-clock time could otherwise recompute the SAME `nowMs` value and
+		// silently fail to re-trigger the retry the user just asked for.
+	}, [getEngine, seededElectionId, reloadNonce, nowMs]);
 
 	if (state.kind === 'indeterminate') {
 		return (
@@ -241,9 +261,49 @@ export default function TimelineScreen() {
 		: '';
 	const dialogBody = dialogRow?.subtitle ? t(dialogRow.subtitle.key, dialogRow.subtitle.params) : '';
 
+	// D-05: the stops are the PRESENT timeline instants, in D-09 order (`state.view.rows` is
+	// already in that order) -- absent instants are skipped, never offered as a dead stop. A
+	// 7-of-10-key timeline therefore yields 7 stage stops plus live (8 total), not 10 plus live.
+	const clockStops = state.view.rows.filter(row => row.instantMs !== null).map(row => ({stageId: row.stageId, instantMs: row.instantMs as number}));
+	const activeClockStop = clockStopIndex > 0 ? clockStops[clockStopIndex - 1] : undefined;
+	const clockOffsetLabel =
+		activeClockStop !== undefined
+			? `${t('dev.clockOffsetLabel')} ${t(STAGE_TITLE_KEY[activeClockStop.stageId])} ${
+					Math.round((activeClockStop.instantMs - Date.now()) / 86_400_000) >= 0 ? '+' : ''
+				}${Math.round((activeClockStop.instantMs - Date.now()) / 86_400_000)}`
+			: `${t('dev.clockOffsetLabel')} 0`;
+
+	const handleClockOffsetPress = () => {
+		const stopCount = clockStops.length + 1; // +1 for the live stop.
+		const nextIndex = (clockStopIndex + 1) % stopCount;
+		if (nextIndex === 0) {
+			setClockStopIndex(0);
+			setClockOffsetMs(0);
+			return;
+		}
+		const stop = clockStops[nextIndex - 1];
+		setClockStopIndex(nextIndex);
+		// Computed AT PRESS TIME so a slower re-fetch afterward still lands close to
+		// `instant + 60_000` -- the small positive epsilon that makes THIS stage (not the next
+		// one) resolve as current.
+		setClockOffsetMs(stop.instantMs + 60_000 - Date.now());
+	};
+
 	return (
 		<>
 			<ScrollView style={[styles.screen, {backgroundColor: colors.background}]} contentContainerStyle={styles.content}>
+				{__DEV__ ? (
+					<Pressable
+						testID="timeline-dev-clock-offset"
+						accessibilityRole="button"
+						style={[styles.devClockOffset, {borderColor: colors.warning}]}
+						onPress={handleClockOffsetPress}>
+						<Text testID="timeline-dev-clock-offset-label" style={{color: colors.warning, fontSize: typeScale.caption.fontSize, lineHeight: typeScale.caption.lineHeight}}>
+							{clockOffsetLabel}
+						</Text>
+					</Pressable>
+				) : null}
+
 				<View testID="timeline-header" style={styles.header}>
 					<Text
 						testID="timeline-header-title"
@@ -307,6 +367,17 @@ const styles = StyleSheet.create({
 	header: {
 		paddingHorizontal: 8,
 		paddingBottom: 16,
+	},
+	devClockOffset: {
+		borderWidth: 1,
+		borderStyle: 'dashed',
+		alignSelf: 'flex-start',
+		paddingHorizontal: 8,
+		paddingVertical: 4,
+		marginHorizontal: 8,
+		marginBottom: 8,
+		minHeight: 44,
+		justifyContent: 'center',
 	},
 	centered: {
 		justifyContent: 'center',
