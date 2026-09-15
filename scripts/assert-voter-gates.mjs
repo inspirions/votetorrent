@@ -38,9 +38,12 @@
  *      a known failure that now passes) loudly, in its own block, on a
  *      PASS verdict -- never silently.
  *
- * `--selftest` runs steps 3-5's logic against three committed fixture
- * bundles under scripts/lib/__fixtures__/voter-gates/ (clean, one with a
- * fabricated phase-owned error path, one with an unexpected failing
+ * `--selftest` runs steps 3-5's logic against four committed fixture
+ * bundles under scripts/lib/__fixtures__/voter-gates/ (clean, an
+ * ANSI-colorized variant of clean proving stripAnsi() below is load-bearing
+ * -- see that function's own comment for why raw captured logs can carry
+ * color even when nothing in this script's environment asks for it --  one
+ * with a fabricated phase-owned error path, one with an unexpected failing
  * suite/title) so a future parser change cannot silently stop catching
  * what it claims to catch.
  *
@@ -147,6 +150,22 @@ const TARGETS = [
 // parsing
 // ---------------------------------------------------------------------------
 
+// Strips ANSI CSI escape sequences (color/bold/etc.) before any line-anchored
+// or column-anchored parsing below. Captured child-process output can carry
+// these even when nothing in this script's own environment requests color:
+// FORCE_COLOR is inherited from the invoking shell (set to 3 in Claude Code
+// agent shells, and by several CI images), and once it reaches jest the
+// summary line becomes `\x1b[1mTest Suites: ...` -- no longer anchored at
+// column 0, which silently defeats every `^...$` /m regex below on an
+// otherwise-green run. Scoped to parsing only: the raw captured text (with
+// any escapes intact) is still what gets written to each target's log file,
+// so a human reading the log sees exactly what the child process emitted.
+const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
+
+function stripAnsi(text) {
+  return text.replace(ANSI_ESCAPE_RE, '');
+}
+
 function parseJestCounts(line) {
   const result = { failed: 0, passed: 0, skipped: 0, pending: 0, todo: 0, total: 0 };
   const re = /(\d+)\s+(failed|passed|skipped|pending|todo|total)/g;
@@ -155,7 +174,8 @@ function parseJestCounts(line) {
   return result;
 }
 
-function parseJestLog(log) {
+function parseJestLog(rawLog) {
+  const log = stripAnsi(rawLog);
   const suitesLineMatch = log.match(/^Test Suites:.*$/m);
   const testsLineMatch = log.match(/^Tests:.*$/m);
   if (!suitesLineMatch || !testsLineMatch) return null; // vacuous-pass guard
@@ -183,7 +203,8 @@ function parseJestLog(log) {
 const TSC_RAN_CLEAN_RE = /^TSC-RAN exit=0$/m;
 const TSC_RAN_ANY_RE = /^TSC-RAN exit=(-?\d+)$/m;
 
-function parseTscLog(log, pathPrefix) {
+function parseTscLog(rawLog, pathPrefix) {
+  const log = stripAnsi(rawLog);
   const errorRe = /^(.+?)\((\d+),(\d+)\):\s+error\s+(TS\d+):/gm;
   const errors = [...log.matchAll(errorRe)].map((m) => ({
     file: pathPrefix + m[1],
@@ -518,7 +539,7 @@ function runSelftest() {
   const cases = readdirSync(FIXTURES_DIR, { withFileTypes: true })
     .filter((e) => e.isDirectory())
     .map((e) => e.name);
-  const required = ['clean', 'phase-owned-error', 'unknown-failing-suite'];
+  const required = ['clean', 'phase-owned-error', 'unknown-failing-suite', 'ansi-colored-clean'];
   for (const r of required) {
     if (!cases.includes(r)) fail(`required fixture bundle missing: ${r}`);
   }
@@ -528,6 +549,35 @@ function runSelftest() {
     const bundle = loadFixtureBundle('clean');
     const result = evaluateAll(bundle.logs, bundle.phaseFileSet, baselines);
     check('clean fixture is PASS', true, result);
+  }
+
+  // 1b. ansi-colored-clean -- byte-identical to "clean" in substance (57/57 suites, 749/749
+  // tests, 2 pre-existing typecheck errors) but every parsed line is wrapped in real ANSI CSI
+  // escape sequences (\x1b[1m / \x1b[22m / \x1b[31m / \x1b[32m / \x1b[39m), reproducing exactly
+  // what jest and tsc emit when FORCE_COLOR reaches them -- which it does in Claude Code agent
+  // shells (FORCE_COLOR=3) and several CI images, with nothing in this script's own environment
+  // asking for it. Without ANSI-stripping in parseJestLog/parseTscLog, the "Test Suites:"/
+  // "Tests:" and "error TS" lines no longer start at column 0 and every `^...$` /m regex here
+  // silently stops matching -- this is the exact defect this fixture exists to catch if a future
+  // edit removes or narrows stripAnsi(). Must PASS outright, identically to "clean".
+  {
+    const bundle = loadFixtureBundle('ansi-colored-clean');
+    const result = evaluateAll(bundle.logs, bundle.phaseFileSet, baselines);
+    const c = check('ansi-colored-clean fixture is PASS', true, result);
+    if (c.correct) {
+      const jest = result.parsed.voterJest;
+      const tc = result.parsed.voterTypecheck;
+      if (!jest || jest.suites.passed !== 57 || jest.suites.failed !== 0 || jest.tests.passed !== 749) {
+        failures.push(
+          `ansi-colored-clean fixture: PASSED but parsed the wrong Voter suite counts (ANSI codes leaked through as content) -- got ${JSON.stringify(jest)}`,
+        );
+      }
+      if (!tc || tc.count !== 2) {
+        failures.push(
+          `ansi-colored-clean fixture: PASSED but parsed the wrong Voter typecheck error count (ANSI codes leaked through as content) -- got ${tc ? tc.count : tc}`,
+        );
+      }
+    }
   }
 
   // 2. phase-owned-error -- must FAIL, and specifically for attribution
@@ -576,7 +626,7 @@ function runSelftest() {
     process.exit(1);
   }
 
-  process.stdout.write(`selftest: ${total}/${total} cases correct (3 required fixtures, each rejected for its own named reason)\n`);
+  process.stdout.write(`selftest: ${total}/${total} cases correct (${required.length} required fixtures: 2 must PASS, 2 must be REJECTED for their own named reason)\n`);
   process.exit(0);
 }
 

@@ -84,38 +84,25 @@
   "voterJest": {
     "command": "yarn workspace votetorrent-voter test",
     "measuredOn": "2026-09-15",
-    "measuredAt": "46dae0c0",
-    "maxFailingSuites": 1,
-    "minPassingSuites": 41,
-    "minPassingTests": 321,
-    "maxFailingTests": 2,
-    "knownFailingSuites": [
-      "src/providers/__tests__/VoterAppProvider.test.tsx"
-    ],
-    "knownFailureTitles": [
-      "VoterAppProvider \u2014 real composition root (D-02/D-04/D-07) \u203a boots to isInitialized after the mocked seed resolves, and calls hideSplash",
-      "VoterAppProvider \u2014 real composition root (D-02/D-04/D-07) \u203a useVoterApp() exposes a real getEngine accessor plus seededElectionId (not the removed isRegistered mock boolean, and NOT a sign field \u2014 51-12/D-09/D-20)"
-    ],
-    "note": "Measured live 2026-09-15 at commit 46dae0c0, working tree clean, before phase 59 touched anything: 42 suites (41 passed, 1 failed), 323 tests (321 passed, 2 failed), ~6s warm. This entry SUPERSEDES notEnforcedHere.voterJest, which recorded 4 failing suites on 2026-08-25 (cause: uint8arrays) and had drifted to 1 by 2026-09-15 without anyone updating the file -- notEnforcedHere.voterJest is removed in this same commit. A stale 4-suite allowance would have silently absorbed up to three phase-59 regressions behind a number nobody was checking against reality. The one known-failing suite, VoterAppProvider.test.tsx, is a file 59-08 legitimately touches; scripts/assert-voter-gates.mjs reports (never silently absorbs) a DROP if it starts passing again -- see that script's own run output and 59-11-SUMMARY.md for whether that in fact happened by the time phase 59 closed."
+    "measuredAt": "2da80f1e",
+    "maxFailingSuites": 0,
+    "minPassingSuites": 57,
+    "minPassingTests": 749,
+    "maxFailingTests": 0,
+    "knownFailingSuites": [],
+    "knownFailureTitles": [],
+    "note": "Measured live 2026-09-15 at commit 46dae0c0, working tree clean, before phase 59 touched anything: 42 suites (41 passed, 1 failed), 323 tests (321 passed, 2 failed), ~6s warm. This entry SUPERSEDES notEnforcedHere.voterJest, which recorded 4 failing suites on 2026-08-25 (cause: uint8arrays) and had drifted to 1 by 2026-09-15 without anyone updating the file -- notEnforcedHere.voterJest is removed in this same commit. A stale 4-suite allowance would have silently absorbed up to three phase-59 regressions behind a number nobody was checking against reality. The one known-failing suite, VoterAppProvider.test.tsx, is a file 59-08 legitimately touches; scripts/assert-voter-gates.mjs reports (never silently absorbs) a DROP if it starts passing again -- see that script's own run output and 59-11-SUMMARY.md for whether that in fact happened by the time phase 59 closed.\n\nGap-closure re-measure (2026-09-15, tip 2da80f1e): this entry was stale-HIGH. Re-ran `FORCE_COLOR=0 yarn workspace votetorrent-voter test` live: 57 suites, 57 passed, 0 failed; 743 tests, 743 passed, 0 failed, ~8.4s. VoterAppProvider.test.tsx (the one knownFailingSuite recorded above) now passes -- 59-05 hardened its `flushBoot` path, exactly the DROP this file's own `_readme` and this entry's prior note anticipated and called out to watch for. Both of the previously-knownFailureTitles pass too. maxFailingSuites 1->0, minPassingSuites 41->57, minPassingTests 321->743, maxFailingTests 2->0, knownFailingSuites/knownFailureTitles both emptied to []. Per this file's own house rule ('a DROP is investigated exactly like a RISE'), this drop was investigated, not silently absorbed: the fix is a real, reviewed, source-verified commit (59-05's flushBoot hardening, independently re-confirmed present at this tip via 59-VERIFICATION.md's re-verification pass and via a direct live re-run in this session), not an unexplained flake."
   },
   "voterTypecheck": {
     "command": "yarn workspace votetorrent-voter typecheck",
     "measuredOn": "2026-09-15",
-    "measuredAt": "46dae0c0",
-    "maxErrors": 44,
+    "measuredAt": "2da80f1e",
+    "maxErrors": 2,
     "knownErrorFiles": {
-      "src/engines/__tests__/real-attestation-producer.test.ts": 15,
-      "src/__tests__/no-vrg-ceremony.gate.test.ts": 9,
-      "src/components/__tests__/ConfigFaultNotice.test.tsx": 4,
-      "__tests__/no-inline-mock-imports.test.ts": 4,
-      "__tests__/i18n-parity.test.ts": 4,
-      "__tests__/hermes-bundle-guard.test.ts": 3,
-      "__tests__/dependency-versions.test.ts": 2,
-      "src/providers/__tests__/RegistrationDraftProvider.test.tsx": 1,
-      "src/engines/storage-guard.ts": 1,
-      "src/engines/__tests__/attestation-producer.test.ts": 1
+      "src/engines/__tests__/attestation-producer.test.ts": 1,
+      "src/engines/__tests__/real-attestation-producer.test.ts": 1
     },
-    "note": "Measured live 2026-09-15 at commit 46dae0c0, before phase 59 touched anything: 44 errors, exit 2, grouped by file in knownErrorFiles above (sums to 44). This is a CEILING, not a floor: scripts/assert-voter-gates.mjs attributes every error path to phase 59's own file set (git diff --name-only against the base) and FAILs if any lands there, which survives line-number churn inside a pre-existing-error file far better than a bare count ever could. A drop below 44 is reported as a DROP, not silently absorbed."
+    "note": "Measured live 2026-09-15 at commit 46dae0c0, before phase 59 touched anything: 44 errors, exit 2, grouped by file in knownErrorFiles above (sums to 44). This is a CEILING, not a floor: scripts/assert-voter-gates.mjs attributes every error path to phase 59's own file set (git diff --name-only against the base) and FAILs if any lands there, which survives line-number churn inside a pre-existing-error file far better than a bare count ever could. A drop below 44 is reported as a DROP, not silently absorbed.\n\nGap-closure re-measure (2026-09-15, tip 2da80f1e): this entry was stale-HIGH at 44 against a measured 2. Re-ran `FORCE_COLOR=0 yarn workspace votetorrent-voter typecheck` live: exactly 2 errors, exit 2, both the pre-existing `AttestationChallenge.expiration` diagnostic (Type '{ ...; expiration: number; }' is not assignable to type 'AttestationChallenge' -- 'expiration' does not exist in type 'AttestationChallenge'), one each in src/engines/__tests__/attestation-producer.test.ts(54,3) and src/engines/__tests__/real-attestation-producer.test.ts(107,3). knownErrorFiles is replaced wholesale (not merged) -- only these two entries survive; every other 46dae0c0-era file (no-vrg-ceremony.gate.test.ts, ConfigFaultNotice.test.tsx, no-inline-mock-imports.test.ts, i18n-parity.test.ts, hermes-bundle-guard.test.ts, dependency-versions.test.ts, RegistrationDraftProvider.test.tsx, storage-guard.ts) now typechecks clean. Root-caused, not merely observed: apps/VoteTorrentVoter/node_modules/@types/node now resolves at 25.9.1, supplying the 42 ambient `Buffer`/`process`/`__dirname`/`path` types whose absence produced the original 44 at commit 46dae0c0; app-local TypeScript is still 5.0.4 (confirmed via `yarn workspace votetorrent-voter typecheck` still resolving `apps/VoteTorrentVoter/node_modules/typescript`), so this is explicitly NOT the npx-vs-yarn compiler-binary skew this file's sibling 59-VALIDATION.md documents for the 44-vs-2 divergence between `yarn workspace` and `cd apps/VoteTorrentVoter && npx tsc --noEmit` -- both invocations now agree at 2, because the ambient-type gap that used to separate them is closed by the newly-resolved @types/node, not because either invocation changed. Per this file's own house rule ('a DROP is investigated exactly like a RISE'), this drop was investigated: it traces to a real, explainable dependency-resolution change, not an unexplained relaxation."
   },
   "voteCoreTypecheck": {
     "command": "npx tsc --noEmit -p packages/vote-core/tsconfig.json",
