@@ -116,7 +116,10 @@ const KeyholdersPanel: PanelComponent = ({ capability, db }) => {
 
 	if (view === 'chart') {
 		const meter = deriveMeterState(state.rows);
-		const valueLabel = meter.threshold === null ? undefined : `${meter.enrolled} / ${meter.threshold}`;
+		const valueLabel =
+			meter.threshold === null
+				? undefined
+				: t('panels.keyholders.meter.value', { count: meter.enrolled, total: meter.threshold });
 		return (
 			<div className="aa-meter">
 				<Meter

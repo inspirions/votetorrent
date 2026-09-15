@@ -175,7 +175,12 @@ const EXTRA_T_KEYS = {
 	'AuthorityProfilePanel.tsx': [],
 	'AuthorityPeersPanel.tsx': [],
 	'AdministrationOfficersPanel.tsx': [],
-	'KeyholdersPanel.tsx': ['panels.keyholders.loading', 'panels.keyholders.unavailable', 'panels.keyholders.readFailed'],
+	'KeyholdersPanel.tsx': [
+		'panels.keyholders.loading',
+		'panels.keyholders.unavailable',
+		'panels.keyholders.readFailed',
+		'panels.keyholders.meter.value',
+	],
 	'InviteAuthoritiesPanel.tsx': [],
 };
 
@@ -192,7 +197,10 @@ function findDisallowedTCalls(source, extraKeys) {
 	const offenders = [];
 	for (const arg of tCalls) {
 		if (arg === 'capability.emptyKey') continue;
-		const singleQuoted = arg.match(/^'([a-zA-Z][\w.]*)'$/);
+		// A key may be followed by an interpolation-params argument. The key
+		// itself still has to be a named extra, so the params tail widens the
+		// accepted SHAPE without widening which keys are allowed.
+		const singleQuoted = arg.match(/^'([a-zA-Z][\w.]*)'(?:\s*,[\s\S]*)?$/);
 		if (singleQuoted && extraKeys.includes(singleQuoted[1])) continue;
 		offenders.push(arg);
 	}
@@ -241,6 +249,14 @@ test('6d: controls -- an invented key is rejected by 6b and absent from COPY, an
 	const { offendingFile, offenders } = findDisallowedTCalls(fixture, EXTRA_T_KEYS['KeyholdersPanel.tsx']);
 	assert.ok(offendingFile, 'the 6b matcher is inert -- it must reject an invented key not in the allowlist');
 	assert.deepEqual(offenders, ["'panels.keyholders.invented'"]);
+
+	// (i-bis) the same rejection must hold in the params-carrying call shape
+	// the matcher also accepts. Without this, widening the matcher to allow
+	// t('key', { ... }) would silently wave through EVERY key in that shape.
+	const paramsFixture = `t(capability.emptyKey) t('panels.keyholders.invented', { count: 1, total: 2 })`;
+	const paramsResult = findDisallowedTCalls(paramsFixture, EXTRA_T_KEYS['KeyholdersPanel.tsx']);
+	assert.ok(paramsResult.offendingFile, 'the 6b matcher waves through any params-carrying t( call -- the params tail must not bypass the allowlist');
+	assert.deepEqual(paramsResult.offenders, ["'panels.keyholders.invented', { count: 1, total: 2 }"]);
 
 	// (ii) that same invented key is genuinely absent from COPY -- otherwise
 	// 6c could never fail on it.
