@@ -54,12 +54,40 @@
  * a mere mount. `computeReactIdentity()` compares this app's own `react`
  * import against `@votetorrent/ui-web/components`'s `packageReactIdentity()`
  * and is published as `window.__UI_GATE__.identity`.
+ *
+ * 60-03 ADDITION — the chart colour-mechanism region, `run-ui-gates.mjs`'s
+ * `resolved-component-styles` rung's four new entries. Mounts all four chart
+ * primitives (`BarSeries`, `StackedBarSeries`, `TimeSeries`, `Meter`), each
+ * inside its own `[data-ui-gate="ExportName"]` wrapper, fed a tiny static
+ * fixture chosen to exercise every colour selector the runner reads: three
+ * statuses (ok/warn/fail, at least one non-zero), two stacked series (both
+ * non-zero), three time buckets (one zero-valued, so the interior-zero case
+ * is exercised here too), and a meter with a value strictly between zero and
+ * a non-null total. Mounted in its OWN React root, on its own container
+ * `appendChild`-ed to `document.body` — never nested under `#root` — for the
+ * same two reasons the hook-root region above is: a chart render throw must
+ * not blank the token-probe/presentational region and take
+ * `harness-readout`/`shared-components-mounted` down with it, and it must
+ * not prevent `__UI_GATE__` from publishing. Recharts 3.x carries its own
+ * `react-redux`/`@reduxjs/toolkit` store and is hook-heavy — mounting it here
+ * answers 60-RESEARCH's open question 2 (whether that reproduces this repo's
+ * duplicate-React dispatcher defect) with this run's own identity rungs,
+ * rather than leaving it untested.
  */
 import { StrictMode, useEffect, useRef, useState } from 'react';
 import * as AppReact from 'react';
 import { createRoot } from 'react-dom/client';
 import '../../src/app.css';
-import { AdvisoryDisclosure, LifecyclePill, DetailsToggle, packageReactIdentity } from '@votetorrent/ui-web/components';
+import {
+	AdvisoryDisclosure,
+	LifecyclePill,
+	DetailsToggle,
+	packageReactIdentity,
+	BarSeries,
+	StackedBarSeries,
+	TimeSeries,
+	Meter,
+} from '@votetorrent/ui-web/components';
 
 const win = window as unknown as Record<string, unknown>;
 
@@ -147,6 +175,76 @@ function UiGateHarness() {
 	);
 }
 
+// --- 60-03 chart region fixtures ------------------------------------------
+// Production-length-adjacent, real prose fixtures — never a short one that
+// could hide a real clipping/zero-bucket defect (60-UI-SPEC's own rule).
+
+const CHART_GATE_BAR_DATA = [
+	{ key: 'a', label: 'Active', value: 42, tone: 'ok' as const, tooltip: 'Active: 42 registrant(s)' },
+	{ key: 's', label: 'Suspended', value: 7, tone: 'warn' as const, tooltip: 'Suspended: 7 registrant(s)' },
+	{ key: 'r', label: 'Revoked', value: 3, tone: 'fail' as const, tooltip: 'Revoked: 3 registrant(s)' },
+];
+
+const CHART_GATE_SERIES = [
+	{ key: 'registrant', label: 'Registrant', tone: 'series-1' as const },
+	{ key: 'bridge', label: 'Bridge', tone: 'series-2' as const },
+];
+
+const CHART_GATE_STACKED_DATA = [
+	{
+		key: 'submitted',
+		label: 'Submitted',
+		segments: [
+			{ seriesKey: 'registrant', value: 12, tooltip: 'Submitted · Registrant: 12 request(s)' },
+			{ seriesKey: 'bridge', value: 5, tooltip: 'Submitted · Bridge: 5 request(s)' },
+		],
+	},
+	{
+		key: 'approved',
+		label: 'Approved',
+		segments: [
+			{ seriesKey: 'registrant', value: 9, tooltip: 'Approved · Registrant: 9 request(s)' },
+			{ seriesKey: 'bridge', value: 2, tooltip: 'Approved · Bridge: 2 request(s)' },
+		],
+	},
+];
+
+const CHART_GATE_TIME_SERIES_DATA = [
+	{ key: '2026-09-10', label: '09/10', value: 4, tooltip: '09/10: 4 received' },
+	{ key: '2026-09-11', label: '09/11', value: 0, tooltip: '09/11: 0 received' },
+	{ key: '2026-09-12', label: '09/12', value: 6, tooltip: '09/12: 6 received' },
+];
+
+/**
+ * The chart colour-mechanism region (60-03, D-10/D-15). Mounted in ITS OWN
+ * root (see this file's header) so a chart render throw cannot unmount or
+ * blank the token-probe/presentational region above. A fixed pixel width on
+ * the wrapping element makes `ResponsiveContainer`'s percentage width
+ * resolve deterministically, independent of the document's own layout.
+ */
+function ChartGateHarness() {
+	return (
+		<div className="ui-gate-chart-harness" style={{ width: '600px' }}>
+			<div data-ui-gate="BarSeries">
+				<BarSeries data={CHART_GATE_BAR_DATA} />
+			</div>
+			<div data-ui-gate="StackedBarSeries">
+				<StackedBarSeries
+					data={CHART_GATE_STACKED_DATA}
+					series={CHART_GATE_SERIES}
+					emptyCopyKey="panels.registrations.requestChart.empty"
+				/>
+			</div>
+			<div data-ui-gate="TimeSeries">
+				<TimeSeries data={CHART_GATE_TIME_SERIES_DATA} emptyCopyKey="panels.registrations.intakeChart.empty" />
+			</div>
+			<div data-ui-gate="Meter">
+				<Meter value={3} total={5} valueLabel="3 of 5" variant="panel" emptyCopyKey="panels.keyholders.meter.empty" />
+			</div>
+		</div>
+	);
+}
+
 /**
  * The hook-root region (53-09, D-19) — mounted in ITS OWN root, separate
  * from `UiGateHarness`'s (see this file's header). Renders `DetailsToggle`
@@ -196,6 +294,23 @@ async function main() {
 		createRoot(hookRootContainer).render(
 			<StrictMode>
 				<HookRootHarness />
+			</StrictMode>,
+		);
+	} catch {
+		// intentionally swallowed — see comment above.
+	}
+
+	// The chart region's own SEPARATE root and container (60-03) — appended to
+	// document.body, never nested under #root, mirroring the hook-root
+	// region's own discipline immediately above. A throw here is deliberately
+	// swallowed for the same reason: the readout below must still publish
+	// either way, and shared-components-mounted must not go down with it.
+	const chartRegionContainer = document.createElement('div');
+	document.body.appendChild(chartRegionContainer);
+	try {
+		createRoot(chartRegionContainer).render(
+			<StrictMode>
+				<ChartGateHarness />
 			</StrictMode>,
 		);
 	} catch {

@@ -144,12 +144,58 @@ export const RUNG_IDS = Object.freeze([
  * deliberate CSS edit is a signal to update the table, not to silence the
  * rung.
  *
- * @type {ReadonlyArray<{ gate: string, selector: string, cssProperty: string, expected: string }>}
+ * `apps` (60-03, D-10/D-15): an optional frozen array of consuming-app
+ * `package.json` `name` fields. A check with no `apps` field runs against
+ * every consumer, exactly as the three original entries always have. A
+ * check WITH an `apps` field is skipped — never silently reported "not
+ * found" — for any app whose own `name` is not a member of that array. The
+ * four chart entries below are scoped to `votetorrent-dashboard` only: the
+ * public app's own chart proof belongs to 60-08's public gate, and scoping
+ * here keeps the public run's rung count and verdict untouched by this
+ * plan. An IN-SCOPE check that finds no element still reports the existing
+ * "not found" problem — scoping must never become a second, silent way for
+ * a check to vanish.
+ *
+ * @type {ReadonlyArray<{ gate: string, selector: string, cssProperty: string, expected: string, apps?: ReadonlyArray<string> }>}
  */
 const RESOLVED_STYLE_CHECKS = Object.freeze([
 	Object.freeze({ gate: 'LifecyclePill', selector: '.lifecycle-pill', cssProperty: 'borderTopStyle', expected: 'solid' }),
 	Object.freeze({ gate: 'AdvisoryDisclosure', selector: '.pv-disclosure', cssProperty: 'fontSize', expected: '12px' }),
 	Object.freeze({ gate: 'DetailsToggle', selector: '.dt-toggle-group', cssProperty: 'flexDirection', expected: 'column' }),
+	// The four 60-03 chart colour-mechanism checks. Every `expected` value is
+	// the rgb() read-back of the matching token as declared in tokens.css —
+	// `--ok: #22c55e`, `--chart-series-2: #d95926`, `--chart-series-1:
+	// #3987e5` — never the hex the token declares. An unresolved token
+	// computes to `rgb(0, 0, 0)`, which is what the `--prove-token-missing`
+	// control (below) requires these four entries to go red under.
+	Object.freeze({
+		gate: 'BarSeries',
+		selector: '.vt-chart__bar--ok',
+		cssProperty: 'fill',
+		expected: 'rgb(34, 197, 94)',
+		apps: Object.freeze(['votetorrent-dashboard']),
+	}),
+	Object.freeze({
+		gate: 'StackedBarSeries',
+		selector: '.vt-chart__segment--series-2',
+		cssProperty: 'fill',
+		expected: 'rgb(217, 89, 38)',
+		apps: Object.freeze(['votetorrent-dashboard']),
+	}),
+	Object.freeze({
+		gate: 'TimeSeries',
+		selector: '.vt-chart__line',
+		cssProperty: 'stroke',
+		expected: 'rgb(57, 135, 229)',
+		apps: Object.freeze(['votetorrent-dashboard']),
+	}),
+	Object.freeze({
+		gate: 'Meter',
+		selector: '.vt-chart__meter-fill',
+		cssProperty: 'backgroundColor',
+		expected: 'rgb(57, 135, 229)',
+		apps: Object.freeze(['votetorrent-dashboard']),
+	}),
 ]);
 
 /**
@@ -573,7 +619,7 @@ async function runGatePassLenient({ appDir, buildConfigRel, buildEnv, distAbs, e
 
 		runHarnessReadoutRung(readout);
 		await runSharedComponentsRung(page, readout);
-		await runResolvedStyleRung(page);
+		await runResolvedStyleRung(page, resolveAppPackageName(appDir));
 		const tokenCount = await runTokenRungs(page);
 		await runIdentityRungs(page, readout, lines);
 
@@ -720,6 +766,25 @@ async function runSharedComponentsRung(page, readout) {
 }
 
 /**
+ * Reads the `name` field of `appDir`'s own `package.json` (60-03) — the
+ * value every `RESOLVED_STYLE_CHECKS` entry's optional `apps` array is
+ * matched against. Returns `null` rather than throwing on a missing/
+ * unparseable `package.json`, so a check scoped by `apps` simply stays
+ * out of scope rather than crashing the run.
+ *
+ * @param {string} appDir
+ * @returns {string | null}
+ */
+function resolveAppPackageName(appDir) {
+	try {
+		const pkg = JSON.parse(readFileSync(path.join(appDir, 'package.json'), 'utf8'));
+		return typeof pkg.name === 'string' ? pkg.name : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * `resolved-component-styles` (CR-01, see `RESOLVED_STYLE_CHECKS`'s own
  * header for the full rationale). Reads each check's `cssProperty` off the
  * component's OWN rendered element — never the harness's
@@ -727,12 +792,21 @@ async function runSharedComponentsRung(page, readout) {
  * component's own root (`DetailsToggle`'s `.dt-toggle-group`, tagged directly
  * by both harnesses).
  *
+ * `appPackageName` (60-03) narrows `RESOLVED_STYLE_CHECKS` to the checks
+ * in scope for THIS app: a check with no `apps` field always runs; a check
+ * with an `apps` field runs only when `appPackageName` is a member. An
+ * in-scope check that finds no element still reports "not found" — scoping
+ * out-of-scope checks must never become a second way for a real miss to go
+ * unreported.
+ *
  * @param {import('playwright').Page} page
+ * @param {string | null} appPackageName
  */
-async function runResolvedStyleRung(page) {
+async function runResolvedStyleRung(page, appPackageName) {
+	const inScopeChecks = RESOLVED_STYLE_CHECKS.filter((check) => !check.apps || check.apps.includes(/** @type {string} */ (appPackageName)));
 	/** @type {string[]} */
 	const problems = [];
-	for (const check of RESOLVED_STYLE_CHECKS) {
+	for (const check of inScopeChecks) {
 		// eslint-disable-next-line no-await-in-loop -- sequential DOM reads against the one shared page, mirrors runSharedComponentsRung's own discipline
 		const value = await page.evaluate((c) => {
 			const wrapper = document.querySelector(`[data-ui-gate="${c.gate}"]`);
@@ -753,7 +827,7 @@ async function runResolvedStyleRung(page) {
 		'resolved-component-styles',
 		problems.length === 0,
 		problems.length === 0
-			? `${RESOLVED_STYLE_CHECKS.length}/${RESOLVED_STYLE_CHECKS.length} resolved styles matched`
+			? `${inScopeChecks.length}/${inScopeChecks.length} resolved styles matched`
 			: problems.join('; '),
 	);
 }
@@ -1369,7 +1443,7 @@ async function main() {
 
 		runHarnessReadoutRung(readout);
 		await runSharedComponentsRung(page, readout);
-		await runResolvedStyleRung(page);
+		await runResolvedStyleRung(page, resolveAppPackageName(appDir));
 		const tokenCount = await runTokenRungs(page);
 		await runIdentityRungs(page, readout, lines);
 
