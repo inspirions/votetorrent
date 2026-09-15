@@ -13,6 +13,11 @@
  * The rules' text is unchanged, only their location; the dashboard's own
  * `app.css` now `@import`s `@votetorrent/ui-web/components.css` in their
  * place.
+ *
+ * `.eo-heading` is the Registrations panel's section-heading rule -- one of
+ * the four newly-labelled sections' `<h4>` elements, token-only, nested
+ * beneath `PanelFrame`'s own `<h3 class="panel-title">`. `.eo-section` is
+ * already a column flex with a gap, so this rule adds no spacing of its own.
  */
 
 .eo-section {
@@ -125,4 +130,12 @@
 	font-size: var(--font-label-size);
 	font-weight: var(--font-label-weight);
 	line-height: var(--font-label-line-height);
+}
+
+.eo-heading {
+	margin: 0;
+	color: var(--text);
+	font-size: var(--font-heading-size);
+	font-weight: var(--font-heading-weight);
+	line-height: var(--font-heading-line-height);
 }

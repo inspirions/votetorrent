@@ -49,25 +49,30 @@ interface RegistrationsData {
 	empty: boolean;
 }
 
-interface RegistrationsState {
-	loading: boolean;
-	data: RegistrationsData | null;
-}
+// A four-arm discriminated union, not a loading/data pair: `data` is
+// declared on the `ready` arm only, so TypeScript narrows every render
+// branch below with no non-null assertion and no fallback that could
+// re-conflate a failed read with a genuinely empty election.
+type RegistrationsState =
+	| { status: 'unavailable' }
+	| { status: 'loading' }
+	| { status: 'failed' }
+	| { status: 'ready'; data: RegistrationsData };
 
 const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
-	const [state, setState] = useState<RegistrationsState>({ loading: true, data: null });
+	const [state, setState] = useState<RegistrationsState>({ status: 'loading' });
 
 	useEffect(() => {
 		let cancelled = false;
 
 		if (!db) {
-			setState({ loading: false, data: null });
+			setState({ status: 'unavailable' });
 			return () => {
 				cancelled = true;
 			};
 		}
 
-		setState({ loading: true, data: null });
+		setState({ status: 'loading' });
 
 		const boundDb = db;
 		(async () => {
@@ -81,7 +86,7 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 				const anyData = await hasAnyRegistrationData(boundDb);
 				if (!cancelled) {
 					setState({
-						loading: false,
+						status: 'ready',
 						data: { statusBreakdown, requestBreakdown, roster, surfaceCounts, empty: !anyData },
 					});
 				}
@@ -95,7 +100,7 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 				// eslint-disable-next-line no-console
 				console.error('RegistrationsPanel: a read failed:', (err as { name?: string })?.name ?? 'Error');
 				if (!cancelled) {
-					setState({ loading: false, data: null });
+					setState({ status: 'failed' });
 				}
 			}
 		})();
@@ -105,7 +110,19 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 		};
 	}, [db]);
 
-	if (!db || state.loading || !state.data || state.data.empty) {
+	if (state.status === 'unavailable') {
+		return <p className="panel-empty">{t('panels.registrations.unavailable')}</p>;
+	}
+
+	if (state.status === 'loading') {
+		return <p className="panel-empty">{t('panels.registrations.loading')}</p>;
+	}
+
+	if (state.status === 'failed') {
+		return <p className="panel-empty">{t('panels.registrations.readFailed')}</p>;
+	}
+
+	if (state.data.empty) {
 		return <p className="panel-empty">{t(capability.emptyKey)}</p>;
 	}
 
@@ -115,6 +132,7 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 	return (
 		<>
 			<section className="eo-section">
+				<h4 className="eo-heading">{t('panels.registrations.statusHeading')}</h4>
 				<div className="eo-count-grid">
 					{statusBreakdown.map((row) => (
 						<div key={row.Code}>
@@ -126,6 +144,7 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 			</section>
 
 			<section className="eo-section">
+				<h4 className="eo-heading">{t('panels.registrations.requestsHeading')}</h4>
 				<div className="eo-count-grid">
 					{requestBreakdown.map((row) => {
 						const label = `${row.StatusName} / ${row.IssuerName}`;
@@ -140,6 +159,7 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 			</section>
 
 			<section className="eo-section">
+				<h4 className="eo-heading">{t('panels.registrations.rosterHeading')}</h4>
 				<span className="eo-datum">{rosterFigure}</span>
 				{roster.rows.map((row) => (
 					<div className="eo-row" key={row.Id}>
@@ -158,6 +178,7 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 			</section>
 
 			<section className="eo-section">
+				<h4 className="eo-heading">{t('panels.registrations.surfaceCountsHeading')}</h4>
 				<div className="eo-count-grid">
 					{surfaceCounts.map((entry) => (
 						<div key={entry.table}>

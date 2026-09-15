@@ -131,8 +131,20 @@ const COPY_KEYS = new Set(Object.keys(COPY));
 // entries are listed but currently unexercised by the loop below; the
 // `COPY_KEYS.has(key)` half two lines down still catches an allow-listed key
 // naming a phase that no longer exists, for the day a panel does call one.
+// Grown for D-06/D-22: RegistrationsPanel.tsx's four-arm state split adds
+// three literal state keys (its fourth state, `.empty`, keeps resolving
+// through the existing `t(capability.emptyKey)` indirection, which is not a
+// literal and so is never a member of this set), and its four new section
+// headings add one literal key each.
 const ALLOWED_T_KEYS = new Set([
 	'panels.registrations.empty',
+	'panels.registrations.loading',
+	'panels.registrations.unavailable',
+	'panels.registrations.readFailed',
+	'panels.registrations.statusHeading',
+	'panels.registrations.requestsHeading',
+	'panels.registrations.rosterHeading',
+	'panels.registrations.surfaceCountsHeading',
 	'panels.elections.empty',
 	'panels.ballotsQuestions.empty',
 	'lifecycle.pre',
@@ -156,6 +168,65 @@ test('positive control: an invented copy key call is detected as outside the all
 	const fixtureKeys = [...`t('panels.registrations.subtitle')`.matchAll(/\bt\(\s*'([^']+)'/g)].map((m) => m[1]);
 	assert.deepEqual(fixtureKeys, ['panels.registrations.subtitle']);
 	assert.ok(!ALLOWED_T_KEYS.has('panels.registrations.subtitle'));
+});
+
+// --- Four section headings (D-06) --------------------------------------------
+
+const REGISTRATIONS_HEADING_KEYS = [
+	'panels.registrations.statusHeading',
+	'panels.registrations.requestsHeading',
+	'panels.registrations.rosterHeading',
+	'panels.registrations.surfaceCountsHeading',
+];
+
+test('RegistrationsPanel.tsx renders each of the four heading keys exactly once, as a t(...) expression child, never a literal JSX text node', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	for (const key of REGISTRATIONS_HEADING_KEYS) {
+		const escaped = key.replace(/\./g, '\\.');
+		const occurrences = source.match(new RegExp(`t\\('${escaped}'\\)`, 'g')) ?? [];
+		assert.equal(occurrences.length, 1, `${key} does not appear exactly once as a t(...) call in RegistrationsPanel.tsx`);
+	}
+	assert.deepEqual(extractWordBearingJsxText(source), []);
+});
+
+// --- Four distinct panel states (D-22) ---------------------------------------
+
+/**
+ * Reads the RegistrationsPanel-shaped literal panel-state `t(...)` calls
+ * (loading / unavailable / readFailed) plus the `t(capability.emptyKey)`
+ * indirection out of `source`, and resolves every one it finds through the
+ * frozen `COPY` table -- so a source naming fewer than four states reports
+ * fewer than four resolved strings, and a source whose keys collide onto the
+ * same sentence is visible as a `Set` smaller than the list.
+ *
+ * @param {string} source
+ * @returns {string[]}
+ */
+function namedRegistrationsStateStrings(source) {
+	/** @type {string[]} */
+	const resolved = [];
+	for (const key of ['panels.registrations.loading', 'panels.registrations.unavailable', 'panels.registrations.readFailed']) {
+		const escaped = key.replace(/\./g, '\\.');
+		if (new RegExp(`t\\('${escaped}'\\)`).test(source)) resolved.push(COPY[key]);
+	}
+	if (/t\(capability\.emptyKey\)/.test(source)) resolved.push(COPY['panels.registrations.empty']);
+	return resolved;
+}
+
+test('RegistrationsPanel.tsx names all four panel states, and the four resolved copy strings are pairwise distinct', () => {
+	const resolved = namedRegistrationsStateStrings(STRIPPED['RegistrationsPanel.tsx']);
+	assert.equal(resolved.length, 4, `RegistrationsPanel.tsx does not name all four panel states: ${JSON.stringify(resolved)}`);
+	assert.equal(
+		new Set(resolved).size,
+		4,
+		`the four panel states did not resolve to four distinct strings -- a failed read would be indistinguishable from another state: ${JSON.stringify(resolved)}`,
+	);
+});
+
+test('positive control: a fixture naming only one of the four state keys is reported as incomplete by the same helper the real rung uses', () => {
+	const fixture = `t('panels.registrations.loading')`;
+	const resolved = namedRegistrationsStateStrings(fixture);
+	assert.equal(resolved.length, 1, 'the helper must report an incomplete fixture as incomplete, or it proves nothing');
 });
 
 // --- No decision ID or phase number -----------------------------------------
