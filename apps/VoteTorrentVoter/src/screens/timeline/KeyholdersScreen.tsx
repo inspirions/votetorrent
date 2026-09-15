@@ -132,9 +132,14 @@ export default function KeyholdersScreen() {
 						style={[
 							styles.heading,
 							{
+								// Regular weight (not bold) -- 59-UI-SPEC.md's 2-weight budget reserves
+								// bold for exactly three named sites (the rail "Now" label, the CTA/
+								// button label, and the Registration Ends panel's "are registered" run),
+								// none of which is this heading; hierarchy here comes from size alone,
+								// mirroring TimelineScreen.tsx's own h2/h4 headings.
 								color: colors.text,
-								fontFamily: fonts.bold.fontFamily,
-								fontWeight: fonts.bold.fontWeight,
+								fontFamily: fonts.regular.fontFamily,
+								fontWeight: fonts.regular.fontWeight,
 								fontSize: typeScale.h4.fontSize,
 								lineHeight: typeScale.h4.lineHeight,
 							},
