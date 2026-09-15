@@ -192,7 +192,9 @@ export function CreateElectionScreen() {
 				resolvedTimeline.accruingVotes >= resolvedTimeline.hashingVotes ||
 				resolvedTimeline.hashingVotes >= resolvedTimeline.releasingKeys ||
 				resolvedTimeline.releasingKeys >= resolvedTimeline.tallyingStarts ||
-				resolvedTimeline.tallyingStarts >= resolvedTimeline.certificationStarts
+				resolvedTimeline.tallyingStarts >= resolvedTimeline.validation ||
+				resolvedTimeline.validation >= resolvedTimeline.certificationStarts ||
+				resolvedTimeline.certificationStarts >= resolvedTimeline.closed
 			) {
 				setErrorMessage(t("errTimelineOrder"));
 				return;
