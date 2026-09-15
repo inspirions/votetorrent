@@ -160,6 +160,7 @@ const DISTRICT_LITERAL_RE = /['"`]District['"`]/;
 /** Counts non-overlapping occurrences of a mount literal that starts with `<`, requiring the
  * character immediately after the literal is NOT a letter — so `<RegistrantRoll` does not also
  * match inside `<RegistrantRollRow` (the `ReadonlyArray<RegistrantRollRow>` type annotation). */
+/** @param {string} literal @returns {RegExp} */
 const mountOccurrenceRe = (literal) => new RegExp(`${literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'g');
 /** @param {string} source @param {string} literal @returns {number} */
 const countMountOccurrences = (source, literal) => (source.match(mountOccurrenceRe(literal)) ?? []).length;
@@ -795,6 +796,7 @@ test('30a. D-23: FactSections.tsx contains none of transition, animation, skelet
 test('31. positive control: the quoted-copy-key occurrence counter fires the planted count on a doubled mount and is silent on a single one', () => {
 	const single = 'emptyCopyKey="public.fact.keyrelease.meterEmpty"';
 	const doubled = single + single;
+	/** @param {string} source @param {string} key @returns {number} */
 	const countOf = (source, key) => (source.match(new RegExp(`['"\`]${key.replace(/\./g, '\\.')}['"\`]`, 'g')) ?? []).length;
 	assert.equal(countOf(doubled, FIXTURES.chartCopyKeys[0]), 2, 'the occurrence counter is inert against a planted doubled mount');
 	assert.equal(countOf(single, FIXTURES.chartCopyKeys[0]), 1, 'the occurrence counter mis-fires against a single planted mount');
