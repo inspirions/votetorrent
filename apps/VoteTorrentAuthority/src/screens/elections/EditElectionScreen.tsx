@@ -52,8 +52,10 @@ export default function EditElectionScreen() {
 	const [revision, setRevision] = useState<ElectionRevisionFormValue>({
 		registrationEnds: "",
 		ballotsFinal: "",
-		releasingKeys: "",
 		votingStarts: "",
+		accruingVotes: "",
+		hashingVotes: "",
+		releasingKeys: "",
 		tallyingStarts: "",
 		validation: "",
 		certificationStarts: "",
@@ -83,8 +85,10 @@ export default function EditElectionScreen() {
 				setRevision({
 					registrationEnds: toISO(cur.timeline.registrationEnds),
 					ballotsFinal: toISO(cur.timeline.ballotsFinal),
-					releasingKeys: toISO(cur.timeline.releasingKeys),
 					votingStarts: toISO(cur.timeline.votingStarts),
+					accruingVotes: toISO(cur.timeline.accruingVotes),
+					hashingVotes: toISO(cur.timeline.hashingVotes),
+					releasingKeys: toISO(cur.timeline.releasingKeys),
 					tallyingStarts: toISO(cur.timeline.tallyingStarts),
 					validation: toISO(cur.timeline.validation),
 					certificationStarts: toISO(cur.timeline.certificationStarts),

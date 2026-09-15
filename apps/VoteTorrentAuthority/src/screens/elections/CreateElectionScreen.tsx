@@ -45,8 +45,10 @@ export function CreateElectionScreen() {
 	const [revision, setRevision] = useState<ElectionRevisionFormValue>({
 		registrationEnds: "",
 		ballotsFinal: "",
-		releasingKeys: "",
 		votingStarts: "",
+		accruingVotes: "",
+		hashingVotes: "",
+		releasingKeys: "",
 		tallyingStarts: "",
 		validation: "",
 		certificationStarts: "",
