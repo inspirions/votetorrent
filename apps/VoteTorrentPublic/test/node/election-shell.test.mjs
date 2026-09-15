@@ -577,14 +577,15 @@ function collectTemplateMountedKeys() {
 // between the fact body and the advisory. The ratchet fired unprompted for
 // those three too.
 //
-// THE LIST IS NOW EMPTY, WHICH IS THE END STATE IT WAS BUILT FOR -- and that
-// is a reason to keep the machinery, not to delete it. An empty list makes the
-// case-9 assertion UNCONDITIONAL again: `declaredNotMounted` must be empty
-// outright, with nothing forgiven. Both rungs stay, so a future plan that
-// declares copy ahead of the screen that renders it has to add its key here
-// deliberately, in a diff a reviewer can see, rather than widening an
-// assertion. The staleness rung then expires that entry on its own, exactly as
-// it did three times across this phase.
+// THE LIST WAS EMPTY, THE END STATE IT WAS BUILT FOR -- and that was a
+// reason to keep the machinery, not to delete it. 60-01 (Phase 60, D-08)
+// re-populates it with three `public.*` keys: `60-01` is the sole owner of
+// `copy.js` for the whole phase, so it lands every copy key the phase will
+// ever need up front, including the three consumed only later by 60-05/60-06
+// (the keyholder-release meter's empty frame and the roll-composition
+// chart's tooltip/fold-label). Each is named by an already-locked decision
+// (60-CONTEXT.md D-08/D-09) and a named future call site, not a guess --
+// exactly the warrant this list has always required.
 //
 // This list is NOT a relaxation of the assertion, and two properties make
 // that true rather than merely asserted:
@@ -596,7 +597,11 @@ function collectTemplateMountedKeys() {
 //     makes the list shrink to empty as the render plans land, rather than
 //     outliving its reason the way the removed skip would have.
 /** @type {ReadonlyArray<string>} */
-const PENDING_MOUNT_KEYS = Object.freeze([]);
+const PENDING_MOUNT_KEYS = Object.freeze([
+	'public.fact.keyrelease.meterEmpty',
+	'public.registrantRoll.chart.tooltip',
+	'public.registrantRoll.chart.otherBucket',
+]);
 
 test('the public-voice key set in COPY equals, in both directions, the set of public-voice keys mounted under src/, packages/ui-web/src/components/ and packages/ui-web/src/lifecycle/ -- as a literal, as the variant="public" template, or as one of facts.js own key templates -- apart from the named PENDING_MOUNT_KEYS still awaiting their render plan', () => {
 	const declaredKeys = new Set(Object.keys(COPY).filter((k) => PUBLIC_VOICE_KEY_RE.test(k)));

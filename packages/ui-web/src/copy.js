@@ -245,6 +245,11 @@ export const COPY = Object.freeze({
 	'panelFrame.tierPill': 'tier {{tier}}',
 	'panelFrame.sitePill': '{{count}} site',
 	'panelFrame.sitesPill': '{{count}} sites',
+	// Phase 60 (D-13/D-17): the per-panel chart/grid view switch, shared by
+	// every panel that offers a chart view -- currently Registrations and
+	// Keyholders. Lives in PanelFrame's own header, beside the pills above.
+	'panelFrame.viewChart': 'Chart',
+	'panelFrame.viewGrid': 'Grid',
 
 	// Navigation groups and lifecycle pill
 	'nav.groupElectionOperations': 'Election Operations',
@@ -268,6 +273,30 @@ export const COPY = Object.freeze({
 	// first, always -- 'vrg' is 39% of the authorization surface)
 	'panels.registrations.title': 'Registrations',
 	'panels.registrations.empty': 'No registrants yet.',
+	// Phase 60 (D-22): the three panel states distinct from the pre-existing,
+	// genuinely-empty `.empty` above -- loading, no election data loaded at
+	// all, and a failed read. Today all four states rendered one shared
+	// paragraph, so a failed read was indistinguishable from an empty
+	// election; this closes that.
+	'panels.registrations.loading': 'Loading registrations…',
+	'panels.registrations.unavailable': 'No election data is loaded in this browser yet.',
+	'panels.registrations.readFailed': "Couldn't load registrations. Try refreshing the snapshot.",
+	// Phase 60 (D-06): section headings for all four Registrations sections,
+	// authored prose rather than literal JSX text (rule R1, contract C2).
+	'panels.registrations.statusHeading': 'Registrants by status',
+	'panels.registrations.requestsHeading': 'Registration requests',
+	'panels.registrations.rosterHeading': 'Roster',
+	'panels.registrations.surfaceCountsHeading': 'Tables read',
+	// Phase 60 (D-21): chart-level empty frames, distinct from the panel
+	// states above -- a chart can be empty while its panel loaded fine.
+	'panels.registrations.intakeChart.empty': 'No requests received in this window.',
+	'panels.registrations.requestChart.empty': 'No requests recorded yet.',
+	// Phase 60: hover-tooltip templates for the three Registrations charts
+	// (C1/C2/C3 of 60-UI-SPEC.md's chart inventory). Placeholder names match
+	// what each render site supplies; `t()` throws on any left unresolved.
+	'panels.registrations.statusChart.tooltip': '{{status}}: {{count}} registrant(s)',
+	'panels.registrations.requestChart.tooltip': '{{status}} · {{issuer}}: {{count}} request(s)',
+	'panels.registrations.intakeChart.tooltip': '{{bucket}}: {{count}} received',
 	'panels.elections.title': 'Elections',
 	'panels.elections.empty': 'No elections yet.',
 	'panels.ballotsQuestions.title': 'Ballots & Questions',
@@ -282,6 +311,16 @@ export const COPY = Object.freeze({
 	'panels.administrationOfficers.empty': 'No officers yet.',
 	'panels.keyholders.title': 'Keyholders',
 	'panels.keyholders.empty': 'No keyholders yet.',
+	// Phase 60 (D-22): the three panel states distinct from the pre-existing,
+	// genuinely-empty `.empty` above -- same rationale as the Registrations
+	// group above.
+	'panels.keyholders.loading': 'Loading keyholders…',
+	'panels.keyholders.unavailable': 'No election data is loaded in this browser yet.',
+	'panels.keyholders.readFailed': "Couldn't load keyholders. Try refreshing the snapshot.",
+	// Phase 60 (D-07/D-21): the threshold meter's chart-level empty frame,
+	// and its numeral template ("N of M" per 60-UI-SPEC.md).
+	'panels.keyholders.meter.empty': 'No keyholder threshold set for this election yet.',
+	'panels.keyholders.meter.value': '{{count}} of {{total}}',
 	'panels.inviteAuthorities.title': 'Invite Authorities',
 	'panels.inviteAuthorities.empty': 'No invitations yet.',
 
@@ -597,6 +636,13 @@ export const COPY = Object.freeze({
 	// prevent.
 	'public.fact.keyrelease.unreadable':
 		"The number of keyholders who have released their keys couldn't be read, so it isn't shown here.",
+	// Phase 60 (60-06, C6): the meter's dedicated empty-frame copy for the
+	// genuinely-reachable branch where `readKeyReleaseProgress` computes
+	// `keyholderCount` as zero -- distinct from `.unreadable` above, which
+	// says the number could not be read at all. Rendering `.unreadable` here
+	// would be false (it was read, and is zero) and would contradict the
+	// sentence rendered directly above the meter.
+	'public.fact.keyrelease.meterEmpty': 'No keyholders are recorded for this election yet.',
 
 	// The voter roll. `.disclaimer` is the one that earns its length: it
 	// tells the reader that what they are looking at is the published
@@ -611,6 +657,11 @@ export const COPY = Object.freeze({
 	'public.registrantRoll.disclaimer':
 		'This shows only the publicly named fields — no other registrant detail is shown or read.',
 	'public.registrantRoll.empty': 'No registrants recorded yet.',
+	// Phase 60 (60-06, C7): roll composition chart -- district hover tooltip
+	// (single hue, D-9/D-09) and the fold label for districts below the
+	// small-count threshold.
+	'public.registrantRoll.chart.tooltip': '{{district}}: {{count}} registrant(s)',
+	'public.registrantRoll.chart.otherBucket': 'Other',
 
 	// The two standing caveats. EXACTLY TWO ship, and the count is a
 	// decision rather than an accident: a third candidate -- that some facts

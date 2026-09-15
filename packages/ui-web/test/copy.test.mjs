@@ -19,28 +19,40 @@ import { COPY, t } from '../src/index.js';
 import { FACT_COPY_KEYS, FACTS } from '../src/lifecycle/facts.js';
 
 // ---------------------------------------------------------------------------
-// Total key count (D-05, D-09, D-08, D-06/54-02, 54-09, 56-12). 146, not 85
-// -- 53-07 (D-08) added exactly ten `public.*`/`advisory.public.body` keys on
-// top of the 73 the table carried after 53-05's `gate.advisoryDisclosure` ->
-// `advisory.authority.body` rename (83 total). 54-02 (D-06/D-10) then
-// RENAMED the three `lifecycle.*` keys (net 0) and ADDED two more
-// (`lifecycle.settling`, `lifecycle.indeterminate`) -- 83 + 2 = 85. 54-09
-// then added the public election view's whole copy table: the 50 keys named
-// by `facts.js`'s own `FACT_COPY_KEYS` export plus the eleven that sit
-// outside the fact model -- 85 + 61 = 146. 54-12 then added the two keys of
-// D-02's addressed-but-not-held sentence -- 146 + 2 = 148. 56-12 then added
-// six more: Surface 1's staleness badge/body and Surface 3's two-variant
-// config-fault title/body pairs -- 148 + 6 = 154. 56-14 then added ONE more:
-// Surface 5's live-update badge word -- 154 + 1 = 155. Written as a bare
-// literal so a future "fix" that deletes any of them is caught by a failure
-// message that names the reason.
+// Total key count (D-05, D-09, D-08, D-06/54-02, 54-09, 56-12, 60-01). 177,
+// not 85 -- 53-07 (D-08) added exactly ten `public.*`/`advisory.public.body`
+// keys on top of the 73 the table carried after 53-05's
+// `gate.advisoryDisclosure` -> `advisory.authority.body` rename (83 total).
+// 54-02 (D-06/D-10) then RENAMED the three `lifecycle.*` keys (net 0) and
+// ADDED two more (`lifecycle.settling`, `lifecycle.indeterminate`) --
+// 83 + 2 = 85. 54-09 then added the public election view's whole copy
+// table: the 50 keys named by `facts.js`'s own `FACT_COPY_KEYS` export plus
+// the eleven that sit outside the fact model -- 85 + 61 = 146. 54-12 then
+// added the two keys of D-02's addressed-but-not-held sentence --
+// 146 + 2 = 148. 56-12 then added six more: Surface 1's staleness badge/body
+// and Surface 3's two-variant config-fault title/body pairs -- 148 + 6 = 154.
+// 56-14 then added ONE more: Surface 5's live-update badge word --
+// 154 + 1 = 155. 60-01 then added twenty-two more: the chart/grid view
+// switch (2), the six panel-state keys for Registrations/Keyholders (D-22),
+// the four Registrations section headings (D-06), the three chart-level
+// empty frames (D-21), the four chart tooltip templates (three Registrations
+// + one public roll-composition), and the three keys named by later 60-05/
+// 60-06 call sites (the keyholder-release meter's empty frame, the roll
+// chart's "Other" fold label, and the keyholder meter's "N of M" numeral) --
+// 155 + 22 = 177. Written as a bare literal so a future "fix" that deletes
+// any of them is caught by a failure message that names the reason. This
+// number is re-derived live from `Object.keys(COPY).length`, never from the
+// arithmetic in this comment.
 // ---------------------------------------------------------------------------
 
-test('COPY has exactly 155 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion, +61 from 54-09s fact/gap copy table, +2 from 54-12s not-held sentence, +6 from 56-12s staleness/config-fault copy, +1 from 56-14s live-update badge)', () => {
+test('COPY has exactly 177 keys (73 pre-53-07, +10 public-voice keys under D-08, +2 net from the 54-02 lifecycle rename/expansion, +61 from 54-09s fact/gap copy table, +2 from 54-12s not-held sentence, +6 from 56-12s staleness/config-fault copy, +1 from 56-14s live-update badge, +22 from 60-01s chart-visualization copy)', () => {
 	assert.equal(
 		Object.keys(COPY).length,
-		155,
-		'expected 155 -- if this reads 154, 56-14s public.liveUpdate.badge was wrongly deleted; it is Surface 5 (D-16/D-19) ' +
+		177,
+		'expected 177 -- if this reads 155, 60-01s twenty-two chart-visualization keys (NEW_60_01_KEYS: the view ' +
+			'switch, the panel-state and chart-empty keys, the section headings and the tooltip/meter templates) were ' +
+			'wrongly deleted; they are consumed starting in 60-03/60-05/60-06. If this reads 154, 56-14s ' +
+			'public.liveUpdate.badge was wrongly deleted; it is Surface 5 (D-16/D-19) ' +
 			'and is mounted by ElectionShell.tsx, where t() throws on it going missing. If it reads 148, 56-12s ' +
 			'public.staleness.*/public.config.*.title/.body were wrongly deleted; ' +
 			'they are Surfaces 1 and 3 (D-17/D-13) and are mounted by ElectionShell.tsx/PublicApp.tsx, where t() throws ' +
@@ -246,6 +258,43 @@ const NEW_56_12_KEYS = Object.freeze([
  */
 const NEW_56_14_KEYS = Object.freeze(['public.liveUpdate.badge']);
 
+/**
+ * The twenty-two keys 60-01 added, serving D-06, D-13, D-17, D-21 and D-22:
+ * the per-panel chart/grid view switch; the three panel-state keys each for
+ * Registrations and Keyholders (loading, no election data loaded, read
+ * failed -- distinct from the pre-existing genuinely-empty `.empty` keys);
+ * the four Registrations section headings; the three chart-level empty
+ * frames; the four chart tooltip templates; and the three keys named by
+ * later 60-05/60-06 call sites (the keyholder-release meter's empty frame,
+ * the roll chart's "Other" fold label, and the keyholder meter's "N of M"
+ * numeral).
+ * @type {ReadonlyArray<string>}
+ */
+const NEW_60_01_KEYS = Object.freeze([
+	'panelFrame.viewChart',
+	'panelFrame.viewGrid',
+	'panels.registrations.loading',
+	'panels.registrations.unavailable',
+	'panels.registrations.readFailed',
+	'panels.keyholders.loading',
+	'panels.keyholders.unavailable',
+	'panels.keyholders.readFailed',
+	'panels.registrations.intakeChart.empty',
+	'panels.registrations.requestChart.empty',
+	'panels.keyholders.meter.empty',
+	'panels.registrations.statusHeading',
+	'panels.registrations.requestsHeading',
+	'panels.registrations.rosterHeading',
+	'panels.registrations.surfaceCountsHeading',
+	'panels.registrations.statusChart.tooltip',
+	'panels.registrations.requestChart.tooltip',
+	'panels.registrations.intakeChart.tooltip',
+	'public.registrantRoll.chart.tooltip',
+	'public.fact.keyrelease.meterEmpty',
+	'public.registrantRoll.chart.otherBucket',
+	'panels.keyholders.meter.value',
+]);
+
 test('sanity: the 54-12 delta is 2 keys and neither collides with the 54-09 delta (a collision would silently shrink the delta while every other assertion still passed)', () => {
 	assert.equal(NEW_54_12_KEYS.length, 2);
 	const priorSet = new Set([...NEW_54_09_KEYS, ...NEW_53_07_KEYS, ...PHASE_54_ADDITIONS]);
@@ -267,6 +316,20 @@ test('sanity: the 56-14 delta is 1 key and does not collide with any prior delta
 	assert.deepEqual(overlap, [], `these keys are counted twice: ${overlap.join(', ')}`);
 });
 
+test('sanity: the 60-01 delta is 22 keys and none collides with any prior delta (a collision would silently shrink the delta while every other assertion still passed)', () => {
+	assert.equal(NEW_60_01_KEYS.length, 22);
+	const priorSet = new Set([
+		...NEW_54_09_KEYS,
+		...NEW_53_07_KEYS,
+		...PHASE_54_ADDITIONS,
+		...NEW_54_12_KEYS,
+		...NEW_56_12_KEYS,
+		...NEW_56_14_KEYS,
+	]);
+	const overlap = NEW_60_01_KEYS.filter((k) => priorSet.has(k));
+	assert.deepEqual(overlap, [], `these keys are counted twice: ${overlap.join(', ')}`);
+});
+
 test('sanity: the 54-09 delta is 61 keys -- 50 named by facts.js FACT_COPY_KEYS plus 11 non-fact keys, with no overlap between the two (an overlap would silently shrink the delta while every other assertion still passed)', () => {
 	assert.equal(FACT_COPY_KEYS.length, 50, 'facts.js FACT_COPY_KEYS must still publish 50 keys');
 	assert.equal(NEW_54_09_NON_FACT_KEYS.length, 11);
@@ -276,7 +339,7 @@ test('sanity: the 54-09 delta is 61 keys -- 50 named by facts.js FACT_COPY_KEYS 
 	assert.equal(new Set(NEW_54_09_KEYS).size, 61);
 });
 
-test('D-25/D-07/D-08/D-06/54-09/54-12/56-12/56-14: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename, the PHASE_54_ADDITIONS additions, the 61 NEW_54_09_KEYS additions, the two NEW_54_12_KEYS additions, the six NEW_56_12_KEYS additions and the one NEW_56_14_KEYS addition -- no other key added or removed', () => {
+test('D-25/D-07/D-08/D-06/54-09/54-12/56-12/56-14/60-01: the ONLY key-set changes since 8326185d are gate.advisoryDisclosure -> advisory.authority.body, the ten NEW_53_07_KEYS additions, the PHASE_54_RENAMES rename, the PHASE_54_ADDITIONS additions, the 61 NEW_54_09_KEYS additions, the two NEW_54_12_KEYS additions, the six NEW_56_12_KEYS additions, the one NEW_56_14_KEYS addition and the twenty-two NEW_60_01_KEYS additions -- no other key added or removed', () => {
 	const currentKeys = new Set(Object.keys(COPY));
 	const renameMap = new Map(PHASE_54_RENAMES);
 	const expectedKeys = new Set([
@@ -291,6 +354,7 @@ test('D-25/D-07/D-08/D-06/54-09/54-12/56-12/56-14: the ONLY key-set changes sinc
 		...NEW_54_12_KEYS,
 		...NEW_56_12_KEYS,
 		...NEW_56_14_KEYS,
+		...NEW_60_01_KEYS,
 	]);
 
 	const added = [...currentKeys].filter((k) => !expectedKeys.has(k));
@@ -299,12 +363,12 @@ test('D-25/D-07/D-08/D-06/54-09/54-12/56-12/56-14: the ONLY key-set changes sinc
 	assert.deepEqual(
 		added,
 		[],
-		`unexpected key(s) added beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes, the 54-09 delta, the 54-12 delta and the 56-12 delta: ${added.join(', ')}`,
+		`unexpected key(s) added beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes, the 54-09 delta, the 54-12 delta, the 56-12 delta, the 56-14 delta and the 60-01 delta: ${added.join(', ')}`,
 	);
 	assert.deepEqual(
 		removed,
 		[],
-		`unexpected key(s) missing beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes, the 54-09 delta, the 54-12 delta and the 56-12 delta: ${removed.join(', ')}`,
+		`unexpected key(s) missing beyond the D-07 rename, the D-08 additions, the 54-02 lifecycle changes, the 54-09 delta, the 54-12 delta, the 56-12 delta, the 56-14 delta and the 60-01 delta: ${removed.join(', ')}`,
 	);
 });
 
