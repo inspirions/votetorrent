@@ -153,7 +153,7 @@ async function flushBoot(ticks = 15, until?: () => boolean) {
 	while (!until() && Date.now() - start < maxMs) {
 		// eslint-disable-next-line no-await-in-loop
 		await renderer.act(async () => {
-			await new Promise(resolve => setTimeout(resolve, 20));
+			await new Promise<void>(resolve => setTimeout(() => resolve(), 20));
 		});
 	}
 }
