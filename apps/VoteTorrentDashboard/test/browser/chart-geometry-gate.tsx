@@ -169,7 +169,10 @@ function KeyholdersBodyHarness() {
 						<Meter
 							value={meter.value}
 							total={meter.total}
-							valueLabel={`${meter.value} / ${meter.total}`}
+							// Through the copy key, exactly as KeyholdersPanel does. A
+							// hardcoded numeral here would make the D-24 screenshot
+							// evidence about this harness rather than about the product.
+							valueLabel={t('panels.keyholders.meter.value', { count: meter.value, total: meter.total })}
 							variant="panel"
 							emptyCopyKey="panels.keyholders.meter.empty"
 						/>
