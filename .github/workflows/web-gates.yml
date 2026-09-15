@@ -717,6 +717,54 @@ jobs:
               fail=1
             fi
           done
+
+          # Fifth block (60-09): the dashboard's own standalone D-24 driver.
+          # Registered here for the same reason $L and $R are -- it is not a
+          # rung in the shared run-ui-gates.mjs runner, so nothing else in
+          # this file would notice a rename, a deletion, or a stripped
+          # inversion mode before the browser job spent an hour finding out.
+          C=apps/VoteTorrentDashboard/test/browser/run-chart-geometry-gate.mjs
+          if [ ! -f "$C" ]; then
+            echo "::error::gate-source-intact: $C does not exist"
+            fail=1
+          fi
+          for banned in executablePath "channel: 'chrome'"; do
+            if grep -q -- "$banned" "$C"; then
+              echo "::error::gate-source-intact: forbidden pattern '$banned' found in $C"
+              fail=1
+            fi
+          done
+          if grep -qE "(from|require\()[[:space:]]*['\"]playwright-core['\"]" "$C"; then
+            echo "::error::gate-source-intact: $C imports playwright-core directly -- forbidden transport"
+            fail=1
+          fi
+          # Comment-filtered, matching every other block's discipline above --
+          # a bare grep -c would count this driver's own header prose. Two
+          # tokens below: the --prove-matchers inversion mode, and D-11's rung
+          # that is the only check in this repository able to see a
+          # Recharts-emitted control inside a panel body. A rename of either
+          # leaves this block red instead of leaving a CI step silently
+          # asserting on a rung that no longer exists.
+          #
+          # Deliberately NOT checked here: a count of this driver's own
+          # navigation calls. This driver navigates TWICE by design -- a
+          # default pass and a grid pass -- because the view flag is read at
+          # mount and the second navigation is what proves D-19's persistence
+          # across a genuinely fresh load. A single-navigation check would be
+          # permanently red against a correct file, the mirror image of the
+          # self-tripping checkers this repository has recorded repeatedly.
+          # Equally, no reload-ban is added here: 60-07's hand-off does not
+          # ask for one, and this driver's own header prose was not read
+          # closely enough by this plan to justify inventing a text ban
+          # against it.
+          for token in prove-matchers panel-body-free-of-controls; do
+            n=$(set +e; grep -n -- "$token" "$C" | grep -vE ':[[:space:]]*(\*|//|/\*)' | wc -l; true)
+            if [ "$n" -lt 1 ]; then
+              echo "::error::gate-source-intact: '$token' is not present as reachable code in $C (comment-filtered occurrences: $n)"
+              fail=1
+            fi
+          done
+
           if [ "$fail" -ne 0 ]; then
             echo "::error::gate-source-intact FAILED -- an inertness control, a banned transport, or the canonical-runner invariant may have been compromised"
             exit 1
@@ -1087,8 +1135,8 @@ jobs:
         run: |
           set -euo pipefail
           yarn test:render-fidelity 2>&1 | tee ../../render-fidelity-public.log
-          if ! grep -q 'RENDER FIDELITY: PASS (6/6 rungs)' ../../render-fidelity-public.log; then
-            echo "::error::render-fidelity-public: the driver did not report all six rungs passing"
+          if ! grep -q 'RENDER FIDELITY: PASS (8/8 rungs)' ../../render-fidelity-public.log; then
+            echo "::error::render-fidelity-public: the driver did not report all eight rungs passing"
             exit 1
           fi
           echo "RECEIPT render-fidelity-public" | tee -a ../../ci-receipt.txt
@@ -1174,6 +1222,49 @@ jobs:
           fi
           echo "RECEIPT public-assets-control-fired" | tee -a ../../ci-receipt.txt
 
+      # 60-09: enforcing 60-07's dashboard chart-geometry gate (D-11, D-24) in
+      # CI for the first time. Named package script, no added arguments --
+      # never --skip-build, since the dashboard serves built output and a run
+      # against a stale build is inert and reports green on the old bundle.
+      # Asserting the rung count IN THE LOG, not merely the exit code, is
+      # what stops a run that silently skipped a rung from passing here --
+      # the same standard the public-assets step above already sets.
+      - name: Dashboard chart-geometry gate (D-11/D-16/D-24)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:chart-geometry 2>&1 | tee ../../chart-geometry-dashboard.log
+          if ! grep -q 'CHART GEOMETRY GATE: PASS (7/7 rungs)' ../../chart-geometry-dashboard.log; then
+            echo "::error::chart-geometry-dashboard: the driver did not report all seven rungs passing"
+            exit 1
+          fi
+          if ! grep -q 'RECEIPT chart-geometry-dashboard rungs=7 passed=7' ../../chart-geometry-dashboard.log; then
+            echo "::error::chart-geometry-dashboard: the driver's own receipt line is missing or does not read rungs=7 passed=7"
+            exit 1
+          fi
+          echo "RECEIPT chart-geometry-dashboard" | tee -a ../../ci-receipt.txt
+
+      # Kept as its own step, not folded into the gate above: under
+      # `set -euo pipefail` a second control in the same step is hidden
+      # behind the first's failure, and one receipt could not say which
+      # fired. Assert only the POSITIVE receipt line -- the driver's own
+      # --prove-matchers counts inert and indiscriminate comparators
+      # separately and reports both counts, so a healthy run may legitimately
+      # print a line containing "indiscriminate=0"; a negative grep for that
+      # text would be permanently red against a correct run. The receipt line
+      # is emitted only on success and the script exits non-zero otherwise
+      # under `set -e`, so the positive assertion is the complete guard.
+      - name: Dashboard chart-geometry comparator control (--prove-chart-geometry-matchers)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:prove-chart-geometry-matchers 2>&1 | tee ../../chart-geometry-prove-matchers.log
+          if ! grep -qE 'RECEIPT chart-geometry-dashboard-matchers-fired comparators=[0-9]+ canfail=[0-9]+' ../../chart-geometry-prove-matchers.log; then
+            echo "::error::chart-geometry-dashboard-matchers-fired: --prove-chart-geometry-matchers did not print its receipt line"
+            exit 1
+          fi
+          echo "RECEIPT chart-geometry-dashboard-matchers-fired" | tee -a ../../ci-receipt.txt
+
       - name: Upload gate evidence on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -1198,6 +1289,8 @@ jobs:
             render-fidelity-prove-gap-cues.log
             public-assets.log
             public-assets-prove-absent.log
+            chart-geometry-dashboard.log
+            chart-geometry-prove-matchers.log
             ci-receipt.txt
           retention-days: 14
 
@@ -1213,7 +1306,8 @@ jobs:
             ui-gate-public-dedupe-control-fired ui-gate-public-token-control-fired \
             live-read-public live-read-control-fired \
             render-fidelity-public render-fidelity-matchers-fired render-fidelity-controls-fired \
-            public-assets public-assets-control-fired
+            public-assets public-assets-control-fired \
+            chart-geometry-dashboard chart-geometry-dashboard-matchers-fired
 
   # =========================================================================
   # Job 3 -- Phase-close baselines: vote-engine suite + authority typecheck.
