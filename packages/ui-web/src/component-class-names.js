@@ -34,6 +34,16 @@
  * `DetailsToggle`), which is exactly the class of gap this checker exists to
  * close.
  *
+ * 60-03 adds four chart primitives, each under `./charts/` rather than
+ * `./components/`. Every chart entry below carries a shared set of names —
+ * `vt-chart`, the two `vt-chart__empty*` names, `vt-chart__axis`,
+ * `vt-chart__grid` and the tooltip trio (`vt-chart__tooltip`,
+ * `vt-chart__tooltip-label`, `vt-chart__tooltip-value`) — that are actually
+ * rendered by `chart-frame.tsx` on each primitive's behalf, not by the
+ * primitive's own file; they are listed under every export that mounts one,
+ * mirroring how `charts-contract.test.mjs`'s lockstep rung reads the two
+ * files' comment-stripped sources CONCATENATED, not separately.
+ *
  * @type {Readonly<Record<string, ReadonlyArray<string>>>}
  */
 export const COMPONENT_CLASS_NAMES = Object.freeze({
@@ -47,4 +57,67 @@ export const COMPONENT_CLASS_NAMES = Object.freeze({
 		'lifecycle-pill--indeterminate',
 	]),
 	DetailsToggle: Object.freeze(['dt-toggle-group', 'dt-toggle', 'dt-body']),
+	BarSeries: Object.freeze([
+		'vt-chart',
+		'vt-chart--bar',
+		'vt-chart__empty-frame',
+		'vt-chart__empty',
+		'vt-chart__axis',
+		'vt-chart__grid',
+		'vt-chart__label',
+		'vt-chart__bar',
+		'vt-chart__bar--series-1',
+		'vt-chart__bar--series-2',
+		'vt-chart__bar--ok',
+		'vt-chart__bar--warn',
+		'vt-chart__bar--fail',
+		'vt-chart__tooltip',
+		'vt-chart__tooltip-label',
+		'vt-chart__tooltip-value',
+	]),
+	StackedBarSeries: Object.freeze([
+		'vt-chart',
+		'vt-chart--stacked-bar',
+		'vt-chart__empty-frame',
+		'vt-chart__empty',
+		'vt-chart__axis',
+		'vt-chart__grid',
+		'vt-chart__segment--series-1',
+		'vt-chart__segment--series-2',
+		'vt-chart__legend',
+		'vt-chart__legend-item',
+		'vt-chart__legend-swatch',
+		'vt-chart__legend-swatch--series-1',
+		'vt-chart__legend-swatch--series-2',
+		'vt-chart__legend-label',
+		'vt-chart__tooltip',
+		'vt-chart__tooltip-label',
+		'vt-chart__tooltip-value',
+	]),
+	TimeSeries: Object.freeze([
+		'vt-chart',
+		'vt-chart--time-series',
+		'vt-chart__empty-frame',
+		'vt-chart__empty',
+		'vt-chart__axis',
+		'vt-chart__grid',
+		'vt-chart__line',
+		'vt-chart__dot',
+		'vt-chart__crosshair',
+		'vt-chart__tooltip',
+		'vt-chart__tooltip-label',
+		'vt-chart__tooltip-value',
+	]),
+	Meter: Object.freeze([
+		'vt-chart',
+		'vt-chart--meter',
+		'vt-chart__empty-frame',
+		'vt-chart__empty',
+		'vt-chart__meter',
+		'vt-chart__meter--panel',
+		'vt-chart__meter--compact',
+		'vt-chart__meter-track',
+		'vt-chart__meter-fill',
+		'vt-chart__meter-value',
+	]),
 });

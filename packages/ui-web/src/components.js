@@ -29,9 +29,22 @@
  * treated as a "shared component" subject to the `shared-components-mounted`
  * rung's mount-and-render check. It belongs on this bundler-only tier for
  * the same reason as the three components above — it imports `react`.
+ *
+ * `BarSeries`, `StackedBarSeries`, `TimeSeries` and `Meter` (60-03) sit under
+ * `./charts/` rather than `./components/` — a second, sibling subfolder of
+ * this same barrel, backed by the same same-named-`.tsx`-on-disk contract.
+ * `run-ui-gates.mjs`'s `parseComponentExportNames` and
+ * `ui-gate-harness.test.mjs` test (7) both match ONLY the `./components/Name.js`
+ * specifier form, so neither of those two forces a browser-harness mount for
+ * the chart half — `packages/ui-web/test/charts-contract.test.mjs`'s barrel-
+ * lockstep rung is what keeps `./charts/` in step with this file instead.
  */
 
 export { AdvisoryDisclosure } from './components/AdvisoryDisclosure.js';
 export { LifecyclePill } from './components/LifecyclePill.js';
 export { DetailsToggle } from './components/DetailsToggle.js';
 export { packageReactIdentity } from './react-identity.js';
+export { BarSeries } from './charts/BarSeries.js';
+export { StackedBarSeries } from './charts/StackedBarSeries.js';
+export { TimeSeries } from './charts/TimeSeries.js';
+export { Meter } from './charts/Meter.js';

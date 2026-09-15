@@ -25,7 +25,8 @@ export function Meter({ value, total, valueLabel, variant = 'panel', emptyCopyKe
 	const isEmpty = total == null || total <= 0;
 	const height = variant === 'compact' ? METER_COMPACT_HEIGHT_PX : METER_HEIGHT_PX;
 	const ratio = isEmpty ? 0 : Math.max(0, Math.min(1, value / (total as number)));
-	const meterClassName = variant === 'compact' ? 'vt-chart__meter vt-chart__meter--compact' : 'vt-chart__meter vt-chart__meter--panel';
+	const meterModifier = variant === 'compact' ? 'vt-chart__meter--compact' : 'vt-chart__meter--panel';
+	const meterClassName = ['vt-chart__meter', meterModifier].join(' ');
 
 	return (
 		<ChartFrame variantClassName="vt-chart--meter" height={height} isEmpty={isEmpty} emptyCopyKey={emptyCopyKey}>
