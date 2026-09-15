@@ -72,6 +72,12 @@ of those components does not need this import.
   external dependency is `@votetorrent/vote-engine/browser`, a database engine — re-exporting it
   through `.` would load that engine for every consumer of any plain-JS value (measured
   0.30-0.44s vs 0.02s bare).
+- `@votetorrent/ui-web/lifecycle-core` — `ELECTION_EVENT_ORDER`/`parseTimeline`/`normalizeInstant`/
+  `finestStage` and the `TimelineStageId` typedef (D-19/D-21, 59-02), plain-JS, importable from
+  `node --test` with no bundler. This is the ZERO-IMPORT half of `./lifecycle` — it imports
+  nothing, not even `@votetorrent/vote-engine/browser`. **React Native consumers (e.g. the voter
+  app) must import this subpath and never `./lifecycle`**: `./lifecycle` reaches the vote-engine
+  browser entry, which a React Native/Metro bundle should not pay for.
 - `@votetorrent/ui-web/facts` — the fact/gap model (`FACTS`, `factsFor`, `headline`,
   `FACT_GROUPS`, `GAP_IDS`, `FACT_COPY_KEYS`), plain-JS, importable from `node --test` with no
   bundler. Deliberately **not** reachable through `./lifecycle` — `election-phase.js` imports
@@ -97,9 +103,9 @@ bundler-less `node --test` tier.
 
 By **relative path**, not by package specifier — a package-specifier `extends` would require a new
 key in this package's `exports` map, and this package's own gate (`test/package-shape.test.mjs`
-rung 5) proves that map's exact key count and order — seven as of 54-04 (`.`, `./components`,
-`./lifecycle`, `./facts`, `./tokens.css`, `./components.css`, `./mutations`). `tsconfig.base.json`
-carries the full `compilerOptions` block (14 options); no
+rung 5) proves that map's exact key count and order — eight as of 59-02 (`.`, `./components`,
+`./lifecycle`, `./lifecycle-core`, `./facts`, `./tokens.css`, `./components.css`, `./mutations`).
+`tsconfig.base.json` carries the full `compilerOptions` block (14 options); no
 consumer redeclares any of them.
 
 ### 6. Binding rule: never hoist React

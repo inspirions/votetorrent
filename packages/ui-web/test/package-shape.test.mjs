@@ -101,7 +101,7 @@ test('rung 4: the real `./tokens.css` subpath resolves to an existing file', () 
 	assert.ok(existsSync(resolvedPath), `expected ${resolvedPath} to exist`);
 });
 
-test('rung 5: the exports map is exactly seven keys, in order, mapping to their expected targets', () => {
+test('rung 5: the exports map is exactly eight keys, in order, mapping to their expected targets', () => {
 	// 53-05 (D-01/D-02) added `./lifecycle` for election-phase.js, on the
 	// plain-JS side of the split (see src/index.js's header for why it is a
 	// separate entry rather than a `.` re-export). 53-11 (D-20) adds
@@ -118,15 +118,22 @@ test('rung 5: the exports map is exactly seven keys, in order, mapping to their 
 	// Routing the fact model through `./lifecycle` would make every consumer
 	// of a dependency-free pure-data module load a database engine, which is
 	// the exact coupling the `./lifecycle`-out-of-`.` split exists to
-	// prevent. None of these additions merge with `.` or `./components`, so
-	// this rung's other assertions (import via `.`, ERR_MODULE_NOT_FOUND via
-	// `./components`, tokens.css resolving) all stay true unchanged -- only
-	// the key count and order grow.
+	// prevent. 59-02 (D-19) adds `./lifecycle-core` -- the ZERO-IMPORT half
+	// of `./lifecycle`, positioned immediately after it since both are
+	// `./lifecycle` siblings -- so a React Native consumer (the voter app)
+	// can reach `ELECTION_EVENT_ORDER`/`parseTimeline`/`normalizeInstant`/
+	// `finestStage` without transitively loading
+	// `@votetorrent/vote-engine/browser`, a database engine, or a
+	// `react-dom` peer. None of these additions merge with `.` or
+	// `./components`, so this rung's other assertions (import via `.`,
+	// ERR_MODULE_NOT_FOUND via `./components`, tokens.css resolving) all stay
+	// true unchanged -- only the key count and order grow.
 	const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8'));
 	assert.deepEqual(Object.keys(pkg.exports), [
 		'.',
 		'./components',
 		'./lifecycle',
+		'./lifecycle-core',
 		'./facts',
 		'./tokens.css',
 		'./components.css',
@@ -135,6 +142,7 @@ test('rung 5: the exports map is exactly seven keys, in order, mapping to their 
 	assert.equal(pkg.exports['.'], './src/index.js');
 	assert.equal(pkg.exports['./components'], './src/components.js');
 	assert.equal(pkg.exports['./lifecycle'], './src/lifecycle/election-phase.js');
+	assert.equal(pkg.exports['./lifecycle-core'], './src/lifecycle/timeline-core.js');
 	assert.equal(pkg.exports['./facts'], './src/lifecycle/facts.js');
 	assert.equal(pkg.exports['./tokens.css'], './src/tokens.css');
 	assert.equal(pkg.exports['./components.css'], './src/components.css');

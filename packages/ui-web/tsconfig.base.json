@@ -6,8 +6,9 @@
 // never by package specifier — a package-specifier `extends` would require a
 // new key in this package's `exports` map, which `test/package-shape.test.mjs`
 // rung 5 forbids widening without an accompanying test/README update in
-// lockstep. Seven keys as of 54-04: `.`, `./components`, `./lifecycle`,
-// `./facts`, `./tokens.css`, `./components.css`, `./mutations`.
+// lockstep. Eight keys as of 59-02: `.`, `./components`, `./lifecycle`,
+// `./lifecycle-core`, `./facts`, `./tokens.css`, `./components.css`,
+// `./mutations`.
 //
 // Changing an option here changes it for every web workspace at once.
 //

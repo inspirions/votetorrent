@@ -124,6 +124,7 @@
 
 import { toCanonicalDatetime, nowCanonicalDatetime } from '@votetorrent/vote-engine/browser';
 import { PHASE_IDS, phaseCopyKey, INDETERMINATE_PHASE } from './phase-ids.js';
+import { CANONICAL_RE, ELECTION_EVENT_ORDER, CONFLICT, normalizeInstant, parseTimeline, finestStage, iso } from './timeline-core.js';
 
 // Re-exported unchanged (WR-11, Phase 53 review): `PHASE_IDS`/`phaseCopyKey`
 // moved to the dependency-free `./phase-ids.js` sibling so `LifecyclePill.tsx`
@@ -133,19 +134,14 @@ import { PHASE_IDS, phaseCopyKey, INDETERMINATE_PHASE } from './phase-ids.js';
 // `@votetorrent/ui-web/lifecycle` consumer) is unchanged.
 export { PHASE_IDS, phaseCopyKey };
 
-/** T-only, no-`Z`, 19-character canonical form -- pins `assertCanonicalDatetime` and `normalizeInstant` to the SAME regex. */
-const CANONICAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
-
-/** The seven `ElectionEvent` values, in schema/vote-core order. Frozen; never derived at runtime. @type {ReadonlyArray<string>} */
-export const ELECTION_EVENT_ORDER = Object.freeze([
-	'registrationEnds',
-	'ballotsFinal',
-	'votingStarts',
-	'tallyingStarts',
-	'validation',
-	'certificationStarts',
-	'closed',
-]);
+// D-19 (Phase 59 plan 59-02): `CANONICAL_RE`, `ELECTION_EVENT_ORDER`,
+// `CONFLICT`, `normalizeInstant`, `parseTimeline`, `finestStage` and `iso`
+// now live in the dependency-free sibling `./timeline-core.js`, imported
+// above and re-exported below where they were already part of this
+// module's public `./lifecycle` surface. This module DELEGATES to them; it
+// no longer defines them. See `./timeline-core.js`'s own header for why the
+// split exists (the same reason `phase-ids.js` was split out in Phase 53).
+export { ELECTION_EVENT_ORDER, CONFLICT, normalizeInstant, parseTimeline };
 
 /** @typedef {'pre' | 'voting' | 'settling' | 'closed'} PhaseId */
 
@@ -164,39 +160,15 @@ export const PHASE_OPENED_BY = Object.freeze({
 });
 
 /**
- * Conflict codes `parseTimeline` can report. @type {Readonly<Record<string, string>>}
- */
-export const CONFLICT = Object.freeze({
-	MISSING_EVENT: 'MISSING_EVENT',
-	UNPARSEABLE: 'UNPARSEABLE',
-	OUT_OF_ORDER: 'OUT_OF_ORDER',
-	BALLOTS_FINAL_AFTER_DEADLINE: 'BALLOTS_FINAL_AFTER_DEADLINE',
-	EVENT_AFTER_ELECTION_DATE: 'EVENT_AFTER_ELECTION_DATE',
-	CLOSED_BEFORE_ELECTION_DATE: 'CLOSED_BEFORE_ELECTION_DATE',
-});
-
-/**
- * @typedef {object} TimelineConflict
- * @property {string} code
- * @property {string} event
- * @property {string} detail
+ * @typedef {import('./timeline-core.js').TimelineConflict} TimelineConflict
  */
 
 /**
- * @typedef {object} ParsedTimeline
- * @property {Record<string, number | null>} at
- * @property {Array<TimelineConflict>} conflicts
+ * @typedef {import('./timeline-core.js').ParsedTimeline} ParsedTimeline
  */
 
 /**
- * The schema-enforced fields `parseTimeline` cross-checks the unenforced JSON
- * Timeline against. Both are optional because a caller that holds no election
- * row -- a test fixture, or the retired two-argument bridge wrapper this
- * module used to export -- can supply neither, and a missing cross-check must
- * degrade to "no discrepancy reported", never to a thrown error.
- * @typedef {object} ElectionCrossCheckFields
- * @property {unknown} [ballotDeadline]
- * @property {unknown} [date]
+ * @typedef {import('./timeline-core.js').ElectionCrossCheckFields} ElectionCrossCheckFields
  */
 
 /**
@@ -245,186 +217,6 @@ export function resolveComparisonInstant(provided) {
 		return nowCanonicalDatetime();
 	}
 	return assertCanonicalDatetime(provided, 'resolveComparisonInstant(provided)');
-}
-
-/**
- * Normalise one raw Timeline value to epoch-ms, or `null`.
- *
- * `Record<ElectionEvent, number>` is the declared TS type, but this project's
- * own prior three-phase derivation accepted `string | number` via
- * `toCanonicalDatetime` -- so the declared type is already known not to hold
- * at runtime. Both are accepted here too.
- *
- * The 19-character canonical VT form (no trailing `Z`) is parsed as UTC
- * EXPLICITLY (D-26): letting the JS engine guess would make the derived
- * phase depend on the reader's timezone, which for a public election
- * dashboard is a correctness bug, not a formatting one.
- *
- * @param {unknown} raw
- * @returns {number | null}
- */
-export function normalizeInstant(raw) {
-	if (raw === undefined || raw === null) return null;
-	if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
-	if (typeof raw !== 'string') return null;
-
-	const trimmed = raw.trim();
-	if (trimmed === '') return null;
-
-	// Canonical VT form (19 chars, T separator, no zone): pin to UTC
-	// explicitly rather than local, via an explicit `Z` suffix (D-26).
-	if (CANONICAL_RE.test(trimmed)) {
-		const ms = Date.parse(trimmed + 'Z');
-		return Number.isFinite(ms) ? ms : null;
-	}
-
-	// Fallback: an arbitrary non-canonical string, expected to already carry
-	// its own zone (e.g. `Z`-suffixed ISO-8601) more often than it succeeds
-	// zoneless -- not the canonical form D-26 pins.
-	const ms = Date.parse(trimmed);
-	return Number.isFinite(ms) ? ms : null;
-}
-
-/**
- * Parse the whole timeline blob into `{ event -> ms|null }` plus the
- * conflicts found while doing it. Never throws: a public page must render
- * something honest for arbitrarily broken authority data.
- *
- * Accepts `timeline` as an already-parsed object OR as a JSON string
- * (deviation (e) from 086 -- see this module's header point 3): a string
- * that fails to parse, or that parses to something other than an object,
- * degrades to an empty blob, which in turn makes every event `MISSING_EVENT`
- * -- never a confident phase.
- *
- * @param {unknown} timeline
- * @param {ElectionCrossCheckFields} [election]
- * @returns {ParsedTimeline}
- */
-export function parseTimeline(timeline, election = {}) {
-	/** @type {Array<TimelineConflict>} */
-	const conflicts = [];
-	/** @type {Record<string, number | null>} */
-	const at = {};
-
-	/** @type {Record<string, unknown>} */
-	let blob;
-	if (typeof timeline === 'string') {
-		try {
-			const parsed = JSON.parse(timeline);
-			blob = parsed !== null && typeof parsed === 'object' ? /** @type {Record<string, unknown>} */ (parsed) : {};
-		} catch {
-			blob = {};
-		}
-	} else {
-		blob = timeline !== null && typeof timeline === 'object' ? /** @type {Record<string, unknown>} */ (timeline) : {};
-	}
-
-	for (const event of ELECTION_EVENT_ORDER) {
-		const raw = blob[event];
-		const ms = normalizeInstant(raw);
-		at[event] = ms;
-		if (ms === null) {
-			conflicts.push({
-				code: raw === undefined || raw === null ? CONFLICT.MISSING_EVENT : CONFLICT.UNPARSEABLE,
-				event,
-				detail:
-					raw === undefined || raw === null
-						? `${event} is absent from Timeline`
-						: `${event} = ${JSON.stringify(raw)} is not a usable instant`,
-			});
-		}
-	}
-
-	// ORDERING, narrowed after spike 088 ran this against the only real 7-event
-	// fixture in the repo (078's seeded Timeline) and this rule fired on it.
-	//
-	// The first version asserted that DECLARATION order is chronological order, and
-	// so flagged `ballotsFinal` (2026-10-01) preceding `registrationEnds`
-	// (2026-10-05). That is not a defect: finalising ballot content and closing
-	// voter registration are INDEPENDENT preparation tracks, and either may finish
-	// first. Only the post-voting chain is genuinely causal -- you cannot tally
-	// before voting ends, validate before tallying, or certify before validating.
-	//
-	// So: the five post-voting events are pairwise ordered; the two preparation
-	// events must each precede `votingStarts` but NOT each other.
-	const STRICT_CHAIN = ['votingStarts', 'tallyingStarts', 'validation', 'certificationStarts', 'closed'];
-	const PREPARATION = ['registrationEnds', 'ballotsFinal'];
-
-	/** @type {string | null} */
-	let prevEvent = null;
-	for (const event of STRICT_CHAIN) {
-		if (at[event] === null) continue;
-		if (prevEvent !== null && /** @type {number} */ (at[event]) < /** @type {number} */ (at[prevEvent])) {
-			conflicts.push({
-				code: CONFLICT.OUT_OF_ORDER,
-				event,
-				detail: `${event} (${iso(at[event])}) precedes ${prevEvent} (${iso(at[prevEvent])})`,
-			});
-		}
-		prevEvent = event;
-	}
-	for (const event of PREPARATION) {
-		if (at[event] === null || at.votingStarts === null) continue;
-		if (/** @type {number} */ (at[event]) > /** @type {number} */ (at.votingStarts)) {
-			conflicts.push({
-				code: CONFLICT.OUT_OF_ORDER,
-				event,
-				detail: `${event} (${iso(at[event])}) falls after votingStarts (${iso(at.votingStarts)})`,
-			});
-		}
-	}
-
-	// Cross-check the unenforced JSON against the three schema-enforced dates.
-	// These are the conflicts that matter most: the DB will act on its columns
-	// and ignore the JSON, so a disagreement means the dashboard and the
-	// database would tell a viewer different things.
-	const ballotDeadline = normalizeInstant(election.ballotDeadline);
-	const electionDate = normalizeInstant(election.date);
-
-	if (ballotDeadline !== null && at.ballotsFinal !== null && at.ballotsFinal > ballotDeadline) {
-		conflicts.push({
-			code: CONFLICT.BALLOTS_FINAL_AFTER_DEADLINE,
-			event: 'ballotsFinal',
-			detail:
-				`Timeline says ballots are final at ${iso(at.ballotsFinal)}, after the ` +
-				`schema-enforced Election.BallotDeadline ${iso(ballotDeadline)}. ` +
-				`Ballot.MutationValid (E.BallotDeadline > context.now) would already reject writes.`,
-		});
-	}
-
-	if (electionDate !== null) {
-		// AMBIGUITY, resolved deliberately (spike 086 rung 2 caught this as a
-		// false positive on an ordinary election). `Election.Date` is commented
-		// "date of the election" -- a DAY -- but is typed `datetime` and compared
-		// as an INSTANT by the schema's own constraints (`DateValid: Date >=
-		// context.now`, `RevisionDeadlineValid: RevisionDeadline <= Date`).
-		// Authorities set it to midnight, so voting at noon on election day is
-		// after it as an instant while being squarely ON it as a day. Comparing
-		// as an instant flags every normal election. We therefore treat Date as
-		// a DAY and conflict only past the end of that day.
-		const dayEnd = startOfUtcDay(electionDate) + 86_400_000;
-		for (const event of ['registrationEnds', 'ballotsFinal', 'votingStarts']) {
-			const eventMs = at[event];
-			if (eventMs !== null && eventMs >= dayEnd) {
-				conflicts.push({
-					code: CONFLICT.EVENT_AFTER_ELECTION_DATE,
-					event,
-					detail:
-						`${event} (${iso(eventMs)}) falls after the end of election day ` +
-						`(Election.Date ${iso(electionDate)}, day ends ${iso(dayEnd)})`,
-				});
-			}
-		}
-		if (at.closed !== null && at.closed < electionDate) {
-			conflicts.push({
-				code: CONFLICT.CLOSED_BEFORE_ELECTION_DATE,
-				event: 'closed',
-				detail: `closed (${iso(at.closed)}) precedes Election.Date (${iso(electionDate)})`,
-			});
-		}
-	}
-
-	return { at, conflicts };
 }
 
 /**
@@ -509,33 +301,6 @@ export function derivePhase(election, timeline, now) {
 		conflicts,
 		indeterminate: false,
 	};
-}
-
-/**
- * The finest-grained stage: the last declared event whose instant has passed.
- * @param {Record<string, number | null>} at
- * @param {number} nowMs
- * @returns {string | null}
- */
-function finestStage(at, nowMs) {
-	/** @type {string | null} */
-	let stage = null;
-	for (const event of ELECTION_EVENT_ORDER) {
-		const eventMs = at[event];
-		if (eventMs !== null && nowMs >= eventMs) stage = event;
-	}
-	return stage;
-}
-
-/** @param {number} ms @returns {number} */
-function startOfUtcDay(ms) {
-	const d = new Date(ms);
-	return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-}
-
-/** @param {number | null | undefined} ms @returns {string} */
-function iso(ms) {
-	return ms === null || ms === undefined ? '(none)' : new Date(ms).toISOString().slice(0, 19) + 'Z';
 }
 
 export { iso as formatInstant };
