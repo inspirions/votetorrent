@@ -79,12 +79,23 @@ export const SEED_ELECTION = Object.freeze({
 
 /**
  * The election timeline, canonical string form (inherited-spec item 3's
- * "spike 078 shape"). `derivePhase` reads these seven cut-offs NEWEST-FIRST
+ * "spike 078 shape"). `derivePhase` reads these ten cut-offs NEWEST-FIRST
  * and the boundaries are half-open: `pre` before `votingStarts`, `voting`
  * from `votingStarts` up to (not including) `tallyingStarts`, `settling`
  * from `tallyingStarts` up to (not including) `closed`, and `closed` from
- * `closed` onward. All four phases are already reachable from the seven
+ * `closed` onward. All four phases are already reachable from the ten
  * events below -- the four-phase model needs NO new timeline event.
+ *
+ * Grown from seven to ten events (Phase 59, D-08/D-09): `accruingVotes`,
+ * `hashingVotes` and `releasingKeys` sit between `votingStarts` and
+ * `tallyingStarts`, at `14:00`/`16:00`/`18:00` on the same day. This window
+ * is deliberately NARROWER than the plain [08:00, 20:00) `votingStarts` ->
+ * `tallyingStarts` span: every instant must fall STRICTLY AFTER
+ * `SEED_PHASE_INSTANTS.voting` (12:00, below) -- placing any of the three
+ * before 12:00 would make `finestStage` return it instead of `votingStarts`
+ * at that instant, breaking
+ * `four-phase-alignment.test.mjs`'s `derivePhase(...).stage === 'votingStarts'`
+ * assertion at the `voting` phase instant.
  *
  * The `ElectionRevision.Timeline` COLUMN stores the JSON **string** form of
  * this object (`JSON.stringify(SEED_TIMELINE)` at the insert below), and
@@ -99,6 +110,9 @@ export const SEED_TIMELINE = Object.freeze({
 	registrationEnds: '2026-10-05T00:00:00',
 	ballotsFinal: '2026-10-01T00:00:00',
 	votingStarts: '2026-11-03T08:00:00',
+	accruingVotes: '2026-11-03T14:00:00',
+	hashingVotes: '2026-11-03T16:00:00',
+	releasingKeys: '2026-11-03T18:00:00',
 	tallyingStarts: '2026-11-03T20:00:00',
 	validation: '2026-11-05T00:00:00',
 	certificationStarts: '2026-11-10T00:00:00',

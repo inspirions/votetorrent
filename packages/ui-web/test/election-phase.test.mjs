@@ -33,12 +33,17 @@ import { INDETERMINATE_PHASE } from '../src/lifecycle/phase-ids.js';
 import { uiWebSrc } from '../../../scripts/lib/source-paths.mjs';
 import { t } from '../src/copy.js';
 
-// A well-formed seven-event timeline (canonical string form), spanning all
-// four phases.
+// A well-formed ten-event timeline (canonical string form), spanning all
+// four phases. Grown from the original seven (Phase 59, D-08/D-09): the
+// three new events (accruingVotes/hashingVotes/releasingKeys) sit between
+// votingStarts (08:00) and tallyingStarts (20:00), on the same day.
 const FULL_TIMELINE = Object.freeze({
 	registrationEnds: '2026-10-01T00:00:00',
 	ballotsFinal: '2026-10-05T00:00:00',
 	votingStarts: '2026-11-03T08:00:00',
+	accruingVotes: '2026-11-03T12:00:00',
+	hashingVotes: '2026-11-03T14:00:00',
+	releasingKeys: '2026-11-03T16:00:00',
 	tallyingStarts: '2026-11-03T20:00:00',
 	validation: '2026-11-04T08:00:00',
 	certificationStarts: '2026-11-05T08:00:00',
@@ -51,11 +56,14 @@ const FULL_TIMELINE_NUMBERS = Object.freeze(
 
 // --- ELECTION_EVENT_ORDER, unchanged (D-25 carry-forward) -------------------
 
-test('ELECTION_EVENT_ORDER deep-equals the seven ElectionEvent values in schema order', () => {
+test('ELECTION_EVENT_ORDER deep-equals the ten ElectionEvent values in schema order (D-08/D-09)', () => {
 	assert.deepEqual(ELECTION_EVENT_ORDER, [
 		'registrationEnds',
 		'ballotsFinal',
 		'votingStarts',
+		'accruingVotes',
+		'hashingVotes',
+		'releasingKeys',
 		'tallyingStarts',
 		'validation',
 		'certificationStarts',

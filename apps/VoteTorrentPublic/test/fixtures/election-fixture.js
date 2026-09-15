@@ -20,12 +20,13 @@ export const FIXTURE_ELECTION_ID = 'vtx-fixture-0001';
 
 /**
  * A frozen `{ title, timeline, date, ballotDeadline }` fact set (Phase 54,
- * D-08). `title` also contains `vtx-fixture`. `timeline` carries all seven
- * `ELECTION_EVENT_ORDER` keys, adopted verbatim from
- * `apps/VoteTorrentDashboard/test/fixtures/seed-election-surface.js`'s
- * `SEED_TIMELINE` (the repo's only other real seven-event timeline) so the
- * public fixture and the dashboard's only real seven-event fixture agree.
- * Every value is a canonical 19-character datetime with NO trailing `Z` —
+ * D-08). `title` also contains `vtx-fixture`. `timeline` carries all ten
+ * `ELECTION_EVENT_ORDER` keys (grown from seven, Phase 59 D-08/D-09),
+ * adopted verbatim from
+ * `packages/web-data/test/fixtures/seed-election-surface.js`'s
+ * `SEED_TIMELINE` (the repo's only other real ten-event timeline) so the
+ * public fixture and that dashboard fixture agree. Every value is a
+ * canonical 19-character datetime with NO trailing `Z` —
  * `toCanonicalDatetime` silently strips a trailing `Z`, so keeping one here
  * would test nothing it appears to test (see `election-phase.js`'s own
  * header FINDING).
@@ -37,6 +38,12 @@ export const FIXTURE_ELECTION_ID = 'vtx-fixture-0001';
  * this ordering is what exercises the narrowed rule rather than the naive
  * declaration-order-is-chronological one (see `election-phase.js`'s
  * `parseTimeline` ORDERING comment).
+ *
+ * `accruingVotes`/`hashingVotes`/`releasingKeys` sit between `votingStarts`
+ * (08:00) and `tallyingStarts` (20:00), at 12:00/14:00/16:00 on the same
+ * day — inside the same election-day window every other same-day event in
+ * this fixture already satisfies, so no new cross-check conflict is
+ * introduced.
  *
  * `date` and `ballotDeadline` are the two schema-enforced values
  * `parseTimeline` cross-checks the unenforced JSON blob against — without
@@ -52,7 +59,8 @@ export const FIXTURE_ELECTION_ID = 'vtx-fixture-0001';
  * @type {Readonly<{
  *   title: string,
  *   timeline: Readonly<Record<
- *     'registrationEnds' | 'ballotsFinal' | 'votingStarts' | 'tallyingStarts' |
+ *     'registrationEnds' | 'ballotsFinal' | 'votingStarts' | 'accruingVotes' |
+ *     'hashingVotes' | 'releasingKeys' | 'tallyingStarts' |
  *     'validation' | 'certificationStarts' | 'closed', string>>,
  *   date: string,
  *   ballotDeadline: string,
@@ -64,6 +72,9 @@ export const FIXTURE_ELECTION = Object.freeze({
 		registrationEnds: '2026-10-05T00:00:00',
 		ballotsFinal: '2026-10-01T00:00:00',
 		votingStarts: '2026-11-03T08:00:00',
+		accruingVotes: '2026-11-03T12:00:00',
+		hashingVotes: '2026-11-03T14:00:00',
+		releasingKeys: '2026-11-03T16:00:00',
 		tallyingStarts: '2026-11-03T20:00:00',
 		validation: '2026-11-05T00:00:00',
 		certificationStarts: '2026-11-10T00:00:00',
