@@ -28,6 +28,26 @@ export interface ChartFrameProps {
 	isEmpty: boolean;
 	emptyCopyKey?: string;
 	children: ReactNode;
+	/**
+	 * 60-07's D-24 geometry gate found (and `Meter.tsx`'s own header already
+	 * states the reason): `ResponsiveContainer` measures its OUTER container
+	 * via `ResizeObserver` and then re-injects that measured pixel width onto
+	 * an SVG CHART child it recognises (`<BarChart>`/`<LineChart>`, which use
+	 * the `width`/`height` PROPS it clones in to render their own internal
+	 * wrapper with an explicit `style="width:Npx"`). A plain `<div>` child —
+	 * Meter's whole shape — has no such internal wiring: React renders
+	 * `width`/`height` as literal (invalid, inert) HTML attributes instead of
+	 * a CSS style, so the div's own `width` stays `auto`, computed against
+	 * `ResponsiveContainer`'s own permanently-0px internal sizing div. The
+	 * result: `getBoundingClientRect()` on the meter's fill/track measures
+	 * ZERO width in every real render, not only in a gate — this was
+	 * undetected before this plan because no prior tier measured geometry.
+	 * `false` skips `ResponsiveContainer` for a plain-DOM child, which then
+	 * inherits real width from THIS component's own `width: 100%` rule
+	 * (`components.css`'s `.vt-chart--meter` rule) against its REAL ancestor
+	 * instead. Every SVG-chart caller keeps the default `true`.
+	 */
+	useResponsiveContainer?: boolean;
 }
 
 /**
@@ -35,7 +55,7 @@ export interface ChartFrameProps {
  * blank region — an officer must be able to tell an empty chart from a
  * broken one.
  */
-export function ChartFrame({ variantClassName, height, isEmpty, emptyCopyKey, children }: ChartFrameProps) {
+export function ChartFrame({ variantClassName, height, isEmpty, emptyCopyKey, children, useResponsiveContainer = true }: ChartFrameProps) {
 	const rootClassName = ['vt-chart', variantClassName].join(' ');
 	return (
 		<div className={rootClassName}>
@@ -43,10 +63,12 @@ export function ChartFrame({ variantClassName, height, isEmpty, emptyCopyKey, ch
 				<div className="vt-chart__empty-frame" style={{ height }}>
 					{emptyCopyKey ? <p className="vt-chart__empty">{t(emptyCopyKey)}</p> : null}
 				</div>
-			) : (
+			) : useResponsiveContainer ? (
 				<ResponsiveContainer width="100%" height={height}>
 					{children}
 				</ResponsiveContainer>
+			) : (
+				children
 			)}
 		</div>
 	);

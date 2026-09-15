@@ -9,6 +9,15 @@
  * The fill's inline `width` is the one inline style this directory permits —
  * a clamped 0–100 percentage of `value / total` — because it is data-driven
  * geometry no class can express; it carries no colour.
+ *
+ * `useResponsiveContainer={false}` (60-07, found while building the first
+ * geometry gate this project has ever had): `ChartFrame`'s shared
+ * `ResponsiveContainer` wrapper never re-injects a measured pixel width onto
+ * a plain-DOM child the way it does for an SVG chart child, so without this
+ * flag every meter measures ZERO width in `getBoundingClientRect()` — a
+ * real, previously-undetected rendering defect, not a gate artefact. See
+ * `chart-frame.tsx`'s own `useResponsiveContainer` doc for the full
+ * mechanism.
  */
 import { ChartFrame } from './chart-frame.js';
 import { METER_COMPACT_HEIGHT_PX, METER_HEIGHT_PX } from './chart-contracts.js';
@@ -29,7 +38,7 @@ export function Meter({ value, total, valueLabel, variant = 'panel', emptyCopyKe
 	const meterClassName = ['vt-chart__meter', meterModifier].join(' ');
 
 	return (
-		<ChartFrame variantClassName="vt-chart--meter" height={height} isEmpty={isEmpty} emptyCopyKey={emptyCopyKey}>
+		<ChartFrame variantClassName="vt-chart--meter" height={height} isEmpty={isEmpty} emptyCopyKey={emptyCopyKey} useResponsiveContainer={false}>
 			<div className={meterClassName}>
 				<div className="vt-chart__meter-track">
 					<div className="vt-chart__meter-fill" style={{ width: `${ratio * 100}%` }} />

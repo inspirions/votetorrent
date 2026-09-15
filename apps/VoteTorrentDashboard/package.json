@@ -16,6 +16,7 @@
 		"build:chart-geometry": "vite build --config test/browser/vite.chart-geometry.config.ts",
 		"gate:prove-no-dedupe": "node ../../packages/ui-web/scripts/run-ui-gates.mjs --app . --prove-no-dedupe",
 		"gate:prove-token-missing": "node ../../packages/ui-web/scripts/run-ui-gates.mjs --app . --prove-token-missing",
+		"gate:chart-geometry": "node test/browser/run-chart-geometry-gate.mjs",
 		"gate:prove-chart-geometry-matchers": "node test/browser/run-chart-geometry-gate.mjs --prove-matchers",
 		"typecheck": "tsc --noEmit",
 		"lint": "node ../../scripts/lint-copy.mjs",
