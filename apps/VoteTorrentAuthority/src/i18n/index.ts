@@ -1186,7 +1186,7 @@ const resources = {
 			ballotsFinal: 'Boletas Finales',
 			votingStarts: 'Inicia Votación',
 			accruingVotes: 'Acumulando Votos',
-			hashingVotes: 'Generando Hash de Votos',
+			hashingVotes: 'Verificando Votos',
 			tallyingStarts: 'Inicia el Recuento', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			validation: 'Validación',
 			certificationStarts: 'Inicia Certificación',
