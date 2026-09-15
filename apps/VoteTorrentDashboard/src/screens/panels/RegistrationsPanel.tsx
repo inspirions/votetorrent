@@ -33,6 +33,7 @@ import {
 	hasAnyRegistrationData,
 	selectActiveElection,
 } from '@votetorrent/web-data/officer';
+import { usePanelView } from './ChartViewContext.js';
 import './election-ops.css';
 
 // Field labels reproduced VERBATIM from the schema (rule R1: a column name
@@ -181,6 +182,7 @@ function toIntakeData(rows: RegistrationsData['intakeSeries']) {
 
 const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 	const [state, setState] = useState<RegistrationsState>({ status: 'loading' });
+	const view = usePanelView();
 
 	useEffect(() => {
 		let cancelled = false;
@@ -254,35 +256,41 @@ const RegistrationsPanel: PanelComponent = ({ capability, db }) => {
 		<>
 			<section className="eo-section">
 				<h4 className="eo-heading">{t('panels.registrations.statusHeading')}</h4>
-				<BarSeries data={toStatusData(statusBreakdown)} />
-				<div className="eo-count-grid">
-					{statusBreakdown.map((row) => (
-						<div key={row.Code}>
-							<span className="eo-datum">{row.Name}</span>
-							<span>{row.Count}</span>
-						</div>
-					))}
-				</div>
+				{view === 'chart' ? (
+					<BarSeries data={toStatusData(statusBreakdown)} />
+				) : (
+					<div className="eo-count-grid">
+						{statusBreakdown.map((row) => (
+							<div key={row.Code}>
+								<span className="eo-datum">{row.Name}</span>
+								<span>{row.Count}</span>
+							</div>
+						))}
+					</div>
+				)}
 			</section>
 
 			<section className="eo-section">
 				<h4 className="eo-heading">{t('panels.registrations.requestsHeading')}</h4>
-				<StackedBarSeries
-					data={toRequestData(requestBreakdown)}
-					series={REQUEST_CHART_SERIES}
-					emptyCopyKey="panels.registrations.requestChart.empty"
-				/>
-				<div className="eo-count-grid">
-					{requestBreakdown.map((row) => {
-						const label = `${row.StatusName} / ${row.IssuerName}`;
-						return (
-							<div key={`${row.Status}-${row.IssuerType}`}>
-								<span className="eo-datum">{label}</span>
-								<span>{row.Count}</span>
-							</div>
-						);
-					})}
-				</div>
+				{view === 'chart' ? (
+					<StackedBarSeries
+						data={toRequestData(requestBreakdown)}
+						series={REQUEST_CHART_SERIES}
+						emptyCopyKey="panels.registrations.requestChart.empty"
+					/>
+				) : (
+					<div className="eo-count-grid">
+						{requestBreakdown.map((row) => {
+							const label = `${row.StatusName} / ${row.IssuerName}`;
+							return (
+								<div key={`${row.Status}-${row.IssuerType}`}>
+									<span className="eo-datum">{label}</span>
+									<span>{row.Count}</span>
+								</div>
+							);
+						})}
+					</div>
+				)}
 			</section>
 
 			<section className="eo-section">
