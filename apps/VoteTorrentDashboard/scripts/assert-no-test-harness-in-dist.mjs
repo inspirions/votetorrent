@@ -40,8 +40,11 @@ const DIST_ASSETS = path.join(DIST, 'assets');
  * cross-page readout channel and would be an even stronger tell if they
  * alone leaked without the literal filename. `ui-gate`/`__UI_GATE__` are
  * 53-08's own D-24 styled harness entry (T-53-08-04) and its readout
- * channel, added the same way. */
-const TEST_HARNESS_TOKEN_RE = /(compose-gate|db-gate|shell-gate|gate-matrix|ui-gate|__COMPOSE_GATE__|__DB_GATE__|__SHELL_GATE__|__UI_GATE__)/;
+ * channel, added the same way. `chart-geometry-gate`/`__CHART_GEOMETRY_GATE__`
+ * are 60-07's own D-24 chart-geometry harness entry (T-60-07-01) and its
+ * readout channel, widened here the same way. */
+const TEST_HARNESS_TOKEN_RE =
+	/(compose-gate|db-gate|shell-gate|gate-matrix|ui-gate|chart-geometry-gate|__COMPOSE_GATE__|__DB_GATE__|__SHELL_GATE__|__UI_GATE__|__CHART_GEOMETRY_GATE__)/;
 
 /** @param {string} message */
 function fail(message) {
@@ -64,6 +67,8 @@ const POSITIVE_CONTROL_FIXTURES = [
 	'/test/browser/db-gate.js',
 	'import { UiGateHarness } from "./test/browser/ui-gate.js";',
 	'window.__UI_GATE__ = { mounted: [], error: null };',
+	'import { ChartGeometryHarness } from "./test/browser/chart-geometry-gate.js";',
+	'window.__CHART_GEOMETRY_GATE__ = { mounted: [], error: null };',
 ];
 for (const fixture of POSITIVE_CONTROL_FIXTURES) {
 	if (!TEST_HARNESS_TOKEN_RE.test(fixture)) {
