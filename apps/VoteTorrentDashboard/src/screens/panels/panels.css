@@ -73,3 +73,41 @@
 	margin: 0;
 	color: var(--muted);
 }
+
+/*
+ * D-13/D-17 chart/grid view switch -- a view-state toggle, not a primary
+ * CTA, so it reuses the pill row's own typography tokens rather than any
+ * button-shaped emphasis. The accent token appears in exactly two places
+ * below (the active-state inset border and the focus outline) -- the
+ * UI-SPEC reserves that token for interactive chrome, explicitly forbidding
+ * it as the switch's inactive-state fill.
+ */
+.panel-view-switch {
+	display: flex;
+	gap: var(--space-xs);
+	margin-left: auto;
+}
+
+.panel-view-switch__option {
+	display: inline-flex;
+	align-items: center;
+	padding: 0 var(--space-sm);
+	border-radius: var(--radius);
+	border: 1px solid var(--border);
+	background: transparent;
+	color: var(--muted);
+	font-size: var(--font-label-size);
+	font-weight: var(--font-label-weight);
+	line-height: var(--font-label-line-height);
+	cursor: pointer;
+}
+
+.panel-view-switch__option--active {
+	background: var(--surface2);
+	color: var(--text);
+	box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.panel-view-switch__option:focus-visible {
+	outline: 2px solid var(--primary);
+}

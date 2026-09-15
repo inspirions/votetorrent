@@ -12,10 +12,11 @@
  * 50-06-PLAN.md's inherited-spec reconciliation for the "why" behind that
  * omission.
  */
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { Capability } from '../../auth/capabilities.js';
 import type { GateResult } from '../../auth/gate.js';
 import { t } from '@votetorrent/ui-web';
+import { ChartViewProvider, readStoredPanelView, writeStoredPanelView, type PanelView } from './ChartViewContext.js';
 import './panels.css';
 
 export interface PanelFrameProps {
@@ -25,6 +26,21 @@ export interface PanelFrameProps {
 }
 
 export function PanelFrame({ capability, evaluation, children }: PanelFrameProps) {
+	// Lazy initialiser: the stored value is read once at mount, so the panel
+	// never flashes the D-18 default before correcting itself to the D-19
+	// stored choice.
+	const [view, setView] = useState<PanelView>(() => readStoredPanelView(capability.id));
+
+	function selectChart() {
+		setView('chart');
+		writeStoredPanelView(capability.id, 'chart');
+	}
+
+	function selectGrid() {
+		setView('grid');
+		writeStoredPanelView(capability.id, 'grid');
+	}
+
 	return (
 		<section className={`panel${evaluation.visible ? '' : ' panel--denied'}`}>
 			<header className="panel-header">
@@ -52,14 +68,54 @@ export function PanelFrame({ capability, evaluation, children }: PanelFrameProps
 						count: String(capability.sites),
 					})}
 				</span>
+				{/* D-13/D-17: a per-panel view-state toggle, not a primary CTA --
+				    it lives here, in the shared chrome's header, and NOT inside a
+				    panel body, so the control-absence gates over panel bodies keep
+				    their full original meaning (D-12). Rendered only when the
+				    panel is visible: a denied panel emits no body, so a view
+				    control over nothing would advertise a capability that is not
+				    there. */}
+				{evaluation.visible ? (
+					<div className="panel-view-switch">
+						<button
+							type="button"
+							className={
+								view === 'chart'
+									? 'panel-view-switch__option panel-view-switch__option--active'
+									: 'panel-view-switch__option'
+							}
+							aria-pressed={view === 'chart'}
+							onClick={selectChart}
+						>
+							{t('panelFrame.viewChart')}
+						</button>
+						<button
+							type="button"
+							className={
+								view === 'grid'
+									? 'panel-view-switch__option panel-view-switch__option--active'
+									: 'panel-view-switch__option'
+							}
+							aria-pressed={view === 'grid'}
+							onClick={selectGrid}
+						>
+							{t('panelFrame.viewGrid')}
+						</button>
+					</div>
+				) : null}
 			</div>
 			{/*
 			 * Binding guard (T-50-06-03): a denied panel's children are not
 			 * rendered AT ALL, not merely hidden with CSS. Hiding a rendered
 			 * body would leave the officer's data in the DOM — an
-			 * information-disclosure failure this frame exists to prevent.
+			 * information-disclosure failure this frame exists to prevent. The
+			 * view-state provider goes INSIDE this guard, never around it.
 			 */}
-			{evaluation.visible ? <div className="panel-body">{children}</div> : null}
+			{evaluation.visible ? (
+				<div className="panel-body">
+					<ChartViewProvider view={view}>{children}</ChartViewProvider>
+				</div>
+			) : null}
 		</section>
 	);
 }
