@@ -83,8 +83,7 @@ export default function EditElectionScreen() {
 				setRevision({
 					registrationEnds: toISO(cur.timeline.registrationEnds),
 					ballotsFinal: toISO(cur.timeline.ballotsFinal),
-					// releasingKeys has no ElectionEvent counterpart — leave blank (same as create)
-					releasingKeys: "",
+					releasingKeys: toISO(cur.timeline.releasingKeys),
 					votingStarts: toISO(cur.timeline.votingStarts),
 					tallyingStarts: toISO(cur.timeline.tallyingStarts),
 					validation: toISO(cur.timeline.validation),
@@ -141,13 +140,17 @@ export default function EditElectionScreen() {
 
 			// Back-half timeline events (tallying → closed) come from the form when set,
 			// otherwise default RELATIVE TO votingStarts — not `now` — so the
-			// votingStarts < tallyingStarts < certificationStarts ordering holds for any
-			// reasonable voting date (mirrors CreateElectionScreen).
+			// votingStarts < accruingVotes < hashingVotes < releasingKeys < tallyingStarts <
+			// certificationStarts ordering holds for any reasonable voting date (mirrors
+			// CreateElectionScreen).
 			const resolvedVotingStarts = parseDateOrFallback(revision.votingStarts, now + 11 * day);
 			const resolvedTimeline = {
 				registrationEnds: parseDateOrFallback(revision.registrationEnds, now + 3 * day),
 				ballotsFinal: parseDateOrFallback(revision.ballotsFinal, now + 6 * day),
 				votingStarts: resolvedVotingStarts,
+				accruingVotes: resolvedVotingStarts + 1 * day,
+				hashingVotes: resolvedVotingStarts + 2 * day,
+				releasingKeys: parseDateOrFallback(revision.releasingKeys, resolvedVotingStarts + 3 * day),
 				tallyingStarts: parseDateOrFallback(revision.tallyingStarts, resolvedVotingStarts + 4 * day),
 				validation: parseDateOrFallback(revision.validation, resolvedVotingStarts + 5 * day),
 				certificationStarts: parseDateOrFallback(revision.certificationStarts, resolvedVotingStarts + 6 * day),
@@ -157,7 +160,10 @@ export default function EditElectionScreen() {
 			// Friendly timeline guard BEFORE adjustElection — voting must precede tallying,
 			// and tallying must precede certification (avoids a raw engine ordering error).
 			if (
-				resolvedTimeline.votingStarts >= resolvedTimeline.tallyingStarts ||
+				resolvedTimeline.votingStarts >= resolvedTimeline.accruingVotes ||
+				resolvedTimeline.accruingVotes >= resolvedTimeline.hashingVotes ||
+				resolvedTimeline.hashingVotes >= resolvedTimeline.releasingKeys ||
+				resolvedTimeline.releasingKeys >= resolvedTimeline.tallyingStarts ||
 				resolvedTimeline.tallyingStarts >= resolvedTimeline.certificationStarts
 			) {
 				setErrorMessage(t("errTimelineOrder"));

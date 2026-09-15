@@ -141,17 +141,22 @@ export function CreateElectionScreen() {
 			const parseDateOrFallback = (s: string, fallbackMs: number): number =>
 				s.trim() ? new Date(s).getTime() || fallbackMs : fallbackMs;
 
-			// Resolve the full 7-event timeline ONCE so the builder payload and the
+			// Resolve the full 10-event timeline ONCE so the builder payload and the
 			// revision-signing seam below sign an IDENTICAL timeline (the digests must match).
 			// The back-half events (tallying → closed) now come from the form when set, and
 			// otherwise default RELATIVE TO votingStarts — not `now` — so pushing the voting
-			// date out keeps votingStarts < tallyingStarts < certificationStarts satisfied
-			// (the ElectionsCreateElectionBuilder cross-field rule that previously broke).
+			// date out keeps votingStarts < accruingVotes < hashingVotes < releasingKeys <
+			// tallyingStarts < certificationStarts satisfied (the ElectionsCreateElectionBuilder
+			// cross-field rule that previously broke).
 			const resolvedVotingStarts = parseDateOrFallback(revision.votingStarts, now + 10 * day);
 			const resolvedTimeline = {
 				registrationEnds: parseDateOrFallback(revision.registrationEnds, now + 2 * day),
 				ballotsFinal: parseDateOrFallback(revision.ballotsFinal, now + 5 * day),
 				votingStarts: resolvedVotingStarts,
+				accruingVotes: resolvedVotingStarts + 1 * day,
+				hashingVotes: resolvedVotingStarts + 2 * day,
+				// R2 fix: this date is already collected by the form and was previously discarded.
+				releasingKeys: parseDateOrFallback(revision.releasingKeys, resolvedVotingStarts + 3 * day),
 				tallyingStarts: parseDateOrFallback(revision.tallyingStarts, resolvedVotingStarts + 4 * day),
 				validation: parseDateOrFallback(revision.validation, resolvedVotingStarts + 5 * day),
 				certificationStarts: parseDateOrFallback(revision.certificationStarts, resolvedVotingStarts + 6 * day),
@@ -198,7 +203,10 @@ export function CreateElectionScreen() {
 				return;
 			}
 			if (
-				resolvedTimeline.votingStarts >= resolvedTimeline.tallyingStarts ||
+				resolvedTimeline.votingStarts >= resolvedTimeline.accruingVotes ||
+				resolvedTimeline.accruingVotes >= resolvedTimeline.hashingVotes ||
+				resolvedTimeline.hashingVotes >= resolvedTimeline.releasingKeys ||
+				resolvedTimeline.releasingKeys >= resolvedTimeline.tallyingStarts ||
 				resolvedTimeline.tallyingStarts >= resolvedTimeline.certificationStarts
 			) {
 				setErrorMessage(t("errTimelineOrder"));

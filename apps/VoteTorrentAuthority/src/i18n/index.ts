@@ -289,6 +289,8 @@ const resources = {
 			registrationEnds: 'Registration Ends',
 			ballotsFinal: 'Ballots Final',
 			votingStarts: 'Voting Starts',
+			accruingVotes: 'Accruing Votes',
+			hashingVotes: 'Hashing Votes',
 			tallyingStarts: 'Tallying Starts',
 			validation: 'Validation',
 			certificationStarts: 'Certification Starts',
@@ -1183,6 +1185,8 @@ const resources = {
 			registrationEnds: 'Finaliza Registro',
 			ballotsFinal: 'Boletas Finales',
 			votingStarts: 'Inicia Votación',
+			accruingVotes: 'Acumulando Votos',
+			hashingVotes: 'Generando Hash de Votos',
 			tallyingStarts: 'Inicia el Recuento', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			validation: 'Validación',
 			certificationStarts: 'Inicia Certificación',
