@@ -217,3 +217,157 @@ export async function hasAnyRegistrationData(db) {
 		.get({});
 	return Boolean(row?.AnyRow);
 }
+
+/* ---------------------------------------------------------------------------
+ * INTAKE SERIES (D-04)
+ *
+ * Buckets registration-intake volume over time for the Registrations panel's
+ * C3 chart (60-05). Bucketed on RegistrationRequest.ReceivedAt -- the
+ * authority-observed intake time the engine writes with toIsoZDatetime,
+ * sitting inside no digest (votetorrent.qsql:1506) -- and NEVER on
+ * SubmittedAt, the submitter-supplied, DG-1-digest-bound value
+ * (votetorrent.qsql:1505). A chart built on SubmittedAt would let a
+ * requester choose where its own mark lands on the officer's time axis.
+ * ------------------------------------------------------------------------- */
+
+/** 48 hours, in milliseconds -- the hour/day bucket-unit threshold (D-04, UI-SPEC "<= ~2 days"). Left as the literal number, not a multiplication chain, so a test can pin the exact value. @type {172800000} */
+export const INTAKE_HOUR_MAX_SPAN_MS = 172800000;
+
+/** 56 days, in milliseconds -- the day/week bucket-unit threshold (D-04, UI-SPEC "up to ~8 weeks"). Left as the literal number for the same reason as INTAKE_HOUR_MAX_SPAN_MS. @type {4838400000} */
+export const INTAKE_DAY_MAX_SPAN_MS = 4838400000;
+
+/** @type {3600000} */
+const HOUR_MS = 3600000;
+/** @type {86400000} */
+const DAY_MS = 86400000;
+/** @type {604800000} */
+const WEEK_MS = 604800000;
+
+/**
+ * @typedef {object} IntakeBucketRow
+ * @property {string} bucketStart
+ * @property {number} count - DELIBERATELY lower-case, unlike this module's
+ *   other reads (which use `Count`): the UI-SPEC's Data Layer Contract pins
+ *   this exact shape for 60-05's consumer. Do not "correct" it to `Count`.
+ */
+
+/** @typedef {'hour' | 'day' | 'week'} IntakeBucketUnit */
+
+/**
+ * `hour` for a span <= INTAKE_HOUR_MAX_SPAN_MS, `day` for a span
+ * <= INTAKE_DAY_MAX_SPAN_MS, `week` otherwise. Both boundaries are
+ * inclusive-of-the-finer-unit. A negative or non-finite span is treated as 0
+ * (i.e. `hour`), never thrown on.
+ *
+ * @param {number} spanMs
+ * @returns {IntakeBucketUnit}
+ */
+export function chooseIntakeBucketUnit(spanMs) {
+	const safeSpanMs = Number.isFinite(spanMs) && spanMs > 0 ? spanMs : 0;
+	if (safeSpanMs <= INTAKE_HOUR_MAX_SPAN_MS) return 'hour';
+	if (safeSpanMs <= INTAKE_DAY_MAX_SPAN_MS) return 'day';
+	return 'week';
+}
+
+/**
+ * Parses a bucketStart string to its UTC epoch ms. Must round-trip
+ * byte-exactly with strftime's own output shapes (measured: `hour` ->
+ * 19-char, no `Z`; `day`/`week` -> 10-char date). Appending `Z` before
+ * parsing is load-bearing -- `Date.parse` of a bare `2026-09-15T13:00:00` is
+ * LOCAL time per spec, which would silently shift every bucket by the
+ * runner's UTC offset and pass on a UTC machine. All bucket arithmetic in
+ * this module is UTC epoch math, never local, never calendar arithmetic --
+ * fixed HOUR_MS / DAY_MS / WEEK_MS steps are safe precisely because the axis
+ * is UTC.
+ *
+ * @param {string} bucketStart
+ * @param {IntakeBucketUnit} unit
+ * @returns {number}
+ */
+function bucketStartToEpochMs(bucketStart, unit) {
+	return unit === 'hour' ? Date.parse(bucketStart + 'Z') : Date.parse(bucketStart + 'T00:00:00Z');
+}
+
+/**
+ * The inverse of bucketStartToEpochMs -- formats a UTC epoch ms back to the
+ * exact bucketStart shape strftime produces for the given unit.
+ *
+ * @param {number} ms
+ * @param {IntakeBucketUnit} unit
+ * @returns {string}
+ */
+function epochMsToBucketStart(ms, unit) {
+	const iso = new Date(ms).toISOString();
+	return unit === 'hour' ? iso.slice(0, 13) + ':00:00' : iso.slice(0, 10);
+}
+
+/**
+ * Sorts the input by bucketStart, drops any row whose bucketStart is null,
+ * empty or unparseable (defence in depth -- the real schema's
+ * ReceivedAtValid CHECK prevents it, but strftime returns null for an
+ * unparseable value and a NaN bucket must never reach a chart), then walks
+ * from the first bucket's epoch to the last in fixed unit-sized steps,
+ * emitting the input count where one exists and 0 where none does. This is
+ * the D-02 absent-vs-zero discipline applied to the time axis (UI-SPEC:
+ * "Zero-request buckets render as zero-height marks, not gaps"). Empty
+ * input returns [].
+ *
+ * @param {ReadonlyArray<{bucketStart: string | null | undefined, count: number}>} rows
+ * @param {IntakeBucketUnit} unit
+ * @returns {IntakeBucketRow[]}
+ */
+export function densifyIntakeBuckets(rows, unit) {
+	/** @type {{bucketStart: string, count: number}[]} */
+	const clean = [];
+	for (const r of rows) {
+		if (typeof r.bucketStart !== 'string' || r.bucketStart.length === 0) continue;
+		if (!Number.isFinite(bucketStartToEpochMs(r.bucketStart, unit))) continue;
+		clean.push({ bucketStart: r.bucketStart, count: r.count });
+	}
+	if (clean.length === 0) return [];
+	clean.sort((a, b) => (a.bucketStart < b.bucketStart ? -1 : a.bucketStart > b.bucketStart ? 1 : 0));
+
+	const stepMs = unit === 'hour' ? HOUR_MS : unit === 'day' ? DAY_MS : WEEK_MS;
+	/** @type {Map<string, number>} */
+	const byBucket = new Map();
+	for (const r of clean) byBucket.set(r.bucketStart, r.count);
+	const firstMs = bucketStartToEpochMs(clean[0].bucketStart, unit);
+	const lastMs = bucketStartToEpochMs(clean[clean.length - 1].bucketStart, unit);
+
+	/** @type {IntakeBucketRow[]} */
+	const out = [];
+	for (let ms = firstMs; ms <= lastMs; ms += stepMs) {
+		const bucketStart = epochMsToBucketStart(ms, unit);
+		out.push({ bucketStart, count: byBucket.get(bucketStart) ?? 0 });
+	}
+	return out;
+}
+
+/**
+ * Anchors on the EARLIEST day bucket's UTC midnight; for each day row
+ * computes index = floor((dayMs - anchorMs) / WEEK_MS) and sums counts per
+ * index. Returns the SPARSE result -- the caller densifies it with
+ * densifyIntakeBuckets(weekRows, 'week'), so gap-filling lives in one
+ * function, not two. Anchoring on the data rather than on an ISO week
+ * number is exactly why no `%W` format string appears anywhere in this
+ * module (measured: `%W` is not fully implemented on the resolved engine
+ * build).
+ *
+ * @param {ReadonlyArray<{bucketStart: string, count: number}>} dayRows
+ * @returns {IntakeBucketRow[]}
+ */
+export function foldDayBucketsIntoWeeks(dayRows) {
+	if (dayRows.length === 0) return [];
+	const sorted = dayRows.slice().sort((a, b) => (a.bucketStart < b.bucketStart ? -1 : a.bucketStart > b.bucketStart ? 1 : 0));
+	const anchorMs = bucketStartToEpochMs(sorted[0].bucketStart, 'day');
+	/** @type {Map<number, number>} */
+	const byIndex = new Map();
+	for (const row of sorted) {
+		const dayMs = bucketStartToEpochMs(row.bucketStart, 'day');
+		const index = Math.floor((dayMs - anchorMs) / WEEK_MS);
+		byIndex.set(index, (byIndex.get(index) ?? 0) + row.count);
+	}
+	return [...byIndex.entries()]
+		.sort((a, b) => a[0] - b[0])
+		.map(([index, count]) => ({ bucketStart: epochMsToBucketStart(anchorMs + index * WEEK_MS, 'week'), count }));
+}
