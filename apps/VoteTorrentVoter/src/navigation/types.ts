@@ -8,6 +8,8 @@
  *
  * All params are `undefined` this phase — no route params for placeholders (39-05 scope). Wired
  * together by 39-07's RootNavigator.
+ *
+ * The 5 tabs (Phase 59, D-13): Vote · Timeline · Registration · Scan · Settings.
  */
 
 // Vote tab: Home root + Ballot pushed + the 4 question/info modals (D-09 topology) +
@@ -50,9 +52,33 @@ export type SettingsStackParamList = {
 	SettingsHome: undefined;
 };
 
-// The 4 tabs, in D-09 locked order: Vote · Registration · Scan · Settings.
+// Timeline tab (Phase 59, D-14/D-13/D-20) — TYPES ONLY this plan (59-05). The
+// TimelineStackNavigator and its `Tab.Screen` are 59-10's (wave 5), landed here first so 59-08
+// (wave 4) can type TimelineScreen's row-action callbacks without waiting on 59-10, and so 59-09
+// and 59-10 stay file-disjoint. Declaring a route on `RootTabParamList` with no corresponding
+// `Tab.Screen` is legal in React Navigation v7 — the param list is a permission list, not a
+// registration.
+//
+// `Ballot` / `ReviewSubmit` / `RegistrationHome` are D-14's exact route names — 59-10 registers
+// them a SECOND time in this new stack (reusing the same screen components as the Vote/
+// Registration stacks) so a row action pushes within the Timeline stack and Back returns to the
+// rail, per D-14. `TimelineHome` / `Keyholders` resolve the OUTLINE↔PATTERNS naming
+// discrepancy (59-05 preflight) and are binding on 59-10: every existing tab stack names its
+// root `<Tab>Home` (Home, RegistrationHome, ScanHome, SettingsHome) — `Timeline` itself is
+// already taken by the `RootTabParamList` tab entry below — and no existing route carries a
+// `Screen` suffix (the registration root is `RegistrationHome`, not `RegistrationScreen`).
+export type TimelineStackParamList = {
+	TimelineHome: undefined;
+	Ballot: undefined;
+	ReviewSubmit: undefined;
+	RegistrationHome: undefined;
+	Keyholders: undefined;
+};
+
+// The 5 tabs, in D-13 locked order: Vote · Timeline · Registration · Scan · Settings.
 export type RootTabParamList = {
 	Vote: undefined;
+	Timeline: undefined;
 	Registration: undefined;
 	Scan: undefined;
 	Settings: undefined;

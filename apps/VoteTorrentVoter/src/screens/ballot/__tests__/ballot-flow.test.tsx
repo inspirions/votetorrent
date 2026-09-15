@@ -18,7 +18,8 @@
  * 3. VOTE-01/D-07: pressing `ballot-save-exit` returns to `Home` and `selectionMap` still holds
  *    the selection made before Save & Exit (retained across the round trip — this is the
  *    integration-level proof that D-07's "re-entering the ballot resumes" claim actually holds,
- *    now that `VoteStackNavigator` is wrapped in `BallotSelectionProvider`, Plan 07 Task 1).
+ *    now that `BallotSelectionProvider` is mounted app-scoped via `AppStateProviders` (Phase 59
+ *    D-22, this test's own harness wraps the provider directly — see below).
  * 4. VOTE-03: the office row's "Learn about this office" link navigates to `OfficeInfo`, and
  *    `IndividualQuestion`'s "Learn about this candidate" link navigates to `CandidateInfo`
  *    (info-modal reachability).

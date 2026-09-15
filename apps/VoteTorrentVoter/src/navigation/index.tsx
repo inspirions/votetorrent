@@ -11,6 +11,7 @@
  * are Voting-specific.
  */
 import React from 'react';
+import type {PropsWithChildren} from 'react';
 import {createBottomTabNavigator} from '@react-navigation/bottom-tabs';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';
 import FontAwesome6 from 'react-native-vector-icons/FontAwesome6';
@@ -67,75 +68,73 @@ function VoteStackNavigator() {
 	const {t: tBallot} = useTranslation('ballot');
 
 	return (
-		<BallotSelectionProvider>
-			<VoteStack.Navigator>
-				{/* headerShown:false — HomeScreen renders the branded blue NetworkHeader itself. */}
-				<VoteStack.Screen
-					name="Home"
-					component={HomeScreen}
-					options={{headerShown: false}}
-				/>
-				<VoteStack.Screen
-					name="Ballot"
-					component={BallotScreen}
-					options={{title: tBallot('headerTitle')}}
-				/>
-				{/* HOME-03/D-11: plain push (default header, back chevron), matching Ballot's own
-				    registration exactly — NOT a modal (RESEARCH Anti-Patterns: no breadcrumb component). */}
-				<VoteStack.Screen
-					name="ValidationDetails"
-					component={ValidationDetailsScreen}
-					options={{title: tHome('validationDetailsTitle')}}
-				/>
-				<VoteStack.Screen
-					name="IndividualQuestion"
-					component={IndividualQuestionScreen}
-					options={({navigation}) => ({
-						title: tBallot('individualQuestionTitle'),
-						presentation: 'modal',
-						headerBackVisible: false,
-						headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-					})}
-				/>
-				{/* VOTE-04/D-05: plain push (default header, back chevron) — mirrors ValidationDetails,
-				    NOT a modal. Selection state lives on BallotSelectionProvider, not a route param. */}
-				<VoteStack.Screen
-					name="ReviewSubmit"
-					component={ReviewSubmitScreen}
-					options={{title: tBallot('reviewSubmitTitle')}}
-				/>
-				<VoteStack.Screen
-					name="ElectionInfo"
-					component={PlaceholderModal}
-					options={({navigation}) => ({
-						title: tHome('electionInfoTitle'),
-						presentation: 'modal',
-						headerBackVisible: false,
-						headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-					})}
-				/>
-				<VoteStack.Screen
-					name="OfficeInfo"
-					component={PlaceholderModal}
-					options={({navigation}) => ({
-						title: tBallot('officeInfoTitle'),
-						presentation: 'modal',
-						headerBackVisible: false,
-						headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-					})}
-				/>
-				<VoteStack.Screen
-					name="CandidateInfo"
-					component={PlaceholderModal}
-					options={({navigation}) => ({
-						title: tBallot('candidateInfoTitle'),
-						presentation: 'modal',
-						headerBackVisible: false,
-						headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-					})}
-				/>
-			</VoteStack.Navigator>
-		</BallotSelectionProvider>
+		<VoteStack.Navigator>
+			{/* headerShown:false — HomeScreen renders the branded blue NetworkHeader itself. */}
+			<VoteStack.Screen
+				name="Home"
+				component={HomeScreen}
+				options={{headerShown: false}}
+			/>
+			<VoteStack.Screen
+				name="Ballot"
+				component={BallotScreen}
+				options={{title: tBallot('headerTitle')}}
+			/>
+			{/* HOME-03/D-11: plain push (default header, back chevron), matching Ballot's own
+			    registration exactly — NOT a modal (RESEARCH Anti-Patterns: no breadcrumb component). */}
+			<VoteStack.Screen
+				name="ValidationDetails"
+				component={ValidationDetailsScreen}
+				options={{title: tHome('validationDetailsTitle')}}
+			/>
+			<VoteStack.Screen
+				name="IndividualQuestion"
+				component={IndividualQuestionScreen}
+				options={({navigation}) => ({
+					title: tBallot('individualQuestionTitle'),
+					presentation: 'modal',
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
+			{/* VOTE-04/D-05: plain push (default header, back chevron) — mirrors ValidationDetails,
+			    NOT a modal. Selection state lives on BallotSelectionProvider, not a route param. */}
+			<VoteStack.Screen
+				name="ReviewSubmit"
+				component={ReviewSubmitScreen}
+				options={{title: tBallot('reviewSubmitTitle')}}
+			/>
+			<VoteStack.Screen
+				name="ElectionInfo"
+				component={PlaceholderModal}
+				options={({navigation}) => ({
+					title: tHome('electionInfoTitle'),
+					presentation: 'modal',
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
+			<VoteStack.Screen
+				name="OfficeInfo"
+				component={PlaceholderModal}
+				options={({navigation}) => ({
+					title: tBallot('officeInfoTitle'),
+					presentation: 'modal',
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
+			<VoteStack.Screen
+				name="CandidateInfo"
+				component={PlaceholderModal}
+				options={({navigation}) => ({
+					title: tBallot('candidateInfoTitle'),
+					presentation: 'modal',
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
+		</VoteStack.Navigator>
 	);
 }
 
@@ -148,56 +147,54 @@ function RegistrationStackNavigator() {
 	const {t} = useTranslation('registration');
 
 	return (
-		<RegistrationDraftProvider>
-			<RegistrationStack.Navigator>
-				{/* headerShown:false — RegistrationScreen renders the branded blue NetworkHeader itself. */}
-				<RegistrationStack.Screen
-					name="RegistrationHome"
-					component={RegistrationScreen}
-					options={{headerShown: false}}
-				/>
-				{/* 41-RESEARCH.md Pitfall 3: real screen, headerShown:false — NOT presentation:'modal'
-				    + CloseButton (full-bleed timed interstitial, no swipe-dismiss). */}
-				<RegistrationStack.Screen
-					name="DeviceAttestation"
-					component={DeviceAttestationScreen}
-					options={{headerShown: false}}
-				/>
-				{/* Form steps are full-bleed (headerShown:false) — each renders its own
-				    RegisterFormHeader (back-arrow / close / title / subtitle / step dots). */}
-				<RegistrationStack.Screen
-					name="RegisterPersonal"
-					component={RegisterPersonalScreen}
-					options={{headerShown: false}}
-				/>
-				<RegistrationStack.Screen
-					name="RegisterAddressParty"
-					component={RegisterAddressPartyScreen}
-					options={{headerShown: false}}
-				/>
-				<RegistrationStack.Screen
-					name="RegisterConfirm"
-					component={RegisterConfirmScreen}
-					options={{headerShown: false}}
-				/>
-				{/* Pitfall 3: real screen, headerShown:false — NOT presentation:'modal' + CloseButton. */}
-				<RegistrationStack.Screen
-					name="Confirmation"
-					component={ConfirmationScreen}
-					options={{headerShown: false}}
-				/>
-				<RegistrationStack.Screen
-					name="RegistrationInfo"
-					component={PlaceholderModal}
-					options={({navigation}) => ({
-						title: t('headerTitle'),
-						presentation: 'modal',
-						headerBackVisible: false,
-						headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-					})}
-				/>
-			</RegistrationStack.Navigator>
-		</RegistrationDraftProvider>
+		<RegistrationStack.Navigator>
+			{/* headerShown:false — RegistrationScreen renders the branded blue NetworkHeader itself. */}
+			<RegistrationStack.Screen
+				name="RegistrationHome"
+				component={RegistrationScreen}
+				options={{headerShown: false}}
+			/>
+			{/* 41-RESEARCH.md Pitfall 3: real screen, headerShown:false — NOT presentation:'modal'
+			    + CloseButton (full-bleed timed interstitial, no swipe-dismiss). */}
+			<RegistrationStack.Screen
+				name="DeviceAttestation"
+				component={DeviceAttestationScreen}
+				options={{headerShown: false}}
+			/>
+			{/* Form steps are full-bleed (headerShown:false) — each renders its own
+			    RegisterFormHeader (back-arrow / close / title / subtitle / step dots). */}
+			<RegistrationStack.Screen
+				name="RegisterPersonal"
+				component={RegisterPersonalScreen}
+				options={{headerShown: false}}
+			/>
+			<RegistrationStack.Screen
+				name="RegisterAddressParty"
+				component={RegisterAddressPartyScreen}
+				options={{headerShown: false}}
+			/>
+			<RegistrationStack.Screen
+				name="RegisterConfirm"
+				component={RegisterConfirmScreen}
+				options={{headerShown: false}}
+			/>
+			{/* Pitfall 3: real screen, headerShown:false — NOT presentation:'modal' + CloseButton. */}
+			<RegistrationStack.Screen
+				name="Confirmation"
+				component={ConfirmationScreen}
+				options={{headerShown: false}}
+			/>
+			<RegistrationStack.Screen
+				name="RegistrationInfo"
+				component={PlaceholderModal}
+				options={({navigation}) => ({
+					title: t('headerTitle'),
+					presentation: 'modal',
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
+		</RegistrationStack.Navigator>
 	);
 }
 
@@ -254,6 +251,30 @@ function registrationTabBarStyle(route: RouteProp<RootTabParamList, 'Registratio
 		: undefined;
 }
 
+// --- AppStateProviders (D-22) — app-scoped state lift ------------------------------------------
+// BallotSelectionProvider and RegistrationDraftProvider used to be mounted PER-STACK
+// (BallotSelectionProvider inside VoteStackNavigator, RegistrationDraftProvider inside
+// RegistrationStackNavigator). 59-10 will add a Timeline stack with duplicate `Ballot` /
+// `ReviewSubmit` / `RegistrationHome` route entries (D-14) — reusing the SAME screen
+// components, but each per-stack provider wrap would mint a SECOND, unsynced provider
+// instance for those duplicate routes, silently resetting a ballot selection or registration
+// draft started from the Vote/Registration tab when the same screen is reached from Timeline.
+//
+// D-22 fixes this by lifting both providers to wrap RootNavigator's <Tab.Navigator> itself, so
+// exactly ONE instance of each spans every tab entry point. Exported (named, not default) so
+// __tests__/provider-scope.test.tsx can mount this exact production composition directly.
+//
+// Moving either provider back inside a per-tab stack navigator silently reintroduces the
+// duplicate-instance defect 59-10 depends on this lift to avoid — see provider-scope.test.tsx's
+// planted negative control, which proves the gate catches exactly that regression.
+export function AppStateProviders({children}: PropsWithChildren) {
+	return (
+		<BallotSelectionProvider>
+			<RegistrationDraftProvider>{children}</RegistrationDraftProvider>
+		</BallotSelectionProvider>
+	);
+}
+
 // --- RootNavigator: the bottom Tab.Navigator itself (D-08), 4 tabs in D-09 locked order ---
 const Tab = createBottomTabNavigator<RootTabParamList>();
 
@@ -262,64 +283,66 @@ export function RootNavigator() {
 	const {t} = useTranslation('common');
 
 	return (
-		<Tab.Navigator
-			screenOptions={{
-				// Active: colors.primary (bold). Inactive: colors.textSecondary — a Phase 38 theme
-				// token, deliberately NOT Authority's hardcoded `"gray"` string literal (RESEARCH
-				// Pitfall 5 / D-07 token discipline).
-				tabBarActiveTintColor: colors.primary,
-				tabBarInactiveTintColor: colors.textSecondary,
-				tabBarLabelStyle: {fontWeight: fonts.bold.fontWeight},
-			}}>
-			<Tab.Screen
-				name="Vote"
-				component={VoteStackNavigator}
-				options={{
-					// headerShown: false — the per-tab nested stack owns header rendering (D-08),
-					// not the Tab.Navigator itself.
-					headerShown: false,
-					tabBarLabel: t('tabVote'),
-					tabBarIcon: ({color, size}) => (
-						<FontAwesome6 name="check-to-slot" size={size} color={color} />
-					),
-				}}
-			/>
-			<Tab.Screen
-				name="Registration"
-				component={RegistrationStackNavigator}
-				options={({route}) => ({
-					headerShown: false,
-					tabBarLabel: t('tabRegistration'),
-					tabBarIcon: ({color, size}) => (
-						<FontAwesome6 name="user-plus" size={size} color={color} />
-					),
-					// Hide the tab bar while inside the register form flow (continuous process).
-					tabBarStyle: registrationTabBarStyle(route),
-				})}
-			/>
-			<Tab.Screen
-				name="Scan"
-				component={ScanStackNavigator}
-				options={{
-					headerShown: false,
-					tabBarLabel: t('tabScan'),
-					tabBarIcon: ({color, size}) => (
-						<FontAwesome6 name="qrcode" size={size} color={color} />
-					),
-				}}
-			/>
-			<Tab.Screen
-				name="Settings"
-				component={SettingsStackNavigator}
-				options={{
-					headerShown: false,
-					tabBarLabel: t('tabSettings'),
-					tabBarIcon: ({color, size}) => (
-						<FontAwesome6 name="gear" size={size} color={color} />
-					),
-				}}
-			/>
-		</Tab.Navigator>
+		<AppStateProviders>
+			<Tab.Navigator
+				screenOptions={{
+					// Active: colors.primary (bold). Inactive: colors.textSecondary — a Phase 38 theme
+					// token, deliberately NOT Authority's hardcoded `"gray"` string literal (RESEARCH
+					// Pitfall 5 / D-07 token discipline).
+					tabBarActiveTintColor: colors.primary,
+					tabBarInactiveTintColor: colors.textSecondary,
+					tabBarLabelStyle: {fontWeight: fonts.bold.fontWeight},
+				}}>
+				<Tab.Screen
+					name="Vote"
+					component={VoteStackNavigator}
+					options={{
+						// headerShown: false — the per-tab nested stack owns header rendering (D-08),
+						// not the Tab.Navigator itself.
+						headerShown: false,
+						tabBarLabel: t('tabVote'),
+						tabBarIcon: ({color, size}) => (
+							<FontAwesome6 name="check-to-slot" size={size} color={color} />
+						),
+					}}
+				/>
+				<Tab.Screen
+					name="Registration"
+					component={RegistrationStackNavigator}
+					options={({route}) => ({
+						headerShown: false,
+						tabBarLabel: t('tabRegistration'),
+						tabBarIcon: ({color, size}) => (
+							<FontAwesome6 name="user-plus" size={size} color={color} />
+						),
+						// Hide the tab bar while inside the register form flow (continuous process).
+						tabBarStyle: registrationTabBarStyle(route),
+					})}
+				/>
+				<Tab.Screen
+					name="Scan"
+					component={ScanStackNavigator}
+					options={{
+						headerShown: false,
+						tabBarLabel: t('tabScan'),
+						tabBarIcon: ({color, size}) => (
+							<FontAwesome6 name="qrcode" size={size} color={color} />
+						),
+					}}
+				/>
+				<Tab.Screen
+					name="Settings"
+					component={SettingsStackNavigator}
+					options={{
+						headerShown: false,
+						tabBarLabel: t('tabSettings'),
+						tabBarIcon: ({color, size}) => (
+							<FontAwesome6 name="gear" size={size} color={color} />
+						),
+					}}
+				/>
+			</Tab.Navigator>
+		</AppStateProviders>
 	);
 }
 
