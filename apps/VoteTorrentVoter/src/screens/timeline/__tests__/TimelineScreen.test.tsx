@@ -17,8 +17,52 @@ import {TIMELINE_STAGE_IDS} from '../../../timeline';
 
 const mockNavigate = jest.fn();
 
+// ---------------------------------------------------------------------------
+// useFocusEffect mock registry — mirrors
+// RegistrationInboxScreen.test.tsx's 48-25 pattern exactly (the precedent
+// `TimelineScreen.tsx`'s own registration-status effect fix follows). Fires
+// each registered callback once per callback-identity change (deps `[cb]`,
+// matching the real hook while focused) AND exposes `mockTriggerFocus` to
+// simulate an explicit re-focus with NO identity change at all — the
+// tab-away-and-back case this regression suite is about. Prefixed `mock` —
+// babel-plugin-jest-hoist forbids a jest.mock() factory from closing over a
+// non-`mock`-prefixed out-of-scope binding.
+// ---------------------------------------------------------------------------
+interface MockFocusEntry {
+	cb: () => void | (() => void);
+	cleanup: (() => void) | undefined;
+}
+let mockFocusEntries: MockFocusEntry[] = [];
+
+/**
+ * Simulates a real re-focus: runs every registered callback's cleanup (if
+ * any), then re-invokes the callback and records its new cleanup. Call from
+ * inside `renderer.act(...)`.
+ */
+function mockTriggerFocus(): void {
+	for (const entry of mockFocusEntries) {
+		if (typeof entry.cleanup === 'function') entry.cleanup();
+		entry.cleanup = entry.cb() ?? undefined;
+	}
+}
+
 jest.mock('@react-navigation/native', () => ({
 	useNavigation: () => ({navigate: mockNavigate}),
+	// Deferred via a real useEffect keyed on [cb] (NOT called synchronously during render) —
+	// mirrors RegistrationInboxScreen.test.tsx's own mock exactly.
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const ReactLib = require('react');
+		ReactLib.useEffect(() => {
+			const entry: MockFocusEntry = {cb, cleanup: undefined};
+			entry.cleanup = cb() ?? undefined;
+			mockFocusEntries.push(entry);
+			return () => {
+				mockFocusEntries = mockFocusEntries.filter(e => e !== entry);
+				if (typeof entry.cleanup === 'function') entry.cleanup();
+			};
+		}, [cb]);
+	},
 	useTheme: () => ({
 		colors: {
 			primary: '#2196f3',
@@ -256,6 +300,10 @@ beforeEach(() => {
 	mockListAssociationRequests.mockImplementation(async () => []);
 
 	mockSeededElectionId = SEEDED_ELECTION_ID;
+
+	// A focus-callback entry leaked from a previous test is its own defect class — reset the
+	// registry alongside every other mock (mirrors RegistrationInboxScreen.test.tsx:506).
+	mockFocusEntries = [];
 });
 
 afterEach(() => {
@@ -759,5 +807,65 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		expect(homeSource).toContain('nextLifecycleState');
 		expect(homeSource).toContain('LIFECYCLE_ORDER');
 		expect(homeSource).toContain('setLifecycleState');
+	});
+});
+
+// ==== Regression: the registration-status panel must re-read on focus, not just at mount ====
+//
+// React Navigation keeps tab screens MOUNTED when a voter tabs away and back — leaving the
+// Timeline tab and returning must NOT require a full app restart to see a fresh registration
+// answer. This suite's own DECLARED BLIND SPOT (mirrors RegistrationInboxScreen.test.tsx 48-25):
+// `mockTriggerFocus()` simulates a re-focus by re-invoking every `useFocusEffect` callback
+// currently registered; it does not prove React Navigation actually delivers a focus event on a
+// real tab switch — that is a navigation-container behavior this mock stands in for. What IS
+// proven here: mounting once, changing the underlying engine's answer, and refocusing (no
+// remount) makes the SAME rendered tree reflect the new answer — the exact distinction a
+// fresh-mount-only test can never make.
+describe('TimelineScreen — registration panel re-reads on focus (regression, stale-vs-fresh)', () => {
+	beforeEach(() => {
+		// `TimelineRow.tsx`'s `showPanel = !isDeemphasized && panel != null` never renders the
+		// panel for a `future`-status row -- so this block needs `registrationEnds` already in the
+		// PAST relative to "now" (an election 5 days out, registration having closed 20 days ago),
+		// unlike every other describe block in this file which uses the 180-day-out default.
+		const anchor = Date.now() + 5 * 86_400_000;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+	});
+
+	it('renders notRegistered at mount, then pending after a simulated refocus with no remount', async () => {
+		const tr = await renderAndFlush();
+
+		const initialSentence = tr.root.findByProps({testID: 'timeline-registration-panel-sentence'});
+		expect(textOf(initialSentence)).toContain('You are not registered');
+
+		// The device just completed a real Register ceremony elsewhere -- the engine's own answer
+		// has changed, but nothing has remounted this screen.
+		mockListAssociationRequests.mockImplementation(async () => [
+			{deviceKey: 'p256-stub-device-key', status: 'p', electionId: SEEDED_ELECTION_ID},
+		]);
+
+		await renderer.act(async () => {
+			mockTriggerFocus();
+			await flushMicrotasks(30);
+		});
+
+		const refocusedSentence = tr.root.findByProps({testID: 'timeline-registration-panel-sentence'});
+		expect(textOf(refocusedSentence)).toContain('awaiting a decision');
+		expect(textOf(refocusedSentence)).not.toContain('You are not registered');
+	});
+
+	it('a refocus with an unchanged answer does not spam the association engine (no refresh storm)', async () => {
+		const tr = await renderAndFlush();
+		const callsAfterMount = mockListAssociationRequests.mock.calls.length;
+		expect(callsAfterMount).toBeGreaterThan(0);
+
+		await renderer.act(async () => {
+			mockTriggerFocus();
+			await flushMicrotasks(30);
+		});
+
+		// Exactly one MORE read fired for the one refocus -- not zero (proves it re-ran) and not a
+		// loop (proves it ran only once per refocus).
+		expect(mockListAssociationRequests.mock.calls.length).toBe(callsAfterMount + 1);
+		void tr;
 	});
 });
