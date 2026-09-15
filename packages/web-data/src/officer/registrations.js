@@ -371,3 +371,94 @@ export function foldDayBucketsIntoWeeks(dayRows) {
 		.sort((a, b) => a[0] - b[0])
 		.map(([index, count]) => ({ bucketStart: epochMsToBucketStart(anchorMs + index * WEEK_MS, 'week'), count }));
 }
+
+/** The DB's full ReceivedAt span in one row. `ReceivedAt` is the only column named (D-04) -- never `SubmittedAt`. @type {string} */
+export const INTAKE_SPAN_SQL = `select min(ReceivedAt) as earliest, max(ReceivedAt) as latest, count(*) as total from RegistrationRequest`;
+
+/** Hour buckets over ReceivedAt. The group-by expression repeats the whole strftime(...) call verbatim -- grouping by the select-list alias alone does not parse on the resolved 4.18.0 build (measured). @type {string} */
+export const INTAKE_HOURLY_SQL = `select strftime('%Y-%m-%dT%H:00:00', ReceivedAt) as bucketStart, count(*) as count from RegistrationRequest group by strftime('%Y-%m-%dT%H:00:00', ReceivedAt) order by 1`;
+
+/** Day buckets over ReceivedAt. Same group-by-repetition constraint as INTAKE_HOURLY_SQL. Also the source for the week path, which folds these day buckets rather than reading raw ReceivedAt values. @type {string} */
+export const INTAKE_DAILY_SQL = `select strftime('%F', ReceivedAt) as bucketStart, count(*) as count from RegistrationRequest group by strftime('%F', ReceivedAt) order by 1`;
+
+/** registration intake series read failed -- a fixed literal message carrying no interpolation and no value (T-60-02). No `cause`: a cause chain re-attaches the engine's message, which is exactly what this class exists to withhold. */
+export class IntakeSeriesReadError extends Error {
+	/** @param {string} originalName */
+	constructor(originalName) {
+		super('registration intake series could not be read');
+		this.name = 'IntakeSeriesReadError';
+		/** @type {string} */
+		this.originalName = originalName;
+	}
+}
+
+/** @type {string} */
+const INTAKE_LOG_PREFIX = 'officer/registrations intake:';
+
+/**
+ * The error's `name` and nothing else -- see public/subscribe.js's identical
+ * idiom (T-60-02). No message, no SQL, no row, no column.
+ *
+ * @param {unknown} err
+ * @returns {void}
+ */
+function logFailure(err) {
+	const name = err && typeof (/** @type {any} */ (err).name) === 'string' ? /** @type {any} */ (err).name : 'Error';
+	console.error(INTAKE_LOG_PREFIX, name);
+}
+
+/**
+ * D-04: buckets the intake series on ReceivedAt -- authority-observed,
+ * written by the engine with toIsoZDatetime, inside no digest -- and never
+ * on SubmittedAt, the submitter-supplied value inside DG-1. A chart built on
+ * SubmittedAt would let a requester choose where its own mark lands on the
+ * officer's time axis. The unit adapts to the data's own span (hour / day /
+ * week, chooseIntakeBucketUnit); interior gaps are densified to zero-count
+ * rows (the D-02 discipline, densifyIntakeBuckets).
+ *
+ * The week path deliberately re-groups DAY buckets (foldDayBucketsIntoWeeks)
+ * instead of reading raw ReceivedAt values. Reading one row per request
+ * would turn a counts-only aggregate surface into a row-enumeration surface
+ * over RegistrationRequest (rule R3, threat T-60-01) and would scale with
+ * request volume instead of with elapsed time. It also removes any need for
+ * `%W`, which is not fully implemented on the resolved engine build.
+ *
+ * @param {import('@quereus/quereus').Database} db
+ * @returns {Promise<IntakeBucketRow[]>}
+ */
+export async function readRegistrationIntakeSeries(db) {
+	try {
+		const span = await db.prepare(INTAKE_SPAN_SQL).get({});
+		const earliest = /** @type {string | null | undefined} */ (span?.earliest);
+		const latest = /** @type {string | null | undefined} */ (span?.latest);
+		const total = /** @type {number} */ (span?.total ?? 0);
+		if (!total || earliest == null || latest == null) return [];
+
+		const earliestMs = Date.parse(earliest);
+		const latestMs = Date.parse(latest);
+		if (!Number.isFinite(earliestMs) || !Number.isFinite(latestMs)) return [];
+
+		const unit = chooseIntakeBucketUnit(latestMs - earliestMs);
+
+		if (unit === 'hour') {
+			/** @type {{bucketStart: string, count: number}[]} */
+			const rows = [];
+			for await (const r of db.eval(INTAKE_HOURLY_SQL, {})) {
+				rows.push(/** @type {{bucketStart: string, count: number}} */ (r));
+			}
+			return densifyIntakeBuckets(rows, 'hour');
+		}
+
+		/** @type {{bucketStart: string, count: number}[]} */
+		const dayRows = [];
+		for await (const r of db.eval(INTAKE_DAILY_SQL, {})) {
+			dayRows.push(/** @type {{bucketStart: string, count: number}} */ (r));
+		}
+		if (unit === 'day') return densifyIntakeBuckets(dayRows, 'day');
+		return densifyIntakeBuckets(foldDayBucketsIntoWeeks(dayRows), 'week');
+	} catch (err) {
+		logFailure(err);
+		const originalName = err && typeof (/** @type {any} */ (err).name) === 'string' ? /** @type {any} */ (err).name : 'Error';
+		throw new IntakeSeriesReadError(originalName);
+	}
+}

@@ -81,8 +81,15 @@ export {
 	readRegistrantRoster,
 	readRegistrationSurfaceCounts,
 	hasAnyRegistrationData,
+	readRegistrationIntakeSeries,
+	IntakeSeriesReadError,
 	TABLES_READ as REGISTRATIONS_TABLES_READ,
 } from './registrations.js';
+// readRegistrationIntakeSeries (D-04, C3) -- 60-05's Registrations panel is
+// the consumer. The three pure bucket helpers and the SQL constants stay OUT
+// of this barrel: they are internals, reached by direct module URL in
+// registrations-intake.test.mjs, and this barrel's job is to keep the
+// officer audience's surface readable at a glance.
 
 export { readKeyholders, TABLES_READ as KEYHOLDER_TABLES_READ } from './read-keyholders.js';
 
@@ -102,5 +109,6 @@ export { readKeyholders, TABLES_READ as KEYHOLDER_TABLES_READ } from './read-key
  * @typedef {import('./registrations.js').RosterRow} RosterRow
  * @typedef {import('./registrations.js').RosterResult} RosterResult
  * @typedef {import('./registrations.js').SurfaceCountEntry} SurfaceCountEntry
+ * @typedef {import('./registrations.js').IntakeBucketRow} IntakeBucketRow
  * @typedef {import('./read-keyholders.js').KeyholderRosterRow} KeyholderRosterRow
  */

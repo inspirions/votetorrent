@@ -20,11 +20,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
+import { Database } from '@quereus/quereus';
+import { prepareDb } from '@votetorrent/vote-engine/browser';
+import { readRegistrationIntakeSeries, IntakeSeriesReadError, REGISTRATIONS_TABLES_READ } from '@votetorrent/web-data/officer';
+import { seedFoundingAuthority } from './fixtures/seed-founding-authority.js';
 import { webDataSrc } from '../../../scripts/lib/source-paths.mjs';
 
 const registrationsModule = await import(pathToFileURL(webDataSrc('officer', 'registrations.js')).href);
 const { chooseIntakeBucketUnit, densifyIntakeBuckets, foldDayBucketsIntoWeeks, INTAKE_HOUR_MAX_SPAN_MS, INTAKE_DAY_MAX_SPAN_MS } =
 	registrationsModule;
+
+/** @returns {Promise<import('@quereus/quereus').Database>} */
+async function foundingOnlyDb() {
+	const db = new Database();
+	await prepareDb(db);
+	await seedFoundingAuthority(db);
+	return db;
+}
+
+/**
+ * A scratch two-column RegistrationRequest table -- `RegistrationRequest` is
+ * unseedable against the real schema (row-level SignatureValid CHECK needs a
+ * genuine secp256k1/P-256 signature this workspace has no dependency for),
+ * so this is the only way to run the real frozen SQL constants over real
+ * rows. Pairs with S1/S2's real-schema rungs so the proof is not
+ * scratch-only.
+ *
+ * @param {ReadonlyArray<{id: string, receivedAt: string | null}>} rows
+ * @returns {Promise<import('@quereus/quereus').Database>}
+ */
+async function scratchIntakeDb(rows) {
+	const db = new Database();
+	await db.exec('create table RegistrationRequest (Id text primary key, ReceivedAt text)');
+	for (const row of rows) {
+		// eslint-disable-next-line no-await-in-loop -- sequential inserts against one shared handle, this project's tier-1 discipline
+		await db.exec('insert into RegistrationRequest (Id, ReceivedAt) values (:id, :receivedAt)', { id: row.id, receivedAt: row.receivedAt });
+	}
+	return db;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // P1-P6 -- the pure bucket core, reached by direct module URL
@@ -131,5 +164,97 @@ test('P6 week folding: three day buckets anchor on the earliest and fold to week
 	const nonZeroIndexes = new Set([0, 2, 21]);
 	for (let i = 0; i < densified.length; i += 1) {
 		assert.equal(densified[i].count, nonZeroIndexes.has(i) ? 1 : 0, 'index ' + i + ' count mismatch');
+	}
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// S1-S6 -- readRegistrationIntakeSeries through the barrel, real schema +
+// scratch bucketing. RegistrationRequest is unseedable against the real
+// schema, so S1/S2 pin the constants to the real table while S3-S6 exercise
+// the real SQL against a scratch table. Neither rung alone is the proof.
+// ─────────────────────────────────────────────────────────────────────────
+
+test('S1 real-schema validity + anti-vacuity: an empty founding-only db returns [] and the span query returns the all-null/zero row', async () => {
+	const db = await foundingOnlyDb();
+	assert.deepEqual(await readRegistrationIntakeSeries(db), []);
+	const span = await db.prepare(registrationsModule.INTAKE_SPAN_SQL).get({});
+	assert.deepEqual(span, { earliest: null, latest: null, total: 0 });
+	assert.equal(REGISTRATIONS_TABLES_READ.length, 13, 'the read surface did not widen (T-60-01)');
+	assert.ok(REGISTRATIONS_TABLES_READ.includes('RegistrationRequest'));
+});
+
+test('S2 real-schema positive control: mutating the real INTAKE_DAILY_SQL constant to a wrong column name is rejected by name', async () => {
+	const db = await foundingOnlyDb();
+	const mutated = registrationsModule.INTAKE_DAILY_SQL.replace('ReceivedAt', 'ReceivedAtt');
+	await assert.rejects(() => db.prepare(mutated).get({}), /ReceivedAtt/, 'this is what proves S1 ran against the real table and not one Quereus invented');
+});
+
+test('S3 scratch bucketing: hour instants over one UTC day produce the P3 four-row expectation through the real SQL', async () => {
+	const db = await scratchIntakeDb([
+		{ id: 'a', receivedAt: '2026-09-15T13:10:00.000Z' },
+		{ id: 'b', receivedAt: '2026-09-15T16:20:00.000Z' },
+	]);
+	assert.deepEqual(await readRegistrationIntakeSeries(db), [
+		{ bucketStart: '2026-09-15T13:00:00', count: 1 },
+		{ bucketStart: '2026-09-15T14:00:00', count: 0 },
+		{ bucketStart: '2026-09-15T15:00:00', count: 0 },
+		{ bucketStart: '2026-09-15T16:00:00', count: 1 },
+	]);
+});
+
+test('S4 scratch bucketing: day instants crossing a month boundary produce the P4 eight-row expectation through the real SQL', async () => {
+	const db = await scratchIntakeDb([
+		{ id: 'a', receivedAt: '2026-09-25T23:00:00.000Z' },
+		{ id: 'b', receivedAt: '2026-10-02T01:00:00.000Z' },
+	]);
+	assert.deepEqual(await readRegistrationIntakeSeries(db), [
+		{ bucketStart: '2026-09-25', count: 1 },
+		{ bucketStart: '2026-09-26', count: 0 },
+		{ bucketStart: '2026-09-27', count: 0 },
+		{ bucketStart: '2026-09-28', count: 0 },
+		{ bucketStart: '2026-09-29', count: 0 },
+		{ bucketStart: '2026-09-30', count: 0 },
+		{ bucketStart: '2026-10-01', count: 0 },
+		{ bucketStart: '2026-10-02', count: 1 },
+	]);
+});
+
+test('S5 scratch bucketing: instants 147 days apart produce the P6 22-row week expectation through the real SQL', async () => {
+	const db = await scratchIntakeDb([
+		{ id: 'a', receivedAt: '2026-01-05T00:00:00.000Z' },
+		{ id: 'b', receivedAt: '2026-01-20T12:00:00.000Z' },
+		{ id: 'c', receivedAt: '2026-06-01T00:00:00.000Z' },
+	]);
+	const series = await readRegistrationIntakeSeries(db);
+	assert.equal(series.length, 22);
+	const nonZeroIndexes = new Set([0, 2, 21]);
+	for (let i = 0; i < series.length; i += 1) {
+		assert.equal(series[i].count, nonZeroIndexes.has(i) ? 1 : 0, 'index ' + i + ' count mismatch');
+	}
+	for (let i = 1; i < series.length; i += 1) {
+		const stepMs = Date.parse(series[i].bucketStart + 'T00:00:00Z') - Date.parse(series[i - 1].bucketStart + 'T00:00:00Z');
+		assert.equal(stepMs, 604800000);
+	}
+});
+
+test('S6 shape and robustness: a malformed ReceivedAt is excluded, every row has exactly two keys, count is a number, bucketStart strictly ascends', async () => {
+	const db = await scratchIntakeDb([
+		{ id: 'a', receivedAt: '2026-09-25T23:00:00.000Z' },
+		{ id: 'b', receivedAt: '2026-10-02T01:00:00.000Z' },
+		// Lexicographically BETWEEN the two valid boundaries (deliberately, so it
+		// never becomes the span query's min/max) -- proves the malformed row is
+		// dropped by the grouped query's own null bucketStart, not by an
+		// unrelated span-parse short-circuit.
+		{ id: 'c', receivedAt: '2026-09-28-not-a-real-timestamp' },
+	]);
+	const series = await readRegistrationIntakeSeries(db);
+	assert.ok(series.length > 0);
+	let previous = '';
+	for (const row of series) {
+		assert.deepEqual(Object.keys(row), ['bucketStart', 'count']);
+		assert.equal(typeof row.count, 'number');
+		assert.doesNotMatch(row.bucketStart, /NaN|Invalid|null|undefined/);
+		assert.ok(row.bucketStart > previous, 'bucketStart must be strictly ascending');
+		previous = row.bucketStart;
 	}
 });
