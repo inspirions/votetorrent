@@ -16,9 +16,9 @@
  * `TimelineRail` / `TimelineRow` stay presentational (props only) — this file is the one place on
  * this surface that calls `useVoterApp()` and `useNavigation()`.
  */
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {useNavigation, useTheme} from '@react-navigation/native';
+import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
@@ -262,28 +262,39 @@ export default function TimelineScreen() {
 	// not re-run every time the __DEV__ clock-offset control changes `nowMs`. Same `let live =
 	// true` cancellation guard; `resolveAttestationProducer().provisionDeviceKey` is passed --
 	// NEVER `getOrCreateDeviceUser` (F1: the wrong key silently reads "not registered" forever).
-	useEffect(() => {
-		let live = true;
+	//
+	// `useFocusEffect` (not a bare `useEffect`), matching `DeviceAttestationScreen.tsx`'s own
+	// precedent exactly: React Navigation keeps tab screens MOUNTED across a tab switch, so a bare
+	// `useEffect` here would only ever read once, at mount, and never again -- leaving a voter who
+	// completes a real Register ceremony and taps back into the Timeline tab looking at whatever
+	// answer was true when the screen first mounted, until the app is fully restarted. Wrapping
+	// with `useCallback` (deps identical to the old bare effect's own deps list) is what makes
+	// this re-run on every focus without re-running on every render -- `useFocusEffect` re-invokes
+	// its callback each time the screen regains focus, not on every identity-stable render.
+	useFocusEffect(
+		useCallback(() => {
+			let live = true;
 
-		if (resolvedElectionId === undefined) {
+			if (resolvedElectionId === undefined) {
+				return () => {
+					live = false;
+				};
+			}
+
+			(async () => {
+				const result = await resolveRegistrationStatus({
+					getEngine,
+					provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+					electionId: resolvedElectionId,
+				});
+				if (live) setRegistrationStatus(result);
+			})();
+
 			return () => {
 				live = false;
 			};
-		}
-
-		(async () => {
-			const result = await resolveRegistrationStatus({
-				getEngine,
-				provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
-				electionId: resolvedElectionId,
-			});
-			if (live) setRegistrationStatus(result);
-		})();
-
-		return () => {
-			live = false;
-		};
-	}, [getEngine, resolvedElectionId]);
+		}, [getEngine, resolvedElectionId]),
+	);
 
 	if (state.kind === 'indeterminate') {
 		return (
