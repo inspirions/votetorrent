@@ -87,3 +87,14 @@
 	padding-top: 0;
 	border-top: none;
 }
+
+/* C5 -- the Keyholders enrolled-vs-threshold meter's wrapper (60-03's Meter
+   primitive owns its own vt-chart* classes, declared in
+   packages/ui-web/src/components.css; this rule is the surrounding column
+   layout only). */
+.aa-meter {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-xs);
+	padding: var(--space-xs) 0;
+}

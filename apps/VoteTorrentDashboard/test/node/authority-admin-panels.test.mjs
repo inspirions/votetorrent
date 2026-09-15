@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { dashboardSrc, workspacePath } from '../../../../scripts/lib/source-paths.mjs';
 import { stripComments } from '../../../../scripts/lib/strip-comments.mjs';
+import { COPY } from '@votetorrent/ui-web';
 
 const PANELS_DIR = dashboardSrc('screens', 'panels');
 const SCHEMA_PATH = workspacePath('packages/vote-core', 'schema', 'votetorrent.qsql');
@@ -152,16 +153,104 @@ test('each file contains exactly one fetcher call, and it is its own', () => {
 	}
 });
 
-// --- 6. Empty state wired to the frozen table ---------------------------------
+// --- 6. Empty state wired to the frozen table -----------------------------
+//
+// The original single test's subject was "empty state wired to the frozen
+// table", asserted as a by-product of "no other t( call". Phase 60 widens
+// this: KeyholdersPanel.tsx now carries three more state-copy keys (D-22),
+// so the original zero-tolerance rule can no longer hold for that one file.
+// This section keeps the original subject as its own direct assertion
+// (6a), restates the original rule for the five untouched files while
+// allowing KeyholdersPanel.tsx's three named additions (6b), and adds new
+// strength the original test could not express at all: every allowed extra
+// key is checked against the frozen copy table, not merely tolerated (6c),
+// with a control proving an invented key is rejected, not silently waved
+// through (6d).
 
-test('each file contains t(capability.emptyKey) and no other t( call', () => {
+/** Five entries keep today's zero-tolerance rule byte-for-byte; only
+ * KeyholdersPanel.tsx (D-22) gets named additions.
+ * @type {Record<string, string[]>} */
+const EXTRA_T_KEYS = {
+	'NetworkSettingsPanel.tsx': [],
+	'AuthorityProfilePanel.tsx': [],
+	'AuthorityPeersPanel.tsx': [],
+	'AdministrationOfficersPanel.tsx': [],
+	'KeyholdersPanel.tsx': ['panels.keyholders.loading', 'panels.keyholders.unavailable', 'panels.keyholders.readFailed'],
+	'InviteAuthoritiesPanel.tsx': [],
+};
+
+/**
+ * The 6b matcher, factored out so 6d's control can drive it against a
+ * synthetic allowlist without duplicating the extraction/validation logic.
+ * @param {string} source
+ * @param {ReadonlyArray<string>} extraKeys
+ * @returns {{ offendingFile: boolean; offenders: string[] }}
+ */
+function findDisallowedTCalls(source, extraKeys) {
+	const tCalls = [...source.matchAll(/\bt\(([^)]*)\)/g)].map((m) => m[1].trim());
+	/** @type {string[]} */
+	const offenders = [];
+	for (const arg of tCalls) {
+		if (arg === 'capability.emptyKey') continue;
+		const singleQuoted = arg.match(/^'([a-zA-Z][\w.]*)'$/);
+		if (singleQuoted && extraKeys.includes(singleQuoted[1])) continue;
+		offenders.push(arg);
+	}
+	return { offendingFile: offenders.length > 0, offenders };
+}
+
+test('6a: each file contains the literal t(capability.emptyKey)', () => {
+	for (const file of FILES) {
+		assert.match(STRIPPED[file], /t\(capability\.emptyKey\)/, `${file} does not call t(capability.emptyKey)`);
+	}
+});
+
+test('6b: every t( call is either t(capability.emptyKey) or one of that file\'s named D-22 extras', () => {
 	for (const file of FILES) {
 		const tCalls = [...STRIPPED[file].matchAll(/\bt\(([^)]*)\)/g)].map((m) => m[1].trim());
 		assert.ok(tCalls.length >= 1, `${file} must call t(...) at least once`);
-		for (const arg of tCalls) {
-			assert.equal(arg, 'capability.emptyKey', `${file} calls t(${arg}), which is not capability.emptyKey`);
+		const { offenders } = findDisallowedTCalls(STRIPPED[file], EXTRA_T_KEYS[file]);
+		assert.deepEqual(offenders, [], `${file} calls t(${offenders.join('), t(')}), which is not capability.emptyKey or an allowed extra`);
+	}
+});
+
+test('6c: every EXTRA_T_KEYS entry and every emptyCopyKey prop literal is a real COPY key', () => {
+	/** @type {string[]} */
+	const emptyCopyKeyLiterals = [];
+	for (const file of FILES) {
+		for (const m of STRIPPED[file].matchAll(/emptyCopyKey=(?:"([^"]*)"|\{'([^']*)'\})/g)) {
+			emptyCopyKeyLiterals.push(m[1] ?? m[2]);
 		}
 	}
+	assert.ok(emptyCopyKeyLiterals.length > 0, 'expected at least one emptyCopyKey prop literal across the six files -- this assertion is vacuous otherwise');
+
+	for (const file of FILES) {
+		for (const key of EXTRA_T_KEYS[file]) {
+			assert.ok(Object.prototype.hasOwnProperty.call(COPY, key), `${file}'s EXTRA_T_KEYS entry "${key}" is not a key in COPY`);
+		}
+	}
+	for (const key of emptyCopyKeyLiterals) {
+		assert.ok(Object.prototype.hasOwnProperty.call(COPY, key), `emptyCopyKey="${key}" is not a key in COPY`);
+	}
+});
+
+test('6d: controls -- an invented key is rejected by 6b and absent from COPY, and only one file has named extras', () => {
+	// (i) the 6b matcher rejects a synthetic invented key checked against
+	// KeyholdersPanel.tsx's own allowlist.
+	const fixture = `t(capability.emptyKey) t('panels.keyholders.invented')`;
+	const { offendingFile, offenders } = findDisallowedTCalls(fixture, EXTRA_T_KEYS['KeyholdersPanel.tsx']);
+	assert.ok(offendingFile, 'the 6b matcher is inert -- it must reject an invented key not in the allowlist');
+	assert.deepEqual(offenders, ["'panels.keyholders.invented'"]);
+
+	// (ii) that same invented key is genuinely absent from COPY -- otherwise
+	// 6c could never fail on it.
+	assert.ok(!Object.prototype.hasOwnProperty.call(COPY, 'panels.keyholders.invented'), '6c cannot prove anything if the negative-control key already exists in COPY');
+
+	// (iii) exactly five of the six EXTRA_T_KEYS arrays are empty -- a later
+	// edit that quietly widens a second file is visible as a failure here,
+	// not a silent relaxation of this gate.
+	const emptyCount = Object.values(EXTRA_T_KEYS).filter((keys) => keys.length === 0).length;
+	assert.equal(emptyCount, 5, 'expected exactly five of six files to carry no extra allowed t( key');
 });
 
 // --- 7. Labels are schema identifiers (binding decision A) --------------------

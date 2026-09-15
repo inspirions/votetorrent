@@ -26,7 +26,9 @@
 import { useEffect, useState } from 'react';
 import type { PanelComponent } from './types.js';
 import { t } from '@votetorrent/ui-web';
+import { Meter } from '@votetorrent/ui-web/components';
 import { fetchKeyholders } from './authority-admin-queries.js';
+import { usePanelView } from './ChartViewContext.js';
 import './authority-admin.css';
 
 const EM_DASH = '—';
@@ -34,18 +36,38 @@ const EM_DASH = '—';
 type KeyholderRow = Awaited<ReturnType<typeof fetchKeyholders>>[number];
 
 interface KeyholdersState {
-	status: 'loading' | 'ready' | 'error';
+	status: 'loading' | 'unavailable' | 'ready' | 'error';
 	rows: KeyholderRow[];
+}
+
+/**
+ * Pure helper deriving the C5 meter's two numbers from the roster
+ * `fetchKeyholders` already returns -- no second query, no new column, no
+ * new table (D-07). A roster spanning more than one election revision has
+ * no single threshold to chart, so `threshold` is `null` in that case
+ * rather than picking one revision's value and misreporting.
+ *
+ * @param {KeyholderRow[]} rows
+ * @returns {{ enrolled: number; threshold: number | null }}
+ */
+function deriveMeterState(rows: KeyholderRow[]): { enrolled: number; threshold: number | null } {
+	const enrolled = rows.length;
+	const revisions = new Set(rows.map((row) => `${row.ElectionId}:${row.ElectionRevision}`));
+	if (revisions.size !== 1) return { enrolled, threshold: null };
+	const raw = rows[0]?.KeyholderThreshold ?? null;
+	const threshold = raw == null || raw <= 0 ? null : raw;
+	return { enrolled, threshold };
 }
 
 const KeyholdersPanel: PanelComponent = ({ capability, db }) => {
 	const [state, setState] = useState<KeyholdersState>({ status: 'loading', rows: [] });
+	const view = usePanelView();
 
 	useEffect(() => {
 		let mounted = true;
 
 		if (!db) {
-			setState({ status: 'ready', rows: [] });
+			setState({ status: 'unavailable', rows: [] });
 			return () => {
 				mounted = false;
 			};
@@ -76,10 +98,36 @@ const KeyholdersPanel: PanelComponent = ({ capability, db }) => {
 		};
 	}, [db]);
 
-	if (!db || state.status === 'loading') return null;
+	if (state.status === 'unavailable') {
+		return <p className="aa-empty">{t('panels.keyholders.unavailable')}</p>;
+	}
 
-	if (state.status === 'error' || state.rows.length === 0) {
+	if (state.status === 'loading') {
+		return <p className="aa-empty">{t('panels.keyholders.loading')}</p>;
+	}
+
+	if (state.status === 'error') {
+		return <p className="aa-empty">{t('panels.keyholders.readFailed')}</p>;
+	}
+
+	if (state.rows.length === 0) {
 		return <p className="aa-empty">{t(capability.emptyKey)}</p>;
+	}
+
+	if (view === 'chart') {
+		const meter = deriveMeterState(state.rows);
+		const valueLabel = meter.threshold === null ? undefined : `${meter.enrolled} / ${meter.threshold}`;
+		return (
+			<div className="aa-meter">
+				<Meter
+					value={meter.enrolled}
+					total={meter.threshold}
+					valueLabel={valueLabel}
+					variant="panel"
+					emptyCopyKey="panels.keyholders.meter.empty"
+				/>
+			</div>
+		);
 	}
 
 	return (
