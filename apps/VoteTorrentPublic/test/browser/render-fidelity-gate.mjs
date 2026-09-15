@@ -26,6 +26,14 @@
  * the single place a raw schema identifier renders verbatim, so they are the
  * spec's literals, asserted here as literals.
  *
+ * THE TWO CHART RUNGS (60-08's C6/C7) DEPEND ON THE SEEDED DISTRICT
+ * DISTRIBUTION. The district-bars rung can only prove D-09's fold is
+ * SELECTIVE, rather than merely present, when the seeded roll holds at least
+ * two districts at or above the fold's own exported threshold and at least
+ * two below it -- `registrant-roll-fixture.js` carries the matching header
+ * rule naming this file's rung in turn, so a later reader changing either
+ * side finds the other.
+ *
  * THE DIVISION OF LABOUR WITH 54-18, recorded so that plan does not duplicate
  * this one. `--prove-matchers` proves every COMPARATOR in this file can
  * report failure, by running each against a synthetic input built to violate
@@ -71,6 +79,11 @@ import { fileURLToPath } from 'node:url';
 import { existsSync, readdirSync } from 'node:fs';
 import { serveDist } from '../../../../packages/ui-web/scripts/lib/serve-dist.mjs';
 import { readMutationReport } from '@votetorrent/ui-web/mutations';
+// D-09's declared threshold, imported by name rather than restated as a
+// literal -- a dependency-free module, safe to import from this node driver.
+// This gate never calls `foldDistrictCounts` itself, so a defect in the fold
+// cannot hide inside an expectation derived from the fold under test.
+import { SMALL_DISTRICT_THRESHOLD } from '../../src/roll-disclosure.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(__dirname, '..', '..');
@@ -120,6 +133,8 @@ export const RUNG_IDS = Object.freeze([
 	'roll-escapes-authority-text',
 	'keyrelease-renders-filled-with-nonzero-released',
 	'gap-card-style-diverges',
+	'keyrelease-meter-fill-matches-released-ratio',
+	'roll-district-bars-proportional-and-folded',
 ]);
 
 /** @type {Array<{ id: string, passed: boolean, detail: string }>} */
@@ -1056,6 +1071,26 @@ function readPage(page) {
 			walk(el);
 			return parts.join(' ');
 		};
+		// D-24/C6/C7 -- Recharts may split a single tick into several `tspan`
+		// children, and `textContent` concatenates them with no separator.
+		// Collapsing whitespace is a fix to the MEASUREMENT, not a loosening of
+		// the assertion: the exact-match requirement on a district's full name
+		// stays exact.
+		/** @param {string} s */
+		const normalizeWhitespace = (s) => s.replace(/\s+/g, ' ').trim();
+		// A multi-line SVG `<text>` wraps by splitting the original string on
+		// spaces into sibling `<tspan>`s, each its own visual line -- the space
+		// that decided the wrap point is DISCARDED, not kept as a text node, so
+		// `el.textContent` alone reproduces "Ward</b>5 Precinct" (fused) rather
+		// than "Ward</b> 5 Precinct". Joining the `<tspan>` children with a
+		// single space reconstructs the space the line-wrap removed. Same
+		// discipline as `readerText` above: a fix to the MEASUREMENT, not a
+		// loosening of the exact-match requirement.
+		/** @param {Element} el */
+		const svgTextOf = (el) => {
+			const tspans = [...el.querySelectorAll('tspan')];
+			return tspans.length > 0 ? tspans.map((t) => t.textContent ?? '').join(' ') : (el.textContent ?? '');
+		};
 		/** @param {Element} el */
 		// A card with no per-fact identity is reported as such rather than as
 		// `null` — it would be a real defect (54-13 tags every card), and a
@@ -1065,6 +1100,28 @@ function readPage(page) {
 			kind: el.getAttribute('data-fact-kind') ?? '(untagged kind)',
 			text: readerText(el),
 		});
+		// C6 -- measured with `getBoundingClientRect()` directly on the SVG
+		// elements, scoped to the key-release card by the interface contract's
+		// selector table. Reported even when a half is missing (0 rather than a
+		// thrown error): the COMPARATOR decides what a missing half means, not
+		// this readout.
+		const keyreleaseCard = document.querySelector('#root [data-fact-id="keyrelease"]');
+		const meterEls = keyreleaseCard ? [...keyreleaseCard.querySelectorAll('.vt-chart__meter')] : [];
+		const trackEls = keyreleaseCard ? [...keyreleaseCard.querySelectorAll('.vt-chart__meter-track')] : [];
+		const fillEls = keyreleaseCard ? [...keyreleaseCard.querySelectorAll('.vt-chart__meter-fill')] : [];
+		// C7 -- scoped to the roll card's `.vt-chart--bar` root, per the
+		// interface contract. If the chart element is present but
+		// `.vt-chart__bar--series-1` matches zero elements, the zero is reported
+		// rather than falling back to another selector -- a readout that
+		// quietly retries a looser selector is how a rung starts passing on a
+		// chart that is not the one under test.
+		const rollCard = document.querySelector('#root [data-fact-id="registrantRoll"]');
+		const districtChartEls = rollCard ? [...rollCard.querySelectorAll('.vt-chart--bar')] : [];
+		const districtChart = districtChartEls[0] ?? null;
+		const districtChartRect = districtChart ? districtChart.getBoundingClientRect() : null;
+		const barEls = districtChart ? [...districtChart.querySelectorAll('.vt-chart__bar--series-1')] : [];
+		const districtTextEls = districtChart ? [...districtChart.querySelectorAll('text')] : [];
+		const markupEls = districtChart ? [...districtChart.querySelectorAll('b, i, script, img')] : [];
 		return {
 			gate: gateReadout ? { error: gateReadout.error, fixture: gateReadout.fixture } : null,
 			roll: {
@@ -1087,6 +1144,28 @@ function readPage(page) {
 			gapCards: [...document.querySelectorAll('#root .fact-card--gap')].map(cardText),
 			gapStyle: gapCard ? { id: gapCard.getAttribute('data-fact-id') ?? '(untagged card)', ...styleOf(gapCard) } : null,
 			plainStyle: plainCard ? { id: plainCard.getAttribute('data-fact-id') ?? '(untagged card)', ...styleOf(plainCard) } : null,
+			meter: {
+				meterCount: meterEls.length,
+				trackCount: trackEls.length,
+				fillCount: fillEls.length,
+				trackWidth: trackEls[0] ? trackEls[0].getBoundingClientRect().width : 0,
+				fillWidth: fillEls[0] ? fillEls[0].getBoundingClientRect().width : 0,
+			},
+			districtChart: {
+				chartCount: districtChartEls.length,
+				bars: barEls.map((el) => {
+					const r = el.getBoundingClientRect();
+					return { width: r.width, top: r.top, bottom: r.bottom };
+				}),
+				texts: districtTextEls.map((el) => {
+					const r = el.getBoundingClientRect();
+					return { text: normalizeWhitespace(svgTextOf(el)), left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+				}),
+				chartBox: districtChartRect
+					? { left: districtChartRect.left, right: districtChartRect.right, top: districtChartRect.top, bottom: districtChartRect.bottom }
+					: null,
+				markupElementCount: markupEls.length,
+			},
 		};
 	});
 }
@@ -1336,6 +1415,22 @@ async function driveRungs(distAbs, port) {
 					KEYRELEASE_FACT_ID,
 				);
 				record('keyrelease-renders-filled-with-nonzero-released', keyrelease.passed, keyrelease.detail);
+
+				// C6/D-24. Denominator is `fx.keyholders`, never `fx.total` -- 60-06
+				// mounts the meter with `total={keyRelease.keyholderCount}`. This gate
+				// CANNOT discriminate the two while the shipped keyrelease fixture
+				// seeds them equal (`EXPECTED_TOTAL === EXPECTED_KEYHOLDERS`); that
+				// claim is owned at the source tier by 60-06's own grep-for-`.total`
+				// check, not here.
+				const meterGeometry = evaluateMeterGeometry(m.meter, { value: fx.released, total: fx.keyholders });
+				record('keyrelease-meter-fill-matches-released-ratio', meterGeometry.passed, meterGeometry.detail);
+
+				// C7/D-09. The expectation is built from the harness's OWN `districts`
+				// array, never by calling `foldDistrictCounts` -- a defect in the fold
+				// cannot hide inside an expectation derived from the fold itself.
+				const districtExpectation = deriveDistrictExpectation(fx.districts, SMALL_DISTRICT_THRESHOLD);
+				const districtBars = evaluateDistrictBars(m.districtChart, districtExpectation);
+				record('roll-district-bars-proportional-and-folded', districtBars.passed, districtBars.detail);
 
 				// Both cards are taken from the SAME rendered section, so the pair
 				// differs only in the class, the branch attribute and one copy key —
