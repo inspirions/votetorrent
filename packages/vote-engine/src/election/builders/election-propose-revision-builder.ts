@@ -100,7 +100,9 @@ export class ElectionProposeRevisionBuilder implements IElectionProposeRevisionB
         ['accruingVotes', 'hashingVotes'],
         ['hashingVotes', 'releasingKeys'],
         ['releasingKeys', 'tallyingStarts'],
-        ['tallyingStarts', 'certificationStarts']
+        ['tallyingStarts', 'validation'],
+        ['validation', 'certificationStarts'],
+        ['certificationStarts', 'closed']
       ]
       for (const [before, after] of ordered) {
         if (

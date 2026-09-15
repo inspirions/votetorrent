@@ -1174,6 +1174,25 @@ describe('ElectionsCreateElectionBuilder', () => {
     expect(errs.length).to.equal(1)
     expect(errs[0].kind).to.equal('cross-field')
   })
+
+  // CR-02 regression: the D-09 STRICT_CHAIN's `tallyingStarts < validation <
+  // certificationStarts < closed` tail was silently unchecked here pre-fix -- an officer
+  // could sign an out-of-order, immutable `validation`/`closed` date with no warning.
+  it('cross-field: validation set before tallyingStarts surfaces TIMELINE_ORDER (CR-02 regression)', () => {
+    const init = makeElectionInit()
+    init.revision.timeline[ElectionEvent.validation] = init.revision.timeline[ElectionEvent.tallyingStarts] - 1
+    const b = new ElectionsCreateElectionBuilder(stubEngine).fromPayload(init)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'revision.timeline.validation')
+    expect(errs.length).to.equal(1)
+  })
+
+  it('cross-field: closed set before certificationStarts surfaces TIMELINE_ORDER (CR-02 regression)', () => {
+    const init = makeElectionInit()
+    init.revision.timeline[ElectionEvent.closed] = init.revision.timeline[ElectionEvent.certificationStarts] - 1
+    const b = new ElectionsCreateElectionBuilder(stubEngine).fromPayload(init)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'revision.timeline.closed')
+    expect(errs.length).to.equal(1)
+  })
 })
 
 // ===========================================================================
@@ -1293,5 +1312,25 @@ describe('ElectionsAdjustElectionBuilder', () => {
     const errs = b.errors().filter(e => e.code === 'THRESHOLD_EXCEEDS_KEYHOLDERS')
     expect(errs.length).to.equal(1)
     expect(errs[0].kind).to.equal('cross-field')
+  })
+
+  // CR-02 regression: same silently-unchecked `validation`/`closed` gap as
+  // ElectionsCreateElectionBuilder above -- this builder is one of the five sites the review
+  // flagged (adjustElection is the path CreateElectionScreen/EditElectionScreen both build
+  // through, per D-16).
+  it('cross-field: validation set before tallyingStarts surfaces TIMELINE_ORDER (CR-02 regression)', () => {
+    const init = makeElectionInit()
+    init.revision.timeline[ElectionEvent.validation] = init.revision.timeline[ElectionEvent.tallyingStarts] - 1
+    const b = new ElectionsAdjustElectionBuilder(stubEngine).fromPayload(init)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'revision.timeline.validation')
+    expect(errs.length).to.equal(1)
+  })
+
+  it('cross-field: closed set before certificationStarts surfaces TIMELINE_ORDER (CR-02 regression)', () => {
+    const init = makeElectionInit()
+    init.revision.timeline[ElectionEvent.closed] = init.revision.timeline[ElectionEvent.certificationStarts] - 1
+    const b = new ElectionsAdjustElectionBuilder(stubEngine).fromPayload(init)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'revision.timeline.closed')
+    expect(errs.length).to.equal(1)
   })
 })

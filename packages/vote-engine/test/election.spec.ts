@@ -375,6 +375,27 @@ describe('ElectionProposeRevisionBuilder', () => {
     const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER')
     expect(errs.length).to.be.greaterThan(0)
   })
+
+  // CR-02 regression: the test above only exercises the pre-59 `tallyingStarts <
+  // certificationStarts` gap. It never moved `validation` or `closed` out of order, so it
+  // could not have caught the D-09 STRICT_CHAIN's `tallyingStarts < validation <
+  // certificationStarts < closed` tail going unchecked -- the exact gap this phase's own
+  // ordering-guard extension left open at every one of the five sites the review flagged.
+  it('cross-field: validation set before tallyingStarts surfaces TIMELINE_ORDER, path-specific (CR-02 regression)', () => {
+    const rev = makeElectionRevisionInit()
+    rev.timeline[ElectionEvent.validation] = rev.timeline[ElectionEvent.tallyingStarts] - 1
+    const b = new ElectionProposeRevisionBuilder(stubEngine).fromPayload(rev)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'timeline.validation')
+    expect(errs.length).to.equal(1)
+  })
+
+  it('cross-field: closed set before certificationStarts surfaces TIMELINE_ORDER, path-specific (CR-02 regression)', () => {
+    const rev = makeElectionRevisionInit()
+    rev.timeline[ElectionEvent.closed] = rev.timeline[ElectionEvent.certificationStarts] - 1
+    const b = new ElectionProposeRevisionBuilder(stubEngine).fromPayload(rev)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'timeline.closed')
+    expect(errs.length).to.equal(1)
+  })
 })
 
 // ===========================================================================

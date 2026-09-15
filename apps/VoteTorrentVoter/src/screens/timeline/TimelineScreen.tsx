@@ -79,6 +79,21 @@ export interface HeaderDateRangeParts {
 	[key: string]: string;
 }
 
+/** Resolves the device's IANA time zone once, at this screen's call boundary. `deriveTimeline`
+ * (`src/timeline/`) and `computeHeaderDateRange` below are pure and take `timeZone` as an
+ * argument -- neither reads this itself -- so this is the ONE place in the ready-state render
+ * path that consults device configuration. `DeriveTimelineInput.timeZone`'s own doc comment
+ * (`src/timeline/types.ts`) promises "the device-local zone when omitted -- deliberately NOT
+ * UTC, per the contracts' 'a voter near midnight' rationale"; that promise is honored by ALWAYS
+ * passing this resolved value explicitly below, never by relying on either function's internal
+ * `?? 'UTC'` fallback (which stays UTC-only for callers, e.g. tests, that omit `timeZone`
+ * entirely). This reads `Intl.DateTimeFormat().resolvedOptions().timeZone`, not the process
+ * clock -- it is exempt from this module's "no ambient clock" contract, which is about `now`,
+ * not the offset used to render it. */
+export function resolveDeviceTimeZone(): string {
+	return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
 /** Numeric `YYYY-MM-DD` calendar-day key for `ms` in `timeZone`, read back from
  * `Intl.DateTimeFormat.formatToParts` (never a formatted/localized string) — mirrors
  * `src/timeline/relative-date.ts`'s `dateParts` idiom. Locale-independent (uses `'en'`
@@ -174,6 +189,13 @@ export default function TimelineScreen() {
 	// once per state change).
 	const nowMs = useMemo(() => Date.now() + clockOffsetMs, [clockOffsetMs, reloadNonce]);
 
+	// CR-01: resolved once per mount, never re-read per render -- the device's zone does not
+	// change mid-session, and re-invoking `Intl.DateTimeFormat` on every render would be wasted
+	// work. Threaded through to BOTH `deriveTimeline` below and `computeHeaderDateRange` at
+	// render time so every relative-date subtitle, rail `MM/DD` label, and the header date range
+	// agree on the same zone.
+	const deviceTimeZone = useMemo(() => resolveDeviceTimeZone(), []);
+
 	// HomeScreen.tsx:50-61's `let live = true` cancellation-guard shape, exactly: an async IIFE
 	// inside the effect, every set* call guarded by `live`, `live = false` in the cleanup. One
 	// try/catch over the WHOLE chain — any rejection anywhere (getEngine, getElections,
@@ -204,6 +226,7 @@ export default function TimelineScreen() {
 				const view = deriveTimeline({
 					timeline: details.current.timeline,
 					now: nowMs,
+					timeZone: deviceTimeZone,
 					election: {
 						ballotDeadline: details.election.ballotDeadline,
 						date: details.election.date,
@@ -231,7 +254,7 @@ export default function TimelineScreen() {
 		// `reloadNonce` stays an explicit dependency (not folded into `nowMs` alone): two presses
 		// close enough in wall-clock time could otherwise recompute the SAME `nowMs` value and
 		// silently fail to re-trigger the retry the user just asked for.
-	}, [getEngine, seededElectionId, reloadNonce, nowMs]);
+	}, [getEngine, seededElectionId, reloadNonce, nowMs, deviceTimeZone]);
 
 	// D-06/D-23 (59-09): the registration-status read is its OWN effect, deliberately separate
 	// from the timeline-read effect above -- `resolveRegistrationStatus` never reads the clock
@@ -296,7 +319,7 @@ export default function TimelineScreen() {
 
 	// From here on `state.kind === 'ready'` is narrowed for the rest of the render (both earlier
 	// branches returned above).
-	const dateRange = computeHeaderDateRange(state.view.rangeStartMs, state.view.rangeEndMs, i18n.language);
+	const dateRange = computeHeaderDateRange(state.view.rangeStartMs, state.view.rangeEndMs, i18n.language, deviceTimeZone);
 	const dialogRow = dialogStageId ? state.view.rows.find(row => row.stageId === dialogStageId) : undefined;
 	const dialogSubtitle = dialogRow
 		? dialogRow.railLabel.kind === 'date'
