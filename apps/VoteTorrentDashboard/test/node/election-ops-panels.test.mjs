@@ -336,6 +336,125 @@ test('no SnapshotInstantContext.ts file exists under src/screens/panels/ -- this
 	assert.ok(!existsSync(path.join(PANELS_DIR, 'SnapshotInstantContext.ts')));
 });
 
+// --- RegistrationsPanel honours the per-panel chart/grid view switch -------
+// (D-13/D-17: the control stays in the shared panel chrome; D-18: chart is
+// the default; D-19: this panel writes nothing to storage; D-20: both
+// representations survive, the hidden one unmounted rather than CSS-hidden)
+
+const VIEW_DISCRIMINANT = "view === 'chart'";
+
+/** Whether a <section> chunk carries the switch discriminant.
+ * @param {string} chunk @returns {boolean} */
+function sectionIsSwitched(chunk) {
+	return chunk.includes(VIEW_DISCRIMINANT);
+}
+
+test('Rung A: RegistrationsPanel.tsx reads the view from the separately-named context module, never from the chrome', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	assert.equal((source.match(/usePanelView\(\)/g) ?? []).length, 1, 'expected exactly one usePanelView() call');
+	assert.match(source, /from ['"]\.\/ChartViewContext\.js['"]/, 'expected an import specifier ending in ChartViewContext.js');
+	// Asserted over RAW, not merely STRIPPED -- this rung is self-sufficient
+	// and does not lean on the sibling matcher above to catch a comment
+	// naming the shared panel chrome.
+	assert.doesNotMatch(
+		RAW['RegistrationsPanel.tsx'],
+		FRAME_OR_CONTEXT_RE,
+		'RegistrationsPanel.tsx must not import the shared panel chrome module, comments included',
+	);
+});
+
+test('positive control: an import of the hook from the chrome module (built by concatenation, never as one banned literal token) is hit by FRAME_OR_CONTEXT_RE', () => {
+	const bannedModule = 'Panel' + 'Frame';
+	const fixture = `import { usePanelView } from './${bannedModule}.js';`;
+	assert.match(fixture, FRAME_OR_CONTEXT_RE, 'the RAW half is not discriminating -- it must hit a synthetic import from the chrome module');
+});
+
+test('Rung B: usePanelView() runs before the first early return in RegistrationsPanel.tsx', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	const hookIdx = source.indexOf('usePanelView()');
+	const firstReturnIdx = source.indexOf('panel-empty');
+	assert.ok(hookIdx !== -1, 'usePanelView() call not found in RegistrationsPanel.tsx');
+	assert.ok(firstReturnIdx !== -1, "the panel's own empty-paragraph class name, panel-empty, was not found");
+	assert.ok(hookIdx < firstReturnIdx, 'usePanelView() must run before the first early return, or a conditionally-called hook violates the rules of hooks');
+});
+
+test('positive control: a synthetic fixture with the hook moved after the first early return is reported as inverted', () => {
+	const fixture = `if (x) { return <p className="panel-empty">y</p>; } const view = usePanelView();`;
+	const hookIdx = fixture.indexOf('usePanelView()');
+	const firstReturnIdx = fixture.indexOf('panel-empty');
+	assert.ok(hookIdx !== -1 && firstReturnIdx !== -1, 'the control fixture itself must contain both markers, or it proves nothing');
+	assert.ok(hookIdx > firstReturnIdx, 'the inverted control fixture must fail the same comparison the real rung applies');
+});
+
+test('Rung C: the status and request sections carry the switch discriminant beside their grid (D-20)', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	const sections = source.split('<section className="eo-section">').slice(1);
+	assert.equal(sections.length, 5, 'expected exactly five <section className="eo-section"> chunks');
+
+	const statusChunk = sections.find((c) => c.includes('<BarSeries'));
+	const requestChunk = sections.find((c) => c.includes('<StackedBarSeries'));
+	assert.ok(statusChunk, 'no section mounts BarSeries');
+	assert.ok(requestChunk, 'no section mounts StackedBarSeries');
+
+	assert.ok(
+		sectionIsSwitched(statusChunk) && statusChunk.includes('eo-count-grid'),
+		'the status section must carry both the discriminant and its grid -- both representations present, one selected',
+	);
+	assert.ok(
+		sectionIsSwitched(requestChunk) && requestChunk.includes('eo-count-grid'),
+		'the request section must carry both the discriminant and its grid -- both representations present, one selected',
+	);
+});
+
+test('Rung D: the intake, roster and surface-count sections stay unswitched, and the discriminant literal occurs exactly twice across the file', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	const sections = source.split('<section className="eo-section">').slice(1);
+	assert.equal(sections.length, 5, 'expected exactly five <section className="eo-section"> chunks');
+
+	const statusChunk = sections.find((c) => c.includes('<BarSeries'));
+	const requestChunk = sections.find((c) => c.includes('<StackedBarSeries'));
+	const intakeChunk = sections.find((c) => c.includes('<TimeSeries'));
+	const rosterChunk = sections.find((c) => c.includes('eo-row'));
+	assert.ok(intakeChunk, 'no section mounts TimeSeries');
+	assert.ok(rosterChunk, 'no section contains eo-row');
+	const remaining = sections.find(
+		(c) => c !== statusChunk && c !== requestChunk && c !== intakeChunk && c !== rosterChunk,
+	);
+	assert.ok(remaining, 'expected a fifth, distinct section for the surface counts');
+
+	assert.ok(
+		!sectionIsSwitched(intakeChunk),
+		// The intake series has no table equivalent -- a recorded user
+		// deferral, not an oversight. See the todo file this rung names in
+		// its own failure message rather than re-litigating the reasoning:
+		// .planning/todos/pending/2026-09-15-c3-intake-series-has-no-table-equivalent.md
+		'the intake series must stay chart-only in both views -- its table equivalent is deferred, see .planning/todos/pending/2026-09-15-c3-intake-series-has-no-table-equivalent.md',
+	);
+	assert.ok(!sectionIsSwitched(rosterChunk), 'the roster is not an aggregate and must not be switched');
+	assert.ok(
+		!sectionIsSwitched(remaining) && remaining.includes('eo-count-grid') && !CHART_PRIMITIVE_RE.test(remaining),
+		'the surface-count section is table-only by D-05 -- it must mount no chart primitive and carry no discriminant',
+	);
+
+	assert.equal(
+		(source.match(/view === 'chart'/g) ?? []).length,
+		2,
+		'expected the discriminant literal to occur exactly twice, in the two switched sections only',
+	);
+});
+
+test('positive control: the section split is non-vacuous (5 > 2), and a synthetic chunk naming a chart primitive beside a grid but carrying no discriminant is reported unswitched', () => {
+	const source = STRIPPED['RegistrationsPanel.tsx'];
+	const sections = source.split('<section className="eo-section">').slice(1);
+	assert.ok(sections.length > 2, 'the walk must classify more than the two switched sections, or a green run over just those two is vacuous');
+
+	const syntheticChunk = '<BarSeries data={x} /><div className="eo-count-grid"></div>';
+	assert.ok(
+		!sectionIsSwitched(syntheticChunk),
+		'sectionIsSwitched must not report a chunk switched merely because it mounts a chart beside a grid -- an "is it switched" check that returns true for everything is not a check',
+	);
+});
+
 // --- ElectionsPanel reads the instant from its own props, never a hook -----
 
 test('ElectionsPanel.tsx references snapshotInstant and contains no useContext/useSnapshotInstant/phase selector', () => {
