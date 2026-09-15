@@ -23,7 +23,9 @@
 		"clean": "rm -rf node_modules"
 	},
 	"dependencies": {
-		"@votetorrent/vote-engine": "workspace:*"
+		"@votetorrent/vote-engine": "workspace:*",
+		"react-is": "19.2.6",
+		"recharts": "3.10.1"
 	},
 	"peerDependencies": {
 		"react": "19.0.0",
@@ -33,6 +35,7 @@
 		"@types/node": "^22.10.2",
 		"@types/react": "19.2.17",
 		"@types/react-dom": "^19.0.0",
+		"@types/react-is": "^19",
 		"playwright": "^1.62.1",
 		"react": "19.0.0",
 		"react-dom": "19.0.0",
