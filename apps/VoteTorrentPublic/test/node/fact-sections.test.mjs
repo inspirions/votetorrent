@@ -29,6 +29,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { publicSrc } from '../../../../scripts/lib/source-paths.mjs';
 import { extractStaticClassNameTokens } from '../../../../scripts/lib/css-class-coverage.mjs';
+import { COPY } from '../../../../packages/ui-web/src/index.js';
 // The two subjects this file EXECUTES are imported by direct relative path --
 // the D-25 idiom `election-address.test.mjs` and `election-shell.test.mjs`
 // already use for an executed module, as distinct from `publicSrc()`, which is
@@ -125,7 +126,49 @@ const FIXTURES = Object.freeze({
 			e.field === DISTRICT_FIELD ? Object.freeze({ field: e.field, audience: 'district' }) : Object.freeze({ field: e.field, audience: e.audience }),
 		),
 	),
+	/** The two chart mount literals (D-08), and the specific roll-table mount
+	 * this file's real JSX contains -- used for ORDERING checks that must not
+	 * be confused by `ReadonlyArray<RegistrantRollRow>`'s own `<RegistrantRoll`
+	 * substring. */
+	meterMount: '<Meter',
+	barSeriesMount: '<BarSeries',
+	rollMount: '<RegistrantRoll rows={roll} />',
+	/** The chart wrapper's static class attribute (D-08), and the body
+	 * paragraph's, reused from test 3's D-20 ordering check. */
+	chartWrapperClassAttr: 'className="fact-card__chart"',
+	bodyClassAttr: 'fact-card__body',
+	/** The three copy keys the two chart mounts consume. */
+	chartCopyKeys: Object.freeze([
+		'public.fact.keyrelease.meterEmpty',
+		'public.registrantRoll.chart.otherBucket',
+		'public.registrantRoll.chart.tooltip',
+	]),
+	/** The banned meter denominator, as a JSX PROP -- distinct from
+	 * `badDenominator` above, which is the object-property form. */
+	badMeterTotalProp: 'total={keyRelease.total}',
+	/** The banned Recharts prop that would flip the bar orientation
+	 * (`<interface_contract>`'s "orientation trap"). */
+	bannedLayoutProp: 'layout=',
+	/** D-23's forbidden motion/loading tokens. */
+	motionTokens: Object.freeze(['transition', 'animation', 'skeleton', 'loading']),
 });
+
+/** Matches a per-datum `tone` property — hue re-encoding value, which D-09 forbids. */
+const PER_DATUM_TONE_RE = /\btone:/;
+/** Matches a raw, quoted `District` string literal — DISTRICT_FIELD's business, one module over. */
+const DISTRICT_LITERAL_RE = /['"`]District['"`]/;
+/** Counts non-overlapping occurrences of a mount literal that starts with `<`, requiring the
+ * character immediately after the literal is NOT a letter — so `<RegistrantRoll` does not also
+ * match inside `<RegistrantRollRow` (the `ReadonlyArray<RegistrantRollRow>` type annotation). */
+const mountOccurrenceRe = (literal) => new RegExp(`${literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'g');
+/** @param {string} source @param {string} literal @returns {number} */
+const countMountOccurrences = (source, literal) => (source.match(mountOccurrenceRe(literal)) ?? []).length;
+/** @param {string} source @param {string} literal @returns {number} index of the first non-collided occurrence, or -1 */
+const firstMountIndex = (source, literal) => {
+	const re = mountOccurrenceRe(literal);
+	const m = re.exec(source);
+	return m ? m.index : -1;
+};
 
 /** Matches a COMPUTED class attribute — an opening brace directly after
  * `className=`. Built from the fixture so the two cannot drift. */
@@ -659,4 +702,122 @@ test('24. every returned bucket array and entry is frozen', () => {
 	const buckets = foldDistrictCounts(districtRows([[DIST_A, 7], [DIST_B, 5], [DIST_C, 1]]));
 	assert.ok(Object.isFrozen(buckets), 'the returned array is not frozen');
 	for (const b of buckets) assert.ok(Object.isFrozen(b), 'a bucket entry is not frozen');
+});
+
+// ---------------------------------------------------------------------------
+// 25-32. Source-shape rungs for the two mounts C6/C7 land in Task 2 (D-08,
+// D-09, D-20, D-23). Every hunted literal lives in FIXTURES above; every
+// rung's own matcher gets a named positive control BEFORE the real source is
+// scanned, run against a planted fixture rather than a re-implementation.
+// ---------------------------------------------------------------------------
+
+test('25. positive control: the mount-count matcher (word-boundary-safe against <RegistrantRollRow-style collisions) is inert on a violating count and fires on a healthy planted mount', () => {
+	assert.equal(countMountOccurrences(FIXTURES.meterMount + ' />', FIXTURES.meterMount), 1, 'the <Meter count matcher is inert against a planted healthy mount');
+	assert.equal(countMountOccurrences(FIXTURES.barSeriesMount + ' />', FIXTURES.barSeriesMount), 1, 'the <BarSeries count matcher is inert against a planted healthy mount');
+	// The collision this matcher exists to avoid: a type annotation must not count as a mount.
+	assert.equal(countMountOccurrences(FIXTURES.rollMount + 'Row>', FIXTURES.rollMount), 0, 'the matcher counted a mount inside a longer identifier — the word-boundary guard is broken');
+	const violating = FIXTURES.meterMount + ' />' + FIXTURES.filledKindAttr;
+	assert.ok(firstMountIndex(violating, FIXTURES.meterMount) < violating.indexOf(FIXTURES.filledKindAttr), 'fixture sanity: the planted violation puts the mount before the kind attribute');
+});
+
+test('25a. D-08: exactly one <Meter and one <BarSeries mount, both inside the filled card (after data-fact-kind="fact"), and neither reaches the gap branch', () => {
+	assert.equal(countMountOccurrences(FACT_SECTIONS, FIXTURES.meterMount), 1, 'expected exactly one <Meter mount');
+	assert.equal(countMountOccurrences(FACT_SECTIONS, FIXTURES.barSeriesMount), 1, 'expected exactly one <BarSeries mount');
+	const kindIndex = FACT_SECTIONS.indexOf(FIXTURES.filledKindAttr);
+	assert.ok(kindIndex >= 0, 'the filled kind attribute is no longer present');
+	assert.ok(firstMountIndex(FACT_SECTIONS, FIXTURES.meterMount) > kindIndex, "the Meter mount does not follow the filled card's own kind attribute — it may have reached the gap branch");
+	assert.ok(firstMountIndex(FACT_SECTIONS, FIXTURES.barSeriesMount) > kindIndex, "the BarSeries mount does not follow the filled card's own kind attribute — it may have reached the gap branch");
+});
+
+test('26. positive control: the roll-precedes-chart ordering check is inert on a violating fixture (chart before the roll mount) and fires on a healthy one', () => {
+	const violating = FIXTURES.barSeriesMount + FIXTURES.rollMount;
+	assert.ok(violating.indexOf(FIXTURES.barSeriesMount) < violating.indexOf(FIXTURES.rollMount), 'fixture sanity: the violating fixture puts the chart first');
+	const healthy = FIXTURES.rollMount + FIXTURES.barSeriesMount;
+	assert.ok(healthy.indexOf(FIXTURES.rollMount) < healthy.indexOf(FIXTURES.barSeriesMount), 'fixture sanity: the healthy fixture puts the roll mount first');
+});
+
+test('26a. D-20: exactly one <RegistrantRoll mount remains, it precedes the roll-composition chart, and the body paragraph precedes the key-release meter', () => {
+	assert.equal(countMountOccurrences(FACT_SECTIONS, '<RegistrantRoll'), 1, 'expected exactly one <RegistrantRoll mount — the table was replaced rather than kept (D-20)');
+	assert.ok(FACT_SECTIONS.includes(FIXTURES.rollMount), 'the roll mount is not the exact literal this rung expects');
+	assert.ok(FACT_SECTIONS.indexOf(FIXTURES.rollMount) < FACT_SECTIONS.indexOf(FIXTURES.barSeriesMount), 'the roll table does not precede the roll-composition chart');
+	assert.ok(FACT_SECTIONS.includes(FIXTURES.bodyClassAttr), 'the body paragraph class is no longer present');
+	assert.ok(FACT_SECTIONS.indexOf(FIXTURES.bodyClassAttr) < firstMountIndex(FACT_SECTIONS, FIXTURES.meterMount), 'the body paragraph does not precede the key-release meter');
+});
+
+test('27. positive control: the second-resolution-site and raw-District-literal matchers fire on planted violations and are silent on the real, sanctioned forms', () => {
+	assert.ok('import { resolveRollColumns } from \'../roll-disclosure.js\';'.includes('resolveRollColumns'), 'fixture sanity: the planted second-resolution import names resolveRollColumns');
+	assert.match("const f = row['District'];", DISTRICT_LITERAL_RE, 'the raw-District-literal matcher is inert against a planted violation');
+	assert.doesNotMatch('const f = DISTRICT_FIELD;', DISTRICT_LITERAL_RE, 'the matcher fires on the sanctioned form — a named constant, never a raw literal');
+});
+
+test('27a. D-09: FactSections.tsx imports foldDistrictCounts from roll-disclosure.js, holds no second disclosure-resolution site, and names no raw District literal', () => {
+	assert.match(FACT_SECTIONS, /foldDistrictCounts[\s\S]*from '\.\.\/roll-disclosure\.js'/, 'FactSections.tsx does not import foldDistrictCounts from roll-disclosure.js');
+	assert.ok(!FACT_SECTIONS.includes('resolveRollColumns'), 'FactSections.tsx holds a second disclosure-resolution site — T-60-06-01 forbids it, the fold must resolve the policy itself');
+	assert.ok(!FACT_SECTIONS.includes('ROLL_DISCLOSURE_POLICY'), 'FactSections.tsx names the policy directly — District must resolve only through foldDistrictCounts');
+	assert.doesNotMatch(FACT_SECTIONS, DISTRICT_LITERAL_RE, "FactSections.tsx names a raw District string literal — that is DISTRICT_FIELD's business, one module over");
+});
+
+test('28. positive control: the per-datum-tone matcher fires on a planted tone property and is silent on the sanctioned defaultTone form', () => {
+	assert.match("tone: 'series-2',", PER_DATUM_TONE_RE, 'the per-datum-tone matcher is inert against a planted violation');
+	assert.doesNotMatch('defaultTone="series-1"', PER_DATUM_TONE_RE, 'the matcher fires on the sanctioned defaultTone form');
+});
+
+test('28a. D-09: defaultTone="series-1" appears exactly once and no per-datum tone property exists — every district bar is the same hue', () => {
+	assert.equal(FACT_SECTIONS.split('defaultTone="series-1"').length - 1, 1, 'expected exactly one defaultTone="series-1"');
+	assert.doesNotMatch(FACT_SECTIONS, PER_DATUM_TONE_RE, 'FactSections.tsx sets a per-datum tone — hue would then re-encode value, which D-09 and UI-SPEC C7 both forbid');
+});
+
+test('29. positive control: the banned layout= prop matcher fires on a planted layout="vertical" fixture and is silent on the sanctioned orientation form', () => {
+	assert.ok('layout="vertical"'.includes(FIXTURES.bannedLayoutProp), 'the planted violation does not actually contain the banned prop');
+	assert.ok(!'orientation="horizontal"'.includes(FIXTURES.bannedLayoutProp), 'the matcher fires on the sanctioned orientation form');
+});
+
+test('29a. the orientation trap: FactSections.tsx passes orientation="horizontal" to BarSeries and never a layout= prop', () => {
+	assert.ok(FACT_SECTIONS.includes('orientation="horizontal"'), 'FactSections.tsx does not pass orientation="horizontal" to BarSeries');
+	assert.ok(!FACT_SECTIONS.includes(FIXTURES.bannedLayoutProp), "FactSections.tsx passes a layout= prop directly — see <interface_contract>'s orientation trap");
+});
+
+test('30. positive control: each D-23 motion/loading token matcher fires on its own planted fixture', () => {
+	for (const token of FIXTURES.motionTokens) {
+		assert.ok(('the ' + token + ' state').includes(token), `the ${token} matcher is inert against its own planted fixture`);
+	}
+});
+
+test('30a. D-23: FactSections.tsx contains none of transition, animation, skeleton or loading, and no hook token, anywhere in its comment-stripped source', () => {
+	for (const token of FIXTURES.motionTokens) {
+		assert.ok(!FACT_SECTIONS.includes(token), `FactSections.tsx contains "${token}" — D-23 forbids any motion or loading state reaching this public page`);
+	}
+	for (const hook of ['useState', 'useReducer', 'useEffect']) {
+		assert.ok(!FACT_SECTIONS.includes(hook), `FactSections.tsx contains ${hook} — test 9 already forbids this; restated here for D-23's own reason`);
+	}
+});
+
+test('31. positive control: the quoted-copy-key occurrence counter fires the planted count on a doubled mount and is silent on a single one', () => {
+	const single = 'emptyCopyKey="public.fact.keyrelease.meterEmpty"';
+	const doubled = single + single;
+	const countOf = (source, key) => (source.match(new RegExp(`['"\`]${key.replace(/\./g, '\\.')}['"\`]`, 'g')) ?? []).length;
+	assert.equal(countOf(doubled, FIXTURES.chartCopyKeys[0]), 2, 'the occurrence counter is inert against a planted doubled mount');
+	assert.equal(countOf(single, FIXTURES.chartCopyKeys[0]), 1, 'the occurrence counter mis-fires against a single planted mount');
+});
+
+test('31a. each of the three chart copy keys appears exactly once as a quoted literal in FactSections.tsx and resolves in COPY to a non-empty string', () => {
+	for (const key of FIXTURES.chartCopyKeys) {
+		const occurrences = (FACT_SECTIONS.match(new RegExp(`['"\`]${key.replace(/\./g, '\\.')}['"\`]`, 'g')) ?? []).length;
+		assert.equal(occurrences, 1, `${key} is mounted ${occurrences} times in FactSections.tsx — expected exactly one`);
+		assert.equal(typeof COPY[key], 'string', `${key} is not declared in COPY — t() would throw and the card would fail to render`);
+		assert.ok(/** @type {string} */ (COPY[key]).length > 0, `${key} resolves to an empty string`);
+	}
+});
+
+test('32. positive control: extractStaticClassNameTokens recovers fact-card__chart from the literal form and stays blind to it in the computed form', () => {
+	const tokens = extractStaticClassNameTokens(FIXTURES.chartWrapperClassAttr);
+	assert.ok(tokens.has('fact-card__chart'), 'the extractor cannot see the chart wrapper class even in the literal form — the control is broken');
+	const computed = extractStaticClassNameTokens(FIXTURES.computedClassAttr);
+	assert.equal(computed.size, 0, 'the extractor read tokens out of a computed attribute — the class-coverage gate would not actually be blind to it');
+});
+
+test('32a. the chart wrapper class is static and reachable: exactly two fact-card__chart mounts (one per chart), and extractStaticClassNameTokens recovers it from the real source', () => {
+	assert.equal(FACT_SECTIONS.split(FIXTURES.chartWrapperClassAttr).length - 1, 2, 'expected exactly two fact-card__chart wrapper mounts — one per chart');
+	const tokens = extractStaticClassNameTokens(FACT_SECTIONS);
+	assert.ok(tokens.has('fact-card__chart'), 'css-class-coverage cannot see the chart wrapper class in the real source');
 });
