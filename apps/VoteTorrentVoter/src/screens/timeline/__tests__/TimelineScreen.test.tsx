@@ -114,9 +114,29 @@ const mockOpenElection = jest.fn(async (_id: string) => mockElectionEngine);
 const mockGetElections = jest.fn(async () => [SUMMARY_A]);
 const mockElectionsEngine = {getElections: mockGetElections, openElection: mockOpenElection};
 
+// ---- 59-09's registration-status read: `getEngine('network' | 'association' | 'registration')`.
+// Stubbed here to resolve cleanly to a "not registered" answer (zero Association rows, zero
+// outstanding requests) so this Task 1/2 suite's PRE-EXISTING assertions -- none of which are
+// about the registration panel -- aren't disturbed by 59-09's additional, legitimate engine
+// calls. `TimelineScreen.test.tsx` still has no test of its own asserting on the panel's
+// content; that coverage lives in `RegistrationPanel.test.tsx` and `registration-status.test.ts`.
+const mockGetNetworkDetails = jest.fn(async () => ({
+	network: {id: 'network-1', hash: 'network-hash-1', name: 'Stub Network', primaryAuthorityId: 'authority-1', relays: [] as string[]},
+}));
+const mockNetworkEngine = {getDetails: mockGetNetworkDetails};
+const mockGetAssociationsByDeviceKey = jest.fn(async () => [] as unknown[]);
+const mockListAssociationRequests = jest.fn(async () => [] as unknown[]);
+const mockAssociationEngine = {getAssociationsByDeviceKey: mockGetAssociationsByDeviceKey, listAssociationRequests: mockListAssociationRequests};
+
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'elections') {
 		return mockElectionsEngine;
+	}
+	if (engineName === 'network') {
+		return mockNetworkEngine;
+	}
+	if (engineName === 'association') {
+		return mockAssociationEngine;
 	}
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
@@ -124,6 +144,16 @@ const mockGetEngine = jest.fn(async (engineName: string) => {
 const mockGetElection = jest.fn(async () => {
 	throw new Error('getElection() must never be called by TimelineScreen (D-04 read-scope fence)');
 });
+
+// ---- 59-09: `resolveAttestationProducer().provisionDeviceKey()` -- mocked exactly as
+// `ConfirmationScreen.test.tsx` mocks the same module, so this suite never reaches the REAL
+// hardware-backed producer (`@votetorrent/attestation-native`'s `TurboModuleRegistry` call,
+// which is unregistered under Jest and throws `Invariant Violation`).
+const mockProvisionDeviceKey = jest.fn(async () => ({publicKey: 'p256-stub-device-key'}));
+const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({provisionDeviceKey: mockProvisionDeviceKey}));
+jest.mock('../../../engines/attestation-producer', () => ({
+	resolveAttestationProducer: (...args: unknown[]) => mockResolveAttestationProducer(...args),
+}));
 
 let mockSeededElectionId: string | undefined = SEEDED_ELECTION_ID;
 
@@ -175,16 +205,31 @@ beforeEach(() => {
 	mockGetElections.mockClear();
 	mockOpenElection.mockClear();
 	mockGetElectionDetails.mockClear();
+	mockGetNetworkDetails.mockClear();
+	mockProvisionDeviceKey.mockClear();
+	mockGetAssociationsByDeviceKey.mockClear();
+	mockListAssociationRequests.mockClear();
 
 	mockGetEngine.mockImplementation(async (engineName: string) => {
 		if (engineName === 'elections') {
 			return mockElectionsEngine;
+		}
+		if (engineName === 'network') {
+			return mockNetworkEngine;
+		}
+		if (engineName === 'association') {
+			return mockAssociationEngine;
 		}
 		throw new Error(`unexpected getEngine call: ${engineName}`);
 	});
 	mockGetElections.mockImplementation(async () => [SUMMARY_A]);
 	mockOpenElection.mockImplementation(async (_id: string) => mockElectionEngine);
 	mockGetElectionDetails.mockImplementation(async () => buildElectionDetails());
+	mockGetNetworkDetails.mockImplementation(async () => ({
+		network: {id: 'network-1', hash: 'network-hash-1', name: 'Stub Network', primaryAuthorityId: 'authority-1', relays: [] as string[]},
+	}));
+	mockGetAssociationsByDeviceKey.mockImplementation(async () => []);
+	mockListAssociationRequests.mockImplementation(async () => []);
 
 	mockSeededElectionId = SEEDED_ELECTION_ID;
 });
@@ -219,8 +264,13 @@ describe('TimelineScreen — real elections read (D-01)', () => {
 	it('drives getEngine -> getElections -> openElection -> getElectionDetails exactly once each, then renders the rail', async () => {
 		const tr = await renderAndFlush();
 
-		expect(mockGetEngine).toHaveBeenCalledTimes(1);
+		// 59-09: `getEngine('elections')` fires from THIS effect, exactly once; the screen's
+		// SEPARATE registration-status effect (Task 3) also resolves `'network'`/`'association'`
+		// through the SAME shared `getEngine` mock, so the TOTAL call count grows from 1 to 3 --
+		// asserted by call-args below rather than re-counting a shared mock across two unrelated
+		// effects into one brittle total.
 		expect(mockGetEngine).toHaveBeenCalledWith('elections');
+		expect(mockGetEngine.mock.calls.filter(call => call[0] === 'elections')).toHaveLength(1);
 		expect(mockGetElections).toHaveBeenCalledTimes(1);
 		expect(mockOpenElection).toHaveBeenCalledTimes(1);
 		expect(mockOpenElection).toHaveBeenCalledWith(SEEDED_ELECTION_ID);

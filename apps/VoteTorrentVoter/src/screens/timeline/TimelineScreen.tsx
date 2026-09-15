@@ -26,10 +26,14 @@ import type {ElectionSummary, IElectionsEngine} from '@votetorrent/vote-core';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {TimelineRail} from '../../components/TimelineRail';
 import {InfoDialog} from '../../components/InfoDialog';
+import {TimelineRegistrationPanel} from '../../components/TimelineRegistrationPanel';
 import i18n from '../../i18n';
 import type {TimelineStackParamList} from '../../navigation/types';
 import {STAGE_TITLE_KEY, deriveTimeline} from '../../timeline';
 import type {TimelineStageId, TimelineViewModelConfident} from '../../timeline';
+import {resolveRegistrationStatus} from '../../engines/registration-status';
+import type {RegistrationStatusResult} from '../../engines/registration-status';
+import {resolveAttestationProducer} from '../../engines/attestation-producer';
 
 /**
  * D-02's election-identity rule, exported as a pure helper so it is testable without rendering.
@@ -139,6 +143,14 @@ export default function TimelineScreen() {
 
 	const [state, setState] = useState<ScreenState>({kind: 'loading'});
 	const [reloadNonce, setReloadNonce] = useState(0);
+	// D-06/D-23 (59-09): the registrationEnds row's status panel. `electionId` is captured
+	// separately from `state` so the registration-status effect below can depend on it without
+	// re-running every time `nowMs` changes (the registration read carries no clock dependency at
+	// all -- unlike the timeline derivation, it never reads `now`). `registrationStatus` stays
+	// `null` while the read is in flight; the panel renders nothing during that window rather
+	// than a guessed "not registered" placeholder (D-23 e).
+	const [resolvedElectionId, setResolvedElectionId] = useState<string | undefined>(undefined);
+	const [registrationStatus, setRegistrationStatus] = useState<RegistrationStatusResult | null>(null);
 	// D-20 discretion: neither `see details` nor the row `?` help affordance has a Details route
 	// (59-05 fixed the Timeline stack's param list at five entries) or its own copy, so both open
 	// the same in-place InfoDialog HomeScreen already uses for `onLearnAboutElection` — modal,
@@ -181,6 +193,11 @@ export default function TimelineScreen() {
 					return;
 				}
 
+				// D-06/D-23 (59-09): captured so the SEPARATE registration-status effect below can
+				// depend on it without re-running on every `nowMs` change (see that effect's own
+				// comment for why the registration read carries no clock dependency).
+				if (live) setResolvedElectionId(electionId);
+
 				const electionEngine = await electionsEngine.openElection(electionId);
 				const details = await electionEngine.getElectionDetails();
 
@@ -215,6 +232,35 @@ export default function TimelineScreen() {
 		// close enough in wall-clock time could otherwise recompute the SAME `nowMs` value and
 		// silently fail to re-trigger the retry the user just asked for.
 	}, [getEngine, seededElectionId, reloadNonce, nowMs]);
+
+	// D-06/D-23 (59-09): the registration-status read is its OWN effect, deliberately separate
+	// from the timeline-read effect above -- `resolveRegistrationStatus` never reads the clock
+	// (it derives from `Association`/`Registrant`/`AssociationRequestRead` rows only), so it must
+	// not re-run every time the __DEV__ clock-offset control changes `nowMs`. Same `let live =
+	// true` cancellation guard; `resolveAttestationProducer().provisionDeviceKey` is passed --
+	// NEVER `getOrCreateDeviceUser` (F1: the wrong key silently reads "not registered" forever).
+	useEffect(() => {
+		let live = true;
+
+		if (resolvedElectionId === undefined) {
+			return () => {
+				live = false;
+			};
+		}
+
+		(async () => {
+			const result = await resolveRegistrationStatus({
+				getEngine,
+				provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+				electionId: resolvedElectionId,
+			});
+			if (live) setRegistrationStatus(result);
+		})();
+
+		return () => {
+			live = false;
+		};
+	}, [getEngine, resolvedElectionId]);
 
 	if (state.kind === 'indeterminate') {
 		return (
@@ -260,6 +306,13 @@ export default function TimelineScreen() {
 				: ''
 		: '';
 	const dialogBody = dialogRow?.subtitle ? t(dialogRow.subtitle.key, dialogRow.subtitle.params) : '';
+
+	// D-06/D-23 (59-09): "before the deadline" is read straight off the SAME row view-model +
+	// dev-clock-aware `nowMs` the rail already compares against -- never a second, independent
+	// `Date.now()` read and never a re-parse of the raw timeline blob. Absent (`null`) instant
+	// defaults to "before" (offers Edit) rather than silently defaulting to the read-only CTA.
+	const registrationEndsRow = state.view.rows.find(row => row.stageId === 'registrationEnds');
+	const isBeforeRegistrationDeadline = registrationEndsRow?.instantMs == null ? true : nowMs < registrationEndsRow.instantMs;
 
 	// D-05: the stops are the PRESENT timeline instants, in D-09 order (`state.view.rows` is
 	// already in that order) -- absent instants are skipped, never offered as a dead stop. A
@@ -334,6 +387,17 @@ export default function TimelineScreen() {
 
 				<TimelineRail
 					rows={state.view.rows}
+					renderPanel={stageId =>
+						stageId === 'registrationEnds' && registrationStatus !== null ? (
+							<TimelineRegistrationPanel
+								status={registrationStatus.kind}
+								networkName={registrationStatus.networkName}
+								isBeforeDeadline={isBeforeRegistrationDeadline}
+								onEditRegistration={() => navigation.navigate('RegistrationHome')}
+								onViewRegistration={() => navigation.navigate('RegistrationHome')}
+							/>
+						) : null
+					}
 					onHelp={stageId => setDialogStageId(stageId)}
 					onSeeDetails={stageId => setDialogStageId(stageId)}
 					onEditRegistration={() => navigation.navigate('RegistrationHome')}

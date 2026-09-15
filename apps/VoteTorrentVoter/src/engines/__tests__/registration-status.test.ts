@@ -131,8 +131,7 @@ function buildDeps(params: BuildDepsParams = {}): RegistrationStatusDeps {
 	});
 
 	return {
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		getEngine: getEngine as any,
+		getEngine: getEngine as unknown as RegistrationStatusDeps['getEngine'],
 		provisionDeviceKey: params.provisionDeviceKey ?? (async () => ({publicKey: DEVICE_KEY})),
 		resolveTransports: params.resolveTransports,
 		electionId: params.electionId,
