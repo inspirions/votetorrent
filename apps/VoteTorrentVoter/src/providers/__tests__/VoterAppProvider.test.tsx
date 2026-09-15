@@ -121,12 +121,39 @@ function renderProvider() {
 }
 
 /** Flush the multi-turn async boot chain (seedDevNetwork -> NetworksEngine.create/open ->
- * setState) — bounded loop, mirrors CadreNodeProvider.test.tsx's flushBoot convention. */
-async function flushBoot(ticks = 15) {
-	for (let i = 0; i < ticks; i++) {
+ * setState) — bounded loop, mirrors CadreNodeProvider.test.tsx's flushBoot convention.
+ *
+ * Two modes:
+ *  - No `until` predicate: a fixed microtask-only spin (`ticks` hops of `Promise.resolve()`).
+ *    Correct for a chain that resolves via pure promise chaining with no real-timer dependency
+ *    (e.g. the forced-rejection path below, which rejects on the very first `await`).
+ *  - With an `until` predicate: polls with REAL timer yields (`setTimeout`, not
+ *    `Promise.resolve()`) up to a bounded real-time ceiling, exiting as soon as the predicate is
+ *    true. Required for the real `NetworksEngine.create()` + schema-init path this file also
+ *    drives: on a loaded host, real module/class initialization inside `@quereus/quereus` can
+ *    take several hundred ms of genuine wall-clock time (measured directly against this file:
+ *    Database construction + type-registry + optimizer-framework setup alone can cost 400-500ms
+ *    under CPU contention). A microtask-only spin can never observe that — no number of
+ *    `await Promise.resolve()` hops advances the event loop's timer phase, so the chain
+ *    completes strictly AFTER the fixed-tick loop already returned, landing outside any `act()`
+ *    and leaving `captured.value` null at assertion time. This is a synchronization-robustness
+ *    fix, not a relaxed assertion: every existing expectation below is unchanged. */
+async function flushBoot(ticks = 15, until?: () => boolean) {
+	if (!until) {
+		for (let i = 0; i < ticks; i++) {
+			// eslint-disable-next-line no-await-in-loop
+			await renderer.act(async () => {
+				await Promise.resolve();
+			});
+		}
+		return;
+	}
+	const start = Date.now();
+	const maxMs = 10000; // headroom under this file's own jest.setTimeout(20000)
+	while (!until() && Date.now() - start < maxMs) {
 		// eslint-disable-next-line no-await-in-loop
 		await renderer.act(async () => {
-			await Promise.resolve();
+			await new Promise(resolve => setTimeout(resolve, 20));
 		});
 	}
 }
@@ -144,7 +171,7 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 	it('boots to isInitialized after the mocked seed resolves, and calls hideSplash', async () => {
 		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
 		const {captured} = renderProvider();
-		await flushBoot();
+		await flushBoot(15, () => captured.value !== null);
 
 		expect(captured.value).not.toBeNull();
 		expect(captured.value!.isInitialized).toBe(true);
@@ -154,7 +181,7 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 	it('useVoterApp() exposes a real getEngine accessor plus seededElectionId (not the removed isRegistered mock boolean, and NOT a sign field — 51-12/D-09/D-20)', async () => {
 		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
 		const {captured} = renderProvider();
-		await flushBoot();
+		await flushBoot(15, () => captured.value !== null);
 
 		expect(typeof captured.value!.getEngine).toBe('function');
 		expect(typeof captured.value!.hasEngine).toBe('function');
