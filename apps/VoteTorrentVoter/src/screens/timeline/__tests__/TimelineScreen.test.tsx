@@ -198,7 +198,31 @@ function hasTestId(tr: renderer.ReactTestRenderer, testID: string): boolean {
 	return tr.root.findAllByProps({testID}).length > 0;
 }
 
+// ---- CR-01: device-time-zone mocking. `TimelineScreen.tsx`'s `resolveDeviceTimeZone()` is the
+// ONLY zero-argument `Intl.DateTimeFormat()` call anywhere under `src/timeline/` or
+// `src/screens/timeline/` (every other call site passes `(language, options)` to FORMAT an
+// already-resolved zone, never to resolve one) -- so intercepting exactly the zero-arg shape and
+// delegating every other call to the real constructor lets these tests pin the "device" zone
+// deterministically (this repo's CI/dev hosts do not all run in UTC) without touching how any
+// actual date gets formatted.
+const RealDateTimeFormat = Intl.DateTimeFormat;
+
+function mockDeviceTimeZone(zone: string): void {
+	jest.spyOn(Intl, 'DateTimeFormat').mockImplementation(((...args: unknown[]) => {
+		if (args.length === 0) {
+			return {resolvedOptions: () => ({timeZone: zone}) as Intl.ResolvedDateTimeFormatOptions} as Intl.DateTimeFormat;
+		}
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		return new (RealDateTimeFormat as any)(...args);
+	}) as unknown as typeof Intl.DateTimeFormat);
+}
+
 beforeEach(() => {
+	// Pins the "device" zone to UTC by default so every PRE-EXISTING test below (written and
+	// reasoned about against UTC-anchored fixtures) stays deterministic regardless of the actual
+	// host's local zone. The CR-01 describe block below overrides this per-test to prove the
+	// screen actually forwards a non-UTC device zone end to end.
+	mockDeviceTimeZone('UTC');
 	mockNavigate.mockClear();
 	mockGetEngine.mockClear();
 	mockGetElection.mockClear();
@@ -232,6 +256,10 @@ beforeEach(() => {
 	mockListAssociationRequests.mockImplementation(async () => []);
 
 	mockSeededElectionId = SEEDED_ELECTION_ID;
+});
+
+afterEach(() => {
+	jest.restoreAllMocks(); // undoes mockDeviceTimeZone's Intl.DateTimeFormat spy, every test.
 });
 
 describe('pickElectionId (D-02)', () => {
@@ -467,6 +495,62 @@ describe('TimelineScreen — header (Task 2)', () => {
 		const range = tr.root.findByProps({testID: 'timeline-header-date-range'});
 		expect(textOf(range)).toContain('December 16');
 		expect(textOf(range)).toContain('January 13');
+	});
+});
+
+// ==== CR-01: TimelineScreen must resolve and forward the DEVICE-local zone, not a hardcoded
+// UTC default (types.ts:122's "device-local, never UTC" contract), to both computeHeaderDateRange
+// and deriveTimeline. Before the fix, TimelineScreen.tsx never passed `timeZone` to either call
+// at all -- so `mockDeviceTimeZone` below (which only intercepts the zero-arg
+// `Intl.DateTimeFormat()` resolution call `resolveDeviceTimeZone()` makes) had NO observable
+// effect pre-fix, and every assertion in this block that expects a Denver-shifted date failed. ====
+
+// 2030-01-01T03:00:00Z -- January 1 in UTC, but still December 31, 2029 in America/Denver (MST,
+// UTC-7, no DST in January): a deliberately zone-sensitive boundary instant, not a hand-picked
+// coincidence.
+const ZONE_BOUNDARY_INSTANT = Date.UTC(2030, 0, 1, 3, 0, 0);
+const ZONE_BOUNDARY_ANCHOR = Date.UTC(2030, 3, 1);
+
+describe('TimelineScreen — device-local time zone default (CR-01)', () => {
+	it('header date range: a device zone of America/Denver renders the boundary instant as "December 31", not "January 1"', async () => {
+		mockDeviceTimeZone('America/Denver');
+		const timeline = buildValidTimeline(ZONE_BOUNDARY_ANCHOR, {registrationEnds: ZONE_BOUNDARY_INSTANT});
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(timeline, ZONE_BOUNDARY_ANCHOR));
+
+		const tr = await renderAndFlush();
+		expect(hasTestId(tr, 'timeline-indeterminate')).toBe(false);
+		const range = tr.root.findByProps({testID: 'timeline-header-date-range'});
+		expect(textOf(range)).toContain('December 31');
+		expect(textOf(range)).not.toContain('January 1');
+	});
+
+	it('header date range: the SAME boundary instant renders as "January 1" under a UTC device zone -- proving the Denver assertion above is genuinely zone-sensitive, not a fixture artifact', async () => {
+		mockDeviceTimeZone('UTC');
+		const timeline = buildValidTimeline(ZONE_BOUNDARY_ANCHOR, {registrationEnds: ZONE_BOUNDARY_INSTANT});
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(timeline, ZONE_BOUNDARY_ANCHOR));
+
+		const tr = await renderAndFlush();
+		const range = tr.root.findByProps({testID: 'timeline-header-date-range'});
+		expect(textOf(range)).toContain('January 1');
+		expect(textOf(range)).not.toContain('December 31');
+	});
+
+	it('rail MM/DD label: deriveTimeline itself receives the forwarded device zone -- registrationEnds\' rail label shifts a day between America/Denver and UTC', async () => {
+		const timeline = buildValidTimeline(ZONE_BOUNDARY_ANCHOR, {registrationEnds: ZONE_BOUNDARY_INSTANT});
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(timeline, ZONE_BOUNDARY_ANCHOR));
+
+		type Row = {stageId: string; railLabel: {kind: string; text?: string}};
+
+		mockDeviceTimeZone('America/Denver');
+		const denverTr = await renderAndFlush();
+		const denverRow = (denverTr.root.findByType(TimelineRail).props.rows as Row[]).find(r => r.stageId === 'registrationEnds');
+
+		mockDeviceTimeZone('UTC');
+		const utcTr = await renderAndFlush();
+		const utcRow = (utcTr.root.findByType(TimelineRail).props.rows as Row[]).find(r => r.stageId === 'registrationEnds');
+
+		expect(denverRow?.railLabel).toEqual({kind: 'date', text: '12/31'});
+		expect(utcRow?.railLabel).toEqual({kind: 'date', text: '01/01'});
 	});
 });
 
