@@ -10,7 +10,7 @@
  * clipped by a mark and no rule anywhere hides content that spills past one.
  */
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, Tooltip, XAxis, YAxis } from 'recharts';
-import { ChartFrame, ChartTooltip } from './chart-frame.js';
+import { ChartFrame, ChartTooltip, tickCountFor, useContainerWidth } from './chart-frame.js';
 import {
 	BAR_SERIES_HEIGHT_PX,
 	CHART_SERIES_1,
@@ -65,61 +65,79 @@ export function BarSeries({
 	const isEmpty = data.length === 0;
 	const isHorizontal = orientation === 'horizontal';
 	const margin = isHorizontal ? { top: 8, right: 48, bottom: 8, left: 8 } : { top: 24, right: 8, bottom: 8, left: 8 };
+	// The NUMERIC axis honours the same narrow-container tick bound
+	// `TimeSeries` does. Left unwired, Recharts' own default heuristic lands
+	// on 5 ticks at any width, which overruns the bound below 400px.
+	const { ref, width } = useContainerWidth();
 
 	return (
-		<ChartFrame variantClassName="vt-chart--bar" height={height} isEmpty={isEmpty} emptyCopyKey={emptyCopyKey}>
-			{/* Recharts' `layout` names the CATEGORY axis: the horizontal-bar form is layout="vertical" with the numeric axis on X. */}
-			<BarChart data={data} layout={isHorizontal ? 'vertical' : 'horizontal'} margin={margin}>
-				<CartesianGrid className="vt-chart__grid" vertical={false} />
-				{isHorizontal ? (
-					<>
-						<XAxis type="number" tick={{ className: 'vt-chart__axis' }} axisLine={{ className: 'vt-chart__grid' }} tickLine={false} />
-						<YAxis
-							type="category"
-							dataKey="label"
-							width={categoryAxisWidth}
-							// Every category gets its tick. Recharts' default collision
-							// heuristic silently DROPS a tick's text node entirely when
-							// rows are tight -- a horizontal bar whose own name has
-							// vanished reads as a missing category, not a cramped one.
-							// Forcing all ticks turns that silent omission into visible
-							// overlap, which a geometry rung can actually see.
-							//
-							// NOT load-bearing for the C7 rung as it stands: measured
-							// inert once the caller reserves enough per-row height, and
-							// that height fix alone turns the rung green. It guards the
-							// case the current fixture does not reach -- a caller whose
-							// row count exceeds its own height cap, where per-row space
-							// compresses again and the drop returns. Kept deliberately,
-							// with that limit stated rather than assumed away.
-							interval={0}
-							tick={{ className: 'vt-chart__axis' }}
-							axisLine={{ className: 'vt-chart__grid' }}
-							tickLine={false}
-						/>
-					</>
-				) : (
-					<>
-						<XAxis type="category" dataKey="label" tick={{ className: 'vt-chart__axis' }} axisLine={{ className: 'vt-chart__grid' }} tickLine={false} />
-						<YAxis type="number" tick={{ className: 'vt-chart__axis' }} axisLine={{ className: 'vt-chart__grid' }} tickLine={false} />
-					</>
-				)}
-				<Tooltip cursor={false} content={ChartTooltip} />
-				<Bar
-					dataKey="value"
-					className="vt-chart__bar"
-					maxBarSize={MAX_BAR_THICKNESS_PX}
-					radius={[DATA_END_RADIUS_PX, DATA_END_RADIUS_PX, 0, 0]}
-					isAnimationActive={false}
-				>
-					{data.map((datum) => {
-						const tone = datum.tone ?? defaultTone;
-						return <Cell key={datum.key} className={BAR_CLASS_BY_TONE[tone]} fill={BAR_FILL_BY_TONE[tone]} />;
-					})}
-					{showValueLabels ? <LabelList dataKey="value" position={isHorizontal ? 'right' : 'top'} className="vt-chart__label" /> : null}
-				</Bar>
-			</BarChart>
-		</ChartFrame>
+		<div ref={ref}>
+			<ChartFrame variantClassName="vt-chart--bar" height={height} isEmpty={isEmpty} emptyCopyKey={emptyCopyKey}>
+				{/* Recharts' `layout` names the CATEGORY axis: the horizontal-bar form is layout="vertical" with the numeric axis on X. */}
+				<BarChart data={data} layout={isHorizontal ? 'vertical' : 'horizontal'} margin={margin}>
+					<CartesianGrid className="vt-chart__grid" vertical={false} />
+					{isHorizontal ? (
+						<>
+							<XAxis
+								type="number"
+								tick={{ className: 'vt-chart__axis' }}
+								axisLine={{ className: 'vt-chart__grid' }}
+								tickLine={false}
+								tickCount={tickCountFor(width)}
+							/>
+							<YAxis
+								type="category"
+								dataKey="label"
+								width={categoryAxisWidth}
+								// Every category gets its tick. Recharts' default collision
+								// heuristic silently DROPS a tick's text node entirely when
+								// rows are tight -- a horizontal bar whose own name has
+								// vanished reads as a missing category, not a cramped one.
+								// Forcing all ticks turns that silent omission into visible
+								// overlap, which a geometry rung can actually see.
+								//
+								// NOT load-bearing for the C7 rung as it stands: measured
+								// inert once the caller reserves enough per-row height, and
+								// that height fix alone turns the rung green. It guards the
+								// case the current fixture does not reach -- a caller whose
+								// row count exceeds its own height cap, where per-row space
+								// compresses again and the drop returns. Kept deliberately,
+								// with that limit stated rather than assumed away.
+								interval={0}
+								tick={{ className: 'vt-chart__axis' }}
+								axisLine={{ className: 'vt-chart__grid' }}
+								tickLine={false}
+							/>
+						</>
+					) : (
+						<>
+							<XAxis type="category" dataKey="label" tick={{ className: 'vt-chart__axis' }} axisLine={{ className: 'vt-chart__grid' }} tickLine={false} />
+							<YAxis
+								type="number"
+								tick={{ className: 'vt-chart__axis' }}
+								axisLine={{ className: 'vt-chart__grid' }}
+								tickLine={false}
+								tickCount={tickCountFor(width)}
+							/>
+						</>
+					)}
+					<Tooltip cursor={false} content={ChartTooltip} />
+					<Bar
+						dataKey="value"
+						className="vt-chart__bar"
+						maxBarSize={MAX_BAR_THICKNESS_PX}
+						radius={[DATA_END_RADIUS_PX, DATA_END_RADIUS_PX, 0, 0]}
+						isAnimationActive={false}
+					>
+						{data.map((datum) => {
+							const tone = datum.tone ?? defaultTone;
+							return <Cell key={datum.key} className={BAR_CLASS_BY_TONE[tone]} fill={BAR_FILL_BY_TONE[tone]} />;
+						})}
+						{showValueLabels ? <LabelList dataKey="value" position={isHorizontal ? 'right' : 'top'} className="vt-chart__label" /> : null}
+					</Bar>
+				</BarChart>
+			</ChartFrame>
+		</div>
 	);
 }
 

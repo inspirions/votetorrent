@@ -8,7 +8,7 @@
  * border drawn around a mark.
  */
 import { Bar, BarChart, CartesianGrid, Legend, Tooltip, XAxis, YAxis } from 'recharts';
-import { ChartFrame, ChartLegend, ChartTooltip } from './chart-frame.js';
+import { ChartFrame, ChartLegend, ChartTooltip, tickCountFor, useContainerWidth } from './chart-frame.js';
 import {
 	CHART_SERIES_1,
 	CHART_SERIES_2,
@@ -36,38 +36,50 @@ export function StackedBarSeries({ data, series, height = STACKED_BAR_HEIGHT_PX,
 		}
 		return row;
 	});
+	// The NUMERIC axis honours the same narrow-container tick bound
+	// `TimeSeries` does. Left unwired, Recharts' own default heuristic lands
+	// on 5 ticks at any width, which overruns the bound below 400px.
+	const { ref, width } = useContainerWidth();
 
 	return (
-		<ChartFrame variantClassName="vt-chart--stacked-bar" height={height} isEmpty={isEmpty} emptyCopyKey={emptyCopyKey}>
-			<BarChart data={chartData} margin={{ top: 24, right: 8, bottom: 8, left: 8 }}>
-				<CartesianGrid className="vt-chart__grid" vertical={false} />
-				<XAxis type="category" dataKey="label" tick={{ className: 'vt-chart__axis' }} axisLine={{ className: 'vt-chart__grid' }} tickLine={false} />
-				<YAxis type="number" tick={{ className: 'vt-chart__axis' }} axisLine={{ className: 'vt-chart__grid' }} tickLine={false} />
-				<Tooltip cursor={false} content={ChartTooltip} />
-				{/* Two or more series always carry a legend — rendered unconditionally. */}
-				<Legend content={ChartLegend} />
-				{series.map((s, index) => {
-					const isSecondSeries = index === 1;
-					const segmentClassName = isSecondSeries ? 'vt-chart__segment--series-2' : 'vt-chart__segment--series-1';
-					const segmentFill = isSecondSeries ? CHART_SERIES_2 : CHART_SERIES_1;
-					return (
-						<Bar
-							key={s.key}
-							dataKey={s.key}
-							name={s.label}
-							stackId="requests"
-							className={segmentClassName}
-							fill={segmentFill}
-							stroke={SURFACE_GAP}
-							strokeWidth={SEGMENT_GAP_PX}
-							maxBarSize={MAX_BAR_THICKNESS_PX}
-							radius={[DATA_END_RADIUS_PX, DATA_END_RADIUS_PX, 0, 0]}
-							isAnimationActive={false}
-						/>
-					);
-				})}
-			</BarChart>
-		</ChartFrame>
+		<div ref={ref}>
+			<ChartFrame variantClassName="vt-chart--stacked-bar" height={height} isEmpty={isEmpty} emptyCopyKey={emptyCopyKey}>
+				<BarChart data={chartData} margin={{ top: 24, right: 8, bottom: 8, left: 8 }}>
+					<CartesianGrid className="vt-chart__grid" vertical={false} />
+					<XAxis type="category" dataKey="label" tick={{ className: 'vt-chart__axis' }} axisLine={{ className: 'vt-chart__grid' }} tickLine={false} />
+					<YAxis
+						type="number"
+						tick={{ className: 'vt-chart__axis' }}
+						axisLine={{ className: 'vt-chart__grid' }}
+						tickLine={false}
+						tickCount={tickCountFor(width)}
+					/>
+					<Tooltip cursor={false} content={ChartTooltip} />
+					{/* Two or more series always carry a legend — rendered unconditionally. */}
+					<Legend content={ChartLegend} />
+					{series.map((s, index) => {
+						const isSecondSeries = index === 1;
+						const segmentClassName = isSecondSeries ? 'vt-chart__segment--series-2' : 'vt-chart__segment--series-1';
+						const segmentFill = isSecondSeries ? CHART_SERIES_2 : CHART_SERIES_1;
+						return (
+							<Bar
+								key={s.key}
+								dataKey={s.key}
+								name={s.label}
+								stackId="requests"
+								className={segmentClassName}
+								fill={segmentFill}
+								stroke={SURFACE_GAP}
+								strokeWidth={SEGMENT_GAP_PX}
+								maxBarSize={MAX_BAR_THICKNESS_PX}
+								radius={[DATA_END_RADIUS_PX, DATA_END_RADIUS_PX, 0, 0]}
+								isAnimationActive={false}
+							/>
+						);
+					})}
+				</BarChart>
+			</ChartFrame>
+		</div>
 	);
 }
 
