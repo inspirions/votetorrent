@@ -68,6 +68,26 @@ export interface IAssociationEngine {
   getAssociations(registrantId: string): Promise<Association[]>
 
   /**
+   * D-23a: reverse lookup — every public `Association` row bound to a
+   * DEVICE, rather than to a registrant. `deviceKey` is the **P-256 device
+   * key** the `Association` row is keyed on (`provisionDeviceKey()`'s
+   * result) — NOT the secp256k1 `deviceUserKey` that signs the registration
+   * request. The registration ceremony uses two distinct keys and
+   * conflating them is a live trap: a lookup with the wrong one silently
+   * reads "not registered" forever.
+   *
+   * `DeviceKey` is the TRAILING column of `Association`'s `(RegistrantId,
+   * DeviceKey)` primary key, so this is a SCAN, not a point lookup —
+   * accepted at voter-local row counts as a documented tradeoff rather than
+   * an added index (D-23a explicitly forbids adding one).
+   *
+   * Results are ordered `registrantId` ascending. Carries the IDENTICAL
+   * Phase-42 D-04 information-disclosure boundary as {@link getAssociation}:
+   * at most `DeviceHash`, never `AssociationPrivate.DeviceId`.
+   */
+  getAssociationsByDeviceKey(deviceKey: string): Promise<Association[]>
+
+  /**
    * D-11 inspect half (paired with the existing `removeAttestationChallenge`
    * expire half): every outstanding `AttestationChallenge`. `registrantId` is
    * an OPTIONAL narrowing predicate — omitted returns all outstanding
