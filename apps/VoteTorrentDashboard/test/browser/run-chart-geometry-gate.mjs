@@ -71,6 +71,7 @@ export const RUNG_IDS = Object.freeze([
 	'c5-meter-fill-ratio-proportional',
 	'panel-body-free-of-controls',
 	'view-switch-swaps-representations',
+	'numeric-axis-ticks-are-whole-numbers',
 ]);
 
 /** Bounded wait for `.vt-chart__tooltip` to appear/disappear during a hover read (60-12). */
@@ -509,6 +510,90 @@ export function evaluateViewSwitchSwapsRepresentations(defaultPass, gridPass) {
 		: { passed: false, detail: failures.join('; ') };
 }
 
+/**
+ * D-16/60-13: every numeric-axis tick label parses as a whole number, and the
+ * largest tick never runs past the fixture's own real maximum.
+ *
+ * DUPLICATED, NOT IMPORTED, from `apps/VoteTorrentPublic/test/browser/render-fidelity-gate.mjs`'s
+ * comparator of the same name -- each gate is self-contained by design (no
+ * cross-app import), and both copies are covered by their own
+ * `--prove-*-matchers` controls.
+ *
+ * ANTI-VACUITY FIRST, and the third clause is the one that makes this rung
+ * honest rather than merely correct: a fractional tick is only REACHABLE when
+ * the axis's own data maximum is small, so `expected.maxValue > 3` must
+ * itself be a FAIL -- a rung fed a large-count fixture would otherwise pass
+ * on every build, healthy or not.
+ * @param {ReadonlyArray<string>} ticks
+ * @param {{ maxValue: number, axisName: string }} expected
+ * @returns {Verdict}
+ */
+export function evaluateIntegerTicks(ticks, expected) {
+	/** @type {string[]} */
+	const failures = [];
+	const list = Array.isArray(ticks) ? ticks : [];
+	const axisName = expected && typeof expected.axisName === 'string' && expected.axisName !== '' ? expected.axisName : '(unnamed axis)';
+	const maxValue = expected ? expected.maxValue : Number.NaN;
+
+	if (list.length < 2) {
+		failures.push(
+			`${axisName}: only ${list.length} tick(s) rendered -- an axis with fewer than 2 ticks cannot show a fractional subdivision, so this rung would be vacuous`,
+		);
+	}
+	const emptyCount = list.filter((t) => typeof t !== 'string' || t.trim() === '').length;
+	if (emptyCount > 0) failures.push(`${axisName}: ${emptyCount} of ${list.length} tick(s) have empty text`);
+	if (!Number.isFinite(maxValue) || maxValue > 3) {
+		failures.push(
+			`${axisName}: the fixture's maximum (${maxValue}) is too large for a fractional tick to be reachable; this rung would be vacuous`,
+		);
+	}
+
+	/** @type {number[]} */
+	const parsed = [];
+	for (const raw of list) {
+		if (typeof raw !== 'string' || raw.trim() === '') continue;
+		const stripped = raw.replace(/,/g, '');
+		if (!/^-?\d+$/.test(stripped)) {
+			failures.push(`${axisName}: tick "${raw}" is not a whole number`);
+			continue;
+		}
+		parsed.push(Number.parseInt(stripped, 10));
+	}
+
+	if (parsed.length > 0 && Number.isFinite(maxValue)) {
+		const largest = Math.max(...parsed);
+		if (largest > maxValue) failures.push(`${axisName}: largest tick ${largest} exceeds the fixture's real maximum ${maxValue}`);
+	}
+
+	return failures.length === 0
+		? { passed: true, detail: `${axisName}: ${list.length} tick(s) [${list.join(', ')}], all whole numbers, within the fixture's real maximum ${maxValue}` }
+		: { passed: false, detail: failures.join('; ') };
+}
+
+/**
+ * Runs `evaluateIntegerTicks` once per small-count probe and joins the three
+ * verdicts into ONE rung, naming the failing probe id in the detail. Covers
+ * the three officer-side numeric axes Task 1's public-side fix does not:
+ * `BarSeries`'s vertical YAxis, `StackedBarSeries`'s YAxis and `TimeSeries`'s
+ * YAxis.
+ * @param {ReadonlyArray<{ probeId: string, ticks: ReadonlyArray<string> }>} probes
+ * @param {number} maxValue
+ * @returns {Verdict}
+ */
+export function evaluateNumericAxisTicksAcrossProbes(probes, maxValue) {
+	/** @type {string[]} */
+	const failures = [];
+	const list = Array.isArray(probes) ? probes : [];
+	if (list.length === 0) failures.push('no probe readout(s) supplied -- this rung would be vacuous');
+	for (const probe of list) {
+		const v = evaluateIntegerTicks(probe.ticks, { maxValue, axisName: probe.probeId });
+		if (!v.passed) failures.push(`probe "${probe.probeId}": ${v.detail}`);
+	}
+	return failures.length === 0
+		? { passed: true, detail: `${list.length} probe(s) [${list.map((p) => p.probeId).join(', ')}], every numeric-axis tick whole and within max ${maxValue}` }
+		: { passed: false, detail: failures.join('; ') };
+}
+
 // ---------------------------------------------------------------------------
 // PART C — matcher positive/negative controls (`--prove-matchers`). Every
 // comparator gets TWO violating cases: a wrong-defect-shape input, and an
@@ -581,6 +666,14 @@ function matcherControls() {
 	};
 	const healthyDefaultPass = { storedRegistrations: null, storedKeyholders: null, barCount: 3, gridPresent: false, gridHeight: 0, meterTrackWidth: 120 };
 	const healthyGridPass = { storedRegistrations: 'grid', storedKeyholders: null, barCount: 0, gridPresent: true, gridHeight: 80, meterTrackWidth: 120 };
+	// 60-13. `FIXTURE_META.smallCountMax` (3) is the single shared bound every
+	// probe's `expected.maxValue` carries -- the constant the fixture's own
+	// header comment names as "the largest value across all three".
+	const healthyTicksProbes = [
+		{ probeId: 'ticks-vertical-bar', ticks: ['0', '1', '2', '3'] },
+		{ probeId: 'ticks-stacked-bar', ticks: ['0', '1', '2', '3'] },
+		{ probeId: 'ticks-time-series', ticks: ['0', '1', '2'] },
+	];
 
 	return Object.freeze([
 		{
@@ -754,6 +847,35 @@ function matcherControls() {
 			violating: evaluateViewSwitchSwapsRepresentations({ ...healthyDefaultPass, storedRegistrations: 'chart' }, healthyGridPass),
 			healthy: evaluateViewSwitchSwapsRepresentations(healthyDefaultPass, healthyGridPass),
 		},
+		{
+			label: 'numeric-axis-ticks-are-whole-numbers vs. fractional ticks on one probe (the live defect shape)',
+			violating: evaluateNumericAxisTicksAcrossProbes(
+				healthyTicksProbes.map((p) => (p.probeId === 'ticks-time-series' ? { ...p, ticks: ['0', '0.5', '1', '1.5', '2'] } : p)),
+				FIXTURE_META.smallCountMax,
+			),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, FIXTURE_META.smallCountMax),
+		},
+		{
+			label: 'numeric-axis-ticks-are-whole-numbers vs. an over-domain largest tick on one probe',
+			violating: evaluateNumericAxisTicksAcrossProbes(
+				healthyTicksProbes.map((p) => (p.probeId === 'ticks-vertical-bar' ? { ...p, ticks: ['0', '1', '2', '3', '4'] } : p)),
+				FIXTURE_META.smallCountMax,
+			),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, FIXTURE_META.smallCountMax),
+		},
+		{
+			label: 'numeric-axis-ticks-are-whole-numbers vs. a one-tick probe (planted anti-vacuity control missing)',
+			violating: evaluateNumericAxisTicksAcrossProbes(
+				healthyTicksProbes.map((p) => (p.probeId === 'ticks-stacked-bar' ? { ...p, ticks: ['0'] } : p)),
+				FIXTURE_META.smallCountMax,
+			),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, FIXTURE_META.smallCountMax),
+		},
+		{
+			label: 'numeric-axis-ticks-are-whole-numbers vs. a shared expected.maxValue of 1847 (would be vacuous against a large-count fixture)',
+			violating: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, 1847),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, FIXTURE_META.smallCountMax),
+		},
 	]);
 }
 
@@ -846,7 +968,7 @@ async function gotoAndWait(page, url) {
  * treated as "measures zero", exactly the semantics C1/C2's own planted
  * zero controls need.
  * @param {import('playwright').Page} page
- * @param {{ STATUS_FIXTURE: unknown, REQUEST_FIXTURE: unknown, REQUEST_SERIES: unknown, INTAKE_FIXTURE: unknown, METER_FIXTURES: unknown }} fixtures
+ * @param {{ STATUS_FIXTURE: unknown, REQUEST_FIXTURE: unknown, REQUEST_SERIES: unknown, INTAKE_FIXTURE: unknown, METER_FIXTURES: unknown, smallCountProbeIds: ReadonlyArray<string> }} fixtures
  */
 function readPage(page, fixtures) {
 	return page.evaluate((fx) => {
@@ -1005,6 +1127,17 @@ function readPage(page, fixtures) {
 		const meterTrackWidth = partialMeterTrack ? partialMeterTrack.getBoundingClientRect().width : 0;
 		const mounted = [...document.querySelectorAll('[data-chart-geometry]')].map((el) => el.getAttribute('data-chart-geometry')).filter((n) => n != null);
 
+		// --- 60-13 small-count numeric-axis probes --------------------------
+		// The vertical bar/stacked-bar probes are numeric on the Y axis; the
+		// time-series probe is also numeric on Y (its X axis is the category
+		// axis) -- all three read `.recharts-yAxis-tick-labels .vt-chart__axis`.
+		const smallCountProbeIds = /** @type {ReadonlyArray<string>} */ (fx.smallCountProbeIds ?? []);
+		const smallCountTicks = smallCountProbeIds.map((probeId) => {
+			const root = document.querySelector(`[data-chart-geometry="${probeId}"]`);
+			const tickEls = root ? [...root.querySelectorAll('.recharts-yAxis-tick-labels .vt-chart__axis')] : [];
+			return { probeId, ticks: tickEls.map((el) => (el.textContent ?? '').trim()) };
+		});
+
 		return {
 			readout,
 			tokens: {
@@ -1026,6 +1159,7 @@ function readPage(page, fixtures) {
 			linePath: { vertices, subpathCount, box: linePathBox, present: linePathEl != null },
 			meters,
 			controls: { bodyTotal, bodyByTerm, switchButtons, probeByTerm },
+			smallCountTicks,
 			view: {
 				barCount,
 				gridPresent,
@@ -1052,7 +1186,7 @@ function checkVacuity(m, passLabel) {
 	if (m.readout === null) return 'the harness never published its readout — the page did not finish.';
 	if (m.readout.error !== null) return `the harness recorded a render error: ${m.readout.error}`;
 	if (m.readout.fixtureMeta.version !== FIXTURE_META.version) return `readout fixtureMeta.version ${m.readout.fixtureMeta.version} disagrees with the driver's own import (${FIXTURE_META.version})`;
-	for (const key of /** @type {const} */ (['statusCount', 'requestCategoryCount', 'intakeBucketCount', 'meterCount'])) {
+	for (const key of /** @type {const} */ (['statusCount', 'requestCategoryCount', 'intakeBucketCount', 'meterCount', 'smallCountMax'])) {
 		if (m.readout.fixtureMeta[key] !== FIXTURE_META[key]) return `readout fixtureMeta.${key} (${m.readout.fixtureMeta[key]}) disagrees with the driver's own import (${FIXTURE_META[key]})`;
 	}
 	for (const [name, value] of Object.entries(m.tokens)) {
@@ -1067,6 +1201,16 @@ function checkVacuity(m, passLabel) {
 		if (m.linePath.vertices.length === 0) return 'default pass: C3 rendered zero marks';
 		if (m.meters.every((/** @type {{ trackWidth: number }} */ mt) => mt.trackWidth === 0)) return 'default pass: C5 rendered zero marks';
 		if (m.view.storedRegistrations !== null) return `default pass: vt-dashboard-panel-view:registrations is already "${m.view.storedRegistrations}" — D-18's chart-first default was never exercised`;
+		// 60-13: a missing probe id, or a probe that mounted but published zero
+		// ticks, is a loud bail rather than a silent pass -- either would make
+		// `numeric-axis-ticks-are-whole-numbers` meaningless rather than failing.
+		for (const probeId of FIXTURE_META.smallCountProbeIds) {
+			if (!m.mounted.includes(probeId)) return `default pass: mounted=${JSON.stringify(m.mounted)} is missing small-count probe "${probeId}"`;
+		}
+		const smallCountTicks = /** @type {ReadonlyArray<{ probeId: string, ticks: ReadonlyArray<string> }>} */ (m.smallCountTicks ?? []);
+		for (const probe of smallCountTicks) {
+			if (!Array.isArray(probe.ticks) || probe.ticks.length === 0) return `default pass: small-count probe "${probe.probeId}" published zero numeric-axis ticks`;
+		}
 	} else {
 		if (!m.mounted.includes('c1-grid') || !m.mounted.includes('c2-grid') || !m.mounted.includes('c3')) return `grid pass: mounted=${JSON.stringify(m.mounted)} is missing c1-grid/c2-grid/c3`;
 		if (m.view.storedRegistrations !== 'grid') return `grid pass: vt-dashboard-panel-view:registrations is "${m.view.storedRegistrations}", not "grid" — the seed did not take`;
@@ -1125,7 +1269,7 @@ async function runBrowserGate(port, skipBuild) {
 	try {
 		server = await serveDist(DIST, port);
 		browser = await chromium.launch({ headless: true });
-		const fixtures = { STATUS_FIXTURE, REQUEST_FIXTURE, REQUEST_SERIES, INTAKE_FIXTURE, METER_FIXTURES };
+		const fixtures = { STATUS_FIXTURE, REQUEST_FIXTURE, REQUEST_SERIES, INTAKE_FIXTURE, METER_FIXTURES, smallCountProbeIds: FIXTURE_META.smallCountProbeIds };
 
 		// -- Default pass: no storage seeded — D-18's chart-first default ----
 		const defaultContext = await browser.newContext();
@@ -1184,6 +1328,10 @@ async function runBrowserGate(port, skipBuild) {
 		{
 			const v = evaluateControlAbsence(defaultMeasured.controls);
 			record('panel-body-free-of-controls', v.passed, v.detail);
+		}
+		{
+			const v = evaluateNumericAxisTicksAcrossProbes(defaultMeasured.smallCountTicks, FIXTURE_META.smallCountMax);
+			record('numeric-axis-ticks-are-whole-numbers', v.passed, v.detail);
 		}
 
 		// -- Grid pass: a SECOND, genuinely fresh navigation, the flag seeded

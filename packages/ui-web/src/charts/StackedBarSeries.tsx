@@ -76,6 +76,15 @@ export function StackedBarSeries({ data, series, height = STACKED_BAR_HEIGHT_PX,
 					<XAxis type="category" dataKey="label" tick={{ className: 'vt-chart__axis' }} axisLine={{ className: 'vt-chart__grid' }} tickLine={false} />
 					<YAxis
 						type="number"
+						// This axis counts people: Recharts subdivides below 1 whenever
+						// the data maximum is small (60-13, closing 60-UAT test 11 --
+						// the public roll chart showed "0.7 registrants" as a gridline
+						// label). `domain` pins the upper bound to the real data
+						// maximum too -- Recharts' "nice tick" algorithm still rounds
+						// an auto domain UP to the next whole number even with
+						// allowDecimals off.
+						domain={[0, 'dataMax']}
+						allowDecimals={false}
 						tick={{ className: 'vt-chart__axis' }}
 						axisLine={{ className: 'vt-chart__grid' }}
 						tickLine={false}

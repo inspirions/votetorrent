@@ -156,15 +156,98 @@ export const METER_FIXTURES = Object.freeze([
 ]);
 
 /**
+ * SMALL_COUNT_FIXTURE — 60-13. Whole purpose: keep the tick-VALUE rung
+ * (`numeric-axis-ticks-are-whole-numbers`) non-vacuous. A maximum of 3 or
+ * less is the condition under which Recharts' nice-number tick algorithm
+ * reaches for a fractional subdivision — the three fixtures above count in
+ * the hundreds/thousands and could never reach that condition, exactly why
+ * 60-UAT test 11 was invisible on the officer dashboard. Covers the three
+ * officer-side numeric axes Task 1's public-side fix (BarSeries's horizontal
+ * XAxis) does not exercise: BarSeries's vertical YAxis, StackedBarSeries's
+ * YAxis and TimeSeries's YAxis.
+ *
+ * Names and labels are schema enum names and bucket boundaries ONLY, per this
+ * module's own FIXTURE DATA RULE (T-60-07-02) — `chart-geometry-harness.test.mjs`
+ * rung (6) scans this module against `BANNED_FIELD_RE`.
+ */
+
+/**
+ * The vertical bar probe. `RegistrantStatus` codes, reused from
+ * `STATUS_FIXTURE` above at counts small enough to be non-vacuous: 3/1/0.
+ * The zero keeps this module's own "absent vs zero" discipline (a real bar
+ * fixture always plants a zero-valued category).
+ * @type {ReadonlyArray<ChartDatum>}
+ */
+export const SMALL_COUNT_BAR_FIXTURE = Object.freeze([
+	Object.freeze({ key: 'a', label: 'Active', value: 3, tone: 'ok' }),
+	Object.freeze({ key: 's', label: 'Suspended', value: 1, tone: 'warn' }),
+	Object.freeze({ key: 'r', label: 'Revoked', value: 0, tone: 'fail' }),
+]);
+
+/**
+ * The stacked-bar probe. Two `RegistrationRequestStatus` categories, each
+ * carrying both `REQUEST_SERIES` segments, whose largest COLUMN TOTAL is 3
+ * (2 + 1) — small enough to reach a fractional tick, non-zero on both
+ * segments across the two categories.
+ * @type {ReadonlyArray<StackedDatum>}
+ */
+export const SMALL_COUNT_STACKED_FIXTURE = Object.freeze([
+	Object.freeze({
+		key: 'p',
+		label: 'Pending',
+		segments: [
+			Object.freeze({ seriesKey: 'registrant', value: 2 }),
+			Object.freeze({ seriesKey: 'bridge', value: 1 }),
+		],
+	}),
+	Object.freeze({
+		key: 'a',
+		label: 'Approved',
+		segments: [
+			Object.freeze({ seriesKey: 'registrant', value: 0 }),
+			Object.freeze({ seriesKey: 'bridge', value: 1 }),
+		],
+	}),
+]);
+
+/**
+ * The time-series probe. Four consecutive-hour buckets, same 19-character
+ * boundary shape `INTAKE_FIXTURE` uses, maximum 2 with one INTERIOR zero
+ * (index 1) — mirroring `INTAKE_FIXTURE`'s own planted-zero discipline at a
+ * small enough scale to reach a fractional tick.
+ * @type {ReadonlyArray<ChartDatum>}
+ */
+export const SMALL_COUNT_TIME_FIXTURE = Object.freeze(
+	/** @type {ReadonlyArray<ChartDatum>} */ (
+		[
+			['2026-09-15T08:00:00', 1],
+			['2026-09-15T09:00:00', 0],
+			['2026-09-15T10:00:00', 2],
+			['2026-09-15T11:00:00', 1],
+		].map(([bucketStart, count]) => Object.freeze({ key: String(bucketStart), label: String(bucketStart), value: Number(count) }))
+	),
+);
+
+/** The largest value across all three SMALL_COUNT_FIXTURE arrays. @type {number} */
+export const SMALL_COUNT_MAX = 3;
+
+/**
+ * The `data-chart-geometry` attribute values the three probe charts mount
+ * under, in the order the driver reads them.
+ * @type {ReadonlyArray<string>}
+ */
+export const SMALL_COUNT_PROBE_IDS = Object.freeze(['ticks-vertical-bar', 'ticks-stacked-bar', 'ticks-time-series']);
+
+/**
  * Echoed by the page's readout so the driver can prove it is asserting
  * against the SAME fixture revision it renders — never a copy that has
  * silently drifted. `panelColumnWidthPx` is 420: above `NARROW_CONTAINER_PX`
  * (400), so the six-tick branch applies. The 280px narrow branch is a
  * judgement call and is 60-09's screenshot review, not a rung here.
- * @type {{ version: number, panelColumnWidthPx: number, statusCount: number, requestCategoryCount: number, intakeBucketCount: number, meterCount: number, registrationsCapabilityId: string, keyholdersCapabilityId: string }}
+ * @type {{ version: number, panelColumnWidthPx: number, statusCount: number, requestCategoryCount: number, intakeBucketCount: number, meterCount: number, registrationsCapabilityId: string, keyholdersCapabilityId: string, smallCountMax: number, smallCountProbeIds: ReadonlyArray<string> }}
  */
 export const FIXTURE_META = Object.freeze({
-	version: 2,
+	version: 3,
 	panelColumnWidthPx: 420,
 	statusCount: STATUS_FIXTURE.length,
 	requestCategoryCount: REQUEST_FIXTURE.length,
@@ -172,4 +255,6 @@ export const FIXTURE_META = Object.freeze({
 	meterCount: METER_FIXTURES.length,
 	registrationsCapabilityId: 'registrations',
 	keyholdersCapabilityId: 'keyholders',
+	smallCountMax: SMALL_COUNT_MAX,
+	smallCountProbeIds: SMALL_COUNT_PROBE_IDS,
 });

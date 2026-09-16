@@ -132,17 +132,18 @@ const EXPECTED_RUNG_IDS = Object.freeze([
 	'c5-meter-fill-ratio-proportional',
 	'panel-body-free-of-controls',
 	'view-switch-swaps-representations',
+	'numeric-axis-ticks-are-whole-numbers',
 ]);
 
-test('(7) run-chart-geometry-gate.mjs\'s RUNG_IDS array literal holds exactly the nine expected ids, in order', () => {
+test('(7) run-chart-geometry-gate.mjs\'s RUNG_IDS array literal holds exactly the ten expected ids, in order', () => {
 	const match = DRIVER_MJS_STRIPPED.match(/RUNG_IDS = Object\.freeze\(\[([\s\S]*?)\]\)/);
 	assert.ok(match, 'RUNG_IDS declaration not found');
 	const ids = [...match[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
 	assert.deepEqual(ids, EXPECTED_RUNG_IDS);
 });
 
-test('(7 control) the RUNG_IDS-equality assertion DOES fail against a fixture array carrying a tenth id', () => {
-	const fixtureIds = [...EXPECTED_RUNG_IDS, 'a-tenth-id-that-should-not-exist'];
+test('(7 control) the RUNG_IDS-equality assertion DOES fail against a fixture array carrying an eleventh id', () => {
+	const fixtureIds = [...EXPECTED_RUNG_IDS, 'an-eleventh-id-that-should-not-exist'];
 	assert.throws(() => assert.deepEqual(fixtureIds, EXPECTED_RUNG_IDS), 'the equality assertion must be able to detect an extra id');
 });
 

@@ -51,7 +51,18 @@ import { panelViewStorageKey } from '../../src/screens/panels/panel-view-storage
 import { CAPABILITIES } from '../../src/auth/capabilities.js';
 import type { Capability } from '../../src/auth/capabilities.js';
 import { evaluate } from '../../src/auth/gate.js';
-import { STATUS_FIXTURE, REQUEST_FIXTURE, REQUEST_SERIES, INTAKE_FIXTURE, METER_FIXTURES, FIXTURE_META, TOOLTIP_COPY_KEYS } from './chart-geometry-fixtures.js';
+import {
+	STATUS_FIXTURE,
+	REQUEST_FIXTURE,
+	REQUEST_SERIES,
+	INTAKE_FIXTURE,
+	METER_FIXTURES,
+	FIXTURE_META,
+	TOOLTIP_COPY_KEYS,
+	SMALL_COUNT_BAR_FIXTURE,
+	SMALL_COUNT_STACKED_FIXTURE,
+	SMALL_COUNT_TIME_FIXTURE,
+} from './chart-geometry-fixtures.js';
 
 const win = window as unknown as Record<string, unknown>;
 
@@ -250,6 +261,33 @@ function ControlProbe() {
 	);
 }
 
+/**
+ * The small-count numeric-axis probe (60-13). Mounted OUTSIDE both
+ * `PanelFrame`s, beside `ControlProbe` — never inside a `.panel-body`, which
+ * would put three more chart subtrees inside the scope
+ * `panel-body-free-of-controls` and `view-switch-swaps-representations`
+ * measure. Fixed at `FIXTURE_META.panelColumnWidthPx` (420px) so the tick
+ * branch is deterministic and matches the width the rest of the harness
+ * renders at. Covers the three officer-side numeric axes Task 1's public-side
+ * fix (BarSeries's horizontal XAxis, exercised by C7) does not: BarSeries's
+ * VERTICAL YAxis, StackedBarSeries's YAxis and TimeSeries's YAxis.
+ */
+function SmallCountTicksProbe() {
+	return (
+		<div className="chart-geometry-small-count-probe" style={{ width: `${FIXTURE_META.panelColumnWidthPx}px` }}>
+			<div data-chart-geometry="ticks-vertical-bar">
+				<BarSeries data={[...SMALL_COUNT_BAR_FIXTURE]} />
+			</div>
+			<div data-chart-geometry="ticks-stacked-bar">
+				<StackedBarSeries data={[...SMALL_COUNT_STACKED_FIXTURE]} series={[...REQUEST_SERIES]} emptyCopyKey="panels.registrations.requestChart.empty" />
+			</div>
+			<div data-chart-geometry="ticks-time-series">
+				<TimeSeries data={[...SMALL_COUNT_TIME_FIXTURE]} emptyCopyKey="panels.registrations.intakeChart.empty" />
+			</div>
+		</div>
+	);
+}
+
 function ChartGeometryHarness() {
 	const registrationsEvaluation = evaluate(registrationsCapability, [registrationsCapability.scope]);
 	const keyholdersEvaluation = evaluate(keyholdersCapability, [keyholdersCapability.scope]);
@@ -263,6 +301,7 @@ function ChartGeometryHarness() {
 				<KeyholdersBodyHarness />
 			</PanelFrame>
 			<ControlProbe />
+			<SmallCountTicksProbe />
 		</div>
 	);
 }
