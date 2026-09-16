@@ -303,6 +303,234 @@ walk_dump() {
   awk -v stage_list="${EXPECTED_STAGES[*]}" -f "${AWK_WALK_SCRIPT}" "${normalized}"
 }
 # ---------------------------------------------------------------------------------------
+# dump_ui -- lifted verbatim from run-authority-signing-ceremony.sh:377-414 (renamed
+# TMPDIR_CEREMONY -> TMPDIR_TG). The three-attempt retry loop, the well-formedness check,
+# and DUMP_UI_STATUS ("unobservable" | "ok") are D-04(1)'s primitive: an unobservable
+# dump is a DIFFERENT failure from an observed [0,0][0,0] node and the two must never be
+# conflated.
+# ---------------------------------------------------------------------------------------
+dump_ui() {
+  local out="${TMPDIR_TG}/dump-$$-${RANDOM}.xml"
+  local attempt
+  DUMP_UI_STATUS="unobservable"
+  for attempt in 1 2 3; do
+    adb ${ADBD} shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1
+    adb ${ADBD} shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
+    adb ${ADBD} pull /sdcard/window_dump.xml "${out}" >/dev/null 2>&1 || : > "${out}"
+    if [ -s "${out}" ] && grep -q "</hierarchy>" "${out}" 2>/dev/null; then
+      DUMP_UI_STATUS="ok"
+      break
+    fi
+    sleep 1
+  done
+  if [ "${DUMP_UI_STATUS}" = "unobservable" ]; then
+    echo "[timeline-geometry] WARNING: dump_ui could not obtain a well-formed uiautomator hierarchy after 3 attempts." >&2
+  fi
+  echo "${out}"
+}
+
+# resolve_device_metrics -- reads DENSITY_DPI / SCREEN_W / SCREEN_H from the device,
+# preferring an Override value over the Physical one, honoring any already-set env value
+# so --selftest and manual re-analysis stay deterministic (D-06 / design_notes item 4).
+resolve_device_metrics() {
+  if [ -z "${DENSITY_DPI}" ]; then
+    local density_out
+    density_out=$(adb ${ADBD} shell wm density 2>/dev/null || true)
+    DENSITY_DPI=$(printf '%s\n' "${density_out}" | grep -i "Override density:" | grep -o '[0-9]\+' | tail -1 || true)
+    if [ -z "${DENSITY_DPI}" ]; then
+      DENSITY_DPI=$(printf '%s\n' "${density_out}" | grep -i "Physical density:" | grep -o '[0-9]\+' | tail -1 || true)
+    fi
+    if [ -z "${DENSITY_DPI}" ]; then
+      echo "PREFLIGHT FAIL: could not parse a density value from 'adb ${ADBD} shell wm density' (got: ${density_out})" >&2
+      exit 1
+    fi
+  fi
+  if [ -z "${SCREEN_W}" ] || [ -z "${SCREEN_H}" ]; then
+    local size_out line wxh
+    size_out=$(adb ${ADBD} shell wm size 2>/dev/null || true)
+    line=$(printf '%s\n' "${size_out}" | grep -i "Override size:" | tail -1 || true)
+    if [ -z "${line}" ]; then
+      line=$(printf '%s\n' "${size_out}" | grep -i "Physical size:" | tail -1 || true)
+    fi
+    wxh=$(printf '%s' "${line}" | grep -o '[0-9]\+x[0-9]\+' || true)
+    if [ -z "${wxh}" ]; then
+      echo "PREFLIGHT FAIL: could not parse a screen size from 'adb ${ADBD} shell wm size' (got: ${size_out})" >&2
+      exit 1
+    fi
+    SCREEN_W="${wxh%x*}"
+    SCREEN_H="${wxh#*x}"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------
+# preflight -- fails loudly, never proceeds silently (shape from
+# run-authority-signing-ceremony.sh:143-150), extended per D-04(1)/D-05/D-06.
+#
+# Deviation from the plan's narrated step order: the plain LOCALE-format check (originally
+# listed as step 4, after the adb device-state check) is run FIRST, before any adb call.
+# The plan's own <verification> section requires `LOCALE=fr ... all` to exit 1 naming
+# `en`/`es` as a host-verifiable-without-hardware check, which is only possible if this
+# check precedes the (necessarily device-dependent) `adb get-state` check -- with no
+# device attached, get-state would otherwise fail first and the LOCALE message would
+# never be reached. The LOCALE CROSS-CHECK against the live dump (D-06, which does need a
+# device) stays in its originally documented position, after device-state/package checks.
+# ---------------------------------------------------------------------------------------
+preflight() {
+  echo "[timeline-geometry] Preflight: LOCALE format ..."
+  case "${LOCALE}" in
+    en|es) ;;
+    *)
+      echo "PREFLIGHT FAIL: LOCALE='${LOCALE}' is not accepted -- must be 'en' or 'es'" >&2
+      exit 1
+      ;;
+  esac
+
+  echo "[timeline-geometry] Preflight: adb device state ..."
+  local state
+  state=$(adb ${ADBD} get-state 2>/dev/null || true)
+  if [ "${state}" != "device" ]; then
+    echo "PREFLIGHT FAIL: '${SERIAL}' is not in 'device' state (got '${state}') -- is the device connected and authorized? (adb devices)" >&2
+    exit 1
+  fi
+
+  if [ "${SERIAL}" != "43a209ff0806" ]; then
+    echo "PREFLIGHT WARN: SUBSTITUTED DEVICE -- SERIAL=${SERIAL} is not the D-05-mandated Redmi 8 43a209ff0806" >&2
+    SERIAL_NOTE="substituted"
+  fi
+
+  echo "[timeline-geometry] Preflight: package installed and debuggable ..."
+  local pkg_list
+  pkg_list=$(adb ${ADBD} shell pm list packages "${PACKAGE}" 2>/dev/null || true)
+  if ! printf '%s' "${pkg_list}" | grep -q "${PACKAGE}"; then
+    echo "PREFLIGHT FAIL: package ${PACKAGE} is not installed on ${SERIAL}" >&2
+    exit 1
+  fi
+  local debuggable
+  debuggable=$(adb ${ADBD} shell dumpsys package "${PACKAGE}" 2>/dev/null | grep -i "flags" | grep -i "DEBUGGABLE" || true)
+  if [ -z "${debuggable}" ]; then
+    echo "PREFLIGHT FAIL: ${PACKAGE} is not a debuggable build on ${SERIAL} -- a release APK ignores Metro and would measure the wrong tree" >&2
+    exit 1
+  fi
+
+  echo "[timeline-geometry] Preflight: device metrics ..."
+  resolve_device_metrics
+
+  echo "[timeline-geometry] Preflight: locale cross-check ..."
+  local dump_path
+  dump_path=$(dump_ui)
+  if [ "${DUMP_UI_STATUS}" != "ok" ]; then
+    echo "PREFLIGHT FAIL: dump-unobservable -- could not obtain a well-formed uiautomator hierarchy for the locale cross-check" >&2
+    exit 1
+  fi
+  local has_en has_es
+  has_en=$(grep -c "Voting Period" "${dump_path}" || true)
+  has_es=$(grep -c "Período de Votación" "${dump_path}" || true)
+  if [ "${LOCALE}" = "en" ] && [ "${has_en}" -eq 0 ]; then
+    if [ "${has_es}" -gt 0 ]; then
+      echo "PREFLIGHT FAIL: LOCALE=en requested but the dump contains the es marker 'Período de Votación' and not the en marker 'Voting Period' -- the app is rendering es" >&2
+    else
+      echo "PREFLIGHT FAIL: LOCALE=en requested but neither the en marker 'Voting Period' nor the es marker 'Período de Votación' was found in the dump" >&2
+    fi
+    exit 1
+  fi
+  if [ "${LOCALE}" = "es" ] && [ "${has_es}" -eq 0 ]; then
+    if [ "${has_en}" -gt 0 ]; then
+      echo "PREFLIGHT FAIL: LOCALE=es requested but the dump contains the en marker 'Voting Period' and not the es marker 'Período de Votación' -- the app is rendering en" >&2
+    else
+      echo "PREFLIGHT FAIL: LOCALE=es requested but neither the es marker 'Período de Votación' nor the en marker 'Voting Period' was found in the dump" >&2
+    fi
+    exit 1
+  fi
+
+  echo "[timeline-geometry] Preflight: node locatability for all ${#EXPECTED_STAGES[@]} stage ids ..."
+  ACCUMULATED_RECORDS="${TMPDIR_TG}/accumulated.records"
+  : > "${ACCUMULATED_RECORDS}"
+  collect_records
+
+  local missing="" s found_count
+  for s in "${EXPECTED_STAGES[@]}"; do
+    found_count=$(grep -c "^CARD${TAB}${s}${TAB}" "${ACCUMULATED_RECORDS}" || true)
+    if [ "${found_count}" -eq 0 ]; then
+      missing="${missing:+${missing},}${s}"
+    fi
+  done
+  if [ -n "${missing}" ]; then
+    echo "PREFLIGHT FAIL: could not locate card anchor for stage(s): ${missing}" >&2
+    exit 1
+  fi
+
+  local orphan_stages
+  orphan_stages=$(awk -v FS="${TAB}" '$1=="ORPHAN"{print $2}' "${ACCUMULATED_RECORDS}" | sort -u | paste -sd, - || true)
+  if [ -n "${orphan_stages}" ]; then
+    echo "PREFLIGHT FAIL: notch anchor did not surface as a resource-id/content-desc for stage(s): ${orphan_stages}" >&2
+    exit 1
+  fi
+
+  echo "[timeline-geometry] Preflight: PASS (density=${DENSITY_DPI}dpi screen=${SCREEN_W}x${SCREEN_H} locale=${LOCALE} serial=${SERIAL}${SERIAL_NOTE:+ serial_note=${SERIAL_NOTE}})"
+}
+
+# ---------------------------------------------------------------------------------------
+# collect_records -- the scroll accumulator (design_notes item 5). Loops at most 8
+# iterations: dump, walk, and for each CARD record whose rectangle is FULLY inside the
+# viewport and whose stage has not yet been recorded, append that stage's full record set
+# to ACCUMULATED_RECORDS. Stops early once all ten stages have a fully-visible
+# observation, or when two consecutive iterations add no new stage. Keeping only
+# fully-visible observations is load-bearing, not an optimization: a partially-scrolled
+# card reports vertically truncated bounds and would manufacture a false touch-targets
+# FAIL that reads exactly like a real one.
+# ---------------------------------------------------------------------------------------
+collect_records() {
+  local iter=0 max_iter=8 added_any same_count=0 stage_list_seen=""
+  while [ "${iter}" -lt "${max_iter}" ]; do
+    iter=$((iter + 1))
+    local dump_path
+    dump_path=$(dump_ui)
+    if [ "${DUMP_UI_STATUS}" != "ok" ]; then
+      echo "[timeline-geometry] WARNING: collect_records iteration ${iter}: dump-unobservable, skipping this pass." >&2
+      continue
+    fi
+    local iter_records="${TMPDIR_TG}/iter-${iter}.records"
+    walk_dump "${dump_path}" > "${iter_records}"
+
+    added_any=0
+    local rtype rstage rx1 ry1 rx2 ry2 rest
+    while IFS="${TAB}" read -r rtype rstage rx1 ry1 rx2 ry2 rest; do
+      [ "${rtype}" != "CARD" ] && continue
+      case ",${stage_list_seen}," in
+        *",${rstage},"*) continue ;;
+      esac
+      if [ "${ry1}" -ge 0 ] && [ "${ry2}" -le "${SCREEN_H}" ]; then
+        awk -v FS="${TAB}" -v st="${rstage}" '$2==st' "${iter_records}" >> "${ACCUMULATED_RECORDS}"
+        stage_list_seen="${stage_list_seen:+${stage_list_seen},}${rstage}"
+        added_any=1
+      fi
+    done < "${iter_records}"
+
+    local ostage
+    for ostage in $(awk -v FS="${TAB}" '$1=="ORPHAN"{print $2}' "${iter_records}" | sort -u); do
+      if ! grep -q "^ORPHAN${TAB}${ostage}\$" "${ACCUMULATED_RECORDS}" 2>/dev/null; then
+        printf 'ORPHAN%s%s\n' "${TAB}" "${ostage}" >> "${ACCUMULATED_RECORDS}"
+      fi
+    done
+
+    local seen_count
+    seen_count=$(printf '%s' "${stage_list_seen}" | tr ',' '\n' | grep -c . || true)
+    if [ "${seen_count}" -ge "${#EXPECTED_STAGES[@]}" ]; then
+      break
+    fi
+    if [ "${added_any}" -eq 0 ]; then
+      same_count=$((same_count + 1))
+      [ "${same_count}" -ge 2 ] && break
+    else
+      same_count=0
+    fi
+
+    adb ${ADBD} shell input swipe $((SCREEN_W / 2)) $((SCREEN_H * 3 / 4)) $((SCREEN_W / 2)) $((SCREEN_H / 4)) 400 >/dev/null 2>&1 || true
+    sleep 1
+  done
+}
+
+# ---------------------------------------------------------------------------------------
 # The three measuring legs (D-03). Each consumes a records FILE (the accumulated
 # walk_dump stream), never re-derives geometry itself, and returns its result as a single
 # "VERDICT<TAB>EVIDENCE" line on stdout for run_leg() to record. Every evidence string
@@ -570,10 +798,38 @@ if [ "${1:-}" = "--dump-records" ]; then
   walk_dump "${DUMP_PATH}"
   exit 0
 fi
+# ---------------------------------------------------------------------------------------
+# Leg dispatch and usage (shape from run-authority-signing-ceremony.sh:73-84).
+# ---------------------------------------------------------------------------------------
+LEG="${1:-}"
+case "${LEG}" in
+  clipping|duplicates|touch-targets|all) ;;
+  *)
+    echo "Usage: SERIAL=43a209ff0806 LOCALE=en ./scripts/run-timeline-geometry-proof.sh <clipping|duplicates|touch-targets|all>" >&2
+    exit 1
+    ;;
+esac
 
-# ---------------------------------------------------------------------------------------
-# Leg dispatch, preflight and device-facing collection land in Task 3 of this plan.
-# For now: --selftest and --dump-records are wired; anything else errors loudly.
-# ---------------------------------------------------------------------------------------
-echo "run-timeline-geometry-proof.sh: preflight()/device legs are not wired up yet; this task adds --selftest only (Task 3 of 61-03 adds device execution)." >&2
-exit 1
+preflight
+
+case "${LEG}" in
+  clipping) run_leg "clipping" "${ACCUMULATED_RECORDS}" ;;
+  duplicates) run_leg "duplicates" "${ACCUMULATED_RECORDS}" ;;
+  touch-targets) run_leg "touch-targets" "${ACCUMULATED_RECORDS}" ;;
+  all)
+    run_leg "clipping" "${ACCUMULATED_RECORDS}"
+    run_leg "duplicates" "${ACCUMULATED_RECORDS}"
+    run_leg "touch-targets" "${ACCUMULATED_RECORDS}"
+    ;;
+esac
+
+echo "[timeline-geometry] ========== Summary =========="
+for r in "${RESULTS[@]}"; do
+  IFS='|' read -r name verdict evidence <<< "${r}"
+  echo "LEG ${name}: ${verdict}"
+done
+
+if any_failed; then
+  exit 1
+fi
+exit 0
