@@ -9,6 +9,20 @@
  * The 2px `stroke`/`strokeWidth` on each segment is 60-UI-SPEC's mandated
  * surface-coloured separator between touching segments — explicitly not a
  * border drawn around a mark.
+ *
+ * `<Tooltip shared={false}>` (60-12, closing 60-UAT test 14 / 60-REVIEW
+ * WR-01): Recharts' `BarChart` defaults to an AXIS-scoped tooltip, which
+ * hands `ChartTooltip` every series stacked at the hovered category
+ * regardless of which segment the pointer is over. `shared={false}` switches
+ * this chart to an ITEM-scoped tooltip so the payload carries only the
+ * hovered segment — the (a) option the WR-01 todo named, and the one the
+ * UI-SPEC's C2 wording ("{status name} · {issuer name}: …", a single issuer)
+ * already commits the product to. This is what makes `ChartTooltip`'s
+ * per-segment `segmentTooltip` lookup meaningful: without it, an item-scoped
+ * lookup would still only ever see the one series Recharts chose to report.
+ * `BarSeries.tsx` and `TimeSeries.tsx` are both single-series and are left on
+ * the default axis scope; `TimeSeries`'s D-11 crosshair depends on that
+ * axis-scoped `cursor`.
  */
 import { Bar, BarChart, CartesianGrid, Legend, Tooltip, XAxis, YAxis } from 'recharts';
 import { ChartFrame, ChartLegend, ChartTooltip, tickCountFor, useContainerWidth } from './chart-frame.js';
@@ -67,7 +81,7 @@ export function StackedBarSeries({ data, series, height = STACKED_BAR_HEIGHT_PX,
 						tickLine={false}
 						tickCount={tickCountFor(width)}
 					/>
-					<Tooltip cursor={false} content={ChartTooltip} />
+					<Tooltip cursor={false} content={ChartTooltip} shared={false} />
 					{/* Two or more series always carry a legend — rendered unconditionally. The element form (rather than the component form) is deliberate: Recharts CLONES this element with its own `payload` prop while preserving the author-supplied `series` prop, so ChartLegend can resolve each swatch from its own series rather than from payload position. */}
 					<Legend content={<ChartLegend series={series} />} />
 					{series.map((s) => {

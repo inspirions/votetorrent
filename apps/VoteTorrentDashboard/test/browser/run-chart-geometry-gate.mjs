@@ -66,11 +66,15 @@ export const RUNG_IDS = Object.freeze([
 	'c1-status-labels-unclipped',
 	'c2-stacked-segments-sum-to-total',
 	'c2-legend-swatch-matches-series-fill',
+	'c2-tooltip-names-hovered-segment-once',
 	'c3-marks-match-buckets-no-gaps',
 	'c5-meter-fill-ratio-proportional',
 	'panel-body-free-of-controls',
 	'view-switch-swaps-representations',
 ]);
+
+/** Bounded wait for `.vt-chart__tooltip` to appear/disappear during a hover read (60-12). */
+const TOOLTIP_WAIT_TIMEOUT_MS = 5_000;
 
 /** Relative-tolerance/pixel-tolerance constants, named rather than scattered as magic numbers. */
 export const PROPORTIONALITY_TOLERANCE = 0.02;
@@ -318,6 +322,67 @@ export function evaluateLegendPairsWithSeries(legend, seriesMarks, seriesTotals)
 }
 
 /**
+ * C2 tooltip content, closing 60-UAT test 14 / 60-REVIEW WR-01. Hovering a
+ * stacked segment must name THAT segment's own series and count, exactly
+ * once — never a fixed series chosen by payload position, and never a
+ * doubled category label. Anti-vacuity runs FIRST because the two defects
+ * this rung guards (fixed-series selection, doubled label) both manifest as
+ * a tooltip that LOOKS present but is silently wrong or silently empty.
+ * @param {ReadonlyArray<{ text: string, labelCount: number, valueCount: number }>} readouts one per hovered series, in the SAME order as `expectations`
+ * @param {ReadonlyArray<{ seriesLabel: string, otherSeriesLabel: string, categoryLabel: string, value: number }>} expectations fixture-derived, computed by the driver -- never recomputed in-page
+ * @returns {Verdict}
+ */
+export function evaluateTooltipContent(readouts, expectations) {
+	/** @type {string[]} */
+	const failures = [];
+
+	// --- anti-vacuity, first ---------------------------------------------
+	if (readouts.length < 2) failures.push(`only ${readouts.length} hover readout(s) supplied (want >= 2 -- a single hover cannot detect a fixed-series tooltip)`);
+	readouts.forEach((readout, i) => {
+		if (readout.text === '') failures.push(`readout ${i} has empty text -- the tooltip never rendered, so this rung would be silently vacuous`);
+	});
+	const seriesLabels = expectations.map((e) => e.seriesLabel);
+	if (seriesLabels.some((l) => l === '')) failures.push('an expectation series label is empty');
+	if (new Set(seriesLabels).size < seriesLabels.length) failures.push(`expectation series labels are not all distinct: ${seriesLabels.join(', ')}`);
+	for (const e of expectations) {
+		if (e.seriesLabel !== '' && e.otherSeriesLabel !== '' && (e.seriesLabel.includes(e.otherSeriesLabel) || e.otherSeriesLabel.includes(e.seriesLabel))) {
+			failures.push(`series label "${e.seriesLabel}" and "${e.otherSeriesLabel}" are substrings of each other -- the containment checks below would be unfalsifiable`);
+		}
+	}
+	if (readouts.length >= 2 && readouts[0].text !== '' && readouts[0].text === readouts[1].text) {
+		failures.push(`both readouts have identical text "${readouts[0].text}" -- the exact signature of a tooltip that reports the same series whichever segment is hovered`);
+	}
+
+	// --- series identity, value, and label-occurs-once, per readout -------
+	readouts.forEach((readout, i) => {
+		const expectation = expectations[i];
+		if (!expectation) {
+			failures.push(`readout ${i} has no matching expectation`);
+			return;
+		}
+		if (readout.text === '') return; // already flagged above -- nothing further to check meaningfully
+		if (!readout.text.includes(expectation.seriesLabel)) {
+			failures.push(`readout ${i} text "${readout.text}" does not contain its own series label "${expectation.seriesLabel}"`);
+		}
+		if (expectation.otherSeriesLabel !== '' && readout.text.includes(expectation.otherSeriesLabel)) {
+			failures.push(`readout ${i} text "${readout.text}" contains the OTHER series' label "${expectation.otherSeriesLabel}" -- the fixed-series-selection signature`);
+		}
+		if (!readout.text.includes(String(expectation.value))) {
+			failures.push(`readout ${i} text "${readout.text}" does not contain its own segment's value "${expectation.value}"`);
+		}
+		const occurrences = expectation.categoryLabel === '' ? 0 : readout.text.split(expectation.categoryLabel).length - 1;
+		if (occurrences !== 1) {
+			failures.push(`readout ${i} text "${readout.text}" contains category label "${expectation.categoryLabel}" ${occurrences} time(s) (want exactly 1) -- the doubled-label signature`);
+		}
+		if (readout.labelCount > 1) failures.push(`readout ${i} carries ${readout.labelCount} .vt-chart__tooltip-label span(s) (want at most 1)`);
+	});
+
+	return failures.length === 0
+		? { passed: true, detail: `${readouts.length} hover(s), each naming its own series and value, category label occurring exactly once, no cross-series leakage` }
+		: { passed: false, detail: failures.join('; ') };
+}
+
+/**
  * C3 mark-count-equals-bucket-count, no gaps. `path.vertices`/`subpathCount`
  * come from parsing the rendered `<path d="…">`; `expected.values` is the
  * fixture's own bucket-count array (INTAKE_FIXTURE-shaped).
@@ -485,6 +550,17 @@ function matcherControls() {
 		{ label: 'Registrant', total: 2310 },
 		{ label: 'Bridge', total: 495 },
 	];
+	// Both hovers land on the fixture's own "Pending" category (registrant and
+	// bridge are both non-zero there), mirroring what a real hover of each
+	// series' FIRST rendered rect measures against REQUEST_FIXTURE.
+	const healthyTooltipReadoutsC2 = [
+		{ text: 'Pending · Registrant: 1263 request(s)', labelCount: 0, valueCount: 1 },
+		{ text: 'Pending · Bridge: 418 request(s)', labelCount: 0, valueCount: 1 },
+	];
+	const healthyTooltipExpectationsC2 = [
+		{ seriesLabel: 'Registrant', otherSeriesLabel: 'Bridge', categoryLabel: 'Pending', value: 1263 },
+		{ seriesLabel: 'Bridge', otherSeriesLabel: 'Registrant', categoryLabel: 'Pending', value: 418 },
+	];
 	const healthyPathValues = [37, 52, 0, 64, 91, 128, 73, 46, 0, 19];
 	const baselineY = 132;
 	const healthyPath = {
@@ -589,6 +665,44 @@ function matcherControls() {
 				healthySeriesTotalsC2,
 			),
 			healthy: evaluateLegendPairsWithSeries(healthyLegendItemsC2, healthySeriesMarksC2, healthySeriesTotalsC2),
+		},
+		{
+			label: 'c2-tooltip-names-hovered-segment-once vs. both hovers naming the same series (the fixed-series defect)',
+			violating: evaluateTooltipContent(
+				[
+					{ text: 'Pending · Bridge: 418 request(s)', labelCount: 0, valueCount: 1 },
+					{ text: 'Pending · Bridge: 418 request(s)', labelCount: 0, valueCount: 1 },
+				],
+				healthyTooltipExpectationsC2,
+			),
+			healthy: evaluateTooltipContent(healthyTooltipReadoutsC2, healthyTooltipExpectationsC2),
+		},
+		{
+			label: 'c2-tooltip-names-hovered-segment-once vs. a readout repeating its own category label (the duplication defect)',
+			violating: evaluateTooltipContent(
+				[
+					{ text: 'Pending Pending · Registrant: 1263 request(s)', labelCount: 1, valueCount: 1 },
+					{ text: 'Pending · Bridge: 418 request(s)', labelCount: 0, valueCount: 1 },
+				],
+				healthyTooltipExpectationsC2,
+			),
+			healthy: evaluateTooltipContent(healthyTooltipReadoutsC2, healthyTooltipExpectationsC2),
+		},
+		{
+			label: 'c2-tooltip-names-hovered-segment-once vs. a single readout supplied (too few hovers to be non-vacuous)',
+			violating: evaluateTooltipContent([healthyTooltipReadoutsC2[0]], healthyTooltipExpectationsC2),
+			healthy: evaluateTooltipContent(healthyTooltipReadoutsC2, healthyTooltipExpectationsC2),
+		},
+		{
+			label: 'c2-tooltip-names-hovered-segment-once vs. a readout whose text is empty (the tooltip never rendered)',
+			violating: evaluateTooltipContent(
+				[
+					{ text: '', labelCount: 0, valueCount: 0 },
+					{ text: 'Pending · Bridge: 418 request(s)', labelCount: 0, valueCount: 1 },
+				],
+				healthyTooltipExpectationsC2,
+			),
+			healthy: evaluateTooltipContent(healthyTooltipReadoutsC2, healthyTooltipExpectationsC2),
 		},
 		{
 			label: 'c3-marks-match-buckets-no-gaps vs. two subpaths and two missing vertices',
@@ -960,6 +1074,45 @@ function checkVacuity(m, passLabel) {
 	return null;
 }
 
+/**
+ * Drives a real hover over each series' first non-zero-valued rendered
+ * segment inside `[data-chart-geometry="c2"]`, and reads back
+ * `.vt-chart__tooltip`'s own text plus its label/value span counts (60-12,
+ * closing 60-UAT test 14 / 60-REVIEW WR-01). Must run on `page` BEFORE its
+ * context closes -- the interface_contract this driver observes
+ * (`defaultContext.close()` runs immediately after `readPage` otherwise).
+ * Hovers only segments with a non-zero fixture value: `StackedBarSeries`
+ * renders no rect for a zero-valued segment (the C2 planted zero control),
+ * so a zero-valued segment has nothing to hover. Moves the pointer off the
+ * chart between hovers so the next hover is a genuine re-activation, never a
+ * stale render carried over from the previous one.
+ * @param {import('playwright').Page} page
+ * @param {ReadonlyArray<{ key: string, label: string, tone: string }>} requestSeries
+ * @returns {Promise<Array<{ text: string, labelCount: number, valueCount: number }>>}
+ */
+async function readTooltips(page, requestSeries) {
+	/** @type {Array<{ text: string, labelCount: number, valueCount: number }>} */
+	const readouts = [];
+	for (const series of requestSeries) {
+		const rect = page.locator(`[data-chart-geometry="c2"] .recharts-rectangle.vt-chart__segment--${series.tone}`).first();
+		if ((await rect.count()) === 0) {
+			readouts.push({ text: '', labelCount: 0, valueCount: 0 });
+			continue;
+		}
+		await rect.hover();
+		const tooltip = page.locator('.vt-chart__tooltip');
+		await tooltip.waitFor({ state: 'visible', timeout: TOOLTIP_WAIT_TIMEOUT_MS }).catch(() => {});
+		const tooltipVisible = (await tooltip.count()) > 0;
+		const text = tooltipVisible ? ((await tooltip.textContent()) ?? '') : '';
+		const labelCount = await page.locator('.vt-chart__tooltip .vt-chart__tooltip-label').count();
+		const valueCount = await page.locator('.vt-chart__tooltip .vt-chart__tooltip-value').count();
+		readouts.push({ text, labelCount, valueCount });
+		await page.mouse.move(0, 0);
+		await tooltip.waitFor({ state: 'hidden', timeout: TOOLTIP_WAIT_TIMEOUT_MS }).catch(() => {});
+	}
+	return readouts;
+}
+
 /** @param {number} port @param {boolean} skipBuild @returns {Promise<void>} */
 async function runBrowserGate(port, skipBuild) {
 	if (!skipBuild) await buildGate();
@@ -981,6 +1134,7 @@ async function runBrowserGate(port, skipBuild) {
 		const defaultMeasured = await readPage(defaultPage, fixtures);
 		const defaultVacuity = checkVacuity(defaultMeasured, 'default');
 		if (defaultVacuity) fail(`default pass: ${defaultVacuity}`);
+		const tooltipReadouts = await readTooltips(defaultPage, REQUEST_SERIES);
 		await defaultContext.close();
 
 		{
@@ -1002,6 +1156,21 @@ async function runBrowserGate(port, skipBuild) {
 			}));
 			const v = evaluateLegendPairsWithSeries(defaultMeasured.legend, defaultMeasured.seriesMarks, seriesTotals);
 			record('c2-legend-swatch-matches-series-fill', v.passed, v.detail);
+		}
+		{
+			const expectations = REQUEST_SERIES.map((s) => {
+				const category = REQUEST_FIXTURE.find((cat) => (cat.segments.find((seg) => seg.seriesKey === s.key)?.value ?? 0) !== 0);
+				const otherSeries = REQUEST_SERIES.find((o) => o.key !== s.key);
+				const value = category ? (category.segments.find((seg) => seg.seriesKey === s.key)?.value ?? 0) : 0;
+				return {
+					seriesLabel: s.label,
+					otherSeriesLabel: otherSeries ? otherSeries.label : '',
+					categoryLabel: category ? category.label : '',
+					value,
+				};
+			});
+			const v = evaluateTooltipContent(tooltipReadouts, expectations);
+			record('c2-tooltip-names-hovered-segment-once', v.passed, v.detail);
 		}
 		{
 			const expectedValues = INTAKE_FIXTURE.map((d) => d.value);

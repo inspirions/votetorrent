@@ -15,6 +15,18 @@
  * never the series hue — "text never wears the data colour") — this file
  * authors no English of its own either.
  *
+ * `ChartTooltip` maps EVERY payload entry to its own resolved tooltip text —
+ * no entry is ever chosen by array position (60-12, closing 60-UAT test 14 /
+ * 60-REVIEW WR-01). `payload[payload.length - 1]` reported a FIXED series
+ * regardless of which stacked segment the pointer was over; this file has
+ * now shipped that defect once and does not repeat the pattern. Each
+ * resolved entry renders its own `.vt-chart__tooltip-value` line and NO
+ * `.vt-chart__tooltip-label` span: all four copy templates in `copy.js`
+ * already OPEN with that same category label, so rendering it a second time
+ * is the verbatim duplication the UAT observed on C7. The label span
+ * survives only as the no-template fallback, so a caller that supplies no
+ * tooltip string still gets a non-empty box.
+ *
  * `ChartLegend`'s swatch hue comes from the payload entry's OWN matched
  * `ChartSeries.tone`, never from its position in Recharts' legend payload
  * array — that payload's order is Recharts' own `itemSorter` (default
@@ -114,15 +126,28 @@ export interface ChartTooltipProps {
 export function ChartTooltip(props: ChartTooltipProps) {
 	const { active, payload, label } = props;
 	if (!active || !payload || payload.length === 0) return null;
-	const entry = payload[payload.length - 1];
-	const datum = entry?.payload;
-	const segmentTooltip = datum?.segments?.find((segment) => segment.seriesKey === entry?.dataKey)?.tooltip;
-	const tooltipText = segmentTooltip ?? datum?.tooltip ?? '';
-	const labelText = datum?.label ?? label ?? '';
+	const resolvedTexts = payload
+		.map((entry) => {
+			const datum = entry?.payload;
+			const segmentTooltip = datum?.segments?.find((segment) => segment.seriesKey === entry?.dataKey)?.tooltip;
+			return segmentTooltip ?? datum?.tooltip ?? '';
+		})
+		.filter((text) => text !== '');
+	if (resolvedTexts.length > 0) {
+		return (
+			<div className="vt-chart__tooltip">
+				{resolvedTexts.map((text, index) => (
+					<span className="vt-chart__tooltip-value" key={index}>
+						{text}
+					</span>
+				))}
+			</div>
+		);
+	}
+	const labelText = payload[0]?.payload?.label ?? label ?? '';
 	return (
 		<div className="vt-chart__tooltip">
 			<span className="vt-chart__tooltip-label">{labelText}</span>
-			<span className="vt-chart__tooltip-value">{tooltipText}</span>
 		</div>
 	);
 }

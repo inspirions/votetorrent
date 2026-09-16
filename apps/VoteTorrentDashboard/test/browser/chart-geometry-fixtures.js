@@ -10,6 +10,11 @@
  * loads unchanged in the Vite-built browser page and under a bare `node
  * --test` run with no transform.
  *
+ * `TOOLTIP_COPY_KEYS` names the two copy keys the page composes tooltip text
+ * through (60-12) — this module holds only the key NAMES, never a rendered
+ * sentence, so the page and the driver read the same key names from one
+ * module and neither can drift into authoring its own English.
+ *
  * FIXTURE DATA RULE (T-60-07-02, a security property, not a style note):
  * this module holds aggregate counts and schema enum names ONLY. No
  * registrant identifier, no person name, no district, no address, and none
@@ -95,6 +100,20 @@ export const REQUEST_SERIES = Object.freeze([
 ]);
 
 /**
+ * The copy keys `chart-geometry-gate.tsx` composes C1/C2 tooltip text
+ * through, via `t()` — mirroring `RegistrationsPanel.tsx`'s `toStatusData`/
+ * `toRequestData` exactly (60-12). Naming them here, once, means the page and
+ * `run-chart-geometry-gate.mjs`'s comparators can never disagree about which
+ * key was rendered. Tooltip text is COMPOSED by the page through `t()` and is
+ * never stored in this module.
+ * @type {{ statusChart: string, requestChart: string }}
+ */
+export const TOOLTIP_COPY_KEYS = Object.freeze({
+	statusChart: 'panels.registrations.statusChart.tooltip',
+	requestChart: 'panels.registrations.requestChart.tooltip',
+});
+
+/**
  * C3 — the intake time series. Ten consecutive-hour buckets, each `label`
  * the full 19-character `strftime('%Y-%m-%dT%H:00:00', …)` boundary Quereus
  * returns — no trailing `Z`, because that expression yields a 19-character
@@ -145,7 +164,7 @@ export const METER_FIXTURES = Object.freeze([
  * @type {{ version: number, panelColumnWidthPx: number, statusCount: number, requestCategoryCount: number, intakeBucketCount: number, meterCount: number, registrationsCapabilityId: string, keyholdersCapabilityId: string }}
  */
 export const FIXTURE_META = Object.freeze({
-	version: 1,
+	version: 2,
 	panelColumnWidthPx: 420,
 	statusCount: STATUS_FIXTURE.length,
 	requestCategoryCount: REQUEST_FIXTURE.length,

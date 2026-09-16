@@ -51,7 +51,7 @@ import { panelViewStorageKey } from '../../src/screens/panels/panel-view-storage
 import { CAPABILITIES } from '../../src/auth/capabilities.js';
 import type { Capability } from '../../src/auth/capabilities.js';
 import { evaluate } from '../../src/auth/gate.js';
-import { STATUS_FIXTURE, REQUEST_FIXTURE, REQUEST_SERIES, INTAKE_FIXTURE, METER_FIXTURES, FIXTURE_META } from './chart-geometry-fixtures.js';
+import { STATUS_FIXTURE, REQUEST_FIXTURE, REQUEST_SERIES, INTAKE_FIXTURE, METER_FIXTURES, FIXTURE_META, TOOLTIP_COPY_KEYS } from './chart-geometry-fixtures.js';
 
 const win = window as unknown as Record<string, unknown>;
 
@@ -89,6 +89,12 @@ const keyholdersCapability = requireCapability(FIXTURE_META.keyholdersCapability
  * C1 (`data-chart-geometry="c1"`) and C2 (`data-chart-geometry="c2"`) switch
  * with the flag; C3 (`data-chart-geometry="c3"`) renders unswitched in both
  * arms, matching `60-10`'s deferral of an intake table equivalent.
+ *
+ * C1's and C2's data are fed the SAME `t()`-composed tooltip strings the real
+ * panel composes (`RegistrationsPanel.tsx`'s `toStatusData`/`toRequestData`,
+ * mirrored here via `TOOLTIP_COPY_KEYS`) — a fixture-supplied English literal
+ * would let a tooltip content rung pass against text the real panel never
+ * produces (60-12, closing the WR-01 fixed-series-tooltip defect).
  */
 function RegistrationsBodyHarness() {
 	const view = usePanelView();
@@ -98,7 +104,12 @@ function RegistrationsBodyHarness() {
 			{view === 'chart' ? (
 				<section className="eo-section" data-chart-geometry="c1">
 					<h4 className="eo-heading">{t('panels.registrations.statusHeading')}</h4>
-					<BarSeries data={[...STATUS_FIXTURE]} />
+					<BarSeries
+						data={STATUS_FIXTURE.map((d) => ({
+							...d,
+							tooltip: t(TOOLTIP_COPY_KEYS.statusChart, { status: d.label, count: String(d.value) }),
+						}))}
+					/>
 				</section>
 			) : (
 				<section className="eo-section" data-chart-geometry="c1-grid">
@@ -118,7 +129,17 @@ function RegistrationsBodyHarness() {
 				<section className="eo-section" data-chart-geometry="c2">
 					<h4 className="eo-heading">{t('panels.registrations.requestsHeading')}</h4>
 					<StackedBarSeries
-						data={REQUEST_FIXTURE.map((datum) => ({ ...datum, segments: [...datum.segments] }))}
+						data={REQUEST_FIXTURE.map((datum) => ({
+							...datum,
+							segments: datum.segments.map((segment) => ({
+								...segment,
+								tooltip: t(TOOLTIP_COPY_KEYS.requestChart, {
+									status: datum.label,
+									issuer: REQUEST_SERIES.find((s) => s.key === segment.seriesKey)?.label ?? segment.seriesKey,
+									count: String(segment.value),
+								}),
+							})),
+						}))}
 						series={[...REQUEST_SERIES]}
 						emptyCopyKey="panels.registrations.requestChart.empty"
 					/>
