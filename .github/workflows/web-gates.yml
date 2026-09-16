@@ -1135,8 +1135,8 @@ jobs:
         run: |
           set -euo pipefail
           yarn test:render-fidelity 2>&1 | tee ../../render-fidelity-public.log
-          if ! grep -q 'RENDER FIDELITY: PASS (8/8 rungs)' ../../render-fidelity-public.log; then
-            echo "::error::render-fidelity-public: the driver did not report all eight rungs passing"
+          if ! grep -q 'RENDER FIDELITY: PASS (9/9 rungs)' ../../render-fidelity-public.log; then
+            echo "::error::render-fidelity-public: the driver did not report all nine rungs passing"
             exit 1
           fi
           echo "RECEIPT render-fidelity-public" | tee -a ../../ci-receipt.txt

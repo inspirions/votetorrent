@@ -135,6 +135,7 @@ export const RUNG_IDS = Object.freeze([
 	'gap-card-style-diverges',
 	'keyrelease-meter-fill-matches-released-ratio',
 	'roll-district-bars-proportional-and-folded',
+	'roll-chart-axis-ticks-are-whole-numbers',
 ]);
 
 /** @type {Array<{ id: string, passed: boolean, detail: string }>} */
@@ -727,6 +728,63 @@ export function evaluateDistrictBars(m, expected) {
 		: { passed: false, detail: failures.join('; ') };
 }
 
+/**
+ * D-16/60-13: every numeric-axis tick label parses as a whole number, and the
+ * largest tick never runs past the fixture's own real maximum.
+ *
+ * ANTI-VACUITY FIRST, and the third clause is the one that makes this rung
+ * honest rather than merely correct: a fractional tick is only REACHABLE when
+ * the axis's own data maximum is small (Recharts' nice-number algorithm has
+ * no reason to subdivide below 1 once the domain runs into the hundreds), so
+ * `expected.maxValue > 3` must itself be a FAIL — a rung fed a large-count
+ * fixture would otherwise pass on every build, healthy or not.
+ *
+ * @param {ReadonlyArray<string>} ticks
+ * @param {{ maxValue: number, axisName: string }} expected
+ * @returns {Verdict}
+ */
+export function evaluateIntegerTicks(ticks, expected) {
+	/** @type {string[]} */
+	const failures = [];
+	const list = Array.isArray(ticks) ? ticks : [];
+	const axisName = expected && typeof expected.axisName === 'string' && expected.axisName !== '' ? expected.axisName : '(unnamed axis)';
+	const maxValue = expected ? expected.maxValue : Number.NaN;
+
+	if (list.length < 2) {
+		failures.push(
+			`${axisName}: only ${list.length} tick(s) rendered -- an axis with fewer than 2 ticks cannot show a fractional subdivision, so this rung would be vacuous`,
+		);
+	}
+	const emptyCount = list.filter((t) => typeof t !== 'string' || t.trim() === '').length;
+	if (emptyCount > 0) failures.push(`${axisName}: ${emptyCount} of ${list.length} tick(s) have empty text`);
+	if (!Number.isFinite(maxValue) || maxValue > 3) {
+		failures.push(
+			`${axisName}: the fixture's maximum (${maxValue}) is too large for a fractional tick to be reachable; this rung would be vacuous`,
+		);
+	}
+
+	/** @type {number[]} */
+	const parsed = [];
+	for (const raw of list) {
+		if (typeof raw !== 'string' || raw.trim() === '') continue;
+		const stripped = raw.replace(/,/g, '');
+		if (!/^-?\d+$/.test(stripped)) {
+			failures.push(`${axisName}: tick "${raw}" is not a whole number`);
+			continue;
+		}
+		parsed.push(Number.parseInt(stripped, 10));
+	}
+
+	if (parsed.length > 0 && Number.isFinite(maxValue)) {
+		const largest = Math.max(...parsed);
+		if (largest > maxValue) failures.push(`${axisName}: largest tick ${largest} exceeds the fixture's real maximum ${maxValue}`);
+	}
+
+	return failures.length === 0
+		? { passed: true, detail: `${axisName}: ${list.length} tick(s) [${list.join(', ')}], all whole numbers, within the fixture's real maximum ${maxValue}` }
+		: { passed: false, detail: failures.join('; ') };
+}
+
 // ---------------------------------------------------------------------------
 // PART C — the matcher positive controls (`--prove-matchers`).
 //
@@ -927,6 +985,26 @@ function matcherControls() {
 			),
 			healthy: evaluateDistrictBars(CTRL_BARS_HEALTHY_READOUT, CTRL_BARS_EXPECTED),
 		},
+		{
+			label: 'integer-tick comparator vs. the live defect\'s fractional, over-domain ticks (0/0.4/0.8/1.2/1.6/2 against a max of 2)',
+			violating: evaluateIntegerTicks(['0', '0.4', '0.8', '1.2', '1.6', '2'], { maxValue: 2, axisName: 'district chart numeric axis' }),
+			healthy: evaluateIntegerTicks(['0', '1', '2'], { maxValue: 2, axisName: 'district chart numeric axis' }),
+		},
+		{
+			label: 'integer-tick comparator vs. the narrow-width form (0/0.7/1.4/2.1) -- fractional AND over-domain',
+			violating: evaluateIntegerTicks(['0', '0.7', '1.4', '2.1'], { maxValue: 2, axisName: 'district chart numeric axis' }),
+			healthy: evaluateIntegerTicks(['0', '1', '2'], { maxValue: 2, axisName: 'district chart numeric axis' }),
+		},
+		{
+			label: 'integer-tick comparator vs. a single-tick axis (planted anti-vacuity control missing)',
+			violating: evaluateIntegerTicks(['0'], { maxValue: 2, axisName: 'district chart numeric axis' }),
+			healthy: evaluateIntegerTicks(['0', '1', '2'], { maxValue: 2, axisName: 'district chart numeric axis' }),
+		},
+		{
+			label: 'integer-tick comparator vs. a healthy integer tick list whose expected maximum is 1847 (would be vacuous against a large-count fixture)',
+			violating: evaluateIntegerTicks(['0', '500', '1000', '1500'], { maxValue: 1847, axisName: 'district chart numeric axis' }),
+			healthy: evaluateIntegerTicks(['0', '1', '2'], { maxValue: 2, axisName: 'district chart numeric axis' }),
+		},
 	]);
 }
 
@@ -1122,6 +1200,10 @@ function readPage(page) {
 		const barEls = districtChart ? [...districtChart.querySelectorAll('.vt-chart__bar--series-1')] : [];
 		const districtTextEls = districtChart ? [...districtChart.querySelectorAll('text')] : [];
 		const markupEls = districtChart ? [...districtChart.querySelectorAll('b, i, script, img')] : [];
+		// D-16/60-13 -- the horizontal C7 form's numeric axis is XAxis, so the
+		// tick text lives under `.recharts-xAxis-tick-labels`, scoped to this
+		// same chart root per the interface contract's selector table.
+		const numericTickEls = districtChart ? [...districtChart.querySelectorAll('.recharts-xAxis-tick-labels .vt-chart__axis')] : [];
 		return {
 			gate: gateReadout ? { error: gateReadout.error, fixture: gateReadout.fixture } : null,
 			roll: {
@@ -1165,6 +1247,7 @@ function readPage(page) {
 					? { left: districtChartRect.left, right: districtChartRect.right, top: districtChartRect.top, bottom: districtChartRect.bottom }
 					: null,
 				markupElementCount: markupEls.length,
+				numericTicks: numericTickEls.map((el) => (el.textContent ?? '').trim()),
 			},
 		};
 	});
@@ -1431,6 +1514,17 @@ async function driveRungs(distAbs, port) {
 				const districtExpectation = deriveDistrictExpectation(fx.districts, SMALL_DISTRICT_THRESHOLD);
 				const districtBars = evaluateDistrictBars(m.districtChart, districtExpectation);
 				record('roll-district-bars-proportional-and-folded', districtBars.passed, districtBars.detail);
+
+				// D-16/60-13. `maxValue` is derived from the SAME expectation the
+				// bars rung above just built -- the largest surviving district
+				// count or the folded "other" total, whichever is greater -- never
+				// a literal, so a rebalanced fixture moves this expectation with it.
+				const numericMax = Math.max(
+					districtExpectation.unfolded.reduce((max, e) => Math.max(max, e.count), 0),
+					districtExpectation.foldedTotal,
+				);
+				const integerTicks = evaluateIntegerTicks(m.districtChart.numericTicks, { maxValue: numericMax, axisName: 'district chart numeric axis' });
+				record('roll-chart-axis-ticks-are-whole-numbers', integerTicks.passed, integerTicks.detail);
 
 				// Both cards are taken from the SAME rendered section, so the pair
 				// differs only in the class, the branch attribute and one copy key —
