@@ -302,12 +302,261 @@ walk_dump() {
   sed 's/></>\n</g' "${xml}" > "${normalized}"
   awk -v stage_list="${EXPECTED_STAGES[*]}" -f "${AWK_WALK_SCRIPT}" "${normalized}"
 }
+# ---------------------------------------------------------------------------------------
+# The three measuring legs (D-03). Each consumes a records FILE (the accumulated
+# walk_dump stream), never re-derives geometry itself, and returns its result as a single
+# "VERDICT<TAB>EVIDENCE" line on stdout for run_leg() to record. Every evidence string
+# ends with " locale=${LOCALE} serial=${SERIAL}" (+ " serial_note=substituted" if D-05
+# fired) so the locale and any device substitution are visible in every leg's evidence.
+# ---------------------------------------------------------------------------------------
+
+leg_clipping() {
+  local records_file="$1"
+  awk -v FS="${TAB}" -v locale="${LOCALE}" -v serial="${SERIAL}" -v serial_note="${SERIAL_NOTE}" '
+    $1=="CARD" { card_x2[$2] = $5 }
+    $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
+    $1=="TEXT" {
+      count_text++
+      stage=$2; x2=$5; source=$7; text=$9
+      if (source=="degenerate" && deg_stage=="") { deg_stage=stage; deg_text=text }
+      if (clip_stage=="" && (stage in card_x2) && x2+0 > card_x2[stage]+0) {
+        clip_stage=stage; clip_text=text; clip_tx2=x2; clip_cx2=card_x2[stage]
+      }
+    }
+    END {
+      note = (serial_note=="substituted") ? " serial_note=substituted" : ""
+      if (orphan_list != "") {
+        printf "FAIL\tanchor-missing: %s locale=%s serial=%s%s\n", orphan_list, locale, serial, note
+      } else if (deg_stage != "") {
+        printf "FAIL\tdegenerate-bounds: stage=%s text=\"%s\" locale=%s serial=%s%s\n", deg_stage, deg_text, locale, serial, note
+      } else if (clip_stage != "") {
+        printf "FAIL\tclipped-text: stage=%s text=\"%s\" text.x2=%s card.x2=%s locale=%s serial=%s%s\n", clip_stage, clip_text, clip_tx2, clip_cx2, locale, serial, note
+      } else {
+        printf "PASS\tclean: %d text node(s) measured locale=%s serial=%s%s\n", count_text, locale, serial, note
+      }
+    }
+  ' "${records_file}"
+}
+
+leg_duplicates() {
+  local records_file="$1"
+  awk -v FS="${TAB}" -v locale="${LOCALE}" -v serial="${SERIAL}" -v serial_note="${SERIAL_NOTE}" '
+    $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
+    $1=="TEXT" {
+      n++; t_stage[n]=$2; t_x1[n]=$3; t_y1[n]=$4; t_x2[n]=$5; t_y2[n]=$6; t_source[n]=$7; t_click[n]=$8; t_text[n]=$9
+      if ($7=="degenerate" && deg_stage=="") { deg_stage=$2; deg_text=$9 }
+    }
+    $1=="CLICK" {
+      m++; c_stage[m]=$2; c_x1[m]=$3; c_y1[m]=$4; c_x2[m]=$5; c_y2[m]=$6
+    }
+    END {
+      note = (serial_note=="substituted") ? " serial_note=substituted" : ""
+      if (orphan_list != "") {
+        printf "FAIL\tanchor-missing: %s locale=%s serial=%s%s\n", orphan_list, locale, serial, note
+        exit
+      }
+      if (deg_stage != "") {
+        printf "FAIL\tdegenerate-bounds: stage=%s text=\"%s\" locale=%s serial=%s%s\n", deg_stage, deg_text, locale, serial, note
+        exit
+      }
+      for (i = 1; i <= n; i++) {
+        eligible = (t_click[i] == "yes")
+        if (!eligible) {
+          for (j = 1; j <= m; j++) {
+            if (c_stage[j] == t_stage[i] && t_x1[i]+0 >= c_x1[j]+0 && t_y1[i]+0 >= c_y1[j]+0 && t_x2[i]+0 <= c_x2[j]+0 && t_y2[i]+0 <= c_y2[j]+0) {
+              eligible = 1
+              break
+            }
+          }
+        }
+        if (!eligible) continue
+        key = t_stage[i] SUBSEP t_text[i]
+        seen_count[key]++
+        seen_stage[key] = t_stage[i]
+        seen_text[key] = t_text[i]
+      }
+      for (key in seen_count) {
+        if (seen_count[key] > 1 && dup_stage == "") { dup_stage = seen_stage[key]; dup_text = seen_text[key] }
+      }
+      if (dup_stage != "") {
+        printf "FAIL\tduplicate-label: stage=%s text=\"%s\" locale=%s serial=%s%s\n", dup_stage, dup_text, locale, serial, note
+      } else {
+        printf "PASS\tno duplicate action labels locale=%s serial=%s%s\n", locale, serial, note
+      }
+    }
+  ' "${records_file}"
+}
+
+leg_touch_targets() {
+  local records_file="$1"
+  local threshold_px=$((44 * DENSITY_DPI / 160))
+  awk -v FS="${TAB}" -v locale="${LOCALE}" -v serial="${SERIAL}" -v serial_note="${SERIAL_NOTE}" -v thr="${threshold_px}" -v density="${DENSITY_DPI}" '
+    $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
+    $1=="TEXT" && $7=="degenerate" && deg_stage=="" { deg_stage=$2; deg_text=$9 }
+    $1=="CLICK" {
+      count++
+      stage=$2; x1=$3; y1=$4; x2=$5; y2=$6; rid=$7
+      w = x2 - x1; h = y2 - y1
+      if ((w < thr || h < thr) && bad_stage == "") { bad_stage=stage; bad_rid=rid; bad_w=w; bad_h=h }
+    }
+    END {
+      note = (serial_note=="substituted") ? " serial_note=substituted" : ""
+      if (orphan_list != "") {
+        printf "FAIL\tanchor-missing: %s locale=%s serial=%s%s\n", orphan_list, locale, serial, note
+        exit
+      }
+      if (deg_stage != "") {
+        printf "FAIL\tdegenerate-bounds: stage=%s text=\"%s\" locale=%s serial=%s%s\n", deg_stage, deg_text, locale, serial, note
+        exit
+      }
+      if (bad_stage != "") {
+        printf "FAIL\tundersized-target: stage=%s resource-id=%s measured=%dx%dpx threshold=%dpx(44dp@%ddpi) locale=%s serial=%s%s\n", bad_stage, bad_rid, bad_w, bad_h, thr, density, locale, serial, note
+      } else {
+        printf "PASS\t%d touch target(s) measured, all >= %dpx (44dp@%ddpi) locale=%s serial=%s%s\n", count+0, thr, density, locale, serial, note
+      }
+    }
+  ' "${records_file}"
+}
+
+# run_leg NAME RECORDS-FILE -- dispatches to the named leg function, records the result
+# via record_leg() (prints "LEG name: VERDICT (evidence)"), and exposes LAST_VERDICT /
+# LAST_EVIDENCE for callers (run_selftest) that need to inspect the outcome.
+LAST_VERDICT=""
+LAST_EVIDENCE=""
+run_leg() {
+  local name="$1" records_file="$2"
+  local out
+  case "${name}" in
+    clipping) out=$(leg_clipping "${records_file}") ;;
+    duplicates) out=$(leg_duplicates "${records_file}") ;;
+    touch-targets) out=$(leg_touch_targets "${records_file}") ;;
+    *)
+      echo "run_leg: unknown leg '${name}'" >&2
+      return 1
+      ;;
+  esac
+  LAST_VERDICT="${out%%${TAB}*}"
+  LAST_EVIDENCE="${out#*${TAB}}"
+  record_leg "${name}" "${LAST_VERDICT}" "${LAST_EVIDENCE}"
+}
 
 # ---------------------------------------------------------------------------------------
-# Host-only --dump-records dispatch (D-02 debugging surface / --selftest internals).
-# Leg execution (--selftest, clipping|duplicates|touch-targets|all) lands in later tasks
-# of this plan (Task 2: legs + --selftest; Task 3: preflight + device dispatch).
+# run_selftest -- D-04(3). Host-only, no device. Sets DENSITY_DPI/SCREEN_W/SCREEN_H so the
+# four committed fixtures are deterministic, runs all three legs against each, and asserts
+# each rejection fixture is rejected FOR ITS OWN NAMED REASON (and that the other two
+# reasons are NOT named), plus leg isolation (a single-defect fixture trips exactly one
+# leg). Adapted from assert-voter-gates.mjs's --selftest idiom (lines 503-653), not ported.
 # ---------------------------------------------------------------------------------------
+run_selftest() {
+  echo "[timeline-geometry] ========== --selftest =========="
+  DENSITY_DPI=320
+  SCREEN_W=720
+  SCREEN_H=1520
+
+  local mismatches=0
+  local f
+  for f in clean clipped degenerate missing-node; do
+    local xml="${FIXTURES_DIR}/${f}.xml"
+    if [ ! -f "${xml}" ]; then
+      echo "SELFTEST MISMATCH: ${f} -- fixture file missing: ${xml}"
+      mismatches=$((mismatches + 1))
+      continue
+    fi
+
+    local records="${TMPDIR_TG}/selftest-${f}.records"
+    if ! walk_dump "${xml}" > "${records}" 2>"${TMPDIR_TG}/selftest-${f}.err"; then
+      echo "SELFTEST MISMATCH: ${f} -- walk_dump failed: $(cat "${TMPDIR_TG}/selftest-${f}.err")"
+      mismatches=$((mismatches + 1))
+      continue
+    fi
+
+    echo "[timeline-geometry] -- fixture: ${f} --"
+    run_leg "clipping" "${records}"
+    local clip_verdict="${LAST_VERDICT}" clip_evidence="${LAST_EVIDENCE}"
+    run_leg "duplicates" "${records}"
+    local dup_verdict="${LAST_VERDICT}" dup_evidence="${LAST_EVIDENCE}"
+    run_leg "touch-targets" "${records}"
+    local tt_verdict="${LAST_VERDICT}" tt_evidence="${LAST_EVIDENCE}"
+
+    local ok=1
+    case "${f}" in
+      clean)
+        if [ "${clip_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: clean -- expected clipping PASS, got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [ "${dup_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: clean -- expected duplicates PASS, got ${dup_verdict} (${dup_evidence})"
+          ok=0
+        fi
+        if [ "${tt_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: clean -- expected touch-targets PASS, got ${tt_verdict} (${tt_evidence})"
+          ok=0
+        fi
+        ;;
+      clipped)
+        if [ "${clip_verdict}" != "FAIL" ] || [[ "${clip_evidence}" != *"clipped-text"* ]]; then
+          echo "SELFTEST MISMATCH: clipped -- expected clipping FAIL naming clipped-text, got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [[ "${clip_evidence}" == *"degenerate-bounds"* || "${clip_evidence}" == *"anchor-missing"* ]]; then
+          echo "SELFTEST MISMATCH: clipped -- clipping evidence named a reason other than its own: ${clip_evidence}"
+          ok=0
+        fi
+        if [ "${dup_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: clipped -- expected duplicates PASS (leg isolation), got ${dup_verdict} (${dup_evidence})"
+          ok=0
+        fi
+        if [ "${tt_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: clipped -- expected touch-targets PASS (leg isolation), got ${tt_verdict} (${tt_evidence})"
+          ok=0
+        fi
+        ;;
+      degenerate)
+        if [ "${clip_verdict}" != "FAIL" ] || [[ "${clip_evidence}" != *"degenerate-bounds"* ]]; then
+          echo "SELFTEST MISMATCH: degenerate -- expected clipping FAIL naming degenerate-bounds, got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [[ "${clip_evidence}" == *"clipped-text"* || "${clip_evidence}" == *"anchor-missing"* ]]; then
+          echo "SELFTEST MISMATCH: degenerate -- clipping evidence named a reason other than its own: ${clip_evidence}"
+          ok=0
+        fi
+        ;;
+      missing-node)
+        if [ "${clip_verdict}" != "FAIL" ] || [[ "${clip_evidence}" != *"anchor-missing"* ]]; then
+          echo "SELFTEST MISMATCH: missing-node -- expected clipping FAIL naming anchor-missing, got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [[ "${clip_evidence}" == *"clipped-text"* || "${clip_evidence}" == *"degenerate-bounds"* ]]; then
+          echo "SELFTEST MISMATCH: missing-node -- clipping evidence named a reason other than its own: ${clip_evidence}"
+          ok=0
+        fi
+        ;;
+    esac
+
+    [ "${ok}" -eq 0 ] && mismatches=$((mismatches + 1))
+  done
+
+  if [ "${mismatches}" -eq 0 ]; then
+    echo "SELFTEST: PASS (4/4 fixtures behaved as specified)"
+    exit 0
+  else
+    echo "SELFTEST: FAIL ($((4 - mismatches))/4 fixtures behaved as specified)"
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------------------
+# Early, device-free dispatch (design_notes item 8): --selftest and --dump-records must be
+# recognized BEFORE leg-name validation and BEFORE preflight() -- both read only committed
+# fixtures / a given file and must work with no device attached at all.
+# ---------------------------------------------------------------------------------------
+for _arg in "$@"; do
+  if [ "${_arg}" = "--selftest" ]; then
+    run_selftest
+  fi
+done
+
 if [ "${1:-}" = "--dump-records" ]; then
   DUMP_PATH="${2:-}"
   if [ -z "${DUMP_PATH}" ]; then
@@ -322,5 +571,9 @@ if [ "${1:-}" = "--dump-records" ]; then
   exit 0
 fi
 
-echo "run-timeline-geometry-proof.sh: only --dump-records is wired up so far; --selftest and the device legs land in later tasks of this plan (61-03)." >&2
+# ---------------------------------------------------------------------------------------
+# Leg dispatch, preflight and device-facing collection land in Task 3 of this plan.
+# For now: --selftest and --dump-records are wired; anything else errors loudly.
+# ---------------------------------------------------------------------------------------
+echo "run-timeline-geometry-proof.sh: preflight()/device legs are not wired up yet; this task adds --selftest only (Task 3 of 61-03 adds device execution)." >&2
 exit 1
