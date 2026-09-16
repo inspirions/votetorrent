@@ -202,6 +202,22 @@ describe('TimelineRail (59-07)', () => {
 		}
 		i18n.changeLanguage('en');
 	});
+
+	it('nowOffsetMs pass-through (D-12/D-14): the rail forwards an explicit offset through TimelineRow to the votingStarts row\'s CountdownTimer', () => {
+		const rows = buildTenRowFixture();
+		const tr = renderRail(<TimelineRail rows={rows} nowOffsetMs={1234567} />);
+
+		const countdown = tr.root.findByType(CountdownTimer);
+		expect(countdown.props.nowOffsetMs).toBe(1234567);
+	});
+
+	it('nowOffsetMs default (D-14): omitting the prop delivers the literal number 0 to CountdownTimer, not undefined -- keeps Home\'s ElectionCard and every other fixture-driven caller inert', () => {
+		const rows = buildTenRowFixture();
+		const tr = renderRail(<TimelineRail rows={rows} />);
+
+		const countdown = tr.root.findByType(CountdownTimer);
+		expect(countdown.props.nowOffsetMs).toBe(0);
+	});
 });
 
 describe('TimelineRail (D1, 61-02) -- panel+row composition proves the ONE-total view-registration contract', () => {
