@@ -79,11 +79,15 @@ describe('TimelineRow (59-07)', () => {
 		expect(tr.root.findAllByProps({testID: 'timeline-row-vote-now-votingStarts'}, {deep: false}).length).toBe(0);
 	});
 
-	it('a past Registration Ends row renders "View registration" AND "See details" as two distinct stacked actions, never merged', () => {
+	it('D1: a past Registration Ends row renders no "View registration" action of its own -- that affordance belongs solely to TimelineRegistrationPanel\'s CTA -- while still rendering "See details" and no "Edit registration"', () => {
 		const row = buildRowFixture({stageId: 'registrationEnds', status: 'past'});
+		// `onViewRegistration` is still supplied here (Task 1 only, RED-observation control): the
+		// live, unfixed `buildActions` gates the duplicate push on `if (callbacks.onViewRegistration)`,
+		// so omitting it would suppress the defect rather than observe it. Task 2 removes this prop
+		// once it ceases to exist on the type.
 		const tr = renderRow({row, onViewRegistration: jest.fn(), onSeeDetails: jest.fn(), onEditRegistration: jest.fn()});
 
-		expect(tr.root.findAllByProps({testID: 'timeline-row-view-registration-registrationEnds'}, {deep: false}).length).toBe(1);
+		expect(tr.root.findAllByProps({testID: 'timeline-row-view-registration-registrationEnds'}, {deep: false}).length).toBe(0);
 		expect(tr.root.findAllByProps({testID: 'timeline-row-see-details-registrationEnds'}, {deep: false}).length).toBe(1);
 		expect(tr.root.findAllByProps({testID: 'timeline-row-edit-registration-registrationEnds'}, {deep: false}).length).toBe(0);
 	});

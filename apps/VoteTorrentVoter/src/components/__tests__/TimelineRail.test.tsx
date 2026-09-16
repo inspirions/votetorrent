@@ -8,10 +8,11 @@ import renderer from 'react-test-renderer';
 import {ThemeProvider} from '@react-navigation/native';
 import {Pressable, Text} from 'react-native';
 import {TimelineRail} from '../TimelineRail';
+import {TimelineRegistrationPanel} from '../TimelineRegistrationPanel';
 import {CountdownTimer} from '../CountdownTimer';
 import {lightTheme} from '../../theme/themes';
 import {TIMELINE_STAGE_IDS} from '../../timeline';
-import {buildSevenRowFixture, buildTenRowFixture, FIXTURE_NOW_MS} from '../__fixtures__/timeline-fixtures';
+import {buildSevenRowFixture, buildTenRowFixture, FIXTURE_NOW_MS, PRODUCTION_NETWORK_NAME} from '../__fixtures__/timeline-fixtures';
 import i18n from '../../i18n';
 
 function withTheme(children: React.ReactNode) {
@@ -200,5 +201,62 @@ describe('TimelineRail (59-07)', () => {
 			expect(node.props.numberOfLines).toBeUndefined();
 		}
 		i18n.changeLanguage('en');
+	});
+});
+
+describe('TimelineRail (D1, 61-02) -- panel+row composition proves the ONE-total view-registration contract', () => {
+	// This predicate is itself Case A's positive control: a `node.type === Text` predicate that
+	// could never match anything would report 0 for Case A too, and Case A's `=== 1` assertion
+	// would fail exactly as loudly as a real regression. Do not "simplify" this to a `>= 0` check
+	// or add a separate "the matcher works" test -- Case A already proves the matcher is live.
+	function countResolvedText(tr: renderer.ReactTestRenderer, expectedText: string): number {
+		return tr.root.findAll(node => node.type === Text && node.props.children === expectedText).length;
+	}
+
+	it('Case A -- panel present, deadline passed: exactly ONE "view registration"-class affordance exists across the whole rail, and it is the panel\'s CTA', () => {
+		const rows = buildTenRowFixture();
+		const tr = renderRail(
+			<TimelineRail
+				rows={rows}
+				renderPanel={stageId =>
+					stageId === 'registrationEnds' ? (
+						// `isBeforeDeadline={false}` is load-bearing: TimelineRegistrationPanel.tsx:105
+						// branches the CTA label on this flag alone, and only `false` resolves it to
+						// `registration.viewCta`. With `true` the panel renders `editCta` and this test
+						// measures nothing.
+						<TimelineRegistrationPanel
+							status="registered"
+							networkName={PRODUCTION_NETWORK_NAME}
+							isBeforeDeadline={false}
+							onEditRegistration={jest.fn()}
+							onViewRegistration={jest.fn()}
+						/>
+					) : null
+				}
+				onSeeDetails={jest.fn()}
+				onEditRegistration={jest.fn()}
+				// Present for Task 1 only (RED-observation control): reproduces the live
+				// `TimelineScreen.tsx:449` wiring so the row's own duplicate action is actually
+				// gated open in the unfixed `buildActions`. Task 2 removes this prop.
+				onViewRegistration={jest.fn()}
+			/>,
+		);
+
+		const viewCtaText = i18n.t('registration.viewCta', {ns: 'timeline'});
+		expect(countResolvedText(tr, viewCtaText)).toBe(1);
+		expect(tr.root.findAllByProps({testID: 'timeline-registration-panel-cta'}, {deep: false}).length).toBe(1);
+		expect(tr.root.findAllByProps({testID: 'timeline-row-view-registration-registrationEnds'}, {deep: false}).length).toBe(0);
+	});
+
+	it('Case B -- panel absent (the registration-status read window): ZERO "view registration"-class affordances exist anywhere in the rail -- no orphan row action, no guessed placeholder', () => {
+		const rows = buildTenRowFixture();
+		// `onViewRegistration={jest.fn()}` present for Task 1 only, same reason as Case A above.
+		const tr = renderRail(
+			<TimelineRail rows={rows} renderPanel={() => null} onSeeDetails={jest.fn()} onEditRegistration={jest.fn()} onViewRegistration={jest.fn()} />,
+		);
+
+		const viewCtaText = i18n.t('registration.viewCta', {ns: 'timeline'});
+		expect(countResolvedText(tr, viewCtaText)).toBe(0);
+		expect(tr.root.findAllByProps({testID: 'timeline-row-view-registration-registrationEnds'}, {deep: false}).length).toBe(0);
 	});
 });
