@@ -321,9 +321,18 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 		instructions: 'Dev-seeded election for local voter registration testing (Phase 44-06).',
 		keyholders: [],
 		timeline: {
-			[ElectionEvent.registrationEnds]: electionDate - 25 * 86_400_000,
-			[ElectionEvent.ballotsFinal]: electionDate - 14 * 86_400_000,
-			[ElectionEvent.votingStarts]: electionDate - 2 * 86_400_000,
+			// D-13/61-05: votingStarts -> tallyingStarts widened to a 31-day gap so the honest
+			// long-remainder countdown case is reachable on hardware (a flat 2-day gap maxed the
+			// countdown at 48h, never clipping). registrationEnds/ballotsFinal move ahead of it
+			// TOGETHER with votingStarts -- moving votingStarts alone would leave both preparation
+			// events later than it, and parseTimeline's PREPARATION rule
+			// (packages/ui-web/src/lifecycle/timeline-core.js) raises a blocking OUT_OF_ORDER
+			// conflict for any preparation event after votingStarts, which blanks the ENTIRE
+			// view-model (INDETERMINATE_CONFLICT_CODES, derive-timeline.ts). All three literals
+			// below move together; do not pull votingStarts back without the other two.
+			[ElectionEvent.registrationEnds]: electionDate - 52 * 86_400_000,
+			[ElectionEvent.ballotsFinal]: electionDate - 40 * 86_400_000,
+			[ElectionEvent.votingStarts]: electionDate - 31 * 86_400_000,
 			[ElectionEvent.accruingVotes]: electionDate - 20 * 3_600_000,
 			[ElectionEvent.hashingVotes]: electionDate - 16 * 3_600_000,
 			[ElectionEvent.releasingKeys]: electionDate - 12 * 3_600_000,

@@ -103,9 +103,12 @@ const SEEDED_ELECTION_ID = 'election-1';
 // days/hours from that anchor. Deliberately NOT a hand-picked absolute date set.
 const ELECTION_DATE = Date.now() + 180 * 86_400_000;
 
-// `anchor` mirrors dev-seed.ts's own `electionDate` — every offset below is the SAME day/hour
-// delta dev-seed.ts:216-248 uses, just parameterized so header-range tests (Task 2) can anchor
-// the same monotonic shape at an explicit UTC calendar point instead of "now" (determinism).
+// `anchor` mirrors dev-seed.ts's own `electionDate`. This fixture is a deliberately frozen
+// monotonic ten-event shape, parameterized so header-range tests (Task 2) can anchor it at an
+// explicit UTC calendar point instead of "now" (determinism) — it is NOT pinned to dev-seed.ts's
+// exact per-event deltas (61-05 widened dev-seed.ts's registrationEnds/ballotsFinal/votingStarts
+// gaps to a 31-day votingStarts window; this fixture's own offsets stay as they were so the
+// header-range assertions below stay stable).
 function buildValidTimeline(anchor: number = ELECTION_DATE, overrides: Partial<Record<string, number>> = {}): Record<string, number> {
 	return {
 		registrationEnds: anchor - 25 * 86_400_000,
