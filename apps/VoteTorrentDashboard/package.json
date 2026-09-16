@@ -26,7 +26,9 @@
 		"capabilities:generate": "node scripts/generate-capabilities.mjs",
 		"clean": "rm -rf dist node_modules",
 		"gate:zero-state-legend": "node test/browser/zero-state-legend-gate.mjs",
-		"gate:prove-zero-state-legend-matchers": "node test/browser/zero-state-legend-gate.mjs --prove-matchers"
+		"gate:prove-zero-state-legend-matchers": "node test/browser/zero-state-legend-gate.mjs --prove-matchers",
+		"gate:label-headroom": "node test/browser/label-headroom-gate.mjs",
+		"gate:prove-label-headroom-matchers": "node test/browser/label-headroom-gate.mjs --prove-matchers"
 	},
 	"dependencies": {
 		"@noble/ciphers": "^2",

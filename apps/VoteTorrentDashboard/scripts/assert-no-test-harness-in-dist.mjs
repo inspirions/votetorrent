@@ -42,9 +42,27 @@ const DIST_ASSETS = path.join(DIST, 'assets');
  * 53-08's own D-24 styled harness entry (T-53-08-04) and its readout
  * channel, added the same way. `chart-geometry-gate`/`__CHART_GEOMETRY_GATE__`
  * are 60-07's own D-24 chart-geometry harness entry (T-60-07-01) and its
- * readout channel, widened here the same way. */
+ * readout channel, widened here the same way. `gap-probe` and the three
+ * `__GAP_PROBE_*` globals are the WR-01/WR-02/WR-03 gap-closure harness
+ * (`test/browser/gap-probe.tsx`, built to `dist-gap-probe`) and its readout
+ * channel; `zero-state-legend`/`label-headroom` are the two gate drivers that
+ * read it. Added by the phase-60 security audit, which found this list blind
+ * to every one of them (`60-WR / T-60-WR-01`).
+ *
+ * ONE KNOWN BENIGN COLLISION, recorded rather than special-cased: `gap-probe`
+ * also appears in a DOC COMMENT in shipped source
+ * (`packages/ui-web/src/charts/chart-contracts.ts:63`, which names the probe
+ * that motivated `zeroSafeDataMax`). It cannot reach `dist/` because the
+ * production build minifies comments away — verified live when this line was
+ * written by a real `yarn build` plus a direct grep of `dist/` for all four
+ * new tokens: zero matches. It is listed deliberately anyway: a token that is
+ * unreachable only because of a minifier setting is still worth watching, and
+ * the matcher stays a plain substring test with no comment-aware
+ * special-casing, exactly as the `.map` note below insists. If a future build
+ * config stops stripping comments this fires, and that is the correct thing
+ * to investigate rather than a bug in the matcher. */
 const TEST_HARNESS_TOKEN_RE =
-	/(compose-gate|db-gate|shell-gate|gate-matrix|ui-gate|chart-geometry-gate|__COMPOSE_GATE__|__DB_GATE__|__SHELL_GATE__|__UI_GATE__|__CHART_GEOMETRY_GATE__)/;
+	/(compose-gate|db-gate|shell-gate|gate-matrix|ui-gate|chart-geometry-gate|gap-probe|zero-state-legend|label-headroom|__COMPOSE_GATE__|__DB_GATE__|__SHELL_GATE__|__UI_GATE__|__CHART_GEOMETRY_GATE__|__GAP_PROBE_THROWS__|__GAP_PROBE_DONE__|__GAP_PROBE_ERROR__)/;
 
 /** @param {string} message */
 function fail(message) {
@@ -69,6 +87,12 @@ const POSITIVE_CONTROL_FIXTURES = [
 	'window.__UI_GATE__ = { mounted: [], error: null };',
 	'import { ChartGeometryHarness } from "./test/browser/chart-geometry-gate.js";',
 	'window.__CHART_GEOMETRY_GATE__ = { mounted: [], error: null };',
+	'import { GapProbe } from "./test/browser/gap-probe.js";',
+	'window.__GAP_PROBE_DONE__ = true;',
+	'window.__GAP_PROBE_THROWS__ = { "legend-non-legend-tone": "…" };',
+	'window.__GAP_PROBE_ERROR__ = null;',
+	'/test/browser/zero-state-legend-gate.js',
+	'/test/browser/label-headroom-gate.js',
 ];
 for (const fixture of POSITIVE_CONTROL_FIXTURES) {
 	if (!TEST_HARNESS_TOKEN_RE.test(fixture)) {

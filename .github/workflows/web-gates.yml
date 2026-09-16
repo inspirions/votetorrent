@@ -1293,11 +1293,50 @@ jobs:
         run: |
           set -euo pipefail
           yarn gate:prove-zero-state-legend-matchers 2>&1 | tee ../../zero-state-legend-matchers.log
-          if ! grep -qE '--prove-matchers: all [0-9]+ case\(s\) discriminating' ../../zero-state-legend-matchers.log; then
+          # Pattern deliberately omits the leading `--`: grep parses an argv
+          # beginning with `--` as a long option and exits 2 before reading the
+          # file, which would make this step fail on a HEALTHY run. Matches the
+          # anchoring style of the render-fidelity and chart-geometry controls
+          # above. Found by the phase-60 security audit.
+          if ! grep -qE 'prove-matchers: all [0-9]+ case\(s\) discriminating' ../../zero-state-legend-matchers.log; then
             echo "::error::zero-state-legend-matchers-fired: the comparators did not all prove discriminating"
             exit 1
           fi
           echo "RECEIPT zero-state-legend-matchers-fired" | tee -a ../../ci-receipt.txt
+
+      # WR-03 label headroom. 60-13 pinned `domain={[0,'dataMax']}`, which put
+      # the tallest bar's top on the plot area's own y=0 edge, so the vertical
+      # form's top `<LabelList>` now has only `BarSeries.tsx`'s fixed 24px
+      # `margin.top` to live in. The existing `c1-status-labels-unclipped` rung
+      # only catches a label that has FULLY escaped the SVG box (0.5px
+      # tolerance); this gate asserts a real 4px buffer, so it catches the
+      # "cramped, not yet clipped" shape WR-03 actually names. Threshold was
+      # measured (7px on the real build), not assumed, and mutation-proved
+      # against margin.top 24/20/8 -- see the gate file's own header.
+      #
+      # Like the zero-state gate above, it BUILDS its own dist-gap-probe before
+      # measuring, so it cannot go inert against a stale bundle.
+      - name: Dashboard label-headroom gate
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:label-headroom 2>&1 | tee ../../label-headroom.log
+          if ! grep -q 'LABEL HEADROOM GATE: PASS (1/1 rungs)' ../../label-headroom.log; then
+            echo "::error::label-headroom: gate did not report PASS (1/1 rungs)"
+            exit 1
+          fi
+          echo "RECEIPT label-headroom" | tee -a ../../ci-receipt.txt
+
+      - name: Dashboard label-headroom comparator control (--prove-matchers)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:prove-label-headroom-matchers 2>&1 | tee ../../label-headroom-matchers.log
+          if ! grep -qE 'prove-matchers: all [0-9]+ case\(s\) discriminating' ../../label-headroom-matchers.log; then
+            echo "::error::label-headroom-matchers-fired: the comparators did not all prove discriminating"
+            exit 1
+          fi
+          echo "RECEIPT label-headroom-matchers-fired" | tee -a ../../ci-receipt.txt
 
       - name: Upload gate evidence on failure
         if: failure()
@@ -1325,6 +1364,10 @@ jobs:
             public-assets-prove-absent.log
             chart-geometry-dashboard.log
             chart-geometry-prove-matchers.log
+            zero-state-legend.log
+            zero-state-legend-matchers.log
+            label-headroom.log
+            label-headroom-matchers.log
             ci-receipt.txt
           retention-days: 14
 
@@ -1341,7 +1384,9 @@ jobs:
             live-read-public live-read-control-fired \
             render-fidelity-public render-fidelity-matchers-fired render-fidelity-controls-fired \
             public-assets public-assets-control-fired \
-            chart-geometry-dashboard chart-geometry-dashboard-matchers-fired
+            chart-geometry-dashboard chart-geometry-dashboard-matchers-fired \
+            zero-state-legend zero-state-legend-matchers-fired \
+            label-headroom label-headroom-matchers-fired
 
   # =========================================================================
   # Job 3 -- Phase-close baselines: vote-engine suite + authority typecheck.
