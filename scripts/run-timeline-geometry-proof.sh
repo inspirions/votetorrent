@@ -483,6 +483,34 @@ preflight() {
   : > "${ACCUMULATED_RECORDS}"
   collect_records
 
+  # fix(61-03): reconcile ORPHAN against the accumulated CARD set (authorized third fix,
+  # same disclosure/scope discipline as the first two -- 61-07 discovered this against real
+  # device output; see todos/pending/2026-09-16-timeline-geometry-proof-dump-ui-status-
+  # unbound-and-exit-masked.md). collect_records() appends one ORPHAN record for a stage the
+  # FIRST time any single pass observes that stage's title/subtitle/action content without
+  # its notch co-resolving IN THAT SAME PASS (e.g. only two cards fit the viewport at once,
+  # so a card's tail can be visible a pass before/after its own notch scrolls into frame).
+  # That ORPHAN record was never retired even when a DIFFERENT pass in the very same
+  # 8-iteration loop captured the stage's CARD (notch + bounds) correctly -- a real, valid
+  # observation sitting in the same ACCUMULATED_RECORDS file. A stage with a CARD record
+  # from ANY pass has, by definition, had its notch anchor positively resolved at least
+  # once; an ORPHAN record for that same stage is then a stale artifact of a different
+  # pass's transitional/boundary state, not evidence the anchor never resolves. Drop such
+  # stale ORPHAN lines before anything downstream (this preflight check, or any leg) reads
+  # the file. This can only ever REMOVE an ORPHAN line for a stage independently proven
+  # present via its own CARD record -- it cannot manufacture a CARD record, and a stage
+  # that truly has no CARD record in any pass is untouched by this filter and continues to
+  # fail (via the "could not locate card anchor" check immediately below, which reads
+  # CARD records only and was never affected by this bug) -- exactly the genuine
+  # scroll-boundary case that must stay a real, reported failure.
+  local reconciled="${TMPDIR_TG}/accumulated.reconciled"
+  awk -v FS="${TAB}" -v OFS="${TAB}" '
+    NR==FNR { if ($1=="CARD") has_card[$2]=1; next }
+    $1=="ORPHAN" && ($2 in has_card) { next }
+    { print }
+  ' "${ACCUMULATED_RECORDS}" "${ACCUMULATED_RECORDS}" > "${reconciled}"
+  mv "${reconciled}" "${ACCUMULATED_RECORDS}"
+
   local missing="" s found_count
   for s in "${EXPECTED_STAGES[@]}"; do
     found_count=$(grep -c "^CARD${TAB}${s}${TAB}" "${ACCUMULATED_RECORDS}" || true)
