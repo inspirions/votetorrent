@@ -30,7 +30,16 @@ import {useTranslation} from 'react-i18next';
 import FontAwesome6 from 'react-native-vector-icons/FontAwesome6';
 import {globalStyles} from '../theme/styles';
 import {CountdownTimer} from './CountdownTimer';
+import {TIMELINE_CARD_MARGIN_V} from './timeline-layout';
 import type {TimelineRow as TimelineRowViewModel, TimelineRowStatus, TimelineStageId} from '../timeline';
+
+// The notch's own geometry constants (61-06, D-08): the accent bar's split below consumes
+// `NOTCH_HEIGHT` and `notchTop` -- the notch's own computed values -- rather than a second,
+// independently-guessed pixel pair. Value-preserving: every number the notch renders is
+// byte-identical to before (top 21, borders 8/8/8, left -8 on the default theme); only the
+// SOURCE of those numbers changed.
+const NOTCH_BORDER_W = 8;
+const NOTCH_HEIGHT = NOTCH_BORDER_W * 2;
 
 export interface RowDisplay {
 	/** Flat dotted `timeline` namespace key -- D-21's one trap: `votingStarts` maps to
@@ -148,6 +157,10 @@ export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, on
 	const helpIconColor = isDeemphasized ? colors.textSecondary : colors.text;
 	const showPanel = !isDeemphasized && panel != null;
 	const showCountdown = stageId === 'votingStarts' && status === 'current' && !!countdownTargetIso;
+	// D-08 (Developer-Ruled Decision #2): the left accent bar renders only on the current row.
+	// Mutually exclusive with `isDeemphasized` (`'current'` is disjoint from `'future'`/`'unknown'`
+	// in the row model), so a de-emphasized row can never render it.
+	const isCurrent = status === 'current';
 
 	const actions = buildActions(stageId, status, {
 		onSeeDetails,
@@ -161,7 +174,7 @@ export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, on
 	// Notch vertical position derives from the theme's OWN h4 line height, so it tracks a theme
 	// change rather than a guessed pixel value (UI-SPEC's "not an approximation" requirement).
 	const cardPaddingTop = 16; // globalStyles.cardSurface.paddingVertical
-	const notchTop = cardPaddingTop + typeScale.h4.lineHeight / 2 - 8;
+	const notchTop = cardPaddingTop + typeScale.h4.lineHeight / 2 - NOTCH_HEIGHT / 2;
 
 	return (
 		<View style={[globalStyles.cardSurface, styles.card, {backgroundColor: colors.card}]}>
@@ -172,6 +185,10 @@ export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, on
 				style={[
 					styles.notch,
 					{
+						left: -NOTCH_BORDER_W,
+						borderTopWidth: NOTCH_BORDER_W,
+						borderBottomWidth: NOTCH_BORDER_W,
+						borderRightWidth: NOTCH_BORDER_W,
 						top: notchTop,
 						borderTopColor: 'transparent',
 						borderBottomColor: 'transparent',
@@ -179,6 +196,23 @@ export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, on
 					},
 				]}
 			/>
+
+			{/* D-08 (Developer-Ruled Decision #2): a 4px colors.primary left accent bar, current row
+			    only, split around the notch using the notch's OWN notchTop/NOTCH_HEIGHT values --
+			    never a second independently-guessed pixel pair. Mirrors the rail's own existing
+			    "above"/"below" connector-segment convention around each dot. */}
+			{isCurrent ? (
+				<View
+					testID={'timeline-row-accent-' + stageId + '-above'}
+					style={[styles.accentBar, {top: 0, height: notchTop, backgroundColor: colors.primary, borderTopLeftRadius: radii.lg}]}
+				/>
+			) : null}
+			{isCurrent ? (
+				<View
+					testID={'timeline-row-accent-' + stageId + '-below'}
+					style={[styles.accentBar, {top: notchTop + NOTCH_HEIGHT, bottom: 0, backgroundColor: colors.primary, borderBottomLeftRadius: radii.lg}]}
+				/>
+			) : null}
 
 			<View style={styles.titleRow}>
 				<Text
@@ -246,7 +280,11 @@ export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, on
 							}>
 							<Text
 								style={[
-									{fontFamily: fonts.bold.fontFamily, fontWeight: fonts.bold.fontWeight},
+									{
+										...(action.id === 'see-details' ? fonts.regular : fonts.bold),
+										fontSize: typeScale.body.fontSize,
+										lineHeight: typeScale.body.lineHeight,
+									},
 									action.variant === 'primary'
 										? {color: colors.light}
 										: action.variant === 'outline'
@@ -268,16 +306,20 @@ export default TimelineRow;
 const styles = StyleSheet.create({
 	card: {
 		marginHorizontal: 0,
-		marginVertical: 8,
+		marginVertical: TIMELINE_CARD_MARGIN_V,
 	},
 	notch: {
 		position: 'absolute',
-		left: -8,
 		width: 0,
 		height: 0,
-		borderTopWidth: 8,
-		borderBottomWidth: 8,
-		borderRightWidth: 8,
+	},
+	// D-08: 4px reuses the existing `xs` spacing token as a width value, not a new arbitrary
+	// number. Position/dimensions here; color and per-segment corner radius are supplied inline
+	// per-segment above, since only one outer corner of each segment is rounded.
+	accentBar: {
+		position: 'absolute',
+		left: 0,
+		width: 4,
 	},
 	titleRow: {
 		flexDirection: 'row',
@@ -290,8 +332,15 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 		justifyContent: 'center',
 	},
+	// D-10/D-11: centres the countdown horizontally on this surface only. `alignItems` -- not
+	// `justifyContent` -- because this wrapper has no `flexDirection` and therefore defaults to
+	// `column`, whose cross (horizontal) axis is controlled by `alignItems`; `justifyContent` on a
+	// column acts on the vertical axis and would be an inert no-op.
+	// D-11 deliberate divergence: Home's `ElectionCard` countdown wrapper is intentionally NOT
+	// centred (stays left-aligned) and must not be "fixed" to match this one.
 	countdown: {
 		marginTop: 16,
+		alignItems: 'center',
 	},
 	actions: {
 		marginTop: 8, // sm spacing token -- stacked actions never merge into one control
