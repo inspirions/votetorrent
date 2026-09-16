@@ -317,7 +317,8 @@ describe('TimelineRow (59-07)', () => {
 		let wrapper: renderer.ReactTestInstance | null = countdown.parent;
 		while (wrapper) {
 			const flat = flattenStyle(wrapper);
-			if (flat.marginTop === 16) {
+			// D-09 addendum (61-08, C1, developer-approved): 16 (md) -> 24 (lg).
+			if (flat.marginTop === 24) {
 				break;
 			}
 			wrapper = wrapper.parent;
@@ -328,7 +329,8 @@ describe('TimelineRow (59-07)', () => {
 		// View, so `alignItems` is the horizontal (cross) axis. `justifyContent` on a column acts on
 		// the vertical axis and would be an inert no-op.
 		expect(wrapperFlat.alignItems).toBe('center');
-		expect(wrapperFlat.marginTop).toBe(16);
+		// D-09 addendum (61-08, C1, developer-approved): 16 (md) -> 24 (lg).
+		expect(wrapperFlat.marginTop).toBe(24);
 
 		const card = tr.root.findAllByType(View)[0];
 		expect(flattenStyle(card).marginVertical).toBe(TIMELINE_CARD_MARGIN_V);

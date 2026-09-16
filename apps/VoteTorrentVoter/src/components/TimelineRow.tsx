@@ -338,12 +338,17 @@ const styles = StyleSheet.create({
 	// column acts on the vertical axis and would be an inert no-op.
 	// D-11 deliberate divergence: Home's `ElectionCard` countdown wrapper is intentionally NOT
 	// centred (stays left-aligned) and must not be "fixed" to match this one.
+	// D-09 addendum (61-08, C1, developer-approved): 16 (md) -> 24 (lg) -- the focal
+	// display-size countdown gets more air than an ordinary body-text gap.
 	countdown: {
-		marginTop: 16,
+		marginTop: 24,
 		alignItems: 'center',
 	},
+	// D-09 addendum (61-08, C2, developer-approved): marginTop 8 (sm) -> 16 (md), matching the
+	// same "one repeated unit instead of two different ones" rhythm fix already applied to the
+	// card-gap constant. `gap: 8` between stacked actions is unchanged.
 	actions: {
-		marginTop: 8, // sm spacing token -- stacked actions never merge into one control
+		marginTop: 16,
 		gap: 8,
 		alignItems: 'flex-start',
 	},

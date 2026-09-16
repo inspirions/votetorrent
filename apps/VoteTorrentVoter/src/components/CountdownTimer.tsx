@@ -145,8 +145,12 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 		marginHorizontal: 4, // sm(8px) gap between groups == 4px on each side
 	},
+	// D-09 addendum (61-08, C3, developer-approved): marginTop 0 -> 4 (xs) -- `styles.row`'s
+	// `alignItems: 'flex-start'` (untouched) top-aligns every group, so the shorter colon glyph
+	// reads slightly high against the taller digit groups at the `display` step; this nudges it
+	// toward the digits' optical middle. Shared with Home's `ElectionCard`.
 	colon: {
-		marginTop: 0,
+		marginTop: 4,
 	},
 	label: {
 		textTransform: 'uppercase',
