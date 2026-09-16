@@ -58,6 +58,30 @@ function buildAnchoredTimeline(nowMs: number): Record<TimelineStageId, number> {
 }
 
 /**
+ * Countdown variant of `buildAnchoredTimeline` (61-01, D2/D-07) -- starts from the same anchored
+ * instant map and moves `tallyingStarts` out to `nowMs + remainingMs`, shifting `validation`,
+ * `certificationStarts` and `closed` LATER by the same delta so the whole chain stays
+ * monotonically ordered. `deriveTimeline` treats `OUT_OF_ORDER` as a blocking conflict that makes
+ * the WHOLE view-model indeterminate (D-03), so a countdown fixture can never move
+ * `tallyingStarts` alone -- the three events causally after it must move with it.
+ * `registrationEnds`/`ballotsFinal`/`votingStarts`/`accruingVotes`/`hashingVotes`/`releasingKeys`
+ * are left exactly as `buildAnchoredTimeline` produced them, so `votingStarts` stays the
+ * `current` row and the same-day cluster is preserved.
+ */
+function buildCountdownTimeline(nowMs: number, remainingMs: number): Record<TimelineStageId, number> {
+	const base = buildAnchoredTimeline(nowMs);
+	const newTallyingStarts = nowMs + remainingMs;
+	const delta = newTallyingStarts - base.tallyingStarts;
+	return {
+		...base,
+		tallyingStarts: newTallyingStarts,
+		validation: base.validation + delta,
+		certificationStarts: base.certificationStarts + delta,
+		closed: base.closed + delta,
+	};
+}
+
+/**
  * The ten `TimelineRow` view-models in D-09 order, anchored to `nowMs` (default
  * `FIXTURE_NOW_MS`) -- `votingStarts` is `current`; `registrationEnds`/`ballotsFinal` are `past`;
  * everything else is `future`, including the same-day `accruingVotes`/`hashingVotes`/
@@ -112,4 +136,128 @@ export function buildRowFixture(overrides: {stageId: TimelineStageId} & Partial<
 					? {key: 'subtitle.pastDate', params: {date: '03/20'}}
 					: null,
 	};
+}
+
+/**
+ * A countdown-fixture result (61-01, D2/D-07): the ten-row rail plus the countdown target and its
+ * exact remainder, so a consumer can either pin the clock (`nowMs`) or assert the render
+ * directly (`remainingSeconds`) without recomputing either from the other.
+ */
+export interface TimelineCountdownFixture {
+	/** The anchor instant the fixture was built against. Exposed so a consumer that asserts
+	 * rendered digits can pin the clock with `jest.setSystemTime(nowMs)`. 61-06 asserts wrapper
+	 * and card style rather than digits and does not need to pin it; the field still ships,
+	 * because a fixture that hides its own anchor is how anchors get mixed. */
+	nowMs: number;
+	/** The countdown target, named to mirror the prop `TimelineRail` already computes and passes
+	 * (`TimelineRail.tsx:75`/`:135`) -- drops straight into either `CountdownTimer targetIso=` or
+	 * `TimelineRow countdownTargetIso=`. */
+	countdownTargetIso: string;
+	/** The exact remainder at `nowMs`. The discriminant Shared Contract 2's `totalSeconds >=
+	 * 86400` branch test asserts against. */
+	remainingSeconds: number;
+	/** The ten mutually-consistent rows, derived through the real `deriveTimeline()` adapter, with
+	 * `tallyingStarts` landing on `countdownTargetIso`. */
+	rows: TimelineRow[];
+}
+
+/**
+ * 179 days + 8 hours. `15_494_400 / 3600 = 4304` exactly -- the value in this phase's
+ * `evidence/D2-countdown-overflow.png`. The unfixed `format()` renders `4304 : 00 : 00` against
+ * this fixture; the fixed one renders `179 : 08 : 00`. This is the phase's positive control for
+ * D2, and the production-length row 61-06's Tier-1 assertions render. `179` is three digits, the
+ * `> 2 digits` arm of Shared Contract 2's shrink-to-fit step function.
+ *
+ * The `86400` half of the D2 boundary pair is reached by calling THIS (long) builder with
+ * `remainingSeconds: 86_400`, not by a third builder. Two builders, not three.
+ */
+export const LONG_COUNTDOWN_REMAINING_SECONDS = 15_494_400;
+
+/**
+ * 23h 59m 59s -- one second below the `>= 86400` discriminant, the `86399` half of the D2
+ * boundary pair. Renders `23 : 59 : 59` under both the old and new `format()` contracts (the
+ * unchanged control).
+ */
+export const SHORT_COUNTDOWN_REMAINING_SECONDS = 86_399;
+
+/** Options shared by both countdown builders. All members optional; unset members take the
+ * documented per-builder default. */
+interface TimelineCountdownFixtureOptions {
+	nowMs?: number;
+	remainingSeconds?: number;
+	timeZone?: string;
+	language?: string;
+}
+
+/** Shared construction path for both countdown builders (61-01). `validateBranch` is the one
+ * piece of behavior that differs between the long and short builder -- which side of the `86400`
+ * discriminant is legal for that builder to hand to `deriveTimeline`. */
+function buildCountdownFixture(
+	builderName: string,
+	defaultRemainingSeconds: number,
+	validateBranch: (remainingSeconds: number) => void,
+	options?: TimelineCountdownFixtureOptions,
+): TimelineCountdownFixture {
+	const nowMs = options?.nowMs ?? FIXTURE_NOW_MS;
+	const remainingSeconds = options?.remainingSeconds ?? defaultRemainingSeconds;
+	const timeZone = options?.timeZone ?? 'UTC';
+	const language = options?.language ?? 'en';
+
+	if (remainingSeconds <= 0) {
+		throw new Error(`${builderName}: remainingSeconds must be > 0, got ${remainingSeconds}`);
+	}
+	validateBranch(remainingSeconds);
+
+	const timeline = buildCountdownTimeline(nowMs, remainingSeconds * 1000);
+	const result = deriveTimeline({timeline, now: nowMs, timeZone, language});
+	if (result.indeterminate) {
+		throw new Error(`${builderName}: fixture timeline unexpectedly indeterminate -- ${result.reason}`);
+	}
+
+	return {
+		nowMs,
+		countdownTargetIso: new Date(nowMs + remainingSeconds * 1000).toISOString(),
+		remainingSeconds,
+		rows: result.rows,
+	};
+}
+
+/**
+ * Ten-row countdown fixture on the `>= 86400`-second (multi-day) side of the D2 branch boundary
+ * (61-01, D2/D-07). Default `remainingSeconds` is `LONG_COUNTDOWN_REMAINING_SECONDS`
+ * (`15_494_400`, the evidence screenshot's exact `4304`-hour case). Throws if handed a
+ * `remainingSeconds` on the short side (`< 86_400`) or `<= 0` -- the guard that lets a caller
+ * write `buildRowFixtureWithLongCountdown({remainingSeconds: 86_400})` and be certain it landed on
+ * this branch, not the short one.
+ */
+export function buildRowFixtureWithLongCountdown(options?: TimelineCountdownFixtureOptions): TimelineCountdownFixture {
+	return buildCountdownFixture(
+		'buildRowFixtureWithLongCountdown',
+		LONG_COUNTDOWN_REMAINING_SECONDS,
+		remainingSeconds => {
+			if (remainingSeconds < 86_400) {
+				throw new Error(`buildRowFixtureWithLongCountdown: remainingSeconds must be >= 86400 (got ${remainingSeconds})`);
+			}
+		},
+		options,
+	);
+}
+
+/**
+ * Ten-row countdown fixture on the `< 86400`-second (same-day) side of the D2 branch boundary
+ * (61-01, D2/D-07). Default `remainingSeconds` is `SHORT_COUNTDOWN_REMAINING_SECONDS` (`86_399`,
+ * one second below the discriminant). Throws if handed a `remainingSeconds` on the long side
+ * (`>= 86_400`) or `<= 0`.
+ */
+export function buildRowFixtureWithShortCountdown(options?: TimelineCountdownFixtureOptions): TimelineCountdownFixture {
+	return buildCountdownFixture(
+		'buildRowFixtureWithShortCountdown',
+		SHORT_COUNTDOWN_REMAINING_SECONDS,
+		remainingSeconds => {
+			if (remainingSeconds >= 86_400) {
+				throw new Error(`buildRowFixtureWithShortCountdown: remainingSeconds must be < 86400 (got ${remainingSeconds})`);
+			}
+		},
+		options,
+	);
 }
