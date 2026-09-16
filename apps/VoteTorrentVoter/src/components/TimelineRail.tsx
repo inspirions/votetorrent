@@ -15,9 +15,12 @@ import {TimelineRow} from './TimelineRow';
 import type {TimelineRowCallbacks} from './TimelineRow';
 import {TIMELINE_STAGE_IDS} from '../timeline';
 import type {TimelineRow as TimelineRowViewModel, TimelineStageId} from '../timeline';
+import {TIMELINE_CARD_MARGIN_V} from './timeline-layout';
 
 const DOT_SIZE = 20;
-const CARD_MARGIN_V = 8; // matches TimelineRow's card margin override
+// D-08: the current row's dot alone renders larger, still centred on the same dotCenterY as every
+// other dot (Developer-Ruled Decision #2).
+const CURRENT_DOT_SIZE = 24;
 const CARD_PADDING = 16; // globalStyles.cardSurface.paddingVertical
 const DATE_COLUMN_WIDTH = 64;
 const DOT_COLUMN_WIDTH = 44;
@@ -78,12 +81,14 @@ export function TimelineRail({
 	const tallyingStartsRow = rows.find(row => row.stageId === 'tallyingStarts');
 	const countdownTargetIso = tallyingStartsRow?.instantMs != null ? new Date(tallyingStartsRow.instantMs).toISOString() : undefined;
 
-	const dotCenterY = CARD_MARGIN_V + CARD_PADDING + typeScale.h4.lineHeight / 2;
+	const dotCenterY = TIMELINE_CARD_MARGIN_V + CARD_PADDING + typeScale.h4.lineHeight / 2;
 
 	return (
 		<View testID="timeline-rail">
 			{rows.map((row, index) => {
 				const isFilledDot = row.status === 'past' || row.status === 'current';
+				// D-08: the `current` literal, not `isFilledDot` (which also covers `past`).
+				const dotSize = row.status === 'current' ? CURRENT_DOT_SIZE : DOT_SIZE;
 				const aboveColor = index <= effectiveCurrentIndex ? colors.primary : colors.border;
 				const belowColor = index < effectiveCurrentIndex ? colors.primary : colors.border;
 				const dateLabel = row.railLabel.kind === 'now' ? t('rail.now') : row.railLabel.kind === 'date' ? row.railLabel.text : '—';
@@ -124,7 +129,13 @@ export function TimelineRail({
 								testID={'timeline-rail-dot-' + row.stageId}
 								style={[
 									styles.dot,
-									{top: dotCenterY - DOT_SIZE / 2},
+									{
+										top: dotCenterY - dotSize / 2,
+										left: (DOT_COLUMN_WIDTH - dotSize) / 2,
+										width: dotSize,
+										height: dotSize,
+										borderRadius: dotSize / 2,
+									},
 									isFilledDot
 										? {borderWidth: 4, borderColor: colors.primary, backgroundColor: colors.card}
 										: {borderWidth: 2, borderColor: colors.border, backgroundColor: colors.background},
@@ -178,9 +189,5 @@ const styles = StyleSheet.create({
 	},
 	dot: {
 		position: 'absolute',
-		left: (DOT_COLUMN_WIDTH - DOT_SIZE) / 2,
-		width: DOT_SIZE,
-		height: DOT_SIZE,
-		borderRadius: DOT_SIZE / 2,
 	},
 });
