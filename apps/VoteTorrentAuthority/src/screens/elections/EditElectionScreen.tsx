@@ -17,6 +17,11 @@ import type { IElectionEngine, IElectionsEngine, ElectionInit, ElectionDetails }
 import { getLocalKeyholders, saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
 import { InlineError } from "../../components/InlineError";
+import {
+	resolveElectionTimeline,
+	findTimelineOrderViolation,
+	EDIT_FALLBACK_DAYS,
+} from "./resolve-election-timeline";
 
 // Phase 9 plan 09-13 (ELECUI-04) — Election Revision form (Screen C, Figma #16/#17).
 // Phase 20 plan 20-06 (EUI-01, EUI-02) — wire real adjustElection from single cached load.
@@ -52,8 +57,10 @@ export default function EditElectionScreen() {
 	const [revision, setRevision] = useState<ElectionRevisionFormValue>({
 		registrationEnds: "",
 		ballotsFinal: "",
-		releasingKeys: "",
 		votingStarts: "",
+		accruingVotes: "",
+		hashingVotes: "",
+		releasingKeys: "",
 		tallyingStarts: "",
 		validation: "",
 		certificationStarts: "",
@@ -83,9 +90,10 @@ export default function EditElectionScreen() {
 				setRevision({
 					registrationEnds: toISO(cur.timeline.registrationEnds),
 					ballotsFinal: toISO(cur.timeline.ballotsFinal),
-					// releasingKeys has no ElectionEvent counterpart — leave blank (same as create)
-					releasingKeys: "",
 					votingStarts: toISO(cur.timeline.votingStarts),
+					accruingVotes: toISO(cur.timeline.accruingVotes),
+					hashingVotes: toISO(cur.timeline.hashingVotes),
+					releasingKeys: toISO(cur.timeline.releasingKeys),
 					tallyingStarts: toISO(cur.timeline.tallyingStarts),
 					validation: toISO(cur.timeline.validation),
 					certificationStarts: toISO(cur.timeline.certificationStarts),
@@ -135,31 +143,17 @@ export default function EditElectionScreen() {
 				return;
 			}
 			const now = Date.now();
-			const day = 24 * 60 * 60 * 1000;
-			const parseDateOrFallback = (s: string, fallbackMs: number): number =>
-				s.trim() ? new Date(s).getTime() || fallbackMs : fallbackMs;
 
-			// Back-half timeline events (tallying → closed) come from the form when set,
-			// otherwise default RELATIVE TO votingStarts — not `now` — so the
-			// votingStarts < tallyingStarts < certificationStarts ordering holds for any
-			// reasonable voting date (mirrors CreateElectionScreen).
-			const resolvedVotingStarts = parseDateOrFallback(revision.votingStarts, now + 11 * day);
-			const resolvedTimeline = {
-				registrationEnds: parseDateOrFallback(revision.registrationEnds, now + 3 * day),
-				ballotsFinal: parseDateOrFallback(revision.ballotsFinal, now + 6 * day),
-				votingStarts: resolvedVotingStarts,
-				tallyingStarts: parseDateOrFallback(revision.tallyingStarts, resolvedVotingStarts + 4 * day),
-				validation: parseDateOrFallback(revision.validation, resolvedVotingStarts + 5 * day),
-				certificationStarts: parseDateOrFallback(revision.certificationStarts, resolvedVotingStarts + 6 * day),
-				closed: parseDateOrFallback(revision.closed, resolvedVotingStarts + 7 * day),
-			};
+			// resolveElectionTimeline is the single shared construction site both this
+			// screen and CreateElectionScreen build through (D-16) — see
+			// resolve-election-timeline.ts for the "relative to votingStarts, not now"
+			// rationale.
+			const resolvedTimeline = resolveElectionTimeline(revision, now, EDIT_FALLBACK_DAYS);
 
-			// Friendly timeline guard BEFORE adjustElection — voting must precede tallying,
-			// and tallying must precede certification (avoids a raw engine ordering error).
-			if (
-				resolvedTimeline.votingStarts >= resolvedTimeline.tallyingStarts ||
-				resolvedTimeline.tallyingStarts >= resolvedTimeline.certificationStarts
-			) {
+			// Friendly timeline guard BEFORE adjustElection — the full eight-event strict
+			// chain, shared verbatim with CreateElectionScreen (CR-02 found all five
+			// ordering sites had drifted while each kept its own hand-typed copy).
+			if (findTimelineOrderViolation(resolvedTimeline) !== null) {
 				setErrorMessage(t("errTimelineOrder"));
 				setProposing(false);
 				return;

@@ -1,18 +1,31 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import type { PropsWithChildren } from "react";
 import type { INetworksEngine, IDefaultUserEngine, NetworkReference } from "@votetorrent/vote-core";
+import type { BootstrapSnapshot } from "@votetorrent/vote-engine/bootstrap";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { hideSplash } from "react-native-splash-view";
 import { EngineFactory } from "../engines/engine-factory";
 import { LocalStorageReact } from "@votetorrent/vote-engine/rn";
 import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
-import { useCadreNode } from "./CadreNodeProvider";
+import { createDeviceSigner } from "../engines/device-signer";
+import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
+import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
+import { attachAssociationSyncBindings } from "../screens/registration/attach-association-sync-bindings";
+import { purgeLegacyStagedPayload, registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
+import { useCadreNode, type CadreNodeSettlement } from "./CadreNodeProvider";
 
 interface AppContextType {
 	networksEngine?: INetworksEngine;
 	getEngine: <T>(engineName: string, initParams?: any) => Promise<T>;
 	hasEngine: (engineName: string) => boolean;
+	/**
+	 * D-09: the device-attestation capability probe (bare boolean — no ctx, no
+	 * network, no data). Consumed by 47-16's inline banner and 47-19's
+	 * AttestationProvisioningStatusScreen so neither has to reach past the
+	 * context boundary into EngineFactory directly.
+	 */
+	isAttestationVerifierProvisioned: () => boolean;
 	isInitialized: boolean;
 	hasNetwork: boolean;
 	/**
@@ -24,6 +37,17 @@ interface AppContextType {
 	 * the init effect), so a freshly-created or just-selected network appeared "not selected".
 	 */
 	selectNetwork: (networkRef: NetworkReference) => Promise<void>;
+	/**
+	 * 50-07 (D-07/D-09/D-13): export the whole local database, for the currently
+	 * established network, as a verified 50-02 snapshot envelope. Consumed by
+	 * `DashboardSignInCodeScreen`, which never imports `EngineFactory` directly —
+	 * this passthrough is that screen's ONLY path to a snapshot, mirroring
+	 * `isAttestationVerifierProvisioned`'s existing factory-ref passthrough shape.
+	 * Rejects with a `NoNetworkEstablishedError` (see `engine-factory.ts`) when no
+	 * network is yet selected; the screen detects that with
+	 * `isNoNetworkEstablishedError` and renders `NoNetwork`, never a raw message.
+	 */
+	exportDashboardSnapshot: () => Promise<BootstrapSnapshot>;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -34,6 +58,86 @@ export function useApp() {
 		throw new Error("useApp must be used within an AppProvider");
 	}
 	return context;
+}
+
+// ---------------------------------------------------------------------------
+// D-09 / RESEARCH Open Question 2: the cold-start re-attach race is REMOVED,
+// not survived. Before this plan, the init effect called
+// `factory.setNode(node)` with whatever `node` happened to be on the
+// CURRENT render — on cold start that is unconditionally `null` on the
+// FIRST render, because CadreNode.start() is async and has not resolved
+// yet. That guaranteed first attempt at `node === null` routes to
+// `rnDbFactory` and dies at `networks-engine.ts`'s `isSchemaInitialized`
+// gate. Adding `node` to the effect's dependency array papered over the
+// race with an implicit SECOND attempt once the boot completed — but
+// nothing distinguished "still booting" from "boot already failed", both
+// of which present identically as `node === null` forever, so a failed
+// boot left the app re-attempting on `rnDbFactory` and never noticing.
+//
+// The fix awaits `CadreNodeProvider`'s `nodeSettled` (D-08) BEFORE the
+// first `factory.setNode(...)`, so the unconditional first attempt at
+// `node === null` never runs at all — there is exactly one dispatch,
+// against the backend actually settled on.
+//
+// Open Question 2 — does the await need its own timeout? YES, and this is
+// the answer, not a retry knob: `nodeSettled` awaited unbounded would be a
+// NEW availability defect — a hung `CadreNode.start()` would strand the
+// officer on the splash screen forever, with no error view and therefore
+// no "Try Again" (T-58-05-02). `NODE_SETTLE_TIMEOUT_MS` bounds the wait;
+// the loser of the race RESOLVES to a `'timeout'` status (never rejects),
+// so a merely-slow boot degrades to the solo backend instead of surfacing
+// "Failed to load network" — a worse outcome than attempting solo. 15000ms
+// is three orders above the sub-second solo boot (`.start()` does not
+// block on peer discovery) and one third of `AddNetworkScreen.tsx`'s
+// `CREATE_TIMEOUT_MS = 45000` — the tolerance already applied to a
+// user-initiated wait; a passive cold-start wait must be shorter. This
+// value is a liveness ceiling chosen from reasoning, not a device
+// measurement — 58-08's D-08 re-measure should record the real settle
+// duration so it can be revisited with a number.
+//
+// D-09 also rejects bounded RETRY (`loadAuthoritiesWithRetry.ts` is
+// deliberately not reused here): retrying re-attempts the SAME ambiguous
+// signal this plan removes, it does not resolve it.
+// ---------------------------------------------------------------------------
+const NODE_SETTLE_TIMEOUT_MS = 15000;
+
+type NodeDispatchStatus = "ready" | "failed" | "timeout" | "unavailable";
+
+interface NodeDispatch {
+	status: NodeDispatchStatus;
+	node: CadreNodeSettlement["node"];
+}
+
+/**
+ * Bounded settle-then-dispatch helper (D-09 / Open Question 2). Races
+ * `nodeSettled` against `timeoutMs` and NEVER rejects: `'ready'` carries the
+ * live node (strand dispatch is correct); every other status
+ * (`'failed'` | `'timeout'` | `'unavailable'`) carries `null` (solo dispatch
+ * is correct). `'unavailable'` covers a missing/non-thenable `nodeSettled` —
+ * conservative direction, and it keeps any existing consumer that mocks
+ * `useCadreNode()` without the new field working rather than throwing on
+ * `settled.status`.
+ */
+async function resolveNodeDispatch(
+	nodeSettled: Promise<CadreNodeSettlement> | undefined,
+	timeoutMs: number
+): Promise<NodeDispatch> {
+	if (!nodeSettled || typeof (nodeSettled as { then?: unknown }).then !== "function") {
+		return { status: "unavailable", node: null };
+	}
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const winner = await Promise.race([
+			nodeSettled.then((settlement): NodeDispatch => ({ status: settlement.status, node: settlement.node })),
+			new Promise<NodeDispatch>((resolve) => {
+				timer = setTimeout(() => resolve({ status: "timeout", node: null }), timeoutMs);
+			}),
+		]);
+		return winner;
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
 }
 
 export function AppProvider({ children }: PropsWithChildren) {
@@ -66,6 +170,109 @@ export function AppProvider({ children }: PropsWithChildren) {
 		return engineFactoryRef.current?.hasEngine(engineName) ?? false;
 	}, []);
 
+	// 48-22 Task 2: DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY. attachSyncBindings() is a no-op
+	// unless DEV_REGISTRATION_SYNC_REST_BASE_URL is explicitly set (no hardcoded default), so a
+	// normal build is byte-identically unaffected. Called exactly once, at the point engines
+	// become available (getEngine is stable via useCallback's [] dep array above); the try/catch
+	// is defense-in-depth on top of the attachment's own internal no-throw guards — a missing or
+	// misconfigured dev sync target must never fail app boot.
+	//
+	// WR-17: `__DEV__`-gated at this CALL SITE as well as inside the harness itself. Two things
+	// change. (1) A release build never invokes the harness at all, so editing
+	// `DEV_REGISTRATION_SYNC_REST_BASE_URL` alone can no longer turn a shipped app into a live
+	// outbound sync client — the hazard plan 48-32's commit 70c40b7 demonstrated in practice
+	// before 4c1b231 reverted it. (2) The `console.error` below no longer runs unconditionally in
+	// release builds; a dev-only harness's failure is a dev-only diagnostic. The gate is
+	// duplicated (here and in `attachSyncBindings`) on purpose: this one keeps the call out of the
+	// release path, the other keeps the harness inert even if some future caller forgets.
+	//
+	// 51-10 Task 3: `attachAssociationSyncBindings()` is called in the SAME effect, immediately
+	// AFTER `attachSyncBindings()` — ordering is load-bearing (see
+	// `attach-association-sync-bindings.ts`'s own header): it composes onto the "rest" binding
+	// `attachSyncBindings()` just registered, via `bulk-import-sync-model.ts`'s registry seam, so
+	// the registration handle must exist before the association attachment captures it. Sequencing
+	// both calls inside one effect (rather than two separate effects) makes that order a property
+	// of the source, not an assumption about React's effect-scheduling order across two hooks.
+	useEffect(() => {
+		if (!__DEV__) return;
+		try {
+			attachSyncBindings(getEngine);
+		} catch (err) {
+			console.error("attachSyncBindings (dev/device-proof only) failed:", err);
+		}
+		try {
+			attachAssociationSyncBindings(getEngine);
+		} catch (err) {
+			console.error("attachAssociationSyncBindings (dev/device-proof only) failed:", err);
+		}
+	}, [getEngine]);
+
+	// D-09: passthrough to the factory's capability probe. The `?? false`
+	// fallback is deliberate: if the factory ref is somehow absent, report NOT
+	// provisioned — the conservative direction, which surfaces the setup
+	// warning rather than falsely claiming the verifier is ready.
+	const isAttestationVerifierProvisioned = useCallback(() => {
+		return engineFactoryRef.current?.isAttestationVerifierProvisioned() ?? false;
+	}, []);
+
+	// 50-07: passthrough to the factory's snapshot seam (see AppContextType's doc
+	// comment above). No fallback default here — unlike the boolean probe above,
+	// there is no safe "conservative" snapshot value to return if the ref is
+	// somehow absent, so an absent factory ref surfaces as a rejected promise
+	// rather than a silently empty snapshot.
+	const exportDashboardSnapshot = useCallback(async (): Promise<BootstrapSnapshot> => {
+		// An EXPLICIT, NAMED failure rather than a non-null assertion. `!` made
+		// an absent factory ref surface as "Cannot read properties of null
+		// (reading 'exportDashboardSnapshot')" -- a message the producer screen
+		// then rendered to the officer verbatim. Named here so a caller can log
+		// the class and show its own copy.
+		const factory = engineFactoryRef.current;
+		if (!factory) {
+			const error = new Error("AppProvider: the engine factory is not ready; cannot export a dashboard snapshot");
+			error.name = "EngineFactoryUnavailableError";
+			throw error;
+		}
+		return factory.exportDashboardSnapshot();
+	}, []);
+
+	// The one-shot startup sweep of PRE-FIX staged sign-in-code records. Two of
+	// two real devices checked were still carrying a whole-database payload in
+	// AsyncStorage, ~15 hours past that code's own expiry, because nothing in
+	// the tree ever rewrites the key for an expired code nobody tries to
+	// redeem. The sweep is a byte-identical no-op on every record a current
+	// build can write and never throws, so it is safe to run unconditionally
+	// here — an empty dependency array, once, on mount.
+	//
+	// The single log line carries the closed outcome token and NOTHING else:
+	// never a record field, never a byte of the payload. It exists so the
+	// on-device evidence that the sweep ran is visible in logcat without
+	// pulling the RKStorage database off the device. The `clean` and `absent`
+	// outcomes are silent — they are the overwhelmingly common case and would
+	// only add noise to every cold start.
+	useEffect(() => {
+		void purgeLegacyStagedPayload().then((outcome) => {
+			if (outcome === "legacy-payload" || outcome === "unreadable") {
+				console.warn(`AppProvider: staged sign-in-code sweep outcome: ${outcome}`);
+			}
+		});
+	}, []);
+
+	// 50-15 (CR-03): register this callback as the redemption-time regeneration
+	// fallback, so `dashboard-signin-code.ts` never needs to have persisted the
+	// payload to answer a redemption — see `registerDashboardSnapshotProvider`'s
+	// own doc comment. Unregister on unmount so a torn-down provider is never
+	// left dangling.
+	//
+	// FILESYSTEM-BINDING PATH ONLY. This registration is NOT live wiring for
+	// the rendezvous service: on that path the phone seals and uploads at mint
+	// and holds no payload, so there is never anything to regenerate and this
+	// callback is never reached. It is retained for the filesystem binding and
+	// is harmless to leave registered.
+	useEffect(() => {
+		registerDashboardSnapshotProvider(exportDashboardSnapshot);
+		return () => registerDashboardSnapshotProvider(undefined);
+	}, [exportDashboardSnapshot]);
+
 	// Activate a network at runtime (create / picker "Select") without a reboot.
 	// Mirrors the boot re-attach block below so behavior is identical to a restart.
 	const selectNetwork = useCallback(async (networkRef: NetworkReference) => {
@@ -89,7 +296,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// (P2P-06 / SC1 no regression). This is also the precondition for the live-node
 	// peerId marker the proof asserts (P2P-04 / D-05). node is null until the CadreNode
 	// boots → rnDbFactory remains active until that point (solo-safe).
-	const { connectedPeers, node } = useCadreNode();
+	const { connectedPeers, node, nodeSettled } = useCadreNode();
 	useEffect(() => {
 		engineFactoryRef.current?.setGetPeerCount(connectedPeers);
 		engineFactoryRef.current?.setNode(node);
@@ -100,21 +307,30 @@ export function AppProvider({ children }: PropsWithChildren) {
 			try {
 				const factory = engineFactoryRef.current!;
 
-				// RE-ATTACH FIX: Synchronise the current CadreNode state into the factory
-				// before any DbFactory call. The lazy-dispatch DbFactory selects strand vs
-				// solo based on factory.node AT CALL TIME. On cold start, the setNode
-				// effect (dep: [connectedPeers, node]) fires before this effect (effects
-				// run in declaration order) — but because CadreNode.start() is async,
-				// node is still null on the first render and may only become non-null after
-				// this effect has already completed. Adding `node` to this effect's dep
-				// array causes it to re-fire when CadreNode boots; calling setNode(node)
-				// here ensures the factory uses the strand DbFactory for the re-attach
-				// open() call, matching the factory path used during the original create().
-				// Without this, create() (user finished the form AFTER CadreNode booted)
-				// used createStrandDbFactory while cold-start re-attach used rnDbFactory —
-				// two different storage backends — leaving isSchemaInitialized false on the
-				// rnDbFactory side → "Network not opened in this session — use create() first".
-				factory.setNode(node);
+				// RE-ATTACH FIX (D-08/D-09, superseding the prior race-survival shape):
+				// await the CadreNode boot's settlement BEFORE the first DbFactory call,
+				// instead of dispatching on whatever `node` happens to be on the CURRENT
+				// render. The lazy-dispatch DbFactory selects strand vs solo based on
+				// factory.node AT CALL TIME, and on cold start `node` is unconditionally
+				// null on the first render (CadreNode.start() is async and has not
+				// resolved yet) — the old `factory.setNode(node)` here guaranteed a first
+				// attempt against rnDbFactory that died at isSchemaInitialized. The old
+				// fix relied on `node` being in this effect's dependency array to force an
+				// implicit SECOND attempt once boot completed, but nothing distinguished
+				// "still booting" from "boot already failed" (both are `node === null`
+				// forever) — bounded retry (`loadAuthoritiesWithRetry.ts`) was considered
+				// and rejected (D-09): retrying re-attempts the same ambiguous signal
+				// rather than resolving it. `nodeSettled` makes the two states
+				// distinguishable, so there is exactly one dispatch, against the backend
+				// actually settled on — see `resolveNodeDispatch`'s header comment above
+				// for the bound (Open Question 2) that keeps this await from becoming a
+				// hang.
+				const settleStart = Date.now();
+				const dispatch = await resolveNodeDispatch(nodeSettled, NODE_SETTLE_TIMEOUT_MS);
+				// Closed-token diagnostic only: status + elapsed ms, never a hash, an
+				// address, or user data (mirrors CadreNodeProvider.tsx's own discipline).
+				console.info("[AppProvider] node settle:", dispatch.status, Date.now() - settleStart);
+				factory.setNode(dispatch.status === "ready" ? dispatch.node : null);
 
 				const networksEng = factory.getNetworksEngine();
 
@@ -148,6 +364,22 @@ export function AppProvider({ children }: PropsWithChildren) {
 						factory.setCurrentUser(user);
 						await networksEng.open(network, user);
 						await factory.getEngine("network", network);
+						// 47-23: __DEV__-guarded, flag-gated registrant fixture. No-op in
+						// release and whenever REGISTRANT_SEED_ENABLED is false (committed
+						// default). Awaited HERE — rather than fired from index.js — so
+						// exactly one Quereus context ever touches the store (the factory's
+						// own), matching the voter app's VoterAppProvider precedent for the
+						// same placement.
+						// A LAZY factory, never a resolved signer: createDeviceSigner reads
+						// the device private key out of AsyncStorage and throws when the
+						// device user is absent/corrupt. Resolving it here ran that read on
+						// every release cold start for a call that always no-ops, and let a
+						// signer failure abort a SUCCESSFUL re-attach into "Failed to load
+						// network". maybeSeedRegistrantFixtures now invokes this only after
+						// its own __DEV__/flag gate, inside its own try/catch.
+						await maybeSeedRegistrantFixtures(networksEng, network, user, () =>
+							createDeviceSigner(user.name),
+						);
 						// Pitfall 4: setHasNetwork is called by AppProvider (not the factory).
 						setHasNetwork(true);
 						// RE-ATTACH FIX: clear any initError from a previous failed attempt so
@@ -178,15 +410,17 @@ export function AppProvider({ children }: PropsWithChildren) {
 
 		initialize();
 		// CR-02: re-run when initNonce changes so "Try Again" can re-attempt init.
-		// RE-ATTACH FIX: also re-run when node changes (null → CadreNode instance)
-		// so that the factory's DbFactory dispatch is re-evaluated with the correct
-		// node state before the re-attach open() call. This fixes the race where
-		// cold-start initialize() ran with node=null (using rnDbFactory) while
-		// create() ran after CadreNode booted (using createStrandDbFactory) —
-		// different storage backends causing isSchemaInitialized to return false.
-		// NetworksEngine.open() is cache-first (D-06) so re-running on a
-		// successfully-attached network is a cheap no-op (cache hit, no DDL).
-	}, [initNonce, node]);
+		// D-09/D-10: `node` is deliberately OUT of this array — it was the trigger
+		// for the implicit second attempt the settle-then-dispatch fix above
+		// removes. `initNonce` stays: it is the CR-02 "Try Again" affordance and is
+		// now also the recovery path for the (rare) timeout branch, since a bump
+		// re-awaits the by-then-settled `nodeSettled` promise and gets the correct
+		// backend. `nodeSettled` itself is NOT in this array either — it is a
+		// stable ref-held promise (CadreNodeProvider.tsx), so listing it would only
+		// matter if some future consumer reconstructed it per render, which would
+		// re-fire this effect and reintroduce the double attempt this plan removes.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [initNonce]);
 
 	// D-15: only show the spinner while initialization is truly pending.
 	if (!isInitialized) {
@@ -240,9 +474,11 @@ export function AppProvider({ children }: PropsWithChildren) {
 				networksEngine: networksEngine ?? undefined,
 				getEngine,
 				hasEngine,
+				isAttestationVerifierProvisioned,
 				isInitialized,
 				hasNetwork,
 				selectNetwork,
+				exportDashboardSnapshot,
 			}}
 		>
 			{children}

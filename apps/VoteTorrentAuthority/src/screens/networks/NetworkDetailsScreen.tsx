@@ -23,6 +23,7 @@ import { useApp } from "../../providers/AppProvider";
 import NetworkDetailsComponent from "./components/NetworkDetailsComponent";
 import { AuthorizationSection } from "../../components/AuthorizationSection";
 import type { NavigationProp } from "../../navigation/types";
+import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
 import {
 	ProposedChange,
 	ProposedChangesCard,
@@ -39,6 +40,7 @@ export function NetworkDetailsScreen() {
 	const [loadError, setLoadError] = useState("");
 	const [selectError, setSelectError] = useState("");
 	const { getEngine, selectNetwork } = useApp();
+	const promptRecoveryKeyRegistrationIfNeeded = useRecoveryKeyRegistrationGate();
 	const { t } = useTranslation();
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NavigationProp>();
@@ -142,6 +144,16 @@ export function NetworkDetailsScreen() {
 			// gated screens (Elections/Authorities) render immediately — previously this
 			// only re-pointed the engine, leaving hasNetwork false until the next reboot.
 			await selectNetwork(networkRef as NetworkReference);
+
+			// 49-19 (recovery-key-registration gap): the join path reaches the same dead end the
+			// create path does. ProvisionSigningKeyScreen's stage 2 registers the recovery key
+			// only once a network `User` resolves, which cannot happen before this point, and
+			// nothing previously brought the officer back to it -- leaving them one biometric
+			// enrolment from a stranded device. The ceremony is idempotent and registers only
+			// what is missing, so the gate below decides whether there is anything to do.
+			// Checked BEFORE goBack() so the officer lands on the ceremony rather than having it
+			// appear over the network home they just returned to.
+			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
 			navigation.goBack();
 		} catch (error) {
 			console.warn("Failed to select network:", error);

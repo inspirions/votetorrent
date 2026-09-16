@@ -10,19 +10,27 @@
  *
  * Phase 44 (D-02/D-04/D-07): `VoterAppContextType` now ALSO carries the real composition
  * root's surface (`getEngine`/`hasEngine`/`selectNetwork`/`hasNetwork`) mirroring the authority
- * app's `AppProvider`, plus the D-07 dev-seeded `seededElectionId`/`sign` the register seam
- * (44-08) reads. The three former registration/voted-status mock booleans (and their setters)
- * are REMOVED from this context — the real registration flow (real `Registrant` rows via
- * `RegistrationEngine`) replaces them; any screen that still needs a local registered/voted flag
- * now owns it as component-local state (see `RegistrationScreen.tsx`/`HomeScreen.tsx`/
- * `ReviewSubmitScreen.tsx`).
+ * app's `AppProvider`, plus the D-07 dev-seeded `seededElectionId` the registration seam reads.
+ * The three former registration/voted-status mock booleans (and their setters) are REMOVED from
+ * this context — the real registration flow (real `Registrant` rows via `RegistrationEngine`)
+ * replaces them; any screen that still needs a local registered/voted flag now owns it as
+ * component-local state (see `RegistrationScreen.tsx`/`HomeScreen.tsx`/`ReviewSubmitScreen.tsx`).
+ *
+ * 51-12 (D-09/D-20): the context's `sign` field (the founding-officer device signer,
+ * `DevSeedResult.sign`) is REMOVED. `ConfirmationScreen.tsx` was rewritten by 51-11 to never
+ * destructure `useVoterApp().sign` — it is dead plumbing, and dead plumbing that hands out an
+ * officer-capable signer is exactly the kind of "obvious, convenient" surface a future
+ * contributor could wire back into a reintroduced admin-signed ceremony (T-51-12-02). Removing
+ * it here means there is no `sign` left on this context to wire back in the first place —
+ * `DevSeedResult.sign` itself is UNCHANGED (dev-seed.ts / dev-seed.test.ts still need it as the
+ * seed's own election/policy-row signer).
  *
  * Voter/Registration/Ballot-selection shapes that have no `vote-core` analog stay app-local
  * here — they are NOT promoted to `vote-core` this phase (D-04, REQUIREMENTS Out of Scope).
- * This module must never import from `vote-core` (a bare `NetworkReference`/`Signature` type
- * import is fine — those are pure type-only re-exports, not a runtime dependency on vote-core).
+ * This module must never import from `vote-core` (a bare `NetworkReference` type import is
+ * fine — that is a pure type-only re-export, not a runtime dependency on vote-core).
  */
-import type {NetworkReference, Signature} from '@votetorrent/vote-core';
+import type {NetworkReference} from '@votetorrent/vote-core';
 
 /**
  * The 7-state election lifecycle, in canonical order (D-03). Phase 40's `__DEV__` cycler steps
@@ -159,9 +167,10 @@ export interface MockBallot {
  *
  * Phase 44 (D-02/D-04): the composition-root surface below (`getEngine`/`hasEngine`/
  * `selectNetwork`/`hasNetwork`) is REAL — it delegates to a real `EngineFactory` + booted
- * `CadreNode`, mirroring the authority app's `AppProvider`. `seededElectionId`/`sign` are
- * captured from the D-07 dev-seed's return and are only populated in `__DEV__` (undefined
- * otherwise — there is no production join flow yet, P2P-11 stays paused).
+ * `CadreNode`, mirroring the authority app's `AppProvider`. `seededElectionId` is captured from
+ * the D-07 dev-seed's return and is only populated in `__DEV__` (undefined otherwise — there is
+ * no production join flow yet, P2P-11 stays paused). There is no `sign` field (51-12, D-09/D-20)
+ * — see the module doc comment above.
  */
 export interface VoterAppContextType {
 	isInitialized: boolean;
@@ -198,10 +207,4 @@ export interface VoterAppContextType {
 	 * Only set in `__DEV__`; `undefined` otherwise (no production join flow yet).
 	 */
 	seededElectionId: string | undefined;
-	/**
-	 * The SAME device signer used both as the dev-seed's founding-officer key and as
-	 * `register()`'s `signatureOrCallback` (44-08) — one identity, two roles (D-05). Only set in
-	 * `__DEV__`; `undefined` otherwise.
-	 */
-	sign: ((digest: Uint8Array) => Promise<Signature>) | undefined;
 }

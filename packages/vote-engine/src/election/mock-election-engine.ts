@@ -145,6 +145,9 @@ export class MockElectionEngine implements IElectionEngine {
 					[ElectionEvent.registrationEnds]: MOCK_NOW + 2 * MOCK_DAY_MS,
 					[ElectionEvent.ballotsFinal]: MOCK_NOW + 5 * MOCK_DAY_MS,
 					[ElectionEvent.votingStarts]: MOCK_NOW + 10 * MOCK_DAY_MS,
+					[ElectionEvent.accruingVotes]: MOCK_NOW + 11 * MOCK_DAY_MS,
+					[ElectionEvent.hashingVotes]: MOCK_NOW + 12 * MOCK_DAY_MS,
+					[ElectionEvent.releasingKeys]: MOCK_NOW + 13 * MOCK_DAY_MS,
 					// votingEnds is rendered from tallyingStarts in the Timeline mapping.
 					[ElectionEvent.tallyingStarts]: MOCK_NOW + 14 * MOCK_DAY_MS,
 					[ElectionEvent.validation]: MOCK_NOW + 15 * MOCK_DAY_MS,

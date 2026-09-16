@@ -1,0 +1,79 @@
+diff --git a/dist/src/cluster/cluster-repo.js b/dist/src/cluster/cluster-repo.js
+index 53e8ca382a67130e7770db8efbe72fc5f67758e6..ec43f1154fb197b2592d60c9a624fe07c9ed5565 100644
+--- a/dist/src/cluster/cluster-repo.js
++++ b/dist/src/cluster/cluster-repo.js
+@@ -191,12 +191,17 @@ export class ClusterMember {
+             membershipAdmissionFraction: this.membershipAdmissionFraction,
+             allowUnvalidatedSmallCluster: this.allowUnvalidatedSmallCluster
+         });
+-        // Periodically clean up expired transactions (.unref() so tests/short-lived processes can exit)
++        // Periodically clean up expired transactions (.unref() so tests/short-lived processes can exit).
++        // 56-11: `setInterval` returns a Node `Timeout` object (which has `.unref()`) under Node, but a
++        // plain numeric id (which does NOT) in a real browser -- and on React Native too. This constructor
++        // runs unconditionally for every ClusterRepo, so an unguarded `.unref()` call throws
++        // `TypeError: ...unref is not a function`. Optional-chained so the Node behaviour (unref'd, so a
++        // short-lived process can still exit) is unchanged, and the browser simply has nothing to unref.
+         this.expirationInterval = setInterval(() => this.queueExpiredTransactions(), 60000);
+-        this.expirationInterval.unref();
++        this.expirationInterval.unref?.();
+         // Process cleanup queue
+         this.cleanupInterval = setInterval(() => this.processCleanupQueue(), 1000);
+-        this.cleanupInterval.unref();
++        this.cleanupInterval.unref?.();
+     }
+     /**
+      * The resolved super-majority threshold this member runs on. Exposed so the composition root can
+@@ -294,7 +299,7 @@ export class ClusterMember {
+             // Remove from pending updates after a short delay to allow concurrent calls to see it
+             setTimeout(() => {
+                 this.pendingUpdates.delete(record.messageHash);
+-            }, 100).unref();
++            }, 100).unref?.();
+         }
+     }
+     async processUpdate(record) {
+@@ -2139,7 +2144,7 @@ export class ClusterMember {
+         let timer;
+         const timeout = new Promise((_, reject) => {
+             timer = setTimeout(() => reject(new Error(`reconcile for block ${blockId} timed out after ${ReconcileTimeoutMs}ms`)), ReconcileTimeoutMs);
+-            timer.unref();
++            timer.unref?.();
+         });
+         return Promise.race([promise, timeout]).finally(() => {
+             if (timer)
+@@ -2153,10 +2158,18 @@ export class ClusterMember {
+         if (!record.message.expiration) {
+             return {};
+         }
+-        return {
+-            promiseTimeout: setTimeout(() => this.handleExpiration(record.messageHash), record.message.expiration - Date.now()).unref(),
+-            resolutionTimeout: setTimeout(() => this.resolveWithPeers(record.messageHash), record.message.expiration + 5000 - Date.now()).unref()
+-        };
++        // 56-11: split from the original chained `setTimeout(...).unref()` form -- under Node,
++        // `.unref()` returns the SAME Timeout object, so chaining it into the property value was
++        // harmless there; in a browser (and on React Native) `setTimeout` returns a plain number
++        // with no `.unref` method, and `?.()`'s short-circuit would have assigned `undefined`
++        // instead of the real handle, silently breaking dispose()'s later
++        // `clearTimeout(state.promiseTimeout)`. Assigning the handle BEFORE the optional unref
++        // call keeps the real handle either way.
++        const promiseTimeout = setTimeout(() => this.handleExpiration(record.messageHash), record.message.expiration - Date.now());
++        promiseTimeout.unref?.();
++        const resolutionTimeout = setTimeout(() => this.resolveWithPeers(record.messageHash), record.message.expiration + 5000 - Date.now());
++        resolutionTimeout.unref?.();
++        return { promiseTimeout, resolutionTimeout };
+     }
+     /**
+      * Scan this member's reservation table (`activeTransactions`) for a held transaction that
+diff --git a/dist/src/libp2p-node-base.js b/dist/src/libp2p-node-base.js
+index 6787965df7e0eef23f57050741e5d1d2525915d1..218d88ef2ab81a18718b65ab80eba420f2d13568 100644
+--- a/dist/src/libp2p-node-base.js
++++ b/dist/src/libp2p-node-base.js
+@@ -497,7 +497,7 @@ export async function createLibp2pNodeBase(options, defaults) {
+             try {
+                 const response = await Promise.race([
+                     syncClient.requestBlock({ blockId, rev: undefined }),
+-                    new Promise(resolve => { setTimeout(() => resolve({ success: false }), 1000).unref(); })
++                    new Promise(resolve => { setTimeout(() => resolve({ success: false }), 1000).unref?.(); })
+                 ]);
+                 return response.success ? response.archive : undefined;
+             }

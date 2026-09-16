@@ -12,6 +12,10 @@ const resources = {
 	en: {
 		common: {
 			tabVote: 'Vote',
+			// Phase 59 (D-13) — fifth bottom tab, second position (Vote · Timeline · Registration ·
+			// Scan · Settings). Placed here (after tabVote) so property order mirrors D-13's locked
+			// tab order.
+			tabTimeline: 'Timeline',
 			tabRegistration: 'Registration',
 			tabScan: 'Scan',
 			tabSettings: 'Settings',
@@ -21,6 +25,7 @@ const resources = {
 			notifications: 'Notifications',
 			'breadcrumb.home': 'Home',
 			'breadcrumb.ballot': 'Ballot',
+			configNotConfigured: 'Not configured',
 		},
 		home: {
 			headerTitle: 'Vote',
@@ -40,6 +45,7 @@ const resources = {
 			'countdown.hours': 'hours',
 			'countdown.minutes': 'minutes',
 			'countdown.seconds': 'seconds',
+			'countdown.days': 'days',
 			validationDetailsTitle: 'Validation Details',
 			'states.upcoming.summary':
 				"Voting hasn't opened yet — check back when the polls open.",
@@ -232,10 +238,74 @@ const resources = {
 			languageEnglish: 'English',
 			languageSpanish: 'Español',
 		},
+		// Phase 59 (D-13/D-21) — the voter's Timeline tab. A NEW namespace (not reuse of `home`):
+		// `home.states.releasingKeys.summary` already exists and speaks a different sentence for a
+		// different surface (ElectionCard's mock lifecycle summary vs. this tab's real row copy) —
+		// reusing `home` risks exactly that collision. Flat dotted-string property names
+		// (`keySeparator: false` below) — never nested objects. Keys mirror the ElectionEvent
+		// member each row's dot/date represents (D-21's row identifier), not the LifecycleState
+		// interval, so a row-title key stays stable regardless of which interval an instant
+		// currently falls in.
+		timeline: {
+			'stage.registrationEnds.title': 'Registration Ends',
+			'stage.ballotsFinal.title': 'Ballots Finalized',
+			'stage.votingPeriod.title': 'Voting Period',
+			'stage.accruingVotes.title': 'Accruing Votes',
+			'stage.hashingVotes.title': 'Hashing Votes',
+			'stage.releasingKeys.title': 'Releasing Keys',
+			'stage.tallyingStarts.title': 'Tallying',
+			'stage.validation.title': 'Validation',
+			'stage.certificationStarts.title': 'Certification',
+			'stage.closed.title': 'Election Closed',
+			'help.accessibilityLabel': 'More information about {{stage}}',
+			'subtitle.yesterday': 'Yesterday',
+			'subtitle.today': 'Today - {{weekday}}',
+			'subtitle.futureWeekday': '{{weekday}}',
+			'subtitle.pastDate': '{{date}}',
+			'subtitle.futureDate': '{{date}}',
+			'header.dateRange': '{{startDate}} - {{endDate}}',
+			headerTitle: 'Timeline',
+			'rail.now': 'Now',
+			// The UI-SPEC's bold run ("You **are registered** ...") is rendered via a nested <Text>
+			// split, NOT markdown-in-string (no rich-text library is used anywhere in this app).
+			// `{{bold}}` is a sentinel the consumer splits on; resolving it to
+			// `registration.isRegisteredBold`'s own text yields the plain sentence for the panel's
+			// `accessibilityLabel`. No third key, no leading/trailing spaces in either resource.
+			'registration.isRegistered': 'You {{bold}} in the {{network}}',
+			'registration.isRegisteredBold': 'are registered',
+			// `pending`/`notRegistered`/`unknown` implement D-23(d)'s three honest states
+			// (registered / pending / not registered) plus D-03's explicit-indeterminate path —
+			// additions beyond the UI-SPEC's printed "registered" copy, required so 59-09 does not
+			// have to reopen this file. Revoked ('r') / suspended ('s') registrants resolve to
+			// `notRegistered` — a wiring call made by 59-09, not this namespace.
+			'registration.pending': 'Your registration in the {{network}} is awaiting a decision.',
+			'registration.notRegistered': 'You are not registered in the {{network}}.',
+			'registration.unknown': "We couldn't check your registration status right now.",
+			'registration.viewCta': 'View registration',
+			'registration.editCta': 'Edit registration',
+			'voting.previewBallotCta': 'Preview ballot',
+			'voting.voteNowCta': 'Vote now',
+			'voting.viewSubmissionCta': 'View submission',
+			'row.detailsCta': 'See details',
+			'keyholders.viewCta': 'View Keyholders',
+			'keyholders.screenTitle': 'Keyholders',
+			'keyholders.releasedCount': '{{released}} of {{total}} keys released',
+			'keyholders.emptyHeading': 'No keyholders yet',
+			'keyholders.emptyBody': 'This election has no keyholders assigned yet.',
+			'indeterminate.heading': "We can't show this election's timeline right now",
+			'indeterminate.body':
+				"The election schedule could not be read or doesn't make sense yet. Try again in a moment.",
+			'indeterminate.retryCta': 'Try again',
+			// __DEV__-only clock-offset control (D-05) — styled with colors.warning, never a
+			// production-affordance color, so it cannot be mistaken for a real control.
+			'dev.clockOffsetLabel': 'DEV: Clock offset',
+		},
 	},
 	es: {
 		common: {
 			tabVote: 'Votar',
+			// Phase 59 (D-13) — see the `en.common` block's comment.
+			tabTimeline: 'Cronograma',
 			tabRegistration: 'Registro',
 			tabScan: 'Escanear',
 			tabSettings: 'Ajustes',
@@ -245,6 +315,7 @@ const resources = {
 			notifications: 'Notificaciones',
 			'breadcrumb.home': 'Inicio',
 			'breadcrumb.ballot': 'Papeleta',
+			configNotConfigured: 'Sin configurar',
 		},
 		home: {
 			headerTitle: 'Votar',
@@ -259,6 +330,7 @@ const resources = {
 			'countdown.hours': 'horas',
 			'countdown.minutes': 'minutos',
 			'countdown.seconds': 'segundos',
+			'countdown.days': 'días',
 			validationDetailsTitle: 'Detalles de Validación',
 			'states.upcoming.summary':
 				'La votación aún no ha comenzado — vuelve cuando se abran las urnas.',
@@ -417,6 +489,51 @@ const resources = {
 			// Endonyms in both locales (mobile-locale-picker convention).
 			languageEnglish: 'English',
 			languageSpanish: 'Español',
+		},
+		// Phase 59 (D-13/D-21) — see the `en.timeline` block's comment.
+		timeline: {
+			'stage.registrationEnds.title': 'Fin del Registro',
+			'stage.ballotsFinal.title': 'Boletas Finalizadas',
+			'stage.votingPeriod.title': 'Período de Votación',
+			'stage.accruingVotes.title': 'Acumulando Votos',
+			'stage.hashingVotes.title': 'Verificando Votos',
+			'stage.releasingKeys.title': 'Liberando Claves',
+			'stage.tallyingStarts.title': 'Escrutinio',
+			'stage.validation.title': 'Validación',
+			'stage.certificationStarts.title': 'Certificación',
+			'stage.closed.title': 'Elección Cerrada',
+			'help.accessibilityLabel': 'Más información sobre {{stage}}',
+			'subtitle.yesterday': 'Ayer',
+			'subtitle.today': 'Hoy - {{weekday}}',
+			'subtitle.futureWeekday': '{{weekday}}',
+			'subtitle.pastDate': '{{date}}',
+			'subtitle.futureDate': '{{date}}',
+			'header.dateRange': '{{startDate}} - {{endDate}}',
+			headerTitle: 'Cronograma',
+			'rail.now': 'Ahora',
+			// Spanish word order leads with the bold run — see the `en.timeline` block's comment
+			// for the sentinel-split mechanism.
+			'registration.isRegistered': '{{bold}} en la {{network}}',
+			'registration.isRegisteredBold': 'Estás registrado',
+			'registration.pending': 'Tu registro en la {{network}} está esperando una decisión.',
+			'registration.notRegistered': 'No estás registrado en la {{network}}.',
+			'registration.unknown': 'No pudimos verificar tu estado de registro en este momento.',
+			'registration.viewCta': 'Ver registro',
+			'registration.editCta': 'Editar registro',
+			'voting.previewBallotCta': 'Vista previa de la boleta',
+			'voting.voteNowCta': 'Votar ahora',
+			'voting.viewSubmissionCta': 'Ver mi envío',
+			'row.detailsCta': 'Ver detalles',
+			'keyholders.viewCta': 'Ver Custodios de Claves',
+			'keyholders.screenTitle': 'Custodios de Claves',
+			'keyholders.releasedCount': '{{released}} de {{total}} claves liberadas',
+			'keyholders.emptyHeading': 'Aún no hay custodios',
+			'keyholders.emptyBody': 'Esta elección aún no tiene custodios asignados.',
+			'indeterminate.heading': 'No podemos mostrar el cronograma de esta elección en este momento',
+			'indeterminate.body':
+				'No se pudo leer el cronograma de la elección o aún no es válido. Inténtalo de nuevo en un momento.',
+			'indeterminate.retryCta': 'Intentar de nuevo',
+			'dev.clockOffsetLabel': 'DEV: Ajuste de reloj',
 		},
 	},
 };

@@ -35,7 +35,7 @@
 
 import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { openOptimysticRNDb, loadOrCreateRNPeerKey } from '@optimystic/db-p2p-storage-rn';
-import { createScopedRnStorageProvider } from './storage-guard';
+import { createScopedRnStorageProvider, scopedRnStoreName } from './storage-guard';
 import { CadreNode } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
@@ -54,6 +54,8 @@ const CADRE_STORE = 'votetorrent-cadre-probe-replication';
 // The per-network strand store name (without the votetorrent- prefix that destroyDB prepends).
 // destroyDB targets ONLY 'votetorrent-' + PROOF_NETWORK_STORE (D-03 / T-23-03-02).
 const PROOF_NETWORK_STORE = 'replication-proof-strand';
+// Store-name prefix for this proof's scoped LevelDBs — used by BOTH the provider and the wipe.
+const PROOF_STORE_PREFIX = 'votetorrent-replication-strand';
 
 // Control address — the drone's control-node ws multiaddr. The harness injects this per-run
 // (D-07 automated injection). Placeholder boots solo (no crash — CF-02 bootstrap mode).
@@ -72,6 +74,17 @@ const STRAND_BOOTSTRAP_ADDR = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RES
 // unset, no crash — backward compatible with a single-drone run).
 const STRAND_BOOTSTRAP_ADDR_B = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
 
+// Cadre invite — the base64url-encoded CadreInvite drone-A mints at boot and advertises as
+// PROOF_INVITE=. The harness injects it here per-run, exactly like the addresses above (D-07).
+//
+// Without this the peer boots addressable but UNAUTHORIZED, and drone-A refuses its
+// strand-addr request as a non-member — the P2P-11 root cause found 2026-08-24. Dialing the
+// invite is only HALF the ceremony: the owner must then accept this peer's control peerId
+// (there is no auto-accept in cadre-core 0.12.0), which the harness arranges by handing the
+// peerId marker below to the drone. Placeholder-aware like the addresses: a placeholder skips
+// the ceremony and boots unenrolled, which is the pre-fix behaviour and a deliberate arm.
+const PROOF_INVITE = 'UPDATE_AFTER_DRONE_RESTART';
+
 // resolveBootstrapNodes — placeholder-aware address resolver (mirrors CadreNodeProvider).
 // Returns [] for empty/unset OR placeholder (safe solo boot), [addr] for a real address.
 const BOOTSTRAP_PLACEHOLDER = 'UPDATE_AFTER_DRONE_RESTART';
@@ -87,20 +100,16 @@ function resolveBootstrapNodes(addr: string): string[] {
 // genuinely solo (CF-02 bootstrap mode), creates the proof network, and emits strandId=.
 const BOOTSTRAP_NODES = resolveBootstrapNodes(CONTROL_ADDR);
 
-// D-05 (41-02, P2P-11 wall #8 fix): relay-qualified per-drone listenAddrs. One
-// `${addr}/p2p-circuit` entry per KNOWN drone (drone-A + drone-B) routes through
-// @libp2p/circuit-relay-v2's 'configured' reservation path (RESEARCH Pattern 1),
-// which bypasses the one-slot 'discovered' cap that capped the emulator at a
-// reservation with only ONE drone (41-01 Node gate reproduced this exactly).
-// Each drone's addr is independently placeholder-aware via resolveBootstrapNodes
-// (mirrors strandBootstrapNodes below) — a single-drone / solo run degrades to []
-// or [one entry], never a crash. Probe 1 (41-01): cadre-core forwards ONE shared
-// network object to the control node AND every strand, so this ONE array must
-// carry BOTH drones' qualified addrs (no per-node-type override exists).
-const STRAND_RELAY_LISTEN_ADDRS = [
-  ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR),
-  ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR_B),
-].map((addr) => `${addr}/p2p-circuit`);
+// The `STRAND_RELAY_LISTEN_ADDRS` constant that stood here is REMOVED.
+//
+// It was already dead: spike 062 retired the `strandNetwork` per-node-type override on
+// cadre-core 0.10.0 (upstream gave each strand node its own derived transport peerId), and
+// nothing has read this constant since — only its own declaration and a comment referenced it.
+//
+// It is removed rather than left dead because it CONSTRUCTED the relay-qualified
+// `<addr>/p2p-circuit` shape, which cadre-core 0.12.0 now rejects outright on a control node.
+// Leaving it would keep a fatal, load-bearing-looking pattern in a file whose relay config is
+// the exact thing 0.12.0 changed. Relays are named by `network.relayAddrs` below.
 
 // P2P-11 (41-11, wall #9 — shared-PeerId strand-relay collision): the control node reserves
 // through the drone's CONTROL relay, a DISTINCT relay identity from the strand node's STRAND
@@ -109,9 +118,23 @@ const STRAND_RELAY_LISTEN_ADDRS = [
 // connections[0]) can no longer misroute strand streams to the control connection (41-10
 // diagnosis §5 — the cadre-core strandNetwork patch unlocks the per-node-type override Probe 1
 // proved did not exist before). Placeholder-aware (degrades to [] — no crash, solo boot).
-const CONTROL_RELAY_LISTEN_ADDRS = resolveBootstrapNodes(CONTROL_ADDR).map(
-  (addr) => `${addr}/p2p-circuit`,
-);
+// cadre-core 0.12.0: relays are named by `network.relayAddrs`, NOT by a relay-qualified
+// `network.listenAddrs` entry — the old shape is now REJECTED at construction on a control
+// node ("network.listenAddrs names a relay directly ... Move the relay to
+// network.relayAddrs, which reserves after bring-up").
+//
+// WHY upstream changed it: a `<relay>/p2p-circuit` listen entry takes libp2p's 'configured'
+// route, which dials the relay from inside `libp2p.start()` — during the bring-up quiet
+// period that denies exactly that dial, so `listen()` fails and the transport manager's
+// FATAL_ALL aborts start. `relayAddrs` takes the 'search' route (one bare `/p2p-circuit`
+// listener, no dial) and CadreNode.start() drives the reservation explicitly once the
+// control database is up. Failure is still fail-fast: a relay that never answers throws
+// RelayReservationFailedError out of start().
+//
+// Entries are the BARE relay addrs; cadre-core appends `/p2p-circuit` itself. Still routed
+// through the placeholder-aware resolveBootstrapNodes guard, so a solo/placeholder boot
+// yields [] (degraded, not a crash).
+const CONTROL_RELAY_ADDRS = resolveBootstrapNodes(CONTROL_ADDR);
 
 // Poll constants (consistent with dial-probe.ts connection-poll shape).
 // PEER_POLL_MAX: 3 ticks × 1 s = 3 s peer-connection wait (exits early when peers appear).
@@ -124,16 +147,147 @@ const CONTROL_RELAY_LISTEN_ADDRS = resolveBootstrapNodes(CONTROL_ADDR).map(
 const PEER_POLL_MAX = 3;
 const REPL_POLL_MAX = 120;
 const POLL_INTERVAL_MS = 1000;
-// STRAND_PEER_POLL_MAX: 10 ticks × 1 s = 10 s strand-cohort connection wait (Fix A, Phase 30).
+// STRAND_PEER_POLL_MAX: 25 ticks × 1 s = 25 s strand-cohort connection wait (Fix A, Phase 30;
+//   RAISED from 10 by W1b, 2026-09-10).
 //   The write below opens an Optimystic cluster stream to the drone's strand node; that stream
 //   resets ("0/N super-majority") if the strand transport has not connected yet. Wait for the
 //   LIVE strand connection (getConnections().length >= 1) before writing. Exits early on connect.
-const STRAND_PEER_POLL_MAX = 10;
+//
+//   MUST EXCEED the drone's enrolment grace. `drone.mjs` holds each newly-seen peer for
+//   DELEGATE_GRACE_MS (default 15_000, env DRONE_DELEGATE_GRACE_MS) before accepting it, so it
+//   cannot be a member sooner than that. At the old 10 the runner gave up FIVE SECONDS BEFORE the
+//   drone would even accept it, then emitted strandPeers=0 — which the harness read as a genuine
+//   cohort-formation failure and aborted on. A peer cannot join a cohort it is not yet a member of;
+//   the wait has to outlast the ceremony that makes it one.
+//
+//   Kept under jest's 30 s testTimeout so a spec that does spin the full loop still fails on its
+//   assertion rather than on a timeout. If DELEGATE_GRACE_MS is ever raised past ~20 s, this and
+//   that timeout both need revisiting together.
+const STRAND_PEER_POLL_MAX = 25;
+
+// CONTROL_RETRY_MAX / CONTROL_RETRY_INTERVAL_MS: 24 x 5 s = 120 s budget for a control-DB read or
+//   write that could not be SERVED (W1b, 2026-09-10).
+//
+//   A read that cannot be served is NOT a verdict. A peer that is not yet an authorized cadre
+//   member has its control-DB streams denied by cadre-core's authorizeInboundControlStream(), and
+//   db-p2p surfaces that denial as `Block default/Revocation is unavailable (cohort-unreachable)`
+//   rather than as a permission error (upstream Optimystic#16 — a refusal and an absence are the
+//   same observable). The drone holds each newly-seen peer for DELEGATE_GRACE_MS (15 s) before
+//   accepting it, so this state is EXPECTED for the first seconds of every networked run.
+//
+//   Before this, the write phase converted that throw into an immediate FAIL verdict; the harness's
+//   verdict poll matched it at once and killed the drones ~38 s in — before the ceremony that would
+//   have authorized this peer could finish. The proof failed fast on the exact condition it was
+//   waiting for. Measured across runs 2, 4 and 5.
+//
+//   Same call the multipeer gate made for its L3 flake (commit 1d3f722a, "a read outage is not a
+//   membership verdict"), and the same predicate `packages/p2p-probe-host/drone.mjs` already uses
+//   in isTransientControlFailure() to bound acceptPhone's retries — kept character-identical so the
+//   two cannot drift apart.
+const CONTROL_RETRY_MAX = 24;
+const CONTROL_RETRY_INTERVAL_MS = 5000;
+
+/**
+ * True when a control-DB failure means "could not be served", not "refused on the merits".
+ * Verbatim from drone.mjs's isTransientControlFailure() — change both or neither.
+ */
+const isTransientControlFailure = (msg: string): boolean =>
+  /unavailable \((?:peers|cohort)-unreachable\)|could not determine whether it exists|exhausted \d+ retries|unresolved rival action|was not atomic/i.test(msg);
+
+/**
+ * Run `op` under the transient-control-failure retry budget. A transient failure is retried until
+ * the budget is spent; anything else rethrows immediately, so a genuine defect still surfaces fast.
+ */
+async function withControlRetry<T>(
+  label: string,
+  op: () => Promise<T>,
+  maxAttempts: number = CONTROL_RETRY_MAX,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isTransientControlFailure(msg)) {
+        throw err;
+      }
+      lastErr = err;
+      if (attempt === 0) {
+        L(label, 'control DB not servable yet (expected while enrolment converges), retrying:', msg);
+      }
+      await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
+    }
+  }
+  L(label, 'control DB still not servable after', maxAttempts, 'attempt(s) — giving up');
+  throw lastErr;
+}
 // RELAY_POLL_MAX: 10 ticks × 1 s = 10 s relay-reservation wait (D-09). 38-02's Node-only
 // smoke measured the /p2p-circuit reservation completing in ~1.3s against a live drone
 // relay, so 10s is a generous bound; emitted unconditionally (true or false) after the
 // bounded wait — never blocks indefinitely, mirrors the strandPeers= polling shape.
 const RELAY_POLL_MAX = 10;
+
+// AUTH_GATE_BUDGET_MS: a WALL-CLOCK budget for section 4b, deliberately not a tick count.
+//
+// The previous `AUTH_GATE_POLL_MAX x CONTROL_RETRY_INTERVAL_MS` arithmetic was wrong by
+// construction. Once `isSelfAuthorized()` is raced against AUTH_GATE_CALL_TIMEOUT_MS, a tick
+// costs the sleep PLUS up to that deadline, so the comment's "24 ticks x 5 s = 120 s" actually
+// spent up to 24 x 9 s = 216 s. Run 24 measured it: 151 s on Peer B, 223 s on Peer A. Peer A's
+// extra time pushed its strandPeers= marker 12 s past the harness's 300 s REPL-01 window, so the
+// run was recorded as "marker never emitted" when the marker did arrive — the harness clock
+// failed it, not the product.
+//
+// A deadline cannot drift when the per-call timeout changes; a tick count silently can.
+//
+// The sizing premise this comment used to carry — "the gate plus the strand build (~90 s observed)
+// plus STRAND_PEER_POLL_MAX still clear the 300 s window with room to spare" — was FALSE, and run
+// 25 is the run it cost. The ~90 s came from run 24's Peer A, which is the duration of a strand
+// build that FAILED; the healthy builds in the same two runs measured 63 s and 162 s. At 162 s the
+// arithmetic is 90 + 162 + 25 = 277 s plus ~10 s of boot, i.e. the window is already spent, and
+// Peer A was killed 215 s into an acquire its sibling had needed 162 s for.
+//
+// The gate no longer has to clear that window at all: REPL-01 now starts its strand budget at the
+// `controlRelayAddrs=` marker (see run-replication-proof.sh), so this budget and the strand
+// budget are consumed in series rather than out of one pot. Kept at 90 s because that is what the
+// gate itself is worth — it is a convergence sample, not a wait for something that will arrive.
+const AUTH_GATE_BUDGET_MS = 90_000;
+
+// AUTH_GATE_CALL_TIMEOUT_MS: deadline for ONE listAuthorizedMembers() call. Deliberately shorter
+// than CONTROL_RETRY_INTERVAL_MS so a stalled call cannot outlive its own poll slot and drag the
+// budget past what the harness allows.
+const AUTH_GATE_CALL_TIMEOUT_MS = 4000;
+
+// ACQUIRE_HEARTBEAT_MS: cadence of the `acquire pending` marker emitted while the strand acquire
+// is in flight. The acquire is the longest single operation in the proof and, until now, the only
+// one that logged NOTHING between its start (`controlRelayAddrs=`) and its end (`strandId=`).
+// Run 25 died in that silence: the harness killed Peer A mid-acquire, the runner had thrown
+// nothing, and the only surviving evidence that the app was still working was ART's GC lines in
+// logcat — so the run was written up as a hang it never demonstrated. A heartbeat makes "slow"
+// and "stuck" two different observations instead of the same silence.
+const ACQUIRE_HEARTBEAT_MS = 15_000;
+
+/**
+ * One libp2p listen failure per line, stack frames stripped.
+ *
+ * libp2p's `UnsupportedListenAddressesError` (transport-manager's `listen()`) reports EVERY
+ * configured listen entry in a SINGLE message, each followed by a full stack trace. On device
+ * that message runs to several KB and logcat truncates one log record at ~4 KB: run 24's copy was
+ * cut off inside the FIRST entry's stack, so the only address we could read was
+ * `/ip4/0.0.0.0/tcp/0` — and the entry that actually explains the failure was never on screen.
+ * Two hypotheses were built on that fragment before the truncation was noticed.
+ *
+ * Dropping the `at ...` frames keeps the whole address list inside one record. Any other error is
+ * returned as its own lines unchanged, so this is safe on the general write-failure path.
+ */
+function errorLinesWithoutStack(err: unknown): string[] {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg
+    .split('\n')
+    .filter(line => !/^\s*at\s/.test(line))
+    .map(line => line.trimEnd())
+    .filter(line => line.length > 0);
+}
 
 /**
  * Boot entry point.  Fire-and-forget from index.js after AppRegistry.registerComponent.
@@ -174,7 +328,7 @@ export async function runReplicationProof(): Promise<void> {
       requireSignedSchemas: false,
       strandFilter: { mode: 'all' },
       // ISO-01 per-scope storage + persistence guardrail (aligned with the app providers).
-      storage: { provider: createScopedRnStorageProvider('votetorrent-replication-strand') },
+      storage: { provider: createScopedRnStorageProvider(PROOF_STORE_PREFIX) },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       // CONTROL node network — reserves through the drone's CONTROL relay (P2P-11 41-11).
       network: {
@@ -188,8 +342,8 @@ export async function runReplicationProof(): Promise<void> {
             // PROBE 5 (41-01, EXERCISED): N relay-qualified listenAddrs ALONE do NOT
             // yield N reservations under the default circuitRelayTransport() —
             // DEFAULT_RESERVATION_CONCURRENCY=1 serializes+drops. Size concurrency to
-            // the number of known control relays driving CONTROL_RELAY_LISTEN_ADDRS.
-            reservationConcurrency: Math.max(1, CONTROL_RELAY_LISTEN_ADDRS.length),
+            // the number of known control relays driving CONTROL_RELAY_ADDRS.
+            reservationConcurrency: Math.max(1, CONTROL_RELAY_ADDRS.length),
           }) as unknown as ReturnType<typeof webSockets>,
         ],
         // 38-20/41-02: this runner boots its OWN CadreNode (never CadreNodeProvider's),
@@ -201,38 +355,81 @@ export async function runReplicationProof(): Promise<void> {
         // The STRAND relay moves to strandNetwork below (the cadre-core strandNetwork patch),
         // so the control and strand libp2p nodes no longer reserve at the SAME relay under
         // this peer's shared PeerId — the wall #9 collision.
-        listenAddrs: CONTROL_RELAY_LISTEN_ADDRS,
+        relayAddrs: CONTROL_RELAY_ADDRS,
         // Permissive gater — dev probe only (matches dial-probe.ts / cadre-runtime-ondevice.md).
         connectionGater: { denyDialMultiaddr: async () => false },
       } as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      // STRAND node network override (cadre-core strandNetwork patch, P2P-11 41-11): the
-      // per-strand libp2p node reserves through the drones' STRAND relays — a DISTINCT relay
-      // identity from the control node above — closing the shared-PeerId hop-connect collision
-      // (41-10 diagnosis §5). Unset ⇒ strands would reuse `network` (the pre-fix collision).
-      strandNetwork: {
-        transports: [
-          webSockets(),
-          circuitRelayTransport({
-            reservationConcurrency: Math.max(1, STRAND_RELAY_LISTEN_ADDRS.length),
-          }) as unknown as ReturnType<typeof webSockets>,
-        ],
-        listenAddrs: STRAND_RELAY_LISTEN_ADDRS,
-        connectionGater: { denyDialMultiaddr: async () => false },
-        // REPL-01: strand-cohort bootstrap — the drones' strand-node multiaddrs (injected
-        // per-run). 38-05 (D-04 n=4): both drone-A and drone-B addrs are included so the
-        // emulator dials BOTH voting-member drones; each is independently placeholder-aware
-        // (resolveBootstrapNodes → [] for an unset/placeholder addr), so a single-drone run
-        // (drone-B addr left as placeholder) degrades cleanly to the pre-38-05 behavior.
-        strandBootstrapNodes: [
-          ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR),
-          ...resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR_B),
-        ],
-      } as any,
+        // On cadre-core 0.10.0 the `strandNetwork` override block is REMOVED.
+        //
+        // It was VT's 41-11 workaround for the shared-peerId circuit-relay-v2 collision: give
+        // strand nodes a SECOND relay identity so the relay could not misroute their streams
+        // onto the control connection. Upstream fixed the ROOT CAUSE instead — each strand
+        // node now derives its OWN transport peerId via
+        // `strandTransportKey(identityKey, strandId)` — so one relay is correct and the
+        // two-relay topology is obsolete.
+        //
+        // IMPORTANT (supersedes the earlier "peer id duplication" framing): a peerId is NO
+        // LONGER the cadre's authority key. Every libp2p node a cadre runs gets its own
+        // transport identity; cadre AUTHORITY is unchanged and stays on the control node,
+        // where the peerId->authority derivation (`ed25519PublicKeyB64FromPeerId`) is a
+        // control-network path only. The collision was never an authority/owner problem —
+        // it was one identity being reused across several libp2p nodes, and it is resolved
+        // by letting each node hold its own id.
+        //
+        // Both keys this block carried are DEAD CONFIG on 0.10.0 (zero occurrences in the
+        // published types/dist):
+        //   - `strandNetwork`        — the key our now-retired yarn-patch added
+        //   - `strandBootstrapNodes` — replaced by `resolveCohortSeed`, which derives strand
+        //     peers from the CONTROL cohort (`queryCadrePeers()` -> siblings with a live
+        //     control connection -> `/sereus/strand-addr/1.0.0` RPC), not from an
+        //     app-supplied strand multiaddr.
+        //
+        // Strand nodes therefore inherit `network` above (the single control relay).
+      // STRAND CLUSTER BREADTH (spike 062 re-run). cadre-core 0.10.0 exposes
+      // `strandClusterSize`; it defaults to DEFAULT_STRAND_CLUSTER_SIZE = 4, described upstream
+      // as "the smallest breadth whose 0.75 super-majority still commits with one holder
+      // offline". That default is why the n=4 proof could form a cohort and still never
+      // replicate: breadth 4 needs ceil(0.75 * 4) = 3 holders to commit, but each peer sees
+      // `strandPeers=1` — a TWO-member cohort — so a commit can never reach quorum. Nothing
+      // errors; the write just never becomes visible, which is exactly the observed signature
+      // (clean logs, silent read-poll timeout).
+      //
+      // MIN_CLUSTER_SIZE is 2, and every node on one strand MUST agree on the value, so this is
+      // set here AND in packages/p2p-probe-host/drone.mjs.
+      //
+      // Trade-off, stated upstream and accepted for a dev proof: at breadth 2 read repair cannot
+      // converge, because a lone corroborator's stale answer is taken as the cluster's truth.
+      // Commit correctness is unaffected — this is replication breadth, not safety.
+      strandClusterSize: 2,
       hibernation: { enabled: false },
     });
 
-    await node.start();
+    // cadre-core 0.13.0 ends start() with driveControlRelayReservation(), which waits on the
+    // supervisor's FIRST attempt (DEFAULT_RELAY_RESERVE_TIMEOUT_MS, 10 s) and THROWS
+    // RelayReservationFailedError if no reservation landed in time. That is fatal to the proof
+    // and should not be: upstream's own comment says "everything above in start() has completed
+    // by the time this runs" and "the retries carry on in the background after this resolves".
+    // So the node IS started and the reservation IS still being pursued — only the WAIT expired.
+    //
+    // Runs 21 and 22 both died here, and always on the D-05 force-stop relaunch rather than the
+    // first boot. That is the D-05 leg's own doing: it restarts the app with a STABLE peerId, so
+    // the relay is still holding that peer's previous reservation and re-granting it takes longer
+    // than the 10 s budget upstream sized for a "healthy dial-plus-reserve [that] is sub-second".
+    //
+    // Swallow ONLY this error, and only by name. Any other start() failure is a real defect and
+    // must still abort. The relayReservation= marker below reports the true state either way, so a
+    // run that genuinely never reserves stays legible as that rather than being hidden here.
+    try {
+      await node.start();
+    } catch (startErr) {
+      const name = (startErr as { name?: string } | undefined)?.name;
+      if (name !== 'RelayReservationFailedError') {
+        throw startErr;
+      }
+      L('start: relay reservation wait expired, continuing (retries run in the background):',
+        startErr instanceof Error ? startErr.message : String(startErr));
+    }
 
     // ── 2. D-05 / P2P-04 peerId marker ──────────────────────────────────────────────────────
     const peerId = node.peerId?.toString() ?? 'unknown';
@@ -255,10 +452,39 @@ export async function runReplicationProof(): Promise<void> {
     }
     L('relayReservation=', hasRelayReservation());
 
+    // ── 2c. Cadre enrolment — dial the owner's invite (P2P-11 membership gate) ─────────────
+    // Ordering matters: AFTER the relay reservation, because on cadre-core 0.12.0 a
+    // relay-only peer can return from start() before it holds a circuit address, and an
+    // invite dialed in that window reads owner-signed control state nobody can serve yet
+    // (`Block default/Revocation is unavailable (peers-unreachable)`) — a timing artifact,
+    // not a membership verdict. Before the strand work, because the strand-addr request is
+    // exactly what gets refused while this peer is a non-member.
+    //
+    // Emitted UNCONDITIONALLY (like relayReservation= and strandPeers=) so the harness can
+    // key off the marker whether or not the ceremony succeeded, and so an unenrolled run is
+    // legible as such instead of failing later as a mystery cohort failure.
+    if (PROOF_INVITE.includes(BOOTSTRAP_PLACEHOLDER)) {
+      L('enrolInvite=skipped (no invite injected — this peer will be refused as a non-member)');
+    } else {
+      try {
+        await node.dialInvite(node.decodeInvite(PROOF_INVITE));
+        L('enrolInvite=ok');
+      } catch (enrolErr) {
+        // Never fatal: the owner-side acceptPhone is the half that actually confers
+        // membership, and it can still land. Fail loudly in the log, continue the proof, and
+        // let strandPeers= be the authoritative signal.
+        L('enrolInvite=failed', enrolErr);
+      }
+    }
+
     // ── 3. D-03 fresh-state wipe — per-network store ONLY, try/catch, never silent (A1) ─────
     // NEVER call LevelDB.destroyDB('votetorrent-cadre-node') — the peerId store must survive.
     try {
-      LevelDB.destroyDB('votetorrent-' + PROOF_NETWORK_STORE);
+      // W1b: derive the name from the SAME helper the provider uses. This wiped
+      // `votetorrent-<strandId>` while the provider opened
+      // `votetorrent-replication-strand-<strandId>` — a name that never existed, so destroyDB
+      // succeeded, the success line was logged, and the store survived every "fresh" run.
+      LevelDB.destroyDB(scopedRnStoreName(PROOF_STORE_PREFIX, PROOF_NETWORK_STORE));
       L('wiped per-network store', PROOF_NETWORK_STORE);
     } catch (wipeErr) {
       // A failed wipe is auditable (logged warning) — proof continues (A1 LOW-conf mitigation).
@@ -303,6 +529,109 @@ export async function runReplicationProof(): Promise<void> {
         .map((ma) => String(ma))
         .filter((addr) => addr.includes('/p2p-circuit'));
 
+    // ── 4b. WRITE GATE: wait until the OWNER has actually authorized this peer ──────────────
+    // Run 18 (2026-09-11) failed here, and `enrolInvite=ok` is why. That marker means only that
+    // THIS peer dialed the invite; it says nothing about the owner-side `acceptPhone`, which is
+    // the half that confers membership. Measured gap between the two on the n=4 device run:
+    //
+    //     Peer A  enrolInvite=ok 04:02:18   ->  drone ENROL_ACCEPTED 04:03:48   (90 s)
+    //     Peer B  enrolInvite=ok 04:02:04   ->  drone ENROL_ACCEPTED 04:04:18   (134 s)
+    //
+    // Both peers wrote inside that gap (A by 20 s, B by 81 s), so every cohort stream the write
+    // needed was refused — 572 denials of `.../db-p2p/sync/1.0.0` on drone-A alone, reason
+    // "not in the materialized authorized set". The write still reported success (it commits to a
+    // cohort of nobody and says nothing — upstream Optimystic#19), it was never retried, and both
+    // peers ended the run holding only their own row.
+    //
+    // The gate is `listAuthorizedMembers()` containing THIS peer, not the drone's ENROL_ACCEPTED
+    // line, for two reasons:
+    //  1. It is the SAME predicate the drone's `authorizeInboundControlStream` consults, so the
+    //     proof waits on exactly the condition that was refusing it — not on a proxy for it.
+    //  2. It is observable from the phone. Reading the drone's stdout would mean routing a peerId
+    //     back through logcat, which races (see the P2P-11 notes); and the drone accepting is not
+    //     sufficient anyway — the membership row must REPLICATE here before this peer's own
+    //     streams are honored by the cohort.
+    //
+    // Bounded and non-fatal: emitted unconditionally (true on success, false on timeout) like
+    // relayReservation= and peers=, so a run that never gets authorized stays legible as THAT
+    // rather than failing later as a mystery cohort failure. 45 x 5 s = 225 s, which fits inside
+    // the harness's 300 s REPL-01 window (peers= is already logged above, so that window is the
+    // one absorbing this wait) and clears run 18's worst observed gap with margin.
+    // SKIPPED when nothing could possibly authorize this peer. The harness's Step 1 is a SOLO
+    // bootstrap boot: no drone, no invite injected (`enrolInvite=skipped`), `peers=0`. There is no
+    // owner to run acceptPhone, so `cadreAuthorized` can never become true and waiting the full
+    // budget is not caution, it is dead time — run 23 spent 122 s of it there and pushed the
+    // `strandId=` handshake past the harness's 420 s Step-1 window, failing a step that was
+    // otherwise healthy (the app was still alive and working when the harness gave up).
+    //
+    // Emitted as `skipped` rather than silently bypassed, so a run that skipped the gate is
+    // legible as that and never mistaken for one that passed it.
+    // Keyed on peer count alone. `peers=0` is the structural case — with no connection there is
+    // nobody to have run acceptPhone and nobody to serve the control read, so the answer cannot
+    // change no matter how long we wait. (An unenrolled peer WITH peers is a different shape: the
+    // gate runs, spends its budget and reports `false`, which is the honest answer and is exactly
+    // how an unenrolled networked run should read.)
+    const canBeAuthorized = peerCount > 0;
+    if (!canBeAuthorized) {
+      L('cadreAuthorized=skipped (peers=0 — no cohort that could authorize this peer)');
+    }
+
+    let authGateLoggedError = false;
+    // Captured rather than closing over the `let node`, which TS cannot narrow inside a closure.
+    const authNode = node;
+    const isSelfAuthorized = async (): Promise<boolean> => {
+      try {
+        // RACED AGAINST A DEADLINE, not merely awaited. Run 19 hung here for 8+ minutes: while
+        // this peer is a non-member its control-DB reads are the thing being denied, and
+        // `listAuthorizedMembers()` does not always THROW that denial — it can simply never
+        // settle. An un-raced await then blocks the proof forever, the strand is never created,
+        // and the harness times out at REPL-01 with no verdict (and the drones spend the whole
+        // window logging NoValidAddressesError against a strand node that will never exist).
+        // A call that does not answer inside one poll interval IS the "not yet" answer.
+        const members = await Promise.race([
+          authNode.listAuthorizedMembers(),
+          new Promise<null>(r => setTimeout(() => r(null), AUTH_GATE_CALL_TIMEOUT_MS)),
+        ]);
+        if (members === null) {
+          if (!authGateLoggedError) {
+            authGateLoggedError = true;
+            L('write gate: listAuthorizedMembers did not answer within',
+              AUTH_GATE_CALL_TIMEOUT_MS, 'ms (expected while enrolment converges)');
+          }
+          return false;
+        }
+        return members.some((m) => m.peerId === peerId);
+      } catch (err) {
+        // While this peer is a non-member its own control-DB reads are the thing being denied, so
+        // a throw here IS the "not yet" answer, not a defect. Logged once for legibility.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!authGateLoggedError) {
+          authGateLoggedError = true;
+          L('write gate: control DB not readable yet (expected while enrolment converges):', msg);
+        }
+        return false;
+      }
+    };
+    if (canBeAuthorized) {
+      const authGateStart = Date.now();
+      const authGateDeadline = authGateStart + AUTH_GATE_BUDGET_MS;
+      let selfAuthorized = await isSelfAuthorized();
+      while (!selfAuthorized && Date.now() < authGateDeadline) {
+        await new Promise<void>(r => setTimeout(r, CONTROL_RETRY_INTERVAL_MS));
+        selfAuthorized = await isSelfAuthorized();
+      }
+      L('cadreAuthorized=', selfAuthorized, 'after', Math.round((Date.now() - authGateStart) / 1000), 's');
+    }
+
+    // The exact INPUT to cadre-core's strand listen-address resolution, logged per peer.
+    // `strandNodeAddrs` -> `resolveListenAddrs` returns UNDEFINED when neither `network.listenAddrs`
+    // nor `network.relayAddrs` is set, and db-p2p then falls back to its own default
+    // `/ip4/0.0.0.0/tcp/0` — an address neither webSockets() nor circuitRelayTransport() will even
+    // accept for listening, which is fatal under libp2p's default FATAL_ALL. Run 24 failed that way
+    // on Peer A while Peer B started cleanly, on what is supposed to be ONE shared module constant,
+    // so the constant itself is now on the record for both peers.
+    L('controlRelayAddrs=', CONTROL_RELAY_ADDRS, 'controlRelayAddrsCount=', CONTROL_RELAY_ADDRS.length);
+
     // ── 5. WRITE: create the strand (correct mode now known) + insert the proof row ──────────
     // createStrandDbFactory(node) calls setSchemaPath(['App','main']) internally so bare SQL
     // table names resolve without rewriting engine queries (D-14). The strand factory is used
@@ -319,7 +648,36 @@ export async function runReplicationProof(): Promise<void> {
       const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
       // The shared strand ID is the PROOF_NETWORK_STORE constant; both peers join the same strand.
       // OQ3: strandId=<hash> is logged so the harness can launch the drone with STRAND_ID=<hash>.
-      strandDb = await strandDbFactory(PROOF_NETWORK_STORE);
+      // W1b: THE throwing call. Acquiring the strand DB reads the control DB, so it is denied
+      // outright while this peer is still a non-member — this is where the whole write phase was
+      // dying, BEFORE the strandId= marker was even emitted (the WARN precedes strandId= in every
+      // failed run's logcat). Wrapping the presence check and the insert alone left this uncovered
+      // and the retry never fired once.
+      // W1b: retry ONLY when there is a peer to converge WITH. The harness's Step-1 boot is
+      // deliberately solo (peers=0, no drone), so a control-DB failure there is terminal, not
+      // transient — nothing will ever authorize this node. Retrying burned the full 120s budget
+      // in bootstrap mode and the strandId= marker never appeared inside the harness's 240s
+      // window, so the run died at Step 1. Fail fast there exactly as before; retry only in the
+      // networked run, which is the case the budget exists for.
+      //
+      // Heartbeat the acquire (see ACQUIRE_HEARTBEAT_MS). `acquire settled` is emitted from a
+      // `finally`, so a throw reports its duration too — the failure path is exactly where the
+      // number is worth having.
+      const acquireStart = Date.now();
+      const acquireElapsedS = () => Math.round((Date.now() - acquireStart) / 1000);
+      const acquireHeartbeat = setInterval(() => {
+        L('acquire pending', acquireElapsedS(), 's');
+      }, ACQUIRE_HEARTBEAT_MS);
+      try {
+        strandDb = await withControlRetry(
+          'write phase acquire:',
+          () => strandDbFactory(PROOF_NETWORK_STORE),
+          peerCount > 0 ? CONTROL_RETRY_MAX : 1,
+        );
+      } finally {
+        clearInterval(acquireHeartbeat);
+        L('acquire settled', acquireElapsedS(), 's');
+      }
 
       // Log OQ3 handshake marker before the write so the harness can capture it.
       L('strandId=', PROOF_NETWORK_STORE);
@@ -351,14 +709,76 @@ export async function runReplicationProof(): Promise<void> {
       // The shoe-in branch needs SigningNonce/InviteSignature null + count(*)=1 (the per-run
       // wipe guarantees the empty table). 'Authority' resolves to 'App.Authority' via the
       // setSchemaPath set by createStrandDbFactory (D-14).
-      await strandDb.exec(
-        `insert into Authority (Id, Name)
-          with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
-          values ('${proofAuthId}', '${proofNetworkName}');`,
-      );
+      //
+      // IDEMPOTENCE (spike 062). `proofAuthId` is `repl-auth-<peerTail>` — deterministic per
+      // peer — and D-05 deliberately proves the peerId is STABLE across restart while the
+      // strand store SURVIVES the relaunch. So on the harness's D-05 relaunch leg this insert
+      // re-ran against a table that already held this peer's own row and died with
+      // `UNIQUE constraint failed: Authority.Id`, which aborted the write phase and left the
+      // sibling with nothing new to read.
+      //
+      // Re-inserting is also impossible by design once the table is non-empty: `InsertValid`'s
+      // shoe-in branch requires `(select count(*) from Authority) = 1`, so a second Authority
+      // row — this peer's own from a prior boot, OR the sibling's once replication WORKS — is
+      // rejected regardless of the Id. A per-run-unique Id would therefore not have helped.
+      //
+      // The proof's actual question is "did the OTHER peer's row arrive", so this peer having
+      // already contributed its row is SUCCESS, not failure. Check first, insert only when
+      // absent, and treat an Id collision as benign if we lose the race.
+      // W1b: the presence check is a control-DB-backed read and is denied outright while this peer
+      // is still a non-member, so it must run under the transient-failure budget rather than
+      // collapsing the whole write phase into a FAIL verdict on the first throw.
+      const db = strandDb;
+      const alreadyContributed = await withControlRetry('write phase:', async () => {
+        let found = false;
+        for await (const row of db.eval(
+          `SELECT Id FROM Authority WHERE Id = '${proofAuthId}'`,
+        )) {
+          if (row && row['Id']) {
+            found = true;
+            break;
+          }
+        }
+        return found;
+      });
+      if (alreadyContributed) {
+        L('write phase: own row already present, skipping insert (idempotent)', proofAuthId);
+      } else {
+        try {
+          await withControlRetry('write phase insert:', () =>
+            db.exec(
+              `insert into Authority (Id, Name)
+                with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+                values ('${proofAuthId}', '${proofNetworkName}');`,
+            ),
+          );
+          // W1b instrumentation (2026-09-10): the success path logged NOTHING, so a run could not
+          // distinguish "this peer inserted its row" from "this peer never reached the write".
+          L('write phase: inserted own row', proofAuthId);
+        } catch (insertErr) {
+          const msg = insertErr instanceof Error ? insertErr.message : String(insertErr);
+          // Benign only when it is OUR OWN row that already exists; anything else is a real
+          // write failure and must still surface.
+          if (/UNIQUE constraint failed: Authority\.Id/.test(msg)) {
+            L('write phase: own row raced in, treating as contributed (idempotent)', proofAuthId);
+          } else {
+            throw insertErr;
+          }
+        }
+      }
     } catch (writeErr) {
       // Write phase error — log the error; proof continues to the read phase which will FAIL.
       L('WARN write phase error (proof will FAIL):', writeErr instanceof Error ? writeErr.message : String(writeErr));
+      // The line above is what logcat truncates. Re-emit the same error one line per record with
+      // stacks stripped, so a multi-address listen failure is fully readable (see
+      // errorLinesWithoutStack). Only for errors that actually span lines — a one-line error is
+      // already complete above.
+      const writeErrLines = errorLinesWithoutStack(writeErr);
+      if (writeErrLines.length > 1) {
+        for (const line of writeErrLines) {
+          L('write phase error detail:', line);
+        }
+      }
       // Still emit OQ3 strandId marker for harness capture even on write failure.
       if (!strandDb) {
         L('strandId=', PROOF_NETWORK_STORE);
@@ -384,27 +804,54 @@ export async function runReplicationProof(): Promise<void> {
     if (peerCount > 0) {
       try {
         const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
-        const readDb = strandDb ?? await strandDbFactory(PROOF_NETWORK_STORE);
+        const readDb = strandDb ?? await withControlRetry(
+          'read phase:',
+          () => strandDbFactory(PROOF_NETWORK_STORE),
+          peerCount > 0 ? CONTROL_RETRY_MAX : 1,
+        );
 
+        // W1b instrumentation (2026-09-10). The loop below previously selected ONLY the sibling's
+        // row and swallowed every error with a bare `catch {}`, retrying 120 times in silence — so
+        // a failed run produced no error, no row census, and no way to tell "the sibling's row
+        // never arrived" from "every read threw". Both are now reported. Verdict semantics are
+        // UNCHANGED: the filter that sets `verdict` is applied in JS over the same row set.
+        let readErrCount = 0;
+        let firstReadErr: string | undefined;
+        let lastCensus = '\u0000';
+        let ticks = 0;
         for (let i = 0; i < REPL_POLL_MAX && !verdict; i++) {
+          ticks = i + 1;
           try {
             // `eval` yields rows lazily via AsyncIterableIterator (no `all` on Database).
-            for await (const row of readDb.eval(
-              `SELECT Id FROM Authority WHERE Id LIKE 'repl-auth-%' AND Id != '${proofAuthId}'`,
-            )) {
+            const seen: string[] = [];
+            for await (const row of readDb.eval(`SELECT Id FROM Authority`)) {
               if (row && row['Id']) {
-                verdict = true;
-                break;
+                seen.push(String(row['Id']));
               }
             }
-            if (!verdict) {
-              await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+            // Report the census on CHANGE, and every 15th tick as a heartbeat, so the log shows
+            // what this peer can actually see rather than only what it was hunting for.
+            const census = seen.slice().sort().join(',');
+            if (census !== lastCensus || i % 15 === 0) {
+              L('read tick', i, 'authorityRows=', seen.length, 'ids=', seen.length ? seen : '(none)');
+              lastCensus = census;
             }
-          } catch {
-            // Strand may still be bootstrapping — retry.
+            if (seen.some(id => id.startsWith('repl-auth-') && id !== proofAuthId)) {
+              verdict = true;
+              break;
+            }
+            await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+          } catch (pollErr) {
+            readErrCount++;
+            const msg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+            if (firstReadErr === undefined) {
+              firstReadErr = msg;
+              L('read tick', i, 'FIRST read error:', msg);
+            }
             await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
           }
         }
+        L('read phase done: ticks=', ticks, 'readErrors=', readErrCount, 'firstError=', firstReadErr ?? '(none)');
       } catch (readErr) {
         L('WARN read phase error:', readErr instanceof Error ? readErr.message : String(readErr));
       }

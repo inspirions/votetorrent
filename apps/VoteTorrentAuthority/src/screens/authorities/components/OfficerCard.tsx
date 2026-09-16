@@ -46,8 +46,9 @@ export interface OfficerCardProps {
  * Falls back to officer.userId when userName is omitted.
  *
  * Permissions: renders bulleted scope list using scopeDescriptions, falling
- * back to the raw scope code when a description is missing (covers the
- * undefined `rnp` entry in vote-core's scopeDescriptions).
+ * back to the raw scope code when a description is missing. As of 2026-08-25
+ * scopeDescriptions covers all nine schema scopes, so the fallback is purely
+ * defensive (it previously covered the undefined `rnp` entry).
  */
 export function OfficerCard({
 	officer,

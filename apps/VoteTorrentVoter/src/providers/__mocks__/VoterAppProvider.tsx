@@ -12,9 +12,11 @@
  * Phase 44 leaves unchanged (`isInitialized`/`lifecycleState`/`setLifecycleState`/`getElection`/
  * `getBallot`) as REAL, stateful React context — so tests exercising the __DEV__ lifecycle cycler
  * or ballot flows still behave correctly — plus inert stand-ins for the real-engine surface
- * (`getEngine`/`hasEngine`/`selectNetwork`/`hasNetwork`/`seededElectionId`/`sign`) that no
- * existing screen test needs to drive. Mirrors the authority app's App.test.tsx inert-mock
- * convention (39-04 precedent) applied at the module level instead of per-test-file.
+ * (`getEngine`/`hasEngine`/`selectNetwork`/`hasNetwork`/`seededElectionId`) that no existing
+ * screen test needs to drive. Mirrors the authority app's App.test.tsx inert-mock convention
+ * (39-04 precedent) applied at the module level instead of per-test-file. 51-12 (D-09/D-20):
+ * `VoterAppContextType` no longer has a `sign` field at all (see `types.ts`'s doc comment), so
+ * this mock has nothing to stand in for there.
  */
 import React, {createContext, useCallback, useContext, useState} from 'react';
 import type {PropsWithChildren} from 'react';
@@ -65,7 +67,6 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				hasEngine,
 				selectNetwork,
 				seededElectionId: undefined,
-				sign: undefined,
 			}}>
 			{children}
 		</VoterAppContext.Provider>

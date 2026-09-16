@@ -37,6 +37,11 @@ interface FakeCadreNode {
   getStrand: (id: string) => { libp2pNode?: { getConnections?: () => FakeConnection[] } } | undefined;
   _setConnections: (conns: FakeConnection[]) => void;
   _setStrandPeers: (n: number) => void;
+  // Section 4b write gate: the runner blocks until this peer appears in its OWN authorized-member
+  // list. Authorized by default so every existing test reaches the write; _setSelfAuthorized(false)
+  // exercises the timeout path.
+  listAuthorizedMembers: jest.Mock;
+  _setSelfAuthorized: (authorized: boolean) => void;
 }
 
 // --- mock the module-load-time native/runtime deps so importing the runner is safe ---
@@ -89,6 +94,45 @@ jest.mock(
         // Capture the full constructor config so tests can assert network.strandBootstrapNodes.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         mockCapturedConfigs.push(config as any);
+      }
+
+      // The runner polls getMultiaddrs() for a '/p2p-circuit' entry to emit the D-09
+      // relayReservation= marker. The mock lacked it entirely, so the call threw and the
+      // runner's catch-all swallowed the rest of the proof — which is why every assertion
+      // AFTER that point (peers=, strandPeers=, the constructor config) failed while the
+      // markers before it passed. Return a reserved address by default; _setRelayReserved(false)
+      // exercises the unreserved path.
+      private _circuitAddrs: Array<{ toString(): string }> = [
+        { toString: () => '/ip4/10.0.2.2/tcp/1/ws/p2p/fakeRelay/p2p-circuit' },
+      ];
+
+      getMultiaddrs() {
+        return this._circuitAddrs;
+      }
+
+      _setRelayReserved(reserved: boolean) {
+        this._circuitAddrs = reserved
+          ? [{ toString: () => '/ip4/10.0.2.2/tcp/1/ws/p2p/fakeRelay/p2p-circuit' }]
+          : [];
+      }
+
+      // Cadre membership ceremony (P2P-11). The runner redeems an injected invite after the
+      // relay reservation and before the strand work; with the committed placeholder it takes
+      // the skip branch, so these exist to be ASSERTED ON — chiefly that they are NOT called
+      // when no invite is injected.
+      public dialInvite = jest.fn(async () => {});
+      public decodeInvite = jest.fn((s: string) => ({ partyId: 'votetorrent', encoded: s }));
+
+      // Section 4b write gate (run 18): the runner will not write until this peer is in the
+      // OWNER-materialized authorized set — the same predicate cadre-core's
+      // authorizeInboundControlStream consults. Authorized by DEFAULT, or every test asserting on
+      // a post-write marker would sit through the gate's full 225 s budget in real time.
+      private _selfAuthorized = true;
+      public listAuthorizedMembers = jest.fn(async () =>
+        this._selfAuthorized ? [{ peerId: 'fakePeerIdABC123', multiaddr: null }] : []);
+
+      _setSelfAuthorized(authorized: boolean) {
+        this._selfAuthorized = authorized;
       }
 
       getControlNode() {
@@ -173,6 +217,25 @@ function reloadRunnerFullMock(): void {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         mockCapturedConfigs.push(config as any);
       }
+      // Must mirror the module-level FakeCadreNode above — see the note there on why a
+      // missing getMultiaddrs() silently truncated the whole proof. The two mocks are
+      // near-duplicates; a method added to one belongs in both.
+      private _circuitAddrs: Array<{ toString(): string }> = [
+        { toString: () => '/ip4/10.0.2.2/tcp/1/ws/p2p/fakeRelay/p2p-circuit' },
+      ];
+      getMultiaddrs() { return this._circuitAddrs; }
+      _setRelayReserved(reserved: boolean) {
+        this._circuitAddrs = reserved
+          ? [{ toString: () => '/ip4/10.0.2.2/tcp/1/ws/p2p/fakeRelay/p2p-circuit' }]
+          : [];
+      }
+      public dialInvite = jest.fn(async () => {});
+      public decodeInvite = jest.fn((s: string) => ({ partyId: 'votetorrent', encoded: s }));
+      // Section 4b write gate — mirrors the module-level mock; authorized by default.
+      private _selfAuthorized = true;
+      public listAuthorizedMembers = jest.fn(async () =>
+        this._selfAuthorized ? [{ peerId: 'fakePeerIdABC123', multiaddr: null }] : []);
+      _setSelfAuthorized(authorized: boolean) { this._selfAuthorized = authorized; }
       getControlNode() { return { getConnections: () => this._connections }; }
       getStrand(_id: string) { return { libp2pNode: { getConnections: () => this._strandConns } }; }
       _setConnections(conns: FakeConnection[]) { this._connections = conns; }
@@ -507,7 +570,7 @@ describe('REPL-01 strand cohort markers', () => {
     expect(strandPeersCall).toBeDefined();
   });
 
-  it('constructs CadreNode with network.strandBootstrapNodes = resolveBootstrapNodes(STRAND_BOOTSTRAP_ADDR)', async () => {
+  it('does NOT pass the retired strandBootstrapNodes / strandNetwork keys (dead config since cadre-core 0.10.0)', async () => {
     reloadRunnerFullMock();
     mockConstructedNodes.length = 0;
     mockCapturedConfigs.length = 0;
@@ -518,14 +581,194 @@ describe('REPL-01 strand cohort markers', () => {
 
     consoleSpy.mockRestore();
 
-    // Assert the first captured config has a network.strandBootstrapNodes array.
-    // When STRAND_BOOTSTRAP_ADDR is the placeholder, resolveBootstrapNodes returns []
-    // (solo-safe). The field must be present (not undefined).
+    // This asserted `Array.isArray(network.strandBootstrapNodes)` until 2026-09-03, which is
+    // backwards: cadre-core 0.10.0 REPLACED that key with `resolveCohortSeed` (strand peers
+    // are derived from the CONTROL cohort via the `/sereus/strand-addr/1.0.0` RPC, not from an
+    // app-supplied strand multiaddr), and the runner's own comment records both it and
+    // `strandNetwork` as dead config with zero occurrences in the published types. The old
+    // assertion would have forced retired keys back into the config. Lock their ABSENCE.
     expect(mockCapturedConfigs.length).toBeGreaterThan(0);
-    const cfg = mockCapturedConfigs[0] as { network?: { strandBootstrapNodes?: string[] } };
+    const cfg = mockCapturedConfigs[0] as {
+      network?: Record<string, unknown>;
+      strandNetwork?: unknown;
+    };
     expect(cfg).toBeDefined();
     expect(cfg?.network).toBeDefined();
-    // strandBootstrapNodes must be an array (placeholder → []).
-    expect(Array.isArray(cfg?.network?.strandBootstrapNodes)).toBe(true);
+    expect(cfg?.network?.strandBootstrapNodes).toBeUndefined();
+    expect(cfg?.strandNetwork).toBeUndefined();
+  });
+
+  // ── cadre membership (P2P-11) ────────────────────────────────────────────────────────
+  // The runner redeems an injected invite so the drone will admit it as a member; without
+  // membership its strand-addr request is refused and the cohort never forms. The committed
+  // source carries the placeholder (the harness injects the real invite per-run), so what is
+  // assertable here is the placeholder branch — and that it is loud rather than silent.
+  describe('cadre enrolment markers', () => {
+    it('emits enrolInvite=skipped and does NOT dial when no invite is injected', async () => {
+      reloadRunnerFullMock();
+      mockConstructedNodes.length = 0;
+
+      const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+      await runReplicationProof();
+      const calls = consoleSpy.mock.calls;
+      consoleSpy.mockRestore();
+
+      // Unconditional marker: an unenrolled run must be legible AS unenrolled, not merely
+      // fail later as an unexplained empty strand cohort — the exact misdiagnosis that cost
+      // every device run through 41-09.
+      const enrolCall = calls.find(
+        (args) => args[0] === '[replication-proof]' && String(args[1]).startsWith('enrolInvite='),
+      );
+      expect(enrolCall).toBeDefined();
+      expect(String(enrolCall![1])).toContain('skipped');
+
+      // The placeholder must not be dialed as if it were an invite.
+      const node = mockConstructedNodes[0] as unknown as {
+        dialInvite: jest.Mock;
+        decodeInvite: jest.Mock;
+      };
+      expect(node.dialInvite).not.toHaveBeenCalled();
+      expect(node.decodeInvite).not.toHaveBeenCalled();
+    });
+
+    it('emits the enrolment marker AFTER relayReservation= and BEFORE strandPeers=', async () => {
+      reloadRunnerFullMock();
+      mockConstructedNodes.length = 0;
+
+      const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+      await runReplicationProof();
+      const markers = consoleSpy.mock.calls
+        .filter((args) => args[0] === '[replication-proof]')
+        .map((args) => String(args[1]));
+      consoleSpy.mockRestore();
+
+      const idx = (prefix: string) => markers.findIndex((m) => m.startsWith(prefix));
+      const relay = idx('relayReservation=');
+      const enrol = idx('enrolInvite=');
+      const strand = idx('strandPeers=');
+
+      expect(relay).toBeGreaterThanOrEqual(0);
+      expect(enrol).toBeGreaterThanOrEqual(0);
+      expect(strand).toBeGreaterThanOrEqual(0);
+      // Ordering is load-bearing, not cosmetic. Before the reservation, a relay-only peer can
+      // still be without a circuit address on cadre-core 0.12.0 and the ceremony reads control
+      // state nobody can serve yet (`peers-unreachable`) — a timing artifact that reads as a
+      // membership verdict. After the strand work, the strand-addr request has already been
+      // refused for non-membership and the cohort has already failed to form.
+      expect(enrol).toBeGreaterThan(relay);
+      expect(enrol).toBeLessThan(strand);
+    });
+  });
+
+  // ── section 4b write gate (run 18) ───────────────────────────────────────────────────
+  // `enrolInvite=ok` means only that THIS peer dialed the invite. The owner-side acceptPhone
+  // is the half that confers membership, and on the n=4 device run it landed 90 s (Peer A) and
+  // 134 s (Peer B) LATER. Both peers wrote inside that gap, every cohort stream the write needed
+  // was refused for non-membership, and the commit reported success anyway (Optimystic#19), so
+  // the run failed with each peer holding only its own row. The gate waits for the owner's
+  // decision to be visible HERE before writing.
+  describe('write gate — owner authorization', () => {
+    it('emits cadreAuthorized= AFTER peers= and BEFORE strandPeers=', async () => {
+      reloadRunnerFullMock();
+      mockConstructedNodes.length = 0;
+
+      const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+      await runReplicationProof();
+      const markers = consoleSpy.mock.calls
+        .filter((args) => args[0] === '[replication-proof]')
+        .map((args) => String(args[1]));
+      consoleSpy.mockRestore();
+
+      const idx = (prefix: string) => markers.findIndex((m) => m.startsWith(prefix));
+      const peers = idx('peers=');
+      const auth = idx('cadreAuthorized=');
+      const strand = idx('strandPeers=');
+
+      expect(auth).toBeGreaterThanOrEqual(0);
+      // After peers=: the harness has that marker in hand before this blocks, so the wait is
+      // absorbed by its 300 s REPL-01 window rather than a shorter marker timeout.
+      expect(auth).toBeGreaterThan(peers);
+      // Before strandPeers=: strandPeers is emitted after the write, which is what this gates.
+      expect(auth).toBeLessThan(strand);
+    });
+
+    it('BLOCKS until this peer appears in its own authorized-member list', async () => {
+      reloadRunnerFullMock();
+      mockConstructedNodes.length = 0;
+
+      const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+      const proof = runReplicationProof();
+
+      // Deny the first poll, admit the second — the real shape, where the owner's acceptPhone
+      // lands while this peer is already polling. Driven off the CALL COUNT rather than a wall
+      // clock: the gate runs several seconds after construction, so a timed flip would race it.
+      // The node is constructed inside runReplicationProof(), so wait for it to exist first.
+      for (let i = 0; i < 500 && mockConstructedNodes.length === 0; i++) {
+        await new Promise<void>(r => setTimeout(r, 10));
+      }
+      const node = mockConstructedNodes[0] as unknown as {
+        listAuthorizedMembers: jest.Mock;
+        _setConnections: (c: FakeConnection[]) => void;
+      };
+      // The gate only runs when this peer has a cohort to be authorized BY — peers=0 skips it.
+      node._setConnections([{} as FakeConnection]);
+      let polls = 0;
+      node.listAuthorizedMembers.mockImplementation(async () => {
+        polls += 1;
+        return polls >= 2 ? [{ peerId: 'fakePeerIdABC123', multiaddr: null }] : [];
+      });
+
+      await proof;
+      const markers = consoleSpy.mock.calls
+        .filter((args) => args[0] === '[replication-proof]')
+        .map((args) => String(args[1]));
+      consoleSpy.mockRestore();
+
+      // It polled more than once — i.e. it actually waited rather than reading the list once and
+      // proceeding regardless, which is precisely what `enrolInvite=ok` did.
+      expect(node.listAuthorizedMembers.mock.calls.length).toBeGreaterThan(1);
+      expect(markers.some((m) => m.startsWith('cadreAuthorized='))).toBe(true);
+    }, 60000);
+
+    // Run 19 died exactly here. While this peer is a non-member its control-DB reads are the thing
+    // being denied, and listAuthorizedMembers() does not always throw that denial — it can simply
+    // never settle. An un-raced await blocked the proof for 8+ minutes: no write, no strand, no
+    // verdict, and the harness timed out at REPL-01 while the drones logged 178
+    // NoValidAddressesError against a strand node that could never exist.
+    it('treats a call that never settles as "not yet" instead of hanging forever', async () => {
+      reloadRunnerFullMock();
+      mockConstructedNodes.length = 0;
+
+      const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+      const proof = runReplicationProof();
+
+      for (let i = 0; i < 500 && mockConstructedNodes.length === 0; i++) {
+        await new Promise<void>(r => setTimeout(r, 10));
+      }
+      const node = mockConstructedNodes[0] as unknown as {
+        listAuthorizedMembers: jest.Mock;
+        _setConnections: (c: FakeConnection[]) => void;
+      };
+      node._setConnections([{} as FakeConnection]);
+      let polls = 0;
+      node.listAuthorizedMembers.mockImplementation(() => {
+        polls += 1;
+        // First poll never settles; the second answers normally.
+        return polls === 1
+          ? new Promise(() => {})
+          : Promise.resolve([{ peerId: 'fakePeerIdABC123', multiaddr: null }]);
+      });
+
+      await proof;
+      const markers = consoleSpy.mock.calls
+        .filter((args) => args[0] === '[replication-proof]')
+        .map((args) => String(args[1]));
+      consoleSpy.mockRestore();
+
+      // It got past the stalled call and reached a verdict rather than blocking on it.
+      expect(polls).toBeGreaterThan(1);
+      expect(markers.some((m) => m.startsWith('cadreAuthorized='))).toBe(true);
+      expect(markers.some((m) => m.startsWith('strandPeers='))).toBe(true);
+    }, 60000);
   });
 });

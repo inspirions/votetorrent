@@ -64,6 +64,14 @@ module.exports = {
       '<rootDir>/node_modules/@optimystic/quereus-plugin-crypto/dist/index.js',
     '^@optimystic/quereus-plugin-crypto/plugin$':
       '<rootDir>/node_modules/@optimystic/quereus-plugin-crypto/dist/plugin.js',
+    // `uint8arrays` is hoisted ONLY into this app's node_modules, but the module that requires it
+    // (`@optimystic/quereus-plugin-crypto/dist/index.js`) sits under the SAME directory, so Jest's
+    // upward walk from that file passes through here and still misses it — the package ships
+    // `exports` with no bare `main`, which the default CJS resolver cannot read. Without this entry
+    // every suite that touches the crypto plugin dies at REQUIRE time with "Cannot find module
+    // 'uint8arrays'", i.e. `real-attestation-producer.test.ts` — the producer's own regression
+    // guard — never ran a single assertion. Same class of fix as the @quereus/@noble entries above.
+    '^uint8arrays$': '<rootDir>/node_modules/uint8arrays/cjs/src/index.js',
     '^inheritree$': '<rootDir>/node_modules/inheritree/dist/index.js',
     '^moat-maker$': '<rootDir>/node_modules/moat-maker/build/index.js',
     '^@noble/curves$': '<rootDir>/node_modules/@noble/curves/index.js',

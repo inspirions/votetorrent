@@ -7,7 +7,7 @@
  * `seedDevNetwork`'s own `NetworksEngine`, rather than through the RN
  * CadreNode boot. No on-device dependency.
  *
- * Asserts the five behaviors this plan's `must_haves` require:
+ * Asserts the five 44-06 behaviors, plus 51-12's D-09/D-20 scope-drop guard:
  *   1. A founding-officer-signed register() persists a real Registrant.
  *   2. register() signed by an UNREGISTERED key is rejected (AdminSigning /
  *      MutationValid / UserIdValid).
@@ -16,15 +16,19 @@
  *   4. A required-tier-violating submission throws FieldPolicyViolationError.
  *   5. A conforming submission succeeds and creates a RegistrantSelective row
  *      for 'party'.
+ *   6. (51-12, D-09/D-20) The seeded officer's Scopes is exactly ['mel'] — the
+ *      registration-ceremony scope is deliberately withheld from the device's
+ *      own voter identity.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import type { RegisterInit, Signature } from '@votetorrent/vote-core'
-import { NetworksEngine, RegistrationEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
+import { NetworksEngine, RegistrationEngine, AssociationEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
 import { FieldPolicyViolationError } from '@votetorrent/vote-engine'
 import { seedDevNetwork, DEV_SEED_NETWORK_NAME } from '../dev-seed'
+import { resolveAttestationProducer } from '../attestation-producer'
 
 /** Build a signer for an UNREGISTERED identity — not a row in Officer for this authority. */
 function makeUnregisteredSigner(): (digest: Uint8Array) => Promise<Signature> {
@@ -94,7 +98,26 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 			.prepare('select UserId, Scopes from Officer where UserId = :userId')
 			.get({ userId: seeded.deviceUser.id })
 		expect(officerRow).toBeTruthy()
-		expect(JSON.parse(officerRow!.Scopes as string)).toContain('vrg')
+		expect(JSON.parse(officerRow!.Scopes as string)).toEqual(['mel'])
+	})
+
+	it('does NOT grant the officer the registration-ceremony scope — a regression re-granting it is exactly the D-01 defect this phase closed (D-09/D-20)', async () => {
+		const { seeded, ctx } = await setup()
+
+		const officerRow = await ctx.db
+			.prepare('select Scopes from Officer where UserId = :userId')
+			.get({ userId: seeded.deviceUser.id })
+		expect(officerRow).toBeTruthy()
+		const scopes = JSON.parse(officerRow!.Scopes as string) as string[]
+		// The authority's own registration-ceremony scope ("Validate registrations",
+		// votetorrent.qsql:59) is deliberately withheld from the device's own voter
+		// identity — granting it is what let the voter app run the authority's
+		// admin-signed ceremony (D-01, 51-CONTEXT.md). 'mel' ("Manage Elections")
+		// stays per D-20 — this seed's own election + policy-row ceremonies need it,
+		// and D-12's ElectionRecordValidityPolicy row is 'mel'-scoped. Deleting this
+		// test later would be an obvious removal of a guard.
+		expect(scopes).not.toContain('vrg')
+		expect(scopes).toContain('mel')
 	})
 
 	it('getElectionRegistrationFields(electionId) is non-empty (Pitfall 5 — policy actually loaded)', async () => {
@@ -184,6 +207,55 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		expect(selective!.selectiveDetails?.some((leaf) => leaf.name === 'party' && leaf.value === 'IND')).toBe(true)
 	})
 
+	it('D-23(f): the registered state is reachable end-to-end from the device key alone (no cached id) — one row, status "a"', async () => {
+		const { seeded, ctx } = await setup()
+		const associationEngine = new AssociationEngine(ctx)
+		const registrationEngine = new RegistrationEngine(ctx)
+
+		const { publicKey: deviceKey } = await resolveAttestationProducer().provisionDeviceKey()
+		const rows = await associationEngine.getAssociationsByDeviceKey(deviceKey)
+		expect(rows).toHaveLength(1)
+
+		const registrant = await registrationEngine.getRegistrant(rows[0]!.registrantId)
+		expect(registrant).toBeDefined()
+		expect(registrant!.status).toBe('a')
+		expect(new Date(registrant!.expiration as string).getTime()).toBeGreaterThan(Date.now())
+		// Sanity: the seeded registrant belongs to THIS seed's own authority/network.
+		expect(registrant!.authorityId).toBe(
+			(
+				await ctx.db
+					.prepare('select AuthorityId from Election where Id = :electionId')
+					.get({ electionId: seeded.electionId })
+			)!.AuthorityId,
+		)
+	})
+
+	it('D-23(f): an unrelated device key reads not-registered — []', async () => {
+		const { ctx } = await setup()
+		const associationEngine = new AssociationEngine(ctx)
+		const rows = await associationEngine.getAssociationsByDeviceKey('dev-seed-test-unrelated-device-key-never-seeded')
+		expect(rows).toEqual([])
+	})
+
+	it('dev-seed.ts has no import of @react-native-async-storage/async-storage (import-graph assertion — inspects the resolved require() module graph, not a text/token scan)', () => {
+		// Genuine import-GRAPH assertion: after this test file's own top-level `import
+		// '../dev-seed'` has resolved it, Jest's CommonJS module registry (`require.cache`)
+		// records dev-seed.ts's DIRECT `children` — the modules it itself required. This
+		// cannot be falsely tripped by a doc comment merely NAMING the package (unlike a
+		// text/token scan): only an actual resolved `require`/`import` edge appears here.
+		// This RN app's ambient `NodeRequire` type (from @types/react-native) declares only the
+		// callable form (matching the existing `require('...')` value-import pattern elsewhere in
+		// this codebase) — `.resolve`/`.cache` are real Jest/CommonJS runtime properties this
+		// project's minimal type does not surface, hence the narrow `as any` escape below.
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const nodeRequire = require as any
+		const devSeedModulePath = nodeRequire.resolve('../dev-seed')
+		const devSeedCacheEntry = nodeRequire.cache[devSeedModulePath]
+		expect(devSeedCacheEntry).toBeDefined()
+		const childIds: string[] = (devSeedCacheEntry?.children ?? []).map((c: { id: string }) => c.id)
+		expect(childIds.some((id) => id.includes('@react-native-async-storage/async-storage'))).toBe(false)
+	})
+
 	it('is idempotent — re-running seedDevNetwork re-attaches the same network and election without duplicating policy rows', async () => {
 		const networksEngine = new NetworksEngine(new LocalStorageReact())
 		const first = await seedDevNetwork(networksEngine)
@@ -198,5 +270,12 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		// Exactly the 3 seeded rows (firstname/email/party) — not 6, proving the
 		// second call did not re-insert (which would violate the PK anyway).
 		expect(fields.length).toBe(3)
+
+		// D-23(f): the registered-state fixture is also idempotent across re-attach —
+		// exactly one Association row for the seeded device key, not two.
+		const associationEngine = new AssociationEngine(ctx)
+		const { publicKey: deviceKey } = await resolveAttestationProducer().provisionDeviceKey()
+		const rows = await associationEngine.getAssociationsByDeviceKey(deviceKey)
+		expect(rows).toHaveLength(1)
 	})
 })

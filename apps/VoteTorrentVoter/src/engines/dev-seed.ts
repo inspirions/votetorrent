@@ -4,7 +4,7 @@
  *
  * DECISIVE RESEARCH FINDING THIS MODULE OPERATIONALIZES (44-RESEARCH.md Pitfall 1):
  * `RegistrationEngine.register()` signs BOTH the row-level `Registrant.Signature`
- * digest AND the `'vrg'`-scoped `AdminSigning` ceremony with the SAME signer — and
+ * digest AND the `vrg`-scoped `AdminSigning` ceremony with the SAME signer — and
  * `AdminSigning.UserIdValid` requires that signer's `signerUserId` already be a row
  * in `Officer` for the target authority. Neither a throwaway voter keypair nor the
  * libp2p/CadreNode peer key (`loadOrCreateRNPeerKey`) satisfies this — that key is
@@ -54,9 +54,11 @@ import {
 	NetworksEngine,
 	RegistrationEngine,
 	peekNextElectionTid,
+	type EngineContext,
 } from '@votetorrent/vote-engine/rn'
 import { createDeviceSigner, type SignCallback } from './device-signer'
 import { getOrCreateDeviceUser } from './device-user'
+import { resolveAttestationProducer } from './attestation-producer'
 
 /** Display name used for the seeded device identity (voter + founding officer, one identity). */
 const DEV_SEED_DISPLAY_NAME = 'Dev Voter'
@@ -69,6 +71,81 @@ const DEV_SEED_AUTHORITY_NAME = 'Dev Election Authority'
 
 /** Marker title for the seeded election. */
 const DEV_SEED_ELECTION_TITLE = 'Dev Voter Registration Election'
+
+/**
+ * Deterministic id for the D-23(f) dev-seeded `registered`-state `Registrant` —
+ * stable across dev boots so `seedRegistrantAssociation`'s idempotent re-attach can
+ * find the EXISTING row via `getRegistrant()` rather than minting a fresh random id
+ * (and therefore a duplicate row) on every boot.
+ */
+const DEV_SEED_ASSOCIATION_REGISTRANT_ID = 'dev-seed-registered-state-registrant'
+
+/**
+ * D-23(f) (owner-locked 2026-09-15): the minimal structural shape this file needs
+ * from `packages/vote-engine/src/dev/seed-registrant-association.ts`'s
+ * `seedRegistrantAssociation` export — declared here rather than imported from
+ * `@votetorrent/vote-engine`, matching `attach-voter-request-transport.ts`'s own
+ * convention for its deep-relative dev-only imports.
+ */
+type SeedRegistrantAssociationFn = (
+	ctx: EngineContext,
+	authorityId: string,
+	registrant: { id: string; privateCid?: string; expiration?: number | string },
+	deviceKey: string,
+	sign: SignCallback,
+) => Promise<{ registrant: unknown; association: unknown }>;
+
+// Deep RELATIVE dist-path require — deliberately NOT a bare "@votetorrent/vote-engine"
+// specifier. The package's `exports` map only publishes the `.`/`./rn` subpaths — this
+// dev-only ceremony module lives outside either, by design (D-23f: it must never be
+// reachable via a bare specifier a release bundler could resolve implicitly). `__DEV__`
+// build-time-gated and lazily `require`d so a release build's module graph never
+// includes it — Metro replaces `__DEV__` with a literal `false` in the release
+// transform, making the branch below unreachable there. Mirrors
+// `attach-voter-request-transport.ts`'s `loadRestAssociationTransport()` shape exactly:
+// same early return, same eslint-disable, same relative `packages/vote-engine/dist/...`
+// path shape (resolved by running `yarn workspace @votetorrent/vote-engine build` and
+// checking its actual `dist/dev/` output — not guessed).
+function loadRegistrantAssociationSeeder(): SeedRegistrantAssociationFn | undefined {
+	if (!__DEV__) return undefined;
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	return require('../../../../packages/vote-engine/dist/dev/seed-registrant-association.js')
+		.seedRegistrantAssociation as SeedRegistrantAssociationFn;
+}
+
+/**
+ * D-23(f)/D-23(b)/D-23(c) — seeds (or re-attaches to) the dev-only `registered`-state
+ * fixture: a `Status = 'a'` `Registrant` and its matching `Association`, bound to the
+ * SAME P-256 device key `resolveAttestationProducer().provisionDeviceKey()` returns
+ * (resolved by CALLING the producer, never a hardcoded placeholder — D-23b), so a real
+ * device-key round trip through `getAssociationsByDeviceKey` finds it.
+ *
+ * HONESTY FENCE: this seeds a UI FIXTURE. It is NEVER evidence that the real
+ * registration ceremony works — the real ceremony requires a cross-device authority
+ * decision this single-process seed does not exercise. SUNSET: delete this call (and
+ * the engine-side fixture it drives) once D-17 / P2P-11 unblocks the real cross-device
+ * authority path — tracked at
+ * `.planning/todos/pending/2026-09-15-retire-engine-side-registered-state-dev-fixture.md`.
+ *
+ * `dev-seed.ts` itself gains no ceremony token of its own here — the forbidden
+ * identifiers (`register(`/`associate(`/`seedSignedMutation`/`issueAttestationChallenge`)
+ * stay inside the engine-side module this function only calls through
+ * `loadRegistrantAssociationSeeder()`.
+ */
+async function seedRegisteredAssociationFixture(
+	ctx: EngineContext,
+	authorityId: string,
+	sign: SignCallback,
+): Promise<void> {
+	const seedRegistrantAssociation = loadRegistrantAssociationSeeder();
+	// Unreachable while __DEV__ is true (seedDevNetwork already throws above when it is
+	// not), but checked because the loader is itself gated — an unattached harness must
+	// be a silent no-op, never a throw.
+	if (!seedRegistrantAssociation) return;
+
+	const { publicKey: deviceKey } = await resolveAttestationProducer().provisionDeviceKey();
+	await seedRegistrantAssociation(ctx, authorityId, { id: DEV_SEED_ASSOCIATION_REGISTRANT_ID }, deviceKey, sign);
+}
 
 /** Result handed to the composition root / ConfirmationScreen (D-05/D-07/D-08). */
 export interface DevSeedResult {
@@ -120,20 +197,51 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 			throw new Error('seedDevNetwork: seeded network re-opened but no Election row found — inconsistent dev-seed state')
 		}
 		const electionId = electionRow.Id as string
+
+		// D-23(f): re-attach path also re-runs the registered-state fixture — it is
+		// idempotent (seedRegistrantAssociation re-attaches to the existing rows rather
+		// than duplicating them), and a re-opened network must not silently lose the
+		// registered state a PRIOR boot already seeded.
+		await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+
 		return { networkReference: existingRef, electionId, deviceUser, sign }
 	}
 
 	// ---------- fresh seed ----------
 
-	// (1) Founding-officer network. `admin.officers[0].init.scopes` includes 'vrg'
-	// (Scope.vrg = "Validate registrations", votetorrent.qsql:59 — required by
-	// register()'s AdminSigning ceremony) and 'mel' (Scope.mel = "Manage
-	// Elections" — required by the election + policy-row ceremonies below).
+	// (1) Founding-officer network. `admin.officers[0].init.scopes` is `['mel']`
+	// ONLY (D-09/D-20) — 'vrg' (Scope.vrg = "Validate registrations",
+	// votetorrent.qsql:59) is DELIBERATELY NOT granted here. 'vrg' is the
+	// authority's registration-ceremony scope; granting it to the device's own
+	// user is exactly what let the voter app run the authority's ceremony
+	// (D-01 — see 51-CONTEXT.md / 51-11-SUMMARY.md). 'mel' (Scope.mel = "Manage
+	// Elections") stays — the election + per-tier policy-row ceremonies below
+	// need it, and D-12's `ElectionRecordValidityPolicy` row is 'mel'-scoped.
 	// Officer.InsertValid's first-authority branch needs no invite, no signing
 	// for officer #1 — networksEngine.create(networkInit, deviceUser) makes the
 	// device user that officer directly (the Officer row's UserId binds to the
 	// `user` param, not to anything in OfficerInit — OfficerInit carries no
 	// userId field, see votetorrent.qsql:164-210 / networks-engine.ts:84-125).
+	//
+	// Honesty note (D-09 gate research): `AdminSigning.UserIdValid`
+	// (votetorrent.qsql:247-252) only checks that the signer is SOME Officer
+	// row at this authority+AdminEffectiveAt — it does not join against
+	// `Officer.Scopes` at all, and no engine-side check does either
+	// (`registration-engine.ts`'s own doc comment on `rejectRegistrationRequest`
+	// says so verbatim: "this method never claims the scope is enforced").
+	// Dropping 'vrg' therefore does NOT, by itself, make THIS identity's
+	// `register()` calls fail at `UserIdValid` — the device user remains an
+	// Officer of this authority regardless of which Scopes it carries. What
+	// removing 'vrg' DOES do: it stops this fixture from asserting/documenting
+	// a grant that was only ever needed to imitate the authority's own
+	// ceremony, and keeps a future reader from treating 'vrg' as an obvious,
+	// convenient scope to restore. The real structural backstops against a
+	// reintroduced voter-side ceremony are (a) the comment-stripped source gate
+	// (`no-vrg-ceremony.gate.test.ts`) that fails on any reintroduced
+	// `register(`/`associate(`/`seedSignedMutation`/`issueAttestationChallenge`
+	// call under `apps/VoteTorrentVoter/src`, and (b) the fact that a genuine
+	// (non-dev-seed) voter identity — one never inserted into `Officer` at all —
+	// fails `UserIdValid` for real, which the same gate file also proves.
 	const networkInit: NetworkInit = {
 		name: DEV_SEED_NETWORK_NAME,
 		relays: [],
@@ -147,7 +255,7 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 					init: {
 						name: deviceUser.name,
 						title: 'Registrar',
-						scopes: ['vrg', 'mel'] as Scope[],
+						scopes: ['mel'] as Scope[],
 					},
 				},
 			],
@@ -216,6 +324,9 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 			[ElectionEvent.registrationEnds]: electionDate - 25 * 86_400_000,
 			[ElectionEvent.ballotsFinal]: electionDate - 14 * 86_400_000,
 			[ElectionEvent.votingStarts]: electionDate - 2 * 86_400_000,
+			[ElectionEvent.accruingVotes]: electionDate - 20 * 3_600_000,
+			[ElectionEvent.hashingVotes]: electionDate - 16 * 3_600_000,
+			[ElectionEvent.releasingKeys]: electionDate - 12 * 3_600_000,
 			[ElectionEvent.tallyingStarts]: electionDate,
 			[ElectionEvent.validation]: electionDate + 86_400_000,
 			[ElectionEvent.certificationStarts]: electionDate + 2 * 86_400_000,
@@ -254,6 +365,13 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 		{ electionId, fieldName: 'party', tier: 'selective', requirement: 'optional' },
 		sign,
 	)
+
+	// (4) D-23(f): the registered-state dev fixture — see
+	// seedRegisteredAssociationFixture's own doc comment for the honesty fence and the
+	// sunset obligation. This grants dev-seed.ts NO ceremony token of its own; the
+	// forbidden identifiers stay inside the engine-side module reached through
+	// loadRegistrantAssociationSeeder().
+	await seedRegisteredAssociationFixture(ctx, authorityId, sign)
 
 	return { networkReference: ref, electionId, deviceUser, sign }
 }

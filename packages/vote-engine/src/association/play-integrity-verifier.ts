@@ -22,16 +22,44 @@ import { Buffer } from 'buffer'
  * every rejection is an early-returned `{ ok: false, reason }` tuple; the
  * caller (`association-engine.ts:255-261`) converts `!ok` into a thrown
  * `Error` itself.
+ *
+ * **D-09 — key-provisioning fail-closed check, relocated here.** This check
+ * formerly lived at construction time in
+ * `apps/VoteTorrentAuthority/src/engines/engine-factory.ts:402-406` (a
+ * `throw` inside the factory's `'association'` case when
+ * `PLAY_CONSOLE_*_KEY_BASE64` build constants were absent). It now lives as
+ * the FIRST statement of `verify()`, gated by the `keysProvisioned`
+ * constructor parameter below, so that no other rejection reason (e.g. "no
+ * Android platform details") can mask an unprovisioned-keys condition — an
+ * unprovisioned verifier must always report the provisioning reason first,
+ * regardless of what else is wrong with the submitted attestation. The
+ * never-throws contract above is unchanged: this is an early-returned
+ * `{ ok: false, reason }` tuple, never a `throw`; `association-engine.ts`'s
+ * existing `if (!verification.ok) throw` at `:279-283` is what converts
+ * this tuple into fail-closed behavior end to end, and that file is not
+ * modified by this relocation. `keysProvisioned` defaults to `true` so
+ * every existing three-argument construction site keeps constructing a
+ * provisioned verifier unchanged — the authority `EngineFactory` is
+ * responsible for threading the real `playConsoleKeysProvisioned` value
+ * into the 5th argument (47-09).
  */
 export class PlayIntegrityVerifier implements IAttestationVerifier {
   constructor (
     private readonly keyProvider: IIntegrityKeyProvider,
     private readonly pinnedHardwareRoots: Uint8Array[],
     private readonly expectedAppIdentity: ExpectedAppIdentity,
-    private readonly revokedSerials: Set<string> = new Set<string>()
+    private readonly revokedSerials: Set<string> = new Set<string>(),
+    private readonly keysProvisioned: boolean = true
   ) {}
 
   async verify (challenge: AttestationChallenge, attestation: DeviceAttestation): Promise<AttestationVerification> {
+    // D-09 / CR-03: relocated fail-closed check — must be the FIRST statement
+    // in this method so an unprovisioned verifier always reports this reason,
+    // never a downstream rejection reason that would mask it.
+    if (!this.keysProvisioned) {
+      return { ok: false, reason: 'Play Console key material is not provisioned — see SETUP.md' }
+    }
+
     const android = attestation.platformDetails?.type === 'Android' ? attestation.platformDetails : undefined
     if (!android) {
       return { ok: false, reason: 'attestation carries no Android platform details' }

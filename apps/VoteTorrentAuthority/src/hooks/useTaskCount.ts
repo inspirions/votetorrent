@@ -35,8 +35,19 @@ export function useTaskCount(): number {
 					signatureTasksEngine.getRequestedSignatures(true),
 				]);
 
+				// 48-11/48-18: getRequestedSignatures(true) itself stays
+				// UNCHANGED — it is the idempotent pull-and-seed call the
+				// registration approval ceremony needs — but 'registrant'
+				// signature tasks are excluded from this COUNT, matching
+				// TasksScreen.tsx's renderableSignatureTasks filter exactly.
+				// The badge and the list are counting the SAME population
+				// deliberately: a badge reading 3 over a list rendering 2 is
+				// a legibility defect, and the two filters must be changed
+				// together or not at all.
+				const renderableSigs = sigs.filter((task) => task.signatureType !== "registrant");
+
 				if (!cancelled) {
-					setCount(keys.length + sigs.length);
+					setCount(keys.length + renderableSigs.length);
 				}
 			} catch {
 				// Network may not be established yet at first render — leave count at 0

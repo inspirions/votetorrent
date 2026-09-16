@@ -23,12 +23,14 @@ import { CustomTextInput } from "../../components/CustomTextInput";
 import { globalStyles } from "../../theme/styles";
 import { formatDate } from "../../utils/displayUtils";
 import { OfficerCard } from "./components/OfficerCard";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 /** Shape the (forthcoming) real authority engine will provide for invited authorities. */
 type InvitedAuthority = { name: string; status: "sent" | "unsent" };
 
 export default function AuthorityDetailsScreen() {
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { colors } = useTheme() as ExtendedTheme;
 	const { authority } = useRoute().params as { authority: Authority };
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -186,7 +188,7 @@ export default function AuthorityDetailsScreen() {
 	}
 
 	return (
-		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 }}>
+		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 + keyboardInset }}>
 			<InlineError message={errorMessage} />
 			<View style={styles.section}>
 				<View style={styles.imageContainer}>
@@ -390,6 +392,57 @@ export default function AuthorityDetailsScreen() {
 					/>
 				</View>
 			)}
+
+			{/* Phase 47 plan 47-21 (D-08) — Registrants / Polling Devices / Authority
+			    Peers entry rows. (i) Placed here because they are authority-owned
+			    surfaces — polling devices and authority peers are authority-config,
+			    not registrant data. (ii) The rows are NOT scope-gated: an officer
+			    lacking 'vrg' or 'cap' reaches the destination screen read-only, with
+			    that screen's own banner and its visible-but-disabled write controls
+			    — the D-13 default pattern working as designed. (iii) The row is
+			    navigation, not an access control — the schema's AdminSignature CHECK
+			    on each ceremony is the enforcement boundary (T-47-04). No
+			    officer-scope hook is added to this screen. */}
+			<View style={styles.section} testID="authority-details-phase47-entries">
+				<View testID="authority-details-registrants-entry">
+					<InfoCard
+						title={t("registrantListScreenTitle")}
+						icon="chevron-right"
+						onPress={() =>
+							// Authority-wide roster — NO electionFilter. The election-filtered
+							// variant is the same route reached from ElectionDetailsScreen
+							// (D-07); a second roster route was deliberately not created.
+							navigation.navigate("RegistrantsList", { authorityId: authority.id })
+						}
+					/>
+				</View>
+				{/* Phase 48 plan 48-21 (D-12) — Registration Requests entry row,
+				    following its three siblings' ungated pattern deliberately: no
+				    officer-scope hook, no conditional render, no disabled state. The
+				    row is navigation, not access control — RegistrationInboxScreen owns
+				    its own read-only banner and visible-but-disabled write controls. */}
+				<View testID="authority-details-registration-requests-entry">
+					<InfoCard
+						title={t("registrationRequestScreenTitle")}
+						icon="chevron-right"
+						onPress={() => navigation.navigate("RegistrationInbox", { authorityId: authority.id })}
+					/>
+				</View>
+				<View testID="authority-details-polling-devices-entry">
+					<InfoCard
+						title={t("pollingDeviceScreenTitle")}
+						icon="chevron-right"
+						onPress={() => navigation.navigate("PollingDevices", { authorityId: authority.id })}
+					/>
+				</View>
+				<View testID="authority-details-authority-peers-entry">
+					<InfoCard
+						title={t("authorityPeerScreenTitle")}
+						icon="chevron-right"
+						onPress={() => navigation.navigate("AuthorityPeers", { authorityId: authority.id })}
+					/>
+				</View>
+			</View>
 
 			<View style={styles.section}>
 				<View style={styles.invitedHeader}>

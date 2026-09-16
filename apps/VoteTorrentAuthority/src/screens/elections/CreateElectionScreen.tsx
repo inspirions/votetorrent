@@ -20,6 +20,13 @@ import { ElectionsCreateElectionBuilder } from "@votetorrent/vote-engine";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import {
+	resolveElectionTimeline,
+	findTimelineOrderViolation,
+	CREATE_FALLBACK_DAYS,
+} from "./resolve-election-timeline";
 
 // Phase 9 plan 09-12 (ELECUI-03) — Single-scroll New Election form.
 // Phase 20 plan 20-06 (EUI-02, EUI-03) — type radio + per-field inline validation.
@@ -43,8 +50,10 @@ export function CreateElectionScreen() {
 	const [revision, setRevision] = useState<ElectionRevisionFormValue>({
 		registrationEnds: "",
 		ballotsFinal: "",
-		releasingKeys: "",
 		votingStarts: "",
+		accruingVotes: "",
+		hashingVotes: "",
+		releasingKeys: "",
 		tallyingStarts: "",
 		validation: "",
 		certificationStarts: "",
@@ -69,6 +78,8 @@ export function CreateElectionScreen() {
 
 	// 16-08 item 4: surface the ACTUAL propose failure inline (not just console.error).
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isCreating, setIsCreating] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	useEffect(() => {
 		async function loadAuthority() {
@@ -120,6 +131,7 @@ export function CreateElectionScreen() {
 			return;
 		}
 
+		setIsCreating(true);
 		try {
 			const electionsEngine = await getEngine<IElectionsEngine>("elections");
 			if (!electionsEngine) {
@@ -132,26 +144,13 @@ export function CreateElectionScreen() {
 			const signer = await createDeviceSigner("Device User");
 
 			const now = Date.now();
-			const day = 24 * 60 * 60 * 1000;
-			const parseDateOrFallback = (s: string, fallbackMs: number): number =>
-				s.trim() ? new Date(s).getTime() || fallbackMs : fallbackMs;
 
-			// Resolve the full 7-event timeline ONCE so the builder payload and the
+			// Resolve the full 10-event timeline ONCE so the builder payload and the
 			// revision-signing seam below sign an IDENTICAL timeline (the digests must match).
-			// The back-half events (tallying → closed) now come from the form when set, and
-			// otherwise default RELATIVE TO votingStarts — not `now` — so pushing the voting
-			// date out keeps votingStarts < tallyingStarts < certificationStarts satisfied
-			// (the ElectionsCreateElectionBuilder cross-field rule that previously broke).
-			const resolvedVotingStarts = parseDateOrFallback(revision.votingStarts, now + 10 * day);
-			const resolvedTimeline = {
-				registrationEnds: parseDateOrFallback(revision.registrationEnds, now + 2 * day),
-				ballotsFinal: parseDateOrFallback(revision.ballotsFinal, now + 5 * day),
-				votingStarts: resolvedVotingStarts,
-				tallyingStarts: parseDateOrFallback(revision.tallyingStarts, resolvedVotingStarts + 4 * day),
-				validation: parseDateOrFallback(revision.validation, resolvedVotingStarts + 5 * day),
-				certificationStarts: parseDateOrFallback(revision.certificationStarts, resolvedVotingStarts + 6 * day),
-				closed: parseDateOrFallback(revision.closed, resolvedVotingStarts + 7 * day),
-			};
+			// resolveElectionTimeline is the single shared construction site both this screen
+			// and EditElectionScreen build through (D-16) — see resolve-election-timeline.ts
+			// for the "relative to votingStarts, not now" rationale.
+			const resolvedTimeline = resolveElectionTimeline(revision, now, CREATE_FALLBACK_DAYS);
 
 			// WR-05: the two required core date fields must actually PARSE — do not let an
 			// unparseable string silently fall back to a fabricated now+N-days timeline in
@@ -192,10 +191,7 @@ export function CreateElectionScreen() {
 				);
 				return;
 			}
-			if (
-				resolvedTimeline.votingStarts >= resolvedTimeline.tallyingStarts ||
-				resolvedTimeline.tallyingStarts >= resolvedTimeline.certificationStarts
-			) {
+			if (findTimelineOrderViolation(resolvedTimeline) !== null) {
 				setErrorMessage(t("errTimelineOrder"));
 				return;
 			}
@@ -285,14 +281,18 @@ export function CreateElectionScreen() {
 			await saveLocalKeyholders(electionId, cleanKeyholders);
 		} catch (err) {
 			console.warn("createElection error:", err);
-			setErrorMessage(mapElectionError(err, t));
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? mapElectionError(err, t));
 			return;
+		} finally {
+			setIsCreating(false);
 		}
 		navigation.goBack();
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView
 				style={styles.container}
 				contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
@@ -389,14 +389,15 @@ export function CreateElectionScreen() {
 			<InlineError message={errorMessage} />
 			<Footer>
 				<CustomButton
-					title={t("propose")}
+					title={isCreating ? `${t("propose")}…` : t("propose")}
 					icon="floppy-disk"
+					disabled={isCreating}
 					onPress={handlePropose}
 					backgroundColor={colors.success}
 					forceDarkText={true}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

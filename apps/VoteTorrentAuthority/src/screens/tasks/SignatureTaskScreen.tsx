@@ -24,8 +24,15 @@ import { useTranslation } from "react-i18next";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 
-const titleKey: Record<SignatureTask["signatureType"], string> = {
+// 'registrant' is deliberately excluded from this map's key type — it can never reach this
+// screen. TasksScreen.tsx's `renderableSignatureTasks` filter and useTaskCount.ts's
+// `renderableSigs` filter both exclude `signatureType === "registrant"` (registrant decisions
+// go through RegistrationRequestApprovalScreen instead), and the two filters change together
+// or not at all. Narrowing here with Exclude<> makes that existing exclusion structurally
+// honest rather than adding an entry that could never be looked up.
+const titleKey: Record<Exclude<SignatureTask["signatureType"], "registrant">, string> = {
 	admin: "adminRevision",
 	authority: "authorityRevision",
 	network: "networkRevision",
@@ -42,9 +49,16 @@ export default function SignatureTaskScreen() {
 	const isNetwork = task.signatureType === "network";
 
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isProcessing, setIsProcessing] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	useLayoutEffect(() => {
-		navigation.setOptions({ title: t(titleKey[task.signatureType]) });
+		// Guarded, not cast: 'registrant' tasks never reach this screen (see the titleKey
+		// comment above), but task.signatureType is still typed as the full union, so the
+		// lookup needs this narrowing test to typecheck under strict mode.
+		if (task.signatureType !== "registrant") {
+			navigation.setOptions({ title: t(titleKey[task.signatureType]) });
+		}
 	}, [navigation, t, task.signatureType]);
 
 	// SIGN-02 accept path (D-01/D-03/D-04):
@@ -53,6 +67,7 @@ export default function SignatureTaskScreen() {
 	//   3. Call completeSignature with the resulting Signature only
 	const sign = async () => {
 		setErrorMessage("");
+		setIsProcessing(true);
 		try {
 			const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
 			const digest = await engine.getSignatureDigest(task);
@@ -63,18 +78,27 @@ export default function SignatureTaskScreen() {
 			// with no additional user decision — so it doubles as the reusable
 			// per-digest `sign` callback finalizeBallot uses to REAL-sign each
 			// promoted per-row Question/Option AdminSigning digest. Only `ballot`
-			// signature tasks drive finalizeBallot (IN-02, 39-REVIEW), so `sign` is
-			// narrowed to that type — a no-op for every other signatureType.
+			// signature tasks drive finalizeBallot (IN-02, 39-REVIEW).
+			// 57-08 (Trigger B): `admin` tasks are the second consumer — a co-signer
+			// accepting a pending "Revise Administration" task may complete the 'rad'
+			// threshold, and completeSignature's promotion attempt (applyAdminProposal)
+			// mints two or three distinct digests, so it likewise needs this
+			// re-invocable closure rather than the single pre-computed `signature`
+			// above. `sign` stays a no-op for every OTHER signatureType.
 			await engine.completeSignature(task, {
 				isAccepted: true,
 				signature,
-				sign: task.signatureType === "ballot" ? signer : undefined,
+				sign: task.signatureType === "ballot" || task.signatureType === "admin" ? signer : undefined,
 			});
 			navigation.goBack();
 		} catch (err) {
 			console.warn("sign error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
 			return;
+		} finally {
+			setIsProcessing(false);
 		}
 	};
 
@@ -84,6 +108,7 @@ export default function SignatureTaskScreen() {
 	//   so no OfficerSignature is inserted and the signing session is not advanced (D-12).
 	const reject = async () => {
 		setErrorMessage("");
+		setIsProcessing(true);
 		try {
 			const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
 			await engine.completeSignature(task, {
@@ -93,8 +118,16 @@ export default function SignatureTaskScreen() {
 			navigation.goBack();
 		} catch (err) {
 			console.warn("reject error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			// This path never calls createDeviceSigner (D-12), so
+			// isDeviceSigningError will always classify a rejection here as
+			// "not mine" — routed through the same shared handler anyway for
+			// consistency with every other migrated catch block.
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
 			return;
+		} finally {
+			setIsProcessing(false);
 		}
 	};
 
@@ -124,7 +157,14 @@ export default function SignatureTaskScreen() {
 			<SignatureTaskFooter
 				onAccept={sign}
 				onReject={reject}
-				acceptLabel={isNetwork ? t("accept") : t("sign")}
+				acceptLabel={
+					isProcessing
+						? `${isNetwork ? t("accept") : t("sign")}…`
+						: isNetwork
+							? t("accept")
+							: t("sign")
+				}
+				disabled={isProcessing}
 			/>
 		</View>
 	);

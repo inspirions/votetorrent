@@ -28,6 +28,7 @@ import type {MockElection} from '../../providers/types';
 import type {VoteStackParamList} from '../../navigation/types';
 import {ElectionCard} from '../../components/ElectionCard';
 import {NetworkHeader} from '../../components/NetworkHeader';
+import {ConfigFaultNotice} from '../../components/ConfigFaultNotice';
 import {InfoDialog} from '../../components/InfoDialog';
 
 type HomeNavigationProp = NativeStackNavigationProp<VoteStackParamList, 'Home'>;
@@ -68,6 +69,7 @@ export default function HomeScreen() {
 	return (
 		<View style={[styles.screen, {backgroundColor: colors.background}]}>
 			<NetworkHeader />
+			<ConfigFaultNotice />
 
 			<ScrollView contentContainerStyle={styles.content}>
 				{isInitialized && election ? (

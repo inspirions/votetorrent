@@ -14,6 +14,7 @@ import {
   BuilderValidationError
 } from '@votetorrent/vote-core'
 import type {
+  AdminSignatureTask,
   IKeysTasksEngine,
   ISignatureTasksEngine,
   IOnboardingTasksEngine,
@@ -311,7 +312,19 @@ describe('CompleteSignatureBuilder', () => {
       relays: ['/dns4/relay.example.com/tcp/443/wss'],
       primaryAuthorityDomainName: 'authority.example.com'
     }
-    const task = makeSignatureTask()   // userId='user-1', signatureType='admin'
+    // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
+    // branch to construct a promoting AuthorityEngine. Its id does not need to
+    // match either seeded fixture's real authority: a mismatch just refuses at
+    // applyAdminProposal's Step 1 ('wrong-scope'), caught and warned exactly
+    // like the roster-mismatch this test's own synthetic digest already
+    // produces — never thrown. `administration` is required by the
+    // AdminSignatureTask type but never read at runtime here.
+    const task: AdminSignatureTask = {
+      ...makeSignatureTask(),   // userId='user-1', signatureType='admin'
+      signatureType: 'admin',
+      authority: { id: 'placeholder-authority', name: 'Placeholder Authority', domainName: 'placeholder.example.com' },
+      administration: { proposed: { officers: [], effectiveAt: Date.now(), thresholdPolicies: [] }, signers: ['user-1'] }
+    }
     // 999.1 R-02: no longer using the shared makeSignatureResult() dummy — each
     // seedPendingTask() call below builds its own real per-digest SignatureResult
     // (the schema's SignatureValid UDF now verifies these bytes for real).
@@ -371,9 +384,15 @@ describe('CompleteSignatureBuilder', () => {
       const digestB64 = digestRow!.Digest as string
       const { privateHex, publicHex } = randomTestKeyPair()
       const realSig = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
+      // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable per-
+      // digest callback. This fixture's AdminSigning row does not use the real
+      // roster-covering digest formula (and `task.authority` above is a
+      // placeholder), so any promotion attempt legitimately refuses — recorded
+      // and warned, never thrown — and this callback is never actually invoked.
       const realResult: SignatureResult = {
         isAccepted: true,
-        signature: { signature: realSig, signerKey: publicHex, signerUserId: userId }
+        signature: { signature: realSig, signerKey: publicHex, signerUserId: userId },
+        sign: async (_d: Uint8Array) => ({ signature: realSig, signerKey: publicHex, signerUserId: userId })
       }
 
       // Step 3: seed Task + AdminSignatureTaskExtension in an explicit BEGIN/COMMIT

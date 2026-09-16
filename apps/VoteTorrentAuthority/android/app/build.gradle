@@ -100,6 +100,9 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 3
         versionName "0.0.3"
+        // D-07 StrongBox rung probe (scripts/run-strongbox-rung-probe.sh) — instrumentation
+        // only; adds no runtime code to the shipped APK.
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
         debug {
@@ -153,4 +156,8 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+
+    // D-07 StrongBox rung probe only. androidTest* never enters the shipped APK.
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
 }

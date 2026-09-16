@@ -22,6 +22,7 @@ import { randomTestKeyPair } from './fixtures/keys.js'
 import { AsyncStorage } from './shims/react-native'
 import type {
   AdminDigestArgs,
+  AdminSignatureTask,
   ISigningEngine,
   NetworkInit,
   NetworkReference,
@@ -127,9 +128,10 @@ function makeSignature (signerUserId: string): Signature {
 /**
  * 999.1 R-02: real per-digest signature for `startSigningSession` (PATH A, digestArgs !==
  * null — no callback form exists on this method, see ISigningEngine.startSigningSession).
- * Reproduces the exact `Digest(:authorityId, :effectiveAt, :thresholdPolicies)` formula
- * `SigningEngine.startSigningSession` computes engine-side, then signs it for real —
- * AdminSigning.SignatureValid now verifies these bytes via the in-schema UDF.
+ * Reproduces the exact `Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies)`
+ * formula `SigningEngine.startSigningSession` computes engine-side (57-01/D-02 added the
+ * `officers` field), then signs it for real — AdminSigning.SignatureValid now verifies
+ * these bytes via the in-schema UDF.
  */
 async function realSignAdminDigest (
   ctx: EngineContext,
@@ -138,8 +140,13 @@ async function realSignAdminDigest (
   signerUserId: string
 ): Promise<Signature> {
   const row = await ctx.db
-    .prepare('select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d')
-    .get({ authorityId, effectiveAt: digestArgs.effectiveAt, thresholdPolicies: digestArgs.thresholdPolicies })
+    .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
+    .get({
+      authorityId,
+      effectiveAt: digestArgs.effectiveAt,
+      officers: digestArgs.officers,
+      thresholdPolicies: digestArgs.thresholdPolicies
+    })
   const digestB64 = row!.d as string
   const { privateHex, publicHex } = randomTestKeyPair()
   const sigHex = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
@@ -162,9 +169,12 @@ function signTestDigestWithFreshKey (signerUserId: string, digestB64: string): S
 // ===========================================================================
 
 // D-09: AdminDigestArgs for startSigningSession (replaces raw digest string)
+// 57-01 (D-02): officers added — empty roster serializes to '[]', mirroring
+// thresholdPolicies' empty-array default.
 const testDigestArgs: AdminDigestArgs = {
   authorityId: 'test-authority',
   effectiveAt: 'test-effective-at',
+  officers: '[]',
   thresholdPolicies: '[]'
 }
 
@@ -598,11 +608,16 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
     }
     const engine = new SignatureTasksEngine(networkRef, auth.ctx)
 
-    const task: SignatureTask = {
+    // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
+    // branch; `administration` is required by the AdminSignatureTask type but
+    // never read at runtime here.
+    const task: AdminSignatureTask = {
       type: 'signature',
       userId: auth.user.id,
       network: networkRef,
-      signatureType: 'admin'
+      signatureType: 'admin',
+      authority: auth.authority,
+      administration: { proposed: { officers: [], effectiveAt: Date.now(), thresholdPolicies: [] }, signers: [auth.user.id] }
     }
 
     // getSignatureDigest: should return the stored AdminSigning.Digest as bytes (D-03)
@@ -631,7 +646,20 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
       .get({ nonce })
     expect(Number((countBefore as any)?.c ?? 0), 'OfficerSignature count before accept must be 0').to.equal(0)
 
-    await engine.completeSignature(task, { isAccepted: true, signature })
+    // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable per-digest
+    // callback. This fixture's AdminSigning row does not use the real roster-
+    // covering digest formula, so any promotion attempt legitimately refuses
+    // (roster-mismatch) — recorded and warned, never thrown — and this callback
+    // is never actually invoked.
+    await engine.completeSignature(task, {
+      isAccepted: true,
+      signature,
+      sign: async (d: Uint8Array) => ({
+        signature: bytesToHex(secp.sign(d, privKey) as unknown as Uint8Array),
+        signerKey: pubHex,
+        signerUserId: auth.user.id
+      })
+    })
 
     // Assert 1: OfficerSignature inserted on accept
     const officerRow = await auth.ctx.db
@@ -896,11 +924,16 @@ describe('completeSignature reject-branch (D-12)', () => {
       primaryAuthorityDomainName: 'test.example'
     }
     const tasksEngine = new SignatureTasksEngine(networkRef, auth.ctx)
-    const task: SignatureTask = {
+    // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
+    // branch; `administration` is required by the AdminSignatureTask type but
+    // never read at runtime here.
+    const task: AdminSignatureTask = {
       type: 'signature',
       userId: auth.user.id,
       network: networkRef,
-      signatureType: 'admin'
+      signatureType: 'admin',
+      authority: auth.authority,
+      administration: { proposed: { officers: [], effectiveAt: Date.now(), thresholdPolicies: [] }, signers: [auth.user.id] }
     }
     // 999.1 R-02: completeSignature's accept path drives a REAL OfficerSignature insert —
     // sign the seeded AdminSigning's actual Digest for real.
@@ -908,7 +941,12 @@ describe('completeSignature reject-branch (D-12)', () => {
       .prepare('select Digest from AdminSigning where Nonce = :nonce')
       .get({ nonce })
     const sig = signTestDigestWithFreshKey(auth.user.id, acceptDigestRow!.Digest as string)
-    const acceptResult = { isAccepted: true, signature: sig }
+    // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable per-digest
+    // callback. This fixture's AdminSigning row does not use the real roster-
+    // covering digest formula, so any promotion attempt legitimately refuses
+    // (roster-mismatch) — recorded and warned, never thrown — and this callback
+    // is never actually invoked.
+    const acceptResult = { isAccepted: true, signature: sig, sign: async (_d: Uint8Array) => sig }
 
     await tasksEngine.completeSignature(task, acceptResult)
 

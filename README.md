@@ -45,6 +45,13 @@ for the release process and repository secret setup.
 * [Voter APK (latest)](https://github.com/gotchoices/votetorrent/releases/download/latest-voter/votetorrent-voter-latest.apk)
 * [Authority APK (latest)](https://github.com/gotchoices/votetorrent/releases/download/latest-authority/votetorrent-authority-latest.apk)
 
+No iOS build has been published to TestFlight yet, so there is nothing to download for
+iOS at this time — see [doc/releases/RELEASE-IOS.md](doc/releases/RELEASE-IOS.md) for the
+release-process overview, and
+[apps/VoteTorrentVoter/BUILD-RELEASE-IOS.md](apps/VoteTorrentVoter/BUILD-RELEASE-IOS.md) /
+[apps/VoteTorrentAuthority/BUILD-RELEASE-IOS.md](apps/VoteTorrentAuthority/BUILD-RELEASE-IOS.md)
+for the per-app signing detail.
+
 ## Contributing
 
 If you would like to help out, the following skills will be most useful:

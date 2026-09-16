@@ -8,6 +8,11 @@ export interface SignatureTaskFooterProps {
 	onReject: () => void;
 	acceptLabel?: string;
 	rejectLabel?: string;
+	// 49-11: optional in-flight-signing disable, applied to BOTH buttons —
+	// backward-compatible (defaults false), so every pre-existing caller of
+	// this shared footer (KeyholderInvitationScreen, AuthorityInvitationScreen,
+	// AdministratorInvitationScreen) is unaffected unless it opts in.
+	disabled?: boolean;
 }
 
 export function SignatureTaskFooter({
@@ -15,6 +20,7 @@ export function SignatureTaskFooter({
 	onReject,
 	acceptLabel,
 	rejectLabel,
+	disabled,
 }: SignatureTaskFooterProps) {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
@@ -27,6 +33,7 @@ export function SignatureTaskFooter({
 				size="thin"
 				flex={true}
 				onPress={onAccept}
+				disabled={disabled}
 			/>
 			<CustomButton
 				title={rejectLabel ?? t("reject")}
@@ -35,6 +42,7 @@ export function SignatureTaskFooter({
 				size="thin"
 				flex={true}
 				onPress={onReject}
+				disabled={disabled}
 			/>
 		</Footer>
 	);
