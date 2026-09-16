@@ -45,6 +45,7 @@ const resources = {
 			'countdown.hours': 'hours',
 			'countdown.minutes': 'minutes',
 			'countdown.seconds': 'seconds',
+			'countdown.days': 'days',
 			validationDetailsTitle: 'Validation Details',
 			'states.upcoming.summary':
 				"Voting hasn't opened yet — check back when the polls open.",
@@ -329,6 +330,7 @@ const resources = {
 			'countdown.hours': 'horas',
 			'countdown.minutes': 'minutos',
 			'countdown.seconds': 'segundos',
+			'countdown.days': 'días',
 			validationDetailsTitle: 'Detalles de Validación',
 			'states.upcoming.summary':
 				'La votación aún no ha comenzado — vuelve cuando se abran las urnas.',
