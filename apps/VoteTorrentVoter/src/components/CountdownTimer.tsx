@@ -8,8 +8,14 @@
  * real elapsed time nor goes stale while the app is backgrounded (JS timers suspend in the
  * background; the `AppState` listener forces an immediate resync on return to `'active'`).
  *
- * Pure presentational (`targetIso: string` only) — does NOT call `useVoterApp()` (RESEARCH.md
- * Anti-Patterns: keep provider reads confined to screens, not this leaf component).
+ * Pure presentational (`targetIso: string`, optional `nowOffsetMs?: number`) — does NOT call
+ * `useVoterApp()` (RESEARCH.md Anti-Patterns: keep provider reads confined to screens, not this
+ * leaf component).
+ *
+ * `nowOffsetMs` (D-14, dev-instrumentation): optional, defaults to `0`, inert in release builds.
+ * It shifts the reference clock from a bare `Date.now()` to `Date.now() + nowOffsetMs`, letting
+ * the Timeline's `__DEV__` clock-offset control move this countdown's reference clock in step
+ * with the rail's own `nowMs`. It arrives by prop only — never a provider read (Phase 59 D-20).
  */
 import React, {useEffect, useState} from 'react';
 import {AppState, StyleSheet, Text, View} from 'react-native';
@@ -17,48 +23,88 @@ import {useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import {useTranslation} from 'react-i18next';
 
-function remaining(targetIso: string): number {
-	return Math.max(0, new Date(targetIso).getTime() - Date.now());
+function remaining(targetIso: string, nowOffsetMs = 0): number {
+	return Math.max(0, new Date(targetIso).getTime() - (Date.now() + nowOffsetMs));
 }
 
-function format(ms: number): {hours: string; minutes: string; seconds: string} {
+/** D2 root-cause fix: adaptive units at the 24h boundary, discriminated union. */
+type FormattedCountdown =
+	| {unit: 'long'; days: string; hours: string; minutes: string}
+	| {unit: 'short'; hours: string; minutes: string; seconds: string};
+
+function format(ms: number): FormattedCountdown {
 	const totalSeconds = Math.floor(ms / 1000);
+	const pad = (n: number) => String(n).padStart(2, '0');
+
+	// 86400 = seconds in a day — the exact D2 discriminant. totalSeconds === 86400 picks 'long';
+	// totalSeconds === 86399 picks 'short'.
+	if (totalSeconds >= 86400) {
+		const days = Math.floor(totalSeconds / 86400);
+		// Hours/minutes bounded 0-23 / 0-59 because the >=86400 case is routed away first — this
+		// bound is D2's root-cause fix (was unbounded Math.floor(totalSeconds / 3600)).
+		const hours = Math.floor((totalSeconds % 86400) / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		return {unit: 'long', days: String(days), hours: pad(hours), minutes: pad(minutes)};
+	}
+
+	// hours is bounded 0-23 here because the >=86400 case above already routed away anything
+	// larger — no seconds group is dropped, this branch keeps today's derivation exactly.
 	const hours = Math.floor(totalSeconds / 3600);
 	const minutes = Math.floor((totalSeconds % 3600) / 60);
 	const seconds = totalSeconds % 60;
-	const pad = (n: number) => String(n).padStart(2, '0');
-	return {hours: pad(hours), minutes: pad(minutes), seconds: pad(seconds)};
+	return {unit: 'short', hours: pad(hours), minutes: pad(minutes), seconds: pad(seconds)};
 }
 
-export function CountdownTimer({targetIso}: {targetIso: string}) {
-	const [remainingMs, setRemainingMs] = useState(() => remaining(targetIso));
+export function CountdownTimer({targetIso, nowOffsetMs = 0}: {targetIso: string; nowOffsetMs?: number}) {
+	const [remainingMs, setRemainingMs] = useState(() => remaining(targetIso, nowOffsetMs));
 	const {colors, fonts, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('home');
 
 	useEffect(() => {
-		// Resync immediately whenever targetIso changes (covers the effect's own mount too).
-		setRemainingMs(remaining(targetIso));
-		const id = setInterval(() => setRemainingMs(remaining(targetIso)), 1000);
+		// Resync immediately whenever targetIso or nowOffsetMs changes (covers the effect's own
+		// mount too). Omitting nowOffsetMs from the deps array below leaves the running interval on
+		// a stale offset and reproduces the "label and countdown disagree" defect D-13 closes.
+		setRemainingMs(remaining(targetIso, nowOffsetMs));
+		const id = setInterval(() => setRemainingMs(remaining(targetIso, nowOffsetMs)), 1000);
 
 		// JS timers are suspended while the app is backgrounded (reactnative.dev/docs/appstate) —
 		// force an immediate resync on return to 'active' instead of waiting for the next tick.
 		const sub = AppState.addEventListener('change', state => {
-			if (state === 'active') setRemainingMs(remaining(targetIso));
+			if (state === 'active') setRemainingMs(remaining(targetIso, nowOffsetMs));
 		});
 
 		return () => {
 			clearInterval(id);
 			sub.remove();
 		};
-	}, [targetIso]);
+	}, [targetIso, nowOffsetMs]);
 
-	const {hours, minutes, seconds} = format(remainingMs);
+	const formatted = format(remainingMs);
+
+	// Shrink-to-fit (D2): derived after `groups` values are known, from the longest displayed
+	// group only. Two steps only — type.display (2 digits or fewer) or type.h2 (more than 2) —
+	// applied uniformly to every displayed group and the colons in a given render.
+	const groups: Array<{value: string; labelKey: string; testId: string}> =
+		formatted.unit === 'long'
+			? [
+					{value: formatted.days, labelKey: 'countdown.days', testId: 'days'},
+					{value: formatted.hours, labelKey: 'countdown.hours', testId: 'hours'},
+					{value: formatted.minutes, labelKey: 'countdown.minutes', testId: 'minutes'},
+				]
+			: [
+					{value: formatted.hours, labelKey: 'countdown.hours', testId: 'hours'},
+					{value: formatted.minutes, labelKey: 'countdown.minutes', testId: 'minutes'},
+					{value: formatted.seconds, labelKey: 'countdown.seconds', testId: 'seconds'},
+				];
+
+	const maxDigits = Math.max(...groups.map(group => group.value.length));
+	const shrinkStep = maxDigits > 2 ? typeScale.h2 : typeScale.display;
 
 	const digitStyle = {
 		fontFamily: fonts.regular.fontFamily,
 		fontWeight: fonts.regular.fontWeight,
-		fontSize: typeScale.display.fontSize,
-		lineHeight: typeScale.display.lineHeight,
+		fontSize: shrinkStep.fontSize,
+		lineHeight: shrinkStep.lineHeight,
 		color: colors.text,
 	};
 	const labelStyle = {
@@ -68,12 +114,6 @@ export function CountdownTimer({targetIso}: {targetIso: string}) {
 		lineHeight: typeScale.caption.lineHeight,
 		color: colors.textSecondary,
 	};
-
-	const groups: Array<{value: string; labelKey: string; testId: string}> = [
-		{value: hours, labelKey: 'countdown.hours', testId: 'hours'},
-		{value: minutes, labelKey: 'countdown.minutes', testId: 'minutes'},
-		{value: seconds, labelKey: 'countdown.seconds', testId: 'seconds'},
-	];
 
 	return (
 		<View style={styles.row}>
