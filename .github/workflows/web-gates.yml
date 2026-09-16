@@ -1234,12 +1234,12 @@ jobs:
         run: |
           set -euo pipefail
           yarn gate:chart-geometry 2>&1 | tee ../../chart-geometry-dashboard.log
-          if ! grep -q 'CHART GEOMETRY GATE: PASS (7/7 rungs)' ../../chart-geometry-dashboard.log; then
-            echo "::error::chart-geometry-dashboard: the driver did not report all seven rungs passing"
+          if ! grep -q 'CHART GEOMETRY GATE: PASS (8/8 rungs)' ../../chart-geometry-dashboard.log; then
+            echo "::error::chart-geometry-dashboard: the driver did not report all eight rungs passing"
             exit 1
           fi
-          if ! grep -q 'RECEIPT chart-geometry-dashboard rungs=7 passed=7' ../../chart-geometry-dashboard.log; then
-            echo "::error::chart-geometry-dashboard: the driver's own receipt line is missing or does not read rungs=7 passed=7"
+          if ! grep -q 'RECEIPT chart-geometry-dashboard rungs=8 passed=8' ../../chart-geometry-dashboard.log; then
+            echo "::error::chart-geometry-dashboard: the driver's own receipt line is missing or does not read rungs=8 passed=8"
             exit 1
           fi
           echo "RECEIPT chart-geometry-dashboard" | tee -a ../../ci-receipt.txt

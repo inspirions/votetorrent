@@ -14,13 +14,28 @@
  * `tooltip` strings a hovered payload already carries (in `--muted`/`--text`,
  * never the series hue — "text never wears the data colour") — this file
  * authors no English of its own either.
+ *
+ * `ChartLegend`'s swatch hue comes from the payload entry's OWN matched
+ * `ChartSeries.tone`, never from its position in Recharts' legend payload
+ * array — that payload's order is Recharts' own `itemSorter` (default
+ * alphabetical-by-label), not declaration order (60-11).
  */
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ResponsiveContainer } from 'recharts';
 import { t } from '../copy.js';
 import { NARROW_CONTAINER_PX, TICKS_NARROW, TICKS_WIDE } from './chart-contracts.js';
-import type { StackedSegment } from './chart-contracts.js';
+import type { ChartSeries, ChartTone, StackedSegment } from './chart-contracts.js';
+
+/**
+ * Only `series-1`/`series-2` carry a swatch rule (`components.css`) — `ok`/
+ * `warn`/`fail` are single-hue status marks, never legend-bearing, so
+ * inventing a swatch class for them here is out of scope.
+ */
+const LEGEND_SWATCH_CLASS_BY_TONE: Readonly<Partial<Record<ChartTone, string>>> = Object.freeze({
+	'series-1': 'vt-chart__legend-swatch--series-1',
+	'series-2': 'vt-chart__legend-swatch--series-2',
+});
 
 export interface ChartFrameProps {
 	variantClassName: string;
@@ -113,6 +128,7 @@ export function ChartTooltip(props: ChartTooltipProps) {
 }
 
 export interface ChartLegendProps {
+	series: ReadonlyArray<ChartSeries>;
 	payload?: ReadonlyArray<{ value?: string; dataKey?: string | number | ((obj: any) => unknown) }>;
 }
 
@@ -121,14 +137,24 @@ export interface ChartLegendProps {
  * (StackedBarSeries only, today). No clickable element and no navigation
  * target, no handler — the swatch is a styled `<span>`, so no legend-
  * filtering affordance exists (D-11).
+ *
+ * Each payload entry resolves its OWN swatch hue from its own `ChartSeries`
+ * (matched by `dataKey`, falling back to the series `label`), never from its
+ * position in `payload` — Recharts' `Legend.itemSorter` defaults to `'value'`
+ * (alphabetical by label), so payload order is not declaration order and an
+ * index-derived colour would silently mispair a swatch with the wrong
+ * series (60-11, closing 60-UAT test 3 / 60-REVIEW WR-02).
  */
 export function ChartLegend(props: ChartLegendProps) {
-	const items = props.payload ?? [];
+	const { series, payload } = props;
+	const items = payload ?? [];
 	return (
 		<ul className="vt-chart__legend">
 			{items.map((item, index) => {
-				const swatchModifier = index === 0 ? 'vt-chart__legend-swatch--series-1' : 'vt-chart__legend-swatch--series-2';
-				const swatchClassName = ['vt-chart__legend-swatch', swatchModifier].join(' ');
+				const matchedSeries =
+					typeof item.dataKey === 'string' ? series.find((s) => s.key === item.dataKey) : series.find((s) => s.label === item.value);
+				const swatchModifier = matchedSeries ? LEGEND_SWATCH_CLASS_BY_TONE[matchedSeries.tone] : undefined;
+				const swatchClassName = swatchModifier ? ['vt-chart__legend-swatch', swatchModifier].join(' ') : 'vt-chart__legend-swatch';
 				return (
 					<li className="vt-chart__legend-item" key={String(item.dataKey ?? item.value ?? index)}>
 						<span className={swatchClassName} />

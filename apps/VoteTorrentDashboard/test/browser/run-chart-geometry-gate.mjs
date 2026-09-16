@@ -65,6 +65,7 @@ export const RUNG_IDS = Object.freeze([
 	'c1-status-bars-proportional',
 	'c1-status-labels-unclipped',
 	'c2-stacked-segments-sum-to-total',
+	'c2-legend-swatch-matches-series-fill',
 	'c3-marks-match-buckets-no-gaps',
 	'c5-meter-fill-ratio-proportional',
 	'panel-body-free-of-controls',
@@ -241,6 +242,82 @@ export function evaluateSegmentsSumToTotal(categories) {
 }
 
 /**
+ * C2 legend<->series-fill pairing (closes 60-UAT test 3 / 60-REVIEW WR-02).
+ * The pairing check alone would only prove that the legend and the bars
+ * agree with EACH OTHER; a shared, symmetric bug in the tone lookup both
+ * paths read could still make them agree on the WRONG colour. The
+ * tone->series anchor below ties the check to DATA (the fixture's own summed
+ * values, supplied by the caller) instead, so a swap of the `--series-N`
+ * classes on the rendered rects still trips this rung even if it happened to
+ * also swap the legend in lockstep.
+ * @param {ReadonlyArray<{ label: string, swatchColor: string }>} legend
+ * @param {ReadonlyArray<{ key: string, label: string, tone: string, fill: string, markCount: number, totalHeight: number }>} seriesMarks
+ * @param {ReadonlyArray<{ label: string, total: number }>} seriesTotals fixture-derived, computed by the driver -- never recomputed in-page
+ * @returns {Verdict}
+ */
+export function evaluateLegendPairsWithSeries(legend, seriesMarks, seriesTotals) {
+	/** @type {string[]} */
+	const failures = [];
+
+	// --- anti-vacuity, first ---------------------------------------------
+	if (legend.length < 2) failures.push(`only ${legend.length} legend item(s) supplied (want >= 2 -- a one-item legend cannot detect a mis-pairing)`);
+	if (legend.length !== seriesMarks.length) failures.push(`legend has ${legend.length} item(s) but seriesMarks has ${seriesMarks.length} item(s) -- want one legend item per series`);
+	for (const item of legend) {
+		if (item.swatchColor === '') failures.push(`legend item "${item.label}" has an empty swatch colour -- the page has likely lost its stylesheet`);
+	}
+	for (const mark of seriesMarks) {
+		if (mark.fill === '') failures.push(`series "${mark.label}" has an empty measured fill -- the page has likely lost its stylesheet`);
+	}
+	const distinctSwatchColors = new Set(legend.map((item) => item.swatchColor));
+	if (distinctSwatchColors.size < legend.length) {
+		failures.push(`only ${distinctSwatchColors.size} distinct swatch colour(s) across ${legend.length} legend item(s) -- two identical colours make the pairing unfalsifiable`);
+	}
+	const distinctFills = new Set(seriesMarks.map((mark) => mark.fill));
+	if (distinctFills.size < seriesMarks.length) {
+		failures.push(`only ${distinctFills.size} distinct series fill colour(s) across ${seriesMarks.length} series -- two identical colours make the pairing unfalsifiable`);
+	}
+
+	// --- the tone->series anchor: height ordering must track the fixture's
+	//     own summed values, never the `tone` field under test -----------
+	const sortedByTotal = [...seriesTotals].sort((a, b) => b.total - a.total);
+	for (let i = 0; i < sortedByTotal.length - 1; i += 1) {
+		const higher = sortedByTotal[i];
+		const lower = sortedByTotal[i + 1];
+		if (higher.total === lower.total) continue;
+		const higherMark = seriesMarks.find((m) => m.label === higher.label);
+		const lowerMark = seriesMarks.find((m) => m.label === lower.label);
+		if (!higherMark || !lowerMark) continue;
+		if (!(higherMark.totalHeight > lowerMark.totalHeight)) {
+			failures.push(
+				`series "${higher.label}" has a larger fixture total (${higher.total}) than "${lower.label}" (${lower.total}) but its summed rect height ${higherMark.totalHeight}px does not exceed "${lower.label}"'s ${lowerMark.totalHeight}px`,
+			);
+		}
+	}
+	for (const total of seriesTotals) {
+		if (total.total === 0) continue;
+		const mark = seriesMarks.find((m) => m.label === total.label);
+		if (mark && !(mark.markCount > 0)) failures.push(`series "${total.label}" has a non-zero fixture total (${total.total}) but its measured markCount is ${mark.markCount}`);
+	}
+
+	// --- the pairing itself ------------------------------------------------
+	for (const item of legend) {
+		const matches = seriesMarks.filter((mark) => mark.label === item.label);
+		if (matches.length !== 1) {
+			failures.push(`legend item "${item.label}" matches ${matches.length} series by exact label (want exactly 1)`);
+			continue;
+		}
+		const series = matches[0];
+		if (series.fill !== item.swatchColor) {
+			failures.push(`legend item "${item.label}" swatch colour ${item.swatchColor} does not match series "${series.label}"'s measured fill ${series.fill}`);
+		}
+	}
+
+	return failures.length === 0
+		? { passed: true, detail: `${legend.length} legend item(s) paired with their own series; every swatch colour matches that series' measured fill, heights ordered by fixture total` }
+		: { passed: false, detail: failures.join('; ') };
+}
+
+/**
  * C3 mark-count-equals-bucket-count, no gaps. `path.vertices`/`subpathCount`
  * come from parsing the rendered `<path d="…">`; `expected.values` is the
  * fixture's own bucket-count array (INTAKE_FIXTURE-shaped).
@@ -395,6 +472,19 @@ function matcherControls() {
 		{ key: 'a', columnExtent: 101.9, segments: [{ seriesKey: 'registrant', value: 902, height: 92.2, strokeWidth: 2 }, { seriesKey: 'bridge', value: 77, height: 9.7, strokeWidth: 2 }] },
 		{ key: 'r', columnExtent: 16.5, segments: [{ seriesKey: 'registrant', value: 145, height: 16.5, strokeWidth: 2 }, { seriesKey: 'bridge', value: 0, height: 0, strokeWidth: 0 }] },
 	];
+	const healthyLegendItemsC2 = [
+		{ label: 'Registrant', swatchColor: 'rgb(37, 99, 235)' },
+		{ label: 'Bridge', swatchColor: 'rgb(217, 119, 6)' },
+	];
+	const healthySeriesMarksC2 = [
+		{ key: 'registrant', label: 'Registrant', tone: 'series-1', fill: 'rgb(37, 99, 235)', markCount: 3, totalHeight: 235.0 },
+		{ key: 'bridge', label: 'Bridge', tone: 'series-2', fill: 'rgb(217, 119, 6)', markCount: 2, totalHeight: 51.5 },
+	];
+	// Registrant 1263 + 902 + 145 = 2310; Bridge 418 + 77 + 0 = 495 -- REQUEST_FIXTURE's own real values.
+	const healthySeriesTotalsC2 = [
+		{ label: 'Registrant', total: 2310 },
+		{ label: 'Bridge', total: 495 },
+	];
 	const healthyPathValues = [37, 52, 0, 64, 91, 128, 73, 46, 0, 19];
 	const baselineY = 132;
 	const healthyPath = {
@@ -458,6 +548,47 @@ function matcherControls() {
 				),
 			),
 			healthy: evaluateSegmentsSumToTotal(healthyCategories),
+		},
+		{
+			label: 'c2-legend-swatch-matches-series-fill vs. swatches paired with the wrong series (the live defect shape)',
+			violating: evaluateLegendPairsWithSeries(
+				[
+					{ label: 'Registrant', swatchColor: 'rgb(217, 119, 6)' },
+					{ label: 'Bridge', swatchColor: 'rgb(37, 99, 235)' },
+				],
+				healthySeriesMarksC2,
+				healthySeriesTotalsC2,
+			),
+			healthy: evaluateLegendPairsWithSeries(healthyLegendItemsC2, healthySeriesMarksC2, healthySeriesTotalsC2),
+		},
+		{
+			label: 'c2-legend-swatch-matches-series-fill vs. both swatches resolving to the same colour (planted control missing)',
+			violating: evaluateLegendPairsWithSeries(
+				[
+					{ label: 'Registrant', swatchColor: 'rgb(37, 99, 235)' },
+					{ label: 'Bridge', swatchColor: 'rgb(37, 99, 235)' },
+				],
+				healthySeriesMarksC2,
+				healthySeriesTotalsC2,
+			),
+			healthy: evaluateLegendPairsWithSeries(healthyLegendItemsC2, healthySeriesMarksC2, healthySeriesTotalsC2),
+		},
+		{
+			label: 'c2-legend-swatch-matches-series-fill vs. a one-item legend (too few items to detect a mis-pairing)',
+			violating: evaluateLegendPairsWithSeries([healthyLegendItemsC2[0]], healthySeriesMarksC2, healthySeriesTotalsC2),
+			healthy: evaluateLegendPairsWithSeries(healthyLegendItemsC2, healthySeriesMarksC2, healthySeriesTotalsC2),
+		},
+		{
+			label: 'c2-legend-swatch-matches-series-fill vs. series mark heights ordered against their summed fixture values (tone->series anchor broken)',
+			violating: evaluateLegendPairsWithSeries(
+				healthyLegendItemsC2,
+				[
+					{ key: 'registrant', label: 'Registrant', tone: 'series-1', fill: 'rgb(37, 99, 235)', markCount: 3, totalHeight: 51.5 },
+					{ key: 'bridge', label: 'Bridge', tone: 'series-2', fill: 'rgb(217, 119, 6)', markCount: 2, totalHeight: 235.0 },
+				],
+				healthySeriesTotalsC2,
+			),
+			healthy: evaluateLegendPairsWithSeries(healthyLegendItemsC2, healthySeriesMarksC2, healthySeriesTotalsC2),
 		},
 		{
 			label: 'c3-marks-match-buckets-no-gaps vs. two subpaths and two missing vertices',
@@ -687,6 +818,33 @@ function readPage(page, fixtures) {
 			}
 			return { key: cat.key, segments, columnExtent };
 		});
+		// The legend and its swatch<->fill pairing (closes 60-UAT test 3):
+		// colours are read via getComputedStyle only, never off a class
+		// name -- a class-name comparison would be satisfied by the very
+		// wiring under test.
+		const legend = c2Section
+			? [...c2Section.querySelectorAll('.vt-chart__legend-item')].map((item) => {
+					const labelEl = item.querySelector('.vt-chart__legend-label');
+					const swatchEl = item.querySelector('.vt-chart__legend-swatch');
+					return {
+						label: labelEl ? (labelEl.textContent ?? '') : '',
+						swatchColor: swatchEl ? getComputedStyle(swatchEl).backgroundColor.trim() : '',
+					};
+				})
+			: [];
+		const seriesMarks = requestSeries.map((s) => {
+			const rectEls = seriesRectEls(s.key);
+			const firstRect = rectEls[0] ?? null;
+			const totalHeight = rectEls.reduce((sum, el) => sum + el.getBoundingClientRect().height, 0);
+			return {
+				key: s.key,
+				label: s.label,
+				tone: s.tone,
+				fill: firstRect ? getComputedStyle(firstRect).fill.trim() : '',
+				markCount: rectEls.length,
+				totalHeight,
+			};
+		});
 
 		// --- C3 -----------------------------------------------------------
 		const c3Section = document.querySelector('[data-chart-geometry="c3"]');
@@ -749,6 +907,8 @@ function readPage(page, fixtures) {
 			labels,
 			svgBox,
 			segments: categories,
+			legend,
+			seriesMarks,
 			linePath: { vertices, subpathCount, box: linePathBox, present: linePathEl != null },
 			meters,
 			controls: { bodyTotal, bodyByTerm, switchButtons, probeByTerm },
@@ -834,6 +994,14 @@ async function runBrowserGate(port, skipBuild) {
 		{
 			const v = evaluateSegmentsSumToTotal(defaultMeasured.segments);
 			record('c2-stacked-segments-sum-to-total', v.passed, v.detail);
+		}
+		{
+			const seriesTotals = REQUEST_SERIES.map((s) => ({
+				label: s.label,
+				total: REQUEST_FIXTURE.reduce((sum, cat) => sum + (cat.segments.find((seg) => seg.seriesKey === s.key)?.value ?? 0), 0),
+			}));
+			const v = evaluateLegendPairsWithSeries(defaultMeasured.legend, defaultMeasured.seriesMarks, seriesTotals);
+			record('c2-legend-swatch-matches-series-fill', v.passed, v.detail);
 		}
 		{
 			const expectedValues = INTAKE_FIXTURE.map((d) => d.value);

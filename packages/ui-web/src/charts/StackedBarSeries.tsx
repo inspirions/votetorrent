@@ -1,7 +1,10 @@
 /**
  * StackedBarSeries.tsx — C2 (registration request breakdown): status on the
  * axis, `IssuerType` as the two stacked segments. Colour therefore encodes
- * issuer only, never status (D-03) — two hues, a genuine 2-slot categorical.
+ * issuer via each series' own declared `tone`, never via array position
+ * (D-03) — two hues, a genuine 2-slot categorical (60-11 closed the latent
+ * mis-colour a reordered `series` array would have produced, 60-REVIEW
+ * WR-02).
  *
  * The 2px `stroke`/`strokeWidth` on each segment is 60-UI-SPEC's mandated
  * surface-coloured separator between touching segments — explicitly not a
@@ -18,7 +21,17 @@ import {
 	STACKED_BAR_HEIGHT_PX,
 	SURFACE_GAP,
 } from './chart-contracts.js';
-import type { ChartSeries, StackedDatum } from './chart-contracts.js';
+import type { ChartSeries, ChartTone, StackedDatum } from './chart-contracts.js';
+
+const SEGMENT_CLASS_BY_TONE: Readonly<Partial<Record<ChartTone, string>>> = Object.freeze({
+	'series-1': 'vt-chart__segment--series-1',
+	'series-2': 'vt-chart__segment--series-2',
+});
+
+const SEGMENT_FILL_BY_TONE: Readonly<Partial<Record<ChartTone, string>>> = Object.freeze({
+	'series-1': CHART_SERIES_1,
+	'series-2': CHART_SERIES_2,
+});
 
 export interface StackedBarSeriesProps {
 	data: StackedDatum[];
@@ -55,12 +68,11 @@ export function StackedBarSeries({ data, series, height = STACKED_BAR_HEIGHT_PX,
 						tickCount={tickCountFor(width)}
 					/>
 					<Tooltip cursor={false} content={ChartTooltip} />
-					{/* Two or more series always carry a legend — rendered unconditionally. */}
-					<Legend content={ChartLegend} />
-					{series.map((s, index) => {
-						const isSecondSeries = index === 1;
-						const segmentClassName = isSecondSeries ? 'vt-chart__segment--series-2' : 'vt-chart__segment--series-1';
-						const segmentFill = isSecondSeries ? CHART_SERIES_2 : CHART_SERIES_1;
+					{/* Two or more series always carry a legend — rendered unconditionally. The element form (rather than the component form) is deliberate: Recharts CLONES this element with its own `payload` prop while preserving the author-supplied `series` prop, so ChartLegend can resolve each swatch from its own series rather than from payload position. */}
+					<Legend content={<ChartLegend series={series} />} />
+					{series.map((s) => {
+						const segmentClassName = SEGMENT_CLASS_BY_TONE[s.tone];
+						const segmentFill = SEGMENT_FILL_BY_TONE[s.tone];
 						return (
 							<Bar
 								key={s.key}
