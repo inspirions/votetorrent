@@ -13,6 +13,7 @@ import {CountdownTimer} from '../CountdownTimer';
 import {lightTheme} from '../../theme/themes';
 import {TIMELINE_STAGE_IDS} from '../../timeline';
 import {buildSevenRowFixture, buildTenRowFixture, FIXTURE_NOW_MS, PRODUCTION_NETWORK_NAME} from '../__fixtures__/timeline-fixtures';
+import {TIMELINE_CARD_MARGIN_V} from '../timeline-layout';
 import i18n from '../../i18n';
 
 function withTheme(children: React.ReactNode) {
@@ -217,6 +218,42 @@ describe('TimelineRail (59-07)', () => {
 
 		const countdown = tr.root.findByType(CountdownTimer);
 		expect(countdown.props.nowOffsetMs).toBe(0);
+	});
+
+	it("61-06 D-08: the current row's dot is 24px, every other dot 20px", () => {
+		const rows = buildTenRowFixture();
+		const tr = renderRail(<TimelineRail rows={rows} />);
+
+		for (const row of rows) {
+			const dot = tr.root.findByProps({testID: 'timeline-rail-dot-' + row.stageId});
+			const flatStyle = Object.assign({}, ...(Array.isArray(dot.props.style) ? dot.props.style : [dot.props.style]));
+			if (row.status === 'current') {
+				expect(flatStyle.width).toBe(24);
+				expect(flatStyle.height).toBe(24);
+				expect(flatStyle.borderRadius).toBe(12);
+			} else {
+				expect(flatStyle.width).toBe(20);
+				expect(flatStyle.height).toBe(20);
+				expect(flatStyle.borderRadius).toBe(10);
+			}
+		}
+	});
+
+	it('61-06 D-08: every dot shares one centre derived from TIMELINE_CARD_MARGIN_V', () => {
+		const rows = buildTenRowFixture();
+		const tr = renderRail(<TimelineRail rows={rows} />);
+
+		const expectedCenterY = TIMELINE_CARD_MARGIN_V + 16 + lightTheme.type.h4.lineHeight / 2;
+		const centersX: number[] = [];
+
+		for (const row of rows) {
+			const dot = tr.root.findByProps({testID: 'timeline-rail-dot-' + row.stageId});
+			const flatStyle = Object.assign({}, ...(Array.isArray(dot.props.style) ? dot.props.style : [dot.props.style]));
+			expect(flatStyle.top + flatStyle.height / 2).toBe(expectedCenterY);
+			centersX.push(flatStyle.left + flatStyle.width / 2);
+		}
+
+		expect(new Set(centersX).size).toBe(1);
 	});
 });
 

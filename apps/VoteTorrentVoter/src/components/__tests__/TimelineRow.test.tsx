@@ -8,13 +8,20 @@
 import React from 'react';
 import renderer from 'react-test-renderer';
 import {ThemeProvider} from '@react-navigation/native';
-import {Text} from 'react-native';
+import {Text, View} from 'react-native';
 import {ROW_DISPLAY, TimelineRow} from '../TimelineRow';
 import type {TimelineRowProps} from '../TimelineRow';
 import {CountdownTimer} from '../CountdownTimer';
 import {lightTheme} from '../../theme/themes';
 import {TIMELINE_STAGE_IDS} from '../../timeline';
-import {buildRowFixture, FIXTURE_NOW_MS, PRODUCTION_ELECTION_TITLE, PRODUCTION_NETWORK_NAME} from '../__fixtures__/timeline-fixtures';
+import {
+	buildRowFixture,
+	buildRowFixtureWithLongCountdown,
+	FIXTURE_NOW_MS,
+	PRODUCTION_ELECTION_TITLE,
+	PRODUCTION_NETWORK_NAME,
+} from '../__fixtures__/timeline-fixtures';
+import {TIMELINE_CARD_MARGIN_V} from '../timeline-layout';
 import i18n, {resources} from '../../i18n';
 
 function withTheme(children: React.ReactNode) {
@@ -43,6 +50,13 @@ afterEach(() => {
 });
 
 const CLOSE_ISO = new Date(FIXTURE_NOW_MS + 3600_000).toISOString();
+
+/** Flattens an RN style array/object the same way `TimelineRail.test.tsx`'s established idiom
+ * does (line 78 there) -- reused here verbatim rather than inventing a second flatten helper. */
+function flattenStyle(node: {props: {style?: unknown}}): Record<string, unknown> {
+	const style = node.props.style;
+	return Object.assign({}, ...(Array.isArray(style) ? style : [style]));
+}
 
 describe('TimelineRow (59-07)', () => {
 	it('a current Voting Period row with onVoteNow renders a primary "Vote now" button and a CountdownTimer targeting the supplied close instant', () => {
@@ -208,5 +222,115 @@ describe('TimelineRow (59-07)', () => {
 		const notch = tr.root.findByProps({testID: 'timeline-row-notch-closed'});
 		const expectedTop = 16 + lightTheme.type.h4.lineHeight / 2 - 8;
 		expect(notch.props.style).toEqual(expect.arrayContaining([expect.objectContaining({top: expectedTop})]));
+	});
+
+	it("61-06 D-08: the card's marginVertical is the hoisted TIMELINE_CARD_MARGIN_V", () => {
+		const row = buildRowFixture({stageId: 'closed', status: 'future'});
+		const tr = renderRow({row});
+
+		const card = tr.root.findAllByType(View)[0];
+		const flat = flattenStyle(card);
+		expect(TIMELINE_CARD_MARGIN_V).toBe(16);
+		expect(flat.marginVertical).toBe(TIMELINE_CARD_MARGIN_V);
+	});
+
+	it("61-06 D-08: a current row's accent-bar segments split around the notch, consuming the notch's own values", () => {
+		const row = buildRowFixture({stageId: 'votingStarts', status: 'current', instantMs: FIXTURE_NOW_MS - 1000});
+		const tr = renderRow({row});
+
+		const notch = tr.root.findByProps({testID: 'timeline-row-notch-votingStarts'});
+		const notchFlat = flattenStyle(notch);
+		const notchHeight = (notchFlat.borderTopWidth as number) + (notchFlat.borderBottomWidth as number);
+		// Notch pinned unchanged first -- the accent split below must consume THESE values, not a
+		// second guessed pixel pair.
+		expect(notchFlat.borderTopWidth).toBe(8);
+		expect(notchFlat.borderBottomWidth).toBe(8);
+		expect(notchFlat.borderRightWidth).toBe(8);
+		expect(notchFlat.left).toBe(-8);
+		expect(notchFlat.top).toBe(16 + lightTheme.type.h4.lineHeight / 2 - 8);
+
+		const aboveNodes = tr.root.findAllByProps({testID: 'timeline-row-accent-votingStarts-above'}, {deep: false});
+		const belowNodes = tr.root.findAllByProps({testID: 'timeline-row-accent-votingStarts-below'}, {deep: false});
+		expect(aboveNodes.length).toBe(1);
+		expect(belowNodes.length).toBe(1);
+
+		const aboveFlat = flattenStyle(aboveNodes[0]);
+		const belowFlat = flattenStyle(belowNodes[0]);
+
+		expect(aboveFlat.position).toBe('absolute');
+		expect(aboveFlat.left).toBe(0);
+		expect(aboveFlat.width).toBe(4);
+		expect(aboveFlat.backgroundColor).toBe(lightTheme.colors.primary);
+		expect(aboveFlat.top).toBe(0);
+		// The single most important assertion in this plan: the split is derived from the notch's
+		// OWN rendered top/height, not a second independently-guessed literal.
+		expect(aboveFlat.height).toBe(notchFlat.top);
+		expect(aboveFlat.borderTopLeftRadius).toBe(lightTheme.radii.lg);
+
+		expect(belowFlat.position).toBe('absolute');
+		expect(belowFlat.left).toBe(0);
+		expect(belowFlat.width).toBe(4);
+		expect(belowFlat.backgroundColor).toBe(lightTheme.colors.primary);
+		expect(belowFlat.top).toBe((notchFlat.top as number) + notchHeight);
+		expect(belowFlat.bottom).toBe(0);
+		expect(belowFlat.borderBottomLeftRadius).toBe(lightTheme.radii.lg);
+	});
+
+	it.each(['past', 'future', 'unknown'] as const)('61-06 D-08: a non-current (%s) row renders neither accent-bar segment', status => {
+		const row = buildRowFixture({stageId: 'votingStarts', status});
+		const tr = renderRow({row});
+
+		expect(tr.root.findAllByProps({testID: 'timeline-row-accent-votingStarts-above'}, {deep: false}).length).toBe(0);
+		expect(tr.root.findAllByProps({testID: 'timeline-row-accent-votingStarts-below'}, {deep: false}).length).toBe(0);
+	});
+
+	it('61-06 D-08: action labels declare the body type step; only See details is demoted to regular', () => {
+		const seeDetailsRow = buildRowFixture({stageId: 'registrationEnds', status: 'past'});
+		const seeDetailsTr = renderRow({row: seeDetailsRow, onSeeDetails: jest.fn()});
+		const seeDetailsButton = seeDetailsTr.root.findByProps({testID: 'timeline-row-see-details-registrationEnds'});
+		const seeDetailsText = seeDetailsButton.findByType(Text);
+		const seeDetailsFlat = flattenStyle(seeDetailsText);
+		expect(seeDetailsFlat.fontSize).toBe(lightTheme.type.body.fontSize);
+		expect(seeDetailsFlat.lineHeight).toBe(lightTheme.type.body.lineHeight);
+		expect(seeDetailsFlat.fontWeight).toBe(lightTheme.fonts.regular.fontWeight);
+
+		const keyholdersRow = buildRowFixture({stageId: 'releasingKeys', status: 'future'});
+		const keyholdersTr = renderRow({row: keyholdersRow, onViewKeyholders: jest.fn()});
+		const keyholdersButton = keyholdersTr.root.findByProps({testID: 'timeline-row-view-keyholders-releasingKeys'});
+		const keyholdersText = keyholdersButton.findByType(Text);
+		const keyholdersFlat = flattenStyle(keyholdersText);
+		expect(keyholdersFlat.fontSize).toBe(lightTheme.type.body.fontSize);
+		expect(keyholdersFlat.lineHeight).toBe(lightTheme.type.body.lineHeight);
+		expect(keyholdersFlat.fontWeight).toBe(lightTheme.fonts.bold.fontWeight);
+	});
+
+	it('61-06 D-10/D-11: the countdown wrapper centres under a production-length countdown row', () => {
+		const fixture = buildRowFixtureWithLongCountdown();
+		expect(Math.floor(fixture.remainingSeconds / 3600)).toBe(4304);
+
+		const row = fixture.rows.find(r => r.stageId === 'votingStarts')!;
+		expect(row.status).toBe('current');
+
+		const tr = renderRow({row, countdownTargetIso: fixture.countdownTargetIso});
+
+		const countdown = tr.root.findByType(CountdownTimer);
+		let wrapper: renderer.ReactTestInstance | null = countdown.parent;
+		while (wrapper) {
+			const flat = flattenStyle(wrapper);
+			if (flat.marginTop === 16) {
+				break;
+			}
+			wrapper = wrapper.parent;
+		}
+		expect(wrapper).not.toBeNull();
+		const wrapperFlat = flattenStyle(wrapper!);
+		// `alignItems`, not `justifyContent` -- the wrapper is a default `flexDirection: 'column'`
+		// View, so `alignItems` is the horizontal (cross) axis. `justifyContent` on a column acts on
+		// the vertical axis and would be an inert no-op.
+		expect(wrapperFlat.alignItems).toBe('center');
+		expect(wrapperFlat.marginTop).toBe(16);
+
+		const card = tr.root.findAllByType(View)[0];
+		expect(flattenStyle(card).marginVertical).toBe(TIMELINE_CARD_MARGIN_V);
 	});
 });
