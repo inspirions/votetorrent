@@ -3,10 +3,33 @@
  * (G8/G9/G10, phase 60 `deferred-items.md` WR-01/WR-02/WR-03). Mounts the
  * REAL `BarSeries`/`StackedBarSeries`/`TimeSeries` primitives (via the public
  * `@votetorrent/ui-web/components` barrel, exactly as production callers do)
- * against three edge shapes no existing fixture reaches:
+ * against edge shapes no existing fixture reaches:
  *
  *  - all-zero-bar / all-zero-stacked / all-zero-time: every row's `value` is
  *    0 (non-empty array) — `domain={[0, 'dataMax']}`'s `dataMax === 0` edge.
+ *  - empty-stacked / empty-time: `data={[]}`, the ONLY shape that trips
+ *    `ChartFrame`'s `isEmpty` branch (D-21). 60-UAT round 2 found that branch
+ *    rendered by nothing at any tier — its sole test asserted the class NAME
+ *    was in a registry list, which is a presence check standing in for a
+ *    render check. Both probes carry the REAL production copy keys, so the
+ *    rung also proves `t()` resolves them rather than echoing the key back.
+ *
+ *    WHY ONLY THESE TWO PRIMITIVES. Reachability was traced per call site
+ *    rather than assumed, and only these two can reach the branch in
+ *    production:
+ *      C2 StackedBarSeries  REACHABLE — `readRegistrationRequestBreakdown` is
+ *                           `from RegistrationRequest ... group by`, so zero
+ *                           requests yields zero rows.
+ *      C3 TimeSeries        REACHABLE — `readRegistrationIntakeSeries` has a
+ *                           literal `return []` guard (registrations.js:435).
+ *      C1 BarSeries         UNREACHABLE — `readRegistrantStatusBreakdown`
+ *                           selects `from RegistrantStatus`, a VIEW of three
+ *                           hardcoded rows, so it always returns three.
+ *      C7 BarSeries         UNREACHABLE — `FactSections.tsx` guards the mount
+ *                           behind `districtBuckets.length > 0 ? ... : null`.
+ *    Do not add an empty `BarSeries` probe here: it would assert behaviour no
+ *    caller can reach, and `BarSeries`'s `emptyCopyKey` is optional precisely
+ *    because its two callers guard externally.
  *  - legend-mismatch: a `StackedBarSeries` `series` entry toned `warn`, a
  *    valid `ChartTone` per `chart-contracts.ts` but one
  *    `LEGEND_SWATCH_CLASS_BY_TONE` does not cover. It used to render a silent
@@ -167,6 +190,12 @@ function GapProbeHarness() {
 			</div>
 			<div data-gap-probe="all-zero-time">
 				<TimeSeries data={ALL_ZERO_TIME} emptyCopyKey="panels.registrations.intakeChart.empty" />
+			</div>
+			<div data-gap-probe="empty-stacked">
+				<StackedBarSeries data={[]} series={REQUEST_SERIES} emptyCopyKey="panels.registrations.requestChart.empty" />
+			</div>
+			<div data-gap-probe="empty-time">
+				<TimeSeries data={[]} emptyCopyKey="panels.registrations.intakeChart.empty" />
 			</div>
 			<div data-gap-probe="legend-mismatch">
 				<ProbeBoundary probeId="legend-mismatch">

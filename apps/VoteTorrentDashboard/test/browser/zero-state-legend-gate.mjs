@@ -49,7 +49,106 @@ const DIST = path.join(APP_DIR, 'dist-gap-probe');
 const PORT = 5299;
 
 
-const RUNG_IDS = Object.freeze(['all-zero-axis-is-not-degenerate', 'legend-rejects-non-legend-tone']);
+/**
+ * Sub-pixel slack for the copy-fits-its-frame comparison. 1px absorbs layout
+ * rounding without admitting a real clip: the mutation that motivated this
+ * check overflowed by ~17px.
+ */
+const CLIP_TOLERANCE_PX = 1;
+
+const RUNG_IDS = Object.freeze([
+	'all-zero-axis-is-not-degenerate',
+	'legend-rejects-non-legend-tone',
+	'empty-chart-frame-renders-copy',
+]);
+
+/**
+ * D-21: an empty chart renders its own frame plus explicit copy, never a blank
+ * region. 60-UAT round 2 measured ZERO `.vt-chart__empty` nodes across all four
+ * served harnesses, and found the only test naming the class asserts it appears
+ * in a registry LIST -- a presence check standing in for a render check, which
+ * is exactly how a blank-box regression would survive.
+ *
+ * Four properties, because a blank box can arise four different ways and only
+ * the first is caught by asking "does the element exist":
+ *  - the empty frame exists AND has a real measured box (a collapsed 0-height
+ *    region is the blank D-21 forbids, and it still satisfies a node query);
+ *  - it carries copy text that is non-empty after trimming;
+ *  - that text is NOT the copy key itself -- `t()` echoing an unresolved key
+ *    renders "panels.registrations.intakeChart.empty" to an officer, which is
+ *    a blank box with extra steps;
+ *  - no chart surface rendered inside it, so we know we measured the empty
+ *    branch and not a populated chart that happens to contain the class.
+ * Anti-vacuity first: too few probes, or a probe missing entirely, fails loudly
+ * rather than passing an empty loop.
+ *
+ * @param {Record<string, { framePresent?: boolean, frameBox?: { width: number, height: number, top: number, bottom: number } | null, copyText?: string | null, copyBox?: { width: number, height: number, top: number, bottom: number } | null, copyKey?: string | null, chartSurfaces?: number } | null | undefined>} probes
+ * @returns {{ passed: boolean, detail: string }}
+ */
+export function evaluateEmptyFrame(probes) {
+	/** @type {string[]} */
+	const problems = [];
+	const entries = Object.entries(probes ?? {});
+	if (entries.length < 2) {
+		problems.push(
+			`only ${entries.length} empty probe(s) supplied (want >= 2) -- too few to cover both reachable primitives (StackedBarSeries, TimeSeries)`,
+		);
+	}
+	for (const [id, probe] of entries) {
+		if (!probe) {
+			problems.push(`probe "${id}" is missing entirely`);
+			continue;
+		}
+		if (!probe.framePresent) {
+			problems.push(`probe "${id}" rendered NO .vt-chart__empty-frame -- an empty dataset produced a blank region (D-21)`);
+			continue;
+		}
+		const box = probe.frameBox;
+		if (!box || !(box.height > 0) || !(box.width > 0)) {
+			problems.push(
+				`probe "${id}" empty frame measured ${box ? `${box.width}x${box.height}` : 'no box'} -- a collapsed frame is still a blank to a reader`,
+			);
+		}
+		const text = String(probe.copyText ?? '').trim();
+		if (text === '') {
+			problems.push(`probe "${id}" empty frame carries no copy -- a framed blank is still a blank (D-21)`);
+			continue;
+		}
+		const key = String(probe.copyKey ?? '').trim();
+		if (key !== '' && text === key) {
+			problems.push(
+				`probe "${id}" empty copy rendered the raw key ${JSON.stringify(key)} -- t() did not resolve it, so an officer reads a dotted identifier`,
+			);
+		}
+		// Presence of text is NOT visibility of text. Measure the copy's own box
+		// and require it to FIT the frame: a frame collapsed to its borders keeps
+		// textContent intact while painting nothing.
+		const copyBox = probe.copyBox;
+		if (!copyBox || !(copyBox.height > 0) || !(copyBox.width > 0)) {
+			problems.push(
+				`probe "${id}" empty copy has no painted box (${copyBox ? `${copyBox.width}x${copyBox.height}` : 'none'}) -- the text exists in the DOM but renders nothing`,
+			);
+		} else if (box && Number.isFinite(box.bottom) && Number.isFinite(copyBox.bottom)) {
+			const overflowPx = Math.max(copyBox.bottom - box.bottom, box.top - copyBox.top);
+			if (overflowPx > CLIP_TOLERANCE_PX) {
+				problems.push(
+					`probe "${id}" empty copy overflows its frame by ${overflowPx.toFixed(1)}px (frame ${box.height.toFixed(0)}px tall, copy ${copyBox.height.toFixed(0)}px) -- clipped out of sight`,
+				);
+			}
+		}
+		if (Number(probe.chartSurfaces ?? 0) > 0) {
+			problems.push(
+				`probe "${id}" rendered ${probe.chartSurfaces} chart surface(s) inside its empty frame -- this probe is not measuring the isEmpty branch`,
+			);
+		}
+	}
+	return {
+		passed: problems.length === 0,
+		detail: problems.length === 0
+			? `${entries.length} empty probe(s), each a real measured frame carrying resolved copy, no chart surface`
+			: problems.join('; '),
+	};
+}
 
 /**
  * An all-zero dataset must still produce a USABLE scale. Two properties, both
@@ -154,6 +253,26 @@ function proveMatchers() {
 		'all-zero-stacked': { yTicks: ['0', '1'], lineD: null, plotArea },
 		'all-zero-time': { yTicks: ['0', '1'], lineD: 'M68,102L180,102', plotArea },
 	};
+	// Shaped from the real measured readout, not invented: see the gate run's
+	// own `--dump` output for the live values these mirror.
+	const healthyEmpty = {
+		'empty-stacked': {
+			framePresent: true,
+			frameBox: { width: 420, height: 182, top: 0, bottom: 182 },
+			copyText: 'No requests recorded yet.',
+			copyBox: { width: 180, height: 17, top: 82, bottom: 99 },
+			copyKey: 'panels.registrations.requestChart.empty',
+			chartSurfaces: 0,
+		},
+		'empty-time': {
+			framePresent: true,
+			frameBox: { width: 420, height: 142, top: 0, bottom: 142 },
+			copyText: 'No requests received in this window.',
+			copyBox: { width: 240, height: 17, top: 62, bottom: 79 },
+			copyKey: 'panels.registrations.intakeChart.empty',
+			chartSurfaces: 0,
+		},
+	};
 	/** @type {ReadonlyArray<[string, () => { passed: boolean, detail: string }, boolean]>} */
 	const cases = [
 		['evaluateZeroState vs. a healthy all-zero readout (current fixed build)', () => evaluateZeroState(healthyProbes), true],
@@ -181,6 +300,65 @@ function proveMatchers() {
 		['evaluateLegendContract vs. a real throw naming the tone (current fixed build)', () => evaluateLegendContract({ 'legend-mismatch': 'ChartLegend: series "flagged" carries tone "warn", which has no legend swatch rule.' }, 'legend-mismatch', 'warn'), true],
 		['evaluateLegendContract vs. no throw at all (the silent grey swatch defect)', () => evaluateLegendContract({}, 'legend-mismatch', 'warn'), false],
 		['evaluateLegendContract vs. an unrelated crash that does not name the tone', () => evaluateLegendContract({ 'legend-mismatch': 'ChartLegend: something else went wrong' }, 'legend-mismatch', 'warn'), false],
+		['evaluateEmptyFrame vs. a healthy empty readout (current build)', () => evaluateEmptyFrame(healthyEmpty), true],
+		[
+			'evaluateEmptyFrame vs. no frame at all (the blank-region defect D-21 forbids)',
+			() => evaluateEmptyFrame({ ...healthyEmpty, 'empty-time': { ...healthyEmpty['empty-time'], framePresent: false } }),
+			false,
+		],
+		[
+			'evaluateEmptyFrame vs. a frame collapsed to 0 height (answers a node query, still a blank)',
+			() => evaluateEmptyFrame({ ...healthyEmpty, 'empty-time': { ...healthyEmpty['empty-time'], frameBox: { width: 420, height: 0, top: 0, bottom: 0 } } }),
+			false,
+		],
+		[
+			'evaluateEmptyFrame vs. a framed blank carrying no copy',
+			() => evaluateEmptyFrame({ ...healthyEmpty, 'empty-stacked': { ...healthyEmpty['empty-stacked'], copyText: '   ' } }),
+			false,
+		],
+		[
+			'evaluateEmptyFrame vs. copy that is the raw unresolved t() key',
+			() => evaluateEmptyFrame({
+				...healthyEmpty,
+				'empty-time': { ...healthyEmpty['empty-time'], copyText: 'panels.registrations.intakeChart.empty' },
+			}),
+			false,
+		],
+		[
+			'evaluateEmptyFrame vs. a chart surface inside the frame (probe not measuring isEmpty)',
+			() => evaluateEmptyFrame({ ...healthyEmpty, 'empty-stacked': { ...healthyEmpty['empty-stacked'], chartSurfaces: 1 } }),
+			false,
+		],
+		['evaluateEmptyFrame vs. too few probes supplied', () => evaluateEmptyFrame({ 'empty-time': healthyEmpty['empty-time'] }), false],
+		['evaluateEmptyFrame vs. a probe missing entirely', () => evaluateEmptyFrame({ ...healthyEmpty, 'empty-stacked': null }), false],
+		[
+			'evaluateEmptyFrame vs. copy with no painted box (present in the DOM, renders nothing)',
+			() => evaluateEmptyFrame({
+				...healthyEmpty,
+				'empty-time': { ...healthyEmpty['empty-time'], copyBox: { width: 0, height: 0, top: 0, bottom: 0 } },
+			}),
+			false,
+		],
+		[
+			'evaluateEmptyFrame vs. copy clipped out of a collapsed frame (the MEASURED overflow:hidden mutation)',
+			() => evaluateEmptyFrame({
+				...healthyEmpty,
+				'empty-stacked': {
+					...healthyEmpty['empty-stacked'],
+					frameBox: { width: 420, height: 2, top: 0, bottom: 2 },
+					copyBox: { width: 180, height: 17, top: -7.4, bottom: 9.4 },
+				},
+			}),
+			false,
+		],
+		[
+			'evaluateEmptyFrame vs. a 1px layout-rounding overhang (must NOT trip the clip check)',
+			() => evaluateEmptyFrame({
+				...healthyEmpty,
+				'empty-time': { ...healthyEmpty['empty-time'], copyBox: { width: 240, height: 17, top: 62, bottom: 142.9 } },
+			}),
+			true,
+		],
 	];
 	let bad = 0;
 	for (const [name, run, want] of cases) {
@@ -293,6 +471,33 @@ async function main() {
 			const allZeroStacked = measureAxes(probe('all-zero-stacked'));
 			const allZeroTime = measureAxes(probe('all-zero-time'));
 
+			// D-21 empty frame. Measures the frame's REAL box rather than its
+			// presence: a collapsed 0-height frame still answers a node query,
+			// and it is the blank the contract forbids.
+			/** @param {string} name @param {string} copyKey */
+			function measureEmptyFrame(name, copyKey) {
+				const root = probe(name);
+				if (!root) return null;
+				const frame = root.querySelector('.vt-chart__empty-frame');
+				const copy = root.querySelector('.vt-chart__empty');
+				const box = frame ? frame.getBoundingClientRect() : null;
+				// The copy's OWN painted box, not just its textContent. A frame
+				// collapsed by `overflow: hidden` still yields perfectly readable
+				// textContent while showing the reader nothing -- mutation-proved,
+				// see this rung's header.
+				const copyBox = copy ? copy.getBoundingClientRect() : null;
+				return {
+					framePresent: frame !== null,
+					frameBox: box ? { width: box.width, height: box.height, top: box.top, bottom: box.bottom } : null,
+					copyText: copy ? copy.textContent : null,
+					copyBox: copyBox ? { width: copyBox.width, height: copyBox.height, top: copyBox.top, bottom: copyBox.bottom } : null,
+					copyKey,
+					chartSurfaces: root.querySelectorAll('svg.recharts-surface').length,
+				};
+			}
+			const emptyStacked = measureEmptyFrame('empty-stacked', 'panels.registrations.requestChart.empty');
+			const emptyTime = measureEmptyFrame('empty-time', 'panels.registrations.intakeChart.empty');
+
 			// legend-mismatch: read the legend swatch's real computed background
 			// colour for BOTH series, plus the base (no-modifier) swatch colour
 			// measured off a synthetic control span for comparison.
@@ -329,7 +534,7 @@ async function main() {
 				};
 			}
 
-			return { allZeroBar, allZeroStacked, allZeroTime, legendItems, tallLabel };
+			return { allZeroBar, allZeroStacked, allZeroTime, legendItems, tallLabel, emptyStacked, emptyTime };
 		});
 
 		if (process.argv.includes('--dump')) {
@@ -352,6 +557,13 @@ async function main() {
 				}),
 			],
 			[RUNG_IDS[1], evaluateLegendContract(probeThrows, 'legend-mismatch', 'warn')],
+			[
+				RUNG_IDS[2],
+				evaluateEmptyFrame({
+					'empty-stacked': measured.emptyStacked,
+					'empty-time': measured.emptyTime,
+				}),
+			],
 		];
 
 		let passed = 0;

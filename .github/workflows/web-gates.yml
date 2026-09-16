@@ -1282,8 +1282,8 @@ jobs:
         run: |
           set -euo pipefail
           yarn gate:zero-state-legend 2>&1 | tee ../../zero-state-legend.log
-          if ! grep -q 'ZERO STATE + LEGEND GATE: PASS (2/2 rungs)' ../../zero-state-legend.log; then
-            echo "::error::zero-state-legend: gate did not report PASS (2/2 rungs)"
+          if ! grep -q 'ZERO STATE + LEGEND GATE: PASS (3/3 rungs)' ../../zero-state-legend.log; then
+            echo "::error::zero-state-legend: gate did not report PASS (3/3 rungs)"
             exit 1
           fi
           echo "RECEIPT zero-state-legend" | tee -a ../../ci-receipt.txt
