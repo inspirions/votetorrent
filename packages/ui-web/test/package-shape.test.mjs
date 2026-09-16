@@ -277,6 +277,29 @@ test('rung 7: react/react-dom never appear in the root manifest, and @types/reac
 	assert.equal(rootPkg.resolutions?.['@types/react'], '19.2.17');
 });
 
+test('rung 11: recharts and react-is are pinned at exactly 3.10.1 / 19.2.6 in dependencies, with no range prefix (D-10)', () => {
+	const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8'));
+	const EXPECTED = { recharts: '3.10.1', 'react-is': '19.2.6' };
+	for (const [dep, expected] of Object.entries(EXPECTED)) {
+		assert.equal(
+			pkg.dependencies[dep],
+			expected,
+			`dependencies.${dep} must be exactly "${expected}" — an unpinned range would let a transitive ` +
+				`Recharts/react-is bump land unreviewed`,
+		);
+	}
+});
+
+test('rung 11 (control): a range-prefixed version string is reported as a mismatch, not silently accepted', () => {
+	const rangePrefixed = '^3.10.1';
+	assert.notEqual(rangePrefixed, '3.10.1', 'a caret-prefixed string must not equal the exact-pinned string');
+	// Sanity: the same discriminator this rung's own assert.equal relies on
+	// correctly distinguishes an exact pin from every common range prefix.
+	for (const prefixed of ['^3.10.1', '~3.10.1', '>=3.10.1', '*']) {
+		assert.notEqual(prefixed, '3.10.1');
+	}
+});
+
 test('rung 8: every ./components/ barrel re-export specifier has a sibling .tsx (never a sibling .js), and the two counts agree', () => {
 	// Scoped to `./components/*.js` specifiers only (53-09): components.js
 	// also re-exports `packageReactIdentity` from `./react-identity.js`, a

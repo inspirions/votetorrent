@@ -185,3 +185,185 @@ test('rung 5b (control): the overflow-hidden matcher DOES fire on a planted fixt
 	const fixture = '.vt-chart__meter-track { overflow: hidden; }';
 	assert.match(fixture, /overflow:\s*hidden/);
 });
+
+// --- rung 6: every Recharts data-mount disables the default redraw animation (D-23) ----
+
+const ANIMATED_MOUNT_TAG_RE = /<(Bar|Line|Area)\b/g;
+const ANIMATION_PROP_RE = /isAnimationActive=\{false\}/;
+
+/**
+ * Extracts the full JSX opening-tag text starting at `startIndex` (which must
+ * index the tag's leading `<`), tracking `{}` depth and quote state so a `>`
+ * nested inside an attribute expression or string literal never terminates
+ * the scan early. This mirrors the one character-level source scanner this
+ * repo already trusts (`stripComments`) rather than a naive "first `>`"
+ * regex, which a future multi-line object/array attribute could defeat.
+ * @param {string} source
+ * @param {number} startIndex
+ * @returns {string}
+ */
+function extractOpeningTag(source, startIndex) {
+	let depth = 0;
+	/** @type {string | null} */
+	let quote = null;
+	let i = startIndex;
+	while (i < source.length) {
+		const c = source[i];
+		if (quote !== null) {
+			if (c === '\\') {
+				i += 2;
+				continue;
+			}
+			if (c === quote) quote = null;
+			i += 1;
+			continue;
+		}
+		if (c === '"' || c === "'" || c === '`') {
+			quote = c;
+			i += 1;
+			continue;
+		}
+		if (c === '{') {
+			depth += 1;
+			i += 1;
+			continue;
+		}
+		if (c === '}') {
+			depth -= 1;
+			i += 1;
+			continue;
+		}
+		if (c === '>' && depth === 0) return source.slice(startIndex, i + 1);
+		i += 1;
+	}
+	return source.slice(startIndex);
+}
+
+test('rung 6: every Recharts data-mount (<Bar, <Line, <Area) under src/charts/ disables the default redraw animation (D-23)', () => {
+	// A file with no such mount at all (Meter.tsx — a plain div, no Recharts
+	// data component) is excluded by this rule's own logic: the inner while
+	// loop below simply never finds a match for it, never by a filename skip.
+	const sources = readAllChartSourcesStripped();
+	let mountsChecked = 0;
+	for (const [name, source] of sources) {
+		ANIMATED_MOUNT_TAG_RE.lastIndex = 0;
+		let match;
+		while ((match = ANIMATED_MOUNT_TAG_RE.exec(source)) !== null) {
+			const tag = extractOpeningTag(source, match.index);
+			mountsChecked += 1;
+			assert.match(
+				tag,
+				ANIMATION_PROP_RE,
+				`${name}'s <${match[1]}> mount does not disable Recharts' default redraw animation — every ` +
+					`re-render would silently re-enable it (D-23)`,
+			);
+		}
+	}
+	// Sanity: the loop body above must have actually run at least once, or
+	// every assertion inside it passed vacuously on an empty mount set.
+	assert.ok(mountsChecked > 0, 'expected at least one Recharts data-mount under src/charts/ to check');
+});
+
+test('rung 6 (control): the mount-tag matcher DOES fire on a planted fixture mount with the animation prop absent', () => {
+	const fixture = ['<BarChart data={data}>', '\t<Bar dataKey="value" className="vt-chart__bar" />', '</BarChart>'].join('\n');
+	ANIMATED_MOUNT_TAG_RE.lastIndex = 0;
+	const match = ANIMATED_MOUNT_TAG_RE.exec(fixture);
+	assert.ok(match, 'expected the mount-tag matcher to find the planted <Bar mount, not its <BarChart container');
+	assert.equal(match[1], 'Bar');
+	const tag = extractOpeningTag(fixture, match.index);
+	assert.equal(tag, '<Bar dataKey="value" className="vt-chart__bar" />');
+	assert.doesNotMatch(tag, ANIMATION_PROP_RE, 'sanity: the planted fixture genuinely omits the prop this rung hunts for');
+});
+
+// --- rung 7: D-16 tick-density boundary semantics (WR-03) --------------------
+
+const CHART_FRAME_PATH = path.join(CHARTS_DIR, 'chart-frame.tsx');
+
+/**
+ * Re-derives `tickCountFor`'s semantics purely from chart-contracts.ts's own
+ * parsed constants (`readGeometryConstant`, rung 5's technique) — neither
+ * chart-frame.tsx nor chart-contracts.ts is importable under plain
+ * `node --test` (both are TypeScript), so the boundary is pinned against the
+ * SAME numbers the shipped constants hold, never against bare literals alone.
+ * @param {number} width
+ * @returns {number}
+ */
+function reDerivedTickCountFor(width) {
+	const narrow = readGeometryConstant('NARROW_CONTAINER_PX');
+	const ticksNarrow = readGeometryConstant('TICKS_NARROW');
+	const ticksWide = readGeometryConstant('TICKS_WIDE');
+	return width < narrow ? ticksNarrow : ticksWide;
+}
+
+test('rung 7: tickCountFor\'s D-16 boundary — at most 6 ticks at/above 400px, at most 4 below — pins exactly at, above and below NARROW_CONTAINER_PX', () => {
+	const narrow = readGeometryConstant('NARROW_CONTAINER_PX');
+	const ticksNarrow = readGeometryConstant('TICKS_NARROW');
+	const ticksWide = readGeometryConstant('TICKS_WIDE');
+
+	assert.equal(reDerivedTickCountFor(399), 4);
+	assert.equal(reDerivedTickCountFor(400), 6);
+	assert.equal(reDerivedTickCountFor(401), 6);
+	assert.equal(reDerivedTickCountFor(narrow - 1), ticksNarrow, 'one px below NARROW_CONTAINER_PX must resolve to the narrow tick count');
+	assert.equal(reDerivedTickCountFor(narrow), ticksWide, 'AT NARROW_CONTAINER_PX itself must resolve to the WIDE tick count — this is the WR-03 edge rung 9 pins the seed against');
+});
+
+test('rung 7 (control): the boundary pin would catch a narrow/wide constant swap', () => {
+	/** A deliberately wrong re-derivation with the two tick counts swapped. */
+	function swappedTickCountFor(width, narrow, ticksNarrow, ticksWide) {
+		return width < narrow ? ticksWide : ticksNarrow;
+	}
+	assert.notEqual(swappedTickCountFor(399, 400, 4, 6), 4, 'sanity: the swapped re-derivation must disagree with the real boundary at 399px');
+});
+
+/**
+ * Reads `tickCountFor`'s single-expression body out of comment-stripped
+ * chart-frame.tsx source.
+ * @returns {string}
+ */
+function readTickCountForBody() {
+	const source = stripComments(readFileSync(CHART_FRAME_PATH, 'utf8'));
+	const match = source.match(/function tickCountFor\(width: number\): number \{\s*return ([^;]+);\s*\}/);
+	assert.ok(match, 'expected to find tickCountFor\'s body in chart-frame.tsx');
+	return match[1].trim();
+}
+
+test('rung 8: tickCountFor\'s source expression in chart-frame.tsx has exactly the width < NARROW_CONTAINER_PX ? TICKS_NARROW : TICKS_WIDE shape', () => {
+	assert.equal(readTickCountForBody(), 'width < NARROW_CONTAINER_PX ? TICKS_NARROW : TICKS_WIDE');
+});
+
+test('rung 8 (control): the body-shape matcher extracts a DIFFERENT string from a planted fixture with the two branches swapped', () => {
+	const fixture = ['function tickCountFor(width: number): number {', '\treturn width < NARROW_CONTAINER_PX ? TICKS_WIDE : TICKS_NARROW;', '}'].join('\n');
+	const match = fixture.match(/function tickCountFor\(width: number\): number \{\s*return ([^;]+);\s*\}/);
+	assert.ok(match);
+	assert.notEqual(match[1].trim(), 'width < NARROW_CONTAINER_PX ? TICKS_NARROW : TICKS_WIDE');
+});
+
+/**
+ * Reads `useContainerWidth`'s `useState` seed argument out of comment-stripped
+ * chart-frame.tsx source.
+ * @returns {string}
+ */
+function readUseContainerWidthSeed() {
+	const source = stripComments(readFileSync(CHART_FRAME_PATH, 'utf8'));
+	const match = source.match(/const \[width, setWidth\] = useState\(([^)]+)\);/);
+	assert.ok(match, 'expected to find useContainerWidth\'s useState seed in chart-frame.tsx');
+	return match[1].trim();
+}
+
+test('rung 9: useContainerWidth seeds its width state at NARROW_CONTAINER_PX, the WR-03 first-paint edge rung 7 pins', () => {
+	// Rung 7 already proves tickCountFor(NARROW_CONTAINER_PX) resolves to the
+	// WIDE branch. Seeding useContainerWidth's state AT that exact value means
+	// a narrow (<400px) chart's FIRST PAINT — before ResizeObserver reports
+	// the real measured width — renders the WIDE tick count, not the narrow
+	// one. This is a known, tracked first-paint gap (WR-03), not an
+	// oversight: a deliberate change to this seed must re-read this rung and
+	// this note before landing.
+	assert.equal(readUseContainerWidthSeed(), 'NARROW_CONTAINER_PX');
+});
+
+test('rung 9 (control): the seed matcher extracts a DIFFERENT value from a planted fixture seeded at a literal instead', () => {
+	const fixture = 'const [width, setWidth] = useState(0);';
+	const match = fixture.match(/const \[width, setWidth\] = useState\(([^)]+)\);/);
+	assert.ok(match);
+	assert.notEqual(match[1].trim(), 'NARROW_CONTAINER_PX');
+});

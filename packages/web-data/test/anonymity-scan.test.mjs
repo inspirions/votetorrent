@@ -166,8 +166,21 @@ const EXPECTED_TABLE_COUNT = 61;
  * forbidden-class table names as code across the public entry source set")
  * was confirmed green over the widened 29-file set, per this file's own
  * discipline above.
+ *
+ * Phase 60 (2026-09-16) moves this 29 -> 31, deliberately, same reason and
+ * same evidence standard: two files landed inside the public-app scan root
+ * during Phase 56, after this pin was last set, neither a reclassification of
+ * an existing table:
+ *   - `apps/VoteTorrentPublic/src/peer/fret-routing-probe.js` (`56-20`,
+ *     commit `1acaf6da`), a diagnostic FRET routing probe;
+ *   - `apps/VoteTorrentPublic/src/peer/connection-lifecycle-probe.js`
+ *     (`56-24`, commit `da4a5b61`), a bounded passive-tap/dial probe.
+ * This is Phase 56 debt inherited into Phase 60, not something Phase 60's own
+ * work added. Test 16 ("D-05: zero forbidden-class table names as code across
+ * the public entry source set") was confirmed green over the widened 31-file
+ * set before this count moved.
  */
-const EXPECTED_SCANNED_FILE_COUNT = 29;
+const EXPECTED_SCANNED_FILE_COUNT = 31;
 
 // The sentinel literals are ASSEMBLED, never written out, so each appears in
 // this file exactly once — as the comment that delimits the region. A checker
