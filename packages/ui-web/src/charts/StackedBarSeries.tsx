@@ -34,6 +34,7 @@ import {
 	SEGMENT_GAP_PX,
 	STACKED_BAR_HEIGHT_PX,
 	SURFACE_GAP,
+	zeroSafeDataMax,
 } from './chart-contracts.js';
 import type { ChartSeries, ChartTone, StackedDatum } from './chart-contracts.js';
 
@@ -83,7 +84,11 @@ export function StackedBarSeries({ data, series, height = STACKED_BAR_HEIGHT_PX,
 						// maximum too -- Recharts' "nice tick" algorithm still rounds
 						// an auto domain UP to the next whole number even with
 						// allowDecimals off.
-						domain={[0, 'dataMax']}
+						// `zeroSafeDataMax` floors that upper bound at 1, so an
+						// all-zero dataset cannot collapse the scale to a
+						// degenerate [0, 0] -- see its docblock for the measured
+						// symptoms that floor prevents.
+						domain={[0, zeroSafeDataMax]}
 						allowDecimals={false}
 						tick={{ className: 'vt-chart__axis' }}
 						axisLine={{ className: 'vt-chart__grid' }}

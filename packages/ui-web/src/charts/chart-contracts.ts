@@ -52,6 +52,31 @@ export const SURFACE_GAP = 'var(--surface)';
  */
 export type ChartTone = 'series-1' | 'series-2' | 'ok' | 'warn' | 'fail';
 
+/**
+ * Upper bound for every count axis, and the reason none of them pass
+ * `'dataMax'` directly any more.
+ *
+ * 60-13 pinned `domain={[0, 'dataMax']}` so Recharts' own "nice tick"
+ * algorithm could not round an axis up past the real data maximum. That is
+ * still right for every non-zero dataset — but when EVERY value is 0 the pin
+ * collapses the scale to a degenerate `[0, 0]`. Measured on the real build
+ * (`test/browser/gap-probe.tsx`): `BarSeries` and `StackedBarSeries` then emit
+ * NO bar rectangles at all, and `TimeSeries` draws its line across the plot
+ * area's vertical MIDPOINT — which reads as a genuine mid-range constant, not
+ * as zero. Neither is caught by the `data.length === 0` empty guard, because
+ * all-zero rows are not an empty array, so the D-21 empty frame never shows
+ * either. Silent, and reachable by any freshly-opened election.
+ *
+ * Flooring the upper bound at 1 keeps an all-zero dataset on a real 0..1
+ * scale: marks render at the baseline (a zero-height bar is the correct state
+ * for C1 — see `BarSeries.tsx`'s own header), and with `allowDecimals={false}`
+ * the ticks read `0`/`1`, never a fraction. Non-zero data is untouched, so
+ * 60-13's over-maximum fix still holds exactly as measured.
+ */
+export function zeroSafeDataMax(dataMax: number): number {
+	return dataMax > 0 ? dataMax : 1;
+}
+
 export interface ChartDatum {
 	key: string;
 	label: string;

@@ -24,7 +24,9 @@
 		"assert:no-test-harness-in-dist": "node scripts/assert-no-test-harness-in-dist.mjs",
 		"assert:tokens-in-dist": "node scripts/assert-tokens-in-dist.mjs",
 		"capabilities:generate": "node scripts/generate-capabilities.mjs",
-		"clean": "rm -rf dist node_modules"
+		"clean": "rm -rf dist node_modules",
+		"gate:zero-state-legend": "node test/browser/zero-state-legend-gate.mjs",
+		"gate:prove-zero-state-legend-matchers": "node test/browser/zero-state-legend-gate.mjs --prove-matchers"
 	},
 	"dependencies": {
 		"@noble/ciphers": "^2",

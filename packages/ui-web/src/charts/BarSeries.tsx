@@ -20,6 +20,7 @@ import {
 	TONE_FAIL,
 	TONE_OK,
 	TONE_WARN,
+	zeroSafeDataMax,
 } from './chart-contracts.js';
 import type { ChartDatum, ChartTone } from './chart-contracts.js';
 
@@ -90,7 +91,11 @@ export function BarSeries({
 								// to the next whole number (a max-2 fixture measured a
 								// tick of 3) -- the same "runs past the real maximum"
 								// defect the UAT reported, by a different mechanism.
-								domain={[0, 'dataMax']}
+									// `zeroSafeDataMax` floors that upper bound at 1, so an
+									// all-zero dataset cannot collapse the scale to a
+									// degenerate [0, 0] -- see its docblock for the measured
+									// symptoms that floor prevents.
+								domain={[0, zeroSafeDataMax]}
 								allowDecimals={false}
 								tick={{ className: 'vt-chart__axis' }}
 								axisLine={{ className: 'vt-chart__grid' }}
@@ -133,7 +138,11 @@ export function BarSeries({
 								// upper bound to the real data maximum too -- Recharts'
 								// "nice tick" algorithm still rounds an auto domain UP
 								// to the next whole number even with allowDecimals off.
-								domain={[0, 'dataMax']}
+								// `zeroSafeDataMax` floors that upper bound at 1, so an
+								// all-zero dataset cannot collapse the scale to a
+								// degenerate [0, 0] -- see its docblock for the measured
+								// symptoms that floor prevents.
+								domain={[0, zeroSafeDataMax]}
 								allowDecimals={false}
 								tick={{ className: 'vt-chart__axis' }}
 								axisLine={{ className: 'vt-chart__grid' }}

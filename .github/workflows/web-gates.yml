@@ -1265,6 +1265,40 @@ jobs:
           fi
           echo "RECEIPT chart-geometry-dashboard-matchers-fired" | tee -a ../../ci-receipt.txt
 
+      # D-21/D-14 zero-state + legend-contract gate. Both defects this closes
+      # were found by phase 60's second Nyquist pass and were invisible to
+      # every other gate here: an all-zero (non-empty) dataset collapsed
+      # `domain={[0,'dataMax']}` to a degenerate [0,0] -- no bar marks, and a
+      # TimeSeries line drawn across the plot area's MIDPOINT, which reads as a
+      # real mid-range value -- while a legend series toned `warn` rendered a
+      # silent grey swatch. No existing fixture reaches either shape: all six
+      # plant exactly one zero alongside non-zero values.
+      #
+      # This gate BUILDS its own dist-gap-probe before measuring, so it cannot
+      # go inert against a stale bundle the way a bare gate invocation can.
+      # Its comparators are proven able to fail by the control step below.
+      - name: Dashboard zero-state and legend-contract gate
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:zero-state-legend 2>&1 | tee ../../zero-state-legend.log
+          if ! grep -q 'ZERO STATE + LEGEND GATE: PASS (2/2 rungs)' ../../zero-state-legend.log; then
+            echo "::error::zero-state-legend: gate did not report PASS (2/2 rungs)"
+            exit 1
+          fi
+          echo "RECEIPT zero-state-legend" | tee -a ../../ci-receipt.txt
+
+      - name: Dashboard zero-state comparator control (--prove-matchers)
+        working-directory: apps/VoteTorrentDashboard
+        run: |
+          set -euo pipefail
+          yarn gate:prove-zero-state-legend-matchers 2>&1 | tee ../../zero-state-legend-matchers.log
+          if ! grep -qE '--prove-matchers: all [0-9]+ case\(s\) discriminating' ../../zero-state-legend-matchers.log; then
+            echo "::error::zero-state-legend-matchers-fired: the comparators did not all prove discriminating"
+            exit 1
+          fi
+          echo "RECEIPT zero-state-legend-matchers-fired" | tee -a ../../ci-receipt.txt
+
       - name: Upload gate evidence on failure
         if: failure()
         uses: actions/upload-artifact@v4

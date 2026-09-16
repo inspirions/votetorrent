@@ -43,11 +43,27 @@ import type { ChartSeries, ChartTone, StackedSegment } from './chart-contracts.j
  * Only `series-1`/`series-2` carry a swatch rule (`components.css`) — `ok`/
  * `warn`/`fail` are single-hue status marks, never legend-bearing, so
  * inventing a swatch class for them here is out of scope.
+ *
+ * That was always the intent; it is now ENFORCED, in two ways. The map used to
+ * be `Partial<Record<ChartTone, string>>`, which meant a series toned `warn`
+ * type-checked, found no class, and rendered a bare `.vt-chart__legend-swatch`
+ * — a generic grey `var(--muted)` (measured: `rgb(141, 151, 168)`). That reads
+ * as "this swatch has no data behind it" rather than as the contract violation
+ * it is, and it is strictly harder to catch in review than the mis-colour
+ * 60-11 fixed, because nothing looks wrong. Keying the map on `LegendTone`
+ * makes it TOTAL, so adding a legend-bearing tone without a swatch rule is a
+ * compile error rather than a silent grey square.
  */
-const LEGEND_SWATCH_CLASS_BY_TONE: Readonly<Partial<Record<ChartTone, string>>> = Object.freeze({
+export type LegendTone = Extract<ChartTone, 'series-1' | 'series-2'>;
+
+const LEGEND_SWATCH_CLASS_BY_TONE: Readonly<Record<LegendTone, string>> = Object.freeze({
 	'series-1': 'vt-chart__legend-swatch--series-1',
 	'series-2': 'vt-chart__legend-swatch--series-2',
 });
+
+function isLegendTone(tone: ChartTone): tone is LegendTone {
+	return tone === 'series-1' || tone === 'series-2';
+}
 
 export interface ChartFrameProps {
 	variantClassName: string;
@@ -178,8 +194,25 @@ export function ChartLegend(props: ChartLegendProps) {
 			{items.map((item, index) => {
 				const matchedSeries =
 					typeof item.dataKey === 'string' ? series.find((s) => s.key === item.dataKey) : series.find((s) => s.label === item.value);
-				const swatchModifier = matchedSeries ? LEGEND_SWATCH_CLASS_BY_TONE[matchedSeries.tone] : undefined;
-				const swatchClassName = swatchModifier ? ['vt-chart__legend-swatch', swatchModifier].join(' ') : 'vt-chart__legend-swatch';
+				// Both misses below used to fall through to a bare swatch class,
+				// i.e. a silent grey square. They now throw, matching this
+				// package's own fail-loud discipline (`copy.js`'s `t()` throws on
+				// an unknown key rather than rendering a blank) and `ChartFrame`'s
+				// D-21 rule that a broken chart must never be mistakable for an
+				// empty one.
+				if (!matchedSeries) {
+					throw new Error(
+						`ChartLegend: no ChartSeries matches legend entry ${JSON.stringify(String(item.dataKey ?? item.value ?? ''))} — ` +
+							`the \`series\` prop and the chart's own dataKeys disagree. Declared series: ${series.map((s) => s.key).join(', ') || '(none)'}.`,
+					);
+				}
+				if (!isLegendTone(matchedSeries.tone)) {
+					throw new Error(
+						`ChartLegend: series ${JSON.stringify(matchedSeries.key)} carries tone ${JSON.stringify(matchedSeries.tone)}, which has no legend swatch rule. ` +
+							`Legend-bearing series must be toned 'series-1' or 'series-2'; 'ok'/'warn'/'fail' are single-hue status marks.`,
+					);
+				}
+				const swatchClassName = ['vt-chart__legend-swatch', LEGEND_SWATCH_CLASS_BY_TONE[matchedSeries.tone]].join(' ');
 				return (
 					<li className="vt-chart__legend-item" key={String(item.dataKey ?? item.value ?? index)}>
 						<span className={swatchClassName} />

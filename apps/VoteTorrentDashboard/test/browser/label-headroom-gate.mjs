@@ -188,9 +188,9 @@ async function main() {
 		const page = await browser.newPage();
 		const url = `http://127.0.0.1:${port}/test/browser/${GATE_ENTRY}`;
 		await page.goto(url, { waitUntil: 'load' });
-		await page.waitForFunction(() => window.__GAP_PROBE_DONE__ === true, { timeout: 10_000 });
+		await page.waitForFunction(() => /** @type {any} */ (window).__GAP_PROBE_DONE__ === true, { timeout: 10_000 });
 
-		const renderError = await page.evaluate(() => window.__GAP_PROBE_ERROR__ ?? null);
+		const renderError = await page.evaluate(() => /** @type {any} */ (window).__GAP_PROBE_ERROR__ ?? null);
 		if (renderError) fail(`page reported a render error: ${renderError}`);
 
 		const measured = await page.evaluate(() => {

@@ -9,7 +9,10 @@
  *    0 (non-empty array) — `domain={[0, 'dataMax']}`'s `dataMax === 0` edge.
  *  - legend-mismatch: a `StackedBarSeries` `series` entry toned `warn`, a
  *    valid `ChartTone` per `chart-contracts.ts` but one
- *    `LEGEND_SWATCH_CLASS_BY_TONE` does not cover.
+ *    `LEGEND_SWATCH_CLASS_BY_TONE` does not cover. It used to render a silent
+ *    grey swatch; `ChartLegend` now THROWS on it, so this probe is wrapped in
+ *    an error boundary that captures the message for measurement. The boundary
+ *    is what keeps the throw from taking the other probes down with it.
  *  - tall-label-bar: a `BarSeries` (vertical) with an extreme production-
  *    scale count, to measure the top `LabelList`'s real clearance against
  *    the fixed 24px top margin.
@@ -17,7 +20,8 @@
  * This file is NOT wired into `run-chart-geometry-gate.mjs`'s rung registry
  * and NOT referenced by `web-gates.yml` — it is a measurement-only artifact.
  */
-import { StrictMode } from 'react';
+import { Component, StrictMode } from 'react';
+import type { ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../../src/app.css';
 import { BarSeries, StackedBarSeries, TimeSeries } from '@votetorrent/ui-web/components';
@@ -115,6 +119,43 @@ const TALL_LABEL_BAR = [
 	{ key: 'r', label: 'Revoked', value: 0, tone: 'fail' as const },
 ];
 
+interface BoundaryProps {
+	probeId: string;
+	children: ReactNode;
+}
+
+interface BoundaryState {
+	message: string | null;
+}
+
+/**
+ * Captures a render-time throw from exactly one probe so the rest of the
+ * harness still mounts and stays measurable. The caught message is published
+ * on `window.__GAP_PROBE_THROWS__` keyed by probe id — a probe that is
+ * SUPPOSED to throw reads as an entry there, and a probe that stops throwing
+ * reads as its absence.
+ */
+class ProbeBoundary extends Component<BoundaryProps, BoundaryState> {
+	state: BoundaryState = { message: null };
+
+	static getDerivedStateFromError(err: unknown): BoundaryState {
+		return { message: String((err as { message?: unknown })?.message ?? err) };
+	}
+
+	componentDidCatch(err: unknown, _info: ErrorInfo) {
+		const bag = (win.__GAP_PROBE_THROWS__ ?? {}) as Record<string, string>;
+		bag[this.props.probeId] = String((err as { message?: unknown })?.message ?? err);
+		win.__GAP_PROBE_THROWS__ = bag;
+	}
+
+	render() {
+		if (this.state.message !== null) {
+			return <p data-gap-probe-threw={this.props.probeId}>{this.state.message}</p>;
+		}
+		return this.props.children;
+	}
+}
+
 function GapProbeHarness() {
 	return (
 		<div className="gap-probe-harness" style={{ width: '420px' }}>
@@ -128,7 +169,9 @@ function GapProbeHarness() {
 				<TimeSeries data={ALL_ZERO_TIME} emptyCopyKey="panels.registrations.intakeChart.empty" />
 			</div>
 			<div data-gap-probe="legend-mismatch">
-				<StackedBarSeries data={LEGEND_MISMATCH_DATA} series={LEGEND_MISMATCH_SERIES} emptyCopyKey="panels.registrations.requestChart.empty" />
+				<ProbeBoundary probeId="legend-mismatch">
+					<StackedBarSeries data={LEGEND_MISMATCH_DATA} series={LEGEND_MISMATCH_SERIES} emptyCopyKey="panels.registrations.requestChart.empty" />
+				</ProbeBoundary>
 			</div>
 			<div data-gap-probe="tall-label-bar">
 				<BarSeries data={TALL_LABEL_BAR} />
@@ -158,6 +201,7 @@ async function main() {
 
 	await settle(SETTLE_FRAMES);
 
+	win.__GAP_PROBE_THROWS__ = win.__GAP_PROBE_THROWS__ ?? {};
 	win.__GAP_PROBE_DONE__ = true;
 	win.__GAP_PROBE_ERROR__ = renderError;
 }
