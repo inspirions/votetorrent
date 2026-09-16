@@ -576,21 +576,35 @@ export function evaluateIntegerTicks(ticks, expected) {
  * the three officer-side numeric axes Task 1's public-side fix does not:
  * `BarSeries`'s vertical YAxis, `StackedBarSeries`'s YAxis and `TimeSeries`'s
  * YAxis.
+ *
+ * `maxValueByProbeId` carries EACH probe's own real maximum (60-REVIEW-2
+ * CR-01) -- either a `{ [probeId]: number }` map, or a single shared number
+ * applied to every probe (kept for the vacuity control at the bottom of
+ * `matcherControls()`, which deliberately proves a SHARED bound is wrong).
+ * The three real probe maxima are NOT the same number (bar/stacked top out
+ * at 3, time-series tops out at 2) -- a single shared bound of 3 let a tick
+ * of 3 on the time-series probe pass one unit too loosely.
  * @param {ReadonlyArray<{ probeId: string, ticks: ReadonlyArray<string> }>} probes
- * @param {number} maxValue
+ * @param {number | Readonly<Record<string, number>>} maxValueByProbeId
  * @returns {Verdict}
  */
-export function evaluateNumericAxisTicksAcrossProbes(probes, maxValue) {
+export function evaluateNumericAxisTicksAcrossProbes(probes, maxValueByProbeId) {
 	/** @type {string[]} */
 	const failures = [];
 	const list = Array.isArray(probes) ? probes : [];
 	if (list.length === 0) failures.push('no probe readout(s) supplied -- this rung would be vacuous');
 	for (const probe of list) {
+		const maxValue =
+			typeof maxValueByProbeId === 'number'
+				? maxValueByProbeId
+				: maxValueByProbeId
+					? maxValueByProbeId[probe.probeId]
+					: Number.NaN;
 		const v = evaluateIntegerTicks(probe.ticks, { maxValue, axisName: probe.probeId });
 		if (!v.passed) failures.push(`probe "${probe.probeId}": ${v.detail}`);
 	}
 	return failures.length === 0
-		? { passed: true, detail: `${list.length} probe(s) [${list.map((p) => p.probeId).join(', ')}], every numeric-axis tick whole and within max ${maxValue}` }
+		? { passed: true, detail: `${list.length} probe(s) [${list.map((p) => p.probeId).join(', ')}], every numeric-axis tick whole and within its own probe's real maximum` }
 		: { passed: false, detail: failures.join('; ') };
 }
 
@@ -666,14 +680,21 @@ function matcherControls() {
 	};
 	const healthyDefaultPass = { storedRegistrations: null, storedKeyholders: null, barCount: 3, gridPresent: false, gridHeight: 0, meterTrackWidth: 120 };
 	const healthyGridPass = { storedRegistrations: 'grid', storedKeyholders: null, barCount: 0, gridPresent: true, gridHeight: 80, meterTrackWidth: 120 };
-	// 60-13. `FIXTURE_META.smallCountMax` (3) is the single shared bound every
-	// probe's `expected.maxValue` carries -- the constant the fixture's own
-	// header comment names as "the largest value across all three".
+	// 60-REVIEW-2 CR-01. Each probe carries its OWN real maximum -- bar and
+	// stacked top out at 3, but the time-series probe's real max is 2. A
+	// single SHARED bound (the pre-fix `FIXTURE_META.smallCountMax`) let a
+	// tick of 3 on the time-series probe pass one unit too loosely.
 	const healthyTicksProbes = [
 		{ probeId: 'ticks-vertical-bar', ticks: ['0', '1', '2', '3'] },
 		{ probeId: 'ticks-stacked-bar', ticks: ['0', '1', '2', '3'] },
 		{ probeId: 'ticks-time-series', ticks: ['0', '1', '2'] },
 	];
+	/** @type {Readonly<Record<string, number>>} */
+	const smallCountMaxByProbe = Object.freeze({
+		'ticks-vertical-bar': FIXTURE_META.smallCountBarMax,
+		'ticks-stacked-bar': FIXTURE_META.smallCountStackedMax,
+		'ticks-time-series': FIXTURE_META.smallCountTimeMax,
+	});
 
 	return Object.freeze([
 		{
@@ -851,30 +872,44 @@ function matcherControls() {
 			label: 'numeric-axis-ticks-are-whole-numbers vs. fractional ticks on one probe (the live defect shape)',
 			violating: evaluateNumericAxisTicksAcrossProbes(
 				healthyTicksProbes.map((p) => (p.probeId === 'ticks-time-series' ? { ...p, ticks: ['0', '0.5', '1', '1.5', '2'] } : p)),
-				FIXTURE_META.smallCountMax,
+				smallCountMaxByProbe,
 			),
-			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, FIXTURE_META.smallCountMax),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, smallCountMaxByProbe),
 		},
 		{
 			label: 'numeric-axis-ticks-are-whole-numbers vs. an over-domain largest tick on one probe',
 			violating: evaluateNumericAxisTicksAcrossProbes(
 				healthyTicksProbes.map((p) => (p.probeId === 'ticks-vertical-bar' ? { ...p, ticks: ['0', '1', '2', '3', '4'] } : p)),
-				FIXTURE_META.smallCountMax,
+				smallCountMaxByProbe,
 			),
-			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, FIXTURE_META.smallCountMax),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, smallCountMaxByProbe),
+		},
+		{
+			// 60-REVIEW-2 CR-01. The time-series probe's real maximum is 2 (NOT
+			// the shared 3 the other two probes top out at) -- a tick of exactly
+			// 3 on THIS probe specifically must FAIL against its own per-probe
+			// bound. Before this fix, `evaluateNumericAxisTicksAcrossProbes` took
+			// one shared `maxValue` for every probe, so this exact input PASSED
+			// (`3 > 3` is false) -- see the driver's own before/after transcript.
+			label: 'numeric-axis-ticks-are-whole-numbers vs. a tick of 3 on the time-series probe specifically (real max is 2, not the shared 3)',
+			violating: evaluateNumericAxisTicksAcrossProbes(
+				healthyTicksProbes.map((p) => (p.probeId === 'ticks-time-series' ? { ...p, ticks: ['0', '1', '2', '3'] } : p)),
+				smallCountMaxByProbe,
+			),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, smallCountMaxByProbe),
 		},
 		{
 			label: 'numeric-axis-ticks-are-whole-numbers vs. a one-tick probe (planted anti-vacuity control missing)',
 			violating: evaluateNumericAxisTicksAcrossProbes(
 				healthyTicksProbes.map((p) => (p.probeId === 'ticks-stacked-bar' ? { ...p, ticks: ['0'] } : p)),
-				FIXTURE_META.smallCountMax,
+				smallCountMaxByProbe,
 			),
-			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, FIXTURE_META.smallCountMax),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, smallCountMaxByProbe),
 		},
 		{
 			label: 'numeric-axis-ticks-are-whole-numbers vs. a shared expected.maxValue of 1847 (would be vacuous against a large-count fixture)',
 			violating: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, 1847),
-			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, FIXTURE_META.smallCountMax),
+			healthy: evaluateNumericAxisTicksAcrossProbes(healthyTicksProbes, smallCountMaxByProbe),
 		},
 	]);
 }
@@ -1186,7 +1221,16 @@ function checkVacuity(m, passLabel) {
 	if (m.readout === null) return 'the harness never published its readout — the page did not finish.';
 	if (m.readout.error !== null) return `the harness recorded a render error: ${m.readout.error}`;
 	if (m.readout.fixtureMeta.version !== FIXTURE_META.version) return `readout fixtureMeta.version ${m.readout.fixtureMeta.version} disagrees with the driver's own import (${FIXTURE_META.version})`;
-	for (const key of /** @type {const} */ (['statusCount', 'requestCategoryCount', 'intakeBucketCount', 'meterCount', 'smallCountMax'])) {
+	for (const key of /** @type {const} */ ([
+		'statusCount',
+		'requestCategoryCount',
+		'intakeBucketCount',
+		'meterCount',
+		'smallCountMax',
+		'smallCountBarMax',
+		'smallCountStackedMax',
+		'smallCountTimeMax',
+	])) {
 		if (m.readout.fixtureMeta[key] !== FIXTURE_META[key]) return `readout fixtureMeta.${key} (${m.readout.fixtureMeta[key]}) disagrees with the driver's own import (${FIXTURE_META[key]})`;
 	}
 	for (const [name, value] of Object.entries(m.tokens)) {
@@ -1330,7 +1374,14 @@ async function runBrowserGate(port, skipBuild) {
 			record('panel-body-free-of-controls', v.passed, v.detail);
 		}
 		{
-			const v = evaluateNumericAxisTicksAcrossProbes(defaultMeasured.smallCountTicks, FIXTURE_META.smallCountMax);
+			// 60-REVIEW-2 CR-01: each probe's own real maximum, not one shared
+			// bound -- the time-series probe's real max (2) is one unit tighter
+			// than the bar/stacked probes' shared max (3).
+			const v = evaluateNumericAxisTicksAcrossProbes(defaultMeasured.smallCountTicks, {
+				'ticks-vertical-bar': FIXTURE_META.smallCountBarMax,
+				'ticks-stacked-bar': FIXTURE_META.smallCountStackedMax,
+				'ticks-time-series': FIXTURE_META.smallCountTimeMax,
+			});
 			record('numeric-axis-ticks-are-whole-numbers', v.passed, v.detail);
 		}
 

@@ -228,8 +228,35 @@ export const SMALL_COUNT_TIME_FIXTURE = Object.freeze(
 	),
 );
 
-/** The largest value across all three SMALL_COUNT_FIXTURE arrays. @type {number} */
-export const SMALL_COUNT_MAX = 3;
+/**
+ * Each small-count probe's OWN real maximum, computed FROM its fixture array
+ * rather than hand-written, so a per-probe bound can never silently drift out
+ * of sync if a fixture's values change (60-REVIEW-2 CR-01). A single SHARED
+ * bound across all three probes is what let a tick of 3 on the time-series
+ * probe (real max 2) pass `evaluateIntegerTicks`'s `largest > maxValue` check
+ * one unit too loosely — this module now names each probe's bound
+ * separately.
+ * @type {number}
+ */
+export const SMALL_COUNT_BAR_MAX = Math.max(...SMALL_COUNT_BAR_FIXTURE.map((d) => d.value));
+
+/** @type {number} */
+export const SMALL_COUNT_STACKED_MAX = Math.max(
+	...SMALL_COUNT_STACKED_FIXTURE.map((d) => d.segments.reduce((sum, seg) => sum + seg.value, 0)),
+);
+
+/** @type {number} */
+export const SMALL_COUNT_TIME_MAX = Math.max(...SMALL_COUNT_TIME_FIXTURE.map((d) => d.value));
+
+/**
+ * The largest value across all three SMALL_COUNT_FIXTURE arrays -- retained
+ * for callers that need ONE shared figure (e.g. the matcher control that
+ * proves a shared bound would be vacuous against a large-count fixture).
+ * NEVER the per-probe bound `evaluateNumericAxisTicksAcrossProbes` enforces
+ * -- that per-probe distinction is exactly what CR-01 fixed.
+ * @type {number}
+ */
+export const SMALL_COUNT_MAX = Math.max(SMALL_COUNT_BAR_MAX, SMALL_COUNT_STACKED_MAX, SMALL_COUNT_TIME_MAX);
 
 /**
  * The `data-chart-geometry` attribute values the three probe charts mount
@@ -244,10 +271,10 @@ export const SMALL_COUNT_PROBE_IDS = Object.freeze(['ticks-vertical-bar', 'ticks
  * silently drifted. `panelColumnWidthPx` is 420: above `NARROW_CONTAINER_PX`
  * (400), so the six-tick branch applies. The 280px narrow branch is a
  * judgement call and is 60-09's screenshot review, not a rung here.
- * @type {{ version: number, panelColumnWidthPx: number, statusCount: number, requestCategoryCount: number, intakeBucketCount: number, meterCount: number, registrationsCapabilityId: string, keyholdersCapabilityId: string, smallCountMax: number, smallCountProbeIds: ReadonlyArray<string> }}
+ * @type {{ version: number, panelColumnWidthPx: number, statusCount: number, requestCategoryCount: number, intakeBucketCount: number, meterCount: number, registrationsCapabilityId: string, keyholdersCapabilityId: string, smallCountMax: number, smallCountBarMax: number, smallCountStackedMax: number, smallCountTimeMax: number, smallCountProbeIds: ReadonlyArray<string> }}
  */
 export const FIXTURE_META = Object.freeze({
-	version: 3,
+	version: 4,
 	panelColumnWidthPx: 420,
 	statusCount: STATUS_FIXTURE.length,
 	requestCategoryCount: REQUEST_FIXTURE.length,
@@ -256,5 +283,8 @@ export const FIXTURE_META = Object.freeze({
 	registrationsCapabilityId: 'registrations',
 	keyholdersCapabilityId: 'keyholders',
 	smallCountMax: SMALL_COUNT_MAX,
+	smallCountBarMax: SMALL_COUNT_BAR_MAX,
+	smallCountStackedMax: SMALL_COUNT_STACKED_MAX,
+	smallCountTimeMax: SMALL_COUNT_TIME_MAX,
 	smallCountProbeIds: SMALL_COUNT_PROBE_IDS,
 });
