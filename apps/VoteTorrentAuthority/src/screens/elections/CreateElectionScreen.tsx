@@ -22,7 +22,11 @@ import { saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
-import { resolveElectionTimeline, CREATE_FALLBACK_DAYS } from "./resolve-election-timeline";
+import {
+	resolveElectionTimeline,
+	findTimelineOrderViolation,
+	CREATE_FALLBACK_DAYS,
+} from "./resolve-election-timeline";
 
 // Phase 9 plan 09-12 (ELECUI-03) — Single-scroll New Election form.
 // Phase 20 plan 20-06 (EUI-02, EUI-03) — type radio + per-field inline validation.
@@ -187,15 +191,7 @@ export function CreateElectionScreen() {
 				);
 				return;
 			}
-			if (
-				resolvedTimeline.votingStarts >= resolvedTimeline.accruingVotes ||
-				resolvedTimeline.accruingVotes >= resolvedTimeline.hashingVotes ||
-				resolvedTimeline.hashingVotes >= resolvedTimeline.releasingKeys ||
-				resolvedTimeline.releasingKeys >= resolvedTimeline.tallyingStarts ||
-				resolvedTimeline.tallyingStarts >= resolvedTimeline.validation ||
-				resolvedTimeline.validation >= resolvedTimeline.certificationStarts ||
-				resolvedTimeline.certificationStarts >= resolvedTimeline.closed
-			) {
+			if (findTimelineOrderViolation(resolvedTimeline) !== null) {
 				setErrorMessage(t("errTimelineOrder"));
 				return;
 			}

@@ -107,3 +107,63 @@ export function resolveElectionTimeline(
     [ElectionEvent.closed]: parseDateOrFallback(form.closed, votingStarts + 7 * DAY_MS),
   } as Record<ElectionEvent, number>
 }
+
+/**
+ * The two preparation events, referenced through the enum (never as string
+ * literals) so a rename in `vote-core` is a compile error here rather than a
+ * silent mismatch. They are deliberately NOT part of the strict chain below:
+ * an officer may legitimately set `ballotsFinal` after `votingStarts`, and
+ * `timeline-core.js` (the voter/public source of truth) likewise keeps them
+ * in its own `PREPARATION` list, outside `STRICT_CHAIN`.
+ */
+const PREPARATION_EVENTS: readonly ElectionEvent[] = [
+  ElectionEvent.registrationEnds,
+  ElectionEvent.ballotsFinal,
+]
+
+/**
+ * The eight events that must strictly increase, in D-09 chronological order:
+ * `votingStarts < accruingVotes < hashingVotes < releasingKeys <
+ * tallyingStarts < validation < certificationStarts < closed`.
+ *
+ * DERIVED from `TIMELINE_FIELD_ORDER` (itself `Object.values(ElectionEvent)`)
+ * minus the preparation pair — never hand-typed, so an eleventh `ElectionEvent`
+ * joins the chain automatically instead of opening the exact hole CR-02 found:
+ * every one of the five ordering-guard sites had silently skipped `validation`
+ * for as long as it existed, letting an officer sign an out-of-order,
+ * IMMUTABLE timeline that the voter's stricter `parseTimeline` then flags
+ * `OUT_OF_ORDER`, collapsing the whole ten-row rail into the D-03
+ * indeterminate state. `Timeline` carries no DB CHECK constraint at all
+ * (`votetorrent.qsql` still has its `--TODO constrain Timeline`), so these
+ * client-side guards are the only defense that exists.
+ */
+export const TIMELINE_STRICT_CHAIN: readonly ElectionEvent[] = Object.freeze(
+  TIMELINE_FIELD_ORDER.filter((event) => !PREPARATION_EVENTS.includes(event))
+)
+
+/** The adjacent pair that failed, in chain order. */
+export interface TimelineOrderViolation {
+  before: ElectionEvent
+  after: ElectionEvent
+}
+
+/**
+ * The single ordering guard both screens call before handing a resolved
+ * timeline to a builder / `adjustElection`. Returns the FIRST adjacent pair
+ * that is not strictly increasing, or `null` when the whole chain holds.
+ *
+ * `>=` (not `>`) is preserved verbatim from the inline chains this replaced:
+ * two events sharing an instant is itself a violation.
+ */
+export function findTimelineOrderViolation(
+  timeline: Record<ElectionEvent, number>
+): TimelineOrderViolation | null {
+  for (let i = 0; i < TIMELINE_STRICT_CHAIN.length - 1; i += 1) {
+    const before = TIMELINE_STRICT_CHAIN[i]!
+    const after = TIMELINE_STRICT_CHAIN[i + 1]!
+    if (timeline[before] >= timeline[after]) {
+      return { before, after }
+    }
+  }
+  return null
+}

@@ -17,7 +17,11 @@ import type { IElectionEngine, IElectionsEngine, ElectionInit, ElectionDetails }
 import { getLocalKeyholders, saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
 import { InlineError } from "../../components/InlineError";
-import { resolveElectionTimeline, EDIT_FALLBACK_DAYS } from "./resolve-election-timeline";
+import {
+	resolveElectionTimeline,
+	findTimelineOrderViolation,
+	EDIT_FALLBACK_DAYS,
+} from "./resolve-election-timeline";
 
 // Phase 9 plan 09-13 (ELECUI-04) — Election Revision form (Screen C, Figma #16/#17).
 // Phase 20 plan 20-06 (EUI-01, EUI-02) — wire real adjustElection from single cached load.
@@ -146,17 +150,10 @@ export default function EditElectionScreen() {
 			// rationale.
 			const resolvedTimeline = resolveElectionTimeline(revision, now, EDIT_FALLBACK_DAYS);
 
-			// Friendly timeline guard BEFORE adjustElection — voting must precede tallying,
-			// and tallying must precede certification (avoids a raw engine ordering error).
-			if (
-				resolvedTimeline.votingStarts >= resolvedTimeline.accruingVotes ||
-				resolvedTimeline.accruingVotes >= resolvedTimeline.hashingVotes ||
-				resolvedTimeline.hashingVotes >= resolvedTimeline.releasingKeys ||
-				resolvedTimeline.releasingKeys >= resolvedTimeline.tallyingStarts ||
-				resolvedTimeline.tallyingStarts >= resolvedTimeline.validation ||
-				resolvedTimeline.validation >= resolvedTimeline.certificationStarts ||
-				resolvedTimeline.certificationStarts >= resolvedTimeline.closed
-			) {
+			// Friendly timeline guard BEFORE adjustElection — the full eight-event strict
+			// chain, shared verbatim with CreateElectionScreen (CR-02 found all five
+			// ordering sites had drifted while each kept its own hand-typed copy).
+			if (findTimelineOrderViolation(resolvedTimeline) !== null) {
 				setErrorMessage(t("errTimelineOrder"));
 				setProposing(false);
 				return;
