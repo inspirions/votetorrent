@@ -9,3 +9,7 @@ dist-mutant-*
 # dist-mutant-* above — the root .gitignore's bare `dist` rule matches only
 # an entry named exactly `dist`. Kept app-local for the same reason.
 dist-chart-geometry
+
+# Nyquist gap-closure (phase 60 WR-01/WR-02/WR-03): gap-probe.tsx's build
+# output. Same reason as dist-chart-geometry above.
+dist-gap-probe
