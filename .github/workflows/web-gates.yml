@@ -410,7 +410,7 @@ jobs:
           echo "RECEIPT dashboard-build-no-polyfills" | tee -a ci-receipt.txt
           # D-15/D-23 post-build bytes-in-dist gate: proves the canonical
           # `@import '@votetorrent/ui-web/tokens.css';` actually resolved
-          # into the dashboard's shipped production CSS (all 31 declared
+          # into the dashboard's shipped production CSS (all 34 declared
           # names present). Requires the fresh dist/ this step just built --
           # this is a post-build check, deliberately not part of tier 1's
           # test:node. New in this phase and never invoked until this commit.

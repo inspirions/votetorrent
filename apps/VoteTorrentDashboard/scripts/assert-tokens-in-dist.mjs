@@ -2,7 +2,7 @@
 /**
  * assert-tokens-in-dist.mjs — the D-15/D-23 post-build bytes-in-dist gate.
  *
- * Proves the 31 design-token NAMES declared in `packages/ui-web/src/tokens.css`
+ * Proves the 34 design-token NAMES declared in `packages/ui-web/src/tokens.css`
  * reached the dashboard's built production CSS, i.e. that the canonical
  * `@import '@votetorrent/ui-web/tokens.css';` in `app.css` actually resolved and the
  * package stylesheet was inlined by Vite.
@@ -102,9 +102,9 @@ if (!existsSync(tokensCssPath)) {
 }
 const tokensCssSource = readFileSync(tokensCssPath, 'utf8');
 const tokenNames = extractTokenNames(tokensCssSource);
-if (tokenNames.length !== 31) {
+if (tokenNames.length !== 34) {
 	fail(
-		`expected exactly 31 token names in ${tokensCssPath}, got ${tokenNames.length} — an empty or ` +
+		`expected exactly 34 token names in ${tokensCssPath}, got ${tokenNames.length} — an empty or ` +
 			'unparsed tokens.css must not make this scan trivially satisfiable.',
 	);
 }
