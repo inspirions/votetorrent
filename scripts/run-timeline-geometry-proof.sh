@@ -61,8 +61,36 @@ SCREEN_H="${SCREEN_H:-}"
 SERIAL_NOTE=""
 
 TMPDIR_TG="$(mktemp -d)"
-cleanup() { rm -rf "${TMPDIR_TG}"; }
+# fix(61-03): preserve the real exit code across cleanup -- a bare `rm -rf` here used to
+# become the script's final exit status (rm succeeds, so ANY fatal abort earlier in the
+# script -- e.g. a `set -u` trip -- silently reported exit 0). The obvious fix
+# (`cleanup(){ local rc=$?; rm -rf ...; exit "$rc"; }`) was tried first and empirically
+# does NOT work on this repo's bash (3.2, macOS stock): verified live that `$?` as read
+# from *inside* an EXIT trap is already 0 by the time the trap body runs when the trap was
+# entered via a `set -u` unbound-variable abort specifically (as opposed to an explicit
+# `exit N` call, which correctly threads through even without this fix) -- there is no
+#"real" nonzero status left to capture at that point on this bash version. Used a
+# fail-closed flag instead: default SCRIPT_EXIT_CODE to 1 (failure) up front, and only the
+# three genuinely-successful exit points in this file (the two host-only --selftest /
+# --dump-records completions and the final all-legs-passed line) flip it to 0 immediately
+# before exiting. Any OTHER termination path -- including one this file's author never
+# anticipated -- now exits nonzero by construction, which is the correct default for an
+# instrument whose whole job is to report failure honestly.
+# Found and authorized-fixed under 61-07 (see todos/pending/2026-09-16-timeline-geometry-
+# proof-dump-ui-status-unbound-and-exit-masked.md); disclosed separately, not folded into
+# 61-07's evidence.
+SCRIPT_EXIT_CODE=1
+cleanup() { rm -rf "${TMPDIR_TG}"; exit "${SCRIPT_EXIT_CODE}"; }
 trap cleanup EXIT
+
+# fix(61-03): DUMP_UI_STATUS ("unobservable" | "ok") is set by dump_ui() below, but every
+# call site invokes it as `dump_path=$(dump_ui)` -- a command substitution, i.e. a
+# SUBSHELL. Any assignment dump_ui() makes to a plain variable is local to that subshell
+# and is discarded the instant the subshell exits; it never reaches the caller's scope.
+# Declaring it here does not fix that (each call site must re-read the status explicitly,
+# see dump_ui()'s trailing comment and its two call sites), but it does mean an accidental
+# early reference fails predictably instead of crashing the whole script under `set -u`.
+DUMP_UI_STATUS=""
 
 TAB="$(printf '\t')"
 
@@ -312,18 +340,23 @@ walk_dump() {
 dump_ui() {
   local out="${TMPDIR_TG}/dump-$$-${RANDOM}.xml"
   local attempt
-  DUMP_UI_STATUS="unobservable"
+  local status="unobservable"
   for attempt in 1 2 3; do
     adb ${ADBD} shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1
     adb ${ADBD} shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
     adb ${ADBD} pull /sdcard/window_dump.xml "${out}" >/dev/null 2>&1 || : > "${out}"
     if [ -s "${out}" ] && grep -q "</hierarchy>" "${out}" 2>/dev/null; then
-      DUMP_UI_STATUS="ok"
+      status="ok"
       break
     fi
     sleep 1
   done
-  if [ "${DUMP_UI_STATUS}" = "unobservable" ]; then
+  # fix(61-03): dump_ui() is always invoked via `dump_path=$(dump_ui)` (a subshell), so a
+  # plain `DUMP_UI_STATUS=...` assignment here can never be observed by the caller -- write
+  # the status to a file in TMPDIR_TG instead; every call site reads it back explicitly
+  # immediately after the substitution (see preflight() and collect_records()).
+  echo "${status}" > "${TMPDIR_TG}/dump_ui_status"
+  if [ "${status}" = "unobservable" ]; then
     echo "[timeline-geometry] WARNING: dump_ui could not obtain a well-formed uiautomator hierarchy after 3 attempts." >&2
   fi
   echo "${out}"
@@ -418,6 +451,9 @@ preflight() {
   echo "[timeline-geometry] Preflight: locale cross-check ..."
   local dump_path
   dump_path=$(dump_ui)
+  # fix(61-03): read the status dump_ui() wrote to TMPDIR_TG -- it cannot be read via a
+  # subshell-local DUMP_UI_STATUS assignment (see dump_ui()'s comment).
+  DUMP_UI_STATUS="$(cat "${TMPDIR_TG}/dump_ui_status" 2>/dev/null || echo unobservable)"
   if [ "${DUMP_UI_STATUS}" != "ok" ]; then
     echo "PREFLIGHT FAIL: dump-unobservable -- could not obtain a well-formed uiautomator hierarchy for the locale cross-check" >&2
     exit 1
@@ -485,6 +521,9 @@ collect_records() {
     iter=$((iter + 1))
     local dump_path
     dump_path=$(dump_ui)
+    # fix(61-03): see preflight()'s identical comment -- read the status back from the file
+    # dump_ui() wrote, not from a subshell-local assignment.
+    DUMP_UI_STATUS="$(cat "${TMPDIR_TG}/dump_ui_status" 2>/dev/null || echo unobservable)"
     if [ "${DUMP_UI_STATUS}" != "ok" ]; then
       echo "[timeline-geometry] WARNING: collect_records iteration ${iter}: dump-unobservable, skipping this pass." >&2
       continue
@@ -767,6 +806,7 @@ run_selftest() {
 
   if [ "${mismatches}" -eq 0 ]; then
     echo "SELFTEST: PASS (4/4 fixtures behaved as specified)"
+    SCRIPT_EXIT_CODE=0
     exit 0
   else
     echo "SELFTEST: FAIL ($((4 - mismatches))/4 fixtures behaved as specified)"
@@ -796,6 +836,7 @@ if [ "${1:-}" = "--dump-records" ]; then
     exit 1
   fi
   walk_dump "${DUMP_PATH}"
+  SCRIPT_EXIT_CODE=0
   exit 0
 fi
 # ---------------------------------------------------------------------------------------
@@ -832,4 +873,5 @@ done
 if any_failed; then
   exit 1
 fi
+SCRIPT_EXIT_CODE=0
 exit 0
