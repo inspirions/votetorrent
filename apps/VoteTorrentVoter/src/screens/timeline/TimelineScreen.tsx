@@ -432,6 +432,7 @@ export default function TimelineScreen() {
 
 				<TimelineRail
 					rows={state.view.rows}
+					nowOffsetMs={clockOffsetMs}
 					renderPanel={stageId =>
 						stageId === 'registrationEnds' && registrationStatus !== null ? (
 							<TimelineRegistrationPanel

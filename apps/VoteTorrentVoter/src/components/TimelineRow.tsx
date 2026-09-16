@@ -89,6 +89,10 @@ export interface TimelineRowProps extends TimelineRowCallbacks {
 	 * component never reaches for another stage's instant.
 	 */
 	countdownTargetIso?: string;
+	/** Dev instrumentation (D-12/D-14): the `__DEV__` clock-offset control's offset, forwarded to
+	 * the countdown so the rail's "Now" label and the countdown cannot disagree. Optional,
+	 * defaults to `0` -- inert in release builds. */
+	nowOffsetMs?: number;
 }
 
 /** Builds the time-conditional action list for one row (CONTEXT `<specifics>` table). Every
@@ -130,7 +134,7 @@ function buildActions(stageId: TimelineStageId, status: TimelineRowStatus, callb
 	return actions;
 }
 
-export function TimelineRow({row, panel, countdownTargetIso, onHelp, onSeeDetails, onEditRegistration, onPreviewBallot, onVoteNow, onViewSubmission, onViewKeyholders}: TimelineRowProps) {
+export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, onHelp, onSeeDetails, onEditRegistration, onPreviewBallot, onVoteNow, onViewSubmission, onViewKeyholders}: TimelineRowProps) {
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('timeline');
 
@@ -217,7 +221,7 @@ export function TimelineRow({row, panel, countdownTargetIso, onHelp, onSeeDetail
 
 			{showCountdown ? (
 				<View style={styles.countdown}>
-					<CountdownTimer targetIso={countdownTargetIso as string} />
+					<CountdownTimer targetIso={countdownTargetIso as string} nowOffsetMs={nowOffsetMs} />
 				</View>
 			) : null}
 

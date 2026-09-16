@@ -30,11 +30,16 @@ export interface TimelineRailProps extends TimelineRowCallbacks {
 	/** Render slot forwarded into each row's `panel` prop -- the seam 59-09 uses to inject the
 	 * Registration Ends status panel without editing this file or `TimelineRow.tsx`. */
 	renderPanel?: (stageId: TimelineStageId) => React.ReactNode;
+	/** Dev instrumentation (D-12/D-14): the `__DEV__` clock-offset control's offset, forwarded to
+	 * the Voting Period row's countdown so the rail's "Now" label and the countdown cannot
+	 * disagree. Optional, defaults to `0` -- inert in release builds. */
+	nowOffsetMs?: number;
 }
 
 export function TimelineRail({
 	rows,
 	renderPanel,
+	nowOffsetMs = 0,
 	onHelp,
 	onSeeDetails,
 	onEditRegistration,
@@ -132,6 +137,7 @@ export function TimelineRail({
 								row={row}
 								panel={renderPanel?.(row.stageId)}
 								countdownTargetIso={row.stageId === 'votingStarts' ? countdownTargetIso : undefined}
+								nowOffsetMs={nowOffsetMs}
 								onHelp={onHelp}
 								onSeeDetails={onSeeDetails}
 								onEditRegistration={onEditRegistration}
