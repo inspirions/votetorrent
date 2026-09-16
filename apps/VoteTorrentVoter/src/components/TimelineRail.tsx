@@ -38,7 +38,6 @@ export function TimelineRail({
 	onHelp,
 	onSeeDetails,
 	onEditRegistration,
-	onViewRegistration,
 	onPreviewBallot,
 	onVoteNow,
 	onViewSubmission,
@@ -136,7 +135,6 @@ export function TimelineRail({
 								onHelp={onHelp}
 								onSeeDetails={onSeeDetails}
 								onEditRegistration={onEditRegistration}
-								onViewRegistration={onViewRegistration}
 								onPreviewBallot={onPreviewBallot}
 								onVoteNow={onVoteNow}
 								onViewSubmission={onViewSubmission}

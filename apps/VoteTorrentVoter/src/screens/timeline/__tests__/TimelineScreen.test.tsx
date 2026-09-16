@@ -639,7 +639,6 @@ describe('TimelineScreen — rail composition and callback wiring (Task 2)', () 
 			'onHelp',
 			'onSeeDetails',
 			'onEditRegistration',
-			'onViewRegistration',
 			'onPreviewBallot',
 			'onVoteNow',
 			'onViewSubmission',
@@ -654,7 +653,6 @@ describe('TimelineScreen — rail composition and callback wiring (Task 2)', () 
 		['onPreviewBallot', 'Ballot'],
 		['onViewSubmission', 'ReviewSubmit'],
 		['onEditRegistration', 'RegistrationHome'],
-		['onViewRegistration', 'RegistrationHome'],
 		['onViewKeyholders', 'Keyholders'],
 	])('%s navigates to %s', async (propName, routeName) => {
 		const tr = await renderAndFlush();

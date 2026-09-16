@@ -235,10 +235,6 @@ describe('TimelineRail (D1, 61-02) -- panel+row composition proves the ONE-total
 				}
 				onSeeDetails={jest.fn()}
 				onEditRegistration={jest.fn()}
-				// Present for Task 1 only (RED-observation control): reproduces the live
-				// `TimelineScreen.tsx:449` wiring so the row's own duplicate action is actually
-				// gated open in the unfixed `buildActions`. Task 2 removes this prop.
-				onViewRegistration={jest.fn()}
 			/>,
 		);
 
@@ -250,10 +246,7 @@ describe('TimelineRail (D1, 61-02) -- panel+row composition proves the ONE-total
 
 	it('Case B -- panel absent (the registration-status read window): ZERO "view registration"-class affordances exist anywhere in the rail -- no orphan row action, no guessed placeholder', () => {
 		const rows = buildTenRowFixture();
-		// `onViewRegistration={jest.fn()}` present for Task 1 only, same reason as Case A above.
-		const tr = renderRail(
-			<TimelineRail rows={rows} renderPanel={() => null} onSeeDetails={jest.fn()} onEditRegistration={jest.fn()} onViewRegistration={jest.fn()} />,
-		);
+		const tr = renderRail(<TimelineRail rows={rows} renderPanel={() => null} onSeeDetails={jest.fn()} onEditRegistration={jest.fn()} />);
 
 		const viewCtaText = i18n.t('registration.viewCta', {ns: 'timeline'});
 		expect(countResolvedText(tr, viewCtaText)).toBe(0);

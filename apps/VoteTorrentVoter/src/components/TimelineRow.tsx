@@ -71,7 +71,6 @@ export interface TimelineRowCallbacks {
 	onHelp?: (stageId: TimelineStageId) => void;
 	onSeeDetails?: (stageId: TimelineStageId) => void;
 	onEditRegistration?: () => void;
-	onViewRegistration?: () => void;
 	onPreviewBallot?: () => void;
 	onVoteNow?: () => void;
 	onViewSubmission?: () => void;
@@ -98,11 +97,7 @@ function buildActions(stageId: TimelineStageId, status: TimelineRowStatus, callb
 	const actions: ActionDescriptor[] = [];
 
 	if (stageId === 'registrationEnds') {
-		if (status === 'past') {
-			if (callbacks.onViewRegistration) {
-				actions.push({id: 'view-registration', labelKey: 'registration.viewCta', onPress: callbacks.onViewRegistration, variant: 'link'});
-			}
-		} else if (callbacks.onEditRegistration) {
+		if (status !== 'past' && callbacks.onEditRegistration) {
 			actions.push({id: 'edit-registration', labelKey: 'registration.editCta', onPress: callbacks.onEditRegistration, variant: 'link'});
 		}
 	}
@@ -135,7 +130,7 @@ function buildActions(stageId: TimelineStageId, status: TimelineRowStatus, callb
 	return actions;
 }
 
-export function TimelineRow({row, panel, countdownTargetIso, onHelp, onSeeDetails, onEditRegistration, onViewRegistration, onPreviewBallot, onVoteNow, onViewSubmission, onViewKeyholders}: TimelineRowProps) {
+export function TimelineRow({row, panel, countdownTargetIso, onHelp, onSeeDetails, onEditRegistration, onPreviewBallot, onVoteNow, onViewSubmission, onViewKeyholders}: TimelineRowProps) {
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('timeline');
 
@@ -153,7 +148,6 @@ export function TimelineRow({row, panel, countdownTargetIso, onHelp, onSeeDetail
 	const actions = buildActions(stageId, status, {
 		onSeeDetails,
 		onEditRegistration,
-		onViewRegistration,
 		onPreviewBallot,
 		onVoteNow,
 		onViewSubmission,

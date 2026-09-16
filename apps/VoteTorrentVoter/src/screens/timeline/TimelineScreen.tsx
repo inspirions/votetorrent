@@ -446,7 +446,6 @@ export default function TimelineScreen() {
 					onHelp={stageId => setDialogStageId(stageId)}
 					onSeeDetails={stageId => setDialogStageId(stageId)}
 					onEditRegistration={() => navigation.navigate('RegistrationHome')}
-					onViewRegistration={() => navigation.navigate('RegistrationHome')}
 					onPreviewBallot={() => navigation.navigate('Ballot')}
 					onVoteNow={() => navigation.navigate('Ballot')}
 					onViewSubmission={() => navigation.navigate('ReviewSubmit')}
