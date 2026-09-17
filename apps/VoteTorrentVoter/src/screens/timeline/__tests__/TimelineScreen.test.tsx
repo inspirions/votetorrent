@@ -762,22 +762,33 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		expect(seen).toEqual(new Set(TIMELINE_STAGE_IDS));
 	});
 
-	it('wraps back to the live stop after the last stage stop', async () => {
+	it('offers the WR-01 final-day probe after the last stage stop, then wraps back to live', async () => {
 		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
 		const tr = await renderAndFlush();
 
 		for (let i = 0; i < TIMELINE_STAGE_IDS.length; i++) {
 			await pressClockOffset(tr);
 		}
-		// One more press than there are stages returns to the live stop.
-		await pressClockOffset(tr);
 
+		// WR-01: one press past the stage stops is the synthetic final-day probe -- the only stop
+		// that puts `nowMs` inside the last 24h before tallyingStarts while votingStarts is still
+		// current, and therefore the only way CountdownTimer's `<24h` branch renders on a device.
+		// Before this stop existed that branch was unreachable on hardware, which is how CR-01's
+		// label-width defect shipped past a green suite AND a passing geometry gate.
+		await pressClockOffset(tr);
+		const probeLabel = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
+		expect(textOf(probeLabel)).toContain('final day');
+		expect(textOf(probeLabel)).toContain('Voting Period');
+
+		// One more press returns to the live stop.
+		await pressClockOffset(tr);
 		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
 		expect(textOf(label)).toContain('0');
 		expect(textOf(label)).not.toContain('Registration Ends');
+		expect(textOf(label)).not.toContain('final day');
 	});
 
-	it('a 7-of-10-key timeline offers exactly 8 stops (7 stages + live) -- absent instants are skipped, never a dead stop', async () => {
+	it('a 7-of-10-key timeline offers exactly 9 stops (7 stages + final-day probe + live) -- absent instants are skipped, never a dead stop', async () => {
 		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
 		const anchor = Date.UTC(2030, 0, 10);
 		const sevenKeyTimeline = buildValidTimeline(anchor);
@@ -796,7 +807,13 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		}
 		expect(seen.size).toBe(7);
 
-		// The 8th press (index 7, zero-based) is the live stop again.
+		// WR-01: the 8th press is the final-day probe. It stays valid on this 7-key timeline --
+		// accruingVotes/hashingVotes/releasingKeys are absent, so the next instant after
+		// votingStarts is tallyingStarts itself and the probe at -23h still clears it.
+		await pressClockOffset(tr);
+		expect(textOf(tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'}))).toContain('final day');
+
+		// The 9th press is the live stop again.
 		await pressClockOffset(tr);
 		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
 		expect(textOf(label)).toContain('0');

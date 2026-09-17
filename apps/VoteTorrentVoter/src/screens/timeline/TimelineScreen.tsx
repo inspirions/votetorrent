@@ -370,10 +370,44 @@ export default function TimelineScreen() {
 	// D-05: the stops are the PRESENT timeline instants, in D-09 order (`state.view.rows` is
 	// already in that order) -- absent instants are skipped, never offered as a dead stop. A
 	// 7-of-10-key timeline therefore yields 7 stage stops plus live (8 total), not 10 plus live.
-	const clockStops = state.view.rows.filter(row => row.instantMs !== null).map(row => ({stageId: row.stageId, instantMs: row.instantMs as number}));
+	const stageStops = state.view.rows
+		.filter(row => row.instantMs !== null)
+		.map(row => ({stageId: row.stageId, instantMs: row.instantMs as number, nowMs: (row.instantMs as number) + 60_000, probe: false}));
+
+	// WR-01: every stage stop lands at `instant + 60_000`, so the Voting Period countdown -- which
+	// targets `tallyingStarts` and renders only while `votingStarts` is current -- was always either
+	// >24h out or already elapsed. CountdownTimer's `<24h` branch was therefore UNREACHABLE on
+	// device, which is exactly how its label-width defect (CR-01) shipped past a green suite and a
+	// passing geometry gate. This adds ONE synthetic stop inside the final 24 hours.
+	//
+	// Offered only when it genuinely lands in that branch with `votingStarts` still current: the
+	// probe must sit after `votingStarts` and strictly before whatever stage comes next, otherwise
+	// that later stage would take `current` and the countdown would not render at all. On the
+	// shipped seed the next stage is `accruingVotes` at tallyingStarts-20h, so 23h clears it.
+	const SHORT_BRANCH_PROBE_MS = 23 * 3_600_000;
+	const tallyingStartsMs = state.view.rows.find(row => row.stageId === 'tallyingStarts')?.instantMs ?? null;
+	const votingStartsMs = state.view.rows.find(row => row.stageId === 'votingStarts')?.instantMs ?? null;
+	const probeNowMs = tallyingStartsMs !== null ? tallyingStartsMs - SHORT_BRANCH_PROBE_MS : null;
+	const nextInstantAfterVotingStarts =
+		votingStartsMs === null
+			? null
+			: state.view.rows
+					.map(row => row.instantMs)
+					.filter((instant): instant is number => instant !== null && instant > votingStartsMs)
+					.reduce<number | null>((min, instant) => (min === null || instant < min ? instant : min), null);
+	const probeIsValid =
+		probeNowMs !== null &&
+		votingStartsMs !== null &&
+		probeNowMs > votingStartsMs &&
+		(nextInstantAfterVotingStarts === null || probeNowMs < nextInstantAfterVotingStarts);
+	const clockStops = probeIsValid
+		? [...stageStops, {stageId: 'votingStarts' as const, instantMs: tallyingStartsMs as number, nowMs: probeNowMs as number, probe: true}]
+		: stageStops;
 	const activeClockStop = clockStopIndex > 0 ? clockStops[clockStopIndex - 1] : undefined;
 	const clockOffsetLabel =
-		activeClockStop !== undefined
+		activeClockStop !== undefined && activeClockStop.probe
+			? `${t('dev.clockOffsetLabel')} ${t(STAGE_TITLE_KEY[activeClockStop.stageId])} final day`
+			: activeClockStop !== undefined
 			? `${t('dev.clockOffsetLabel')} ${t(STAGE_TITLE_KEY[activeClockStop.stageId])} ${
 					Math.round((activeClockStop.instantMs - Date.now()) / 86_400_000) >= 0 ? '+' : ''
 				}${Math.round((activeClockStop.instantMs - Date.now()) / 86_400_000)}`
@@ -389,10 +423,11 @@ export default function TimelineScreen() {
 		}
 		const stop = clockStops[nextIndex - 1];
 		setClockStopIndex(nextIndex);
-		// Computed AT PRESS TIME so a slower re-fetch afterward still lands close to
-		// `instant + 60_000` -- the small positive epsilon that makes THIS stage (not the next
-		// one) resolve as current.
-		setClockOffsetMs(stop.instantMs + 60_000 - Date.now());
+		// Computed AT PRESS TIME so a slower re-fetch afterward still lands close to the stop's
+		// target. For a stage stop that target is `instant + 60_000` -- the small positive epsilon
+		// that makes THIS stage (not the next one) resolve as current. The WR-01 probe carries its
+		// own target instead, inside the final 24h before tallyingStarts.
+		setClockOffsetMs(stop.nowMs - Date.now());
 	};
 
 	return (
