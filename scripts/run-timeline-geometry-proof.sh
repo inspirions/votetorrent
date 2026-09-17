@@ -38,6 +38,13 @@
 #           1 -- a preflight failed, any selected leg printed LEG <name>: FAIL, or
 #               --selftest / --dump-records failed
 #
+# Verdict : a DEVICE run prints `LEG <name>: PASS|FAIL (<evidence>)`; --selftest prints
+# lines     `SELFTEST-LEG <name>: ...` and `RECORDS-CASE <name>: ...` instead (IN-03). The two
+#           are deliberately NOT interchangeable: a healthy --selftest emits many FAIL lines --
+#           rejecting a broken fixture is what passing looks like -- and they carry the same
+#           `locale=... serial=...` tail a device line does. Cite `LEG ` only for device
+#           evidence; a `SELFTEST-LEG ` line proves the instrument, never the product.
+#
 # Note    : this script emits no ANSI colour codes in its own output. A future CI-style
 #           consumer piping `LEG ` lines through a line-anchored parser must not assume a
 #           colour-stripping step exists upstream -- this project has hit the
@@ -109,10 +116,21 @@ TAB="$(printf '\t')"
 # downstream grep in this repo (incl. 61-07) expects.
 # ---------------------------------------------------------------------------------------
 RESULTS=()
+
+# IN-03: the verdict-line prefix, so a HOST-ONLY --selftest transcript is never mistaken for a
+# DEVICE run. A healthy --selftest prints dozens of verdict lines -- many of them FAIL, all of
+# them carrying the same `locale=... serial=...` evidence tail a real device run produces --
+# because rejecting a broken fixture IS the selftest passing. With one shared prefix,
+# `grep -c "LEG clipping: PASS"` could not tell the two apart, and this file's own header warns
+# about exactly that class of line-anchored consumer. run_selftest() overrides this to
+# SELFTEST-LEG for the whole of its run; the device path keeps the historical `LEG ` prefix
+# every 61-07 evidence file and downstream grep already expects.
+VERDICT_PREFIX="LEG"
+
 record_leg() {
   local name="$1" verdict="$2" evidence="$3"
   RESULTS+=("${name}|${verdict}|${evidence}")
-  echo "LEG ${name}: ${verdict} (${evidence})"
+  echo "${VERDICT_PREFIX} ${name}: ${verdict} (${evidence})"
 }
 
 # WR-06 -- FAIL-CLOSED. A leg counts as passing only if its verdict is EXACTLY "PASS".
@@ -124,7 +142,7 @@ record_leg() {
 any_failed() {
   local r name verdict rest
   if [ "${#RESULTS[@]}" -eq 0 ]; then
-    echo "LEG (none): ERROR (no leg produced a verdict -- refusing to report success)" >&2
+    echo "${VERDICT_PREFIX} (none): ERROR (no leg produced a verdict -- refusing to report success)" >&2
     return 0
   fi
   for r in "${RESULTS[@]}"; do
@@ -861,6 +879,11 @@ run_selftest() {
   DENSITY_DPI=320
   SCREEN_W=720
   SCREEN_H=1520
+  # IN-03: every verdict line below is a HOST-ONLY fixture result, not a device measurement, and
+  # most of the FAIL ones are the selftest working correctly. Prefix them distinctly so no
+  # line-anchored consumer can count a selftest transcript as device evidence. run_selftest()
+  # always exits before returning, so this never leaks back into a device run.
+  VERDICT_PREFIX="SELFTEST-LEG"
 
   local mismatches=0
   local f
