@@ -61,8 +61,13 @@ ADBD="-s ${SERIAL}"
 LOCALE="${LOCALE:-en}"
 FIXTURES_DIR="scripts/lib/__fixtures__/timeline-geometry"
 
-# ROW_DISPLAY's ten stage ids (apps/VoteTorrentVoter/src/components/TimelineRow.tsx:48-59),
-# in the same order. The preflight must positively locate a card anchor for every one.
+# The ten stage ids of the exported `ROW_DISPLAY` map in
+# apps/VoteTorrentVoter/src/components/TimelineRow.tsx, in the same order. The preflight must
+# positively locate a card anchor for every one.
+#
+# IN-02: cite the SYMBOL, never a line range. This comment used to say `TimelineRow.tsx:48-59`;
+# by the end of the same phase that wrote it, `ROW_DISPLAY` had moved to :57-68 and :48-59 was
+# the tail of an unrelated interface. A grep for the symbol survives any edit above it.
 EXPECTED_STAGES=(registrationEnds ballotsFinal votingStarts accruingVotes hashingVotes releasingKeys tallyingStarts validation certificationStarts closed)
 
 # D-06: env overrides read from the device when unset; --selftest sets these explicitly so
