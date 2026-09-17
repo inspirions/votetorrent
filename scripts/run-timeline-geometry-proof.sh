@@ -106,10 +106,23 @@ record_leg() {
   echo "LEG ${name}: ${verdict} (${evidence})"
 }
 
+# WR-06 -- FAIL-CLOSED. A leg counts as passing only if its verdict is EXACTLY "PASS".
+# Anything else fails the run: "FAIL", "ERROR", an unrecognised token, or an EMPTY verdict
+# (what a leg whose awk silently matched nothing produces). The previous form tested for the
+# literal "|FAIL|" substring, so every one of those cases exited 0 -- a harness that cannot
+# report the failure of its own instrument. An empty RESULTS set (no leg ran at all) is also
+# a failure, never a silent success.
 any_failed() {
-  local r
+  local r name verdict rest
+  if [ "${#RESULTS[@]}" -eq 0 ]; then
+    echo "LEG (none): ERROR (no leg produced a verdict -- refusing to report success)" >&2
+    return 0
+  fi
   for r in "${RESULTS[@]}"; do
-    [[ "${r}" == *"|FAIL|"* ]] && return 0
+    IFS='|' read -r name verdict rest <<< "${r}"
+    if [ "${verdict}" != "PASS" ]; then
+      return 0
+    fi
   done
   return 1
 }
@@ -608,7 +621,7 @@ collect_records() {
 leg_clipping() {
   local records_file="$1"
   awk -v FS="${TAB}" -v locale="${LOCALE}" -v serial="${SERIAL}" -v serial_note="${SERIAL_NOTE}" '
-    $1=="CARD" { card_x2[$2] = $5 }
+    $1=="CARD" { card_x2[$2] = $5; n_cards++ }
     $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
     $1=="TEXT" {
       count_text++
@@ -626,6 +639,11 @@ leg_clipping() {
         printf "FAIL\tdegenerate-bounds: stage=%s text=\"%s\" locale=%s serial=%s%s\n", deg_stage, deg_text, locale, serial, note
       } else if (clip_stage != "") {
         printf "FAIL\tclipped-text: stage=%s text=\"%s\" text.x2=%s card.x2=%s locale=%s serial=%s%s\n", clip_stage, clip_text, clip_tx2, clip_cx2, locale, serial, note
+      } else if (count_text+0 == 0) {
+        # WR-06: zero measured nodes is NOT a pass. The cards resolved but nothing inside them
+        # did -- the shape a parser regression takes. Reporting PASS here is a gate certifying
+        # its own blindness.
+        printf "FAIL\tno-measurement: 0 text node(s) measured inside %d resolved card(s) locale=%s serial=%s%s\n", n_cards+0, locale, serial, note
       } else {
         printf "PASS\tclean: %d text node(s) measured locale=%s serial=%s%s\n", count_text, locale, serial, note
       }
@@ -675,6 +693,9 @@ leg_duplicates() {
       }
       if (dup_stage != "") {
         printf "FAIL\tduplicate-label: stage=%s text=\"%s\" locale=%s serial=%s%s\n", dup_stage, dup_text, locale, serial, note
+      } else if (n+0 == 0) {
+        # WR-06: "no duplicates found" among ZERO candidates is vacuous, not a pass.
+        printf "FAIL\tno-measurement: 0 text node(s) available to compare locale=%s serial=%s%s\n", locale, serial, note
       } else {
         printf "PASS\tno duplicate action labels locale=%s serial=%s%s\n", locale, serial, note
       }
@@ -706,6 +727,9 @@ leg_touch_targets() {
       }
       if (bad_stage != "") {
         printf "FAIL\tundersized-target: stage=%s resource-id=%s measured=%dx%dpx threshold=%dpx(44dp@%ddpi) locale=%s serial=%s%s\n", bad_stage, bad_rid, bad_w, bad_h, thr, density, locale, serial, note
+      } else if (count+0 == 0) {
+        # WR-06: "all targets are large enough" across ZERO targets is vacuous, not a pass.
+        printf "FAIL\tno-measurement: 0 touch target(s) measured locale=%s serial=%s%s\n", locale, serial, note
       } else {
         printf "PASS\t%d touch target(s) measured, all >= %dpx (44dp@%ddpi) locale=%s serial=%s%s\n", count+0, thr, density, locale, serial, note
       }
@@ -720,18 +744,39 @@ LAST_VERDICT=""
 LAST_EVIDENCE=""
 run_leg() {
   local name="$1" records_file="$2"
-  local out
+  local out="" rc=0
   case "${name}" in
-    clipping) out=$(leg_clipping "${records_file}") ;;
-    duplicates) out=$(leg_duplicates "${records_file}") ;;
-    touch-targets) out=$(leg_touch_targets "${records_file}") ;;
+    clipping) out=$(leg_clipping "${records_file}") || rc=$? ;;
+    duplicates) out=$(leg_duplicates "${records_file}") || rc=$? ;;
+    touch-targets) out=$(leg_touch_targets "${records_file}") || rc=$? ;;
     *)
       echo "run_leg: unknown leg '${name}'" >&2
       return 1
       ;;
   esac
+
+  # WR-06: a leg whose awk died, or that printed nothing at all, has NOT passed -- it failed to
+  # measure. Record it as ERROR so the fail-closed any_failed() below trips on it.
+  if [ "${rc}" -ne 0 ] || [ -z "${out}" ]; then
+    LAST_VERDICT="ERROR"
+    LAST_EVIDENCE="leg produced no verdict line (exit=${rc}) locale=${LOCALE} serial=${SERIAL}"
+    record_leg "${name}" "${LAST_VERDICT}" "${LAST_EVIDENCE}"
+    return 0
+  fi
+
   LAST_VERDICT="${out%%${TAB}*}"
   LAST_EVIDENCE="${out#*${TAB}}"
+
+  # WR-06: only PASS and FAIL are legal verdict tokens. Anything else means the leg's own
+  # printf drifted from this contract; treat it as ERROR rather than letting it read as a pass.
+  case "${LAST_VERDICT}" in
+    PASS|FAIL) ;;
+    *)
+      LAST_EVIDENCE="unrecognised verdict token '"'"'${LAST_VERDICT}'"'"' in leg output: ${out}"
+      LAST_VERDICT="ERROR"
+      ;;
+  esac
+
   record_leg "${name}" "${LAST_VERDICT}" "${LAST_EVIDENCE}"
 }
 
@@ -750,7 +795,10 @@ run_selftest() {
 
   local mismatches=0
   local f
-  for f in clean clipped degenerate missing-node; do
+  # WR-06/W-1: fixture list is an array so the summary count below cannot drift from it.
+  local fixtures=(clean clipped degenerate missing-node no-measurement)
+  local total="${#fixtures[@]}"
+  for f in "${fixtures[@]}"; do
     local xml="${FIXTURES_DIR}/${f}.xml"
     if [ ! -f "${xml}" ]; then
       echo "SELFTEST MISMATCH: ${f} -- fixture file missing: ${xml}"
@@ -827,17 +875,38 @@ run_selftest() {
           ok=0
         fi
         ;;
+      no-measurement)
+        # WR-06: the cards resolve but nothing inside them does. A gate that measured zero
+        # nodes must never report success -- ALL THREE legs must FAIL for their own
+        # `no-measurement` reason, not fall through to a PASS on an empty count.
+        if [ "${clip_verdict}" != "FAIL" ] || [[ "${clip_evidence}" != *"no-measurement"* ]]; then
+          echo "SELFTEST MISMATCH: no-measurement -- expected clipping FAIL naming no-measurement, got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [ "${dup_verdict}" != "FAIL" ] || [[ "${dup_evidence}" != *"no-measurement"* ]]; then
+          echo "SELFTEST MISMATCH: no-measurement -- expected duplicates FAIL naming no-measurement, got ${dup_verdict} (${dup_evidence})"
+          ok=0
+        fi
+        if [ "${tt_verdict}" != "FAIL" ] || [[ "${tt_evidence}" != *"no-measurement"* ]]; then
+          echo "SELFTEST MISMATCH: no-measurement -- expected touch-targets FAIL naming no-measurement, got ${tt_verdict} (${tt_evidence})"
+          ok=0
+        fi
+        if [[ "${clip_evidence}" == *"clipped-text"* || "${clip_evidence}" == *"anchor-missing"* || "${clip_evidence}" == *"degenerate-bounds"* ]]; then
+          echo "SELFTEST MISMATCH: no-measurement -- clipping evidence named a reason other than its own: ${clip_evidence}"
+          ok=0
+        fi
+        ;;
     esac
 
     [ "${ok}" -eq 0 ] && mismatches=$((mismatches + 1))
   done
 
   if [ "${mismatches}" -eq 0 ]; then
-    echo "SELFTEST: PASS (4/4 fixtures behaved as specified)"
+    echo "SELFTEST: PASS (${total}/${total} fixtures behaved as specified)"
     SCRIPT_EXIT_CODE=0
     exit 0
   else
-    echo "SELFTEST: FAIL ($((4 - mismatches))/4 fixtures behaved as specified)"
+    echo "SELFTEST: FAIL ($((total - mismatches))/${total} fixtures behaved as specified)"
     exit 1
   fi
 }
