@@ -23,8 +23,16 @@ import {useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import {useTranslation} from 'react-i18next';
 
-function remaining(targetIso: string, nowOffsetMs = 0): number {
-	return Math.max(0, new Date(targetIso).getTime() - (Date.now() + nowOffsetMs));
+/**
+ * WR-09: returns `null` for a `targetIso` this component cannot parse. Previously an unparsable
+ * value produced `NaN`, which `format()` then padded into a literal `NaN : NaN : NaN` -- and
+ * because `'NaN'.length === 3`, `maxDigits > 2` selected the SMALLER `h2` shrink step, so the
+ * failure rendered as a legitimately shrunken long countdown rather than as an error.
+ */
+function remaining(targetIso: string, nowOffsetMs = 0): number | null {
+	const targetMs = new Date(targetIso).getTime();
+	if (!Number.isFinite(targetMs)) return null;
+	return Math.max(0, targetMs - (Date.now() + nowOffsetMs));
 }
 
 /** D2 root-cause fix: adaptive units at the 24h boundary, discriminated union. */
@@ -78,6 +86,10 @@ export function CountdownTimer({targetIso, nowOffsetMs = 0}: {targetIso: string;
 			sub.remove();
 		};
 	}, [targetIso, nowOffsetMs]);
+
+	// WR-09: render nothing rather than a NaN countdown. Consistent with TimelineRail's CR-02
+	// guard -- degrade to "no countdown", never to a plausible-looking wrong one.
+	if (remainingMs === null) return null;
 
 	const formatted = format(remainingMs);
 

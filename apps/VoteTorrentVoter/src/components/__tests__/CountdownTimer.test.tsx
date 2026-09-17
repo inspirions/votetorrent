@@ -58,6 +58,35 @@ describe('CountdownTimer (HOME-01, D-09)', () => {
 		expect(text).toContain('02');
 	});
 
+	it.each([
+		['a non-date string', 'not-a-date'],
+		['an empty string', ''],
+		['a truncated ISO fragment', '2026-13-45T99:99:99Z'],
+	])('WR-09: an unparsable targetIso (%s) renders nothing instead of a NaN countdown', (_label, badIso) => {
+		let tr!: renderer.ReactTestRenderer;
+		renderer.act(() => {
+			tr = renderer.create(withTheme(<CountdownTimer targetIso={badIso} />));
+		});
+		// Before the fix this rendered literal 'NaN : NaN : NaN' -- and because 'NaN'.length === 3,
+		// maxDigits > 2 selected the SMALLER h2 shrink step, so it read as a legitimately shrunken
+		// long countdown rather than as an error.
+		const text = tr.root.findAll(node => typeof node.props.children === 'string')
+			.map(node => node.props.children)
+			.join(' ');
+		expect(text).not.toContain('NaN');
+		expect(tr.root.findAllByProps({testID: 'countdown-hours-value'}, {deep: false})).toHaveLength(0);
+		expect(tr.toJSON()).toBeNull();
+	});
+
+	it('WR-09 (positive): a valid targetIso still renders its groups -- the guard does not blank a working countdown', () => {
+		let tr!: renderer.ReactTestRenderer;
+		renderer.act(() => {
+			tr = renderer.create(withTheme(<CountdownTimer targetIso={FUTURE_ISO} />));
+		});
+		expect(tr.toJSON()).not.toBeNull();
+		expect(tr.root.findByProps({testID: 'countdown-hours-value'}).props.children).toBe('02');
+	});
+
 	it('decrements the seconds group by exactly 1 after one 1000ms tick (recomputed from target, not a decrementing counter)', () => {
 		let tr!: renderer.ReactTestRenderer;
 		renderer.act(() => {
