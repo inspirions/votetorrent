@@ -42,8 +42,23 @@ describe('CountdownTimer (HOME-01, D-09)', () => {
 		jest.setSystemTime(NOW);
 	});
 
-	afterEach(() => {
+	// WR-03: the language reset belongs HERE, not as the last statement of the one test body that
+	// changes it. `i18n` is a module singleton and `jest.config.js` declares no
+	// `setupFilesAfterEnv`, so nothing resets it between tests. If an assertion in the `es`
+	// iteration of the it.each below threw, the in-body restore never ran and every later test in
+	// this file asserting 'hours'/'minutes'/'seconds' failed against 'horas'/'minutos'/'segundos'
+	// -- burying the one real failure under a cascade of seven. Both sibling suites
+	// (TimelineRow.test.tsx:49, TimelineRail.test.tsx:41) already reset it in an afterEach.
+	//
+	// The call is `renderer.act`-wrapped for the same reason the in-body ones are (IN-05): these
+	// tests never unmount their trees, so an un-wrapped language switch re-renders every
+	// still-mounted CountdownTimer. Measured: 171 "not wrapped in act(...)" warnings across the
+	// 18 tests with a bare `await i18n.changeLanguage('en')` here, 0 with the wrapper.
+	afterEach(async () => {
 		jest.useRealTimers();
+		await renderer.act(async () => {
+			await i18n.changeLanguage('en');
+		});
 	});
 
 	it('renders the correct HH:MM:SS three 2-digit groups on initial render', () => {
