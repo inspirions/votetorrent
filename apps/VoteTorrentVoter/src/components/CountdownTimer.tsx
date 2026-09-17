@@ -63,6 +63,61 @@ function format(ms: number): FormattedCountdown {
 	return {unit: 'short', hours: pad(hours), minutes: pad(minutes), seconds: pad(seconds)};
 }
 
+/**
+ * WR-01 -- OS TEXT SCALING IS CAPPED ON THIS SURFACE. RATIFIED PRODUCT DECISION, NOT AN
+ * OVERSIGHT. DO NOT "FIX" IT BACK WITHOUT REVERSING THE DECISION.
+ *
+ * RN `<Text>` defaults to `allowFontScaling: true`, so every `fontSize` this component resolves
+ * is multiplied by the OS text-size setting. `maxFontSizeMultiplier` clamps that multiplier per
+ * node (RN 0.78 `Libraries/Text/Text.d.ts`: `>= 1` sets this node's max; `1` therefore means "no
+ * scaling"). Applied below to ALL THREE text nodes -- digits, colons AND labels.
+ *
+ * WHY THE CAP EXISTS. Every width claim this component rests on -- the two shrink steps picked by
+ * `needsShrink`, and `themes.ts` `captionSmall`'s own derivation -- is a PIXEL measurement taken
+ * on the Redmi 8 at DEFAULT scale only, against a ~371px card inner width:
+ *
+ *   row                      measured width   max scale before it clips
+ *   <24h  labels @12px, EN   ~329px           1.128
+ *   <24h  labels @12px, ES   ~345px           1.075
+ *   >=24h labels @16px       ~362px           1.025
+ *
+ * Uncapped, those measurements hold at 1.0x and nowhere else. Android's first step above default
+ * is *Large* = 1.15x, which clips every row in that table -- and the <24h branch is ALREADY on
+ * the smaller of the two shrink steps, so there is no third step to fall back to.
+ *
+ * WHY ONE VALUE, NOT ONE PER BRANCH. A single cap is governed by the tightest row, and that is
+ * the >=24h row at 1.025 -- which is also the most common render on the screen. Per-branch caps
+ * were considered and rejected on two grounds. (1) The headroom they buy is imperceptible: a 1.07
+ * cap on the <24h branch takes a 12px label to 12.84px. (2) `needsShrink` is NOT the <24h/>=24h
+ * discriminant -- it also fires for a >=100-day >=24h render, whose width nobody has measured --
+ * so the looser cap would silently extend to an unmeasured case, which is the exact defect class
+ * WR-01 raised. 1.025 itself is not used as the value because it sits inside the error bar of the
+ * ~20.6px/glyph average the table is derived from, and no OS exposes a step between 1.0 and
+ * 1.025, so any cap in that interval renders identically to 1 on real hardware while reading as
+ * a measured allowance it is not. Hence 1.
+ *
+ * THE TRADE-OFF, STATED PLAINLY. This deliberately pins the sub-labels (and the digits) at their
+ * authored sizes for a user who has enlarged system text. That is a real accessibility cost and
+ * it was accepted knowingly. The countdown is a fixed-width numeric display inside a fixed-width
+ * card that cannot reflow -- `styles.row` is a `flexDirection: 'row'` with no wrap -- so scaled-up
+ * text does not move onto a second line, it clips, and clipped digits are unreadable outright.
+ * Pinned-but-legible was judged better than scaled-but-clipped. This was raised twice as a code
+ * review finding and skipped twice as too large a call for a fixer agent to make silently; the
+ * product owner then decided it on the record. A future reader must not read the cap as a missed
+ * accessibility default and remove it.
+ *
+ * IF THE DECISION IS EVER REVERSED, the remedy is layout, not a looser multiplier: let the label
+ * row wrap/reflow, or measure it (`onTextLayout`/`onLayout` against the wrapper's measured width)
+ * and shrink from the observed overflow -- the same measured fix the WR-02 note below names for
+ * the character-count proxy. Either way it needs a device run to confirm.
+ *
+ * SCOPE. Confined to the countdown surface on purpose: WR-01 is about the COUNTDOWN's pixel-width
+ * claim. Nothing else in either app controls font scaling today, and whether the apps should do
+ * so globally is a separate question that has NOT been decided. Do not generalise this constant
+ * outward without deciding that question first.
+ */
+const COUNTDOWN_MAX_FONT_SCALE = 1;
+
 export function CountdownTimer({targetIso, nowOffsetMs = 0}: {targetIso: string; nowOffsetMs?: number}) {
 	const [remainingMs, setRemainingMs] = useState(() => remaining(targetIso, nowOffsetMs));
 	const {colors, fonts, type: typeScale} = useTheme() as ExtendedTheme;
@@ -171,12 +226,19 @@ export function CountdownTimer({targetIso, nowOffsetMs = 0}: {targetIso: string;
 		<View style={styles.row}>
 			{groups.map((group, index) => (
 				<React.Fragment key={group.testId}>
-					{index > 0 && <Text style={[digitStyle, styles.colon]}>:</Text>}
+					{index > 0 && (
+						<Text style={[digitStyle, styles.colon]} maxFontSizeMultiplier={COUNTDOWN_MAX_FONT_SCALE}>
+							:
+						</Text>
+					)}
 					<View style={styles.group}>
-						<Text style={digitStyle} testID={`countdown-${group.testId}-value`}>
+						<Text style={digitStyle} maxFontSizeMultiplier={COUNTDOWN_MAX_FONT_SCALE} testID={`countdown-${group.testId}-value`}>
 							{group.value}
 						</Text>
-						<Text style={[labelStyle, styles.label]} testID={`countdown-${group.testId}-label`}>
+						<Text
+							style={[labelStyle, styles.label]}
+							maxFontSizeMultiplier={COUNTDOWN_MAX_FONT_SCALE}
+							testID={`countdown-${group.testId}-label`}>
 							{t(group.labelKey)}
 						</Text>
 					</View>

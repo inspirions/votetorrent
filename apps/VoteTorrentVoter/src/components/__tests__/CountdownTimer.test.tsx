@@ -5,7 +5,7 @@
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
-import {StyleSheet} from 'react-native';
+import {StyleSheet, Text} from 'react-native';
 import {ThemeProvider} from '@react-navigation/native';
 import {CountdownTimer} from '../CountdownTimer';
 import {lightTheme} from '../../theme/themes';
@@ -169,6 +169,70 @@ describe('CountdownTimer (HOME-01, D-09)', () => {
 			const tr = render(LONG_3DIGIT_ISO);
 			expect(labelSize(tr, 'countdown-days-label')).toBe(lightTheme.type.captionSmall.fontSize);
 			expect(StyleSheet.flatten(tr.root.findByProps({testID: 'countdown-days-value'}).props.style).fontSize).toBe(lightTheme.type.h2.fontSize);
+		});
+	});
+
+	/**
+	 * WR-01. The shrink-to-fit steps above are PIXEL measurements taken at DEFAULT OS text scale
+	 * only (~329px EN / ~345px ES for the <24h label row, ~362px for the >=24h one, against a
+	 * ~371px card inner width) -- so uncapped they hold at 1.0x and nowhere else, and Android's
+	 * first step above default (*Large*, 1.15x) clips all three. The countdown therefore caps
+	 * `maxFontSizeMultiplier` at 1. See CountdownTimer.tsx's WR-01 note for the ratified
+	 * product/accessibility trade-off; this block pins that the cap is actually authored.
+	 *
+	 * It pins BOTH branches and, in each, BOTH the digits and the LABELS. Capping only the
+	 * numerals would repeat CR-01 exactly -- that defect was a shrink step that reached the digits
+	 * and left the labels, which are the wider element, untouched.
+	 *
+	 * Tier note: this asserts the authored prop, which is all Tier 1 can see. That scaled text
+	 * actually stops growing on hardware is a Tier 2 claim.
+	 */
+	describe('WR-01: OS text-scaling cap', () => {
+		/**
+		 * Written as a literal rather than imported from the component on purpose: a test that
+		 * reads the component's own constant agrees with whatever value the component picked,
+		 * including a cap loosened past the 1.025 the >=24h row was measured to allow.
+		 */
+		const EXPECTED_CAP = 1;
+
+		const render = (iso: string) => {
+			let tr!: renderer.ReactTestRenderer;
+			renderer.act(() => {
+				tr = renderer.create(withTheme(<CountdownTimer targetIso={iso} />));
+			});
+			return tr;
+		};
+		const capOf = (tr: renderer.ReactTestRenderer, testID: string) =>
+			tr.root.findByProps({testID}).props.maxFontSizeMultiplier;
+
+		it.each<[string, string, string[]]>([
+			['<24h', BOUNDARY_BELOW_ISO, ['hours', 'minutes', 'seconds']],
+			['>=24h', LONG_ISO, ['days', 'hours', 'minutes']],
+		])('%s branch: every digit AND every label caps font scaling at 1', (_branch, iso, groupIds) => {
+			const tr = render(iso);
+			// Non-vacuity first: prove the groups this branch is supposed to render are present,
+			// so a rename of a testID cannot turn the assertions below into zero assertions.
+			for (const id of groupIds) {
+				expect(tr.root.findAllByProps({testID: `countdown-${id}-value`}).length).toBeGreaterThan(0);
+				expect(tr.root.findAllByProps({testID: `countdown-${id}-label`}).length).toBeGreaterThan(0);
+			}
+			for (const id of groupIds) {
+				expect(capOf(tr, `countdown-${id}-value`)).toBe(EXPECTED_CAP);
+				expect(capOf(tr, `countdown-${id}-label`)).toBe(EXPECTED_CAP);
+			}
+		});
+
+		it.each<[string, string]>([
+			['<24h', BOUNDARY_BELOW_ISO],
+			['>=24h', LONG_ISO],
+		])('%s branch: NO Text node is left uncapped -- the separator colons included', (_branch, iso) => {
+			const tr = render(iso);
+			const texts = tr.root.findAllByType(Text);
+			// 3 digit groups + 3 labels + 2 separator colons. Pinned, not just ">0": the colons
+			// carry no testID, so a sweep that silently missed them would still look green.
+			expect(texts).toHaveLength(8);
+			const uncapped = texts.filter(node => node.props.maxFontSizeMultiplier !== EXPECTED_CAP);
+			expect(uncapped.map(node => node.props.testID ?? `(untagged: ${String(node.props.children)})`)).toEqual([]);
 		});
 	});
 
