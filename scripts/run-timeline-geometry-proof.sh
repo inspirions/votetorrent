@@ -227,10 +227,17 @@ BEGIN {
 
     if (role == "notch" && (cand_stage in stage_set)) {
       parent_depth = cur_depth - 1
+      # WR-05: field 7 records whether the card rectangle was actually parsed. A card whose
+      # parent bounds do not parse used to be emitted as a bare 0/0/0/0 rectangle that read as a
+      # legitimate measurement: collect_records() accepted it as "fully visible" (0 >= 0 and
+      # 0 <= SCREEN_H), and leg_clipping then compared every text in that card against
+      # card_x2 = 0 and reported the first one as "clipped-text". The run failed -- correctly --
+      # but named the wrong root cause, which is exactly the discipline the selftest enforces on
+      # every other reason. Naming it here lets all three legs report "degenerate-card" instead.
       if (parse_bounds(bounds_at_depth[parent_depth], cb)) {
-        printf "CARD\t%s\t%s\t%s\t%s\t%s\n", cand_stage, cb[1], cb[2], cb[3], cb[4]
+        printf "CARD\t%s\t%s\t%s\t%s\t%s\t%s\n", cand_stage, cb[1], cb[2], cb[3], cb[4], "measured"
       } else {
-        printf "CARD\t%s\t0\t0\t0\t0\n", cand_stage
+        printf "CARD\t%s\t0\t0\t0\t0\t%s\n", cand_stage, "degenerate"
       }
       card_stage = cand_stage
       card_depth = parent_depth
@@ -582,7 +589,14 @@ collect_records() {
 leg_clipping() {
   local records_file="$1"
   awk -v FS="${TAB}" -v locale="${LOCALE}" -v serial="${SERIAL}" -v serial_note="${SERIAL_NOTE}" '
-    $1=="CARD" { card_x1[$2] = $3; card_y1[$2] = $4; card_x2[$2] = $5; card_y2[$2] = $6; n_cards++ }
+    $1=="CARD" {
+      card_x1[$2] = $3; card_y1[$2] = $4; card_x2[$2] = $5; card_y2[$2] = $6; n_cards++
+      # WR-05: checked FIRST in END, ahead of anchor-missing. A degenerate CARD still counts as a
+      # CARD for the ORPHAN reconciliation, so it suppresses anchor-missing anyway; and every
+      # comparison this leg would otherwise make is against a 0/0/0/0 rectangle, which
+      # manufactures a bogus clipped-text verdict. Name the card, not its symptom.
+      if ($7=="degenerate" && deg_card=="") deg_card=$2
+    }
     $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
     $1=="TEXT" {
       stage=$2; x1=$3; y1=$4; x2=$5; y2=$6; source=$7; text=$9
@@ -620,7 +634,9 @@ leg_clipping() {
     }
     END {
       note = (serial_note=="substituted") ? " serial_note=substituted" : ""
-      if (orphan_list != "") {
+      if (deg_card != "") {
+        printf "FAIL\tdegenerate-card: stage=%s (card bounds did not parse -- every comparison against this card is meaningless) locale=%s serial=%s%s\n", deg_card, locale, serial, note
+      } else if (orphan_list != "") {
         printf "FAIL\tanchor-missing: %s locale=%s serial=%s%s\n", orphan_list, locale, serial, note
       } else if (deg_stage != "") {
         printf "FAIL\tdegenerate-bounds: stage=%s text=\"%s\" locale=%s serial=%s%s\n", deg_stage, deg_text, locale, serial, note
@@ -648,6 +664,9 @@ leg_clipping() {
 leg_duplicates() {
   local records_file="$1"
   awk -v FS="${TAB}" -v locale="${LOCALE}" -v serial="${SERIAL}" -v serial_note="${SERIAL_NOTE}" '
+    # WR-05: see leg_clipping -- a card whose own rectangle did not parse must be named as such
+    # by every leg, not left to surface as some downstream symptom.
+    $1=="CARD" && $7=="degenerate" && deg_card=="" { deg_card=$2 }
     $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
     $1=="TEXT" {
       n++; t_stage[n]=$2; t_x1[n]=$3; t_y1[n]=$4; t_x2[n]=$5; t_y2[n]=$6; t_source[n]=$7; t_click[n]=$8; t_text[n]=$9
@@ -658,6 +677,10 @@ leg_duplicates() {
     }
     END {
       note = (serial_note=="substituted") ? " serial_note=substituted" : ""
+      if (deg_card != "") {
+        printf "FAIL\tdegenerate-card: stage=%s (card bounds did not parse -- every comparison against this card is meaningless) locale=%s serial=%s%s\n", deg_card, locale, serial, note
+        exit
+      }
       if (orphan_list != "") {
         printf "FAIL\tanchor-missing: %s locale=%s serial=%s%s\n", orphan_list, locale, serial, note
         exit
@@ -701,6 +724,9 @@ leg_touch_targets() {
   local records_file="$1"
   local threshold_px=$((44 * DENSITY_DPI / 160))
   awk -v FS="${TAB}" -v locale="${LOCALE}" -v serial="${SERIAL}" -v serial_note="${SERIAL_NOTE}" -v thr="${threshold_px}" -v density="${DENSITY_DPI}" '
+    # WR-05: see leg_clipping -- a card whose own rectangle did not parse must be named as such
+    # by every leg, not left to surface as some downstream symptom.
+    $1=="CARD" && $7=="degenerate" && deg_card=="" { deg_card=$2 }
     $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
     $1=="TEXT" && $7=="degenerate" && deg_stage=="" { deg_stage=$2; deg_text=$9 }
     $1=="CLICK" {
@@ -711,6 +737,10 @@ leg_touch_targets() {
     }
     END {
       note = (serial_note=="substituted") ? " serial_note=substituted" : ""
+      if (deg_card != "") {
+        printf "FAIL\tdegenerate-card: stage=%s (card bounds did not parse -- every comparison against this card is meaningless) locale=%s serial=%s%s\n", deg_card, locale, serial, note
+        exit
+      }
       if (orphan_list != "") {
         printf "FAIL\tanchor-missing: %s locale=%s serial=%s%s\n", orphan_list, locale, serial, note
         exit
@@ -790,7 +820,7 @@ run_selftest() {
   local mismatches=0
   local f
   # WR-06/W-1: fixture list is an array so the summary count below cannot drift from it.
-  local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized clipped-left clipped-vertical unmeasurable-fallback)
+  local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized clipped-left clipped-vertical unmeasurable-fallback degenerate-card)
   local total="${#fixtures[@]}"
 
   # CR-01: the fixture ARRAY and the fixtures on DISK must be the same set. A file on disk that
@@ -990,6 +1020,30 @@ run_selftest() {
         fi
         if [ "${tt_verdict}" != "PASS" ]; then
           echo "SELFTEST MISMATCH: unmeasurable-fallback -- expected touch-targets PASS (the fallback must still LOCATE the node), got ${tt_verdict} (${tt_evidence})"
+          ok=0
+        fi
+        ;;
+      degenerate-card)
+        # WR-05: the notch resolves, the card ViewGroup's bounds do not parse. The run always
+        # failed (fail-closed, good) but named `clipped-text` -- because leg_clipping compared
+        # every text against the 0/0/0/0 card rectangle -- which is the wrong root cause, and no
+        # fixture covered a degenerate CARD at all. All three legs must now name it.
+        if [ "${clip_verdict}" != "FAIL" ] || [[ "${clip_evidence}" != *"degenerate-card"* ]]; then
+          echo "SELFTEST MISMATCH: degenerate-card -- expected clipping FAIL naming degenerate-card, got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [ "${dup_verdict}" != "FAIL" ] || [[ "${dup_evidence}" != *"degenerate-card"* ]]; then
+          echo "SELFTEST MISMATCH: degenerate-card -- expected duplicates FAIL naming degenerate-card, got ${dup_verdict} (${dup_evidence})"
+          ok=0
+        fi
+        if [ "${tt_verdict}" != "FAIL" ] || [[ "${tt_evidence}" != *"degenerate-card"* ]]; then
+          echo "SELFTEST MISMATCH: degenerate-card -- expected touch-targets FAIL naming degenerate-card, got ${tt_verdict} (${tt_evidence})"
+          ok=0
+        fi
+        # `degenerate-bounds` is a substring-safe negative here only because the reason token is
+        # `degenerate-card`; both are checked explicitly against the other three reasons.
+        if [[ "${clip_evidence}" == *"clipped-text"* || "${clip_evidence}" == *"anchor-missing"* || "${clip_evidence}" == *"degenerate-bounds"* || "${clip_evidence}" == *"no-measurement"* ]]; then
+          echo "SELFTEST MISMATCH: degenerate-card -- clipping evidence named a reason other than its own: ${clip_evidence}"
           ok=0
         fi
         ;;
