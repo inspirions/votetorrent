@@ -306,33 +306,54 @@ describe('TimelineRow (59-07)', () => {
 
 	it('61-06 D-10/D-11: the countdown wrapper centres under a production-length countdown row', () => {
 		const fixture = buildRowFixtureWithLongCountdown();
-		expect(Math.floor(fixture.remainingSeconds / 3600)).toBe(4304);
 
-		const row = fixture.rows.find(r => r.stageId === 'votingStarts')!;
-		expect(row.status).toBe('current');
+		// WR-02: pin the clock to the fixture's OWN nowMs before rendering. CountdownTimer derives
+		// `remaining()` from the real `Date.now()` against the fixture's FIXED target
+		// (2026-09-18T20:00Z), so without this the row rendered whatever the wall clock made it --
+		// `1 : 13 : ..` on the day this was written, `00 : 00 : 00` from 2026-09-19 onward -- and
+		// never the 4304-hour case this test is named for. The old assertions (marginTop,
+		// alignItems) are clock-independent style props, so it passed either way.
+		jest.useFakeTimers();
+		jest.setSystemTime(fixture.nowMs);
 
-		const tr = renderRow({row, countdownTargetIso: fixture.countdownTargetIso});
+		try {
+			const row = fixture.rows.find(r => r.stageId === 'votingStarts')!;
+			expect(row.status).toBe('current');
 
-		const countdown = tr.root.findByType(CountdownTimer);
-		let wrapper: renderer.ReactTestInstance | null = countdown.parent;
-		while (wrapper) {
-			const flat = flattenStyle(wrapper);
-			// D-09 addendum (61-08, C1, developer-approved): 16 (md) -> 24 (lg).
-			if (flat.marginTop === 24) {
-				break;
+			const tr = renderRow({row, countdownTargetIso: fixture.countdownTargetIso});
+
+			const countdown = tr.root.findByType(CountdownTimer);
+			// WR-02: assert what the component RENDERED, not what the fixture was handed. The previous
+			// `expect(Math.floor(fixture.remainingSeconds / 3600)).toBe(4304)` compared a constant with
+			// itself and could never fail. 15_494_400s == 179d 08h 00m and is >2 digits, so this is also
+			// the only row-level case that exercises D2's h2 shrink step.
+			expect(countdown.props.targetIso).toBe(fixture.countdownTargetIso);
+			expect(tr.root.findByProps({testID: 'countdown-days-value'}).props.children).toBe('179');
+			expect(tr.root.findByProps({testID: 'countdown-hours-value'}).props.children).toBe('08');
+			expect(tr.root.findByProps({testID: 'countdown-minutes-value'}).props.children).toBe('00');
+
+			let wrapper: renderer.ReactTestInstance | null = countdown.parent;
+			while (wrapper) {
+				const flat = flattenStyle(wrapper);
+				// D-09 addendum (61-08, C1, developer-approved): 16 (md) -> 24 (lg).
+				if (flat.marginTop === 24) {
+					break;
+				}
+				wrapper = wrapper.parent;
 			}
-			wrapper = wrapper.parent;
-		}
-		expect(wrapper).not.toBeNull();
-		const wrapperFlat = flattenStyle(wrapper!);
-		// `alignItems`, not `justifyContent` -- the wrapper is a default `flexDirection: 'column'`
-		// View, so `alignItems` is the horizontal (cross) axis. `justifyContent` on a column acts on
-		// the vertical axis and would be an inert no-op.
-		expect(wrapperFlat.alignItems).toBe('center');
-		// D-09 addendum (61-08, C1, developer-approved): 16 (md) -> 24 (lg).
-		expect(wrapperFlat.marginTop).toBe(24);
+			expect(wrapper).not.toBeNull();
+			const wrapperFlat = flattenStyle(wrapper!);
+			// `alignItems`, not `justifyContent` -- the wrapper is a default `flexDirection: 'column'`
+			// View, so `alignItems` is the horizontal (cross) axis. `justifyContent` on a column acts on
+			// the vertical axis and would be an inert no-op.
+			expect(wrapperFlat.alignItems).toBe('center');
+			// D-09 addendum (61-08, C1, developer-approved): 16 (md) -> 24 (lg).
+			expect(wrapperFlat.marginTop).toBe(24);
 
-		const card = tr.root.findAllByType(View)[0];
-		expect(flattenStyle(card).marginVertical).toBe(TIMELINE_CARD_MARGIN_V);
+			const card = tr.root.findAllByType(View)[0];
+			expect(flattenStyle(card).marginVertical).toBe(TIMELINE_CARD_MARGIN_V);
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 });
