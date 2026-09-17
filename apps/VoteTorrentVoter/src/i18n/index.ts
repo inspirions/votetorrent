@@ -299,6 +299,11 @@ const resources = {
 			// __DEV__-only clock-offset control (D-05) — styled with colors.warning, never a
 			// production-affordance color, so it cannot be mistaken for a real control.
 			'dev.clockOffsetLabel': 'DEV: Clock offset',
+			// WR-04: the probe stop's suffix. It was an inline English literal concatenated onto the
+			// translated prefix, so under es the control read 'DEV: Ajuste de reloj Periodo de Votacion
+			// final day'. The i18n-parity test only walks literal single-argument translate call
+			// sites, so it was structurally unable to see it.
+			'dev.finalDayStop': 'final day',
 		},
 	},
 	es: {
@@ -534,6 +539,7 @@ const resources = {
 				'No se pudo leer el cronograma de la elección o aún no es válido. Inténtalo de nuevo en un momento.',
 			'indeterminate.retryCta': 'Intentar de nuevo',
 			'dev.clockOffsetLabel': 'DEV: Ajuste de reloj',
+			'dev.finalDayStop': 'último día',
 		},
 	},
 };

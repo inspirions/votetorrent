@@ -11,7 +11,7 @@
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
-import '../../../i18n';
+import i18n from '../../../i18n';
 import {TimelineRail} from '../../../components/TimelineRail';
 import {TIMELINE_STAGE_IDS} from '../../../timeline';
 
@@ -777,7 +777,7 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		// label-width defect shipped past a green suite AND a passing geometry gate.
 		await pressClockOffset(tr);
 		const probeLabel = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
-		expect(textOf(probeLabel)).toContain('final day');
+		expect(textOf(probeLabel)).toContain(i18n.t('dev.finalDayStop', {ns: 'timeline'}));
 		expect(textOf(probeLabel)).toContain('Voting Period');
 
 		// One more press returns to the live stop.
@@ -785,7 +785,7 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
 		expect(textOf(label)).toContain('0');
 		expect(textOf(label)).not.toContain('Registration Ends');
-		expect(textOf(label)).not.toContain('final day');
+		expect(textOf(label)).not.toContain(i18n.t('dev.finalDayStop', {ns: 'timeline'}));
 	});
 
 	it('a 7-of-10-key timeline offers exactly 9 stops (7 stages + final-day probe + live) -- absent instants are skipped, never a dead stop', async () => {
@@ -811,7 +811,7 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		// accruingVotes/hashingVotes/releasingKeys are absent, so the next instant after
 		// votingStarts is tallyingStarts itself and the probe at -23h still clears it.
 		await pressClockOffset(tr);
-		expect(textOf(tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'}))).toContain('final day');
+		expect(textOf(tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'}))).toContain(i18n.t('dev.finalDayStop', {ns: 'timeline'}));
 
 		// The 9th press is the live stop again.
 		await pressClockOffset(tr);

@@ -406,7 +406,13 @@ export default function TimelineScreen() {
 	const activeClockStop = clockStopIndex > 0 ? clockStops[clockStopIndex - 1] : undefined;
 	const clockOffsetLabel =
 		activeClockStop !== undefined && activeClockStop.probe
-			? `${t('dev.clockOffsetLabel')} ${t(STAGE_TITLE_KEY[activeClockStop.stageId])} final day`
+			? // WR-04: `final day` used to be an inline English literal here, concatenated onto an
+				// otherwise fully-translated label -- under es the control read
+				// "DEV: Ajuste de reloj Período de Votación final day". The i18n-parity test only
+				// walks literal single-argument translate call sites, so it could not see it. (Do NOT write
+				// that call shape out longhand here: the scanner greps source text, so quoting it in a
+				// comment makes this file report a missing key for the literal word in the quotes.)
+				`${t('dev.clockOffsetLabel')} ${t(STAGE_TITLE_KEY[activeClockStop.stageId])} ${t('dev.finalDayStop')}`
 			: activeClockStop !== undefined
 			? `${t('dev.clockOffsetLabel')} ${t(STAGE_TITLE_KEY[activeClockStop.stageId])} ${
 					Math.round((activeClockStop.instantMs - Date.now()) / 86_400_000) >= 0 ? '+' : ''
