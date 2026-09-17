@@ -242,4 +242,41 @@ describe('ElectionCard (HOME-01/02/03)', () => {
 			expect(tr.root.findAllByProps({testID: 'election-card-view-validation-details'}, {deep: false}).length).toBe(1);
 		});
 	});
+
+	/**
+	 * D-11 is a DELIBERATE DIVERGENCE requirement: `TimelineRow`'s countdown wrapper centres, and
+	 * Home's stays left-aligned, and "the two must not be reconciled" (`ElectionCard.tsx`'s own
+	 * marker comment). Only the centring half was ever asserted
+	 * (`TimelineRow.test.tsx`'s `61-06 D-10/D-11` test). Nothing guarded this half: a later edit
+	 * adding `alignItems: 'center'` here to "make the two match" would erase the divergence the
+	 * requirement exists to encode, and the whole voter suite would stay green.
+	 *
+	 * The wrapper carries no testID, so it is located by IDENTITY — the parent of the
+	 * `CountdownTimer` this card renders — never by scanning ancestors for a magic style value.
+	 * (That search shape is what IN-04 caught in the sibling suite: when the magic number moved,
+	 * the search silently found nothing and the assertion passed on an empty result.) The
+	 * marginTop check below is a FOUND-THE-RIGHT-NODE confirmation, not the search key.
+	 */
+	describe('D-11 deliberate divergence — Home\'s countdown stays LEFT-aligned', () => {
+		it.each(['Upcoming', 'ReleasingKeys', 'Validation'] as const)(
+			'%s: the View hosting the countdown declares no centring alignItems, unlike TimelineRow\'s wrapper',
+			state => {
+				const tr = renderCard(electionFor(state));
+
+				const wrapper = tr.root.findByType(CountdownTimer).parent;
+				expect(wrapper).not.toBeNull();
+
+				const flat: Record<string, unknown> = Object.assign(
+					{},
+					...(Array.isArray(wrapper!.props.style) ? wrapper!.props.style : [wrapper!.props.style]),
+				);
+
+				// Confirms this really is the styled countdown wrapper and not some incidental
+				// ancestor -- without it, a refactor that dropped the wrapper would leave the
+				// alignment assertion asserting nothing.
+				expect(flat.marginTop).toBe(16);
+				expect(flat.alignItems).toBeUndefined();
+			},
+		);
+	});
 });
