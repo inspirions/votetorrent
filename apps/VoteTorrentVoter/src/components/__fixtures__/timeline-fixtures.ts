@@ -173,15 +173,8 @@ export interface TimelineCountdownFixture {
  */
 export const LONG_COUNTDOWN_REMAINING_SECONDS = 15_494_400;
 
-/**
- * 23h 59m 59s -- one second below the `>= 86400` discriminant, the `86399` half of the D2
- * boundary pair. Renders `23 : 59 : 59` under both the old and new `format()` contracts (the
- * unchanged control).
- */
-export const SHORT_COUNTDOWN_REMAINING_SECONDS = 86_399;
-
-/** Options shared by both countdown builders. All members optional; unset members take the
- * documented per-builder default. */
+/** Options for the countdown builder. All members optional; unset members take the documented
+ * default. */
 interface TimelineCountdownFixtureOptions {
 	nowMs?: number;
 	remainingSeconds?: number;
@@ -189,9 +182,12 @@ interface TimelineCountdownFixtureOptions {
 	language?: string;
 }
 
-/** Shared construction path for both countdown builders (61-01). `validateBranch` is the one
- * piece of behavior that differs between the long and short builder -- which side of the `86400`
- * discriminant is legal for that builder to hand to `deriveTimeline`. */
+/** Construction path for the countdown builder (61-01). `validateBranch` is kept as a parameter
+ * rather than inlined: it was the one piece of behaviour that differed between the long and short
+ * builders, and the short builder (`buildRowFixtureWithShortCountdown`) was deleted in 2026-09-17's
+ * review-todo sweep as dead code -- exported, imported by nothing. The <24h branch is covered at the
+ * component level by CountdownTimer.test.tsx's CR-01 block. Restore from git if a ROW-level sub-24h
+ * fixture is ever wanted. */
 function buildCountdownFixture(
 	builderName: string,
 	defaultRemainingSeconds: number,
@@ -237,25 +233,6 @@ export function buildRowFixtureWithLongCountdown(options?: TimelineCountdownFixt
 		remainingSeconds => {
 			if (remainingSeconds < 86_400) {
 				throw new Error(`buildRowFixtureWithLongCountdown: remainingSeconds must be >= 86400 (got ${remainingSeconds})`);
-			}
-		},
-		options,
-	);
-}
-
-/**
- * Ten-row countdown fixture on the `< 86400`-second (same-day) side of the D2 branch boundary
- * (61-01, D2/D-07). Default `remainingSeconds` is `SHORT_COUNTDOWN_REMAINING_SECONDS` (`86_399`,
- * one second below the discriminant). Throws if handed a `remainingSeconds` on the long side
- * (`>= 86_400`) or `<= 0`.
- */
-export function buildRowFixtureWithShortCountdown(options?: TimelineCountdownFixtureOptions): TimelineCountdownFixture {
-	return buildCountdownFixture(
-		'buildRowFixtureWithShortCountdown',
-		SHORT_COUNTDOWN_REMAINING_SECONDS,
-		remainingSeconds => {
-			if (remainingSeconds >= 86_400) {
-				throw new Error(`buildRowFixtureWithShortCountdown: remainingSeconds must be < 86400 (got ${remainingSeconds})`);
 			}
 		},
 		options,

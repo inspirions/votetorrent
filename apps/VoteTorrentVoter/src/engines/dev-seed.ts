@@ -108,7 +108,6 @@ type SeedRegistrantAssociationFn = (
 // checking its actual `dist/dev/` output — not guessed).
 function loadRegistrantAssociationSeeder(): SeedRegistrantAssociationFn | undefined {
 	if (!__DEV__) return undefined;
-	// eslint-disable-next-line @typescript-eslint/no-var-requires
 	return require('../../../../packages/vote-engine/dist/dev/seed-registrant-association.js')
 		.seedRegistrantAssociation as SeedRegistrantAssociationFn;
 }
@@ -293,7 +292,6 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 	// create-election screen uses; this seed does not hand-roll any Digest/
 	// AdminSigning SQL of its own.
 	const electionsEngine = new ElectionsEngine(ctx)
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const electionId: string = (globalThis as any).crypto.randomUUID()
 	const now = Date.now()
 	const electionDate = now + 180 * 86_400_000 // 180 days out — DateValid requires >= context.now

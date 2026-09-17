@@ -363,6 +363,11 @@ const styles = StyleSheet.create({
 	},
 	actionLink: {
 		minHeight: 44,
+		// IN-07: `leg_touch_targets` measures BOTH dimensions, and `styles.actions` uses
+		// `alignItems: 'flex-start'`, so a link shrinks to its text width. Every current label in EN
+		// and ES is comfortably wider than 44dp, but a future short one would trip the gate.
+		// Symmetric with `helpTarget`.
+		minWidth: 44,
 		justifyContent: 'center',
 	},
 });
