@@ -139,7 +139,27 @@ describe('CountdownTimer (HOME-01, D-09)', () => {
 			});
 		});
 
-		it('the ordinary >=24h branch does NOT shrink -- no visual regression for the common case', () => {
+		/**
+		 * WR-02: parameterized over BOTH locales. `LABEL_CHAR_BUDGET` is 16 and the trigger is
+		 * `> 16`, and BOTH shipped locales land EXACTLY on that boundary on this branch:
+		 *   en -- days(4) + hours(5) + minutes(7) = 16
+		 *   es -- días(4) + horas(5) + minutos(7) = 16   ('días' is FOUR characters: U+00ED is
+		 *                                                 precomposed, so String.length is 4)
+		 * so neither shrinks, and a ONE-CHARACTER copy change to any of those six labels flips
+		 * the ordinary, most-common render into the shrunken step. Running this only under `en`
+		 * left the es half of that unguarded and the symmetry itself unrecorded. The budget cannot
+		 * be raised to buy margin -- 16 characters is the widest row device-verified to fit -- so
+		 * the boundary is pinned by assertion instead. See CountdownTimer.tsx's WR-02 note.
+		 *
+		 * (The <24h rows are well clear of the budget -- en 5+7+7 = 19, es 5+7+8 = 20 -- and the
+		 * it.each above pins that they DO shrink, so both directions of the trigger are covered.)
+		 */
+		it.each([['en'], ['es']])('%s: the ordinary >=24h branch does NOT shrink -- no visual regression for the common case', async language => {
+			// IN-05: act-wrapped -- changeLanguage triggers a useTranslation re-render. The
+			// restore to 'en' is the suite's afterEach (WR-03), so a failure here cannot leak.
+			await renderer.act(async () => {
+				await i18n.changeLanguage(language);
+			});
 			const tr = render(LONG_ISO);
 			expect(labelSize(tr, 'countdown-days-label')).toBe(lightTheme.type.caption.fontSize);
 			expect(StyleSheet.flatten(tr.root.findByProps({testID: 'countdown-days-value'}).props.style).fontSize).toBe(lightTheme.type.display.fontSize);

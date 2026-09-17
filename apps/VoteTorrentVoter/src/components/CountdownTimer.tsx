@@ -118,8 +118,32 @@ export function CountdownTimer({targetIso, nowOffsetMs = 0}: {targetIso: string;
 	//      narrowest label (DAYS/DÍAS) for the widest (SECONDS/SEGUNDOS).
 	// So the trigger now also counts label characters, and the step applies to labelStyle too.
 	// The budget is the >=24h row's own 16 characters -- the widest label row device-verified to
-	// fit (evidence/61-08-after-current-row-en.png). Anything wider than what has been measured to
-	// fit must shrink, which keeps this correct for future locales rather than just for ES.
+	// fit (evidence/61-08-after-current-row-en.png).
+	//
+	// WR-02 -- READ THIS BEFORE TRUSTING THE BUDGET. It is a LATIN-ONLY CHARACTER-COUNT PROXY for
+	// a width measurement, not a width measurement. The 12px step it selects was derived in
+	// PIXELS (themes.ts `captionSmall`: ~20.6px per Latin glyph against a ~371px card inner width
+	// on the Redmi 8); this counts CHARACTERS. Any locale whose glyphs are wider than Latin --
+	// CJK, Devanagari, Thai -- fits 16 characters into far more than the measured 362px, never
+	// trips the trigger, and clips silently. An earlier version of this comment claimed the budget
+	// "keeps this correct for future locales rather than just for ES": it does not, and that claim
+	// is withdrawn. The real fix is to MEASURE -- onTextLayout/onLayout on the label row against
+	// the wrapper's measured width, shrinking from the observed overflow. Until that lands this
+	// covers EN and ES only, and adding a third locale means re-deriving the budget for it.
+	//
+	// BOTH shipped locales' >=24h rows land EXACTLY on the budget, against a `> 16` test:
+	//   en  days(4)  + hours(5) + minutes(7) = 16  -> does not shrink
+	//   es  días(4)  + horas(5) + minutos(7) = 16  -> does not shrink
+	// ('días' is FOUR characters, not five: U+00ED is precomposed, so String.length is 4. The
+	// >=24h branch is therefore symmetric across en/es -- measured, not assumed.) The <24h rows
+	// clear it comfortably: en 5+7+7 = 19, es 5+7+8 = 20.
+	//
+	// The budget cannot simply be raised to buy margin off that boundary: 16 characters is the
+	// widest label row DEVICE-VERIFIED to fit (~362px of a ~371px inner width), so 17 would admit
+	// a width nobody has measured. What guards the boundary is a test, not a margin --
+	// CountdownTimer.test.tsx pins the expected step for BOTH locales on this branch, so a
+	// one-character copy change to any of those six labels turns that assertion red instead of
+	// silently flipping the most common render on the screen into the shrunken step.
 	const LABEL_CHAR_BUDGET = 16;
 	const labels = groups.map(group => t(group.labelKey));
 	const maxDigits = Math.max(...groups.map(group => group.value.length));
