@@ -162,6 +162,39 @@ describe('TimelineRail (59-07)', () => {
 		expect(countdown.props.targetIso).toBe(expectedIso);
 	});
 
+	it.each([
+		['NaN', NaN],
+		['a value past the max representable Date (8.64e15)', 8.7e15],
+		['a value past the min representable Date', -8.7e15],
+	])('CR-02: an out-of-range tallyingStarts instant (%s) renders the rail without a countdown instead of throwing during render', (_label, badInstantMs) => {
+		const rows = buildTenRowFixture();
+		const tallyingStartsRow = rows.find(r => r.stageId === 'tallyingStarts')!;
+		// normalizeInstant (timeline-core) admits ANY finite number and the Timeline blob carries no
+		// CHECK bounding the instant, so this state is reachable from a malformed/hostile peer blob.
+		// relative-date's dateParts try/catch means deriveTimeline returns a CONFIDENT result here
+		// rather than throwing, so TimelineScreen's own try/catch never fires -- the throw lands in
+		// render, on a screen whose comment states it has no ErrorBoundary.
+		(tallyingStartsRow as {instantMs: number}).instantMs = badInstantMs;
+
+		let tr!: renderer.ReactTestRenderer;
+		expect(() => {
+			tr = renderRail(<TimelineRail rows={rows} onVoteNow={jest.fn()} />);
+		}).not.toThrow();
+
+		// The rail still renders its ten rows -- degrading to "no countdown", never to a blank screen.
+		expect(tr.root.findAllByType(CountdownTimer)).toHaveLength(0);
+		for (const stageId of TIMELINE_STAGE_IDS) {
+			expect(tr.root.findAllByProps({testID: 'timeline-rail-label-' + stageId}, {deep: false}).length).toBe(1);
+		}
+	});
+
+	it('CR-02 (positive): a valid in-range instant still produces a countdown -- the guard does not disable the feature', () => {
+		const rows = buildTenRowFixture();
+		const tallyingStartsRow = rows.find(r => r.stageId === 'tallyingStarts')!;
+		const tr = renderRail(<TimelineRail rows={rows} onVoteNow={jest.fn()} />);
+		expect(tr.root.findByType(CountdownTimer).props.targetIso).toBe(new Date(tallyingStartsRow.instantMs as number).toISOString());
+	});
+
 	it('same-day cluster: accruingVotes/hashingVotes/releasingKeys each render their own dot and repeat an identical label, never deduped', () => {
 		const rows = buildTenRowFixture();
 		const clusterIds = ['accruingVotes', 'hashingVotes', 'releasingKeys'] as const;

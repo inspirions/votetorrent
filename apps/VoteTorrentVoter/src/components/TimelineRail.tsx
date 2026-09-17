@@ -79,7 +79,20 @@ export function TimelineRail({
 	// the moment it opens. Wired here, once, so TimelineRow never reaches for a neighbour's
 	// instant.
 	const tallyingStartsRow = rows.find(row => row.stageId === 'tallyingStarts');
-	const countdownTargetIso = tallyingStartsRow?.instantMs != null ? new Date(tallyingStartsRow.instantMs).toISOString() : undefined;
+	// CR-02: `!= null` admits NaN and values outside the representable Date range, and
+	// `toISOString()` throws `RangeError: Invalid time value` on both -- in the component BODY,
+	// i.e. during render. That state is reachable: `normalizeInstant` (timeline-core) admits any
+	// finite number, the Timeline blob carries no CHECK bounding the instant, and relative-date's
+	// `dateParts` try/catch means `deriveTimeline` returns a CONFIDENT result with NaN labels
+	// instead of throwing -- so `TimelineScreen`'s own try/catch never fires and the throw escapes
+	// on a screen that states it has no ErrorBoundary. Degrade to "no countdown", never to a blank
+	// screen (D-03: never blank, never silent). 8.64e15 is the max time value per ECMA-262.
+	const MAX_TIME_VALUE_MS = 8.64e15;
+	const tallyingInstantMs = tallyingStartsRow?.instantMs;
+	const countdownTargetIso =
+		typeof tallyingInstantMs === 'number' && Number.isFinite(tallyingInstantMs) && Math.abs(tallyingInstantMs) <= MAX_TIME_VALUE_MS
+			? new Date(tallyingInstantMs).toISOString()
+			: undefined;
 
 	const dotCenterY = TIMELINE_CARD_MARGIN_V + CARD_PADDING + typeScale.h4.lineHeight / 2;
 
