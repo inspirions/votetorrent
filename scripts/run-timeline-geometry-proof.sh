@@ -13,8 +13,14 @@
 # Usage   : SERIAL=43a209ff0806 LOCALE=en ./scripts/run-timeline-geometry-proof.sh <leg>
 #           <leg> one of: clipping | duplicates | touch-targets | all
 #           --selftest              host-only, no device required: proves the parser
-#                                    against four committed fixtures under
-#                                    scripts/lib/__fixtures__/timeline-geometry/
+#                                    against the committed fixtures under
+#                                    scripts/lib/__fixtures__/timeline-geometry/, plus the
+#                                    records-level cases run_selftest() builds inline.
+#                                    IN-01: deliberately NO count here -- this sentence said
+#                                    "four" while the set grew to eleven, and run_selftest()
+#                                    already cross-checks its own array against that directory
+#                                    and prints the real N/N, so a second hand-maintained
+#                                    number can only ever be wrong.
 #           --dump-records <xml>    host-only, no device required: prints the normalized
 #                                    CARD/TEXT/CLICK/ORPHAN record stream for one XML file
 #                                    and exits (debugging surface / --selftest internals)
@@ -874,7 +880,7 @@ run_leg() {
 
 # ---------------------------------------------------------------------------------------
 # run_selftest -- D-04(3). Host-only, no device. Sets DENSITY_DPI/SCREEN_W/SCREEN_H so the
-# four committed fixtures are deterministic, runs all three legs against each, and asserts
+# committed fixtures are deterministic, runs all three legs against each, and asserts
 # each rejection fixture is rejected FOR ITS OWN NAMED REASON (and that the other two
 # reasons are NOT named), plus leg isolation (a single-defect fixture trips exactly one
 # leg). Adapted from assert-voter-gates.mjs's --selftest idiom (lines 503-653), not ported.
