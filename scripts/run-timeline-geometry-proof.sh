@@ -768,6 +768,21 @@ run_selftest() {
   # WR-06/W-1: fixture list is an array so the summary count below cannot drift from it.
   local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized clipped-left clipped-vertical)
   local total="${#fixtures[@]}"
+
+  # CR-01: the fixture ARRAY and the fixtures on DISK must be the same set. A file on disk that
+  # the array never names is simply unexercised; a name in the array with no `case` arm below is
+  # worse -- it runs all three legs, asserts nothing, and is still counted toward the "N/N
+  # fixtures behaved as specified" line this selftest is cited for. Compare the two sets up front
+  # so neither direction of drift can inflate that count silently. (The per-name "no assertion
+  # arm exists" default arm at the bottom of the `case` closes the second hole directly.)
+  local on_disk expected
+  on_disk=$(find "${FIXTURES_DIR}" -maxdepth 1 -name '*.xml' -exec basename {} .xml \; 2>/dev/null | sort | paste -sd, - || true)
+  expected=$(printf '%s\n' "${fixtures[@]}" | sort | paste -sd, - || true)
+  if [ "${on_disk}" != "${expected}" ]; then
+    echo "SELFTEST MISMATCH: fixture list drifted -- array=[${expected}] disk=[${on_disk}]"
+    mismatches=$((mismatches + 1))
+  fi
+
   for f in "${fixtures[@]}"; do
     local xml="${FIXTURES_DIR}/${f}.xml"
     if [ ! -f "${xml}" ]; then
@@ -926,6 +941,17 @@ run_selftest() {
           echo "SELFTEST MISMATCH: undersized -- expected duplicates PASS (leg isolation), got ${dup_verdict} (${dup_evidence})"
           ok=0
         fi
+        ;;
+      *)
+        # CR-01 -- FAIL-CLOSED. Before this arm existed, a fixture name in the `fixtures` array
+        # that matched none of the arms above ran all three legs, asserted NOTHING, left `ok` at
+        # its initial 1, and was counted as "behaved as specified" -- proven empirically by adding
+        # a byte-copy of the deliberately-broken clipped.xml under a new name: the clipping leg
+        # printed FAIL and the summary still read "SELFTEST: PASS (10/10 ...)", exit 0. That is a
+        # gate that cannot fail, inside the one file every other rendering claim in this phase
+        # cites. A fixture with no assertion arm is now a mismatch, never a silent pass.
+        echo "SELFTEST MISMATCH: ${f} -- no assertion arm exists for this fixture name; refusing to count it as specified"
+        ok=0
         ;;
     esac
 
