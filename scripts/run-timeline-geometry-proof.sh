@@ -24,6 +24,15 @@
 #           fixtures / a given file. A booted, USB-debug-enabled device running the
 #           debug build of org.votetorrent.voter is required for the device legs.
 #
+#           REQUIRED APP STATE (IN-06) -- the device legs do NOT navigate for you:
+#             * the app must already be on the TIMELINE tab,
+#             * scrolled to the TOP (collect_records() only ever swipes DOWNWARD),
+#             * showing the locale named by LOCALE (the preflight cross-checks the live
+#               dump for 'Voting Period' / 'Período de Votación'),
+#             * with the votingStarts row reachable.
+#           Starting anywhere else fails the locale cross-check below, which historically
+#           read like a locale bug when it was really "you are on the wrong screen".
+#
 # Exit    : 0 -- every selected leg printed LEG <name>: PASS (or --selftest /
 #               --dump-records completed successfully)
 #           1 -- a preflight failed, any selected leg printed LEG <name>: FAIL, or
@@ -426,7 +435,9 @@ preflight() {
     if [ "${has_es}" -gt 0 ]; then
       echo "PREFLIGHT FAIL: LOCALE=en requested but the dump contains the es marker 'Período de Votación' and not the en marker 'Voting Period' -- the app is rendering es" >&2
     else
-      echo "PREFLIGHT FAIL: LOCALE=en requested but neither the en marker 'Voting Period' nor the es marker 'Período de Votación' was found in the dump" >&2
+      echo "PREFLIGHT FAIL: LOCALE=en requested but NEITHER marker was found ('Voting Period' / 'Período de Votación')." >&2
+      echo "  This is usually NOT a locale problem: neither marker appears when the app is not on the Timeline tab," >&2
+      echo "  or is scrolled past the Voting Period row. Put the app on the Timeline tab, scrolled to the top, and re-run." >&2
     fi
     exit 1
   fi
@@ -434,7 +445,9 @@ preflight() {
     if [ "${has_en}" -gt 0 ]; then
       echo "PREFLIGHT FAIL: LOCALE=es requested but the dump contains the en marker 'Voting Period' and not the es marker 'Período de Votación' -- the app is rendering en" >&2
     else
-      echo "PREFLIGHT FAIL: LOCALE=es requested but neither the es marker 'Período de Votación' nor the en marker 'Voting Period' was found in the dump" >&2
+      echo "PREFLIGHT FAIL: LOCALE=es requested but NEITHER marker was found ('Período de Votación' / 'Voting Period')." >&2
+      echo "  This is usually NOT a locale problem: neither marker appears when the app is not on the Timeline tab," >&2
+      echo "  or is scrolled past the Voting Period row. Put the app on the Timeline tab, scrolled to the top, and re-run." >&2
     fi
     exit 1
   fi
@@ -980,9 +993,13 @@ case "${LEG}" in
 esac
 
 echo "[timeline-geometry] ========== Summary =========="
+# IN-03: prefixed SUMMARY, not a second "LEG " line. record_leg() already prints
+# "LEG <name>: <verdict> (<evidence>)" once per leg; reprinting the same prefix here meant a
+# line-anchored consumer -- exactly what this file's own header warns about -- counted every leg
+# twice. `grep -c "LEG clipping: PASS"` returned 2 for a single run.
 for r in "${RESULTS[@]}"; do
   IFS='|' read -r name verdict evidence <<< "${r}"
-  echo "LEG ${name}: ${verdict}"
+  echo "SUMMARY ${name}: ${verdict}"
 done
 
 if any_failed; then
