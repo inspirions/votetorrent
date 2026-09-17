@@ -156,7 +156,13 @@ export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, on
 	const titleColor = isDeemphasized ? colors.textSecondary : colors.text;
 	const helpIconColor = isDeemphasized ? colors.textSecondary : colors.text;
 	const showPanel = !isDeemphasized && panel != null;
-	const showCountdown = stageId === 'votingStarts' && status === 'current' && !!countdownTargetIso;
+	// IN-07: the countdown's render gate and its target are the SAME value, so the target narrows
+	// to `string` on its own and the render site needs no `as string`. The previous shape was a
+	// boolean gate (`... && !!countdownTargetIso`) plus an assertion at the call site, which meant
+	// TypeScript was proving nothing there: rewriting this line to drop the `!!countdownTargetIso`
+	// clause would have pushed `undefined` into `CountdownTimer.targetIso` with no compile error
+	// and no test failure. Keep the gate and the value bound together.
+	const countdownIso = stageId === 'votingStarts' && status === 'current' ? countdownTargetIso : undefined;
 	// D-08 (Developer-Ruled Decision #2): the left accent bar renders only on the current row.
 	// Mutually exclusive with `isDeemphasized` (`'current'` is disjoint from `'future'`/`'unknown'`
 	// in the row model), so a de-emphasized row can never render it.
@@ -253,9 +259,9 @@ export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, on
 
 			{showPanel ? <View testID={'timeline-row-panel-' + stageId}>{panel}</View> : null}
 
-			{showCountdown ? (
+			{countdownIso ? (
 				<View testID={'timeline-row-countdown-' + stageId} style={styles.countdown}>
-					<CountdownTimer targetIso={countdownTargetIso as string} nowOffsetMs={nowOffsetMs} />
+					<CountdownTimer targetIso={countdownIso} nowOffsetMs={nowOffsetMs} />
 				</View>
 			) : null}
 
