@@ -63,34 +63,24 @@ jest.mock('@react-navigation/native', () => ({
 			};
 		}, [cb]);
 	},
-	useTheme: () => ({
-		colors: {
-			primary: '#2196f3',
-			background: '#fbfbfb',
-			card: '#ffffff',
-			text: '#000000',
-			textSecondary: '#7d7d7d',
-			border: '#e5e5e5',
-			error: '#971d1d',
-			warning: '#bcb600',
-			light: '#ffffff',
-			link: '#2196f3',
-			secondaryButtonSurface: '#f5f5f5',
-		},
-		fonts: {
-			regular: {fontFamily: 'System', fontWeight: '400'},
-			medium: {fontFamily: 'System', fontWeight: '500'},
-			bold: {fontFamily: 'System', fontWeight: '700'},
-		},
-		// CR-01: was a hand-copied SUBSET of the real scale (display/h2/h4/body/caption only). When
-		// CountdownTimer started reading `type.captionSmall`, every test through this mock crashed
-		// on `undefined.fontSize` -- the component was correct and the stub was stale. Sourced from
-		// the real module instead, so a new token can never again break tests that never named it.
-		// `jest.requireActual` is used because a jest.mock factory is hoisted and may not close over
-		// imported bindings.
-		type: jest.requireActual('../../../theme/themes').type,
-		radii: jest.requireActual('../../../theme/themes').radii,
-	}),
+	// WR-07: the WHOLE theme is sourced from the real module now, not just `type` and `radii`.
+	//
+	// CR-01 fixed half of this: `type` used to be a hand-copied SUBSET (display/h2/h4/body/caption
+	// only), so when CountdownTimer started reading `type.captionSmall` every test through this
+	// mock crashed on `undefined.fontSize` -- the component was correct and the stub was stale.
+	// But `colors` (11 of the 25 roles themes.ts declares) and `fonts` (3 of 4 -- `heavy` was
+	// absent) were left as literals, and that residual half was STRICTLY WORSE than the case that
+	// got fixed: a missing `type` token crashes loudly, whereas RN silently accepts `undefined` as
+	// a style colour. Any component on this screen reaching for `success`, `muted`,
+	// `notification`, `surface`, `accent`, `validBadge`, `progressFill`, `progressTrack`,
+	// `registerNegative`, `registerPositive`, `contrast`, `dark`, `important` or `secondary`
+	// rendered with no colour at all and the suite stayed green -- asserting against a render no
+	// user will ever see.
+	//
+	// `jest.requireActual` is used because a jest.mock factory is hoisted and may not close over
+	// imported bindings. `lightTheme` already carries colors/fonts/type/radii, so returning it
+	// whole means there is no subset left that can go stale.
+	useTheme: () => jest.requireActual('../../../theme/themes').lightTheme,
 }));
 
 // ---- Production-length fixtures (59-UI-SPEC.md, no hand-picked short strings) ----
