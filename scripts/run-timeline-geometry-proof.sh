@@ -585,9 +585,26 @@ leg_clipping() {
     $1=="CARD" { card_x1[$2] = $3; card_y1[$2] = $4; card_x2[$2] = $5; card_y2[$2] = $6; n_cards++ }
     $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
     $1=="TEXT" {
-      count_text++
       stage=$2; x1=$3; y1=$4; x2=$5; y2=$6; source=$7; text=$9
       if (source=="degenerate" && deg_stage=="") { deg_stage=stage; deg_text=text }
+      # CR-02: a "content-desc-fallback" record carries the nearest ANCESTOR-with-a-matching-
+      # content-desc rectangle, not the rectangle of the text node itself -- the walker
+      # substitutes it so a zero-size node stays LOCATABLE (which is what the containment test in
+      # leg_duplicates and leg_touch_targets legitimately need). It is useless for THIS leg: that
+      # substituted ancestor is the
+      # touchable, Yoga keeps the touchable inside the card by construction, so comparing it
+      # against the card is unfalsifiable. Such a node was previously counted in count_text and
+      # compared like a measured one, so it could only ever push this leg toward "N text node(s)
+      # measured -- PASS" while witnessing nothing. Count it separately, keep it OUT of the
+      # clipped-text comparison (so "clipped-text" always means a genuinely measured text rect
+      # overflowed), and refuse to certify the leg while any exist -- the same discipline
+      # "no-measurement" already applies to zero evidence.
+      if (source=="content-desc-fallback") {
+        count_unmeasurable++
+        if (unmeas_stage=="") { unmeas_stage=stage; unmeas_text=text }
+        next
+      }
+      count_text++
       # WR-07: test ALL FOUR edges. This compared only the right edge, so a node overflowing the
       # left or (since 61-08 C1/C2 added 16px of height per current row) the bottom was invisible.
       if (clip_stage=="" && (stage in card_x2)) {
@@ -609,6 +626,13 @@ leg_clipping() {
         printf "FAIL\tdegenerate-bounds: stage=%s text=\"%s\" locale=%s serial=%s%s\n", deg_stage, deg_text, locale, serial, note
       } else if (clip_stage != "") {
         printf "FAIL\tclipped-text: stage=%s text=\"%s\" edge=%s text.%s=%s card.%s=%s locale=%s serial=%s%s\n", clip_stage, clip_text, clip_edge, clip_attr, clip_tv, clip_attr, clip_cv, locale, serial, note
+      } else if (unmeas_stage != "") {
+        # CR-02: zero-size text nodes resolved through the content-desc fallback carry the
+        # touchable ancestor rectangle, so no amount of glyph overrun inside that touchable can
+        # ever produce a verdict for them. Reporting PASS while they are present certifies
+        # evidence this leg does not have -- and the phase cites this leg (via
+        # TimelineRow.test.tsx) as the ONLY tier that can see action-label clipping. Name them.
+        printf "FAIL\tunmeasurable-text: %d text node(s) resolved via content-desc-fallback (ancestor rect substituted -- cannot witness glyph overrun); first: stage=%s text=\"%s\" locale=%s serial=%s%s\n", count_unmeasurable+0, unmeas_stage, unmeas_text, locale, serial, note
       } else if (count_text+0 == 0) {
         # WR-06: zero measured nodes is NOT a pass. The cards resolved but nothing inside them
         # did -- the shape a parser regression takes. Reporting PASS here is a gate certifying
@@ -766,7 +790,7 @@ run_selftest() {
   local mismatches=0
   local f
   # WR-06/W-1: fixture list is an array so the summary count below cannot drift from it.
-  local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized clipped-left clipped-vertical)
+  local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized clipped-left clipped-vertical unmeasurable-fallback)
   local total="${#fixtures[@]}"
 
   # CR-01: the fixture ARRAY and the fixtures on DISK must be the same set. A file on disk that
@@ -939,6 +963,33 @@ run_selftest() {
         fi
         if [ "${dup_verdict}" != "PASS" ]; then
           echo "SELFTEST MISMATCH: undersized -- expected duplicates PASS (leg isolation), got ${dup_verdict} (${dup_evidence})"
+          ok=0
+        fi
+        ;;
+      unmeasurable-fallback)
+        # CR-02: a text node whose own rectangle is zero-size resolves through the content-desc
+        # fallback, which substitutes the touchable ANCESTOR's rect. Yoga keeps that touchable
+        # inside the card by construction, so the clipping comparison against the card was
+        # unfalsifiable for the whole class -- and the leg reported PASS, counting the node among
+        # the "N text node(s) measured". This fixture pins both halves of the fix: the clipping
+        # leg refuses to certify (FAIL naming unmeasurable-text), while duplicates and
+        # touch-targets still PASS -- which is the proof that the fallback is intact for the
+        # locatability the other two legs legitimately need (without it, the node would resolve
+        # as `degenerate` and all three legs would fail for the wrong reason).
+        if [ "${clip_verdict}" != "FAIL" ] || [[ "${clip_evidence}" != *"unmeasurable-text"* ]]; then
+          echo "SELFTEST MISMATCH: unmeasurable-fallback -- expected clipping FAIL naming unmeasurable-text, got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [[ "${clip_evidence}" == *"clipped-text"* || "${clip_evidence}" == *"anchor-missing"* || "${clip_evidence}" == *"degenerate-bounds"* || "${clip_evidence}" == *"no-measurement"* ]]; then
+          echo "SELFTEST MISMATCH: unmeasurable-fallback -- clipping evidence named a reason other than its own: ${clip_evidence}"
+          ok=0
+        fi
+        if [ "${dup_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: unmeasurable-fallback -- expected duplicates PASS (the fallback must still LOCATE the node), got ${dup_verdict} (${dup_evidence})"
+          ok=0
+        fi
+        if [ "${tt_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: unmeasurable-fallback -- expected touch-targets PASS (the fallback must still LOCATE the node), got ${tt_verdict} (${tt_evidence})"
           ok=0
         fi
         ;;
