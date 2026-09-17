@@ -82,14 +82,14 @@ jest.mock('@react-navigation/native', () => ({
 			medium: {fontFamily: 'System', fontWeight: '500'},
 			bold: {fontFamily: 'System', fontWeight: '700'},
 		},
-		type: {
-			display: {fontSize: 40, lineHeight: 48},
-			h2: {fontSize: 28, lineHeight: 34},
-			h4: {fontSize: 20, lineHeight: 26},
-			body: {fontSize: 16, lineHeight: 22},
-			caption: {fontSize: 16, lineHeight: 20},
-		},
-		radii: {pill: 999, lg: 16},
+		// CR-01: was a hand-copied SUBSET of the real scale (display/h2/h4/body/caption only). When
+		// CountdownTimer started reading `type.captionSmall`, every test through this mock crashed
+		// on `undefined.fontSize` -- the component was correct and the stub was stale. Sourced from
+		// the real module instead, so a new token can never again break tests that never named it.
+		// `jest.requireActual` is used because a jest.mock factory is hoisted and may not close over
+		// imported bindings.
+		type: jest.requireActual('../../../theme/themes').type,
+		radii: jest.requireActual('../../../theme/themes').radii,
 	}),
 }));
 

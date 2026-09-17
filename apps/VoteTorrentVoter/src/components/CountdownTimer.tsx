@@ -109,8 +109,24 @@ export function CountdownTimer({targetIso, nowOffsetMs = 0}: {targetIso: string;
 					{value: formatted.seconds, labelKey: 'countdown.seconds', testId: 'seconds'},
 				];
 
+	// CR-01: the shrink trigger used to be `maxDigits > 2` alone, and the step reached only the
+	// digits. Both halves were wrong for the case that actually clips:
+	//   1. In the `short` (<24h) branch every group is pad()'d to 2 chars, so maxDigits is ALWAYS
+	//      2 and the shrink could never fire there at all.
+	//   2. The LABELS, not the digits, are the widest element -- on the Redmi 8 the >=24h labels
+	//      already span ~362px of a ~371px card inner width, and the `short` branch swaps the
+	//      narrowest label (DAYS/DÍAS) for the widest (SECONDS/SEGUNDOS).
+	// So the trigger now also counts label characters, and the step applies to labelStyle too.
+	// The budget is the >=24h row's own 16 characters -- the widest label row device-verified to
+	// fit (evidence/61-08-after-current-row-en.png). Anything wider than what has been measured to
+	// fit must shrink, which keeps this correct for future locales rather than just for ES.
+	const LABEL_CHAR_BUDGET = 16;
+	const labels = groups.map(group => t(group.labelKey));
 	const maxDigits = Math.max(...groups.map(group => group.value.length));
-	const shrinkStep = maxDigits > 2 ? typeScale.h2 : typeScale.display;
+	const totalLabelChars = labels.reduce((sum, label) => sum + label.length, 0);
+	const needsShrink = maxDigits > 2 || totalLabelChars > LABEL_CHAR_BUDGET;
+	const shrinkStep = needsShrink ? typeScale.h2 : typeScale.display;
+	const labelStep = needsShrink ? typeScale.captionSmall : typeScale.caption;
 
 	const digitStyle = {
 		fontFamily: fonts.regular.fontFamily,
@@ -122,8 +138,8 @@ export function CountdownTimer({targetIso, nowOffsetMs = 0}: {targetIso: string;
 	const labelStyle = {
 		fontFamily: fonts.regular.fontFamily,
 		fontWeight: fonts.regular.fontWeight,
-		fontSize: typeScale.caption.fontSize,
-		lineHeight: typeScale.caption.lineHeight,
+		fontSize: labelStep.fontSize,
+		lineHeight: labelStep.lineHeight,
 		color: colors.textSecondary,
 	};
 

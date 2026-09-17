@@ -5,10 +5,11 @@
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
+import {StyleSheet} from 'react-native';
 import {ThemeProvider} from '@react-navigation/native';
 import {CountdownTimer} from '../CountdownTimer';
 import {lightTheme} from '../../theme/themes';
-import '../../i18n'; // initializes the global i18next instance useTranslation() reads from
+import i18n from '../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 /** ~2h/5m/2s in the future from a fixed reference "now". */
 const NOW = new Date('2026-07-09T12:00:00.000Z').getTime();
@@ -85,6 +86,49 @@ describe('CountdownTimer (HOME-01, D-09)', () => {
 		});
 		expect(tr.toJSON()).not.toBeNull();
 		expect(tr.root.findByProps({testID: 'countdown-hours-value'}).props.children).toBe('02');
+	});
+
+	/**
+	 * CR-01. D2's shrink-to-fit scaled ONLY the digits, and derived its trigger from digit count
+	 * alone -- but in the `short` (<24h) branch every group is pad()'d to 2 chars, so maxDigits is
+	 * ALWAYS 2 and the shrink could never fire there. Meanwhile the LABELS are the widest element:
+	 * on the Redmi 8 the >=24h labels already span ~362px of a ~371px card inner width, and the
+	 * <24h branch swaps the narrowest label (DAYS) for the widest (SECONDS) -- ~427px EN, ~449px ES.
+	 * These pin the MECHANISM (which type token each element resolves to). The WIDTH claim itself is
+	 * Tier 2 -- scripts/run-timeline-geometry-proof.sh on real hardware.
+	 */
+	describe('CR-01: label shrink', () => {
+		const labelSize = (tr: renderer.ReactTestRenderer, testID: string) => {
+			const node = tr.root.findByProps({testID});
+			return StyleSheet.flatten(node.props.style).fontSize;
+		};
+		const render = (iso: string) => {
+			let tr!: renderer.ReactTestRenderer;
+			renderer.act(() => {
+				tr = renderer.create(withTheme(<CountdownTimer targetIso={iso} />));
+			});
+			return tr;
+		};
+
+		it.each([['en'], ['es']])('%s: the <24h branch shrinks its LABELS below caption -- the branch where shrink could never previously fire', async language => {
+			await i18n.changeLanguage(language);
+			const tr = render(BOUNDARY_BELOW_ISO);
+			expect(labelSize(tr, 'countdown-seconds-label')).toBe(lightTheme.type.captionSmall.fontSize);
+			expect(labelSize(tr, 'countdown-seconds-label')).toBeLessThan(lightTheme.type.caption.fontSize);
+			await i18n.changeLanguage('en');
+		});
+
+		it('the ordinary >=24h branch does NOT shrink -- no visual regression for the common case', () => {
+			const tr = render(LONG_ISO);
+			expect(labelSize(tr, 'countdown-days-label')).toBe(lightTheme.type.caption.fontSize);
+			expect(StyleSheet.flatten(tr.root.findByProps({testID: 'countdown-days-value'}).props.style).fontSize).toBe(lightTheme.type.display.fontSize);
+		});
+
+		it('a >2-digit day count shrinks labels AND digits together -- the two can no longer disagree', () => {
+			const tr = render(LONG_3DIGIT_ISO);
+			expect(labelSize(tr, 'countdown-days-label')).toBe(lightTheme.type.captionSmall.fontSize);
+			expect(StyleSheet.flatten(tr.root.findByProps({testID: 'countdown-days-value'}).props.style).fontSize).toBe(lightTheme.type.h2.fontSize);
+		});
 	});
 
 	it('decrements the seconds group by exactly 1 after one 1000ms tick (recomputed from target, not a decrementing counter)', () => {
