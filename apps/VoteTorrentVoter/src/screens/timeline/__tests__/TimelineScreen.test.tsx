@@ -854,6 +854,59 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		expect(textOf(label)).toContain('0');
 	});
 
+	// IN-05: `clockStopIndex` is React state; `clockStops` is recomputed from `state.view.rows` on
+	// every render. The timeline-read effect re-runs on every `nowMs` change -- i.e. on every press
+	// of this control -- so the engine can answer with a SHORTER timeline while the index stays put.
+	// `clockStops[clockStopIndex - 1]` is then `undefined`, and the label used to fall all the way
+	// through to its live form ("<label> 0") while the non-zero offset was still driving the rail
+	// and the countdown. That is the "label and countdown disagree" shape D-13 closed; it must not
+	// come back through the dev control.
+	//
+	// The assertion is deliberately an INVARIANT rather than a fixed string: the label reads as live
+	// if and only if the offset actually applied to the rail is zero. That stays true whichever way
+	// a future fix chooses to reconcile the two (clamp the index, or report the raw offset).
+	it('IN-05: a stop list that shrinks under a live offset never leaves the label reading as live', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+
+		// `textOf` JSON-stringifies the node's children, so the expected value must be stringified
+		// too -- comparing a raw string against it silently never matches, which makes an
+		// invariant assertion like the one below pass vacuously.
+		const liveLabel = JSON.stringify(`${i18n.t('dev.clockOffsetLabel', {ns: 'timeline'})} 0`);
+		const readLabel = () => textOf(tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'}));
+		const readAppliedOffset = () => tr.root.findByType(TimelineRail).props.nowOffsetMs as number;
+
+		// Walk well past the end of the shorter list installed below.
+		for (let i = 0; i < 8; i++) {
+			await pressClockOffset(tr);
+		}
+		expect(readAppliedOffset()).not.toBe(0);
+		expect(readLabel()).not.toBe(liveLabel);
+
+		// The engine's answer changes underneath: a five-key timeline offers five stage stops plus
+		// the final-day probe, fewer than the index we are sitting on.
+		const anchor = Date.UTC(2030, 0, 10);
+		const fiveKeyTimeline = buildValidTimeline(anchor);
+		delete fiveKeyTimeline.accruingVotes;
+		delete fiveKeyTimeline.hashingVotes;
+		delete fiveKeyTimeline.releasingKeys;
+		delete fiveKeyTimeline.validation;
+		delete fiveKeyTimeline.certificationStarts;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(fiveKeyTimeline, anchor));
+
+		// One more press: the effect refetches against the new `nowMs` and the stop list shrinks.
+		await pressClockOffset(tr);
+
+		expect(readLabel() === liveLabel).toBe(readAppliedOffset() === 0);
+
+		// ...and the index itself must have been clamped, not left pointing past the end of the
+		// shortened list: the very next press has to land on the FIRST stop of the new list. With a
+		// stale index of 9 against 6 stops, `(9 + 1) % 7` would land on the third stop instead --
+		// an arbitrary position that reads like a press was skipped.
+		await pressClockOffset(tr);
+		expect(readLabel()).toContain('Registration Ends');
+	});
+
 	it("the label at a stage stop names that stage's translated title", async () => {
 		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
 		const tr = await renderAndFlush();

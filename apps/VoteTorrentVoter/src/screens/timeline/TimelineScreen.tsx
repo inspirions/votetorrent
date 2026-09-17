@@ -403,7 +403,20 @@ export default function TimelineScreen() {
 	const clockStops = probeIsValid
 		? [...stageStops, {stageId: 'votingStarts' as const, instantMs: tallyingStartsMs as number, nowMs: probeNowMs as number, probe: true}]
 		: stageStops;
-	const activeClockStop = clockStopIndex > 0 ? clockStops[clockStopIndex - 1] : undefined;
+	// IN-05: `clockStopIndex` is React state, but `clockStops` is recomputed from `state.view.rows`
+	// on EVERY render -- and the timeline-read effect re-runs on every `nowMs` change, i.e. on every
+	// press of this control. So the engine can answer with a timeline carrying fewer present
+	// instants (or `probeIsValid` can flip) while the index stays where it was, leaving the index
+	// pointing past the end of the list. Clamp back to the live stop when that happens, so the
+	// press handler below steps forward from a real position instead of a phantom one.
+	//
+	// This is a render-time clamp rather than a `useEffect` on purpose: `clockStops` is derived
+	// AFTER this component's two early returns (`indeterminate`, `loading`), so a hook here would
+	// be a conditional hook. The label below closes the other half -- it must never read as live
+	// while a non-zero offset is still driving the rail and the countdown.
+	const effectiveStopIndex = clockStopIndex > clockStops.length ? 0 : clockStopIndex;
+	const activeClockStop = effectiveStopIndex > 0 ? clockStops[effectiveStopIndex - 1] : undefined;
+	const clockOffsetDays = Math.round(clockOffsetMs / 86_400_000);
 	const clockOffsetLabel =
 		activeClockStop !== undefined && activeClockStop.probe
 			? // WR-04: `final day` used to be an inline English literal here, concatenated onto an
@@ -417,11 +430,21 @@ export default function TimelineScreen() {
 			? `${t('dev.clockOffsetLabel')} ${t(STAGE_TITLE_KEY[activeClockStop.stageId])} ${
 					Math.round((activeClockStop.instantMs - Date.now()) / 86_400_000) >= 0 ? '+' : ''
 				}${Math.round((activeClockStop.instantMs - Date.now()) / 86_400_000)}`
-			: `${t('dev.clockOffsetLabel')} 0`;
+			: clockOffsetMs === 0
+				? `${t('dev.clockOffsetLabel')} 0`
+				: // IN-05: no stop resolves, but an offset IS still applied -- report THAT, never a
+					// bare zero. The old code fell straight through to the live form here, so the label
+					// read as live while the rail and the countdown were shifted by up to half a year.
+					// That is precisely the "label and countdown disagree" shape D-13 closed, and it is
+					// reachable: press the control, the read re-fires on the new `nowMs`, and a timeline
+					// with fewer present instants comes back. The live form above stays byte-identical
+					// (`0`, unsigned) so it remains distinguishable from a genuine `+0`/`-0` offset that
+					// happens to round to zero days.
+					`${t('dev.clockOffsetLabel')} ${clockOffsetDays >= 0 ? '+' : ''}${clockOffsetDays}`;
 
 	const handleClockOffsetPress = () => {
 		const stopCount = clockStops.length + 1; // +1 for the live stop.
-		const nextIndex = (clockStopIndex + 1) % stopCount;
+		const nextIndex = (effectiveStopIndex + 1) % stopCount;
 		if (nextIndex === 0) {
 			setClockStopIndex(0);
 			setClockOffsetMs(0);
