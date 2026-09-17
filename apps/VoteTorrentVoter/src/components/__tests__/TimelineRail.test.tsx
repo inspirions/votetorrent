@@ -222,7 +222,10 @@ describe('TimelineRail (59-07)', () => {
 	});
 
 	it('ES pass: re-rendering under the ES locale changes the current label to the ES "Now" string and clips no Text node', () => {
-		i18n.changeLanguage('es');
+		// IN-05: wrapped so a genuine act() violation later is not lost in this file's own noise.
+		renderer.act(() => {
+			i18n.changeLanguage('es');
+		});
 		const rows = buildTenRowFixture(FIXTURE_NOW_MS, 'UTC', 'es');
 		const tr = renderRail(<TimelineRail rows={rows} />);
 
@@ -234,7 +237,10 @@ describe('TimelineRail (59-07)', () => {
 		for (const node of textNodes) {
 			expect(node.props.numberOfLines).toBeUndefined();
 		}
-		i18n.changeLanguage('en');
+		// IN-05: wrapped so a genuine act() violation later is not lost in this file's own noise.
+		renderer.act(() => {
+			i18n.changeLanguage('en');
+		});
 	});
 
 	it('nowOffsetMs pass-through (D-12/D-14): the rail forwards an explicit offset through TimelineRow to the votingStarts row\'s CountdownTimer', () => {

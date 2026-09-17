@@ -93,11 +93,30 @@ describe('TimelineRow (59-07)', () => {
 		expect(tr.root.findAllByProps({testID: 'timeline-row-vote-now-votingStarts'}, {deep: false}).length).toBe(0);
 	});
 
+	// IN-01: mirrors TimelineRail.test.tsx:298's predicate. Counting RESOLVED TEXT, not a testID,
+	// is what makes the D1 assertions below able to fail: the row's own testID is derived from
+	// `action.id`, so a duplicate re-added under any other id would be invisible to a testID check.
+	// This is its own positive control -- the sibling tests that assert `=== 1` for other labels
+	// would fail just as loudly if the predicate could never match.
+	function countResolvedText(tr: renderer.ReactTestRenderer, expectedText: string): number {
+		return tr.root.findAll(node => node.type === Text && node.props.children === expectedText).length;
+	}
+
 	it('D1: a past Registration Ends row renders no "View registration" action of its own -- that affordance belongs solely to TimelineRegistrationPanel\'s CTA -- while still rendering "See details" and no "Edit registration"', () => {
 		const row = buildRowFixture({stageId: 'registrationEnds', status: 'past'});
 		const tr = renderRow({row, onSeeDetails: jest.fn(), onEditRegistration: jest.fn()});
 
-		expect(tr.root.findAllByProps({testID: 'timeline-row-view-registration-registrationEnds'}, {deep: false}).length).toBe(0);
+		// IN-01: assert on RESOLVED TEXT, not on the absence of a testID. The old form checked for
+		// `timeline-row-view-registration-registrationEnds`, built as 'timeline-row-' + action.id +
+		// '-' + stageId -- but buildActions no longer emits ANY descriptor with id 'view-registration',
+		// so a regression re-adding the CTA under a different action.id (say 'view-reg') would have
+		// left it green. Counting the rendered label catches the affordance whatever its id.
+		expect(countResolvedText(tr, i18n.t('registration.viewCta', {ns: 'timeline'}))).toBe(0);
+		// POSITIVE CONTROL for the predicate above. Every countResolvedText assertion in this file is
+		// `=== 0`, so a predicate that could never match would satisfy all of them vacuously -- the
+		// exact shape of defect this phase keeps finding. This line proves the matcher is live by
+		// counting a label that IS rendered on this very row.
+		expect(countResolvedText(tr, i18n.t('row.detailsCta', {ns: 'timeline'}))).toBe(1);
 		expect(tr.root.findAllByProps({testID: 'timeline-row-see-details-registrationEnds'}, {deep: false}).length).toBe(1);
 		expect(tr.root.findAllByProps({testID: 'timeline-row-edit-registration-registrationEnds'}, {deep: false}).length).toBe(0);
 	});
@@ -108,7 +127,8 @@ describe('TimelineRow (59-07)', () => {
 
 		expect(tr.root.findAllByProps({testID: 'timeline-row-edit-registration-registrationEnds'}, {deep: false}).length).toBe(1);
 		expect(tr.root.findAllByProps({testID: 'timeline-row-see-details-registrationEnds'}, {deep: false}).length).toBe(0);
-		expect(tr.root.findAllByProps({testID: 'timeline-row-view-registration-registrationEnds'}, {deep: false}).length).toBe(0);
+		// IN-01: resolved text, not a testID that no code path emits -- see the D1 test above.
+		expect(countResolvedText(tr, i18n.t('registration.viewCta', {ns: 'timeline'}))).toBe(0);
 	});
 
 	it('a future row renders its title in colors.textSecondary and does not render the panel slot even when a panel node is supplied', () => {
@@ -209,7 +229,10 @@ describe('TimelineRow (59-07)', () => {
 	// This rename is itself a CR-01 lesson: a test whose NAME claims more than its assertions
 	// deliver is precisely how the sub-24h countdown overflow survived a fully green suite.
 	it('no-truncation guard: under the ES locale with the 49-char network string in the panel slot, no Text node sets numberOfLines or ellipsizeMode (full text stays readable; CLIPPING is Tier 2, see run-timeline-geometry-proof.sh)', () => {
-		i18n.changeLanguage('es');
+		// IN-05: wrapped so a genuine act() violation later is not lost in this file's own noise.
+		renderer.act(() => {
+			i18n.changeLanguage('es');
+		});
 		const row = buildRowFixture({stageId: 'votingStarts', status: 'current', instantMs: FIXTURE_NOW_MS - 1000});
 		const tr = renderRow({
 			row,
@@ -222,7 +245,10 @@ describe('TimelineRow (59-07)', () => {
 			expect(node.props.numberOfLines).toBeUndefined();
 			expect(node.props.ellipsizeMode).toBeUndefined();
 		}
-		i18n.changeLanguage('en');
+		// IN-05: wrapped so a genuine act() violation later is not lost in this file's own noise.
+		renderer.act(() => {
+			i18n.changeLanguage('en');
+		});
 	});
 
 	it('the notch element exists with testID timeline-row-notch-<stageId> and derives its top from typeScale.h4.lineHeight', () => {
@@ -342,17 +368,13 @@ describe('TimelineRow (59-07)', () => {
 			expect(tr.root.findByProps({testID: 'countdown-hours-value'}).props.children).toBe('08');
 			expect(tr.root.findByProps({testID: 'countdown-minutes-value'}).props.children).toBe('00');
 
-			let wrapper: renderer.ReactTestInstance | null = countdown.parent;
-			while (wrapper) {
-				const flat = flattenStyle(wrapper);
-				// D-09 addendum (61-08, C1, developer-approved): 16 (md) -> 24 (lg).
-				if (flat.marginTop === 24) {
-					break;
-				}
-				wrapper = wrapper.parent;
-			}
-			expect(wrapper).not.toBeNull();
-			const wrapperFlat = flattenStyle(wrapper!);
+			// IN-04: located by IDENTITY, not by walking ancestors until `marginTop === 24`. That magic
+			// number is itself a value 61-08's C1 changed (16 -> 24), so the old search would have
+			// silently found nothing -- and `expect(wrapper).not.toBeNull()` was the only thing standing
+			// between that and a false pass.
+			const wrappers = tr.root.findAllByProps({testID: 'timeline-row-countdown-votingStarts'}, {deep: false});
+			expect(wrappers).toHaveLength(1);
+			const wrapperFlat = flattenStyle(wrappers[0]);
 			// `alignItems`, not `justifyContent` -- the wrapper is a default `flexDirection: 'column'`
 			// View, so `alignItems` is the horizontal (cross) axis. `justifyContent` on a column acts on
 			// the vertical axis and would be an inert no-op.

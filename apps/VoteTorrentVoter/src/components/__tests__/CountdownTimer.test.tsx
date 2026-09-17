@@ -111,11 +111,17 @@ describe('CountdownTimer (HOME-01, D-09)', () => {
 		};
 
 		it.each([['en'], ['es']])('%s: the <24h branch shrinks its LABELS below caption -- the branch where shrink could never previously fire', async language => {
-			await i18n.changeLanguage(language);
+			// IN-05: act-wrapped -- changeLanguage triggers a useTranslation re-render.
+			await renderer.act(async () => {
+				await i18n.changeLanguage(language);
+			});
 			const tr = render(BOUNDARY_BELOW_ISO);
 			expect(labelSize(tr, 'countdown-seconds-label')).toBe(lightTheme.type.captionSmall.fontSize);
 			expect(labelSize(tr, 'countdown-seconds-label')).toBeLessThan(lightTheme.type.caption.fontSize);
-			await i18n.changeLanguage('en');
+			// IN-05: act-wrapped -- changeLanguage triggers a useTranslation re-render.
+			await renderer.act(async () => {
+				await i18n.changeLanguage('en');
+			});
 		});
 
 		it('the ordinary >=24h branch does NOT shrink -- no visual regression for the common case', () => {

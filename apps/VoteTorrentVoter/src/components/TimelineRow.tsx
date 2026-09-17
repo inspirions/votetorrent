@@ -254,7 +254,7 @@ export function TimelineRow({row, panel, countdownTargetIso, nowOffsetMs = 0, on
 			{showPanel ? <View testID={'timeline-row-panel-' + stageId}>{panel}</View> : null}
 
 			{showCountdown ? (
-				<View style={styles.countdown}>
+				<View testID={'timeline-row-countdown-' + stageId} style={styles.countdown}>
 					<CountdownTimer targetIso={countdownTargetIso as string} nowOffsetMs={nowOffsetMs} />
 				</View>
 			) : null}
