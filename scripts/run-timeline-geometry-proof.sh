@@ -569,14 +569,23 @@ collect_records() {
 leg_clipping() {
   local records_file="$1"
   awk -v FS="${TAB}" -v locale="${LOCALE}" -v serial="${SERIAL}" -v serial_note="${SERIAL_NOTE}" '
-    $1=="CARD" { card_x2[$2] = $5; n_cards++ }
+    $1=="CARD" { card_x1[$2] = $3; card_y1[$2] = $4; card_x2[$2] = $5; card_y2[$2] = $6; n_cards++ }
     $1=="ORPHAN" { orphan_list = (orphan_list=="") ? $2 : orphan_list","$2 }
     $1=="TEXT" {
       count_text++
-      stage=$2; x2=$5; source=$7; text=$9
+      stage=$2; x1=$3; y1=$4; x2=$5; y2=$6; source=$7; text=$9
       if (source=="degenerate" && deg_stage=="") { deg_stage=stage; deg_text=text }
-      if (clip_stage=="" && (stage in card_x2) && x2+0 > card_x2[stage]+0) {
-        clip_stage=stage; clip_text=text; clip_tx2=x2; clip_cx2=card_x2[stage]
+      # WR-07: test ALL FOUR edges. This compared only the right edge, so a node overflowing the
+      # left or (since 61-08 C1/C2 added 16px of height per current row) the bottom was invisible.
+      if (clip_stage=="" && (stage in card_x2)) {
+        edge=""
+        if (x2+0 > card_x2[stage]+0)      { edge="right";  attr="x2"; tv=x2; cv=card_x2[stage] }
+        else if (x1+0 < card_x1[stage]+0) { edge="left";   attr="x1"; tv=x1; cv=card_x1[stage] }
+        else if (y2+0 > card_y2[stage]+0) { edge="bottom"; attr="y2"; tv=y2; cv=card_y2[stage] }
+        else if (y1+0 < card_y1[stage]+0) { edge="top";    attr="y1"; tv=y1; cv=card_y1[stage] }
+        if (edge != "") {
+          clip_stage=stage; clip_text=text; clip_edge=edge; clip_attr=attr; clip_tv=tv; clip_cv=cv
+        }
       }
     }
     END {
@@ -586,7 +595,7 @@ leg_clipping() {
       } else if (deg_stage != "") {
         printf "FAIL\tdegenerate-bounds: stage=%s text=\"%s\" locale=%s serial=%s%s\n", deg_stage, deg_text, locale, serial, note
       } else if (clip_stage != "") {
-        printf "FAIL\tclipped-text: stage=%s text=\"%s\" text.x2=%s card.x2=%s locale=%s serial=%s%s\n", clip_stage, clip_text, clip_tx2, clip_cx2, locale, serial, note
+        printf "FAIL\tclipped-text: stage=%s text=\"%s\" edge=%s text.%s=%s card.%s=%s locale=%s serial=%s%s\n", clip_stage, clip_text, clip_edge, clip_attr, clip_tv, clip_attr, clip_cv, locale, serial, note
       } else if (count_text+0 == 0) {
         # WR-06: zero measured nodes is NOT a pass. The cards resolved but nothing inside them
         # did -- the shape a parser regression takes. Reporting PASS here is a gate certifying
@@ -744,7 +753,7 @@ run_selftest() {
   local mismatches=0
   local f
   # WR-06/W-1: fixture list is an array so the summary count below cannot drift from it.
-  local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized)
+  local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized clipped-left clipped-vertical)
   local total="${#fixtures[@]}"
   for f in "${fixtures[@]}"; do
     local xml="${FIXTURES_DIR}/${f}.xml"
@@ -862,6 +871,27 @@ run_selftest() {
         fi
         if [ "${tt_verdict}" != "PASS" ]; then
           echo "SELFTEST MISMATCH: duplicate -- expected touch-targets PASS (leg isolation), got ${tt_verdict} (${tt_evidence})"
+          ok=0
+        fi
+        ;;
+      clipped-left|clipped-vertical)
+        # WR-07: leg_clipping compared only text.x2 > card.x2, so a node overflowing the LEFT or
+        # the BOTTOM of its card was invisible. Vertical matters now that 61-08's C1/C2 added 16px
+        # of height per current row.
+        if [ "${clip_verdict}" != "FAIL" ] || [[ "${clip_evidence}" != *"clipped-text"* ]]; then
+          echo "SELFTEST MISMATCH: ${f} -- expected clipping FAIL naming clipped-text, got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [[ "${clip_evidence}" == *"anchor-missing"* || "${clip_evidence}" == *"degenerate-bounds"* || "${clip_evidence}" == *"no-measurement"* ]]; then
+          echo "SELFTEST MISMATCH: ${f} -- clipping evidence named a reason other than its own: ${clip_evidence}"
+          ok=0
+        fi
+        if [ "${dup_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: ${f} -- expected duplicates PASS (leg isolation), got ${dup_verdict} (${dup_evidence})"
+          ok=0
+        fi
+        if [ "${tt_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: ${f} -- expected touch-targets PASS (leg isolation), got ${tt_verdict} (${tt_evidence})"
           ok=0
         fi
         ;;
