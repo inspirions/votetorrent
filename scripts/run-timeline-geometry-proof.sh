@@ -796,7 +796,7 @@ run_selftest() {
   local mismatches=0
   local f
   # WR-06/W-1: fixture list is an array so the summary count below cannot drift from it.
-  local fixtures=(clean clipped degenerate missing-node no-measurement)
+  local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized)
   local total="${#fixtures[@]}"
   for f in "${fixtures[@]}"; do
     local xml="${FIXTURES_DIR}/${f}.xml"
@@ -893,6 +893,46 @@ run_selftest() {
         fi
         if [[ "${clip_evidence}" == *"clipped-text"* || "${clip_evidence}" == *"anchor-missing"* || "${clip_evidence}" == *"degenerate-bounds"* ]]; then
           echo "SELFTEST MISMATCH: no-measurement -- clipping evidence named a reason other than its own: ${clip_evidence}"
+          ok=0
+        fi
+        ;;
+      duplicate)
+        # W-1: the duplicates leg maps to D1, this phase's flagship defect. Before this fixture
+        # existed, `duplicate-label` appeared at exactly one site in the repo -- its own printf --
+        # and had never been observed firing against anything committed.
+        if [ "${dup_verdict}" != "FAIL" ] || [[ "${dup_evidence}" != *"duplicate-label"* ]]; then
+          echo "SELFTEST MISMATCH: duplicate -- expected duplicates FAIL naming duplicate-label, got ${dup_verdict} (${dup_evidence})"
+          ok=0
+        fi
+        if [[ "${dup_evidence}" == *"anchor-missing"* || "${dup_evidence}" == *"degenerate-bounds"* || "${dup_evidence}" == *"no-measurement"* ]]; then
+          echo "SELFTEST MISMATCH: duplicate -- duplicates evidence named a reason other than its own: ${dup_evidence}"
+          ok=0
+        fi
+        if [ "${clip_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: duplicate -- expected clipping PASS (leg isolation), got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [ "${tt_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: duplicate -- expected touch-targets PASS (leg isolation), got ${tt_verdict} (${tt_evidence})"
+          ok=0
+        fi
+        ;;
+      undersized)
+        # W-1: same gap for `undersized-target` -- one printf, never observed firing.
+        if [ "${tt_verdict}" != "FAIL" ] || [[ "${tt_evidence}" != *"undersized-target"* ]]; then
+          echo "SELFTEST MISMATCH: undersized -- expected touch-targets FAIL naming undersized-target, got ${tt_verdict} (${tt_evidence})"
+          ok=0
+        fi
+        if [[ "${tt_evidence}" == *"anchor-missing"* || "${tt_evidence}" == *"degenerate-bounds"* || "${tt_evidence}" == *"no-measurement"* ]]; then
+          echo "SELFTEST MISMATCH: undersized -- touch-targets evidence named a reason other than its own: ${tt_evidence}"
+          ok=0
+        fi
+        if [ "${clip_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: undersized -- expected clipping PASS (leg isolation), got ${clip_verdict} (${clip_evidence})"
+          ok=0
+        fi
+        if [ "${dup_verdict}" != "PASS" ]; then
+          echo "SELFTEST MISMATCH: undersized -- expected duplicates PASS (leg isolation), got ${dup_verdict} (${dup_evidence})"
           ok=0
         fi
         ;;
