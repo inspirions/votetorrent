@@ -172,13 +172,32 @@ function parse_bounds(b, arr,    s, n) {
   return (n == 4)
 }
 
+# IN-06: the value this returns is printed as the LAST field of a TEXT record, and the whole
+# record stream's contract is ONE RECORD PER LINE with tab-separated fields (every consumer
+# matches on $1 with FS=TAB). So this function must never emit a tab or a newline. It used to
+# decode &#10; to a REAL newline, which split a single TEXT record across two lines: the first
+# line kept the geometry but carried TRUNCATED text, and the remainder became a free-standing
+# line the walker never wrote. Measured against a control copy of clean.xml carrying
+# text="Closed 3 days&#10;ago": the stream grew from 10 records to 11, with a bare `ago` line
+# wedged between two real records. Worse, the remainder is attacker-shaped rather than merely
+# lost -- a control carrying text="Closed&#10;CARD<TAB>closed<TAB>20<TAB>800<TAB>700<TAB>900<TAB>measured"
+# FABRICATED a well-formed CARD record for a stage that never rendered, which on the device path
+# would satisfy preflight's ten-anchor check and make `anchor-missing` unreachable for it.
+# The text is used for display and equality comparison only and is never re-rendered, so
+# collapsing separators to a space loses nothing that any leg reads.
 function xml_unescape(s) {
   gsub(/&quot;/, "\"", s)
   gsub(/&apos;/, "'", s)
   gsub(/&lt;/, "<", s)
   gsub(/&gt;/, ">", s)
-  gsub(/&#10;/, "\n", s)
+  gsub(/&#10;/, " ", s)
+  gsub(/&#13;/, " ", s)
+  gsub(/&#9;/, " ", s)
+  # Last, so an encoded &amp;#10; cannot be decoded into a separator by the lines above.
   gsub(/&amp;/, "\\&", s)
+  # Belt and braces: a RAW tab/newline/CR sitting in the attribute value (legal XML, and not
+  # something the entity substitutions above can see) would corrupt the stream the same way.
+  gsub(/[\t\n\r]/, " ", s)
   return s
 }
 
@@ -845,6 +864,10 @@ run_selftest() {
 
   local mismatches=0
   local f
+  # Non-fixture checks that also increment `mismatches`: the fixture-list drift check plus the
+  # two records-level cases below. Named here so the FAIL summary can never drift from how many
+  # of them there actually are (the previous form hard-coded the number in the message).
+  local NON_FIXTURE_CHECKS=3
   # WR-06/W-1: fixture list is an array so the summary count below cannot drift from it.
   local fixtures=(clean clipped degenerate missing-node no-measurement duplicate undersized clipped-left clipped-vertical unmeasurable-fallback degenerate-card)
   local total="${#fixtures[@]}"
@@ -1124,18 +1147,69 @@ run_selftest() {
     echo "RECORDS-CASE orphan-reconciliation: PASS (ORPHAN votingStarts retired by its own CARD, ORPHAN closed survives, CARD untouched)"
   fi
 
+  # IN-06: records-level case -- the ONE-RECORD-PER-LINE invariant of the stream walk_dump()
+  # emits. No XML fixture in the loop above can assert this, because every leg reads the stream
+  # through $1== predicates and a corrupted stream simply presents as different numbers, never
+  # as a named failure. xml_unescape() previously decoded &#10; to a real newline; this case
+  # pins both halves of what that cost: a record must not be SPLIT, and the remainder must not
+  # be able to FABRICATE a record. The second half is the sharp one -- a text attribute carrying
+  # an encoded newline followed by tab-separated fields synthesised a well-formed CARD for a
+  # stage that never rendered, which on the device path satisfies preflight's ten-anchor check
+  # and makes `anchor-missing` unreachable for that stage.
+  echo "[timeline-geometry] -- records case: text-separator-sanitisation --"
+  local sepxml="${TMPDIR_TG}/selftest-separators.xml"
+  {
+    printf '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>\n'
+    printf '<hierarchy rotation="0">\n'
+    printf '  <node index="0" text="" resource-id="" class="android.view.ViewGroup" content-desc="" clickable="false" bounds="[20,100][700,400]">\n'
+    printf '    <node index="0" text="" resource-id="timeline-row-notch-registrationEnds" class="android.view.View" content-desc="" clickable="false" bounds="[20,140][28,156]" />\n'
+    printf '    <node index="1" text="Closed 3 days&#10;ago" resource-id="timeline-row-subtitle-registrationEnds" class="android.widget.TextView" content-desc="" clickable="false" bounds="[40,145][320,170]" />\n'
+    printf '    <node index="2" text="Closed&#10;CARD\tclosed\t20\t800\t700\t900\tmeasured" resource-id="timeline-row-title-registrationEnds" class="android.widget.TextView" content-desc="" clickable="false" bounds="[40,110][300,140]" />\n'
+    printf '  </node>\n'
+    printf '</hierarchy>\n'
+  } > "${sepxml}"
+  local seprecords="${TMPDIR_TG}/selftest-separators.records"
+  local sep_ok=1 sep_lines sep_cards sep_subtitle
+  if ! walk_dump "${sepxml}" > "${seprecords}" 2>/dev/null; then
+    echo "SELFTEST MISMATCH: text-separator-sanitisation -- walk_dump failed on the separator fixture"
+    sep_ok=0
+  else
+    # Three records exactly: one CARD for registrationEnds plus one TEXT per text node. Any
+    # extra line is a split record or a fabricated one.
+    sep_lines=$(wc -l < "${seprecords}" | tr -d ' ')
+    sep_cards=$(awk -v FS="${TAB}" '$1=="CARD"{print $2}' "${seprecords}" | sort | paste -sd, - || true)
+    sep_subtitle=$(awk -v FS="${TAB}" '$1=="TEXT" && $9 ~ /^Closed 3 days/{print $9}' "${seprecords}" || true)
+    if [ "${sep_lines}" != "3" ]; then
+      echo "SELFTEST MISMATCH: text-separator-sanitisation -- expected exactly 3 records (1 CARD + 2 TEXT), got ${sep_lines}; an encoded separator split or fabricated a record"
+      sep_ok=0
+    fi
+    if [ "${sep_cards}" != "registrationEnds" ]; then
+      echo "SELFTEST MISMATCH: text-separator-sanitisation -- expected exactly [registrationEnds] to have a CARD record, got [${sep_cards}]; a text attribute fabricated a CARD"
+      sep_ok=0
+    fi
+    if [ "${sep_subtitle}" != "Closed 3 days ago" ]; then
+      echo "SELFTEST MISMATCH: text-separator-sanitisation -- expected the subtitle text to survive whole as [Closed 3 days ago], got [${sep_subtitle}]"
+      sep_ok=0
+    fi
+  fi
+  if [ "${sep_ok}" -eq 0 ]; then
+    mismatches=$((mismatches + 1))
+  else
+    echo "RECORDS-CASE text-separator-sanitisation: PASS (3 records, no fabricated CARD, subtitle text survives whole)"
+  fi
+
   if [ "${mismatches}" -eq 0 ]; then
     echo "SELFTEST: PASS (${total}/${total} fixtures behaved as specified)"
     SCRIPT_EXIT_CODE=0
     exit 0
   else
-    # CR-01/WR-06: `mismatches` now also counts two NON-fixture checks (the fixture-list drift
-    # check and the orphan-reconciliation records case), so `total - mismatches` stopped being a
-    # meaningful numerator on this path -- it could read "10/11 fixtures behaved as specified"
-    # when all 11 fixtures behaved and a records check failed. Report the mismatch count itself.
-    # The PASSING line above is deliberately left byte-identical: it is quoted verbatim in this
-    # phase's VERIFICATION.
-    echo "SELFTEST: FAIL (${mismatches} mismatch(es) across ${total} fixture(s) + 2 records-level checks)"
+    # CR-01/WR-06: `mismatches` now also counts NON-fixture checks (the fixture-list drift check
+    # and the records-level cases), so `total - mismatches` stopped being a meaningful numerator
+    # on this path -- it could read "10/11 fixtures behaved as specified" when all 11 fixtures
+    # behaved and a records check failed. Report the mismatch count itself. The PASSING line
+    # above is deliberately left byte-identical: it is quoted verbatim in this phase's
+    # VERIFICATION.
+    echo "SELFTEST: FAIL (${mismatches} mismatch(es) across ${total} fixture(s) + ${NON_FIXTURE_CHECKS} non-fixture checks)"
     exit 1
   fi
 }
