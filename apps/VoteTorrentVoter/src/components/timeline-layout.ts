@@ -15,10 +15,18 @@
  * Re-typing it anywhere else (a second hand-copied literal) is the specific defect this module
  * exists to prevent.
  *
- * Wired as of 61-06 (wave 4). `TimelineRow.tsx:309` reads it as `styles.card.marginVertical` and
- * `TimelineRail.tsx:97` reads it in the `dotCenterY` formula — the two consumers named above. The
+ * Wired as of 61-06 (wave 4): `TimelineRow` reads it as `styles.card.marginVertical` and
+ * `TimelineRail` reads it in its `dotCenterY` formula — the two consumers named above. The
  * earlier text here described 61-01's deliberately-unwired state ("still reads 8") and stayed
  * unchanged after 61-06 wired both, making all three of its claims false in the one module whose
  * entire job is preventing exactly that kind of desync.
+ *
+ * IN-08: that same paragraph then cited both consumers by LINE NUMBER, in the one module that
+ * exists because a claim here went stale. Line numbers are the fastest-drifting form of
+ * reference there is — within this very phase, `run-timeline-geometry-proof.sh` located
+ * `ROW_DISPLAY` by a line range that had already slipped nine lines off it (IN-02), pointing at
+ * the tail of an unrelated interface instead. Cite the symbol:
+ * `grep -rn TIMELINE_CARD_MARGIN_V apps/VoteTorrentVoter/src` finds every consumer no matter
+ * where it has moved to, and cannot be silently wrong.
  */
 export const TIMELINE_CARD_MARGIN_V = 16;
