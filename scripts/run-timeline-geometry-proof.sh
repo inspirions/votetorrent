@@ -128,65 +128,13 @@ any_failed() {
 }
 
 # ---------------------------------------------------------------------------------------
-# _find_nondegenerate_bounds ATTR LABEL DUMP_FILE -- case-insensitive substring match
-# against the given XML attribute (`text` or `content-desc`), returning the FIRST bounds
-# value among all matching nodes that is NOT the degenerate "[0,0][0,0]" sentinel.
-#
-# Lifted verbatim from run-authority-signing-ceremony.sh:416-450, comment included, per
-# this plan's Task 1 -- this is a documented, hard-won bug fix (49-13 Task 2 / commit
-# 6f1aff2's bug class), not stylistic preference. Do NOT "clean up" this regex.
-#
-# Bracket-expression note (real bug, found and fixed during 49-13 Task 2):
-# POSIX bracket expressions (`[...]`) do NOT support backslash-escaping -- `\[`/`\]`
-# INSIDE a `[...]` class are literal backslash-then-bracket, not an escaped bracket.
-# The earlier, broken bracket ordering (escaped brackets placed immediately after the
-# comma, inside the class) under BSD/POSIX grep (the actual interpreter this script runs
-# under, confirmed via `grep --version` -> "BSD grep, GNU compatible" -- NOT the same
-# grep some interactive dev shells alias) therefore closes the class early at the first
-# literal `]` and silently fails to match every real `bounds="[x1,y1][x2,y2]"` value,
-# making every match fail 100% of the time despite the target text being genuinely
-# present (observed: 12/12 identical false failures against a real, static,
-# already-rendered dump -- not a timing issue). `[][0-9,]` is the POSIX-safe form:
-# placing `]` immediately after the opening `[` makes it a literal member of the class
-# instead of closing it.
-# ---------------------------------------------------------------------------------------
-_find_nondegenerate_bounds() {
-  local attr="$1" label="$2" dump="$3"
-  local candidates b
-  # 49-14 pipefail note (same bug class as commit 6f1aff2): under this script's
-  # `set -euo pipefail`, an EMPTY match at either grep stage makes the whole pipeline
-  # exit non-zero (pipefail propagates ANY stage's failure, not only the trailing
-  # command's) even though `sed` itself would happily process zero lines -- guard with
-  # `|| true` so "no match" degrades to an empty `candidates`, handled below, instead
-  # of aborting the script.
-  candidates=$(grep -io "${attr}=\"[^\"]*${label}[^\"]*\"[^>]*bounds=\"[][0-9,]*\"" "${dump}" \
-    | grep -o 'bounds="[][0-9,]*"' | sed 's/bounds="//;s/"//' || true)
-  while IFS= read -r b; do
-    [ -z "${b}" ] && continue
-    if [ "${b}" != "[0,0][0,0]" ]; then
-      printf '%s\n' "${b}"
-      return 0
-    fi
-  done <<< "${candidates}"
-  return 1
-}
-
-# ---------------------------------------------------------------------------------------
-# _parse_bounds BOUNDS-STRING -- the bash-level companion to _find_nondegenerate_bounds:
-# that function only answers "does a non-degenerate bounds exist"; the clipping/
-# touch-target math needs all four numbers. Echoes "x1 y1 x2 y2" space-separated on
-# success; returns non-zero on an unparseable value. The record-stream parser itself
-# (walk_dump, below) uses an awk-native equivalent for whole-file throughput; this
-# bash-level primitive is provided for any bash-side (non-awk) consumer of a single
-# bounds string.
-# ---------------------------------------------------------------------------------------
-_parse_bounds() {
-  local bounds="$1"
-  local parsed
-  parsed=$(printf '%s' "${bounds}" | sed -n 's/^\[\([0-9]*\),\([0-9]*\)\]\[\([0-9]*\),\([0-9]*\)\]$/\1 \2 \3 \4/p')
-  [ -z "${parsed}" ] && return 1
-  printf '%s\n' "${parsed}"
-}
+# WR-04: `_find_nondegenerate_bounds` and `_parse_bounds` used to live here, lifted verbatim
+# from run-authority-signing-ceremony.sh:431 along with their "Do NOT 'clean up' this regex"
+# warning. Nothing in THIS script ever called them -- the record parser resolves degenerate
+# bounds inside the awk walker instead (see the content-desc fallback in AWK_WALK_SCRIPT).
+# Deleted rather than kept: dead code carrying a do-not-touch warning invites someone to
+# "reconcile" it with the LIVE copy, which is the one that actually guards the 49-13 bug
+# class. That live copy remains in scripts/run-authority-signing-ceremony.sh, unchanged.
 
 # ---------------------------------------------------------------------------------------
 # The awk program driving walk_dump(). Written once to a tmp file at startup rather than

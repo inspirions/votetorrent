@@ -247,8 +247,9 @@ const styles = StyleSheet.create({
 		flex: 1,
 	},
 	// D-11 deliberate divergence: this wrapper stays intentionally left-aligned (no alignItems),
-	// unlike TimelineRow's identical-looking {marginTop: 16} countdown wrapper, which centres. The
-	// two must not be reconciled.
+	// unlike TimelineRow's countdown wrapper, which centres. The two must not be reconciled.
+	// (The values are no longer the same either: 61-08's C1 moved TimelineRow's to marginTop 24
+	// while Home's stays 16. The contract is the ALIGNMENT, not the spacing.)
 	countdown: {
 		marginTop: 16, // md-ish spacing, matches card padding rhythm
 	},
