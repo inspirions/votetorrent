@@ -307,6 +307,31 @@ walk_dump() {
   sed 's/></>\n</g' "${xml}" > "${normalized}"
   awk -v stage_list="${EXPECTED_STAGES[*]}" -f "${AWK_WALK_SCRIPT}" "${normalized}"
 }
+
+# ---------------------------------------------------------------------------------------
+# reconcile_orphans RECORDS-FILE -- rewrites the file in place, dropping every ORPHAN record
+# whose stage also has a CARD record ANYWHERE in the same file. See the long rationale at the
+# call site in preflight(): collect_records() emits an ORPHAN the first time a single pass sees
+# a stage's content without its notch co-resolving IN THAT PASS, which is a routine
+# scroll-boundary artifact once a LATER pass captures that stage's CARD.
+#
+# WR-06: extracted from preflight() so it is reachable from --selftest. This filter is the only
+# thing standing between a genuine scroll-boundary observation and a false `anchor-missing`
+# FAIL -- and, in the other direction, between a real missing anchor and a silent pass. It can
+# only ever REMOVE an ORPHAN for a stage independently proven present by its own CARD record;
+# it can never manufacture a CARD record, and a stage with no CARD record in any pass is left
+# untouched and continues to fail. The records-level case in run_selftest() pins exactly that.
+# ---------------------------------------------------------------------------------------
+reconcile_orphans() {
+  local records_file="$1"
+  local reconciled="${records_file}.reconciled"
+  awk -v FS="${TAB}" -v OFS="${TAB}" '
+    NR==FNR { if ($1=="CARD") has_card[$2]=1; next }
+    $1=="ORPHAN" && ($2 in has_card) { next }
+    { print }
+  ' "${records_file}" "${records_file}" > "${reconciled}"
+  mv "${reconciled}" "${records_file}"
+}
 # ---------------------------------------------------------------------------------------
 # dump_ui -- lifted verbatim from run-authority-signing-ceremony.sh:377-414 (renamed
 # TMPDIR_CEREMONY -> TMPDIR_TG). The three-attempt retry loop, the well-formedness check,
@@ -484,13 +509,14 @@ preflight() {
   # fail (via the "could not locate card anchor" check immediately below, which reads
   # CARD records only and was never affected by this bug) -- exactly the genuine
   # scroll-boundary case that must stay a real, reported failure.
-  local reconciled="${TMPDIR_TG}/accumulated.reconciled"
-  awk -v FS="${TAB}" -v OFS="${TAB}" '
-    NR==FNR { if ($1=="CARD") has_card[$2]=1; next }
-    $1=="ORPHAN" && ($2 in has_card) { next }
-    { print }
-  ' "${ACCUMULATED_RECORDS}" "${ACCUMULATED_RECORDS}" > "${reconciled}"
-  mv "${reconciled}" "${ACCUMULATED_RECORDS}"
+  #
+  # WR-06: the awk that does this used to be inlined right here, on the DEVICE-ONLY path --
+  # --selftest goes straight from walk_dump() to run_leg() and never calls preflight() or
+  # collect_records(), so nothing committed exercised it. A field-index drift ($1 for $2 in
+  # either the has_card build or the ORPHAN test) would silently drop EVERY orphan and make
+  # `anchor-missing` unreachable on the only path that checks it. It now lives in
+  # reconcile_orphans() so the records-level selftest case and this call site run the same code.
+  reconcile_orphans "${ACCUMULATED_RECORDS}"
 
   local missing="" s found_count
   for s in "${EXPECTED_STAGES[@]}"; do
@@ -1063,12 +1089,53 @@ run_selftest() {
     [ "${ok}" -eq 0 ] && mismatches=$((mismatches + 1))
   done
 
+  # WR-06: records-level case -- device-free coverage for reconcile_orphans(), the one piece of
+  # the preflight path the XML fixture loop above can never reach (--selftest goes straight from
+  # walk_dump() to run_leg(); it never calls preflight() or collect_records()). That filter is
+  # the only thing standing between a genuine scroll-boundary observation and a false
+  # `anchor-missing` FAIL -- and, in the other direction, between a real missing anchor and a
+  # silent pass. A field-index drift inside it ($1 for $2 in either the has_card build or the
+  # ORPHAN test) would drop EVERY orphan and make `anchor-missing` unreachable on the device
+  # path, where preflight() is the only place ORPHANs are ever checked. Feed it a fixed records
+  # file and assert BOTH directions: the orphan that has its own CARD is retired, the orphan
+  # that does not is kept, and the CARD itself is untouched.
+  echo "[timeline-geometry] -- records case: orphan-reconciliation --"
+  local recfile="${TMPDIR_TG}/selftest-reconcile.records"
+  {
+    printf 'CARD\tvotingStarts\t20\t420\t700\t720\tmeasured\n'
+    printf 'ORPHAN\tvotingStarts\n'
+    printf 'ORPHAN\tclosed\n'
+  } > "${recfile}"
+  reconcile_orphans "${recfile}"
+  local rc_ok=1 surviving_orphans surviving_cards
+  surviving_orphans=$(awk -v FS="${TAB}" '$1=="ORPHAN"{print $2}' "${recfile}" | sort | paste -sd, - || true)
+  surviving_cards=$(awk -v FS="${TAB}" '$1=="CARD"{print $2}' "${recfile}" | sort | paste -sd, - || true)
+  if [ "${surviving_orphans}" != "closed" ]; then
+    echo "SELFTEST MISMATCH: orphan-reconciliation -- expected exactly [closed] to survive (votingStarts has its own CARD record, closed does not), got [${surviving_orphans}]"
+    rc_ok=0
+  fi
+  if [ "${surviving_cards}" != "votingStarts" ]; then
+    echo "SELFTEST MISMATCH: orphan-reconciliation -- the CARD record must pass through untouched, got [${surviving_cards}]"
+    rc_ok=0
+  fi
+  if [ "${rc_ok}" -eq 0 ]; then
+    mismatches=$((mismatches + 1))
+  else
+    echo "RECORDS-CASE orphan-reconciliation: PASS (ORPHAN votingStarts retired by its own CARD, ORPHAN closed survives, CARD untouched)"
+  fi
+
   if [ "${mismatches}" -eq 0 ]; then
     echo "SELFTEST: PASS (${total}/${total} fixtures behaved as specified)"
     SCRIPT_EXIT_CODE=0
     exit 0
   else
-    echo "SELFTEST: FAIL ($((total - mismatches))/${total} fixtures behaved as specified)"
+    # CR-01/WR-06: `mismatches` now also counts two NON-fixture checks (the fixture-list drift
+    # check and the orphan-reconciliation records case), so `total - mismatches` stopped being a
+    # meaningful numerator on this path -- it could read "10/11 fixtures behaved as specified"
+    # when all 11 fixtures behaved and a records check failed. Report the mismatch count itself.
+    # The PASSING line above is deliberately left byte-identical: it is quoted verbatim in this
+    # phase's VERIFICATION.
+    echo "SELFTEST: FAIL (${mismatches} mismatch(es) across ${total} fixture(s) + 2 records-level checks)"
     exit 1
   fi
 }
