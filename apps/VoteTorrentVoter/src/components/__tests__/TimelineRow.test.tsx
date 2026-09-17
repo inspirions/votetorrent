@@ -198,7 +198,17 @@ describe('TimelineRow (59-07)', () => {
 		expect(PRODUCTION_NETWORK_NAME.length).toBe(48);
 	});
 
-	it('no-clipping guard: under the ES locale with the 49-char network string in the panel slot, no Text node sets numberOfLines or ellipsizeMode', () => {
+	// WR-08: renamed from "no-clipping guard", which overclaimed. The ABSENCE of numberOfLines /
+	// ellipsizeMode is the precondition for overflow, not evidence against it -- a Text with no
+	// numberOfLines wraps or overruns its parent rather than truncating, so this assertion cannot
+	// fail on a clipping defect and never could. What it genuinely pins is the NO-TRUNCATION
+	// contract: production-length strings must stay fully readable, never elided to "Red Rock Vot...".
+	// Clipping is geometry and RN's test renderer has no layout engine, so it is provable only at
+	// Tier 2 -- scripts/run-timeline-geometry-proof.sh's `clipping` leg, which measures text bounds
+	// against card bounds on a real device (all four edges since WR-07).
+	// This rename is itself a CR-01 lesson: a test whose NAME claims more than its assertions
+	// deliver is precisely how the sub-24h countdown overflow survived a fully green suite.
+	it('no-truncation guard: under the ES locale with the 49-char network string in the panel slot, no Text node sets numberOfLines or ellipsizeMode (full text stays readable; CLIPPING is Tier 2, see run-timeline-geometry-proof.sh)', () => {
 		i18n.changeLanguage('es');
 		const row = buildRowFixture({stageId: 'votingStarts', status: 'current', instantMs: FIXTURE_NOW_MS - 1000});
 		const tr = renderRow({

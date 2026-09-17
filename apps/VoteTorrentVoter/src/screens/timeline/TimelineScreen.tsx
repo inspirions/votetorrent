@@ -198,6 +198,14 @@ export default function TimelineScreen() {
 	// never read once and cached, per the "no ambient clock capture" spirit this screen owns
 	// (deriveTimeline itself never reads the clock; this is the one place that does, exactly
 	// once per state change).
+	// WR-10: `reloadNonce` is a deliberate CACHE-BUSTING dependency -- it is intentionally not
+	// referenced in the callback body, which is exactly why the rule flags it. Do NOT "fix" this by
+	// deleting the dep: `nowMs` would then stay frozen across a pull-to-reload whenever
+	// `clockOffsetMs` is unchanged, so the rail would re-fetch and re-derive against a STALE now.
+	// See the matching note on the effect's own dependency list below (`reloadNonce` stays explicit
+	// there for the same reason). No test covers reload freshness today, so this comment is the
+	// only thing standing between that dep and a well-meaning lint cleanup.
+	// eslint-disable-next-line react-hooks/exhaustive-deps
 	const nowMs = useMemo(() => Date.now() + clockOffsetMs, [clockOffsetMs, reloadNonce]);
 
 	// CR-01: resolved once per mount, never re-read per render -- the device's zone does not
