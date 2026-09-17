@@ -314,10 +314,39 @@ beforeEach(() => {
 	// A focus-callback entry leaked from a previous test is its own defect class — reset the
 	// registry alongside every other mock (mirrors RegistrationInboxScreen.test.tsx:506).
 	mockFocusEntries = [];
+
+	// IN-04: pins this file's act() noise at ZERO. A bare `jest.spyOn` still calls through, so
+	// any warning is still printed — this only makes it COUNTABLE in afterEach below. Without
+	// the guard, the count silently drifts back up: the two warnings this closed were emitted by
+	// an unflushed render in one test and landed in a different test's window, which is exactly
+	// the shape that is impossible to attribute by eye.
+	jest.spyOn(console, 'error');
 });
 
 afterEach(() => {
+	// Read the spy BEFORE restoring it — restoreAllMocks discards the recorded calls.
+	const errorSpy = console.error as unknown as jest.Mock;
+	const actViolations: unknown[][] = (errorSpy.mock?.calls ?? []).filter(
+		(call: unknown[]) => typeof call[0] === 'string' && call[0].includes('not wrapped in act'),
+	);
+
 	jest.restoreAllMocks(); // undoes mockDeviceTimeZone's Intl.DateTimeFormat spy, every test.
+
+	if (actViolations.length > 0) {
+		// Deliberately a hard failure, not a warning: the phase's own rationale in the two
+		// sibling suites is that unwrapped-update noise must stay at zero so a REAL act()
+		// violation added later cannot hide in it. Note the offending update may have been
+		// started by an EARLIER test that rendered without draining its async chain.
+		throw new Error(
+			`IN-04: ${actViolations.length} unwrapped React update(s) reached this test. ` +
+				'Wrap the update in renderer.act(...), or drain the pending chain inside act() ' +
+				// React passes the component name as a separate format argument, so the raw first
+				// arg reads "An update to %s ..." on its own -- splice it back in.
+				`before the test that started it returns. First: ${String(actViolations[0][0])
+					.split('\n')[0]
+					.replace('%s', String(actViolations[0][1] ?? 'a component'))}`,
+		);
+	}
 });
 
 describe('pickElectionId (D-02)', () => {
@@ -371,10 +400,26 @@ describe('TimelineScreen — real elections read (D-01)', () => {
 		expect(mockGetElection).not.toHaveBeenCalled();
 	});
 
-	it('before the first read resolves, neither the rail nor the indeterminate frame is mounted', () => {
+	it('before the first read resolves, neither the rail nor the indeterminate frame is mounted', async () => {
 		const tr = renderScreen();
 		expect(hasTestId(tr, 'timeline-rail')).toBe(false);
 		expect(hasTestId(tr, 'timeline-indeterminate')).toBe(false);
+
+		// IN-04: this is the ONE test in the file that deliberately does NOT flush before
+		// asserting -- the unflushed window IS its subject. But the read it kicked off is still
+		// in flight when the assertions finish, and it used to resolve during some LATER test,
+		// outside any act() scope: that is where both of this file's residual "An update to
+		// TimelineScreen inside a test was not wrapped in act(...)" warnings came from (they
+		// point at `setResolvedElectionId` and the `setState({kind: 'ready', ...})` inside the
+		// timeline-read effect, not at anything the later test did). Drain the chain here, now
+		// that the assertions are done, so the noise cannot bury a genuine act() violation added
+		// later -- the same rationale the two sibling suites already act on.
+		await renderer.act(async () => {
+			await flushMicrotasks();
+		});
+		renderer.act(() => {
+			tr.unmount();
+		});
 	});
 });
 
