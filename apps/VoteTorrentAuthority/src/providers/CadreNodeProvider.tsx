@@ -310,6 +310,15 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           // CONTROL node network — reserves through the drone's CONTROL relay (P2P-11 41-11).
           network: {
+            // Mirrors the drone's override (packages/p2p-probe-host/drone.mjs). cadre-core
+            // throttles the strand-addr fan-out per STRAND at `strandAddrRefreshMs`
+            // (default 10 min) and stamps that throttle on the pass HAPPENING rather than on
+            // its answer, with no invalidation when the connected-sibling set GROWS. A peer
+            // whose first pass lands before its cohort has formed then holds an empty strand
+            // address book — and never sends its delegate announcement either, since both ride
+            // the same collectStrandAddrs call. 15 s keeps re-asking while the cohort is still
+            // assembling, which is the only window in which it matters.
+            controlCohort: { strandAddrRefreshMs: 15_000 },
             transports: [
               webSockets(),
               // D-10: cast by the global transportSymbol, not structural type — the

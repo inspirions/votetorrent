@@ -93,6 +93,18 @@ const node = new CadreNode({
   requireSignedSchemas: false,
   strandFilter: { mode: 'all' },
   network: {
+    // The strand-addr fan-out is throttled per STRAND by `strandAddrRefreshMs`
+    // (cadre-core default 10 min), and `refreshOneStrandPeerAddrs` stamps that throttle on
+    // the pass HAPPENING, not on its answer — keyed by strandId alone, with no invalidation
+    // when the connected-sibling set GROWS. On this rig the drones boot ~2-4 min before the
+    // phones enrol, so the first pass finds only the sibling drone, answers nothing, stamps,
+    // and the strand address book stays peers=0 for the rest of the run. Run 26 shows exactly
+    // two `address book merged (peers=0 ...)` lines, at 04:31:05 and 04:31:34, on an 8 m 35 s
+    // run: next pass due 04:41:34, ~2 min after the drone was killed. That is why the cohort
+    // can never dial back and block-transfer ends in UnexpectedEOFError + NoValidAddressesError.
+    // 15 s re-asks within the formation window. Invisible to tools/multipeer-gate, which starts
+    // every node at once so its FIRST pass already sees the whole cohort.
+    controlCohort: { strandAddrRefreshMs: 15_000 },
     // circuitRelayTransport() is the DIALER half of circuit-relay-v2, and this node needs it
     // even though it is itself a relay SERVER (see relayServerInit below). Supplying
     // `transports` at all REPLACES @optimystic/db-p2p's defaults wholesale —
