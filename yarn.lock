@@ -5760,64 +5760,64 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@serfab/cadre-core@npm:0.13.0":
-  version: 0.13.0
-  resolution: "@serfab/cadre-core@npm:0.13.0"
+"@serfab/cadre-core@npm:1.1.0":
+  version: 1.1.0
+  resolution: "@serfab/cadre-core@npm:1.1.0"
   dependencies:
     "@libp2p/crypto": "npm:^5.1.13"
     "@libp2p/interface": "npm:^3.1.0"
     "@libp2p/peer-id": "npm:^6.0.4"
     "@multiformats/multiaddr": "npm:^12.5.1"
-    "@optimystic/db-core": "npm:^1.0.0-beta.2"
-    "@optimystic/db-p2p": "npm:^1.0.0-beta.2"
-    "@optimystic/quereus-plugin-crypto": "npm:^1.0.0-beta.2"
-    "@optimystic/quereus-plugin-optimystic": "npm:^1.0.0-beta.2"
-    "@quereus/quereus": "npm:^4.19.0"
-    "@serfab/quereus-plugin-sereus": "npm:^0.13.0"
+    "@optimystic/db-core": "npm:^1.1.0"
+    "@optimystic/db-p2p": "npm:^1.1.0"
+    "@optimystic/quereus-plugin-crypto": "npm:^1.1.0"
+    "@optimystic/quereus-plugin-optimystic": "npm:^1.1.0"
+    "@quereus/quereus": "npm:^4.19.4"
+    "@serfab/quereus-plugin-sereus": "npm:^1.1.0"
     debug: "npm:^4.4.3"
     libp2p: "npm:^3.1.3"
     uint8arrays: "npm:^5.1.0"
-  checksum: 10c0/6d6c381106ad94947fd202790ef1684247165e661c7843ab7d5d9591bc7a70955d00c3b9ef6ad673ab5d2ef7f80a77782bdf91b98aaa9b152754dd4c3c0a6e1d
+  checksum: 10c0/44b612664e675600f7236d49e4fdb1f3d8b26121ea86f07b15e9410aae2ecf169d2cc85ef42d51512eb19f701805b1e180fb8066e0f95e5cfd39d6ef688b1341
   languageName: node
   linkType: hard
 
-"@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch":
-  version: 0.13.0
-  resolution: "@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch::version=0.13.0&hash=af5af4"
+"@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch":
+  version: 1.1.0
+  resolution: "@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch::version=1.1.0&hash=887ae7"
   dependencies:
     "@libp2p/crypto": "npm:^5.1.13"
     "@libp2p/interface": "npm:^3.1.0"
     "@libp2p/peer-id": "npm:^6.0.4"
     "@multiformats/multiaddr": "npm:^12.5.1"
-    "@optimystic/db-core": "npm:^1.0.0-beta.2"
-    "@optimystic/db-p2p": "npm:^1.0.0-beta.2"
-    "@optimystic/quereus-plugin-crypto": "npm:^1.0.0-beta.2"
-    "@optimystic/quereus-plugin-optimystic": "npm:^1.0.0-beta.2"
-    "@quereus/quereus": "npm:^4.19.0"
-    "@serfab/quereus-plugin-sereus": "npm:^0.13.0"
+    "@optimystic/db-core": "npm:^1.1.0"
+    "@optimystic/db-p2p": "npm:^1.1.0"
+    "@optimystic/quereus-plugin-crypto": "npm:^1.1.0"
+    "@optimystic/quereus-plugin-optimystic": "npm:^1.1.0"
+    "@quereus/quereus": "npm:^4.19.4"
+    "@serfab/quereus-plugin-sereus": "npm:^1.1.0"
     debug: "npm:^4.4.3"
     libp2p: "npm:^3.1.3"
     uint8arrays: "npm:^5.1.0"
-  checksum: 10c0/5ba923de3499db3b7cd2bef4b47f61bd8aaa45db2caa2a0bed4eee45cb178fb673fe7df0b66065ee2acd1277f0930abaa4e709e86eae76bc70cbdb6bb7a679ae
+  checksum: 10c0/0f6f3cfede762e0df6a7e1e8536521c3259bd78f60aaf8f0b38e244ed1b3075c2e2777ef7564a0c1a19bcf0a36c3f7bb55a3dff2b348bcda73e9ed2ca4a12efb
   languageName: node
   linkType: hard
 
-"@serfab/quereus-plugin-sereus@npm:^0.13.0":
-  version: 0.13.0
-  resolution: "@serfab/quereus-plugin-sereus@npm:0.13.0"
+"@serfab/quereus-plugin-sereus@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@serfab/quereus-plugin-sereus@npm:1.1.0"
   dependencies:
     "@libp2p/circuit-relay-v2": "npm:^4.1.3"
     "@libp2p/interface": "npm:^3.1.0"
     "@libp2p/websockets": "npm:^10.1.3"
-    "@optimystic/db-core": "npm:^1.0.0-beta.2"
-    "@optimystic/db-p2p": "npm:^1.0.0-beta.2"
-    "@optimystic/db-p2p-storage-fs": "npm:^1.0.0-beta.2"
-    "@optimystic/db-p2p-storage-web": "npm:^1.0.0-beta.2"
-    "@optimystic/quereus-plugin-crypto": "npm:^1.0.0-beta.2"
-    "@optimystic/quereus-plugin-optimystic": "npm:^1.0.0-beta.2"
-    "@quereus/quereus": "npm:^4.19.0"
+    "@optimystic/db-core": "npm:^1.1.0"
+    "@optimystic/db-p2p": "npm:^1.1.0"
+    "@optimystic/db-p2p-storage-fs": "npm:^1.1.0"
+    "@optimystic/db-p2p-storage-web": "npm:^1.1.0"
+    "@optimystic/quereus-plugin-crypto": "npm:^1.1.0"
+    "@optimystic/quereus-plugin-optimystic": "npm:^1.1.0"
+    "@quereus/quereus": "npm:^4.19.4"
     debug: "npm:^4.4.3"
-  checksum: 10c0/ae29e4cab8bf575e594a76af6f981481369a02d142ec1349238ff5b7025d3965beb06ef7a2317b9e71c8ce7833877ac8818d4f2784ae756a1865045edec36e29
+  checksum: 10c0/7bf563145580acea06bbd8a2278d28b62cc5d9e61424b52e64ea1b4b2882d60479f91c00cf18d459ec8e912739f425400c654cb094ab6db062052606ddd602f0
   languageName: node
   linkType: hard
 
@@ -17498,7 +17498,7 @@ __metadata:
     "@libp2p/peer-id": "npm:^6.0.0"
     "@libp2p/websockets": "npm:^10"
     "@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A1.1.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.1.0-c1815c4b38.patch"
-    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch"
     "@serfab/strand-proto": "npm:^0.11.0"
   languageName: unknown
   linkType: soft
@@ -22010,7 +22010,7 @@ __metadata:
     "@react-navigation/bottom-tabs": "npm:^7.0.0"
     "@react-navigation/native": "npm:^7.0.0"
     "@react-navigation/native-stack": "npm:^7.0.0"
-    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch"
     "@types/jest": "npm:^29.5.13"
     "@types/react": "npm:^19.0.0"
     "@types/react-native-vector-icons": "npm:^6.4.18"
@@ -22087,8 +22087,8 @@ __metadata:
     "@optimystic/quereus-plugin-crypto": "npm:^1.1.0"
     "@quereus/plugin-indexeddb": "npm:4.19.4"
     "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.19.4#~/.yarn/patches/@quereus-quereus-npm-4.19.4-6fd16bc9e5.patch"
-    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch"
-    "@serfab/quereus-plugin-sereus": "npm:^0.13.0"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch"
+    "@serfab/quereus-plugin-sereus": "npm:^1.1.0"
     "@types/node": "npm:^22.10.2"
     "@types/react": "npm:19.2.17"
     "@types/react-dom": "npm:^19.0.0"
@@ -22140,7 +22140,7 @@ __metadata:
     "@react-navigation/bottom-tabs": "npm:^7.0.0"
     "@react-navigation/native": "npm:^7.0.0"
     "@react-navigation/native-stack": "npm:^7.0.0"
-    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch"
     "@types/jest": "npm:^29.5.13"
     "@types/react": "npm:^19.0.0"
     "@types/react-native-vector-icons": "npm:^6.4.18"

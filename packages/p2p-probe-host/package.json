@@ -17,7 +17,7 @@
 		"@libp2p/peer-id": "^6.0.0",
 		"@libp2p/websockets": "^10",
 		"@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A1.1.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.1.0-c1815c4b38.patch",
-		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch",
+		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch",
 		"@serfab/strand-proto": "^0.11.0"
 	}
 }

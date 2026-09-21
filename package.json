@@ -53,8 +53,8 @@
 		"uint8arrays@npm:^5.1.0": "3.1.1",
 		"uuid": "9.0.1",
 		"react-native-screens": "4.10.0",
-		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch",
-		"@serfab/quereus-plugin-sereus": "^0.13.0",
+		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch",
+		"@serfab/quereus-plugin-sereus": "^1.1.0",
 		"@serfab/strand-proto": "^0.11.0",
 		"@optimystic/db-core": "^1.1.0",
 		"@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A1.1.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.1.0-c1815c4b38.patch",
@@ -96,7 +96,7 @@
 		"@optimystic/db-p2p@npm:^1.1.0": "patch:@optimystic/db-p2p@npm%3A1.1.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.1.0-c1815c4b38.patch",
 		"@optimystic/db-p2p@npm:^1.0.0-beta.2": "patch:@optimystic/db-p2p@npm%3A1.1.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.1.0-c1815c4b38.patch",
 		"@optimystic/db-p2p@npm:^1.0.0": "patch:@optimystic/db-p2p@npm%3A1.1.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.1.0-c1815c4b38.patch",
-		"@serfab/cadre-core@npm:^0.13.0": "patch:@serfab/cadre-core@npm%3A0.13.0#~/.yarn/patches/@serfab-cadre-core-npm-0.13.0-8e3274cee1.patch"
+		"@serfab/cadre-core@npm:^1.1.0": "patch:@serfab/cadre-core@npm%3A1.1.0#~/.yarn/patches/@serfab-cadre-core-npm-1.1.0-fwdport.patch"
 	},
 	"packageManager": "yarn@4.7.0",
 	"engines": {
