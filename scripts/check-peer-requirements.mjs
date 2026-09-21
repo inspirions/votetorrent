@@ -150,8 +150,19 @@ const execAsync = promisify(exec);
 // (packages/attestation-native depends on quereus-plugin-crypto without declaring
 // @quereus/quereus, so it cannot provide that peer). Unlike the two bumps before it,
 // this line was updated in the same commit as the bump.
+//
+// @optimystic 1.0.0-beta.3 -> 1.1.0 bump (2026-09-21): same single mismatch, re-keyed
+// again. Re-verified rather than assumed: yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.1.0), and the cause is unchanged —
+// packages/attestation-native depends on quereus-plugin-crypto without declaring
+// @quereus/quereus, so it cannot provide that peer. NOTE what did NOT change here:
+// optimystic 1.1.0 raised both plugins' @quereus/quereus peer RANGE from ^4.3.0 to
+// ^4.19.4, but this mismatch was never a range problem — it is a MISSING peer, so
+// narrowing the range neither caused nor cured it. The real fix is to add
+// @quereus/quereus to packages/attestation-native, not to widen this allowlist;
+// until then the entry stays and must be re-keyed on every optimystic bump.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.0.0-beta.3',
+  '@optimystic/quereus-plugin-crypto@npm:1.1.0',
 ]);
 
 // The ✘ marker (U+2718)

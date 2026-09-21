@@ -1,8 +1,8 @@
 diff --git a/dist/src/cluster/cluster-repo.js b/dist/src/cluster/cluster-repo.js
-index 53e8ca382a67130e7770db8efbe72fc5f67758e6..ec43f1154fb197b2592d60c9a624fe07c9ed5565 100644
+index 6eb847dbd5b5366f0c91647aaab0bf93f5181cb2..6f4aa3606bfc3d82052135724e477bb2f171c07d 100644
 --- a/dist/src/cluster/cluster-repo.js
 +++ b/dist/src/cluster/cluster-repo.js
-@@ -191,12 +191,17 @@ export class ClusterMember {
+@@ -229,12 +229,17 @@ export class ClusterMember {
              membershipAdmissionFraction: this.membershipAdmissionFraction,
              allowUnvalidatedSmallCluster: this.allowUnvalidatedSmallCluster
          });
@@ -23,7 +23,7 @@ index 53e8ca382a67130e7770db8efbe72fc5f67758e6..ec43f1154fb197b2592d60c9a624fe07
      }
      /**
       * The resolved super-majority threshold this member runs on. Exposed so the composition root can
-@@ -294,7 +299,7 @@ export class ClusterMember {
+@@ -333,7 +338,7 @@ export class ClusterMember {
              // Remove from pending updates after a short delay to allow concurrent calls to see it
              setTimeout(() => {
                  this.pendingUpdates.delete(record.messageHash);
@@ -32,7 +32,7 @@ index 53e8ca382a67130e7770db8efbe72fc5f67758e6..ec43f1154fb197b2592d60c9a624fe07
          }
      }
      async processUpdate(record) {
-@@ -2139,7 +2144,7 @@ export class ClusterMember {
+@@ -2526,7 +2531,7 @@ export class ClusterMember {
          let timer;
          const timeout = new Promise((_, reject) => {
              timer = setTimeout(() => reject(new Error(`reconcile for block ${blockId} timed out after ${ReconcileTimeoutMs}ms`)), ReconcileTimeoutMs);
@@ -41,7 +41,7 @@ index 53e8ca382a67130e7770db8efbe72fc5f67758e6..ec43f1154fb197b2592d60c9a624fe07
          });
          return Promise.race([promise, timeout]).finally(() => {
              if (timer)
-@@ -2153,10 +2158,18 @@ export class ClusterMember {
+@@ -2540,10 +2545,18 @@ export class ClusterMember {
          if (!record.message.expiration) {
              return {};
          }
@@ -65,10 +65,10 @@ index 53e8ca382a67130e7770db8efbe72fc5f67758e6..ec43f1154fb197b2592d60c9a624fe07
      /**
       * Scan this member's reservation table (`activeTransactions`) for a held transaction that
 diff --git a/dist/src/libp2p-node-base.js b/dist/src/libp2p-node-base.js
-index 6787965df7e0eef23f57050741e5d1d2525915d1..218d88ef2ab81a18718b65ab80eba420f2d13568 100644
+index 68ffcc8a6dbcc188114d2e27ccd96ec11c591f36..97122a9e62f0e5c34e29270f05ab5c8c4ed85d83 100644
 --- a/dist/src/libp2p-node-base.js
 +++ b/dist/src/libp2p-node-base.js
-@@ -497,7 +497,7 @@ export async function createLibp2pNodeBase(options, defaults) {
+@@ -569,7 +569,7 @@ export async function createLibp2pNodeBase(options, defaults) {
              try {
                  const response = await Promise.race([
                      syncClient.requestBlock({ blockId, rev: undefined }),

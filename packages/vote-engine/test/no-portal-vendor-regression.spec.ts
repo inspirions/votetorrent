@@ -125,7 +125,7 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 0.13.x, @optimystic/db-* 1.0.0-beta.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 0.13.x, @optimystic/db-* 1.1.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
@@ -138,11 +138,16 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
 
       // @serfab/strand-proto is still on the 0.11 line (neither 0.12 nor 0.13 was ever
       // published for it); cadre-core and quereus-plugin-sereus moved 0.12.0 -> 0.13.0
-      // with the bump in eb5302af, which also took @optimystic/db-* to the 1.0.0-beta
-      // line. This assertion had drifted TWO bumps behind that (it still named 0.12.x /
+      // with the bump in eb5302af. @optimystic/db-* moved 1.0.0-beta.3 -> 1.1.0 on
+      // 2026-09-21: 1.1.0 is the first STABLE optimystic line, and taking it was not
+      // optional once its two quereus plugins narrowed their peer range to ^4.19.4.
+      // NOTE the @serfab line is deliberately NOT moved in that bump even though
+      // cadre-core 1.0.0 exists — cadre-core 0.13.0's `^1.0.0-beta.2` range already
+      // admits 1.1.0, so the families were decoupled for this hop on purpose.
+      // This assertion had drifted TWO bumps behind once already (it still named 0.12.x /
       // 0.27.x) because nothing re-runs it on a dependency change.
       const expectedPrefix = pkg === '@serfab/strand-proto' ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '0.13.' : '1.0.0-beta.'
+        : pkg.startsWith('@serfab/') ? '0.13.' : '1.1.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`
