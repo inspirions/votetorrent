@@ -214,6 +214,16 @@ export async function legStrandCohort(ctx, all) {
  */
 export async function legReplication(ctx, peerA, peerB) {
   const id = `${ctx.runId}-forward`;
+  // strandConfig() opts out of cadre-core 1.1.0's attach-time first-sync gate
+  // (`awaitFirstSync: false`), which is what lets this gate's sequential bring-up complete at
+  // all. The documented other half of that opt-out is that the caller awaits writability
+  // before it writes -- otherwise the attach may still be 'syncing' with no database and the
+  // write fails as 'no active strand database'. Optional-chained so the multiproc agent, which
+  // does not expose the helper, is unaffected.
+  for (const p of [peerA, peerB]) {
+    const w = await p.whenWritable?.();
+    if (w) console.log(`[multipeer-gate] writability ${p.name}: ${w.writable ? 'WRITABLE' : 'NOT writable — ' + w.error}`);
+  }
   try {
     await peerA.exec(
       `insert into ${ctx.TABLE} (Id, Value, Writer) values ('${id}', 'written-by-${peerA.name}', '${peerA.name}');`);

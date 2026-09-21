@@ -458,6 +458,14 @@ await node.addStrand({
     latencyHint: 'interactive',
   },
   mode: 'bootstrap',
+  // cadre-core 1.1.0 made `awaitFirstSync` default to TRUE: a JOINING machine's addStrand now
+  // blocks until its first sync and then rejects with the retryable StrandAwaitingFirstSyncError
+  // ("no member of this strand has been reachable since this machine joined"). A founder, or a
+  // machine already holding the strand's Header, is never gated -- but this drone is neither: it
+  // is the bootstrap HOST that everyone else syncs FROM, so gating it on a reachable member is
+  // backwards and deadlocks the whole rig at start-up (run 30 died here after 30002 ms, as did
+  // tools/multipeer-gate). Opt out and let the strand become writable as peers arrive.
+  awaitFirstSync: false,
 });
 L(`[replication-proof] strand started, strandId=${STRAND_ID}`);
 // Advertise the drone's strand-node listen multiaddr so the harness can inject it

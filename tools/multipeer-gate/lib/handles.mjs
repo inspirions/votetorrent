@@ -89,6 +89,15 @@ export function inProcessHandle(name, node, storage, { strandId = STRAND_ID } = 
 
     addStrand: async (config) => { await node.addStrand(config); },
 
+    // Pairs with `awaitFirstSync: false` in strandConfig(): that opt-out returns as soon as the
+    // runtime is launched, possibly status 'syncing' with NO database, and cadre-core 1.1.0's
+    // own docs say the caller must then await writability itself. Without this L5 writes into a
+    // strand that has no database yet and fails with 'no active strand database'.
+    whenWritable: async (timeoutMs = 30_000) => {
+      try { await node.whenStrandWritable(strandId, { timeoutMs }); return { writable: true }; }
+      catch (e) { return { writable: false, error: `${e?.message ?? e}` }; }
+    },
+
     cohort: async (key) => {
       const strandNode = node.getStrand(strandId)?.libp2pNode;
       if (!strandNode) return { count: 0, ids: [] };

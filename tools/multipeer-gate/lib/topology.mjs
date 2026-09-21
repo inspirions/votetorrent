@@ -161,5 +161,13 @@ export function strandConfig({ strandId = STRAND_ID, sAppId = SAPP_ID, schema = 
     strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o' },
     sAppConfig: { id: sAppId, version: '1.0.0', schema, latencyHint: 'interactive' },
     mode,
+    // cadre-core 1.1.0 made `awaitFirstSync` default to TRUE, so a JOINING machine's addStrand
+    // blocks until its first sync and then rejects with StrandAwaitingFirstSyncError. That
+    // deadlocks this gate's sequential bring-up: each node is attached before the sibling it
+    // would sync from exists, so the FIRST attach times out (30 s) and the run dies before L4.
+    // Opt out and let the strand become writable as the topology assembles -- L4/L5 already
+    // prove real cohort formation and cross-peer replication, which is a stricter check than
+    // the attach-time gate this replaces.
+    awaitFirstSync: false,
   };
 }
