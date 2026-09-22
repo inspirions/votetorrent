@@ -188,8 +188,8 @@ const ops = {
     }
   },
 
-  addStrand: async ({ mode }) => {
-    await requireNode().addStrand(strandConfig({ strandId: state.strandId, mode }));
+  addStrand: async ({ mode, founder }) => {
+    await requireNode().addStrand(strandConfig({ strandId: state.strandId, mode, founder }));
     return {};
   },
 

@@ -157,7 +157,7 @@ export function agentHandle(name, client) {
     acceptPhone: (phonePeerId, encodedInvite) => client.call('acceptPhone', { phonePeerId, encodedInvite }),
     isAuthorizedMember: (peerId) => client.call('isAuthorizedMember', { peerId }),
     listAuthorizedMembers: () => client.call('listAuthorizedMembers'),
-    addStrand: (config) => client.call('addStrand', { mode: config.mode }),
+    addStrand: (config) => client.call('addStrand', { mode: config.mode, founder: config.founder }),
     cohort: (key) => client.call('cohort', { key }),
     exec: (sql) => client.call('exec', { sql }),
     query: (sql) => client.call('query', { sql }),

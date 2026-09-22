@@ -156,11 +156,23 @@ export function buildNode(role, opts) {
 export { generateKeyPair };
 
 /** The strand config both gates add. */
-export function strandConfig({ strandId = STRAND_ID, sAppId = SAPP_ID, schema = SCHEMA, mode }) {
+export function strandConfig({ strandId = STRAND_ID, sAppId = SAPP_ID, schema = SCHEMA, mode, founder }) {
   return {
     strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o' },
     sAppConfig: { id: sAppId, version: '1.0.0', schema, latencyHint: 'interactive' },
     mode,
+    // Founder-ness is normally DERIVED from `strandRow.FounderOwnerKey` matching the node's own
+    // owner key. The row above is hand-built and carries no such provenance, so the derivation
+    // says "joiner" for EVERY node here -- including the drone that is meant to found. Under
+    // cadre-core >= 1.1.0's first-sync gate that is a deadlock rather than a slow start: a joiner
+    // is withheld its database until some member's `Strand.Header` reaches it, and with nobody
+    // founding, no header ever exists. Every node then reports "no member of this strand has been
+    // reachable since this machine joined" and every write fails with "no active strand database"
+    // -- which reads exactly like the relay-only reachability wall this gate exists to measure.
+    // An explicit value wins over the derivation, and the cadre-core docs name this case (a
+    // hand-built row with no founder provenance to heal against) as the reason it can be set.
+    // Left undefined for joiners, so their gating is the real thing.
+    ...(founder !== undefined && { founder }),
     // cadre-core 1.1.0 made `awaitFirstSync` default to TRUE, so a JOINING machine's addStrand
     // blocks until its first sync and then rejects with StrandAwaitingFirstSyncError. That
     // deadlocks this gate's sequential bring-up: each node is attached before the sibling it

@@ -41,7 +41,20 @@ try {
   await withTimeout(node.start(), START_TIMEOUT_MS, 'selftest node start');
   const solo = inProcessHandle('solo', node, storage);
   await solo.genesis();
-  await solo.addStrand(strandConfig({ mode: 'bootstrap' }));
+  // The solo node is the whole topology, so it must found: with no founder provenance on the
+  // hand-built strand row it would attach as a joiner, and a joiner with no members to sync from
+  // never gets a database -- the data legs would then fail as an instrument on a topology that
+  // has no replication in it at all.
+  await solo.addStrand(strandConfig({ mode: 'bootstrap', founder: true }));
+  // strandConfig() opts out of cadre-core 1.1.0's attach-time first-sync gate
+  // (`awaitFirstSync: false`) so the gate's sequential bring-up can complete. The documented
+  // other half of that opt-out applies here too: addStrand can return with status 'syncing'
+  // and NO database, so the caller must await writability before it writes. Without this the
+  // solo node fails every data leg with 'no active strand database' -- an instrument fault
+  // that reads exactly like the multi-peer wall the gate is measuring, on a topology that has
+  // no peers at all.
+  const soloWritable = await solo.whenWritable();
+  console.log(`[selftest] writability solo: ${soloWritable.writable ? 'WRITABLE' : 'NOT writable -- ' + soloWritable.error}`);
 
   const ctx = createContext({
     tag: 'selftest', kind: 'inproc', table: GATE_TABLE, runId: `selftest-${Date.now().toString(36)}`,

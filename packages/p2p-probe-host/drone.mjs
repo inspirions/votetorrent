@@ -458,13 +458,21 @@ await node.addStrand({
     latencyHint: 'interactive',
   },
   mode: 'bootstrap',
-  // cadre-core 1.1.0 made `awaitFirstSync` default to TRUE: a JOINING machine's addStrand now
-  // blocks until its first sync and then rejects with the retryable StrandAwaitingFirstSyncError
-  // ("no member of this strand has been reachable since this machine joined"). A founder, or a
-  // machine already holding the strand's Header, is never gated -- but this drone is neither: it
-  // is the bootstrap HOST that everyone else syncs FROM, so gating it on a reachable member is
-  // backwards and deadlocks the whole rig at start-up (run 30 died here after 30002 ms, as did
-  // tools/multipeer-gate). Opt out and let the strand become writable as peers arrive.
+  // A founder is never gated on first sync, and this drone (when it is the founding one) IS the
+  // bootstrap host everyone else syncs FROM. But founder-ness is normally DERIVED from
+  // `strandRow.FounderOwnerKey` matching this node's owner key, and the row above is hand-built
+  // with no such provenance -- so the derivation says "joiner" even here. Under cadre-core
+  // >= 1.1.0's first-sync gate that is a deadlock, not a slow start: a joiner is withheld its
+  // database until some member's Header reaches it, and with nobody founding, no Header ever
+  // exists. Every node then reports "no member of this strand has been reachable since this
+  // machine joined" and every write fails with "no active strand database" -- which reads exactly
+  // like a peer-reachability failure. An explicit value wins over the derivation. Left undefined
+  // on a joiner drone, so its gating is the real thing.
+  ...(IS_FOUNDER && { founder: true }),
+  // Belt and braces for the joiner drone: `awaitFirstSync: false` returns as soon as the runtime
+  // is launched (possibly 'syncing' with no database) instead of blocking the whole rig's start-up
+  // on a sibling that may not be up yet -- run 30 died here after 30002 ms, as did
+  // tools/multipeer-gate. The documented other half is that the caller awaits writability itself.
   awaitFirstSync: false,
 });
 L(`[replication-proof] strand started, strandId=${STRAND_ID}`);

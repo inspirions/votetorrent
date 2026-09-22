@@ -115,8 +115,12 @@ export async function runGate({ tag, kind, fabric }) {
   if (!(await legRealDial(ctx, drones, peers))) return finish(false);
 
   L('bringing up strands ...');
-  for (const d of drones) {
-    await withTimeout(d.addStrand(strandConfig({ mode: 'bootstrap' })), ADD_STRAND_TIMEOUT_MS, `${d.name} addStrand`);
+  // Exactly ONE founder, and it is the node that already founded the cadre (droneA ran owner
+  // genesis). Every other node attaches as a genuine joiner, so the first-sync gate they pass
+  // through is the real one -- which is what L4/L5 are measuring.
+  for (const [i, d] of drones.entries()) {
+    await withTimeout(d.addStrand(strandConfig({ mode: 'bootstrap', ...(i === 0 && { founder: true }) })),
+      ADD_STRAND_TIMEOUT_MS, `${d.name} addStrand`);
   }
   for (const p of peers) {
     await withTimeout(p.addStrand(strandConfig({ mode: 'networked' })), ADD_STRAND_TIMEOUT_MS, `${p.name} addStrand`);
@@ -158,7 +162,10 @@ export async function runGate({ tag, kind, fabric }) {
     // Always. It is the control arm.
     const outsider = await fabric.startOutsider?.('outsider');
     if (outsider) {
-      await withTimeout(outsider.addStrand(strandConfig({ mode: 'bootstrap' })), ADD_STRAND_TIMEOUT_MS, 'outsider addStrand');
+      // The control arm is a strand of one, deliberately cut off from the cohort, so it has to
+      // found its own or it would sit un-writable and report "sees nothing" for that reason
+      // rather than for the isolation it is there to demonstrate.
+      await withTimeout(outsider.addStrand(strandConfig({ mode: 'bootstrap', founder: true })), ADD_STRAND_TIMEOUT_MS, 'outsider addStrand');
       if (!(await legIsolationControl(ctx, outsider, writtenIds))) ok = false;
     } else {
       skip('D5', 'isolation-control', 'this gate supplied no outsider — D1-D4 are unvouched');
