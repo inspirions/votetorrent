@@ -424,7 +424,7 @@ fi
 # which says whether the cold-start carve-out is still open.
 # DRONE_LOG is retained through the FULL run (no rm -f below) — only the EXIT trap removes it.
 DRONE_LOG=$(mktemp /tmp/drone-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*}" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
 DRONE_PID=$!
 echo "[run-replication-proof] Drone launched (PID ${DRONE_PID}, DEBUG= cluster-error logging armed), waiting for READY line ..."
 
@@ -518,7 +518,7 @@ echo "[run-replication-proof] Drone invite captured (${#DRONE_INVITE} chars)"
 # host-loopback vs emulator-alias address spaces).
 echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} under Node 22 ..."
 DRONE_B_LOG=$(mktemp /tmp/drone-b-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*}" \
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" \
   STRAND_ID="${STRAND_ID}" \
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
   DRONE_BOOTSTRAP_STRAND_ADDR="${STRAND_ADDR}" \
@@ -687,15 +687,25 @@ PROBE_STARTED=1
 # ── D-09: relay-READY gate — gates the START of the replication run on the relay
 # reservation being observed on BOTH peers (P2P-08). Both emulators run the same
 # replication-proof-runner.ts, so both independently poll getMultiaddrs()/p2p-circuit
-# and emit relayReservation= (true|false) unconditionally — wait for the marker line
-# itself (its presence, not its boolean value) on each serial, mirroring the existing
-# PROBE_MARKER/STRAND_ID_MARKER gating shape.
+# and emit relayReservation= (true|false) unconditionally. We wait for the marker line
+# on each serial (mirroring the PROBE_MARKER/STRAND_ID_MARKER gating shape) AND assert
+# its boolean is `true`: waiting on presence alone let run 28 proceed on
+# relayReservation=false, i.e. with the very precondition this gate exists to establish
+# already broken, which makes every reservation-sensitive result downstream
+# uninterpretable. See the strand-addr-throttle todo's "Rig caveat on runs 27-29".
 echo "[run-replication-proof] D-09: waiting for relayReservation= marker on emulator-5554 (networked run) ..."
 RELAY_LINE_A=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-A" "-s emulator-5554")
 if [ -z "${RELAY_LINE_A}" ]; then
   echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on emulator-5554 (networked run) — relay reservation not established (P2P-08)" >&2
   exit 1
 fi
+case "${RELAY_LINE_A}" in
+  *"relayReservation=', true"*|*"relayReservation= true"*|*"relayReservation=true"*) : ;;
+  *)
+    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on emulator-5554 — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_A}" >&2
+    exit 1
+    ;;
+esac
 echo "[run-replication-proof] D-09: relay-READY on emulator-5554: ${RELAY_LINE_A}"
 echo "[run-replication-proof] D-09: waiting for relayReservation= marker on emulator-5556 (networked run) ..."
 RELAY_LINE_B=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-B" "-s emulator-5556")
@@ -703,6 +713,13 @@ if [ -z "${RELAY_LINE_B}" ]; then
   echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on emulator-5556 (networked run) — relay reservation not established (P2P-08)" >&2
   exit 1
 fi
+case "${RELAY_LINE_B}" in
+  *"relayReservation=', true"*|*"relayReservation= true"*|*"relayReservation=true"*) : ;;
+  *)
+    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on emulator-5556 — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_B}" >&2
+    exit 1
+    ;;
+esac
 echo "[run-replication-proof] D-09: relay-READY on emulator-5556: ${RELAY_LINE_B}"
 
 # ── D-05: peerId stability — capture before/after a Peer-A force-stop relaunch ─
