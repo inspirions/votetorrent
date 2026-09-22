@@ -161,8 +161,21 @@ const execAsync = promisify(exec);
 // narrowing the range neither caused nor cured it. The real fix is to add
 // @quereus/quereus to packages/attestation-native, not to widen this allowlist;
 // until then the entry stays and must be re-keyed on every optimystic bump.
+//
+// @optimystic 1.1.0 -> 1.2.0 bump (2026-09-22): same single mismatch, re-keyed again and
+// re-verified the same way — yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.2.0), and the cause is still the missing
+// @quereus/quereus dependency in packages/attestation-native, not a peer RANGE (1.2.0
+// leaves that range at ^4.19.4, unchanged from 1.1.0).
+//
+// @optimystic 1.2.0 -> 1.3.0 bump (2026-09-22): same single mismatch, re-keyed once more.
+// Re-verified: yarn.lock holds exactly ONE resolved @optimystic/quereus-plugin-crypto
+// version (1.3.0), the peer range is still ^4.19.4, and the cause is still the missing
+// @quereus/quereus declaration in packages/attestation-native. NOTE the @serfab family did
+// NOT move on this hop (cadre-core / quereus-plugin-sereus stay 1.2.0), so this is the first
+// bump where the two families are deliberately on different minors.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.1.0',
+  '@optimystic/quereus-plugin-crypto@npm:1.3.0',
 ]);
 
 // The ✘ marker (U+2718)
