@@ -27,6 +27,7 @@ const resources = {
 			scanQrCode: 'Scan QR Code',
 			enterBootstrap: 'Enter Bootstrap (advanced)',
 			useLocation: 'Use Location',
+			useLocationComingSoon: 'Use Location (coming soon)',
 			scan: 'Scan',
 			useBootstrap: 'Use Bootstrap',
 			enterAddressOrLocation: 'Enter address or location...',
@@ -96,7 +97,7 @@ const resources = {
 			noKeyholders: 'No keyholders',
 			singleAuthority: 'Single authority',
 			multiple: 'Multiple',
-			multipleAuthorityNotYetSupported: 'Multiple (not yet supported)',
+			multipleAuthorityNotYetSupportedNote: 'Multiple authorities are not yet supported.',
 			mustSignBeforeCreating: 'You must sign before creating the network.',
 			atLeastOneKeyholderRequired: 'At least one keyholder is required.',
 			invalidDate: 'Please enter a valid date.',
@@ -107,9 +108,9 @@ const resources = {
 			networkCreateUnconfirmed:
 				'Could not confirm whether the network was created. It may still be finishing — check your networks list before creating it again, so you do not create it twice.',
 			errRelayRequired:
-				'Add at least one relay address under Advanced → Add Relay before creating the network.',
+				'Add at least one relay address under Relays before creating the network.',
 			errRelayInvalid:
-				'A relay address under Advanced → Add Relay is not a valid multiaddress. Check it and try again — for example /dns4/relay.example.com/tcp/443/wss/p2p/<peer id>.',
+				'A relay address under Relays is not a valid multiaddress. Check it and try again — for example /dns4/relay.example.com/tcp/443/wss/p2p/<peer id>.',
 			validationFailed: 'Validation failed.',
 			errTitleRequired: 'Please enter an election title.',
 			errElectionDateRequired: 'Please choose an election date.',
@@ -141,6 +142,14 @@ const resources = {
 			sign: 'SIGN',
 			createNetwork: 'Create Network',
 			relays: 'Relays',
+			relaysRequiredHint: 'At least one relay is required so other devices can reach this network.',
+			createMissingFields: 'Before creating the network: {{fields}}.',
+			missingNetworkName: 'enter a network name',
+			missingAuthorityName: 'enter the primary authority name',
+			missingYourName: 'enter your name',
+			missingYourTitle: 'enter your title',
+			missingSignature: 'sign',
+			missingRelay: 'add a relay address',
 			multiaddress: 'Multiaddress',
 			advanced: 'Advanced',
 			import: 'Import',
@@ -178,7 +187,7 @@ const resources = {
 			inviteId: 'Invite ID',
 			showHelpIcons: 'Show help icons',
 			defaultUser: 'Default User',
-			connectDevice: 'Connect this device\nto existing user',
+			connectDevice: 'Connect to existing user',
 			connect: 'Connect',
 			enterName: 'Enter name',
 			enterImageUrl: 'Enter image URL',
@@ -242,7 +251,7 @@ const resources = {
 			signingKeyProvisioningAwaitingNetworkHeading: 'Secure signing is set up on this device',
 			signingKeyProvisioningAwaitingNetworkBody:
 				'Your signing key is protected by your biometrics. Select or create a network to finish registering it.',
-			signingKeyProvisioningContinueButton: 'Return to App',
+			signingKeyProvisioningContinueButton: 'Continue',
 			// 49-14 follow-up: distinct from awaiting-network — the network resolved, but this
 			// device's account on it did not (see ProvisionSigningKeyScreen.tsx's
 			// tryResolveNetworkUserEngine doc comment).
@@ -402,7 +411,7 @@ const resources = {
 			editElectionBodyPrimary:
 				'Your invitation has been sent. You will be notified when the recipient responds.',
 			editElectionBodySecondary: 'If no response is received soon, you can resend the invitation.',
-			editElectionResend: 'Resend Invitation',
+			editElectionResend: 'Resend',
 			editElectionBackToTasks: 'Back to Tasks',
 			// Frame 7 — Awaiting response
 			authorityDetailTitle: 'Awaiting Response',
@@ -439,6 +448,10 @@ const resources = {
 			thresholdPolicies: 'Threshold Policies',
 			addAdministrator: 'Add Administrator',
 			loading: 'Loading...',
+			invitationNeedsNetwork: 'Select a network first, then open this invitation again.',
+			invitationLoadFailed: "This invitation couldn't be loaded. Go back and try again.",
+			a11yChooseNetwork: 'Choose network',
+			a11yOpenSettings: 'Open settings',
 			// Phase 8 plan 08-03 — OfficerDetails + Invitation screens (AUTHUI-04, 05, 06)
 			administrator: 'Administrator',
 			administratorInvitation: 'Administrator Invitation',
@@ -747,7 +760,7 @@ const resources = {
 			attestationProvisioningNotProvisionedHeading: 'Play Console keys are not configured',
 			attestationProvisioningNotProvisionedBody:
 				'Device association will fail until Play Console key material is provisioned. Registrant and association data can still be viewed and managed normally.',
-			attestationProvisioningSetupLink: 'See SETUP.md for provisioning steps',
+			attestationProvisioningSetupLink: 'These keys are set up by whoever builds and distributes this app. Contact them if this stays unconfigured.',
 			attestationProvisioningInlineBannerBody:
 				"Device attestation isn't configured. Associate ceremonies will fail closed until this is fixed.",
 			attestationProvisioningInlineBannerLink: 'View setup status',
@@ -926,6 +939,7 @@ const resources = {
 			scanQrCode: 'Escanear Código QR',
 			enterBootstrap: 'Ingresar Bootstrap (avanzado)',
 			useLocation: 'Usar Ubicación',
+			useLocationComingSoon: 'Usar Ubicación (próximamente)',
 			scan: 'Escanear',
 			useBootstrap: 'Usar Bootstrap',
 			enterAddressOrLocation: 'Ingresar dirección o ubicación...',
@@ -995,7 +1009,7 @@ const resources = {
 			noKeyholders: 'Sin custodios',
 			singleAuthority: 'Autoridad única',
 			multiple: 'Múltiple',
-			multipleAuthorityNotYetSupported: 'Múltiple (aún no soportado)',
+			multipleAuthorityNotYetSupportedNote: 'Múltiples autoridades aún no están soportadas.',
 			mustSignBeforeCreating: 'Debe firmar antes de crear la red.',
 			atLeastOneKeyholderRequired: 'Se requiere al menos un custodio.',
 			invalidDate: 'Ingrese una fecha válida.',
@@ -1006,9 +1020,9 @@ const resources = {
 			networkCreateUnconfirmed:
 				'No se pudo confirmar si la red fue creada. Puede que aún se esté completando: revise su lista de redes antes de volver a crearla, para no crearla dos veces.',
 			errRelayRequired:
-				'Agregue al menos una dirección de relay en Avanzado → Agregar relay antes de crear la red.',
+				'Agregue al menos una dirección de relay en Relays antes de crear la red.',
 			errRelayInvalid:
-				'Una dirección de relay en Avanzado → Agregar relay no es una multidirección válida. Revísela e inténtelo de nuevo — por ejemplo /dns4/relay.example.com/tcp/443/wss/p2p/<id de par>.',
+				'Una dirección de relay en Relays no es una multidirección válida. Revísela e inténtelo de nuevo — por ejemplo /dns4/relay.example.com/tcp/443/wss/p2p/<id de par>.',
 			validationFailed: 'Error de validación.',
 			errTitleRequired: 'Ingrese un título para la elección.',
 			errElectionDateRequired: 'Elija una fecha para la elección.',
@@ -1041,6 +1055,14 @@ const resources = {
 			sign: 'FIRMAR',
 			createNetwork: 'Crear Red',
 			relays: 'Relays',
+			relaysRequiredHint: 'Se requiere al menos un relay para que otros dispositivos puedan llegar a esta red.',
+			createMissingFields: 'Antes de crear la red: {{fields}}.',
+			missingNetworkName: 'ingrese un nombre de red',
+			missingAuthorityName: 'ingrese el nombre de la autoridad principal',
+			missingYourName: 'ingrese su nombre',
+			missingYourTitle: 'ingrese su título',
+			missingSignature: 'firme',
+			missingRelay: 'agregue una dirección de relay',
 			multiaddress: 'Multiaddress',
 			advanced: 'Avanzado',
 			import: 'Importar',
@@ -1078,7 +1100,7 @@ const resources = {
 			inviteId: 'ID de Invitación',
 			showHelpIcons: 'Mostrar iconos de ayuda',
 			defaultUser: 'Usuario predeterminado',
-			connectDevice: 'Conectar este dispositivo\na usuario existente', // Phase 11 plan 11-03 (D-10) — line-break for ES overflow.
+			connectDevice: 'Conectar a usuario existente', // Shortened so it fits on one line; no forced break.
 			connect: 'Conectar',
 			enterName: 'Ingrese el nombre',
 			enterImageUrl: 'Ingrese la URL de la imagen',
@@ -1140,7 +1162,7 @@ const resources = {
 			signingKeyProvisioningAwaitingNetworkHeading: 'La firma segura está configurada en este dispositivo',
 			signingKeyProvisioningAwaitingNetworkBody:
 				'Tu clave de firma está protegida por tu biometría. Selecciona o crea una red para terminar de registrarla.',
-			signingKeyProvisioningContinueButton: 'Volver a la Aplicación',
+			signingKeyProvisioningContinueButton: 'Continuar',
 			signingKeyProvisioningNetworkUserUnresolvedHeading: 'No pudimos encontrar tu cuenta en esta red',
 			signingKeyProvisioningNetworkUserUnresolvedBody:
 				'Este dispositivo está conectado, pero tu cuenta de funcionario aún no ha terminado de sincronizarse con esta red. Espera un momento e inténtalo de nuevo.',
@@ -1270,7 +1292,7 @@ const resources = {
 			editElectionBodyPrimary:
 				'Tu invitación ha sido enviada. Se te notificará cuando el destinatario responda.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionBodySecondary: 'Si no se recibe respuesta pronto, puedes reenviar la invitación.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			editElectionResend: 'Reenviar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			editElectionResend: 'Reenviar', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionBackToTasks: 'Volver a Tareas', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailTitle: 'Esperando Respuesta', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailBodyPrimary: 'Esperando que el destinatario responda tu invitación.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
@@ -1304,6 +1326,10 @@ const resources = {
 			thresholdPolicies: 'Políticas de Umbral', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			addAdministrator: 'Agregar Administrador', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			loading: 'Cargando...', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			invitationNeedsNetwork: 'Seleccione primero una red y luego vuelva a abrir esta invitación.',
+			invitationLoadFailed: 'No se pudo cargar esta invitación. Vuelva atrás e inténtelo de nuevo.',
+			a11yChooseNetwork: 'Elegir red',
+			a11yOpenSettings: 'Abrir ajustes',
 			// Phase 8 plan 08-03 — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			administrator: 'Administrador', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			administratorInvitation: 'Invitación de Administrador', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
@@ -1634,7 +1660,7 @@ const resources = {
 				'Las claves de Play Console no están configuradas',
 			attestationProvisioningNotProvisionedBody:
 				'La asociación de dispositivos fallará hasta que se configuren las claves de Play Console. Los datos de registrantes y asociaciones aún pueden verse y gestionarse con normalidad.',
-			attestationProvisioningSetupLink: 'Consulta SETUP.md para los pasos de configuración',
+			attestationProvisioningSetupLink: 'Estas claves las configura quien compila y distribuye esta aplicación. Contáctelos si sigue sin configurarse.',
 			attestationProvisioningInlineBannerBody:
 				'La certificación de dispositivos no está configurada. Las ceremonias de asociación fallarán hasta que esto se corrija.',
 			attestationProvisioningInlineBannerLink: 'Ver estado de configuración',

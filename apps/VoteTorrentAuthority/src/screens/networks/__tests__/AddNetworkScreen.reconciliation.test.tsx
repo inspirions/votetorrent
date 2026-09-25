@@ -139,9 +139,39 @@ function inlineErrorMessage(tr: renderer.ReactTestRenderer): string {
 	return (matches[0]?.props as { message?: string } | undefined)?.message ?? "";
 }
 
+
+// A known-valid relay from the shared fixture corpus, so the relay check passes for real.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const VALID_RELAY: string = (
+	require("../../../../__fixtures__/relay-address-fixtures.json") as {
+		fixtures: Array<{ address: string; expected: "valid" | "invalid" }>;
+	}
+).fixtures.find((f) => f.expected === "valid")!.address;
+
+/** CREATE now checks every required field up front (network/authority/admin name, title, a relay,
+ * the signature) before any engine or biometric work. Fill them so specs exercise the path they
+ * are about rather than that check. `relay` is omitted by specs that test the empty-relay case. */
+const FILLED_NAME = "Test Net";
+async function fillRequiredFields(tr: renderer.ReactTestRenderer, opts: { relay?: string } = {}) {
+	await renderer.act(async () => {
+		for (const n of findByProps(tr, (p) => p.title === "name" && typeof p.onChangeText === "function")) {
+			(n.props as { onChangeText: (v: string) => void }).onChangeText(FILLED_NAME);
+		}
+		for (const n of findByProps(tr, (p) => p.title === "title" && typeof p.onChangeText === "function")) {
+			(n.props as { onChangeText: (v: string) => void }).onChangeText("Clerk");
+		}
+		if (opts.relay !== undefined) {
+			for (const n of findByProps(tr, (p) => p.placeholder === "multiaddress" && typeof p.onChangeText === "function")) {
+				(n.props as { onChangeText: (v: string) => void }).onChangeText(opts.relay);
+			}
+		}
+	});
+}
+
 /** Drives the screen to a signed, CREATE-pressed state so handleCreate's try body runs, and
  * awaits the returned promise fully. Use only for specs that do not need to drive a real timer. */
 async function pressSignThenCreate(tr: renderer.ReactTestRenderer) {
+	await fillRequiredFields(tr, { relay: VALID_RELAY });
 	await renderer.act(async () => {
 		getSignButton(tr).props.onPress();
 	});
@@ -162,6 +192,7 @@ async function pressSignThenCreate(tr: renderer.ReactTestRenderer) {
 async function signAndPressCreateWithoutAwaiting(
 	tr: renderer.ReactTestRenderer,
 ): Promise<{ promise: Promise<unknown> }> {
+	await fillRequiredFields(tr, { relay: VALID_RELAY });
 	await renderer.act(async () => {
 		getSignButton(tr).props.onPress();
 	});
@@ -175,15 +206,15 @@ async function signAndPressCreateWithoutAwaiting(
 const SIGNING_KEY = "03f450ccccbaefd2efe218d8eb8c2f84677aaed1fa7bc19b9dbcac96e6ef7d86ab";
 const RECOVERY_KEY = "036d541206f2fb5d6c67e0a39b615eebf8ada784a8b12dcab550c901305b6fcf3a";
 
-/** The screen's default networkName/domainName state is "" -- no spec here fills those fields,
- * so every "landed" NetworkReference fixture used to drive `findLandedNetwork`'s match must carry
- * name: "" / primaryAuthorityDomainName: "" to be recognized as landed by the real code path. */
+/** Specs fill networkName with FILLED_NAME (see fillRequiredFields) and leave domainName "", so
+ * every "landed" NetworkReference fixture used to drive `findLandedNetwork`'s match must carry
+ * name: FILLED_NAME / primaryAuthorityDomainName: "" to be recognized as landed by the real code path. */
 const BEFORE: NetworkReference[] = [
 	{ hash: "existing-hash", name: "Old Net", primaryAuthorityDomainName: "old.example", relays: [] },
 ];
 const LANDED_REF: NetworkReference = {
 	hash: "landed-hash",
-	name: "",
+	name: "Test Net",
 	primaryAuthorityDomainName: "",
 	relays: [],
 };

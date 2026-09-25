@@ -313,10 +313,8 @@ export default function DashboardSignInCodeScreen() {
 		<View style={styles.content}>
 			<ScrollView style={styles.container}>
 				<View style={styles.section}>
-					<ThemedText type="title" style={styles.sectionTitle}>
-						{t("dashboardSignInCodeTitle")}
-					</ThemedText>
-
+					{/* No in-body title: the navigation header already shows
+					    dashboardSignInCodeTitle directly above. */}
 					{/* OUTSIDE the screenState branches, deliberately. During a
 					    re-mint the screen is in the generated state showing the
 					    PRIOR code, and an indicator that only rendered in the

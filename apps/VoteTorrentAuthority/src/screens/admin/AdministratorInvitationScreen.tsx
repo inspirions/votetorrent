@@ -42,7 +42,7 @@ export default function AdministratorInvitationScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const { mode, invitationId, authority } = useRoute().params as AdministratorInvitationParams;
-	const { getEngine } = useApp();
+	const { getEngine, hasNetwork } = useApp();
 
 	// Send-mode form state
 	const [name, setName] = useState("");
@@ -58,6 +58,8 @@ export default function AdministratorInvitationScreen() {
 
 	// Accept-mode fetched invite
 	const [invite, setInvite] = useState<InviteStatus<SentOfficerInvite> | undefined>(undefined);
+	// Set when the invite fetch fails, so the screen stops showing "Loading…" forever.
+	const [inviteLoadFailed, setInviteLoadFailed] = useState(false);
 	const [networkName, setNetworkName] = useState("");
 
 	useEffect(() => {
@@ -88,8 +90,10 @@ export default function AdministratorInvitationScreen() {
 				const status = await engine.getOfficerInvite(invitationId);
 				setInvite(status);
 			} catch (error) {
+				// Log the engine detail for developers; officers get plain copy below instead of
+				// strings like `EngineFactory: Network context not established — call getEngine(...)`.
 				console.warn("Error loading officer invite:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setInviteLoadFailed(true);
 			}
 		}
 		loadInvite();
@@ -328,6 +332,8 @@ export default function AdministratorInvitationScreen() {
 								placeholder="Paste the invite text from the sender"
 							/>
 						</>
+					) : inviteLoadFailed ? (
+						<ThemedText>{t(hasNetwork ? "invitationLoadFailed" : "invitationNeedsNetwork")}</ThemedText>
 					) : (
 						<ThemedText>{t("loading")}</ThemedText>
 					)}

@@ -225,6 +225,8 @@ export default function SettingsScreen() {
 							onPress={() => setShowLangModal(prev => !prev)}
 							style={[styles.langDropdownBtn, { backgroundColor: colors.accent }]}
 							accessibilityRole="button"
+							accessibilityLabel={`${t("language")}: ${LANGUAGES.find(l => l.code === currentLang)?.label ?? currentLang}`}
+							testID="settings-language-toggle"
 						>
 							<ThemedText type="defaultSemiBold">
 								{LANGUAGES.find(l => l.code === currentLang)?.label ?? currentLang}
@@ -319,6 +321,7 @@ export default function SettingsScreen() {
 				<View testID="settings-attestation-provisioning-entry">
 					<InfoCard
 						title={t("attestationProvisioningScreenTitle")}
+						titleType="defaultSemiBold"
 						icon="chevron-right"
 						onPress={() => navigation.navigate("AttestationProvisioningStatus")}
 					/>
@@ -332,7 +335,8 @@ export default function SettingsScreen() {
 				<View testID="settings-signing-key-provisioning-entry">
 					<InfoCard
 						title={t("settingsSigningKeyRow")}
-						icon="fingerprint"
+						titleType="defaultSemiBold"
+						icon="chevron-right"
 						onPress={() => navigation.navigate("ProvisionSigningKey", { reason: "first-run" })}
 					/>
 				</View>
@@ -353,14 +357,20 @@ export default function SettingsScreen() {
 				<View testID="settings-dashboard-signin-code-entry">
 					<InfoCard
 						title={t("dashboardSignInCodeTitle")}
+						titleType="defaultSemiBold"
 						icon="chevron-right"
 						onPress={() => navigation.navigate("DashboardSignInCode")}
 					/>
 				</View>
 
-				<ThemedText type="subtitle" style={styles.networkTitle}>
-					{currentNetwork}
-				</ThemedText>
+				{/* Per-network block: only shown once a network is selected. Without a
+				    network the empty subtitle left a blank gap, and "No user found for this
+				    network" repeated the "No default user found" line above. */}
+				{currentNetwork ? (
+					<ThemedText type="subtitle" style={styles.networkTitle}>
+						{currentNetwork}
+					</ThemedText>
+				) : null}
 
 				{currentUser ? (
 					<InfoCard
@@ -375,11 +385,11 @@ export default function SettingsScreen() {
 							});
 						}}
 					/>
-				) : (
+				) : currentNetwork ? (
 					<ThemedText type="default" style={styles.noUserText}>
 						{t("noUserFound")}
 					</ThemedText>
-				)}
+				) : null}
 
 				{__DEV__ && (
 					<>

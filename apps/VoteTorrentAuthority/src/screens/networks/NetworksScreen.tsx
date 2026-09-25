@@ -125,7 +125,7 @@ export default function NetworksScreen() {
 				<ThemedText type="defaultSemiBold" style={styles.section}>
 					{t("useOneOfTheFollowingToGetConnected")}
 				</ThemedText>
-				<ThemedText type="title">{t("connectedNetworks")}</ThemedText>
+				<ThemedText type="title">{t("recentNetworks")}</ThemedText>
 				{recentNetworkRefs.length === 0 && (
 					// NETUI-01 empty-state: short hint when no recent networks.
 					// The find/scan/bootstrap sections below remain the primary
@@ -171,7 +171,8 @@ export default function NetworksScreen() {
 					{t("or")}
 				</ThemedText>
 				<CustomButton
-					title={t("useLocation")}
+					// Not implemented yet — say so, so the disabled styling reads as intended.
+					title={t("useLocationComingSoon")}
 					backgroundColor={colors.important}
 					forceDarkText={true}
 					disabled={true}

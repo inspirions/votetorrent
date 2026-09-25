@@ -34,17 +34,17 @@ export function SyncChip() {
 	const {syncState, configFault} = useCadreNode();
 
 	const presentation = configFault
-		? {icon: 'triangle-exclamation', color: colors.warning, label: t('syncNotConfigured')}
+		? {icon: 'triangle-exclamation', color: colors.warning, textColor: colors.warningText, label: t('syncNotConfigured')}
 		: {
-				connected: {icon: 'wifi', color: colors.success, label: t('syncConnected')},
-				syncing: {icon: 'rotate', color: colors.warning, label: t('syncSyncing')},
-				offline: {icon: 'link-slash', color: colors.error, label: t('syncOffline')},
+				connected: {icon: 'wifi', color: colors.success, textColor: colors.success, label: t('syncConnected')},
+				syncing: {icon: 'rotate', color: colors.warning, textColor: colors.warningText, label: t('syncSyncing')},
+				offline: {icon: 'link-slash', color: colors.error, textColor: colors.error, label: t('syncOffline')},
 			}[syncState];
 
 	return (
 		<View style={[styles.chip, {backgroundColor: colors.card}]}>
 			<FontAwesome6 name={presentation.icon} size={14} color={presentation.color} />
-			<ThemedText type="small" numberOfLines={1} style={{color: presentation.color}}>
+			<ThemedText type="small" numberOfLines={1} style={{color: presentation.textColor ?? presentation.color}}>
 				{presentation.label}
 			</ThemedText>
 		</View>

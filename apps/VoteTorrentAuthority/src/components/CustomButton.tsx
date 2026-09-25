@@ -45,6 +45,11 @@ export function CustomButton({
 			]}
 			onPress={onPress}
 			disabled={disabled}
+			// Explicit label: otherwise Android concatenates the icon glyph's empty text
+			// with the title and screen readers announce ", TITLE".
+			accessibilityRole="button"
+			accessibilityLabel={title}
+			accessibilityState={{ disabled }}
 			// The thin box is 6*2 + minHeight 24 = 36pt, below the 44pt floor.
 			// Raising paddingVertical would reflow every thin call site
 			// (LifecycleConfirmCard's width-constrained slots, both

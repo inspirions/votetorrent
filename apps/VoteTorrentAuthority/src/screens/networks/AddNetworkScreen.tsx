@@ -1,11 +1,10 @@
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { ScrollView, StyleSheet, TouchableOpacity, View, Image } from "react-native";
+import { ScrollView, StyleSheet, TouchableOpacity, View, Image, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 import { ThemedText } from "../../components/ThemedText";
-import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
@@ -44,7 +43,6 @@ export default function AddNetworkScreen() {
 	const [adminName, setAdminName] = useState("");
 	const [adminTitle, setAdminTitle] = useState("");
 	const [isSigned, setIsSigned] = useState(false);
-	const [showAdvanced, setShowAdvanced] = useState(false);
 	const [relayAddresses, setRelayAddresses] = useState([""]);
 	// Election Characteristics (Figma "New Network" frame) — keyholder usage and
 	// single-vs-multiple authority.
@@ -59,21 +57,81 @@ export default function AddNetworkScreen() {
 	// from a hang.
 	const [creating, setCreating] = useState(false);
 	const scrollViewRef = useRef<ScrollView>(null);
+	// When the inline error appears it grows the footer, which shrinks the scroll
+	// viewport. Android keeps the old scroll offset, so if the user was at the bottom
+	// the last controls (e.g. ADD RELAY) slide out of view behind the error. Track
+	// whether we're pinned to the bottom and re-pin when the viewport shrinks.
+	const nearBottomRef = useRef(false);
+	const viewportHeightRef = useRef(0);
 
-	const toggleAdvanced = () => {
-		if (!showAdvanced) {
-			setTimeout(() => {
-				scrollViewRef.current?.scrollToEnd({ animated: true });
-			}, 100);
-		}
-		setShowAdvanced(!showAdvanced);
+	const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+		const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+		nearBottomRef.current = layoutMeasurement.height + contentOffset.y >= contentSize.height - 24;
 	};
+
+	const handleScrollLayout = (e: LayoutChangeEvent) => {
+		const height = e.nativeEvent.layout.height;
+		if (height < viewportHeightRef.current && nearBottomRef.current) {
+			scrollViewRef.current?.scrollToEnd({ animated: false });
+		}
+		viewportHeightRef.current = height;
+	};
+
+	// Drop an error once the user has acted on it, so a fixed problem doesn't keep
+	// reporting itself until the next CREATE press.
+	const clearErrorIf = (...keys: string[]) => {
+		if (keys.some((key) => errorMessage === t(key))) setErrorMessage("");
+	};
+
+	// Relays used to hide under a collapsed "Advanced" toggle even though CREATE requires one;
+	// the section is now always shown. Its y-offset lets a relay error scroll it into view.
+	const relaysYRef = useRef(0);
+	const scrollToRelays = () =>
+		setTimeout(() => scrollViewRef.current?.scrollTo({ y: relaysYRef.current, animated: true }), 100);
+
+	// Everything CREATE needs before it may start the device-key ceremony, reported together
+	// rather than one error per press. Keys index the `missing*` copy.
+	const missingRequirements = (): string[] => {
+		const missing: string[] = [];
+		if (!networkName.trim()) missing.push("missingNetworkName");
+		if (!authorityName.trim()) missing.push("missingAuthorityName");
+		if (!adminName.trim()) missing.push("missingYourName");
+		if (!adminTitle.trim()) missing.push("missingYourTitle");
+		if (normalizeRelayAddresses(relayAddresses).length === 0) missing.push("missingRelay");
+		// CR-01: the "Sign" affordance gates creation of a signed permanent record.
+		if (!isSigned) missing.push("missingSignature");
+		return missing;
+	};
+	const missingMessage = (missing: string[]): string => {
+		// Single-cause cases keep their established, more specific copy.
+		if (missing.length === 1 && missing[0] === "missingSignature") return t("mustSignBeforeCreating");
+		if (missing.length === 1 && missing[0] === "missingRelay") return t("errRelayRequired");
+		return t("createMissingFields", { fields: missing.map((key) => t(key)).join(", ") });
+	};
+	const readyToCreate = missingRequirements().length === 0;
+
+	// While a "missing fields" error is showing, keep it in step with the form: shrink it as
+	// fields are filled and clear it once nothing is missing.
+	const [showingMissing, setShowingMissing] = useState(false);
+	useEffect(() => {
+		if (!showingMissing) return;
+		const missing = missingRequirements();
+		if (missing.length === 0) {
+			setErrorMessage("");
+			setShowingMissing(false);
+		} else {
+			setErrorMessage(missingMessage(missing));
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [showingMissing, networkName, authorityName, adminName, adminTitle, isSigned, relayAddresses]);
 
 	const addRelayField = () => {
 		setRelayAddresses([...relayAddresses, ""]);
+		clearErrorIf("errRelayRequired", "errRelayInvalid");
 	};
 
 	const updateRelayAddress = (index: number, value: string) => {
+		clearErrorIf("errRelayRequired", "errRelayInvalid");
 		const newAddresses = [...relayAddresses];
 		newAddresses[index] = value;
 		setRelayAddresses(newAddresses);
@@ -146,10 +204,13 @@ export default function AddNetworkScreen() {
 	const handleCreate = async () => {
 		// 16-08 item 4: clear any prior error so a retry starts clean.
 		setErrorMessage("");
-		// CR-01: the "Sign" affordance gates creation of a signed permanent record.
-		// Do not create the network unless the administrator has signed.
-		if (!isSigned) {
-			setErrorMessage(t("mustSignBeforeCreating"));
+		setShowingMissing(false);
+		// Report every missing requirement at once, before any engine or biometric work.
+		const missing = missingRequirements();
+		if (missing.length > 0) {
+			setErrorMessage(missingMessage(missing));
+			setShowingMissing(true);
+			if (missing.length === 1 && missing[0] === "missingRelay") scrollToRelays();
 			return;
 		}
 		setCreating(true);
@@ -172,7 +233,7 @@ export default function AddNetworkScreen() {
 			const invalidRelay = findInvalidRelayAddress(relays);
 			if (invalidRelay !== undefined) {
 				setErrorMessage(t("errRelayInvalid"));
-				setShowAdvanced(true);
+				scrollToRelays();
 				return;
 			}
 
@@ -227,13 +288,13 @@ export default function AddNetworkScreen() {
 				const relayMissing = builder.errors().some((e) => e.path === "networkInit.relays");
 				setErrorMessage(
 					// network-create-release-hang: replace the raw "networkInit.relays must not be
-					// empty" engine string with discoverable guidance (the relay field lives under
-					// Advanced → ADD RELAY). Other validation errors fall through unchanged.
+					// empty" engine string with discoverable guidance pointing at the Relays
+					// section. Other validation errors fall through unchanged.
 					relayMissing
 						? t("errRelayRequired")
 						: builder.errors().map((e) => e.message).join("\n") || t("validationFailed"),
 				);
-				if (relayMissing) setShowAdvanced(true);
+				if (relayMissing) scrollToRelays();
 				return;
 			}
 			// D-01 (58-04): snapshot the recents list BEFORE commit() so a missed deadline can be
@@ -339,9 +400,15 @@ export default function AddNetworkScreen() {
 
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView ref={scrollViewRef} style={styles.container}>
-				<ThemedText type="defaultSemiBold" style={styles.sectionTitle}>
-					{t("createNewNetwork")}
+			<ScrollView
+				ref={scrollViewRef}
+				style={styles.container}
+				onScroll={handleScroll}
+				scrollEventThrottle={64}
+				onLayout={handleScrollLayout}
+			>
+				<ThemedText type="title" style={styles.sectionTitle}>
+					{t("network")}
 				</ThemedText>
 
 				<View style={styles.section}>
@@ -364,7 +431,7 @@ export default function AddNetworkScreen() {
 				</View>
 
 				<View style={styles.section}>
-					<ThemedText type="defaultSemiBold" style={styles.sectionTitle}>
+					<ThemedText type="title" style={styles.sectionTitle}>
 						{t("electionCharacteristics")}
 					</ThemedText>
 					<View style={styles.characteristicsGrid}>
@@ -399,9 +466,15 @@ export default function AddNetworkScreen() {
 						</View>
 						<View style={[styles.radioOption, { opacity: 0.4 }]}>
 							<View style={[styles.radioOuter, { borderColor: colors.textSecondary }]} />
-							<ThemedText style={styles.radioLabel}>{t("multipleAuthorityNotYetSupported")}</ThemedText>
+							<ThemedText style={styles.radioLabel}>{t("multiple")}</ThemedText>
 						</View>
 					</View>
+					{/* The "not yet supported" note sits under the grid rather than in the
+					    radio label, where it wrapped to two lines and knocked the rows out
+					    of line with the keyholder row above. */}
+					<ThemedText type="small" style={[styles.unsupportedNote, { color: colors.textSecondary }]}>
+						{t("multipleAuthorityNotYetSupportedNote")}
+					</ThemedText>
 				</View>
 
 				<View style={styles.section}>
@@ -435,6 +508,40 @@ export default function AddNetworkScreen() {
 					/>
 				</View>
 
+				<View
+					style={styles.section}
+					onLayout={(e) => {
+						relaysYRef.current = e.nativeEvent.layout.y;
+					}}
+				>
+					<View style={[styles.buttonHeader, styles.relaysHeader]}>
+						<ThemedText type="title">{t("relays")}</ThemedText>
+						<ChipButton
+							label={t("import")}
+							icon="circle-plus"
+							disabled={true}
+							onPress={undefined}
+						/>
+					</View>
+					<ThemedText type="small" style={[styles.relaysHint, { color: colors.textSecondary }]}>
+						{t("relaysRequiredHint")}
+					</ThemedText>
+					{relayAddresses.map((address, index) => (
+						<CustomTextInput
+							key={index}
+							placeholder={t("multiaddress")}
+							value={address}
+							onChangeText={(value) => updateRelayAddress(index, value)}
+							icon={relayAddresses.length > 1 ? "circle-xmark" : undefined}
+							onIconPress={() => removeRelayField(index)}
+						/>
+					))}
+					<View style={styles.buttonHeader}>
+						<View />
+						<ChipButton label={t("addRelay")} icon="circle-plus" onPress={addRelayField} />
+					</View>
+				</View>
+
 				<View style={styles.section}>
 					<ThemedText type="title" style={styles.sectionTitle}>
 						{t("initialAdministrator")}
@@ -456,58 +563,25 @@ export default function AddNetworkScreen() {
 						icon={isSigned ? "square-check" : "square"}
 						backgroundColor={colors.important}
 						forceDarkText={true}
-						onPress={() => setIsSigned(!isSigned)}
+						onPress={() => {
+							setIsSigned(!isSigned);
+							clearErrorIf("mustSignBeforeCreating");
+						}}
 					/>
 				</View>
 
-				<TouchableOpacity
-					style={styles.advancedHeader}
-					onPress={() => {
-						toggleAdvanced();
-					}}
-				>
-					<FontAwesome6
-						name={showAdvanced ? "chevron-down" : "chevron-right"}
-						size={14}
-						color={colors.text}
-					/>
-					<ThemedText type="default">{t("advanced")}</ThemedText>
-				</TouchableOpacity>
-				{showAdvanced ? (
-					<View style={styles.section}>
-						<View style={[styles.buttonHeader, styles.sectionTitle]}>
-							<ThemedText type="title">{t("relays")}</ThemedText>
-							<ChipButton
-								label={t("import")}
-								icon="circle-plus"
-								disabled={true}
-								onPress={undefined}
-							/>
-						</View>
-						{relayAddresses.map((address, index) => (
-							<CustomTextInput
-								key={index}
-								placeholder={t("multiaddress")}
-								value={address}
-								onChangeText={(value) => updateRelayAddress(index, value)}
-								icon={relayAddresses.length > 1 ? "circle-xmark" : undefined}
-								onIconPress={() => removeRelayField(index)}
-							/>
-						))}
-						<View style={styles.buttonHeader}>
-							<View />
-							<ChipButton label={t("addRelay")} icon="circle-plus" onPress={addRelayField} />
-						</View>
-					</View>
-				) : null}
 			</ScrollView>
 
-			<InlineError message={errorMessage} />
 			<Footer>
+				{/* Inside the Footer so it picks up the footer's horizontal padding
+				    instead of running flush against the screen edge. */}
+				<InlineError message={errorMessage} />
 				<CustomButton
 					title={creating ? t("creating") : t("create")}
 					icon={creating ? "spinner" : "floppy-disk"}
-					backgroundColor={colors.success}
+					// Neutral grey until every requirement is met, green once CREATE can succeed. Still
+					// pressable while grey, so a press explains what's missing.
+					backgroundColor={readyToCreate ? colors.success : colors.accent}
 					forceDarkText={true}
 					disabled={creating}
 					onPress={handleCreate}
@@ -569,6 +643,9 @@ const localStyles = StyleSheet.create({
 	radioLabel: {
 		flex: 1,
 	},
+	unsupportedNote: {
+		marginTop: 8,
+	},
 	signButton: {
 		flexDirection: "row",
 		alignItems: "center",
@@ -582,11 +659,11 @@ const localStyles = StyleSheet.create({
 		fontSize: 16,
 		fontWeight: "600",
 	},
-	advancedHeader: {
-		flexDirection: "row",
-		alignItems: "center",
-		gap: 16,
-		marginBottom: 16,
+	relaysHeader: {
+		marginBottom: 8,
+	},
+	relaysHint: {
+		marginBottom: 8,
 	},
 	relayFieldContainer: {
 		flexDirection: "row",

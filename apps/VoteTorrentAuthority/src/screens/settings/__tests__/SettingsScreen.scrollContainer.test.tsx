@@ -175,7 +175,11 @@ describe("SettingsScreen — scroll container regression guard (57-16 / UAT-10)"
 		const tr = await renderScreen();
 
 		// Open the dropdown via the real toggle button.
-		const toggle = tr.root.findByProps({ accessibilityRole: "button" });
+		// By testID: buttons across the screen now carry accessibilityRole="button" too, so the
+		// role alone no longer singles out the language toggle.
+		const toggle = tr.root.findAll(
+			(node) => node.props.testID === "settings-language-toggle" && typeof node.props.onPress === "function",
+		)[0];
 		await renderer.act(async () => {
 			toggle.props.onPress();
 		});

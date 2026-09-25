@@ -126,8 +126,38 @@ function inlineErrorMessage(tr: renderer.ReactTestRenderer): string {
 	return (matches[0]?.props as { message?: string } | undefined)?.message ?? "";
 }
 
+
+// A known-valid relay from the shared fixture corpus, so the relay check passes for real.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const VALID_RELAY: string = (
+	require("../../../../__fixtures__/relay-address-fixtures.json") as {
+		fixtures: Array<{ address: string; expected: "valid" | "invalid" }>;
+	}
+).fixtures.find((f) => f.expected === "valid")!.address;
+
+/** CREATE now checks every required field up front (network/authority/admin name, title, a relay,
+ * the signature) before any engine or biometric work. Fill them so specs exercise the path they
+ * are about rather than that check. `relay` is omitted by specs that test the empty-relay case. */
+const FILLED_NAME = "Test Net";
+async function fillRequiredFields(tr: renderer.ReactTestRenderer, opts: { relay?: string } = {}) {
+	await renderer.act(async () => {
+		for (const n of findByProps(tr, (p) => p.title === "name" && typeof p.onChangeText === "function")) {
+			(n.props as { onChangeText: (v: string) => void }).onChangeText(FILLED_NAME);
+		}
+		for (const n of findByProps(tr, (p) => p.title === "title" && typeof p.onChangeText === "function")) {
+			(n.props as { onChangeText: (v: string) => void }).onChangeText("Clerk");
+		}
+		if (opts.relay !== undefined) {
+			for (const n of findByProps(tr, (p) => p.placeholder === "multiaddress" && typeof p.onChangeText === "function")) {
+				(n.props as { onChangeText: (v: string) => void }).onChangeText(opts.relay);
+			}
+		}
+	});
+}
+
 /** Drives the screen to a signed, CREATE-pressed state so handleCreate's try body runs. */
 async function pressSignThenCreate(tr: renderer.ReactTestRenderer) {
+	await fillRequiredFields(tr, { relay: VALID_RELAY });
 	await renderer.act(async () => {
 		getSignButton(tr).props.onPress();
 	});
@@ -182,12 +212,35 @@ describe("AddNetworkScreen — 49-16 Gap A closure: routes NO_KEY_PROVISIONED th
 
 	it("mustSignBeforeCreating gate is unchanged: pressing CREATE without signing sets that error and never calls getOrCreateDeviceUser", async () => {
 		const tr = await renderScreen();
+		// Everything else filled, so the signature is the ONLY missing requirement and its
+		// dedicated copy (not the combined "missing fields" message) is what shows.
+		await fillRequiredFields(tr, { relay: VALID_RELAY });
 		await renderer.act(async () => {
 			await getCreateButton(tr).props.onPress();
 		});
 
 		expect(mockGetOrCreateDeviceUser).not.toHaveBeenCalled();
 		expect(inlineErrorMessage(tr)).toBe("mustSignBeforeCreating");
+	});
+
+	it("an empty form reports every missing requirement at once, never starts the device-key ceremony, and clears once they are all met", async () => {
+		const tr = await renderScreen();
+		await renderer.act(async () => {
+			await getCreateButton(tr).props.onPress();
+		});
+
+		// More than one requirement is missing, so the combined message (not a single-cause one).
+		expect(inlineErrorMessage(tr)).toBe("createMissingFields");
+		expect(mockGetOrCreateDeviceUser).not.toHaveBeenCalled();
+
+		// Sign FIRST, then fill: the last change is a field edit, so only the form-tracking effect
+		// (not the Sign button's own mustSign clear) can remove the message.
+		await renderer.act(async () => {
+			getSignButton(tr).props.onPress();
+		});
+		expect(inlineErrorMessage(tr)).toBe("createMissingFields");
+		await fillRequiredFields(tr, { relay: VALID_RELAY });
+		expect(inlineErrorMessage(tr)).toBe("");
 	});
 });
 

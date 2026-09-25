@@ -646,7 +646,7 @@ export default function ProvisionSigningKeyScreen() {
 				<View style={localStyles.iconRow}>
 					<FontAwesome6 name="circle-check" size={32} color={colors.success} />
 				</View>
-				<ThemedText type="default" style={{ color: colors.text }}>
+				<ThemedText type="defaultSemiBold" style={[localStyles.heading, { color: colors.text }]}>
 					{t(headingKey)}
 				</ThemedText>
 				<ThemedText type="small" style={[localStyles.body, { color: colors.textSecondary }]}>
@@ -677,7 +677,7 @@ export default function ProvisionSigningKeyScreen() {
 				<View style={localStyles.iconRow}>
 					<FontAwesome6 name="triangle-exclamation" size={32} color={colors.warning} />
 				</View>
-				<ThemedText type="default" style={{ color: colors.text }}>
+				<ThemedText type="defaultSemiBold" style={[localStyles.heading, { color: colors.text }]}>
 					{t("signingKeyProvisioningNetworkUserUnresolvedHeading")}
 				</ThemedText>
 				<ThemedText type="small" style={[localStyles.body, { color: colors.textSecondary }]}>
@@ -704,7 +704,7 @@ export default function ProvisionSigningKeyScreen() {
 				style={styles.container}
 				contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
 			>
-				<ThemedText type="default" style={{ color: colors.error }}>
+				<ThemedText type="defaultSemiBold" style={[localStyles.heading, { color: colors.error }]}>
 					{t("signingKeyProvisioningNoRecoveryHeading")}
 				</ThemedText>
 				<ThemedText type="small" style={[localStyles.body, { color: colors.text }]}>
@@ -724,7 +724,7 @@ export default function ProvisionSigningKeyScreen() {
 				style={styles.container}
 				contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
 			>
-				<ThemedText type="default" style={{ color: colors.error }}>
+				<ThemedText type="defaultSemiBold" style={[localStyles.heading, { color: colors.error }]}>
 					{t("signingKeyProvisioningRecoveryUnsupportedOsHeading")}
 				</ThemedText>
 				<ThemedText type="small" style={[localStyles.body, { color: colors.text }]}>
@@ -757,7 +757,7 @@ export default function ProvisionSigningKeyScreen() {
 			<View style={localStyles.iconRow}>
 				<FontAwesome6 name={icon} size={32} color={iconColor} />
 			</View>
-			<ThemedText type="default" style={{ color: colors.text }}>
+			<ThemedText type="defaultSemiBold" style={[localStyles.heading, { color: colors.text }]}>
 				{t(headingKey)}
 			</ThemedText>
 			<ThemedText type="small" style={[localStyles.body, { color: colors.textSecondary }]}>
@@ -788,9 +788,17 @@ const localStyles = StyleSheet.create({
 		marginTop: 24,
 		marginBottom: 12,
 	},
+	// Headings sit above the grey body copy; at body weight they read as just
+	// another paragraph, so give them size and weight.
+	heading: {
+		fontSize: 20,
+		lineHeight: 26,
+		fontWeight: "700",
+	},
 	body: {
 		marginTop: 8,
 		marginBottom: 16,
+		lineHeight: 20,
 	},
 });
 

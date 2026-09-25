@@ -157,27 +157,29 @@ async function setRelayAddress(tr: renderer.ReactTestRenderer, value: string) {
 	});
 }
 
-/**
- * Reveals Advanced (needed to find/set the relay field before pressing CREATE). Locating the
- * Advanced toggle by elimination against onPress handlers is unreliable: the two "election
- * characteristics" radio TouchableOpacitys also carry a bare `onPress` and no `title` prop, so an
- * elimination-by-title search matches the FIRST radio button instead. Instead, find the mounted
- * FontAwesome6 chevron icon (`chevron-right`, collapsed) and walk up its ancestors to the nearest
- * node exposing `onPress` — that is the TouchableOpacity wrapping the chevron + "advanced" label.
- */
-async function openAdvanced(tr: renderer.ReactTestRenderer) {
+/** CREATE now checks every required field up front (network/authority/admin name, title, a relay,
+ * the signature) before any engine or biometric work. Fill them so specs exercise the path they
+ * are about rather than that check. `relay` is omitted by specs that test the empty-relay case. */
+const FILLED_NAME = "Test Net";
+async function fillRequiredFields(tr: renderer.ReactTestRenderer, opts: { relay?: string } = {}) {
 	await renderer.act(async () => {
-		const chevron = findByProps(tr, (p) => p.name === "chevron-right")[0];
-		let node: renderer.ReactTestInstance | null = chevron ?? null;
-		while (node && typeof (node.props as { onPress?: unknown }).onPress !== "function") {
-			node = node.parent;
+		for (const n of findByProps(tr, (p) => p.title === "name" && typeof p.onChangeText === "function")) {
+			(n.props as { onChangeText: (v: string) => void }).onChangeText(FILLED_NAME);
 		}
-		if (!node) throw new Error("could not locate the Advanced toggle (chevron-right ancestor chain)");
-		(node.props as { onPress: () => void }).onPress();
+		for (const n of findByProps(tr, (p) => p.title === "title" && typeof p.onChangeText === "function")) {
+			(n.props as { onChangeText: (v: string) => void }).onChangeText("Clerk");
+		}
+		if (opts.relay !== undefined) {
+			for (const n of findByProps(tr, (p) => p.placeholder === "multiaddress" && typeof p.onChangeText === "function")) {
+				(n.props as { onChangeText: (v: string) => void }).onChangeText(opts.relay);
+			}
+		}
 	});
 }
 
 async function pressSignThenCreate(tr: renderer.ReactTestRenderer) {
+	// Relay left as each spec set it (these specs are ABOUT the relay field).
+	await fillRequiredFields(tr);
 	await renderer.act(async () => {
 		getSignButton(tr).props.onPress();
 	});
@@ -240,22 +242,20 @@ describe("AddNetworkScreen relay validation (D-11) — WIRING coverage only, moc
 		mockNetworksEngine.getRecentNetworks.mockResolvedValue([]);
 	});
 
-	it("Test 1: an invalid relay address produces errRelayInvalid and reveals Advanced", async () => {
+	it("Test 1: an invalid relay address produces errRelayInvalid and the relay field stays reachable", async () => {
 		const tr = await renderScreen();
-		await openAdvanced(tr);
 		await setRelayAddress(tr, WIRING_SAFE_INVALID_ADDRESS);
 
 		await pressSignThenCreate(tr);
 
 		expect(inlineErrorMessage(tr)).toBe("errRelayInvalid");
-		// Advanced is revealed: the relay CustomTextInput is findable after the press.
+		// Relays are always shown now (no Advanced toggle): the relay input is still findable.
 		expect(getRelayInput(tr)).toBeDefined();
 	});
 
 	it("Test 2: a valid relay address does not produce errRelayInvalid and proceeds into the engine path", async () => {
 		armSuccessfulCreate();
 		const tr = await renderScreen();
-		await openAdvanced(tr);
 		await setRelayAddress(tr, VALID_ADDRESS);
 
 		await pressSignThenCreate(tr);
@@ -277,7 +277,6 @@ describe("AddNetworkScreen relay validation (D-11) — WIRING coverage only, moc
 	it("Test 4: a whitespace-only relay behaves as Test 3, not as Test 1 (normalized away, not invalid)", async () => {
 		armRelayAwareBuilder();
 		const tr = await renderScreen();
-		await openAdvanced(tr);
 		await setRelayAddress(tr, "   ");
 
 		await pressSignThenCreate(tr);
@@ -288,7 +287,6 @@ describe("AddNetworkScreen relay validation (D-11) — WIRING coverage only, moc
 
 	it("Test 5: validation runs BEFORE device identity resolution — getOrCreateDeviceUser and buildCreate are never called for an invalid relay", async () => {
 		const tr = await renderScreen();
-		await openAdvanced(tr);
 		await setRelayAddress(tr, WIRING_SAFE_INVALID_ADDRESS);
 
 		await pressSignThenCreate(tr);
@@ -299,7 +297,6 @@ describe("AddNetworkScreen relay validation (D-11) — WIRING coverage only, moc
 
 	it("Test 6: the in-flight flag is cleared on the invalid-relay early return — CREATE re-enables", async () => {
 		const tr = await renderScreen();
-		await openAdvanced(tr);
 		await setRelayAddress(tr, WIRING_SAFE_INVALID_ADDRESS);
 
 		await pressSignThenCreate(tr);

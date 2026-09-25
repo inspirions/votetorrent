@@ -15,7 +15,7 @@ import AuthoritiesScreen from "../screens/authorities/AuthoritiesScreen";
 import SettingsScreen from "../screens/settings/SettingsScreen";
 import { ChipButton } from "../components/ChipButton";
 import { SyncChip } from "../components/SyncChip";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, StackActions, useFocusEffect } from "@react-navigation/native";
 import { useTheme } from "@react-navigation/native";
 import NetworksScreen from "../screens/networks/NetworksScreen";
@@ -126,10 +126,20 @@ function HeaderTitle() {
 		<Pressable
 			onPress={() => navigation.navigate("Networks")}
 			style={[styles.networkTextContainer, styles.headerText]}
+			accessibilityRole="button"
 		>
 			<ThemedText type="header">{networkName ? networkName : t("selectNetwork")}</ThemedText>
 		</Pressable>
 	);
+}
+
+// Tasks spans every network, so it's titled "All Networks" — but only once there IS a
+// network. With none selected, show the same "Select Network" control as the other tabs,
+// since the empty state below tells the officer to tap exactly that.
+function TasksHeaderTitle() {
+	const { hasNetwork } = useApp();
+	const { t } = useTranslation();
+	return hasNetwork ? <ThemedText type="header">{t("allNetworks")}</ThemedText> : <HeaderTitle />;
 }
 
 function useTabHeaderOptions(tab?: string) {
@@ -143,7 +153,12 @@ function useTabHeaderOptions(tab?: string) {
 
 	return {
 		headerLeft: () => (
-			<Pressable onPress={handleNetworkPress} style={styles.headerButton}>
+			<Pressable
+				onPress={handleNetworkPress}
+				style={styles.headerButton}
+				accessibilityRole="button"
+				accessibilityLabel={t("a11yChooseNetwork")}
+			>
 				<FontAwesome6 name="cloud-rain" size={24} color={colors.text} />
 			</Pressable>
 		),
@@ -157,13 +172,15 @@ function useTabHeaderOptions(tab?: string) {
 				<Pressable
 					style={styles.headerButton}
 					onPress={() => navigation.navigate("Home", { screen: "Settings" })}
+					accessibilityRole="button"
+					accessibilityLabel={t("a11yOpenSettings")}
 				>
 					<FontAwesome6 name="circle-user" size={24} color={colors.text} />
 				</Pressable>
 			</View>
 		),
 		headerTitle: () =>
-			tab === "tasks" ? <ThemedText type="header">{t("allNetworks")}</ThemedText> : <HeaderTitle />,
+			tab === "tasks" ? <TasksHeaderTitle /> : <HeaderTitle />,
 		headerShadowVisible: true,
 	};
 }
@@ -177,26 +194,18 @@ const TabNavigator = () => {
 		<Tab.Navigator
 			screenOptions={({ route }) => ({
 				tabBarLabel: t(route.name.toLowerCase()),
-				tabBarIcon: ({ focused, color }) => {
-					if (route.name === "Settings") {
-						return <FontAwesome6 name="gear" size={22} color={color} />;
-					}
-					const letterMap: Record<string, string> = {
-						Elections: "E",
-						Tasks: "T",
-						Authorities: "A",
+				// Without this, Android joins the icon glyph's empty text to the label and
+				// screen readers announce ", Elections".
+				tabBarAccessibilityLabel: t(route.name.toLowerCase()),
+				tabBarIcon: ({ color }) => {
+					// One icon family for every tab (previously E/T/A letters beside a gear).
+					const iconMap: Record<string, string> = {
+						Elections: "check-to-slot",
+						Tasks: "list-check",
+						Authorities: "building-columns",
+						Settings: "gear",
 					};
-					const letter = letterMap[route.name] ?? "?";
-					return (
-						<Text
-							style={[
-								styles.tabLetter,
-								{ color, fontWeight: focused ? "900" : "700" },
-							]}
-						>
-							{letter}
-						</Text>
-					);
+					return <FontAwesome6 name={iconMap[route.name] ?? "circle"} size={22} color={color} />;
 				},
 				tabBarActiveTintColor: colors.text,
 				tabBarInactiveTintColor: "gray",
@@ -265,10 +274,6 @@ const styles = StyleSheet.create({
 		flexDirection: "row",
 		alignItems: "center",
 		gap: 6,
-	},
-	tabLetter: {
-		fontSize: 22,
-		lineHeight: 24,
 	},
 });
 

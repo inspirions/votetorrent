@@ -71,6 +71,11 @@ export function CustomTextInput(props: CustomTextInputProps) {
 					</View>
 				)}
 				<TextInput
+					// The placeholder is drawn by a separate overlay (for italics), so the native
+					// input has no hint of its own — expose the field name and placeholder to
+					// screen readers explicitly. Callers can still override via otherProps.
+					accessibilityLabel={props.title ?? placeholder}
+					accessibilityHint={props.title ? placeholder : undefined}
 					value={value}
 					onChangeText={handleChangeText}
 					style={[styles.input, {backgroundColor: colors.card, borderColor: colors.border, color: colors.text}]}
