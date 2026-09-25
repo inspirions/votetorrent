@@ -3,12 +3,22 @@ import type { PropsWithChildren } from 'react';
 import type { Candidate, Office } from './types';
 
 /**
- * BallotSelectionProvider — the Vote-stack-scoped, session-only in-memory selection Context
- * (Phase 42, VOTE-01/02, D-01). Mirrors `RegistrationDraftProvider`'s structural mechanics
- * (createContext + useContext + throw-if-outside hook + Provider) but holds a `selectionMap`
- * (officeId → selected candidate id[]) plus the provider-held `currentQuestionIndex` that
- * `IndividualQuestionScreen` walks via Next/Previous (42-RESEARCH.md Pattern 5 — no route
- * param, keeping every `ParamList` entry `undefined` per the established convention).
+ * BallotSelectionProvider — the APP-SCOPED (Phase 59, D-22), session-only in-memory selection
+ * Context (Phase 42, VOTE-01/02, D-01). Mirrors `RegistrationDraftProvider`'s structural
+ * mechanics (createContext + useContext + throw-if-outside hook + Provider) but holds a
+ * `selectionMap` (officeId → selected candidate id[]) plus the provider-held
+ * `currentQuestionIndex` that `IndividualQuestionScreen` walks via Next/Previous
+ * (42-RESEARCH.md Pattern 5 — no route param, keeping every `ParamList` entry `undefined` per
+ * the established convention).
+ *
+ * D-22 correction: an earlier decision draft claimed this provider was `AsyncStorage`-backed —
+ * false. It is, and always was, pure in-memory `useState`/`useCallback` with ZERO persistence
+ * (see below) — which is exactly why lifting it above `Tab.Navigator` (mounted once via
+ * `AppStateProviders` in `navigation/index.tsx`, not per-stack) was necessary: with no
+ * persistence layer, two mounted instances have no mechanism to ever reconverge, so a Vote-tab
+ * selection and a Timeline-tab selection (59-10's duplicate `Ballot` route) would silently
+ * diverge forever, not just temporarily. See `__tests__/provider-scope.test.tsx` for the
+ * committed gate enforcing exactly one instance app-wide.
  *
  * Held in-memory React state ONLY (D-01/D-07) — never persisted to AsyncStorage/SecureStore/
  * disk, and never logged (threat T-42-01). Exiting and re-entering the ballot within the same

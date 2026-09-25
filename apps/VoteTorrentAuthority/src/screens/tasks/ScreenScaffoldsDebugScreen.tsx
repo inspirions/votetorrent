@@ -12,10 +12,18 @@ import type { NavigationProp } from "../../navigation/types";
 // Temporary by design — remove once callers are wired upstream.
 //
 // Phase 8 gap-closure 08-07 Task 3: three additional entries for accept/send
-// invitation modes (closes UAT tests 7 + 8 accept-mode reachability). The
-// invitationId values are placeholders; MockInvitationEngine returns the seeded
-// invite for any id (VERIFICATION.md truth #10). A real Tasks/Inbox surface is
-// deferred to a future milestone per scope_constraints.
+// invitation modes (closes UAT tests 7 + 8 accept-mode reachability). A real
+// Tasks/Inbox surface is deferred to a future milestone per scope_constraints.
+//
+// Phase 57 (T-57-16-05) — CORRECTION. The earlier note here claimed
+// MockInvitationEngine returns a seeded invite for any id. That is STALE:
+// engine-factory.ts `case 'invitations'` returns a real InvitationEngine with
+// no dev branch, so the send modes reach real signing (createDeviceSigner →
+// saveInviteWithSigning) and the `mock-*-invite-1` ids below are placeholders
+// against the real engine, not against a mock. This screen and its route are
+// now dev-only: the Settings entry sits inside `__DEV__` and the route is
+// registered through a `__DEV__`-guarded require, so this module is absent
+// from release bundles (verified by bundle grep + negative control).
 type FrameRoute = {
 	key: string;
 	route: string;

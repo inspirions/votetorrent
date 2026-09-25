@@ -4,6 +4,25 @@ import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { verifySig } from './database/initialize.js'
 import type { InviteStatus, SentKeyholderInvite } from '@votetorrent/vote-core'
 
+/**
+ * How many times an unsigned append-only insert may re-derive its `Sequence`
+ * and retry after losing a read-then-insert race (47-REVIEW WR-06).
+ *
+ * `RegistrantAccessEvent` and `AttestationVerdict` both allocate their PK's
+ * `Sequence` component with a `select coalesce(max(Sequence), -1) + 1`
+ * followed by an unwrapped `insert` — no transaction wraps the pair, so two
+ * overlapping writers read the same high-water mark and the loser violates the
+ * primary key. Retrying is the cheap fix; the retry loops re-read the
+ * high-water mark and only retry when it ADVANCED, so a non-race failure still
+ * surfaces on the first attempt.
+ *
+ * Three is deliberate: contention here is between at most a handful of
+ * in-process callers (a background flush racing an unmount flush), never a
+ * fleet of writers, so a bounded small number both terminates and is
+ * comfortably more than the observed contention.
+ */
+export const SEQUENCE_ALLOCATION_ATTEMPTS = 3
+
 // sql data validation helpers
 export const asText = (value: unknown, field: string): string => {
   if (value === null || value === undefined) {

@@ -7,7 +7,7 @@
  * Terminal drill-in (D-05): no action button, nothing navigates further from here.
  */
 import React, {useEffect, useState} from 'react';
-import {StyleSheet, Text, View} from 'react-native';
+import {ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import {useTranslation} from 'react-i18next';
@@ -46,7 +46,9 @@ export default function ValidationDetailsScreen() {
 	const total = evidence.length;
 
 	return (
-		<View style={[globalStyles.container, styles.screen, {backgroundColor: colors.background}]}>
+		<ScrollView
+			style={[styles.screen, {backgroundColor: colors.background}]}
+			contentContainerStyle={globalStyles.container}>
 			<Text
 				style={[
 					styles.overallCount,
@@ -158,7 +160,7 @@ export default function ValidationDetailsScreen() {
 					{t('validationDetails.recordedInBlockchain')}
 				</Text>
 			</View>
-		</View>
+		</ScrollView>
 	);
 }
 

@@ -1,0 +1,3 @@
+src/synthetic-voter-tc-synthetic0.ts(1,1): error TS1000: synthetic error for selftest
+src/synthetic-voter-tc-synthetic1.ts(2,1): error TS1001: synthetic error for selftest
+TSC-RAN exit=2

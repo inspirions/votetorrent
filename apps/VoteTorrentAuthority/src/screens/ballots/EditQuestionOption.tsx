@@ -19,6 +19,7 @@ import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../../navigation/types";
 import { useBallotDraft } from "./providers/BallotDraftProvider";
 import type { Option } from "@votetorrent/vote-core";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 /**
  * EditQuestionOption — polish for BALUI-04 (Figma frame 57:740).
@@ -107,7 +108,7 @@ export function EditQuestionOption() {
 	};
 
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView
 				style={[styles.container, { backgroundColor: colors.background }]}
 				contentContainerStyle={{ paddingBottom: 24 }}>
@@ -169,7 +170,7 @@ export function EditQuestionOption() {
 					disabled={!canSave}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

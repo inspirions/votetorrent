@@ -27,6 +27,9 @@ import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
+import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 type AdministratorInvitationParams = {
 	mode: "send" | "accept";
@@ -39,7 +42,7 @@ export default function AdministratorInvitationScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const { mode, invitationId, authority } = useRoute().params as AdministratorInvitationParams;
-	const { getEngine } = useApp();
+	const { getEngine, hasNetwork } = useApp();
 
 	// Send-mode form state
 	const [name, setName] = useState("");
@@ -47,12 +50,16 @@ export default function AdministratorInvitationScreen() {
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
 	const [errorMessage, setErrorMessage] = useState<string>("");
+	const [isSending, setIsSending] = useState(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Accept-mode paste field (D-06 — invitee pastes the share text here)
 	const [pastedInvite, setPastedInvite] = useState<string>("");
 
 	// Accept-mode fetched invite
 	const [invite, setInvite] = useState<InviteStatus<SentOfficerInvite> | undefined>(undefined);
+	// Set when the invite fetch fails, so the screen stops showing "Loading…" forever.
+	const [inviteLoadFailed, setInviteLoadFailed] = useState(false);
 	const [networkName, setNetworkName] = useState("");
 
 	useEffect(() => {
@@ -83,8 +90,10 @@ export default function AdministratorInvitationScreen() {
 				const status = await engine.getOfficerInvite(invitationId);
 				setInvite(status);
 			} catch (error) {
+				// Log the engine detail for developers; officers get plain copy below instead of
+				// strings like `EngineFactory: Network context not established — call getEngine(...)`.
 				console.warn("Error loading officer invite:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setInviteLoadFailed(true);
 			}
 		}
 		loadInvite();
@@ -94,6 +103,7 @@ export default function AdministratorInvitationScreen() {
 	const onSend = async () => {
 		// Pattern B: clear any prior error so a retry starts clean.
 		setErrorMessage("");
+		setIsSending(true);
 		try {
 			if (!authority?.id) {
 				setErrorMessage("Authority not available — navigate from an authority context.");
@@ -112,7 +122,7 @@ export default function AdministratorInvitationScreen() {
 			const officerInvite = authorityEngine.createOfficerInvite({
 				name,
 				title,
-				scopes: ["rn", "rad", "iad", "uai", "mel", "ceb"] as Scope[],
+				scopes: [...FOUNDING_OFFICER_SCOPES],
 			});
 
 			// D-01/D-03/D-04: device signer callback — engine computes Digest(InviteSlot.Cid)
@@ -139,7 +149,11 @@ export default function AdministratorInvitationScreen() {
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
 			console.warn("onSend error:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+		} finally {
+			setIsSending(false);
 		}
 	};
 
@@ -237,8 +251,9 @@ export default function AdministratorInvitationScreen() {
 				{!shareText ? (
 					<Footer>
 						<CustomButton
-							title={t("send")}
+							title={isSending ? `${t("send")}…` : t("send")}
 							icon="paper-plane"
+							disabled={isSending}
 							backgroundColor={colors.success}
 							forceDarkText={true}
 							onPress={onSend}
@@ -255,7 +270,7 @@ export default function AdministratorInvitationScreen() {
 		.map((scope: Scope) => scopeDescriptions[scope] ?? t(`scope_${scope}`))
 		.join(", ");
 	return (
-		<View style={styles.content}>
+		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
 					{seedInvite ? (
@@ -317,6 +332,8 @@ export default function AdministratorInvitationScreen() {
 								placeholder="Paste the invite text from the sender"
 							/>
 						</>
+					) : inviteLoadFailed ? (
+						<ThemedText>{t(hasNetwork ? "invitationLoadFailed" : "invitationNeedsNetwork")}</ThemedText>
 					) : (
 						<ThemedText>{t("loading")}</ThemedText>
 					)}
@@ -330,7 +347,7 @@ export default function AdministratorInvitationScreen() {
 				acceptLabel={t("accept")}
 				rejectLabel={t("reject")}
 			/>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

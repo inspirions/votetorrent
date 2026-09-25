@@ -1,0 +1,65 @@
+diff --git a/dist/cadre-node.js b/dist/cadre-node.js
+index 70b27fd..ff5f654 100644
+--- a/dist/cadre-node.js
++++ b/dist/cadre-node.js
+@@ -3655,7 +3655,11 @@ export class CadreNode {
+             requireSignedSchemas: this.config.requireSignedSchemas,
+             clusterSize: this.config.strandClusterSize,
+             backfill: this.config.strandBackfill,
+-            founder
++            founder,
++            // VoteTorrent patch (strand-cohort-topic): node-local, operator-supplied only — never
++            // read from the replicated control database, a strand row, or a peer, exactly the
++            // discipline the public-observer allowlist follows.
++            strandCohortTopic: this.config.strandCohortTopic
+         });
+         // The seed reached the node as `bootstrapNodes`, which only enters the
+         // address book via @libp2p/bootstrap discovery. Merge it directly too, so a
+diff --git a/dist/index.js b/dist/index.js
+index ed4384e..f82e046 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -124,4 +124,9 @@ export { RelayReservationFailedError, RELAY_SEARCH_LISTEN_ADDR } from './relay-a
+ export { circuitMultiaddrs, superviseRelayReservation, DEFAULT_RELAY_RESERVE_TIMEOUT_MS, DEFAULT_RELAY_RESERVE_POLL_MS, DEFAULT_RELAY_CHECK_MS, DEFAULT_RELAY_MIN_BACKOFF_MS, DEFAULT_RELAY_MAX_BACKOFF_MS } from './relay-reservation.js';
+ // Connection-path diagnostics (relayed vs direct classification + summary)
+ export { classifyTransport, classifyConnectionPath, summarizeConnectionPaths, emptyConnectionPathSummary, DEFAULT_SETTLE_WINDOW_MS } from './diagnostics/connection-path.js';
++// VoteTorrent patch (strand-cohort-topic): a provenance token only — its VALUE is the node-local
++// launch-config key name this patch introduces on `buildStrandRuntime`/`startStrand`. Not a
++// module, not a service: a consumer imports and compares this value, never a literal copied into
++// the consumer's own source.
++export const STRAND_COHORT_TOPIC_CONFIG_KEY = 'strandCohortTopic';
+ //# sourceMappingURL=index.js.map
+\ No newline at end of file
+diff --git a/dist/strand-instance-manager.js b/dist/strand-instance-manager.js
+index db81618..0957196 100644
+--- a/dist/strand-instance-manager.js
++++ b/dist/strand-instance-manager.js
+@@ -258,6 +258,28 @@ export class StrandInstanceManager {
+                     enableRingZulu: config.profile === 'storage'
+                 },
+                 ...(config.privateKey && { privateKey: config.privateKey }),
++                // VoteTorrent patch (strand-cohort-topic): a node-local, fail-closed cohort-topic
++                // surface. Contributes a `cohortTopic` key ONLY when the launch config's
++                // `strandCohortTopic` says so — strictly `enabled === true`, AND (when `strandIds`
++                // is a non-empty array) `strandIds.includes(strandId)`. When either fails this
++                // contributes NOTHING: no `cohortTopic: undefined` key, because the upstream read
++                // is `options.cohortTopic?.enabled === true` and an explicitly-undefined key is
++                // still a behavioural difference in a diff. This patch never supplies a
++                // requested-cohort-size override (both sides must resolve node-base's own
++                // default), never supplies a host-profile override (the strand node WANTS the
++                // host's own default so it is willing at the reactivity tier), and never supplies
++                // a gossip-cadence override.
++                ...(config.strandCohortTopic?.enabled === true &&
++                    (!Array.isArray(config.strandCohortTopic.strandIds) ||
++                        config.strandCohortTopic.strandIds.length === 0 ||
++                        config.strandCohortTopic.strandIds.includes(strandId)) && {
++                    cohortTopic: {
++                        enabled: true,
++                        ...(typeof config.strandCohortTopic.minSigs === 'number' && {
++                            host: { minSigs: config.strandCohortTopic.minSigs }
++                        })
++                    }
++                }),
+                 ...(config.network?.transports && { transports: config.network.transports }),
+                 // NOTE: strand nodes receive the same RESOLVED listen addrs as the
+                 // control node. A fixed-port listen addr (e.g. cadre-cli's example

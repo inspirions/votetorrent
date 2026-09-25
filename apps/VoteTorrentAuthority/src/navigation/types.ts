@@ -67,7 +67,67 @@ export type RootStackParamList = {
 	// Dev-entry route per D-12 — temporary; replaced by real callers in phases 8–10 (renamed by 07-08)
 	ScreenScaffoldsDebug: undefined;
 	ElectionDetails: { electionEngine: IElectionEngine };
+	// Phase 46 (D-01) — the single RegistrationPolicy route; all three params are
+	// required (not optional) since the screen destructures them unconditionally, and
+	// electionId/authorityId are passed to avoid a redundant getElectionDetails()
+	// round-trip just to learn them.
+	RegistrationPolicy: { electionEngine: IElectionEngine; electionId: string; authorityId: string };
+	// Phase 48 plan 48-21 (D-12) — the three Phase 48 routes: the Registration
+	// Requests inbox, its per-request approval ceremony, and Bulk Import / Sync.
+	// T-48-21-01: params carry identifiers only — authorityId, requestId. React
+	// Navigation serializes route params into navigation state, and that state
+	// surfaces in crash and debug payloads, so a requester name, a district, an
+	// IssuerType payload value or an engine handle must never be added here.
+	// Unlike RegistrationPolicy, no engine handle is threaded: every Phase 48
+	// screen resolves its engine from useApp().getEngine(...). Placement: this
+	// block sits ABOVE the Phase 47 comment/block (not folded into it) so
+	// phase47Routes.test.tsx's param-hygiene source-block extraction (which
+	// starts at the Phase 47 RegistrantsList route entry and ends at the
+	// EditBallot route entry) stays byte-identical in coverage — do not
+	// "tidy" this block down next to Phase 47's, that silently breaks that
+	// gate.
+	RegistrationInbox: { authorityId: string };
+	RegistrationRequestApproval: { requestId: string; authorityId: string };
+	BulkImportSync: { authorityId: string };
+	// Phase 47 plan 47-21 (D-07/D-08/D-09) — the five Phase 47 routes, split by owning domain.
+	// D-07: RegistrantsList is BOTH the authority-wide roster (no electionFilter) and the
+	// election roster (electionFilter pre-applied). There is deliberately no second roster route.
+	// D-08: RegistrantDetail is reached only from a RegistrantsList row press — no deep link
+	// this phase.
+	// T-47-21-01: params carry identifiers only. electionTitle is the single exception and is
+	// public election metadata used for the header; a registrant name, a district, or any
+	// RegistrantPrivate value must never be added, because React Navigation serializes route
+	// params into navigation state and that state surfaces in crash and debug payloads.
+	// Unlike RegistrationPolicy, no engine handle is threaded: every Phase 47 screen resolves
+	// its engine from useApp().getEngine(...).
+	RegistrantsList: { authorityId: string; electionFilter?: { electionId: string; electionTitle?: string } };
+	RegistrantDetail: { registrantId: string; authorityId: string };
+	AttestationProvisioningStatus: undefined;
+	PollingDevices: { authorityId: string };
+	AuthorityPeers: { authorityId: string };
 	EditBallot: { electionId?: string; electionTitle?: string; electionDate?: string; ballotId?: string; electionEngine?: IElectionEngine; removeQuestionCode?: string; question?: any; originalQuestionCode?: string; readOnly?: boolean };
+	// Phase 49 plan 49-10 (D-14) — the officer-facing signing-key provisioning/recovery surface.
+	// Deliberately placed OUTSIDE the RegistrantsList..EditBallot block above: that block is the
+	// scanned region of navigation/__tests__/phase47Routes.test.tsx's T-47-21-01 param-hygiene
+	// gate (a Phase-47-scoped allow-list of exactly 5 route entries) — adding a param name here
+	// would spuriously widen that gate's allow-list rather than proving anything about THIS
+	// route's own param hygiene. No third `no-key-yet` value: that condition reuses `first-run`
+	// (see 49-UI-SPEC.md), since visually and copy-wise it is the identical variant — only *how*
+	// the screen was reached differs, not what it renders.
+	ProvisionSigningKey: { reason: 'first-run' | 'invalidated' };
+	// Phase 51 plan 51-10 (D-06/D-19) — the route for AssociationRequestStatusScreen, the
+	// read-only association-request status screen. Deliberately placed OUTSIDE the
+	// RegistrationInbox..RegistrantsList block above (phase48Routes.test.tsx's T-48-21-01
+	// param-hygiene gate) and the RegistrantsList..EditBallot block above that
+	// (phase47Routes.test.tsx's T-47-21-01 gate) for the SAME reason ProvisionSigningKey
+	// sits here: adding a param name inside either scanned span would spuriously widen
+	// that gate's allow-list rather than proving anything about THIS route's own hygiene.
+	AssociationRequestStatus: { authorityId: string };
+	// 50-07 (D-03/D-05/D-09) — the authority-app producer screen for the web
+	// dashboard's bearer sign-in code. No params: the screen reads its staged
+	// record straight out of AsyncStorage (dashboard-signin-code.ts) and
+	// resolves the live network snapshot through useApp() itself.
+	DashboardSignInCode: undefined;
 	// Phase 9 plan 09-01 — type entries for routes whose screens land in later
 	// plans (CreateElection in 09-02, CreateBallot in 09-04). Stack.Screen
 	// registration is deferred; only the type signature is added here so the

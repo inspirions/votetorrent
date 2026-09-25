@@ -44,6 +44,15 @@ jest.mock('react-native-vector-icons/FontAwesome6', () => 'FontAwesome6');
 
 jest.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
+  // 49-07: device-signer.ts now imports the app's `i18n` singleton (src/i18n/index.ts) at
+  // module scope to resolve the native BiometricPrompt's prompt strings, and this screen
+  // imports device-signer.ts directly (not mocked, unlike every other createDeviceSigner call
+  // site's test — see this file's own header comment on why). `src/i18n/index.ts` calls
+  // `i18n.use(initReactI18next).init(...)` at ITS OWN module scope, so this mock must supply a
+  // real-shaped plugin object (i18next's actual duck-type contract: `{ type: '3rdParty', init }`
+  // — see react-i18next's own initReactI18next.js) or `i18n.use(undefined)` throws before this
+  // test file's real assertions ever run.
+  initReactI18next: { type: '3rdParty', init: () => {} },
 }));
 
 jest.mock('react-native-safe-area-context', () => ({

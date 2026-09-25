@@ -19,4 +19,11 @@ export type { Spec as NativeAttestationSpec } from './specs/NativeAttestation'
 // byte-for-byte matching the authority verifier's recomputeChallengeDigest), the D-16b
 // module-load probe, and the injectable createRealAttestationProducer({ enablePlayIntegrity })
 // factory driving the two-step TurboModule seam.
-export { computeBoundDigest, createRealAttestationProducer } from './real-attestation-producer'
+export {
+	computeBoundDigest,
+	// iOS §3.1/§4 digests. Exported so the vote-engine verifier's independent copies can be pinned
+	// against these in a cross-implementation agreement test — the two must never drift.
+	computeAssertionDigest,
+	computePopDigest,
+	createRealAttestationProducer,
+} from './real-attestation-producer'

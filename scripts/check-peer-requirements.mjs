@@ -93,8 +93,95 @@ const execAsync = promisify(exec);
 // alongside cadre-core 0.9.0 + quereus 4.4.1. The crypto-plugin peer wart is the SAME
 // known-suppressed `^0.16.2` mismatch against the plugin's own internal quereus-version
 // scheme (unrelated to @quereus/quereus 4.4.1) — only the resolved version moved.
+// db-p2p 0.18.0 bump (2026-08-03): @optimystic/* family bumped 0.16.3 → 0.18.0 (all
+// aligned) to pick up the reworked db-p2p membership admission gate. The mismatch is
+// unchanged in SHAPE — `packages/attestation-native` consumes
+// @optimystic/quereus-plugin-crypto but does not itself declare @quereus/quereus, so it
+// cannot provide that peer (every other consumer — vote-engine, cadre-core,
+// quereus-plugin-sereus, both apps — provides the resolved 4.4.1 patch copy and reports ✓).
+// Only the resolved version moved. Note the crypto plugin's peer range is now
+// `@quereus/quereus: ^4.3.0`, satisfied by 4.4.1; the residual ✘ is the missing
+// declaration in attestation-native, not a version conflict.
+// Spike 064 (four-family bump): @optimystic 0.22.0 -> 0.24.0. The mismatch is the
+// SAME single one, re-keyed to the new provider version. Two OTHER mismatches
+// DISAPPEARED on this bump -- `yarn explain peer-requirements` now shows
+// `@serfab/cadre-core@npm:0.11.0 provides @quereus/quereus@npm:4.14.0 to
+// @optimystic/quereus-plugin-crypto@npm:0.24.0` (and the same for
+// quereus-plugin-sereus), so the long-standing ^0.16.2 peer wart against the
+// crypto plugin's own internal quereus-version scheme is FIXED upstream.
+// What remains is VT-side: packages/attestation-native depends on
+// quereus-plugin-crypto without declaring @quereus/quereus itself.
+//
+// Phase 50-04: the root `resolutions` entry for @optimystic/quereus-plugin-crypto
+// is a floating `^0.24.0` range, and upstream published a 0.24.2 patch release
+// sometime before this plan ran. `yarn.lock` at this plan's starting commit had
+// ALREADY re-resolved every consumer to the single unified 0.24.2 copy (verified:
+// `git show HEAD:yarn.lock` contains zero `0.24.0` entries and one `0.24.2` entry)
+// -- this KNOWN_ALLOWED value was already stale before apps/VoteTorrentDashboard
+// existed. Re-keyed 0.24.0 -> 0.24.2 to match the actual (still single-copy, still
+// benign) resolved state; `yarn why @optimystic/quereus-plugin-crypto` confirms
+// every consumer (cadre-core, quereus-plugin-sereus, attestation-native,
+// vote-engine, and now votetorrent-dashboard) resolves the SAME 0.24.2 descriptor.
+//
+// @optimystic 0.25.1 -> 0.27.0 bump (2026-09-03): the mismatch is again the SAME
+// single one, re-keyed to the new provider version. `yarn why
+// @optimystic/quereus-plugin-crypto` resolves every consumer (cadre-core,
+// quereus-plugin-sereus, attestation-native, vote-engine, votetorrent-dashboard,
+// votetorrent-public) to one 0.27.0 copy, and @serfab/cadre-core@0.11.0's own
+// `^0.24.0` @optimystic range is flattened onto 0.27.0 by the root `resolutions`
+// -- so no second, unfixed db-p2p is nested behind cadre-core. The residual cause
+// is unchanged and still VT-side: packages/attestation-native depends on
+// quereus-plugin-crypto without declaring @quereus/quereus itself, so it cannot
+// provide that peer.
+//
+// @optimystic 0.29.0 -> 1.0.0-beta.2 bump (2026-09-11, commit eb5302af): same single
+// mismatch, re-keyed again. This value went stale the moment that bump landed and
+// stayed stale because nothing re-runs this guard on a dependency change -- the
+// checker reported the descriptor as `disappeared` (the allowlisted 0.29.0 entry no
+// longer exists) AND as `unexpected` (the real 1.0.0-beta.2 one is not allowlisted),
+// which is exactly what a version-keyed allowlist looks like when it is left behind.
+// NOTE the 0.29.0 line itself was never committed: it sat uncommitted in the working
+// tree from 2026-09-10, so the tracked value was still 0.27.0 two bumps later.
+//
+// @optimystic 1.0.0-beta.2 -> 1.0.0-beta.3 bump (2026-09-14): same single mismatch,
+// re-keyed once more. Re-verified rather than assumed: `yarn why
+// @optimystic/quereus-plugin-crypto` resolves every workspace consumer to one
+// 1.0.0-beta.3 copy, and the cause is still the VT-side one described above
+// (packages/attestation-native depends on quereus-plugin-crypto without declaring
+// @quereus/quereus, so it cannot provide that peer). Unlike the two bumps before it,
+// this line was updated in the same commit as the bump.
+//
+// @optimystic 1.0.0-beta.3 -> 1.1.0 bump (2026-09-21): same single mismatch, re-keyed
+// again. Re-verified rather than assumed: yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.1.0), and the cause is unchanged —
+// packages/attestation-native depends on quereus-plugin-crypto without declaring
+// @quereus/quereus, so it cannot provide that peer. NOTE what did NOT change here:
+// optimystic 1.1.0 raised both plugins' @quereus/quereus peer RANGE from ^4.3.0 to
+// ^4.19.4, but this mismatch was never a range problem — it is a MISSING peer, so
+// narrowing the range neither caused nor cured it. The real fix is to add
+// @quereus/quereus to packages/attestation-native, not to widen this allowlist;
+// until then the entry stays and must be re-keyed on every optimystic bump.
+//
+// @optimystic 1.1.0 -> 1.2.0 bump (2026-09-22): same single mismatch, re-keyed again and
+// re-verified the same way — yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.2.0), and the cause is still the missing
+// @quereus/quereus dependency in packages/attestation-native, not a peer RANGE (1.2.0
+// leaves that range at ^4.19.4, unchanged from 1.1.0).
+//
+// @optimystic 1.2.0 -> 1.3.0 bump (2026-09-22): same single mismatch, re-keyed once more.
+// Re-verified: yarn.lock holds exactly ONE resolved @optimystic/quereus-plugin-crypto
+// version (1.3.0), the peer range is still ^4.19.4, and the cause is still the missing
+// @quereus/quereus declaration in packages/attestation-native. NOTE the @serfab family did
+// NOT move on this hop (cadre-core / quereus-plugin-sereus stay 1.2.0), so this is the first
+// bump where the two families are deliberately on different minors.
+//
+// @optimystic 1.3.0 -> 1.5.0 bump (2026-09-24): same single mismatch, re-keyed once more
+// (1.4.0 skipped). Re-verified: yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.5.0), the peer range is still ^4.19.4, and the
+// cause is still the missing @quereus/quereus declaration in packages/attestation-native.
+// The @serfab family again did NOT move (cadre-core / quereus-plugin-sereus stay 1.2.0).
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:0.16.3',
+  '@optimystic/quereus-plugin-crypto@npm:1.5.0',
 ]);
 
 // The ✘ marker (U+2718)

@@ -16,10 +16,12 @@ import { CustomButton } from "../../components/CustomButton";
 import { globalStyles } from "../../theme/styles";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 export default function NetworksScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
+	const keyboardInset = useKeyboardInset();
 	const { networksEngine } = useApp();
 	const { node } = useCadreNode();
 	const [recentNetworkRefs, setRecentNetworkRefs] = useState<NetworkReference[]>([]);
@@ -52,15 +54,20 @@ export default function NetworksScreen() {
 		}
 		try {
 			await node.addStrand({
-				strandRow: { Id: strandId, MemberPrivateKey: null, Type: "o" },
+				// FounderOwnerKey is new and REQUIRED in cadre-core 0.13.0. This is the JOIN path —
+				// we are connecting to a strand someone else published — so this node is not the
+				// founding machine and null is correct, not merely tolerated.
+				strandRow: { Id: strandId, MemberPrivateKey: null, Type: "o", FounderOwnerKey: null },
 				sAppConfig: {
 					id: "org.votetorrent",
 					version: "1.0.0",
 					schema: VOTETORRENT_SCHEMA_SQL,
 					latencyHint: "interactive",
 				},
-				// Joining an existing host → networked transactor (peers expected).
-				mode: "networked",
+				// Joining an existing host: we did NOT provision this strand, so we are
+				// not the founder. `StrandConfig.mode` was deleted in cadre-core 0.11.0
+				// (spike 064); `founder` is the surviving knob and defaults to false.
+				founder: false,
 			});
 		} catch {
 			setJoinError(t("joinFailed"));
@@ -112,13 +119,13 @@ export default function NetworksScreen() {
 	return (
 		<ScrollView
 			style={styles.container}
-			contentContainerStyle={{ paddingBottom: insets.bottom + 16 }}
+			contentContainerStyle={{ paddingBottom: insets.bottom + 16 + keyboardInset }}
 		>
 			<View style={styles.section}>
 				<ThemedText type="defaultSemiBold" style={styles.section}>
 					{t("useOneOfTheFollowingToGetConnected")}
 				</ThemedText>
-				<ThemedText type="title">{t("connectedNetworks")}</ThemedText>
+				<ThemedText type="title">{t("recentNetworks")}</ThemedText>
 				{recentNetworkRefs.length === 0 && (
 					// NETUI-01 empty-state: short hint when no recent networks.
 					// The find/scan/bootstrap sections below remain the primary
@@ -164,7 +171,8 @@ export default function NetworksScreen() {
 					{t("or")}
 				</ThemedText>
 				<CustomButton
-					title={t("useLocation")}
+					// Not implemented yet — say so, so the disabled styling reads as intended.
+					title={t("useLocationComingSoon")}
 					backgroundColor={colors.important}
 					forceDarkText={true}
 					disabled={true}

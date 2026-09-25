@@ -102,11 +102,41 @@ export default function TasksScreen() {
 		return <NoNetwork />;
 	}
 
+	// 48-11 handoff, resolved here: `getRequestedSignatures(true)` stays
+	// UNCHANGED above — it is an idempotent pull-and-seed call (creates the
+	// Task + RegistrantSignatureTaskExtension + unsigned 'vrg' AdminSigning
+	// rows the registration approval ceremony needs), so it must keep firing
+	// from this consumer verbatim. The RENDERED result is a different
+	// question: 'registrant' signature tasks are filtered out here, for
+	// three reasons —
+	//   1. `SignatureTaskScreen` enumerates six signature types in its
+	//      `titleKey` record and its `signatureType` switch, and 48-19
+	//      deliberately does not add a seventh: the registration-approval
+	//      ceremony is a standalone screen with a screen-local gate (the
+	//      D-07 checklist) `SignatureTaskScreen` has no equivalent of. A
+	//      'registrant' `TaskCard` here would navigate to a screen with no
+	//      title and no details branch — a dead end presenting as a defect.
+	//   2. Registration review needs the request payload, the bridge
+	//      provenance callout, and the prior-rejection history. A generic
+	//      task card carries none of it, so even a "working" row would be
+	//      the wrong surface.
+	//   3. The Registration Requests inbox (48-18) is the single canonical
+	//      surface for this decision. Two entry points to one decision, one
+	//      of which shows strictly less, is exactly how an officer approves
+	//      without seeing a prior rejection.
+	// Filtered at BOTH points of use below (isEmpty AND the pushTask loop) —
+	// filtering only one would either show an empty section header with no
+	// cards (render-only fix) or the friendly "no tasks" screen while cards
+	// still exist (isEmpty-only fix).
+	const renderableSignatureTasks = (signatureTasks ?? []).filter(
+		(task) => task.signatureType !== "registrant"
+	);
+
 	const isEmpty =
 		releaseKeyTasks !== undefined &&
 		signatureTasks !== undefined &&
 		releaseKeyTasks.length === 0 &&
-		signatureTasks.length === 0;
+		renderableSignatureTasks.length === 0;
 
 	if (isEmpty) {
 		return (
@@ -120,8 +150,9 @@ export default function TasksScreen() {
 	}
 
 	// Build an authority-keyed map preserving engine order. We walk
-	// releaseKeyTasks first, then signatureTasks; within each authority bucket
-	// we preserve the order tasks arrived from the engine (D-04 — no sort).
+	// releaseKeyTasks first, then renderableSignatureTasks; within each
+	// authority bucket we preserve the order tasks arrived from the engine
+	// (D-04 — no sort).
 	const grouped = new Map<string, Array<ReleaseKeyTask | SignatureTask>>();
 	const pushTask = (task: ReleaseKeyTask | SignatureTask) => {
 		const key = getAuthorityGroupKey(task);
@@ -133,7 +164,7 @@ export default function TasksScreen() {
 		}
 	};
 	(releaseKeyTasks ?? []).forEach(pushTask);
-	(signatureTasks ?? []).forEach(pushTask);
+	renderableSignatureTasks.forEach(pushTask);
 
 	const renderChipForTask = (task: ReleaseKeyTask | SignatureTask) => {
 		if (task.type === "release-key") {

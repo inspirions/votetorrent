@@ -16,6 +16,9 @@ import { MisuseError, QuereusError } from '@quereus/quereus';
 import { Temporal } from 'temporal-polyfill';
 import { SigningEngine } from '../signing/signing-engine.js';
 import { allocateTid } from '../database/tid-allocator.js';
+import { verifySig, verifySigP256 } from '../database/initialize.js';
+import { verifyUserKeyMembership } from '../user/verify-user-key.js';
+import { UserKeyType } from '@votetorrent/vote-core';
 import {
 	asText,
 	authorityInviteSignedBytes,
@@ -35,10 +38,12 @@ import type { EngineContext } from '../types.js';
 // counter. See tid-allocator.ts for the D-07 hybrid seed / D-09
 // reserve-before-use / D-10 per-namespace serialization rationale that
 // replaces the WR-16/WR-25 heuristic this module used to carry.
+import { AdminPromotionError } from '@votetorrent/vote-core';
 import type {
 	AdminDetails,
 	AdminDigestArgs,
 	AdminInit,
+	AdminPromotionResult,
 	Officer,
 	OfficerInit,
 	OfficerInvite,
@@ -70,6 +75,114 @@ import {
 	AuthoritySaveInviteWithSigningBuilder,
 } from './builders/index.js';
 
+/**
+ * 57-01 (D-02): one entry in the admin roster covered by the 'rad' digest.
+ * `proposedName` mirrors `ProposedOfficer.ProposedName` — the officer's
+ * display name, resolved from `User.Name` for `.existing` selections (see
+ * `AuthorityEngine.resolveAdminRoster`).
+ *
+ * 57-13 (CR-01, D-03 amendment — see 57-13-CR01-CARRIER-PROBE.md): `userId`
+ * is the stable identity reference the promotion path resolves against
+ * instead of the renameable `User.Name` bridge. It is `null` ONLY for
+ * `.init` officers, which have no `User` row and are already unpromotable
+ * (D-03's original `.init`-officer case). For `.existing` officers it is
+ * `selection.existing.userId` — the SAME value the digest now attests to,
+ * so a rename between propose and promote can no longer retarget a grant.
+ */
+export interface AdminRosterEntry {
+	proposedName: string;
+	userId: string | null;
+	title: string;
+	scopes: Scope[];
+}
+
+/**
+ * 57-01 (D-02), CR-02 (57-12): deterministic, byte-stable serialization of
+ * an admin roster for the 'rad' digest. Sorted ascending by `proposedName`
+ * using a plain ordinal (code-unit) comparison — the same engine-independent
+ * three-way comparison shape `applyAdminProposal` already uses for its
+ * `sortedOfficers` userId sort — with a fixed per-entry key order
+ * (`proposedName`, `userId`, `title`, `scopes`) and `scopes` themselves
+ * sorted ascending, so the resulting JSON — and therefore the digest built
+ * from it — is independent of caller input order AND of the host runtime's
+ * collation data, because the value is digested and independently
+ * re-derived on another runtime (Hermes app vs Node/mocha engine tests).
+ * Deliberately NOT the schema's single-row, LIMIT-1-style shortcut
+ * elsewhere in this codebase, which would digest only the first officer
+ * rather than the full roster.
+ *
+ * 57-13 (CR-01): `userId` is bound as `entry.userId ?? null`, NEVER as a
+ * bare `entry.userId` — `JSON.stringify` DROPS keys whose value is
+ * `undefined`, which would silently emit two different digest shapes for
+ * the same logical roster (T-57-13-05) and reintroduce the exact class of
+ * defect this plan closes. The `userId` tiebreak (for the rare equal-name
+ * case) uses the SAME ordinal `<`/`>`/`0` three-way shape as the primary
+ * `proposedName` sort — introduce no locale-sensitive primitive; 57-12's
+ * `roster-digest-determinism.spec.ts` guard fails the suite if one
+ * reappears in this file.
+ *
+ * Deliberately exported as a pure, side-effect-free function (not inlined
+ * into `proposeAdmin`) so roster-order determinism and scope-change
+ * sensitivity are directly unit-testable without a live `proposeAdmin`
+ * round trip — see `authority.spec.ts`'s 'proposeAdmin' D-02 cases.
+ * `ProposedAdmin`/`ProposedOfficer`'s composite primary keys (plus
+ * `ProposedOfficer.CantDelete`) make a second `proposeAdmin` call against
+ * the SAME (authorityId, effectiveAt) structurally impossible, so this pure
+ * function is the only place that property is observable in isolation.
+ */
+export function sortRosterEntries(
+	entries: AdminRosterEntry[],
+): AdminRosterEntry[] {
+	return entries
+		.map((entry) => ({
+			proposedName: entry.proposedName,
+			userId: entry.userId ?? null,
+			title: entry.title,
+			scopes: [...entry.scopes].sort(),
+		}))
+		.sort((a, b) => {
+			if (a.proposedName < b.proposedName) return -1;
+			if (a.proposedName > b.proposedName) return 1;
+			const aUserId = a.userId ?? '';
+			const bUserId = b.userId ?? '';
+			return aUserId < bUserId ? -1 : aUserId > bUserId ? 1 : 0;
+		});
+}
+
+/**
+ * 57-08 (D-01 trigger half): the outcome of `proposeAdmin`'s own attempt to
+ * promote its proposal when `startSigningSession` reports `thresholdReached`.
+ * Mirrors `SignatureTasksEngine.RegistrantSeedOutcome` / `lastSeedOutcome`'s
+ * shape and discipline exactly: public on `AuthorityEngine` so a test or a
+ * future UI consumer can read it, deliberately NOT added to `IAuthorityEngine`
+ * (no interface change, no UI consumer this round).
+ *
+ * `proposeAdmin`'s contract is to propose — a proposal that is correctly
+ * persisted and correctly signed must survive a promotion that legitimately
+ * cannot apply (a typed `AdminPromotionError`, e.g. the D-03 `.init`-officer
+ * case), so a refusal is RECORDED here rather than thrown. This field is the
+ * channel a caller reads to discover that outcome; it is never silent.
+ */
+export type AdminProposalPromotionOutcome =
+	| { status: 'promoted'; nonce: string; result: AdminPromotionResult }
+	| {
+			status: 'refused';
+			nonce: string;
+			reason: AdminPromotionError['reason'];
+			proposedName?: string;
+	  }
+	| {
+			// Threshold reached but signatureOrCallback was a bare Signature, not a
+			// re-invocable per-digest callback — applyAdminProposal requires a
+			// callback because it mints two or three distinct digests (57-07). This
+			// is a DISTINCT marker from 'refused' (no AdminPromotionError was ever
+			// thrown; the promotion attempt never started). Per Task 1's P8 probe,
+			// authority-propose-admin-builder.ts:154 is the one production
+			// (non-test, non-mock) caller shaped this way today.
+			status: 'skipped-non-callback-signature';
+			nonce: string;
+	  };
+
 export class AuthorityEngine implements IAuthorityEngine {
 	constructor(
 		private readonly authority: Authority,
@@ -80,6 +193,14 @@ export class AuthorityEngine implements IAuthorityEngine {
 	}
 
 	private readonly invitationSpanMinutes: number;
+
+	/**
+	 * 57-08 (D-01 trigger half) — the most recent outcome of `proposeAdmin`'s
+	 * own promotion attempt. Public so a test or a future UI consumer can read
+	 * it; NOT part of `IAuthorityEngine` (no interface change, no UI consumer
+	 * this round — see {@link AdminProposalPromotionOutcome}'s own doc comment).
+	 */
+	lastPromotionOutcome?: AdminProposalPromotionOutcome;
 
 	createOfficerInvite(init: OfficerInit): OfficerInviteShare {
 		// AUTH-01 (D-01/D-04): hex-encoded secp256k1 key material at the
@@ -406,6 +527,52 @@ export class AuthorityEngine implements IAuthorityEngine {
 		}
 	}
 
+	/**
+	 * 57-01 (D-01 propose side, D-03): resolve each `OfficerSelection` in a
+	 * `proposeAdmin` roster into an `AdminRosterEntry`. For `.init`, the
+	 * caller-supplied `name`/`title`/`scopes` are taken directly. For
+	 * `.existing`, `ProposedOfficer` is keyed by NAME (not userId), so the
+	 * display name is resolved from `User.Name` — mirroring the bridge
+	 * `ProposedAdministrationScreen.tsx` already uses, not a second one. If
+	 * the `User` row is missing, this throws rather than silently
+	 * substituting the userId as the name (T-57-05).
+	 *
+	 * Returns entries UNSORTED, in caller order — callers needing the
+	 * digest/serialization form must run the result through
+	 * `sortRosterEntries`.
+	 */
+	private async resolveAdminRoster(
+		officers: OfficerSelection[],
+	): Promise<AdminRosterEntry[]> {
+		const entries: AdminRosterEntry[] = [];
+		for (const selection of officers) {
+			if (selection.init) {
+				entries.push({
+					proposedName: selection.init.name,
+					userId: null,
+					title: selection.init.title,
+					scopes: selection.init.scopes,
+				});
+			} else if (selection.existing) {
+				const userDB = await this.ctx.db
+					.prepare('select Id, Name, ImageRef from User where Id = :id')
+					.get({ id: selection.existing.userId });
+				if (!userDB) {
+					throw new Error(
+						`proposeAdmin: unresolvable officer userId '${selection.existing.userId}' — no matching User row`,
+					);
+				}
+				entries.push({
+					proposedName: userDB.Name as string,
+					userId: selection.existing.userId,
+					title: selection.existing.title,
+					scopes: selection.existing.scopes,
+				});
+			}
+		}
+		return entries;
+	}
+
 	async proposeAdmin(
 		admin: Proposal<AdminInit>,
 		signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>),
@@ -420,58 +587,148 @@ export class AuthorityEngine implements IAuthorityEngine {
 		const effectiveAtCanon = toCanonicalDatetime(admin.proposed.effectiveAt);
 		const tid = await allocateTid(this.ctx.db, 'authority');
 		try {
-			// D-03/D-04: resolve the concrete Signature.
-			// If a sign callback is provided, compute the canonical digest engine-side
-			// (same args as PATH A's inline Digest() in startSigningSession) and invoke
-			// the callback so the caller signs exactly the bytes the engine stores.
-			// If a completed Signature is passed (test fixture path), use it directly.
+			// 57-01 (D-02): resolve + deterministically sort the roster BEFORE
+			// computing the digest, so the digest attests to the FULL roster this
+			// proposal revises — never a single-row, first-officer-only shortcut.
+			const rosterEntries = sortRosterEntries(
+				await this.resolveAdminRoster(admin.proposed.officers),
+			);
+			const officersJson = JSON.stringify(rosterEntries);
+
+			// D-03/D-04: resolve the canonical digest ENGINE-SIDE first — needed both to
+			// hand a sign callback the exact bytes to sign, and (D-21) to independently
+			// re-verify whatever Signature ends up bound, including a pre-supplied one.
+			const digestRow = await this.ctx.db
+				.prepare(
+					'select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d',
+				)
+				.get({
+					authorityId: this.authority.id,
+					effectiveAt: effectiveAtCanon,
+					officers: officersJson,
+					thresholdPolicies: thresholdPoliciesJson,
+				});
+			if (!digestRow || digestRow.d == null) {
+				throw new Error('proposeAdmin: Digest() returned null — crypto plugin not registered?');
+			}
+			// WR-01: single shared digestToBytes decoder.
+			const digestBytes = digestToBytes(digestRow.d);
+
+			// If a sign callback is provided, invoke it so the caller signs exactly the
+			// bytes the engine stores. If a completed Signature is passed (test fixture
+			// path), use it directly — either way `digestRow.d`/`digestBytes` above are
+			// the SAME bytes the signature must cover, per D-21 verification below.
 			let signature: Signature;
 			if (typeof signatureOrCallback === 'function') {
-				const digestRow = await this.ctx.db
-					.prepare(
-						'select Digest(:authorityId, :effectiveAt, :thresholdPolicies) as d',
-					)
-					.get({
-						authorityId: this.authority.id,
-						effectiveAt: effectiveAtCanon,
-						thresholdPolicies: thresholdPoliciesJson,
-					});
-				if (!digestRow || digestRow.d == null) {
-					throw new Error('proposeAdmin: Digest() returned null — crypto plugin not registered?');
-				}
-				// WR-01: single shared digestToBytes decoder.
-				const digestBytes = digestToBytes(digestRow.d);
 				signature = await signatureOrCallback(digestBytes);
 			} else {
 				signature = signatureOrCallback;
 			}
 
-			await this.ctx.db.exec(
-				`insert into ProposedAdmin (
-					AuthorityId,
-					EffectiveAt,
-					ThresholdPolicies
-				)
-					with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = true
-				values (
-					:authorityId,
-					:effectiveAt,
-					:thresholdPolicies
-				)`,
-				{
-					authorityId: this.authority.id,
-					effectiveAt: effectiveAtCanon,
-					thresholdPolicies: thresholdPoliciesJson,
-					signerUserId: signature.signerUserId,
-					signerKey: signature.signerKey,
-					signature: signature.signature,
-					now: nowCanonicalDatetime(),
-				},
+			// D-21 (Class A): compute a REAL IsUserValid — the conjunction of registered/
+			// unexpired key membership AND a curve-dispatched signature verification over
+			// the digest already computed above. Replaces the prior literal `true`.
+			const membership = await verifyUserKeyMembership(
+				this.ctx,
+				signature.signerUserId,
+				signature.signerKey,
 			);
+			const signatureValid = membership.keyType === UserKeyType.p256
+				? verifySigP256(digestRow.d, signature.signature, signature.signerKey)
+				: verifySig(digestRow.d, signature.signature, signature.signerKey);
+			const isUserValid = membership.valid && signatureValid;
+
+			// 57-01 (D-01 propose side, T-57-04): ProposedAdmin + its roster commit
+			// atomically. ProposedAdmin MUST land first — ProposedOfficer.AdminValid
+			// requires the matching ProposedAdmin row to already exist. COMMIT here,
+			// BEFORE calling signingEngine.startSigningSession below — Quereus's
+			// transaction model is flat and startSigningSession calls sign(), which
+			// opens its own transaction by default.
+			const nowCanon = nowCanonicalDatetime();
+			await this.ctx.db.exec('BEGIN');
+			try {
+				await this.ctx.db.exec(
+					`insert into ProposedAdmin (
+						AuthorityId,
+						EffectiveAt,
+						ThresholdPolicies
+					)
+						with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
+					values (
+						:authorityId,
+						:effectiveAt,
+						:thresholdPolicies
+					)`,
+					{
+						authorityId: this.authority.id,
+						effectiveAt: effectiveAtCanon,
+						thresholdPolicies: thresholdPoliciesJson,
+						signerUserId: signature.signerUserId,
+						signerKey: signature.signerKey,
+						signature: signature.signature,
+						now: nowCanon,
+						isUserValid,
+					},
+				);
+
+				// 57-13 (CR-01, D-03 AMENDMENT — see 57-13-CR01-CARRIER-PROBE.md):
+				// D-03 originally left ProposedOfficerUser unpopulated because 57-01's
+				// read-side probe found no reader. That no longer holds — the promote-
+				// side closure's applyAdminProposal Step 4 is a genuinely NEW reader
+				// that needs a stable identity reference instead of the renameable
+				// User.Name bridge — but the carrier probe (Task 1) found ProposedOfficerUser
+				// itself unusable: its UserSignature column is NOT NULL with no
+				// legitimate non-fabricated value available at propose time (Q2),
+				// and an officer seeded through the ordinary invite path has no live
+				// UserKey row at all (Q3). The FALLBACK carrier persists the same
+				// fact directly on ProposedOfficer.UserId instead (a column-only
+				// schema addition, no new constraint) — ProposedOfficerUser itself
+				// stays unpopulated, same as before, just for a different reason.
+				for (const entry of rosterEntries) {
+					await this.ctx.db.exec(
+						`insert into ProposedOfficer (
+							AuthorityId,
+							AdminEffectiveAt,
+							ProposedName,
+							Title,
+							Scopes,
+							UserId
+						)
+							with context UserId = :signerUserId, UserKey = :signerKey, Signature = :signature, Tid = ${tid}, now = :now, IsUserValid = :isUserValid
+						values (
+							:authorityId,
+							:effectiveAt,
+							:proposedName,
+							:title,
+							:scopes,
+							:entryUserId
+						)`,
+						{
+							authorityId: this.authority.id,
+							effectiveAt: effectiveAtCanon,
+							proposedName: entry.proposedName,
+							title: entry.title,
+							scopes: JSON.stringify(entry.scopes),
+							entryUserId: entry.userId ?? null,
+							signerUserId: signature.signerUserId,
+							signerKey: signature.signerKey,
+							signature: signature.signature,
+							now: nowCanon,
+							isUserValid,
+						},
+					);
+				}
+
+				await this.ctx.db.exec('COMMIT');
+			} catch (innerErr) {
+				await this.ctx.db.exec('ROLLBACK');
+				throw innerErr;
+			}
 
 			const adminDigestArgs: AdminDigestArgs = {
 				authorityId: this.authority.id,
 				effectiveAt: effectiveAtCanon,
+				officers: officersJson,
 				thresholdPolicies: thresholdPoliciesJson,
 			};
 			// WR-06 (17-REVIEW): proposeAdmin only STARTS the signing session with
@@ -481,17 +738,466 @@ export class AuthorityEngine implements IAuthorityEngine {
 			// their OWN signature, so completion cannot happen inside this method
 			// (a previously commented-out loop here would have re-applied the
 			// instigator's signature for every signer, which is wrong).
-			await this.signingEngine.startSigningSession(
-				this.authority.id,
-				adminDigestArgs,
-				'rad',
-				signature,
-			);
+			const { nonce, thresholdReached } =
+				await this.signingEngine.startSigningSession(
+					this.authority.id,
+					adminDigestArgs,
+					'rad',
+					signature,
+				);
+
+			// 57-08 (D-01 trigger half, Trigger A): the instigator's own signature
+			// can already reach threshold here — the only administration shape the
+			// current data model supports is threshold 1 (WR-05: every seeded
+			// officer carries ctx.user.id), so proposeAdmin is where the FIRST and,
+			// today, ONLY signature-completing event for a 'rad' session happens.
+			// Promote only when threshold is genuinely reached AND a re-invocable
+			// per-digest callback is available — applyAdminProposal mints two or
+			// three distinct digests (57-07) and a single pre-computed Signature
+			// cannot cover them.
+			if (thresholdReached) {
+				if (typeof signatureOrCallback === 'function') {
+					try {
+						const result = await this.applyAdminProposal(
+							nonce,
+							signatureOrCallback,
+							{ ownsTransaction: true }, // 57-01 already COMMITted ProposedAdmin/
+							// ProposedOfficer above, and startSigningSession's sign() call
+							// (just above) owns and closes its OWN transaction — there is no
+							// open transaction at this point, so this trigger opens its own.
+						);
+						this.lastPromotionOutcome = { status: 'promoted', nonce, result };
+					} catch (promotionErr) {
+						if (promotionErr instanceof AdminPromotionError) {
+							// A promotion that legitimately cannot apply (e.g. the D-03
+							// .init-officer case) must not destroy a correctly persisted,
+							// correctly signed proposal. RECORD the refusal — never silent,
+							// never thrown — proposeAdmin's contract is to propose.
+							this.lastPromotionOutcome = {
+								status: 'refused',
+								nonce,
+								reason: promotionErr.reason,
+								proposedName: promotionErr.proposedName,
+							};
+							console.warn(
+								`AuthorityEngine.proposeAdmin: promotion refused for nonce ${nonce}: ${promotionErr.reason}. The proposal itself was NOT affected — see lastPromotionOutcome.`,
+							);
+						} else {
+							// Any OTHER error is unexpected and must not be downgraded to a
+							// warning.
+							throw promotionErr;
+						}
+					}
+				} else {
+					// Threshold reached but the caller supplied a bare Signature, not a
+					// callback. Per Task 1's P8 probe, this shape has a production
+					// (non-test, non-mock) caller — authority-propose-admin-builder.ts:154
+					// — with no current app-level UI consumer. Record and warn; do NOT
+					// throw and do NOT substitute/reuse the single supplied signature for
+					// the two or three distinct digests the promotion needs to mint.
+					this.lastPromotionOutcome = {
+						status: 'skipped-non-callback-signature',
+						nonce,
+					};
+					console.warn(
+						`AuthorityEngine.proposeAdmin: threshold reached for nonce ${nonce} but a bare Signature (not a re-invocable per-digest callback) was supplied — promotion needs a callback because it mints two or three distinct digests. The proposal itself was NOT affected; this surface cannot promote until it supplies a callback.`,
+					);
+				}
+			}
 		} catch (err) {
 			if (err instanceof QuereusError) {
 				throw new Error(`Quereus error (code ${err.code}): ${err.message}`);
 			} else if (err instanceof MisuseError) {
 				throw new Error(`API misuse: ${err.message}`);
+			} else if (err instanceof Error) {
+				// WR-02: mirror `applyAdminProposal`'s own catch. Without this branch a
+				// re-thrown promotion failure (the `throw promotionErr` in Trigger A
+				// above) was rebuilt as a brand-new, cause-less `Error("Unknown
+				// error: …")`, erasing `instanceof` and the stack. A caller could then
+				// not distinguish "the proposal was never saved" from "the proposal and
+				// its threshold-reached signature were saved correctly; only the
+				// automatic promotion crashed" — and a blind retry collides on
+				// ProposedAdmin's (AuthorityId, EffectiveAt) primary key.
+				throw err;
+			} else {
+				throw new Error(`Unknown error: ${err}`);
+			}
+		}
+	}
+
+	/**
+	 * 57-07 (D-01 promotion half): promote a threshold-reached 'rad'
+	 * AdminSigning/AdminSignature session into live Admin + Officer rows.
+	 *
+	 * Read-then-verify-then-write, modelled on
+	 * SignatureTasksEngine.finalizeBallot's read-a-Proposed*-row-after-
+	 * threshold-and-promote shape. Steps 1-5 (identification + refusal
+	 * checks) run BEFORE any write and BEFORE any transaction opens.
+	 *
+	 * quereus finding (T-57-07-01..06, pinned by 57-07's P4 probe): the
+	 * deferred-constraint queue mis-evaluates the self-referential
+	 * `Admin.MutationValid` / `Officer.InsertValid` subqueries when MORE
+	 * THAN ONE deferred entry is pending at COMMIT (matches the open
+	 * "deferred-CHECK sibling-row visibility" class of quereus issue) — a
+	 * live `select` inside the same open transaction shows the correct,
+	 * self-visible digest, but the deferred evaluator computes something
+	 * else and the CHECK spuriously fails. Workaround: drain the queue via
+	 * `this.ctx.db.runDeferredRowConstraints()` immediately after EACH
+	 * Admin/Officer insert, while still inside the one open transaction —
+	 * every deferred CHECK then evaluates alone (the single-entry case,
+	 * proven self-visible), and the surrounding BEGIN…COMMIT/ROLLBACK still
+	 * provides real, whole-transaction atomicity.
+	 */
+	async applyAdminProposal(
+		nonce: string,
+		sign: (digest: Uint8Array) => Promise<Signature>,
+		options?: { ownsTransaction?: boolean },
+	): Promise<AdminPromotionResult> {
+		const ownsTransaction = options?.ownsTransaction ?? true;
+		try {
+			// Step 1: read the session.
+			const sessionRow = await this.ctx.db
+				.prepare(
+					'select Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest from AdminSigning where Nonce = :nonce',
+				)
+				.get({ nonce });
+			if (
+				!sessionRow ||
+				sessionRow.Scope !== 'rad' ||
+				sessionRow.AuthorityId !== this.authority.id
+			) {
+				throw new AdminPromotionError('wrong-scope', nonce);
+			}
+
+			// Step 2: threshold gate. AdminSignature is sign()'s own authoritative
+			// "threshold reached" marker — do not re-derive the arithmetic.
+			const signedRow = await this.ctx.db
+				.prepare('select 1 as x from AdminSignature where SigningNonce = :nonce')
+				.get({ nonce });
+			if (!signedRow) {
+				throw new AdminPromotionError('not-signed', nonce);
+			}
+
+			// Step 3: identify the proposal by re-deriving 57-01's roster-covering
+			// digest over each persisted ProposedAdmin + its ProposedOfficer roster,
+			// and matching byte-for-byte against the session's stored Digest.
+			// Exactly one row may match (T-57-07-02, repudiation control).
+			let matched:
+				| {
+						effectiveAtCanon: string;
+						thresholdPoliciesJson: string;
+						rosterEntries: AdminRosterEntry[];
+				  }
+				| undefined;
+			// WR-XX (57-07): materialize the outer cursor into a plain array BEFORE
+			// issuing any nested db call. `Database.eval()` holds the exec mutex for
+			// the whole iteration (documented on `_acquireExecMutex`) — a nested
+			// `eval`/`prepare().get()` issued from inside an still-open outer `eval`
+			// iterator re-enters the same mutex and deadlocks (never rejects; the
+			// call simply never resolves). Every per-row nested read below runs
+			// AFTER this array is fully collected, once the outer cursor has
+			// released the mutex.
+			const proposedAdminRows: Array<{ effectiveAtCanon: string; thresholdPoliciesJson: string }> = [];
+			for await (const proposedRow of this.ctx.db.eval(
+				'select AuthorityId, EffectiveAt, ThresholdPolicies from ProposedAdmin where AuthorityId = :id',
+				{ id: this.authority.id },
+			)) {
+				proposedAdminRows.push({
+					effectiveAtCanon: proposedRow.EffectiveAt as string,
+					thresholdPoliciesJson: proposedRow.ThresholdPolicies as string,
+				});
+			}
+			for (const { effectiveAtCanon, thresholdPoliciesJson } of proposedAdminRows) {
+				const rosterRaw: AdminRosterEntry[] = [];
+				// 57-13 (CR-01, fallback carrier — see 57-13-CR01-CARRIER-PROBE.md):
+				// UserId is a plain column on ProposedOfficer itself (added by Task 2),
+				// so it comes back in this SAME select — no second query, no new
+				// exec-mutex hazard (unlike the primary-carrier branch this plan did
+				// NOT take, which would have needed a per-row point lookup issued
+				// AFTER this cursor closed).
+				for await (const officerRow of this.ctx.db.eval(
+					'select ProposedName, Title, Scopes, UserId from ProposedOfficer where AuthorityId = :id and AdminEffectiveAt = :e',
+					{ id: this.authority.id, e: effectiveAtCanon },
+				)) {
+					rosterRaw.push({
+						proposedName: officerRow.ProposedName as string,
+						// 57-13: bind as `?? null`, matching the producer's exact binding
+						// (T-57-13-05) — a mismatch between `null` and `undefined` here
+						// produces a silent `roster-mismatch` refusal that looks like a
+						// tampering detection rather than what it actually is.
+						userId: (officerRow.UserId as string | null) ?? null,
+						title: officerRow.Title as string,
+						scopes: parseJsonOr<Scope[]>(officerRow.Scopes as string, [], 'ProposedOfficer.Scopes'),
+					});
+				}
+				const rosterEntries = sortRosterEntries(rosterRaw);
+				const officersJson = JSON.stringify(rosterEntries);
+				const candidateDigestRow = await this.ctx.db
+					.prepare(
+						'select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d',
+					)
+					.get({
+						authorityId: this.authority.id,
+						effectiveAt: effectiveAtCanon,
+						officers: officersJson,
+						thresholdPolicies: thresholdPoliciesJson,
+					});
+				if (candidateDigestRow?.d != null && candidateDigestRow.d === sessionRow.Digest) {
+					matched = { effectiveAtCanon, thresholdPoliciesJson, rosterEntries };
+					break;
+				}
+			}
+			if (!matched) {
+				throw new AdminPromotionError('roster-mismatch', nonce);
+			}
+
+			// Step 4: resolve each roster entry's privilege grant. CR-01 promote-side
+			// closure (this plan): for an entry that carries a signed, persisted
+			// `userId` (57-13), identity comes from THAT value — a single point
+			// lookup confirms the `User` row still exists, and NO query against
+			// `User.Name` is issued on this path. `User.Name` is attacker-controlled
+			// (`UserEngine.revise()` accepts a self-service rename with no signature
+			// and no admin gate, and the column has no uniqueness constraint), so a
+			// grant resolved from it could be retargeted after the proposal was
+			// signed. The name lookup survives ONLY as the null-userId fallback:
+			// `.init` officers have no `User` row and are already unpromotable
+			// (T-57-07-07), and any legacy roster proposed before 57-13 has no
+			// persisted userId to trust instead. Refuse loudly (`unresolvable-officer`)
+			// rather than silently promoting a smaller roster than the one that was
+			// signed, on both branches.
+			const resolvedOfficers: Array<{ userId: string; title: string; scopes: Scope[] }> = [];
+			for (const entry of matched.rosterEntries) {
+				if (entry.userId != null) {
+					const userRow = await this.ctx.db
+						.prepare('select Id from User where Id = :id')
+						.get({ id: entry.userId });
+					if (!userRow) {
+						throw new AdminPromotionError('unresolvable-officer', nonce, entry.proposedName);
+					}
+					resolvedOfficers.push({ userId: entry.userId, title: entry.title, scopes: entry.scopes });
+					continue;
+				}
+				const userIds: string[] = [];
+				for await (const userRow of this.ctx.db.eval('select Id from User where Name = :name', {
+					name: entry.proposedName,
+				})) {
+					userIds.push(userRow.Id as string);
+				}
+				if (userIds.length !== 1) {
+					throw new AdminPromotionError('unresolvable-officer', nonce, entry.proposedName);
+				}
+				resolvedOfficers.push({ userId: userIds[0]!, title: entry.title, scopes: entry.scopes });
+			}
+
+			// Step 5: refuse a roster with no 'rad'-scoped officer — Admin.OfficerRequired
+			// fires `check on update`, so an administration promoted without a 'rad'
+			// officer could never be revised again (T-57-07-08). Then the idempotent-
+			// replay short-circuit: a live Admin row already covering this
+			// (authorityId, effectiveAt) means this nonce was already promoted
+			// (T-57-07-06) — return without opening a transaction.
+			const hasRadOfficer = resolvedOfficers.some((o) => o.scopes.includes('rad' as Scope));
+			if (!hasRadOfficer) {
+				throw new AdminPromotionError('no-rad-officer', nonce);
+			}
+			const existingAdminRow = await this.ctx.db
+				.prepare('select 1 as x from Admin where AuthorityId = :id and EffectiveAt = :e')
+				.get({ id: this.authority.id, e: matched.effectiveAtCanon });
+			if (existingAdminRow) {
+				return {
+					authorityId: this.authority.id,
+					effectiveAt: fromCanonicalDatetime(matched.effectiveAtCanon),
+					officersPromoted: 0,
+					alreadyApplied: true,
+				};
+			}
+
+			// Step 6: allocate one Tid for the whole promotion; sort the resolved
+			// roster ascending by UserId (Officer.AdminValid's strong branch requires
+			// Admin to exist first when InviteSlotCid is null — D-07d).
+			const tid = await allocateTid(this.ctx.db, 'authority');
+			const sortedOfficers = [...resolvedOfficers].sort((a, b) =>
+				a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0,
+			);
+			const minOfficer = sortedOfficers[0]!;
+
+			// Session 1 — Admin-side digest. No Officer row exists yet for this
+			// brand-new EffectiveAt (under ANY UserId), so the officer part is null
+			// (57-07 P1/P2 probe verdict).
+			const adminDigestRow = await this.ctx.db
+				.prepare(
+					'select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d',
+				)
+				.get({
+					tid,
+					authorityId: this.authority.id,
+					effectiveAt: matched.effectiveAtCanon,
+					thresholdPolicies: matched.thresholdPoliciesJson,
+					officerPart: null,
+				});
+			if (!adminDigestRow || adminDigestRow.d == null) {
+				throw new Error('applyAdminProposal: Digest() returned null for the Admin-side session');
+			}
+			const adminDigest = adminDigestRow.d as string;
+			const adminSignature = await sign(digestToBytes(adminDigest));
+
+			// AdminSigning.AdminEffectiveAt is the CURRENT admin's effective date
+			// (never the promoted proposal's) — resolved via the same CurrentAdmin
+			// join Officer lookup startSigningSession uses, keyed to the promoting
+			// signer (key fact 4).
+			const currentAdminRow = await this.ctx.db
+				.prepare(
+					`select CurrentAdmin.EffectiveAt from CurrentAdmin join Officer
+						on CurrentAdmin.AuthorityId = Officer.AuthorityId
+							and CurrentAdmin.EffectiveAt = Officer.AdminEffectiveAt
+								where Officer.UserId = :userId and Officer.AuthorityId = :authorityId`,
+				)
+				.get({ userId: adminSignature.signerUserId, authorityId: this.authority.id });
+			if (!currentAdminRow) {
+				throw new Error(
+					'applyAdminProposal: the promoting signer is not a current Officer of this authority',
+				);
+			}
+			const currentAdminEffectiveAt = currentAdminRow.EffectiveAt as string;
+
+			// Session 2 — ONE shared officer-side digest for EVERY officer,
+			// including the first: 57-07's P4 probe proved that draining the
+			// deferred-constraint queue after each insert makes every officer's
+			// deferred CHECK resolve as self-visible, so the officer part is always
+			// the minimum-UserId officer's own tuple (never null, never per-officer).
+			const officerPartRow = await this.ctx.db
+				.prepare('select Digest(:effectiveAt, :userId, :title, :scopes) as d')
+				.get({
+					effectiveAt: matched.effectiveAtCanon,
+					userId: minOfficer.userId,
+					title: minOfficer.title,
+					scopes: JSON.stringify(minOfficer.scopes),
+				});
+			if (!officerPartRow || officerPartRow.d == null) {
+				throw new Error('applyAdminProposal: Digest() returned null for the officer-part tuple');
+			}
+			const officerPart = officerPartRow.d as string;
+			const officerDigestRow = await this.ctx.db
+				.prepare(
+					'select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d',
+				)
+				.get({
+					tid,
+					authorityId: this.authority.id,
+					effectiveAt: matched.effectiveAtCanon,
+					thresholdPolicies: matched.thresholdPoliciesJson,
+					officerPart,
+				});
+			if (!officerDigestRow || officerDigestRow.d == null) {
+				throw new Error('applyAdminProposal: Digest() returned null for the Officer-side session');
+			}
+			const officerDigest = officerDigestRow.d as string;
+			const officerSignature = await sign(digestToBytes(officerDigest));
+
+			const adminNonce = crypto.randomUUID();
+			const officerNonce = crypto.randomUUID();
+			const nowCanon = nowCanonicalDatetime();
+
+			if (ownsTransaction) await this.ctx.db.exec('BEGIN');
+			try {
+				// Mint + insert the Admin row. Never IsPlaceholderSignature = true —
+				// this method supplies real crypto (T-57-07-03).
+				await this.ctx.db.exec(
+					`insert into AdminSigning (
+						Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature
+					)
+						with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+					values (
+						:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature
+					)`,
+					{
+						nonce: adminNonce,
+						authorityId: this.authority.id,
+						adminEffectiveAt: currentAdminEffectiveAt,
+						digest: adminDigest,
+						userId: adminSignature.signerUserId,
+						signerKey: adminSignature.signerKey,
+						signature: adminSignature.signature,
+						now: nowCanon,
+					},
+				);
+				await this.signingEngine.sign(adminNonce, adminSignature, { ownsTransaction: false });
+				await this.ctx.db.exec(
+					`insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
+						with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
+					values (:authorityId, :effectiveAt, :thresholdPolicies)`,
+					{
+						nonce: adminNonce,
+						authorityId: this.authority.id,
+						effectiveAt: matched.effectiveAtCanon,
+						thresholdPolicies: matched.thresholdPoliciesJson,
+					},
+				);
+				// Workaround for the deferred-CHECK sibling-row-visibility class of
+				// quereus issue (see method doc comment) — drain before the next insert
+				// enqueues its own deferred entry.
+				await this.ctx.db.runDeferredRowConstraints();
+
+				// Mint the ONE shared officer-side session, then insert every officer
+				// row ascending by UserId, draining after each.
+				await this.ctx.db.exec(
+					`insert into AdminSigning (
+						Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature
+					)
+						with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+					values (
+						:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature
+					)`,
+					{
+						nonce: officerNonce,
+						authorityId: this.authority.id,
+						adminEffectiveAt: currentAdminEffectiveAt,
+						digest: officerDigest,
+						userId: officerSignature.signerUserId,
+						signerKey: officerSignature.signerKey,
+						signature: officerSignature.signature,
+						now: nowCanon,
+					},
+				);
+				await this.signingEngine.sign(officerNonce, officerSignature, { ownsTransaction: false });
+
+				for (const officer of sortedOfficers) {
+					await this.ctx.db.exec(
+						`insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes)
+							with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
+						values (:authorityId, :effectiveAt, :userId, :title, :scopes)`,
+						{
+							nonce: officerNonce,
+							authorityId: this.authority.id,
+							effectiveAt: matched.effectiveAtCanon,
+							userId: officer.userId,
+							title: officer.title,
+							scopes: JSON.stringify(officer.scopes),
+						},
+					);
+					await this.ctx.db.runDeferredRowConstraints();
+				}
+
+				if (ownsTransaction) await this.ctx.db.exec('COMMIT');
+			} catch (innerErr) {
+				if (ownsTransaction) await this.ctx.db.exec('ROLLBACK');
+				throw innerErr;
+			}
+
+			return {
+				authorityId: this.authority.id,
+				effectiveAt: fromCanonicalDatetime(matched.effectiveAtCanon),
+				officersPromoted: sortedOfficers.length,
+				alreadyApplied: false,
+			};
+		} catch (err) {
+			if (err instanceof AdminPromotionError) {
+				throw err;
+			} else if (err instanceof QuereusError) {
+				throw new Error(`Quereus error (code ${err.code}): ${err.message}`);
+			} else if (err instanceof MisuseError) {
+				throw new Error(`API misuse: ${err.message}`);
+			} else if (err instanceof Error) {
+				throw err;
 			} else {
 				throw new Error(`Unknown error: ${err}`);
 			}

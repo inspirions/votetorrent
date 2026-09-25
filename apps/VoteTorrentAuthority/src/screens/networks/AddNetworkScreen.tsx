@@ -1,14 +1,14 @@
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { ScrollView, StyleSheet, TouchableOpacity, View, Image } from "react-native";
+import { ScrollView, StyleSheet, TouchableOpacity, View, Image, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 import { ThemedText } from "../../components/ThemedText";
-import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { globalStyles } from "../../theme/styles";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { useApp } from "../../providers/AppProvider";
@@ -17,12 +17,24 @@ import type { IDefaultUserEngine, INetworksEngine, NetworkInit, NetworkReference
 import { ElectionType } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
 import { InlineError } from "../../components/InlineError";
+import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
+import {
+	RECONCILE_TIMEOUT_MS,
+	createStepTimeoutError,
+	timedOutStep,
+	findLandedNetwork,
+} from "./networkCreateOutcome";
+import { normalizeRelayAddresses, findInvalidRelayAddress } from "../../utils/relayAddressValidation";
 
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 	const { getEngine, networksEngine, selectNetwork } = useApp();
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
+	const promptRecoveryKeyRegistrationIfNeeded = useRecoveryKeyRegistrationGate();
 	const [networkName, setNetworkName] = useState("");
 	const [networkImageUrl, setNetworkImageUrl] = useState("");
 	const [authorityName, setAuthorityName] = useState("");
@@ -31,7 +43,6 @@ export default function AddNetworkScreen() {
 	const [adminName, setAdminName] = useState("");
 	const [adminTitle, setAdminTitle] = useState("");
 	const [isSigned, setIsSigned] = useState(false);
-	const [showAdvanced, setShowAdvanced] = useState(false);
 	const [relayAddresses, setRelayAddresses] = useState([""]);
 	// Election Characteristics (Figma "New Network" frame) — keyholder usage and
 	// single-vs-multiple authority.
@@ -46,21 +57,81 @@ export default function AddNetworkScreen() {
 	// from a hang.
 	const [creating, setCreating] = useState(false);
 	const scrollViewRef = useRef<ScrollView>(null);
+	// When the inline error appears it grows the footer, which shrinks the scroll
+	// viewport. Android keeps the old scroll offset, so if the user was at the bottom
+	// the last controls (e.g. ADD RELAY) slide out of view behind the error. Track
+	// whether we're pinned to the bottom and re-pin when the viewport shrinks.
+	const nearBottomRef = useRef(false);
+	const viewportHeightRef = useRef(0);
 
-	const toggleAdvanced = () => {
-		if (!showAdvanced) {
-			setTimeout(() => {
-				scrollViewRef.current?.scrollToEnd({ animated: true });
-			}, 100);
-		}
-		setShowAdvanced(!showAdvanced);
+	const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+		const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+		nearBottomRef.current = layoutMeasurement.height + contentOffset.y >= contentSize.height - 24;
 	};
+
+	const handleScrollLayout = (e: LayoutChangeEvent) => {
+		const height = e.nativeEvent.layout.height;
+		if (height < viewportHeightRef.current && nearBottomRef.current) {
+			scrollViewRef.current?.scrollToEnd({ animated: false });
+		}
+		viewportHeightRef.current = height;
+	};
+
+	// Drop an error once the user has acted on it, so a fixed problem doesn't keep
+	// reporting itself until the next CREATE press.
+	const clearErrorIf = (...keys: string[]) => {
+		if (keys.some((key) => errorMessage === t(key))) setErrorMessage("");
+	};
+
+	// Relays used to hide under a collapsed "Advanced" toggle even though CREATE requires one;
+	// the section is now always shown. Its y-offset lets a relay error scroll it into view.
+	const relaysYRef = useRef(0);
+	const scrollToRelays = () =>
+		setTimeout(() => scrollViewRef.current?.scrollTo({ y: relaysYRef.current, animated: true }), 100);
+
+	// Everything CREATE needs before it may start the device-key ceremony, reported together
+	// rather than one error per press. Keys index the `missing*` copy.
+	const missingRequirements = (): string[] => {
+		const missing: string[] = [];
+		if (!networkName.trim()) missing.push("missingNetworkName");
+		if (!authorityName.trim()) missing.push("missingAuthorityName");
+		if (!adminName.trim()) missing.push("missingYourName");
+		if (!adminTitle.trim()) missing.push("missingYourTitle");
+		if (normalizeRelayAddresses(relayAddresses).length === 0) missing.push("missingRelay");
+		// CR-01: the "Sign" affordance gates creation of a signed permanent record.
+		if (!isSigned) missing.push("missingSignature");
+		return missing;
+	};
+	const missingMessage = (missing: string[]): string => {
+		// Single-cause cases keep their established, more specific copy.
+		if (missing.length === 1 && missing[0] === "missingSignature") return t("mustSignBeforeCreating");
+		if (missing.length === 1 && missing[0] === "missingRelay") return t("errRelayRequired");
+		return t("createMissingFields", { fields: missing.map((key) => t(key)).join(", ") });
+	};
+	const readyToCreate = missingRequirements().length === 0;
+
+	// While a "missing fields" error is showing, keep it in step with the form: shrink it as
+	// fields are filled and clear it once nothing is missing.
+	const [showingMissing, setShowingMissing] = useState(false);
+	useEffect(() => {
+		if (!showingMissing) return;
+		const missing = missingRequirements();
+		if (missing.length === 0) {
+			setErrorMessage("");
+			setShowingMissing(false);
+		} else {
+			setErrorMessage(missingMessage(missing));
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [showingMissing, networkName, authorityName, adminName, adminTitle, isSigned, relayAddresses]);
 
 	const addRelayField = () => {
 		setRelayAddresses([...relayAddresses, ""]);
+		clearErrorIf("errRelayRequired", "errRelayInvalid");
 	};
 
 	const updateRelayAddress = (index: number, value: string) => {
+		clearErrorIf("errRelayRequired", "errRelayInvalid");
 		const newAddresses = [...relayAddresses];
 		newAddresses[index] = value;
 		setRelayAddresses(newAddresses);
@@ -83,25 +154,63 @@ export default function AddNetworkScreen() {
 	// inline error instead of an infinite silent spinner. The underlying promise can't be
 	// cancelled, but the UI recovers and the user can retry.
 	const CREATE_TIMEOUT_MS = 45000;
-	const withTimeout = <T,>(p: Promise<T>, label: string): Promise<T> => {
-		return Promise.race([
-			p,
-			new Promise<T>((_resolve, reject) =>
-				setTimeout(
-					() => reject(new Error(t("networkCreateTimeout", { step: label }))),
-					CREATE_TIMEOUT_MS,
-				),
-			),
-		]);
+	const withTimeout = async <T,>(p: Promise<T>, label: string, ms: number = CREATE_TIMEOUT_MS): Promise<T> => {
+		// Clear the losing timer once the race settles. Without this, every call leaves a
+		// live handle (and its closure) alive for the full `ms` -- and handleCreate races
+		// four steps per create. Mirrors resolveNodeDispatch in AppProvider.tsx.
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				p,
+				new Promise<T>((_resolve, reject) => {
+					timer = setTimeout(
+						() => reject(createStepTimeoutError(label, t("networkCreateTimeout", { step: label }))),
+						ms,
+					);
+				}),
+			]);
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
+	};
+
+	// D-01/D-02 (58-04): when `builder.commit()` misses its deadline, `commit()` is still running
+	// and may still land -- `withTimeout`'s underlying promise "can't be cancelled" (see the
+	// comment above). Reconciling against `getRecentNetworks()` (a bare `localStorage.getItem`,
+	// never `open()` -- see `networkCreateOutcome.ts`'s header comment for why) is the only way to
+	// tell a genuine failure apart from a slow success before reporting anything to the officer.
+	// Own deadline (RECONCILE_TIMEOUT_MS), deliberately shorter than CREATE_TIMEOUT_MS: this runs
+	// after the officer has already waited one full commit budget.
+	const reconcileLandedNetwork = async (
+		eng: INetworksEngine,
+		before: NetworkReference[] | undefined,
+	): Promise<NetworkReference | undefined> => {
+		if (before === undefined) return undefined;
+		console.info("[network-create] reconcile() start");
+		try {
+			const after = await withTimeout(eng.getRecentNetworks(), "reconcile", RECONCILE_TIMEOUT_MS);
+			const landed = findLandedNetwork(before, after, {
+				name: networkName,
+				primaryAuthorityDomainName: domainName,
+			});
+			console.info("[network-create] reconcile() outcome", { landed: Boolean(landed) });
+			return landed;
+		} catch {
+			console.info("[network-create] reconcile() outcome", { landed: false, timedOut: true });
+			return undefined;
+		}
 	};
 
 	const handleCreate = async () => {
 		// 16-08 item 4: clear any prior error so a retry starts clean.
 		setErrorMessage("");
-		// CR-01: the "Sign" affordance gates creation of a signed permanent record.
-		// Do not create the network unless the administrator has signed.
-		if (!isSigned) {
-			setErrorMessage(t("mustSignBeforeCreating"));
+		setShowingMissing(false);
+		// Report every missing requirement at once, before any engine or biometric work.
+		const missing = missingRequirements();
+		if (missing.length > 0) {
+			setErrorMessage(missingMessage(missing));
+			setShowingMissing(true);
+			if (missing.length === 1 && missing[0] === "missingRelay") scrollToRelays();
 			return;
 		}
 		setCreating(true);
@@ -114,6 +223,20 @@ export default function AddNetworkScreen() {
 			}
 			const networksEng = networksEngine as INetworksEngine;
 
+			// R4 (D-11): validate relay addresses BEFORE device identity is resolved, so a
+			// malformed paste can never trigger a biometric/device-key ceremony. Mirrors
+			// NetworksScreen.tsx:36's "parsed/validated BEFORE any use" rule (T-22-09 DoS
+			// mitigation, Security V5) on the JOIN path, extended here to CREATE. The validated
+			// address is still NOT threaded into the rn-db-factory bootstrap-dial call — see
+			// relayAddressValidation.ts's header comment for why that boundary stays closed.
+			const relays = normalizeRelayAddresses(relayAddresses);
+			const invalidRelay = findInvalidRelayAddress(relays);
+			if (invalidRelay !== undefined) {
+				setErrorMessage(t("errRelayInvalid"));
+				scrollToRelays();
+				return;
+			}
+
 			// Resolve device identity (D-02 / generate-on-first-run).
 			const defaultUserEng = await getEngine<IDefaultUserEngine>("defaultUser");
 			const defaultUser = await defaultUserEng.get();
@@ -124,7 +247,10 @@ export default function AddNetworkScreen() {
 			const networkInit: NetworkInit = {
 				name: networkName,
 				imageUrl: networkImageUrl || undefined,
-				relays: relayAddresses.filter(Boolean),
+				// R4 (D-11, T-58-06-02): the SAME array that was just validated above — never
+				// re-derive a second array from relayAddresses here, which would validate one
+				// value and persist another.
+				relays,
 				primaryAuthority: {
 					name: authorityName,
 					domainName: domainName,
@@ -135,7 +261,7 @@ export default function AddNetworkScreen() {
 							init: {
 								name: adminName,
 								title: adminTitle,
-								scopes: ["rn", "rad", "iad", "uai", "mel", "ceb"],
+								scopes: [...FOUNDING_OFFICER_SCOPES],
 							},
 						},
 					],
@@ -162,29 +288,61 @@ export default function AddNetworkScreen() {
 				const relayMissing = builder.errors().some((e) => e.path === "networkInit.relays");
 				setErrorMessage(
 					// network-create-release-hang: replace the raw "networkInit.relays must not be
-					// empty" engine string with discoverable guidance (the relay field lives under
-					// Advanced → ADD RELAY). Other validation errors fall through unchanged.
+					// empty" engine string with discoverable guidance pointing at the Relays
+					// section. Other validation errors fall through unchanged.
 					relayMissing
 						? t("errRelayRequired")
 						: builder.errors().map((e) => e.message).join("\n") || t("validationFailed"),
 				);
-				if (relayMissing) setShowAdvanced(true);
+				if (relayMissing) scrollToRelays();
 				return;
 			}
+			// D-01 (58-04): snapshot the recents list BEFORE commit() so a missed deadline can be
+			// reconciled against it afterward. A failed snapshot must NOT degrade to an empty
+			// array -- with before=[] every pre-existing network would look "new" and reconciliation
+			// could select an unrelated one -- so on failure it stays `undefined`, which forces the
+			// "could not confirm" outcome further down.
+			let recentsSnapshot: NetworkReference[] | undefined;
+			try {
+				recentsSnapshot = await withTimeout(
+					networksEng.getRecentNetworks(),
+					"snapshot",
+					RECONCILE_TIMEOUT_MS,
+				);
+			} catch (snapshotErr) {
+				console.info("[network-create] snapshot() failed", snapshotErr);
+				recentsSnapshot = undefined;
+			}
+
 			// network-create-release-hang: instrument each create step so on-device logcat
 			// pinpoints where a real-device hang occurs (console.info is allowed by the VER-01
 			// stub guard). Race against a timeout so an indefinite stall surfaces an error.
 			console.info("[network-create] commit() start", { network: networkName });
-			const networkEngine = await withTimeout(builder.commit(), "commit");
-			console.info("[network-create] commit() done");
-
-			// Pitfall 4: re-establish currentNetworkHash in the factory by calling
-			// getEngine("network", ref) with the full NetworkReference that the concrete
-			// NetworkEngine exposes via its `init` property. INetworkEngine does not
-			// declare `init` in the interface, so we access it via a cast.
-			// This allows sibling engines (elections, signing, etc.) to resolve the
-			// established ctx immediately after create without a separate open().
-			const networkRef = (networkEngine as unknown as { init: NetworkReference }).init;
+			let networkRef: NetworkReference;
+			try {
+				const networkEngine = await withTimeout(builder.commit(), "commit");
+				console.info("[network-create] commit() done");
+				// Pitfall 4: re-establish currentNetworkHash in the factory by calling
+				// getEngine("network", ref) with the full NetworkReference that the concrete
+				// NetworkEngine exposes via its `init` property. INetworkEngine does not
+				// declare `init` in the interface, so we access it via a cast.
+				// This allows sibling engines (elections, signing, etc.) to resolve the
+				// established ctx immediately after create without a separate open().
+				networkRef = (networkEngine as unknown as { init: NetworkReference }).init;
+			} catch (commitErr) {
+				if (timedOutStep(commitErr) !== "commit") throw commitErr;
+				// D-02: the commit deadline was missed. Reconcile before reporting anything -- a
+				// timely commit and a reconciled-landed commit must produce the identical tail
+				// (selectNetwork -> the recovery-key gate -> goBack), never a duplicated copy of it.
+				const landed = await reconcileLandedNetwork(networksEng, recentsSnapshot);
+				if (!landed) {
+					// D-03: never claim failure, never blame the connection -- only that the
+					// outcome could not be confirmed.
+					setErrorMessage(t("networkCreateUnconfirmed"));
+					return;
+				}
+				networkRef = landed;
+			}
 			// Auto-select the just-created network: bind it AND flip hasNetwork so the
 			// app lands on the populated network home instead of "No network selected".
 			// (selectNetwork re-establishes currentNetworkHash like the old getEngine call,
@@ -192,9 +350,45 @@ export default function AddNetworkScreen() {
 			console.info("[network-create] selectNetwork() start");
 			await withTimeout(selectNetwork(networkRef), "select");
 			console.info("[network-create] selectNetwork() done");
+
+			// 49-19 (recovery-key-registration gap): networks-engine.create() registers ONLY the
+			// founding signing key -- its bootstrap branch writes user.activeKeys[0] and has no
+			// analog for a second key -- so the officer's recovery key is still unregistered the
+			// moment this network comes up. Registration lives in ProvisionSigningKeyScreen's
+			// stage 2, which needs a resolvable network User and therefore CANNOT run before this
+			// point; until now nothing brought the officer back to it, leaving them one biometric
+			// enrolment away from a stranded device (addKey needs a valid signing key, and only
+			// the recovery key can replace an invalidated one -- a closed loop whose only recorded
+			// escape was a destructive `pm clear`). Measured unregistered on BOTH fleet devices.
+			//
+			// The ceremony is idempotent and reconciling (it registers only what is missing), so
+			// routing into it here is safe; the gate keeps us from showing it when there is
+			// nothing to do. Deliberately AFTER selectNetwork: the network is fully established
+			// and stays selected, so declining leaves a usable network rather than a dead end.
+			//
+			// The `return` is load-bearing, and is why this mirrors NetworkDetailsScreen's join
+			// path rather than calling the gate for its side effect: the `navigation.goBack()`
+			// at the end of this function is UNCONDITIONAL, so without it the ceremony screen the
+			// gate just pushed is popped straight back off and the officer lands on Add Network
+			// again -- the gate's whole point undone one statement later. Measured on real
+			// hardware (Pixel 7 Pro, 2026-08-24): the gate logged `needed: true` and navigated,
+			// and the device still sat on Add Network. `finally` still runs on this path, so the
+			// in-flight flag is cleared exactly as it is on every other exit.
+			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
 		} catch (err) {
 			console.error("handleCreate error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory
+			// (device-signer.ts's exported creator) and is therefore outside the 20-file rollout
+			// inventory — but getOrCreateDeviceUser above is the exact second-half-of-the-
+			// onboarding-cycle site that produced the dead end 49-13 reproduced four times on
+			// device. Route its NO_KEY_PROVISIONED rejection through the same shared hook every
+			// migrated call site uses, rather than re-deriving the mapping here, so the officer
+			// lands on the provisioning screen instead of a raw error string. Any other failure
+			// (validation, commit, network) is "not mine" to the hook and falls through to this
+			// screen's own raw-message handling unchanged.
+			const outcome = handleDeviceSigningError(err);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
 			return;
 		} finally {
 			// Always clear the in-flight flag so the button re-enables on error/timeout
@@ -205,10 +399,16 @@ export default function AddNetworkScreen() {
 	};
 
 	return (
-		<View style={styles.content}>
-			<ScrollView ref={scrollViewRef} style={styles.container}>
-				<ThemedText type="defaultSemiBold" style={styles.sectionTitle}>
-					{t("createNewNetwork")}
+		<KeyboardAvoidingScreen>
+			<ScrollView
+				ref={scrollViewRef}
+				style={styles.container}
+				onScroll={handleScroll}
+				scrollEventThrottle={64}
+				onLayout={handleScrollLayout}
+			>
+				<ThemedText type="title" style={styles.sectionTitle}>
+					{t("network")}
 				</ThemedText>
 
 				<View style={styles.section}>
@@ -231,7 +431,7 @@ export default function AddNetworkScreen() {
 				</View>
 
 				<View style={styles.section}>
-					<ThemedText type="defaultSemiBold" style={styles.sectionTitle}>
+					<ThemedText type="title" style={styles.sectionTitle}>
 						{t("electionCharacteristics")}
 					</ThemedText>
 					<View style={styles.characteristicsGrid}>
@@ -266,9 +466,15 @@ export default function AddNetworkScreen() {
 						</View>
 						<View style={[styles.radioOption, { opacity: 0.4 }]}>
 							<View style={[styles.radioOuter, { borderColor: colors.textSecondary }]} />
-							<ThemedText style={styles.radioLabel}>{t("multipleAuthorityNotYetSupported")}</ThemedText>
+							<ThemedText style={styles.radioLabel}>{t("multiple")}</ThemedText>
 						</View>
 					</View>
+					{/* The "not yet supported" note sits under the grid rather than in the
+					    radio label, where it wrapped to two lines and knocked the rows out
+					    of line with the keyholder row above. */}
+					<ThemedText type="small" style={[styles.unsupportedNote, { color: colors.textSecondary }]}>
+						{t("multipleAuthorityNotYetSupportedNote")}
+					</ThemedText>
 				</View>
 
 				<View style={styles.section}>
@@ -302,6 +508,40 @@ export default function AddNetworkScreen() {
 					/>
 				</View>
 
+				<View
+					style={styles.section}
+					onLayout={(e) => {
+						relaysYRef.current = e.nativeEvent.layout.y;
+					}}
+				>
+					<View style={[styles.buttonHeader, styles.relaysHeader]}>
+						<ThemedText type="title">{t("relays")}</ThemedText>
+						<ChipButton
+							label={t("import")}
+							icon="circle-plus"
+							disabled={true}
+							onPress={undefined}
+						/>
+					</View>
+					<ThemedText type="small" style={[styles.relaysHint, { color: colors.textSecondary }]}>
+						{t("relaysRequiredHint")}
+					</ThemedText>
+					{relayAddresses.map((address, index) => (
+						<CustomTextInput
+							key={index}
+							placeholder={t("multiaddress")}
+							value={address}
+							onChangeText={(value) => updateRelayAddress(index, value)}
+							icon={relayAddresses.length > 1 ? "circle-xmark" : undefined}
+							onIconPress={() => removeRelayField(index)}
+						/>
+					))}
+					<View style={styles.buttonHeader}>
+						<View />
+						<ChipButton label={t("addRelay")} icon="circle-plus" onPress={addRelayField} />
+					</View>
+				</View>
+
 				<View style={styles.section}>
 					<ThemedText type="title" style={styles.sectionTitle}>
 						{t("initialAdministrator")}
@@ -323,64 +563,31 @@ export default function AddNetworkScreen() {
 						icon={isSigned ? "square-check" : "square"}
 						backgroundColor={colors.important}
 						forceDarkText={true}
-						onPress={() => setIsSigned(!isSigned)}
+						onPress={() => {
+							setIsSigned(!isSigned);
+							clearErrorIf("mustSignBeforeCreating");
+						}}
 					/>
 				</View>
 
-				<TouchableOpacity
-					style={styles.advancedHeader}
-					onPress={() => {
-						toggleAdvanced();
-					}}
-				>
-					<FontAwesome6
-						name={showAdvanced ? "chevron-down" : "chevron-right"}
-						size={14}
-						color={colors.text}
-					/>
-					<ThemedText type="default">{t("advanced")}</ThemedText>
-				</TouchableOpacity>
-				{showAdvanced ? (
-					<View style={styles.section}>
-						<View style={[styles.buttonHeader, styles.sectionTitle]}>
-							<ThemedText type="title">{t("relays")}</ThemedText>
-							<ChipButton
-								label={t("import")}
-								icon="circle-plus"
-								disabled={true}
-								onPress={undefined}
-							/>
-						</View>
-						{relayAddresses.map((address, index) => (
-							<CustomTextInput
-								key={index}
-								placeholder={t("multiaddress")}
-								value={address}
-								onChangeText={(value) => updateRelayAddress(index, value)}
-								icon={relayAddresses.length > 1 ? "circle-xmark" : undefined}
-								onIconPress={() => removeRelayField(index)}
-							/>
-						))}
-						<View style={styles.buttonHeader}>
-							<View />
-							<ChipButton label={t("addRelay")} icon="circle-plus" onPress={addRelayField} />
-						</View>
-					</View>
-				) : null}
 			</ScrollView>
 
-			<InlineError message={errorMessage} />
 			<Footer>
+				{/* Inside the Footer so it picks up the footer's horizontal padding
+				    instead of running flush against the screen edge. */}
+				<InlineError message={errorMessage} />
 				<CustomButton
 					title={creating ? t("creating") : t("create")}
 					icon={creating ? "spinner" : "floppy-disk"}
-					backgroundColor={colors.success}
+					// Neutral grey until every requirement is met, green once CREATE can succeed. Still
+					// pressable while grey, so a press explains what's missing.
+					backgroundColor={readyToCreate ? colors.success : colors.accent}
 					forceDarkText={true}
 					disabled={creating}
 					onPress={handleCreate}
 				/>
 			</Footer>
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 
@@ -436,6 +643,9 @@ const localStyles = StyleSheet.create({
 	radioLabel: {
 		flex: 1,
 	},
+	unsupportedNote: {
+		marginTop: 8,
+	},
 	signButton: {
 		flexDirection: "row",
 		alignItems: "center",
@@ -449,11 +659,11 @@ const localStyles = StyleSheet.create({
 		fontSize: 16,
 		fontWeight: "600",
 	},
-	advancedHeader: {
-		flexDirection: "row",
-		alignItems: "center",
-		gap: 16,
-		marginBottom: 16,
+	relaysHeader: {
+		marginBottom: 8,
+	},
+	relaysHint: {
+		marginBottom: 8,
 	},
 	relayFieldContainer: {
 		flexDirection: "row",

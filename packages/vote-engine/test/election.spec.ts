@@ -85,6 +85,9 @@ function makeElectionRevisionInit (overrides?: Partial<ElectionRevisionInit>): E
       [ElectionEvent.registrationEnds]: now + 25 * 86_400_000,
       [ElectionEvent.ballotsFinal]: now + 14 * 86_400_000,
       [ElectionEvent.votingStarts]: now + 28 * 86_400_000,
+      [ElectionEvent.accruingVotes]: now + 28 * 86_400_000 + 6 * 3_600_000,
+      [ElectionEvent.hashingVotes]: now + 28 * 86_400_000 + 12 * 3_600_000,
+      [ElectionEvent.releasingKeys]: now + 28 * 86_400_000 + 18 * 3_600_000,
       [ElectionEvent.tallyingStarts]: now + 30 * 86_400_000,
       [ElectionEvent.validation]: now + 31 * 86_400_000,
       [ElectionEvent.certificationStarts]: now + 32 * 86_400_000,
@@ -359,6 +362,9 @@ describe('ElectionProposeRevisionBuilder', () => {
         [ElectionEvent.registrationEnds]: now + 1,
         [ElectionEvent.ballotsFinal]: now + 2,
         [ElectionEvent.votingStarts]: now + 30,
+        [ElectionEvent.accruingVotes]: now + 31,
+        [ElectionEvent.hashingVotes]: now + 32,
+        [ElectionEvent.releasingKeys]: now + 33,
         [ElectionEvent.tallyingStarts]: now + 10, // BEFORE votingStarts end — wrong
         [ElectionEvent.validation]: now + 31,
         [ElectionEvent.certificationStarts]: now + 32,
@@ -368,6 +374,27 @@ describe('ElectionProposeRevisionBuilder', () => {
     const b = new ElectionProposeRevisionBuilder(stubEngine).fromPayload(rev)
     const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER')
     expect(errs.length).to.be.greaterThan(0)
+  })
+
+  // CR-02 regression: the test above only exercises the pre-59 `tallyingStarts <
+  // certificationStarts` gap. It never moved `validation` or `closed` out of order, so it
+  // could not have caught the D-09 STRICT_CHAIN's `tallyingStarts < validation <
+  // certificationStarts < closed` tail going unchecked -- the exact gap this phase's own
+  // ordering-guard extension left open at every one of the five sites the review flagged.
+  it('cross-field: validation set before tallyingStarts surfaces TIMELINE_ORDER, path-specific (CR-02 regression)', () => {
+    const rev = makeElectionRevisionInit()
+    rev.timeline[ElectionEvent.validation] = rev.timeline[ElectionEvent.tallyingStarts] - 1
+    const b = new ElectionProposeRevisionBuilder(stubEngine).fromPayload(rev)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'timeline.validation')
+    expect(errs.length).to.equal(1)
+  })
+
+  it('cross-field: closed set before certificationStarts surfaces TIMELINE_ORDER, path-specific (CR-02 regression)', () => {
+    const rev = makeElectionRevisionInit()
+    rev.timeline[ElectionEvent.closed] = rev.timeline[ElectionEvent.certificationStarts] - 1
+    const b = new ElectionProposeRevisionBuilder(stubEngine).fromPayload(rev)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'timeline.closed')
+    expect(errs.length).to.equal(1)
   })
 })
 

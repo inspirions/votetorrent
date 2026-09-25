@@ -129,6 +129,35 @@ describe('ElectionCard (HOME-01/02/03)', () => {
 		}
 	});
 
+	it('Home inherits the shared >=24h countdown contract — a 31h30m target renders 1 DAYS : 07 HOURS and no seconds group (D-16/D-17)', () => {
+		// Inline fixture (not electionFor/FUTURE_ISO — both feed the existing 7-state test and
+		// must stay on the <24h branch). Mirrors mockData.ts:83's nowPlus(31 * HOUR_MS) plus 30
+		// minutes of slack so the remainder lands cleanly inside the HOURS group.
+		const election: MockElection = {
+			id: 'mock-election-1',
+			title: 'General Election 2025',
+			lifecycleState: 'Upcoming',
+			countdownTarget: new Date(Date.now() + 31 * 3600_000 + 30 * 60_000).toISOString(),
+		};
+		const tr = renderCard(election);
+
+		expect(tr.root.findByProps({testID: 'countdown-days-value'}).props.children).toBe('1');
+		expect(tr.root.findByProps({testID: 'countdown-hours-value'}).props.children).toBe('07');
+		expect(tr.root.findAllByProps({testID: 'countdown-seconds-value'}).length).toBe(0);
+
+		// Content-level cross-check. Verified safe: states.upcoming.summary's copy ("Voting
+		// hasn't opened yet — check back when the polls open.") contains neither word.
+		const text = tr.root.findAll(node => typeof node.props.children === 'string')
+			.map(node => node.props.children)
+			.join(' ');
+		expect(text).toContain('days');
+		expect(text).not.toContain('seconds');
+
+		// Deliberately no minutes-group assertion here: this file runs REAL timers by design
+		// (see the activeRenderers/afterEach comment above), and minutes is the only group that
+		// can drift within a single test tick — asserting it would introduce a flake.
+	});
+
 	it('pressing the Open "Vote now" element invokes onVoteNow exactly once', () => {
 		const onVoteNow = jest.fn();
 		const tr = renderCard(electionFor('Open'), {onVoteNow});
@@ -212,5 +241,42 @@ describe('ElectionCard (HOME-01/02/03)', () => {
 			// The ValidationDetails action is untouched by hasVoted.
 			expect(tr.root.findAllByProps({testID: 'election-card-view-validation-details'}, {deep: false}).length).toBe(1);
 		});
+	});
+
+	/**
+	 * D-11 is a DELIBERATE DIVERGENCE requirement: `TimelineRow`'s countdown wrapper centres, and
+	 * Home's stays left-aligned, and "the two must not be reconciled" (`ElectionCard.tsx`'s own
+	 * marker comment). Only the centring half was ever asserted
+	 * (`TimelineRow.test.tsx`'s `61-06 D-10/D-11` test). Nothing guarded this half: a later edit
+	 * adding `alignItems: 'center'` here to "make the two match" would erase the divergence the
+	 * requirement exists to encode, and the whole voter suite would stay green.
+	 *
+	 * The wrapper carries no testID, so it is located by IDENTITY — the parent of the
+	 * `CountdownTimer` this card renders — never by scanning ancestors for a magic style value.
+	 * (That search shape is what IN-04 caught in the sibling suite: when the magic number moved,
+	 * the search silently found nothing and the assertion passed on an empty result.) The
+	 * marginTop check below is a FOUND-THE-RIGHT-NODE confirmation, not the search key.
+	 */
+	describe('D-11 deliberate divergence — Home\'s countdown stays LEFT-aligned', () => {
+		it.each(['Upcoming', 'ReleasingKeys', 'Validation'] as const)(
+			'%s: the View hosting the countdown declares no centring alignItems, unlike TimelineRow\'s wrapper',
+			state => {
+				const tr = renderCard(electionFor(state));
+
+				const wrapper = tr.root.findByType(CountdownTimer).parent;
+				expect(wrapper).not.toBeNull();
+
+				const flat: Record<string, unknown> = Object.assign(
+					{},
+					...(Array.isArray(wrapper!.props.style) ? wrapper!.props.style : [wrapper!.props.style]),
+				);
+
+				// Confirms this really is the styled countdown wrapper and not some incidental
+				// ancestor -- without it, a refactor that dropped the wrapper would leave the
+				// alignment assertion asserting nothing.
+				expect(flat.marginTop).toBe(16);
+				expect(flat.alignItems).toBeUndefined();
+			},
+		);
 	});
 });

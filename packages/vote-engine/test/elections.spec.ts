@@ -26,6 +26,7 @@ import { digestToBytes } from '../src/utils.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { AsyncStorage } from './shims/react-native'
 import type {
+  AdminSignatureTask,
   Ballot,
   ElectionInit,
   ElectionRevisionInit,
@@ -125,6 +126,9 @@ function makeElectionInit (overrides?: Partial<ElectionInit['election']>): Elect
         [ElectionEvent.registrationEnds]: now + 25 * 86_400_000,
         [ElectionEvent.ballotsFinal]: now + 14 * 86_400_000,
         [ElectionEvent.votingStarts]: now + 28 * 86_400_000,
+        [ElectionEvent.accruingVotes]: now + 28 * 86_400_000 + 6 * 3_600_000,
+        [ElectionEvent.hashingVotes]: now + 28 * 86_400_000 + 12 * 3_600_000,
+        [ElectionEvent.releasingKeys]: now + 28 * 86_400_000 + 18 * 3_600_000,
         [ElectionEvent.tallyingStarts]: now + 30 * 86_400_000,
         [ElectionEvent.validation]: now + 31 * 86_400_000,
         [ElectionEvent.certificationStarts]: now + 32 * 86_400_000,
@@ -898,11 +902,19 @@ describe('SignatureTasksEngine', () => {
         throw err
       }
       const engine = new SignatureTasksEngine(makeNetworkRef(), auth.ctx)
-      const task: SignatureTask = {
+      // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
+      // branch (to construct a promoting AuthorityEngine); `administration` is
+      // required by the AdminSignatureTask type but never read at runtime here.
+      const task: AdminSignatureTask = {
         type: 'signature',
         userId,
         network: makeNetworkRef(),
-        signatureType: 'admin'
+        signatureType: 'admin',
+        authority: auth.authority,
+        administration: {
+          proposed: { officers: [], effectiveAt: adminEffectiveAt, thresholdPolicies: [] },
+          signers: [userId]
+        }
       }
       // 999.1 R-02: completeSignature drives a REAL OfficerSignature insert — the schema's
       // SignatureValid UDF verifies it against AdminSigning's actual Digest, so this must be
@@ -919,7 +931,19 @@ describe('SignatureTasksEngine', () => {
           signature: realSig,
           signerKey: publicHex,
           signerUserId: userId
-        }
+        },
+        // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable
+        // per-digest callback (the promotion mints two or three distinct
+        // digests). This synthetic fixture's AdminSigning row does not use
+        // the real roster-covering digest formula 57-01/57-07 introduced, so
+        // any promotion attempt legitimately refuses (roster-mismatch) —
+        // recorded and warned by completeSignature's Trigger B branch, never
+        // thrown — and this callback is never actually invoked.
+        sign: async (digest: Uint8Array) => ({
+          signature: bytesToHex(secp256k1.sign(digest, hexToBytes(privateHex))),
+          signerKey: publicHex,
+          signerUserId: userId
+        })
       }
       await engine.completeSignature(task, result)
     })
@@ -1150,6 +1174,25 @@ describe('ElectionsCreateElectionBuilder', () => {
     expect(errs.length).to.equal(1)
     expect(errs[0].kind).to.equal('cross-field')
   })
+
+  // CR-02 regression: the D-09 STRICT_CHAIN's `tallyingStarts < validation <
+  // certificationStarts < closed` tail was silently unchecked here pre-fix -- an officer
+  // could sign an out-of-order, immutable `validation`/`closed` date with no warning.
+  it('cross-field: validation set before tallyingStarts surfaces TIMELINE_ORDER (CR-02 regression)', () => {
+    const init = makeElectionInit()
+    init.revision.timeline[ElectionEvent.validation] = init.revision.timeline[ElectionEvent.tallyingStarts] - 1
+    const b = new ElectionsCreateElectionBuilder(stubEngine).fromPayload(init)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'revision.timeline.validation')
+    expect(errs.length).to.equal(1)
+  })
+
+  it('cross-field: closed set before certificationStarts surfaces TIMELINE_ORDER (CR-02 regression)', () => {
+    const init = makeElectionInit()
+    init.revision.timeline[ElectionEvent.closed] = init.revision.timeline[ElectionEvent.certificationStarts] - 1
+    const b = new ElectionsCreateElectionBuilder(stubEngine).fromPayload(init)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'revision.timeline.closed')
+    expect(errs.length).to.equal(1)
+  })
 })
 
 // ===========================================================================
@@ -1269,5 +1312,25 @@ describe('ElectionsAdjustElectionBuilder', () => {
     const errs = b.errors().filter(e => e.code === 'THRESHOLD_EXCEEDS_KEYHOLDERS')
     expect(errs.length).to.equal(1)
     expect(errs[0].kind).to.equal('cross-field')
+  })
+
+  // CR-02 regression: same silently-unchecked `validation`/`closed` gap as
+  // ElectionsCreateElectionBuilder above -- this builder is one of the five sites the review
+  // flagged (adjustElection is the path CreateElectionScreen/EditElectionScreen both build
+  // through, per D-16).
+  it('cross-field: validation set before tallyingStarts surfaces TIMELINE_ORDER (CR-02 regression)', () => {
+    const init = makeElectionInit()
+    init.revision.timeline[ElectionEvent.validation] = init.revision.timeline[ElectionEvent.tallyingStarts] - 1
+    const b = new ElectionsAdjustElectionBuilder(stubEngine).fromPayload(init)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'revision.timeline.validation')
+    expect(errs.length).to.equal(1)
+  })
+
+  it('cross-field: closed set before certificationStarts surfaces TIMELINE_ORDER (CR-02 regression)', () => {
+    const init = makeElectionInit()
+    init.revision.timeline[ElectionEvent.closed] = init.revision.timeline[ElectionEvent.certificationStarts] - 1
+    const b = new ElectionsAdjustElectionBuilder(stubEngine).fromPayload(init)
+    const errs = b.errors().filter(e => e.code === 'TIMELINE_ORDER' && e.path === 'revision.timeline.closed')
+    expect(errs.length).to.equal(1)
   })
 })

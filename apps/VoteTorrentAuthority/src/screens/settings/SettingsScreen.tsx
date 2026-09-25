@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { View, StyleSheet, Switch, TouchableOpacity } from "react-native";
+import { View, ScrollView, StyleSheet, Switch, TouchableOpacity } from "react-native";
 import { useNavigation, useTheme, useFocusEffect } from "@react-navigation/native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import i18n from "../../i18n";
@@ -213,7 +213,11 @@ export default function SettingsScreen() {
 	return (
 		<View style={styles.content}>
 			<InlineError message={settingsError} />
-			<View style={[styles.container, { backgroundColor: colors.background }]}>
+			<ScrollView
+				testID="settings-scroll"
+				style={[styles.content, { backgroundColor: colors.background }]}
+				contentContainerStyle={styles.container}
+			>
 				<View style={[styles.helpIconsRow, { zIndex: 10 }]}>
 					<ThemedText type="default">{t('language')}</ThemedText>
 					<View style={styles.langSelector}>
@@ -221,6 +225,8 @@ export default function SettingsScreen() {
 							onPress={() => setShowLangModal(prev => !prev)}
 							style={[styles.langDropdownBtn, { backgroundColor: colors.accent }]}
 							accessibilityRole="button"
+							accessibilityLabel={`${t("language")}: ${LANGUAGES.find(l => l.code === currentLang)?.label ?? currentLang}`}
+							testID="settings-language-toggle"
 						>
 							<ThemedText type="defaultSemiBold">
 								{LANGUAGES.find(l => l.code === currentLang)?.label ?? currentLang}
@@ -305,9 +311,66 @@ export default function SettingsScreen() {
 					}}
 				/>
 
-				<ThemedText type="subtitle" style={styles.networkTitle}>
-					{currentNetwork}
-				</ThemedText>
+				{/* Phase 47 plan 47-21 (D-09) — device-level provisioning entry, placed
+				    above the {currentNetwork} boundary because Play Console key
+				    provisioning is a build/device concern, not per-network and not
+				    per-authority. Deliberately NO scope gate: 47-19's screen reads a
+				    build-state boolean, makes no engine call and holds no registrant
+				    data, so gating it would make it unreachable for exactly the
+				    operator who needs to diagnose a build. */}
+				<View testID="settings-attestation-provisioning-entry">
+					<InfoCard
+						title={t("attestationProvisioningScreenTitle")}
+						titleType="defaultSemiBold"
+						icon="chevron-right"
+						onPress={() => navigation.navigate("AttestationProvisioningStatus")}
+					/>
+				</View>
+
+				{/* Phase 49 plan 49-10 (D-14) — device-level signing-key provisioning entry, placed
+				    adjacent to the attestation-provisioning row above for the same reason: a
+				    device/build concern, not per-network and not per-authority. No scope gate for
+				    the same reason as that row — this is exactly the entry point an unprovisioned
+				    device needs before it can complete ANY signing action. */}
+				<View testID="settings-signing-key-provisioning-entry">
+					<InfoCard
+						title={t("settingsSigningKeyRow")}
+						titleType="defaultSemiBold"
+						icon="chevron-right"
+						onPress={() => navigation.navigate("ProvisionSigningKey", { reason: "first-run" })}
+					/>
+				</View>
+
+				{/* 50-07 (D-09) — the dashboard bearer sign-in code producer entry,
+				    placed adjacent to the two device-level provisioning rows above for
+				    the same reason: it exports only data the officer's own device
+				    already holds. Deliberately NOT scope-gated: gating it would hide
+				    the feature from exactly the officer who needs it.
+
+				    THAT REASONING COVERS SCOPE ONLY, AND THIS ROW IS NOT THE GATE.
+				    Navigating here must stay cheap; what is expensive is the export
+				    itself, which is why the destination screen — not this row — puts a
+				    blocking confirmation naming the whole database in front of
+				    `exportDashboardSnapshot()`. Whether the registrant-facing scopes
+				    should ALSO be required to mint a whole-database code is a separate,
+				    still-open decision; it is not settled by the sentence above. */}
+				<View testID="settings-dashboard-signin-code-entry">
+					<InfoCard
+						title={t("dashboardSignInCodeTitle")}
+						titleType="defaultSemiBold"
+						icon="chevron-right"
+						onPress={() => navigation.navigate("DashboardSignInCode")}
+					/>
+				</View>
+
+				{/* Per-network block: only shown once a network is selected. Without a
+				    network the empty subtitle left a blank gap, and "No user found for this
+				    network" repeated the "No default user found" line above. */}
+				{currentNetwork ? (
+					<ThemedText type="subtitle" style={styles.networkTitle}>
+						{currentNetwork}
+					</ThemedText>
+				) : null}
 
 				{currentUser ? (
 					<InfoCard
@@ -322,22 +385,22 @@ export default function SettingsScreen() {
 							});
 						}}
 					/>
-				) : (
+				) : currentNetwork ? (
 					<ThemedText type="default" style={styles.noUserText}>
 						{t("noUserFound")}
 					</ThemedText>
-				)}
+				) : null}
 
-				<CustomButton
-					title={t("screenScaffoldsDebugTitle")}
-					icon="wrench"
-					size="thin"
-					onPress={() => {
-						navigation.navigate("ScreenScaffoldsDebug");
-					}}
-				/>
 				{__DEV__ && (
 					<>
+						<CustomButton
+							title={t("screenScaffoldsDebugTitle")}
+							icon="wrench"
+							size="thin"
+							onPress={() => {
+								navigation.navigate("ScreenScaffoldsDebug");
+							}}
+						/>
 						<CustomButton
 							title={t("debugSeedTasksTitle")}
 							icon="vial"
@@ -351,7 +414,7 @@ export default function SettingsScreen() {
 						) : null}
 					</>
 				)}
-			</View>
+			</ScrollView>
 		</View>
 	);
 }
