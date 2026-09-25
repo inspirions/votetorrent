@@ -1,6 +1,7 @@
 package org.votetorrent.attestationnative
 
 import android.util.Base64
+import androidx.biometric.BiometricManager
 import androidx.fragment.app.FragmentActivity
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
@@ -92,9 +93,23 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 			// D-09 terminal, release-only (see class doc comment).
 			promise.reject("NO_STRONGBOX_OR_TEE", e)
 		} catch (e: Exception) {
-			promise.reject("PROVISION_FAILED", e)
+			// A BIOMETRIC_STRONG key cannot be generated with no biometric enrolled — Keystore
+			// throws a generic InvalidAlgorithmParameterException that would otherwise surface as
+			// PROVISION_FAILED ("Couldn't verify your biometrics"). Only AFTER keygen has failed,
+			// ask whether that is the reason, and if so report the actionable, already-mapped
+			// NO_BIOMETRICS_ENROLLED code. Success paths are untouched.
+			if (noBiometricEnrolled()) {
+				promise.reject("NO_BIOMETRICS_ENROLLED", e)
+			} else {
+				promise.reject("PROVISION_FAILED", e)
+			}
 		}
 	}
+
+	private fun noBiometricEnrolled(): Boolean =
+		BiometricManager.from(reactApplicationContext)
+			.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+			BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED
 
 	override fun provisionRecoveryKey(keyAlias: String, promise: Promise) {
 		try {
