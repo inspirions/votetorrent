@@ -174,8 +174,14 @@ const execAsync = promisify(exec);
 // @quereus/quereus declaration in packages/attestation-native. NOTE the @serfab family did
 // NOT move on this hop (cadre-core / quereus-plugin-sereus stay 1.2.0), so this is the first
 // bump where the two families are deliberately on different minors.
+//
+// @optimystic 1.3.0 -> 1.5.0 bump (2026-09-24): same single mismatch, re-keyed once more
+// (1.4.0 skipped). Re-verified: yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.5.0), the peer range is still ^4.19.4, and the
+// cause is still the missing @quereus/quereus declaration in packages/attestation-native.
+// The @serfab family again did NOT move (cadre-core / quereus-plugin-sereus stay 1.2.0).
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.3.0',
+  '@optimystic/quereus-plugin-crypto@npm:1.5.0',
 ]);
 
 // The ✘ marker (U+2718)
