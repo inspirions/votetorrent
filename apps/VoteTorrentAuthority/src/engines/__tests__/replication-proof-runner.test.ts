@@ -28,6 +28,18 @@ const mockConstructedNodes: FakeCadreNode[] = [];
 // Task-1 RED: asserts network.strandBootstrapNodes forwarding.
 const mockCapturedConfigs: Array<Record<string, unknown>> = [];
 
+// QUICK-260928-jwi: mock verifyCadrePeerVoucher, module-scope so both FakeCadreNode module
+// factories can reference it (jest hoisting requires the `mock` prefix).
+const mockVerifyCadrePeerVoucher = jest.fn((..._a: unknown[]) => true);
+
+type VoucherRow = {
+  peerId: string;
+  multiaddr: string | null;
+  stampId: string | null;
+  vouchOwner: string | null;
+  vouchSig: string | null;
+};
+
 interface FakeCadreNode {
   start: jest.Mock;
   stop: jest.Mock;
@@ -37,10 +49,15 @@ interface FakeCadreNode {
   getStrand: (id: string) => { libp2pNode?: { getConnections?: () => FakeConnection[] } } | undefined;
   _setConnections: (conns: FakeConnection[]) => void;
   _setStrandPeers: (n: number) => void;
-  // Section 4b write gate: the runner blocks until this peer appears in its OWN authorized-member
-  // list. Authorized by default so every existing test reaches the write; _setSelfAuthorized(false)
-  // exercises the timeout path.
+  // The real library excludes self unconditionally (check 1) — this is exactly what hid the
+  // section-4b defect, so the mock must too. Never returns the self peerId.
   listAuthorizedMembers: jest.Mock;
+  // Section 4b write gate: isSelfVouched() reads THIS peer's own CadrePeer row via
+  // getControlDatabase().queryCadrePeers(). queryCadrePeers is driven by _selfAuthorized:
+  // vouched (complete voucher) when true, unvouched (self-published, no voucher yet) when false.
+  queryCadrePeers: jest.Mock;
+  getControlDatabase: () => { queryCadrePeers: jest.Mock };
+  getTrustedOwnerStore: () => { has: (k: string) => boolean };
   _setSelfAuthorized: (authorized: boolean) => void;
 }
 
@@ -123,13 +140,43 @@ jest.mock(
       public dialInvite = jest.fn(async () => {});
       public decodeInvite = jest.fn((s: string) => ({ partyId: 'votetorrent', encoded: s }));
 
-      // Section 4b write gate (run 18): the runner will not write until this peer is in the
-      // OWNER-materialized authorized set — the same predicate cadre-core's
-      // authorizeInboundControlStream consults. Authorized by DEFAULT, or every test asserting on
-      // a post-write marker would sit through the gate's full 225 s budget in real time.
+      // Section 4b write gate (run 18): the runner will not write until this peer's own
+      // CadrePeer row carries a voucher from an owner anchored in the local trust store — the
+      // same predicate cadre-core's authorizeInboundControlStream consults. Vouched by DEFAULT,
+      // or every test asserting on a post-write marker would sit through the gate's full 90 s
+      // budget in real time.
+      //
+      // listAuthorizedMembers ALWAYS excludes self (check 1 — real cadre-core does this
+      // unconditionally, `row.peerId !== selfPeerId`), which is exactly what hid the
+      // QUICK-260928-jwi defect: the old gate looked up self in a list that can never contain it.
+      public listAuthorizedMembers = jest.fn(async () => []);
+
       private _selfAuthorized = true;
-      public listAuthorizedMembers = jest.fn(async () =>
-        this._selfAuthorized ? [{ peerId: 'fakePeerIdABC123', multiaddr: null }] : []);
+      public queryCadrePeers = jest.fn(async (): Promise<VoucherRow[]> => [
+        this._selfAuthorized
+          ? {
+              peerId: 'fakePeerIdABC123',
+              multiaddr: null,
+              stampId: 'stamp-1',
+              vouchOwner: 'ownerKeyB64',
+              vouchSig: 'sigB64',
+            }
+          : {
+              peerId: 'fakePeerIdABC123',
+              multiaddr: null,
+              stampId: null,
+              vouchOwner: null,
+              vouchSig: null,
+            },
+      ]);
+
+      getControlDatabase() {
+        return { queryCadrePeers: this.queryCadrePeers };
+      }
+
+      getTrustedOwnerStore() {
+        return { has: (k: string) => k === 'ownerKeyB64' };
+      }
 
       _setSelfAuthorized(authorized: boolean) {
         this._selfAuthorized = authorized;
@@ -155,7 +202,10 @@ jest.mock(
         this._strandConns = new Array(n).fill({});
       }
     }
-    return { CadreNode: FakeCadreNode };
+    return {
+      CadreNode: FakeCadreNode,
+      verifyCadrePeerVoucher: (...a: unknown[]) => mockVerifyCadrePeerVoucher(...a),
+    };
   },
   { virtual: true },
 );
@@ -191,6 +241,8 @@ let { runReplicationProof } = require('../replication-proof-runner');
 // full mock rather than a simpler one left active by an earlier test (Fix A, Phase 30).
 // ---------------------------------------------------------------------------
 function reloadRunnerFullMock(): void {
+  mockVerifyCadrePeerVoucher.mockReset();
+  mockVerifyCadrePeerVoucher.mockImplementation((..._a: unknown[]) => true);
   jest.resetModules();
   jest.mock('../proof-flags.generated', () => ({ REPLICATION_PROOF_ENABLED: true }));
   jest.mock('rn-leveldb', () => ({ LevelDB: class {}, LevelDBWriteBatch: class {} }), { virtual: true });
@@ -231,17 +283,39 @@ function reloadRunnerFullMock(): void {
       }
       public dialInvite = jest.fn(async () => {});
       public decodeInvite = jest.fn((s: string) => ({ partyId: 'votetorrent', encoded: s }));
-      // Section 4b write gate — mirrors the module-level mock; authorized by default.
+      // Section 4b write gate — mirrors the module-level mock; vouched by default.
+      // listAuthorizedMembers ALWAYS excludes self (check 1) — exactly what hid the defect.
+      public listAuthorizedMembers = jest.fn(async () => []);
       private _selfAuthorized = true;
-      public listAuthorizedMembers = jest.fn(async () =>
-        this._selfAuthorized ? [{ peerId: 'fakePeerIdABC123', multiaddr: null }] : []);
+      public queryCadrePeers = jest.fn(async (): Promise<VoucherRow[]> => [
+        this._selfAuthorized
+          ? {
+              peerId: 'fakePeerIdABC123',
+              multiaddr: null,
+              stampId: 'stamp-1',
+              vouchOwner: 'ownerKeyB64',
+              vouchSig: 'sigB64',
+            }
+          : {
+              peerId: 'fakePeerIdABC123',
+              multiaddr: null,
+              stampId: null,
+              vouchOwner: null,
+              vouchSig: null,
+            },
+      ]);
+      getControlDatabase() { return { queryCadrePeers: this.queryCadrePeers }; }
+      getTrustedOwnerStore() { return { has: (k: string) => k === 'ownerKeyB64' }; }
       _setSelfAuthorized(authorized: boolean) { this._selfAuthorized = authorized; }
       getControlNode() { return { getConnections: () => this._connections }; }
       getStrand(_id: string) { return { libp2pNode: { getConnections: () => this._strandConns } }; }
       _setConnections(conns: FakeConnection[]) { this._connections = conns; }
       _setStrandPeers(n: number) { this._strandConns = new Array(n).fill({}); }
     }
-    return { CadreNode: FakeCadreNode };
+    return {
+      CadreNode: FakeCadreNode,
+      verifyCadrePeerVoucher: (...a: unknown[]) => mockVerifyCadrePeerVoucher(...a),
+    };
   }, { virtual: true });
   jest.mock('@libp2p/websockets', () => ({ webSockets: () => ({}) }), { virtual: true });
   jest.mock('@libp2p/circuit-relay-v2', () => ({ circuitRelayTransport: () => ({}) }), { virtual: true });
@@ -692,7 +766,46 @@ describe('REPL-01 strand cohort markers', () => {
       expect(auth).toBeLessThan(strand);
     });
 
-    it('BLOCKS until this peer appears in its own authorized-member list', async () => {
+    // QUICK-260928-jwi REGRESSION: the mock now behaves like the REAL library —
+    // listAuthorizedMembers ALWAYS excludes self (check 1) — while this peer's own CadrePeer row
+    // is vouched by an owner anchored in the local trust store and verify succeeds. Against the
+    // OLD `members.some(m => m.peerId === peerId)` gate this can never pass: `members` is always
+    // `[]`, so `cadreAuthorized=` resolves `false` after burning the full AUTH_GATE_BUDGET_MS.
+    // Against the NEW isSelfVouched() gate it must resolve `true` promptly.
+    it('reports cadreAuthorized= true from the self-voucher, even though listAuthorizedMembers excludes self (regression)', async () => {
+      reloadRunnerFullMock();
+      mockConstructedNodes.length = 0;
+
+      const realPush = Array.prototype.push;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      jest.spyOn(mockConstructedNodes as any, 'push').mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        function (this: unknown[], ...args: any[]) {
+          const node = args[0] as FakeCadreNode;
+          node._setConnections([{}]);
+          node._setStrandPeers(1);
+          return realPush.apply(this, args);
+        },
+      );
+
+      const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+      await runReplicationProof();
+      const calls = consoleSpy.mock.calls;
+      consoleSpy.mockRestore();
+      jest.restoreAllMocks();
+
+      const authCall = calls.find(
+        (args) => args[0] === '[replication-proof]' && args[1] === 'cadreAuthorized=',
+      );
+      expect(authCall).toBeDefined();
+      // L('cadreAuthorized=', selfAuthorized, 'after', <n>, 's') — args[2] is the boolean.
+      expect(authCall![2]).toBe(true);
+      expect(mockVerifyCadrePeerVoucher).toHaveBeenCalledWith(
+        'fakePeerIdABC123', 'stamp-1', 'ownerKeyB64', 'sigB64',
+      );
+    }, 120000);
+
+    it('BLOCKS until this peer\'s own row carries an anchored voucher', async () => {
       reloadRunnerFullMock();
       mockConstructedNodes.length = 0;
 
@@ -707,15 +820,17 @@ describe('REPL-01 strand cohort markers', () => {
         await new Promise<void>(r => setTimeout(r, 10));
       }
       const node = mockConstructedNodes[0] as unknown as {
-        listAuthorizedMembers: jest.Mock;
+        queryCadrePeers: jest.Mock;
         _setConnections: (c: FakeConnection[]) => void;
       };
       // The gate only runs when this peer has a cohort to be authorized BY — peers=0 skips it.
       node._setConnections([{} as FakeConnection]);
       let polls = 0;
-      node.listAuthorizedMembers.mockImplementation(async () => {
+      node.queryCadrePeers.mockImplementation(async () => {
         polls += 1;
-        return polls >= 2 ? [{ peerId: 'fakePeerIdABC123', multiaddr: null }] : [];
+        return polls >= 2
+          ? [{ peerId: 'fakePeerIdABC123', multiaddr: null, stampId: 'stamp-1', vouchOwner: 'ownerKeyB64', vouchSig: 'sigB64' }]
+          : [{ peerId: 'fakePeerIdABC123', multiaddr: null, stampId: null, vouchOwner: null, vouchSig: null }];
       });
 
       await proof;
@@ -724,14 +839,14 @@ describe('REPL-01 strand cohort markers', () => {
         .map((args) => String(args[1]));
       consoleSpy.mockRestore();
 
-      // It polled more than once — i.e. it actually waited rather than reading the list once and
+      // It polled more than once — i.e. it actually waited rather than reading the row once and
       // proceeding regardless, which is precisely what `enrolInvite=ok` did.
-      expect(node.listAuthorizedMembers.mock.calls.length).toBeGreaterThan(1);
+      expect(node.queryCadrePeers.mock.calls.length).toBeGreaterThan(1);
       expect(markers.some((m) => m.startsWith('cadreAuthorized='))).toBe(true);
     }, 60000);
 
     // Run 19 died exactly here. While this peer is a non-member its control-DB reads are the thing
-    // being denied, and listAuthorizedMembers() does not always throw that denial — it can simply
+    // being denied, and a self-voucher read does not always throw that denial — it can simply
     // never settle. An un-raced await blocked the proof for 8+ minutes: no write, no strand, no
     // verdict, and the harness timed out at REPL-01 while the drones logged 178
     // NoValidAddressesError against a strand node that could never exist.
@@ -746,17 +861,17 @@ describe('REPL-01 strand cohort markers', () => {
         await new Promise<void>(r => setTimeout(r, 10));
       }
       const node = mockConstructedNodes[0] as unknown as {
-        listAuthorizedMembers: jest.Mock;
+        queryCadrePeers: jest.Mock;
         _setConnections: (c: FakeConnection[]) => void;
       };
       node._setConnections([{} as FakeConnection]);
       let polls = 0;
-      node.listAuthorizedMembers.mockImplementation(() => {
+      node.queryCadrePeers.mockImplementation(() => {
         polls += 1;
-        // First poll never settles; the second answers normally.
+        // First poll never settles; the second answers vouched.
         return polls === 1
           ? new Promise(() => {})
-          : Promise.resolve([{ peerId: 'fakePeerIdABC123', multiaddr: null }]);
+          : Promise.resolve([{ peerId: 'fakePeerIdABC123', multiaddr: null, stampId: 'stamp-1', vouchOwner: 'ownerKeyB64', vouchSig: 'sigB64' }]);
       });
 
       await proof;

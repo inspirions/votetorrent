@@ -42,6 +42,7 @@ import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/rn';
 import { REPLICATION_PROOF_ENABLED } from './proof-flags.generated';
 import { createStrandDbFactory } from './rn-db-factory';
+import { isSelfVouched } from './self-voucher';
 
 // Multi-arg form — REQUIRED so logcat renders '[replication-proof]', 'msg' and the
 // harness `.*` grep matches. (STATE.md v2.0 Phase 17 Plan 06 lesson.)
@@ -253,9 +254,9 @@ const RELAY_POLL_MAX = 10;
 // gate itself is worth — it is a convergence sample, not a wait for something that will arrive.
 const AUTH_GATE_BUDGET_MS = 90_000;
 
-// AUTH_GATE_CALL_TIMEOUT_MS: deadline for ONE listAuthorizedMembers() call. Deliberately shorter
-// than CONTROL_RETRY_INTERVAL_MS so a stalled call cannot outlive its own poll slot and drag the
-// budget past what the harness allows.
+// AUTH_GATE_CALL_TIMEOUT_MS: deadline for ONE self-voucher read (getControlDatabase().
+// queryCadrePeers()). Deliberately shorter than CONTROL_RETRY_INTERVAL_MS so a stalled call
+// cannot outlive its own poll slot and drag the budget past what the harness allows.
 const AUTH_GATE_CALL_TIMEOUT_MS = 4000;
 
 // ACQUIRE_HEARTBEAT_MS: cadence of the `acquire pending` marker emitted while the strand acquire
@@ -543,8 +544,19 @@ export async function runReplicationProof(): Promise<void> {
     // cohort of nobody and says nothing — upstream Optimystic#19), it was never retried, and both
     // peers ended the run holding only their own row.
     //
-    // The gate is `listAuthorizedMembers()` containing THIS peer, not the drone's ENROL_ACCEPTED
-    // line, for two reasons:
+    // QUICK-260928-jwi: the gate USED to be `listAuthorizedMembers().some(m => m.peerId ===
+    // peerId)`, which can NEVER pass — cadre-core's listAuthorizedMembers()/isAuthorizedMember()
+    // unconditionally exclude self (documented check 1, cadre-node.js: `row.peerId !==
+    // selfPeerId`). `isMember(self)` is not a substitute either: it is true before any owner has
+    // vouched at all, so it would report authorized before the ceremony this gate exists to wait
+    // for. Every real device run through 2026-09-28 could therefore only ever log
+    // `cadreAuthorized= false`, having spent the whole gate budget on a predicate that was always
+    // going to answer false.
+    //
+    // The gate now checks `isSelfVouched()` — that THIS peer's own replicated CadrePeer row
+    // carries a voucher from an owner anchored in the local trust store, with a signature that
+    // verifies. That is checks 2-5 of the SAME predicate the drone's
+    // `authorizeInboundControlStream` applies, evaluated against our own row (see self-voucher.ts):
     //  1. It is the SAME predicate the drone's `authorizeInboundControlStream` consults, so the
     //     proof waits on exactly the condition that was refusing it — not on a proxy for it.
     //  2. It is observable from the phone. Reading the drone's stdout would mean routing a peerId
@@ -554,9 +566,9 @@ export async function runReplicationProof(): Promise<void> {
     //
     // Bounded and non-fatal: emitted unconditionally (true on success, false on timeout) like
     // relayReservation= and peers=, so a run that never gets authorized stays legible as THAT
-    // rather than failing later as a mystery cohort failure. 45 x 5 s = 225 s, which fits inside
-    // the harness's 300 s REPL-01 window (peers= is already logged above, so that window is the
-    // one absorbing this wait) and clears run 18's worst observed gap with margin.
+    // rather than failing later as a mystery cohort failure. Bounded by AUTH_GATE_BUDGET_MS (a
+    // wall-clock deadline, currently 90 s — see that constant; this comment used to say
+    // "45 x 5 s = 225 s", which was already stale arithmetic for the old tick-count shape).
     // SKIPPED when nothing could possibly authorize this peer. The harness's Step 1 is a SOLO
     // bootstrap boot: no drone, no invite injected (`enrolInvite=skipped`), `peers=0`. There is no
     // owner to run acceptPhone, so `cadreAuthorized` can never become true and waiting the full
@@ -582,25 +594,25 @@ export async function runReplicationProof(): Promise<void> {
     const isSelfAuthorized = async (): Promise<boolean> => {
       try {
         // RACED AGAINST A DEADLINE, not merely awaited. Run 19 hung here for 8+ minutes: while
-        // this peer is a non-member its control-DB reads are the thing being denied, and
-        // `listAuthorizedMembers()` does not always THROW that denial — it can simply never
-        // settle. An un-raced await then blocks the proof forever, the strand is never created,
-        // and the harness times out at REPL-01 with no verdict (and the drones spend the whole
-        // window logging NoValidAddressesError against a strand node that will never exist).
+        // this peer is a non-member its control-DB reads are the thing being denied, and a
+        // self-voucher read does not always THROW that denial — it can simply never settle. An
+        // un-raced await then blocks the proof forever, the strand is never created, and the
+        // harness times out at REPL-01 with no verdict (and the drones spend the whole window
+        // logging NoValidAddressesError against a strand node that will never exist).
         // A call that does not answer inside one poll interval IS the "not yet" answer.
-        const members = await Promise.race([
-          authNode.listAuthorizedMembers(),
+        const vouched = await Promise.race([
+          isSelfVouched(authNode, peerId),
           new Promise<null>(r => setTimeout(() => r(null), AUTH_GATE_CALL_TIMEOUT_MS)),
         ]);
-        if (members === null) {
+        if (vouched === null) {
           if (!authGateLoggedError) {
             authGateLoggedError = true;
-            L('write gate: listAuthorizedMembers did not answer within',
+            L('write gate: self-voucher read did not answer within',
               AUTH_GATE_CALL_TIMEOUT_MS, 'ms (expected while enrolment converges)');
           }
           return false;
         }
-        return members.some((m) => m.peerId === peerId);
+        return vouched;
       } catch (err) {
         // While this peer is a non-member its own control-DB reads are the thing being denied, so
         // a throw here IS the "not yet" answer, not a defect. Logged once for legibility.
