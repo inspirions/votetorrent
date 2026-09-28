@@ -155,11 +155,11 @@ export class SigningEngine implements ISigningEngine {
 							coalesce(
 								cast(
 									json_extract(
-										-- get the first policy object that matches the scope; fallback to 1 if not found
+										-- get the first policy object whose 'policy' field matches the session scope; fallback to 1 if not found
 										(
 										  select value
 										  from json_each(ThresholdPolicies)
-										  where json_extract(value, '$.scope') = :scope
+										  where json_extract(value, '$.policy') = :scope
 										  limit 1
 										), '$.threshold'
 									) as integer

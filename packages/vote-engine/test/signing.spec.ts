@@ -30,6 +30,7 @@ import type {
   Scope,
   Signature,
   SignatureTask,
+  ThresholdPolicy,
   User
 } from '@votetorrent/vote-core'
 
@@ -54,7 +55,10 @@ function makeUser (overrides?: Partial<User>): User {
   }
 }
 
-function makeNetworkInit (): NetworkInit {
+// r24: `thresholdPolicies` is an optional override so the threshold-enforcement
+// tests below can seed a `{ policy: 'mel', threshold: 2 }` entry without
+// disturbing every other caller's default single-officer-threshold-1 seed.
+function makeNetworkInit (thresholdPolicies?: ThresholdPolicy[]): NetworkInit {
   return {
     name: 'Test Network',
     imageUrl: 'https://cdn.example.com/logo.png',
@@ -74,7 +78,7 @@ function makeNetworkInit (): NetworkInit {
         }
       ],
       effectiveAt: Date.now(),
-      thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+      thresholdPolicies: thresholdPolicies ?? [{ policy: 'rad', threshold: 1 }]
     },
     policies: {
       timestampAuthorities: [{ url: 'https://tsa.example.com' }],
@@ -96,7 +100,7 @@ async function makeDbOnlyContext (): Promise<{ ctx: EngineContext, user: User }>
 }
 
 // Reaches into a NetworksEngine for a populated EngineContext after create().
-async function createPopulatedContext (): Promise<{
+async function createPopulatedContext (thresholdPolicies?: ThresholdPolicy[]): Promise<{
   ctx: EngineContext
   user: User
 }> {
@@ -104,7 +108,7 @@ async function createPopulatedContext (): Promise<{
   await AsyncStorage.setItem('recentNetworks', [])
   const networksEngine = new NetworksEngine(AsyncStorage)
   const user = makeUser()
-  await networksEngine.create(makeNetworkInit(), user)
+  await networksEngine.create(makeNetworkInit(thresholdPolicies), user)
   const recents =
     (await AsyncStorage.getItem<NetworkReference[]>('recentNetworks')) ?? []
   const ref = recents[0]
@@ -477,6 +481,104 @@ describe('SigningEngine', () => {
         )
         .get({ n: nonce })
       expect(adminSig?.SigningNonce).to.equal(nonce)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // r24: threshold enforcement (ThresholdPolicies keyed on policy)
+  //
+  // Regression coverage for the silent threshold-of-1 defect: the threshold
+  // subquery in SigningEngine.sign() used to filter json_each(ThresholdPolicies)
+  // on `$.scope`, but every stored entry is `{ policy, threshold }` (the
+  // schema's Admin.ThresholdPoliciesValid CHECK rejects entries without
+  // `policy`). The filter never matched, coalesce(..., 1) fired, and every
+  // multi-officer policy was silently enforced as 1. These tests seed a real
+  // `{ policy: 'mel', threshold: 2 }` policy (alongside the default
+  // `{ policy: 'rad', threshold: 1 }`, left untouched so network creation is
+  // unaffected) and prove threshold >= 2 actually gates AdminSignature
+  // completion.
+  // -----------------------------------------------------------------------
+  describe('threshold enforcement (ThresholdPolicies keyed on policy)', () => {
+    const thresholdPolicies: ThresholdPolicy[] = [
+      { policy: 'rad', threshold: 1 },
+      { policy: 'mel', threshold: 2 }
+    ]
+
+    it('threshold 2: is NOT completed after a single OfficerSignature (threshold=2 on scope "mel")', async () => {
+      const { ctx, user } = await createPopulatedContext(thresholdPolicies)
+      const engine = new SigningEngine(ctx)
+      const authRow = await ctx.db.prepare('select Id from Authority limit 1').get({})
+      const authorityId = authRow!.Id as string
+      const sig1 = await realSignAdminDigest(ctx, authorityId, testDigestArgs, user.id)
+      const { nonce, thresholdReached } = await engine.startSigningSession(
+        authorityId,
+        testDigestArgs,
+        'mel',
+        sig1
+      )
+      expect(thresholdReached, 'threshold=2 must NOT be reached after 1 signature').to.equal(false)
+
+      const officerCount = await ctx.db
+        .prepare('select count(*) as n from OfficerSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      expect(Number(officerCount?.n), 'exactly 1 OfficerSignature after 1 signer').to.equal(1)
+
+      const adminSig = await ctx.db
+        .prepare('select count(*) as n from AdminSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      expect(Number(adminSig?.n), 'no AdminSignature row while threshold=2 is unmet').to.equal(0)
+    })
+
+    it('threshold 2: completes once a second distinct officer signs (threshold=2 on scope "mel")', async () => {
+      const { ctx, user } = await createPopulatedContext(thresholdPolicies)
+      const engine = new SigningEngine(ctx)
+      const authRow = await ctx.db.prepare('select Id from Authority limit 1').get({})
+      const authorityId = authRow!.Id as string
+      const sig1 = await realSignAdminDigest(ctx, authorityId, testDigestArgs, user.id)
+      const { nonce, thresholdReached: firstReached } = await engine.startSigningSession(
+        authorityId,
+        testDigestArgs,
+        'mel',
+        sig1
+      )
+      expect(firstReached, 'threshold=2 must NOT be reached after 1 signature').to.equal(false)
+
+      const adminSigningDigestRow = await ctx.db
+        .prepare('select Digest from AdminSigning where Nonce = :nonce')
+        .get({ nonce })
+      const sig2 = signTestDigestWithFreshKey('user-2-threshold', adminSigningDigestRow!.Digest as string)
+      const secondResult = await engine.sign(nonce, sig2)
+      expect(secondResult, 'sign() must return true once threshold=2 is met').to.equal(true)
+
+      const officerCount = await ctx.db
+        .prepare('select count(*) as n from OfficerSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      expect(Number(officerCount?.n), 'exactly 2 OfficerSignature rows after both signers').to.equal(2)
+
+      const adminSig = await ctx.db
+        .prepare('select count(*) as n from AdminSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      expect(Number(adminSig?.n), 'exactly 1 AdminSignature row once threshold=2 is met').to.equal(1)
+    })
+
+    it('threshold 1: completes after a single OfficerSignature (threshold=1 on scope "rad")', async () => {
+      const { ctx, user } = await createPopulatedContext(thresholdPolicies)
+      const engine = new SigningEngine(ctx)
+      const authRow = await ctx.db.prepare('select Id from Authority limit 1').get({})
+      const authorityId = authRow!.Id as string
+      const sig = await realSignAdminDigest(ctx, authorityId, testDigestArgs, user.id)
+      const { nonce, thresholdReached } = await engine.startSigningSession(
+        authorityId,
+        testDigestArgs,
+        'rad',
+        sig
+      )
+      expect(thresholdReached, 'threshold=1 must be reached after 1 signature').to.equal(true)
+
+      const adminSig = await ctx.db
+        .prepare('select count(*) as n from AdminSignature where SigningNonce = :nonce')
+        .get({ nonce })
+      expect(Number(adminSig?.n), 'exactly 1 AdminSignature row once threshold=1 is met').to.equal(1)
     })
   })
 
