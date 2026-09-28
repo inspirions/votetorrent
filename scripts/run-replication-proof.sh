@@ -74,7 +74,29 @@ PACKAGE="org.votetorrent.authority"
 # instead of aborting, then retries the whole cycle once more (2 attempts total)
 # before giving up.
 #
-# Usage: relaunch_and_wait SERIAL PATTERN TIMEOUT_S WHAT [SECOND_SERIAL]
+# wipe_proof_strand_store SERIAL
+#
+# D-03 fresh-state wipe of the proof STRAND store only, done from the host while the app is
+# force-stopped. It used to run inside the app on EVERY boot, including the D-05 relaunch. By
+# then Peer A had already joined networked in Step 4 and, at strandClusterSize 2, was one of the
+# two holders of blocks it wrote. Wiping it there left the drones holding headers that point at
+# blocks nobody serves any more, so the next read was a CONFIRMED absence: `Missing block` on
+# `Strand.Header` / `App.InviteSlot`, on the Peer-A role only (checkpoint 4, item 3). The wipe
+# now happens ONLY before Step 1 and before the Step-4 relaunch, never before D-05. It targets
+# the exact store name; the `...-control-...` store and `votetorrent-cadre-node` (peerId) must
+# survive.
+PROOF_STRAND_STORE="votetorrent-replication-strand-replication-proof-strand"
+wipe_proof_strand_store() {
+  local serial="$1"
+  adb -s "${serial}" shell run-as "${PACKAGE}" rm -rf "files/${PROOF_STRAND_STORE}" >&2 || true
+  if adb -s "${serial}" shell run-as "${PACKAGE}" ls "files/${PROOF_STRAND_STORE}" > /dev/null 2>&1; then
+    echo "[run-replication-proof] WARN: proof strand store still present on ${serial} after wipe" >&2
+  else
+    echo "[run-replication-proof] wiped proof strand store on ${serial}" >&2
+  fi
+}
+
+# Usage: relaunch_and_wait SERIAL PATTERN TIMEOUT_S WHAT [SECOND_SERIAL] [WIPE_STRAND]
 #   SERIAL         — the adb serial whose marker is waited on (e.g. ${PEER_A_SERIAL})
 #   PATTERN        — logcat pattern passed to wait_for_logcat_line
 #   TIMEOUT_S      — seconds to wait per attempt
@@ -82,13 +104,16 @@ PACKAGE="org.votetorrent.authority"
 #   SECOND_SERIAL  — optional: also force-stop/clear/relaunch this serial on every
 #                    attempt (the networked both-peer relaunch needs both devices up
 #                    together before either's marker is meaningful), but only SERIAL's
-#                    marker is waited on.
+#                    marker is waited on. Pass "" to skip it.
+#   WIPE_STRAND    — optional: "1" wipes the proof strand store on every relaunched serial
+#                    between force-stop and launch. Only the Step-4 relaunch passes it; the
+#                    D-05 relaunch must NOT (see wipe_proof_strand_store).
 #
 # Echoes the matched logcat line to stdout (same contract as wait_for_logcat_line);
 # prints nothing (empty) if both attempts miss — callers must check for an empty
 # result exactly as they already do for a bare wait_for_logcat_line call.
 relaunch_and_wait() {
-  local serial="$1" pattern="$2" timeout_s="$3" what="$4" second_serial="${5:-}"
+  local serial="$1" pattern="$2" timeout_s="$3" what="$4" second_serial="${5:-}" wipe_strand="${6:-0}"
   local attempt line status
   for attempt in 1 2; do
     echo "[run-replication-proof] relaunch_and_wait: attempt ${attempt}/2 for '${what}' on ${serial}$([ -n "${second_serial}" ] && echo " (+ ${second_serial})") ..." >&2
@@ -97,6 +122,12 @@ relaunch_and_wait() {
       adb -s "${second_serial}" shell am force-stop "${PACKAGE}" >&2
     fi
     sleep 2
+    if [ "${wipe_strand}" = "1" ]; then
+      wipe_proof_strand_store "${serial}"
+      if [ -n "${second_serial}" ]; then
+        wipe_proof_strand_store "${second_serial}"
+      fi
+    fi
     adb -s "${serial}" logcat -c >&2
     if [ -n "${second_serial}" ]; then
       adb -s "${second_serial}" logcat -c >&2
@@ -362,6 +393,7 @@ echo "[run-replication-proof] Flag file updated: REPLICATION_PROOF_ENABLED=true"
 echo "[run-replication-proof] Step 1: bootstrap-mode first boot — Peer A solo (no drone) ..."
 adb -s ${PEER_A_SERIAL} shell am force-stop "${PACKAGE}"
 sleep 2
+wipe_proof_strand_store "${PEER_A_SERIAL}"
 # Pitfall 4: clear stale logcat ring buffer BEFORE the bootstrap-mode relaunch.
 adb -s ${PEER_A_SERIAL} logcat -c
 echo "[run-replication-proof] Relaunching ${PACKAGE} on ${PEER_A_SERIAL} (bootstrap mode, solo) ..."
@@ -683,7 +715,7 @@ PROBE_STARTED=0  # reset sentinel before the real networked run
 # is one of the exact checkpoints where prior 38-05 runs died on a transient
 # Metro-rebundle/emulator-slowness marker timeout.
 echo "[run-replication-proof] Step 4: relaunching BOTH peers networked (via relaunch_and_wait, bounded retry) ..."
-MARKER_LINE=$(relaunch_and_wait "${PEER_A_SERIAL}" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker" "${PEER_B_SERIAL}")
+MARKER_LINE=$(relaunch_and_wait "${PEER_A_SERIAL}" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker" "${PEER_B_SERIAL}" 1)
 if [ -z "${MARKER_LINE}" ]; then
   echo "[run-replication-proof] ERROR: [replication-proof] never started on Peer A (networked run) after 2 relaunch_and_wait attempts — Metro rebundle likely in flight; re-run" >&2
   exit 1

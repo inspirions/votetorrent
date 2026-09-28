@@ -12,9 +12,10 @@
  * Boots its OWN CadreNode (store `votetorrent-cadre-probe-replication` — OQ2) so it is
  * self-contained and never collides with CadreNodeProvider's `votetorrent-cadre-node`.
  *
- * D-03 fresh-state wipe: `LevelDB.destroyDB` on ONLY the per-network strand store, wrapped
- * in try/catch so a failed wipe is auditable (logged warning) rather than silent (A1 mitigation).
- * The node-identity store (`votetorrent-cadre-node`) is NEVER destroyed (T-23-03-02).
+ * D-03 fresh-state wipe: done by `scripts/run-replication-proof.sh` (`wipe_proof_strand_store`),
+ * NOT here. The script wipes ONLY the proof strand store, before Step 1 and before the Step-4
+ * relaunch, and never before the D-05 relaunch (see section 3 below for why). The node-identity
+ * store (`votetorrent-cadre-node`) is NEVER destroyed (T-23-03-02).
  *
  * Markers emitted (multi-arg — logcat grep must use .* between tag and message):
  *   [replication-proof] starting
@@ -108,10 +109,11 @@ const L = (...a: unknown[]) => console.info('[replication-proof]', ...a);
 // NEVER 'votetorrent-cadre-node' — that store holds the stable peerId (D-05 / T-23-03-02).
 const CADRE_STORE = 'votetorrent-cadre-probe-replication';
 
-// The per-network strand store name (without the votetorrent- prefix that destroyDB prepends).
-// destroyDB targets ONLY 'votetorrent-' + PROOF_NETWORK_STORE (D-03 / T-23-03-02).
+// The proof strand's id, which is also its store scope. The on-disk store is
+// scopedRnStoreName(PROOF_STORE_PREFIX, PROOF_NETWORK_STORE); run-replication-proof.sh's
+// PROOF_STRAND_STORE must match it, because the script owns the D-03 wipe (T-23-03-02).
 const PROOF_NETWORK_STORE = 'replication-proof-strand';
-// Store-name prefix for this proof's scoped LevelDBs — used by BOTH the provider and the wipe.
+// Store-name prefix for this proof's scoped LevelDBs — used by the provider, and by the script's wipe.
 const PROOF_STORE_PREFIX = 'votetorrent-replication-strand';
 
 // Control address — the drone's control-node ws multiaddr. The harness injects this per-run
@@ -580,19 +582,16 @@ export async function runReplicationProof(): Promise<void> {
       }
     }
 
-    // ── 3. D-03 fresh-state wipe — per-network store ONLY, try/catch, never silent (A1) ─────
-    // NEVER call LevelDB.destroyDB('votetorrent-cadre-node') — the peerId store must survive.
-    try {
-      // W1b: derive the name from the SAME helper the provider uses. This wiped
-      // `votetorrent-<strandId>` while the provider opened
-      // `votetorrent-replication-strand-<strandId>` — a name that never existed, so destroyDB
-      // succeeded, the success line was logged, and the store survived every "fresh" run.
-      LevelDB.destroyDB(scopedRnStoreName(PROOF_STORE_PREFIX, PROOF_NETWORK_STORE));
-      L('wiped per-network store', PROOF_NETWORK_STORE);
-    } catch (wipeErr) {
-      // A failed wipe is auditable (logged warning) — proof continues (A1 LOW-conf mitigation).
-      L('WARN wipe failed (continuing, determinism may be reduced):', wipeErr);
-    }
+    // ── 3. D-03 fresh-state wipe — owned by the harness script, NOT done in-app ─────────────
+    // This used to `LevelDB.destroyDB` the proof strand store on EVERY boot, including Peer A's
+    // D-05 relaunch. By then Peer A had joined networked in Step 4 and, at strandClusterSize 2,
+    // was one of the two holders of blocks it wrote. Wiping it left the drones holding headers
+    // that point at blocks nobody serves any more, so the next read was a CONFIRMED absence:
+    // `Missing block` on `Strand.Header` / `App.InviteSlot`, on the Peer-A role only
+    // (checkpoint 4, item 3). An in-app boot cannot tell Step 4 from D-05, so the script wipes
+    // the store while the app is force-stopped: before Step 1 and before the Step-4 relaunch,
+    // never before D-05.
+    L('strand store wipe: owned by harness (not wiped in-app)', scopedRnStoreName(PROOF_STORE_PREFIX, PROOF_NETWORK_STORE));
 
     // ── 4. WAIT for peers FIRST, so the strand factory selects 'networked' mode ─────────────
     // createStrandDbFactory picks bootstrap (local) vs networked by peer presence AT CALL TIME.

@@ -1498,3 +1498,40 @@ describe('run-replication-proof.sh — verdict-wait timeout message (harness ear
   });
 });
 
+// ---------------------------------------------------------------------------
+// Strand-store wipe moved from the app to the harness (checkpoint 4, item 3).
+//
+// The in-app wipe ran on EVERY boot, including Peer A's D-05 relaunch, after Peer A had already
+// joined networked and become one of the two holders of blocks it wrote — leaving the drones
+// pointing at blocks nobody served (`Missing block`, Peer-A role only). Text-level guard, like the
+// verdict-timeout block above: the runner no longer destroys a store, the script's store name
+// matches the runner's, and only the Step-4 relaunch (never D-05) wipes.
+// ---------------------------------------------------------------------------
+describe('run-replication-proof.sh — strand-store wipe is harness-owned and skips D-05', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require('fs');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require('path');
+  const script: string = fs.readFileSync(
+    path.resolve(__dirname, '../../../../../scripts/run-replication-proof.sh'),
+    'utf8',
+  );
+  const runner: string = fs.readFileSync(path.resolve(__dirname, '../replication-proof-runner.ts'), 'utf8');
+
+  it('the runner never calls LevelDB.destroyDB', () => {
+    expect(runner).not.toMatch(/LevelDB\.destroyDB\(/);
+  });
+
+  it("the script's PROOF_STRAND_STORE is the runner's scoped store name", () => {
+    const prefix = runner.match(/const PROOF_STORE_PREFIX = '([^']+)'/)![1];
+    const scope = runner.match(/const PROOF_NETWORK_STORE = '([^']+)'/)![1];
+    expect(script).toContain(`PROOF_STRAND_STORE="${prefix}-${scope}"`);
+  });
+
+  it('wipes before the Step-4 relaunch but NOT before the D-05 relaunch', () => {
+    const step4 = script.match(/^MARKER_LINE=\$\(relaunch_and_wait .*\)$/m)![0];
+    const d05 = script.match(/^D05_MARKER_LINE=\$\(relaunch_and_wait .*\)$/m)![0];
+    expect(step4).toMatch(/ 1\)$/);
+    expect(d05).not.toMatch(/ 1\)$/);
+  });
+});
