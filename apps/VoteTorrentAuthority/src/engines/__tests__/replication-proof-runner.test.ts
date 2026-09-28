@@ -32,6 +32,123 @@ const mockCapturedConfigs: Array<Record<string, unknown>> = [];
 // factories can reference it (jest hoisting requires the `mock` prefix).
 const mockVerifyCadrePeerVoucher = jest.fn((..._a: unknown[]) => true);
 
+// ---------------------------------------------------------------------------
+// Write-phase choreography mocks (checkpoint 3, 2026-09-28, debug session
+// p2p11-multi-peer-replication) — `@votetorrent/vote-engine/rn`'s NetworkEngine and
+// AuthorityEngine, replacing the earlier bare `VOTETORRENT_SCHEMA_SQL`-only virtual mock.
+//
+// These fakes deliberately do NOT touch `ctx.db` the way the real engine classes do (that
+// would require emulating Quereus's `.prepare().get()` SQL surface, which the task brief
+// explicitly scopes OUT — "test the CHOREOGRAPHY, not an end-to-end schema execution"). Instead
+// they record constructor/method arguments for assertions and are individually configurable to
+// succeed or fail, so tests can drive and observe: founder success, founder-fails-falls-to-join,
+// and the joiner's own respondToInvite/createAuthority call shapes — without a real DB.
+//
+// `mock`-prefixed (module scope) per jest hoisting rules — referenced from `jest.mock(...)`
+// factories below.
+// ---------------------------------------------------------------------------
+
+const mockAuthorityEngineConstructions: Array<{ authority: unknown; ctx: { user?: { id: string } } }> = [];
+const mockCreateAuthorityInviteCalls: string[] = [];
+const mockSaveInviteWithSigningCalls: Array<{ invite: unknown; scope: unknown }> = [];
+let mockSaveInviteWithSigningShouldFail = false;
+let mockSaveInviteWithSigningFailureMessage = 'CHECK constraint failed: InsertValid';
+
+const mockNetworkEngineConstructions: Array<{ init: unknown; ctx: { user?: { id: string } } }> = [];
+const mockRespondToInviteCalls: unknown[] = [];
+let mockRespondToInviteShouldFail = false;
+let mockRespondToInviteFailureMessage = 'respondToInvite failed';
+let mockRespondToInviteReturnId = 'mock-joined-authority-id';
+const mockCreateAuthorityCalls: Array<{ authorityInit: unknown; adminInit: unknown; options: unknown }> = [];
+let mockCreateAuthorityShouldFail = false;
+let mockCreateAuthorityFailureMessage = 'createAuthority failed';
+
+class MockAuthorityEngineForRn {
+  constructor(
+    public authority: unknown,
+    public ctx: { user?: { id: string } },
+  ) {
+    mockAuthorityEngineConstructions.push({ authority, ctx });
+  }
+
+  createAuthorityInvite(name: string) {
+    mockCreateAuthorityInviteCalls.push(name);
+    return {
+      name,
+      type: 'au' as const,
+      expiration: '2099-01-01T00:00:00',
+      inviteKey: 'fakeInviteKeyHex',
+      invitePrivate: 'fakeInvitePrivateHex',
+      inviteSignature: 'fakeInviteSignatureHex',
+    };
+  }
+
+  async saveInviteWithSigning(invite: unknown, scope: unknown, cb: unknown) {
+    mockSaveInviteWithSigningCalls.push({ invite, scope });
+    if (mockSaveInviteWithSigningShouldFail) {
+      throw new Error(mockSaveInviteWithSigningFailureMessage);
+    }
+    // Realism: the real engine invokes the caller's signCallback with computed digest bytes —
+    // invoke it here too so a signCallback-shape bug in the runner would surface as a thrown
+    // error from this call, not silently pass.
+    if (typeof cb === 'function') {
+      await (cb as (d: Uint8Array) => Promise<unknown>)(new Uint8Array([1, 2, 3, 4]));
+    }
+  }
+}
+
+class MockNetworkEngineForRn {
+  constructor(
+    public init: unknown,
+    public localStorage: unknown,
+    public ctx: { user?: { id: string } },
+    public getPeerCount?: unknown,
+  ) {
+    mockNetworkEngineConstructions.push({ init, ctx });
+  }
+
+  async respondToInvite(action: unknown): Promise<string> {
+    mockRespondToInviteCalls.push(action);
+    if (mockRespondToInviteShouldFail) {
+      throw new Error(mockRespondToInviteFailureMessage);
+    }
+    return mockRespondToInviteReturnId;
+  }
+
+  async createAuthority(authorityInit: unknown, adminInit: unknown, options?: unknown): Promise<void> {
+    mockCreateAuthorityCalls.push({ authorityInit, adminInit, options });
+    if (mockCreateAuthorityShouldFail) {
+      throw new Error(mockCreateAuthorityFailureMessage);
+    }
+  }
+}
+
+function mockVoteEngineRnModule() {
+  return {
+    VOTETORRENT_SCHEMA_SQL: 'declare schema main {}',
+    NetworkEngine: MockNetworkEngineForRn,
+    AuthorityEngine: MockAuthorityEngineForRn,
+  };
+}
+
+// Reset every choreography-mock recording array/flag to its default (founder-succeeds) state.
+// Call from beforeEach / at the start of any test that overrides them.
+function mockResetChoreographyMocks(): void {
+  mockAuthorityEngineConstructions.length = 0;
+  mockCreateAuthorityInviteCalls.length = 0;
+  mockSaveInviteWithSigningCalls.length = 0;
+  mockSaveInviteWithSigningShouldFail = false;
+  mockSaveInviteWithSigningFailureMessage = 'CHECK constraint failed: InsertValid';
+  mockNetworkEngineConstructions.length = 0;
+  mockRespondToInviteCalls.length = 0;
+  mockRespondToInviteShouldFail = false;
+  mockRespondToInviteFailureMessage = 'respondToInvite failed';
+  mockRespondToInviteReturnId = 'mock-joined-authority-id';
+  mockCreateAuthorityCalls.length = 0;
+  mockCreateAuthorityShouldFail = false;
+  mockCreateAuthorityFailureMessage = 'createAuthority failed';
+}
+
 type VoucherRow = {
   peerId: string;
   multiaddr: string | null;
@@ -86,7 +203,7 @@ jest.mock('@quereus/plugin-react-native-leveldb', () => ({ ReactNativeLevelDBPro
 jest.mock('@quereus/store', () => ({ createIsolatedStoreModule: jest.fn(() => ({})) }), { virtual: true });
 jest.mock(
   '@votetorrent/vote-engine/rn',
-  () => ({ VOTETORRENT_SCHEMA_SQL: 'declare schema main {}' }),
+  () => mockVoteEngineRnModule(),
   { virtual: true },
 );
 
@@ -254,7 +371,7 @@ function reloadRunnerFullMock(): void {
   jest.mock('@quereus/quereus', () => ({ Database: class {}, registerPlugin: jest.fn() }), { virtual: true });
   jest.mock('@quereus/plugin-react-native-leveldb', () => ({ ReactNativeLevelDBProvider: jest.fn() }), { virtual: true });
   jest.mock('@quereus/store', () => ({ createIsolatedStoreModule: jest.fn(() => ({})) }), { virtual: true });
-  jest.mock('@votetorrent/vote-engine/rn', () => ({ VOTETORRENT_SCHEMA_SQL: 'declare schema main {}' }), { virtual: true });
+  jest.mock('@votetorrent/vote-engine/rn', () => mockVoteEngineRnModule(), { virtual: true });
   jest.mock('@serfab/cadre-core', () => {
     class FakeCadreNode {
       public start = jest.fn(async () => {});
@@ -354,6 +471,7 @@ function reloadRunnerFullMock(): void {
 beforeEach(() => {
   mockConstructedNodes.length = 0;
   mockCapturedConfigs.length = 0;
+  mockResetChoreographyMocks();
   jest.clearAllMocks();
 });
 
@@ -388,7 +506,7 @@ describe('runReplicationProof — gate behavior', () => {
     });
     jest.mock(
       '@votetorrent/vote-engine/rn',
-      () => ({ VOTETORRENT_SCHEMA_SQL: 'declare schema main {}' }),
+      () => mockVoteEngineRnModule(),
       { virtual: true },
     );
     jest.mock(
@@ -531,7 +649,7 @@ describe('runReplicationProof — marker emissions', () => {
     jest.mock('@optimystic/quereus-plugin-optimystic', () => ({ register: jest.fn() }), { virtual: true });
     jest.mock(
       '@votetorrent/vote-engine/rn',
-      () => ({ VOTETORRENT_SCHEMA_SQL: 'declare schema main {}' }),
+      () => mockVoteEngineRnModule(),
       { virtual: true },
     );
     jest.mock(
@@ -898,15 +1016,19 @@ describe('REPL-01 strand cohort markers', () => {
 // having landed AND having read another peer's row — not either alone.
 //
 // `reloadRunnerWithControlledDb` mirrors `reloadRunnerFullMock` (same FakeCadreNode) but replaces
-// the `../rn-db-factory` mock with one that distinguishes the write-phase presence-check query
-// (`WHERE Id =`) from the read-phase census query, and can be told (via the `mock`-prefixed
-// module-scope flags below, per jest hoisting rules) to make the OWN insert throw a non-UNIQUE
-// error — exactly the `InsertValid` CHECK-constraint shape observed on device — while still
-// exposing another peer's row to the read poll.
+// the `../rn-db-factory` mock with one that distinguishes the write-phase choreography's own
+// query shapes (checkpoint 3, 2026-09-28 — see replication-proof-runner.ts's write-phase doc
+// comment): the idempotency presence check (`FROM Officer WHERE UserId`), the founder's own
+// `insert into Authority` (can be told to fail — the "lost the race" case — via the `mock`-
+// prefixed module-scope flags below, per jest hoisting rules), the joiner's InviteSlot poll
+// (`FROM InviteSlot WHERE Type`), and the read-phase census query (`SELECT Id FROM Authority`,
+// no WHERE) — each independently controllable so a test can drive founder success, founder-
+// fails-falls-to-join, or a genuinely empty read set without conflating them.
 // ---------------------------------------------------------------------------
 
-let mockOwnInsertShouldFail = false;
-let mockOwnInsertFailureMessage = 'CHECK constraint failed: InsertValid';
+let mockAuthorityInsertShouldFail = false;
+let mockAuthorityInsertFailureMessage = 'CHECK constraint failed: InsertValid';
+let mockInviteSlotAvailable = true;
 let mockForeignRowOnRead = true;
 
 function reloadRunnerWithControlledDb(): void {
@@ -923,7 +1045,7 @@ function reloadRunnerWithControlledDb(): void {
   jest.mock('@quereus/quereus', () => ({ Database: class {}, registerPlugin: jest.fn() }), { virtual: true });
   jest.mock('@quereus/plugin-react-native-leveldb', () => ({ ReactNativeLevelDBProvider: jest.fn() }), { virtual: true });
   jest.mock('@quereus/store', () => ({ createIsolatedStoreModule: jest.fn(() => ({})) }), { virtual: true });
-  jest.mock('@votetorrent/vote-engine/rn', () => ({ VOTETORRENT_SCHEMA_SQL: 'declare schema main {}' }), { virtual: true });
+  jest.mock('@votetorrent/vote-engine/rn', () => mockVoteEngineRnModule(), { virtual: true });
   jest.mock('@serfab/cadre-core', () => {
     class FakeCadreNode {
       public start = jest.fn(async () => {});
@@ -984,23 +1106,27 @@ function reloadRunnerWithControlledDb(): void {
   jest.mock('@libp2p/websockets', () => ({ webSockets: () => ({}) }), { virtual: true });
   jest.mock('@libp2p/circuit-relay-v2', () => ({ circuitRelayTransport: () => ({}) }), { virtual: true });
   jest.mock('@multiformats/multiaddr', () => ({ multiaddr: (s: string) => ({ toString: () => s }) }), { virtual: true });
-  // Distinguishes the presence-check query (`... WHERE Id = '<id>'`) from the read-phase census
-  // query (`SELECT Id FROM Authority`, no WHERE) so a test can make ONLY the insert fail while
-  // the read poll still legitimately observes a foreign peer's row.
+  // Query-shape-aware exec/eval so the write-phase choreography's distinct steps (idempotency
+  // check, founder genesis inserts, joiner InviteSlot poll, read-phase census) can each be
+  // driven independently — see the `mock`-prefixed flags declared above this function.
   jest.mock('../rn-db-factory', () => ({
     createStrandDbFactory: () => async () => ({
-      exec: async () => {
-        if (mockOwnInsertShouldFail) {
-          throw new Error(mockOwnInsertFailureMessage);
+      exec: async (sql: string) => {
+        if (mockAuthorityInsertShouldFail && /insert into Authority/.test(sql)) {
+          throw new Error(mockAuthorityInsertFailureMessage);
         }
       },
       eval: (sql: string) => {
-        const isPresenceCheck = /WHERE Id =/.test(sql);
-        const rows = isPresenceCheck
-          ? [] // always report "not yet contributed" so the insert path actually runs
-          : mockForeignRowOnRead
-            ? [{ Id: 'repl-auth-otherpeer' }]
+        let rows: Array<Record<string, unknown>> = [];
+        if (/FROM Officer WHERE UserId/.test(sql)) {
+          rows = []; // never idempotent-skip in these tests — the genesis/join attempt must run
+        } else if (/FROM InviteSlot WHERE Type/.test(sql)) {
+          rows = mockInviteSlotAvailable
+            ? [{ Cid: 'mock-slot-cid', InviteKey: 'mock-invite-key', InviteSignature: 'mock-invite-sig' }]
             : [];
+        } else if (/SELECT Id FROM Authority/.test(sql)) {
+          rows = mockForeignRowOnRead ? [{ Id: 'repl-auth-otherpeer' }] : [];
+        }
         let i = 0;
         return {
           [Symbol.asyncIterator]() {
@@ -1034,15 +1160,23 @@ function primeConnectedNode(): void {
 
 describe('runReplicationProof — verdict composition (harness false-PASS fix)', () => {
   beforeEach(() => {
-    mockOwnInsertShouldFail = false;
-    mockOwnInsertFailureMessage = 'CHECK constraint failed: InsertValid';
+    mockAuthorityInsertShouldFail = false;
+    mockAuthorityInsertFailureMessage = 'CHECK constraint failed: InsertValid';
+    mockInviteSlotAvailable = true;
     mockForeignRowOnRead = true;
   });
 
+  // Both the founder attempt AND the join-via-invite fallback fail — a genuine total write-phase
+  // failure, not the old single-insert-failure shape. Driven fast (no 60s InviteSlot-poll wait):
+  // the founder's own Authority insert fails immediately (mockAuthorityInsertShouldFail), and the
+  // fallback join attempt finds an InviteSlot but its NetworkEngine.respondToInvite call itself
+  // fails (mockRespondToInviteShouldFail) — exercising the outer write-phase catch either way.
   it("FAILs when this peer's own write fails, even though it reads another peer's row", async () => {
     reloadRunnerWithControlledDb();
     mockConstructedNodes.length = 0;
-    mockOwnInsertShouldFail = true;
+    mockAuthorityInsertShouldFail = true;
+    mockRespondToInviteShouldFail = true;
+    mockRespondToInviteFailureMessage = 'respondToInvite failed (fixture)';
     primeConnectedNode();
 
     const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
@@ -1051,14 +1185,25 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     consoleSpy.mockRestore();
     jest.restoreAllMocks();
 
-    // Own write really did fail (sanity check on the fixture, not just the verdict).
+    // The founder attempt really did fail and fell back to the joiner (sanity check on the
+    // fixture, not just the verdict).
+    const fallbackCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('falling back to join-via-invite'),
+    );
+    expect(fallbackCall).toBeDefined();
+    expect(fallbackCall!.join(' ')).toContain('InsertValid');
+
+    // ...and the join attempt itself also failed for real (via respondToInvite).
     const writeErrCall = calls.find(
       (args) => args[0] === '[replication-proof]' && args.join(' ').includes('write phase error'),
     );
     expect(writeErrCall).toBeDefined();
-    expect(writeErrCall!.join(' ')).toContain('InsertValid');
+    expect(writeErrCall!.join(' ')).toContain('respondToInvite failed (fixture)');
 
-    // It DID see the other peer's row (the old buggy predicate would have PASSed on this alone).
+    // It DID see the other peer's row (the old buggy predicate would have PASSed on this alone —
+    // the write-phase choreography's founder never resolved an authority id of its own here, so
+    // the read-phase predicate falls back to the 'repl-auth-' prefix heuristic; see the runner's
+    // isForeignAuthorityRow doc comment).
     const readTickCall = calls.find(
       (args) => args[0] === '[replication-proof]' && args.join(' ').includes('authorityRows= 1'),
     );
@@ -1074,10 +1219,10 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     expect(verdictCall!.join(' ')).not.toContain('PASS');
   }, 20000);
 
-  it("PASSes when this peer's own write succeeds AND it reads another peer's row", async () => {
+  it("PASSes when this peer's own write succeeds (founder path) AND it reads another peer's row", async () => {
     reloadRunnerWithControlledDb();
     mockConstructedNodes.length = 0;
-    mockOwnInsertShouldFail = false;
+    mockAuthorityInsertShouldFail = false;
     mockForeignRowOnRead = true;
     primeConnectedNode();
 
@@ -1087,10 +1232,18 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     consoleSpy.mockRestore();
     jest.restoreAllMocks();
 
-    const insertedCall = calls.find(
-      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('inserted own row'),
+    const founderCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('founder published authority + invite'),
     );
-    expect(insertedCall).toBeDefined();
+    expect(founderCall).toBeDefined();
+
+    // The real AuthorityEngine invite-issuance ceremony was actually exercised: a real invite
+    // was created and saveInviteWithSigning was called with the 'iad' scope.
+    expect(mockCreateAuthorityInviteCalls.length).toBe(1);
+    expect(mockSaveInviteWithSigningCalls.length).toBe(1);
+    expect(mockSaveInviteWithSigningCalls[0]!.scope).toBe('iad');
+    // The joiner path was NOT exercised — the founder attempt succeeded outright.
+    expect(mockNetworkEngineConstructions.length).toBe(0);
 
     const verdictCall = calls.find(
       (args) =>
@@ -1108,7 +1261,7 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
   it('FAILs when this peer sees no other row, even though its own write succeeded', async () => {
     reloadRunnerWithControlledDb();
     mockConstructedNodes.length = 0;
-    mockOwnInsertShouldFail = false;
+    mockAuthorityInsertShouldFail = false;
     mockForeignRowOnRead = false;
     primeConnectedNode();
 
@@ -1126,6 +1279,65 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     expect(verdictCall).toBeDefined();
     expect(verdictCall!.join(' ')).toContain('FAIL');
   }, 150000);
+
+  // Checkpoint 3 (2026-09-28): the join-via-invite fallback itself, driven to a SUCCESSFUL
+  // completion — the founder attempt loses the Authority race (mockAuthorityInsertShouldFail),
+  // this peer finds the (mocked) founder's InviteSlot, accepts it via the real
+  // NetworkEngine.respondToInvite() authority-accept branch, and creates its own authority via
+  // the real invite-bound NetworkEngine.createAuthority(..., { inviteSlotCid, inviteSignature }).
+  // This is the choreography's "issue -> accept -> invite-bound insert" call sequence the task
+  // brief asked to be tested — verified here as call shapes/argument plumbing, not a real schema
+  // execution (no real Optimystic/cadre-core runtime in jest — see the file header).
+  it('falls back to join-via-invite when the founder loses the Authority race, and completes via the real invite flow', async () => {
+    reloadRunnerWithControlledDb();
+    mockConstructedNodes.length = 0;
+    mockAuthorityInsertShouldFail = true;
+    mockInviteSlotAvailable = true;
+    mockRespondToInviteReturnId = 'mock-joined-authority-id';
+    primeConnectedNode();
+
+    const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+    await runReplicationProof();
+    const calls = consoleSpy.mock.calls;
+    consoleSpy.mockRestore();
+    jest.restoreAllMocks();
+
+    // The founder attempt was tried and lost the race — it never reached AuthorityEngine
+    // construction (the Authority insert throws before that point).
+    expect(mockAuthorityEngineConstructions.length).toBe(0);
+
+    // The joiner path ran for real: NetworkEngine was constructed, respondToInvite was called
+    // with the InviteSlot's own inviteKey (public — read directly from the shared strand DB,
+    // exactly as a real out-of-band-delivered invite share would carry it), and createAuthority
+    // was called with the invite-bound options carrying that same slot's Cid.
+    expect(mockNetworkEngineConstructions.length).toBe(1);
+    expect(mockRespondToInviteCalls.length).toBe(1);
+    expect((mockRespondToInviteCalls[0] as { invite: { inviteKey: string } }).invite.inviteKey).toBe(
+      'mock-invite-key',
+    );
+    expect(mockCreateAuthorityCalls.length).toBe(1);
+    expect(
+      (mockCreateAuthorityCalls[0] as { options: { inviteSlotCid: string; inviteSignature: string } }).options,
+    ).toMatchObject({ inviteSlotCid: 'mock-slot-cid' });
+
+    const joinedCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('joined authority via real invite flow'),
+    );
+    expect(joinedCall).toBeDefined();
+    expect(joinedCall!.join(' ')).toContain('mock-joined-authority-id');
+
+    const verdictCall = calls.find(
+      (args) =>
+        args[0] === '[replication-proof]' &&
+        args.join(' ').includes('========== REPLICATION VERDICT'),
+    );
+    expect(verdictCall).toBeDefined();
+    // No foreign row configured this test (mockForeignRowOnRead defaults true from beforeEach,
+    // but this peer's OWN resolved authority id is the joiner's mock-returned id, which differs
+    // from the default foreign fixture row 'repl-auth-otherpeer' — so sawOtherPeerRow is true and
+    // ownWriteOk is true: PASS).
+    expect(verdictCall!.join(' ')).toContain('PASS');
+  }, 20000);
 });
 
 // ---------------------------------------------------------------------------

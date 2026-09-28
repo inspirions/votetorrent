@@ -31,6 +31,47 @@
  * Fire-and-forget from index.js. Never throws — all errors caught and logged.
  *
  * Static import only — dynamic require() breaks Metro (Phase 16-07 lesson).
+ *
+ * WRITE-PHASE CHOREOGRAPHY (2026-09-28, debug session p2p11-multi-peer-replication,
+ * "User Decisions (checkpoint 3)" — supersedes the earlier bare shoe-in insert):
+ *
+ * `Authority.InsertValid`'s "very first authority" branch admits exactly ONE unauthorized
+ * writer per strand (`count(*) from Authority = 1`, spec'd as the network's one-time root of
+ * trust — see `doc/administration.md`). The original proof had BOTH peers attempt that same
+ * shoe-in insert, which only one of them can ever satisfy — a proof-authoring oversight
+ * (commit `66d9bed7`), not a deliberate design. This write phase now races for that slot for
+ * real and drives the REAL invite ceremony for whichever peer loses it:
+ *
+ *   1. FOUNDER attempt (both peers try this first): insert a real User -> Authority -> Admin
+ *      -> Officer (in THIS order — `Officer.AdminValid`'s non-invite branch requires Admin to
+ *      already exist, which is why this can't reuse `NetworkEngine.createAuthority()`'s own
+ *      Authority -> Officer -> Admin order; that order is correct ONLY for the invite-bound
+ *      path it was built for — see the debug session's Option-1 implementation note). Whichever
+ *      peer's Authority insert lands first genuinely becomes "the first authority"; then it
+ *      issues a real Authority invite via `AuthorityEngine.createAuthorityInvite()` ->
+ *      `saveInviteWithSigning('iad', ...)` (a real secp256k1 threshold-signing ceremony,
+ *      threshold=1) and publishes an `InviteSlot` for its sibling to find.
+ *   2. JOINER fallback (whichever peer's genesis attempt fails, for ANY reason — losing the
+ *      Authority race is the expected case, but any other genesis failure degrades to this same
+ *      path): poll the shared strand DB for the founder's `InviteSlot`, ensure its own User row
+ *      exists (shoe-in if still free, otherwise via the InviteSlot's own invite-bound branch —
+ *      `User.InsertValid` carries the identical one-free-slot pattern as `Authority`), accept
+ *      the invite via `NetworkEngine.respondToInvite()` (the real authority-accept branch, which
+ *      commits the 7-arg Digest `Admin.MutationValid` later recomputes), then create its OWN
+ *      authority via the real invite-bound `NetworkEngine.createAuthority(..., { inviteSlotCid,
+ *      inviteSignature })`.
+ *
+ * Both roles set `ownWriteOk = true` on success (section 5/7 false-PASS-fix contract
+ * unchanged, see CORRECTION 5 in the debug session file). The read phase (section 6) now
+ * detects "saw the other peer's contribution" by any `Authority.Id` that is NOT this peer's own
+ * resolved authority id (the joiner's own new authority uses a server-generated id, not the
+ * `repl-auth-<tail>` naming convention the founder's does), falling back to the old
+ * `repl-auth-`-prefix heuristic only when this peer never resolved an id of its own (total
+ * write-phase failure).
+ *
+ * Test/harness-only: no schema or product-engine-method change. `NetworkEngine`,
+ * `AuthorityEngine`, and the schema are called/read exactly as production code already does;
+ * only this proof-harness file's own orchestration grew.
  */
 
 import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
@@ -39,10 +80,22 @@ import { createScopedRnStorageProvider, scopedRnStoreName } from './storage-guar
 import { CadreNode } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
-import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/rn';
+import { VOTETORRENT_SCHEMA_SQL, NetworkEngine, AuthorityEngine } from '@votetorrent/vote-engine/rn';
 import { REPLICATION_PROOF_ENABLED } from './proof-flags.generated';
 import { createStrandDbFactory } from './rn-db-factory';
 import { isSelfVouched } from './self-voucher';
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { bytesToHex } from '@noble/curves/utils.js';
+import type {
+  Authority,
+  AuthorityInviteInvokes,
+  InviteAction,
+  LocalStorage,
+  Scope,
+  Signature,
+  ThresholdPolicy,
+  User,
+} from '@votetorrent/vote-core';
 
 // Multi-arg form — REQUIRED so logcat renders '[replication-proof]', 'msg' and the
 // harness `.*` grep matches. (STATE.md v2.0 Phase 17 Plan 06 lesson.)
@@ -171,6 +224,30 @@ const POLL_INTERVAL_MS = 1000;
 //   assertion rather than on a timeout. If DELEGATE_GRACE_MS is ever raised past ~20 s, this and
 //   that timeout both need revisiting together.
 const STRAND_PEER_POLL_MAX = 25;
+
+// INVITE_SLOT_POLL_MAX: bounded wait (ticks x POLL_INTERVAL_MS) for the JOINER role to find the
+// FOUNDER's published Authority InviteSlot (checkpoint-3 write-phase choreography, 2026-09-28).
+// The founder's own ceremony before publishing (4 raw inserts + a real threshold-signing
+// ceremony via AuthorityEngine.saveInviteWithSigning) is itself several real control-DB round
+// trips — sized generously (60s) rather than reusing the shorter STRAND_PEER_POLL_MAX, which
+// bounds a cheaper local connection-count read, not a cross-peer replicated-row wait.
+const INVITE_SLOT_POLL_MAX = 60;
+
+// Fixed identity/shape constants for the write-phase choreography's genesis + invite ceremony.
+// Values are arbitrary (this is a byte-replication proof, not a real authority) but must be
+// used CONSISTENTLY between the InviteResult.Digest binding (respondToInvite's invokes) and the
+// actual invite-bound Authority/Admin/Officer insert (createAuthority) — see
+// Admin.MutationValid's invite branch in votetorrent.qsql.
+const FOUNDER_AUTHORITY_NAME = 'Replication Proof Authority';
+const FOUNDER_AUTHORITY_DOMAIN = 'replication-proof.local';
+const FOUNDER_OFFICER_TITLE = 'Proof Officer';
+const FOUNDER_OFFICER_SCOPES: Scope[] = ['iad'];
+const FOUNDER_THRESHOLD_POLICIES: ThresholdPolicy[] = [{ policy: 'iad', threshold: 1 }];
+const JOIN_AUTHORITY_NAME = 'Replication Proof Authority (joined)';
+const JOIN_AUTHORITY_DOMAIN = 'replication-proof-joined.local';
+const JOIN_OFFICER_TITLE = 'Proof Officer (joined)';
+const JOIN_OFFICER_SCOPES: Scope[] = ['rad'];
+const JOIN_THRESHOLD_POLICIES: ThresholdPolicy[] = [{ policy: 'rad', threshold: 1 }];
 
 // CONTROL_RETRY_MAX / CONTROL_RETRY_INTERVAL_MS: 24 x 5 s = 120 s budget for a control-DB read or
 //   write that could not be SERVED (W1b, 2026-09-10).
@@ -444,7 +521,6 @@ export async function runReplicationProof(): Promise<void> {
 
     // Derive unique per-peer suffix for the proof network name (last 8 chars of peerId).
     const peerTail = peerId.length >= 8 ? peerId.slice(-8) : peerId;
-    const proofNetworkName = `replication-test-${peerTail}`;
 
     // ── 2b. D-09: relay-reservation READY marker (P2P-08 close confirmation) ────────────────
     // Locked observable (38-02 Wave-0 smoke, self:peer:update never fired in that run):
@@ -650,16 +726,19 @@ export async function runReplicationProof(): Promise<void> {
     // so the constant itself is now on the record for both peers.
     L('controlRelayAddrs=', CONTROL_RELAY_ADDRS, 'controlRelayAddrsCount=', CONTROL_RELAY_ADDRS.length);
 
-    // ── 5. WRITE: create the strand (correct mode now known) + insert the proof row ──────────
+    // ── 5. WRITE: create the strand (correct mode now known) + run the invite choreography ────
     // createStrandDbFactory(node) calls setSchemaPath(['App','main']) internally so bare SQL
     // table names resolve without rewriting engine queries (D-14). The strand factory is used
     // — not the local rnDbFactory and not a bare Quereus Database constructor call (Pitfall 7).
     //
     // Write target = Authority, NOT Network: Network is a singleton (`primary key ()`) gated by
-    // a valid PrimaryAuthorityId + signing context. Authority's first-insert is a "shoe-in"
-    // (context.SigningNonce/InviteSignature null AND count(*)=1) — satisfied by the fresh
-    // per-run wipe — and it is multi-row (PK=Id), so each peer can write its own uniquely-keyed
-    // row and read the other's. This is a pure strand-replication proof, not a semantic write.
+    // a valid PrimaryAuthorityId + signing context; Authority is multi-row (PK=Id) and admits
+    // exactly one free ("shoe-in") insert — the network's one-time root of trust — with every
+    // subsequent Authority admitted only via a real Invite. See the write-phase choreography
+    // doc comment at the top of this file (checkpoint 3, 2026-09-28) for the full design: both
+    // peers race for the shoe-in slot; the winner (founder) issues a real invite; the loser
+    // (joiner) accepts it for real. This is still a pure strand-replication proof (no product
+    // schema/engine change), now exercising the real authorization design instead of bypassing it.
     let strandDb: Awaited<ReturnType<ReturnType<typeof createStrandDbFactory>>> | undefined;
     const proofAuthId = `repl-auth-${peerTail}`;
     // Harness false-PASS fix (2026-09-28, CORRECTION 3 / Eliminated): tracks whether THIS peer's
@@ -669,6 +748,11 @@ export async function runReplicationProof(): Promise<void> {
     // failed: InsertValid`), which falls through to the outer catch below without setting it.
     // The final verdict (section 7) requires BOTH this AND seeing another peer's row.
     let ownWriteOk = false;
+    // The authority id THIS peer ends up owning — 'repl-auth-<peerTail>' if it won the
+    // founder race, or the server-generated id `NetworkEngine.createAuthority` resolves via
+    // InviteResult.InvokedId if it joined instead. Read by section 6 to tell "my own row"
+    // apart from "the other peer's row" (see the write-phase choreography doc comment above).
+    let myAuthorityId: string | undefined;
     try {
       const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
       // The shared strand ID is the PROOF_NETWORK_STORE constant; both peers join the same strand.
@@ -728,71 +812,240 @@ export async function runReplicationProof(): Promise<void> {
 
       // Use VOTETORRENT_SCHEMA_SQL to satisfy the import (tree-shaken in release).
       void VOTETORRENT_SCHEMA_SQL;
-      // Authority first-insert shoe-in. Every VoteTorrent table is context-gated, so the
-      // mutation MUST carry the signing context envelope via Quereus's inline
-      // `with context <var> = <value>` clause (mirrors NetworksEngine.createNetwork's TX1).
-      // The shoe-in branch needs SigningNonce/InviteSignature null + count(*)=1 (the per-run
-      // wipe guarantees the empty table). 'Authority' resolves to 'App.Authority' via the
-      // setSchemaPath set by createStrandDbFactory (D-14).
-      //
-      // IDEMPOTENCE (spike 062). `proofAuthId` is `repl-auth-<peerTail>` — deterministic per
-      // peer — and D-05 deliberately proves the peerId is STABLE across restart while the
-      // strand store SURVIVES the relaunch. So on the harness's D-05 relaunch leg this insert
-      // re-ran against a table that already held this peer's own row and died with
-      // `UNIQUE constraint failed: Authority.Id`, which aborted the write phase and left the
-      // sibling with nothing new to read.
-      //
-      // Re-inserting is also impossible by design once the table is non-empty: `InsertValid`'s
-      // shoe-in branch requires `(select count(*) from Authority) = 1`, so a second Authority
-      // row — this peer's own from a prior boot, OR the sibling's once replication WORKS — is
-      // rejected regardless of the Id. A per-run-unique Id would therefore not have helped.
-      //
-      // The proof's actual question is "did the OTHER peer's row arrive", so this peer having
-      // already contributed its row is SUCCESS, not failure. Check first, insert only when
-      // absent, and treat an Id collision as benign if we lose the race.
-      // W1b: the presence check is a control-DB-backed read and is denied outright while this peer
-      // is still a non-member, so it must run under the transient-failure budget rather than
-      // collapsing the whole write phase into a FAIL verdict on the first throw.
+      // Every VoteTorrent table is context-gated, so every mutation below carries the signing
+      // context envelope via Quereus's inline `with context <var> = <value>` clause (mirrors
+      // NetworksEngine.createNetwork's TX1). 'Authority'/'Officer'/'Admin'/'User'/'InviteSlot'/
+      // 'InviteResult' resolve to their 'App.*' names via the setSchemaPath set by
+      // createStrandDbFactory (D-14).
       const db = strandDb;
-      const alreadyContributed = await withControlRetry('write phase:', async () => {
-        let found = false;
+      const proofUserId = `repl-user-${peerTail}`;
+      const nowDt = (): string =>
+        // Canonical datetime form — NO trailing 'Z', no milliseconds (19 chars). Matches
+        // vote-engine's nowCanonicalDatetime() exactly; reimplemented locally rather than
+        // imported because packages/vote-engine's utils.ts is not exported from the RN-safe
+        // '/rn' subpath (see rn-entry.ts's controlled re-export list) and this harness file may
+        // not add a new product-code export per the checkpoint-3 binding scope. Passing the
+        // WRONG format here reproduces the deferred-CHECK datetime-coercion bug documented in
+        // toCanonicalDatetime's own doc comment (memory: project_quereus_deferred_check_...).
+        new Date().toISOString().slice(0, 19);
+
+      // IDEMPOTENCE (D-05 relaunch, generalized from the spike-062 single-insert check to the
+      // multi-row genesis ceremony below): if this peer already has an Officer row for its own
+      // proof user — under EITHER role, founder or joiner — it already completed the whole
+      // choreography in a prior boot of this SAME peer (the strand store's distributed state
+      // survives the D-03 LOCAL-cache wipe + D-05 relaunch; only the local replica is cleared).
+      // Recover the authority id from that row rather than re-running the ceremony, which would
+      // otherwise die on `UNIQUE constraint failed: User.Id` at the very first insert.
+      const existingAuthorityId = await withControlRetry('write phase: presence check', async () => {
         for await (const row of db.eval(
-          `SELECT Id FROM Authority WHERE Id = '${proofAuthId}'`,
+          `SELECT AuthorityId FROM Officer WHERE UserId = '${proofUserId}'`,
         )) {
-          if (row && row['Id']) {
-            found = true;
-            break;
+          if (row && row['AuthorityId']) {
+            return String(row['AuthorityId']);
           }
         }
-        return found;
+        return undefined;
       });
-      if (alreadyContributed) {
-        L('write phase: own row already present, skipping insert (idempotent)', proofAuthId);
+
+      /**
+       * FOUNDER attempt: insert User -> Authority -> Admin -> Officer, in THIS order (see the
+       * write-phase choreography doc comment at the top of this file for why the order matters
+       * and why `NetworkEngine.createAuthority()` cannot be reused here), then issue a real
+       * Authority invite via AuthorityEngine so the sibling can join for real. Throws on ANY
+       * failure — losing the Authority shoe-in race is the expected case, but this deliberately
+       * does not special-case the error: any genesis failure degrades to attemptJoinViaInvite.
+       */
+      async function attemptFounderGenesis(): Promise<string> {
+        await withControlRetry('write phase founder: user insert', () =>
+          db.exec(
+            `insert into User (Id, Name, ImageRef)
+              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+              values ('${proofUserId}', 'Proof User ${peerTail}', null);`,
+          ),
+        );
+        await withControlRetry('write phase founder: authority insert', () =>
+          db.exec(
+            `insert into Authority (Id, Name, DomainName, ImageRef)
+              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+              values ('${proofAuthId}', '${FOUNDER_AUTHORITY_NAME}', '${FOUNDER_AUTHORITY_DOMAIN}', null);`,
+          ),
+        );
+        const adminEffectiveAt = nowDt();
+        await withControlRetry('write phase founder: admin insert', () =>
+          db.exec(
+            `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
+              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+              values ('${proofAuthId}', '${adminEffectiveAt}', '${JSON.stringify(FOUNDER_THRESHOLD_POLICIES)}');`,
+          ),
+        );
+        await withControlRetry('write phase founder: officer insert', () =>
+          db.exec(
+            `insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes)
+              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+              values ('${proofAuthId}', '${adminEffectiveAt}', '${proofUserId}', '${FOUNDER_OFFICER_TITLE}', '${JSON.stringify(FOUNDER_OFFICER_SCOPES)}');`,
+          ),
+        );
+
+        // Real engine calls from here — the invite-issuance ceremony this checkpoint exists to
+        // exercise for real: a genuine secp256k1 threshold-signing ceremony (threshold=1) via
+        // AuthorityEngine.saveInviteWithSigning -> SigningEngine (its own default-constructed
+        // instance), publishing a real InviteSlot the joiner will find and accept.
+        const authorityEngine = new AuthorityEngine(
+          { id: proofAuthId, name: FOUNDER_AUTHORITY_NAME, domainName: FOUNDER_AUTHORITY_DOMAIN } as Authority,
+          { db, user: { id: proofUserId, name: `Proof User ${peerTail}`, activeKeys: [] } as User },
+        );
+        const inviteShare = authorityEngine.createAuthorityInvite(FOUNDER_AUTHORITY_NAME);
+        // Harness-only signing identity — never the device's real key (mirrors
+        // vote-engine/test/fixtures/test-context.ts's makeTestSignCallback, reimplemented
+        // locally since test fixtures are not importable into app/dev-tooling code).
+        const founderPrivateKey = secp256k1.utils.randomSecretKey();
+        const founderPublicKeyHex = bytesToHex(secp256k1.getPublicKey(founderPrivateKey));
+        const signCallback = async (digest: Uint8Array): Promise<Signature> => ({
+          signature: bytesToHex(secp256k1.sign(digest, founderPrivateKey)),
+          signerKey: founderPublicKeyHex,
+          signerUserId: proofUserId,
+        });
+        await authorityEngine.saveInviteWithSigning(inviteShare, 'iad' as Scope, signCallback);
+        return proofAuthId;
+      }
+
+      /**
+       * JOINER fallback: poll for the founder's InviteSlot, accept it via the real
+       * NetworkEngine.respondToInvite() authority-accept branch (commits the 7-arg Digest
+       * Admin.MutationValid later recomputes), then create this peer's OWN authority via the
+       * real invite-bound NetworkEngine.createAuthority(..., { inviteSlotCid, inviteSignature }).
+       */
+      async function attemptJoinViaInvite(): Promise<string> {
+        type SlotRow = { cid: string; inviteKey: string; inviteSignature: string };
+        let slot: SlotRow | undefined;
+        for (let i = 0; i < INVITE_SLOT_POLL_MAX && !slot; i++) {
+          slot = await withControlRetry('write phase joiner: poll InviteSlot', async () => {
+            for await (const row of db.eval(
+              `SELECT Cid, InviteKey, InviteSignature FROM InviteSlot WHERE Type = 'au'`,
+            )) {
+              if (row && row['Cid']) {
+                return {
+                  cid: String(row['Cid']),
+                  inviteKey: String(row['InviteKey']),
+                  inviteSignature: String(row['InviteSignature'] ?? ''),
+                };
+              }
+            }
+            return undefined;
+          });
+          if (!slot) {
+            if (i === 0) {
+              L('write phase joiner: no Authority InviteSlot yet, waiting for the founder to publish one');
+            }
+            await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
+          }
+        }
+        if (!slot) {
+          throw new Error(
+            `write phase joiner: no Authority InviteSlot appeared within ${INVITE_SLOT_POLL_MAX * POLL_INTERVAL_MS / 1000}s`,
+          );
+        }
+
+        // Ensure this peer's OWN User row exists. createAuthority() never creates one, and this
+        // peer's own genesis attempt above may have already inserted it (harmless — the shoe-in
+        // slot is still "ours") or may have failed before reaching it (the shoe-in slot may
+        // already be gone too, in which case fall back to User's own invite-bound branch,
+        // reusing the InviteSlot's own Cid + InviteSignature exactly as
+        // InvitationEngine.respondToInvite's keyholder-accept branch does for its minted User).
+        try {
+          await withControlRetry('write phase joiner: user shoe-in attempt', () =>
+            db.exec(
+              `insert into User (Id, Name, ImageRef)
+                with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
+                values ('${proofUserId}', 'Proof User ${peerTail}', null);`,
+            ),
+          );
+        } catch (userErr) {
+          const msg = userErr instanceof Error ? userErr.message : String(userErr);
+          if (!/UNIQUE constraint failed: User\.Id/.test(msg)) {
+            await withControlRetry('write phase joiner: user invite-bound insert', () =>
+              db.exec(
+                `insert into User (Id, Name, ImageRef)
+                  with context SigningNonce = null, InviteSlotCid = '${slot!.cid}', InviteSignature = '${slot!.inviteSignature}', Tid = 0
+                  values ('${proofUserId}', 'Proof User ${peerTail}', null);`,
+              ),
+            );
+          }
+        }
+
+        const joinAdminEffectiveAt = nowDt();
+        const inviteAction: InviteAction<AuthorityInviteInvokes> = {
+          invite: { type: 'au', expiration: '', inviteKey: slot.inviteKey, inviteSignature: '' },
+          isAccepted: true,
+          invokes: {
+            authority: { name: JOIN_AUTHORITY_NAME, domainName: JOIN_AUTHORITY_DOMAIN },
+            admin: { effectiveAt: joinAdminEffectiveAt, thresholdPolicies: JSON.stringify(JOIN_THRESHOLD_POLICIES) },
+            officers: [
+              {
+                adminEffectiveAt: joinAdminEffectiveAt,
+                userId: proofUserId,
+                title: JOIN_OFFICER_TITLE,
+                scopes: JSON.stringify(JOIN_OFFICER_SCOPES),
+              },
+            ],
+          },
+          // 999.1 R-03 documented limitation — the authority-accept branch's InviteResult.Digest
+          // embeds a server-generated id unknown at signing time, so no caller can pre-sign it;
+          // NetworkEngine.respondToInvite does not cryptographically verify this field on that
+          // branch (see network-engine.ts's own comment at this call site). Matches vote-engine's
+          // own seedAuthorityInvite test fixture convention for this exact reason.
+          inviteSignature: 'a'.repeat(128),
+        };
+        const networkEngine = new NetworkEngine(
+          {
+            hash: 'replication-proof',
+            name: 'Replication Proof',
+            primaryAuthorityDomainName: FOUNDER_AUTHORITY_DOMAIN,
+            relays: [],
+          },
+          {
+            getItem: async () => undefined,
+            setItem: async () => undefined,
+            removeItem: async () => undefined,
+            clear: async () => undefined,
+          } as LocalStorage,
+          { db, user: { id: proofUserId, name: `Proof User ${peerTail}`, activeKeys: [] } as User },
+        );
+        const invokedId = await networkEngine.respondToInvite(inviteAction);
+        if (!invokedId) {
+          throw new Error('write phase joiner: respondToInvite did not return an invokedId');
+        }
+        await networkEngine.createAuthority(
+          { name: JOIN_AUTHORITY_NAME, domainName: JOIN_AUTHORITY_DOMAIN },
+          {
+            officers: [
+              { init: { name: `Proof Officer ${peerTail}`, title: JOIN_OFFICER_TITLE, scopes: JOIN_OFFICER_SCOPES } },
+            ],
+            effectiveAt: joinAdminEffectiveAt,
+            thresholdPolicies: JOIN_THRESHOLD_POLICIES,
+          },
+          { inviteSlotCid: slot.cid, inviteSignature: 'a'.repeat(128) },
+        );
+        return invokedId;
+      }
+
+      if (existingAuthorityId) {
+        L('write phase: own genesis already present, skipping (idempotent)', existingAuthorityId);
+        myAuthorityId = existingAuthorityId;
         ownWriteOk = true;
       } else {
         try {
-          await withControlRetry('write phase insert:', () =>
-            db.exec(
-              `insert into Authority (Id, Name)
-                with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
-                values ('${proofAuthId}', '${proofNetworkName}');`,
-            ),
-          );
-          // W1b instrumentation (2026-09-10): the success path logged NOTHING, so a run could not
-          // distinguish "this peer inserted its row" from "this peer never reached the write".
-          L('write phase: inserted own row', proofAuthId);
+          myAuthorityId = await attemptFounderGenesis();
+          L('write phase: founder published authority + invite', myAuthorityId);
           ownWriteOk = true;
-        } catch (insertErr) {
-          const msg = insertErr instanceof Error ? insertErr.message : String(insertErr);
-          // Benign only when it is OUR OWN row that already exists; anything else is a real
-          // write failure (e.g. `CHECK constraint failed: InsertValid`) and must still surface —
-          // ownWriteOk stays false and the throw below is caught by the outer writeErr handler.
-          if (/UNIQUE constraint failed: Authority\.Id/.test(msg)) {
-            L('write phase: own row raced in, treating as contributed (idempotent)', proofAuthId);
-            ownWriteOk = true;
-          } else {
-            throw insertErr;
-          }
+        } catch (founderErr) {
+          L(
+            'write phase: founder attempt did not complete (expected for the non-founding peer), falling back to join-via-invite:',
+            founderErr instanceof Error ? founderErr.message : String(founderErr),
+          );
+          myAuthorityId = await attemptJoinViaInvite();
+          L('write phase: joined authority via real invite flow', myAuthorityId);
+          ownWriteOk = true;
         }
       }
     } catch (writeErr) {
@@ -838,6 +1091,15 @@ export async function runReplicationProof(): Promise<void> {
     // OWN write failed (e.g. `CHECK constraint failed: InsertValid`) still report PASS merely for
     // having read a row the OTHER peer wrote (CORRECTION 3 / Eliminated, 2026-09-28).
     let sawOtherPeerRow = false;
+    // Write-phase choreography (checkpoint 3, 2026-09-28): only the FOUNDER's own authority id
+    // uses the 'repl-auth-<tail>' naming convention — the JOINER's own new authority uses a
+    // server-generated id (NetworkEngine.createAuthority resolves it via InviteResult.InvokedId,
+    // returned to this file as `myAuthorityId`). "Saw the other peer's contribution" therefore
+    // means "any Authority row whose Id is not MY OWN resolved id" — falling back to the old
+    // 'repl-auth-' prefix heuristic only when this peer never resolved an id of its own (total
+    // write-phase failure, in which case the verdict FAILs on ownWriteOk regardless).
+    const isForeignAuthorityRow = (id: string): boolean =>
+      myAuthorityId ? id !== myAuthorityId : id.startsWith('repl-auth-');
     if (peerCount > 0) {
       try {
         const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
@@ -873,7 +1135,7 @@ export async function runReplicationProof(): Promise<void> {
               L('read tick', i, 'authorityRows=', seen.length, 'ids=', seen.length ? seen : '(none)');
               lastCensus = census;
             }
-            if (seen.some(id => id.startsWith('repl-auth-') && id !== proofAuthId)) {
+            if (seen.some(isForeignAuthorityRow)) {
               sawOtherPeerRow = true;
               break;
             }
