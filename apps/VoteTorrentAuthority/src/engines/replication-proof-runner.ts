@@ -88,6 +88,7 @@ import { VOTETORRENT_SCHEMA_SQL, NetworkEngine, AuthorityEngine, registerDbPlugi
 import { REPLICATION_PROOF_ENABLED } from './proof-flags.generated';
 import { createStrandDbFactory } from './rn-db-factory';
 import { isSelfVouched } from './self-voucher';
+import { publishSelfRecordAfterEnrol, type PublishSelfRecordResult } from './publish-self-record';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
 import type {
@@ -568,12 +569,17 @@ export async function runReplicationProof(): Promise<void> {
     // Emitted UNCONDITIONALLY (like relayReservation= and strandPeers=) so the harness can
     // key off the marker whether or not the ceremony succeeded, and so an unenrolled run is
     // legible as such instead of failing later as a mystery cohort failure.
+    // Started after a successful enrol and awaited just before the strand acquire (section 5).
+    // See publish-self-record.ts: without it a phone enrolled after boot leaves its CadrePeer
+    // row unsigned and addressless for up to 7.5 min, so no drone can dial it back.
+    let selfRecordPublish: Promise<PublishSelfRecordResult> | undefined;
     if (PROOF_INVITE.includes(BOOTSTRAP_PLACEHOLDER)) {
       L('enrolInvite=skipped (no invite injected — this peer will be refused as a non-member)');
     } else {
       try {
         await node.dialInvite(node.decodeInvite(PROOF_INVITE));
         L('enrolInvite=ok');
+        selfRecordPublish = publishSelfRecordAfterEnrol(node);
       } catch (enrolErr) {
         // Never fatal: the owner-side acceptPhone is the half that actually confers
         // membership, and it can still land. Fail loudly in the log, continue the proof, and
@@ -584,13 +590,11 @@ export async function runReplicationProof(): Promise<void> {
 
     // ── 3. D-03 fresh-state wipe — owned by the harness script, NOT done in-app ─────────────
     // This used to `LevelDB.destroyDB` the proof strand store on EVERY boot, including Peer A's
-    // D-05 relaunch. By then Peer A had joined networked in Step 4 and, at strandClusterSize 2,
-    // was one of the two holders of blocks it wrote. Wiping it left the drones holding headers
-    // that point at blocks nobody serves any more, so the next read was a CONFIRMED absence:
-    // `Missing block` on `Strand.Header` / `App.InviteSlot`, on the Peer-A role only
-    // (checkpoint 4, item 3). An in-app boot cannot tell Step 4 from D-05, so the script wipes
-    // the store while the app is force-stopped: before Step 1 and before the Step-4 relaunch,
-    // never before D-05.
+    // D-05 relaunch, which would discard any blocks Peer A already held in a networked cohort.
+    // An in-app boot cannot tell Step 4 from D-05, so the script wipes the store while the app
+    // is force-stopped: before Step 1 and before the Step-4 relaunch, never before D-05.
+    // (This was first suspected of causing `Missing block`; device leg 7 refuted that. The real
+    // cause was the unpublished self record — see publish-self-record.ts.)
     L('strand store wipe: owned by harness (not wiped in-app)', scopedRnStoreName(PROOF_STORE_PREFIX, PROOF_NETWORK_STORE));
 
     // ── 4. WAIT for peers FIRST, so the strand factory selects 'networked' mode ─────────────
@@ -805,6 +809,11 @@ export async function runReplicationProof(): Promise<void> {
       // Heartbeat the acquire (see ACQUIRE_HEARTBEAT_MS). `acquire settled` is emitted from a
       // `finally`, so a throw reports its duration too — the failure path is exactly where the
       // number is worth having.
+      if (selfRecordPublish) {
+        const pub = await selfRecordPublish;
+        L('selfRecordPublished=', pub.published, 'outcome=', pub.outcome, 'attempts=', pub.attempts,
+          'after', Math.round(pub.elapsedMs / 1000), 's', ...(pub.lastError ? ['lastError=', pub.lastError] : []));
+      }
       const acquireStart = Date.now();
       const acquireElapsedS = () => Math.round((Date.now() - acquireStart) / 1000);
       const acquireHeartbeat = setInterval(() => {

@@ -1535,3 +1535,33 @@ describe('run-replication-proof.sh — strand-store wipe is harness-owned and sk
     expect(d05).not.toMatch(/ 1\)$/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Late-enrolled self-record publish (device leg 7 trace). A phone enrolled after boot never
+// publishes its signed CadrePeer address until cadre-core's 7.5-min heartbeat, so no drone can
+// dial it back and it joins the strand with 0 peers. The runner must start the publish after a
+// successful enrol and await it BEFORE the strand acquire. PROOF_INVITE is substituted by the
+// harness at run time (a placeholder under jest), so this ordering is guarded at text level.
+// ---------------------------------------------------------------------------
+describe('replication-proof-runner — self-record publish after enrol', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require('fs');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require('path');
+  const runner: string = fs.readFileSync(path.resolve(__dirname, '../replication-proof-runner.ts'), 'utf8');
+
+  it('starts the publish only after a successful enrol', () => {
+    const enrolOk = runner.indexOf("L('enrolInvite=ok');");
+    const start = runner.indexOf('selfRecordPublish = publishSelfRecordAfterEnrol(node);');
+    expect(enrolOk).toBeGreaterThan(-1);
+    expect(start).toBeGreaterThan(enrolOk);
+    expect(start).toBeLessThan(runner.indexOf("L('enrolInvite=failed'"));
+  });
+
+  it('awaits the publish before the strand acquire starts', () => {
+    const awaitAt = runner.indexOf('const pub = await selfRecordPublish;');
+    const acquireAt = runner.indexOf('const acquireStart = Date.now();');
+    expect(awaitAt).toBeGreaterThan(-1);
+    expect(acquireAt).toBeGreaterThan(awaitAt);
+  });
+});
