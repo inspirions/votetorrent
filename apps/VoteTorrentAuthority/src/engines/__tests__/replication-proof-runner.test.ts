@@ -1030,6 +1030,12 @@ let mockAuthorityInsertShouldFail = false;
 let mockAuthorityInsertFailureMessage = 'CHECK constraint failed: InsertValid';
 let mockInviteSlotAvailable = true;
 let mockForeignRowOnRead = true;
+// Leg-6b false-PASS regression (2026-09-28T20:03): when set, overrides `mockForeignRowOnRead`
+// entirely and returns EXACTLY these ids from the read-phase `SELECT Id FROM Authority` census —
+// lets a test assert the read set is composed of specific ids (e.g. this peer's own orphan PLUS
+// its own joined authority, no genuinely foreign row) rather than only "some fixed foreign id or
+// nothing".
+let mockReadRowIds: string[] | null = null;
 
 function reloadRunnerWithControlledDb(): void {
   mockVerifyCadrePeerVoucher.mockReset();
@@ -1125,7 +1131,11 @@ function reloadRunnerWithControlledDb(): void {
             ? [{ Cid: 'mock-slot-cid', InviteKey: 'mock-invite-key', InviteSignature: 'mock-invite-sig' }]
             : [];
         } else if (/SELECT Id FROM Authority/.test(sql)) {
-          rows = mockForeignRowOnRead ? [{ Id: 'repl-auth-otherpeer' }] : [];
+          rows = mockReadRowIds
+            ? mockReadRowIds.map((id) => ({ Id: id }))
+            : mockForeignRowOnRead
+              ? [{ Id: 'repl-auth-otherpeer' }]
+              : [];
         }
         let i = 0;
         return {
@@ -1164,6 +1174,7 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     mockAuthorityInsertFailureMessage = 'CHECK constraint failed: InsertValid';
     mockInviteSlotAvailable = true;
     mockForeignRowOnRead = true;
+    mockReadRowIds = null;
   });
 
   // Both the founder attempt AND the join-via-invite fallback fail — a genuine total write-phase
@@ -1338,6 +1349,87 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     // ownWriteOk is true: PASS).
     expect(verdictCall!.join(' ')).toContain('PASS');
   }, 20000);
+
+  // Leg-6b false-PASS regression (2026-09-28T20:03, ORCHESTRATOR CORRECTION / checkpoint-4
+  // item 1): reproduces the EXACT on-device shape — this peer's founder attempt commits its
+  // `repl-auth-<tail>` Authority row, then fails LATER in the SAME genesis ceremony (on-device:
+  // `saveInviteWithSigning` threw `QuereusError: Function not found: SignatureValidP256/3`),
+  // falls back to attemptJoinViaInvite, and that succeeds under a DIFFERENT (invite-bound) id.
+  // The read-phase census then sees BOTH of this peer's own rows (the orphan + the joined
+  // authority) and NO row that was genuinely written by the other peer (Peer A never wrote at
+  // all in leg 6b). Before the fix, the single-id `id !== myAuthorityId` predicate counted the
+  // orphan as "the other peer's row" and the verdict falsely PASSed. After the fix, both ids are
+  // recognized as this peer's own (via ownAuthorityIds) and the verdict correctly FAILs.
+  it('FAILs on the leg-6b shape: own orphan Authority row + own joined authority, no other-peer row', async () => {
+    reloadRunnerWithControlledDb();
+    mockConstructedNodes.length = 0;
+    // Founder's own Authority insert SUCCEEDS (commits the 'repl-auth-<tail>' orphan row) ...
+    mockAuthorityInsertShouldFail = false;
+    // ... but the ceremony fails LATER, in the real threshold-signing invite-issuance call —
+    // exactly where leg 6b's device run failed, on a missing SQL function.
+    mockSaveInviteWithSigningShouldFail = true;
+    mockSaveInviteWithSigningFailureMessage =
+      "Unknown error: QuereusError: Function not found: SignatureValidP256/3";
+    // Joiner fallback succeeds under a different, invite-bound id (a UUID on-device; the exact
+    // value doesn't matter, only that it differs from the founder's 'repl-auth-<tail>' id).
+    mockInviteSlotAvailable = true;
+    mockRespondToInviteShouldFail = false;
+    mockCreateAuthorityShouldFail = false;
+    mockRespondToInviteReturnId = '242d5575-8170-4f17-930c-cd219bc06408';
+    // The read-phase census sees ONLY this peer's own two rows — no genuinely foreign row.
+    mockReadRowIds = ['repl-auth-IdABC123', '242d5575-8170-4f17-930c-cd219bc06408'];
+    primeConnectedNode();
+
+    const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+    await runReplicationProof();
+    const calls = consoleSpy.mock.calls;
+    consoleSpy.mockRestore();
+    jest.restoreAllMocks();
+
+    // Sanity check on the fixture: the founder attempt really did reach the real invite-issuance
+    // ceremony (AuthorityEngine was constructed, saveInviteWithSigning was called) and really did
+    // fail there, not at the Authority insert itself.
+    expect(mockAuthorityEngineConstructions.length).toBe(1);
+    expect(mockSaveInviteWithSigningCalls.length).toBe(1);
+    const fallbackCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('falling back to join-via-invite'),
+    );
+    expect(fallbackCall).toBeDefined();
+    expect(fallbackCall!.join(' ')).toContain('SignatureValidP256/3');
+
+    // ... and the joiner fallback completed successfully under its own different id.
+    const joinedCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('joined authority via real invite flow'),
+    );
+    expect(joinedCall).toBeDefined();
+    expect(joinedCall!.join(' ')).toContain('242d5575-8170-4f17-930c-cd219bc06408');
+
+    // The read phase saw exactly the two rows configured — both this peer's own.
+    const readTickCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('authorityRows= 2'),
+    );
+    expect(readTickCall).toBeDefined();
+    expect(readTickCall!.join(' ')).toContain('repl-auth-IdABC123');
+    expect(readTickCall!.join(' ')).toContain('242d5575-8170-4f17-930c-cd219bc06408');
+
+    // The fixed predicate: ownWriteOk=true (the joiner fallback DID complete for real) but
+    // sawOtherPeerRow=false (neither row in the read set was written by anyone else).
+    const verdictInputsCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args[1] === 'verdict inputs: ownWriteOk=',
+    );
+    expect(verdictInputsCall).toBeDefined();
+    expect(verdictInputsCall![2]).toBe(true); // ownWriteOk
+    expect(verdictInputsCall![4]).toBe(false); // sawOtherPeerRow — THE regression this test locks
+
+    const verdictCall = calls.find(
+      (args) =>
+        args[0] === '[replication-proof]' &&
+        args.join(' ').includes('========== REPLICATION VERDICT'),
+    );
+    expect(verdictCall).toBeDefined();
+    expect(verdictCall!.join(' ')).toContain('FAIL');
+    expect(verdictCall!.join(' ')).not.toContain('PASS');
+  }, 150000); // no foreign row ever appears, so the read phase polls its full window (~120s)
 });
 
 // ---------------------------------------------------------------------------

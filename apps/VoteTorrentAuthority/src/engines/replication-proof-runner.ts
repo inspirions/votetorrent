@@ -62,12 +62,15 @@
  *      inviteSignature })`.
  *
  * Both roles set `ownWriteOk = true` on success (section 5/7 false-PASS-fix contract
- * unchanged, see CORRECTION 5 in the debug session file). The read phase (section 6) now
- * detects "saw the other peer's contribution" by any `Authority.Id` that is NOT this peer's own
- * resolved authority id (the joiner's own new authority uses a server-generated id, not the
- * `repl-auth-<tail>` naming convention the founder's does), falling back to the old
- * `repl-auth-`-prefix heuristic only when this peer never resolved an id of its own (total
- * write-phase failure).
+ * unchanged, see CORRECTION 5 in the debug session file). The read phase (section 6) detects
+ * "saw the other peer's contribution" by any `Authority.Id` that is NOT in `ownAuthorityIds` —
+ * the SET of every Authority id this peer's own genesis ceremony ever committed (not just the
+ * single id it ends up resolving as "mine"; see the leg-6b false-PASS fix, 2026-09-28T20:03,
+ * documented at both `ownAuthorityIds`'s declaration in section 5 and `isForeignAuthorityRow`'s
+ * declaration in section 6 — a founder attempt can commit its `repl-auth-<tail>` row and then
+ * fail LATER in the same ceremony, leaving an orphan that a single-id comparison misreads as the
+ * other peer's row), falling back to the old `repl-auth-`-prefix heuristic only when this peer
+ * never got ANY id committed (total write-phase failure).
  *
  * Test/harness-only: no schema or product-engine-method change. `NetworkEngine`,
  * `AuthorityEngine`, and the schema are called/read exactly as production code already does;
@@ -748,11 +751,25 @@ export async function runReplicationProof(): Promise<void> {
     // failed: InsertValid`), which falls through to the outer catch below without setting it.
     // The final verdict (section 7) requires BOTH this AND seeing another peer's row.
     let ownWriteOk = false;
-    // The authority id THIS peer ends up owning — 'repl-auth-<peerTail>' if it won the
-    // founder race, or the server-generated id `NetworkEngine.createAuthority` resolves via
-    // InviteResult.InvokedId if it joined instead. Read by section 6 to tell "my own row"
-    // apart from "the other peer's row" (see the write-phase choreography doc comment above).
+    // The authority id THIS peer ends up owning as its FINAL resolved authority — 'repl-auth-
+    // <peerTail>' if it won the founder race, or the server-generated id
+    // `NetworkEngine.createAuthority` resolves via InviteResult.InvokedId if it joined instead.
+    // Kept for logging/idempotence only — do NOT use this alone to decide "foreign" in section 6
+    // (see ownAuthorityIds below and the leg-6b false-PASS regression it fixes).
     let myAuthorityId: string | undefined;
+    // Leg-6b false-PASS fix (2026-09-28, ORCHESTRATOR CORRECTION / checkpoint-4 item 1): EVERY
+    // Authority row this peer itself ever got committed, not just the ONE it ends up resolving as
+    // "mine". A founder attempt can commit its `repl-auth-<tail>` Authority row and then fail
+    // LATER in the same genesis ceremony (e.g. the Admin/Officer inserts, or the
+    // AuthorityEngine.saveInviteWithSigning threshold-signing ceremony — observed on-device as a
+    // missing-SQL-function error) — the attempt as a whole throws and falls back to
+    // attemptJoinViaInvite, but the orphaned `repl-auth-<tail>` row it already committed survives
+    // in the shared strand DB. `myAuthorityId` only ever holds the LAST-resolved id (the joiner's
+    // invite-bound id in that case), so a predicate comparing a read row against `myAuthorityId`
+    // alone wrongly counts that orphan as "the other peer's row" — the exact leg-6b defect. Track
+    // every id this peer itself wrote (orphan or final) here instead, and in section 6 treat a row
+    // as foreign iff it is NOT in this set.
+    const ownAuthorityIds = new Set<string>();
     try {
       const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
       // The shared strand ID is the PROOF_NETWORK_STORE constant; both peers join the same strand.
@@ -870,6 +887,12 @@ export async function runReplicationProof(): Promise<void> {
               values ('${proofAuthId}', '${FOUNDER_AUTHORITY_NAME}', '${FOUNDER_AUTHORITY_DOMAIN}', null);`,
           ),
         );
+        // Record the commit IMMEDIATELY, before any of the ceremony steps below that can still
+        // fail (Admin/Officer inserts, the real threshold-signing invite ceremony). If any of
+        // those throw, this row is an ORPHAN that survives in the shared strand DB even though
+        // this attempt as a whole fails and falls back to attemptJoinViaInvite — it must still be
+        // recognized as OUR OWN row in section 6, not misread as the other peer's (leg-6b fix).
+        ownAuthorityIds.add(proofAuthId);
         const adminEffectiveAt = nowDt();
         await withControlRetry('write phase founder: admin insert', () =>
           db.exec(
@@ -1026,12 +1049,17 @@ export async function runReplicationProof(): Promise<void> {
           },
           { inviteSlotCid: slot.cid, inviteSignature: 'a'.repeat(128) },
         );
+        // Only recorded once createAuthority() itself has succeeded — that is the call that
+        // actually inserts this peer's own Authority row under `invokedId` (respondToInvite above
+        // only commits an InviteResult row, a different table, not read by section 6's predicate).
+        ownAuthorityIds.add(invokedId);
         return invokedId;
       }
 
       if (existingAuthorityId) {
         L('write phase: own genesis already present, skipping (idempotent)', existingAuthorityId);
         myAuthorityId = existingAuthorityId;
+        ownAuthorityIds.add(existingAuthorityId);
         ownWriteOk = true;
       } else {
         try {
@@ -1091,15 +1119,24 @@ export async function runReplicationProof(): Promise<void> {
     // OWN write failed (e.g. `CHECK constraint failed: InsertValid`) still report PASS merely for
     // having read a row the OTHER peer wrote (CORRECTION 3 / Eliminated, 2026-09-28).
     let sawOtherPeerRow = false;
-    // Write-phase choreography (checkpoint 3, 2026-09-28): only the FOUNDER's own authority id
-    // uses the 'repl-auth-<tail>' naming convention — the JOINER's own new authority uses a
-    // server-generated id (NetworkEngine.createAuthority resolves it via InviteResult.InvokedId,
-    // returned to this file as `myAuthorityId`). "Saw the other peer's contribution" therefore
-    // means "any Authority row whose Id is not MY OWN resolved id" — falling back to the old
-    // 'repl-auth-' prefix heuristic only when this peer never resolved an id of its own (total
-    // write-phase failure, in which case the verdict FAILs on ownWriteOk regardless).
+    // Leg-6b false-PASS fix (2026-09-28, ORCHESTRATOR CORRECTION / checkpoint-4 item 1):
+    // "foreign" means "NOT one of the ids THIS peer itself ever got committed" — checked against
+    // `ownAuthorityIds` (section 5), a SET populated at every point this peer's own genesis
+    // ceremony actually commits an Authority row, not just the single id it ends up resolving as
+    // "mine". The single-id comparison this replaced (`id !== myAuthorityId`) was wrong: a
+    // founder attempt can commit its `repl-auth-<tail>` row and then fail LATER in the same
+    // ceremony (Admin/Officer inserts, or the real threshold-signing invite ceremony — observed
+    // on-device as a missing-SQL-function error), falling back to attemptJoinViaInvite, which
+    // resolves a DIFFERENT id (the invite-bound InviteResult.InvokedId) as `myAuthorityId`. Both
+    // ids are this SAME peer's own rows, but only one of them ever matched `myAuthorityId` — the
+    // orphaned `repl-auth-<tail>` row was misread as "the other peer's row" (a live device leg,
+    // 2026-09-28T20:03, reproduced exactly this: `authorityRows=2` were BOTH Peer B's own, no
+    // Peer A row existed at all, yet the old predicate reported PASS). Falls back to the old
+    // 'repl-auth-' prefix heuristic only when this peer never got ANY id committed (total
+    // write-phase failure, in which case the verdict FAILs on ownWriteOk regardless of what this
+    // predicate decides).
     const isForeignAuthorityRow = (id: string): boolean =>
-      myAuthorityId ? id !== myAuthorityId : id.startsWith('repl-auth-');
+      ownAuthorityIds.size > 0 ? !ownAuthorityIds.has(id) : id.startsWith('repl-auth-');
     if (peerCount > 0) {
       try {
         const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
