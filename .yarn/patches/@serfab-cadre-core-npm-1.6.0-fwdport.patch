@@ -67,7 +67,23 @@ index d17fc5156ae9bc4acff99edee3bf00ec0b696053..10bac37cb6d863b98ea5af42947aabed
              this._running = true;
              this.emit('control:connected', undefined);
              timing('[start] total: %dms', Math.round(performance.now() - tTotal));
-@@ -1450,7 +1487,12 @@ export class CadreNode {
+@@ -1394,6 +1431,15 @@ export class CadreNode {
+             storage: controlStorageProvider,
+             fretProfile: profile === 'storage' ? 'core' : 'edge',
+             relay: enableRelay,
++            // VoteTorrent patch (p2p11-relay-data-limit-forward): forward the embedder's
++            // bounded circuit-relay-v2 server config through to db-p2p's
++            // `circuitRelayServer(options.relayServerInit)` construction
++            // (`libp2p-node-base.js`). Without this, `relayServerInit` is always
++            // `undefined` here regardless of what `network.relayServerInit` sets, so the
++            // control node's relay silently runs on the RAW library defaults (128 KiB /
++            // 2 min) no matter what the embedder configures — see debug session
++            // p2p11-multi-peer-replication (votetorrent) for the device-run evidence.
++            ...(network?.relayServerInit && { relayServerInit: network.relayServerInit }),
+             // Fixed, and deliberately above any party's node count: every member reads the
+             // whole control database, so a cohort that excludes a member leaves it dependent
+             // on read repair — which cannot converge at a two-member cohort. Not a knob;
+@@ -1450,7 +1496,12 @@ export class CadreNode {
              connectionGater: createMembershipConnectionGater({
                  admitInbound: (remotePeerId) => this.admitInboundControlConnection(remotePeerId),
                  admitRelayReservation: (remotePeerId) => this.admitControlRelayReservation(remotePeerId),
@@ -81,7 +97,7 @@ index d17fc5156ae9bc4acff99edee3bf00ec0b696053..10bac37cb6d863b98ea5af42947aabed
              }, network?.connectionGater),
              // Fail-closed per-stream authorization for the four Optimystic control-DB
              // protocols — the members-only layer the connection gater's stranger
-@@ -3841,6 +3883,14 @@ export class CadreNode {
+@@ -3841,6 +3892,14 @@ export class CadreNode {
              await this.strandAddrService.shutdown();
              this.strandAddrService = null;
          }
@@ -96,7 +112,7 @@ index d17fc5156ae9bc4acff99edee3bf00ec0b696053..10bac37cb6d863b98ea5af42947aabed
          // Tear down the push-wake fan-out (releases the notifier's APNs HTTP/2 session).
          if (this.pushFanoutService) {
              await this.pushFanoutService.close().catch((err) => log('Push fan-out close failed: %o', err));
-@@ -4956,7 +5006,11 @@ export class CadreNode {
+@@ -4956,7 +5015,11 @@ export class CadreNode {
              founder: resolvedFounder,
              // Retained with the launch config, so a hibernation wake rebuilds under the
              // same identity without re-reading the control DB.
@@ -184,7 +200,22 @@ diff --git a/dist/strand-instance-manager.js b/dist/strand-instance-manager.js
 index 69fefb234c500abd296cf1772709fce16383a838..ad3707f95e036c3e180cd85d33ff07eaae281ce7 100644
 --- a/dist/strand-instance-manager.js
 +++ b/dist/strand-instance-manager.js
-@@ -426,6 +426,28 @@ export class StrandInstanceManager {
+@@ -405,6 +405,14 @@ export class StrandInstanceManager {
+                 storage: strandStorage,
+                 fretProfile: config.profile === 'storage' ? 'core' : 'edge',
+                 relay: enableRelay,
++                // VoteTorrent patch (p2p11-relay-data-limit-forward): mirrors the same
++                // forward added to `buildControlNodeOptions()` in cadre-node.js — the
++                // STRAND node is where replication/block-transfer traffic actually flows,
++                // so bounding only the control node's relay left this one on the RAW
++                // library defaults (128 KiB / 2 min), silently truncating relayed strand
++                // connections regardless of `network.relayServerInit`. See debug session
++                // p2p11-multi-peer-replication (votetorrent) for the device-run evidence.
++                ...(config.network?.relayServerInit && { relayServerInit: config.network.relayServerInit }),
+                 clusterSize: strandClusterSize,
+                 // Deliberately NOT CONTROL_CLUSTER_POLICY: a strand is application data with its own
+                 // breadth reasoning, and the shape match with the control policy is a coincidence.
+@@ -426,6 +434,28 @@ export class StrandInstanceManager {
                      enableRingZulu: config.profile === 'storage'
                  },
                  ...(config.privateKey && { privateKey: config.privateKey }),

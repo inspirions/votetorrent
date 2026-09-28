@@ -5783,7 +5783,7 @@ __metadata:
 
 "@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch":
   version: 1.6.0
-  resolution: "@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch::version=1.6.0&hash=e60db0"
+  resolution: "@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch::version=1.6.0&hash=0d3988"
   dependencies:
     "@libp2p/crypto": "npm:^5.1.13"
     "@libp2p/interface": "npm:^3.1.0"
@@ -5798,7 +5798,7 @@ __metadata:
     debug: "npm:^4.4.3"
     libp2p: "npm:^3.1.3"
     uint8arrays: "npm:^5.1.0"
-  checksum: 10c0/00189f734d3c62f4fd05a2760c39633858b102d48e670ae14b973f3e714e8599f683ed3f8012516182ae10dc3b253bdc8887173173d6b948120e035ce166a45c
+  checksum: 10c0/c807e4146329eab777930a69d713d9c5fa119c7221a0689a3a914f663490994450128bfd1c49aac447c63a0443626eeff25470f3e8c6568d358f791ae42be002
   languageName: node
   linkType: hard
 

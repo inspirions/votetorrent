@@ -122,18 +122,42 @@ const node = new CadreNode({
     listenAddrs: ['/ip4/0.0.0.0/tcp/0/ws'], // ephemeral — avoids EADDRINUSE
     // The storage profile turns the circuit-relay-v2 relay server ON
     // (createControlNode/startStrand derive `relay: profile === 'storage'` in
-    // the consumed vendored cadre-core, wiring circuitRelayServer() at
-    // libp2p-node-base.js). The prior WR-19 note — that the options builder
-    // forwarded only privateKey/transports/listenAddrs/connectionGater so an
-    // `enableRelay` key was a silent no-op — is now stale: the builder forwards
-    // `relayServerInit` too (T-38-12-01 transplant). Supply BOUNDED reservation
-    // limits so the relay does not run on the unlimited @libp2p/circuit-relay-v2
-    // defaults (dev-harness infra only, not shipped).
+    // the consumed cadre-core, wiring circuitRelayServer() at
+    // libp2p-node-base.js). CORRECTED (P2P-11 debug session, 2026-09-28,
+    // CORRECTION/CORRECTION 2): the prior WR-19 note claiming the options
+    // builder already forwarded `relayServerInit` was WRONG — as-shipped
+    // `@serfab/cadre-core@1.6.0` never forwards it (confirmed by full-dist
+    // grep, twice, independently), so `relayServerInit` below was DEAD
+    // CONFIG until `.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch`
+    // was extended to forward it — that patch must be applied (it is, via
+    // this repo's yarn patch mechanism) for anything in this block to have
+    // any effect on the running relay. Supply BOUNDED reservation limits so
+    // the relay does not fall back to circuit-relay-v2's own
+    // DEFAULT_DATA_LIMIT/DEFAULT_DURATION_LIMIT (128 KiB / 2 min — a real,
+    // FINITE library default, NOT "unlimited" as an earlier version of this
+    // comment incorrectly claimed; see constants.js DEFAULT_DATA_LIMIT =
+    // BigInt(1 << 17)) — that default is undersized for this app's real
+    // control-schema + block-replication traffic over one relayed connection
+    // (dev-harness infra only, not shipped).
+    //
+    // P2P-11 device-run root cause (debug session p2p11-multi-peer-replication,
+    // 2026-09-28): T-38-12-01 originally copied circuit-relay-v2's OWN library
+    // defaults verbatim (128 KiB / 2 min) as the "bounded" limit, never sized
+    // against VoteTorrent's actual control-schema + block-replication traffic.
+    // A phone's ENTIRE control/repo/replication session to a storage-profile
+    // drone rides ONE relayed connection, and the multi-table schema DDL +
+    // block sync + corroboration + self-voucher CadrePeer replication routinely
+    // exceed 128 KiB, so the relay itself resets the connection mid-transfer
+    // (`TransferLimitError: data limit of 131072 bytes exceeded`) — reproduced
+    // byte-for-byte on Node with no device/emulator involved, and eliminated by
+    // raising this bound (see debug session Evidence). `tools/multipeer-gate`
+    // (which mostly PASSES) already runs with a materially larger bound; these
+    // values match it rather than inventing a new number.
     relayServerInit: {
       reservations: {
         maxReservations: 32, // n=4 mesh + headroom (circuit-relay-v2 default is 15)
-        defaultDurationLimit: 2 * 60 * 1000, // 2 min per reservation
-        defaultDataLimit: BigInt(1 << 17), // 128 KiB per reservation
+        defaultDurationLimit: 10 * 60 * 1000, // 10 min per reservation (was 2 min; matches tools/multipeer-gate/lib/topology.mjs)
+        defaultDataLimit: BigInt(1 << 20), // 1 MiB per reservation (was 128 KiB; matches tools/multipeer-gate/lib/topology.mjs)
       },
       maxInboundHopStreams: 64,
       maxOutboundStopStreams: 64,
