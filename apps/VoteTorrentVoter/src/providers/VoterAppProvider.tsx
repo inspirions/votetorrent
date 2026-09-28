@@ -30,6 +30,7 @@
 import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
 import type {PropsWithChildren} from 'react';
 import {ActivityIndicator, Text, TouchableOpacity, View} from 'react-native';
+import {useTranslation} from 'react-i18next';
 import {hideSplash} from 'react-native-splash-view';
 import type {IDefaultUserEngine, NetworkReference} from '@votetorrent/vote-core';
 import {EngineFactory} from '../engines/engine-factory';
@@ -52,12 +53,24 @@ export function useVoterApp(): VoterAppContextType {
 }
 
 export function VoterAppProvider({children}: PropsWithChildren) {
+	// 'common' namespace (D-11 feature-namespaced resource tree) — syncSyncing lives
+	// there alongside the app's other cross-screen shell copy.
+	const {t} = useTranslation('common');
 	const [isInitialized, setIsInitialized] = useState(false);
 	const [hasNetwork, setHasNetwork] = useState(false);
 	const [initError, setInitError] = useState<string | null>(null);
 	// CR-02 parity: bump this to re-run the init effect ("Try Again"). The init effect's dep
 	// array includes initNonce; setIsInitialized(false) alone cannot re-fire it.
 	const [initNonce, setInitNonce] = useState(0);
+	// Quick task 260928-kkf ("Syncing + escape button", locked decision, mirrors the
+	// authority app's AppProvider): flips true once the CURRENT boot's first-sync wait
+	// has rejected once with StrandAwaitingFirstSyncError (~300s budget elapsed) — the
+	// signal that gates the Start Fresh escape under the Syncing label. Reset to false
+	// at the start of every non-cancelled init run (see the [initNonce, node] effect).
+	const [firstSyncBudgetElapsed, setFirstSyncBudgetElapsed] = useState(false);
+	// The currently-running init effect's own cancellation flag, published here so the
+	// escape's onPress can mark a superseded run BEFORE calling startFresh().
+	const cancelInitRunRef = useRef<(() => void) | undefined>(undefined);
 
 	// D-07: the dev-seeded election id, captured from seedDevNetwork's return once the boot
 	// effect resolves. Only populated in __DEV__ (undefined otherwise). 51-12 (D-09/D-20): does
@@ -104,13 +117,41 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// mirroring the authority app's AppProvider. connectedPeers is keyed by strandId
 	// (== networkHash); node is null until CadreNode boots (rnDbFactory stays active until then,
 	// solo-safe — P2P-11 stays paused this phase).
-	const {connectedPeers, node} = useCadreNode();
+	const {connectedPeers, node, syncState} = useCadreNode();
 	useEffect(() => {
 		engineFactoryRef.current?.setGetPeerCount(connectedPeers);
 		engineFactoryRef.current?.setNode(node);
 	}, [connectedPeers, node]);
 
+	// Quick task 260928-kkf: register the "first wait budget elapsed" listener for the
+	// lifetime of this provider (not just the current init run) — mirrors the authority
+	// app's AppProvider. Deregistered on unmount.
 	useEffect(() => {
+		engineFactoryRef.current?.setFirstSyncListener(() => setFirstSyncBudgetElapsed(true));
+		return () => engineFactoryRef.current?.setFirstSyncListener(undefined);
+	}, []);
+
+	// Quick task 260928-kkf: hide the splash the moment there is something to show under
+	// it — either the early 'syncing' signal or the later "budget elapsed" signal — even
+	// though isInitialized is still false and the init effect has not resolved.
+	useEffect(() => {
+		if (!isInitialized && (syncState === 'syncing' || firstSyncBudgetElapsed)) {
+			hideSplash();
+		}
+	}, [isInitialized, syncState, firstSyncBudgetElapsed]);
+
+	useEffect(() => {
+		// Quick task 260928-kkf (mirrors authority AppProvider): a cancelled run has been
+		// SUPERSEDED — by unmount, a node change re-running this effect, or the escape
+		// action explicitly abandoning the wait — so its state writes must never reach
+		// the component after that point. This does NOT stop the background strand wait
+		// itself (only cancelPendingStrandWaits does that, in the cleanup below); it
+		// stops THIS run's reaction to it.
+		let cancelled = false;
+		cancelInitRunRef.current = () => {
+			cancelled = true;
+		};
+
 		async function initialize() {
 			try {
 				const factory = engineFactoryRef.current!;
@@ -130,11 +171,17 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 					// registrant's own signing key (44-06).
 					try {
 						const seeded = await seedDevNetwork(networksEng);
+						// A cancelled run (superseded by the escape action, unmount, or a node
+						// change) must not write hasNetwork/initError/seededElectionId, and must
+						// not print the boot-smoke PASS marker for a run that is not the one that
+						// actually initialized.
+						if (cancelled) return;
 						// Bind the resolved device user into the factory BEFORE
 						// getEngine("network", ...) so the factory's internal open() also uses
 						// the real user.
 						factory.setCurrentUser(seeded.deviceUser);
 						await factory.getEngine('network', seeded.networkReference);
+						if (cancelled) return;
 						setHasNetwork(true);
 						setSeededElectionId(seeded.electionId);
 						// 51-12 (D-09/D-20): deliberately does NOT also capture seeded.sign onto
@@ -148,6 +195,10 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 						// cold-start smoke (scripts/voter-boot-smoke.sh). Additive only.
 						console.log('[voter-boot] VoterAppProvider isInitialized');
 					} catch (seedError) {
+						// A cancelled run's rejection (e.g. StrandWaitCancelledError from the
+						// cleanup below aborting a pending first-sync wait) must never surface
+						// as an error view — the escape action already resolved the UI.
+						if (cancelled) return;
 						// D-15 parity: surface the recoverable error; spinner resolves to an
 						// error view. NEVER fall back to a silent empty in-memory network.
 						console.error('seedDevNetwork failed:', seedError);
@@ -160,9 +211,13 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				// production seed source) — hasNetwork stays false; screens that need a real
 				// network gate on it, mirroring the authority app's cold-start-no-network state.
 
+				if (cancelled) return;
 				setIsInitialized(true);
 				hideSplash();
+				// Quick task 260928-kkf: a fresh run starts with no elapsed-budget escape shown.
+				setFirstSyncBudgetElapsed(false);
 			} catch (fatalError) {
+				if (cancelled) return;
 				// Outer catch handles failures before/after the seed/re-attach block (e.g.
 				// LocalStorageReact init failure).
 				console.error('Fatal init error:', fatalError);
@@ -173,9 +228,30 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		}
 
 		initialize();
+
+		return () => {
+			cancelled = true;
+			// Unmount, a node change re-running this effect, or a superseded boot run:
+			// stop waiting on any in-flight first-sync gate so nothing keeps polling in
+			// the background.
+			engineFactoryRef.current?.cancelPendingStrandWaits();
+		};
 		// Re-run when initNonce changes (Try Again) or node changes (CadreNode boot race,
 		// mirrors authority AppProvider's re-attach-fix dep array).
 	}, [initNonce, node]);
+
+	// Start Fresh: clear the engine cache and reset to a clean-slate boot.
+	// Extracted (quick task 260928-kkf, mirrors the authority app) so the error view's
+	// existing button AND the syncing view's escape button below call the EXACT same
+	// handler — same literal copy, same behavior. clearEngineCache() also calls
+	// cancelPendingStrandWaits(), so this already aborts any pending first-sync wait;
+	// the escape's onPress calls cancelInitRunRef.current() FIRST so the (now-cancelled)
+	// run's own rejection never re-surfaces as an error view.
+	const startFresh = useCallback(() => {
+		engineFactoryRef.current?.clearEngineCache();
+		setInitError(null);
+		setIsInitialized(true);
+	}, []);
 
 	// Async even though the data is in-memory — mirrors the shape a real engine's read method
 	// would have (D-01 swap-fidelity investment). UNCHANGED from the mock provider.
@@ -189,10 +265,35 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	}, []);
 
 	// Only show the spinner while initialization is truly pending.
+	// Quick task 260928-kkf ("Syncing + escape button", locked decision, mirrors the
+	// authority app's AppProvider): while a boot re-attach is gated on the first-sync
+	// wait, this same loading view additionally shows the localized Syncing label (as
+	// soon as syncState reports 'syncing', or once the wait's first budget has
+	// elapsed) and, ONLY once that budget has elapsed, the existing Start Fresh action
+	// — reusing its exact literal copy and handler. Try Again is deliberately NOT
+	// offered here: it would just start a new ~300s wait on the same strand, which the
+	// background wait is already doing.
 	if (!isInitialized) {
+		const showSyncing = syncState === 'syncing' || firstSyncBudgetElapsed;
 		return (
 			<View style={{flex: 1, justifyContent: 'center', alignItems: 'center'}}>
 				<ActivityIndicator size="large" />
+				{showSyncing && (
+					<Text style={{marginTop: 16, textAlign: 'center'}}>{t('syncSyncing')}</Text>
+				)}
+				{firstSyncBudgetElapsed && (
+					<TouchableOpacity
+						onPress={() => {
+							// Mark THIS boot run cancelled before startFresh() clears the
+							// engine cache — so its (now-orphaned) pending seed/open never
+							// writes state once cancelPendingStrandWaits() rejects it.
+							cancelInitRunRef.current?.();
+							startFresh();
+						}}
+						style={{marginTop: 8}}>
+						<Text>{'Start Fresh'}</Text>
+					</TouchableOpacity>
+				)}
 			</View>
 		);
 	}
@@ -216,13 +317,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 					style={{marginBottom: 8}}>
 					<Text>{'Try Again'}</Text>
 				</TouchableOpacity>
-				<TouchableOpacity
-					onPress={() => {
-						// Start Fresh: clear the engine cache and reset to a clean-slate boot.
-						engineFactoryRef.current?.clearEngineCache();
-						setInitError(null);
-						setIsInitialized(true);
-					}}>
+				<TouchableOpacity onPress={startFresh}>
 					<Text>{'Start Fresh'}</Text>
 				</TouchableOpacity>
 			</View>

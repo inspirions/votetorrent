@@ -48,7 +48,7 @@ interface FakeCadreNode {
   offCalls: Array<[string, Listener]>;
   /** The options object the constructor was called with (D-14 wiring proof). */
   receivedOptions: unknown;
-  emit(event: string): void;
+  emit(event: string, payload?: unknown): void;
   hasListener(event: string): boolean;
 }
 
@@ -79,8 +79,13 @@ jest.mock(
         this.listeners[event] = (this.listeners[event] ?? []).filter((l) => l !== cb);
       }
 
-      emit(event: string) {
-        (this.listeners[event] ?? []).forEach((l) => l());
+      // Optional payload forwarded to every listener (quick task 260928-kkf: the
+      // first-sync gate's onStrandStarted reads `e?.strandId` off it). A call with
+      // no payload (the ORIGINAL contract every pre-existing test in this file
+      // relies on) still forwards `undefined`, exercising the same "no strandId"
+      // branch as a real payload-less event.
+      emit(event: string, payload?: unknown) {
+        (this.listeners[event] ?? []).forEach((l) => l(payload));
       }
 
       hasListener(event: string) {
@@ -257,6 +262,89 @@ describe('CadreNodeProvider — P2P-02 boot invariants', () => {
         renderer.create(<Orphan />);
       });
     }).toThrow('useCadreNode must be used within a CadreNodeProvider');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// First-sync gate syncState mapping — quick task 260928-kkf.
+//
+// A gated joiner's `strand:started` event carries `{strandId}` but its
+// `StrandInstance.database` is still unset — the OLD unconditional 'connected'
+// mapping was wrong for exactly that case. `getStrand(strandId)` is now consulted:
+// `database` unset -> 'syncing'; `database` present, or no strandId / no instance at
+// all (the pre-existing payload-less-emit test above), -> 'connected' as before.
+// `strand:writable` is the gate's own resolution signal, newly listened for.
+// ---------------------------------------------------------------------------
+describe('CadreNodeProvider — first-sync gate syncState mapping (quick task 260928-kkf)', () => {
+  it("strand:started for a strandId whose getStrand() instance has no database maps to 'syncing'", async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    node.getStrand.mockReturnValue({ strandId: 'net1', database: undefined });
+
+    renderer.act(() => {
+      node.emit('strand:started', { strandId: 'net1' });
+    });
+
+    expect(captured.value!.syncState).toBe('syncing');
+  });
+
+  it("strand:writable transitions a gated 'syncing' strand to 'connected'", async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    node.getStrand.mockReturnValue({ strandId: 'net1', database: undefined });
+
+    renderer.act(() => {
+      node.emit('strand:started', { strandId: 'net1' });
+    });
+    expect(captured.value!.syncState).toBe('syncing');
+
+    expect(node.hasListener('strand:writable')).toBe(true);
+    renderer.act(() => {
+      node.emit('strand:writable', { strandId: 'net1' });
+    });
+    expect(captured.value!.syncState).toBe('connected');
+  });
+
+  it("strand:started for a strandId whose getStrand() instance ALREADY has a database maps to 'connected' (founder / already-synced case, unchanged)", async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    node.getStrand.mockReturnValue({ strandId: 'net1', database: {} });
+
+    renderer.act(() => {
+      node.emit('strand:started', { strandId: 'net1' });
+    });
+
+    expect(captured.value!.syncState).toBe('connected');
+  });
+
+  it("strand:started with a strandId getStrand() cannot resolve (undefined instance) maps to 'connected', unchanged", async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    node.getStrand.mockReturnValue(undefined);
+
+    renderer.act(() => {
+      node.emit('strand:started', { strandId: 'unknown-strand' });
+    });
+
+    expect(captured.value!.syncState).toBe('connected');
+  });
+
+  it('removes the strand:writable listener on unmount (cleanup via off())', async () => {
+    const { tr } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    expect(node.hasListener('strand:writable')).toBe(true);
+
+    renderer.act(() => {
+      tr.unmount();
+    });
+
+    const writableOffCalls = node.offCalls.filter(([event]) => event === 'strand:writable');
+    expect(writableOffCalls.length).toBeGreaterThan(0);
   });
 });
 

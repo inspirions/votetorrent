@@ -24,6 +24,7 @@
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
+import {Text, TouchableOpacity} from 'react-native';
 import {Database} from '@quereus/quereus';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {UserKeyType, ElectionType} from '@votetorrent/vote-core';
@@ -37,9 +38,30 @@ jest.setTimeout(20000);
 
 // Mirrors App.tsx's nesting (CadreNodeProvider wraps VoterAppProvider) with an inert
 // pass-through — this test proves VoterAppProvider's OWN plumbing, not a real CadreNode boot.
+//
+// `mockCadreNodeValue` is a mutable module-scope object (not a fresh literal per call)
+// so a test can flip `syncState` (quick task 260928-kkf's boot-syncing cases) while
+// keeping `connectedPeers`/`node` referentially stable across renders — a fresh
+// closure each render would spuriously re-fire VoterAppProvider's
+// `[connectedPeers, node]` peer-count effect.
+const mockCadreNodeValue: {
+	node: unknown;
+	syncState: 'connected' | 'syncing' | 'offline';
+	connectedPeers: () => number;
+} = {
+	node: null,
+	syncState: 'offline',
+	connectedPeers: () => 0,
+};
 jest.mock('../CadreNodeProvider', () => ({
-	useCadreNode: () => ({node: null, syncState: 'offline', connectedPeers: () => 0}),
+	useCadreNode: () => mockCadreNodeValue,
 	CadreNodeProvider: ({children}: {children: React.ReactNode}) => children,
+}));
+
+// react-i18next — VoterAppProvider now calls useTranslation('common') for the Syncing
+// label (quick task 260928-kkf). Echo the key so the assertions below are exact.
+jest.mock('react-i18next', () => ({
+	useTranslation: () => ({t: (key: string) => key}),
 }));
 
 // The engine layer's own in-memory-Database dbFactory default (networks-engine.ts's
@@ -58,6 +80,15 @@ jest.mock('../../engines/dev-seed', () => ({
 import {VoterAppProvider, useVoterApp} from '../VoterAppProvider';
 import type {VoterAppContextType} from '../types';
 import {hideSplash} from 'react-native-splash-view';
+// The REAL EngineFactory (not mocked) — quick task 260928-kkf's tests spy on its
+// prototype so a test can (a) capture the listener VoterAppProvider registers via
+// `setFirstSyncListener` and invoke it directly (simulating the first-sync gate's
+// budget elapsing without running the whole strand-backed DbFactory machinery, which
+// this file's `rnDbFactory` mock deliberately bypasses), and (b) assert
+// `clearEngineCache`/`cancelPendingStrandWaits` were actually called — both spies
+// call through to the real implementation (no `mockImplementation`), so behaviour is
+// unchanged; only the call record is added.
+import {EngineFactory} from '../../engines/engine-factory';
 
 const FAKE_USER: User = {
 	id: 'test-device-user',
@@ -161,6 +192,8 @@ async function flushBoot(ticks = 15, until?: () => boolean) {
 beforeEach(async () => {
 	mockSeedDevNetwork.mockReset();
 	(hideSplash as jest.Mock).mockClear();
+	mockCadreNodeValue.node = null;
+	mockCadreNodeValue.syncState = 'offline';
 	// AsyncStorage's jest mock is a module-scope singleton store shared across every it() in this
 	// file — clear it so each test's seedRealNetwork() creates a genuinely fresh network (mirrors
 	// dev-seed.test.ts's own AsyncStorage.clear() isolation convention).
@@ -205,5 +238,247 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 		expect(text).toContain('Try Again');
 		expect(text).toContain('Start Fresh');
 		expect(hideSplash).toHaveBeenCalled();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Quick task 260928-kkf — "Syncing + escape button" (locked decision), mirroring
+// the authority app's AppProvider test coverage.
+//
+// `seedDevNetwork` is given a "gate" via `makeDeferredSeed`: it still performs the
+// REAL `NetworksEngine.create()` seed work (so a later `getEngine('network', ref)`
+// resolves against a genuinely cached context, exactly like the tests above), but
+// its outer promise does not settle until the test releases the gate — letting a
+// test observe the PENDING (syncing) state before deciding how the boot finishes.
+// ---------------------------------------------------------------------------
+function findTouchableWithText(tr: renderer.ReactTestRenderer, text: string) {
+	const touchables = tr.root.findAllByType(TouchableOpacity);
+	return touchables.find(
+		t => t.findAll(n => n.type === Text && n.props.children === text).length > 0,
+	);
+}
+
+function findStartFreshButton(tr: renderer.ReactTestRenderer) {
+	return findTouchableWithText(tr, 'Start Fresh');
+}
+
+/** True if the localized Syncing label (echoed key 'syncSyncing') is rendered anywhere. */
+function hasSyncingLabel(tr: renderer.ReactTestRenderer): boolean {
+	return JSON.stringify(tr.toJSON()).includes('syncSyncing');
+}
+
+/** A seedDevNetwork implementation that does the REAL seed work up front, then blocks
+ * on an externally-releasable gate before resolving (or, if `releaseSeed('reject')` is
+ * called, rejecting instead). `reachedGateCount` increments the instant a given
+ * invocation starts awaiting the gate — a caller that invokes seedDevNetwork more than
+ * once (the "node changed, superseded run" case) MUST poll this up to the expected
+ * count (with `flushBoot`'s real-timer `until` mode — real `NetworksEngine.create()`
+ * work needs real timer yields, not just microtask hops) BEFORE releasing the gate;
+ * releasing before every expected invocation has reached it leaves the late arrival's
+ * eventual throw/setState landing outside any `act()` wrapper. */
+function makeDeferredSeed() {
+	let release!: (mode: 'resolve' | 'reject') => void;
+	const gate = new Promise<'resolve' | 'reject'>(resolve => {
+		release = resolve;
+	});
+	const state = {reachedGateCount: 0};
+	mockSeedDevNetwork.mockImplementation(async networksEngine => {
+		const result = await seedRealNetwork(networksEngine);
+		state.reachedGateCount += 1;
+		const mode = await gate;
+		if (mode === 'reject') {
+			throw new Error('seed rejected after release');
+		}
+		return result;
+	});
+	return {releaseSeed: (mode: 'resolve' | 'reject') => release(mode), state};
+}
+
+/** Releases a deferred seed's gate AND flushes the microtask chain it unblocks —
+ * INSIDE the same `act(async () => ...)` call — so every resulting state update
+ * (including a superseded run's OWN legitimate `setInitError`, which can span
+ * several microtask ticks past the synchronous `release()` call) is captured by
+ * act() rather than warning "not wrapped in act(...)". A bare
+ * `renderer.act(() => releaseSeed(...))` followed by a SEPARATE `flushBoot()` call
+ * leaves exactly that gap open. */
+async function releaseAndFlush(releaseSeed: (mode: 'resolve' | 'reject') => void, mode: 'resolve' | 'reject') {
+	await renderer.act(async () => {
+		releaseSeed(mode);
+		for (let i = 0; i < 15; i++) {
+			// eslint-disable-next-line no-await-in-loop
+			await Promise.resolve();
+		}
+	});
+}
+
+describe("VoterAppProvider boot 'still syncing' surface + escape — quick task 260928-kkf", () => {
+	it('hides the splash and shows the Syncing label while a boot re-attach is pending; resolves to isInitialized with no error once the seed settles', async () => {
+		const {releaseSeed} = makeDeferredSeed();
+		mockCadreNodeValue.syncState = 'syncing';
+
+		const {tr, captured} = renderProvider();
+		await flushBoot(30, () => hasSyncingLabel(tr));
+
+		expect(hideSplash).toHaveBeenCalled();
+		expect(hasSyncingLabel(tr)).toBe(true);
+		expect(findStartFreshButton(tr)).toBeUndefined();
+
+		await releaseAndFlush(releaseSeed, 'resolve');
+		await flushBoot(30, () => captured.value !== null && captured.value.isInitialized === true);
+
+		expect(captured.value!.isInitialized).toBe(true);
+		expect(JSON.stringify(tr.toJSON())).not.toContain('Failed to load network');
+	});
+
+	it("(d) hides Start Fresh until the first-sync listener fires once, then shows it under the Syncing label", async () => {
+		const {} = makeDeferredSeed();
+		mockCadreNodeValue.syncState = 'syncing';
+		const setFirstSyncListenerSpy = jest.spyOn(EngineFactory.prototype, 'setFirstSyncListener');
+
+		const {tr} = renderProvider();
+		await flushBoot(30, () => hasSyncingLabel(tr));
+
+		expect(findStartFreshButton(tr)).toBeUndefined();
+
+		const registeredListener = setFirstSyncListenerSpy.mock.calls[setFirstSyncListenerSpy.mock.calls.length - 1][0];
+		expect(typeof registeredListener).toBe('function');
+		renderer.act(() => {
+			registeredListener?.('fake-strand-id');
+		});
+		await flushBoot(10);
+
+		expect(hasSyncingLabel(tr)).toBe(true);
+		expect(findStartFreshButton(tr)).toBeDefined();
+
+		setFirstSyncListenerSpy.mockRestore();
+	});
+
+	it('(e) pressing the syncing-view Start Fresh calls clearEngineCache (which runs cancelPendingStrandWaits) and resolves to isInitialized with no error, even if the pending seed later rejects', async () => {
+		const {releaseSeed} = makeDeferredSeed();
+		mockCadreNodeValue.syncState = 'syncing';
+		const clearEngineCacheSpy = jest.spyOn(EngineFactory.prototype, 'clearEngineCache');
+		const cancelPendingStrandWaitsSpy = jest.spyOn(EngineFactory.prototype, 'cancelPendingStrandWaits');
+		const setFirstSyncListenerSpy = jest.spyOn(EngineFactory.prototype, 'setFirstSyncListener');
+
+		const {tr, captured} = renderProvider();
+		await flushBoot(30, () => hasSyncingLabel(tr));
+
+		const registeredListener = setFirstSyncListenerSpy.mock.calls[setFirstSyncListenerSpy.mock.calls.length - 1][0];
+		renderer.act(() => {
+			registeredListener?.('fake-strand-id');
+		});
+		await flushBoot(10);
+
+		const startFresh = findStartFreshButton(tr);
+		expect(startFresh).toBeDefined();
+
+		renderer.act(() => {
+			startFresh!.props.onPress();
+		});
+		await flushBoot(10);
+
+		expect(clearEngineCacheSpy).toHaveBeenCalled();
+		expect(cancelPendingStrandWaitsSpy).toHaveBeenCalled();
+		expect(captured.value).not.toBeNull();
+		expect(captured.value!.isInitialized).toBe(true);
+		expect(JSON.stringify(tr.toJSON())).not.toContain('Failed to load network');
+
+		// The superseded seed rejecting AFTER the escape must write no state — no
+		// error view, no unmounted/act-violation console noise.
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		await releaseAndFlush(releaseSeed, 'reject');
+
+		expect(JSON.stringify(tr.toJSON())).not.toContain('Failed to load network');
+		for (const call of errorSpy.mock.calls) {
+			expect(String(call[0])).not.toContain('not wrapped in act');
+		}
+		errorSpy.mockRestore();
+		clearEngineCacheSpy.mockRestore();
+		cancelPendingStrandWaitsSpy.mockRestore();
+		setFirstSyncListenerSpy.mockRestore();
+	});
+
+	it('(c) unmounting while the seed is pending cancels the wait; a later rejection writes no state', async () => {
+		const {releaseSeed} = makeDeferredSeed();
+		mockCadreNodeValue.syncState = 'syncing';
+		const cancelPendingStrandWaitsSpy = jest.spyOn(EngineFactory.prototype, 'cancelPendingStrandWaits');
+
+		const {tr} = renderProvider();
+		await flushBoot(30, () => hasSyncingLabel(tr));
+
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		renderer.act(() => {
+			tr.unmount();
+		});
+
+		expect(cancelPendingStrandWaitsSpy).toHaveBeenCalled();
+
+		await releaseAndFlush(releaseSeed, 'reject');
+
+		for (const call of errorSpy.mock.calls) {
+			expect(String(call[0])).not.toContain('not wrapped in act');
+		}
+		errorSpy.mockRestore();
+		cancelPendingStrandWaitsSpy.mockRestore();
+	});
+
+	it('(c) a node change re-running the init effect cancels the pending wait for the superseded run', async () => {
+		const {releaseSeed, state} = makeDeferredSeed();
+		mockCadreNodeValue.syncState = 'syncing';
+		const cancelPendingStrandWaitsSpy = jest.spyOn(EngineFactory.prototype, 'cancelPendingStrandWaits');
+
+		function Harness({generation}: {generation: number}) {
+			void generation;
+			return (
+				<VoterAppProvider>
+					<Text>child-rendered</Text>
+				</VoterAppProvider>
+			);
+		}
+
+		let tr!: renderer.ReactTestRenderer;
+		renderer.act(() => {
+			tr = renderer.create(<Harness generation={0} />);
+		});
+		await flushBoot(30, () => hasSyncingLabel(tr));
+		// Real `NetworksEngine.create()` work needs real timer yields, not just
+		// microtask hops (see makeDeferredSeed's header) — wait for run 1's OWN seed
+		// work to have actually reached the gate before triggering the node change,
+		// so the ordering below is deterministic rather than racing real DB I/O.
+		await flushBoot(30, () => state.reachedGateCount >= 1);
+
+		const callsBeforeNodeChange = cancelPendingStrandWaitsSpy.mock.calls.length;
+
+		// Simulate the CadreNode boot's `node` value CHANGING (null -> undefined is a
+		// distinct value, same as the real null -> live-node transition for
+		// change-detection purposes) — re-runs the `[initNonce, node]` init effect
+		// (mirrors the authority app's equivalent case). Deliberately NOT a truthy fake
+		// node object: that would flip the lazy DbFactory dispatch onto the
+		// strand-backed path this file's `rnDbFactory` mock does not support, crashing
+		// the still-real `NetworksEngine.create()` the deferred seed performs — this
+		// test's target is the engine-factory's "node actually changed" cancellation
+		// logic, not the strand dispatch itself (already covered by rn-db-factory's
+		// own first-sync gate tests).
+		mockCadreNodeValue.node = undefined;
+		renderer.act(() => {
+			tr.update(<Harness generation={1} />);
+		});
+		await flushBoot(10);
+
+		expect(cancelPendingStrandWaitsSpy.mock.calls.length).toBeGreaterThan(callsBeforeNodeChange);
+
+		// Wait for the SUPERSEDING run's own seed work to reach the gate too — only
+		// THEN is it safe to release without a late arrival landing outside act().
+		await flushBoot(30, () => state.reachedGateCount >= 2);
+
+		// The superseded seed's later rejection must write no state.
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		await releaseAndFlush(releaseSeed, 'reject');
+
+		for (const call of errorSpy.mock.calls) {
+			expect(String(call[0])).not.toContain('not wrapped in act');
+		}
+		errorSpy.mockRestore();
+		cancelPendingStrandWaitsSpy.mockRestore();
 	});
 });

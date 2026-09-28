@@ -33,6 +33,16 @@ jest.mock("react-native-splash-view", () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// react-i18next — AppProvider now calls useTranslation() for the Syncing label
+// (quick task 260928-kkf). Echo the key (label copy is incidental; the KEY is
+// what a real translation resource resolves) — same convention as
+// NetworksScreen.bootstrap.test.tsx.
+// ---------------------------------------------------------------------------
+jest.mock("react-i18next", () => ({
+	useTranslation: () => ({ t: (key: string) => key }),
+}));
+
+// ---------------------------------------------------------------------------
 // @votetorrent/vote-engine/rn — only LocalStorageReact is touched by
 // AppProvider's construction path; a bare class stub is enough.
 // ---------------------------------------------------------------------------
@@ -94,11 +104,22 @@ interface FakeEngineFactoryInstance {
 	currentNode: FakeNode | null;
 	setNodeCalls: Array<FakeNode | null>;
 	openCalls: Array<{ node: FakeNode | null }>;
+	clearEngineCache: jest.Mock;
+	cancelPendingStrandWaits: jest.Mock;
+	setFirstSyncListenerCalls: Array<((strandId: string) => void) | undefined>;
+	/** Fires whatever listener is CURRENTLY registered — simulates the factory's own
+	 * onAwaitingFirstSync callback firing once the first wait budget has elapsed. */
+	triggerFirstSync: (strandId: string) => void;
 }
 
 const mockEngineFactoryInstances: FakeEngineFactoryInstance[] = [];
 let mockNetworksToReturn: unknown[] = [{ id: "net1" }];
 let mockOpenShouldReject = false;
+// When true, getNetworksEngine().open() returns a promise the test resolves/rejects
+// itself via mockOpenController — lets a test observe the PENDING (syncing) state and
+// control exactly when/how the boot re-attach settles (escape / cleanup cases).
+let mockOpenDeferred = false;
+let mockOpenController: { resolve: () => void; reject: (err: unknown) => void } | null = null;
 
 jest.mock("../../engines/engine-factory", () => {
 	class FakeEngineFactory {
@@ -106,11 +127,24 @@ jest.mock("../../engines/engine-factory", () => {
 		setNodeCalls: Array<FakeNode | null> = [];
 		openCalls: Array<{ node: FakeNode | null }> = [];
 		clearEngineCache = jest.fn();
+		cancelPendingStrandWaits = jest.fn();
 		setCurrentUser = jest.fn();
 		setGetPeerCount = jest.fn();
 		hasEngine = jest.fn(() => false);
 		isAttestationVerifierProvisioned = jest.fn(() => false);
 		exportDashboardSnapshot = jest.fn(async () => ({}));
+
+		private firstSyncListener: ((strandId: string) => void) | undefined;
+		setFirstSyncListenerCalls: Array<((strandId: string) => void) | undefined> = [];
+
+		setFirstSyncListener(listener: ((strandId: string) => void) | undefined) {
+			this.firstSyncListener = listener;
+			this.setFirstSyncListenerCalls.push(listener);
+		}
+
+		triggerFirstSync(strandId: string) {
+			this.firstSyncListener?.(strandId);
+		}
 
 		private fakeNetworksEngine = {
 			getRecentNetworks: jest.fn(async () => mockNetworksToReturn),
@@ -120,6 +154,11 @@ jest.mock("../../engines/engine-factory", () => {
 				// this fake: proves which backend a real lazy DbFactory dispatch
 				// would have chosen at THIS call.
 				this.openCalls.push({ node: this.currentNode });
+				if (mockOpenDeferred) {
+					return new Promise<void>((resolve, reject) => {
+						mockOpenController = { resolve, reject };
+					});
+				}
 				if (mockOpenShouldReject) {
 					throw new Error("open failed");
 				}
@@ -220,12 +259,25 @@ async function flushMicrotasks(turns = 10) {
 }
 
 function findTryAgainButton(tr: import("react-test-renderer").ReactTestRenderer) {
+	return findTouchableWithText(tr, "Try Again");
+}
+
+function findStartFreshButton(tr: import("react-test-renderer").ReactTestRenderer) {
+	return findTouchableWithText(tr, "Start Fresh");
+}
+
+function findTouchableWithText(tr: import("react-test-renderer").ReactTestRenderer, text: string) {
 	const touchables = tr.root.findAllByType(TouchableOpacity);
 	return touchables.find(
 		(t: import("react-test-renderer").ReactTestInstance) =>
-			t.findAll((n: import("react-test-renderer").ReactTestInstance) => n.type === Text && n.props.children === "Try Again")
+			t.findAll((n: import("react-test-renderer").ReactTestInstance) => n.type === Text && n.props.children === text)
 				.length > 0,
 	);
+}
+
+/** True if the localized Syncing label (echoed key 'syncSyncing') is rendered anywhere. */
+function hasSyncingLabel(tr: import("react-test-renderer").ReactTestRenderer): boolean {
+	return JSON.stringify(tr.toJSON()).includes("syncSyncing");
 }
 
 beforeEach(() => {
@@ -233,6 +285,8 @@ beforeEach(() => {
 	mockEngineFactoryInstances.length = 0;
 	mockNetworksToReturn = [{ id: "net1" }];
 	mockOpenShouldReject = false;
+	mockOpenDeferred = false;
+	mockOpenController = null;
 	mockCadreHook.current = defaultCadreHookValue();
 });
 
@@ -379,5 +433,148 @@ describe("AppProvider cold-start re-attach — D-08/D-09/D-10 (58-05)", () => {
 		await flushMicrotasks();
 
 		expect(factory.openCalls.length).toBe(2);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Quick task 260928-kkf — "Syncing + escape button" (locked decision).
+//
+// A pending boot re-attach (open() deferred via mockOpenDeferred) surfaces the
+// localized Syncing label as soon as syncState is 'syncing', and — ONLY once the
+// factory's first-sync listener has fired once (simulating the first
+// StrandAwaitingFirstSyncError budget elapsing) — the existing Start Fresh action
+// under it. Pressing that escape marks the run cancelled and runs the SAME
+// clearEngineCache()-based handler as the error view.
+// ---------------------------------------------------------------------------
+describe("AppProvider boot 'still syncing' surface + escape — quick task 260928-kkf", () => {
+	it("hides the splash and shows the Syncing label while a boot re-attach is pending; resolves to isInitialized with no error once open() settles", async () => {
+		mockOpenDeferred = true;
+		mockCadreHook.current = {
+			...defaultCadreHookValue(),
+			syncState: "syncing",
+			nodeSettled: Promise.resolve({ status: "failed", node: null }),
+		};
+
+		const tr = renderApp();
+		await flushMicrotasks();
+
+		expect(mockHideSplash).toHaveBeenCalledTimes(1);
+		expect(hasSyncingLabel(tr)).toBe(true);
+		expect(findStartFreshButton(tr)).toBeUndefined();
+
+		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+		mockOpenController!.resolve();
+		await flushMicrotasks();
+
+		const factory = mockEngineFactoryInstances[0];
+		expect(factory.openCalls.length).toBe(1);
+		expect(JSON.stringify(tr.toJSON())).toContain("child-rendered");
+		expect(JSON.stringify(tr.toJSON())).not.toContain("Failed to load network");
+	});
+
+	it("(d) hides Start Fresh until the first-sync listener fires once, then shows it under the Syncing label", async () => {
+		mockOpenDeferred = true;
+		mockCadreHook.current = {
+			...defaultCadreHookValue(),
+			syncState: "syncing",
+			nodeSettled: Promise.resolve({ status: "failed", node: null }),
+		};
+
+		const tr = renderApp();
+		await flushMicrotasks();
+
+		expect(findStartFreshButton(tr)).toBeUndefined();
+
+		const factory = mockEngineFactoryInstances[0];
+		renderer.act(() => {
+			factory.triggerFirstSync("networkhash123");
+		});
+		await flushMicrotasks();
+
+		expect(hasSyncingLabel(tr)).toBe(true);
+		expect(findStartFreshButton(tr)).toBeDefined();
+	});
+
+	it("(e) pressing the syncing-view Start Fresh runs clearEngineCache and resolves to isInitialized with no error, even if the pending open() later rejects", async () => {
+		mockOpenDeferred = true;
+		mockCadreHook.current = {
+			...defaultCadreHookValue(),
+			syncState: "syncing",
+			nodeSettled: Promise.resolve({ status: "failed", node: null }),
+		};
+
+		const tr = renderApp();
+		await flushMicrotasks();
+
+		const factory = mockEngineFactoryInstances[0];
+		renderer.act(() => {
+			factory.triggerFirstSync("networkhash123");
+		});
+		await flushMicrotasks();
+
+		const startFresh = findStartFreshButton(tr);
+		expect(startFresh).toBeDefined();
+
+		renderer.act(() => {
+			// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+			startFresh!.props.onPress();
+		});
+		await flushMicrotasks();
+
+		expect(factory.clearEngineCache).toHaveBeenCalledTimes(1);
+		expect(JSON.stringify(tr.toJSON())).toContain("child-rendered");
+		expect(JSON.stringify(tr.toJSON())).not.toContain("Failed to load network");
+
+		// The superseded open() rejecting AFTER the escape must write no state —
+		// no error view, no console noise.
+		const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+		renderer.act(() => {
+			// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+			mockOpenController!.reject(new Error("open failed after escape"));
+		});
+		await flushMicrotasks();
+
+		expect(JSON.stringify(tr.toJSON())).not.toContain("Failed to load network");
+		for (const call of errorSpy.mock.calls) {
+			expect(String(call[0])).not.toContain("not wrapped in act");
+		}
+		errorSpy.mockRestore();
+	});
+
+	it("(c) unmounting while open() is pending cancels the wait and deregisters the listener; a later rejection writes no state", async () => {
+		mockOpenDeferred = true;
+		mockCadreHook.current = {
+			...defaultCadreHookValue(),
+			syncState: "syncing",
+			nodeSettled: Promise.resolve({ status: "failed", node: null }),
+		};
+
+		const tr = renderApp();
+		await flushMicrotasks();
+
+		const factory = mockEngineFactoryInstances[0];
+		expect(factory.openCalls.length).toBe(1);
+
+		const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+		renderer.act(() => {
+			tr.unmount();
+		});
+
+		expect(factory.cancelPendingStrandWaits).toHaveBeenCalledTimes(1);
+		// The listener registration effect's cleanup deregisters LAST with undefined.
+		expect(
+			factory.setFirstSyncListenerCalls[factory.setFirstSyncListenerCalls.length - 1],
+		).toBeUndefined();
+
+		renderer.act(() => {
+			// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+			mockOpenController!.reject(new Error("open failed after unmount"));
+		});
+		await flushMicrotasks();
+
+		for (const call of errorSpy.mock.calls) {
+			expect(String(call[0])).not.toContain("not wrapped in act");
+		}
+		errorSpy.mockRestore();
 	});
 });

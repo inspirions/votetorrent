@@ -244,4 +244,49 @@ describe('NetworksScreen bootstrap join — NETOP-03 / T-22-09 guard', () => {
     expect(mockAddStrand).not.toHaveBeenCalled();
     expect(hasInvalidAddrError(tr)).toBe(true);
   });
+
+  // -------------------------------------------------------------------------
+  // Quick task 260928-kkf: addStrand rejecting with StrandAwaitingFirstSyncError
+  // for THIS strand is not a join failure — the strand launched and keeps syncing
+  // on its own. Any other rejection still shows the joinFailed copy (unchanged).
+  // -------------------------------------------------------------------------
+  it('addStrand rejecting with StrandAwaitingFirstSyncError for the joined strand shows NO joinFailed error', async () => {
+    const PEER = '12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X';
+    const addr = `/ip4/127.0.0.1/tcp/4001/ws/p2p/${PEER}`;
+    const gateError = new Error(`Strand ${PEER} is not yet reachable`);
+    gateError.name = 'StrandAwaitingFirstSyncError';
+    (gateError as unknown as { strandId: string }).strandId = PEER;
+    mockAddStrand.mockRejectedValueOnce(gateError);
+
+    const tr = await renderScreen();
+
+    await renderer.act(async () => {
+      getBootstrapInput(tr).props.onChangeText(addr);
+    });
+    await renderer.act(async () => {
+      await getConnectButton(tr).props.onPress();
+    });
+
+    expect(mockAddStrand).toHaveBeenCalledTimes(1);
+    expect(hasInvalidAddrError(tr)).toBe(false);
+    expect(JSON.stringify(tr.toJSON())).not.toContain('joinFailed');
+  });
+
+  it('addStrand rejecting with a generic Error still shows joinFailed (unchanged)', async () => {
+    const PEER = '12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X';
+    const addr = `/ip4/127.0.0.1/tcp/4001/ws/p2p/${PEER}`;
+    mockAddStrand.mockRejectedValueOnce(new Error('connection refused'));
+
+    const tr = await renderScreen();
+
+    await renderer.act(async () => {
+      getBootstrapInput(tr).props.onChangeText(addr);
+    });
+    await renderer.act(async () => {
+      await getConnectButton(tr).props.onPress();
+    });
+
+    expect(mockAddStrand).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(tr.toJSON())).toContain('joinFailed');
+  });
 });

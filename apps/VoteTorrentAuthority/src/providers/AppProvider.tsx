@@ -3,6 +3,7 @@ import type { PropsWithChildren } from "react";
 import type { INetworksEngine, IDefaultUserEngine, NetworkReference } from "@votetorrent/vote-core";
 import type { BootstrapSnapshot } from "@votetorrent/vote-engine/bootstrap";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
+import { useTranslation } from "react-i18next";
 import { hideSplash } from "react-native-splash-view";
 import { EngineFactory } from "../engines/engine-factory";
 import { LocalStorageReact } from "@votetorrent/vote-engine/rn";
@@ -141,6 +142,7 @@ async function resolveNodeDispatch(
 }
 
 export function AppProvider({ children }: PropsWithChildren) {
+	const { t } = useTranslation();
 	const [isInitialized, setIsInitialized] = useState(false);
 	const [hasNetwork, setHasNetwork] = useState(false);
 	const [networksEngine, setNetworksEngine] = useState<INetworksEngine | null>(null);
@@ -148,6 +150,16 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// CR-02: bump this to re-run the init effect ("Try Again"). The init effect's
 	// dep array is [initNonce]; setIsInitialized(false) alone cannot re-fire it.
 	const [initNonce, setInitNonce] = useState(0);
+	// Quick task 260928-kkf ("Syncing + escape button", locked decision): flips true
+	// once the CURRENT boot's first-sync wait has rejected once with
+	// StrandAwaitingFirstSyncError (~300s budget elapsed) — the signal that gates the
+	// Start Fresh escape under the Syncing label. Reset to false at the start of every
+	// non-cancelled init run (see the [initNonce] effect below).
+	const [firstSyncBudgetElapsed, setFirstSyncBudgetElapsed] = useState(false);
+	// The currently-running init effect's own cancellation flag, published here so the
+	// escape's onPress can mark a superseded run BEFORE calling startFresh() — a
+	// cancelled run's later state writes must never reach setInitError/setIsInitialized.
+	const cancelInitRunRef = useRef<(() => void) | undefined>(undefined);
 
 	// D-12: one app-lifetime EngineFactory via useRef (constructed once, stable across renders).
 	// Pitfall 7: factory ref is stable — getEngine dep array simplifies to [].
@@ -296,13 +308,46 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// (P2P-06 / SC1 no regression). This is also the precondition for the live-node
 	// peerId marker the proof asserts (P2P-04 / D-05). node is null until the CadreNode
 	// boots → rnDbFactory remains active until that point (solo-safe).
-	const { connectedPeers, node, nodeSettled } = useCadreNode();
+	const { connectedPeers, node, nodeSettled, syncState } = useCadreNode();
 	useEffect(() => {
 		engineFactoryRef.current?.setGetPeerCount(connectedPeers);
 		engineFactoryRef.current?.setNode(node);
 	}, [connectedPeers, node]);
 
+	// Quick task 260928-kkf: register the "first wait budget elapsed" listener for the
+	// lifetime of this provider (not just the current init run) — a listener registered
+	// only inside the init effect would be torn down and re-created on every "Try Again",
+	// and the factory only ever holds ONE listener at a time (setFirstSyncListener
+	// overwrites, it does not accumulate). Deregistered on unmount.
 	useEffect(() => {
+		engineFactoryRef.current?.setFirstSyncListener(() => setFirstSyncBudgetElapsed(true));
+		return () => engineFactoryRef.current?.setFirstSyncListener(undefined);
+	}, []);
+
+	// Quick task 260928-kkf: the splash must come down the moment there is SOMETHING to
+	// show under it — either the early "strand:started, not yet writable" signal
+	// (syncState 'syncing') or the later "first wait budget elapsed" signal — even
+	// though isInitialized is still false and the init effect has not resolved. Without
+	// this, a joiner blocked on the first-sync gate stays behind the native splash for
+	// the whole wait instead of seeing the Syncing label.
+	useEffect(() => {
+		if (!isInitialized && (syncState === "syncing" || firstSyncBudgetElapsed)) {
+			hideSplash();
+		}
+	}, [isInitialized, syncState, firstSyncBudgetElapsed]);
+
+	useEffect(() => {
+		// Quick task 260928-kkf: a cancelled run is one that has been SUPERSEDED —
+		// either by unmount, or by the escape action explicitly abandoning the wait
+		// (cancelInitRunRef.current(), called BEFORE clearEngineCache/startFresh) — so
+		// its state writes must never reach the component after that point. This does
+		// NOT stop the background strand wait itself (only cancelPendingStrandWaits does
+		// that, in the cleanup below); it stops THIS run's reaction to it.
+		let cancelled = false;
+		cancelInitRunRef.current = () => {
+			cancelled = true;
+		};
+
 		async function initialize() {
 			try {
 				const factory = engineFactoryRef.current!;
@@ -380,6 +425,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 						await maybeSeedRegistrantFixtures(networksEng, network, user, () =>
 							createDeviceSigner(user.name),
 						);
+						// A cancelled run (superseded by the escape action, or by unmount) must
+						// not write hasNetwork/initError — the newer run (or no run at all,
+						// post-escape) owns the UI now.
+						if (cancelled) return;
 						// Pitfall 4: setHasNetwork is called by AppProvider (not the factory).
 						setHasNetwork(true);
 						// RE-ATTACH FIX: clear any initError from a previous failed attempt so
@@ -387,6 +436,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 						// triggered by the node dep change (CadreNode boot race).
 						setInitError(null);
 					} catch (reattachError) {
+						// A cancelled run's rejection (e.g. StrandWaitCancelledError from the
+						// cleanup below aborting a pending first-sync wait) must never surface
+						// as an error view — the escape action already resolved the UI.
+						if (cancelled) return;
 						// D-15: surface the recoverable error; spinner resolves to an error view.
 						console.error("Re-attach failed:", reattachError);
 						setInitError(String(reattachError));
@@ -394,11 +447,15 @@ export function AppProvider({ children }: PropsWithChildren) {
 					}
 				}
 
+				if (cancelled) return;
 				setNetworksEngine(networksEng);
 				// D-15: ALWAYS reach setIsInitialized(true) + hideSplash() — no path skips this.
 				setIsInitialized(true);
 				hideSplash();
+				// Quick task 260928-kkf: a fresh run starts with no elapsed-budget escape shown.
+				setFirstSyncBudgetElapsed(false);
 			} catch (fatalError) {
+				if (cancelled) return;
 				// Outer catch handles failures before/after the re-attach block
 				// (e.g. getRecentNetworks() failure, LocalStorageReact init failure).
 				console.error("Fatal init error:", fatalError);
@@ -409,6 +466,13 @@ export function AppProvider({ children }: PropsWithChildren) {
 		}
 
 		initialize();
+
+		return () => {
+			cancelled = true;
+			// Unmount, network switch, or a superseded boot run: stop waiting on any
+			// in-flight first-sync gate so nothing keeps polling in the background.
+			engineFactoryRef.current?.cancelPendingStrandWaits();
+		};
 		// CR-02: re-run when initNonce changes so "Try Again" can re-attempt init.
 		// D-09/D-10: `node` is deliberately OUT of this array — it was the trigger
 		// for the implicit second attempt the settle-then-dispatch fix above
@@ -422,11 +486,50 @@ export function AppProvider({ children }: PropsWithChildren) {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [initNonce]);
 
+	// Start Fresh: clear the engine cache and reset to the create-network flow.
+	// Extracted (quick task 260928-kkf) so the error view's existing button AND the
+	// syncing view's escape button below call the EXACT same handler — same literal
+	// copy, same behavior, no divergence between the two call sites.
+	// clearEngineCache() also calls cancelPendingStrandWaits() (engine-factory.ts), so
+	// this already aborts any pending first-sync wait; the escape's onPress calls
+	// cancelInitRunRef.current() FIRST so the (now-cancelled) run's own rejection never
+	// re-surfaces as an error view.
+	const startFresh = useCallback(() => {
+		engineFactoryRef.current?.clearEngineCache();
+		setInitError(null);
+		setIsInitialized(true);
+	}, []);
+
 	// D-15: only show the spinner while initialization is truly pending.
+	// Quick task 260928-kkf ("Syncing + escape button", locked decision): while a boot
+	// re-attach is gated on the first-sync wait, this same loading view additionally
+	// shows the localized Syncing label (as soon as syncState reports 'syncing', or once
+	// the wait's first budget has elapsed) and, ONLY once that budget has elapsed, the
+	// existing Start Fresh action — reusing its exact literal copy and handler. Try
+	// Again is deliberately NOT offered here: it would just start a new ~300s wait on
+	// the same strand, which the background wait is already doing.
 	if (!isInitialized) {
+		const showSyncing = syncState === "syncing" || firstSyncBudgetElapsed;
 		return (
 			<View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
 				<ActivityIndicator size="large" />
+				{showSyncing && (
+					<Text style={{ marginTop: 16, textAlign: "center" }}>{t("syncSyncing")}</Text>
+				)}
+				{firstSyncBudgetElapsed && (
+					<TouchableOpacity
+						onPress={() => {
+							// Mark THIS boot run cancelled before startFresh() clears the
+							// engine cache — so its (now-orphaned) pending open() never
+							// writes state once cancelPendingStrandWaits() rejects it.
+							cancelInitRunRef.current?.();
+							startFresh();
+						}}
+						style={{ marginTop: 8 }}
+					>
+						<Text>{"Start Fresh"}</Text>
+					</TouchableOpacity>
+				)}
 			</View>
 		);
 	}
@@ -454,14 +557,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 				>
 					<Text>{"Try Again"}</Text>
 				</TouchableOpacity>
-				<TouchableOpacity
-					onPress={() => {
-						// Start Fresh: clear the engine cache and reset to the create-network flow.
-						engineFactoryRef.current?.clearEngineCache();
-						setInitError(null);
-						setIsInitialized(true);
-					}}
-				>
+				<TouchableOpacity onPress={startFresh}>
 					<Text>{"Start Fresh"}</Text>
 				</TouchableOpacity>
 			</View>

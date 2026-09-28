@@ -26,6 +26,10 @@ const resources = {
 			'breadcrumb.home': 'Home',
 			'breadcrumb.ballot': 'Ballot',
 			configNotConfigured: 'Not configured',
+			// Quick task 260928-kkf — the boot re-attach's "still syncing" label, shown
+			// under the loading spinner while a joiner waits on cadre-core's first-sync
+			// gate (mirrors the authority app's SyncChip copy, `syncSyncing`).
+			syncSyncing: 'Syncing',
 		},
 		home: {
 			headerTitle: 'Vote',
@@ -321,6 +325,7 @@ const resources = {
 			'breadcrumb.home': 'Inicio',
 			'breadcrumb.ballot': 'Papeleta',
 			configNotConfigured: 'Sin configurar',
+			syncSyncing: 'Sincronizando',
 		},
 		home: {
 			headerTitle: 'Votar',

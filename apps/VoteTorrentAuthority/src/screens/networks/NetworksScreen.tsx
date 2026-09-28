@@ -8,6 +8,9 @@ import { InfoCard } from "../../components/InfoCard";
 import { ThemedText } from "../../components/ThemedText";
 import { useApp } from "../../providers/AppProvider";
 import { useCadreNode } from "../../providers/CadreNodeProvider";
+// Pure module (no rn-leveldb / native deps) — NOT imported from rn-db-factory, which
+// would drag rn-leveldb into this screen just to reach one type-guard function.
+import { isStrandAwaitingFirstSyncError } from "../../engines/strand-first-sync";
 import type { NetworkReference } from "@votetorrent/vote-core";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import type { NavigationProp } from "../../navigation/types";
@@ -69,7 +72,14 @@ export default function NetworksScreen() {
 				// (spike 064); `founder` is the surviving knob and defaults to false.
 				founder: false,
 			});
-		} catch {
+		} catch (error) {
+			// Quick task 260928-kkf: a retryable "no sibling reachable yet" is NOT a join
+			// failure — the strand launched and keeps syncing on its own; the SyncChip
+			// shows 'syncing' until 'strand:writable' fires. Every other error (including
+			// this same error for a different strand) still shows the join-failed copy.
+			if (isStrandAwaitingFirstSyncError(error, strandId)) {
+				return;
+			}
 			setJoinError(t("joinFailed"));
 		}
 	}, [bootstrapAddr, node, t]);

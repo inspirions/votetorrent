@@ -131,8 +131,49 @@ export class EngineFactory {
 	 */
 	private node: StrandHost | null = null;
 
-	/** Called by AppProvider when the CadreNode boots (mirrors setGetPeerCount / D-04). */
+	/**
+	 * First-sync gate wiring (quick task 260928-kkf — see strand-first-sync.ts /
+	 * rn-db-factory.ts's `createStrandDbFactory` doc comments for the full gate
+	 * semantics). One AbortController "owns" every `whenStrandWritable` wait a
+	 * strand-backed DbFactory call is currently running; replacing it cancels
+	 * whatever wait was pending, without touching future ones.
+	 */
+	private firstSyncAbort = new AbortController();
+	/**
+	 * Fires once per pending open, BEFORE the wait begins (never on retry), so a
+	 * caller (AppProvider) can flip a "still syncing" UI flag. Registered by the
+	 * provider via `setFirstSyncListener`; cleared on unmount.
+	 */
+	private firstSyncListener: ((strandId: string) => void) | undefined;
+
+	/** Registers (or, passed undefined, deregisters) the first-sync "still syncing" callback. */
+	setFirstSyncListener(listener: ((strandId: string) => void) | undefined): void {
+		this.firstSyncListener = listener;
+	}
+
+	/**
+	 * Cancels any `whenStrandWritable` wait currently in flight (via the shared
+	 * AbortController) and arms a fresh controller for the NEXT strand-backed open.
+	 * Called on a genuine node change (setNode below), on clearEngineCache()
+	 * (network switch / Start Fresh), and by AppProvider on unmount / a superseded
+	 * boot run — every place a pending wait must stop being the "active" one.
+	 */
+	cancelPendingStrandWaits(): void {
+		this.firstSyncAbort.abort();
+		this.firstSyncAbort = new AbortController();
+	}
+
+	/**
+	 * Called by AppProvider when the CadreNode boots (mirrors setGetPeerCount / D-04).
+	 *
+	 * Cancels any pending first-sync wait ONLY when `node` actually changes — the
+	 * provider's peer-count effect re-invokes `setNode` with the SAME node on every
+	 * `connectedPeers` change, and aborting then would kill a live wait for no reason.
+	 */
 	setNode(node: StrandHost | null): void {
+		if (node !== this.node) {
+			this.cancelPendingStrandWaits();
+		}
 		this.node = node;
 	}
 
@@ -201,7 +242,13 @@ export class EngineFactory {
 		// RESEARCH Pitfall 1: never call createStrandDbFactory(null) — guard on this.node truthy.
 		this.networksEngine = new NetworksEngine(localStorage, async (networkHash: string) => {
 			if (this.node && !(__DEV__ && USE_LOCAL_DB_FACTORY)) {
-				return createStrandDbFactory(this.node)(networkHash);
+				// The signal is read AT CALL TIME (not captured once) so a controller
+				// swapped in by a later cancelPendingStrandWaits() is the one this call
+				// actually waits on.
+				return createStrandDbFactory(this.node, {
+					signal: this.firstSyncAbort.signal,
+					onAwaitingFirstSync: (id) => this.firstSyncListener?.(id),
+				})(networkHash);
 			}
 			return this.rnDbFactory(networkHash);
 		});
@@ -220,6 +267,9 @@ export class EngineFactory {
 	clearEngineCache(): void {
 		this.engineCache.clear();
 		this.currentNetworkHash = undefined;
+		// A network switch / Start Fresh must not leave a stale first-sync wait
+		// running in the background against a network the user has just left.
+		this.cancelPendingStrandWaits();
 	}
 
 	/** True if the named engine (with optional initParams) is already cached. */
