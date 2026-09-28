@@ -3,7 +3,7 @@
 # run-replication-proof.sh
 #
 # Purpose  : P2P-06 symmetric replication proof.
-#            Step 1 — Peer A (emulator-5554) boots FIRST solo in bootstrap mode
+#            Step 1 — Peer A (${PEER_A_SERIAL}) boots FIRST solo in bootstrap mode
 #            (no drone, no peer). Its replication-proof-runner creates the proof
 #            strand and logs [replication-proof] strandId=<hash>.
 #            Step 2 — The script captures the hash and launches the drone (Node 22)
@@ -42,7 +42,7 @@
 #
 # Prerequisites:
 #   - adb must be in PATH (Android SDK Platform Tools)
-#   - Both emulators (emulator-5554 and emulator-5556) must be running and the
+#   - Both emulators (${PEER_A_SERIAL} and ${PEER_B_SERIAL}) must be running and the
 #     app (org.votetorrent.authority) must be installed on each.
 #   - nvm must be available with Node 22 (drone.mjs requires Promise.withResolvers).
 #   - The drone and CONTROL_ADDR injection are now automated — no manual steps needed.
@@ -75,7 +75,7 @@ PACKAGE="org.votetorrent.authority"
 # before giving up.
 #
 # Usage: relaunch_and_wait SERIAL PATTERN TIMEOUT_S WHAT [SECOND_SERIAL]
-#   SERIAL         — the adb serial whose marker is waited on (e.g. emulator-5554)
+#   SERIAL         — the adb serial whose marker is waited on (e.g. ${PEER_A_SERIAL})
 #   PATTERN        — logcat pattern passed to wait_for_logcat_line
 #   TIMEOUT_S      — seconds to wait per attempt
 #   WHAT           — human label for wait_for_logcat_line's own error messages
@@ -317,10 +317,17 @@ trap restore_flags EXIT
 # leaves residue; per-network isolation memory: a shared/stale LevelDB handle
 # contaminates state across runs). Gated behind FRESH_EMULATOR so a caller can
 # skip it (e.g. re-running immediately after a clean pass).
+# PEER_A_SERIAL / PEER_B_SERIAL — (default ${PEER_A_SERIAL} / ${PEER_B_SERIAL}) which adb serial
+# plays "Peer A" (the D-05 force-stop+relaunch role, D-06/D-09/REPL-01 sampling target) vs
+# "Peer B". Added for the P2P-11 debug session's leg-5 role-swap test (does Missing block
+# follow the emulator/on-device store, or the Peer-A script role?) — override both to swap
+# which physical AVD plays which role without editing this script.
+PEER_A_SERIAL="${PEER_A_SERIAL:-emulator-5554}"
+PEER_B_SERIAL="${PEER_B_SERIAL:-emulator-5556}"
 FRESH_EMULATOR="${FRESH_EMULATOR:-1}"
 if [ "${FRESH_EMULATOR}" = "1" ]; then
   echo "[run-replication-proof] Fresh-emulator precondition: pm clear + votetorrent-* LevelDB wipe on both emulators (FRESH_EMULATOR=1) ..."
-  for serial in emulator-5554 emulator-5556; do
+  for serial in ${PEER_A_SERIAL} ${PEER_B_SERIAL}; do
     adb -s "${serial}" shell pm clear "${PACKAGE}" > /dev/null 2>&1 || true
     adb -s "${serial}" shell run-as "${PACKAGE}" \
       find /data/data/"${PACKAGE}"/files -name "votetorrent-*" -exec rm -rf {} + 2>/dev/null || true
@@ -353,16 +360,16 @@ echo "[run-replication-proof] Flag file updated: REPLICATION_PROOF_ENABLED=true"
 # selects CF-02 bootstrap mode automatically (no peers reachable). It creates the
 # proof strand and logs [replication-proof] strandId=<hash>.
 echo "[run-replication-proof] Step 1: bootstrap-mode first boot — Peer A solo (no drone) ..."
-adb -s emulator-5554 shell am force-stop "${PACKAGE}"
+adb -s ${PEER_A_SERIAL} shell am force-stop "${PACKAGE}"
 sleep 2
 # Pitfall 4: clear stale logcat ring buffer BEFORE the bootstrap-mode relaunch.
-adb -s emulator-5554 logcat -c
-echo "[run-replication-proof] Relaunching ${PACKAGE} on emulator-5554 (bootstrap mode, solo) ..."
-adb -s emulator-5554 shell monkey -p "${PACKAGE}" -c android.intent.category.LAUNCHER 1
+adb -s ${PEER_A_SERIAL} logcat -c
+echo "[run-replication-proof] Relaunching ${PACKAGE} on ${PEER_A_SERIAL} (bootstrap mode, solo) ..."
+adb -s ${PEER_A_SERIAL} shell monkey -p "${PACKAGE}" -c android.intent.category.LAUNCHER 1
 
 # Wait for the proof-start marker on Peer A (proves metro served the enabled bundle).
-echo "[run-replication-proof] Waiting up to ${MARKER_TIMEOUT}s for [replication-proof] starting marker on emulator-5554 ..."
-BOOTSTRAP_MARKER_LINE=$(wait_for_logcat_line "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "bootstrap-marker" "-s emulator-5554")
+echo "[run-replication-proof] Waiting up to ${MARKER_TIMEOUT}s for [replication-proof] starting marker on ${PEER_A_SERIAL} ..."
+BOOTSTRAP_MARKER_LINE=$(wait_for_logcat_line "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "bootstrap-marker" "-s ${PEER_A_SERIAL}")
 if [ -z "${BOOTSTRAP_MARKER_LINE}" ]; then
   echo "[run-replication-proof] ERROR: [replication-proof] never started on Peer A (bootstrap mode) — Metro rebundle likely in flight or flags-disabled bundle served; re-run" >&2
   exit 1
@@ -373,8 +380,8 @@ PROBE_STARTED=1
 
 # ── STEP 2: CAPTURE the strand hash from Peer A's bootstrap-mode logcat ──────
 # The runner logs [replication-proof] strandId=<hash> after createStrandDbFactory.
-echo "[run-replication-proof] Waiting up to ${STRAND_TIMEOUT}s for strandId= marker on emulator-5554 ..."
-STRAND_LINE=$(wait_for_logcat_line "${STRAND_ID_MARKER}" "${STRAND_TIMEOUT}" "[run-replication-proof]" "strandId" "-s emulator-5554")
+echo "[run-replication-proof] Waiting up to ${STRAND_TIMEOUT}s for strandId= marker on ${PEER_A_SERIAL} ..."
+STRAND_LINE=$(wait_for_logcat_line "${STRAND_ID_MARKER}" "${STRAND_TIMEOUT}" "[run-replication-proof]" "strandId" "-s ${PEER_A_SERIAL}")
 if [ -z "${STRAND_LINE}" ]; then
   echo "[run-replication-proof] ERROR: strandId= marker never appeared — runner may have crashed; check logcat" >&2
   exit 1
@@ -676,7 +683,7 @@ PROBE_STARTED=0  # reset sentinel before the real networked run
 # is one of the exact checkpoints where prior 38-05 runs died on a transient
 # Metro-rebundle/emulator-slowness marker timeout.
 echo "[run-replication-proof] Step 4: relaunching BOTH peers networked (via relaunch_and_wait, bounded retry) ..."
-MARKER_LINE=$(relaunch_and_wait "emulator-5554" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker" "emulator-5556")
+MARKER_LINE=$(relaunch_and_wait "${PEER_A_SERIAL}" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker" "${PEER_B_SERIAL}")
 if [ -z "${MARKER_LINE}" ]; then
   echo "[run-replication-proof] ERROR: [replication-proof] never started on Peer A (networked run) after 2 relaunch_and_wait attempts — Metro rebundle likely in flight; re-run" >&2
   exit 1
@@ -693,39 +700,39 @@ PROBE_STARTED=1
 # relayReservation=false, i.e. with the very precondition this gate exists to establish
 # already broken, which makes every reservation-sensitive result downstream
 # uninterpretable. See the strand-addr-throttle todo's "Rig caveat on runs 27-29".
-echo "[run-replication-proof] D-09: waiting for relayReservation= marker on emulator-5554 (networked run) ..."
-RELAY_LINE_A=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-A" "-s emulator-5554")
+echo "[run-replication-proof] D-09: waiting for relayReservation= marker on ${PEER_A_SERIAL} (networked run) ..."
+RELAY_LINE_A=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-A" "-s ${PEER_A_SERIAL}")
 if [ -z "${RELAY_LINE_A}" ]; then
-  echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on emulator-5554 (networked run) — relay reservation not established (P2P-08)" >&2
+  echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on ${PEER_A_SERIAL} (networked run) — relay reservation not established (P2P-08)" >&2
   exit 1
 fi
 case "${RELAY_LINE_A}" in
   *"relayReservation=', true"*|*"relayReservation= true"*|*"relayReservation=true"*) : ;;
   *)
-    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on emulator-5554 — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_A}" >&2
+    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on ${PEER_A_SERIAL} — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_A}" >&2
     exit 1
     ;;
 esac
-echo "[run-replication-proof] D-09: relay-READY on emulator-5554: ${RELAY_LINE_A}"
-echo "[run-replication-proof] D-09: waiting for relayReservation= marker on emulator-5556 (networked run) ..."
-RELAY_LINE_B=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-B" "-s emulator-5556")
+echo "[run-replication-proof] D-09: relay-READY on ${PEER_A_SERIAL}: ${RELAY_LINE_A}"
+echo "[run-replication-proof] D-09: waiting for relayReservation= marker on ${PEER_B_SERIAL} (networked run) ..."
+RELAY_LINE_B=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-B" "-s ${PEER_B_SERIAL}")
 if [ -z "${RELAY_LINE_B}" ]; then
-  echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on emulator-5556 (networked run) — relay reservation not established (P2P-08)" >&2
+  echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on ${PEER_B_SERIAL} (networked run) — relay reservation not established (P2P-08)" >&2
   exit 1
 fi
 case "${RELAY_LINE_B}" in
   *"relayReservation=', true"*|*"relayReservation= true"*|*"relayReservation=true"*) : ;;
   *)
-    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on emulator-5556 — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_B}" >&2
+    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on ${PEER_B_SERIAL} — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_B}" >&2
     exit 1
     ;;
 esac
-echo "[run-replication-proof] D-09: relay-READY on emulator-5556: ${RELAY_LINE_B}"
+echo "[run-replication-proof] D-09: relay-READY on ${PEER_B_SERIAL}: ${RELAY_LINE_B}"
 
 # ── D-05: peerId stability — capture before/after a Peer-A force-stop relaunch ─
 # Peer A must emit the same peerId before and after a force-stop (P2P-04 / Test 4).
 echo "[run-replication-proof] D-05: capturing peerId on Peer A before force-stop ..."
-PEER_ID_LINE_BEFORE=$(wait_for_logcat_line "${PEER_ID_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "peerId-before" "-s emulator-5554")
+PEER_ID_LINE_BEFORE=$(wait_for_logcat_line "${PEER_ID_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "peerId-before" "-s ${PEER_A_SERIAL}")
 if [ -z "${PEER_ID_LINE_BEFORE}" ]; then
   echo "[run-replication-proof] ERROR: peerId= marker not seen on Peer A before force-stop" >&2
   exit 1
@@ -738,7 +745,7 @@ echo "[run-replication-proof] peerId before: ${ID_BEFORE}"
 # checkpoint is where the best 38-05 run died (relaunched Peer A's starting/relay
 # markers never re-emitted within the old 90s window; see 38-05-SUMMARY.md
 # "Where it stopped").
-D05_MARKER_LINE=$(relaunch_and_wait "emulator-5554" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker-d05-relaunch")
+D05_MARKER_LINE=$(relaunch_and_wait "${PEER_A_SERIAL}" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker-d05-relaunch")
 if [ -z "${D05_MARKER_LINE}" ]; then
   echo "[run-replication-proof] ERROR: [replication-proof] starting marker never appeared on Peer A after the D-05 relaunch (both relaunch_and_wait attempts missed)" >&2
   exit 1
@@ -761,11 +768,11 @@ echo "[run-replication-proof] D-05 relaunch start marker seen: ${D05_MARKER_LINE
 # Read the buffer directly (`logcat -d`), bounded-retry for the case where the relaunched app has
 # not reached the line yet. Same extraction, same comparison, no window to outlive.
 echo "[run-replication-proof] D-05: capturing peerId on Peer A after force-stop relaunch ..."
-PEER_ID_LINE_AFTER=$(read_logcat_line_now "${PEER_ID_MARKER}" "emulator-5554")
+PEER_ID_LINE_AFTER=$(read_logcat_line_now "${PEER_ID_MARKER}" "${PEER_A_SERIAL}")
 if [ -z "${PEER_ID_LINE_AFTER}" ]; then
   echo "[run-replication-proof] ERROR: peerId= marker not seen on Peer A after force-stop relaunch" >&2
   echo "[run-replication-proof] --- last 20 [replication-proof] lines on Peer A (diagnostic) ---" >&2
-  adb -s emulator-5554 logcat -d 2>/dev/null | grep 'replication-proof' | tail -20 >&2
+  adb -s ${PEER_A_SERIAL} logcat -d 2>/dev/null | grep 'replication-proof' | tail -20 >&2
   exit 1
 fi
 ID_AFTER=$(extract_marker_value "${PEER_ID_LINE_AFTER}" "peerId")
@@ -781,13 +788,13 @@ echo "[run-replication-proof] D-05 PASS: peerId stable across restart (${ID_AFTE
 # reservation; the relaunched runner must re-establish it before we trust any dial
 # that follows. Re-gate on the SAME RELAY_READY_MARKER, same idiom as the D-09 gate.
 echo "[run-replication-proof] D-10: waiting for relayReservation= marker on Peer A after D-05 relaunch ..."
-wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-d05-relaunch" "-s emulator-5554" > /dev/null
+wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-d05-relaunch" "-s ${PEER_A_SERIAL}" > /dev/null
 echo "[run-replication-proof] D-10: relay reservation re-established on Peer A after D-05 relaunch"
 
 
 # ── D-06: peers >= 1 ───────────────────────────────────────────────────────────
 echo "[run-replication-proof] D-06: waiting for peers= marker on Peer A ..."
-PEERS_LINE=$(wait_for_logcat_line "${PEERS_MARKER}" "${LOGCAT_TIMEOUT}" "[run-replication-proof]" "peers" "-s emulator-5554")
+PEERS_LINE=$(wait_for_logcat_line "${PEERS_MARKER}" "${LOGCAT_TIMEOUT}" "[run-replication-proof]" "peers" "-s ${PEER_A_SERIAL}")
 N=$(extract_marker_value "${PEERS_LINE}" "peers")
 if [ -z "${N}" ] || [ "${N}" -lt 1 ]; then
   echo "[run-replication-proof] FAIL: peer count < 1 (peers=${N}) (D-06 / ENG-05)" >&2
@@ -807,7 +814,7 @@ STRAND_PEERS_MARKER='\[replication-proof\].*strandPeers='
 # enrolment and the auth gate, none of which is strand work; charging their cost to the strand
 # budget is what made run 25 unreadable.
 echo "[run-replication-proof] REPL-01: waiting for the acquire-start marker (controlRelayAddrs=) on Peer A (timeout ${ACQUIRE_START_TIMEOUT}s) ..."
-ACQUIRE_START_LINE=$(read_logcat_line_now "${ACQUIRE_START_MARKER}" "emulator-5554" $((ACQUIRE_START_TIMEOUT / 5)))
+ACQUIRE_START_LINE=$(read_logcat_line_now "${ACQUIRE_START_MARKER}" "${PEER_A_SERIAL}" $((ACQUIRE_START_TIMEOUT / 5)))
 if [ -z "${ACQUIRE_START_LINE}" ]; then
   echo "[run-replication-proof] FAIL: controlRelayAddrs= marker never emitted on Peer A within ${ACQUIRE_START_TIMEOUT}s — the runner never reached the strand acquire (REPL-01 phase 1); the failure is upstream of strand wiring, read the auth gate markers" >&2
   exit 1
@@ -819,11 +826,11 @@ echo "[run-replication-proof] REPL-01: acquire started on Peer A: ${ACQUIRE_STAR
 # see read_logcat_line_now). The runner heartbeats `acquire pending <n> s` throughout, so a run
 # that spends this budget can be read afterwards as slow-but-alive or genuinely stuck.
 echo "[run-replication-proof] REPL-01: waiting for strandPeers= marker on Peer A (timeout ${STRAND_PEERS_TIMEOUT}s, measured from acquire start) ..."
-STRAND_PEERS_LINE=$(read_logcat_line_now "${STRAND_PEERS_MARKER}" "emulator-5554" $((STRAND_PEERS_TIMEOUT / 5)))
+STRAND_PEERS_LINE=$(read_logcat_line_now "${STRAND_PEERS_MARKER}" "${PEER_A_SERIAL}" $((STRAND_PEERS_TIMEOUT / 5)))
 if [ -z "${STRAND_PEERS_LINE}" ]; then
   echo "[run-replication-proof] FAIL: strandPeers= marker never emitted on Peer A within ${STRAND_PEERS_TIMEOUT}s of the acquire starting (REPL-01 phase 2)" >&2
   echo "[run-replication-proof] --- acquire heartbeat on Peer A (was it alive?) ---" >&2
-  adb -s emulator-5554 logcat -d 2>/dev/null | grep -E 'acquire pending|acquire settled|write phase' | tail -10 >&2
+  adb -s ${PEER_A_SERIAL} logcat -d 2>/dev/null | grep -E 'acquire pending|acquire settled|write phase' | tail -10 >&2
   exit 1
 fi
 SP=$(extract_marker_value "${STRAND_PEERS_LINE}" "strandPeers")
@@ -853,19 +860,19 @@ fi
 # run #1, without waiting for a costly FAIL verdict to investigate. Diagnostic only —
 # does NOT gate the run (warn-and-continue on a miss), since the both-peer REPLICATION
 # VERDICT below remains the authoritative PASS/FAIL signal.
-echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on emulator-5554 (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
-RELAY_ADDRS_LINE_A=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "emulator-5554" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
+echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on ${PEER_A_SERIAL} (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
+RELAY_ADDRS_LINE_A=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "${PEER_A_SERIAL}" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
 if [ -n "${RELAY_ADDRS_LINE_A}" ]; then
-  echo "[run-replication-proof] D-04: relayAddrsPerDrone= on emulator-5554: ${RELAY_ADDRS_LINE_A}"
+  echo "[run-replication-proof] D-04: relayAddrsPerDrone= on ${PEER_A_SERIAL}: ${RELAY_ADDRS_LINE_A}"
 else
-  echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on emulator-5554 (diagnostic only, not gating)" >&2
+  echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on ${PEER_A_SERIAL} (diagnostic only, not gating)" >&2
 fi
-echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on emulator-5556 (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
-RELAY_ADDRS_LINE_B=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "emulator-5556" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
+echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on ${PEER_B_SERIAL} (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
+RELAY_ADDRS_LINE_B=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "${PEER_B_SERIAL}" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
 if [ -n "${RELAY_ADDRS_LINE_B}" ]; then
-  echo "[run-replication-proof] D-04: relayAddrsPerDrone= on emulator-5556: ${RELAY_ADDRS_LINE_B}"
+  echo "[run-replication-proof] D-04: relayAddrsPerDrone= on ${PEER_B_SERIAL}: ${RELAY_ADDRS_LINE_B}"
 else
-  echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on emulator-5556 (diagnostic only, not gating)" >&2
+  echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on ${PEER_B_SERIAL} (diagnostic only, not gating)" >&2
 fi
 
 # ── BOTH-PEER VERDICT (D-01) ──────────────────────────────────────────────────
@@ -890,10 +897,10 @@ fi
 # needs ~480 s; budget for the bad case (same margin pattern as STRAND_PEERS_TIMEOUT/
 # STRAND_TIMEOUT above, both raised past their own measured worst case for the same reason).
 VERDICT_TIMEOUT=600
-echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5554 (${VERDICT_TIMEOUT}s) ..."
-VERDICT_A=$(read_logcat_line_now "${VERDICT_TAG}" "emulator-5554" $((VERDICT_TIMEOUT / 5)))
-echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5556 (${VERDICT_TIMEOUT}s) ..."
-VERDICT_B=$(read_logcat_line_now "${VERDICT_TAG}" "emulator-5556" $((VERDICT_TIMEOUT / 5)))
+echo "[run-replication-proof] Polling REPLICATION VERDICT on ${PEER_A_SERIAL} (${VERDICT_TIMEOUT}s) ..."
+VERDICT_A=$(read_logcat_line_now "${VERDICT_TAG}" "${PEER_A_SERIAL}" $((VERDICT_TIMEOUT / 5)))
+echo "[run-replication-proof] Polling REPLICATION VERDICT on ${PEER_B_SERIAL} (${VERDICT_TIMEOUT}s) ..."
+VERDICT_B=$(read_logcat_line_now "${VERDICT_TAG}" "${PEER_B_SERIAL}" $((VERDICT_TIMEOUT / 5)))
 
 # ── D-08: cluster-error capture (diagnose-first, P2P-09) ─────────────────────
 # MUST run BEFORE the verdict-empty guard below: a verdict TIMEOUT (empty
