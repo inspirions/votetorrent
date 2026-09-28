@@ -887,3 +887,281 @@ describe('REPL-01 strand cohort markers', () => {
     }, 60000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Harness false-PASS fix (2026-09-28, debug session p2p11-multi-peer-replication).
+//
+// CORRECTION 3 / Eliminated ("Peer B's VERDICT: PASS ... represents a genuine passing
+// replication result"): a live device run had this peer's OWN Authority insert fail with
+// `CHECK constraint failed: InsertValid`, yet the runner still reported PASS because it merely
+// saw the OTHER peer's row in its read set. The verdict must require BOTH this peer's own write
+// having landed AND having read another peer's row — not either alone.
+//
+// `reloadRunnerWithControlledDb` mirrors `reloadRunnerFullMock` (same FakeCadreNode) but replaces
+// the `../rn-db-factory` mock with one that distinguishes the write-phase presence-check query
+// (`WHERE Id =`) from the read-phase census query, and can be told (via the `mock`-prefixed
+// module-scope flags below, per jest hoisting rules) to make the OWN insert throw a non-UNIQUE
+// error — exactly the `InsertValid` CHECK-constraint shape observed on device — while still
+// exposing another peer's row to the read poll.
+// ---------------------------------------------------------------------------
+
+let mockOwnInsertShouldFail = false;
+let mockOwnInsertFailureMessage = 'CHECK constraint failed: InsertValid';
+let mockForeignRowOnRead = true;
+
+function reloadRunnerWithControlledDb(): void {
+  mockVerifyCadrePeerVoucher.mockReset();
+  mockVerifyCadrePeerVoucher.mockImplementation((..._a: unknown[]) => true);
+  jest.resetModules();
+  jest.mock('../proof-flags.generated', () => ({ REPLICATION_PROOF_ENABLED: true }));
+  jest.mock('rn-leveldb', () => ({ LevelDB: class {}, LevelDBWriteBatch: class {} }), { virtual: true });
+  jest.mock('@optimystic/db-p2p-storage-rn', () => ({
+    openOptimysticRNDb: jest.fn(() => ({})),
+    LevelDBRawStorage: class {},
+    loadOrCreateRNPeerKey: jest.fn(async () => ({ type: 'Ed25519' })),
+  }), { virtual: true });
+  jest.mock('@quereus/quereus', () => ({ Database: class {}, registerPlugin: jest.fn() }), { virtual: true });
+  jest.mock('@quereus/plugin-react-native-leveldb', () => ({ ReactNativeLevelDBProvider: jest.fn() }), { virtual: true });
+  jest.mock('@quereus/store', () => ({ createIsolatedStoreModule: jest.fn(() => ({})) }), { virtual: true });
+  jest.mock('@votetorrent/vote-engine/rn', () => ({ VOTETORRENT_SCHEMA_SQL: 'declare schema main {}' }), { virtual: true });
+  jest.mock('@serfab/cadre-core', () => {
+    class FakeCadreNode {
+      public start = jest.fn(async () => {});
+      public stop = jest.fn(async () => {});
+      public peerId = { toString: () => 'fakePeerIdABC123' };
+      private _connections: FakeConnection[] = [];
+      private _strandConns: FakeConnection[] = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      constructor(config?: any) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        mockConstructedNodes.push(this as any);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        mockCapturedConfigs.push(config as any);
+      }
+      private _circuitAddrs: Array<{ toString(): string }> = [
+        { toString: () => '/ip4/10.0.2.2/tcp/1/ws/p2p/fakeRelay/p2p-circuit' },
+      ];
+      getMultiaddrs() { return this._circuitAddrs; }
+      _setRelayReserved(reserved: boolean) {
+        this._circuitAddrs = reserved
+          ? [{ toString: () => '/ip4/10.0.2.2/tcp/1/ws/p2p/fakeRelay/p2p-circuit' }]
+          : [];
+      }
+      public dialInvite = jest.fn(async () => {});
+      public decodeInvite = jest.fn((s: string) => ({ partyId: 'votetorrent', encoded: s }));
+      public listAuthorizedMembers = jest.fn(async () => []);
+      private _selfAuthorized = true;
+      public queryCadrePeers = jest.fn(async (): Promise<VoucherRow[]> => [
+        this._selfAuthorized
+          ? {
+              peerId: 'fakePeerIdABC123',
+              multiaddr: null,
+              stampId: 'stamp-1',
+              vouchOwner: 'ownerKeyB64',
+              vouchSig: 'sigB64',
+            }
+          : {
+              peerId: 'fakePeerIdABC123',
+              multiaddr: null,
+              stampId: null,
+              vouchOwner: null,
+              vouchSig: null,
+            },
+      ]);
+      getControlDatabase() { return { queryCadrePeers: this.queryCadrePeers }; }
+      getTrustedOwnerStore() { return { has: (k: string) => k === 'ownerKeyB64' }; }
+      _setSelfAuthorized(authorized: boolean) { this._selfAuthorized = authorized; }
+      getControlNode() { return { getConnections: () => this._connections }; }
+      getStrand(_id: string) { return { libp2pNode: { getConnections: () => this._strandConns } }; }
+      _setConnections(conns: FakeConnection[]) { this._connections = conns; }
+      _setStrandPeers(n: number) { this._strandConns = new Array(n).fill({}); }
+    }
+    return {
+      CadreNode: FakeCadreNode,
+      verifyCadrePeerVoucher: (...a: unknown[]) => mockVerifyCadrePeerVoucher(...a),
+    };
+  }, { virtual: true });
+  jest.mock('@libp2p/websockets', () => ({ webSockets: () => ({}) }), { virtual: true });
+  jest.mock('@libp2p/circuit-relay-v2', () => ({ circuitRelayTransport: () => ({}) }), { virtual: true });
+  jest.mock('@multiformats/multiaddr', () => ({ multiaddr: (s: string) => ({ toString: () => s }) }), { virtual: true });
+  // Distinguishes the presence-check query (`... WHERE Id = '<id>'`) from the read-phase census
+  // query (`SELECT Id FROM Authority`, no WHERE) so a test can make ONLY the insert fail while
+  // the read poll still legitimately observes a foreign peer's row.
+  jest.mock('../rn-db-factory', () => ({
+    createStrandDbFactory: () => async () => ({
+      exec: async () => {
+        if (mockOwnInsertShouldFail) {
+          throw new Error(mockOwnInsertFailureMessage);
+        }
+      },
+      eval: (sql: string) => {
+        const isPresenceCheck = /WHERE Id =/.test(sql);
+        const rows = isPresenceCheck
+          ? [] // always report "not yet contributed" so the insert path actually runs
+          : mockForeignRowOnRead
+            ? [{ Id: 'repl-auth-otherpeer' }]
+            : [];
+        let i = 0;
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next: async () =>
+                i < rows.length
+                  ? { done: false, value: rows[i++] }
+                  : { done: true, value: undefined },
+            };
+          },
+        };
+      },
+    }),
+  }));
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  ({ runReplicationProof } = require('../replication-proof-runner'));
+}
+
+function primeConnectedNode(): void {
+  const realPush = Array.prototype.push;
+  jest.spyOn(mockConstructedNodes as any, 'push').mockImplementation(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    function (this: unknown[], ...args: any[]) {
+      const node = args[0] as FakeCadreNode;
+      node._setConnections([{}]);
+      node._setStrandPeers(1);
+      return realPush.apply(this, args);
+    },
+  );
+}
+
+describe('runReplicationProof — verdict composition (harness false-PASS fix)', () => {
+  beforeEach(() => {
+    mockOwnInsertShouldFail = false;
+    mockOwnInsertFailureMessage = 'CHECK constraint failed: InsertValid';
+    mockForeignRowOnRead = true;
+  });
+
+  it("FAILs when this peer's own write fails, even though it reads another peer's row", async () => {
+    reloadRunnerWithControlledDb();
+    mockConstructedNodes.length = 0;
+    mockOwnInsertShouldFail = true;
+    primeConnectedNode();
+
+    const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+    await runReplicationProof();
+    const calls = consoleSpy.mock.calls;
+    consoleSpy.mockRestore();
+    jest.restoreAllMocks();
+
+    // Own write really did fail (sanity check on the fixture, not just the verdict).
+    const writeErrCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('write phase error'),
+    );
+    expect(writeErrCall).toBeDefined();
+    expect(writeErrCall!.join(' ')).toContain('InsertValid');
+
+    // It DID see the other peer's row (the old buggy predicate would have PASSed on this alone).
+    const readTickCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('authorityRows= 1'),
+    );
+    expect(readTickCall).toBeDefined();
+
+    const verdictCall = calls.find(
+      (args) =>
+        args[0] === '[replication-proof]' &&
+        args.join(' ').includes('========== REPLICATION VERDICT'),
+    );
+    expect(verdictCall).toBeDefined();
+    expect(verdictCall!.join(' ')).toContain('FAIL');
+    expect(verdictCall!.join(' ')).not.toContain('PASS');
+  }, 20000);
+
+  it("PASSes when this peer's own write succeeds AND it reads another peer's row", async () => {
+    reloadRunnerWithControlledDb();
+    mockConstructedNodes.length = 0;
+    mockOwnInsertShouldFail = false;
+    mockForeignRowOnRead = true;
+    primeConnectedNode();
+
+    const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+    await runReplicationProof();
+    const calls = consoleSpy.mock.calls;
+    consoleSpy.mockRestore();
+    jest.restoreAllMocks();
+
+    const insertedCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('inserted own row'),
+    );
+    expect(insertedCall).toBeDefined();
+
+    const verdictCall = calls.find(
+      (args) =>
+        args[0] === '[replication-proof]' &&
+        args.join(' ').includes('========== REPLICATION VERDICT'),
+    );
+    expect(verdictCall).toBeDefined();
+    expect(verdictCall!.join(' ')).toContain('PASS');
+  }, 20000);
+
+  // No foreign row ever appears, so the read poll must exhaust the FULL REPL_POLL_MAX
+  // (120 ticks x POLL_INTERVAL_MS) before giving up — a genuinely ~120s wait, unlike the other
+  // two tests above which exit on the first tick. Timeout sized accordingly (same pattern as
+  // the write-gate describe block's 60000/120000ms tests elsewhere in this file).
+  it('FAILs when this peer sees no other row, even though its own write succeeded', async () => {
+    reloadRunnerWithControlledDb();
+    mockConstructedNodes.length = 0;
+    mockOwnInsertShouldFail = false;
+    mockForeignRowOnRead = false;
+    primeConnectedNode();
+
+    const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+    await runReplicationProof();
+    const calls = consoleSpy.mock.calls;
+    consoleSpy.mockRestore();
+    jest.restoreAllMocks();
+
+    const verdictCall = calls.find(
+      (args) =>
+        args[0] === '[replication-proof]' &&
+        args.join(' ').includes('========== REPLICATION VERDICT'),
+    );
+    expect(verdictCall).toBeDefined();
+    expect(verdictCall!.join(' ')).toContain('FAIL');
+  }, 150000);
+});
+
+// ---------------------------------------------------------------------------
+// Harness early-quit / mislabelled-timeout fix (2026-09-28, same debug session).
+//
+// The FIX itself lives in scripts/run-replication-proof.sh (a bash harness, not this TS
+// runner) — jest cannot drive an adb-backed bash script directly, so this is a lightweight
+// text-level regression guard: it locks (a) the verdict-wait error message reporting the
+// variable that was ACTUALLY used to bound the wait rather than a stale one, and (b) that
+// budget being sized for the runner's own REPL_POLL_MAX-tick read phase, not the old
+// undersized value that cut Peer A off at read tick 105/120 (see the debug session file).
+// ---------------------------------------------------------------------------
+describe('run-replication-proof.sh — verdict-wait timeout message (harness early-quit fix)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require('fs');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require('path');
+  const scriptPath = path.resolve(__dirname, '../../../../../scripts/run-replication-proof.sh');
+  const script: string = fs.readFileSync(scriptPath, 'utf8');
+
+  it('defines VERDICT_TIMEOUT and never lets the "no verdict" error message reference the stale LOGCAT_TIMEOUT', () => {
+    expect(script).toMatch(/VERDICT_TIMEOUT=\d+/);
+    const noVerdictLine = script
+      .split('\n')
+      .find((line: string) => line.includes('did not emit a verdict within'));
+    expect(noVerdictLine).toBeDefined();
+    expect(noVerdictLine).toContain('${VERDICT_TIMEOUT}');
+    expect(noVerdictLine).not.toContain('${LOGCAT_TIMEOUT}');
+  });
+
+  it('budgets VERDICT_TIMEOUT for the real on-device read-phase duration (>= 480s, not the old 420s)', () => {
+    const match = script.match(/VERDICT_TIMEOUT=(\d+)/);
+    expect(match).not.toBeNull();
+    const verdictTimeout = Number(match![1]);
+    // 120 ticks measured at ~4s/tick on device (Peer A reached only tick 105 after the OLD 420s
+    // budget elapsed) needs ~480s; this locks the budget above that measured floor.
+    expect(verdictTimeout).toBeGreaterThanOrEqual(480);
+  });
+});

@@ -142,9 +142,15 @@ const CONTROL_RELAY_ADDRS = resolveBootstrapNodes(CONTROL_ADDR);
 //   On a real device with a live drone the peer handshake typically completes within 1–2 s.
 //   3 ticks is the minimum that covers transient boot delays without blocking unit tests past
 //   Jest's default 5 s timeout (tests 2 and 3 each run the full 3 s peer wait).
-// REPL_POLL_MAX: 120 ticks × 1 s = 120 s replication wait (exits early when strand replicates).
-//   The read poll is ONLY entered when peerCount >= 1 after the peer wait. If peerCount === 0
-//   the verdict is FAIL immediately — no peers means no replication is possible.
+// REPL_POLL_MAX: 120 ticks, nominally × 1 s = 120 s replication wait (exits early when strand
+//   replicates). The read poll is ONLY entered when peerCount >= 1 after the peer wait. If
+//   peerCount === 0 the verdict is FAIL immediately — no peers means no replication is possible.
+//   NOTE (2026-09-28): the "1 s" is POLL_INTERVAL_MS's sleep only — each tick's own
+//   `SELECT Id FROM Authority` is a real distributed-DB round trip, not a local read, and on
+//   device has measured closer to ~4 s/tick (a run captured only tick 105/120 reached after 420 s
+//   of harness-side polling). The 120-tick BUDGET itself is unaffected by this note — only
+//   run-replication-proof.sh's VERDICT_TIMEOUT (which waits for this loop to finish, one way or
+//   the other) needs to budget for the real wall-clock duration, not the nominal one.
 const PEER_POLL_MAX = 3;
 const REPL_POLL_MAX = 120;
 const POLL_INTERVAL_MS = 1000;
@@ -656,6 +662,13 @@ export async function runReplicationProof(): Promise<void> {
     // row and read the other's. This is a pure strand-replication proof, not a semantic write.
     let strandDb: Awaited<ReturnType<ReturnType<typeof createStrandDbFactory>>> | undefined;
     const proofAuthId = `repl-auth-${peerTail}`;
+    // Harness false-PASS fix (2026-09-28, CORRECTION 3 / Eliminated): tracks whether THIS peer's
+    // own contribution actually landed (already present, freshly inserted, or raced in under the
+    // same Id) — as opposed to whether this peer merely SAW another peer's row. Stays false on
+    // any write-phase failure (including a rethrown non-idempotent error, e.g. `CHECK constraint
+    // failed: InsertValid`), which falls through to the outer catch below without setting it.
+    // The final verdict (section 7) requires BOTH this AND seeing another peer's row.
+    let ownWriteOk = false;
     try {
       const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
       // The shared strand ID is the PROOF_NETWORK_STORE constant; both peers join the same strand.
@@ -755,6 +768,7 @@ export async function runReplicationProof(): Promise<void> {
       });
       if (alreadyContributed) {
         L('write phase: own row already present, skipping insert (idempotent)', proofAuthId);
+        ownWriteOk = true;
       } else {
         try {
           await withControlRetry('write phase insert:', () =>
@@ -767,19 +781,24 @@ export async function runReplicationProof(): Promise<void> {
           // W1b instrumentation (2026-09-10): the success path logged NOTHING, so a run could not
           // distinguish "this peer inserted its row" from "this peer never reached the write".
           L('write phase: inserted own row', proofAuthId);
+          ownWriteOk = true;
         } catch (insertErr) {
           const msg = insertErr instanceof Error ? insertErr.message : String(insertErr);
           // Benign only when it is OUR OWN row that already exists; anything else is a real
-          // write failure and must still surface.
+          // write failure (e.g. `CHECK constraint failed: InsertValid`) and must still surface —
+          // ownWriteOk stays false and the throw below is caught by the outer writeErr handler.
           if (/UNIQUE constraint failed: Authority\.Id/.test(msg)) {
             L('write phase: own row raced in, treating as contributed (idempotent)', proofAuthId);
+            ownWriteOk = true;
           } else {
             throw insertErr;
           }
         }
       }
     } catch (writeErr) {
-      // Write phase error — log the error; proof continues to the read phase which will FAIL.
+      // Write phase error — log the error; proof continues to the read phase, but ownWriteOk
+      // stays false (never set on this path) so the section-7 verdict FAILs regardless of what
+      // the read phase below observes — the harness false-PASS this guards against.
       L('WARN write phase error (proof will FAIL):', writeErr instanceof Error ? writeErr.message : String(writeErr));
       // The line above is what logcat truncates. Re-emit the same error one line per record with
       // stacks stripped, so a multi-address listen failure is fully readable (see
@@ -812,7 +831,13 @@ export async function runReplicationProof(): Promise<void> {
     // OPTIMIZATION: if peerCount === 0 after the peer-wait, skip the read poll entirely and
     // emit FAIL immediately. No peers → no replication is possible within the poll window;
     // this also keeps unit-test runtime within Jest's default 5 s timeout.
-    let verdict = false;
+    //
+    // NOTE: this tracks only what this peer SAW in its read set. It is NOT the verdict by
+    // itself — see section 7. Renamed from `verdict` (2026-09-28 harness false-PASS fix): the
+    // old name implied seeing another peer's row was sufficient for PASS, which let a peer whose
+    // OWN write failed (e.g. `CHECK constraint failed: InsertValid`) still report PASS merely for
+    // having read a row the OTHER peer wrote (CORRECTION 3 / Eliminated, 2026-09-28).
+    let sawOtherPeerRow = false;
     if (peerCount > 0) {
       try {
         const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
@@ -826,12 +851,12 @@ export async function runReplicationProof(): Promise<void> {
         // row and swallowed every error with a bare `catch {}`, retrying 120 times in silence — so
         // a failed run produced no error, no row census, and no way to tell "the sibling's row
         // never arrived" from "every read threw". Both are now reported. Verdict semantics are
-        // UNCHANGED: the filter that sets `verdict` is applied in JS over the same row set.
+        // UNCHANGED: the filter that sets `sawOtherPeerRow` is applied in JS over the same row set.
         let readErrCount = 0;
         let firstReadErr: string | undefined;
         let lastCensus = '\u0000';
         let ticks = 0;
-        for (let i = 0; i < REPL_POLL_MAX && !verdict; i++) {
+        for (let i = 0; i < REPL_POLL_MAX && !sawOtherPeerRow; i++) {
           ticks = i + 1;
           try {
             // `eval` yields rows lazily via AsyncIterableIterator (no `all` on Database).
@@ -849,7 +874,7 @@ export async function runReplicationProof(): Promise<void> {
               lastCensus = census;
             }
             if (seen.some(id => id.startsWith('repl-auth-') && id !== proofAuthId)) {
-              verdict = true;
+              sawOtherPeerRow = true;
               break;
             }
             await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
@@ -870,6 +895,12 @@ export async function runReplicationProof(): Promise<void> {
     }
 
     // ── 7. REPLICATION VERDICT (byte-identical to logcat grep target) ───────────────────────
+    // Harness false-PASS fix (2026-09-28): PASS requires BOTH that this peer's own write landed
+    // (ownWriteOk, section 5) AND that it saw another peer's row (sawOtherPeerRow, section 6).
+    // Seeing another peer's row alone is not evidence this peer replicated successfully if this
+    // peer's own insert never committed.
+    const verdict = ownWriteOk && sawOtherPeerRow;
+    L('verdict inputs: ownWriteOk=', ownWriteOk, 'sawOtherPeerRow=', sawOtherPeerRow);
     L(`========== REPLICATION VERDICT: ${verdict ? 'PASS' : 'FAIL'} ==========`);
 
     await node.stop();

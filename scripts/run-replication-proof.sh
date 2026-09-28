@@ -881,7 +881,15 @@ fi
 # verdict" — a statement about the instrument dressed as a statement about the peers. The
 # verdict was FAIL either way there, so nothing was misjudged; on a PASS it would have
 # discarded the pass.
-VERDICT_TIMEOUT=420
+#
+# Raised from 420 (commit 1920b696) — that value assumed the runner's own "REPL_POLL_MAX: 120
+# ticks x 1 s = 120 s" comment held on device. It does not: the 2026-09-28 device run captured
+# Peer A still at `read tick 105` of 120 when THIS poll gave up after burning its full 420 s
+# window — ~4 s per tick, not 1 s, because each tick's `SELECT Id FROM Authority` is a real
+# distributed-DB round trip, not a local read. At that measured rate a full 120-tick read phase
+# needs ~480 s; budget for the bad case (same margin pattern as STRAND_PEERS_TIMEOUT/
+# STRAND_TIMEOUT above, both raised past their own measured worst case for the same reason).
+VERDICT_TIMEOUT=600
 echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5554 (${VERDICT_TIMEOUT}s) ..."
 VERDICT_A=$(read_logcat_line_now "${VERDICT_TAG}" "emulator-5554" $((VERDICT_TIMEOUT / 5)))
 echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5556 (${VERDICT_TIMEOUT}s) ..."
@@ -923,7 +931,11 @@ else
 fi
 
 if [ -z "${VERDICT_A}" ] || [ -z "${VERDICT_B}" ]; then
-  echo "[run-replication-proof] ERROR: one or both peers did not emit a verdict within ${LOGCAT_TIMEOUT}s — FAIL" >&2
+  # Mislabel fix (2026-09-28): this used to read "${LOGCAT_TIMEOUT}s" (180s), a leftover from
+  # before commit 1920b696 raised the ACTUAL poll budget to VERDICT_TIMEOUT — the message never
+  # matched what the script actually waited, and reading it (rather than the real code) is what
+  # produced the "180s" mislabel in prior run write-ups. Report the timeout that was really used.
+  echo "[run-replication-proof] ERROR: one or both peers did not emit a verdict within ${VERDICT_TIMEOUT}s — FAIL" >&2
   exit 1
 fi
 
