@@ -83,7 +83,7 @@ import { createScopedRnStorageProvider, scopedRnStoreName } from './storage-guar
 import { CadreNode } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
-import { VOTETORRENT_SCHEMA_SQL, NetworkEngine, AuthorityEngine } from '@votetorrent/vote-engine/rn';
+import { VOTETORRENT_SCHEMA_SQL, NetworkEngine, AuthorityEngine, registerDbPlugins } from '@votetorrent/vote-engine/rn';
 import { REPLICATION_PROOF_ENABLED } from './proof-flags.generated';
 import { createStrandDbFactory } from './rn-db-factory';
 import { isSelfVouched } from './self-voucher';
@@ -374,6 +374,23 @@ function errorLinesWithoutStack(err: unknown): string[] {
     .filter(line => !/^\s*at\s/.test(line))
     .map(line => line.trimEnd())
     .filter(line => line.length > 0);
+}
+
+/**
+ * Opens the proof's strand handle AND registers vote-engine's per-Database UDFs on it — the same
+ * two steps NetworksEngine.open()/createContext() always run back to back. The DbFactory alone
+ * registers nothing (cadre-core registers plugins only on its CONTROL database), so a handle taken
+ * straight from it lacks `SignatureValid`/`SignatureValidP256`/`isISODatetime`, and the first
+ * signed insert (AdminSigning, inside saveInviteWithSigning) fails
+ * `Function not found: SignatureValidP256/3` — the on-device leg-6b founder failure (checkpoint 4,
+ * item 2). Every strand handle this proof uses must come through here.
+ */
+async function acquireProofDb(
+  factory: ReturnType<typeof createStrandDbFactory>,
+): Promise<Awaited<ReturnType<ReturnType<typeof createStrandDbFactory>>>> {
+  const db = await factory(PROOF_NETWORK_STORE);
+  await registerDbPlugins(db);
+  return db;
 }
 
 /**
@@ -797,7 +814,7 @@ export async function runReplicationProof(): Promise<void> {
       try {
         strandDb = await withControlRetry(
           'write phase acquire:',
-          () => strandDbFactory(PROOF_NETWORK_STORE),
+          () => acquireProofDb(strandDbFactory),
           peerCount > 0 ? CONTROL_RETRY_MAX : 1,
         );
       } finally {
@@ -1142,7 +1159,7 @@ export async function runReplicationProof(): Promise<void> {
         const strandDbFactory = createStrandDbFactory(node as Parameters<typeof createStrandDbFactory>[0]);
         const readDb = strandDb ?? await withControlRetry(
           'read phase:',
-          () => strandDbFactory(PROOF_NETWORK_STORE),
+          () => acquireProofDb(strandDbFactory),
           peerCount > 0 ? CONTROL_RETRY_MAX : 1,
         );
 

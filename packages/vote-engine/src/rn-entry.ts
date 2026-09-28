@@ -13,6 +13,11 @@
 // Verifying with a hand-rolled noble call instead would prove nothing about schema agreement —
 // which is the whole point of the encoding contract (base64url digest / hex sig / hex key).
 export { verifySigP256 } from './database/initialize.js'
+// The per-Database UDF lifecycle (`SignatureValid`/`SignatureValidP256`/`isISODatetime` + the
+// crypto plugin) that every schema CHECK calls. NetworksEngine runs it on every handle it opens;
+// the P2P-11 replication proof opens its strand handle directly through the DbFactory, so it must
+// run it too — without it, the first signed insert fails `Function not found: SignatureValidP256/3`.
+export { registerDbPlugins } from './database/initialize.js'
 export { NetworksEngine } from './networks/networks-engine.js'
 export { NetworkEngine } from './network/network-engine.js'
 export { ElectionsEngine, peekNextElectionTid } from './elections/elections-engine.js'

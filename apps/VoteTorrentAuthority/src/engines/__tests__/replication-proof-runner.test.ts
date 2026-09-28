@@ -123,9 +123,16 @@ class MockNetworkEngineForRn {
   }
 }
 
+// Ordered log of strand-handle events ('register' from registerDbPlugins, 'exec' from a write)
+// so a test can assert UDF registration happens before the first write on the handle.
+const mockDbEvents: string[] = [];
+
 function mockVoteEngineRnModule() {
   return {
     VOTETORRENT_SCHEMA_SQL: 'declare schema main {}',
+    registerDbPlugins: async (_db: unknown) => {
+      mockDbEvents.push('register');
+    },
     NetworkEngine: MockNetworkEngineForRn,
     AuthorityEngine: MockAuthorityEngineForRn,
   };
@@ -1118,6 +1125,7 @@ function reloadRunnerWithControlledDb(): void {
   jest.mock('../rn-db-factory', () => ({
     createStrandDbFactory: () => async () => ({
       exec: async (sql: string) => {
+        mockDbEvents.push('exec');
         if (mockAuthorityInsertShouldFail && /insert into Authority/.test(sql)) {
           throw new Error(mockAuthorityInsertFailureMessage);
         }
@@ -1175,7 +1183,27 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     mockInviteSlotAvailable = true;
     mockForeignRowOnRead = true;
     mockReadRowIds = null;
+    mockDbEvents.length = 0;
   });
+
+  // Checkpoint 4, item 2: the leg-6b founder failed `Function not found: SignatureValidP256/3`
+  // because the proof took its strand handle straight from the DbFactory and never ran
+  // registerDbPlugins (NetworksEngine always does). Lock that the handle is registered before
+  // anything is written to it.
+  it('registers vote-engine UDFs on the strand handle before the first write', async () => {
+    reloadRunnerWithControlledDb();
+    mockConstructedNodes.length = 0;
+    primeConnectedNode();
+
+    const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+    await runReplicationProof();
+    consoleSpy.mockRestore();
+    jest.restoreAllMocks();
+
+    expect(mockDbEvents).toContain('register');
+    expect(mockDbEvents).toContain('exec');
+    expect(mockDbEvents.indexOf('register')).toBeLessThan(mockDbEvents.indexOf('exec'));
+  }, 20000);
 
   // Both the founder attempt AND the join-via-invite fallback fail — a genuine total write-phase
   // failure, not the old single-insert-failure shape. Driven fast (no 60s InviteSlot-poll wait):
@@ -1469,3 +1497,4 @@ describe('run-replication-proof.sh — verdict-wait timeout message (harness ear
     expect(verdictTimeout).toBeGreaterThanOrEqual(480);
   });
 });
+
