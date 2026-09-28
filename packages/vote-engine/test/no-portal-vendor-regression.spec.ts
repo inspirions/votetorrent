@@ -125,7 +125,7 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 0.13.x, @optimystic/db-* 1.1.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.6.x, @optimystic/db-* 1.7.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
@@ -146,8 +146,11 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // admits 1.1.0, so the families were decoupled for this hop on purpose.
       // This assertion had drifted TWO bumps behind once already (it still named 0.12.x /
       // 0.27.x) because nothing re-runs it on a dependency change.
+      // It drifted AGAIN (still 0.13.x / 1.1.x) across the cadre-core 1.2.0 and the
+      // @optimystic 1.2.0 -> 1.3.0 -> 1.5.0 bumps; re-keyed 2026-09-28 with the
+      // @optimystic 1.5.0 -> 1.7.0 and @serfab 1.2.0 -> 1.6.0 bumps to what yarn.lock actually resolves.
       const expectedPrefix = pkg === '@serfab/strand-proto' ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '0.13.' : '1.1.'
+        : pkg.startsWith('@serfab/') ? '1.6.' : '1.7.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

@@ -84,28 +84,31 @@ index 0b76a9275292239d2405534bd4eff42a8b96097f..5fef4571f854e947aedd7fadd842fc9e
          for await (const sourceRow of sourceValue) {
              // Convert source row to flat OLD/NEW format
 diff --git a/dist/src/runtime/emit/schema-declarative.js b/dist/src/runtime/emit/schema-declarative.js
-index 3b95b81e5284e36f794aaa0be6c8d2b5cf60bd41..a17db58acc33c283e4a49062d1728687bf8099b5 100644
+index 7e578613cb8a01fcdf3e7f27a656c15cebcfd727..799a341ab5ee99b7067e1dc851f0e1f25d1d46d2 100644
 --- a/dist/src/runtime/emit/schema-declarative.js
 +++ b/dist/src/runtime/emit/schema-declarative.js
-@@ -454,6 +454,18 @@ async function runBatchedMigrationLoop(db, schemaName, migrationStatements) {
-                 const errorMessage = e instanceof Error ? e.message : String(e);
-                 throw new QuereusError(`Failed to execute DDL: ${ddl}\nError: ${errorMessage}`, StatusCode.ERROR, e instanceof Error ? e : undefined);
-             }
-+            // VoteTorrent patch (network-create-hangs): a multi-object `apply schema` (VoteTorrent's
-+            // sApp schema alone declares 79 tables/views) drives this loop through dozens of
-+            // sequential `await`s that, under the optimystic vtab's `network` transactor, resolve
-+            // through chained microtasks rather than real macrotask-yielding I/O. A long enough run
-+            // of such awaits never lets the JS event loop's macrotask queue (setTimeout/timers)
-+            // drain, so any caller racing this DDL against a `setTimeout`-based timeout (e.g.
-+            // AddNetworkScreen's CREATE_TIMEOUT_MS) can never see that timeout fire — the operation
-+            // looks like an indefinite silent hang instead of a bounded, reportable failure. Yielding
-+            // to a real macrotask after every migration statement costs one extra event-loop turn per
-+            // object (negligible against the seconds-to-minutes this loop can already take) and
-+            // restores the guarantee that a caller's own timeout logic can actually run.
-+            await new Promise((resolve) => setTimeout(resolve, 0));
+@@ -530,6 +530,21 @@ async function runStepsWithUndoJournal(db, schemaName, migrationStatements, preA
          }
+         if (poisonedBy === undefined && step.undo !== undefined && step.undo.length > 0)
+             journal.push(step.undo);
++        // VoteTorrent patch (network-create-hangs): a multi-object `apply schema` (VoteTorrent's
++        // sApp schema alone declares 79 tables/views) drives this loop through dozens of
++        // sequential `await`s that, under the optimystic vtab's `network` transactor, resolve
++        // through chained microtasks rather than real macrotask-yielding I/O. A long enough run
++        // of such awaits never lets the JS event loop's macrotask queue (setTimeout/timers)
++        // drain, so any caller racing this DDL against a `setTimeout`-based timeout (e.g.
++        // AddNetworkScreen's CREATE_TIMEOUT_MS) can never see that timeout fire — the operation
++        // looks like an indefinite silent hang instead of a bounded, reportable failure. Yielding
++        // to a real macrotask after every migration statement costs one extra event-loop turn per
++        // object (negligible against the seconds-to-minutes this loop can already take) and
++        // restores the guarantee that a caller's own timeout logic can actually run.
++        // 4.20.0: the loop body moved from runBatchedMigrationLoop into this function (the undo
++        // journal); the yield follows it, still once per SUCCESSFUL step. A failed step returns
++        // above without yielding, exactly as the 4.19.4 placement (after the try/catch) did.
++        await new Promise((resolve) => setTimeout(resolve, 0));
      }
-     catch (e) {
+     return undefined;
+ }
 diff --git a/dist/src/runtime/emit/update.js b/dist/src/runtime/emit/update.js
 index c2028920c89b76bf6ca275761b0234d3cb189f33..af52c56c16d7cf8686eb2b6eb554c09cff3a89e8 100644
 --- a/dist/src/runtime/emit/update.js
@@ -182,7 +185,7 @@ index 512ab1ccd1722e8cbba5ce95f52ca410660fa9ae..906504978b692cb4b9b9bcf5dfbee743
      return {
          operands: [plan.operand],
 diff --git a/dist/src/runtime/row-constraints.js b/dist/src/runtime/row-constraints.js
-index fe52e105af9484a5107293a5608f08032e1eefa0..af6d36a5b706d078524db235618a4fe407811edb 100644
+index fe52e105af9484a5107293a5608f08032e1eefa0..db03c82e02540818055dd9d408d838873d28f6d2 100644
 --- a/dist/src/runtime/row-constraints.js
 +++ b/dist/src/runtime/row-constraints.js
 @@ -3,6 +3,8 @@ import { RowOpFlag } from '../schema/table.js';
@@ -203,10 +206,13 @@ index fe52e105af9484a5107293a5608f08032e1eefa0..af6d36a5b706d078524db235618a4fe4
              continue;
          }
          // Resolve without a per-row microtask hop (see runtime/async-util.ts).
-@@ -263,3 +265,36 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
+@@ -262,4 +264,37 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
+     }
      return { skip: false };
  }
- //# sourceMappingURL=row-constraints.js.map
+-//# sourceMappingURL=row-constraints.js.map
+\ No newline at end of file
++//# sourceMappingURL=row-constraints.js.map
 +
 +/**
 + * VoteTorrent patch (datetime-immediate-check-coercion), part 2 of 2.
@@ -216,7 +222,7 @@ index fe52e105af9484a5107293a5608f08032e1eefa0..af6d36a5b706d078524db235618a4fe4
 + * UPDATE, so they are left untouched. A per-cell parse failure falls back to the raw
 + * value — the row's own performInsert remains the authoritative place that throws.
 + *
-+ * Byte-identical module across 4.14.0, 4.17.1, 4.18.0 and 4.19.4, so this port is verbatim.
++ * Byte-identical module across 4.14.0, 4.17.1, 4.18.0, 4.19.4 and 4.20.0, so this port is verbatim.
 + * Those versions do not import `validateAndParse` here, so the import is added above.
 + * NOTE: this hunk must be appended by hand on every hop — the module ships with NO
 + * trailing newline, so `git apply` rejects hunk #3 while hunks #1-#2 land, leaving a
