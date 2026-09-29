@@ -222,7 +222,7 @@ describe('NetworksScreen bootstrap join — NETOP-03 / T-22-09 guard', () => {
       founder: boolean;
       sAppConfig: { schema: string };
     };
-    expect(config.strandRow).toEqual({ Id: PEER, MemberPrivateKey: null, Type: 'o' });
+    expect(config.strandRow).toEqual({ Id: PEER, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null });
     // Spike 064: joining an existing host — we did not provision the strand.
     expect(config.founder).toBe(false);
     expect(config.sAppConfig.schema).toBe('declare schema main {}');
