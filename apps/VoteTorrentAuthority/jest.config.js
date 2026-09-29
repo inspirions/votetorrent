@@ -25,6 +25,8 @@ module.exports = {
   testPathIgnorePatterns: [
     '<rootDir>/node_modules/',
     '<rootDir>/src/engines/__tests__/cadre-core-node.smoke.spec.ts',
+    // Guards jest.node.config.js's own ESM mappers; runs only under that config.
+    '<rootDir>/src/engines/__tests__/node-config-esm-mappers.spec.ts',
     // replication-proof-runner.test.ts was excluded here by Phase 39 plan 39-04 because
     // "Phase 41 is PAUSED (P2P-11 open at 41-11)". It stayed excluded for months and rotted:
     // its CadreNode mock lost getMultiaddrs(), so the runner threw at the relay-reservation
