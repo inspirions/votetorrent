@@ -1395,7 +1395,7 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
   // all in leg 6b). Before the fix, the single-id `id !== myAuthorityId` predicate counted the
   // orphan as "the other peer's row" and the verdict falsely PASSed. After the fix, both ids are
   // recognized as this peer's own (via ownAuthorityIds) and the verdict correctly FAILs.
-  it('FAILs on the leg-6b shape: own orphan Authority row + own joined authority, no other-peer row', async () => {
+  it('leg-6b shape, corrected by spike 095: a founder whose row committed NEVER redeems an invite, and its own row is not foreign', async () => {
     reloadRunnerWithControlledDb();
     mockConstructedNodes.length = 0;
     // Founder's own Authority insert SUCCEEDS (commits the 'repl-auth-<tail>' orphan row) ...
@@ -1405,14 +1405,14 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     mockSaveInviteWithSigningShouldFail = true;
     mockSaveInviteWithSigningFailureMessage =
       "Unknown error: QuereusError: Function not found: SignatureValidP256/3";
-    // Joiner fallback succeeds under a different, invite-bound id (a UUID on-device; the exact
-    // value doesn't matter, only that it differs from the founder's 'repl-auth-<tail>' id).
+    // An InviteSlot IS visible (on-device it was this founder's OWN, committed before the
+    // signing step threw). The joiner path would redeem it; spike 095 leg 3 caught exactly that.
     mockInviteSlotAvailable = true;
     mockRespondToInviteShouldFail = false;
     mockCreateAuthorityShouldFail = false;
     mockRespondToInviteReturnId = '242d5575-8170-4f17-930c-cd219bc06408';
-    // The read-phase census sees ONLY this peer's own two rows — no genuinely foreign row.
-    mockReadRowIds = ['repl-auth-IdABC123', '242d5575-8170-4f17-930c-cd219bc06408'];
+    // The read-phase census sees ONLY this peer's own founder row — no genuinely foreign row.
+    mockReadRowIds = ['repl-auth-IdABC123'];
     primeConnectedNode();
 
     const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
@@ -1432,29 +1432,33 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     expect(fallbackCall).toBeDefined();
     expect(fallbackCall!.join(' ')).toContain('SignatureValidP256/3');
 
-    // ... and the joiner fallback completed successfully under its own different id.
-    const joinedCall = calls.find(
+    // SPIKE 095: the founder does NOT redeem the invite. It keeps its role and leaves the open
+    // slot for the sibling. Before the fix it joined through its own slot, spending it.
+    expect(mockRespondToInviteCalls.length).toBe(0);
+    expect(calls.find(
       (args) => args[0] === '[replication-proof]' && args.join(' ').includes('joined authority via real invite flow'),
+    )).toBeUndefined();
+    const founderHeldCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('founder row committed and invite open for the sibling'),
     );
-    expect(joinedCall).toBeDefined();
-    expect(joinedCall!.join(' ')).toContain('242d5575-8170-4f17-930c-cd219bc06408');
+    expect(founderHeldCall).toBeDefined();
+    expect(founderHeldCall!.join(' ')).toContain('repl-auth-IdABC123');
 
-    // The read phase saw exactly the two rows configured — both this peer's own.
+    // The read phase saw exactly the one row configured — this peer's own.
     const readTickCall = calls.find(
-      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('authorityRows= 2'),
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('authorityRows= 1'),
     );
     expect(readTickCall).toBeDefined();
     expect(readTickCall!.join(' ')).toContain('repl-auth-IdABC123');
-    expect(readTickCall!.join(' ')).toContain('242d5575-8170-4f17-930c-cd219bc06408');
 
-    // The fixed predicate: ownWriteOk=true (the joiner fallback DID complete for real) but
-    // sawOtherPeerRow=false (neither row in the read set was written by anyone else).
+    // ownWriteOk=true (the founder row is this peer's own committed write) but
+    // sawOtherPeerRow=false (its own row is never foreign).
     const verdictInputsCall = calls.find(
       (args) => args[0] === '[replication-proof]' && args[1] === 'verdict inputs: ownWriteOk=',
     );
     expect(verdictInputsCall).toBeDefined();
     expect(verdictInputsCall![2]).toBe(true); // ownWriteOk
-    expect(verdictInputsCall![4]).toBe(false); // sawOtherPeerRow — THE regression this test locks
+    expect(verdictInputsCall![4]).toBe(false); // sawOtherPeerRow — the leg-6b false-PASS lock
 
     const verdictCall = calls.find(
       (args) =>
@@ -1465,6 +1469,35 @@ describe('runReplicationProof — verdict composition (harness false-PASS fix)',
     expect(verdictCall!.join(' ')).toContain('FAIL');
     expect(verdictCall!.join(' ')).not.toContain('PASS');
   }, 150000); // no foreign row ever appears, so the read phase polls its full window (~120s)
+
+  it('spike 095: a founder whose row committed but who cannot open an invite FAILs its write rather than joining', async () => {
+    reloadRunnerWithControlledDb();
+    mockConstructedNodes.length = 0;
+    mockAuthorityInsertShouldFail = false;
+    mockSaveInviteWithSigningShouldFail = true; // the first ceremony AND every retry fail
+    mockSaveInviteWithSigningFailureMessage = 'the repo could not determine whether it exists';
+    mockInviteSlotAvailable = false; // nothing was published
+    mockRespondToInviteShouldFail = false;
+    mockReadRowIds = ['repl-auth-IdABC123'];
+    primeConnectedNode();
+
+    const consoleSpy = jest.spyOn(console, 'info').mockImplementation(() => {});
+    await runReplicationProof();
+    const calls = consoleSpy.mock.calls;
+    consoleSpy.mockRestore();
+    jest.restoreAllMocks();
+
+    expect(mockSaveInviteWithSigningCalls.length).toBe(1 + 3); // the ceremony + FOUNDER_INVITE_RETRIES
+    expect(mockRespondToInviteCalls.length).toBe(0);
+    const writeErr = calls.find(
+      (args) => args[0] === '[replication-proof]' && args.join(' ').includes('no invite could be opened for the sibling'),
+    );
+    expect(writeErr).toBeDefined();
+    const verdictInputsCall = calls.find(
+      (args) => args[0] === '[replication-proof]' && args[1] === 'verdict inputs: ownWriteOk=',
+    );
+    expect(verdictInputsCall![2]).toBe(false);
+  }, 150000);
 });
 
 // ---------------------------------------------------------------------------

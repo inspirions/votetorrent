@@ -240,6 +240,8 @@ const STRAND_PEER_POLL_MAX = 25;
 // trips — sized generously (60s) rather than reusing the shorter STRAND_PEER_POLL_MAX, which
 // bounds a cheaper local connection-count read, not a cross-peer replicated-row wait.
 const INVITE_SLOT_POLL_MAX = 60;
+// Spike 095 leg 3: how many times a founder whose row committed re-tries JUST the invite ceremony.
+const FOUNDER_INVITE_RETRIES = 3;
 
 // Fixed identity/shape constants for the write-phase choreography's genesis + invite ceremony.
 // Values are arbitrary (this is a byte-replication proof, not a real authority) but must be
@@ -955,10 +957,18 @@ export async function runReplicationProof(): Promise<void> {
           ),
         );
 
-        // Real engine calls from here — the invite-issuance ceremony this checkpoint exists to
-        // exercise for real: a genuine secp256k1 threshold-signing ceremony (threshold=1) via
-        // AuthorityEngine.saveInviteWithSigning -> SigningEngine (its own default-constructed
-        // instance), publishing a real InviteSlot the joiner will find and accept.
+        await issueFounderInvite();
+        return proofAuthId;
+      }
+
+      /**
+       * The founder's real Authority invite, split out so a founder whose row committed can
+       * retry JUST this step (spike 095 leg 3). Real engine calls: a genuine secp256k1
+       * threshold-signing ceremony (threshold=1) via AuthorityEngine.saveInviteWithSigning ->
+       * SigningEngine (its own default-constructed instance), publishing a real InviteSlot the
+       * joiner will find and accept.
+       */
+      async function issueFounderInvite(): Promise<void> {
         const authorityEngine = new AuthorityEngine(
           { id: proofAuthId, name: FOUNDER_AUTHORITY_NAME, domainName: FOUNDER_AUTHORITY_DOMAIN } as Authority,
           { db, user: { id: proofUserId, name: `Proof User ${peerTail}`, activeKeys: [] } as User },
@@ -975,7 +985,18 @@ export async function runReplicationProof(): Promise<void> {
           signerUserId: proofUserId,
         });
         await authorityEngine.saveInviteWithSigning(inviteShare, 'iad' as Scope, signCallback);
-        return proofAuthId;
+      }
+
+      /** Is an Authority InviteSlot visible that nobody has redeemed yet? */
+      async function unredeemedAuthoritySlotExists(): Promise<boolean> {
+        return withControlRetry('write phase founder: InviteSlot presence', async () => {
+          for await (const row of db.eval(
+            `SELECT Cid FROM InviteSlot WHERE Type = 'au' AND Cid NOT IN (SELECT SlotCid FROM InviteResult)`,
+          )) {
+            if (row && row['Cid']) return true;
+          }
+          return false;
+        });
       }
 
       /**
@@ -990,7 +1011,9 @@ export async function runReplicationProof(): Promise<void> {
         for (let i = 0; i < INVITE_SLOT_POLL_MAX && !slot; i++) {
           slot = await withControlRetry('write phase joiner: poll InviteSlot', async () => {
             for await (const row of db.eval(
-              `SELECT Cid, InviteKey, InviteSignature FROM InviteSlot WHERE Type = 'au'`,
+              // Unredeemed only: a slot with an InviteResult is spent, and redeeming it again fails
+              // `UNIQUE constraint failed: InviteResult.SlotCid` (spike 095 leg 3, Peer A).
+              `SELECT Cid, InviteKey, InviteSignature FROM InviteSlot WHERE Type = 'au' AND Cid NOT IN (SELECT SlotCid FROM InviteResult)`,
             )) {
               if (row && row['Cid']) {
                 return {
@@ -1117,9 +1140,35 @@ export async function runReplicationProof(): Promise<void> {
             'write phase: founder attempt did not complete (expected for the non-founding peer), falling back to join-via-invite:',
             founderErr instanceof Error ? founderErr.message : String(founderErr),
           );
-          myAuthorityId = await attemptJoinViaInvite();
-          L('write phase: joined authority via real invite flow', myAuthorityId);
-          ownWriteOk = true;
+          if (ownAuthorityIds.has(proofAuthId)) {
+            // SPIKE 095 leg 3: this phone's founder row COMMITTED, then the ceremony threw later
+            // (there, `the repo could not determine whether it exists` inside the invite signing).
+            // It is the founder. It used to fall through to the joiner path, find its OWN
+            // InviteSlot and redeem it, leaving the sibling nothing to join through (the leg-6b
+            // self-orphan shape again). A founder never redeems an invite. It makes sure one is
+            // open for the sibling, and its committed Authority row is its own write.
+            let published = await unredeemedAuthoritySlotExists();
+            for (let attempt = 1; !published && attempt <= FOUNDER_INVITE_RETRIES; attempt++) {
+              L('write phase founder: row committed but no open invite, re-issuing, attempt', attempt);
+              try {
+                await issueFounderInvite();
+                published = true;
+              } catch (inviteErr) {
+                L('write phase founder: invite re-issue failed:', inviteErr instanceof Error ? inviteErr.message : String(inviteErr));
+                published = await unredeemedAuthoritySlotExists();
+              }
+            }
+            if (!published) {
+              throw new Error('write phase founder: founder row committed but no invite could be opened for the sibling');
+            }
+            myAuthorityId = proofAuthId;
+            L('write phase: founder row committed and invite open for the sibling', myAuthorityId);
+            ownWriteOk = true;
+          } else {
+            myAuthorityId = await attemptJoinViaInvite();
+            L('write phase: joined authority via real invite flow', myAuthorityId);
+            ownWriteOk = true;
+          }
         }
       }
     } catch (writeErr) {
