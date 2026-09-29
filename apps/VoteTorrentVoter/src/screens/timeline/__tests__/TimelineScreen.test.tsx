@@ -657,6 +657,44 @@ describe('TimelineScreen — device-local time zone default (CR-01)', () => {
 	});
 });
 
+describe('TimelineScreen — row subtitle weekday follows the active language', () => {
+	let previousLanguage: string;
+
+	beforeEach(() => {
+		previousLanguage = i18n.language;
+	});
+
+	afterEach(async () => {
+		await renderer.act(async () => {
+			await i18n.changeLanguage(previousLanguage);
+		});
+	});
+
+	it('under Español, a near-future row\'s {{weekday}} param is the Spanish weekday name, not the English one', async () => {
+		// Anchored 3 days out so several rows (votingStarts .. tallyingStarts) fall 1-6 calendar
+		// days ahead and carry `subtitle.futureWeekday` with a `weekday` param.
+		const anchor = Date.now() + 3 * 86_400_000;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+		await renderer.act(async () => {
+			await i18n.changeLanguage('es');
+		});
+
+		const tr = await renderAndFlush();
+		type Row = {stageId: string; instantMs: number | null; subtitle: {key: string; params?: {weekday?: string}} | null};
+		const rows = tr.root.findByType(TimelineRail).props.rows as Row[];
+		const weekdayRows = rows.filter(r => typeof r.subtitle?.params?.weekday === 'string');
+		expect(weekdayRows.length).toBeGreaterThan(0);
+
+		for (const row of weekdayRows) {
+			const at = new Date(row.instantMs as number);
+			const es = new RealDateTimeFormat('es', {timeZone: 'UTC', weekday: 'long'}).format(at);
+			const en = new RealDateTimeFormat('en', {timeZone: 'UTC', weekday: 'long'}).format(at);
+			expect(row.subtitle?.params?.weekday).toBe(es);
+			expect(row.subtitle?.params?.weekday).not.toBe(en);
+		}
+	});
+});
+
 describe('TimelineScreen — rail composition and callback wiring (Task 2)', () => {
 	it('TimelineRail is mounted exactly once in the ready state, zero times in the indeterminate state', async () => {
 		const ready = await renderAndFlush();

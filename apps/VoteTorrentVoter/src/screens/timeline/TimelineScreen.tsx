@@ -165,6 +165,10 @@ export default function TimelineScreen() {
 	const {colors, fonts, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('timeline');
 	const {t: tCommon} = useTranslation('common');
+	// Read per render: `useTranslation` re-renders this screen on a language change, and the
+	// timeline-read effect below depends on it so the rows' weekday names re-derive in the new
+	// language (`deriveTimeline` otherwise defaults to 'en').
+	const language = i18n.language;
 	const navigation = useNavigation<NativeStackNavigationProp<TimelineStackParamList, 'TimelineHome'>>();
 
 	const [state, setState] = useState<ScreenState>({kind: 'loading'});
@@ -246,6 +250,7 @@ export default function TimelineScreen() {
 					timeline: details.current.timeline,
 					now: nowMs,
 					timeZone: deviceTimeZone,
+					language,
 					election: {
 						ballotDeadline: details.election.ballotDeadline,
 						date: details.election.date,
@@ -273,7 +278,7 @@ export default function TimelineScreen() {
 		// `reloadNonce` stays an explicit dependency (not folded into `nowMs` alone): two presses
 		// close enough in wall-clock time could otherwise recompute the SAME `nowMs` value and
 		// silently fail to re-trigger the retry the user just asked for.
-	}, [getEngine, seededElectionId, reloadNonce, nowMs, deviceTimeZone]);
+	}, [getEngine, seededElectionId, reloadNonce, nowMs, deviceTimeZone, language]);
 
 	// D-06/D-23 (59-09): the registration-status read is its OWN effect, deliberately separate
 	// from the timeline-read effect above -- `resolveRegistrationStatus` never reads the clock
