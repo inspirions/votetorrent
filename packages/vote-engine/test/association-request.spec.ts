@@ -103,7 +103,10 @@ function makeRequestInit (authorityId: string, deviceKey: string, overrides?: Pa
     authorityId,
     registrantId: crypto.randomUUID(),
     deviceKey,
-    submittedAt: toIsoZDatetime(Date.now()),
+    // A minute in the past (well inside the 30-day skew floor), never `Date.now()`: the
+    // engine stamps its own ReceivedAt, and on a quiet host a same-millisecond submit made
+    // `ReceivedAt !== SubmittedAt` fail intermittently.
+    submittedAt: toIsoZDatetime(Date.now() - 60_000),
     ...overrides
   }
 }
