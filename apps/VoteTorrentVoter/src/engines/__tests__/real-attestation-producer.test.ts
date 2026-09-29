@@ -104,7 +104,6 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 		authorityId: 'authority-1',
 		registrantId: 'registrant-1',
 		deviceKey: 'device-voting-pubkey-hex',
-		expiration: Date.now() + 60_000,
 	}
 
 	const fakeProvisionResult = { publicKeyBase64: 'fake-public-key-b64', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' }

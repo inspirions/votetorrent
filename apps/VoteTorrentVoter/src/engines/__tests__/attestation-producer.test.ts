@@ -51,7 +51,6 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 		authorityId: 'authority-1',
 		registrantId: 'registrant-1',
 		deviceKey: 'devkey-pubkey-hex',
-		expiration: Date.now() + 60_000,
 	}
 
 	describe('StubAttestationProducer', () => {
