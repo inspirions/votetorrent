@@ -153,11 +153,21 @@ const node = new CadreNode({
     // raising this bound (see debug session Evidence). `tools/multipeer-gate`
     // (which mostly PASSES) already runs with a materially larger bound; these
     // values match it rather than inventing a new number.
+    //
+    // SPIKE 095 (2026-09-29): 1 MiB was STILL the wall. Device leg 2 logged 358
+    // `TransferLimitError: data limit of 1048576 bytes exceeded` on drone-A, and the
+    // phone-to-phone strand commit died as "Some peers did not complete". A per-reservation
+    // byte cap is the wrong SHAPE for a party's own relay, not merely the wrong size.
+    // Upstream agrees: the #19 fix (sereus master, ticket
+    // `bug-party-run-relay-caps-every-relayed-connection`, NOT yet released) makes a
+    // party-run relay forward WITHOUT LIMIT by default, via
+    // `reservations: { applyDefaultLimit: false, maxReservations: 128, reservationTtl: 2 h }`.
+    // These are those exact values. Delete this block when the release carrying the fix is adopted.
     relayServerInit: {
       reservations: {
-        maxReservations: 32, // n=4 mesh + headroom (circuit-relay-v2 default is 15)
-        defaultDurationLimit: 10 * 60 * 1000, // 10 min per reservation (was 2 min; matches tools/multipeer-gate/lib/topology.mjs)
-        defaultDataLimit: BigInt(1 << 20), // 1 MiB per reservation (was 128 KiB; matches tools/multipeer-gate/lib/topology.mjs)
+        applyDefaultLimit: false, // a granted slot is uncapped (upstream PARTY-run default)
+        maxReservations: 128, // upstream PARTY_RELAY_MAX_RESERVATIONS
+        reservationTtl: 2 * 60 * 60 * 1000, // upstream PARTY_RELAY_RESERVATION_TTL_MS (2 h)
       },
       maxInboundHopStreams: 64,
       maxOutboundStopStreams: 64,
