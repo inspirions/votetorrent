@@ -14,6 +14,9 @@ import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import bootstrapConfigDoc from '../../bootstrap.config.json';
 import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
+import { noiseCryptoForNode } from '../engines/noise-crypto-config';
+import { openStrandPeerBook } from '../engines/rn-durable-slot';
+import { REPLICATION_PROOF_ENABLED } from '../engines/proof-flags.generated';
 
 // ---------------------------------------------------------------------------
 // `Promise.withResolvers` ambient augmentation (D-08/D-09).
@@ -222,6 +225,17 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
     let localNode: InstanceType<typeof CadreNode> | null = null;
 
     async function bootNode() {
+      // Spike 093: the P2P-11 replication proof boots its OWN CadreNode. Booting this one too puts
+      // two cadre nodes on one Hermes JS thread for the whole run, and on React Native that cost
+      // compounds per node (sereus-chat measured control-DB bring-up at 761 ms -> 3 s -> 43 s as
+      // nodes were added to one device, and the extra nodes could not obtain a relay reservation
+      // at all). The proof owns the device; this node sits the run out. Dev-only by construction.
+      if (__DEV__ && REPLICATION_PROOF_ENABLED) {
+        console.info('[CadreNodeProvider] skipped: the replication proof owns this device\'s cadre node');
+        settleNode({ status: 'failed', node: null });
+        return;
+      }
+
       // D-14: a config fault does not block boot — the node still constructs
       // and starts (degraded, solo), it is just loud about why. Exactly one
       // console.error, naming only the closed kind/reason tokens — never the
@@ -277,9 +291,14 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         // ISO-01 per-scope storage + release-build persistence guardrail — see engines/storage-guard.ts.
         const scopedStorageProvider = createScopedRnStorageProvider();
 
+        // cadre-core 1.7.0 strand peer book, durable across launches (spike 094). In memory it
+        // dies with the process, and on a phone every launch is a restart.
+        const strandPeerStore = await openStrandPeerBook(PARTY_ID, 'votetorrent-cadre-node');
+
         localNode = new CadreNode({
           privateKey,
           controlNetwork: { partyId: PARTY_ID, bootstrapNodes: CONTROL_RELAY_ADDRS },
+          strandPeers: { store: strandPeerStore },
           profile: 'transaction',
           // sApp-schema signing is DISABLED for VoteTorrent — a deliberate project
           // decision, not an oversight.
@@ -343,6 +362,10 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
             // Permissive gater — allows loopback / emulator host dials (D-11).
             // Per-strand enrollment gating is v2.x scope.
             connectionGater: { denyDialMultiaddr: async () => false },
+            // Spike 093: native Noise crypto (react-native-quick-crypto) for the control node
+            // AND every strand node. Pure-JS Noise on Hermes saturated the JS thread during
+            // bring-up. See engines/noise-crypto-config.ts.
+            noiseCrypto: noiseCryptoForNode(),
           } as any,
           // SPIKE 062 — the `strandNetwork` override block is REMOVED on cadre-core 0.10.0.
           //

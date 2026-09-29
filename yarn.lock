@@ -1680,6 +1680,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@craftzdog/react-native-buffer@npm:^6.1.2":
+  version: 6.1.2
+  resolution: "@craftzdog/react-native-buffer@npm:6.1.2"
+  dependencies:
+    ieee754: "npm:^1.2.1"
+    react-native-quick-base64: "npm:^3.0.0"
+  checksum: 10c0/039e9f74d4f06c0fd1008fc3d42a5ca50970c61a126bcb561f8b4cf8fd06ebc8a372adaeec36526de2d544e3117b71023b6fe2d634361c142b96978e64954f36
+  languageName: node
+  linkType: hard
+
 "@cspell/cspell-bundled-dicts@npm:8.19.4":
   version: 8.19.4
   resolution: "@cspell/cspell-bundled-dicts@npm:8.19.4"
@@ -5760,9 +5770,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@serfab/cadre-core@npm:1.6.0":
-  version: 1.6.0
-  resolution: "@serfab/cadre-core@npm:1.6.0"
+"@serfab/cadre-core@npm:1.7.0":
+  version: 1.7.0
+  resolution: "@serfab/cadre-core@npm:1.7.0"
   dependencies:
     "@libp2p/crypto": "npm:^5.1.13"
     "@libp2p/interface": "npm:^3.1.0"
@@ -5773,17 +5783,17 @@ __metadata:
     "@optimystic/quereus-plugin-crypto": "npm:^1.7.0"
     "@optimystic/quereus-plugin-optimystic": "npm:^1.7.0"
     "@quereus/quereus": "npm:^4.20.0"
-    "@serfab/quereus-plugin-sereus": "npm:^1.6.0"
+    "@serfab/quereus-plugin-sereus": "npm:^1.7.0"
     debug: "npm:^4.4.3"
     libp2p: "npm:^3.1.3"
     uint8arrays: "npm:^5.1.0"
-  checksum: 10c0/35d6b86495488b9e5e34da685d27b7b1ce490ff99dde3df7da3001c8a2ac3db9c087222ef81c74d62f435be316f9ea6865618334f04f602463eb85e165a84a8c
+  checksum: 10c0/6e81fb90e05c59b9ddfebdad0583e307307e2950382c2f87bd86b786e8976d1ee56d77b3b724c6b5d83e2b6f78b3c65fc1b0379f2551cfa5efe91e75439bb7a4
   languageName: node
   linkType: hard
 
-"@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch":
-  version: 1.6.0
-  resolution: "@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch::version=1.6.0&hash=0d3988"
+"@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.7.0#~/.yarn/patches/@serfab-cadre-core-npm-1.7.0-fwdport.patch":
+  version: 1.7.0
+  resolution: "@serfab/cadre-core@patch:@serfab/cadre-core@npm%3A1.7.0#~/.yarn/patches/@serfab-cadre-core-npm-1.7.0-fwdport.patch::version=1.7.0&hash=9ec61e"
   dependencies:
     "@libp2p/crypto": "npm:^5.1.13"
     "@libp2p/interface": "npm:^3.1.0"
@@ -5794,17 +5804,55 @@ __metadata:
     "@optimystic/quereus-plugin-crypto": "npm:^1.7.0"
     "@optimystic/quereus-plugin-optimystic": "npm:^1.7.0"
     "@quereus/quereus": "npm:^4.20.0"
-    "@serfab/quereus-plugin-sereus": "npm:^1.6.0"
+    "@serfab/quereus-plugin-sereus": "npm:^1.7.0"
     debug: "npm:^4.4.3"
     libp2p: "npm:^3.1.3"
     uint8arrays: "npm:^5.1.0"
-  checksum: 10c0/c807e4146329eab777930a69d713d9c5fa119c7221a0689a3a914f663490994450128bfd1c49aac447c63a0443626eeff25470f3e8c6568d358f791ae42be002
+  checksum: 10c0/3d615b3956d5b9ebc984b6b64089223e3d820796eb141de8fbdecc13e72413436ce2b4b2272d93f6a2bb2494e21b7d47aa3e962f29cabb2bf37d00f7ec6fa161
   languageName: node
   linkType: hard
 
-"@serfab/quereus-plugin-sereus@npm:^1.6.0":
-  version: 1.6.0
-  resolution: "@serfab/quereus-plugin-sereus@npm:1.6.0"
+"@serfab/cadre-rn@npm:1.7.0":
+  version: 1.7.0
+  resolution: "@serfab/cadre-rn@npm:1.7.0"
+  dependencies:
+    "@noble/hashes": "npm:^2.0.0"
+    "@optimystic/db-p2p": "npm:^1.7.0"
+    "@ungap/structured-clone": "npm:^1.3.0"
+    buffer: "npm:^6.0.3"
+    event-target-polyfill: "npm:^0.0.4"
+    readable-stream: "npm:^4.7.0"
+    web-streams-polyfill: "npm:^4.1.0"
+  peerDependencies:
+    "@craftzdog/react-native-buffer": ^6.1.2
+    react-native: ">=0.79.0"
+    react-native-get-random-values: ^1.11.0
+    react-native-nitro-modules: ">=0.31.2"
+    react-native-quick-base64: ">=3.0.0"
+    react-native-quick-crypto: ^1.1.7
+    react-native-webrtc: ^124.0.6
+  peerDependenciesMeta:
+    "@craftzdog/react-native-buffer":
+      optional: true
+    react-native:
+      optional: true
+    react-native-get-random-values:
+      optional: true
+    react-native-nitro-modules:
+      optional: true
+    react-native-quick-base64:
+      optional: true
+    react-native-quick-crypto:
+      optional: true
+    react-native-webrtc:
+      optional: true
+  checksum: 10c0/d9904d6e651f5fa58270e1a653303633f3a095510f05922683c87d56c0736dd2c08b2ee37285a42d0a68a8033b54ec653c4973be2ec3f1737f47a61bdaee7121
+  languageName: node
+  linkType: hard
+
+"@serfab/quereus-plugin-sereus@npm:^1.7.0":
+  version: 1.7.0
+  resolution: "@serfab/quereus-plugin-sereus@npm:1.7.0"
   dependencies:
     "@libp2p/circuit-relay-v2": "npm:^4.1.3"
     "@libp2p/interface": "npm:^3.1.0"
@@ -5817,7 +5865,7 @@ __metadata:
     "@optimystic/quereus-plugin-optimystic": "npm:^1.7.0"
     "@quereus/quereus": "npm:^4.20.0"
     debug: "npm:^4.4.3"
-  checksum: 10c0/e71039cbcc3d328b80f7ca10a3f5e5dca1dd360e5d96794ed89dae9b4a24a031d2182b74dfe2c7e2fadb52fd4f16af56ce23984a282ee68aa07a70b1f0037610
+  checksum: 10c0/890fc1f73bf0178f94fd5eac1637aaad20ddd172bf7e3bc224c7ab7e6e6ea8770ec3bbf9fd74734a0db20c4b7593e8f7662c8c8412caca662277f7914f9cfe1a
   languageName: node
   linkType: hard
 
@@ -11117,7 +11165,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"events@npm:^3.3.0":
+"events@npm:3.3.0, events@npm:^3.3.0":
   version: 3.3.0
   resolution: "events@npm:3.3.0"
   checksum: 10c0/d6b6f2adbccbcda74ddbab52ed07db727ef52e31a61ed26db9feb7dc62af7fc8e060defa65e5f8af9449b86b52cc1a1f6a79f2eafcf4e62add2b7a1fa4a432f6
@@ -17498,7 +17546,7 @@ __metadata:
     "@libp2p/peer-id": "npm:^6.0.0"
     "@libp2p/websockets": "npm:^10"
     "@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A1.7.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.7.0-c1815c4b38.patch"
-    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.7.0#~/.yarn/patches/@serfab-cadre-core-npm-1.7.0-fwdport.patch"
     "@serfab/strand-proto": "npm:^0.11.0"
   languageName: unknown
   linkType: soft
@@ -18595,6 +18643,59 @@ __metadata:
   languageName: node
   linkType: hard
 
+"react-native-nitro-modules@npm:^0.37.1":
+  version: 0.37.1
+  resolution: "react-native-nitro-modules@npm:0.37.1"
+  peerDependencies:
+    react: "*"
+    react-native: "*"
+  checksum: 10c0/5178f2ee891cb746b084fdf382b6020e366d8e4a81922a3f1d60a453d34fca6ebb1b00c4c28785c36385bc182ab76a30cba70441c39abbc25d3ad54db612e46e
+  languageName: node
+  linkType: hard
+
+"react-native-quick-base64@npm:3.0.1":
+  version: 3.0.1
+  resolution: "react-native-quick-base64@npm:3.0.1"
+  peerDependencies:
+    react: "*"
+    react-native: "*"
+  checksum: 10c0/5600efa5a5583b6160a6b9d74c3dcfb3cef491b6267e9ce9193f82598662df780310ac32247505d99ec2c6cf72162ed48ed32e342a61fffc02e5375d3a7d871b
+  languageName: node
+  linkType: hard
+
+"react-native-quick-base64@patch:react-native-quick-base64@npm%3A3.0.1#~/.yarn/patches/react-native-quick-base64-npm-3.0.1-f6009a6514.patch":
+  version: 3.0.1
+  resolution: "react-native-quick-base64@patch:react-native-quick-base64@npm%3A3.0.1#~/.yarn/patches/react-native-quick-base64-npm-3.0.1-f6009a6514.patch::version=3.0.1&hash=e00951"
+  peerDependencies:
+    react: "*"
+    react-native: "*"
+  checksum: 10c0/0f0b105de9402b9159721c55ede305ce1c9f5576b516a7e7f87fe4b36db36c1c62f475dee119a5df8a8825d2f018067b460c13595440688a5237967a099de945
+  languageName: node
+  linkType: hard
+
+"react-native-quick-crypto@npm:^1.1.7":
+  version: 1.1.7
+  resolution: "react-native-quick-crypto@npm:1.1.7"
+  dependencies:
+    "@craftzdog/react-native-buffer": "npm:^6.1.2"
+    events: "npm:3.3.0"
+    readable-stream: "npm:4.7.0"
+    safe-buffer: "npm:^5.2.1"
+    string_decoder: "npm:^1.3.0"
+    util: "npm:0.12.5"
+  peerDependencies:
+    expo: ">=48.0.0"
+    react: "*"
+    react-native: "*"
+    react-native-nitro-modules: ">=0.31.2"
+    react-native-quick-base64: ">=3.0.0"
+  peerDependenciesMeta:
+    expo:
+      optional: true
+  checksum: 10c0/9b2528a2cce41d01f4e346f356bd7bc706402cd02489398dddf60fa1f570031c2999346848f7cb8c78f50f3c236667612e3f732207e2b286d22dea91c9c9e60a
+  languageName: node
+  linkType: hard
+
 "react-native-safe-area-context@npm:^5.2.0":
   version: 5.8.0
   resolution: "react-native-safe-area-context@npm:5.8.0"
@@ -18879,6 +18980,19 @@ __metadata:
   languageName: node
   linkType: hard
 
+"readable-stream@npm:4.7.0, readable-stream@npm:^4.7.0":
+  version: 4.7.0
+  resolution: "readable-stream@npm:4.7.0"
+  dependencies:
+    abort-controller: "npm:^3.0.0"
+    buffer: "npm:^6.0.3"
+    events: "npm:^3.3.0"
+    process: "npm:^0.11.10"
+    string_decoder: "npm:^1.3.0"
+  checksum: 10c0/fd86d068da21cfdb10f7a4479f2e47d9c0a9b0c862fc0c840a7e5360201580a55ac399c764b12a4f6fa291f8cee74d9c4b7562e0d53b3c4b2769f2c98155d957
+  languageName: node
+  linkType: hard
+
 "readable-stream@npm:^2.0.2, readable-stream@npm:~2.3.6":
   version: 2.3.8
   resolution: "readable-stream@npm:2.3.8"
@@ -18902,19 +19016,6 @@ __metadata:
     string_decoder: "npm:^1.1.1"
     util-deprecate: "npm:^1.0.1"
   checksum: 10c0/e37be5c79c376fdd088a45fa31ea2e423e5d48854be7a22a58869b4e84d25047b193f6acb54f1012331e1bcd667ffb569c01b99d36b0bd59658fb33f513511b7
-  languageName: node
-  linkType: hard
-
-"readable-stream@npm:^4.7.0":
-  version: 4.7.0
-  resolution: "readable-stream@npm:4.7.0"
-  dependencies:
-    abort-controller: "npm:^3.0.0"
-    buffer: "npm:^6.0.3"
-    events: "npm:^3.3.0"
-    process: "npm:^0.11.10"
-    string_decoder: "npm:^1.3.0"
-  checksum: 10c0/fd86d068da21cfdb10f7a4479f2e47d9c0a9b0c862fc0c840a7e5360201580a55ac399c764b12a4f6fa291f8cee74d9c4b7562e0d53b3c4b2769f2c98155d957
   languageName: node
   linkType: hard
 
@@ -19557,7 +19658,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"safe-buffer@npm:5.2.1, safe-buffer@npm:^5.1.0, safe-buffer@npm:~5.2.0":
+"safe-buffer@npm:5.2.1, safe-buffer@npm:^5.1.0, safe-buffer@npm:^5.2.1, safe-buffer@npm:~5.2.0":
   version: 5.2.1
   resolution: "safe-buffer@npm:5.2.1"
   checksum: 10c0/6501914237c0a86e9675d4e51d89ca3c21ffd6a31642efeba25ad65720bce6921c9e7e974e5be91a786b25aa058b5303285d3c15dbabf983a919f5f630d349f3
@@ -21792,16 +21893,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"util@npm:^0.10.3":
-  version: 0.10.4
-  resolution: "util@npm:0.10.4"
-  dependencies:
-    inherits: "npm:2.0.3"
-  checksum: 10c0/d29f6893e406b63b088ce9924da03201df89b31490d4d011f1c07a386ea4b3dbe907464c274023c237da470258e1805d806c7e4009a5974cd6b1d474b675852a
-  languageName: node
-  linkType: hard
-
-"util@npm:^0.12.5":
+"util@npm:0.12.5, util@npm:^0.12.5":
   version: 0.12.5
   resolution: "util@npm:0.12.5"
   dependencies:
@@ -21811,6 +21903,15 @@ __metadata:
     is-typed-array: "npm:^1.1.3"
     which-typed-array: "npm:^1.1.2"
   checksum: 10c0/c27054de2cea2229a66c09522d0fa1415fb12d861d08523a8846bf2e4cbf0079d4c3f725f09dcb87493549bcbf05f5798dce1688b53c6c17201a45759e7253f3
+  languageName: node
+  linkType: hard
+
+"util@npm:^0.10.3":
+  version: 0.10.4
+  resolution: "util@npm:0.10.4"
+  dependencies:
+    inherits: "npm:2.0.3"
+  checksum: 10c0/d29f6893e406b63b088ce9924da03201df89b31490d4d011f1c07a386ea4b3dbe907464c274023c237da470258e1805d806c7e4009a5974cd6b1d474b675852a
   languageName: node
   linkType: hard
 
@@ -21978,6 +22079,7 @@ __metadata:
     "@babel/parser": "npm:^7.25.3"
     "@babel/preset-env": "npm:^7.25.3"
     "@babel/runtime": "npm:^7.25.0"
+    "@craftzdog/react-native-buffer": "npm:^6.1.2"
     "@libp2p/circuit-relay-v2": "npm:^4"
     "@libp2p/crypto": "npm:^5.1.13"
     "@libp2p/interface": "npm:^3.1.0"
@@ -22010,7 +22112,8 @@ __metadata:
     "@react-navigation/bottom-tabs": "npm:^7.0.0"
     "@react-navigation/native": "npm:^7.0.0"
     "@react-navigation/native-stack": "npm:^7.0.0"
-    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.7.0#~/.yarn/patches/@serfab-cadre-core-npm-1.7.0-fwdport.patch"
+    "@serfab/cadre-rn": "npm:1.7.0"
     "@types/jest": "npm:^29.5.13"
     "@types/react": "npm:^19.0.0"
     "@types/react-native-vector-icons": "npm:^6.4.18"
@@ -22036,6 +22139,9 @@ __metadata:
     react-native: "npm:0.78.0"
     react-native-get-random-values: "npm:^2.0.0"
     react-native-localize: "npm:^3.4.1"
+    react-native-nitro-modules: "npm:^0.37.1"
+    react-native-quick-base64: "patch:react-native-quick-base64@npm%3A3.0.1#~/.yarn/patches/react-native-quick-base64-npm-3.0.1-f6009a6514.patch"
+    react-native-quick-crypto: "npm:^1.1.7"
     react-native-safe-area-context: "npm:^5.2.0"
     react-native-screens: "npm:^4.5.0"
     react-native-splash-view: "npm:^0.0.13"
@@ -22087,8 +22193,8 @@ __metadata:
     "@optimystic/quereus-plugin-crypto": "npm:^1.7.0"
     "@quereus/plugin-indexeddb": "npm:4.20.0"
     "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.20.0#~/.yarn/patches/@quereus-quereus-npm-4.20.0-6fd16bc9e5.patch"
-    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch"
-    "@serfab/quereus-plugin-sereus": "npm:^1.6.0"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.7.0#~/.yarn/patches/@serfab-cadre-core-npm-1.7.0-fwdport.patch"
+    "@serfab/quereus-plugin-sereus": "npm:^1.7.0"
     "@types/node": "npm:^22.10.2"
     "@types/react": "npm:19.2.17"
     "@types/react-dom": "npm:^19.0.0"
@@ -22140,7 +22246,7 @@ __metadata:
     "@react-navigation/bottom-tabs": "npm:^7.0.0"
     "@react-navigation/native": "npm:^7.0.0"
     "@react-navigation/native-stack": "npm:^7.0.0"
-    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.6.0#~/.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.7.0#~/.yarn/patches/@serfab-cadre-core-npm-1.7.0-fwdport.patch"
     "@types/jest": "npm:^29.5.13"
     "@types/react": "npm:^19.0.0"
     "@types/react-native-vector-icons": "npm:^6.4.18"
@@ -22255,7 +22361,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"web-streams-polyfill@npm:^4.3.0":
+"web-streams-polyfill@npm:^4.1.0, web-streams-polyfill@npm:^4.3.0":
   version: 4.3.0
   resolution: "web-streams-polyfill@npm:4.3.0"
   checksum: 10c0/b00df8bc814e2a9dcb4b7e80972ff7b0a18415bc3ba58eb1fb94aacc912df936a8f2465ab1e8c548e37ea4e5c9ce1898b407f962e9782ee7ae2dca2396cccd6e

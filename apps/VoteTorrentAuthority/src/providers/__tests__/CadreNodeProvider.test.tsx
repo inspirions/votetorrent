@@ -92,7 +92,17 @@ jest.mock(
         return (this.listeners[event] ?? []).length > 0;
       }
     }
-    return { CadreNode: FakeCadreNode };
+    // cadre-core 1.7.0 (spike 094): the provider opens a durable strand peer book before
+    // constructing the node. The fake records the slot it was opened over.
+    const PersistentStrandPeerBookStore = {
+      open: jest.fn(async (slot: unknown, partyId: string) => ({
+        partyId,
+        slot,
+        entries: () => [],
+        forget: async () => undefined,
+      })),
+    };
+    return { CadreNode: FakeCadreNode, PersistentStrandPeerBookStore };
   },
   { virtual: true },
 );
@@ -588,5 +598,65 @@ describe('CadreNodeProvider — config-fault wiring (D-14)', () => {
     }
 
     errorSpy.mockRestore();
+  });
+});
+
+describe('CadreNodeProvider — native Noise crypto (spike 093)', () => {
+  it('builds the node with network.noiseCrypto from the shared switch (symmetric by default)', async () => {
+    renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    const network = (node.receivedOptions as { network?: { noiseCrypto?: unknown } }).network;
+    // The jest mock of @serfab/cadre-rn/noise-crypto tags its result with the mode, so this
+    // proves the provider forwards the switch rather than silently running stock pure-JS noise.
+    expect(network?.noiseCrypto).toEqual({ __mockNoiseCrypto: 'symmetric' });
+  });
+});
+
+describe('CadreNodeProvider — durable strand peer book (spike 094)', () => {
+  it('builds the node with strandPeers.store: a persistent book for its own party and store scope', async () => {
+    renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    const opts = node.receivedOptions as { strandPeers?: { store?: { partyId?: string; slot?: { key?: string } } } };
+    expect(opts.strandPeers?.store?.partyId).toBe('votetorrent');
+    // Namespaced by scope AND party, so the proof runner's node on the same device never shares it.
+    expect(opts.strandPeers?.store?.slot?.key).toBe('@votetorrent/strandPeerBook/votetorrent-cadre-node/votetorrent');
+  });
+});
+
+describe('CadreNodeProvider — yields the device to the replication proof (spike 093)', () => {
+  it('constructs NO node and settles failed when REPLICATION_PROOF_ENABLED is on', async () => {
+    // React, the renderer and the provider must all come from ONE isolated registry, or the
+    // provider's hooks run against a different React than the renderer's dispatcher.
+    let mod!: typeof import('../CadreNodeProvider');
+    let R!: typeof import('react-test-renderer');
+    let ReactIso!: typeof import('react');
+    jest.isolateModules(() => {
+      jest.doMock('../../engines/proof-flags.generated', () => ({
+        ...jest.requireActual('../../engines/proof-flags.generated'),
+        REPLICATION_PROOF_ENABLED: true,
+      }));
+      ReactIso = require('react');
+      R = require('react-test-renderer');
+      mod = require('../CadreNodeProvider');
+    });
+    const infoSpy = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+    const captured: { value: ReturnType<typeof mod.useCadreNode> | null } = { value: null };
+    function Probe() {
+      captured.value = mod.useCadreNode();
+      return null;
+    }
+    await R.act(async () => {
+      R.create(ReactIso.createElement(mod.CadreNodeProvider, null, ReactIso.createElement(Probe)));
+      for (let i = 0; i < 10; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+    });
+    expect(mockConstructedNodes).toHaveLength(0);
+    await expect(captured.value!.nodeSettled).resolves.toEqual({ status: 'failed', node: null });
+    expect(infoSpy.mock.calls.some(c => String(c[0]).includes('replication proof owns'))).toBe(true);
+    infoSpy.mockRestore();
   });
 });

@@ -60,6 +60,9 @@ module.exports = {
     '^react-native$': '<rootDir>/node_modules/react-native/index.js',
     '^react-native-localize$': '<rootDir>/__mocks__/react-native-localize.js',
     '^@optimystic/db-p2p$': '<rootDir>/__mocks__/@optimystic/db-p2p.js',
+    // Spike 093: native Noise crypto. The real module needs react-native-quick-crypto (Nitro/JSI),
+    // which cannot load under Jest; the mock keeps the mode contract.
+    '^@serfab/cadre-rn/noise-crypto$': '<rootDir>/__mocks__/@serfab/cadre-rn-noise-crypto.js',
     // Phase 39 plan 39-04 (DEBT-09 app-Jest gate) — native TurboModules pulled in
     // transitively by App.test.tsx's full navigation tree (every screen module is
     // eagerly required by src/navigation/index.tsx, not lazily).

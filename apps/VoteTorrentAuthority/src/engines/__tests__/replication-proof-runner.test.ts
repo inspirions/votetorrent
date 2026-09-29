@@ -22,6 +22,13 @@
 type FakeConnection = Record<string, unknown>;
 
 // `mock`-prefixed so jest's hoisted module factory can reference it.
+// Spike 094: the runner opens a durable strand peer book (AsyncStorage-backed) before building its
+// node. Mocked at the seam, once, so every per-case @serfab/cadre-core fake below stays unchanged.
+// The fake book is empty, which is also what a fresh install reads.
+jest.mock('../rn-durable-slot', () => ({
+  openStrandPeerBook: async (partyId: string) => ({ partyId, entries: () => [], forget: async () => undefined }),
+}));
+
 const mockConstructedNodes: FakeCadreNode[] = [];
 
 // Captures the CadreNode constructor config for each constructed instance.

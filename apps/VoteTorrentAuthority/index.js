@@ -55,6 +55,12 @@ runDialProbe();
 import {runReplicationProof} from './src/engines/replication-proof-runner';
 runReplicationProof();
 
+// Spike 093 dev-only native Noise crypto parity + cost probe. No-op unless
+// __DEV__ && NOISE_PARITY_PROBE_ENABLED (a const in the probe, never committed true).
+// Logs under [noise-parity].
+import {runNoiseParityProbe} from './src/engines/noise-crypto-parity-probe';
+runNoiseParityProbe();
+
 // Phase 28 (D-07 / SIGN-04) dev-only signing round-trip proof. Fire-and-forget; no-op unless
 // __DEV__ && SIGNING_PROOF_ENABLED (see proof-flags.generated.ts). Logs under [spike013].
 import {runSigningProofRunner} from './src/engines/signing-proof-runner';
