@@ -4,12 +4,16 @@
 // lesson, ported here verbatim per 44-PATTERNS.md). This file IS git-tracked; never
 // commit an enabled-flag override.
 //
-// Only USE_LOCAL_DB_FACTORY is load-bearing this phase (D-04). The authority app's
-// PROOF_ENABLED / DIAL_PROBE_ENABLED / REPLICATION_PROOF_ENABLED / SIGNING_PROOF_ENABLED /
-// STRAND_PERSISTENCE_PROOF_ENABLED / USE_STUB_ATTESTATION_VERIFIER flags are dropped —
-// the voter app has no dev-proof-runner harness and hardcodes StubAttestationVerifier
-// unconditionally in engine-factory.ts (no gate to select).
+// The authority app's PROOF_ENABLED / DIAL_PROBE_ENABLED / REPLICATION_PROOF_ENABLED /
+// SIGNING_PROOF_ENABLED / STRAND_PERSISTENCE_PROOF_ENABLED flags are dropped — the voter app
+// has no dev-proof-runner harness.
 export const USE_LOCAL_DB_FACTORY = false;
+
+// Selects StubAttestationVerifier for the 'association' engine. __DEV__-gated (see
+// attestation-verifier.ts's selectAttestationVerifier): a release build gets the fail-closed
+// RefusingAttestationVerifier no matter what this file holds. Committed default false —
+// never commit an enabled override.
+export const USE_STUB_ATTESTATION_VERIFIER = false;
 
 // D-12 independent Play-Integrity-leg stub toggle (real-key + stub-PI test tier).
 // __DEV__-gated (see attestation-producer.ts's resolvePlayIntegrityEnabled); committed

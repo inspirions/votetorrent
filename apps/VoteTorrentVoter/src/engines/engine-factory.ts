@@ -13,9 +13,10 @@
  *     device-attestation verifier this phase;
  *   - a net-new `'registration'` case (RegistrationEngine — voter-app only, the
  *     authority app never builds one);
- *   - the `'association'` case UNCONDITIONALLY hardcoding `StubAttestationVerifier`
- *     (44-RESEARCH.md Open Question 2 — no real voter-side verifier exists yet;
- *     T-44-06 mitigation: this seam is explicit and reviewable, not a silent stub).
+ *   - the `'association'` case selecting its verifier through
+ *     `selectAttestationVerifier` (`attestation-verifier.ts`): the stub ONLY under
+ *     `__DEV__ && USE_STUB_ATTESTATION_VERIFIER`, otherwise a fail-closed verifier —
+ *     the voter never verifies attestations, the authority does.
  *
  * Lifecycle:
  *   - One EngineFactory instance per VoterAppProvider (useRef, app-lifetime).
@@ -43,13 +44,13 @@ import {
 	InvitationEngine,
 	LocalStorageReact,
 	AssociationEngine,
-	StubAttestationVerifier,
 	RegistrationEngine,
 } from '@votetorrent/vote-engine/rn'
 import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn'
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory'
 import type { StrandHost } from './rn-db-factory'
-import { USE_LOCAL_DB_FACTORY } from './proof-flags.generated'
+import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated'
+import { selectAttestationVerifier } from './attestation-verifier'
 
 export class EngineFactory {
 	private readonly networksEngine: NetworksEngine
@@ -364,13 +365,12 @@ export class EngineFactory {
 			}
 
 			case 'association': {
-				// T-44-06: no real voter-side attestation verifier exists yet this phase —
-				// hardcode StubAttestationVerifier unconditionally (44-RESEARCH.md Open
-				// Question 2). Kept as a single `verifier` local so a later __DEV__ gate
-				// (mirroring the authority app's USE_STUB_ATTESTATION_VERIFIER convention)
-				// can be re-added without restructuring this case.
+				// The stub is selected ONLY under an explicit __DEV__ dev gate (mirroring the
+				// authority app's USE_STUB_ATTESTATION_VERIFIER convention), never a silent prod
+				// fallback. The non-stub branch fails closed — see attestation-verifier.ts for
+				// why the voter does not carry the authority's real verifier.
 				const ctx = this.requireEstablishedCtx()
-				const verifier: IAttestationVerifier = new StubAttestationVerifier()
+				const verifier: IAttestationVerifier = selectAttestationVerifier(__DEV__, USE_STUB_ATTESTATION_VERIFIER)
 				return new AssociationEngine(ctx, verifier)
 			}
 
