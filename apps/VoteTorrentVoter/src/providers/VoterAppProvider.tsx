@@ -12,9 +12,10 @@
  * seed's returned `electionId` onto context as `seededElectionId` — the registration seam
  * (`ConfirmationScreen`) reads it as `RegisterInit.electionId`.
  *
- * The `lifecycleState`/`getElection`/`getBallot` mock-data-backed election/ballot read surface is
- * UNCHANGED (Phase 44's scope is the registration flow only, per 44-CONTEXT.md's Phase Boundary —
- * swapping the election/ballot surface for a real engine is a later phase's concern). The
+ * `getElection`/`getBallot` are REAL engine reads (`engines/election-read.ts`) against the same
+ * election every other tab resolves (`pickElectionId`, falling back to the `__DEV__` seeded
+ * election). `lifecycleOverride` is the `__DEV__`-only design-review cycler: it forces a card
+ * state and overlays that state's `DEV_LIFECYCLE_CONTENT`, and is inert in a release build. The
  * `isRegistered`/`registeredAt`/`hasVoted` mock booleans are REMOVED — the real registration flow
  * (real `Registrant` rows via `RegistrationEngine`) replaces them (D-02).
  *
@@ -39,8 +40,9 @@ import {rnDbFactory} from '../engines/rn-db-factory';
 import {getOrCreateDeviceUser} from '../engines/device-user';
 import {seedDevNetwork} from '../engines/dev-seed';
 import {useCadreNode} from './CadreNodeProvider';
-import type {LifecycleState, MockBallot, MockElection, VoterAppContextType} from './types';
-import {LIFECYCLE_CONTENT, mockBallot, mockElection} from './mockData';
+import {readVoterBallot, readVoterElection} from '../engines/election-read';
+import type {LifecycleState, VoterBallot, VoterElection, VoterAppContextType} from './types';
+import {DEV_LIFECYCLE_CONTENT} from './devLifecycleFixtures';
 
 const VoterAppContext = createContext<VoterAppContextType | null>(null);
 
@@ -78,11 +80,14 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// module doc comment above.
 	const [seededElectionId, setSeededElectionId] = useState<string | undefined>(undefined);
 
-	// D-03: one lifecycle state, defaulted to 'Upcoming', with a setter exposed through context
-	// so Phase 40's __DEV__ cycler can drive it. UNCHANGED from the mock provider — the
-	// election/ballot read surface stays mock-data-backed this phase (Phase 44 scope is
-	// registration only).
-	const [lifecycleState, setLifecycleState] = useState<LifecycleState>('Upcoming');
+	// D-03: the __DEV__ cycler's forced card state. null = live (derived from the timeline). The
+	// setter ignores writes outside __DEV__, so a release build can never leave live mode.
+	const [lifecycleOverride, setLifecycleOverrideState] = useState<LifecycleState | null>(null);
+	const setLifecycleOverride = useCallback((state: LifecycleState | null) => {
+		if (__DEV__) {
+			setLifecycleOverrideState(state);
+		}
+	}, []);
 
 	// D-02/D-04: one app-lifetime EngineFactory via useRef (constructed once, stable across
 	// renders) — mirrors the authority app's AppProvider (44-PATTERNS.md).
@@ -253,16 +258,33 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		setIsInitialized(true);
 	}, []);
 
-	// Async even though the data is in-memory — mirrors the shape a real engine's read method
-	// would have (D-01 swap-fidelity investment). UNCHANGED from the mock provider.
-	const getElection = useCallback(async (): Promise<MockElection> => {
-		return {...mockElection, lifecycleState, ...LIFECYCLE_CONTENT[lifecycleState]};
-	}, [lifecycleState]);
+	// Real reads against the same election every tab resolves. `Date.now()` is read per call, so
+	// each fetch derives the card state for the moment it runs. Under a __DEV__ override the
+	// real title/id stay, and the forced state's review fixture replaces the derived content.
+	const getElection = useCallback(async (): Promise<VoterElection> => {
+		const election = await readVoterElection(
+			{getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined},
+			Date.now(),
+		);
+		if (__DEV__ && lifecycleOverride !== null) {
+			return {
+				id: election.id,
+				title: election.title,
+				lifecycleState: lifecycleOverride,
+				...DEV_LIFECYCLE_CONTENT[lifecycleOverride],
+			};
+		}
+		return election;
+	}, [getEngine, seededElectionId, lifecycleOverride]);
 
-	// UNCHANGED from the mock provider — no per-state merge (Phase 42, RESEARCH Pattern 3).
-	const getBallot = useCallback(async (): Promise<MockBallot> => {
-		return mockBallot;
-	}, []);
+	// Officer-confirmed ballots only; __DEV__ also admits the dev seed's proposed ballot (the seed
+	// cannot run the officer confirmation ceremony).
+	const getBallot = useCallback(async (): Promise<VoterBallot> => {
+		return readVoterBallot(
+			{getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined},
+			{includeProposed: __DEV__},
+		);
+	}, [getEngine, seededElectionId]);
 
 	// Only show the spinner while initialization is truly pending.
 	// Quick task 260928-kkf ("Syncing + escape button", locked decision, mirrors the
@@ -328,8 +350,8 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		<VoterAppContext.Provider
 			value={{
 				isInitialized,
-				lifecycleState,
-				setLifecycleState,
+				lifecycleOverride,
+				setLifecycleOverride,
 				getElection,
 				getBallot,
 				hasNetwork,

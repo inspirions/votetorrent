@@ -1,9 +1,10 @@
 /**
  * HomeScreen — Vote tab root (D-07 per-domain screen file). Reads through `useVoterApp()`
- * (D-06 / SHELL-03 — no direct mock-data-module import), fetches the election on mount and
- * whenever `lifecycleState` changes, and composes the real `ElectionCard` (Phase 40, HOME-01/02/
- * 03) once loaded. Also hosts the `__DEV__`-gated lifecycle-state cycler (D-03) — dev-only
- * affordance, compiled out of release builds.
+ * (D-06 / SHELL-03 — no direct fixture-module import), fetches the election on mount and
+ * whenever the `__DEV__` lifecycle override changes, and composes the real `ElectionCard` (Phase
+ * 40, HOME-01/02/03) once loaded — or an unavailable message when there is no election to read.
+ * Also hosts the `__DEV__`-gated lifecycle cycler (D-03): it steps live -> each forced state ->
+ * back to live. Dev-only affordance, compiled out of release builds.
  *
  * HomeScreen remains the only `useVoterApp()` caller on this surface (SHELL-03) — `ElectionCard`
  * is presentational (election prop + navigation callback props), never reading the provider or
@@ -24,7 +25,7 @@ import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {LIFECYCLE_ORDER} from '../../providers/types';
-import type {MockElection} from '../../providers/types';
+import type {LifecycleState, VoterElection} from '../../providers/types';
 import type {VoteStackParamList} from '../../navigation/types';
 import {ElectionCard} from '../../components/ElectionCard';
 import {NetworkHeader} from '../../components/NetworkHeader';
@@ -34,36 +35,49 @@ import {InfoDialog} from '../../components/InfoDialog';
 type HomeNavigationProp = NativeStackNavigationProp<VoteStackParamList, 'Home'>;
 
 export default function HomeScreen() {
-	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline mockData import.
-	const {isInitialized, lifecycleState, setLifecycleState, getElection} = useVoterApp();
+	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
+	const {isInitialized, lifecycleOverride, setLifecycleOverride, getElection} = useVoterApp();
 	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('home');
 	const {t: tCommon} = useTranslation('common');
 	const navigation = useNavigation<HomeNavigationProp>();
-	const [election, setElection] = useState<MockElection | null>(null);
+	const [election, setElection] = useState<VoterElection | null>(null);
+	const [unavailable, setUnavailable] = useState(false);
 	const [electionInfoVisible, setElectionInfoVisible] = useState(false);
 	// Phase 44-07 (D-02): local session-only flag — see file header comment.
 	const [hasVoted] = useState(false);
 
-	// Fetch on mount and re-fetch whenever lifecycleState changes — getElection's identity
-	// changes with lifecycleState (VoterAppProvider's useCallback([lifecycleState]) shape), so
-	// this effect naturally re-runs on every cycler step.
+	// Fetch on mount and re-fetch whenever the override changes — getElection's identity changes
+	// with lifecycleOverride (VoterAppProvider's useCallback deps), so this effect naturally
+	// re-runs on every cycler step. A rejected read (no election on this network, or an
+	// indeterminate timeline) renders the unavailable message, never a stale or guessed card.
 	useEffect(() => {
 		let live = true;
-		getElection().then(result => {
-			if (live) {
-				setElection(result);
-			}
-		});
+		getElection().then(
+			result => {
+				if (live) {
+					setElection(result);
+					setUnavailable(false);
+				}
+			},
+			() => {
+				if (live) {
+					setElection(null);
+					setUnavailable(true);
+				}
+			},
+		);
 		return () => {
 			live = false;
 		};
 	}, [getElection]);
 
-	const nextLifecycleState = () => {
-		const currentIndex = LIFECYCLE_ORDER.indexOf(lifecycleState);
-		const next = LIFECYCLE_ORDER[(currentIndex + 1) % LIFECYCLE_ORDER.length];
-		setLifecycleState(next);
+	// live -> LIFECYCLE_ORDER[0] -> ... -> LIFECYCLE_ORDER[last] -> live.
+	const nextLifecycleOverride = () => {
+		const currentIndex = lifecycleOverride === null ? -1 : LIFECYCLE_ORDER.indexOf(lifecycleOverride);
+		const next: LifecycleState | null =
+			currentIndex + 1 < LIFECYCLE_ORDER.length ? LIFECYCLE_ORDER[currentIndex + 1] : null;
+		setLifecycleOverride(next);
 	};
 
 	return (
@@ -82,11 +96,20 @@ export default function HomeScreen() {
 					/>
 				) : null}
 
-				{/* D-03: __DEV__-gated lifecycle-state cycler — never ships to release builds. */}
+				{isInitialized && unavailable ? (
+					<Text
+						testID="home-election-unavailable"
+						style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize, lineHeight: typeScale.body.lineHeight}}>
+						{t('electionUnavailable')}
+					</Text>
+				) : null}
+
+				{/* D-03: __DEV__-gated lifecycle cycler — never ships to release builds. Dev-only
+				    text, deliberately not localized (it is not user-facing copy). */}
 				{__DEV__ && isInitialized ? (
-					<Pressable onPress={nextLifecycleState} style={styles.devCycler}>
+					<Pressable testID="home-dev-lifecycle-cycler" onPress={nextLifecycleOverride} style={styles.devCycler}>
 						<Text style={{color: colors.muted, fontSize: typeScale.caption.fontSize}}>
-							Next state: {lifecycleState}
+							Dev state: {lifecycleOverride ?? 'live'} (tap to cycle)
 						</Text>
 					</Pressable>
 				) : null}

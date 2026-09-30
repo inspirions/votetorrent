@@ -130,8 +130,8 @@ export function computeCompletedCount(
 }
 
 /**
- * Resolves an office's selection summary (42-REVIEW WR-02/IN-02) — the joined localized names of
- * every selected candidate, or the localized `notYetAnswered` fallback when the office has no
+ * Resolves an office's selection summary (42-REVIEW WR-02/IN-02) — the joined names of every
+ * selected candidate (authority-published literal text, not i18n keys), or the localized `notYetAnswered` fallback when the office has no
  * selection — plus `hasSelection`, derived from the SAME `selectedIds` lookup rather than being
  * recomputed independently by each call site. Previously duplicated verbatim between
  * `BallotScreen` and `ReviewSubmitScreen`; centralized here alongside `computeCompletedCount`,
@@ -151,7 +151,7 @@ export function resolveSelectionSummary(
 	const summary = selectedIds
 		.map((id) => candidates.find((candidate) => candidate.id === id))
 		.filter((candidate): candidate is Candidate => Boolean(candidate))
-		.map((candidate) => t(candidate.nameKey))
+		.map((candidate) => candidate.name)
 		.join(', ');
 	return { summary, hasSelection };
 }

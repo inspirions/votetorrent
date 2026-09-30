@@ -234,6 +234,27 @@ describe('KeyholdersScreen — read failure never falls through to the empty sta
 	});
 });
 
+describe('KeyholdersScreen — an unmeasured released count is hidden, never "0 of N" (D-04)', () => {
+	it('a real election read (no keysReleased) lists the keyholders but renders no released-count line', async () => {
+		const tr = await renderAndFlush();
+		const text = allText(tr);
+		expect(text).toContain(KEYHOLDER_NAME_1);
+		expect(text).not.toContain('keys released');
+		expect(tr.root.findAllByProps({testID: 'keyholders-released-count'})).toHaveLength(0);
+	});
+
+	it('a rejecting getElection costs only the count line — the list still renders, not indeterminate', async () => {
+		mockGetElection.mockImplementation(async () => {
+			throw new Error('indeterminate timeline');
+		});
+		const tr = await renderAndFlush();
+		const text = allText(tr);
+		expect(text).toContain(KEYHOLDER_NAME_2);
+		expect(text).not.toContain('keys released');
+		expect(text).not.toContain("We can't show this election's timeline right now");
+	});
+});
+
 describe('KeyholdersScreen — released count clamp (D-04)', () => {
 	it('keysReleased: 9 against a two-keyholder election with no keysTotal clamps to "2 of 2", never "9 of 2"', async () => {
 		mockGetElection.mockImplementation(async () => ({

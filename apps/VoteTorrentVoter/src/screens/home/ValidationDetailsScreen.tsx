@@ -13,23 +13,28 @@ import type {ExtendedTheme} from '@react-navigation/native';
 import {useTranslation} from 'react-i18next';
 import FontAwesome6 from 'react-native-vector-icons/FontAwesome6';
 import {useVoterApp} from '../../providers/VoterAppProvider';
-import type {MockElection} from '../../providers/types';
+import type {VoterElection} from '../../providers/types';
 import {globalStyles} from '../../theme/styles';
 
 export default function ValidationDetailsScreen() {
-	// D-06/SHELL-03: reads through useVoterApp() — no inline mockData import.
+	// D-06/SHELL-03: reads through useVoterApp() — no inline fixture-module import.
 	const {getElection} = useVoterApp();
 	const {colors, fonts, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('home');
-	const [election, setElection] = useState<MockElection | null>(null);
+	const [election, setElection] = useState<VoterElection | null>(null);
 
 	useEffect(() => {
 		let cancelled = false;
-		getElection().then(result => {
-			if (!cancelled) {
-				setElection(result);
-			}
-		});
+		// Evidence only exists under the __DEV__ review override (no engine source yet); a failed
+		// read renders the same nothing as "no evidence".
+		getElection().then(
+			result => {
+				if (!cancelled) {
+					setElection(result);
+				}
+			},
+			() => {},
+		);
 		return () => {
 			cancelled = true;
 		};

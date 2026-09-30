@@ -25,9 +25,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import type { RegisterInit, Signature } from '@votetorrent/vote-core'
-import { NetworksEngine, RegistrationEngine, AssociationEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
+import { NetworksEngine, RegistrationEngine, AssociationEngine, ElectionsEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
 import { FieldPolicyViolationError } from '@votetorrent/vote-engine'
 import { seedDevNetwork, DEV_SEED_NETWORK_NAME } from '../dev-seed'
+import { readVoterBallot, readVoterElection } from '../election-read'
 import { resolveAttestationProducer } from '../attestation-producer'
 
 /** Build a signer for an UNREGISTERED identity — not a row in Officer for this authority. */
@@ -256,6 +257,35 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		expect(childIds.some((id) => id.includes('@react-native-async-storage/async-storage'))).toBe(false)
 	})
 
+	// The voter's REAL read path (election-read.ts) against the REAL seeded engine rows — the
+	// end-to-end proof that the Home/Ballot screens no longer need an in-memory mock.
+	it('the seeded election and ballot read back through the voter read path', async () => {
+		const { seeded, ctx } = await setup()
+		const deps = {
+			getEngine: async <T,>() => new ElectionsEngine(ctx) as unknown as T,
+			fallbackElectionId: seeded.electionId,
+		}
+
+		const election = await readVoterElection(deps, Date.now())
+		expect(election).toMatchObject({ id: seeded.electionId, title: 'Dev Voter Registration Election', lifecycleState: 'Upcoming' })
+		expect(election.countdownTarget).toEqual(expect.any(String))
+
+		const devBallot = await readVoterBallot(deps, { includeProposed: true })
+		expect(devBallot.unsupportedQuestionCount).toBe(0)
+		expect(devBallot.offices.map(o => [o.group, o.title, o.voteFor])).toEqual([
+			['Federal', 'U.S. Senate', 1],
+			['Federal', 'U.S. House of Representatives, District 2', 1],
+			['State (UT)', 'Governor', 1],
+			['State (UT)', 'State Board of Education', 2],
+			['State (UT)', 'State Senate, District 8', 1],
+		])
+		expect(devBallot.offices[0].candidates[0]).toMatchObject({ name: 'Diana Foster', party: 'Democratic Party' })
+
+		// The seed only PROPOSES the ballot (no officer confirmation), so a release-build read —
+		// confirmed ballots only — must not offer it to a voter.
+		expect((await readVoterBallot(deps, { includeProposed: false })).offices).toEqual([])
+	})
+
 	it('is idempotent — re-running seedDevNetwork re-attaches the same network and election without duplicating policy rows', async () => {
 		const networksEngine = new NetworksEngine(new LocalStorageReact())
 		const first = await seedDevNetwork(networksEngine)
@@ -277,5 +307,9 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		const { publicKey: deviceKey } = await resolveAttestationProducer().provisionDeviceKey()
 		const rows = await associationEngine.getAssociationsByDeviceKey(deviceKey)
 		expect(rows).toHaveLength(1)
+
+		// Exactly one ballot — the re-attach must not propose a second one.
+		const electionEngine = await new ElectionsEngine(ctx).openElection(second.electionId)
+		expect(await electionEngine.getBallots()).toHaveLength(1)
 	})
 })

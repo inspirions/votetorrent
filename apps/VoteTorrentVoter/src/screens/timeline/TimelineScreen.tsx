@@ -22,7 +22,7 @@ import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native'
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
-import type {ElectionSummary, IElectionsEngine} from '@votetorrent/vote-core';
+import type {IElectionsEngine} from '@votetorrent/vote-core';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {TimelineRail} from '../../components/TimelineRail';
 import {InfoDialog} from '../../components/InfoDialog';
@@ -35,41 +35,10 @@ import {resolveRegistrationStatus} from '../../engines/registration-status';
 import type {RegistrationStatusResult} from '../../engines/registration-status';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
 
-/**
- * D-02's election-identity rule, exported as a pure helper so it is testable without rendering.
- * `ElectionsEngine.getElections()` filters `where E.Date >= :now` (elections-engine.ts:474), so
- * every summary this function ever receives is already in the FUTURE — picking the summary
- * nearest to now is therefore picking the soonest upcoming election, not "most recent" in the
- * sense of "just happened". Ties broken by ascending `id` for determinism. The single-summary
- * case (today's dev seed and every current deployment) is identical under either reading; the
- * multi-election surface (an election picker) is a deferred phase — see 59-CONTEXT.md Deferred
- * Ideas.
- *
- * `fallbackId` is passed as `__DEV__ ? seededElectionId : undefined` at the call site so the
- * `__DEV__` gate lives in one visible place: `seededElectionId` is `undefined` in every release
- * build (`providers/types.ts:203-209`), so relying on it alone would render an empty tab in
- * production.
- */
-export function pickElectionId(summaries: ElectionSummary[], fallbackId: string | undefined): string | undefined {
-	if (summaries.length === 0) {
-		return fallbackId;
-	}
-	if (summaries.length === 1) {
-		return summaries[0].id;
-	}
-
-	const nowMs = Date.now();
-	let best: ElectionSummary | undefined;
-	let bestDiff = Number.POSITIVE_INFINITY;
-	for (const summary of summaries) {
-		const diff = Math.abs(summary.date - nowMs);
-		if (diff < bestDiff || (diff === bestDiff && best !== undefined && summary.id < best.id)) {
-			best = summary;
-			bestDiff = diff;
-		}
-	}
-	return best?.id;
-}
+// D-02's election-identity rule now lives in engines/election-read.ts (shared with the Home and
+// Ballot reads); re-exported here so existing importers keep resolving it from this module.
+import {pickElectionId} from '../../engines/election-read';
+export {pickElectionId};
 
 export interface HeaderDateRangeParts {
 	startDate: string;

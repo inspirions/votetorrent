@@ -32,7 +32,7 @@ type RegistrationNavigationProp = NativeStackNavigationProp<
 >;
 
 export default function RegistrationScreen() {
-	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline mockData import.
+	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
 	const {isInitialized} = useVoterApp();
 	const {draft} = useRegistrationDraft();
 	// Phase 44-07 (D-02): local session-only state — see file header comment.

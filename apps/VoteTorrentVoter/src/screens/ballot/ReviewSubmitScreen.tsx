@@ -33,14 +33,14 @@ import type {VoteStackParamList} from '../../navigation/types';
 type ReviewSubmitNavigationProp = NativeStackNavigationProp<VoteStackParamList, 'ReviewSubmit'>;
 
 export default function ReviewSubmitScreen() {
-	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline mockData import.
+	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
 	const {getBallot} = useVoterApp();
 	const {selectionMap} = useBallotSelection();
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('ballot');
 	const navigation = useNavigation<ReviewSubmitNavigationProp>();
 	// 42-REVIEW IN-01: shared live-guarded fetch-on-mount effect, extracted out of the screen.
-	const {ballot} = useBallot(getBallot);
+	const {ballot, failed} = useBallot(getBallot);
 	const [submitted, setSubmitted] = useState(false);
 
 	const offices = ballot?.offices ?? [];
@@ -76,6 +76,13 @@ export default function ReviewSubmitScreen() {
 		<View style={[globalStyles.container, styles.screen, {backgroundColor: colors.background}]}>
 			<ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
 				<View style={styles.rowList}>
+					{failed ? (
+						<Text
+							testID="review-ballot-unavailable"
+							style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize, lineHeight: typeScale.body.lineHeight}}>
+							{t('ballotUnavailable')}
+						</Text>
+					) : null}
 					{offices.map(office => {
 						const {summary, hasSelection} = resolveSelectionSummary(
 							office.id,
@@ -99,7 +106,7 @@ export default function ReviewSubmitScreen() {
 											lineHeight: typeScale.caption.lineHeight,
 										},
 									]}>
-									{t(office.titleKey)}
+									{office.title}
 								</Text>
 								<Text
 									style={[

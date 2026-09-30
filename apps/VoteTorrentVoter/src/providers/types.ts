@@ -1,12 +1,12 @@
 /**
  * App-local, future-engine-shaped interfaces for VoteTorrentVoter's provider (D-04).
  *
- * The election/ballot lifecycle shapes below deliberately mirror what a future `vote-core`
- * election read surface would look like (id, title, lifecycle state, async reads) so that
- * swapping their mock backing for a real engine later is DI-only, not a rewrite of every
- * screen (D-01). They stay mock-data-backed this phase (Phase 44 scope is the registration
- * flow only, per 44-CONTEXT.md's Phase Boundary — the election/ballot read surface is a later
- * phase's concern).
+ * The election/ballot shapes below are the voter's view-models over the REAL engine read surface
+ * (`engines/election-read.ts`: `IElectionsEngine` -> `getElectionDetails()` / `getBallots()` /
+ * `getBallotDetails()`). Fields with no engine source yet (voting progress, keys released,
+ * validation checks/fingerprint, certification) are OPTIONAL and left absent in a real read —
+ * never faked. The `__DEV__` lifecycle override fills them from `devLifecycleFixtures.ts` so
+ * every card state can still be design-reviewed.
  *
  * Phase 44 (D-02/D-04/D-07): `VoterAppContextType` now ALSO carries the real composition
  * root's surface (`getEngine`/`hasEngine`/`selectNetwork`/`hasNetwork`) mirroring the authority
@@ -72,20 +72,18 @@ export interface ValidationCheck {
 	nameKey: string;
 	/** Bare i18n key resolving to this check's result copy (e.g. `validationDetails.check1.result`). */
 	resultKey: string;
-	/** Elapsed time for this check, in seconds (mock timing data, per-state fixture-sourced). */
+	/** Elapsed time for this check, in seconds. */
 	elapsedSeconds: number;
 	/** Whether this check has completed verification, or is still pending. */
 	verified: boolean;
 }
 
 /**
- * The per-lifecycle-state content that varies across the `__DEV__` cycler (RESEARCH Pitfall 1).
- * A flat `MockElection` cannot represent "3/5 keys released" (ReleasingKeys) and "5/5 keys
- * released" (Validation) simultaneously — both would have to live on the same static fields of
- * the same object. Instead, one `LifecycleContent` entry per state is merged into the resolved
- * election by `getElection()` (`providers/mockData.ts`'s `LIFECYCLE_CONTENT` map). All fields are
- * optional because not every state uses every field (e.g. `ReviewSelections`/`Complete` show no
- * countdown or progress — RESEARCH Pitfall 4/A3).
+ * The per-lifecycle-state content of an election card. All fields are optional: not every state
+ * uses every field (e.g. `ReviewSelections`/`Complete` show no countdown or progress — RESEARCH
+ * Pitfall 4/A3), and a REAL read only fills what the engine can source (`countdownTarget`,
+ * `keysTotal`). The rest have no engine source yet and are only ever populated by the `__DEV__`
+ * lifecycle override (`devLifecycleFixtures.ts`'s `DEV_LIFECYCLE_CONTENT`).
  */
 export interface LifecycleContent {
 	/** ISO-8601 countdown target, for states whose card shows a countdown. */
@@ -100,7 +98,7 @@ export interface LifecycleContent {
 	checksComplete?: number;
 	/** Total number of validation checks (Validation/ValidationDetails). */
 	checksTotal?: number;
-	/** Validation fingerprint string (ValidationDetails), e.g. mock "Birddog133". */
+	/** Validation fingerprint string (ValidationDetails). */
 	fingerprint?: string;
 	/** Whether the election has been certified (Complete). */
 	certified?: boolean;
@@ -109,61 +107,61 @@ export interface LifecycleContent {
 }
 
 /**
- * Future-engine-shaped mock election — the base identity (id, title, lifecycle state) a real
- * `vote-core` election read would expose, intersected with the current lifecycle state's
- * `LifecycleContent` (merged in by `getElection()`). This is the single shape every downstream
- * screen consumes — the eventual real-engine swap stays DI-only (D-01) because the merged shape
- * never changes, only what populates it does.
+ * The voter's current election: its identity and title (from `getElectionDetails()`), the
+ * lifecycle state derived from its timeline at read time, and that state's `LifecycleContent`.
+ * The single shape every downstream screen consumes.
  */
-export type MockElection = {
+export type VoterElection = {
 	id: string;
 	title: string;
 	lifecycleState: LifecycleState;
 } & LifecycleContent;
 
 /**
- * A single ballot candidate (Phase 42, VOTE-01/02, D-02/D-03). `nameKey`/`partyKey` are i18n
- * KEYS resolved within the `ballot` namespace (e.g. `t(candidate.nameKey)`), not literal
- * copy — mirrors `ValidationCheck.nameKey`/`resultKey`'s i18n-key-not-literal convention above
- * (SHELL-03 spirit: the data layer holds identifiers, the i18n layer holds user-facing strings).
+ * A single ballot candidate — one `Option` of a `select` `Question`. `name`/`party` are the
+ * authority's literal published text (`Option.title` / `Option.details`), NOT i18n keys: ballot
+ * content is election data, so it is shown exactly as the authority published it.
  */
 export interface Candidate {
+	/** `${ballotId}:${questionCode}:${optionCode}` — unique across every ballot in the election. */
 	id: string;
-	nameKey: string;
-	partyKey: string;
+	name: string;
+	/** `Option.details` — the secondary line under the name (e.g. a party). Absent when unpublished. */
+	party?: string;
 }
 
 /**
- * A single ballot office/question (Phase 42, VOTE-01/02, D-02/D-03/D-04). `titleKey` is an i18n
- * key (same convention as `Candidate`). `jurisdiction` drives the Ballot Page's Federal/State
- * display-time grouping (RESEARCH Pattern 3 — a flat, order-stable `offices` array is the single
- * source of truth; grouping is a filter, never a split array, so Next/Previous can walk one
- * index space). `voteFor` drives both the "Vote for N" modal header and radio-(1)-vs-capped-
- * checkbox-(>1) rendering (D-03) — the `voteFor` cap is the ONLY selection constraint.
+ * A single ballot office/question — one `select` `Question`. `group` (`Question.group`) drives
+ * the Ballot Page's display-time sections, in first-appearance order; the flat, order-stable
+ * `offices` array (already sorted by group) is the single source of truth, so Next/Previous walk
+ * one index space (RESEARCH Pattern 3). `voteFor` (`Question.optionRange.max`, default 1) drives
+ * both the "Vote for N" header and radio-(1)-vs-capped-checkbox-(>1) rendering (D-03).
  */
 export interface Office {
+	/** `${ballotId}:${questionCode}`. */
 	id: string;
-	titleKey: string;
-	jurisdiction: 'Federal' | 'State';
+	title: string;
+	group?: string;
 	voteFor: number;
 	candidates: Candidate[];
 }
 
 /**
- * The mock ballot for the current election (Phase 42, VOTE-01, D-02). Served async via
- * `getBallot()` on `VoterAppContextType`, mirroring `getElection()`'s swap-fidelity shape
- * (D-01) — no per-lifecycle-state merge, unlike `MockElection` (RESEARCH Pattern 3).
+ * The voter's ballot for the current election: every `select` question across the election's
+ * ballots, flattened into one `offices` list. `unsupportedQuestionCount` counts questions this
+ * app cannot render (`rank`/`score`/`text`) so the Ballot Page can say so instead of silently
+ * dropping them.
  */
-export interface MockBallot {
+export interface VoterBallot {
 	electionId: string;
 	offices: Office[];
+	unsupportedQuestionCount: number;
 }
 
 /**
- * The provider's context shape. Election/ballot read methods are async (Promise-returning) even
- * though the backing data is in-memory this phase — a deliberate swap-fidelity investment (D-01)
- * so the eventual real-engine wiring for THAT surface becomes DI-only, not a rewrite of every
- * screen.
+ * The provider's context shape. `getElection`/`getBallot` are real engine reads and REJECT when
+ * there is no election (or no ballot) to read — callers render an unavailable state, never a
+ * guessed one.
  *
  * Phase 44 (D-02/D-04): the composition-root surface below (`getEngine`/`hasEngine`/
  * `selectNetwork`/`hasNetwork`) is REAL — it delegates to a real `EngineFactory` + booted
@@ -174,15 +172,17 @@ export interface MockBallot {
  */
 export interface VoterAppContextType {
 	isInitialized: boolean;
-	lifecycleState: LifecycleState;
-	setLifecycleState: (state: LifecycleState) => void;
-	getElection: () => Promise<MockElection>;
 	/**
-	 * Async read of the current election's mock ballot (Phase 42, VOTE-01/02, D-02) — mirrors
-	 * `getElection()`'s swap-fidelity shape (D-01). No per-lifecycle-state merge, unlike
-	 * `getElection()` (RESEARCH Pattern 3).
+	 * `__DEV__`-only design-review override (D-03 cycler). `null` = live: `getElection()` reports
+	 * the state derived from the election's timeline. Non-null forces that state AND overlays its
+	 * `DEV_LIFECYCLE_CONTENT` fixture. Always `null` in a release build (the setter is inert).
 	 */
-	getBallot: () => Promise<MockBallot>;
+	lifecycleOverride: LifecycleState | null;
+	setLifecycleOverride: (state: LifecycleState | null) => void;
+	/** Real read of the current election. Rejects when there is no election to read. */
+	getElection: () => Promise<VoterElection>;
+	/** Real read of the current election's ballot. Rejects when there is no election to read. */
+	getBallot: () => Promise<VoterBallot>;
 	/**
 	 * True once the D-07 seeded/most-recent network has been re-attached (or the seeding attempt
 	 * has resolved, success or failure) — mirrors the authority `AppProvider`'s `hasNetwork`,

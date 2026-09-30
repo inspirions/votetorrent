@@ -27,8 +27,8 @@
  * Do NOT hand-roll any signing-ceremony SQL here — every mutation below goes
  * through a real `vote-engine` method (`NetworksEngine.create`, `ElectionsEngine.
  * seedElectionSigning`/`seedElectionRevisionSigning`/`createElection`,
- * `RegistrationEngine.addElectionRegistrationField`) that owns its own Digest/
- * AdminSigning/AdminSignature ceremony internally. The app layer only ever
+ * `RegistrationEngine.addElectionRegistrationField`, `ElectionEngine.proposeBallot`)
+ * that owns its own Digest/AdminSigning/AdminSignature ceremony internally. The app layer only ever
  * supplies a `SignCallback` — never a raw private key, never a raw AdminSigning
  * INSERT, and never a schema-CHECK-context signature bypass flag.
  *
@@ -44,8 +44,10 @@ import {
 	ElectionType,
 	type ElectionCoreInit,
 	type ElectionRevisionInit,
+	type Ballot,
 	type NetworkInit,
 	type NetworkReference,
+	type Question,
 	type Scope,
 	type User,
 } from '@votetorrent/vote-core'
@@ -146,6 +148,77 @@ async function seedRegisteredAssociationFixture(
 	await seedRegistrantAssociation(ctx, authorityId, { id: DEV_SEED_ASSOCIATION_REGISTRANT_ID }, deviceKey, sign);
 }
 
+/** One `select` question for the dev ballot: `voteFor` becomes `optionRange.max`. */
+function devSelectQuestion(
+	code: string,
+	title: string,
+	group: string,
+	sequence: number,
+	voteFor: number,
+	options: Array<[code: string, title: string, party: string]>,
+): Question {
+	return {
+		code,
+		title,
+		instructions: '',
+		type: 'select',
+		optionRange: { min: 1, max: voteFor },
+		group,
+		sequence,
+		options: options.map(([optionCode, optionTitle, party]) => ({ code: optionCode, title: optionTitle, details: party })),
+	}
+}
+
+/** The dev election's ballot content (the voter app's former in-memory mock ballot, now real rows). */
+const DEV_SEED_BALLOT_QUESTIONS: Question[] = [
+	devSelectQuestion('us-senate', 'U.S. Senate', 'Federal', 0, 1, [
+		['diana', 'Diana Foster', 'Democratic Party'],
+		['marcus', 'Marcus Whitfield', 'Republican Party'],
+		['elena', 'Elena Vasquez', 'Independent'],
+	]),
+	devSelectQuestion('us-house', 'U.S. House of Representatives, District 2', 'Federal', 1, 1, [
+		['james', 'James Okafor', 'Democratic Party'],
+		['laura', 'Laura Bennett', 'Republican Party'],
+	]),
+	devSelectQuestion('governor', 'Governor', 'State (UT)', 0, 1, [
+		['priya', 'Priya Nandan', 'Democratic Party'],
+		['robert', 'Robert Kessler', 'Republican Party'],
+	]),
+	// voteFor 2 — the capped-checkbox CandidateSelector variant.
+	devSelectQuestion('state-board-education', 'State Board of Education', 'State (UT)', 1, 2, [
+		['angela', 'Angela Torres', 'Nonpartisan'],
+		['brian', 'Brian Michaels', 'Nonpartisan'],
+		['cynthia', 'Cynthia Park', 'Nonpartisan'],
+		['david', 'David Nguyen', 'Nonpartisan'],
+	]),
+	devSelectQuestion('state-senate', 'State Senate, District 8', 'State (UT)', 2, 1, [
+		['maria', 'Maria Gutierrez', 'Democratic Party'],
+		['thomas', 'Thomas Reyes', 'Republican Party'],
+	]),
+]
+
+/**
+ * Proposes the dev election's ballot through the real `ElectionEngine.proposeBallot` (an
+ * unsigned `ProposedBallot` row — the officer confirmation ceremony that would finalize it is
+ * not run here, so only a `__DEV__` voter read, which admits proposed ballots, will show it).
+ * Idempotent: skipped when the election already has any ballot, so a re-attach never duplicates
+ * it — and a network seeded before this step existed gains its ballot on the next dev boot.
+ */
+async function seedDevBallot(ctx: EngineContext, electionId: string, authorityId: string): Promise<void> {
+	const electionEngine = await new ElectionsEngine(ctx).openElection(electionId)
+	if ((await electionEngine.getBallots()).length > 0) return
+
+	const ballot: Ballot = {
+		id: (globalThis as any).crypto.randomUUID(),
+		electionId,
+		authorityId,
+		description: 'Dev-seeded ballot for local voter testing.',
+		districts: [],
+		questions: DEV_SEED_BALLOT_QUESTIONS,
+	}
+	await electionEngine.proposeBallot(ballot)
+}
+
 /** Result handed to the composition root / ConfirmationScreen (D-05/D-07/D-08). */
 export interface DevSeedResult {
 	/** Reference to the seeded (or re-attached) network — pass to `EngineFactory.getEngine('network', ref)`. */
@@ -202,6 +275,7 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 		// than duplicating them), and a re-opened network must not silently lose the
 		// registered state a PRIOR boot already seeded.
 		await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+		await seedDevBallot(ctx, electionId, authorityId)
 
 		return { networkReference: existingRef, electionId, deviceUser, sign }
 	}
@@ -379,6 +453,9 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 	// forbidden identifiers stay inside the engine-side module reached through
 	// loadRegistrantAssociationSeeder().
 	await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+
+	// (5) The election's ballot (see seedDevBallot).
+	await seedDevBallot(ctx, electionId, authorityId)
 
 	return { networkReference: ref, electionId, deviceUser, sign }
 }

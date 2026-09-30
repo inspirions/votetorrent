@@ -2,7 +2,7 @@
  * IndividualQuestionScreen.test.tsx (VOTE-02, TDD RED->GREEN) — mounts a real NavigationContainer
  * + real VoterAppProvider + real BallotSelectionProvider around a minimal native-stack harness
  * (the real IndividualQuestionScreen plus DummyScreen stand-ins for CandidateInfo/ReviewSubmit) so
- * getBallot()'s real mockBallot offices resolve and navigation calls land on registered routes —
+ * getBallot()'s real FIXTURE_BALLOT offices resolve and navigation calls land on registered routes —
  * mirrors BallotScreen.test.tsx's real-provider harness. A Probe captures
  * BallotSelectionProvider's context (mirrors BallotSelectionProvider.test.tsx's Probe-capture
  * convention) so the test can jump `currentQuestionIndex` directly instead of walking Next N
@@ -24,7 +24,7 @@ jest.mock('../../../providers/VoterAppProvider');
 import {VoterAppProvider} from '../../../providers/VoterAppProvider';
 import {BallotSelectionProvider, useBallotSelection} from '../../../providers/BallotSelectionProvider';
 import type {BallotSelectionContextType} from '../../../providers/BallotSelectionProvider';
-import {mockBallot} from '../../../providers/mockData';
+import {FIXTURE_BALLOT} from '../../../providers/__fixtures__/voter-fixtures';
 import IndividualQuestionScreen from '../IndividualQuestionScreen';
 import {lightTheme} from '../../../theme/themes';
 import '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
@@ -79,16 +79,16 @@ describe('IndividualQuestionScreen (VOTE-02)', () => {
 		const {tr, captured} = renderScreen();
 		await flushBoot();
 
-		const firstOffice = mockBallot.offices[0];
+		const firstOffice = FIXTURE_BALLOT.offices[0];
 		expect(JSON.stringify(tr.toJSON())).toContain(`Vote for ${firstOffice.voteFor}`);
 
-		const boardIndex = mockBallot.offices.findIndex(o => o.id === 'office-state-board-education');
+		const boardIndex = FIXTURE_BALLOT.offices.findIndex(o => o.id === 'office-state-board-education');
 		renderer.act(() => {
 			captured.value!.setCurrentQuestionIndex(boardIndex);
 		});
 		await flushBoot();
 
-		const boardOffice = mockBallot.offices[boardIndex];
+		const boardOffice = FIXTURE_BALLOT.offices[boardIndex];
 		expect(JSON.stringify(tr.toJSON())).toContain(`Vote for ${boardOffice.voteFor}`);
 	});
 
@@ -96,7 +96,7 @@ describe('IndividualQuestionScreen (VOTE-02)', () => {
 		const {tr, captured} = renderScreen();
 		await flushBoot();
 
-		const firstOffice = mockBallot.offices[0];
+		const firstOffice = FIXTURE_BALLOT.offices[0];
 		const firstCandidateId = firstOffice.candidates[0].id;
 		const row = tr.root.findByProps({testID: `candidate-row-${firstCandidateId}`});
 		renderer.act(() => {
@@ -147,7 +147,7 @@ describe('IndividualQuestionScreen (VOTE-02)', () => {
 		const {tr, captured, navRef} = renderScreen();
 		await flushBoot();
 
-		const lastIndex = mockBallot.offices.length - 1;
+		const lastIndex = FIXTURE_BALLOT.offices.length - 1;
 		renderer.act(() => {
 			captured.value!.setCurrentQuestionIndex(lastIndex);
 		});
@@ -165,7 +165,7 @@ describe('IndividualQuestionScreen (VOTE-02)', () => {
 		const {tr} = renderScreen();
 		await flushBoot();
 
-		const firstCandidateId = mockBallot.offices[0].candidates[0].id;
+		const firstCandidateId = FIXTURE_BALLOT.offices[0].candidates[0].id;
 		// Dialog is closed until the in-card link is tapped.
 		expect(tr.root.findAllByProps({testID: 'info-dialog'})).toHaveLength(0);
 

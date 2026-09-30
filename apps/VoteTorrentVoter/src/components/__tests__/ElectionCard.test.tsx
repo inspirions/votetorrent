@@ -1,6 +1,6 @@
 /**
  * Unit tests for ElectionCard (HOME-01/02/03) — the 7-state presentational card driven by a
- * `STATE_DISPLAY` lookup map (40-RESEARCH.md Pattern 1). Constructs fixture `MockElection` objects
+ * `STATE_DISPLAY` lookup map (40-RESEARCH.md Pattern 1). Constructs fixture `VoterElection` objects
  * directly (no `VoterAppProvider`/navigator) since `ElectionCard` never calls `useVoterApp()` or
  * `useNavigation()` — RESEARCH Anti-Patterns / this plan's presentational-component constraint.
  */
@@ -13,7 +13,7 @@ import {CountdownTimer} from '../CountdownTimer';
 import {ProgressBar} from '../ProgressBar';
 import {lightTheme} from '../../theme/themes';
 import {LIFECYCLE_ORDER} from '../../providers/types';
-import type {LifecycleState, MockElection} from '../../providers/types';
+import type {LifecycleState, VoterElection} from '../../providers/types';
 import '../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 /** useTheme() requires a ThemeProvider ancestor (@react-navigation/native) — wrap every render. */
@@ -24,11 +24,11 @@ function withTheme(children: React.ReactNode) {
 const FUTURE_ISO = new Date(Date.now() + 3600_000).toISOString();
 
 /**
- * Fixture MockElection per state — plausible field values exercising each state's prescribed
+ * Fixture VoterElection per state — plausible field values exercising each state's prescribed
  * STATE_DISPLAY branch, constructed directly (no provider/getElection() involved).
  */
-function electionFor(state: LifecycleState): MockElection {
-	const base: MockElection = {id: 'mock-election-1', title: 'General Election 2025', lifecycleState: state};
+function electionFor(state: LifecycleState): VoterElection {
+	const base: VoterElection = {id: 'mock-election-1', title: 'General Election 2025', lifecycleState: state};
 	switch (state) {
 		case 'Upcoming':
 			return {...base, countdownTarget: FUTURE_ISO};
@@ -61,7 +61,7 @@ type Callbacks = Partial<{
 // test file's module registry is torn down.
 const activeRenderers: renderer.ReactTestRenderer[] = [];
 
-function renderCard(election: MockElection, callbacks: Callbacks = {}, hasVoted?: boolean) {
+function renderCard(election: VoterElection, callbacks: Callbacks = {}, hasVoted?: boolean) {
 	let tr!: renderer.ReactTestRenderer;
 	renderer.act(() => {
 		tr = renderer.create(withTheme(<ElectionCard election={election} hasVoted={hasVoted} {...callbacks} />));
@@ -131,9 +131,9 @@ describe('ElectionCard (HOME-01/02/03)', () => {
 
 	it('Home inherits the shared >=24h countdown contract — a 31h30m target renders 1 DAYS : 07 HOURS and no seconds group (D-16/D-17)', () => {
 		// Inline fixture (not electionFor/FUTURE_ISO — both feed the existing 7-state test and
-		// must stay on the <24h branch). Mirrors mockData.ts:83's nowPlus(31 * HOUR_MS) plus 30
+		// must stay on the <24h branch). Mirrors devLifecycleFixtures.ts's nowPlus(31 * HOUR_MS) plus 30
 		// minutes of slack so the remainder lands cleanly inside the HOURS group.
-		const election: MockElection = {
+		const election: VoterElection = {
 			id: 'mock-election-1',
 			title: 'General Election 2025',
 			lifecycleState: 'Upcoming',
@@ -207,6 +207,42 @@ describe('ElectionCard (HOME-01/02/03)', () => {
 		expect(validationIcon.props.name).toBe('lock-open');
 		expect(releasingKeysIcon.props.name).not.toBe(validationIcon.props.name);
 		expect(releasingKeysIcon.props.color).not.toBe(validationIcon.props.color);
+	});
+
+	// A REAL election read carries no keysReleased / validation checks / certification / progress
+	// (no engine source yet) — the card must say only what is known, never interpolate `undefined`
+	// or imply a measured zero.
+	describe('real-read fallbacks (fields with no engine source are absent)', () => {
+		const summaryOf = (tr: renderer.ReactTestRenderer) =>
+			tr.root.findByProps({testID: 'election-card-summary'}).props.children as string;
+		const real = (state: LifecycleState): VoterElection => ({id: 'e-1', title: 'Real Election', lifecycleState: state});
+
+		it.each([
+			['ReleasingKeys', 'Voting has closed. Results stay locked until the election keys are released.'],
+			['Validation', 'Election keys released — results are being tallied and validated.'],
+			['Complete', 'This election is closed.'],
+		] as const)('%s renders its fallback summary, with no "undefined" and no invented count', (state, expected) => {
+			const summary = summaryOf(renderCard(real(state)));
+			expect(summary).toBe(expected);
+			expect(summary).not.toMatch(/undefined|\d+\/\d+|Certified/);
+		});
+
+		it('ReleasingKeys with only keysTotal (a real read) still falls back — never "0/5"', () => {
+			const summary = summaryOf(renderCard({...real('ReleasingKeys'), keysTotal: 5}));
+			expect(summary).not.toMatch(/\//);
+		});
+
+		it('Open with no progress value renders no progress bar and no "0% complete"', () => {
+			const text = JSON.stringify(renderCard(real('Open')).toJSON());
+			expect(text).not.toContain('% complete');
+			// The vote CTA is still there — only the unsourced progress is omitted.
+			expect(text).toContain('Vote now');
+		});
+
+		it('the counted copy still renders when the review fixture supplies the fields', () => {
+			expect(summaryOf(renderCard(electionFor('ReleasingKeys')))).toBe('3/5 election keys released.');
+			expect(summaryOf(renderCard(electionFor('Complete')))).toBe('Certified ✓');
+		});
 	});
 
 	describe('hasVoted (VOTE-04 / D-08 Home CTA reflection)', () => {

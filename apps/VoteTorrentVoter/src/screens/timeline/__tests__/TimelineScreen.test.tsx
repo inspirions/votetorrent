@@ -488,14 +488,14 @@ describe('TimelineScreen — retry (D-03)', () => {
 });
 
 describe('TimelineScreen — D-04/D-12 read-scope source fence', () => {
-	it('the screen source references none of ElectionCard, mockData, LIFECYCLE_CONTENT, keysReleased, checksComplete', () => {
+	it('the screen source references none of ElectionCard, mockData, devLifecycleFixtures, LIFECYCLE_CONTENT, keysReleased, checksComplete', () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const fs = require('fs');
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const path = require('path');
 		const source: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
 
-		for (const forbidden of ['ElectionCard', 'mockData', 'LIFECYCLE_CONTENT', 'keysReleased', 'checksComplete']) {
+		for (const forbidden of ['ElectionCard', 'mockData', 'devLifecycleFixtures', 'LIFECYCLE_CONTENT', 'keysReleased', 'checksComplete']) {
 			expect(source).not.toContain(forbidden);
 		}
 	});
@@ -954,20 +954,20 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		expect(textOf(label)).toContain('Registration Ends');
 	});
 
-	it('never calls setLifecycleState and never imports LIFECYCLE_ORDER; HomeScreen keeps its own cycler untouched', () => {
+	it('never calls setLifecycleOverride and never imports LIFECYCLE_ORDER; HomeScreen keeps its own cycler untouched', () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const fs = require('fs');
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const path = require('path');
 
 		const screenSource: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
-		expect(screenSource).not.toContain('setLifecycleState');
+		expect(screenSource).not.toContain('setLifecycleOverride');
 		expect(screenSource).not.toContain('LIFECYCLE_ORDER');
 
 		const homeSource: string = fs.readFileSync(path.resolve(__dirname, '../../home/HomeScreen.tsx'), 'utf8');
-		expect(homeSource).toContain('nextLifecycleState');
+		expect(homeSource).toContain('nextLifecycleOverride');
 		expect(homeSource).toContain('LIFECYCLE_ORDER');
-		expect(homeSource).toContain('setLifecycleState');
+		expect(homeSource).toContain('setLifecycleOverride');
 	});
 });
 

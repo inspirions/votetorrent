@@ -66,6 +66,13 @@ const resources = {
 			// extract; authored to match the drill-in screen's own title 1:1.
 			'states.validationDetails.cta': 'View Validation Details',
 			'states.complete.summary': 'Certified ✓',
+			// Fallbacks for a real election read: these states' counted copy above needs data with
+			// no engine source yet (keys released, validation checks, certification), so the card
+			// states only what the timeline establishes.
+			'states.releasingKeys.pendingSummary': 'Voting has closed. Results stay locked until the election keys are released.',
+			'states.validation.pendingSummary': 'Election keys released — results are being tallied and validated.',
+			'states.complete.closedSummary': 'This election is closed.',
+			electionUnavailable: 'No election is available on this network yet.',
 			// Phase 42 (VOTE-04/D-08) — the Open card's minimal voted-state reflection: once
 			// hasVoted flips true, the "Vote now" CTA becomes this disabled pill instead.
 			votedCta: 'You voted',
@@ -111,37 +118,12 @@ const resources = {
 			'officeInfo.title': 'Office Info',
 			'officeInfo.subtitle': 'Informational Page about this office',
 			'officeInfo.body': '"The following information has been provided by the office"',
-			'federalSection': 'Federal',
-			'stateSection': 'State (UT)',
 			'reviewSubmitTitle': 'Review & Submit',
-			// Party labels (D-02/D-03) — own ballot-namespace keys, not a cross-namespace reuse of
-			// registration.form.party.* (RESEARCH Pattern 3 — each namespace stays independently
-			// ownable, 39 D-11).
-			'candidateParty.democratic': 'Democratic Party',
-			'candidateParty.republican': 'Republican Party',
-			'candidateParty.independent': 'Independent',
-			'candidateParty.nonpartisan': 'Nonpartisan',
-			// [ASSUMED] mockBallot office titles (mockData.ts) — no fresh Figma pull captured a
-			// literal office list this session (42-FIGMA-EXTRACT "What was NOT captured" item 1).
-			'office.usSenate': 'U.S. Senate',
-			'office.usHouse': 'U.S. House of Representatives, District 2',
-			'office.governor': 'Governor',
-			'office.stateBoardEducation': 'State Board of Education',
-			'office.stateSenate': 'State Senate, District 8',
-			// [ASSUMED] mockBallot candidate names (mockData.ts) — proper names, not translated in es.
-			'candidate.usSenate.diana': 'Diana Foster',
-			'candidate.usSenate.marcus': 'Marcus Whitfield',
-			'candidate.usSenate.elena': 'Elena Vasquez',
-			'candidate.usHouse.james': 'James Okafor',
-			'candidate.usHouse.laura': 'Laura Bennett',
-			'candidate.governor.priya': 'Priya Nandan',
-			'candidate.governor.robert': 'Robert Kessler',
-			'candidate.stateBoardEducation.angela': 'Angela Torres',
-			'candidate.stateBoardEducation.brian': 'Brian Michaels',
-			'candidate.stateBoardEducation.cynthia': 'Cynthia Park',
-			'candidate.stateBoardEducation.david': 'David Nguyen',
-			'candidate.stateSenate.maria': 'Maria Gutierrez',
-			'candidate.stateSenate.thomas': 'Thomas Reyes',
+			// Office titles, candidate names and party lines are NOT keys: they are the authority's
+			// published ballot text (Question.title / Option.title / Option.details), shown as-is.
+			ballotUnavailable: "This election's ballot isn't available yet.",
+			unsupportedQuestions_one: "{{count}} question on this ballot can't be answered in this app yet.",
+			unsupportedQuestions_other: "{{count}} questions on this ballot can't be answered in this app yet.",
 		},
 		registration: {
 			headerTitle: 'Registration',
@@ -356,6 +338,12 @@ const resources = {
 			// [ASSUMED] RESEARCH A2 — see EN comment above.
 			'states.validationDetails.cta': 'Ver Detalles de Validación',
 			'states.complete.summary': 'Certificada ✓',
+			'states.releasingKeys.pendingSummary':
+				'La votación ha cerrado. Los resultados permanecen bloqueados hasta que se liberen las claves de la elección.',
+			'states.validation.pendingSummary':
+				'Claves de la elección liberadas — los resultados se están contando y validando.',
+			'states.complete.closedSummary': 'Esta elección ha cerrado.',
+			electionUnavailable: 'Aún no hay ninguna elección disponible en esta red.',
 			votedCta: 'Ya votaste',
 			'validationDetails.columnCheck': 'Verificación',
 			'validationDetails.columnResult': 'Resultado',
@@ -399,31 +387,10 @@ const resources = {
 			'officeInfo.title': 'Información del cargo',
 			'officeInfo.subtitle': 'Página informativa sobre este cargo',
 			'officeInfo.body': '"La siguiente información ha sido proporcionada por el cargo"',
-			'federalSection': 'Federal',
-			'stateSection': 'Estatal (UT)',
 			'reviewSubmitTitle': 'Revisar y enviar',
-			'candidateParty.democratic': 'Partido Demócrata',
-			'candidateParty.republican': 'Partido Republicano',
-			'candidateParty.independent': 'Independiente',
-			'candidateParty.nonpartisan': 'No partidista',
-			'office.usSenate': 'Senado de EE. UU.',
-			'office.usHouse': 'Cámara de Representantes de EE. UU., Distrito 2',
-			'office.governor': 'Gobernador/a',
-			'office.stateBoardEducation': 'Junta Estatal de Educación',
-			'office.stateSenate': 'Senado Estatal, Distrito 8',
-			'candidate.usSenate.diana': 'Diana Foster',
-			'candidate.usSenate.marcus': 'Marcus Whitfield',
-			'candidate.usSenate.elena': 'Elena Vasquez',
-			'candidate.usHouse.james': 'James Okafor',
-			'candidate.usHouse.laura': 'Laura Bennett',
-			'candidate.governor.priya': 'Priya Nandan',
-			'candidate.governor.robert': 'Robert Kessler',
-			'candidate.stateBoardEducation.angela': 'Angela Torres',
-			'candidate.stateBoardEducation.brian': 'Brian Michaels',
-			'candidate.stateBoardEducation.cynthia': 'Cynthia Park',
-			'candidate.stateBoardEducation.david': 'David Nguyen',
-			'candidate.stateSenate.maria': 'Maria Gutierrez',
-			'candidate.stateSenate.thomas': 'Thomas Reyes',
+			ballotUnavailable: 'La boleta de esta elección aún no está disponible.',
+			unsupportedQuestions_one: '{{count}} pregunta de esta boleta aún no se puede responder en esta aplicación.',
+			unsupportedQuestions_other: '{{count}} preguntas de esta boleta aún no se pueden responder en esta aplicación.',
 		},
 		registration: {
 			headerTitle: 'Registro',

@@ -37,7 +37,7 @@ import {VoterAppProvider, useVoterApp} from '../../../providers/VoterAppProvider
 import {BallotSelectionProvider, useBallotSelection} from '../../../providers/BallotSelectionProvider';
 import type {BallotSelectionContextType} from '../../../providers/BallotSelectionProvider';
 import type {VoterAppContextType} from '../../../providers/types';
-import {mockBallot} from '../../../providers/mockData';
+import {FIXTURE_BALLOT} from '../../../providers/__fixtures__/voter-fixtures';
 import BallotScreen from '../BallotScreen';
 import IndividualQuestionScreen from '../IndividualQuestionScreen';
 import ReviewSubmitScreen from '../ReviewSubmitScreen';
@@ -105,7 +105,7 @@ describe('ballot navigation flow (VOTE-01/02/03)', () => {
 		const {tr, capturedSelection} = renderFlow('IndividualQuestion');
 		await flushBoot();
 
-		const firstOffice = mockBallot.offices[0];
+		const firstOffice = FIXTURE_BALLOT.offices[0];
 		const firstCandidateId = firstOffice.candidates[0].id;
 
 		const candidateRow = tr.root.findByProps({testID: `candidate-row-${firstCandidateId}`});
@@ -150,7 +150,7 @@ describe('ballot navigation flow (VOTE-01/02/03)', () => {
 		});
 		await flushBoot();
 
-		const firstOffice = mockBallot.offices[0];
+		const firstOffice = FIXTURE_BALLOT.offices[0];
 		const firstCandidateId = firstOffice.candidates[0].id;
 		renderer.act(() => {
 			capturedSelection.value!.toggleCandidate(firstOffice.id, firstCandidateId, firstOffice.voteFor);
@@ -186,7 +186,7 @@ describe('ballot navigation flow (VOTE-01/02/03)', () => {
 		const {tr} = renderFlow('IndividualQuestion');
 		await flushBoot();
 
-		const firstCandidateId = mockBallot.offices[0].candidates[0].id;
+		const firstCandidateId = FIXTURE_BALLOT.offices[0].candidates[0].id;
 		expect(tr.root.findAllByProps({testID: 'info-dialog'})).toHaveLength(0);
 
 		const learnLink = tr.root.findByProps({testID: `candidate-learn-${firstCandidateId}`});

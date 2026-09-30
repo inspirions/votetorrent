@@ -3,7 +3,7 @@
  * across all 7 `LifecycleState` values, driven by the `STATE_DISPLAY` lookup map (40-RESEARCH.md
  * Pattern 1) rather than a long switch embedded in JSX.
  *
- * Pure presentational (`election: MockElection` prop + optional navigation CALLBACK props) — does
+ * Pure presentational (`election: VoterElection` prop + optional navigation CALLBACK props) — does
  * NOT call `useVoterApp()` or `useNavigation()` (RESEARCH.md Anti-Patterns / SHELL-03 spirit), so
  * every state is unit-testable directly with a fixture election, no provider/navigator required.
  * `HomeScreen` owns the provider read and maps these callbacks to real navigation.
@@ -15,7 +15,7 @@ import type {ExtendedTheme} from '@react-navigation/native';
 import {useTranslation} from 'react-i18next';
 import FontAwesome6 from 'react-native-vector-icons/FontAwesome6';
 import {globalStyles} from '../theme/styles';
-import type {LifecycleState, MockElection} from '../providers/types';
+import type {LifecycleState, VoterElection} from '../providers/types';
 import {CountdownTimer} from './CountdownTimer';
 import {ProgressBar} from './ProgressBar';
 
@@ -93,8 +93,33 @@ const STATE_DISPLAY: Record<LifecycleState, StateDisplay> = {
 	},
 };
 
+/**
+ * States whose summary copy interpolates counts or a certification that have no engine source
+ * yet. A real read leaves those fields absent, so the card falls back to copy that states only
+ * what is known — never "undefined/5" and never an implied "0 released". The `__DEV__` review
+ * fixture fills the fields, so the counted copy is still reviewable.
+ */
+const SUMMARY_FALLBACK: Partial<Record<LifecycleState, {isKnown: (election: VoterElection) => boolean; summaryKey: string}>> = {
+	ReleasingKeys: {
+		isKnown: election => election.keysReleased !== undefined && election.keysTotal !== undefined,
+		summaryKey: 'states.releasingKeys.pendingSummary',
+	},
+	Validation: {
+		isKnown: election => election.checksComplete !== undefined && election.checksTotal !== undefined,
+		summaryKey: 'states.validation.pendingSummary',
+	},
+	ValidationDetails: {
+		isKnown: election => election.checksComplete !== undefined && election.checksTotal !== undefined,
+		summaryKey: 'states.validation.pendingSummary',
+	},
+	Complete: {
+		isKnown: election => election.certified === true,
+		summaryKey: 'states.complete.closedSummary',
+	},
+};
+
 export interface ElectionCardProps {
-	election: MockElection;
+	election: VoterElection;
 	onVoteNow?: () => void;
 	onViewValidationDetails?: () => void;
 	onLearnAboutElection?: () => void;
@@ -106,6 +131,10 @@ export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLe
 	const {t} = useTranslation('home');
 
 	const display = STATE_DISPLAY[election.lifecycleState];
+	const fallback = SUMMARY_FALLBACK[election.lifecycleState];
+	const summaryKey = fallback && !fallback.isKnown(election) ? fallback.summaryKey : display.summaryKey;
+	// No engine source for turnout yet: the bar renders only when a progress value exists.
+	const showProgress = display.showProgress && election.progress !== undefined;
 	const percent = Math.round((election.progress ?? 0) * 100);
 
 	return (
@@ -160,7 +189,7 @@ export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLe
 							lineHeight: typeScale.body.lineHeight,
 						},
 					]}>
-					{t(display.summaryKey, {
+					{t(summaryKey, {
 						released: election.keysReleased,
 						total: election.keysTotal,
 						checksComplete: election.checksComplete,
@@ -176,7 +205,7 @@ export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLe
 				</View>
 			) : null}
 
-			{display.showProgress ? (
+			{showProgress ? (
 				<View style={styles.progress}>
 					<Text
 						style={[

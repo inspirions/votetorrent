@@ -14,24 +14,24 @@ import type { Office } from '../types';
 const OFFICES: Office[] = [
 	{
 		id: 'office-1',
-		titleKey: 'ballot.office1',
-		jurisdiction: 'Federal',
+		title: 'Office 1',
+		group: 'Federal',
 		voteFor: 3,
 		candidates: [
-			{ id: 'cand-a', nameKey: 'a', partyKey: 'democratic' },
-			{ id: 'cand-b', nameKey: 'b', partyKey: 'republican' },
-			{ id: 'cand-c', nameKey: 'c', partyKey: 'independent' },
-			{ id: 'cand-d', nameKey: 'd', partyKey: 'nonpartisan' },
+			{ id: 'cand-a', name: 'a', party: 'democratic' },
+			{ id: 'cand-b', name: 'b', party: 'republican' },
+			{ id: 'cand-c', name: 'c', party: 'independent' },
+			{ id: 'cand-d', name: 'd', party: 'nonpartisan' },
 		],
 	},
 	{
 		id: 'office-2',
-		titleKey: 'ballot.office2',
-		jurisdiction: 'State',
+		title: 'Office 2',
+		group: 'State',
 		voteFor: 1,
 		candidates: [
-			{ id: 'cand-x', nameKey: 'x', partyKey: 'democratic' },
-			{ id: 'cand-y', nameKey: 'y', partyKey: 'republican' },
+			{ id: 'cand-x', name: 'x', party: 'democratic' },
+			{ id: 'cand-y', name: 'y', party: 'republican' },
 		],
 	},
 ];

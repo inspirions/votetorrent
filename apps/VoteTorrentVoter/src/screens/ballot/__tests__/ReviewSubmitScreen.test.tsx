@@ -3,7 +3,7 @@
  * BallotSelectionProvider around a minimal native-stack harness (the real `BallotScreen` + real
  * `ReviewSubmitScreen`, reached by pressing Ballot's own "Review & Submit" button — mirrors
  * BallotScreen.test.tsx's real-provider harness, driving navigation through real UI rather than
- * pushing routes via a nav ref directly) so `getBallot()`'s real `mockBallot` offices resolve.
+ * pushing routes via a nav ref directly) so `getBallot()`'s real `FIXTURE_BALLOT` offices resolve.
  *
  * Covers 42-RESEARCH.md's Pattern 2/7 for VOTE-04: per-office summary (notYetAnswered placeholder
  * / selected candidate name), Submit shows an inline mock confirmation, "Continue Voting" goes
@@ -25,7 +25,7 @@ jest.mock('../../../providers/VoterAppProvider');
 import {VoterAppProvider} from '../../../providers/VoterAppProvider';
 import {BallotSelectionProvider, useBallotSelection} from '../../../providers/BallotSelectionProvider';
 import type {BallotSelectionContextType} from '../../../providers/BallotSelectionProvider';
-import {mockBallot} from '../../../providers/mockData';
+import {FIXTURE_BALLOT} from '../../../providers/__fixtures__/voter-fixtures';
 import BallotScreen from '../BallotScreen';
 import ReviewSubmitScreen from '../ReviewSubmitScreen';
 import {lightTheme} from '../../../theme/themes';
@@ -95,7 +95,7 @@ describe('ReviewSubmitScreen (VOTE-04)', () => {
 		const beforeText = JSON.stringify(tr.toJSON());
 		expect(beforeText).toContain('Not yet answered');
 
-		const firstOffice = mockBallot.offices[0];
+		const firstOffice = FIXTURE_BALLOT.offices[0];
 		const firstCandidate = firstOffice.candidates[0];
 		renderer.act(() => {
 			capturedSelection.value!.toggleCandidate(firstOffice.id, firstCandidate.id, firstOffice.voteFor);

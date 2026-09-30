@@ -39,7 +39,7 @@ type IndividualQuestionNavigationProp = NativeStackNavigationProp<
 >;
 
 export default function IndividualQuestionScreen() {
-	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline mockData import.
+	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
 	const {getBallot} = useVoterApp();
 	const {
 		currentQuestionIndex,
@@ -53,14 +53,14 @@ export default function IndividualQuestionScreen() {
 	const {t: tCommon} = useTranslation('common');
 	const navigation = useNavigation<IndividualQuestionNavigationProp>();
 	// 42-REVIEW IN-01: shared live-guarded fetch-on-mount effect, extracted out of the screen.
-	const {ballot} = useBallot(getBallot);
+	const {ballot, failed} = useBallot(getBallot);
 	const [candidateInfoVisible, setCandidateInfoVisible] = useState(false);
 
 	const offices = ballot?.offices ?? [];
 	const office = offices[currentQuestionIndex];
 	// Figma: the modal header shows the current office name, not a generic "Individual Question".
 	// setOptions from the screen because the header title must track currentQuestionIndex (Pitfall 6).
-	const officeTitle = office ? t(office.titleKey) : '';
+	const officeTitle = office ? office.title : '';
 	useLayoutEffect(() => {
 		if (officeTitle) {
 			navigation.setOptions({title: officeTitle});
@@ -68,8 +68,19 @@ export default function IndividualQuestionScreen() {
 	}, [navigation, officeTitle]);
 
 	if (!office) {
-		// Still loading (or an out-of-range index) — render the bare screen shell, nothing more.
-		return <View style={[globalStyles.container, styles.screen, {backgroundColor: colors.background}]} />;
+		// Still loading (or an out-of-range index) — render the bare screen shell, nothing more. A
+		// failed read says so instead of staying blank.
+		return (
+			<View style={[globalStyles.container, styles.screen, {backgroundColor: colors.background}]}>
+				{failed ? (
+					<Text
+						testID="question-ballot-unavailable"
+						style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize, lineHeight: typeScale.body.lineHeight}}>
+						{t('ballotUnavailable')}
+					</Text>
+				) : null}
+			</View>
+		);
 	}
 
 	const isFirst = currentQuestionIndex === 0;
@@ -153,8 +164,8 @@ export default function IndividualQuestionScreen() {
 				<CandidateSelector
 					candidates={office.candidates.map(candidate => ({
 						id: candidate.id,
-						name: t(candidate.nameKey),
-						party: t(candidate.partyKey),
+						name: candidate.name,
+						party: candidate.party,
 					}))}
 					selectedIds={selectionMap[office.id] ?? []}
 					voteFor={office.voteFor}

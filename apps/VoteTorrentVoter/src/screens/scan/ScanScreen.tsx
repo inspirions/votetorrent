@@ -17,7 +17,7 @@ import {useVoterApp} from '../../providers/VoterAppProvider';
 import {globalStyles} from '../../theme/styles';
 
 export default function ScanScreen() {
-	// D-06/SHELL-03: every placeholder screen routes through useVoterApp() — no inline mockData import.
+	// D-06/SHELL-03: every placeholder screen routes through useVoterApp() — no inline fixture-module import.
 	useVoterApp();
 	const {colors, fonts, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('scan');
