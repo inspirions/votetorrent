@@ -280,6 +280,11 @@ const resources = {
 			token: 'Token',
 			fromOtherDevice:
 				'From the other device, select the user, press Add Key, the Scan, using the following QR code:',
+			// AddDeviceScreen: IUserEngine.connectDevice() is phase-gated (same-user device pairing).
+			connectDeviceUnavailable:
+				"Connecting another device to this user isn't available yet. This version of the app can't pair devices.",
+			connectDeviceFailed:
+				"Couldn't prepare the connection details. Make sure a network is selected, then try again.",
 			select: 'Select',
 			hash: 'Hash',
 			requiredTimestampAuthorities: 'Required Timestamp Authorities',
@@ -523,8 +528,6 @@ const resources = {
 			// Phase 10 plan 10-01 (USRUI-05/09; USRUI-01 polish) — D-17: en-only; Spanish deferred to Phase 11
 			addedKey: 'Added Key',
 			noActiveKeysFound: 'No active keys found.',
-			addedDevice: 'Added Device',
-			deviceAdded: 'Device Added',
 			done: 'Done',
 			// Phase 10 plan 10-02 (KHUI-01/02) — D-17: en-only; Spanish deferred to Phase 11
 			keyholder: 'Keyholder',
@@ -1189,6 +1192,10 @@ const resources = {
 			token: 'Token',
 			fromOtherDevice:
 				'Desde el otro dispositivo, selecciona el usuario, presiona Agregar Clave, escanea, usando el siguiente código QR:',
+			connectDeviceUnavailable:
+				'Conectar otro dispositivo a este usuario aún no está disponible. Esta versión de la aplicación no puede vincular dispositivos.',
+			connectDeviceFailed:
+				'No se pudieron preparar los datos de conexión. Asegúrate de haber seleccionado una red e inténtalo de nuevo.',
 			select: 'Seleccionar',
 			hash: 'Hash',
 			requiredTimestampAuthorities: 'Autoridades de Temporizador Requeridas',
@@ -1423,8 +1430,6 @@ const resources = {
 			// Phase 10 plan 10-01 (USRUI-05/09) — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			addedKey: 'Clave Agregada', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			noActiveKeysFound: 'No se encontraron claves activas.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			addedDevice: 'Dispositivo Agregado', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			deviceAdded: 'Dispositivo Añadido', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			done: 'Listo', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			// Phase 10 plan 10-02 (KHUI-01/02) — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			keyholder: 'Custodio de Clave', // Phase 11 plan 11-01 (D-11) — Spanish backfill.

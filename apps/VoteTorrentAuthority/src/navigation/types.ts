@@ -41,7 +41,6 @@ export type RootStackParamList = {
 	AddDevice: undefined;
 	// Phase 10 plan 10-01 (USRUI-05, USRUI-09; D-01, D-04) — display-only confirmation routes
 	AddedKey: { user: User; keyValue: string; keyType: string; expiration: number };
-	AddedDevice: { multiaddress: string; token: string };
 	// Phase 10 plan 10-02 (KHUI-01/02; D-05, D-06) — keyholder detail + invitation routes
 	Keyholder: { keyholder: InviteStatus<SentKeyholderInvite>; electionEngine: IElectionEngine };
 	// 21-11 (INV-03): extended with electionEngine + keyholder so send mode can call inviteKeyholder
