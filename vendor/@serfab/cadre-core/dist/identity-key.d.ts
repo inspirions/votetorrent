@@ -1,0 +1,49 @@
+import type { PrivateKey } from '@libp2p/interface';
+import { type KeyId, type KeyStore } from './key-store.js';
+/**
+ * Load the node identity key from `keyStore`, generating and persisting a fresh
+ * Ed25519 key when the slot is empty.
+ *
+ * A rejected `get` (e.g. {@link KeyStoreAccessError} from a cancelled biometric
+ * prompt) **propagates** — we never fall through to generation on a read error,
+ * because that would silently orphan an existing but momentarily unreadable
+ * identity. Corrupt bytes in the slot likewise throw rather than regenerate.
+ *
+ * Idempotent in effect: a second call on a populated store loads the stored key
+ * and writes nothing.
+ *
+ * @param keyStore - Backend the identity is read from / persisted to.
+ * @param keyId - Slot id; defaults to {@link DEFAULT_IDENTITY_KEY_ID}.
+ * @returns The resolved libp2p private key.
+ */
+export declare function loadOrCreateIdentityKey(keyStore: KeyStore, keyId?: KeyId): Promise<PrivateKey>;
+/**
+ * Proof-of-possession signer for a node key, for out-of-band HTTP services that
+ * want to attribute a request to a peer id.
+ *
+ * Deliberately generic — it carries no ICE/TURN vocabulary, and the message it
+ * signs is the caller's business. The one consumer today is the reference apps'
+ * `loadIceConfig`, which signs the TURN credential issuer's peer assertion; those
+ * files mirror this interface structurally rather than importing it, so they stay
+ * dependency-free.
+ */
+export interface PeerKeySigner {
+    /** base58btc peer id — the same string libp2p reports for this node. */
+    readonly peerId: string;
+    /** base64url of the libp2p protobuf-encoded public key. */
+    readonly publicKeyB64: string;
+    /** Sign the UTF-8 bytes of `message`; resolves to a base64url signature. */
+    sign(message: string): Promise<string>;
+}
+/**
+ * Wrap a libp2p private key as a {@link PeerKeySigner}.
+ *
+ * Ed25519 only: the peer id is derived as an identity multihash (so
+ * `publicKey.toString()` already *is* the base58btc peer id — no `@libp2p/peer-id`
+ * round trip needed), and verifiers of this proof accept nothing else.
+ *
+ * @param privateKey - The node's libp2p Ed25519 private key.
+ * @returns A signer exposing the peer id, the encoded public key, and `sign`.
+ * @throws If the key is not Ed25519.
+ */
+export declare function peerKeySigner(privateKey: PrivateKey): PeerKeySigner;

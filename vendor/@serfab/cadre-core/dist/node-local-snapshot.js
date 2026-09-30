@@ -1,0 +1,206 @@
+/**
+ * Shared machinery for the node's **node-local** records — the small,
+ * NEVER-replicated, per-party sets a node keeps for itself and never sources
+ * from shared group state:
+ *
+ *  - the trusted-owner anchor (`trusted-owner-store.ts`),
+ *  - the cold-start bootstrap-peer store (`bootstrap-peer-store.ts`),
+ *  - the strand peer book (`strand-peer-book.ts`), whose entries are one map per
+ *    strand rather than one value per key — the validation hook below is what
+ *    lets it drop a single junk peer without dropping the strand.
+ *
+ * ANOTHER node-local record — the enrolled-machine count
+ * (`enrolled-machine-store.ts`) — reuses {@link DurableSlot} but deliberately
+ * NOT this module's snapshot machinery: it is one scalar rather than an entry
+ * map, and it must cold-start rather than throw on an unreadable slot. Its
+ * module comment carries the reasoning; do not fold it in here.
+ *
+ * Every record here is the same mechanism with a different payload: a
+ * `{ version, partyId, <entries> }` envelope, snapshot-written whole on every
+ * change, loaded under one fail-safe-but-not-fail-silent policy. The only part
+ * that differs per platform is WHERE the bytes are kept — Node writes a file,
+ * a browser writes IndexedDB, React Native writes SecureStore or its LevelDB
+ * KV, NativeScript writes SQLite. That difference is the whole of
+ * {@link DurableSlot}, which the embedding app supplies; everything else lives
+ * here.
+ *
+ * This module is cross-platform (no `node:` imports), so it is safe in the
+ * package's default entry — the Node-only `FileDurableSlot`
+ * (`file-durable-slot.ts`) is what stays behind the `*-store-file` subpaths.
+ */
+import debug from 'debug';
+const log = debug('sereus:cadre:node-local-snapshot');
+/** Envelope version. Guards future migrations; an unknown version loads empty. */
+const ENVELOPE_VERSION = 1;
+/**
+ * A loaded node-local record over a {@link DurableSlot}: an in-memory
+ * `key -> entry` map plus a serialised full-snapshot write chain.
+ *
+ * NOTE: writes are serialised in-process only. Two processes (or two browser
+ * tabs) sharing ONE slot for ONE party would each snapshot-write their own
+ * view, so the loser's entries are dropped. Fine for every backend today —
+ * each node gets its own directory / origin database — but a single slot
+ * backing two concurrent nodes of one party needs a lock or a merge-on-write,
+ * not a snapshot replace.
+ */
+export class NodeLocalSnapshot {
+    constructor(slot, partyId, spec, entries) {
+        this.slot = slot;
+        this.partyId = partyId;
+        this.spec = spec;
+        this.entries = entries;
+        /**
+         * Serialises persists: every write ({@link put}, {@link remove}) snapshot-writes
+         * the full entry set, so chaining writes keeps them ordered and the last landed
+         * snapshot complete.
+         */
+        this.writeChain = Promise.resolve();
+    }
+    /**
+     * Load (or cold-start) the party's record from `slot`. Failure policy, per
+     * the trust model of the anchor this was first written for: only a real,
+     * well-formed, matching-party record yields entries.
+     *
+     * A *decidable* non-record — slot never written, unparsable JSON, unknown
+     * envelope shape, `partyId` mismatch (a slot reused for a different party
+     * must not leak into this one) — yields an EMPTY record, the safe direction:
+     * the node holds nothing until it is re-seeded, rather than acting on stale
+     * or foreign state.
+     *
+     * A slot that is *present but unreadable* ({@link DurableSlot.load} threw)
+     * is NOT decidable and **throws** instead — mirroring `FileKeyStore.get`.
+     * Loading empty there would both hide a real misconfiguration and let the
+     * next {@link put} snapshot-write silently destroy a still-intact record.
+     */
+    static async open(slot, partyId, spec) {
+        return new NodeLocalSnapshot(slot, partyId, spec, await loadEntries(slot, partyId, spec));
+    }
+    has(key) {
+        return this.entries.has(key);
+    }
+    /** Fresh copy of the keys — a snapshot decoupled from later {@link put} / {@link remove} calls. */
+    keySnapshot() {
+        return new Set(this.entries.keys());
+    }
+    /**
+     * Fresh copy of the `key -> entry` map — a snapshot decoupled from later
+     * {@link put} / {@link remove} calls. The entries themselves need no copy:
+     * {@link put} REPLACES an entry rather than mutating it in place.
+     */
+    entrySnapshot() {
+        return new Map(this.entries);
+    }
+    /**
+     * Add or replace an entry: the in-memory map updates SYNCHRONOUSLY (so a
+     * synchronous caller may consult the store the moment this returns), then
+     * the full snapshot is persisted. A persist failure rejects the returned
+     * promise but leaves the entry in memory — this session's decision stands,
+     * and any later successful write re-lands the complete set.
+     */
+    put(key, entry) {
+        this.entries.set(key, entry);
+        return this.queuePersist();
+    }
+    /**
+     * Remove an entry, with {@link put}'s contract: the in-memory map updates
+     * SYNCHRONOUSLY, then the full snapshot is persisted. Removing an absent key
+     * changes nothing, so it writes nothing.
+     */
+    remove(key) {
+        if (!this.entries.delete(key)) {
+            return Promise.resolve();
+        }
+        return this.queuePersist();
+    }
+    /** Chain a full-snapshot write behind every earlier one (see {@link put}). */
+    queuePersist() {
+        const persist = this.writeChain.then(() => this.persistSnapshot());
+        // The chain itself must survive a failed persist (the next write retries the
+        // full snapshot); the caller still observes the rejection via `persist`.
+        this.writeChain = persist.catch((error) => {
+            log('%s: persist failed for party %s: %o', this.spec.label, this.partyId, error);
+        });
+        return persist;
+    }
+    async persistSnapshot() {
+        const envelope = {
+            version: ENVELOPE_VERSION,
+            partyId: this.partyId,
+            [this.spec.payloadKey]: Object.fromEntries(this.entries),
+        };
+        await this.slot.save(JSON.stringify(envelope, null, '\t'));
+    }
+}
+/** Read + validate the slot's text into the initial entry map (see {@link NodeLocalSnapshot.open}). */
+async function loadEntries(slot, partyId, spec) {
+    const entries = new Map();
+    let text;
+    try {
+        text = await slot.load();
+    }
+    catch (error) {
+        // Present but unreadable: the one non-decidable case, and the one that must
+        // not cold-start empty (see NodeLocalSnapshot.open). The slot's own text is
+        // folded into the message, not left only on `cause`: the operator-facing
+        // print sites (e.g. `cadre-cli start`) log `error.message` alone, and the
+        // slot is what knows the platform detail worth acting on (which file, which
+        // database).
+        throw new Error(`failed to read the ${spec.label} for party ${partyId}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
+    if (text === undefined)
+        return entries;
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    }
+    catch (error) {
+        log('%s: corrupt slot for party %s (cold start): %o', spec.label, partyId, error);
+        return entries;
+    }
+    const payload = envelopePayload(parsed, partyId, spec.payloadKey);
+    if (!payload) {
+        log('%s: slot for party %s has an unknown shape or a foreign partyId (cold start)', spec.label, partyId);
+        return entries;
+    }
+    for (const [key, raw] of Object.entries(payload)) {
+        const entry = spec.acceptEntry(key, raw);
+        if (entry === undefined) {
+            if (spec.unusableEntry === 'discard-all') {
+                log('%s: unusable entry for %s discards the whole record (party %s, cold start)', spec.label, key, partyId);
+                return new Map();
+            }
+            log('%s: dropping unusable entry for %s (party %s)', spec.label, key, partyId);
+            continue;
+        }
+        entries.set(key, entry);
+    }
+    log('%s: loaded %d entr(ies) for party %s', spec.label, entries.size, partyId);
+    return entries;
+}
+/**
+ * The envelope's `key -> entry` record, or undefined on any envelope mismatch —
+ * wrong version, wrong (or absent) `partyId`, missing or non-record payload.
+ * Individual entries are judged separately by
+ * {@link NodeLocalSnapshotSpec.acceptEntry}, because one bad entry does not
+ * always mean a bad record.
+ */
+function envelopePayload(value, partyId, payloadKey) {
+    if (!isRecord(value))
+        return undefined;
+    // A non-string partyId cannot equal the requested one, so this covers both
+    // "malformed partyId" and "another party's record".
+    if (value.version !== ENVELOPE_VERSION || value.partyId !== partyId)
+        return undefined;
+    const payload = value[payloadKey];
+    return isRecord(payload) ? payload : undefined;
+}
+/**
+ * A plain JSON object usable as a `key -> value` record. Arrays are excluded
+ * explicitly: they are `typeof 'object'`, so an array payload would otherwise
+ * reach `acceptEntry` once per numeric index — the entries all get rejected in
+ * the end, but by accident rather than by decision, and noisily.
+ */
+function isRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+//# sourceMappingURL=node-local-snapshot.js.map

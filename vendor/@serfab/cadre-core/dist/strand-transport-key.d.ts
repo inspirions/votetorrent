@@ -1,0 +1,40 @@
+import type { PrivateKey } from '@libp2p/interface';
+/**
+ * Derive a strand node's libp2p transport key from the cadre identity key and
+ * the strand id.
+ *
+ * A `CadreNode` runs its control node and each strand node as separate libp2p
+ * instances. Handing them all the same private key gives them all the same
+ * peerId, and `@libp2p/circuit-relay-v2` keys reservations and hop-connects by
+ * peerId — so a control node and a strand node reserving through one shared
+ * relay collide, and relayed streams for one land on the other
+ * (https://github.com/gotchoices/sereus/issues/1). Each strand node therefore
+ * gets its own transport identity. Cadre *authority* is untouched: the control
+ * node keeps the identity key, and every peerId→authority derivation
+ * (`ed25519PublicKeyB64FromPeerId`) is a control-network path.
+ *
+ * The derivation is deterministic — `sha256(domain, identity seed, strandId)`
+ * as an Ed25519 seed — rather than a fresh random key per launch, so the
+ * strand's transport peerId survives restarts. The identity *private* seed is
+ * an input (not the public key) so that no third party can enumerate a member's
+ * strand peerIds from public data; only the key holder can compute them.
+ *
+ * NOTE: the derived peerId *is* attested at runtime: before a strand node
+ * starts, its control node announces it over the strand-addr RPC, and a
+ * membership-gated relay (a party control node running the relay server) holds
+ * a short-lived delegate admission grant for it (`delegate-admission.ts`) —
+ * without that grant the relay denies the strand node's reservation and
+ * `libp2p.start()` fails. The strand *mesh* itself still does not gate
+ * admission by peerId (strand peers are legitimately cross-party); if
+ * strand-mesh admission control is ever added, the durable binding it needs is
+ * a `MemberPeer(MemberKey, PeerId)` row: the table and its self-signed
+ * `Authorized` constraint already exist in `schemas/strand.qsql`; production
+ * code simply never writes one.
+ *
+ * @param identityKey - The cadre's Ed25519 identity key (the control node's key).
+ * @param strandId - The strand whose transport key to derive.
+ * @returns A stable, per-strand Ed25519 libp2p private key, distinct from the
+ *   identity key and from every other strand's.
+ * @throws If the identity key is not Ed25519.
+ */
+export declare function strandTransportKey(identityKey: PrivateKey, strandId: string): Promise<PrivateKey>;

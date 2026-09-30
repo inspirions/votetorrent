@@ -1,0 +1,204 @@
+// Core types
+export * from './types.js';
+// Canonical JSON serialization (shared signing payload format)
+export { canonicalJson } from './canonical-json.js';
+// Main CadreNode class
+export { CadreNode } from './cadre-node.js';
+// Control database
+export { ControlDatabase, MissingHostStrandError, buildAuthorizationMessage, formationVouchMessage, formationConsentMessage, REAPABLE_TABLES } from './control-database.js';
+// Bounded retry for transient control-write failures (classifier + loop behind
+// ControlDatabase.lockedWithRetry; exported so the integration package can drive the
+// classifier against real engine errors)
+export { CONTROL_WRITE_ATTEMPTS, CONTROL_WRITE_RETRY_BUDGET_MS, SCHEMA_INIT_ATTEMPTS, SCHEMA_INIT_RETRY_POLICY, isRetriableControlWriteFailure, isRetriableSchemaInitFailure, retryControlWrite } from './control-write-retry.js';
+// Bounded retry for transient control-read failures (classifier + policy behind
+// ControlDatabase.readRows; the loop is shared with the write side via control-retry.ts)
+export { CONTROL_READ_ATTEMPTS, CONTROL_READ_RETRY_DELAYS_MS, CONTROL_READ_RETRY_BUDGET_MS, isRetriableControlReadFailure, retryControlRead } from './control-read-retry.js';
+// Control-plane authorization field vector (the domain/action tagging every signer shares)
+export { controlAuthorizationFields } from './control-authorization.js';
+// Ed25519 key bridge (libp2p Ed25519 -> base64url keypair)
+export { ed25519KeyPairFromLibp2p, ed25519PublicKeyFromPrivate, requireEd25519PublicKeyB64 } from './ed25519-key.js';
+// Pluggable key store (backend-agnostic identity/owner key material seam).
+// Dependency-free: the interface, error, default slot id, and in-memory backend
+// are safe in every (RN/browser/Node) entry graph. The Node FileKeyStore is a
+// separate subpath module ('@serfab/cadre-core/key-store-file') so its node:fs
+// import never lands here.
+export { InMemoryKeyStore, KeyStoreAccessError, DEFAULT_IDENTITY_KEY_ID } from './key-store.js';
+// The KeyStore-backed identity rule, shared with embedding apps that need the
+// node key BEFORE `CadreNode` exists (RN resolves it to sign its ICE-manifest
+// request), plus the generic "prove you hold this node key" signer built on it.
+export { loadOrCreateIdentityKey, peerKeySigner } from './identity-key.js';
+// Node-local trusted-owner anchor: the NON-replicated, per-party record of
+// out-of-band-established owner keys (the trust anchor the replicated OwnerKey
+// table cannot be). Cross-platform: interface + in-memory store only — the
+// file-backed store is the Node-only subpath
+// '@serfab/cadre-core/trusted-owner-store-file' (same isolation as
+// key-store-file) so node:fs never lands in this graph.
+export { MemoryTrustedOwnerStore, PersistentTrustedOwnerStore } from './trusted-owner-store.js';
+// Node-local cold-start bootstrap-peer store: the dial targets retained from an
+// applied seed so a node that could not connect on its first try keeps retrying
+// across restarts. Same cross-platform split as the trusted-owner anchor above —
+// interface + in-memory store here, Node-only file backend behind the subpath
+// '@serfab/cadre-core/bootstrap-peer-store-file'.
+export { MemoryBootstrapPeerStore, PersistentBootstrapPeerStore } from './bootstrap-peer-store.js';
+// Node-local enrolled-machine count: the machines this party had enrolled the
+// last time this node looked, remembered across restarts so the CONTROL node can
+// declare a block-repair yardstick at bring-up — which is before the database
+// holding the membership rows exists. Same cross-platform split as the two
+// records above; Node-only file backend behind the subpath
+// '@serfab/cadre-core/enrolled-machine-store-file'. Its load policy deliberately
+// DIVERGES from theirs (an unreadable slot cold-starts rather than throwing) —
+// see the module comment before unifying the three.
+export { MemoryEnrolledMachineStore, PersistentEnrolledMachineStore } from './enrolled-machine-store.js';
+// Node-local record of the strands this node joined from ANOTHER party and has not yet
+// published party-wide, re-offered on every start as `strand:discovered`.
+// Cross-platform: its durable form rides the KeyStore seam above (the record carries a
+// closed strand's read secret), so there is no file-backed subpath.
+export { MemoryJoinedStrandStore, KeyStoreJoinedStrandStore } from './joined-strand-store.js';
+// Node-local strand peer book: per strand, the strand peers this node has met and
+// their last-known addresses, dialed first on every launch so a restarted machine
+// re-finds the other parties. Same cross-platform split as the bootstrap-peer store
+// above — interface + in-memory + slot-backed stores here, Node-only file backend
+// behind the subpath '@serfab/cadre-core/strand-peer-book-file'.
+export { MemoryStrandPeerBookStore, PersistentStrandPeerBookStore, mergeStrandPeerEntry, sanitizeStrandPeerEntry, strandPeerFreshness, MAX_STRAND_PEERS, STRAND_PEER_MAX_AGE_MS } from './strand-peer-book.js';
+export { StrandPeerObserver, dialableAddrs, connectedIdentifiedPeers, STRAND_PEER_OBSERVE_THROTTLE_MS } from './strand-peer-observer.js';
+// The signed book SWAP between strand peers (`/sereus/strand-peers/1.0.0`): the wire
+// protocol, signing and verification, and the per-strand driver that arms it.
+export { STRAND_PEER_BOOK_PROTOCOL, SIGNED_STRAND_PEER_ENTRY_VERSION, STRAND_PEER_ISSUED_AT_SKEW_MS, MAX_BOOK_FRAME_SIZE, StrandPeerBookService, exchangeStrandPeerBook, signStrandPeerEntry, signedStrandPeerEntryPayload, verifySignedStrandPeerEntry, verifyStrandPeerBookFrame, trimBookFrameToFit, assertBookFrameFits } from './strand-peer-book-protocol.js';
+export { StrandPeerBookSwap, STRAND_PEER_BOOK_SWAP_THROTTLE_MS, OWN_ENTRY_RESIGN_DEBOUNCE_MS } from './strand-peer-book-swap.js';
+// Storage scope keys — what `CadreNodeConfig.storage.provider` is called with. A
+// strand's key is its strand id; the control database's key carries the party id,
+// so two parties on one device never share a control store. Every key stays within
+// `[a-z0-9._-]` — lowercase, so distinct keys stay distinct on a case-insensitive
+// filesystem: the control key by lowercase hex encoding, a strand's by
+// `assertStrandScopeKey`, which every strand launch runs.
+export { controlStorageScope, isControlStorageScope, isValidStrandScopeKey, assertStrandScopeKey, InvalidStrandIdError } from './storage-scope.js';
+// Strand database
+export { StrandDatabase } from './strand-database.js';
+// Strand management
+export { StrandWatcher } from './strand-watcher.js';
+export { StrandInstanceManager, getStrandStoragePath, isAwaitingFirstSync, liveStrandStatus } from './strand-instance-manager.js';
+// The joining machine's first-sync write gate: a non-founder launch withholds its
+// database (status 'syncing') until the strand's Header has arrived from a peer, so a
+// write before the first sync can never fork the strand's tables.
+export { StrandAwaitingFirstSyncError, DEFAULT_STRAND_FIRST_SYNC_TIMEOUT_MS, DEFAULT_STRAND_FIRST_SYNC_POLL_MS, strandHeaderHeld, appTablesReadable, strandFirstSyncComplete } from './strand-first-sync-gate.js';
+// Peer-join block catch-up (push this network's own blocks to each newly
+// connected peer, so a late joiner physically holds pre-join blocks). Shared
+// by the strand networks (ungated) and the control network (membership-gated).
+export { PeerJoinBackfill, DEFAULT_PEER_JOIN_BACKFILL, MAX_BLOCK_MESSAGE_BYTES, PEER_JOIN_BACKFILL_WARN_AFTER_FAILURES } from './peer-join-backfill.js';
+// Closed-strand revoked-peer enforcement (deny the network nodes of removed
+// members at the stream and connection layers, and hang up the sessions they
+// already hold — see the module doc for the settled deny-list design, the
+// teardown seam, and the fail directions).
+export { StrandRevocationEnforcer, createRevocationConnectionGater, readStrandRevocationRows, DEFAULT_REVOCATION_POLL_INTERVAL_MS } from './strand-revocation-enforcer.js';
+// Closed-strand membership reconciliation: the bring-up loop that finishes a
+// party's join on every machine — redeem the staged formation invitation, then
+// write the durable machine→party MemberPeer binding — without ever blocking
+// bring-up (see the module doc for the pass ladder and terminal states).
+export { StrandMembershipReconciler, IDLE_PASSES_BEFORE_ESCALATION, INITIAL_JOIN_RETRY_INTERVAL_MS } from './strand-membership-reconciler.js';
+// The timer seam the self-rescheduling strand bring-up loops share (first-sync gate
+// probe loop, membership retry ladder) — injected by tests as a hand-cranked clock.
+export { defaultTimeoutScheduler } from './timeout-scheduler.js';
+// Hibernation
+export { HibernationManager } from './hibernation-manager.js';
+// Arachnode (stub)
+export { ArachnodeStub, createArachnodeStub } from './arachnode-stub.js';
+// Enrollment
+export { EnrollmentService } from './enrollment.js';
+// Strand Solicitation
+export { StrandSolicitationService, createDefaultFormationResponseValidator } from './strand-solicitation.js';
+// Formation approval client: asks an invite's ValidationUrl hook whether ONE redemption
+// may proceed, and checks the answer against the bytes the control database will verify.
+export { createHttpFormationApprover, signFormationApproval, verifyFormationApproval, FormationApprovalError } from './formation-approval.js';
+// DB-backed FormationUsageRecorder (reads/writes the real CadreControl tables)
+export { ControlFormationUsageRecorder } from './control-formation-recorder.js';
+// Closed-strand member key generation (ed25519 protobuf, base64) + the
+// protobuf->base64url bridge that derives the founding Member/Manager key.
+export { generateStrandMemberKey, strandMemberKeyPair } from './strand-member-key.js';
+// Strand membership writer (founder bootstrap, invite issuance/consumption,
+// manager-admit, member-peer registration, manager rotation, sealing — the sole
+// manager permanently freezing admission — + shared signing primitives reused
+// across the flows).
+export { signStrandPayload, verifyStrandPayload, signStrandApproval, generateStrandStampId, bootstrapFounderMembership, PreSplitStrandIdentityError, issueInvite, consumeInvite, burnInvite, isStrandMember, cancelInvite, listOutstandingInvites, addMemberByManager, revokeMember, leaveStrand, registerMemberPeer, listMemberPeers, removeMemberPeer, addManager, admitManager, removeManager, sealStrand, isStrandSealed, StrandTransactionBusyError, STRAND_ENGINE, STRAND_ENGINE_VERSION } from './strand-membership-writer.js';
+// Engine-canonical datetime helper (shared by control + strand signed-write flows
+// so a signed timestamp byte-matches the datetime-coerced column the CHECK sees).
+export { canonicalDatetime } from './canonical-datetime.js';
+// Strand-DB-backed EnrollmentService backing: concrete MemberRegistry +
+// MemberVerifier that write/read the real Strand.* membership tables.
+export { StrandMemberRegistry, StrandMemberVerifier, memberRegistrationPayload } from './strand-member-registry.js';
+// Seed Bootstrap
+export { SeedBootstrapService, SEED_PROTOCOL, ed25519PublicKeyB64FromPeerId } from './seed-bootstrap.js';
+// Peer Authorization (shared owner-signature digest + offline verifier)
+export { peerAuthorizationDigest, cadrePeerVoucherDigest, cadrePeerRemoveDigest, deviceTokenAddDigest, deviceTokenRemoveDigest, formationConsentDigest, verifyPeerAuthorization, verifyCadrePeerVoucher, verifyFormationConsent } from './peer-authorization.js';
+// Strand Wake (control-network push-wake protocol)
+export { StrandWakeService, dialWake, WAKE_PROTOCOL, DEFAULT_WAKE_DIAL_BUDGET_MS } from './strand-wake-protocol.js';
+// Strand Address (control-network strand-address RPC) — wire types come via
+// `export * from './types.js'` (StrandAddrRequest / StrandAddrResponse / StrandAddrStatus).
+export { StrandAddrService, collectStrandAddrs, STRAND_ADDR_PROTOCOL } from './strand-addr-protocol.js';
+// VoteTorrent patch (public-observer-protocol): unauthenticated strand-address
+// RPC gated on a node-local observable-strand allowlist rather than membership.
+export { StrandObserverService, STRAND_OBSERVER_PROTOCOL } from './strand-observer-protocol.js';
+// Peer-address record (self-published, signed, freshness-stamped CadrePeer row)
+export { peerRecordSignedPayload, signPeerRecord, verifyPeerRecordSignature, isPeerRecordFresh, isSignalingAddr, orderSignalingFirst, withTrailingPeerId, currentMemberTrustPolicy, DEFAULT_PEER_RECORD_MAX_AGE_MS, DEFAULT_PEER_RECORD_HEARTBEAT_MS } from './peer-record.js';
+// Device-token record (self-published, signed FCM/APNs push token — CadrePeer sibling)
+export { deviceTokenSignedPayload, signDeviceTokenRecord, verifyDeviceTokenSignature, isPushPlatform } from './device-token.js';
+// Strand-wake payload contract (canonical; shared by the server sender + RN receiver)
+export { STRAND_WAKE_TYPE } from './strand-wake-payload.js';
+// Push-credential validation + log redaction. Dependency-free (type-only imports),
+// so a provisioner (cadre-host / cadre-provider) can reject a partial credential
+// set and produce a key-safe log view without pulling the FCM/APNs sender graph.
+export { validatePushCredentials, redactPushCredentials, REDACTED } from './push-credentials.js';
+// Server-side push-wake trigger policy + fan-out (who/when to wake). Cross-platform
+// clean — it imports only the PushNotifier *type*, so exporting it as a runtime
+// value pulls no node:http2/node:crypto edge into the RN/browser graph.
+export { PushFanoutService, DEFAULT_PUSH_COOLDOWN_MS, DEFAULT_PUSH_DEBOUNCE_MS } from './push-fanout.js';
+// Control-cohort dial selection (backbone-preferential, bounded out-degree) +
+// the cadence/degree defaults the proactive reconcile routine reads.
+export { selectControlCohortDials, DEFAULT_CONTROL_COHORT_RECONCILE_MS, DEFAULT_CONTROL_COHORT_TARGET_DEGREE } from './control-cohort.js';
+// Dialing one peer from several candidate addresses, each under its own time
+// limit, so an address that never answers cannot starve the rest.
+export { dialPeerAddrs, SelfRelayOnlyError, tryAddrsInTurn, directBeforeRelayed, DEFAULT_CONTROL_COHORT_DIAL_TIMEOUT_MS, DEFAULT_CONTROL_COHORT_PER_ADDRESS_DIAL_TIMEOUT_MS, CONTROL_COHORT_DIAL_ADDRESS_ATTEMPTS, DEFAULT_PEER_DIAL_BUDGET } from './peer-dial.js';
+// Dial and reservation budgets counted in link round trips rather than fixed milliseconds, so
+// one declared assumption about the link moves them all — see `NetworkConfig.linkRoundTripMs`.
+export { DECLARED_LINK_ROUND_TRIP_MS, RELAYED_DIAL_ROUND_TRIPS, RELAY_RESERVATION_ROUND_TRIPS, CIRCUIT_REQUEST_ROUND_TRIPS, RELAYED_REQUEST_ROUND_TRIPS, PUSH_TRANSFER_ALLOWANCE_MS, ADMISSION_DECISION_TIMEOUT_MS, resolveLinkRoundTripMs, relayedDialBudgetMs, connectionManagerTimeouts, relayReservationBudgetMs, circuitRequestBudgetMs, relayedRequestBudgetMs, peerJoinPushBudget } from './link-budget.js';
+// Seed trust policy (trust anchor for incoming seeds)
+export { anchoredTrustPolicy, pinnedKeyTrustPolicy, tofuTrustPolicy } from './seed-trust-policy.js';
+// Schema Verification
+export { signSchema, verifySchema, assertSchemaSignature, SchemaVerificationError } from './schema-verification.js';
+// Strand Formation transport (native cadre-core protocol)
+export { FormationListener, dialFormation, isValidResponderCreatesResult, isWellFormedMembershipInvite, sanitizeStrandAddrs, FORMATION_PROTOCOL } from './strand-formation-protocol.js';
+export { formationDeadlines } from './strand-formation-deadlines.js';
+// Strand Formation manager (drives the native transport)
+export { StrandFormationManager, createStrandFormationManager, MEMBERSHIP_INVITE_TTL_MS, MEMBERSHIP_INVITE_UNAVAILABLE_REASON, HOST_STRAND_MUST_BE_RECREATED_REASON } from './strand-formation-manager.js';
+// Control-network inbound connection gate (membership defense-in-depth)
+export { createMembershipConnectionGater, STRANGER_OPEN_PROTOCOLS, DEFAULT_ENROLLMENT_WINDOW_MS, RELAY_ADMISSION_RESERVE_DEADLINE_MS, RELAY_ADMISSION_CLOSE_TIMEOUT_MS, MAX_UNAUTHORIZED_RELAY_RESERVATIONS, UnauthorizedReservationBudget } from './membership-connection-gater.js';
+// Thrown out of `CadreNode.start()` when a `network.relayAddrs` reservation does
+// not land on its first attempt — the fail-fast posture of that config field now
+// that the control node reserves AFTER control-database bring-up (relay-addrs.ts).
+// `UnbindableListenAddressError` is the same posture for the OTHER half of the listen
+// config: a `network.listenAddrs` entry whose transport the node will not have refuses
+// start instead of being silently dropped by libp2p's transport manager.
+//
+// `resolveListenAddrs` and `strandNodeAddrs` are the derivations themselves — what a
+// `NetworkConfig` actually turns into for the control node and for each strand node.
+// Exported so an embedder that hand-writes a `network` block (the React Native and web
+// reference apps) can assert on the resulting SHAPE rather than on its own field names,
+// which is the difference between a test that proves reachability and one that proves a
+// spelling.
+export { RelayReservationFailedError, UnbindableListenAddressError, RELAY_SEARCH_LISTEN_ADDR, resolveListenAddrs } from './relay-addrs.js';
+export { strandNodeAddrs } from './strand-network-config.js';
+// The circuit-relay SERVER a node runs, and with which init — one resolution shared by the
+// control node and every strand node. Exported alongside the listen derivations above for the
+// same reason: an embedder can assert on what its `network` block resolves to.
+export { resolveRelayServer, PARTY_RELAY_MAX_RESERVATIONS, PARTY_RELAY_RESERVATION_TTL_MS } from './relay-server.js';
+// Relay reservation via the bare `/p2p-circuit` search listener — the one route
+// every control node takes; `network.relayAddrs` is its fail-fast posture
+// (see relay-reservation.ts)
+export { circuitMultiaddrs, superviseRelayReservation, DEFAULT_RELAY_RESERVE_TIMEOUT_MS, DEFAULT_RELAY_RESERVE_POLL_MS, DEFAULT_RELAY_CHECK_MS, DEFAULT_RELAY_MIN_BACKOFF_MS, DEFAULT_RELAY_MAX_BACKOFF_MS } from './relay-reservation.js';
+// Connection-path diagnostics (relayed vs direct classification + summary)
+export { classifyTransport, classifyConnectionPath, summarizeConnectionPaths, emptyConnectionPathSummary, DEFAULT_SETTLE_WINDOW_MS } from './diagnostics/connection-path.js';
+// VoteTorrent patch (strand-cohort-topic): a provenance token only — its VALUE is the node-local
+// launch-config key name this patch introduces on `buildStrandRuntime`/`startStrand`. Not a
+// module, not a service: a consumer imports and compares this value, never a literal copied into
+// the consumer's own source.
+export const STRAND_COHORT_TOPIC_CONFIG_KEY = 'strandCohortTopic';
+//# sourceMappingURL=index.js.map

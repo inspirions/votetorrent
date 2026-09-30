@@ -1,0 +1,216 @@
+import debug from 'debug';
+import { Database } from '@quereus/quereus';
+import { applyAppSchema, connectToStrand } from '@serfab/quereus-plugin-sereus';
+import { bootstrapFounderMembership } from './strand-membership-writer.js';
+import { strandMemberKeyPair } from './strand-member-key.js';
+const log = debug('sereus:cadre:strand-db');
+const timing = debug('sereus:cadre:timing');
+/**
+ * StrandDatabase manages the sApp schema for a strand using Quereus with the
+ * Optimystic backend. Each strand instance has its own isolated database with
+ * the sApp's schema applied.
+ *
+ * This class owns the `Database` lifecycle (creation, `getDatabase()`, `close()`)
+ * but delegates the actual SQL-surface composition — plugin registration, node
+ * wiring, catalog hydration, schema apply — to `connectToStrand` from
+ * `@serfab/quereus-plugin-sereus`, the single shared composition. The libp2p
+ * node is injected here, so `connectToStrand` never *creates* the node;
+ * `StrandInstanceManager` owns the node lifecycle. (The strand connection's
+ * `shutdown` still stops the injected node via the collection factory, so the
+ * manager's own `node.stop()` is an idempotent second stop — see `close()`.)
+ */
+export class StrandDatabase {
+    constructor(config) {
+        this.db = null;
+        this.shutdownStrand = null;
+        this.resolvedTransactor = null;
+        this.initialized = false;
+        this.config = config;
+    }
+    /**
+     * Initialize the database — create the `Database` and delegate the strand
+     * SQL-surface composition (plugins, node wiring, hydrate, schema apply) to
+     * `connectToStrand` with the injected libp2p node.
+     */
+    async initialize() {
+        if (this.initialized) {
+            log('StrandDatabase for strand %s already initialized', this.config.strandId);
+            return;
+        }
+        const sid = this.config.strandId;
+        const { sAppConfig } = this.config;
+        if (this.config.founder === true) {
+            // Before composing anything: a founder that cannot write its Header must not
+            // leave a half-built connection behind.
+            this.founderSApp();
+        }
+        log('Initializing StrandDatabase for strand: %s (%s)', sid, sAppConfig ? `sApp: ${sAppConfig.id} v${sAppConfig.version}` : 'storage replica');
+        this.db = new Database();
+        // Delegate to the shared composition. The node is injected, so:
+        //  - `connectToStrand` never creates a node (its `createdNode` stays null);
+        //    `StrandInstanceManager` owns the node lifecycle. Its `shutdown` does
+        //    still stop the injected node via the collection factory, so the
+        //    manager's later `node.stop()` is an idempotent second stop;
+        //  - no `storage` is passed: the plugin consumes it only to build a local
+        //    transactor's raw-storage factory or to create a node it was not given,
+        //    and cadre-core always injects the node and runs the network transactor.
+        //    (The plugin keeps its `storage` option for the browser entry point.)
+        const t0 = performance.now();
+        //
+        // A storage replica passes no schema, so no `App` tables are declared. A warm restart's
+        // hydrate may still load `App` table definitions persisted in the replicated store into
+        // the catalog — declarative metadata, nothing the app supplied runs — and the first-sync
+        // probe then reads those tables once from blocks this node holds.
+        const result = await connectToStrand(this.db, {
+            strandId: sid,
+            schema: sAppConfig?.schema,
+            libp2pNode: this.config.libp2pNode,
+            coordinatedRepo: this.config.coordinatedRepo,
+            enableCache: true,
+        });
+        this.shutdownStrand = result.shutdown;
+        this.resolvedTransactor = result.transactor;
+        timing('[strandDb:%s] connectToStrand: %dms (hydrated tables=%d, indexes=%d)', sid, Math.round(performance.now() - t0), result.hydrated?.tables ?? 0, result.hydrated?.indexes ?? 0);
+        // Founder-only: write the one-time membership bootstrap now that the schema is
+        // applied (connectToStrand has returned). A throw here propagates out of
+        // initialize() so buildStrandRuntime's rollback tears the half-built strand
+        // down rather than leaking a node. Joiners skip this — their rows arrive via sync.
+        if (this.config.founder === true) {
+            await this.bootstrapFounder();
+        }
+        this.initialized = true;
+        log('StrandDatabase for strand %s initialized successfully', sid);
+    }
+    /**
+     * Run the founder membership bootstrap against the freshly-composed strand DB.
+     *
+     * Derives the founding keypair from this PARTY's own `partyMemberPrivateKey` (the
+     * `Member.Key`/`Manager.MemberKey` are its public key) — deliberately NOT from the
+     * strand row's shared `MemberPrivateKey`, which every joining party receives and could
+     * therefore use to forge the founder's identity. A closed strand with no
+     * `partyMemberPrivateKey` throws, because it could never seat a founding manager.
+     * The shared key's public half IS passed, but only so the bootstrap can refuse a strand
+     * founded under it before the split (`PreSplitStrandIdentityError`). Open strands derive
+     * no keypair (Header only). Idempotent — see {@link bootstrapFounderMembership}.
+     */
+    async bootstrapFounder() {
+        const { strandId, strandType, memberPrivateKey, partyMemberPrivateKey } = this.config;
+        const closed = strandType === 'c';
+        await bootstrapFounderMembership(this.db, {
+            strandId,
+            type: strandType,
+            sApp: this.founderSApp(),
+            founderKeyPair: closed ? this.deriveFounderKeyPair(strandId, partyMemberPrivateKey) : undefined,
+            sharedMemberPublicKey: closed && memberPrivateKey
+                ? strandMemberKeyPair(memberPrivateKey).publicKeyB64
+                : undefined,
+        });
+    }
+    /**
+     * The sApp a founder bootstrap records in the `Strand.Header`. Throws for a storage
+     * replica (no sApp config): its Header's sApp columns would have nothing to say.
+     * `CadreNode` always launches a replica as a joiner, so this guards a future caller.
+     */
+    founderSApp() {
+        const { sAppConfig, strandId } = this.config;
+        if (!sAppConfig) {
+            throw new Error(`Cannot found strand ${strandId} as a storage replica: the founder bootstrap writes ` +
+                'the sApp id and version into Strand.Header, and a replica has no sApp config.');
+        }
+        return sAppConfig;
+    }
+    /**
+     * Derive the founding keypair for a closed strand from the party's own
+     * `partyMemberPrivateKey`, failing loudly when the key is absent (a closed strand
+     * with no founding Manager can never admit anyone).
+     */
+    deriveFounderKeyPair(strandId, partyMemberPrivateKey) {
+        if (!partyMemberPrivateKey) {
+            throw new Error(`Cannot found closed strand ${strandId}: this party has no StrandPartyKey for it. ` +
+                'A closed strand needs a founding Member/Manager derived from the party\'s own ' +
+                'membership key (minted at publishStrand, or at the founder launch that follows a ' +
+                'publish interrupted before its mint) — the shared MemberPrivateKey deliberately ' +
+                'no longer derives anyone\'s identity.');
+        }
+        return strandMemberKeyPair(partyMemberPrivateKey);
+    }
+    /**
+     * Run the founder membership bootstrap against an ALREADY-LIVE database — the
+     * seam {@link StrandInstanceManager.foundExistingStrand} uses when a founder
+     * request arrives for an instance that was first launched as a joiner.
+     * Idempotent: every bootstrap write is insert-if-absent
+     * ({@link bootstrapFounderMembership}), so calling it on an instance that
+     * already founded writes nothing. On success also flips the captured config's
+     * `founder`, so this object's own record of how it was launched stays coherent
+     * with what actually ran (a construction-time `founder: false` is a statement
+     * about the launch, not a permanent identity); a refused bootstrap leaves it a joiner.
+     *
+     * @param partyMemberPrivateKey - The party's own membership key, for a closed strand
+     *   whose original (joiner) launch resolved none — e.g. the `StrandPartyKey` row had
+     *   not been written or replicated yet. The captured config's key wins when both
+     *   exist: it is the identity this instance launched under.
+     */
+    async ensureFounderBootstrap(partyMemberPrivateKey) {
+        var _a;
+        this.ensureInitialized();
+        (_a = this.config).partyMemberPrivateKey ?? (_a.partyMemberPrivateKey = partyMemberPrivateKey);
+        await this.bootstrapFounder();
+        this.config.founder = true;
+    }
+    /**
+     * Give a live storage replica the app's schema: apply `App` to the already-composed
+     * database — same libp2p node, same store, so the new tables read the blocks this node
+     * already holds — and record the sApp, so a later {@link ensureFounderBootstrap} has it
+     * for the `Header`. Idempotent: the apply is a declarative diff, so re-applying the same
+     * schema emits nothing. A failed apply records nothing.
+     */
+    async attachAppSchema(sAppConfig) {
+        this.ensureInitialized();
+        await applyAppSchema(this.db, sAppConfig.schema);
+        this.config.sAppConfig = sAppConfig;
+        log('StrandDatabase for strand %s attached sApp %s v%s', this.config.strandId, sAppConfig.id, sAppConfig.version);
+    }
+    /**
+     * Get the underlying database for queries
+     */
+    getDatabase() {
+        this.ensureInitialized();
+        return this.db;
+    }
+    /**
+     * The Optimystic transactor this strand's connection resolved to — always
+     * `'network'` here, since cadre-core passes no `transactor` option and takes
+     * the plugin's default. Exposed so a spec measuring or asserting the network
+     * path (`strand-solo-write-budget.spec.ts`) can pin the engine it ran on
+     * rather than assume it.
+     */
+    getTransactor() {
+        this.ensureInitialized();
+        return this.resolvedTransactor;
+    }
+    /**
+     * Close the database and cleanup resources. Runs the strand-connection
+     * shutdown (collection-factory teardown, which also stops the injected node),
+     * then closes the `Database`. `StrandInstanceManager.releaseRuntime` issues a
+     * further idempotent `node.stop()` after this returns.
+     */
+    async close() {
+        if (this.shutdownStrand) {
+            await this.shutdownStrand();
+            this.shutdownStrand = null;
+        }
+        if (this.db) {
+            void this.db.close();
+            this.db = null;
+        }
+        this.resolvedTransactor = null;
+        this.initialized = false;
+        log('StrandDatabase for strand %s closed', this.config.strandId);
+    }
+    ensureInitialized() {
+        if (!this.initialized || !this.db) {
+            throw new Error(`StrandDatabase for strand ${this.config.strandId} not initialized. Call initialize() first.`);
+        }
+    }
+}
+//# sourceMappingURL=strand-database.js.map

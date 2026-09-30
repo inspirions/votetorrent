@@ -448,6 +448,14 @@ if [ -z "${NODE22}" ] || [ ! -x "${NODE22}" ]; then
   echo "[run-replication-proof] ERROR: Node 22 not found via 'nvm which 22' — run 'nvm install 22'" >&2
   exit 1
 fi
+# @serfab/cadre-core is consumed through portal:./vendor/@serfab/cadre-core (sereus master,
+# pending the release carrying sereus#19-#22). Node resolves a symlinked package from its
+# REAL path, so the vendored cadre-core would load libp2p / db-p2p / multiaddr from the ROOT
+# node_modules while drone.mjs loads p2p-probe-host's own copies: two instances of each in
+# one process. --preserve-symlinks resolves cadre-core's imports from the symlink inside
+# p2p-probe-host/node_modules, so both share one copy, as they did from npm. Drop it with
+# the vendor copy.
+DRONE_NODE_FLAGS="--preserve-symlinks"
 
 # D-08 (diagnose-first): DEBUG= arms the drone's namespace-gated cluster-protocol error
 # logging (cluster/service.js's this.log.error('error handling cluster protocol message...'))
@@ -463,7 +471,7 @@ fi
 # which says whether the cold-start carve-out is still open.
 # DRONE_LOG is retained through the FULL run (no rm -f below) — only the EXIT trap removes it.
 DRONE_LOG=$(mktemp /tmp/drone-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" "${NODE22}" ${DRONE_NODE_FLAGS} packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
 DRONE_PID=$!
 echo "[run-replication-proof] Drone launched (PID ${DRONE_PID}, DEBUG= cluster-error logging armed), waiting for READY line ..."
 
@@ -562,7 +570,7 @@ DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,se
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
   DRONE_BOOTSTRAP_STRAND_ADDR="${STRAND_ADDR}" \
   DRONE_INVITE="${DRONE_INVITE}" \
-  "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_B_LOG}" 2>&1 &
+  "${NODE22}" ${DRONE_NODE_FLAGS} packages/p2p-probe-host/drone.mjs > "${DRONE_B_LOG}" 2>&1 &
 DRONE_B_PID=$!
 echo "[run-replication-proof] Drone-B launched (PID ${DRONE_B_PID}, DEBUG= cluster-error logging armed, cross-bootstrapped to drone-A), waiting for READY line ..."
 

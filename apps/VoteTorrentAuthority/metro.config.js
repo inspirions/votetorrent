@@ -179,10 +179,26 @@ const multiaddrConvertV12 = path.resolve(
 // Ported from apps/VoteTorrentVoter/metro.config.js (44-09, D-04).
 const tslibUmdPath = require.resolve("tslib/tslib.js", { paths: nodeModulesPaths });
 
-// Wrap resolveRequest to apply the @multiformats/multiaddr/convert redirect, the tslib
-// CJS UMD redirect, and the @libp2p/crypto browser rewrite.
+// @serfab/cadre-core and @serfab/quereus-plugin-sereus are consumed through
+// portal:./vendor/@serfab/* (sereus master, pending the release carrying sereus#19-#22).
+// Metro follows the node_modules symlink to the REAL path under vendor/, and a bare import
+// from there walks up to the ROOT node_modules. That is a second copy of libp2p / db-p2p /
+// multiaddr beside this app's own. Re-resolving those imports from the symlink inside this
+// app's node_modules keeps a single copy, as it was from npm. Drop with the vendor copy.
+const vendorSerfabRoot = path.resolve(workspaceRoot, "vendor/@serfab");
+const appSerfabModules = path.resolve(projectRoot, "node_modules/@serfab");
+const isBareSpecifier = (name) => !name.startsWith(".") && !path.isAbsolute(name);
+
+// Wrap resolveRequest to apply the vendor re-rooting, the @multiformats/multiaddr/convert
+// redirect, the tslib CJS UMD redirect, and the @libp2p/crypto browser rewrite.
 const upstreamResolveRequest = merged.resolver.resolveRequest;
 merged.resolver.resolveRequest = (context, moduleName, platform) => {
+	if (context.originModulePath.startsWith(vendorSerfabRoot + path.sep) && isBareSpecifier(moduleName)) {
+		context = {
+			...context,
+			originModulePath: path.join(appSerfabModules, path.relative(vendorSerfabRoot, context.originModulePath)),
+		};
+	}
 	if (moduleName === "@multiformats/multiaddr/convert") {
 		return { type: "sourceFile", filePath: multiaddrConvertV12 };
 	}

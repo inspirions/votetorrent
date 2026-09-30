@@ -1,0 +1,288 @@
+import debug from 'debug';
+import optimysticPlugin from '@optimystic/quereus-plugin-optimystic/plugin';
+import { STRAND_SCHEMA } from './strand-schema.js';
+import { resolveStrandClusterSize, STRAND_CLUSTER_POLICY } from './cluster-size.js';
+import { wrapStorageWithCache, disposeStorageCache } from './cached-storage.js';
+const log = debug('sereus:plugin:strand');
+const timing = debug('sereus:plugin:strand:timing');
+/**
+ * Inline equivalent of `@quereus/quereus`'s `registerPlugin` for plugins that
+ * only return functions/vtables/collations. Used directly for the optimystic
+ * result (so the composition can read `collectionFactory` off the same object),
+ * and by the browser crypto strategy to keep the browser bundle from pulling a
+ * duplicate `@quereus/quereus` next to the host's instance.
+ */
+export function applyRegistrations(db, result) {
+    for (const vtable of result.vtables ?? []) {
+        db.registerModule(vtable.name, vtable.module, vtable.auxData);
+    }
+    for (const func of result.functions ?? []) {
+        db.registerFunction(func.schema);
+    }
+    for (const collation of result.collations ?? []) {
+        db.registerCollation(collation.name, collation.func, collation.normalizer);
+    }
+}
+/**
+ * Connect a Quereus `Database` to a Sereus strand. This is the single shared
+ * SQL-surface composition: `connectToStrand` (Node), `connectToStrandBrowser`
+ * (browser), and `cadre-core`'s `StrandDatabase` all flow through here, so the
+ * hydrate-before-apply fix and any future schema wiring land in one place.
+ *
+ * Steps: resolve transactor + storage, register crypto + optimystic plugins,
+ * acquire (inject or create) the libp2p node, set optimystic as the default
+ * vtab, hydrate the catalog, then apply the sApp schema.
+ */
+export async function composeStrand(db, options, platform) {
+    const { strandId, bootstrapNodes = [], schema, port = 0, enableCache = true, fretProfile = 'edge', transactor = 'network', } = options;
+    // Resolve (and validate) up front so a nonsense value fails before any plugin
+    // registration or node creation has happened.
+    const clusterSize = resolveStrandClusterSize(options.clusterSize);
+    // The storage engine every write and read below goes through — see
+    // `StrandConnectionOptions.transactor`. Named separately from the option so
+    // the default is applied exactly once and reported on the result.
+    const resolvedTransactor = transactor;
+    const networkName = `strand-${strandId}`;
+    log('Connecting to strand %s (network: %s, transactor=%s)', strandId, networkName, resolvedTransactor);
+    // Resolve storage. Node passes `options.storage` through; the browser
+    // defaults to IndexedDB. The resolved instance feeds BOTH the local
+    // transactor's `rawStorageFactory` and node creation, so it must be decided
+    // up front (before pluginConfig is built). Wrapped in the write-through
+    // raw-storage cache (cached-storage.ts) — idempotent, so a caller that
+    // already wrapped (cadre-core's seams) passes through unchanged, with this
+    // composition counted as one more holder of that same cache.
+    const resolvedStorage = platform.resolveStorage
+        ? await platform.resolveStorage({ strandId, resolvedTransactor, requestedStorage: options.storage })
+        : options.storage;
+    const storage = resolvedStorage ? wrapStorageWithCache(resolvedStorage, strandId) : resolvedStorage;
+    /**
+     * Release THIS composition's claim on the storage cache — the matching half of the
+     * wrap above, which took one. `wrapStorageWithCache` counts holders, so this is
+     * unconditionally correct whoever created the wrapper: the cache stays live while
+     * cadre-core (or any other seam over the same store) still holds a claim, and is
+     * emptied and unregistered from the shared cache pool when the last one goes. Holding
+     * a claim past the strand's life is not free — the registration claims the backing
+     * store in the pool, and a claim outliving its strand makes the next connect over that
+     * same directory throw.
+     *
+     * Latched, so a caller that calls `shutdown()` twice releases one claim, not two — a
+     * second release would consume another scope's claim.
+     */
+    let storageCacheReleased = false;
+    const releaseStorageCache = async () => {
+        if (storageCacheReleased || !storage) {
+            return;
+        }
+        storageCacheReleased = true;
+        await disposeStorageCache(storage);
+    };
+    // 1-2. Register the crypto and optimystic plugins. Guarded on its own, because the
+    // wrap above has ALREADY taken a holder claim: a registration that throws must release
+    // it, or the claim — and the backing store's registration in the shared cache pool —
+    // outlives the failed connect for the process lifetime, and no other scope can retire
+    // the cache. Separate from the larger try below, which has a collection factory and
+    // possibly a node to tear down as well; neither exists yet here.
+    let pluginResult;
+    try {
+        pluginResult = await registerStrandPlugins(db, platform, {
+            resolvedTransactor,
+            networkName,
+            enableCache,
+            storage,
+        });
+    }
+    catch (err) {
+        await releaseStorageCache();
+        throw err;
+    }
+    const { collectionFactory } = pluginResult;
+    let createdNode = null;
+    let hydrated;
+    try {
+        // 3. Acquire the libp2p node. Skip only when this is the unit-test fake
+        // transactor with no injected node — every real path needs a node.
+        if (resolvedTransactor !== 'test' || options.libp2pNode) {
+            let node;
+            let coordinatedRepo;
+            if (options.libp2pNode) {
+                node = options.libp2pNode;
+                if (!options.coordinatedRepo) {
+                    throw new Error('coordinatedRepo is required when libp2pNode is provided');
+                }
+                coordinatedRepo = options.coordinatedRepo;
+                log('Using injected libp2p node');
+            }
+            else {
+                // NOTE: this path takes the frozen policy whole, so it takes COHORT_READ_DEADLINE_MS
+                // with no way to override it — `StrandConnectionOptions` has no counterpart to
+                // cadre-core's `NetworkConfig.cohortQueryTimeoutMs` or `linkRoundTripMs`. Fine
+                // today: every production strand comes up through cadre-core, which does thread
+                // both, and this path is the plugin's own connect/e2e route, where the constant —
+                // two link round trips at cadre's default declared link — is the right answer
+                // anyway. If a plugin embedder ever needs a different deadline,
+                // `strandClusterPolicy(clusterSize, { cohortQueryTimeoutMs: <ms> })` is the call to
+                // reach for here.
+                const created = await platform.createNode({ networkName, bootstrapNodes, fretProfile, port, clusterSize, clusterPolicy: STRAND_CLUSTER_POLICY, storage });
+                createdNode = created;
+                node = created;
+                const repo = created.coordinatedRepo;
+                if (!repo) {
+                    throw new Error('coordinatedRepo not available on created libp2p node');
+                }
+                coordinatedRepo = repo;
+                log('Created libp2p node (port: %d, fretProfile: %s, storage=%s)', port, fretProfile, !!storage);
+            }
+            collectionFactory.registerLibp2pNode(networkName, node, coordinatedRepo);
+            log('Registered libp2p node with collection factory');
+        }
+        // 4. Set optimystic as default vtab so `declare schema` tables use it.
+        db.setDefaultVtabName('optimystic');
+        db.setDefaultVtabArgs({
+            networkName,
+            transactor: resolvedTransactor,
+            keyNetwork: 'libp2p',
+        });
+        log('Set default vtab to optimystic (networkName=%s, transactor=%s)', networkName, resolvedTransactor);
+        // 5. Hydrate Quereus's catalog from persisted optimystic vtab schemas
+        // BEFORE applying the sApp schema. Without this, a warm restart diffs the
+        // wrapped DDL against an empty catalog and re-emits CREATE TABLE / CREATE
+        // INDEX for every persisted object — each round-tripping through optimystic
+        // storage (the measured ~160s warm-start regression). No-op on first launch.
+        const t0 = performance.now();
+        hydrated = await pluginResult.hydrate(db);
+        timing('[strand:%s] hydrate: %dms (tables=%d, indexes=%d)', strandId, Math.round(performance.now() - t0), hydrated.tables, hydrated.indexes);
+        log('Hydrated catalog for strand %s (tables=%d, indexes=%d)', strandId, hydrated.tables, hydrated.indexes);
+        // 6. Apply the strand membership/RBAC schema (`schemas/strand.qsql`,
+        // embedded as STRAND_SCHEMA) UNCONDITIONALLY — every strand has membership
+        // semantics whether or not an sApp schema is supplied. There are no
+        // cross-schema references between `Strand` and `App`, so order is
+        // irrelevant; apply `Strand` first for clarity. Because this runs AFTER
+        // hydrate, a warm restart diffs the membership DDL against the already-
+        // hydrated catalog and re-emits nothing (same fix as the sApp apply).
+        //
+        // This ticket only makes the tables present and their constraints active;
+        // nothing here writes membership rows. Founder bootstrap (Header, founding
+        // Manager/Member, invite/peer flows) is owned by the lifecycle ticket
+        // `strand-membership-lifecycle-population`.
+        log('Applying Strand membership schema for strand %s', strandId);
+        await db.exec(`
+			declare schema Strand {
+				${STRAND_SCHEMA}
+			}
+			apply schema Strand;
+		`);
+        log('Strand membership schema applied');
+        // 7. Apply the sApp schema, if provided.
+        //
+        // SEAM: this and the Strand apply above are the single composition point
+        // where strand-level declarative DDL is applied. Keep new schema wiring
+        // here so it stays a one-location edit across Node, browser, and cadre-core.
+        //
+        // NOTE: neither apply is retried — a failure tears the strand down and throws,
+        // and a later connect builds a fresh `Database` and re-hydrates from storage. A
+        // failed apply is normally taken back whole (Quereus unwinds its migration steps
+        // and verifies the catalog against a pre-apply fingerprint), so the next connect
+        // diffs against the state the apply started from. The sApp schema is the one
+        // supplied by the EMBEDDER, and the steps that DISCARD data — dropping a table,
+        // dropping a column, narrowing a column's type — are irreversible to Quereus's
+        // differ: once one has run, any later step that fails leaves the schema partially
+        // migrated instead of restored. No schema in this repo evolves that way, so this
+        // is a note for whoever first ships a migration that does.
+        if (schema) {
+            log('Applying sApp schema for strand %s', strandId);
+            await applyAppSchema(db, schema);
+            log('sApp schema applied');
+        }
+    }
+    catch (err) {
+        // Clean up resources if setup fails after partial initialization.
+        await collectionFactory.shutdown();
+        if (createdNode) {
+            await createdNode.stop();
+        }
+        await releaseStorageCache();
+        throw err;
+    }
+    // 8. Return result with hydrate counts + shutdown handler. `shutdown` tears
+    // down the collection factory, and `collectionFactory.shutdown()` stops EVERY
+    // node registered with it — including an injected one (registered via
+    // `registerLibp2pNode`). So an injected node IS stopped on `shutdown`; the
+    // `createdNode` guard below only avoids a redundant second `stop()` on a node
+    // we created ourselves, it is not what spares an injected node. A caller that
+    // needs an injected node to outlive `shutdown` must re-create it (cadre-core's
+    // `StrandInstanceManager` instead re-stops it, which is idempotent).
+    return {
+        vtables: [],
+        functions: [],
+        collations: [],
+        hydrated,
+        transactor: resolvedTransactor,
+        async shutdown() {
+            log('Shutting down strand connection %s', strandId);
+            await collectionFactory.shutdown();
+            if (createdNode) {
+                await createdNode.stop();
+            }
+            await releaseStorageCache();
+            log('Strand connection %s shut down', strandId);
+        },
+    };
+}
+/**
+ * Step 7 of {@link composeStrand}: declare the sApp's schema as `App` and apply it — a
+ * declarative diff against the catalog, so re-applying a schema that is already in place
+ * emits nothing. The one site that applies an `App` schema: `composeStrand` calls it at
+ * bring-up, and cadre-core's `StrandDatabase.attachAppSchema` calls it on a live storage
+ * replica when an app claims the strand. The database must already be composed (optimystic
+ * set as the default vtab), or the tables land in memory instead of the strand.
+ *
+ * Refuses a schema holding an item the Quereus parser skipped: it keeps any item whose leading
+ * keyword it does not model (`create unique index …`, a misspelled `tabel`, `domain`) as an
+ * opaque placeholder that apply ignores, so the app would otherwise run without that item.
+ */
+export async function applyAppSchema(db, schema) {
+    await db.exec(`
+		declare schema App {
+			${schema}
+		}
+	`);
+    assertNoIgnoredItems(db);
+    await db.exec('apply schema App;');
+}
+function assertNoIgnoredItems(db) {
+    const items = db.declaredSchemaManager.getDeclaredSchema('App')?.items ?? [];
+    const ignored = items.filter(item => item.type === 'declareIgnored').length;
+    if (ignored > 0) {
+        // Only a count: Quereus leaves an ignored item's source text empty.
+        throw new Error(`sApp schema has ${ignored} item(s) the parser does not recognize (a \`create …\` prefix or a misspelled item keyword such as \`tabel\`); items are \`table\`, \`index\`, \`unique index\`, \`view\`, \`materialized view\`, \`seed\` and \`assertion\``);
+    }
+}
+/**
+ * Steps 1-2 of {@link composeStrand}: register the crypto plugin, then the optimystic
+ * plugin carrying this strand's transactor defaults. Split out so the composition can
+ * guard the pair against the storage-cache claim it has already taken.
+ */
+async function registerStrandPlugins(db, platform, strand) {
+    await platform.registerCrypto(db);
+    log('Registered crypto plugin');
+    // On the local transactor with persistent storage, hand the same instance to the
+    // plugin so DML persists on the host backend (not in-memory).
+    const pluginConfig = {
+        default_transactor: strand.resolvedTransactor,
+        default_key_network: 'libp2p',
+        default_network_name: strand.networkName,
+        enable_cache: strand.enableCache,
+    };
+    if (strand.resolvedTransactor === 'local' && strand.storage) {
+        const storage = strand.storage;
+        pluginConfig.rawStorageFactory = () => storage;
+    }
+    // The plugin's published signature is `Record<string, SqlValue>` but it also reads
+    // `rawStorageFactory` (a function reference) from the same map. Cast through unknown
+    // rather than widen the public type.
+    const pluginResult = optimysticPlugin(db, pluginConfig);
+    applyRegistrations(db, pluginResult);
+    log('Registered optimystic vtables and functions');
+    return pluginResult;
+}
+//# sourceMappingURL=compose-strand.js.map
