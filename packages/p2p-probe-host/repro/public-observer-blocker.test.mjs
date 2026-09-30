@@ -243,7 +243,7 @@ async function buildGateway({ publicObserverStrandIds } = {}) {
   const controlDb = node.getControlDatabase();
   if (!controlDb) throw new Error('gateway has no control database after start()');
   await controlDb.ensureOwnerKey(owner.publicKeyB64);
-  node.initializeSeedBootstrap(owner.privateKeyB64);
+  await node.initializeSeedBootstrap(owner.privateKeyB64);
 
   const seedMemberKeyPair = await generateKeyPair('Ed25519');
   const seedMemberPeerId = peerIdFromPrivateKey(seedMemberKeyPair).toString();

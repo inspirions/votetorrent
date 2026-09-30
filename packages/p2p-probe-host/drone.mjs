@@ -235,7 +235,7 @@ if (IS_FOUNDER) {
   const controlDb = node.getControlDatabase();
   if (!controlDb) throw new Error('founder has no control database after start()');
   await controlDb.ensureOwnerKey(owner.publicKeyB64);
-  node.initializeSeedBootstrap(owner.privateKeyB64);
+  await node.initializeSeedBootstrap(owner.privateKeyB64);
   L(`owner genesis done (ownerKey=${owner.publicKeyB64.slice(0, 12)}…)`);
 
   const { invite } = await node.createInvite(undefined, ENROL_WINDOW_MS);

@@ -873,7 +873,7 @@ export async function startGateway(options = {}) {
   const controlDb = node.getControlDatabase();
   if (!controlDb) fatal('gateway has no control database after start() — cannot run owner genesis.');
   await controlDb.ensureOwnerKey(owner.publicKeyB64);
-  node.initializeSeedBootstrap(owner.privateKeyB64);
+  await node.initializeSeedBootstrap(owner.privateKeyB64);
   L(`owner genesis done (ownerKey=${owner.publicKeyB64.slice(0, 12)}…)`);
 
   // ── Seed exactly one authorized member — see the header's "DELIBERATE MEMBER-SEEDING
