@@ -93,20 +93,11 @@ const node = new CadreNode({
   requireSignedSchemas: false,
   strandFilter: { mode: 'all' },
   network: {
-    // The strand-addr fan-out is throttled per STRAND by `strandAddrRefreshMs`
-    // (cadre-core default 10 min), and `refreshOneStrandPeerAddrs` stamps that throttle on
-    // the pass HAPPENING, not on its answer — keyed by strandId alone, with no invalidation
-    // when the connected-sibling set GROWS. On this rig the drones boot ~2-4 min before the
-    // phones enrol, so the first pass finds only the sibling drone, answers nothing, stamps,
-    // and the strand address book stays peers=0 for the rest of the run. Run 26 shows exactly
-    // two `address book merged (peers=0 ...)` lines, at 04:31:05 and 04:31:34, on an 8 m 35 s
-    // run: next pass due 04:41:34, ~2 min after the drone was killed. That is why the cohort
-    // can never dial back and block-transfer ends in UnexpectedEOFError + NoValidAddressesError.
-    // 15 s re-asks within the formation window. Invisible to tools/multipeer-gate, which starts
-    // every node at once so its FIRST pass already sees the whole cohort.
-    controlCohort: { strandAddrRefreshMs: 15_000 },
+    // No `controlCohort.strandAddrRefreshMs` override: the 15 s workaround for the per-STRAND
+    // refresh throttle (sereus#21) is gone. cadre-core now tracks the refresh per
+    // (sibling, strand), so a sibling that connects after a pass is asked on the next tick.
     // circuitRelayTransport() is the DIALER half of circuit-relay-v2, and this node needs it
-    // even though it is itself a relay SERVER (see relayServerInit below). Supplying
+    // even though it is itself a relay SERVER (the storage profile turns that on). Supplying
     // `transports` at all REPLACES @optimystic/db-p2p's defaults wholesale —
     // `libp2p-node-base.ts` does `options.transports ?? defaults.transports` — and it is those
     // defaults (via createLibp2pNode) that would otherwise carry it. Without it libp2p's dial
@@ -120,58 +111,9 @@ const node = new CadreNode({
     // had no transport to use. cadre-core documents the same pairing for RN in types.d.ts.
     transports: [webSockets(), circuitRelayTransport()],
     listenAddrs: ['/ip4/0.0.0.0/tcp/0/ws'], // ephemeral — avoids EADDRINUSE
-    // The storage profile turns the circuit-relay-v2 relay server ON
-    // (createControlNode/startStrand derive `relay: profile === 'storage'` in
-    // the consumed cadre-core, wiring circuitRelayServer() at
-    // libp2p-node-base.js). CORRECTED (P2P-11 debug session, 2026-09-28,
-    // CORRECTION/CORRECTION 2): the prior WR-19 note claiming the options
-    // builder already forwarded `relayServerInit` was WRONG — as-shipped
-    // `@serfab/cadre-core@1.6.0` never forwards it (confirmed by full-dist
-    // grep, twice, independently), so `relayServerInit` below was DEAD
-    // CONFIG until `.yarn/patches/@serfab-cadre-core-npm-1.6.0-fwdport.patch`
-    // was extended to forward it — that patch must be applied (it is, via
-    // this repo's yarn patch mechanism) for anything in this block to have
-    // any effect on the running relay. Supply BOUNDED reservation limits so
-    // the relay does not fall back to circuit-relay-v2's own
-    // DEFAULT_DATA_LIMIT/DEFAULT_DURATION_LIMIT (128 KiB / 2 min — a real,
-    // FINITE library default, NOT "unlimited" as an earlier version of this
-    // comment incorrectly claimed; see constants.js DEFAULT_DATA_LIMIT =
-    // BigInt(1 << 17)) — that default is undersized for this app's real
-    // control-schema + block-replication traffic over one relayed connection
-    // (dev-harness infra only, not shipped).
-    //
-    // P2P-11 device-run root cause (debug session p2p11-multi-peer-replication,
-    // 2026-09-28): T-38-12-01 originally copied circuit-relay-v2's OWN library
-    // defaults verbatim (128 KiB / 2 min) as the "bounded" limit, never sized
-    // against VoteTorrent's actual control-schema + block-replication traffic.
-    // A phone's ENTIRE control/repo/replication session to a storage-profile
-    // drone rides ONE relayed connection, and the multi-table schema DDL +
-    // block sync + corroboration + self-voucher CadrePeer replication routinely
-    // exceed 128 KiB, so the relay itself resets the connection mid-transfer
-    // (`TransferLimitError: data limit of 131072 bytes exceeded`) — reproduced
-    // byte-for-byte on Node with no device/emulator involved, and eliminated by
-    // raising this bound (see debug session Evidence). `tools/multipeer-gate`
-    // (which mostly PASSES) already runs with a materially larger bound; these
-    // values match it rather than inventing a new number.
-    //
-    // SPIKE 095 (2026-09-29): 1 MiB was STILL the wall. Device leg 2 logged 358
-    // `TransferLimitError: data limit of 1048576 bytes exceeded` on drone-A, and the
-    // phone-to-phone strand commit died as "Some peers did not complete". A per-reservation
-    // byte cap is the wrong SHAPE for a party's own relay, not merely the wrong size.
-    // Upstream agrees: the #19 fix (sereus master, ticket
-    // `bug-party-run-relay-caps-every-relayed-connection`, NOT yet released) makes a
-    // party-run relay forward WITHOUT LIMIT by default, via
-    // `reservations: { applyDefaultLimit: false, maxReservations: 128, reservationTtl: 2 h }`.
-    // These are those exact values. Delete this block when the release carrying the fix is adopted.
-    relayServerInit: {
-      reservations: {
-        applyDefaultLimit: false, // a granted slot is uncapped (upstream PARTY-run default)
-        maxReservations: 128, // upstream PARTY_RELAY_MAX_RESERVATIONS
-        reservationTtl: 2 * 60 * 60 * 1000, // upstream PARTY_RELAY_RESERVATION_TTL_MS (2 h)
-      },
-      maxInboundHopStreams: 64,
-      maxOutboundStopStreams: 64,
-    },
+    // No `relayServerInit`: cadre-core now forwards it itself (sereus#19) and defaults a
+    // party-run relay to uncapped reservations (applyDefaultLimit: false, 128 slots, 2 h),
+    // the values spike 095 had to set here after 358 TransferLimitErrors at a 1 MiB cap.
     ...(DRONE_BOOTSTRAP_STRAND_ADDR && { strandBootstrapNodes: [DRONE_BOOTSTRAP_STRAND_ADDR] }),
   },
   // STRAND CLUSTER BREADTH (spike 062 re-run). cadre-core 0.10.0 exposes
