@@ -1,5 +1,6 @@
 import type { ReleaseKeyTask, SignatureTask, SignatureResult } from './models'
 import type { IBuilder } from '../common/builder.js'
+import type { KeyholderDkgSigner } from '../keyholder/models.js'
 import type { SigningStatus } from '../signing/models.js'
 
 export interface IOnboardingTasksEngine {
@@ -9,9 +10,18 @@ export interface IOnboardingTasksEngine {
 }
 
 export interface IKeysTasksEngine {
+  /**
+   * 62-20 (D-17, D-20): completing a release-key Task ALWAYS means a
+   * publicly published share. `signer` is optional only so
+   * `MockKeysTasksEngine` and `CompleteKeyReleaseBuilder` (whose
+   * `IBuilder<ReleaseKeyTask, void>` surface carries no signer slot) still
+   * compile — the REAL engine (`KeysTasksEngine`) refuses with
+   * `KeyReleaseError('signer-required')` when `signer` is absent, writes no
+   * row, and leaves the Task incomplete.
+   */
   completeKeyRelease(
-    task: ReleaseKeyTask
-  // keyShares: FinalShareData
+    task: ReleaseKeyTask,
+    signer?: KeyholderDkgSigner
   ): Promise<void>
   getKeysToRelease(pending: boolean): Promise<ReleaseKeyTask[]>
   buildCompleteKeyRelease(): IKeysTasksCompleteKeyReleaseBuilder

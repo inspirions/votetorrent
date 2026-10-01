@@ -111,3 +111,129 @@ export interface DkgTranscriptVerdict {
   electionKeyConsistent: boolean | null
   status: KeyholderDkgStatus
 }
+
+// ---------------------------------------------------------------------------
+// Key release and public reconstruction (62-20: D-13, D-14, D-17, D-18, D-20)
+// ---------------------------------------------------------------------------
+//
+// APPENDED by 62-20. None of 62-17's declarations above are modified. These
+// names are LOCKED and consumed verbatim by 62-24 (two-node share-release
+// legs) and 62-29 (KeyReleaseScreen, Voter `releasedCount`, web-data reads)
+// — see 62-20-PLAN.md `<interfaces>`. `ElectionKeyRecord` and
+// `KeyholderDkgSigner` above are reused as-is: the release signer is the
+// SAME keyholder identity key the DKG used.
+
+/**
+ * `'before-release-window'`/`'releasing'` are mutually exclusive with
+ * `'reconstructable'` only by COUNT — public shares are public whatever the
+ * clock says, so k accepted releases make the phase `'reconstructable'` even
+ * before `releasingKeys` (D-14 overrides D-20's window for counting, never
+ * for seeding or for the honest `releaseKeyShare` path).
+ */
+export type KeyReleasePhase =
+  | 'no-current-revision' | 'no-election-key' | 'election-key-inconsistent'
+  | 'before-release-window' | 'releasing' | 'reconstructable'
+
+export type KeyReleaseRejectionReason = 'signature-invalid' | 'not-a-participant' | 'identifier-mismatch' | 'share-invalid'
+
+export interface KeyShareReleaseRecord {
+  electionId: string
+  revision: number
+  userId: string
+  /** `dkgIdentifierForUser(userId)`, 64-char lowercase hex. */
+  identifier: string
+  /** 64-char lowercase hex. PUBLIC once released (D-17) — never treated as a secret once this row exists. */
+  signingShare: string
+  /** ISO-Z text. */
+  releasedAt: string
+  signerKey: string
+}
+
+export interface KeyReleaseRejection {
+  userId: string
+  reason: KeyReleaseRejectionReason
+}
+
+export interface KeyReleaseSelfStatus {
+  userId: string
+  isParticipant: boolean
+  hasReleased: boolean
+  hasShare: boolean
+}
+
+export interface KeyReleaseStatus {
+  electionId: string
+  revision: number | null
+  phase: KeyReleasePhase
+  /** Epoch ms from `ElectionRevision.Timeline.releasingKeys`; null when unset (fail closed — never seed, never open the window). */
+  releasingKeysAt: number | null
+  hasEnteredReleasingKeys: boolean
+  /** k (D-14): `ElectionKey.Threshold`, required to equal the current revision's `KeyholderThreshold`. */
+  threshold: number | null
+  /** n: the published participant count. */
+  participants: number | null
+  /** Counts ACCEPTED releases ONLY — these are what count toward k. */
+  releasedCount: number
+  /** Sorted by userId. */
+  releasedUserIds: string[]
+  /** R4 participants with no accepted release yet, sorted by userId. */
+  awaitingUserIds: string[]
+  /** Rows present but NOT counted toward k, sorted by userId. */
+  rejectedReleases: KeyReleaseRejection[]
+  electionKey: ElectionKeyRecord | null
+  self?: KeyReleaseSelfStatus
+}
+
+export type KeyShareReleaseOutcome =
+  | { outcome: 'released'; release: KeyShareReleaseRecord }
+  | { outcome: 'already-released'; release: KeyShareReleaseRecord }
+
+export interface ReconstructedElectionKey {
+  electionId: string
+  revision: number
+  jointPublicKey: string
+  /**
+   * The reconstructed election secret key. Exists ONLY in the reconstructing
+   * caller's own process memory, and only after k shares have been PUBLICLY
+   * released — D-16 custody holds until release; D-17 governs what happens
+   * after. This module never persists, vaults or logs it.
+   */
+  secretKey: Uint8Array
+  threshold: number
+  participants: number
+  usedUserIds: string[]
+  rejectedReleases: KeyReleaseRejection[]
+}
+
+/**
+ * D-18: a block's payload ALWAYS carries both the votes AND the voter
+ * records of that block — they are encrypted together under the joint key
+ * Y. A payload missing either array is refused before encryption (see
+ * `encryptElectionBlock` in vote-engine's `src/key-release/election-block.ts`),
+ * so a block builder cannot leave voter records in clear by accident.
+ */
+export interface ElectionBlockPayload {
+  v: 1
+  votes: unknown[]
+  voterRecords: unknown[]
+}
+
+/** `ciphertext` is a `BlockCiphertext` object (62-04) or its JSON string. */
+export interface ElectionBlockInput {
+  blockId: string
+  ciphertext: unknown
+}
+
+export type ElectionBlockDecryptFailureReason =
+  | 'not-reconstructable' | 'invalid-argument' | 'malformed-ciphertext'
+  | 'unsupported-version' | 'authentication-failed' | 'malformed-payload'
+
+export type ElectionBlockDecryptResult =
+  | { ok: true; blockId: string; payload: ElectionBlockPayload }
+  | { ok: false; blockId: string; reason: ElectionBlockDecryptFailureReason; detail: string }
+
+export interface SeedReleaseKeyTasksResult {
+  seeded: Array<{ taskId: string; userId: string; electionId: string; revision: number }>
+  alreadySeeded: number
+  failures: Array<{ userId: string; electionId: string; detail: string }>
+}
