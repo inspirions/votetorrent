@@ -9,7 +9,7 @@ import type { TransportSyncState } from "../../components/TransportStatusCard";
  *
  * (b) THE BUNDLING RULE. `FilesystemRegistrationTransport` (48-09) imports `node:fs/promises` and
  * is therefore NOT RN-bundleable: it carries no `transport/index.ts` barrel and is unreachable
- * from `@votetorrent/vote-engine`'s root barrel for exactly that reason. Neither this file nor the
+ * from the engine package's root barrel for exactly that reason. Neither this file nor the
  * screen may import ANY transport module — by barrel OR by deep path — because either route would
  * drag `node:fs` toward the Metro bundle and reproduce the failure class Phase 44's `@peculiar`
  * device-boot wall cost two plans to unstick, invisibly to jest (jest runs on Node, where the
@@ -18,11 +18,17 @@ import type { TransportSyncState } from "../../components/TransportStatusCard";
  * the app already reaches its engines through `useApp().getEngine()` instead of importing engine
  * classes directly.
  *
- * (c) THE D-11 RULE. The peer-cluster leg ships **code-complete, unverified**: P2P-11 is
- * device-REFUTED, its wall has moved repeatedly, and this project has already lived through
- * "implemented but unproven" being read as "done" more than once. This file attaches NO peer
- * binding, and `SyncBindingId` deliberately excludes a peer/p2p member so a peer binding cannot be
- * registered at this seam without an out-loud type change — see `INERT_PEER_SYNC` below.
+ * (c) THE D-11/D-23/D-28 RULE, updated 62-21. The peer-cluster leg ships **code-complete,
+ * unverified**: P2P-11 is device-REFUTED, its wall has moved repeatedly, and this project has
+ * already lived through "implemented but unproven" being read as "done" more than once. Through
+ * 62-20 this file deliberately attached no peer binding. **62-21 is the plan that changes that**:
+ * per D-28, the `'peer'` binding IS attached in every build (no `__DEV__` gate, no configuration —
+ * see `attach-peer-sync-binding.ts`), and per D-31 its card (`PeerTransportStatusCard.tsx`, which
+ * replaces `ExperimentalTransportStatusCard`) reports real numeric pending/synced/failed counts
+ * read from the P2P transport's own reports. The peer leg itself remains code-complete and
+ * unverified on devices (D-23, proof debt against P2P-11) — attaching it unconditionally and
+ * showing real counts does not change that; `PeerTransportStatusCard`'s hardcoded warning frame
+ * and verbatim caveat are what keep that distinction visible to the officer.
  *
  * (d) THE PII RULE. A sync error carries an **identifier** and nothing else. A failing item is a
  * registration payload containing real registrant PII, so `SyncErrorRef` and
@@ -43,10 +49,11 @@ import type { TransportSyncState } from "../../components/TransportStatusCard";
  *
  * **48-23, 2026-08-06: `'peer'` is now admitted.** This member's addition IS that out-loud step.
  * The peer-cluster leg it routes to is **code-complete, unverified** (D-11) — admitting the id at
- * this seam does not change that, and it does not change what the peer card SHOWS:
- * `ExperimentalTransportStatusCard` (48-17) still accepts only `disabled?` and `onTrySync`, with
- * no state channel of any kind. Widening this union changes what the peer control's press CAN DO
- * (resolve a `'peer'` binding through the seam below) — never what the card renders.
+ * this seam does not change that. Through 62-20 the peer card showed no state at all
+ * (`ExperimentalTransportStatusCard`, `disabled?`/`onTrySync` only). **62-21** replaces that card
+ * with `PeerTransportStatusCard` (D-31), which DOES render real numeric counts — but every count,
+ * the caveat, the heading and the border are still structurally fixed by the card itself, never by
+ * a prop a caller controls (see that component's own doc comment).
  */
 export type SyncBindingId = "filesystem" | "rest" | "peer";
 
@@ -66,16 +73,42 @@ export interface TransportSyncReport {
 }
 
 /**
+ * 62-21 (D-32): an optional context a binding's `syncNow`/`readCounts` may need — currently just
+ * `authorityId`, since the peer binding's transports and signer all scope to one authority. The
+ * filesystem/REST bindings ignore it (their own `syncNow` closures already capture everything they
+ * need at attach time).
+ */
+export interface SyncBindingContext {
+	authorityId: string;
+}
+
+/**
+ * 62-21 (D-31): numbers only — the SAME T-48-20-02 PII rule `TransportSyncReport.errorItemIds`
+ * already follows. `pending`/`synced`/`failed` never carry a requester name, a payload value, or a
+ * transport error string.
+ */
+export interface PeerSyncCounts {
+	pending: number;
+	synced: number;
+	failed: number;
+}
+
+/**
  * A view-model shape, NOT `IRegistrationRequestTransport` itself. The screen must never hold a
  * transport instance, because holding one would require importing one (see the bundling rule
  * above). A host wraps its real binding — `FilesystemRegistrationTransport` reading staged
  * documents, or `RestRegistrationTransport` polling its endpoint — in this handle and registers
  * it via `registerSyncBinding`. The transport seam's own discipline is unchanged and unweakened:
  * a handle never receives, derives, or holds key material.
+ *
+ * 62-21 widens `syncNow` to take an OPTIONAL `SyncBindingContext` (additive — the filesystem/REST
+ * bindings' existing zero-arg calls stay valid) and adds an OPTIONAL `readCounts`, which the peer
+ * binding implements (D-31) to report numeric counts without signing or submitting anything.
  */
 export interface SyncBindingHandle {
 	id: SyncBindingId;
-	syncNow: () => Promise<TransportSyncReport>;
+	syncNow: (context?: SyncBindingContext) => Promise<TransportSyncReport>;
+	readCounts?: (context: SyncBindingContext) => Promise<PeerSyncCounts>;
 }
 
 /**
@@ -142,9 +175,10 @@ export function clearSyncBindings(): void {
  * instead of this export.** `INERT_PEER_SYNC` stays exported anyway — 48-20's own test suite
  * asserts it exists and returns `undefined` (Suite F), and this export is retained precisely so
  * that assertion keeps documenting the transition it was written to describe: the peer card WAS
- * structurally inert through 48-20, and is now wired through the seam. The peer-cluster leg
- * itself remains **code-complete, unverified** (D-11) either way — this export's retirement from
- * the call site changes nothing about that.
+ * structurally inert through 48-20, and is now wired through the seam. **62-21: `PeerTransportStatusCard`
+ * is the live card this wiring now drives** — the peer-cluster leg itself remains **code-complete,
+ * unverified** (D-23) either way; this export's retirement from the call site changes nothing about
+ * that.
  */
 export const INERT_PEER_SYNC = (): void => {};
 

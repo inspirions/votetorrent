@@ -9,10 +9,11 @@ import { EngineFactory } from "../engines/engine-factory";
 import { LocalStorageReact } from "@votetorrent/vote-engine/rn";
 import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
-import { createDeviceSigner } from "../engines/device-signer";
+import { createDeviceSigner, type SignCallback } from "../engines/device-signer";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
 import { attachAssociationSyncBindings } from "../screens/registration/attach-association-sync-bindings";
+import { attachPeerSyncBinding } from "../screens/registration/attach-peer-sync-binding";
 import { purgeLegacyStagedPayload, registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
 import { useCadreNode, type CadreNodeSettlement } from "./CadreNodeProvider";
 
@@ -49,6 +50,17 @@ interface AppContextType {
 	 * `isNoNetworkEstablishedError` and renders `NoNetwork`, never a raw message.
 	 */
 	exportDashboardSnapshot: () => Promise<BootstrapSnapshot>;
+	/**
+	 * 62-21 (D-04/D-28): resolves the Authority's hardware-backed device `SignCallback` ON DEMAND.
+	 * The SAME lazy-factory-thunk class already established by the `maybeSeedRegistrantFixtures`
+	 * argument in the init effect below — calling it reads the device key and may prompt, so it is
+	 * NEVER invoked by the provider itself, only passed down for a user-initiated signing action
+	 * (enable encrypted intake, a peer sync's decision publishing) to resolve when it actually
+	 * needs to sign. This is what keeps `AppProvider.tsx` — already exempt from the device-signing
+	 * rollout inventory for exactly this reason — the only provider-level invoker, so 62-21 adds no
+	 * new one.
+	 */
+	resolveDeviceSigner: () => Promise<SignCallback>;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -181,6 +193,39 @@ export function AppProvider({ children }: PropsWithChildren) {
 	const hasEngine = useCallback((engineName: string) => {
 		return engineFactoryRef.current?.hasEngine(engineName) ?? false;
 	}, []);
+
+	// 62-21 (D-04/D-28): the lazy device-signer thunk — the SAME class as the
+	// `maybeSeedRegistrantFixtures` factory argument already in this file (see that call site's
+	// own comment): it never resolves a signer at provider construction or cold start. Resolving
+	// here would read the device key on every boot for a value most boots never use, and could
+	// turn a successful re-attach into "Failed to load network" on a signer failure that has
+	// nothing to do with network init. It is invoked only inside a user-initiated signing action
+	// (enable encrypted intake, a peer sync's decision publishing), whose caller owns the error
+	// handling (`useDeviceSigningErrorHandler`). This keeps `AppProvider.tsx` — already in
+	// `ROLLOUT_EXEMPT` for exactly this reason — the only provider-level invoker (62-21 adds no new
+	// invoking file).
+	const resolveDeviceSigner = useCallback(async (): Promise<SignCallback> => {
+		const user = await getOrCreateDeviceUser("Device User");
+		return createDeviceSigner(user.name);
+	}, []);
+
+	// 62-21 (D-28): the 'peer' sync binding is attached in EVERY build — unlike the REST/filesystem
+	// dev/device-proof harnesses below, there is no `__DEV__` gate and no configuration. P2P is the
+	// default intake path. The binding holds no key material and constructs its transports lazily,
+	// per sync, through the factory's `createPeerStagingTransports`. The catch is silent by design
+	// (mirrors the dev-attach effect below): registration is a Map set, and a boot must never fail
+	// because this attachment did.
+	useEffect(() => {
+		try {
+			attachPeerSyncBinding({
+				getEngine,
+				createTransports: (d) => engineFactoryRef.current!.createPeerStagingTransports(d),
+				createSigner: resolveDeviceSigner,
+			});
+		} catch {
+			/* boot must not fail */
+		}
+	}, [getEngine, resolveDeviceSigner]);
 
 	// 48-22 Task 2: DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY. attachSyncBindings() is a no-op
 	// unless DEV_REGISTRATION_SYNC_REST_BASE_URL is explicitly set (no hardcoded default), so a
@@ -575,6 +620,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 				hasNetwork,
 				selectNetwork,
 				exportDashboardSnapshot,
+				resolveDeviceSigner,
 			}}
 		>
 			{children}
