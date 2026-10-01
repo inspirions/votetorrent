@@ -11,6 +11,9 @@ import { AssociationAssociateBuilder } from './builders/association-associate-bu
 import { resolveRecordValidity as resolveRecordValidityFromPolicy } from './record-validity.js'
 import { REASSOCIATION_WRITE_MODE } from './reassociation/write-mode.js'
 import type { ReassociationWriteMode } from './reassociation/write-mode.js'
+import { deriveRegistrationCodeWith } from './reassociation/registration-code.js'
+import * as reassociationDriver from './reassociation/driver.js'
+import type { ReassociationHost } from './reassociation/driver.js'
 import type { EngineContext } from '../types.js'
 import { REASSOCIATION_REJECTION_NONCE_PREFIX, REASSOCIATION_UNRESOLVED_REGISTRANT_ID, REGISTRANT_HAS_ACTIVE_DEVICE_REASON } from '@votetorrent/vote-core'
 // 51-09 Task 2: `IAssociationRequestIntake`/`StagedAttestation` are declared in the FILESYSTEM
@@ -32,9 +35,20 @@ import type {
   AttestationVerdictCode,
   AttestationVerification,
   DeviceAttestation,
+  DeviceRetirement,
   IAssociationAssociateBuilder,
   IAssociationEngine,
   IAttestationVerifier,
+  IReassociationEngine,
+  ReassociationApprovalInput,
+  ReassociationApprovalResult,
+  ReassociationDecisionSource,
+  ReassociationIntake,
+  ReassociationOpener,
+  ReassociationProcessingSummary,
+  ReassociationRejectionResult,
+  ReassociationReview,
+  ReassociationSignatureOrCallback,
   Signature
 } from '@votetorrent/vote-core'
 
@@ -53,6 +67,18 @@ type SignatureOrCallback = Signature | ((digest: Uint8Array) => Promise<Signatur
  * public read shape. 51-09's driver (`processPendingAssociationRequests`, same class/file) calls
  * `validateStagedAttestationAnswer` again on every staged document and consumes this same shape.
  */
+/**
+ * 62-18 (D-41) — the minimal structural shape `rejectPendingRequest`/`completeInterruptedRejections`
+ * need from an intake: just `publishDecision`, over the base (no `revokesDeviceKey`/`matchMethod`)
+ * decision shape every intake publishes for a rejection. Both `IAssociationRequestIntake` (the
+ * 51-09 driver's own param type) and vote-core's `ReassociationIntake` (62-18's driver) satisfy
+ * this structurally, so `reassociationHost()` can pass a `ReassociationIntake` through to these
+ * two shared helpers without a second, duplicated implementation.
+ */
+interface DecisionPublisher {
+  publishDecision (decision: { requestId: string; status: AssociationRequestStatus; reason?: string; decidedAt: string }): Promise<string>
+}
+
 interface AssociationRequestRow {
   id: string
   authorityId: string
@@ -148,7 +174,7 @@ const SUBMITTED_AT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
  * `sha256(DeviceId)` — the same hash convention `Association.DeviceHash`/
  * `PollingDevice.DeviceHash` document.
  */
-export class AssociationEngine implements IAssociationEngine {
+export class AssociationEngine implements IAssociationEngine, IReassociationEngine {
   /**
    * D-18: same-process holding pen for a validated staged attestation answer, keyed by
    * `requestId`. NOT the durable home for an in-flight answer — that is the TRANSPORT's staging
@@ -1501,7 +1527,7 @@ export class AssociationEngine implements IAssociationEngine {
     row: { id: string; authorityId: string; registrantId: string; deviceKey: string },
     reasonCode: string,
     signatureOrCallback: SignatureOrCallback,
-    intake: IAssociationRequestIntake
+    intake: DecisionPublisher
   ): Promise<void> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const syntheticNonce = `${REASSOCIATION_REJECTION_NONCE_PREFIX}${reasonCode}:${(globalThis as any).crypto.randomUUID()}`
@@ -1524,7 +1550,7 @@ export class AssociationEngine implements IAssociationEngine {
   private async completeInterruptedRejections (
     authorityId: string,
     signatureOrCallback: SignatureOrCallback,
-    intake: IAssociationRequestIntake
+    intake: DecisionPublisher
   ): Promise<number> {
     const ctx = this.ctx!
     const likePattern = `${REASSOCIATION_REJECTION_NONCE_PREFIX}%`
@@ -1953,6 +1979,96 @@ export class AssociationEngine implements IAssociationEngine {
       receivedAt: reZuluDatetime(asText(row.ReceivedAt, 'AssociationRequest.ReceivedAt')),
       decidedAt: row.DecidedAt == null ? undefined : reZuluDatetime(asText(row.DecidedAt, 'AssociationRequest.DecidedAt')),
       rejectionReason: row.RejectionReason == null ? undefined : asText(row.RejectionReason, 'AssociationRequest.RejectionReason')
+    }
+  }
+
+  // ---------- 62-18: IReassociationEngine (D-40, D-41, D-45, D-46) ----------
+  //
+  // Thin delegators over `./reassociation/driver.js`'s free functions, bound to this instance's
+  // private surface through `reassociationHost()` below — the SAME `prepareAssociation`/
+  // `commitPreparedAssociation`/transition-helper/synthetic-rejection machinery Task 2 proved,
+  // never duplicated. Read methods (`listPendingReassociations`/`getReassociationReview`/
+  // `getDeviceRetirement`) return an empty/`undefined` result when unwired, mirroring
+  // `getAssociations`'s own convention; every write method still calls `requireCtx` first.
+
+  /** D-01/D-45: the registering device's own code derivation — needs no ctx (pure crypto over a
+   * signing callback). */
+  async deriveRegistrationCode (registrantId: string, sign: (digest: Uint8Array) => Promise<Signature>): Promise<string> {
+    return deriveRegistrationCodeWith(registrantId, sign)
+  }
+
+  async getRegistrationCodeHolderKey (registrantId: string): Promise<string | undefined> {
+    if (!this.ctx) return undefined
+    return reassociationDriver.getRegistrationCodeHolderKey(this.reassociationHost(), registrantId)
+  }
+
+  async processPendingReassociations (
+    authorityId: string,
+    signatureOrCallback: ReassociationSignatureOrCallback,
+    intake: ReassociationIntake,
+    opener: ReassociationOpener
+  ): Promise<ReassociationProcessingSummary> {
+    this.requireCtx('processPendingReassociations')
+    return reassociationDriver.processPendingReassociations(this.reassociationHost(), authorityId, signatureOrCallback, intake, opener)
+  }
+
+  async listPendingReassociations (authorityId: string, intake: ReassociationIntake, opener: ReassociationOpener): Promise<ReassociationReview[]> {
+    if (!this.ctx) return []
+    return reassociationDriver.listPendingReassociations(this.reassociationHost(), authorityId, intake, opener)
+  }
+
+  async getReassociationReview (
+    requestId: string,
+    intake: ReassociationIntake,
+    opener: ReassociationOpener,
+    options?: { readonly registrantId?: string }
+  ): Promise<ReassociationReview | undefined> {
+    if (!this.ctx) return undefined
+    return reassociationDriver.getReassociationReview(this.reassociationHost(), requestId, intake, opener, options)
+  }
+
+  async approveReassociation (
+    requestId: string,
+    input: ReassociationApprovalInput,
+    signatureOrCallback: ReassociationSignatureOrCallback,
+    intake: ReassociationIntake,
+    opener: ReassociationOpener
+  ): Promise<ReassociationApprovalResult> {
+    this.requireCtx('approveReassociation')
+    return reassociationDriver.approveReassociation(this.reassociationHost(), requestId, input, signatureOrCallback, intake, opener)
+  }
+
+  async rejectReassociation (
+    requestId: string,
+    signatureOrCallback: ReassociationSignatureOrCallback,
+    intake: ReassociationIntake
+  ): Promise<ReassociationRejectionResult> {
+    this.requireCtx('rejectReassociation')
+    return reassociationDriver.rejectReassociation(this.reassociationHost(), requestId, signatureOrCallback, intake)
+  }
+
+  async getDeviceRetirement (deviceKey: string, source?: ReassociationDecisionSource): Promise<DeviceRetirement | undefined> {
+    if (!this.ctx) return undefined
+    return reassociationDriver.getDeviceRetirement(this.reassociationHost(), deviceKey, source)
+  }
+
+  /** Builds the bound-private-method seam `./reassociation/driver.js`'s free functions run
+   * against — never constructed until a re-association method is actually called. */
+  private reassociationHost (): ReassociationHost {
+    const ctx = this.ctx!
+    return {
+      ctx,
+      prepareAssociation: (init, options) => this.prepareAssociation(init, options),
+      commitPreparedAssociation: (prepared, sig, revoke) => this.commitPreparedAssociation(prepared as PreparedAssociation, sig, revoke),
+      issueAttestationChallenge: (registrantId, deviceKey, sig, electionId) => this.issueAttestationChallenge(registrantId, deviceKey, sig, electionId),
+      validateStagedAttestationAnswer: (answer, requesterKey, sig) => this.validateStagedAttestationAnswer(answer, requesterKey, sig),
+      writeChallengeTransition: (requestId, authorityId, challengeNonce, sig) => this.writeChallengeTransition(requestId, authorityId, challengeNonce, sig),
+      writeTerminalTransition: (requestId, authorityId, status, rejectionReason, sig) => this.writeTerminalTransition(requestId, authorityId, status, rejectionReason, sig),
+      rejectPendingRequest: (row, reasonCode, sig, intake) => this.rejectPendingRequest(row, reasonCode, sig, intake),
+      completeInterruptedRejections: (authorityId, sig, intake) => this.completeInterruptedRejections(authorityId, sig, intake),
+      getAssociation: (registrantId, deviceKey) => this.getAssociation(registrantId, deviceKey),
+      getAssociations: (registrantId) => this.getAssociations(registrantId),
+      getAssociationsByDeviceKey: (deviceKey) => this.getAssociationsByDeviceKey(deviceKey)
     }
   }
 }
