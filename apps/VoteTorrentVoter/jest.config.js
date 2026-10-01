@@ -78,6 +78,11 @@ module.exports = {
     '^@noble/curves/(.*)$': '<rootDir>/node_modules/@noble/curves/$1',
     '^@noble/hashes$': '<rootDir>/node_modules/@noble/hashes/index.js',
     '^@noble/hashes/(.*)$': '<rootDir>/node_modules/@noble/hashes/$1',
+    // Phase 62 Plan 22 (D-32): 62-04's envelope (vote-engine's sealer/opener) imports
+    // '@noble/ciphers/aes.js'. Same single-copy-binding rationale as the @noble/hashes/
+    // @quereus entries above — 62-06 already declared the package as a Voter dependency.
+    '^@noble/ciphers$': '<rootDir>/node_modules/@noble/ciphers/index.js',
+    '^@noble/ciphers/(.*)$': '<rootDir>/node_modules/@noble/ciphers/$1',
     '^@babel/runtime/(.*)$': '<rootDir>/node_modules/@babel/runtime/$1',
     '^multiformats/cid$': '<rootDir>/node_modules/multiformats/dist/src/cid.js',
     '^multiformats/bases/base16$': '<rootDir>/node_modules/multiformats/dist/src/bases/base16.js',
