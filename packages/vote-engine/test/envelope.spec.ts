@@ -402,6 +402,69 @@ describe('envelope (62-04, D-03/D-04)', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Content-AAD binding, isolated from wrap-AAD binding (62-04 Task 3 / M1)
+  //
+  // The high-level transplant tests above cannot by themselves prove the
+  // CONTENT layer's AAD is load-bearing: the WRAP layer independently binds
+  // the SAME requestId/digest, so a naive "reseal under binding A, open
+  // under binding B" transplant already fails at the wrap-unwrap step
+  // before the content layer is ever reached — a content-AAD mutation would
+  // stay invisible to that style of test. This block isolates the content
+  // layer by reusing the SAME content key/nonce (a TEST-ONLY adversarial
+  // construction via the deep-path deterministic seal — never valid in
+  // production) across two envelopes sealed to two DIFFERENT bindings with
+  // two DIFFERENT plaintexts, then splices the second envelope's `ct` onto
+  // the first envelope's otherwise-untouched (correctly wrap-bound) wire
+  // shape.
+  // -------------------------------------------------------------------------
+  describe('content-AAD binding (isolated from wrap-AAD binding)', () => {
+    it('a ct spliced from a SAME-content-key envelope sealed under a DIFFERENT binding/plaintext is rejected, not silently substituted', () => {
+      const sk = repeated(0xa9, 32)
+      const recipients: EnvelopeRecipient[] = [{ userId: 'u1', publicKey: bytesToHex(secp256k1.getPublicKey(sk, true)) }]
+      const bindingReal = { requestId: 'req-isolate-real', digest: 'digest-isolate-real' }
+      const bindingOther = { requestId: 'req-isolate-other', digest: 'digest-isolate-other' }
+      const sharedRandomness = {
+        contentKey: repeated(0xb9, 32),
+        contentNonce: sequence(0xe0, 12),
+        wraps: [{ ephemeralSecretKey: repeated(0xc9, 32), nonce: sequence(0xf0, 12) }]
+      }
+      const realPlaintext = new TextEncoder().encode('REAL payload for the real request')
+      const otherPlaintext = new TextEncoder().encode('OTHER payload for an unrelated request')
+
+      const sealedReal = sealToRecipientsWithRandomness(realPlaintext, recipients, bindingReal, sharedRandomness)
+      const sealedOther = sealToRecipientsWithRandomness(otherPlaintext, recipients, bindingOther, sharedRandomness)
+
+      // sealedReal's wrap entries are untouched and correctly bound to
+      // bindingReal; only the content ciphertext is substituted.
+      const spliced: SealedEnvelope = { ...sealedReal, ct: sealedOther.ct }
+
+      const result = openEnvelope(spliced, { userId: 'u1', secretKey: sk }, bindingReal)
+      expect(result.ok, 'content AAD must reject a ct encrypted under a different binding, even with a correctly-unwrapped CK').to.equal(false)
+      if (!result.ok) {
+        expect(result.reason).to.equal('authentication-failed')
+        expect(result.detail).to.not.contain('REAL payload')
+        expect(result.detail).to.not.contain('OTHER payload')
+      }
+    })
+
+    it('the unspliced envelope still opens to its own plaintext (paired positive control)', () => {
+      const sk = repeated(0xa9, 32)
+      const recipients: EnvelopeRecipient[] = [{ userId: 'u1', publicKey: bytesToHex(secp256k1.getPublicKey(sk, true)) }]
+      const bindingReal = { requestId: 'req-isolate-real', digest: 'digest-isolate-real' }
+      const sharedRandomness = {
+        contentKey: repeated(0xb9, 32),
+        contentNonce: sequence(0xe0, 12),
+        wraps: [{ ephemeralSecretKey: repeated(0xc9, 32), nonce: sequence(0xf0, 12) }]
+      }
+      const realPlaintext = new TextEncoder().encode('REAL payload for the real request')
+      const sealedReal = sealToRecipientsWithRandomness(realPlaintext, recipients, bindingReal, sharedRandomness)
+      const result = openEnvelope(sealedReal, { userId: 'u1', secretKey: sk }, bindingReal)
+      expect(result.ok).to.equal(true)
+      if (result.ok) expect(Buffer.from(result.plaintext).toString('utf8')).to.equal('REAL payload for the real request')
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Key commitment and tampering
   // -------------------------------------------------------------------------
   describe('key commitment and tampering', () => {
