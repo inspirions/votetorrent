@@ -4,7 +4,7 @@ import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { readSessionThreshold } from '../signing/threshold.js'
 import { fanOutSignatureTasks } from '../signing/fan-out.js'
-import { findPendingTaskNonce } from './task-signing-status.js'
+import { findPendingAdminTaskRow, findPendingTaskNonce } from './task-signing-status.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
@@ -739,6 +739,22 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           `SignatureTasksEngine.completeSignature: no pending registrant task for user=${task.userId} requestId=${requestId}`
         )
       }
+    } else if (
+      task.signatureType === 'admin' &&
+      (task as AdminSignatureTask).authority?.id !== undefined &&
+      (task as AdminSignatureTask).administration?.proposed?.effectiveAt !== undefined
+    ) {
+      // 62-13 (D-09, T-62-13-04): disambiguate by (AuthorityId, proposed AdminEffectiveAt) —
+      // D-09 keeps every reached sibling open, so one officer can hold several pending admin
+      // tasks for DIFFERENT proposals at once. An arbitrary LIMIT-1 row here would let an
+      // officer sign the WRONG proposal. A join-miss base task (no `authority`) falls through
+      // to the generic branch below, unchanged (WR-01).
+      taskRow = await findPendingAdminTaskRow(this.ctx!.db, task as AdminSignatureTask)
+      if (!taskRow) {
+        throw new Error(
+          `SignatureTasksEngine.completeSignature: no pending admin task for user=${task.userId} authorityId=${(task as AdminSignatureTask).authority?.id}`
+        )
+      }
     } else {
       taskRow = await this.ctx!.db
         .prepare(
@@ -848,14 +864,15 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       }
     }
 
-    // 57-08 (Trigger B pre-check): the admin accept path REQUIRES the reusable
-    // per-digest callback — applyAdminProposal mints two or three distinct
-    // digests (57-07) and a single pre-computed Signature cannot cover them.
-    // Checked BEFORE sign() below, alongside the registrant guard above, so a
-    // refusable accept never spends the officer's header signature.
+    // 57-08 (Trigger B pre-check), explanation updated 62-03/62-13: the admin accept path
+    // REQUIRES the reusable per-digest callback — promotion (applyAdminProposal) mints its OWN
+    // promotion digest (62-03's single full-roster promotion session), which a single
+    // pre-computed Signature cannot cover. Checked BEFORE sign() below, alongside the
+    // registrant guard above, so a refusable accept never spends the officer's header
+    // signature.
     if (result.isAccepted && task.signatureType === 'admin' && !result.sign) {
       throw new Error(
-        'SignatureTasksEngine.completeSignature: admin accept requires result.sign (a reusable per-digest signing callback) — the promotion mints two or three distinct digests and cannot be covered by a single pre-computed Signature'
+        'SignatureTasksEngine.completeSignature: admin accept requires result.sign (a reusable per-digest signing callback) — promotion mints its own promotion digest, which a single pre-computed Signature cannot cover'
       )
     }
 
@@ -880,8 +897,17 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         // byte (the `else` branch below is the exact prior call, unchanged).
         await this.ctx!.db.exec('BEGIN')
         try {
-          thresholdReached = await this.signingEngine.sign(nonce, result.signature, { ownsTransaction: false })
-          if (thresholdReached) {
+          const adminOutcome = await this.signingEngine.signWithOutcome(nonce, result.signature, { ownsTransaction: false })
+          thresholdReached = adminOutcome.thresholdReached
+          // 62-13 (D-10): promote once — on the call that CROSSED the threshold (crossedNow), or
+          // on a LATER accept when the threshold is reached but the Admin row is still missing.
+          // The resume case: a crossing whose promotion was refused with AdminPromotionError (or
+          // whose composed transaction rolled back on a plain error, below) committed the
+          // signature without an Admin row, so the next accept re-attempts. A late co-signature
+          // after a COMPLETE promotion is recorded only — never re-invokes applyAdminProposal.
+          // Mirrors 62-11's ceb/vrg gates (crossedNow, or thresholdReached with an incomplete
+          // artifact) verbatim, per 62-11-SUMMARY.md's handoff.
+          if (adminOutcome.crossedNow || (adminOutcome.thresholdReached && !(await this.isAdminPromotionComplete(taskRow.Id)))) {
             try {
               // WR-01: the task-listing path above deliberately pushes a BASE
               // SignatureTask — no `authority` — when the
@@ -1416,6 +1442,28 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
   }
 
   /**
+   * 62-13 (D-10) — true only when the admin promotion artifact already exists for `taskId`'s
+   * proposal: both the `AdminSignatureTaskExtension` row (AuthorityId, AdminEffectiveAt) and a
+   * live `Admin` row at that key. Mirrors `isBallotFinalizeComplete`'s shape exactly (a
+   * `count(*)`/`select 1` probe against the artifact table, not a shared cross-scope helper).
+   * Used by `completeSignature`'s admin gate so a `thresholdReached` (but not `crossedNow`)
+   * accept — the resume shape, after a refused or failed promotion — still re-attempts
+   * promotion, while a genuinely late signature (the Admin row already exists) takes the
+   * recorded, non-promoting path (D-10). Returns `false` (never promoted) when either row is
+   * missing.
+   */
+  private async isAdminPromotionComplete (taskId: string): Promise<boolean> {
+    const extRow = await this.ctx!.db
+      .prepare('select AuthorityId, AdminEffectiveAt from AdminSignatureTaskExtension where TaskId = :taskId')
+      .get({ taskId }) as { AuthorityId: string; AdminEffectiveAt: string } | undefined
+    if (!extRow) return false
+    const adminRow = await this.ctx!.db
+      .prepare('select 1 as x from Admin where AuthorityId = :authorityId and EffectiveAt = :adminEffectiveAt')
+      .get({ authorityId: extRow.AuthorityId, adminEffectiveAt: extRow.AdminEffectiveAt })
+    return !!adminRow
+  }
+
+  /**
    * WR-19 (T-48-34-01..-05) — the single payload-acceptability gate for a registrant approval.
    * Called from TWO sites: `completeSignature`, BEFORE `signingEngine.sign()` consumes the
    * officer's real header signature (the fix), and again from `finalizeRegistrantApproval` itself,
@@ -1875,6 +1923,20 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       if (!taskRow) {
         throw new Error(
           `SignatureTasksEngine.getSignatureDigest: no pending registrant task for user=${task.userId} requestId=${requestId}`
+        )
+      }
+    } else if (
+      task.signatureType === 'admin' &&
+      (task as AdminSignatureTask).authority?.id !== undefined &&
+      (task as AdminSignatureTask).administration?.proposed?.effectiveAt !== undefined
+    ) {
+      // 62-13 (D-09, T-62-13-04): the SAME disambiguated admin lookup completeSignature uses —
+      // an officer with several open admin tasks must be shown, and must sign, the digest of
+      // the EXACT proposal its task names.
+      taskRow = await findPendingAdminTaskRow(this.ctx!.db, task as AdminSignatureTask)
+      if (!taskRow) {
+        throw new Error(
+          `SignatureTasksEngine.getSignatureDigest: no pending admin task for user=${task.userId} authorityId=${(task as AdminSignatureTask).authority?.id}`
         )
       }
     } else {

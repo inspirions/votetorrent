@@ -703,7 +703,7 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
       throw err
     }
 
-    return { nonce, taskId }
+    return { nonce, taskId, adminEffectiveAt }
   }
 
   it('case (1) accept: getSignatureDigest returns bytes, signing them via secp256k1 + completeSignature inserts OfficerSignature + AdminSignature + marks Task complete', async () => {
@@ -713,7 +713,7 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
     const { bytesToHex } = await import('@noble/curves/utils.js')
 
     const auth = await addTestAuthority(await createTestNetwork())
-    const { nonce } = await seedSignatureTaskForDigest(auth)
+    const { nonce, adminEffectiveAt } = await seedSignatureTaskForDigest(auth)
 
     const networkRef = {
       hash: 'test-hash-digest',
@@ -724,15 +724,19 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
     const engine = new SignatureTasksEngine(networkRef, auth.ctx)
 
     // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
-    // branch; `administration` is required by the AdminSignatureTask type but
-    // never read at runtime here.
+    // branch. 62-13 (D-09, T-62-13-04): `administration.proposed.effectiveAt` is now ALSO
+    // read, to disambiguate by (AuthorityId, AdminEffectiveAt) against the seeded
+    // AdminSignatureTaskExtension row — it must equal the SAME `adminEffectiveAt` the fixture
+    // seeded the extension with (not an independently-chosen timestamp), exactly as the real
+    // materializer (getRequestedSignatures) always populates this field from the extension's
+    // own column.
     const task: AdminSignatureTask = {
       type: 'signature',
       userId: auth.user.id,
       network: networkRef,
       signatureType: 'admin',
       authority: auth.authority,
-      administration: { proposed: { officers: [], effectiveAt: Date.now(), thresholdPolicies: [] }, signers: [auth.user.id] }
+      administration: { proposed: { officers: [], effectiveAt: adminEffectiveAt, thresholdPolicies: [] }, signers: [auth.user.id] }
     }
 
     // getSignatureDigest: should return the stored AdminSigning.Digest as bytes (D-03)
@@ -974,7 +978,7 @@ describe('completeSignature reject-branch (D-12)', () => {
       throw err
     }
 
-    return { nonce, taskId }
+    return { nonce, taskId, adminEffectiveAt }
   }
 
   it('reject (isAccepted=false) marks the Task complete WITHOUT inserting an OfficerSignature or advancing the threshold', async () => {
@@ -1029,7 +1033,7 @@ describe('completeSignature reject-branch (D-12)', () => {
     // Positive control: the accept path must call sign() and insert an OfficerSignature row.
     // At threshold=1, AdminSignature is also auto-inserted (D-11).
     const auth = await addTestAuthority(await createTestNetwork())
-    const { nonce } = await seedSignatureTask(auth)
+    const { nonce, adminEffectiveAt } = await seedSignatureTask(auth)
 
     // OfficerSignature count BEFORE accept — should be 0 (no sign at seed).
     const countBefore = await auth.ctx.db
@@ -1044,16 +1048,17 @@ describe('completeSignature reject-branch (D-12)', () => {
       primaryAuthorityDomainName: 'test.example'
     }
     const tasksEngine = new SignatureTasksEngine(networkRef, auth.ctx)
-    // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin'
-    // branch; `administration` is required by the AdminSignatureTask type but
-    // never read at runtime here.
+    // 57-08 (Trigger B): `authority` is now read by completeSignature's 'admin' branch.
+    // 62-13 (D-09, T-62-13-04): `administration.proposed.effectiveAt` must equal the SAME
+    // `adminEffectiveAt` the fixture seeded AdminSignatureTaskExtension with, to disambiguate
+    // by (AuthorityId, AdminEffectiveAt) — exactly as the real materializer always populates it.
     const task: AdminSignatureTask = {
       type: 'signature',
       userId: auth.user.id,
       network: networkRef,
       signatureType: 'admin',
       authority: auth.authority,
-      administration: { proposed: { officers: [], effectiveAt: Date.now(), thresholdPolicies: [] }, signers: [auth.user.id] }
+      administration: { proposed: { officers: [], effectiveAt: adminEffectiveAt, thresholdPolicies: [] }, signers: [auth.user.id] }
     }
     // 999.1 R-02: completeSignature's accept path drives a REAL OfficerSignature insert —
     // sign the seeded AdminSigning's actual Digest for real.

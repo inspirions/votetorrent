@@ -318,13 +318,24 @@ describe('CompleteSignatureBuilder', () => {
     // match either seeded fixture's real authority: a mismatch just refuses at
     // applyAdminProposal's Step 1 ('wrong-scope'), caught and warned exactly
     // like the roster-mismatch this test's own synthetic digest already
-    // produces — never thrown. `administration` is required by the
-    // AdminSignatureTask type but never read at runtime here.
+    // produces — never thrown.
+    // 62-13 (D-09, T-62-13-04): `completeSignature`/`getSignatureDigest` now disambiguate an
+    // admin task by (AuthorityId, AdminEffectiveAt) ONLY when BOTH `authority.id` and
+    // `administration.proposed.effectiveAt` are defined. This ONE `task` object is reused
+    // across TWO DIFFERENT seeded fixtures below (ctx1/ctx2, each its OWN real authorityId) —
+    // a single `effectiveAt` could never match both extension rows. `effectiveAt` is left
+    // `undefined` deliberately so this task keeps resolving through the pre-62-13 generic
+    // (UserId, SignatureType, IsCompleted) lookup — there is exactly one pending admin task
+    // per fresh ctx, so that lookup is unambiguous here, and the disambiguated path (and its
+    // own dedicated coverage) belongs to `threshold-rad.spec.ts`'s R11.
     const task: AdminSignatureTask = {
       ...makeSignatureTask(),   // userId='user-1', signatureType='admin'
       signatureType: 'admin',
       authority: { id: 'placeholder-authority', name: 'Placeholder Authority', domainName: 'placeholder.example.com' },
-      administration: { proposed: { officers: [], effectiveAt: Date.now(), thresholdPolicies: [] }, signers: ['user-1'] }
+      administration: {
+        proposed: { officers: [], effectiveAt: undefined as unknown as number, thresholdPolicies: [] },
+        signers: ['user-1'],
+      }
     }
     // 999.1 R-02: no longer using the shared makeSignatureResult() dummy — each
     // seedPendingTask() call below builds its own real per-digest SignatureResult
