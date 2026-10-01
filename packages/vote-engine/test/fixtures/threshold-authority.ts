@@ -1,19 +1,21 @@
 // 62-07 (D-08..D-12): a reusable multi-holder authority fixture for threshold co-signing
 // tests, reused by 62-11 (ceb/vrg end-to-end) and 62-13 (rad fan-out + D-12 producer audit).
 //
-// IMPORTANT (schema constraint, votetorrent.qsql Officer.InsertValid "first authority" arm):
-// every Officer insert this fixture performs uses the unsigned, no-invite arm, which requires
-// `(select count(*) from Authority) = 1`. ALL officer inserts below therefore run BEFORE
-// anything in a test creates a SECOND Authority. If 62-03's Officer.InsertValid change
-// narrows this arm further (D-48), it must keep accepting this shape: a founding-style insert
-// while exactly one Authority exists.
+// 62-03 (D-48): the founder is the network's FIRST (and, until promotion, ONLY) unsigned
+// Admin/Officer — formulation A admits exactly one unsigned Admin and one unsigned Officer
+// per Authority. Every additional holder, the nonHolder and the outsider therefore enter
+// through a REAL signed `proposeAdmin` promotion (the founder alone, at a founding
+// threshold of 1, promotes the full target roster — including itself — in one call), never
+// a raw unsigned insert. See the header comment on `createThresholdAuthority` below for the
+// exact shape. This is a BEHAVIOR change from 62-07's original unsigned-insert shape, not
+// merely an internal implementation swap: `adminEffectiveAt` now names the PROMOTED
+// generation, never the founding one.
 //
 // The fixture never logs keys or signatures (T-62-07-08).
 
 import type { Database } from '@quereus/quereus'
-import type { Scope, Signature, ThresholdPolicy, User } from '@votetorrent/vote-core'
+import type { AdminInit, OfficerSelection, Proposal, Scope, Signature, ThresholdPolicy, User } from '@votetorrent/vote-core'
 import { BALLOT_HEADER_TID } from '../../src/election/election-engine.js'
-import { allocateTid } from '../../src/database/tid-allocator.js'
 import { nowCanonicalDatetime } from '../../src/utils.js'
 import {
   addTestAuthority,
@@ -80,36 +82,24 @@ async function insertFixtureUser (auth: TestAuthorityContext, user: User): Promi
   )
 }
 
-/** Insert an Officer row via the unsigned "first authority" InsertValid arm — see this file's
- *  header comment for why every call must happen before a second Authority exists. */
-async function insertFixtureOfficer (
-  db: Database,
-  authorityId: string,
-  adminEffectiveAt: string | number,
-  userId: string,
-  title: string,
-  scopes: Scope[]
-): Promise<void> {
-  const tid = await allocateTid(db, 'officer-fixture')
-  await db.exec(
-    `insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes)
-     with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = :tid
-     values (:authorityId, :adminEffectiveAt, :userId, :title, :scopes)`,
-    {
-      authorityId,
-      adminEffectiveAt,
-      userId,
-      title,
-      scopes: JSON.stringify(scopes),
-      tid,
-    }
-  )
-}
-
 /**
  * Build a multi-holder authority: a founding officer (holders[0]) plus `holderCount - 1`
  * additional officers who ALL hold `holderScopes`, one officer holding only `nonHolderScopes`,
  * and one plain User who is not an officer at all.
+ *
+ * 62-03 (D-48): the founder is minted unsigned by `createTestNetwork` (the network's FIRST
+ * and only Admin/Officer), at an EMPTY founding `thresholdPolicies` (so `rad` defaults to
+ * threshold 1, and the founder ALONE can complete the promotion below, regardless of what
+ * `opts.thresholdPolicies` asks for — `readSessionThreshold` resolves the threshold off the
+ * CURRENT (founding) Admin row the signer belongs to, never the proposed one, so this is
+ * genuinely safe even when `opts.thresholdPolicies` sets `rad` to 2+). Every additional
+ * holder, the nonHolder and the outsider get their `User` rows seeded via the ordinary
+ * invite-bound arm (unaffected by D-48), and the founder then calls `proposeAdmin` with the
+ * FULL target roster — every holder (itself included) plus the nonHolder, as `.existing`
+ * entries — at an `effectiveAt` strictly between founding and now. Threshold 1 means Trigger
+ * A auto-promotes inside that single call; `lastPromotionOutcome.status` is asserted
+ * `'promoted'`, and `adminEffectiveAt` returned to the caller is this PROMOTED generation's
+ * EffectiveAt (read back from `CurrentAdmin`), never the founding one.
  *
  * Defaults: holderCount 4 (founder + 3), holderScopes the full 7-scope set, thresholdPolicies
  * `{rad:1, ceb:2, vrg:2}`, nonHolderScopes `['mel']`.
@@ -119,7 +109,11 @@ export async function createThresholdAuthority (opts?: ThresholdAuthorityOptions
   const holderScopes = opts?.holderScopes ?? DEFAULT_HOLDER_SCOPES
   const thresholdPolicies = opts?.thresholdPolicies ?? DEFAULT_THRESHOLD_POLICIES
   const nonHolderScopes = opts?.nonHolderScopes ?? DEFAULT_NON_HOLDER_SCOPES
+  // The founder must hold 'rad' to be able to propose/promote the roster below, even if
+  // the caller's holderScopes omits it.
+  const founderScopes: Scope[] = holderScopes.includes('rad' as Scope) ? holderScopes : [...holderScopes, 'rad' as Scope]
 
+  const foundingEffectiveAt = Date.now() - 120_000
   const net = await createTestNetwork({
     network: {
       admin: {
@@ -128,49 +122,90 @@ export async function createThresholdAuthority (opts?: ThresholdAuthorityOptions
             init: {
               name: 'Admin A',
               title: 'Chair',
-              scopes: holderScopes,
+              scopes: founderScopes,
             },
           },
         ],
-        effectiveAt: Date.now(),
-        thresholdPolicies,
+        effectiveAt: foundingEffectiveAt,
+        // Founding threshold policies are EMPTY — see the method doc comment above for why
+        // this is load-bearing (the promotion signer threshold is read off THIS row).
+        thresholdPolicies: [],
       },
     },
   })
   const auth = await addTestAuthority(net)
   const elec = await addTestElection(auth)
-
   const authorityId = elec.authority.id
-  const adminRow = await elec.ctx.db
-    .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
-    .get({ authorityId })
-  if (!adminRow) throw new Error('createThresholdAuthority: CurrentAdmin not found')
-  const adminEffectiveAt = adminRow.EffectiveAt as string | number
 
-  const holders: ThresholdOfficer[] = [
-    { user: elec.user, scopes: holderScopes, sign: makeTestSignCallback(elec.user) },
-  ]
+  const founder: ThresholdOfficer = { user: elec.user, scopes: holderScopes, sign: makeTestSignCallback(elec.user) }
+  const holders: ThresholdOfficer[] = [founder]
 
-  // Every Officer insert below MUST run before anything creates a second Authority (first-
-  // authority InsertValid arm — see file header).
+  // 62-03: `makeDistinctTestUser()` gives every call the SAME literal `name` ('Distinct
+  // Test User') — only `id` differs. `ProposedOfficer`'s PK is (AuthorityId,
+  // AdminEffectiveAt, ProposedName), and `.existing` entries resolve their ProposedName
+  // from the DB's `User.Name`, so leaving every extra holder with that same shared name
+  // would collide at the FIRST ProposedOfficer insert (`UNIQUE constraint failed`) the
+  // moment there are 2+ of them. Each gets an explicit, distinct name.
   for (let i = 1; i < holderCount; i++) {
-    const user = makeDistinctTestUser()
+    const user: User = { ...makeDistinctTestUser(), name: `Officer ${i}` }
     await insertFixtureUser(auth, user)
-    await insertFixtureOfficer(elec.ctx.db, authorityId, adminEffectiveAt, user.id, `Officer ${i}`, holderScopes)
     holders.push({ user, scopes: holderScopes, sign: makeTestSignCallback(user) })
   }
 
-  const nonHolderUser = makeDistinctTestUser()
+  const nonHolderUser: User = { ...makeDistinctTestUser(), name: 'Non-holder Officer' }
   await insertFixtureUser(auth, nonHolderUser)
-  await insertFixtureOfficer(elec.ctx.db, authorityId, adminEffectiveAt, nonHolderUser.id, 'Non-holder Officer', nonHolderScopes)
   const nonHolder: ThresholdOfficer = {
     user: nonHolderUser,
     scopes: nonHolderScopes,
     sign: makeTestSignCallback(nonHolderUser),
   }
 
-  const outsider = makeDistinctTestUser()
+  const outsider: User = { ...makeDistinctTestUser(), name: 'Outsider' }
   await insertFixtureUser(auth, outsider)
+
+  // Promote the full target roster (every holder including the founder, plus the
+  // nonHolder) in ONE real, signed proposeAdmin call.
+  const promotionEffectiveAt = Date.now() - 60_000
+  const officers: OfficerSelection[] = [
+    ...holders.map((h, i) => ({
+      existing: { userId: h.user.id, authorityId, title: i === 0 ? 'Chair' : `Officer ${i}`, scopes: h.scopes },
+    })),
+    { existing: { userId: nonHolder.user.id, authorityId, title: 'Non-holder Officer', scopes: nonHolder.scopes } },
+  ]
+  const proposal: Proposal<AdminInit> = {
+    proposed: { officers, effectiveAt: promotionEffectiveAt, thresholdPolicies },
+    signers: [founder.user.id],
+  }
+  await elec.authorityEngine.proposeAdmin(proposal, founder.sign)
+  const outcome = (elec.authorityEngine as unknown as { lastPromotionOutcome?: { status?: string, reason?: string } })
+    .lastPromotionOutcome
+  if (outcome?.status !== 'promoted') {
+    throw new Error(
+      `createThresholdAuthority: founder promotion did not complete — status=${String(outcome?.status)} reason=${String(outcome?.reason)}`
+    )
+  }
+
+  const adminRow = await elec.ctx.db
+    .prepare('select EffectiveAt from CurrentAdmin where AuthorityId = :authorityId')
+    .get({ authorityId })
+  if (!adminRow) throw new Error('createThresholdAuthority: CurrentAdmin not found after promotion')
+  const adminEffectiveAt = adminRow.EffectiveAt as string | number
+
+  // Post-state proof: the promoted Officer roster is EXACTLY the holders plus the nonHolder.
+  const expectedUserIds = new Set([...holders.map((h) => h.user.id), nonHolder.user.id])
+  const actualUserIds = new Set<string>()
+  for await (const row of elec.ctx.db.eval(
+    'select UserId from Officer where AuthorityId = :authorityId and AdminEffectiveAt = :e',
+    { authorityId, e: adminEffectiveAt }
+  )) {
+    actualUserIds.add(row.UserId as string)
+  }
+  const matches = actualUserIds.size === expectedUserIds.size && [...expectedUserIds].every((id) => actualUserIds.has(id))
+  if (!matches) {
+    throw new Error(
+      `createThresholdAuthority: promoted Officer roster mismatch — expected ${[...expectedUserIds].join(',')}, got ${[...actualUserIds].join(',')}`
+    )
+  }
 
   return { elec, authorityId, adminEffectiveAt, holders, nonHolder, outsider }
 }

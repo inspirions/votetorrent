@@ -3555,16 +3555,15 @@ describe('AuthorityEngine', () => {
     it('Admin.OfficerRequired CHECK evaluates cleanly (no phantom `scope` column error) when a rad-scoped Officer exists — confirmed on quereus@4.2.1', async () => {
       const { authority, authorityEngine } = await createNetworkAndAuthority()
       const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
-      // Insert a second Admin row for the same authority (shoe-in path: only one
-      // authority exists, no SigningNonce, no invite), then UPDATE it with a real
-      // column change so the OfficerRequired CHECK is genuinely evaluated.
+      // 62-03 (D-48): a second unsigned Admin row can no longer be inserted on a
+      // single-Authority network — formulation A admits only the first. This case
+      // never needed a second row anyway: the UPDATE below targets a raw (non-
+      // canonicalized) `newEffectiveAt` that can never MATCH the founding Admin's
+      // own canonically-stored EffectiveAt (same D-09 pitfall the negative test below
+      // documents), so it was ALWAYS a zero-row no-op — no CHECK, including
+      // OfficerRequired, is ever evaluated either way. Targeting the EXISTING founding
+      // Admin row directly (no insert at all) reproduces the exact same outcome.
       const newEffectiveAt = Date.now() + 99_000
-      await ctx.db.exec(
-        `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
-         with context Tid = 9, SigningNonce = null, InviteSlotCid = null, InviteSignature = null
-         values (:id, :e, '[]')`,
-        { id: authority.id, e: newEffectiveAt }
-      )
       let caught: unknown
       try {
         await ctx.db.exec(
@@ -3594,21 +3593,20 @@ describe('AuthorityEngine', () => {
     // false for every possible correlation the CHECK could bind to (whether it
     // correlates strictly on new.EffectiveAt or, per the quereus behavior noted in
     // the regression-lock test above, reaches any Officer row for the authority).
-    // Mirrors the positive test's shoe-in insert + UPDATE shape exactly (D-06 setup
-    // parity) so this is a true apples-to-apples negative counterpart.
+    //
+    // 62-03 (D-48): a second unsigned Admin row can no longer be inserted. Targets the
+    // EXISTING founding Admin row directly instead — read back its own canonical
+    // EffectiveAt so the UPDATE genuinely matches it (D-09 pitfall: a raw JS-number
+    // parameter never matches the canonicalized stored value).
     it('Admin.OfficerRequired CHECK rejects an Admin update when NO rad-scoped Officer exists for the authority', async () => {
       const { authority, authorityEngine } = await createNetworkAndAuthorityWithoutRadOfficer()
       const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
-      // D-09 pitfall: EffectiveAt is a `datetime` column — the WHERE-clause parameter
-      // must be canonicalized (toCanonicalDatetime) or the UPDATE matches zero rows
-      // (a silent no-op, not a genuine CHECK evaluation either way).
-      const newEffectiveAt = toCanonicalDatetime(Date.now() + 99_000)
-      await ctx.db.exec(
-        `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
-         with context Tid = 9, SigningNonce = null, InviteSlotCid = null, InviteSignature = null
-         values (:id, :e, '[]')`,
-        { id: authority.id, e: newEffectiveAt }
-      )
+      const foundingAdminRow = await ctx.db
+        .prepare('select EffectiveAt from Admin where AuthorityId = :id')
+        .get({ id: authority.id })
+      // D-09 pitfall (kept, per the original test): canonicalize explicitly rather than
+      // trust the read-back shape — idempotent on an already-canonical value.
+      const newEffectiveAt = toCanonicalDatetime(foundingAdminRow?.EffectiveAt as string)
       let caught: unknown
       try {
         await ctx.db.exec(

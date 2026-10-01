@@ -20,9 +20,9 @@
  * accepted, so the gate cannot pass by rejecting everything.
  */
 
+import { Database } from '@quereus/quereus'
 import { expect } from 'chai'
-import { createTestNetwork, addTestAuthority } from './fixtures/test-context.js'
-import type { TestAuthorityContext } from './fixtures/test-context.js'
+import { prepareDb } from '../src/database/initialize.js'
 
 const NO_CTX =
   'with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 1'
@@ -31,16 +31,28 @@ const NO_CTX =
 const SCOPE_CODES = ['rn', 'rad', 'vrg', 'iad', 'uai', 'ceb', 'mel', 'cap', 'ik']
 
 describe('Admin.ThresholdPoliciesValid (schema CHECK)', () => {
-  let auth: TestAuthorityContext
+  let authorityId: string
   let day = 0
 
+  // 62-03 (D-48): formulation A admits only the FIRST Admin of a single-Authority
+  // network unsigned. Every case below therefore inserts the FIRST (and ONLY) Admin of
+  // a BRAND-NEW founding-shaped database — never a second Admin on a shared, already-
+  // founded one (the pre-62-03 shape, which the D-48 hole alone admitted).
   const insertAdmin = async (thresholdPolicies: string): Promise<void> => {
     day += 1
+    const db = new Database()
+    await prepareDb(db)
+    authorityId = `authority-${day}`
+    await db.exec(
+      `insert into Authority (Id, Name, DomainName, ImageRef) ${NO_CTX}
+       values (:id, 'Test Authority', 'test.example.com', null)`,
+      { id: authorityId }
+    )
     const effectiveAt = `2027-03-${String(day).padStart(2, '0')}T00:00:00.000Z`
-    await auth.ctx.db.exec(
+    await db.exec(
       `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies) ${NO_CTX}
        values (:authorityId, :effectiveAt, :thresholdPolicies)`,
-      { authorityId: auth.authority.id, effectiveAt, thresholdPolicies }
+      { authorityId, effectiveAt, thresholdPolicies }
     )
   }
 
@@ -59,9 +71,7 @@ describe('Admin.ThresholdPoliciesValid (schema CHECK)', () => {
     ).to.contain('ThresholdPoliciesValid')
   }
 
-  beforeEach(async () => {
-    const net = await createTestNetwork()
-    auth = await addTestAuthority(net)
+  beforeEach(() => {
     day = 0
   })
 
