@@ -11,11 +11,12 @@
 #   1. Working-tree provenance: git SHA, git status --porcelain (warn loudly if dirty).
 #   2. Rebuild packages/vote-engine's dist/ (the deep-require path both apps use) and print the
 #      built artifact's mtime.
-#   3. Print the values DEV_VOTER_REQUEST_REST_BASE_URL / DEV_ASSOCIATION_SYNC_REST_BASE_URL must
-#      be set to for this host/port, read their CURRENT working-tree values, and REFUSE to
-#      continue while either is still literally `undefined` — the WR-17 two-gate design leaves
-#      both with no default, and a silent no-op bridge is exactly the failure this script exists
-#      to prevent.
+#   3. Print the value DEV_ASSOCIATION_SYNC_REST_BASE_URL (the Authority's dev REST courier) must
+#      be set to for this host/port, read its CURRENT working-tree value, and REFUSE to continue
+#      while it is still literally `undefined` — the WR-17 gate design leaves it with no default,
+#      and a silent no-op bridge is exactly the failure this script exists to prevent. The Voter
+#      side has no equivalent constant any more (Phase 62 Plan 22, D-28/D-29): it is a P2P peer,
+#      and this step says so without any file check.
 #   4. Assert the COMMITTED tree's APP_ATTEST_ENVIRONMENT is 'production' (D-15) and print the
 #      current WORKING-TREE value beside it (which may legitimately read 'development' while a
 #      dev-only authority build is staged for Phase B — that edit must never be committed).
@@ -116,26 +117,25 @@ BRIDGE_URL="http://${LAN_IP}:${PORT}"
 echo "Bridge will bind to: http://${HOST}:${PORT}"
 echo "Detected LAN IP candidate (phone-reachable, NOT 127.0.0.1/10.0.2.2 — this is a real iOS"
 echo "  device on the same network, not an Android emulator loopback alias): $LAN_IP"
-echo "Both dev base-URL constants below must be set, LOCALLY ONLY, to: $BRIDGE_URL"
+echo "The authority dev base-URL constant below must be set, LOCALLY ONLY, to: $BRIDGE_URL"
 echo
 
-VOTER_FILE="apps/VoteTorrentVoter/src/screens/registration/attach-voter-request-transport.ts"
 AUTH_FILE="apps/VoteTorrentAuthority/src/screens/registration/attach-association-sync-bindings.ts"
 
-VOTER_LINE="$(grep -E 'DEV_VOTER_REQUEST_REST_BASE_URL: string \| undefined =' "$VOTER_FILE" || true)"
+# Phase 62 Plan 22 (D-28/D-29): the Voter no longer has a dev REST constant — association is
+# P2P-only over the Voter's own CadreNode strand, and Voter registration routes to P2P by
+# default or to the authority-configured bridge URL read from the replicated AuthorityIntakePolicy
+# (no local edit, no __DEV__ gate). So the Voter half of this ceremony needs no local edit.
+echo "Voter: no dev REST constant exists any more (D-28/D-29) — association is P2P-only, and"
+echo "  registration routes to P2P or the authority-configured AuthorityIntakePolicy bridge URL."
+echo "  No local Voter edit is needed for this ceremony."
+echo
+
 AUTH_LINE="$(grep -E 'DEV_ASSOCIATION_SYNC_REST_BASE_URL: string \| undefined =' "$AUTH_FILE" || true)"
-echo "Current $VOTER_FILE:"
-echo "  $VOTER_LINE"
 echo "Current $AUTH_FILE:"
 echo "  $AUTH_LINE"
 
 GATE_FAIL=0
-if echo "$VOTER_LINE" | grep -q '= undefined'; then
-	echo
-	echo "REFUSING: $VOTER_FILE still declares DEV_VOTER_REQUEST_REST_BASE_URL = undefined."
-	echo "  Edit it LOCALLY (never commit a real value — WR-17) to: '$BRIDGE_URL'"
-	GATE_FAIL=1
-fi
 if echo "$AUTH_LINE" | grep -q '= undefined'; then
 	echo
 	echo "REFUSING: $AUTH_FILE still declares DEV_ASSOCIATION_SYNC_REST_BASE_URL = undefined."
@@ -144,12 +144,12 @@ if echo "$AUTH_LINE" | grep -q '= undefined'; then
 fi
 if [ "$GATE_FAIL" -eq 1 ]; then
 	echo
-	echo "FATAL: a silent no-op bridge (both dev gates left undefined) is exactly the failure this" >&2
-	echo "script exists to prevent. Edit both constants above, then re-run this script." >&2
+	echo "FATAL: a silent no-op bridge (the dev gate left undefined) is exactly the failure this" >&2
+	echo "script exists to prevent. Edit the constant above, then re-run this script." >&2
 	exit 1
 fi
 echo
-echo "Both dev base-URL constants are locally set (not undefined) — proceeding."
+echo "The dev base-URL constant is locally set (not undefined) — proceeding."
 echo
 
 # --- [4/6] APP_ATTEST_ENVIRONMENT (D-15) -----------------------------------

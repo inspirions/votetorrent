@@ -51,6 +51,8 @@ import { rnDbFactory, createStrandDbFactory } from './rn-db-factory'
 import type { StrandHost } from './rn-db-factory'
 import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated'
 import { selectAttestationVerifier } from './attestation-verifier'
+import { createVoterStrandPort } from './strand-port-adapter'
+import { createVoterRequestTransportSource, VOTER_REQUEST_TRANSPORTS_ENGINE } from './voter-request-transports'
 
 export class EngineFactory {
 	private readonly networksEngine: NetworksEngine
@@ -96,6 +98,17 @@ export class EngineFactory {
 	 * pending, without touching future ones.
 	 */
 	private firstSyncAbort = new AbortController()
+
+	/**
+	 * D-32 (Phase 62 Plan 22): tracks which established network hashes went through the strand
+	 * path (vs. the solo/local-DB fallback) on their DbFactory call, so the `'requestTransports'`
+	 * case can pass the right `peerBacked` flag without re-deriving it from `this.node` (which may
+	 * have changed since the network was opened). Entries are added only AFTER
+	 * `createStrandDbFactory(...)(networkHash)` resolves — never speculatively — and are never
+	 * cleared: `NetworksEngine` caches each ctx for the session, so the marker stays true for the
+	 * ctx it describes even across a later `setNode(null)`.
+	 */
+	private readonly strandBackedNetworks = new Set<string>()
 	/**
 	 * Fires once per pending open, BEFORE the wait begins (never on retry), so a
 	 * caller (VoterAppProvider) can flip a "still syncing" UI flag. Registered via
@@ -150,10 +163,14 @@ export class EngineFactory {
 				// The signal is read AT CALL TIME (not captured once) so a controller
 				// swapped in by a later cancelPendingStrandWaits() is the one this call
 				// actually waits on.
-				return createStrandDbFactory(this.node, {
+				const db = await createStrandDbFactory(this.node, {
 					signal: this.firstSyncAbort.signal,
 					onAwaitingFirstSync: (id) => this.firstSyncListener?.(id),
 				})(networkHash)
+				// D-32: mark this hash peer-backed only AFTER the strand factory resolved —
+				// never speculatively before the call.
+				this.strandBackedNetworks.add(networkHash)
+				return db
 			}
 			return this.rnDbFactory(networkHash)
 		})
@@ -251,7 +268,7 @@ export class EngineFactory {
 	 *
 	 * Covers: network, defaultUser, user, authority, elections, signing, election,
 	 * keysTasksEngine, signatureTasksEngine, onboardingTasksEngine, invitations,
-	 * association, registration.
+	 * association, registration, requestTransports.
 	 *
 	 * For sibling engines that require a live EngineContext, call
 	 * requireEstablishedCtx() which throws if no ctx is yet established
@@ -362,6 +379,21 @@ export class EngineFactory {
 				// app never builds RegistrationEngine).
 				const ctx = this.requireEstablishedCtx()
 				return new RegistrationEngine(ctx)
+			}
+
+			case VOTER_REQUEST_TRANSPORTS_ENGINE: {
+				// D-28/D-32: the joined network's OWN strand database is the delivery target —
+				// strandId = currentNetworkHash (the value createStrandDbFactory passed to
+				// addStrand). The raw port never leaves this factory: the screen layer gets only
+				// the source's typed transports back from resolve(), matching this file's
+				// "screens receive only engine-shaped objects" rule.
+				const ctx = this.requireEstablishedCtx()
+				const hash = this.currentNetworkHash!
+				return createVoterRequestTransportSource({
+					strandId: hash,
+					port: createVoterStrandPort(ctx.db),
+					peerBacked: this.strandBackedNetworks.has(hash),
+				})
 			}
 
 			case 'association': {
