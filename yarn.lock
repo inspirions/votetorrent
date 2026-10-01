@@ -6938,9 +6938,12 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@votetorrent/vote-engine@workspace:packages/vote-engine"
   dependencies:
+    "@libp2p/crypto": "npm:^5.1.13"
+    "@libp2p/websockets": "npm:^10"
     "@noble/ciphers": "npm:2.2.0"
     "@noble/curves": "npm:2.2.0"
     "@noble/hashes": "npm:2.2.0"
+    "@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A1.8.1#~/.yarn/patches/@optimystic-db-p2p-npm-1.8.1-votetorrent.patch"
     "@optimystic/quereus-plugin-crypto": "npm:^1.8.1"
     "@peculiar/asn1-android": "npm:^2.8.0"
     "@peculiar/asn1-schema": "npm:^2.8.0"
@@ -6948,6 +6951,7 @@ __metadata:
     "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.20.0#~/.yarn/patches/@quereus-quereus-npm-4.20.0-6fd16bc9e5.patch"
     "@quereus/store": "npm:^4.20.0"
     "@react-native-async-storage/async-storage": "npm:^2.1.2"
+    "@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.9.0#~/.yarn/patches/@serfab-cadre-core-npm-1.9.0-votetorrent.patch"
     "@types/mocha": "npm:^10.0.10"
     "@types/node": "npm:^22.13.10"
     "@types/uuid": "npm:^11.0.0"
@@ -22258,6 +22262,7 @@ __metadata:
     "@libp2p/websockets": "npm:^10"
     "@multiformats/multiaddr": "npm:^13.0.1"
     "@multiformats/multiaddr-v12": "npm:@multiformats/multiaddr@12.5.1"
+    "@noble/ciphers": "npm:^2"
     "@noble/curves": "npm:^2"
     "@noble/hashes": "npm:^2"
     "@optimystic/db-core": "npm:^1.8.1"
