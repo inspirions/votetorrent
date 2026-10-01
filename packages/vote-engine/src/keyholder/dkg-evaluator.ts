@@ -1,0 +1,666 @@
+// src/keyholder/dkg-evaluator.ts — the pure, deterministic DKG transcript
+// evaluator and action planner (62-17: D-14, D-16, D-19, D-26). No DB, no
+// `node:`, no `Buffer`, no `console`. Every node (including a replica that
+// only READS rows, 62-24's receiver) runs this SAME function over the SAME
+// signed-row snapshot and reaches the SAME verdict — that determinism is the
+// whole point: nobody's local clock, local order-of-arrival or local retry
+// count may influence a disqualification or an abort.
+//
+// Imports only from `../crypto/dkg.js`, `./dkg-payloads.js`,
+// `@votetorrent/vote-core` types and `@noble/hashes/utils.js`.
+//
+// ---------------------------------------------------------------------------
+// Numbered rules (Task 3's security review cites these by number)
+// ---------------------------------------------------------------------------
+//
+//  1. Rows with `signatureValid` false are dropped into `invalidRows` and
+//     never attributed to anyone — a replica can forge a row's CONTENT but
+//     not its signature, so an invalid-signature row is simply noise.
+//  2. Attempts 1..DKG_MAX_ATTEMPTS are processed in order, carrying
+//     `cumulativeDisqualified` forward from earlier attempts.
+//     `effectiveLive = liveRoster` minus `cumulativeDisqualified`,
+//     intersected with users that have a visible `KeyholderDkgBinding`
+//     (D-26) — a live keyholder with no binding cannot receive an encrypted
+//     share, so it is never a DKG participant.
+//  3. An attempt's roster is the DECLARED union of its senders' own R0
+//     `roster` claims, restricted to rows from senders IN `effectiveLive`
+//     (rows from any other sender — e.g. a stale prior-attempt loser — are
+//     ignored outright, never even reaching the roster-rule check below).
+//  4. A round is evaluated only once EVERY `effectiveLive` member has a
+//     valid-signature row for it (the "boundary" — so every node computes
+//     the same verdict regardless of arrival order). Round 0 faults:
+//     payload null, or a declared `threshold` different from the snapshot's
+//     (`malformed-round0`). Round 1: identifier, commitment length, the R0
+//     commit, and the proof of knowledge (verified against a disposable
+//     per-attempt observer package via `verifyRound1Package`, exactly the
+//     trick `dkg.ts` itself documents). Round 2: structure
+//     (`malformed-round2`). Round 3: complaint verdicts, via
+//     `verifyComplaintEvidence` against the dealer's R1 package and the
+//     dealer's own R2 entry addressed to the complainant. Round 4: the
+//     `ResultKey`/payload must equal `deriveGroupCommitments` over the
+//     roster's R1 packages (`round4-mismatch`).
+//  5. A fault aborts the attempt with reason `faults` (or
+//     `unresolved-complaint` when every round-3 complaint resolved
+//     `unresolved` and none disqualified anybody). Faults take precedence
+//     over the roster rule below.
+//  6. Roster rule (current attempt only — the lowest attempt not yet
+//     aborted by its own rows): let `symdiff` be the symmetric difference
+//     between the attempt's declared roster union and `effectiveLive`. Empty
+//     `symdiff`: no roster issue. Every member of a non-empty `symdiff` has
+//     a visible binding: `roster-changed` (abort). Any member of `symdiff`
+//     has NO visible binding: `in-progress` with `waitingReason
+//     'roster-mismatch'` (replication lag — not an abort).
+//  7. Gates (attempt 1 only, before any row is read): a null revision/
+//     threshold gives `no-current-revision`; an empty `effectiveLive` gives
+//     `no-keyholders`; a failing `assertDkgThreshold` gives
+//     `threshold-out-of-range`; `pendingInviteCount > 0` gives
+//     `pending-invites`.
+//  8. After any abort: `|effectiveLive| < threshold` or `< 2` gives
+//     `failed/threshold-unreachable`. Reaching the end of attempt
+//     `DKG_MAX_ATTEMPTS` still aborted gives `failed/attempts-exhausted`.
+//  9. Phase precedence: a consistent `ElectionKey` gives `complete`; an
+//     inconsistent one gives `failed/election-key-mismatch`; then `failed`;
+//     then `blocked`; then `not-started` (attempt 1, round 0, zero rows);
+//     then `restarting` (current attempt > 1 and its round is 0); otherwise
+//     `in-progress`.
+//
+// `planDkgAction` priority: `none` when complete/failed/blocked or self is
+// not a live, non-disqualified participant; `remove-disqualified` for any
+// `cumulativeDisqualified` user still physically present in `liveRoster`;
+// `publish` when `readyToPublish` and no `ElectionKey` exists yet;
+// `post-round` for the current round when self is still in
+// `awaitingUserIds`; otherwise `none`.
+
+import {
+  assertDkgThreshold,
+  deriveGroupCommitments,
+  dkgIdentifierForUser,
+  dkgRound1,
+  verifyComplaintEvidence,
+  verifyRound1Commit,
+  verifyRound1Package,
+  type DkgContext,
+  type DkgRound1Wire,
+  type EncryptedShare
+} from '../crypto/dkg.js'
+import {
+  parseRound0Payload,
+  parseRound1Payload,
+  parseRound2Payload,
+  parseRound3Payload,
+  parseRound4Payload
+} from './dkg-payloads.js'
+import {
+  DKG_MAX_ATTEMPTS,
+  type DkgAbortReason,
+  type DkgAttemptSummary,
+  type DkgDisqualification,
+  type DkgFaultReason,
+  type DkgPhase,
+  type DkgRound,
+  type ElectionKeyRecord
+} from '@votetorrent/vote-core'
+
+// ---------------------------------------------------------------------------
+// Snapshot and evaluation shapes
+// ---------------------------------------------------------------------------
+
+export interface DkgMessageRow {
+  attempt: number
+  round: DkgRound
+  senderUserId: string
+  payload: string
+  resultKey: string | null
+  signatureValid: boolean
+}
+
+export interface DkgRevisionSnapshot {
+  electionId: string
+  revision: number | null
+  threshold: number | null
+  liveRoster: string[]
+  bindings: Record<string, { dkgPublicKey: string }>
+  pendingInviteCount: number
+  messages: DkgMessageRow[]
+  electionKey: (ElectionKeyRecord & { signatureValid: boolean }) | null
+}
+
+export interface DkgReadyToPublish {
+  attempt: number
+  jointPublicKey: string
+  groupCommitments: string[]
+  threshold: number
+  participants: number
+  roster: string[]
+}
+
+export interface DkgInvalidRow { attempt: number, round: number, senderUserId: string }
+
+export interface DkgRevisionEvaluation {
+  electionId: string
+  revision: number | null
+  threshold: number | null
+  phase: DkgPhase
+  blockedReason?: import('@votetorrent/vote-core').DkgBlockedReason
+  waitingReason?: import('@votetorrent/vote-core').DkgWaitingReason
+  failedReason?: import('@votetorrent/vote-core').DkgFailedReason
+  currentAttempt: number | null
+  currentRound: DkgRound | null
+  roster: string[]
+  awaitingUserIds: string[]
+  attempts: DkgAttemptSummary[]
+  disqualified: DkgDisqualification[]
+  electionKey: ElectionKeyRecord | null
+  invalidRows: DkgInvalidRow[]
+  readyToPublish: DkgReadyToPublish | null
+  cumulativeDisqualified: string[]
+  /** The raw live `Keyholder` roster (unfiltered by binding or disqualification) — needed by `planDkgAction`'s `remove-disqualified` check. */
+  liveRoster: string[]
+}
+
+export type DkgPlannedAction =
+  | { kind: 'none' }
+  | { kind: 'remove-disqualified', userIds: string[] }
+  | { kind: 'post-round', attempt: number, round: DkgRound }
+  | { kind: 'publish', attempt: number }
+
+// ---------------------------------------------------------------------------
+// Small pure helpers
+// ---------------------------------------------------------------------------
+
+function sortUnique (values: string[]): string[] {
+  return [...new Set(values)].sort()
+}
+
+function symmetricDifference (a: string[], b: string[]): string[] {
+  const setA = new Set(a)
+  const setB = new Set(b)
+  const out: string[] = []
+  for (const v of a) if (!setB.has(v)) out.push(v)
+  for (const v of b) if (!setA.has(v)) out.push(v)
+  return sortUnique(out)
+}
+
+function sameStringArray (a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+/**
+ * A disposable per-evaluation observer package — used ONLY as the vehicle
+ * `verifyRound1Package` needs to check an arbitrary round-1 package's own
+ * internal self-consistency (its Feldman commitment plus its Schnorr proof
+ * of knowledge). The observer's own identifier is namespaced with a `:`,
+ * which can never collide with a UUID userId's derived identifier (UUIDs
+ * never contain `:`), and its own secret is never persisted or reused across
+ * evaluations — the verification OUTCOME depends only on the package being
+ * checked, never on which observer package did the checking.
+ */
+function makeObserverSecret (k: number, n: number): ReturnType<typeof dkgRound1>['secret'] {
+  return dkgRound1(dkgIdentifierForUser(':dkg-observer'), k, n).secret
+}
+
+// ---------------------------------------------------------------------------
+// Main entry points
+// ---------------------------------------------------------------------------
+
+export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevisionEvaluation {
+  const invalidRows: DkgInvalidRow[] = []
+  const validRows: DkgMessageRow[] = []
+  for (const row of snapshot.messages) {
+    if (!row.signatureValid) {
+      invalidRows.push({ attempt: row.attempt, round: row.round, senderUserId: row.senderUserId })
+      continue
+    }
+    validRows.push(row)
+  }
+
+  const base = {
+    electionId: snapshot.electionId,
+    revision: snapshot.revision,
+    threshold: snapshot.threshold,
+    invalidRows,
+    liveRoster: snapshot.liveRoster,
+    electionKey: snapshot.electionKey === null
+      ? null
+      : {
+          electionId: snapshot.electionKey.electionId,
+          revision: snapshot.electionKey.revision,
+          attempt: snapshot.electionKey.attempt,
+          jointPublicKey: snapshot.electionKey.jointPublicKey,
+          groupCommitments: snapshot.electionKey.groupCommitments,
+          threshold: snapshot.electionKey.threshold,
+          participants: snapshot.electionKey.participants,
+          publishedAt: snapshot.electionKey.publishedAt,
+          publisherUserId: snapshot.electionKey.publisherUserId
+        }
+  }
+
+  // Rule 7: gates, attempt 1 only.
+  if (snapshot.revision === null || snapshot.threshold === null) {
+    return {
+      ...base,
+      phase: 'blocked', blockedReason: 'no-current-revision',
+      currentAttempt: null, currentRound: null, roster: [], awaitingUserIds: [],
+      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: []
+    }
+  }
+  const bindingIds = new Set(Object.keys(snapshot.bindings))
+  const effectiveLiveAtt1 = snapshot.liveRoster.filter((u) => bindingIds.has(u))
+  if (effectiveLiveAtt1.length === 0) {
+    return {
+      ...base,
+      phase: 'blocked', blockedReason: 'no-keyholders',
+      currentAttempt: null, currentRound: null, roster: [], awaitingUserIds: [],
+      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: []
+    }
+  }
+  try {
+    assertDkgThreshold(snapshot.threshold, effectiveLiveAtt1.length)
+  } catch {
+    return {
+      ...base,
+      phase: 'blocked', blockedReason: 'threshold-out-of-range',
+      currentAttempt: null, currentRound: null, roster: [], awaitingUserIds: [],
+      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: []
+    }
+  }
+  if (snapshot.pendingInviteCount > 0) {
+    return {
+      ...base,
+      phase: 'blocked', blockedReason: 'pending-invites',
+      currentAttempt: null, currentRound: null, roster: [], awaitingUserIds: [],
+      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: []
+    }
+  }
+
+  const revision = snapshot.revision
+  const threshold = snapshot.threshold
+  const electionId = snapshot.electionId
+
+  const attempts: DkgAttemptSummary[] = []
+  const disqualifiedAll: DkgDisqualification[] = []
+  let cumulativeDisqualified: string[] = []
+  const attemptAgreedKey: Record<number, { jointPublicKey: string, groupCommitments: string[], roster: string[] }> = {}
+
+  let phase: DkgPhase = 'not-started'
+  let blockedReason: import('@votetorrent/vote-core').DkgBlockedReason | undefined
+  let waitingReason: import('@votetorrent/vote-core').DkgWaitingReason | undefined
+  let failedReason: import('@votetorrent/vote-core').DkgFailedReason | undefined
+  let currentAttempt: number | null = null
+  let currentRound: DkgRound | null = null
+  let roster: string[] = []
+  let awaitingUserIds: string[] = []
+  let readyToPublish: DkgReadyToPublish | null = null
+
+  attemptLoop:
+  for (let attempt = 1; attempt <= DKG_MAX_ATTEMPTS; attempt++) {
+    const effectiveLive = sortUnique(snapshot.liveRoster.filter((u) => bindingIds.has(u) && !cumulativeDisqualified.includes(u)))
+
+    if (attempt > 1 && (effectiveLive.length < 2 || effectiveLive.length < threshold)) {
+      phase = 'failed'
+      failedReason = 'threshold-unreachable'
+      currentAttempt = null
+      currentRound = null
+      roster = []
+      awaitingUserIds = []
+      break attemptLoop
+    }
+
+    const ctx: DkgContext = { electionId, revision, attempt }
+    const attemptRows = validRows.filter((r) => r.attempt === attempt)
+    const r0Rows = attemptRows.filter((r) => r.round === 0 && effectiveLive.includes(r.senderUserId))
+
+    if (r0Rows.length === 0) {
+      currentAttempt = attempt
+      currentRound = 0
+      roster = effectiveLive
+      awaitingUserIds = effectiveLive
+      phase = attempt === 1 ? 'not-started' : 'restarting'
+      break attemptLoop
+    }
+
+    if (r0Rows.length < effectiveLive.length) {
+      // Round 0 boundary not yet reached — still collecting.
+      currentAttempt = attempt
+      currentRound = 0
+      roster = effectiveLive
+      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r0Rows.some((r) => r.senderUserId === u)))
+      phase = (attempt === 1 && r0Rows.length === 0) ? 'not-started' : (attempt > 1 ? 'restarting' : 'in-progress')
+      break attemptLoop
+    }
+
+    // Round 0 boundary reached: parse every row, collect faults.
+    const r0Parsed: Record<string, ReturnType<typeof parseRound0Payload>> = {}
+    const r0Faults: DkgDisqualification[] = []
+    for (const row of r0Rows) {
+      const parsed = parseRound0Payload(row.payload)
+      r0Parsed[row.senderUserId] = parsed
+      if (parsed === null || parsed.threshold !== threshold) {
+        r0Faults.push({ attempt, userId: row.senderUserId, reason: 'malformed-round0' })
+      }
+    }
+
+    if (r0Faults.length > 0) {
+      const newlyDisqualified = sortUnique(r0Faults.map((f) => f.userId))
+      cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
+      disqualifiedAll.push(...r0Faults)
+      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 0, abortReason: 'faults', disqualified: r0Faults, unresolvedComplaints: 0 })
+      if (attempt === DKG_MAX_ATTEMPTS) {
+        phase = 'failed'
+        failedReason = 'attempts-exhausted'
+        currentAttempt = null
+        currentRound = null
+        roster = []
+        awaitingUserIds = []
+        break attemptLoop
+      }
+      continue
+    }
+
+    const declaredRosterUnion = sortUnique(r0Rows.flatMap((row) => r0Parsed[row.senderUserId]!.roster))
+    const symdiff = symmetricDifference(declaredRosterUnion, effectiveLive)
+    if (symdiff.length > 0) {
+      const allBound = symdiff.every((u) => bindingIds.has(u))
+      if (allBound) {
+        attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 0, abortReason: 'roster-changed', disqualified: [], unresolvedComplaints: 0 })
+        if (attempt === DKG_MAX_ATTEMPTS) {
+          phase = 'failed'
+          failedReason = 'attempts-exhausted'
+          currentAttempt = null
+          currentRound = null
+          roster = []
+          awaitingUserIds = []
+          break attemptLoop
+        }
+        continue
+      } else {
+        currentAttempt = attempt
+        currentRound = 0
+        roster = effectiveLive
+        awaitingUserIds = []
+        phase = 'in-progress'
+        waitingReason = 'roster-mismatch'
+        break attemptLoop
+      }
+    }
+
+    // Round 0 clean: `effectiveLive` IS the attempt's roster from here on.
+    const r0CommitBySender: Record<string, string> = {}
+    for (const row of r0Rows) r0CommitBySender[row.senderUserId] = r0Parsed[row.senderUserId]!.commit
+
+    // --------------------------- Round 1 ---------------------------
+    const r1Rows = attemptRows.filter((r) => r.round === 1 && effectiveLive.includes(r.senderUserId))
+    if (r1Rows.length < effectiveLive.length) {
+      currentAttempt = attempt
+      currentRound = 1
+      roster = effectiveLive
+      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r1Rows.some((r) => r.senderUserId === u)))
+      phase = 'in-progress'
+      break attemptLoop
+    }
+
+    const n = effectiveLive.length
+    const observerSecret = makeObserverSecret(threshold, n)
+    const r1Parsed: Record<string, DkgRound1Wire> = {}
+    const r1Faults: DkgDisqualification[] = []
+    for (const row of r1Rows) {
+      const parsed = parseRound1Payload(row.payload)
+      let faultReason: DkgFaultReason | null = null
+      if (parsed === null) {
+        faultReason = 'invalid-round1'
+      } else if (parsed.identifier !== dkgIdentifierForUser(row.senderUserId)) {
+        faultReason = 'invalid-round1'
+      } else if (parsed.commitment.length !== threshold) {
+        faultReason = 'invalid-round1'
+      } else if (!verifyRound1Commit(ctx, parsed, r0CommitBySender[row.senderUserId]!)) {
+        faultReason = 'commit-mismatch'
+      } else if (!verifyRound1Package(observerSecret, parsed)) {
+        faultReason = 'invalid-round1'
+      }
+      if (faultReason !== null) {
+        r1Faults.push({ attempt, userId: row.senderUserId, reason: faultReason })
+      } else {
+        r1Parsed[row.senderUserId] = parsed!
+      }
+    }
+
+    if (r1Faults.length > 0) {
+      const newlyDisqualified = sortUnique(r1Faults.map((f) => f.userId))
+      cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
+      disqualifiedAll.push(...r1Faults)
+      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 1, abortReason: 'faults', disqualified: r1Faults, unresolvedComplaints: 0 })
+      if (attempt === DKG_MAX_ATTEMPTS) {
+        phase = 'failed'
+        failedReason = 'attempts-exhausted'
+        currentAttempt = null
+        currentRound = null
+        roster = []
+        awaitingUserIds = []
+        break attemptLoop
+      }
+      continue
+    }
+
+    // --------------------------- Round 2 ---------------------------
+    const r2Rows = attemptRows.filter((r) => r.round === 2 && effectiveLive.includes(r.senderUserId))
+    if (r2Rows.length < effectiveLive.length) {
+      currentAttempt = attempt
+      currentRound = 2
+      roster = effectiveLive
+      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r2Rows.some((r) => r.senderUserId === u)))
+      phase = 'in-progress'
+      break attemptLoop
+    }
+
+    const r2Parsed: Record<string, EncryptedShare[]> = {}
+    const r2Faults: DkgDisqualification[] = []
+    for (const row of r2Rows) {
+      const parsed = parseRound2Payload(row.payload)
+      const expectedDealer = dkgIdentifierForUser(row.senderUserId)
+      const expectedRecipients = sortUnique(effectiveLive.filter((u) => u !== row.senderUserId).map((u) => dkgIdentifierForUser(u)))
+      let ok = parsed !== null && parsed.length === expectedRecipients.length
+      if (ok && parsed !== null) {
+        if (parsed[0]!.dealer !== expectedDealer) ok = false
+        const recipients = sortUnique(parsed.map((e) => e.recipient))
+        if (!sameStringArray(recipients, expectedRecipients)) ok = false
+      }
+      if (!ok) {
+        r2Faults.push({ attempt, userId: row.senderUserId, reason: 'malformed-round2' })
+      } else {
+        r2Parsed[row.senderUserId] = parsed!
+      }
+    }
+
+    if (r2Faults.length > 0) {
+      const newlyDisqualified = sortUnique(r2Faults.map((f) => f.userId))
+      cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
+      disqualifiedAll.push(...r2Faults)
+      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 2, abortReason: 'faults', disqualified: r2Faults, unresolvedComplaints: 0 })
+      if (attempt === DKG_MAX_ATTEMPTS) {
+        phase = 'failed'
+        failedReason = 'attempts-exhausted'
+        currentAttempt = null
+        currentRound = null
+        roster = []
+        awaitingUserIds = []
+        break attemptLoop
+      }
+      continue
+    }
+
+    // --------------------------- Round 3 ---------------------------
+    const r3Rows = attemptRows.filter((r) => r.round === 3 && effectiveLive.includes(r.senderUserId))
+    if (r3Rows.length < effectiveLive.length) {
+      currentAttempt = attempt
+      currentRound = 3
+      roster = effectiveLive
+      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r3Rows.some((r) => r.senderUserId === u)))
+      phase = 'in-progress'
+      break attemptLoop
+    }
+
+    const r3Disqualified: DkgDisqualification[] = []
+    let unresolvedCount = 0
+    for (const row of r3Rows) {
+      const parsed = parseRound3Payload(row.payload)
+      if (parsed === null || parsed.kind === 'ack') continue
+      for (const evidence of parsed.evidence) {
+        const complainant = row.senderUserId
+        const complainantIdentifier = dkgIdentifierForUser(complainant)
+        if (evidence.recipient !== complainantIdentifier) {
+          r3Disqualified.push({ attempt, userId: complainant, reason: 'malformed-complaint' })
+          continue
+        }
+        const dealerUserId = Object.keys(r1Parsed).find((u) => dkgIdentifierForUser(u) === evidence.dealer)
+        const dealerR1 = dealerUserId !== undefined ? r1Parsed[dealerUserId] : undefined
+        const dealerR2 = dealerUserId !== undefined ? r2Parsed[dealerUserId] : undefined
+        const encEntry = dealerR2?.find((e) => e.recipient === complainantIdentifier)
+        if (dealerUserId === undefined || dealerR1 === undefined || encEntry === undefined) {
+          r3Disqualified.push({ attempt, userId: complainant, reason: 'malformed-complaint' })
+          continue
+        }
+        const verdict = verifyComplaintEvidence(ctx, threshold, n, encEntry, dealerR1, evidence)
+        if (verdict.verdict === 'dealer-fault') {
+          r3Disqualified.push({
+            attempt, userId: dealerUserId,
+            reason: verdict.reason === 'undecryptable' ? 'undecryptable-share' : 'invalid-share',
+            complainantUserId: complainant
+          })
+        } else if (verdict.verdict === 'complainant-fault') {
+          r3Disqualified.push({
+            attempt, userId: complainant,
+            reason: verdict.reason === 'malformed-evidence' ? 'malformed-complaint' : 'false-complaint'
+          })
+        } else {
+          unresolvedCount++
+        }
+      }
+    }
+
+    if (r3Disqualified.length > 0 || unresolvedCount > 0) {
+      const abortReason: DkgAbortReason = r3Disqualified.length > 0 ? 'faults' : 'unresolved-complaint'
+      if (r3Disqualified.length > 0) {
+        const newlyDisqualified = sortUnique(r3Disqualified.map((f) => f.userId))
+        cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
+        disqualifiedAll.push(...r3Disqualified)
+      }
+      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 3, abortReason, disqualified: r3Disqualified, unresolvedComplaints: unresolvedCount })
+      if (attempt === DKG_MAX_ATTEMPTS) {
+        phase = 'failed'
+        failedReason = 'attempts-exhausted'
+        currentAttempt = null
+        currentRound = null
+        roster = []
+        awaitingUserIds = []
+        break attemptLoop
+      }
+      continue
+    }
+
+    // --------------------------- Round 4 ---------------------------
+    const r4Rows = attemptRows.filter((r) => r.round === 4 && effectiveLive.includes(r.senderUserId))
+    if (r4Rows.length < effectiveLive.length) {
+      currentAttempt = attempt
+      currentRound = 4
+      roster = effectiveLive
+      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r4Rows.some((r) => r.senderUserId === u)))
+      phase = 'in-progress'
+      break attemptLoop
+    }
+
+    const orderedR1 = effectiveLive.map((u) => r1Parsed[u]!)
+    const derived = deriveGroupCommitments(orderedR1)
+    const derivedY = derived[0]!
+
+    const r4Faults: DkgDisqualification[] = []
+    for (const row of r4Rows) {
+      const parsed = parseRound4Payload(row.payload)
+      const ok = parsed !== null && row.resultKey === derivedY && parsed.groupPublicKey === derivedY && sameStringArray(parsed.groupCommitments, derived)
+      if (!ok) r4Faults.push({ attempt, userId: row.senderUserId, reason: 'round4-mismatch' })
+    }
+
+    if (r4Faults.length > 0) {
+      const newlyDisqualified = sortUnique(r4Faults.map((f) => f.userId))
+      cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
+      disqualifiedAll.push(...r4Faults)
+      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 4, abortReason: 'faults', disqualified: r4Faults, unresolvedComplaints: 0 })
+      if (attempt === DKG_MAX_ATTEMPTS) {
+        phase = 'failed'
+        failedReason = 'attempts-exhausted'
+        currentAttempt = null
+        currentRound = null
+        roster = []
+        awaitingUserIds = []
+        break attemptLoop
+      }
+      continue
+    }
+
+    // Agreed.
+    attempts.push({ attempt, roster: effectiveLive, outcome: 'agreed', round: 4, disqualified: [], unresolvedComplaints: 0 })
+    attemptAgreedKey[attempt] = { jointPublicKey: derivedY, groupCommitments: derived, roster: effectiveLive }
+    currentAttempt = attempt
+    currentRound = 4
+    roster = effectiveLive
+    awaitingUserIds = []
+    phase = 'in-progress'
+    readyToPublish = { attempt, jointPublicKey: derivedY, groupCommitments: derived, threshold, participants: effectiveLive.length, roster: effectiveLive }
+    break attemptLoop
+  }
+
+  // Rule 9: ElectionKey consistency takes final precedence.
+  let electionKeyConsistent: boolean | null = null
+  if (snapshot.electionKey !== null) {
+    const agreed = attemptAgreedKey[snapshot.electionKey.attempt]
+    electionKeyConsistent = snapshot.electionKey.signatureValid && agreed !== undefined && agreed.jointPublicKey === snapshot.electionKey.jointPublicKey
+    if (electionKeyConsistent) {
+      phase = 'complete'
+      failedReason = undefined
+      blockedReason = undefined
+      waitingReason = undefined
+    } else {
+      phase = 'failed'
+      failedReason = 'election-key-mismatch'
+    }
+  }
+
+  return {
+    ...base,
+    phase,
+    blockedReason,
+    waitingReason,
+    failedReason,
+    currentAttempt,
+    currentRound,
+    roster,
+    awaitingUserIds,
+    attempts,
+    disqualified: disqualifiedAll,
+    readyToPublish,
+    cumulativeDisqualified
+  }
+}
+
+export function planDkgAction (evaluation: DkgRevisionEvaluation, selfUserId: string): DkgPlannedAction {
+  if (evaluation.phase === 'complete' || evaluation.phase === 'failed' || evaluation.phase === 'blocked') {
+    return { kind: 'none' }
+  }
+  const isParticipant = evaluation.roster.includes(selfUserId)
+  const isDisqualified = evaluation.cumulativeDisqualified.includes(selfUserId)
+  if (!isParticipant || isDisqualified) {
+    return { kind: 'none' }
+  }
+  const stillPresent = evaluation.cumulativeDisqualified.filter((u) => evaluation.liveRoster.includes(u))
+  if (stillPresent.length > 0) {
+    return { kind: 'remove-disqualified', userIds: stillPresent }
+  }
+  if (evaluation.readyToPublish !== null && evaluation.electionKey === null) {
+    return { kind: 'publish', attempt: evaluation.readyToPublish.attempt }
+  }
+  if (evaluation.currentAttempt !== null && evaluation.currentRound !== null && evaluation.awaitingUserIds.includes(selfUserId)) {
+    return { kind: 'post-round', attempt: evaluation.currentAttempt, round: evaluation.currentRound }
+  }
+  return { kind: 'none' }
+}
