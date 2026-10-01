@@ -40,11 +40,16 @@ import {
 	LocalConfigKeyProvider,
 	RegistrationEngine,
 	AuthorityConfigEngine,
+	IntakeEngine,
+	P2pRegistrationTransport,
+	P2pAssociationTransport,
 } from '@votetorrent/vote-engine/rn';
-import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn';
+import type { DbFactory, EngineContext, ElectionSubject, StagingOpener, StagingDecisionSigner } from '@votetorrent/vote-engine/rn';
 import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory';
 import type { StrandHost } from './rn-db-factory';
+import { createStrandPort } from './strand-port-adapter';
+import type { StrandSqlDatabase } from './strand-port-adapter';
 import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated';
 import { PINNED_HARDWARE_ROOTS_DER } from './attestation-roots.generated';
 import { REVOKED_ATTESTATION_SERIALS } from './attestation-status.generated';
@@ -96,6 +101,43 @@ export function isNoNetworkEstablishedError(error: unknown): boolean {
 	);
 }
 
+/**
+ * Thrown by `createPeerStagingTransports` when the currently-established network cannot back a
+ * peer staging transport (D-32). `reason`:
+ *   - `'no-network'` — no network is established at all;
+ *   - `'not-strand-backed'` — the established network was opened through the solo (non-strand)
+ *     `rnDbFactory`, so no peer could ever reach its store; reporting "synced" against it would be
+ *     a false assurance (T-62-21-05);
+ *   - `'network-changed'` — `openStrand()` was called after the app switched to a different
+ *     network than the one `strandId` was captured for.
+ */
+export class PeerStrandUnavailableError extends Error {
+	readonly peerStrandUnavailable = true as const;
+	readonly reason: 'no-network' | 'not-strand-backed' | 'network-changed';
+
+	constructor(reason: 'no-network' | 'not-strand-backed' | 'network-changed', message: string) {
+		super(message);
+		this.name = 'PeerStrandUnavailableError';
+		this.reason = reason;
+	}
+}
+
+/** Structural check (not `instanceof`), mirroring `isNoNetworkEstablishedError` above. */
+export function isPeerStrandUnavailableError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		(error as { peerStrandUnavailable?: unknown }).peerStrandUnavailable === true
+	);
+}
+
+/** `EngineFactory.createPeerStagingTransports`'s return shape (D-32). */
+export interface PeerStagingTransports {
+	strandId: string;
+	registration: P2pRegistrationTransport;
+	association: P2pAssociationTransport;
+}
+
 export class EngineFactory {
 	private readonly networksEngine: NetworksEngine;
 	/** Cache keyed by engineName (+ ':' + JSON(initParams) for param-keyed engines). */
@@ -130,6 +172,14 @@ export class EngineFactory {
 	 * Set by AppProvider in the same useEffect that registers setGetPeerCount.
 	 */
 	private node: StrandHost | null = null;
+
+	/**
+	 * D-32: the set of network hashes whose DbFactory call resolved through the strand-backed
+	 * path (`createStrandDbFactory`), as opposed to the solo `rnDbFactory`. `createPeerStagingTransports`
+	 * refuses `'not-strand-backed'` for any hash not in this set — a solo store can never be reached
+	 * by a peer, so reporting "synced" against it would be a false assurance (T-62-21-05).
+	 */
+	private strandBackedNetworkHashes = new Set<string>();
 
 	/**
 	 * First-sync gate wiring (quick task 260928-kkf — see strand-first-sync.ts /
@@ -245,11 +295,13 @@ export class EngineFactory {
 				// The signal is read AT CALL TIME (not captured once) so a controller
 				// swapped in by a later cancelPendingStrandWaits() is the one this call
 				// actually waits on.
+				this.strandBackedNetworkHashes.add(networkHash);
 				return createStrandDbFactory(this.node, {
 					signal: this.firstSyncAbort.signal,
 					onAwaitingFirstSync: (id) => this.firstSyncListener?.(id),
 				})(networkHash);
 			}
+			this.strandBackedNetworkHashes.delete(networkHash);
 			return this.rnDbFactory(networkHash);
 		});
 	}
@@ -368,6 +420,77 @@ export class EngineFactory {
 		const ctx = this.requireEstablishedCtx();
 		const { exportDatabaseSnapshot } = await import('../services/dashboard-bootstrap-producer');
 		return exportDatabaseSnapshot(ctx.db, this.currentNetworkHash!);
+	}
+
+	/**
+	 * D-32: constructs the two staging-only P2P transports (`PeerStagingTransports`), bound to
+	 * `strandId = currentNetworkHash` (matching `rn-db-factory.ts`'s own `strandId = networkHash`
+	 * convention). The caller receives two transports, never a Database — the port is built AND
+	 * consumed entirely inside this method, preserving the same no-raw-accessor rule
+	 * `exportDashboardSnapshot`'s doc comment states above.
+	 *
+	 * Refuses `PeerStrandUnavailableError`:
+	 *   - `'no-network'` when no network is established;
+	 *   - `'not-strand-backed'` when the established network was opened solo (not via
+	 *     `createStrandDbFactory`) — a solo store can never be reached by a peer (T-62-21-05);
+	 *   - `'network-changed'` (thrown lazily, by `openStrand`, not here) if the app switches to a
+	 *     different network between construction and first use.
+	 *
+	 * Neither transport is given a `sealer` — the Authority app never submits staged requests, it
+	 * only intakes and decides them, so `computeDigest`/`computeAttestationDigest` are refusing
+	 * stubs that reject if ever called (submission is a REQUESTER-side-only operation). The strand
+	 * port is built and consumed entirely inside this method, the same no-raw-handle rule the
+	 * comment above this one already states for the dashboard snapshot seam.
+	 */
+	createPeerStagingTransports(deps: { opener: StagingOpener; decisionSigner: StagingDecisionSigner }): PeerStagingTransports {
+		if (this.currentNetworkHash === undefined) {
+			throw new PeerStrandUnavailableError('no-network', 'EngineFactory.createPeerStagingTransports: no network established');
+		}
+		if (!this.strandBackedNetworkHashes.has(this.currentNetworkHash)) {
+			throw new PeerStrandUnavailableError(
+				'not-strand-backed',
+				'EngineFactory.createPeerStagingTransports: the established network was opened solo, not strand-backed — no peer could ever reach it'
+			);
+		}
+		const strandId = this.currentNetworkHash;
+
+		const refuseSubmit = async (..._args: unknown[]): Promise<Uint8Array> => {
+			throw new Error('The authority app never submits staged requests');
+		};
+
+		const openStrand = async () => {
+			const ctx = this.requireEstablishedCtx();
+			if (this.currentNetworkHash !== strandId) {
+				throw new PeerStrandUnavailableError(
+					'network-changed',
+					'EngineFactory.createPeerStagingTransports: the app switched to a different network since this transport was constructed'
+				);
+			}
+			// The real Quereus `Database`'s `eval`/`exec` param types (`SqlParameters | SqlValue[]`)
+			// are narrower than `StrandSqlDatabase`'s engine-agnostic `Record<string, unknown>` —
+			// the same structural-fit cast `intake/query-port.ts`'s `intakeQueryPortFromDb` makes at
+			// its own call site. No behavior change: `createStrandPort` only ever forwards `params`
+			// through unchanged.
+			return createStrandPort(ctx.db as unknown as StrandSqlDatabase);
+		};
+
+		const registration = new P2pRegistrationTransport({
+			openStrand,
+			computeDigest: refuseSubmit,
+			strandId,
+			opener: deps.opener,
+			decisionSigner: deps.decisionSigner,
+		});
+		const association = new P2pAssociationTransport({
+			openStrand,
+			computeDigest: refuseSubmit,
+			computeAttestationDigest: refuseSubmit,
+			strandId,
+			opener: deps.opener,
+			decisionSigner: deps.decisionSigner,
+		});
+
+		return { strandId, registration, association };
 	}
 
 	// ---------- private helpers ----------
@@ -507,6 +630,14 @@ export class EngineFactory {
 				// (useCurrentOfficerScopes()) are convenience, not a boundary.
 				const ctx = this.requireEstablishedCtx();
 				return new AuthorityConfigEngine(ctx);
+			}
+
+			case 'intake': {
+				// D-32/D-04: the IntakeEngine over the established ctx — same lifecycle guard as
+				// every other ctx-dependent sibling (requireEstablishedCtx rejects
+				// NoNetworkEstablishedError with no network open).
+				const ctx = this.requireEstablishedCtx();
+				return new IntakeEngine(ctx);
 			}
 
 			case 'election': {
