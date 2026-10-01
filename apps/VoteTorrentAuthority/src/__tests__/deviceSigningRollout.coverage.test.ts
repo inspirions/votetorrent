@@ -10,19 +10,23 @@
  * path back to recovery).
  *
  * Reconciliation this test encodes (so a future reader does not conclude the rollout is short):
- *   - 25 non-test files under `src` reference `device-signer` in some form.
- *   - 23 of those actually INVOKE `createDeviceSigner(` (a call expression, not a comment) — the
- *     23rd is 62-11's `screens/ballots/CreateBallotScreen.tsx` (the lazy ballot-submit signer).
- *   - 19 of the 23 route through `useDeviceSigningErrorHandler` (8 from 49-11, 9 from 49-12,
- *     1 from 50-15's `DashboardSignInCodeScreen.tsx` — the CR-04 presence-proof gate — and 1
- *     from 62-11's `screens/ballots/CreateBallotScreen.tsx`).
- *   - 4 of the 23 are named, justified exemptions (`ROLLOUT_EXEMPT` below) — 51-10 added the
+ *   - 26 non-test files under `src` reference `device-signer` in some form.
+ *   - 24 of those actually INVOKE `createDeviceSigner(` (a call expression, not a comment) — the
+ *     23rd is 62-11's `screens/ballots/CreateBallotScreen.tsx` (the lazy ballot-submit signer), and
+ *     the 24th is 62-23's `screens/networks/components/FoundingBundleExportCard.tsx` (the
+ *     founding-bundle export signer).
+ *   - 20 of the 24 route through `useDeviceSigningErrorHandler` (8 from 49-11, 9 from 49-12,
+ *     1 from 50-15's `DashboardSignInCodeScreen.tsx` — the CR-04 presence-proof gate, 1
+ *     from 62-11's `screens/ballots/CreateBallotScreen.tsx`, and 1 from 62-23's
+ *     `screens/networks/components/FoundingBundleExportCard.tsx` (the founding-bundle export
+ *     signer)).
+ *   - 4 of the 24 are named, justified exemptions (`ROLLOUT_EXEMPT` below) — 51-10 added the
  *     4th, `screens/registration/attach-association-sync-bindings.ts`, the SAME exemption class
  *     as its registration sibling below.
  *   - 2 files (`engines/registrant-dev-seed.ts`, `engines/signing-proof.ts`) reference
  *     `createDeviceSigner` only in prose comments, never as a call — they are correctly
  *     excluded from the invocation inventory by this test's comment-stripping walk, and are NOT
- *     part of the 25/23/19/4/2 arithmetic above (25 = 23 invokers + 2 comment-only).
+ *     part of the 26/24/20/4/2 arithmetic above (26 = 24 invokers + 2 comment-only).
  *
  * Convention mirrors this workspace's other release-guard-style source-inspection tests (see
  * `engines/__tests__/`): reads files as TEXT rather than importing them, so it fails on what is
@@ -120,14 +124,14 @@ describe('D-09/D-13/D-14 rollout completeness: every createDeviceSigner call sit
 		.map((f) => path.relative(SRC_ROOT, f))
 		.sort();
 
-	it('the call-site inventory has exactly 23 members (fail loud, with the full list, if this drifts)', () => {
-		if (invokingFiles.length !== 23) {
+	it('the call-site inventory has exactly 24 members (fail loud, with the full list, if this drifts)', () => {
+		if (invokingFiles.length !== 24) {
 			throw new Error(
-				`Expected exactly 23 createDeviceSigner(...) call-site files, found ` +
+				`Expected exactly 24 createDeviceSigner(...) call-site files, found ` +
 					`${invokingFiles.length}:\n${invokingFiles.join('\n')}`,
 			);
 		}
-		expect(invokingFiles).toHaveLength(23);
+		expect(invokingFiles).toHaveLength(24);
 	});
 
 	it('ROLLOUT_EXEMPT has exactly 4 entries', () => {

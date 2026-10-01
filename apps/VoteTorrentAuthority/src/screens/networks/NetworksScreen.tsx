@@ -3,14 +3,10 @@ import React, { useCallback, useLayoutEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ScrollView, StyleSheet, TouchableOpacity, View } from "react-native";
 import { multiaddr } from "@multiformats/multiaddr";
-import { VOTETORRENT_SCHEMA_SQL } from "@votetorrent/vote-engine/rn";
 import { InfoCard } from "../../components/InfoCard";
 import { ThemedText } from "../../components/ThemedText";
 import { useApp } from "../../providers/AppProvider";
 import { useCadreNode } from "../../providers/CadreNodeProvider";
-// Pure module (no rn-leveldb / native deps) — NOT imported from rn-db-factory, which
-// would drag rn-leveldb into this screen just to reach one type-guard function.
-import { isStrandAwaitingFirstSyncError } from "../../engines/strand-first-sync";
 import type { NetworkReference } from "@votetorrent/vote-core";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import type { NavigationProp } from "../../navigation/types";
@@ -20,6 +16,7 @@ import { globalStyles } from "../../theme/styles";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
+import { FoundingBundleExportCard } from "./components/FoundingBundleExportCard";
 
 export default function NetworksScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -31,15 +28,21 @@ export default function NetworksScreen() {
 	const [bootstrapAddr, setBootstrapAddr] = useState("");
 	// NETOP-03 inline feedback — surfaces validation / join failures without crashing (T-22-09).
 	const [joinError, setJoinError] = useState("");
+	// D-35/D-36: which recent network's export card is open (one at a time), keyed on networkHash.
+	const [exportTargetHash, setExportTargetHash] = useState<string | null>(null);
 	const navigation = useNavigation<NavigationProp>();
 	const insets = useSafeAreaInsets();
 
-	// NETOP-03: join a strand from a pasted bootstrap multiaddr (advanced / dev fallback).
-	// The multiaddr is parsed/validated BEFORE any use so a malformed paste produces an
-	// inline error instead of crashing the node (T-22-09 DoS mitigation, Security V5).
-	// The strandId is decoded from the multiaddr's peer component; binding it to the
-	// network hash (D-05) for true cross-device sync is finalized in the Plan 05
-	// two-device replication proof (the host advertises a known strandId there).
+	// NETOP-03 / D-39: join a bootstrap peer from a pasted multiaddr (advanced / dev fallback).
+	// The multiaddr is parsed/validated BEFORE any use so a malformed paste produces an inline
+	// error instead of crashing the node (T-22-09 DoS mitigation, Security V5).
+	//
+	// D-39: this field DIALS a bootstrap peer only — it never opens a strand. A strand is opened
+	// solely by the networks engine's DbFactory, keyed on `strandId = networkHash`
+	// (`rn-db-factory.ts`'s `createStrandDbFactory`), on create, open and founding-bundle import.
+	// Connecting to a peer here lets that factory's founder probe see a reachable peer and join
+	// instead of founding a parallel strand (D-05's `founder: !hasPeers`); the UI-SPEC freezes
+	// this field and its copy, so no `networkHash` input is added here.
 	const handleBootstrapConnect = useCallback(async () => {
 		setJoinError("");
 		let parsed: ReturnType<typeof multiaddr>;
@@ -49,37 +52,20 @@ export default function NetworksScreen() {
 			setJoinError(t("invalidBootstrapAddress"));
 			return;
 		}
-		// Decode the peer component (/p2p/<id>) of the multiaddr as the strandId.
-		const strandId = parsed.getComponents().find((c) => c.name === "p2p")?.value;
-		if (!strandId || !node) {
+		// The dial target needs a specific peer id — decode the /p2p component.
+		const peerId = parsed.getComponents().find((c) => c.name === "p2p")?.value;
+		if (!peerId) {
+			setJoinError(t("invalidBootstrapAddress"));
+			return;
+		}
+		const control = node?.getControlNode();
+		if (!control) {
 			setJoinError(t("invalidBootstrapAddress"));
 			return;
 		}
 		try {
-			await node.addStrand({
-				// FounderOwnerKey is new and REQUIRED in cadre-core 0.13.0. This is the JOIN path —
-				// we are connecting to a strand someone else published — so this node is not the
-				// founding machine and null is correct, not merely tolerated.
-				strandRow: { Id: strandId, MemberPrivateKey: null, Type: "o", FounderOwnerKey: null },
-				sAppConfig: {
-					id: "org.votetorrent",
-					version: "1.0.0",
-					schema: VOTETORRENT_SCHEMA_SQL,
-					latencyHint: "interactive",
-				},
-				// Joining an existing host: we did NOT provision this strand, so we are
-				// not the founder. `StrandConfig.mode` was deleted in cadre-core 0.11.0
-				// (spike 064); `founder` is the surviving knob and defaults to false.
-				founder: false,
-			});
-		} catch (error) {
-			// Quick task 260928-kkf: a retryable "no sibling reachable yet" is NOT a join
-			// failure — the strand launched and keeps syncing on its own; the SyncChip
-			// shows 'syncing' until 'strand:writable' fires. Every other error (including
-			// this same error for a different strand) still shows the join-failed copy.
-			if (isStrandAwaitingFirstSyncError(error, strandId)) {
-				return;
-			}
+			await control.dial(parsed);
+		} catch {
 			setJoinError(t("joinFailed"));
 		}
 	}, [bootstrapAddr, node, t]);
@@ -145,33 +131,51 @@ export default function NetworksScreen() {
 					</ThemedText>
 				)}
 				{recentNetworkRefs.map((networkRef) => (
-					<View key={networkRef.hash} style={styles.networkContainer}>
-						<View style={styles.infoCardContainer}>
-							<InfoCard
-								image={{ uri: networkRef.imageUrl }}
-								title={networkRef.name}
-								additionalInfo={[
-									{
-										label: t("address"),
-										value: networkRef.primaryAuthorityDomainName,
-									},
-								]}
-								onPress={() => navigation.navigate("NetworkDetails", { networkRef })}
+					<React.Fragment key={networkRef.hash}>
+						<View style={styles.networkContainer}>
+							<View style={styles.infoCardContainer}>
+								<InfoCard
+									image={{ uri: networkRef.imageUrl }}
+									title={networkRef.name}
+									additionalInfo={[
+										{
+											label: t("address"),
+											value: networkRef.primaryAuthorityDomainName,
+										},
+									]}
+									onPress={() => navigation.navigate("NetworkDetails", { networkRef })}
+								/>
+							</View>
+							<View style={styles.iconContainer}>
+								<TouchableOpacity
+									accessibilityRole="button"
+									accessibilityLabel={t("networkFoundingExportButton")}
+									testID={`founding-export-entry-${networkRef.hash}`}
+									style={styles.exportIconButton}
+									onPress={() => setExportTargetHash(networkRef.hash)}
+								>
+									<FontAwesome6 name="share-nodes" size={20} color={colors.text} />
+								</TouchableOpacity>
+								<TouchableOpacity
+									style={styles.iconButton}
+									onPress={() => navigation.navigate("Hosting", { networkRef })}
+								>
+									<FontAwesome6 name="database" size={20} color={colors.text} />
+								</TouchableOpacity>
+							</View>
+						</View>
+						{exportTargetHash === networkRef.hash && (
+							<FoundingBundleExportCard
+								networkRef={networkRef}
+								onClose={() => setExportTargetHash(null)}
 							/>
-						</View>
-						<View style={styles.iconContainer}>
-							<View style={[styles.iconButton, { opacity: 0.4 }]}>
-							<FontAwesome6 name="share-nodes" size={20} color={colors.text} />
-						</View>
-							<TouchableOpacity
-								style={styles.iconButton}
-								onPress={() => navigation.navigate("Hosting", { networkRef })}
-							>
-								<FontAwesome6 name="database" size={20} color={colors.text} />
-							</TouchableOpacity>
-						</View>
-					</View>
+						)}
+					</React.Fragment>
 				))}
+				<CustomButton
+					title={t("networkFoundingImportButton")}
+					onPress={() => navigation.navigate("ImportFoundingBundle")}
+				/>
 			</View>
 
 			<View style={styles.section}>
@@ -230,6 +234,14 @@ const localStyles = StyleSheet.create({
 	},
 	iconButton: {
 		padding: 8,
+	},
+	// D-36: the export entry's minimum touch target (44x44). 44 + the database button's 36
+	// (padding 8 around a 20px glyph) = 80, matching iconContainer's existing height.
+	exportIconButton: {
+		minWidth: 44,
+		minHeight: 44,
+		alignItems: "center",
+		justifyContent: "center",
 	},
 	input: {
 		marginTop: 8,

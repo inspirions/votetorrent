@@ -22,6 +22,7 @@ import NetworksScreen from "../screens/networks/NetworksScreen";
 import type { NavigationProp } from "./types";
 import AddNetworkScreen from "../screens/networks/AddNetworkScreen";
 import HostingScreen from "../screens/networks/HostingScreen";
+import ImportFoundingBundleScreen from "../screens/networks/ImportFoundingBundleScreen";
 import { useApp } from "../providers/AppProvider";
 import { useTaskCount } from "../hooks/useTaskCount";
 import EditOfficerScreen from "../screens/admin/EditOfficerScreen";
@@ -309,6 +310,11 @@ export const RootNavigator = () => {
 				options={{ title: t("network") }}
 			/>
 			<Stack.Screen name="Hosting" component={HostingScreen} options={{ title: t("hosting") }} />
+			<Stack.Screen
+				name="ImportFoundingBundle"
+				component={ImportFoundingBundleScreen}
+				options={{ title: t("networkFoundingImportScreenTitle") }}
+			/>
 			<Stack.Screen
 				name="NetworkStatistics"
 				component={NetworkStatisticsScreen}

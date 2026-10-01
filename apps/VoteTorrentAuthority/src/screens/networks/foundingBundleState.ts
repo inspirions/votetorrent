@@ -50,14 +50,22 @@ export function mapFoundingImportResult(result: FoundingBundleImportResult): Fou
 		}
 	}
 
-	switch (result.category) {
-		case 'already-joined':
-			return { state: 'alreadyJoined', networkRef: result.networkRef }
-		case 'invalid-bundle':
-			return { state: 'invalidSignature' }
-		case 'error':
-			return { state: 'genericError' }
-		default:
-			return assertNever(result.category)
+	// A plain `switch` on `result.category` here defeats TypeScript's discriminated-union
+	// narrowing: the second `FoundingBundleImportResult` member's `category` is itself the
+	// 2-literal union `FoundingBundleFailureCategory` ('invalid-bundle' | 'error'), and a
+	// multi-case switch cannot split that single member across its two case labels for
+	// exhaustiveness purposes — the `default` branch's `assertNever(result.category)` then
+	// fails to typecheck because TS narrows `result` to `never` before it, not because the
+	// logic is wrong (confirmed in isolation against the installed TS version). A sequential
+	// if-chain narrows correctly and keeps the exhaustiveness proof.
+	if (result.category === 'already-joined') {
+		return { state: 'alreadyJoined', networkRef: result.networkRef }
 	}
+	if (result.category === 'invalid-bundle') {
+		return { state: 'invalidSignature' }
+	}
+	if (result.category === 'error') {
+		return { state: 'genericError' }
+	}
+	return assertNever(result.category)
 }

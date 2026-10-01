@@ -19,6 +19,8 @@ export type RootStackParamList = {
 	AddNetwork: undefined;
 	NetworkDetails: { network: NetworkReference };
 	Hosting: undefined;
+	// Phase 62 plan 62-23 — D-35/D-36 founding-bundle import (Surface 2)
+	ImportFoundingBundle: undefined;
 	// Phase 8 plan 08-06 — Networks routes (NETUI-05, NETUI-06; D-12 / D-13)
 	NetworkStatistics: { networkId: string };
 	NetworkRevision: { networkId: string };

@@ -1,0 +1,442 @@
+/**
+ * NetworksScreen.foundingBundle.test.tsx — E-1..E-6 (D-35, D-36).
+ *
+ * Mounts the REAL NetworksScreen with its REAL FoundingBundleExportCard and REAL
+ * LifecycleConfirmCard. `t()` resolves against the REAL `resources`; `useTheme()` returns the
+ * REAL `lightTheme.colors`. `device-signer`, `device-user`, `react-native`'s `Share.share` and
+ * `useApp` are mocked.
+ */
+
+import React from "react";
+import { StyleSheet } from "react-native";
+import renderer, { act } from "react-test-renderer";
+import { lightTheme } from "../../../theme/themes";
+import { resources } from "../../../i18n";
+
+jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
+
+jest.mock("react-native-safe-area-context", () => ({
+	useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+}));
+
+jest.mock("../../../providers/SettingsProvider", () => ({
+	useSettings: () => ({ showHelpIcons: false }),
+}));
+
+jest.mock("../../../providers/CadreNodeProvider", () => ({
+	useCadreNode: () => ({ node: null, syncState: "offline", connectedPeers: jest.fn() }),
+}));
+
+let mockCurrentLocale: "en" | "es" = "en";
+jest.mock("react-i18next", () => ({
+	useTranslation: () => ({
+		t: (key: string) => {
+			// eslint-disable-next-line @typescript-eslint/no-var-requires
+			const { resources: res } = require("../../../i18n");
+			const value = (res[mockCurrentLocale].translation as Record<string, string>)[key];
+			return typeof value === "string" ? value : key;
+		},
+	}),
+	initReactI18next: { type: "3rdParty", init: jest.fn() },
+}));
+
+const mockNavigate = jest.fn();
+jest.mock("@react-navigation/native", () => {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const ReactForMock = require("react");
+	return {
+		useTheme: () => {
+			// eslint-disable-next-line @typescript-eslint/no-var-requires
+			const { lightTheme: theme } = require("../../../theme/themes");
+			return theme;
+		},
+		useNavigation: () => ({ navigate: mockNavigate, setOptions: jest.fn() }),
+		useFocusEffect: (cb: () => void | (() => void)) => {
+			ReactForMock.useEffect(() => cb(), []);
+		},
+	};
+});
+
+let mockRecentNetworks: Array<{ hash: string; name: string; primaryAuthorityDomainName: string }> = [];
+const callOrder: string[] = [];
+const mockOpen = jest.fn(async (...args: unknown[]) => {
+	callOrder.push("open");
+	return {} as unknown;
+});
+const mockExportFoundingBundle = jest.fn(async (...args: unknown[]) => {
+	callOrder.push("exportFoundingBundle");
+	return { bundle: {}, text: "BUNDLE-TEXT", fileName: "founding-bundle.json" };
+});
+const mockNetworksEngine = {
+	getRecentNetworks: jest.fn(async () => mockRecentNetworks),
+	open: mockOpen,
+	exportFoundingBundle: mockExportFoundingBundle,
+};
+const mockSelectNetwork = jest.fn(async () => undefined);
+jest.mock("../../../providers/AppProvider", () => ({
+	useApp: () => ({ networksEngine: mockNetworksEngine, selectNetwork: mockSelectNetwork }),
+}));
+
+const mockCreateDeviceSigner = jest.fn(async (...args: unknown[]) => {
+	callOrder.push("createDeviceSigner");
+	return jest.fn(async () => ({ signerUserId: "user-1", signerKey: "key-1", signature: "sig" }));
+});
+jest.mock("../../../engines/device-signer", () => ({
+	createDeviceSigner: () => mockCreateDeviceSigner(),
+}));
+
+const mockGetDeviceUser = jest.fn(async () => {
+	callOrder.push("getDeviceUser");
+	return { id: "user-1", name: "Officer One", activeKeys: [{ key: "key-1", type: "ed25519" }] };
+});
+jest.mock("../../../engines/device-user", () => ({
+	getDeviceUser: () => mockGetDeviceUser(),
+}));
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const NetworksScreenModule = require("../NetworksScreen");
+const NetworksScreen = NetworksScreenModule.default ?? NetworksScreenModule.NetworksScreen;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { Share } = require("react-native");
+
+const NETWORK_A = { hash: "hashA", name: "Network A", primaryAuthorityDomainName: "a.example" };
+const NETWORK_B = { hash: "hashB", name: "Network B", primaryAuthorityDomainName: "b.example" };
+
+async function renderScreen() {
+	let tr!: renderer.ReactTestRenderer;
+	await act(async () => {
+		tr = renderer.create(<NetworksScreen />);
+	});
+	await act(async () => {
+		await Promise.resolve();
+	});
+	return tr;
+}
+
+function findByProps(tr: renderer.ReactTestRenderer, predicate: (props: Record<string, unknown>) => boolean) {
+	return tr.root.findAll((n) => {
+		try {
+			return predicate(n.props as Record<string, unknown>);
+		} catch {
+			return false;
+		}
+	});
+}
+
+function findButton(tr: renderer.ReactTestRenderer, title: string) {
+	const matches = findByProps(tr, (p) => p.title === title && typeof p.onPress === "function");
+	expect(matches.length).toBeGreaterThan(0);
+	return matches[0];
+}
+
+/** True if `testID` appears anywhere within `node` (inclusive). */
+function containsTestID(node: unknown, testID: string): boolean {
+	if (node == null || typeof node === "string") return false;
+	if (Array.isArray(node)) return node.some((n) => containsTestID(n, testID));
+	const n = node as { props?: Record<string, unknown>; children?: unknown[] };
+	if (n.props?.testID === testID) return true;
+	return (n.children ?? []).some((c) => containsTestID(c, testID));
+}
+
+function findJsonByTestID(node: unknown, testID: string, path: unknown[] = []): { node: any; path: any[] } | null {
+	if (node == null || typeof node === "string") return null;
+	if (Array.isArray(node)) {
+		for (const child of node) {
+			const found = findJsonByTestID(child, testID, path);
+			if (found) return found;
+		}
+		return null;
+	}
+	const n = node as { props?: Record<string, unknown>; children?: unknown[] };
+	if (n.props && n.props.testID === testID) return { node, path };
+	if (n.children) {
+		for (const child of n.children) {
+			const found = findJsonByTestID(child, testID, [...path, node]);
+			if (found) return found;
+		}
+	}
+	return null;
+}
+
+beforeEach(() => {
+	jest.clearAllMocks();
+	jest.useRealTimers();
+	mockCurrentLocale = "en";
+	mockRecentNetworks = [NETWORK_A, NETWORK_B];
+	callOrder.length = 0;
+	mockOpen.mockImplementation(async () => {
+		callOrder.push("open");
+		return {} as unknown;
+	});
+	mockExportFoundingBundle.mockImplementation(async () => {
+		callOrder.push("exportFoundingBundle");
+		return { bundle: {}, text: "BUNDLE-TEXT", fileName: "founding-bundle.json" };
+	});
+	mockCreateDeviceSigner.mockImplementation(async () => {
+		callOrder.push("createDeviceSigner");
+		return jest.fn(async () => ({ signerUserId: "user-1", signerKey: "key-1", signature: "sig" }));
+	});
+	mockGetDeviceUser.mockImplementation(async () => {
+		callOrder.push("getDeviceUser");
+		return { id: "user-1", name: "Officer One", activeKeys: [{ key: "key-1", type: "ed25519" }] };
+	});
+});
+
+describe("E-1: export entry geometry and accessibility", () => {
+	it("each row's export entry is a 44x44+ button, full opacity, icon column stays height 80", async () => {
+		const tr = await renderScreen();
+		const found = findJsonByTestID(tr.toJSON(), `founding-export-entry-${NETWORK_A.hash}`)!;
+		expect(found).toBeTruthy();
+		expect(found.node.props.accessibilityRole).toBe("button");
+		expect(found.node.props.accessibilityLabel).toBe(resources.en.translation.networkFoundingExportButton);
+
+		const flat = StyleSheet.flatten(found.node.props.style) as Record<string, unknown>;
+		expect(flat.minWidth as number).toBeGreaterThanOrEqual(44);
+		expect(flat.minHeight as number).toBeGreaterThanOrEqual(44);
+		expect(flat.opacity).not.toBe(0.4);
+
+		// icon column ancestor still height 80, no hidden overflow.
+		const iconColumn = found.path[found.path.length - 1] as any;
+		const columnFlat = StyleSheet.flatten(iconColumn.props?.style) as Record<string, unknown>;
+		expect(columnFlat.height).toBe(80);
+		expect(columnFlat.overflow).not.toBe("hidden");
+	});
+});
+
+describe("E-2: pressing the export entry renders the confirm card directly after its row; dismiss removes it; only one at a time", () => {
+	it("renders confirming card with the four resource strings, dismiss removes it", async () => {
+		const tr = await renderScreen();
+		const entry = findJsonByTestID(tr.toJSON(), `founding-export-entry-${NETWORK_A.hash}`)!;
+		const entryComponent = findByProps(tr, (p) => p.testID === `founding-export-entry-${NETWORK_A.hash}`)[0];
+
+		await act(async () => {
+			(entryComponent.props as any).onPress();
+		});
+
+		const title = findJsonByTestID(tr.toJSON(), "founding-export-title")!;
+		const body = findJsonByTestID(tr.toJSON(), "founding-export-body")!;
+		expect(title.node.children).toEqual([resources.en.translation.networkFoundingExportConfirmHeading]);
+		expect(body.node.children).toEqual([resources.en.translation.networkFoundingExportConfirmBody]);
+
+		// Positional proof: the card must be the NEXT sibling directly after NETWORK_A's own row
+		// (not appended after the whole list) — this is the rung m8 proves.
+		const card = findJsonByTestID(tr.toJSON(), "founding-export-card")!;
+		const cardParent = card.path[card.path.length - 1] as any;
+		const siblings = cardParent.children as unknown[];
+		const cardIndex = siblings.indexOf(card.node);
+		expect(cardIndex).toBeGreaterThan(0);
+		expect(containsTestID(siblings[cardIndex - 1], `founding-export-entry-${NETWORK_A.hash}`)).toBe(true);
+		// And NETWORK_B's row (the next network in the list) must NOT precede the card.
+		expect(containsTestID(siblings[cardIndex - 1], `founding-export-entry-${NETWORK_B.hash}`)).toBe(false);
+
+		const confirmButton = findButton(tr, resources.en.translation.networkFoundingExportShareButton);
+		expect(confirmButton).toBeTruthy();
+		const dismissButton = findButton(tr, resources.en.translation.networkFoundingExportCancelButton);
+		expect(dismissButton).toBeTruthy();
+
+		await act(async () => {
+			(dismissButton.props as any).onPress();
+		});
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-card")).toBeNull();
+	});
+
+	it("opening a second row's card replaces the first (only one card at a time)", async () => {
+		const tr = await renderScreen();
+		const entryA = findByProps(tr, (p) => p.testID === `founding-export-entry-${NETWORK_A.hash}`)[0];
+		const entryB = findByProps(tr, (p) => p.testID === `founding-export-entry-${NETWORK_B.hash}`)[0];
+
+		await act(async () => {
+			(entryA.props as any).onPress();
+		});
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-title")!.node.children).toEqual([
+			resources.en.translation.networkFoundingExportConfirmHeading,
+		]);
+
+		await act(async () => {
+			(entryB.props as any).onPress();
+		});
+		// Still exactly one confirm card in the tree (B's), proving A's card unmounted.
+		let count = 0;
+		function countTestID(node: unknown): void {
+			if (node == null || typeof node === "string") return;
+			if (Array.isArray(node)) {
+				node.forEach(countTestID);
+				return;
+			}
+			const n = node as { props?: Record<string, unknown>; children?: unknown[] };
+			if (n.props?.testID === "founding-export-card") count++;
+			(n.children ?? []).forEach(countTestID);
+		}
+		countTestID(tr.toJSON());
+		expect(count).toBe(1);
+	});
+});
+
+async function openAndConfirm(tr: renderer.ReactTestRenderer, networkRef = NETWORK_A) {
+	const entry = findByProps(tr, (p) => p.testID === `founding-export-entry-${networkRef.hash}`)[0];
+	await act(async () => {
+		(entry.props as any).onPress();
+	});
+	const confirmButton = findButton(tr, resources.en.translation.networkFoundingExportShareButton);
+	await act(async () => {
+		(confirmButton.props as any).onPress();
+		await Promise.resolve();
+	});
+}
+
+describe("E-3: confirm -> generating -> export call order -> sharing -> Share.share -> close", () => {
+	it("calls createDeviceSigner, getDeviceUser, open(ref,user,false), exportFoundingBundle(hash,{userId,signerKey,sign}), then Share.share, then closes", async () => {
+		let resolveShare!: (v: unknown) => void;
+		const shareSpy = jest
+			.spyOn(Share, "share")
+			.mockImplementation(() => new Promise((resolve) => (resolveShare = resolve)));
+
+		const tr = await renderScreen();
+		await openAndConfirm(tr);
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		expect(callOrder).toEqual(["createDeviceSigner", "getDeviceUser", "open", "exportFoundingBundle"]);
+		expect(mockOpen).toHaveBeenCalledWith(NETWORK_A, { id: "user-1", name: "Officer One", activeKeys: [{ key: "key-1", type: "ed25519" }] }, false);
+		expect(mockExportFoundingBundle).toHaveBeenCalledWith(NETWORK_A.hash, {
+			userId: "user-1",
+			signerKey: "key-1",
+			sign: expect.any(Function),
+		});
+
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-sharing")).toBeTruthy();
+		expect(shareSpy).toHaveBeenCalledWith(
+			{ message: "BUNDLE-TEXT", title: "founding-bundle.json" },
+			expect.objectContaining({ subject: "founding-bundle.json" }),
+		);
+
+		await act(async () => {
+			resolveShare(undefined);
+			await Promise.resolve();
+		});
+
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-card")).toBeNull();
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-sharing")).toBeNull();
+		shareSpy.mockRestore();
+	});
+});
+
+describe("E-4: exportFoundingBundle rejection (not-founding-officer) -> error state, logged token only", () => {
+	it("renders the error body with retry/dismiss and logs only the code", async () => {
+		const spy = jest.spyOn(console, "info").mockImplementation(() => {});
+		mockExportFoundingBundle.mockImplementation(async () => {
+			throw Object.assign(new Error("not a founding officer"), { code: "not-founding-officer" });
+		});
+
+		const tr = await renderScreen();
+		await openAndConfirm(tr);
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		const errorBody = findJsonByTestID(tr.toJSON(), "founding-export-body-error")!;
+		expect(errorBody).toBeTruthy();
+		const flat = StyleSheet.flatten(errorBody.node.children[0].props.style) as Record<string, unknown>;
+		expect(flat.color).toBe(lightTheme.colors.error);
+		expect(errorBody.node.children[0].props.numberOfLines).toBeUndefined();
+		expect(errorBody.node.children[0].children).toEqual([resources.en.translation.networkFoundingExportError]);
+
+		expect(findButton(tr, resources.en.translation.networkFoundingExportShareButton)).toBeTruthy();
+		expect(findButton(tr, resources.en.translation.networkFoundingExportCancelButton)).toBeTruthy();
+
+		const tokenCalls = spy.mock.calls.filter((c) => String(c[0]).includes("not-founding-officer"));
+		expect(tokenCalls.length).toBeGreaterThanOrEqual(1);
+		spy.mockRestore();
+	});
+});
+
+describe("E-5: createDeviceSigner CANCELED closes silently; Share.share rejection -> error; open() timeout -> error", () => {
+	it("E-5a: createDeviceSigner rejecting with code CANCELED closes the card silently (no error text)", async () => {
+		mockCreateDeviceSigner.mockImplementation(async () => {
+			throw Object.assign(new Error("user canceled"), { code: "CANCELED" });
+		});
+
+		const tr = await renderScreen();
+		await openAndConfirm(tr);
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-card")).toBeNull();
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-error")).toBeNull();
+		expect(JSON.stringify(tr.toJSON())).not.toContain(resources.en.translation.networkFoundingExportError);
+	});
+
+	it("E-5b: a Share.share rejection leads to the error state", async () => {
+		const shareSpy = jest.spyOn(Share, "share").mockRejectedValue(new Error("share failed"));
+		const tr = await renderScreen();
+		await openAndConfirm(tr);
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-error")).toBeTruthy();
+		shareSpy.mockRestore();
+	});
+
+	it("E-5c: open() exceeding 45000ms leads to the error state (fake timers)", async () => {
+		jest.useFakeTimers();
+		mockOpen.mockImplementation(
+			() =>
+				new Promise(() => {
+					/* never resolves */
+				}),
+		);
+
+		const tr = await renderScreen();
+		const entry = findByProps(tr, (p) => p.testID === `founding-export-entry-${NETWORK_A.hash}`)[0];
+		await act(async () => {
+			(entry.props as any).onPress();
+		});
+		const confirmButton = findButton(tr, resources.en.translation.networkFoundingExportShareButton);
+		await act(async () => {
+			(confirmButton.props as any).onPress();
+		});
+
+		await act(async () => {
+			jest.advanceTimersByTime(45001);
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-error")).toBeTruthy();
+		jest.useRealTimers();
+	});
+});
+
+describe("E-6: Import Network button renders with zero and with recent networks, navigates to ImportFoundingBundle", () => {
+	it("renders and navigates with zero recent networks", async () => {
+		mockRecentNetworks = [];
+		const tr = await renderScreen();
+		const importButton = findButton(tr, resources.en.translation.networkFoundingImportButton);
+		expect(importButton).toBeTruthy();
+		await act(async () => {
+			(importButton.props as any).onPress();
+		});
+		expect(mockNavigate).toHaveBeenCalledWith("ImportFoundingBundle");
+	});
+
+	it("renders and navigates with two recent networks", async () => {
+		mockRecentNetworks = [NETWORK_A, NETWORK_B];
+		const tr = await renderScreen();
+		const importButton = findButton(tr, resources.en.translation.networkFoundingImportButton);
+		expect(importButton).toBeTruthy();
+		await act(async () => {
+			(importButton.props as any).onPress();
+		});
+		expect(mockNavigate).toHaveBeenCalledWith("ImportFoundingBundle");
+	});
+});
