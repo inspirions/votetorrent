@@ -120,7 +120,7 @@ describe("ThresholdProgressNote — copy + state (N1-N7)", () => {
 			.replace("{{signed}}", "1")
 			.replace("{{threshold}}", "2");
 		expect(expected).toBe("1 of 2 signatures");
-		expect(tr.root.findByType("Text").props.children).toBe(expected);
+		expect(tr.root.findByType(require("react-native").Text).props.children).toBe(expected);
 	});
 
 	test("N2 (ES): progress renders the ES resource text", () => {
@@ -129,12 +129,12 @@ describe("ThresholdProgressNote — copy + state (N1-N7)", () => {
 		const expected = resources.es.translation.signatureTaskThresholdProgress
 			.replace("{{signed}}", "1")
 			.replace("{{threshold}}", "2");
-		expect(tr.root.findByType("Text").props.children).toBe(expected);
+		expect(tr.root.findByType(require("react-native").Text).props.children).toBe(expected);
 	});
 
 	test("N3: reached (D-09) renders the EN resource text", () => {
 		const tr = mount(<ThresholdProgressNote status={makeStatus({ threshold: 2, signatures: 2, reached: true })} />);
-		expect(tr.root.findByType("Text").props.children).toBe(resources.en.translation.signatureTaskThresholdReached);
+		expect(tr.root.findByType(require("react-native").Text).props.children).toBe(resources.en.translation.signatureTaskThresholdReached);
 	});
 
 	test("N4: past threshold (D-10) renders identically to at-threshold", () => {
@@ -160,14 +160,14 @@ describe("ThresholdProgressNote — copy + state (N1-N7)", () => {
 
 	test("N7a: colour is textSecondary in the progress state, never success", () => {
 		const tr = mount(<ThresholdProgressNote status={makeStatus({ threshold: 2, signatures: 1, reached: false })} />);
-		const flat = flattenStyle(tr.root.findByType("Text"));
+		const flat = flattenStyle(tr.root.findByType(require("react-native").Text));
 		expect(flat.color).toBe(PALETTE.textSecondary);
 		expect(flat.color).not.toBe(PALETTE.success);
 	});
 
 	test("N7b: colour is textSecondary in the reached state, never success", () => {
 		const tr = mount(<ThresholdProgressNote status={makeStatus({ threshold: 2, signatures: 2, reached: true })} />);
-		const flat = flattenStyle(tr.root.findByType("Text"));
+		const flat = flattenStyle(tr.root.findByType(require("react-native").Text));
 		expect(flat.color).toBe(PALETTE.textSecondary);
 		expect(flat.color).not.toBe(PALETTE.success);
 	});
