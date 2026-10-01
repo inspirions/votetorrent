@@ -23,7 +23,16 @@ import {
   STATUS_REJECTED
 } from './registration-request-query.js'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
-import { isChecklistGateMet, VERIFICATION_CHECKLIST_ITEM_ORDER, verificationCid as computeVerificationCidFor, RegistrantAlreadyExistsError } from '@votetorrent/vote-core'
+import { findLikelyDuplicates, extractRegistrationIdentity, matchRegistrationIdentities } from './duplicate-detection.js'
+import type { DuplicateComparable } from './duplicate-detection.js'
+import { registrationRequestNotClosedSql, readDuplicateClosure, readDuplicateClosureStates } from './duplicate-closure.js'
+import {
+  isChecklistGateMet,
+  VERIFICATION_CHECKLIST_ITEM_ORDER,
+  verificationCid as computeVerificationCidFor,
+  RegistrantAlreadyExistsError,
+  RegistrationDuplicateError
+} from '@votetorrent/vote-core'
 import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
 import type {
@@ -35,6 +44,7 @@ import type {
   ElectionRegistrationField,
   IRegistrationEngine,
   IRegistrationRegisterBuilder,
+  LikelyDuplicateRequest,
   PriorRejection,
   PrivateDetail,
   RegisterInit,
@@ -51,6 +61,13 @@ import type {
   RegistrantStatus,
   RegistrationBridgeKey,
   RegistrationBridgeKeyInit,
+  RegistrationDecisionPublication,
+  RegistrationDecisionPublishOptions,
+  RegistrationDecisionPublishPort,
+  RegistrationDecisionPublishResult,
+  RegistrationDuplicateClosure,
+  RegistrationDuplicateClosureOutcome,
+  RegistrationDuplicateClosureRepairReport,
   RegistrationRequestDecision,
   RegistrationRequestInit,
   RegistrationRequestIssuerType,
@@ -2226,6 +2243,396 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
   }
 
+  // ---------- D-44 duplicate detection and closure ----------
+
+  /**
+   * The ONE payload source for duplicate detection: every PENDING, not-closed request of
+   * `authorityId`, mapped to a pure `DuplicateComparable` plus the display fields
+   * `getLikelyDuplicateRequests` needs. Collects the raw rows into an array BEFORE parsing
+   * (this file's own "do not interleave eval + prepare" habit).
+   *
+   * This is where the authority's post-decrypt payload is read (today's
+   * `RegistrationRequest.Payload`, the pre-existing T-62-01-10 storage) — nothing derived from it
+   * is written anywhere. If T-62-01-10 is later resolved by no longer persisting `Payload`, only
+   * this method changes.
+   */
+  private async readPendingComparables (authorityId: string): Promise<Array<{
+    comparable: DuplicateComparable
+    display: { issuerType: RegistrationRequestIssuerType; submittedAt: string; receivedAt: string; firstName?: string; lastName?: string }
+  }>> {
+    const ctx = this.ctx!
+    const rawRows: Array<{ Id: string; RequesterKey: string; IssuerType: string; Payload: unknown; SubmittedAt: string; ReceivedAt: string }> = []
+    for await (const row of ctx.db.eval(
+      `select R.Id, R.RequesterKey, R.IssuerType, R.Payload, R.SubmittedAt, R.ReceivedAt
+         from RegistrationRequest R
+         where R.AuthorityId = :rowAuthorityId and R.Status = 'p' and ${registrationRequestNotClosedSql('R')}`,
+      { rowAuthorityId: authorityId }
+    )) {
+      rawRows.push({
+        Id: asText(row.Id, 'RegistrationRequest.Id'),
+        RequesterKey: asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'),
+        IssuerType: asText(row.IssuerType, 'RegistrationRequest.IssuerType'),
+        Payload: row.Payload,
+        SubmittedAt: row.SubmittedAt as string,
+        ReceivedAt: row.ReceivedAt as string
+      })
+    }
+
+    return rawRows.map((row) => {
+      // A malformed Payload yields an empty identity and never throws — the matcher must still
+      // run over every OTHER row.
+      const payload = parseJsonOr<RegisterInit | undefined>(row.Payload, undefined, 'RegistrationRequest.Payload')
+      const receivedAt = reZuluDatetime(row.ReceivedAt)
+      return {
+        comparable: {
+          requestId: row.Id,
+          authorityId,
+          requesterKey: row.RequesterKey,
+          receivedAt,
+          identity: extractRegistrationIdentity(payload)
+        },
+        display: {
+          issuerType: row.IssuerType as RegistrationRequestIssuerType,
+          submittedAt: reZuluDatetime(row.SubmittedAt),
+          receivedAt,
+          firstName: payload?.public?.firstName,
+          lastName: payload?.public?.lastName
+        }
+      }
+    })
+  }
+
+  /**
+   * D-44: likely duplicates of `requestId`, authority-side and in memory — never throws. Returns
+   * `[]` for an unknown id, a non-pending target, or a target that is itself closed/closing.
+   */
+  async getLikelyDuplicateRequests (requestId: string): Promise<LikelyDuplicateRequest[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    try {
+      const targetRow = await ctx.db
+        .prepare('select Id, AuthorityId, Status from RegistrationRequest where Id = :requestId')
+        .get({ requestId })
+      if (!targetRow) return []
+      const authorityId = asText(targetRow.AuthorityId, 'RegistrationRequest.AuthorityId')
+      if (asText(targetRow.Status, 'RegistrationRequest.Status') !== 'p') return []
+      if (await readDuplicateClosure(ctx.db, requestId, authorityId)) return []
+
+      const comparables = await this.readPendingComparables(authorityId)
+      const targetEntry = comparables.find((c) => c.comparable.requestId === requestId)
+      if (!targetEntry) return []
+
+      const matches = findLikelyDuplicates(targetEntry.comparable, comparables.map((c) => c.comparable))
+      const displayByRequestId = new Map(comparables.map((c) => [c.comparable.requestId, c.display]))
+
+      return matches.map((m) => {
+        const display = displayByRequestId.get(m.comparable.requestId)!
+        return {
+          requestId: m.comparable.requestId,
+          authorityId: m.comparable.authorityId,
+          issuerType: display.issuerType,
+          submittedAt: display.submittedAt,
+          receivedAt: display.receivedAt,
+          firstName: display.firstName,
+          lastName: display.lastName,
+          matchedOn: m.matchedOn
+        }
+      })
+    } catch (err) {
+      this.rethrow(err, 'getLikelyDuplicateRequests')
+    }
+  }
+
+  /** D-44: the closure state of one request, or `undefined` when it is neither closed nor closing. */
+  async getDuplicateClosure (requestId: string): Promise<RegistrationDuplicateClosure | undefined> {
+    if (!this.ctx) return undefined
+    const ctx = this.ctx
+    try {
+      const row = await ctx.db.prepare('select AuthorityId from RegistrationRequest where Id = :requestId').get({ requestId })
+      if (!row) return undefined
+      const authorityId = asText(row.AuthorityId, 'RegistrationRequest.AuthorityId')
+      return await readDuplicateClosure(ctx.db, requestId, authorityId)
+    } catch (err) {
+      this.rethrow(err, 'getDuplicateClosure')
+    }
+  }
+
+  /** D-44: decided (`'a'`/`'r'`) request ids of `authorityId` with no `RegistrationDecision` row
+   *  yet, oldest `DecidedAt` first (then `Id`) — the peer-sync drain list. */
+  async listUnpublishedRegistrationDecisions (authorityId: string): Promise<string[]> {
+    if (!this.ctx) return []
+    const ctx = this.ctx
+    const out: string[] = []
+    try {
+      // T-62-19-QUEREUS-01 (found via TDD): `R.AuthorityId = :x and R.Status in ('a','r')` (and the
+      // equivalent `and (R.Status = 'a' or R.Status = 'r')`, with either literal or bound operands)
+      // silently returns ZERO rows against this table, while the identical predicate keyed on `R.Id`
+      // instead of `R.AuthorityId` works. `R.AuthorityId = :x and R.Status = :oneValue` also works —
+      // only the AuthorityId-equality-AND-Status-OR combination is affected. `Status <> 'p'` is
+      // semantically identical here (StatusValid closes the vocabulary to exactly 'p'/'a'/'r') and
+      // does not trip the bug — empirically confirmed before shipping this form.
+      for await (const row of ctx.db.eval(
+        `select R.Id, R.DecidedAt from RegistrationRequest R
+           where R.AuthorityId = :rowAuthorityId and R.Status <> 'p'
+             and not exists (select 1 from RegistrationDecision D where D.RequestId = R.Id and D.AuthorityId = R.AuthorityId)
+           order by R.DecidedAt, R.Id`,
+        { rowAuthorityId: authorityId }
+      )) {
+        out.push(asText(row.Id, 'RegistrationRequest.Id'))
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'listUnpublishedRegistrationDecisions')
+    }
+  }
+
+  /**
+   * D-44: writes ONE `'d'` (closed-as-duplicate) row for `targetRequestId` through `publisher`.
+   * Never throws: a publisher rejection resolves `closure: 'pending-retry'` with the thrown
+   * error's own string `code` property (or `'unknown'` when it carried none) — never the error's
+   * message text. Shared by `publishRegistrationDecision`'s transaction 2, its "already
+   * published, resume the interrupted close" branch, and `completeDuplicateClosures`.
+   */
+  private async publishDuplicateCloseRow (
+    publisher: RegistrationDecisionPublishPort,
+    targetRequestId: string
+  ): Promise<{ closure: RegistrationDuplicateClosureOutcome; closureCursor?: string; closureErrorCode?: string }> {
+    try {
+      const closureCursor = await publisher.publishDecision({
+        requestId: targetRequestId,
+        status: 'd',
+        decidedAt: toIsoZDatetime(Date.now())
+      })
+      return { closure: 'closed', closureCursor }
+    } catch (err) {
+      const errorCode =
+        err !== null && typeof err === 'object' && 'code' in err && typeof (err as { code?: unknown }).code === 'string'
+          ? (err as { code: string }).code
+          : 'unknown'
+      return { closure: 'pending-retry', closureErrorCode: errorCode }
+    }
+  }
+
+  /**
+   * D-44: publishes a decided request's `RegistrationDecision` through `publisher` — 62-01's
+   * protocol exactly, in TWO separate transactions (Quereus mis-evaluates
+   * `DuplicateCloseValid`'s self-referential `EXISTS` when two deferred entries land in one
+   * COMMIT; a caller-open transaction would also roll the first row back together with the
+   * second). `publisher` MUST write into this engine's OWN database — a publisher wired to a
+   * different one is refused `'publisher-db-mismatch'` once its first write is not visible here.
+   */
+  async publishRegistrationDecision (
+    publisher: RegistrationDecisionPublishPort,
+    requestId: string,
+    options?: RegistrationDecisionPublishOptions
+  ): Promise<RegistrationDecisionPublishResult> {
+    this.requireCtx('publishRegistrationDecision')
+    const ctx = this.ctx!
+    try {
+      if (!ctx.db.getAutocommit()) {
+        throw new RegistrationDuplicateError(
+          'transaction-open',
+          requestId,
+          'publishRegistrationDecision: must not be called inside an open transaction — the two decision inserts must commit separately'
+        )
+      }
+
+      const row = await ctx.db
+        .prepare(
+          'select Id, AuthorityId, Status, DecidedAt, RejectionReason, RequesterKey, Payload, ReceivedAt ' +
+          'from RegistrationRequest where Id = :requestId'
+        )
+        .get({ requestId })
+      if (!row) {
+        throw new RegistrationDuplicateError('request-not-found', requestId, `publishRegistrationDecision: no RegistrationRequest for requestId=${requestId}`)
+      }
+      const authorityId = asText(row.AuthorityId, 'RegistrationRequest.AuthorityId')
+      const status = asText(row.Status, 'RegistrationRequest.Status') as RegistrationRequestStatus
+      if (status === 'p') {
+        throw new RegistrationDuplicateError('request-not-decided', requestId, `publishRegistrationDecision: RegistrationRequest ${requestId} is still pending`)
+      }
+      if (authorityId !== publisher.authorityId) {
+        throw new RegistrationDuplicateError(
+          'authority-mismatch',
+          requestId,
+          "publishRegistrationDecision: publisher.authorityId does not match the request's AuthorityId"
+        )
+      }
+
+      // Already published?
+      const existing = await ctx.db
+        .prepare('select Status, ClosesRequestId from RegistrationDecision where RequestId = :requestId and AuthorityId = :rowAuthorityId')
+        .get({ requestId, rowAuthorityId: authorityId })
+      if (existing) {
+        const publishedStatus = asText(existing.Status, 'RegistrationDecision.Status') as RegistrationDecisionPublication['status']
+        const existingCloses = existing.ClosesRequestId == null ? undefined : asText(existing.ClosesRequestId, 'RegistrationDecision.ClosesRequestId')
+        if (existingCloses === undefined) {
+          return { requestId, outcome: 'already-published', publishedStatus, closure: 'none' }
+        }
+        const targetClosure = await readDuplicateClosure(ctx.db, existingCloses, authorityId)
+        if (targetClosure?.state === 'closed') {
+          return { requestId, outcome: 'already-published', publishedStatus, closesRequestId: existingCloses, closure: 'already-closed' }
+        }
+        const closeResult = await this.publishDuplicateCloseRow(publisher, existingCloses)
+        return { requestId, outcome: 'already-published', publishedStatus, closesRequestId: existingCloses, ...closeResult }
+      }
+
+      const buildComparable = (comparableRequestId: string, requesterKey: string, payloadJson: unknown, receivedAtRaw: string): DuplicateComparable => ({
+        requestId: comparableRequestId,
+        authorityId,
+        requesterKey,
+        receivedAt: reZuluDatetime(receivedAtRaw),
+        identity: extractRegistrationIdentity(parseJsonOr<RegisterInit | undefined>(payloadJson, undefined, 'RegistrationRequest.Payload'))
+      })
+
+      // Resolve the closure target.
+      let target: string | undefined
+      let closureNoneReason: 'skipped-target-decided' | 'skipped-target-closed' | undefined
+      const explicit = options?.closesRequestId
+      if (explicit === null) {
+        // Decide without closing — target stays undefined, closure 'none'.
+      } else if (typeof explicit === 'string') {
+        if (explicit === requestId) {
+          throw new RegistrationDuplicateError('self-closure', requestId, 'publishRegistrationDecision: closesRequestId must not name the request itself', explicit)
+        }
+        const xRow = await ctx.db
+          .prepare('select Id, AuthorityId, Status, RequesterKey, Payload, ReceivedAt from RegistrationRequest where Id = :x')
+          .get({ x: explicit })
+        if (!xRow || asText(xRow.AuthorityId, 'RegistrationRequest.AuthorityId') !== authorityId) {
+          throw new RegistrationDuplicateError(
+            'not-a-likely-duplicate',
+            requestId,
+            `publishRegistrationDecision: closesRequestId ${explicit} is not a request of the same authority`,
+            explicit
+          )
+        }
+        if (asText(xRow.Status, 'RegistrationRequest.Status') !== 'p') {
+          closureNoneReason = 'skipped-target-decided'
+        } else if (await readDuplicateClosure(ctx.db, explicit, authorityId)) {
+          closureNoneReason = 'skipped-target-closed'
+        } else {
+          const aComparable = buildComparable(requestId, asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'), row.Payload, row.ReceivedAt as string)
+          const xComparable = buildComparable(explicit, asText(xRow.RequesterKey, 'RegistrationRequest.RequesterKey'), xRow.Payload, xRow.ReceivedAt as string)
+          if (matchRegistrationIdentities(aComparable, xComparable) === undefined) {
+            throw new RegistrationDuplicateError(
+              'not-a-likely-duplicate',
+              requestId,
+              `publishRegistrationDecision: closesRequestId ${explicit} does not match requestId ${requestId}'s identity`,
+              explicit
+            )
+          }
+          target = explicit
+        }
+      } else {
+        // Automatic: the oldest flagged pending candidate received no later than A's DecidedAt.
+        const decidedAtRaw = row.DecidedAt as string | null
+        const decidedMs = decidedAtRaw == null ? NaN : Date.parse(reZuluDatetime(decidedAtRaw))
+        const aComparable = buildComparable(requestId, asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'), row.Payload, row.ReceivedAt as string)
+        const pending = await this.readPendingComparables(authorityId)
+        const candidates = findLikelyDuplicates(aComparable, pending.map((p) => p.comparable))
+          .filter((m) => !Number.isNaN(decidedMs) && Date.parse(m.comparable.receivedAt) <= decidedMs)
+        target = candidates[0]?.comparable.requestId
+      }
+
+      // decidedAt for the surviving row.
+      const decidedAtRaw = row.DecidedAt as string | null
+      const decidedAtParsed = decidedAtRaw == null ? NaN : Date.parse(reZuluDatetime(decidedAtRaw))
+      const decidedAt = Number.isNaN(decidedAtParsed) ? toIsoZDatetime(Date.now()) : new Date(decidedAtParsed).toISOString()
+
+      const rawReason = row.RejectionReason == null ? '' : String(row.RejectionReason).trim()
+      const reason = status === 'r' && rawReason.length > 0 ? rawReason : undefined
+
+      // Transaction 1: the surviving row.
+      const cursor = await publisher.publishDecision({
+        requestId,
+        status,
+        reason,
+        decidedAt,
+        closesRequestId: target
+      })
+      const verifyRow = await ctx.db
+        .prepare('select Status from RegistrationDecision where RequestId = :requestId and AuthorityId = :rowAuthorityId')
+        .get({ requestId, rowAuthorityId: authorityId })
+      if (!verifyRow) {
+        throw new RegistrationDuplicateError(
+          'publisher-db-mismatch',
+          requestId,
+          "publishRegistrationDecision: the publisher reported success, but the decision row is not visible in this engine's own database"
+        )
+      }
+
+      // Transaction 2, only when there is a target.
+      let closure: RegistrationDuplicateClosureOutcome
+      let closureCursor: string | undefined
+      let closureErrorCode: string | undefined
+      if (target === undefined) {
+        closure = closureNoneReason ?? 'none'
+      } else {
+        const closeResult = await this.publishDuplicateCloseRow(publisher, target)
+        closure = closeResult.closure
+        closureCursor = closeResult.closureCursor
+        closureErrorCode = closeResult.closureErrorCode
+      }
+
+      return { requestId, outcome: 'published', publishedStatus: status, cursor, closesRequestId: target, closure, closureCursor, closureErrorCode }
+    } catch (err) {
+      if (err instanceof RegistrationDuplicateError) throw err
+      this.rethrow(err, 'publishRegistrationDecision')
+    }
+  }
+
+  /**
+   * D-44: resumes every interrupted two-transaction close of `publisher.authorityId` — writes
+   * the missing `'d'` row for each target exactly once. Never throws per target: a failure is
+   * reported in `failed`, never thrown.
+   */
+  async completeDuplicateClosures (publisher: RegistrationDecisionPublishPort): Promise<RegistrationDuplicateClosureRepairReport> {
+    this.requireCtx('completeDuplicateClosures')
+    const ctx = this.ctx!
+    try {
+      if (!ctx.db.getAutocommit()) {
+        throw new RegistrationDuplicateError(
+          'transaction-open',
+          '',
+          'completeDuplicateClosures: must not be called inside an open transaction — each resumed close must commit on its own'
+        )
+      }
+
+      const targets: string[] = []
+      for await (const row of ctx.db.eval(
+        `select D.ClosesRequestId as Target from RegistrationDecision D
+           where D.AuthorityId = :rowAuthorityId and D.ClosesRequestId is not null
+             and not exists (
+               select 1 from RegistrationDecision X
+                 where X.RequestId = D.ClosesRequestId and X.AuthorityId = D.AuthorityId and X.Status = 'd'
+             )`,
+        { rowAuthorityId: publisher.authorityId }
+      )) {
+        targets.push(asText(row.Target, 'RegistrationDecision.ClosesRequestId'))
+      }
+
+      const completed: string[] = []
+      const failed: Array<{ requestId: string; reason: 'target-decided' | 'publish-failed'; errorCode?: string }> = []
+      for (const target of targets) {
+        const localRow = await ctx.db.prepare('select Status from RegistrationRequest where Id = :target').get({ target })
+        if (localRow && asText(localRow.Status, 'RegistrationRequest.Status') !== 'p') {
+          failed.push({ requestId: target, reason: 'target-decided' })
+          continue
+        }
+        const result = await this.publishDuplicateCloseRow(publisher, target)
+        if (result.closure === 'closed') {
+          completed.push(target)
+        } else {
+          failed.push({ requestId: target, reason: 'publish-failed', errorCode: result.closureErrorCode })
+        }
+      }
+      return { completed, failed }
+    } catch (err) {
+      if (err instanceof RegistrationDuplicateError) throw err
+      this.rethrow(err, 'completeDuplicateClosures')
+    }
+  }
+
   /**
    * D-07: recovers the decision-time checklist from the persisted
    * `VerificationCid` by BOUNDED ENUMERATION over the module-level
@@ -2400,6 +2807,20 @@ export class RegistrationEngine implements IRegistrationEngine {
         // opaque CHECK failure.
         throw new Error(`rejectRegistrationRequest: RegistrationRequest ${requestId} is already decided (Status=${status})`)
       }
+
+      // D-44: a request closed or closing as a duplicate is undecidable — checked BEFORE the
+      // threshold guard below and before any ceremony write, mirroring the "already decided"
+      // check immediately above it.
+      const duplicateClosure = await readDuplicateClosure(ctx.db, requestId, authorityId)
+      if (duplicateClosure) {
+        throw new RegistrationDuplicateError(
+          'closed-as-duplicate',
+          requestId,
+          'This request was closed as a duplicate of another request and can no longer be decided.',
+          duplicateClosure.closedByRequestId ?? undefined
+        )
+      }
+
       const submittedAt = restoreCanonicalDatetime(asText(row.SubmittedAt, 'RegistrationRequest.SubmittedAt'))
       const receivedAt = restoreCanonicalDatetime(asText(row.ReceivedAt, 'RegistrationRequest.ReceivedAt'))
 
@@ -2447,8 +2868,12 @@ export class RegistrationEngine implements IRegistrationEngine {
       // OfficerSignature and advances nothing (D-11's no-veto derivation).
       const rejectThreshold = await readAuthorityThreshold(ctx.db, authorityId, 'vrg')
       if (rejectThreshold > 1) {
+        // 62-19 crossnote (claimed): the previous text pointed the officer at a screen it cannot
+        // reach — registrant tasks are filtered out of TasksScreen (62-12). The corrected text
+        // below states what actually happened and how the request IS decided (every officer's
+        // rejection counts as one vote, through their own signature task), without naming a screen.
         throw new Error(
-          `rejectRegistrationRequest: This authority needs ${rejectThreshold} approvals for registrations. One officer cannot reject a request on their own; record your decision on the signature task instead.`
+          `rejectRegistrationRequest: This authority needs ${rejectThreshold} approvals for registrations. One officer cannot reject a request on their own, so nothing was recorded. Each officer's rejection counts as one vote, and the request is refused only when the remaining officers can no longer reach ${rejectThreshold} approvals.`
         )
       }
 
@@ -2529,6 +2954,7 @@ export class RegistrationEngine implements IRegistrationEngine {
         }
       )
     } catch (err) {
+      if (err instanceof RegistrationDuplicateError) throw err
       this.rethrow(err, 'rejectRegistrationRequest')
     }
   }

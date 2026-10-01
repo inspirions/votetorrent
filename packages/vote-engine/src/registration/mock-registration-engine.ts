@@ -2,6 +2,8 @@ import { setCommit, setDisclose, randomBytes } from '@optimystic/quereus-plugin-
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
 import { clampPageSize } from './registrant-list-query.js'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from './access-trail-fields.js'
+import { findLikelyDuplicates, extractRegistrationIdentity } from './duplicate-detection.js'
+import type { DuplicateComparable } from './duplicate-detection.js'
 import type {
   DisclosedSelective,
   ElectionAttestationPolicy,
@@ -10,6 +12,7 @@ import type {
   ElectionRegistrationField,
   IRegistrationEngine,
   IRegistrationRegisterBuilder,
+  LikelyDuplicateRequest,
   PriorRejection,
   PrivateDetail,
   RegisterInit,
@@ -25,6 +28,11 @@ import type {
   RegistrantStatus,
   RegistrationBridgeKey,
   RegistrationBridgeKeyInit,
+  RegistrationDecisionPublishOptions,
+  RegistrationDecisionPublishPort,
+  RegistrationDecisionPublishResult,
+  RegistrationDuplicateClosure,
+  RegistrationDuplicateClosureRepairReport,
   RegistrationRequestDecision,
   RegistrationRequestInit,
   RegistrationRequestIssuerType,
@@ -193,6 +201,46 @@ export class MockRegistrationEngine implements IRegistrationEngine {
       submittedAt: iso(now - 30_000),
       receivedAt: iso(now - 30_000),
       requesterKey: repeatRequesterKey,
+      issuerType: 'registrant',
+      bridgeId: null,
+      status: 'p'
+    })
+
+    // D-43/D-44 (Phase 62 Plan 19): a look-alike PENDING pair — same public name, no dob
+    // conflict, two DIFFERENT requester keys — so `getLikelyDuplicateRequests` has something to
+    // flag against a fresh mock. Checked first: none of the four fixtures above form such a pair
+    // (the two PENDING entries, `fixture-request-bridge-1` and `fixture-request-pending-repeat`,
+    // carry different names). Both land in the SAME authority as every other fixture above, and
+    // neither touches `this.registrants` (same "no exact-count-assertion contamination" rule the
+    // comment below states for `approvedRegistrantId`).
+    const duplicatePairPayloadA: RegisterInit = {
+      registrant: { id: 'fixture-registrant-duplicate-a', authorityId, expiration: iso(now + 365 * 86_400_000) },
+      public: { lastName: 'Dupree', firstName: 'Sam' },
+      private: { expiration: iso(now + 365 * 86_400_000), details: [] }
+    }
+    this.registrationRequests.set('fixture-request-pending-duplicate-a', {
+      id: 'fixture-request-pending-duplicate-a',
+      authorityId,
+      payload: duplicatePairPayloadA,
+      submittedAt: iso(now - 20 * 60_000),
+      receivedAt: iso(now - 20 * 60_000),
+      requesterKey: 'fixture-requester-duplicate-a',
+      issuerType: 'registrant',
+      bridgeId: null,
+      status: 'p'
+    })
+    const duplicatePairPayloadB: RegisterInit = {
+      registrant: { id: 'fixture-registrant-duplicate-b', authorityId, expiration: iso(now + 365 * 86_400_000) },
+      public: { lastName: 'Dupree', firstName: 'Sam' },
+      private: { expiration: iso(now + 365 * 86_400_000), details: [] }
+    }
+    this.registrationRequests.set('fixture-request-pending-duplicate-b', {
+      id: 'fixture-request-pending-duplicate-b',
+      authorityId,
+      payload: duplicatePairPayloadB,
+      submittedAt: iso(now - 10 * 60_000),
+      receivedAt: iso(now - 10 * 60_000),
+      requesterKey: 'fixture-requester-duplicate-b',
       issuerType: 'registrant',
       bridgeId: null,
       status: 'p'
@@ -735,5 +783,67 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   async rejectRegistrationRequest (_requestId: string, _decision: RegistrationRequestDecision, _signatureOrCallback: SignatureOrCallback): Promise<void> {
     // CONTRACT STUB — replaced by 48-12 (rejection)
     throw new Error('rejectRegistrationRequest is not implemented')
+  }
+
+  // ---------- D-44 duplicate detection and closure (Phase 62 Plan 19) ----------
+
+  /**
+   * D-44 mock parity: builds `DuplicateComparable`s from this map's PENDING entries of the
+   * target's own authority (the mock holds no `RegistrationDecision` table, so every pending
+   * entry is implicitly "not closed") and runs the SAME shared matcher the real engine uses.
+   */
+  async getLikelyDuplicateRequests (requestId: string): Promise<LikelyDuplicateRequest[]> {
+    const target = this.registrationRequests.get(requestId)
+    if (!target || target.status !== 'p') return []
+
+    const pending = [...this.registrationRequests.values()].filter((r) => r.status === 'p' && r.authorityId === target.authorityId)
+    const comparables: DuplicateComparable[] = pending.map((r) => ({
+      requestId: r.id,
+      authorityId: r.authorityId,
+      requesterKey: r.requesterKey,
+      receivedAt: r.receivedAt,
+      identity: extractRegistrationIdentity(r.payload)
+    }))
+    const targetComparable = comparables.find((c) => c.requestId === requestId)
+    if (!targetComparable) return []
+
+    const byId = new Map(pending.map((r) => [r.id, r]))
+    return findLikelyDuplicates(targetComparable, comparables).map((m) => {
+      const r = byId.get(m.comparable.requestId)!
+      return {
+        requestId: r.id,
+        authorityId: r.authorityId,
+        issuerType: r.issuerType as RegistrationRequestIssuerType,
+        submittedAt: r.submittedAt,
+        receivedAt: r.receivedAt,
+        firstName: r.payload.public?.firstName,
+        lastName: r.payload.public?.lastName,
+        matchedOn: m.matchedOn
+      }
+    })
+  }
+
+  /** D-44 mock parity: the mock holds no `RegistrationDecision` table, so no request is ever closed. */
+  async getDuplicateClosure (_requestId: string): Promise<RegistrationDuplicateClosure | undefined> {
+    return undefined
+  }
+
+  /** D-44 mock parity: the mock publishes no decisions, so nothing is ever "unpublished". */
+  async listUnpublishedRegistrationDecisions (_authorityId: string): Promise<string[]> {
+    return []
+  }
+
+  async publishRegistrationDecision (
+    _publisher: RegistrationDecisionPublishPort,
+    _requestId: string,
+    _options?: RegistrationDecisionPublishOptions
+  ): Promise<RegistrationDecisionPublishResult> {
+    // CONTRACT STUB — the mock holds no RegistrationDecision table
+    throw new Error('publishRegistrationDecision is not implemented')
+  }
+
+  async completeDuplicateClosures (_publisher: RegistrationDecisionPublishPort): Promise<RegistrationDuplicateClosureRepairReport> {
+    // CONTRACT STUB — the mock holds no RegistrationDecision table
+    throw new Error('completeDuplicateClosures is not implemented')
   }
 }
