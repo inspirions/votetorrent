@@ -1,4 +1,13 @@
-import type { Signature } from '@votetorrent/vote-core';
+import type {
+	Signature,
+	ReassociationIntake,
+	ReassociationOpener,
+	ReassociationProcessingSummary,
+	RegistrationDecisionPublication,
+	RegistrationDecisionPublishPort,
+	RegistrationDecisionPublishResult,
+	RegistrationDuplicateClosureRepairReport,
+} from '@votetorrent/vote-core';
 import type {
 	IKeyVault,
 	P2pAssociationTransport,
@@ -23,22 +32,42 @@ import { resolveAuthorityKeyVault } from '../../engines/key-vault';
 import type { PeerStagingTransports } from '../../engines/engine-factory';
 
 /**
- * attach-peer-sync-binding.ts — Phase 62 Plan 21 (D-28/D-31/D-32).
+ * attach-peer-sync-binding.ts — Phase 62 Plan 21 (D-28/D-31/D-32), extended by Phase 62 Plan 25
+ * (D-28/D-44/D-46 — the 62-19/62-18/62-01 orchestrator assignments).
  *
  * The 'peer' `SyncBindingHandle`: `syncNow` intakes this authority's staged registration and
  * association requests from the strand, publishes officer-signed registration decisions for
- * locally-decided peer requests, and drives association processing with the P2P transport AS the
- * intake. `readCounts` derives pending/synced/failed from the transport's own reports, signing
+ * locally-decided peer requests through 62-19's closure-aware drain, drives first-association
+ * processing AND 62-18's automatic re-association pass with the P2P transport AS the intake, both
+ * legs. `readCounts` derives pending/synced/failed from the transport's own reports, signing
  * nothing.
  *
  * D-28: `attachPeerSyncBinding` is called UNCONDITIONALLY from `AppProvider.tsx` — no dev-only
- * build gate, no configuration. P2P is the default intake path, unlike the REST/filesystem dev/device-
- * proof harnesses (`attach-sync-bindings.ts`/`attach-association-sync-bindings.ts`).
+ * build gate, no configuration. P2P is the default intake path. As of 62-25, association has NO
+ * REST or filesystem app binding at all (the dev-only association REST harness is deleted) — this
+ * file's `processPending` step is the ONLY place association requests, first or re-association,
+ * are ever processed by the Authority app.
  *
  * D-32: the transports come from the factory's `createPeerStagingTransports`, bound to
  * `strandId = currentNetworkHash`; this file never opens a strand itself.
  *
  * D-23: the peer leg is code-complete and unverified on devices (proof debt against P2P-11).
+ *
+ * D-44 (62-19 assignment): every registration decision this file publishes goes through
+ * `RegistrationEngine.listUnpublishedRegistrationDecisions` -> `publishRegistrationDecision`
+ * (automatic closure) plus one `completeDuplicateClosures` resume per sync — never the
+ * registration transport's `publishDecision` directly. `createRegistrationDecisionPublisher` is
+ * the ONE wrapper shape through which a decision may reach the strand (see that function's own
+ * doc comment). The drain covers every decided request of this authority, including a request
+ * intaken over the REST bridge (62-25's `attach-sync-bindings.ts`) — a decision row carries no
+ * staging-row dependency (62-01), and the strand is the authoritative decision record regardless
+ * of which transport intook the original request.
+ *
+ * D-46 (62-18 assignment): after `processPendingAssociationRequests`, this file ALWAYS also calls
+ * `AssociationEngine.processPendingReassociations`, so an authority's configured automatic
+ * re-association mode actually takes effect. Without this call every re-association would wait
+ * for manual officer review regardless of the authority's saved `reassociationMode` — a fail-safe
+ * default, but not what D-46 configures when an authority opts into automatic mode.
  *
  * Count semantics (D-31, planner discretion): `pending`/`synced` are derived from the transport's
  * own delivered reports against this authority's local read model — pending = delivered and not
@@ -64,15 +93,23 @@ interface PeerIntakeEngine {
 	createOpener(vault: IKeyVault): StagingOpener;
 }
 
-/** The minimal local structural type this file needs from `RegistrationEngine`. */
+/** The minimal local structural type this file needs from `RegistrationEngine`. Widened by 62-25
+ * (D-44, the 62-19 assignment) with the closure-aware decision-publish drain. */
 interface PeerRegistrationEngine {
 	getRegistrationRequest(
 		requestId: string,
 	): Promise<{ status: string; decidedAt?: string; rejectionReason?: string } | undefined>;
 	submitRegistrationRequest(init: unknown, requesterKey: string, signatureOrCallback: Signature): Promise<string>;
+	listUnpublishedRegistrationDecisions(authorityId: string): Promise<string[]>;
+	publishRegistrationDecision(
+		publisher: RegistrationDecisionPublishPort,
+		requestId: string,
+	): Promise<RegistrationDecisionPublishResult>;
+	completeDuplicateClosures(publisher: RegistrationDecisionPublishPort): Promise<RegistrationDuplicateClosureRepairReport>;
 }
 
-/** The minimal local structural type this file needs from `AssociationEngine`. */
+/** The minimal local structural type this file needs from `AssociationEngine`. Widened by 62-25
+ * (D-46, the 62-18 assignment) with the automatic re-association driver. */
 interface PeerAssociationEngine {
 	getAssociationRequest(requestId: string): Promise<{ status: string } | undefined>;
 	submitAssociationRequest(init: unknown, requesterKey: string, signatureOrCallback: Signature): Promise<string>;
@@ -82,6 +119,33 @@ interface PeerAssociationEngine {
 		signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>),
 		intake: P2pAssociationTransport,
 	): Promise<{ challengesIssued: number; associated: number; rejected: number }>;
+	processPendingReassociations(
+		authorityId: string,
+		signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>),
+		intake: ReassociationIntake,
+		opener: ReassociationOpener,
+	): Promise<ReassociationProcessingSummary>;
+}
+
+/**
+ * The ONLY shape through which a registration decision may reach the strand (D-44, 62-19
+ * coordination) — the transport's own decision-publish method is called exactly once in this
+ * file's comment-stripped source, right here. Wraps the registration transport so
+ * `RegistrationEngine`'s closure-aware drain (`listUnpublishedRegistrationDecisions` /
+ * `publishRegistrationDecision` / `completeDuplicateClosures`) can write through it. The publisher
+ * writes into the SAME strand `Database` the engine reads, because both come from the SAME
+ * `createPeerStagingTransports` call over the established ctx (D-32) —
+ * `RegistrationEngine.publishRegistrationDecision` probes the write back through its own `ctx.db`
+ * and refuses `'publisher-db-mismatch'` if they ever diverge.
+ */
+export function createRegistrationDecisionPublisher(
+	transport: { publishDecision: (decision: RegistrationDecisionPublication) => Promise<string> },
+	authorityId: string,
+): RegistrationDecisionPublishPort {
+	return {
+		authorityId,
+		publishDecision: (decision) => transport.publishDecision(decision),
+	};
 }
 
 /** Structural check (not `instanceof`) — `P2pStagingError` crosses from vote-engine's barrel. */
@@ -157,27 +221,33 @@ export function createPeerSyncBinding(deps: PeerSyncBindingDeps): SyncBindingHan
 				}
 			}
 
-			// (b) registration decision reconcile — the only Authority path that publishes
-			// registration decisions to the strand. Runs on the officer's peer sync, never at
-			// decide time, and skips any request that already has a decision row.
-			const decided = new Set((await registration.readDecisionRecords()).map((d) => d.requestId));
-			for (const doc of authRegDocs) {
-				const local = await regEngine.getRegistrationRequest(doc.requestId);
-				if (!local) continue;
-				if ((local.status === 'a' || local.status === 'r') && local.decidedAt !== undefined && !decided.has(doc.requestId)) {
-					try {
-						await registration.publishDecision({
-							requestId: doc.requestId,
-							status: local.status as 'a' | 'r',
-							reason: local.status === 'r' ? local.rejectionReason : undefined,
-							decidedAt: local.decidedAt,
-						});
-					} catch (err) {
-						if (!isP2pStagingError(err, 'duplicate-decision')) {
-							errorItemIds.add(doc.requestId);
-						}
+			// (b) registration decision drain (D-44, 62-19 coordination) — the ONLY Authority path
+			// that publishes registration decisions to the strand, and the only caller of
+			// `createRegistrationDecisionPublisher`. Runs on the officer's peer sync, never at
+			// decide time (62-27 adds the decide-time publish). Covers EVERY decided request of
+			// this authority with no decision row yet — including a request intaken over the REST
+			// bridge (62-25's `attach-sync-bindings.ts`), because a decision row carries no
+			// staging-row dependency (62-01) and the strand is the authoritative decision record.
+			const publisher = createRegistrationDecisionPublisher(registration, authorityId);
+			const unpublishedIds = await regEngine.listUnpublishedRegistrationDecisions(authorityId);
+			for (const requestId of unpublishedIds) {
+				try {
+					// Options omitted: automatic closure (62-19 coordination) — the oldest flagged
+					// pending duplicate candidate, if any, closes alongside this decision.
+					await regEngine.publishRegistrationDecision(publisher, requestId);
+				} catch (err) {
+					if (!isP2pStagingError(err, 'duplicate-decision')) {
+						errorItemIds.add(requestId);
 					}
 				}
+			}
+			// Resume any interrupted two-transaction duplicate close exactly once per sync. A
+			// throw here is swallowed: the next sync resumes it (62-19 makes this idempotent).
+			try {
+				const repair = await regEngine.completeDuplicateClosures(publisher);
+				for (const failure of repair.failed) errorItemIds.add(failure.requestId);
+			} catch {
+				// Swallowed — see comment above.
 			}
 
 			// (c) association — the P2P transport IS the intake (D-06 via 62-15).
@@ -203,7 +273,27 @@ export function createPeerSyncBinding(deps: PeerSyncBindingDeps): SyncBindingHan
 					const row = await assocEngine.getAssociationRequest(doc.requestId);
 					return row === undefined || row.status !== 'c';
 				},
-				processPending: () => assocEngine.processPendingAssociationRequests(authorityId, sign, association),
+				// D-46 (62-18 assignment): first-association processing, THEN the automatic
+				// re-association pass — unconditionally, even when the first driver throws, so one
+				// driver's failure can never starve the other (fail-safe: without this call every
+				// re-association would silently wait for manual review regardless of the
+				// authority's configured mode). `opener` is the SAME instance passed to
+				// `createTransports` above. The first error wins the rethrow; the reassociation
+				// error is reported only when the first driver succeeded.
+				processPending: async () => {
+					let firstError: unknown;
+					try {
+						await assocEngine.processPendingAssociationRequests(authorityId, sign, association);
+					} catch (err) {
+						firstError = err;
+					}
+					try {
+						await assocEngine.processPendingReassociations(authorityId, sign, association, opener);
+					} catch (err) {
+						if (firstError === undefined) firstError = err;
+					}
+					if (firstError !== undefined) throw firstError;
+				},
 			});
 			imported += assocResult.imported;
 			for (const id of assocResult.errorItemIds) errorItemIds.add(id);

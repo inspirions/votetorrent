@@ -35,7 +35,7 @@ import {
 	REGISTRATIONS_TABLES_READ,
 } from '@votetorrent/web-data/officer';
 import { seedFoundingAuthority } from './fixtures/seed-founding-authority.js';
-import { seedElectionSurface, SEED_ELECTION, SEED_EXPECTED_COUNTS } from './fixtures/seed-election-surface.js';
+import { seedElectionSurface, SEED_ELECTION, SEED_EXPECTED_COUNTS, ceremony } from './fixtures/seed-election-surface.js';
 import { webDataSrc } from '../../../scripts/lib/source-paths.mjs';
 
 const OFFICER_DIR = webDataSrc('officer');
@@ -286,6 +286,44 @@ test('hasAnyRegistrationData is false on founding-only and true once a Registrat
 
 	const seeded = await seededDb();
 	assert.equal(await hasAnyRegistrationData(seeded), true);
+});
+
+test('hasAnyRegistrationData is true once a lone AuthorityIntakePolicy row exists (Phase 62 Plan 25, 62-01 open question)', async () => {
+	const db = await foundingOnlyDb();
+	assert.equal(await hasAnyRegistrationData(db), false);
+
+	const { Id: authorityId } = await db.prepare('select Id from Authority').get({});
+
+	const tid = 600;
+	const nonce = await ceremony(db, {
+		scope: 'vrg',
+		tid,
+		digestSql: ':tid, :tbl, :aid, :rev, :url, :mode, :setAt',
+		params: {
+			tbl: 'AuthorityIntakePolicy',
+			aid: authorityId,
+			rev: 1,
+			url: 'https://bridge.example/intake',
+			mode: 'manual',
+			setAt: '2026-03-01T00:00:00.000Z',
+		},
+	});
+	await db.exec(
+		`insert into AuthorityIntakePolicy (AuthorityId,Revision,RestBridgeUrl,ReassociationMode,SetAt)
+		 with context SigningNonce = :n, Tid = :tid
+		 values (:aid,:rev,:url,:mode,:setAt)`,
+		{
+			n: nonce,
+			tid,
+			aid: authorityId,
+			rev: 1,
+			url: 'https://bridge.example/intake',
+			mode: 'manual',
+			setAt: '2026-03-01T00:00:00.000Z',
+		},
+	);
+
+	assert.equal(await hasAnyRegistrationData(db), true);
 });
 
 // --- Rules R3 / R4 source-level scans ---------------------------------------
