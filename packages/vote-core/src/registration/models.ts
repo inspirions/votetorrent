@@ -568,6 +568,14 @@ export interface RegistrationRequestListRow {
   lastName?: string
   firstName?: string
   hasPriorRejections: boolean
+
+  /**
+   * D-44: present only when this request is `'closed'` (a `'d'` `RegistrationDecision` row
+   * exists) or `'closing'` (another decision names it in `ClosesRequestId` but its own `'d'` row
+   * has not landed yet). Absent — never `undefined` as an assigned key — on every other row, so a
+   * caller cannot distinguish "not computed" from "not closed".
+   */
+  duplicateClosure?: RegistrationDuplicateClosureState
 }
 
 /**
@@ -610,6 +618,14 @@ export interface RegistrationTransparencyStats {
   approved: number
   rejected: number
   medianTimeToDecisionMs?: number
+
+  /**
+   * D-44: a COUNT of requests closed as a likely duplicate of another decided request — never a
+   * rating. Present **only when greater than zero**, so the pre-existing zero-request deep-equal
+   * (`{ pending: 0, approved: 0, rejected: 0, medianTimeToDecisionMs: undefined }`) stays exact
+   * and this field never appears as an explicit `0`.
+   */
+  closedAsDuplicate?: number
 }
 
 /**
@@ -630,4 +646,130 @@ export interface RegistrationBridgeKeyInit {
   authorityId: string
   label: string
   key: string
+}
+
+/** ********* D-43/D-44: duplicate-registration detection and closure (Phase 62 Plan 19) ***********/
+
+/**
+ * D-44: which normalized identity signals two pending requests share. Values ONLY — never the
+ * underlying field contents (a date of birth, an email, a phone number). This is the entire
+ * disclosure surface `LikelyDuplicateRequest.matchedOn` and every `RegistrationDuplicateError`
+ * message are allowed to carry about WHY a pair matched.
+ */
+export type RegistrationDuplicateMatchSignal = 'requester-key' | 'name' | 'dob' | 'email' | 'phone'
+
+/**
+ * D-44: one likely-duplicate candidate of a pending request, as computed by
+ * `RegistrationEngine.getLikelyDuplicateRequests` — authority-side, in memory, over the
+ * authority's own PENDING requests, and never a SQL CHECK (T-62-01-10 does not widen: nothing
+ * derived from this comparison is ever persisted). Surface 3's `PossibleDuplicateCallout` renders
+ * `candidates[0]`.
+ */
+export interface LikelyDuplicateRequest {
+  requestId: string
+  authorityId: string
+  issuerType: RegistrationRequestIssuerType
+  /** reZulu'd, as on `RegistrationRequestListRow`. */
+  submittedAt: string
+  /** reZulu'd; the ordering key (oldest first). */
+  receivedAt: string
+  /** Public tier only — already visible on the inbox row (never a selective/private field). */
+  firstName?: string
+  lastName?: string
+  /** In `DUPLICATE_MATCH_SIGNAL_ORDER`. */
+  matchedOn: RegistrationDuplicateMatchSignal[]
+}
+
+/**
+ * D-44: a request is either `'closed'` — a `'d'` `RegistrationDecision` row exists for it — or
+ * `'closing'` — another decision of the same authority names it in `ClosesRequestId` but its own
+ * `'d'` row has not been written yet (the two-transaction close is mid-flight or was interrupted).
+ * Either state makes the request undecidable: it cannot be rejected, approved, seeded, or counted
+ * as pending.
+ */
+export type RegistrationDuplicateClosureState = 'closed' | 'closing'
+
+/** D-44: the closure state of one request, as returned by `getDuplicateClosure`. */
+export interface RegistrationDuplicateClosure {
+  requestId: string
+  state: RegistrationDuplicateClosureState
+  /** `null` only for a `'d'` row that no decision names (the schema's own `DuplicateCloseValid`
+   *  fallback case — see 62-01-SUMMARY.md). */
+  closedByRequestId: string | null
+  /** The `'d'` row's `DecidedAt`, present only when `state === 'closed'`. */
+  closedAt?: string
+}
+
+/** D-44: the three `RegistrationDecision.Status` values a publish can produce. */
+export type RegistrationDecisionPublicationStatus = 'a' | 'r' | 'd'
+
+/**
+ * D-44: what `RegistrationEngine.publishRegistrationDecision` hands to a
+ * `RegistrationDecisionPublishPort`. Structurally assignable to 62-15's
+ * `P2pRegistrationDecisionInput` (`packages/vote-engine/src/registration/transport/
+ * p2p-registration-transport.ts`) — this type is declared independently here (vote-core has no
+ * dependency on vote-engine's transport module) and the two are proven structurally compatible at
+ * the call site, not by a shared declaration.
+ */
+export interface RegistrationDecisionPublication {
+  requestId: string
+  status: RegistrationDecisionPublicationStatus
+  reason?: string
+  /** Canonical ISO-Z (`toISOString` form). */
+  decidedAt: string
+  /** Set ONLY on the surviving `'a'`/`'r'` row — never on the `'d'` row that follows it. */
+  closesRequestId?: string
+}
+
+/**
+ * D-44: the host's wrapper around 62-15's `P2pRegistrationTransport.publishDecision` (or any
+ * equivalent decision-publication channel). `authorityId` is the injected `decisionSigner`'s own
+ * authority — the transport itself does not expose it, so the host carries it explicitly. The
+ * publisher **must** write into the SAME Quereus database `RegistrationEngine` reads; a publisher
+ * wired to a different database is refused `'publisher-db-mismatch'` (the written row is probed
+ * back through the engine's own `ctx.db`, never assumed from the publisher's return value alone).
+ */
+export interface RegistrationDecisionPublishPort {
+  readonly authorityId: string
+  publishDecision(decision: RegistrationDecisionPublication): Promise<string>
+}
+
+/** D-44: the closure-target option for `publishRegistrationDecision`. */
+export interface RegistrationDecisionPublishOptions {
+  /**
+   * `undefined` (omitted): automatic — the oldest flagged pending candidate received no later
+   * than the decision closes. `null`: close nothing. A string: close exactly that request — it
+   * must be a flagged, pending, not-closed candidate of the SAME authority, or the call refuses
+   * `'not-a-likely-duplicate'` with zero rows written.
+   */
+  closesRequestId?: string | null
+}
+
+/** D-44: what a publish attempt actually did to the closure target, if any. */
+export type RegistrationDuplicateClosureOutcome =
+  | 'none' | 'closed' | 'already-closed' | 'pending-retry' | 'skipped-target-decided' | 'skipped-target-closed'
+
+/** D-44: the result of one `publishRegistrationDecision` call. */
+export interface RegistrationDecisionPublishResult {
+  requestId: string
+  outcome: 'published' | 'already-published'
+  /** The status of the row now on the strand for `requestId`. */
+  publishedStatus: RegistrationDecisionPublicationStatus
+  /** Present when `outcome === 'published'`. */
+  cursor?: string
+  closesRequestId?: string
+  closure: RegistrationDuplicateClosureOutcome
+  /** Present when `closure === 'closed'`. */
+  closureCursor?: string
+  /** Present when `closure === 'pending-retry'`: the publisher error's own string `code` property,
+   *  or `'unknown'` when the thrown error carried none. Never the error's message text. */
+  closureErrorCode?: string
+}
+
+/** D-44: the report `completeDuplicateClosures` returns after resuming every interrupted close of
+ *  one authority. */
+export interface RegistrationDuplicateClosureRepairReport {
+  /** Closed request ids whose `'d'` row THIS call wrote. */
+  completed: string[]
+  failed: Array<{ requestId: string; reason: 'target-decided' | 'publish-failed'; errorCode?: string }>
 }

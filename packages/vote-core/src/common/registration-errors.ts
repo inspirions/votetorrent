@@ -33,3 +33,34 @@ export class RegistrantAlreadyExistsError extends Error {
     this.requestId = requestId
   }
 }
+
+/**
+ * D-44: the typed refusal every duplicate-detection and duplicate-closure guard throws (Phase 62
+ * Plan 19). Mirrors `RegistrantAlreadyExistsError`'s shape: explicit `readonly` identifying
+ * fields and an explicit `this.name`. Every caller builds `message` from ids and codes ONLY —
+ * never a name, a date of birth, an email, a phone value, payload text, or a GSD phase number —
+ * so this error class can never become a T-62-01-10 leak surface of its own.
+ */
+export type RegistrationDuplicateErrorCode =
+  | 'request-not-found'
+  | 'request-not-decided'
+  | 'authority-mismatch'
+  | 'self-closure'
+  | 'not-a-likely-duplicate'
+  | 'closed-as-duplicate'
+  | 'transaction-open'
+  | 'publisher-db-mismatch'
+
+export class RegistrationDuplicateError extends Error {
+  readonly code: RegistrationDuplicateErrorCode
+  readonly requestId: string
+  readonly otherRequestId?: string
+
+  constructor (code: RegistrationDuplicateErrorCode, requestId: string, message: string, otherRequestId?: string) {
+    super(message)
+    this.name = 'RegistrationDuplicateError'
+    this.code = code
+    this.requestId = requestId
+    this.otherRequestId = otherRequestId
+  }
+}
