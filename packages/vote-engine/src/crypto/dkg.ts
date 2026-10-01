@@ -101,6 +101,179 @@
 // already uniquely binds the derivation to one encryption instance, so this
 // preserves the intended domain separation without requiring a parameter
 // the locked API does not carry.
+//
+// ---------------------------------------------------------------------------
+// Security review (D-25) — dated 2026-10-01, 62-05 Task 3
+// ---------------------------------------------------------------------------
+//
+// Adversarial review against a 14-item checklist, each with evidence (a test
+// title that fails when the control is removed, or a grep/command output).
+// ASVS L1: every HIGH finding is fixed before this section was written. None
+// were found HIGH; see the findings table at the end.
+//
+//  1. No hand-rolled primitives.
+//     `grep -vE '^\s*(//|\*|/\*)' dkg.ts | grep -cE "BigInt\(|Fn\.(mul|add|sub|inv|pow|div)\b"` -> 0.
+//     `grep -vE '^\s*(//|\*|/\*)' dkg.ts | grep -c "\.add("` -> 1 (deriveGroupCommitments only).
+//     All scalar/point algebra goes through `secp256k1_FROST` / `secp256k1.Point`.
+//
+//  2. Every dealer share is validated before use.
+//     `dkgRound3` pre-checks every `received` entry with `verifyDealerShare`
+//     against the matching `others` package BEFORE calling noble's `round3`.
+//     Evidence: "crypto-dkg: round-3 blame attribution > one received share
+//     altered gives invalid-share with dealer set to that dealer" (pinned by
+//     negative control (g), which removes exactly this pre-check loop).
+//
+//  3. Released shares are filtered before `combineSecret`, and `s*G == Y` is
+//     asserted after it.
+//     Filter: "crypto-dkg: ... a bit-flipped P2 share fails
+//     validateReleasedShare, and reconstructGroupSecret still recovers
+//     group_secret_key over [P1, badP2, P3] with P2 rejected" and "3 valid
+//     shares plus 1 bogus share reconstruct, with the bogus identifier
+//     rejected" (pinned by negative control (a)).
+//     Post-assertion: present in code (`derivedPublicKey` vs `groupPublicKey`
+//     via `equalBytes`), REQUIRED by D-17's "the result is asserted s*G == Y
+//     before it is returned". Negative control (b) finding: given control
+//     (a)'s per-share Feldman check (RFC 9591 Appendix C.2 `vss_verify`) is
+//     cryptographically BINDING on secp256k1 (cofactor 1, so every valid
+//     curve point is in the prime-order subgroup; for a fixed commitment
+//     vector and identifier there is EXACTLY ONE valid scalar, since
+//     `s -> s*G` is injective on a prime-order group) and Lagrange
+//     interpolation of `k` points consistent with one polynomial
+//     deterministically recovers that exact polynomial's constant term,
+//     NO adversarial `shares`/`groupCommitments`/`groupPublicKey` input can
+//     make the post-assertion diverge from what the pre-filter already
+//     proved, as long as control (a) stays active. Exhaustively checked:
+//     length-mismatch padding (closed by `validateReleasedShare`'s own
+//     `groupCommitments.length !== threshold` guard), share relabeling across
+//     identifiers (closed by VSS uniqueness), over-counting beyond threshold
+//     (over-determined-but-consistent systems still interpolate correctly).
+//     Removing control (b) alone leaves the suite at 0 failing. This is
+//     recorded as an INFO finding, not a vulnerability: the assertion is
+//     correctness-required by D-17's own text and is retained as defense in
+//     depth against a future regression in `validateReleasedShare` or an
+//     accidental argument swap in a refactor — it is just not independently
+//     triggerable by an external adversary today, which is a GOOD property of
+//     a cryptographically sound VSS filter, not a gap.
+//
+//  4. Commit-reveal binds `electionId`/`revision`/`attempt`.
+//     "crypto-dkg: commit-reveal (R0)" — 5 tests (commitment swap, attempt,
+//     revision, electionId, PoK tamper). Pinned by negative control (f).
+//
+//  5. Share AAD binds `electionId`/`revision`/`attempt`/`dealer`/`recipient`.
+//     "crypto-dkg-complaint: AAD binding" — 5 tests. Pinned by negative
+//     control (d).
+//
+//  6. The key-commitment tag is compared in constant time with `equalBytes`.
+//     `grep -c "equalBytes" dkg.ts` -> 5 (tag compares in `decryptShare` and
+//     `verifyComplaintEvidence`, plus the group-key compare in
+//     `reconstructGroupSecret`). Pinned by negative control (c).
+//
+//  7. The complaint verdict table is sound, and the A6 `unresolved` residual
+//     is denial of service only.
+//     "crypto-dkg-complaint: complaint verdicts" — 7 tests covering every
+//     verdict/reason pair in the matrix, including the A6 case explicitly.
+//     See residual A6 below.
+//
+//  8. `2 <= k <= n` holds everywhere a threshold enters.
+//     "crypto-dkg: threshold bounds (D-16, 2 <= k <= n)" — 21 tests across
+//     `assertDkgThreshold`, `dkgRound1` and `reconstructGroupSecret`. Pinned
+//     by negative control (e).
+//
+//  9. No secret bytes appear in any error message.
+//     "crypto-dkg-complaint: no secret leakage in DkgError messages".
+//
+// 10. Randomness comes from noble `randomBytes`/`randomSecretKey` only.
+//     `grep -n "secret?:\|rng?:\|rng:" dkg.ts` -> no matches: no exported
+//     function accepts a caller rng or a caller polynomial secret.
+//
+// 11. Zeroization is best-effort (`DKG.clean`), no erasure claim is made.
+//     See the comment at the `DKG.clean` call site in `dkgRound3`.
+//
+// 12. `verifyRound1Package` relies on noble 2.2.0 internals (round2 not
+//     re-running `validateSigners` against the real threshold), pinned by
+//     the tampered-PoK blame test in "crypto-dkg: round-1 blame attribution".
+//     MUST be re-verified on any `@noble/curves` bump (documented at the
+//     function itself).
+//
+// 13. Hermes: the bigint math in `frost.js` and the multi-copy hazard are
+//     guarded only in Node, via SC3/SC4 in `noble-dedupe-regression.spec.ts`.
+//     The Hermes device KAT is PROOF DEBT, recorded here and tracked by
+//     62-30 (D-23 style: code-complete, unverified on-device). Never claim
+//     device proof for this module.
+//
+// 14. Bias residual A7 (Joint-Feldman DKG, Gennaro-Jarecki-Krawczyk-Rabin,
+//     J. Cryptology 2007): FROST's DKG does not by itself yield a uniform
+//     key against a rushing or aborting adversary. The R0 commit-reveal here
+//     removes the RUSHING choice (a participant cannot choose its own R1
+//     package after seeing others', because it already committed to a hash
+//     of it), but a participant can still bias the group key by roughly one
+//     bit per self-disqualifying abort-and-retry, bounded by 62-17's attempt
+//     cap. GJKR's CT-RSA 2003 positive result (which removes even the abort
+//     bias) applies to DL-reduction schemes like Schnorr signing, NOT to
+//     ElGamal/ECIES-style encryption under the resulting public key Y — which
+//     is exactly how this module's released shares and 62-04's block cipher
+//     use Y. The residual is therefore documented as OPEN and surfaced to the
+//     user/reviewer, never claimed safe. The named alternative, if this ever
+//     needs closing, is full GJKR (Pedersen commitments plus a public
+//     extraction/complaint phase) — not built here because it would be
+//     additional hand-rolled protocol logic beyond what D-25 sanctions.
+//
+// Negative control results (temporarily mutate dkg.ts, run
+// crypto-dkg.spec.ts + crypto-dkg-complaint.spec.ts, record the failing
+// title(s), then `git checkout -- src/crypto/dkg.ts`):
+//
+//   (a) Skip the `validateReleasedShare` filter in `reconstructGroupSecret`.
+//       RED: "a bit-flipped P2 share fails validateReleasedShare, and
+//       reconstructGroupSecret still recovers group_secret_key over [P1,
+//       badP2, P3] with P2 rejected"; "3 valid shares plus 1 bogus share
+//       reconstruct, with the bogus identifier rejected". (2 failing)
+//   (b) Remove the `s*G == Y` assertion.
+//       GREEN (0 failing) — see item 3 above for the full algebraic proof of
+//       why this is provably unreachable given (a), recorded as an INFO
+//       finding rather than silently dropped.
+//   (c) Skip the `keyCommitment` comparison in `decryptShare`.
+//       RED: "decrypting with a different recipient private key throws
+//       key-commitment-mismatch"; "a tampered keyCommitment throws
+//       key-commitment-mismatch"; "a dealer-posted keyCommitment derived
+//       from a different shared secret: ... (A6)". (3 failing)
+//   (d) Drop `ctx.attempt` from the share AAD.
+//       RED: "decrypting with ctx.attempt+1 throws share-decrypt-failed".
+//       (1 failing)
+//   (e) Relax `assertDkgThreshold` to `threshold >= 1`.
+//       RED: "assertDkgThreshold(1, 3) throws threshold-out-of-range";
+//       "dkgRound1 rejects threshold=1, participants=3"; "reconstructGroupSecret
+//       rejects threshold=1, participants=3". (3 failing)
+//   (f) Drop `ctx.attempt` from `commitRound1`.
+//       RED: "verifyRound1Commit is false when ctx.attempt differs".
+//       (1 failing)
+//   (g) Skip the per-dealer pre-check in `dkgRound3`.
+//       RED: "one received share altered gives invalid-share with dealer set
+//       to that dealer" — fails because noble itself still throws, but an
+//       UNATTRIBUTED `Error: invalid secret share`, not a `DkgError` with
+//       `.dealer` set (exactly the predicted failure mode). (1 failing)
+//
+// Findings table (id, severity, status):
+//
+//   F-01 | INFO | accepted — control (b) is provably non-divergent given
+//         control (a); the assertion stays as D-17-mandated defense in
+//         depth. No fix needed; no HIGH/MEDIUM severity.
+//
+// No HIGH findings were raised by this review.
+//
+// Residuals (OPEN, not claimed safe):
+//   A6 — complaint attribution without a DLEQ proof: a key-commitment tag
+//        mismatch cannot distinguish a lying dealer from a lying complainant,
+//        so the verdict is `unresolved`. Denial of service only (forces an
+//        attempt restart), bounded by 62-17's attempt cap.
+//   A7 — Joint-Feldman DKG bias under a rushing/aborting adversary (see
+//        item 14 above). Roughly one bit of bias per self-disqualifying
+//        abort-and-retry; bounded by 62-17's attempt cap; GJKR named as the
+//        alternative if this needs closing later.
+//
+// Hermes device-KAT proof debt: this module's known-answer tests (RFC 9591
+// E.5, frost-rs DKG vectors, SC3/SC4) run on Node only. No device KAT has
+// been run on Hermes. Tracked for 62-30 in the D-23 "code-complete,
+// unverified" style — never claim device proof from this review.
 
 import { gcm } from '@noble/ciphers/aes.js'
 import { equalBytes } from '@noble/ciphers/utils.js'
