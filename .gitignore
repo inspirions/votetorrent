@@ -127,12 +127,6 @@ figmaToken.txt
 # to the default-false content by each script's EXIT trap.
 
 vendor
-# Root vendor/@serfab/ is the one exception: sereus master's cadre-core and
-# quereus-plugin-sereus, consumed through portal: until the release carrying
-# sereus#19-#22 ships (vendor/@serfab/README.md). Remove with the vendor copy.
-!/vendor/
-/vendor/*
-!/vendor/@serfab/
 scratchpad/
 # D-07 StrongBox rung probe output (scripts/run-strongbox-rung-probe.sh)
 .probe-out/

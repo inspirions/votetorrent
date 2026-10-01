@@ -175,74 +175,28 @@ showing up).
 
 ## Vendoring and patching
 
-VoteTorrent depends on packages that are either unpublished or carry edits not
-yet upstream. Two mechanisms keep a clean clone reproducible:
+Nothing is vendored. `@serfab/*` and `@optimystic/*` come from npm; edits that
+are not upstream yet are yarn patches under `.yarn/patches/`, referenced from
+the root `resolutions` and each consumer's manifest. Current inventory:
 
-**`portal:` vendoring.** `vendor/@serfab/*` and `vendor/@optimystic/db-*` hold
-the built `dist/` + `package.json` of those packages, and the root `resolutions`
-point the bare package names at them via `portal:./vendor/...`. The app manifest
-also references them with `portal:../../vendor/...`. This is why a clean clone
-needs no `../sereus` / `../Optimystic` sibling — the dist is committed. The most
-important baked-in edit is the **`connectionGater` forward** (in
-`vendor/@serfab/cadre-core/dist/cadre-node.js` + `strand-instance-manager.js`),
-without which libp2p connections fail at runtime. Full provenance and the
-NOT-vendored boundary (`@quereus/quereus`, the quereus plugins — these stay
-published) are documented in `vendor/VENDOR.md`.
+| Package | Patch | What it carries |
+|---------|-------|-----------------|
+| `@serfab/cadre-core@1.9.0` | `@serfab-cadre-core-npm-1.9.0-votetorrent.patch` | The public-observer protocol (`patches/serfab-cadre-core-public-observer.md`) and the strand cohort topic (`patches/serfab-cadre-core-strand-cohort-topic.md`) |
+| `@optimystic/db-p2p@1.8.1` | `@optimystic-db-p2p-npm-1.8.1-votetorrent.patch` | `.unref?.()` guards in `cluster-repo.js`, whose timers return plain numbers on React Native and in browsers |
+| `@quereus/quereus@4.20.0` | `@quereus-quereus-npm-4.20.0-6fd16bc9e5.patch` | The datetime immediate-CHECK fix |
+| `react-native-quick-base64@3.0.1` | `react-native-quick-base64-npm-3.0.1-f6009a6514.patch` | |
 
-**Yarn patches.** `.yarn/patches/` holds the patched upstreams, referenced from
-the root `resolutions` and the app/vote-engine manifests. Current inventory:
-
-- `@chainsafe-libp2p-gossipsub-npm-14.1.2-*.patch` — `@multiformats/multiaddr`
-  v13 compatibility (v13 removed the `./convert` subpath export and
-  `Multiaddr#tuples()`; the patch switches to `getComponents()`, which exists
-  on both v12 and v13).
-- `@quereus-quereus-npm-4.18.0-*.patch` — applied to `@quereus/quereus@4.18.0`.
-- `@serfab-cadre-core-npm-0.12.0-*.patch` — the public-observer protocol
-  (Phase 56); the rationale, invariants, and forward-port procedure are
-  written up in `patches/serfab-cadre-core-public-observer.md`.
-
-### Re-syncing the vendor (maintainer-only)
-
-A clean-clone build does **not** require this — `vendor/dist` is committed. You
-only re-run it when pulling new upstream `@serfab` changes, and only with a
-`../sereus` sibling present:
-
-```bash
-./scripts/sync-vendor.sh
-```
-
-It rebuilds `@serfab/strand-proto` + `@serfab/quereus-plugin-sereus` with esbuild
-and `@serfab/cadre-core` declarations with `tsc --emitDeclarationOnly`, copies
-each `dist/` + `package.json` into `vendor/@serfab/<pkg>/`, then asserts the
-`connectionGater` canary is present in the freshly-copied cadre-core dist
-(failing if the sereus tree didn't have the forward applied). It finishes by
-reminding you to bump the source-commit rows in `vendor/VENDOR.md`. It needs
-`nvm` with Node 22, `npx esbuild`, and `tsc`.
+To change a patch, run `yarn patch <pkg>@npm:<version>`, edit the extracted
+copy, and `yarn patch-commit`. On a version bump, dry-run the old patch against
+the new tarball first (`patch -p1 --dry-run`) and re-base only the hunks that
+fail.
 
 ### Verifying the vendor / portal wiring
 
-Two acceptance-gate scripts confirm the wiring still holds. Both take an
-optional `--skip-install` to reuse a known-good install and require `nvm` with
-Node 22.
-
-```bash
-./scripts/verify-vendoring.sh           # clean-clone reproducibility gate
-./scripts/verify-portal-adoption.sh     # portal install + bundle + suite gate
-```
-
-- **`verify-vendoring.sh`** temporarily renames `../sereus` aside (restoring it
-  on exit), runs `yarn install --immutable` + a release Metro Android bundle,
-  then asserts `@serfab/cadre-core` resolves to the in-repo `vendor/` copy
-  (via `yarn why`) and that the `connectionGater` canary is in the vendored
-  dist. Emits `VENDORING GATE: PASS`.
-- **`verify-portal-adoption.sh`** runs `yarn install` + the Metro Android bundle
-  + the full `vote-engine` suite (gate: 0 failing), then a boundary check:
-  `yarn lint:peers` must pass and the app manifest's `@quereus/quereus` /
-  `@optimystic/quereus-plugin-*` entries must **not** carry a `portal:` prefix
-  (they must stay published). Emits `PORTAL ADOPTION GATE: PASS`.
-
-Re-run these after any change to `vendor/`, the root `resolutions`, the
-`.yarn/patches`, or the app's quereus/plugin dependency lines.
+`scripts/verify-vendoring.sh`, `scripts/verify-portal-adoption.sh` and
+`scripts/sync-vendor.sh` belong to the retired `vendor/` model and assert
+things that are no longer true (a `vendor/` copy of `@serfab/cadre-core`). The
+live guard is `packages/vote-engine/test/no-portal-vendor-regression.spec.ts`.
 
 ## vote-engine build guard
 

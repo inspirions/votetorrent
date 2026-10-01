@@ -1,14 +1,17 @@
 /**
- * A cadre-core `DurableSlot` over AsyncStorage, and the strand peer book that sits on it (spike 094).
+ * A cadre-core `DurableSlot` over AsyncStorage, and the strand network state that sits on it.
  *
- * WHY. cadre-core 1.7.0 keeps a per-strand PEER BOOK: every strand peer this node met on a live
- * connection, with its last-known addresses. It is read on every launch and every periodic address
- * refresh, so a restarted phone dials the strand peers it was talking to before anything else,
- * instead of depending solely on the control-cohort strand-addr RPC. That RPC path is where
+ * WHY. cadre-core 1.9.0 saves each strand node's NETWORK STATE per strand: Optimystic db-p2p's FRET
+ * routing table, every entry carrying the peer's signed address record, plus the network-size
+ * high-water mark and which peers it saw serving the strand. db-p2p re-imports it when the strand
+ * node is next built, so a restarted phone dials the strand peers it was talking to before anything
+ * else, instead of depending solely on the control-cohort strand-addr RPC. That RPC path is where
  * P2P-11 kept breaking (the late-enrolment gap, sereus#21's throttle, sereus#22's masking).
- * Without an injected store the book is in-memory and dies with the process. Upstream's release
- * notes: "either store left in memory reproduces the old behaviour". On a phone every launch is
- * a restart; the proof's D-05 relaunch is one too.
+ * Without an injected store the state is in-memory and dies with the process. On a phone every
+ * launch is a restart; the proof's D-05 relaunch is one too.
+ *
+ * It replaces 1.7.0's strand PEER BOOK (spike 094), which 1.9.0 deleted: the saved FRET table now
+ * does that job. The old `@votetorrent/strandPeerBook/...` AsyncStorage keys are no longer read.
  *
  * Adapted from sereus-chat `apps/mobile/src/cadre/rn-durable-slot.ts`. We omit its `RNKeyStore` /
  * `joinedStrands` half: that records strands joined from ANOTHER party, while VoteTorrent's
@@ -20,7 +23,7 @@
  * AsyncStorage error would destroy an intact book on the next save.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { PersistentStrandPeerBookStore, type DurableSlot, type StrandPeerBookStore } from '@serfab/cadre-core';
+import { PersistentStrandNetworkStateStore, type DurableSlot, type StrandNetworkStateStore } from '@serfab/cadre-core';
 
 export class AsyncStorageDurableSlot implements DurableSlot {
   constructor(private readonly key: string) {}
@@ -37,12 +40,12 @@ export class AsyncStorageDurableSlot implements DurableSlot {
 }
 
 /**
- * The strand peer book for one node, namespaced by party AND by store scope. Two nodes on one
- * device (the app's own and a proof runner's) must never share a book.
+ * The strand network state for one node, namespaced by party AND by store scope. Two nodes on one
+ * device (the app's own and a proof runner's) must never share one.
  */
-export function openStrandPeerBook(partyId: string, scope: string): Promise<StrandPeerBookStore> {
-  return PersistentStrandPeerBookStore.open(
-    new AsyncStorageDurableSlot(`@votetorrent/strandPeerBook/${scope}/${partyId}`),
+export function openStrandNetworkState(partyId: string, scope: string): Promise<StrandNetworkStateStore> {
+  return PersistentStrandNetworkStateStore.open(
+    new AsyncStorageDurableSlot(`@votetorrent/strandNetworkState/${scope}/${partyId}`),
     partyId,
   );
 }

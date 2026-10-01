@@ -90,7 +90,7 @@ import { createStrandDbFactory } from './rn-db-factory';
 import { isSelfVouched } from './self-voucher';
 import { publishSelfRecordAfterEnrol, type PublishSelfRecordResult } from './publish-self-record';
 import { NOISE_CRYPTO_MODE, noiseCryptoForNode } from './noise-crypto-config';
-import { openStrandPeerBook } from './rn-durable-slot';
+import { openStrandNetworkState } from './rn-durable-slot';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
 import type {
@@ -425,15 +425,16 @@ export async function runReplicationProof(): Promise<void> {
     });
     const privateKey = await loadOrCreateRNPeerKey(rnDb);
 
-    // Spike 094 (cadre-core 1.7.0): a DURABLE strand peer book, so the D-05 relaunch dials the
-    // strand peers this phone met before anything else, instead of coming back up alone.
-    // Scoped by CADRE_STORE so the app's own CadreNode never shares this node's book.
-    const strandPeerStore = await openStrandPeerBook('votetorrent', CADRE_STORE);
+    // cadre-core 1.9.0: a DURABLE strand network state (the saved FRET table, which replaced
+    // spike 094's peer book), so the D-05 relaunch dials the strand peers this phone met before
+    // anything else, instead of coming back up alone. Scoped by CADRE_STORE so the app's own
+    // CadreNode never shares this node's state.
+    const strandNetworkStateStore = await openStrandNetworkState('votetorrent', CADRE_STORE);
 
     node = new CadreNode({
       privateKey,
       controlNetwork: { partyId: 'votetorrent', bootstrapNodes: BOOTSTRAP_NODES },
-      strandPeers: { store: strandPeerStore },
+      strandNetworkState: { store: strandNetworkStateStore },
       profile: 'transaction',
       // Published @serfab/cadre-core@0.8.1 added a fail-closed sApp-schema signature
       // policy (requireSignedSchemas defaults true): an unsigned sAppConfig is rejected
@@ -555,14 +556,16 @@ export async function runReplicationProof(): Promise<void> {
     const peerId = node.peerId?.toString() ?? 'unknown';
     L('peerId=', peerId);
     L('noiseCrypto=', NOISE_CRYPTO_MODE);
-    // Spike 094: what the durable strand peer book holds for the proof strand AT BOOT, i.e. the
-    // dial hints a relaunch starts from. 0 on a fresh install; >0 on the D-05 relaunch is the
-    // 1.7.0 restart path doing its job. Peer ids are tail-8 only.
-    const strandPeerBookSummary = (): string => {
-      const entries = strandPeerStore.entries(PROOF_NETWORK_STORE);
-      return `${entries.length} [${entries.map(e => `${String(e.peerId).slice(-8)}:${e.addrs?.length ?? 0}`).join(',')}]`;
+    // What the durable strand network state holds for the proof strand AT BOOT, i.e. the FRET
+    // entries a relaunch re-imports. 0 on a fresh install; >0 on the D-05 relaunch is the
+    // restart path doing its job. `+rec` marks an entry carrying a signed address record (the
+    // dial hint); `serving=` is the peers db-p2p saw serving the strand. Peer ids are tail-8 only.
+    const strandNetworkStateSummary = (): string => {
+      const state = strandNetworkStateStore.load(PROOF_NETWORK_STORE);
+      const entries = state?.fretTable?.entries ?? [];
+      return `${entries.length} [${entries.map(e => `${String(e.id).slice(-8)}:${e.state}${e.addressRecord ? '+rec' : ''}`).join(',')}] serving=${state?.servingPeers?.length ?? 0}`;
     };
-    L('strandPeerBook(boot)=', strandPeerBookSummary());
+    L('strandNetworkState(boot)=', strandNetworkStateSummary());
 
     // Derive unique per-peer suffix for the proof network name (last 8 chars of peerId).
     const peerTail = peerId.length >= 8 ? peerId.slice(-8) : peerId;
@@ -868,7 +871,7 @@ export async function runReplicationProof(): Promise<void> {
       }
       // REPL-01: live strand-cohort size marker, emitted AFTER addStrand + the bounded wait.
       L('strandPeers=', readStrandPeers());
-      L('strandPeerBook=', strandPeerBookSummary());
+      L('strandNetworkState=', strandNetworkStateSummary());
       // D-04: per-drone relay-reservation marker, emitted alongside strandPeers= (the strand
       // node now exists). Expect ONE /p2p-circuit multiaddr PER drone reserved with (2 for the
       // n=4 topology) after the D-05 fix — length is logged too so a per-drone count is
@@ -1195,7 +1198,7 @@ export async function runReplicationProof(): Promise<void> {
       // reached. Always emit the live strandPeers= marker so the harness gate sees the real
       // cohort signal (0) rather than "marker never emitted".
       L('strandPeers=', readStrandPeers());
-      L('strandPeerBook=', strandPeerBookSummary());
+      L('strandNetworkState=', strandNetworkStateSummary());
       // D-04: mirror the per-drone relay marker on the failure path too, for the same reason.
       L('relayAddrsPerDrone=', readStrandRelayAddrs(), 'relayAddrsPerDroneCount=', readStrandRelayAddrs().length);
     }

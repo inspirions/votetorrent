@@ -26,7 +26,7 @@ type FakeConnection = Record<string, unknown>;
 // node. Mocked at the seam, once, so every per-case @serfab/cadre-core fake below stays unchanged.
 // The fake book is empty, which is also what a fresh install reads.
 jest.mock('../rn-durable-slot', () => ({
-  openStrandPeerBook: async (partyId: string) => ({ partyId, entries: () => [], forget: async () => undefined }),
+  openStrandNetworkState: async (partyId: string) => ({ partyId, load: () => undefined, forget: async () => undefined }),
 }));
 
 const mockConstructedNodes: FakeCadreNode[] = [];

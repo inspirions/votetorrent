@@ -92,17 +92,17 @@ jest.mock(
         return (this.listeners[event] ?? []).length > 0;
       }
     }
-    // cadre-core 1.7.0 (spike 094): the provider opens a durable strand peer book before
-    // constructing the node. The fake records the slot it was opened over.
-    const PersistentStrandPeerBookStore = {
+    // cadre-core 1.9.0: the provider opens a durable strand network state before constructing
+    // the node. The fake records the slot it was opened over.
+    const PersistentStrandNetworkStateStore = {
       open: jest.fn(async (slot: unknown, partyId: string) => ({
         partyId,
         slot,
-        entries: () => [],
+        load: () => undefined,
         forget: async () => undefined,
       })),
     };
-    return { CadreNode: FakeCadreNode, PersistentStrandPeerBookStore };
+    return { CadreNode: FakeCadreNode, PersistentStrandNetworkStateStore };
   },
   { virtual: true },
 );
@@ -613,15 +613,15 @@ describe('CadreNodeProvider — native Noise crypto (spike 093)', () => {
   });
 });
 
-describe('CadreNodeProvider — durable strand peer book (spike 094)', () => {
-  it('builds the node with strandPeers.store: a persistent book for its own party and store scope', async () => {
+describe('CadreNodeProvider — durable strand network state (cadre-core 1.9.0)', () => {
+  it('builds the node with strandNetworkState.store: a persistent store for its own party and store scope', async () => {
     renderProvider();
     await flushBoot();
     const node = mockConstructedNodes[0];
-    const opts = node.receivedOptions as { strandPeers?: { store?: { partyId?: string; slot?: { key?: string } } } };
-    expect(opts.strandPeers?.store?.partyId).toBe('votetorrent');
+    const opts = node.receivedOptions as { strandNetworkState?: { store?: { partyId?: string; slot?: { key?: string } } } };
+    expect(opts.strandNetworkState?.store?.partyId).toBe('votetorrent');
     // Namespaced by scope AND party, so the proof runner's node on the same device never shares it.
-    expect(opts.strandPeers?.store?.slot?.key).toBe('@votetorrent/strandPeerBook/votetorrent-cadre-node/votetorrent');
+    expect(opts.strandNetworkState?.store?.slot?.key).toBe('@votetorrent/strandNetworkState/votetorrent-cadre-node/votetorrent');
   });
 });
 

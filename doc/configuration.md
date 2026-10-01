@@ -91,8 +91,10 @@ toolchain requires.
 ## Dependency resolutions, patches, and vendoring
 
 The root `package.json` `resolutions` block pins shared transitive versions and
-redirects several `@serfab/*` and `@optimystic/*` packages to in-repo vendored
-copies via `portal:` targets.
+points the patched `@serfab/*`, `@optimystic/*` and `@quereus/*` packages at
+their `patch:` locators. Nothing is vendored: every `@serfab/*` and
+`@optimystic/*` package comes from npm (the last vendor copy, sereus master for
+sereus#19-#22, was removed when `@serfab` 1.9.0 shipped those fixes).
 
 ### Version pins
 
@@ -107,47 +109,22 @@ copies via `portal:` targets.
 | `@noble/hashes` | `2.2.0` |
 | `@libp2p/crypto` | `5.1.20` |
 
-### Portal-vendored packages
-
-These resolve to built `dist/` copies kept under `vendor/`:
-
-| Package | Portal target |
-|---------|---------------|
-| `@serfab/cadre-core` | `portal:./vendor/@serfab/cadre-core` |
-| `@serfab/quereus-plugin-sereus` | `portal:./vendor/@serfab/quereus-plugin-sereus` |
-| `@serfab/strand-proto` | `portal:./vendor/@serfab/strand-proto` |
-| `@optimystic/db-core` | `portal:./vendor/@optimystic/db-core` |
-| `@optimystic/db-p2p` | `portal:./vendor/@optimystic/db-p2p` |
-| `@optimystic/db-p2p-storage-rn` | `portal:./vendor/@optimystic/db-p2p-storage-rn` |
-
-Vendoring lets the app — and a release APK — build from a clean clone with no
-sibling source checkout. The app declares the same packages with relative
-`portal:../../vendor/...` paths in `apps/VoteTorrentAuthority/package.json`. See
-`vendor/VENDOR.md` for the source commits and the rebuild/re-sync procedure.
-
 ### Patches
 
-Only two patches are wired into root `package.json` `resolutions` and applied by
-`yarn install`:
+Applied by `yarn install` from `.yarn/patches/`, through root `resolutions` and
+each consumer's descriptor:
 
-| Package | Patch |
-|---------|-------|
-| `@quereus/quereus@^3.3.0` and `@^3.2.1` | `.yarn/patches/@quereus-quereus-npm-3.3.0-5d38946b35.patch` (both ranges resolve to patched `3.3.0`) |
-| `@optimystic/quereus-plugin-optimystic@0.13.5` | `.yarn/patches/@optimystic-quereus-plugin-optimystic-npm-0.13.5-6fbe2eccab.patch` |
+| Package | Patch | What it carries |
+|---------|-------|-----------------|
+| `@serfab/cadre-core@1.9.0` | `@serfab-cadre-core-npm-1.9.0-votetorrent.patch` | The public-observer protocol (`patches/serfab-cadre-core-public-observer.md`) and the strand cohort topic (`patches/serfab-cadre-core-strand-cohort-topic.md`) |
+| `@optimystic/db-p2p@1.8.1` | `@optimystic-db-p2p-npm-1.8.1-votetorrent.patch` | `.unref?.()` guards in `cluster-repo.js`, whose timers return plain numbers on React Native and in browsers |
+| `@quereus/quereus@4.20.0` | `@quereus-quereus-npm-4.20.0-6fd16bc9e5.patch` | The datetime immediate-CHECK fix |
+| `react-native-quick-base64@3.0.1` | `react-native-quick-base64-npm-3.0.1-f6009a6514.patch` | |
 
-A third file, `.yarn/patches/@serfab-cadre-core-npm-0.7.1-518fb48136.patch`,
-exists on disk but is an inert orphan: it is not referenced in `resolutions`,
-any `patch:` entry, `.yarnrc.yml`, or `yarn.lock`, so `yarn install` never
-applies it. `@serfab/cadre-core` is instead vendored via
-`portal:./vendor/@serfab/cadre-core`, and the `connectionGater` change that
-patch represented is baked into the vendored `dist/` by source-edit (see
-`apps/VoteTorrentAuthority/PORTAL-SETUP.md`).
-
-`@quereus/quereus`, `@optimystic/quereus-plugin-crypto`, and
-`@optimystic/quereus-plugin-optimystic` intentionally stay on published ranges
-plus these patches rather than being vendored (`vendor/VENDOR.md`, "Boundary").
-The patch rationale for `@optimystic/quereus-plugin-optimystic` (composite
-primary keys) is documented in `patches/optimystic-quereus-plugin-composite-pk.md`.
+Older files in `.yarn/patches/` that no descriptor references are not applied.
+`packages/vote-engine/test/no-portal-vendor-regression.spec.ts` fails if a
+`portal:` or `./vendor/` resolution comes back for the `@serfab` /
+`@optimystic/db-*` packages.
 
 ## TypeScript configuration
 

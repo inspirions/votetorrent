@@ -163,8 +163,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
     })
   })
 
-  describe('PUB-02: @optimystic/quereus-plugin-optimystic reconciled to ^1.7.x, dead patches retired', () => {
-    it('resolves a single @optimystic/quereus-plugin-optimystic version, and it is 1.7.x', () => {
+  describe('PUB-02: @optimystic/quereus-plugin-optimystic reconciled to ^1.8.x, dead patches retired', () => {
+    it('resolves a single @optimystic/quereus-plugin-optimystic version, and it is 1.8.x', () => {
       const versions = resolvedVersionsFor(lock, '@optimystic/quereus-plugin-optimystic')
       expect(versions.length, 'expected at least one resolved @optimystic/quereus-plugin-optimystic block in yarn.lock').to.be.greaterThan(0)
 
@@ -176,11 +176,11 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @optimystic/quereus-plugin-optimystic version must be 1.7.x, got ${distinct[0]}`
-      ).to.match(/^1\.7\./)
+        `Resolved @optimystic/quereus-plugin-optimystic version must be 1.8.x, got ${distinct[0]}`
+      ).to.match(/^1\.8\./)
     })
 
-    it('resolves ^1.7.0 in the root package.json dependency declaration', () => {
+    it('resolves ^1.8.1 in the root package.json dependency declaration', () => {
       const parsed = JSON.parse(rootPackageJson) as {
         dependencies?: Record<string, string>
         resolutions?: Record<string, string>
@@ -189,8 +189,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
         parsed.resolutions?.['@optimystic/quereus-plugin-optimystic']
       expect(
         declared,
-        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^1.7.0'
-      ).to.equal('^1.7.0')
+        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^1.8.1'
+      ).to.equal('^1.8.1')
     })
 
     it('has zero references to the dead patch locators (0.13.5 plugin-optimystic patch, 0.7.1 cadre-core patch)', () => {

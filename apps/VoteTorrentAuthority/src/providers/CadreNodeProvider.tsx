@@ -15,7 +15,7 @@ import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import bootstrapConfigDoc from '../../bootstrap.config.json';
 import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
 import { noiseCryptoForNode } from '../engines/noise-crypto-config';
-import { openStrandPeerBook } from '../engines/rn-durable-slot';
+import { openStrandNetworkState } from '../engines/rn-durable-slot';
 import { REPLICATION_PROOF_ENABLED } from '../engines/proof-flags.generated';
 
 // ---------------------------------------------------------------------------
@@ -291,14 +291,14 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         // ISO-01 per-scope storage + release-build persistence guardrail — see engines/storage-guard.ts.
         const scopedStorageProvider = createScopedRnStorageProvider();
 
-        // cadre-core 1.7.0 strand peer book, durable across launches (spike 094). In memory it
-        // dies with the process, and on a phone every launch is a restart.
-        const strandPeerStore = await openStrandPeerBook(PARTY_ID, 'votetorrent-cadre-node');
+        // cadre-core 1.9.0 strand network state (the saved FRET table), durable across launches.
+        // In memory it dies with the process, and on a phone every launch is a restart.
+        const strandNetworkStateStore = await openStrandNetworkState(PARTY_ID, 'votetorrent-cadre-node');
 
         localNode = new CadreNode({
           privateKey,
           controlNetwork: { partyId: PARTY_ID, bootstrapNodes: CONTROL_RELAY_ADDRS },
-          strandPeers: { store: strandPeerStore },
+          strandNetworkState: { store: strandNetworkStateStore },
           profile: 'transaction',
           // sApp-schema signing is DISABLED for VoteTorrent — a deliberate project
           // decision, not an oversight.

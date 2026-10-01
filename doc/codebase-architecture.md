@@ -211,11 +211,10 @@ the Metro config (`metro.config.js`) with its polyfill bootstrap
 (`polyfills.bootstrap.js`, `polyfills/`) for the Node-style globals the P2P/SQL
 stack expects under Hermes, and the build entry (`index.js` → `App.tsx`).
 
-## External & Vendored Dependencies
+## External Dependencies
 
-VoteTorrent builds on three external technology families, several pieces of
-which are pinned into the repository rather than consumed straight from the
-registry.
+VoteTorrent builds on three external technology families, consumed from npm,
+with local edits carried as yarn patches.
 
 ### The technology families
 
@@ -236,43 +235,18 @@ registry.
 - **libp2p** — the underlying peer-to-peer transport (Kademlia DHT, WebSockets,
   circuit relay), wired in by the Sereus and Optimystic layers.
 
-### Why these are vendored (`portal:` resolutions)
-
-The root `package.json` `resolutions` field redirects the `@serfab/*` and
-`@optimystic/db-*` packages to in-repo copies under `vendor/`:
-
-```
-"@serfab/cadre-core":            "portal:./vendor/@serfab/cadre-core",
-"@serfab/quereus-plugin-sereus": "portal:./vendor/@serfab/quereus-plugin-sereus",
-"@serfab/strand-proto":          "portal:./vendor/@serfab/strand-proto",
-"@optimystic/db-core":           "portal:./vendor/@optimystic/db-core",
-"@optimystic/db-p2p":            "portal:./vendor/@optimystic/db-p2p",
-"@optimystic/db-p2p-storage-rn": "portal:./vendor/@optimystic/db-p2p-storage-rn"
-```
-
-These libraries are co-developed alongside VoteTorrent (the Sereus and
-Optimystic working trees live as `../sereus` and `../Optimystic` siblings during
-active development). Vendoring serves two goals:
-
-1. **Reproducible clean-clone builds.** The vendored `dist/` is committed, so a
-   fresh clone builds without the sibling source trees present.
-2. **Version pinning of fast-moving co-dependencies.** A `portal:` resolution
-   points the whole dependency graph at one known-good copy, avoiding registry
-   drift while the upstream packages stabilize.
-
-The maintainer-only `scripts/sync-vendor.sh` rebuilds the `@serfab` `dist/` from
-the `../sereus` sibling and copies it into `vendor/@serfab/<pkg>/`; it is *not*
-needed for a clean-clone build.
-
 ### Patches
 
-A few upstream packages need source-level fixes applied via `yarn patch`,
-recorded under `.yarn/patches/` and referenced from `resolutions`:
+A few upstream packages need fixes that are not released yet, applied via
+`yarn patch`, recorded under `.yarn/patches/` and referenced from
+`resolutions`:
 
-- `@quereus/quereus@3.3.0` — patched (used by both `vote-engine` and the app).
-- `@optimystic/quereus-plugin-optimystic@0.13.5` — patched (composite-PK fix;
-  the human-readable rationale is in `patches/optimystic-quereus-plugin-composite-pk.md`).
-- `@serfab/cadre-core@0.7.1` — patched.
+| Package | Patch | What it carries |
+|---------|-------|-----------------|
+| `@serfab/cadre-core@1.9.0` | `@serfab-cadre-core-npm-1.9.0-votetorrent.patch` | The public-observer protocol (`patches/serfab-cadre-core-public-observer.md`) and the strand cohort topic (`patches/serfab-cadre-core-strand-cohort-topic.md`) |
+| `@optimystic/db-p2p@1.8.1` | `@optimystic-db-p2p-npm-1.8.1-votetorrent.patch` | `.unref?.()` guards in `cluster-repo.js`, whose timers return plain numbers on React Native and in browsers |
+| `@quereus/quereus@4.20.0` | `@quereus-quereus-npm-4.20.0-6fd16bc9e5.patch` | The datetime immediate-CHECK fix |
+| `react-native-quick-base64@3.0.1` | `react-native-quick-base64-npm-3.0.1-f6009a6514.patch` | |
 
 Other resolutions pin shared low-level libraries to single versions
 (`uint8arrays` → `3.1.1`, `@noble/curves`/`@noble/hashes` → `2.2.0`,
@@ -301,17 +275,9 @@ directly; the app bundles through **Metro** (`metro.config.js`).
 
 ### Vendor / portal verification scripts
 
-Three acceptance-gate scripts under `scripts/` keep the vendoring and portal
-setup honest:
-
-- **`verify-vendoring.sh`** — simulates the absence of the `../sereus` sibling
-  (clean-clone condition), runs `yarn install` plus a Metro Android bundle, and
-  asserts that `@serfab/cadre-core` resolves to the in-repo `vendor/` copy and
-  that the bundle builds. Proves reproducibility from a clean clone.
-- **`verify-portal-adoption.sh`** — runs `yarn install`, a Metro Android bundle,
-  the `vote-engine` suite, and a published/portal boundary check (no leaked
-  `@quereus/quereus` `portal:` references). Requires the sibling working trees.
-- **`check-peer-requirements.mjs`** — the peer-dependency guard described above.
+`verify-vendoring.sh` and `verify-portal-adoption.sh` belong to the retired
+`vendor/` model. The live guards are `check-peer-requirements.mjs` (described
+above) and `packages/vote-engine/test/no-portal-vendor-regression.spec.ts`.
 
 ## Runtime Composition
 

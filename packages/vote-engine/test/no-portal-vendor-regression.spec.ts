@@ -31,13 +31,8 @@
  *
  * This is a lockfile/manifest guard, not a runtime-behaviour guard.
  *
- * TEMPORARY EXCEPTION (2026-09-30): `@serfab/cadre-core` and `@serfab/quereus-plugin-sereus`
- * are consumed from sereus master through `portal:./vendor/@serfab/*`, because the fixes for
- * sereus#19-#22 are on master but not released (npm latest is 1.7.0). Only those two, and
- * only at exactly that path; the other four stay guarded as before, and the version check
- * reads the vendored package.json. See `vendor/@serfab/README.md`. Remove
- * `SANCTIONED_VENDOR` and the vendor copy together once a release carrying the fixes is
- * adopted.
+ * The 2026-09-30 sereus-master vendor exception (`portal:./vendor/@serfab/*` for sereus#19-#22)
+ * ended with the adoption of @serfab 1.9.0, which ships those fixes; all 6 are guarded again.
  */
 
 import { expect } from 'chai'
@@ -54,16 +49,6 @@ const DEVENDORED_PACKAGES = [
   '@optimystic/db-p2p',
   '@optimystic/db-p2p-storage-rn'
 ]
-
-/**
- * The two packages temporarily vendored from sereus master, and the only portal target
- * each may use.
- */
-const SANCTIONED_VENDOR: Record<string, string> = {
-  '@serfab/cadre-core': 'portal:./vendor/@serfab/cadre-core',
-  '@serfab/quereus-plugin-sereus': 'portal:./vendor/@serfab/quereus-plugin-sereus'
-}
-const GUARDED_PACKAGES = DEVENDORED_PACKAGES.filter((pkg) => !(pkg in SANCTIONED_VENDOR))
 
 /** Walk up from this spec to the repo root (the dir containing yarn.lock). */
 function findRepoRoot (): string {
@@ -123,29 +108,19 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   const rootPackageJson = readFileSync(join(repoRoot, 'package.json'), 'utf8')
 
   // PUB-01-a — zero portal: locators for the 6 de-vendored packages in yarn.lock.
-  it('PUB-01-a: yarn.lock has zero portal: locators for the de-vendored packages outside the sanctioned vendor', () => {
-    const count = countPortalLocatorsFor(lock, GUARDED_PACKAGES)
+  it('PUB-01-a: yarn.lock has zero portal: locators for the 6 de-vendored packages', () => {
+    const count = countPortalLocatorsFor(lock, DEVENDORED_PACKAGES)
     expect(
       count,
-      `Expected zero portal: locators for ${GUARDED_PACKAGES.join(', ')}, found ${count} — a package has been re-vendored (PUB-01 violation)`
+      `Expected zero portal: locators for ${DEVENDORED_PACKAGES.join(', ')}, found ${count} — a package has been re-vendored (PUB-01 violation)`
     ).to.equal(0)
-    // A sanctioned package may only portal to its own vendor dir.
-    for (const line of lock.split('\n')) {
-      if (!line.includes('portal:')) continue
-      for (const [pkg, target] of Object.entries(SANCTIONED_VENDOR)) {
-        if (line.includes(`${pkg}@portal:`)) {
-          expect(line, `${pkg} portals somewhere other than ${target}`).to.include(`${pkg}@${target}`)
-        }
-      }
-    }
   })
 
   // PUB-01-b — zero ./vendor/ resolution targets in the root package.json resolutions block.
   it('PUB-01-b: root package.json has zero ./vendor/ resolution targets', () => {
     const parsed = JSON.parse(rootPackageJson) as { resolutions?: Record<string, string> }
     const resolutions = parsed.resolutions ?? {}
-    const vendorEntries = Object.entries(resolutions).filter(([key, value]) =>
-      value.includes('./vendor/') && SANCTIONED_VENDOR[key] !== value)
+    const vendorEntries = Object.entries(resolutions).filter(([, value]) => value.includes('./vendor/'))
     expect(
       vendorEntries.length,
       `Expected zero ./vendor/ resolution targets in root package.json, found: ${vendorEntries.map(([k]) => k).join(', ')} — a package has been re-vendored (PUB-02 violation)`
@@ -153,14 +128,8 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.7.x, @optimystic/db-* 1.7.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.9.x, @optimystic/db-* 1.8.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
-      if (pkg in SANCTIONED_VENDOR) {
-        // A portal locks as 0.0.0-use.local, so read the vendored manifest instead.
-        const vendored = JSON.parse(readFileSync(join(repoRoot, 'vendor', pkg, 'package.json'), 'utf8')) as { version: string }
-        expect(vendored.version, `vendored ${pkg} must be on the 1.7 line`).to.match(/^1\.7\./)
-        continue
-      }
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
 
@@ -184,8 +153,10 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // @optimystic 1.2.0 -> 1.3.0 -> 1.5.0 bumps; re-keyed 2026-09-28 with the
       // @optimystic 1.5.0 -> 1.7.0 and @serfab 1.2.0 -> 1.6.0 bumps to what yarn.lock actually resolves.
       // Spike 094: @serfab 1.6.0 -> 1.7.0 (strand peer book; the local fwdport patch carried verbatim).
+      // 2026-10-01: @serfab 1.9.0 (sereus#19-#22 released; peer book replaced by strand network
+      // state) and @optimystic 1.8.1, ending the sereus-master vendor copy.
       const expectedPrefix = pkg === '@serfab/strand-proto' ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.7.' : '1.7.'
+        : pkg.startsWith('@serfab/') ? '1.9.' : '1.8.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`
