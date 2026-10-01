@@ -27,7 +27,8 @@ import type {
   KeyholderInvite,
   Ballot,
   RegistrantSignatureTask,
-  RegisterInit
+  RegisterInit,
+  SigningStatus
 } from '@votetorrent/vote-core'
 import type { MockElectionEngine } from '../election/mock-election-engine.js'
 
@@ -346,5 +347,13 @@ export class MockSignatureTasksEngine implements ISignatureTasksEngine {
    */
   async getSignatureDigest (task: SignatureTask): Promise<Uint8Array> {
     return new TextEncoder().encode(`mock-digest-${task.signatureType}`)
+  }
+
+  /**
+   * Mock parity for `ISignatureTasksEngine.getTaskSigningStatus` (62-12, D-09/D-10/D-11).
+   * The mock world is threshold 1 throughout, so no progress note is ever shown — always null.
+   */
+  async getTaskSigningStatus (_task: SignatureTask): Promise<SigningStatus | null> {
+    return null
   }
 }

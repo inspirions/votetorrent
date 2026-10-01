@@ -4,6 +4,7 @@ import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { readSessionThreshold } from '../signing/threshold.js'
 import { fanOutSignatureTasks } from '../signing/fan-out.js'
+import { findPendingTaskNonce } from './task-signing-status.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
@@ -28,6 +29,7 @@ import type {
   RegistrationRequestDecision,
   Signature,
   SignOutcome,
+  SigningStatus,
 } from '@votetorrent/vote-core'
 import { BALLOT_HEADER_TID } from '../election/election-engine.js'
 import { CompleteSignatureBuilder } from './builders/index.js'
@@ -1909,6 +1911,21 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     } catch (err) {
       this.rethrow(err, 'getSignatureDigest')
     }
+  }
+
+  /**
+   * 62-12 (Surface 5, D-09/D-10/D-11) — read-only co-signing status for the session behind the
+   * caller's OWN PENDING task. The nonce lookup is `findPendingTaskNonce`, deliberately the SAME
+   * lookup `getSignatureDigest` above uses, so the returned status always describes exactly the
+   * session the officer would sign. Returns `null` (never throws) when there is no ctx, no
+   * signing engine, no pending task row, or no `AdminSigning` session for the resolved nonce.
+   * Writes nothing; display-only (never an authorization input — see the interface doc comment).
+   */
+  async getTaskSigningStatus (task: SignatureTask): Promise<SigningStatus | null> {
+    if (!this.ctx || !this.signingEngine) return null
+    const nonce = await findPendingTaskNonce(this.ctx.db, task)
+    if (nonce === undefined) return null
+    return this.signingEngine.getSigningStatus(nonce)
   }
 
   buildCompleteSignature (): ISignatureTasksCompleteSignatureBuilder {

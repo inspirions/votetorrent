@@ -1,5 +1,6 @@
 import type { ReleaseKeyTask, SignatureTask, SignatureResult } from './models'
 import type { IBuilder } from '../common/builder.js'
+import type { SigningStatus } from '../signing/models.js'
 
 export interface IOnboardingTasksEngine {
   getCompletedOnboardingTasks(): Promise<string[]>
@@ -33,6 +34,22 @@ export interface ISignatureTasksEngine {
    * Throws a descriptive error when no pending task or no AdminSigning row exists.
    */
   getSignatureDigest(task: SignatureTask): Promise<Uint8Array>
+
+  /**
+   * Surface 5 (62-12, D-09/D-10/D-11) — read-only co-signing status for the session behind the
+   * caller's OWN PENDING task. Locates the session through exactly the same lookup
+   * `getSignatureDigest` uses (ballot scoped by `ballot.proposed.id`, registrant scoped by
+   * `requestId`, else the single-pending-task-of-type form), then returns 62-07's
+   * `SigningStatus` for that nonce verbatim.
+   *
+   * Returns `null` when the task has no pending row, when the engine has no context, or when
+   * the resolved nonce has no `AdminSigning` session — never throws for those cases.
+   *
+   * Writes nothing and seeds nothing. Display-only: the returned status is NEVER an
+   * authorization input — `completeSignature` and the schema's own CHECK constraints remain the
+   * sole enforcement of who may sign and when a session is satisfied.
+   */
+  getTaskSigningStatus(task: SignatureTask): Promise<SigningStatus | null>
 }
 
 export interface IOnboardingTasksSetOnboardingTaskCompletedBuilder extends IBuilder<string, void> {
