@@ -17,3 +17,8 @@ export * from './types.js'
 // IKeyVault port). Named-export barrel, not a wildcard — see
 // src/crypto/index.ts's header for what is deliberately excluded.
 export * from './crypto/index.js'
+// Phase 62 Plan 14 (D-03/D-04/D-29/D-32/D-46): the intake module (officer
+// encryption-key registration, D-04/D-32 recipient resolution, the D-03/D-04
+// sealer/opener, the D-29/D-46 intake policy). Named-export barrel — see
+// src/intake/index.ts's header for what is deliberately excluded.
+export * from './intake/index.js'

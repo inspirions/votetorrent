@@ -128,3 +128,52 @@ export type {
 	KeyVaultErrorCode,
 	KeyVaultPolicy
 } from './crypto/index.js'
+// Phase 62 Plan 14 (D-03/D-04/D-29/D-32/D-46): the intake module, re-exported
+// by name (never `export *`) for its RN consumers — the Authority's officer
+// key step and peer intake (62-21), the bridge URL card (62-25) and the
+// re-association toggle (62-27), and the Voter's sealing (62-22). Mirrors
+// the exact name list on src/intake/index.ts.
+export {
+	IntakeError,
+	REASSOCIATION_MODES,
+	DEFAULT_REASSOCIATION_MODE,
+	REST_BRIDGE_URL_MAX_LENGTH,
+	intakeQueryPortFromDb,
+	intakeQueryPortFromStrandPort,
+	resolveIntakeRecipients,
+	createIntakeSealer,
+	createIntakeOpener,
+	isValidRestBridgeUrl,
+	normalizeIntakePolicyRow,
+	readIntakePolicyFrom,
+	reassociationRouteFor,
+	IntakeEngine
+} from './intake/index.js'
+export type {
+	IntakeErrorCode,
+	IntakeSignCallback,
+	ReassociationMode,
+	ReassociationMatchMethod,
+	ReassociationRoute,
+	IntakeRecipientDroppedKey,
+	IntakeRecipientSet,
+	OfficerEncryptionKeyRegistration,
+	OfficerEncryptionKeyStatus,
+	IntakeSealer,
+	IntakeOpenFailureReason,
+	IntakeOpenResult,
+	IntakeOpener,
+	AuthorityIntakePolicyView,
+	AuthorityIntakePolicyInput,
+	IntakeQueryPort
+} from './intake/index.js'
+// Phase 62 Plan 14: these two `export *` lines are a DELIBERATE exception to
+// this file's named-export convention — each transport's whole exported
+// surface (class + options/strand-port types, and registration's re-exported
+// staging-seam names) IS its consumers' contract. Consumers: 62-21 (Authority
+// strand-port adapter, peer intake) and 62-22 (Voter sealing) import
+// `P2pRegistrationTransport`/`P2pAssociationTransport` from
+// `@votetorrent/vote-engine/rn` in wave 5. NEVER copy either line into
+// `src/index.ts` — src/registration/index.ts and src/association/transport/index.ts already reach it (62-15 Task 3).
+export * from './registration/transport/p2p-registration-transport.js'
+export * from './association/transport/p2p-association-transport.js'
