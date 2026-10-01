@@ -94,6 +94,256 @@
 // 62-24 constructs a `KeyholderDkgEngine` on node B and calls
 // `verifyDkgTranscript`, re-verifying every replicated row in SQL; its vault
 // is never read except through `hasSecret`.
+//
+// ---------------------------------------------------------------------------
+// Security review (D-25) — protocol composition — dated 2026-10-01, 62-17 Task 3
+// ---------------------------------------------------------------------------
+//
+// The 62-05 review (`src/crypto/dkg.ts`) covers the primitives in isolation.
+// This review covers how THIS engine composes them over signed strand rows:
+// does it schedule rounds in the right order, verify what it reads, map
+// verdicts to the right disqualification, and leave no full key or stale
+// secret on any device. ASVS L1: every HIGH finding is fixed (or the
+// composing control already closes it) before this section was written.
+//
+//  1. Commit-reveal ordering: `planDkgAction`'s `post-round` branch never
+//     schedules round 1 until every roster member's round-0 row is visible
+//     (`awaitingUserIds` at round 0 blocks everyone). Evidence: "gates
+//     passing with zero rows ... planDkgAction returns post-round-0", "with
+//     4 of 5 R0 rows present, planDkgAction returns none ... and never
+//     post-round-1" (`dkg-evaluator.spec.ts`). Negative controls (a), (b).
+//  2. R1 commit and proof of knowledge are verified publicly (read-side, by
+//     EVERY node, not just the dealer's peers) and failures are attributed
+//     to the sender. Evidence: "an R1 that differs from its R0 commit gives
+//     aborted/faults with commit-mismatch", "a tampered proof of knowledge
+//     gives invalid-round1" (`dkg-evaluator.spec.ts`). Control (a).
+//  3. Every received share is verified with `verifyDealerShare` before an
+//     ack and before the round-4 `dkgRound3` call (`executePostRound3`,
+//     `executePostRound4`). Evidence: scenario B (`dkg.spec.ts`) — a
+//     perturbed share is caught and complained, never silently acked.
+//     Control (c).
+//  4. Verdict-to-disqualification mapping (dealer-fault -> the dealer,
+//     complainant-fault -> the complainant, unresolved -> nobody, abort
+//     only). Evidence: the five "round-3 verdicts" cases in
+//     `dkg-evaluator.spec.ts`, plus scenarios B (dealer-fault) and D
+//     (complainant-fault) in `dkg.spec.ts`. Control (d).
+//  5. Boundary determinism: a round is evaluated only once every roster
+//     member's row for it is visible, so every node reaches the identical
+//     verdict regardless of arrival order. Evidence: "with one complaint
+//     present and another member's R3 missing, the attempt is still
+//     collecting" (`dkg-evaluator.spec.ts`). Control (k).
+//  6. Participants come from the LIVE `Keyholder` table
+//     (`loadSnapshot`'s `liveRoster` query), and a transcript-proven
+//     disqualification is removed (tier 2, see item 15) before the next
+//     attempt's round 0 and before any publication — `planDkgAction`
+//     prioritizes `remove-disqualified` over every other action. Evidence:
+//     scenario B ("removed-disqualified fires first"), scenario C (a
+//     raw-handle re-add is re-removed). Control (e).
+//  7. The attempt cap matches the schema's `AttemptValid` bound
+//     (`DKG_MAX_ATTEMPTS = 3`, `@votetorrent/vote-core`), and
+//     `keyholderDkgRoundSecretAlias` independently bounds `attempt` to
+//     `1..DKG_MAX_ATTEMPTS` as a second, defense-in-depth gate BEFORE any
+//     row is even built. Evidence: scenario E (attempts-exhausted at 3, no
+//     `Attempt > 3` row). Control (f).
+//  8. `k` comes from the 'mel'-signed `ElectionRevision.KeyholderThreshold`
+//     (`loadSnapshot`), never from the roster size, and the published
+//     `ElectionKey.Threshold` must equal it (schema `ThresholdMatchesRevision`).
+//     Evidence: scenario G (`threshold-out-of-range` gate). Control (g).
+//  9. R2 shares are encrypted only to the recipient's keyholder-signed
+//     `KeyholderDkgBinding.DkgPublicKey` (`executePostRound2` reads
+//     `snapshot.bindings`, never a signing key) — D-26. Control (h).
+// 10. R4 agreement and the published `ElectionKey`'s consistency with the
+//     agreed `Y` are both checked (`evaluateDkgRevision`'s final
+//     `electionKeyConsistent` pass; `verifyDkgTranscript`). Evidence: the
+//     two "ElectionKey consistency" cases in `dkg-evaluator.spec.ts`, and
+//     scenario A's `verifyDkgTranscript` assertion.
+// 11. No full key on any device (D-16): `grep -vE '^\s*(//|\*|/\*)'
+//     src/keyholder/*.ts | grep -cE "combineSecret|reconstructGroupSecret"`
+//     prints 0. Scenario A additionally proves the AFFIRMATIVE side —
+//     every vault holds exactly one 32-byte `keyholderDkgShareAlias` share,
+//     reconstructible (TEST-SIDE ONLY, via `reconstructGroupSecret`) from
+//     any 3-of-5 subset to a scalar whose public key is `Y`.
+// 12. Round-secret custody: `keyholderDkgRoundSecretAlias` with
+//     `KEYHOLDER_DKG_ROUND_SECRET_POLICY.requireUserAuth === true`; the
+//     step-2 record is written BEFORE step 1 is deleted
+//     (`executePostRound2`); `cleanupVault` sweeps every ABORTED attempt's
+//     round-secret aliases (and, once `complete`, every attempt's) after
+//     every action. Evidence: scenario A ("round-secret aliases all
+//     swept"), scenario E ("no vault holds a round-secret alias"). Control
+//     (j).
+// 13. Read-side signature verification of replicated rows: `loadSnapshot`
+//     recomputes `SignatureValid(...)  or SignatureValidP256(...)` AND an
+//     EXISTS over `UserKey` for every `KeyholderDkgMessage`/`ElectionKey`
+//     row in SQL — a replicated row is never trusted on the strength of
+//     having replicated. `evaluateDkgRevision` drops a `signatureValid:
+//     false` row into `invalidRows` and never attributes it. Control (i).
+// 14. No secret bytes in error messages, and no `console` use. The
+//     `KeyholderDkgError`/`KeyVaultError` codes and ids are the only error
+//     content; `decodeDkgRoundVaultRecord`'s own corruption messages name
+//     no field value. Evidence: scenario L asserts the thrown message
+//     matches no 64-hex run. `grep -vE '^\s*(//|\*|/\*)' src/keyholder/*.ts
+//     | grep -cE "combineSecret|reconstructGroupSecret|console\."` prints 0.
+// 15. Two-tier residual (T-62-02-13, inherited from 62-02): `Keyholder`
+//     carries no `check on delete`, so `remove-disqualified` is a tier-2
+//     path — any live participant may run it, on transcript-proven evidence
+//     only, idempotently. A raw-handle re-add is re-removed on the next
+//     honest pass (scenario C). The residual for a client that never runs
+//     this engine at all (and so never re-removes a re-added row) transfers
+//     to the still-open T-62-02-13 Keyholder-delete-authorization gap —
+//     not re-opened or re-designed here.
+// 16. Liveness residual (accepted, not mitigated): no wall-clock timeout on
+//     replicated rows — an absent participant stalls the DKG with
+//     `awaitingUserIds` naming them. The officer remedy is
+//     `ElectionEngine.revokeKeyholder`, which the roster-rule fallback
+//     (rule 6) turns into a clean `roster-changed` abort once the revoked
+//     member's further rows become structurally impossible (`
+//     SenderIsBoundKeyholder` would reject them). Evidence: scenario H.
+// 17. Lag residual (accepted): a replication lag that makes one node see a
+//     roster change before another can consume at most one extra attempt
+//     (the roster-rule fallback aborts that attempt as `roster-changed`
+//     rather than publishing on a stale roster), bounded by the 3-attempt
+//     cap like any other abort.
+// 18. Inherited A6/A7 (from 62-05, unchanged by this plan): A6 — a
+//     complaint without a DLEQ proof cannot distinguish a lying dealer from
+//     a lying complainant when the key-commitment tag itself mismatches, so
+//     the verdict is `unresolved` (denial of service only — scenario E
+//     shows this costs at most all 3 attempts). A7 — Joint-Feldman DKG bias
+//     under a rushing/aborting adversary: the commit-reveal in R0 removes
+//     the RUSHING choice, but a participant can still bias the joint key by
+//     roughly one bit per self-disqualifying abort-and-retry, bounded by
+//     the SAME 3-attempt cap. Both residuals stay OPEN, surfaced to the
+//     user/reviewer (not claimed closed by this plan), and GJKR (Pedersen
+//     commitments plus a public extraction/complaint phase) is the named
+//     alternative if either ever needs closing — not built here, since it
+//     would be additional hand-rolled protocol logic beyond what D-25
+//     sanctions.
+// 19. Hermes proof debt (inherited from 62-05's own dkg.ts review, and this
+//     engine's own driver on top of it): the composed round driver
+//     (`KeyholderDkgEngine`) has run only in Node, over `InMemoryTestKeyVault`
+//     and an in-memory Quereus `Database`. No device run has been made on
+//     Hermes or against a hardware-backed vault adapter. Tracked for 62-30
+//     in the D-23 "code-complete, unverified" style — never claim device
+//     proof for this review.
+//
+// Negative control results (temporarily mutate the named file, run the
+// targeted spec(s), record the failing title(s), then `git checkout --` the
+// file to restore):
+//
+//   (a) Skip `verifyRound1Commit` in the evaluator's round-1 fault check.
+//       NOT LIVE-MUTATED: the permission system's Security-Weaken
+//       classifier refused this edit (disabling a signature/commit
+//       verification call), and per its own instructions the SAME outcome
+//       was not re-attempted through a different phrasing or tool. The
+//       control is instead evidenced structurally: "an R1 that differs
+//       from its R0 commit gives aborted/faults with commit-mismatch on
+//       that sender" (`dkg-evaluator.spec.ts`) is a POSITIVE-path test that
+//       only passes because `verifyRound1Commit` actually detects the
+//       mismatch — removing the call would make this exact assertion fail
+//       (`ev.disqualified.find(...).reason` would be `undefined`, not
+//       `'commit-mismatch'`), by direct code inspection of the `if`/`else
+//       if` chain at the round-1 fault site. Recorded as a gap in live
+//       coverage, not in protection — flagged for the human reviewer.
+//   (b) Let `planDkgAction` plan round 1 while an R0 is missing (forced the
+//       `post-round` branch's `awaitingUserIds.includes(selfUserId)` guard
+//       to `true` unconditionally).
+//       RED: "with 4 of 5 R0 rows present, planDkgAction returns none for
+//       posted members and never post-round-1; awaitingUserIds is the
+//       missing member" (`dkg-evaluator.spec.ts`) — planned `post-round
+//       0/1` instead of `none` for an already-posted member.
+//   (c) Ack a decrypted share without `verifyDealerShare` in
+//       `executePostRound3` (forced the check to `false && ...`).
+//       RED: scenario B (`dkg.spec.ts`) — the bad share is never
+//       complained; `dkgRound3`'s OWN internal check then throws
+//       `"share failed verification against the dealer's own commitment"`
+//       at round 4 instead (a second, independent layer catches it, but
+//       NOT as the intended round-3 complaint — recorded as a defense-in-
+//       depth finding, not a silent pass).
+//   (d) Map `unresolved` to disqualifying the complainant with
+//       `false-complaint` in the evaluator's round-3 verdict loop.
+//       RED: "a random-point sharedSecret gives aborted/unresolved-
+//       complaint with an empty disqualified list and unresolvedComplaints
+//       1" — got `abortReason: 'faults'` instead of `'unresolved-complaint'`.
+//   (e) Make `executeRemoveDisqualified` a no-op (never issues the
+//       `delete from Keyholder`).
+//       RED: scenario B — `runDkgToQuiescence` throws `"exceeded maxPasses
+//       (60)"` after 4 minutes of real time. This is `planDkgAction`'s OWN
+//       priority ordering working as designed: `remove-disqualified` is
+//       checked BEFORE `publish`/`post-round` for every eligible
+//       participant, so an un-removed disqualified member blocks ALL
+//       further progress rather than letting the DKG silently continue
+//       around a raw-handle survivor — an availability-only, fail-closed
+//       outcome. The control ALSO proves a second, deeper backstop by code
+//       inspection (not independently triggered by this run, since the
+//       planner-priority protection fires first): `ElectionKey`'s
+//       `ParticipantsAreKeyholders` CHECK (`new.Participants = (select
+//       count(*) from Keyholder ...)`) would reject a publish attempt that
+//       ever got as far as computing `Participants` from the engine's own
+//       (disqualification-aware) roster length against a DB that still
+//       counted the un-removed row — the same "provably non-divergent
+//       given an earlier control" shape as 62-05 dkg.ts's own F-01 finding.
+//   (f) Raise the evaluator's attempt cap to 4 (loop bound and both
+//       `attempt === DKG_MAX_ATTEMPTS` cap checks).
+//       RED: scenario E — `KeyholderDkgError: keyholderDkgRoundSecretAlias:
+//       attempt must be 1..DKG_MAX_ATTEMPTS`, thrown from
+//       `executePostRound0` before any attempt-4 row is ever built. The
+//       alias function's own defensive bound is a SECOND, independent cap
+//       below the evaluator's — the schema's `AttemptValid` CHECK is a
+//       third, never reached in this run because the alias guard fires
+//       first.
+//   (g) Publish with `Threshold = roster.length` instead of
+//       `evaluation.threshold` (the revision's signed `KeyholderThreshold`).
+//       RED: scenario A — `Quereus error (code 19): CHECK constraint
+//       failed: ThresholdMatchesRevision`.
+//   (h) Encrypt R2 to `signer.signingPublicKey` instead of
+//       `snapshot.bindings[...].dkgPublicKey`.
+//       RED: scenario A — final `status.phase` is `'failed'` instead of
+//       `'complete'` (every recipient's `decryptShare` fails against the
+//       wrong key, producing a complaint storm that exhausts all 3
+//       attempts).
+//   (i) Ignore `signatureValid` in the evaluator (never route a `false` row
+//       into `invalidRows`).
+//       RED: "a row with signatureValid false is treated as absent, is
+//       listed in invalidRows, and never disqualifies the claimed sender"
+//       — `invalidRows` came back `[]` instead of containing the row.
+//   (j) Skip the `cleanupVault` calls in `advanceDkg`'s round-driving loop.
+//       RED: scenario E — `readRoundRecord` for a BYGONE aborted attempt's
+//       step-2 alias returned the record instead of `null`
+//       (`"Dealer attempt 1 step 2: expected {...} to equal null"`). (Scenario
+//       A alone does NOT catch this control — its own round-secret aliases
+//       are already deleted inline by `executePostRound2`/`executePostRound4`
+//       on the one successful attempt; the dedicated sweep is load-bearing
+//       only for ABORTED attempts' leftovers, which is exactly what
+//       scenario E isolates.)
+//   (k) Decide a complaint abort as soon as ANY round-3 row is a complaint,
+//       instead of waiting for the full round-3 boundary.
+//       RED: "with one complaint present and another member's R3 missing,
+//       the attempt is still collecting and awaitingUserIds lists the
+//       missing member" — got an immediate `aborted/unresolved-complaint`
+//       instead of `collecting`.
+//
+// Findings table (id, severity, status):
+//
+//   F-01 | LOW    | accepted — control (a) could not be live-mutated (see
+//         above); closed by structural code-reading of the existing
+//         positive-path test instead of a live red/green cycle. No
+//         HIGH/MEDIUM severity — the SAME check is additionally exercised,
+//         un-mutated, by three other round-1 fault cases in this run.
+//   F-02 | INFO   | accepted — control (e)'s SECOND backstop
+//         (`ParticipantsAreKeyholders`) is provably reachable only if the
+//         planner-priority protection (which this run DID trigger) is
+//         ALSO bypassed; not independently triggered here, same
+//         "provably non-divergent given an earlier control" shape as
+//         62-05 dkg.ts's F-01. No fix needed.
+//
+// No HIGH or MEDIUM finding was raised by this review.
+//
+// Residuals (OPEN, not claimed safe — see items 15-18 above):
+//   T-62-02-13 (tier-2 Keyholder delete, inherited) — transferred, not
+//   re-designed. A6 and A7 (inherited from 62-05) — bounded by the
+//   3-attempt cap, surfaced to the user/reviewer.
+//
+// Hermes device proof debt: see item 19. Tracked for 62-30 — never claim
+// device proof for this review.
 
 import { MisuseError, QuereusError } from '@quereus/quereus'
 import { bytesToHex } from '@noble/hashes/utils.js'

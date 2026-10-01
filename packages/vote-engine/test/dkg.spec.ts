@@ -24,22 +24,46 @@ import {
   type EncryptedShare,
   type ReleasedShare
 } from '../src/crypto/dkg.js'
-import { keyholderDkgShareAlias } from '../src/crypto/vault.js'
+import { InMemoryTestKeyVault, KEYHOLDER_DKG_RECEIVING_KEY_POLICY, KeyVaultError, keyholderDkgReceivingKeyAlias, keyholderDkgShareAlias } from '../src/crypto/vault.js'
 import { allocateTid } from '../src/database/tid-allocator.js'
 import { parseRound1Payload, parseRound2Payload, serializeRound2Payload, serializeRound3Payload } from '../src/keyholder/dkg-payloads.js'
+import { KeyholderDkgEngine, KeyholderDkgError } from '../src/keyholder/keyholder-dkg-engine.js'
 import {
+  inviteAndAcceptKeyholder,
   postSignedDkgMessage,
   readRoundRecord,
   runDkgToQuiescence,
   seedDkgElection,
   type DkgTestParticipant
 } from './fixtures/dkg-keyholders.js'
+import { bumpElectionRevision } from './fixtures/test-context.js'
+import type { KeyholderDkgSigner } from '@votetorrent/vote-core'
 
 async function countRows (db: Database, electionId: string, revision: number, attempt: number, round: number): Promise<number> {
   const row = await db
     .prepare('select count(*) as c from KeyholderDkgMessage where ElectionId = :electionId and ElectionRevision = :revision and Attempt = :attempt and DkgRound = :dkgRound')
     .get({ electionId, revision, attempt, dkgRound: round })
   return (row?.c as number | undefined) ?? 0
+}
+
+/**
+ * A `stopWhen` boundary can be reached by whichever participant's call
+ * happens to be the LAST needed — and that same call may cascade straight
+ * into posting the NEXT round too (the engine does not artificially stop
+ * at a round boundary it just completed). Scenarios that need a specific
+ * participant to NOT yet have posted a given round pick dynamically,
+ * rather than assuming `participants[0]` is still eligible.
+ */
+async function pickParticipantAwaitingRound (
+  db: Database, electionId: string, revision: number, attempt: number, round: number, participants: DkgTestParticipant[]
+): Promise<DkgTestParticipant> {
+  for (const p of participants) {
+    const row = await db
+      .prepare('select 1 as x from KeyholderDkgMessage where ElectionId = :electionId and ElectionRevision = :revision and Attempt = :attempt and DkgRound = :dkgRound and SenderUserId = :senderUserId')
+      .get({ electionId, revision, attempt, dkgRound: round, senderUserId: p.userId })
+    if (!row) return p
+  }
+  throw new Error('pickParticipantAwaitingRound: every participant already posted this round')
 }
 
 async function bindingKeyFor (db: Database, electionId: string, revision: number, userId: string): Promise<string> {
@@ -391,6 +415,255 @@ describe('dkg.spec: KeyholderDkgEngine over one shared DB', function () {
 
       const attempt2Count = await countRows(db, electionId, revision, 2, 0)
       expect(attempt2Count).to.equal(0)
+    })
+  })
+
+  // ===========================================================================
+  // G. Gates
+  // ===========================================================================
+
+  describe('G: gates', function () {
+    this.timeout(180000)
+
+    it('G: KeyholderThreshold 1 with 3 keyholders gives blocked/threshold-out-of-range, and advanceDkg writes no row', async () => {
+      const { auth, electionId, revision, participants } = await seedDkgElection({ keyholders: ['A', 'B', 'C'], threshold: 1 })
+      const status = await participants[0]!.engine.getDkgStatus(electionId)
+      expect(status.phase).to.equal('blocked')
+      expect(status.blockedReason).to.equal('threshold-out-of-range')
+
+      const result = await participants[0]!.engine.advanceDkg(electionId, participants[0]!.signer)
+      expect(result.actions).to.deep.equal([])
+      expect(await countRows(auth.ctx.db, electionId, revision, 1, 0)).to.equal(0)
+    })
+
+    it('G: one unanswered unexpired keyholder invite gives blocked/pending-invites; accepting it unblocks the DKG, which then completes with that keyholder in the roster', async () => {
+      const { auth, electionEngine, electionId, participants } = await seedDkgElection({ keyholders: ['A', 'B'], threshold: 2, pendingInvites: ['Cee'] })
+      const blockedStatus = await participants[0]!.engine.getDkgStatus(electionId)
+      expect(blockedStatus.phase).to.equal('blocked')
+      expect(blockedStatus.blockedReason).to.equal('pending-invites')
+
+      const cee = await inviteAndAcceptKeyholder(auth, electionEngine, electionId, 'Cee')
+      const all = [...participants, cee]
+      await runDkgToQuiescence(all, electionId)
+
+      const finalStatus = await cee.engine.getDkgStatus(electionId)
+      expect(finalStatus.phase).to.equal('complete')
+      const ek = await cee.engine.getElectionKey(electionId)
+      expect(ek!.participants).to.equal(3)
+    })
+  })
+
+  // ===========================================================================
+  // H. Officer revoke mid-attempt
+  // ===========================================================================
+
+  describe('H: officer revoke mid-attempt', function () {
+    this.timeout(180000)
+
+    it('H: a revoke after every R1 exists aborts attempt 1 with roster-changed; attempt 2 completes with Participants n-1', async () => {
+      const { auth, electionEngine, electionId, revision, participants } = await seedDkgElection({
+        keyholders: ['Alice', 'Bob', 'Carol', 'Dave', 'Eve'], threshold: 3
+      })
+      const db = auth.ctx.db
+      const revoked = participants[4]!
+
+      await runDkgToQuiescence(participants, electionId, {
+        stopWhen: async () => (await countRows(db, electionId, revision, 1, 1)) === participants.length
+      })
+
+      await electionEngine.revokeKeyholder({ name: revoked.name, type: 'k', expiration: '0', inviteKey: '', inviteSignature: '' }, electionId)
+
+      await runDkgToQuiescence(participants, electionId, { skip: [revoked.userId] })
+
+      const status = await participants[0]!.engine.getDkgStatus(electionId)
+      const attempt1 = status.attempts.find((a) => a.attempt === 1)
+      expect(attempt1?.outcome).to.equal('aborted')
+      expect(attempt1?.abortReason).to.equal('roster-changed')
+
+      const ek = await participants[0]!.engine.getElectionKey(electionId)
+      expect(ek!.attempt).to.equal(2)
+      expect(ek!.participants).to.equal(4)
+    })
+  })
+
+  // ===========================================================================
+  // I. Revision pin
+  // ===========================================================================
+
+  describe('I: revision pin', function () {
+    this.timeout(180000)
+
+    it('I: a revision bump after round 1 reports the new revision as blocked/no-keyholders; a further advanceDkg by an old participant writes no row, and old-revision rows are untouched', async () => {
+      const { auth, electionsEngine, electionEngine, electionId, revision, participants } = await seedDkgElection({
+        keyholders: ['Alice', 'Bob', 'Carol'], threshold: 2
+      })
+      const db = auth.ctx.db
+
+      await runDkgToQuiescence(participants, electionId, {
+        stopWhen: async () => (await countRows(db, electionId, revision, 1, 1)) === participants.length
+      })
+      const oldRound1Count = await countRows(db, electionId, revision, 1, 1)
+
+      await bumpElectionRevision({ ...auth, electionsEngine, electionEngine })
+
+      const status = await participants[0]!.engine.getDkgStatus(electionId)
+      expect(status.revision).to.equal(revision + 1)
+      expect(status.phase).to.equal('blocked')
+      expect(status.blockedReason).to.equal('no-keyholders')
+
+      const result = await participants[0]!.engine.advanceDkg(electionId, participants[0]!.signer)
+      expect(result.actions).to.deep.equal([])
+
+      expect(await countRows(db, electionId, revision, 1, 1)).to.equal(oldRound1Count)
+    })
+  })
+
+  // ===========================================================================
+  // J. Signer checks
+  // ===========================================================================
+
+  describe('J: signer checks', function () {
+    this.timeout(180000)
+
+    it('J: a signer whose userId is not a live keyholder gets actions: [] and self.isParticipant false', async () => {
+      const { auth, electionId, participants } = await seedDkgElection({ keyholders: ['Alice', 'Bob'], threshold: 2 })
+      const outsider: KeyholderDkgSigner = {
+        userId: auth.user.id,
+        signingPublicKey: auth.user.activeKeys[0]!.key,
+        sign: participants[0]!.signer.sign // irrelevant — the outsider never reaches a post
+      }
+      const engine = new KeyholderDkgEngine(auth.ctx, { vault: new InMemoryTestKeyVault() })
+      const result = await engine.advanceDkg(electionId, outsider)
+      expect(result.actions).to.deep.equal([])
+      const status = await engine.getDkgStatus(electionId, outsider.userId)
+      expect(status.self?.isParticipant).to.equal(false)
+    })
+
+    it('J: a signingPublicKey that is not a UserKey of userId throws signer-key-mismatch and writes nothing', async () => {
+      const { auth, electionId, revision, participants } = await seedDkgElection({ keyholders: ['Alice', 'Bob'], threshold: 2 })
+      const p = participants[0]!
+      const badSigner: KeyholderDkgSigner = { userId: p.userId, signingPublicKey: 'ff'.repeat(33), sign: p.signer.sign }
+      let caught: unknown
+      try {
+        await p.engine.advanceDkg(electionId, badSigner)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).to.be.instanceOf(KeyholderDkgError)
+      expect((caught as KeyholderDkgError).code).to.equal('signer-key-mismatch')
+      expect(await countRows(auth.ctx.db, electionId, revision, 1, 0)).to.equal(0)
+    })
+
+    it('J: a sign callback returning another key throws signature-mismatch and writes nothing', async () => {
+      const { auth, electionId, revision, participants } = await seedDkgElection({ keyholders: ['Alice', 'Bob'], threshold: 2 })
+      const p = participants[0]!
+      const badSign = async (digest: Uint8Array) => {
+        const real = await p.signer.sign(digest)
+        return { ...real, signerKey: 'ff'.repeat(33) }
+      }
+      const badSigner: KeyholderDkgSigner = { userId: p.userId, signingPublicKey: p.signer.signingPublicKey, sign: badSign }
+      let caught: unknown
+      try {
+        await p.engine.advanceDkg(electionId, badSigner)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).to.be.instanceOf(KeyholderDkgError)
+      expect((caught as KeyholderDkgError).code).to.equal('signature-mismatch')
+      expect(await countRows(auth.ctx.db, electionId, revision, 1, 0)).to.equal(0)
+    })
+  })
+
+  // ===========================================================================
+  // K. Idempotency
+  // ===========================================================================
+
+  describe('K: idempotency', function () {
+    this.timeout(180000)
+
+    it('K: two concurrent advanceDkg calls post exactly one R0 row; a repeated call with no new rows leaves counts unchanged', async () => {
+      const { auth, electionId, revision, participants } = await seedDkgElection({ keyholders: ['Alice', 'Bob'], threshold: 2 })
+      const p = participants[0]!
+      await Promise.all([
+        p.engine.advanceDkg(electionId, p.signer),
+        p.engine.advanceDkg(electionId, p.signer)
+      ])
+      expect(await countRows(auth.ctx.db, electionId, revision, 1, 0)).to.equal(1)
+
+      const again = await p.engine.advanceDkg(electionId, p.signer)
+      expect(again.actions).to.deep.equal([])
+      expect(await countRows(auth.ctx.db, electionId, revision, 1, 0)).to.equal(1)
+    })
+  })
+
+  // ===========================================================================
+  // L. Missing receiving key
+  // ===========================================================================
+
+  describe('L: missing receiving key', function () {
+    this.timeout(180000)
+
+    it('L: round 3 with the receiving key deleted throws receiving-key-missing; the message has no 64-hex run; no R3 row is posted', async () => {
+      const { auth, electionId, revision, participants } = await seedDkgElection({
+        keyholders: ['Alice', 'Bob', 'Carol'], threshold: 2
+      })
+      const db = auth.ctx.db
+      await runDkgToQuiescence(participants, electionId, {
+        stopWhen: async () => (await countRows(db, electionId, revision, 1, 2)) === participants.length
+      })
+      const p = await pickParticipantAwaitingRound(db, electionId, revision, 1, 3, participants)
+      await p.vault.deleteSecret(keyholderDkgReceivingKeyAlias(p.userId))
+
+      let caught: unknown
+      try {
+        await p.engine.advanceDkg(electionId, p.signer)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).to.be.instanceOf(KeyholderDkgError)
+      expect((caught as KeyholderDkgError).code).to.equal('receiving-key-missing')
+      expect((caught as Error).message).to.not.match(/[0-9a-f]{64}/)
+
+      expect(await countRows(db, electionId, revision, 1, 3)).to.satisfy((n: number) => n < participants.length)
+      const row = await db.prepare('select 1 as x from KeyholderDkgMessage where ElectionId = :electionId and ElectionRevision = :revision and Attempt = 1 and DkgRound = 3 and SenderUserId = :senderUserId').get({ electionId, revision, senderUserId: p.userId })
+      expect(row).to.equal(undefined)
+    })
+  })
+
+  // ===========================================================================
+  // M. Vault auth denied
+  // ===========================================================================
+
+  describe('M: vault auth denied', function () {
+    this.timeout(180000)
+
+    it('M: an InMemoryTestKeyVault that always denies rejects with KeyVaultError auth-denied at the round-3 receiving-key read, and posts no round-3 row for that user', async () => {
+      const { auth, electionId, revision, participants } = await seedDkgElection({ keyholders: ['Alice', 'Bob', 'Carol'], threshold: 2 })
+      const db = auth.ctx.db
+      await runDkgToQuiescence(participants, electionId, {
+        stopWhen: async () => (await countRows(db, electionId, revision, 1, 2)) === participants.length
+      })
+      const p = await pickParticipantAwaitingRound(db, electionId, revision, 1, 3, participants)
+
+      // A fresh, always-denying vault for p, preloaded with the SAME
+      // receiving key p's real vault holds — the alias EXISTS, so the
+      // round-3 `getSecret` is this vault's first call and is denied.
+      const denyVault = new InMemoryTestKeyVault({ authorize: () => false })
+      await denyVault.putSecret(keyholderDkgReceivingKeyAlias(p.userId), p.receivingPrivateKey, KEYHOLDER_DKG_RECEIVING_KEY_POLICY)
+      const denyEngine = new KeyholderDkgEngine(auth.ctx, { vault: denyVault })
+
+      let caught: unknown
+      try {
+        await denyEngine.advanceDkg(electionId, p.signer)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).to.be.instanceOf(KeyVaultError)
+      expect((caught as KeyVaultError).code).to.equal('auth-denied')
+      expect(denyVault.authPromptCount).to.equal(1)
+
+      const row = await db.prepare('select 1 as x from KeyholderDkgMessage where ElectionId = :electionId and ElectionRevision = :revision and Attempt = 1 and DkgRound = 3 and SenderUserId = :senderUserId').get({ electionId, revision, senderUserId: p.userId })
+      expect(row).to.equal(undefined)
     })
   })
 })

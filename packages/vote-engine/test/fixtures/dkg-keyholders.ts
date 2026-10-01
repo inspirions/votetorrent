@@ -41,7 +41,7 @@ import type { IElectionEngine } from '@votetorrent/vote-core'
 // actually needs.
 // ---------------------------------------------------------------------------
 
-async function setKeyholderThreshold (threshold: number): Promise<{ auth: TestAuthorityContext, electionEngine: IElectionEngine, electionId: string }> {
+async function setKeyholderThreshold (threshold: number): Promise<{ auth: TestAuthorityContext, electionsEngine: ElectionsEngine, electionEngine: IElectionEngine, electionId: string }> {
   const net = await createTestNetwork()
   const auth = await addTestAuthority(net)
   const electionsEngine = new ElectionsEngine(auth.ctx)
@@ -73,7 +73,7 @@ async function setKeyholderThreshold (threshold: number): Promise<{ auth: TestAu
   const initWithPastTs = { ...init, revision: { ...init.revision, revisionTimestamp: pastRevTimestamp } }
   await electionsEngine.createElection(initWithPastTs, { signingNonce, revisionSigningNonce })
   const electionEngine = await electionsEngine.openElection(e.id)
-  return { auth, electionEngine, electionId: e.id }
+  return { auth, electionsEngine, electionEngine, electionId: e.id }
 }
 
 // ---------------------------------------------------------------------------
@@ -91,48 +91,63 @@ export interface DkgTestParticipant {
 
 export interface SeedDkgElectionResult {
   auth: TestAuthorityContext
+  electionsEngine: ElectionsEngine
   electionEngine: IElectionEngine
   electionId: string
   revision: number
   participants: DkgTestParticipant[]
 }
 
-export async function seedDkgElection (options: { keyholders: string[], threshold: number, pendingInvites?: string[] }): Promise<SeedDkgElectionResult> {
-  const { auth, electionEngine, electionId } = await setKeyholderThreshold(options.threshold)
-  const participants: DkgTestParticipant[] = []
-
-  for (const name of options.keyholders) {
+/**
+ * Invite (if not already invited) and accept a Type 'k' keyholder slot by
+ * `name`, through the real D-21/D-26 pipeline, returning its
+ * `DkgTestParticipant`. Factored out of `seedDkgElection` so a caller (e.g.
+ * scenario G's pending-invite unblock) can accept a keyholder invite
+ * AFTER the election is already seeded.
+ */
+export async function inviteAndAcceptKeyholder (auth: TestAuthorityContext, electionEngine: IElectionEngine, electionId: string, name: string): Promise<DkgTestParticipant> {
+  let slotRow = await auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
+  if (!slotRow) {
     const invite: KeyholderInvite = {
       name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: 'k'.repeat(66), inviteSignature: ''
     }
     await electionEngine.inviteKeyholder(invite, electionId, makeTestSignCallback(auth.user))
-    const slotRow = await auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
-    if (!slotRow) throw new Error(`seedDkgElection: no InviteSlot found for ${name}`)
-    const slotCid = slotRow.Cid as string
+    slotRow = await auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
+  }
+  if (!slotRow) throw new Error(`inviteAndAcceptKeyholder: no InviteSlot found for ${name}`)
+  const slotCid = slotRow.Cid as string
 
-    const { privateHex: signingPrivateHex, publicHex: signingPublicHex } = randomTestKeyPair()
-    const recv = generateDkgReceivingKey()
-    const sign = async (digest: Uint8Array): Promise<Signature> => {
-      const sig = secp256k1.sign(digest, hexToBytes(signingPrivateHex))
-      return { signature: bytesToHex(sig), signerKey: signingPublicHex, signerUserId: '' }
-    }
-    const provisioning: KeyholderAcceptProvisioning = {
-      signingKey: { key: signingPublicHex, type: UserKeyType.mobile, expiration: Date.now() + 10 * 365 * 86_400_000 },
-      dkgPublicKey: recv.publicKey,
-      sign
-    }
-    const invitationEngine = new InvitationEngine(auth.ctx)
-    await invitationEngine.respondToInvite(slotCid, true, undefined, undefined, undefined, provisioning)
+  const { privateHex: signingPrivateHex, publicHex: signingPublicHex } = randomTestKeyPair()
+  const recv = generateDkgReceivingKey()
+  const sign = async (digest: Uint8Array): Promise<Signature> => {
+    const sig = secp256k1.sign(digest, hexToBytes(signingPrivateHex))
+    return { signature: bytesToHex(sig), signerKey: signingPublicHex, signerUserId: '' }
+  }
+  const provisioning: KeyholderAcceptProvisioning = {
+    signingKey: { key: signingPublicHex, type: UserKeyType.mobile, expiration: Date.now() + 10 * 365 * 86_400_000 },
+    dkgPublicKey: recv.publicKey,
+    sign
+  }
+  const invitationEngine = new InvitationEngine(auth.ctx)
+  await invitationEngine.respondToInvite(slotCid, true, undefined, undefined, undefined, provisioning)
 
-    const resultRow = await auth.ctx.db.prepare('select InvokedId from InviteResult where SlotCid = :cid').get({ cid: slotCid })
-    const userId = resultRow?.InvokedId as string | undefined
-    if (!userId) throw new Error(`seedDkgElection: no InviteResult.InvokedId for ${name}`)
+  const resultRow = await auth.ctx.db.prepare('select InvokedId from InviteResult where SlotCid = :cid').get({ cid: slotCid })
+  const userId = resultRow?.InvokedId as string | undefined
+  if (!userId) throw new Error(`inviteAndAcceptKeyholder: no InviteResult.InvokedId for ${name}`)
 
-    const vault = new InMemoryTestKeyVault()
-    await vault.putSecret(keyholderDkgReceivingKeyAlias(userId), recv.privateKey, KEYHOLDER_DKG_RECEIVING_KEY_POLICY)
-    const engine = new KeyholderDkgEngine(auth.ctx, { vault })
-    const signer: KeyholderDkgSigner = { userId, signingPublicKey: signingPublicHex, sign }
-    participants.push({ name, userId, signer, vault, engine, receivingPrivateKey: recv.privateKey })
+  const vault = new InMemoryTestKeyVault()
+  await vault.putSecret(keyholderDkgReceivingKeyAlias(userId), recv.privateKey, KEYHOLDER_DKG_RECEIVING_KEY_POLICY)
+  const engine = new KeyholderDkgEngine(auth.ctx, { vault })
+  const signer: KeyholderDkgSigner = { userId, signingPublicKey: signingPublicHex, sign }
+  return { name, userId, signer, vault, engine, receivingPrivateKey: recv.privateKey }
+}
+
+export async function seedDkgElection (options: { keyholders: string[], threshold: number, pendingInvites?: string[] }): Promise<SeedDkgElectionResult> {
+  const { auth, electionsEngine, electionEngine, electionId } = await setKeyholderThreshold(options.threshold)
+  const participants: DkgTestParticipant[] = []
+
+  for (const name of options.keyholders) {
+    participants.push(await inviteAndAcceptKeyholder(auth, electionEngine, electionId, name))
   }
 
   for (const name of options.pendingInvites ?? []) {
@@ -144,7 +159,7 @@ export async function seedDkgElection (options: { keyholders: string[], threshol
 
   const revRow = await auth.ctx.db.prepare('select Revision from ElectionRevision where ElectionId = :id').get({ id: electionId })
   const revision = revRow?.Revision as number
-  return { auth, electionEngine, electionId, revision, participants }
+  return { auth, electionsEngine, electionEngine, electionId, revision, participants }
 }
 
 // ---------------------------------------------------------------------------
