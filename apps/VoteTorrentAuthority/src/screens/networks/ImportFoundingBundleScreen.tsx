@@ -10,6 +10,10 @@
  * UI-SPEC rule: every one of the seven states below renders its own, distinct body (testID
  * `founding-import-body-<state>`) — never two states sharing one body, and never a body that also
  * satisfies a different state's rendering.
+ *
+ * The screen's heading is the navigator title (`networkFoundingImportScreenTitle`, bound by
+ * `navigation/index.tsx`'s `ImportFoundingBundle` route registration) — nothing renders above the
+ * body here, so this screen's own JSX never repeats that key.
  */
 
 import { ExtendedTheme, useTheme, useNavigation } from '@react-navigation/native'
