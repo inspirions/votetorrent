@@ -65,12 +65,18 @@ export interface ISigningEngine {
   signDerived(nonce: string, signature: Signature, headerNonce: string, options?: SignOptions): Promise<SignOutcome>
   /** D-11: a read-only, no-veto derivation of a signing session's reached/unreachable state. Returns null for an unknown nonce. */
   getSigningStatus(nonce: string): Promise<SigningStatus | null>
+  /** 62-13 (D-08): `options` is optional and trailing. Only `options.ownsTransaction` is
+   *  honoured — it is forwarded to the session's own internal signWithOutcome call, so a caller
+   *  (AuthorityEngine.proposeAdmin, above a rad threshold of 1) can compose the session into a
+   *  larger transaction alongside fanOutSignatureTasks. The default (`ownsTransaction` unset or
+   *  true) is a self-owned transaction — byte-identical to every pre-62-13 caller. */
   startSigningSession(
     authorityId: string,
     digestArgs: AdminDigestArgs | null,
     scope: Scope,
     signature: Signature,
-    nonce?: string
+    nonce?: string,
+    options?: SignOptions
   ): Promise<SigningResult>
   buildSign(): ISigningSignBuilder
   buildStartSigningSession(): ISigningStartSigningSessionBuilder

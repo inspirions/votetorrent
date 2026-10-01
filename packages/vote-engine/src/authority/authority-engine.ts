@@ -18,10 +18,13 @@ import { SigningEngine } from '../signing/signing-engine.js';
 import { allocateTid } from '../database/tid-allocator.js';
 import { verifySig, verifySigP256 } from '../database/initialize.js';
 import {
+	adminSignatureTaskExtensionInserter,
 	computeAdminPromotionDigest,
 	computeRadProposalDigest,
 	readProposedRosterJson,
 } from './rad-roster-digest.js';
+import { listCurrentScopeHolders, readAuthorityThreshold } from '../signing/threshold.js';
+import { fanOutSignatureTasks } from '../signing/fan-out.js';
 import { verifyUserKeyMembership } from '../user/verify-user-key.js';
 import { UserKeyType } from '@votetorrent/vote-core';
 import {
@@ -186,6 +189,20 @@ export type AdminProposalPromotionOutcome =
 			// (non-test, non-mock) caller shaped this way today.
 			status: 'skipped-non-callback-signature';
 			nonce: string;
+	  }
+	| {
+			// 62-13 (D-08): above a rad threshold greater than 1, the proposer's OWN
+			// signature is recorded on the 'rad' proposal session, and a co-signer
+			// Task (plus AdminSignatureTaskExtension) is fanned out to every OTHER
+			// current rad holder — all in the SAME transaction as the session
+			// (T-62-13-02). Promotion does NOT happen here: it happens later, in
+			// SignatureTasksEngine.completeSignature's admin branch (Trigger B),
+			// once enough co-signers have accepted. This marker is set after that
+			// fan-out transaction commits.
+			status: 'awaiting-co-signers';
+			nonce: string;
+			threshold: number;
+			recipientUserIds: string[];
 	  };
 
 export class AuthorityEngine implements IAuthorityEngine {
@@ -592,6 +609,22 @@ export class AuthorityEngine implements IAuthorityEngine {
 		const effectiveAtCanon = toCanonicalDatetime(admin.proposed.effectiveAt);
 		const tid = await allocateTid(this.ctx.db, 'authority');
 		try {
+			// 62-13 (D-08, T-62-13-05): pre-write threshold decision — runs BEFORE the roster
+			// digest and the sign callback, so a proposal that could never reach its own rad
+			// threshold is refused before any write and before any biometric prompt is spent.
+			// The proposer's own signature counts only if they are a current holder, and the
+			// later fan-out excludes only the proposer — "holders.length" is the right bound
+			// either way.
+			const radThreshold = await readAuthorityThreshold(this.ctx.db, this.authority.id, 'rad');
+			if (radThreshold > 1) {
+				const radHolders = await listCurrentScopeHolders(this.ctx.db, this.authority.id, 'rad');
+				if (radThreshold > radHolders.length) {
+					throw new Error(
+						`proposeAdmin: This authority needs ${radThreshold} approvals to change its administration, but only ${radHolders.length} officers can approve administration changes.`,
+					);
+				}
+			}
+
 			// 57-01 (D-02): resolve + deterministically sort the roster BEFORE
 			// computing the digest, so the digest attests to the FULL roster this
 			// proposal revises — never a single-row, first-officer-only shortcut.
@@ -623,6 +656,16 @@ export class AuthorityEngine implements IAuthorityEngine {
 				signature = await signatureOrCallback(digestBytes);
 			} else {
 				signature = signatureOrCallback;
+			}
+
+			// 62-13 (D-08, T-62-13-01): above threshold 1, a co-signer Task is about to be
+			// fanned out on the strength of this signature — refuse a spoofed proposer BEFORE
+			// the ProposedAdmin envelope writes anything. Threshold 1 stays byte-identical
+			// (unchecked), so existing threshold-1 callers are not newly re-validated here.
+			if (radThreshold > 1 && signature.signerUserId !== initialSignerId) {
+				throw new Error(
+					'proposeAdmin: The signature does not belong to the officer proposing this administration.',
+				);
 			}
 
 			// D-21 (Class A): compute a REAL IsUserValid — the conjunction of registered/
@@ -731,77 +774,161 @@ export class AuthorityEngine implements IAuthorityEngine {
 				officers: officersJson,
 				thresholdPolicies: thresholdPoliciesJson,
 			};
-			// WR-06 (17-REVIEW): proposeAdmin only STARTS the signing session with
-			// the instigator's signature. For threshold policies > 1, the remaining
-			// signers complete the proposal via separate per-signer calls to
-			// `signingEngine.sign(nonce, signature)` — each signer must produce
-			// their OWN signature, so completion cannot happen inside this method
-			// (a previously commented-out loop here would have re-applied the
-			// instigator's signature for every signer, which is wrong).
-			const { nonce, thresholdReached } =
-				await this.signingEngine.startSigningSession(
-					this.authority.id,
-					adminDigestArgs,
-					'rad',
-					signature,
-				);
 
-			// 57-08 (D-01 trigger half, Trigger A): the instigator's own signature
-			// can already reach threshold here — the only administration shape the
-			// current data model supports is threshold 1 (WR-05: every seeded
-			// officer carries ctx.user.id), so proposeAdmin is where the FIRST and,
-			// today, ONLY signature-completing event for a 'rad' session happens.
-			// Promote only when threshold is genuinely reached AND a re-invocable
-			// per-digest callback is available — applyAdminProposal mints two or
-			// three distinct digests (57-07) and a single pre-computed Signature
-			// cannot cover them.
-			if (thresholdReached) {
-				if (typeof signatureOrCallback === 'function') {
-					try {
-						const result = await this.applyAdminProposal(
-							nonce,
-							signatureOrCallback,
-							{ ownsTransaction: true }, // 57-01 already COMMITted ProposedAdmin/
-							// ProposedOfficer above, and startSigningSession's sign() call
-							// (just above) owns and closes its OWN transaction — there is no
-							// open transaction at this point, so this trigger opens its own.
-						);
-						this.lastPromotionOutcome = { status: 'promoted', nonce, result };
-					} catch (promotionErr) {
-						if (promotionErr instanceof AdminPromotionError) {
-							// A promotion that legitimately cannot apply (e.g. the D-03
-							// .init-officer case) must not destroy a correctly persisted,
-							// correctly signed proposal. RECORD the refusal — never silent,
-							// never thrown — proposeAdmin's contract is to propose.
-							this.lastPromotionOutcome = {
-								status: 'refused',
-								nonce,
-								reason: promotionErr.reason,
-								proposedName: promotionErr.proposedName,
-							};
-							console.warn(
-								`AuthorityEngine.proposeAdmin: promotion refused for nonce ${nonce}: ${promotionErr.reason}. The proposal itself was NOT affected — see lastPromotionOutcome.`,
-							);
-						} else {
-							// Any OTHER error is unexpected and must not be downgraded to a
-							// warning.
-							throw promotionErr;
-						}
-					}
-				} else {
-					// Threshold reached but the caller supplied a bare Signature, not a
-					// callback. Per Task 1's P8 probe, this shape has a production
-					// (non-test, non-mock) caller — authority-propose-admin-builder.ts:154
-					// — with no current app-level UI consumer. Record and warn; do NOT
-					// throw and do NOT substitute/reuse the single supplied signature for
-					// the two or three distinct digests the promotion needs to mint.
-					this.lastPromotionOutcome = {
-						status: 'skipped-non-callback-signature',
-						nonce,
-					};
-					console.warn(
-						`AuthorityEngine.proposeAdmin: threshold reached for nonce ${nonce} but a bare Signature (not a re-invocable per-digest callback) was supplied — promotion needs a callback because it mints two or three distinct digests. The proposal itself was NOT affected; this surface cannot promote until it supplies a callback.`,
+			if (radThreshold <= 1) {
+				// WR-06 (17-REVIEW): proposeAdmin only STARTS the signing session with
+				// the instigator's signature. At threshold 1 this is the whole ceremony —
+				// Trigger A below is the FIRST and ONLY signature-completing event. Above
+				// threshold 1 (the `else` branch), the remaining signers complete the
+				// proposal through separate co-signer Tasks (62-13, D-08, D-12) and
+				// promotion happens in SignatureTasksEngine.completeSignature's admin
+				// branch (Trigger B) — never here.
+				const { nonce, thresholdReached } =
+					await this.signingEngine.startSigningSession(
+						this.authority.id,
+						adminDigestArgs,
+						'rad',
+						signature,
 					);
+
+				// 57-08 (D-01 trigger half, Trigger A): the instigator's own signature
+				// can already reach threshold here — the only administration shape the
+				// current data model supports is threshold 1 (WR-05: every seeded
+				// officer carries ctx.user.id), so proposeAdmin is where the FIRST and,
+				// today, ONLY signature-completing event for a 'rad' session happens.
+				// Promote only when threshold is genuinely reached AND a re-invocable
+				// per-digest callback is available — applyAdminProposal mints two or
+				// three distinct digests (57-07) and a single pre-computed Signature
+				// cannot cover them.
+				if (thresholdReached) {
+					if (typeof signatureOrCallback === 'function') {
+						try {
+							const result = await this.applyAdminProposal(
+								nonce,
+								signatureOrCallback,
+								{ ownsTransaction: true }, // 57-01 already COMMITted ProposedAdmin/
+								// ProposedOfficer above, and startSigningSession's sign() call
+								// (just above) owns and closes its OWN transaction — there is no
+								// open transaction at this point, so this trigger opens its own.
+							);
+							this.lastPromotionOutcome = { status: 'promoted', nonce, result };
+						} catch (promotionErr) {
+							if (promotionErr instanceof AdminPromotionError) {
+								// A promotion that legitimately cannot apply (e.g. the D-03
+								// .init-officer case) must not destroy a correctly persisted,
+								// correctly signed proposal. RECORD the refusal — never silent,
+								// never thrown — proposeAdmin's contract is to propose.
+								this.lastPromotionOutcome = {
+									status: 'refused',
+									nonce,
+									reason: promotionErr.reason,
+									proposedName: promotionErr.proposedName,
+								};
+								console.warn(
+									`AuthorityEngine.proposeAdmin: promotion refused for nonce ${nonce}: ${promotionErr.reason}. The proposal itself was NOT affected — see lastPromotionOutcome.`,
+								);
+							} else {
+								// Any OTHER error is unexpected and must not be downgraded to a
+								// warning.
+								throw promotionErr;
+							}
+						}
+					} else {
+						// Threshold reached but the caller supplied a bare Signature, not a
+						// callback. Per Task 1's P8 probe, this shape has a production
+						// (non-test, non-mock) caller — authority-propose-admin-builder.ts:154
+						// — with no current app-level UI consumer. Record and warn; do NOT
+						// throw and do NOT substitute/reuse the single supplied signature for
+						// the two or three distinct digests the promotion needs to mint.
+						this.lastPromotionOutcome = {
+							status: 'skipped-non-callback-signature',
+							nonce,
+						};
+						console.warn(
+							`AuthorityEngine.proposeAdmin: threshold reached for nonce ${nonce} but a bare Signature (not a re-invocable per-digest callback) was supplied — promotion needs a callback because it mints two or three distinct digests. The proposal itself was NOT affected; this surface cannot promote until it supplies a callback.`,
+						);
+					}
+				}
+			} else {
+				// 62-13 (D-08, D-12, T-62-13-02): above rad threshold 1, promotion never
+				// happens here — it happens later, in SignatureTasksEngine.completeSignature's
+				// admin branch (Trigger B), once enough co-signers have accepted. The session
+				// (ownsTransaction false) and the fan-out helper (ownsTransaction false) share
+				// ONE transaction here, so no proposal is ever left signed with no co-signer
+				// Task. The ProposedAdmin/ProposedOfficer envelope already COMMITted above, in
+				// its OWN transaction, before this one opens — quereus's transaction model is
+				// flat and those rows predate this plan; they are not re-opened here.
+				//
+				// Re-read the roster the schema itself now holds (the SAME cast(...as text)
+				// serialization Trigger B's CHECK recomputes) and compare byte-for-byte against
+				// what was just signed. A co-signer's Trigger B CHECK would refuse every task if
+				// these ever disagreed, so refuse here instead — nothing more is signed or
+				// written.
+				const schemaRoster = await readProposedRosterJson(this.ctx.db, this.authority.id, effectiveAtCanon);
+				if (schemaRoster !== officersJson) {
+					throw new Error(
+						"proposeAdmin: This proposal's stored officer list does not match the list that was signed, so co-signers could never verify it.",
+					);
+				}
+
+				const taskTid = await allocateTid(this.ctx.db, 'authority');
+				await this.ctx.db.exec('BEGIN');
+				try {
+					const session = await this.signingEngine.startSigningSession(
+						this.authority.id,
+						adminDigestArgs,
+						'rad',
+						signature,
+						undefined,
+						{ ownsTransaction: false },
+					);
+					if (session.thresholdReached) {
+						// Internal-invariant guard, not a reachable user-facing case: one
+						// signature cannot reach a threshold above 1.
+						throw new Error(
+							'proposeAdmin: internal invariant violated — a single signature reached a threshold greater than 1',
+						);
+					}
+					await this.ctx.db.runDeferredRowConstraints();
+					const fan = await fanOutSignatureTasks(
+						this.ctx,
+						{
+							authorityId: this.authority.id,
+							scope: 'rad',
+							nonce: session.nonce,
+							initiatorUserId: signature.signerUserId,
+							signatureType: 'admin',
+							taskTid,
+							insertExtension: adminSignatureTaskExtensionInserter(
+								this.ctx.db,
+								this.authority.id,
+								effectiveAtCanon,
+								taskTid,
+							),
+						},
+						{ ownsTransaction: false },
+					);
+					await this.ctx.db.exec('COMMIT');
+					this.lastPromotionOutcome = {
+						status: 'awaiting-co-signers',
+						nonce: session.nonce,
+						threshold: fan.threshold,
+						recipientUserIds: fan.recipientUserIds,
+					};
+				} catch (innerErr) {
+					// CR-04 shape (fan-out.ts, submitBallotForConfirmation): one bounded,
+					// autocommit-guarded recovery attempt. Either way, the ORIGINAL error is
+					// what the caller needs to see — never substitute a rollback error.
+					try {
+						if (!this.ctx.db.getAutocommit()) {
+							await this.ctx.db.exec('ROLLBACK');
+						}
+					} catch {
+						// Swallowed — getAutocommit() reports the handle's true state to any
+						// caller that checks it; this method does not pretend recovery
+						// succeeded.
+					}
+					throw innerErr;
 				}
 			}
 		} catch (err) {

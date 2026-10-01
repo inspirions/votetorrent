@@ -1,4 +1,4 @@
-import type { AdminDigestArgs, ISigningEngine, ISigningSignBuilder, ISigningStartSigningSessionBuilder, Scope, Signature, SignOutcome, SigningResult, SigningStatus } from '@votetorrent/vote-core'
+import type { AdminDigestArgs, ISigningEngine, ISigningSignBuilder, ISigningStartSigningSessionBuilder, Scope, Signature, SignOptions, SignOutcome, SigningResult, SigningStatus } from '@votetorrent/vote-core'
 import { SigningSignBuilder } from './builders/signing-sign-builder.js'
 import { SigningStartSigningSessionBuilder } from './builders/signing-start-signing-session-builder.js'
 
@@ -32,7 +32,8 @@ export class MockSigningEngine implements ISigningEngine {
     _digestArgs: AdminDigestArgs | null,
     _scope: Scope,
     _signature: Signature,
-    _nonce?: string
+    _nonce?: string,
+    _options?: SignOptions
   ): Promise<SigningResult> {
     const usedNonce = _nonce !== undefined ? _nonce : `mock-nonce-${++this.nonceCounter}`
     return { nonce: usedNonce, thresholdReached: true, crossedNow: true }

@@ -384,6 +384,7 @@ export class SigningEngine implements ISigningEngine {
 		scope: Scope,
 		signature: Signature,
 		nonce?: string,
+		options?: SignOptions,
 	): Promise<SigningResult> {
 		// PATH A: non-invite callers — generate a fresh nonce
 		// PATH B: invite callers — must supply the pre-generated nonce
@@ -498,7 +499,12 @@ export class SigningEngine implements ISigningEngine {
 				throw new Error(`Unknown error: ${err}`);
 			}
 		}
-		const { thresholdReached, crossedNow } = await this.signWithOutcome(sessionNonce, signature);
+		// 62-13 (D-08): forward ONLY options.ownsTransaction to the internal signWithOutcome
+		// call — isPlaceholderSignature never flows through this path. Default (unset or
+		// true) is a self-owned transaction, byte-identical to every pre-62-13 caller.
+		const { thresholdReached, crossedNow } = await this.signWithOutcome(sessionNonce, signature, {
+			ownsTransaction: options?.ownsTransaction ?? true,
+		});
 		return { nonce: sessionNonce, thresholdReached, crossedNow };
 	}
 
