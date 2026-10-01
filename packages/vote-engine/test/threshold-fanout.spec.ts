@@ -738,3 +738,36 @@ describe('fan-out helper (62-07)', function () {
     expect(Number(adminCountWithout?.n), 'without headerNonce, threshold-2 ceb stays unreached (pre-existing gap)').to.equal(0)
   })
 })
+
+// ===========================================================================
+// threshold-fanout structure (62-07) — Task 3: mechanically enforces D-09
+// (SigningEngine and fan-out never close/delete a Task) so a future edit
+// cannot silently break it.
+// ===========================================================================
+
+describe('threshold-fanout structure (62-07)', () => {
+  it('SigningEngine and fan-out.ts never update/delete Task; fan-out.ts flushes deferred constraints', () => {
+    const stripComments = (src: string): string =>
+      src
+        .split('\n')
+        .filter(line => {
+          const trimmed = line.trim()
+          return !trimmed.startsWith('//') && !trimmed.startsWith('*')
+        })
+        .join('\n')
+
+    const fanOutSrc = stripComments(readFileSync(path.join(__dirname, '..', 'src', 'signing', 'fan-out.ts'), 'utf8'))
+    const signingEngineSrc = stripComments(readFileSync(path.join(__dirname, '..', 'src', 'signing', 'signing-engine.ts'), 'utf8'))
+
+    const forbiddenUpdate = new RegExp(['up', 'date\\s+Task'].join(''), 'i')
+    const forbiddenDelete = new RegExp(['delete\\s+from\\s+', 'Task'].join(''), 'i')
+
+    expect(forbiddenUpdate.test(fanOutSrc), 'fan-out.ts must never UPDATE Task').to.equal(false)
+    expect(forbiddenUpdate.test(signingEngineSrc), 'signing-engine.ts must never UPDATE Task').to.equal(false)
+    expect(forbiddenDelete.test(fanOutSrc), 'fan-out.ts must never DELETE FROM Task').to.equal(false)
+    expect(forbiddenDelete.test(signingEngineSrc), 'signing-engine.ts must never DELETE FROM Task').to.equal(false)
+
+    expect(fanOutSrc.includes('runDeferredRowConstraints'), 'fan-out.ts flushes deferred constraints').to.equal(true)
+    expect(signingEngineSrc.includes('crossedNow'), 'signing-engine.ts carries crossedNow').to.equal(true)
+  })
+})
