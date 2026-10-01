@@ -37,7 +37,7 @@ const EXPECTED_ID_ORDER = [
 ];
 
 const EXPECTED_SITES_BY_SCOPE = {
-	vrg: 18,
+	vrg: 19,
 	mel: 12,
 	ceb: 7,
 	rn: 3,
@@ -74,11 +74,11 @@ test('CAPABILITIES ids are in the binding registration-first order', () => {
 	);
 });
 
-test('per-scope sites match the measured baseline and sum to 45', () => {
+test('per-scope sites match the measured baseline and sum to 46', () => {
 	const bySopce = Object.fromEntries(CAPABILITIES.map((c) => [c.scope, c.sites]));
 	assert.deepEqual(bySopce, EXPECTED_SITES_BY_SCOPE);
 	const total = CAPABILITIES.reduce((sum, c) => sum + c.sites, 0);
-	assert.equal(total, 45, `expected 45 total enforcement sites, measured ${total}`);
+	assert.equal(total, 46, `expected 46 total enforcement sites, measured ${total}`);
 });
 
 test('tier is derived correctly: sites > 0 => tier 1, sites === 0 => tier 2; keyholders and inviteAuthorities are the only tier-2 entries', () => {

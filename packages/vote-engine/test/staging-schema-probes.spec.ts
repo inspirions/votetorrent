@@ -221,9 +221,18 @@ const ASSOCIATION_DEVICE_HASH_ANCHOR =
  * into the Association table body of `base`. A no-op (returns `base` unchanged) once Task 3 has
  * actually adopted the constraint into `votetorrent.qsql` itself — keeps this probe valid after
  * that lands, per the plan's instruction.
+ *
+ * EMPIRICAL FINDING (62-01 Task 3): the guard below checks for the literal CONSTRAINT
+ * DECLARATION (`constraint SingleActiveAssociation`), not a bare substring match on the name.
+ * Task 3's own `AssociationDecision` table comment PROSE mentions "Association.SingleActiveAssociation"
+ * (documenting that it did NOT ship) — a bare `base.includes('SingleActiveAssociation')` guard
+ * matched that comment and made this function a permanent, silent no-op from Task 3 onward: test
+ * (b) below started failing (the "CHECK is live" assertion saw no throw) the moment that comment
+ * landed, discovered by actually re-running this file after Task 3's qsql edits rather than
+ * assuming it still passed. The self-tripping-checker failure mode this repo has hit before.
  */
 function buildD41CandidateSchema (base: string): string {
-  if (base.includes('SingleActiveAssociation')) return base
+  if (base.includes('constraint SingleActiveAssociation')) return base
   const occurrences = base.split(ASSOCIATION_DEVICE_HASH_ANCHOR).length - 1
   if (occurrences !== 1) {
     throw new Error(`buildD41CandidateSchema: anchor must occur exactly once in schema, found ${occurrences} — Association table shape changed, update this probe`)

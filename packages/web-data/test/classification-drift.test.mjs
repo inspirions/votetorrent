@@ -51,8 +51,8 @@ const CLASSIFICATION_FILE = webDataSrc('classification.js');
  */
 const FACTS_FILE = uiWebSrc('lifecycle', 'facts.js');
 
-const EXPECTED_TABLE_COUNT = 66;
-const EXPECTED_VIEW_COUNT = 20;
+const EXPECTED_TABLE_COUNT = 68;
+const EXPECTED_VIEW_COUNT = 22;
 
 const THIS_FILE = fileURLToPath(import.meta.url);
 const BEGIN_SENTINEL = ['BEGIN', 'CONTROL', 'FIXTURES'].join(' ');

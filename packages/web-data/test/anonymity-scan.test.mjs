@@ -121,10 +121,16 @@ const PUBLIC_SAFE_NAMES = Object.freeze(
  * table names intentionally NOT repeated here, see the self-trip guard below). AGGREGATE (+2):
  * the two new decision tables (decision throughput by status is public; individual rows name the
  * deciding officer and are not). 28 -> 31 forbidden, 33 -> 35 public-safe, 61 -> 66 total.
+ *
+ * 2026-10-01 (62-01 Task 3): +2 more tables, both PUBLIC_SAFE (forbidden stays 31). An
+ * envelope-encryption-key table is AGGREGATE (mirrors UserKey: public keys are not secret, a full
+ * listing is an identity graph). A per-authority intake-policy table is PUBLIC (mirrors
+ * ElectionAttestationPolicy: a signed policy voters must read to act on, no person-level column).
+ * 35 -> 37 public-safe, 66 -> 68 total.
  */
 const EXPECTED_FORBIDDEN_COUNT = 31;
-const EXPECTED_PUBLIC_SAFE_COUNT = 35;
-const EXPECTED_TABLE_COUNT = 66;
+const EXPECTED_PUBLIC_SAFE_COUNT = 37;
+const EXPECTED_TABLE_COUNT = 68;
 
 /**
  * The size of the scanned file set, pinned the same way the table counts above

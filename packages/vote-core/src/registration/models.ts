@@ -444,6 +444,28 @@ export interface RegistrationRequestInit {
 }
 
 /**
+ * 62-01 (D-45): the plaintext a 62-04 `SealedEnvelope` seals into
+ * `RegistrationRequestStaging.InitJson`. `registrationCode` exists ONLY inside this ciphertext —
+ * it is NEVER copied into `RegisterInit`, `RegistrationRequest.Payload`, or any schema column
+ * (62-01 Task 1's decision: `RegistrationEngine.submitRegistrationRequest` persists the OPENED
+ * `RegisterInit` as plaintext into `RegistrationRequest.Payload`, and the Authority's strand path
+ * hands that table's own Quereus DB to every peer on the strand, so a code inside `RegisterInit`
+ * would ride the public replica).
+ *
+ * The durable carrier of the code is the `RegistrationRequestStaging` row itself (kept forever,
+ * D-07; sealed, D-04) — an officer matches a re-association by opening the ORIGINAL staging row
+ * after decrypt (62-18), with a constant-time compare. Known limits: an officer added AFTER the
+ * registration is not a recipient of the old envelope and must use the identity fallback
+ * ({@link AssociationStagingPlaintext.identityFields}); a registration that arrived by REST bridge
+ * or filesystem import has no staging row at all and always uses the identity fallback.
+ */
+export interface RegistrationStagingPlaintext {
+  version: 1
+  init: RegistrationRequestInit
+  registrationCode?: string
+}
+
+/**
  * The single-request read backing the approval screen's three modes
  * (pending / approved / rejected).
  *

@@ -19,7 +19,6 @@ import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import type { Scope, Signature, Proposal, AdminInit, User, UserKeyType } from '@votetorrent/vote-core'
 import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
-import { seedSignedMutation } from '../src/signing/signed-mutation.js'
 import { UserEngine } from '../src/user/user-engine.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { makeP256TestKey, signDigestP256 } from './fixtures/p256-signer.js'
@@ -30,7 +29,8 @@ import {
   makeDistinctTestUser,
   makeTestSignCallback,
   signTestDigest,
-  seedUserInvite
+  seedUserInvite,
+  seedSignedMutation as seedSignedMutationFixture
 } from './fixtures/test-context.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
 import type { EngineContext } from '../src/types.js'
@@ -873,6 +873,343 @@ describe('AssociationDecision (D-06, D-41, D-45)', () => {
     let caught: unknown
     try {
       await auth.ctx.db.exec("delete from AssociationDecision where StrandId = :strandId and RequestId = :requestId and Status = 'a'", { strandId, requestId })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'DELETE must be rejected').to.be.instanceOf(Error)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UserEncryptionKey (D-04) — 62-01 Task 3
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ENCRYPTION_KEY_ALG = 'secp256k1-ecdh-hkdf-sha256-aes256gcm'
+
+/** Registers a brand-new User (invite + UserKey bootstrap), mirroring the former-officer helper above. */
+async function seedRegisteredUser (auth: TestAuthorityContext): Promise<User> {
+  const user = makeDistinctTestUser()
+  const { inviteSlotCid, inviteSignature } = await seedUserInvite(auth, user)
+  const userTid = Date.now() + Math.floor(Math.random() * 100_000)
+  await auth.ctx.db.exec(
+    `insert into User (Id, Name, ImageRef)
+     with context SigningNonce = null, InviteSlotCid = :inviteSlotCid, InviteSignature = :inviteSignature, Tid = ${userTid}
+     values (:userId, :userName, :userImageRef)`,
+    {
+      userId: user.id,
+      userName: user.name,
+      userImageRef: user.imageRef ? JSON.stringify(user.imageRef) : null,
+      inviteSlotCid,
+      inviteSignature
+    }
+  )
+  await new UserEngine({ ...user, activeKeys: [] }, auth.ctx).addKey(user.activeKeys[0]!)
+  return user
+}
+
+interface UserEncryptionKeyArgs {
+  userId: string
+  alg?: string
+  pubKey?: string
+  registeredAt?: string
+}
+
+async function insertUserEncryptionKeyRaw (
+  ctx: EngineContext,
+  f: UserEncryptionKeyArgs & { signerKey: string; signature: string }
+): Promise<void> {
+  await ctx.db.exec(
+    'insert into UserEncryptionKey (UserId, Alg, PubKey, RegisteredAt, SignerKey, Signature) values (:userId, :alg, :pubKey, :registeredAt, :signerKey, :signature)',
+    {
+      userId: f.userId,
+      alg: f.alg ?? ENCRYPTION_KEY_ALG,
+      pubKey: f.pubKey ?? randomTestKeyPair().publicHex,
+      registeredAt: f.registeredAt ?? toIsoZDatetime(Date.now()),
+      signerKey: f.signerKey,
+      signature: f.signature
+    }
+  )
+}
+
+async function signAndInsertUserEncryptionKey (
+  ctx: EngineContext,
+  f: UserEncryptionKeyArgs,
+  signer: { sign: (d: string) => { signature: string; signerKey: string } }
+): Promise<UserEncryptionKeyArgs & { pubKey: string }> {
+  const alg = f.alg ?? ENCRYPTION_KEY_ALG
+  const pubKey = f.pubKey ?? randomTestKeyPair().publicHex
+  const registeredAt = f.registeredAt ?? toIsoZDatetime(Date.now())
+  const digestRow = await ctx.db
+    .prepare("select Digest('UserEncryptionKey', :userId, :alg, :pubKey, :registeredAt) as d")
+    .get({ userId: f.userId, alg, pubKey, registeredAt })
+  if (!digestRow || digestRow.d == null) throw new Error('signAndInsertUserEncryptionKey: Digest() returned null')
+  const sig = signer.sign(digestRow.d as string)
+  await insertUserEncryptionKeyRaw(ctx, { userId: f.userId, alg, pubKey, registeredAt, signerKey: sig.signerKey, signature: sig.signature })
+  return { userId: f.userId, alg, pubKey, registeredAt }
+}
+
+describe('UserEncryptionKey (D-04)', () => {
+  let net: Awaited<ReturnType<typeof createTestNetwork>>
+  let auth: TestAuthorityContext
+
+  beforeEach(async () => {
+    net = await createTestNetwork()
+    auth = await addTestAuthority(net)
+  })
+
+  it("a row self-signed by a key in the same user's UserKey inserts", async () => {
+    const { pubKey } = await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id }, officerSignerFor(auth.user))
+    expect(await rowCount(auth.ctx, 'select count(*) as c from UserEncryptionKey where UserId = :userId and PubKey = :pubKey', { userId: auth.user.id, pubKey })).to.equal(1)
+  })
+
+  it("signed by a DIFFERENT user's key throws", async () => {
+    const otherUser = await seedRegisteredUser(auth)
+    let caught: unknown
+    try {
+      await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id }, officerSignerFor(otherUser))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, "a different user's key must be rejected by SignerIsUser").to.be.instanceOf(Error)
+  })
+
+  it('signature over a different digest throws', async () => {
+    const pubKey = randomTestKeyPair().publicHex
+    const registeredAt = toIsoZDatetime(Date.now())
+    const otherDigestRow = await auth.ctx.db
+      .prepare("select Digest('UserEncryptionKey', :userId, :alg, :pubKey, :otherRegisteredAt) as d")
+      .get({ userId: auth.user.id, alg: ENCRYPTION_KEY_ALG, pubKey, otherRegisteredAt: toIsoZDatetime(Date.now() + 1000) })
+    if (!otherDigestRow?.d) throw new Error('Digest() returned null')
+    const sig = signTestDigest(auth.user, otherDigestRow.d as string)
+    let caught: unknown
+    try {
+      await insertUserEncryptionKeyRaw(auth.ctx, { userId: auth.user.id, pubKey, registeredAt, signerKey: sig.signerKey, signature: sig.signature })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'a signature over a different digest must be rejected').to.be.instanceOf(Error)
+  })
+
+  it("Alg other than 'secp256k1-ecdh-hkdf-sha256-aes256gcm' throws", async () => {
+    let caught: unknown
+    try {
+      await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id, alg: 'bogus-alg' }, officerSignerFor(auth.user))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'an unrecognized Alg must be rejected').to.be.instanceOf(Error)
+  })
+
+  it('a 64-character PubKey throws', async () => {
+    let caught: unknown
+    try {
+      await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id, pubKey: '02'.concat('a'.repeat(62)) }, officerSignerFor(auth.user))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'a 64-character (not 66-character) PubKey must be rejected').to.be.instanceOf(Error)
+  })
+
+  it("a PubKey starting '04' throws", async () => {
+    let caught: unknown
+    try {
+      await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id, pubKey: '04'.concat('a'.repeat(64)) }, officerSignerFor(auth.user))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, "a '04'-prefixed (uncompressed) PubKey must be rejected").to.be.instanceOf(Error)
+  })
+
+  it('a second key for the same user (different PubKey) inserts', async () => {
+    const first = await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id }, officerSignerFor(auth.user))
+    const second = await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id }, officerSignerFor(auth.user))
+    expect(first.pubKey).to.not.equal(second.pubKey)
+    expect(await rowCount(auth.ctx, 'select count(*) as c from UserEncryptionKey where UserId = :userId', { userId: auth.user.id })).to.equal(2)
+  })
+
+  it('UPDATE throws — NoUpdate', async () => {
+    const { pubKey } = await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id }, officerSignerFor(auth.user))
+    let caught: unknown
+    try {
+      await auth.ctx.db.exec('update UserEncryptionKey set RegisteredAt = :registeredAt where UserId = :userId and PubKey = :pubKey', {
+        registeredAt: toIsoZDatetime(Date.now() + 1000),
+        userId: auth.user.id,
+        pubKey
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'UPDATE must be rejected').to.be.instanceOf(Error)
+  })
+
+  it('DELETE throws — NoDelete', async () => {
+    const { pubKey } = await signAndInsertUserEncryptionKey(auth.ctx, { userId: auth.user.id }, officerSignerFor(auth.user))
+    let caught: unknown
+    try {
+      await auth.ctx.db.exec('delete from UserEncryptionKey where UserId = :userId and PubKey = :pubKey', { userId: auth.user.id, pubKey })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'DELETE must be rejected').to.be.instanceOf(Error)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AuthorityIntakePolicy (D-29, D-46) — 62-01 Task 3
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface AuthorityIntakePolicyArgs {
+  revision: number
+  restBridgeUrl: string | null
+  reassociationMode: string
+  setAt?: string
+}
+
+async function seedAndInsertAuthorityIntakePolicy (
+  auth: TestAuthorityContext,
+  scope: Scope,
+  args: AuthorityIntakePolicyArgs,
+  digestOverride?: { reassociationMode?: string }
+): Promise<void> {
+  const setAt = args.setAt ?? toIsoZDatetime(Date.now())
+  const tid = Date.now() + Math.floor(Math.random() * 100_000)
+  const digestExpr = "select Digest(:tid, 'AuthorityIntakePolicy', :authorityId, :revision, :restBridgeUrl, :reassociationMode, :setAt) as d"
+  const digestParams = {
+    tid,
+    authorityId: auth.authority.id,
+    revision: args.revision,
+    restBridgeUrl: args.restBridgeUrl,
+    reassociationMode: digestOverride?.reassociationMode ?? args.reassociationMode,
+    setAt
+  }
+  const { nonce } = await seedSignedMutationFixture(auth.ctx, auth.authority.id, scope, tid, digestExpr, digestParams, auth.user)
+  await auth.ctx.db.exec(
+    `insert into AuthorityIntakePolicy (AuthorityId, Revision, RestBridgeUrl, ReassociationMode, SetAt)
+     with context SigningNonce = :nonce, Tid = ${tid}
+     values (:authorityId, :revision, :restBridgeUrl, :reassociationMode, :setAt)`,
+    {
+      authorityId: auth.authority.id,
+      revision: args.revision,
+      restBridgeUrl: args.restBridgeUrl,
+      reassociationMode: args.reassociationMode,
+      setAt,
+      nonce
+    }
+  )
+}
+
+describe('AuthorityIntakePolicy (D-29, D-46)', () => {
+  let net: Awaited<ReturnType<typeof createTestNetwork>>
+  let auth: TestAuthorityContext
+  let revisionSeq = 0
+
+  beforeEach(async () => {
+    net = await createTestNetwork()
+    auth = await addTestAuthority(net)
+    revisionSeq = 0
+  })
+
+  function nextRevision (): number {
+    revisionSeq += 1
+    return revisionSeq
+  }
+
+  it("an insert under a seeded 'vrg' ceremony with the matching digest inserts", async () => {
+    const revision = nextRevision()
+    await seedAndInsertAuthorityIntakePolicy(auth, 'vrg' as Scope, { revision, restBridgeUrl: null, reassociationMode: 'manual' })
+    expect(await rowCount(auth.ctx, 'select count(*) as c from AuthorityIntakePolicy where AuthorityId = :authorityId and Revision = :revision', { authorityId: auth.authority.id, revision })).to.equal(1)
+  })
+
+  it("the same insert under a 'mel' ceremony throws", async () => {
+    const revision = nextRevision()
+    let caught: unknown
+    try {
+      await seedAndInsertAuthorityIntakePolicy(auth, 'mel' as Scope, { revision, restBridgeUrl: null, reassociationMode: 'manual' })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, "a 'mel'-scoped ceremony must be rejected by MutationValid (requires 'vrg')").to.be.instanceOf(Error)
+  })
+
+  it('a digest over a different ReassociationMode throws', async () => {
+    const revision = nextRevision()
+    let caught: unknown
+    try {
+      await seedAndInsertAuthorityIntakePolicy(
+        auth,
+        'vrg' as Scope,
+        { revision, restBridgeUrl: null, reassociationMode: 'manual' },
+        { reassociationMode: 'automatic' }
+      )
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'a digest computed over a different ReassociationMode must be rejected').to.be.instanceOf(Error)
+  })
+
+  it("ReassociationMode 'auto' throws", async () => {
+    const revision = nextRevision()
+    let caught: unknown
+    try {
+      await seedAndInsertAuthorityIntakePolicy(auth, 'vrg' as Scope, { revision, restBridgeUrl: null, reassociationMode: 'auto' })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, "'auto' (not 'automatic') must be rejected by ReassociationModeValid").to.be.instanceOf(Error)
+  })
+
+  it("RestBridgeUrl 'http://bridge.example' throws", async () => {
+    const revision = nextRevision()
+    let caught: unknown
+    try {
+      await seedAndInsertAuthorityIntakePolicy(auth, 'vrg' as Scope, { revision, restBridgeUrl: 'http://bridge.example', reassociationMode: 'manual' })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'a non-https RestBridgeUrl must be rejected (D-29 https-only)').to.be.instanceOf(Error)
+  })
+
+  it("RestBridgeUrl null and 'https://bridge.example/intake' both insert", async () => {
+    const revisionNull = nextRevision()
+    await seedAndInsertAuthorityIntakePolicy(auth, 'vrg' as Scope, { revision: revisionNull, restBridgeUrl: null, reassociationMode: 'manual' })
+    const revisionHttps = nextRevision()
+    await seedAndInsertAuthorityIntakePolicy(auth, 'vrg' as Scope, { revision: revisionHttps, restBridgeUrl: 'https://bridge.example/intake', reassociationMode: 'automatic' })
+    expect(await rowCount(auth.ctx, 'select count(*) as c from AuthorityIntakePolicy where AuthorityId = :authorityId', { authorityId: auth.authority.id })).to.equal(2)
+  })
+
+  it('a non-Z SetAt throws', async () => {
+    const revision = nextRevision()
+    let caught: unknown
+    try {
+      await seedAndInsertAuthorityIntakePolicy(auth, 'vrg' as Scope, { revision, restBridgeUrl: null, reassociationMode: 'manual', setAt: '2026-01-01T00:00:00.000' })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'a non-Z-suffixed SetAt must be rejected').to.be.instanceOf(Error)
+  })
+
+  it('UPDATE throws — NoUpdate', async () => {
+    const revision = nextRevision()
+    await seedAndInsertAuthorityIntakePolicy(auth, 'vrg' as Scope, { revision, restBridgeUrl: null, reassociationMode: 'manual' })
+    let caught: unknown
+    try {
+      await auth.ctx.db.exec('update AuthorityIntakePolicy set ReassociationMode = :mode where AuthorityId = :authorityId and Revision = :revision', {
+        mode: 'automatic',
+        authorityId: auth.authority.id,
+        revision
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught, 'UPDATE must be rejected').to.be.instanceOf(Error)
+  })
+
+  it('DELETE throws — NoDelete', async () => {
+    const revision = nextRevision()
+    await seedAndInsertAuthorityIntakePolicy(auth, 'vrg' as Scope, { revision, restBridgeUrl: null, reassociationMode: 'manual' })
+    let caught: unknown
+    try {
+      await auth.ctx.db.exec('delete from AuthorityIntakePolicy where AuthorityId = :authorityId and Revision = :revision', { authorityId: auth.authority.id, revision })
     } catch (err) {
       caught = err
     }

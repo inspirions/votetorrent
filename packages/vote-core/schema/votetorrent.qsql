@@ -660,6 +660,11 @@ declare schema main
 		select 'M' as Code, 'Mobile' as Name
 		union all select 'Y' as Code, 'Yubico' as Name;
 
+	-- 62-01 (D-04) the one envelope-encryption algorithm an officer's UserEncryptionKey may
+	-- declare -- the exact literal 62-04 exports as ENCRYPTION_KEY_ALG.
+	view EncryptionKeyAlg as
+		select 'secp256k1-ecdh-hkdf-sha256-aes256gcm' as Code, 'secp256k1 ECDH + HKDF-SHA256 + AES-256-GCM' as Name;
+
 	table User (
 		Id text primary key, -- Random ID
 		Name text,
@@ -804,6 +809,45 @@ declare schema main
 		constraint ExpirationFuture check (Expiration > context.now)
 	)
 		with context ( UserKey text null, Signature text null, Tid int, now datetime, IsSignatureValid boolean );
+
+	-- 62-01 (D-04) lets any number of officers each publish their own secp256k1 envelope
+	-- encryption public key, self-attested by a signing key already in that user's OWN UserKey
+	-- rows. Several keys per user are legal (rotation = a new row; "current" = greatest
+	-- RegisteredAt, a 62-14 read-side choice, not a schema one). Officers with NO row here cannot
+	-- receive new sealed envelopes -- 62-14 treats zero recipients as an engine hard failure, NEVER
+	-- a plaintext fallback (D-03 would otherwise erode silently).
+	table UserEncryptionKey (
+		UserId text,
+		Alg text, -- references EncryptionKeyAlg(Code)
+		PubKey text, -- 66-char hex, compressed secp256k1 (02/03 prefix) -- the 62-04 convention
+		RegisteredAt text,
+		SignerKey text, -- a key from the SAME user's UserKey rows (self-attestation)
+		Signature text,
+		primary key (UserId, PubKey),
+		constraint AlgValid check (new.Alg in (select Code from EncryptionKeyAlg)),
+		constraint PubKeyFormat check (
+			length(new.PubKey) = 66 and (like('02%', new.PubKey) or like('03%', new.PubKey))
+		),
+		constraint RegisteredAtValid check (isISODatetime(new.RegisteredAt) and like('%Z', new.RegisteredAt)),
+		-- D-04 self-attested binding: SignerKey must be a key the SAME user already owns.
+		constraint SignerIsUser check on insert (
+			exists (select 1 from UserKey K where K.UserId = new.UserId and K.PubKey = new.SignerKey)
+		),
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest('UserEncryptionKey', new.UserId, new.Alg, new.PubKey, new.RegisteredAt),
+				new.Signature,
+				new.SignerKey
+			)
+				or SignatureValidP256(
+					Digest('UserEncryptionKey', new.UserId, new.Alg, new.PubKey, new.RegisteredAt),
+					new.Signature,
+					new.SignerKey
+				)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	);
 
 	-- Append-only user-event log (ENG-02, D-13..D-18). One row per user mutation
 	-- (create/revise/addKey/revokeKey), written in the same db.exec batch as the mutation.
@@ -1496,6 +1540,51 @@ declare schema main
 						)
 			)
 		)
+	)
+		with context ( SigningNonce text, Tid int );
+
+	-- 62-01 (D-46) which second-device review mode an authority runs: officer review, or
+	-- automatic processing.
+	view ReassociationMode as
+		select 'manual' as Code, 'Officer review' as Name
+		union all select 'automatic' as Code, 'Automatic processing' as Name;
+
+	-- 62-01 (D-29, D-46) a signed, append-only, per-authority intake policy row: the https-only
+	-- REST bridge URL and the re-association review mode. No row for an authority means
+	-- ReassociationMode = 'manual' and no REST bridge (D-46 default) -- 62-18's reader is
+	-- responsible for that fallback, not a schema default. The identity-fallback re-association
+	-- path is ALWAYS manual review regardless of this table's mode (D-45/D-46, enforced by 62-18) --
+	-- this table governs only the registration-code-matched path. The reader takes the GREATEST
+	-- Revision; a 'vrg' threshold above 1 leaves a policy change pending co-sign exactly like
+	-- RegistrationBridgeKey.MutationValid above (same ceremony idiom, mirrored field for field).
+	table AuthorityIntakePolicy (
+		AuthorityId text,
+		Revision integer,
+		RestBridgeUrl text null,
+		ReassociationMode text, -- references ReassociationMode(Code)
+		SetAt text,
+		primary key (AuthorityId, Revision),
+		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
+		constraint RevisionValid check (new.Revision >= 1),
+		constraint ReassociationModeValid check (new.ReassociationMode in (select Code from ReassociationMode)),
+		-- D-29: https-only, with a sane length bound.
+		constraint RestBridgeUrlValid check (
+			new.RestBridgeUrl is null or (like('https://%', new.RestBridgeUrl) and length(new.RestBridgeUrl) <= 2048)
+		),
+		constraint SetAtValid check (isISODatetime(new.SetAt) and like('%Z', new.SetAt)),
+		constraint MutationValid check on insert (
+			exists (
+				select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
+					where A.Nonce = context.SigningNonce
+						and A.AuthorityId = new.AuthorityId
+						and A.Scope = 'vrg'
+						and A.Digest = Digest(
+							context.Tid, 'AuthorityIntakePolicy', new.AuthorityId, new.Revision, new.RestBridgeUrl, new.ReassociationMode, new.SetAt
+						)
+			)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
 	)
 		with context ( SigningNonce text, Tid int );
 

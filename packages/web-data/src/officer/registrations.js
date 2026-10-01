@@ -30,7 +30,7 @@
 
 import { CAPABILITY_TABLES } from './capability-tables.js';
 
-/** The thirteen `vrg` tables this module covers -- read from `capability-tables.js`'s generated `CAPABILITY_TABLES.registrations` field rather than re-declared here, so there is exactly one list (that generator, `generate-capabilities.mjs`, is the same schema-parse run that also emits `capabilities.js`). @type {ReadonlyArray<string>} */
+/** The fourteen `vrg` tables this module covers -- read from `capability-tables.js`'s generated `CAPABILITY_TABLES.registrations` field rather than re-declared here, so there is exactly one list (that generator, `generate-capabilities.mjs`, is the same schema-parse run that also emits `capabilities.js`). @type {ReadonlyArray<string>} */
 export const TABLES_READ = Object.freeze([...CAPABILITY_TABLES.registrations]);
 
 /** The registrant roster page bound -- a PRIVACY control first, a
@@ -155,6 +155,7 @@ const SURFACE_COUNT_QUERIES = Object.freeze({
 	AssociationRequest: 'select count(*) as c from AssociationRequest',
 	AssociationPrivate: 'select count(*) as c from AssociationPrivate',
 	AttestationChallenge: 'select count(*) as c from AttestationChallenge',
+	AuthorityIntakePolicy: 'select count(*) as c from AuthorityIntakePolicy',
 	ElectionRegistrant: 'select count(*) as c from ElectionRegistrant where ElectionId = :electionId',
 	PollingDevice: 'select count(*) as c from PollingDevice',
 	Registrant: 'select count(*) as c from Registrant',
@@ -169,7 +170,7 @@ const SURFACE_COUNT_QUERIES = Object.freeze({
 /**
  * One `{ table, count }` entry per `vrg` table, in `capability.tables`
  * order (i.e. `TABLES_READ` order) -- the positive control that proves the
- * counts are really being read, and the section that makes all thirteen
+ * counts are really being read, and the section that makes all fourteen
  * tables visible in the panel.
  *
  * @param {import('@quereus/quereus').Database} db

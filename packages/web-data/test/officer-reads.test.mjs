@@ -57,10 +57,10 @@ async function seededDb() {
 
 // --- Coverage: CAPABILITY_TABLES subset of module TABLES_READ --------------
 
-test('coverage: registrations TABLES_READ covers all 13 vrg tables from CAPABILITY_TABLES', () => {
+test('coverage: registrations TABLES_READ covers all 14 vrg tables from CAPABILITY_TABLES', () => {
 	const tables = CAPABILITY_TABLES.registrations;
 	assert.ok(tables);
-	assert.equal(tables.length, 13);
+	assert.equal(tables.length, 14);
 	for (const table of tables) {
 		assert.ok(REGISTRATIONS_TABLES_READ.includes(table), `registrations TABLES_READ missing ${table}`);
 	}
@@ -129,7 +129,7 @@ test('SQL validity (founding-only): every read function resolves without throwin
 	const roster = await readRegistrantRoster(db);
 	assert.deepEqual(roster, { rows: [], total: 0 });
 	const surfaceCounts = await readRegistrationSurfaceCounts(db, 'nonexistent');
-	assert.equal(surfaceCounts.length, 13);
+	assert.equal(surfaceCounts.length, 14);
 	assert.ok(surfaceCounts.every((entry) => entry.count === 0));
 	assert.equal(await hasAnyRegistrationData(db), false);
 });
@@ -254,7 +254,7 @@ test('readRegistrantRoster returns { rows: [], total: 0 } on the seeded database
 test('readRegistrationSurfaceCounts returns one entry per vrg table with RegistrationBridgeKey=1 and PollingDevice=1 seeded, everything else 0', async () => {
 	const db = await seededDb();
 	const entries = await readRegistrationSurfaceCounts(db, SEED_ELECTION.id);
-	assert.equal(entries.length, 13);
+	assert.equal(entries.length, 14);
 	const byTable = Object.fromEntries(entries.map((e) => [e.table, e.count]));
 	assert.equal(byTable.RegistrationBridgeKey, SEED_EXPECTED_COUNTS.RegistrationBridgeKey);
 	assert.equal(byTable.PollingDevice, SEED_EXPECTED_COUNTS.PollingDevice);
@@ -265,6 +265,7 @@ test('readRegistrationSurfaceCounts returns one entry per vrg table with Registr
 	assert.equal(byTable.AssociationPrivate, 0);
 	assert.equal(byTable.AssociationRequest, 0);
 	assert.equal(byTable.AttestationChallenge, 0);
+	assert.equal(byTable.AuthorityIntakePolicy, 0);
 	assert.equal(byTable.ElectionRegistrant, 0);
 	assert.equal(byTable.RegistrantPublic, 0);
 	assert.equal(byTable.RegistrantSignatureTaskExtension, 0);
