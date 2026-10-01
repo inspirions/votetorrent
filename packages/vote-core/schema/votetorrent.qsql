@@ -1455,6 +1455,22 @@ declare schema main
 		union all select 'a' as Code, 'Associated' as Name
 		union all select 'r' as Code, 'Rejected' as Name;
 
+	-- 62-01 (D-44) status vocabulary for RegistrationDecision. 'd' (Closed as duplicate) is the
+	-- D-44 protocol's second row: deciding the surviving request writes 'a'/'r' with ClosesRequestId
+	-- naming the duplicate, then a SEPARATE transaction writes the duplicate's own row as 'd'.
+	view RegistrationDecisionStatus as
+		select 'a' as Code, 'Approved' as Name
+		union all select 'r' as Code, 'Rejected' as Name
+		union all select 'd' as Code, 'Closed as duplicate' as Name;
+
+	-- 62-01 (D-45) how an AssociationDecision's approval was matched: the sealed staging
+	-- plaintext's registration code, or an officer matching identity fields by hand. Deliberately
+	-- NOT a status vocabulary -- AssociationDecision carries no Status CHECK at all (see its own
+	-- comment).
+	view AssociationMatchMethod as
+		select 'code' as Code, 'Registration code matched' as Name
+		union all select 'identity' as Code, 'Identity fields matched by an officer' as Name;
+
 	-- D-03 registry: the bounded, append-only allowlist of bridge keys authorized to submit
 	-- RegistrationRequest rows on another person's behalf. RevokedAt is shipped so
 	-- RegistrationRequest.BridgeIdValid can honestly enforce revocation, but no revoke ceremony
@@ -1627,6 +1643,154 @@ declare schema main
 
 	index RegistrationRequestAuthorityStatus on RegistrationRequest (AuthorityId, Status);
 
+	-- 62-01 (D-03, D-05, D-07) staging row for the registration-request P2P transport. A requester
+	-- (or bridge) stages a sealed envelope on the strand BEFORE intake ever sees it -- this table is
+	-- the strand-replicated queue p2p-registration-transport.ts reads/writes
+	-- (StrandId, Cursor, RequestId, InitJson, RequesterKey, SignatureJson, StagedAt). Columns, PK and
+	-- cursor index are binding on every downstream plan that reads this table (62-14/62-15/etc).
+	--
+	-- InitJson is a 62-04 SealedEnvelope (D-03): the plaintext it seals is a
+	-- RegistrationStagingPlaintext (vote-core/registration/models.ts). The D-45 registration code
+	-- lives ONLY inside that sealed plaintext, as RegistrationStagingPlaintext.registrationCode --
+	-- it is NEVER copied into RegisterInit or any column of ANY table (62-01 Task 1's decision:
+	-- RegistrationEngine.submitRegistrationRequest persists the OPENED RegisterInit as plaintext
+	-- into RegistrationRequest.Payload (registration-engine.ts ~:1851), and the Authority's strand
+	-- path (apps/VoteTorrentAuthority/src/engines/rn-db-factory.ts createStrandDbFactory) hands the
+	-- strand's own Quereus DB -- which carries that table -- to every engine on the strand, so a code
+	-- inside RegisterInit would ride the public replica. The durable carrier of the code is THIS row
+	-- itself (kept forever by D-07, sealed by D-04); an officer matches a re-association by opening
+	-- the original staging row after decrypt. Known limits (recorded for 62-18): an officer added
+	-- after the registration is not a recipient of the old envelope and must use the identity
+	-- fallback; a registration that arrived by REST bridge or filesystem import has no staging row
+	-- at all and always uses the identity fallback.
+	--
+	-- Digest is the requester's existing DG-1, Digest(Id, AuthorityId, RequesterKey, IssuerType,
+	-- BridgeId, PayloadCid, SubmittedAt) -- the SAME single signature later satisfies
+	-- RegistrationRequest.SignatureValid at intake, so staging costs the voter no second biometric
+	-- prompt. Keeping Digest in clear beside the sealed payload is an ACCEPTED exposure (CONTEXT
+	-- D-47, formerly US-01): it lets two rows be compared for equality and, since the registration
+	-- leg's DG-1 includes PayloadCid (whose payload carries a random registrant id, assumption A3),
+	-- it is not an offline dictionary oracle over registration contents (T-62-01-08, T-62-01-09).
+	table RegistrationRequestStaging (
+		StrandId text,
+		Cursor text, -- 16-digit zero-padded decimal, per the P2P transport convention
+		RequestId text,
+		Digest text,
+		InitJson text, -- sealed RegistrationStagingPlaintext envelope (62-04); see table comment
+		RequesterKey text,
+		SignatureJson text, -- JSON.stringify(Signature): { signature, signerKey, signerUserId? }
+		StagedAt text,
+		primary key (StrandId, RequestId),
+		-- D-05: the ONLY authorization gate -- the requester's own signature over the stored Digest.
+		-- Subquery-free (Pattern 1) so it evaluates immediately, not deferred. json_extract passed
+		-- DIRECTLY as a UDF argument (no cast(...as text)) -- empirically proven by 62-01 Task 1's
+		-- Probe 1 (staging-schema-probes.spec.ts, VERDICT PASS).
+		constraint SignatureValid check (
+			SignatureValid(new.Digest, json_extract(new.SignatureJson, '$.signature'), new.RequesterKey)
+				or SignatureValidP256(new.Digest, json_extract(new.SignatureJson, '$.signature'), new.RequesterKey)
+		),
+		constraint SignerKeyMatches check (
+			cast(json_extract(new.SignatureJson, '$.signerKey') as text) = new.RequesterKey
+		),
+		constraint DigestPresent check (length(new.Digest) > 0),
+		constraint CursorWidth check (length(new.Cursor) = 16),
+		constraint StagedAtValid check (isISODatetime(new.StagedAt) and like('%Z', new.StagedAt)),
+		-- D-07: staged requests are kept forever.
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	);
+
+	unique index RegistrationRequestStagingCursor on RegistrationRequestStaging (StrandId, Cursor);
+
+	-- 62-01 (D-06, D-44) the authority's signed verdict on a staged RegistrationRequest, published
+	-- over the SAME P2P transport (p2p-registration-transport.ts reads/writes StrandId, Cursor,
+	-- RequestId, Status, Reason, DecidedAt). Deliberately carries NO FK to RegistrationRequestStaging
+	-- -- the conformance spec publishes decisions for request ids that were never staged
+	-- (registration-request-transport-conformance.spec.ts:619-625).
+	--
+	-- D-44: ClosesRequestId implements the duplicate-close protocol. Deciding the SURVIVING request A
+	-- writes A's row with ClosesRequestId = B and Status 'a' or 'r'; a SEPARATE, later transaction
+	-- writes B's own row with Status 'd' and ClosesRequestId null. DuplicateCloseValid below requires
+	-- that a 'd' row's RequestId is already named by some OTHER decision's ClosesRequestId in the
+	-- SAME (StrandId, AuthorityId) -- a self-referencing EXISTS. If this mis-evaluates in the batched
+	-- same-transaction case (the "deferred-CHECK sibling-row visibility" class this project has hit
+	-- before), ONLY DuplicateCloseValid is removed, keeping the 'd' vocabulary and ClosesRequestIdValid,
+	-- with linkage enforcement moved engine-side (62-19); see the SUMMARY for which shipped.
+	table RegistrationDecision (
+		StrandId text,
+		Cursor text,
+		RequestId text,
+		AuthorityId text,
+		Status text, -- references RegistrationDecisionStatus(Code)
+		Reason text null,
+		ClosesRequestId text null, -- D-44
+		DecidedAt text,
+		DeciderKey text,
+		DeciderSignature text,
+		primary key (StrandId, RequestId),
+		-- D-06: the ONLY authorization gate -- a signature over the row's own recomputed,
+		-- domain-tagged digest. Subquery-free (no digest-table lookup inside the Digest() call), so
+		-- this CHECK itself evaluates immediately; DeciderIsOfficerWithScope below is the deferred one.
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest('RegistrationDecision', new.StrandId, new.RequestId, new.AuthorityId, new.Status, new.Reason, new.ClosesRequestId, new.DecidedAt),
+				new.DeciderSignature,
+				new.DeciderKey
+			)
+				or SignatureValidP256(
+					Digest('RegistrationDecision', new.StrandId, new.RequestId, new.AuthorityId, new.Status, new.Reason, new.ClosesRequestId, new.DecidedAt),
+					new.DeciderSignature,
+					new.DeciderKey
+				)
+		),
+		-- D-06: DeciderKey must be a CURRENT officer of new.AuthorityId who holds 'vrg'. Mirrors
+		-- Officer.ScopesValid's json_each(Scopes) idiom (bare -- no Dashboard capability-generator
+		-- site, matching the 'rad' blind spot the generator already documents).
+		--
+		-- 62-01 Task 2 EMPIRICAL FINDING: a `CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and
+		-- CA.EffectiveAt = O.AdminEffectiveAt` join (the facts_verified premise that "no existing
+		-- CHECK uses" the view) was tried FIRST and FAILED -- Quereus's determinism validator
+		-- rejects it: "Non-deterministic expression not allowed in CHECK constraint
+		-- 'DeciderIsOfficerWithScope' ... Use mutation context ... (e.g., WITH CONTEXT (timestamp =
+		-- datetime('now')))". CurrentAdmin's own view body calls `datetime('now')`
+		-- (votetorrent.qsql:179-183), and that wall-clock call makes ANY CHECK that joins it
+		-- non-deterministic by Quereus's rules, exactly as every OTHER `context.now`-bound CHECK in
+		-- this file (e.g. Association.ExpirationFuture) already avoids by never calling
+		-- `datetime('now')` directly inside a constraint body. Replaced with the inline correlated
+		-- max(EffectiveAt) form the plan's fallback names, bound to `context.now` instead of
+		-- `datetime('now')` -- the shipped form.
+		constraint DeciderIsOfficerWithScope check on insert (
+			exists (
+				select 1 from UserKey K join Officer O on O.UserId = K.UserId and O.AuthorityId = new.AuthorityId
+					where K.PubKey = new.DeciderKey
+						and O.AdminEffectiveAt = (
+							select max(A.EffectiveAt) from Admin A where A.AuthorityId = O.AuthorityId and A.EffectiveAt <= context.now
+						)
+						and exists (select 1 from json_each(O.Scopes) where value = 'vrg')
+			)
+		),
+		constraint DecidedAtValid check (isISODatetime(new.DecidedAt) and like('%Z', new.DecidedAt)),
+		constraint CursorWidth check (length(new.Cursor) = 16),
+		constraint StatusValid check (new.Status in (select Code from RegistrationDecisionStatus)),
+		constraint ClosesRequestIdValid check (
+			new.ClosesRequestId is null or (new.Status in ('a', 'r') and new.ClosesRequestId <> new.RequestId)
+		),
+		constraint DuplicateCloseValid check on insert (
+			new.Status <> 'd' or (
+				new.ClosesRequestId is null
+					and exists (
+						select 1 from RegistrationDecision D
+							where D.StrandId = new.StrandId and D.AuthorityId = new.AuthorityId and D.ClosesRequestId = new.RequestId
+					)
+			)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	)
+		with context ( now datetime );
+
+	unique index RegistrationDecisionCursor on RegistrationDecision (StrandId, Cursor);
+
 	-- D-02/D-18 intake row for the associate-device ceremony. Authorized on INSERT SOLELY by the
 	-- requester's own signature (SignatureValid below) -- NO User FK, NO UserId/UserKey context
 	-- param, NO IsUserValid gate. A prospective registrant has a device keypair but no User row and
@@ -1746,6 +1910,148 @@ declare schema main
 		with context ( SigningNonce text, Tid int );
 
 	index AssociationRequestAuthorityStatus on AssociationRequest (AuthorityId, Status);
+
+	-- 62-01 (D-03, D-05, D-07) staging row for the association-request P2P transport leg 1
+	-- (p2p-association-transport.ts). Same shape and SAME rationale as RegistrationRequestStaging
+	-- above -- see that table's comment for the full D-03/D-04/D-05/D-07/D-45/D-47 design record;
+	-- not repeated per-table here.
+	--
+	-- Digest is Digest(Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, SubmittedAt) (the
+	-- AssociationRequest DG tuple). Unlike the registration leg, this Digest carries NO random
+	-- secret (T-62-01-08): a guesser who already knows a registrant id can confirm which device key
+	-- requested association for it. Accepted by the user as D-47 (formerly US-01).
+	--
+	-- InitJson's sealed plaintext is an AssociationStagingPlaintext (vote-core/association/models.ts);
+	-- the D-45 registration code / identity fields live there, never in a column (same discipline as
+	-- RegistrationRequestStaging.InitJson).
+	table AssociationRequestStaging (
+		StrandId text,
+		Cursor text,
+		RequestId text,
+		Digest text,
+		InitJson text, -- sealed AssociationStagingPlaintext envelope (62-04)
+		RequesterKey text,
+		SignatureJson text,
+		StagedAt text,
+		primary key (StrandId, RequestId),
+		constraint SignatureValid check (
+			SignatureValid(new.Digest, json_extract(new.SignatureJson, '$.signature'), new.RequesterKey)
+				or SignatureValidP256(new.Digest, json_extract(new.SignatureJson, '$.signature'), new.RequesterKey)
+		),
+		constraint SignerKeyMatches check (
+			cast(json_extract(new.SignatureJson, '$.signerKey') as text) = new.RequesterKey
+		),
+		constraint DigestPresent check (length(new.Digest) > 0),
+		constraint CursorWidth check (length(new.Cursor) = 16),
+		constraint StagedAtValid check (isISODatetime(new.StagedAt) and like('%Z', new.StagedAt)),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	);
+
+	unique index AssociationRequestStagingCursor on AssociationRequestStaging (StrandId, Cursor);
+
+	-- 62-01 (D-03, D-05, D-07) staging row for the association-request P2P transport leg 2 (the
+	-- attestation answer -- p2p-association-transport.ts's AnswerJson). Same shape and rationale as
+	-- RegistrationRequestStaging above, with Digest = Digest(RequestId, Nonce, AttestationJson,
+	-- DeviceHash) (association-request-digest.ts:61-69) and AnswerJson's sealed plaintext an
+	-- AssociationAttestationAnswer (vote-core).
+	table AssociationAttestationStaging (
+		StrandId text,
+		Cursor text,
+		RequestId text,
+		Digest text,
+		AnswerJson text, -- sealed AssociationAttestationAnswer envelope (62-04)
+		RequesterKey text,
+		SignatureJson text,
+		StagedAt text,
+		primary key (StrandId, RequestId),
+		constraint SignatureValid check (
+			SignatureValid(new.Digest, json_extract(new.SignatureJson, '$.signature'), new.RequesterKey)
+				or SignatureValidP256(new.Digest, json_extract(new.SignatureJson, '$.signature'), new.RequesterKey)
+		),
+		constraint SignerKeyMatches check (
+			cast(json_extract(new.SignatureJson, '$.signerKey') as text) = new.RequesterKey
+		),
+		constraint DigestPresent check (length(new.Digest) > 0),
+		constraint CursorWidth check (length(new.Cursor) = 16),
+		constraint StagedAtValid check (isISODatetime(new.StagedAt) and like('%Z', new.StagedAt)),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	);
+
+	unique index AssociationAttestationStagingCursor on AssociationAttestationStaging (StrandId, Cursor);
+
+	-- 62-01 (D-06, D-41, D-45) the authority's signed verdict on a staged association request,
+	-- published over the SAME P2P transport. PK is (StrandId, RequestId, Status) -- NOT
+	-- (StrandId, RequestId) alone -- because the association decision channel publishes TWO rows for
+	-- one request: 'c' (with a ChallengeNonce) then 'a'/'r'. Deliberately carries NO Status
+	-- vocabulary CHECK: association-request-transport-conformance.spec.ts:706-722 publishes a
+	-- decision with Status='x' and requires the READ side (pollDecisions), not this write side, to
+	-- reject it.
+	--
+	-- D-41: RevokesDeviceKey is the SIGNED RECORD OF INTENT to revoke a prior device's Association on
+	-- an approved re-association; the EFFECT (AssociationEngine.removeAssociation) is engine-applied
+	-- by 62-18 (tier 2 -- Association.SingleActiveAssociation was evaluated by 62-01 Task 1's Probe 2
+	-- and did NOT ship; see that probe's VERDICT for the disqualifying finding).
+	-- D-45: MatchMethod records HOW an 'a' decision was matched -- 'code' (the sealed registration
+	-- code) or 'identity' (an officer matching identity fields by hand); the identity-fallback path
+	-- always needs an officer regardless of AuthorityIntakePolicy.ReassociationMode (D-46).
+	table AssociationDecision (
+		StrandId text,
+		Cursor text,
+		RequestId text,
+		AuthorityId text,
+		Status text, -- NO vocabulary CHECK -- see table comment
+		ChallengeNonce text null,
+		Reason text null,
+		RevokesDeviceKey text null,
+		MatchMethod text null, -- references AssociationMatchMethod(Code) only when set
+		DecidedAt text,
+		DeciderKey text,
+		DeciderSignature text,
+		primary key (StrandId, RequestId, Status),
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest('AssociationDecision', new.StrandId, new.RequestId, new.AuthorityId, new.Status, new.ChallengeNonce, new.Reason, new.RevokesDeviceKey, new.MatchMethod, new.DecidedAt),
+				new.DeciderSignature,
+				new.DeciderKey
+			)
+				or SignatureValidP256(
+					Digest('AssociationDecision', new.StrandId, new.RequestId, new.AuthorityId, new.Status, new.ChallengeNonce, new.Reason, new.RevokesDeviceKey, new.MatchMethod, new.DecidedAt),
+					new.DeciderSignature,
+					new.DeciderKey
+				)
+		),
+		-- See RegistrationDecision.DeciderIsOfficerWithScope's comment for the CurrentAdmin-join
+		-- form tried first and why it failed the determinism validator; this is the SAME shipped
+		-- `context.now`-bound inline form.
+		constraint DeciderIsOfficerWithScope check on insert (
+			exists (
+				select 1 from UserKey K join Officer O on O.UserId = K.UserId and O.AuthorityId = new.AuthorityId
+					where K.PubKey = new.DeciderKey
+						and O.AdminEffectiveAt = (
+							select max(A.EffectiveAt) from Admin A where A.AuthorityId = O.AuthorityId and A.EffectiveAt <= context.now
+						)
+						and exists (select 1 from json_each(O.Scopes) where value = 'vrg')
+			)
+		),
+		constraint DecidedAtValid check (isISODatetime(new.DecidedAt) and like('%Z', new.DecidedAt)),
+		constraint CursorWidth check (length(new.Cursor) = 16),
+		constraint ChallengeNonceShape check (
+			(new.Status = 'c' and new.ChallengeNonce is not null) or (new.Status <> 'c' and new.ChallengeNonce is null)
+		),
+		constraint MatchMethodValid check (
+			new.MatchMethod is null or (new.Status = 'a' and new.MatchMethod in (select Code from AssociationMatchMethod))
+		),
+		constraint RevocationShape check (
+			new.RevokesDeviceKey is null or (new.Status = 'a' and new.MatchMethod is not null)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	)
+		with context ( now datetime );
+
+	unique index AssociationDecisionCursor on AssociationDecision (StrandId, Cursor);
 
 	view RegistrantStatus as
 		select 'a' as Code, 'Active' as Name

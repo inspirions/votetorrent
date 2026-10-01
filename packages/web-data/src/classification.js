@@ -102,6 +102,20 @@ export const CLASSIFICATION = {
 	BallotSignatureTaskExtension:[CLASS.NEVER,'Task extension', []],
 	RegistrantSignatureTaskExtension:[CLASS.NEVER,'Task extension', []],
 
+	// ── 62-01 (D-03, D-05, D-06, D-07, D-15): the five staging/decision tables the P2P transports
+	// land this phase. Three staging tables are NEVER (sealed envelopes in transit plus a clear
+	// Digest that is an accepted equality/guessing-oracle exposure, D-47/T-62-01-08 — the public
+	// queue-health number already comes from RegistrationRequest/AssociationRequest counts, so not
+	// even a row COUNT of the staging tables is needed). The two decision tables are AGGREGATE,
+	// mirroring RegistrationRequest: counts by status are decision throughput, but a row names the
+	// deciding officer's key, a free-text Reason and, on AssociationDecision, a revoked device key,
+	// so individual rows are never published.
+	RegistrationRequestStaging:   [CLASS.NEVER, 'Sealed registration-request envelope in transit; the clear Digest is an accepted equality/guessing oracle (D-47), and a count adds nothing RegistrationRequest does not already publish', []],
+	AssociationRequestStaging:    [CLASS.NEVER, 'Sealed association-request envelope in transit; same D-47 Digest exposure, same no-added-count reasoning as RegistrationRequestStaging', []],
+	AssociationAttestationStaging:[CLASS.NEVER,'Sealed device-attestation-answer envelope in transit; carries the richest device-identifying material of the three staging tables', []],
+	RegistrationDecision: [CLASS.AGGREGATE, 'Counts by status are decision throughput, a genuinely useful public number (mirrors RegistrationRequest); a row names the deciding officer and a free-text Reason, so rows are never published', ['pre','voting']],
+	AssociationDecision:  [CLASS.AGGREGATE, 'Counts by status are decision throughput; a row names the deciding officer, a free-text Reason and, on an approved re-association, a revoked device key, so rows are never published', ['pre','voting']],
+
 	// ── NEVER
 	RegistrantPrivate:  [CLASS.NEVER, 'Private registrant detail by definition', []],
 	AssociationPrivate: [CLASS.NEVER, 'Private association detail by definition', []],

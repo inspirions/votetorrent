@@ -114,10 +114,17 @@ const PUBLIC_SAFE_NAMES = Object.freeze(
  * classes, D-15 moves two tables out of NEVER into AGGREGATE and D-18 moves one
  * out of POLICY_GATED into PUBLIC, giving 28 forbidden and 33 public-safe of 61.
  * 54-06's landed `classification.js` produces exactly those numbers.
+ *
+ * 2026-10-01 (62-01 Task 2): +5 tables, deliberately classified. NEVER (+3): the three new
+ * registration/association staging tables (sealed P2P-transport envelopes in transit; D-47
+ * accepts the clear Digest as an equality/guessing-oracle exposure, not a publication decision —
+ * table names intentionally NOT repeated here, see the self-trip guard below). AGGREGATE (+2):
+ * the two new decision tables (decision throughput by status is public; individual rows name the
+ * deciding officer and are not). 28 -> 31 forbidden, 33 -> 35 public-safe, 61 -> 66 total.
  */
-const EXPECTED_FORBIDDEN_COUNT = 28;
-const EXPECTED_PUBLIC_SAFE_COUNT = 33;
-const EXPECTED_TABLE_COUNT = 61;
+const EXPECTED_FORBIDDEN_COUNT = 31;
+const EXPECTED_PUBLIC_SAFE_COUNT = 35;
+const EXPECTED_TABLE_COUNT = 66;
 
 /**
  * The size of the scanned file set, pinned the same way the table counts above
