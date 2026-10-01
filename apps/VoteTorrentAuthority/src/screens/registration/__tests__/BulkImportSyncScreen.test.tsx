@@ -119,6 +119,45 @@ jest.mock("../../../hooks/useDeviceSigningErrorHandler", () => ({
 	useDeviceSigningErrorHandler: () => mockHandleDeviceSigningError,
 }));
 
+// 62-25 (D-29): registration-bridge-config, device-signer and device-user are mocked at module
+// scope — the screen now resolves the device signer directly for the bridge-URL save action.
+// Default state: a saved https URL already exists (bridgeReady === true), so every PRE-EXISTING
+// test in this file that presses `transport-sync-now-rest` keeps working unchanged; S8 overrides
+// this per-case to exercise the unset/loading states.
+interface BridgeConfigDepsLike {
+	getEngine: unknown;
+}
+const mockReadRegistrationBridgeConfig = jest.fn<Promise<{ savedUrl: string | null; revision: number | undefined }>, [BridgeConfigDepsLike, string]>(
+	async () => ({ savedUrl: "https://bridge.example/intake", revision: 1 }),
+);
+const mockSaveRegistrationBridgeUrl = jest.fn<
+	Promise<{ outcome: string; config?: { savedUrl: string | null; revision: number | undefined } }>,
+	[BridgeConfigDepsLike, string, string, unknown, number | undefined]
+>(async (_deps, _authorityId, url) => ({ outcome: "saved", config: { savedUrl: url, revision: 2 } }));
+jest.mock("../registration-bridge-config", () => ({
+	// The model mock's isSaveableBridgeUrl: startsWith('https://') — a deliberately simpler rule
+	// than the real 62-14 validator, sufficient for this screen's own gating assertions.
+	isSaveableBridgeUrl: (url: string) => url.startsWith("https://"),
+	readRegistrationBridgeConfig: (...args: unknown[]) =>
+		mockReadRegistrationBridgeConfig(...(args as [BridgeConfigDepsLike, string])),
+	saveRegistrationBridgeUrl: (...args: unknown[]) =>
+		mockSaveRegistrationBridgeUrl(...(args as [BridgeConfigDepsLike, string, string, unknown, number | undefined])),
+}));
+
+const mockCreateDeviceSigner = jest.fn(async (_name: string) => async () => ({
+	signerUserId: "u1",
+	signerKey: "k1",
+	signature: "sig1",
+}));
+jest.mock("../../../engines/device-signer", () => ({
+	createDeviceSigner: (name: string) => mockCreateDeviceSigner(name),
+}));
+
+const mockGetOrCreateDeviceUser = jest.fn(async (name: string) => ({ id: "u1", name, activeKeys: [] }));
+jest.mock("../../../engines/device-user", () => ({
+	getOrCreateDeviceUser: (name: string) => mockGetOrCreateDeviceUser(name),
+}));
+
 // ---------------------------------------------------------------------------
 // The model — plain TypeScript, no mocked dependency of its own, safe to import directly.
 // ---------------------------------------------------------------------------
@@ -208,6 +247,7 @@ function serializeSubtree(node: renderer.ReactTestInstance): string {
 
 const BLOCK_TEST_IDS = [
 	"bulk-import-sync-error",
+	"rest-bridge-config-card",
 	"transport-status-card-filesystem",
 	"transport-status-card-rest",
 	"officer-intake-key-card",
@@ -248,14 +288,31 @@ beforeEach(() => {
 	mockEnableOfficerEncryptedIntake.mockImplementation(async () => "enabled");
 	mockHandleDeviceSigningError.mockClear();
 	mockHandleDeviceSigningError.mockImplementation(() => ({ handled: false, message: undefined }));
+	mockReadRegistrationBridgeConfig.mockClear();
+	mockReadRegistrationBridgeConfig.mockImplementation(async () => ({
+		savedUrl: "https://bridge.example/intake",
+		revision: 1,
+	}));
+	mockSaveRegistrationBridgeUrl.mockClear();
+	mockSaveRegistrationBridgeUrl.mockImplementation(async (_deps, _authorityId, url) => ({
+		outcome: "saved",
+		config: { savedUrl: url, revision: 2 },
+	}));
+	mockCreateDeviceSigner.mockClear();
+	mockCreateDeviceSigner.mockImplementation(async () => async () => ({
+		signerUserId: "u1",
+		signerKey: "k1",
+		signature: "sig1",
+	}));
+	mockGetOrCreateDeviceUser.mockClear();
 });
 
 // ---------------------------------------------------------------------------
 // S1 — the fixed render order.
 // ---------------------------------------------------------------------------
 
-describe("BulkImportSyncScreen — fixed render order (S1)", () => {
-	it("error slot, filesystem, rest, officer-intake-key-card, transport-status-card-p2p — the peer card is last", async () => {
+describe("BulkImportSyncScreen — fixed render order (S1b, 62-25)", () => {
+	it("error slot, rest-bridge-config-card, filesystem, rest, officer-intake-key-card, transport-status-card-p2p — the peer card is last", async () => {
 		registerSyncBinding({
 			id: "filesystem",
 			syncNow: jest.fn(async () => report({ errorItemIds: ["req-0001"] })),
@@ -276,10 +333,31 @@ describe("BulkImportSyncScreen — fixed render order (S1)", () => {
 
 		expect(orderedBlockIds(tr)).toEqual([
 			"bulk-import-sync-error",
+			"rest-bridge-config-card",
 			"transport-status-card-filesystem",
 			"transport-status-card-rest",
 			"officer-intake-key-card",
 			"transport-status-card-p2p",
+		]);
+	});
+
+	it("the unset-bridge hint sits directly under the REST card when no URL is saved", async () => {
+		mockReadRegistrationBridgeConfig.mockImplementation(async () => ({ savedUrl: null, revision: 0 }));
+		const tr = await renderScreen();
+
+		const ids = tr.root
+			.findAll(
+				(node) =>
+					typeof node.type === "string" &&
+					["transport-status-card-rest", "registration-bridge-config-unset-hint", "officer-intake-key-card"].includes(
+						node.props.testID,
+					),
+			)
+			.map((n) => n.props.testID as string);
+		expect(ids).toEqual([
+			"transport-status-card-rest",
+			"registration-bridge-config-unset-hint",
+			"officer-intake-key-card",
 		]);
 	});
 });
@@ -622,6 +700,207 @@ describe("BulkImportSyncScreen — S6 gating (disabled, not hidden)", () => {
 		const peerWrapper = tr.root.findByProps({ testID: "transport-try-peer-sync-p2p" });
 		const peerDisabled = peerWrapper.findAll((node) => "disabled" in node.props)[0];
 		expect(peerDisabled!.props.disabled).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// S8-S14 — the RestBridgeConfigCard integration (62-25, D-29).
+// ---------------------------------------------------------------------------
+
+describe("BulkImportSyncScreen — RestBridgeConfigCard integration (S8-S14, D-29)", () => {
+	it("S8: while loading, the REST control is disabled and no hint renders; with savedUrl null it is present+disabled with the hint; with a saved URL and 'vrg' it is enabled and the hint is absent", async () => {
+		mockReadRegistrationBridgeConfig.mockImplementation(
+			() => new Promise(() => {}), // never resolves -> stays loading
+		);
+		let tr = await renderScreen();
+		let wrapper = tr.root.findByProps({ testID: "transport-sync-now-rest" });
+		let disabledNode = wrapper.findAll((node) => "disabled" in node.props)[0]!;
+		expect(disabledNode.props.disabled).toBe(true);
+		absent(tr, "registration-bridge-config-unset-hint");
+
+		mockReadRegistrationBridgeConfig.mockReset();
+		mockReadRegistrationBridgeConfig.mockImplementation(async () => ({ savedUrl: null, revision: 0 }));
+		tr = await renderScreen();
+		wrapper = tr.root.findByProps({ testID: "transport-sync-now-rest" });
+		disabledNode = wrapper.findAll((node) => "disabled" in node.props)[0]!;
+		expect(disabledNode.props.disabled).toBe(true);
+		present(tr, "registration-bridge-config-unset-hint");
+
+		mockReadRegistrationBridgeConfig.mockReset();
+		mockReadRegistrationBridgeConfig.mockImplementation(async () => ({
+			savedUrl: "https://bridge.example/intake",
+			revision: 1,
+		}));
+		tr = await renderScreen();
+		wrapper = tr.root.findByProps({ testID: "transport-sync-now-rest" });
+		disabledNode = wrapper.findAll((node) => "disabled" in node.props)[0]!;
+		expect(disabledNode.props.disabled).toBe(false);
+		absent(tr, "registration-bridge-config-unset-hint");
+	});
+
+	it("S9: Save resolves the device signer then calls saveRegistrationBridgeUrl({getEngine}, authorityId, url, sign, revision) exactly once; two presses in one tick call it once; 'saved' shows SavedConfirm and enables the REST control without remounting", async () => {
+		mockReadRegistrationBridgeConfig.mockImplementation(async () => ({ savedUrl: null, revision: 0 }));
+		const tr = await renderScreen();
+		const input = tr.root.findByProps({ testID: "registration-bridge-config-url" });
+		await renderer.act(async () => {
+			input.props.onChangeText("https://new-bridge.example");
+		});
+		await flushTicks(2);
+
+		const saveWrapper = tr.root.findByProps({ testID: "registration-bridge-config-save" });
+		const onPress = saveWrapper.findAll((node) => typeof node.props.onPress === "function")[0]!.props.onPress;
+		await renderer.act(async () => {
+			onPress();
+			onPress();
+		});
+		await flushTicks(4);
+
+		expect(mockCreateDeviceSigner).toHaveBeenCalledTimes(1);
+		expect(mockSaveRegistrationBridgeUrl).toHaveBeenCalledTimes(1);
+		const call = mockSaveRegistrationBridgeUrl.mock.calls[0]!;
+		expect(call[1]).toBe("auth-1");
+		expect(call[2]).toBe("https://new-bridge.example");
+		expect(typeof call[3]).toBe("function");
+		expect(call[4]).toBe(0);
+
+		present(tr, "rest-bridge-config-card");
+		expect(treeText(tr)).toContain("registrationBridgeConfigSavedConfirm");
+		const wrapper = tr.root.findByProps({ testID: "transport-sync-now-rest" });
+		const disabledNode = wrapper.findAll((node) => "disabled" in node.props)[0]!;
+		expect(disabledNode.props.disabled).toBe(false);
+	});
+
+	it("S10: 'co-sign-required' renders the co-sign line, keeps Save disabled for the rest of the mount (a second press calls nothing more), and leaves the REST control's state unchanged", async () => {
+		mockReadRegistrationBridgeConfig.mockImplementation(async () => ({ savedUrl: null, revision: 0 }));
+		mockSaveRegistrationBridgeUrl.mockImplementation(async () => ({ outcome: "co-sign-required" }));
+		const tr = await renderScreen();
+		const input = tr.root.findByProps({ testID: "registration-bridge-config-url" });
+		await renderer.act(async () => {
+			input.props.onChangeText("https://new-bridge.example");
+		});
+		await flushTicks(2);
+
+		const saveWrapper = tr.root.findByProps({ testID: "registration-bridge-config-save" });
+		let onPress = saveWrapper.findAll((node) => typeof node.props.onPress === "function")[0]!.props.onPress;
+		await renderer.act(async () => {
+			onPress();
+		});
+		await flushTicks(4);
+
+		expect(mockSaveRegistrationBridgeUrl).toHaveBeenCalledTimes(1);
+		present(tr, "registration-bridge-config-co-sign");
+
+		const saveWrapper2 = tr.root.findByProps({ testID: "registration-bridge-config-save" });
+		const button = saveWrapper2.findByType(require("react-native").TouchableOpacity);
+		expect(button.props.disabled).toBe(true);
+		onPress = button.props.onPress;
+		await renderer.act(async () => {
+			onPress();
+		});
+		await flushTicks(2);
+		expect(mockSaveRegistrationBridgeUrl).toHaveBeenCalledTimes(1);
+
+		const restWrapper = tr.root.findByProps({ testID: "transport-sync-now-rest" });
+		const restDisabled = restWrapper.findAll((node) => "disabled" in node.props)[0]!;
+		expect(restDisabled.props.disabled).toBe(true); // bridgeReady stayed false
+	});
+
+	it("S11: 'conflict' and 'failed' render SaveError and re-read the config (called twice)", async () => {
+		for (const outcome of ["conflict", "failed"] as const) {
+			mockReadRegistrationBridgeConfig.mockClear();
+			mockReadRegistrationBridgeConfig.mockImplementation(async () => ({ savedUrl: null, revision: 0 }));
+			mockSaveRegistrationBridgeUrl.mockImplementation(async () => ({ outcome }));
+			const tr = await renderScreen();
+			const input = tr.root.findByProps({ testID: "registration-bridge-config-url" });
+			await renderer.act(async () => {
+				input.props.onChangeText("https://new-bridge.example");
+			});
+			await flushTicks(2);
+			const saveWrapper = tr.root.findByProps({ testID: "registration-bridge-config-save" });
+			const onPress = saveWrapper.findAll((node) => typeof node.props.onPress === "function")[0]!.props.onPress;
+			await renderer.act(async () => {
+				onPress();
+			});
+			await flushTicks(4);
+
+			expect(treeText(tr)).toContain("registrationBridgeConfigSaveError");
+			expect(mockReadRegistrationBridgeConfig).toHaveBeenCalledTimes(2);
+		}
+	});
+
+	it("S12: signer errors route through useDeviceSigningErrorHandler — handled:true sets no notice; handled:false with a message shows it in InlineError; handled:false with no message shows SaveError; the raw message never appears", async () => {
+		mockReadRegistrationBridgeConfig.mockImplementation(async () => ({ savedUrl: null, revision: 0 }));
+
+		mockCreateDeviceSigner.mockRejectedValueOnce(new Error("device-signing-cancel-secret"));
+		mockHandleDeviceSigningError.mockReturnValueOnce({ handled: true, message: undefined });
+		let tr = await renderScreen();
+		let input = tr.root.findByProps({ testID: "registration-bridge-config-url" });
+		await renderer.act(async () => {
+			input.props.onChangeText("https://new-bridge.example");
+		});
+		await flushTicks(2);
+		let saveWrapper = tr.root.findByProps({ testID: "registration-bridge-config-save" });
+		let onPress = saveWrapper.findAll((node) => typeof node.props.onPress === "function")[0]!.props.onPress;
+		await renderer.act(async () => {
+			onPress();
+		});
+		await flushTicks(4);
+		expect(treeText(tr)).not.toContain("registrationBridgeConfigSaveError");
+		expect(treeText(tr)).not.toContain("device-signing-cancel-secret");
+
+		mockCreateDeviceSigner.mockRejectedValueOnce(new Error("raw-2"));
+		mockHandleDeviceSigningError.mockReturnValueOnce({ handled: false, message: "mapped-copy" });
+		tr = await renderScreen();
+		input = tr.root.findByProps({ testID: "registration-bridge-config-url" });
+		await renderer.act(async () => {
+			input.props.onChangeText("https://new-bridge.example");
+		});
+		await flushTicks(2);
+		saveWrapper = tr.root.findByProps({ testID: "registration-bridge-config-save" });
+		onPress = saveWrapper.findAll((node) => typeof node.props.onPress === "function")[0]!.props.onPress;
+		await renderer.act(async () => {
+			onPress();
+		});
+		await flushTicks(4);
+		expect(treeText(tr)).toContain("mapped-copy");
+		expect(treeText(tr)).not.toContain("raw-2");
+
+		mockCreateDeviceSigner.mockRejectedValueOnce(new Error("raw-3-secret"));
+		mockHandleDeviceSigningError.mockReturnValueOnce({ handled: false, message: undefined });
+		tr = await renderScreen();
+		input = tr.root.findByProps({ testID: "registration-bridge-config-url" });
+		await renderer.act(async () => {
+			input.props.onChangeText("https://new-bridge.example");
+		});
+		await flushTicks(2);
+		saveWrapper = tr.root.findByProps({ testID: "registration-bridge-config-save" });
+		onPress = saveWrapper.findAll((node) => typeof node.props.onPress === "function")[0]!.props.onPress;
+		await renderer.act(async () => {
+			onPress();
+		});
+		await flushTicks(4);
+		expect(treeText(tr)).toContain("registrationBridgeConfigSaveError");
+		expect(treeText(tr)).not.toContain("raw-3-secret");
+	});
+
+	it("S13: with scopes undefined or ['mel'], the bridge field and Save are present and disabled", async () => {
+		for (const scopes of [undefined, ["mel"]] as (string[] | undefined)[]) {
+			mockScopesResult = { scopes, loading: false };
+			const tr = await renderScreen();
+			const input = tr.root.findByProps({ testID: "registration-bridge-config-url" });
+			expect(input.props.editable).toBe(false);
+			const saveWrapper = tr.root.findByProps({ testID: "registration-bridge-config-save" });
+			const button = saveWrapper.findByType(require("react-native").TouchableOpacity);
+			expect(button.props.disabled).toBe(true);
+		}
+	});
+
+	it("S14: the bundling gate still passes, and the filesystem card still renders and dispatches runSync('filesystem') unchanged", async () => {
+		const syncNow = jest.fn(async () => report());
+		registerSyncBinding({ id: "filesystem", syncNow });
+		const tr = await renderScreen();
+		await press(tr, "transport-sync-now-filesystem");
+		expect(syncNow).toHaveBeenCalledTimes(1);
 	});
 });
 

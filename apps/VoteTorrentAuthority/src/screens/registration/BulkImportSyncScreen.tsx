@@ -2,16 +2,19 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useRoute, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeDescriptions, type Signature } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
 import { InlineError } from "../../components/InlineError";
 import { TransportStatusCard } from "../../components/TransportStatusCard";
 import { PeerTransportStatusCard } from "../../components/PeerTransportStatusCard";
 import { OfficerIntakeKeyCard } from "./components/OfficerIntakeKeyCard";
+import { RestBridgeConfigCard } from "./components/RestBridgeConfigCard";
 import { globalStyles } from "../../theme/styles";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import { useApp } from "../../providers/AppProvider";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { createDeviceSigner } from "../../engines/device-signer";
+import { getOrCreateDeviceUser } from "../../engines/device-user";
 import {
 	resolveSyncBinding,
 	resolveTransportCardState,
@@ -25,27 +28,46 @@ import {
 	readOfficerIntakeKeyState,
 	type OfficerIntakeKeyState,
 } from "./officer-intake-key";
+import {
+	readRegistrationBridgeConfig,
+	saveRegistrationBridgeUrl,
+	type RegistrationBridgeConfig,
+} from "./registration-bridge-config";
+
+/** The card-facing subset of `RegistrationBridgeSaveOutcome` — 'invalid-url' never reaches here
+ * (the card's own draft validation already shows it), and 'not-authorized'/'conflict' both map to
+ * the generic 'save-error' notice (S11: both re-read the config rather than carry a distinct
+ * screen-level state). */
+type BridgeScreenNotice = "saved" | "save-error" | "co-sign-required";
 
 /**
- * BulkImportSyncScreen — the officer-facing surface for the D-01 transport bridges, now also the
- * D-04/D-28/D-31 peer-staging surface (Phase 62 Plan 21).
+ * BulkImportSyncScreen — the officer-facing surface for the D-01 transport bridges, the D-04/
+ * D-28/D-31 peer-staging surface (Phase 62 Plan 21), and the D-28/D-29 REST bridge config surface
+ * (Phase 62 Plan 25).
  *
  * Renders, in a FIXED order that is never reordered by any state:
  *   1. `InlineError`
  *   2. the scope-gate banner (only when ungated for `'vrg'`)
- *   3. Filesystem `TransportStatusCard` — first-listed, most-trusted binding
- *   4. REST `TransportStatusCard`
- *   5. `OfficerIntakeKeyCard` — the D-04 "enable encrypted intake" step
- *   6. `PeerTransportStatusCard` — D-31's live-count peer card
- *   7. the sync-errors section, identifier-only
+ *   3. `RestBridgeConfigCard` — its own section (62-UI-SPEC Surface 1, D-29)
+ *   4. Filesystem `TransportStatusCard` — first-listed, most-trusted binding; D-28/D-29: this
+ *      transport and its binding are unchanged by this plan, attached by the Node-side host as
+ *      before
+ *   5. REST `TransportStatusCard`, plus the unset-bridge hint directly below it when no URL is
+ *      saved yet
+ *   6. `OfficerIntakeKeyCard` — the D-04 "enable encrypted intake" step
+ *   7. `PeerTransportStatusCard` — D-31's live-count peer card
+ *   8. the sync-errors section, identifier-only
  *
- * D-28: the 'peer' binding is attached in EVERY build (`AppProvider.tsx`, no `__DEV__` gate) — P2P
- * is the default intake path, unlike the REST/filesystem dev/device-proof harnesses above it on
- * this screen. D-31: `PeerTransportStatusCard` shows REAL numeric counts read via
- * `resolveSyncBinding('peer').readCounts`. The peer leg itself remains **code-complete, unverified**
- * on devices (D-23, proof debt against P2P-11) — attaching it and showing counts does not change
- * that; the card's own hardcoded warning frame and verbatim caveat are what keep that distinction
- * visible to the officer.
+ * D-28: association has NO REST or filesystem app binding of any kind (62-25 deletes the
+ * dev-only association REST harness) — association syncs only over the 'peer' binding, attached
+ * in EVERY build (`AppProvider.tsx`, no `__DEV__` gate). D-29: the registration REST binding is
+ * ALSO attached in every build now, reading its target from the signed, replicated
+ * `AuthorityIntakePolicy` at every sync — it is inert (refuses before any network call) until an
+ * officer with `'vrg'` saves an https URL here. D-31: `PeerTransportStatusCard` shows REAL numeric
+ * counts read via `resolveSyncBinding('peer').readCounts`. The peer leg itself remains
+ * **code-complete, unverified** on devices (D-23, proof debt against P2P-11) — attaching it and
+ * showing counts does not change that; the card's own hardcoded warning frame and verbatim caveat
+ * are what keep that distinction visible to the officer.
  *
  * The errors section renders a transport heading and an item IDENTIFIER only — never a payload
  * value, a requester name, or a transport's error text (T-48-20-02).
@@ -54,10 +76,14 @@ import {
  * control only — `useCurrentOfficerScopes()`'s own file header says so verbatim. No claim anywhere
  * in this file that this gate is enforcement (Phase 999.1's pre-existing, out-of-scope gap). D-04:
  * encrypted intake registration is open to EVERY current officer of this authority (any scope) —
- * `canEnableIntake` therefore does not require `'vrg'`, unlike `canSync`.
+ * `canEnableIntake` therefore does not require `'vrg'`, unlike `canSync`/`canConfigureBridge`.
  *
- * This screen never imports `device-signer`/`device-user` directly — `resolveDeviceSigner` is
- * passed down from `useApp()`, so this file adds no new `createDeviceSigner(` invoker.
+ * 62-25: this screen now resolves the device signer directly (the bridge-URL save is a
+ * user-initiated signing action), so it DOES invoke the injected signer factory — the
+ * `deviceSigningRollout` coverage inventory gains this file as an invoker, routed through
+ * `useDeviceSigningErrorHandler` below (see `handleSaveBridgeUrl`). The bundling gate this
+ * screen was already held to is unchanged: no vote-engine package import, no Node built-in
+ * module specifier, and no dynamic module loader of any kind.
  */
 
 interface BulkImportSyncRouteParams {
@@ -196,6 +222,91 @@ export function BulkImportSyncScreen() {
 			});
 	}, [getEngine, resolveDeviceSigner, authorityId, handleDeviceSigningError, refreshPeerCounts]);
 
+	// --- D-29: registration REST bridge URL config (62-25) ---
+	// `undefined` = loading (never read yet). A re-read also runs after 'conflict'/'failed' (S11),
+	// so a stale revision never gets re-submitted blind.
+	const [bridgeConfig, setBridgeConfig] = useState<RegistrationBridgeConfig | undefined>(undefined);
+	const [bridgeNotice, setBridgeNotice] = useState<BridgeScreenNotice | undefined>(undefined);
+	const [bridgeSubmitting, setBridgeSubmitting] = useState(false);
+	const bridgeSubmittingRef = useRef(false);
+
+	const readBridgeConfig = useCallback(() => {
+		void readRegistrationBridgeConfig({ getEngine }, authorityId).then((config) => {
+			if (!unmountedRef.current) setBridgeConfig(config);
+		});
+	}, [getEngine, authorityId]);
+
+	useEffect(() => {
+		readBridgeConfig();
+	}, [readBridgeConfig]);
+
+	const handleSaveBridgeUrl = useCallback(
+		(url: string) => {
+			// The ref guard (WR-16): a second press in the same tick is a no-op.
+			if (bridgeSubmittingRef.current) return;
+			// A latched co-sign-required notice is terminal for this mount — nothing to retry.
+			if (bridgeNotice === "co-sign-required") return;
+			bridgeSubmittingRef.current = true;
+			if (!unmountedRef.current) setBridgeSubmitting(true);
+
+			(async () => {
+				let sign: (digest: Uint8Array) => Promise<Signature>;
+				try {
+					const user = await getOrCreateDeviceUser("Device User");
+					sign = await createDeviceSigner(user.name);
+				} catch (err) {
+					const outcome = handleDeviceSigningError(err);
+					if (outcome.handled) return;
+					if (unmountedRef.current) return;
+					if (outcome.message) {
+						setErrorMessage(outcome.message);
+					} else {
+						// No mapped copy to show in the screen's own InlineError: fall back to the
+						// card's own SaveError notice rather than a silent no-op.
+						setBridgeNotice("save-error");
+					}
+					return;
+				}
+
+				const result = await saveRegistrationBridgeUrl(
+					{ getEngine },
+					authorityId,
+					url,
+					sign,
+					bridgeConfig?.revision,
+				);
+
+				if (unmountedRef.current) return;
+				switch (result.outcome) {
+					case "saved":
+						if (result.config) setBridgeConfig(result.config);
+						setBridgeNotice("saved");
+						break;
+					case "co-sign-required":
+						setBridgeNotice("co-sign-required");
+						break;
+					case "invalid-url":
+						// The card's own validation already shows this — no screen-level notice.
+						break;
+					case "not-authorized":
+					case "conflict":
+					case "failed":
+						setBridgeNotice("save-error");
+						readBridgeConfig();
+						break;
+				}
+			})()
+				.finally(() => {
+					bridgeSubmittingRef.current = false;
+					if (!unmountedRef.current) setBridgeSubmitting(false);
+				});
+		},
+		[getEngine, authorityId, bridgeConfig, bridgeNotice, handleDeviceSigningError, readBridgeConfig],
+	);
+
+	const canConfigureBridge = canSync;
+	const bridgeReady = bridgeConfig?.savedUrl != null;
+
 	const errorRefs = toSyncErrorRefs({
 		filesystem: filesystemEntry.report,
 		rest: restEntry.report,
@@ -228,6 +339,19 @@ export function BulkImportSyncScreen() {
 					</View>
 				))}
 
+			{/* 62-UI-SPEC Surface 1, D-29: the registration REST bridge config card, its own
+			    section, placed before the filesystem/REST cards per the composition reference. */}
+			<View style={styles.section}>
+				<RestBridgeConfigCard
+					loading={bridgeConfig === undefined}
+					savedUrl={bridgeConfig?.savedUrl ?? null}
+					notice={bridgeNotice}
+					disabled={!canConfigureBridge}
+					submitting={bridgeSubmitting}
+					onSave={handleSaveBridgeUrl}
+				/>
+			</View>
+
 			<View style={styles.section}>
 				<TransportStatusCard
 					kind="filesystem"
@@ -241,9 +365,20 @@ export function BulkImportSyncScreen() {
 				<TransportStatusCard
 					kind="rest"
 					{...resolveTransportCardState(restEntry)}
-					disabled={!canSync || inFlight.has("rest")}
+					disabled={!canSync || inFlight.has("rest") || !bridgeReady}
 					onSyncNow={() => runSync("rest")}
 				/>
+				{/* D-29: the REST card stays disabled, with plain guidance, until a bridge URL is
+				    saved above -- never a silent dead control. */}
+				{bridgeConfig !== undefined && !bridgeReady && (
+					<ThemedText
+						type="small"
+						style={{ color: colors.textSecondary }}
+						testID="registration-bridge-config-unset-hint"
+					>
+						{t("registrationBridgeConfigUnsetHint")}
+					</ThemedText>
+				)}
 			</View>
 
 			<View style={styles.section}>
