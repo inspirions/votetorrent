@@ -8,10 +8,6 @@
 // (Task 2) and this package's own tests, not part of the app-facing
 // surface.
 //
-// Task 2 adds the engine names (`KeyReleaseEngine`, `KeyReleaseError`,
-// `releaseKeyTaskId`, plus the `KeyReleaseErrorCode`/`KeyReleaseEngineDeps`
-// types) once `key-release-engine.ts` exists.
-//
 // Reconstruction (`reconstructGroupSecret`) lives in THIS module's engine
 // and never in `src/keyholder/` — 62-17's D-16 grep gate over
 // `src/keyholder/*.ts` requires zero `combineSecret`/`reconstructGroupSecret`
@@ -24,3 +20,5 @@ export {
   parseElectionBlockPayload,
   serializeElectionBlockPayload
 } from './election-block.js'
+export { KeyReleaseEngine, KeyReleaseError, releaseKeyTaskId } from './key-release-engine.js'
+export type { KeyReleaseErrorCode, KeyReleaseEngineDeps } from './key-release-engine.js'

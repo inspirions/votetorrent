@@ -739,7 +739,7 @@ describe('KeysTasksEngine', () => {
       expect((caught as Error)?.message).to.include('no EngineContext bound')
     })
 
-    it('marks a release-key Task as completed', async () => {
+    it('refuses to complete a release-key Task without a keyholder signer (D-17)', async () => {
       const net = await createTestNetwork()
       const auth = await addTestAuthority(net)
       const elCtx = await addTestElection(auth)
@@ -776,7 +776,19 @@ describe('KeysTasksEngine', () => {
           current: {}
         } as never
       }
-      await engine.completeKeyRelease(task)
+      // 62-20 (D-17): completing a release-key Task now ALWAYS means a
+      // published share. With no signer, the real engine refuses closed
+      // (`KeyReleaseError('signer-required')`) and the Task stays
+      // incomplete — see key-release.spec.ts scenario J for the happy path.
+      let caught: unknown
+      try {
+        await engine.completeKeyRelease(task)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as { code?: string })?.code).to.equal('signer-required')
+      const taskRow = await elCtx.ctx.db.prepare('select IsCompleted from Task where Id = :id').get({ id: 'task-rk-1' })
+      expect(taskRow!.IsCompleted).to.equal(0)
     })
   })
 })

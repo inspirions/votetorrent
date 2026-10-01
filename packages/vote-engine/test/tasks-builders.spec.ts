@@ -198,7 +198,7 @@ describe('CompleteKeyReleaseBuilder', () => {
     expect(builder).to.be.instanceOf(CompleteKeyReleaseBuilder)
   })
 
-  it('REAL ENGINE equivalence smoke: engine.completeKeyRelease(task) vs builder.setTask(task).commit()', async () => {
+  it('REAL ENGINE equivalence smoke: engine.completeKeyRelease(task) vs builder.setTask(task).commit() — both reject signer-required (D-17)', async () => {
     const stubRef: NetworkReference = {
       hash: 'h'.repeat(16),
       name: 'Test Network',
@@ -206,14 +206,30 @@ describe('CompleteKeyReleaseBuilder', () => {
       primaryAuthorityDomainName: 'authority.example.com'
     }
     const task = makeReleaseKeyTask()
-    // Direct path — UPDATE is a no-op on empty Task table (no throw)
+    // 62-20 (D-17): completeKeyRelease now ALWAYS means a published share.
+    // The builder's IBuilder<ReleaseKeyTask, void> surface carries no signer
+    // slot, so BOTH the direct call and the builder path call the engine with
+    // no signer — equivalence now means they reject with the SAME KeyReleaseError
+    // code, `signer-required`, not that both silently no-op.
     const { ctx: ctx1 } = await createTestNetwork()
     const eng1 = new KeysTasksEngine(stubRef, ctx1)
-    await eng1.completeKeyRelease(task)  // no throw
-    // Builder path
+    let caught1: unknown
+    try {
+      await eng1.completeKeyRelease(task)
+    } catch (err) {
+      caught1 = err
+    }
+    expect((caught1 as { code?: string })?.code).to.equal('signer-required')
+
     const { ctx: ctx2 } = await createTestNetwork()
     const eng2 = new KeysTasksEngine(stubRef, ctx2)
-    await eng2.buildCompleteKeyRelease().setTask(task).commit()  // no throw
+    let caught2: unknown
+    try {
+      await eng2.buildCompleteKeyRelease().setTask(task).commit()
+    } catch (err) {
+      caught2 = err
+    }
+    expect((caught2 as { code?: string })?.code).to.equal('signer-required')
   })
 })
 

@@ -1143,11 +1143,11 @@ describe('completeKeyRelease (SIGN-03)', () => {
     return { taskId, electionId }
   }
 
-  it('marks a release-key Task as completed (SIGN-03 real pipeline)', async () => {
+  it('refuses to complete without publishing a share (SIGN-03, D-17)', async () => {
     // Seed the full election context (includes AdminSigning + AdminSignature for election).
     const auth = await addTestAuthority(await createTestNetwork())
     const elCtx = await addTestElection(auth)
-    const { electionId } = await seedReleaseKeyTask(elCtx)
+    const { electionId, taskId } = await seedReleaseKeyTask(elCtx)
 
     const networkRef = {
       hash: 'test-hash',
@@ -1167,13 +1167,24 @@ describe('completeKeyRelease (SIGN-03)', () => {
       },
     }
 
-    await engine.completeKeyRelease(task)
+    // 62-20 (D-17): completing a release-key Task now ALWAYS means a
+    // published, signed share — with no signer, the real engine refuses
+    // closed (`KeyReleaseError('signer-required')`). The happy path (a
+    // real keyholder signer, over a real DKG, publishing one signed
+    // KeyholderShareRelease row) is key-release.spec.ts scenario C.
+    let caught: unknown
+    try {
+      await engine.completeKeyRelease(task)
+    } catch (err) {
+      caught = err
+    }
+    expect((caught as { code?: string })?.code).to.equal('signer-required')
 
-    // Assert: Task is marked IsCompleted=1.
+    // Assert: Task is NOT marked complete.
     const taskRow = await elCtx.ctx.db
-      .prepare('select IsCompleted from Task where UserId = :userId and Type = :type and IsCompleted = 1')
-      .get({ userId: elCtx.user.id, type: 'release-key' })
-    expect(taskRow, 'Task.IsCompleted must be 1 after completeKeyRelease').to.not.be.undefined
+      .prepare('select IsCompleted from Task where Id = :id')
+      .get({ id: taskId })
+    expect(taskRow!.IsCompleted, 'Task.IsCompleted must stay 0 without a published share').to.equal(0)
   })
 })
 
