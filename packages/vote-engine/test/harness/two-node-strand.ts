@@ -190,6 +190,17 @@ export interface TwoNodeHarnessOptions {
  * Polls read() every opts.intervalMs (default HARNESS_TIMEOUTS.pollMs) until
  * done(value); throws Error(`${label} timed out after ${timeoutMs}ms;
  * last=${JSON.stringify(last)}`) on timeout.
+ *
+ * A throw from read() is treated as "not yet done" and retried on the same
+ * interval, not as a terminal failure — callers poll specifically because the
+ * underlying operation (e.g. a strand open racing a P2P block-fetch) is
+ * expected to be transiently unready, and a bare exception is one of the
+ * ways "not ready yet" surfaces (fix: debug session founding-bundle-harness-f1,
+ * 2026-10-01 — the original version re-threw read()'s first exception
+ * immediately, so no caller of pollUntil ever actually retried past a throw,
+ * contrary to this function's documented contract and every caller's intent).
+ * If the deadline is reached on a throwing attempt, the ORIGINAL error is
+ * thrown (more actionable than "last=undefined").
  */
 export async function pollUntil<T> (
   read: () => Promise<T>,
@@ -200,7 +211,15 @@ export async function pollUntil<T> (
   const deadline = Date.now() + opts.timeoutMs
   let last: T
   for (;;) {
-    last = await read()
+    try {
+      last = await read()
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        throw error
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, intervalMs))
+      continue
+    }
     if (done(last)) return last
     if (Date.now() >= deadline) {
       throw new Error(`${opts.label} timed out after ${opts.timeoutMs}ms; last=${JSON.stringify(last)}`)
@@ -452,6 +471,15 @@ function buildHarnessNode (
       if (isNodeA) openedByA.add(strandId)
       p = rawOpen(strandId)
       dbFactoryCache.set(strandId, p)
+      // Evict a rejected attempt so a LATER caller (e.g. pollUntil retrying a
+      // transient P2P block-fetch race) can actually re-attempt rawOpen()
+      // instead of forever replaying the same dead promise (fix: debug session
+      // founding-bundle-harness-f1, 2026-10-01 — previously one failed
+      // addStrand attempt permanently poisoned the strandId for the rest of
+      // the run; the guard avoids deleting a newer, already-succeeded entry).
+      p.catch(() => {
+        if (dbFactoryCache.get(strandId) === p) dbFactoryCache.delete(strandId)
+      })
     }
     return p
   }

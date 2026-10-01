@@ -111,17 +111,23 @@ describeP2PHarness('founding bundle across two nodes (D-23, D-35, D-39)', functi
     // 62-06-SUMMARY's own "Issues Encountered" documents a transient, upstream
     // "Missing block" error inside cadre-core's composeStrand/applyAppSchema
     // when a strand's distributed catalog has not fully settled yet — a
-    // stack-internal race, not vote-engine or harness code. node-B's dbFactory
-    // memoizes per strandId (including a REJECTED promise), so a first-attempt
-    // failure would permanently break this strandId for the rest of the run.
-    // Give the control mesh a short settle grace (mirrors the harness's own
-    // post-mesh 3000ms grace in attemptBringUp) before the FIRST attempt.
+    // stack-internal race, not vote-engine or harness code (debug session
+    // founding-bundle-harness-f1, 2026-10-01, reconfirmed this directly: the
+    // SAME error, at the SAME internal composeStrand call sites, reproduces on
+    // 62-06's own unmodified two-node-strand.harness.spec.ts self-test whenever
+    // a CPU-heavy sibling process shares the host — it is not specific to this
+    // spec's sequencing). Give the control mesh a short settle grace (mirrors
+    // the harness's own post-mesh 3000ms grace in attemptBringUp) before the
+    // FIRST attempt.
     await new Promise((resolve) => setTimeout(resolve, 3000))
 
     // Poll on the raw dbFactory handle (not openStrand): 62-06-SUMMARY records
     // double registerDbPlugins as safe (doubleRegisterSafe=true), and the
     // engine's own createContext registers plugins itself — no plain SELECT
-    // here needs a UDF.
+    // here needs a UDF. pollUntil now genuinely retries a thrown addStrand
+    // failure (two-node-strand.ts fix, same debug session) instead of
+    // propagating the first exception, so a transient block-fetch race gets
+    // up to HARNESS_TIMEOUTS.replicationMs to heal before this test gives up.
     await pollUntil(
       async () => {
         const db: Database = await harness.nodeB.dbFactory(hash)
