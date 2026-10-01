@@ -75,3 +75,56 @@ export type { DigestVector } from './database/digest-vectors.js'
 // passes this into CadreNode.addStrand's sAppConfig.schema (P2P-03) so the
 // strand DB and the LevelDB path declare the SAME schema — no drift.
 export { VOTETORRENT_SCHEMA_SQL } from './database/schema-sql.js'
+// Phase 62 Plan 04 (D-03/D-04/D-13/D-18/D-25): the crypto module, re-exported
+// by name (never `export *`) for its RN consumers — 62-14 (intake
+// sealer/opener and officer key registration), 62-21 (the Authority native
+// vault adapter) and 62-22 (voter sealing). Mirrors the exact name list on
+// src/crypto/index.ts; the deterministic/test-only entry points stay off
+// this seam too.
+export {
+	ENCRYPTION_KEY_ALG,
+	ENVELOPE_ALG,
+	ENVELOPE_FORMAT_VERSION,
+	ENVELOPE_MAX_RECIPIENTS,
+	EnvelopeSealError,
+	encryptionPublicKeyFromSecret,
+	envelopeRecipientUserIds,
+	generateEncryptionKeyPair,
+	isValidEncryptionPublicKey,
+	openEnvelope,
+	sealToRecipients,
+	serializeEnvelope,
+	BLOCK_CIPHER_ALG,
+	BLOCK_CIPHER_FORMAT_VERSION,
+	BlockCipherError,
+	decryptBlockContent,
+	encryptBlockContent,
+	serializeBlockCiphertext,
+	KEY_VAULT_ALIAS_PATTERN,
+	KEYHOLDER_DKG_RECEIVING_KEY_POLICY,
+	KEYHOLDER_SHARE_POLICY,
+	KeyVaultError,
+	OFFICER_ENCRYPTION_KEY_POLICY,
+	assertKeyVaultAlias,
+	keyholderDkgReceivingKeyAlias,
+	keyholderDkgShareAlias,
+	officerEncryptionKeyAlias
+} from './crypto/index.js'
+export type {
+	EnvelopeBinding,
+	EnvelopeOpenFailureReason,
+	EnvelopeOpenResult,
+	EnvelopeRecipient,
+	EnvelopeRecipientSecret,
+	EnvelopeSealErrorCode,
+	SealedEnvelope,
+	SealedEnvelopeRecipientEntry,
+	BlockCipherBinding,
+	BlockCipherErrorCode,
+	BlockCiphertext,
+	BlockDecryptFailureReason,
+	BlockDecryptResult,
+	IKeyVault,
+	KeyVaultErrorCode,
+	KeyVaultPolicy
+} from './crypto/index.js'
