@@ -158,6 +158,43 @@ export async function computeSigningStatus (db: Database, nonce: string): Promis
   return { nonce, scope, threshold, signatures, openTasks, rejected, reached, unreachable }
 }
 
+/**
+ * 62-11 (D-08): the PRE-SESSION form of {@link readSessionThreshold} — reads an authority's
+ * threshold for `scope` directly off its CURRENT `Admin` row, for decisions that must be made
+ * BEFORE any `AdminSigning` session exists (e.g. whether `submitBallotForConfirmation` must
+ * collect the proposer's signature before writing anything). Same
+ * `coalesce(cast(json_extract(...) as integer), 1)` formula and the same `Number(x) || 1`
+ * fallback as `readSessionThreshold` — the two stay byte-identical in intent, differing only in
+ * where they join from (`CurrentAdmin` directly here, vs. an existing `AdminSigning.Nonce`
+ * there). Returns 1 when the authority has no `CurrentAdmin` row.
+ */
+export async function readAuthorityThreshold (db: Database, authorityId: string, scope: Scope): Promise<number> {
+  const thresholdRes = await db
+    .prepare(
+      `select
+				coalesce(
+					cast(
+						json_extract(
+							(
+							  select value
+							  from json_each(ThresholdPolicies)
+							  where json_extract(value, '$.policy') = :scope
+							  limit 1
+							), '$.threshold'
+						) as integer
+					), 1
+				) as threshold
+		from CurrentAdmin CA
+		join Admin A
+			on A.AuthorityId = CA.AuthorityId
+			and A.EffectiveAt = CA.EffectiveAt
+		where CA.AuthorityId = :authorityId`
+    )
+    .get({ authorityId, scope })
+
+  return Number(thresholdRes?.threshold) || 1
+}
+
 export type DerivedSigningErrorReason =
   | 'session-not-found'
   | 'header-not-found'

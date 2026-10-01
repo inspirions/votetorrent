@@ -25,6 +25,7 @@ import type {
   RegisterInit,
   RegistrationRequestDecision,
   Signature,
+  SignOutcome,
 } from '@votetorrent/vote-core'
 import { BALLOT_HEADER_TID } from '../election/election-engine.js'
 import { CompleteSignatureBuilder } from './builders/index.js'
@@ -811,6 +812,10 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // auto-complete AdminSignature. Do NOT call sign() on reject: a rejection that
     // advances the signing session is a critical integrity hole (D-12 threat).
     let thresholdReached = false
+    // 62-11 (D-10): the full {thresholdReached, crossedNow} outcome, needed by the ballot and
+    // registrant finalize gates below. Only set on the non-admin path (the admin branch keeps
+    // its own P7-composed sign() call, unchanged and untouched by this plan — 62-13 owns it).
+    let signOutcome: SignOutcome | undefined
     if (result.isAccepted) {
       if (task.signatureType === 'admin') {
         // 57-08 (Trigger B, P7-composed transaction): sign() and the
@@ -871,20 +876,43 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           this.rethrow(err, 'completeSignature (finalize admin)')
         }
       } else {
-        thresholdReached = await this.signingEngine.sign(nonce, result.signature)
+        // 62-11 (D-10): signWithOutcome, not sign() — the ballot/registrant finalize gates
+        // below need crossedNow, not just the boolean. sign()'s own Promise<boolean> contract
+        // (thresholdReached) is preserved via signOutcome.thresholdReached below.
+        signOutcome = await this.signingEngine.signWithOutcome(nonce, result.signature)
+        thresholdReached = signOutcome.thresholdReached
       }
     }
 
-    // Ballot finalize branch (D-01, D-08): after sign() succeeds (AdminSignature inserted at
-    // threshold=1), INSERT Ballot first then per-row signed Questions and Options.
+    // Ballot finalize branch (D-01, D-08, 62-11 D-09/D-10/D-12): after sign() succeeds, INSERT
+    // Ballot first then per-row signed Questions and Options.
     // This runs BEFORE the Task-complete update so options are promoted before the Task closes.
+    //
+    // Gate (D-10): finalize runs ONLY on `crossedNow` (THIS call inserted the AdminSignature —
+    // the normal path, every threshold), OR on `thresholdReached` with the artifact still
+    // incomplete (WR-05: a retry after a failed finalize returns crossedNow=false because the
+    // AdminSignature already exists from the FIRST attempt — `isBallotFinalizeComplete` is what
+    // keeps that retry retryable rather than silently skipped). A below-threshold accept
+    // (`thresholdReached === false`) only records the vote and completes the Task below — this
+    // is exactly the CONTEXT "Specific Ideas" defect this plan fixes: the first accept at
+    // threshold 2 used to run finalize unconditionally and throw on Ballot.MutationValid.
     if (result.isAccepted && task.signatureType === 'ballot') {
       try {
-        // 39-03 (DEBT-11, D-06): thread the caller's optional reusable
-        // per-digest signing callback into finalizeBallot so per-row
-        // Question/Option AdminSigning rows can carry a REAL signature
-        // instead of the legacy placeholder (see SignatureResult.sign doc).
-        await this.finalizeBallot(taskRow.Id as string, nonce, result.sign)
+        const ballotExtRow = await this.ctx!.db
+          .prepare('select BallotId from BallotSignatureTaskExtension where TaskId = :taskId')
+          .get({ taskId: taskRow.Id })
+        const ballotId = ballotExtRow?.BallotId as string | undefined
+        const shouldFinalize = ballotId !== undefined && (
+          signOutcome?.crossedNow === true ||
+          (signOutcome?.thresholdReached === true && !(await this.isBallotFinalizeComplete(ballotId)))
+        )
+        if (shouldFinalize) {
+          // 39-03 (DEBT-11, D-06): thread the caller's optional reusable
+          // per-digest signing callback into finalizeBallot so per-row
+          // Question/Option AdminSigning rows can carry a REAL signature
+          // instead of the legacy placeholder (see SignatureResult.sign doc).
+          await this.finalizeBallot(taskRow.Id as string, nonce, result.sign)
+        }
       } catch (err) {
         this.rethrow(err, 'completeSignature (finalize)')
       }
@@ -991,21 +1019,31 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // Digest(context.Tid, …) matches the AdminSigning.Digest baked in at submitBallotForConfirmation
     // (Pitfall 2). The same nonce (headerNonce) + same Description/Districts from ProposedBallot
     // reproduces the byte-identical digest tuple.
-    await this.ctx!.db.exec(
-      `insert into Ballot (Id, ElectionId, AuthorityId, Description, Districts)
-       with context SigningNonce = :nonce, Tid = :headerTid, now = :now
-       values (:id, :electionId, :authorityId, :description, :districts)`,
-      {
-        nonce: headerNonce,
-        headerTid: BALLOT_HEADER_TID,
-        id: pbRow.Id,
-        electionId: pbRow.ElectionId,
-        authorityId: pbRow.AuthorityId,
-        description: pbRow.Description,
-        districts: pbRow.Districts,
-        now,
-      }
-    )
+    //
+    // 62-11 (D-10, resumable/idempotent second defence): skip the insert when the Ballot row
+    // already exists — a retry after a failed finalize (WR-05), a second crosser racing the
+    // first, or a direct re-invocation (C11) must never re-attempt an INSERT that would collide
+    // on the primary key or re-spend AdminSigning/OfficerSignature rows this call does not own.
+    const existingBallot = await this.ctx!.db
+      .prepare('select 1 as x from Ballot where Id = :id')
+      .get({ id: pbRow.Id })
+    if (!existingBallot) {
+      await this.ctx!.db.exec(
+        `insert into Ballot (Id, ElectionId, AuthorityId, Description, Districts)
+         with context SigningNonce = :nonce, Tid = :headerTid, now = :now
+         values (:id, :electionId, :authorityId, :description, :districts)`,
+        {
+          nonce: headerNonce,
+          headerTid: BALLOT_HEADER_TID,
+          id: pbRow.Id,
+          electionId: pbRow.ElectionId,
+          authorityId: pbRow.AuthorityId,
+          description: pbRow.Description,
+          districts: pbRow.Districts,
+          now,
+        }
+      )
+    }
 
     // Resolve AdminEffectiveAt for per-question/option AdminSigning inserts.
     const adminRow = await this.ctx!.db
@@ -1061,80 +1099,91 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         sequence,
         required,
       }
-      const {
-        userId: qUserId,
-        signerKey: qSignerKey,
-        signature: qSignature,
-        isPlaceholder: qIsPlaceholder,
-      } = await this.resolveRowSignature(
-        'select Digest(1, :ballotId, :code, :title, :instructions, :dependsOn, :type, :optionRange, :scoreRange, :grouping, :sequence, :required) as d',
-        qDigestArgs,
-        'Question',
-        sign
-      )
-      const qNonce = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
-      await this.ctx!.db.exec(
-        `insert into AdminSigning (
-          Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature
-        )
-        with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = :isPlaceholderSignature
-        values (
-          :nonce, :authorityId, :adminEffectiveAt, 'ceb',
-          Digest(1, :ballotId, :code, :title, :instructions, :dependsOn, :type, :optionRange, :scoreRange, :grouping, :sequence, :required),
-          :userId, :signerKey, :signature
-        )`,
-        {
-          nonce: qNonce,
-          authorityId: pbRow.AuthorityId,
-          adminEffectiveAt,
-          ...qDigestArgs,
+
+      // 62-11 (D-10, resumable/idempotent): skip the whole AdminSigning+signDerived+insert trio
+      // when this Question row already exists — a retry (WR-05) or a direct re-invocation (C11)
+      // must not re-spend a signature or collide on (BallotId, Code).
+      const existingQuestion = await this.ctx!.db
+        .prepare('select 1 as x from Question where BallotId = :ballotId and Code = :code')
+        .get({ ballotId, code: q.code })
+      if (!existingQuestion) {
+        const {
           userId: qUserId,
           signerKey: qSignerKey,
           signature: qSignature,
-          isPlaceholderSignature: qIsPlaceholder,
-          now,
-        }
-      )
-
-      // Step 3b: sign to create AdminSignature (threshold=1 auto-completes)
-      // 999.1 R-02/R-04 (DEBT-11): same real-vs-placeholder branch as above — the
-      // OfficerSignature counter-signature verifies against this SAME AdminSigning
-      // Digest (OfficerSignature.SignatureValid), so reuse the identical signature
-      // bytes when real-signed.
-      const qSig = {
-        signerUserId: qUserId ?? '',
-        signerKey: qSignerKey,
-        signature: qSignature,
-      }
-      await this.signingEngine!.sign(qNonce, qSig, { isPlaceholderSignature: qIsPlaceholder })
-
-      // Step 3c: INSERT Question row (Ballot must already exist — BallotIdValid constraint, D-08)
-      await this.ctx!.db.exec(
-        `insert into Question (
-          BallotId, Code, Title, Instructions, DependsOn, Type,
-          OptionRange, ScoreRange, Grouping, Sequence, Required
+          isPlaceholder: qIsPlaceholder,
+        } = await this.resolveRowSignature(
+          'select Digest(1, :ballotId, :code, :title, :instructions, :dependsOn, :type, :optionRange, :scoreRange, :grouping, :sequence, :required) as d',
+          qDigestArgs,
+          'Question',
+          sign
         )
-        with context SigningNonce = :nonce, Tid = 1, now = :now
-        values (
-          :ballotId, :code, :title, :instructions, :dependsOn, :type,
-          :optionRange, :scoreRange, :grouping, :sequence, :required
-        )`,
-        {
-          nonce: qNonce,
-          ballotId,
-          code: q.code,
-          title: q.title,
-          instructions: q.instructions,
-          dependsOn,
-          type: questionType,
-          optionRange,
-          scoreRange,
-          grouping,
-          sequence,
-          required,
-          now,
+        const qNonce = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
+        await this.ctx!.db.exec(
+          `insert into AdminSigning (
+            Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature
+          )
+          with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = :isPlaceholderSignature
+          values (
+            :nonce, :authorityId, :adminEffectiveAt, 'ceb',
+            Digest(1, :ballotId, :code, :title, :instructions, :dependsOn, :type, :optionRange, :scoreRange, :grouping, :sequence, :required),
+            :userId, :signerKey, :signature
+          )`,
+          {
+            nonce: qNonce,
+            authorityId: pbRow.AuthorityId,
+            adminEffectiveAt,
+            ...qDigestArgs,
+            userId: qUserId,
+            signerKey: qSignerKey,
+            signature: qSignature,
+            isPlaceholderSignature: qIsPlaceholder,
+            now,
+          }
+        )
+
+        // Step 3b: signDerived to create AdminSignature (62-07 Finding 4.1 / 62-11 handoff (a)) —
+        // this row inherits satisfaction from the ALREADY-reached header (headerNonce), rather
+        // than recounting this derived session's own (typically threshold-1, non-holder) signer
+        // set. 999.1 R-02/R-04 (DEBT-11): same real-vs-placeholder branch as above — the
+        // OfficerSignature counter-signature verifies against this SAME AdminSigning Digest
+        // (OfficerSignature.SignatureValid), so reuse the identical signature bytes when
+        // real-signed.
+        const qSig = {
+          signerUserId: qUserId ?? '',
+          signerKey: qSignerKey,
+          signature: qSignature,
         }
-      )
+        await this.signingEngine!.signDerived(qNonce, qSig, headerNonce, { isPlaceholderSignature: qIsPlaceholder })
+
+        // Step 3c: INSERT Question row (Ballot must already exist — BallotIdValid constraint, D-08)
+        await this.ctx!.db.exec(
+          `insert into Question (
+            BallotId, Code, Title, Instructions, DependsOn, Type,
+            OptionRange, ScoreRange, Grouping, Sequence, Required
+          )
+          with context SigningNonce = :nonce, Tid = 1, now = :now
+          values (
+            :ballotId, :code, :title, :instructions, :dependsOn, :type,
+            :optionRange, :scoreRange, :grouping, :sequence, :required
+          )`,
+          {
+            nonce: qNonce,
+            ballotId,
+            code: q.code,
+            title: q.title,
+            instructions: q.instructions,
+            dependsOn,
+            type: questionType,
+            optionRange,
+            scoreRange,
+            grouping,
+            sequence,
+            required,
+            now,
+          }
+        )
+      }
 
       // Step 4: per-option promotion — INSERT AFTER the parent Question (D-08, CLOSED).
       //
@@ -1176,6 +1225,14 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           image: oImage,
           video: oVideo,
         }
+
+        // 62-11 (D-10, resumable/idempotent): skip the whole trio when this Option row already
+        // exists — same reasoning as the Question skip above.
+        const existingOption = await this.ctx!.db
+          .prepare('select 1 as x from Option where BallotId = :ballotId and QuestionCode = :questionCode and Code = :code')
+          .get({ ballotId, questionCode: q.code, code: o.code })
+        if (existingOption) continue
+
         const {
           userId: oUserId,
           signerKey: oSignerKey,
@@ -1215,15 +1272,16 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           this.rethrow(err, 'finalizeBallot (option AdminSigning)')
         }
 
-        // Step 4b: sign to create AdminSignature (threshold=1 auto-completes)
-        // 999.1 R-02/R-04 (DEBT-11): reuse the same real signature bytes as the
-        // AdminSigning row above (OfficerSignature verifies against that same Digest).
+        // Step 4b: signDerived to create AdminSignature (62-07 Finding 4.1 / 62-11 handoff (a)) —
+        // same header-inheritance reasoning as the Question path above. 999.1 R-02/R-04
+        // (DEBT-11): reuse the same real signature bytes as the AdminSigning row above
+        // (OfficerSignature verifies against that same Digest).
         const oSig = {
           signerUserId: oUserId ?? '',
           signerKey: oSignerKey,
           signature: oSignature,
         }
-        await this.signingEngine!.sign(oNonce, oSig, { isPlaceholderSignature: oIsPlaceholder })
+        await this.signingEngine!.signDerived(oNonce, oSig, headerNonce, { isPlaceholderSignature: oIsPlaceholder })
 
         // Step 4c: INSERT Option row (Ballot + parent Question already exist — constraints satisfied)
         try {
@@ -1255,6 +1313,40 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       }
     }
     // D-04: ProposedBallot is NOT deleted — retained for history.
+  }
+
+  /**
+   * 62-11 (D-10) — true only when `finalizeBallot`'s entire artifact already exists for
+   * `ballotId`: the Ballot row, every ProposedBallot question code has a Question row, and every
+   * one of that question's options has an Option row. Used by `completeSignature`'s finalize
+   * gate so a `thresholdReached` (but not `crossedNow`) accept — the WR-05 retry shape — still
+   * finalizes when the PRIOR attempt left the artifact incomplete, while a genuinely late
+   * signature (artifact already complete) takes the recorded, non-finalizing path (D-10).
+   */
+  private async isBallotFinalizeComplete (ballotId: string): Promise<boolean> {
+    const ballotRow = await this.ctx!.db.prepare('select 1 as x from Ballot where Id = :id').get({ id: ballotId })
+    if (!ballotRow) return false
+
+    const pbRow = await this.ctx!.db
+      .prepare('select Questions from ProposedBallot where Id = :ballotId')
+      .get({ ballotId }) as { Questions: string | null } | undefined
+    const questions = parseJsonOr<Question[]>(pbRow?.Questions, [], 'ProposedBallot.Questions')
+
+    for (const q of questions) {
+      const questionCount = await this.ctx!.db
+        .prepare('select count(*) as n from Question where BallotId = :ballotId and Code = :code')
+        .get({ ballotId, code: q.code })
+      if (Number(questionCount?.n ?? 0) === 0) return false
+
+      const expectedOptions = q.options?.length ?? 0
+      if (expectedOptions > 0) {
+        const optionCount = await this.ctx!.db
+          .prepare('select count(*) as n from Option where BallotId = :ballotId and QuestionCode = :code')
+          .get({ ballotId, code: q.code })
+        if (Number(optionCount?.n ?? 0) < expectedOptions) return false
+      }
+    }
+    return true
   }
 
   /**

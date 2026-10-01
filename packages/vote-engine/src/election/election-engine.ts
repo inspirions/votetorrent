@@ -33,6 +33,8 @@ import { ElectionRevokeKeyholderBuilder } from './builders/election-revoke-keyho
 import { allocateTid } from '../database/tid-allocator.js'
 import { verifyUserKeyMembership } from '../user/verify-user-key.js'
 import { SigningEngine } from '../signing/signing-engine.js'
+import { fanOutSignatureTasks } from '../signing/fan-out.js'
+import { readAuthorityThreshold, listCurrentScopeHolders } from '../signing/threshold.js'
 
 /**
  * Fixed ballot-header Tid for the `AdminSigning` digest at submit time.
@@ -883,24 +885,38 @@ export class ElectionEngine implements IElectionEngine {
   // ---------- confirm-path methods (31-02 implementation) ----------
 
   /**
-   * D-03/D-07/D-06 — Submit a ProposedBallot for authority confirmation.
+   * D-03/D-07/D-06/D-08 — Submit a ProposedBallot for authority confirmation.
    *
    * 1. Read the ProposedBallot row.
    * 2. Re-validate ballot invariants (D-07): non-empty description, ≥1 question,
    *    ≥2 options for 'select'-type questions. Throw before any write on failure.
    * 3. Resolve AdminEffectiveAt from CurrentAdmin.
-   * 4. Insert an UNSIGNED AdminSigning('ceb') with the canonical ballot-header
-   *    digest. Uses BALLOT_HEADER_TID (a fixed constant, not allocateTid()) so
-   *    31-03's finalize can reproduce the identical digest without reading Tid
-   *    from any persisted column (Pitfall 2). Do NOT call sign() here — the
-   *    AdminSigning must stay unsigned until completeSignature (Pitfall 1).
-   * 5. Atomically BEGIN → Task(signature/ballot) → BallotSignatureTaskExtension → COMMIT.
-   *    BallotSignatureTaskExtension.MutationValid recomputes Digest(BALLOT_HEADER_TID, …)
-   *    from ProposedBallot and must match the AdminSigning.Digest inserted above.
+   * 3a. (62-11, D-08) Read the authority's `ceb` threshold (pre-session, via
+   *     `readAuthorityThreshold`). AT THRESHOLD 1, the old note still applies verbatim: do NOT
+   *     call sign() here — the AdminSigning must stay unsigned until completeSignature
+   *     (Pitfall 1), and no `sign` callback is ever invoked (D-06 self-confirm, byte-identical to
+   *     pre-62-11). ABOVE THRESHOLD 1, the proposer's REAL signature is collected and recorded as
+   *     an OfficerSignature at submit time — before any BEGIN, so no transaction is held across a
+   *     biometric prompt — and the unreachable-at-birth/missing-callback cases are refused before
+   *     any write.
+   * 4. Insert an UNSIGNED AdminSigning('ceb') with the canonical ballot-header digest, INSIDE the
+   *    one write envelope (62-11 moved this inside BEGIN — WR-06 parity, no orphan on failure).
+   *    Uses BALLOT_HEADER_TID (a fixed constant, not allocateTid()) so finalize can reproduce the
+   *    identical digest without reading Tid from any persisted column (Pitfall 2). The
+   *    AdminSigning row itself is STILL a never-updated placeholder at every threshold (999.1
+   *    R-02/R-04) — the proposer's real crypto above threshold 1 is a SEPARATE OfficerSignature
+   *    row, not a mutation of this one.
+   * 5. At threshold 1: Task(signature/ballot) → BallotSignatureTaskExtension, byte-for-byte
+   *    unchanged (D-06 self-confirm). Above threshold 1: `signWithOutcome` records the proposer's
+   *    OfficerSignature, then `fanOutSignatureTasks` creates one open sibling Task for every OTHER
+   *    current `ceb` holder (D-08, D-12 — the ONE shared fan-out helper).
+   *    BallotSignatureTaskExtension.MutationValid recomputes Digest(BALLOT_HEADER_TID, …) from
+   *    ProposedBallot and must match the AdminSigning.Digest inserted above.
    *
-   * D-06: no distinct-signer check — self-confirm is the intended single-authority path.
+   * D-06: at threshold 1, no distinct-signer check — self-confirm is the intended
+   * single-authority path, unchanged by this plan.
    */
-  async submitBallotForConfirmation (ballotId: string): Promise<void> {
+  async submitBallotForConfirmation (ballotId: string, sign?: (digest: Uint8Array) => Promise<Signature>): Promise<void> {
     try {
       // Step 1: read the ProposedBallot row
       const ballotRow = await this.ctx.db
@@ -973,52 +989,141 @@ export class ElectionEngine implements IElectionEngine {
       const taskTid = await allocateTid(this.ctx.db, 'election')
       const taskId = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
 
-      // Step 4: insert UNSIGNED AdminSigning('ceb') — do NOT call sign() (Pitfall 1)
-      // Bind Description and Districts from the ProposedBallot row so submit and
-      // finalize produce byte-identical digests (Pitfall 2).
-      // Bind BALLOT_HEADER_TID as a JS number (never String()) — TAG_INT vs TEXT (Pitfall 2).
-      await this.ctx.db.exec(
-        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
-         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
-         values (:nonce, :authorityId, :adminEffectiveAt, 'ceb',
-                 Digest(:headerTid, :id, :electionId, :authorityId, :description, :districts),
-                 :userId, :signerKey, :signature)`,
-        {
-          nonce,
-          authorityId: this.election.authorityId,
-          adminEffectiveAt,
-          headerTid: BALLOT_HEADER_TID,
-          id: ballotRow.Id,
-          electionId: ballotRow.ElectionId,
-          description: ballotRow.Description,
-          districts: ballotRow.Districts,
-          userId,
-          signerKey,
-          signature: placeholderSig,
-          now,
+      // Step 3a (62-11, D-08): pre-write threshold decisions — nothing written yet. At
+      // threshold 1 this is a no-op (byte-identical to pre-62-11: no sign callback is ever
+      // invoked, D-06 self-confirm). Above threshold 1, the proposer's REAL signature is
+      // collected BEFORE any BEGIN, so no transaction is held open across a biometric prompt.
+      const threshold = await readAuthorityThreshold(this.ctx.db, this.election.authorityId, 'ceb')
+      let proposerSignature: Signature | undefined
+      if (threshold > 1) {
+        if (!sign) {
+          throw new Error(
+            `submitBallotForConfirmation: This authority needs ${threshold} approvals to confirm a ballot, so your signature is required when submitting it.`
+          )
         }
-      )
+        const holders = await listCurrentScopeHolders(this.ctx.db, this.election.authorityId, 'ceb')
+        const proposerIsHolder = userId != null && holders.includes(userId)
+        const possible = holders.filter((h) => h !== userId).length + (proposerIsHolder ? 1 : 0)
+        if (threshold > possible) {
+          throw new Error(
+            `submitBallotForConfirmation: This authority needs ${threshold} approvals to confirm a ballot, but only ${holders.length} officers can approve ballots.`
+          )
+        }
+        const headerDigestRow = await this.ctx.db
+          .prepare('select Digest(:headerTid, :id, :electionId, :authorityId, :description, :districts) as d')
+          .get({
+            headerTid: BALLOT_HEADER_TID,
+            id: ballotRow.Id,
+            electionId: ballotRow.ElectionId,
+            authorityId: this.election.authorityId,
+            description: ballotRow.Description,
+            districts: ballotRow.Districts,
+          })
+        if (!headerDigestRow || headerDigestRow.d == null) {
+          throw new Error('submitBallotForConfirmation: Digest() returned null — crypto plugin not registered?')
+        }
+        proposerSignature = await sign(digestToBytes(headerDigestRow.d))
+        if (proposerSignature.signerUserId !== userId) {
+          throw new Error(
+            'submitBallotForConfirmation: the submitted signature does not belong to the submitting officer'
+          )
+        }
+      }
 
-      // Step 5: atomically insert Task + BallotSignatureTaskExtension
-      // BallotSignatureTaskExtension.MutationValid recomputes Digest(context.Tid, …) from
-      // ProposedBallot and must match AdminSigning.Digest — pass BALLOT_HEADER_TID as context.Tid.
+      // Step 4/5: one write envelope. The AdminSigning insert is now INSIDE the BEGIN (WR-06
+      // parity, 62-11) so a failure anywhere in this envelope leaves no orphan placeholder row.
       await this.ctx.db.exec('BEGIN')
       try {
+        // Step 4: insert UNSIGNED AdminSigning('ceb') — do NOT call sign() here (Pitfall 1); the
+        // row is a never-updated placeholder at every threshold (999.1 R-02/R-04). Bind
+        // Description and Districts from the ProposedBallot row so submit and finalize produce
+        // byte-identical digests (Pitfall 2). Bind BALLOT_HEADER_TID as a JS number (never
+        // String()) — TAG_INT vs TEXT (Pitfall 2).
         await this.ctx.db.exec(
-          `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
-           with context IsMutationValid = true, Tid = :tid
-           values (:id, :userId, 'signature', 'ballot', :nonce, 0)`,
-          { id: taskId, userId, nonce, tid: taskTid }
+          `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
+           with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
+           values (:nonce, :authorityId, :adminEffectiveAt, 'ceb',
+                   Digest(:headerTid, :id, :electionId, :authorityId, :description, :districts),
+                   :userId, :signerKey, :signature)`,
+          {
+            nonce,
+            authorityId: this.election.authorityId,
+            adminEffectiveAt,
+            headerTid: BALLOT_HEADER_TID,
+            id: ballotRow.Id,
+            electionId: ballotRow.ElectionId,
+            description: ballotRow.Description,
+            districts: ballotRow.Districts,
+            userId,
+            signerKey,
+            signature: placeholderSig,
+            now,
+          }
         )
-        await this.ctx.db.exec(
-          `insert into BallotSignatureTaskExtension (TaskId, BallotId)
-           with context Tid = :tid
-           values (:taskId, :ballotId)`,
-          { taskId, ballotId, tid: BALLOT_HEADER_TID }
-        )
+        await this.ctx.db.runDeferredRowConstraints()
+
+        if (threshold <= 1) {
+          // Step 5 (threshold 1, D-06 self-confirm): the existing Task + extension inserts,
+          // byte-for-byte unchanged.
+          // BallotSignatureTaskExtension.MutationValid recomputes Digest(context.Tid, …) from
+          // ProposedBallot and must match AdminSigning.Digest — pass BALLOT_HEADER_TID as context.Tid.
+          await this.ctx.db.exec(
+            `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
+             with context IsMutationValid = true, Tid = :tid
+             values (:id, :userId, 'signature', 'ballot', :nonce, 0)`,
+            { id: taskId, userId, nonce, tid: taskTid }
+          )
+          await this.ctx.db.exec(
+            `insert into BallotSignatureTaskExtension (TaskId, BallotId)
+             with context Tid = :tid
+             values (:taskId, :ballotId)`,
+            { taskId, ballotId, tid: BALLOT_HEADER_TID }
+          )
+        } else {
+          // Step 5 (threshold > 1, D-08/D-12): record the proposer's own signature as an
+          // OfficerSignature (never the initiator — fanOutSignatureTasks excludes them), then fan
+          // out one open sibling Task to every OTHER current ceb holder through the ONE shared
+          // fan-out helper.
+          const outcome = await this.signingEngine.signWithOutcome(nonce, proposerSignature!, { ownsTransaction: false })
+          if (outcome.thresholdReached) {
+            // Cannot happen: threshold > 1 and this is the FIRST (and only) signature recorded
+            // for this nonce. An internal-invariant guard, not a reachable user-facing case.
+            throw new Error('submitBallotForConfirmation: internal invariant violated — a single signature reached a threshold > 1')
+          }
+          await this.ctx.db.runDeferredRowConstraints()
+          await fanOutSignatureTasks(
+            this.ctx,
+            {
+              authorityId: this.election.authorityId,
+              scope: 'ceb',
+              nonce,
+              initiatorUserId: userId,
+              signatureType: 'ballot',
+              taskTid,
+              insertExtension: async (fanOutTaskId: string) => {
+                await this.ctx.db.exec(
+                  `insert into BallotSignatureTaskExtension (TaskId, BallotId)
+                   with context Tid = :tid
+                   values (:taskId, :ballotId)`,
+                  { taskId: fanOutTaskId, ballotId, tid: BALLOT_HEADER_TID }
+                )
+              },
+            },
+            { ownsTransaction: false }
+          )
+        }
+
         await this.ctx.db.exec('COMMIT')
       } catch (err) {
-        await this.ctx.db.exec('ROLLBACK')
+        try {
+          if (!this.ctx.db.getAutocommit()) {
+            await this.ctx.db.exec('ROLLBACK')
+          }
+        } catch {
+          // Swallowed — the handle's transaction state is reported truthfully by
+          // db.getAutocommit() to any caller that checks it; this method does not pretend
+          // recovery succeeded. The ORIGINAL error is what the caller needs to see.
+        }
         throw err
       }
     } catch (err) {
@@ -1027,49 +1132,93 @@ export class ElectionEngine implements IElectionEngine {
   }
 
   /**
-   * D-05 — Withdraw a pending ballot confirmation, deleting the Task and
-   * BallotSignatureTaskExtension so the ProposedBallot becomes editable again.
+   * D-05/D-09 (62-11 rewrite) — Withdraw a pending ballot confirmation. At threshold 1 this
+   * reduces to the pre-62-11 shape (one open Task, deleted by its only owner). Above threshold
+   * 1 it deletes EVERY open sibling Task of an UNREACHED session (D-09, research problem 8) —
+   * never the siblings of a session that has already reached its threshold, and only the
+   * session's ORIGINAL INITIATOR (the proposer who opened the AdminSigning header) may do it.
    *
-   * Delete order: Task first, then BallotSignatureTaskExtension.
-   * `BallotSignatureTaskExtension.DeleteValid` passes when the Task does NOT
-   * exist OR the Task is completed — so deleting the Task first satisfies the
-   * "not exists Task" condition, making the extension delete pass.
+   * Delete order per row: Task first, then BallotSignatureTaskExtension.
+   * `BallotSignatureTaskExtension.DeleteValid` passes when the Task does NOT exist OR the Task
+   * is completed — so deleting the Task first satisfies the "not exists Task" condition, making
+   * the extension delete pass.
    *
-   * The orphaned UNSIGNED AdminSigning row is left in place (harmless — no
-   * AdminSignature will ever reference it once the Task is gone).
+   * The orphaned UNSIGNED AdminSigning row, and the proposer's OfficerSignature (if any, above
+   * threshold 1), are left in place — both tables are InsertOnly, and no AdminSignature will
+   * ever reference an unreached header once every open Task is gone. Extension rows of
+   * COMPLETED siblings are also left in place — they are history (D-07) and are never touched
+   * by this method; only OPEN rows are ever collected or deleted.
    */
   async withdrawBallotConfirmation (ballotId: string): Promise<void> {
     try {
+      // Collect every open sibling row for this ballot BEFORE any write — across every nonce
+      // that still has an open Task (normally one, but this is nonce-scoped rather than
+      // assuming exactly one header exists).
+      const openRows: Array<{ Id: string; SigningNonce: string; InitiatorUserId: string | null }> = []
+      for await (const row of this.ctx.db.eval(
+        `select T.Id, T.SigningNonce, A.UserId as InitiatorUserId
+           from Task T
+             join BallotSignatureTaskExtension B on B.TaskId = T.Id
+             join AdminSigning A on A.Nonce = T.SigningNonce
+           where B.BallotId = :ballotId
+             and T.Type = 'signature'
+             and T.SignatureType = 'ballot'
+             and T.IsCompleted = 0`,
+        { ballotId }
+      )) {
+        openRows.push({
+          Id: row.Id as string,
+          SigningNonce: row.SigningNonce as string,
+          InitiatorUserId: (row.InitiatorUserId as string | null | undefined) ?? null,
+        })
+      }
+
+      if (openRows.length === 0) {
+        // Nothing open to withdraw — a no-op is idempotent.
+        return
+      }
+
+      // D-09: a session that has ALREADY reached its threshold never has its siblings deleted.
+      const distinctNonces = [...new Set(openRows.map((r) => r.SigningNonce))]
+      const reachedNonces = new Set<string>()
+      for (const nonce of distinctNonces) {
+        const reachedRow = await this.ctx.db
+          .prepare('select 1 as x from AdminSignature where SigningNonce = :nonce')
+          .get({ nonce })
+        if (reachedRow) reachedNonces.add(nonce)
+      }
+
+      const unreachedRows = openRows.filter((r) => !reachedNonces.has(r.SigningNonce))
+      if (unreachedRows.length === 0) {
+        throw new Error('withdrawBallotConfirmation: This ballot is already confirmed and can no longer be withdrawn.')
+      }
+
+      // T-62-11-03: only the session's original initiator may withdraw — checked BEFORE any write.
       const userId = this.ctx.user?.id ?? null
-      const tid = await allocateTid(this.ctx.db, 'election')
+      for (const row of unreachedRows) {
+        if (row.InitiatorUserId !== userId) {
+          throw new Error('withdrawBallotConfirmation: Only the officer who submitted this ballot can withdraw it.')
+        }
+      }
 
       await this.ctx.db.exec('BEGIN')
       try {
-        // Delete Task first (makes DeleteValid pass on the extension — "not exists Task")
-        await this.ctx.db.exec(
-          `delete from Task
-           where Id in (
-             select T.Id from Task T
-               join BallotSignatureTaskExtension B on B.TaskId = T.Id
-               where B.BallotId = :ballotId
-                 and T.UserId = :userId
-                 and T.Type = 'signature'
-                 and T.SignatureType = 'ballot'
-                 and T.IsCompleted = 0
-           )`,
-          { ballotId, userId }
-        )
-
-        // Delete extension (now passes DeleteValid because Task no longer exists)
-        await this.ctx.db.exec(
-          `delete from BallotSignatureTaskExtension
-           where BallotId = :ballotId`,
-          { ballotId, tid }
-        )
-
+        for (const row of unreachedRows) {
+          // Delete Task first (makes DeleteValid pass on the extension — "not exists Task")
+          await this.ctx.db.exec('delete from Task where Id = :id', { id: row.Id })
+          // Delete extension (now passes DeleteValid because the Task no longer exists)
+          await this.ctx.db.exec('delete from BallotSignatureTaskExtension where TaskId = :id', { id: row.Id })
+          await this.ctx.db.runDeferredRowConstraints()
+        }
         await this.ctx.db.exec('COMMIT')
       } catch (err) {
-        await this.ctx.db.exec('ROLLBACK')
+        try {
+          if (!this.ctx.db.getAutocommit()) {
+            await this.ctx.db.exec('ROLLBACK')
+          }
+        } catch {
+          // Swallowed — see submitBallotForConfirmation's matching comment.
+        }
         throw err
       }
     } catch (err) {
@@ -1080,7 +1229,13 @@ export class ElectionEngine implements IElectionEngine {
   /**
    * D-05/D-09 — Report the lock and confirmed state of a ProposedBallot.
    *
-   * `locked` = a pending (IsCompleted=0) ballot Task exists.
+   * `locked` = a pending (IsCompleted=0) ballot Task exists for a session that has NOT yet
+   * reached its threshold. 62-11 (D-09): above threshold 1, open D-09 siblings of an ALREADY
+   * reached (confirmed) session must not read as locked — the `not exists AdminSignature`
+   * clause below is what keeps a confirmed ballot's still-open siblings from flipping
+   * `locked` back to `true`. At threshold 1 this clause is a no-op (a confirmed ballot there
+   * never has an open Task left — the session's only Task was completed by the single signer),
+   * so this is purely additive, not a behavior change at threshold 1.
    * `confirmed` = a finalized Ballot row exists for this id.
    */
   async getBallotConfirmationState (ballotId: string): Promise<{ locked: boolean; confirmed: boolean }> {
@@ -1092,7 +1247,8 @@ export class ElectionEngine implements IElectionEngine {
              where B.BallotId = :ballotId
                and T.Type = 'signature'
                and T.SignatureType = 'ballot'
-               and T.IsCompleted = 0`
+               and T.IsCompleted = 0
+               and not exists (select 1 from AdminSignature S where S.SigningNonce = T.SigningNonce)`
         )
         .get({ ballotId })
 
