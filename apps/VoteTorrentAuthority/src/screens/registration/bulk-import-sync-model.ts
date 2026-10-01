@@ -24,7 +24,7 @@ import type { TransportSyncState } from "../../components/TransportStatusCard";
  * 62-20 this file deliberately attached no peer binding. **62-21 is the plan that changes that**:
  * per D-28, the `'peer'` binding IS attached in every build (no `__DEV__` gate, no configuration —
  * see `attach-peer-sync-binding.ts`), and per D-31 its card (`PeerTransportStatusCard.tsx`, which
- * replaces `ExperimentalTransportStatusCard`) reports real numeric pending/synced/failed counts
+ * replaces the retired `Experimental`-prefixed peer card) reports real numeric pending/synced/failed counts
  * read from the P2P transport's own reports. The peer leg itself remains code-complete and
  * unverified on devices (D-23, proof debt against P2P-11) — attaching it unconditionally and
  * showing real counts does not change that; `PeerTransportStatusCard`'s hardcoded warning frame
@@ -50,7 +50,7 @@ import type { TransportSyncState } from "../../components/TransportStatusCard";
  * **48-23, 2026-08-06: `'peer'` is now admitted.** This member's addition IS that out-loud step.
  * The peer-cluster leg it routes to is **code-complete, unverified** (D-11) — admitting the id at
  * this seam does not change that. Through 62-20 the peer card showed no state at all
- * (`ExperimentalTransportStatusCard`, `disabled?`/`onTrySync` only). **62-21** replaces that card
+ * (the retired `Experimental`-prefixed peer card, `disabled?`/`onTrySync` only). **62-21** replaces that card
  * with `PeerTransportStatusCard` (D-31), which DOES render real numeric counts — but every count,
  * the caveat, the heading and the border are still structurally fixed by the card itself, never by
  * a prop a caller controls (see that component's own doc comment).
@@ -255,7 +255,7 @@ export function resolveTransportCardState(entry: TransportCardEntry): TransportC
  * choice: the officer saw a card and a press that reported nothing.
  *
  * What this widening does NOT do: it softens the D-11 posture nowhere. The peer card still carries
- * no state channel at all (`ExperimentalTransportStatusCardProps` is exactly
+ * no state channel at all (its props type was exactly
  * `{disabled?, onTrySync}`) and still renders its unconditional warning treatment; this function
  * still reads ONLY `errorItemIds`, never `imported`/`pending`/`syncedAt`; and a caught transport
  * error's `message` is never placed into a report in the first place
