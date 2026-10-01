@@ -23,6 +23,8 @@ import { SignatureTaskFooter } from "../../components/SignatureTaskFooter";
 import type { RootStackParamList } from "../../navigation/types";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
+import { resolveKeyholderKeyVault } from "../../engines/keyholder-vault";
+import { acceptKeyholderInvitation } from "./keyholder-accept";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
@@ -47,6 +49,7 @@ export function KeyholderInvitationScreen() {
 	const [shareText, setShareText] = useState<string>("");
 	const [errorMessage, setErrorMessage] = useState<string>("");
 	const [isSending, setIsSending] = useState(false);
+	const [isAccepting, setIsAccepting] = useState(false);
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Accept-mode paste field (D-06)
@@ -154,8 +157,13 @@ export function KeyholderInvitationScreen() {
 		}
 	};
 
-	// D-06: accept — invitee pastes the share text; screen reconstructs ephemeral invitePrivate.
+	// D-06/D-21/D-26: accept — invitee pastes the share text; the screen reconstructs the
+	// ephemeral invitePrivate, then acceptKeyholderInvitation provisions a FRESH keyholder
+	// identity (D-21) and passes its signed binding (D-26) to respondToInvite in one call. The
+	// officer's device key is never used for a keyholder accept.
 	const onAccept = async () => {
+		if (isAccepting) return;
+		setIsAccepting(true);
 		try {
 			const engine = await getEngine<IInvitationEngine>("invitations");
 			let invitePrivate: string | undefined;
@@ -167,13 +175,19 @@ export function KeyholderInvitationScreen() {
 					invitePrivate = pastedInvite.trim();
 				}
 			}
-			// T-21-11-03: accept calls the SIGNED respondToInvite path (D-09).
-			await engine.respondToInvite(invitationId ?? "", true, invitePrivate);
+			await acceptKeyholderInvitation({ invitationEngine: engine, vault: resolveKeyholderKeyVault() }, invitationId ?? "", invitePrivate);
 			// GAP-2: navigate ONLY on success — the InviteResult is now written.
 			navigation.goBack();
 		} catch (error) {
 			console.warn("Error responding to invite:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const code = (error as { code?: unknown } | undefined)?.code;
+			if (code === "auth-denied") {
+				setErrorMessage(t("deviceSigningErrorGeneric"));
+			} else {
+				setErrorMessage(error instanceof Error ? error.message : String(error));
+			}
+		} finally {
+			setIsAccepting(false);
 		}
 	};
 
@@ -287,6 +301,7 @@ export function KeyholderInvitationScreen() {
 				onReject={onDecline}
 				acceptLabel={t("accept")}
 				rejectLabel={t("decline")}
+				disabled={isAccepting}
 			/>
 		</KeyboardAvoidingScreen>
 	);

@@ -1,0 +1,68 @@
+/**
+ * keyholder-accept.ts — Phase 62 Plan 26 (D-21, D-26). Orchestrates a keyholder invite accept:
+ * provision a fresh identity, pass it to 62-02's `respondToInvite`, and reconcile before ever
+ * discarding the provisioned keys.
+ *
+ * Four points:
+ *  1. The provisioning contract (62-02): `respondToInvite`'s sixth argument
+ *     (`KeyholderAcceptProvisioning`) carries the fresh identity's public signing key, its DKG
+ *     public key and a `sign` callback. The engine signs the binding digest through that callback
+ *     BEFORE opening its accept transaction, and writes `InviteResult`, `User`, `UserKey`,
+ *     `Keyholder` and `KeyholderDkgBinding` together, in one commit.
+ *  2. `invokedId` (the engine's fifth argument) is the APP-MINTED userId from
+ *     `provisionKeyholderIdentity` — never the officer's own id. Passing the officer's id collides
+ *     on the `User` primary key and the whole accept rejects (D-21: the officer's device key is
+ *     never used for a keyholder accept).
+ *  3. The reconcile rule: on an error from `respondToInvite`, re-read the invite. If it shows this
+ *     accept actually committed (an orphaned-keys-committed-keyholder race), the keys are KEPT and
+ *     this call reports success — never orphan a committed keyholder without its keys. If the
+ *     re-read shows no commit, the freshly-minted keys are inert (never bound to a Keyholder row)
+ *     and are discarded. If the re-read itself fails, the outcome is UNKNOWN — discard nothing,
+ *     and rethrow the original error (the keys might belong to a keyholder that did commit).
+ *  4. D-21: every accept provisions a brand-new identity; this module never touches the officer's
+ *     device signing key.
+ */
+
+import type { IInvitationEngine } from '@votetorrent/vote-core';
+import type { IKeyVault } from '@votetorrent/vote-engine/rn';
+import { discardKeyholderIdentity, provisionKeyholderIdentity } from '../../engines/keyholder-identity';
+import type { KeyVaultStorage } from '../../engines/key-vault';
+
+export interface KeyholderAcceptDeps {
+	invitationEngine: IInvitationEngine;
+	vault: IKeyVault;
+	storage?: KeyVaultStorage;
+}
+
+export async function acceptKeyholderInvitation(
+	deps: KeyholderAcceptDeps,
+	invitationId: string,
+	invitePrivate: string | undefined
+): Promise<{ userId: string }> {
+	const identity = await provisionKeyholderIdentity({ vault: deps.vault, storage: deps.storage }, invitationId);
+
+	try {
+		try {
+			await deps.invitationEngine.respondToInvite(invitationId, true, invitePrivate, undefined, identity.userId, identity.provisioning);
+			return { userId: identity.userId };
+		} catch (originalError) {
+			let reread: Awaited<ReturnType<IInvitationEngine['getKeyholderInvite']>>;
+			try {
+				reread = await deps.invitationEngine.getKeyholderInvite(invitationId);
+			} catch {
+				// The outcome is UNKNOWN — the keys might belong to a keyholder that DID commit.
+				// Discard nothing; surface the original error.
+				throw originalError;
+			}
+			if (reread?.result?.isAccepted === true && reread.result.invokedId === identity.userId) {
+				// The accept actually committed despite the thrown error — never orphan a
+				// committed keyholder's keys.
+				return { userId: identity.userId };
+			}
+			await discardKeyholderIdentity({ vault: deps.vault, storage: deps.storage }, identity.userId).catch(() => undefined);
+			throw originalError;
+		}
+	} finally {
+		identity.release();
+	}
+}
