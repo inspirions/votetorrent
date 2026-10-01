@@ -529,7 +529,12 @@ describe('SigningEngine', () => {
       expect(Number(adminSig?.n), 'no AdminSignature row while threshold=2 is unmet').to.equal(0)
     })
 
-    it('threshold 2: completes once a second distinct officer signs (threshold=2 on scope "mel")', async () => {
+    // 62-07 (D-08/D-12, Pitfall 5): at threshold > 1, sign() counts only DISTINCT signers who
+    // CURRENTLY hold the session's scope. 'user-2-threshold' is neither a User nor an Officer, so
+    // this second signature is recorded (OfficerSignature row count 2) but never moves the
+    // qualifying count — the session stays unreached. The positive two-holder completion case
+    // (a REAL current scope-holder as the second signer) now lives in threshold-fanout.spec.ts T1.
+    it('threshold 2: a second signature from a NON-holder does NOT complete (holder-only counting, 62-07)', async () => {
       const { ctx, user } = await createPopulatedContext(thresholdPolicies)
       const engine = new SigningEngine(ctx)
       const authRow = await ctx.db.prepare('select Id from Authority limit 1').get({})
@@ -548,7 +553,7 @@ describe('SigningEngine', () => {
         .get({ nonce })
       const sig2 = signTestDigestWithFreshKey('user-2-threshold', adminSigningDigestRow!.Digest as string)
       const secondResult = await engine.sign(nonce, sig2)
-      expect(secondResult, 'sign() must return true once threshold=2 is met').to.equal(true)
+      expect(secondResult, 'sign() must NOT return true for a non-holder second signer').to.equal(false)
 
       const officerCount = await ctx.db
         .prepare('select count(*) as n from OfficerSignature where SigningNonce = :nonce')
@@ -558,7 +563,7 @@ describe('SigningEngine', () => {
       const adminSig = await ctx.db
         .prepare('select count(*) as n from AdminSignature where SigningNonce = :nonce')
         .get({ nonce })
-      expect(Number(adminSig?.n), 'exactly 1 AdminSignature row once threshold=2 is met').to.equal(1)
+      expect(Number(adminSig?.n), 'no AdminSignature row — the non-holder signature never qualified').to.equal(0)
     })
 
     it('threshold 1: completes after a single OfficerSignature (threshold=1 on scope "rad")', async () => {
@@ -1167,8 +1172,17 @@ function makeStubSigningEngine (): ISigningEngine {
     async sign (_nonce: string, _signature: Signature): Promise<boolean> {
       return false
     },
+    async signWithOutcome (_nonce: string, _signature: Signature) {
+      return { thresholdReached: false, crossedNow: false }
+    },
+    async signDerived (_nonce: string, _signature: Signature, _headerNonce: string) {
+      return { thresholdReached: false, crossedNow: false }
+    },
+    async getSigningStatus (_nonce: string) {
+      return null
+    },
     async startSigningSession (_authorityId: string, _digestArgs: AdminDigestArgs | null, _scope: Scope, _signature: Signature, _nonce?: string) {
-      return { nonce: _nonce ?? 'stub-nonce', thresholdReached: false }
+      return { nonce: _nonce ?? 'stub-nonce', thresholdReached: false, crossedNow: false }
     },
     buildSign () {
       return new SigningSignBuilder(this)
