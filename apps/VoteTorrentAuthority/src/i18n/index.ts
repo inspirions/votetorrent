@@ -916,6 +916,132 @@ const resources = {
 			bulkImportSyncNowButton: 'Sync Now',
 			bulkImportSyncP2pTryButton: 'Try Peer Sync (Experimental)',
 			bulkImportSyncErrorsSectionTitle: 'Sync Errors',
+			// 62-UI-SPEC Surface 1 — peerSyncCard* group (D-31). Consumer: 62-21.
+			peerSyncCardHeading: 'Peer-to-Peer (Unverified on Devices)',
+			peerSyncCardCaveat:
+				'This sync method is code-complete but peer delivery not yet proven on devices. Use Filesystem or REST sync for dependable results.',
+			peerSyncCardPendingLabel: '{{count}} pending',
+			peerSyncCardSyncedLabel: '{{count}} synced',
+			peerSyncCardFailedLabel: '{{count}} failed',
+			peerSyncCardTryButton: 'Try Peer Sync (Unverified)',
+			// 62-UI-SPEC Surface 1 — registrationBridgeConfig* group (D-29). Consumer: 62-25.
+			registrationBridgeConfigHeading: 'Registration Bridge (REST)',
+			registrationBridgeConfigUrlLabel: 'Bridge URL',
+			registrationBridgeConfigUrlPlaceholder: 'https://your-bridge.example.org',
+			registrationBridgeConfigSaveButton: 'Save Bridge URL',
+			registrationBridgeConfigInvalidUrl: 'Enter a valid https URL',
+			registrationBridgeConfigSavedConfirm: 'Bridge URL saved',
+			registrationBridgeConfigUnsetHint: 'Save a bridge URL above to turn on REST sync.',
+			registrationBridgeConfigSaveError: 'Could not save the bridge URL. Try again.',
+			registrationBridgeConfigCoSignRequired:
+				'This authority requires more than one officer to approve this change. Saving the bridge URL is not supported at that setting, so nothing was saved.',
+			// 62-UI-SPEC Surface 2 — networkFounding* group (D-36). Consumer: 62-23.
+			networkFoundingExportButton: 'Share Network',
+			networkFoundingExportConfirmHeading: 'Share this network with another device?',
+			networkFoundingExportConfirmBody:
+				"This creates a file containing this network's founding records, signed by its original officers. Anyone who imports it joins the exact same network.",
+			networkFoundingExportShareButton: 'Share File',
+			networkFoundingExportError: 'Could not create the network file. Try again.',
+			networkFoundingImportButton: 'Import Network',
+			networkFoundingImportScreenTitle: 'Import Founding Bundle',
+			networkFoundingImportChooseFileButton: 'Choose File',
+			networkFoundingImportValidating: 'Checking signatures…',
+			networkFoundingImportInvalidSignature:
+				"This file's signatures don't check out. It may be corrupted or tampered with.",
+			networkFoundingImportAlreadyJoined: 'You already have this network.',
+			networkFoundingImportSuccess: 'Network joined',
+			networkFoundingImportGenericError: 'Could not import this file.',
+			networkFoundingExportCancelButton: "Don't Share",
+			networkFoundingExportGenerating: 'Preparing the network file…',
+			networkFoundingImportViewNetworkButton: 'View Network',
+			networkFoundingImportChooseAnotherFileButton: 'Choose a Different File',
+			// 62-UI-SPEC Surface 3 — possibleDuplicate* group (D-44). Consumer: 62-27.
+			possibleDuplicateHeading: 'This may be a duplicate request',
+			possibleDuplicateBody:
+				'Another pending request from {{name}} looks similar. Deciding this one will close the other as a duplicate.',
+			possibleDuplicateViewOtherButton: 'View Other Request',
+			possibleDuplicateClosedLabel: 'Closed as a duplicate of another request',
+			possibleDuplicateCheckFailed:
+				'Could not check for duplicate requests. Approval is paused until this check works.',
+			// 62-UI-SPEC Surface 4 — associationApproval* group (D-41, D-45). Consumer: 62-27.
+			associationApprovalScreenTitle: 'Device Change Request',
+			associationApprovalNewDeviceLabel: 'New device',
+			associationApprovalExistingDeviceLabel: 'Current device (will be retired)',
+			associationApprovalCodeMatchedBadge: 'Matched by registration code',
+			associationApprovalIdentityMatchedBanner:
+				"This voter entered their identity details instead of a code. Compare them against the registrant's record below before approving.",
+			associationApprovalApproveButton: 'Approve New Device',
+			associationApprovalApproveConfirmHeading: 'Retire the current device?',
+			// Deliberate deviation from the 62-UI-SPEC row (62-18: retirement follows the new
+			// device's attestation, not the approve action, so "immediately" would be false).
+			associationApprovalApproveConfirmBody:
+				"Approving this request retires {{registrantName}}'s current device as soon as the new device finishes setting up. That device will no longer be able to vote. This cannot be undone.",
+			associationApprovalRejectButton: 'Reject Request',
+			associationApprovalApproveConfirmButton: 'Approve and Retire Device',
+			associationApprovalKeepReviewingButton: 'Keep Reviewing',
+			associationApprovalLoadError: 'Could not load this device change request. Try again.',
+			associationApprovalDecisionError: 'Could not record your decision. Try again.',
+			associationApprovalQueueRowTitle: 'Device change: {{registrantName}}',
+			associationApprovalCodeUnmatchedBanner:
+				'The registration code this voter entered does not match any registrant. You can only reject this request.',
+			associationApprovalCodeUnverifiableBanner:
+				"The registration code could not be checked against the registrant's record. You can only reject this request.",
+			associationApprovalNoEvidenceBanner:
+				'This voter sent neither a registration code nor identity details. You can only reject this request.',
+			associationApprovalCandidatesHeading: 'Possible registrants',
+			associationApprovalEnteredFieldsHeading: 'Entered by the voter',
+			associationApprovalRegistrantRecordHeading: "Registrant's record",
+			associationApprovalCoSignRequired:
+				'This authority needs more than one officer to approve device changes, and co-signing is not available for them yet.',
+			// 62-UI-SPEC Surface 4 settings toggle — registrationPolicyReassociation* group (D-46). Consumer: 62-27.
+			registrationPolicyReassociationHeading: 'Device Change Requests',
+			registrationPolicyReassociationManual: 'Review each one manually',
+			registrationPolicyReassociationAutomatic: 'Process automatically, like a first device',
+			registrationPolicyReassociationDefaultNote: 'Manual review is recommended and is the default.',
+			registrationPolicyReassociationSaveError: 'Could not save this setting. Try again.',
+			registrationPolicyReassociationCoSignRequired:
+				'This authority needs more than one officer to change this setting, and co-signing is not available for it yet.',
+			registrationPolicyReassociationLoadError: 'Could not read this setting. Try again later.',
+			// 62-UI-SPEC Surface 5 — signatureTaskThreshold* group. Consumers: 62-12, 62-27.
+			signatureTaskThresholdProgress: '{{signed}} of {{threshold}} signatures',
+			signatureTaskThresholdReached: 'Threshold reached — more signatures can still be added',
+			signatureTaskThresholdVoteRecorded: 'Your decision is recorded. Waiting for other officers.',
+			signatureTaskThresholdUnreachable:
+				'Too few officers can still approve this request, so it is refused.',
+			// 62-UI-SPEC Surface 6 — keyholderDkg* group. Consumer: 62-26.
+			keyholderDkgStatusPending: 'Waiting for other keyholders to join',
+			keyholderDkgStatusInProgress: 'Generating key material…',
+			keyholderDkgStatusComplete: 'Key generation complete',
+			keyholderDkgStatusComplaint:
+				"A problem was found with another keyholder's data. Generation will restart.",
+			keyholderDkgStatusHeading: 'Key Generation',
+			// 62-UI-SPEC Surface 6 — keyholderRelease[A-Z]* group (bare `keyholderRelease` above is
+			// pre-existing and NOT part of this group). Consumer: 62-29.
+			keyholderReleaseScreenTitle: 'Release Your Key Share',
+			keyholderReleaseBody:
+				'This election has entered the key release period. Releasing your share helps reconstruct the decryption key once enough keyholders have released theirs.',
+			keyholderReleaseButton: 'Release My Share',
+			keyholderReleaseSuccess: 'Your share has been released',
+			keyholderReleaseError: 'Could not release your share. Try again.',
+			keyholderReleaseInProgress: 'Releasing your share…',
+			// officerIntakeKey* group — gap-fill, not in 62-UI-SPEC (D-04 recipient key). Consumer: 62-21.
+			officerIntakeKeyHeading: 'Encrypted Intake',
+			officerIntakeKeyBody:
+				"Register an encryption key so voters' registration details are encrypted to you. The private key stays on this device.",
+			officerIntakeKeyEnableButton: 'Enable Encrypted Intake',
+			officerIntakeKeyEnabledConfirm: 'Encrypted intake enabled',
+			officerIntakeKeyError: 'Could not enable encrypted intake. Try again.',
+			// registrationContent* group — gap-fill (D-49 sealed registration content, 62-31). Consumer: 62-27.
+			registrationContentNotRecipient:
+				'This request was sealed before this device could read it. Another officer can review it.',
+			registrationContentNoKey: 'Turn on encrypted intake on this device to read requests.',
+			registrationContentUnreadable: 'This request could not be read on this device.',
+			registrationContentTampered:
+				"This request's contents do not match what the applicant signed. It cannot be approved.",
+			// registrantPrivate* group — gap-fill (D-51 late-officer residual). Consumer: 62-32.
+			registrantPrivateNotRecipient:
+				'These private details were sealed before you became an officer, so they cannot be shown on this device.',
+			registrantPrivateUnreadable: 'These private details could not be read on this device.',
 		},
 	},
 	es: {
@@ -1813,6 +1939,132 @@ const resources = {
 			bulkImportSyncNowButton: 'Sincronizar Ahora',
 			bulkImportSyncP2pTryButton: 'Probar Sincronización P2P (Experimental)',
 			bulkImportSyncErrorsSectionTitle: 'Errores de Sincronización',
+			// 62-UI-SPEC Surface 1 — peerSyncCard* group (D-31). Consumer: 62-21.
+			peerSyncCardHeading: 'Entre Pares (No Verificado en Dispositivos)',
+			peerSyncCardCaveat:
+				'Este método de sincronización está completo en código, pero la entrega entre pares aún no se ha comprobado en dispositivos. Usa la sincronización por Sistema de Archivos o REST para resultados confiables.',
+			peerSyncCardPendingLabel: '{{count}} pendientes',
+			peerSyncCardSyncedLabel: '{{count}} sincronizadas',
+			peerSyncCardFailedLabel: '{{count}} fallidas',
+			peerSyncCardTryButton: 'Probar Sincronización P2P (No Verificado)',
+			// 62-UI-SPEC Surface 1 — registrationBridgeConfig* group (D-29). Consumer: 62-25.
+			registrationBridgeConfigHeading: 'Puente de Registro (REST)',
+			registrationBridgeConfigUrlLabel: 'URL del Puente',
+			registrationBridgeConfigUrlPlaceholder: 'https://tu-puente.ejemplo.org',
+			registrationBridgeConfigSaveButton: 'Guardar URL del Puente',
+			registrationBridgeConfigInvalidUrl: 'Introduce una URL https válida',
+			registrationBridgeConfigSavedConfirm: 'URL del puente guardada',
+			registrationBridgeConfigUnsetHint: 'Guarda una URL del puente arriba para activar la sincronización REST.',
+			registrationBridgeConfigSaveError: 'No se pudo guardar la URL del puente. Inténtalo de nuevo.',
+			registrationBridgeConfigCoSignRequired:
+				'Esta autoridad requiere que más de un funcionario apruebe este cambio. Guardar la URL del puente no es compatible con esa configuración, así que no se guardó nada.',
+			// 62-UI-SPEC Surface 2 — networkFounding* group (D-36). Consumer: 62-23.
+			networkFoundingExportButton: 'Compartir Red',
+			networkFoundingExportConfirmHeading: '¿Compartir esta red con otro dispositivo?',
+			networkFoundingExportConfirmBody:
+				'Esto crea un archivo con los registros fundacionales de esta red, firmados por sus funcionarios originales. Quien lo importe se unirá exactamente a la misma red.',
+			networkFoundingExportShareButton: 'Compartir Archivo',
+			networkFoundingExportError: 'No se pudo crear el archivo de la red. Inténtalo de nuevo.',
+			networkFoundingImportButton: 'Importar Red',
+			networkFoundingImportScreenTitle: 'Importar Paquete Fundacional',
+			networkFoundingImportChooseFileButton: 'Elegir Archivo',
+			networkFoundingImportValidating: 'Verificando firmas…',
+			networkFoundingImportInvalidSignature:
+				'Las firmas de este archivo no son válidas. Puede estar dañado o alterado.',
+			networkFoundingImportAlreadyJoined: 'Ya tienes esta red.',
+			networkFoundingImportSuccess: 'Red unida',
+			networkFoundingImportGenericError: 'No se pudo importar este archivo.',
+			networkFoundingExportCancelButton: 'No Compartir',
+			networkFoundingExportGenerating: 'Preparando el archivo de la red…',
+			networkFoundingImportViewNetworkButton: 'Ver Red',
+			networkFoundingImportChooseAnotherFileButton: 'Elegir Otro Archivo',
+			// 62-UI-SPEC Surface 3 — possibleDuplicate* group (D-44). Consumer: 62-27.
+			possibleDuplicateHeading: 'Esto podría ser una solicitud duplicada',
+			possibleDuplicateBody:
+				'Otra solicitud pendiente de {{name}} parece similar. Decidir esta cerrará la otra como duplicada.',
+			possibleDuplicateViewOtherButton: 'Ver Otra Solicitud',
+			possibleDuplicateClosedLabel: 'Cerrada como duplicada de otra solicitud',
+			possibleDuplicateCheckFailed:
+				'No se pudo comprobar si hay solicitudes duplicadas. La aprobación queda en pausa hasta que esta comprobación funcione.',
+			// 62-UI-SPEC Surface 4 — associationApproval* group (D-41, D-45). Consumer: 62-27.
+			associationApprovalScreenTitle: 'Solicitud de Cambio de Dispositivo',
+			associationApprovalNewDeviceLabel: 'Dispositivo nuevo',
+			associationApprovalExistingDeviceLabel: 'Dispositivo actual (se retirará)',
+			associationApprovalCodeMatchedBadge: 'Coincide por código de registro',
+			associationApprovalIdentityMatchedBanner:
+				'Este votante introdujo sus datos de identidad en lugar de un código. Compáralos con el registro del registrante antes de aprobar.',
+			associationApprovalApproveButton: 'Aprobar Dispositivo Nuevo',
+			associationApprovalApproveConfirmHeading: '¿Retirar el dispositivo actual?',
+			// Deliberate deviation from the 62-UI-SPEC row (62-18: retirement follows the new
+			// device's attestation, not the approve action, so "de inmediato" would be false).
+			associationApprovalApproveConfirmBody:
+				'Aprobar esta solicitud retira el dispositivo actual de {{registrantName}} en cuanto el nuevo dispositivo termine de configurarse. Ese dispositivo ya no podrá votar. Esta acción no se puede deshacer.',
+			associationApprovalRejectButton: 'Rechazar Solicitud',
+			associationApprovalApproveConfirmButton: 'Aprobar y Retirar Dispositivo',
+			associationApprovalKeepReviewingButton: 'Seguir Revisando',
+			associationApprovalLoadError: 'No se pudo cargar esta solicitud de cambio de dispositivo. Inténtalo de nuevo.',
+			associationApprovalDecisionError: 'No se pudo registrar tu decisión. Inténtalo de nuevo.',
+			associationApprovalQueueRowTitle: 'Cambio de dispositivo: {{registrantName}}',
+			associationApprovalCodeUnmatchedBanner:
+				'El código de registro que introdujo este votante no coincide con ningún registrante. Solo puedes rechazar esta solicitud.',
+			associationApprovalCodeUnverifiableBanner:
+				'No se pudo comprobar el código de registro con el registro del registrante. Solo puedes rechazar esta solicitud.',
+			associationApprovalNoEvidenceBanner:
+				'Este votante no envió ni un código de registro ni datos de identidad. Solo puedes rechazar esta solicitud.',
+			associationApprovalCandidatesHeading: 'Posibles registrantes',
+			associationApprovalEnteredFieldsHeading: 'Introducido por el votante',
+			associationApprovalRegistrantRecordHeading: 'Registro del registrante',
+			associationApprovalCoSignRequired:
+				'Esta autoridad necesita a más de un funcionario para aprobar cambios de dispositivo, y la firma conjunta aún no está disponible para ellos.',
+			// 62-UI-SPEC Surface 4 settings toggle — registrationPolicyReassociation* group (D-46). Consumer: 62-27.
+			registrationPolicyReassociationHeading: 'Solicitudes de Cambio de Dispositivo',
+			registrationPolicyReassociationManual: 'Revisar cada una manualmente',
+			registrationPolicyReassociationAutomatic: 'Procesar automáticamente, como un primer dispositivo',
+			registrationPolicyReassociationDefaultNote: 'Se recomienda la revisión manual y es la opción predeterminada.',
+			registrationPolicyReassociationSaveError: 'No se pudo guardar esta configuración. Inténtalo de nuevo.',
+			registrationPolicyReassociationCoSignRequired:
+				'Esta autoridad necesita a más de un funcionario para cambiar esta configuración, y la firma conjunta aún no está disponible para ella.',
+			registrationPolicyReassociationLoadError: 'No se pudo leer esta configuración. Inténtalo más tarde.',
+			// 62-UI-SPEC Surface 5 — signatureTaskThreshold* group. Consumers: 62-12, 62-27.
+			signatureTaskThresholdProgress: '{{signed}} de {{threshold}} firmas',
+			signatureTaskThresholdReached: 'Umbral alcanzado — aún se pueden añadir más firmas',
+			signatureTaskThresholdVoteRecorded: 'Tu decisión quedó registrada. Esperando a otros funcionarios.',
+			signatureTaskThresholdUnreachable:
+				'Ya no quedan suficientes funcionarios que puedan aprobar esta solicitud, así que queda rechazada.',
+			// 62-UI-SPEC Surface 6 — keyholderDkg* group. Consumer: 62-26.
+			keyholderDkgStatusPending: 'Esperando a que otros custodios se unan',
+			keyholderDkgStatusInProgress: 'Generando material de clave…',
+			keyholderDkgStatusComplete: 'Generación de clave completa',
+			keyholderDkgStatusComplaint:
+				'Se encontró un problema con los datos de otro custodio. La generación se reiniciará.',
+			keyholderDkgStatusHeading: 'Generación de Clave',
+			// 62-UI-SPEC Surface 6 — keyholderRelease[A-Z]* group (bare `keyholderRelease` above is
+			// pre-existing and NOT part of this group). Consumer: 62-29.
+			keyholderReleaseScreenTitle: 'Liberar tu Parte de la Clave',
+			keyholderReleaseBody:
+				'Esta elección ha entrado en el período de liberación de claves. Liberar tu parte ayuda a reconstruir la clave de descifrado una vez que suficientes custodios hayan liberado la suya.',
+			keyholderReleaseButton: 'Liberar mi Parte',
+			keyholderReleaseSuccess: 'Tu parte ha sido liberada',
+			keyholderReleaseError: 'No se pudo liberar tu parte. Inténtalo de nuevo.',
+			keyholderReleaseInProgress: 'Liberando tu parte…',
+			// officerIntakeKey* group — gap-fill, not in 62-UI-SPEC (D-04 recipient key). Consumer: 62-21.
+			officerIntakeKeyHeading: 'Recepción Cifrada',
+			officerIntakeKeyBody:
+				'Registra una clave de cifrado para que los datos de registro de los votantes se cifren para ti. La clave privada permanece en este dispositivo.',
+			officerIntakeKeyEnableButton: 'Activar Recepción Cifrada',
+			officerIntakeKeyEnabledConfirm: 'Recepción cifrada activada',
+			officerIntakeKeyError: 'No se pudo activar la recepción cifrada. Inténtalo de nuevo.',
+			// registrationContent* group — gap-fill (D-49 sealed registration content, 62-31). Consumer: 62-27.
+			registrationContentNotRecipient:
+				'Esta solicitud se selló antes de que este dispositivo pudiera leerla. Otro funcionario puede revisarla.',
+			registrationContentNoKey: 'Activa la recepción cifrada en este dispositivo para leer las solicitudes.',
+			registrationContentUnreadable: 'No se pudo leer esta solicitud en este dispositivo.',
+			registrationContentTampered:
+				'El contenido de esta solicitud no coincide con lo que firmó el solicitante. No se puede aprobar.',
+			// registrantPrivate* group — gap-fill (D-51 late-officer residual). Consumer: 62-32.
+			registrantPrivateNotRecipient:
+				'Estos datos privados se sellaron antes de que fueras funcionario, así que no se pueden mostrar en este dispositivo.',
+			registrantPrivateUnreadable: 'No se pudieron leer estos datos privados en este dispositivo.',
 		},
 	},
 };
