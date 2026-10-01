@@ -12,6 +12,10 @@
 import { expect } from 'chai'
 import type {
   RegistrationRequestInit,
+  AssociationRequestInit,
+  AssociationAttestationAnswer,
+  AssociationIdentityField,
+  DeviceAttestation,
   Scope
 } from '@votetorrent/vote-core'
 import { sealToRecipients, serializeEnvelope } from '../src/crypto/index.js'
@@ -21,6 +25,8 @@ import {
   REGISTRATION_DUPLICATE_CLOSED_REASON
 } from '../src/registration/transport/p2p-registration-transport.js'
 import type { RegistrationStrandPort, P2pRegistrationTransportOptions } from '../src/registration/transport/p2p-registration-transport.js'
+import { P2pAssociationTransport } from '../src/association/transport/p2p-association-transport.js'
+import type { AssociationStrandPort, P2pAssociationTransportOptions } from '../src/association/transport/p2p-association-transport.js'
 import { P2pStagingError, STAGING_CURSOR_MAX_ATTEMPTS } from '../src/registration/transport/p2p-staging-seam.js'
 import type { StagingSealer, StagingOpener, StagingDecisionSigner } from '../src/registration/transport/p2p-staging-seam.js'
 import { createP2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
@@ -99,6 +105,68 @@ describe('P2P staging transports', function () {
 
   async function regDecisionRowCount (strandId: string): Promise<number> {
     return (await fixture.rawRows('RegistrationDecision', strandId)).length
+  }
+
+  // ---------------------------------------------------------------------------
+  // Association helpers
+  // ---------------------------------------------------------------------------
+
+  let assocSeq = 0
+  function nextAssociationRequestId (): string {
+    assocSeq += 1
+    return `p2p-assoc-req-${Date.now()}-${assocSeq}`
+  }
+
+  function makeAssociationInit (authorityId: string, deviceKey: string, overrides: Partial<AssociationRequestInit> = {}): AssociationRequestInit {
+    const id = overrides.id ?? nextAssociationRequestId()
+    return {
+      id,
+      authorityId,
+      registrantId: overrides.registrantId ?? `registrant-${id}`,
+      deviceKey: overrides.deviceKey ?? deviceKey,
+      electionId: overrides.electionId,
+      submittedAt: overrides.submittedAt ?? new Date().toISOString()
+    }
+  }
+
+  function makeAttestation (overrides: Partial<DeviceAttestation> = {}): DeviceAttestation {
+    return {
+      publicKey: overrides.publicKey ?? 'p2p-staging-device-pubkey',
+      deviceId: overrides.deviceId ?? `p2p-staging-device-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      attestationTime: overrides.attestationTime ?? Date.now(),
+      certificateChain: overrides.certificateChain ?? ['p2p-staging-leaf-cert']
+    }
+  }
+
+  function makeAttestationAnswer (overrides: Partial<AssociationAttestationAnswer> = {}): AssociationAttestationAnswer {
+    return {
+      requestId: overrides.requestId ?? nextAssociationRequestId(),
+      nonce: overrides.nonce ?? `p2p-staging-nonce-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      attestation: overrides.attestation ?? makeAttestation(),
+      deviceHash: overrides.deviceHash
+    }
+  }
+
+  function buildAssociationTransport (
+    strandId: string,
+    overrides: Partial<Omit<P2pAssociationTransportOptions, 'strandId' | 'openStrand' | 'computeDigest' | 'computeAttestationDigest'>> = {},
+    portOptions?: P2pStagingFixturePortOptions
+  ): { transport: P2pAssociationTransport } {
+    const port = fixture.makePort(portOptions)
+    const transport = new P2pAssociationTransport({
+      openStrand: async () => port as unknown as AssociationStrandPort,
+      computeDigest: async (init, requesterKey) => await fixture.fixtureRequestDigest(init, requesterKey),
+      computeAttestationDigest: async (answer, requesterKey) => await fixture.fixtureAttestationDigest(answer, requesterKey),
+      strandId,
+      sealer: 'sealer' in overrides ? overrides.sealer : fixture.sealer,
+      opener: 'opener' in overrides ? overrides.opener : fixture.opener,
+      decisionSigner: 'decisionSigner' in overrides ? overrides.decisionSigner : fixture.decisionSigner
+    })
+    return { transport }
+  }
+
+  async function assocRowCount (table: 'AssociationRequestStaging' | 'AssociationAttestationStaging' | 'AssociationDecision', strandId: string): Promise<number> {
+    return (await fixture.rawRows(table, strandId)).length
   }
 
   // =========================================================================
@@ -509,6 +577,376 @@ describe('P2P staging transports', function () {
       }
       expect(caught).to.be.instanceOf(P2pStagingError)
       expect((caught as P2pStagingError).code).to.equal('duplicate-decision')
+    })
+  })
+
+  // =========================================================================
+  // ASSOCIATION
+  // =========================================================================
+
+  describe('association', () => {
+    it('D-03: submitRequest with a registrationCode and two identityFields writes one sealed row; raw text has no identity-field value or code', async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+      const init = makeAssociationInit(fixture.auth.authority.id, signer.publicHex)
+      const identityFields: AssociationIdentityField[] = [
+        { name: 'lastName', value: fixture.payloadMarker },
+        { name: 'dob', value: `dob-${fixture.payloadMarker}` }
+      ]
+      const registrationCode = `assoc-code-${fixture.payloadMarker}`
+
+      await transport.submitRequest(init, signer.publicHex, signer.sign, { registrationCode, identityFields })
+
+      const rows = await fixture.rawRows('AssociationRequestStaging', strandId)
+      expect(rows).to.have.lengthOf(1)
+      const row = rows[0]!
+      const parsedEnvelope = JSON.parse(row.InitJson as string) as { v: number, alg: string }
+      expect(parsedEnvelope.v).to.equal(1)
+      expect(parsedEnvelope.alg).to.equal('vt-env-1')
+      const rawText = JSON.stringify(row)
+      expect(rawText.includes(fixture.payloadMarker)).to.equal(false)
+      expect(rawText.includes(registrationCode)).to.equal(false)
+    })
+
+    it('D-03: the delivered request carries the code and both identity fields, while its init has neither', async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+      const init = makeAssociationInit(fixture.auth.authority.id, signer.publicHex)
+      const identityFields: AssociationIdentityField[] = [{ name: 'lastName', value: 'Voter' }, { name: 'dob', value: '2000-01-01' }]
+      const registrationCode = `assoc-code-${Date.now()}`
+
+      await transport.submitRequest(init, signer.publicHex, signer.sign, { registrationCode, identityFields })
+
+      const report = await transport.readStagedRequestsReport()
+      expect(report.delivered).to.have.lengthOf(1)
+      const delivered = report.delivered[0]!
+      expect(delivered.registrationCode).to.equal(registrationCode)
+      expect(delivered.identityFields).to.deep.equal(identityFields)
+      expect((delivered.init as unknown as { registrationCode?: unknown, identityFields?: unknown }).registrationCode).to.equal(undefined)
+      expect((delivered.init as unknown as { identityFields?: unknown }).identityFields).to.equal(undefined)
+    })
+
+    it("D-03: submitAttestation writes a sealed AnswerJson lacking the attestation's deviceId, and readStagedAttestationsReport delivers the answer", async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+      const answer = makeAttestationAnswer({ attestation: makeAttestation({ deviceId: `device-${fixture.payloadMarker}` }) })
+
+      await transport.submitAttestation(answer, signer.publicHex, signer.sign)
+
+      const rows = await fixture.rawRows('AssociationAttestationStaging', strandId)
+      expect(rows).to.have.lengthOf(1)
+      expect(JSON.stringify(rows[0]).includes(answer.attestation.deviceId)).to.equal(false)
+
+      const report = await transport.readStagedAttestationsReport()
+      const delivered = report.delivered.find((r) => r.requestId === answer.requestId)
+      expect(delivered, 'attestation must be delivered').to.not.equal(undefined)
+      expect(delivered!.answer.attestation.deviceId).to.equal(answer.attestation.deviceId)
+    })
+
+    it('D-03: an attestation for a never-submitted request id is delivered, with its requestId verbatim', async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+      const orphanRequestId = nextAssociationRequestId()
+      const answer = makeAttestationAnswer({ requestId: orphanRequestId })
+
+      await transport.submitAttestation(answer, signer.publicHex, signer.sign)
+
+      const report = await transport.readStagedAttestationsReport()
+      const delivered = report.delivered.find((r) => r.requestId === orphanRequestId)
+      expect(delivered, 'orphan attestation must still be delivered').to.not.equal(undefined)
+      expect(delivered!.requestId).to.equal(orphanRequestId)
+      expect(delivered!.answer.requestId).to.equal(orphanRequestId)
+    })
+
+    it("D-03: no sealer refuses 'no-sealer' on both legs with zero rows", async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId, { sealer: undefined })
+      const signer = fixture.makeRequesterSigner()
+      const init = makeAssociationInit(fixture.auth.authority.id, signer.publicHex)
+      const answer = makeAttestationAnswer()
+
+      let caughtRequest: unknown
+      try {
+        await transport.submitRequest(init, signer.publicHex, signer.sign)
+      } catch (err) {
+        caughtRequest = err
+      }
+      let caughtAttestation: unknown
+      try {
+        await transport.submitAttestation(answer, signer.publicHex, signer.sign)
+      } catch (err) {
+        caughtAttestation = err
+      }
+      expect((caughtRequest as P2pStagingError)?.code).to.equal('no-sealer')
+      expect((caughtAttestation as P2pStagingError)?.code).to.equal('no-sealer')
+      expect(await assocRowCount('AssociationRequestStaging', strandId)).to.equal(0)
+      expect(await assocRowCount('AssociationAttestationStaging', strandId)).to.equal(0)
+    })
+
+    it("D-03: no opener refuses 'no-opener' on both read paths", async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId, { opener: undefined })
+      let caughtRequests: unknown
+      try {
+        await transport.readStagedRequestsReport()
+      } catch (err) {
+        caughtRequests = err
+      }
+      let caughtAttestations: unknown
+      try {
+        await transport.readStagedAttestationsReport()
+      } catch (err) {
+        caughtAttestations = err
+      }
+      expect((caughtRequests as P2pStagingError)?.code).to.equal('no-opener')
+      expect((caughtAttestations as P2pStagingError)?.code).to.equal('no-opener')
+    })
+
+    it("unreadable rows: the outsider opener reports 'not-a-recipient' on both read paths", async () => {
+      const strandId = nextStrandId()
+      const { transport: submitTransport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+      const init = makeAssociationInit(fixture.auth.authority.id, signer.publicHex)
+      const answer = makeAttestationAnswer()
+      await submitTransport.submitRequest(init, signer.publicHex, signer.sign)
+      await submitTransport.submitAttestation(answer, signer.publicHex, signer.sign)
+
+      const { transport: outsiderTransport } = buildAssociationTransport(strandId, { opener: fixture.outsiderOpener })
+      const requestReport = await outsiderTransport.readStagedRequestsReport()
+      const attestationReport = await outsiderTransport.readStagedAttestationsReport()
+      expect(requestReport.delivered).to.have.lengthOf(0)
+      expect(requestReport.unreadable[0]?.reason).to.equal('not-a-recipient')
+      expect(attestationReport.delivered).to.have.lengthOf(0)
+      expect(attestationReport.unreadable[0]?.reason).to.equal('not-a-recipient')
+    })
+
+    it("unreadable rows: a request envelope transplanted onto the attestation row of the same RequestId (different Digest) is unreadable 'authentication-failed'", async () => {
+      const strandId = nextStrandId()
+      const { transport: submitTransport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+      const sharedRequestId = nextAssociationRequestId()
+      const init = makeAssociationInit(fixture.auth.authority.id, signer.publicHex, { id: sharedRequestId })
+      const answer = makeAttestationAnswer({ requestId: sharedRequestId })
+      await submitTransport.submitRequest(init, signer.publicHex, signer.sign)
+      await submitTransport.submitAttestation(answer, signer.publicHex, signer.sign)
+
+      const requestRow = (await fixture.rawRows('AssociationRequestStaging', strandId)).find((r) => r.RequestId === sharedRequestId)!
+      const overlay = new Map<string, string>([[sharedRequestId, requestRow.InitJson as string]])
+      const { transport: overlaidTransport } = buildAssociationTransport(strandId, {}, { overlay })
+
+      const attestationReport = await overlaidTransport.readStagedAttestationsReport()
+      const unreadable = attestationReport.unreadable.find((r) => r.requestId === sharedRequestId)
+      expect(unreadable, 'the transplanted attestation row must be reported unreadable').to.not.equal(undefined)
+      expect(unreadable!.reason).to.equal('authentication-failed')
+    })
+
+    it('D-05: the Digest column equals bytesToBase64url of the per-leg digest function, each called exactly once per submit, including with a pre-resolved Signature', async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+
+      const init = makeAssociationInit(fixture.auth.authority.id, signer.publicHex)
+      await transport.submitRequest(init, signer.publicHex, signer.sign)
+      const requestRow = (await fixture.rawRows('AssociationRequestStaging', strandId)).find((r) => r.RequestId === init.id)!
+      const requestDigestBytes = await fixture.fixtureRequestDigest(init, signer.publicHex)
+      expect(requestRow.Digest).to.equal(bytesToBase64url(requestDigestBytes))
+
+      const answer = makeAttestationAnswer()
+      const attestationDigestBytes = await fixture.fixtureAttestationDigest(answer, signer.publicHex)
+      const preResolved = await signer.sign(attestationDigestBytes)
+      await transport.submitAttestation(answer, signer.publicHex, preResolved)
+      const attestationRow = (await fixture.rawRows('AssociationAttestationStaging', strandId)).find((r) => r.RequestId === answer.requestId)!
+      expect(attestationRow.Digest).to.equal(bytesToBase64url(attestationDigestBytes))
+    })
+
+    it("D-05: a pre-resolved attestation signature over other bytes rejects 'rejected' and writes zero rows", async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+      const answer = makeAttestationAnswer()
+      const wrongBytes = await fixture.fixtureAttestationDigest(makeAttestationAnswer(), signer.publicHex)
+      const forgedSignature = await signer.sign(wrongBytes)
+
+      let caught: unknown
+      try {
+        await transport.submitAttestation(answer, signer.publicHex, forgedSignature)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as P2pStagingError)?.code).to.equal('rejected')
+      expect(await assocRowCount('AssociationAttestationStaging', strandId)).to.equal(0)
+    })
+
+    it("D-05: a second request with the same RequestId and different content is 'duplicate-request-id'", async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const signer = fixture.makeRequesterSigner()
+      const init = makeAssociationInit(fixture.auth.authority.id, signer.publicHex)
+      await transport.submitRequest(init, signer.publicHex, signer.sign)
+
+      const differentInit: AssociationRequestInit = {
+        ...init,
+        submittedAt: new Date(Date.parse(init.submittedAt) + 1000).toISOString()
+      }
+      let caught: unknown
+      try {
+        await transport.submitRequest(differentInit, signer.publicHex, signer.sign)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as P2pStagingError)?.code).to.equal('duplicate-request-id')
+      expect(await assocRowCount('AssociationRequestStaging', strandId)).to.equal(1)
+    })
+
+    it("D-06: 'c' with a challengeNonce then 'a' for the SAME request id are both accepted; a second 'a' is 'duplicate-decision'", async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const requestId = nextAssociationRequestId()
+      const nonce = `assoc-nonce-${Date.now()}`
+
+      await transport.publishDecision({ requestId, status: 'c', challengeNonce: nonce, decidedAt: new Date().toISOString() })
+      await transport.publishDecision({ requestId, status: 'a', decidedAt: new Date().toISOString() })
+
+      const records = await transport.readDecisionRecords()
+      expect(records.find((r) => r.requestId === requestId && r.status === 'c')?.challengeNonce).to.equal(nonce)
+      expect(records.find((r) => r.requestId === requestId && r.status === 'a')).to.not.equal(undefined)
+
+      let caught: unknown
+      try {
+        await transport.publishDecision({ requestId, status: 'a', decidedAt: new Date().toISOString() })
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as P2pStagingError)?.code).to.equal('duplicate-decision')
+    })
+
+    it("D-06: an out-of-vocabulary status 'x' is accepted on write, and both pollDecisions and readDecisionRecords throw", async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+      const requestId = nextAssociationRequestId()
+
+      await transport.publishDecision({ requestId, status: 'x' as never, decidedAt: new Date().toISOString() })
+      expect(await assocRowCount('AssociationDecision', strandId)).to.equal(1)
+
+      let pollCaught: unknown
+      try {
+        await transport.pollDecisions()
+      } catch (err) {
+        pollCaught = err
+      }
+      expect(pollCaught).to.be.instanceOf(Error)
+
+      let readCaught: unknown
+      try {
+        await transport.readDecisionRecords()
+      } catch (err) {
+        readCaught = err
+      }
+      expect(readCaught).to.be.instanceOf(Error)
+    })
+
+    it("D-41/D-45: 'a' with revokesDeviceKey and matchMethod 'code' is accepted and the record carries both; 'r' with revokesDeviceKey is 'rejected' (RevocationShape); 'a' with matchMethod 'identity' and no revokesDeviceKey is accepted", async () => {
+      const strandId = nextStrandId()
+      const { transport } = buildAssociationTransport(strandId)
+
+      const requestId1 = nextAssociationRequestId()
+      await transport.publishDecision({
+        requestId: requestId1, status: 'a', decidedAt: new Date().toISOString(),
+        revokesDeviceKey: fixture.makeRequesterSigner().publicHex, matchMethod: 'code'
+      })
+      const record1 = (await transport.readDecisionRecords()).find((r) => r.requestId === requestId1)!
+      expect(record1.matchMethod).to.equal('code')
+      expect(typeof record1.revokesDeviceKey).to.equal('string')
+
+      const requestId2 = nextAssociationRequestId()
+      let caught: unknown
+      try {
+        await transport.publishDecision({
+          requestId: requestId2, status: 'r', decidedAt: new Date().toISOString(),
+          revokesDeviceKey: fixture.makeRequesterSigner().publicHex
+        })
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as P2pStagingError)?.code).to.equal('rejected')
+      expect((await fixture.rawRows('AssociationDecision', strandId)).filter((r) => r.RequestId === requestId2)).to.have.lengthOf(0)
+
+      const requestId3 = nextAssociationRequestId()
+      await transport.publishDecision({ requestId: requestId3, status: 'a', decidedAt: new Date().toISOString(), matchMethod: 'identity' })
+      const record3 = (await transport.readDecisionRecords()).find((r) => r.requestId === requestId3)!
+      expect(record3.matchMethod).to.equal('identity')
+      expect(record3.revokesDeviceKey).to.equal(undefined)
+    })
+
+    it("D-06 refusals: the non-officer signer and the non-'vrg' sibling signer are both 'rejected' with zero rows", async () => {
+      const strandId = nextStrandId()
+      const unregistered = fixture.makeRequesterSigner()
+      const unregisteredSigner: StagingDecisionSigner = { authorityId: fixture.auth.authority.id, sign: async (digest) => await unregistered.sign(digest) }
+      const { transport: unregisteredTransport } = buildAssociationTransport(strandId, { decisionSigner: unregisteredSigner })
+      const requestId1 = nextAssociationRequestId()
+      let caught1: unknown
+      try {
+        await unregisteredTransport.publishDecision({ requestId: requestId1, status: 'a', decidedAt: new Date().toISOString() })
+      } catch (err) {
+        caught1 = err
+      }
+      expect((caught1 as P2pStagingError)?.code).to.equal('rejected')
+
+      const siblingAuthorityId = await addSiblingAuthority(fixture.auth, { scopes: ['rad'] as Scope[] })
+      const siblingSigner: StagingDecisionSigner = { authorityId: siblingAuthorityId, sign: makeTestSignCallback(fixture.net.user) }
+      const { transport: siblingTransport } = buildAssociationTransport(strandId, { decisionSigner: siblingSigner })
+      const requestId2 = nextAssociationRequestId()
+      let caught2: unknown
+      try {
+        await siblingTransport.publishDecision({ requestId: requestId2, status: 'a', decidedAt: new Date().toISOString() })
+      } catch (err) {
+        caught2 = err
+      }
+      expect((caught2 as P2pStagingError)?.code).to.equal('rejected')
+      expect(await assocRowCount('AssociationDecision', strandId)).to.equal(0)
+    })
+
+    it('cursor race: a racing port on AssociationAttestationStaging lands both rows on distinct cursors', async () => {
+      const strandId = nextStrandId()
+      let raced = false
+      const portOptions: P2pStagingFixturePortOptions = {
+        beforeInsert: async (table, params) => {
+          if (table !== 'AssociationAttestationStaging' || raced) return
+          raced = true
+          const racerSigner = fixture.makeRequesterSigner()
+          const racerAnswer = makeAttestationAnswer()
+          const digestBytes = await fixture.fixtureAttestationDigest(racerAnswer, racerSigner.publicHex)
+          const digest = bytesToBase64url(digestBytes)
+          const sig = await racerSigner.sign(digestBytes)
+          const answerJson = await fixture.sealer.seal(JSON.stringify(racerAnswer), { requestId: racerAnswer.requestId, digest })
+          await fixture.db.exec(
+            'insert into AssociationAttestationStaging (StrandId, Cursor, RequestId, Digest, AnswerJson, RequesterKey, SignatureJson, StagedAt) ' +
+            'values (:strandId, :cursor, :requestId, :digest, :answerJson, :requesterKey, :signatureJson, :stagedAt)',
+            {
+              strandId,
+              cursor: params.cursor as string,
+              requestId: racerAnswer.requestId,
+              digest,
+              answerJson,
+              requesterKey: racerSigner.publicHex,
+              signatureJson: JSON.stringify(sig),
+              stagedAt: new Date().toISOString()
+            }
+          )
+        }
+      }
+      const { transport } = buildAssociationTransport(strandId, {}, portOptions)
+      const signer = fixture.makeRequesterSigner()
+      const answer = makeAttestationAnswer()
+
+      await transport.submitAttestation(answer, signer.publicHex, signer.sign)
+      const rows = await fixture.rawRows('AssociationAttestationStaging', strandId)
+      expect(rows).to.have.lengthOf(2)
+      expect(rows.map((r) => r.Cursor).sort()).to.deep.equal(['0000000000000001', '0000000000000002'])
     })
   })
 })
