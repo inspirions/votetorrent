@@ -291,6 +291,51 @@ const resources = {
 			// sites, so it was structurally unable to see it.
 			'dev.finalDayStop': 'final day',
 		},
+		// Phase 62 (D-31/D-36/D-40/D-41/D-43/D-45) — the `continuity` namespace: device-continuity
+		// surfaces (registration code display, continue-on-another-device, retired device, restart a
+		// pending registration). Flat dotted-string property names (`keySeparator: false` below) —
+		// never nested objects. Consumers use `useTranslation('continuity')`.
+		continuity: {
+			'code.heading': 'Your Registration Code',
+			'code.body':
+				"Save this code. If you ever need to continue your registration on another device, you'll enter it there.",
+			'code.copyButton': 'Copy Code',
+			'code.copiedConfirm': 'Copied',
+			'code.showAgainLink': 'Show my registration code',
+			'code.unavailable':
+				"Your registration code isn't available right now. Try again in a moment.",
+			'code.notAvailableOnDevice':
+				"A registration code isn't available on this device. If you move to another device, you'll confirm your identity there instead.",
+			'newDevice.screenTitle': 'Continue on This Device',
+			'newDevice.codeFieldLabel': 'Registration Code',
+			'newDevice.codeFieldPlaceholder': 'Enter your code',
+			'newDevice.submitButton': 'Continue with Code',
+			'newDevice.lostCodeLink': "I don't have my code",
+			'newDevice.identityFallbackHeading': 'Confirm Your Identity',
+			'newDevice.identityFallbackBody':
+				'An officer will match these details to your existing registration. This may take longer than using a code.',
+			'newDevice.identityFallbackSubmitButton': 'Submit for Review',
+			'newDevice.pendingHeading': 'Waiting for approval',
+			'newDevice.pendingBody':
+				'An officer needs to approve this device change before you can continue.',
+			'newDevice.approvedHeading': 'Device approved',
+			'newDevice.rejectedHeading': 'Request not approved',
+			'newDevice.rejectedBody':
+				'This device change request was not approved. Contact your election authority for help.',
+			'newDevice.entryLink': 'Already registered on another device?',
+			'newDevice.codeRequired': 'Enter your registration code to continue.',
+			'newDevice.submitError': 'Could not send your request. Check your connection and try again.',
+			'newDevice.backToCodeLink': 'Use my code instead',
+			'newDevice.restartLink': 'My registration is still pending',
+			'newDevice.retryButton': 'Try Again',
+			'deviceRetired.heading': 'This device has been retired',
+			'deviceRetired.body':
+				'Your voting registration was moved to another device. This device can no longer be used to vote.',
+			'restart.heading': 'Start a New Registration',
+			'restart.body':
+				'Your previous registration is still pending and tied to your other device. Continuing here starts a brand-new registration from scratch on this device.',
+			'restart.confirmButton': 'Start New Registration',
+		},
 	},
 	es: {
 		common: {
@@ -512,6 +557,48 @@ const resources = {
 			'indeterminate.retryCta': 'Intentar de nuevo',
 			'dev.clockOffsetLabel': 'DEV: Ajuste de reloj',
 			'dev.finalDayStop': 'último día',
+		},
+		// Phase 62 — see the `en.continuity` block's comment.
+		continuity: {
+			'code.heading': 'Tu Código de Registro',
+			'code.body':
+				'Guarda este código. Si alguna vez necesitas continuar tu registro en otro dispositivo, lo introducirás allí.',
+			'code.copyButton': 'Copiar Código',
+			'code.copiedConfirm': 'Copiado',
+			'code.showAgainLink': 'Mostrar mi código de registro',
+			'code.unavailable':
+				'Tu código de registro no está disponible en este momento. Inténtalo de nuevo en un momento.',
+			'code.notAvailableOnDevice':
+				'No hay un código de registro disponible en este dispositivo. Si cambias a otro dispositivo, confirmarás tu identidad allí.',
+			'newDevice.screenTitle': 'Continuar en Este Dispositivo',
+			'newDevice.codeFieldLabel': 'Código de Registro',
+			'newDevice.codeFieldPlaceholder': 'Introduce tu código',
+			'newDevice.submitButton': 'Continuar con el código',
+			'newDevice.lostCodeLink': 'No tengo mi código',
+			'newDevice.identityFallbackHeading': 'Confirma tu Identidad',
+			'newDevice.identityFallbackBody':
+				'Un funcionario comparará estos datos con tu registro existente. Esto puede tardar más que usar un código.',
+			'newDevice.identityFallbackSubmitButton': 'Enviar para Revisión',
+			'newDevice.pendingHeading': 'Esperando aprobación',
+			'newDevice.pendingBody':
+				'Un funcionario debe aprobar este cambio de dispositivo antes de que puedas continuar.',
+			'newDevice.approvedHeading': 'Dispositivo aprobado',
+			'newDevice.rejectedHeading': 'Solicitud no aprobada',
+			'newDevice.rejectedBody':
+				'Esta solicitud de cambio de dispositivo no fue aprobada. Contacta a tu autoridad electoral para obtener ayuda.',
+			'newDevice.entryLink': '¿Ya te registraste en otro dispositivo?',
+			'newDevice.codeRequired': 'Introduce tu código de registro para continuar.',
+			'newDevice.submitError': 'No se pudo enviar tu solicitud. Revisa tu conexión e inténtalo de nuevo.',
+			'newDevice.backToCodeLink': 'Usar mi código en su lugar',
+			'newDevice.restartLink': 'Mi registro aún está pendiente',
+			'newDevice.retryButton': 'Intentar de nuevo',
+			'deviceRetired.heading': 'Este dispositivo ha sido retirado',
+			'deviceRetired.body':
+				'Tu registro de votación se trasladó a otro dispositivo. Este dispositivo ya no se puede usar para votar.',
+			'restart.heading': 'Iniciar un Nuevo Registro',
+			'restart.body':
+				'Tu registro anterior sigue pendiente y vinculado a tu otro dispositivo. Continuar aquí inicia un registro completamente nuevo desde cero en este dispositivo.',
+			'restart.confirmButton': 'Iniciar Nuevo Registro',
 		},
 	},
 };
