@@ -79,7 +79,31 @@ export interface RegistrantPrivate {
 
   /** json array of { name, value, hint? } triples (recursive); never disclosed */
   privateDetails?: PrivateDetail[]
+
+  /**
+   * D-49: how `privateDetails` was read on THIS device. Optional — undefined when the reading
+   * engine does not report it (e.g. `MockRegistrationEngine`); the real `RegistrationEngine`
+   * always sets it. See `RegistrationContentAccess`'s own doc comment for the full vocabulary.
+   */
+  detailsAccess?: RegistrationContentAccess
 }
+
+/**
+ * D-49: how a stored registration payload / private tier was read on THIS device.
+ *
+ * - `'opened'`          sealed envelope, opened with this device's officer key, PayloadCid recheck passed
+ * - `'unsealed'`        stored without sealing (a pre-D-49 legacy row, or the constant '[]' for empty
+ *                        private details), PayloadCid recheck passed where one applies
+ * - `'no-opener'`       sealed, and this context has no opener (a voter, a host that has not wired one,
+ *                        or no local key)
+ * - `'not-a-recipient'` sealed, and this device's key is not among its recipients (e.g. an officer added
+ *                        later, D-51)
+ * - `'unreadable'`      malformed envelope, failed authentication, vault error, or plaintext that is not
+ *                        the expected JSON shape
+ * - `'tampered'`        Digest(opened or unsealed plaintext) !== PayloadCid (RegistrationRequest only)
+ */
+export type RegistrationContentAccess =
+  'opened' | 'unsealed' | 'no-opener' | 'not-a-recipient' | 'unreadable' | 'tampered'
 
 /**
  * Flat salted-leaf disclosure attribute (RegistrantSelective.SelectiveDetails, D-11/D-12/D-13).
@@ -503,6 +527,15 @@ export interface RegistrationRequestRead {
   verificationCid?: string
   verificationChecklist?: RegistrationVerificationChecklistItem[]
   registrantId?: string
+
+  /**
+   * D-49: how `payload` was read on THIS device (see `RegistrationContentAccess`'s doc comment).
+   * Optional — undefined when the reading engine does not report it (e.g. `MockRegistrationEngine`);
+   * the real `RegistrationEngine` always sets it. When `payloadAccess` is anything other than
+   * `'opened'`/`'unsealed'`, `payload` is the degrade-convention `{}` and `registrantId` is never
+   * reported.
+   */
+  payloadAccess?: RegistrationContentAccess
 }
 
 /**
@@ -576,6 +609,13 @@ export interface RegistrationRequestListRow {
    * caller cannot distinguish "not computed" from "not closed".
    */
   duplicateClosure?: RegistrationDuplicateClosureState
+
+  /**
+   * D-49: how `lastName`/`firstName` were read on THIS device. `lastName`/`firstName` are
+   * undefined unless `payloadAccess` is `'opened'`/`'unsealed'`. Optional — undefined when the
+   * reading engine does not report it (e.g. `MockRegistrationEngine`).
+   */
+  payloadAccess?: RegistrationContentAccess
 }
 
 /**

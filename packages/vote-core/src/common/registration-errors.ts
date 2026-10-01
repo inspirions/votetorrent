@@ -64,3 +64,33 @@ export class RegistrationDuplicateError extends Error {
     this.otherRequestId = otherRequestId
   }
 }
+
+/**
+ * D-49 (Phase 62 Plan 31): every `RegistrationContentAccess` value except the two READABLE ones.
+ * `RegistrationContentAccess` itself lives in `registration/models.ts` (not re-imported here, to
+ * avoid a cross-file type-only import loop in this barrel-exported module) — this type is
+ * structurally identical to `Exclude<RegistrationContentAccess, 'opened' | 'unsealed'>`.
+ */
+export type RegistrationContentAccessFailure =
+  'no-opener' | 'not-a-recipient' | 'unreadable' | 'tampered'
+
+/**
+ * Thrown by `SignatureTasksEngine`'s registrant approval gate (`completeSignature`'s accept path,
+ * via `resolveAcceptableRegistrantApproval`) when the request's payload cannot be opened on this
+ * device or fails the PayloadCid recheck (D-49). Thrown BEFORE any signature is spent or any row
+ * is written. The message carries the request id and the access code only — never payload text,
+ * key bytes or a GSD phase number.
+ */
+export class RegistrationContentAccessError extends Error {
+  readonly code: 'registration-content-unreadable'
+  readonly access: RegistrationContentAccessFailure
+  readonly requestId: string
+
+  constructor (access: RegistrationContentAccessFailure, requestId: string) {
+    super(`RegistrationRequest ${requestId} cannot be approved on this device (access=${access})`)
+    this.name = 'RegistrationContentAccessError'
+    this.code = 'registration-content-unreadable'
+    this.access = access
+    this.requestId = requestId
+  }
+}
