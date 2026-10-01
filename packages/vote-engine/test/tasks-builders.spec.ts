@@ -35,6 +35,7 @@ import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
 import { createTestNetwork, addTestAuthority } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { digestToBytes } from '../src/utils.js'
+import { computeRadProposalDigest, readProposedRosterJson } from '../src/authority/rad-roster-digest.js'
 
 // ---- Stub engine factories (minimal interface satisfaction) ----
 
@@ -362,18 +363,25 @@ describe('CompleteSignatureBuilder', () => {
         // Idempotent — ProposedAdmin already exists for this (AuthorityId, EffectiveAt) PK.
       }
 
-      // Step 2: seed AdminSigning (required by AdminSignatureTaskExtension.MutationValid).
+      // Step 2: seed AdminSigning with the full-roster 'rad' PROPOSAL digest (62-03,
+      // D-33/D-34) — Digest(AuthorityId, EffectiveAt, Officers, ThresholdPolicies), no
+      // Tid, matching AdminSignatureTaskExtension.MutationValid's recomputation exactly.
       // 999.1 R-02/R-04: this row is created BEFORE the officer actually signs (the task
       // is "pending" until completeSignature runs) — same DEBT-11 shape as
       // elections-engine.ts's debugSeedPendingTasks, so it takes the explicit
       // IsPlaceholderSignature escape hatch rather than a real signature.
+      const rosterJson = await readProposedRosterJson(ctx.db, authorityId, adminEffectiveAt as string)
+      const seedDigest = await computeRadProposalDigest(ctx.db, {
+        authorityId,
+        effectiveAt: adminEffectiveAt as string,
+        officers: rosterJson,
+        thresholdPolicies
+      })
       await ctx.db.exec(
         `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
          with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
-         values (:nonce, :authorityId, :adminEffectiveAt, 'rad',
-                 Digest(:tid, :authorityId, :adminEffectiveAt, :thresholdPolicies),
-                 :userId, :signerKey, :sig)`,
-        { nonce: taskNonce, authorityId, adminEffectiveAt, thresholdPolicies, tid, now, userId, signerKey, sig: placeholderSig }
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :sig)`,
+        { nonce: taskNonce, authorityId, adminEffectiveAt, digest: seedDigest, now, userId, signerKey, sig: placeholderSig }
       )
 
       // Compute the REAL AdminSigning.Digest so completeSignature()'s OfficerSignature

@@ -3,6 +3,11 @@ import { ElectionEngine } from '../election/election-engine.js'
 import { digestToBytes, fromCanonicalDatetime, nowCanonicalDatetime, parseJsonOr, toCanonicalDatetime } from '../utils.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { verifyUserKeyMembership } from '../user/verify-user-key.js'
+import {
+  adminSignatureTaskExtensionInserter,
+  computeRadProposalDigest,
+  readProposedRosterJson
+} from '../authority/rad-roster-digest.js'
 import type { Database } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
 import type {
@@ -998,17 +1003,31 @@ export class ElectionsEngine implements IElectionsEngine {
       }
 
       // 4. Insert a fresh AdminSigning row with a NEW nonce.
-      //    Digest uses the same thresholdPolicies value as AdminSignatureTaskExtension.MutationValid
-      //    will look up from ProposedAdmin — they must match byte-for-byte.
+      //    62-03 (D-33/D-34): the Digest now uses the SAME full-roster 'rad' PROPOSAL
+      //    formula AdminSignatureTaskExtension.MutationValid (Trigger B) recomputes —
+      //    Digest(AuthorityId, EffectiveAt, Officers, ThresholdPolicies), no Tid. The
+      //    ThresholdPolicies and roster are RE-READ from ProposedAdmin/ProposedOfficer
+      //    themselves (the exact source the schema CHECK reads), not assumed to match
+      //    `adminThresholdPolicies` (the live Admin table's value) — the ProposedAdmin
+      //    row may already have existed from a prior seed call.
       //    Do NOT call sign() here: AdminSigning must stay unsigned (no AdminSignature) so that
       //    MutationValid's "not exists AdminSignature for uncompleted task" gate passes.
+      const proposedAdminRow = await ctx.db
+        .prepare('select ThresholdPolicies from ProposedAdmin where AuthorityId = :authorityId and EffectiveAt = :adminEffectiveAt')
+        .get({ authorityId, adminEffectiveAt })
+      const proposedThresholdPolicies = (proposedAdminRow?.ThresholdPolicies as string | null) ?? adminThresholdPolicies
+      const rosterJson = await readProposedRosterJson(ctx.db, authorityId, adminEffectiveAt)
+      const digest = await computeRadProposalDigest(ctx.db, {
+        authorityId,
+        effectiveAt: adminEffectiveAt,
+        officers: rosterJson,
+        thresholdPolicies: proposedThresholdPolicies
+      })
       await ctx.db.exec(
         `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
          with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
-         values (:nonce, :authorityId, :adminEffectiveAt, 'rad',
-                 Digest(:tid, :authorityId, :adminEffectiveAt, :thresholdPolicies),
-                 :userId, :signerKey, :signature)`,
-        { nonce, authorityId, adminEffectiveAt, thresholdPolicies: adminThresholdPolicies, tid, now, userId, signerKey: placeholderKey, signature: placeholderSig }
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
+        { nonce, authorityId, adminEffectiveAt, digest, now, userId, signerKey: placeholderKey, signature: placeholderSig }
       )
 
       // 5. Insert Task + AdminSignatureTaskExtension in a single atomic transaction.
@@ -1016,6 +1035,9 @@ export class ElectionsEngine implements IElectionsEngine {
       //    within-transaction state is visible to the next statement's inline checks.
       //    The deferred ExtensionExists (on Task) and TaskIdValid (on AdminSignatureTaskExtension)
       //    are both evaluated at COMMIT time when both rows are present.
+      //    62-03: the extension insert now runs through the shared
+      //    adminSignatureTaskExtensionInserter helper (same inserter fanOutSignatureTasks uses).
+      const insertExtension = adminSignatureTaskExtensionInserter(ctx.db, authorityId, adminEffectiveAt, tid)
       await ctx.db.exec('BEGIN')
       try {
         await ctx.db.exec(
@@ -1024,12 +1046,7 @@ export class ElectionsEngine implements IElectionsEngine {
            values (:id, :userId, 'signature', 'admin', :nonce, 0)`,
           { id: signatureTaskId, userId, nonce, tid }
         )
-        await ctx.db.exec(
-          `insert into AdminSignatureTaskExtension (TaskId, AuthorityId, AdminEffectiveAt)
-           with context Tid = :tid
-           values (:taskId, :authorityId, :adminEffectiveAt)`,
-          { taskId: signatureTaskId, authorityId, adminEffectiveAt, tid }
-        )
+        await insertExtension(signatureTaskId as string, userId)
         await ctx.db.exec('COMMIT')
       } catch (err) {
         await ctx.db.exec('ROLLBACK')

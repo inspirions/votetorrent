@@ -17,6 +17,11 @@ import { Temporal } from 'temporal-polyfill';
 import { SigningEngine } from '../signing/signing-engine.js';
 import { allocateTid } from '../database/tid-allocator.js';
 import { verifySig, verifySigP256 } from '../database/initialize.js';
+import {
+	computeAdminPromotionDigest,
+	computeRadProposalDigest,
+	readProposedRosterJson,
+} from './rad-roster-digest.js';
 import { verifyUserKeyMembership } from '../user/verify-user-key.js';
 import { UserKeyType } from '@votetorrent/vote-core';
 import {
@@ -598,25 +603,20 @@ export class AuthorityEngine implements IAuthorityEngine {
 			// D-03/D-04: resolve the canonical digest ENGINE-SIDE first — needed both to
 			// hand a sign callback the exact bytes to sign, and (D-21) to independently
 			// re-verify whatever Signature ends up bound, including a pre-supplied one.
-			const digestRow = await this.ctx.db
-				.prepare(
-					'select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d',
-				)
-				.get({
-					authorityId: this.authority.id,
-					effectiveAt: effectiveAtCanon,
-					officers: officersJson,
-					thresholdPolicies: thresholdPoliciesJson,
-				});
-			if (!digestRow || digestRow.d == null) {
-				throw new Error('proposeAdmin: Digest() returned null — crypto plugin not registered?');
-			}
+			// 62-03 (D-33/D-34): routed through the shared rad-roster-digest module — the
+			// SAME formula AdminSignatureTaskExtension.MutationValid (Trigger B) recomputes.
+			const digest = await computeRadProposalDigest(this.ctx.db, {
+				authorityId: this.authority.id,
+				effectiveAt: effectiveAtCanon,
+				officers: officersJson,
+				thresholdPolicies: thresholdPoliciesJson,
+			});
 			// WR-01: single shared digestToBytes decoder.
-			const digestBytes = digestToBytes(digestRow.d);
+			const digestBytes = digestToBytes(digest);
 
 			// If a sign callback is provided, invoke it so the caller signs exactly the
 			// bytes the engine stores. If a completed Signature is passed (test fixture
-			// path), use it directly — either way `digestRow.d`/`digestBytes` above are
+			// path), use it directly — either way `digest`/`digestBytes` above are
 			// the SAME bytes the signature must cover, per D-21 verification below.
 			let signature: Signature;
 			if (typeof signatureOrCallback === 'function') {
@@ -634,8 +634,8 @@ export class AuthorityEngine implements IAuthorityEngine {
 				signature.signerKey,
 			);
 			const signatureValid = membership.keyType === UserKeyType.p256
-				? verifySigP256(digestRow.d, signature.signature, signature.signerKey)
-				: verifySig(digestRow.d, signature.signature, signature.signerKey);
+				? verifySigP256(digest, signature.signature, signature.signerKey)
+				: verifySig(digest, signature.signature, signature.signerKey);
 			const isUserValid = membership.valid && signatureValid;
 
 			// 57-01 (D-01 propose side, T-57-04): ProposedAdmin + its roster commit
@@ -887,6 +887,11 @@ export class AuthorityEngine implements IAuthorityEngine {
 						effectiveAtCanon: string;
 						thresholdPoliciesJson: string;
 						rosterEntries: AdminRosterEntry[];
+						// 62-03 (D-33b): the SAME cast(...as text)-sorted roster JSON the matching
+						// digest was computed over — re-serialized identically for the ONE shared
+						// promotion digest below (Step 6), so it never drifts from what Step 3
+						// actually matched.
+						officersJson: string;
 				  }
 				| undefined;
 			// WR-XX (57-07): materialize the outer cursor into a plain array BEFORE
@@ -932,18 +937,16 @@ export class AuthorityEngine implements IAuthorityEngine {
 				}
 				const rosterEntries = sortRosterEntries(rosterRaw);
 				const officersJson = JSON.stringify(rosterEntries);
-				const candidateDigestRow = await this.ctx.db
-					.prepare(
-						'select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d',
-					)
-					.get({
-						authorityId: this.authority.id,
-						effectiveAt: effectiveAtCanon,
-						officers: officersJson,
-						thresholdPolicies: thresholdPoliciesJson,
-					});
-				if (candidateDigestRow?.d != null && candidateDigestRow.d === sessionRow.Digest) {
-					matched = { effectiveAtCanon, thresholdPoliciesJson, rosterEntries };
+				// 62-03 (D-33/D-34): routed through the shared rad-roster-digest module — the
+				// SAME formula proposeAdmin signs and Trigger B's schema CHECK recomputes.
+				const candidateDigest = await computeRadProposalDigest(this.ctx.db, {
+					authorityId: this.authority.id,
+					effectiveAt: effectiveAtCanon,
+					officers: officersJson,
+					thresholdPolicies: thresholdPoliciesJson,
+				});
+				if (candidateDigest === sessionRow.Digest) {
+					matched = { effectiveAtCanon, thresholdPoliciesJson, rosterEntries, officersJson };
 					break;
 				}
 			}
@@ -1018,27 +1021,28 @@ export class AuthorityEngine implements IAuthorityEngine {
 			const sortedOfficers = [...resolvedOfficers].sort((a, b) =>
 				a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0,
 			);
-			const minOfficer = sortedOfficers[0]!;
 
-			// Session 1 — Admin-side digest. No Officer row exists yet for this
-			// brand-new EffectiveAt (under ANY UserId), so the officer part is null
-			// (57-07 P1/P2 probe verdict).
-			const adminDigestRow = await this.ctx.db
-				.prepare(
-					'select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d',
-				)
-				.get({
-					tid,
-					authorityId: this.authority.id,
-					effectiveAt: matched.effectiveAtCanon,
-					thresholdPolicies: matched.thresholdPoliciesJson,
-					officerPart: null,
-				});
-			if (!adminDigestRow || adminDigestRow.d == null) {
-				throw new Error('applyAdminProposal: Digest() returned null for the Admin-side session');
+			// 62-03 (D-33b): the former two-session (admin-side null-officer-part +
+			// shared min-UserId-officer-part) design COLLAPSES into ONE full-roster
+			// promotion session, shared by the Admin insert AND every Officer insert.
+			// Re-verify the schema's own roster (ProposedOfficer, the same source the
+			// qsql CHECKs read) against the roster Step 3 already matched BEFORE any
+			// sign or write — a mismatch here means the TS-side and schema-side roster
+			// serializations have drifted, and promoting would write a roster the
+			// signed digest never actually covered.
+			const officersJson = matched.officersJson;
+			const schemaRoster = await readProposedRosterJson(this.ctx.db, this.authority.id, matched.effectiveAtCanon);
+			if (schemaRoster !== officersJson) {
+				throw new AdminPromotionError('roster-mismatch', nonce);
 			}
-			const adminDigest = adminDigestRow.d as string;
-			const adminSignature = await sign(digestToBytes(adminDigest));
+			const promotionDigest = await computeAdminPromotionDigest(this.ctx.db, {
+				tid,
+				authorityId: this.authority.id,
+				effectiveAt: matched.effectiveAtCanon,
+				thresholdPolicies: matched.thresholdPoliciesJson,
+				officers: officersJson,
+			});
+			const promotionSignature = await sign(digestToBytes(promotionDigest));
 
 			// AdminSigning.AdminEffectiveAt is the CURRENT admin's effective date
 			// (never the promoted proposal's) — resolved via the same CurrentAdmin
@@ -1051,7 +1055,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 							and CurrentAdmin.EffectiveAt = Officer.AdminEffectiveAt
 								where Officer.UserId = :userId and Officer.AuthorityId = :authorityId`,
 				)
-				.get({ userId: adminSignature.signerUserId, authorityId: this.authority.id });
+				.get({ userId: promotionSignature.signerUserId, authorityId: this.authority.id });
 			if (!currentAdminRow) {
 				throw new Error(
 					'applyAdminProposal: the promoting signer is not a current Officer of this authority',
@@ -1059,47 +1063,12 @@ export class AuthorityEngine implements IAuthorityEngine {
 			}
 			const currentAdminEffectiveAt = currentAdminRow.EffectiveAt as string;
 
-			// Session 2 — ONE shared officer-side digest for EVERY officer,
-			// including the first: 57-07's P4 probe proved that draining the
-			// deferred-constraint queue after each insert makes every officer's
-			// deferred CHECK resolve as self-visible, so the officer part is always
-			// the minimum-UserId officer's own tuple (never null, never per-officer).
-			const officerPartRow = await this.ctx.db
-				.prepare('select Digest(:effectiveAt, :userId, :title, :scopes) as d')
-				.get({
-					effectiveAt: matched.effectiveAtCanon,
-					userId: minOfficer.userId,
-					title: minOfficer.title,
-					scopes: JSON.stringify(minOfficer.scopes),
-				});
-			if (!officerPartRow || officerPartRow.d == null) {
-				throw new Error('applyAdminProposal: Digest() returned null for the officer-part tuple');
-			}
-			const officerPart = officerPartRow.d as string;
-			const officerDigestRow = await this.ctx.db
-				.prepare(
-					'select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d',
-				)
-				.get({
-					tid,
-					authorityId: this.authority.id,
-					effectiveAt: matched.effectiveAtCanon,
-					thresholdPolicies: matched.thresholdPoliciesJson,
-					officerPart,
-				});
-			if (!officerDigestRow || officerDigestRow.d == null) {
-				throw new Error('applyAdminProposal: Digest() returned null for the Officer-side session');
-			}
-			const officerDigest = officerDigestRow.d as string;
-			const officerSignature = await sign(digestToBytes(officerDigest));
-
-			const adminNonce = crypto.randomUUID();
-			const officerNonce = crypto.randomUUID();
+			const promotionNonce = crypto.randomUUID();
 			const nowCanon = nowCanonicalDatetime();
 
 			if (ownsTransaction) await this.ctx.db.exec('BEGIN');
 			try {
-				// Mint + insert the Admin row. Never IsPlaceholderSignature = true —
+				// Mint the ONE promotion session. Never IsPlaceholderSignature = true —
 				// this method supplies real crypto (T-57-07-03).
 				await this.ctx.db.exec(
 					`insert into AdminSigning (
@@ -1110,23 +1079,31 @@ export class AuthorityEngine implements IAuthorityEngine {
 						:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature
 					)`,
 					{
-						nonce: adminNonce,
+						nonce: promotionNonce,
 						authorityId: this.authority.id,
 						adminEffectiveAt: currentAdminEffectiveAt,
-						digest: adminDigest,
-						userId: adminSignature.signerUserId,
-						signerKey: adminSignature.signerKey,
-						signature: adminSignature.signature,
+						digest: promotionDigest,
+						userId: promotionSignature.signerUserId,
+						signerKey: promotionSignature.signerKey,
+						signature: promotionSignature.signature,
 						now: nowCanon,
 					},
 				);
-				await this.signingEngine.sign(adminNonce, adminSignature, { ownsTransaction: false });
+				// 62-03 (D-33b): signDerived — the promotion session INHERITS satisfaction
+				// from the proposal nonce's already-reached AdminSignature (Step 2 confirmed
+				// it exists), rather than re-running a fresh threshold count. This is what
+				// makes promotion threshold-correct at `rad` threshold > 1 without needing a
+				// SECOND co-signature on the promotion digest itself — the co-signers already
+				// signed the PROPOSAL; the promotion digest is this method's own derived,
+				// system-attested step.
+				await this.signingEngine.signDerived(promotionNonce, promotionSignature, nonce, { ownsTransaction: false });
+
 				await this.ctx.db.exec(
 					`insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
 						with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
 					values (:authorityId, :effectiveAt, :thresholdPolicies)`,
 					{
-						nonce: adminNonce,
+						nonce: promotionNonce,
 						authorityId: this.authority.id,
 						effectiveAt: matched.effectiveAtCanon,
 						thresholdPolicies: matched.thresholdPoliciesJson,
@@ -1137,36 +1114,13 @@ export class AuthorityEngine implements IAuthorityEngine {
 				// enqueues its own deferred entry.
 				await this.ctx.db.runDeferredRowConstraints();
 
-				// Mint the ONE shared officer-side session, then insert every officer
-				// row ascending by UserId, draining after each.
-				await this.ctx.db.exec(
-					`insert into AdminSigning (
-						Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature
-					)
-						with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
-					values (
-						:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature
-					)`,
-					{
-						nonce: officerNonce,
-						authorityId: this.authority.id,
-						adminEffectiveAt: currentAdminEffectiveAt,
-						digest: officerDigest,
-						userId: officerSignature.signerUserId,
-						signerKey: officerSignature.signerKey,
-						signature: officerSignature.signature,
-						now: nowCanon,
-					},
-				);
-				await this.signingEngine.sign(officerNonce, officerSignature, { ownsTransaction: false });
-
 				for (const officer of sortedOfficers) {
 					await this.ctx.db.exec(
 						`insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes)
 							with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
 						values (:authorityId, :effectiveAt, :userId, :title, :scopes)`,
 						{
-							nonce: officerNonce,
+							nonce: promotionNonce,
 							authorityId: this.authority.id,
 							effectiveAt: matched.effectiveAtCanon,
 							userId: officer.userId,

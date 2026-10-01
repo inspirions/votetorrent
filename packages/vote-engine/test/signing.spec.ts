@@ -17,6 +17,7 @@ import { SigningSignBuilder } from '../src/signing/builders/signing-sign-builder
 import { SigningStartSigningSessionBuilder } from '../src/signing/builders/signing-start-signing-session-builder.js'
 import { createTestNetwork, addTestAuthority, addTestElection, makeTestSignature } from './fixtures/test-context.js'
 import { nowCanonicalDatetime, digestToBytes } from '../src/utils.js'
+import { computeRadProposalDigest, readProposedRosterJson } from '../src/authority/rad-roster-digest.js'
 import type { EngineContext } from '../src/types.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { AsyncStorage } from './shims/react-native'
@@ -652,22 +653,29 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
       }
     )
 
+    // 62-03 (D-33/D-34): full-roster 'rad' PROPOSAL digest — Digest(AuthorityId,
+    // EffectiveAt, Officers, ThresholdPolicies), no Tid, matching
+    // AdminSignatureTaskExtension.MutationValid's recomputation exactly.
     // 999.1 R-02/R-04: this row is created BEFORE the officer actually signs (the task is
     // "pending" until completeSignature runs with a real secp256k1 key, below) — same
     // DEBT-11 shape as elections-engine.ts's debugSeedPendingTasks — so it takes the
     // explicit IsPlaceholderSignature escape hatch.
+    const seedRosterJson = await readProposedRosterJson(auth.ctx.db, auth.authority.id, adminEffectiveAt)
+    const seedDigest = await computeRadProposalDigest(auth.ctx.db, {
+      authorityId: auth.authority.id,
+      effectiveAt: adminEffectiveAt,
+      officers: seedRosterJson,
+      thresholdPolicies
+    })
     await auth.ctx.db.exec(
       `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
        with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
-       values (:nonce, :authorityId, :adminEffectiveAt, 'rad',
-               Digest(:tid, :authorityId, :adminEffectiveAt, :thresholdPolicies),
-               :userId, :signerKey, :signature)`,
+       values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
       {
         nonce,
         authorityId: auth.authority.id,
         adminEffectiveAt,
-        thresholdPolicies,
-        tid,
+        digest: seedDigest,
         now: nowCanonicalDatetime(),
         userId: sig.signerUserId,
         signerKey: sig.signerKey,
@@ -910,27 +918,32 @@ describe('completeSignature reject-branch (D-12)', () => {
       }
     )
 
-    // Step 2: Insert AdminSigning with the 4-arg Digest formula that
-    // AdminSignatureTaskExtension.MutationValid will recompute at extension-INSERT time:
-    //   Digest(context.Tid, PA.AuthorityId, PA.EffectiveAt, PA.ThresholdPolicies)
+    // Step 2: Insert AdminSigning with the full-roster 'rad' PROPOSAL digest (62-03,
+    // D-33/D-34) that AdminSignatureTaskExtension.MutationValid will recompute at
+    // extension-INSERT time: Digest(PA.AuthorityId, PA.EffectiveAt, <roster>,
+    // PA.ThresholdPolicies), no Tid.
     // We do NOT call sign() here — AdminSignature must be absent when the extension is inserted
     // (the extension's MutationValid "not exists AdminSignature for uncompleted task" gate).
     // 999.1 R-02/R-04: this row is created BEFORE the officer actually signs (mirrors
     // the DEBT-11 shape used elsewhere — the officer's real decision arrives via
     // completeSignature, not at seed time) — takes the explicit IsPlaceholderSignature
     // escape hatch rather than a real signature.
+    const rejectRosterJson = await readProposedRosterJson(auth.ctx.db, auth.authority.id, adminEffectiveAt)
+    const rejectSeedDigest = await computeRadProposalDigest(auth.ctx.db, {
+      authorityId: auth.authority.id,
+      effectiveAt: adminEffectiveAt,
+      officers: rejectRosterJson,
+      thresholdPolicies
+    })
     await auth.ctx.db.exec(
       `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
        with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
-       values (:nonce, :authorityId, :adminEffectiveAt, 'rad',
-               Digest(:tid, :authorityId, :adminEffectiveAt, :thresholdPolicies),
-               :userId, :signerKey, :signature)`,
+       values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
       {
         nonce,
         authorityId: auth.authority.id,
         adminEffectiveAt,
-        thresholdPolicies,
-        tid,
+        digest: rejectSeedDigest,
         now: nowCanonicalDatetime(),
         userId: sig.signerUserId,
         signerKey: sig.signerKey,

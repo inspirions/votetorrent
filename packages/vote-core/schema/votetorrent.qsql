@@ -134,10 +134,19 @@ declare schema main
 		),
 		constraint MutationValid check (
 			-- Initial admin for the first authority - no invite, no signing
+			-- D-48 (62-03, founding row only): the own-table `count(*) <= 1` conjunct below
+			-- counts the row currently being checked (proven by probe P6), so this branch now
+			-- admits ONLY the FIRST Admin of a single-Authority network, never a second
+			-- unsigned one. The branch stays Tid-free and signature-free on purpose — this is
+			-- the exact shape `NetworksEngine.create()` and the 62-16 founding-bundle replay
+			-- use (D-48). Later admins and officers enter only through the signed promotion
+			-- (branch 3 below) or the invite path (branch 2). DO NOT relax this back to the
+			-- Authority count alone — that was the hole D-48 closes.
 			(
 				context.SigningNonce is null and context.InviteSlotCid is null and context.InviteSignature is null
 					and old.AuthorityId is null -- an insertion
 					and not exists (select 1 from Authority where Id <> new.AuthorityId)
+					and (select count(*) from Admin FoundingAdmin where FoundingAdmin.AuthorityId = new.AuthorityId) <= 1
 			)
 				-- or, if an invite is present this is a new authority - invite is valid
 				or (
@@ -150,7 +159,10 @@ declare schema main
 									context.Tid, A.Id, A.Name, A.DomainName, A.ImageRef,
 									(select Digest(EffectiveAt, ThresholdPolicies)
 											from Admin A where A.AuthorityId = new.AuthorityId and A.EffectiveAt = new.EffectiveAt),
-									-- D-09: sort + bind first officer to make the multi-row scalar subquery deterministic under quereus 3.3.0
+									-- D-09: sort + bind first officer to make the multi-row scalar subquery deterministic under quereus 3.3.0.
+									-- Still `limit 1` here (unchanged by D-33b): network-engine.ts maps every
+									-- init officer to the caller, and Officer's PK includes UserId, so the
+									-- invite path can hold exactly ONE Officer row — `limit 1` IS the full roster.
 									(select Digest(AdminEffectiveAt, UserId, Title, Scopes)
 										from (select * from Officer where AuthorityId = new.AuthorityId and AdminEffectiveAt = new.EffectiveAt order by UserId asc limit 1))
 								)
@@ -162,13 +174,33 @@ declare schema main
 						and exists (
 							select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
 								where A.Nonce = context.SigningNonce
+									-- D-33/D-34 (62-03): full-roster PROMOTION digest, replacing the D-09
+									-- first-officer shortcut. The roster is sourced from ProposedOfficer (the
+									-- signed, already-complete proposal roster), cast(...as text) — a
+									-- cryptographic requirement, not a comparison nicety: an uncast
+									-- json_group_array(...) hashes under the Digest() UDF's JSON tag, never the
+									-- TEXT tag the TS side's string-typed bound parameter uses
+									-- (62-RESEARCH-SCHEMA.md Security Domain V6). Per D-34, any 'rad' session
+									-- signed before this CHECK landed (including this plan's own pre-62-03
+									-- single-officer-shortcut shape) is non-re-derivable by this formula and
+									-- refuses promotion fail-closed — no migration, see STATE.md Phase 62-03
+									-- entry (extends the 57-15 accepted-risk entry). DO NOT loosen this CHECK
+									-- (no `limit 1` shortcut, no dropped roster argument) to unblock a legacy
+									-- session.
 									and A.Digest = Digest(
 										context.Tid, new.AuthorityId,
 										(select Digest(EffectiveAt, ThresholdPolicies)
 												from Admin Ad where Ad.AuthorityId = new.AuthorityId and Ad.EffectiveAt = new.EffectiveAt),
-										-- D-09: sort + bind first officer to make the multi-row scalar subquery deterministic under quereus 3.3.0
-										(select Digest(AdminEffectiveAt, UserId, Title, Scopes)
-												from (select * from Officer where AuthorityId = new.AuthorityId and AdminEffectiveAt = new.EffectiveAt order by UserId asc limit 1))
+										cast((
+											select json_group_array(json_object(
+												'proposedName', ProposedName, 'userId', UserId, 'title', Title, 'scopes', Scopes
+											))
+											from (
+												select * from ProposedOfficer
+												where AuthorityId = new.AuthorityId and AdminEffectiveAt = new.EffectiveAt
+												order by ProposedName asc, UserId asc
+											)
+										) as text)
 									)
 						)
 				)
@@ -202,7 +234,16 @@ declare schema main
 		constraint OnlyInsert check on update, delete (false),
 		constraint InsertValid check on insert (
 			-- part of the very first authority in the network - no invite, no signing
-			(context.SigningNonce is null and context.InviteSlotCid is null and context.InviteSignature is null and (select count(*) from Authority) = 1)
+			-- D-48 (62-03, founding row only): formulation A, same discipline as
+			-- Admin.MutationValid branch 1 above — the own-table `count(*) <= 1` for THIS
+			-- table plus `= 1` for the founding Admin together admit ONLY the first Officer
+			-- under the sole founding Admin, never a second unsigned one. Tid-free and
+			-- signature-free on purpose (the 62-16 founding replay). Later officers enter
+			-- only through the signed promotion (branch 3 below) or the invite path
+			-- (branch 2). DO NOT relax this back to the Authority count alone.
+			(context.SigningNonce is null and context.InviteSlotCid is null and context.InviteSignature is null and (select count(*) from Authority) = 1
+				and (select count(*) from Officer FoundingOfficer where FoundingOfficer.AuthorityId = new.AuthorityId) <= 1
+				and (select count(*) from Admin FoundingAdmin where FoundingAdmin.AuthorityId = new.AuthorityId) = 1)
 			-- part of the first admin for an authority - invite is valid (D-07c: existence-only; cryptographic binding moved to Admin.MutationValid TX3; Authority count relaxed to 1 per D-07a insert order)
 				or (context.SigningNonce is null and context.InviteSlotCid is not null and context.InviteSignature is not null
 					and (select count(*) from Authority where Id = new.AuthorityId) = 1
@@ -216,13 +257,41 @@ declare schema main
 					and exists (
 							select 1 from AdminSignature ASig join AdminSigning A on A.Nonce = ASig.SigningNonce
 								where A.Nonce = context.SigningNonce
+									-- D-33/D-34 (62-03): the SAME full-roster PROMOTION digest as
+									-- Admin.MutationValid branch 3 — one shared session now covers both the
+									-- Admin insert and every Officer insert of the promotion. See that
+									-- constraint's comment for the cast(...as text) cryptographic rationale
+									-- and the D-34 no-migration/DO-NOT-loosen rule (same formula, same rule,
+									-- same STATE.md entry).
 									and A.Digest = Digest(
 										context.Tid, new.AuthorityId,
 										(select Digest(EffectiveAt, ThresholdPolicies)
 												from Admin Ad where Ad.AuthorityId = new.AuthorityId and Ad.EffectiveAt = new.AdminEffectiveAt),
-										-- D-09: sort + bind first officer to make the multi-row scalar subquery deterministic under quereus 3.3.0
-										(select Digest(AdminEffectiveAt, UserId, Title, Scopes)
-												from (select * from Officer where AuthorityId = new.AuthorityId and AdminEffectiveAt = new.AdminEffectiveAt order by UserId asc limit 1))
+										cast((
+											select json_group_array(json_object(
+												'proposedName', ProposedName, 'userId', UserId, 'title', Title, 'scopes', Scopes
+											))
+											from (
+												select * from ProposedOfficer
+												where AuthorityId = new.AuthorityId and AdminEffectiveAt = new.AdminEffectiveAt
+												order by ProposedName asc, UserId asc
+											)
+										) as text)
+									)
+						)
+						-- D-33 (RosterMember): this specific Officer row (UserId, Title, Scopes) must
+						-- itself be an entry of the SIGNED ProposedOfficer roster — closes the gap where
+						-- a valid promotion session admitted ANY officer tuple, not just the ones
+						-- actually signed for (T-62-03-01). The null-UserId/User.Name fallback mirrors
+						-- applyAdminProposal Step 4's resolution exactly (the documented CR-01 residual:
+						-- User.Name is renameable, reachable only for a null-UserId `.init`/legacy entry).
+						and exists (
+							select 1 from ProposedOfficer PO
+								where PO.AuthorityId = new.AuthorityId and PO.AdminEffectiveAt = new.AdminEffectiveAt
+									and PO.Title = new.Title and PO.Scopes = new.Scopes
+									and (
+										PO.UserId = new.UserId
+											or (PO.UserId is null and exists (select 1 from User U where U.Id = new.UserId and U.Name = PO.ProposedName))
 									)
 						)
 				)
@@ -1563,18 +1632,51 @@ declare schema main
 	table AdminSignatureTaskExtension (
 		TaskId text primary key, -- references Task.Id
 		AuthorityId text, -- references Authority.Id
-		AdminEffectiveAt datetime, -- references Admin.EffectiveAt
+		AdminEffectiveAt datetime, -- references ProposedAdmin.EffectiveAt (the PROPOSED administration being co-signed)
 		constraint TaskIdValid check (exists (select 1 from Task T where T.Id = new.TaskId and T.Type = 'signature' and T.SignatureType = 'admin')),
 		constraint AuthorityIdValid check (exists (select 1 from Authority A where A.Id = new.AuthorityId)),
-		constraint AdminEffectiveAtValid check (exists (select 1 from Admin A where A.AuthorityId = new.AuthorityId and A.EffectiveAt = new.AdminEffectiveAt)),
+		-- D-33/D-34 (62-03): was `exists (select 1 from Admin ...)` — a LIVE administration.
+		-- A real Trigger B co-signer task is seeded while the administration it covers is
+		-- still a PROPOSAL (no Admin row exists until promotion), so this must reference
+		-- ProposedAdmin instead. DO NOT revert to Admin: that made every genuine Trigger B
+		-- task structurally unreachable (the task listing's own `left join ProposedAdmin PA
+		-- ... PA.EffectiveAt = E.AdminEffectiveAt` in signature-tasks-engine.ts already
+		-- treats this column as the PROPOSED EffectiveAt).
+		constraint AdminEffectiveAtValid check (exists (select 1 from ProposedAdmin PA where PA.AuthorityId = new.AuthorityId and PA.EffectiveAt = new.AdminEffectiveAt)),
 		constraint MutationValid check on insert, update (
 			exists (
 				select 1 from Task T join AdminSigning A on A.Nonce = T.SigningNonce and A.Scope = 'rad'
 					join ProposedAdmin PA on PA.AuthorityId = new.AuthorityId and PA.EffectiveAt = new.AdminEffectiveAt
 						where T.Id = new.TaskId and T.Type = 'signature' and T.SignatureType = 'admin'
 							and T.IsCompleted = false
+							-- D-33/D-34 (62-03): the full-roster 'rad' PROPOSAL digest
+							-- `Digest(AuthorityId, EffectiveAt, Officers, ThresholdPolicies)` — NO
+							-- context.Tid (AdminSigning.Digest for 'rad' never includes it; the prior
+							-- 4-argument context.Tid-leading formula could never match a real session).
+							-- The roster aggregate below MUST be `cast(...as text)`: an uncast
+							-- json_group_array(...) hashes under the Digest() UDF's JSON tag, not its
+							-- TEXT tag, and can never match the TS side's string-typed bound parameter
+							-- (62-RESEARCH-SCHEMA.md Security Domain V6 — a cryptographic requirement,
+							-- not a comparison nicety).
+							-- Per D-34, any 'rad' session signed before THIS check landed (both the
+							-- pre-57-12/13 shape and this plan's own stale 4-arg shape) is non-
+							-- re-derivable by this formula and refuses fail-closed — no migration, see
+							-- STATE.md Phase 62-03 entry (extends the 57-15 accepted-risk entry).
+							-- DO NOT loosen this CHECK (no reverting to the 4-arg shape, no dropping the
+							-- roster argument) to unblock a legacy session.
 							and A.Digest = Digest(
-								context.Tid, PA.AuthorityId, PA.EffectiveAt, PA.ThresholdPolicies
+								PA.AuthorityId, PA.EffectiveAt,
+								cast((
+									select json_group_array(json_object(
+										'proposedName', ProposedName, 'userId', UserId, 'title', Title, 'scopes', Scopes
+									))
+									from (
+										select * from ProposedOfficer
+										where AuthorityId = PA.AuthorityId and AdminEffectiveAt = PA.EffectiveAt
+										order by ProposedName asc, UserId asc
+									)
+								) as text),
+								PA.ThresholdPolicies
 							)
 			)
 			-- if the admin change has been fully signed, no uncompleted tasks should be left
@@ -1881,8 +1983,8 @@ declare schema main
 		RequesterKey text, -- the requester's (or bridge's) public key
 		IssuerType text default 'registrant', -- references RegistrationRequestIssuer(Code)
 		BridgeId text null, -- references RegistrationBridgeKey.Id when IssuerType = 'bridge'
-		Payload text, -- JSON RegisterInit
-		PayloadCid text, -- content-addressed hash of Payload
+		Payload text, -- D-49: sealed envelope (vt-env-1) of the JSON RegisterInit; pre-D-49 rows hold the plaintext JSON
+		PayloadCid text, -- Digest of the PLAINTEXT RegisterInit JSON (DG-1 argument); rechecked by the engine at open time (D-49)
 		Status text default 'p', -- references RegistrationRequestStatus(Code)
 		SubmittedAt datetime, -- submitter-supplied, inside DG-1 (see comment above)
 		ReceivedAt datetime, -- authority-observed intake time, inside NO digest (see comment above)
@@ -1902,8 +2004,19 @@ declare schema main
 					select 1 from RegistrationBridgeKey B where B.Id = new.BridgeId and B.BridgeKey = new.RequesterKey and B.RevokedAt is null
 				))
 		),
-		-- payload's digest-boundness is what makes DG-1 cover the payload transitively
-		constraint PayloadCidValid check (PayloadCid = Digest(Payload)),
+		-- D-49 (T-62-01-10, 62-03): the digest-bound Payload CHECK that lived here before this
+		-- plan re-derived Digest(Payload) on every peer, which forced the PLAINTEXT
+		-- RegisterInit JSON into this replicated column. Dropped so the engine can store a
+		-- D-04 sealed envelope (vt-env-1, sealed to the officers current at intake) instead —
+		-- the plaintext never rides the strand. PayloadCid is still the Digest of that
+		-- plaintext and still inside DG-1 (SignatureValid below keeps binding it to the
+		-- requester at tier 1 — unchanged). The Payload-to-PayloadCid binding moves to a
+		-- tier-2 recheck the engine performs at every OPEN (Digest(<opened plaintext>) must
+		-- equal PayloadCid, failing closed) — a tier-1 CHECK cannot read a sealed payload.
+		-- Rows written before D-49 keep their plaintext forever (no migration, D-07, the same
+		-- accepted-risk posture as D-34). DO NOT re-add a digest-equality check over Payload
+		-- here: it would make every sealed row unwritable and force plaintext back onto every
+		-- peer, undoing the whole point of this change.
 		-- SubmittedAt validates an UNTRUSTED, submitter-supplied value (L-3), not an engine-written one
 		constraint SubmittedAtValid check (isISODatetime(SubmittedAt) and like('%Z', SubmittedAt)),
 		-- ReceivedAt is written by the engine with toIsoZDatetime
@@ -2527,7 +2640,7 @@ declare schema main
 		Cid text, -- content-addressed hash of this record
 		RegistrantId text, -- references Registrant.Id
 		Expiration datetime,
-		PrivateDetails text null, -- json array of { name, value, hint? } triples (recursive); never disclosed
+		PrivateDetails text null, -- json array of { name, value, hint? } triples (recursive); never disclosed; D-49: stored as a sealed envelope (vt-env-1) to the officers current at write time, pre-D-49 rows hold the plaintext
 		primary key (RegistrantId, Cid), -- registrant-clustered storage key (one ranged fetch per registrant); Cid retains its content-integrity role
 		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId)),
 		constraint ExpirationValid check (isISODatetime(Expiration) and like('%Z', Expiration)),
