@@ -1,25 +1,29 @@
 /**
- * ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18) — the Face-ID confirmation
- * screen. The "Confirm with Face ID" tap IS the deliberate confirming gesture (D-05), not decorative
- * or an auto-advance. `navigation.popToTop()` clears the whole `DeviceAttestation → RegisterPersonal
- * → RegisterAddressParty → RegisterConfirm → Confirmation` chain in one call (41-RESEARCH.md
- * Pattern 5) — NOT `navigate('RegistrationHome')`, which would leave that entire chain on the back
- * stack.
+ * ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18/D-28/D-29/D-32) — the
+ * Face-ID confirmation screen. The "Confirm with Face ID" tap IS the deliberate confirming
+ * gesture (D-05), not decorative or an auto-advance. `navigation.popToTop()` clears the whole
+ * `DeviceAttestation → RegisterPersonal → RegisterAddressParty → RegisterConfirm → Confirmation`
+ * chain in one call (41-RESEARCH.md Pattern 5) — NOT `navigate('RegistrationHome')`, which would
+ * leave that entire chain on the back stack.
  *
- * Plan 11 (D-07 — the whole point of this phase) — REWRITTEN: the voter no longer runs the
- * authority's admin-signed ceremony for either the register step or the associate step.
+ * Plan 11 (D-07) / Phase 62 Plan 22 (D-28/D-29/D-32) — the voter never runs the authority's
+ * admin-signed ceremony for either the register step or the associate step.
  * `doc/registration.md:10/:105/:119` puts issuing the challenge, verifying the produced attestation,
  * signing and writing on the AUTHORITY's side; the voter's job is to SUBMIT self-signed requests and
  * an answer, never to sign as an officer. The officer signer (`useVoterApp().sign`) is deliberately
- * not even destructured in this file — it must not appear anywhere in this ceremony.
+ * not even destructured in this file — it must not appear anywhere in this ceremony. Delivery is
+ * P2P by default over the Voter's own joined-network strand, or the authority-configured REST
+ * bridge for registration only — association is ALWAYS P2P (D-28/D-29, `attach-voter-request-
+ * transport.ts`'s `resolveVoterRequestTransports`).
  *
  * The ceremony (order matters — the biometric-last property, D-06/D-15/D-16, is unchanged):
  *   1. `provisionDeviceKey()` — resolves the hardware-backed P-256 public key BEFORE any request is
  *      submitted. Idempotent; does NOT prompt biometric.
  *   2. Map the shared draft onto `RegisterInit` tiers (unchanged tier mapping / WR-04).
- *   3. Submit a self-signed registration-request document through the REST transport
+ *   3. Submit a self-signed registration-request document through the joined network's transports
  *      (`attach-voter-request-transport.ts`), signed under the voter's OWN secp256k1 device
- *      identity — never the officer signer.
+ *      identity (62-08's `createDeviceSigner`, unwrapped in memory — D-42) — never the officer
+ *      signer.
  *   4. Submit a self-signed association-request document bound to the P-256 device key, then poll
  *      (bounded, no timer-based background poller) for the authority's challenge-issued decision
  *      notice — never calling the authority's challenge-issuing engine method directly.
@@ -35,6 +39,12 @@
  * requires an `expiration` field on `registrant`/`private`/`selective` (the type is unchanged this
  * phase); a clearly-named placeholder is passed and IGNORED — the authority's approval path
  * overrides it with its own policy-derived value before ever creating the Registrant record.
+ *
+ * D-32/D-05: both inits (not just their ids) are minted once per mounted attempt and reused
+ * byte-identical on every "Try Again" retry — a P2P re-submit of an identical Digest + RequesterKey
+ * is idempotent, but a fresh `submittedAt` would change the Digest and be refused forever as
+ * 'duplicate-request-id'. The bounded, timer-free poll is unchanged; a timeout is recovered by
+ * "Try Again", which re-submits idempotently and polls again.
  *
  * On any thrown step, `classifyAttestationFailure(err)` (D-09) drives the failure UX exactly as
  * before: `'recoverable-action'` renders a setup prompt + retry reusing the same `registrantId`
@@ -134,6 +144,12 @@ export default function ConfirmationScreen() {
 	// mount, so the refs reset naturally without leaking the prior attempt's ids.
 	const registrantIdRef = useRef<string | null>(null);
 	const associationRequestIdRef = useRef<string | null>(null);
+	// Phase 62 Plan 22 (D-28/D-32): the FULL init objects (not just their ids) are also minted once
+	// and reused byte-identical on every retry. 62-15's P2P transports treat an identical
+	// Digest + RequesterKey re-submit as idempotent (D-05) — a fresh `submittedAt` on retry would
+	// instead be refused forever as 'duplicate-request-id'.
+	const registrationRequestInitRef = useRef<RegistrationRequestInit | null>(null);
+	const associationRequestInitRef = useRef<AssociationRequestInit | null>(null);
 
 	async function onConfirm() {
 		if (isSubmitting) {
@@ -169,9 +185,10 @@ export default function ConfirmationScreen() {
 			const deviceUserKey = deviceUser.activeKeys[0]!.key;
 			const deviceSign = await createDeviceSigner('Device User');
 
-			// D-07/D-08: reach the authority ONLY through the D-01 REST transport pair, behind two
-			// independent dev gates. Unreachable is a user-visible condition, never a crash.
-			const transports = resolveVoterRequestTransports();
+			// D-28/D-29/D-32: reach the authority through the joined network's own strand — P2P by
+			// default, or the authority-configured REST bridge for registration only. Unreachable
+			// (no delivery path at all) is a user-visible condition, never a crash.
+			const transports = await resolveVoterRequestTransports({getEngine, authorityId});
 			if (!transports) {
 				throw new Error('Cannot reach the authority right now — please try again later.');
 			}
@@ -219,26 +236,37 @@ export default function ConfirmationScreen() {
 			// (1) Submit the self-signed registration request document — never a direct write, and
 			// never the officer signer. Reuses the registrantId as the request document's own id (no
 			// cross-table uniqueness constraint requires otherwise, and it keeps a single id to reuse
-			// on retry).
-			const registrationRequestInit: RegistrationRequestInit = {
-				id: registrantId,
-				authorityId,
-				payload: init,
-				submittedAt: new Date().toISOString(),
-			};
+			// on retry). D-05/D-32: the whole init (including submittedAt) is minted ONCE and reused
+			// byte-identical on every retry, so a P2P re-submit after a timeout is idempotent instead
+			// of a permanent 'duplicate-request-id'.
+			let registrationRequestInit = registrationRequestInitRef.current;
+			if (registrationRequestInit === null) {
+				registrationRequestInit = {
+					id: registrantId,
+					authorityId,
+					payload: init,
+					submittedAt: new Date().toISOString(),
+				};
+				registrationRequestInitRef.current = registrationRequestInit;
+			}
 			await transports.registrationTransport.submitRequest(registrationRequestInit, deviceUserKey, deviceSign);
 
 			// (2) Submit the self-signed association-request document, bound to the P-256 device
 			// key. The requester key MUST equal the device key (the authority's engine enforces this
-			// with a pre-flight guard) — both are p256DeviceKey.
-			const associationRequestInit: AssociationRequestInit = {
-				id: associationRequestId,
-				authorityId,
-				registrantId,
-				deviceKey: p256DeviceKey,
-				electionId: seededElectionId,
-				submittedAt: new Date().toISOString(),
-			};
+			// with a pre-flight guard) — both are p256DeviceKey. Reused byte-identical on retry, same
+			// idempotency rationale as the registration init above.
+			let associationRequestInit = associationRequestInitRef.current;
+			if (associationRequestInit === null) {
+				associationRequestInit = {
+					id: associationRequestId,
+					authorityId,
+					registrantId,
+					deviceKey: p256DeviceKey,
+					electionId: seededElectionId,
+					submittedAt: new Date().toISOString(),
+				};
+				associationRequestInitRef.current = associationRequestInit;
+			}
 			// The association-request self-signature must verify directly against the P-256 device
 			// key (the schema checks the signature against that exact public key, not against any
 			// registered identity) — `signDeviceKeyDigest` is the producer seam for that.

@@ -89,8 +89,12 @@ function makeRequest(overrides: {
 }
 
 /** Builds a fully-typed `VoterRequestTransports` stub around a caller-supplied `pollDecisions`
- * spy -- every other method is an unused jest.fn() stub (never called by the leg under test). */
-function makeTransports(pollDecisions: VoterAssociationRequestTransport['pollDecisions']): VoterRequestTransports {
+ * spy and an explicit `ownAssociationRequestIds` list (D-32 attribution) -- every other method is
+ * an unused jest.fn() stub (never called by the leg under test). */
+function makeTransports(
+	pollDecisions: VoterAssociationRequestTransport['pollDecisions'],
+	ownIds: string[] = [],
+): VoterRequestTransports {
 	const associationTransport: VoterAssociationRequestTransport = {
 		submitRequest: jest.fn(),
 		submitAttestation: jest.fn(),
@@ -100,7 +104,12 @@ function makeTransports(pollDecisions: VoterAssociationRequestTransport['pollDec
 		submitRequest: jest.fn(),
 		pollDecisions: jest.fn(),
 	};
-	return {associationTransport, registrationTransport};
+	return {
+		associationTransport,
+		registrationTransport,
+		registrationRoute: 'peer',
+		ownAssociationRequestIds: jest.fn(async () => ownIds),
+	};
 }
 
 interface BuildDepsParams {
@@ -194,17 +203,69 @@ describe('resolveRegistrationStatus (D-06/D-23, four-outcome derived read)', () 
 		expect(resultC).toEqual({kind: 'pending', networkName: NETWORK_NAME});
 	});
 
-	test('pending (transport corroboration, D-23 d): zero Association rows, no matching engine request, an attached transport corroborates pending', async () => {
+	test('pending (transport corroboration, D-23 d / D-32): a \'c\' notice for a request id IN ownAssociationRequestIds(p256DeviceKey) corroborates pending', async () => {
+		// Rewritten for Phase 62 Plan 22 (D-32): the corroboration leg now filters notices to this
+		// device's own staged request ids (by RequesterKey) BEFORE testing status, so the notice id
+		// must be present in the mocked ownAssociationRequestIds list to be attributed.
 		const associationEngine = makeAssociationEngine({rows: [], requests: []});
 		const pollDecisions = jest.fn(async () => [
-			{requestId: 'unattributable-request', status: 'p', cursor: 'cursor-1'},
+			{requestId: 'own-request-1', status: 'c', cursor: 'cursor-1'},
 		]);
-		const resolveTransports = jest.fn(() => makeTransports(pollDecisions));
+		const resolveTransports = jest.fn(async () => makeTransports(pollDecisions, ['own-request-1']));
 
 		const result = await resolveRegistrationStatus(buildDeps({associationEngine, resolveTransports}));
 
 		expect(result).toEqual({kind: 'pending', networkName: NETWORK_NAME});
 		expect(pollDecisions).toHaveBeenCalledTimes(1);
+	});
+
+	test('notRegistered (transport corroboration, D-32): a \'c\' notice for a request id NOT in ownAssociationRequestIds never produces pending', async () => {
+		const associationEngine = makeAssociationEngine({rows: [], requests: []});
+		const pollDecisions = jest.fn(async () => [
+			{requestId: 'someone-elses-request', status: 'c', cursor: 'cursor-1'},
+		]);
+		// ownAssociationRequestIds deliberately does NOT include 'someone-elses-request'.
+		const resolveTransports = jest.fn(async () => makeTransports(pollDecisions, ['own-request-1']));
+
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine, resolveTransports}));
+
+		expect(result).toEqual({kind: 'notRegistered', networkName: NETWORK_NAME});
+	});
+
+	test('notRegistered: resolveTransports resolving undefined never corroborates pending (D-28 — no delivery path)', async () => {
+		const associationEngine = makeAssociationEngine({rows: [], requests: []});
+		const resolveTransports = jest.fn(async () => undefined);
+
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine, resolveTransports}));
+
+		expect(result).toEqual({kind: 'notRegistered', networkName: NETWORK_NAME});
+	});
+
+	test('notRegistered, never indeterminate: a rejecting resolveTransports falls through to notRegistered (the leg is corroborating-only)', async () => {
+		const associationEngine = makeAssociationEngine({rows: [], requests: []});
+		const resolveTransports = jest.fn(async () => {
+			throw new Error('transport source unavailable');
+		});
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine, resolveTransports}));
+
+		expect(result).toEqual({kind: 'notRegistered', networkName: NETWORK_NAME});
+		errorSpy.mockRestore();
+	});
+
+	test('notRegistered, never indeterminate: a rejecting ownAssociationRequestIds falls through to notRegistered', async () => {
+		const associationEngine = makeAssociationEngine({rows: [], requests: []});
+		const pollDecisions = jest.fn(async () => [{requestId: 'own-request-1', status: 'c', cursor: 'cursor-1'}]);
+		const transports = makeTransports(pollDecisions, []);
+		(transports.ownAssociationRequestIds as jest.Mock).mockRejectedValueOnce(new Error('own-ids read failed'));
+		const resolveTransports = jest.fn(async () => transports);
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine, resolveTransports}));
+
+		expect(result).toEqual({kind: 'notRegistered', networkName: NETWORK_NAME});
+		errorSpy.mockRestore();
 	});
 
 	test('notRegistered (rejected): zero Association rows and the only matching request is rejected (r) resolves notRegistered', async () => {
@@ -262,10 +323,10 @@ describe('resolveRegistrationStatus (D-06/D-23, four-outcome derived read)', () 
 		expect(resultUnscoped.kind).toBe('pending');
 	});
 
-	test('transport never claims registered: a pollDecisions notice with status a does not produce registered', async () => {
+	test('transport never claims registered: an OWN notice with status a does not produce registered (D-32)', async () => {
 		const associationEngine = makeAssociationEngine({rows: [], requests: []});
-		const pollDecisions = jest.fn(async () => [{requestId: 'unattributable-request', status: 'a', cursor: 'cursor-1'}]);
-		const resolveTransports = jest.fn(() => makeTransports(pollDecisions));
+		const pollDecisions = jest.fn(async () => [{requestId: 'own-request-1', status: 'a', cursor: 'cursor-1'}]);
+		const resolveTransports = jest.fn(async () => makeTransports(pollDecisions, ['own-request-1']));
 
 		const result = await resolveRegistrationStatus(buildDeps({associationEngine, resolveTransports}));
 

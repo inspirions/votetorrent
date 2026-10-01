@@ -27,6 +27,7 @@
  */
 import type {Association, IAssociationEngine, INetworkEngine, IRegistrationEngine} from '@votetorrent/vote-core';
 import {resolveVoterRequestTransports} from '../screens/registration/attach-voter-request-transport';
+import type {VoterRequestTransportDeps, VoterRequestTransports} from '../screens/registration/attach-voter-request-transport';
 
 export type RegistrationStatusKind = 'registered' | 'pending' | 'notRegistered' | 'indeterminate';
 
@@ -44,8 +45,8 @@ export interface RegistrationStatusDeps {
 	 * never `getOrCreateDeviceUser` (see this file's header). */
 	provisionDeviceKey: () => Promise<{publicKey: string}>;
 	/** Defaults to `resolveVoterRequestTransports` — injected so every branch below is testable
-	 * without the real `__DEV__` + base-URL transport gate. */
-	resolveTransports?: () => ReturnType<typeof resolveVoterRequestTransports>;
+	 * without the real P2P/strand transport source (D-28/D-32). */
+	resolveTransports?: (deps: VoterRequestTransportDeps) => Promise<VoterRequestTransports | undefined>;
 	/** Narrows `listAssociationRequests` results to this election — a request whose own
 	 * `electionId` is set and differs is ignored; a request with no `electionId` is accepted
 	 * regardless. */
@@ -120,24 +121,27 @@ export async function resolveRegistrationStatus(deps: RegistrationStatusDeps): P
 		// leg before concluding `notRegistered`.
 
 		// D-23(d)'s explicitly named corroborating leg — deliberately narrow: one call, never a
-		// loop, never a re-delivery/cursor walk. In every normal build `resolveTransports()`
-		// returns `undefined` (F2: `__DEV__` AND a configured base URL are both required), so this
-		// leg is skipped entirely outside a device-proof session.
-		const transports = (deps.resolveTransports ?? resolveVoterRequestTransports)();
-		if (transports) {
-			// `AssociationDecisionNotice` carries NO `deviceKey` (F3), and the ceremony's own
-			// `associationRequestId` lives in a `useRef` D-23 forbids persisting — so a notice
-			// cannot be attributed to THIS device. This leg is therefore permitted to move
-			// `notRegistered -> pending` ONLY, never to claim `registered`: showing "awaiting a
-			// decision" to a device whose feed happens to carry someone else's request is
-			// strictly less of a lie than telling a voter who just completed the ceremony that
-			// they are not registered.
-			const notices = await transports.associationTransport.pollDecisions();
-			if (notices.some(n => n.status === 'p' || n.status === 'c')) {
-				return {kind: 'pending', networkName};
+		// loop, never a re-delivery/cursor walk. Phase 62 Plan 22 (D-32): notices are now
+		// attributable on the Voter's own P2P strand through this device's own `RequesterKey`, so
+		// another voter's challenge no longer reads as this voter's pending state (the F2/F3
+		// `__DEV__`-gate-era caveats below are obsolete and have been removed). This leg runs in
+		// its OWN try/catch — it is corroborating-only, so a failure here must fall through to
+		// `notRegistered`, never escape to the outer catch (which would report `indeterminate`).
+		try {
+			const resolve = deps.resolveTransports ?? resolveVoterRequestTransports;
+			const transports = await resolve({getEngine: deps.getEngine, authorityId});
+			if (transports) {
+				const ownIds = new Set(await transports.ownAssociationRequestIds(p256DeviceKey));
+				const notices = await transports.associationTransport.pollDecisions();
+				const mine = notices.filter(n => ownIds.has(n.requestId));
+				if (mine.some(n => n.status === 'p' || n.status === 'c')) {
+					return {kind: 'pending', networkName};
+				}
+				// A notice with status 'a' must NEVER produce `registered` here — intentionally
+				// ignored, falling through to `notRegistered` below.
 			}
-			// A notice with status 'a' must NEVER produce `registered` here — intentionally
-			// ignored, falling through to `notRegistered` below.
+		} catch (err) {
+			console.error('resolveRegistrationStatus: transport corroboration leg failed:', err);
 		}
 
 		return {kind: 'notRegistered', networkName};

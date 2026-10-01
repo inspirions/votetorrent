@@ -218,6 +218,7 @@ const mockRegistrationTransport = {
 	submitRequest: mockRegistrationSubmitRequest,
 	pollDecisions: jest.fn(async () => []),
 };
+const mockOwnAssociationRequestIds = jest.fn(async (_requesterKey: string) => [] as string[]);
 const mockAssociationTransport = {
 	submitRequest: mockAssociationSubmitRequest,
 	submitAttestation: mockAssociationSubmitAttestation,
@@ -227,11 +228,17 @@ const mockAssociationTransport = {
 type ResolvedTransports = {
 	registrationTransport: typeof mockRegistrationTransport;
 	associationTransport: typeof mockAssociationTransport;
+	registrationRoute: 'peer' | 'rest-bridge';
+	ownAssociationRequestIds: typeof mockOwnAssociationRequestIds;
 };
+// Phase 62 Plan 22 (D-28/D-32): the resolver is now ASYNC (`Promise<VoterRequestTransports |
+// undefined>`), called with `{getEngine, authorityId}` rather than no arguments.
 const mockResolveVoterRequestTransports = jest.fn(
-	(..._args: unknown[]): ResolvedTransports | undefined => ({
+	async (..._args: unknown[]): Promise<ResolvedTransports | undefined> => ({
 		registrationTransport: mockRegistrationTransport,
 		associationTransport: mockAssociationTransport,
+		registrationRoute: 'peer',
+		ownAssociationRequestIds: mockOwnAssociationRequestIds,
 	}),
 );
 jest.mock('../attach-voter-request-transport', () => ({
@@ -315,6 +322,7 @@ beforeEach(() => {
 	mockAssociationSubmitAttestation.mockClear();
 	mockPollDecisions.mockClear();
 	mockResolveVoterRequestTransports.mockClear();
+	mockOwnAssociationRequestIds.mockClear();
 
 	mockProvisionDeviceKey.mockImplementation(async () => {
 		callOrder.push('provisionDeviceKey');
@@ -341,9 +349,11 @@ beforeEach(() => {
 			},
 		];
 	});
-	mockResolveVoterRequestTransports.mockImplementation(() => ({
+	mockResolveVoterRequestTransports.mockImplementation(async () => ({
 		registrationTransport: mockRegistrationTransport,
 		associationTransport: mockAssociationTransport,
+		registrationRoute: 'peer' as const,
+		ownAssociationRequestIds: mockOwnAssociationRequestIds,
 	}));
 
 	callOrder.length = 0;
@@ -444,8 +454,20 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(registrationRequestInits[0].payload.electionId).toBe(SEEDED_ELECTION_ID);
 	});
 
-	it('the transport resolver returning undefined (both dev gates closed) surfaces the generic failure class and does not crash', async () => {
-		mockResolveVoterRequestTransports.mockReturnValueOnce(undefined);
+	it('the transport resolver returning undefined (no delivery path, D-28) surfaces the generic failure class and does not crash', async () => {
+		mockResolveVoterRequestTransports.mockResolvedValueOnce(undefined);
+
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('Something went wrong verifying your device. Try again.');
+		expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+		expect(mockClearDraft).not.toHaveBeenCalled();
+	});
+
+	it("the transport resolver rejecting with {code: 'no-recipients'} (D-32/D-04 zero recipients) surfaces the same generic failure class", async () => {
+		mockResolveVoterRequestTransports.mockRejectedValueOnce({code: 'no-recipients'});
 
 		const tr = renderScreen();
 		await pressConfirm(tr);
@@ -503,6 +525,56 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(associationSubmitRequestCalls[0].init.id).toBe(associationSubmitRequestCalls[1].init.id);
 		expect(associationSubmitRequestCalls[0].init.registrantId).toBe(associationSubmitRequestCalls[1].init.registrantId);
 	});
+
+	it(
+		'idempotent retry (D-05/D-32): a bounded-poll-exhaustion failure, then a successful retry, re-submits the ' +
+			'SAME registration and association init objects (not merely equal ids), with identical submittedAt',
+		async () => {
+			// Attempt 1: EVERY poll call returns [] (never a challenge-issued notice), so the bounded
+			// poll exhausts and the attempt fails with the generic transient copy. A single
+			// `mockImplementationOnce` would not be enough — `pollForNotice` loops up to
+			// MAX_POLL_ATTEMPTS times within ONE attempt, so the whole-attempt implementation must be
+			// overridden, not just its first call.
+			mockPollDecisions.mockImplementation(async () => {
+				callOrder.push('association.pollDecisions');
+				return [];
+			});
+
+			const tr = renderScreen();
+			await pressConfirm(tr, 'confirmation-confirm-face-id', 400); // attempt 1 — poll exhausts
+
+			const text1 = JSON.stringify(tr.toJSON());
+			expect(text1).toContain('Something went wrong verifying your device. Try again.');
+
+			// Attempt 2 ("Try Again"): restore the default pollDecisions implementation (the 'c'
+			// notice), so the retry completes to the pending state.
+			mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+				callOrder.push('association.pollDecisions');
+				return [
+					{
+						requestId: capturedAssociationRequestId,
+						status: 'c',
+						challengeNonce: CHALLENGE_NONCE,
+						cursor: 'cursor-1',
+					},
+				];
+			});
+			await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2 — retry succeeds
+
+			const text2 = JSON.stringify(tr.toJSON());
+			expect(text2).toContain('submitted');
+
+			expect(registrationRequestInits).toHaveLength(2);
+			// Object IDENTITY (toBe), not merely equal fields — the exact same init object is
+			// re-submitted on retry.
+			expect(registrationRequestInits[0]).toBe(registrationRequestInits[1]);
+			expect(registrationRequestInits[0].submittedAt).toBe(registrationRequestInits[1].submittedAt);
+
+			expect(associationSubmitRequestCalls).toHaveLength(2);
+			expect(associationSubmitRequestCalls[0].init).toBe(associationSubmitRequestCalls[1].init);
+			expect(associationSubmitRequestCalls[0].init.submittedAt).toBe(associationSubmitRequestCalls[1].init.submittedAt);
+		},
+	);
 
 	it('does not furnish a blank required field on the registration payload (WR-04 — empty required rejected by policy)', async () => {
 		// A blank required private field (email) must NOT be furnished as {name:'email', value:''}
