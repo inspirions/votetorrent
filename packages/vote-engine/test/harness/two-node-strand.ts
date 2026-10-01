@@ -70,6 +70,18 @@ function scaled (ms: number): number {
  * SUMMARY "Timing" section for the raw numbers). Initial Task 2 defaults, before
  * tuning, are the gate-derived values below. Every value is multiplied by
  * `P2P_HARNESS_TIMEOUT_SCALE` (default 1).
+ *
+ * Measured 2026-10-01, 8/8 runs passing (8 passing, 0 failing each run), host
+ * load (1-min uptime average) ranged 3.47-5.50 across the 8 runs. Per-phase max
+ * observed ms across the 8 passing runs: startAMs 153, startBMs 74, meshMs 4014,
+ * enrolMs 94, strandOpenMs (addStrand+whenStrandWritable combined) 1964. Applying
+ * `max(Task-2 gate-derived default, ceil(3 x observed-max) rounded up to the next
+ * 5000ms)` to each phase keeps every value at its Task 2 gate-derived default
+ * below (3x the observed max never approaches the conservative gate defaults on
+ * a calm host) — the two earlier exploratory runs under host load ~6-16 (8
+ * concurrent wave-1 sibling agents) that timed out/flaked at well under these
+ * defaults are the evidence the generous defaults are warranted, not evidence to
+ * shrink them. No numeric value below changed from the Task 2 defaults.
  */
 export const HARNESS_TIMEOUTS: Readonly<{
   startMs: number
