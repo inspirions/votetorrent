@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# run-reattach-proof.sh — drives reattach-proof.mjs end to end (Phase 51 Plan 05, Task 3).
+# run-reattach-proof.sh — drives reattach-proof.mjs end to end. Originally Phase 51 Plan 05
+# Task 3; generalized by 62-03 (D-22) into a scripted re-attach proof usable against ANY
+# baseline, not just the hardcoded Phase 51 AttestationChallenge shape.
 #
 # Sequence:
 #   1. Extract the PRE-change schema-sql.ts from git at the baseline ref.
 #   2. --seed a fresh on-disk DB under that old schema (real Network/Authority/
-#      Registrant/AttestationChallenge ceremony, via the real vote-engine classes).
+#      Registrant/AttestationChallenge ceremony, via the real vote-engine classes). The
+#      challenge SHAPE (legacy 7-arg vs current 6-arg) is detected from the baseline
+#      schema text itself (reattach-proof.mjs), not hardcoded.
 #   3. --reopen the SAME on-disk path under the CURRENT (post-change) schema and
-#      assert: no throw, no ALTER COLUMN, rows still readable at the seeded count,
-#      and the Expiration column is genuinely gone.
+#      assert: no throw, no ALTER COLUMN, rows still readable at the seeded counts
+#      (Authority/Registrant/AttestationChallenge/Admin/Officer/UserKey), the
+#      Expiration column is genuinely gone, and every table the current schema added
+#      since the baseline is queryable (--baseline-schema).
 #   4. NEGATIVE CONTROL: repeat --seed/--reopen against a tiny one-table schema
 #      exercising a KNOWN Quereus re-attach defect class (boolean-default column
 #      type change) and confirm the harness correctly reports it as a FAILURE —
 #      a harness that has only ever printed PASS proves nothing.
 #
 # Usage:
-#   bash scripts/run-reattach-proof.sh [baseline-ref]
+#   bash scripts/run-reattach-proof.sh <baseline-ref>
 #
-# baseline-ref defaults to the commit immediately before this plan's Task 1
-# commit (93824ab) — i.e. b0de604, the last commit with the pre-change
-# AttestationChallenge schema.
+# baseline-ref is REQUIRED — there is no default. (Historical Phase 51 ref: b0de604 —
+# named here for context only; it predates every phase-62 table and is not a valid
+# baseline for a phase-62 gate.)
 #
 # Safe to re-run: every invocation uses a fresh mktemp directory.
 
@@ -28,7 +34,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PACKAGE_ROOT"
 
-BASELINE_REF="${1:-b0de604}"
+if [ $# -lt 1 ]; then
+	echo "usage: bash scripts/run-reattach-proof.sh <baseline-ref>" >&2
+	echo "  baseline-ref is REQUIRED (no default) — e.g. the D-22 baseline ref recorded" >&2
+	echo "  in the current phase's wave-1 schema plan SUMMARY." >&2
+	exit 2
+fi
+
+BASELINE_REF="$1"
 RESOLVED_BASELINE="$(git rev-parse --short "$BASELINE_REF")"
 
 WORKDIR="$(mktemp -d)"
@@ -47,7 +60,7 @@ git show "${RESOLVED_BASELINE}:packages/vote-engine/src/database/schema-sql.ts" 
 DB_PATH="$WORKDIR/reattach-proof-db"
 COUNTS_FILE="$WORKDIR/seed-counts.json"
 
-echo "=== Phase 51 Plan 05 Task 3 — scripted re-attach proof ==="
+echo "=== scripted re-attach proof (baseline=$RESOLVED_BASELINE) ==="
 echo "Baseline ref (pre-change schema): $RESOLVED_BASELINE"
 echo "Extracted schema file:            $OLD_SCHEMA_FILE"
 echo "On-disk DB path:                  $DB_PATH"
@@ -73,7 +86,7 @@ echo
 
 echo "--- [2/3] reopen: current (post-change) schema, on the SAME on-disk store ---"
 set +e
-REOPEN_OUT="$(run_node --reopen "$DB_PATH" --expected-counts "$COUNTS_FILE")"
+REOPEN_OUT="$(run_node --reopen "$DB_PATH" --expected-counts "$COUNTS_FILE" --baseline-schema "$OLD_SCHEMA_FILE")"
 MAIN_EXIT=$?
 set -e
 echo "$REOPEN_OUT"
@@ -104,7 +117,7 @@ if [ "$MAIN_EXIT" -eq 0 ] && [ "$NEG_EXIT" -eq 1 ]; then
 	# does NOT prove the harness can detect a RECONCILE incompatibility — the only class D-10's
 	# column removal could plausibly hit.
 	echo "FINAL VERDICT: NO-REGRESSION (baseline=$RESOLVED_BASELINE db=$DB_PATH schema=$OLD_SCHEMA_FILE)"
-	echo "  ESTABLISHED: re-attach did not throw; the pre-existing rows are still readable at the exact seeded count; no 'ALTER COLUMN' appeared in any error; the Expiration column is absent."
+	echo "  ESTABLISHED: re-attach did not throw; the pre-existing rows (Authority/Registrant/AttestationChallenge/Admin/Officer/UserKey) are still readable at the exact seeded counts; no 'ALTER COLUMN' appeared in any error; the Expiration column is absent; every table the current schema added since the baseline is queryable and empty (new-table queryability, --baseline-schema)."
 	echo "  NOT ESTABLISHED: that a SILENT reconcile incompatibility would have been detected. The negative control (exit=1, as required) exercises only the PARSE-failure path."
 	exit 0
 else

@@ -305,6 +305,10 @@ const negativeControl = argv.includes('--negative-control')
 const seedPath = flagValue('--seed')
 const reopenPath = flagValue('--reopen')
 const schemaFile = flagValue('--schema')
+// 62-03 (D-22): generalizes this harness to run against ANY baseline, not just the
+// hardcoded pre-Phase-51 AttestationChallenge shape — a phase-62 baseline has neither
+// the Expiration column nor the 7-arg digest.
+const baselineSchemaFile = flagValue('--baseline-schema')
 
 if (!seedPath && !reopenPath) {
 	console.error('usage: node reattach-proof.mjs --seed <dbPath> --schema <file> [--negative-control]')
@@ -411,55 +415,72 @@ async function runSeed (dbPath) {
 		sign
 	)
 
-	// 3. AttestationChallenge, hand-built against the OLD (pre-change) 7-arg digest tuple —
-	//    the exact shape `association-engine.ts`'s `issueAttestationChallenge` used before Task 1
-	//    (git history, commit b0de604): `Digest(Tid, Nonce, AuthorityId, RegistrantId, DeviceKey,
-	//    ElectionId, Expiration)`, with `Expiration` deferred-check-normalized. The CURRENT engine
-	//    method no longer accepts an expiration argument, so this cannot be done by calling it —
-	//    only the OLD schema requires this shape, and this IS that shape.
+	// 3. AttestationChallenge — 62-03 (D-22): the challenge SHAPE is now detected from the
+	//    OLD schema text itself, rather than hardcoded, so this harness works against any
+	//    baseline. Extract the `table AttestationChallenge (` block (from that text up to
+	//    the first line that is exactly a tab then `)`); `legacyChallenge` is true iff the
+	//    block declares an `Expiration` column.
+	const challengeBlockMatch = oldSchemaSql.match(/\ttable AttestationChallenge \([\s\S]*?\n\t\)/)
+	if (!challengeBlockMatch) {
+		throw new Error('runSeed: could not locate `table AttestationChallenge (` in the baseline schema')
+	}
+	const challengeBlock = challengeBlockMatch[0]
+	const legacyChallenge = /^\s*Expiration\s/m.test(challengeBlock)
+
 	const deviceKey = randomTestKeyPair().publicHex
 	const tid = await allocateTid(ctx.db, 'association')
 	const nonce = crypto.randomUUID()
 	const electionIdValue = null
-	const expirationZ = toIsoZDatetime(Date.now() + 600_000)
-	const expirationDeferred = toDeferredCheckDatetime(expirationZ)
 
-	const digestExpr = 'select Digest(:tid, :challengeNonce, :challengeAuthorityId, :registrantId, :deviceKey, :electionId, :expirationDeferred) as d'
-	const digestParams = {
-		tid,
-		challengeNonce: nonce,
-		challengeAuthorityId: authorityId,
-		registrantId,
-		deviceKey,
-		electionId: electionIdValue,
-		expirationDeferred,
-	}
-	const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
-
-	await ctx.db.exec(
-		`insert into AttestationChallenge (Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration)
-		 with context SigningNonce = :signingNonce, Tid = ${tid}, now = :now
-		 values (:nonce, :authorityId, :registrantId, :deviceKey, :electionId, :expiration)`,
-		{
-			nonce,
-			authorityId,
-			registrantId,
-			deviceKey,
-			electionId: electionIdValue,
-			expiration: expirationZ,
-			signingNonce,
-			now: nowCanonicalDatetime(),
+	if (legacyChallenge) {
+		// Pre-Phase-51 shape: `Digest(Tid, Nonce, AuthorityId, RegistrantId, DeviceKey,
+		// ElectionId, Expiration)`, with `Expiration` deferred-check-normalized.
+		const expirationZ = toIsoZDatetime(Date.now() + 600_000)
+		const expirationDeferred = toDeferredCheckDatetime(expirationZ)
+		const digestExpr = 'select Digest(:tid, :challengeNonce, :challengeAuthorityId, :registrantId, :deviceKey, :electionId, :expirationDeferred) as d'
+		const digestParams = {
+			tid, challengeNonce: nonce, challengeAuthorityId: authorityId, registrantId,
+			deviceKey, electionId: electionIdValue, expirationDeferred,
 		}
-	)
+		const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
+		await ctx.db.exec(
+			`insert into AttestationChallenge (Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration)
+			 with context SigningNonce = :signingNonce, Tid = ${tid}, now = :now
+			 values (:nonce, :authorityId, :registrantId, :deviceKey, :electionId, :expiration)`,
+			{
+				nonce, authorityId, registrantId, deviceKey, electionId: electionIdValue,
+				expiration: expirationZ, signingNonce, now: nowCanonicalDatetime(),
+			}
+		)
+	} else {
+		// Current (post-51-05) shape: 6-arg digest, no Expiration column, context
+		// (SigningNonce, Tid) only.
+		const digestExpr = 'select Digest(:tid, :challengeNonce, :challengeAuthorityId, :registrantId, :deviceKey, :electionId) as d'
+		const digestParams = {
+			tid, challengeNonce: nonce, challengeAuthorityId: authorityId, registrantId,
+			deviceKey, electionId: electionIdValue,
+		}
+		const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
+		await ctx.db.exec(
+			`insert into AttestationChallenge (Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId)
+			 with context SigningNonce = :signingNonce, Tid = ${tid}
+			 values (:nonce, :authorityId, :registrantId, :deviceKey, :electionId)`,
+			{ nonce, authorityId, registrantId, deviceKey, electionId: electionIdValue, signingNonce }
+		)
+	}
 
 	const counts = {}
-	for (const table of ['Authority', 'Registrant', 'AttestationChallenge']) {
+	for (const table of ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']) {
 		const row = await ctx.db.prepare(`select count(*) as n from ${table}`).get()
 		counts[table] = Number(row?.n ?? 0)
 	}
 
 	await ctx.db.close()
-	console.log(JSON.stringify({ mode: 'seed', negativeControl: false, dbPath, counts }, null, 2))
+	console.log(JSON.stringify({
+		mode: 'seed', negativeControl: false, dbPath,
+		challengeShape: legacyChallenge ? 'legacy-7-arg' : 'current-6-arg',
+		counts,
+	}, null, 2))
 }
 
 // ---------------------------------------------------------------------------
@@ -539,17 +560,23 @@ async function runReopen (dbPath) {
 		expectedCounts = JSON.parse(readFileSync(expectedCountsPath, 'utf8'))
 	}
 
+	// 62-03 (D-22): counted tables extended with Admin/Officer/UserKey (seeded by
+	// NetworksEngine.create() in runSeed) on top of the three original tables.
 	const counts = {}
-	for (const table of ['Authority', 'Registrant', 'AttestationChallenge']) {
+	for (const table of ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']) {
 		const row = await db.prepare(`select count(*) as n from ${table}`).get()
 		counts[table] = Number(row?.n ?? 0)
 	}
+	// rowsReadable stays exactly the original three-table non-zero check (unaffected by the
+	// wider count set) — then require EQUALITY for every key present in --expected-counts,
+	// not just the original three.
 	assertions.rowsReadable = counts.Authority > 0 && counts.Registrant > 0 && counts.AttestationChallenge > 0
 	if (expectedCounts) {
-		assertions.rowsReadable = assertions.rowsReadable
-			&& counts.Authority === expectedCounts.Authority
-			&& counts.Registrant === expectedCounts.Registrant
-			&& counts.AttestationChallenge === expectedCounts.AttestationChallenge
+		for (const key of Object.keys(expectedCounts)) {
+			if (counts[key] !== expectedCounts[key]) {
+				assertions.rowsReadable = false
+			}
+		}
 	}
 
 	// Column-shape proof: the reopened row must NOT carry an Expiration column any more
@@ -558,11 +585,45 @@ async function runReopen (dbPath) {
 	const columnNames = challengeRow ? Object.keys(challengeRow) : []
 	const expirationGone = !columnNames.includes('Expiration')
 
+	// 62-03 (D-22): new-table queryability. When --baseline-schema is given, every table
+	// the CURRENT bundled schema declares that the baseline did NOT must be queryable
+	// (select count(*) does not throw) and empty (the re-attach replayed no rows for it —
+	// it is new since the baseline).
+	let newTables = null
+	let newTablesQueryable = null
+	if (baselineSchemaFile) {
+		// Load via the SAME module-import path --seed uses (loadSchemaSqlFrom), not a raw
+		// readFileSync: the baseline file is a `schema-sql.ts`-shaped module exporting a
+		// JSON.stringify'd string — reading it as raw text would see literal `\t`/`\n`
+		// escape sequences, not real tab/newline characters, and the table-name regex
+		// below would never match.
+		const baselineSchemaSql = await loadSchemaSqlFrom(baselineSchemaFile)
+		const currentSchemaSql = (await import('../src/database/schema-sql.js')).VOTETORRENT_SCHEMA_SQL
+		const declaredTables = (sql) => {
+			const names = new Set()
+			for (const m of sql.matchAll(/^\ttable\s+(\w+)\s*\(/gm)) names.add(m[1])
+			return names
+		}
+		const baselineTables = declaredTables(baselineSchemaSql)
+		const currentTables = declaredTables(currentSchemaSql)
+		newTables = [...currentTables].filter((t) => !baselineTables.has(t)).sort()
+		newTablesQueryable = true
+		for (const table of newTables) {
+			try {
+				const row = await db.prepare(`select count(*) as n from ${table}`).get()
+				if (Number(row?.n ?? -1) !== 0) newTablesQueryable = false
+			} catch {
+				newTablesQueryable = false
+			}
+		}
+	}
+
 	await db.close()
 
-	const verdict = (assertions.noThrow && assertions.noAlterColumn && assertions.rowsReadable && expirationGone)
-		? 'PASS'
-		: 'FAIL'
+	const verdict = (
+		assertions.noThrow && assertions.noAlterColumn && assertions.rowsReadable && expirationGone
+		&& (baselineSchemaFile ? newTablesQueryable === true : true)
+	) ? 'PASS' : 'FAIL'
 
 	console.log(JSON.stringify({
 		mode: 'reopen',
@@ -572,6 +633,8 @@ async function runReopen (dbPath) {
 		counts,
 		expectedCounts: expectedCounts ?? null,
 		attestationChallengeColumns: columnNames,
+		newTables,
+		newTablesQueryable,
 		verdict,
 	}, null, 2))
 
