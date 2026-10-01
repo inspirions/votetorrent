@@ -12,6 +12,7 @@ import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import { prepareDb } from '../src/database/initialize'
 import { ElectionEngine } from '../src/election/election-engine'
 import { ElectionsEngine } from '../src/elections/elections-engine'
+import { InvitationEngine } from '../src/invite/invitation-engine.js'
 import { ElectionsCreateElectionBuilder } from '../src/elections/builders/elections-create-election-builder.js'
 import { ElectionsAdjustElectionBuilder } from '../src/elections/builders/elections-adjust-election-builder.js'
 import { MockElectionsEngine } from '../src/elections/mock-elections-engine.js'
@@ -652,23 +653,42 @@ describe('ElectionEngine', () => {
   })
 
   describe('revokeKeyholder', () => {
-    // Keyholder rows are seeded via createPopulatedContext. Passes on
-    // quereus@4.2.1 (the historical quereus#23 block is resolved on 4.x).
-    it('DELETEs a Keyholder row', async () => {
-      const { ctx } = await createPopulatedContext()
-      const engine = new ElectionEngine(
-        { id: 'election-1', authorityId: 'authority-1' },
-        ctx
-      )
+    // D-27 (T-62-09-01): createPopulatedContext seeds no Keyholder row, so the
+    // old 'DELETEs a Keyholder row' test was vacuous — revokeKeyholder's
+    // UserId = this.ctx.user?.id bug deleted nothing, and the test could not
+    // tell the difference between "deleted the row" and "matched no row".
+    // Rewritten to seed a REAL accepted keyholder via the invite->accept path
+    // and assert the TARGET row is gone.
+    it('DELETEs the target Keyholder row', async () => {
+      const net = await createTestNetwork()
+      const auth = await addTestAuthority(net)
+      const elec = await addTestElection(auth)
+
       const kh: KeyholderInvite = {
         name: 'KH1',
-        type: 'au',
-        expiration: '0',
+        type: 'k',
+        expiration: new Date(Date.now() + 3_600_000).toISOString(),
         inviteKey: 'k'.repeat(66),
-        inviteSignature: 's'.repeat(128),
+        // Empty inviteSignature hits the documented send-side carve-out.
+        inviteSignature: '',
       }
-      await engine.revokeKeyholder(kh, 'election-1')
-      const row = await ctx.db
+      await elec.electionEngine.inviteKeyholder(kh, 'election-1', makeTestSignCallback(auth.user))
+      const slotRow = await elec.ctx.db
+        .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
+        .get({ name: 'KH1' })
+      const invitationEngine = new InvitationEngine(elec.ctx)
+      await invitationEngine.respondToInvite(slotRow!.Cid as string, true)
+
+      const before = await elec.ctx.db
+        .prepare('select UserId from Keyholder where ElectionId = :id')
+        .get({ id: 'election-1' })
+      expect(before, 'the accept-time Keyholder row exists before revoke').to.not.equal(undefined)
+
+      await elec.electionEngine.revokeKeyholder(
+        { name: 'KH1', type: 'k', expiration: '0', inviteKey: '', inviteSignature: '' },
+        'election-1'
+      )
+      const row = await elec.ctx.db
         .prepare('select UserId from Keyholder where ElectionId = :id')
         .get({ id: 'election-1' })
       expect(row).to.equal(undefined)

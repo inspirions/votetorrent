@@ -18,6 +18,7 @@ import { ElectionRevokeKeyholderBuilder } from '../src/election/builders/electio
 import { ElectionEngine } from '../src/election/election-engine.js'
 import type { ElectionSubject } from '../src/election/election-engine.js'
 import { MockElectionEngine } from '../src/election/mock-election-engine.js'
+import { InvitationEngine } from '../src/invite/invitation-engine.js'
 import { createTestNetwork, addTestAuthority, addTestElection, makeTestSignCallback } from './fixtures/test-context.js'
 import type {
   Ballot,
@@ -533,9 +534,22 @@ describe('ElectionRevokeKeyholderBuilder', () => {
   })
 
   it('REAL ENGINE: isValid===true => commit() does not throw BuilderValidationError', async () => {
-    const { ctx } = await createTestNetwork()
-    const engine = new ElectionEngine(testElectionSubject, ctx)
-    const b = new ElectionRevokeKeyholderBuilder(engine).fromPayload({ keyholder: makeKeyholderInvite(), electionId: 'election-1' })
+    // D-27 (T-62-09-01): revokeKeyholder now resolves a real target through
+    // InviteSlot/InviteResult/Keyholder, so this REAL ENGINE no-throw case
+    // needs a genuinely accepted keyholder to revoke — createTestNetwork()
+    // alone (as before) seeds none, which now correctly throws.
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    const elec = await addTestElection(auth)
+    const kh = makeKeyholderInvite()
+    await elec.electionEngine.inviteKeyholder(kh, 'election-1', makeTestSignCallback(auth.user))
+    const slotRow = await elec.ctx.db
+      .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
+      .get({ name: kh.name })
+    await new InvitationEngine(elec.ctx).respondToInvite(slotRow!.Cid as string, true)
+
+    const engine = new ElectionEngine({ id: 'election-1', authorityId: auth.authority.id }, elec.ctx)
+    const b = new ElectionRevokeKeyholderBuilder(engine).fromPayload({ keyholder: kh, electionId: 'election-1' })
     expect(b.isValid()).to.equal(true)
     await b.commit()
   })
@@ -551,9 +565,22 @@ describe('ElectionRevokeKeyholderBuilder', () => {
   })
 
   it('REAL ENGINE: double-commit guard throws BuilderAlreadyCommittedError', async () => {
-    const { ctx } = await createTestNetwork()
-    const engine = new ElectionEngine(testElectionSubject, ctx)
-    const b = new ElectionRevokeKeyholderBuilder(engine).fromPayload({ keyholder: makeKeyholderInvite(), electionId: 'election-1' })
+    // D-27 (T-62-09-01): the first commit() must succeed (not throw) for this
+    // to be a genuine double-commit-guard test rather than a first-commit
+    // rejection — seed a real accepted keyholder, same reasoning as the
+    // no-throw test above.
+    const net = await createTestNetwork()
+    const auth = await addTestAuthority(net)
+    const elec = await addTestElection(auth)
+    const kh = makeKeyholderInvite()
+    await elec.electionEngine.inviteKeyholder(kh, 'election-1', makeTestSignCallback(auth.user))
+    const slotRow = await elec.ctx.db
+      .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
+      .get({ name: kh.name })
+    await new InvitationEngine(elec.ctx).respondToInvite(slotRow!.Cid as string, true)
+
+    const engine = new ElectionEngine({ id: 'election-1', authorityId: auth.authority.id }, elec.ctx)
+    const b = new ElectionRevokeKeyholderBuilder(engine).fromPayload({ keyholder: kh, electionId: 'election-1' })
     await b.commit()
     let caught: unknown
     try { b.commit() } catch (err) { caught = err }
@@ -579,17 +606,29 @@ describe('ElectionRevokeKeyholderBuilder', () => {
   })
 
   it('REAL ENGINE: equivalence smoke: engine.revokeKeyholder(payload) vs builder.fromPayload(payload).commit()', async () => {
+    // D-27 (T-62-09-01): revokeKeyholder now resolves its target through a
+    // real InviteSlot/InviteResult/Keyholder chain. Neither network here has
+    // ANY accepted keyholder, so BOTH paths must reject identically with the
+    // "no accepted keyholder" error — the prior assertion (both no-throw) was
+    // a stale artifact of the old UserId = this.ctx.user?.id delete, which
+    // always "succeeded" by deleting nothing.
     const payload = { keyholder: makeKeyholderInvite(), electionId: 'election-1' }
     const { ctx: ctx1 } = await createTestNetwork()
     const engine1 = new ElectionEngine(testElectionSubject, ctx1)
     let err1: unknown
     try { await engine1.revokeKeyholder(payload.keyholder, payload.electionId) } catch (e) { err1 = e }
-    expect(err1).to.equal(undefined)
+    expect(err1).to.be.instanceOf(Error)
+    expect((err1 as Error).message).to.include('no accepted keyholder')
+
     const { ctx: ctx2 } = await createTestNetwork()
     const engine2 = new ElectionEngine(testElectionSubject, ctx2)
     let err2: unknown
     try { await engine2.buildRevokeKeyholder().fromPayload(payload).commit() } catch (e) { err2 = e }
-    expect(err2).to.equal(undefined)
+    expect(err2).to.be.instanceOf(Error)
+    expect((err2 as Error).message).to.include('no accepted keyholder')
+
+    // Equivalence claim: both paths reject with the SAME message.
+    expect((err1 as Error).message).to.equal((err2 as Error).message)
   })
 
   it('FACT-04 parity: MockElectionEngine returns instanceof ElectionRevokeKeyholderBuilder', () => {

@@ -1,4 +1,5 @@
 import { MisuseError, QuereusError } from '@quereus/quereus'
+import type { SqlValue } from '@quereus/quereus'
 import { digestToBytes, formatPgRange, fromCanonicalDatetime, keyholderInviteSignedBytes, nowCanonicalDatetime, parseJsonOr, parseKeyholdersAsInviteStatus, parsePgRange, verifyAdHocInviteSignature } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import type {
@@ -16,10 +17,12 @@ import type {
   IElectionProposeBallotBuilder,
   IElectionProposeRevisionBuilder,
   IElectionRevokeKeyholderBuilder,
+  InviteStatus,
   ISigningEngine,
   KeyholderInvite,
   Option,
   Question,
+  SentKeyholderInvite,
   Signature,
   Timestamp
 } from '@votetorrent/vote-core'
@@ -306,15 +309,21 @@ export class ElectionEngine implements IElectionEngine {
 					`Election ${this.election.id} has no current revision`
         )
       }
+      // D-27: keyholders are the persisted create-time invitee JSON joined
+      // with the real Keyholder table, so accepted keyholders carry a result.
+      const currentKeyholders = await this.readRevisionKeyholders(
+        revRow.ElectionId as string,
+        revRow.Revision as number,
+        revRow.Keyholders,
+        'ElectionRevision.Keyholders'
+      )
       const current: ElectionRevision = {
         electionId: revRow.ElectionId as string,
         revision: revRow.Revision as number,
         revisionTimestamp: [fromCanonicalDatetime(revRow.RevisionTimestamp as string)],
         tags: parseJsonOr<string[]>(revRow.Tags, [], 'ElectionRevision.Tags'),
         instructions: revRow.Instructions as string,
-        // 39-02 D-04 Gap 2: read the persisted create-time keyholder invitees
-        // back (this is the primary DEBT-10 getElectionDetails path).
-        keyholders: parseKeyholdersAsInviteStatus(revRow.Keyholders, 'ElectionRevision.Keyholders'),
+        keyholders: currentKeyholders,
         timeline: parseJsonOr<Record<ElectionEvent, number>>(
           revRow.Timeline,
           {} as Record<ElectionEvent, number>,
@@ -370,6 +379,12 @@ export class ElectionEngine implements IElectionEngine {
   async getRevisions (): Promise<ElectionRevision[]> {
     const out: ElectionRevision[] = []
     try {
+      // Collect all ElectionRevision rows first — do not run a nested
+      // readRevisionKeyholders() query while this eval() cursor is still
+      // open (a second concurrent cursor on the same DB handle deadlocks,
+      // same pattern as getBallotDetails's Question/Option read above).
+      type RawRevision = Record<string, unknown>
+      const rawRows: RawRevision[] = []
       for await (const row of this.ctx.db.eval(
 				`select ElectionId, Revision, RevisionTimestamp, Tags, Instructions, Timeline, KeyholderThreshold, Keyholders
 					from ElectionRevision
@@ -377,14 +392,24 @@ export class ElectionEngine implements IElectionEngine {
 					order by Revision asc`,
         { electionId: this.election.id }
       )) {
+        rawRows.push(row as RawRevision)
+      }
+      for (const row of rawRows) {
+        // D-27: keyholders are the persisted invitee JSON joined with the
+        // real Keyholder table, so accepted keyholders carry a result.
+        const keyholders = await this.readRevisionKeyholders(
+          row.ElectionId as string,
+          row.Revision as number,
+          row.Keyholders,
+          'ElectionRevision.Keyholders'
+        )
         out.push({
           electionId: row.ElectionId as string,
           revision: row.Revision as number,
           revisionTimestamp: [fromCanonicalDatetime(row.RevisionTimestamp as string)],
           tags: parseJsonOr<string[]>(row.Tags, [], 'ElectionRevision.Tags'),
           instructions: row.Instructions as string,
-          // 39-02 D-04 Gap 2: read the persisted create-time keyholder invitees back.
-          keyholders: parseKeyholdersAsInviteStatus(row.Keyholders, 'ElectionRevision.Keyholders'),
+          keyholders,
           timeline: parseJsonOr<Record<ElectionEvent, number>>(
             row.Timeline,
             {} as Record<ElectionEvent, number>,
@@ -778,22 +803,76 @@ export class ElectionEngine implements IElectionEngine {
   }
 
   /**
-   * DELETE a Keyholder row. Schema's `check on delete` constraints on
-   * downstream-related tables trip quereus#23 today.
+   * DELETE the Keyholder row of the TARGET keyholder named by `keyholder.name`
+   * (D-27 / T-62-09-01 fix). The prior implementation deleted
+   * `where UserId = this.ctx.user?.id` — the CALLER's own id, constant across
+   * every revoke — so it never touched the invitee it claimed to revoke.
+   *
+   * Target resolution: `InviteSlot(Type='k', ElectionId, Name[, InviteKey])
+   * -> InviteResult.InvokedId -> Keyholder.UserId`. Only ACCEPTED invites
+   * (`InviteResult.IsAccepted`) with a live `Keyholder` row are candidates.
+   * `keyholder.inviteKey` disambiguates when two accepted invitees share a
+   * name; a non-empty value is ANDed into the resolution query. Zero matches
+   * throws "no accepted keyholder…"; more than one (two same-named accepted
+   * invitees, no inviteKey supplied) throws "ambiguous…" — in both cases
+   * nothing is deleted. `this.ctx.user` never appears in this method.
+   *
+   * Tier note (T-62-09-02, accepted — not mitigated by this plan): `Keyholder`
+   * has no `check on delete` constraint, so once a target is resolved the
+   * DELETE itself carries no schema-level authorization. Any strand writer
+   * could already issue the raw DELETE before this fix too; this method only
+   * fixes WHICH row is targeted, not WHO is allowed to target it. Tier-1
+   * delete authorization belongs to the Keyholder schema region (62-02).
    */
   async revokeKeyholder (
     keyholder: KeyholderInvite,
     electionId: string
   ): Promise<void> {
-    const tid = await allocateTid(this.ctx.db, 'election')
     try {
+      const candidateParams: Record<string, SqlValue> = { electionId, name: keyholder.name }
+      let inviteKeyFilter = ''
+      if (typeof keyholder.inviteKey === 'string' && keyholder.inviteKey.length > 0) {
+        inviteKeyFilter = ' and S.InviteKey = :inviteKey'
+        candidateParams.inviteKey = keyholder.inviteKey
+      }
+
+      type CandidateRow = { UserId: string | null; IsAccepted: boolean | number | null }
+      const candidates: CandidateRow[] = []
+      for await (const row of this.ctx.db.eval(
+        `select distinct IR.InvokedId as UserId, IR.IsAccepted as IsAccepted
+          from InviteSlot S
+          join InviteResult IR on IR.SlotCid = S.Cid
+          join Keyholder K on K.UserId = IR.InvokedId and K.ElectionId = S.ElectionId
+          where S.Type = 'k' and S.ElectionId = :electionId and S.Name = :name${inviteKeyFilter}`,
+        candidateParams
+      )) {
+        candidates.push({ UserId: row.UserId as string | null, IsAccepted: row.IsAccepted as boolean | number | null })
+      }
+
+      // WR-02: Quereus/SQLite returns boolean columns as 0/1 on the on-device
+      // path — normalize before filtering to accepted-only, then dedupe by UserId.
+      const acceptedIds = new Set<string>()
+      for (const c of candidates) {
+        const isAccepted = c.IsAccepted === true || (c.IsAccepted as unknown) === 1
+        if (isAccepted && c.UserId) acceptedIds.add(c.UserId)
+      }
+
+      if (acceptedIds.size === 0) {
+        throw new Error(`no accepted keyholder named "${keyholder.name}" on election ${electionId}`)
+      }
+      if (acceptedIds.size > 1) {
+        throw new Error(`ambiguous: ${acceptedIds.size} accepted keyholders named "${keyholder.name}" on election ${electionId}; pass the invite key to choose one`)
+      }
+      const userId: string = [...acceptedIds][0]!
+
+      const tid = await allocateTid(this.ctx.db, 'election')
       await this.ctx.db.exec(
 				`delete from Keyholder
 					with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
 					where ElectionId = :electionId and UserId = :userId`,
         {
           electionId,
-          userId: this.ctx.user?.id ?? ''
+          userId
         }
       )
     } catch (err) {
@@ -1049,6 +1128,80 @@ export class ElectionEngine implements IElectionEngine {
   }
 
   // ---------- helpers ----------
+
+  /**
+   * D-27 — build one `ElectionRevision.keyholders` projection by joining the
+   * revision's persisted pending-invitee JSON with the real `Keyholder` table.
+   *
+   * Starts from `parseKeyholdersAsInviteStatus(keyholdersJson, field)` — the
+   * create/propose-time invitee names, still unresolved. Separately reads
+   * every `Keyholder` row for `(electionId, revision)` joined with `User`
+   * (for the name) and left-joined with `InviteResult` (for the invite
+   * signature) — a real `Keyholder` row IS the accepted fact, so `isAccepted`
+   * is always `true` for a row this join produces, even if `InviteResult` is
+   * somehow absent. Each invitee in JSON order consumes the first unconsumed
+   * `Keyholder` row whose `Name` matches exactly; any `Keyholder` rows left
+   * over (accepted keyholders never named in the original invitee JSON — see
+   * D-27 read c) are appended at the end. A `Keyholder` row is never dropped
+   * and never duplicated — residual: with two SAME-NAME invitees in the JSON,
+   * the FIRST slot absorbs the acceptance (display-only; T-62-09-05).
+   */
+  private async readRevisionKeyholders (
+    electionId: string,
+    revision: number,
+    keyholdersJson: unknown,
+    field: string
+  ): Promise<Array<InviteStatus<SentKeyholderInvite>>> {
+    const invitees = parseKeyholdersAsInviteStatus(keyholdersJson, field)
+
+    type KeyholderRow = { UserId: string, Name: string, InviteSignature: string | null }
+    const rows: KeyholderRow[] = []
+    const seenUserIds = new Set<string>()
+    for await (const row of this.ctx.db.eval(
+      `select K.UserId, U.Name, IR.InviteSignature, IR.IsAccepted
+        from Keyholder K
+        join User U on U.Id = K.UserId
+        left join InviteResult IR on IR.InvokedId = K.UserId
+        where K.ElectionId = :electionId and K.ElectionRevision = :revision
+        order by U.Name, K.UserId`,
+      { electionId, revision }
+    )) {
+      const userId = row.UserId as string
+      if (seenUserIds.has(userId)) continue // dedupe by UserId in JS
+      seenUserIds.add(userId)
+      rows.push({
+        UserId: userId,
+        Name: row.Name as string,
+        InviteSignature: (row.InviteSignature as string | null | undefined) ?? null
+      })
+    }
+
+    const toResult = (row: KeyholderRow): NonNullable<InviteStatus<SentKeyholderInvite>['result']> => ({
+      // The Keyholder row itself is the accepted fact — isAccepted is true
+      // even when InviteResult is null (left join miss).
+      isAccepted: true,
+      invitationSignature: row.InviteSignature ?? '',
+      invokedId: row.UserId
+    })
+
+    const consumed = new Set<number>()
+    const out: Array<InviteStatus<SentKeyholderInvite>> = []
+    for (const invitee of invitees) {
+      const idx = rows.findIndex((r, i) => !consumed.has(i) && r.Name === invitee.invite.name)
+      if (idx >= 0) {
+        consumed.add(idx)
+        out.push({ invite: invitee.invite, result: toResult(rows[idx]!) })
+      } else {
+        out.push(invitee)
+      }
+    }
+    for (let i = 0; i < rows.length; i++) {
+      if (!consumed.has(i)) {
+        out.push({ invite: { name: rows[i]!.Name }, result: toResult(rows[i]!) })
+      }
+    }
+    return out
+  }
 
   private rethrow (err: unknown, method: string): never {
     if (err instanceof QuereusError) {
