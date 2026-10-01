@@ -71,7 +71,7 @@
 // (`key-release-evaluator.ts` rule 1), never trusted, never attributed.
 //
 // ---------------------------------------------------------------------------
-// Security review (D-25) — key release and reconstruction — dated
+// Security review — key release and reconstruction (D-25) — dated
 // 2026-10-01, 62-20 Task 3
 // ---------------------------------------------------------------------------
 //
