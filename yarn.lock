@@ -5091,6 +5091,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@react-native-documents/picker@npm:10.1.7":
+  version: 10.1.7
+  resolution: "@react-native-documents/picker@npm:10.1.7"
+  peerDependencies:
+    react: "*"
+    react-native: "*"
+  checksum: 10c0/f2578398ec590c7ee5a0fda8f0625e54fa8da3a9c21608a802bf30905ff9a02d2ec94bf0e0625f206bfa0552c19c685de207d2e79868960d0efe39aaffe8c5cf
+  languageName: node
+  linkType: hard
+
 "@react-native/assets-registry@npm:0.78.0":
   version: 0.78.0
   resolution: "@react-native/assets-registry@npm:0.78.0"
@@ -22141,6 +22151,7 @@ __metadata:
     "@react-native-community/cli-platform-ios": "npm:^15.1.0"
     "@react-native-community/datetimepicker": "npm:^9.1.0"
     "@react-native-community/slider": "npm:^4.5.2"
+    "@react-native-documents/picker": "npm:10.1.7"
     "@react-native/babel-preset": "npm:0.78.0"
     "@react-native/eslint-config": "npm:0.78.0"
     "@react-native/gradle-plugin": "npm:^0.78.0"
