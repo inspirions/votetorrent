@@ -11,12 +11,16 @@
 #   1. Working-tree provenance: git SHA, git status --porcelain (warn loudly if dirty).
 #   2. Rebuild packages/vote-engine's dist/ (the deep-require path both apps use) and print the
 #      built artifact's mtime.
-#   3. Print the value DEV_ASSOCIATION_SYNC_REST_BASE_URL (the Authority's dev REST courier) must
-#      be set to for this host/port, read its CURRENT working-tree value, and REFUSE to continue
-#      while it is still literally `undefined` — the WR-17 gate design leaves it with no default,
-#      and a silent no-op bridge is exactly the failure this script exists to prevent. The Voter
-#      side has no equivalent constant any more (Phase 62 Plan 22, D-28/D-29): it is a P2P peer,
-#      and this step says so without any file check.
+#   3. Transport routing (D-28/D-29, Phase 62 Plan 25): neither app carries a dev base-URL
+#      constant any longer. Association is P2P-only in both apps (D-28) — this bridge's
+#      association endpoints (`/staged-association-requests`, `/staged-association-attestations`,
+#      `/association-decisions`) have no app consumer any more. The Authority's registration REST
+#      path (D-29) now reaches this bridge only through the https URL a `'vrg'` officer saves in
+#      the app's Registration Bridge card, stored in the signed, replicated `AuthorityIntakePolicy`
+#      — never a local source edit. This bridge serves plain http, so a real device session needs
+#      an https terminator in front of it (e.g. a local TLS proxy) before an officer can save this
+#      bridge's URL. The two-party association ceremony over the peer path remains proof debt
+#      against P2P-11 (D-37) — this script no longer stages a courier for it.
 #   4. Assert the COMMITTED tree's APP_ATTEST_ENVIRONMENT is 'production' (D-15) and print the
 #      current WORKING-TREE value beside it (which may legitimately read 'development' while a
 #      dev-only authority build is staged for Phase B — that edit must never be committed).
@@ -83,8 +87,8 @@ GIT_SHA="$(git rev-parse --short HEAD)"
 echo "git SHA: $GIT_SHA"
 GIT_STATUS="$(git status --porcelain)"
 if [ -n "$GIT_STATUS" ]; then
-	echo "WARNING: working tree is dirty (expected while DEV_*_BASE_URL edits and the dev-only"
-	echo "APP_ATTEST_ENVIRONMENT flip are staged for this session — neither may ever be committed):"
+	echo "WARNING: working tree is dirty (expected while the dev-only APP_ATTEST_ENVIRONMENT flip"
+	echo "is staged for this session — that edit may never be committed):"
 	echo "$GIT_STATUS"
 else
 	echo "working tree is clean."
@@ -105,8 +109,8 @@ echo "Built artifact: $DIST_FILE"
 echo "mtime:          $DIST_MTIME"
 echo
 
-# --- [3/6] dev base-URL gates (WR-17) --------------------------------------
-echo "--- [3/6] dev base-URL gates (WR-17) ---"
+# --- [3/6] transport routing (D-28/D-29) -----------------------------------
+echo "--- [3/6] transport routing (D-28/D-29) ---"
 LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo '')"
 if [ -z "$LAN_IP" ]; then
 	echo "WARNING: could not auto-detect a LAN IP (tried en0/en1 via ipconfig). Find one manually"
@@ -115,41 +119,25 @@ if [ -z "$LAN_IP" ]; then
 fi
 BRIDGE_URL="http://${LAN_IP}:${PORT}"
 echo "Bridge will bind to: http://${HOST}:${PORT}"
-echo "Detected LAN IP candidate (phone-reachable, NOT 127.0.0.1/10.0.2.2 — this is a real iOS"
-echo "  device on the same network, not an Android emulator loopback alias): $LAN_IP"
-echo "The authority dev base-URL constant below must be set, LOCALLY ONLY, to: $BRIDGE_URL"
+echo "Detected LAN IP candidate (phone-reachable, NOT 127.0.0.1/10.0.2.2): $LAN_IP"
 echo
 
-AUTH_FILE="apps/VoteTorrentAuthority/src/screens/registration/attach-association-sync-bindings.ts"
-
-# Phase 62 Plan 22 (D-28/D-29): the Voter no longer has a dev REST constant — association is
-# P2P-only over the Voter's own CadreNode strand, and Voter registration routes to P2P by
-# default or to the authority-configured bridge URL read from the replicated AuthorityIntakePolicy
-# (no local edit, no __DEV__ gate). So the Voter half of this ceremony needs no local edit.
-echo "Voter: no dev REST constant exists any more (D-28/D-29) — association is P2P-only, and"
-echo "  registration routes to P2P or the authority-configured AuthorityIntakePolicy bridge URL."
-echo "  No local Voter edit is needed for this ceremony."
+echo "Neither app carries a dev base-URL constant any longer — 62-22 retired the Voter's, and"
+echo "  62-25 retired the Authority's registration one. There is nothing left to locally edit."
 echo
-
-AUTH_LINE="$(grep -E 'DEV_ASSOCIATION_SYNC_REST_BASE_URL: string \| undefined =' "$AUTH_FILE" || true)"
-echo "Current $AUTH_FILE:"
-echo "  $AUTH_LINE"
-
-GATE_FAIL=0
-if echo "$AUTH_LINE" | grep -q '= undefined'; then
-	echo
-	echo "REFUSING: $AUTH_FILE still declares DEV_ASSOCIATION_SYNC_REST_BASE_URL = undefined."
-	echo "  Edit it LOCALLY (never commit a real value — WR-17) to: '$BRIDGE_URL'"
-	GATE_FAIL=1
-fi
-if [ "$GATE_FAIL" -eq 1 ]; then
-	echo
-	echo "FATAL: a silent no-op bridge (the dev gate left undefined) is exactly the failure this" >&2
-	echo "script exists to prevent. Edit the constant above, then re-run this script." >&2
-	exit 1
-fi
+echo "Association is P2P-only in BOTH apps (D-28): neither app binds this bridge's"
+echo "  /staged-association-requests, /staged-association-attestations or /association-decisions"
+echo "  endpoints — they have no app consumer any more. The two-party association ceremony over"
+echo "  the peer path remains proof debt against P2P-11 (D-37); this script does not exercise it."
 echo
-echo "The dev base-URL constant is locally set (not undefined) — proceeding."
+echo "Registration reaches this bridge only through the https URL a 'vrg' officer saves in the"
+echo "  Authority app's Registration Bridge card (D-29), stored in the signed, replicated"
+echo "  AuthorityIntakePolicy — never a local source edit. This relay serves plain http"
+echo "  ($BRIDGE_URL), so a real device session needs an https terminator in front of it before"
+echo "  an officer can save this bridge's URL (the policy's RestBridgeUrl CHECK is https-only)."
+echo
+echo "The Voter (62-22) reads the SAME replicated AuthorityIntakePolicy bridge URL — no local"
+echo "  Voter edit is needed for this ceremony either."
 echo
 
 # --- [4/6] APP_ATTEST_ENVIRONMENT (D-15) -----------------------------------

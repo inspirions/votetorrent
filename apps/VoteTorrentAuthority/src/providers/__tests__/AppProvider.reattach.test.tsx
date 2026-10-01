@@ -213,9 +213,6 @@ jest.mock("../../engines/registrant-dev-seed", () => ({
 jest.mock("../../screens/registration/attach-sync-bindings", () => ({
 	attachSyncBindings: jest.fn(),
 }));
-jest.mock("../../screens/registration/attach-association-sync-bindings", () => ({
-	attachAssociationSyncBindings: jest.fn(),
-}));
 
 const mockPurgeLegacyStagedPayload = jest.fn(async () => "clean" as const);
 const mockRegisterDashboardSnapshotProvider = jest.fn();

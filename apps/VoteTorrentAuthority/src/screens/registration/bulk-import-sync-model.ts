@@ -18,7 +18,7 @@ import type { TransportSyncState } from "../../components/TransportStatusCard";
  * the app already reaches its engines through `useApp().getEngine()` instead of importing engine
  * classes directly.
  *
- * (c) THE D-11/D-23/D-28 RULE, updated 62-21. The peer-cluster leg ships **code-complete,
+ * (c) THE D-11/D-23/D-28 RULE, updated 62-21/62-25. The peer-cluster leg ships **code-complete,
  * unverified**: P2P-11 is device-REFUTED, its wall has moved repeatedly, and this project has
  * already lived through "implemented but unproven" being read as "done" more than once. Through
  * 62-20 this file deliberately attached no peer binding. **62-21 is the plan that changes that**:
@@ -29,6 +29,16 @@ import type { TransportSyncState } from "../../components/TransportStatusCard";
  * unverified on devices (D-23, proof debt against P2P-11) — attaching it unconditionally and
  * showing real counts does not change that; `PeerTransportStatusCard`'s hardcoded warning frame
  * and verbatim caveat are what keep that distinction visible to the officer.
+ *
+ * **62-25 closes D-28 the rest of the way**: association processing (first association AND D-46
+ * re-association) is now driven ENTIRELY by the `'peer'` binding's `processPending` step — there is
+ * no association REST or filesystem app binding of any kind. The `'rest'` binding registered by
+ * `attach-sync-bindings.ts` is REGISTRATION-ONLY, and is attached in every build (D-29) the same
+ * unconditional way the `'peer'` binding is — it is simply inert (refuses before any network call)
+ * until an officer saves a bridge URL. `mergeTransportSyncReports`/`runAssociationSync` below stay
+ * exported: `runAssociationSync` is still the ordering/pre-filter helper the `'peer'` binding's
+ * association leg uses; `mergeTransportSyncReports` is retained for any future binding composition
+ * but currently has no caller (the association REST composition it served is retired).
  *
  * (d) THE PII RULE. A sync error carries an **identifier** and nothing else. A failing item is a
  * registration payload containing real registrant PII, so `SyncErrorRef` and
@@ -135,12 +145,13 @@ export interface TransportCardEntry {
 const bindings = new Map<SyncBindingId, SyncBindingHandle>();
 
 /**
- * Stores `handle` by `handle.id`. This is the attachment point for the two real D-01 bindings —
- * the REST binding is RN-constructible (built-in `fetch` only) and is attached wherever its
- * `baseUrl` is configured, typically at app bootstrap; the filesystem binding is attached by the
- * Node-side host that owns the drop directory (the bulk-import bridge process, or the on-device
- * harness leg 48-22 drives), because `node:fs/promises` is not Metro-resolvable and can never be
- * attached from inside the RN app itself.
+ * Stores `handle` by `handle.id`. This is the attachment point for the real D-01/D-28/D-29
+ * bindings — the REST binding (registration only, D-29) is RN-constructible (built-in `fetch`
+ * only) and is attached at app boot in EVERY build, reading its target URL from the replicated
+ * `AuthorityIntakePolicy` at every sync rather than from a configured constant; the filesystem
+ * binding is attached by the Node-side host that owns the drop directory (the bulk-import bridge
+ * process, or the on-device harness leg 48-22 drives), because `node:fs/promises` is not
+ * Metro-resolvable and can never be attached from inside the RN app itself.
  *
  * This plan registers nothing here — it owns the seam and the screen, not the app's transport
  * configuration. A later host wiring plan is responsible for calling this function.

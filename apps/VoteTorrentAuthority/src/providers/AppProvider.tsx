@@ -12,7 +12,6 @@ import { getOrCreateDeviceUser } from "../engines/device-user";
 import { createDeviceSigner, type SignCallback } from "../engines/device-signer";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
-import { attachAssociationSyncBindings } from "../screens/registration/attach-association-sync-bindings";
 import { attachPeerSyncBinding } from "../screens/registration/attach-peer-sync-binding";
 import { purgeLegacyStagedPayload, registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
 import { useCadreNode, type CadreNodeSettlement } from "./CadreNodeProvider";
@@ -227,40 +226,23 @@ export function AppProvider({ children }: PropsWithChildren) {
 		}
 	}, [getEngine, resolveDeviceSigner]);
 
-	// 48-22 Task 2: DEVELOPMENT / DEVICE-PROOF ATTACHMENT ONLY. attachSyncBindings() is a no-op
-	// unless DEV_REGISTRATION_SYNC_REST_BASE_URL is explicitly set (no hardcoded default), so a
-	// normal build is byte-identically unaffected. Called exactly once, at the point engines
-	// become available (getEngine is stable via useCallback's [] dep array above); the try/catch
-	// is defense-in-depth on top of the attachment's own internal no-throw guards — a missing or
-	// misconfigured dev sync target must never fail app boot.
+	// 62-25 (D-28/D-29): the registration REST binding is attached in EVERY build, like the 'peer'
+	// binding above it — no `__DEV__` gate, no configuration at this call site. It is inert until
+	// an officer with 'vrg' saves an https bridge URL through `RestBridgeConfigCard`
+	// (`registration-bridge-config.ts`, `setIntakePolicy`); `syncNow` itself refuses before any
+	// network call while no valid URL is saved. The try/catch is defense-in-depth on top of the
+	// attachment's own internal no-throw guards — a boot must never fail because this attachment
+	// did, and no error object reaches `console` here (it may carry endpoint/policy text).
 	//
-	// WR-17: `__DEV__`-gated at this CALL SITE as well as inside the harness itself. Two things
-	// change. (1) A release build never invokes the harness at all, so editing
-	// `DEV_REGISTRATION_SYNC_REST_BASE_URL` alone can no longer turn a shipped app into a live
-	// outbound sync client — the hazard plan 48-32's commit 70c40b7 demonstrated in practice
-	// before 4c1b231 reverted it. (2) The `console.error` below no longer runs unconditionally in
-	// release builds; a dev-only harness's failure is a dev-only diagnostic. The gate is
-	// duplicated (here and in `attachSyncBindings`) on purpose: this one keeps the call out of the
-	// release path, the other keeps the harness inert even if some future caller forgets.
-	//
-	// 51-10 Task 3: `attachAssociationSyncBindings()` is called in the SAME effect, immediately
-	// AFTER `attachSyncBindings()` — ordering is load-bearing (see
-	// `attach-association-sync-bindings.ts`'s own header): it composes onto the "rest" binding
-	// `attachSyncBindings()` just registered, via `bulk-import-sync-model.ts`'s registry seam, so
-	// the registration handle must exist before the association attachment captures it. Sequencing
-	// both calls inside one effect (rather than two separate effects) makes that order a property
-	// of the source, not an assumption about React's effect-scheduling order across two hooks.
+	// D-28: association has NO REST or filesystem app binding any more. Through 62-24 this effect
+	// also called a second dev-only attach function that composed an association REST harness onto
+	// this same "rest" registry entry — that sibling file is deleted; the ONLY association sync
+	// path is the 'peer' binding's `processPendingReassociations` call (see that binding's header).
 	useEffect(() => {
-		if (!__DEV__) return;
 		try {
 			attachSyncBindings(getEngine);
-		} catch (err) {
-			console.error("attachSyncBindings (dev/device-proof only) failed:", err);
-		}
-		try {
-			attachAssociationSyncBindings(getEngine);
-		} catch (err) {
-			console.error("attachAssociationSyncBindings (dev/device-proof only) failed:", err);
+		} catch {
+			/* boot must not fail */
 		}
 	}, [getEngine]);
 
