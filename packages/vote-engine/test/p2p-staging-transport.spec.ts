@@ -949,4 +949,14 @@ describe('P2P staging transports', function () {
       expect(rows.map((r) => r.Cursor).sort()).to.deep.equal(['0000000000000001', '0000000000000002'])
     })
   })
+
+  it('reaches both transports and the seam names through the main barrel, but NOT insertWithCursorRetry', async () => {
+    const barrel = await import('../src/index.js') as Record<string, unknown>
+    expect(barrel.P2pRegistrationTransport).to.not.equal(undefined)
+    expect(barrel.P2pAssociationTransport).to.not.equal(undefined)
+    expect(barrel.P2pStagingError).to.not.equal(undefined)
+    expect(barrel.REGISTRATION_DUPLICATE_CLOSED_REASON).to.not.equal(undefined)
+    expect(barrel.STAGING_CURSOR_MAX_ATTEMPTS).to.not.equal(undefined)
+    expect('insertWithCursorRetry' in barrel).to.equal(false)
+  })
 })
