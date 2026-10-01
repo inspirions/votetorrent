@@ -20,12 +20,21 @@ import {
 import type { IKeyVault } from '../crypto/index.js'
 import { digestToBytes } from '../utils.js'
 import { requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
+import { seedSignedMutation } from '../signing/signed-mutation.js'
+import { readAuthorityThreshold } from '../signing/threshold.js'
+import { allocateTid } from '../database/tid-allocator.js'
 import type { EngineContext } from '../types.js'
 import { intakeQueryPortFromDb } from './query-port.js'
 import { pickCurrentEncryptionKey, readUsableEncryptionKeys, resolveIntakeRecipients } from './recipients.js'
-import { IntakeError } from './types.js'
+import { createIntakeOpener, createIntakeSealer } from './sealing.js'
+import { isValidRestBridgeUrl, readIntakePolicyFrom } from './policy.js'
+import { IntakeError, REASSOCIATION_MODES } from './types.js'
 import type {
+  AuthorityIntakePolicyInput,
+  AuthorityIntakePolicyView,
+  IntakeOpener,
   IntakeRecipientSet,
+  IntakeSealer,
   IntakeSignCallback,
   OfficerEncryptionKeyRegistration,
   OfficerEncryptionKeyStatus
@@ -242,5 +251,126 @@ export class IntakeEngine {
   async listIntakeRecipients (authorityId: string): Promise<IntakeRecipientSet> {
     this.requireCtx('listIntakeRecipients')
     return resolveIntakeRecipients(intakeQueryPortFromDb(this.ctx!.db), authorityId)
+  }
+
+  // ---------- D-03/D-04 sealer/opener factories ----------
+
+  createSealer (authorityId: string): IntakeSealer {
+    this.requireCtx('createSealer')
+    return createIntakeSealer({ port: intakeQueryPortFromDb(this.ctx!.db), authorityId })
+  }
+
+  createOpener (vault: IKeyVault): IntakeOpener {
+    this.requireCtx('createOpener')
+    return createIntakeOpener({ vault, userId: this.requireUserId() })
+  }
+
+  // ---------- D-29/D-46 intake policy ----------
+
+  async readIntakePolicy (authorityId: string): Promise<AuthorityIntakePolicyView> {
+    this.requireCtx('readIntakePolicy')
+    return readIntakePolicyFrom(intakeQueryPortFromDb(this.ctx!.db), authorityId)
+  }
+
+  /**
+   * D-29: an officer holding `'vrg'` sets the authority's REST bridge URL
+   * and/or re-association mode as a new revision, under a `'vrg'`
+   * AdminSigning ceremony — mirroring `RegistrationEngine.registerBridgeKey`
+   * field for field. Every check below runs BEFORE the first write, so a
+   * refusal never leaves an orphan ceremony session.
+   */
+  async setIntakePolicy (input: AuthorityIntakePolicyInput, sign: IntakeSignCallback): Promise<AuthorityIntakePolicyView> {
+    this.requireCtx('setIntakePolicy')
+    const ctx = this.ctx!
+    const userId = this.requireUserId()
+    const { authorityId } = input
+
+    if (typeof authorityId !== 'string' || authorityId.length === 0) {
+      throw new IntakeError('invalid-policy', 'setIntakePolicy: authorityId must be a non-empty string')
+    }
+    const hasUrl = Object.prototype.hasOwnProperty.call(input, 'restBridgeUrl')
+    const hasMode = Object.prototype.hasOwnProperty.call(input, 'reassociationMode')
+    if (!hasUrl && !hasMode) {
+      throw new IntakeError('invalid-policy', 'setIntakePolicy: at least one of restBridgeUrl/reassociationMode must be given')
+    }
+    if (hasUrl && input.restBridgeUrl !== null && input.restBridgeUrl !== undefined && !isValidRestBridgeUrl(input.restBridgeUrl)) {
+      throw new IntakeError('invalid-policy', 'setIntakePolicy: restBridgeUrl must be null or a valid https URL')
+    }
+    if (hasMode && !(REASSOCIATION_MODES as readonly string[]).includes(input.reassociationMode as string)) {
+      throw new IntakeError('invalid-policy', 'setIntakePolicy: reassociationMode must be "manual" or "automatic"')
+    }
+
+    // Tier 2 pre-check (tier 1 is the schema's own ceremony CHECK).
+    if (!(await this.isCurrentOfficer(authorityId, userId, 'vrg' as Scope))) {
+      throw new IntakeError('not-authorized', "setIntakePolicy: caller does not hold 'vrg' at this authority")
+    }
+
+    // Like registerBridgeKey, this table has no co-sign Task path, and
+    // adding one needs a schema change frozen after 62-03 (D-22). Refusing
+    // before any write leaves no orphan ceremony.
+    const threshold = await readAuthorityThreshold(ctx.db, authorityId, 'vrg' as Scope)
+    if (threshold > 1) {
+      throw new IntakeError(
+        'threshold-requires-co-sign',
+        "setIntakePolicy: the 'vrg' threshold at this authority is above 1 — co-sign is not yet supported for this table"
+      )
+    }
+
+    const current = await readIntakePolicyFrom(intakeQueryPortFromDb(ctx.db), authorityId)
+    if (input.expectedRevision !== undefined && input.expectedRevision !== current.revision) {
+      throw new IntakeError(
+        'policy-revision-conflict',
+        `setIntakePolicy: expectedRevision ${input.expectedRevision} does not match current revision ${current.revision}`
+      )
+    }
+
+    const nextUrl = hasUrl ? (input.restBridgeUrl ?? null) : current.restBridgeUrl
+    const nextMode = hasMode ? (input.reassociationMode ?? current.reassociationMode) : current.reassociationMode
+
+    if (!current.isDefault && nextUrl === current.restBridgeUrl && nextMode === current.reassociationMode) {
+      return current
+    }
+
+    const revision = current.revision + 1
+    const setAt = new Date().toISOString()
+    // The SAME durable allocator namespace registerBridgeKey uses.
+    const tid = await allocateTid(ctx.db, 'registration-request')
+    const digestExpr = "select Digest(:tid, 'AuthorityIntakePolicy', :rowAuthorityId, :revision, :restBridgeUrl, :reassociationMode, :setAt) as d"
+    const digestParams = {
+      tid,
+      rowAuthorityId: authorityId,
+      revision,
+      restBridgeUrl: nextUrl,
+      reassociationMode: nextMode,
+      setAt
+    }
+
+    try {
+      const nonce = await seedSignedMutation(ctx, authorityId, 'vrg' as Scope, tid, digestExpr, digestParams, sign)
+      await ctx.db.exec(
+        `insert into AuthorityIntakePolicy (AuthorityId, Revision, RestBridgeUrl, ReassociationMode, SetAt)
+         with context SigningNonce = :signingNonce, Tid = ${tid}
+         values (:rowAuthorityId, :revision, :restBridgeUrl, :reassociationMode, :setAt)`,
+        {
+          rowAuthorityId: authorityId,
+          revision,
+          restBridgeUrl: nextUrl,
+          reassociationMode: nextMode,
+          setAt,
+          signingNonce: nonce
+        }
+      )
+    } catch (err) {
+      if (err instanceof IntakeError) throw err
+      // A concurrent officer may have won the PK race (same idiom as
+      // registerBridgeKey) — the unused ceremony session is harmless.
+      const reread = await readIntakePolicyFrom(intakeQueryPortFromDb(ctx.db), authorityId)
+      if (reread.revision >= revision) {
+        throw new IntakeError('policy-revision-conflict', 'setIntakePolicy: a concurrent write won the revision race')
+      }
+      this.rethrow(err, 'setIntakePolicy')
+    }
+
+    return readIntakePolicyFrom(intakeQueryPortFromDb(ctx.db), authorityId)
   }
 }
