@@ -38,6 +38,8 @@ import RegisterPersonalScreen from '../screens/registration/RegisterPersonalScre
 import RegisterAddressPartyScreen from '../screens/registration/RegisterAddressPartyScreen';
 import RegisterConfirmScreen from '../screens/registration/RegisterConfirmScreen';
 import ConfirmationScreen from '../screens/registration/ConfirmationScreen';
+import ContinueOnAnotherDeviceScreen from '../screens/registration/ContinueOnAnotherDeviceScreen';
+import {DeviceRetiredNotice, useDeviceRetired} from '../screens/registration/DeviceRetiredNotice';
 import ScanScreen from '../screens/scan/ScanScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
 import TimelineScreen from '../screens/timeline/TimelineScreen';
@@ -233,6 +235,13 @@ function TimelineStackNavigator() {
 				component={ConfirmationScreen}
 				options={{headerShown: false}}
 			/>
+			{/* Phase 62 Plan 28 (D-14 route-closure gate) — Surfaces 8/9, headerShown:false (the
+			    screen renders its own close control). */}
+			<TimelineStack.Screen
+				name="ContinueOnAnotherDevice"
+				component={ContinueOnAnotherDeviceScreen}
+				options={{headerShown: false}}
+			/>
 			{/* D-15: plain push (default header, back chevron) — mirrors ValidationDetails on the
 			    Vote stack, never presentation:'modal'. */}
 			<TimelineStack.Screen
@@ -288,6 +297,13 @@ function RegistrationStackNavigator() {
 			<RegistrationStack.Screen
 				name="Confirmation"
 				component={ConfirmationScreen}
+				options={{headerShown: false}}
+			/>
+			{/* Phase 62 Plan 28 (D-40/D-43/D-45) — Surfaces 8/9, headerShown:false (the screen
+			    renders its own close control). */}
+			<RegistrationStack.Screen
+				name="ContinueOnAnotherDevice"
+				component={ContinueOnAnotherDeviceScreen}
 				options={{headerShown: false}}
 			/>
 			<RegistrationStack.Screen
@@ -348,6 +364,8 @@ const REGISTRATION_FULLSCREEN_ROUTES = [
 	'RegisterAddressParty',
 	'RegisterConfirm',
 	'Confirmation',
+	// Phase 62 Plan 28 — Surfaces 8/9 are their own continuous, un-interruptible flow too.
+	'ContinueOnAnotherDevice',
 ];
 
 function registrationTabBarStyle(route: RouteProp<RootTabParamList, 'Registration'>) {
@@ -400,6 +418,14 @@ const Tab = createBottomTabNavigator<RootTabParamList>();
 export function RootNavigator() {
 	const {colors, fonts} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('common');
+	// Phase 62 Plan 28 (D-41): a retired device's whole tab navigator is replaced by
+	// DeviceRetiredNotice — see that hook's own header for the fail-open/latch contract. Called
+	// after the existing hooks so it never changes their order.
+	const isDeviceRetired = useDeviceRetired();
+
+	if (isDeviceRetired) {
+		return <DeviceRetiredNotice />;
+	}
 
 	return (
 		<AppStateProviders>

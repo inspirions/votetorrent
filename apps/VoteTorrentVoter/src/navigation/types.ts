@@ -40,6 +40,9 @@ export type RegistrationStackParamList = {
 	RegisterAddressParty: undefined;
 	RegisterConfirm: undefined;
 	RegistrationInfo: undefined;
+	// Phase 62 Plan 28 (D-40/D-43/D-45) — Surfaces 8/9. Registered a SECOND time on
+	// TimelineStackParamList below, mirroring D-14's existing route-closure requirement.
+	ContinueOnAnotherDevice: undefined;
 };
 
 // Scan tab: single root screen, no modals.
@@ -84,6 +87,9 @@ export type TimelineStackParamList = {
 	RegisterConfirm: undefined;
 	Confirmation: undefined;
 	Keyholders: undefined;
+	// Phase 62 Plan 28 (D-14 route-closure gate) — the Timeline duplicate of
+	// RegistrationStackParamList's entry above.
+	ContinueOnAnotherDevice: undefined;
 };
 
 // The 5 tabs, in D-13 locked order: Vote · Timeline · Registration · Scan · Settings.
