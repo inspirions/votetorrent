@@ -20,6 +20,11 @@ import type { ElectionSubject } from '../src/election/election-engine.js'
 import { MockElectionEngine } from '../src/election/mock-election-engine.js'
 import { InvitationEngine } from '../src/invite/invitation-engine.js'
 import { createTestNetwork, addTestAuthority, addTestElection, makeTestSignCallback } from './fixtures/test-context.js'
+// 62-02 (D-26) deviation: this spec is not in 62-02-PLAN.md's files_modified list, but
+// InvitationEngine.respondToInvite now requires provisioning for every Type 'k' accept — these two
+// REAL ENGINE tests (not named in the plan's test-update list) accept a keyholder invite and would
+// otherwise newly fail, see the SUMMARY's Deviations section.
+import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
 import type {
   Ballot,
   ElectionRevisionInit,
@@ -546,7 +551,7 @@ describe('ElectionRevokeKeyholderBuilder', () => {
     const slotRow = await elec.ctx.db
       .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
       .get({ name: kh.name })
-    await new InvitationEngine(elec.ctx).respondToInvite(slotRow!.Cid as string, true)
+    await new InvitationEngine(elec.ctx).respondToInvite(slotRow!.Cid as string, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const engine = new ElectionEngine({ id: 'election-1', authorityId: auth.authority.id }, elec.ctx)
     const b = new ElectionRevokeKeyholderBuilder(engine).fromPayload({ keyholder: kh, electionId: 'election-1' })
@@ -577,7 +582,7 @@ describe('ElectionRevokeKeyholderBuilder', () => {
     const slotRow = await elec.ctx.db
       .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
       .get({ name: kh.name })
-    await new InvitationEngine(elec.ctx).respondToInvite(slotRow!.Cid as string, true)
+    await new InvitationEngine(elec.ctx).respondToInvite(slotRow!.Cid as string, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const engine = new ElectionEngine({ id: 'election-1', authorityId: auth.authority.id }, elec.ctx)
     const b = new ElectionRevokeKeyholderBuilder(engine).fromPayload({ keyholder: kh, electionId: 'election-1' })

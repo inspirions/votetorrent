@@ -128,8 +128,11 @@ const KEYHOLDER_DKG_BINDING_CANDIDATE = `
 const OLD_KEYHOLDER_INSERT_VALID =
   `constraint InsertValid check on insert (\n\t\t\tcontext.SigningNonce is null and context.InviteSlotCid is null and context.InviteSignature is null\n\t\t)`
 
+// Verbatim copy of the REAL Task 3 body (votetorrent.qsql's `table Keyholder (` block) — kept as an
+// independent literal (not shared with the real schema text) so a later accidental drift between
+// this probe and the shipped body is caught by re-running this file, not masked by sharing.
 const NEW_KEYHOLDER_INSERT_VALID =
-  `constraint InsertValid check on insert (\n\t\t\tcontext.SigningNonce is null and context.InviteSlotCid is null and context.InviteSignature is null\n\t\t\t\tand exists (select 1 from KeyholderDkgBinding B where B.ElectionId = new.ElectionId and B.ElectionRevision = new.ElectionRevision and B.UserId = new.UserId)\n\t\t)`
+  `constraint InsertValid check on insert (\n\t\t\tcontext.SigningNonce is null and context.InviteSlotCid is null and context.InviteSignature is null\n\t\t\t\tand exists (\n\t\t\t\t\tselect 1 from KeyholderDkgBinding B\n\t\t\t\t\t\twhere B.ElectionId = new.ElectionId and B.ElectionRevision = new.ElectionRevision and B.UserId = new.UserId\n\t\t\t\t)\n\t\t)`
 
 /**
  * Builds the D-26 candidate schema: the real schema (post Task-1) plus `KeyholderDkgBinding`
