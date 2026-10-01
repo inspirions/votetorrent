@@ -9,6 +9,11 @@ import type {
 	NetworkInit,
 	NetworkReference,
 	User,
+	FoundingBundleExporter,
+	FoundingBundleExport,
+	FoundingBundleImportOptions,
+	FoundingBundleImportResult,
+	FoundingBundleRows,
 } from '@votetorrent/vote-core';
 import type {
 	INetworksEngine,
@@ -22,13 +27,46 @@ import {
 	markSchemaInitialized,
 	ensureTidSequence,
 	declareViewsInMain,
+	prepareDb,
 } from '../database/initialize.js';
 import { allocateTid } from '../database/tid-allocator.js';
 import { NetworksCreateBuilder } from './builders/index.js';
+import {
+	FOUNDING_BUNDLE_TABLE_ORDER,
+	readGenesisRows,
+	replayGenesisRows,
+} from './genesis-rows.js';
+import {
+	FOUNDING_BUNDLE_FORMAT,
+	FOUNDING_BUNDLE_FORMAT_VERSION,
+	FOUNDING_FAILURE_CATEGORY,
+	FoundingBundleExportError,
+	deriveFoundingDescriptor,
+	foundingBundleSigningDigest,
+	parseFoundingBundle,
+	serializeFoundingBundle,
+	verifyFoundingBundle,
+} from './founding-bundle.js';
+import { buildManifest, computeContentDigest, computeSchemaHash } from '../bootstrap/snapshot-manifest.js';
+import type { SnapshotTables } from '../bootstrap/snapshot-types.js';
 
 // D-02: default in-memory factory — keeps all 581 existing tests passing unchanged.
 // Lives at module scope (not inside the class) so it is a stable default parameter.
 const inMemoryFactory: DbFactory = async (_hash: string) => new Database();
+
+/**
+ * 62-16: parse the violated CHECK constraint's name out of a Quereus error
+ * thrown by a genesis-row replay — the only detail `importFoundingBundle`'s
+ * `replay-rejected` result carries (never a row or column value, matching
+ * the detail-string discipline `founding-bundle.ts` uses). Quereus's own
+ * constraint-violation text is `CHECK constraint failed: <name>[ (...)]`
+ * (row-constraints.js / deferred-constraint-queue.js / view-mutation-builder.js).
+ */
+function extractConstraintName(err: unknown): string {
+	const message = err instanceof Error ? err.message : String(err);
+	const match = /CHECK constraint failed:\s*([A-Za-z0-9_]+)/.exec(message);
+	return match?.[1] ?? 'unknown constraint';
+}
 
 export class NetworksEngine implements INetworksEngine {
 	// D-07: per-instance hash→EngineContext cache.
@@ -261,6 +299,313 @@ export class NetworksEngine implements INetworksEngine {
 		]);
 
 		return this.open(networkRef, user, true);
+	}
+
+	/**
+	 * D-35/62-16: export the network's founding bundle. Device A reads its own
+	 * six founding rows verbatim, builds a signed, verified envelope, and
+	 * returns it. Rejects with a `FoundingBundleExportError` (never a partial
+	 * bundle) — see the named codes on `FoundingBundleExportErrorCode`.
+	 */
+	async exportFoundingBundle(
+		networkHash: string,
+		exporter: FoundingBundleExporter,
+	): Promise<FoundingBundleExport> {
+		const ctx = this.contexts.get(networkHash);
+		if (!ctx) throw new FoundingBundleExportError('network-not-open');
+
+		const networkRow = await ctx.db
+			.prepare(
+				'select Id, Hash, PrimaryAuthorityId, Name, ImageRef, Relays, TimestampAuthorities, NumberRequiredTSAs, ElectionType from Network',
+			)
+			.get({});
+		if (!networkRow || networkRow.Hash !== networkHash) {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		const primaryAuthorityId = networkRow.PrimaryAuthorityId as string;
+
+		const adminEffectiveAtRows: Array<{ EffectiveAt: unknown }> = [];
+		for await (const row of ctx.db.eval(
+			'select EffectiveAt from Admin where AuthorityId = :authorityId',
+			{ authorityId: primaryAuthorityId },
+		)) {
+			adminEffectiveAtRows.push(row as { EffectiveAt: unknown });
+		}
+		// D-38: signed revisions carry no stored Tid, so they can never be
+		// replayed with their original Tid — export refuses once the primary
+		// authority's Admin has been revised (`admin-revised`).
+		if (adminEffectiveAtRows.length > 1) {
+			throw new FoundingBundleExportError('admin-revised');
+		}
+		if (adminEffectiveAtRows.length === 0) {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		const adminEffectiveAt = String(adminEffectiveAtRows[0]!.EffectiveAt);
+
+		let rows: FoundingBundleRows;
+		try {
+			rows = await readGenesisRows(ctx.db, {
+				userId: exporter.userId,
+				signerKey: exporter.signerKey,
+				authorityId: primaryAuthorityId,
+				adminEffectiveAt,
+			});
+		} catch {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+
+		if (rows.User.length === 0 || rows.Officer.length === 0) {
+			throw new FoundingBundleExportError('not-founding-officer');
+		}
+		if (rows.Authority.length === 0 || rows.Admin.length === 0 || rows.Network.length === 0) {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		if (rows.UserKey.length === 0) {
+			throw new FoundingBundleExportError('signer-key-invalid');
+		}
+		const expiration = String(rows.UserKey[0]!.Expiration);
+		if (!(expiration > nowCanonicalDatetime())) {
+			throw new FoundingBundleExportError('signer-key-invalid');
+		}
+
+		const exportedAt = nowCanonicalDatetime();
+		const schemaHash = computeSchemaHash();
+		const manifest = buildManifest(rows as unknown as SnapshotTables) as unknown as FoundingBundleExport['bundle']['manifest'];
+		const digest = computeContentDigest(rows as unknown as SnapshotTables);
+		const descriptor = deriveFoundingDescriptor(rows);
+
+		const signingDigest = foundingBundleSigningDigest({
+			networkHash: descriptor.networkHash,
+			schemaHash,
+			exportedAt,
+			exporterUserId: exporter.userId,
+			signerKey: exporter.signerKey,
+			digest,
+		});
+
+		let signature: Awaited<ReturnType<FoundingBundleExporter['sign']>>;
+		try {
+			signature = await exporter.sign(signingDigest.bytes);
+		} catch {
+			throw new FoundingBundleExportError('signature-self-check');
+		}
+		if (signature.signerUserId !== exporter.userId || signature.signerKey !== exporter.signerKey) {
+			throw new FoundingBundleExportError('signature-self-check');
+		}
+
+		const bundle: FoundingBundleExport['bundle'] = {
+			format: FOUNDING_BUNDLE_FORMAT,
+			formatVersion: FOUNDING_BUNDLE_FORMAT_VERSION,
+			descriptor,
+			schemaHash,
+			exportedAt,
+			manifest,
+			digest,
+			rows,
+			exporter: {
+				userId: signature.signerUserId,
+				signerKey: signature.signerKey,
+				signature: signature.signature,
+			},
+		};
+
+		// Fail closed on a mis-encoding app signer: the bundle must verify
+		// against its own declared contents before it is ever handed out.
+		const selfCheck = verifyFoundingBundle(bundle);
+		if (!selfCheck.ok) {
+			throw new FoundingBundleExportError('signature-self-check', selfCheck.detail);
+		}
+
+		const text = serializeFoundingBundle(bundle);
+		const fileName = `votetorrent-network-${descriptor.networkHash.slice(0, 12)}.json`;
+		return { bundle, text, fileName };
+	}
+
+	/**
+	 * D-35/D-38/D-39/62-16: import a founding bundle produced by
+	 * `exportFoundingBundle` on a second device. NEVER throws for a bundle or
+	 * target problem — every failure is returned, categorized by
+	 * `FOUNDING_FAILURE_CATEGORY`. Verification (parse + verifyFoundingBundle)
+	 * and the already-joined check both run BEFORE any `DbFactory` call
+	 * (fail-closed, Phase 50 D-12/D-13 order); a scratch in-memory dry run then
+	 * proves the replay passes every tier-1 CHECK before the target database is
+	 * opened.
+	 */
+	async importFoundingBundle(
+		bundleText: string,
+		user: User | undefined,
+		options?: FoundingBundleImportOptions,
+	): Promise<FoundingBundleImportResult> {
+		const parsed = parseFoundingBundle(bundleText);
+		if (!parsed.ok) {
+			return { ok: false, reason: parsed.reason, category: FOUNDING_FAILURE_CATEGORY[parsed.reason], detail: parsed.detail };
+		}
+
+		const verified = verifyFoundingBundle(parsed.bundle, {
+			expectedNetworkHash: options?.expectedNetworkHash,
+			expectedDigest: options?.expectedDigest,
+		});
+		if (!verified.ok) {
+			return {
+				ok: false,
+				reason: verified.reason,
+				category: FOUNDING_FAILURE_CATEGORY[verified.reason],
+				detail: verified.detail,
+			};
+		}
+
+		const bundle = parsed.bundle;
+		const hash = bundle.descriptor.networkHash;
+
+		// Already-joined check — before any DbFactory call.
+		const recentBefore: NetworkReference[] = (await this.localStorage.getItem('recentNetworks')) ?? [];
+		const existingRef = recentBefore.find((r) => r.hash === hash);
+		if (this.contexts.has(hash) || existingRef) {
+			const networkRef: NetworkReference = existingRef ?? {
+				hash,
+				imageUrl: bundle.descriptor.imageUrl,
+				relays: [...bundle.descriptor.relays],
+				name: bundle.descriptor.name,
+				primaryAuthorityDomainName: bundle.descriptor.primaryAuthorityDomainName,
+			};
+			return { ok: false, reason: 'already-joined', category: 'already-joined', networkRef };
+		}
+
+		const genesisKeys = {
+			userId: String(bundle.rows.User[0]!.Id),
+			signerKey: String(bundle.rows.UserKey[0]!.PubKey),
+			authorityId: String(bundle.rows.Authority[0]!.Id),
+			adminEffectiveAt: String(bundle.rows.Admin[0]!.EffectiveAt),
+		};
+
+		// Scratch in-memory dry run — proves the replay passes every tier-1
+		// CHECK BEFORE the target database (DbFactory) is ever opened. Not
+		// wrapped in BEGIN/COMMIT: create()'s own three execs are not one
+		// transaction either, and the batched deferred-CHECK trap applies the
+		// same way here (see genesis-rows.ts's replayGenesisRows doc comment).
+		const scratch = new Database();
+		try {
+			await prepareDb(scratch);
+			await replayGenesisRows(scratch, bundle.rows, nowCanonicalDatetime());
+			const scratchRows = await readGenesisRows(scratch, genesisKeys);
+			const scratchDigest = computeContentDigest(scratchRows as unknown as SnapshotTables);
+			if (scratchDigest !== bundle.digest) {
+				return {
+					ok: false,
+					reason: 'replay-rejected',
+					category: FOUNDING_FAILURE_CATEGORY['replay-rejected'],
+					detail: 'founding bundle: scratch replay digest does not match the bundle digest',
+				};
+			}
+		} catch (err) {
+			return {
+				ok: false,
+				reason: 'replay-rejected',
+				category: FOUNDING_FAILURE_CATEGORY['replay-rejected'],
+				detail: `founding bundle: scratch replay refused (${extractConstraintName(err)})`,
+			};
+		} finally {
+			const closable = scratch as unknown as { close?: () => Promise<void> };
+			if (typeof closable.close === 'function') {
+				try {
+					await closable.close();
+				} catch {
+					// best-effort — the scratch handle is discarded either way.
+				}
+			}
+		}
+
+		// Target: the CREATE path, reached only after verification and the dry
+		// run, so no empty database is ever fabricated for an invalid bundle.
+		let ctx: EngineContext;
+		try {
+			ctx = await this.createContext(user, hash);
+		} catch {
+			return {
+				ok: false,
+				reason: 'target-open-failed',
+				category: FOUNDING_FAILURE_CATEGORY['target-open-failed'],
+				detail: 'founding bundle: target database open failed',
+			};
+		}
+
+		let targetRows: FoundingBundleRows;
+		try {
+			targetRows = await readGenesisRows(ctx.db, genesisKeys);
+		} catch {
+			return {
+				ok: false,
+				reason: 'target-open-failed',
+				category: FOUNDING_FAILURE_CATEGORY['target-open-failed'],
+				detail: 'founding bundle: target database read failed',
+			};
+		}
+
+		const presentCount = FOUNDING_BUNDLE_TABLE_ORDER.reduce(
+			(n, table) => n + (targetRows[table].length > 0 ? 1 : 0),
+			0,
+		);
+
+		let outcome: 'replayed' | 'already-present';
+		if (presentCount === FOUNDING_BUNDLE_TABLE_ORDER.length) {
+			const targetDigest = computeContentDigest(targetRows as unknown as SnapshotTables);
+			if (targetDigest !== bundle.digest) {
+				return {
+					ok: false,
+					reason: 'target-conflict',
+					category: FOUNDING_FAILURE_CATEGORY['target-conflict'],
+					detail: 'founding bundle: target already holds a different network (different)',
+				};
+			}
+			outcome = 'already-present';
+		} else if (presentCount === 0) {
+			try {
+				await replayGenesisRows(ctx.db, bundle.rows, nowCanonicalDatetime());
+			} catch {
+				return {
+					ok: false,
+					reason: 'target-replay-failed',
+					category: FOUNDING_FAILURE_CATEGORY['target-replay-failed'],
+					detail: 'founding bundle: target replay refused',
+				};
+			}
+			const readBack = await readGenesisRows(ctx.db, genesisKeys);
+			const readBackDigest = computeContentDigest(readBack as unknown as SnapshotTables);
+			if (readBackDigest !== bundle.digest) {
+				return {
+					ok: false,
+					reason: 'target-replay-failed',
+					category: FOUNDING_FAILURE_CATEGORY['target-replay-failed'],
+					detail: 'founding bundle: replayed rows do not match the bundle digest',
+				};
+			}
+			outcome = 'replayed';
+		} else {
+			// A failure in batch 2 or 3 of a PRIOR replay attempt can leave
+			// batch-1 rows — the dry run above makes that environmental only
+			// (proven safe before this attempt), but a partial target from a
+			// concurrent sync is a real, retryable state.
+			return {
+				ok: false,
+				reason: 'target-conflict',
+				category: FOUNDING_FAILURE_CATEGORY['target-conflict'],
+				detail: 'founding bundle: target holds a partial founding generation (partial — sync in progress, retry later)',
+			};
+		}
+
+		this.contexts.set(hash, ctx);
+		const networkRef: NetworkReference = {
+			hash,
+			imageUrl: bundle.descriptor.imageUrl,
+			relays: [...bundle.descriptor.relays],
+			name: bundle.descriptor.name,
+			primaryAuthorityDomainName: bundle.descriptor.primaryAuthorityDomainName,
+		};
+		const recentAfter: NetworkReference[] = (await this.localStorage.getItem('recentNetworks')) ?? [];
+		await this.localStorage.setItem('recentNetworks', [...recentAfter, networkRef]);
+
+		const network = await this.open(networkRef, user, true, options?.getPeerCount);
+		return { ok: true, outcome, networkRef, network };
 	}
 
 	async getRecentNetworks(): Promise<NetworkReference[]> {

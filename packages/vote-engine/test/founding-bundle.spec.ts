@@ -9,15 +9,18 @@
 
 import { expect } from 'chai'
 import { Database } from '@quereus/quereus'
+import { secp256k1 } from '@noble/curves/secp256k1.js'
+import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import { UserKeyType } from '@votetorrent/vote-core'
-import type { FoundingBundle, FoundingBundleRows, Signature } from '@votetorrent/vote-core'
+import type { FoundingBundle, FoundingBundleRows, Signature, LocalStorage, AdminInit, Proposal, Scope } from '@votetorrent/vote-core'
 import { prepareDb } from '../src/database/initialize.js'
-import { nowCanonicalDatetime, toCanonicalDatetime, bytesToBase64url } from '../src/utils.js'
+import { nowCanonicalDatetime, bytesToBase64url } from '../src/utils.js'
 import { buildManifest, computeContentDigest, computeSchemaHash } from '../src/bootstrap/snapshot-manifest.js'
 import {
   FOUNDING_BUNDLE_FORMAT,
   FOUNDING_BUNDLE_FORMAT_VERSION,
   MAX_FOUNDING_BUNDLE_CHARS,
+  FoundingBundleExportError,
   deriveFoundingDescriptor,
   foundingBundleSigningDigest,
   serializeFoundingBundle,
@@ -25,11 +28,46 @@ import {
   verifyFoundingBundle
 } from '../src/networks/founding-bundle.js'
 import { GENESIS_COLUMNS, readGenesisRows, replayGenesisRows } from '../src/networks/genesis-rows.js'
-import { createTestNetwork, makeTestSignCallback } from './fixtures/test-context.js'
+import { NetworksEngine } from '../src/networks/networks-engine.js'
+import type { DbFactory } from '../src/types.js'
+import { createTestNetwork, addTestAuthority, makeTestSignCallback } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { makeP256TestKey, signDigestP256 } from './fixtures/p256-signer.js'
 
 type TestNet = Awaited<ReturnType<typeof createTestNetwork>>
+
+// ---------------------------------------------------------------------------
+// Task 2 device-B helpers: a per-device in-memory LocalStorage (the
+// module-level AsyncStorage shim is shared, so device B must not use it) and
+// a DbFactory recorder that keeps the hashes it was called with.
+// ---------------------------------------------------------------------------
+
+function makeDeviceLocalStorage (): LocalStorage {
+  const store = new Map<string, unknown>()
+  return {
+    async getItem<TValue> (key: string): Promise<TValue | undefined> {
+      return store.has(key) ? (store.get(key) as TValue) : undefined
+    },
+    async setItem<TValue> (key: string, value: TValue): Promise<void> {
+      store.set(key, value)
+    },
+    async removeItem (key: string): Promise<void> {
+      store.delete(key)
+    },
+    async clear (): Promise<void> {
+      store.clear()
+    }
+  }
+}
+
+function makeRecordedInMemoryFactory (): { factory: DbFactory; calls: string[] } {
+  const calls: string[] = []
+  const factory: DbFactory = async (hash: string) => {
+    calls.push(hash)
+    return new Database()
+  }
+  return { factory, calls }
+}
 
 /**
  * Build a genuine, self-consistent, exporter-signed bundle directly from the
@@ -513,6 +551,339 @@ describe('founding-bundle codec and genesis replay (D-35, D-38, D-39)', () => {
       await replayGenesisRows(deviceB, sourceRows, nowCanonicalDatetime())
       const row = await deviceB.prepare("select Namespace from TidHighWater where Namespace = 'networks'").get({})
       expect(row).to.equal(undefined)
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Task 2 — NetworksEngine.exportFoundingBundle/importFoundingBundle (D-35,
+// D-37, D-38, D-39): two-device in-memory cases.
+// ---------------------------------------------------------------------------
+
+describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
+  async function exporterFor (net: TestNet): Promise<{ userId: string; signerKey: string; sign: (digest: Uint8Array) => Promise<Signature> }> {
+    return {
+      userId: net.user.id,
+      signerKey: net.user.activeKeys[0]!.key,
+      sign: makeTestSignCallback(net.user)
+    }
+  }
+
+  describe('E-1/E-2: exportFoundingBundle', () => {
+    it('E-1: exports a bundle that verifies, with one row per table and a matching descriptor', async () => {
+      const net = await createTestNetwork()
+      const exporter = await exporterFor(net)
+      const result = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+
+      expect(verifyFoundingBundle(result.bundle)).to.deep.equal({ ok: true })
+      for (const table of Object.keys(GENESIS_COLUMNS) as Array<keyof typeof GENESIS_COLUMNS>) {
+        expect(result.bundle.rows[table]).to.have.lengthOf(1)
+      }
+      expect(result.bundle.descriptor.relays).to.deep.equal(net.ref.relays)
+      expect(result.bundle.descriptor.networkHash).to.equal(net.ref.hash)
+      expect(result.text).to.equal(serializeFoundingBundle(result.bundle))
+    })
+
+    it('E-2a: network-not-open for an unknown hash', async () => {
+      const net = await createTestNetwork()
+      const exporter = await exporterFor(net)
+      let caught: unknown
+      try {
+        await net.networksEngine.exportFoundingBundle('0000000000000000', exporter)
+      } catch (err) { caught = err }
+      expect(caught).to.be.instanceOf(FoundingBundleExportError)
+      expect((caught as FoundingBundleExportError).code).to.equal('network-not-open')
+    })
+
+    it('E-2b: not-founding-officer for a userId that is not an Officer', async () => {
+      const net = await createTestNetwork()
+      const exporter = { ...(await exporterFor(net)), userId: 'not-a-real-user' }
+      let caught: unknown
+      try {
+        await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+      } catch (err) { caught = err }
+      expect(caught).to.be.instanceOf(FoundingBundleExportError)
+      expect((caught as FoundingBundleExportError).code).to.equal('not-founding-officer')
+    })
+
+    it('E-2c: signer-key-invalid for a signerKey not among that user\'s keys', async () => {
+      const net = await createTestNetwork()
+      const exporter = { ...(await exporterFor(net)), signerKey: randomTestKeyPair().publicHex }
+      let caught: unknown
+      try {
+        await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+      } catch (err) { caught = err }
+      expect(caught).to.be.instanceOf(FoundingBundleExportError)
+      expect((caught as FoundingBundleExportError).code).to.equal('signer-key-invalid')
+    })
+
+    it('E-2d: admin-revised for a second SIGNED Admin generation, seeded through a real proposeAdmin promotion (D-48)', async () => {
+      const net = await createTestNetwork()
+      const auth = await addTestAuthority(net)
+
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [{ existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } }],
+          effectiveAt: Date.now() + 60_000,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, makeTestSignCallback(auth.user))
+
+      const outcome = (auth.authorityEngine as unknown as { lastPromotionOutcome?: { status: string } }).lastPromotionOutcome
+      expect(outcome?.status, 'E-2d setup: the promotion must actually complete').to.equal('promoted')
+
+      const adminCount = await auth.ctx.db
+        .prepare('select count(*) as n from Admin where AuthorityId = :id')
+        .get({ id: auth.authority.id })
+      expect(Number(adminCount?.n), 'E-2d setup: two Admin rows must now exist').to.equal(2)
+
+      const exporter = await exporterFor(net)
+      let caught: unknown
+      try {
+        await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+      } catch (err) { caught = err }
+      expect(caught).to.be.instanceOf(FoundingBundleExportError)
+      expect((caught as FoundingBundleExportError).code).to.equal('admin-revised')
+    })
+
+    it('E-2e: signature-self-check when the sign callback signs other bytes', async () => {
+      const net = await createTestNetwork()
+      const exporter = {
+        ...(await exporterFor(net)),
+        sign: async (_digest: Uint8Array): Promise<Signature> => {
+          const real = await makeTestSignCallback(net.user)(new TextEncoder().encode('wrong bytes entirely'))
+          return real
+        }
+      }
+      let caught: unknown
+      try {
+        await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+      } catch (err) { caught = err }
+      expect(caught).to.be.instanceOf(FoundingBundleExportError)
+      expect((caught as FoundingBundleExportError).code).to.equal('signature-self-check')
+    })
+  })
+
+  describe('I: importFoundingBundle on a second in-memory device', () => {
+    it('I-1/I-2: a second device imports the text — ok, replayed, strandId = H16(networkId), digest-equal, no Tid allocated', async () => {
+      const net = await createTestNetwork()
+      const exporter = await exporterFor(net)
+      const { text, bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+
+      const { factory, calls } = makeRecordedInMemoryFactory()
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
+      const result = await engineB.importFoundingBundle(text, undefined)
+
+      expect(result.ok, 'import must succeed').to.equal(true)
+      if (!result.ok) throw new Error('unreachable')
+      expect(result.outcome).to.equal('replayed')
+      expect(calls).to.deep.equal([bundle.descriptor.networkHash])
+
+      const ctxB = engineB.getEstablishedContext(bundle.descriptor.networkHash)
+      if (!ctxB) throw new Error('I-1: device B context not established')
+      const genesisKeys = {
+        userId: String(bundle.rows.User[0]!.Id),
+        signerKey: String(bundle.rows.UserKey[0]!.PubKey),
+        authorityId: String(bundle.rows.Authority[0]!.Id),
+        adminEffectiveAt: String(bundle.rows.Admin[0]!.EffectiveAt)
+      }
+      const rowsB = await readGenesisRows(ctxB.db, genesisKeys)
+      expect(computeContentDigest(rowsB as unknown as Parameters<typeof computeContentDigest>[0])).to.equal(bundle.digest)
+
+      const details = await result.network.getDetails()
+      expect(details.network.id).to.equal(bundle.descriptor.networkId)
+      expect(details.network.primaryAuthorityId).to.equal(bundle.descriptor.primaryAuthorityId)
+
+      const recentsB = await engineB.getRecentNetworks()
+      expect(recentsB).to.have.lengthOf(1)
+      expect(recentsB[0]?.hash).to.equal(bundle.descriptor.networkHash)
+      expect(recentsB[0]?.relays).to.deep.equal([...bundle.descriptor.relays])
+
+      // I-2: no Tid allocated.
+      const tidRow = await ctxB.db.prepare("select Namespace from TidHighWater where Namespace = 'networks'").get({})
+      expect(tidRow).to.equal(undefined)
+    })
+
+    it('I-3: a bundle exported while the founding key was still valid, but whose key has since expired by IMPORT time, still imports with outcome replayed', async function () {
+      this.timeout(15_000)
+      // Generate the key pair ourselves (rather than through makeTestUser's own
+      // internal randomTestKeyPair()) so the sign callback below can sign with
+      // the SAME private key as the overridden public key — createTestNetwork's
+      // `user.activeKeys` override replaces the whole array, but
+      // makeTestSignCallback only ever knows the key makeTestUser generated
+      // internally, so a bare activeKeys override would sign with the WRONG key.
+      const { privateHex, publicHex } = randomTestKeyPair()
+      const net = await createTestNetwork({
+        user: { activeKeys: [{ key: publicHex, type: UserKeyType.mobile, expiration: Date.now() + 3000 }] }
+      })
+      const exporter = {
+        userId: net.user.id,
+        signerKey: publicHex,
+        sign: async (digest: Uint8Array): Promise<Signature> => ({
+          signature: bytesToHex(secp256k1.sign(digest, hexToBytes(privateHex))),
+          signerKey: publicHex,
+          signerUserId: net.user.id
+        })
+      }
+
+      // Export FIRST, while the key is still valid (exportFoundingBundle itself
+      // requires `expiration > now` at EXPORT time — signer-key-invalid otherwise,
+      // and `verifyFoundingBundle` check 8 requires exportedAt not after
+      // Expiration). D-38's waiver is for the gap between export and import, not
+      // for signing with an already-dead key.
+      const { text } = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+
+      // THEN wait for the key to genuinely expire before importing.
+      let expired = false
+      const deadline = Date.now() + 10_000
+      while (!expired && Date.now() < deadline) {
+        const row = await net.ctx.db.prepare('select Expiration from UserKey where UserId = :id').get({ id: net.user.id })
+        if (row && nowCanonicalDatetime() > String(row.Expiration)) expired = true
+        else await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+      expect(expired, 'I-3 setup: the founding key must have genuinely expired before import').to.equal(true)
+
+      const engineB = new NetworksEngine(makeDeviceLocalStorage())
+      const result = await engineB.importFoundingBundle(text, undefined)
+      expect(result.ok, `I-3 import must succeed even though the founding key has since expired: ${result.ok ? '' : (result as { detail: string }).detail}`).to.equal(true)
+      if (!result.ok) throw new Error('unreachable')
+      expect(result.outcome).to.equal('replayed')
+    })
+
+    it('I-4: a digest-tampered bundle returns ok:false digest-mismatch, the recorder is never called, recentNetworks unchanged', async () => {
+      const net = await createTestNetwork()
+      const exporter = await exporterFor(net)
+      const { bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+      const tampered: FoundingBundle = { ...bundle, digest: 'not-the-real-digest' }
+      const text = serializeFoundingBundle(tampered)
+
+      const { factory, calls } = makeRecordedInMemoryFactory()
+      const storage = makeDeviceLocalStorage()
+      const engineB = new NetworksEngine(storage, factory)
+      const result = await engineB.importFoundingBundle(text, undefined)
+
+      expect(result.ok).to.equal(false)
+      if (result.ok) throw new Error('unreachable')
+      expect(result.reason).to.equal('digest-mismatch')
+      expect(result.category).to.equal('invalid-bundle')
+      expect(calls).to.deep.equal([])
+      expect(await engineB.getRecentNetworks()).to.deep.equal([])
+    })
+
+    it('I-5: replay-rejected for a consistently re-signed bundle whose Officer.Scopes holds an unknown scope code', async () => {
+      const net = await createTestNetwork()
+      const exporter = await exporterFor(net)
+      const { bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+
+      const officerRow = { ...bundle.rows.Officer[0]!, Scopes: '["not-a-real-scope"]' }
+      const rows: FoundingBundleRows = { ...bundle.rows, Officer: [officerRow] }
+      const digest = computeContentDigest(rows as unknown as Parameters<typeof computeContentDigest>[0])
+      const manifest = buildManifest(rows as unknown as Parameters<typeof buildManifest>[0]) as unknown as FoundingBundle['manifest']
+      const exportedAt = nowCanonicalDatetime()
+      const signingDigest = foundingBundleSigningDigest({
+        networkHash: bundle.descriptor.networkHash, schemaHash: bundle.schemaHash, exportedAt,
+        exporterUserId: bundle.exporter.userId, signerKey: bundle.exporter.signerKey, digest
+      })
+      const sig = await exporter.sign(signingDigest.bytes)
+      const tampered: FoundingBundle = {
+        ...bundle, rows, digest, manifest, exportedAt,
+        exporter: { userId: sig.signerUserId, signerKey: sig.signerKey, signature: sig.signature }
+      }
+      expect(verifyFoundingBundle(tampered), 'I-5 setup: the re-signed bundle must pass codec verification').to.deep.equal({ ok: true })
+      const text = serializeFoundingBundle(tampered)
+
+      const { factory, calls } = makeRecordedInMemoryFactory()
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
+      const result = await engineB.importFoundingBundle(text, undefined)
+
+      expect(result.ok).to.equal(false)
+      if (result.ok) throw new Error('unreachable')
+      expect(result.reason).to.equal('replay-rejected')
+      expect(result.category).to.equal('invalid-bundle')
+      expect(result.detail).to.include('ScopesValid')
+      expect(calls).to.deep.equal([])
+    })
+
+    it('I-6: importing the same text twice on one engine returns already-joined the second time', async () => {
+      const net = await createTestNetwork()
+      const exporter = await exporterFor(net)
+      const { text } = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+
+      const { factory, calls } = makeRecordedInMemoryFactory()
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
+      const first = await engineB.importFoundingBundle(text, undefined)
+      expect(first.ok).to.equal(true)
+      const callsAfterFirst = calls.length
+
+      const second = await engineB.importFoundingBundle(text, undefined)
+      expect(second.ok).to.equal(false)
+      if (second.ok) throw new Error('unreachable')
+      expect(second.reason).to.equal('already-joined')
+      expect(second.category).to.equal('already-joined')
+      expect(calls.length, 'no second DbFactory call on an already-joined import').to.equal(callsAfterFirst)
+    })
+
+    it('I-7: already-present when the target DbFactory returns the SAME database device A already wrote', async () => {
+      const net = await createTestNetwork()
+      const exporter = await exporterFor(net)
+      const { text, bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+
+      const sameDbFactory: DbFactory = async () => net.ctx.db
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), sameDbFactory)
+      const result = await engineB.importFoundingBundle(text, undefined)
+
+      expect(result.ok, `I-7 import must succeed: ${result.ok ? '' : (result as { reason: string }).reason}`).to.equal(true)
+      if (!result.ok) throw new Error('unreachable')
+      expect(result.outcome).to.equal('already-present')
+
+      const countRow = await net.ctx.db.prepare('select count(*) as n from Officer where AuthorityId = :id').get({ id: bundle.descriptor.primaryAuthorityId })
+      expect(Number(countRow?.n), 'already-present must not write a second Officer row').to.equal(1)
+    })
+
+    it('I-8: target-conflict when the target DbFactory returns a database holding a DIFFERENT network\'s genesis', async () => {
+      const net = await createTestNetwork()
+      const exporter = await exporterFor(net)
+      const { text } = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+
+      const otherNet = await createTestNetwork()
+      const differentDbFactory: DbFactory = async () => otherNet.ctx.db
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), differentDbFactory)
+      const result = await engineB.importFoundingBundle(text, undefined)
+
+      expect(result.ok).to.equal(false)
+      if (result.ok) throw new Error('unreachable')
+      expect(result.reason).to.equal('target-conflict')
+      expect(result.category).to.equal('error')
+    })
+
+    it('I-9: a self-consistent bundle from a genuinely different network imports without anchors, and anchor-mismatch with the genuine digest pinned', async () => {
+      const genuineNet = await createTestNetwork()
+      const genuineExporter = await exporterFor(genuineNet)
+      const { bundle: genuineBundle } = await genuineNet.networksEngine.exportFoundingBundle(genuineNet.ref.hash, genuineExporter)
+
+      // A self-consistent, independently-signed bundle from a SEPARATE network —
+      // structurally indistinguishable from an attacker minting their own fully
+      // valid genesis and presenting it as "the" network (T-62-16-03, documented
+      // residual: the real anchor is the founding officer key plus the human
+      // handoff channel, not anything verifyFoundingBundle alone can prove).
+      const attackerNet = await createTestNetwork()
+      const attackerExporter = await exporterFor(attackerNet)
+      const { text: attackerText, bundle: attackerBundle } = await attackerNet.networksEngine.exportFoundingBundle(
+        attackerNet.ref.hash, attackerExporter
+      )
+      expect(attackerBundle.descriptor.networkHash).to.not.equal(genuineBundle.descriptor.networkHash)
+
+      const engineB1 = new NetworksEngine(makeDeviceLocalStorage())
+      const withoutAnchors = await engineB1.importFoundingBundle(attackerText, undefined)
+      expect(withoutAnchors.ok, 'I-9: imports without anchors (documented residual)').to.equal(true)
+
+      const engineB2 = new NetworksEngine(makeDeviceLocalStorage())
+      const withGenuineAnchor = await engineB2.importFoundingBundle(attackerText, undefined, { expectedDigest: genuineBundle.digest })
+      expect(withGenuineAnchor.ok).to.equal(false)
+      if (withGenuineAnchor.ok) throw new Error('unreachable')
+      expect(withGenuineAnchor.reason).to.equal('anchor-mismatch')
     })
   })
 })
