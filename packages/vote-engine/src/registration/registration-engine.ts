@@ -1,6 +1,7 @@
 import { setDisclose } from '@optimystic/quereus-plugin-crypto'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr, asText, asNumberOr, SEQUENCE_ALLOCATION_ATTEMPTS } from '../utils.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
+import { readAuthorityThreshold } from '../signing/threshold.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, restoreCanonicalDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
@@ -283,7 +284,7 @@ export class RegistrationEngine implements IRegistrationEngine {
       expiration: Timestamp | string
     },
     signatureOrCallback: SignatureOrCallback,
-    options?: { ownsTransaction?: boolean }
+    options?: { ownsTransaction?: boolean; headerNonce?: string }
   ): Promise<Registrant> {
     this.requireCtx('createRegistrant')
     const ctx = this.ctx!
@@ -411,7 +412,7 @@ export class RegistrationEngine implements IRegistrationEngine {
       extraFields?: Record<string, unknown>
     },
     signatureOrCallback: SignatureOrCallback,
-    options?: { ownsTransaction?: boolean }
+    options?: { ownsTransaction?: boolean; headerNonce?: string }
   ): Promise<RegistrantPublic> {
     this.requireCtx('createRegistrantPublic')
     const ctx = this.ctx!
@@ -478,7 +479,7 @@ export class RegistrationEngine implements IRegistrationEngine {
   async createRegistrantPrivate (
     input: { registrantId: string; expiration: Timestamp | string; details: PrivateDetail[] },
     signatureOrCallback: SignatureOrCallback,
-    options?: { ownsTransaction?: boolean }
+    options?: { ownsTransaction?: boolean; headerNonce?: string }
   ): Promise<RegistrantPrivate> {
     this.requireCtx('createRegistrantPrivate')
     const ctx = this.ctx!
@@ -541,7 +542,7 @@ export class RegistrationEngine implements IRegistrationEngine {
     leaves: SelectiveLeaf[],
     cid: string,
     signatureOrCallback: SignatureOrCallback,
-    options?: { ownsTransaction?: boolean }
+    options?: { ownsTransaction?: boolean; headerNonce?: string }
   ): Promise<RegistrantSelective> {
     const ctx = this.ctx!
     const tid = await allocateTid(ctx.db, 'registration')
@@ -1105,7 +1106,11 @@ export class RegistrationEngine implements IRegistrationEngine {
    * running its OWN `vrg` ceremony) — all inside one BEGIN/COMMIT/ROLLBACK
    * envelope so a partial failure never strands an orphaned `Registrant`.
    */
-  async register (init: RegisterInit, signatureOrCallback: SignatureOrCallback): Promise<void> {
+  async register (
+    init: RegisterInit,
+    signatureOrCallback: SignatureOrCallback,
+    options?: { headerNonce?: string }
+  ): Promise<void> {
     this.requireCtx('register')
     const ctx = this.ctx!
     // D-09: engine-side field-policy enforcement runs BEFORE any DB ceremony —
@@ -1179,6 +1184,11 @@ export class RegistrationEngine implements IRegistrationEngine {
         // above — Quereus's transaction model is flat (no nested BEGIN), so the
         // inner ceremony's SigningEngine.sign() must NOT start its own nested
         // transaction (see SigningEngine.sign()'s doc comment / T-42-03).
+        // 62-11 (research Finding 4.1): `options?.headerNonce`, when set (the registrant-approval
+        // ceremony calling through a threshold-above-1 'vrg' header), routes EVERY one of these
+        // four ceremonies through signDerived instead of each recomputing its OWN (often
+        // threshold-1, non-holder) signer count. Every pre-62-11 caller omits it and is
+        // unaffected (routes through sign() exactly as before).
         await this.createRegistrant(
           {
             id: registrantId,
@@ -1189,19 +1199,19 @@ export class RegistrationEngine implements IRegistrationEngine {
             expiration: init.registrant.expiration
           },
           signatureOrCallback,
-          { ownsTransaction: false }
+          { ownsTransaction: false, headerNonce: options?.headerNonce }
         )
 
         // Tier rows after — each recomputes the SAME deterministic Cid and runs
         // its OWN vrg ceremony (Pitfall 4); RegistrantCidMatch now finds the
         // just-committed parent Cid.
         if (init.public) {
-          await this.createRegistrantPublic({ registrantId, ...init.public }, signatureOrCallback, { ownsTransaction: false })
+          await this.createRegistrantPublic({ registrantId, ...init.public }, signatureOrCallback, { ownsTransaction: false, headerNonce: options?.headerNonce })
         }
         await this.createRegistrantPrivate(
           { registrantId, expiration: init.private.expiration, details: init.private.details },
           signatureOrCallback,
-          { ownsTransaction: false }
+          { ownsTransaction: false, headerNonce: options?.headerNonce }
         )
         if (selectiveLeaves && selectiveCid) {
           await this.insertRegistrantSelectiveRow(
@@ -1210,7 +1220,7 @@ export class RegistrationEngine implements IRegistrationEngine {
             selectiveLeaves,
             selectiveCid,
             signatureOrCallback,
-            { ownsTransaction: false }
+            { ownsTransaction: false, headerNonce: options?.headerNonce }
           )
         }
 
@@ -2424,6 +2434,21 @@ export class RegistrationEngine implements IRegistrationEngine {
       if (!isChecklistGateMet(decision.checklist)) {
         throw new Error(
           'rejectRegistrationRequest: decision.checklist does not satisfy the D-07 gate (empty, or "none" combined with a substantive item)'
+        )
+      }
+
+      // 62-11 (D-11, no veto): above vrg threshold 1, ONE officer rejecting a request through
+      // this ceremony would be a VETO — a single officer could unilaterally kill a request that
+      // the REST of the vrg holders might have approved. Refused HERE, BEFORE the DG-2 digest
+      // ceremony below runs (readAuthorityThreshold precedes every write), so no orphan
+      // AdminSigning/OfficerSignature rows are created. The rejection is still recorded as a
+      // VOTE: the officer completes their own signature task through
+      // SignatureTasksEngine.completeSignature({isAccepted:false, ...}), which records no
+      // OfficerSignature and advances nothing (D-11's no-veto derivation).
+      const rejectThreshold = await readAuthorityThreshold(ctx.db, authorityId, 'vrg')
+      if (rejectThreshold > 1) {
+        throw new Error(
+          `rejectRegistrationRequest: This authority needs ${rejectThreshold} approvals for registrations. One officer cannot reject a request on their own; record your decision on the signature task instead.`
         )
       }
 

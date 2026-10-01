@@ -2,6 +2,8 @@ import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { SqlValue, Database } from '@quereus/quereus'
 import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
+import { readSessionThreshold } from '../signing/threshold.js'
+import { fanOutSignatureTasks } from '../signing/fan-out.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
@@ -568,18 +570,53 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
               now,
             }
           )
-          await ctx.db.exec(
-            `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
-             with context IsMutationValid = true, Tid = :tid
-             values (:id, :userId, 'signature', 'registrant', :nonce, 0)`,
-            { id: taskId, userId, nonce, tid }
-          )
-          await ctx.db.exec(
-            `insert into RegistrantSignatureTaskExtension (TaskId, RequestId)
-             with context Tid = :tid
-             values (:taskId, :requestId)`,
-            { taskId, requestId: row.Id, tid }
-          )
+          // 62-11 (D-08, assumption A5): above the vrg threshold, the whole sibling set is
+          // seeded HERE, inside this SAME per-request envelope — one open registrant Task per
+          // CURRENT vrg holder, the seeding officer included (initiatorUserId null, A5), rather
+          // than only the legacy single Task. readSessionThreshold reads the AdminSigning('vrg')
+          // row just inserted above — visible on this SAME handle before COMMIT (62-07 PROBE-A11).
+          const threshold = await readSessionThreshold(ctx.db, nonce, 'vrg')
+          if (threshold <= 1) {
+            // Threshold-1 path: byte-for-byte unchanged (the legacy single seeded Task).
+            await ctx.db.exec(
+              `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
+               with context IsMutationValid = true, Tid = :tid
+               values (:id, :userId, 'signature', 'registrant', :nonce, 0)`,
+              { id: taskId, userId, nonce, tid }
+            )
+            await ctx.db.exec(
+              `insert into RegistrantSignatureTaskExtension (TaskId, RequestId)
+               with context Tid = :tid
+               values (:taskId, :requestId)`,
+              { taskId, requestId: row.Id, tid }
+            )
+          } else {
+            // Threshold > 1 (D-08/D-12): fan out through the ONE shared helper. A FanOutError
+            // (e.g. 'unreachable-at-birth') falls into the existing CR-04 catch below: ROLLBACK,
+            // skipped++, nothing logged — the request stays 'p' and unseeded, retried on the
+            // next pull. Do NOT change the `not exists` work-set predicate or the tally fields.
+            await ctx.db.runDeferredRowConstraints()
+            await fanOutSignatureTasks(
+              ctx,
+              {
+                authorityId: row.AuthorityId,
+                scope: 'vrg',
+                nonce,
+                initiatorUserId: null,
+                signatureType: 'registrant',
+                taskTid: tid,
+                insertExtension: async (fanOutTaskId: string) => {
+                  await ctx.db.exec(
+                    `insert into RegistrantSignatureTaskExtension (TaskId, RequestId)
+                     with context Tid = :tid
+                     values (:taskId, :requestId)`,
+                    { taskId: fanOutTaskId, requestId: row.Id, tid }
+                  )
+                },
+              },
+              { ownsTransaction: false }
+            )
+          }
           await ctx.db.exec('COMMIT')
           seeded++
         } catch (err) {
@@ -783,16 +820,29 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           'SignatureTasksEngine.completeSignature: registrant decision checklist does not satisfy the D-07 gate (empty, or "none" combined with a substantive item)'
         )
       }
-      try {
-        await this.resolveAcceptableRegistrantApproval(taskRow.Id as string)
-      } catch (err) {
-        // R2/D-04/D-05 (57-02): let RegistrantAlreadyExistsError through undecorated —
-        // this.rethrow() below wraps any plain Error into a fresh `new Error(...)` and
-        // would destroy the instanceof check the typed error exists to provide.
-        if (err instanceof RegistrantAlreadyExistsError) {
-          throw err
+
+      // 62-11 (D-10): the late-signature path. When this session has ALREADY reached its
+      // threshold AND the request is already decided ('a'), the pre-check below is skipped —
+      // the crossing officer's accept already proved the payload acceptable, and no mint can
+      // follow this accept because the finalize gate (further down) is off for this shape. Every
+      // OTHER accept (including the FIRST, below-threshold ones, and any accept against a request
+      // that is not yet 'a') still runs the FULL pre-check — WR-19, WR-22, CR-02, CR-03 and
+      // WR-20 stay in force for every accept that could possibly mint.
+      const preStatus = await this.signingEngine.getSigningStatus(nonce)
+      const preRequestStatus = await this.readRegistrantRequestStatus(taskRow.Id as string)
+      const isLateSignature = preStatus?.reached === true && preRequestStatus === 'a'
+      if (!isLateSignature) {
+        try {
+          await this.resolveAcceptableRegistrantApproval(taskRow.Id as string)
+        } catch (err) {
+          // R2/D-04/D-05 (57-02): let RegistrantAlreadyExistsError through undecorated —
+          // this.rethrow() below wraps any plain Error into a fresh `new Error(...)` and
+          // would destroy the instanceof check the typed error exists to provide.
+          if (err instanceof RegistrantAlreadyExistsError) {
+            throw err
+          }
+          this.rethrow(err, 'completeSignature (registrant pre-check)')
         }
-        this.rethrow(err, 'completeSignature (registrant pre-check)')
       }
     }
 
@@ -936,17 +986,31 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     //
     // result.sign/result.decision were already validated above, before sign() — do not re-check
     // them here.
+    //
+    // 62-11 (D-10): the SAME crossedNow-or-incomplete gate as the ballot branch above, and the
+    // SAME WR-05 retry guarantee. A below-threshold accept (the CONTEXT "Specific Ideas" defect
+    // for vrg) only records the vote and completes the Task below — it never reaches finalize.
+    // Also 62-11 note: at threshold above 1, only the CROSSING officer's D-07 checklist is
+    // digested into VerificationCid — earlier accepters' checklists are recorded as votes
+    // (OfficerSignature rows) but are not themselves persisted into the decision record (open
+    // question 2).
     if (result.isAccepted && task.signatureType === 'registrant') {
-      try {
-        await this.finalizeRegistrantApproval(taskRow.Id as string, result.decision!, result.sign!)
-      } catch (err) {
-        // R2/D-04/D-05 (57-02): see the matching note on the pre-check call site above —
-        // finalizeRegistrantApproval's own defence-in-depth guard, and register() itself,
-        // can both throw RegistrantAlreadyExistsError; do not let this.rethrow() re-wrap it.
-        if (err instanceof RegistrantAlreadyExistsError) {
-          throw err
+      const shouldFinalizeRegistrant = signOutcome?.crossedNow === true ||
+        (signOutcome?.thresholdReached === true && (await this.readRegistrantRequestStatus(taskRow.Id as string)) !== 'a')
+      // Below threshold, or an already-finalized late signature: nothing more to do here — the
+      // unconditional Task-complete update below still runs either way.
+      if (shouldFinalizeRegistrant) {
+        try {
+          await this.finalizeRegistrantApproval(taskRow.Id as string, result.decision!, result.sign!, nonce)
+        } catch (err) {
+          // R2/D-04/D-05 (57-02): see the matching note on the pre-check call site above —
+          // finalizeRegistrantApproval's own defence-in-depth guard, and register() itself,
+          // can both throw RegistrantAlreadyExistsError; do not let this.rethrow() re-wrap it.
+          if (err instanceof RegistrantAlreadyExistsError) {
+            throw err
+          }
+          this.rethrow(err, 'completeSignature (finalize registrant)')
         }
-        this.rethrow(err, 'completeSignature (finalize registrant)')
       }
     }
 
@@ -1567,19 +1631,48 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
   }
 
   /**
+   * 62-11 (D-10) — the RegistrationRequest.Status of the request a Task's
+   * RegistrantSignatureTaskExtension points to, or `undefined` if the extension row is missing.
+   * Used by `completeSignature`'s late-signature detection and finalize gate, and by
+   * `finalizeRegistrantApproval`'s own idempotency guard below.
+   */
+  private async readRegistrantRequestStatus (taskId: string): Promise<string | undefined> {
+    const row = await this.ctx!.db
+      .prepare(
+        `select R.Status from RegistrantSignatureTaskExtension E
+           join RegistrationRequest R on R.Id = E.RequestId
+           where E.TaskId = :taskId`
+      )
+      .get({ taskId })
+    return row?.Status as string | undefined
+  }
+
+  /**
    * D-05/D-07 — the registrant accept ceremony. `RegistrationEngine.register()` is reused
-   * COMPLETELY UNCHANGED — it was always correct, and the defect this phase corrects was only
+   * UNCHANGED except for the optional `headerNonce` passthrough (derived-session inheritance,
+   * research Finding 4.1) — it was always correct, and the defect this phase corrects was only
    * ever that the voter app supplied a founding-officer key it held. This method changes WHO
    * DRIVES `register()`, not what `register()` does. A second `register()`-shaped write path
    * (an inline `insert into Registrant`, a copy of `register()`'s body, etc.) must never be
    * created here.
+   *
+   * 62-11 (D-10) — idempotent: if the request is ALREADY decided ('a'), this is a no-op. Every
+   * other status ('p', 'r') flows into the unchanged pre-check below, which still refuses a
+   * rejected ('r') request and the CR-03 id collision.
    */
   private async finalizeRegistrantApproval (
     taskId: string,
     decision: RegistrationRequestDecision,
-    sign: (digest: Uint8Array) => Promise<Signature>
+    sign: (digest: Uint8Array) => Promise<Signature>,
+    headerNonce: string
   ): Promise<void> {
     const ctx = this.ctx!
+
+    // 62-11 (D-10, second defence against concurrent crossers/retries): if the decision already
+    // landed, there is nothing left to finalize.
+    if ((await this.readRegistrantRequestStatus(taskId)) === 'a') {
+      return
+    }
 
     // T-48-34-05: defence in depth — completeSignature already calls this SAME gate BEFORE
     // signingEngine.sign() (T-48-34-01/02), so by the time execution reaches here the payload has
@@ -1642,7 +1735,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // transitively covers the checklist. This runs under a 'vrg'-scoped AdminSigning ceremony —
     // AdminSigning.UserIdValid requires merely that the signer be some officer at that authority —
     // it does not require a 'vrg'-scoped officer specifically (Phase 999.1).
-    const decisionNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
+    const decisionNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign, { headerNonce })
 
     // D-12 (51-09): the authority OWNS the validity of a record it signs — a submitter-proposed
     // expiration (e.g. `ConfirmationScreen.tsx:150`'s ten-year "dev posture" window) is IGNORED
@@ -1685,9 +1778,10 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     // rather than dying at sign() — and it must, because that retryability is the entire point of
     // the WR-05 fix. The CR-03 refusal is what stops the retry from silently adopting a
     // pre-existing Registrant; it does not rely on sign() throwing.
-    // RegistrationEngine.register() — reused COMPLETELY UNCHANGED, with the reviewing officer's
-    // own device-signer callback. No wrapper, no reimplementation, no inline Registrant insert.
-    await new RegistrationEngine(ctx).register(init, sign)
+    // RegistrationEngine.register() — reused with the reviewing officer's own device-signer
+    // callback, unchanged except for the optional headerNonce passthrough (62-11, research
+    // Finding 4.1). No wrapper, no reimplementation, no inline Registrant insert.
+    await new RegistrationEngine(ctx).register(init, sign, { headerNonce })
 
     await ctx.db.exec(
       // SubmittedAt/ReceivedAt are explicitly rebound (restoreCanonicalDatetime, above) rather than

@@ -223,6 +223,18 @@ async function getRegistrantTask (engine: SignatureTasksEngine, requestId: strin
  * in a counting proxy" the plan specifies, constructed through SignatureTasksEngine's own
  * constructor-injected `signingEngine` field (48-11's documented injection seam).
  */
+/**
+ * 62-11 deviation (Rule 1): `SignatureTasksEngine.completeSignature`'s non-admin accept path now
+ * calls `signWithOutcome()` directly (D-10's crossedNow signal), not `sign()` — `sign()` itself
+ * still delegates to `signWithOutcome()` internally, but that internal call happens on the REAL
+ * engine, not through this Proxy, so a Proxy that intercepted only `sign` would silently stop
+ * observing every completeSignature-driven signature (both the "never signs on reject" case this
+ * spec asserts AND the accept control run that proves the spy is live). Intercepting
+ * `signWithOutcome` as well — the ONE signing primitive both `sign()` and `completeSignature`
+ * ultimately route through — keeps this spy accurate to its own doc comment's "sign() is never
+ * called" claim (which means "no signature is ever recorded", not "this one specific method
+ * name is never invoked").
+ */
 function makeCountingSigningEngine (ctx: EngineContext): { engine: ISigningEngine; counter: { calls: number } } {
   const real = new SigningEngine(ctx)
   const counter = { calls: 0 }
@@ -232,6 +244,12 @@ function makeCountingSigningEngine (ctx: EngineContext): { engine: ISigningEngin
         return async (...args: Parameters<ISigningEngine['sign']>) => {
           counter.calls += 1
           return target.sign(...args)
+        }
+      }
+      if (prop === 'signWithOutcome') {
+        return async (...args: Parameters<ISigningEngine['signWithOutcome']>) => {
+          counter.calls += 1
+          return target.signWithOutcome(...args)
         }
       }
       return Reflect.get(target, prop, receiver)

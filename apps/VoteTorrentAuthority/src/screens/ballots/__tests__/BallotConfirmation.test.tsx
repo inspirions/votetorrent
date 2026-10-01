@@ -76,6 +76,23 @@ jest.mock('../../../providers/AppProvider', () => ({
   }),
 }));
 
+// 62-11 (D-08): device-signer — spied so tests can assert the lazy factory is never invoked
+// by a threshold-1 (mock) engine, and the module-level mockCreateDeviceSigner lets the
+// jest.mock factory below reference it (mock*-prefixed variable, same convention as
+// mockCurrentElectionEngine above).
+const mockCreateDeviceSigner = jest.fn();
+jest.mock('../../../engines/device-signer', () => ({
+  createDeviceSigner: (...args: unknown[]) => mockCreateDeviceSigner(...args),
+}));
+
+// 62-11: useDeviceSigningErrorHandler — a module-level jest.fn so each test can control its
+// returned outcome ({ handled, message? }). Reassigned (not just mock-reset) per test via the
+// `let` binding below, since the factory reads the CURRENT value at call time.
+let mockHandleDeviceSigningError: jest.Mock = jest.fn(() => ({ handled: false }));
+jest.mock('../../../hooks/useDeviceSigningErrorHandler', () => ({
+  useDeviceSigningErrorHandler: () => mockHandleDeviceSigningError,
+}));
+
 // ---------------------------------------------------------------------------
 // Navigation mock — useFocusEffect calls the callback synchronously.
 // useRoute exposes the mutable `mockCurrentElectionEngine` slot so per-test
@@ -171,6 +188,8 @@ async function renderCreateBallotScreen(): Promise<renderer.ReactTestRenderer> {
 beforeEach(() => {
   jest.clearAllMocks();
   mockCurrentElectionEngine = null;
+  mockCreateDeviceSigner.mockReset();
+  mockHandleDeviceSigningError = jest.fn(() => ({ handled: false }));
   // Do NOT reset modules — the top-level require for MockElectionEngine/MockSignatureTasksEngine
   // must remain cached across tests; resetModules would break mock factory closures.
 });
@@ -345,6 +364,99 @@ describe('BallotConfirmation — D-03/D-05/D-09 RTL coverage', () => {
       (t: { signatureType: string }) => t.signatureType === 'ballot'
     );
     expect(stillHasBallotTask).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // (d)-(g) 62-11 (D-08/D-13): the lazy device-signer wiring and its error routing
+  // -------------------------------------------------------------------------
+
+  it('(d) submit calls submitBallotForConfirmation with a lazy signer callback; createDeviceSigner is never invoked at threshold 1', async () => {
+    const confirmState = new MockBallotConfirmationState();
+    const engine = new MockElectionEngine(confirmState);
+    const submitSpy = jest.spyOn(engine, 'submitBallotForConfirmation');
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderCreateBallotScreen();
+    const submitButton = tr.root.findByProps({ accessibilityLabel: 'submitForConfirmation' });
+    await renderer.act(async () => {
+      submitButton.props.onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(submitSpy).toHaveBeenCalledWith('mock-ballot-id', expect.any(Function));
+    expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+  });
+
+  it('(e) routed, handled: a device-signing error is routed to the hook; the raw message never renders and the screen does not lock', async () => {
+    const confirmState = new MockBallotConfirmationState();
+    const engine = new MockElectionEngine(confirmState);
+    const thrown = Object.assign(new Error('raw-signer-text'), { code: 'KEY_INVALIDATED' });
+    engine.submitBallotForConfirmation = jest.fn(async () => {
+      throw thrown;
+    });
+    mockHandleDeviceSigningError = jest.fn(() => ({ handled: true }));
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderCreateBallotScreen();
+    const submitButton = tr.root.findByProps({ accessibilityLabel: 'submitForConfirmation' });
+    await renderer.act(async () => {
+      submitButton.props.onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockHandleDeviceSigningError).toHaveBeenCalledTimes(1);
+    expect(mockHandleDeviceSigningError).toHaveBeenCalledWith(thrown);
+    expect(treeContainsText(tr, 'raw-signer-text')).toBe(false);
+    // handled: true means the catch returns early — confirmationLocked never flips, the
+    // Submit button (not Withdraw) stays visible.
+    expect(treeContainsText(tr, 'submitForConfirmation')).toBe(true);
+    expect(treeContainsText(tr, 'withdrawConfirmation')).toBe(false);
+  });
+
+  it('(f) routed, inline copy: an unhandled outcome with a mapped message shows the mapped copy, not the raw one', async () => {
+    const confirmState = new MockBallotConfirmationState();
+    const engine = new MockElectionEngine(confirmState);
+    const thrown = new Error('raw-signer-text-2');
+    engine.submitBallotForConfirmation = jest.fn(async () => {
+      throw thrown;
+    });
+    mockHandleDeviceSigningError = jest.fn(() => ({ handled: false, message: 'mapped-copy' }));
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderCreateBallotScreen();
+    const submitButton = tr.root.findByProps({ accessibilityLabel: 'submitForConfirmation' });
+    await renderer.act(async () => {
+      submitButton.props.onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(treeContainsText(tr, 'mapped-copy')).toBe(true);
+    expect(treeContainsText(tr, 'raw-signer-text-2')).toBe(false);
+  });
+
+  it('(g) not mine: a plain engine error with an unhandled outcome shows the raw message, exactly as today', async () => {
+    const confirmState = new MockBallotConfirmationState();
+    const engine = new MockElectionEngine(confirmState);
+    const thrown = new Error('engine-failure');
+    engine.submitBallotForConfirmation = jest.fn(async () => {
+      throw thrown;
+    });
+    mockHandleDeviceSigningError = jest.fn(() => ({ handled: false }));
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderCreateBallotScreen();
+    const submitButton = tr.root.findByProps({ accessibilityLabel: 'submitForConfirmation' });
+    await renderer.act(async () => {
+      submitButton.props.onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(treeContainsText(tr, 'engine-failure')).toBe(true);
   });
 
 });

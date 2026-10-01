@@ -13,6 +13,8 @@ import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
 import { useApp } from "../../providers/AppProvider";
 import { loadAuthoritiesWithRetry } from "../../utils/loadAuthoritiesWithRetry";
+import { createDeviceSigner } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import type { Authority, Ballot, INetworkEngine, Question } from "@votetorrent/vote-core";
 
 /**
@@ -44,6 +46,7 @@ export default function CreateBallotScreen() {
 	};
 	const electionEngine = (route.params as any)?.electionEngine;
 	const { getEngine } = useApp();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const [errorMessage, setErrorMessage] = useState("");
 	const [proposing, setProposing] = useState(false);
 	const [submitting, setSubmitting] = useState(false);
@@ -159,7 +162,12 @@ export default function CreateBallotScreen() {
 		}, [electionEngine, currentBallotId])
 	);
 
-	// D-03: Submit the ballot for confirmation — creates the signature task in the inbox.
+	// D-03/D-08: Submit the ballot for confirmation — creates the signature task in the inbox.
+	// `lazySign` is a LAZY factory thunk: `createDeviceSigner` is only invoked if the engine
+	// actually calls this callback, which happens only when the authority's ceb threshold is
+	// above 1 (IElectionEngine.submitBallotForConfirmation's own doc comment). A threshold-1
+	// authority therefore needs neither a provisioned key nor a biometric prompt to submit,
+	// exactly as before 62-11.
 	const handleSubmitForConfirmation = async () => {
 		if (!electionEngine) return;
 		setErrorMessage("");
@@ -170,11 +178,14 @@ export default function CreateBallotScreen() {
 				setErrorMessage("No ballot to submit.");
 				return;
 			}
-			await electionEngine.submitBallotForConfirmation(ballotId);
+			const lazySign = async (digest: Uint8Array) => (await createDeviceSigner("Device User"))(digest);
+			await electionEngine.submitBallotForConfirmation(ballotId, lazySign);
 			setConfirmationLocked(true);
 		} catch (error) {
 			console.warn("submitBallotForConfirmation error", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
 		} finally {
 			setSubmitting(false);
 		}
