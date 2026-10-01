@@ -74,6 +74,13 @@ import type { RegisterInit, RegistrationRequestInit, Signature } from '@votetorr
 import { NetworksEngine, RegistrationEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { seedDevNetwork } from '../engines/dev-seed'
+import { setDeviceKeyWrapProviderForTests } from '../engines/device-key-wrap'
+import { createInMemoryKeyWrapProviderForTests } from '../engines/__fixtures__/in-memory-key-wrap-provider'
+
+// D-42 (Phase 62 plan 08): seedDevNetwork -> getOrCreateDeviceUser now needs a DeviceKeyWrapProvider.
+const wrapProvider = createInMemoryKeyWrapProviderForTests()
+beforeAll(() => setDeviceKeyWrapProviderForTests(wrapProvider))
+afterAll(() => setDeviceKeyWrapProviderForTests(undefined))
 
 // ---------------------------------------------------------------------------
 // Comment stripping (mechanism analog: packages/vote-engine/test/browser-entry-purity.spec.ts)

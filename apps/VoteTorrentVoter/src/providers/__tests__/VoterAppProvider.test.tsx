@@ -77,6 +77,15 @@ jest.mock('../../engines/dev-seed', () => ({
 	seedDevNetwork: (networksEngine: NetworksEngine) => mockSeedDevNetwork(networksEngine),
 }));
 
+// D-42 (Phase 62 plan 08): the real migration sweep hits real AsyncStorage/crypto, which this
+// provider-plumbing test does not need to exercise (device-user.migration.test.ts already proves
+// it) — stub it to a quiet 'absent' outcome and keep every other device-user export real.
+const mockMigrateLegacyPlaintextIdentityKey = jest.fn().mockResolvedValue('absent');
+jest.mock('../../engines/device-user', () => ({
+	...jest.requireActual('../../engines/device-user'),
+	migrateLegacyPlaintextIdentityKey: () => mockMigrateLegacyPlaintextIdentityKey(),
+}));
+
 import {VoterAppProvider, useVoterApp} from '../VoterAppProvider';
 import type {VoterAppContextType} from '../types';
 import {hideSplash} from 'react-native-splash-view';
@@ -191,6 +200,7 @@ async function flushBoot(ticks = 15, until?: () => boolean) {
 
 beforeEach(async () => {
 	mockSeedDevNetwork.mockReset();
+	mockMigrateLegacyPlaintextIdentityKey.mockClear().mockResolvedValue('absent');
 	(hideSplash as jest.Mock).mockClear();
 	mockCadreNodeValue.node = null;
 	mockCadreNodeValue.syncState = 'offline';
@@ -227,6 +237,14 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 		expect((captured.value as unknown as Record<string, unknown>).isRegistered).toBeUndefined();
 		expect((captured.value as unknown as Record<string, unknown>).registeredAt).toBeUndefined();
 		expect((captured.value as unknown as Record<string, unknown>).hasVoted).toBeUndefined();
+	});
+
+	it('calls migrateLegacyPlaintextIdentityKey exactly once on mount (D-42)', async () => {
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		const {captured} = renderProvider();
+		await flushBoot(15, () => captured.value !== null);
+
+		expect(mockMigrateLegacyPlaintextIdentityKey).toHaveBeenCalledTimes(1);
 	});
 
 	it('on a forced seedDevNetwork throw, renders the recoverable "Try Again" view — never a silent empty network (T-44-18)', async () => {

@@ -30,6 +30,15 @@ import { FieldPolicyViolationError } from '@votetorrent/vote-engine'
 import { seedDevNetwork, DEV_SEED_NETWORK_NAME } from '../dev-seed'
 import { readVoterBallot, readVoterElection } from '../election-read'
 import { resolveAttestationProducer } from '../attestation-producer'
+import { setDeviceKeyWrapProviderForTests } from '../device-key-wrap'
+import { createInMemoryKeyWrapProviderForTests } from '../__fixtures__/in-memory-key-wrap-provider'
+
+// D-42 (Phase 62 plan 08): seedDevNetwork -> getOrCreateDeviceUser now needs a DeviceKeyWrapProvider.
+// ONE instance for the whole file (not per-test) so a record wrapped in an earlier test stays
+// unwrappable by a later one, mirroring a real device's single wrap key per alias.
+const wrapProvider = createInMemoryKeyWrapProviderForTests()
+beforeAll(() => setDeviceKeyWrapProviderForTests(wrapProvider))
+afterAll(() => setDeviceKeyWrapProviderForTests(undefined))
 
 /** Build a signer for an UNREGISTERED identity — not a row in Officer for this authority. */
 function makeUnregisteredSigner(): (digest: Uint8Array) => Promise<Signature> {

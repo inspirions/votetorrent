@@ -45,7 +45,7 @@ const nodeCrypto = require('crypto') as {
 }
 
 import type { DeviceKeyWrapProvider } from '../device-key-wrap'
-import { VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1, type WrappedSecret } from '@votetorrent/attestation-native'
+import { VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1, SecretWrapError, type WrappedSecret } from '@votetorrent/attestation-native'
 
 /**
  * `TextEncoder`/`btoa`/`atob` are globals on both Hermes/RN and Node (same `globalThis` cast idiom
@@ -146,7 +146,16 @@ export function createInMemoryKeyWrapProviderForTests(options: InMemoryKeyWrapPr
 			const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', key, iv)
 			decipher.setAAD(aad)
 			decipher.setAuthTag(tag)
-			return concatBytes(decipher.update(ciphertext), decipher.final())
+			try {
+				return concatBytes(decipher.update(ciphertext), decipher.final())
+			} catch (err) {
+				// Node's AES-GCM throws a generic Error ("Unsupported state or unable to
+				// authenticate data") on a tag mismatch — re-surface it with the SAME typed code
+				// `secret-wrap.ts` maps a native UNWRAP_TAG_MISMATCH rejection to, so a consumer
+				// (`device-user.ts`'s `getDevicePrivKeyHex`) classifies it identically regardless
+				// of whether the provider is this stub or the real native one.
+				throw new SecretWrapError('UNWRAP_TAG_MISMATCH', (err as Error).message ?? 'GCM authentication failed')
+			}
 		},
 	}
 }

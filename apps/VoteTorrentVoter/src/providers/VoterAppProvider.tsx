@@ -37,7 +37,7 @@ import type {IDefaultUserEngine, NetworkReference} from '@votetorrent/vote-core'
 import {EngineFactory} from '../engines/engine-factory';
 import {LocalStorageReact} from '@votetorrent/vote-engine/rn';
 import {rnDbFactory} from '../engines/rn-db-factory';
-import {getOrCreateDeviceUser} from '../engines/device-user';
+import {getOrCreateDeviceUser, migrateLegacyPlaintextIdentityKey} from '../engines/device-user';
 import {seedDevNetwork} from '../engines/dev-seed';
 import {useCadreNode} from './CadreNodeProvider';
 import {readVoterBallot, readVoterElection} from '../engines/election-read';
@@ -144,6 +144,26 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 			hideSplash();
 		}
 	}, [isInitialized, syncState, firstSyncBudgetElapsed]);
+
+	// D-42 (Phase 62 plan 08): the one-shot startup sweep of a legacy plaintext
+	// `votingDeviceUser` record (pre-D-42) into the wrapped-at-rest shape. Mirrors the
+	// authority app's AppProvider staged-sign-in-code sweep (purgeLegacyStagedPayload):
+	// an empty-dependency effect, once, on mount, logging only the closed outcome
+	// token — never a record field, never a byte of the key. UI-SPEC Surface 10: zero
+	// UI, no state, no splash interaction, no i18n key. Deliberately declared BEFORE
+	// the `[initNonce, node]` init effect below, so a legacy key is migrated before
+	// anything else in this provider touches `votingDeviceUser`.
+	useEffect(() => {
+		void migrateLegacyPlaintextIdentityKey().then(outcome => {
+			if (outcome === 'migrated') {
+				// Device-proof logcat marker (62-30 collects this).
+				console.log('VoterAppProvider: identity-key migration outcome: migrated');
+			} else if (outcome === 'unreadable' || outcome === 'wrap-unavailable' || outcome === 'read-back-failed') {
+				console.warn(`VoterAppProvider: identity-key migration outcome: ${outcome}`);
+			}
+			// 'absent' and 'already-wrapped' are silent — the overwhelmingly common case.
+		});
+	}, []);
 
 	useEffect(() => {
 		// Quick task 260928-kkf (mirrors authority AppProvider): a cancelled run has been
