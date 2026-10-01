@@ -193,7 +193,6 @@ describe('registration-duplicate-matcher (D-43/D-44)', () => {
   it('M5: normalizeNamePart survives a throwing String.prototype.normalize (Hermes without ICU)', () => {
     const original = String.prototype.normalize
     try {
-      // @ts-expect-error -- deliberately replacing a built-in for the duration of this test
       String.prototype.normalize = function (): string {
         throw new Error('simulated Hermes-without-ICU normalize failure')
       }
