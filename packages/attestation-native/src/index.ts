@@ -27,3 +27,24 @@ export {
 	computePopDigest,
 	createRealAttestationProducer,
 } from './real-attestation-producer'
+
+// D-42 (Phase 62 plan 08): the generic, alias-keyed AES-256-GCM secret-wrap capability consumed
+// by this plan's Voter `device-key-wrap.ts` and by later plans (62-21, 62-26) in other apps. Same
+// "no re-export of the TurboModule default" rule as above — `secret-wrap.ts`'s own `getNative()`
+// stays the only access path, lazily required inside each call.
+export {
+	VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1,
+	WRAP_KEY_ALIAS_PATTERN,
+	isValidWrapKeyAlias,
+	SECRET_WRAP_ERROR_CODES,
+	SecretWrapError,
+	createNativeSecretWrapper,
+} from './secret-wrap'
+export type {
+	WrapKeySecurityLevel,
+	WrappedSecret,
+	SecretWrapPrompt,
+	SecretWrapOptions,
+	SecretWrapper,
+	SecretWrapErrorCode,
+} from './secret-wrap'

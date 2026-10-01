@@ -177,6 +177,76 @@ export interface Spec extends TurboModule {
 		promptSubtitle: string,
 		promptNegativeButton: string,
 	): Promise<Object>
+
+	/**
+	 * D-42: wraps an arbitrary `plaintextBase64` secret (1..4096 bytes) under a generic,
+	 * alias-keyed, non-exportable AES-256-GCM key. This is a SEPARATE capability from the P-256
+	 * signing keys above — it protects a secret AT REST (encrypt/decrypt), not a signing operation.
+	 * One alias = one auth policy, forever: `requireAuth` is fixed when the alias's wrap key is
+	 * first created, and a later call with a different `requireAuth` for the SAME alias rejects
+	 * `WRAP_KEY_POLICY_MISMATCH` rather than silently downgrading or upgrading it.
+	 *
+	 * Byte contract, identical on both platforms: `plaintextBase64`/`ciphertextBase64` are PLAIN
+	 * standard-alphabet base64 (NEVER base64url). The native side generates a fresh 12-byte IV per
+	 * call (`ivBase64`, also plain base64) — callers never supply one. `ciphertextBase64` decodes to
+	 * `GCM ciphertext || 16-byte tag`. `aadBase64` decodes to the AAD bytes bound into the GCM tag
+	 * (may be empty, but is still authenticated).
+	 *
+	 * The prompt strings (`promptTitle`/`promptSubtitle`/`promptNegativeButton`) are used ONLY when
+	 * `requireAuth` is true — JS resolves them via `t()` and passes `''` for all three when
+	 * `requireAuth` is false.
+	 *
+	 * Resolves `{ ciphertextBase64, ivBase64, keyAlias, securityLevel }`, where `securityLevel` is
+	 * one of `'strongbox' | 'tee' | 'software' | 'keychain' | 'unknown'` — reported, never asserted;
+	 * this module makes no hardware-backing guarantee beyond what the OS actually reports.
+	 *
+	 * Platform implementation: Android — AndroidKeyStore AES-256-GCM, non-exportable. iOS — a
+	 * Keychain-stored AES-256 key (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`), used through
+	 * CryptoKit; this is explicitly NOT a Secure Enclave key — the Secure Enclave holds only EC
+	 * P-256 keys (there is no `kSecAttrKeyTypeAES`).
+	 *
+	 * Rejects with one of the closed set of typed codes: `INVALID_ARGUMENT`, `INVALID_ENCODING`,
+	 * `NO_WRAP_KEY`, `WRAP_KEY_POLICY_MISMATCH`, `UNWRAP_TAG_MISMATCH`, `KEY_INVALIDATED`,
+	 * `DEVICE_LOCKED`, `CANCELED`, `NO_BIOMETRICS_ENROLLED`, `LOCKOUT`, `LOCKOUT_PERMANENT`,
+	 * `BIOMETRIC_ERROR`, `NO_ACTIVITY`, `WRAP_FAILED`, `UNWRAP_FAILED`.
+	 *
+	 * Unproven on device: D-23 proof debt. Compilation/jest-against-a-faked-TurboModule is not
+	 * evidence of real Keystore/Keychain behaviour.
+	 */
+	wrapSecret(
+		keyAlias: string,
+		plaintextBase64: string,
+		aadBase64: string,
+		requireAuth: boolean,
+		promptTitle: string,
+		promptSubtitle: string,
+		promptNegativeButton: string,
+	): Promise<Object>
+
+	/**
+	 * D-42: the inverse of `wrapSecret` — decrypts a `WrappedSecret` previously produced by
+	 * `wrapSecret` under the SAME `keyAlias`, `ivBase64`, `aadBase64` and `requireAuth`. Resolves
+	 * `{ plaintextBase64 }` (plain standard-alphabet base64 of the decrypted bytes).
+	 *
+	 * `aadBase64` MUST equal the AAD used at wrap time, or the GCM tag check fails and this rejects
+	 * `UNWRAP_TAG_MISMATCH` — this is how a caller binds ciphertext to a specific record (for
+	 * example `userId|pubKeyHex`) so a ciphertext cannot be silently transplanted onto a different
+	 * record. A missing wrap key (alias never created, or the device was restored from a backup
+	 * that carries no Keystore/Keychain state) rejects `NO_WRAP_KEY`, decided before any auth prompt.
+	 *
+	 * Same closed reject-code set, byte contract, auth-prompt gating and platform implementation as
+	 * `wrapSecret` (see that method's doc comment). Unproven on device: D-23 proof debt.
+	 */
+	unwrapSecret(
+		keyAlias: string,
+		ciphertextBase64: string,
+		ivBase64: string,
+		aadBase64: string,
+		requireAuth: boolean,
+		promptTitle: string,
+		promptSubtitle: string,
+		promptNegativeButton: string,
+	): Promise<Object>
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('AttestationNative')
