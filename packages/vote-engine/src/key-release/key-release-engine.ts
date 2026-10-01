@@ -154,58 +154,80 @@
 //     adapter. Tracked for 62-30 in the D-23 "code-complete, unverified"
 //     style — never claim device proof from this review.
 //
-// Negative control results (temporarily mutate the named file, run
-// `key-release.spec.ts` + `key-release-evaluator.spec.ts`, record the
-// failing title(s), then `git checkout --` to restore):
+// Negative control results — ALL 10 live-mutated (temporarily edited the
+// named file with the mutation wrapped `false && (...)`/inlined so the
+// surrounding code stays syntactically valid), the targeted spec(s) run to
+// completion, the failing title(s) recorded below VERBATIM from the actual
+// run, then `git checkout --` restored the file (`git diff --quiet` over
+// `src/key-release/` and `src/tasks/keys-tasks-engine.ts` confirmed clean
+// after every one):
 //
-//   (a) Call `combineSecret` directly instead of `reconstructGroupSecret`
-//       in `reconstructElectionKey` (skipping the per-share filter).
-//       RED: scenario G — "3 honest + bogus X reconstructs, with X in
-//       rejectedReleases and not in usedUserIds" fails once the bogus share
-//       is fed straight into interpolation instead of being filtered first.
+//   (a) Bypass `reconstructGroupSecret`'s filter+assertion entirely —
+//       interpolate over snapshot.releases (unfiltered, raw) via
+//       `secp256k1_FROST.combineSecret` directly.
+//       RED (2 failing): "G: 2 honest releases plus the bogus X row still
+//       gives insufficient-shares" (`expectThrows: function did not throw`
+//       — combineSecret succeeds on the raw 3-row set, bogus share and
+//       all); "D: with all 5 released, reconstruction still uses exactly
+//       k=3 (usedUserIds length 3)" (`key-release.spec.ts`).
 //   (b) Treat `signatureValid` false rows as accepted in the evaluator
 //       (drop the rule-1 check).
-//       RED: "a row with signatureValid false gives signature-invalid, not
-//       counted" (`key-release-evaluator.spec.ts`) — the row is counted and
-//       the rejection list comes back empty.
+//       RED (2 failing): "a row with signatureValid false gives
+//       signature-invalid, not counted" and "two honest plus three bogus
+//       rows gives releasedCount 2 and phase releasing"
+//       (`key-release-evaluator.spec.ts`).
 //   (c) Remove the `hasEnteredReleasingKeys` check in `releaseKeyShare`.
-//       RED: scenario H — an early release no longer rejects
-//       `release-window-not-open`; a row is written before the window
-//       opens.
+//       RED (1 failing): "H: releaseKeyShare before the window rejects
+//       release-window-not-open, writes no row, and reads no vault"
+//       (`key-release.spec.ts`) — no longer throws.
 //   (d) Remove the `r4ParticipantUserIds` participant check in
 //       `releaseKeyShare`.
-//       RED: scenario I's "a signer whose userId is not an R4 participant
-//       gives not-a-participant" — the release instead proceeds to the
-//       vault read.
+//       RED (1 failing): "I: a signer whose userId is not an R4
+//       participant gives not-a-participant" — the release instead
+//       proceeds past the participant gate and fails downstream with
+//       `share-missing` (the outsider's vault never held a share) instead
+//       of `not-a-participant`, confirming the check is bypassed.
 //   (e) Seed for every R4 participant without the `vault.hasSecret` filter.
-//       RED: scenario A — "every participant's getKeysToRelease(true) ...
-//       returns exactly one task ... the count is now 1, not 5" instead
-//       seeds all 5 on the first device's read.
+//       RED (1 failing): "A: at the window, one participant seeds exactly
+//       one own-device task with the deterministic Id" — got 5 Tasks
+//       instead of 1 on the FIRST device's single read.
 //   (f) Use a random Task Id (not `releaseKeyTaskId`) and drop the
 //       existence check in seeding.
-//       RED: scenario A's idempotency assertion — "three more reads per
-//       participant ... leave it at 5" instead keeps growing the Task
-//       count.
+//       RED (2 failing): "A: at the window, one participant seeds exactly
+//       one own-device task with the deterministic Id" (the persisted Id no
+//       longer equals `releaseKeyTaskId(...)`) and "A: idempotent under
+//       repeated and concurrent reads ..." (30 Task rows instead of 5 —
+//       every repeat read now seeds a fresh one).
 //   (g) Skip the threshold-versus-`keyholderThreshold` consistency check in
 //       the evaluator.
-//       RED: "electionKey.threshold differing from the current revision
-//       keyholderThreshold gives election-key-inconsistent"
-//       (`key-release-evaluator.spec.ts`) — the phase comes back
-//       `reconstructable`/`releasing` instead.
+//       RED (1 failing): "electionKey.threshold differing from the current
+//       revision keyholderThreshold gives election-key-inconsistent"
+//       (`key-release-evaluator.spec.ts`) — the phase came back `releasing`
+//       instead.
 //   (h) In `KeysTasksEngine.completeKeyRelease`, mark the Task complete
 //       when `signer` is absent (skip the `signer-required` gate).
-//       RED: scenario J — "completeKeyRelease(task) with no signer rejects
-//       signer-required; the Task stays IsCompleted 0" instead completes
-//       the Task with no published share.
+//       RED (2 failing): "J: completeKeyRelease(task) with no signer
+//       rejects signer-required; the Task stays IsCompleted 0 and no row
+//       exists" (completes with no throw instead); "J: a signer for a
+//       different keyholder rejects signer-task-mismatch" (a cascading
+//       failure of the SAME mutation — the first test's unguarded
+//       completion already marked the shared Task complete, so the second
+//       test's own pending-task lookup returns nothing).
 //   (i) Skip the `identifier !== dkgIdentifierForUser(userId)` check in the
 //       evaluator.
-//       RED: "a row whose identifier belongs to a different user gives
-//       identifier-mismatch" (`key-release-evaluator.spec.ts`) — the row is
-//       accepted instead.
-//   (j) Let `encryptElectionBlock` accept a payload without `voterRecords`.
-//       RED: "throws BlockCipherError invalid-plaintext for a payload
-//       missing voterRecords" (`key-release-evaluator.spec.ts`,
-//       `election-block.ts`) — no longer throws.
+//       RED (1 failing): "a row whose identifier belongs to a different
+//       user gives identifier-mismatch" (`key-release-evaluator.spec.ts`)
+//       — the row falls through to rule 4 and is rejected `share-invalid`
+//       instead of `identifier-mismatch` (still rejected, by a different
+//       rule, confirming rule 3 itself is bypassed).
+//   (j) Let `encryptElectionBlock` accept a payload without `voterRecords`
+//       or `votes`.
+//       RED (2 failing): "throws BlockCipherError invalid-plaintext for a
+//       payload missing voterRecords" and "... missing votes"
+//       (`key-release-evaluator.spec.ts`) — the call proceeds past the
+//       shape check into `encryptBlockContent` and fails later on the
+//       (deliberately invalid) test `jointPublicKey` instead, confirming
+//       the D-18 shape gate itself is bypassed.
 //
 // Findings table: no HIGH or MEDIUM finding raised by this review.
 //

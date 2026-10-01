@@ -128,6 +128,41 @@ export type {
 	KeyVaultErrorCode,
 	KeyVaultPolicy
 } from './crypto/index.js'
+// Phase 62 Plan 17 (D-13/D-14/D-16/D-19/D-25/D-26): the keyholder DKG round
+// driver, re-exported by name for its RN consumer — 62-26 (the Authority
+// keyholder app, which stores the DKG receiving key at accept and drives
+// rounds on keyholder-screen focus). Mirrors 62-17's own instruction for
+// this exact name list.
+export {
+	KeyholderDkgEngine,
+	KeyholderDkgError,
+	keyholderDkgRoundSecretAlias,
+	KEYHOLDER_DKG_ROUND_SECRET_POLICY,
+	encodeDkgRoundVaultRecord,
+	decodeDkgRoundVaultRecord
+} from './keyholder/index.js'
+export type { KeyholderDkgErrorCode, DkgRoundVaultRecord } from './keyholder/index.js'
+// Phase 62 Plan 20 (D-13/D-14/D-17/D-18/D-20): the key-release engine and
+// its pure window/block-payload helpers, re-exported by name for its RN
+// consumers — 62-26 (KeyTaskScreen's signer wiring) and 62-29
+// (KeyReleaseScreen, Voter releasedCount).
+export {
+	KeyReleaseEngine,
+	KeyReleaseError,
+	releaseKeyTaskId,
+	hasEnteredReleasingKeys,
+	releasingKeysAt,
+	encryptElectionBlock,
+	openElectionBlock
+} from './key-release/index.js'
+export type { KeyReleaseErrorCode, KeyReleaseEngineDeps } from './key-release/index.js'
+export type { KeysTasksEngineDeps } from './tasks/keys-tasks-engine.js'
+// Phase 62 Plan 20: a curated DKG surface, named from `./crypto/index.js` —
+// 62-26 mints the receiving key at accept (`generateDkgReceivingKey`) and
+// reads the same identifier/validation/reconstruction primitives the
+// key-release engine uses.
+export { DkgError, dkgIdentifierForUser, generateDkgReceivingKey, validateReleasedShare, reconstructGroupSecret } from './crypto/index.js'
+export type { DkgErrorCode, ReleasedShare, ReconstructionResult } from './crypto/index.js'
 // Phase 62 Plan 14 (D-03/D-04/D-29/D-32/D-46): the intake module, re-exported
 // by name (never `export *`) for its RN consumers — the Authority's officer
 // key step and peer intake (62-21), the bridge URL card (62-25) and the

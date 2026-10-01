@@ -22,3 +22,13 @@ export * from './crypto/index.js'
 // sealer/opener, the D-29/D-46 intake policy). Named-export barrel — see
 // src/intake/index.ts's header for what is deliberately excluded.
 export * from './intake/index.js'
+// Phase 62 Plan 17 (D-13/D-14/D-16/D-19/D-25/D-26): the keyholder DKG module
+// (62-17's own instruction, added here by 62-20 in wave 5 — the barrel line
+// 62-17 deliberately left for this plan to add). Named-export barrel — see
+// src/keyholder/index.ts's header.
+export * from './keyholder/index.js'
+// Phase 62 Plan 20 (D-13/D-14/D-17/D-18/D-20): the key-release module —
+// release-task seeding, signed share publication, public k-of-n
+// reconstruction and the D-18 block-payload contract. Named-export barrel —
+// see src/key-release/index.ts's header.
+export * from './key-release/index.js'

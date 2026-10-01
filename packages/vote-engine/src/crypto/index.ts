@@ -13,9 +13,6 @@
 //     only. Keeping them off every barrel makes a pinned nonce or a
 //     plaintext-in-memory test double unreachable from any app build;
 //
-//   - 62-05's DKG module — `dkg.ts` lives alongside these files in this
-//     same directory, but its barrel line belongs to 62-20, not this plan;
-//
 //   - a line on `src/browser-entry.ts` — this module is browser-safe by
 //     construction (pure `@noble/*` arithmetic, no Node or React Native
 //     import reachable from it), but Phase 50's dashboard is read-only
@@ -76,3 +73,36 @@ export {
   officerEncryptionKeyAlias
 } from './vault.js'
 export type { IKeyVault, KeyVaultErrorCode, KeyVaultPolicy } from './vault.js'
+
+// 62-20: a CURATED subset of the DKG module (`dkg.ts`, 62-05). This barrel
+// adds the names the key-release and keyholder-screen layers need —
+// identifiers, receiving-key generation, released-share validation and
+// reconstruction, plus the error and wire-material types. It deliberately
+// leaves off this directory's round drivers and the secret-coefficient
+// codecs: those stay reachable only from the one engine (62-17's
+// `KeyholderDkgEngine`) that drives DKG rounds and handles an in-progress
+// polynomial secret. Confining that handling to a single, reviewed call
+// site is the whole point of keeping it off every barrel — widening this
+// set to re-export it would make a stray future import able to touch
+// coefficients it has no business seeing.
+export {
+  DkgError,
+  assertDkgThreshold,
+  dkgIdentifierForUser,
+  generateDkgReceivingKey,
+  deriveGroupCommitments,
+  validateReleasedShare,
+  reconstructGroupSecret
+} from './dkg.js'
+export type {
+  DkgErrorCode,
+  DkgContext,
+  DkgRound1Wire,
+  DkgKeyMaterial,
+  EncryptedShare,
+  ComplaintEvidence,
+  ComplaintVerdict,
+  ComplaintResult,
+  ReleasedShare,
+  ReconstructionResult
+} from './dkg.js'
