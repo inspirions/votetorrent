@@ -12,6 +12,7 @@ import {
   createThresholdAuthority,
   type ThresholdAuthorityFixture,
 } from './fixtures/threshold-authority.js'
+import { provisionTestIntakeRecipient } from './fixtures/test-context.js'
 
 /**
  * threshold-vrg.spec.ts — 62-11 (D-08..D-12): registrant-approval (`vrg`) threshold-2
@@ -112,6 +113,7 @@ describe('threshold-2 first accept (vrg, RED pin)', function () {
 
   it('V0: at vrg threshold 2, the first accept does not throw, mints no Registrant, and leaves the request pending', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId, init } = await submitPendingRequest(fx)
 
@@ -230,6 +232,7 @@ describe('vrg threshold-2 end to end (D-08..D-12)', function () {
 
   it('V1 (D-08 + A5): the inbox seed pass fans out to every current holder, seeding officer included', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId } = await submitPendingRequest(fx)
 
@@ -261,6 +264,7 @@ describe('vrg threshold-2 end to end (D-08..D-12)', function () {
 
   it('V2 (crossing): the second accept mints the Registrant and inherits header satisfaction', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId, init } = await submitPendingRequest(fx)
     await engineFor(fx, fx.holders[0]!).getRequestedSignatures(true)
@@ -289,6 +293,7 @@ describe('vrg threshold-2 end to end (D-08..D-12)', function () {
 
   it('V3 (D-10 late): a third accept after crossing is recorded, re-decides nothing', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId, init } = await submitPendingRequest(fx)
     await engineFor(fx, fx.holders[0]!).getRequestedSignatures(true)
@@ -319,6 +324,7 @@ describe('vrg threshold-2 end to end (D-08..D-12)', function () {
 
   it('V4 (D-11 no veto): a rejection is a vote, not a veto — the request still crosses', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId, init } = await submitPendingRequest(fx)
     await engineFor(fx, fx.holders[0]!).getRequestedSignatures(true)
@@ -342,6 +348,7 @@ describe('vrg threshold-2 end to end (D-08..D-12)', function () {
 
   it('V5 (D-11 unreachable): three rejections and one accept leave the session unreachable', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId, init } = await submitPendingRequest(fx)
     await engineFor(fx, fx.holders[0]!).getRequestedSignatures(true)
@@ -364,6 +371,7 @@ describe('vrg threshold-2 end to end (D-08..D-12)', function () {
 
   it('V6 (reject guard, D-11): a single officer cannot reject above vrg threshold 1', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId } = await submitPendingRequest(fx)
 
@@ -390,6 +398,7 @@ describe('vrg threshold-2 end to end (D-08..D-12)', function () {
 
   it('V7 (finalize idempotency): a direct re-invocation after crossing is a no-op', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId, init } = await submitPendingRequest(fx)
     await engineFor(fx, fx.holders[0]!).getRequestedSignatures(true)
@@ -428,6 +437,7 @@ describe('vrg threshold-2 end to end (D-08..D-12)', function () {
         { policy: 'vrg', threshold: 1 },
       ],
     })
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const db = fx.elec.ctx.db
     const { requestId, init } = await submitPendingRequest(fx)
 

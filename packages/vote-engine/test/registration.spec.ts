@@ -28,7 +28,7 @@ import type { Signature, Scope, RegisterInit } from '@votetorrent/vote-core'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { MockRegistrationEngine } from '../src/registration/mock-registration-engine.js'
 import { RegistrationRegisterBuilder } from '../src/registration/builders/registration-register-builder.js'
-import { createTestNetwork, addTestAuthority, addTestElection, seedAuthorityInvite, seedSignedMutation as seedSignedMutationFixture } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, addTestElection, seedAuthorityInvite, seedSignedMutation as seedSignedMutationFixture, provisionTestIntakeRecipient } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { digestToBytes, toCanonicalDatetime } from '../src/utils.js'
 import type { EngineContext } from '../src/types.js'
@@ -72,6 +72,10 @@ async function setupRegistrationTest (): Promise<{
 }> {
   const net = await createTestNetwork()
   const auth = await addTestAuthority(net)
+  // D-49 (62-31): several tests in this file write non-empty private details through
+  // createRegistrantPrivate/register() (now D-49-sealed) — one provisioning call here covers
+  // every one of this file's 30 setupRegistrationTest() call sites.
+  await provisionTestIntakeRecipient(auth.ctx, auth.authority.id)
   const { sign, publicHex } = makeRegistrantSigner(auth.user.id)
   const engine = new RegistrationEngine(auth.ctx)
   return { auth, engine, sign, publicHex }

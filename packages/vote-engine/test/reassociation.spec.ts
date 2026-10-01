@@ -48,11 +48,13 @@ import type { AssociationStrandPort } from '../src/association/transport/p2p-ass
 import { computeAssociationAttestationDigest, computeAssociationRequestDigest } from '../src/association/transport/association-request-digest.js'
 import { createP2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
 import type { P2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
-import { makeTestSignCallback } from './fixtures/test-context.js'
+import { makeTestSignCallback, provisionTestIntakeRecipient } from './fixtures/test-context.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { digestToBytes } from '../src/utils.js'
 import { createThresholdAuthority } from './fixtures/threshold-authority.js'
 import { addSiblingAuthority } from './fixtures/test-context.js'
+import { InMemoryTestKeyVault } from '../src/crypto/vault.js'
+import { OFFICER_ENCRYPTION_KEY_POLICY, officerEncryptionKeyAlias } from '../src/crypto/index.js'
 import type { RegistrantSignatureTask, RegisterInit, RegistrationRequestInit, RegistrationVerificationChecklistItem } from '@votetorrent/vote-core'
 
 /** Deterministic callback signer — @noble/curves v2 defaults (prehash:true, no extraEntropy), so
@@ -246,6 +248,22 @@ describe('re-association driver (62-18 Task 3, D-40/D-41/D-45/D-46)', function (
     registrationTransport = buildRegistrationTransport(fixture, 'reassoc-reg-strand')
     associationEngine = new AssociationEngine(fixture.auth.ctx)
     officerSign = makeTestSignCallback(fixture.auth.user)
+    // D-49 (62-31): approveRegistration below drives the real (now-sealed) submitRegistrationRequest
+    // and register(). `fixture.opener` (passed throughout this file as the re-association opener)
+    // is built DIRECTLY on 62-04's openEnvelope over `fixture.recipients[0]`'s OWN in-memory secret —
+    // a test stand-in independent of the real `UserEncryptionKey` table 62-14's IntakeEngine reads.
+    // For `fixture.opener` to also open a D-49-sealed RegistrationRequest.Payload/RegistrantPrivate
+    // (evidence.ts's listApprovedRegistrations), the REAL published UserEncryptionKey for
+    // `fixture.net.user.id` must wrap that SAME secret — pre-seed the vault with it before
+    // registering, so IntakeEngine reuses it (its own 'already has this alias' branch) instead of
+    // minting an unrelated keypair.
+    const matchingVault = new InMemoryTestKeyVault()
+    await matchingVault.putSecret(
+      officerEncryptionKeyAlias(fixture.net.user.id),
+      fixture.recipients[0].secretKey,
+      OFFICER_ENCRYPTION_KEY_POLICY
+    )
+    await provisionTestIntakeRecipient(fixture.auth.ctx, fixture.auth.authority.id, { vault: matchingVault })
   })
 
   // -----------------------------------------------------------------------------------------
@@ -810,6 +828,7 @@ describe('re-association driver (62-18 Task 3, D-40/D-41/D-45/D-46)', function (
       const threshAuth = await createThresholdAuthority()
       const authorityId = threshAuth.authorityId
       const ctx = threshAuth.elec.ctx
+      await provisionTestIntakeRecipient(ctx, authorityId)
 
       // Get a REAL active registrant under this vrg:2 authority through the full co-sign flow
       // (createRegistrant's own single-signer ceremony is threshold-1-only and cannot be used

@@ -28,7 +28,7 @@ import type { PrivateDetail, Signature } from '@votetorrent/vote-core'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from '../src/registration/access-trail-fields.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { MockRegistrationEngine } from '../src/registration/mock-registration-engine.js'
-import { createTestNetwork, addTestAuthority } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, provisionTestIntakeRecipient } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { nowCanonicalDatetime } from '../src/utils.js'
 import type { EngineContext } from '../src/types.js'
@@ -194,6 +194,10 @@ async function setup (): Promise<{
 }> {
   const net = await createTestNetwork()
   const auth = await addTestAuthority(net)
+  // D-49 (62-31): seedRegistrant below writes non-empty private details through
+  // createRegistrantPrivate (now D-49-sealed), and recordRegistrantAccessEvent/getRegistrantPrivate
+  // must be able to open what was sealed — one provisioning call here covers every call site.
+  await provisionTestIntakeRecipient(auth.ctx, auth.authority.id)
   const sign = makeRealSigner(auth.user.id)
   const engine = new RegistrationEngine(auth.ctx)
   return { auth, engine, sign }

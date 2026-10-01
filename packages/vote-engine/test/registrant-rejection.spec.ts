@@ -19,7 +19,7 @@ import 'reflect-metadata'
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import { createTestNetwork, addTestAuthority, makeTestSignCallback } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, makeTestSignCallback, provisionTestIntakeRecipient } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime } from '../src/signing/ceremony-helpers.js'
@@ -56,7 +56,12 @@ function makeNetworkRef () {
 
 async function setup (): Promise<TestAuthority> {
   const net = await createTestNetwork()
-  return addTestAuthority(net)
+  const auth = await addTestAuthority(net)
+  // D-49 (62-31): every test in this file submits a pending request through the real
+  // submitRegistrationRequest() (submitPendingRequest below) — now sealed — so a single
+  // provisioning call here covers every call site.
+  await provisionTestIntakeRecipient(auth.ctx, auth.authority.id)
+  return auth
 }
 
 /** WR-10 prehash contract: mirrors authority-transport.spec.ts / registrant-approval.spec.ts. */

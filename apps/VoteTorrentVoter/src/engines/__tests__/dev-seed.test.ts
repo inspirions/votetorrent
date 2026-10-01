@@ -25,7 +25,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import type { RegisterInit, Signature } from '@votetorrent/vote-core'
-import { NetworksEngine, RegistrationEngine, AssociationEngine, ElectionsEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
+import { NetworksEngine, RegistrationEngine, AssociationEngine, ElectionsEngine, IntakeEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
+import type { EngineContext } from '@votetorrent/vote-engine/rn'
 import { FieldPolicyViolationError } from '@votetorrent/vote-engine'
 import { seedDevNetwork, DEV_SEED_NETWORK_NAME } from '../dev-seed'
 import { readVoterBallot, readVoterElection } from '../election-read'
@@ -59,6 +60,47 @@ function nextRegistrantId(): string {
 	return `dev-seed-registrant-${Date.now()}-${registrantSeq}`
 }
 
+/**
+ * D-49 (Phase 62 Plan 31): a file-local Map-backed `IKeyVault` (62-04's four-method contract) —
+ * the Voter resolves `@votetorrent/vote-engine` from `dist` and has no mapped fixture, so this
+ * mirrors `packages/vote-engine/src/crypto/vault.ts`'s `InMemoryTestKeyVault` structurally rather
+ * than importing it (that class is a deep-path, never-barrel-exported test-only type).
+ */
+class MapKeyVaultForTests {
+	private readonly store = new Map<string, Uint8Array>()
+	async putSecret(alias: string, secret: Uint8Array): Promise<void> {
+		if (this.store.has(alias)) throw new Error(`MapKeyVaultForTests.putSecret: alias '${alias}' already holds a secret`)
+		this.store.set(alias, Uint8Array.from(secret))
+	}
+	async getSecret(alias: string): Promise<Uint8Array | null> {
+		const found = this.store.get(alias)
+		return found ? Uint8Array.from(found) : null
+	}
+	async hasSecret(alias: string): Promise<boolean> {
+		return this.store.has(alias)
+	}
+	async deleteSecret(alias: string): Promise<boolean> {
+		return this.store.delete(alias)
+	}
+}
+
+/**
+ * D-49: registers the founding officer's intake encryption key BEFORE the first registration
+ * write, so `RegistrationEngine.submitRegistrationRequest`/`register()` (now D-49-sealed) have a
+ * recipient. `ctx.intakeOpener` is also set so this file's own reads (`getRegistrant`,
+ * `getRegistrantSelective`) can open the sealed tiers they write.
+ */
+async function ensureIntakeRecipient(
+	ctx: EngineContext,
+	authorityId: string,
+	sign: (digest: Uint8Array) => Promise<Signature>
+): Promise<void> {
+	const vault = new MapKeyVaultForTests()
+	const intakeEngine = new IntakeEngine(ctx)
+	await intakeEngine.registerOfficerEncryptionKey(authorityId, vault, sign)
+	ctx.intakeOpener = intakeEngine.createOpener(vault)
+}
+
 const FUTURE_EXPIRATION = Date.now() + 365 * 86_400_000
 
 describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed register', () => {
@@ -85,6 +127,7 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 			.prepare('select AuthorityId from Election where Id = :electionId')
 			.get({ electionId: seeded.electionId })
 		const authorityId = authorityRow!.AuthorityId as string
+		await ensureIntakeRecipient(ctx, authorityId, seeded.sign)
 		return { seeded, ctx, registrationEngine, authorityId }
 	}
 
@@ -170,7 +213,17 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 			private: { expiration: FUTURE_EXPIRATION, details: [{ name: 'email', value: 'unreg@example.com' }] },
 		}
 
-		await expect(registrationEngine.register(init, unregisteredSign)).rejects.toThrow()
+		let caught: unknown
+		try {
+			await registrationEngine.register(init, unregisteredSign)
+		} catch (err) {
+			caught = err
+		}
+		expect(caught).toBeDefined()
+		// D-49 (62-31): a recipient is provisioned in setup() above, so this rejection must be the
+		// ORIGINAL AdminSigning/UserIdValid refusal, never IntakeError('no-recipients') firing first
+		// for the wrong reason.
+		expect((caught as { name?: string } | undefined)?.name).not.toBe('IntakeError')
 
 		const registrant = await registrationEngine.getRegistrant(registrantId)
 		expect(registrant).toBeUndefined()

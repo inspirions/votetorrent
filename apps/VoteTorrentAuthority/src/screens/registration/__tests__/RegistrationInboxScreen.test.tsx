@@ -1112,8 +1112,19 @@ describe("RegistrationInboxScreen — D-03/D-09/D-12 (48-18)", () => {
 		void pendingBefore;
 		const pendingValueBefore = findJsonNodeByTestID(tr.toJSON(), "transparency-stats-pending-value");
 		const approvedValueBefore = findJsonNodeByTestID(tr.toJSON(), "transparency-stats-approved-value");
-		expect(JSON.stringify(pendingValueBefore)).toContain("2");
-		expect(JSON.stringify(approvedValueBefore)).toContain("1");
+		// 4 pending / 1 approved: 62-19 (D-44) added a second pending-pair fixture
+		// (`fixture-request-pending-duplicate-a`/`-b`, both status 'p', same authority) to
+		// `MockRegistrationEngine.seedRegistrationRequestFixtures`, alongside the pre-existing
+		// `fixture-request-bridge-1`/`fixture-request-pending-repeat`. The numeric assertions
+		// below read the rendered `children` text exactly (`toEqual`, not `toContain`) so a
+		// future fixture-count drift fails loudly here instead of passing on a coincidental
+		// digit substring (e.g. `fontSize":24` contains "2").
+		expect(JSON.stringify((pendingValueBefore as { children: unknown[] }).children)).toEqual(
+			JSON.stringify(["4"])
+		);
+		expect(JSON.stringify((approvedValueBefore as { children: unknown[] }).children)).toEqual(
+			JSON.stringify(["1"])
+		);
 
 		const stored = mockRegistrationEngine.registrationRequests.get("fixture-request-pending-repeat");
 		stored.status = "a";
@@ -1126,8 +1137,12 @@ describe("RegistrationInboxScreen — D-03/D-09/D-12 (48-18)", () => {
 
 		const pendingValueAfter = findJsonNodeByTestID(tr.toJSON(), "transparency-stats-pending-value");
 		const approvedValueAfter = findJsonNodeByTestID(tr.toJSON(), "transparency-stats-approved-value");
-		expect(JSON.stringify(pendingValueAfter)).toContain("1");
-		expect(JSON.stringify(approvedValueAfter)).toContain("2");
+		expect(JSON.stringify((pendingValueAfter as { children: unknown[] }).children)).toEqual(
+			JSON.stringify(["3"])
+		);
+		expect(JSON.stringify((approvedValueAfter as { children: unknown[] }).children)).toEqual(
+			JSON.stringify(["2"])
+		);
 	});
 
 	it("source gate: no plain useEffect besides the unmountedRef guard, and the false premise sentence is gone", () => {

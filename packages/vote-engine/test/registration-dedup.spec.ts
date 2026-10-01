@@ -15,7 +15,7 @@ import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import type { SqlValue } from '@quereus/quereus'
 import { createP2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
 import type { P2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
-import { addSiblingAuthority, makeTestSignCallback } from './fixtures/test-context.js'
+import { addSiblingAuthority, makeTestSignCallback, provisionTestIntakeRecipient } from './fixtures/test-context.js'
 import { createThresholdAuthority } from './fixtures/threshold-authority.js'
 import type { ThresholdAuthorityFixture } from './fixtures/threshold-authority.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
@@ -192,6 +192,10 @@ describe('D-43/D-44 registration duplicate detection and closure', function () {
     fixture = await createP2pStagingFixture()
     expect(fixture.auth.ctx.db).to.equal(fixture.db)
     expect(await readAuthorityThreshold(fixture.db, fixture.auth.authority.id, 'vrg')).to.equal(1)
+    // D-49 (62-31): submitPending below drives the real (now-sealed) submitRegistrationRequest, and
+    // getLikelyDuplicateRequests/readPendingComparables must be able to OPEN what was sealed to
+    // match names/dob/email/phone — ctx.intakeOpener must be set, not merely a recipient published.
+    await provisionTestIntakeRecipient(fixture.auth.ctx, fixture.auth.authority.id)
     engine = new RegistrationEngine(fixture.auth.ctx)
     transport = makeTransport(fixture)
     publisher = makePublisher(fixture, transport)
@@ -232,6 +236,7 @@ describe('D-43/D-44 registration duplicate detection and closure', function () {
 
   it('D2: the same identity under a sibling authority is not flagged', async () => {
     const siblingAuthorityId = await addSiblingAuthority(fixture.auth, { scopes: ['vrg'] })
+    await provisionTestIntakeRecipient(fixture.auth.ctx, siblingAuthorityId)
     const { requestId: d } = await submitPending(fixture, { firstName: 'Carl', lastName: 'Diaz' })
     await submitPending(fixture, { firstName: 'Carl', lastName: 'Diaz' }, { authorityId: siblingAuthorityId })
     expect(await engine.getLikelyDuplicateRequests(d)).to.deep.equal([])
@@ -478,6 +483,7 @@ describe('D-43/D-44 registration duplicate detection and closure', function () {
 
   it('D7: at vrg threshold 2, rejectRegistrationRequest refuses with the corrected D-11 text', async () => {
     const fx = await createThresholdAuthority()
+    await provisionTestIntakeRecipient(fx.elec.ctx, fx.authorityId)
     const thresholdEngine = new RegistrationEngine({ db: fx.elec.ctx.db, user: fx.holders[0]!.user })
     const { requestId } = await submitPendingAtThresholdAuthority(fx, { firstName: 'Wren', lastName: 'Zahn' })
 

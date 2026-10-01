@@ -19,7 +19,7 @@ import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import type { RegistrantTier, FieldRequirement, Signature } from '@votetorrent/vote-core'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { FieldPolicyViolationError } from '../src/registration/field-policy.js'
-import { createTestNetwork, addTestAuthority, addTestElection } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, addTestElection, provisionTestIntakeRecipient } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { EngineContext } from '../src/types.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
@@ -46,6 +46,10 @@ async function setupFieldPolicyTest (): Promise<{
 }> {
   const net = await createTestNetwork()
   const auth = await addTestAuthority(net)
+  // D-49 (62-31): register() below (now D-49-sealed) runs field-policy validation BEFORE sealing,
+  // so a policy-violating payload never reaches the sealer — but every test here that register()s a
+  // policy-CONFORMING payload needs a recipient, so one provisioning call here covers them all.
+  await provisionTestIntakeRecipient(auth.ctx, auth.authority.id)
   const elec = await addTestElection(auth)
   const electionId = await resolveElectionId(elec.ctx, elec.authority.id)
   const sign = makeRegistrantSigner(auth.user.id)
