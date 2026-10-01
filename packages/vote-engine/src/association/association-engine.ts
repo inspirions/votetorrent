@@ -9,7 +9,10 @@ import { verifySig, verifySigP256 } from '../database/initialize.js'
 import { StubAttestationVerifier } from './stub-attestation-verifier.js'
 import { AssociationAssociateBuilder } from './builders/association-associate-builder.js'
 import { resolveRecordValidity as resolveRecordValidityFromPolicy } from './record-validity.js'
+import { REASSOCIATION_WRITE_MODE } from './reassociation/write-mode.js'
+import type { ReassociationWriteMode } from './reassociation/write-mode.js'
 import type { EngineContext } from '../types.js'
+import { REASSOCIATION_REJECTION_NONCE_PREFIX, REASSOCIATION_UNRESOLVED_REGISTRANT_ID, REGISTRANT_HAS_ACTIVE_DEVICE_REASON } from '@votetorrent/vote-core'
 // 51-09 Task 2: `IAssociationRequestIntake`/`StagedAttestation` are declared in the FILESYSTEM
 // transport module (deliberately, per that file's own doc comment — "transport-agnostic despite
 // living in the filesystem module for now"). This is a TYPE-ONLY import of that shared interface,
@@ -28,6 +31,7 @@ import type {
   AttestationVerdict,
   AttestationVerdictCode,
   AttestationVerification,
+  DeviceAttestation,
   IAssociationAssociateBuilder,
   IAssociationEngine,
   IAttestationVerifier,
@@ -57,6 +61,29 @@ interface AssociationRequestRow {
   electionId?: string
   status: AssociationRequestStatus
   challengeNonce?: string
+}
+
+/**
+ * 62-18 (D-41) — everything `prepareAssociation` resolves before any write: the matched
+ * `AttestationChallenge` (carrying `authorityId`, needed by every ceremony in
+ * `commitPreparedAssociation`), the verified `DeviceAttestation`, and every derived value the
+ * original `associate()` computed before `BEGIN` (expiration + its deferred form, attestation
+ * time + its deferred form, the serialized attestation-details JSON, and the authority-derived
+ * `DeviceHash` to publish). Engine-internal — never exported.
+ */
+interface PreparedAssociation {
+  registrantId: string
+  deviceKey: string
+  /** The `AttestationChallenge.Nonce` this attestation answered — also `AssociationPrivate.Nonce`. */
+  nonce: string
+  challenge: AttestationChallenge
+  attestation: DeviceAttestation
+  expiration: string
+  expirationDeferred: string
+  attestationTime: string
+  attestationTimeDeferred: string
+  attestationDetailsJson: string
+  publishedDeviceHash: string | null
 }
 
 // 999.1 D-01/D-02: AssociationEngine mutations allocate Tids through the
@@ -134,10 +161,20 @@ export class AssociationEngine implements IAssociationEngine {
    */
   private readonly pendingAttestationAnswers = new Map<string, AssociationAttestationAnswer>()
 
+  /** 62-18 (D-41): per-instance write-mode override, defaulting to the shipped
+   * `REASSOCIATION_WRITE_MODE` verdict — exists so `association-removal.spec.ts`'s probe can
+   * exercise BOTH modes against the same real schema in one spec run. Every pre-62-18
+   * two-argument call site is unaffected (an omitted third argument resolves to `undefined`,
+   * which `commitPreparedAssociation` treats as "use the shipped default"). */
+  private readonly reassociationWriteMode?: ReassociationWriteMode
+
   constructor (
     private readonly ctx?: EngineContext,
-    private readonly verifier: IAttestationVerifier = new StubAttestationVerifier()
-  ) {}
+    private readonly verifier: IAttestationVerifier = new StubAttestationVerifier(),
+    options?: { reassociationWriteMode?: ReassociationWriteMode }
+  ) {
+    this.reassociationWriteMode = options?.reassociationWriteMode
+  }
 
   /** Normalizes the Signature|callback union into a single callback shape (WR-04: shared). */
   private resolveSign (signatureOrCallback: SignatureOrCallback): (digest: Uint8Array) => Promise<Signature> {
@@ -338,17 +375,46 @@ export class AssociationEngine implements IAssociationEngine {
    */
   async associate (init: AssociateInit, signatureOrCallback: SignatureOrCallback): Promise<void> {
     this.requireCtx('associate')
+    // NOTE: deliberately NO try/catch here — matches the ORIGINAL (pre-62-18) method shape
+    // exactly: everything `prepareAssociation` does (challenge lookup, the D-07 verify-before-
+    // transaction gate, device uniqueness) was never wrapped by `this.rethrow`, and a caller
+    // depends on that (`attestation-verdict.spec.ts`'s ordering-guard case (a) asserts
+    // `caught.cause` survives UNCHANGED — `rethrow` would strip it). Only
+    // `commitPreparedAssociation`'s transactional section keeps its own rethrow wrapping, exactly
+    // where the original method's own try/catch began (at `BEGIN`).
+    const prepared = await this.prepareAssociation(init)
+    await this.commitPreparedAssociation(prepared, signatureOrCallback)
+  }
+
+  /**
+   * 62-18 (D-41) — everything `associate()` used to do BEFORE `BEGIN`, split out so the D-41
+   * compound write (`commitPreparedAssociation`, below) can run the SAME verification exactly
+   * once whether this is a first association or a re-association's new-device leg. Steps 1-3 of
+   * `associate()`'s own doc comment above, UNCHANGED (moved verbatim — same messages, same order,
+   * same fail-closed gates).
+   *
+   * `options.registrantIdForChallenge`, when supplied, is the registrantId the
+   * `AttestationChallenge` row was issued under (the `IReassociationEngine` re-association driver
+   * issues the challenge for the ALREADY-RESOLVED registrant, so this defaults to `init.registrantId`
+   * — the two are the same value on every call this plan makes, but kept distinct so a future
+   * caller is never forced to synthesize a matching `init.registrantId` just to look up the row).
+   */
+  private async prepareAssociation (
+    init: AssociateInit,
+    options?: { registrantIdForChallenge?: string }
+  ): Promise<PreparedAssociation> {
     const ctx = this.ctx!
     const { registrantId, deviceKey, deviceHash, nonce, attestation } = init
+    const challengeRegistrantId = options?.registrantIdForChallenge ?? registrantId
 
     const challengeRow = await ctx.db
       .prepare(
         'select Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId from AttestationChallenge where Nonce = :nonce and RegistrantId = :registrantId and DeviceKey = :deviceKey'
       )
-      .get({ nonce, registrantId, deviceKey })
+      .get({ nonce, registrantId: challengeRegistrantId, deviceKey })
     if (!challengeRow) {
       throw new Error(
-        `AssociationEngine.associate: no AttestationChallenge found for nonce=${nonce} registrantId=${registrantId} deviceKey=${deviceKey} — either it was never issued, has already been consumed, or does not bind this exact (registrant, device) pair`
+        `AssociationEngine.associate: no AttestationChallenge found for nonce=${nonce} registrantId=${challengeRegistrantId} deviceKey=${deviceKey} — either it was never issued, has already been consumed, or does not bind this exact (registrant, device) pair`
       )
     }
     const challenge: AttestationChallenge = {
@@ -471,163 +537,249 @@ export class AssociationEngine implements IAssociationEngine {
       platformDetails: attestation.platformDetails
     })
 
+    return {
+      registrantId,
+      deviceKey,
+      nonce,
+      challenge,
+      attestation,
+      expiration,
+      expirationDeferred,
+      attestationTime,
+      attestationTimeDeferred,
+      attestationDetailsJson,
+      publishedDeviceHash
+    }
+  }
+
+  /**
+   * 62-18 (D-41) — the commit half of the associate ceremony (steps 4/5 of `associate()`'s own
+   * doc comment, UNCHANGED — same digests, same insert order, same D-11 post-commit challenge
+   * consumption). `revoke`, when present, deletes `revoke.deviceKeys` (the registrant's OLD device
+   * keys) with or before the new insert, per the engine's write mode
+   * (`this.reassociationWriteMode ?? REASSOCIATION_WRITE_MODE`):
+   *
+   *   - 'single-transaction': each old key is deleted INSIDE this method's own `BEGIN`, sorted,
+   *     BEFORE the Association insert, each under its OWN `'vrg'`-signed delete ceremony
+   *     (`ownsTransaction: false` — this is already inside the outer transaction). On any error the
+   *     whole transaction ROLLBACKs, so a failed revoke never leaves a partial delete.
+   *   - 'delete-then-insert': each old key is removed through `removeAssociation` — its own,
+   *     already-committed 'vrg' ceremony — BEFORE this method opens its own transaction at all.
+   *
+   * Verification already happened in `prepareAssociation` (called by this method's caller) BEFORE
+   * either path runs, so a failed attestation never reaches a delete (research ruling 2, A5): the
+   * registrant's old device is untouched whenever this method is never called.
+   */
+  private async commitPreparedAssociation (
+    prepared: PreparedAssociation,
+    signatureOrCallback: SignatureOrCallback,
+    revoke?: { registrantId: string; deviceKeys: readonly string[] }
+  ): Promise<void> {
+    const ctx = this.ctx!
+    const { registrantId, deviceKey, nonce, challenge, attestation, expiration, expirationDeferred, attestationTime, attestationTimeDeferred, attestationDetailsJson, publishedDeviceHash } = prepared
+
+    const writeMode = this.reassociationWriteMode ?? REASSOCIATION_WRITE_MODE
+    const revokeKeysSorted = revoke === undefined ? [] : [...revoke.deviceKeys].sort()
+    const deleteInTransaction = revoke !== undefined && revokeKeysSorted.length > 0 && writeMode === 'single-transaction'
+    const deleteBeforeTransaction = revoke !== undefined && revokeKeysSorted.length > 0 && writeMode === 'delete-then-insert'
+
+    // 'delete-then-insert': each old key's own, already-committed ceremony — BEFORE this
+    // method's own transaction opens at all.
+    if (deleteBeforeTransaction) {
+      for (const oldDeviceKey of revokeKeysSorted) {
+        await this.removeAssociation(revoke!.registrantId, oldDeviceKey, signatureOrCallback)
+      }
+    }
+
+    // Restored outer try/catch -> rethrow('associate'), matching the ORIGINAL method's own
+    // wrapping exactly (begins at BEGIN, covers the write transaction AND the post-commit
+    // challenge consumption below) — everything BEFORE this point (prepareAssociation, and the
+    // optional delete-then-insert pre-transaction ceremonies above) stays UNWRAPPED, preserving
+    // `attestation-verdict.spec.ts`'s ordering-guard `.cause` assertion.
     try {
       await ctx.db.exec('BEGIN')
       try {
-        const cid = await this.computeAssociationPrivateCid({
+      // 'single-transaction': each old key deleted HERE, sorted, BEFORE the Association insert —
+      // same digest/SQL shape `removeAssociation` uses, just `ownsTransaction: false` (already
+      // inside this method's own BEGIN).
+      if (deleteInTransaction) {
+        for (const oldDeviceKey of revokeKeysSorted) {
+          const deleteTid = await allocateTid(ctx.db, 'association')
+          const deleteDigestExpr = "select Digest(:tid, :registrantId, :deviceKey, 'delete') as d"
+          const deleteDigestParams = { tid: deleteTid, registrantId: revoke!.registrantId, deviceKey: oldDeviceKey }
+          const deleteSigningNonce = await seedSignedMutation(
+            ctx,
+            challenge.authorityId,
+            'vrg',
+            deleteTid,
+            deleteDigestExpr,
+            deleteDigestParams,
+            this.resolveSign(signatureOrCallback),
+            { ownsTransaction: false }
+          )
+          await ctx.db.exec(
+            `delete from Association
+             with context SigningNonce = :signingNonce, Tid = ${deleteTid}, now = :now
+             where RegistrantId = :registrantId and DeviceKey = :deviceKey`,
+            { registrantId: revoke!.registrantId, deviceKey: oldDeviceKey, signingNonce: deleteSigningNonce, now: nowCanonicalDatetime() }
+          )
+        }
+      }
+
+      const cid = await this.computeAssociationPrivateCid({
+        registrantId,
+        deviceKey,
+        deviceId: attestation.deviceId,
+        attestationTime,
+        nonce,
+        attestationDetails: attestationDetailsJson,
+        expiration
+      })
+
+      // ---- Association (public row) FIRST — AssociationCidMatch (below) needs it. ----
+      const associationTid = await allocateTid(ctx.db, 'association')
+      const rowDigestRow = await ctx.db
+        .prepare('select Digest(:registrantId, :deviceKey, :deviceHash, :attestationCid, :expiration) as d')
+        .get({ registrantId, deviceKey, deviceHash: publishedDeviceHash, attestationCid: cid, expiration })
+      if (!rowDigestRow || rowDigestRow.d == null) {
+        throw new Error('AssociationEngine.associate: Digest() returned null for Association row-level signature — crypto plugin not registered?')
+      }
+      const rowSignature = await this.resolveSign(signatureOrCallback)(digestToBytes(rowDigestRow.d))
+
+      const associationDigestExpr = 'select Digest(:tid, :registrantId, :deviceKey, :deviceHash, :attestationCid, :expirationDeferred, :rowSignorKey, :rowSignature) as d'
+      const associationDigestParams = {
+        tid: associationTid,
+        registrantId,
+        deviceKey,
+        deviceHash: publishedDeviceHash,
+        attestationCid: cid,
+        expirationDeferred,
+        rowSignorKey: rowSignature.signerKey,
+        rowSignature: rowSignature.signature
+      }
+      const associationNonce = await seedSignedMutation(
+        ctx,
+        challenge.authorityId,
+        'vrg',
+        associationTid,
+        associationDigestExpr,
+        associationDigestParams,
+        this.resolveSign(signatureOrCallback),
+        { ownsTransaction: false }
+      )
+
+      await ctx.db.exec(
+        `insert into Association (RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration, SignorKey, Signature)
+         with context SigningNonce = :signingNonce, Tid = ${associationTid}, now = :now
+         values (:registrantId, :deviceKey, :deviceHash, :attestationCid, :expiration, :signorKey, :signature)`,
+        {
+          registrantId,
+          deviceKey,
+          deviceHash: publishedDeviceHash,
+          attestationCid: cid,
+          expiration,
+          signorKey: rowSignature.signerKey,
+          signature: rowSignature.signature,
+          signingNonce: associationNonce,
+          now: nowCanonicalDatetime()
+        }
+      )
+
+      // ---- AssociationPrivate (authority-held) SECOND — re-derives the SAME Cid. ----
+      // NOTE: `challengeNonce` (not `nonce`) — avoids the seedSignedMutation reserved-bind
+      // collision (see issueAttestationChallenge's doc comment); this is the AttestationChallenge
+      // nonce this attestation answered, stored in AssociationPrivate.Nonce.
+      const privateTid = await allocateTid(ctx.db, 'association')
+      const privateDigestExpr = 'select Digest(:tid, :cid, :registrantId, :deviceKey, :deviceId, :attestationTimeDeferred, :challengeNonce, :attestationDetails, :expirationDeferred) as d'
+      const privateDigestParams = {
+        tid: privateTid,
+        cid,
+        registrantId,
+        deviceKey,
+        deviceId: attestation.deviceId,
+        attestationTimeDeferred,
+        challengeNonce: nonce,
+        attestationDetails: attestationDetailsJson,
+        expirationDeferred
+      }
+      const privateNonce = await seedSignedMutation(
+        ctx,
+        challenge.authorityId,
+        'vrg',
+        privateTid,
+        privateDigestExpr,
+        privateDigestParams,
+        this.resolveSign(signatureOrCallback),
+        { ownsTransaction: false }
+      )
+
+      await ctx.db.exec(
+        `insert into AssociationPrivate (Cid, RegistrantId, DeviceKey, DeviceId, AttestationTime, Nonce, AttestationDetails, Expiration)
+         with context SigningNonce = :signingNonce, Tid = ${privateTid}, now = :now
+         values (:cid, :registrantId, :deviceKey, :deviceId, :attestationTime, :nonce, :attestationDetails, :expiration)`,
+        {
+          cid,
           registrantId,
           deviceKey,
           deviceId: attestation.deviceId,
           attestationTime,
           nonce,
           attestationDetails: attestationDetailsJson,
-          expiration
-        })
-
-        // ---- Association (public row) FIRST — AssociationCidMatch (below) needs it. ----
-        const associationTid = await allocateTid(ctx.db, 'association')
-        const rowDigestRow = await ctx.db
-          .prepare('select Digest(:registrantId, :deviceKey, :deviceHash, :attestationCid, :expiration) as d')
-          .get({ registrantId, deviceKey, deviceHash: publishedDeviceHash, attestationCid: cid, expiration })
-        if (!rowDigestRow || rowDigestRow.d == null) {
-          throw new Error('AssociationEngine.associate: Digest() returned null for Association row-level signature — crypto plugin not registered?')
+          expiration,
+          signingNonce: privateNonce,
+          now: nowCanonicalDatetime()
         }
-        const rowSignature = await this.resolveSign(signatureOrCallback)(digestToBytes(rowDigestRow.d))
-
-        const associationDigestExpr = 'select Digest(:tid, :registrantId, :deviceKey, :deviceHash, :attestationCid, :expirationDeferred, :rowSignorKey, :rowSignature) as d'
-        const associationDigestParams = {
-          tid: associationTid,
-          registrantId,
-          deviceKey,
-          deviceHash: publishedDeviceHash,
-          attestationCid: cid,
-          expirationDeferred,
-          rowSignorKey: rowSignature.signerKey,
-          rowSignature: rowSignature.signature
-        }
-        const associationNonce = await seedSignedMutation(
-          ctx,
-          challenge.authorityId,
-          'vrg',
-          associationTid,
-          associationDigestExpr,
-          associationDigestParams,
-          this.resolveSign(signatureOrCallback),
-          { ownsTransaction: false }
-        )
-
-        await ctx.db.exec(
-          `insert into Association (RegistrantId, DeviceKey, DeviceHash, AttestationCid, Expiration, SignorKey, Signature)
-           with context SigningNonce = :signingNonce, Tid = ${associationTid}, now = :now
-           values (:registrantId, :deviceKey, :deviceHash, :attestationCid, :expiration, :signorKey, :signature)`,
-          {
-            registrantId,
-            deviceKey,
-            deviceHash: publishedDeviceHash,
-            attestationCid: cid,
-            expiration,
-            signorKey: rowSignature.signerKey,
-            signature: rowSignature.signature,
-            signingNonce: associationNonce,
-            now: nowCanonicalDatetime()
-          }
-        )
-
-        // ---- AssociationPrivate (authority-held) SECOND — re-derives the SAME Cid. ----
-        // NOTE: `challengeNonce` (not `nonce`) — avoids the seedSignedMutation reserved-bind
-        // collision (see issueAttestationChallenge's doc comment); this is the AttestationChallenge
-        // nonce this attestation answered, stored in AssociationPrivate.Nonce.
-        const privateTid = await allocateTid(ctx.db, 'association')
-        const privateDigestExpr = 'select Digest(:tid, :cid, :registrantId, :deviceKey, :deviceId, :attestationTimeDeferred, :challengeNonce, :attestationDetails, :expirationDeferred) as d'
-        const privateDigestParams = {
-          tid: privateTid,
-          cid,
-          registrantId,
-          deviceKey,
-          deviceId: attestation.deviceId,
-          attestationTimeDeferred,
-          challengeNonce: nonce,
-          attestationDetails: attestationDetailsJson,
-          expirationDeferred
-        }
-        const privateNonce = await seedSignedMutation(
-          ctx,
-          challenge.authorityId,
-          'vrg',
-          privateTid,
-          privateDigestExpr,
-          privateDigestParams,
-          this.resolveSign(signatureOrCallback),
-          { ownsTransaction: false }
-        )
-
-        await ctx.db.exec(
-          `insert into AssociationPrivate (Cid, RegistrantId, DeviceKey, DeviceId, AttestationTime, Nonce, AttestationDetails, Expiration)
-           with context SigningNonce = :signingNonce, Tid = ${privateTid}, now = :now
-           values (:cid, :registrantId, :deviceKey, :deviceId, :attestationTime, :nonce, :attestationDetails, :expiration)`,
-          {
-            cid,
-            registrantId,
-            deviceKey,
-            deviceId: attestation.deviceId,
-            attestationTime,
-            nonce,
-            attestationDetails: attestationDetailsJson,
-            expiration,
-            signingNonce: privateNonce,
-            now: nowCanonicalDatetime()
-          }
-        )
-
-        await ctx.db.exec('COMMIT')
-      } catch (innerErr) {
-        await ctx.db.exec('ROLLBACK')
-        throw innerErr
-      }
-
-      // ---- D-11 (51-05): consume the challenge — its OWN transaction, run ONLY after the
-      // Association/AssociationPrivate write above has durably COMMITted. This is NOT folded
-      // into that transaction (a deliberate deviation from the original plan text, which asked
-      // for the delete inside the same BEGIN/COMMIT): AssociationPrivate.ChallengeValid is a
-      // subquery ("deferred") CHECK, and empirically (via TDD — every associate() test failed
-      // with "CHECK constraint failed: ChallengeValid" once the in-transaction delete was added)
-      // Quereus evaluates deferred CHECKs against the transaction's FINAL row state at COMMIT,
-      // not per-statement. Deleting AttestationChallenge inside the same transaction as the
-      // AssociationPrivate insert made that already-satisfied CHECK fail at commit — the exact
-      // "deferred-CHECK sibling-row visibility" class this project has hit before (quereus #25).
-      //
-      // Consequence: the write and the consumption are two honest, sequential transactions, not
-      // one atomic unit. A crash in the narrow window between them would leave a used-but-not-
-      // yet-deleted challenge — NOT a live replay vector, because a second associate() attempt
-      // for the same (registrantId, deviceKey) is independently rejected by the Association
-      // primary-key collision (D-06 structural — proven in association.spec.ts's "replay-reject"
-      // suite). Single-use is therefore enforced by TWO independent layers (PK collision +
-      // this consumption), not by this delete alone.
-      //
-      // Modeled on removeAttestationChallenge's existing 'vrg'-signed delete ceremony shape,
-      // called with its OWN transaction (no `ownsTransaction: false` — the outer BEGIN/COMMIT
-      // above has already closed).
-      const consumeTid = await allocateTid(ctx.db, 'association')
-      // NOTE: `challengeNonce` (not `nonce`) — avoids the seedSignedMutation reserved-bind
-      // collision (see issueAttestationChallenge's doc comment).
-      const consumeDigestExpr = "select Digest(:tid, :challengeNonce, 'delete') as d"
-      const consumeDigestParams = { tid: consumeTid, challengeNonce: nonce }
-      const consumeNonce = await seedSignedMutation(
-        ctx,
-        challenge.authorityId,
-        'vrg',
-        consumeTid,
-        consumeDigestExpr,
-        consumeDigestParams,
-        this.resolveSign(signatureOrCallback)
       )
-      // D-10 (51-05): the `with context` clause's `now` param is GONE from this table.
-      await ctx.db.exec(
-        `delete from AttestationChallenge
-         with context SigningNonce = :signingNonce, Tid = ${consumeTid}
-         where Nonce = :nonce`,
-        { nonce, signingNonce: consumeNonce }
-      )
+
+      await ctx.db.exec('COMMIT')
+    } catch (innerErr) {
+      await ctx.db.exec('ROLLBACK')
+      throw innerErr
+    }
+
+    // ---- D-11 (51-05): consume the challenge — its OWN transaction, run ONLY after the
+    // Association/AssociationPrivate write above has durably COMMITted. This is NOT folded
+    // into that transaction (a deliberate deviation from the original plan text, which asked
+    // for the delete inside the same BEGIN/COMMIT): AssociationPrivate.ChallengeValid is a
+    // subquery ("deferred") CHECK, and empirically (via TDD — every associate() test failed
+    // with "CHECK constraint failed: ChallengeValid" once the in-transaction delete was added)
+    // Quereus evaluates deferred CHECKs against the transaction's FINAL row state at COMMIT,
+    // not per-statement. Deleting AttestationChallenge inside the same transaction as the
+    // AssociationPrivate insert made that already-satisfied CHECK fail at commit — the exact
+    // "deferred-CHECK sibling-row visibility" class this project has hit before (quereus #25).
+    //
+    // Consequence: the write and the consumption are two honest, sequential transactions, not
+    // one atomic unit. A crash in the narrow window between them would leave a used-but-not-
+    // yet-deleted challenge — NOT a live replay vector, because a second associate() attempt
+    // for the same (registrantId, deviceKey) is independently rejected by the Association
+    // primary-key collision (D-06 structural — proven in association.spec.ts's "replay-reject"
+    // suite). Single-use is therefore enforced by TWO independent layers (PK collision +
+    // this consumption), not by this delete alone.
+    //
+    // Modeled on removeAttestationChallenge's existing 'vrg'-signed delete ceremony shape,
+    // called with its OWN transaction (no `ownsTransaction: false` — the outer BEGIN/COMMIT
+    // above has already closed).
+    const consumeTid = await allocateTid(ctx.db, 'association')
+    // NOTE: `challengeNonce` (not `nonce`) — avoids the seedSignedMutation reserved-bind
+    // collision (see issueAttestationChallenge's doc comment).
+    const consumeDigestExpr = "select Digest(:tid, :challengeNonce, 'delete') as d"
+    const consumeDigestParams = { tid: consumeTid, challengeNonce: nonce }
+    const consumeNonce = await seedSignedMutation(
+      ctx,
+      challenge.authorityId,
+      'vrg',
+      consumeTid,
+      consumeDigestExpr,
+      consumeDigestParams,
+      this.resolveSign(signatureOrCallback)
+    )
+    // D-10 (51-05): the `with context` clause's `now` param is GONE from this table.
+    await ctx.db.exec(
+      `delete from AttestationChallenge
+       with context SigningNonce = :signingNonce, Tid = ${consumeTid}
+       where Nonce = :nonce`,
+      { nonce, signingNonce: consumeNonce }
+    )
     } catch (err) {
       this.rethrow(err, 'associate')
     }
@@ -1249,6 +1401,160 @@ export class AssociationEngine implements IAssociationEngine {
     return { id: answer.requestId, authorityId, registrantId, deviceKey, electionId, status, challengeNonce }
   }
 
+  // ---------- 62-18 Task 2: transition helpers + D-41 synthetic rejection ----------
+
+  /**
+   * 62-18 Task 2 — the leg-1 `'p' -> 'c'` challenge-echo transition, extracted verbatim out of
+   * `processPendingAssociationRequests`'s former inline body (same SQL, same digest tuple, same
+   * `SubmittedAt`/`ReceivedAt` rebinding — the partial-UPDATE trap). Re-reads the row's own
+   * current timestamps rather than trusting a caller-supplied copy, so every caller (LEG 1 here,
+   * and `rejectPendingRequest` below) gets the same rebinding discipline for free.
+   */
+  private async writeChallengeTransition (
+    requestId: string,
+    authorityId: string,
+    challengeNonce: string,
+    signatureOrCallback: SignatureOrCallback
+  ): Promise<void> {
+    const ctx = this.ctx!
+    const rowBefore = await ctx.db
+      .prepare('select SubmittedAt, ReceivedAt from AssociationRequest where Id = :id')
+      .get({ id: requestId })
+    if (!rowBefore) {
+      throw new Error(`writeChallengeTransition: AssociationRequest ${requestId} disappeared before the transition UPDATE`)
+    }
+    const submittedAt = restoreCanonicalDatetime(rowBefore.SubmittedAt as string)
+    const receivedAt = restoreCanonicalDatetime(rowBefore.ReceivedAt as string)
+
+    const tid = await allocateTid(ctx.db, 'association-request')
+    // TransitionValid's challenge-echo clause, field for field: Digest(context.Tid, new.Id, new.Status, new.ChallengeNonce).
+    const digestExpr = 'select Digest(:tid, :requestId, :status, :challengeNonce) as d'
+    const digestParams = { tid, requestId, status: 'c', challengeNonce }
+    const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
+
+    await ctx.db.exec(
+      `update AssociationRequest
+       with context SigningNonce = :signingNonce, Tid = ${tid}
+       set Status = :status, ChallengeNonce = :challengeNonce, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+       where Id = :requestId`,
+      { requestId, status: 'c', challengeNonce, submittedAt, receivedAt, signingNonce }
+    )
+  }
+
+  /**
+   * 62-18 Task 2 — the leg-2 `'c' -> 'a'/'r'` terminal transition, extracted verbatim out of
+   * `processPendingAssociationRequests`'s former inline body (same SQL, digest tuple and
+   * `toDeferredCheckDatetime`/rebinding discipline). Returns the `DecidedAt` it wrote (ISO-Z), so
+   * every caller (LEG 2 here, `rejectPendingRequest` and `completeInterruptedRejections` below)
+   * can publish the matching decision notice with the exact value the row now carries.
+   */
+  private async writeTerminalTransition (
+    requestId: string,
+    authorityId: string,
+    status: 'a' | 'r',
+    rejectionReason: string | null,
+    signatureOrCallback: SignatureOrCallback
+  ): Promise<string> {
+    const ctx = this.ctx!
+    const rowBefore = await ctx.db
+      .prepare('select SubmittedAt, ReceivedAt from AssociationRequest where Id = :id')
+      .get({ id: requestId })
+    if (!rowBefore) {
+      throw new Error(`writeTerminalTransition: AssociationRequest ${requestId} disappeared before the transition UPDATE`)
+    }
+    const submittedAt = restoreCanonicalDatetime(rowBefore.SubmittedAt as string)
+    const receivedAt = restoreCanonicalDatetime(rowBefore.ReceivedAt as string)
+    const tid = await allocateTid(ctx.db, 'association-request')
+    const decidedAt = toIsoZDatetime(Date.now())
+    // `new.DecidedAt` is a datetime column inside TransitionValid's deferred (subquery) clause —
+    // the digest argument MUST use toDeferredCheckDatetime, never the raw ISO-Z value bound into
+    // the stored column below.
+    const decidedAtDeferred = toDeferredCheckDatetime(decidedAt)
+
+    // TransitionValid's decision clause, field for field: Digest(context.Tid, new.Id, new.Status, new.DecidedAt, new.RejectionReason).
+    const digestExpr = 'select Digest(:tid, :requestId, :status, :decidedAtDeferred, :rejectionReason) as d'
+    const digestParams = { tid, requestId, status, decidedAtDeferred, rejectionReason }
+    const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
+
+    await ctx.db.exec(
+      `update AssociationRequest
+       with context SigningNonce = :signingNonce, Tid = ${tid}
+       set Status = :status, DecidedAt = :decidedAt, RejectionReason = :rejectionReason, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
+       where Id = :requestId`,
+      { requestId, status, decidedAt, rejectionReason, submittedAt, receivedAt, signingNonce }
+    )
+
+    return decidedAt
+  }
+
+  /**
+   * 62-18 (D-41) — synthetic `'p' -> 'c' -> 'r'` rejection. `AssociationRequest.TransitionValid`
+   * admits no direct `'p' -> 'r'` transition, so this passes through a `'c'` state using a
+   * SYNTHETIC `ChallengeNonce` (`REASSOCIATION_REJECTION_NONCE_PREFIX + reasonCode + ':' + a
+   * uuid`) instead of a real `AttestationChallenge` nonce: no `AttestationChallenge` row is ever
+   * minted for it, and no `'c'` decision is published for this synthetic leg (a device polling
+   * for its own `'c'` notice must never see one for a request the authority is about to reject).
+   * The real, visible decision is the `'c' -> 'r'` leg that follows, which publishes `'r'` with
+   * `reasonCode`.
+   */
+  private async rejectPendingRequest (
+    row: { id: string; authorityId: string; registrantId: string; deviceKey: string },
+    reasonCode: string,
+    signatureOrCallback: SignatureOrCallback,
+    intake: IAssociationRequestIntake
+  ): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const syntheticNonce = `${REASSOCIATION_REJECTION_NONCE_PREFIX}${reasonCode}:${(globalThis as any).crypto.randomUUID()}`
+    await this.writeChallengeTransition(row.id, row.authorityId, syntheticNonce, signatureOrCallback)
+    const decidedAt = await this.writeTerminalTransition(row.id, row.authorityId, 'r', reasonCode, signatureOrCallback)
+    await intake.publishDecision({ requestId: row.id, status: 'r', reason: reasonCode, decidedAt })
+  }
+
+  /**
+   * 62-18 (D-41) — idempotent sweep for a `'c'` row an interrupted `rejectPendingRequest` call
+   * left behind (the process died between its synthetic `'p' -> 'c'` and the `'c' -> 'r'` that
+   * follows it). Selects this authority's `'c'` rows whose `ChallengeNonce` starts with
+   * `REASSOCIATION_REJECTION_NONCE_PREFIX` — a BOUND `like` pattern, never a reserved bind name —
+   * parses the reason segment back out, and finishes each with the same
+   * `writeTerminalTransition` + `publishDecision` pair `rejectPendingRequest`'s second leg uses.
+   * Per-row isolated: one row's failure here must never block the rest of the sweep or the
+   * caller's own driver loop. Returns the count of rows it completed, for the caller's own
+   * `rejected` tally.
+   */
+  private async completeInterruptedRejections (
+    authorityId: string,
+    signatureOrCallback: SignatureOrCallback,
+    intake: IAssociationRequestIntake
+  ): Promise<number> {
+    const ctx = this.ctx!
+    const likePattern = `${REASSOCIATION_REJECTION_NONCE_PREFIX}%`
+    const rows: Array<{ id: string; challengeNonce: string }> = []
+    for await (const row of ctx.db.eval(
+      "select Id, ChallengeNonce from AssociationRequest where AuthorityId = :rowAuthorityId and Status = 'c' and ChallengeNonce like :likePattern",
+      { rowAuthorityId: authorityId, likePattern }
+    )) {
+      rows.push({ id: asText(row.Id, 'AssociationRequest.Id'), challengeNonce: asText(row.ChallengeNonce, 'AssociationRequest.ChallengeNonce') })
+    }
+
+    let completed = 0
+    for (const row of rows) {
+      try {
+        const withoutPrefix = row.challengeNonce.slice(REASSOCIATION_REJECTION_NONCE_PREFIX.length)
+        const lastColon = withoutPrefix.lastIndexOf(':')
+        const reasonCode = lastColon === -1 ? withoutPrefix : withoutPrefix.slice(0, lastColon)
+        const decidedAt = await this.writeTerminalTransition(row.id, authorityId, 'r', reasonCode, signatureOrCallback)
+        await intake.publishDecision({ requestId: row.id, status: 'r', reason: reasonCode, decidedAt })
+        completed++
+      } catch (err) {
+        console.warn(
+          `AssociationEngine.completeInterruptedRejections: failed to complete requestId=${row.id} — the row stays 'c' for a later sweep`,
+          err instanceof Error ? err.message : String(err)
+        )
+      }
+    }
+    return completed
+  }
+
   /**
    * D-05/D-19 — the automatic authority-side processing driver. Turns the persisted D-02/D-18
    * intake into real records by orchestrating the two UNCHANGED engine methods
@@ -1318,6 +1624,9 @@ export class AssociationEngine implements IAssociationEngine {
     let associated = 0
     let rejected = 0
     try {
+      // ---------------- R0 (62-18, D-41): finish any interrupted synthetic rejection first ----------------
+      rejected += await this.completeInterruptedRejections(authorityId, signatureOrCallback, intake)
+
       // ---------------- LEG 1: pending ('p') rows -> issue challenge, transition to 'c' ----------------
       const pendingRows: Array<{ id: string; registrantId: string; deviceKey: string; electionId?: string }> = []
       for await (const row of ctx.db.eval(
@@ -1333,6 +1642,43 @@ export class AssociationEngine implements IAssociationEngine {
       }
 
       for (const row of pendingRows) {
+        // 62-18 (D-41) — classify BEFORE issueAttestationChallenge, so an unresolved sentinel
+        // row, a not-yet-replicated registrant, or a registrant that already has another device
+        // never makes the batch throw and never mints a challenge.
+        if (row.registrantId === REASSOCIATION_UNRESOLVED_REGISTRANT_ID) {
+          // Task 3's re-association driver (IReassociationEngine.processPendingReassociations)
+          // owns sentinel-registrant rows — this driver never touches them.
+          continue
+        }
+        const registrantStatusRow = await ctx.db
+          .prepare('select Status from Registrant where Id = :registrantId')
+          .get({ registrantId: row.registrantId })
+        if (!registrantStatusRow || asText(registrantStatusRow.Status, 'Registrant.Status') !== 'a') {
+          // The registrant row has not replicated yet (P2P rows can arrive before it does), or is
+          // not active — never batch-fatal, never a rejection.
+          continue
+        }
+        const conflictingAssociationRow = await ctx.db
+          .prepare('select DeviceKey from Association where RegistrantId = :registrantId and DeviceKey <> :deviceKey limit 1')
+          .get({ registrantId: row.registrantId, deviceKey: row.deviceKey })
+        if (conflictingAssociationRow) {
+          try {
+            await this.rejectPendingRequest(
+              { id: row.id, authorityId, registrantId: row.registrantId, deviceKey: row.deviceKey },
+              REGISTRANT_HAS_ACTIVE_DEVICE_REASON,
+              signatureOrCallback,
+              intake
+            )
+            rejected++
+          } catch (conflictErr) {
+            console.warn(
+              `AssociationEngine.processPendingAssociationRequests: D-41 leg-1 conflict rejection failed for requestId=${row.id} — the row is left 'p' for a later sync`,
+              conflictErr instanceof Error ? conflictErr.message : String(conflictErr)
+            )
+          }
+          continue
+        }
+
         // WR-06 (51-REVIEW): per-row isolation for the TRANSITION, mirroring LEG 2's. This
         // method's doc comment promises "one bad answer never stalls the batch (T-51-09-07)",
         // but that only held for LEG 2 — LEG 1 had no per-row try, so a single row throwing
@@ -1355,30 +1701,8 @@ export class AssociationEngine implements IAssociationEngine {
         const challenge = await this.issueAttestationChallenge(row.registrantId, row.deviceKey, signatureOrCallback, row.electionId)
 
         try {
-
-          const rowBefore = await ctx.db
-            .prepare('select SubmittedAt, ReceivedAt from AssociationRequest where Id = :id')
-            .get({ id: row.id })
-          if (!rowBefore) {
-            throw new Error(`processPendingAssociationRequests: AssociationRequest ${row.id} disappeared between the leg-1 select and the transition UPDATE`)
-          }
-          // CRITICAL — partial-UPDATE trap: explicitly rebind BOTH untouched timestamp columns.
-          const submittedAt = restoreCanonicalDatetime(rowBefore.SubmittedAt as string)
-          const receivedAt = restoreCanonicalDatetime(rowBefore.ReceivedAt as string)
-
-          const tid = await allocateTid(ctx.db, 'association-request')
-          // TransitionValid's challenge-echo clause, field for field: Digest(context.Tid, new.Id, new.Status, new.ChallengeNonce).
-          const digestExpr = 'select Digest(:tid, :requestId, :status, :challengeNonce) as d'
-          const digestParams = { tid, requestId: row.id, status: 'c', challengeNonce: challenge.nonce }
-          const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback))
-
-          await ctx.db.exec(
-            `update AssociationRequest
-             with context SigningNonce = :signingNonce, Tid = ${tid}
-             set Status = :status, ChallengeNonce = :challengeNonce, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
-             where Id = :requestId`,
-            { requestId: row.id, status: 'c', challengeNonce: challenge.nonce, submittedAt, receivedAt, signingNonce }
-          )
+          // 62-18 Task 2: same SQL/digest/rebinding as before, now the shared helper.
+          await this.writeChallengeTransition(row.id, authorityId, challenge.nonce, signatureOrCallback)
 
           await intake.publishDecision({ requestId: row.id, status: 'c', challengeNonce: challenge.nonce, decidedAt: toIsoZDatetime(Date.now()) })
           challengesIssued++
@@ -1416,13 +1740,22 @@ export class AssociationEngine implements IAssociationEngine {
       for (const doc of stagedAnswers) {
         const rowC = await ctx.db
           .prepare(
-            "select Id, ChallengeNonce, SubmittedAt, ReceivedAt from AssociationRequest where Id = :id and AuthorityId = :rowAuthorityId and Status = 'c'"
+            "select Id, RegistrantId, ChallengeNonce, SubmittedAt, ReceivedAt from AssociationRequest where Id = :id and AuthorityId = :rowAuthorityId and Status = 'c'"
           )
           .get({ id: doc.requestId, rowAuthorityId: authorityId })
         if (!rowC) {
           // Not one of THIS authority's still-'c' rows (a different authority's request, or a row
           // this method already resolved on a prior run) — this batch is scoped to `authorityId`,
           // and idempotency relies on this skip.
+          continue
+        }
+
+        const rowCRegistrantId = asText(rowC.RegistrantId, 'AssociationRequest.RegistrantId')
+        const rowCChallengeNonce = rowC.ChallengeNonce == null ? '' : asText(rowC.ChallengeNonce, 'AssociationRequest.ChallengeNonce')
+        if (rowCRegistrantId === REASSOCIATION_UNRESOLVED_REGISTRANT_ID || rowCChallengeNonce.startsWith(REASSOCIATION_REJECTION_NONCE_PREFIX)) {
+          // 62-18 (D-41): Task 3's re-association driver owns sentinel-registrant rows; a
+          // synthetic rejection in progress is owned by `completeInterruptedRejections` above —
+          // this LEG never calls `associate()` for either.
           continue
         }
 
@@ -1465,6 +1798,17 @@ export class AssociationEngine implements IAssociationEngine {
         }
 
         if (validated) {
+          // 62-18 (D-41) — LEG 2 race guard: two first-association requests for the same
+          // registrant can both reach 'c' before either completes. Once the first is associated,
+          // decide the SECOND 'r' here rather than letting it collide inside associate()'s own
+          // commit (whose only recovery path, the alreadyAssociated re-read below, would wrongly
+          // read this as "my own write landed" and decide 'a').
+          const raceConflictRow = await ctx.db
+            .prepare('select DeviceKey from Association where RegistrantId = :registrantId and DeviceKey <> :deviceKey limit 1')
+            .get({ registrantId: validated.registrantId, deviceKey: validated.deviceKey })
+          if (raceConflictRow) {
+            rejectionReason = REGISTRANT_HAS_ACTIVE_DEVICE_REASON
+          } else {
           // T-51-09-02: registrantId/deviceKey come from the PERSISTED ROW (via
           // validateStagedAttestationAnswer's own row load), never the wire — only nonce,
           // attestation and deviceHash come from the staged document.
@@ -1522,32 +1866,14 @@ export class AssociationEngine implements IAssociationEngine {
               )
             }
           }
+          }
         }
 
-        const submittedAt = restoreCanonicalDatetime(rowC.SubmittedAt as string)
-        const receivedAt = restoreCanonicalDatetime(rowC.ReceivedAt as string)
-        const tid2 = await allocateTid(ctx.db, 'association-request')
-        const decidedAt = toIsoZDatetime(Date.now())
-        // `new.DecidedAt` is a datetime column inside TransitionValid's deferred (subquery)
-        // clause — the digest argument MUST use toDeferredCheckDatetime, never the raw ISO-Z value
-        // bound into the stored column below.
-        const decidedAtDeferred = toDeferredCheckDatetime(decidedAt)
         const finalStatus = rejectionReason === undefined ? 'a' : 'r'
         const rejectionReasonBind = rejectionReason ?? null
 
-        // TransitionValid's decision clause, field for field: Digest(context.Tid, new.Id,
-        // new.Status, new.DecidedAt, new.RejectionReason).
-        const digestExpr2 = 'select Digest(:tid, :requestId, :status, :decidedAtDeferred, :rejectionReason) as d'
-        const digestParams2 = { tid: tid2, requestId: doc.requestId, status: finalStatus, decidedAtDeferred, rejectionReason: rejectionReasonBind }
-        const signingNonce2 = await seedSignedMutation(ctx, authorityId, 'vrg', tid2, digestExpr2, digestParams2, this.resolveSign(signatureOrCallback))
-
-        await ctx.db.exec(
-          `update AssociationRequest
-           with context SigningNonce = :signingNonce, Tid = ${tid2}
-           set Status = :status, DecidedAt = :decidedAt, RejectionReason = :rejectionReason, SubmittedAt = :submittedAt, ReceivedAt = :receivedAt
-           where Id = :requestId`,
-          { requestId: doc.requestId, status: finalStatus, decidedAt, rejectionReason: rejectionReasonBind, submittedAt, receivedAt, signingNonce: signingNonce2 }
-        )
+        // 62-18 Task 2: same SQL/digest/rebinding as before, now the shared helper.
+        const decidedAt = await this.writeTerminalTransition(doc.requestId, authorityId, finalStatus, rejectionReasonBind, signatureOrCallback)
 
         if (finalStatus === 'a') {
           await intake.publishDecision({ requestId: doc.requestId, status: 'a', decidedAt })
