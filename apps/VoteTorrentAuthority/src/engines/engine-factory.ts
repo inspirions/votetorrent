@@ -43,6 +43,7 @@ import {
 	IntakeEngine,
 	P2pRegistrationTransport,
 	P2pAssociationTransport,
+	KeyholderDkgEngine,
 } from '@votetorrent/vote-engine/rn';
 import type { DbFactory, EngineContext, ElectionSubject, StagingOpener, StagingDecisionSigner } from '@votetorrent/vote-engine/rn';
 import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
@@ -50,6 +51,7 @@ import { rnDbFactory, createStrandDbFactory } from './rn-db-factory';
 import type { StrandHost } from './rn-db-factory';
 import { createStrandPort } from './strand-port-adapter';
 import type { StrandSqlDatabase } from './strand-port-adapter';
+import { resolveKeyholderKeyVault } from './keyholder-vault';
 import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated';
 import { PINNED_HARDWARE_ROOTS_DER } from './attestation-roots.generated';
 import { REVOKED_ATTESTATION_SERIALS } from './attestation-status.generated';
@@ -526,10 +528,10 @@ export class EngineFactory {
 	/**
 	 * Build a fresh engine instance for the given name.
 	 *
-	 * Covers all 14 engine names this switch handles:
+	 * Covers all 16 engine names this switch handles:
 	 *   network, defaultUser, user, authority,
-	 *   elections, signing, registration, authorityConfig, election, keysTasksEngine,
-	 *   signatureTasksEngine, onboardingTasksEngine, invitations, association.
+	 *   elections, signing, registration, authorityConfig, intake, election, keysTasksEngine,
+	 *   keyholderDkg, signatureTasksEngine, onboardingTasksEngine, invitations, association.
 	 *
 	 * For sibling engines that require a live EngineContext, call
 	 * requireEstablishedCtx() which throws if no ctx is yet established
@@ -648,9 +650,22 @@ export class EngineFactory {
 			}
 
 			case 'keysTasksEngine': {
+				// 62-26 (62-20 assignment): without the keyholder vault, 62-20's release-task
+				// seeding finds no local keyholder (its `vault.hasSecret` check on
+				// `keyholderDkgShareAlias` never matches) and no release task ever appears —
+				// fail-closed, not a bug. `resolveKeyholderKeyVault()` is the SAME auth-required
+				// vault `keyholderDkg` below uses; `hasSecret` itself never prompts.
 				const ctx = this.requireEstablishedCtx();
 				const ref = { hash: this.currentNetworkHash! } as NetworkReference;
-				return new KeysTasksEngine(ref, ctx);
+				return new KeysTasksEngine(ref, ctx, { vault: resolveKeyholderKeyVault() });
+			}
+
+			case 'keyholderDkg': {
+				// 62-26 (D-16/D-19): the keyholder DKG round driver, over the SAME auth-required
+				// keyholder vault as 'keysTasksEngine' above — every round secret and share this
+				// engine ever touches lives only in that vault.
+				const ctx = this.requireEstablishedCtx();
+				return new KeyholderDkgEngine(ctx, { vault: resolveKeyholderKeyVault() });
 			}
 
 			case 'signatureTasksEngine': {
