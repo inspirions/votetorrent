@@ -22,12 +22,24 @@ import type {RegistrationDraft} from '../../../providers/RegistrationDraftProvid
 import '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 const mockNavigate = jest.fn();
+let latestFocusCallback: (() => void) | null = null;
 
 jest.mock('@react-navigation/native', () => {
 	const actual = jest.requireActual('@react-navigation/native');
 	return {
 		...actual,
 		useNavigation: () => ({navigate: mockNavigate}),
+		// Plan 28 (D-45): the real `useFocusEffect` needs a NavigationContainer ancestor this test
+		// never mounts (mirrors `ConfirmationScreen.test.tsx`'s own shim) — runs the callback on
+		// mount/dependency-change and exposes it so a test can re-fire a "focus".
+		useFocusEffect: (cb: () => void) => {
+			latestFocusCallback = cb;
+			// eslint-disable-next-line @typescript-eslint/no-var-requires, react-hooks/rules-of-hooks
+			require('react').useEffect(() => {
+				const cleanup = cb();
+				return typeof cleanup === 'function' ? cleanup : undefined;
+			}, [cb]);
+		},
 	};
 });
 
@@ -49,6 +61,21 @@ jest.mock('../../../providers/RegistrationDraftProvider', () => {
 	};
 });
 
+// Plan 28 (D-45): mock resolveRegistrationCodeAvailability only — a pure stand-in, never the real
+// engine reads (this test drives no real network/engine tree).
+const mockResolveRegistrationCodeAvailability = jest.fn(
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	async (..._args: unknown[]): Promise<any> => ({kind: 'unavailable'}),
+);
+jest.mock('../../../engines/continuity', () => ({
+	resolveRegistrationCodeAvailability: (...args: unknown[]) => mockResolveRegistrationCodeAvailability(...args),
+}));
+jest.mock('../../../engines/attestation-producer', () => ({
+	resolveAttestationProducer: () => ({
+		provisionDeviceKey: async () => ({publicKey: 'P256_PUB'}),
+	}),
+}));
+
 import {useVoterApp} from '../../../providers/VoterAppProvider';
 import {useRegistrationDraft} from '../../../providers/RegistrationDraftProvider';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -56,10 +83,14 @@ const RegistrationScreen = require('../RegistrationScreen').default;
 
 const mockUseVotingApp = useVoterApp as jest.Mock;
 const mockUseRegistrationDraft = useRegistrationDraft as jest.Mock;
+const mockGetEngine = jest.fn(async () => {
+	throw new Error('getEngine is not available in this test — mock resolveRegistrationCodeAvailability instead');
+});
 
 function setProviderState(overrides: {draft?: RegistrationDraft} = {}) {
 	mockUseVotingApp.mockReturnValue({
 		isInitialized: true,
+		getEngine: mockGetEngine,
 	});
 	mockUseRegistrationDraft.mockReturnValue({
 		draft: overrides.draft ?? EMPTY_DRAFT,
@@ -92,6 +123,9 @@ function flipToRegistered(tr: renderer.ReactTestRenderer) {
 describe('RegistrationScreen (REG-01/REG-05)', () => {
 	beforeEach(() => {
 		mockNavigate.mockClear();
+		mockResolveRegistrationCodeAvailability.mockClear();
+		mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind: 'unavailable'}));
+		latestFocusCallback = null;
 	});
 
 	it('not-registered: Register-now CTA navigates to DeviceAttestation', () => {
@@ -136,5 +170,131 @@ describe('RegistrationScreen (REG-01/REG-05)', () => {
 		const text = JSON.stringify(tr.toJSON());
 		expect(text).not.toContain('Open Device Attestation (dev)');
 		expect(text).not.toContain('Open Confirmation (dev)');
+	});
+});
+
+describe('RegistrationScreen — registration code re-show / entry links (D-40/D-45)', () => {
+	beforeEach(() => {
+		mockNavigate.mockClear();
+		mockResolveRegistrationCodeAvailability.mockClear();
+		latestFocusCallback = null;
+	});
+
+	async function flush(times = 10) {
+		for (let i = 0; i < times; i++) {
+			await Promise.resolve();
+		}
+	}
+
+	it("'available' renders code.showAgainLink; pressing it re-resolves and reveals the card with the fresh code", async () => {
+		mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind: 'available', code: 'ABCDE12345'}));
+		setProviderState();
+		let tr!: renderer.ReactTestRenderer;
+		await renderer.act(async () => {
+			tr = renderer.create(
+				<ThemeProvider value={lightTheme}>
+					<RegistrationScreen />
+				</ThemeProvider>,
+			);
+			await flush();
+		});
+
+		const link = tr.root.findByProps({testID: 'registration-code-show-again-link'});
+		const flatStyle = Object.assign({}, ...[].concat(link.props.style));
+		expect(flatStyle.minHeight).toBeGreaterThanOrEqual(44);
+
+		const callsBefore = mockResolveRegistrationCodeAvailability.mock.calls.length;
+		mockResolveRegistrationCodeAvailability.mockImplementationOnce(async () => ({kind: 'available', code: 'ABCDEFGHJK'}));
+		await renderer.act(async () => {
+			link.props.onPress();
+			await flush();
+		});
+		expect(mockResolveRegistrationCodeAvailability.mock.calls.length).toBeGreaterThan(callsBefore);
+
+		const value = tr.root.findByProps({testID: 'registration-code-value'});
+		expect(value.props.children).toBe('ABCDE-FGHJK');
+	});
+
+	it("'available' then a second resolve returning 'unavailable' shows the card's unavailable state", async () => {
+		mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind: 'available', code: 'ABCDE12345'}));
+		setProviderState();
+		let tr!: renderer.ReactTestRenderer;
+		await renderer.act(async () => {
+			tr = renderer.create(
+				<ThemeProvider value={lightTheme}>
+					<RegistrationScreen />
+				</ThemeProvider>,
+			);
+			await flush();
+		});
+
+		mockResolveRegistrationCodeAvailability.mockImplementationOnce(async () => ({kind: 'unavailable'}));
+		const link = tr.root.findByProps({testID: 'registration-code-show-again-link'});
+		await renderer.act(async () => {
+			link.props.onPress();
+			await flush();
+		});
+
+		expect(tr.root.findAllByProps({testID: 'registration-code-value'})).toHaveLength(0);
+	});
+
+	it("'not-registered' renders newDevice.entryLink, whose press navigates to ContinueOnAnotherDevice", async () => {
+		mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind: 'not-registered'}));
+		setProviderState();
+		let tr!: renderer.ReactTestRenderer;
+		await renderer.act(async () => {
+			tr = renderer.create(
+				<ThemeProvider value={lightTheme}>
+					<RegistrationScreen />
+				</ThemeProvider>,
+			);
+			await flush();
+		});
+
+		const link = tr.root.findByProps({testID: 'continue-device-entry-link'});
+		renderer.act(() => {
+			link.props.onPress();
+		});
+		expect(mockNavigate).toHaveBeenCalledWith('ContinueOnAnotherDevice');
+	});
+
+	it.each(['not-sent', 'not-holder'])(
+		"'%s' renders neither link but renders the code.notAvailableOnDevice notice, with no numberOfLines",
+		async kind => {
+			mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind}));
+			setProviderState();
+			let tr!: renderer.ReactTestRenderer;
+			await renderer.act(async () => {
+				tr = renderer.create(
+					<ThemeProvider value={lightTheme}>
+						<RegistrationScreen />
+					</ThemeProvider>,
+				);
+				await flush();
+			});
+
+			expect(tr.root.findAllByProps({testID: 'registration-code-show-again-link'})).toHaveLength(0);
+			expect(tr.root.findAllByProps({testID: 'continue-device-entry-link'})).toHaveLength(0);
+			const notice = tr.root.findByProps({testID: 'registration-code-not-available'});
+			expect(notice.props.numberOfLines).toBeUndefined();
+		},
+	);
+
+	it("'unavailable' renders neither link nor the notAvailableOnDevice notice", async () => {
+		mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind: 'unavailable'}));
+		setProviderState();
+		let tr!: renderer.ReactTestRenderer;
+		await renderer.act(async () => {
+			tr = renderer.create(
+				<ThemeProvider value={lightTheme}>
+					<RegistrationScreen />
+				</ThemeProvider>,
+			);
+			await flush();
+		});
+
+		expect(tr.root.findAllByProps({testID: 'registration-code-show-again-link'})).toHaveLength(0);
+		expect(tr.root.findAllByProps({testID: 'continue-device-entry-link'})).toHaveLength(0);
+		expect(tr.root.findAllByProps({testID: 'registration-code-not-available'})).toHaveLength(0);
 	});
 });

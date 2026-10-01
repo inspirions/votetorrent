@@ -165,6 +165,9 @@ const TIMELINE_ROUTE_NAMES = new Set([
 	'RegisterAddressParty',
 	'RegisterConfirm',
 	'Confirmation',
+	// Phase 62 Plan 28 (D-14 route-closure gate) — RegistrationScreen's newDevice.entryLink
+	// navigates here; registered on both stacks in navigation/index.tsx.
+	'ContinueOnAnotherDevice',
 	'Keyholders',
 ]);
 

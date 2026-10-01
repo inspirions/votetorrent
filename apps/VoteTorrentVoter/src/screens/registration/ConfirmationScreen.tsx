@@ -51,10 +51,18 @@
  * (WR-02); `'recoverable-transient'` renders a generic retry; `'terminal'` (release-only) renders a
  * terminal message with no retry. Classified copy is generic by design — raw reject codes / internal
  * error messages never reach the UI.
+ *
+ * Plan 28 (D-45) addition: on the P2P route only, step (1) also mints the registration code
+ * (`mintRegistrationCodeForSubmit`, the registering device's own identity-key signer — never a raw
+ * key) and passes it as `extras.registrationCode` on the registration-request submit. The REST
+ * bridge route cannot carry extras at all (62-15's own constraint), so the mint and the 4th
+ * argument are both skipped there. Once pending, a re-focus-driven read offers the
+ * `RegistrationConfirmationCodeCard` appended below the existing pending content whenever this
+ * device both staged the registration over P2P and holds the derived code's matching identity key.
  */
-import React, {useRef, useState} from 'react';
+import React, {useCallback, useRef, useState} from 'react';
 import {Linking, Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {useNavigation, useTheme} from '@react-navigation/native';
+import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
@@ -75,7 +83,10 @@ import {getOrCreateDeviceUser} from '../../engines/device-user';
 import {createDeviceSigner} from '../../engines/device-signer';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
 import {classifyAttestationFailure, type AttestationFailureClass} from '../../engines/attestation-failure';
+import {mintRegistrationCodeForSubmit, resolveRegistrationCodeAvailability} from '../../engines/continuity';
+import type {RegistrationCodeAvailability} from '../../engines/continuity';
 import {resolveVoterRequestTransports} from './attach-voter-request-transport';
+import {RegistrationConfirmationCodeCard} from './RegistrationConfirmationCodeCard';
 import {globalStyles} from '../../theme/styles';
 import type {RegistrationStackParamList} from '../../navigation/types';
 
@@ -133,10 +144,14 @@ export default function ConfirmationScreen() {
 	const navigation = useNavigation<ConfirmationNavigationProp>();
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('registration');
+	const {t: tContinuity} = useTranslation('continuity');
 
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const [failureClass, setFailureClass] = useState<AttestationFailureClass | null>(null);
 	const [isPending, setIsPending] = useState(false);
+	// Plan 28 (D-45): the re-showable code card's own availability read — re-resolved on every
+	// focus while pending, never cached beyond this render (59 D-23).
+	const [codeAvailability, setCodeAvailability] = useState<RegistrationCodeAvailability | null>(null);
 
 	// WR-02: one registrantId (and, per this rewrite, one registration-request id and one
 	// association-request id) per registration attempt (this mounted ceremony) — minted once and
@@ -150,6 +165,9 @@ export default function ConfirmationScreen() {
 	// instead be refused forever as 'duplicate-request-id'.
 	const registrationRequestInitRef = useRef<RegistrationRequestInit | null>(null);
 	const associationRequestInitRef = useRef<AssociationRequestInit | null>(null);
+	// Plan 28 (D-45): minted once per attempt, 'peer' route only — reused byte-identical on retry,
+	// same idempotency rationale as the two init refs above.
+	const registrationCodeRef = useRef<string | null>(null);
 
 	async function onConfirm() {
 		if (isSubmitting) {
@@ -249,7 +267,21 @@ export default function ConfirmationScreen() {
 				};
 				registrationRequestInitRef.current = registrationRequestInit;
 			}
-			await transports.registrationTransport.submitRequest(registrationRequestInit, deviceUserKey, deviceSign);
+			// D-45: mint the registration code on the P2P route ONLY — the REST bridge cannot carry
+			// `extras` at all (62-15's own constraint), so a registration submitted over it never
+			// gets a code (the identity fallback is the only later re-association path for it).
+			// Minted once per attempt, from the SAME identity-key signer that signs the request
+			// itself — never a raw key.
+			if (transports.registrationRoute === 'peer' && registrationCodeRef.current === null) {
+				registrationCodeRef.current = await mintRegistrationCodeForSubmit(getEngine, registrantId, deviceSign);
+			}
+			if (transports.registrationRoute === 'peer') {
+				await transports.registrationTransport.submitRequest(registrationRequestInit, deviceUserKey, deviceSign, {
+					registrationCode: registrationCodeRef.current as string,
+				});
+			} else {
+				await transports.registrationTransport.submitRequest(registrationRequestInit, deviceUserKey, deviceSign);
+			}
 
 			// (2) Submit the self-signed association-request document, bound to the P-256 device
 			// key. The requester key MUST equal the device key (the authority's engine enforces this
@@ -351,6 +383,26 @@ export default function ConfirmationScreen() {
 		}
 	}
 
+	// Plan 28 (D-45): re-resolved on every focus while pending — never cached beyond this render
+	// (59 D-23). Inert before the ceremony reaches the pending state.
+	useFocusEffect(
+		useCallback(() => {
+			if (!isPending) return;
+			let cancelled = false;
+			(async () => {
+				const result = await resolveRegistrationCodeAvailability({
+					getEngine,
+					provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+				});
+				if (!cancelled) setCodeAvailability(result);
+			})();
+			return () => {
+				cancelled = true;
+			};
+			// eslint-disable-next-line react-hooks/exhaustive-deps
+		}, [isPending]),
+	);
+
 	const errorCopy =
 		failureClass === 'recoverable-action'
 			? t('confirmation.error.biometricNotEnrolled')
@@ -407,21 +459,43 @@ export default function ConfirmationScreen() {
 				{t('confirmation.caption')}
 			</Text>
 			{isPending ? (
-				<Text
-					testID="confirmation-pending"
-					style={[
-						styles.error,
-						{
-							color: colors.text,
-							fontFamily: fonts.regular.fontFamily,
-							fontWeight: fonts.regular.fontWeight,
-							fontSize: typeScale.body.fontSize,
-							lineHeight: typeScale.body.lineHeight,
-						},
-					]}>
-					Your registration has been submitted. We'll let you know once the authority confirms
-					your device.
-				</Text>
+				<>
+					<Text
+						testID="confirmation-pending"
+						style={[
+							styles.error,
+							{
+								color: colors.text,
+								fontFamily: fonts.regular.fontFamily,
+								fontWeight: fonts.regular.fontWeight,
+								fontSize: typeScale.body.fontSize,
+								lineHeight: typeScale.body.lineHeight,
+							},
+						]}>
+						Your registration has been submitted. We'll let you know once the authority confirms
+						your device.
+					</Text>
+					{/* UI-SPEC Screen Composition Reference: appended, never replacing the pending
+					    content above (D-45). */}
+					{codeAvailability?.kind === 'available' ? (
+						<RegistrationConfirmationCodeCard state={{kind: 'code', code: codeAvailability.code}} />
+					) : codeAvailability?.kind === 'not-sent' || codeAvailability?.kind === 'not-holder' ? (
+						<Text
+							testID="confirmation-code-not-available"
+							style={[
+								styles.body,
+								{
+									color: colors.textSecondary,
+									fontFamily: fonts.regular.fontFamily,
+									fontWeight: fonts.regular.fontWeight,
+									fontSize: typeScale.body.fontSize,
+									lineHeight: typeScale.body.lineHeight,
+								},
+							]}>
+							{tContinuity('code.notAvailableOnDevice')}
+						</Text>
+					) : null}
+				</>
 			) : (
 				<>
 					{errorCopy ? (
