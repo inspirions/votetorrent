@@ -900,9 +900,6 @@ const resources = {
 			bulkImportSyncScreenTitle: 'Bulk Import / Sync',
 			bulkImportSyncFilesystemHeading: 'Filesystem',
 			bulkImportSyncRestHeading: 'Webhook / REST',
-			bulkImportSyncP2pHeading: 'Peer-to-Peer (Experimental)',
-			bulkImportSyncP2pBody:
-				'This sync method is still under development and has not been verified to work reliably. Use Filesystem or REST sync for dependable results.',
 			bulkImportSyncNeverSyncedBody: 'Not synced yet',
 			bulkImportSyncSyncedBody: 'Sync completed.',
 			bulkImportSyncErrorBody:
@@ -914,7 +911,6 @@ const resources = {
 			bulkImportSyncPendingCountLabel: '{{count}} pending review',
 			bulkImportSyncErrorCountLabel: '{{count}} errors',
 			bulkImportSyncNowButton: 'Sync Now',
-			bulkImportSyncP2pTryButton: 'Try Peer Sync (Experimental)',
 			bulkImportSyncErrorsSectionTitle: 'Sync Errors',
 			// 62-UI-SPEC Surface 1 — peerSyncCard* group (D-31). Consumer: 62-21.
 			peerSyncCardHeading: 'Peer-to-Peer (Unverified on Devices)',
@@ -1925,9 +1921,6 @@ const resources = {
 			bulkImportSyncScreenTitle: 'Importación Masiva / Sincronizar',
 			bulkImportSyncFilesystemHeading: 'Sistema de Archivos',
 			bulkImportSyncRestHeading: 'Webhook / REST',
-			bulkImportSyncP2pHeading: 'Entre Pares (Experimental)',
-			bulkImportSyncP2pBody:
-				'Este método de sincronización aún está en desarrollo y no se ha verificado que funcione de forma confiable. Usa la sincronización por Sistema de Archivos o REST para resultados confiables.',
 			bulkImportSyncNeverSyncedBody: 'Aún no sincronizado',
 			bulkImportSyncSyncedBody: 'Sincronización completada.',
 			bulkImportSyncErrorBody:
@@ -1937,7 +1930,6 @@ const resources = {
 			bulkImportSyncPendingCountLabel: '{{count}} pendientes de revisión',
 			bulkImportSyncErrorCountLabel: '{{count}} errores',
 			bulkImportSyncNowButton: 'Sincronizar Ahora',
-			bulkImportSyncP2pTryButton: 'Probar Sincronización P2P (Experimental)',
 			bulkImportSyncErrorsSectionTitle: 'Errores de Sincronización',
 			// 62-UI-SPEC Surface 1 — peerSyncCard* group (D-31). Consumer: 62-21.
 			peerSyncCardHeading: 'Entre Pares (No Verificado en Dispositivos)',
