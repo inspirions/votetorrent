@@ -73,6 +73,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 
 	private val keyAttestationHelper by lazy { KeyAttestationHelper(reactApplicationContext) }
 	private val playIntegrityHelper by lazy { PlayIntegrityHelper(reactApplicationContext) }
+	private val secretWrapHelper by lazy { SecretWrapHelper(reactApplicationContext) }
 
 	override fun getName(): String {
 		return NAME
@@ -318,6 +319,119 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 				// only the independent Play Integrity leg failed (network/timeout/quota).
 				promise.reject("PLAY_INTEGRITY_ERROR", e)
 			},
+		)
+	}
+
+	/**
+	 * D-42 (Phase 62 plan 08): generic alias-keyed AES-256-GCM secret-at-rest wrap, distinct from
+	 * every P-256 signing-key method above. Reject codes this pair adds to the module's taxonomy:
+	 * `INVALID_ARGUMENT`, `INVALID_ENCODING`, `NO_WRAP_KEY`, `WRAP_KEY_POLICY_MISMATCH`,
+	 * `UNWRAP_TAG_MISMATCH`, `KEY_INVALIDATED`, `WRAP_FAILED`, `UNWRAP_FAILED` — plus the existing
+	 * `NO_ACTIVITY`/`CANCELED`/`NO_BIOMETRICS_ENROLLED`/`LOCKOUT`/`LOCKOUT_PERMANENT`/
+	 * `BIOMETRIC_ERROR` classes, reused verbatim when `requireAuth` is true.
+	 */
+	override fun wrapSecret(
+		keyAlias: String,
+		plaintextBase64: String,
+		aadBase64: String,
+		requireAuth: Boolean,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		promise: Promise,
+	) {
+		val plaintext: ByteArray
+		val aad: ByteArray
+		try {
+			plaintext = Base64.decode(plaintextBase64, Base64.NO_WRAP)
+			aad = Base64.decode(aadBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_ENCODING", e)
+			return
+		}
+
+		val activity = if (requireAuth) {
+			val a = currentActivity as? FragmentActivity
+			if (a == null) {
+				promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
+				return
+			}
+			a
+		} else {
+			null
+		}
+
+		secretWrapHelper.wrap(
+			alias = keyAlias,
+			plaintext = plaintext,
+			aad = aad,
+			requireAuth = requireAuth,
+			activity = activity,
+			promptTitle = promptTitle,
+			promptSubtitle = promptSubtitle,
+			promptNegativeButton = promptNegativeButton,
+			onResult = { ciphertext, iv, securityLevel ->
+				promise.resolve(Arguments.createMap().apply {
+					putString("ciphertextBase64", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+					putString("ivBase64", Base64.encodeToString(iv, Base64.NO_WRAP))
+					putString("keyAlias", keyAlias)
+					putString("securityLevel", securityLevel)
+				})
+			},
+			onError = { code, throwable -> promise.reject(code, throwable) },
+		)
+	}
+
+	override fun unwrapSecret(
+		keyAlias: String,
+		ciphertextBase64: String,
+		ivBase64: String,
+		aadBase64: String,
+		requireAuth: Boolean,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		promise: Promise,
+	) {
+		val ciphertext: ByteArray
+		val iv: ByteArray
+		val aad: ByteArray
+		try {
+			ciphertext = Base64.decode(ciphertextBase64, Base64.NO_WRAP)
+			iv = Base64.decode(ivBase64, Base64.NO_WRAP)
+			aad = Base64.decode(aadBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_ENCODING", e)
+			return
+		}
+
+		val activity = if (requireAuth) {
+			val a = currentActivity as? FragmentActivity
+			if (a == null) {
+				promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
+				return
+			}
+			a
+		} else {
+			null
+		}
+
+		secretWrapHelper.unwrap(
+			alias = keyAlias,
+			ciphertext = ciphertext,
+			iv = iv,
+			aad = aad,
+			requireAuth = requireAuth,
+			activity = activity,
+			promptTitle = promptTitle,
+			promptSubtitle = promptSubtitle,
+			promptNegativeButton = promptNegativeButton,
+			onResult = { plaintext ->
+				promise.resolve(Arguments.createMap().apply {
+					putString("plaintextBase64", Base64.encodeToString(plaintext, Base64.NO_WRAP))
+				})
+			},
+			onError = { code, throwable -> promise.reject(code, throwable) },
 		)
 	}
 

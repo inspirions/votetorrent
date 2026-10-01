@@ -479,4 +479,239 @@ class AttestationNativeModule: NSObject {
       reject("KEY_ERROR", error.localizedDescription, error)
     }
   }
+
+  // MARK: - Secret wrap (D-42)
+  //
+  // Generic, alias-keyed AES-256-GCM secret-at-rest wrap — distinct from every P-256 key above.
+  // The wrap key is a Keychain-protected AES-256 key, NOT a Secure Enclave key: the Secure
+  // Enclave holds only EC P-256 keys (there is no `kSecAttrKeyTypeAES`). Used through CryptoKit.
+  // Unproven on device — D-23 proof debt; a clean typecheck is not working Keychain behaviour.
+
+  private static let secretWrapService = "org.votetorrent.secretwrap"
+  private let secretWrapQueue = DispatchQueue(label: "org.votetorrent.secretwrap")
+  private static let wrapKeyAliasPattern = try! NSRegularExpression(pattern: "^VOTETORRENT_[A-Z0-9_]+_WRAP_KEY_V[0-9]+$")
+
+  private func isValidWrapKeyAlias(_ alias: String) -> Bool {
+    let range = NSRange(alias.startIndex..<alias.endIndex, in: alias)
+    return Self.wrapKeyAliasPattern.firstMatch(in: alias, range: range) != nil
+  }
+
+  private enum SecretWrapNativeError: Error {
+    case code(String, String)
+  }
+
+  /// Reads the stored policy marker ("auth=1"/"auth=0") for [alias] WITHOUT prompting —
+  /// `interactionNotAllowed = true` mirrors `probeKeyLiveness`'s no-UI probe above. Returns nil if
+  /// no item exists yet.
+  private func readWrapKeyPolicyMarker(alias: String) -> String? {
+    let context = LAContext()
+    context.interactionNotAllowed = true
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: Self.secretWrapService,
+      kSecAttrAccount as String: alias,
+      kSecReturnAttributes as String: true,
+      kSecUseAuthenticationContext as String: context
+    ]
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+          let attrs = item as? [String: Any],
+          let label = attrs[kSecAttrLabel as String] as? String else {
+      return nil
+    }
+    return label
+  }
+
+  /// Get-or-create the wrap key under [alias], keyed by `service` + `kSecAttrAccount == alias`.
+  /// NEVER updates or overwrites an existing item — a policy mismatch is rejected, never
+  /// reconciled (T-62-08-11). Returns the raw 32-byte AES key.
+  private func getOrCreateWrapKey(alias: String, requireAuth: Bool) throws -> Data {
+    guard isValidWrapKeyAlias(alias) else {
+      throw SecretWrapNativeError.code("INVALID_ARGUMENT", "invalid wrap key alias: \(alias)")
+    }
+
+    let wantedMarker = requireAuth ? "auth=1" : "auth=0"
+    if let existingMarker = readWrapKeyPolicyMarker(alias: alias) {
+      if existingMarker != wantedMarker {
+        throw SecretWrapNativeError.code(
+          "WRAP_KEY_POLICY_MISMATCH",
+          "alias \(alias) was created with \(existingMarker), but this call requested \(wantedMarker)"
+        )
+      }
+    } else {
+      var randomBytes = [UInt8](repeating: 0, count: 32)
+      guard SecRandomCopyBytes(kSecRandomDefault, 32, &randomBytes) == errSecSuccess else {
+        throw SecretWrapNativeError.code("WRAP_FAILED", "SecRandomCopyBytes failed")
+      }
+      let keyData = Data(randomBytes)
+
+      var addQuery: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: Self.secretWrapService,
+        kSecAttrAccount as String: alias,
+        kSecAttrLabel as String: wantedMarker,
+        kSecAttrSynchronizable as String: false,
+        kSecValueData as String: keyData
+      ]
+      if requireAuth {
+        var accessError: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+          kCFAllocatorDefault,
+          kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+          .biometryCurrentSet,
+          &accessError
+        ) else {
+          throw accessError!.takeRetainedValue() as Error
+        }
+        addQuery[kSecAttrAccessControl as String] = access
+      } else {
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+      }
+
+      let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+      // A concurrent create lost the race — re-read rather than treat as a failure. NEVER update
+      // or overwrite an existing item (T-62-08-03).
+      if addStatus != errSecSuccess && addStatus != errSecDuplicateItem {
+        throw SecretWrapNativeError.code("WRAP_FAILED", "SecItemAdd failed with OSStatus \(addStatus)")
+      }
+    }
+
+    var readQuery: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: Self.secretWrapService,
+      kSecAttrAccount as String: alias,
+      kSecReturnData as String: true
+    ]
+    if requireAuth {
+      let context = LAContext()
+      // promptSubtitle carries the localizedReason — iOS has no separate title/subtitle/negative
+      // button surface for a Keychain item read the way BiometricPrompt does.
+      context.localizedReason = ""
+      readQuery[kSecUseAuthenticationContext as String] = context
+    }
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(readQuery as CFDictionary, &item)
+    guard status == errSecSuccess, let data = item as? Data else {
+      if status == errSecItemNotFound {
+        throw SecretWrapNativeError.code("NO_WRAP_KEY", "no wrap key under alias \(alias)")
+      }
+      throw mapOSStatusOrLAError(status)
+    }
+    return data
+  }
+
+  private func mapOSStatusOrLAError(_ status: OSStatus) -> SecretWrapNativeError {
+    switch status {
+    case errSecItemNotFound:
+      return .code("NO_WRAP_KEY", "no wrap key present")
+    case errSecInteractionNotAllowed:
+      return .code("DEVICE_LOCKED", "device is locked")
+    case errSecUserCanceled, OSStatus(LAError.userCancel.rawValue), OSStatus(LAError.systemCancel.rawValue),
+         OSStatus(LAError.appCancel.rawValue), OSStatus(LAError.userFallback.rawValue):
+      return .code("CANCELED", "authentication cancelled")
+    case OSStatus(LAError.biometryNotEnrolled.rawValue):
+      return .code("NO_BIOMETRICS_ENROLLED", "no biometrics enrolled")
+    case OSStatus(LAError.biometryLockout.rawValue):
+      return .code("LOCKOUT_PERMANENT", "biometry locked out")
+    default:
+      return .code("WRAP_FAILED", "Keychain operation failed with OSStatus \(status)")
+    }
+  }
+
+  private func zeroize(_ data: inout Data) {
+    data.withUnsafeMutableBytes { raw in
+      guard let base = raw.baseAddress else { return }
+      memset(base, 0, raw.count)
+    }
+  }
+
+  /// Answers `wrapSecret`. `promptTitle`/`promptNegativeButton` are accepted for ABI parity with
+  /// Android (used only when `requireAuth` is true, which iOS surfaces via `promptSubtitle` as
+  /// the Keychain read's `LAContext.localizedReason` — there is no separate title/negative-button
+  /// surface for a Keychain item read the way `BiometricPrompt` has one).
+  @objc(wrapSecret:plaintextBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:resolver:rejecter:)
+  func wrapSecret(_ keyAlias: String,
+                  plaintextBase64: String,
+                  aadBase64: String,
+                  requireAuth: Bool,
+                  promptTitle: String,
+                  promptSubtitle: String,
+                  promptNegativeButton: String,
+                  resolver resolve: @escaping RCTPromiseResolveBlock,
+                  rejecter reject: @escaping RCTPromiseRejectBlock) {
+    secretWrapQueue.async {
+      guard let plaintext = Data(base64Encoded: plaintextBase64) else {
+        reject("INVALID_ENCODING", "plaintextBase64 did not decode", nil); return
+      }
+      guard let aad = Data(base64Encoded: aadBase64) else {
+        reject("INVALID_ENCODING", "aadBase64 did not decode", nil); return
+      }
+      do {
+        var keyData = try self.getOrCreateWrapKey(alias: keyAlias, requireAuth: requireAuth)
+        defer { self.zeroize(&keyData) }
+        let sealed = try AES.GCM.seal(plaintext, using: SymmetricKey(data: keyData), nonce: AES.GCM.Nonce(), authenticating: aad)
+        let ciphertext = sealed.ciphertext + sealed.tag
+        let iv = Data(sealed.nonce)
+        resolve([
+          "ciphertextBase64": ciphertext.base64EncodedString(),
+          "ivBase64": iv.base64EncodedString(),
+          "keyAlias": keyAlias,
+          "securityLevel": "keychain"
+        ])
+      } catch let SecretWrapNativeError.code(code, message) {
+        reject(code, message, nil)
+      } catch {
+        reject("WRAP_FAILED", error.localizedDescription, error)
+      }
+    }
+  }
+
+  /// Answers `unwrapSecret`. Same prompt-surface note as `wrapSecret` above.
+  @objc(unwrapSecret:ciphertextBase64:ivBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:resolver:rejecter:)
+  func unwrapSecret(_ keyAlias: String,
+                    ciphertextBase64: String,
+                    ivBase64: String,
+                    aadBase64: String,
+                    requireAuth: Bool,
+                    promptTitle: String,
+                    promptSubtitle: String,
+                    promptNegativeButton: String,
+                    resolver resolve: @escaping RCTPromiseResolveBlock,
+                    rejecter reject: @escaping RCTPromiseRejectBlock) {
+    secretWrapQueue.async {
+      guard let combined = Data(base64Encoded: ciphertextBase64), combined.count >= 16 else {
+        reject("INVALID_ENCODING", "ciphertextBase64 did not decode to at least 16 bytes", nil); return
+      }
+      guard let iv = Data(base64Encoded: ivBase64), iv.count == 12 else {
+        reject("INVALID_ENCODING", "ivBase64 must decode to 12 bytes", nil); return
+      }
+      guard let aad = Data(base64Encoded: aadBase64) else {
+        reject("INVALID_ENCODING", "aadBase64 did not decode", nil); return
+      }
+      if !self.isValidWrapKeyAlias(keyAlias) {
+        reject("INVALID_ARGUMENT", "invalid wrap key alias: \(keyAlias)", nil); return
+      }
+      do {
+        var keyData = try self.getOrCreateWrapKey(alias: keyAlias, requireAuth: requireAuth)
+        defer { self.zeroize(&keyData) }
+        let ciphertext = combined.prefix(combined.count - 16)
+        let tag = combined.suffix(16)
+        let sealedBox = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: iv), ciphertext: ciphertext, tag: tag)
+        let plaintext = try AES.GCM.open(sealedBox, using: SymmetricKey(data: keyData), authenticating: aad)
+        resolve(["plaintextBase64": plaintext.base64EncodedString()])
+      } catch let SecretWrapNativeError.code(code, message) {
+        reject(code, message, nil)
+      } catch let error as CryptoKitError {
+        // Domain-specific: only `.authenticationFailure` is a GCM tag mismatch; other
+        // CryptoKitError cases (e.g. incorrectParameterSize) are not.
+        if case .authenticationFailure = error {
+          reject("UNWRAP_TAG_MISMATCH", "GCM authentication failed", nil)
+        } else {
+          reject("UNWRAP_FAILED", "\(error)", nil)
+        }
+      } catch {
+        reject("UNWRAP_FAILED", error.localizedDescription, error)
+      }
+    }
+  }
 }
