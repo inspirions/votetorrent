@@ -4,11 +4,13 @@
  * `registrant-roll-fixture.js` states: a production bundle carrying these facts
  * would let a public page assert election facts that are not true.
  *
- * ZERO IMPORTS. Every row here is inserted through a context shoe-in, so no key
- * material and no ceremony helper is needed. `Task.MutationValid` is
- * `context.IsMutationValid = true` and nothing else — the cheapest insert
- * pattern in this schema, and the reason D-14's fixture needs no signing at
- * all.
+ * 62-02 (D-26): `Keyholder.InsertValid` now requires a signed
+ * `KeyholderDkgBinding` in the SAME transaction, so the five `Keyholder` rows
+ * below no longer use a bare context shoe-in — each is seeded through
+ * `seed-bound-keyholder.js`'s `seedKeyholderPrerequisites`/`insertBoundKeyholder`
+ * pair (the one import this file now carries). Every OTHER row (the five
+ * `Task`/`ReleaseKeyTaskExtension` pairs) is still a plain context shoe-in —
+ * `Task.MutationValid` is `context.IsMutationValid = true` and nothing else.
  *
  * TWO OPPOSITE TRANSACTION RULES LIVE IN THIS PHASE. They are stated side by
  * side here so the contrast reads as deliberate rather than as an
@@ -40,9 +42,12 @@
  * it.
  */
 
+import { seedKeyholderPrerequisites, insertBoundKeyholder } from './seed-bound-keyholder.js';
+
 /**
- * The four additional keyholder users the `InviteSlot` unlocks. The founding
- * fixture's `u1` is the fifth keyholder and already exists.
+ * The four additional keyholder users. The founding fixture's `u1` is the
+ * fifth keyholder and already exists (as a `User`; it gets its own `UserKey`
+ * here, since the founding fixture never gives it one).
  * @type {ReadonlyArray<Readonly<{ id: string, name: string }>>}
  */
 export const KEYRELEASE_USERS = Object.freeze([
@@ -90,47 +95,21 @@ export const EXPECTED_KEYHOLDERS = 5;
  * @type {Readonly<Record<string, number>>}
  */
 export const KEYRELEASE_EXPECTED_COUNTS = Object.freeze({
-	InviteSlot: 1,
+	InviteSlot: 5,
+	InviteResult: 5,
 	User: 5,
+	UserKey: 5,
 	Keyholder: 5,
+	KeyholderDkgBinding: 5,
 	Task: 5,
 	ReleaseKeyTaskExtension: 5,
 });
 
 /**
- * The invite slot's `SigningNonce`.
- *
- * THIS VALUE MUST NOT MATCH ANY `AdminSigning.Nonce`, and it cannot: the shared
- * `ceremony` helper mints nonces of the form `n-<scope>-<seq>`. That
- * non-collision is LOAD-BEARING. The global `InviteSlotSigningValid` assertion
- * is written as an INNER JOIN from `InviteSlot` to `AdminSigning`, so a slot
- * whose nonce matches no signing row satisfies it VACUOUSLY — which is the
- * documented and allowed insert-before-signing ordering (`votetorrent.qsql`'s
- * own D-03 comment on that assertion). A later reader who "tidies" this nonce
- * into a real ceremony nonce would trip a GLOBAL assertion at a commit far from
- * this statement, with nothing pointing back here.
- * @type {string}
- */
-const INVITE_SIGNING_NONCE = 'vtx-fixture-invite-nonce';
-
-/** The slot's invite keypair stand-ins. Never verified — `InviteSignatureValid` is a context passthrough. @type {string} */
-const INVITE_KEY = 'vtx-fixture-invite-key';
-
-/** @type {string} */
-const INVITE_SIGNATURE = 'vtx-fixture-invite-signature';
-
-/**
- * Canonical 19 characters, NO trailing `Z`. `InviteSlot` has no
- * `isISODatetime` check and `ExpirationValid` is a plain `> context.now`
- * comparison against `seedNow` — the opposite of `Registrant.Expiration`, which
- * REQUIRES the `Z`.
- * @type {string}
- */
-const INVITE_EXPIRATION = '2026-12-31T00:00:00';
-
-/**
  * Seed the keyholder roster and the release-key tasks that D-14's aggregate
- * counts: one `InviteSlot`, four `User`s, five `Keyholder`s, and five
+ * counts: five `InviteSlot`+`InviteResult`+`UserKey`+`Keyholder`+
+ * `KeyholderDkgBinding` tuples (62-02, D-26: one per keyholder, each
+ * self-signed), four new `User`s (the fifth, `u1`, already exists), and five
  * `Task` + `ReleaseKeyTaskExtension` pairs.
  *
  * @param {import('@quereus/quereus').Database} db
@@ -143,73 +122,28 @@ export async function seedKeyReleaseTasks(db, options) {
 	if (revision === undefined || revision === null) throw new Error('seedKeyReleaseTasks: options.revision is required');
 	if (!seedNow) throw new Error('seedKeyReleaseTasks: options.seedNow is required');
 
-	// --- 1. Unlock additional users through one keyholder InviteSlot. ---------
-	// The content id is computed IN SQL against `CidValid`'s KEYHOLDER branch —
-	// the one keyed on `ElectionId is not null`. Its argument order is
-	// `Digest(ElectionId, Expiration, InviteKey, InviteSignature, Name,
-	// SigningNonce, Type)`: ALPHABETICAL BY COLUMN NAME, not declaration order.
-	// Getting the order wrong surfaces as a bare
-	// `CHECK constraint failed: CidValid` naming nothing.
-	//
-	// Bind names avoid this engine's reserved words (`:type` parses as a
-	// keyword, not a parameter), hence `:itype`.
-	const slotName = 'vtx-fixture Keyholder Invite Batch';
-	const cidRow = await db
-		.prepare('select cid(Digest(:eid, :exp, :ikey, :isig, :iname, :nonce, :itype)) as c')
-		.get({
-			eid: electionId,
-			exp: INVITE_EXPIRATION,
-			ikey: INVITE_KEY,
-			isig: INVITE_SIGNATURE,
-			iname: slotName,
-			nonce: INVITE_SIGNING_NONCE,
-			itype: 'k',
-		});
-	if (cidRow?.c == null) {
-		throw new Error('keyrelease-fixture: cid(Digest(...)) returned null — crypto plugin not registered?');
-	}
-	const slotCid = String(cidRow.c);
-
-	await db.exec(
-		`insert into InviteSlot (Cid,Type,Name,Expiration,InviteKey,InviteSignature,SigningNonce,ResendSalt,ElectionId)
-		 with context Tid = 1, now = '${seedNow}', IsSignatureValid = true, IsInsertValid = true
-		 values (:cid,:itype,:iname,:exp,:ikey,:isig,:nonce,null,:eid)`,
-		{
-			cid: slotCid,
-			itype: 'k',
-			iname: slotName,
-			exp: INVITE_EXPIRATION,
-			ikey: INVITE_KEY,
-			isig: INVITE_SIGNATURE,
-			nonce: INVITE_SIGNING_NONCE,
-			eid: electionId,
-		},
-	);
-
-	for (const user of KEYRELEASE_USERS) {
-		// `User.InsertValid`'s SECOND disjunct: a null SigningNonce plus an
-		// InviteSlotCid / InviteSignature pair matching an existing slot.
+	// --- 1 & 2. Keyholders, EACH with its own InviteSlot + signed binding. ----
+	// 62-02 (D-26): `Keyholder.InsertValid` requires a signed
+	// `KeyholderDkgBinding` for the SAME (ElectionId, ElectionRevision, UserId)
+	// triple, and `KeyholderDkgBinding.InviteAccepted` requires the slot's
+	// `InviteResult.InvokedId` to equal the binding's UserId -- so a single
+	// shared slot (the pre-62-02 shape) can no longer serve more than one
+	// keyholder. Each of the five users (the founding fixture's `u1` plus the
+	// four `KEYRELEASE_USERS`) now gets its OWN prerequisites.
+	const keyholderNames = Object.freeze({
+		u1: 'vtx-fixture Keyholder One',
+		...Object.fromEntries(KEYRELEASE_USERS.map((u) => [u.id, u.name])),
+	});
+	for (const userId of ['u1', ...KEYRELEASE_USERS.map((u) => u.id)]) {
 		// eslint-disable-next-line no-await-in-loop -- sequential against one shared handle, this project's tier-1 discipline
-		await db.exec(
-			`insert into User (Id, Name, ImageRef)
-			 with context SigningNonce = null, InviteSlotCid = :slot, InviteSignature = :sig, Tid = 1
-			 values (:id,:uname,null)`,
-			{ slot: slotCid, sig: INVITE_SIGNATURE, id: user.id, uname: user.name },
-		);
-	}
-
-	// --- 2. Keyholders. ------------------------------------------------------
-	// `Keyholder.InsertValid` requires exactly that all three context fields are
-	// null. `revision` is bound as a NUMBER; the column is declared `integer`.
-	const keyholderUserIds = ['u1', ...KEYRELEASE_USERS.map((u) => u.id)];
-	for (const userId of keyholderUserIds) {
+		const prereq = await seedKeyholderPrerequisites(db, {
+			electionId,
+			userId,
+			userName: keyholderNames[userId],
+			now: seedNow,
+		});
 		// eslint-disable-next-line no-await-in-loop
-		await db.exec(
-			`insert into Keyholder (ElectionId,ElectionRevision,UserId)
-			 with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 1
-			 values (:eid,:rev,:uid)`,
-			{ eid: electionId, rev: Number(revision), uid: userId },
-		);
+		await insertBoundKeyholder(db, prereq, { electionId, revision: Number(revision), tid: 1 });
 	}
 
 	// --- 3. Tasks and their extensions, ONE EXPLICIT TRANSACTION PER PAIR. ----

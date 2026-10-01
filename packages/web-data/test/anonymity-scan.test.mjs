@@ -127,10 +127,18 @@ const PUBLIC_SAFE_NAMES = Object.freeze(
  * listing is an identity graph). A per-authority intake-policy table is PUBLIC (mirrors
  * ElectionAttestationPolicy: a signed policy voters must read to act on, no person-level column).
  * 35 -> 37 public-safe, 66 -> 68 total.
+ *
+ * 2026-10-01 (62-02 Task 2): +4 keyholder DKG/key-loop tables, deliberately classified. NEVER
+ * (+2): the two new DKG-transport tables (protocol plumbing — per-keyholder receiving keys,
+ * encrypted share bundles, user ids; nothing a public reader needs — table names intentionally
+ * NOT repeated here, see the self-trip guard below). PUBLIC_SAFE (+2): the published joint key
+ * table (the whole point of publishing it is that voters encrypt to it) and the released-share
+ * table (public by design once released, D-17 — anyone with k shares may reconstruct).
+ * 31 -> 33 forbidden, 37 -> 39 public-safe, 68 -> 72 total.
  */
-const EXPECTED_FORBIDDEN_COUNT = 31;
-const EXPECTED_PUBLIC_SAFE_COUNT = 37;
-const EXPECTED_TABLE_COUNT = 68;
+const EXPECTED_FORBIDDEN_COUNT = 33;
+const EXPECTED_PUBLIC_SAFE_COUNT = 39;
+const EXPECTED_TABLE_COUNT = 72;
 
 /**
  * The size of the scanned file set, pinned the same way the table counts above

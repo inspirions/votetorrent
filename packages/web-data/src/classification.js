@@ -66,6 +66,8 @@ export const CLASSIFICATION = {
 	Question:           [CLASS.PUBLIC, 'Ballot questions', ['pre','voting','settling','closed']],
 	Option:             [CLASS.PUBLIC, 'Ballot options', ['pre','voting','settling','closed']],
 	Keyholder:          [CLASS.PUBLIC, 'WHO holds election keys. PUBLIC as a COUNT and as a roster the authority already publishes — but a per-row join to User is an identity graph, which is why that query lives under src/officer/ (D-04) and the anonymous audience gets counts only (D-14)', ['pre','voting','settling','closed']],
+	ElectionKey:        [CLASS.PUBLIC, '62-02 (D-13, D-16): the joint public key voters encrypt ballots to — publishing it is the whole point; it holds only public material (Y and commitments), never a private share', ['pre','voting','settling','closed']],
+	KeyholderShareRelease:[CLASS.PUBLIC,'62-02 (D-13, D-17): by design, a released signing share is PUBLIC once released — anyone with k shares may reconstruct (D-17); visible only once the election has reached settling/closed, when release legitimately happens', ['settling','closed']],
 	ElectionRegistrationField:[CLASS.PUBLIC,'What a voter must supply to register — must be public to be actionable', ['pre','voting']],
 	ElectionDisclosurePolicy:[CLASS.PUBLIC,'The disclosure policy is itself public; it governs RegistrantSelective', ['pre','voting','settling','closed']],
 	ElectionAttestationPolicy:[CLASS.PUBLIC,'Whether device attestation is required to associate', ['pre','voting']],
@@ -115,6 +117,8 @@ export const CLASSIFICATION = {
 	RegistrationRequestStaging:   [CLASS.NEVER, 'Sealed registration-request envelope in transit; the clear Digest is an accepted equality/guessing oracle (D-47), and a count adds nothing RegistrationRequest does not already publish', []],
 	AssociationRequestStaging:    [CLASS.NEVER, 'Sealed association-request envelope in transit; same D-47 Digest exposure, same no-added-count reasoning as RegistrationRequestStaging', []],
 	AssociationAttestationStaging:[CLASS.NEVER,'Sealed device-attestation-answer envelope in transit; carries the richest device-identifying material of the three staging tables', []],
+	KeyholderDkgBinding:[CLASS.NEVER, '62-02 (D-26): protocol plumbing binding a keyholder to their DKG receiving key — a per-keyholder public key and user id, nothing a public reader needs beyond the Keyholder count already published', []],
+	KeyholderDkgMessage:[CLASS.NEVER, '62-02 (D-19): DKG round-trip transport — commitments, encrypted R2 share bundles and acks/complaints between keyholders; opaque protocol machinery, not an election artifact', []],
 	RegistrationDecision: [CLASS.AGGREGATE, 'Counts by status are decision throughput, a genuinely useful public number (mirrors RegistrationRequest); a row names the deciding officer and a free-text Reason, so rows are never published', ['pre','voting']],
 	AssociationDecision:  [CLASS.AGGREGATE, 'Counts by status are decision throughput; a row names the deciding officer, a free-text Reason and, on an approved re-association, a revoked device key, so rows are never published', ['pre','voting']],
 

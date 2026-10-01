@@ -1198,6 +1198,256 @@ declare schema main
 	)
 		with context ( SigningNonce text null, InviteSlotCid text null, InviteSignature text null, Tid int );
 
+	-- 62-02 (D-13, D-16, D-19, D-26): the keyholder DKG/key-loop schema -- KeyholderDkgBinding,
+	-- KeyholderDkgMessage, ElectionKey, KeyholderShareRelease. No device EVER stores the full
+	-- election private key in these tables -- only each keyholder's public DKG receiving key, the
+	-- public joint key Y and its group commitments, encrypted R2 shares (opaque inside
+	-- KeyholderDkgMessage.Payload, 62-17 owns the encryption), and released shares (public by
+	-- design, D-17) AFTER release. Threshold >= 2 because k = 1 lets a single keyholder decrypt
+	-- alone (D-16, matching 62-05's assertDkgThreshold). Share validity and DKG round ordering are
+	-- verified by every READER (62-17, 62-20), not by schema -- there is no EC scalar-multiply UDF
+	-- to check `s*G == Y` here. Consequence for 62-17 (recorded, not designed here): a disqualified
+	-- dealer must leave the live Keyholder set before an ElectionKey for a restarted attempt can be
+	-- written, because AllKeyholdersAgree requires EVERY live keyholder's round-4 message to agree.
+	-- Signer-key expiry for these rows is tier 2 (no context.now bound here), matching every other
+	-- replicated-row table in this schema (UserEncryptionKey, AuthorityIntakePolicy, ...).
+	-- `Keyholder` itself still carries no `check on delete` (deferred; see 62-02-SUMMARY.md).
+	table KeyholderDkgBinding (
+		ElectionId text, -- references Election.Id
+		ElectionRevision integer, -- references ElectionRevision.Revision
+		UserId text, -- the keyholder's own (fresh, D-21) User.Id
+		InviteSlotCid text, -- references InviteSlot.Cid (the accepted Type 'k' slot naming this user)
+		DkgPublicKey text, -- 66-char hex, compressed secp256k1 (02/03) -- the R2 share-encryption RECEIVING key, never the joint key
+		BoundAt text, -- ISO-Z
+		SignerKey text, -- a key from this SAME user's OWN UserKey rows (self-attestation)
+		Signature text,
+		primary key (ElectionId, ElectionRevision, UserId),
+		constraint DkgPublicKeyFormat check (
+			length(new.DkgPublicKey) = 66 and (like('02%', new.DkgPublicKey) or like('03%', new.DkgPublicKey))
+		),
+		constraint BoundAtValid check (isISODatetime(new.BoundAt) and like('%Z', new.BoundAt)),
+		constraint RevisionInteger check (typeof(new.ElectionRevision) = 'integer'),
+		-- D-26: the binding must name an ACCEPTED Type 'k' InviteSlot, for this same election, whose
+		-- InviteResult.InvokedId is this row's OWN UserId -- a binding can never be minted for anyone
+		-- but the invitee who actually accepted.
+		constraint InviteAccepted check on insert (
+			exists (
+				select 1 from InviteSlot S join InviteResult IR on IR.SlotCid = S.Cid
+					where S.Cid = new.InviteSlotCid and S.Type = 'k' and S.ElectionId = new.ElectionId
+						and IR.IsAccepted and IR.InvokedId = new.UserId
+			)
+		),
+		-- Probe 1 VERDICT PASS (keyholder-schema-probes.spec.ts): kept alongside InviteAccepted --
+		-- a Keyholder row for the same triple must already exist. Written in the SAME transaction as
+		-- the Keyholder insert (a 2-row pair), both deferred CHECKs evaluated at COMMIT against the
+		-- transaction's final state, so statement order within that one transaction does not matter.
+		constraint KeyholderExists check on insert (
+			exists (
+				select 1 from Keyholder K
+					where K.ElectionId = new.ElectionId and K.ElectionRevision = new.ElectionRevision and K.UserId = new.UserId
+			)
+		),
+		constraint SignerIsUser check on insert (
+			exists (select 1 from UserKey K where K.UserId = new.UserId and K.PubKey = new.SignerKey)
+		),
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest('KeyholderDkgBinding', new.ElectionId, new.ElectionRevision, new.UserId, new.InviteSlotCid, new.DkgPublicKey, new.BoundAt),
+				new.Signature,
+				new.SignerKey
+			)
+				or SignatureValidP256(
+					Digest('KeyholderDkgBinding', new.ElectionId, new.ElectionRevision, new.UserId, new.InviteSlotCid, new.DkgPublicKey, new.BoundAt),
+					new.Signature,
+					new.SignerKey
+				)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	);
+
+	-- D-19: DKG messages travel as signed, append-only, strand-replicated rows -- one per sender
+	-- per attempt per round. Attempt is 1..3 (a DKG attempt may restart on complaint/disqualify,
+	-- 62-17's concern, not schema's). DkgRound is 0 (R0 commitment), 1 (R1 reveal), 2 (R2 encrypted
+	-- share bundle -- ALL recipients in one row), 3 (R3 ack/complaint), 4 (R4 result). ResultKey is
+	-- non-null exactly on round 4 and equals the agreed joint key Y. Payload is opaque JSON owned by
+	-- 62-17; round-specific validity is reader-verified, not schema-verified.
+	table KeyholderDkgMessage (
+		ElectionId text,
+		ElectionRevision integer,
+		Attempt integer,
+		DkgRound integer,
+		SenderUserId text,
+		Payload text, -- opaque JSON, 62-17-owned shape (DkgRound1Wire / EncryptedShare[] / ack-or-ComplaintEvidence / { groupPublicKey, groupCommitments })
+		ResultKey text null, -- non-null exactly on DkgRound 4; the agreed joint public key Y
+		SentAt text, -- ISO-Z
+		SenderKey text,
+		Signature text,
+		primary key (ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId),
+		constraint AttemptValid check (typeof(new.Attempt) = 'integer' and new.Attempt >= 1 and new.Attempt <= 3),
+		constraint DkgRoundValid check (typeof(new.DkgRound) = 'integer' and new.DkgRound >= 0 and new.DkgRound <= 4),
+		constraint ResultKeyShape check (
+			(new.DkgRound = 4 and new.ResultKey is not null and length(new.ResultKey) = 66 and (like('02%', new.ResultKey) or like('03%', new.ResultKey)))
+				or (new.DkgRound <> 4 and new.ResultKey is null)
+		),
+		constraint PayloadPresent check (new.Payload is not null and length(new.Payload) > 0),
+		constraint SentAtValid check (isISODatetime(new.SentAt) and like('%Z', new.SentAt)),
+		-- D-19/D-26 lockstep: a sender must be a LIVE Keyholder of this election revision who ALSO
+		-- holds a KeyholderDkgBinding for the same triple -- after Task 3 flips Keyholder.InsertValid
+		-- these are always both-or-neither, but the join is written explicitly so this CHECK stays
+		-- correct even if a future revocation path (T-62-02-13) ever separates them.
+		constraint SenderIsBoundKeyholder check on insert (
+			exists (
+				select 1 from Keyholder K join KeyholderDkgBinding B
+					on B.ElectionId = K.ElectionId and B.ElectionRevision = K.ElectionRevision and B.UserId = K.UserId
+					where K.ElectionId = new.ElectionId and K.ElectionRevision = new.ElectionRevision and K.UserId = new.SenderUserId
+			)
+		),
+		constraint SenderKeyIsUsers check on insert (
+			exists (select 1 from UserKey K where K.UserId = new.SenderUserId and K.PubKey = new.SenderKey)
+		),
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest('KeyholderDkgMessage', new.ElectionId, new.ElectionRevision, new.Attempt, new.DkgRound, new.SenderUserId, new.Payload, new.ResultKey, new.SentAt),
+				new.Signature,
+				new.SenderKey
+			)
+				or SignatureValidP256(
+					Digest('KeyholderDkgMessage', new.ElectionId, new.ElectionRevision, new.Attempt, new.DkgRound, new.SenderUserId, new.Payload, new.ResultKey, new.SentAt),
+					new.Signature,
+					new.SenderKey
+				)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	);
+
+	-- D-13/D-16: the published joint public key, write-once per (ElectionId, ElectionRevision).
+	-- Only publishable once EVERY live keyholder of the revision has signed a ROUND-4 message for
+	-- the same attempt carrying the SAME Y (AllKeyholdersAgree), and no round-4 message for that
+	-- attempt dissents (NoDissent). ThresholdBounds forbids k = 1 (D-16). GroupCommitments is the
+	-- JSON array of 66-char hex points whose element 0 equals JointPublicKey -- 62-20's
+	-- reconstructGroupSecret asserts that; this schema checks only presence.
+	table ElectionKey (
+		ElectionId text,
+		ElectionRevision integer,
+		Attempt integer,
+		JointPublicKey text,
+		GroupCommitments text, -- json array of 66-char hex points, element 0 = JointPublicKey (62-20-verified)
+		Threshold integer,
+		Participants integer,
+		PublishedAt text, -- ISO-Z
+		PublisherUserId text,
+		PublisherKey text,
+		Signature text,
+		primary key (ElectionId, ElectionRevision),
+		constraint JointPublicKeyFormat check (
+			length(new.JointPublicKey) = 66 and (like('02%', new.JointPublicKey) or like('03%', new.JointPublicKey))
+		),
+		constraint IntegersValid check (
+			typeof(new.Attempt) = 'integer' and typeof(new.Threshold) = 'integer' and typeof(new.Participants) = 'integer'
+		),
+		constraint ThresholdBounds check (new.Threshold >= 2 and new.Threshold <= new.Participants),
+		constraint ThresholdMatchesRevision check on insert (
+			exists (
+				select 1 from ElectionRevision ER
+					where ER.ElectionId = new.ElectionId and ER.Revision = new.ElectionRevision and ER.KeyholderThreshold = new.Threshold
+			)
+		),
+		constraint ParticipantsAreKeyholders check on insert (
+			new.Participants = (
+				select count(*) from Keyholder K where K.ElectionId = new.ElectionId and K.ElectionRevision = new.ElectionRevision
+			)
+		),
+		constraint AllKeyholdersAgree check on insert (
+			(
+				select count(*) from Keyholder K join KeyholderDkgMessage M
+					on M.ElectionId = K.ElectionId and M.ElectionRevision = K.ElectionRevision and M.SenderUserId = K.UserId
+					where K.ElectionId = new.ElectionId and K.ElectionRevision = new.ElectionRevision
+						and M.Attempt = new.Attempt and M.DkgRound = 4 and M.ResultKey = new.JointPublicKey
+			) = new.Participants
+		),
+		constraint NoDissent check on insert (
+			not exists (
+				select 1 from KeyholderDkgMessage M
+					where M.ElectionId = new.ElectionId and M.ElectionRevision = new.ElectionRevision
+						and M.Attempt = new.Attempt and M.DkgRound = 4 and M.ResultKey <> new.JointPublicKey
+			)
+		),
+		constraint PublisherIsParticipant check on insert (
+			exists (
+				select 1 from Keyholder K
+					where K.ElectionId = new.ElectionId and K.ElectionRevision = new.ElectionRevision and K.UserId = new.PublisherUserId
+			)
+		),
+		constraint PublisherKeyIsUsers check on insert (
+			exists (select 1 from UserKey K where K.UserId = new.PublisherUserId and K.PubKey = new.PublisherKey)
+		),
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest('ElectionKey', new.ElectionId, new.ElectionRevision, new.Attempt, new.JointPublicKey, new.GroupCommitments, new.Threshold, new.Participants, new.PublishedAt, new.PublisherUserId),
+				new.Signature,
+				new.PublisherKey
+			)
+				or SignatureValidP256(
+					Digest('ElectionKey', new.ElectionId, new.ElectionRevision, new.Attempt, new.JointPublicKey, new.GroupCommitments, new.Threshold, new.Participants, new.PublishedAt, new.PublisherUserId),
+					new.Signature,
+					new.PublisherKey
+				)
+		),
+		constraint PublishedAtValid check (isISODatetime(new.PublishedAt) and like('%Z', new.PublishedAt)),
+		constraint GroupCommitmentsPresent check (new.GroupCommitments is not null and length(new.GroupCommitments) > 0),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	);
+
+	-- D-13/D-17: a keyholder's PUBLICLY released signing share -- by design (D-17), release makes
+	-- the share public so ANYONE with k shares may reconstruct; this is not a partial-decryption
+	-- scheme. Share validity (`s*G == Y`) is NOT schema-checkable (no EC scalar-multiply UDF) --
+	-- 62-20's reader-side `validateReleasedShare` filters bogus rows at reconstruction time, so a
+	-- bogus release cannot block or corrupt a legitimate reconstruction (T-62-02-09, accepted).
+	table KeyholderShareRelease (
+		ElectionId text,
+		ElectionRevision integer,
+		UserId text,
+		Identifier text, -- dkgIdentifierForUser(UserId), 64-char hex (62-05)
+		SigningShare text, -- 64-char hex (62-05 ReleasedShare) -- public once released, by design
+		ReleasedAt text, -- ISO-Z
+		SignerKey text,
+		Signature text,
+		primary key (ElectionId, ElectionRevision, UserId),
+		constraint IdentifierFormat check (length(new.Identifier) = 64),
+		constraint SigningShareFormat check (length(new.SigningShare) = 64),
+		constraint ReleasedAtValid check (isISODatetime(new.ReleasedAt) and like('%Z', new.ReleasedAt)),
+		-- A release is accepted only from a user who actually signed the AGREEING round-4 message
+		-- for the published key's own attempt -- the same join shape AllKeyholdersAgree uses.
+		constraint ReleaserParticipated check on insert (
+			exists (
+				select 1 from ElectionKey EK join KeyholderDkgMessage M
+					on M.ElectionId = EK.ElectionId and M.ElectionRevision = EK.ElectionRevision and M.Attempt = EK.Attempt
+					where EK.ElectionId = new.ElectionId and EK.ElectionRevision = new.ElectionRevision
+						and M.DkgRound = 4 and M.ResultKey = EK.JointPublicKey and M.SenderUserId = new.UserId
+			)
+		),
+		constraint SignerIsUser check on insert (
+			exists (select 1 from UserKey K where K.UserId = new.UserId and K.PubKey = new.SignerKey)
+		),
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest('KeyholderShareRelease', new.ElectionId, new.ElectionRevision, new.UserId, new.Identifier, new.SigningShare, new.ReleasedAt),
+				new.Signature,
+				new.SignerKey
+			)
+				or SignatureValidP256(
+					Digest('KeyholderShareRelease', new.ElectionId, new.ElectionRevision, new.UserId, new.Identifier, new.SigningShare, new.ReleasedAt),
+					new.Signature,
+					new.SignerKey
+				)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	);
+
 	table Task (
 		Id text primary key, -- 32 byte random id
 		UserId text, -- references User.Id

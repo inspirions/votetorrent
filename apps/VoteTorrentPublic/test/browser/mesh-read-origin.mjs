@@ -318,15 +318,32 @@ async function main() {
 	// `live-read-gate.js:123` declares for the identical reason.
 	const SEED_REVISION = 0;
 
+	// 62-02 (D-26): seed-bound-keyholder.js, dynamic-imported for the same
+	// "never enter the gateway's import graph" reason as the two fixtures
+	// above.
+	const { seedKeyholderPrerequisites, insertBoundKeyholder } = await import('../fixtures/seed-bound-keyholder.js');
+
 	/** @returns {Promise<number>} */
 	async function countKeyholders() {
 		const row = await db.prepare('select count(*) as c from Keyholder').get({});
 		return Number(/** @type {any} */ (row)?.c ?? 0);
 	}
 
+	/** @type {{ userId: string, inviteSlotCid: string, signerPublicKey: string } | null} */
+	let u1Prereq = null;
 	try {
 		await seedFoundingAuthority(db);
 		await seedElectionSurface(db);
+		// 62-02 (D-26): prerequisites for the `mutate` command's signed
+		// keyholder write -- 'u1' (the founding officer) gets an
+		// InviteSlot/InviteResult/UserKey here so `mutate` later produces
+		// exactly one new Keyholder row (plus its now-mandatory binding).
+		u1Prereq = await seedKeyholderPrerequisites(db, {
+			electionId: SEED_ELECTION.id,
+			userId: 'u1',
+			userName: 'mesh-read origin Officer',
+			now: new Date().toISOString().slice(0, 19),
+		});
 	} catch (err) {
 		fatal('origin-seed', `${err && /** @type {any} */ (err).name}`);
 	}
@@ -370,14 +387,12 @@ async function main() {
 		const line = rawLine.trim();
 		if (line === 'mutate') {
 			try {
-				// The one insert on a seeded election surface that needs no
-				// signing ceremony: its insert-time constraint requires exactly
-				// that the three signing-context values be null, which are
-				// simply not supplied. Bound parameters only.
-				await db.exec(
-					`insert into Keyholder (ElectionId, ElectionRevision, UserId) with context Tid = :tid values (:electionId, :revision, :userId)`,
-					{ tid: 900, electionId: SEED_ELECTION.id, revision: SEED_REVISION, userId: 'u1' },
-				);
+				// 62-02 (D-26): Keyholder.InsertValid now requires a signed
+				// KeyholderDkgBinding in the SAME transaction -- this call still
+				// produces exactly one new Keyholder row (the observed mutation
+				// below), plus its now-mandatory binding.
+				if (u1Prereq === null) throw new Error('u1Prereq was not seeded');
+				await insertBoundKeyholder(db, u1Prereq, { electionId: SEED_ELECTION.id, revision: SEED_REVISION, tid: 900 });
 				const keyholdersAfter = await countKeyholders();
 				console.log('ORIGIN_KEYHOLDERS_AFTER=' + keyholdersAfter);
 				console.log('ORIGIN_MUTATED=ok');
