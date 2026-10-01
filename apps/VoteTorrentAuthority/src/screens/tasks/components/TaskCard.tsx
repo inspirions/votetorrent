@@ -14,9 +14,11 @@ import {
 	NetworkSignatureTask,
 	ReleaseKeyTask,
 	SignatureTask,
+	SigningStatus,
 } from "@votetorrent/vote-core";
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { ThresholdProgressNote } from "./ThresholdProgressNote";
 
 interface TaskCardProps {
 	task: ReleaseKeyTask | SignatureTask;
@@ -25,6 +27,10 @@ interface TaskCardProps {
 	// Phase 7 additions (07-01 D-02): task-type chip rendered above title
 	chipLabel?: string;
 	chipColor?: string;
+	// 62-12 (Surface 5, D-09/D-10/D-11): the task's own co-signing status, rendered as a caption
+	// directly under the title. Undefined/null/threshold<=1/unreachable all render nothing —
+	// release-key cards never receive this prop.
+	thresholdStatus?: SigningStatus | null;
 }
 
 export function TaskCard({
@@ -33,6 +39,7 @@ export function TaskCard({
 	showIndicator = true,
 	chipLabel,
 	chipColor,
+	thresholdStatus,
 }: TaskCardProps) {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
@@ -108,7 +115,7 @@ export function TaskCard({
 	return (
 		<TouchableOpacity onPress={onPress} style={[styles.card, { backgroundColor: colors.card }]}>
 			{imageUrl && <Image source={{ uri: imageUrl }} style={styles.image} />}
-			<View style={styles.content}>
+			<View style={styles.content} testID="task-card-content">
 				{chipLabel && (
 					<View style={[styles.chip, { backgroundColor: chipColor ?? colors.accent }]}>
 						<ThemedText type="small">{chipLabel.toUpperCase()}</ThemedText>
@@ -117,6 +124,7 @@ export function TaskCard({
 				<ThemedText type="cardTitle" numberOfLines={1}>
 					{title}
 				</ThemedText>
+				<ThresholdProgressNote status={thresholdStatus} />
 				{date && (
 					<ThemedText type="defaultSemiBold" numberOfLines={1}>
 						{date}
