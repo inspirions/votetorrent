@@ -189,3 +189,22 @@ export function listOwnStagedAssociationRequestIds(
 		)
 		.then((rows) => rows.map((row) => row.RequestId))
 }
+
+/**
+ * Phase 62 Plan 28 (D-45) — same shape as `listOwnStagedAssociationRequestIds`, over
+ * `RegistrationRequestStaging`. Exists so the D-45 registration-code card is offered only for a
+ * registration whose sealed staging row an officer can actually open (REST-bridge/filesystem
+ * registrations have no such row) — see `continuity.ts`'s `resolveRegistrationCodeAvailability`.
+ */
+export function listOwnStagedRegistrationRequestIds(
+	port: QueryOnly,
+	strandId: string,
+	requesterKey: string,
+): Promise<string[]> {
+	return port
+		.query<{ RequestId: string }>(
+			'select RequestId from RegistrationRequestStaging where StrandId = :strandId and RequesterKey = :requesterKey order by Cursor',
+			{ strandId, requesterKey },
+		)
+		.then((rows) => rows.map((row) => row.RequestId))
+}

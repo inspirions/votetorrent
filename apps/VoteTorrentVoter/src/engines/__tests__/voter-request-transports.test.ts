@@ -371,6 +371,34 @@ describe('voter-request-transports (D-28/D-29/D-32) — mounted on a real in-mem
 		expect(someoneElses).toEqual([]);
 	});
 
+	it('own-staging read (Phase 62 Plan 28, D-45): ownStagedRegistrationRequestIds is scoped by RequesterKey, and empty for an unsubmitted/other key', async () => {
+		await intakeEngine.registerOfficerEncryptionKey(authorityId, vault, officer.sign);
+		const source = createVoterRequestTransportSource({strandId, port, peerBacked: true});
+		const transports = await source.resolve(authorityId);
+		const requesterSign = await createDeviceSigner('Device User');
+
+		const init = makeRegistrationRequestInit();
+		// Before any P2P submit, the member exists and returns [] for this key.
+		expect(await transports!.ownStagedRegistrationRequestIds(requesterKey)).toEqual([]);
+
+		await transports!.registrationTransport.submitRequest(init, requesterKey, requesterSign);
+
+		expect(await transports!.ownStagedRegistrationRequestIds(requesterKey)).toEqual([init.id]);
+		expect(await transports!.ownStagedRegistrationRequestIds('other-key')).toEqual([]);
+	});
+
+	it('own-staging read (rest-bridge route): the member still exists and returns [] for this device\'s key before any P2P submit', async () => {
+		await intakeEngine.setIntakePolicy(
+			{authorityId, restBridgeUrl: 'https://bridge.example.org/intake'},
+			officer.sign,
+		);
+		const source = createVoterRequestTransportSource({strandId, port, peerBacked: true});
+		const transports = await source.resolve(authorityId);
+
+		expect(transports!.registrationRoute).toBe('rest-bridge');
+		expect(await transports!.ownStagedRegistrationRequestIds(requesterKey)).toEqual([]);
+	});
+
 	it('bridge route (D-29): after setIntakePolicy with an https bridge URL, registration routes to the bridge while association stays P2P (D-28)', async () => {
 		await intakeEngine.setIntakePolicy(
 			{authorityId, restBridgeUrl: 'https://bridge.example.org/intake'},

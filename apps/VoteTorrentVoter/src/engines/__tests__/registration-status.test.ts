@@ -35,10 +35,36 @@ function makeNetworkEngine() {
 	};
 }
 
-function makeAssociationEngine(opts: {rows?: Association[]; requests?: AssociationRequestRead[]}) {
-	return {
+interface DeviceRetirementRecord {
+	deviceKey: string;
+	requestId: string;
+	decidedAt: string;
+}
+
+function makeAssociationEngine(opts: {
+	rows?: Association[];
+	requests?: AssociationRequestRead[];
+	// Phase 62 Plan 28 (D-41): omit entirely to model a pre-62-18 engine with no
+	// getDeviceRetirement method at all; set to a record/undefined to model 62-18's
+	// IReassociationEngine; set 'reject' to model a read failure (must fall through unchanged).
+	deviceRetirement?: DeviceRetirementRecord | undefined | 'reject';
+}) {
+	const base = {
 		getAssociationsByDeviceKey: jest.fn(async (_deviceKey: string) => opts.rows ?? []),
 		listAssociationRequests: jest.fn(async (_authorityId: string) => opts.requests ?? []),
+	};
+	if (opts.deviceRetirement === undefined && !('deviceRetirement' in opts)) {
+		// No getDeviceRetirement member at all.
+		return base;
+	}
+	return {
+		...base,
+		getDeviceRetirement: jest.fn(async (_deviceKey: string) => {
+			if (opts.deviceRetirement === 'reject') {
+				throw new Error('simulated getDeviceRetirement failure');
+			}
+			return opts.deviceRetirement;
+		}),
 	};
 }
 
@@ -109,6 +135,7 @@ function makeTransports(
 		registrationTransport,
 		registrationRoute: 'peer',
 		ownAssociationRequestIds: jest.fn(async () => ownIds),
+		ownStagedRegistrationRequestIds: jest.fn(async () => [] as string[]),
 	};
 }
 
@@ -294,6 +321,53 @@ describe('resolveRegistrationStatus (D-06/D-23, four-outcome derived read)', () 
 		const result = await resolveRegistrationStatus(buildDeps({associationEngine}));
 
 		expect(result).toEqual({kind: 'indeterminate', networkName: NETWORK_NAME});
+	});
+
+	test('notRegistered (D-41 retirement): zero Association rows, getDeviceRetirement resolves a record, and an own \'a\' request is present — previously indeterminate, now notRegistered', async () => {
+		const associatedRequest = makeRequest({requestId: 'req-associated', status: 'a'});
+		const associationEngine = makeAssociationEngine({
+			rows: [],
+			requests: [associatedRequest],
+			deviceRetirement: {deviceKey: DEVICE_KEY, requestId: 'req-reassoc-1', decidedAt: '2026-01-01T00:00:00.000Z'},
+		});
+
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine}));
+
+		expect(result).toEqual({kind: 'notRegistered', networkName: NETWORK_NAME});
+	});
+
+	test('D-41: an association engine with NO getDeviceRetirement method keeps the previous (indeterminate) behaviour for the own-\'a\'-request contradiction case', async () => {
+		const associatedRequest = makeRequest({requestId: 'req-associated', status: 'a'});
+		const associationEngine = makeAssociationEngine({rows: [], requests: [associatedRequest]});
+		expect((associationEngine as {getDeviceRetirement?: unknown}).getDeviceRetirement).toBeUndefined();
+
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine}));
+
+		expect(result).toEqual({kind: 'indeterminate', networkName: NETWORK_NAME});
+	});
+
+	test('D-41: a rejecting getDeviceRetirement falls through to the previous (indeterminate) behaviour, never escalating further', async () => {
+		const associatedRequest = makeRequest({requestId: 'req-associated', status: 'a'});
+		const associationEngine = makeAssociationEngine({rows: [], requests: [associatedRequest], deviceRetirement: 'reject'});
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine}));
+
+		expect(result).toEqual({kind: 'indeterminate', networkName: NETWORK_NAME});
+		errorSpy.mockRestore();
+	});
+
+	test('D-41: getDeviceRetirement resolving undefined (not retired) keeps the previous (registered) behaviour when Association rows exist', async () => {
+		const registrantId = 'registrant-active-d41';
+		const associationEngine = makeAssociationEngine({
+			rows: [makeAssociation(registrantId)],
+			deviceRetirement: undefined,
+		});
+		const registrationEngine = makeRegistrationEngine({[registrantId]: makeRegistrant(registrantId, 'a')});
+
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine, registrationEngine}));
+
+		expect(result).toEqual({kind: 'registered', networkName: NETWORK_NAME});
 	});
 
 	test('indeterminate (read failure): a throw anywhere in the chain resolves indeterminate, never a silent notRegistered', async () => {

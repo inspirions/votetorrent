@@ -39,6 +39,7 @@ import {
 	createAssociationRequestDigestFn,
 	createRegistrationRequestDigestFn,
 	listOwnStagedAssociationRequestIds,
+	listOwnStagedRegistrationRequestIds,
 } from './strand-port-adapter'
 import type { VoterStrandPort } from './strand-port-adapter'
 
@@ -85,6 +86,10 @@ export interface VoterRequestTransports {
 	associationTransport: VoterAssociationRequestTransport
 	registrationRoute: VoterRegistrationRoute
 	ownAssociationRequestIds(requesterKey: string): Promise<string[]>
+	/** Phase 62 Plan 28 (D-45) — own `RegistrationRequestStaging` row ids, scoped by `RequesterKey`.
+	 * Wired on BOTH routes: the strand port exists whenever transports resolve, and on
+	 * 'rest-bridge' it simply finds no row (the REST route never stages locally). */
+	ownStagedRegistrationRequestIds(requesterKey: string): Promise<string[]>
 }
 
 export interface VoterRequestStrand {
@@ -156,6 +161,8 @@ export function createVoterRequestTransportSource(strand: VoterRequestStrand): V
 				registrationRoute,
 				ownAssociationRequestIds: (requesterKey: string) =>
 					listOwnStagedAssociationRequestIds(strand.port, strand.strandId, requesterKey),
+				ownStagedRegistrationRequestIds: (requesterKey: string) =>
+					listOwnStagedRegistrationRequestIds(strand.port, strand.strandId, requesterKey),
 			}
 		},
 	}

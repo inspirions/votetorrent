@@ -99,6 +99,28 @@ export async function resolveRegistrationStatus(deps: RegistrationStatusDeps): P
 			return {kind: 'notRegistered', networkName};
 		}
 
+		// Phase 62 Plan 28 (D-41): a retired key's own 'a' request with no Association row is
+		// RETIREMENT, not a contradiction — checked BEFORE the mine.some('a') contradiction branch
+		// below, which would otherwise read it as `indeterminate`. Narrow, structural check (never
+		// `association as unknown as IReassociationEngine` cast at the top of the function) so an
+		// `IAssociationEngine` without `getDeviceRetirement` — every pre-62-18 mock/engine — keeps
+		// its existing behaviour for every existing case, unchanged. Own try/catch: a failure here
+		// is corroborating-only and must fall through to the pre-existing logic below, never
+		// escalate to the outer catch's `indeterminate`.
+		try {
+			const reassociationAssociation = association as unknown as {
+				getDeviceRetirement?: (deviceKey: string) => Promise<unknown>;
+			};
+			if (typeof reassociationAssociation.getDeviceRetirement === 'function') {
+				const retirement = await reassociationAssociation.getDeviceRetirement(p256DeviceKey);
+				if (retirement !== undefined) {
+					return {kind: 'notRegistered', networkName};
+				}
+			}
+		} catch {
+			// Fall through to the pre-existing logic below, unchanged.
+		}
+
 		// F4: `getEngine('association')` only resolves once a network ctx is established —
 		// `EngineFactory.buildEngine`'s `'association'` case calls `requireEstablishedCtx()`,
 		// which THROWS when no network is established. So a resolved `association` engine always
