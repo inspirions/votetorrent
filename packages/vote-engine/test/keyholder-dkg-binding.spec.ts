@@ -104,14 +104,18 @@ interface TestKeyholder {
   curve: 'secp256k1' | 'p256'
 }
 
-/** Invite + mint InviteResult/User/UserKey/Keyholder for a fresh keyholder identity (NO binding). */
+/**
+ * Invite + mint InviteResult/User/UserKey for a fresh keyholder identity. Deliberately mints NO
+ * Keyholder row and NO binding — 62-02 Task 3 flips `Keyholder.InsertValid` to require a binding
+ * in the SAME transaction (Probe 1's proven shape), so every test below inserts the Keyholder +
+ * KeyholderDkgBinding pair together via `insertKeyholderAndBinding`.
+ */
 async function inviteAndMintKeyholder (
   seeded: SeededElection,
   name: string,
-  opts: { curve?: 'secp256k1' | 'p256', insertKeyholderRow?: boolean } = {}
+  opts: { curve?: 'secp256k1' | 'p256' } = {}
 ): Promise<TestKeyholder> {
   const curve = opts.curve ?? 'secp256k1'
-  const insertKeyholderRow = opts.insertKeyholderRow ?? true
   await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite(name), seeded.electionId, makeTestSignCallback(seeded.auth.user))
   const slot = await keyholderSlotCid(seeded.auth.ctx, name)
   const userId = crypto.randomUUID()
@@ -147,14 +151,6 @@ async function inviteAndMintKeyholder (
        values (:userId, :keyType, :pubKey, :expiration)`,
       { userId, keyType: curve === 'p256' ? 'P' : 'M', pubKey: publicHex, expiration: toCanonicalDatetime(Date.now() + 365 * 86_400_000), now: nowCanonicalDatetime() }
     )
-    if (insertKeyholderRow) {
-      await ctx.db.exec(
-        `insert into Keyholder (ElectionId, ElectionRevision, UserId)
-         with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
-         values (:electionId, 0, :userId)`,
-        { electionId: seeded.electionId, userId }
-      )
-    }
     await ctx.db.exec('COMMIT')
   } catch (err) {
     await ctx.db.exec('ROLLBACK')
@@ -172,6 +168,10 @@ interface BindingOverrides {
   boundAt?: string
   signerKey?: string
   signOverride?: (digestHex: string) => string
+  /** Omit the Keyholder insert from the transaction (tests KeyholderExists). */
+  skipKeyholder?: boolean
+  /** Omit the KeyholderDkgBinding insert from the transaction (tests Keyholder's own InsertValid). */
+  skipBinding?: boolean
 }
 
 function signWithCurve (curve: 'secp256k1' | 'p256', privateHex: string, digest: Uint8Array): string {
@@ -179,8 +179,13 @@ function signWithCurve (curve: 'secp256k1' | 'p256', privateHex: string, digest:
   return bytesToHex(secp256k1.sign(digest, hexToBytes(privateHex)))
 }
 
-/** Insert a KeyholderDkgBinding row, computing the digest in SQL and signing with `kh`'s own key (self-attested) unless overridden. */
-async function insertBinding (ctx: EngineContext, seeded: SeededElection, kh: TestKeyholder, overrides: BindingOverrides = {}): Promise<void> {
+/**
+ * Insert the Keyholder + KeyholderDkgBinding pair in ONE transaction (62-02 Task 3: D-26's proven
+ * shape, keyholder-schema-probes.spec.ts Probe 1). The binding digest is computed in SQL and
+ * self-signed with `kh`'s own key unless overridden. `skipKeyholder`/`skipBinding` isolate each
+ * half's own CHECKs.
+ */
+async function insertKeyholderAndBinding (ctx: EngineContext, seeded: SeededElection, kh: TestKeyholder, overrides: BindingOverrides = {}): Promise<void> {
   const electionId = overrides.electionId ?? seeded.electionId
   const revision = overrides.revision ?? 0
   const userId = overrides.userId ?? kh.userId
@@ -188,21 +193,39 @@ async function insertBinding (ctx: EngineContext, seeded: SeededElection, kh: Te
   const dkgPublicKey = overrides.dkgPublicKey ?? randomTestKeyPair().publicHex
   const boundAt = overrides.boundAt ?? (nowCanonicalDatetime() + 'Z')
   const signerKey = overrides.signerKey ?? kh.publicHex
+  const tid = await allocateTid(ctx.db, 'user')
 
-  const digestRow = await ctx.db
-    .prepare("select Digest('KeyholderDkgBinding', :electionId, :revision, :userId, :inviteSlotCid, :dkgPublicKey, :boundAt) as d")
-    .get({ electionId, revision, userId, inviteSlotCid, dkgPublicKey, boundAt })
-  if (!digestRow || digestRow.d == null) throw new Error('insertBinding: Digest() returned null')
-  const digestHex = digestRow.d as string
-  const signature = overrides.signOverride
-    ? overrides.signOverride(digestHex)
-    : signWithCurve(kh.curve, kh.privateHex, digestToBytes(digestHex))
+  await ctx.db.exec('BEGIN')
+  try {
+    if (!overrides.skipKeyholder) {
+      await ctx.db.exec(
+        `insert into Keyholder (ElectionId, ElectionRevision, UserId)
+         with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
+         values (:electionId, :revision, :userId)`,
+        { electionId, revision, userId: kh.userId }
+      )
+    }
+    if (!overrides.skipBinding) {
+      const digestRow = await ctx.db
+        .prepare("select Digest('KeyholderDkgBinding', :electionId, :revision, :userId, :inviteSlotCid, :dkgPublicKey, :boundAt) as d")
+        .get({ electionId, revision, userId, inviteSlotCid, dkgPublicKey, boundAt })
+      if (!digestRow || digestRow.d == null) throw new Error('insertKeyholderAndBinding: Digest() returned null')
+      const digestHex = digestRow.d as string
+      const signature = overrides.signOverride
+        ? overrides.signOverride(digestHex)
+        : signWithCurve(kh.curve, kh.privateHex, digestToBytes(digestHex))
 
-  await ctx.db.exec(
-    `insert into KeyholderDkgBinding (ElectionId, ElectionRevision, UserId, InviteSlotCid, DkgPublicKey, BoundAt, SignerKey, Signature)
-     values (:electionId, :revision, :userId, :inviteSlotCid, :dkgPublicKey, :boundAt, :signerKey, :signature)`,
-    { electionId, revision, userId, inviteSlotCid, dkgPublicKey, boundAt, signerKey, signature }
-  )
+      await ctx.db.exec(
+        `insert into KeyholderDkgBinding (ElectionId, ElectionRevision, UserId, InviteSlotCid, DkgPublicKey, BoundAt, SignerKey, Signature)
+         values (:electionId, :revision, :userId, :inviteSlotCid, :dkgPublicKey, :boundAt, :signerKey, :signature)`,
+        { electionId, revision, userId, inviteSlotCid, dkgPublicKey, boundAt, signerKey, signature }
+      )
+    }
+    await ctx.db.exec('COMMIT')
+  } catch (err) {
+    await ctx.db.exec('ROLLBACK')
+    throw err
+  }
 }
 
 async function expectRejected (p: Promise<unknown>, checkName: string): Promise<void> {
@@ -232,14 +255,14 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
   it('a binding signed (secp256k1) by the keyholder user\'s own UserKey inserts and reads back', async () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Alice Keyholder')
-    await insertBinding(seeded.auth.ctx, seeded, kh)
+    await insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh)
     expect(await bindingCount(seeded.auth.ctx, seeded.electionId, 0, kh.userId)).to.equal(1)
   })
 
   it('a P-256 (Type \'P\') self-signed binding also inserts', async () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Bob Keyholder', { curve: 'p256' })
-    await insertBinding(seeded.auth.ctx, seeded, kh)
+    await insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh)
     expect(await bindingCount(seeded.auth.ctx, seeded.electionId, 0, kh.userId)).to.equal(1)
   })
 
@@ -247,7 +270,7 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Carol Keyholder')
     await expectRejected(
-      insertBinding(seeded.auth.ctx, seeded, kh, { signOverride: () => signWithCurve(kh.curve, kh.privateHex, digestToBytes((nowCanonicalDatetime() + 'Z').repeat(1) && 'a'.repeat(43))) }),
+      insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, { signOverride: () => signWithCurve(kh.curve, kh.privateHex, digestToBytes((nowCanonicalDatetime() + 'Z').repeat(1) && 'a'.repeat(43))) }),
       'SignatureValid'
     )
   })
@@ -260,7 +283,7 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
       // The signature must itself be VALID (really signed by the officer's own registered key) so
       // SignatureValid does not fire first — the only thing wrong is that the officer's key is not
       // registered to the KEYHOLDER's UserId.
-      insertBinding(seeded.auth.ctx, seeded, kh, {
+      insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, {
         signerKey: officerKey,
         signOverride: (digestHex) => signTestDigest(seeded.auth.user, digestHex).signature
       }),
@@ -271,19 +294,19 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
   it('a DkgPublicKey of 64 chars throws DkgPublicKeyFormat', async () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Eve Keyholder')
-    await expectRejected(insertBinding(seeded.auth.ctx, seeded, kh, { dkgPublicKey: '02'.repeat(32) }), 'DkgPublicKeyFormat')
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, { dkgPublicKey: '02'.repeat(32) }), 'DkgPublicKeyFormat')
   })
 
   it('a DkgPublicKey starting \'04\' (uncompressed) throws DkgPublicKeyFormat', async () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Frank Keyholder')
-    await expectRejected(insertBinding(seeded.auth.ctx, seeded, kh, { dkgPublicKey: '04' + 'a'.repeat(64) }), 'DkgPublicKeyFormat')
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, { dkgPublicKey: '04' + 'a'.repeat(64) }), 'DkgPublicKeyFormat')
   })
 
   it('a non-Z BoundAt throws BoundAtValid', async () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Grace Keyholder')
-    await expectRejected(insertBinding(seeded.auth.ctx, seeded, kh, { boundAt: nowCanonicalDatetime() }), 'BoundAtValid')
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, { boundAt: nowCanonicalDatetime() }), 'BoundAtValid')
   })
 
   it('an InviteSlotCid naming a Type \'of\' slot (not \'k\') throws InviteAccepted', async () => {
@@ -297,7 +320,7 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
       { expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: 'b'.repeat(66), inviteSignature: '', name: 'wrong-type-slot', nonce: crypto.randomUUID(), type: 'of', now: nowCanonicalDatetime() }
     )
     const ofSlot = await seeded.auth.ctx.db.prepare("select Cid from InviteSlot where Name = 'wrong-type-slot'").get()
-    await expectRejected(insertBinding(seeded.auth.ctx, seeded, kh, { inviteSlotCid: ofSlot!.Cid as string }), 'InviteAccepted')
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, { inviteSlotCid: ofSlot!.Cid as string }), 'InviteAccepted')
   })
 
   it('a slot for a DIFFERENT election throws InviteAccepted', async () => {
@@ -307,7 +330,7 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
     const khB = await inviteAndMintKeyholder(seededB, 'Irene Keyholder')
     // Use khB's own slot (a different election) as the InviteSlotCid for khA's binding attempt.
     await expectRejected(
-      insertBinding(seededA.auth.ctx, seededA, khA, { inviteSlotCid: khB.slotCid }),
+      insertKeyholderAndBinding(seededA.auth.ctx, seededA, khA, { inviteSlotCid: khB.slotCid }),
       'InviteAccepted'
     )
   })
@@ -321,7 +344,7 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
     const { publicHex, privateHex } = randomTestKeyPair()
     const fakeKh: TestKeyholder = { userId: crypto.randomUUID(), publicHex, privateHex, slotCid: slot.cid, curve: 'secp256k1' }
     // No Keyholder/UserKey exist for fakeKh; expect InviteAccepted to fire first regardless.
-    await expectRejected(insertBinding(seeded.auth.ctx, seeded, fakeKh), 'InviteAccepted')
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, fakeKh, { skipKeyholder: true }), 'InviteAccepted')
   })
 
   it('InvokedId of ANOTHER user (not this binding\'s UserId) throws InviteAccepted', async () => {
@@ -329,27 +352,56 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
     const khA = await inviteAndMintKeyholder(seeded, 'Kyle Keyholder')
     const khB = await inviteAndMintKeyholder(seeded, 'Laura Keyholder')
     // Bind khA's slot (InvokedId = khA.userId) but claim it is khB's binding.
-    await expectRejected(insertBinding(seeded.auth.ctx, seeded, khB, { inviteSlotCid: khA.slotCid }), 'InviteAccepted')
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, khB, { inviteSlotCid: khA.slotCid }), 'InviteAccepted')
   })
 
   it('a binding whose Keyholder row is ABSENT is refused (live KeyholderExists)', async () => {
     const seeded = await seedElectionWithThreshold()
-    const kh = await inviteAndMintKeyholder(seeded, 'Mallory Keyholder', { insertKeyholderRow: false })
-    await expectRejected(insertBinding(seeded.auth.ctx, seeded, kh), 'KeyholderExists')
+    const kh = await inviteAndMintKeyholder(seeded, 'Mallory Keyholder')
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, { skipKeyholder: true }), 'KeyholderExists')
+  })
+
+  it('(Task 3) a Keyholder insert WITHOUT a binding in the same transaction throws InsertValid and leaves no row', async () => {
+    const seeded = await seedElectionWithThreshold()
+    const kh = await inviteAndMintKeyholder(seeded, 'Quentin Keyholder')
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, { skipBinding: true }), 'InsertValid')
+    const row = await seeded.auth.ctx.db.prepare('select UserId from Keyholder where UserId = :id').get({ id: kh.userId })
+    expect(row, 'no Keyholder row survives the rolled-back transaction').to.be.undefined
+  })
+
+  it('(Task 3) Keyholder + binding pair commits; the pre-existing null-context requirement still holds (Keyholder with SigningNonce bound throws)', async () => {
+    const seeded = await seedElectionWithThreshold()
+    const kh = await inviteAndMintKeyholder(seeded, 'Romeo Keyholder')
+    let caught: unknown
+    try {
+      await seeded.auth.ctx.db.exec('BEGIN')
+      await seeded.auth.ctx.db.exec(
+        `insert into Keyholder (ElectionId, ElectionRevision, UserId)
+         with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = 1
+         values (:electionId, 0, :userId)`,
+        { electionId: seeded.electionId, userId: kh.userId, nonce: 'not-null-nonce' }
+      )
+      await seeded.auth.ctx.db.exec('COMMIT')
+    } catch (err) {
+      caught = err
+      await seeded.auth.ctx.db.exec('ROLLBACK')
+    }
+    expect(caught, 'a bound SigningNonce must still reject, binding or no binding').to.not.equal(undefined)
+    expect((caught as Error).message).to.include('InsertValid')
   })
 
   it('a second binding for the same (ElectionId, ElectionRevision, UserId) throws (primary key)', async () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Nina Keyholder')
-    await insertBinding(seeded.auth.ctx, seeded, kh)
-    await expectRejected(insertBinding(seeded.auth.ctx, seeded, kh), '')
+    await insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh)
+    await expectRejected(insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh, { skipKeyholder: true }), '')
     expect(await bindingCount(seeded.auth.ctx, seeded.electionId, 0, kh.userId)).to.equal(1)
   })
 
   it('UPDATE throws NoUpdate', async () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Oscar Keyholder')
-    await insertBinding(seeded.auth.ctx, seeded, kh)
+    await insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh)
     let caught: unknown
     try {
       await seeded.auth.ctx.db.exec(
@@ -366,7 +418,7 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
   it('DELETE throws NoDelete', async () => {
     const seeded = await seedElectionWithThreshold()
     const kh = await inviteAndMintKeyholder(seeded, 'Peggy Keyholder')
-    await insertBinding(seeded.auth.ctx, seeded, kh)
+    await insertKeyholderAndBinding(seeded.auth.ctx, seeded, kh)
     let caught: unknown
     try {
       await seeded.auth.ctx.db.exec('delete from KeyholderDkgBinding where UserId = :userId', { userId: kh.userId })

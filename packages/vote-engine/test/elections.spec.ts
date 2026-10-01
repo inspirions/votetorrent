@@ -24,6 +24,7 @@ import type { EngineContext } from '../src/types.js'
 import { createTestNetwork, addTestAuthority, addTestElection, seedBallot, seedQuestion, seedElectionSigning, makeElectionInit as makeElectionInitFromFixture, makeTestSignature, makeTestSignCallback } from './fixtures/test-context.js'
 import { peekNextElectionTid } from '../src/elections/elections-engine.js'
 import { digestToBytes } from '../src/utils.js'
+import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { AsyncStorage } from './shims/react-native'
 import type {
@@ -677,7 +678,7 @@ describe('ElectionEngine', () => {
         .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
         .get({ name: 'KH1' })
       const invitationEngine = new InvitationEngine(elec.ctx)
-      await invitationEngine.respondToInvite(slotRow!.Cid as string, true)
+      await invitationEngine.respondToInvite(slotRow!.Cid as string, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
       const before = await elec.ctx.db
         .prepare('select UserId from Keyholder where ElectionId = :id')

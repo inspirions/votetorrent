@@ -3,7 +3,7 @@ import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
-import { inviteResultSignedBytes, nowCanonicalDatetime, verifyAdHocInviteSignature } from '../utils.js'
+import { digestToBytes, inviteResultSignedBytes, nowCanonicalDatetime, toCanonicalDatetime, verifyAdHocInviteSignature } from '../utils.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import type {
   IInvitationEngine,
@@ -11,6 +11,7 @@ import type {
   SentOfficerInvite,
   SentAuthorityInvite,
   SentKeyholderInvite,
+  KeyholderAcceptProvisioning,
 } from '@votetorrent/vote-core'
 
 /**
@@ -237,6 +238,18 @@ export class InvitationEngine implements IInvitationEngine {
    * Phase-22 cross-device P2P transport: disabled boundary (D-08). The
    * cross-device "send over network" hop is deferred to the P2P transport
    * phase. Only the local InviteResult write is real in this phase.
+   *
+   * 62-02 (D-21, D-26): a Type 'k' (keyholder) ACCEPT is now ATOMIC and requires `keyholder`
+   * provisioning. `InviteResult`, the fresh `User` (D-21: never the officer's identity), its
+   * `UserKey` (the provisioned signing key), the `Keyholder` row and the signed
+   * `KeyholderDkgBinding` row (D-26) are all written inside ONE `BEGIN`/`COMMIT` — a failed accept
+   * leaves no orphan row behind (the 62-09 crossnote's non-atomicity is fixed). `keyholder.sign` is
+   * called BEFORE the transaction opens (never hold a transaction open across a signing prompt);
+   * the returned `signerKey` is verified against `keyholder.signingKey.key` before anything is
+   * written. Decline and every non-'k' accept are UNCHANGED (single InviteResult write, no
+   * transaction). INTERIM STATE: the Authority keyholder-accept screen does not yet pass
+   * provisioning (62-26 wires it), so a real keyholder accept in the app fails closed with the
+   * message thrown below — by design, not a bug.
    */
   async respondToInvite (
     invitationId: string,
@@ -244,6 +257,7 @@ export class InvitationEngine implements IInvitationEngine {
     invitePrivate?: string,
     digest?: string,
     invokedId?: string,
+    keyholder?: KeyholderAcceptProvisioning,
   ): Promise<void> {
     // invitationId is the InviteSlot Cid in the thin IInvitationEngine surface
     // (as used by the accept/decline screens per D-06 paste flow).
@@ -329,11 +343,80 @@ export class InvitationEngine implements IInvitationEngine {
         ? verifyAdHocInviteSignature(signedBytes, inviteSignature, slotRow.InviteKey)
         : true
 
-      // Step 5: INSERT InviteResult with context flags (mirrors network-engine.ts:1046-1060,
-      // non-authority branch). The AdminSigning row was already committed by
-      // saveInviteWithSigning on the send side — this is the receive-side local write only.
-      await this.ctx.db.exec(
-        `insert into InviteResult (
+      // 62-02 (D-21, D-26): a Type 'k' accept needs provisioning validated and its binding
+      // digest signed BEFORE anything is written — never hold a transaction open across a
+      // signing prompt, and never write a partial accept for a provisioning that turns out to
+      // be malformed or falsely attributed.
+      let keyholderWrite: {
+        electionId: string
+        revision: number
+        boundAt: string
+        bindingSignature: string
+        userId: string
+      } | undefined
+
+      if (isKeyholderAccept) {
+        if (!keyholder || !mintedUserId) {
+          throw new Error(
+            'Accepting a keyholder invitation needs a keyholder signing key and a key-generation receiving key, and none was provided'
+          )
+        }
+        const keyholderUserId = mintedUserId
+        if (
+          typeof keyholder.dkgPublicKey !== 'string' ||
+          keyholder.dkgPublicKey.length !== 66 ||
+          !/^(02|03)[0-9a-f]{64}$/.test(keyholder.dkgPublicKey)
+        ) {
+          throw new Error('respondToInvite: keyholder.dkgPublicKey must be a 66-char lowercase hex compressed secp256k1 point (02/03 prefix)')
+        }
+        if (keyholder.signingKey.type !== 'M' && keyholder.signingKey.type !== 'P') {
+          throw new Error(`respondToInvite: keyholder.signingKey.type must be 'M' or 'P' (got ${String(keyholder.signingKey.type)})`)
+        }
+        if (!slotRow.ElectionId) {
+          throw new Error(`respondToInvite: keyholder InviteSlot ${slotCid} has no ElectionId`)
+        }
+        const revRow = await this.ctx.db
+          .prepare('SELECT Revision FROM ElectionRevision WHERE ElectionId = :electionId')
+          .get({ electionId: slotRow.ElectionId }) as { Revision: number } | undefined
+        if (!revRow) {
+          throw new Error(`respondToInvite: no ElectionRevision found for election ${slotRow.ElectionId}`)
+        }
+
+        const boundAt = new Date().toISOString()
+        const bindingDigestRow = await this.ctx.db
+          .prepare(
+            "select Digest('KeyholderDkgBinding', :electionId, :revision, :userId, :inviteSlotCid, :dkgPublicKey, :boundAt) as d"
+          )
+          .get({
+            electionId: slotRow.ElectionId,
+            revision: revRow.Revision,
+            userId: keyholderUserId,
+            inviteSlotCid: slotCid,
+            dkgPublicKey: keyholder.dkgPublicKey,
+            boundAt,
+          })
+        if (!bindingDigestRow || bindingDigestRow.d == null) {
+          throw new Error('respondToInvite: Digest() returned null for KeyholderDkgBinding — crypto plugin not registered?')
+        }
+        const bindingSig = await keyholder.sign(digestToBytes(bindingDigestRow.d as string))
+        if (bindingSig.signerKey !== keyholder.signingKey.key) {
+          throw new Error('respondToInvite: keyholder.sign() returned a signerKey that does not match keyholder.signingKey.key')
+        }
+        keyholderWrite = {
+          electionId: slotRow.ElectionId,
+          revision: revRow.Revision,
+          boundAt,
+          bindingSignature: bindingSig.signature,
+          userId: keyholderUserId,
+        }
+      }
+
+      // Step 5: write InviteResult (mirrors network-engine.ts:1046-1060, non-authority branch).
+      // The AdminSigning row was already committed by saveInviteWithSigning on the send side —
+      // this is the receive-side local write only. A keyholder accept wraps this in the SAME
+      // transaction as the User/UserKey/Keyholder/KeyholderDkgBinding inserts below (D-26
+      // lockstep); every other accept/decline keeps the pre-62-02 single-statement shape.
+      const inviteResultSql = `insert into InviteResult (
           SlotCid,
           IsAccepted,
           Digest,
@@ -347,82 +430,115 @@ export class InvitationEngine implements IInvitationEngine {
           :digest,
           :inviteSignature,
           :invokedId
-        )`,
-        {
-          slotCid,
-          isAccepted: accept,
-          digest: digestValue,
-          inviteSignature,
-          invokedId: mintedUserId ?? invokedId ?? null,
-          isSignatureValid,
-        }
-      )
+        )`
+      const inviteResultParams = {
+        slotCid,
+        isAccepted: accept,
+        digest: digestValue,
+        inviteSignature,
+        invokedId: mintedUserId ?? invokedId ?? null,
+        isSignatureValid,
+      }
 
-      // Phase-22 boundary (D-08): cross-device P2P network send is deferred.
-      // The local InviteResult write above is the only real action this phase.
-      // Transport-level authenticity for the cross-device exchange will be
-      // implemented in the P2P transport phase.
+      if (!keyholderWrite) {
+        await this.ctx.db.exec(inviteResultSql, inviteResultParams)
 
-      // second-keyholder-invite-unique fix: mint the real User + Keyholder rows an
-      // accepted keyholder invite promises. This is the ONLY type-specific branch in
-      // this method today — officer ('of') and authority ('au') invites still stop at
-      // the InviteResult write above (their downstream object creation lives in
-      // NetworkEngine.respondToInvite, a separate engine).
-      //
-      // Two-insert batch, deliberately DIFFERENT context envelopes per table:
-      //   User:      InviteSlotCid + InviteSignature bound (satisfies User.InsertValid's
-      //              invite-bound branch: `I.Cid = context.InviteSlotCid and
-      //              I.InviteSignature = context.InviteSignature` — reusing the InviteSlot's
-      //              OWN InviteSignature column, which may legitimately be '' per the
-      //              documented send-side carve-out).
-      //   Keyholder: SigningNonce/InviteSlotCid/InviteSignature all NULL (satisfies
-      //              Keyholder.InsertValid, which requires exactly that — Keyholder rows
-      //              are inserted post-signing, not as part of the AdminSignature pipeline).
-      // Same `db.exec` batch so User.UserValid/UserKeyValid-adjacent cross-table CHECKs
-      // (Keyholder.UserIdValid: `exists (select 1 from User U where U.Id = new.UserId)`)
-      // resolve against the deferred-constraint queue at batch end, not per-statement.
-      //
-      // ElectionRevision is resolved FRESH here (not persisted on InviteSlot at send-time)
-      // so the Keyholder row always binds to the CURRENT revision, never a stale one
-      // captured when the invite was sent — this is also where the old hardcoded
-      // `revision: 0` bug (election-engine.ts's prior inviteKeyholder) is genuinely fixed,
-      // not just relocated.
-      if (isKeyholderAccept && mintedUserId) {
-        if (!slotRow.ElectionId) {
-          throw new Error(`respondToInvite: keyholder InviteSlot ${slotCid} has no ElectionId`)
-        }
-        const revRow = await this.ctx.db
-          .prepare('SELECT Revision FROM ElectionRevision WHERE ElectionId = :electionId')
-          .get({ electionId: slotRow.ElectionId }) as { Revision: number } | undefined
-        if (!revRow) {
-          throw new Error(`respondToInvite: no ElectionRevision found for election ${slotRow.ElectionId}`)
-        }
-        const tid = await allocateTid(this.ctx.db, 'user')
-        await this.ctx.db.exec(
-          `insert into User (
-            Id,
-            Name,
-            ImageRef
+        // Phase-22 boundary (D-08): cross-device P2P network send is deferred.
+        // The local InviteResult write above is the only real action this phase.
+        // Transport-level authenticity for the cross-device exchange will be
+        // implemented in the P2P transport phase.
+        return
+      }
+
+      // D-21/D-26 atomic keyholder accept: InviteResult + User + UserKey + Keyholder +
+      // KeyholderDkgBinding, all in ONE BEGIN/COMMIT, so a failed accept (e.g. an invokedId
+      // collision on User) leaves ZERO rows behind — fixing the 62-09 crossnote's documented
+      // non-atomicity (a failed mint used to orphan the InviteResult write).
+      const tid = await allocateTid(this.ctx.db, 'user')
+      await this.ctx.db.exec('BEGIN')
+      try {
+        await this.ctx.db.exec(inviteResultSql, inviteResultParams)
+
+          await this.ctx.db.exec(
+            `insert into User (
+              Id,
+              Name,
+              ImageRef
+            )
+            with context SigningNonce = null, InviteSlotCid = :inviteSlotCid, InviteSignature = :userInviteSignature, Tid = ${tid}
+            values (:userId, :userName, null)`,
+            {
+              inviteSlotCid: slotCid,
+              userInviteSignature: slotRow.InviteSignature,
+              userId: keyholderWrite.userId,
+              userName: slotRow.Name,
+            }
           )
-          with context SigningNonce = null, InviteSlotCid = :inviteSlotCid, InviteSignature = :userInviteSignature, Tid = ${tid}
-          values (:userId, :userName, null);
 
-          insert into Keyholder (
-            ElectionId,
-            ElectionRevision,
-            UserId
+          // D-21: a fresh identity's ONLY key is the caller-provisioned keyholder signing key —
+          // the bootstrap UserKey context form (never the officer's key, never SignatureValid-
+          // checked beyond the bootstrap branch), mirroring NetworksEngine.create's founding key.
+          await this.ctx.db.exec(
+            `insert into UserKey (
+              UserId,
+              Type,
+              PubKey,
+              Expiration
+            )
+            with context UserKey = null, Signature = null, Tid = ${tid}, now = :now, IsSignatureValid = true
+            values (:userId, :keyType, :keyValue, :expiration)`,
+            {
+              userId: keyholderWrite.userId,
+              keyType: keyholder!.signingKey.type,
+              keyValue: keyholder!.signingKey.key,
+              expiration: toCanonicalDatetime(keyholder!.signingKey.expiration),
+              now: nowCanonicalDatetime(),
+            }
           )
-          with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
-          values (:electionId, :revision, :userId);`,
-          {
-            inviteSlotCid: slotCid,
-            userInviteSignature: slotRow.InviteSignature,
-            userId: mintedUserId,
-            userName: slotRow.Name,
-            electionId: slotRow.ElectionId,
-            revision: revRow.Revision,
-          }
-        )
+
+          await this.ctx.db.exec(
+            `insert into Keyholder (
+              ElectionId,
+              ElectionRevision,
+              UserId
+            )
+            with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
+            values (:electionId, :revision, :userId)`,
+            { electionId: keyholderWrite.electionId, revision: keyholderWrite.revision, userId: keyholderWrite.userId }
+          )
+
+          await this.ctx.db.exec(
+            `insert into KeyholderDkgBinding (
+              ElectionId,
+              ElectionRevision,
+              UserId,
+              InviteSlotCid,
+              DkgPublicKey,
+              BoundAt,
+              SignerKey,
+              Signature
+            )
+            values (:electionId, :revision, :userId, :inviteSlotCid, :dkgPublicKey, :boundAt, :signerKey, :signature)`,
+            {
+              electionId: keyholderWrite.electionId,
+              revision: keyholderWrite.revision,
+              userId: keyholderWrite.userId,
+              inviteSlotCid: slotCid,
+              dkgPublicKey: keyholder!.dkgPublicKey,
+              boundAt: keyholderWrite.boundAt,
+              signerKey: keyholder!.signingKey.key,
+              signature: keyholderWrite.bindingSignature,
+            }
+          )
+
+        await this.ctx.db.exec('COMMIT')
+      } catch (innerErr) {
+        try {
+          await this.ctx.db.exec('ROLLBACK')
+        } catch {
+          // already rolled back by the failed statement — ignore, the original error is what matters.
+        }
+        throw innerErr
       }
 
     } catch (err) {

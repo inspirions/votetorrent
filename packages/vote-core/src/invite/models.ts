@@ -1,5 +1,27 @@
 import type { UserInit } from '../index.js';
 import type { AuthorityInvite, OfficerInvite } from '../authority/models.js';
+import type { UserKey } from '../user/models.js';
+import type { Signature } from '../common/signature.js';
+
+/**
+ * 62-02 (D-21, D-26): what the app provides to `IInvitationEngine.respondToInvite` for a Type 'k'
+ * (keyholder) accept. The PRIVATE halves of both keys never cross into vote-engine — only the
+ * public `signingKey`, the public `dkgPublicKey`, and a `sign` callback that signs with the
+ * private half of `signingKey.key` on the caller's side.
+ *
+ * - `signingKey`: the fresh keyholder identity's OWN public signing key (type 'M' or 'P', a
+ *   future expiration) — D-21: never the inviting officer's key, never reused across accepts.
+ * - `dkgPublicKey`: the 66-char hex compressed secp256k1 DKG share-encryption RECEIVING key
+ *   (62-05's `generateDkgReceivingKey().publicKey`) — never the joint election key.
+ * - `sign`: signs a digest with `signingKey`'s private half. `respondToInvite` calls this BEFORE
+ *   opening the accept transaction (never holds a transaction open across a signing prompt) and
+ *   verifies the returned `signerKey` equals `signingKey.key` before writing anything.
+ */
+export interface KeyholderAcceptProvisioning {
+	signingKey: UserKey;
+	dkgPublicKey: string;
+	sign: (digest: Uint8Array) => Promise<Signature>;
+}
 
 export interface Invite {
 	/** The type of the invitation */

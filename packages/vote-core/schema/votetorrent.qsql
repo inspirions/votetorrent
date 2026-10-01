@@ -1192,8 +1192,18 @@ declare schema main
 		constraint ElectionIdValid check (exists (select 1 from Election E where E.Id = new.ElectionId)),
 		constraint UserIdValid check (exists (select 1 from User U where U.Id = new.UserId)),
 		constraint ElectionRevisionValid check (exists (select 1 from ElectionRevision ER where ER.ElectionId = new.ElectionId and ER.Revision = new.ElectionRevision)),
+		-- 62-02 (D-26): a Keyholder can no longer exist without a signed KeyholderDkgBinding for
+		-- the SAME (ElectionId, ElectionRevision, UserId) triple -- the Keyholder row and its
+		-- binding are written as a 2-row pair in ONE transaction (never batched with other
+		-- keyholders' pairs; keyholder-schema-probes.spec.ts Probe 1 proves the shape). The three
+		-- pre-existing null-context conditions are UNCHANGED. Keyholder still carries no
+		-- `check on delete` (revoke authorization is deferred -- T-62-02-13, see 62-02-SUMMARY.md).
 		constraint InsertValid check on insert (
 			context.SigningNonce is null and context.InviteSlotCid is null and context.InviteSignature is null
+				and exists (
+					select 1 from KeyholderDkgBinding B
+						where B.ElectionId = new.ElectionId and B.ElectionRevision = new.ElectionRevision and B.UserId = new.UserId
+				)
 		)
 	)
 		with context ( SigningNonce text null, InviteSlotCid text null, InviteSignature text null, Tid int );

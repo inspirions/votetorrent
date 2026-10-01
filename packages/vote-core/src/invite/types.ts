@@ -1,4 +1,4 @@
-import type { InviteStatus } from './models.js';
+import type { InviteStatus, KeyholderAcceptProvisioning } from './models.js';
 import type { SentOfficerInvite, SentAuthorityInvite } from '../authority/models.js';
 import type { SentKeyholderInvite } from '../election/models.js';
 
@@ -27,6 +27,9 @@ export interface IInvitationEngine {
 	 *                        decline (engine enforces Digest=null per DigestValid) or when the
 	 *                        caller wants the engine to derive a placeholder.
 	 * @param invokedId     - Optional: ID of the object the invitation will invoke (Authority / User).
+	 * @param keyholder     - 62-02 (D-21, D-26): REQUIRED for a Type 'k' (keyholder) accept — absent
+	 *                        means the engine throws before any write. Ignored for every other
+	 *                        invite type. See `KeyholderAcceptProvisioning`'s doc comment.
 	 */
 	respondToInvite(
 		invitationId: string,
@@ -34,5 +37,6 @@ export interface IInvitationEngine {
 		invitePrivate?: string,
 		digest?: string,
 		invokedId?: string,
+		keyholder?: KeyholderAcceptProvisioning,
 	): Promise<void>;
 }

@@ -39,6 +39,7 @@ import {
   makeElectionInit,
 } from './fixtures/test-context.js'
 import type { EngineContext } from '../src/types.js'
+import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
 
 const ELECTION_ID = 'election-1' // addTestElection's / makeElectionInit's default election id
 
@@ -187,8 +188,8 @@ describe('D-21: fresh User per keyholder accept', () => {
     const bobCid = await keyholderSlotCid(elec.ctx, 'Bob Keyholder')
 
     const invitationEngine = new InvitationEngine(elec.ctx)
-    await invitationEngine.respondToInvite(aliceCid, true)
-    await invitationEngine.respondToInvite(bobCid, true)
+    await invitationEngine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await invitationEngine.respondToInvite(bobCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const alice = await readAcceptedKeyholder(elec.ctx, aliceCid)
     const bob = await readAcceptedKeyholder(elec.ctx, bobCid)
@@ -216,7 +217,7 @@ describe('D-21: fresh User per keyholder accept', () => {
     let caught: unknown
     try {
       // Reuse-attempt: pass the officer's own id as the accept-time invokedId.
-      await invitationEngine.respondToInvite(eveCid, true, undefined, undefined, auth.user.id)
+      await invitationEngine.respondToInvite(eveCid, true, undefined, undefined, auth.user.id, makeKeyholderProvisioning())
     } catch (err) {
       caught = err
     }
@@ -242,7 +243,7 @@ describe('D-27: engine reads join the Keyholder table', () => {
     await elec.electionEngine.inviteKeyholder(makeKeyholderInvite('Carol Keyholder'), ELECTION_ID, makeTestSignCallback(auth.user))
     const carolCid = await keyholderSlotCid(elec.ctx, 'Carol Keyholder')
     const invitationEngine = new InvitationEngine(elec.ctx)
-    await invitationEngine.respondToInvite(carolCid, true)
+    await invitationEngine.respondToInvite(carolCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const carol = await readAcceptedKeyholder(elec.ctx, carolCid)
     const irRow = await elec.ctx.db.prepare('select InviteSignature from InviteResult where SlotCid = :cid').get({ cid: carolCid })
@@ -269,7 +270,7 @@ describe('D-27: engine reads join the Keyholder table', () => {
     await electionEngine.inviteKeyholder(makeKeyholderInvite('Alice Keyholder'), electionId, makeTestSignCallback(auth.user))
     const aliceCid = await keyholderSlotCid(auth.ctx, 'Alice Keyholder')
     const invitationEngine = new InvitationEngine(auth.ctx)
-    await invitationEngine.respondToInvite(aliceCid, true)
+    await invitationEngine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const alice = await readAcceptedKeyholder(auth.ctx, aliceCid)
     const irRow = await auth.ctx.db.prepare('select InviteSignature from InviteResult where SlotCid = :cid').get({ cid: aliceCid })
@@ -291,11 +292,11 @@ describe('D-27: engine reads join the Keyholder table', () => {
     await electionEngine.inviteKeyholder(makeKeyholderInvite('Alice Keyholder'), electionId, makeTestSignCallback(auth.user))
     const aliceCid = await keyholderSlotCid(auth.ctx, 'Alice Keyholder')
     const invitationEngine = new InvitationEngine(auth.ctx)
-    await invitationEngine.respondToInvite(aliceCid, true)
+    await invitationEngine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     await electionEngine.inviteKeyholder(makeKeyholderInvite('Dave Keyholder'), electionId, makeTestSignCallback(auth.user))
     const daveCid = await keyholderSlotCid(auth.ctx, 'Dave Keyholder')
-    await invitationEngine.respondToInvite(daveCid, true)
+    await invitationEngine.respondToInvite(daveCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
     const dave = await readAcceptedKeyholder(auth.ctx, daveCid)
 
     const details = await electionEngine.getElectionDetails()
@@ -321,8 +322,8 @@ describe('revokeKeyholder deletes the target, not the caller', () => {
     const aliceCid = await keyholderSlotCid(elec.ctx, 'Alice Keyholder')
     const bobCid = await keyholderSlotCid(elec.ctx, 'Bob Keyholder')
     const invitationEngine = new InvitationEngine(elec.ctx)
-    await invitationEngine.respondToInvite(aliceCid, true)
-    await invitationEngine.respondToInvite(bobCid, true)
+    await invitationEngine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await invitationEngine.respondToInvite(bobCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const alice = await readAcceptedKeyholder(elec.ctx, aliceCid)
     const bob = await readAcceptedKeyholder(elec.ctx, bobCid)
@@ -350,8 +351,8 @@ describe('revokeKeyholder deletes the target, not the caller', () => {
     const cidA = await keyholderSlotCid(elec.ctx, 'Dup Keyholder', keyA)
     const cidB = await keyholderSlotCid(elec.ctx, 'Dup Keyholder', keyB)
     const invitationEngine = new InvitationEngine(elec.ctx)
-    await invitationEngine.respondToInvite(cidA, true)
-    await invitationEngine.respondToInvite(cidB, true)
+    await invitationEngine.respondToInvite(cidA, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await invitationEngine.respondToInvite(cidB, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const dupA = await readAcceptedKeyholder(elec.ctx, cidA)
     const dupB = await readAcceptedKeyholder(elec.ctx, cidB)
@@ -388,7 +389,7 @@ describe('revokeKeyholder deletes the target, not the caller', () => {
     const elec = await addTestElection(auth)
     await elec.electionEngine.inviteKeyholder(makeKeyholderInvite('Alice Keyholder'), ELECTION_ID, makeTestSignCallback(auth.user))
     const aliceCid = await keyholderSlotCid(elec.ctx, 'Alice Keyholder')
-    await new InvitationEngine(elec.ctx).respondToInvite(aliceCid, true)
+    await new InvitationEngine(elec.ctx).respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const countBefore = (await elec.ctx.db.prepare('select count(*) as c from Keyholder').get())!.c as number
 

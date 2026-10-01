@@ -16,6 +16,7 @@ import {
   makeTestSignCallback,
 } from './fixtures/test-context.js'
 import { nowCanonicalDatetime } from '../src/utils.js'
+import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
 import type {
   InviteStatus,
   KeyholderInvite,
@@ -430,7 +431,7 @@ describe('second-keyholder-invite-unique regression (2026-07-30)', () => {
     const keyholderCountBefore = (await elec.ctx.db.prepare('select count(*) as c from Keyholder').get())!.c as number
 
     const engine = new InvitationEngine(elec.ctx)
-    await engine.respondToInvite(aliceCid, true)
+    await engine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const userCountAfter = (await elec.ctx.db.prepare('select count(*) as c from User').get())!.c as number
     const keyholderCountAfter = (await elec.ctx.db.prepare('select count(*) as c from Keyholder').get())!.c as number
@@ -479,7 +480,7 @@ describe('second-keyholder-invite-unique regression (2026-07-30)', () => {
     const carolCid = await keyholderSlotCid(elec.ctx, 'Carol Keyholder')
 
     const engine = new InvitationEngine(elec.ctx)
-    await engine.respondToInvite(carolCid, true)
+    await engine.respondToInvite(carolCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
 
     const khRow = await elec.ctx.db
       .prepare('select ElectionRevision from Keyholder where ElectionId = :electionId')
