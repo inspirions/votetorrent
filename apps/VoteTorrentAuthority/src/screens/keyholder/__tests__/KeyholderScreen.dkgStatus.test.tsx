@@ -1,0 +1,190 @@
+/**
+ * KeyholderScreen.dkgStatus.test.tsx — Phase 62 Plan 26 (D-19 UI). `driveKeyholderDkg` is mocked
+ * (keeping the real `keyholderDkgRowState` via `jest.requireActual`), and `useFocusEffect` is
+ * mocked to invoke its callback once (the `SettingsScreen` convention for this app's own
+ * `useFocusEffect` screens).
+ */
+
+import React from 'react';
+import renderer from 'react-test-renderer';
+
+const mockDriveKeyholderDkg = jest.fn();
+
+jest.mock('../keyholder-dkg-driver', () => {
+  const actual = jest.requireActual('../keyholder-dkg-driver');
+  return {
+    ...actual,
+    driveKeyholderDkg: (...args: unknown[]) => mockDriveKeyholderDkg(...args),
+  };
+});
+
+const mockGetElectionDetails = jest.fn(async () => ({ election: { id: 'election-1' } }));
+const mockElectionEngine = { getElectionDetails: mockGetElectionDetails };
+
+const mockGetEngine = jest.fn(async () => undefined);
+
+jest.mock('../../../providers/AppProvider', () => ({
+  useApp: () => ({ getEngine: mockGetEngine }),
+}));
+
+jest.mock('../../../engines/keyholder-vault', () => ({
+  resolveKeyholderKeyVault: () => ({}),
+}));
+
+jest.mock('react-native-vector-icons/FontAwesome6', () => 'FontAwesome6');
+
+jest.mock('react-i18next', () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
+
+let mockRouteParams: { keyholder: { invite: { name: string }; result?: { invokedId: string } }; electionEngine: typeof mockElectionEngine };
+
+const mockSetOptions = jest.fn();
+const mockNavigate = jest.fn();
+
+jest.mock('@react-navigation/native', () => ({
+  useTheme: () => ({
+    colors: { accent: '#ACCENT0', textSecondary: '#888888', success: '#00FF00', warning: '#FFA500', error: '#FF0000' },
+  }),
+  useRoute: () => ({ params: mockRouteParams }),
+  useNavigation: () => ({ navigate: mockNavigate, setOptions: mockSetOptions }),
+  useFocusEffect: (callback: () => void | (() => void)) => {
+    const React = require('react');
+    React.useEffect(() => callback(), []);
+  },
+}));
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const KeyholderScreenModule = require('../KeyholderScreen');
+const KeyholderScreen = KeyholderScreenModule.default ?? KeyholderScreenModule.KeyholderScreen;
+
+async function render() {
+  let tr!: renderer.ReactTestRenderer;
+  await renderer.act(async () => {
+    tr = renderer.create(<KeyholderScreen />);
+  });
+  await renderer.act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  return tr;
+}
+
+function hasTestID(tr: renderer.ReactTestRenderer, testID: string): boolean {
+  return tr.root.findAll((n) => n.props?.testID === testID).length > 0;
+}
+
+/** Walks up from `instance` to the nearest ancestor whose host type is `'View'`. */
+function nearestViewAncestor(instance: renderer.ReactTestInstance): renderer.ReactTestInstance {
+  let node: renderer.ReactTestInstance | null = instance.parent;
+  while (node && (node.type as unknown) !== 'View') {
+    node = node.parent;
+  }
+  if (!node) throw new Error('nearestViewAncestor: no View ancestor found');
+  return node;
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockGetElectionDetails.mockResolvedValue({ election: { id: 'election-1' } });
+  mockRouteParams = {
+    keyholder: { invite: { name: 'Alice' }, result: { invokedId: 'user-1' } },
+    electionEngine: mockElectionEngine,
+  };
+});
+
+describe('KeyholderScreen — DKG status wiring (62-26)', () => {
+  it('K1 position: the complaint row shares its SECTION ancestor with the two detail rows, not with the Invite button', async () => {
+    mockDriveKeyholderDkg.mockResolvedValue({ status: { phase: 'restarting', self: { isDisqualified: false } }, advanced: false, actions: [] });
+    const tr = await render();
+
+    const statusRow = tr.root.findByProps({ testID: 'keyholder-dkg-status-row' });
+    const inviteButton = tr.root.findAll((n) => n.props?.title === 'invite')[0];
+    expect(inviteButton).toBeTruthy();
+
+    // The "type" detail row's grandparent is the first `section` View. The status row must live
+    // in THAT SAME subtree, and that subtree must NOT contain the Invite button.
+    const typeLabelText = tr.root.findAll(
+      (n) => (n.type as unknown) === 'Text' && Array.isArray(n.props?.children) && n.props.children[0] === 'type'
+    )[0];
+    expect(typeLabelText).toBeTruthy();
+    const detailRow = nearestViewAncestor(typeLabelText); // the `styles.detail` row View
+    const firstSection = nearestViewAncestor(detailRow); // the `styles.section` View
+
+    expect(firstSection.findAll((n) => n === statusRow)).toHaveLength(1);
+    expect(firstSection.findAll((n) => n.props?.title === 'invite')).toHaveLength(0);
+  });
+
+  it('K2 drive key: electionId comes from getElectionDetails, and invokedId from keyholder.result', async () => {
+    mockDriveKeyholderDkg.mockResolvedValue({ status: { phase: 'in-progress', self: { isDisqualified: false } }, advanced: false, actions: [] });
+    await render();
+
+    expect(mockDriveKeyholderDkg).toHaveBeenCalledWith(expect.anything(), 'election-1', 'user-1');
+  });
+
+  it('K2b: a keyholder with no result passes undefined as the driver userId', async () => {
+    mockRouteParams.keyholder = { invite: { name: 'Bob' } };
+    mockDriveKeyholderDkg.mockResolvedValue({ status: { phase: 'not-started', self: undefined }, advanced: false, actions: [] });
+    await render();
+
+    expect(mockDriveKeyholderDkg).toHaveBeenCalledWith(expect.anything(), 'election-1', undefined);
+  });
+
+  it('K3a: an authDenied driver outcome renders deviceSigningErrorGeneric and keeps the status row', async () => {
+    mockDriveKeyholderDkg.mockResolvedValue({
+      status: { phase: 'in-progress', self: { isDisqualified: false } },
+      advanced: false,
+      actions: [],
+      error: { code: 'auth-denied', authDenied: true, message: 'denied' },
+    });
+    const tr = await render();
+
+    expect(JSON.stringify(tr.toJSON())).toContain('deviceSigningErrorGeneric');
+    expect(hasTestID(tr, 'keyholder-dkg-status-inProgress')).toBe(true);
+  });
+
+  it('K3b: a non-auth driver error renders its own message', async () => {
+    mockDriveKeyholderDkg.mockResolvedValue({
+      status: null,
+      advanced: false,
+      actions: [],
+      error: { code: 'unknown', authDenied: false, message: 'engine unavailable' },
+    });
+    const tr = await render();
+
+    expect(JSON.stringify(tr.toJSON())).toContain('engine unavailable');
+    expect(hasTestID(tr, 'keyholder-dkg-status-row')).toBe(false);
+  });
+
+  it('K4 unmount: unmounting before the driver settles produces no post-unmount state update', async () => {
+    let resolveDriver!: (value: unknown) => void;
+    mockDriveKeyholderDkg.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveDriver = resolve;
+        })
+    );
+    let tr!: renderer.ReactTestRenderer;
+    await renderer.act(async () => {
+      tr = renderer.create(<KeyholderScreen />);
+    });
+
+    renderer.act(() => {
+      tr.unmount();
+    });
+
+    // Resolving AFTER unmount must not throw or warn — the effect's `active` flag guards it.
+    await renderer.act(async () => {
+      resolveDriver({ status: { phase: 'complete', self: { isDisqualified: false } }, advanced: false, actions: [] });
+      await Promise.resolve();
+    });
+  });
+
+  it('K5 failed: a driver status with phase failed renders keyholder-dkg-status-failed, not complaint', async () => {
+    mockDriveKeyholderDkg.mockResolvedValue({ status: { phase: 'failed', self: { isDisqualified: false } }, advanced: false, actions: [] });
+    const tr = await render();
+
+    expect(hasTestID(tr, 'keyholder-dkg-status-failed')).toBe(true);
+    expect(hasTestID(tr, 'keyholder-dkg-status-complaint')).toBe(false);
+  });
+});

@@ -23,7 +23,6 @@
 
 import type { IKeyVault } from '@votetorrent/vote-engine/rn';
 import type { SecretWrapPrompt } from '@votetorrent/attestation-native';
-import i18n from '../i18n';
 import { createAuthorityKeyVault } from './key-vault';
 
 /** requireAuth true, forever — point 1 above. */
@@ -31,8 +30,17 @@ export const VOTETORRENT_AUTHORITY_KEYHOLDER_SHARE_WRAP_KEY_V1 = 'VOTETORRENT_AU
 
 /** Resolved fresh on every wrap/unwrap call (never cached), so a locale change between calls is
  * honored. Reuses the existing `deviceSigningPrompt*` catalog keys (same biometric-confirmation
- * copy every other auth-required prompt in this app uses). */
+ * copy every other auth-required prompt in this app uses).
+ *
+ * `../i18n` is required LAZILY (call time, not module-load time): that module calls
+ * `i18n.use(initReactI18next).init(...)` at its own module scope, and `engine-factory.ts` (which
+ * imports `resolveKeyholderKeyVault` below) is reachable from nearly every screen's test. A
+ * top-level import here would force every such test to supply a working `initReactI18next` mock,
+ * even when nothing in that test ever wraps or unwraps a keyholder secret. Deferring the require
+ * to the moment a prompt is actually needed keeps every other screen's test unaffected. */
 export function keyholderVaultPrompt(): SecretWrapPrompt {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const i18n = require('../i18n').default as { t: (key: string) => string };
 	return {
 		title: i18n.t('deviceSigningPromptTitle'),
 		subtitle: i18n.t('deviceSigningPromptSubtitle'),
