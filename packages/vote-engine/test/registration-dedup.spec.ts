@@ -22,14 +22,17 @@ import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { MockRegistrationEngine } from '../src/registration/mock-registration-engine.js'
+import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
 import { P2pRegistrationTransport, REGISTRATION_DUPLICATE_CLOSED_REASON } from '../src/registration/transport/p2p-registration-transport.js'
 import { readAuthorityThreshold } from '../src/signing/threshold.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { RegistrationDuplicateError } from '@votetorrent/vote-core'
 import type {
   RegisterInit,
+  RegistrantSignatureTask,
   RegistrationDecisionPublishPort,
   RegistrationRequestInit,
+  RegistrationVerificationChecklistItem,
   Signature
 } from '@votetorrent/vote-core'
 
@@ -63,17 +66,18 @@ async function submitPending (
   fixture: P2pStagingFixture,
   identity: SubmitIdentity,
   opts?: { requesterKey?: TestKeyPair; authorityId?: string }
-): Promise<{ requestId: string; requester: TestKeyPair }> {
+): Promise<{ requestId: string; requester: TestKeyPair; registrantId: string }> {
   const requester = opts?.requesterKey ?? randomTestKeyPair()
   const authorityId = opts?.authorityId ?? fixture.auth.authority.id
   const engine = new RegistrationEngine(fixture.auth.ctx)
+  const registrantId = crypto.randomUUID()
   const details = [
     ...(identity.dob !== undefined ? [{ name: 'dob', value: identity.dob }] : []),
     ...(identity.email !== undefined ? [{ name: 'email', value: identity.email }] : []),
     ...(identity.phone !== undefined ? [{ name: 'phone', value: identity.phone }] : [])
   ]
   const payload: RegisterInit = {
-    registrant: { id: crypto.randomUUID(), authorityId, expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000) },
+    registrant: { id: registrantId, authorityId, expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000) },
     public: { firstName: identity.firstName, lastName: identity.lastName },
     private: { expiration: toIsoZDatetime(Date.now() + 365 * 86_400_000), details }
   }
@@ -84,7 +88,45 @@ async function submitPending (
     submittedAt: toIsoZDatetime(Date.now())
   }
   const requestId = await engine.submitRegistrationRequest(init, requester.publicHex, makeCallbackSigner(requester))
-  return { requestId, requester }
+  return { requestId, requester, registrantId }
+}
+
+function makeNetworkRef (): { hash: string; name: string; relays: string[]; primaryAuthorityDomainName: string } {
+  return {
+    hash: 'test-registration-dedup-hash',
+    name: 'Test Network',
+    relays: [],
+    primaryAuthorityDomainName: 'test.example'
+  }
+}
+
+/** Mirrors `registrant-approval.spec.ts`'s own helper (not imported — see this file's header). */
+async function getRegistrantTask (tasksEngine: SignatureTasksEngine, requestId: string): Promise<RegistrantSignatureTask> {
+  const tasks = await tasksEngine.getRequestedSignatures(true)
+  const found = tasks.find(
+    (t) => t.signatureType === 'registrant' && (t as RegistrantSignatureTask).requestId === requestId
+  ) as RegistrantSignatureTask | undefined
+  expect(found, `registrant task for requestId=${requestId} must be present`).to.not.be.undefined
+  return found!
+}
+
+/** Mirrors `registrant-approval.spec.ts`'s own helper (not imported — see this file's header). */
+async function acceptRequest (
+  tasksEngine: SignatureTasksEngine,
+  officerSign: (digest: Uint8Array) => Promise<Signature>,
+  requestId: string,
+  checklist: RegistrationVerificationChecklistItem[] = ['id']
+): Promise<RegistrantSignatureTask> {
+  const task = await getRegistrantTask(tasksEngine, requestId)
+  const digestBytes = await tasksEngine.getSignatureDigest(task)
+  const headerSignature = await officerSign(digestBytes)
+  await tasksEngine.completeSignature(task, {
+    isAccepted: true,
+    signature: headerSignature,
+    sign: officerSign,
+    decision: { checklist }
+  })
+  return task
 }
 
 /** Submits one PENDING request directly against a `ThresholdAuthorityFixture` (D7). */
@@ -522,5 +564,192 @@ describe('D-43/D-44 registration duplicate detection and closure', function () {
     expect(combined).to.not.include(secretDob)
     expect(combined).to.not.include(secretEmail)
     expect(combined).to.not.include(secretPhone)
+  })
+
+  // ---- Closure enforcement (Task 3) ----
+
+  describe('closure enforcement', () => {
+    it('S1: a closed-as-duplicate request is excluded from the registrant seed pass', async () => {
+      const { requestId: a } = await submitPending(fixture, { firstName: 'Seed', lastName: 'Alpha' })
+      await wait(5)
+      const { requestId: b } = await submitPending(fixture, { firstName: 'Seed', lastName: 'Alpha' })
+      await rejectAs(fixture, b, 'reason')
+      await engine.publishRegistrationDecision(publisher, b, { closesRequestId: a })
+
+      const { requestId: c } = await submitPending(fixture, { firstName: 'Seed', lastName: 'Gamma' })
+
+      const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), fixture.auth.ctx)
+      await tasksEngine.getRequestedSignatures(true)
+
+      expect(await countRows(fixture, 'select count(*) as n from RegistrantSignatureTaskExtension where RequestId = :id', { id: a })).to.equal(0)
+      expect(await countRows(fixture, 'select count(*) as n from RegistrantSignatureTaskExtension where RequestId = :id', { id: c })).to.equal(1)
+    })
+
+    it('S2: an already-seeded task for a request that becomes closed refuses before sign() is spent', async () => {
+      const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), fixture.auth.ctx)
+      const officerSign = makeTestSignCallback(fixture.net.user)
+
+      const { requestId: a, registrantId: registrantIdForA } = await submitPending(fixture, { firstName: 'Gate', lastName: 'Beta' })
+      await wait(5)
+      const { requestId: b } = await submitPending(fixture, { firstName: 'Gate', lastName: 'Beta' })
+      await tasksEngine.getRequestedSignatures(true)
+
+      await rejectAs(fixture, b, 'reason')
+      await engine.publishRegistrationDecision(publisher, b, { closesRequestId: a })
+
+      const before = {
+        officer: await countRows(fixture, 'select count(*) as n from OfficerSignature'),
+        admin: await countRows(fixture, 'select count(*) as n from AdminSignature')
+      }
+
+      const task = await getRegistrantTask(tasksEngine, a)
+      const digestBytes = await tasksEngine.getSignatureDigest(task)
+      const headerSignature = await officerSign(digestBytes)
+      let caught: unknown
+      try {
+        await tasksEngine.completeSignature(task, {
+          isAccepted: true,
+          signature: headerSignature,
+          sign: officerSign,
+          decision: { checklist: ['id'] }
+        })
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).to.be.instanceOf(RegistrationDuplicateError)
+      expect((caught as RegistrationDuplicateErrorInstance).code).to.equal('closed-as-duplicate')
+
+      expect(await countRows(fixture, 'select count(*) as n from Registrant where Id = :id', { id: registrantIdForA })).to.equal(0)
+      const aStatusRow = await fixture.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id: a })
+      expect(aStatusRow?.Status).to.equal('p')
+      expect(await countRows(fixture, 'select count(*) as n from OfficerSignature')).to.equal(before.officer)
+      expect(await countRows(fixture, 'select count(*) as n from AdminSignature')).to.equal(before.admin)
+    })
+
+    it('S3: a merely closing (not yet closed) request is also refused by both decision paths', async () => {
+      const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), fixture.auth.ctx)
+      const officerSign = makeTestSignCallback(fixture.net.user)
+
+      const { requestId: target } = await submitPending(fixture, { firstName: 'Hold', lastName: 'Delta' })
+      await wait(5)
+      const { requestId: surviving } = await submitPending(fixture, { firstName: 'Hold', lastName: 'Delta' })
+      await tasksEngine.getRequestedSignatures(true)
+      await rejectAs(fixture, surviving, 'reason')
+
+      let callCount = 0
+      const flakyPublisher: RegistrationDecisionPublishPort = {
+        authorityId: fixture.decisionSigner.authorityId,
+        publishDecision: async (d) => {
+          callCount += 1
+          if (callCount === 2) {
+            const err = new Error('simulated cursor exhaustion') as Error & { code?: string }
+            err.code = 'cursor-exhausted'
+            throw err
+          }
+          return transport.publishDecision(d)
+        }
+      }
+      await engine.publishRegistrationDecision(flakyPublisher, surviving, { closesRequestId: target })
+      expect((await engine.getDuplicateClosure(target))?.state).to.equal('closing')
+
+      let rejectCaught: unknown
+      try {
+        await rejectAs(fixture, target, 'reason')
+      } catch (err) {
+        rejectCaught = err
+      }
+      expect(rejectCaught).to.be.instanceOf(RegistrationDuplicateError)
+      expect((rejectCaught as RegistrationDuplicateErrorInstance).code).to.equal('closed-as-duplicate')
+
+      const task = await getRegistrantTask(tasksEngine, target)
+      const digestBytes = await tasksEngine.getSignatureDigest(task)
+      const headerSignature = await officerSign(digestBytes)
+      let acceptCaught: unknown
+      try {
+        await tasksEngine.completeSignature(task, {
+          isAccepted: true,
+          signature: headerSignature,
+          sign: officerSign,
+          decision: { checklist: ['id'] }
+        })
+      } catch (err) {
+        acceptCaught = err
+      }
+      expect(acceptCaught).to.be.instanceOf(RegistrationDuplicateError)
+      expect((acceptCaught as RegistrationDuplicateErrorInstance).code).to.equal('closed-as-duplicate')
+    })
+
+    it('S4: approving the surviving request and publishing automatically closes its older look-alike', async () => {
+      const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), fixture.auth.ctx)
+      const officerSign = makeTestSignCallback(fixture.net.user)
+
+      const { requestId: a } = await submitPending(fixture, { firstName: 'Echo', lastName: 'Foxtrot' })
+      await wait(5)
+      const { requestId: b } = await submitPending(fixture, { firstName: 'Echo', lastName: 'Foxtrot' })
+      await tasksEngine.getRequestedSignatures(true)
+
+      await acceptRequest(tasksEngine, officerSign, b)
+
+      const result = await engine.publishRegistrationDecision(publisher, b)
+      expect(result.closesRequestId).to.equal(a)
+      expect(result.closure).to.equal('closed')
+
+      const bRow = await rawDecision(fixture, b)
+      expect(bRow?.Status).to.equal('a')
+      expect(bRow?.ClosesRequestId).to.equal(a)
+      const aRow = await rawDecision(fixture, a)
+      expect(aRow?.Status).to.equal('d')
+    })
+
+    it('S5: the pending-filtered inbox excludes a closed request; the unfiltered inbox shows it flagged', async () => {
+      const { requestId: a } = await submitPending(fixture, { firstName: 'Golf', lastName: 'Hotel' })
+      await wait(5)
+      const { requestId: b } = await submitPending(fixture, { firstName: 'Golf', lastName: 'Hotel' })
+      await rejectAs(fixture, b, 'reason')
+      await engine.publishRegistrationDecision(publisher, b, { closesRequestId: a })
+
+      const totalPendingBefore = await countRows(
+        fixture,
+        "select count(*) as n from RegistrationRequest where AuthorityId = :auth and Status = 'p'",
+        { auth: fixture.auth.authority.id }
+      )
+
+      const pendingResult = await engine.listRegistrationRequests({ authorityId: fixture.auth.authority.id, status: 'p' })
+      expect(pendingResult.rows.map((r) => r.requestId)).to.not.include(a)
+      expect(pendingResult.total).to.equal(totalPendingBefore - 1)
+
+      const unfilteredResult = await engine.listRegistrationRequests({ authorityId: fixture.auth.authority.id })
+      const aRow = unfilteredResult.rows.find((r) => r.requestId === a)
+      expect(aRow?.status).to.equal('p')
+      expect(aRow?.duplicateClosure).to.equal('closed')
+      for (const row of unfilteredResult.rows) {
+        if (row.requestId !== a) expect(row).to.not.have.property('duplicateClosure')
+      }
+    })
+
+    it('S6: transparency stats exclude a closed request from pending and report closedAsDuplicate', async () => {
+      const statsBefore = await engine.getRegistrationTransparencyStats(fixture.auth.authority.id)
+      expect(statsBefore).to.not.have.property('closedAsDuplicate')
+
+      const { requestId: a } = await submitPending(fixture, { firstName: 'India', lastName: 'Juliet' })
+      await wait(5)
+      const { requestId: b } = await submitPending(fixture, { firstName: 'India', lastName: 'Juliet' })
+
+      const statsWithTwoPending = await engine.getRegistrationTransparencyStats(fixture.auth.authority.id)
+      expect(statsWithTwoPending.pending).to.equal(statsBefore.pending + 2)
+
+      await rejectAs(fixture, b, 'reason')
+      await engine.publishRegistrationDecision(publisher, b, { closesRequestId: a })
+
+      const stats = await engine.getRegistrationTransparencyStats(fixture.auth.authority.id)
+      expect(stats.closedAsDuplicate).to.equal(1)
+      // B moved from pending to rejected (not closed); A stays Status='p' locally but is excluded
+      // from "pending" because it is closed — net change from statsWithTwoPending is -2.
+      expect(stats.pending).to.equal(statsWithTwoPending.pending - 2)
+      expect(stats.rejected).to.equal((statsBefore.rejected ?? 0) + 1)
+
+      const noClosureStats = await engine.getRegistrationTransparencyStats('nonexistent-authority-id')
+      expect(noClosureStats).to.not.have.property('closedAsDuplicate')
+    })
   })
 })

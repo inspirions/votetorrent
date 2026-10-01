@@ -1,4 +1,5 @@
 import type { RegistrationRequestListFilter, RegistrationRequestStatus } from '@votetorrent/vote-core'
+import { registrationRequestNotClosedSql } from './duplicate-closure.js'
 
 /**
  * D-06/D-08/D-09 (Phase 48 plan 08): the SINGLE shared predicate builder
@@ -81,6 +82,13 @@ function buildRegistrationRequestListFragment (filter?: RegistrationRequestListF
   if (filter?.status !== undefined) {
     where += ' and R.Status = :status'
     params.status = filter.status
+    if (filter.status === STATUS_PENDING) {
+      // D-44 (62-19): a pending request closed or closing as a duplicate is not in the pending
+      // queue — an UNFILTERED list still shows it, flagged (RegistrationEngine.listRegistrationRequests
+      // sets duplicateClosure on the row instead). Appended right after the status predicate so
+      // the page and count SQL (the SAME shared fragment) can never disagree about this.
+      where += ` and ${registrationRequestNotClosedSql('R')}`
+    }
   }
   if (filter?.issuerType !== undefined) {
     where += ' and R.IssuerType = :issuerType'

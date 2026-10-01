@@ -8,7 +8,7 @@ import { findPendingAdminTaskRow, findPendingTaskNonce } from './task-signing-st
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
-import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError } from '@votetorrent/vote-core'
+import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError, RegistrationDuplicateError } from '@votetorrent/vote-core'
 import type {
   ISigningEngine,
   ISignatureTasksEngine,
@@ -35,6 +35,7 @@ import { BALLOT_HEADER_TID } from '../election/election-engine.js'
 import { CompleteSignatureBuilder } from './builders/index.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { RegistrationEngine } from '../registration/registration-engine.js'
+import { registrationRequestNotClosedSql, readDuplicateClosure } from '../registration/duplicate-closure.js'
 import { resolveRecordValidity } from '../association/record-validity.js'
 import { AuthorityEngine } from '../authority/authority-engine.js'
 
@@ -460,7 +461,10 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
                  join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
                  where O.AuthorityId = R.AuthorityId and O.UserId = :userId
                    and exists (select 1 from json_each(O.Scopes) where value = 'vrg')
-             )`,
+             )
+             -- D-44 (62-19): a request closed or closing as a duplicate is undecidable, so it must
+             -- never be seeded. The single shared definition — never a locally re-derived predicate.
+             and ${registrationRequestNotClosedSql('R')}`,
         { userId }
       )) {
         pendingRows.push({
@@ -853,10 +857,11 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         try {
           await this.resolveAcceptableRegistrantApproval(taskRow.Id as string)
         } catch (err) {
-          // R2/D-04/D-05 (57-02): let RegistrantAlreadyExistsError through undecorated —
-          // this.rethrow() below wraps any plain Error into a fresh `new Error(...)` and
-          // would destroy the instanceof check the typed error exists to provide.
-          if (err instanceof RegistrantAlreadyExistsError) {
+          // R2/D-04/D-05 (57-02), and D-44 (62-19): let RegistrantAlreadyExistsError and
+          // RegistrationDuplicateError through undecorated — this.rethrow() below wraps any plain
+          // Error into a fresh `new Error(...)` and would destroy the instanceof check each typed
+          // error exists to provide.
+          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError) {
             throw err
           }
           this.rethrow(err, 'completeSignature (registrant pre-check)')
@@ -1031,10 +1036,11 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         try {
           await this.finalizeRegistrantApproval(taskRow.Id as string, result.decision!, result.sign!, nonce)
         } catch (err) {
-          // R2/D-04/D-05 (57-02): see the matching note on the pre-check call site above —
-          // finalizeRegistrantApproval's own defence-in-depth guard, and register() itself,
-          // can both throw RegistrantAlreadyExistsError; do not let this.rethrow() re-wrap it.
-          if (err instanceof RegistrantAlreadyExistsError) {
+          // R2/D-04/D-05 (57-02), and D-44 (62-19): see the matching note on the pre-check call
+          // site above — finalizeRegistrantApproval's own defence-in-depth guard, and register()
+          // itself, can both throw RegistrantAlreadyExistsError; resolveAcceptableRegistrantApproval
+          // (called internally) can throw RegistrationDuplicateError. Neither may be re-wrapped.
+          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError) {
             throw err
           }
           this.rethrow(err, 'completeSignature (finalize registrant)')
@@ -1563,6 +1569,18 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     if (extRow.Status !== 'p') {
       throw new Error(
         `SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} is not pending (Status=${extRow.Status})`
+      )
+    }
+
+    // D-44 (62-19): a request closed or closing as a duplicate cannot be decided — checked BEFORE
+    // sign() (this is called from completeSignature's pre-check, ahead of any signature spend).
+    const duplicateClosure = await readDuplicateClosure(ctx.db, requestId, extRow.AuthorityId)
+    if (duplicateClosure) {
+      throw new RegistrationDuplicateError(
+        'closed-as-duplicate',
+        requestId,
+        'This request was closed as a duplicate of another request and can no longer be decided.',
+        duplicateClosure.closedByRequestId ?? undefined
       )
     }
 

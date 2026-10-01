@@ -2071,6 +2071,16 @@ export class RegistrationEngine implements IRegistrationEngine {
           // satisfying the "required, not optional" contract.
           rows[i]!.hasPriorRejections = count > (rows[i]!.status === STATUS_REJECTED ? 1 : 0)
         }
+
+        // D-44 (62-19): ONE grouped query for the whole page, never a per-row query. A row whose
+        // id is absent from the map gets no `duplicateClosure` key at all (never an assigned
+        // `undefined`) — a caller must not be able to observe a difference between "not computed"
+        // and "not closed".
+        const closureStates = await readDuplicateClosureStates(ctx.db, filter?.authorityId)
+        for (let i = 0; i < rows.length; i++) {
+          const state = closureStates.get(rows[i]!.requestId)
+          if (state !== undefined) rows[i]!.duplicateClosure = state
+        }
       }
 
       const nextCursor = rows.length === pageSize ? rows[rows.length - 1]!.requestId : undefined
@@ -2709,6 +2719,25 @@ export class RegistrationEngine implements IRegistrationEngine {
         else if (row.s === STATUS_REJECTED) rejected = n
       }
 
+      // D-44 (62-19): a pending request closed or closing as a duplicate is not really pending —
+      // subtract it, and report its count separately. Computed as (total pending) minus (pending
+      // AND not-closed) rather than a single `not (${registrationRequestNotClosedSql('R')})` form
+      // — both sub-queries here reuse the EXACT shape `readPendingComparables` already proves safe
+      // against this table (`R.AuthorityId = :x and R.Status = 'p' and registrationRequestNotClosedSql('R')`),
+      // where a NOT-wrapped compound predicate is an unproven shape against this table.
+      let closedAsDuplicate = 0
+      if (pending > 0) {
+        const notClosedPendingRow = await ctx.db
+          .prepare(
+            `select count(*) as n from RegistrationRequest R
+               where R.AuthorityId = :rowAuthorityId and R.Status = 'p' and ${registrationRequestNotClosedSql('R')}`
+          )
+          .get({ rowAuthorityId: authorityId })
+        const notClosedPending = asNumberOr(notClosedPendingRow?.n, 0, 'getRegistrationTransparencyStats.notClosedPending')
+        closedAsDuplicate = Math.max(0, pending - notClosedPending)
+        pending = notClosedPending
+      }
+
       // MEDIAN, measured from ReceivedAt — the authority's OWN observation —
       // NEVER from SubmittedAt (submitter-supplied, 48-02 L-3). SubmittedAt
       // could move the published responsiveness figure in either direction
@@ -2745,7 +2774,12 @@ export class RegistrationEngine implements IRegistrationEngine {
       // UI renders the number as a short duration, never as a raw
       // millisecond count.
 
-      return { pending, approved, rejected, medianTimeToDecisionMs }
+      // closedAsDuplicate is present ONLY when greater than zero — the pre-existing zero-request
+      // deep-equal (`{ pending: 0, approved: 0, rejected: 0, medianTimeToDecisionMs: undefined }`)
+      // must stay exact.
+      return closedAsDuplicate > 0
+        ? { pending, approved, rejected, medianTimeToDecisionMs, closedAsDuplicate }
+        : { pending, approved, rejected, medianTimeToDecisionMs }
     } catch (err) {
       this.rethrow(err, 'getRegistrationTransparencyStats')
     }
