@@ -806,9 +806,26 @@ declare schema main
 			)
 		),
 		constraint NoUpdate check on update (false),
-		constraint ExpirationFuture check (Expiration > context.now)
+		-- 62-02 (D-38): the import-mode replay hook. `IsImportReplay` admits only a row whose
+		-- Expiration is already in the past -- every key-USE CHECK (this table's own InsertValid
+		-- signer-liveness branch `K.Expiration > context.now`, and the analogous bound on
+		-- AdminSigning/OfficerSignature) already treats an expired key as dead, so a replayed row
+		-- this flag waives can do nothing a currently-valid key's holder could not already do. The
+		-- waiver touches ONLY this ExpirationFuture bound -- it never relaxes InsertValid or
+		-- SignatureValid, both of which still verify the replayed row independently (a subsequent
+		-- key whose SIGNER key has itself expired still fails closed on InsertValid -- the
+		-- documented fail-closed residual). Replayed signed rows elsewhere must bind their
+		-- ORIGINAL Tid (an import-path engine discipline, not a schema one). Exactly ONE
+		-- sanctioned producer (62-16's NetworksEngine.importFoundingBundle); bind 1 (an integer),
+		-- never a boolean -- `coalesce(context.IsImportReplay, 0) = 1` treats NULL/omitted as "not
+		-- a replay", never as a bypass. The `context.now is not null` half closes a latent
+		-- SQL-CHECK NULL-bypass: a bare `Expiration > context.now` evaluates to NULL (not false)
+		-- when `now` is omitted, which standard CHECK semantics treat as SATISFIED -- an expired
+		-- key would silently insert. See keyholder-schema-probes.spec.ts Probe 2 for the empirical
+		-- proof against this project's installed Quereus version.
+		constraint ExpirationFuture check (coalesce(context.IsImportReplay, 0) = 1 or (context.now is not null and Expiration > context.now))
 	)
-		with context ( UserKey text null, Signature text null, Tid int, now datetime, IsSignatureValid boolean );
+		with context ( UserKey text null, Signature text null, Tid int, now datetime, IsSignatureValid boolean, IsImportReplay integer null );
 
 	-- 62-01 (D-04) lets any number of officers each publish their own secp256k1 envelope
 	-- encryption public key, self-attested by a signing key already in that user's OWN UserKey
