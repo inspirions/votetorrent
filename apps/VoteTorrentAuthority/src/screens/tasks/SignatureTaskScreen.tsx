@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { globalStyles } from "../../theme/styles";
 import type {
@@ -10,6 +10,7 @@ import type {
 	ElectionRevisionSignatureTask,
 	BallotSignatureTask,
 	ISignatureTasksEngine,
+	SigningStatus,
 } from "@votetorrent/vote-core";
 import { AdminSignatureTaskDetails } from "./components/AdminSignatureTaskDetails";
 import { AuthoritySignatureTaskDetails } from "./components/AuthoritySignatureTaskDetails";
@@ -20,6 +21,8 @@ import { BallotSignatureTaskDetails } from "./components/BallotSignatureTaskDeta
 import { SignatureTaskFooter } from "../../components/SignatureTaskFooter";
 import { ThemedText } from "../../components/ThemedText";
 import { InlineError } from "../../components/InlineError";
+import { ThresholdProgressNote } from "./components/ThresholdProgressNote";
+import { loadTaskSigningStatus } from "./renderable-signature-tasks";
 import { useTranslation } from "react-i18next";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import { useApp } from "../../providers/AppProvider";
@@ -50,7 +53,35 @@ export default function SignatureTaskScreen() {
 
 	const [errorMessage, setErrorMessage] = useState<string>("");
 	const [isProcessing, setIsProcessing] = useState(false);
+	const [thresholdStatus, setThresholdStatus] = useState<SigningStatus | null>(null);
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
+
+	// 62-12 (Surface 5, D-09/D-10/D-11): load the task's own co-signing status on mount, display
+	// only. An `unreachable` session takes the EXISTING closed-task path — the same thing that
+	// already happens after Accept/Reject navigates back, just triggered by the status read
+	// instead of a completion call. No new pill, no new copy (the UI-SPEC's "no veto UI").
+	useEffect(() => {
+		let cancelled = false;
+		(async () => {
+			let engine: ISignatureTasksEngine | undefined;
+			try {
+				engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
+			} catch {
+				// An engine-resolution failure leaves the status null (fail-open, no note).
+			}
+			const status = await loadTaskSigningStatus(engine, task);
+			if (cancelled) return;
+			if (status?.unreachable) {
+				navigation.goBack();
+				return;
+			}
+			setThresholdStatus(status);
+		})();
+		return () => {
+			cancelled = true;
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [task]);
 
 	useLayoutEffect(() => {
 		// Guarded, not cast: 'registrant' tasks never reach this screen (see the titleKey
@@ -106,6 +137,10 @@ export default function SignatureTaskScreen() {
 	//   On reject the screen MUST NOT invoke the device-signer or produce a real signature.
 	//   The engine's if (result.isAccepted) branch (plan 21-06) skips signingEngine.sign()
 	//   so no OfficerSignature is inserted and the signing session is not advanced (D-12).
+	// 62-12 (D-11): above threshold 1 this completion is a RECORDED VOTE, not a veto — no confirm
+	// dialog, no second engine call, nothing else. The session is only ever shown as failed once
+	// `getSigningStatus` derives it `unreachable` (the mount effect above), never from this call
+	// itself.
 	const reject = async () => {
 		setErrorMessage("");
 		setIsProcessing(true);
@@ -134,6 +169,7 @@ export default function SignatureTaskScreen() {
 	return (
 		<View style={styles.content}>
 			<ScrollView style={styles.container}>
+				<ThresholdProgressNote status={thresholdStatus} testID="signature-task-threshold-note" />
 				{task.signatureType === "admin" && (
 					<AdminSignatureTaskDetails task={task as AdminSignatureTask} />
 				)}
