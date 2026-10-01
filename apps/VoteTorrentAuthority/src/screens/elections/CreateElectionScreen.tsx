@@ -18,7 +18,6 @@ import { ElectionType } from "@votetorrent/vote-core";
 import type { IElectionsEngine, INetworkEngine, ElectionInit } from "@votetorrent/vote-core";
 import { ElectionsCreateElectionBuilder } from "@votetorrent/vote-engine";
 import { createDeviceSigner } from "../../engines/device-signer";
-import { saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
@@ -273,12 +272,9 @@ export function CreateElectionScreen() {
 			// Call createElection directly (not via builder.commit()) so both nonces are forwarded —
 			// ElectionsCreateElectionBuilder.commit() does NOT forward signingNonce (RESEARCH FQ3 option a).
 			const payload = builder.build();
+			// D-27: no local scaffold persistence — createElection already persists
+			// ElectionRevision.Keyholders, and the engine is the single source.
 			await electionsEngine.createElection(payload, { signingNonce, revisionSigningNonce });
-
-			// TEMP scaffold (delete with cadre P2P invite flow): the engine does not
-			// persist keyholder names yet, so stash them locally keyed by election id
-			// so the detail / revise screens can display them. See local-keyholders.ts.
-			await saveLocalKeyholders(electionId, cleanKeyholders);
 		} catch (err) {
 			console.warn("createElection error:", err);
 			const outcome = handleDeviceSigningError(err);

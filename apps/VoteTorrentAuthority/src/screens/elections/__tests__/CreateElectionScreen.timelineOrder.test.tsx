@@ -140,10 +140,6 @@ jest.mock("../../../engines/device-signer", () => ({
   })),
 }));
 
-jest.mock("../../../engines/local-keyholders", () => ({
-  saveLocalKeyholders: jest.fn(async () => undefined),
-}));
-
 jest.mock("../../../hooks/useDeviceSigningErrorHandler", () => ({
   useDeviceSigningErrorHandler: () => () => ({ handled: false }),
 }));

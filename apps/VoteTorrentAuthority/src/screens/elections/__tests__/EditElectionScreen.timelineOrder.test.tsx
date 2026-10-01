@@ -58,7 +58,7 @@ const mockElectionEngine = {
         certificationStarts: ms(16),
         closed: ms(17),
       },
-      keyholders: [],
+      keyholders: [{ invite: { name: "Alice" } }],
       keyholderThreshold: 1,
       tags: [],
       instructions: "",
@@ -116,11 +116,6 @@ jest.mock("@react-navigation/native", () => ({
 
 jest.mock("../../../providers/AppProvider", () => ({
   useApp: () => ({ getEngine: mockGetEngine }),
-}));
-
-jest.mock("../../../engines/local-keyholders", () => ({
-  getLocalKeyholders: jest.fn(async () => ["Alice"]),
-  saveLocalKeyholders: jest.fn(async () => undefined),
 }));
 
 let mockFormProps: { value: ElectionRevisionFormValue; onChange: (v: ElectionRevisionFormValue) => void };

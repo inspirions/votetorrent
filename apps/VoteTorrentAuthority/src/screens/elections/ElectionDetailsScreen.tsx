@@ -4,7 +4,7 @@ import { ExtendedTheme, useRoute, useTheme, useNavigation, useFocusEffect } from
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import { ThemedText } from "../../components/ThemedText";
-import type { BallotSummary, ElectionDetails, IElectionEngine, ElectionRevisionSignatureTask, KeyholderInvite } from "@votetorrent/vote-core";
+import type { BallotSummary, ElectionDetails, IElectionEngine, ElectionRevisionSignatureTask } from "@votetorrent/vote-core";
 import { globalStyles } from "../../theme/styles";
 import { InlineError } from "../../components/InlineError";
 import { ElectionDetailsBlock } from "./components/ElectionDetailsBlock";
@@ -15,7 +15,6 @@ import { CustomButton } from "../../components/CustomButton";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { InfoCard } from "../../components/InfoCard";
 import { formatDate } from "../../utils/displayUtils";
-import { getLocalKeyholders } from "../../engines/local-keyholders";
 import type { NavigationProp } from "../../navigation/types";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
@@ -55,23 +54,8 @@ export default function ElectionDetailsScreen() {
 		const loadElectionDetails = async () => {
 			try {
 				if (electionEngine) {
+					// D-27: keyholders come from the engine only — no AsyncStorage merge.
 					const details = await electionEngine.getElectionDetails();
-					// TEMP scaffold (delete with cadre P2P invite flow): the engine does
-					// not persist keyholders yet, so merge locally-stored names into the
-					// revision projections so the count + cards render. See local-keyholders.ts.
-					const names = await getLocalKeyholders(details.election.id);
-					if (names.length) {
-						// current is ElectionRevision -> InviteStatus<SentKeyholderInvite>[]
-						if (details.current.keyholders.length === 0) {
-							details.current.keyholders = names.map((name) => ({ invite: { name } }));
-						}
-						// proposed.proposed is ElectionRevisionInit -> KeyholderInvite[]
-						if (details.proposed && details.proposed.proposed.keyholders.length === 0) {
-							details.proposed.proposed.keyholders = names.map(
-								(name): KeyholderInvite => ({ name, type: "k", expiration: "0", inviteKey: "", inviteSignature: "" })
-							);
-						}
-					}
 					setElectionDetails(details);
 				}
 			} catch (error) {
