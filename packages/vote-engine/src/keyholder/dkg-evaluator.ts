@@ -359,49 +359,95 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
       continue
     }
 
+    // `attemptRoster` (= the declared union from round 0) is THE roster for
+    // rounds 1-4, NOT `effectiveLive`. Rule 5 ("faults take precedence over
+    // the roster rule") means a genuine protocol fault — discoverable only
+    // by evaluating rounds 1-4 — must get its chance to explain an attempt's
+    // outcome before a roster mismatch is ever reported. This also makes
+    // re-evaluation stable after a disqualified dealer's OWN later removal:
+    // `effectiveLive` for attempt 1 (recomputed from the CURRENT, post-
+    // removal `liveRoster`) would otherwise retroactively "lose" a dealer
+    // who legitimately posted every row of the very attempt that got them
+    // disqualified — the schema's `SenderIsBoundKeyholder` CHECK already
+    // proved every sender was live and bound AT SEND TIME, so trusting
+    // `attemptRoster` for the rest of this attempt is sound. The symmetric
+    // difference against `effectiveLive` is still checked — just only once
+    // rounds 1-4 fail to produce a fault-based explanation (an attempt
+    // that stalls waiting for a since-revoked member, or one that reaches
+    // round 4 cleanly but a current-roster member was never declared).
     const declaredRosterUnion = sortUnique(r0Rows.flatMap((row) => r0Parsed[row.senderUserId]!.roster))
-    const symdiff = symmetricDifference(declaredRosterUnion, effectiveLive)
-    if (symdiff.length > 0) {
-      const allBound = symdiff.every((u) => bindingIds.has(u))
-      if (allBound) {
-        attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 0, abortReason: 'roster-changed', disqualified: [], unresolvedComplaints: 0 })
-        if (attempt === DKG_MAX_ATTEMPTS) {
-          phase = 'failed'
-          failedReason = 'attempts-exhausted'
-          currentAttempt = null
-          currentRound = null
-          roster = []
-          awaitingUserIds = []
-          break attemptLoop
-        }
-        continue
-      } else {
-        currentAttempt = attempt
-        currentRound = 0
-        roster = effectiveLive
-        awaitingUserIds = []
-        phase = 'in-progress'
-        waitingReason = 'roster-mismatch'
-        break attemptLoop
-      }
+    const attemptRoster = declaredRosterUnion
+    const n = attemptRoster.length
+
+    // Rebuild the R0-commit lookup from EVERY valid round-0 row for this
+    // attempt whose sender is in `attemptRoster` — NOT from `r0Rows` (which
+    // is `effectiveLive`-gated, and `effectiveLive` can shrink mid
+    // re-evaluation once this very attempt's own `remove-disqualified`
+    // action has run, e.g. while an `advanceDkg` call's internal loop is
+    // still mid-flight). Without this, a legitimately-disqualified sender's
+    // OWN round-0 row would drop out of the lookup on the NEXT evaluation,
+    // making `verifyRound1Commit` throw on a `undefined` commit hex and
+    // misreport every OTHER sender's real fault as a spurious
+    // `commit-mismatch` on whoever the lookup gap landed on.
+    const r0CommitBySender: Record<string, string> = {}
+    for (const row of validRows) {
+      if (row.attempt !== attempt || row.round !== 0 || !attemptRoster.includes(row.senderUserId)) continue
+      const parsed = parseRound0Payload(row.payload)
+      if (parsed !== null) r0CommitBySender[row.senderUserId] = parsed.commit
     }
 
-    // Round 0 clean: `effectiveLive` IS the attempt's roster from here on.
-    const r0CommitBySender: Record<string, string> = {}
-    for (const row of r0Rows) r0CommitBySender[row.senderUserId] = r0Parsed[row.senderUserId]!.commit
+    const rosterFallback = (): 'none' | 'waiting' | 'roster-changed' => {
+      const symdiff = symmetricDifference(attemptRoster, effectiveLive)
+      if (symdiff.length === 0) return 'none'
+      return symdiff.every((u) => bindingIds.has(u)) ? 'roster-changed' : 'waiting'
+    }
+
+    /** Pushes an aborted-attempt summary, applies the cap, and returns `true` if the caller should `break` (cap reached) or `false` to `continue` to the next attempt. */
+    const recordAbort = (round: DkgRound, abortReason: DkgAbortReason, disqualified: DkgDisqualification[], unresolvedComplaints = 0): boolean => {
+      if (disqualified.length > 0) {
+        const newlyDisqualified = sortUnique(disqualified.map((f) => f.userId))
+        cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
+        disqualifiedAll.push(...disqualified)
+      }
+      attempts.push({ attempt, roster: attemptRoster, outcome: 'aborted', round, abortReason, disqualified, unresolvedComplaints })
+      if (attempt === DKG_MAX_ATTEMPTS) {
+        phase = 'failed'
+        failedReason = 'attempts-exhausted'
+        currentAttempt = null
+        currentRound = null
+        roster = []
+        awaitingUserIds = []
+        return true
+      }
+      return false
+    }
+
+    /** For a stalled round whose fallback is 'none' or 'waiting' (NOT 'roster-changed' — the caller checks that separately, since it needs `continue` rather than `break`). Sets the collecting/waiting status fields for the caller's immediate `break`. */
+    const reportCollecting = (round: DkgRound, posted: DkgMessageRow[], fb: 'none' | 'waiting'): void => {
+      currentAttempt = attempt
+      currentRound = round
+      roster = attemptRoster
+      if (fb === 'waiting') {
+        awaitingUserIds = []
+        waitingReason = 'roster-mismatch'
+      } else {
+        awaitingUserIds = sortUnique(attemptRoster.filter((u) => !posted.some((r) => r.senderUserId === u)))
+      }
+      phase = 'in-progress'
+    }
 
     // --------------------------- Round 1 ---------------------------
-    const r1Rows = attemptRows.filter((r) => r.round === 1 && effectiveLive.includes(r.senderUserId))
-    if (r1Rows.length < effectiveLive.length) {
-      currentAttempt = attempt
-      currentRound = 1
-      roster = effectiveLive
-      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r1Rows.some((r) => r.senderUserId === u)))
-      phase = 'in-progress'
+    const r1Rows = attemptRows.filter((r) => r.round === 1 && attemptRoster.includes(r.senderUserId))
+    if (r1Rows.length < attemptRoster.length) {
+      const fb = rosterFallback()
+      if (fb === 'roster-changed') {
+        if (recordAbort(1, 'roster-changed', [])) break attemptLoop
+        continue attemptLoop
+      }
+      reportCollecting(1, r1Rows, fb)
       break attemptLoop
     }
 
-    const n = effectiveLive.length
     const observerSecret = makeObserverSecret(threshold, n)
     const r1Parsed: Record<string, DkgRound1Wire> = {}
     const r1Faults: DkgDisqualification[] = []
@@ -427,30 +473,19 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
     }
 
     if (r1Faults.length > 0) {
-      const newlyDisqualified = sortUnique(r1Faults.map((f) => f.userId))
-      cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
-      disqualifiedAll.push(...r1Faults)
-      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 1, abortReason: 'faults', disqualified: r1Faults, unresolvedComplaints: 0 })
-      if (attempt === DKG_MAX_ATTEMPTS) {
-        phase = 'failed'
-        failedReason = 'attempts-exhausted'
-        currentAttempt = null
-        currentRound = null
-        roster = []
-        awaitingUserIds = []
-        break attemptLoop
-      }
+      if (recordAbort(1, 'faults', r1Faults)) break attemptLoop
       continue
     }
 
     // --------------------------- Round 2 ---------------------------
-    const r2Rows = attemptRows.filter((r) => r.round === 2 && effectiveLive.includes(r.senderUserId))
-    if (r2Rows.length < effectiveLive.length) {
-      currentAttempt = attempt
-      currentRound = 2
-      roster = effectiveLive
-      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r2Rows.some((r) => r.senderUserId === u)))
-      phase = 'in-progress'
+    const r2Rows = attemptRows.filter((r) => r.round === 2 && attemptRoster.includes(r.senderUserId))
+    if (r2Rows.length < attemptRoster.length) {
+      const fb = rosterFallback()
+      if (fb === 'roster-changed') {
+        if (recordAbort(2, 'roster-changed', [])) break attemptLoop
+        continue attemptLoop
+      }
+      reportCollecting(2, r2Rows, fb)
       break attemptLoop
     }
 
@@ -459,7 +494,7 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
     for (const row of r2Rows) {
       const parsed = parseRound2Payload(row.payload)
       const expectedDealer = dkgIdentifierForUser(row.senderUserId)
-      const expectedRecipients = sortUnique(effectiveLive.filter((u) => u !== row.senderUserId).map((u) => dkgIdentifierForUser(u)))
+      const expectedRecipients = sortUnique(attemptRoster.filter((u) => u !== row.senderUserId).map((u) => dkgIdentifierForUser(u)))
       let ok = parsed !== null && parsed.length === expectedRecipients.length
       if (ok && parsed !== null) {
         if (parsed[0]!.dealer !== expectedDealer) ok = false
@@ -474,30 +509,19 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
     }
 
     if (r2Faults.length > 0) {
-      const newlyDisqualified = sortUnique(r2Faults.map((f) => f.userId))
-      cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
-      disqualifiedAll.push(...r2Faults)
-      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 2, abortReason: 'faults', disqualified: r2Faults, unresolvedComplaints: 0 })
-      if (attempt === DKG_MAX_ATTEMPTS) {
-        phase = 'failed'
-        failedReason = 'attempts-exhausted'
-        currentAttempt = null
-        currentRound = null
-        roster = []
-        awaitingUserIds = []
-        break attemptLoop
-      }
+      if (recordAbort(2, 'faults', r2Faults)) break attemptLoop
       continue
     }
 
     // --------------------------- Round 3 ---------------------------
-    const r3Rows = attemptRows.filter((r) => r.round === 3 && effectiveLive.includes(r.senderUserId))
-    if (r3Rows.length < effectiveLive.length) {
-      currentAttempt = attempt
-      currentRound = 3
-      roster = effectiveLive
-      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r3Rows.some((r) => r.senderUserId === u)))
-      phase = 'in-progress'
+    const r3Rows = attemptRows.filter((r) => r.round === 3 && attemptRoster.includes(r.senderUserId))
+    if (r3Rows.length < attemptRoster.length) {
+      const fb = rosterFallback()
+      if (fb === 'roster-changed') {
+        if (recordAbort(3, 'roster-changed', [])) break attemptLoop
+        continue attemptLoop
+      }
+      reportCollecting(3, r3Rows, fb)
       break attemptLoop
     }
 
@@ -541,36 +565,23 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
 
     if (r3Disqualified.length > 0 || unresolvedCount > 0) {
       const abortReason: DkgAbortReason = r3Disqualified.length > 0 ? 'faults' : 'unresolved-complaint'
-      if (r3Disqualified.length > 0) {
-        const newlyDisqualified = sortUnique(r3Disqualified.map((f) => f.userId))
-        cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
-        disqualifiedAll.push(...r3Disqualified)
-      }
-      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 3, abortReason, disqualified: r3Disqualified, unresolvedComplaints: unresolvedCount })
-      if (attempt === DKG_MAX_ATTEMPTS) {
-        phase = 'failed'
-        failedReason = 'attempts-exhausted'
-        currentAttempt = null
-        currentRound = null
-        roster = []
-        awaitingUserIds = []
-        break attemptLoop
-      }
+      if (recordAbort(3, abortReason, r3Disqualified, unresolvedCount)) break attemptLoop
       continue
     }
 
     // --------------------------- Round 4 ---------------------------
-    const r4Rows = attemptRows.filter((r) => r.round === 4 && effectiveLive.includes(r.senderUserId))
-    if (r4Rows.length < effectiveLive.length) {
-      currentAttempt = attempt
-      currentRound = 4
-      roster = effectiveLive
-      awaitingUserIds = sortUnique(effectiveLive.filter((u) => !r4Rows.some((r) => r.senderUserId === u)))
-      phase = 'in-progress'
+    const r4Rows = attemptRows.filter((r) => r.round === 4 && attemptRoster.includes(r.senderUserId))
+    if (r4Rows.length < attemptRoster.length) {
+      const fb = rosterFallback()
+      if (fb === 'roster-changed') {
+        if (recordAbort(4, 'roster-changed', [])) break attemptLoop
+        continue attemptLoop
+      }
+      reportCollecting(4, r4Rows, fb)
       break attemptLoop
     }
 
-    const orderedR1 = effectiveLive.map((u) => r1Parsed[u]!)
+    const orderedR1 = attemptRoster.map((u) => r1Parsed[u]!)
     const derived = deriveGroupCommitments(orderedR1)
     const derivedY = derived[0]!
 
@@ -582,31 +593,40 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
     }
 
     if (r4Faults.length > 0) {
-      const newlyDisqualified = sortUnique(r4Faults.map((f) => f.userId))
-      cumulativeDisqualified = sortUnique([...cumulativeDisqualified, ...newlyDisqualified])
-      disqualifiedAll.push(...r4Faults)
-      attempts.push({ attempt, roster: effectiveLive, outcome: 'aborted', round: 4, abortReason: 'faults', disqualified: r4Faults, unresolvedComplaints: 0 })
-      if (attempt === DKG_MAX_ATTEMPTS) {
-        phase = 'failed'
-        failedReason = 'attempts-exhausted'
-        currentAttempt = null
-        currentRound = null
-        roster = []
-        awaitingUserIds = []
-        break attemptLoop
-      }
+      if (recordAbort(4, 'faults', r4Faults)) break attemptLoop
       continue
     }
 
+    // Every round-4 row is clean. Apply the roster fallback ONE more time —
+    // an attempt that reaches here with a current-roster mismatch (e.g. a
+    // same-attempt officer revoke that happened to land after round 4 was
+    // already fully posted) is reported as roster-changed/waiting rather
+    // than silently agreeing on a roster the CURRENT Keyholder table no
+    // longer reflects.
+    const finalFallback = rosterFallback()
+    if (finalFallback === 'roster-changed') {
+      if (recordAbort(4, 'roster-changed', [])) break attemptLoop
+      continue
+    }
+    if (finalFallback === 'waiting') {
+      currentAttempt = attempt
+      currentRound = 4
+      roster = attemptRoster
+      awaitingUserIds = []
+      phase = 'in-progress'
+      waitingReason = 'roster-mismatch'
+      break attemptLoop
+    }
+
     // Agreed.
-    attempts.push({ attempt, roster: effectiveLive, outcome: 'agreed', round: 4, disqualified: [], unresolvedComplaints: 0 })
-    attemptAgreedKey[attempt] = { jointPublicKey: derivedY, groupCommitments: derived, roster: effectiveLive }
+    attempts.push({ attempt, roster: attemptRoster, outcome: 'agreed', round: 4, disqualified: [], unresolvedComplaints: 0 })
+    attemptAgreedKey[attempt] = { jointPublicKey: derivedY, groupCommitments: derived, roster: attemptRoster }
     currentAttempt = attempt
     currentRound = 4
-    roster = effectiveLive
+    roster = attemptRoster
     awaitingUserIds = []
     phase = 'in-progress'
-    readyToPublish = { attempt, jointPublicKey: derivedY, groupCommitments: derived, threshold, participants: effectiveLive.length, roster: effectiveLive }
+    readyToPublish = { attempt, jointPublicKey: derivedY, groupCommitments: derived, threshold, participants: attemptRoster.length, roster: attemptRoster }
     break attemptLoop
   }
 

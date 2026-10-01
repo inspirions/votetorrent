@@ -24,3 +24,6 @@ export {
   decodeDkgRoundVaultRecord
 } from './dkg-vault.js'
 export type { DkgRoundVaultRecord } from './dkg-vault.js'
+
+export { KeyholderDkgEngine, KeyholderDkgError } from './keyholder-dkg-engine.js'
+export type { KeyholderDkgErrorCode } from './keyholder-dkg-engine.js'
