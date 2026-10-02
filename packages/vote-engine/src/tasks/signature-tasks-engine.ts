@@ -4,7 +4,7 @@ import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { readSessionThreshold } from '../signing/threshold.js'
 import { fanOutSignatureTasks } from '../signing/fan-out.js'
-import { findPendingAdminTaskRow, findPendingTaskNonce } from './task-signing-status.js'
+import { findPendingAdminTaskRow, findPendingTaskNonce, findRegistrantSessionNonce } from './task-signing-status.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
@@ -2018,6 +2018,19 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
   async getTaskSigningStatus (task: SignatureTask): Promise<SigningStatus | null> {
     if (!this.ctx || !this.signingEngine) return null
     const nonce = await findPendingTaskNonce(this.ctx.db, task)
+    if (nonce === undefined) return null
+    return this.signingEngine.getSigningStatus(nonce)
+  }
+
+  /**
+   * 62-27 (D-11 vrg) — read-only status of the registrant vrg session behind `requestId`,
+   * independent of the caller's own task (which `getTaskSigningStatus` cannot see once it is
+   * completed). Null when there is no ctx/signing engine or the session nonce is missing or
+   * ambiguous. Writes nothing; display-only.
+   */
+  async getRegistrantSigningStatus (requestId: string): Promise<SigningStatus | null> {
+    if (!this.ctx || !this.signingEngine) return null
+    const nonce = await findRegistrantSessionNonce(this.ctx.db, requestId)
     if (nonce === undefined) return null
     return this.signingEngine.getSigningStatus(nonce)
   }

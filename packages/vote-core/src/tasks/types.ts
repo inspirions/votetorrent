@@ -60,6 +60,19 @@ export interface ISignatureTasksEngine {
    * sole enforcement of who may sign and when a session is satisfied.
    */
   getTaskSigningStatus(task: SignatureTask): Promise<SigningStatus | null>
+
+  /**
+   * 62-27 (D-11 vrg) — read-only co-signing status for the vrg session behind a REGISTRATION
+   * REQUEST, whatever the caller's own task state. `getTaskSigningStatus` returns null once the
+   * caller's own task has completed, which would hide the progress from an officer who has
+   * already voted; this reads the session through the request's registrant Task rows instead.
+   *
+   * Display-only and read-only: never an authorization input. Returns `null` when the request
+   * has no registrant Task rows, when those rows disagree on their signing nonce (an ambiguous
+   * session is never guessed), when the session has no `AdminSigning` row, or when the engine
+   * has no context. Never throws for those cases.
+   */
+  getRegistrantSigningStatus(requestId: string): Promise<SigningStatus | null>
 }
 
 export interface IOnboardingTasksSetOnboardingTaskCompletedBuilder extends IBuilder<string, void> {

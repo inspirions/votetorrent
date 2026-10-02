@@ -356,4 +356,12 @@ export class MockSignatureTasksEngine implements ISignatureTasksEngine {
   async getTaskSigningStatus (_task: SignatureTask): Promise<SigningStatus | null> {
     return null
   }
+
+  /**
+   * Mock parity for `ISignatureTasksEngine.getRegistrantSigningStatus` (62-27, D-11 vrg).
+   * Threshold 1 throughout in the mock world, so no progress is ever shown — always null.
+   */
+  async getRegistrantSigningStatus (_requestId: string): Promise<SigningStatus | null> {
+    return null
+  }
 }

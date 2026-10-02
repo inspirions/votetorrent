@@ -62,6 +62,34 @@ export async function findPendingAdminTaskRow (
   return row
 }
 
+/**
+ * 62-27 (D-11 vrg): the signing nonce of the registrant vrg session behind `requestId`,
+ * independent of any one officer's task state (completed or not). Every sibling task of one
+ * request shares one nonce (62-11 fan-out). Collects all rows first: exactly one distinct
+ * non-empty nonce is returned; zero or several return `undefined` — an ambiguous session is
+ * never guessed. Read-only.
+ */
+export async function findRegistrantSessionNonce (
+  db: Database,
+  requestId: string
+): Promise<string | undefined> {
+  const rows: Array<{ SigningNonce: string | null }> = []
+  for await (const row of db.eval(
+    `select distinct T.SigningNonce as SigningNonce from Task T
+      join RegistrantSignatureTaskExtension E on E.TaskId = T.Id
+      where E.RequestId = :requestId
+        and T.Type = 'signature'
+        and T.SignatureType = 'registrant'`,
+    { requestId }
+  )) {
+    rows.push(row as { SigningNonce: string | null })
+  }
+  const nonces = rows
+    .map((r) => r.SigningNonce)
+    .filter((n): n is string => typeof n === 'string' && n.length > 0)
+  return nonces.length === 1 ? nonces[0] : undefined
+}
+
 export async function findPendingTaskNonce (
   db: Database,
   task: SignatureTask
