@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import {
 	ExtendedTheme,
@@ -28,6 +28,8 @@ import type {
 	RegistrationTransparencyStats,
 } from "@votetorrent/vote-core";
 import { RegistrationRequestRow } from "./components/RegistrationRequestRow";
+import { ReassociationQueueSection } from "./components/ReassociationQueueSection";
+import { registrationContentUnreadKey } from "./continuity-review";
 import { TransparencyStatsCard } from "./components/TransparencyStatsCard";
 import type { RootStackParamList } from "../../navigation/types";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
@@ -385,6 +387,13 @@ export default function RegistrationInboxScreen() {
 				/>
 			</View>
 
+			{/* D-41/D-46 (62-27): device-change requests awaiting officer review are reached from
+			    here, and AssociationRequestStatusScreen stays control-free (Phase 51). The section
+			    renders nothing without a peer network or with an empty queue. */}
+			<View style={styles.section} testID="registration-inbox-reassociation-queue">
+				<ReassociationQueueSection authorityId={authorityId} />
+			</View>
+
 			<View style={styles.section} testID="registration-inbox-filters">
 				<View testID="registration-inbox-search">
 					<CustomTextInput
@@ -522,22 +531,37 @@ export default function RegistrationInboxScreen() {
 				// .map()-in-ScrollView is deliberate: this app has zero
 				// virtualized-list-component precedent, and pages are bounded by
 				// REGISTRATION_REQUESTS_PAGE_SIZE.
-				rows.map((row) => (
-					<RegistrationRequestRow
-						key={row.requestId}
-						row={row}
-						// Identifiers only — never the row object, never the display
-						// name, never any payload value. React Navigation params are
-						// persisted into navigation state and can surface in
-						// crash/debug payloads.
-						onPress={() =>
-							navigation.navigate("RegistrationRequestApproval", {
-								requestId: row.requestId,
-								authorityId,
-							})
-						}
-					/>
-				))
+				rows.map((row) => {
+					// D-49 (62-31): an unread sealed request is listed honestly instead of as a nameless
+					// row. The line carries a key name only, never a payload value.
+					const unreadKey = registrationContentUnreadKey(row.payloadAccess);
+					return (
+						<Fragment key={row.requestId}>
+							<RegistrationRequestRow
+								row={row}
+								// Identifiers only — never the row object, never the display
+								// name, never any payload value. React Navigation params are
+								// persisted into navigation state and can surface in
+								// crash/debug payloads.
+								onPress={() =>
+									navigation.navigate("RegistrationRequestApproval", {
+										requestId: row.requestId,
+										authorityId,
+									})
+								}
+							/>
+							{unreadKey ? (
+								<ThemedText
+									type="small"
+									style={{ color: colors.textSecondary }}
+									testID={"registration-inbox-row-content-" + row.requestId}
+								>
+									{t(unreadKey)}
+								</ThemedText>
+							) : null}
+						</Fragment>
+					);
+				})
 			)}
 
 			{rows.length > 0 &&

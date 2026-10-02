@@ -18,7 +18,6 @@ import type {
 } from '@votetorrent/vote-engine/rn';
 import { resolveAuthorityKeyVault } from '../../engines/key-vault';
 import type { PeerStagingTransports } from '../../engines/engine-factory';
-import { truncateDeviceKey } from './components/AssociationsSection';
 
 /**
  * continuity-review.ts — Phase 62 Plan 27 (D-41/D-44/D-45/D-49).
@@ -32,6 +31,16 @@ import { truncateDeviceKey } from './components/AssociationsSection';
  * the device-signing rollout inventory. It never logs, and no error message is built from row
  * values (names, identity fields, payload text are untrusted display data under the never-log rule).
  */
+
+/**
+ * The truncated device-key form every device surface renders. Kept as a local pure copy of
+ * `AssociationsSection.truncateDeviceKey` (a parity test pins the two together): importing that
+ * component module would drag the device signer and the i18n bootstrap into the registration
+ * inbox's import graph, whose existing suite mocks `react-i18next` without `initReactI18next`.
+ */
+export function truncateDeviceKeyLabel(deviceKey: string): string {
+	return deviceKey.slice(0, 5) + '...';
+}
 
 /** A device-key signer, as every ceremony in this app consumes it. */
 export type DeviceSign = (digest: Uint8Array) => Promise<Signature>;
@@ -213,7 +222,7 @@ export function classifyReassociationEvidence(review: ReassociationReview): Reas
 }
 
 export function reassociationRegistrantLabel(review: ReassociationReview): string {
-	return review.registrantName ?? truncateDeviceKey(review.newDeviceKey);
+	return review.registrantName ?? truncateDeviceKeyLabel(review.newDeviceKey);
 }
 
 export type RegistrationContentUnreadKey =

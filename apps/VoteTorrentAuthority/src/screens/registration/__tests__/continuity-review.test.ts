@@ -14,6 +14,7 @@ import {
 	openPeerReviewSession,
 	publishRegistrationDecisionAfterDecide,
 	reassociationRegistrantLabel,
+	truncateDeviceKeyLabel,
 	readOnlyReviewSign,
 	registrationContentUnreadKey,
 	type PeerReviewDeps,
@@ -23,9 +24,9 @@ jest.mock("../../../engines/key-vault", () => ({
 	resolveAuthorityKeyVault: jest.fn(() => ({ __vault: "default" })),
 }));
 jest.mock("react-native-vector-icons/FontAwesome6", () => "Icon");
-jest.mock("../components/AssociationsSection", () => ({
-	truncateDeviceKey: (k: string) => k.slice(0, 5) + "...",
-}));
+// Only the parity test loads AssociationsSection for real; stub the native-backed providers it pulls in.
+jest.mock("../../../providers/AppProvider", () => ({ useApp: jest.fn() }));
+jest.mock("../../../engines/device-signer", () => ({ createDeviceSigner: jest.fn() }));
 
 const SRC = path.resolve(__dirname, "../../..");
 const stripComments = (s: string) =>
@@ -242,6 +243,14 @@ describe("CR4 classifiers", () => {
 		expect(r({ kind: "code", outcome: "unverifiable" })).toBe("code-unverifiable");
 		expect(r({ kind: "identity", fields: [] })).toBe("identity");
 		expect(r({ kind: "none" })).toBe("no-evidence");
+	});
+
+	it("the local device-key truncation stays identical to AssociationsSection's export", () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const { truncateDeviceKey } = require("../components/AssociationsSection");
+		for (const key of ["", "abc", "abcdefgh", "0123456789abcdef"]) {
+			expect(truncateDeviceKeyLabel(key)).toBe(truncateDeviceKey(key));
+		}
 	});
 
 	it("reassociationRegistrantLabel falls back to the truncated new device key", () => {

@@ -53,6 +53,7 @@ import RegistrationPolicyScreen from "../screens/elections/RegistrationPolicyScr
 // Phase 48 plan 48-21 (D-12) — the three Phase 48 screen modules.
 import RegistrationInboxScreen from "../screens/registration/RegistrationInboxScreen";
 import RegistrationRequestApprovalScreen from "../screens/registration/RegistrationRequestApprovalScreen";
+import AssociationRequestApprovalScreen from "../screens/registration/AssociationRequestApprovalScreen";
 // BulkImportSyncScreen (48-20) is a named export, not a default export —
 // imported accordingly (a Rule-1 fix: the plan's "default imports" language
 // does not hold for this one file).
@@ -314,6 +315,11 @@ export const RootNavigator = () => {
 				name="ImportFoundingBundle"
 				component={ImportFoundingBundleScreen}
 				options={{ title: t("networkFoundingImportScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="AssociationRequestApproval"
+				component={AssociationRequestApprovalScreen}
+				options={{ title: t("associationApprovalScreenTitle") }}
 			/>
 			<Stack.Screen
 				name="NetworkStatistics"
