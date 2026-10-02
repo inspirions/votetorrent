@@ -159,7 +159,11 @@
 //     `KeyholderDkgBinding.DkgPublicKey` (`executePostRound2` reads
 //     `snapshot.bindings`, never a signing key) — D-26. Control (h).
 // 10. R4 agreement and the published `ElectionKey`'s consistency with the
-//     agreed `Y` are both checked (`evaluateDkgRevision`'s final
+//     agreed `Y`, the derived group commitments, the revision's threshold
+//     and the agreed roster length (V-2) are all checked; a malformed
+//     GroupCommitments column is guarded (`parseElectionKeyCommitments`,
+//     `[]` on the record means "malformed on the row") and reads as a
+//     mismatch, never a throw. Both are checked (`evaluateDkgRevision`'s final
 //     `electionKeyConsistent` pass; `verifyDkgTranscript`). Evidence: the
 //     two "ElectionKey consistency" cases in `dkg-evaluator.spec.ts`, and
 //     scenario A's `verifyDkgTranscript` assertion.
@@ -392,6 +396,7 @@ import {
   type EncryptedShare
 } from '../crypto/dkg.js'
 import {
+  parseElectionKeyCommitments,
   parseRound0Payload,
   parseRound1Payload,
   parseRound2Payload,
@@ -547,7 +552,7 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
       })
     }
 
-    let electionKey: (ElectionKeyRecord & { signatureValid: boolean }) | null = null
+    let electionKey: (ElectionKeyRecord & { signatureValid: boolean, commitmentsWellFormed: boolean }) | null = null
     const ekRow = await this.ctx.db
       .prepare(
         `select Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId,
@@ -567,12 +572,13 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
         revision,
         attempt: ekRow.Attempt as number,
         jointPublicKey: ekRow.JointPublicKey as string,
-        groupCommitments: JSON.parse(ekRow.GroupCommitments as string) as string[],
+        groupCommitments: parseElectionKeyCommitments(ekRow.GroupCommitments) ?? [],
         threshold: ekRow.Threshold as number,
         participants: ekRow.Participants as number,
         publishedAt: ekRow.PublishedAt as string,
         publisherUserId: ekRow.PublisherUserId as string,
-        signatureValid: normalizeBool(ekRow.SigValid)
+        signatureValid: normalizeBool(ekRow.SigValid),
+        commitmentsWellFormed: parseElectionKeyCommitments(ekRow.GroupCommitments) !== null
       }
     }
 
@@ -613,7 +619,8 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
         revision: rev,
         attempt: row.Attempt as number,
         jointPublicKey: row.JointPublicKey as string,
-        groupCommitments: JSON.parse(row.GroupCommitments as string) as string[],
+        // `[]` means "malformed on the row" (the public record shape is unchanged).
+        groupCommitments: parseElectionKeyCommitments(row.GroupCommitments) ?? [],
         threshold: row.Threshold as number,
         participants: row.Participants as number,
         publishedAt: row.PublishedAt as string,

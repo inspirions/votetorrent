@@ -59,7 +59,12 @@
 //     `failed/threshold-unreachable`. Reaching the end of attempt
 //     `DKG_MAX_ATTEMPTS` still aborted gives `failed/attempts-exhausted`.
 //  9. Phase precedence: a consistent `ElectionKey` gives `complete`; an
-//     inconsistent one gives `failed/election-key-mismatch`; then `failed`;
+//     inconsistent one gives `failed/election-key-mismatch`. Consistent means
+//     signature-valid AND the agreed attempt's Y, derived GroupCommitments
+//     (element-wise), the revision's threshold, and the agreed roster length
+//     all equal the row's (V-2: Y alone let a live keyholder publish junk
+//     commitments); a malformed column (`commitmentsWellFormed: false`) is a
+//     mismatch. Then `failed`;
 //     then `blocked`; then `not-started` (attempt 1, round 0, zero rows);
 //     then `restarting` (current attempt > 1 and its round is 0); otherwise
 //     `in-progress`.
@@ -122,7 +127,11 @@ export interface DkgRevisionSnapshot {
   bindings: Record<string, { dkgPublicKey: string }>
   pendingInviteCount: number
   messages: DkgMessageRow[]
-  electionKey: (ElectionKeyRecord & { signatureValid: boolean }) | null
+  /**
+   * `commitmentsWellFormed` is false when the row's GroupCommitments column did not parse as an array of valid
+   * points (the record then carries `groupCommitments: []`). Rule 9 treats that as a mismatch.
+   */
+  electionKey: (ElectionKeyRecord & { signatureValid: boolean, commitmentsWellFormed: boolean }) | null
 }
 
 export interface DkgReadyToPublish {
@@ -634,7 +643,10 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
   let electionKeyConsistent: boolean | null = null
   if (snapshot.electionKey !== null) {
     const agreed = attemptAgreedKey[snapshot.electionKey.attempt]
-    electionKeyConsistent = snapshot.electionKey.signatureValid && agreed !== undefined && agreed.jointPublicKey === snapshot.electionKey.jointPublicKey
+    const ek = snapshot.electionKey
+    electionKeyConsistent = ek.signatureValid && agreed !== undefined && agreed.jointPublicKey === ek.jointPublicKey &&
+      ek.commitmentsWellFormed && sameStringArray(agreed.groupCommitments, ek.groupCommitments) &&
+      ek.threshold === snapshot.threshold && ek.participants === agreed.roster.length
     if (electionKeyConsistent) {
       phase = 'complete'
       failedReason = undefined
