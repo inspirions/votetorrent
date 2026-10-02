@@ -232,7 +232,7 @@ function describeStagingTableBehaviors (table: StagingTable, payloadColumn: 'Ini
       } catch (err) {
         caught = err
       }
-      expect(caught, 'a 15-character Cursor must be rejected — CursorWidth requires exactly 16').to.be.instanceOf(Error)
+      expect(caught, 'a 15-character Cursor must be rejected — CursorWellFormed requires exactly 16').to.be.instanceOf(Error)
     })
 
     it('UPDATE throws — NoUpdate', async () => {
