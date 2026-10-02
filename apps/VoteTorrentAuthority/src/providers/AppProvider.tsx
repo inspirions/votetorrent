@@ -6,7 +6,9 @@ import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { hideSplash } from "react-native-splash-view";
 import { EngineFactory } from "../engines/engine-factory";
+import type { PeerStagingTransports } from "../engines/engine-factory";
 import { LocalStorageReact } from "@votetorrent/vote-engine/rn";
+import type { StagingOpener, StagingDecisionSigner } from "@votetorrent/vote-engine/rn";
 import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
 import { createDeviceSigner, type SignCallback } from "../engines/device-signer";
@@ -60,6 +62,17 @@ interface AppContextType {
 	 * new one.
 	 */
 	resolveDeviceSigner: () => Promise<SignCallback>;
+	/**
+	 * 62-27 (D-41/D-44/D-45): screens open the peer staging transports through this passthrough
+	 * (an officer reviewing a device change, a decide-time registration publish), mirroring
+	 * `exportDashboardSnapshot`'s factory-ref shape. It holds no key material: the caller supplies
+	 * the opener and the decision signer. Throws 62-21's `PeerStrandUnavailableError` when the
+	 * established network cannot back a peer strand. Optional so existing `useApp` fakes stay valid.
+	 */
+	createPeerStagingTransports?: (deps: {
+		opener: StagingOpener;
+		decisionSigner: StagingDecisionSigner;
+	}) => PeerStagingTransports;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -185,6 +198,13 @@ export function AppProvider({ children }: PropsWithChildren) {
 		async <T,>(engineName: string, initParams?: any): Promise<T> => {
 			return engineFactoryRef.current!.getEngine<T>(engineName, initParams);
 		},
+		[]
+	);
+
+	// 62-27: the transports passthrough (see `AppContextType.createPeerStagingTransports`).
+	const createPeerStagingTransports = useCallback(
+		(deps: { opener: StagingOpener; decisionSigner: StagingDecisionSigner }): PeerStagingTransports =>
+			engineFactoryRef.current!.createPeerStagingTransports(deps),
 		[]
 	);
 
@@ -603,6 +623,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 				selectNetwork,
 				exportDashboardSnapshot,
 				resolveDeviceSigner,
+				createPeerStagingTransports,
 			}}
 		>
 			{children}
