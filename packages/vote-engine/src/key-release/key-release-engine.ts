@@ -101,6 +101,13 @@
 //     `SignerIsUser` CHECKs back this at insert as a second, independent
 //     layer. Controls (d) and (i, identifier variant below).
 //  5. A published share is commitment-checked (`validateReleasedShare`)
+//     against commitments DERIVED FROM THE TRANSCRIPT (V-2: the attempt's
+//     signature-valid round-1 packages of the round-4 participants,
+//     `transcriptCommitments` on the snapshot), never against the
+//     write-once `ElectionKey.GroupCommitments` column, which any live
+//     keyholder can publish with junk. The column is parsed with
+//     `parseElectionKeyCommitments` (never throws) and is advisory; the DKG
+//     status reports a mismatch. A share is checked
 //     BEFORE it is ever signed — a share that fails its own group
 //     commitments is never published. Evidence: scenario G (raw-inserted
 //     bogus share), and the honest-release path's own `share-invalid` gate.
@@ -255,7 +262,8 @@ import type { EngineContext } from '../types.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { digestToBytes, parseJsonOr } from '../utils.js'
 import { KeyVaultError, keyholderDkgShareAlias, type IKeyVault } from '../crypto/vault.js'
-import { DkgError, dkgIdentifierForUser, reconstructGroupSecret, validateReleasedShare } from '../crypto/dkg.js'
+import { DkgError, deriveGroupCommitments, dkgIdentifierForUser, reconstructGroupSecret, validateReleasedShare, type DkgRound1Wire } from '../crypto/dkg.js'
+import { parseElectionKeyCommitments, parseRound1Payload } from '../keyholder/dkg-payloads.js'
 import { openElectionBlock } from './election-block.js'
 import { hasEnteredReleasingKeys } from './release-window.js'
 import { evaluateKeyRelease, type KeyReleaseRow, type KeyReleaseSnapshot } from './key-release-evaluator.js'
@@ -369,7 +377,7 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
     if (revision === null) {
       return {
         electionId, revision: null, isCurrentRevision: false, keyholderThreshold: null, timeline: {}, now,
-        electionKey: null, r4ParticipantUserIds: [], releases: []
+        electionKey: null, r4ParticipantUserIds: [], transcriptCommitments: null, releases: []
       }
     }
 
@@ -394,7 +402,8 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
         revision,
         attempt: ekRow.Attempt as number,
         jointPublicKey: ekRow.JointPublicKey as string,
-        groupCommitments: JSON.parse(ekRow.GroupCommitments as string) as string[],
+        // Advisory only; `[]` means "malformed on the row". Validation uses `transcriptCommitments`.
+        groupCommitments: parseElectionKeyCommitments(ekRow.GroupCommitments) ?? [],
         threshold: ekRow.Threshold as number,
         participants: ekRow.Participants as number,
         publishedAt: ekRow.PublishedAt as string,
@@ -415,6 +424,41 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
         { electionId, revision, attempt: electionKey.attempt, jointPublicKey: electionKey.jointPublicKey }
       )) {
         r4ParticipantUserIds.push(row.SenderUserId as string)
+      }
+    }
+
+    // Commitments derived from the TRANSCRIPT: the attempt's signature-valid round-1 packages of exactly the
+    // round-4 participants, one parseable package each. Any gap or throw gives null (fail-closed).
+    let transcriptCommitments: string[] | null = null
+    if (electionKey !== null && r4ParticipantUserIds.length > 0) {
+      const r1Rows: Array<{ userId: string, payload: string, sigValid: boolean }> = []
+      for await (const row of this.ctx.db.eval(
+        `select SenderUserId, Payload,
+            (
+              (
+                SignatureValid(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
+                  or SignatureValidP256(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
+              )
+              and exists (select 1 from UserKey K where K.UserId = SenderUserId and K.PubKey = SenderKey)
+            ) as SigValid
+          from KeyholderDkgMessage
+          where ElectionId = :electionId and ElectionRevision = :revision and Attempt = :attempt and DkgRound = 1`,
+        { electionId, revision, attempt: electionKey.attempt }
+      )) {
+        r1Rows.push({ userId: row.SenderUserId as string, payload: row.Payload as string, sigValid: normalizeBool(row.SigValid) })
+      }
+      try {
+        const packages: DkgRound1Wire[] = []
+        for (const userId of r4ParticipantUserIds) {
+          const mine = r1Rows.filter((r) => r.userId === userId && r.sigValid)
+          if (mine.length !== 1) throw new Error('round-1 gap')
+          const pkg = parseRound1Payload(mine[0]!.payload)
+          if (pkg === null) throw new Error('round-1 unparseable')
+          packages.push(pkg)
+        }
+        transcriptCommitments = deriveGroupCommitments(packages)
+      } catch {
+        transcriptCommitments = null
       }
     }
 
@@ -441,7 +485,7 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
       })
     }
 
-    return { electionId, revision, isCurrentRevision, keyholderThreshold, timeline, now, electionKey, r4ParticipantUserIds, releases }
+    return { electionId, revision, isCurrentRevision, keyholderThreshold, timeline, now, electionKey, r4ParticipantUserIds, transcriptCommitments, releases }
   }
 
   // -------------------------------------------------------------------------
@@ -626,8 +670,9 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
         const ek = snapshot.electionKey
         const thresholdMatches = !snapshot.isCurrentRevision || ek.threshold === snapshot.keyholderThreshold
         const participantsMatch = ek.participants === snapshot.r4ParticipantUserIds.length
-        const commitmentsMatch = ek.groupCommitments[0] === ek.jointPublicKey
-        if (!thresholdMatches || !participantsMatch || !commitmentsMatch) {
+        const transcriptCommitments = snapshot.transcriptCommitments
+        const commitmentsMatch = transcriptCommitments !== null && transcriptCommitments[0] === ek.jointPublicKey
+        if (!thresholdMatches || !participantsMatch || !commitmentsMatch || transcriptCommitments === null) {
           throw new KeyReleaseError('election-key-inconsistent', 'releaseKeyShare: published ElectionKey is inconsistent with the revision, roster or commitments')
         }
 
@@ -673,7 +718,7 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
         // 8. validate against the published group commitments — never publish a share that fails its own commitments.
         const identifier = dkgIdentifierForUser(signer.userId)
         const signingShareHex = bytesToHex(shareBytes)
-        const valid = validateReleasedShare(ek.threshold, ek.participants, ek.groupCommitments, { identifier, signingShare: signingShareHex })
+        const valid = validateReleasedShare(ek.threshold, ek.participants, transcriptCommitments, { identifier, signingShare: signingShareHex })
         if (!valid) {
           shareBytes.fill(0)
           throw new KeyReleaseError('share-invalid', 'releaseKeyShare: share fails validateReleasedShare against the published group commitments')
@@ -754,7 +799,7 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
           threshold: ek.threshold,
           participants: ek.participants,
           groupPublicKey: ek.jointPublicKey,
-          groupCommitments: ek.groupCommitments,
+          groupCommitments: snapshot.transcriptCommitments!,
           shares
         })
       } catch (err) {

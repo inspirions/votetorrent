@@ -71,6 +71,14 @@ export interface KeyReleaseSnapshot {
   electionKey: (ElectionKeyRecord & { signatureValid: boolean }) | null
   /** Live Keyholder rows whose R4 for `electionKey.attempt` carries `ResultKey = electionKey.jointPublicKey`. */
   r4ParticipantUserIds: string[]
+  /**
+   * The group commitments DERIVED FROM THE TRANSCRIPT (the attempt's signature-valid round-1 packages of the
+   * round-4 participants), or `null` when they cannot be derived (a gap, an unparseable package, a derive error).
+   * Key release validates every share against THIS, never against the published ElectionKey commitments column: the published
+   * column is advisory (any live keyholder writes it once, the DKG status reports a mismatch), and D-17
+   * reconstruction depends only on the transcript.
+   */
+  transcriptCommitments: string[] | null
   releases: KeyReleaseRow[]
 }
 
@@ -84,7 +92,7 @@ function byUserIdAsc<T extends { userId: string }> (a: T, b: T): number {
 }
 
 export function evaluateKeyRelease (snapshot: KeyReleaseSnapshot): KeyReleaseEvaluation {
-  const { electionId, revision, isCurrentRevision, keyholderThreshold, timeline, now, electionKey, r4ParticipantUserIds, releases } = snapshot
+  const { electionId, revision, isCurrentRevision, keyholderThreshold, timeline, now, electionKey, r4ParticipantUserIds, transcriptCommitments, releases } = snapshot
 
   const base = {
     electionId,
@@ -120,8 +128,8 @@ export function evaluateKeyRelease (snapshot: KeyReleaseSnapshot): KeyReleaseEva
   // still apply regardless.
   const thresholdMatches = !isCurrentRevision || electionKey.threshold === keyholderThreshold
   const participantsMatch = electionKey.participants === r4ParticipantUserIds.length
-  const commitmentsMatch = electionKey.groupCommitments[0] === electionKey.jointPublicKey
-  if (!thresholdMatches || !participantsMatch || !commitmentsMatch) {
+  const commitmentsMatch = transcriptCommitments !== null && transcriptCommitments[0] === electionKey.jointPublicKey
+  if (!thresholdMatches || !participantsMatch || !commitmentsMatch || transcriptCommitments === null) {
     return { status: { ...base, ...empty, phase: 'election-key-inconsistent', electionKey: electionKeyClean }, acceptedReleases: [] }
   }
 
@@ -154,7 +162,7 @@ export function evaluateKeyRelease (snapshot: KeyReleaseSnapshot): KeyReleaseEva
       rejected.push({ userId: row.userId, reason: 'identifier-mismatch' })
       continue
     }
-    if (!validateReleasedShare(k, n, electionKey.groupCommitments, { identifier: row.identifier, signingShare: row.signingShare })) {
+    if (!validateReleasedShare(k, n, transcriptCommitments, { identifier: row.identifier, signingShare: row.signingShare })) {
       rejected.push({ userId: row.userId, reason: 'share-invalid' })
       continue
     }

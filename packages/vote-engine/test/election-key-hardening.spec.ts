@@ -14,6 +14,11 @@ import { expect } from 'chai'
 import type { Database } from '@quereus/quereus'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
+import { dkgIdentifierForUser } from '../src/crypto/dkg.js'
+import { releasingKeysAt } from '../src/key-release/release-window.js'
+import { KeyReleaseEngine } from '../src/key-release/key-release-engine.js'
+import { KeysTasksEngine } from '../src/tasks/keys-tasks-engine.js'
+import { keyholderDkgShareAlias } from '../src/crypto/vault.js'
 import { parseRound4Payload, serializeRound4Payload } from '../src/keyholder/dkg-payloads.js'
 import { digestToBytes } from '../src/utils.js'
 import { postSignedDkgMessage, runDkgToQuiescence, seedDkgElection, type DkgTestParticipant } from './fixtures/dkg-keyholders.js'
@@ -104,6 +109,13 @@ function junkCommitments (commitments: string[]): string {
   return JSON.stringify(forged)
 }
 
+async function releaseAt (db: Database, electionId: string): Promise<number> {
+  const row = await db.prepare('select Timeline from ElectionRevision where ElectionId = :electionId').get({ electionId })
+  const at = releasingKeysAt(JSON.parse(row!.Timeline as string) as Record<string, number>)
+  if (at === null) throw new Error('releaseAt: fixture has no releasingKeys entry')
+  return at
+}
+
 describe('election-key-hardening: V-2 (62-34)', function () {
   this.timeout(240000)
 
@@ -165,6 +177,88 @@ describe('election-key-hardening: V-2 (62-34)', function () {
         expect(status.phase).to.equal('failed')
         expect(status.failedReason).to.equal('election-key-mismatch')
       }
+    })
+  })
+
+  describe('R: key release validates against transcript-derived commitments', function () {
+    async function releaseThree (setup: ForgedSetup): Promise<{ at: number }> {
+      const db = setup.auth.ctx.db
+      const at = await releaseAt(db, setup.electionId)
+      for (const p of setup.holders.slice(0, 3)) {
+        const engine = new KeyReleaseEngine({ db }, { vault: p.vault, now: () => at + 1 })
+        const outcome = await engine.releaseKeyShare(setup.electionId, p.signer)
+        expect(outcome.outcome, `${p.name} release`).to.not.equal('already-released')
+      }
+      return { at }
+    }
+
+    it('R1: with junk commitments published, release succeeds for three honest keyholders and the key reconstructs to Y', async () => {
+      const setup = await driveToRound4Minus1()
+      await publishForgedElectionKey(setup, setup.holders[0]!, { groupCommitments: junkCommitments(setup.commitments) })
+      await runDkgToQuiescence(setup.holders, setup.electionId)
+      for (const p of setup.holders) {
+        expect(await p.vault.hasSecret(keyholderDkgShareAlias(setup.electionId, setup.revision, p.userId)), `${p.name} share`).to.equal(true)
+      }
+
+      const { at } = await releaseThree(setup)
+      const engine = new KeyReleaseEngine({ db: setup.auth.ctx.db }, { now: () => at + 1 })
+      const status = await engine.getKeyReleaseStatus(setup.electionId)
+      expect(status.phase).to.equal('reconstructable')
+      expect(status.rejectedReleases).to.deep.equal([])
+      const reconstructed = await engine.reconstructElectionKey(setup.electionId)
+      expect(bytesToHex(secp256k1.getPublicKey(reconstructed.secretKey, true))).to.equal(setup.y)
+    })
+
+    it('R2: with a malformed GroupCommitments column, release status and seeding do not throw and the release still works', async () => {
+      const setup = await driveToRound4Minus1()
+      let refused: unknown = null
+      try {
+        await publishForgedElectionKey(setup, setup.holders[0]!, { groupCommitments: 'not-json' })
+      } catch (err) {
+        refused = err
+      }
+      if (refused !== null) {
+        await publishForgedElectionKey(setup, setup.holders[0]!, { groupCommitments: JSON.stringify(['not-a-point']) })
+      }
+      await runDkgToQuiescence(setup.holders, setup.electionId)
+
+      const db = setup.auth.ctx.db
+      const at = await releaseAt(db, setup.electionId)
+      const p0 = setup.holders[0]!
+      const tasks = new KeysTasksEngine(
+        { hash: 'h'.repeat(16), name: 'Test Network', relays: [], primaryAuthorityDomainName: 'authority.example.com' },
+        { db }, { vault: p0.vault, now: () => at + 1 }
+      )
+      await tasks.getKeysToRelease(true)
+      await releaseThree(setup)
+      const engine = new KeyReleaseEngine({ db }, { now: () => at + 1 })
+      expect((await engine.getKeyReleaseStatus(setup.electionId)).phase).to.equal('reconstructable')
+      const reconstructed = await engine.reconstructElectionKey(setup.electionId)
+      expect(bytesToHex(secp256k1.getPublicKey(reconstructed.secretKey, true))).to.equal(setup.y)
+    })
+
+    it('R3: a signed release row carrying a wrong share is rejected share-invalid against the transcript commitments', async () => {
+      const setup = await driveToRound4Minus1()
+      await publishForgedElectionKey(setup, setup.holders[0]!, { groupCommitments: junkCommitments(setup.commitments) })
+      await runDkgToQuiescence(setup.holders, setup.electionId)
+
+      const db = setup.auth.ctx.db
+      const at = await releaseAt(db, setup.electionId)
+      const x = setup.holders[3]!
+      const identifier = dkgIdentifierForUser(x.userId)
+      const wrongShare = bytesToHex(secp256k1.utils.randomSecretKey())
+      const releasedAt = new Date(at + 1).toISOString()
+      const digestRow = await db
+        .prepare("select Digest('KeyholderShareRelease', :electionId, :revision, :userId, :identifier, :signingShare, :releasedAt) as d")
+        .get({ electionId: setup.electionId, revision: setup.revision, userId: x.userId, identifier, signingShare: wrongShare, releasedAt })
+      const signature = await x.signer.sign(digestToBytes(digestRow!.d as string))
+      await db.exec(
+        `insert into KeyholderShareRelease (ElectionId, ElectionRevision, UserId, Identifier, SigningShare, ReleasedAt, SignerKey, Signature)
+         values (:electionId, :revision, :userId, :identifier, :signingShare, :releasedAt, :signerKey, :signature)`,
+        { electionId: setup.electionId, revision: setup.revision, userId: x.userId, identifier, signingShare: wrongShare, releasedAt, signerKey: signature.signerKey, signature: signature.signature }
+      )
+      const status = await new KeyReleaseEngine({ db }, { now: () => at + 1 }).getKeyReleaseStatus(setup.electionId)
+      expect(status.rejectedReleases.find((r) => r.userId === x.userId)?.reason).to.equal('share-invalid')
     })
   })
 })
