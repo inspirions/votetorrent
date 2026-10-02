@@ -245,8 +245,8 @@ describe("multipeer-continuity-keys (62-10, D-31/D-36/D-41/D-43/D-45/D-46/D-49/D
 		});
 	});
 
-	test("the total catalog is 91 keys per locale", () => {
-		expect(ALL_CATALOG_KEYS).toHaveLength(91);
+	test("the total catalog is 93 keys per locale", () => {
+		expect(ALL_CATALOG_KEYS).toHaveLength(93);
 	});
 
 	test.each(ALL_CATALOG_KEYS)("%s: non-empty value in both locales, EN !== ES", (key) => {
