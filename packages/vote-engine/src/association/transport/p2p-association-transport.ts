@@ -15,7 +15,9 @@ import {
   decodeStagingPlaintext,
   insertWithCursorRetry,
   isConformingStagingCursor,
-  readInSequenceRows
+  readConformingRows,
+  readInSequenceRows,
+  inSequenceHighWater
 } from '../../registration/transport/p2p-staging-seam.js'
 import type { StagingSealer, StagingOpener, StagingDecisionSigner, StagingReadReport, StagingUnreadableRow, StagingSqlPort } from '../../registration/transport/p2p-staging-seam.js'
 import { bytesToBase64url, digestToBytes, nowCanonicalDatetime } from '../../utils.js'
@@ -438,14 +440,14 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
       throw new P2pStagingError('no-opener', 'P2pAssociationTransport.readStagedRequestsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await readInSequenceRows<StagingRow>(port, 'AssociationRequestStaging', this.strandId, STAGING_SELECT_SQL, sinceCursor)
+    const { rows, ceiling } = await readConformingRows<StagingRow>(port, 'AssociationRequestStaging', this.strandId, STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedAssociationRequest[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (isConformingStagingCursor(row.Cursor) && (highWaterCursor === undefined || row.Cursor > highWaterCursor)) highWaterCursor = row.Cursor
+      highWaterCursor = inSequenceHighWater(highWaterCursor, row.Cursor, ceiling)
 
       let signature: Signature
       try {
@@ -507,14 +509,14 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
       throw new P2pStagingError('no-opener', 'P2pAssociationTransport.readStagedAttestationsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await readInSequenceRows<AttestationStagingRow>(port, 'AssociationAttestationStaging', this.strandId, ATTESTATION_STAGING_SELECT_SQL, sinceCursor)
+    const { rows, ceiling } = await readConformingRows<AttestationStagingRow>(port, 'AssociationAttestationStaging', this.strandId, ATTESTATION_STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedAttestation[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (isConformingStagingCursor(row.Cursor) && (highWaterCursor === undefined || row.Cursor > highWaterCursor)) highWaterCursor = row.Cursor
+      highWaterCursor = inSequenceHighWater(highWaterCursor, row.Cursor, ceiling)
 
       let signature: Signature
       try {

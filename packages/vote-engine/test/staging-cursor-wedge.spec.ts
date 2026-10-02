@@ -15,6 +15,7 @@ import {
   isConformingStagingCursor,
   stagingCursorCeiling,
   P2pStagingError,
+  STAGING_CURSOR_MAX_ATTEMPTS,
   STAGING_CURSOR_MAX_TEXT,
   STAGING_CURSOR_MAX_STEP
 } from '../src/registration/transport/p2p-staging-seam.js'
@@ -36,7 +37,8 @@ const CAP = STAGING_CURSOR_MAX_TEXT
 /** In-memory port that interprets just the statements the seam and transports issue. */
 class MockPort implements StagingSqlPort, RegistrationStrandPort, AssociationStrandPort {
   readonly inserted: string[] = []
-  constructor (private readonly cursors: string[], private readonly table: string = 'T') {}
+  mutateCalls = 0
+  constructor (protected readonly cursors: string[], private readonly table: string = 'T', private readonly rowCountOverride?: number | string) {}
 
   private rowFor (cursor: string): Record<string, unknown> {
     return {
@@ -63,7 +65,15 @@ class MockPort implements StagingSqlPort, RegistrationStrandPort, AssociationStr
 
   async query<T> (sql: string, params: Record<string, unknown>): Promise<T[]> {
     if (/max\(Cursor\)/.test(sql)) return [{ MaxCursor: [...this.cursors].sort().pop() ?? null } as unknown as T]
-    if (/count\(\*\)/.test(sql)) return [{ RowCount: this.cursors.length } as unknown as T]
+    if (/count\(\*\)/.test(sql)) return [{ RowCount: this.rowCountOverride ?? this.cursors.length } as unknown as T]
+    if (/order by Cursor asc limit 64/.test(sql)) {
+      const from = params.fromCursor as string
+      return this.cursors
+        .filter((c) => c >= from)
+        .sort()
+        .slice(0, 64)
+        .map((c) => ({ Cursor: c }) as unknown as T)
+    }
     if (/order by Cursor desc limit 64/.test(sql)) {
       const ceiling = params.ceiling as string
       const before = params.beforeCursor as string | undefined
@@ -86,9 +96,13 @@ class MockPort implements StagingSqlPort, RegistrationStrandPort, AssociationStr
     throw new Error(`MockPort: unexpected query ${sql}`)
   }
 
+  /** Models the schema's (StrandId, Cursor) unique index: a duplicate cursor is refused. */
   async mutate (_sql: string, params: Record<string, unknown>): Promise<void> {
-    this.inserted.push(params.cursor as string)
-    this.cursors.push(params.cursor as string)
+    this.mutateCalls += 1
+    const cursor = params.cursor as string
+    if (this.cursors.includes(cursor)) throw new Error('UNIQUE constraint failed: (StrandId, Cursor)')
+    this.inserted.push(cursor)
+    this.cursors.push(cursor)
   }
 
   async close (): Promise<void> {}
@@ -108,6 +122,36 @@ async function allocate (cursors: string[], table: StagingCursorTable = 'Registr
   })
   return { cursor: out.cursor, port }
 }
+
+/** Every mutate (or just the first, when `firstOnly`) lands a competitor row at the requested cursor, then rejects. */
+class RacingPort extends MockPort {
+  constructor (cursors: string[], private readonly firstOnly: boolean) { super(cursors) }
+  override async mutate (_sql: string, params: Record<string, unknown>): Promise<void> {
+    this.mutateCalls += 1
+    if (this.firstOnly && this.mutateCalls > 1) {
+      this.cursors.push(params.cursor as string)
+      this.inserted.push(params.cursor as string)
+      return
+    }
+    this.cursors.push(params.cursor as string)
+    throw new Error('UNIQUE constraint failed: (StrandId, Cursor)')
+  }
+}
+
+async function allocateOn (port: MockPort): Promise<string> {
+  const out = await insertWithCursorRetry(port, {
+    table: 'RegistrationRequestStaging',
+    strandId: 's',
+    insertSql: 'insert into x',
+    params: {},
+    identity: { sql: 'select 1 where StrandId = :strandId and RequestId = :requestId', params: { strandId: 's', requestId: 'r' } },
+    onIdentityConflict: () => 'idempotent',
+    where: 'test'
+  })
+  return out.cursor
+}
+
+const pad16 = (n: number | bigint): string => String(n).padStart(16, '0')
 
 const unreadableOpener = { open: async () => ({ ok: false as const, reason: 'not-a-recipient', detail: '' }) }
 
@@ -155,6 +199,63 @@ describe('staging cursor wedge (62-33, V-4)', function () {
       expect(port.inserted).to.deep.equal([])
     })
 
+    it('W0: MockPort models the (StrandId, Cursor) unique index', async () => {
+      const port = new MockPort([GOOD])
+      let caught: unknown
+      try {
+        await port.mutate('insert into x', { cursor: GOOD })
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as Error).message).to.contain('UNIQUE')
+      expect(port['cursors']).to.deep.equal([GOOD])
+      await port.mutate('insert into x', { cursor: '0000000000000002' })
+      expect(port['cursors']).to.deep.equal([GOOD, '0000000000000002'])
+    })
+
+    it('W8: two rows at (ceiling, ceiling + 1) allocate the first free slot above them', async () => {
+      expect((await allocate([pad16(1002), pad16(1003)])).cursor).to.equal(pad16(1004))
+    })
+
+    it('W9: a 70-row run (more than one page) is walked in a single mutate', async () => {
+      const cursors: string[] = []
+      for (let i = 1070; i < 1140; i++) cursors.push(pad16(i))
+      const { cursor, port } = await allocate(cursors)
+      expect(cursor).to.equal(pad16(1140))
+      expect(port.mutateCalls).to.equal(1)
+    })
+
+    it('W10: a genuine race above the ceiling lands past the competitor after two mutates', async () => {
+      const port = new RacingPort([pad16(1002), pad16(1003)], true)
+      expect(await allocateOn(port)).to.equal(pad16(1005))
+      expect(port.mutateCalls).to.equal(2)
+    })
+
+    it('W11: repeated genuine races end in cursor-exhausted after exactly STAGING_CURSOR_MAX_ATTEMPTS mutates', async () => {
+      const port = new RacingPort([], false)
+      let caught: unknown
+      try {
+        await allocateOn(port)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as P2pStagingError).code).to.equal('cursor-exhausted')
+      expect(port.mutateCalls).to.equal(STAGING_CURSOR_MAX_ATTEMPTS)
+    })
+
+    it('W12: a static run that walks past the cap throws cursor-exhausted without mutating', async () => {
+      const cap = BigInt(CAP)
+      const port = new MockPort([pad16(cap - BigInt(2)), pad16(cap - BigInt(1)), CAP], 'T', (cap - BigInt(2) - BigInt(STAGING_CURSOR_MAX_STEP)).toString())
+      let caught: unknown
+      try {
+        await allocateOn(port)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as P2pStagingError).code).to.equal('cursor-exhausted')
+      expect(port.mutateCalls).to.equal(0)
+    })
+
     it('an empty strand allocates 0000000000000001', async () => {
       expect((await allocate([])).cursor).to.equal(GOOD)
     })
@@ -197,7 +298,7 @@ describe('staging cursor wedge (62-33, V-4)', function () {
 
     it('W6: registration readStagedRequestsReport ignores forged cursors', async () => {
       const report = await reg(ROWS).readStagedRequestsReport()
-      expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD])
+      expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD, CAP])
       expect(report.highWaterCursor).to.equal(GOOD)
     })
 
@@ -212,16 +313,26 @@ describe('staging cursor wedge (62-33, V-4)', function () {
       expect((await reg(ROWS).pollDecisions(FORGED_TEXT)).map((n) => n.cursor)).to.deep.equal([GOOD])
     })
 
+    it('W13: a staging report delivers every conforming row but the high-water mark stays at or below the ceiling', async () => {
+      const port = new MockPort([GOOD, pad16(1003)], 'T', 2)
+      const transport = new P2pRegistrationTransport({
+        openStrand: async () => port, computeDigest: async () => new Uint8Array(32), strandId: 's', opener: unreadableOpener
+      })
+      const report = await transport.readStagedRequestsReport()
+      expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD, pad16(1003)])
+      expect(report.highWaterCursor).to.equal(GOOD)
+    })
+
     it('W6b: association requests', async () => {
       const report = await assoc(ROWS).readStagedRequestsReport()
-      expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD])
+      expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD, CAP])
       expect(report.highWaterCursor).to.equal(GOOD)
       expect((await assoc(ROWS).readStagedRequestsReport(FORGED_TEXT)).highWaterCursor).to.equal(GOOD)
     })
 
     it('W6b: association attestations', async () => {
       const report = await assoc(ROWS).readStagedAttestationsReport()
-      expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD])
+      expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD, CAP])
       expect(report.highWaterCursor).to.equal(GOOD)
       expect((await assoc(ROWS).readStagedAttestationsReport(FORGED_TEXT)).highWaterCursor).to.equal(GOOD)
     })
@@ -280,6 +391,7 @@ describe('staging cursor wedge (62-33, V-4)', function () {
 
       const report = await transport.readStagedRequestsReport()
       expect(report.delivered.map((d) => d.requestId)).to.deep.equal([id])
+      expect(report.unreadable.map((u) => u.cursor)).to.deep.equal([CAP])
       expect(report.highWaterCursor).to.equal(GOOD)
     })
   })

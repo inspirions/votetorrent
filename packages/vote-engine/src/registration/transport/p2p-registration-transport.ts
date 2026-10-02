@@ -13,7 +13,9 @@ import {
   decodeStagingPlaintext,
   insertWithCursorRetry,
   isConformingStagingCursor,
-  readInSequenceRows
+  readConformingRows,
+  readInSequenceRows,
+  inSequenceHighWater
 } from './p2p-staging-seam.js'
 import type {
   StagingSealer,
@@ -404,14 +406,14 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
       throw new P2pStagingError('no-opener', 'P2pRegistrationTransport.readStagedRequestsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await readInSequenceRows<StagingRow>(port, 'RegistrationRequestStaging', this.strandId, STAGING_SELECT_SQL, sinceCursor)
+    const { rows, ceiling } = await readConformingRows<StagingRow>(port, 'RegistrationRequestStaging', this.strandId, STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedRequest[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (isConformingStagingCursor(row.Cursor) && (highWaterCursor === undefined || row.Cursor > highWaterCursor)) highWaterCursor = row.Cursor
+      highWaterCursor = inSequenceHighWater(highWaterCursor, row.Cursor, ceiling)
 
       let signature: Signature
       try {
