@@ -172,7 +172,7 @@ export default function TasksScreen() {
 							const chip = renderChipForTask(task);
 							const onPress =
 								task.type === "release-key"
-									? () => navigation.navigate("KeyTask", { task: task as ReleaseKeyTask })
+									? () => navigation.navigate("KeyRelease", { task: task as ReleaseKeyTask })
 									: () => navigation.navigate("SignatureTask", { task: task as SignatureTask });
 							return (
 								<TaskCard

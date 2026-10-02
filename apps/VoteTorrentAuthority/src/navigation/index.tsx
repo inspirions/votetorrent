@@ -37,10 +37,10 @@ import AddDeviceScreen from "../screens/users/AddDeviceScreen";
 import AddedKeyScreen from "../screens/users/AddedKeyScreen";
 import KeyholderScreen from "../screens/keyholder/KeyholderScreen";
 import KeyholderInvitationScreen from "../screens/keyholder/KeyholderInvitationScreen";
+import KeyReleaseScreen from "../screens/keyholder/KeyReleaseScreen";
 import NetworkDetailsScreen from "../screens/networks/NetworkDetailsScreen";
 import NetworkStatisticsScreen from "../screens/networks/NetworkStatisticsScreen";
 import NetworkRevisionScreen from "../screens/networks/NetworkRevisionScreen";
-import KeyTaskScreen from "../screens/tasks/KeyTaskScreen";
 import SignatureTaskScreen from "../screens/tasks/SignatureTaskScreen";
 import EditElectionScreen from "../screens/tasks/EditElectionScreen";
 import AuthorityDetailScreen from "../screens/tasks/AuthorityDetailScreen";
@@ -322,6 +322,16 @@ export const RootNavigator = () => {
 				options={{ title: t("associationApprovalScreenTitle") }}
 			/>
 			<Stack.Screen
+				name="KeyRelease"
+				component={KeyReleaseScreen}
+				options={({ navigation }) => ({
+					title: t("keyholderReleaseScreenTitle"),
+					presentation: "modal",
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
+			<Stack.Screen
 				name="NetworkStatistics"
 				component={NetworkStatisticsScreen}
 				options={{ title: t("statistics") }}
@@ -409,16 +419,6 @@ export const RootNavigator = () => {
 				name="KeyholderInvitation"
 				component={KeyholderInvitationScreen}
 				options={{ title: t("keyholderInvitation") }}
-			/>
-			<Stack.Screen
-				name="KeyTask"
-				component={KeyTaskScreen}
-				options={({ navigation }) => ({
-					title: t("keyholderRelease"),
-					presentation: "modal",
-					headerBackVisible: false,
-					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-				})}
 			/>
 			<Stack.Screen
 				name="SignatureTask"
