@@ -185,11 +185,21 @@
 //     swept"), scenario E ("no vault holds a round-secret alias"). Control
 //     (j).
 // 13. Read-side signature verification of replicated rows: `loadSnapshot`
-//     recomputes `SignatureValid(...)  or SignatureValidP256(...)` AND an
-//     EXISTS over `UserKey` for every `KeyholderDkgMessage`/`ElectionKey`
-//     row in SQL — a replicated row is never trusted on the strength of
+//     recomputes `SignatureValid(...)  or SignatureValidP256(...)` over every
+//     `KeyholderDkgMessage`/`ElectionKey` row in SQL against the row's OWN
+//     stored key — a replicated row is never trusted on the strength of
 //     having replicated. `evaluateDkgRevision` drops a `signatureValid:
 //     false` row into `invalidRows` and never attributes it. Control (i).
+//     Key membership is proven ONCE, at insert, by `SenderKeyIsUsers` /
+//     `PublisherKeyIsUsers` on immutable NoUpdate/NoDelete rows, and is
+//     deliberately NOT re-required at read (WR-02, mirroring 62-39's CR-02
+//     release reads): a later rotation or revocation must not turn a healthy
+//     transcript into `failed / election-key-mismatch`. A revoked key still
+//     cannot write: `advanceDkg` checks the current key and the schema refuses
+//     the insert. REJECTED variant: drop the membership requirement only once
+//     an ElectionKey is published; a row's validity must not depend on whether
+//     a LATER row exists, and a pre-publish rotation could still invalidate an
+//     honest participant's earlier rounds mid-DKG.
 // 14. No secret bytes in error messages, and no `console` use. The
 //     `KeyholderDkgError`/`KeyVaultError` codes and ids are the only error
 //     content; `decodeDkgRoundVaultRecord`'s own corruption messages name
@@ -333,6 +343,10 @@
 //       the attempt is still collecting and awaitingUserIds lists the
 //       missing member" — got an immediate `aborted/unresolved-complaint`
 //       instead of `collecting`.
+//
+//   (l) WR-02 controls (62-42): re-add an EXISTS over UserKey at the
+//       KeyholderDkgMessage read (DS2 goes red); at the ElectionKey read (DS3
+//       goes red); delete the advanceDkg current-key check (DS4b goes red).
 //
 // Findings table (id, severity, status):
 //
@@ -532,11 +546,8 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
     for await (const row of this.ctx.db.eval(
       `select Attempt, DkgRound, SenderUserId, Payload, ResultKey,
           (
-            (
-              SignatureValid(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
-                or SignatureValidP256(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
-            )
-            and exists (select 1 from UserKey K where K.UserId = SenderUserId and K.PubKey = SenderKey)
+            SignatureValid(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
+              or SignatureValidP256(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
           ) as SigValid
         from KeyholderDkgMessage
         where ElectionId = :electionId and ElectionRevision = :revision`,
@@ -557,11 +568,8 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
       .prepare(
         `select Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId,
             (
-              (
-                SignatureValid(Digest('ElectionKey', ElectionId, ElectionRevision, Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId), Signature, PublisherKey)
-                  or SignatureValidP256(Digest('ElectionKey', ElectionId, ElectionRevision, Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId), Signature, PublisherKey)
-              )
-              and exists (select 1 from UserKey K where K.UserId = PublisherUserId and K.PubKey = PublisherKey)
+              SignatureValid(Digest('ElectionKey', ElectionId, ElectionRevision, Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId), Signature, PublisherKey)
+                or SignatureValidP256(Digest('ElectionKey', ElectionId, ElectionRevision, Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId), Signature, PublisherKey)
             ) as SigValid
           from ElectionKey where ElectionId = :electionId and ElectionRevision = :revision`
       )

@@ -21,7 +21,7 @@ import { releasingKeysAt } from '../src/key-release/release-window.js'
 import { KeyReleaseEngine, KeyReleaseError } from '../src/key-release/key-release-engine.js'
 import { UserEngine } from '../src/user/user-engine.js'
 import { digestToBytes } from '../src/utils.js'
-import { randomTestKeyPair } from './fixtures/keys.js'
+import { randomTestKeyPair, type TestKeyPair } from './fixtures/keys.js'
 import { runDkgToQuiescence, seedDkgElection, type DkgTestParticipant, type SeedDkgElectionResult } from './fixtures/dkg-keyholders.js'
 
 interface Setup {
@@ -54,7 +54,7 @@ async function setup (): Promise<Setup> {
 }
 
 /** Verifier recipe: add a second key (signed by the current one), revoke the DKG key (signed by the new one). */
-async function rotateAndRevoke (s: Setup, p: DkgTestParticipant): Promise<void> {
+async function rotateAndRevoke (s: Setup, p: DkgTestParticipant): Promise<TestKeyPair> {
   const db = s.db
   const user = { id: p.userId, activeKeys: [{ key: p.signer.signingPublicKey, type: 'M', expiration: Date.now() + 86_400_000 }] }
   const ue = new UserEngine(user as never, s.seeded.auth.ctx)
@@ -65,6 +65,7 @@ async function rotateAndRevoke (s: Setup, p: DkgTestParticipant): Promise<void> 
   await ue.revokeKey(p.signer.signingPublicKey, { signature: bytesToHex(sig), signerKey: second.publicHex, signerUserId: '' })
   const left = await db.prepare('select count(*) as n from UserKey where UserId = :u and PubKey = :k').get({ u: p.userId, k: p.signer.signingPublicKey })
   expect(Number(left!.n), `${p.name} old key revoked`).to.equal(0)
+  return second
 }
 
 function engineFor (s: Setup, p?: DkgTestParticipant): KeyReleaseEngine {
@@ -167,5 +168,24 @@ describe('key release survives keyholder key rotation (62-39, CR-02)', function 
     expect((err as KeyReleaseError).code).to.equal('signer-key-mismatch')
     const row = await s.db.prepare('select 1 as x from KeyholderShareRelease where ElectionId = :e and UserId = :u').get({ e: s.electionId, u: p.userId })
     expect(row).to.equal(undefined)
+  })
+
+  it('KR6 (IN-04): a rotated holder releases with its NEW key and the key reconstructs to Y', async () => {
+    const s = await setup()
+    const p = s.nonPublishers[0]!
+    const fresh = await rotateAndRevoke(s, p)
+    const newSigner = {
+      userId: p.userId,
+      signingPublicKey: fresh.publicHex,
+      sign: async (digest: Uint8Array) => ({
+        signature: bytesToHex(secp256k1.sign(digest, hexToBytes(fresh.privateHex))),
+        signerKey: fresh.publicHex,
+        signerUserId: ''
+      })
+    }
+    const out = await engineFor(s, p).releaseKeyShare(s.electionId, newSigner)
+    expect(out.outcome, `${p.name} release with new key`).to.equal('released')
+    await releaseOk(s, s.nonPublishers[1]!)
+    await expectReconstructsToY(s)
   })
 })
