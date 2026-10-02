@@ -11,7 +11,9 @@ import {
   P2pStagingError,
   encodeStagingPlaintext,
   decodeStagingPlaintext,
-  insertWithCursorRetry
+  insertWithCursorRetry,
+  isConformingStagingCursor,
+  readInSequenceRows
 } from './p2p-staging-seam.js'
 import type {
   StagingSealer,
@@ -348,11 +350,8 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
    */
   async pollDecisions (sinceCursor?: string): Promise<RegistrationDecisionNotice[]> {
     const port = await this.strand()
-    const rows = await port.query<DecisionRow>(DECISION_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
-    return rows.map((row) => {
+    const rows = await readInSequenceRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.filter((row) => isConformingStagingCursor(row.Cursor)).map((row) => {
       if (row.Status === 'd') {
         return { requestId: row.RequestId, status: 'r', reason: REGISTRATION_DUPLICATE_CLOSED_REASON, cursor: row.Cursor }
       }
@@ -376,17 +375,14 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
       throw new P2pStagingError('no-opener', 'P2pRegistrationTransport.readStagedRequestsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await port.query<StagingRow>(STAGING_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
+    const rows = await readInSequenceRows<StagingRow>(port, 'RegistrationRequestStaging', this.strandId, STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedRequest[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (highWaterCursor === undefined || row.Cursor > highWaterCursor) highWaterCursor = row.Cursor
+      if (isConformingStagingCursor(row.Cursor) && (highWaterCursor === undefined || row.Cursor > highWaterCursor)) highWaterCursor = row.Cursor
 
       let signature: Signature
       try {
@@ -484,11 +480,8 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
    * 'd' status. Throws (naming only the offending status) on anything outside `a`/`r`/`d`. */
   async readDecisionRecords (sinceCursor?: string): Promise<P2pRegistrationDecisionRecord[]> {
     const port = await this.strand()
-    const rows = await port.query<DecisionRow>(DECISION_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
-    return rows.map((row) => {
+    const rows = await readInSequenceRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.filter((row) => isConformingStagingCursor(row.Cursor)).map((row) => {
       if (row.Status !== 'a' && row.Status !== 'r' && row.Status !== 'd') {
         throw new Error(`P2pRegistrationTransport.readDecisionRecords: decision record carries a status outside a/r/d: ${JSON.stringify(row.Status)}`)
       }

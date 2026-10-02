@@ -13,7 +13,9 @@ import {
   P2pStagingError,
   encodeStagingPlaintext,
   decodeStagingPlaintext,
-  insertWithCursorRetry
+  insertWithCursorRetry,
+  isConformingStagingCursor,
+  readInSequenceRows
 } from '../../registration/transport/p2p-staging-seam.js'
 import type { StagingSealer, StagingOpener, StagingDecisionSigner, StagingReadReport, StagingUnreadableRow, StagingSqlPort } from '../../registration/transport/p2p-staging-seam.js'
 import { bytesToBase64url, digestToBytes, nowCanonicalDatetime } from '../../utils.js'
@@ -416,10 +418,7 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
    */
   async pollDecisions (sinceCursor?: string): Promise<AssociationDecisionNotice[]> {
     const port = await this.strand()
-    const rows = await port.query<DecisionRow>(DECISION_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
+    const rows = await readInSequenceRows<DecisionRow>(port, 'AssociationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
     return rows.map((row) => ({
       requestId: row.RequestId,
       status: assertKnownAssociationStatus(row.Status, 'P2pAssociationTransport.pollDecisions'),
@@ -439,17 +438,14 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
       throw new P2pStagingError('no-opener', 'P2pAssociationTransport.readStagedRequestsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await port.query<StagingRow>(STAGING_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
+    const rows = await readInSequenceRows<StagingRow>(port, 'AssociationRequestStaging', this.strandId, STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedAssociationRequest[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (highWaterCursor === undefined || row.Cursor > highWaterCursor) highWaterCursor = row.Cursor
+      if (isConformingStagingCursor(row.Cursor) && (highWaterCursor === undefined || row.Cursor > highWaterCursor)) highWaterCursor = row.Cursor
 
       let signature: Signature
       try {
@@ -511,17 +507,14 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
       throw new P2pStagingError('no-opener', 'P2pAssociationTransport.readStagedAttestationsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await port.query<AttestationStagingRow>(ATTESTATION_STAGING_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
+    const rows = await readInSequenceRows<AttestationStagingRow>(port, 'AssociationAttestationStaging', this.strandId, ATTESTATION_STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedAttestation[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (highWaterCursor === undefined || row.Cursor > highWaterCursor) highWaterCursor = row.Cursor
+      if (isConformingStagingCursor(row.Cursor) && (highWaterCursor === undefined || row.Cursor > highWaterCursor)) highWaterCursor = row.Cursor
 
       let signature: Signature
       try {
@@ -623,10 +616,7 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
    * through `assertKnownAssociationStatus` (unknown status THROWS, unchanged). */
   async readDecisionRecords (sinceCursor?: string): Promise<P2pAssociationDecisionRecord[]> {
     const port = await this.strand()
-    const rows = await port.query<DecisionRow>(DECISION_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
+    const rows = await readInSequenceRows<DecisionRow>(port, 'AssociationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
     return rows.map((row) => ({
       requestId: row.RequestId,
       authorityId: row.AuthorityId,
