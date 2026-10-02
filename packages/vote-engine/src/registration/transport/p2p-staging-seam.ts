@@ -259,8 +259,13 @@ export type StagingCursorTable =
  *   1. Allocate the cursor (V-4): the greatest CONFORMING, IN-SEQUENCE cursor (at or below
  *      `stagingCursorCeiling`: row count + `STAGING_CURSOR_MAX_STEP`) is `base`; the candidate is
  *      max(`base`, `floor`) + 1, then WALKED upward past every occupied slot (ascending pages of
- *      64 rows from the candidate), because the strand's (StrandId, Cursor) unique index refuses
- *      an occupied slot and re-deriving the same candidate would wedge allocation (CR-01).
+ *      64 rows), because the strand's (StrandId, Cursor) unique index refuses an occupied slot
+ *      and re-deriving the same candidate would wedge allocation (CR-01). The walk pages by the
+ *      last row seen (not by the candidate), so a page holding only non-conforming rows still
+ *      advances; it is bounded to `STAGING_CURSOR_MAX_TEXT`, so above-cap and non-digit rows
+ *      (which the decision tables' `CursorWidth` admits and pre-V-4 staging rows may carry) are
+ *      never paged; a page that does not advance throws `cursor-exhausted`; cost grows by one
+ *      query per 64 planted in-range rows (IN-05).
  *      `floor` is the slot a genuine race just took. Static occupied slots, however many a
  *      forger planted, never consume an attempt; only real concurrent inserts do. A malformed
  *      cursor is skipped. If the free slot is above the cap it throws `cursor-exhausted` without
@@ -299,7 +304,7 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
   const cursorProbeSql = `select Cursor from ${table} where StrandId = :strandId and Cursor = :cursor`
   const topPageSql = `select Cursor from ${table} where StrandId = :strandId and Cursor <= :ceiling order by Cursor desc limit 64`
   const nextPageSql = `select Cursor from ${table} where StrandId = :strandId and Cursor <= :ceiling and Cursor < :beforeCursor order by Cursor desc limit 64`
-  const walkPageSql = `select Cursor from ${table} where StrandId = :strandId and Cursor >= :fromCursor order by Cursor asc limit 64`
+  const walkPageSql = `select Cursor from ${table} where StrandId = :strandId and Cursor > :afterCursor and Cursor <= :capCursor order by Cursor asc limit 64`
 
   let lastError: unknown
   let floor = BigInt(0)
@@ -324,11 +329,14 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
       before = last
     }
     let nextValue = (maxConforming > floor ? maxConforming : floor) + BigInt(1)
-    // Walk past every occupied slot: each re-query starts strictly higher, so this terminates
-    // within the strand's row count.
+    // Walk past every occupied slot. The walk pages by the LAST ROW SEEN (never by the
+    // candidate, which does not move across a page of non-conforming rows) and is bounded to the
+    // conforming range (`Cursor <= STAGING_CURSOR_MAX_TEXT`), so above-cap and non-digit rows are
+    // never paged and every query starts strictly after the previous page. A page that fails to
+    // advance throws `cursor-exhausted`. Cost: one query per 64 planted in-range rows (IN-05).
+    let afterCursor = (nextValue - BigInt(1)).toString().padStart(STAGING_CURSOR_WIDTH, '0')
     for (; nextValue <= STAGING_CURSOR_CAP;) {
-      const fromCursor = nextValue.toString().padStart(STAGING_CURSOR_WIDTH, '0')
-      const page = await port.query<{ Cursor: unknown }>(walkPageSql, { strandId, fromCursor })
+      const page = await port.query<{ Cursor: unknown }>(walkPageSql, { strandId, afterCursor, capCursor: STAGING_CURSOR_MAX_TEXT })
       let free = false
       for (const row of page) {
         if (!isConformingStagingCursor(row.Cursor)) continue
@@ -336,7 +344,16 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
         if (rowValue === nextValue) nextValue += BigInt(1)
         else if (rowValue > nextValue) { free = true; break }
       }
-      if (free || page.length < 64) break
+      if (free || page.length < 64 || nextValue > STAGING_CURSOR_CAP) break
+      const last = page[page.length - 1]?.Cursor
+      if (typeof last !== 'string' || last <= afterCursor) {
+        throw new P2pStagingError(
+          'cursor-exhausted',
+          `${where}: the strand returned a cursor page that does not advance`,
+          { cause: lastError }
+        )
+      }
+      afterCursor = last
     }
     if (nextValue > STAGING_CURSOR_CAP) {
       throw new P2pStagingError(

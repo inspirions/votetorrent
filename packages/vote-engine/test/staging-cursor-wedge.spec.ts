@@ -67,9 +67,11 @@ class MockPort implements StagingSqlPort, RegistrationStrandPort, AssociationStr
     if (/max\(Cursor\)/.test(sql)) return [{ MaxCursor: [...this.cursors].sort().pop() ?? null } as unknown as T]
     if (/count\(\*\)/.test(sql)) return [{ RowCount: this.rowCountOverride ?? this.cursors.length } as unknown as T]
     if (/order by Cursor asc limit 64/.test(sql)) {
-      const from = params.fromCursor as string
+      const after = typeof params.afterCursor === 'string' ? params.afterCursor : undefined
+      const cap = typeof params.capCursor === 'string' ? params.capCursor : undefined
+      const from = params.fromCursor as string | undefined
       return this.cursors
-        .filter((c) => c >= from)
+        .filter((c) => (after !== undefined ? c > after && (cap === undefined || c <= cap) : c >= (from as string)))
         .sort()
         .slice(0, 64)
         .map((c) => ({ Cursor: c }) as unknown as T)

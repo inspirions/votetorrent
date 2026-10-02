@@ -16,7 +16,8 @@ import type { RegistrationStrandPort } from '../src/registration/transport/p2p-r
 import { P2pAssociationTransport } from '../src/association/transport/p2p-association-transport.js'
 import type { AssociationStrandPort } from '../src/association/transport/p2p-association-transport.js'
 import { STAGING_CURSOR_MAX_STEP } from '../src/registration/transport/p2p-staging-seam.js'
-import { digestToBytes } from '../src/utils.js'
+import type { StagingSqlPort } from '../src/registration/transport/p2p-staging-seam.js'
+import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { createP2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
@@ -56,6 +57,57 @@ async function forgeWedgePair (fixture: P2pStagingFixture, table: StagingTable, 
   await forgeRow(fixture, table, strandId, first)
   await forgeRow(fixture, table, strandId, second)
   return [first, second]
+}
+
+/** Wraps a port with a query budget so a regressed (looping) walk ends in a 'HANG' error. */
+function budgeted (port: StagingSqlPort, budget: number): StagingSqlPort & { readonly queries: number } {
+  let queries = 0
+  return {
+    get queries () { return queries },
+    async query<T> (sql: string, params: Record<string, unknown>): Promise<T[]> {
+      queries += 1
+      if (queries > budget) throw new Error(`HANG: query budget ${budget} exceeded`)
+      return await port.query<T>(sql, params)
+    },
+    mutate: async (sql, params) => await port.mutate(sql, params),
+    close: async () => await port.close(),
+    describe: () => port.describe()
+  }
+}
+
+/** An officer-signed raw decision row at an arbitrary cursor (what any `vrg` officer can write). */
+async function forgeDecision (
+  fixture: P2pStagingFixture,
+  table: 'RegistrationDecision' | 'AssociationDecision',
+  strandId: string,
+  cursor: string
+): Promise<void> {
+  const requestId = `forged-${crypto.randomUUID()}`
+  const authorityId = fixture.auth.authority.id
+  const decidedAt = toIsoZDatetime(Date.now())
+  const registration = table === 'RegistrationDecision'
+  const digestRow = registration
+    ? await fixture.db.prepare("select Digest('RegistrationDecision', :strandId, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt) as d")
+      .get({ strandId, requestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt })
+    : await fixture.db.prepare("select Digest('AssociationDecision', :strandId, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt) as d")
+      .get({ strandId, requestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt })
+  const digest = digestRow?.d as string
+  const sig = await fixture.decisionSigner.sign(digestToBytes(digest))
+  if (registration) {
+    await fixture.db.exec(
+      `insert into RegistrationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, Reason, ClosesRequestId, DecidedAt, DeciderKey, DeciderSignature)
+       with context now = :now
+       values (:strandId, :cursor, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt, :deciderKey, :deciderSignature)`,
+      { strandId, cursor, requestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt, deciderKey: sig.signerKey, deciderSignature: sig.signature, now: nowCanonicalDatetime() }
+    )
+  } else {
+    await fixture.db.exec(
+      `insert into AssociationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, ChallengeNonce, Reason, RevokesDeviceKey, MatchMethod, DecidedAt, DeciderKey, DeciderSignature)
+       with context now = :now
+       values (:strandId, :cursor, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt, :deciderKey, :deciderSignature)`,
+      { strandId, cursor, requestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt, deciderKey: sig.signerKey, deciderSignature: sig.signature, now: nowCanonicalDatetime() }
+    )
+  }
 }
 
 describe('staging cursor wedge on a real strand (62-38, CR-01)', function () {
@@ -184,5 +236,44 @@ describe('staging cursor wedge on a real strand (62-38, CR-01)', function () {
     expect(report.delivered.map((d) => d.requestId)).to.deep.equal([id])
     expect(report.unreadable.map((u) => u.cursor)).to.deep.equal([first, second])
     expect(report.highWaterCursor).to.equal('0000000000001003')
+  })
+
+  it('D7: 64 officer-signed above-cap RegistrationDecision rows do not stall publishDecision (62-41, CR-01)', async () => {
+    const strandId = freshStrand()
+    for (let i = 0; i < 64; i++) {
+      await forgeDecision(fixture, 'RegistrationDecision', strandId, (BigInt('9999999999999999') - BigInt(i)).toString())
+    }
+    const wrapped = budgeted(fixture.makePort(), 2000)
+    const transport = new P2pRegistrationTransport({
+      openStrand: async () => wrapped as unknown as RegistrationStrandPort,
+      computeDigest: async (init, key) => await fixture.fixtureRequestDigest(init, key),
+      strandId,
+      sealer: fixture.sealer,
+      opener: fixture.opener,
+      decisionSigner: fixture.decisionSigner
+    })
+    const cursor = await transport.publishDecision({ requestId: `honest-${crypto.randomUUID()}`, status: 'a', decidedAt: new Date().toISOString() })
+    expect(cursor).to.equal('0000000000000001')
+    expect(wrapped.queries).to.be.at.most(20)
+  })
+
+  it('D8: 64 officer-signed non-digit AssociationDecision rows do not stall publishDecision (62-41, CR-01)', async () => {
+    const strandId = freshStrand()
+    for (let i = 0; i < 64; i++) {
+      await forgeDecision(fixture, 'AssociationDecision', strandId, `zzzzzzzzzzzz${String(i).padStart(4, '0')}`)
+    }
+    const wrapped = budgeted(fixture.makePort(), 2000)
+    const transport = new P2pAssociationTransport({
+      openStrand: async () => wrapped as unknown as AssociationStrandPort,
+      computeDigest: async (init, key) => await fixture.fixtureRequestDigest(init, key),
+      computeAttestationDigest: async (answer, key) => await fixture.fixtureAttestationDigest(answer, key),
+      strandId,
+      sealer: fixture.sealer,
+      opener: fixture.opener,
+      decisionSigner: fixture.decisionSigner
+    })
+    const cursor = await transport.publishDecision({ requestId: `honest-${crypto.randomUUID()}`, status: 'a', matchMethod: 'code', decidedAt: new Date().toISOString() })
+    expect(cursor).to.equal('0000000000000001')
+    expect(wrapped.queries).to.be.at.most(20)
   })
 })
