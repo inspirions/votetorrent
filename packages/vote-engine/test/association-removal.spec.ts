@@ -35,7 +35,7 @@ import type {
   IAttestationVerifier,
   Signature
 } from '@votetorrent/vote-core'
-import { createTestNetwork, addTestAuthority, makeTestSignCallback } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, makeTestSignCallback, testKeyPairFor } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
@@ -85,7 +85,7 @@ after(async () => {
 })
 
 function makeRealSigner (userId: string): { sign: (digest: Uint8Array) => Promise<Signature>; publicHex: string; privateHex: string } {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   const sign = async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes)
@@ -312,7 +312,15 @@ describe('association-removal / D-41 compound write (62-18 Task 2)', function ()
     it('throws when the signer is not a vrg officer of the registrant authority, and the row survives', async () => {
       const { auth, registrantId, engine, sign } = await setupAssociationTest()
       const { deviceKey } = await associateDevice(engine, registrantId, sign)
-      const { sign: outsiderSign } = makeRealSigner('assoc-rm-outsider-not-an-officer')
+      // The outsider is not a fixture user, so it has no registered key: sign with a
+      // throwaway key. NOTE: this is refused by SignerKeyValid as well as the officer check,
+      // so the officer check is not isolated here.
+      const outsiderKeys = randomTestKeyPair()
+      const outsiderSign = async (digest: Uint8Array): Promise<Signature> => ({
+        signerUserId: 'assoc-rm-outsider-not-an-officer',
+        signerKey: outsiderKeys.publicHex,
+        signature: bytesToHex(secp256k1.sign(digest, hexToBytes(outsiderKeys.privateHex)))
+      })
 
       let threw = false
       try {

@@ -18,12 +18,13 @@ import {
 	NetworkDetails,
 } from "@votetorrent/vote-core";
 import { CustomButton } from "../../components/CustomButton";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useApp } from "../../providers/AppProvider";
 import NetworkDetailsComponent from "./components/NetworkDetailsComponent";
 import { AuthorizationSection } from "../../components/AuthorizationSection";
 import type { NavigationProp } from "../../navigation/types";
 import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import {
 	ProposedChange,
 	ProposedChangesCard,
@@ -39,7 +40,11 @@ export function NetworkDetailsScreen() {
 	const [primaryAuthorityAdmin, setPrimaryAuthorityAdmin] = useState<AdminDetails>();
 	const [loadError, setLoadError] = useState("");
 	const [selectError, setSelectError] = useState("");
-	const { getEngine, selectNetwork } = useApp();
+	const [currentUserId, setCurrentUserId] = useState<string>();
+	const [applying, setApplying] = useState(false);
+	const [applyError, setApplyError] = useState("");
+	const { getEngine, selectNetwork, resolveDeviceSigner } = useApp();
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const promptRecoveryKeyRegistrationIfNeeded = useRecoveryKeyRegistrationGate();
 	const { t } = useTranslation();
 	const { colors } = useTheme() as ExtendedTheme;
@@ -54,6 +59,9 @@ export function NetworkDetailsScreen() {
 				setNetworkEngine(engine);
 				const details = await engine.getDetails();
 				setNetworkDetails(details);
+				// Which officer is looking — only their own SIGN button is live (AuthorizationSection).
+				const currentUser = await engine.getCurrentUser();
+				setCurrentUserId((await currentUser?.getSummary())?.id);
 			} catch (error) {
 				console.warn("Failed to load network details:", error);
 				setLoadError(error instanceof Error ? error.message : String(error));
@@ -137,6 +145,33 @@ export function NetworkDetailsScreen() {
 	// writes the ref to the recentNetworks LocalStorage list, so no separate persistence is
 	// needed. Then return to the network home; sibling screens (Elections/Authorities/Create)
 	// resolve against the now-selected network.
+	// "Sign" on the proposed revision = approve AND apply it: applyRevision signs the revision's
+	// rn digest with this officer's device key and writes the new network row (servers, name,
+	// image, TSA policy) under that signature in one transaction. Single-approver networks only;
+	// the engine refuses (before writing) when the rn threshold needs more than one officer.
+	const handleApplyRevision = useCallback(async () => {
+		const proposal = networkDetails?.proposed?.proposed;
+		const revision = networkDetails?.proposedRevision;
+		if (!networkEngine || !proposal || revision === undefined) return;
+		setApplyError("");
+		setApplying(true);
+		try {
+			const sign = await resolveDeviceSigner();
+			await networkEngine.applyRevision(proposal.name, revision, sign);
+			setNetworkDetails(await networkEngine.getDetails());
+		} catch (error) {
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setApplyError(
+				error instanceof Error && error.name === "FeatureNotAvailableError"
+					? t("applyRevisionNeedsCoSigners")
+					: outcome.message ?? (error instanceof Error ? error.message : String(error)),
+			);
+		} finally {
+			setApplying(false);
+		}
+	}, [networkEngine, networkDetails, resolveDeviceSigner, handleDeviceSigningError, t]);
+
 	const handleSelectNetwork = async () => {
 		setSelectError("");
 		try {
@@ -240,6 +275,9 @@ export function NetworkDetailsScreen() {
 				<View style={styles.section}>
 					<AuthorizationSection
 						admin={primaryAuthorityAdmin}
+						currentUserId={currentUserId}
+						onSign={handleApplyRevision}
+						signing={applying}
 						onAdjustProposal={() => {
 							if (networkDetails) {
 								navigation.navigate("NetworkRevision", {
@@ -248,6 +286,7 @@ export function NetworkDetailsScreen() {
 							}
 						}}
 					/>
+					<InlineError message={applyError} />
 				</View>
 			)}
 		</ScrollView>

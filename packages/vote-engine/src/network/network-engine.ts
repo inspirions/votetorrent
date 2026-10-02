@@ -1,4 +1,5 @@
 import { QuereusError, MisuseError } from '@quereus/quereus'
+import { FeatureNotAvailableError, toImageRef } from '@votetorrent/vote-core'
 import { AuthorityEngine } from '../authority/authority-engine.js'
 import { UserEngine } from '../user/user-engine.js'
 import {
@@ -44,9 +45,13 @@ import type {
   UserKey,
   Timestamp,
   UserKeyType,
-  User
+  User,
+  Signature
 } from '@votetorrent/vote-core'
 import { verifyUserKeyMembership } from '../user/verify-user-key.js'
+import { allocateTid } from '../database/tid-allocator.js'
+import { seedSignedMutation } from '../signing/signed-mutation.js'
+import { listCurrentScopeHolders, readAuthorityThreshold } from '../signing/threshold.js'
 import { NetworkCreateAuthorityBuilder } from './builders/network-create-authority-builder.js'
 import { NetworkPinAuthorityBuilder } from './builders/network-pin-authority-builder.js'
 import { NetworkUnpinAuthorityBuilder } from './builders/network-unpin-authority-builder.js'
@@ -282,7 +287,7 @@ export class NetworkEngine implements INetworkEngine {
           id: row.Id as string,
           name: rowName,
           domainName: asText(row.DomainName, 'Authority.DomainName'),
-          imageRef: parseJsonOr<ImageRef | undefined>(row.ImageRef, undefined, 'Authority.ImageRef')
+          imageRef: toImageRef(parseJsonOr<unknown>(row.ImageRef, undefined, 'Authority.ImageRef'))
         })
       }
       return { buffer, firstBOF: true, lastEOF: buffer.length < PAGE_SIZE, offset: 0 }
@@ -328,11 +333,11 @@ export class NetworkEngine implements INetworkEngine {
         hash: nRow.Hash as string,
         primaryAuthorityId: nRow.PrimaryAuthorityId as string,
         name: nRow.Name as string,
-        imageRef: parseJsonOr<ImageRef | undefined>(
+        imageRef: toImageRef(parseJsonOr<unknown>(
           nRow.ImageRef,
           undefined,
           'Network.ImageRef'
-        ),
+        )),
         relays: parseJsonOr<string[]>(nRow.Relays, [], 'Network.Relays'),
         policies: {
           numberRequiredTSAs: nRow.NumberRequiredTSAs as number,
@@ -362,14 +367,15 @@ export class NetworkEngine implements INetworkEngine {
         )
         .get({ name: network.name })
       let proposedNetwork: NetworkRevision | undefined
+      const proposedRevision = pnRow ? Number(pnRow.Revision) : undefined
       if (pnRow) {
         proposedNetwork = {
           name: pnRow.Name as string,
-          imageRef: parseJsonOr<ImageRef | undefined>(
+          imageRef: toImageRef(parseJsonOr<unknown>(
             pnRow.ImageRef,
             undefined,
             'ProposedNetwork.ImageRef'
-          ),
+          )),
           relays: parseJsonOr<string[]>(
             pnRow.Relays,
             [],
@@ -404,11 +410,11 @@ export class NetworkEngine implements INetworkEngine {
         id: aRow.Id as string,
         name: aRow.Name as string,
         domainName: asText(aRow.DomainName, 'Authority.DomainName'),
-        imageRef: parseJsonOr<ImageRef | undefined>(
+        imageRef: toImageRef(parseJsonOr<unknown>(
           aRow.ImageRef,
           undefined,
           'Authority.ImageRef'
-        )
+        ))
       }
 
       return {
@@ -427,7 +433,8 @@ export class NetworkEngine implements INetworkEngine {
         },
         proposed: proposedNetwork
           ? { proposed: proposedNetwork, signers: [] }
-          : undefined
+          : undefined,
+        ...(proposedRevision !== undefined ? { proposedRevision } : {})
       }
     } catch (error) {
       // WR-05: preserve the genuine missing-row signal but stop masking every
@@ -539,11 +546,11 @@ export class NetworkEngine implements INetworkEngine {
         id: nRow.Id as string,
         hash: nRow.Hash as string,
         name: nRow.Name as string,
-        imageUrl: parseJsonOr<ImageRef | undefined>(
+        imageUrl: toImageRef(parseJsonOr<unknown>(
           aRow.ImageRef,
           undefined,
           'Authority.ImageRef'
-        )?.url,
+        ))?.url,
         primaryAuthorityDomainName: asText(
           aRow.DomainName,
           'Authority.DomainName'
@@ -677,11 +684,11 @@ export class NetworkEngine implements INetworkEngine {
       const user: User = {
         id: userDB.Id as string,
         name: userDB.Name as string,
-        imageRef: parseJsonOr<ImageRef | undefined>(
+        imageRef: toImageRef(parseJsonOr<unknown>(
           userDB.ImageRef,
           undefined,
           'User.ImageRef'
-        ),
+        )),
         activeKeys
       }
       if (user) {
@@ -723,7 +730,7 @@ export class NetworkEngine implements INetworkEngine {
           id: row.Id as string,
           name: row.Name as string,
           domainName: asText(row.DomainName, 'Authority.DomainName'),
-          imageRef: parseJsonOr<ImageRef | undefined>(row.ImageRef, undefined, 'Authority.ImageRef')
+          imageRef: toImageRef(parseJsonOr<unknown>(row.ImageRef, undefined, 'Authority.ImageRef'))
         })
       }
       return { buffer, firstBOF: newOffset === 0, lastEOF: buffer.length < PAGE_SIZE, offset: newOffset }
@@ -756,11 +763,11 @@ export class NetworkEngine implements INetworkEngine {
         id: authorityDB.Id as string,
         name: authorityDB.Name as string,
         domainName: asText(authorityDB.DomainName, 'Authority.DomainName'),
-        imageRef: parseJsonOr<ImageRef | undefined>(
+        imageRef: toImageRef(parseJsonOr<unknown>(
           authorityDB.ImageRef,
           undefined,
           'Authority.ImageRef'
-        )
+        ))
       }
       return new AuthorityEngine(authority, this.ctx)
     } catch (err) {
@@ -915,6 +922,108 @@ export class NetworkEngine implements INetworkEngine {
       return Number(newRow?.MaxRevision)
     } catch (error) {
       throw new Error('Failed to resend revision: ' + error)
+    }
+  }
+
+  /**
+   * Apply a proposed network revision (servers/relays, name, image, TSA policy) to the live
+   * `Network` row. The schema's `Network.UpdateNetworkValid` admits the UPDATE only under a
+   * completed `rn`-scoped AdminSignature whose Digest covers the new row —
+   * `Digest(Tid, Id, Name, ImageRef, Relays, TimestampAuthorities, NumberRequiredTSAs, ElectionType)` —
+   * so this method mints exactly that signing session (the officer's `sign` callback signs the
+   * digest app-side), then updates the row under it, all in ONE transaction: a refused signature
+   * leaves neither a session nor a half-applied network.
+   *
+   * The applied proposal is then marked resolved with the existing RevisionCancellation marker, so
+   * it drops off the proposed list (the network row now carries its values).
+   *
+   * Single-approver only: when the authority's `rn` threshold is above 1 this refuses BEFORE
+   * writing anything. Co-signing needs a 'network' signature Task, and the schema's
+   * `NetworkSignatureTaskExtension.MutationValid` binds a 7-field digest without `Id` that can never
+   * equal `UpdateNetworkValid`'s 8-field digest — a schema amendment, not engine work.
+   */
+  async applyRevision (
+    name: string,
+    revision: number,
+    sign: (digest: Uint8Array) => Promise<Signature>
+  ): Promise<void> {
+    const proposal = await this.ctx.db
+      .prepare(
+        `select ImageRef, Relays, TimestampAuthorities, NumberRequiredTSAs, ElectionType
+          from ProposedNetwork P
+          where Name = :name and Revision = :revision
+            and not exists (
+              select 1 from RevisionCancellation C where C.Name = P.Name and C.Revision = P.Revision
+            )`
+      )
+      .get({ name, revision })
+    if (!proposal) {
+      throw new Error(`No open proposed revision found for (${name}, ${revision})`)
+    }
+    const network = await this.ctx.db
+      .prepare('select Id, PrimaryAuthorityId from Network where Hash = :hash limit 1')
+      .get({ hash: this.init.hash })
+    if (!network) throw new Error('Network not found')
+    const networkId = network.Id as string
+    const authorityId = network.PrimaryAuthorityId as string
+
+    const userId = this.ctx.user?.id
+    if (!userId || !(await listCurrentScopeHolders(this.ctx.db, authorityId, 'rn')).includes(userId)) {
+      throw new Error('Only a current officer of the primary authority holding the "Revise Network" scope can apply a network revision')
+    }
+    if ((await readAuthorityThreshold(this.ctx.db, authorityId, 'rn')) > 1) {
+      throw new FeatureNotAvailableError(
+        'Applying a network revision that needs more than one officer\'s approval is not supported yet'
+      )
+    }
+
+    // Values bound IDENTICALLY into the digest and the UPDATE, so UpdateNetworkValid recomputes
+    // the same bytes the officer signed.
+    const row = {
+      id: networkId,
+      name,
+      imageRef: (proposal.ImageRef as string | null) ?? null,
+      relays: proposal.Relays as string,
+      timestampAuthorities: proposal.TimestampAuthorities as string,
+      numberRequiredTSAs: Number(proposal.NumberRequiredTSAs),
+      electionType: proposal.ElectionType as string
+    }
+    const tid = await allocateTid(this.ctx.db, 'network')
+
+    await this.ctx.db.exec('BEGIN')
+    try {
+      const signingNonce = await seedSignedMutation(
+        this.ctx,
+        authorityId,
+        'rn',
+        tid,
+        'select Digest(:tid, :id, :name, :imageRef, :relays, :timestampAuthorities, :numberRequiredTSAs, :electionType) as d',
+        { tid, ...row },
+        sign,
+        { ownsTransaction: false }
+      )
+      await this.ctx.db.exec(
+        `update Network
+          with context SigningNonce = :signingNonce, Tid = ${tid}
+          set Name = :name,
+            ImageRef = :imageRef,
+            Relays = :relays,
+            TimestampAuthorities = :timestampAuthorities,
+            NumberRequiredTSAs = :numberRequiredTSAs,
+            ElectionType = :electionType
+          where Id = :id`,
+        { ...row, signingNonce }
+      )
+      await this.ctx.db.exec(
+        `insert into RevisionCancellation (Name, Revision, CancelledAt)
+          with context Tid = 0, now = :now
+          values (:name, :revision, :now)`,
+        { name, revision, now: nowCanonicalDatetime() }
+      )
+      await this.ctx.db.exec('COMMIT')
+    } catch (error) {
+      await this.ctx.db.exec('ROLLBACK')
+      throw new Error('Failed to apply revision: ' + (error instanceof Error ? error.message : String(error)))
     }
   }
 

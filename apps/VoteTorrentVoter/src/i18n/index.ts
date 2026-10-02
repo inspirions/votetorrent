@@ -21,6 +21,9 @@ const resources = {
 			tabSettings: 'Settings',
 			placeholderBody: "This screen isn't built yet — check back in a future update.",
 			close: 'Close',
+			// Detail inside the "Learn about this …" info dialogs.
+			'info.unavailable': "This information isn't available right now.",
+			'info.openLink': 'More information',
 			networkName: 'Utah Network',
 			notifications: 'Notifications',
 			'breadcrumb.home': 'Home',
@@ -33,7 +36,6 @@ const resources = {
 		},
 		home: {
 			headerTitle: 'Vote',
-			electionInfoTitle: 'About This Election',
 			// Phase 40 (HOME-01/02/03) — flat dotted keys (property names literally contain
 			// dots), required by `keySeparator: false` below. See i18n-parity.test.ts (D-14):
 			// walking Object.keys(namespace) shallowly gives full per-key EN/ES coverage only
@@ -45,6 +47,10 @@ const resources = {
 			'electionInfo.title': 'Election Info',
 			'electionInfo.subtitle': 'Informational Page about this election',
 			'electionInfo.body': '"The following information has been provided by the election authority"',
+			'electionInfo.authority': 'Election authority',
+			'electionInfo.date': 'Election day',
+			'electionInfo.instructions': 'Instructions',
+			'electionInfo.tags': 'Tags',
 			'progressLabel': '{{percent}}% complete',
 			'countdown.hours': 'hours',
 			'countdown.minutes': 'minutes',
@@ -96,8 +102,6 @@ const resources = {
 		ballot: {
 			headerTitle: 'Ballot',
 			individualQuestionTitle: 'Individual Question',
-			officeInfoTitle: 'About This Office',
-			candidateInfoTitle: 'About This Candidate',
 			// Phase 42 (VOTE-01/02/04) — Ballot Page / Individual Question / Review & Submit UI copy.
 			'progressLabel': '{{completed}}/{{total}} questions completed',
 			'voteForN': 'Vote for {{n}}',
@@ -118,6 +122,11 @@ const resources = {
 			'officeInfo.title': 'Office Info',
 			'officeInfo.subtitle': 'Informational Page about this office',
 			'officeInfo.body': '"The following information has been provided by the office"',
+			'officeInfo.instructions': 'Instructions',
+			'officeInfo.voteFor': 'You may choose',
+			'officeInfo.voteForValue': 'Up to {{count}}',
+			'candidateInfo.name': 'Name',
+			'candidateInfo.details': 'Details',
 			'reviewSubmitTitle': 'Review & Submit',
 			// Office titles, candidate names and party lines are NOT keys: they are the authority's
 			// published ballot text (Question.title / Option.title / Option.details), shown as-is.
@@ -127,6 +136,18 @@ const resources = {
 		},
 		registration: {
 			headerTitle: 'Registration',
+			// RegistrationInfo (the "(?)" help / network-header target): live status + deadline + how it works.
+			'info.statusHeading': 'Your registration',
+			'info.network': 'Network',
+			'info.election': 'Election',
+			'info.deadline': 'Registration closes',
+			'info.deadlinePassed': 'Registration has closed',
+			'info.noElection': 'No election is open for registration on this network.',
+			'info.howHeading': 'How registration works',
+			'info.step1': 'Your device is checked to confirm it is genuine and secure.',
+			'info.step2': 'You enter the personal details the election authority asks for.',
+			'info.step3': 'You confirm the request with your device unlock (face, fingerprint or passcode).',
+			'info.step4': 'The election authority reviews your request. Once approved you are registered and receive a registration code.',
 			deviceAttestationTitle: 'Verifying Your Device',
 			confirmationTitle: "You're All Set",
 			// Phase 41 (REG-01..05) — flat dotted keys, transcribed verbatim from
@@ -347,6 +368,8 @@ const resources = {
 			tabSettings: 'Ajustes',
 			placeholderBody: 'Esta pantalla aún no está lista — vuelve a consultar más adelante.',
 			close: 'Cerrar',
+			'info.unavailable': 'Esta información no está disponible en este momento.',
+			'info.openLink': 'Más información',
 			networkName: 'Utah Network',
 			notifications: 'Notificaciones',
 			'breadcrumb.home': 'Inicio',
@@ -356,13 +379,16 @@ const resources = {
 		},
 		home: {
 			headerTitle: 'Votar',
-			electionInfoTitle: 'Sobre Esta Elección',
 			voteNowCta: 'Votar ahora',
 			learnAboutElection: 'Conoce más sobre esta elección',
 			// "Learn about this election" info dialog (Figma Candidate Info frame, election variant).
 			'electionInfo.title': 'Información de la elección',
 			'electionInfo.subtitle': 'Página informativa sobre esta elección',
 			'electionInfo.body': '"La siguiente información ha sido proporcionada por la autoridad electoral"',
+			'electionInfo.authority': 'Autoridad electoral',
+			'electionInfo.date': 'Día de la elección',
+			'electionInfo.instructions': 'Instrucciones',
+			'electionInfo.tags': 'Etiquetas',
 			'progressLabel': '{{percent}}% completado',
 			'countdown.hours': 'horas',
 			'countdown.minutes': 'minutos',
@@ -411,8 +437,6 @@ const resources = {
 		ballot: {
 			headerTitle: 'Boleta',
 			individualQuestionTitle: 'Pregunta Individual',
-			officeInfoTitle: 'Sobre Este Cargo',
-			candidateInfoTitle: 'Sobre Este Candidato',
 			'progressLabel': '{{completed}}/{{total}} preguntas completadas',
 			'voteForN': 'Vote por {{n}}',
 			'saveExitCta': 'Guardar y salir',
@@ -432,6 +456,11 @@ const resources = {
 			'officeInfo.title': 'Información del cargo',
 			'officeInfo.subtitle': 'Página informativa sobre este cargo',
 			'officeInfo.body': '"La siguiente información ha sido proporcionada por el cargo"',
+			'officeInfo.instructions': 'Instrucciones',
+			'officeInfo.voteFor': 'Puedes elegir',
+			'officeInfo.voteForValue': 'Hasta {{count}}',
+			'candidateInfo.name': 'Nombre',
+			'candidateInfo.details': 'Detalles',
 			'reviewSubmitTitle': 'Revisar y enviar',
 			ballotUnavailable: 'La boleta de esta elección aún no está disponible.',
 			unsupportedQuestions_one: '{{count}} pregunta de esta boleta aún no se puede responder en esta aplicación.',
@@ -439,6 +468,17 @@ const resources = {
 		},
 		registration: {
 			headerTitle: 'Registro',
+			'info.statusHeading': 'Tu registro',
+			'info.network': 'Red',
+			'info.election': 'Elección',
+			'info.deadline': 'El registro cierra',
+			'info.deadlinePassed': 'El registro ha cerrado',
+			'info.noElection': 'No hay ninguna elección abierta para registro en esta red.',
+			'info.howHeading': 'Cómo funciona el registro',
+			'info.step1': 'Se verifica tu dispositivo para confirmar que es auténtico y seguro.',
+			'info.step2': 'Ingresas los datos personales que solicita la autoridad electoral.',
+			'info.step3': 'Confirmas la solicitud con el desbloqueo de tu dispositivo (rostro, huella o código).',
+			'info.step4': 'La autoridad electoral revisa tu solicitud. Una vez aprobada quedas registrado y recibes un código de registro.',
 			deviceAttestationTitle: 'Verificando Tu Dispositivo',
 			confirmationTitle: 'Todo Listo',
 			'notRegistered.heading': 'No estás registrado',

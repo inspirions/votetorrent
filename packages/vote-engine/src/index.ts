@@ -12,6 +12,7 @@ export * from './user/index.js'
 export * from './tasks/index.js'
 export * from './registration/index.js'
 export * from './types.js'
+export * from './media/media-fingerprint.js'
 // Phase 62 Plan 04 (D-03/D-04/D-13/D-18/D-25): the crypto module (per-officer
 // multi-recipient envelope, the D-18 block-content cipher and the D-13
 // IKeyVault port). Named-export barrel, not a wildcard — see

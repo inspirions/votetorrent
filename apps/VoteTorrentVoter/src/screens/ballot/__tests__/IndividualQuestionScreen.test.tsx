@@ -21,6 +21,11 @@ import {createNativeStackNavigator} from '@react-navigation/native-stack';
 // CadreNodeProvider ancestor — this ballot-flow test has no need to exercise that boot, so it
 // uses the manual Jest mock at providers/__mocks__/VoterAppProvider.tsx.
 jest.mock('../../../providers/VoterAppProvider');
+// The candidate dialog's detail read is stubbed at the info-read boundary; the dialog wiring is real.
+jest.mock('../../../engines/info-read', () => ({
+	readCandidateInfo: jest.fn(() => Promise.reject(new Error('no engine in this harness'))),
+}));
+import {readCandidateInfo} from '../../../engines/info-read';
 import {VoterAppProvider} from '../../../providers/VoterAppProvider';
 import {BallotSelectionProvider, useBallotSelection} from '../../../providers/BallotSelectionProvider';
 import type {BallotSelectionContextType} from '../../../providers/BallotSelectionProvider';
@@ -63,7 +68,6 @@ function renderScreen() {
 						<Probe />
 						<Stack.Navigator initialRouteName="IndividualQuestion" screenOptions={{headerShown: false}}>
 							<Stack.Screen name="IndividualQuestion" component={IndividualQuestionScreen} />
-							<Stack.Screen name="CandidateInfo" component={DummyScreen} />
 							<Stack.Screen name="ReviewSubmit" component={DummyScreen} />
 						</Stack.Navigator>
 					</BallotSelectionProvider>
@@ -176,5 +180,40 @@ describe('IndividualQuestionScreen (VOTE-02)', () => {
 
 		expect(tr.root.findByProps({testID: 'info-dialog'})).toBeTruthy();
 		expect(JSON.stringify(tr.toJSON())).toContain('Candidate Info');
+		await flushBoot(); // settle the dialog's detail read inside act()
+	});
+
+	it('the candidate dialog shows the tapped candidate\'s published detail and info link', async () => {
+		const mockRead = readCandidateInfo as jest.Mock;
+		mockRead.mockImplementationOnce(() =>
+			Promise.resolve({name: 'Ada Lovelace', details: 'Analytical Party', infoURL: 'https://example.org/ada'}),
+		);
+		const {tr} = renderScreen();
+		await flushBoot();
+
+		const candidateId = FIXTURE_BALLOT.offices[0].candidates[1].id;
+		renderer.act(() => {
+			tr.root.findByProps({testID: `candidate-learn-${candidateId}`}).props.onPress();
+		});
+		await flushBoot();
+
+		expect(mockRead).toHaveBeenLastCalledWith(expect.anything(), candidateId);
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain('Ada Lovelace');
+		expect(json).toContain('Analytical Party');
+		expect(tr.root.findByProps({testID: 'candidate-info-details-link'})).toBeTruthy();
+	});
+
+	it('a failed candidate read renders the unavailable line, not boilerplate', async () => {
+		const {tr} = renderScreen();
+		await flushBoot();
+
+		const candidateId = FIXTURE_BALLOT.offices[0].candidates[0].id;
+		renderer.act(() => {
+			tr.root.findByProps({testID: `candidate-learn-${candidateId}`}).props.onPress();
+		});
+		await flushBoot();
+
+		expect(tr.root.findByProps({testID: 'candidate-info-details-unavailable'})).toBeTruthy();
 	});
 });

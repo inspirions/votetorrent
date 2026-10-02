@@ -17,7 +17,7 @@
  * registration flow only (44-CONTEXT.md Phase Boundary), so cross-screen vote-status sync via a
  * shared real engine read is deferred to the phase that swaps the ballot/vote surface for real.
  */
-import React, {useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
@@ -31,14 +31,17 @@ import {ElectionCard} from '../../components/ElectionCard';
 import {NetworkHeader} from '../../components/NetworkHeader';
 import {ConfigFaultNotice} from '../../components/ConfigFaultNotice';
 import {InfoDialog} from '../../components/InfoDialog';
+import {InfoDetails} from '../../components/InfoDetails';
+import {readElectionInfo} from '../../engines/info-read';
+import {useInfoRead} from '../../hooks/useInfoRead';
 
 type HomeNavigationProp = NativeStackNavigationProp<VoteStackParamList, 'Home'>;
 
 export default function HomeScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
-	const {isInitialized, lifecycleOverride, setLifecycleOverride, getElection} = useVoterApp();
+	const {isInitialized, lifecycleOverride, setLifecycleOverride, getElection, getEngine, seededElectionId} = useVoterApp();
 	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
-	const {t} = useTranslation('home');
+	const {t, i18n} = useTranslation('home');
 	const {t: tCommon} = useTranslation('common');
 	const navigation = useNavigation<HomeNavigationProp>();
 	const [election, setElection] = useState<VoterElection | null>(null);
@@ -46,6 +49,13 @@ export default function HomeScreen() {
 	const [electionInfoVisible, setElectionInfoVisible] = useState(false);
 	// Phase 44-07 (D-02): local session-only flag — see file header comment.
 	const [hasVoted] = useState(false);
+	// The election dialog's authority-published detail, read only while the dialog is open.
+	const loadElectionInfo = useCallback(
+		() => readElectionInfo({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined}),
+		[getEngine, seededElectionId],
+	);
+	const electionInfo = useInfoRead(electionInfoVisible ? loadElectionInfo : null);
+	const info = electionInfo.data;
 
 	// Fetch on mount and re-fetch whenever the override changes — getElection's identity changes
 	// with lifecycleOverride (VoterAppProvider's useCallback deps), so this effect naturally
@@ -121,10 +131,28 @@ export default function HomeScreen() {
 				subtitle={t('electionInfo.subtitle')}
 				body={t('electionInfo.body')}
 				closeLabel={tCommon('close')}
-				onClose={() => setElectionInfoVisible(false)}
-			/>
+				onClose={() => setElectionInfoVisible(false)}>
+				<InfoDetails
+					testID="election-info-details"
+					loading={electionInfo.loading}
+					failed={electionInfo.failed}
+					unavailableLabel={tCommon('info.unavailable')}
+					rows={[
+						{label: t('electionInfo.authority'), value: info?.authorityName},
+						{label: t('electionInfo.date'), value: info ? formatElectionDay(info.date, i18n.language) : undefined},
+						{label: t('electionInfo.instructions'), value: info?.instructions},
+						{label: t('electionInfo.tags'), value: info?.tags.join(', ')},
+					]}
+				/>
+			</InfoDialog>
 		</View>
 	);
+}
+
+/** `Election.Date` is a DAY stored as a datetime at UTC midnight — format it in UTC so a voter west
+ *  of Greenwich doesn't see the day before. */
+function formatElectionDay(ms: number, language: string): string {
+	return new Intl.DateTimeFormat(language, {timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric'}).format(new Date(ms));
 }
 
 const styles = StyleSheet.create({

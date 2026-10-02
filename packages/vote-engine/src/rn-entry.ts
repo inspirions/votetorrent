@@ -60,6 +60,17 @@ export { StubAttestationVerifier } from './association/stub-attestation-verifier
 export { AppAttestVerifier, NO_PRIOR_ASSERTIONS } from './association/app-attest-verifier.js'
 export type { IAssertionCounterStore } from './association/app-attest-verifier.js'
 export { PlatformDispatchingAttestationVerifier } from './association/platform-dispatching-verifier.js'
+// "Make permanent" on media URL fields: download once, record `{ url, cid }` so the reference is
+// tamper-evident. Pure (fetch is injectable); no storage, no network-side hosting.
+export {
+  fingerprintMedia,
+  verifyMediaFingerprint,
+  isFingerprintableUrl,
+  mediaCid,
+  MediaFingerprintError,
+  MAX_MEDIA_BYTES
+} from './media/media-fingerprint.js'
+export type { MediaFetch, MediaFingerprintFailure, MediaFingerprintOptions, MediaResponse } from './media/media-fingerprint.js'
 export { LocalConfigKeyProvider } from './association/key-provider.js'
 export type { IIntegrityKeyProvider } from './association/key-provider.js'
 export type { ExpectedAppIdentity } from './association/verifiers/app-identity.js'

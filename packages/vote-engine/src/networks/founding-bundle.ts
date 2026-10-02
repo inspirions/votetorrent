@@ -21,6 +21,7 @@
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { utf8ToBytes } from '@noble/hashes/utils.js'
+import { toImageRef } from '@votetorrent/vote-core'
 import type {
   FoundingBundle,
   FoundingBundleDescriptor,
@@ -97,9 +98,8 @@ function requireRow (rows: FoundingBundleRows, table: FoundingBundleTable): Foun
  * Derive the human- and UI-facing descriptor from the six founding rows.
  * networkId = Network.Id, networkHash = Network.Hash (D-39), relays =
  * JSON.parse(Network.Relays) (must be a string array — throws otherwise),
- * primaryAuthorityDomainName = Authority.DomainName, imageUrl = the parsed
- * Network.ImageRef when it is a JSON string (create() writes
- * `JSON.stringify(networkInit.imageUrl)`), omitted when ImageRef is null.
+ * primaryAuthorityDomainName = Authority.DomainName, imageUrl = the url of the parsed
+ * Network.ImageRef (either stored form — see `toImageRef`), omitted when ImageRef is null.
  */
 export function deriveFoundingDescriptor (rows: FoundingBundleRows): FoundingBundleDescriptor {
   const network = requireRow(rows, 'Network')
@@ -119,10 +119,11 @@ export function deriveFoundingDescriptor (rows: FoundingBundleRows): FoundingBun
   let imageUrl: string | undefined
   if (network.ImageRef !== null && network.ImageRef !== undefined) {
     try {
-      const parsed: unknown = JSON.parse(String(network.ImageRef))
-      if (typeof parsed === 'string') imageUrl = parsed
+      // Either stored form (a bare JSON string, or `{ url, cid? }` since media pinning) yields
+      // the same descriptor imageUrl, so bundles from either era compare equal.
+      imageUrl = toImageRef(JSON.parse(String(network.ImageRef)))?.url
     } catch {
-      // Not a JSON string — omitted, matching create()'s own ImageRef convention.
+      // Not JSON — omitted.
     }
   }
 

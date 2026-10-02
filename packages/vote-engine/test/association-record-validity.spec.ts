@@ -23,7 +23,8 @@ import {
   addTestElection,
   makeTestSignCallback,
   provisionTestIntakeRecipient,
-  seedSignedMutation as seedSignedMutationFixture
+  seedSignedMutation as seedSignedMutationFixture,
+  testKeyPairFor
 } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
@@ -48,7 +49,7 @@ const DAY_TOLERANCE = 0.05
 // ---------------------------------------------------------------------------
 
 function makeRealSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   return async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes)

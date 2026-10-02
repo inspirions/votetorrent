@@ -27,7 +27,6 @@ import { allocateTid } from '../src/database/tid-allocator.js'
 import { digestToBytes, toCanonicalDatetime } from '../src/utils.js'
 import { SigningEngine } from '../src/signing/signing-engine.js'
 import { sortRosterEntries } from '../src/authority/authority-engine.js'
-import { UserEngine } from '../src/user/user-engine.js'
 
 function makeNetworkRef () {
   return {
@@ -569,11 +568,8 @@ describe('rad Trigger A: proposeAdmin fan-out (D-08, D-12)', function () {
     const effectiveAt = Date.now() + 3_600_000
 
     // proposeAdmin's ProposedAdmin insert is a Class A IsUserValid site (verify-user-key.ts):
-    // it requires a REAL UserKey row for whoever signs, not only the founder. The fixture never
-    // seeds one for nonHolder/outsider (only the founder's key exists from genesis) — prime it
-    // through the real UserEngine.addKey bootstrap path, exactly as authority.spec.ts's
-    // primeUserForRename does for its own non-founder signer.
-    await new UserEngine({ ...fx.nonHolder.user, activeKeys: [] }, fx.elec.ctx).addKey(fx.nonHolder.user.activeKeys[0]!)
+    // it requires a REAL UserKey row for whoever signs. createThresholdAuthority now registers
+    // every fixture user's key (signer CHECKs require it), so the nonHolder needs no priming.
 
     const { effectiveAtCanon } = await proposeAdminRoster(fx, {
       effectiveAt,

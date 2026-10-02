@@ -16,7 +16,7 @@
 import type { Database } from '@quereus/quereus'
 import type { AdminInit, OfficerSelection, Proposal, Scope, Signature, ThresholdPolicy, User } from '@votetorrent/vote-core'
 import { BALLOT_HEADER_TID } from '../../src/election/election-engine.js'
-import { nowCanonicalDatetime } from '../../src/utils.js'
+import { nowCanonicalDatetime, toCanonicalDatetime } from '../../src/utils.js'
 import {
   addTestAuthority,
   addTestElection,
@@ -64,7 +64,10 @@ const DEFAULT_THRESHOLD_POLICIES: ThresholdPolicy[] = [
 const DEFAULT_NON_HOLDER_SCOPES: Scope[] = ['mel']
 
 /** Insert a User row via the invite-bound InsertValid arm (seedUserInvite + raw insert), mirroring
- *  authority.spec.ts's `seedExtraUser` shape. */
+ *  authority.spec.ts's `seedExtraUser` shape, then register the user's fixture key as its FIRST
+ *  UserKey (UserKey.InsertValid's first-key arm). Without that key every signature this user
+ *  produces is refused by AdminSigning/OfficerSignature.SignerKeyValid — the engine now checks the
+ *  signer key is a registered, unexpired UserKey of the signer instead of binding `true`. */
 async function insertFixtureUser (auth: TestAuthorityContext, user: User): Promise<void> {
   const { inviteSlotCid, inviteSignature } = await seedUserInvite(auth, user)
   const tid = Date.now() + Math.floor(Math.random() * 1_000_000)
@@ -80,6 +83,21 @@ async function insertFixtureUser (auth: TestAuthorityContext, user: User): Promi
       inviteSignature,
     }
   )
+  const key = user.activeKeys[0]
+  if (key) {
+    await auth.ctx.db.exec(
+      `insert into UserKey (UserId, Type, PubKey, Expiration)
+       with context UserKey = null, Signature = null, Tid = ${tid + 1}, now = :now, IsSignatureValid = true
+       values (:userId, :type, :pubKey, :expiration)`,
+      {
+        userId: user.id,
+        type: key.type,
+        pubKey: key.key,
+        expiration: toCanonicalDatetime(key.expiration),
+        now: nowCanonicalDatetime(),
+      }
+    )
+  }
 }
 
 /**

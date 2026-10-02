@@ -13,6 +13,7 @@ import type {
 import type { InviteAction } from '../invite/models.js'
 import type { IUserEngine } from '../user/types.js'
 import type { IBuilder } from '../common/builder.js'
+import type { Signature } from '../common/signature.js'
 
 /**
  * Payload shape for authority invites (`InviteAction.invokes` when
@@ -109,6 +110,11 @@ export interface INetworkEngine {
    * proposals are untouched). Returns the new Revision number.
    */
   resendRevision(name: string, revision: number): Promise<number>
+
+  /** Apply a proposed revision to the live network under a signed `rn` admin approval: `sign`
+   *  signs the revision digest app-side. Single-approver (rn threshold 1) only; marks the
+   *  proposal resolved. */
+  applyRevision(name: string, revision: number, sign: (digest: Uint8Array) => Promise<Signature>): Promise<void>
   respondToInvite<TInvokes>(
     invite: InviteAction<TInvokes>
   ): Promise<string>

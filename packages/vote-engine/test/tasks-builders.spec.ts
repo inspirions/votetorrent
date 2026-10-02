@@ -32,8 +32,7 @@ import { MockOnboardingTasksEngine } from '../src/tasks/mock-onboarding-tasks-en
 import { KeysTasksEngine } from '../src/tasks/keys-tasks-engine.js'
 import { OnboardingTasksEngine } from '../src/tasks/onboarding-tasks-engine.js'
 import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
-import { createTestNetwork, addTestAuthority } from './fixtures/test-context.js'
-import { randomTestKeyPair } from './fixtures/keys.js'
+import { createTestNetwork, addTestAuthority, testKeyPairFor } from './fixtures/test-context.js'
 import { digestToBytes } from '../src/utils.js'
 import { computeRadProposalDigest, readProposedRosterJson } from '../src/authority/rad-roster-digest.js'
 
@@ -417,7 +416,7 @@ describe('CompleteSignatureBuilder', () => {
         .prepare('select Digest from AdminSigning where Nonce = :nonce')
         .get({ nonce: taskNonce })
       const digestB64 = digestRow!.Digest as string
-      const { privateHex, publicHex } = randomTestKeyPair()
+      const { privateHex, publicHex } = testKeyPairFor(userId)
       const realSig = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
       // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable per-
       // digest callback. This fixture's AdminSigning row does not use the real

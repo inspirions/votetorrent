@@ -97,12 +97,11 @@ export class NetworksEngine implements INetworksEngine {
 		}
 
 		// Prepare json fields
-		const networkImageRefJson = networkInit.imageUrl
-			? JSON.stringify(networkInit.imageUrl)
-			: null;
-		const primaryAuthorityImageRefJson = networkInit.primaryAuthority.imageUrl
-			? JSON.stringify(networkInit.primaryAuthority.imageUrl)
-			: null;
+		const networkImageRefJson = storedImageRefJson(networkInit.imageUrl, networkInit.imageCid);
+		const primaryAuthorityImageRefJson = storedImageRefJson(
+			networkInit.primaryAuthority.imageUrl,
+			networkInit.primaryAuthority.imageCid,
+		);
 		const relaysJson = JSON.stringify(networkInit.relays ?? []);
 		const tsaJson = JSON.stringify(
 			networkInit.policies?.timestampAuthorities ?? [],
@@ -833,4 +832,14 @@ export class NetworksEngine implements INetworksEngine {
 		const ctx: EngineContext = { db, user };
 		return ctx;
 	}
+}
+
+/**
+ * Network/Authority.ImageRef as written at create. Without a cid this is the historical bare JSON
+ * string (byte-identical to every network created before media pinning, so founding bundles and
+ * descriptors are unchanged); with one it is `{ url, cid }`. Readers accept both via `toImageRef`.
+ */
+function storedImageRefJson(url: string | undefined, cid: string | undefined): string | null {
+	if (!url) return null;
+	return cid ? JSON.stringify({ url, cid }) : JSON.stringify(url);
 }

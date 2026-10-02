@@ -20,6 +20,7 @@ import { InlineError } from "../../components/InlineError";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
+import { useMediaPin } from "../../hooks/useMediaPin";
 import {
 	RECONCILE_TIMEOUT_MS,
 	createStepTimeoutError,
@@ -39,6 +40,9 @@ export default function AddNetworkScreen() {
 	const [networkImageUrl, setNetworkImageUrl] = useState("");
 	const [authorityName, setAuthorityName] = useState("");
 	const [authorityImageUrl, setAuthorityImageUrl] = useState("");
+	// "Make Permanent": records the content id of each image's bytes (useMediaPin).
+	const networkImagePin = useMediaPin();
+	const authorityImagePin = useMediaPin();
 	const [domainName, setDomainName] = useState("");
 	const [adminName, setAdminName] = useState("");
 	const [adminTitle, setAdminTitle] = useState("");
@@ -144,10 +148,6 @@ export default function AddNetworkScreen() {
 		}
 	};
 
-	const handleMakePermanent = () => {
-		// Phase 22: media-pin to content-addressed storage (CID) — not yet implemented.
-	};
-
 	// network-create-release-hang: on real devices `builder.commit()` (strand/cadre/libp2p
 	// network creation) can stall indefinitely with no error, leaving the screen frozen.
 	// Race every create step against a timeout so an indefinite hang surfaces an actionable
@@ -247,6 +247,7 @@ export default function AddNetworkScreen() {
 			const networkInit: NetworkInit = {
 				name: networkName,
 				imageUrl: networkImageUrl || undefined,
+				imageCid: networkImageUrl ? networkImagePin.cidFor(networkImageUrl) : undefined,
 				// R4 (D-11, T-58-06-02): the SAME array that was just validated above — never
 				// re-derive a second array from relayAddresses here, which would validate one
 				// value and persist another.
@@ -254,6 +255,8 @@ export default function AddNetworkScreen() {
 				primaryAuthority: {
 					name: authorityName,
 					domainName: domainName,
+					imageUrl: authorityImageUrl || undefined,
+					imageCid: authorityImageUrl ? authorityImagePin.cidFor(authorityImageUrl) : undefined,
 				},
 				admin: {
 					officers: [
@@ -419,7 +422,9 @@ export default function AddNetworkScreen() {
 						placeholder={t("optionalImageAddress")}
 						onChangeText={setNetworkImageUrl}
 						isImageUrlField={true}
-						makePermanentPressed={handleMakePermanent}
+						makePermanentPressed={() => networkImagePin.pin(networkImageUrl)}
+						makePermanentDisabled={!networkImageUrl.trim() || networkImagePin.isPinning}
+						permanentStatus={networkImagePin.statusFor(networkImageUrl)}
 					/>
 					{networkImageUrl ? (
 						<Image
@@ -492,7 +497,9 @@ export default function AddNetworkScreen() {
 						placeholder={t("optionalImageAddress")}
 						onChangeText={setAuthorityImageUrl}
 						isImageUrlField={true}
-						makePermanentPressed={handleMakePermanent}
+						makePermanentPressed={() => authorityImagePin.pin(authorityImageUrl)}
+						makePermanentDisabled={!authorityImageUrl.trim() || authorityImagePin.isPinning}
+						permanentStatus={authorityImagePin.statusFor(authorityImageUrl)}
 					/>
 					{authorityImageUrl ? (
 						<Image

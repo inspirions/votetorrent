@@ -29,8 +29,7 @@ import { hexToBytes, bytesToHex } from '@noble/curves/utils.js'
 import type { AttestationVerification, DeviceAttestation, IAttestationVerifier, Signature } from '@votetorrent/vote-core'
 import { AssociationEngine } from '../src/association/association-engine.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
-import { createTestNetwork, addTestAuthority, seedSignedMutation as seedSignedMutationFixture } from './fixtures/test-context.js'
-import { randomTestKeyPair } from './fixtures/keys.js'
+import { createTestNetwork, addTestAuthority, seedSignedMutation as seedSignedMutationFixture, testKeyPairFor } from './fixtures/test-context.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
 
 // ---------------------------------------------------------------------------
@@ -40,7 +39,7 @@ import type { TestAuthorityContext } from './fixtures/test-context.js'
 
 /** Build a real secp256k1 sign callback (@noble/curves v2 defaults — prehash:true). */
 function makeRealSigner (userId: string): { sign: (digest: Uint8Array) => Promise<Signature> } {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   const sign = async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes) // v2 default: prehash:true

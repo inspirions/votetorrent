@@ -29,8 +29,7 @@ import { collectPrivateFieldNames, sanitizeAccessTrailFields } from '../src/regi
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { MockRegistrationEngine } from '../src/registration/mock-registration-engine.js'
 import { sealRegistrantPrivateDetails } from '../src/registration/sealed-registration-content.js'
-import { createTestNetwork, addTestAuthority, provisionTestIntakeRecipient } from './fixtures/test-context.js'
-import { randomTestKeyPair } from './fixtures/keys.js'
+import { createTestNetwork, addTestAuthority, provisionTestIntakeRecipient, testKeyPairFor } from './fixtures/test-context.js'
 import { nowCanonicalDatetime } from '../src/utils.js'
 import type { EngineContext } from '../src/types.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
@@ -152,7 +151,7 @@ describe('access-trail field sanitizer (D-01/T-47-02)', () => {
 
 /** Build a real secp256k1 sign callback (@noble/curves v2 defaults — prehash:true). */
 function makeRealSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   return async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes) // v2 default: prehash:true

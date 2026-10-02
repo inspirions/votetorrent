@@ -15,6 +15,7 @@ import { SigningSignBuilder } from './builders/signing-sign-builder.js';
 import { SigningStartSigningSessionBuilder } from './builders/signing-start-signing-session-builder.js';
 import { type EngineContext } from '../types';
 import { nowCanonicalDatetime } from '../utils.js';
+import { adminSigningKeyValidity, officerSignatureValidity } from './signer-validity.js';
 import {
 	countQualifyingSignatures,
 	computeSigningStatus,
@@ -134,6 +135,14 @@ export class SigningEngine implements ISigningEngine {
 				// dropped the signer's public key. The SQL placeholder is :signerKey;
 				// the JS object key now matches.
 				if (!existingOfficerSignature) {
+					const now = nowCanonicalDatetime();
+					const validity = await officerSignatureValidity(this.ctx.db, {
+						nonce,
+						userId: signature.signerUserId,
+						signerKey: signature.signerKey,
+						now,
+						isPlaceholderSignature,
+					});
 					await this.ctx.db.exec(
 						`insert into OfficerSignature (
 							SigningNonce,
@@ -141,7 +150,7 @@ export class SigningEngine implements ISigningEngine {
 							SignerKey,
 							Signature
 						)
-						with context now = :now, IsSignerKeyValid = true, IsOfficerValid = true, IsPlaceholderSignature = :isPlaceholderSignature
+						with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsOfficerValid = :isOfficerValid, IsPlaceholderSignature = :isPlaceholderSignature
 						values (
 							:nonce,
 							:userId,
@@ -153,7 +162,9 @@ export class SigningEngine implements ISigningEngine {
 							userId: signature.signerUserId,
 							signerKey: signature.signerKey,
 							signature: signature.signature,
-							now: nowCanonicalDatetime(),
+							now,
+							isSignerKeyValid: validity.isSignerKeyValid,
+							isOfficerValid: validity.isOfficerValid,
 							isPlaceholderSignature,
 						},
 					);
@@ -298,6 +309,14 @@ export class SigningEngine implements ISigningEngine {
 					)
 					.get({ nonce, userId: signature.signerUserId });
 				if (!existingOfficerSignature) {
+					const now = nowCanonicalDatetime();
+					const validity = await officerSignatureValidity(this.ctx.db, {
+						nonce,
+						userId: signature.signerUserId,
+						signerKey: signature.signerKey,
+						now,
+						isPlaceholderSignature,
+					});
 					await this.ctx.db.exec(
 						`insert into OfficerSignature (
 							SigningNonce,
@@ -305,7 +324,7 @@ export class SigningEngine implements ISigningEngine {
 							SignerKey,
 							Signature
 						)
-						with context now = :now, IsSignerKeyValid = true, IsOfficerValid = true, IsPlaceholderSignature = :isPlaceholderSignature
+						with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsOfficerValid = :isOfficerValid, IsPlaceholderSignature = :isPlaceholderSignature
 						values (
 							:nonce,
 							:userId,
@@ -317,7 +336,9 @@ export class SigningEngine implements ISigningEngine {
 							userId: signature.signerUserId,
 							signerKey: signature.signerKey,
 							signature: signature.signature,
-							now: nowCanonicalDatetime(),
+							now,
+							isSignerKeyValid: validity.isSignerKeyValid,
+							isOfficerValid: validity.isOfficerValid,
 							isPlaceholderSignature,
 						},
 					);
@@ -414,6 +435,13 @@ export class SigningEngine implements ISigningEngine {
 			if (!adminDB) {
 				throw new Error('Admin not found');
 			}
+			const now = nowCanonicalDatetime();
+			const isSignerKeyValid = await adminSigningKeyValidity(this.ctx.db, {
+				userId: signature.signerUserId,
+				signerKey: signature.signerKey,
+				now,
+				isPlaceholderSignature: false,
+			});
 
 			if (digestArgs !== null) {
 				// PATH A: inline Digest() — fields in alphabetical order (D-07d)
@@ -429,7 +457,7 @@ export class SigningEngine implements ISigningEngine {
 						SignerKey,
 						Signature
 					)
-					with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+					with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsPlaceholderSignature = false
 					values (
 						:nonce,
 						:authorityId,
@@ -451,7 +479,8 @@ export class SigningEngine implements ISigningEngine {
 						userId: signature.signerUserId,
 						signerKey: signature.signerKey,
 						signature: signature.signature,
-						now: nowCanonicalDatetime(),
+						now,
+						isSignerKeyValid,
 					},
 				);
 			} else {
@@ -467,7 +496,7 @@ export class SigningEngine implements ISigningEngine {
 						SignerKey,
 						Signature
 					)
-					with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+					with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsPlaceholderSignature = false
 					values (
 						:nonce,
 						:authorityId,
@@ -486,7 +515,8 @@ export class SigningEngine implements ISigningEngine {
 						userId: signature.signerUserId,
 						signerKey: signature.signerKey,
 						signature: signature.signature,
-						now: nowCanonicalDatetime(),
+						now,
+						isSignerKeyValid,
 					},
 				);
 			}

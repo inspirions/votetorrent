@@ -388,7 +388,7 @@ describe('D-09 behavioral + structural halves', () => {
 		expect(after).toBe(before)
 	})
 
-	it('STRUCTURAL: register() signed by a genuinely non-officer identity FAILS at AdminSigning.UserIdValid, quoting the identifier', async () => {
+	it('STRUCTURAL: register() signed by a genuinely non-officer identity FAILS at an AdminSigning signer CHECK (UserIdValid or SignerKeyValid), quoting the identifier', async () => {
 		const networksEngine = new NetworksEngine(new LocalStorageReact())
 		const seeded = await seedDevNetwork(networksEngine)
 		const ctx = networksEngine.getEstablishedContext(seeded.networkReference.hash)
@@ -418,8 +418,12 @@ describe('D-09 behavioral + structural halves', () => {
 		} catch (err) {
 			caught = err
 		}
-		expect((caught as Error | undefined)?.message).toMatch(/UserIdValid/)
-		// D-49 (62-31): a recipient is provisioned above, so this must be the ORIGINAL UserIdValid
+		// The non-officer is refused by AdminSigning's signer CHECKs: it is not an Officer
+		// (UserIdValid) and its key is not a registered UserKey (SignerKeyValid, engine-computed
+		// since the hardcoded `IsSignerKeyValid = true` stub was replaced). Either names the
+		// structural reason; which one Quereus reports first is evaluation order, not intent.
+		expect((caught as Error | undefined)?.message).toMatch(/UserIdValid|SignerKeyValid/)
+		// D-49 (62-31): a recipient is provisioned above, so this must be the ORIGINAL signer
 		// refusal, never IntakeError('no-recipients') firing first for the wrong reason.
 		expect((caught as { name?: string } | undefined)?.name).not.toBe('IntakeError')
 

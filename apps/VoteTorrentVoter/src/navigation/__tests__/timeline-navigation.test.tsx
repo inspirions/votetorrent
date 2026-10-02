@@ -179,7 +179,7 @@ const TIMELINE_STACK_COMPONENT_FILES = [
 	'../../screens/ballot/IndividualQuestionScreen.tsx',
 	'../../screens/ballot/ReviewSubmitScreen.tsx',
 	'../../screens/registration/RegistrationScreen.tsx',
-	'../../components/PlaceholderModal.tsx',
+	'../../screens/registration/RegistrationInfoScreen.tsx',
 	'../../screens/registration/DeviceAttestationScreen.tsx',
 	'../../screens/registration/RegisterPersonalScreen.tsx',
 	'../../screens/registration/RegisterAddressPartyScreen.tsx',

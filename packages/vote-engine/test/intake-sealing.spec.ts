@@ -21,7 +21,14 @@ import type { EngineContext } from '../src/types.js'
 const MARKER = 'PLAINTEXT-MARKER-62-14'
 
 async function giveUserKey (ctx: EngineContext, user: User): Promise<void> {
-  await new UserEngine({ ...user, activeKeys: [] }, ctx).addKey(user.activeKeys[0]!)
+  // createThresholdAuthority now registers its officers' keys itself (signer CHECKs need them), so
+  // only add one for a user that has none yet.
+  const key = user.activeKeys[0]!
+  const existing = await ctx.db
+    .prepare('select 1 as x from UserKey where UserId = :userId and PubKey = :pubKey')
+    .get({ userId: user.id, pubKey: key.key })
+  if (existing) return
+  await new UserEngine({ ...user, activeKeys: [] }, ctx).addKey(key)
 }
 
 describe('src/intake/sealing.ts — IntakeSealer / IntakeOpener (D-03, D-04)', () => {

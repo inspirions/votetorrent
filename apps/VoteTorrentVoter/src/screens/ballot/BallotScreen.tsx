@@ -13,7 +13,7 @@
  * has no questions this app can show, an unavailable message replaces all of that. The footer stacks
  * two full-width buttons: Save & Exit (outline, `popToTop()`) over Review & Submit Ballot (solid).
  */
-import React, {useEffect, useLayoutEffect, useState} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
@@ -29,6 +29,9 @@ import {
 import {ProgressBar} from '../../components/ProgressBar';
 import {OfficeRow} from '../../components/OfficeRow';
 import {InfoDialog} from '../../components/InfoDialog';
+import {InfoDetails} from '../../components/InfoDetails';
+import {readOfficeInfo} from '../../engines/info-read';
+import {useInfoRead} from '../../hooks/useInfoRead';
 import {globalStyles} from '../../theme/styles';
 import {useBallot} from '../../hooks/useBallot';
 import type {VoteStackParamList} from '../../navigation/types';
@@ -38,7 +41,7 @@ type BallotNavigationProp = NativeStackNavigationProp<VoteStackParamList, 'Ballo
 
 export default function BallotScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
-	const {getElection, getBallot} = useVoterApp();
+	const {getElection, getBallot, getEngine, seededElectionId} = useVoterApp();
 	const {selectionMap, setCurrentQuestionIndex} = useBallotSelection();
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('ballot');
@@ -47,7 +50,16 @@ export default function BallotScreen() {
 	// 42-REVIEW IN-01: shared live-guarded fetch-on-mount effect, extracted out of the screen.
 	const {ballot, failed} = useBallot(getBallot);
 	const [election, setElection] = useState<VoterElection | null>(null);
-	const [officeInfoVisible, setOfficeInfoVisible] = useState(false);
+	// The office whose "Learn about this office" dialog is open, or null when it is closed.
+	const [officeInfoId, setOfficeInfoId] = useState<string | null>(null);
+	const loadOfficeInfo = useCallback(
+		() =>
+			officeInfoId === null
+				? Promise.reject(new Error('no office selected'))
+				: readOfficeInfo({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined}, officeInfoId),
+		[getEngine, seededElectionId, officeInfoId],
+	);
+	const officeInfo = useInfoRead(officeInfoId === null ? null : loadOfficeInfo);
 
 	// Fetch the election once so the native header can read its title (Figma: the header shows the
 	// election name, not a generic "Ballot" label).
@@ -112,7 +124,7 @@ export default function BallotScreen() {
 							setCurrentQuestionIndex(offices.indexOf(office));
 							navigation.navigate('IndividualQuestion');
 						}}
-						onLearnAboutOffice={() => setOfficeInfoVisible(true)}
+						onLearnAboutOffice={() => setOfficeInfoId(office.id)}
 					/>
 				);
 			});
@@ -266,13 +278,26 @@ export default function BallotScreen() {
 			</ScrollView>
 
 			<InfoDialog
-				visible={officeInfoVisible}
+				visible={officeInfoId !== null}
 				title={t('officeInfo.title')}
 				subtitle={t('officeInfo.subtitle')}
 				body={t('officeInfo.body')}
 				closeLabel={tCommon('close')}
-				onClose={() => setOfficeInfoVisible(false)}
-			/>
+				onClose={() => setOfficeInfoId(null)}>
+				<InfoDetails
+					testID="office-info-details"
+					loading={officeInfo.loading}
+					failed={officeInfo.failed}
+					unavailableLabel={tCommon('info.unavailable')}
+					rows={[
+						{label: t('officeInfo.instructions'), value: officeInfo.data?.instructions},
+						{
+							label: t('officeInfo.voteFor'),
+							value: officeInfo.data ? t('officeInfo.voteForValue', {count: officeInfo.data.voteFor}) : undefined,
+						},
+					]}
+				/>
+			</InfoDialog>
 		</View>
 	);
 }
