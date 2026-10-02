@@ -13,7 +13,8 @@
  *   - clearEngineCache() wipes ALL cached engines for a clean switch (D-14 uniform clear-all).
  *
  * Security: factory holds ctx internally; screens receive only IXxxEngine instances.
- * getEstablishedContext result never returned to AppProvider/screens (T-15-03-04).
+ * getEstablishedContext result never returned to AppProvider/screens (T-15-03-04); the factory also
+ * attaches the officer's intake opener (D-49) to that ctx, which is still never returned.
  * factory never calls rnDbFactory(hash) twice — only via networksEngine.open()/create()
  * which is cache-first (T-15-03-05 / Pitfall 2).
  */
@@ -52,6 +53,7 @@ import type { StrandHost } from './rn-db-factory';
 import { createStrandPort } from './strand-port-adapter';
 import type { StrandSqlDatabase } from './strand-port-adapter';
 import { resolveKeyholderKeyVault } from './keyholder-vault';
+import { resolveAuthorityKeyVault } from './key-vault';
 import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated';
 import { PINNED_HARDWARE_ROOTS_DER } from './attestation-roots.generated';
 import { REVOKED_ATTESTATION_SERIALS } from './attestation-status.generated';
@@ -773,6 +775,42 @@ export class EngineFactory {
 				`EngineFactory: Network context not established for hash ${this.currentNetworkHash} — call getEngine("network", ref) first`
 			);
 		}
+		this.bindIntakeOpener(ctx);
 		return ctx;
+	}
+
+	/**
+	 * D-49: 62-31 seals registration content to the officers current at write time. The engine reads
+	 * it only through `ctx.intakeOpener`, which this host sets on the SHARED established ctx, so every
+	 * engine built from that ctx sees it and no screen touches keys.
+	 *
+	 * D-04: the opener holds the vault reference and the user id, never a secret. It fetches the
+	 * officer secret on each open from the native-wrapped vault (no prompt: requireUserAuth false), so
+	 * an officer who enables encrypted intake after this bind reads 'opened' without a rebind.
+	 *
+	 * The user-id comparison exists because NetworksEngine.open() spreads the cached ctx on re-open.
+	 * Without it, an opener bound to the previous user would follow a user switch.
+	 *
+	 * The catch is fail-closed: an unbuildable opener makes sealed rows read as 'no-opener'. It never
+	 * blocks the engine, and it logs nothing (no plaintext or key-related detail may reach a log).
+	 *
+	 * D-51: officers who were not recipients read 'not-a-recipient'. No re-wrap exists.
+	 */
+	private bindIntakeOpener(ctx: EngineContext): void {
+		const userId = ctx.user?.id;
+		if (typeof userId !== 'string' || userId.length === 0) {
+			if (ctx.intakeOpener !== undefined) {
+				ctx.intakeOpener = undefined;
+			}
+			return;
+		}
+		if (ctx.intakeOpener?.userId === userId) {
+			return;
+		}
+		try {
+			ctx.intakeOpener = new IntakeEngine(ctx).createOpener(resolveAuthorityKeyVault());
+		} catch {
+			ctx.intakeOpener = undefined;
+		}
 	}
 }
