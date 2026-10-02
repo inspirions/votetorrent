@@ -197,6 +197,14 @@ const GROUPS: readonly Group[] = [
 			"registrantPrivateUnreadable",
 		],
 	],
+	[
+		"M registrantSelective*",
+		/^registrantSelective[A-Z]/,
+		[
+			"registrantSelectiveNotRecipient",
+			"registrantSelectiveUnreadable",
+		],
+	],
 ];
 
 const ALL_CATALOG_KEYS: readonly string[] = GROUPS.flatMap(([, , keys]) => keys);
@@ -348,6 +356,7 @@ describe("multipeer-continuity-keys (62-10, D-31/D-36/D-41/D-43/D-45/D-46/D-49/D
 		expect(enTranslation.registrationContentNotRecipient).toContain("Another officer");
 		expect(enTranslation.registrationContentNoKey).toContain("encrypted intake");
 		expect(enTranslation.registrantPrivateNotRecipient).toContain("before you became an officer");
+		expect(enTranslation.registrantSelectiveNotRecipient).toContain("before you became an officer");
 	});
 
 	test.each([
@@ -357,6 +366,8 @@ describe("multipeer-continuity-keys (62-10, D-31/D-36/D-41/D-43/D-45/D-46/D-49/D
 		"registrationContentTampered",
 		"registrantPrivateNotRecipient",
 		"registrantPrivateUnreadable",
+		"registrantSelectiveNotRecipient",
+		"registrantSelectiveUnreadable",
 	])("%s: no retry offered in either locale (D-49/D-51 — a sealed request cannot become readable by retrying)", (key) => {
 		expect(enTranslation[key]).not.toMatch(RETRY_EN_RE);
 		expect(esTranslation[key]).not.toMatch(RETRY_ES_RE);

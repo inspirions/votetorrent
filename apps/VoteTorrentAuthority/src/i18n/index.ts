@@ -1047,6 +1047,9 @@ const resources = {
 			registrantPrivateNotRecipient:
 				'These private details were sealed before you became an officer, so they cannot be shown on this device.',
 			registrantPrivateUnreadable: 'These private details could not be read on this device.',
+			registrantSelectiveNotRecipient:
+				'These selective-disclosure details were sealed before you became an officer, so they cannot be shown on this device.',
+			registrantSelectiveUnreadable: 'These selective-disclosure details could not be read on this device.',
 		},
 	},
 	es: {
@@ -2074,6 +2077,9 @@ const resources = {
 			registrantPrivateNotRecipient:
 				'Estos datos privados se sellaron antes de que fueras funcionario, así que no se pueden mostrar en este dispositivo.',
 			registrantPrivateUnreadable: 'No se pudieron leer estos datos privados en este dispositivo.',
+			registrantSelectiveNotRecipient:
+				'Estos datos de divulgación selectiva se sellaron antes de que fueras funcionario, así que no se pueden mostrar en este dispositivo.',
+			registrantSelectiveUnreadable: 'No se pudieron leer estos datos de divulgación selectiva en este dispositivo.',
 		},
 	},
 };

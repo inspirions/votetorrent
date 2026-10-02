@@ -10,6 +10,8 @@ import {
 	isNoOpTransition,
 	flattenPrivateDetails,
 	toPublicTierRows,
+	selectiveTierReadState,
+	SELECTIVE_TIER_READ_STATE_COPY,
 } from "../registrant-detail-model";
 import type { PrivateDetail, RegistrantPublic, RegistrantStatus } from "@votetorrent/vote-core";
 
@@ -221,7 +223,30 @@ describe("negative space — this module's runtime surface is pinned", () => {
 				"toPublicTierRows",
 				"privateTierReadState",
 				"PRIVATE_TIER_READ_STATE_COPY",
+				"selectiveTierReadState",
+				"SELECTIVE_TIER_READ_STATE_COPY",
 			].sort(),
 		);
+	});
+});
+
+describe("selectiveTierReadState (M1/M2)", () => {
+	it("M1: readable states", () => {
+		expect(selectiveTierReadState(undefined)).toBe("readable");
+		expect(selectiveTierReadState("opened")).toBe("readable");
+		expect(selectiveTierReadState("unsealed")).toBe("readable");
+	});
+	it("M1: unread states", () => {
+		expect(selectiveTierReadState("not-a-recipient")).toBe("not-a-recipient");
+		expect(selectiveTierReadState("no-opener")).toBe("no-key");
+		expect(selectiveTierReadState("unreadable")).toBe("unreadable");
+		expect(selectiveTierReadState("tampered")).toBe("unreadable");
+	});
+	it("M2: copy map", () => {
+		expect(SELECTIVE_TIER_READ_STATE_COPY).toEqual({
+			"not-a-recipient": "registrantSelectiveNotRecipient",
+			"no-key": "registrationContentNoKey",
+			unreadable: "registrantSelectiveUnreadable",
+		});
 	});
 });
