@@ -1,4 +1,5 @@
 import { bytesToHex } from '@noble/curves/utils.js';
+import { toImageRef } from '@votetorrent/vote-core';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
@@ -15,6 +16,7 @@ if (typeof secp256k1.verify !== 'function') {
 import { MisuseError, QuereusError } from '@quereus/quereus';
 import { Temporal } from 'temporal-polyfill';
 import { SigningEngine } from '../signing/signing-engine.js';
+import { adminSigningKeyValidity } from '../signing/signer-validity.js';
 import { allocateTid } from '../database/tid-allocator.js';
 import { verifySig, verifySigP256 } from '../database/initialize.js';
 import {
@@ -492,11 +494,11 @@ export class AuthorityEngine implements IAuthorityEngine {
 				id: authorityDB.Id as string,
 				name: authorityDB.Name as string,
 				domainName: asText(authorityDB.DomainName, 'Authority.DomainName'),
-				imageRef: parseJsonOr<ImageRef | undefined>(
+				imageRef: toImageRef(parseJsonOr<unknown>(
 					authorityDB.ImageRef,
 					undefined,
 					'Authority.ImageRef',
-				),
+				)),
 			};
 			const proposedAuthorityDB = await this.ctx.db
 				.prepare(
@@ -1193,6 +1195,13 @@ export class AuthorityEngine implements IAuthorityEngine {
 			const promotionNonce = crypto.randomUUID();
 			const nowCanon = nowCanonicalDatetime();
 
+			const isSignerKeyValid = await adminSigningKeyValidity(this.ctx.db, {
+				userId: promotionSignature.signerUserId,
+				signerKey: promotionSignature.signerKey,
+				now: nowCanon,
+				isPlaceholderSignature: false,
+			});
+
 			if (ownsTransaction) await this.ctx.db.exec('BEGIN');
 			try {
 				// Mint the ONE promotion session. Never IsPlaceholderSignature = true —
@@ -1201,7 +1210,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 					`insert into AdminSigning (
 						Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature
 					)
-						with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+						with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsPlaceholderSignature = false
 					values (
 						:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature
 					)`,
@@ -1214,6 +1223,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 						signerKey: promotionSignature.signerKey,
 						signature: promotionSignature.signature,
 						now: nowCanon,
+						isSignerKeyValid,
 					},
 				);
 				// 62-03 (D-33b): signDerived — the promotion session INHERITS satisfaction

@@ -12,15 +12,13 @@
  * The 5 tabs (Phase 59, D-13): Vote · Timeline · Registration · Scan · Settings.
  */
 
-// Vote tab: Home root + Ballot pushed + the 4 question/info modals (D-09 topology) +
+// Vote tab: Home root + Ballot pushed + the IndividualQuestion modal (D-09 topology; the
+// election/office/candidate "Learn about" info is an in-place InfoDialog, not a route) +
 // ValidationDetails (HOME-03/D-11 trust-story drill-in, plain push — not a modal).
 export type VoteStackParamList = {
 	Home: undefined;
 	Ballot: undefined;
 	IndividualQuestion: undefined;
-	ElectionInfo: undefined;
-	OfficeInfo: undefined;
-	CandidateInfo: undefined;
 	ValidationDetails: undefined;
 	// Phase 42 (VOTE-04, D-05) — per-office selection summary + final Submit. All `undefined`
 	// like every other entry above: selection state (selectionMap, currentQuestionIndex) lives

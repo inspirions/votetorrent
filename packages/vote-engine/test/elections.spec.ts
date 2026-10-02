@@ -21,7 +21,7 @@ import { KeysTasksEngine } from '../src/tasks/keys-tasks-engine'
 import { OnboardingTasksEngine } from '../src/tasks/onboarding-tasks-engine'
 import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine'
 import type { EngineContext } from '../src/types.js'
-import { createTestNetwork, addTestAuthority, addTestElection, seedBallot, seedQuestion, seedElectionSigning, makeElectionInit as makeElectionInitFromFixture, makeTestSignature, makeTestSignCallback } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, addTestElection, seedBallot, seedQuestion, seedElectionSigning, makeElectionInit as makeElectionInitFromFixture, makeTestSignature, makeTestSignCallback, testKeyPairFor } from './fixtures/test-context.js'
 import { peekNextElectionTid } from '../src/elections/elections-engine.js'
 import { digestToBytes } from '../src/utils.js'
 import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
@@ -965,7 +965,7 @@ describe('SignatureTasksEngine', () => {
         .prepare('select Digest from AdminSigning where Nonce = :nonce')
         .get({ nonce: taskNonce })
       const digestB64 = digestRow!.Digest as string
-      const { privateHex, publicHex } = randomTestKeyPair()
+      const { privateHex, publicHex } = testKeyPairFor(userId)
       const realSig = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
       const result: SignatureResult = {
         isAccepted: true,

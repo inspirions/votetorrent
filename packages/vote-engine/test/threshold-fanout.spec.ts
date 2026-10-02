@@ -108,13 +108,21 @@ describe('threshold core (62-07)', function () {
     const rNonHolder = await engine.signWithOutcome(nonce, await signSessionDigest(fx.elec.ctx.db, nonce, fx.nonHolder.user))
     expect(rNonHolder.thresholdReached, 'non-holder signature must not complete').to.equal(false)
 
-    const rOutsider = await engine.signWithOutcome(nonce, await signSessionDigest(fx.elec.ctx.db, nonce, fx.outsider))
-    expect(rOutsider.thresholdReached, 'non-officer signature must not complete').to.equal(false)
+    // A non-officer can no longer sign at all: OfficerSignature.OfficerValid is engine-computed
+    // (was a hardcoded `true`), so the outsider's signature is refused rather than recorded and
+    // ignored.
+    let outsiderError: Error | undefined
+    try {
+      await engine.signWithOutcome(nonce, await signSessionDigest(fx.elec.ctx.db, nonce, fx.outsider))
+    } catch (err) {
+      outsiderError = err as Error
+    }
+    expect(outsiderError?.message, 'non-officer signature is refused').to.include('OfficerValid')
 
     const officerCount = await fx.elec.ctx.db
       .prepare('select count(*) as n from OfficerSignature where SigningNonce = :nonce')
       .get({ nonce })
-    expect(Number(officerCount?.n), '3 OfficerSignature rows recorded').to.equal(3)
+    expect(Number(officerCount?.n), '2 OfficerSignature rows recorded (holder + non-holder officer)').to.equal(2)
 
     const adminCount = await fx.elec.ctx.db
       .prepare('select count(*) as n from AdminSignature where SigningNonce = :nonce')

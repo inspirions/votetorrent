@@ -28,6 +28,7 @@ import type {
 import { ElectionsCreateElectionBuilder } from './builders/elections-create-election-builder.js'
 import { ElectionsAdjustElectionBuilder } from './builders/elections-adjust-election-builder.js'
 import { SigningEngine } from '../signing/signing-engine.js'
+import { adminSigningKeyValidity } from '../signing/signer-validity.js'
 
 // Phase 999.1 D-01/D-02/D-03 — Tids for ElectionsEngine batches are allocated
 // through the shared durable, peer-safe allocator (`tid-allocator.ts`,
@@ -702,6 +703,12 @@ export class ElectionsEngine implements IElectionsEngine {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const nonce: string = (globalThis as any).crypto.randomUUID()
     const now = nowCanonicalDatetime()
+    const isSignerKeyValid = await adminSigningKeyValidity(ctx.db, {
+      userId: signature.signerUserId,
+      signerKey: signature.signerKey,
+      now,
+      isPlaceholderSignature: false
+    })
 
     await ctx.db.exec(
       `insert into AdminSigning (
@@ -714,7 +721,7 @@ export class ElectionsEngine implements IElectionsEngine {
         SignerKey,
         Signature
       )
-      with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+      with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsPlaceholderSignature = false
       values (
         :nonce,
         :authorityId,
@@ -740,6 +747,7 @@ export class ElectionsEngine implements IElectionsEngine {
         signerKey: signature.signerKey,
         signature: signature.signature,
         now,
+        isSignerKeyValid,
       }
     )
 
@@ -853,6 +861,12 @@ export class ElectionsEngine implements IElectionsEngine {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const nonce: string = (globalThis as any).crypto.randomUUID()
     const now = nowCanonicalDatetime()
+    const isSignerKeyValid = await adminSigningKeyValidity(ctx.db, {
+      userId: signature.signerUserId,
+      signerKey: signature.signerKey,
+      now,
+      isPlaceholderSignature: false
+    })
 
     await ctx.db.exec(
       `insert into AdminSigning (
@@ -865,7 +879,7 @@ export class ElectionsEngine implements IElectionsEngine {
         SignerKey,
         Signature
       )
-      with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+      with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsPlaceholderSignature = false
       values (
         :nonce,
         :authorityId,
@@ -892,6 +906,7 @@ export class ElectionsEngine implements IElectionsEngine {
         signerKey: signature.signerKey,
         signature: signature.signature,
         now,
+        isSignerKeyValid,
       }
     )
 

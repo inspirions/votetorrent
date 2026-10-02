@@ -15,10 +15,10 @@
  * changing `currentQuestionIndex`). Previous is hidden at index 0 (D-06, no wrap-around). Next
  * advances the index, or on the last question calls `navigation.replace('ReviewSubmit')` instead
  * of `navigate()` (RESEARCH Pattern 7 / Assumption A2) so Android hardware-back from Review lands
- * on the Ballot Page, not a re-opened modal at the last question. "Learn about this candidate" is
- * an unconditional link to `CandidateInfo` (VOTE-03).
+ * on the Ballot Page, not a re-opened modal at the last question. "Learn about this candidate"
+ * opens the in-place candidate InfoDialog with that candidate's authority-published detail.
  */
-import React, {useLayoutEffect, useState} from 'react';
+import React, {useCallback, useLayoutEffect, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
@@ -29,6 +29,9 @@ import {useVoterApp} from '../../providers/VoterAppProvider';
 import {useBallotSelection} from '../../providers/BallotSelectionProvider';
 import {CandidateSelector} from '../../components/CandidateSelector';
 import {InfoDialog} from '../../components/InfoDialog';
+import {InfoDetails} from '../../components/InfoDetails';
+import {readCandidateInfo} from '../../engines/info-read';
+import {useInfoRead} from '../../hooks/useInfoRead';
 import {globalStyles} from '../../theme/styles';
 import {useBallot} from '../../hooks/useBallot';
 import type {VoteStackParamList} from '../../navigation/types';
@@ -40,7 +43,7 @@ type IndividualQuestionNavigationProp = NativeStackNavigationProp<
 
 export default function IndividualQuestionScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
-	const {getBallot} = useVoterApp();
+	const {getBallot, getEngine, seededElectionId} = useVoterApp();
 	const {
 		currentQuestionIndex,
 		selectionMap,
@@ -54,7 +57,16 @@ export default function IndividualQuestionScreen() {
 	const navigation = useNavigation<IndividualQuestionNavigationProp>();
 	// 42-REVIEW IN-01: shared live-guarded fetch-on-mount effect, extracted out of the screen.
 	const {ballot, failed} = useBallot(getBallot);
-	const [candidateInfoVisible, setCandidateInfoVisible] = useState(false);
+	// The candidate whose "Learn about this candidate" dialog is open, or null when it is closed.
+	const [candidateInfoId, setCandidateInfoId] = useState<string | null>(null);
+	const loadCandidateInfo = useCallback(
+		() =>
+			candidateInfoId === null
+				? Promise.reject(new Error('no candidate selected'))
+				: readCandidateInfo({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined}, candidateInfoId),
+		[getEngine, seededElectionId, candidateInfoId],
+	);
+	const candidateInfo = useInfoRead(candidateInfoId === null ? null : loadCandidateInfo);
 
 	const offices = ballot?.offices ?? [];
 	const office = offices[currentQuestionIndex];
@@ -171,7 +183,7 @@ export default function IndividualQuestionScreen() {
 					voteFor={office.voteFor}
 					onToggle={candidateId => toggleCandidate(office.id, candidateId, office.voteFor)}
 					learnLabel={t('learnAboutCandidate')}
-					onLearnAboutCandidate={() => setCandidateInfoVisible(true)}
+					onLearnAboutCandidate={candidateId => setCandidateInfoId(candidateId)}
 				/>
 			</ScrollView>
 
@@ -201,13 +213,28 @@ export default function IndividualQuestionScreen() {
 			</View>
 
 			<InfoDialog
-				visible={candidateInfoVisible}
+				visible={candidateInfoId !== null}
 				title={t('candidateInfo.title')}
 				subtitle={t('candidateInfo.subtitle')}
 				body={t('candidateInfo.body')}
 				closeLabel={tCommon('close')}
-				onClose={() => setCandidateInfoVisible(false)}
-			/>
+				onClose={() => setCandidateInfoId(null)}>
+				<InfoDetails
+					testID="candidate-info-details"
+					loading={candidateInfo.loading}
+					failed={candidateInfo.failed}
+					unavailableLabel={tCommon('info.unavailable')}
+					rows={[
+						{label: t('candidateInfo.name'), value: candidateInfo.data?.name},
+						{label: t('candidateInfo.details'), value: candidateInfo.data?.details},
+					]}
+					link={
+						candidateInfo.data?.infoURL
+							? {label: tCommon('info.openLink'), url: candidateInfo.data.infoURL}
+							: undefined
+					}
+				/>
+			</InfoDialog>
 		</View>
 	);
 }

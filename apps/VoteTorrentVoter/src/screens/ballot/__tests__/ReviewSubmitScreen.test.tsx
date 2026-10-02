@@ -65,8 +65,6 @@ function renderScreen() {
 						<Stack.Navigator initialRouteName="Ballot" screenOptions={{headerShown: false}}>
 							<Stack.Screen name="Ballot" component={BallotScreen} />
 							<Stack.Screen name="IndividualQuestion" component={DummyScreen} />
-							<Stack.Screen name="OfficeInfo" component={DummyScreen} />
-							<Stack.Screen name="ElectionInfo" component={DummyScreen} />
 							<Stack.Screen name="ReviewSubmit" component={ReviewSubmitScreen} />
 						</Stack.Navigator>
 					</BallotSelectionProvider>

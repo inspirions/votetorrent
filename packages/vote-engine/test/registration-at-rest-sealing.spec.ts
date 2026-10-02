@@ -16,7 +16,6 @@ import type { RegisterInit, RegistrationRequestInit, Signature } from '@votetorr
 import { RegistrationContentAccessError, RegistrationDuplicateError } from '@votetorrent/vote-core'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
-import { UserEngine } from '../src/user/user-engine.js'
 import { isSealedRegistrationContent } from '../src/registration/sealed-registration-content.js'
 import { digestToBytes } from '../src/utils.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
@@ -586,7 +585,7 @@ describe('registration-at-rest-sealing — D-49 (62-31 Task 3)', function () {
 
       // holders[1] joins the intake-recipient set AFTER the above.
       const holder1Ctx: EngineContext = { db: fx.elec.ctx.db, user: fx.holders[1]!.user }
-      await new UserEngine({ ...fx.holders[1]!.user, activeKeys: [] }, holder1Ctx).addKey(fx.holders[1]!.user.activeKeys[0]!)
+      // (holders[1]'s UserKey is already registered by createThresholdAuthority.)
       await provisionTestIntakeRecipient(holder1Ctx, fx.authorityId)
 
       const holder1Engine = new RegistrationEngine({ db: fx.elec.ctx.db, user: fx.holders[1]!.user, intakeOpener: holder1Ctx.intakeOpener })

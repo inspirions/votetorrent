@@ -44,7 +44,7 @@ import ScanScreen from '../screens/scan/ScanScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
 import TimelineScreen from '../screens/timeline/TimelineScreen';
 import KeyholdersScreen from '../screens/timeline/KeyholdersScreen';
-import PlaceholderModal from '../components/PlaceholderModal';
+import RegistrationInfoScreen from '../screens/registration/RegistrationInfoScreen';
 import {RegistrationDraftProvider} from '../providers/RegistrationDraftProvider';
 import {BallotSelectionProvider} from '../providers/BallotSelectionProvider';
 
@@ -109,36 +109,6 @@ function VoteStackNavigator() {
 				component={ReviewSubmitScreen}
 				options={{title: tBallot('reviewSubmitTitle')}}
 			/>
-			<VoteStack.Screen
-				name="ElectionInfo"
-				component={PlaceholderModal}
-				options={({navigation}) => ({
-					title: tHome('electionInfoTitle'),
-					presentation: 'modal',
-					headerBackVisible: false,
-					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-				})}
-			/>
-			<VoteStack.Screen
-				name="OfficeInfo"
-				component={PlaceholderModal}
-				options={({navigation}) => ({
-					title: tBallot('officeInfoTitle'),
-					presentation: 'modal',
-					headerBackVisible: false,
-					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-				})}
-			/>
-			<VoteStack.Screen
-				name="CandidateInfo"
-				component={PlaceholderModal}
-				options={({navigation}) => ({
-					title: tBallot('candidateInfoTitle'),
-					presentation: 'modal',
-					headerBackVisible: false,
-					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-				})}
-			/>
 		</VoteStack.Navigator>
 	);
 }
@@ -197,7 +167,7 @@ function TimelineStackNavigator() {
 			/>
 			<TimelineStack.Screen
 				name="RegistrationInfo"
-				component={PlaceholderModal}
+				component={RegistrationInfoScreen}
 				options={({navigation}) => ({
 					title: tRegistration('headerTitle'),
 					presentation: 'modal',
@@ -308,7 +278,7 @@ function RegistrationStackNavigator() {
 			/>
 			<RegistrationStack.Screen
 				name="RegistrationInfo"
-				component={PlaceholderModal}
+				component={RegistrationInfoScreen}
 				options={({navigation}) => ({
 					title: t('headerTitle'),
 					presentation: 'modal',

@@ -15,7 +15,8 @@ import { KeysTasksEngine } from '../src/tasks/keys-tasks-engine.js'
 import { MockSigningEngine } from '../src/signing/mock-signing-engine'
 import { SigningSignBuilder } from '../src/signing/builders/signing-sign-builder.js'
 import { SigningStartSigningSessionBuilder } from '../src/signing/builders/signing-start-signing-session-builder.js'
-import { createTestNetwork, addTestAuthority, addTestElection, makeTestSignature } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, addTestElection, makeTestSignature, makeTestUser, testKeyPairFor } from './fixtures/test-context.js'
+import { createThresholdAuthority, signSessionDigest } from './fixtures/threshold-authority.js'
 import { nowCanonicalDatetime, digestToBytes } from '../src/utils.js'
 import { computeRadProposalDigest, readProposedRosterJson } from '../src/authority/rad-roster-digest.js'
 import type { EngineContext } from '../src/types.js'
@@ -39,21 +40,10 @@ import type {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Delegates to the shared fixture so the user's key is recorded and `testKeyPairFor`
+// can sign with the key the network registers as this user's UserKey.
 function makeUser (overrides?: Partial<User>): User {
-  const { publicHex } = randomTestKeyPair()
-  return {
-    id: 'user-1',
-    name: 'Test User',
-    imageRef: { url: 'https://img.local/user.png' },
-    activeKeys: [
-      {
-        key: publicHex,
-        type: UserKeyType.mobile,
-        expiration: Date.now() + 86_400_000
-      }
-    ],
-    ...overrides
-  }
+  return makeTestUser(overrides)
 }
 
 // r24: `thresholdPolicies` is an optional override so the threshold-enforcement
@@ -153,7 +143,7 @@ async function realSignAdminDigest (
       thresholdPolicies: digestArgs.thresholdPolicies
     })
   const digestB64 = row!.d as string
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(signerUserId)
   const sigHex = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
   return { signerUserId, signerKey: publicHex, signature: sigHex }
 }
@@ -165,6 +155,13 @@ async function realSignAdminDigest (
  */
 function signTestDigestWithFreshKey (signerUserId: string, digestB64: string): Signature {
   const { privateHex, publicHex } = randomTestKeyPair()
+  const sigHex = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
+  return { signerUserId, signerKey: publicHex, signature: sigHex }
+}
+
+/** Same as signTestDigestWithFreshKey, but with the signer's REGISTERED fixture key. */
+function signTestDigestAsRegistered (signerUserId: string, digestB64: string): Signature {
+  const { privateHex, publicHex } = testKeyPairFor(signerUserId)
   const sigHex = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
   return { signerUserId, signerKey: publicHex, signature: sigHex }
 }
@@ -412,11 +409,16 @@ describe('SigningEngine', () => {
     // (their audit evidence) — not ROLLBACK it. A prior ROLLBACK here silently
     // dropped the officer's signature while still returning true.
     it('preserves a second officer\'s OfficerSignature when the AdminSignature already exists (WR-02: no silent audit-row drop)', async () => {
-      const { ctx, user } = await createPopulatedContext()
+      // A REAL second officer with a registered key: signer CHECKs (SignerKeyValid/OfficerValid) are
+      // engine-computed now, so a made-up second signer would be refused before reaching WR-02.
+      const fx = await createThresholdAuthority()
+      const ctx = fx.elec.ctx
       const engine = new SigningEngine(ctx)
-      const authRow = await ctx.db.prepare('select Id from Authority limit 1').get({})
-      const authorityId = authRow!.Id as string
-      const sig1 = await realSignAdminDigest(ctx, authorityId, testDigestArgs, user.id)
+      const authorityId = fx.authorityId
+      const digestRow = await ctx.db
+        .prepare('select Digest(:authorityId, :effectiveAt, :officers, :thresholdPolicies) as d')
+        .get({ ...testDigestArgs, authorityId })
+      const sig1 = await fx.holders[0]!.sign(digestToBytes(digestRow!.d as string))
       // Officer 1 crosses the threshold (=1): AdminSignature row is created.
       const { nonce, thresholdReached } = await engine.startSigningSession(authorityId, testDigestArgs, 'rad', sig1)
       expect(thresholdReached).to.equal(true)
@@ -429,12 +431,8 @@ describe('SigningEngine', () => {
       // Officer 2 (distinct UserId) signs the SAME nonce. Their OfficerSignature
       // inserts cleanly (distinct PK), the count re-crosses the threshold, and
       // the AdminSignature insert collides on its existing PK → the WR-02 branch.
-      // 999.1 R-02: OfficerSignature.SignatureValid verifies against the SAME
-      // AdminSigning.Digest sig1 signed above — sign a real signature over it too.
-      const adminSigningDigestRow = await ctx.db
-        .prepare('select Digest from AdminSigning where Nonce = :nonce')
-        .get({ nonce })
-      const sig2 = signTestDigestWithFreshKey('user-2-wr02', adminSigningDigestRow!.Digest as string)
+const officer2 = fx.holders[1]!.user
+      const sig2 = await signSessionDigest(ctx.db, nonce, officer2)
       const result = await engine.sign(nonce, sig2)
       expect(result, 'threshold is already met, so sign() reports success').to.equal(true)
 
@@ -444,10 +442,10 @@ describe('SigningEngine', () => {
         .prepare('select count(*) as n from OfficerSignature where SigningNonce = :nonce')
         .get({ nonce })
       expect(Number(afterOfficer?.n), 'officer 2\'s signature must survive (pre-fix ROLLBACK dropped it)').to.equal(2)
-      const officer2 = await ctx.db
+      const officer2Row = await ctx.db
         .prepare('select UserId from OfficerSignature where SigningNonce = :nonce and UserId = :uid')
-        .get({ nonce, uid: 'user-2-wr02' })
-      expect(officer2?.UserId).to.equal('user-2-wr02')
+        .get({ nonce, uid: officer2.id })
+      expect(officer2Row?.UserId).to.equal(officer2.id)
 
       // And exactly one AdminSignature row still exists (idempotent completion).
       const adminSigCount = await ctx.db
@@ -535,7 +533,8 @@ describe('SigningEngine', () => {
     // this second signature is recorded (OfficerSignature row count 2) but never moves the
     // qualifying count — the session stays unreached. The positive two-holder completion case
     // (a REAL current scope-holder as the second signer) now lives in threshold-fanout.spec.ts T1.
-    it('threshold 2: a second signature from a NON-holder does NOT complete (holder-only counting, 62-07)', async () => {
+    // Holder-only counting with a real non-holder OFFICER is covered by threshold-fanout.spec.ts T2.
+    it('threshold 2: a second signature from a non-User, non-officer is refused outright and never counts', async () => {
       const { ctx, user } = await createPopulatedContext(thresholdPolicies)
       const engine = new SigningEngine(ctx)
       const authRow = await ctx.db.prepare('select Id from Authority limit 1').get({})
@@ -553,18 +552,23 @@ describe('SigningEngine', () => {
         .prepare('select Digest from AdminSigning where Nonce = :nonce')
         .get({ nonce })
       const sig2 = signTestDigestWithFreshKey('user-2-threshold', adminSigningDigestRow!.Digest as string)
-      const secondResult = await engine.sign(nonce, sig2)
-      expect(secondResult, 'sign() must NOT return true for a non-holder second signer').to.equal(false)
+      let refused: Error | undefined
+      try {
+        await engine.sign(nonce, sig2)
+      } catch (err) {
+        refused = err as Error
+      }
+      expect(refused?.message, 'an unregistered, non-officer signer is refused by a signer CHECK').to.match(/SignerKeyValid|OfficerValid/)
 
       const officerCount = await ctx.db
         .prepare('select count(*) as n from OfficerSignature where SigningNonce = :nonce')
         .get({ nonce })
-      expect(Number(officerCount?.n), 'exactly 2 OfficerSignature rows after both signers').to.equal(2)
+      expect(Number(officerCount?.n), 'only the real officer\'s OfficerSignature exists').to.equal(1)
 
       const adminSig = await ctx.db
         .prepare('select count(*) as n from AdminSignature where SigningNonce = :nonce')
         .get({ nonce })
-      expect(Number(adminSig?.n), 'no AdminSignature row — the non-holder signature never qualified').to.equal(0)
+      expect(Number(adminSig?.n), 'no AdminSignature row').to.equal(0)
     })
 
     it('threshold 1: completes after a single OfficerSignature (threshold=1 on scope "rad")', async () => {
@@ -744,11 +748,11 @@ describe('getSignatureDigest + completeSignature round-trip', () => {
     expect(digest).to.be.instanceOf(Uint8Array)
     expect(digest.length).to.be.greaterThan(0)
 
-    // Sign the engine-authoritative digest with a fresh test secp256k1 key
+    // Sign the engine-authoritative digest with the officer's REGISTERED test key
     // (plain closure, NOT the RN device-signer module — headless Node spec)
-    const privKey = secp.utils.randomSecretKey()
-    const pubKey = secp.getPublicKey(privKey)
-    const pubHex = bytesToHex(pubKey)
+    const registered = testKeyPairFor(auth.user.id)
+    const privKey = hexToBytes(registered.privateHex)
+    const pubHex = registered.publicHex
     // noble v2: secp256k1.sign() returns Uint8Array (compact raw bytes) directly
     const sigBytes = secp.sign(digest, privKey) as unknown as Uint8Array
     const sigHex = bytesToHex(sigBytes)
@@ -1065,7 +1069,7 @@ describe('completeSignature reject-branch (D-12)', () => {
     const acceptDigestRow = await auth.ctx.db
       .prepare('select Digest from AdminSigning where Nonce = :nonce')
       .get({ nonce })
-    const sig = signTestDigestWithFreshKey(auth.user.id, acceptDigestRow!.Digest as string)
+    const sig = signTestDigestAsRegistered(auth.user.id, acceptDigestRow!.Digest as string)
     // 57-08 (Trigger B): the admin accept path now REQUIRES a reusable per-digest
     // callback. This fixture's AdminSigning row does not use the real roster-
     // covering digest formula, so any promotion attempt legitimately refuses

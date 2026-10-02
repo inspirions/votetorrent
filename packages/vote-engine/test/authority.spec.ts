@@ -5416,8 +5416,11 @@ describe('AuthoritySaveInviteWithSigningBuilder', () => {
     expect(err1).to.equal(undefined)
     const { authorityEngine: eng2 } = await createNetworkAndAuthority()
     const invite2 = eng2.createAuthorityInvite('Invite2')
+    // The second network re-registers 'user-1' with a fresh key, so the signer must be
+    // rebuilt against it (SignerKeyValid requires the key registered in THIS network).
+    const sig2 = makeRealSignCallback('user-1')
     let err2: unknown
-    try { await eng2.buildSaveInviteWithSigning().fromPayload({ invite: invite2, scope: 'iad', signature: sig }).commit() } catch (e) { err2 = e }
+    try { await eng2.buildSaveInviteWithSigning().fromPayload({ invite: invite2, scope: 'iad', signature: sig2 }).commit() } catch (e) { err2 = e }
     expect(err2).to.equal(undefined)
   })
 })

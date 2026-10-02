@@ -21,10 +21,12 @@ import { InlineError } from "../../components/InlineError";
  * Figma frame `1425:1448`. Standalone screen reached from
  * `NetworkDetailsScreen`'s STATISTICS button (D-12). Renders two stat rows
  * (estimatedNodes, serverCount) sourced from `INetworkEngine.getStatistics()`
- * (static mock numbers per D-15) plus an ADD SERVERS stub.
+ * (serverCount = the network's relay list; estimatedNodes = max(serverCount, live peer count)).
+ * ADD SERVERS opens the network revision form, where an officer proposes the new relay list;
+ * signing that proposal on NetworkDetails applies it (`INetworkEngine.applyRevision`).
  */
 export default function NetworkStatisticsScreen() {
-	const { networkId: _networkId } = useRoute().params as { networkId: string };
+	const { networkId } = useRoute().params as { networkId: string };
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 	const navigation = useNavigation<NavigationProp>();
@@ -86,7 +88,7 @@ export default function NetworkStatisticsScreen() {
 						title={t("addServers")}
 						icon="circle-plus"
 						backgroundColor={colors.accent}
-						disabled={true}
+						onPress={() => navigation.navigate("NetworkRevision", { networkId })}
 					/>
 				</View>
 			</ScrollView>

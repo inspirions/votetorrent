@@ -15,7 +15,7 @@ import { nowCanonicalDatetime, toCanonicalDatetime, fromCanonicalDatetime, diges
 import { ElectionsEngine, peekNextElectionTid } from '../../src/elections/elections-engine.js'
 import { SigningEngine } from '../../src/signing/signing-engine.js'
 import { NetworksEngine } from '../../src/networks/networks-engine.js'
-import { randomTestKeyPair } from './keys.js'
+import { randomTestKeyPair, type TestKeyPair } from './keys.js'
 import { AsyncStorage } from '../shims/react-native.js'
 import { IntakeEngine, createIntakeOpener } from '../../src/intake/index.js'
 import { InMemoryTestKeyVault } from '../../src/crypto/vault.js'
@@ -156,6 +156,23 @@ export function makeTestSignCallback (user: User): (digest: Uint8Array) => Promi
       signerUserId: user.id,
     }
   }
+}
+
+/**
+ * The key pair registered (as UserKey) for a fixture user created via
+ * makeTestUser/makeDistinctTestUser. Signers MUST use this rather than a fresh
+ * randomTestKeyPair(): AdminSigning/OfficerSignature.SignerKeyValid now requires the
+ * signer key to be a registered, unexpired UserKey of the signing user, so a signature
+ * by an unregistered throwaway key is (correctly) refused.
+ */
+export function testKeyPairFor (userId: string): TestKeyPair {
+  const privateHex = testUserPrivateKeys.get(userId)
+  if (!privateHex) {
+    throw new Error(
+      `testKeyPairFor: no key recorded for user.id=${userId} — was this user created via makeTestUser/makeDistinctTestUser?`
+    )
+  }
+  return { privateHex, publicHex: bytesToHex(secp256k1.getPublicKey(hexToBytes(privateHex))) }
 }
 
 /**

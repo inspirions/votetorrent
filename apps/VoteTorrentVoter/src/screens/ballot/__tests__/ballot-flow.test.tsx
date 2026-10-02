@@ -3,7 +3,7 @@
  * ballot navigation-flow test. Mounts a real `NavigationContainer` + real `VoterAppProvider` +
  * real `BallotSelectionProvider` around a minimal native-stack harness wiring the real
  * `BallotScreen`, `IndividualQuestionScreen`, `ReviewSubmitScreen` plus `DummyScreen` stand-ins
- * for `Home`/`ElectionInfo`/`OfficeInfo`/`CandidateInfo` — mirrors
+ * for `Home` — mirrors
  * `registration-flow.test.tsx`'s real-provider harness + `tr.root.findByProps({testID})`
  * interaction style (no `@testing-library/react-native`), and captures `useBallotSelection()`
  * via a Probe (mirrors `BallotSelectionProvider.test.tsx`/`IndividualQuestionScreen.test.tsx`'s
@@ -20,9 +20,8 @@
  *    integration-level proof that D-07's "re-entering the ballot resumes" claim actually holds,
  *    now that `BallotSelectionProvider` is mounted app-scoped via `AppStateProviders` (Phase 59
  *    D-22, this test's own harness wraps the provider directly — see below).
- * 4. VOTE-03: the office row's "Learn about this office" link navigates to `OfficeInfo`, and
- *    `IndividualQuestion`'s "Learn about this candidate" link navigates to `CandidateInfo`
- *    (info-modal reachability).
+ * 4. VOTE-03: the office row's "Learn about this office" link and `IndividualQuestion`'s "Learn
+ *    about this candidate" link open their in-place InfoDialogs.
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
@@ -88,9 +87,6 @@ function renderFlow(initialRouteName: 'Home' | 'Ballot' | 'IndividualQuestion') 
 							<Stack.Screen name="Ballot" component={BallotScreen} />
 							<Stack.Screen name="IndividualQuestion" component={IndividualQuestionScreen} />
 							<Stack.Screen name="ReviewSubmit" component={ReviewSubmitScreen} />
-							<Stack.Screen name="ElectionInfo" component={DummyScreen} />
-							<Stack.Screen name="OfficeInfo" component={DummyScreen} />
-							<Stack.Screen name="CandidateInfo" component={DummyScreen} />
 						</Stack.Navigator>
 					</BallotSelectionProvider>
 				</VoterAppProvider>

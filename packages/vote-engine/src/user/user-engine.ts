@@ -1,5 +1,5 @@
 import { MisuseError, QuereusError } from '@quereus/quereus'
-import { FeatureNotAvailableError, UserHistoryEvent, UserKeyType } from '@votetorrent/vote-core'
+import { FeatureNotAvailableError, toImageRef, UserHistoryEvent, UserKeyType } from '@votetorrent/vote-core'
 import { bytesToBase64url, digestToBytes, fromCanonicalDatetime, nowCanonicalDatetime, parseJsonOr, toCanonicalDatetime } from '../utils.js'
 import { verifySig, verifySigP256 } from '../database/initialize.js'
 import { allocateTid } from '../database/tid-allocator.js'
@@ -357,11 +357,11 @@ export class UserEngine implements IUserEngine {
       return {
         id: row.Id as string,
         name: row.Name as string,
-        imageRef: parseJsonOr<ImageRef | undefined>(
+        imageRef: toImageRef(parseJsonOr<unknown>(
           row.ImageRef,
           undefined,
           'User.ImageRef'
-        ),
+        )),
         activeKeys
       }
     } catch (err) {

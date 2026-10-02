@@ -19,8 +19,7 @@ import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import type { RegistrantTier, FieldRequirement, Signature } from '@votetorrent/vote-core'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { FieldPolicyViolationError } from '../src/registration/field-policy.js'
-import { createTestNetwork, addTestAuthority, addTestElection, provisionTestIntakeRecipient } from './fixtures/test-context.js'
-import { randomTestKeyPair } from './fixtures/keys.js'
+import { createTestNetwork, addTestAuthority, addTestElection, provisionTestIntakeRecipient, testKeyPairFor } from './fixtures/test-context.js'
 import type { EngineContext } from '../src/types.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
 
@@ -30,7 +29,7 @@ import type { TestAuthorityContext } from './fixtures/test-context.js'
 
 /** Build a real secp256k1 sign callback (@noble/curves v2 defaults — prehash:true). */
 function makeRegistrantSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   return async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes)

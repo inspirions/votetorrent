@@ -51,7 +51,8 @@ import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import {
   createTestNetwork,
   addTestAuthority,
-  makeTestSignCallback
+  makeTestSignCallback,
+  testKeyPairFor
 } from './fixtures/test-context.js'
 import type { EngineContext } from '../src/types.js'
 
@@ -240,9 +241,9 @@ function buildD41CandidateSchema (base: string): string {
   return base.replace(ASSOCIATION_DEVICE_HASH_ANCHOR, `${ASSOCIATION_DEVICE_HASH_ANCHOR}\n\t\t${SINGLE_ACTIVE_ASSOCIATION_CONSTRAINT},`)
 }
 
-/** Real secp256k1 sign callback bound to a fresh keypair — mirrors association.spec.ts's makeRealSigner. */
+/** Real secp256k1 sign callback bound to the user's registered keypair — mirrors association.spec.ts's makeRealSigner. */
 function makeProbe2Signer (userId: string): { sign: (digest: Uint8Array) => Promise<Signature>; publicHex: string } {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   const sign = async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes)

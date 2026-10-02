@@ -3,6 +3,7 @@ import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
 import { digestToBytes, nowCanonicalDatetime } from '../utils.js'
 import { SigningEngine } from './signing-engine.js'
+import { adminSigningKeyValidity } from './signer-validity.js'
 
 /**
  * Generic scope/digest/tid/sign-callback-parameterized AdminSigning ceremony
@@ -90,6 +91,12 @@ export async function seedSignedMutation (
   // 5. Insert AdminSigning — embeds the SAME digestExpr so the stored Digest matches the SELECT.
   //    `scope` binds as a value (it is not part of the Digest, unlike `tid`, which stays inside
   //    digestExpr/digestParams as a bound integer per the caller's own field list).
+  const isSignerKeyValid = await adminSigningKeyValidity(ctx.db, {
+    userId: signature.signerUserId,
+    signerKey: signature.signerKey,
+    now,
+    isPlaceholderSignature: false
+  })
   await ctx.db.exec(
     `insert into AdminSigning (
       Nonce,
@@ -101,7 +108,7 @@ export async function seedSignedMutation (
       SignerKey,
       Signature
     )
-    with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
+    with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsPlaceholderSignature = false
     values (
       :nonce,
       :authorityId,
@@ -122,6 +129,7 @@ export async function seedSignedMutation (
       signerKey: signature.signerKey,
       signature: signature.signature,
       now,
+      isSignerKeyValid,
     }
   )
 

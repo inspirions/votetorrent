@@ -2,6 +2,7 @@ import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { SqlValue, Database } from '@quereus/quereus'
 import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
+import { adminSigningKeyValidity } from '../signing/signer-validity.js'
 import { readSessionThreshold } from '../signing/threshold.js'
 import { fanOutSignatureTasks } from '../signing/fan-out.js'
 import { findPendingAdminTaskRow, findPendingTaskNonce, findRegistrantSessionNonce } from './task-signing-status.js'
@@ -1226,11 +1227,17 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           sign
         )
         const qNonce = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
+        const qIsSignerKeyValid = await adminSigningKeyValidity(this.ctx!.db, {
+          userId: qUserId ?? '',
+          signerKey: qSignerKey,
+          now,
+          isPlaceholderSignature: qIsPlaceholder,
+        })
         await this.ctx!.db.exec(
           `insert into AdminSigning (
             Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature
           )
-          with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = :isPlaceholderSignature
+          with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsPlaceholderSignature = :isPlaceholderSignature
           values (
             :nonce, :authorityId, :adminEffectiveAt, 'ceb',
             Digest(1, :ballotId, :code, :title, :instructions, :dependsOn, :type, :optionRange, :scoreRange, :grouping, :sequence, :required),
@@ -1246,6 +1253,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
             signature: qSignature,
             isPlaceholderSignature: qIsPlaceholder,
             now,
+            isSignerKeyValid: qIsSignerKeyValid,
           }
         )
 
@@ -1352,12 +1360,18 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           sign
         )
         const oNonce = (globalThis as { crypto: { randomUUID: () => string } }).crypto.randomUUID()
+        const oIsSignerKeyValid = await adminSigningKeyValidity(this.ctx!.db, {
+          userId: oUserId ?? '',
+          signerKey: oSignerKey,
+          now,
+          isPlaceholderSignature: oIsPlaceholder,
+        })
         try {
           await this.ctx!.db.exec(
             `insert into AdminSigning (
               Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature
             )
-            with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = :isPlaceholderSignature
+            with context now = :now, IsSignerKeyValid = :isSignerKeyValid, IsPlaceholderSignature = :isPlaceholderSignature
             values (
               :nonce, :authorityId, :adminEffectiveAt, 'ceb',
               Digest(1, :ballotId, :questionCode, :code, :sequence, :title, :details, :infoURL, :image, :video),
@@ -1373,6 +1387,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
               signature: oSignature,
               isPlaceholderSignature: oIsPlaceholder,
               now,
+              isSignerKeyValid: oIsSignerKeyValid,
             }
           )
         } catch (err) {
