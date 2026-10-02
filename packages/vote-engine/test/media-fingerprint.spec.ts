@@ -72,6 +72,13 @@ describe('media fingerprint', () => {
     expect(result).to.deep.equal({ url: 'https://example.org/logo.png', cid: mediaCid(data) })
   })
 
+  it('fetches a capitalized scheme in canonical lowercase but reports the url as entered', async () => {
+    const { fetch, calls } = fetchServing(bytes('x'))
+    const result = await fingerprintMedia('Http://10.0.2.2:8765/Seal.png', { fetch })
+    expect(calls).to.deep.equal(['http://10.0.2.2:8765/Seal.png'])
+    expect(result.url).to.equal('Http://10.0.2.2:8765/Seal.png')
+  })
+
   it('refuses non-http(s) urls without fetching', async () => {
     const { fetch, calls } = fetchServing(bytes('x'))
     for (const url of ['file:///etc/passwd', 'data:image/png;base64,AAAA', 'logo.png', '']) {
@@ -79,6 +86,31 @@ describe('media fingerprint', () => {
       expect((await failure(fingerprintMedia(url, { fetch }))).reason).to.equal('invalid-url')
     }
     expect(calls).to.have.length(0)
+  })
+
+  it('accepts http(s) urls with ports, paths and queries', () => {
+    for (const url of ['http://10.0.2.2:8765/logo.png', 'https://cdn.example.org/a/b.png?v=2', 'HTTPS://x.test']) {
+      expect(isFingerprintableUrl(url), url).to.equal(true)
+    }
+    for (const url of ['https://', 'http:///a.png', 'https://user@host/a', 'ftp://x.test/a', 'https://x .test/a']) {
+      expect(isFingerprintableUrl(url), url).to.equal(false)
+    }
+  })
+
+  it('does not depend on the URL class (React Native\'s throws from .protocol)', async () => {
+    const realUrl = globalThis.URL
+    class ThrowingUrl {
+      get protocol (): string { throw new Error('URL.protocol is not implemented') }
+      get hostname (): string { throw new Error('URL.hostname is not implemented') }
+    }
+    ;(globalThis as { URL: unknown }).URL = ThrowingUrl
+    try {
+      expect(isFingerprintableUrl('http://10.0.2.2:8765/logo.png')).to.equal(true)
+      const { fetch } = fetchServing(bytes('x'))
+      expect((await fingerprintMedia('http://10.0.2.2:8765/logo.png', { fetch })).cid).to.equal(mediaCid(bytes('x')))
+    } finally {
+      ;(globalThis as { URL: unknown }).URL = realUrl
+    }
   })
 
   it('reports http, network, empty and too-large failures by reason', async () => {

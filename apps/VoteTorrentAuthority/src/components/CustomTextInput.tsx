@@ -86,6 +86,11 @@ export function CustomTextInput(props: CustomTextInputProps) {
 					</View>
 				)}
 				<TextInput
+					// URL fields: no auto-capitalization/correction — a keyboard-capitalized "Http://"
+					// is refused by Android's networking. Callers can still override via otherProps.
+					{...(props.isImageUrlField
+						? {autoCapitalize: 'none' as const, autoCorrect: false, keyboardType: 'url' as const}
+						: {})}
 					// The placeholder is drawn by a separate overlay (for italics), so the native
 					// input has no hint of its own — expose the field name and placeholder to
 					// screen readers explicitly. Callers can still override via otherProps.

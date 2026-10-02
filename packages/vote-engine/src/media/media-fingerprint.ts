@@ -38,14 +38,13 @@ export interface MediaFingerprintOptions {
   maxBytes?: number
 }
 
-/** Only absolute http(s) URLs are fetched — never file:, data:, content: or relative paths. */
+/**
+ * Only absolute http(s) URLs are fetched — never file:, data:, content: or relative paths.
+ * Deliberately NOT `new URL(...)`: React Native's built-in URL class throws "not implemented"
+ * from `.protocol`/`.hostname`, which made every URL read as invalid on device.
+ */
 export function isFingerprintableUrl (url: string): boolean {
-  try {
-    const parsed = new URL(url.trim())
-    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && parsed.hostname !== ''
-  } catch {
-    return false
-  }
+  return /^https?:\/\/[^\s/?#:@]+(:\d+)?([/?#]\S*)?$/i.test(url.trim())
 }
 
 function defaultFetch (): MediaFetch {
@@ -66,7 +65,9 @@ async function downloadBytes (url: string, options: MediaFingerprintOptions): Pr
 
   let response: MediaResponse
   try {
-    response = await fetchMedia(url.trim())
+    // The scheme is case-insensitive (RFC 3986) but Android's networking refuses "Http://"
+    // outright, and phone keyboards auto-capitalize the first letter — fetch the canonical form.
+    response = await fetchMedia(url.trim().replace(/^https?:/i, (scheme) => scheme.toLowerCase()))
   } catch (err) {
     throw new MediaFingerprintError('network', `could not download ${url}: ${err instanceof Error ? err.message : String(err)}`)
   }
