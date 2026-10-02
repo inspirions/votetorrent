@@ -217,6 +217,8 @@ async function buildReview (
   }
 
   const policy = await readIntakePolicyFrom(intakeQueryPortFromDb(host.ctx.db), authorityId)
+  // Invariant (V-3): a code reaches the automatic route only through a binding verified against
+  // the approved RequesterKey (evidence.openRegistrationCode); only a verified code sets matchMethod "code".
   const route: ReassociationRouteKind = reassociationRouteFor(policy, matchMethod)
 
   let existingDevices: Association[] = []
