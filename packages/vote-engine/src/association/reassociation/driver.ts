@@ -585,22 +585,26 @@ export async function getDeviceRetirement (
  * The `RequesterKey` of the approved registration for `registrantId` — the only key whose
  * derived code would match — or `undefined` when none is resolvable.
  *
- * D-49 (62-31) residual: `IReassociationEngine.getRegistrationCodeHolderKey` declares NO opener
- * parameter (unlike every other evidence-reading method on that interface), so a D-49-sealed
- * RegistrationRequest.Payload cannot be opened here — `listApprovedRegistrations` is called with
- * no opener, and every sealed approved row counts toward its `unreadCount` rather than resolving a
- * registrantId. This method therefore only resolves a holder key for a LEGACY unsealed row. This
- * method has no production caller and no test coverage today (confirmed by `grep` across `src/` and
- * `test/`); widening `IReassociationEngine`'s own signature to add an opener parameter is an
- * architectural change outside this plan's scope — recorded for 62-30.
+ * Used by the Voter's code-availability read (`continuity.ts`, through `IReassociationEngine`,
+ * which declares NO opener parameter here). It reads only cleartext columns, so it works for
+ * D-49-sealed rows: the Voter's own registration shape has a request id equal to the registrant
+ * id, and `RegistrationRequest.RequesterKey` is cleartext (V-5). A request whose id differs from
+ * the registrant id AND whose payload is sealed cannot be resolved without an opener and returns
+ * `undefined`; a legacy unsealed row is still resolved through the fallback scan below.
  */
 export async function getRegistrationCodeHolderKey (host: ReassociationHost, registrantId: string): Promise<string | undefined> {
   const registrantRow = await host.ctx.db
-    .prepare('select AuthorityId from Registrant where Id = :registrantId')
+    .prepare("select AuthorityId from Registrant where Id = :registrantId and Status = 'a'")
     .get({ registrantId })
   if (!registrantRow) return undefined
   const authorityId = asText(registrantRow.AuthorityId, 'Registrant.AuthorityId')
 
+  const direct = await host.ctx.db
+    .prepare("select RequesterKey from RegistrationRequest where Id = :registrantId and AuthorityId = :authorityId and Status = 'a'")
+    .get({ registrantId, authorityId })
+  if (direct) return asText(direct.RequesterKey, 'RegistrationRequest.RequesterKey')
+
+  // Legacy fallback: an unsealed approved row whose request id differs from the registrant id.
   const approved = await listApprovedRegistrations(host.ctx.db, authorityId)
   const reg = approved.registrations.find((a) => a.registrantId === registrantId)
   if (reg === undefined) return undefined
