@@ -72,12 +72,18 @@ body{background:#050609;color:var(--text);font-size:14px;line-height:1.5;
 
    TRANSCRIBED FROM (source of truth — if these drift, this file is wrong):
      packages/ui-web/src/tokens.css            — every :root custom property
-     packages/ui-web/src/components.css        — .pv-disclosure .lifecycle-pill .dt-*
+     packages/ui-web/src/components.css        — .pv-disclosure .lifecycle-pill .dt-* .vt-chart*
+     packages/ui-web/src/charts/*.tsx          — BarSeries, StackedBarSeries, TimeSeries, Meter
+                                                 (Recharts geometry re-drawn as inline SVG, below)
+     packages/ui-web/src/lifecycle/timeline-core.js + election-phase.js
+                                               — the ten-event order and derivePhase
      apps/VoteTorrentDashboard/src/app.css     — .layout .panel-grid
      .../src/screens/shell.css                 — .sh-*
      .../src/screens/preview-as.css            — .pv-*
      .../src/screens/bootstrap.css             — .bs-*
-     .../src/screens/panels/panels.css         — .panel .pill
+     .../src/screens/panels/panels.css         — .panel .pill .panel-view-switch*
+     .../src/screens/panels/PanelFrame.tsx + panel-view-storage.js
+                                               — the per-panel Chart/Grid switch and its storage
      .../src/screens/panels/election-ops.css   — .eo-*
      .../src/screens/panels/authority-admin.css— .aa-*
    Copy strings are verbatim from packages/ui-web/src/copy.js.
@@ -99,6 +105,7 @@ body{background:#050609;color:var(--text);font-size:14px;line-height:1.5;
   --bg:#0d0f14; --surface:#151922; --surface2:#1b202b; --border:#2a3040;
   --text:#e9ecf2; --muted:#8d97a8; --primary:#3b82f6;
   --ok:#22c55e; --warn:#f59e0b; --fail:#ef4444; --done:#64748b;
+  --chart-series-1:#3987e5; --chart-series-2:#d95926;
   --radius:10px;
   --space-xs:4px; --space-sm:8px; --space-md:16px; --space-lg:24px;
   --space-xl:32px; --space-2xl:48px; --space-3xl:64px;
@@ -262,6 +269,53 @@ button,a[role="button"]{min-height:32px}
 .lifecycle-pill--indeterminate{color:var(--text);opacity:.85}
 .dt-toggle-group{display:flex;flex-direction:column;gap:var(--space-xs)}
 
+/* ---- components.css — chart primitives (BarSeries, StackedBarSeries,
+   TimeSeries, Meter). Colour only through tokens; SVG marks take fill/stroke,
+   the legend swatches and the meter take background. ---- */
+.vt-chart{display:block}
+.vt-chart .recharts-surface{overflow:visible}
+.vt-chart__empty-frame{display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+.vt-chart__empty{margin:0;color:var(--muted);font-size:var(--font-label-size);
+  font-weight:var(--font-label-weight);line-height:var(--font-label-line-height)}
+.vt-chart__axis{fill:var(--muted);font-size:var(--font-label-size);font-weight:var(--font-label-weight)}
+.vt-chart__grid{stroke:var(--border)}
+.vt-chart__label{fill:var(--text);font-size:var(--font-label-size);font-weight:var(--font-label-weight)}
+.vt-chart__bar{stroke:none}
+.vt-chart__bar--series-1{fill:var(--chart-series-1)}
+.vt-chart__bar--series-2{fill:var(--chart-series-2)}
+.vt-chart__bar--ok{fill:var(--ok)}
+.vt-chart__bar--warn{fill:var(--warn)}
+.vt-chart__bar--fail{fill:var(--fail)}
+.vt-chart__segment--series-1{fill:var(--chart-series-1);stroke:var(--surface);stroke-width:2px}
+.vt-chart__segment--series-2{fill:var(--chart-series-2);stroke:var(--surface);stroke-width:2px}
+.vt-chart__line{stroke:var(--chart-series-1);fill:none}
+.vt-chart__dot{fill:var(--chart-series-1);stroke:var(--surface)}
+.vt-chart__crosshair{stroke:var(--border)}
+.vt-chart__tooltip{display:flex;flex-direction:column;gap:var(--space-xs);padding:var(--space-sm);
+  border-radius:var(--radius);background:var(--surface2);border:1px solid var(--border)}
+.vt-chart__tooltip-label{color:var(--muted);font-size:var(--font-label-size);
+  font-weight:var(--font-label-weight);line-height:var(--font-label-line-height)}
+.vt-chart__tooltip-value{color:var(--text);font-size:var(--font-label-size);
+  font-weight:var(--font-label-weight);line-height:var(--font-label-line-height)}
+.vt-chart__legend{display:flex;flex-wrap:wrap;gap:var(--space-sm);margin:0;padding:0;list-style:none}
+.vt-chart__legend-item{display:inline-flex;align-items:center;gap:var(--space-xs)}
+.vt-chart__legend-swatch{display:inline-block;width:var(--space-sm);height:var(--space-sm);
+  border-radius:var(--radius);background:var(--muted)}
+.vt-chart__legend-swatch--series-1{background:var(--chart-series-1)}
+.vt-chart__legend-swatch--series-2{background:var(--chart-series-2)}
+.vt-chart__legend-label{color:var(--muted);font-size:var(--font-label-size);
+  font-weight:var(--font-label-weight);line-height:var(--font-label-line-height)}
+.vt-chart__meter{display:flex;align-items:stretch;gap:var(--space-sm)}
+.vt-chart__meter--panel{height:32px}
+.vt-chart__meter--compact{height:20px}
+.vt-chart__meter-track{flex:1;border-radius:var(--radius);background:var(--border)}
+.vt-chart__meter-fill{height:100%;border-radius:var(--radius);background:var(--chart-series-1)}
+.vt-chart__meter-value{align-self:center;white-space:nowrap;color:var(--text);
+  font-size:var(--font-display-size);font-weight:var(--font-display-weight);
+  line-height:var(--font-display-line-height)}
+.vt-chart--bar,.vt-chart--stacked-bar,.vt-chart--time-series,.vt-chart--meter{width:100%}
+
 /* ---- panels.css ---- */
 .panel{display:flex;flex-direction:column;gap:var(--space-sm);background:var(--surface);
   border:1px solid var(--border);border-radius:var(--radius);padding:var(--space-md)}
@@ -277,6 +331,15 @@ button,a[role="button"]{min-height:32px}
 .panel-body{color:var(--text);font-size:var(--font-body-size);font-weight:var(--font-body-weight);
   line-height:var(--font-body-line-height)}
 .panel-empty{margin:0;color:var(--muted)}
+/* per-panel chart/grid view switch — a view-state toggle, not a primary CTA */
+.panel-view-switch{display:flex;gap:var(--space-xs);margin-left:auto}
+.panel-view-switch__option{display:inline-flex;align-items:center;padding:0 var(--space-sm);
+  border-radius:var(--radius);border:1px solid var(--border);background:transparent;color:var(--muted);
+  font-size:var(--font-label-size);font-weight:var(--font-label-weight);
+  line-height:var(--font-label-line-height);cursor:pointer}
+.panel-view-switch__option--active{background:var(--surface2);color:var(--text);
+  box-shadow:inset 0 0 0 1px var(--primary)}
+.panel-view-switch__option:focus-visible{outline:2px solid var(--primary)}
 
 /* ---- election-ops.css ---- */
 .eo-section{display:flex;flex-direction:column;gap:var(--space-sm);padding-top:var(--space-sm);
@@ -301,6 +364,8 @@ button,a[role="button"]{min-height:32px}
   background:var(--surface2);padding:0 var(--space-xs)}
 .eo-datum{color:var(--muted);font-size:var(--font-label-size);font-weight:var(--font-label-weight);
   line-height:var(--font-label-line-height)}
+.eo-heading{margin:0;color:var(--text);font-size:var(--font-heading-size);
+  font-weight:var(--font-heading-weight);line-height:var(--font-heading-line-height)}
 
 /* ---- authority-admin.css ---- */
 .aa-kv{display:grid;grid-template-columns:auto 1fr;column-gap:var(--space-md);
@@ -321,6 +386,17 @@ button,a[role="button"]{min-height:32px}
 .aa-section{display:flex;flex-direction:column;gap:var(--space-sm);padding-top:var(--space-sm);
   border-top:1px solid var(--border)}
 .aa-section:first-child{padding-top:0;border-top:none}
+.aa-meter{display:flex;flex-direction:column;gap:var(--space-xs);padding:var(--space-xs) 0}
+
+/* ---- Recharts' own inline wrapper styles, restated as classes. The real
+   charts are Recharts components; Recharts writes these as inline styles on
+   its responsive container, wrapper, legend and tooltip DOM. The prototype
+   draws the same SVG by hand (no chart library), so it carries them here. ---- */
+.recharts-responsive-container{width:100%;min-width:0}
+.recharts-wrapper{position:relative;cursor:default}
+.recharts-surface{display:block}
+.recharts-legend-wrapper{position:absolute;left:8px;bottom:8px}
+.recharts-tooltip-wrapper{position:absolute;top:0;left:0;pointer-events:none;z-index:1}
 /* ============================================================================
    PROTOTYPE-ONLY OVERRIDES — NOT IN THE REAL CSS.
 
@@ -373,6 +449,22 @@ button,input{font-family:inherit}
     <p class="note">
       The 900 width crosses <code>shell.css</code>'s <code>max-width:900px</code> breakpoint, where
       <code>.sh-body</code> collapses from a 220px sidebar + panels to one column.
+    </p>
+    <p class="note">
+      <b>Chart / Grid.</b> Every visible panel carries the switch in its header, but only Registrations
+      and Keyholders change body with it; the intake time series shows in both views. A choice persists
+      per panel under <code>vt-dashboard-panel-view:&lt;id&gt;</code>; a panel never chosen opens on Chart.
+      Rail entries below override the stored choice without writing it.
+    </p>
+    <p class="note">
+      <b>No light theme.</b> <code>tokens.css</code> declares one dark token set and no
+      <code>prefers-color-scheme</code> rule, so the dashboard has no light mode to toggle. The prototype
+      renders identically whatever the OS asks for.
+    </p>
+    <p class="note">
+      <b>Keyholder releases.</b> The officer roster read in <code>web-data</code> now carries each
+      keyholder's published <code>ReleasedAt</code>, but this dashboard's Keyholders panel reads its own
+      roster query, which does not select it. No release count appears here because none appears in the app.
     </p>
   </nav>
   <div id="stagewrap">
@@ -435,6 +527,8 @@ const COPY = {
   'panelFrame.tierPill':'tier {{tier}}',
   'panelFrame.sitePill':'{{count}} site',
   'panelFrame.sitesPill':'{{count}} sites',
+  'panelFrame.viewChart':'Chart',
+  'panelFrame.viewGrid':'Grid',
   'nav.groupElectionOperations':'Election Operations',
   'nav.groupAuthorityAdministration':'Authority Administration',
   'lifecycle.pre':'Being organized',
@@ -444,6 +538,18 @@ const COPY = {
   'lifecycle.indeterminate':'Phase unknown',
   'panels.registrations.title':'Registrations',
   'panels.registrations.empty':'No registrants yet.',
+  'panels.registrations.loading':'Loading registrations…',
+  'panels.registrations.unavailable':'No election data is loaded in this browser yet.',
+  'panels.registrations.readFailed':"Couldn't load registrations. Try refreshing the snapshot.",
+  'panels.registrations.statusHeading':'Registrants by status',
+  'panels.registrations.requestsHeading':'Registration requests',
+  'panels.registrations.rosterHeading':'Roster',
+  'panels.registrations.surfaceCountsHeading':'Tables read',
+  'panels.registrations.intakeChart.empty':'No requests received in this window.',
+  'panels.registrations.requestChart.empty':'No requests recorded yet.',
+  'panels.registrations.statusChart.tooltip':'{{status}}: {{count}} registrant(s)',
+  'panels.registrations.requestChart.tooltip':'{{status}} · {{issuer}}: {{count}} request(s)',
+  'panels.registrations.intakeChart.tooltip':'{{bucket}}: {{count}} received',
   'panels.elections.title':'Elections',
   'panels.elections.empty':'No elections yet.',
   'panels.ballotsQuestions.title':'Ballots & Questions',
@@ -458,6 +564,11 @@ const COPY = {
   'panels.administrationOfficers.empty':'No officers yet.',
   'panels.keyholders.title':'Keyholders',
   'panels.keyholders.empty':'No keyholders yet.',
+  'panels.keyholders.loading':'Loading keyholders…',
+  'panels.keyholders.unavailable':'No election data is loaded in this browser yet.',
+  'panels.keyholders.readFailed':"Couldn't load keyholders. Try refreshing the snapshot.",
+  'panels.keyholders.meter.empty':'No keyholder threshold set for this election yet.',
+  'panels.keyholders.meter.value':'{{count}} of {{total}}',
   'panels.inviteAuthorities.title':'Invite Authorities',
   'panels.inviteAuthorities.empty':'No invitations yet.',
 };
@@ -477,7 +588,7 @@ const EM_DASH='—';
  *    sites, icon, group, order). Nine entries, frozen, in order.
  * ====================================================================== */
 const CAPABILITIES=[
-  {id:'registrations',scope:'vrg',schemaName:'Validate registrations',tier:1,sites:18,icon:'👥',group:'electionOperations',titleKey:'panels.registrations.title',emptyKey:'panels.registrations.empty'},
+  {id:'registrations',scope:'vrg',schemaName:'Validate registrations',tier:1,sites:19,icon:'👥',group:'electionOperations',titleKey:'panels.registrations.title',emptyKey:'panels.registrations.empty'},
   {id:'elections',scope:'mel',schemaName:'Manage Elections',tier:1,sites:12,icon:'🗳',group:'electionOperations',titleKey:'panels.elections.title',emptyKey:'panels.elections.empty'},
   {id:'ballotsQuestions',scope:'ceb',schemaName:'Create/Edit ballot templates',tier:1,sites:7,icon:'📋',group:'electionOperations',titleKey:'panels.ballotsQuestions.title',emptyKey:'panels.ballotsQuestions.empty'},
   {id:'networkSettings',scope:'rn',schemaName:'Revise Network',tier:1,sites:3,icon:'🌐',group:'authorityAdministration',titleKey:'panels.networkSettings.title',emptyKey:'panels.networkSettings.empty'},
@@ -536,44 +647,96 @@ const ELECTION={
   Tags:['general','statewide','federal'],
   Instructions:'Vote in every contest you are eligible for. Rank-choice contests require you to rank at least one candidate; leaving a rank blank ends your ranking for that contest. Your completed ballot is sealed on your device before it leaves it.',
 };
-/* ELECTION_EVENT_ORDER, verbatim from packages/ui-web/src/lifecycle/election-phase.js */
-const ELECTION_EVENT_ORDER=['registrationEnds','ballotsFinal','votingStarts','tallyingStarts','validation','certificationStarts','closed'];
+const TOTAL_ELECTIONS=2;
+/* ELECTION_EVENT_ORDER, verbatim from packages/ui-web/src/lifecycle/timeline-core.js —
+   the ten ElectionEvent values; the three vote-processing events sit between
+   votingStarts and tallyingStarts. */
+const ELECTION_EVENT_ORDER=['registrationEnds','ballotsFinal','votingStarts','accruingVotes','hashingVotes','releasingKeys','tallyingStarts','validation','certificationStarts','closed'];
 const TIMELINE={
-  registrationEnds:'2026-09-15T23:59:59',
+  registrationEnds:'2026-09-10T23:59:59',
   ballotsFinal:'2026-09-25T17:00:00',
   votingStarts:'2026-11-03T07:00:00',
-  tallyingStarts:'2026-11-03T20:00:00',
-  validation:'2026-11-05T09:00:00',
+  accruingVotes:'2026-11-03T20:00:00',
+  hashingVotes:'2026-11-04T02:00:00',
+  releasingKeys:'2026-11-04T09:00:00',
+  tallyingStarts:'2026-11-04T12:00:00',
+  validation:'2026-11-06T09:00:00',
   certificationStarts:'2026-11-12T09:00:00',
   closed:'2026-11-20T17:00:00',
 };
 const SNAPSHOT_INSTANT='2026-09-14T16:52:11';
-
-const REGISTRATIONS={
-  statusBreakdown:[{Code:'a',Name:'Active',Count:18412},{Code:'s',Name:'Suspended',Count:63},{Code:'r',Name:'Revoked',Count:27}],
-  requestBreakdown:[
-    {Status:'p',IssuerType:'r',StatusName:'Pending',IssuerName:'Registrant',Count:214},
-    {Status:'a',IssuerType:'au',StatusName:'Approved',IssuerName:'Authority',Count:18326},
-    {Status:'r',IssuerType:'au',StatusName:'Rejected',IssuerName:'Authority',Count:88},
-    {Status:'p',IssuerType:'of',StatusName:'Pending',IssuerName:'Officer',Count:41},
-  ],
-  roster:{total:18502,rows:[
-    {Id:'nW6LTyYEQDiSC7Y75-DZenmnX5Z47GQsRkcHjVCYlOE',LastName:'Abernathy-Whitfield',FirstName:'Rosalind',District:'District 7 / Precinct 7A',Status:'a',Expiration:'2028-01-31T23:59:59'},
-    {Id:'E71ImFxReiqTAfVm5Erf2JJw0KFXntPkFuvoG8nGN1I',LastName:'Okonkwo',FirstName:'Adaeze',District:'District 3 / Precinct 3C',Status:'a',Expiration:'2027-06-30T23:59:59'},
-    {Id:'H9UHDOENYdfT81PXgb1cBov3S9f5-8GCbGLFiJ8T_fs',LastName:'Delacroix',FirstName:'Marguerite',District:'Countywide (unassigned)',Status:'s',Expiration:'2026-12-31T23:59:59'},
-    {Id:'el3QpNoeu9Ii7DcXIj8mMUnK2IaoEdmvRM-4he_rImQ',LastName:'Nakamura',FirstName:'Hiroshi',District:'District 1 / Precinct 1B',Status:'a',Expiration:'2029-03-15T23:59:59'},
-    {Id:'xOgWfgyXN0tTjCBTEJGvg2T_9sb28j1j45QEuIxTRNw',LastName:'Vasquez-Montenegro',FirstName:'Esperanza',District:'District 7 / Precinct 7B',Status:'r',Expiration:'2026-02-28T23:59:59'},
-    {Id:'eKC9ExQFZWB95fjhEuSXMd1jpHQUPafYV_xc-bFQdKw',LastName:'Hartsfield',FirstName:'Thomas',District:'District 3 / Precinct 3A',Status:'a',Expiration:'2027-11-30T23:59:59'},
-  ]},
-  surfaceCounts:[
-    {table:'Registrant',count:18502},{table:'RegistrantPrivate',count:18502},
-    {table:'RegistrantPublic',count:18441},{table:'RegistrantSelective',count:9270},
-    {table:'ElectionRegistrant',count:18412},{table:'RegistrationRequest',count:18669},
-    {table:'Association',count:17980},{table:'AssociationRequest',count:212},
-    {table:'AttestationChallenge',count:37},{table:'PollingDevice',count:94},
-    {table:'RegistrationBridgeKey',count:2},
-  ],
+/* the comparison instant + timeline each Elections lifecycle rail entry feeds derivePhase */
+const PHASE_CASES={
+  pre:{at:SNAPSHOT_INSTANT,timeline:TIMELINE},
+  voting:{at:'2026-11-03T15:00:00',timeline:TIMELINE},
+  settling:{at:'2026-11-05T10:00:00',timeline:TIMELINE},
+  closed:{at:'2026-11-21T09:00:00',timeline:TIMELINE},
+  /* votingStarts absent from the unconstrained JSON blob, and nothing later has passed */
+  indeterminate:{at:SNAPSHOT_INSTANT,timeline:Object.fromEntries(Object.entries(TIMELINE).filter(([k])=>k!=='votingStarts'))},
 };
+
+/* RegistrantStatus / RegistrationRequestStatus / RegistrationRequestIssuer codes
+   are the schema's own (votetorrent.qsql views): a/s/r, p/a/r, registrant/bridge. */
+const ROSTER_ROWS=[
+  {Id:'nW6LTyYEQDiSC7Y75-DZenmnX5Z47GQsRkcHjVCYlOE',LastName:'Abernathy-Whitfield',FirstName:'Rosalind',District:'District 7 / Precinct 7A',Status:'a',Expiration:'2028-01-31T23:59:59Z'},
+  {Id:'H9UHDOENYdfT81PXgb1cBov3S9f5-8GCbGLFiJ8T_fs',LastName:'Delacroix',FirstName:'Marguerite',District:'Countywide (unassigned)',Status:'s',Expiration:'2026-12-31T23:59:59Z'},
+  {Id:'eKC9ExQFZWB95fjhEuSXMd1jpHQUPafYV_xc-bFQdKw',LastName:'Hartsfield',FirstName:'Thomas',District:'District 3 / Precinct 3A',Status:'a',Expiration:'2027-11-30T23:59:59Z'},
+  {Id:'el3QpNoeu9Ii7DcXIj8mMUnK2IaoEdmvRM-4he_rImQ',LastName:'Nakamura',FirstName:'Hiroshi',District:'District 1 / Precinct 1B',Status:'a',Expiration:'2029-03-15T23:59:59Z'},
+  {Id:'E71ImFxReiqTAfVm5Erf2JJw0KFXntPkFuvoG8nGN1I',LastName:'Okonkwo',FirstName:'Adaeze',District:'District 3 / Precinct 3C',Status:'a',Expiration:'2027-06-30T23:59:59Z'},
+  {Id:'xOgWfgyXN0tTjCBTEJGvg2T_9sb28j1j45QEuIxTRNw',LastName:'Vasquez-Montenegro',FirstName:'Esperanza',District:'District 7 / Precinct 7B',Status:'r',Expiration:'2026-02-28T23:59:59Z'},
+];
+/* readRegistrationSurfaceCounts — one entry per vrg table, in capability.tables order (fourteen). */
+const SURFACE_TABLES=['Association','AssociationPrivate','AssociationRequest','AttestationChallenge','AuthorityIntakePolicy','ElectionRegistrant','PollingDevice','Registrant','RegistrantPrivate','RegistrantPublic','RegistrantSelective','RegistrantSignatureTaskExtension','RegistrationBridgeKey','RegistrationRequest'];
+const surface=o=>SURFACE_TABLES.map(table=>({table,count:o[table]??0}));
+const dayBuckets=(start,counts)=>counts.map((count,i)=>({bucketStart:new Date(Date.parse(start+'T00:00:00Z')+i*86400000).toISOString().slice(0,10),count}));
+const weekBuckets=(start,counts)=>counts.map((count,i)=>({bucketStart:new Date(Date.parse(start+'T00:00:00Z')+i*604800000).toISOString().slice(0,10),count}));
+
+const REG_STATUS_DEFAULT=[{Code:'a',Name:'Active',Count:18412},{Code:'s',Name:'Suspended',Count:63},{Code:'r',Name:'Revoked',Count:27}];
+const REG_REQUESTS_DEFAULT=[
+  {Status:'p',StatusName:'Pending',IssuerType:'registrant',IssuerName:'Registrant',Count:214},
+  {Status:'p',StatusName:'Pending',IssuerType:'bridge',IssuerName:'Bridge',Count:41},
+  {Status:'a',StatusName:'Approved',IssuerType:'registrant',IssuerName:'Registrant',Count:15890},
+  {Status:'a',StatusName:'Approved',IssuerType:'bridge',IssuerName:'Bridge',Count:2436},
+  {Status:'r',StatusName:'Rejected',IssuerType:'registrant',IssuerName:'Registrant',Count:88},
+];
+const REG_SURFACE_DEFAULT=surface({Association:17980,AssociationPrivate:17980,AssociationRequest:212,AttestationChallenge:37,
+  AuthorityIntakePolicy:1,ElectionRegistrant:18412,PollingDevice:94,Registrant:18502,RegistrantPrivate:18502,RegistrantPublic:18441,
+  RegistrantSelective:9270,RegistrantSignatureTaskExtension:3,RegistrationBridgeKey:2,RegistrationRequest:18669});
+/* Day buckets (span <= 56 days), densified: weekends are real zero rows, not gaps. Sums to 18669. */
+const INTAKE_DAILY=dayBuckets('2026-08-19',[612,744,951,0,0,1204,1187,1033,876,1398,0,0,1520,1466,1301,1129,1642,0,0,1873,1733]);
+/* Week buckets (span > 56 days), anchored on the earliest day. Sums to 18669. */
+const INTAKE_WEEKLY=weekBuckets('2026-06-16',[310,0,644,1207,1388,1562,1890,2113,2347,2602,2871,1735]);
+
+const REG_VARIANTS={
+  default:{statusBreakdown:REG_STATUS_DEFAULT,requestBreakdown:REG_REQUESTS_DEFAULT,
+    roster:{rows:ROSTER_ROWS,total:18502},surfaceCounts:REG_SURFACE_DEFAULT,intakeSeries:INTAKE_DAILY},
+  weekly:{statusBreakdown:REG_STATUS_DEFAULT,requestBreakdown:REG_REQUESTS_DEFAULT,
+    roster:{rows:ROSTER_ROWS,total:18502},surfaceCounts:REG_SURFACE_DEFAULT,intakeSeries:INTAKE_WEEKLY},
+  /* a freshly opened election: four registrants, six requests in one morning (hour buckets) */
+  small:{statusBreakdown:[{Code:'a',Name:'Active',Count:3},{Code:'s',Name:'Suspended',Count:1},{Code:'r',Name:'Revoked',Count:0}],
+    requestBreakdown:[
+      {Status:'p',StatusName:'Pending',IssuerType:'registrant',IssuerName:'Registrant',Count:2},
+      {Status:'a',StatusName:'Approved',IssuerType:'registrant',IssuerName:'Registrant',Count:3},
+      {Status:'a',StatusName:'Approved',IssuerType:'bridge',IssuerName:'Bridge',Count:1}],
+    roster:{rows:ROSTER_ROWS.slice(1,5),total:4},
+    surfaceCounts:surface({AuthorityIntakePolicy:1,ElectionRegistrant:3,Registrant:4,RegistrantPrivate:4,RegistrantPublic:4,RegistrantSelective:2,RegistrationBridgeKey:1,RegistrationRequest:6}),
+    intakeSeries:[['09:00',1],['10:00',0],['11:00',2],['12:00',1],['13:00',2]].map(([h,c])=>({bucketStart:'2026-09-14T'+h+':00',count:c}))},
+  /* every request landed inside one hour: a one-row series */
+  single:{statusBreakdown:[{Code:'a',Name:'Active',Count:3},{Code:'s',Name:'Suspended',Count:1},{Code:'r',Name:'Revoked',Count:0}],
+    requestBreakdown:[
+      {Status:'p',StatusName:'Pending',IssuerType:'registrant',IssuerName:'Registrant',Count:2},
+      {Status:'a',StatusName:'Approved',IssuerType:'registrant',IssuerName:'Registrant',Count:3},
+      {Status:'a',StatusName:'Approved',IssuerType:'bridge',IssuerName:'Bridge',Count:1}],
+    roster:{rows:ROSTER_ROWS.slice(1,5),total:4},
+    surfaceCounts:surface({AuthorityIntakePolicy:1,ElectionRegistrant:3,Registrant:4,RegistrantPrivate:4,RegistrantPublic:4,RegistrantSelective:2,RegistrationBridgeKey:1,RegistrationRequest:6}),
+    intakeSeries:[{bucketStart:'2026-09-14T09:00:00',count:6}]},
+  /* only configuration rows (an intake policy + a bridge key): hasAnyRegistrationData is
+     true, so the panel renders — every status bar at zero height, both request charts empty */
+  configOnly:{statusBreakdown:[{Code:'a',Name:'Active',Count:0},{Code:'s',Name:'Suspended',Count:0},{Code:'r',Name:'Revoked',Count:0}],
+    requestBreakdown:[],roster:{rows:[],total:0},
+    surfaceCounts:surface({AuthorityIntakePolicy:1,RegistrationBridgeKey:1}),intakeSeries:[]},
+};
+
 const POLICIES={
   registrationFieldCount:11,disclosurePolicyCount:6,attestationRequired:1,
   registrationFieldBreakdown:[
@@ -605,11 +768,16 @@ const OFFICERS=[
   {UserId:'GD-H-P_O1GdNXQXI1g4NUUDdebrI5Q9FPoJUvRh45cA',Name:'Thomas Hartsfield',Title:'Elections Administrator',Scopes:['mel','ceb','cap']},
   {UserId:'vd4yKGS36yqXSLOicWCicFyXxVL6WPiICWtDVKU9xug',Name:null,Title:'Records Officer (appointment pending)',Scopes:[]},
 ];
-const KEYHOLDERS=[
-  {UserId:'hdVl2t98IuWWkqEh2YnnZqa5WKYUpB-37mkU_UzoLvw',Name:'Priya Raghunathan',ElectionId:ELECTION.Id,ElectionRevision:4,KeyholderThreshold:3},
-  {UserId:'5EEbshiaJJtK6G2QnA8R5seT7TytY1FLLmpfab1JLqQ',Name:'Bartholomew Achterberg',ElectionId:ELECTION.Id,ElectionRevision:4,KeyholderThreshold:3},
-  {UserId:'6246jYn4EgpNF4g8GdblDaY4wRQDgQfNWP4BV1VXHyA',Name:null,ElectionId:ELECTION.Id,ElectionRevision:4,KeyholderThreshold:3},
-];
+/* fetchKeyholders rows: Keyholder left-joined to User and ElectionRevision. No key
+   column exists to show, and no release column is selected by this query. */
+const KH=(UserId,Name,rev,thr)=>({UserId,Name,ElectionId:ELECTION.Id,ElectionRevision:rev,KeyholderThreshold:thr});
+const KH_IDS=['hdVl2t98IuWWkqEh2YnnZqa5WKYUpB-37mkU_UzoLvw','5EEbshiaJJtK6G2QnA8R5seT7TytY1FLLmpfab1JLqQ','6246jYn4EgpNF4g8GdblDaY4wRQDgQfNWP4BV1VXHyA'];
+const KEYHOLDER_VARIANTS={
+  full:[KH(KH_IDS[0],'Priya Raghunathan',4,3),KH(KH_IDS[1],'Bartholomew Achterberg',4,3),KH(KH_IDS[2],null,4,3)],
+  partial:[KH(KH_IDS[0],'Priya Raghunathan',4,3),KH(KH_IDS[1],'Bartholomew Achterberg',4,3)],
+  noThreshold:[KH(KH_IDS[0],'Priya Raghunathan',4,null),KH(KH_IDS[1],'Bartholomew Achterberg',4,null),KH(KH_IDS[2],null,4,null)],
+  multiRevision:[KH(KH_IDS[0],'Priya Raghunathan',3,2),KH(KH_IDS[0],'Priya Raghunathan',4,3),KH(KH_IDS[1],'Bartholomew Achterberg',4,3),KH(KH_IDS[2],null,4,3)],
+};
 const INVITES=[
   {Cid:'POoR9diAwBJ61iaXfEAD8ETvMgrcMBGf1Ij5kjfQUHw',Name:'Pinegrove Township Clerk',Type:'au',TypeName:'Authority',Expiration:'2026-09-30T23:59:59',IsAccepted:1,CancelledAt:null},
   {Cid:'XrnGIgkuo5_UetKWwaq2O2iGyE29W3mt4TAdhgxYC40',Name:'Riverbend Municipal Elections',Type:'au',TypeName:'Authority',Expiration:'2026-09-20T23:59:59',IsAccepted:0,CancelledAt:'2026-09-11T10:04:22'},
@@ -634,33 +802,348 @@ const S={
   errorBanner:null,     /* 'verify' | 'attach' | 'swap' */
   stale:false,
   toast:null,
-  empty:false,
+  load:'ready',         /* 'ready' | 'loading' | 'unavailable' (no db) | 'failed' | 'empty' */
+  regVariant:'default',
+  khVariant:'full',
+  phaseCase:'pre',
+  views:{},             /* capability id -> 'chart' | 'grid' */
+  pinTooltip:false,
   bootstrapPhase:null,
   bootstrapError:null,
   bootstrapOk:false,
   forgetInput:'',
 };
 
-/* =========================================================================
- * 5. LIFECYCLE — the phase/stage rule this prototype paints the timeline
- *    with. The real derivation lives in ui-web/lifecycle/election-phase.js
- *    (derivePhase); this is the same shape, not a second implementation to
- *    trust: past = strictly before the comparison instant, current = the
- *    earliest event not yet reached.
- * ====================================================================== */
-function derivePhaseSimple(at){
-  if(at>=TIMELINE.closed) return 'closed';
-  if(at>=TIMELINE.tallyingStarts) return 'settling';
-  if(at>=TIMELINE.votingStarts) return 'voting';
-  return 'pre';
+/* panel-view-storage.js: the default view is 'chart'; the stored value is validated,
+   never trusted; every storage failure is silent. */
+const PANEL_VIEWS=['chart','grid'];
+const DEFAULT_PANEL_VIEW='chart';
+const PANEL_VIEW_STORAGE_PREFIX='vt-dashboard-panel-view:';
+function readStoredPanelView(id){
+  let raw=null;
+  try{ raw=window.localStorage.getItem(PANEL_VIEW_STORAGE_PREFIX+id); }catch(e){ return DEFAULT_PANEL_VIEW; }
+  if(raw===null) return DEFAULT_PANEL_VIEW;
+  return PANEL_VIEWS.includes(raw)?raw:DEFAULT_PANEL_VIEW;
 }
-function currentStage(at){
-  for(const e of ELECTION_EVENT_ORDER){ if(TIMELINE[e]>at) return e; }
-  return null;
+function writeStoredPanelView(id,view){
+  if(!PANEL_VIEWS.includes(view)) return;
+  try{ window.localStorage.setItem(PANEL_VIEW_STORAGE_PREFIX+id,view); }catch(e){}
+}
+const viewOf=id=>S.views[id]||DEFAULT_PANEL_VIEW;
+
+/* =========================================================================
+ * 5. LIFECYCLE — a port of derivePhase (ui-web/lifecycle/election-phase.js)
+ *    over timeline-core.js: canonical instants parsed as UTC, the three phase
+ *    boundaries walked NEWEST-FIRST, a missing boundary that nothing later
+ *    settles yields 'indeterminate', and the marked row is finestStage — the
+ *    LAST event whose instant has already passed (never the next one ahead).
+ * ====================================================================== */
+const CANONICAL_RE=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+function normalizeInstant(raw){
+  if(raw===undefined||raw===null) return null;
+  if(typeof raw==='number') return Number.isFinite(raw)?raw:null;
+  if(typeof raw!=='string') return null;
+  const s=raw.trim(); if(s==='') return null;
+  const ms=CANONICAL_RE.test(s)?Date.parse(s+'Z'):Date.parse(s);
+  return Number.isFinite(ms)?ms:null;
+}
+function finestStage(at,nowMs){
+  let stage=null;
+  for(const ev of ELECTION_EVENT_ORDER){ const m=at[ev]; if(m!==null&&nowMs>=m) stage=ev; }
+  return stage;
+}
+function derivePhase(timeline,now){
+  const nowMs=normalizeInstant(now);
+  const at={}; for(const ev of ELECTION_EVENT_ORDER) at[ev]=normalizeInstant(timeline[ev]);
+  if(nowMs===null) return {phase:'indeterminate',stage:null};
+  for(const [phase,opener] of [['closed','closed'],['settling','tallyingStarts'],['voting','votingStarts']]){
+    const b=at[opener];
+    if(b===null) return {phase:'indeterminate',stage:null};
+    if(nowMs>=b) return {phase,stage:finestStage(at,nowMs)};
+  }
+  return {phase:'pre',stage:finestStage(at,nowMs)};
 }
 
 /* =========================================================================
- * 6. COMPONENT FRAGMENTS
+ * 6. CHARTS — packages/ui-web/src/charts/*.tsx, re-drawn without a chart
+ *    library. The real primitives are Recharts components; the geometry below
+ *    reproduces what Recharts lays out for them, measured against the real
+ *    build (same margins, axis box sizes, band/bar math, nice-tick algorithm,
+ *    tick-collision culling, legend placement, item ordering and empty
+ *    frames). Every class name and colour path is the primitives' own.
+ * ====================================================================== */
+/* chart-contracts.ts, verbatim */
+const MAX_BAR_THICKNESS_PX=24, DATA_END_RADIUS_PX=4, LINE_STROKE_WIDTH_PX=2, END_DOT_RADIUS_PX=4,
+  SEGMENT_GAP_PX=2, GRID_STROKE_WIDTH_PX=1, BAR_SERIES_HEIGHT_PX=160, STACKED_BAR_HEIGHT_PX=180,
+  TIME_SERIES_HEIGHT_PX=140, METER_HEIGHT_PX=32, METER_COMPACT_HEIGHT_PX=20, NARROW_CONTAINER_PX=400,
+  TICKS_WIDE=6, TICKS_NARROW=4;
+const zeroSafeDataMax=m=>m>0?m:1;
+const tickCountFor=w=>w<NARROW_CONTAINER_PX?TICKS_NARROW:TICKS_WIDE;
+/* Recharts defaults these primitives inherit (measured on the real build) */
+const RC={Y_AXIS_WIDTH:60, X_AXIS_HEIGHT:30, TICK_TEXT_OFFSET:8, MIN_TICK_GAP:5, LABEL_OFFSET:5,
+  DEFAULT_TICK_COUNT:5, BAR_CATEGORY_GAP:0.1, TOOLTIP_OFFSET:10, LINE_DOT_RADIUS:3,
+  TICK_LABEL_BOX_H:18,   /* 12px axis text x the inherited 1.5 line-height: label culling */
+  GRID_TICK_BOX_H:21};   /* unstyled 14px body text x 1.5: the grid's own culling pass */
+
+/* getAdaptiveStep + getTickValuesFixedDomain (recharts/util/scale/getNiceTickValues) */
+function adaptiveStep(rough){
+  if(rough<=0) return 0;
+  const digits=Math.floor(Math.log10(Math.abs(rough)))+1;
+  const dv=Math.pow(10,digits), scale=digits!==1?0.05:0.1;
+  let q=(rough/dv)/scale; q=Math.abs(q-Math.round(q))<1e-9?Math.round(q):Math.ceil(q);
+  return Math.ceil(Math.round(q*scale*dv*1e6)/1e6);     /* allowDecimals={false} */
+}
+function fixedDomainTicks(max,tickCount){
+  if(max===0) return [0];
+  const step=adaptiveStep(max/(Math.max(tickCount,2)-1));
+  const v=[]; for(let x=0;x<max&&v.length<1000;x+=step) v.push(x);
+  v.push(max);
+  const r=v.map(Math.round);
+  if(r.length>1&&r[r.length-1]===r[r.length-2]) r.pop();
+  return r;
+}
+/* getTicks (recharts/cartesian/getTicks): 'preserveEnd' (the axis default) and
+   'preserveStartEnd' (TimeSeries' category axis). Boundaries are the chart box. */
+function isVisible(sign,pos,size,start,end){
+  if(sign*pos<sign*start||sign*pos>sign*end) return false;
+  return sign*(pos-sign*size/2-start)>=0 && sign*(pos+sign*size/2-end)<=0;
+}
+function cullTicks(ticks,sizeOf,start,end,interval){
+  const res=ticks.map(x=>Object.assign({},x)); const len=res.length; if(!len) return [];
+  const sign=len>=2?Math.sign(res[1].coordinate-res[0].coordinate)||1:1;
+  if(sign===-1){ const tmp=start; start=end; end=tmp; }
+  const gapMin=RC.MIN_TICK_GAP;
+  if(interval==='preserveStartEnd'){
+    const tail=res[len-1], ts=sizeOf(tail);
+    const tg=sign*(tail.coordinate+sign*ts/2-end);
+    tail.tickCoord=tg>0?tail.coordinate-tg*sign:tail.coordinate;
+    if(isVisible(sign,tail.tickCoord,ts,start,end)){ end=tail.tickCoord-sign*(ts/2+gapMin); tail.isShow=true; }
+    for(let i=0;i<len-1;i++){
+      const e=res[i], sz=sizeOf(e);
+      if(i===0){ const g=sign*(e.coordinate-sign*sz/2-start); e.tickCoord=g<0?e.coordinate-g*sign:e.coordinate; }
+      else e.tickCoord=e.coordinate;
+      if(isVisible(sign,e.tickCoord,sz,start,end)){ start=e.tickCoord+sign*(sz/2+gapMin); e.isShow=true; }
+    }
+  }else{
+    for(let i=len-1;i>=0;i--){
+      const e=res[i], sz=sizeOf(e);
+      if(i===len-1){ const g=sign*(e.coordinate+sign*sz/2-end); e.tickCoord=g>0?e.coordinate-g*sign:e.coordinate; }
+      else e.tickCoord=e.coordinate;
+      if(isVisible(sign,e.tickCoord,sz,start,end)){ end=e.tickCoord-sign*(sz/2+gapMin); e.isShow=true; }
+    }
+  }
+  return res.filter(e=>e.isShow);
+}
+let measureCtx=null;
+function textWidth(doc,s){
+  if(!measureCtx){ measureCtx=doc.createElement('canvas').getContext('2d'); }
+  const cs=doc.defaultView.getComputedStyle(doc.body);
+  measureCtx.font='400 12px '+cs.fontFamily;
+  return measureCtx.measureText(String(s)).width;
+}
+/* a top-rounded bar path (Recharts Rectangle with radius [r,r,0,0]); r is clamped to the mark */
+function barPath(x,y,w,h){
+  const r=Math.min(DATA_END_RADIUS_PX,h/2,w/2);
+  const f=n=>+n.toFixed(4);
+  return 'M'+f(x)+','+f(y+r)+'A '+f(r)+','+f(r)+',0,0,1,'+f(x+r)+','+f(y)+'L '+f(x+w-r)+','+f(y)
+    +'A '+f(r)+','+f(r)+',0,0,1,'+f(x+w)+','+f(y+r)+'L '+f(x+w)+','+f(y+h)+'L '+f(x)+','+f(y+h)+'Z';
+}
+/* the numeric (count) axis: domain [0, zeroSafeDataMax(max)], allowDecimals off,
+   labels and gridlines each culled by their own pass */
+function numericAxis(doc,max,tickCount,top,bottom,H){
+  const dmax=zeroSafeDataMax(max);
+  const y=v=>bottom-(v/dmax)*(bottom-top);
+  const ticks=fixedDomainTicks(dmax,tickCount).map(v=>({value:v,coordinate:y(v)}));
+  const labels=cullTicks(ticks,()=>RC.TICK_LABEL_BOX_H,0,H,'preserveEnd');
+  const grid=cullTicks(ticks,()=>RC.GRID_TICK_BOX_H,0,H,'preserveEnd').map(e=>e.coordinate);
+  if(!grid.some(g=>Math.abs(g-bottom)<0.01)) grid.push(bottom);
+  return {y,labels,grid};
+}
+function axisSvg(left,right,top,bottom,num,cats){
+  let s='<g class="recharts-cartesian-grid"><g class="recharts-cartesian-grid-horizontal">';
+  for(const g of num.grid) s+='<line class="vt-chart__grid" x1="'+left+'" y1="'+g+'" x2="'+right+'" y2="'+g+'"></line>';
+  s+='</g></g>';
+  s+='<g class="recharts-cartesian-axis recharts-xAxis"><line class="recharts-cartesian-axis-line vt-chart__grid" x1="'+left+'" y1="'+bottom+'" x2="'+right+'" y2="'+bottom+'"></line>';
+  for(const c of cats) s+='<text class="recharts-text recharts-cartesian-axis-tick-value vt-chart__axis" x="'+c.tickCoord+'" y="'+(bottom+RC.TICK_TEXT_OFFSET)+'" text-anchor="middle"><tspan x="'+c.tickCoord+'" dy="0.71em">'+esc(c.label)+'</tspan></text>';
+  s+='</g><g class="recharts-cartesian-axis recharts-yAxis"><line class="recharts-cartesian-axis-line vt-chart__grid" x1="'+left+'" y1="'+top+'" x2="'+left+'" y2="'+bottom+'"></line>';
+  for(const l of num.labels) s+='<text class="recharts-text recharts-cartesian-axis-tick-value vt-chart__axis" x="'+(left-RC.TICK_TEXT_OFFSET)+'" y="'+l.tickCoord+'" text-anchor="end"><tspan x="'+(left-RC.TICK_TEXT_OFFSET)+'" dy="0.355em">'+esc(l.value)+'</tspan></text>';
+  return s+'</g>';
+}
+const svgOpen=(W,H)=>'<svg class="recharts-surface" role="application" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" style="width:100%;height:100%">';
+const wrapOpen=(variant,H,W)=>'<div class="vt-chart '+variant+'"><div class="recharts-responsive-container" style="height:'+H+'px"><div class="recharts-wrapper" style="width:'+W+'px;height:'+H+'px">';
+const WRAP_CLOSE='<div class="recharts-tooltip-wrapper" hidden></div></div></div></div>';
+function emptyFrame(variant,height,copyKey){
+  return '<div class="vt-chart '+variant+'"><div class="vt-chart__empty-frame" style="height:'+height+'px">'
+    +(copyKey?'<p class="vt-chart__empty">'+esc(t(copyKey))+'</p>':'')+'</div></div>';
+}
+
+/* C1 — BarSeries (vertical): one bar per status, tone per status, direct count
+   labels outside the data end. A zero count draws no mark and no label. */
+function renderBarSeries(doc,host,spec,W){
+  const H=BAR_SERIES_HEIGHT_PX, m={top:24,right:8,bottom:8,left:8};
+  const left=m.left+RC.Y_AXIS_WIDTH, right=W-m.right, top=m.top, bottom=H-m.bottom-RC.X_AXIS_HEIGHT;
+  const n=spec.data.length, band=(right-left)/n;
+  const max=Math.max(0,...spec.data.map(d=>d.value));
+  const num=numericAxis(doc,max,tickCountFor(W),top,bottom,H);
+  const cats=cullTicks(spec.data.map((d,i)=>({label:d.label,coordinate:left+band*(i+0.5)})),e=>textWidth(doc,e.label),0,W,'preserveEnd');
+  const size=Math.min(MAX_BAR_THICKNESS_PX,band*(1-2*RC.BAR_CATEGORY_GAP));
+  let bars='', labels='';
+  spec.data.forEach((d,i)=>{
+    if(d.value<=0) return;
+    const x=left+band*i+(band-size)/2, yTop=num.y(d.value), h=bottom-yTop;
+    bars+='<path class="recharts-rectangle vt-chart__bar--'+(d.tone||'series-1')+'" data-i="'+i+'" d="'+barPath(x,yTop,size,h)+'"></path>';
+    labels+='<text class="recharts-text vt-chart__label" x="'+(x+size/2)+'" y="'+(yTop-RC.LABEL_OFFSET)+'" text-anchor="middle"><tspan x="'+(x+size/2)+'" dy="0em">'+esc(d.value)+'</tspan></text>';
+  });
+  host.innerHTML='<div>'+wrapOpen('vt-chart--bar',H,W)+svgOpen(W,H)
+    +axisSvg(left,right,top,bottom,num,cats)
+    +'<g class="recharts-layer recharts-bar vt-chart__bar">'+bars+'<g class="recharts-layer recharts-label-list">'+labels+'</g></g>'
+    +'</svg>'+WRAP_CLOSE+'</div>';
+  host._hit={kind:'axis',W,H,left,right,top,bottom,points:spec.data.map((d,i)=>({x:left+band*(i+0.5),tips:d.tooltip?[d.tooltip]:[],label:d.label}))};
+}
+/* C2 — StackedBarSeries: status on the axis, issuer as two stacked segments,
+   colour from each series' own tone; legend below, ordered by label (Recharts'
+   default itemSorter), item-scoped tooltip. */
+function renderStackedBarSeries(doc,host,spec,W){
+  const H=STACKED_BAR_HEIGHT_PX, m={top:24,right:8,bottom:8,left:8};
+  const legendItems=spec.series.slice().sort((a,b)=>a.label<b.label?-1:a.label>b.label?1:0);
+  const legend='<div class="recharts-legend-wrapper" style="width:'+(W-m.left-m.right)+'px"><ul class="vt-chart__legend">'
+    +legendItems.map(s=>'<li class="vt-chart__legend-item"><span class="vt-chart__legend-swatch vt-chart__legend-swatch--'+s.tone+'"></span><span class="vt-chart__legend-label">'+esc(s.label)+'</span></li>').join('')
+    +'</ul></div>';
+  /* Recharts measures the legend box, then shrinks the plot by its height */
+  host.innerHTML='<div style="position:absolute;visibility:hidden;width:'+W+'px">'+legend+'</div>';
+  const lh=host.querySelector('.vt-chart__legend').getBoundingClientRect().height;
+  const left=m.left+RC.Y_AXIS_WIDTH, right=W-m.right, top=m.top, bottom=H-m.bottom-RC.X_AXIS_HEIGHT-lh;
+  const n=spec.data.length, band=(right-left)/n;
+  const max=Math.max(0,...spec.data.map(d=>d.segments.reduce((a,s)=>a+s.value,0)));
+  const num=numericAxis(doc,max,tickCountFor(W),top,bottom,H);
+  const cats=cullTicks(spec.data.map((d,i)=>({label:d.label,coordinate:left+band*(i+0.5)})),e=>textWidth(doc,e.label),0,W,'preserveEnd');
+  const size=Math.min(MAX_BAR_THICKNESS_PX,band*(1-2*RC.BAR_CATEGORY_GAP));
+  const base=spec.data.map(()=>0);
+  let segs='';
+  for(const s of spec.series){
+    segs+='<g class="recharts-layer recharts-bar '+'vt-chart__segment--'+s.tone+'">';
+    spec.data.forEach((d,i)=>{
+      const seg=d.segments.find(x=>x.seriesKey===s.key); const v=seg?seg.value:0;
+      const y0=num.y(base[i]), y1=num.y(base[i]+v); base[i]+=v;
+      if(v<=0) return;
+      const x=left+band*i+(band-size)/2;
+      segs+='<path class="recharts-rectangle vt-chart__segment--'+s.tone+'" data-tip="'+esc(seg.tooltip||'')+'" data-x="'+(x+size/2)+'" stroke-width="'+SEGMENT_GAP_PX+'" d="'+barPath(x,y1,size,y0-y1)+'"></path>';
+    });
+    segs+='</g>';
+  }
+  host.innerHTML='<div>'+wrapOpen('vt-chart--stacked-bar',H,W)+svgOpen(W,H)
+    +axisSvg(left,right,top,bottom,num,cats)+segs+'</svg>'+legend+WRAP_CLOSE+'</div>';
+  host._hit={kind:'item',W,H};
+}
+/* C3 — TimeSeries: one series-1 line on a point scale, no dots except Recharts'
+   own lone dot when there is a single bucket; zero buckets sit on the baseline;
+   crosshair + active dot on hover. */
+function renderTimeSeries(doc,host,spec,W){
+  const H=TIME_SERIES_HEIGHT_PX, m={top:8,right:16,bottom:8,left:8};
+  const left=m.left+RC.Y_AXIS_WIDTH, right=W-m.right, top=m.top, bottom=H-m.bottom-RC.X_AXIS_HEIGHT;
+  const n=spec.data.length;
+  const xAt=i=>n===1?(left+right)/2:left+i*(right-left)/(n-1);
+  const max=Math.max(0,...spec.data.map(d=>d.value));
+  const num=numericAxis(doc,max,RC.DEFAULT_TICK_COUNT,top,bottom,H);
+  const cats=cullTicks(spec.data.map((d,i)=>({label:d.label,coordinate:xAt(i)})),e=>textWidth(doc,e.label),0,W,'preserveStartEnd');
+  const pts=spec.data.map((d,i)=>[xAt(i),num.y(d.value)]);
+  const line=n>1
+    ?'<path class="recharts-curve recharts-line-curve vt-chart__line" stroke-width="'+LINE_STROKE_WIDTH_PX+'" stroke-linejoin="round" stroke-linecap="round" d="'+pts.map((p,i)=>(i?'L':'M')+(+p[0].toFixed(3))+','+(+p[1].toFixed(3))).join('')+'"></path>'
+    :'<circle class="recharts-dot recharts-line-dot" r="'+RC.LINE_DOT_RADIUS+'" cx="'+pts[0][0]+'" cy="'+pts[0][1]+'" stroke="var(--chart-series-1)" stroke-width="2" fill="#fff"></circle>';
+  host.innerHTML='<div>'+wrapOpen('vt-chart--time-series',H,W)+svgOpen(W,H)
+    +axisSvg(left,right,top,bottom,num,cats)
+    +'<g class="recharts-layer recharts-line">'+line+'</g><g class="proto-hover"></g>'
+    +'</svg>'+WRAP_CLOSE+'</div>';
+  host._hit={kind:'axis',crosshair:true,W,H,left,right,top,bottom,
+    points:spec.data.map((d,i)=>({x:pts[i][0],y:pts[i][1],tips:d.tooltip?[d.tooltip]:[],label:d.label}))};
+}
+/* C5 — Meter: plain DOM, the fill's inline width is the one inline style allowed */
+function Meter({value,total,valueLabel,variant='panel',emptyCopyKey}){
+  const isEmpty=total==null||total<=0;
+  const height=variant==='compact'?METER_COMPACT_HEIGHT_PX:METER_HEIGHT_PX;
+  if(isEmpty) return emptyFrame('vt-chart--meter',height,emptyCopyKey);
+  const ratio=Math.max(0,Math.min(1,value/total));
+  return '<div class="vt-chart vt-chart--meter"><div class="vt-chart__meter vt-chart__meter--'+variant+'">'
+    +'<div class="vt-chart__meter-track"><div class="vt-chart__meter-fill" style="width:'+(ratio*100)+'%"></div></div>'
+    +(valueLabel?'<span class="vt-chart__meter-value">'+esc(valueLabel)+'</span>':'')
+    +'</div></div>';
+}
+/* ChartTooltip: one .vt-chart__tooltip-value line per resolved tooltip, label only as fallback */
+function showTooltip(host,anchorX,anchorY,texts,fallback){
+  const tw=host.querySelector('.recharts-tooltip-wrapper'); if(!tw) return;
+  tw.innerHTML='<div class="vt-chart__tooltip">'+(texts.length
+    ?texts.map(x=>'<span class="vt-chart__tooltip-value">'+esc(x)+'</span>').join('')
+    :'<span class="vt-chart__tooltip-label">'+esc(fallback||'')+'</span>')+'</div>';
+  tw.hidden=false;
+  const {W,H}=host._hit, w=tw.offsetWidth, h=tw.offsetHeight;
+  let x=anchorX+RC.TOOLTIP_OFFSET, y=anchorY+RC.TOOLTIP_OFFSET;
+  if(x+w>W) x=Math.max(0,anchorX-RC.TOOLTIP_OFFSET-w);
+  if(y+h>H) y=Math.max(0,anchorY-RC.TOOLTIP_OFFSET-h);
+  tw.style.transform='translate('+x+'px,'+y+'px)';
+}
+function hideTooltip(host){
+  const tw=host.querySelector('.recharts-tooltip-wrapper'); if(tw){ tw.hidden=true; tw.innerHTML=''; }
+  const hv=host.querySelector('.proto-hover'); if(hv) hv.innerHTML='';
+}
+function hoverAxisIndex(host,i,mouseY){
+  const h=host._hit, p=h.points[i]; if(!p) return;
+  if(h.crosshair){
+    host.querySelector('.proto-hover').innerHTML=
+      '<path class="recharts-curve recharts-tooltip-cursor vt-chart__crosshair" stroke-width="'+GRID_STROKE_WIDTH_PX+'" d="M'+p.x+','+h.top+'L'+p.x+','+h.bottom+'"></path>'
+      +'<g class="recharts-layer recharts-active-dot"><circle class="recharts-dot vt-chart__dot" cx="'+p.x+'" cy="'+p.y+'" r="'+END_DOT_RADIUS_PX+'" stroke-width="2"></circle></g>';
+  }
+  showTooltip(host,p.x,mouseY,p.tips,p.label);
+}
+function wireChartHover(host){
+  const svg=host.querySelector('svg'); if(!svg) return;
+  svg.addEventListener('mousemove',e=>{
+    const r=svg.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top, h=host._hit;
+    if(h.kind==='item'){
+      const seg=e.target.closest('path.recharts-rectangle');
+      if(!seg){ hideTooltip(host); return; }
+      showTooltip(host,+seg.dataset.x,my,seg.dataset.tip?[seg.dataset.tip]:[],'');
+      return;
+    }
+    if(mx<h.left||mx>h.right||my<h.top||my>h.bottom){ hideTooltip(host); return; }
+    let best=0; h.points.forEach((p,i)=>{ if(Math.abs(p.x-mx)<Math.abs(h.points[best].x-mx)) best=i; });
+    hoverAxisIndex(host,best,my);
+  });
+  svg.addEventListener('mouseleave',()=>hideTooltip(host));
+}
+/* ResponsiveContainer + useContainerWidth: every chart host is re-laid-out from
+   its own measured width, and again whenever that width changes. */
+let CHART_SPECS={}, chartObserver=null;
+function drawChart(host){
+  const spec=CHART_SPECS[host.dataset.chart]; if(!spec) return;
+  const W=Math.round(host.getBoundingClientRect().width); if(W<=0) return;
+  if(host._w===W) return; host._w=W;
+  const doc=host.ownerDocument;
+  if(spec.kind==='bar') renderBarSeries(doc,host,spec,W);
+  else if(spec.kind==='stacked') renderStackedBarSeries(doc,host,spec,W);
+  else renderTimeSeries(doc,host,spec,W);
+  wireChartHover(host);
+}
+function hydrateCharts(doc){
+  if(chartObserver) chartObserver.disconnect();
+  const hosts=[...doc.querySelectorAll('[data-chart]')];
+  hosts.forEach(drawChart);
+  chartObserver=new doc.defaultView.ResizeObserver(entries=>entries.forEach(en=>drawChart(en.target)));
+  hosts.forEach(h=>chartObserver.observe(h));
+  if(S.pinTooltip){
+    const st=doc.querySelector('[data-chart="reg-status"]'); if(st&&st._hit) hoverAxisIndex(st,0,40);
+    const it=doc.querySelector('[data-chart="reg-intake"]'); if(it&&it._hit) hoverAxisIndex(it,it._hit.points.length-2,40);
+  }
+}
+/* a chart placeholder: BarSeries/StackedBarSeries/TimeSeries each render their own
+   width-measuring wrapper div; this host IS that div. Empty data takes the explicit empty frame. */
+function chartHost(id,spec,variant,height,emptyCopyKey){
+  if(spec.data.length===0) return '<div>'+emptyFrame(variant,height,emptyCopyKey)+'</div>';
+  CHART_SPECS[id]=spec;
+  return '<div data-chart="'+id+'" style="min-height:'+height+'px"></div>';
+}
+
+/* =========================================================================
+ * 7. COMPONENT FRAGMENTS
  * ====================================================================== */
 function LifecyclePill(phase){
   const key = phase==='indeterminate' ? 'lifecycle.indeterminate' : 'lifecycle.'+phase;
@@ -686,8 +1169,13 @@ function PreviewAsControl(){
     +'<button type="button" class="pv-reset" data-act="pv-reset">'+esc(t('gate.resetScopesCta'))+'</button>'
   +'</fieldset>';
 }
+/* PanelFrame.tsx: the view switch renders only for a visible panel, beside the pills;
+   a denied panel renders no body and no switch. */
 function PanelFrame(cap,visible,body){
   const sitesKey = cap.sites===1 ? 'panelFrame.sitePill' : 'panelFrame.sitesPill';
+  const view=viewOf(cap.id);
+  const opt=(v,key)=>'<button type="button" class="panel-view-switch__option'+(view===v?' panel-view-switch__option--active':'')+'"'
+    +' aria-pressed="'+(view===v?'true':'false')+'" data-act="view" data-cap="'+cap.id+'" data-view="'+v+'">'+esc(t(key))+'</button>';
   return '<section class="panel'+(visible?'':' panel--denied')+'">'
     +'<header class="panel-header">'
       +'<span class="panel-icon" aria-hidden="true">'+cap.icon+'</span>'
@@ -698,28 +1186,75 @@ function PanelFrame(cap,visible,body){
       +'<span class="pill pill-tier">'+esc(t('panelFrame.tierPill',{tier:String(cap.tier)}))+'</span>'
       +'<span class="pill pill-sites"'+(cap.siteCountCaveat?' title="'+esc(cap.siteCountCaveat)+'"':'')+'>'
         +esc(t(sitesKey,{count:String(cap.sites)}))+'</span>'
+      +(visible?'<div class="panel-view-switch">'+opt('chart','panelFrame.viewChart')+opt('grid','panelFrame.viewGrid')+'</div>':'')
     +'</div>'
     +(visible?'<div class="panel-body">'+body+'</div>':'')
   +'</section>';
 }
-const emptyBody=cap=>'<p class="panel-empty">'+esc(t(cap.emptyKey))+'</p>';
+const pEmpty=(cls,key)=>'<p class="'+cls+'">'+esc(t(key))+'</p>';
 
 /* =========================================================================
- * 7. PANEL BODIES — markup mirrors each component's own JSX.
+ * 8. PANEL BODIES — markup mirrors each component's own JSX, including the
+ *    branch each one takes for loading / no database / failed read / empty.
  * ====================================================================== */
+const STATUS_TONE={a:'ok',s:'warn',r:'fail'};
+const ISSUER_CODES=['registrant','bridge'];
+const ISSUER_SERIES={registrant:'series-1',bridge:'series-2'};
+const ISSUER_NAME={registrant:'Registrant',bridge:'Bridge'};
+const REQUEST_STATUS_ORDER=['p','a','r'];
+const REQUEST_CHART_SERIES=ISSUER_CODES.map(code=>({key:code,label:ISSUER_NAME[code],tone:ISSUER_SERIES[code]}));
+function compareRequestStatusCodes(a,b){
+  const ai=REQUEST_STATUS_ORDER.indexOf(a), bi=REQUEST_STATUS_ORDER.indexOf(b);
+  if(ai!==-1&&bi!==-1) return ai-bi; if(ai!==-1) return -1; if(bi!==-1) return 1;
+  return a<b?-1:a>b?1:0;
+}
+const toStatusData=rows=>rows.map(r=>({key:r.Code,label:r.Name,value:r.Count,tone:STATUS_TONE[r.Code],
+  tooltip:t('panels.registrations.statusChart.tooltip',{status:r.Name,count:String(r.Count)})}));
+function toRequestData(rows){
+  const by=new Map();
+  for(const r of rows){ const e=by.get(r.Status)||{label:r.StatusName,byIssuer:new Map()}; e.byIssuer.set(r.IssuerType,{count:r.Count,issuerName:r.IssuerName}); by.set(r.Status,e); }
+  return [...by.entries()].sort(([a],[b])=>compareRequestStatusCodes(a,b)).map(([code,e])=>({key:code,label:e.label,
+    segments:ISSUER_CODES.map(ic=>{ const f=e.byIssuer.get(ic); const value=f?f.count:0; const issuerName=f?f.issuerName:ISSUER_NAME[ic];
+      return {seriesKey:ic,value,tooltip:t('panels.registrations.requestChart.tooltip',{status:e.label,issuer:issuerName,count:String(value)})}; })}));
+}
+const HOUR_BUCKET_START_LENGTH=19;
+const toIntakeData=rows=>rows.map(r=>({key:r.bucketStart,
+  label:r.bucketStart.length===HOUR_BUCKET_START_LENGTH?r.bucketStart.slice(11,16):r.bucketStart,
+  value:r.count,tooltip:t('panels.registrations.intakeChart.tooltip',{bucket:r.bucketStart,count:String(r.count)})}));
+const countGrid=rows=>'<div class="eo-count-grid">'+rows.map(([label,count])=>
+  '<div><span class="eo-datum">'+esc(label)+'</span><span>'+esc(count)+'</span></div>').join('')+'</div>';
+
+function deriveMeterState(rows){
+  const enrolled=rows.length;
+  const revisions=new Set(rows.map(r=>r.ElectionId+':'+r.ElectionRevision));
+  if(revisions.size!==1) return {enrolled,threshold:null};
+  const raw=rows[0]?.KeyholderThreshold ?? null;
+  return {enrolled,threshold:raw==null||raw<=0?null:raw};
+}
+
 const PANEL_BODIES={
-  registrations(){
-    const R=REGISTRATIONS;
-    const countGrid = rows => '<div class="eo-count-grid">'+rows.map(r=>
-      '<div><span class="eo-datum">'+esc(r.label)+'</span><span>'+esc(r.count.toLocaleString('en-US'))+'</span></div>').join('')+'</div>';
-    return '<section class="eo-section">'
-        +countGrid(R.statusBreakdown.map(r=>({label:r.Name,count:r.Count})))
+  registrations(cap){
+    if(S.load==='unavailable') return pEmpty('panel-empty','panels.registrations.unavailable');
+    if(S.load==='loading') return pEmpty('panel-empty','panels.registrations.loading');
+    if(S.load==='failed') return pEmpty('panel-empty','panels.registrations.readFailed');
+    if(S.load==='empty') return pEmpty('panel-empty',cap.emptyKey);
+    const R=REG_VARIANTS[S.regVariant], view=viewOf(cap.id);
+    return '<section class="eo-section"><h4 class="eo-heading">'+esc(t('panels.registrations.statusHeading'))+'</h4>'
+        +(view==='chart'
+          ?chartHost('reg-status',{kind:'bar',data:toStatusData(R.statusBreakdown)},'vt-chart--bar',BAR_SERIES_HEIGHT_PX)
+          :countGrid(R.statusBreakdown.map(r=>[r.Name,r.Count])))
       +'</section>'
-      +'<section class="eo-section">'
-        +countGrid(R.requestBreakdown.map(r=>({label:r.StatusName+' / '+r.IssuerName,count:r.Count})))
+      +'<section class="eo-section"><h4 class="eo-heading">'+esc(t('panels.registrations.requestsHeading'))+'</h4>'
+        +(view==='chart'
+          ?chartHost('reg-requests',{kind:'stacked',data:toRequestData(R.requestBreakdown),series:REQUEST_CHART_SERIES},'vt-chart--stacked-bar',STACKED_BAR_HEIGHT_PX,'panels.registrations.requestChart.empty')
+          :countGrid(R.requestBreakdown.map(r=>[r.StatusName+' / '+r.IssuerName,r.Count])))
       +'</section>'
+      /* the intake series has no heading and ignores the view switch */
       +'<section class="eo-section">'
-        +'<span class="eo-datum">'+R.roster.rows.length+' / '+R.roster.total.toLocaleString('en-US')+'</span>'
+        +chartHost('reg-intake',{kind:'time',data:toIntakeData(R.intakeSeries)},'vt-chart--time-series',TIME_SERIES_HEIGHT_PX,'panels.registrations.intakeChart.empty')
+      +'</section>'
+      +'<section class="eo-section"><h4 class="eo-heading">'+esc(t('panels.registrations.rosterHeading'))+'</h4>'
+        +'<span class="eo-datum">'+R.roster.rows.length+' / '+R.roster.total+'</span>'
         +R.roster.rows.map(row=>'<div class="eo-row">'
             +'<span>'+esc(row.LastName)+'</span>'
             +'<span>'+esc(row.FirstName)+'</span>'
@@ -729,12 +1264,14 @@ const PANEL_BODIES={
             +'<span class="eo-datum" title="Expiration">'+esc(row.Expiration)+'</span>'
           +'</div>').join('')
       +'</section>'
-      +'<section class="eo-section">'
-        +countGrid(R.surfaceCounts.map(r=>({label:r.table,count:r.count})))
+      +'<section class="eo-section"><h4 class="eo-heading">'+esc(t('panels.registrations.surfaceCountsHeading'))+'</h4>'
+        +countGrid(R.surfaceCounts.map(r=>[r.table,r.count]))
       +'</section>';
   },
-  elections(){
-    const at=SNAPSHOT_INSTANT, phase=derivePhaseSimple(at), stage=currentStage(at);
+  elections(cap){
+    if(S.load!=='ready') return pEmpty('panel-empty',cap.emptyKey);
+    const pc=PHASE_CASES[S.phaseCase], at=pc.at, timeline=pc.timeline;
+    const {phase,stage}=derivePhase(timeline,at);
     const kv=[['Type',ELECTION.TypeName??EM_DASH],['Date',ELECTION.Date],
       ['RevisionDeadline',ELECTION.RevisionDeadline],['BallotDeadline',ELECTION.BallotDeadline],
       ['Revision',ELECTION.Revision],['RevisionTimestamp',ELECTION.RevisionTimestamp],
@@ -747,7 +1284,7 @@ const PANEL_BODIES={
       +'</dl></section>'
       +'<section class="eo-section"><ul class="eo-timeline">'
         +ELECTION_EVENT_ORDER.map(ev=>{
-          const v=TIMELINE[ev]??null;
+          const v=timeline[ev]??null;
           const isPast = v!==null && v<at;
           const isCurrent = v!==null && ev===stage;
           const cls = isCurrent?'eo-tl--current':(isPast?'eo-tl--past':'eo-tl--future');
@@ -764,9 +1301,11 @@ const PANEL_BODIES={
         +POLICIES.registrationFieldBreakdown.map(r=>'<div class="eo-row">'
             +'<span>'+esc(r.TierName)+'</span><span>'+esc(r.RequirementName)+'</span><span>'+r.Count+'</span>'
           +'</div>').join('')
-      +'</section>';
+      +'</section>'
+      +(TOTAL_ELECTIONS>1?'<span class="eo-datum">1 / '+TOTAL_ELECTIONS+'</span>':'');
   },
-  ballotsQuestions(){
+  ballotsQuestions(cap){
+    if(S.load!=='ready') return pEmpty('panel-empty',cap.emptyKey);
     const range=raw=>{try{const p=JSON.parse(raw);return (p.min??'')+'-'+(p.max??'');}catch(e){return '';}};
     return '<div class="eo-row"><span>'+esc(ELECTION.Title)+'</span>'
         +'<span class="eo-datum" title="BallotDeadline">'+esc(ELECTION.BallotDeadline)+'</span></div>'
@@ -787,7 +1326,10 @@ const PANEL_BODIES={
         +'</section>').join('')
       +'<span class="eo-datum">BallotSignatureTaskExtension '+PENDING_SIGNING_TASKS+'</span>';
   },
-  networkSettings(){
+  networkSettings(cap){
+    if(S.load==='loading'||S.load==='unavailable') return '';
+    if(S.load==='failed') return '<dl class="aa-kv"><dt>Name</dt><dd>'+EM_DASH+'</dd></dl>';
+    if(S.load==='empty') return pEmpty('aa-empty',cap.emptyKey);
     const N=NETWORK_SETTINGS;
     const kv=[['Name',N.Name],['Hash',N.Hash,'aa-mono'],['PrimaryAuthorityId',N.PrimaryAuthorityId,'aa-mono'],
       ['Relays',N.Relays.join(', ')],['TimestampAuthorities',N.TimestampAuthorities.join(', ')],
@@ -795,7 +1337,10 @@ const PANEL_BODIES={
     return '<dl class="aa-kv">'+kv.map(([k,v,c])=>
       '<dt>'+esc(k)+'</dt><dd'+(c?' class="'+c+'"':'')+'>'+esc(v)+'</dd>').join('')+'</dl>';
   },
-  authorityProfile(){
+  authorityProfile(cap){
+    if(S.load==='loading'||S.load==='unavailable') return '';
+    if(S.load==='failed') return '<dl class="aa-kv"><dt>Name</dt><dd>'+EM_DASH+'</dd></dl>';
+    if(S.load==='empty') return pEmpty('aa-empty',cap.emptyKey);
     const A=AUTHORITY;
     return '<dl class="aa-kv">'
       +'<dt>Name</dt><dd>'+esc(A.Name)+'</dd>'
@@ -804,11 +1349,15 @@ const PANEL_BODIES={
       +'<dt>ImageRef</dt><dd>'+esc(A.ImageRef)+'</dd>'
     +'</dl>';
   },
-  authorityPeers(){
+  authorityPeers(cap){
+    if(S.load==='loading'||S.load==='unavailable') return '';
+    if(S.load==='failed'||S.load==='empty') return pEmpty('aa-empty',cap.emptyKey);
     return PEER_IDS.map(p=>'<div class="aa-row"><dl class="aa-kv">'
       +'<dt>PeerId</dt><dd class="aa-mono">'+esc(p)+'</dd></dl></div>').join('');
   },
-  administrationOfficers(){
+  administrationOfficers(cap){
+    if(S.load==='loading'||S.load==='unavailable') return '';
+    if(S.load==='failed'||S.load==='empty') return pEmpty('aa-empty',cap.emptyKey);
     return '<section class="aa-section"><dl class="aa-kv">'
         +'<dt>EffectiveAt</dt><dd>'+esc(ADMIN.EffectiveAt)+'</dd>'
         +'<dt>ThresholdPolicies</dt><dd>'+esc(ADMIN.ThresholdPolicies)+'</dd>'
@@ -823,8 +1372,18 @@ const PANEL_BODIES={
           +'</dl></div>').join('')
       +'</section>';
   },
-  keyholders(){
-    return KEYHOLDERS.map(r=>'<div class="aa-row"><dl class="aa-kv">'
+  keyholders(cap){
+    if(S.load==='unavailable') return pEmpty('aa-empty','panels.keyholders.unavailable');
+    if(S.load==='loading') return pEmpty('aa-empty','panels.keyholders.loading');
+    if(S.load==='failed') return pEmpty('aa-empty','panels.keyholders.readFailed');
+    const rows=S.load==='empty'?[]:KEYHOLDER_VARIANTS[S.khVariant];
+    if(rows.length===0) return pEmpty('aa-empty',cap.emptyKey);
+    if(viewOf(cap.id)==='chart'){
+      const m=deriveMeterState(rows);
+      const valueLabel=m.threshold===null?undefined:t('panels.keyholders.meter.value',{count:m.enrolled,total:m.threshold});
+      return '<div class="aa-meter">'+Meter({value:m.enrolled,total:m.threshold,valueLabel,variant:'panel',emptyCopyKey:'panels.keyholders.meter.empty'})+'</div>';
+    }
+    return rows.map(r=>'<div class="aa-row"><dl class="aa-kv">'
       +'<dt>Name</dt><dd>'+esc(r.Name??EM_DASH)+'</dd>'
       +'<dt>UserId</dt><dd class="aa-mono">'+esc(r.UserId)+'</dd>'
       +'<dt>ElectionId</dt><dd class="aa-mono">'+esc(r.ElectionId)+'</dd>'
@@ -832,7 +1391,9 @@ const PANEL_BODIES={
       +'<dt>KeyholderThreshold</dt><dd>'+(r.KeyholderThreshold??EM_DASH)+'</dd>'
     +'</dl></div>').join('');
   },
-  inviteAuthorities(){
+  inviteAuthorities(cap){
+    if(S.load==='loading'||S.load==='unavailable') return '';
+    if(S.load==='failed'||S.load==='empty') return pEmpty('aa-empty',cap.emptyKey);
     return INVITES.map(r=>'<div class="aa-row"><dl class="aa-kv">'
       +'<dt>Name</dt><dd>'+esc(r.Name)+'</dd>'
       +'<dt>Type</dt><dd title="'+esc(r.Type)+'">'+esc(r.TypeName??r.Type)+'</dd>'
@@ -845,7 +1406,7 @@ const PANEL_BODIES={
 };
 
 /* =========================================================================
- * 8. SCREENS
+ * 9. SCREENS
  * ====================================================================== */
 function PanelGrid(){
   return '<div class="sh-panel-grid-wrap">'
@@ -854,10 +1415,7 @@ function PanelGrid(){
     +'<div class="panel-grid">'
       +CAPABILITIES.map(cap=>{
         const visible=S.effectiveScopes.includes(cap.scope);
-        if(visible){
-          const body = S.empty ? emptyBody(cap) : PANEL_BODIES[cap.id]();
-          return '<div id="panel-'+cap.id+'">'+PanelFrame(cap,true,body)+'</div>';
-        }
+        if(visible) return '<div id="panel-'+cap.id+'">'+PanelFrame(cap,true,PANEL_BODIES[cap.id](cap))+'</div>';
         if(S.revealDenied) return '<div id="panel-'+cap.id+'">'+PanelFrame(cap,false,'')+'</div>';
         return '';
       }).join('')
@@ -989,8 +1547,10 @@ function BootstrapScreen(){
 }
 
 /* =========================================================================
- * 9. ROUTES
+ * 10. ROUTES
  * ====================================================================== */
+const allViews=v=>Object.fromEntries(CAPABILITIES.map(c=>[c.id,v]));
+const LIMITED=()=>{S.realScopes=['vrg','mel','ceb'];S.effectiveScopes=['vrg','mel','ceb'];};
 const ROUTES=[
   {group:'Bootstrap (first screen)'},
   {id:'bootstrap',label:'Code entry',apply(){S.bootstrapPhase=null;S.bootstrapError=null;S.bootstrapOk=false;}},
@@ -1003,12 +1563,39 @@ const ROUTES=[
   {id:'bootstrap-ok',label:'Redeemed — no networks yet',apply(){S.bootstrapOk=true;}},
 
   {group:'Dashboard'},
-  {id:'dashboard',label:'All nine scopes',apply(){}},
-  {id:'dashboard-limited',label:'Limited officer (vrg, mel, ceb)',apply(){S.realScopes=['vrg','mel','ceb'];S.effectiveScopes=['vrg','mel','ceb'];}},
-  {id:'dashboard-reveal',label:'…with denied panels revealed',apply(){S.realScopes=['vrg','mel','ceb'];S.effectiveScopes=['vrg','mel','ceb'];S.revealDenied=true;}},
+  {id:'dashboard',label:'All nine scopes (chart view)',apply(){}},
+  {id:'dashboard-limited',label:'Limited officer (vrg, mel, ceb)',apply(){LIMITED();}},
+  {id:'dashboard-reveal',label:'…with denied panels revealed',apply(){LIMITED();S.revealDenied=true;}},
   {id:'dashboard-sim',label:'Preview as — simulated scopes',apply(){S.effectiveScopes=['mel','ceb','ik'];}},
-  {id:'dashboard-empty',label:'Bootstrapped, no data yet',apply(){S.empty=true;}},
   {id:'dashboard-stale',label:'Stale snapshot banner',apply(){S.stale=true;}},
+
+  {group:'Panel view (Chart / Grid)'},
+  {id:'view-grid',label:'Every panel on Grid',apply(){S.views=allViews('grid');}},
+  {id:'view-mixed',label:'Registrations Grid, Keyholders Chart',apply(){S.views=Object.assign(allViews('chart'),{registrations:'grid'});}},
+
+  {group:'Panel read states'},
+  {id:'load-loading',label:'Reads in flight',apply(){S.load='loading';}},
+  {id:'load-unavailable',label:'No election data in this browser',apply(){S.load='unavailable';}},
+  {id:'load-failed',label:'Reads failed',apply(){S.load='failed';}},
+  {id:'dashboard-empty',label:'Bootstrapped, no data yet',apply(){S.load='empty';}},
+
+  {group:'Registrations charts'},
+  {id:'reg-small',label:'Small election — hourly intake, whole-number axes',apply(){S.regVariant='small';}},
+  {id:'reg-single',label:'Intake in a single bucket',apply(){S.regVariant='single';}},
+  {id:'reg-weekly',label:'Intake over 8 weeks — weekly buckets',apply(){S.regVariant='weekly';}},
+  {id:'reg-config-only',label:'Configuration rows only — zero bars, empty frames',apply(){S.regVariant='configOnly';}},
+  {id:'reg-tooltip',label:'Hover tooltips (pinned)',apply(){S.pinTooltip=true;}},
+
+  {group:'Keyholders meter'},
+  {id:'kh-partial',label:'Below threshold (2 of 3)',apply(){S.khVariant='partial';}},
+  {id:'kh-no-threshold',label:'No threshold on the revision',apply(){S.khVariant='noThreshold';}},
+  {id:'kh-multi-revision',label:'Roster spans two revisions',apply(){S.khVariant='multiRevision';}},
+
+  {group:'Election lifecycle'},
+  {id:'phase-voting',label:'Voting',apply(){S.phaseCase='voting';}},
+  {id:'phase-settling',label:'Settling',apply(){S.phaseCase='settling';}},
+  {id:'phase-closed',label:'Closed',apply(){S.phaseCase='closed';}},
+  {id:'phase-unknown',label:'Phase unknown (votingStarts missing)',apply(){S.phaseCase='indeterminate';}},
 
   {group:'Menus, dialogs, banners'},
   {id:'switcher',label:'Network switcher open',apply(){S.switcherOpen=true;}},
@@ -1029,7 +1616,9 @@ function go(id){
   S.route=id;
   S.realScopes=ALL_SCOPES.slice(); S.effectiveScopes=ALL_SCOPES.slice();
   S.revealDenied=false; S.switcherOpen=false; S.kebabOpen=false; S.dialog=null;
-  S.errorBanner=null; S.stale=false; S.toast=null; S.empty=false;
+  S.errorBanner=null; S.stale=false; S.toast=null; S.load='ready';
+  S.regVariant='default'; S.khVariant='full'; S.phaseCase='pre'; S.pinTooltip=false;
+  S.views=Object.fromEntries(CAPABILITIES.map(c=>[c.id,readStoredPanelView(c.id)]));
   S.bootstrapPhase=null; S.bootstrapError=null; S.bootstrapOk=false; S.forgetInput='';
   ROUTES.find(r=>r.id===id).apply();
   if(location.hash.slice(1)!==id) location.hash=id;
@@ -1037,7 +1626,7 @@ function go(id){
 }
 
 /* =========================================================================
- * 10. RENDER + EVENTS
+ * 11. RENDER + EVENTS
  * ====================================================================== */
 function renderRail(){
   document.getElementById('railstates').innerHTML=ROUTES.map(r=>
@@ -1066,11 +1655,16 @@ function render(){
   renderRail();
   const frame=document.getElementById('stage');
   frame.style.maxWidth = S.width==='full' ? 'none' : S.width+'px';
+  const nonDefault=CAPABILITIES.filter(c=>viewOf(c.id)!==DEFAULT_PANEL_VIEW).map(c=>c.id);
   document.getElementById('stagelabel').textContent =
     '#'+S.route+'   ·   '+(S.width==='full'?'full width':S.width+'px')
-    +'   ·   effective scopes: ['+S.effectiveScopes.join(', ')+']';
-  appDoc().getElementById('root').innerHTML =
+    +'   ·   effective scopes: ['+S.effectiveScopes.join(', ')+']'
+    +(nonDefault.length?'   ·   grid: ['+nonDefault.join(', ')+']':'');
+  CHART_SPECS={};
+  const d=appDoc();
+  d.getElementById('root').innerHTML =
     BOOTSTRAP_ROUTES.has(S.route) ? BootstrapScreen() : DashboardScreen();
+  hydrateCharts(d);
 }
 /* rail + width picker live in THIS document; everything else is in the frame */
 document.addEventListener('click',e=>{
@@ -1089,6 +1683,7 @@ function onAppClick(e){
     case 'forget': S.kebabOpen=false; S.dialog='forget'; break;
     case 'close-dialog': S.dialog=null; break;
     case 'pv-reset': S.effectiveScopes=S.realScopes.slice(); break;
+    case 'view': S.views[act.dataset.cap]=act.dataset.view; writeStoredPanelView(act.dataset.cap,act.dataset.view); break;
     case 'pv-toggle': {
       const sc=act.dataset.scope;
       S.effectiveScopes = S.effectiveScopes.includes(sc)
