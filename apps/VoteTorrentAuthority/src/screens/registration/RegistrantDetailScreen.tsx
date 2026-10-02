@@ -39,7 +39,12 @@ import {
 	toPublicTierRows,
 } from "./registrant-detail-model";
 import type { LifecycleActionId } from "./registrant-detail-model";
-import { privateTierReadState, PRIVATE_TIER_READ_STATE_COPY } from "./registrant-detail-model";
+import {
+	privateTierReadState,
+	PRIVATE_TIER_READ_STATE_COPY,
+	selectiveTierReadState,
+	SELECTIVE_TIER_READ_STATE_COPY,
+} from "./registrant-detail-model";
 import { useAccessTrailVisit } from "./useAccessTrailVisit";
 import type { AccessTrailRecorder } from "./access-trail-visit";
 import { pillStyles, tintPill } from "./components/pill";
@@ -137,6 +142,9 @@ export default function RegistrantDetailScreen() {
 		undefined
 	);
 	const [disclosure, setDisclosure] = useState<DisclosedSelective | null | undefined>(undefined);
+	const selectiveReadState = selectiveTierReadState(selectiveTier?.detailsAccess);
+	const selectiveReadStateRef = useRef(selectiveReadState);
+	selectiveReadStateRef.current = selectiveReadState;
 
 	// CR-02 guard against a stale setState after unmount, copied from
 	// RegistrationPolicyScreen.tsx:102-111. Reset on entry so a cleanup that
@@ -306,6 +314,9 @@ export default function RegistrantDetailScreen() {
 
 	const handleSelectAudience = useCallback(
 		async (audience: DisclosureAudience) => {
+			// D-52: defence in depth. The audience selector is not rendered for an unread
+			// selective tier, and no disclosure is ever requested for one.
+			if (selectiveReadStateRef.current !== "readable") return;
 			setSelectedAudience(audience);
 			// The in-flight state (47-12): raw rows, no annotations, while a
 			// fetch (or the election-context resolution ahead of it) is pending.
@@ -324,7 +335,11 @@ export default function RegistrantDetailScreen() {
 					} else {
 						const engine = await getEngine<IRegistrationEngine>("registration");
 						const result = await engine.getDisclosedSelective(electionId, registrantId, audience);
-						if (!unmountedRef.current) setDisclosure(result ?? null);
+						// D-52: a disclosure this device could not open carries no leaves; show no
+						// annotation rather than a false "not disclosed" on every row, and never
+						// render its arrays.
+						const unread = result != null && selectiveTierReadState(result.access) !== "readable";
+						if (!unmountedRef.current) setDisclosure(unread ? undefined : (result ?? null));
 					}
 				}
 			} catch (err) {
@@ -636,12 +651,28 @@ export default function RegistrantDetailScreen() {
 			{/* Selective tier + D-12 audience preview. */}
 			<View style={styles.section} testID="registrant-detail-selective-tier">
 				<ThemedText type="title">{t("registrantDetailSelectiveTierTitle")}</ThemedText>
-				<SelectiveAudiencePreview
-					leaves={selectiveTier?.selectiveDetails ?? []}
-					selectedAudience={selectedAudience}
-					disclosure={disclosure}
-					onSelectAudience={handleSelectAudience}
-				/>
+				{selectiveReadState !== "readable" ? (
+					// D-52: sealed selective details this device cannot open are shown as unread,
+					// never as an empty preview (which would read as "no selective details"). No
+					// audience selector is offered. Nothing from the record is rendered.
+					<View testID="registrant-detail-selective-unread" style={localStyles.sealedNotice}>
+						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
+						<ThemedText
+							type="small"
+							testID="registrant-detail-selective-unread-text"
+							style={[{ color: colors.textSecondary }, localStyles.sealedNoticeText]}
+						>
+							{t(SELECTIVE_TIER_READ_STATE_COPY[selectiveReadState])}
+						</ThemedText>
+					</View>
+				) : (
+					<SelectiveAudiencePreview
+						leaves={selectiveTier?.selectiveDetails ?? []}
+						selectedAudience={selectedAudience}
+						disclosure={disclosure}
+						onSelectAudience={handleSelectAudience}
+					/>
+				)}
 			</View>
 
 			{/* Private tier — the D-13 divergence. */}
