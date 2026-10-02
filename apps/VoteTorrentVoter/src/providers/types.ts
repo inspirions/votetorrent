@@ -82,7 +82,7 @@ export interface ValidationCheck {
  * The per-lifecycle-state content of an election card. All fields are optional: not every state
  * uses every field (e.g. `ReviewSelections`/`Complete` show no countdown or progress — RESEARCH
  * Pitfall 4/A3), and a REAL read only fills what the engine can source (`countdownTarget`,
- * `keysTotal`). The rest have no engine source yet and are only ever populated by the `__DEV__`
+ * `keysTotal`, and `keysReleased` from the release engine). The rest have no engine source yet and are only ever populated by the `__DEV__`
  * lifecycle override (`devLifecycleFixtures.ts`'s `DEV_LIFECYCLE_CONTENT`).
  */
 export interface LifecycleContent {
@@ -90,7 +90,11 @@ export interface LifecycleContent {
 	countdownTarget?: string;
 	/** Progress ratio (0-1), for states whose card shows a progress bar (Open only, per D-10). */
 	progress?: number;
-	/** Number of election keys released so far (ReleasingKeys/Validation). */
+	/**
+	 * Number of election keys released so far (ReleasingKeys/Validation/Complete). Read from the
+	 * release engine's ACCEPTED count (`getKeyReleaseStatus().releasedCount`); absent, never 0, when
+	 * no election key is published or the read fails.
+	 */
 	keysReleased?: number;
 	/** Total number of election keys required (ReleasingKeys/Validation). */
 	keysTotal?: number;

@@ -39,6 +39,7 @@ import {
 	SigningEngine,
 	DefaultUserEngine,
 	KeysTasksEngine,
+	KeyReleaseEngine,
 	SignatureTasksEngine,
 	OnboardingTasksEngine,
 	InvitationEngine,
@@ -267,7 +268,7 @@ export class EngineFactory {
 	 * Build a fresh engine instance for the given name.
 	 *
 	 * Covers: network, defaultUser, user, authority, elections, signing, election,
-	 * keysTasksEngine, signatureTasksEngine, onboardingTasksEngine, invitations,
+	 * keysTasksEngine, keyRelease, signatureTasksEngine, onboardingTasksEngine, invitations,
 	 * association, registration, requestTransports.
 	 *
 	 * For sibling engines that require a live EngineContext, call
@@ -356,6 +357,13 @@ export class EngineFactory {
 				const ctx = this.requireEstablishedCtx()
 				const ref = { hash: this.currentNetworkHash! } as NetworkReference
 				return new KeysTasksEngine(ref, ctx)
+			}
+
+			case 'keyRelease': {
+				// Read-only release status (D-17): the Voter never holds a share, so this engine is
+				// built with NO vault and no deps. `getKeyReleaseStatus` never needs one.
+				const ctx = this.requireEstablishedCtx()
+				return new KeyReleaseEngine(ctx)
 			}
 
 			case 'signatureTasksEngine': {

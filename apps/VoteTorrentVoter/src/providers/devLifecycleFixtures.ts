@@ -4,8 +4,9 @@ import type {LifecycleContent, LifecycleState, ValidationCheck} from './types';
  * `__DEV__`-only design-review content for the Home card's lifecycle states (D-03 cycler).
  *
  * The real election read (`engines/election-read.ts`) only fills what the engine can source.
- * Voting progress, keys released, validation checks/fingerprint and certification have NO engine
- * source yet, so a real card simply omits them. When a developer forces a state with the cycler,
+ * Voting progress, validation checks/fingerprint and certification have NO engine source yet, so a
+ * real card simply omits them (keys released is engine-sourced now; this fixture still sets it so
+ * every card variant can be reviewed without a published key). When a developer forces a state with the cycler,
  * `VoterAppProvider` overlays that state's entry below so every card variant can still be
  * reviewed. It is never applied in a release build (`lifecycleOverride` is always null there).
  *

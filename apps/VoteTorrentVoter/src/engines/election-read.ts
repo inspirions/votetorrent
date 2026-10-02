@@ -5,10 +5,13 @@
  * Home/Ballot screens used to read.
  *
  * Only what the engine can source is filled in: id, title, the lifecycle state derived from the
- * election's timeline at read time, the countdown to the event that ends that state, and the
- * keyholder count. Voting progress, keys released, validation checks/fingerprint and
- * certification have NO engine source yet and are left absent — never faked (the `__DEV__`
- * override in `VoterAppProvider` is the only thing that ever fills them, from
+ * election's timeline at read time, the countdown to the event that ends that state, the keyholder
+ * count, and (from the key-release states on) the number of keys released. "Keys released" is the
+ * release engine's ACCEPTED count (`KeyReleaseEngine.getKeyReleaseStatus().releasedCount`,
+ * signature- and commitment-checked, D-17), read through a vault-less `'keyRelease'` engine, and
+ * left absent when no election key is published or the read fails. Voting progress, validation
+ * checks/fingerprint and certification have NO engine source yet and are left absent — never
+ * faked (the `__DEV__` override in `VoterAppProvider` is the only thing that ever fills them, from
  * `devLifecycleFixtures.ts`).
  */
 import type {
@@ -16,6 +19,7 @@ import type {
 	ElectionSummary,
 	IElectionEngine,
 	IElectionsEngine,
+	IKeyReleaseEngine,
 	Question,
 } from '@votetorrent/vote-core'
 import { deriveTimeline } from '../timeline'
@@ -140,11 +144,35 @@ export async function readVoterElection (deps: ElectionReadDeps, nowMs: number):
 		throw new Error(`Election ${electionId} has an indeterminate timeline: ${view.reason}`)
 	}
 	const keyholders = details.current.keyholders ?? []
+	const lifecycle = lifecycleFromTimeline(view, nowMs)
+	const keysReleased = await readKeysReleased(deps, electionId, lifecycle.lifecycleState)
 	return {
 		id: electionId,
 		title: details.election.title,
-		...lifecycleFromTimeline(view, nowMs),
+		...lifecycle,
 		...(keyholders.length > 0 ? { keysTotal: keyholders.length } : {}),
+		...(keysReleased !== undefined ? { keysReleased } : {}),
+	}
+}
+
+/** States in which the card/keyholder list shows a released count. */
+const RELEASE_COUNT_STATES: ReadonlySet<LifecycleState> = new Set<LifecycleState>(['ReleasingKeys', 'Validation', 'Complete'])
+
+/**
+ * The accepted release count (D-17), or `undefined` — never 0 — when it cannot be measured: the
+ * state shows no count, no election key is published yet, or the read fails. A failed release read
+ * must never cost the election card.
+ */
+async function readKeysReleased (deps: ElectionReadDeps, electionId: string, state: LifecycleState): Promise<number | undefined> {
+	if (!RELEASE_COUNT_STATES.has(state)) return undefined
+	try {
+		const status = await (await deps.getEngine<IKeyReleaseEngine>('keyRelease')).getKeyReleaseStatus(electionId)
+		const measurable =
+			status.electionKey !== null &&
+			(status.phase === 'before-release-window' || status.phase === 'releasing' || status.phase === 'reconstructable')
+		return measurable ? status.releasedCount : undefined
+	} catch {
+		return undefined
 	}
 }
 

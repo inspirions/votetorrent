@@ -9,10 +9,10 @@
  * `pickElectionId` helper, same `let live = true` cancellation guard, one try/catch over the
  * whole chain): `getEngine('elections')` -> `getElections()` -> `openElection(id)` ->
  * `getElectionDetails()` -> `details.current.keyholders`. The released/total counts are a
- * SEPARATE read via `useVoterApp().getElection()` (D-04). There is no per-keyholder release count
- * anywhere in vote-core or vote-engine yet, so a real read carries no `keysReleased` and the count
- * line is HIDDEN — only the `__DEV__` review override supplies one. Never "0 of N": that would
- * claim a release state nobody measured.
+ * SEPARATE read via `useVoterApp().getElection()` (D-04). The election-level released count is the
+ * release engine's accepted-release count (D-17), carried on `getElection()`; it is absent, and the
+ * count line HIDDEN, when no election key is published or the read fails. Never "0 of N": that
+ * would claim a release state nobody measured.
  */
 import React, {useEffect, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
@@ -72,7 +72,7 @@ export default function KeyholdersScreen() {
 				}
 
 				// Election-level released/total (D-04): read via getElection(), NEVER the engine
-				// chain above — there is no per-keyholder release datum in vote-core/vote-engine.
+				// chain above — it is the release engine's accepted-release count (D-17), carried by getElection().
 				// A failed election read only costs the count line, never the keyholder list. The
 				// clamp prevents an incoherent "9 of 2" when a review-fixture released count outruns
 				// the real keyholder count.

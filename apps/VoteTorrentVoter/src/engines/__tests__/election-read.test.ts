@@ -28,6 +28,8 @@ interface FakeOptions {
 	timeline?: unknown;
 	keyholders?: unknown[];
 	ballots?: Array<{ballot: Ballot; confirmed: boolean}>;
+	/** Serves the vault-less 'keyRelease' engine; when omitted, getEngine('keyRelease') THROWS like any unknown name. */
+	keyRelease?: {getKeyReleaseStatus: (electionId: string) => Promise<unknown>};
 }
 
 function fakeDeps(options: FakeOptions = {}, fallbackElectionId?: string) {
@@ -50,6 +52,7 @@ function fakeDeps(options: FakeOptions = {}, fallbackElectionId?: string) {
 		},
 	};
 	const getEngine = async <T,>(name: string): Promise<T> => {
+		if (name === 'keyRelease' && options.keyRelease) return options.keyRelease as unknown as T;
 		if (name !== 'elections') throw new Error(`unexpected engine ${name}`);
 		return electionsEngine as unknown as T;
 	};
@@ -96,6 +99,7 @@ describe('readVoterElection — lifecycle state derived from the real timeline',
 	it('carries the real id and title, and NEVER fills a field with no engine source', async () => {
 		const election = await readVoterElection(fakeDeps({keyholders: [{}, {}, {}]}).deps, D - 6 * HOUR);
 		expect(election).toMatchObject({id: 'e-1', title: 'Real Election', keysTotal: 3});
+		// No keyRelease engine is served here, so keysReleased is absent too (the read failed).
 		for (const unsourced of ['progress', 'keysReleased', 'checksComplete', 'checksTotal', 'fingerprint', 'certified', 'evidence']) {
 			expect(election).not.toHaveProperty(unsourced);
 		}
@@ -117,6 +121,71 @@ describe('readVoterElection — lifecycle state derived from the real timeline',
 		const {deps, opened} = fakeDeps({summaries: []}, 'seeded-1');
 		await readVoterElection(deps, D - 60 * DAY);
 		expect(opened).toEqual(['seeded-1']);
+	});
+});
+
+describe('readVoterElection — keysReleased from the release engine (62-29, D-17)', () => {
+	const KEY = {jointPublicKey: '02aa'};
+	const status = (overrides: Record<string, unknown>) => ({phase: 'releasing', releasedCount: 3, rejectedReleases: [], electionKey: KEY, ...overrides});
+	const stub = (value: unknown) => {
+		const getKeyReleaseStatus = jest.fn(async (_electionId: string) => value);
+		return {getKeyReleaseStatus};
+	};
+	const FIVE = [{}, {}, {}, {}, {}];
+
+	it('V1: fills keysReleased with the ACCEPTED count only (never counting a rejected row) in ReleasingKeys', async () => {
+		const keyRelease = stub(status({releasedCount: 3, rejectedReleases: [{userId: 'u-9', reason: 'share-invalid'}]}));
+		const election = await readVoterElection(fakeDeps({keyholders: FIVE, keyRelease}).deps, D - 6 * HOUR);
+		expect(election.lifecycleState).toBe('ReleasingKeys');
+		expect(election.keysReleased).toBe(3);
+		expect(election.keysTotal).toBe(5);
+		expect(keyRelease.getKeyReleaseStatus).toHaveBeenCalledWith('e-1');
+	});
+
+	it.each([
+		['Validation', D + 2.5 * DAY],
+		['Complete', D + 4 * DAY],
+	] as const)('V2: phase reconstructable fills keysReleased in the %s state', async (state, now) => {
+		const keyRelease = stub(status({phase: 'reconstructable', releasedCount: 4}));
+		const election = await readVoterElection(fakeDeps({keyholders: FIVE, keyRelease}).deps, now);
+		expect(election.lifecycleState).toBe(state);
+		expect(election.keysReleased).toBe(4);
+	});
+
+	it.each(['no-election-key', 'election-key-inconsistent', 'no-current-revision'] as const)('V3: phase %s leaves keysReleased absent', async phase => {
+		const keyRelease = stub(status({phase, releasedCount: 0, electionKey: phase === 'election-key-inconsistent' ? KEY : null}));
+		const election = await readVoterElection(fakeDeps({keyholders: FIVE, keyRelease}).deps, D - 6 * HOUR);
+		expect(election).not.toHaveProperty('keysReleased');
+	});
+
+	it('V3b: a null electionKey leaves keysReleased absent even in a measurable phase', async () => {
+		const keyRelease = stub(status({phase: 'releasing', electionKey: null}));
+		expect(await readVoterElection(fakeDeps({keyholders: FIVE, keyRelease}).deps, D - 6 * HOUR)).not.toHaveProperty('keysReleased');
+	});
+
+	it('V4: a throwing getEngine or a rejecting status read leaves keysReleased absent and the election still resolves', async () => {
+		const withoutEngine = await readVoterElection(fakeDeps({keyholders: FIVE}).deps, D - 6 * HOUR);
+		expect(withoutEngine).toMatchObject({id: 'e-1', keysTotal: 5});
+		expect(withoutEngine).not.toHaveProperty('keysReleased');
+
+		const rejecting = {getKeyReleaseStatus: jest.fn(async () => {
+			throw new Error('read failed');
+		})};
+		const election = await readVoterElection(fakeDeps({keyholders: FIVE, keyRelease: rejecting}).deps, D - 6 * HOUR);
+		expect(election).toMatchObject({id: 'e-1', keysTotal: 5});
+		expect(election).not.toHaveProperty('keysReleased');
+		expect(rejecting.getKeyReleaseStatus).toHaveBeenCalled();
+	});
+
+	it.each([
+		['Upcoming', D - 60 * DAY],
+		['Open', D - 10 * DAY],
+	] as const)('V5: the %s state never calls getKeyReleaseStatus and has no keysReleased', async (state, now) => {
+		const keyRelease = stub(status({}));
+		const election = await readVoterElection(fakeDeps({keyholders: FIVE, keyRelease}).deps, now);
+		expect(election.lifecycleState).toBe(state);
+		expect(keyRelease.getKeyReleaseStatus).not.toHaveBeenCalled();
+		expect(election).not.toHaveProperty('keysReleased');
 	});
 });
 
