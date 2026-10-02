@@ -30,7 +30,7 @@ import {
   REGISTRATION_REQUEST_NAME_SCAN_BATCH,
   registrationRequestNameMatches
 } from './registration-request-query.js'
-import { openRegistrationPayload, openRegistrantPrivateDetails, openRegistrantSelectiveDetails, sealRegistrationPayload, sealRegistrantPrivateDetails, sealRegistrantSelectiveDetails } from './sealed-registration-content.js'
+import { isSealedRegistrationContent, openRegistrationPayload, openRegistrantPrivateDetails, openRegistrantSelectiveDetails, sealRegistrationPayload, sealRegistrantPrivateDetails, sealRegistrantSelectiveDetails } from './sealed-registration-content.js'
 import type { RegistrationPayloadRead } from './sealed-registration-content.js'
 import { IntakeError } from '../intake/types.js'
 import {
@@ -636,7 +636,7 @@ export class RegistrationEngine implements IRegistrationEngine {
       }
     )
 
-    return { cid, registrantId, expiration, selectiveDetails: leaves, detailsAccess: 'opened' }
+    return { cid, registrantId, expiration, selectiveDetails: leaves, detailsAccess: isSealedRegistrationContent(storedDetails) ? 'opened' : 'unsealed' }
   }
 
   /**
@@ -659,7 +659,7 @@ export class RegistrationEngine implements IRegistrationEngine {
       const leaves = await this.buildSelectiveLeaves(input.fields)
       const cid = await this.computeRegistrantSelectiveCid(JSON.stringify(leaves))
       // D-52: seal ONCE (Cid is over the plaintext leaves, computed above). An empty field set keeps its
-      // pre-D-52 behavior: the constant '[]' is stored unsealed (no recipient needed to say "nothing").
+      // pre-D-52 behavior: the constant '[]' is stored unsealed (no recipient needed to say "nothing") and reads back 'unsealed'.
       const registrantRow = await this.ctx!.db
         .prepare('select AuthorityId from Registrant where Id = :registrantId')
         .get({ registrantId: input.registrantId })

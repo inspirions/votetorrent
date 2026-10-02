@@ -249,8 +249,9 @@ export type RegistrantSelectiveRead =
 /**
  * Never throws for content. Order: (1) non-string -> 'unreadable'; (2) sealed: no opener ->
  * 'no-opener', else open under the binding (failures via `mapOpenFailure`); (3) unsealed: plaintext
- * = stored; (4) parse to a non-empty array of objects with string `name` and `salt`, else
- * 'unreadable'; (5) TIER-2 RECHECK: `cid(set_commit(plaintext)) !== cid` -> 'tampered', for sealed
+ * = stored; (4) parse to an array of objects with string `name` and `salt`, else
+ * 'unreadable' (WR-02: an unsealed empty set is the pre-D-52 "no selective fields" constant and
+ * passes the same Cid recheck; a sealed empty set is never written by the engine and stays unreadable); (5) TIER-2 RECHECK: `cid(set_commit(plaintext)) !== cid` -> 'tampered', for sealed
  * and unsealed rows alike.
  */
 export async function openRegistrantSelectiveDetails (db: Database, opener: IntakeOpener | undefined, row: {
@@ -278,7 +279,9 @@ export async function openRegistrantSelectiveDetails (db: Database, opener: Inta
   } catch {
     return { access: 'unreadable', leaves: undefined }
   }
-  if (!Array.isArray(parsed) || parsed.length === 0) return { access: 'unreadable', leaves: undefined }
+  if (!Array.isArray(parsed)) return { access: 'unreadable', leaves: undefined }
+  // WR-02: an unsealed '[]' is the pre-D-52 "no selective fields" constant and falls through to the Cid recheck.
+  if (parsed.length === 0 && sealed) return { access: 'unreadable', leaves: undefined }
   for (const leaf of parsed) {
     if (leaf === null || typeof leaf !== 'object' || typeof (leaf as { name?: unknown }).name !== 'string' || typeof (leaf as { salt?: unknown }).salt !== 'string') {
       return { access: 'unreadable', leaves: undefined }

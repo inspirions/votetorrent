@@ -183,6 +183,30 @@ describe('selective seal/open (D-52, T-62-31-13)', () => {
     })
   })
 
+  describe('SC8b — empty set (WR-02)', () => {
+    it('unsealed [] under its own Cid opens unsealed; under a foreign Cid tampered; sealed empty stays unreadable', async () => {
+      const fx = await fresh()
+      const probe = await fx.ctx.db.prepare('select cid(set_commit(:p)) as c').get({ p: '[]' })
+      expect(probe!.c).to.not.equal(null)
+      const emptyCid = probe!.c as string
+
+      const ok = await openRegistrantSelectiveDetails(fx.ctx.db, undefined, { registrantId: 'sc8e', cid: emptyCid, stored: '[]' })
+      expect(ok.access).to.equal('unsealed')
+      expect(ok.leaves).to.deep.equal([])
+
+      const foreign = await cidOf(fx.ctx.db, await makeLeaves(fx.ctx.db, [['z', 'z']]))
+      const bad = await openRegistrantSelectiveDetails(fx.ctx.db, undefined, { registrantId: 'sc8e', cid: foreign, stored: '[]' })
+      expect(bad.access).to.equal('tampered')
+      expect(bad.leaves).to.equal(undefined)
+
+      await provisionTestIntakeRecipient(fx.ctx, fx.authority.id)
+      const envelope = await sealRegistrantSelectiveDetails(fx.ctx.db, { authorityId: fx.authority.id, registrantId: 'sc8e', cid: emptyCid, leaves: [] })
+      const sealedEmpty = await openRegistrantSelectiveDetails(fx.ctx.db, fx.ctx.intakeOpener, { registrantId: 'sc8e', cid: emptyCid, stored: envelope })
+      expect(sealedEmpty.access).to.equal('unreadable')
+      expect(sealedEmpty.leaves).to.equal(undefined)
+    })
+  })
+
   describe('SC7 — no leak', () => {
     it('no console call or error message captured a marker or salt', () => {
       expect(markers.length).to.be.greaterThan(0)

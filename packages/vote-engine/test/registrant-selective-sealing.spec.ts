@@ -113,6 +113,13 @@ async function rawRegistrantWithSelective (
   )
 }
 
+async function rawRegistrantRowViaInsert (engine: RegistrationEngine, id: string, cid: string, sign: unknown): Promise<void> {
+  const priv = engine as unknown as {
+    insertRegistrantSelectiveRow: (r: string, e: number, l: SelectiveLeaf[], s: string, c: string, sg: unknown) => Promise<unknown>
+  }
+  await priv.insertRegistrantSelectiveRow(id, FUTURE, [], '[]', cid, sign)
+}
+
 describe('registrant-selective-sealing — D-52 (62-36 Task 2)', function () {
   this.timeout(60_000)
 
@@ -364,6 +371,58 @@ describe('registrant-selective-sealing — D-52 (62-36 Task 2)', function () {
         expect(await rawSelective(auth.ctx, id)).to.equal(undefined)
         expect((await engine.getRegistrant(id))!.selectiveCid).to.equal(undefined)
       }
+    })
+  })
+
+  describe('S13 — empty selective set round-trips (WR-02)', () => {
+    type Priv = {
+      buildSelectiveLeaves: (f: Array<{ name: string; value: string }>) => Promise<SelectiveLeaf[]>
+      computeRegistrantSelectiveCid: (j: string) => Promise<string>
+      computeRegistrantPrivateCid: (id: string, a: { expiration: number; storedDetails: string }) => Promise<string>
+      insertRegistrantSelectiveRow: (
+        registrantId: string, expiration: number, leaves: SelectiveLeaf[], stored: string, cid: string, sign: unknown
+      ) => Promise<unknown>
+    }
+    async function parent (auth: TestAuthorityContext, engine: RegistrationEngine, id: string): Promise<string> {
+      const priv = engine as unknown as Priv
+      const cid = await priv.computeRegistrantSelectiveCid('[]')
+      const privateCid = await priv.computeRegistrantPrivateCid(id, { expiration: FUTURE, storedDetails: '[]' })
+      await engine.createRegistrant({ id, authorityId: auth.authority.id, privateCid, selectiveCid: cid, expiration: FUTURE }, makeTestSignCallback(auth.user))
+      return cid
+    }
+
+    it('S13 new empty: create, get and disclosed all report unsealed with an empty leaf list', async () => {
+      const auth = await freshAuthority(true)
+      const elec = await addTestElection(auth)
+      const electionRow = await elec.ctx.db.prepare('select Id from Election where AuthorityId = :a limit 1').get({ a: elec.authority.id })
+      const electionId = electionRow!.Id as string
+      const engine = new RegistrationEngine(auth.ctx)
+      const sign = makeTestSignCallback(auth.user)
+      const id = crypto.randomUUID()
+      await parent(auth, engine, id)
+      const created = await engine.createRegistrantSelective({ registrantId: id, expiration: FUTURE, fields: [] }, sign)
+      expect(created.detailsAccess).to.equal('unsealed')
+      expect(created.selectiveDetails).to.deep.equal([])
+      expect((await rawSelective(auth.ctx, id))!.SelectiveDetails).to.equal('[]')
+      const read = await engine.getRegistrantSelective(id)
+      expect(read!.detailsAccess).to.equal('unsealed')
+      expect(read!.selectiveDetails).to.deep.equal([])
+      const view = await engine.getDisclosedSelective(electionId, id, 'everyone')
+      expect(view!.access).to.equal('unsealed')
+      expect(view!.disclosed).to.deep.equal([])
+      expect(view!.hidden).to.deep.equal([])
+      expect(view!.root).to.not.equal('')
+    })
+
+    it('S13b legacy [] row written through the raw insert path reads unsealed', async () => {
+      const auth = await freshAuthority(true)
+      const engine = new RegistrationEngine(auth.ctx)
+      const id = crypto.randomUUID()
+      const cid = await parent(auth, engine, id)
+      await rawRegistrantRowViaInsert(engine, id, cid, makeTestSignCallback(auth.user))
+      const read = await engine.getRegistrantSelective(id)
+      expect(read!.detailsAccess).to.equal('unsealed')
+      expect(read!.selectiveDetails).to.deep.equal([])
     })
   })
 
