@@ -26,6 +26,11 @@ export const REGISTRATION_CODE_FORMATTED_LENGTH = 11
  * from — never published, never transmitted; only its derivation uses this string. */
 export const REGISTRATION_CODE_DOMAIN = 'votetorrent/registration-code/v1'
 
+/** Domain tag of the requester's signature over `sha256(domain + '\n' + requestId + '\n' + code)`
+ * carried inside the sealed staging plaintext (V-3, D-45); verified officer-side against the
+ * approved `RegistrationRequest.RequesterKey`. */
+export const REGISTRATION_CODE_BINDING_DOMAIN = 'votetorrent/registration-code-binding/v1'
+
 /**
  * Reads the first 50 bits of `bytes`, MSB-first, 5 bits per output character — a bit accumulator
  * over BYTES only (never a >8-bit shift, and never an arbitrary-precision integer type: Hermes

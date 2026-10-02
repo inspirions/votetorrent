@@ -1,4 +1,4 @@
-import type { Timestamp } from '../common/index.js'
+import type { Signature, Timestamp } from '../common/index.js'
 
 /** ********* Enums (D-08, text codes — avoids the number/boolean-in-Digest pitfalls) ***********/
 
@@ -151,7 +151,7 @@ export type RegisterSelectivePayload = SelectiveFieldInput[]
 
 /** ********* RegistrantSelective (authority-held, insert-only, 'vrg'-signed) ***********/
 export interface RegistrantSelective {
-  /** Content-addressed CIDv1 of this record: cid(set_commit(SelectiveDetails)) */
+  /** Content-addressed CIDv1 of the PLAINTEXT leaves: cid(set_commit(<plaintext leaves>)) */
   cid: string
 
   /** references Registrant.id */
@@ -161,6 +161,12 @@ export interface RegistrantSelective {
 
   /** json array of flat { name, value, salt } salted leaves (SaltedLeaf[]) */
   selectiveDetails?: SaltedLeaf[]
+
+  /**
+   * D-52: how `selectiveDetails` was read on THIS device. `selectiveDetails` is `undefined`
+   * unless this is `'opened'` or `'unsealed'`. Undefined = not reported (e.g. `MockRegistrationEngine`).
+   */
+  detailsAccess?: RegistrationContentAccess
 }
 
 /**
@@ -179,6 +185,13 @@ export interface DisclosedSelective {
   root: string
   disclosed: SelectiveLeaf[]
   hidden: string[]
+
+  /**
+   * D-52: how the underlying `RegistrantSelective` leaves were read on THIS device. When it is not
+   * `'opened'` or `'unsealed'`, `disclosed` and `hidden` are empty and `root` is `''`.
+   * Undefined = not reported (e.g. the mock engine).
+   */
+  access?: RegistrationContentAccess
 }
 
 /** DisclosureAudience(Code) — which recipients a selective field may be revealed to. */
@@ -471,10 +484,9 @@ export interface RegistrationRequestInit {
  * 62-01 (D-45): the plaintext a 62-04 `SealedEnvelope` seals into
  * `RegistrationRequestStaging.InitJson`. `registrationCode` exists ONLY inside this ciphertext —
  * it is NEVER copied into `RegisterInit`, `RegistrationRequest.Payload`, or any schema column
- * (62-01 Task 1's decision: `RegistrationEngine.submitRegistrationRequest` persists the OPENED
- * `RegisterInit` as plaintext into `RegistrationRequest.Payload`, and the Authority's strand path
- * hands that table's own Quereus DB to every peer on the strand, so a code inside `RegisterInit`
- * would ride the public replica).
+ * (since D-49 `RegistrationRequest.Payload` is itself sealed, 62-31; the code stays out of it
+ * regardless, because the Authority's strand path hands that table's own Quereus DB to every peer
+ * on the strand).
  *
  * The durable carrier of the code is the `RegistrationRequestStaging` row itself (kept forever,
  * D-07; sealed, D-04) — an officer matches a re-association by opening the ORIGINAL staging row
@@ -487,6 +499,16 @@ export interface RegistrationStagingPlaintext {
   version: 1
   init: RegistrationRequestInit
   registrationCode?: string
+
+  /**
+   * V-3 / D-45: the requester's signature over
+   * `sha256(REGISTRATION_CODE_BINDING_DOMAIN + '\n' + requestId + '\n' + code)`, verified
+   * officer-side against the approved `RegistrationRequest.RequesterKey`. Present whenever
+   * `registrationCode` is (written by `P2pRegistrationTransport.submitRequest`); a row with a code
+   * and no valid binding signature is never a code match: it reads `unverifiable` and never takes
+   * the automatic route.
+   */
+  registrationCodeSignature?: Signature
 }
 
 /**
