@@ -295,7 +295,7 @@ const UNREAD: Array<[RegistrationContentAccess, string]> = [
 	["not-a-recipient", "registrantSelectiveNotRecipient"],
 	["no-opener", "registrationContentNoKey"],
 	["unreadable", "registrantSelectiveUnreadable"],
-	["tampered", "registrantSelectiveUnreadable"],
+	["tampered", "registrantSelectiveTampered"],
 ];
 
 describe("RegistrantDetailScreen — sealed selective tier (D-52, D-51)", () => {

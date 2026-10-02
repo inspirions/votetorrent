@@ -240,13 +240,14 @@ describe("selectiveTierReadState (M1/M2)", () => {
 		expect(selectiveTierReadState("not-a-recipient")).toBe("not-a-recipient");
 		expect(selectiveTierReadState("no-opener")).toBe("no-key");
 		expect(selectiveTierReadState("unreadable")).toBe("unreadable");
-		expect(selectiveTierReadState("tampered")).toBe("unreadable");
+		expect(selectiveTierReadState("tampered")).toBe("tampered");
 	});
 	it("M2: copy map", () => {
 		expect(SELECTIVE_TIER_READ_STATE_COPY).toEqual({
 			"not-a-recipient": "registrantSelectiveNotRecipient",
 			"no-key": "registrationContentNoKey",
 			unreadable: "registrantSelectiveUnreadable",
+			tampered: "registrantSelectiveTampered",
 		});
 	});
 });

@@ -1050,6 +1050,8 @@ const resources = {
 			registrantSelectiveNotRecipient:
 				'These selective-disclosure details were sealed before you became an officer, so they cannot be shown on this device.',
 			registrantSelectiveUnreadable: 'These selective-disclosure details could not be read on this device.',
+			registrantSelectiveTampered:
+				"These selective-disclosure details do not match the registrant's signed record. Do not rely on them.",
 		},
 	},
 	es: {
@@ -2080,6 +2082,8 @@ const resources = {
 			registrantSelectiveNotRecipient:
 				'Estos datos de divulgación selectiva se sellaron antes de que fueras funcionario, así que no se pueden mostrar en este dispositivo.',
 			registrantSelectiveUnreadable: 'No se pudieron leer estos datos de divulgación selectiva en este dispositivo.',
+			registrantSelectiveTampered:
+				'Estos datos de divulgación selectiva no coinciden con el registro firmado del registrante. No confíes en ellos.',
 		},
 	},
 };
