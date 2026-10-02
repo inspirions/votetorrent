@@ -79,19 +79,15 @@ const WRAP_LABEL = 'vt-env-1/wrap'
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface EnvelopeRecipient {
-  readonly userId: string
-  readonly publicKey: string
-}
+// EnvelopeRecipient, EnvelopeBinding and EnvelopeOpenFailureReason live in the
+// import-free leaf `envelope-types.ts`, so type-only consumers on the
+// `./browser` graph (src/types.ts -> intake/types.ts) do not pull @noble in.
+import type { EnvelopeBinding, EnvelopeOpenFailureReason, EnvelopeRecipient } from './envelope-types.js'
+export type { EnvelopeBinding, EnvelopeOpenFailureReason, EnvelopeRecipient } from './envelope-types.js'
 
 export interface EnvelopeRecipientSecret {
   readonly userId: string
   readonly secretKey: Uint8Array
-}
-
-export interface EnvelopeBinding {
-  readonly requestId: string
-  readonly digest: string
 }
 
 export interface SealedEnvelopeRecipientEntry {
@@ -128,13 +124,6 @@ export class EnvelopeSealError extends Error {
     this.code = code
   }
 }
-
-export type EnvelopeOpenFailureReason =
-  | 'invalid-argument'
-  | 'malformed-envelope'
-  | 'unsupported-version'
-  | 'not-a-recipient'
-  | 'authentication-failed'
 
 export type EnvelopeOpenResult =
   | { readonly ok: true, readonly plaintext: Uint8Array }

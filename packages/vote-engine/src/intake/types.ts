@@ -20,7 +20,7 @@
 // ...) is imported from `../crypto/index.js` and never redeclared here.
 
 import type { Signature } from '@votetorrent/vote-core'
-import type { EnvelopeBinding, EnvelopeOpenFailureReason, EnvelopeRecipient } from '../crypto/index.js'
+import type { EnvelopeBinding, EnvelopeOpenFailureReason, EnvelopeRecipient } from '../crypto/envelope-types.js'
 
 /**
  * Every refusal this module can throw as an `IntakeError`. Messages built

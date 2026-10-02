@@ -1,6 +1,6 @@
 import type { Database } from '@quereus/quereus'
 import type { User } from '@votetorrent/vote-core'
-import type { IntakeOpener } from './intake/index.js'
+import type { IntakeOpener } from './intake/types.js'
 
 export interface EngineContext {
   db: Database
