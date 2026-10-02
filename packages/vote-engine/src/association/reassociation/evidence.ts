@@ -1,20 +1,28 @@
 /**
- * evidence.ts — 62-18 Task 3 (D-45).
+ * evidence.ts — 62-18 Task 3 (D-45), migrated onto D-49 sealing by 62-31.
  *
  * Pure reads plus opener calls — no writes, no logging. A re-association's registration code or
- * identity fields are matched OFFICER-SIDE, after decrypt (the opened registration payload is a
- * pre-existing plaintext, T-62-01-10, referenced here and never widened), never by a SQL query
- * over ciphertext (research's own "don't hand-roll a SQL-visible match" ruling). Performance is
- * one envelope open per approved registration per call — a documented residual, not a cache
- * across calls: `cache` is created fresh by every PUBLIC entry point in `driver.ts` and dropped
- * at the end of that call, so an opened plaintext never outlives the request that needed it.
+ * identity fields are matched OFFICER-SIDE, after decrypt, never by a SQL query over ciphertext
+ * (research's own "don't hand-roll a SQL-visible match" ruling). Performance is one envelope open
+ * per approved registration per call — a documented residual, not a cache across calls: `cache`
+ * is created fresh by every PUBLIC entry point in `driver.ts` and dropped at the end of that call,
+ * so an opened plaintext never outlives the request that needed it.
+ *
+ * D-49 (62-31): `RegistrationRequest.Payload` may now hold a sealed D-49 envelope. `opener` here is
+ * a `ReassociationOpener` (structurally identical to 62-14's `IntakeOpener` — `.open(sealed,
+ * binding)`, same result shape — but declared without `IntakeOpener`'s `userId` field, since
+ * `IReassociationEngine`'s own vote-core contract never needed it). The cast below is the same
+ * structural-fit gap `engine-factory.ts`'s own `ctx.db as unknown as StrandSqlDatabase` documents —
+ * `openRegistrationPayload`/`openRegistrantPrivateDetails` only ever call `opener.open(...)`.
  */
 
 import type { Database } from '@quereus/quereus'
 import { REASSOCIATION_MAX_CANDIDATES, registrationCodesEqual } from '@votetorrent/vote-core'
 import type { AssociationIdentityField, PrivateDetail, ReassociationCandidate, ReassociationOpener, RegisterInit } from '@votetorrent/vote-core'
 import { decodeStagingPlaintext } from '../../registration/transport/p2p-staging-seam.js'
-import { asText, parseJsonOr } from '../../utils.js'
+import { openRegistrationPayload } from '../../registration/sealed-registration-content.js'
+import type { IntakeOpener } from '../../intake/types.js'
+import { asText } from '../../utils.js'
 
 /** One approved registration, resolved to its ALREADY-active registrant. */
 export interface ApprovedRegistration {
@@ -23,39 +31,73 @@ export interface ApprovedRegistration {
   readonly payload: RegisterInit
 }
 
+/**
+ * D-49: the result of scanning every approved registration of one authority. `unreadCount` is the
+ * number of approved rows whose Payload could not be opened AT ALL (so no registrantId could even
+ * be resolved from it) — distinct from a row that opened fine but failed the OLD malformed-payload
+ * skip (still silently excluded, as before this plan). Callers combine `unreadCount > 0` with a
+ * zero-match search result to report 'unverifiable' rather than a false 'unmatched' (P13).
+ */
+export interface ApprovedRegistrationsRead {
+  readonly registrations: readonly ApprovedRegistration[]
+  readonly unreadCount: number
+}
+
 /** `openRegistrationCode`'s own tiny result union — never re-exports the code itself beyond this
  * module's own return value; callers compare via `registrationCodesEqual`, never read it raw. */
 export type OpenedCode = { readonly status: 'code'; readonly code: string } | { readonly status: 'unverifiable' }
 
 /**
  * Every `RegistrationRequest` of `authorityId` that is approved (`Status = 'a'`) AND whose
- * `Payload.registrant.id` still names a currently-active `Registrant` row. Two passes: the first
- * collects candidate (requestId, payload) pairs from one `db.eval` cursor; the second probes each
- * registrant's current status via its own `db.prepare(...).get(...)` call — never nested inside
- * the still-open eval cursor (this codebase's own established discipline for that reason).
+ * (opened) `Payload.registrant.id` still names a currently-active `Registrant` row. `opener` is
+ * REQUIRED to resolve a registrantId from a sealed row at all — when omitted (e.g.
+ * `getRegistrationCodeHolderKey`, which `IReassociationEngine` declares with no opener parameter),
+ * every sealed row counts toward `unreadCount` and contributes no registration. Three passes: the
+ * first collects raw (requestId, payloadCid, stored) rows from one `db.eval` cursor; the second
+ * opens each — never nested inside the still-open eval cursor (this codebase's own established
+ * discipline); the third probes each resolved registrant's current status via its own
+ * `db.prepare(...).get(...)` call.
  */
-export async function listApprovedRegistrations (db: Database, authorityId: string): Promise<ApprovedRegistration[]> {
-  const candidates: Array<{ requestId: string; registrantId: string; payload: RegisterInit }> = []
+export async function listApprovedRegistrations (db: Database, authorityId: string, opener?: ReassociationOpener): Promise<ApprovedRegistrationsRead> {
+  const rawRows: Array<{ requestId: string; payloadCid: string; stored: unknown }> = []
   for await (const row of db.eval(
-    "select Id, Payload from RegistrationRequest where AuthorityId = :rowAuthorityId and Status = 'a'",
+    "select Id, Payload, PayloadCid from RegistrationRequest where AuthorityId = :rowAuthorityId and Status = 'a'",
     { rowAuthorityId: authorityId }
   )) {
-    const requestId = asText(row.Id, 'RegistrationRequest.Id')
-    const payload = parseJsonOr<RegisterInit | undefined>(row.Payload, undefined, 'RegistrationRequest.Payload')
-    const registrantId = payload?.registrant?.id
-    if (typeof registrantId !== 'string' || registrantId.length === 0 || payload === undefined) continue
-    candidates.push({ requestId, registrantId, payload })
+    rawRows.push({
+      requestId: asText(row.Id, 'RegistrationRequest.Id'),
+      payloadCid: asText(row.PayloadCid, 'RegistrationRequest.PayloadCid'),
+      stored: row.Payload
+    })
   }
 
-  const out: ApprovedRegistration[] = []
+  const candidates: Array<{ requestId: string; registrantId: string; payload: RegisterInit }> = []
+  let unreadCount = 0
+  for (const row of rawRows) {
+    const read = await openRegistrationPayload(db, opener as unknown as IntakeOpener | undefined, {
+      requestId: row.requestId,
+      payloadCid: row.payloadCid,
+      stored: row.stored
+    })
+    if (read.access !== 'opened' && read.access !== 'unsealed') {
+      unreadCount++
+      continue
+    }
+    const payload = read.payload
+    const registrantId = payload.registrant?.id
+    if (typeof registrantId !== 'string' || registrantId.length === 0) continue
+    candidates.push({ requestId: row.requestId, registrantId, payload })
+  }
+
+  const registrations: ApprovedRegistration[] = []
   for (const candidate of candidates) {
     const activeRow = await db
       .prepare("select 1 as x from Registrant where Id = :registrantId and Status = 'a'")
       .get({ registrantId: candidate.registrantId })
     if (!activeRow) continue
-    out.push(candidate)
+    registrations.push(candidate)
   }
-  return out
+  return { registrations, unreadCount }
 }
 
 /**
@@ -99,17 +141,18 @@ async function openCached (db: Database, opener: ReassociationOpener, requestId:
 }
 
 /** Verifies `presented` against ONE registrant's own approved-registration code — 'unverifiable'
- * when that registrant has no resolvable registration in `approved`, or its staging row cannot be
+ * when that registrant has no resolvable registration in `approved.registrations` (including when
+ * its own RegistrationRequest.Payload could not be opened, D-49), or its staging row cannot be
  * opened/decoded. */
 export async function verifyRegistrationCode (
   db: Database,
   opener: ReassociationOpener,
   presented: string,
   registrantId: string,
-  approved: readonly ApprovedRegistration[],
+  approved: ApprovedRegistrationsRead,
   cache: Map<string, OpenedCode>
 ): Promise<'matched' | 'unmatched' | 'unverifiable'> {
-  const reg = approved.find((a) => a.registrantId === registrantId)
+  const reg = approved.registrations.find((a) => a.registrantId === registrantId)
   if (reg === undefined) return 'unverifiable'
   const opened = await openCached(db, opener, reg.requestId, cache)
   if (opened.status === 'unverifiable') return 'unverifiable'
@@ -119,21 +162,23 @@ export async function verifyRegistrationCode (
 /**
  * Scans every approved registration for one whose own code equals `presented`. Exactly one match
  * is `{outcome:'matched', registrantId}`. Zero matches while at least one row could not be
- * verified, or MORE than one match (an officer-visible ambiguity, D-45's guessing-oracle note),
- * is `{outcome:'unverifiable'}` — never auto-approved. Otherwise `{outcome:'unmatched'}`.
+ * verified (its staging envelope), or at least one approved row's REGISTRATION PAYLOAD itself
+ * could not be opened (D-49 — `approved.unreadCount > 0`, so it was never even a candidate), or
+ * MORE than one match (an officer-visible ambiguity, D-45's guessing-oracle note), is
+ * `{outcome:'unverifiable'}` — never auto-approved. Otherwise `{outcome:'unmatched'}`.
  */
 export async function resolveRegistrantByCode (
   db: Database,
   opener: ReassociationOpener,
   presented: string,
-  approved: readonly ApprovedRegistration[],
+  approved: ApprovedRegistrationsRead,
   cache: Map<string, OpenedCode>
 ): Promise<{ readonly outcome: 'matched'; readonly registrantId: string } | { readonly outcome: 'unmatched' | 'unverifiable' }> {
   let matchedRegistrantId: string | undefined
   let matchCount = 0
-  let sawUnverifiable = false
+  let sawUnverifiable = approved.unreadCount > 0
 
-  for (const reg of approved) {
+  for (const reg of approved.registrations) {
     const opened = await openCached(db, opener, reg.requestId, cache)
     if (opened.status === 'unverifiable') {
       sawUnverifiable = true
@@ -203,15 +248,17 @@ function normalizeFieldValue (value: string): string {
  */
 export function rankIdentityCandidates (
   fields: readonly AssociationIdentityField[],
-  approved: readonly ApprovedRegistration[]
+  approved: ApprovedRegistrationsRead
 ): ReassociationCandidate[] {
   const submitted = new Map<string, string>()
   for (const field of fields) {
     submitted.set(normalizeFieldName(field.name), normalizeFieldValue(field.value))
   }
 
+  // D-49: an unread row is simply absent from `approved.registrations` — it was never a candidate
+  // (it cannot be ranked; its identity is unknown). No special-casing needed here.
   const scored: Array<{ registrantId: string; count: number; matchedFieldNames: string[]; displayName?: string }> = []
-  for (const reg of approved) {
+  for (const reg of approved.registrations) {
     const record = identityRecordOf(reg.payload)
     const matchedFieldNames: string[] = []
     for (const field of record) {

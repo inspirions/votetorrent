@@ -847,7 +847,10 @@ describe('re-association driver (62-18 Task 3, D-40/D-41/D-45/D-46)', function (
       await new RegistrationEngine(ctx).submitRegistrationRequest(regInit, voter.publicHex, makeCallbackSigner(voter))
       const threshNetworkRef = { hash: 'reassoc-thresh-hash', name: 'Reassoc Thresh Network', relays: [], primaryAuthorityDomainName: 'reassoc-thresh.example' }
       for (const holder of [threshAuth.holders[0]!, threshAuth.holders[1]!]) {
-        const tasksEngine = new SignatureTasksEngine(threshNetworkRef, { db: ctx.db, user: holder.user })
+        // D-49 (62-31): every holder reads through the SAME provisioned opener (ctx.intakeOpener,
+        // set by provisionTestIntakeRecipient against the founder above) — this test is not about
+        // D-49, it needs a real RegistrantSignatureTask (with requestId) to find and sign.
+        const tasksEngine = new SignatureTasksEngine(threshNetworkRef, { db: ctx.db, user: holder.user, intakeOpener: ctx.intakeOpener })
         const tasks = await tasksEngine.getRequestedSignatures(true)
         const task = tasks.find((t) => t.signatureType === 'registrant' && (t as RegistrantSignatureTask).requestId === regInit.id) as RegistrantSignatureTask | undefined
         if (task === undefined) throw new Error(`threshold gate test: no pending registrant task for holder=${holder.user.id}`)

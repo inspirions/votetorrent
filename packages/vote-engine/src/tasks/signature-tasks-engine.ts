@@ -8,7 +8,8 @@ import { findPendingAdminTaskRow, findPendingTaskNonce } from './task-signing-st
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
 import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
-import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError, RegistrationDuplicateError } from '@votetorrent/vote-core'
+import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError, RegistrationDuplicateError, RegistrationContentAccessError } from '@votetorrent/vote-core'
+import { openRegistrationPayload } from '../registration/sealed-registration-content.js'
 import type {
   ISigningEngine,
   ISignatureTasksEngine,
@@ -277,7 +278,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           // consumer must never infer "registrant-submitted" from a missing label.
           const rExtRow = await this.ctx.db
             .prepare(
-              `select E.RequestId, R.AuthorityId, R.IssuerType, R.BridgeId, R.Payload, R.SubmittedAt,
+              `select E.RequestId, R.AuthorityId, R.IssuerType, R.BridgeId, R.Payload, R.PayloadCid, R.SubmittedAt,
                       B.Label as BridgeLabel
                  from RegistrantSignatureTaskExtension E
                    join RegistrationRequest R on R.Id = E.RequestId
@@ -286,8 +287,16 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
             )
             .get({ taskId: row.Id })
 
+          // D-49: open through the one seal/open module (the tier-2 PayloadCid recheck included).
+          // Any access other than 'opened'/'unsealed' takes the EXISTING base-task fallback below —
+          // the same discipline this branch already had for a missing extension row, a missing
+          // joined request, or an unparseable payload.
           const payload = rExtRow
-            ? parseJsonOr<RegisterInit | undefined>(rExtRow.Payload as string, undefined, 'RegistrationRequest.Payload')
+            ? (await openRegistrationPayload(this.ctx.db, this.ctx.intakeOpener, {
+                requestId: rExtRow.RequestId as string,
+                payloadCid: rExtRow.PayloadCid as string,
+                stored: rExtRow.Payload
+              })).payload
             : undefined
 
           if (rExtRow && payload) {
@@ -861,7 +870,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           // RegistrationDuplicateError through undecorated — this.rethrow() below wraps any plain
           // Error into a fresh `new Error(...)` and would destroy the instanceof check each typed
           // error exists to provide.
-          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError) {
+          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError || err instanceof RegistrationContentAccessError) {
             throw err
           }
           this.rethrow(err, 'completeSignature (registrant pre-check)')
@@ -1040,7 +1049,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           // site above — finalizeRegistrantApproval's own defence-in-depth guard, and register()
           // itself, can both throw RegistrantAlreadyExistsError; resolveAcceptableRegistrantApproval
           // (called internally) can throw RegistrationDuplicateError. Neither may be re-wrapped.
-          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError) {
+          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError || err instanceof RegistrationContentAccessError) {
             throw err
           }
           this.rethrow(err, 'completeSignature (finalize registrant)')
@@ -1544,7 +1553,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
     }
     const extRow = await ctx.db
       .prepare(
-        `select E.RequestId, R.AuthorityId, R.Payload, R.Status, R.SubmittedAt, R.ReceivedAt
+        `select E.RequestId, R.AuthorityId, R.Payload, R.PayloadCid, R.Status, R.SubmittedAt, R.ReceivedAt
            from RegistrantSignatureTaskExtension E
              join RegistrationRequest R on R.Id = E.RequestId
            where E.TaskId = :taskId`
@@ -1553,6 +1562,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         RequestId: string
         AuthorityId: string
         Payload: string
+        PayloadCid: string
         Status: string
         SubmittedAt: string
         ReceivedAt: string
@@ -1572,6 +1582,15 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       )
     }
 
+    // D-49 (62-31): open BEFORE every other gate below, including the D-44 closure check — an
+    // officer who cannot read this request's payload must never be told anything MORE specific
+    // about it (closed-as-duplicate, authority mismatch, ...) than "cannot be approved here".
+    const payloadRead = await openRegistrationPayload(ctx.db, ctx.intakeOpener, { requestId, payloadCid: extRow.PayloadCid, stored: extRow.Payload })
+    if (payloadRead.access !== 'opened' && payloadRead.access !== 'unsealed') {
+      throw new RegistrationContentAccessError(payloadRead.access, requestId)
+    }
+    const init = payloadRead.payload
+
     // D-44 (62-19): a request closed or closing as a duplicate cannot be decided — checked BEFORE
     // sign() (this is called from completeSignature's pre-check, ahead of any signature spend).
     const duplicateClosure = await readDuplicateClosure(ctx.db, requestId, extRow.AuthorityId)
@@ -1582,11 +1601,6 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
         'This request was closed as a duplicate of another request and can no longer be decided.',
         duplicateClosure.closedByRequestId ?? undefined
       )
-    }
-
-    const init = parseJsonOr<RegisterInit | undefined>(extRow.Payload, undefined, 'RegistrationRequest.Payload')
-    if (!init) {
-      throw new Error(`SignatureTasksEngine.resolveAcceptableRegistrantApproval: RegistrationRequest ${requestId} Payload failed to parse`)
     }
 
     if (init.registrant?.authorityId !== extRow.AuthorityId) {

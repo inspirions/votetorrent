@@ -28,6 +28,7 @@ import type { PrivateDetail, Signature } from '@votetorrent/vote-core'
 import { collectPrivateFieldNames, sanitizeAccessTrailFields } from '../src/registration/access-trail-fields.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { MockRegistrationEngine } from '../src/registration/mock-registration-engine.js'
+import { sealRegistrantPrivateDetails } from '../src/registration/sealed-registration-content.js'
 import { createTestNetwork, addTestAuthority, provisionTestIntakeRecipient } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { nowCanonicalDatetime } from '../src/utils.js'
@@ -174,17 +175,37 @@ const TRAIL_PRIVATE_DETAILS: PrivateDetail[] = [
   { name: 'phone', value: '555-0100' }
 ]
 
-/** Mirrors RegistrationEngine's private computeRegistrantPrivateCid (registration.spec.ts's own precedent). */
-async function computeTrailPrivateCid (
+/**
+ * D-49 (62-31): seals `details` ONCE (sealing is randomized) and computes the Cid over that SAME
+ * stored text — mirrors `registration.spec.ts`'s own `sealPrivateDetails` precedent, so a test
+ * driving `createRegistrant` and the private-tier insert as two SEPARATE calls can still predict
+ * the parent's `PrivateCid` before the child row exists, without re-sealing (which would produce a
+ * DIFFERENT Cid and trip `RegistrantCidMatch`).
+ */
+async function sealTrailPrivateDetails (
   ctx: EngineContext,
+  authorityId: string,
   registrantId: string,
   input: { expiration: number; details: PrivateDetail[] }
-): Promise<string> {
+): Promise<{ storedDetails: string; cid: string }> {
+  const storedDetails = await sealRegistrantPrivateDetails(ctx.db, { authorityId, registrantId, details: input.details })
   const expiration = new Date(input.expiration).toISOString()
   const row = await ctx.db
     .prepare('select cid(Digest(:registrantId, :expiration, :privateDetails)) as c')
-    .get({ registrantId, expiration, privateDetails: JSON.stringify(input.details) })
-  return row!.c as string
+    .get({ registrantId, expiration, privateDetails: storedDetails })
+  return { storedDetails, cid: row!.c as string }
+}
+
+/** Narrow structural type for reaching `RegistrationEngine`'s private `insertRegistrantPrivateRow`
+ * — the project's established convention for exercising engine-internal state from a spec. */
+type EngineWithInsertRegistrantPrivateRow = Omit<RegistrationEngine, 'insertRegistrantPrivateRow'> & {
+  insertRegistrantPrivateRow: (
+    registrantId: string,
+    authorityId: string,
+    expiration: number,
+    storedDetails: string,
+    signatureOrCallback: (digest: Uint8Array) => Promise<Signature>
+  ) => Promise<{ cid: string }>
 }
 
 async function setup (): Promise<{
@@ -216,12 +237,14 @@ async function seedRegistrant (
 ): Promise<string> {
   const registrantId = nextTrailRegistrantId()
   const ctx = (engine as unknown as { ctx: EngineContext }).ctx
-  const privateCid = await computeTrailPrivateCid(ctx, registrantId, { expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS })
+  const { storedDetails, cid: privateCid } = await sealTrailPrivateDetails(ctx, auth.authority.id, registrantId, { expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS })
   await engine.createRegistrant(
     { id: registrantId, authorityId: auth.authority.id, privateCid, expiration: TRAIL_FUTURE_EXPIRATION },
     sign
   )
-  await engine.createRegistrantPrivate({ registrantId, expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS }, sign)
+  await (engine as unknown as EngineWithInsertRegistrantPrivateRow).insertRegistrantPrivateRow(
+    registrantId, auth.authority.id, TRAIL_FUTURE_EXPIRATION, storedDetails, sign
+  )
   return registrantId
 }
 
@@ -528,7 +551,7 @@ describe('RegistrantAccessEvent trail (D-01/D-02)', () => {
     const { auth, engine, sign } = await setup()
     const registrantId = nextTrailRegistrantId()
     const ctx = (engine as unknown as { ctx: EngineContext }).ctx
-    const privateCid = await computeTrailPrivateCid(ctx, registrantId, { expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS })
+    const { cid: privateCid } = await sealTrailPrivateDetails(ctx, auth.authority.id, registrantId, { expiration: TRAIL_FUTURE_EXPIRATION, details: TRAIL_PRIVATE_DETAILS })
     await engine.createRegistrant(
       { id: registrantId, authorityId: auth.authority.id, privateCid, expiration: TRAIL_FUTURE_EXPIRATION },
       sign

@@ -52,7 +52,7 @@ import {
   resolveRegistrantByCode,
   verifyRegistrationCode
 } from './evidence.js'
-import type { ApprovedRegistration, OpenedCode } from './evidence.js'
+import type { ApprovedRegistrationsRead, OpenedCode } from './evidence.js'
 
 /** The staged-answer shape `validateStagedAttestationAnswer` returns — duplicated structurally
  * (not imported) because `association-engine.ts`'s own copy is intentionally engine-internal. */
@@ -190,7 +190,7 @@ async function buildReview (
   row: { id: string; deviceKey: string; electionId?: string; submittedAt: string; receivedAt: string; status: AssociationRequestStatus },
   intake: ReassociationIntake,
   opener: ReassociationOpener,
-  approved: readonly ApprovedRegistration[],
+  approved: ApprovedRegistrationsRead,
   codeCache: Map<string, OpenedCode>,
   options?: { readonly registrantId?: string }
 ): Promise<ReassociationReview> {
@@ -224,7 +224,7 @@ async function buildReview (
   let registrantName: string | undefined
   if (resolvedRegistrantId !== undefined) {
     existingDevices = await host.getAssociations(resolvedRegistrantId)
-    const reg = approved.find((a) => a.registrantId === resolvedRegistrantId)
+    const reg = approved.registrations.find((a) => a.registrantId === resolvedRegistrantId)
     if (reg !== undefined) {
       registrantRecord = identityRecordOf(reg.payload)
       const nameParts = [reg.payload.public?.firstName, reg.payload.public?.lastName].filter((x): x is string => typeof x === 'string')
@@ -279,7 +279,7 @@ export async function listPendingReassociations (
     })
   }
 
-  const approved = await listApprovedRegistrations(host.ctx.db, authorityId)
+  const approved = await listApprovedRegistrations(host.ctx.db, authorityId, opener)
   const codeCache = new Map<string, OpenedCode>()
   const out: ReassociationReview[] = []
   for (const row of rows) {
@@ -298,7 +298,7 @@ export async function getReassociationReview (
   const row = await loadRequestRow(host.ctx.db, requestId)
   if (row === undefined || row.registrantId !== REASSOCIATION_UNRESOLVED_REGISTRANT_ID) return undefined
 
-  const approved = await listApprovedRegistrations(host.ctx.db, row.authorityId)
+  const approved = await listApprovedRegistrations(host.ctx.db, row.authorityId, opener)
   const codeCache = new Map<string, OpenedCode>()
   return buildReview(host, row.authorityId, row, intake, opener, approved, codeCache, options)
 }
@@ -337,7 +337,7 @@ export async function processPendingReassociations (
     })
   }
 
-  const r1Approved = await listApprovedRegistrations(host.ctx.db, authorityId)
+  const r1Approved = await listApprovedRegistrations(host.ctx.db, authorityId, opener)
   const r1CodeCache = new Map<string, OpenedCode>()
 
   for (const row of pendingRows) {
@@ -404,7 +404,7 @@ export async function processPendingReassociations (
       const raw = await rawEvidenceFor(doc.requestId, intake)
       let matchMethod: AssociationMatchMethod = 'identity'
       if (raw.kind === 'code') {
-        const r2Approved = await listApprovedRegistrations(host.ctx.db, authorityId)
+        const r2Approved = await listApprovedRegistrations(host.ctx.db, authorityId, opener)
         const r2CodeCache = new Map<string, OpenedCode>()
         const verdict = await verifyRegistrationCode(host.ctx.db, opener, raw.code, registrantId, r2Approved, r2CodeCache)
         matchMethod = verdict === 'matched' ? 'code' : 'identity'
@@ -492,7 +492,7 @@ export async function approveReassociation (
   const raw = await rawEvidenceFor(requestId, intake)
   let matchMethod: AssociationMatchMethod = 'identity'
   if (raw.kind === 'code') {
-    const approved = await listApprovedRegistrations(host.ctx.db, row.authorityId)
+    const approved = await listApprovedRegistrations(host.ctx.db, row.authorityId, opener)
     const codeCache = new Map<string, OpenedCode>()
     const resolved = await resolveRegistrantByCode(host.ctx.db, opener, raw.code, approved, codeCache)
     if (resolved.outcome === 'matched') {
@@ -581,8 +581,19 @@ export async function getDeviceRetirement (
   }
 }
 
-/** The `RequesterKey` of the approved registration for `registrantId` — the only key whose
- * derived code would match — or `undefined` when none is resolvable. */
+/**
+ * The `RequesterKey` of the approved registration for `registrantId` — the only key whose
+ * derived code would match — or `undefined` when none is resolvable.
+ *
+ * D-49 (62-31) residual: `IReassociationEngine.getRegistrationCodeHolderKey` declares NO opener
+ * parameter (unlike every other evidence-reading method on that interface), so a D-49-sealed
+ * RegistrationRequest.Payload cannot be opened here — `listApprovedRegistrations` is called with
+ * no opener, and every sealed approved row counts toward its `unreadCount` rather than resolving a
+ * registrantId. This method therefore only resolves a holder key for a LEGACY unsealed row. This
+ * method has no production caller and no test coverage today (confirmed by `grep` across `src/` and
+ * `test/`); widening `IReassociationEngine`'s own signature to add an opener parameter is an
+ * architectural change outside this plan's scope — recorded for 62-30.
+ */
 export async function getRegistrationCodeHolderKey (host: ReassociationHost, registrantId: string): Promise<string | undefined> {
   const registrantRow = await host.ctx.db
     .prepare('select AuthorityId from Registrant where Id = :registrantId')
@@ -591,7 +602,7 @@ export async function getRegistrationCodeHolderKey (host: ReassociationHost, reg
   const authorityId = asText(registrantRow.AuthorityId, 'Registrant.AuthorityId')
 
   const approved = await listApprovedRegistrations(host.ctx.db, authorityId)
-  const reg = approved.find((a) => a.registrantId === registrantId)
+  const reg = approved.registrations.find((a) => a.registrantId === registrantId)
   if (reg === undefined) return undefined
 
   const row = await host.ctx.db

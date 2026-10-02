@@ -27,6 +27,13 @@ import { findLikelyDuplicates, extractRegistrationIdentity, matchRegistrationIde
 import type { DuplicateComparable } from './duplicate-detection.js'
 import { registrationRequestNotClosedSql, readDuplicateClosure, readDuplicateClosureStates } from './duplicate-closure.js'
 import {
+  REGISTRATION_REQUEST_NAME_SCAN_BATCH,
+  registrationRequestNameMatches
+} from './registration-request-query.js'
+import { openRegistrationPayload, openRegistrantPrivateDetails, sealRegistrationPayload, sealRegistrantPrivateDetails } from './sealed-registration-content.js'
+import type { RegistrationPayloadRead } from './sealed-registration-content.js'
+import { IntakeError } from '../intake/types.js'
+import {
   isChecklistGateMet,
   VERIFICATION_CHECKLIST_ITEM_ORDER,
   verificationCid as computeVerificationCidFor,
@@ -210,17 +217,22 @@ export class RegistrationEngine implements IRegistrationEngine {
     return row.c as string
   }
 
-  /** RegistrantPrivate.CidValid: Cid = cid(Digest(RegistrantId, Expiration, PrivateDetails)). */
+  /**
+   * RegistrantPrivate.CidValid: Cid = cid(Digest(RegistrantId, Expiration, PrivateDetails)).
+   * D-49: `storedDetails` is the EXACT text that will be bound into the `PrivateDetails` column —
+   * the sealed envelope string, or `REGISTRANT_PRIVATE_EMPTY_DETAILS` — never a re-stringified copy
+   * of the plaintext leaves (sealing is randomized, so re-stringifying would digest DIFFERENT bytes
+   * than what the row actually stores, and `RegistrantCidMatch` would fail).
+   */
   private async computeRegistrantPrivateCid (
     registrantId: string,
-    input: { expiration: Timestamp | string; details: PrivateDetail[] }
+    input: { expiration: Timestamp | string; storedDetails: string }
   ): Promise<string> {
     const ctx = this.ctx!
     const expiration = toIsoZDatetime(input.expiration)
-    const privateDetailsJson = JSON.stringify(input.details ?? [])
     const row = await ctx.db
       .prepare('select cid(Digest(:registrantId, :expiration, :privateDetails)) as c')
-      .get({ registrantId, expiration, privateDetails: privateDetailsJson })
+      .get({ registrantId, expiration, privateDetails: input.storedDetails })
     if (!row || row.c == null) {
       throw new Error('computeRegistrantPrivateCid: cid(Digest(...)) returned null — crypto plugin not registered?')
     }
@@ -490,8 +502,59 @@ export class RegistrationEngine implements IRegistrationEngine {
   }
 
   /**
+   * D-49: the shared insert path for a `RegistrantPrivate` tier row — accepts the ALREADY-SEALED
+   * `storedDetails` text (the sealed envelope, or `REGISTRANT_PRIVATE_EMPTY_DETAILS`) and performs
+   * only the digest/seedSignedMutation/INSERT ceremony. Never seals — callers seal exactly once,
+   * before calling this (sealing is randomized; sealing twice for one row would produce two
+   * different Cids and RegistrantCidMatch would fail). `authorityId` is supplied by the caller
+   * rather than re-queried, so `register()` can call this from inside its own transaction right
+   * after the parent `Registrant` row's INSERT (Pitfall 4, Cids-before-parent) without a redundant
+   * read of the row it just wrote.
+   */
+  private async insertRegistrantPrivateRow (
+    registrantId: string,
+    authorityId: string,
+    expiration: Timestamp | string,
+    storedDetails: string,
+    signatureOrCallback: SignatureOrCallback,
+    options?: { ownsTransaction?: boolean; headerNonce?: string }
+  ): Promise<{ cid: string }> {
+    const ctx = this.ctx!
+    const tid = await allocateTid(ctx.db, 'registration')
+    const expirationZ = toIsoZDatetime(expiration)
+    const cid = await this.computeRegistrantPrivateCid(registrantId, { expiration, storedDetails })
+
+    // InsertValid contains a subquery (exists(...)) -> DEFERRED check -> its
+    // new.Expiration snapshot is Z-stripped (see toDeferredCheckDatetime).
+    // CidValid (above, immediate) correctly used the Z-suffixed form.
+    const expirationForDeferredCheck = toDeferredCheckDatetime(expiration)
+    const digestExpr = 'select Digest(:tid, :cid, :registrantId, :expirationDeferred, :privateDetails) as d'
+    const digestParams = { tid, cid, registrantId, expirationDeferred: expirationForDeferredCheck, privateDetails: storedDetails }
+    const nonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback), options)
+
+    await ctx.db.exec(
+      `insert into RegistrantPrivate (Cid, RegistrantId, Expiration, PrivateDetails)
+       with context SigningNonce = :signingNonce, Tid = ${tid}, now = :now
+       values (:cid, :registrantId, :expiration, :privateDetails)`,
+      {
+        cid,
+        registrantId,
+        expiration: expirationZ,
+        privateDetails: storedDetails,
+        signingNonce: nonce,
+        now: nowCanonicalDatetime()
+      }
+    )
+
+    return { cid }
+  }
+
+  /**
    * Insert a `RegistrantPrivate` tier row (authority-held, insert-only,
    * never disclosed). Requires the parent `Registrant` row to already exist.
+   * D-49: seals `input.details` ONCE (62-14's `createIntakeSealer`, resolved to the current
+   * officers of the Registrant's own authority) before computing the Cid and inserting — the
+   * returned `privateDetails`/`detailsAccess` reflect what THIS CALL just wrote, not a fresh open.
    */
   async createRegistrantPrivate (
     input: { registrantId: string; expiration: Timestamp | string; details: PrivateDetail[] },
@@ -500,7 +563,6 @@ export class RegistrationEngine implements IRegistrationEngine {
   ): Promise<RegistrantPrivate> {
     this.requireCtx('createRegistrantPrivate')
     const ctx = this.ctx!
-    const tid = await allocateTid(ctx.db, 'registration')
     try {
       const registrantRow = await ctx.db
         .prepare('select AuthorityId from Registrant where Id = :registrantId')
@@ -509,36 +571,14 @@ export class RegistrationEngine implements IRegistrationEngine {
         throw new Error(`createRegistrantPrivate: Registrant not found for registrantId=${input.registrantId}`)
       }
       const authorityId = asText(registrantRow.AuthorityId, 'Registrant.AuthorityId')
-
       const details = input.details ?? []
-      const expiration = toIsoZDatetime(input.expiration)
-      const privateDetailsJson = JSON.stringify(details)
-      const cid = await this.computeRegistrantPrivateCid(input.registrantId, { expiration: input.expiration, details })
 
-      // InsertValid contains a subquery (exists(...)) -> DEFERRED check -> its
-      // new.Expiration snapshot is Z-stripped (see toDeferredCheckDatetime).
-      // CidValid (above, immediate) correctly used the Z-suffixed form.
-      const expirationForDeferredCheck = toDeferredCheckDatetime(input.expiration)
-      const digestExpr = 'select Digest(:tid, :cid, :registrantId, :expirationDeferred, :privateDetails) as d'
-      const digestParams = { tid, cid, registrantId: input.registrantId, expirationDeferred: expirationForDeferredCheck, privateDetails: privateDetailsJson }
-      const nonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, this.resolveSign(signatureOrCallback), options)
+      const storedDetails = await sealRegistrantPrivateDetails(ctx.db, { authorityId, registrantId: input.registrantId, details })
+      const { cid } = await this.insertRegistrantPrivateRow(input.registrantId, authorityId, input.expiration, storedDetails, signatureOrCallback, options)
 
-      await ctx.db.exec(
-        `insert into RegistrantPrivate (Cid, RegistrantId, Expiration, PrivateDetails)
-         with context SigningNonce = :signingNonce, Tid = ${tid}, now = :now
-         values (:cid, :registrantId, :expiration, :privateDetails)`,
-        {
-          cid,
-          registrantId: input.registrantId,
-          expiration,
-          privateDetails: privateDetailsJson,
-          signingNonce: nonce,
-          now: nowCanonicalDatetime()
-        }
-      )
-
-      return { cid, registrantId: input.registrantId, expiration: input.expiration, privateDetails: details }
+      return { cid, registrantId: input.registrantId, expiration: input.expiration, privateDetails: details, detailsAccess: 'opened' }
     } catch (err) {
+      if (err instanceof IntakeError) throw err
       this.rethrow(err, 'createRegistrantPrivate')
     }
   }
@@ -748,11 +788,17 @@ export class RegistrationEngine implements IRegistrationEngine {
         )
         .get({ registrantId })
       if (!row) return undefined
+      // D-49: open through the one seal/open module — never parseJsonOr the raw column again.
+      const read = await openRegistrantPrivateDetails(this.ctx.db, this.ctx.intakeOpener, {
+        registrantId: asText(row.RegistrantId, 'RegistrantPrivate.RegistrantId'),
+        stored: row.PrivateDetails
+      })
       return {
         cid: asText(row.Cid, 'RegistrantPrivate.Cid'),
         registrantId: asText(row.RegistrantId, 'RegistrantPrivate.RegistrantId'),
         expiration: reZuluDatetime(row.Expiration as string),
-        privateDetails: parseJsonOr<PrivateDetail[]>(row.PrivateDetails, [], 'RegistrantPrivate.PrivateDetails')
+        privateDetails: read.details ?? [],
+        detailsAccess: read.access
       }
     } catch (err) {
       this.rethrow(err, 'getRegistrantPrivate')
@@ -801,6 +847,10 @@ export class RegistrationEngine implements IRegistrationEngine {
       // interpolated into a message, never returned, and never rethrown; only
       // the NAME set `collectPrivateFieldNames` derives from it leaves this
       // statement (T-47-11).
+      // D-49: opened through the one seal/open module. An unread access (no opener, not a
+      // recipient, unreadable) yields an EMPTY allowlist — this ctx cannot prove which fields are
+      // genuinely private, so it records nothing rather than guessing (fail closed, T-47-11's own
+      // discipline extended to sealed rows).
       const privateRow = await ctx.db
         .prepare(
           'select T.PrivateDetails '
@@ -808,7 +858,8 @@ export class RegistrationEngine implements IRegistrationEngine {
           + 'where T.RegistrantId = :registrantId'
         )
         .get({ registrantId })
-      const privateDetails = parseJsonOr<PrivateDetail[]>(privateRow?.PrivateDetails, [], 'RegistrantPrivate.PrivateDetails')
+      const privateRead = await openRegistrantPrivateDetails(ctx.db, ctx.intakeOpener, { registrantId, stored: privateRow?.PrivateDetails ?? null })
+      const privateDetails = privateRead.details ?? []
       const allowedNames = collectPrivateFieldNames(privateDetails)
 
       const safeFields = sanitizeAccessTrailFields(fields, allowedNames)
@@ -1183,6 +1234,17 @@ export class RegistrationEngine implements IRegistrationEngine {
       throw new RegistrantAlreadyExistsError(registrantId)
     }
 
+    // D-49: seal the private tier ONCE, before BEGIN and outside the try below — sealing is
+    // randomized (a fresh content key per call), so sealing twice for one row would yield two
+    // different Cids and RegistrantCidMatch (the parent row vs. the tier row) would fail. Kept
+    // outside the try/catch for the SAME reason as the idempotency pre-check above: this.rethrow()
+    // wraps a plain Error and would destroy the IntakeError instanceof check.
+    const storedPrivateDetails = await sealRegistrantPrivateDetails(ctx.db, {
+      authorityId: init.registrant.authorityId,
+      registrantId,
+      details: init.private.details
+    })
+
     try {
       await ctx.db.exec('BEGIN')
       try {
@@ -1193,7 +1255,7 @@ export class RegistrationEngine implements IRegistrationEngine {
         }
         const privateCid = await this.computeRegistrantPrivateCid(registrantId, {
           expiration: init.private.expiration,
-          details: init.private.details
+          storedDetails: storedPrivateDetails
         })
 
         // Parent row first, carrying the pre-computed Cids (own vrg ceremony).
@@ -1225,8 +1287,14 @@ export class RegistrationEngine implements IRegistrationEngine {
         if (init.public) {
           await this.createRegistrantPublic({ registrantId, ...init.public }, signatureOrCallback, { ownsTransaction: false, headerNonce: options?.headerNonce })
         }
-        await this.createRegistrantPrivate(
-          { registrantId, expiration: init.private.expiration, details: init.private.details },
+        // D-49: insertRegistrantPrivateRow directly (never the public createRegistrantPrivate
+        // wrapper, which would seal a SECOND time) — storedPrivateDetails was already sealed once,
+        // above, and already fed privateCid's computation.
+        await this.insertRegistrantPrivateRow(
+          registrantId,
+          init.registrant.authorityId,
+          init.private.expiration,
+          storedPrivateDetails,
           signatureOrCallback,
           { ownsTransaction: false, headerNonce: options?.headerNonce }
         )
@@ -1810,16 +1878,27 @@ export class RegistrationEngine implements IRegistrationEngine {
         throw new Error('submitRegistrationRequest: issuerType is bridge but bridgeId is null — a bridge-issued row must carry a BridgeId')
       }
 
-      // The identical serialized string flows into Digest(:payload) AND the
-      // Payload column, so PayloadCidValid's own Digest(Payload)
-      // recomputation matches (any re-serialization between the two would
-      // produce a different cid).
+      // D-49 (62-31, T-62-01-10): PayloadCid is the Digest of the PLAINTEXT payload (inside
+      // DG-1, below) — the Payload COLUMN instead holds a sealed envelope over that same
+      // plaintext (62-03 dropped the CHECK that once forced Payload itself to hash to
+      // PayloadCid; openRegistrationPayload's tier-2 recheck re-derives that binding at every
+      // read, for sealed AND legacy-unsealed rows).
       const payload = JSON.stringify(init.payload)
       const payloadCidRow = await ctx.db.prepare('select Digest(:payload) as d').get({ payload })
       if (!payloadCidRow || payloadCidRow.d == null) {
         throw new Error('submitRegistrationRequest: Digest() returned null for Payload — crypto plugin not registered?')
       }
       const payloadCid = payloadCidRow.d as string
+
+      // D-49: seal right after payloadCid is computed and BEFORE the DG-1 digest is signed below —
+      // a zero-recipient refusal (IntakeError) must never consume the requester's signature (P7:
+      // the sign callback's own call count stays 0 on this path).
+      const storedPayload = await sealRegistrationPayload(ctx.db, {
+        authorityId: init.authorityId,
+        requestId: init.id,
+        payloadCid,
+        plaintext: payload
+      })
 
       // L-3: SubmittedAt is the SUBMITTER's own value, bound VERBATIM.
       // NEVER toIsoZDatetime(new Date()) / nowCanonicalDatetime() here — see
@@ -1888,7 +1967,7 @@ export class RegistrationEngine implements IRegistrationEngine {
           requesterKey,
           issuerType,
           bridgeId,
-          payload,
+          payload: storedPayload,
           payloadCid,
           status: 'p',
           submittedAt,
@@ -1900,6 +1979,10 @@ export class RegistrationEngine implements IRegistrationEngine {
 
       return init.id
     } catch (err) {
+      // D-49: an IntakeError (e.g. 'no-recipients') propagates UNCHANGED — this.rethrow() below
+      // wraps any plain Error into a fresh `new Error(...)` and would destroy the instanceof check
+      // callers rely on (62-19's identical pattern for RegistrationDuplicateError).
+      if (err instanceof IntakeError) throw err
       this.rethrow(err, 'submitRegistrationRequest')
     }
   }
@@ -2003,12 +2086,41 @@ export class RegistrationEngine implements IRegistrationEngine {
    * accumulation, cursor-absent-only `total`, the silent T-47-06
    * count-failure catch) — only the order key and the row shape differ.
    */
+  /** D-49: builds one inbox row from a raw page/scan row plus its already-opened payload. */
+  private buildRegistrationRequestListRow (row: Record<string, unknown>, read: RegistrationPayloadRead): RegistrationRequestListRow {
+    return {
+      requestId: asText(row.Id, 'RegistrationRequest.Id'),
+      authorityId: asText(row.AuthorityId, 'RegistrationRequest.AuthorityId'),
+      status: asText(row.Status, 'RegistrationRequest.Status') as RegistrationRequestStatus,
+      issuerType: asText(row.IssuerType, 'RegistrationRequest.IssuerType') as RegistrationRequestIssuerType,
+      bridgeId: row.BridgeId == null ? undefined : asText(row.BridgeId, 'RegistrationRequest.BridgeId'),
+      bridgeLabel: row.BridgeLabel == null ? undefined : asText(row.BridgeLabel, 'RegistrationBridgeKey.Label'),
+      // BOTH timestamps reach the row — submittedAt is DISPLAYED beside
+      // receivedAt (the sort key), so a divergence between claim and
+      // observation is visible, never collapsed. Never render one as
+      // the other.
+      submittedAt: reZuluDatetime(row.SubmittedAt as string),
+      receivedAt: reZuluDatetime(row.ReceivedAt as string),
+      // D-49: undefined whenever the payload was not read (read.payload is undefined for every
+      // access other than 'opened'/'unsealed') — never a throw, the inbox row must still render.
+      lastName: read.payload?.public?.lastName,
+      firstName: read.payload?.public?.firstName,
+      // Placeholder — overwritten below once the prior-rejection counts
+      // are known. A caller must never observe this placeholder value;
+      // the field is required-not-optional precisely so `undefined`
+      // never means "no prior rejections" (see the overwrite below).
+      hasPriorRejections: false,
+      payloadAccess: read.access
+    }
+  }
+
   async listRegistrationRequests (filter?: RegistrationRequestListFilter, page?: RegistrationRequestListPage): Promise<RegistrationRequestListResult> {
     if (!this.ctx) return { rows: [] }
     const ctx = this.ctx
     try {
       const pageSize = clampPageSize(page?.pageSize)
       const cursor = page?.cursor
+      const nameQuery = filter?.name
 
       // Cursor resolution POINT-READS ReceivedAt — matching the order key,
       // never Id alone and never SubmittedAt. An unresolvable (stale or
@@ -2022,38 +2134,59 @@ export class RegistrationEngine implements IRegistrationEngine {
         cursorReceivedAt = asText(cursorRow.ReceivedAt, 'RegistrationRequest.ReceivedAt')
       }
 
-      const { sql, params } = buildRegistrationRequestListPageSql(filter, cursor, cursorReceivedAt, pageSize)
       const rows: RegistrationRequestListRow[] = []
       // Parallel array (not a field on RegistrationRequestListRow — the list
       // row deliberately omits RequesterKey/the full payload, T-48-08-10) so
       // the hasPriorRejections pass below can still key back to each row.
       const requesterKeys: string[] = []
-      for await (const row of ctx.db.eval(sql, params as Record<string, SqlValue>)) {
-        // A malformed Payload yields undefined names, never a throw — the
-        // inbox row must still render.
-        const payload = parseJsonOr<{ public?: { lastName?: string; firstName?: string } }>(row.Payload, {}, 'RegistrationRequest.Payload')
-        requesterKeys.push(asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'))
-        rows.push({
-          requestId: asText(row.Id, 'RegistrationRequest.Id'),
-          authorityId: asText(row.AuthorityId, 'RegistrationRequest.AuthorityId'),
-          status: asText(row.Status, 'RegistrationRequest.Status') as RegistrationRequestStatus,
-          issuerType: asText(row.IssuerType, 'RegistrationRequest.IssuerType') as RegistrationRequestIssuerType,
-          bridgeId: row.BridgeId == null ? undefined : asText(row.BridgeId, 'RegistrationRequest.BridgeId'),
-          bridgeLabel: row.BridgeLabel == null ? undefined : asText(row.BridgeLabel, 'RegistrationBridgeKey.Label'),
-          // BOTH timestamps reach the row — submittedAt is DISPLAYED beside
-          // receivedAt (the sort key), so a divergence between claim and
-          // observation is visible, never collapsed. Never render one as
-          // the other.
-          submittedAt: reZuluDatetime(row.SubmittedAt as string),
-          receivedAt: reZuluDatetime(row.ReceivedAt as string),
-          lastName: payload.public?.lastName,
-          firstName: payload.public?.firstName,
-          // Placeholder — overwritten below once the prior-rejection counts
-          // are known. A caller must never observe this placeholder value;
-          // the field is required-not-optional precisely so `undefined`
-          // never means "no prior rejections" (see the overwrite below).
-          hasPriorRejections: false
-        })
+
+      if (nameQuery === undefined) {
+        // COLLECT the page rows first, then open each — never await a db.prepare inside a
+        // ctx.db.eval iteration (this file's existing habit).
+        const { sql, params } = buildRegistrationRequestListPageSql(filter, cursor, cursorReceivedAt, pageSize)
+        const rawRows: Array<Record<string, unknown>> = []
+        for await (const row of ctx.db.eval(sql, params as Record<string, SqlValue>)) rawRows.push(row as Record<string, unknown>)
+        for (const row of rawRows) {
+          const requestId = asText(row.Id, 'RegistrationRequest.Id')
+          const payloadCid = asText(row.PayloadCid, 'RegistrationRequest.PayloadCid')
+          const read = await openRegistrationPayload(ctx.db, ctx.intakeOpener, { requestId, payloadCid, stored: row.Payload })
+          requesterKeys.push(asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'))
+          rows.push(this.buildRegistrationRequestListRow(row, read))
+        }
+      } else {
+        // D-49/WR-12: a sealed Payload has no SQL-visible names — the SQL fragment no longer
+        // filters on `filter.name` (registration-request-query.ts), so this scans the name-FREE
+        // keyset in bounded batches (REGISTRATION_REQUEST_NAME_SCAN_BATCH), opening each row once,
+        // keeping only the ones whose opened public names match. An unread row's names are
+        // `undefined` and can never match (registrationRequestNameMatches requires a defined
+        // field). `nextCursor` is the last KEPT row's id, matching the un-filtered branch's own
+        // contract (a caller `loadMore`s from the last row it actually received).
+        let scanCursor = cursor
+        let scanCursorReceivedAt = cursorReceivedAt
+        let exhausted = false
+        while (rows.length < pageSize && !exhausted) {
+          const { sql, params } = buildRegistrationRequestListPageSql(filter, scanCursor, scanCursorReceivedAt, REGISTRATION_REQUEST_NAME_SCAN_BATCH)
+          const batch: Array<Record<string, unknown>> = []
+          for await (const row of ctx.db.eval(sql, params as Record<string, SqlValue>)) batch.push(row as Record<string, unknown>)
+          if (batch.length === 0) {
+            exhausted = true
+            break
+          }
+          for (const row of batch) {
+            const requestId = asText(row.Id, 'RegistrationRequest.Id')
+            const payloadCid = asText(row.PayloadCid, 'RegistrationRequest.PayloadCid')
+            const read = await openRegistrationPayload(ctx.db, ctx.intakeOpener, { requestId, payloadCid, stored: row.Payload })
+            if (registrationRequestNameMatches({ lastName: read.payload?.public?.lastName, firstName: read.payload?.public?.firstName }, nameQuery)) {
+              requesterKeys.push(asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'))
+              rows.push(this.buildRegistrationRequestListRow(row, read))
+              if (rows.length >= pageSize) break
+            }
+          }
+          const lastScanned = batch[batch.length - 1]!
+          scanCursor = asText(lastScanned.Id, 'RegistrationRequest.Id')
+          scanCursorReceivedAt = asText(lastScanned.ReceivedAt, 'RegistrationRequest.ReceivedAt')
+          if (batch.length < REGISTRATION_REQUEST_NAME_SCAN_BATCH) exhausted = true
+        }
       }
 
       // ONE grouped query for the WHOLE page (T-48-08-06) — never a per-row
@@ -2090,9 +2223,15 @@ export class RegistrationEngine implements IRegistrationEngine {
         // D-05/T-47-09 pattern: run once per filter-change (a cursor-absent
         // call), never per page.
         try {
-          const countSql = buildRegistrationRequestListCountSql(filter)
-          const countRow = await ctx.db.prepare(countSql.sql).get(countSql.params as Record<string, SqlValue>)
-          total = asNumberOr(countRow?.n, 0, 'listRegistrationRequests.total')
+          if (nameQuery === undefined) {
+            const countSql = buildRegistrationRequestListCountSql(filter)
+            const countRow = await ctx.db.prepare(countSql.sql).get(countSql.params as Record<string, SqlValue>)
+            total = asNumberOr(countRow?.n, 0, 'listRegistrationRequests.total')
+          } else {
+            // D-49/WR-12: no SQL count exists for a name-filtered set anymore — scan the whole
+            // name-free keyset to exhaustion, same open-per-row discipline as the page scan above.
+            total = await this.countNameFilteredRegistrationRequests(filter, nameQuery)
+          }
         } catch {
           // T-47-06 (carried verbatim): deliberately NOT logged and NOT
           // interpolated into any message — the count query's bound params
@@ -2107,6 +2246,39 @@ export class RegistrationEngine implements IRegistrationEngine {
     } catch (err) {
       this.rethrow(err, 'listRegistrationRequests')
     }
+  }
+
+  /**
+   * D-49/WR-12: counts the WHOLE name-filtered set by scanning the name-free keyset to
+   * exhaustion in `REGISTRATION_REQUEST_NAME_SCAN_BATCH` batches, opening each row once — the
+   * unindexed-scan performance residual recorded in this plan's `<interfaces>` block. Runs only on
+   * a cursor-absent call, same as the SQL count it replaces for this one filter shape.
+   */
+  private async countNameFilteredRegistrationRequests (filter: RegistrationRequestListFilter | undefined, nameQuery: string): Promise<number> {
+    const ctx = this.ctx!
+    let count = 0
+    let scanCursor: string | undefined
+    let scanCursorReceivedAt: string | undefined
+    let exhausted = false
+    while (!exhausted) {
+      const { sql, params } = buildRegistrationRequestListPageSql(filter, scanCursor, scanCursorReceivedAt, REGISTRATION_REQUEST_NAME_SCAN_BATCH)
+      const batch: Array<Record<string, unknown>> = []
+      for await (const row of ctx.db.eval(sql, params as Record<string, SqlValue>)) batch.push(row as Record<string, unknown>)
+      if (batch.length === 0) break
+      for (const row of batch) {
+        const requestId = asText(row.Id, 'RegistrationRequest.Id')
+        const payloadCid = asText(row.PayloadCid, 'RegistrationRequest.PayloadCid')
+        const read = await openRegistrationPayload(ctx.db, ctx.intakeOpener, { requestId, payloadCid, stored: row.Payload })
+        if (registrationRequestNameMatches({ lastName: read.payload?.public?.lastName, firstName: read.payload?.public?.firstName }, nameQuery)) {
+          count++
+        }
+      }
+      const lastScanned = batch[batch.length - 1]!
+      scanCursor = asText(lastScanned.Id, 'RegistrationRequest.Id')
+      scanCursorReceivedAt = asText(lastScanned.ReceivedAt, 'RegistrationRequest.ReceivedAt')
+      if (batch.length < REGISTRATION_REQUEST_NAME_SCAN_BATCH) exhausted = true
+    }
+    return count
   }
 
   /**
@@ -2133,7 +2305,13 @@ export class RegistrationEngine implements IRegistrationEngine {
         .get({ requestId })
       if (!row) return undefined
 
-      const payload = parseJsonOr<RegisterInit>(row.Payload, {} as RegisterInit, 'RegistrationRequest.Payload')
+      // D-49: open through the one seal/open module (the tier-2 PayloadCid recheck included) —
+      // never parseJsonOr the raw column again. An unread payload degrades to the EXISTING `{}`
+      // convention (payloadAccess carries WHY), and the registrantId probe below only runs when the
+      // payload was actually read.
+      const payloadCid = asText(row.PayloadCid, 'RegistrationRequest.PayloadCid')
+      const payloadRead = await openRegistrationPayload(ctx.db, ctx.intakeOpener, { requestId, payloadCid, stored: row.Payload })
+      const payload = payloadRead.payload ?? ({} as RegisterInit)
       const status = asText(row.Status, 'RegistrationRequest.Status') as RegistrationRequestStatus
 
       // T-48-08-05: registrantId is reported ONLY when status === 'a' AND a
@@ -2144,7 +2322,7 @@ export class RegistrationEngine implements IRegistrationEngine {
       // inconsistency it is. A miss leaves registrantId undefined — the CTA
       // does not render — it is not an error.
       let registrantId: string | undefined
-      if (status === STATUS_APPROVED) {
+      if (status === STATUS_APPROVED && payloadRead.payload !== undefined) {
         const candidateId = payload.registrant?.id
         if (candidateId) {
           const registrantRow = await ctx.db.prepare('select Id from Registrant where Id = :id').get({ id: candidateId })
@@ -2187,7 +2365,8 @@ export class RegistrationEngine implements IRegistrationEngine {
         rejectionReason: row.RejectionReason == null ? undefined : asText(row.RejectionReason, 'RegistrationRequest.RejectionReason'),
         verificationCid: verificationCidOut,
         verificationChecklist,
-        registrantId
+        registrantId,
+        payloadAccess: payloadRead.access
       }
     } catch (err) {
       this.rethrow(err, 'getRegistrationRequest')
@@ -2258,22 +2437,22 @@ export class RegistrationEngine implements IRegistrationEngine {
   /**
    * The ONE payload source for duplicate detection: every PENDING, not-closed request of
    * `authorityId`, mapped to a pure `DuplicateComparable` plus the display fields
-   * `getLikelyDuplicateRequests` needs. Collects the raw rows into an array BEFORE parsing
+   * `getLikelyDuplicateRequests` needs. Collects the raw rows into an array BEFORE opening
    * (this file's own "do not interleave eval + prepare" habit).
    *
-   * This is where the authority's post-decrypt payload is read (today's
-   * `RegistrationRequest.Payload`, the pre-existing T-62-01-10 storage) — nothing derived from it
-   * is written anywhere. If T-62-01-10 is later resolved by no longer persisting `Payload`, only
-   * this method changes.
+   * D-49 (62-31): the payload is opened through the one seal/open module (the tier-2 PayloadCid
+   * recheck included). An unread row (no opener, not a recipient, unreadable, tampered) contributes
+   * an EMPTY identity — it can never be flagged as a duplicate of anything, and can never flag
+   * another row — and undefined display names, never a throw.
    */
   private async readPendingComparables (authorityId: string): Promise<Array<{
     comparable: DuplicateComparable
     display: { issuerType: RegistrationRequestIssuerType; submittedAt: string; receivedAt: string; firstName?: string; lastName?: string }
   }>> {
     const ctx = this.ctx!
-    const rawRows: Array<{ Id: string; RequesterKey: string; IssuerType: string; Payload: unknown; SubmittedAt: string; ReceivedAt: string }> = []
+    const rawRows: Array<{ Id: string; RequesterKey: string; IssuerType: string; Payload: unknown; PayloadCid: string; SubmittedAt: string; ReceivedAt: string }> = []
     for await (const row of ctx.db.eval(
-      `select R.Id, R.RequesterKey, R.IssuerType, R.Payload, R.SubmittedAt, R.ReceivedAt
+      `select R.Id, R.RequesterKey, R.IssuerType, R.Payload, R.PayloadCid, R.SubmittedAt, R.ReceivedAt
          from RegistrationRequest R
          where R.AuthorityId = :rowAuthorityId and R.Status = 'p' and ${registrationRequestNotClosedSql('R')}`,
       { rowAuthorityId: authorityId }
@@ -2283,17 +2462,21 @@ export class RegistrationEngine implements IRegistrationEngine {
         RequesterKey: asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'),
         IssuerType: asText(row.IssuerType, 'RegistrationRequest.IssuerType'),
         Payload: row.Payload,
+        PayloadCid: asText(row.PayloadCid, 'RegistrationRequest.PayloadCid'),
         SubmittedAt: row.SubmittedAt as string,
         ReceivedAt: row.ReceivedAt as string
       })
     }
 
-    return rawRows.map((row) => {
-      // A malformed Payload yields an empty identity and never throws — the matcher must still
-      // run over every OTHER row.
-      const payload = parseJsonOr<RegisterInit | undefined>(row.Payload, undefined, 'RegistrationRequest.Payload')
+    const out: Array<{
+      comparable: DuplicateComparable
+      display: { issuerType: RegistrationRequestIssuerType; submittedAt: string; receivedAt: string; firstName?: string; lastName?: string }
+    }> = []
+    for (const row of rawRows) {
+      const read = await openRegistrationPayload(ctx.db, ctx.intakeOpener, { requestId: row.Id, payloadCid: row.PayloadCid, stored: row.Payload })
+      const payload = read.payload
       const receivedAt = reZuluDatetime(row.ReceivedAt)
-      return {
+      out.push({
         comparable: {
           requestId: row.Id,
           authorityId,
@@ -2308,8 +2491,9 @@ export class RegistrationEngine implements IRegistrationEngine {
           firstName: payload?.public?.firstName,
           lastName: payload?.public?.lastName
         }
-      }
-    })
+      })
+    }
+    return out
   }
 
   /**
@@ -2449,7 +2633,7 @@ export class RegistrationEngine implements IRegistrationEngine {
 
       const row = await ctx.db
         .prepare(
-          'select Id, AuthorityId, Status, DecidedAt, RejectionReason, RequesterKey, Payload, ReceivedAt ' +
+          'select Id, AuthorityId, Status, DecidedAt, RejectionReason, RequesterKey, Payload, PayloadCid, ReceivedAt ' +
           'from RegistrationRequest where Id = :requestId'
         )
         .get({ requestId })
@@ -2487,13 +2671,18 @@ export class RegistrationEngine implements IRegistrationEngine {
         return { requestId, outcome: 'already-published', publishedStatus, closesRequestId: existingCloses, ...closeResult }
       }
 
-      const buildComparable = (comparableRequestId: string, requesterKey: string, payloadJson: unknown, receivedAtRaw: string): DuplicateComparable => ({
-        requestId: comparableRequestId,
-        authorityId,
-        requesterKey,
-        receivedAt: reZuluDatetime(receivedAtRaw),
-        identity: extractRegistrationIdentity(parseJsonOr<RegisterInit | undefined>(payloadJson, undefined, 'RegistrationRequest.Payload'))
-      })
+      // D-49: opens through the one seal/open module. An unread row contributes an EMPTY identity
+      // — the SAME fail-closed contract readPendingComparables already carries.
+      const buildComparable = async (comparableRequestId: string, requesterKey: string, payloadCid: string, storedPayload: unknown, receivedAtRaw: string): Promise<DuplicateComparable> => {
+        const read = await openRegistrationPayload(ctx.db, ctx.intakeOpener, { requestId: comparableRequestId, payloadCid, stored: storedPayload })
+        return {
+          requestId: comparableRequestId,
+          authorityId,
+          requesterKey,
+          receivedAt: reZuluDatetime(receivedAtRaw),
+          identity: extractRegistrationIdentity(read.payload)
+        }
+      }
 
       // Resolve the closure target.
       let target: string | undefined
@@ -2506,7 +2695,7 @@ export class RegistrationEngine implements IRegistrationEngine {
           throw new RegistrationDuplicateError('self-closure', requestId, 'publishRegistrationDecision: closesRequestId must not name the request itself', explicit)
         }
         const xRow = await ctx.db
-          .prepare('select Id, AuthorityId, Status, RequesterKey, Payload, ReceivedAt from RegistrationRequest where Id = :x')
+          .prepare('select Id, AuthorityId, Status, RequesterKey, Payload, PayloadCid, ReceivedAt from RegistrationRequest where Id = :x')
           .get({ x: explicit })
         if (!xRow || asText(xRow.AuthorityId, 'RegistrationRequest.AuthorityId') !== authorityId) {
           throw new RegistrationDuplicateError(
@@ -2521,8 +2710,8 @@ export class RegistrationEngine implements IRegistrationEngine {
         } else if (await readDuplicateClosure(ctx.db, explicit, authorityId)) {
           closureNoneReason = 'skipped-target-closed'
         } else {
-          const aComparable = buildComparable(requestId, asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'), row.Payload, row.ReceivedAt as string)
-          const xComparable = buildComparable(explicit, asText(xRow.RequesterKey, 'RegistrationRequest.RequesterKey'), xRow.Payload, xRow.ReceivedAt as string)
+          const aComparable = await buildComparable(requestId, asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'), asText(row.PayloadCid, 'RegistrationRequest.PayloadCid'), row.Payload, row.ReceivedAt as string)
+          const xComparable = await buildComparable(explicit, asText(xRow.RequesterKey, 'RegistrationRequest.RequesterKey'), asText(xRow.PayloadCid, 'RegistrationRequest.PayloadCid'), xRow.Payload, xRow.ReceivedAt as string)
           if (matchRegistrationIdentities(aComparable, xComparable) === undefined) {
             throw new RegistrationDuplicateError(
               'not-a-likely-duplicate',
@@ -2537,7 +2726,7 @@ export class RegistrationEngine implements IRegistrationEngine {
         // Automatic: the oldest flagged pending candidate received no later than A's DecidedAt.
         const decidedAtRaw = row.DecidedAt as string | null
         const decidedMs = decidedAtRaw == null ? NaN : Date.parse(reZuluDatetime(decidedAtRaw))
-        const aComparable = buildComparable(requestId, asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'), row.Payload, row.ReceivedAt as string)
+        const aComparable = await buildComparable(requestId, asText(row.RequesterKey, 'RegistrationRequest.RequesterKey'), asText(row.PayloadCid, 'RegistrationRequest.PayloadCid'), row.Payload, row.ReceivedAt as string)
         const pending = await this.readPendingComparables(authorityId)
         const candidates = findLikelyDuplicates(aComparable, pending.map((p) => p.comparable))
           .filter((m) => !Number.isNaN(decidedMs) && Date.parse(m.comparable.receivedAt) <= decidedMs)

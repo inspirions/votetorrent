@@ -33,7 +33,11 @@ function makeNetworkRef () {
 }
 
 function engineFor (fx: ThresholdAuthorityFixture, holder: ThresholdAuthorityFixture['holders'][number]): SignatureTasksEngine {
-  return new SignatureTasksEngine(makeNetworkRef(), { db: fx.elec.ctx.db, user: holder.user })
+  // D-49 (62-31): every holder reads through the SAME provisioned opener (fx.elec.ctx.intakeOpener,
+  // set by provisionTestIntakeRecipient against the founder) — this file is not testing D-49 itself,
+  // it needs every officer's read of a sealed RegistrationRequest.Payload to materialise a REAL
+  // RegistrantSignatureTask (with requestId), not degrade to the base-task fallback.
+  return new SignatureTasksEngine(makeNetworkRef(), { db: fx.elec.ctx.db, user: holder.user, intakeOpener: fx.elec.ctx.intakeOpener })
 }
 
 async function countRows (db: Database, sql: string, params: Record<string, unknown> = {}): Promise<number> {
