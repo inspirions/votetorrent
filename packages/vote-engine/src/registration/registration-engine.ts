@@ -30,7 +30,7 @@ import {
   REGISTRATION_REQUEST_NAME_SCAN_BATCH,
   registrationRequestNameMatches
 } from './registration-request-query.js'
-import { openRegistrationPayload, openRegistrantPrivateDetails, sealRegistrationPayload, sealRegistrantPrivateDetails } from './sealed-registration-content.js'
+import { openRegistrationPayload, openRegistrantPrivateDetails, openRegistrantSelectiveDetails, sealRegistrationPayload, sealRegistrantPrivateDetails, sealRegistrantSelectiveDetails } from './sealed-registration-content.js'
 import type { RegistrationPayloadRead } from './sealed-registration-content.js'
 import { IntakeError } from '../intake/types.js'
 import {
@@ -597,6 +597,7 @@ export class RegistrationEngine implements IRegistrationEngine {
     registrantId: string,
     expiration: Timestamp | string,
     leaves: SelectiveLeaf[],
+    storedDetails: string,
     cid: string,
     signatureOrCallback: SignatureOrCallback,
     options?: { ownsTransaction?: boolean; headerNonce?: string }
@@ -611,7 +612,8 @@ export class RegistrationEngine implements IRegistrationEngine {
     }
     const authorityId = asText(registrantRow.AuthorityId, 'Registrant.AuthorityId')
     const expirationZ = toIsoZDatetime(expiration)
-    const selectiveDetailsJson = JSON.stringify(leaves)
+    // D-52: the STORED text (sealed envelope, or the '[]' empty constant) feeds the vrg digest and the INSERT.
+    const selectiveDetailsJson = storedDetails
 
     // InsertValid contains a subquery (exists(...)) -> DEFERRED check -> its
     // new.Expiration snapshot is Z-stripped (see toDeferredCheckDatetime).
@@ -634,7 +636,7 @@ export class RegistrationEngine implements IRegistrationEngine {
       }
     )
 
-    return { cid, registrantId, expiration, selectiveDetails: leaves }
+    return { cid, registrantId, expiration, selectiveDetails: leaves, detailsAccess: 'opened' }
   }
 
   /**
@@ -656,7 +658,23 @@ export class RegistrationEngine implements IRegistrationEngine {
     try {
       const leaves = await this.buildSelectiveLeaves(input.fields)
       const cid = await this.computeRegistrantSelectiveCid(JSON.stringify(leaves))
-      return await this.insertRegistrantSelectiveRow(input.registrantId, input.expiration, leaves, cid, signatureOrCallback, options)
+      // D-52: seal ONCE (Cid is over the plaintext leaves, computed above). An empty field set keeps its
+      // pre-D-52 behavior: the constant '[]' is stored unsealed (no recipient needed to say "nothing").
+      const registrantRow = await this.ctx!.db
+        .prepare('select AuthorityId from Registrant where Id = :registrantId')
+        .get({ registrantId: input.registrantId })
+      if (!registrantRow) {
+        throw new Error(`createRegistrantSelective: Registrant not found for registrantId=${input.registrantId}`)
+      }
+      const stored = leaves.length === 0
+        ? '[]'
+        : await sealRegistrantSelectiveDetails(this.ctx!.db, {
+          authorityId: asText(registrantRow.AuthorityId, 'Registrant.AuthorityId'),
+          registrantId: input.registrantId,
+          cid,
+          leaves
+        })
+      return await this.insertRegistrantSelectiveRow(input.registrantId, input.expiration, leaves, stored, cid, signatureOrCallback, options)
     } catch (err) {
       this.rethrow(err, 'createRegistrantSelective')
     }
@@ -817,11 +835,20 @@ export class RegistrationEngine implements IRegistrationEngine {
         )
         .get({ registrantId })
       if (!row) return undefined
+      const cid = asText(row.Cid, 'RegistrantSelective.Cid')
+      const registrantIdText = asText(row.RegistrantId, 'RegistrantSelective.RegistrantId')
+      // D-52: open through the one seal/open module (tier-2 set_commit recheck inside) — never parse the raw column.
+      const read = await openRegistrantSelectiveDetails(this.ctx.db, this.ctx.intakeOpener, {
+        registrantId: registrantIdText,
+        cid,
+        stored: row.SelectiveDetails
+      })
       return {
-        cid: asText(row.Cid, 'RegistrantSelective.Cid'),
-        registrantId: asText(row.RegistrantId, 'RegistrantSelective.RegistrantId'),
+        cid,
+        registrantId: registrantIdText,
         expiration: reZuluDatetime(row.Expiration as string),
-        selectiveDetails: parseJsonOr<SelectiveLeaf[]>(row.SelectiveDetails, [], 'RegistrantSelective.SelectiveDetails')
+        selectiveDetails: read.leaves,
+        detailsAccess: read.access
       }
     } catch (err) {
       this.rethrow(err, 'getRegistrantSelective')
@@ -1069,7 +1096,10 @@ export class RegistrationEngine implements IRegistrationEngine {
         .get({ registrantId })
       if (!row) return null
       const cid = asText(row.Cid, 'RegistrantSelective.Cid')
-      const leaves = parseJsonOr<SelectiveLeaf[]>(row.SelectiveDetails, [], 'RegistrantSelective.SelectiveDetails')
+      const read = await openRegistrantSelectiveDetails(ctx.db, ctx.intakeOpener, { registrantId, cid, stored: row.SelectiveDetails })
+      // D-52: an unread row never yields a partial disclosure.
+      if (read.leaves === undefined) return { cid, root: '', disclosed: [], hidden: [], access: read.access }
+      const leaves = read.leaves
 
       const permitted = new Set<string>()
       for await (const policyRow of ctx.db.eval(
@@ -1086,14 +1116,13 @@ export class RegistrationEngine implements IRegistrationEngine {
         salt: typeof leaf.salt === 'string' ? leaf.salt : asText(leaf.salt, 'salt')
       }))
 
-      const selectiveDetailsText = asText(row.SelectiveDetails, 'RegistrantSelective.SelectiveDetails')
-      const rootRow = await ctx.db.prepare('select set_commit(:details) as r').get({ details: selectiveDetailsText })
+      const rootRow = await ctx.db.prepare('select set_commit(:plaintextLeaves) as r').get({ plaintextLeaves: JSON.stringify(leaves) })
       if (!rootRow || rootRow.r == null) {
         throw new Error('getDisclosedSelective: set_commit(...) returned null — crypto plugin not registered?')
       }
       const root = asText(rootRow.r, 'set_commit root')
 
-      return { cid, root, disclosed: disclosedOut, hidden: [...hidden] }
+      return { cid, root, disclosed: disclosedOut, hidden: [...hidden], access: read.access }
     } catch (err) {
       this.rethrow(err, 'getDisclosedSelective')
     }
@@ -1245,6 +1274,19 @@ export class RegistrationEngine implements IRegistrationEngine {
       details: init.private.details
     })
 
+    // D-52: seal the selective tier ONCE (leaves are randomly salted and sealing is randomized), after
+    // the Cid is known and before BEGIN, outside the try for the same IntakeError reason as above. The
+    // same sealed text feeds the vrg digest and the INSERT.
+    let storedSelectiveDetails: string | undefined
+    if (selectiveLeaves && selectiveCid) {
+      storedSelectiveDetails = await sealRegistrantSelectiveDetails(ctx.db, {
+        authorityId: init.registrant.authorityId,
+        registrantId,
+        cid: selectiveCid,
+        leaves: selectiveLeaves
+      })
+    }
+
     try {
       await ctx.db.exec('BEGIN')
       try {
@@ -1298,11 +1340,12 @@ export class RegistrationEngine implements IRegistrationEngine {
           signatureOrCallback,
           { ownsTransaction: false, headerNonce: options?.headerNonce }
         )
-        if (selectiveLeaves && selectiveCid) {
+        if (selectiveLeaves && selectiveCid && storedSelectiveDetails !== undefined) {
           await this.insertRegistrantSelectiveRow(
             registrantId,
             init.selective!.expiration,
             selectiveLeaves,
+            storedSelectiveDetails,
             selectiveCid,
             signatureOrCallback,
             { ownsTransaction: false, headerNonce: options?.headerNonce }

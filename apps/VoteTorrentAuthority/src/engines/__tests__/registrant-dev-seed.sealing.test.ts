@@ -98,6 +98,19 @@ describe('registrant-dev-seed.ts — D-49 sealing (real schema)', () => {
 				}
 			}
 
+			// D-52: the raw RegistrantSelective.SelectiveDetails column holds none of the seeded selective
+			// literals and no salt key either.
+			for (const registrantId of result.registrantIds) {
+				const row = await net.ctx.db
+					.prepare('select SelectiveDetails from RegistrantSelective where RegistrantId = :id')
+					.get({ id: registrantId })
+				expect(row).toBeTruthy()
+				const stored = String(row!.SelectiveDetails)
+				for (const literal of ['Independent', 'Unaffiliated', 'BirthYear', '"salt"']) {
+					expect(stored.includes(literal)).toBe(false)
+				}
+			}
+
 			// Opened through the SAME vault: the real values ARE recoverable.
 			const intakeEngine = new IntakeEngine({ ...net.ctx })
 			const opener = intakeEngine.createOpener(vault)
