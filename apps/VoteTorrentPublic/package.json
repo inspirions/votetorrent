@@ -45,11 +45,11 @@
 		"clean": "rm -rf dist dist-gate node_modules"
 	},
 	"dependencies": {
-		"@libp2p/crypto": "5.1.21",
+		"@libp2p/crypto": "5.1.23",
 		"@libp2p/websockets": "10.1.18",
-		"@optimystic/db-core": "^1.8.1",
-		"@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A1.8.1#~/.yarn/patches/@optimystic-db-p2p-npm-1.8.1-votetorrent.patch",
-		"@optimystic/db-p2p-storage-web": "^1.8.1",
+		"@optimystic/db-core": "^1.9.0",
+		"@optimystic/db-p2p": "patch:@optimystic/db-p2p@npm%3A1.9.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.9.0-votetorrent.patch",
+		"@optimystic/db-p2p-storage-web": "^1.9.0",
 		"@quereus/plugin-indexeddb": "4.20.0",
 		"@quereus/quereus": "patch:@quereus/quereus@npm%3A4.20.0#~/.yarn/patches/@quereus-quereus-npm-4.20.0-6fd16bc9e5.patch",
 		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.9.0#~/.yarn/patches/@serfab-cadre-core-npm-1.9.0-votetorrent.patch",
@@ -61,7 +61,7 @@
 		"react-dom": "19.0.0"
 	},
 	"devDependencies": {
-		"@optimystic/quereus-plugin-crypto": "^1.8.1",
+		"@optimystic/quereus-plugin-crypto": "^1.9.0",
 		"@types/node": "^22.10.2",
 		"@types/react": "19.2.17",
 		"@types/react-dom": "^19.0.0",

@@ -188,8 +188,14 @@ const execAsync = promisify(exec);
 // missing @quereus/quereus declaration in packages/attestation-native (YN0002 names it).
 // The @serfab family moved in the same commit (cadre-core / quereus-plugin-sereus 1.2.0 -> 1.6.0,
 // strand-proto still 0.11.0); it does not touch this mismatch.
+//
+// @optimystic 1.8.1 -> 1.9.0 bump (2026-10-02): same single mismatch, re-keyed. The 1.7.0 ->
+// 1.8.1 bump never re-keyed this entry, so the guard had been reporting 1.7.0 as `disappeared`
+// and 1.8.1 as `unexpected` since then. Re-verified: yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.9.0), and YN0002 still names
+// packages/attestation-native as the workspace that does not provide @quereus/quereus.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.7.0',
+  '@optimystic/quereus-plugin-crypto@npm:1.9.0',
 ]);
 
 // The ✘ marker (U+2718)

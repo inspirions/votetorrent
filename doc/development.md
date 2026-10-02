@@ -182,7 +182,7 @@ the root `resolutions` and each consumer's manifest. Current inventory:
 | Package | Patch | What it carries |
 |---------|-------|-----------------|
 | `@serfab/cadre-core@1.9.0` | `@serfab-cadre-core-npm-1.9.0-votetorrent.patch` | The public-observer protocol (`patches/serfab-cadre-core-public-observer.md`) and the strand cohort topic (`patches/serfab-cadre-core-strand-cohort-topic.md`) |
-| `@optimystic/db-p2p@1.8.1` | `@optimystic-db-p2p-npm-1.8.1-votetorrent.patch` | `.unref?.()` guards in `cluster-repo.js`, whose timers return plain numbers on React Native and in browsers |
+| `@optimystic/db-p2p@1.9.0` | `@optimystic-db-p2p-npm-1.9.0-votetorrent.patch` | `.unref?.()` guards in `cluster-repo.js`, whose timers return plain numbers on React Native and in browsers |
 | `@quereus/quereus@4.20.0` | `@quereus-quereus-npm-4.20.0-6fd16bc9e5.patch` | The datetime immediate-CHECK fix |
 | `react-native-quick-base64@3.0.1` | `react-native-quick-base64-npm-3.0.1-f6009a6514.patch` | |
 
