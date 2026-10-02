@@ -27,6 +27,7 @@ import type {
   StagingSqlPort
 } from './p2p-staging-seam.js'
 import { bytesToBase64url, digestToBytes, nowCanonicalDatetime } from '../../utils.js'
+import { registrationCodeBindingDigest } from '../../association/reassociation/registration-code.js'
 
 // Re-exported so 62-18/62-19/62-21/62-22/62-24 can import the whole seam from this one module
 // (explicit names only — never `export *` of the seam — so `insertWithCursorRetry` and the
@@ -163,6 +164,8 @@ interface RegistrationStagingPlaintextShape {
   version: 1
   init: RegistrationRequestInit
   registrationCode?: string
+  /** V-3: the requester's signature over (RequestId, registrationCode); sealed with the rest. */
+  registrationCodeSignature?: Signature
 }
 
 export interface P2pStagedRequest extends StagedRequest {
@@ -283,6 +286,12 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
    * copied through verbatim inside the sealed plaintext, exactly like the filesystem and REST
    * bindings copy them in the clear. This transport never receives, derives, or persists key
    * material: it holds either a finished `Signature` or a callback, never a raw private key.
+   *
+   * V-3 binding: when a registration code is carried, the requester's key also signs
+   * `sha256(REGISTRATION_CODE_BINDING_DOMAIN, RequestId, code)` through the SAME callback (a signer
+   * that unwraps its key once adds no extra prompt) and the signature is sealed inside the
+   * plaintext. A finished `Signature` cannot produce that binding, so a code with one is refused
+   * with 'code-binding-requires-signer' before any signing, sealing or write.
    */
   async submitRequest (
     init: RegistrationRequestInit,
@@ -300,15 +309,35 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
       )
     }
 
+    const registrationCode = extras?.registrationCode
+    if (registrationCode !== undefined && typeof signatureOrCallback !== 'function') {
+      throw new P2pStagingError(
+        'code-binding-requires-signer',
+        'P2pRegistrationTransport.submitRequest: a registration code needs a signing callback to produce its binding signature'
+      )
+    }
+
     const digestBytes = await this.computeDigest(init, requesterKey)
     const signature = typeof signatureOrCallback === 'function'
       ? await signatureOrCallback(digestBytes)
       : signatureOrCallback
     const digest = bytesToBase64url(digestBytes)
 
-    const plaintextValue: RegistrationStagingPlaintextShape = extras?.registrationCode === undefined
-      ? { version: 1, init }
-      : { version: 1, init, registrationCode: extras.registrationCode }
+    let plaintextValue: RegistrationStagingPlaintextShape
+    if (registrationCode === undefined) {
+      plaintextValue = { version: 1, init }
+    } else {
+      const bindingSignature = await (signatureOrCallback as (digest: Uint8Array) => Promise<Signature>)(
+        registrationCodeBindingDigest(init.id, registrationCode)
+      )
+      if (bindingSignature.signerKey !== requesterKey) {
+        throw new P2pStagingError(
+          'rejected',
+          'P2pRegistrationTransport.submitRequest: the registration code binding was not signed by the requester key'
+        )
+      }
+      plaintextValue = { version: 1, init, registrationCode, registrationCodeSignature: bindingSignature }
+    }
     const initJson = await this.sealer.seal(encodeStagingPlaintext(plaintextValue), { requestId: init.id, digest })
 
     const port = await this.strand()
