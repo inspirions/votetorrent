@@ -14,9 +14,8 @@ import {
   encodeStagingPlaintext,
   decodeStagingPlaintext,
   insertWithCursorRetry,
-  isConformingStagingCursor,
   readConformingRows,
-  readInSequenceRows,
+  readDecisionRows,
   inSequenceHighWater
 } from '../../registration/transport/p2p-staging-seam.js'
 import type { StagingSealer, StagingOpener, StagingDecisionSigner, StagingReadReport, StagingUnreadableRow, StagingSqlPort } from '../../registration/transport/p2p-staging-seam.js'
@@ -417,16 +416,20 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
    * advance monotonically; a stale cursor re-delivers rather than losing a row. `AssociationDecision`
    * carries no Status vocabulary CHECK — an out-of-vocabulary status (e.g. 'x') THROWS here
    * (unchanged from before this plan), via `assertKnownAssociationStatus`.
+   *
+   * Every conforming decision is delivered (WR-01). `cursor` is a forward-safe resume cursor: the
+   * row's own cursor when in sequence, otherwise the last in-sequence cursor of the read, so
+   * forwarding the last notice's cursor re-delivers and never skips.
    */
   async pollDecisions (sinceCursor?: string): Promise<AssociationDecisionNotice[]> {
     const port = await this.strand()
-    const rows = await readInSequenceRows<DecisionRow>(port, 'AssociationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
-    return rows.map((row) => ({
+    const rows = await readDecisionRows<DecisionRow>(port, 'AssociationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.map(({ row, resumeCursor }) => ({
       requestId: row.RequestId,
       status: assertKnownAssociationStatus(row.Status, 'P2pAssociationTransport.pollDecisions'),
       challengeNonce: row.ChallengeNonce ?? undefined,
       reason: row.Reason ?? undefined,
-      cursor: row.Cursor
+      cursor: resumeCursor
     }))
   }
 
@@ -618,8 +621,8 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
    * through `assertKnownAssociationStatus` (unknown status THROWS, unchanged). */
   async readDecisionRecords (sinceCursor?: string): Promise<P2pAssociationDecisionRecord[]> {
     const port = await this.strand()
-    const rows = await readInSequenceRows<DecisionRow>(port, 'AssociationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
-    return rows.map((row) => ({
+    const rows = await readDecisionRows<DecisionRow>(port, 'AssociationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.map(({ row, resumeCursor }) => ({
       requestId: row.RequestId,
       authorityId: row.AuthorityId,
       status: assertKnownAssociationStatus(row.Status, 'P2pAssociationTransport.readDecisionRecords'),
@@ -630,7 +633,7 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
       decidedAt: row.DecidedAt,
       deciderKey: row.DeciderKey,
       deciderSignature: row.DeciderSignature,
-      cursor: row.Cursor
+      cursor: resumeCursor
     }))
   }
 

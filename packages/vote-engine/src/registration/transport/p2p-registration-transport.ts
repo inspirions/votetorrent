@@ -12,9 +12,8 @@ import {
   encodeStagingPlaintext,
   decodeStagingPlaintext,
   insertWithCursorRetry,
-  isConformingStagingCursor,
   readConformingRows,
-  readInSequenceRows,
+  readDecisionRows,
   inSequenceHighWater
 } from './p2p-staging-seam.js'
 import type {
@@ -378,19 +377,23 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
    * (closed-as-duplicate) row maps to `{ status: 'r', reason: REGISTRATION_DUPLICATE_CLOSED_REASON }`
    * rather than throwing — without this mapping a single closed-duplicate row on a shared strand
    * would make every voter's poll throw.
+   *
+   * Every conforming decision is delivered (WR-01). `cursor` is a forward-safe resume cursor: the
+   * row's own cursor when in sequence, otherwise the last in-sequence cursor of the read, so
+   * forwarding the last notice's cursor re-delivers and never skips.
    */
   async pollDecisions (sinceCursor?: string): Promise<RegistrationDecisionNotice[]> {
     const port = await this.strand()
-    const rows = await readInSequenceRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
-    return rows.filter((row) => isConformingStagingCursor(row.Cursor)).map((row) => {
+    const rows = await readDecisionRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.map(({ row, resumeCursor }) => {
       if (row.Status === 'd') {
-        return { requestId: row.RequestId, status: 'r', reason: REGISTRATION_DUPLICATE_CLOSED_REASON, cursor: row.Cursor }
+        return { requestId: row.RequestId, status: 'r', reason: REGISTRATION_DUPLICATE_CLOSED_REASON, cursor: resumeCursor }
       }
       return {
         requestId: row.RequestId,
         status: assertKnownRegistrationStatus(row.Status, 'P2pRegistrationTransport.pollDecisions'),
         reason: row.Reason ?? undefined,
-        cursor: row.Cursor
+        cursor: resumeCursor
       }
     })
   }
@@ -511,8 +514,8 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
    * 'd' status. Throws (naming only the offending status) on anything outside `a`/`r`/`d`. */
   async readDecisionRecords (sinceCursor?: string): Promise<P2pRegistrationDecisionRecord[]> {
     const port = await this.strand()
-    const rows = await readInSequenceRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
-    return rows.filter((row) => isConformingStagingCursor(row.Cursor)).map((row) => {
+    const rows = await readDecisionRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.map(({ row, resumeCursor }) => {
       if (row.Status !== 'a' && row.Status !== 'r' && row.Status !== 'd') {
         throw new Error(`P2pRegistrationTransport.readDecisionRecords: decision record carries a status outside a/r/d: ${JSON.stringify(row.Status)}`)
       }
@@ -525,7 +528,7 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
         decidedAt: row.DecidedAt,
         deciderKey: row.DeciderKey,
         deciderSignature: row.DeciderSignature,
-        cursor: row.Cursor
+        cursor: resumeCursor
       }
     })
   }

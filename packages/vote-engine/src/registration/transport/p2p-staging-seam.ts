@@ -74,10 +74,12 @@ export function isConformingStagingCursor (value: unknown): value is string {
  *      high cursor is re-reported on every read (consumers are idempotent, D-05) and never
  *      advances the high-water mark; an honest row that had to land above the ceiling is still
  *      delivered.
- *  (c) The decision readers (`readInSequenceRows`) still skip rows above the ceiling: consumers
- *      forward their notice cursors between polls, and only officers can write decision rows
- *      (D-06), so an officer-forged decision row delays later decisions until the row count
- *      catches up, but a forwarded cursor can never skip a later decision.
+ *  (c) The decision readers (`readDecisionRows`) also deliver EVERY conforming row (WR-01); the
+ *      ceiling only picks the forward cursor. Consumers forward their notice cursors between
+ *      polls (62-38, T-62-38-05), so the `cursor` a notice carries is a resume cursor: the row's
+ *      own cursor when in sequence, otherwise the last in-sequence cursor of the read. A forged
+ *      high decision is therefore re-delivered on every poll and never adopted as a forward
+ *      cursor, and an honest decision walked above the ceiling is delivered at once.
  *  (d) A non-conforming `sinceCursor` is treated as absent, so the caller re-reads from the start
  *      and may see rows it already processed.
  */
@@ -118,19 +120,35 @@ export async function readConformingRows<T extends { Cursor: string }> (
 }
 
 /**
- * Decision reader front end (V-4): `readConformingRows`, then drops every row above the
- * in-sequence ceiling BEFORE the caller delivers it. Decision readers keep the ceiling because
- * their notice cursors are forwarded by consumers and only officers can write decision rows (D-06).
+ * The `sinceCursor` a consumer forwards to re-read from the very start: 16 characters but
+ * deliberately NON-conforming (`isConformingStagingCursor` requires a value of at least 1), so
+ * every P2P reader treats it as an absent `sinceCursor` (WR-01).
  */
-export async function readInSequenceRows<T extends { Cursor: string }> (
+export const STAGING_CURSOR_REREAD = '0000000000000000'
+
+/**
+ * Decision reader front end (V-4, WR-01): `readConformingRows`, then pairs EVERY conforming row
+ * (none is dropped for sitting above the ceiling) with a forward-safe RESUME cursor. A row at or
+ * below the ceiling carries its own cursor; a row above it carries the greatest in-sequence
+ * cursor of this read, else the caller's conforming `sinceCursor`, else `STAGING_CURSOR_REREAD`.
+ * Consumers forward the last notice's cursor between polls (62-38, T-62-38-05), so a forged
+ * far-high decision is re-delivered on every poll and never adopted as a forward cursor, while an
+ * honest decision walked above the ceiling is delivered at once.
+ */
+export async function readDecisionRows<T extends { Cursor: string }> (
   port: StagingSqlPort,
   table: StagingCursorTable,
   strandId: string,
   selectSql: string,
   sinceCursor: string | undefined
-): Promise<T[]> {
+): Promise<Array<{ row: T, resumeCursor: string }>> {
   const { rows, ceiling } = await readConformingRows<T>(port, table, strandId, selectSql, sinceCursor)
-  return rows.filter((row) => row.Cursor <= ceiling)
+  const since = sinceCursor !== undefined && isConformingStagingCursor(sinceCursor) ? sinceCursor : undefined
+  let highWater: string | undefined
+  return rows.map((row) => {
+    highWater = inSequenceHighWater(highWater, row.Cursor, ceiling)
+    return { row, resumeCursor: highWater ?? since ?? STAGING_CURSOR_REREAD }
+  })
 }
 
 /**

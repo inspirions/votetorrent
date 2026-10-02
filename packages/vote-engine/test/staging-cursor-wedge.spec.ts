@@ -298,7 +298,7 @@ describe('staging cursor wedge (62-33, V-4)', function () {
       } as never)
     }
 
-    it('W6: registration readStagedRequestsReport ignores forged cursors', async () => {
+    it('W6: registration readStagedRequestsReport delivers forged cursors but never adopts them as high-water', async () => {
       const report = await reg(ROWS).readStagedRequestsReport()
       expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD, CAP])
       expect(report.highWaterCursor).to.equal(GOOD)
@@ -309,10 +309,17 @@ describe('staging cursor wedge (62-33, V-4)', function () {
       expect(report.highWaterCursor).to.equal(GOOD)
     })
 
-    it('W6: registration pollDecisions and readDecisionRecords ignore forged cursors', async () => {
-      expect((await reg(ROWS).pollDecisions()).map((n) => n.cursor)).to.deep.equal([GOOD])
-      expect((await reg(ROWS).readDecisionRecords()).map((n) => n.cursor)).to.deep.equal([GOOD])
-      expect((await reg(ROWS).pollDecisions(FORGED_TEXT)).map((n) => n.cursor)).to.deep.equal([GOOD])
+    it('W6: registration pollDecisions and readDecisionRecords deliver every conforming decision but forward only an in-sequence cursor', async () => {
+      const ids = [`req-${GOOD}`, `req-${CAP}`]
+      const polled = await reg(ROWS).pollDecisions()
+      expect(polled.map((n) => n.requestId)).to.deep.equal(ids)
+      expect(polled.map((n) => n.cursor)).to.deep.equal([GOOD, GOOD])
+      const records = await reg(ROWS).readDecisionRecords()
+      expect(records.map((n) => n.requestId)).to.deep.equal(ids)
+      expect(records.map((n) => n.cursor)).to.deep.equal([GOOD, GOOD])
+      const forged = await reg(ROWS).pollDecisions(FORGED_TEXT)
+      expect(forged.map((n) => n.requestId)).to.deep.equal(ids)
+      expect(forged.map((n) => n.cursor)).to.deep.equal([GOOD, GOOD])
     })
 
     it('W13: a staging report delivers every conforming row but the high-water mark stays at or below the ceiling', async () => {
@@ -325,25 +332,30 @@ describe('staging cursor wedge (62-33, V-4)', function () {
       expect(report.highWaterCursor).to.equal(GOOD)
     })
 
-    it('W6b: association requests', async () => {
+    it('W6b: association requests deliver forged cursors but never adopt them as high-water', async () => {
       const report = await assoc(ROWS).readStagedRequestsReport()
       expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD, CAP])
       expect(report.highWaterCursor).to.equal(GOOD)
       expect((await assoc(ROWS).readStagedRequestsReport(FORGED_TEXT)).highWaterCursor).to.equal(GOOD)
     })
 
-    it('W6b: association attestations', async () => {
+    it('W6b: association attestations deliver forged cursors but never adopt them as high-water', async () => {
       const report = await assoc(ROWS).readStagedAttestationsReport()
       expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD, CAP])
       expect(report.highWaterCursor).to.equal(GOOD)
       expect((await assoc(ROWS).readStagedAttestationsReport(FORGED_TEXT)).highWaterCursor).to.equal(GOOD)
     })
 
-    it('W6b: association decisions', async () => {
-      expect((await assoc(ROWS).pollDecisions()).map((n) => n.cursor)).to.deep.equal([GOOD])
-      expect((await assoc(ROWS).readDecisionRecords()).map((n) => n.cursor)).to.deep.equal([GOOD])
-      expect((await assoc(ROWS).pollDecisions(FORGED_TEXT)).map((n) => n.cursor)).to.deep.equal([GOOD])
-      expect((await assoc(ROWS).readDecisionRecords(FORGED_TEXT)).map((n) => n.cursor)).to.deep.equal([GOOD])
+    it('W6b: association pollDecisions and readDecisionRecords deliver every conforming decision but forward only an in-sequence cursor', async () => {
+      const ids = [`req-${GOOD}`, `req-${CAP}`]
+      for (const since of [undefined, FORGED_TEXT]) {
+        const polled = await assoc(ROWS).pollDecisions(since)
+        expect(polled.map((n) => n.requestId)).to.deep.equal(ids)
+        expect(polled.map((n) => n.cursor)).to.deep.equal([GOOD, GOOD])
+        const records = await assoc(ROWS).readDecisionRecords(since)
+        expect(records.map((n) => n.requestId)).to.deep.equal(ids)
+        expect(records.map((n) => n.cursor)).to.deep.equal([GOOD, GOOD])
+      }
     })
   })
 
