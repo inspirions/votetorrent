@@ -22166,6 +22166,7 @@ __metadata:
     readable-stream: "npm:^4.7.0"
     rn-leveldb: "npm:^3.11.1"
     typescript: "npm:5.0.4"
+    uint8arraylist: "npm:^2.4.8"
     web-streams-polyfill: "npm:^4.3.0"
   languageName: unknown
   linkType: soft
