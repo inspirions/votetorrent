@@ -39,6 +39,7 @@ import {
 	toPublicTierRows,
 } from "./registrant-detail-model";
 import type { LifecycleActionId } from "./registrant-detail-model";
+import { privateTierReadState, PRIVATE_TIER_READ_STATE_COPY } from "./registrant-detail-model";
 import { useAccessTrailVisit } from "./useAccessTrailVisit";
 import type { AccessTrailRecorder } from "./access-trail-visit";
 import { pillStyles, tintPill } from "./components/pill";
@@ -482,7 +483,11 @@ export default function RegistrantDetailScreen() {
 	}
 
 	const publicRows = toPublicTierRows(publicTier);
-	const privateRows = flattenPrivateDetails(privateTier?.privateDetails);
+	const privateReadState = privateTierReadState(privateTier?.detailsAccess);
+	// Defence in depth: an unread record never yields a row, whatever the engine returned.
+	const privateRows = flattenPrivateDetails(
+		privateReadState === "readable" ? privateTier?.privateDetails : undefined
+	);
 
 	return (
 		<ScrollView
@@ -656,6 +661,25 @@ export default function RegistrantDetailScreen() {
 							{t("registrantDetailPrivateGateHeading", { scope: scopeDescriptions.vrg })}
 						</ThemedText>
 					</View>
+				) : privateReadState !== "readable" ? (
+					// D-49: a sealed tier this device cannot open is shown as unreadable, never as
+					// "No private details recorded", which would be a false claim.
+					// D-51: officers added after a registrant was written are not recipients, and no
+					// re-wrap exists.
+					// Not hidden: the section, its title, the lifecycle controls and Access History
+					// all stay. Nothing from the record (values, ciphertext, failure detail) is
+					// rendered or put in `errorMessage`.
+					<View testID="registrant-detail-private-sealed" style={localStyles.sealedNotice}>
+						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
+						<View testID={"registrant-detail-private-sealed-" + privateReadState} />
+						<ThemedText
+							type="small"
+							testID="registrant-detail-private-sealed-text"
+							style={[{ color: colors.textSecondary }, localStyles.sealedNoticeText]}
+						>
+							{t(PRIVATE_TIER_READ_STATE_COPY[privateReadState])}
+						</ThemedText>
+					</View>
 				) : privateRows.length === 0 ? (
 					<View testID="registrant-detail-private-empty">
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
@@ -713,6 +737,14 @@ const localStyles = StyleSheet.create({
 		alignItems: "center",
 		gap: 8,
 		marginBottom: 12,
+	},
+	sealedNotice: {
+		flexDirection: "row",
+		alignItems: "flex-start",
+		gap: 8,
+	},
+	sealedNoticeText: {
+		flexShrink: 1,
 	},
 	lifecycleButtonRow: {
 		flexDirection: "row",
