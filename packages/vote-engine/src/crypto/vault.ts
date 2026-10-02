@@ -87,10 +87,23 @@ export function keyholderDkgShareAlias (electionId: string, revision: number, us
   return alias
 }
 
+/**
+ * Non-secret marker beside the share alias: the attempt number whose round 4 produced the share.
+ * The share alias itself stays attempt-agnostic (every consumer reads it unchanged); only the DKG
+ * vault sweep reads this marker, so it deletes a share ONLY when the producing attempt aborted.
+ */
+export function keyholderDkgShareAttemptAlias (electionId: string, revision: number, userId: string): string {
+  const alias = `vt.keyholder-share-attempt.${electionId}.${revision}.${userId}`
+  assertKeyVaultAlias(alias)
+  return alias
+}
+
 /** Research A4: unattended intake — officer encryption keys are usable without user interaction. */
 export const OFFICER_ENCRYPTION_KEY_POLICY: KeyVaultPolicy = { requireUserAuth: false }
 export const KEYHOLDER_DKG_RECEIVING_KEY_POLICY: KeyVaultPolicy = { requireUserAuth: true }
 export const KEYHOLDER_SHARE_POLICY: KeyVaultPolicy = { requireUserAuth: true }
+/** Non-secret metadata (an attempt number already public on the strand); reading it never prompts, so the biometric budget is unchanged. */
+export const KEYHOLDER_SHARE_ATTEMPT_POLICY: KeyVaultPolicy = { requireUserAuth: false }
 
 interface VaultEntry {
   readonly bytes: Uint8Array

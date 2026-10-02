@@ -36,9 +36,15 @@
 // BEFORE step 1 is deleted (crash safety -- see `dkg-vault.ts`'s header) and
 // itself deleted right after round 4 is posted. `cleanupVault` additionally
 // sweeps every attempt's round-secret aliases once that attempt is known
-// ABORTED, and the own share alias whenever an attempt aborts with no
-// ElectionKey yet published -- so a disqualified or superseded attempt never
-// leaves a stale secret behind.
+// ABORTED. The own share is swept only when its PRODUCING attempt is proven
+// aborted: `executePostRound4` writes a non-secret marker
+// (`keyholderDkgShareAttemptAlias`) naming the attempt beside the share, and
+// `cleanupVault` deletes the share (then the marker) only when the marker
+// parses AND names an aborted attempt AND no ElectionKey exists. The old
+// attempt-agnostic sweep ("any attempt aborted, no key yet") deleted the
+// FRESH share of a retried DKG right after round 4 (V-1), leaving a complete
+// election key no one could release. A missing or unparseable marker never
+// deletes the share (fail-safe toward keeping key material).
 //
 // No device ever holds the full election private key: `src/keyholder/*`
 // never calls `combineSecret`/`reconstructGroupSecret` (D-16 grep gate).
@@ -168,7 +174,10 @@
 //     step-2 record is written BEFORE step 1 is deleted
 //     (`executePostRound2`); `cleanupVault` sweeps every ABORTED attempt's
 //     round-secret aliases (and, once `complete`, every attempt's) after
-//     every action. Evidence: scenario A ("round-secret aliases all
+//     every action. The SHARE sweep is attempt-bound (V-1): only a share
+//     whose attempt marker names an aborted attempt, with no ElectionKey,
+//     is deleted; a marker-less share is never deleted. Evidence: scenarios
+//     B and D (every honest share survives a retry and releases). Scenario A ("round-secret aliases all
 //     swept"), scenario E ("no vault holds a round-secret alias"). Control
 //     (j).
 // 13. Read-side signature verification of replicated rows: `loadSnapshot`
@@ -361,7 +370,7 @@ import {
 import type { EngineContext } from '../types.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { digestToBytes } from '../utils.js'
-import { KEYHOLDER_SHARE_POLICY, KeyVaultError, keyholderDkgReceivingKeyAlias, keyholderDkgShareAlias, type IKeyVault } from '../crypto/vault.js'
+import { KEYHOLDER_SHARE_ATTEMPT_POLICY, KEYHOLDER_SHARE_POLICY, KeyVaultError, keyholderDkgReceivingKeyAlias, keyholderDkgShareAlias, keyholderDkgShareAttemptAlias, type IKeyVault } from '../crypto/vault.js'
 import {
   buildComplaintEvidence,
   commitRound1,
@@ -943,6 +952,7 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
     }
 
     const shareAlias = keyholderDkgShareAlias(electionId, revision, signer.userId)
+    const markerAlias = keyholderDkgShareAttemptAlias(electionId, revision, signer.userId)
     const existingShareBytes = await this.deps.vault.getSecret(shareAlias)
     if (existingShareBytes !== null) {
       const stillValid = validateReleasedShare(evaluation.threshold!, evaluation.roster.length, material.groupCommitments, {
@@ -950,12 +960,17 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
         signingShare: bytesToHex(existingShareBytes)
       })
       if (!stillValid) {
+        await this.deps.vault.deleteSecret(markerAlias)
         await this.deps.vault.deleteSecret(shareAlias)
         await this.deps.vault.putSecret(shareAlias, material.signingShare, KEYHOLDER_SHARE_POLICY)
       }
     } else {
       await this.deps.vault.putSecret(shareAlias, material.signingShare, KEYHOLDER_SHARE_POLICY)
     }
+    // Record the producing attempt AFTER the share is in the vault on every branch (a crash between the two
+    // leaves a marker-less share, which the sweep never deletes). `putSecret` refuses an existing alias.
+    await this.deps.vault.deleteSecret(markerAlias)
+    await this.deps.vault.putSecret(markerAlias, new TextEncoder().encode(String(attempt)), KEYHOLDER_SHARE_ATTEMPT_POLICY)
 
     const payload = serializeRound4Payload({ groupPublicKey: material.groupPublicKey, groupCommitments: material.groupCommitments })
     await this.postMessage(electionId, revision, attempt, 4, material.groupPublicKey, payload, signer)
@@ -1038,10 +1053,21 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
       }
     }
 
-    const hadAbortedAttempt = evaluation.attempts.some((a) => a.outcome === 'aborted')
-    if (hadAbortedAttempt && evaluation.electionKey === null) {
-      const shareAlias = keyholderDkgShareAlias(electionId, revision, signer.userId)
-      if (await this.deps.vault.deleteSecret(shareAlias)) didSomething = true
+    // V-1: the share is deleted only when the attempt that PRODUCED it is proven aborted (and no key exists).
+    if (evaluation.electionKey === null) {
+      const markerAlias = keyholderDkgShareAttemptAlias(electionId, revision, signer.userId)
+      const markerBytes = await this.deps.vault.getSecret(markerAlias)
+      if (markerBytes !== null) {
+        const text = new TextDecoder().decode(markerBytes)
+        const producing = /^[1-9][0-9]*$/.test(text) ? Number(text) : null
+        const aborted = producing !== null && evaluation.attempts.some((a) => a.attempt === producing && a.outcome === 'aborted')
+        if (aborted) {
+          const shareAlias = keyholderDkgShareAlias(electionId, revision, signer.userId)
+          await this.deps.vault.deleteSecret(shareAlias)
+          await this.deps.vault.deleteSecret(markerAlias)
+          didSomething = true
+        }
+      }
     }
 
     return didSomething
