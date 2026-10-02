@@ -280,6 +280,48 @@ describe('registration-at-rest-sealing — D-49 (62-31 Task 3)', function () {
     })
   })
 
+  describe('P5b — no-opener at the approval gate (M6 control)', () => {
+    it('a sealed request approved from a context with no opener throws RegistrationContentAccessError(no-opener) and writes nothing', async () => {
+      const auth = await freshAuthority()
+      await provisionTestIntakeRecipient(auth.ctx, auth.authority.id)
+      const requester = randomTestKeyPair()
+      const payload = makePayload(auth.authority.id)
+      const init = makeRequestInit(auth.authority.id, payload)
+      await new RegistrationEngine(auth.ctx).submitRegistrationRequest(init, requester.publicHex, makeCallbackSigner(requester))
+
+      // Seed the registrant task extension with the OPENER-bearing engine; only the approval attempt below is opener-less.
+      await new SignatureTasksEngine(makeNetworkRef(), auth.ctx).getRequestedSignatures(true)
+      const noOpenerCtx: EngineContext = { db: auth.ctx.db, user: auth.user }
+      const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), noOpenerCtx)
+      const beforeCounts = await countTripleRows(auth.ctx.db, auth.authority.id)
+      const task = {
+        type: 'signature' as const,
+        userId: auth.user.id,
+        network: makeNetworkRef(),
+        signatureType: 'registrant' as const,
+        requestId: init.id,
+        payload,
+        submittedAt: init.submittedAt,
+        issuerType: 'registrant' as const
+      }
+      let caught: unknown
+      try {
+        const digest = await tasksEngine.getSignatureDigest(task)
+        await tasksEngine.completeSignature(task, {
+          isAccepted: true,
+          signature: await makeTestSignCallback(auth.user)(digest),
+          sign: makeTestSignCallback(auth.user),
+          decision: { checklist: ['id'] }
+        })
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).to.be.instanceOf(RegistrationContentAccessError)
+      expect((caught as RegistrationContentAccessError).access).to.equal('no-opener')
+      expect(await countTripleRows(auth.ctx.db, auth.authority.id)).to.deep.equal(beforeCounts)
+    })
+  })
+
   describe('P6 — legacy rows', () => {
     it('a raw plaintext row with a correct PayloadCid reads unsealed and approves end to end; a mismatched PayloadCid reads tampered', async () => {
       const auth = await freshAuthority()
