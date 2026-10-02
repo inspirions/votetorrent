@@ -139,6 +139,9 @@ const mockRegistrationEngine = {
 	getRegistrationRequest: mockGetRegistrationRequest,
 	getPriorRejections: mockGetPriorRejections,
 	rejectRegistrationRequest: mockRejectRegistrationRequest,
+	// 62-27: D-44 duplicate reads. Defaults keep every pre-existing case on its original path.
+	getLikelyDuplicateRequests: jest.fn(async (_requestId: string) => []),
+	getDuplicateClosure: jest.fn(async (_requestId: string) => undefined),
 };
 
 const mockGetRequestedSignatures = jest.fn(async (_pending: boolean) => mockTasks);
@@ -149,6 +152,8 @@ const mockSignatureTasksEngine = {
 	getRequestedSignatures: mockGetRequestedSignatures,
 	getSignatureDigest: mockGetSignatureDigest,
 	completeSignature: mockCompleteSignature,
+	// 62-27: D-11 display-only status; null = no progress note.
+	getRegistrantSigningStatus: jest.fn(async (_requestId: string) => null),
 };
 
 const mockGetEngine = jest.fn(async (name: string): Promise<any> => {

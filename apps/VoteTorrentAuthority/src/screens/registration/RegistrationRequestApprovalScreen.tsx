@@ -7,10 +7,13 @@ import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import type {
 	IRegistrationEngine,
 	ISignatureTasksEngine,
+	LikelyDuplicateRequest,
 	PriorRejection,
 	RegistrantSignatureTask,
+	RegistrationDuplicateClosure,
 	RegistrationRequestRead,
 	RegistrationVerificationChecklistItem,
+	SigningStatus,
 } from "@votetorrent/vote-core";
 import { isChecklistGateMet } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
@@ -30,6 +33,17 @@ import {
 import { truncateId } from "./registrant-display";
 import { BridgeSourceCallout } from "./components/BridgeSourceBadge";
 import { PriorRejectionsCallout } from "./components/PriorRejectionsCallout";
+import { PossibleDuplicateCallout } from "./components/PossibleDuplicateCallout";
+import { ThresholdProgressNote } from "../tasks/components/ThresholdProgressNote";
+import { ChipButton } from "../../components/ChipButton";
+import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
+import {
+	createLazyDeviceSign,
+	isClosedAsDuplicateError,
+	isRegistrationContentAccessError,
+	publishRegistrationDecisionAfterDecide,
+	registrationContentUnreadKey,
+} from "./continuity-review";
 import { VerificationChecklist } from "./components/VerificationChecklist";
 import { RejectReasonCard } from "./components/RejectReasonCard";
 import { pillStyles, tintPill } from "./components/pill";
@@ -79,6 +93,21 @@ import type { RootStackParamList } from "../../navigation/types";
  * cross-cutting gap tracked under Phase 999.1 and out of scope here. This
  * file makes no claim anywhere that write access is scope-gated at the data
  * layer; `canDecide` decides only which write controls render `disabled`.
+ *
+ * (5) D-44 / D-11 (62-27). `PossibleDuplicateCallout` renders beneath the prior-rejections
+ * callout. A request closed (or closing) as a duplicate renders its own block, and its Approve and
+ * Reject controls stay present but disabled. Each decision is published right after it resolves,
+ * through `RegistrationEngine.publishRegistrationDecision` with `closesRequestId` set to the
+ * callout candidate or null (never omitted); a publish failure never reports the recorded decision
+ * as failed, and 62-25's drain publishes it later. At a vrg threshold above 1, Reject records a
+ * vote through the officer's own registrant task (62-11 refuses a single-officer
+ * `rejectRegistrationRequest` above threshold 1); the reason is not collected, because whether to
+ * persist it is an open question. No screen calls a transport's `publishDecision`.
+ *
+ * (6) D-49 (62-31) seals the payload per officer. An unread payload renders an explicit
+ * unreadable state in place of the summary and checklist, never an empty form. The copy is
+ * 62-10's Group K; the approval gate's `RegistrationContentAccessError` is mapped by its access
+ * code, and its message (request id plus access code) is never rendered.
  */
 
 export interface RequestSummaryRow {
@@ -206,7 +235,7 @@ export default function RegistrationRequestApprovalScreen() {
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
-	const { getEngine } = useApp();
+	const { getEngine, createPeerStagingTransports } = useApp();
 	const { scopes } = useCurrentOfficerScopes(authorityId);
 
 	useLayoutEffect(() => {
@@ -216,6 +245,19 @@ export default function RegistrationRequestApprovalScreen() {
 	const [read, setRead] = useState<RegistrationRequestRead | undefined>(undefined);
 	const [priorRejections, setPriorRejections] = useState<PriorRejection[]>([]);
 	const [priorRejectionsUnavailable, setPriorRejectionsUnavailable] = useState(false);
+	// D-44: the likely-duplicate candidate the callout shows (oldest first), the closure state, and
+	// the "could not check" flags. Refusing under uncertainty is safe; approving a possible
+	// duplicate without seeing the flag is not.
+	const [duplicate, setDuplicate] = useState<LikelyDuplicateRequest | undefined>(undefined);
+	const [duplicateUnavailable, setDuplicateUnavailable] = useState(false);
+	const [closure, setClosure] = useState<RegistrationDuplicateClosure | undefined>(undefined);
+	const [closureUnavailable, setClosureUnavailable] = useState(false);
+	// D-11: display-only status of the vrg session behind this request.
+	const [signingStatus, setSigningStatus] = useState<SigningStatus | null>(null);
+	// Bumping this re-runs the load effect (after a vote, a closed race, a content refusal).
+	const [reloadNonce, setReloadNonce] = useState(0);
+	// A message that must survive the reload it triggers (the load effect clears the error area).
+	const carryMessageRef = useRef("");
 	const [task, setTask] = useState<RegistrantSignatureTask | undefined>(undefined);
 	const [checked, setChecked] = useState<RegistrationVerificationChecklistItem[]>([]);
 	const [gateMet, setGateMet] = useState(false);
@@ -260,7 +302,14 @@ export default function RegistrationRequestApprovalScreen() {
 	useEffect(() => {
 		async function load() {
 			setLoading(true);
-			setErrorMessage("");
+			setErrorMessage(carryMessageRef.current);
+			carryMessageRef.current = "";
+			setPriorRejectionsUnavailable(false);
+			setDuplicate(undefined);
+			setDuplicateUnavailable(false);
+			setClosure(undefined);
+			setClosureUnavailable(false);
+			setSigningStatus(null);
 			try {
 				const reg = await getEngine<IRegistrationEngine>("registration");
 				const r = await reg.getRegistrationRequest(requestId);
@@ -290,6 +339,32 @@ export default function RegistrationRequestApprovalScreen() {
 					}
 				}
 
+				// D-44: the closure state first. A request already closed (or closing) as a
+				// duplicate is never decided, and needs no candidate callout.
+				let closed: RegistrationDuplicateClosure | undefined;
+				try {
+					closed = await reg.getDuplicateClosure(requestId);
+					if (!unmountedRef.current) setClosure(closed);
+				} catch {
+					if (!unmountedRef.current) {
+						setClosureUnavailable(true);
+						setErrorMessage(t("possibleDuplicateCheckFailed"));
+					}
+				}
+
+				if (r.status === "p" && closed === undefined) {
+					try {
+						const likely = await reg.getLikelyDuplicateRequests(requestId);
+						if (!unmountedRef.current) setDuplicate(likely[0]);
+					} catch {
+						// L-3 mirror: the engine message is never shown, and Approve is blocked.
+						if (!unmountedRef.current) {
+							setDuplicateUnavailable(true);
+							setErrorMessage(t("possibleDuplicateCheckFailed"));
+						}
+					}
+				}
+
 				if (r.status === "p") {
 					const tasksEngine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
 					const tasks = await tasksEngine.getRequestedSignatures(true);
@@ -301,6 +376,13 @@ export default function RegistrationRequestApprovalScreen() {
 						(x) => x.signatureType === "registrant" && (x as RegistrantSignatureTask).requestId === requestId
 					) as RegistrantSignatureTask | undefined;
 					if (!unmountedRef.current) setTask(found);
+					// D-11: display-only; a failed read is simply no note.
+					try {
+						const status = await tasksEngine.getRegistrantSigningStatus(requestId);
+						if (!unmountedRef.current) setSigningStatus(status);
+					} catch {
+						if (!unmountedRef.current) setSigningStatus(null);
+					}
 				}
 			} catch (err) {
 				if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -309,7 +391,36 @@ export default function RegistrationRequestApprovalScreen() {
 			}
 		}
 		load();
-	}, [requestId, getEngine]);
+		// `t` is intentionally not a dependency: a locale change must not re-run the engine reads.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [requestId, getEngine, reloadNonce]);
+
+	// Derived values (D-44 / D-11 / D-49).
+	const thresholdAboveOne = (signingStatus?.threshold ?? 1) > 1;
+	const unreachable = mode === "pending" && signingStatus?.unreachable === true && signingStatus.reached === false;
+	const closedAsDuplicate = closure !== undefined;
+	const unreadKey = registrationContentUnreadKey(read?.payloadAccess);
+	const contentReadable = unreadKey === undefined;
+	// An officer cannot refuse a request they cannot see, but may refuse content that fails its
+	// signed digest: refusing under uncertainty is the safe direction.
+	const rejectableUnread = read?.payloadAccess === "tampered";
+	// 62-31 degrades an unread registrant task to the base task, so a missing own task does not
+	// mean the officer voted.
+	const voteRecorded = mode === "pending" && thresholdAboveOne && !task && !unreachable && contentReadable;
+
+	function buildReviewDeps() {
+		return {
+			getEngine,
+			createPeerStagingTransports,
+			authorityId,
+			sign: createLazyDeviceSign(() => createDeviceSigner("Device User")),
+		};
+	}
+
+	/** The request the callout showed, or null: never omitted (automatic closure would close an unseen request). */
+	function closesRequestId(): string | null {
+		return duplicateUnavailable ? null : (duplicate?.requestId ?? null);
+	}
 
 	// G. handleApprove — the accept ceremony (D-07). Four steps: fetch the
 	// engine-authoritative digest, sign it device-side, complete the
@@ -361,13 +472,31 @@ export default function RegistrationRequestApprovalScreen() {
 				sign: signer,
 				decision: { checklist: checked },
 			});
+			// D-44: publish right after the decision resolves. Never throws, and a failure here
+			// is never reported as a failed decision: 62-25's drain publishes it later.
+			const published = await publishRegistrationDecisionAfterDecide(buildReviewDeps(), requestId, closesRequestId());
+			if (thresholdAboveOne && published.kind === "still-pending") {
+				// Below threshold: the vote is recorded, the request is still pending.
+				setReloadNonce((n) => n + 1);
+				return;
+			}
 			// No toast, no checkmark — this is a ceremony screen, mirroring
 			// SignatureTaskScreen.tsx.
 			navigation.goBack();
 		} catch (err) {
-			const outcome = handleDeviceSigningError(err);
-			if (!outcome.handled) {
-				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			if (isClosedAsDuplicateError(err)) {
+				setErrorMessage("");
+				setReloadNonce((n) => n + 1);
+			} else if (isRegistrationContentAccessError(err)) {
+				// D-49: the approval gate refused before any signature was spent. Mapped by access
+				// code; its message (request id plus access code) is never rendered.
+				carryMessageRef.current = t(registrationContentUnreadKey(err.access) ?? "registrationContentUnreadable");
+				setReloadNonce((n) => n + 1);
+			} else {
+				const outcome = handleDeviceSigningError(err);
+				if (!outcome.handled) {
+					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+				}
 			}
 		} finally {
 			submittingRef.current = false;
@@ -437,11 +566,21 @@ export default function RegistrationRequestApprovalScreen() {
 					// task is cosmetic, and reporting it as a failed refusal is not.
 				}
 			}
+			//
+			// WR-14 (62-27): publishing is a third, separately failing act whose failure is never
+			// reported as a failed refusal. It never throws.
+			await publishRegistrationDecisionAfterDecide(buildReviewDeps(), requestId, closesRequestId());
 			navigation.goBack();
 		} catch (err) {
-			const outcome = handleDeviceSigningError(err);
-			if (!outcome.handled) {
-				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			if (isClosedAsDuplicateError(err)) {
+				setErrorMessage("");
+				setShowRejectCard(false);
+				setReloadNonce((n) => n + 1);
+			} else {
+				const outcome = handleDeviceSigningError(err);
+				if (!outcome.handled) {
+					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+				}
 			}
 			// Re-thrown so RejectReasonCard's own submit latch (idle ->
 			// submitting -> submitted) sees a REJECTED onConfirm and returns to
@@ -449,6 +588,44 @@ export default function RegistrationRequestApprovalScreen() {
 			// precedent. Without this a failed reject would latch the card on
 			// "submitted" permanently, stranding the officer with no retry.
 			throw err;
+		}
+	}
+
+	// D-11 (crossnote assignment): at a vrg threshold above 1 a rejection is a RECORDED VOTE, not a
+	// veto (UI-SPEC Surface 5). 62-11 refuses a single-officer `rejectRegistrationRequest` above
+	// threshold 1, so this records the officer's decision through their own registrant task, the
+	// blank triple exactly as the rejected-task completion above does: no `sign`, no `decision`, no
+	// device signer, no confirm and no reason card. The reason is NOT collected, because whether to
+	// persist it needs a schema change and that question is still open.
+	async function handleThresholdRejectVote() {
+		if (submittingRef.current) return;
+		submittingRef.current = true;
+		setSubmitting(true);
+		try {
+			setErrorMessage("");
+			if (!task) {
+				throw new Error(`RegistrationRequestApprovalScreen: no pending signature task for requestId=${requestId}`);
+			}
+			const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
+			await engine.completeSignature(task, {
+				isAccepted: false,
+				signature: { signature: "", signerKey: "", signerUserId: "" },
+			});
+			// The request stays pending until the session resolves: reload to show the status.
+			setReloadNonce((n) => n + 1);
+		} catch (err) {
+			if (isClosedAsDuplicateError(err)) {
+				setErrorMessage("");
+				setReloadNonce((n) => n + 1);
+			} else {
+				const outcome = handleDeviceSigningError(err);
+				if (!outcome.handled) {
+					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+				}
+			}
+		} finally {
+			submittingRef.current = false;
+			if (!unmountedRef.current) setSubmitting(false);
 		}
 	}
 
@@ -492,6 +669,88 @@ export default function RegistrationRequestApprovalScreen() {
 						    rendered unconditionally, no wrapping length check. */}
 						<PriorRejectionsCallout rejections={priorRejections} />
 
+						{/* D-44: directly beneath the prior-rejections callout. Absent when there is no
+						    candidate, and never rendered for an already-closed request. */}
+						<PossibleDuplicateCallout
+							candidate={closedAsDuplicate ? undefined : duplicate}
+							onViewOther={(id) => navigation.push("RegistrationRequestApproval", { requestId: id, authorityId })}
+						/>
+
+						{/* D-11: threshold progress, rendered from a status read that survives the
+						    officer's own vote. An unreachable session renders its own block below. */}
+						{!unreachable ? (
+							<View testID="registration-request-approval-threshold-note">
+								<ThresholdProgressNote status={signingStatus} />
+							</View>
+						) : null}
+						{voteRecorded ? (
+							<ThemedText
+								type="small"
+								style={{ color: colors.textSecondary }}
+								testID="registration-request-approval-vote-recorded"
+							>
+								{t("signatureTaskThresholdVoteRecorded")}
+							</ThemedText>
+						) : null}
+
+						{closedAsDuplicate ? (
+							<View testID="registration-request-approval-duplicate-closed-block" style={localStyles.stateBlock}>
+								<View style={[pillStyles.pill, { backgroundColor: tintPill(colors.warning) }]}>
+									<ThemedText type="smallBold" style={{ color: colors.warning }}>
+										{t("possibleDuplicateClosedLabel")}
+									</ThemedText>
+								</View>
+								{closure?.closedByRequestId ? (
+									<ChipButton
+										fullWidth
+										label={t("possibleDuplicateViewOtherButton")}
+										onPress={() =>
+											navigation.push("RegistrationRequestApproval", {
+												requestId: closure.closedByRequestId!,
+												authorityId,
+											})
+										}
+									/>
+								) : null}
+							</View>
+						) : null}
+
+						{unreachable ? (
+							<View testID="registration-request-approval-unreachable-block" style={localStyles.stateBlock}>
+								<View
+									testID="registration-request-approval-unreachable-pill"
+									style={[pillStyles.pill, { backgroundColor: tintPill(colors[rejectedMeta.colorKey]) }]}
+								>
+									<ThemedText type="smallBold" style={{ color: colors[rejectedMeta.colorKey] }}>
+										{t(rejectedMeta.labelKey)}
+									</ThemedText>
+								</View>
+								<ThemedText type="small" testID="registration-request-approval-unreachable-text">
+									{t("signatureTaskThresholdUnreachable")}
+								</ThemedText>
+							</View>
+						) : null}
+
+						{/* D-49: an unread payload renders why, in place of the summary and the checklist,
+						    never an empty form. The copy is a Group K key; no payload text, request id or
+						    access code reaches this node. */}
+						{!contentReadable ? (
+							<View
+								testID="registration-request-approval-content-unreadable"
+								style={[
+									styles.cardSurface,
+									{ backgroundColor: colors.card, borderLeftWidth: 4, borderLeftColor: colors.warning },
+								]}
+							>
+								<View style={localStyles.unreadableRow}>
+									<FontAwesome6 name="circle-exclamation" size={16} color={colors.warning} />
+									<ThemedText type="default" style={localStyles.unreadableText}>
+										{t(unreadKey!)}
+									</ThemedText>
+								</View>
+							</View>
+						) : (
+						<>
 						<View
 							testID="registration-request-approval-summary"
 							style={[styles.cardSurface, { backgroundColor: colors.card }]}
@@ -534,6 +793,8 @@ export default function RegistrationRequestApprovalScreen() {
 							readOnly={mode !== "pending"}
 							decidedAt={read.decidedAt}
 						/>
+						</>
+						)}
 
 						{mode === "approved" ? (
 							<View testID="registration-request-approval-approved-block">
@@ -590,7 +851,7 @@ export default function RegistrationRequestApprovalScreen() {
 			</ScrollView>
 
 			{/* Neither decided mode renders a footer of any kind. */}
-			{mode === "pending" && !showRejectCard ? (
+			{mode === "pending" && !unreachable && !showRejectCard ? (
 				<View testID="registration-request-approval-footer">
 					{/* Stacked (no `row`), not the two-across row every other footer
 					    in the app uses: a row gave each label ~84dp, and "APPROVE
@@ -614,7 +875,17 @@ export default function RegistrationRequestApprovalScreen() {
 								size="thin"
 								// WR-13: reads the STATE, not the ref — a ref mutation schedules no render, so
 								// the ref-based form never produced a visual disable while the ceremony ran.
-								disabled={!gateMet || !canDecide || priorRejectionsUnavailable || submitting}
+								disabled={
+										!gateMet ||
+										!canDecide ||
+										priorRejectionsUnavailable ||
+										duplicateUnavailable ||
+										closureUnavailable ||
+										closedAsDuplicate ||
+										(thresholdAboveOne && !task) ||
+										!contentReadable ||
+										submitting
+									}
 								onPress={handleApprove}
 							/>
 						</View>
@@ -624,9 +895,16 @@ export default function RegistrationRequestApprovalScreen() {
 								icon="xmark"
 								backgroundColor={colors.error}
 								size="thin"
-								disabled={!canDecide}
-								// Fires NO engine call whatsoever — only reveals the card.
-								onPress={() => setShowRejectCard(true)}
+								disabled={
+									!canDecide ||
+									closedAsDuplicate ||
+									(thresholdAboveOne && !task) ||
+									(!contentReadable && !rejectableUnread) ||
+									submitting
+								}
+								// Threshold 1 fires NO engine call whatsoever — only reveals the card. Above
+								// threshold 1 it records a vote (D-11).
+								onPress={() => (thresholdAboveOne ? handleThresholdRejectVote() : setShowRejectCard(true))}
 							/>
 						</View>
 					</Footer>
@@ -658,6 +936,18 @@ const localStyles = StyleSheet.create({
 	// the slot (48-26 gap 4 / D-07).
 	footerSlot: {
 		alignSelf: "stretch",
+	},
+	stateBlock: {
+		marginBottom: 12,
+		gap: 8,
+	},
+	unreadableRow: {
+		flexDirection: "row",
+		alignItems: "flex-start",
+		gap: 8,
+	},
+	unreadableText: {
+		flexShrink: 1,
 	},
 });
 
