@@ -11,7 +11,10 @@
  *   - DS2 / DS3 status and audit stay healthy after a participant's /
  *     the publisher's rotation, and agree with key release,
  *   - DS4a / DS4b writes stay closed: a revoked key can neither raw-insert a
- *     KeyholderDkgMessage (schema) nor advance the DKG (engine).
+ *     KeyholderDkgMessage (schema) nor advance the DKG (engine),
+ *   - DS5 (62-48, IN-04) a MID-DKG rotation (after round 0, before any
+ *     ElectionKey) followed by continuing with the NEW key still completes
+ *     with a consistent transcript spanning both keys.
  */
 
 import { expect } from 'chai'
@@ -89,6 +92,51 @@ async function countMessages (s: Setup, userId?: string): Promise<number> {
   return Number(row!.n)
 }
 
+interface MidRunSetup {
+  seeded: SeedDkgElectionResult
+  db: Database
+  electionId: string
+  participants: DkgTestParticipant[]
+}
+
+async function setupMidRun (): Promise<MidRunSetup> {
+  const seeded = await seedDkgElection({ keyholders: ['Alice', 'Bob', 'Carol'], threshold: 2 })
+  const { auth, electionId, participants } = seeded
+  const db = auth.ctx.db
+  const count = async (): Promise<number> => {
+    const r = await db.prepare('select count(*) as n from KeyholderDkgMessage where ElectionId = :e').get({ e: electionId })
+    return Number(r!.n)
+  }
+  await runDkgToQuiescence(participants, electionId, { stopWhen: async () => (await count()) >= 3 })
+  const ek = await db.prepare('select 1 as x from ElectionKey where ElectionId = :e').get({ e: electionId })
+  expect(ek, 'no ElectionKey yet at rotation time').to.equal(undefined)
+  return { seeded, db, electionId, participants }
+}
+
+/** Rotate p's DKG key (add fresh, revoke old) and swap p.signer to the fresh key. Returns the fresh key pair. */
+async function rotateMidRun (s: MidRunSetup, p: DkgTestParticipant): Promise<{ publicHex: string, privateHex: string }> {
+  const db = s.db
+  const user = { id: p.userId, activeKeys: [{ key: p.signer.signingPublicKey, type: 'M', expiration: Date.now() + 86_400_000 }] }
+  const ue = new UserEngine(user as never, s.seeded.auth.ctx)
+  const fresh = randomTestKeyPair()
+  await ue.addKey({ key: fresh.publicHex, type: 'M', expiration: Date.now() + 86_400_000 } as never, p.signer.sign)
+  const d = await db.prepare('select Digest(:u, :k) as d').get({ u: p.userId, k: p.signer.signingPublicKey })
+  const sig = secp256k1.sign(digestToBytes(d!.d as string), hexToBytes(fresh.privateHex))
+  await ue.revokeKey(p.signer.signingPublicKey, { signature: bytesToHex(sig), signerKey: fresh.publicHex, signerUserId: '' })
+  const left = await db.prepare('select count(*) as n from UserKey where UserId = :u and PubKey = :k').get({ u: p.userId, k: p.signer.signingPublicKey })
+  expect(Number(left!.n), `${p.name} old key revoked`).to.equal(0)
+  p.signer = {
+    userId: p.userId,
+    signingPublicKey: fresh.publicHex,
+    sign: async (digest: Uint8Array) => ({
+      signature: bytesToHex(secp256k1.sign(digest, hexToBytes(fresh.privateHex))),
+      signerKey: fresh.publicHex,
+      signerUserId: ''
+    })
+  }
+  return fresh
+}
+
 describe('DKG status survives keyholder key rotation (62-42, WR-02)', function () {
   this.timeout(240_000)
 
@@ -144,5 +192,32 @@ describe('DKG status survives keyholder key rotation (62-42, WR-02)', function (
     expect(err).to.be.instanceOf(KeyholderDkgError)
     expect((err as KeyholderDkgError).code).to.equal('signer-key-mismatch')
     expect(await countMessages(s)).to.equal(before)
+  })
+
+  it('DS5: a participant rotating its DKG key mid-run (after round 0, before any ElectionKey) still completes with a consistent transcript (IN-04)', async function () {
+    this.timeout(600_000)
+    const s = await setupMidRun()
+    const p = s.participants[0]!
+    const oldKey = p.signer.signingPublicKey
+    const fresh = await rotateMidRun(s, p)
+    await runDkgToQuiescence(s.participants, s.electionId)
+
+    for (const q of s.participants) {
+      const status = await q.engine.getDkgStatus(s.electionId, q.userId)
+      expect(status.phase, `${q.name} dkg phase`).to.equal('complete')
+      expect((status as { failedReason?: string }).failedReason, `${q.name} failedReason`).to.equal(undefined)
+    }
+    const verdict = await s.participants[1]!.engine.verifyDkgTranscript(s.electionId)
+    expect(verdict.electionKeyConsistent, 'electionKeyConsistent').to.equal(true)
+    expect(verdict.invalidRows, 'invalidRows').to.deep.equal([])
+
+    // Non-vacuity: the transcript really spans the rotation.
+    const keyed = async (k: string): Promise<number> => {
+      const r = await s.db.prepare('select count(*) as n from KeyholderDkgMessage where ElectionId = :e and SenderUserId = :u and SenderKey = :k')
+        .get({ e: s.electionId, u: p.userId, k })
+      return Number(r!.n)
+    }
+    expect(await keyed(oldKey), 'rows signed by the OLD key').to.be.greaterThan(0)
+    expect(await keyed(fresh.publicHex), 'rows signed by the FRESH key').to.be.greaterThan(0)
   })
 })
