@@ -177,6 +177,15 @@ export interface P2pAssociationDecisionRecord {
   decidedAt: string
   deciderKey: string
   deciderSignature: string
+  /**
+   * RESUME cursor, not a row identifier: forward the last value as `sinceCursor` to continue
+   * (re-delivery is permitted, loss is not). Opaque; compare for equality only. In the P2P binding
+   * a decision above the in-sequence ceiling carries the last in-sequence cursor of the read (else
+   * the caller's conforming `sinceCursor`, else the re-read sentinel `0000000000000000`), so
+   * several notices can share one value and it can differ from the cursor `publishDecision`
+   * returned. See `readDecisionRows` in `p2p-staging-seam.ts`.
+   * Audit consumers must not key records on it.
+   */
   cursor: string
 }
 
@@ -617,7 +626,8 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
     return cursor
   }
 
-  /** `readDecisionRecords` — every column of `P2pAssociationDecisionRecord`. Routes `Status`
+  /** `readDecisionRecords` — every column of `P2pAssociationDecisionRecord` except `cursor`, which is
+   * the resume cursor described on the record type. Routes `Status`
    * through `assertKnownAssociationStatus` (unknown status THROWS, unchanged). */
   async readDecisionRecords (sinceCursor?: string): Promise<P2pAssociationDecisionRecord[]> {
     const port = await this.strand()

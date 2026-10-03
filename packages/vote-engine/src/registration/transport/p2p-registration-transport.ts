@@ -192,6 +192,15 @@ export interface P2pRegistrationDecisionRecord {
   decidedAt: string
   deciderKey: string
   deciderSignature: string
+  /**
+   * RESUME cursor, not a row identifier: forward the last value as `sinceCursor` to continue
+   * (re-delivery is permitted, loss is not). Opaque; compare for equality only. In the P2P binding
+   * a decision above the in-sequence ceiling carries the last in-sequence cursor of the read (else
+   * the caller's conforming `sinceCursor`, else the re-read sentinel `0000000000000000`), so
+   * several notices can share one value and it can differ from the cursor `publishDecision`
+   * returned. See `readDecisionRows` in `p2p-staging-seam.ts`.
+   * Audit consumers must not key records on it.
+   */
   cursor: string
 }
 
@@ -510,8 +519,8 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
     return cursor
   }
 
-  /** `readDecisionRecords` — every column of `P2pRegistrationDecisionRecord`, including D-44's
-   * 'd' status. Throws (naming only the offending status) on anything outside `a`/`r`/`d`. */
+  /** `readDecisionRecords` — every column of `P2pRegistrationDecisionRecord` except `cursor`, which is
+   * the resume cursor described on the record type, including D-44's 'd' status. Throws (naming only the offending status) on anything outside `a`/`r`/`d`. */
   async readDecisionRecords (sinceCursor?: string): Promise<P2pRegistrationDecisionRecord[]> {
     const port = await this.strand()
     const rows = await readDecisionRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
