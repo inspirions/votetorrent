@@ -21,6 +21,7 @@ import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { createP2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
+import { createLegacyCursorStagingFixture } from './fixtures/legacy-cursor-schema.js'
 import type { P2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
 
 type StagingTable = 'RegistrationRequestStaging' | 'AssociationRequestStaging' | 'AssociationAttestationStaging'
@@ -238,42 +239,116 @@ describe('staging cursor wedge on a real strand (62-38, CR-01)', function () {
     expect(report.highWaterCursor).to.equal('0000000000001003')
   })
 
-  it('D7: 64 officer-signed above-cap RegistrationDecision rows do not stall publishDecision (62-41, CR-01)', async () => {
-    const strandId = freshStrand()
-    for (let i = 0; i < 64; i++) {
-      await forgeDecision(fixture, 'RegistrationDecision', strandId, (BigInt('9999999999999999') - BigInt(i)).toString())
-    }
-    const wrapped = budgeted(fixture.makePort(), 2000)
-    const transport = new P2pRegistrationTransport({
-      openStrand: async () => wrapped as unknown as RegistrationStrandPort,
-      computeDigest: async (init, key) => await fixture.fixtureRequestDigest(init, key),
-      strandId,
-      sealer: fixture.sealer,
-      opener: fixture.opener,
-      decisionSigner: fixture.decisionSigner
-    })
-    const cursor = await transport.publishDecision({ requestId: `honest-${crypto.randomUUID()}`, status: 'a', decidedAt: new Date().toISOString() })
-    expect(cursor).to.equal('0000000000000001')
-    expect(wrapped.queries).to.be.at.most(20)
-  })
+  describe('legacy decision rows on a legacy-cursor-schema strand (62-44, CR-01)', function () {
+    this.timeout(600_000)
+    let legacy: P2pStagingFixture
+    before(async () => { legacy = await createLegacyCursorStagingFixture() })
 
-  it('D8: 64 officer-signed non-digit AssociationDecision rows do not stall publishDecision (62-41, CR-01)', async () => {
-    const strandId = freshStrand()
-    for (let i = 0; i < 64; i++) {
-      await forgeDecision(fixture, 'AssociationDecision', strandId, `zzzzzzzzzzzz${String(i).padStart(4, '0')}`)
-    }
-    const wrapped = budgeted(fixture.makePort(), 2000)
-    const transport = new P2pAssociationTransport({
-      openStrand: async () => wrapped as unknown as AssociationStrandPort,
-      computeDigest: async (init, key) => await fixture.fixtureRequestDigest(init, key),
-      computeAttestationDigest: async (answer, key) => await fixture.fixtureAttestationDigest(answer, key),
-      strandId,
-      sealer: fixture.sealer,
-      opener: fixture.opener,
-      decisionSigner: fixture.decisionSigner
+    it('D7: 64 officer-signed above-cap RegistrationDecision rows do not stall publishDecision (62-41, CR-01)', async () => {
+      const strandId = freshStrand()
+      for (let i = 0; i < 64; i++) {
+        await forgeDecision(legacy, 'RegistrationDecision', strandId, (BigInt('9999999999999999') - BigInt(i)).toString())
+      }
+      const wrapped = budgeted(legacy.makePort(), 2000)
+      const transport = new P2pRegistrationTransport({
+        openStrand: async () => wrapped as unknown as RegistrationStrandPort,
+        computeDigest: async (init, key) => await legacy.fixtureRequestDigest(init, key),
+        strandId,
+        sealer: legacy.sealer,
+        opener: legacy.opener,
+        decisionSigner: legacy.decisionSigner
+      })
+      const cursor = await transport.publishDecision({ requestId: `honest-${crypto.randomUUID()}`, status: 'a', decidedAt: new Date().toISOString() })
+      expect(cursor).to.equal('0000000000000001')
+      expect(wrapped.queries).to.be.at.most(20)
     })
-    const cursor = await transport.publishDecision({ requestId: `honest-${crypto.randomUUID()}`, status: 'a', matchMethod: 'code', decidedAt: new Date().toISOString() })
-    expect(cursor).to.equal('0000000000000001')
-    expect(wrapped.queries).to.be.at.most(20)
+
+    it('D8: 64 officer-signed non-digit AssociationDecision rows do not stall publishDecision (62-41, CR-01)', async () => {
+      const strandId = freshStrand()
+      for (let i = 0; i < 64; i++) {
+        await forgeDecision(legacy, 'AssociationDecision', strandId, `zzzzzzzzzzzz${String(i).padStart(4, '0')}`)
+      }
+      const wrapped = budgeted(legacy.makePort(), 2000)
+      const transport = new P2pAssociationTransport({
+        openStrand: async () => wrapped as unknown as AssociationStrandPort,
+        computeDigest: async (init, key) => await legacy.fixtureRequestDigest(init, key),
+        computeAttestationDigest: async (answer, key) => await legacy.fixtureAttestationDigest(answer, key),
+        strandId,
+        sealer: legacy.sealer,
+        opener: legacy.opener,
+        decisionSigner: legacy.decisionSigner
+      })
+      const cursor = await transport.publishDecision({ requestId: `honest-${crypto.randomUUID()}`, status: 'a', matchMethod: 'code', decidedAt: new Date().toISOString() })
+      expect(cursor).to.equal('0000000000000001')
+      expect(wrapped.queries).to.be.at.most(20)
+    })
+
+    const PREFIX = '00000000000000'
+    function collationShape (page2: 'defect' | 'control'): string[] {
+      const fillers = Array.from({ length: 63 }, (_, i) => `${PREFIX}x${String.fromCharCode(0x41 + i)}`)
+      const pivot = `${PREFIX}${String.fromCharCode(0xFFFD)}a`
+      const tail = Array.from({ length: 64 }, (_, i) => page2 === 'defect'
+        ? `${PREFIX}${String.fromCodePoint(0x1F600 + i)}`
+        : `${PREFIX}${String.fromCharCode(0xFFFE)}${String.fromCharCode(0x41 + i)}`)
+      return [...fillers, pivot, ...tail]
+    }
+
+    async function plant (table: 'RegistrationDecision' | 'AssociationDecision', page2: 'defect' | 'control'): Promise<string> {
+      const strandId = freshStrand()
+      for (const c of collationShape(page2)) {
+        expect(c.length, `CursorWidth for ${JSON.stringify(c)}`).to.equal(16)
+        await forgeDecision(legacy, table, strandId, c)
+      }
+      return strandId
+    }
+
+    async function publishRegistration (strandId: string): Promise<string> {
+      const wrapped = budgeted(legacy.makePort(), 2000)
+      const transport = new P2pRegistrationTransport({
+        openStrand: async () => wrapped as unknown as RegistrationStrandPort,
+        computeDigest: async (init, key) => await legacy.fixtureRequestDigest(init, key),
+        strandId,
+        sealer: legacy.sealer,
+        opener: legacy.opener,
+        decisionSigner: legacy.decisionSigner
+      })
+      try {
+        return await transport.publishDecision({ requestId: `honest-${crypto.randomUUID()}`, status: 'a', decidedAt: new Date().toISOString() })
+      } catch (e) {
+        throw new Error(`publishDecision threw code=${(e as { code?: string }).code} message=${(e as Error).message}`)
+      }
+    }
+
+    it('D9a: 128 collation-shaped RegistrationDecision rows do not wedge publishDecision (62-44, CR-01)', async function () {
+      this.timeout(600_000)
+      expect(await publishRegistration(await plant('RegistrationDecision', 'defect'))).to.equal('0000000000000001')
+    })
+
+    it('D9b: 128 collation-shaped AssociationDecision rows do not wedge publishDecision (62-44, CR-01)', async function () {
+      this.timeout(600_000)
+      const strandId = await plant('AssociationDecision', 'defect')
+      const wrapped = budgeted(legacy.makePort(), 2000)
+      const transport = new P2pAssociationTransport({
+        openStrand: async () => wrapped as unknown as AssociationStrandPort,
+        computeDigest: async (init, key) => await legacy.fixtureRequestDigest(init, key),
+        computeAttestationDigest: async (answer, key) => await legacy.fixtureAttestationDigest(answer, key),
+        strandId,
+        sealer: legacy.sealer,
+        opener: legacy.opener,
+        decisionSigner: legacy.decisionSigner
+      })
+      let cursor: string
+      try {
+        cursor = await transport.publishDecision({ requestId: `honest-${crypto.randomUUID()}`, status: 'a', matchMethod: 'code', decidedAt: new Date().toISOString() })
+      } catch (e) {
+        throw new Error(`publishDecision threw code=${(e as { code?: string }).code} message=${(e as Error).message}`)
+      }
+      expect(cursor).to.equal('0000000000000001')
+    })
+
+    it('D9c: CONTROL, the U+FFFE page 2 allocates 0000000000000001 (green before and after)', async function () {
+      this.timeout(600_000)
+      expect(await publishRegistration(await plant('RegistrationDecision', 'control'))).to.equal('0000000000000001')
+    })
   })
 })

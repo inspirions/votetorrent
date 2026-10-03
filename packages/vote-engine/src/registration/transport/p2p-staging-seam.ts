@@ -84,6 +84,11 @@ export function isConformingStagingCursor (value: unknown): value is string {
  *      and may see rows it already processed.
  */
 export async function stagingCursorCeiling (port: StagingSqlPort, table: StagingCursorTable, strandId: string): Promise<string> {
+  return (await stagingCursorBounds(port, table, strandId)).ceiling
+}
+
+/** One count query, two uses: the in-sequence ceiling and the strand's row count (the walk bound). */
+async function stagingCursorBounds (port: StagingSqlPort, table: StagingCursorTable, strandId: string): Promise<{ ceiling: string, rowCount: bigint }> {
   const rows = await port.query<{ RowCount: number | string | bigint | null }>(
     `select count(*) as RowCount from ${table} where StrandId = :strandId`,
     { strandId }
@@ -97,7 +102,31 @@ export async function stagingCursorCeiling (port: StagingSqlPort, table: Staging
   }
   let ceiling = count + BigInt(STAGING_CURSOR_MAX_STEP)
   if (ceiling > STAGING_CURSOR_CAP) ceiling = STAGING_CURSOR_CAP
-  return ceiling.toString().padStart(STAGING_CURSOR_WIDTH, '0')
+  return { ceiling: ceiling.toString().padStart(STAGING_CURSOR_WIDTH, '0'), rowCount: count }
+}
+
+/**
+ * Orders cursor text by Unicode code point, exactly like Quereus BINARY collation. It mirrors
+ * `@quereus/quereus` `compareCodePoints` (4.20.0, `dist/src/util/comparison.js`). SQL
+ * `order by Cursor` and `Cursor > :x` use that order, whereas JS `<` / `>` on strings use UTF-16
+ * code-unit order, which disagrees when one string has a supplementary-plane character and the
+ * other a BMP character in U+E000-U+FFFF (CR-01). It is local rather than imported to keep this
+ * seam free of a new runtime import; the CP0 spec pins parity with Quereus's own function. Any
+ * comparison of SQL-ordered, possibly non-conforming cursor text must go through it.
+ */
+export function compareStagingCursorText (a: string, b: string): number {
+  if (a === b) return 0
+  const n = Math.min(a.length, b.length)
+  for (let i = 0; i < n; i++) {
+    const ua = a.charCodeAt(i)
+    const ub = b.charCodeAt(i)
+    if (ua === ub) continue
+    // Lift high surrogates above the BMP range U+E000-U+FFFF, as a code-point order would.
+    const ra = ua >= 0xD800 && ua <= 0xDBFF ? ua + 0x2800 : ua
+    const rb = ub >= 0xD800 && ub <= 0xDBFF ? ub + 0x2800 : ub
+    return ra < rb ? -1 : 1
+  }
+  return a.length < b.length ? -1 : 1
 }
 
 /**
@@ -154,7 +183,8 @@ export async function readDecisionRows<T extends { Cursor: string }> (
 /**
  * The next high-water mark: `cursor` only when it is conforming, at or below the ceiling and
  * greater than `current`; otherwise `current`. A forged or out-of-sequence high cursor is
- * therefore never adopted as a high-water mark.
+ * therefore never adopted as a high-water mark. It compares only conforming 16-digit ASCII
+ * values, for which JS order equals code-point order.
  */
 export function inSequenceHighWater (current: string | undefined, cursor: string, ceiling: string): string | undefined {
   if (!isConformingStagingCursor(cursor) || cursor > ceiling) return current
@@ -280,9 +310,11 @@ export type StagingCursorTable =
  *      64 rows), because the strand's (StrandId, Cursor) unique index refuses an occupied slot
  *      and re-deriving the same candidate would wedge allocation (CR-01). The walk pages by the
  *      last row seen (not by the candidate), so a page holding only non-conforming rows still
- *      advances; it is bounded to `STAGING_CURSOR_MAX_TEXT`, so above-cap and non-digit rows
- *      (which the decision tables' `CursorWidth` admits and pre-V-4 staging rows may carry) are
- *      never paged; a page that does not advance throws `cursor-exhausted`; cost grows by one
+ *      advances; it is bounded to `STAGING_CURSOR_MAX_TEXT`, so above-cap rows are never paged,
+ *      while non-digit and wrong-width rows that sort at or below the cap ARE paged and skipped.
+ *      The progress guard compares cursors by code point (`compareStagingCursorText`) because SQL
+ *      orders by code point (CR-01). The walk is bounded by `rowCount / 64 + 2` pages; a page that
+ *      does not advance, or a walk past that bound, throws `cursor-exhausted`; cost grows by one
  *      query per 64 planted in-range rows (IN-05).
  *      `floor` is the slot a genuine race just took. Static occupied slots, however many a
  *      forger planted, never consume an attempt; only real concurrent inserts do. A malformed
@@ -328,7 +360,9 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
   let floor = BigInt(0)
 
   for (let attempt = 1; attempt <= STAGING_CURSOR_MAX_ATTEMPTS; attempt++) {
-    const ceiling = await stagingCursorCeiling(port, table, strandId)
+    const { ceiling, rowCount } = await stagingCursorBounds(port, table, strandId)
+    const maxWalkPages = rowCount / BigInt(64) + BigInt(2)
+    let walkPages = BigInt(0)
     // Greatest CONFORMING cursor at or below the ceiling; non-conforming rows are skipped.
     let maxConforming = BigInt(0)
     let before: string | undefined
@@ -349,11 +383,21 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
     let nextValue = (maxConforming > floor ? maxConforming : floor) + BigInt(1)
     // Walk past every occupied slot. The walk pages by the LAST ROW SEEN (never by the
     // candidate, which does not move across a page of non-conforming rows) and is bounded to the
-    // conforming range (`Cursor <= STAGING_CURSOR_MAX_TEXT`), so above-cap and non-digit rows are
-    // never paged and every query starts strictly after the previous page. A page that fails to
-    // advance throws `cursor-exhausted`. Cost: one query per 64 planted in-range rows (IN-05).
+    // conforming range (`Cursor <= STAGING_CURSOR_MAX_TEXT`), so above-cap rows are never paged
+    // (non-digit and wrong-width rows at or below the cap ARE paged and skipped) and every query
+    // starts strictly after the previous page. The progress guard compares by code point, as SQL
+    // orders (CR-01). A page that fails to advance, or a walk past `rowCount / 64 + 2` pages,
+    // throws `cursor-exhausted`. Cost: one query per 64 planted in-range rows (IN-05).
     let afterCursor = (nextValue - BigInt(1)).toString().padStart(STAGING_CURSOR_WIDTH, '0')
     for (; nextValue <= STAGING_CURSOR_CAP;) {
+      walkPages += BigInt(1)
+      if (walkPages > maxWalkPages) {
+        throw new P2pStagingError(
+          'cursor-exhausted',
+          `${where}: the cursor walk read more pages than the strand holds rows`,
+          { cause: lastError }
+        )
+      }
       const page = await port.query<{ Cursor: unknown }>(walkPageSql, { strandId, afterCursor, capCursor: STAGING_CURSOR_MAX_TEXT })
       let free = false
       for (const row of page) {
@@ -364,7 +408,7 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
       }
       if (free || page.length < 64 || nextValue > STAGING_CURSOR_CAP) break
       const last = page[page.length - 1]?.Cursor
-      if (typeof last !== 'string' || last <= afterCursor) {
+      if (typeof last !== 'string' || compareStagingCursorText(last, afterCursor) <= 0) {
         throw new P2pStagingError(
           'cursor-exhausted',
           `${where}: the strand returned a cursor page that does not advance`,

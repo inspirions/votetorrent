@@ -9,6 +9,7 @@
  */
 
 import { expect } from 'chai'
+import { compareCodePoints } from '@quereus/quereus'
 import {
   insertWithCursorRetry,
   P2pStagingError,
@@ -30,14 +31,15 @@ class BudgetPort implements StagingSqlPort {
   ) {}
 
   protected ascending (params: Record<string, unknown>): string[] {
-    const sorted = [...this.cursors].sort()
+    // Order and filter exactly like Quereus BINARY collation (code point), never like JS `<`.
+    const sorted = [...this.cursors].sort((a, b) => compareCodePoints(a, b))
     if (typeof params.afterCursor === 'string') {
       const after = params.afterCursor
       const cap = typeof params.capCursor === 'string' ? params.capCursor : undefined
-      return sorted.filter((c) => c > after && (cap === undefined || c <= cap)).slice(0, 64)
+      return sorted.filter((c) => compareCodePoints(c, after) > 0 && (cap === undefined || compareCodePoints(c, cap) <= 0)).slice(0, 64)
     }
     const from = params.fromCursor as string
-    return sorted.filter((c) => c >= from).slice(0, 64)
+    return sorted.filter((c) => compareCodePoints(c, from) >= 0).slice(0, 64)
   }
 
   async query<T> (sql: string, params: Record<string, unknown>): Promise<T[]> {
@@ -49,9 +51,8 @@ class BudgetPort implements StagingSqlPort {
       const ceiling = params.ceiling as string
       const before = params.beforeCursor as string | undefined
       return [...this.cursors]
-        .filter((c) => c <= ceiling && (before === undefined || c < before))
-        .sort()
-        .reverse()
+        .filter((c) => compareCodePoints(c, ceiling) <= 0 && (before === undefined || compareCodePoints(c, before) < 0))
+        .sort((a, b) => compareCodePoints(b, a))
         .slice(0, 64)
         .map((c) => ({ Cursor: c }) as unknown as T)
     }
@@ -73,7 +74,16 @@ class BudgetPort implements StagingSqlPort {
 /** Ignores every lower bound: always returns the first 64 rows, so it can never advance. */
 class NonAdvancingPort extends BudgetPort {
   protected override ascending (_params: Record<string, unknown>): string[] {
-    return [...this.cursors].filter((c) => !/^\d{16}$/.test(c)).sort().slice(0, 64)
+    return [...this.cursors].filter((c) => !/^\d{16}$/.test(c)).sort((a, b) => compareCodePoints(a, b)).slice(0, 64)
+  }
+}
+
+/** Reports no rows by count but always returns 64 fresh, strictly advancing non-conforming cursors. */
+class EndlessPort extends BudgetPort {
+  private k = 0
+  constructor () { super([], DEFAULT_BUDGET, 0) }
+  protected override ascending (_params: Record<string, unknown>): string[] {
+    return Array.from({ length: 64 }, () => `0000${String(this.k++).padStart(11, '0')}x`)
   }
 }
 
@@ -157,5 +167,72 @@ describe('staging cursor walk always makes progress (62-41, CR-01)', () => {
     expect((err as P2pStagingError).message).to.not.contain('HANG')
     expect((err as P2pStagingError).code).to.equal('cursor-exhausted')
     expect(port.mutates).to.equal(0)
+  })
+})
+
+const PREFIX = '00000000000000'
+const fillers = (): string[] => Array.from({ length: 63 }, (_, i) => `${PREFIX}x${String.fromCharCode(0x41 + i)}`)
+const pivot = (): string => `${PREFIX}${String.fromCharCode(0xFFFD)}a`
+const astralPage = (): string[] => Array.from({ length: 64 }, (_, i) => `${PREFIX}${String.fromCodePoint(0x1F600 + i)}`)
+const bmpPage = (): string[] => Array.from({ length: 64 }, (_, i) => `${PREFIX}${String.fromCharCode(0xFFFE)}${String.fromCharCode(0x41 + i)}`)
+
+describe('staging cursor walk orders by code point (62-44, CR-01, WR-01)', () => {
+  it('H0b: the instrument models code-point order (U+FFFE sorts before an astral character)', () => {
+    const bmp = `${PREFIX}${String.fromCharCode(0xFFFE)}A`
+    const astral = `${PREFIX}${String.fromCodePoint(0x1F600)}`
+    class Probe extends BudgetPort {
+      page (params: Record<string, unknown>): string[] { return this.ascending(params) }
+    }
+    const probe = new Probe([astral, bmp])
+    expect(probe.page({ fromCursor: '' })).to.deep.equal([bmp, astral])
+    expect(probe.page({ afterCursor: bmp })).to.deep.equal([astral])
+  })
+
+  it('H8: 63 fillers, a U+FFFD pivot and 64 astral cursors do not stall allocation (the review shape)', async () => {
+    const port = new BudgetPort([...fillers(), pivot(), ...astralPage()])
+    expect(await allocateOn(port, 'RegistrationDecision')).to.equal(pad(1))
+    expect(port.mutates).to.equal(1)
+  })
+
+  it('H9: CONTROL, the same shape with a U+FFFE page 2 allocates 0000000000000001', async () => {
+    const port = new BudgetPort([...fillers(), pivot(), ...bmpPage()])
+    expect(await allocateOn(port, 'RegistrationDecision')).to.equal(pad(1))
+  })
+
+  it('H10: a port whose pages always advance is stopped by the row-count bound without mutating', async () => {
+    const port = new EndlessPort()
+    let err: unknown
+    try { await allocateOn(port, 'RegistrationRequestStaging') } catch (e) { err = e }
+    expect(err, 'expected a throw').to.be.instanceOf(P2pStagingError)
+    expect((err as P2pStagingError).message).to.not.contain('HANG')
+    expect((err as P2pStagingError).code).to.equal('cursor-exhausted')
+    expect(port.mutates).to.equal(0)
+    expect(port.queries).to.be.at.most(6)
+  })
+})
+
+describe('staging cursor comparator parity with Quereus (62-44, CP0)', () => {
+  it('CP0: compareStagingCursorText agrees in sign with compareCodePoints over a corpus that includes the CR-01 disagreement', async () => {
+    const seam = (await import('../src/registration/transport/p2p-staging-seam.js')) as Record<string, unknown>
+    expect(typeof seam.compareStagingCursorText, 'compareStagingCursorText export').to.equal('function')
+    const compare = seam.compareStagingCursorText as (a: string, b: string) => number
+    const corpus = [
+      '', '0', '0000000000000001', '9007199254740991', 'zzzzzzzzzzzzzzzz',
+      `${PREFIX}xA`, `${PREFIX}a`, `${PREFIX}${String.fromCharCode(0xFFFD)}a`,
+      `${PREFIX}${String.fromCharCode(0xFFFE)}A`, `${PREFIX}${String.fromCharCode(0xFFFF)}`,
+      `${PREFIX}${String.fromCodePoint(0x10000)}`, `${PREFIX}${String.fromCodePoint(0x1F600)}`,
+      `${PREFIX}${String.fromCodePoint(0x1F63F)}`, `${PREFIX}${String.fromCodePoint(0x10FFFF)}`,
+      'a', 'ab'
+    ]
+    let disagreements = 0
+    for (const a of corpus) {
+      for (const b of corpus) {
+        const expected = Math.sign(compareCodePoints(a, b))
+        expect(Math.sign(compare(a, b)), `${JSON.stringify(a)} vs ${JSON.stringify(b)}`).to.equal(expected)
+        const js = a < b ? -1 : a > b ? 1 : 0
+        if (js !== expected) disagreements += 1
+      }
+    }
+    expect(disagreements, 'corpus must contain a JS-vs-code-point disagreement').to.be.greaterThan(0)
   })
 })
