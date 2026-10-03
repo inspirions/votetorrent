@@ -117,7 +117,7 @@ if [ "$MAIN_EXIT" -eq 0 ] && [ "$NEG_EXIT" -eq 1 ]; then
 	# does NOT prove the harness can detect a RECONCILE incompatibility — the only class D-10's
 	# column removal could plausibly hit.
 	echo "FINAL VERDICT: NO-REGRESSION (baseline=$RESOLVED_BASELINE db=$DB_PATH schema=$OLD_SCHEMA_FILE)"
-	echo "  ESTABLISHED: re-attach did not throw; the pre-existing rows (Authority/Registrant/AttestationChallenge/Admin/Officer/UserKey) are still readable at the exact seeded counts; no 'ALTER COLUMN' appeared in any error; the Expiration column is absent; every table the current schema added since the baseline is queryable and empty (new-table queryability, --baseline-schema)."
+	echo "  ESTABLISHED: re-attach did not throw; the pre-existing rows (Authority/Registrant/AttestationChallenge/Admin/Officer/UserKey, plus RegistrationDecision/AssociationDecision when the baseline declares them) are still readable at the exact seeded counts; no 'ALTER COLUMN' appeared in any error; the legacy non-conforming decision rows (astral cursors, legal under the old length-only check) re-attached under the new CursorWellFormed check and read back byte-identical; the Expiration column is absent; every table the current schema added since the baseline is queryable and empty (new-table queryability, --baseline-schema)."
 	echo "  NOT ESTABLISHED: that a SILENT reconcile incompatibility would have been detected. The negative control (exit=1, as required) exercises only the PARSE-failure path."
 	exit 0
 else

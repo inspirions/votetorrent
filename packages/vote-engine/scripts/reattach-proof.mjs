@@ -93,7 +93,7 @@ import {
 import { allocateTid } from '../src/database/tid-allocator.js'
 import { seedSignedMutation } from '../src/signing/signed-mutation.js'
 import { toIsoZDatetime, toDeferredCheckDatetime } from '../src/signing/ceremony-helpers.js'
-import { nowCanonicalDatetime } from '../src/utils.js'
+import { nowCanonicalDatetime, digestToBytes } from '../src/utils.js'
 import { NetworksEngine } from '../src/networks/networks-engine.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { AsyncStorage } from '../test/shims/react-native.js'
@@ -469,8 +469,47 @@ async function runSeed (dbPath) {
 		)
 	}
 
+	// 4. 62-46 (D-22, CR-01, D-07): when the BASELINE declares the decision tables, seed one
+	//    officer-signed row in each at a cursor that is legal under the baseline's length-only
+	//    CursorWidth (16 UTF-16 units: 14 zeros + one astral code point) but violates the new
+	//    CursorWellFormed. This makes the gate exercise the real drift trap: amending a CHECK on a
+	//    live table that already holds rows violating the new CHECK. Signed over the same Digest
+	//    arguments the transports use, by the founding officer (who holds vrg).
+	const hasDecisionTables = /\ttable RegistrationDecision \(/.test(oldSchemaSql) && /\ttable AssociationDecision \(/.test(oldSchemaSql)
+	const legacyDecisionCursors = {}
+	if (hasDecisionTables) {
+		const decidedAt = toIsoZDatetime(Date.now())
+		const strandId = 'reattach-proof-strand'
+		const regCursor = '00000000000000' + String.fromCodePoint(0x1F600)
+		const assocCursor = '00000000000000' + String.fromCodePoint(0x1F601)
+		const regRequestId = 'reattach-proof-legacy-reg'
+		const regDigest = (await ctx.db.prepare("select Digest('RegistrationDecision', :strandId, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt) as d")
+			.get({ strandId, requestId: regRequestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt }))?.d
+		const regSig = await sign(digestToBytes(regDigest))
+		await ctx.db.exec(
+			`insert into RegistrationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, Reason, ClosesRequestId, DecidedAt, DeciderKey, DeciderSignature)
+			 with context now = :now
+			 values (:strandId, :cursor, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt, :deciderKey, :deciderSignature)`,
+			{ strandId, cursor: regCursor, requestId: regRequestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt, deciderKey: regSig.signerKey, deciderSignature: regSig.signature, now: nowCanonicalDatetime() }
+		)
+		const assocRequestId = 'reattach-proof-legacy-assoc'
+		const assocDigest = (await ctx.db.prepare("select Digest('AssociationDecision', :strandId, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt) as d")
+			.get({ strandId, requestId: assocRequestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt }))?.d
+		const assocSig = await sign(digestToBytes(assocDigest))
+		await ctx.db.exec(
+			`insert into AssociationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, ChallengeNonce, Reason, RevokesDeviceKey, MatchMethod, DecidedAt, DeciderKey, DeciderSignature)
+			 with context now = :now
+			 values (:strandId, :cursor, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt, :deciderKey, :deciderSignature)`,
+			{ strandId, cursor: assocCursor, requestId: assocRequestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt, deciderKey: assocSig.signerKey, deciderSignature: assocSig.signature, now: nowCanonicalDatetime() }
+		)
+		legacyDecisionCursors.RegistrationDecision = regCursor
+		legacyDecisionCursors.AssociationDecision = assocCursor
+	}
+
 	const counts = {}
-	for (const table of ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']) {
+	const countedTables = ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']
+	if (hasDecisionTables) countedTables.push('RegistrationDecision', 'AssociationDecision')
+	for (const table of countedTables) {
 		const row = await ctx.db.prepare(`select count(*) as n from ${table}`).get()
 		counts[table] = Number(row?.n ?? 0)
 	}
@@ -479,6 +518,8 @@ async function runSeed (dbPath) {
 	console.log(JSON.stringify({
 		mode: 'seed', negativeControl: false, dbPath,
 		challengeShape: legacyChallenge ? 'legacy-7-arg' : 'current-6-arg',
+		decisionShape: hasDecisionTables ? 'legacy-non-conforming' : 'absent',
+		legacyDecisionCursors,
 		counts,
 	}, null, 2))
 }
@@ -563,7 +604,13 @@ async function runReopen (dbPath) {
 	// 62-03 (D-22): counted tables extended with Admin/Officer/UserKey (seeded by
 	// NetworksEngine.create() in runSeed) on top of the three original tables.
 	const counts = {}
-	for (const table of ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']) {
+	// 62-46: the decision tables are counted whenever the seed counted them (and the current schema
+	// always declares them), so --expected-counts equality covers them too.
+	const reopenTables = ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']
+	for (const t of ['RegistrationDecision', 'AssociationDecision']) {
+		if (expectedCounts && t in expectedCounts) reopenTables.push(t)
+	}
+	for (const table of reopenTables) {
 		const row = await db.prepare(`select count(*) as n from ${table}`).get()
 		counts[table] = Number(row?.n ?? 0)
 	}
@@ -576,6 +623,24 @@ async function runReopen (dbPath) {
 			if (counts[key] !== expectedCounts[key]) {
 				assertions.rowsReadable = false
 			}
+		}
+	}
+
+	// 62-46 (D-07): the legacy non-conforming decision cursors seeded under the baseline must read
+	// back byte-identical after re-attach under CursorWellFormed. Only asserted when the seed
+	// counted the decision tables.
+	assertions.legacyDecisionCursorsIntact = true
+	const observedCursors = {}
+	if (expectedCounts && 'RegistrationDecision' in expectedCounts && 'AssociationDecision' in expectedCounts) {
+		const want = {
+			RegistrationDecision: '00000000000000' + String.fromCodePoint(0x1F600),
+			AssociationDecision: '00000000000000' + String.fromCodePoint(0x1F601),
+		}
+		for (const table of Object.keys(want)) {
+			const rows = []
+			for await (const r of db.eval(`select Cursor from ${table}`)) rows.push(r)
+			observedCursors[table] = rows.map((r) => r.Cursor)
+			if (rows.length !== 1 || rows[0].Cursor !== want[table]) assertions.legacyDecisionCursorsIntact = false
 		}
 	}
 
@@ -621,7 +686,7 @@ async function runReopen (dbPath) {
 	await db.close()
 
 	const verdict = (
-		assertions.noThrow && assertions.noAlterColumn && assertions.rowsReadable && expirationGone
+		assertions.noThrow && assertions.noAlterColumn && assertions.rowsReadable && assertions.legacyDecisionCursorsIntact && expirationGone
 		&& (baselineSchemaFile ? newTablesQueryable === true : true)
 	) ? 'PASS' : 'FAIL'
 
@@ -631,6 +696,7 @@ async function runReopen (dbPath) {
 		dbPath,
 		assertions: { ...assertions, expirationColumnGone: expirationGone },
 		counts,
+		observedDecisionCursors: observedCursors,
 		expectedCounts: expectedCounts ?? null,
 		attestationChallengeColumns: columnNames,
 		newTables,
