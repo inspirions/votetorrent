@@ -9,10 +9,13 @@
  */
 
 import { expect } from 'chai'
+import { compareCodePoints } from '@quereus/quereus'
 import {
   insertWithCursorRetry,
+  isConformingStagingCursor,
   STAGING_CURSOR_MAX_STEP,
-  STAGING_CURSOR_MAX_TEXT
+  STAGING_CURSOR_MAX_TEXT,
+  STAGING_CURSOR_REREAD
 } from '../src/registration/transport/p2p-staging-seam.js'
 import type { StagingSqlPort, StagingCursorTable } from '../src/registration/transport/p2p-staging-seam.js'
 import { P2pRegistrationTransport } from '../src/registration/transport/p2p-registration-transport.js'
@@ -23,8 +26,11 @@ import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { createP2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
 import type { P2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
+import { createLegacyCursorStagingFixture } from './fixtures/legacy-cursor-schema.js'
 
 const CAP = STAGING_CURSOR_MAX_TEXT
+/** Quereus BINARY order (code point), never JS string order (WR-01). */
+const byCodePoint = (a: string, b: string): number => compareCodePoints(a, b)
 const pad = (n: number | bigint): string => String(n).padStart(16, '0')
 const unreadableOpener = { open: async () => ({ ok: false as const, reason: 'not-a-recipient', detail: '' }) }
 
@@ -54,20 +60,20 @@ class DecisionPort implements StagingSqlPort, RegistrationStrandPort, Associatio
     if (/order by Cursor asc limit 64/.test(sql)) {
       const after = params.afterCursor as string
       const cap = params.capCursor as string
-      return this.cursors.filter((c) => c > after && c <= cap).sort().slice(0, 64).map((c) => ({ Cursor: c }) as unknown as T)
+      return this.cursors.filter((c) => compareCodePoints(c, after) > 0 && compareCodePoints(c, cap) <= 0).sort(byCodePoint).slice(0, 64).map((c) => ({ Cursor: c }) as unknown as T)
     }
     if (/order by Cursor desc limit 64/.test(sql)) {
       const ceiling = params.ceiling as string
       const before = params.beforeCursor as string | undefined
       return this.cursors
-        .filter((c) => c <= ceiling && (before === undefined || c < before))
-        .sort().reverse().slice(0, 64)
+        .filter((c) => compareCodePoints(c, ceiling) <= 0 && (before === undefined || compareCodePoints(c, before) < 0))
+        .sort(byCodePoint).reverse().slice(0, 64)
         .map((c) => ({ Cursor: c }) as unknown as T)
     }
     if (/Cursor = :cursor/.test(sql)) return this.cursors.filter((c) => c === params.cursor).map((c) => ({ Cursor: c }) as unknown as T)
     if (/:sinceCursor/.test(sql)) {
       const since = params.sinceCursor as string | null
-      return this.cursors.filter((c) => since === null || c > since).sort().map((c) => this.rowFor(c) as unknown as T)
+      return this.cursors.filter((c) => since === null || compareCodePoints(c, since) > 0).sort(byCodePoint).map((c) => this.rowFor(c) as unknown as T)
     }
     return []
   }
@@ -205,6 +211,38 @@ describe('decision readers deliver walked decisions without skipping (62-43, WR-
     expect(again.map((n) => n.requestId)).to.deep.equal([`req-${CAP}`])
   })
 
+  const NB = '00000000000000'
+  /** The CR-01 shape: 63 ASCII fillers, a U+FFFD pivot, then 64 astral cursors (all 16 UTF-16 units). */
+  function collationShape (): string[] {
+    const fillers = Array.from({ length: 63 }, (_, i) => `${NB}x${String.fromCharCode(0x41 + i)}`)
+    const pivot = `${NB}${String.fromCharCode(0xFFFD)}a`
+    const tail = Array.from({ length: 64 }, (_, i) => `${NB}${String.fromCodePoint(0x1F600 + i)}`)
+    return [...fillers, pivot, ...tail]
+  }
+  const resumeOk = (cursor: string | undefined): boolean => cursor !== undefined && (isConformingStagingCursor(cursor) || cursor === STAGING_CURSOR_REREAD)
+
+  it('V0: DecisionPort orders and range-filters by code point (U+FFFE sorts before an astral character)', async () => {
+    const astral = `${NB}${String.fromCodePoint(0x1F600)}`
+    const fffe = `${NB}${String.fromCharCode(0xFFFE)}A`
+    const port = new DecisionPort([astral, fffe])
+    const asc = await port.query<{ Cursor: string }>('select Cursor from T order by Cursor asc limit 64', { afterCursor: fffe, capCursor: CAP })
+    expect(asc.map((r) => r.Cursor)).to.deep.equal([astral])
+    const desc = await port.query<{ Cursor: string }>('select Cursor from T order by Cursor desc limit 64', { ceiling: `${NB}${String.fromCodePoint(0x10FFFF)}` })
+    expect(desc.map((r) => r.Cursor)).to.deep.equal([astral, fffe])
+  })
+
+  it('V7 non-BMP legacy decision rows hide no honest decision and never yield a non-conforming resume cursor (WR-01)', async () => {
+    const port = new DecisionPort([pad(1), pad(2), pad(3), pad(4), ...collationShape()])
+    const transport = reg(port)
+    const first = await forwardPoll(async (c) => await transport.pollDecisions(c), undefined)
+    expect(first.requestIds).to.include.members([1, 2, 3, 4].map((n) => `req-${pad(n)}`))
+    expect(resumeOk(first.cursor), `cursor ${JSON.stringify(first.cursor)}`).to.equal(true)
+    port.cursors.push(pad(5))
+    const second = await forwardPoll(async (c) => await transport.pollDecisions(c), first.cursor)
+    expect(second.requestIds).to.include(`req-${pad(5)}`)
+    expect(resumeOk(second.cursor), `cursor ${JSON.stringify(second.cursor)}`).to.equal(true)
+  })
+
   describe('real strand', () => {
     let fixture: P2pStagingFixture
     before(async () => {
@@ -249,6 +287,53 @@ describe('decision readers deliver walked decisions without skipping (62-43, WR-
       const record = (await transport.readDecisionRecords()).find((r) => r.requestId === honestId)
       expect(record, 'readDecisionRecords delivers the honest decision').to.not.equal(undefined)
       expect(record?.cursor !== undefined && record.cursor <= '0000000000001003').to.equal(true)
+    })
+  })
+  describe('real strand, legacy cursor schema', () => {
+    let legacy: P2pStagingFixture
+    before(async function () {
+      this.timeout(600_000)
+      legacy = await createLegacyCursorStagingFixture()
+    })
+
+    async function forgeLegacyDecision (strandId: string, cursor: string): Promise<void> {
+      const requestId = `forged-${crypto.randomUUID()}`
+      const authorityId = legacy.auth.authority.id
+      const decidedAt = toIsoZDatetime(Date.now())
+      const digestRow = await legacy.db
+        .prepare("select Digest('RegistrationDecision', :strandId, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt) as d")
+        .get({ strandId, requestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt })
+      const sig = await legacy.decisionSigner.sign(digestToBytes(digestRow?.d as string))
+      await legacy.db.exec(
+        `insert into RegistrationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, Reason, ClosesRequestId, DecidedAt, DeciderKey, DeciderSignature)
+         with context now = :now
+         values (:strandId, :cursor, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt, :deciderKey, :deciderSignature)`,
+        { strandId, cursor, requestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt, deciderKey: sig.signerKey, deciderSignature: sig.signature, now: nowCanonicalDatetime() }
+      )
+    }
+
+    it('V7-db: 65 legacy non-BMP decision rows hide no honest decision and yield only conforming resume cursors (WR-01)', async function () {
+      this.timeout(600_000)
+      const strandId = `decision-visibility-legacy-${crypto.randomUUID()}`
+      for (const c of collationShape()) await forgeLegacyDecision(strandId, c)
+      const transport = new P2pRegistrationTransport({
+        openStrand: async () => legacy.makePort() as unknown as RegistrationStrandPort,
+        computeDigest: async (init, key) => await legacy.fixtureRequestDigest(init, key),
+        strandId,
+        sealer: legacy.sealer,
+        opener: legacy.opener,
+        decisionSigner: legacy.decisionSigner
+      })
+      const honestId = `honest-${crypto.randomUUID()}`
+      const cursor = await transport.publishDecision({ requestId: honestId, status: 'a', decidedAt: new Date().toISOString() })
+      expect(cursor).to.equal('0000000000000001')
+      const notice = (await transport.pollDecisions()).find((n) => n.requestId === honestId)
+      expect(notice, 'pollDecisions delivers the honest decision').to.not.equal(undefined)
+      expect(resumeOk(notice?.cursor), `notice cursor ${JSON.stringify(notice?.cursor)}`).to.equal(true)
+      const record = (await transport.readDecisionRecords()).find((r) => r.requestId === honestId)
+      expect(record, 'readDecisionRecords delivers the honest decision').to.not.equal(undefined)
+      expect(resumeOk(record?.cursor), `record cursor ${JSON.stringify(record?.cursor)}`).to.equal(true)
+      for (const n of await transport.pollDecisions()) expect(resumeOk(n.cursor), JSON.stringify(n.cursor)).to.equal(true)
     })
   })
 })

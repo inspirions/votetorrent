@@ -8,11 +8,13 @@
  */
 
 import { expect } from 'chai'
+import { compareCodePoints } from '@quereus/quereus'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import {
   insertWithCursorRetry,
   isConformingStagingCursor,
+  STAGING_CURSOR_REREAD,
   stagingCursorCeiling,
   P2pStagingError,
   STAGING_CURSOR_MAX_ATTEMPTS,
@@ -33,6 +35,9 @@ const GOOD = '0000000000000001'
 const FORGED_TEXT = 'zzzzzzzzzzzzzzzz'
 const FORGED_NINES = '9999999999999999'
 const CAP = STAGING_CURSOR_MAX_TEXT
+
+/** Quereus BINARY order (code point), never JS string order (WR-01). */
+const byCodePoint = (a: string, b: string): number => compareCodePoints(a, b)
 
 /** In-memory port that interprets just the statements the seam and transports issue. */
 class MockPort implements StagingSqlPort, RegistrationStrandPort, AssociationStrandPort {
@@ -64,15 +69,17 @@ class MockPort implements StagingSqlPort, RegistrationStrandPort, AssociationStr
   }
 
   async query<T> (sql: string, params: Record<string, unknown>): Promise<T[]> {
-    if (/max\(Cursor\)/.test(sql)) return [{ MaxCursor: [...this.cursors].sort().pop() ?? null } as unknown as T]
+    if (/max\(Cursor\)/.test(sql)) return [{ MaxCursor: [...this.cursors].sort(byCodePoint).pop() ?? null } as unknown as T]
     if (/count\(\*\)/.test(sql)) return [{ RowCount: this.rowCountOverride ?? this.cursors.length } as unknown as T]
     if (/order by Cursor asc limit 64/.test(sql)) {
       const after = typeof params.afterCursor === 'string' ? params.afterCursor : undefined
       const cap = typeof params.capCursor === 'string' ? params.capCursor : undefined
       const from = params.fromCursor as string | undefined
       return this.cursors
-        .filter((c) => (after !== undefined ? c > after && (cap === undefined || c <= cap) : c >= (from as string)))
-        .sort()
+        .filter((c) => (after !== undefined
+          ? compareCodePoints(c, after) > 0 && (cap === undefined || compareCodePoints(c, cap) <= 0)
+          : compareCodePoints(c, from as string) >= 0))
+        .sort(byCodePoint)
         .slice(0, 64)
         .map((c) => ({ Cursor: c }) as unknown as T)
     }
@@ -80,8 +87,8 @@ class MockPort implements StagingSqlPort, RegistrationStrandPort, AssociationStr
       const ceiling = params.ceiling as string
       const before = params.beforeCursor as string | undefined
       return this.cursors
-        .filter((c) => c <= ceiling && (before === undefined || c < before))
-        .sort()
+        .filter((c) => compareCodePoints(c, ceiling) <= 0 && (before === undefined || compareCodePoints(c, before) < 0))
+        .sort(byCodePoint)
         .reverse()
         .slice(0, 64)
         .map((c) => ({ Cursor: c }) as unknown as T)
@@ -90,8 +97,8 @@ class MockPort implements StagingSqlPort, RegistrationStrandPort, AssociationStr
     if (/:sinceCursor/.test(sql)) {
       const since = params.sinceCursor as string | null
       return this.cursors
-        .filter((c) => since === null || c > since)
-        .sort()
+        .filter((c) => since === null || compareCodePoints(c, since) > 0)
+        .sort(byCodePoint)
         .map((c) => this.rowFor(c) as unknown as T)
     }
     if (/where StrandId = :strandId and RequestId/.test(sql)) return []
@@ -155,6 +162,15 @@ async function allocateOn (port: MockPort): Promise<string> {
 
 const pad16 = (n: number | bigint): string => String(n).padStart(16, '0')
 
+const NB_PREFIX = '00000000000000'
+/** The CR-01 shape: 63 ASCII fillers, a U+FFFD pivot, then 64 astral cursors (all 16 UTF-16 units). */
+function collationShape (): string[] {
+  const fillers = Array.from({ length: 63 }, (_, i) => `${NB_PREFIX}x${String.fromCharCode(0x41 + i)}`)
+  const pivot = `${NB_PREFIX}${String.fromCharCode(0xFFFD)}a`
+  const tail = Array.from({ length: 64 }, (_, i) => `${NB_PREFIX}${String.fromCodePoint(0x1F600 + i)}`)
+  return [...fillers, pivot, ...tail]
+}
+
 const unreadableOpener = { open: async () => ({ ok: false as const, reason: 'not-a-recipient', detail: '' }) }
 
 describe('staging cursor wedge (62-33, V-4)', function () {
@@ -213,6 +229,23 @@ describe('staging cursor wedge (62-33, V-4)', function () {
       expect(port['cursors']).to.deep.equal([GOOD])
       await port.mutate('insert into x', { cursor: '0000000000000002' })
       expect(port['cursors']).to.deep.equal([GOOD, '0000000000000002'])
+    })
+
+    it('W0b: MockPort orders and range-filters by code point (U+FFFE sorts before an astral character)', async () => {
+      const P = '00000000000000'
+      const astral = `${P}${String.fromCodePoint(0x1F600)}`
+      const fffe = `${P}${String.fromCharCode(0xFFFE)}A`
+      const port = new MockPort([astral, fffe])
+      const asc = await port.query<{ Cursor: string }>('select Cursor from T order by Cursor asc limit 64', { afterCursor: fffe, capCursor: CAP })
+      expect(asc.map((r) => r.Cursor)).to.deep.equal([astral])
+      const desc = await port.query<{ Cursor: string }>('select Cursor from T order by Cursor desc limit 64', { ceiling: `${P}${String.fromCodePoint(0x10FFFF)}` })
+      expect(desc.map((r) => r.Cursor)).to.deep.equal([astral, fffe])
+    })
+
+    it('W14: 63 fillers, a U+FFFD pivot and 64 astral cursors allocate 0000000000000001 on AssociationDecision with one mutate (non-BMP, WR-01)', async () => {
+      const { cursor, port } = await allocate(collationShape(), 'AssociationDecision')
+      expect(cursor).to.equal(GOOD)
+      expect(port.mutateCalls).to.equal(1)
     })
 
     it('W8: two rows at (ceiling, ceiling + 1) allocate the first free slot above them', async () => {
@@ -330,6 +363,23 @@ describe('staging cursor wedge (62-33, V-4)', function () {
       const report = await transport.readStagedRequestsReport()
       expect(report.unreadable.map((u) => u.cursor).concat(report.delivered.map((d) => d.cursor))).to.deep.equal([GOOD, pad16(1003)])
       expect(report.highWaterCursor).to.equal(GOOD)
+    })
+
+    it('W15: non-BMP legacy decision cursors never surface as a delivered request or a non-conforming resume cursor (WR-01)', async () => {
+      const rows = [pad16(1), pad16(2), pad16(3), ...collationShape()]
+      const honest = [pad16(1), pad16(2), pad16(3)].map((c) => `req-${c}`)
+      const nonConforming = new Set(collationShape().map((c) => `req-${c}`))
+      const ok = (cursor: string): boolean => isConformingStagingCursor(cursor) || cursor === STAGING_CURSOR_REREAD
+      for (const [label, make] of [['registration', reg], ['association', assoc]] as const) {
+        const transport = make(rows)
+        const lists = [await transport.pollDecisions(), await transport.readDecisionRecords()]
+        for (const list of lists) {
+          const ids = list.map((n) => n.requestId)
+          for (const h of honest) expect(ids, `${label} delivers ${h}`).to.include(h)
+          for (const id of ids) expect(nonConforming.has(id), `${label} delivered ${JSON.stringify(id)}`).to.equal(false)
+          for (const n of list) expect(ok(n.cursor), `${label} cursor ${JSON.stringify(n.cursor)}`).to.equal(true)
+        }
+      }
     })
 
     it('W6b: association requests deliver forged cursors but never adopt them as high-water', async () => {
