@@ -187,19 +187,42 @@
 // 13. Read-side signature verification of replicated rows: `loadSnapshot`
 //     recomputes `SignatureValid(...)  or SignatureValidP256(...)` over every
 //     `KeyholderDkgMessage`/`ElectionKey` row in SQL against the row's OWN
-//     stored key — a replicated row is never trusted on the strength of
-//     having replicated. `evaluateDkgRevision` drops a `signatureValid:
+//     stored key. That proves only that the row is consistent with that key.
+//     AUTHORSHIP (that the key belonged to `SenderUserId` /
+//     `PublisherUserId` when the row was written) rests on the insert-time
+//     CHECK (`SenderKeyIsUsers` / `PublisherKeyIsUsers`) on immutable
+//     NoUpdate/NoDelete rows, and is deliberately NOT re-required at read
+//     (WR-02, mirroring 62-39's CR-02 release reads): a later rotation or
+//     revocation must not turn a healthy transcript into `failed /
+//     election-key-mismatch`. `evaluateDkgRevision` drops a `signatureValid:
 //     false` row into `invalidRows` and never attributes it. Control (i).
-//     Key membership is proven ONCE, at insert, by `SenderKeyIsUsers` /
-//     `PublisherKeyIsUsers` on immutable NoUpdate/NoDelete rows, and is
-//     deliberately NOT re-required at read (WR-02, mirroring 62-39's CR-02
-//     release reads): a later rotation or revocation must not turn a healthy
-//     transcript into `failed / election-key-mismatch`. A revoked key still
-//     cannot write: `advanceDkg` checks the current key and the schema refuses
-//     the insert. REJECTED variant: drop the membership requirement only once
+//     A revoked key still cannot write: `advanceDkg` checks the current key
+//     and the schema refuses the insert.
+//     ACCEPTED SCOPE (T-62-42-05): since 62-42, rows signed by a key later
+//     revoked stay valid for EVERY consumer of `loadSnapshot`: `getDkgStatus`,
+//     `verifyDkgTranscript`, `advanceDkg`'s `evaluateDkgRevision` /
+//     `planDkgAction` (complaints, disqualification, ElectionKey
+//     publication) and `cleanupVault`. If a key is revoked BECAUSE it was
+//     compromised, its earlier rows keep counting in all of them.
+//     REPLICATION RE-VALIDATION: only partly established. The installed
+//     optimystic validator re-executes a pend's statements through the
+//     registered engine (db-core/dist/src/transaction/validator.js:100,
+//     `registration.engine.execute(transaction)`), which would evaluate the
+//     insert CHECKs, and cluster members call it from
+//     db-p2p/dist/src/cluster/cluster-repo.js:976 (`validatePendOperations`).
+//     NOT ESTABLISHED: that this deployment registers that validator (no
+//     `createQuereusValidator` call was found under @serfab/cadre-core/dist,
+//     and `unvalidatablePendPolicy` defaults to 'accept' at
+//     cluster-repo.js:239), and that block-level sync/restore paths re-run
+//     the CHECKs at all. A replication path that applied rows without
+//     re-running insert CHECKs would let a self-signed row impersonate a
+//     participant.
+//     REJECTED variant: drop the membership requirement only once
 //     an ElectionKey is published; a row's validity must not depend on whether
 //     a LATER row exists, and a pre-publish rotation could still invalidate an
-//     honest participant's earlier rounds mid-DKG.
+//     honest participant's earlier rounds mid-DKG (DS5 pins that a mid-DKG
+//     rotation completes under the current read; its negative control
+//     re-adds the membership EXISTS and turns it red).
 // 14. No secret bytes in error messages, and no `console` use. The
 //     `KeyholderDkgError`/`KeyVaultError` codes and ids are the only error
 //     content; `decodeDkgRoundVaultRecord`'s own corruption messages name
