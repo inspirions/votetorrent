@@ -277,7 +277,9 @@ export type ReassociationProgress =
  * Up to `REASSOCIATION_MAX_POLL_ROUNDS` rounds of `pollDecisions`, forwarding the cursor between
  * calls. A `'c'` notice (with a nonce, not yet answered) drives `producer.produce` then
  * `submitAttestation` — a `'duplicate-request-id'` rejection from `submitAttestation` is treated
- * as already-answered, not an error. Timer-free; an empty round ends the run as pending.
+ * as already-answered, not an error. Timer-free; an empty round, or a round whose resume cursor did
+ * not move (above-ceiling decisions are re-delivered with an unchanged cursor), ends the run as
+ * pending and the next call resumes. Cursors are compared for equality only.
  */
 export async function advanceReassociation(
 	deps: ReassociationCeremonyDeps,
@@ -288,6 +290,7 @@ export async function advanceReassociation(
 	let isAnswered = answered;
 
 	for (let round = 0; round < REASSOCIATION_MAX_POLL_ROUNDS; round++) {
+		const forwarded = cursor;
 		const notices = await deps.transports.associationTransport.pollDecisions(cursor);
 		if (notices.length === 0) {
 			return {kind: 'pending', answered: isAnswered};
@@ -301,6 +304,9 @@ export async function advanceReassociation(
 			}
 		}
 		if (!latest) {
+			if (cursor === forwarded) {
+				return {kind: 'pending', answered: isAnswered};
+			}
 			continue;
 		}
 
@@ -343,7 +349,11 @@ export async function advanceReassociation(
 				}
 			}
 		}
-		// A 'c' notice already answered, or any other status, just keeps polling.
+		// A 'c' notice already answered, or any other status, just keeps polling — unless the resume
+		// cursor did not move, in which case another round would re-read the same rows.
+		if (cursor === forwarded) {
+			return {kind: 'pending', answered: isAnswered};
+		}
 	}
 
 	return {kind: 'pending', answered: isAnswered};

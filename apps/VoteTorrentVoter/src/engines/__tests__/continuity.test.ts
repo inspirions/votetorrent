@@ -592,6 +592,47 @@ describe('advanceReassociation', () => {
 		expect(pollDecisions).toHaveBeenCalledTimes(1);
 	});
 
+	test('IN-02a: a re-delivered non-matching notice with an unmoved resume cursor ends the run as pending after two polls', async () => {
+		const pollDecisions = jest.fn(async () => [{requestId: 'someone-else', status: 'c', challengeNonce: 'N', cursor: 'R'}]);
+		const transports = makeTransports({
+			associationTransport: {submitRequest: jest.fn(), submitAttestation: jest.fn(), pollDecisions},
+		});
+		const deps = makeCeremonyDeps({transports});
+
+		const result = await advanceReassociation(deps, 'Q', false);
+		expect(result).toEqual({kind: 'pending', answered: false});
+		expect(pollDecisions).toHaveBeenCalledTimes(2);
+		expect(pollDecisions).toHaveBeenNthCalledWith(2, 'R');
+	});
+
+	test('IN-02b: a re-delivered challenge for our request is answered exactly once, then the run ends pending after two polls', async () => {
+		const pollDecisions = jest.fn(async () => [{requestId: 'Q', status: 'c', challengeNonce: 'N', cursor: 'R'}]);
+		const submitAttestation = jest.fn(async (_a: unknown, _k: unknown, _s: unknown) => undefined);
+		const produce = jest.fn(async () => ({publicKey: P256_PUB, deviceId: 'd', attestationTime: 1, certificateChain: ['c']}));
+		const transports = makeTransports({
+			associationTransport: {submitRequest: jest.fn(), submitAttestation, pollDecisions},
+		});
+		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), produce, signDeviceKeyDigest: jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: '', signature: 'sig'}))}});
+
+		const result = await advanceReassociation(deps, 'Q', false);
+		expect(result).toEqual({kind: 'pending', answered: true});
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(submitAttestation).toHaveBeenCalledTimes(1);
+		expect(pollDecisions).toHaveBeenCalledTimes(2);
+	});
+
+	test('IN-02c: a re-delivered approval with an unmoved resume cursor still resolves approved', async () => {
+		const pollDecisions = jest.fn(async () => [{requestId: 'Q', status: 'a', cursor: 'R'}]);
+		const transports = makeTransports({
+			associationTransport: {submitRequest: jest.fn(), submitAttestation: jest.fn(), pollDecisions},
+		});
+		const deps = makeCeremonyDeps({transports});
+
+		const result = await advanceReassociation(deps, 'Q', false);
+		expect(result).toEqual({kind: 'approved'});
+		expect(pollDecisions).toHaveBeenCalledTimes(1);
+	});
+
 	test('bounded: a feed that only ever reports a fresh non-matching notice stops after exactly REASSOCIATION_MAX_POLL_ROUNDS calls', async () => {
 		let calls = 0;
 		const pollDecisions = jest.fn(async () => {
