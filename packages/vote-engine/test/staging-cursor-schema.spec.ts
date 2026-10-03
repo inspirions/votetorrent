@@ -12,7 +12,11 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import { digestToBytes } from '../src/utils.js'
+import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
+import { VOTETORRENT_SCHEMA_SQL } from '../src/database/schema-sql.js'
+import { legacyCursorSchemaReplacements } from './fixtures/legacy-cursor-schema.js'
+import { createP2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
+import type { P2pStagingFixture } from './fixtures/p2p-staging-fixture.js'
 import { toIsoZDatetime } from '../src/signing/ceremony-helpers.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { createTestNetwork } from './fixtures/test-context.js'
@@ -62,6 +66,87 @@ async function signedInsert (ctx: EngineContext, table: StagingTable, col: 'Init
     }
   )
 }
+
+type DecisionTable = 'RegistrationDecision' | 'AssociationDecision'
+
+const P = '00000000000000'
+// CR-01 collation shapes: all are 16 UTF-16 units, so they pass a length-only CHECK.
+const CR01_SHAPES: Array<[string, string]> = [
+  ['supplementary-plane (astral)', P + '\u{1F600}'],
+  ['U+FFFD pivot', P + '\uFFFDa'],
+  ['U+FFFE BMP high', P + '\uFFFEA'],
+  ['ASCII-letter filler', P + 'xA']
+]
+
+/** Officer-signed raw decision insert (local copy of the wedge spec's forgeDecision, cursor chosen by caller). */
+async function forgeDecision (fixture: P2pStagingFixture, table: DecisionTable, strandId: string, cursor: string): Promise<void> {
+  const requestId = `forged-${crypto.randomUUID()}`
+  const authorityId = fixture.auth.authority.id
+  const decidedAt = toIsoZDatetime(Date.now())
+  const registration = table === 'RegistrationDecision'
+  const digestRow = registration
+    ? await fixture.db.prepare("select Digest('RegistrationDecision', :strandId, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt) as d")
+      .get({ strandId, requestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt })
+    : await fixture.db.prepare("select Digest('AssociationDecision', :strandId, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt) as d")
+      .get({ strandId, requestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt })
+  const digest = digestRow?.d as string
+  const sig = await fixture.decisionSigner.sign(digestToBytes(digest))
+  if (registration) {
+    await fixture.db.exec(
+      `insert into RegistrationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, Reason, ClosesRequestId, DecidedAt, DeciderKey, DeciderSignature)
+       with context now = :now
+       values (:strandId, :cursor, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt, :deciderKey, :deciderSignature)`,
+      { strandId, cursor, requestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt, deciderKey: sig.signerKey, deciderSignature: sig.signature, now: nowCanonicalDatetime() }
+    )
+  } else {
+    await fixture.db.exec(
+      `insert into AssociationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, ChallengeNonce, Reason, RevokesDeviceKey, MatchMethod, DecidedAt, DeciderKey, DeciderSignature)
+       with context now = :now
+       values (:strandId, :cursor, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt, :deciderKey, :deciderSignature)`,
+      { strandId, cursor, requestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt, deciderKey: sig.signerKey, deciderSignature: sig.signature, now: nowCanonicalDatetime() }
+    )
+  }
+}
+
+describe('decision cursor well-formedness (62-46, V-4, CR-01 schema half)', function () {
+  this.timeout(240_000)
+  let fixture: P2pStagingFixture
+  before(async () => {
+    fixture = await createP2pStagingFixture()
+  })
+
+  for (const table of ['RegistrationDecision', 'AssociationDecision'] as DecisionTable[]) {
+    describe(table, () => {
+      const shapes: Array<[string, string]> = [...MALFORMED, ...CR01_SHAPES]
+      for (const [label, cursor] of shapes) {
+        it(`K6: refuses ${label} (${JSON.stringify(cursor)})`, async () => {
+          expect(cursor.length, 'shape must be 16 UTF-16 units').to.equal(16)
+          let caught: unknown
+          try {
+            await forgeDecision(fixture, table, `k6-${crypto.randomUUID()}`, cursor)
+          } catch (err) {
+            caught = err
+          }
+          expect(caught, `${JSON.stringify(cursor)} must be refused`).to.be.instanceOf(Error)
+          expect(String((caught as Error).message)).to.match(/CursorWellFormed/)
+        })
+      }
+
+      for (const cursor of ['0000000000000001', '9007199254740991']) {
+        it(`K7: accepts '${cursor}'`, async () => {
+          const strandId = `k7-${crypto.randomUUID()}`
+          await forgeDecision(fixture, table, strandId, cursor)
+          const row = await fixture.db.prepare(`select count(*) as c from ${table} where StrandId = :strandId and Cursor = :cursor`).get({ strandId, cursor })
+          expect(Number(row?.c ?? 0)).to.equal(1)
+        })
+      }
+    })
+  }
+
+  it('K8: the legacy-cursor fixture replaces all five CursorWellFormed blocks', () => {
+    expect(legacyCursorSchemaReplacements(VOTETORRENT_SCHEMA_SQL)).to.equal(5)
+  })
+})
 
 describe('staging cursor well-formedness (62-33, V-4)', () => {
   let net: Awaited<ReturnType<typeof createTestNetwork>>
@@ -117,10 +202,10 @@ describe('staging cursor well-formedness (62-33, V-4)', () => {
       expect(block).to.contain('constraint InsertValid')
     })
 
-    it('K5: the two decision tables still declare CursorWidth', () => {
+    it('K5: all five staging and decision tables declare CursorWellFormed and none declares CursorWidth', () => {
       const code = qsql.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
-      expect(code.split('constraint CursorWidth check').length - 1).to.equal(2)
-      expect(code.split('constraint CursorWellFormed check').length - 1).to.equal(3)
+      expect(code.split('constraint CursorWidth check').length - 1).to.equal(0)
+      expect(code.split('constraint CursorWellFormed check').length - 1).to.equal(5)
     })
   })
 })

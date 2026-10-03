@@ -2260,7 +2260,17 @@ declare schema main
 			)
 		),
 		constraint DecidedAtValid check (isISODatetime(new.DecidedAt) and like('%Z', new.DecidedAt)),
-		constraint CursorWidth check (length(new.Cursor) = 16),
+		-- V-4 now covers decision rows (62-46): a decision Cursor is exactly 16 ASCII digits within
+		-- 0000000000000001..9007199254740991. This closes the cursor-collation wedge (CR-01), where
+		-- officer-written non-digit or non-BMP cursors could make the allocator walk throw. Rows written
+		-- before this check stay stored (NoUpdate/NoDelete, D-07) and the engine allocator and readers
+		-- still tolerate them. The bounded-step rule stays engine-side.
+		constraint CursorWellFormed check (
+			length(new.Cursor) = 16
+			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
+			and new.Cursor >= '0000000000000001'
+			and new.Cursor <= '9007199254740991'
+		),
 		constraint StatusValid check (new.Status in (select Code from RegistrationDecisionStatus)),
 		constraint ClosesRequestIdValid check (
 			new.ClosesRequestId is null or (new.Status in ('a', 'r') and new.ClosesRequestId <> new.RequestId)
@@ -2548,7 +2558,17 @@ declare schema main
 			)
 		),
 		constraint DecidedAtValid check (isISODatetime(new.DecidedAt) and like('%Z', new.DecidedAt)),
-		constraint CursorWidth check (length(new.Cursor) = 16),
+		-- V-4 now covers decision rows (62-46): a decision Cursor is exactly 16 ASCII digits within
+		-- 0000000000000001..9007199254740991. This closes the cursor-collation wedge (CR-01), where
+		-- officer-written non-digit or non-BMP cursors could make the allocator walk throw. Rows written
+		-- before this check stay stored (NoUpdate/NoDelete, D-07) and the engine allocator and readers
+		-- still tolerate them. The bounded-step rule stays engine-side.
+		constraint CursorWellFormed check (
+			length(new.Cursor) = 16
+			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
+			and new.Cursor >= '0000000000000001'
+			and new.Cursor <= '9007199254740991'
+		),
 		constraint ChallengeNonceShape check (
 			(new.Status = 'c' and new.ChallengeNonce is not null) or (new.Status <> 'c' and new.ChallengeNonce is null)
 		),
