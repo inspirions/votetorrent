@@ -544,6 +544,7 @@ describe('LifecycleConfirmCard — D-10', () => {
     const { tr } = renderCard();
     for (const id of ['lifecycle-confirm-dismiss', 'lifecycle-confirm-confirm']) {
       expect(styleValue(tr, id, 'flexDirection')).toBe('row');
+      expect(styleValue(tr, id, 'minHeight')).toBeGreaterThanOrEqual(48);
     }
   });
 });

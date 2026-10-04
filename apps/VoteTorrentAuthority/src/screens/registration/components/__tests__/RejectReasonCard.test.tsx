@@ -356,6 +356,7 @@ describe('RejectReasonCard — D-06', () => {
     const { tr } = renderCard();
     for (const id of ['reject-reason-dismiss', 'reject-reason-confirm']) {
       expect(styleValue(tr, id, 'flexDirection')).toBe('row');
+      expect(styleValue(tr, id, 'minHeight')).toBeGreaterThanOrEqual(48);
     }
   });
 

@@ -323,6 +323,9 @@ const localStyles = StyleSheet.create({
 		// Row direction on purpose: CustomButton's `flex` assumes a row parent (see the note at
 		// each button). The slot still splits the row 50/50 via flex:1 + minWidth:0.
 		flexDirection: "row",
+		// 48dp floor: a one-line thin CustomButton is 36dp (95px on Pixel_8, measured on the
+		// Share Network confirm). The row stretches to this, and `flex` stretches the button.
+		minHeight: 48,
 		flex: 1,
 		minWidth: 0,
 	},
