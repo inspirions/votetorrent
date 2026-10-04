@@ -66,6 +66,12 @@ const EMPTY_IDENTITY: IdentityFallbackInput = {
 	addressLine3: '',
 };
 
+/** T-62-28-01: logs carry at most the error's class name, never its message, its String() form,
+ * the error object, or any evidence, code or identity value. */
+function errorClassName(err: unknown): string {
+	return err instanceof Error ? err.name : typeof err;
+}
+
 /** Pure — the ScrollView offset that brings a field's full frame inside the (keyboard-shrunken)
  * viewport, with `margin` of breathing room past the field's bottom edge. Never negative. */
 export function revealOffsetFor({
@@ -183,7 +189,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 					setBranch('code');
 				}
 			} catch (err) {
-				console.error('ContinueOnAnotherDeviceScreen: bootstrap failed:', err);
+				console.error('ContinueOnAnotherDeviceScreen: bootstrap failed:', errorClassName(err));
 				if (!cancelled) setBranch('code');
 			}
 		}
@@ -236,7 +242,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 				answeredRef.current = progress.answered;
 			}
 		} catch (err) {
-			console.error('ContinueOnAnotherDeviceScreen: advance failed:', err);
+			console.error('ContinueOnAnotherDeviceScreen: advance failed:', errorClassName(err));
 			setFailureClass(classifyAttestationFailure(err));
 		} finally {
 			advanceInFlightRef.current = false;
@@ -312,7 +318,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 			setFailureClass(null);
 			setBranch('pending');
 		} catch (err) {
-			console.error('ContinueOnAnotherDeviceScreen: submit failed:', err);
+			console.error('ContinueOnAnotherDeviceScreen: submit failed:', errorClassName(err));
 			setSubmitError(t('newDevice.submitError'));
 		}
 	}
@@ -354,11 +360,11 @@ export default function ContinueOnAnotherDeviceScreen() {
 		try {
 			await Linking.sendIntent('android.settings.BIOMETRIC_ENROLL');
 		} catch (err) {
-			console.error('ContinueOnAnotherDeviceScreen: BIOMETRIC_ENROLL intent failed, falling back:', err);
+			console.error('ContinueOnAnotherDeviceScreen: BIOMETRIC_ENROLL intent failed, falling back:', errorClassName(err));
 			try {
 				await Linking.sendIntent('android.settings.SECURITY_SETTINGS');
 			} catch (fallbackErr) {
-				console.error('ContinueOnAnotherDeviceScreen: SECURITY_SETTINGS fallback intent also failed:', fallbackErr);
+				console.error('ContinueOnAnotherDeviceScreen: SECURITY_SETTINGS fallback intent also failed:', errorClassName(fallbackErr));
 			}
 		}
 	}
