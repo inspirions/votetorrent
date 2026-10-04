@@ -47,6 +47,7 @@ import {
 import type {IdentityFallbackInput, ReassociationCeremonyDeps, ReassociationEvidenceInput} from '../../engines/continuity';
 import type {AssociationRequestInit} from '@votetorrent/vote-core';
 import {globalStyles} from '../../theme/styles';
+import {errorClassName} from '../../utils/errorClassName';
 import type {RegistrationStackParamList} from '../../navigation/types';
 
 type ContinueNavigationProp = NativeStackNavigationProp<RegistrationStackParamList, 'ContinueOnAnotherDevice'>;
@@ -65,12 +66,6 @@ const EMPTY_IDENTITY: IdentityFallbackInput = {
 	addressLine2: '',
 	addressLine3: '',
 };
-
-/** T-62-28-01: logs carry at most the error's class name, never its message, its String() form,
- * the error object, or any evidence, code or identity value. */
-function errorClassName(err: unknown): string {
-	return err instanceof Error ? err.name : typeof err;
-}
 
 /** Pure — the ScrollView offset that brings a field's full frame inside the (keyboard-shrunken)
  * viewport, with `margin` of breathing room past the field's bottom edge. Never negative. */

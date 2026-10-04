@@ -88,6 +88,7 @@ import type {RegistrationCodeAvailability} from '../../engines/continuity';
 import {resolveVoterRequestTransports} from './attach-voter-request-transport';
 import {RegistrationConfirmationCodeCard} from './RegistrationConfirmationCodeCard';
 import {globalStyles} from '../../theme/styles';
+import {errorClassName} from '../../utils/errorClassName';
 import type {RegistrationStackParamList} from '../../navigation/types';
 
 type ConfirmationNavigationProp = NativeStackNavigationProp<RegistrationStackParamList, 'Confirmation'>;
@@ -356,7 +357,7 @@ export default function ConfirmationScreen() {
 			clearDraft();
 			setIsPending(true);
 		} catch (err) {
-			console.error('ConfirmationScreen: registration ceremony failed:', err);
+			console.error('ConfirmationScreen: registration ceremony failed:', errorClassName(err));
 			// D-09/T-45-06-04: classify to a generic UX class — raw reject codes / internal
 			// error messages never reach the UI.
 			setFailureClass(classifyAttestationFailure(err));
@@ -374,11 +375,11 @@ export default function ConfirmationScreen() {
 		try {
 			await Linking.sendIntent('android.settings.BIOMETRIC_ENROLL');
 		} catch (err) {
-			console.error('ConfirmationScreen: BIOMETRIC_ENROLL intent failed, falling back to security settings:', err);
+			console.error('ConfirmationScreen: BIOMETRIC_ENROLL intent failed, falling back to security settings:', errorClassName(err));
 			try {
 				await Linking.sendIntent('android.settings.SECURITY_SETTINGS');
 			} catch (fallbackErr) {
-				console.error('ConfirmationScreen: SECURITY_SETTINGS fallback intent also failed:', fallbackErr);
+				console.error('ConfirmationScreen: SECURITY_SETTINGS fallback intent also failed:', errorClassName(fallbackErr));
 			}
 		}
 	}
