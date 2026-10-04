@@ -83,6 +83,12 @@ export interface RejectReasonCardProps {
 	onConfirm: (reason: string) => void | Promise<void>;
 	onDismiss: () => void;
 	/**
+	 * The D-07 checklist gate state, owned by the host. The engine refuses an
+	 * ungated reject (WR-02); this mirrors it so Confirm Rejection cannot be
+	 * pressed (and no biometric prompt spent) while the checklist is unmet.
+	 */
+	decisionGateMet: boolean;
+	/**
 	 * Defaults to `"reject-reason"`, which resolves the rendered testIDs to
 	 * `reject-reason-card`, `reject-reason-title`, `reject-reason-body`,
 	 * `reject-reason-reason-input`, `reject-reason-confirm`, and
@@ -95,6 +101,7 @@ export function RejectReasonCard({
 	requesterName,
 	onConfirm,
 	onDismiss,
+	decisionGateMet,
 	testIDPrefix = "reject-reason",
 }: RejectReasonCardProps) {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -121,7 +128,7 @@ export function RejectReasonCard({
 		setReasonValue("");
 	}, [requesterName, testIDPrefix]);
 
-	const canConfirm = submitState === "idle" && isRejectReasonValid(reasonValue);
+	const canConfirm = submitState === "idle" && decisionGateMet && isRejectReasonValid(reasonValue);
 
 	// Three-state submit latch: idle -> submitting -> submitted. A resolved
 	// submit latches permanently (the card's owner is expected to unmount it
@@ -185,6 +192,11 @@ export function RejectReasonCard({
 				// disabled.
 				autoCapitalize="sentences"
 			/>
+			{!decisionGateMet ? (
+				<ThemedText type="small" testID={`${testIDPrefix}-gate-hint`} style={{ color: colors.textSecondary }}>
+					{t("registrationRequestRejectChecklistRequired")}
+				</ThemedText>
+			) : null}
 			<View style={localStyles.buttonRow}>
 				<View testID={`${testIDPrefix}-dismiss`} style={localStyles.buttonSlot}>
 					{/*

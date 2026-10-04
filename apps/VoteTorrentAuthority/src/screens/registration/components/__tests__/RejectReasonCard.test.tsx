@@ -135,6 +135,7 @@ function renderCard(overrides: Record<string, unknown> = {}) {
     requesterName: 'Jane Doe',
     onConfirm,
     onDismiss,
+    decisionGateMet: true,
     testIDPrefix: PREFIX,
     ...overrides,
   };
@@ -336,6 +337,7 @@ describe('RejectReasonCard — D-06', () => {
           requesterName="Ada Vasquez"
           onConfirm={jest.fn().mockResolvedValue(undefined)}
           onDismiss={jest.fn()}
+          decisionGateMet
           testIDPrefix={PREFIX}
         />,
       );
@@ -358,5 +360,22 @@ describe('RejectReasonCard — D-06', () => {
       expect(thin.length).toBeGreaterThan(0);
       for (const n of thin) expect(n.props.flex).toBeFalsy();
     }
+  });
+
+  it('14. decisionGateMet=false disables Confirm even with a valid reason, shows the gate hint, and a direct press fires nothing', () => {
+    const { tr, onConfirm } = renderCard({ decisionGateMet: false });
+    type(tr, PREFIX, 'dup');
+    expect(isDisabled(tr, `${PREFIX}-confirm`)).toBe(true);
+    expect(tr.root.findByProps({ testID: `${PREFIX}-gate-hint` })).toBeTruthy();
+    expect(treeText(tr)).toContain('registrationRequestRejectChecklistRequired');
+    press(tr, `${PREFIX}-confirm`);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('15. decisionGateMet=true: no gate hint, Confirm enabled once a reason is typed', () => {
+    const { tr } = renderCard({ decisionGateMet: true });
+    type(tr, PREFIX, 'dup');
+    expect(tr.root.findAllByProps({ testID: `${PREFIX}-gate-hint` }).length).toBe(0);
+    expect(isDisabled(tr, `${PREFIX}-confirm`)).toBe(false);
   });
 });

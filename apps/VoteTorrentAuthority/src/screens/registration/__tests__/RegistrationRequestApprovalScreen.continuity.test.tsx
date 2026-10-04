@@ -311,6 +311,8 @@ function decideOnReject() {
 	});
 }
 async function rejectWithReason(tr: renderer.ReactTestRenderer, reason = "no proof of residence") {
+	// D-07: Reject is disabled until the checklist gate is met; tick only when it is not already.
+	if (isDisabled(tr, "registration-request-approval-reject")) press(tr, "verification-checklist-toggle-id");
 	press(tr, "registration-request-approval-reject");
 	const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
 	renderer.act(() => {
@@ -659,6 +661,23 @@ describe("RegistrationRequestApprovalScreen continuity — D-49 unreadable conte
 		expect(exists(tr, "reject-reason-card")).toBe(true);
 	});
 
+	it("A20b. (62-52) tampered renders the checklist below the unreadable notice; a fresh tampered read can be ticked to enable Reject, and other unread states render none", async () => {
+		mockCurrentRead = { ...UNREAD("tampered"), verificationChecklist: [] };
+		const tr = await renderScreen();
+		expect(exists(tr, "verification-checklist")).toBe(true);
+		const ids = orderedTestIDs(tr);
+		expect(ids.indexOf("verification-checklist")).toBeGreaterThan(ids.indexOf("registration-request-approval-content-unreadable"));
+		expect(isDisabled(tr, "registration-request-approval-reject")).toBe(true);
+		press(tr, "verification-checklist-toggle-id");
+		expect(isDisabled(tr, "registration-request-approval-reject")).toBe(false);
+		for (const access of ["not-a-recipient", "no-opener", "unreadable"]) {
+			mockCurrentRead = UNREAD(access);
+			const other = await renderScreen();
+			expect(exists(other, "verification-checklist")).toBe(false);
+			expect(isDisabled(other, "registration-request-approval-reject")).toBe(true);
+		}
+	});
+
 	it("A21. the approval gate's refusal renders its mapped copy, never its message, and reloads", async () => {
 		for (const [access, key] of [
 			["tampered", "registrationContentTampered"],
@@ -697,7 +716,8 @@ describe("RegistrationRequestApprovalScreen continuity — D-49 unreadable conte
 		press(tr, "verification-checklist-toggle-id");
 		expect(isDisabled(tr, "registration-request-approval-approve")).toBe(false);
 		await pressAsync(tr, "registration-request-approval-approve");
-		expect(exists(tr, "verification-checklist")).toBe(false);
+		// Tampered is the one unread state that renders the checklist (62-52: Reject needs its gate).
+		expect(exists(tr, "verification-checklist")).toBe(true);
 		expect(textOf(tr, "registration-request-approval-content-unreadable")).toBe(dict("en").registrationContentTampered);
 		expect(isDisabled(tr, "registration-request-approval-approve")).toBe(true);
 	});

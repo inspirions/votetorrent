@@ -404,6 +404,21 @@ export default function RegistrationRequestApprovalScreen() {
 	// An officer cannot refuse a request they cannot see, but may refuse content that fails its
 	// signed digest: refusing under uncertainty is the safe direction.
 	const rejectableUnread = read?.payloadAccess === "tampered";
+	// D-07: derived from `checked` directly (not the `gateMet` state), because `checked` can be
+	// seeded from `read.verificationChecklist` before VerificationChecklist reports.
+	const checklistGateMet = isChecklistGateMet(checked);
+	// One definition shared by the readable branch and the tampered branch.
+	const checklistElement = (
+		<VerificationChecklist
+			checked={checked}
+			onChange={(next, met) => {
+				setChecked(next);
+				setGateMet(met);
+			}}
+			readOnly={mode !== "pending"}
+			decidedAt={read?.decidedAt}
+		/>
+	);
 	// 62-31 degrades an unread registrant task to the base task, so a missing own task does not
 	// mean the officer voted.
 	const voteRecorded = mode === "pending" && thresholdAboveOne && !task && !unreachable && contentReadable;
@@ -522,6 +537,13 @@ export default function RegistrationRequestApprovalScreen() {
 	// `getSignatureDigest` and never invokes `signer(digest)` itself.
 	async function handleReject(reason: string): Promise<void> {
 		setErrorMessage("");
+		// D-07 / WR-02: the engine refuses an ungated reject, and the buttons are disabled on the
+		// same predicate; this is the belt to those braces so an ungated press spends NO biometric
+		// prompt. Fixed text, no request id. Rethrown so RejectReasonCard's latch returns to idle.
+		if (!isChecklistGateMet(checked)) {
+			setErrorMessage(t("registrationRequestRejectChecklistRequired"));
+			throw new Error("reject checklist gate not met");
+		}
 		try {
 			const reg = await getEngine<IRegistrationEngine>("registration");
 			// The screen never calls getSignatureDigest and never invokes
@@ -579,7 +601,7 @@ export default function RegistrationRequestApprovalScreen() {
 			} else {
 				const outcome = handleDeviceSigningError(err);
 				if (!outcome.handled) {
-					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+					setErrorMessage(outcome.message ?? t("registrationRequestRejectFailed"));
 				}
 			}
 			// Re-thrown so RejectReasonCard's own submit latch (idle ->
@@ -735,6 +757,7 @@ export default function RegistrationRequestApprovalScreen() {
 						    never an empty form. The copy is a Group K key; no payload text, request id or
 						    access code reaches this node. */}
 						{!contentReadable ? (
+							<>
 							<View
 								testID="registration-request-approval-content-unreadable"
 								style={[
@@ -749,6 +772,13 @@ export default function RegistrationRequestApprovalScreen() {
 									</ThemedText>
 								</View>
 							</View>
+							{/* D-07 + WR-02: the tampered state is still rejectable, and the engine refuses
+							    any reject whose checklist does not meet the gate. Without the checklist here
+							    a fresh tampered read has `checked = []` and Reject could never be enabled.
+							    Only the tampered state gets it; the checklist carries no payload content, so
+							    D-49's never-render posture is unaffected. */}
+							{rejectableUnread ? checklistElement : null}
+							</>
 						) : (
 						<>
 						<View
@@ -784,15 +814,7 @@ export default function RegistrationRequestApprovalScreen() {
 							))}
 						</View>
 
-						<VerificationChecklist
-							checked={checked}
-							onChange={(next, met) => {
-								setChecked(next);
-								setGateMet(met);
-							}}
-							readOnly={mode !== "pending"}
-							decidedAt={read.decidedAt}
-						/>
+						{checklistElement}
 						</>
 						)}
 
@@ -896,6 +918,7 @@ export default function RegistrationRequestApprovalScreen() {
 								backgroundColor={colors.error}
 								size="thin"
 								disabled={
+									!checklistGateMet ||
 									!canDecide ||
 									closedAsDuplicate ||
 									(thresholdAboveOne && !task) ||
@@ -912,7 +935,9 @@ export default function RegistrationRequestApprovalScreen() {
 			) : null}
 
 			{mode === "pending" && showRejectCard && read ? (
+				<View testID="registration-request-approval-reject-card-host" style={{ paddingBottom: insets.bottom }}>
 				<RejectReasonCard
+					decisionGateMet={checklistGateMet}
 					requesterName={registrationRequestDisplayName({
 						requestId,
 						lastName: read.payload.public?.lastName,
@@ -922,6 +947,7 @@ export default function RegistrationRequestApprovalScreen() {
 					onConfirm={handleReject}
 					onDismiss={() => setShowRejectCard(false)}
 				/>
+				</View>
 			) : null}
 		</View>
 	);

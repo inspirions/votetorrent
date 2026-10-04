@@ -880,6 +880,8 @@ const resources = {
 			registrationRequestRejectReasonPlaceholder: 'Reason for rejection',
 			registrationRequestRejectConfirmButton: 'Confirm Rejection',
 			registrationRequestRejectKeepReviewingButton: 'Keep Reviewing',
+			registrationRequestRejectChecklistRequired: 'Complete the verification checklist before rejecting.',
+			registrationRequestRejectFailed: 'Could not record the rejection. Try again.',
 			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			bridgeSourceBadgeLabel: 'Bridge Import',
 			bridgeSourceCalloutHeading: 'Submitted by an import bridge',
@@ -1914,6 +1916,8 @@ const resources = {
 			registrationRequestRejectReasonPlaceholder: 'Motivo del rechazo',
 			registrationRequestRejectConfirmButton: 'Confirmar Rechazo',
 			registrationRequestRejectKeepReviewingButton: 'Seguir Revisando',
+			registrationRequestRejectChecklistRequired: 'Completa la lista de verificación antes de rechazar.',
+			registrationRequestRejectFailed: 'No se pudo registrar el rechazo. Inténtalo de nuevo.',
 			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			bridgeSourceBadgeLabel: 'Importación por Puente',
 			bridgeSourceCalloutHeading: 'Enviada por un puente de importación',

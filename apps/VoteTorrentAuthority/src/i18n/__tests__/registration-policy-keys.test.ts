@@ -58,13 +58,13 @@ describe('registrationPolicy* i18n key group (D-11)', () => {
 		expect(esTranslation.registrationDeadline).toBe('Fecha Límite de Registro');
 	});
 
-	test('EN has exactly 42 registrationRequest* keys, ES key set is deeply equal', () => {
+	test('EN has exactly 44 registrationRequest* keys, ES key set is deeply equal', () => {
 		const enKeys = Object.keys(enTranslation).filter(k => REGISTRATION_REQUEST_RE.test(k));
 		const esKeys = Object.keys(esTranslation).filter(k => REGISTRATION_REQUEST_RE.test(k));
 
-		expect(enKeys).toHaveLength(42);
+		expect(enKeys).toHaveLength(44);
 		expect(new Set(esKeys)).toEqual(new Set(enKeys));
-		expect(esKeys).toHaveLength(42);
+		expect(esKeys).toHaveLength(44);
 	});
 
 	test('no registrationRequest* value is empty or whitespace-only, in either locale', () => {
