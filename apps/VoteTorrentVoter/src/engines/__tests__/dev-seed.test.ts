@@ -117,9 +117,9 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		await AsyncStorage.clear()
 	})
 
-	async function setup() {
+	async function setup(options?: { registeredStateFixture?: boolean }) {
 		const networksEngine = new NetworksEngine(new LocalStorageReact())
-		const seeded = await seedDevNetwork(networksEngine)
+		const seeded = await seedDevNetwork(networksEngine, options)
 		const ctx = networksEngine.getEstablishedContext(seeded.networkReference.hash)
 		if (!ctx) throw new Error('test setup: no established context after seedDevNetwork')
 		const registrationEngine = new RegistrationEngine(ctx)
@@ -270,8 +270,15 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		expect(selective!.selectiveDetails?.some((leaf) => leaf.name === 'party' && leaf.value === 'IND')).toBe(true)
 	})
 
-	it('D-23(f): the registered state is reachable end-to-end from the device key alone (no cached id) — one row, status "a"', async () => {
-		const { seeded, ctx } = await setup()
+	it('62-51: default seed binds nothing to the stub device key (fresh dev Voter reads not-registered)', async () => {
+		const { ctx } = await setup()
+		const associationEngine = new AssociationEngine(ctx)
+		const { publicKey: deviceKey } = await resolveAttestationProducer().provisionDeviceKey()
+		expect(await associationEngine.getAssociationsByDeviceKey(deviceKey)).toEqual([])
+	})
+
+	it('D-23(f) opt-in: the registered state is reachable end-to-end from the device key alone (no cached id) — one row, status "a"', async () => {
+		const { seeded, ctx } = await setup({ registeredStateFixture: true })
 		const associationEngine = new AssociationEngine(ctx)
 		const registrationEngine = new RegistrationEngine(ctx)
 
@@ -348,10 +355,19 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		expect((await readVoterBallot(deps, { includeProposed: false })).offices).toEqual([])
 	})
 
+	it('62-51: default re-attach run also binds nothing to the stub device key', async () => {
+		const networksEngine = new NetworksEngine(new LocalStorageReact())
+		await seedDevNetwork(networksEngine)
+		const second = await seedDevNetwork(networksEngine)
+		const ctx = networksEngine.getEstablishedContext(second.networkReference.hash)!
+		const { publicKey: deviceKey } = await resolveAttestationProducer().provisionDeviceKey()
+		expect(await new AssociationEngine(ctx).getAssociationsByDeviceKey(deviceKey)).toEqual([])
+	})
+
 	it('is idempotent — re-running seedDevNetwork re-attaches the same network and election without duplicating policy rows', async () => {
 		const networksEngine = new NetworksEngine(new LocalStorageReact())
-		const first = await seedDevNetwork(networksEngine)
-		const second = await seedDevNetwork(networksEngine)
+		const first = await seedDevNetwork(networksEngine, { registeredStateFixture: true })
+		const second = await seedDevNetwork(networksEngine, { registeredStateFixture: true })
 
 		expect(second.networkReference.hash).toBe(first.networkReference.hash)
 		expect(second.electionId).toBe(first.electionId)

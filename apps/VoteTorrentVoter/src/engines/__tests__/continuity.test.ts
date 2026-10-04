@@ -163,6 +163,29 @@ describe('resolveRegistrationCodeAvailability (D-45)', () => {
 		expect(await getDeviceIdentityKeyState()).toBe('absent');
 	});
 
+	test('unavailable: holder key undefined logs exactly one fixed-string warn (T-62-51-01) and the catch-path warn stays distinct', async () => {
+		const association = {
+			getAssociationsByDeviceKey: jest.fn(async () => [{registrantId: 'R1', deviceKey: P256_PUB}]),
+			getRegistrationCodeHolderKey: jest.fn(async () => undefined),
+			deriveRegistrationCode: jest.fn(),
+		};
+		const registration = {getRegistrant: jest.fn(async () => ({id: 'R1', authorityId: AUTHORITY_ID, status: 'a'}))};
+		const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const result = await resolveRegistrationCodeAvailability(makeContinuityDeps({association, registration}));
+			expect(result).toEqual({kind: 'unavailable'});
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0]).toEqual(['continuity: registration code holder key not found']);
+
+			warn.mockClear();
+			const failing = {getAssociationsByDeviceKey: jest.fn(async () => { throw new Error('boom'); })};
+			expect(await resolveRegistrationCodeAvailability(makeContinuityDeps({association: failing}))).toEqual({kind: 'unavailable'});
+			expect(warn.mock.calls[0]![0]).toBe('continuity: code availability read failed');
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	test('not-registered: a suspended (s) registrant is also not-registered', async () => {
 		const association = {
 			getAssociationsByDeviceKey: jest.fn(async () => [{registrantId: 'R1', deviceKey: P256_PUB}]),

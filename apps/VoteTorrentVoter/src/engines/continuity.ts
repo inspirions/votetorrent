@@ -82,7 +82,9 @@ export type RegistrationCodeAvailability =
  *   3. This device staged that registration over P2P (`ownStagedRegistrationRequestIds` contains
  *      the registration request id, which equals the registrantId).
  *   4. `deriveRegistrationCode` succeeds.
- * Never throws — every failure (including an engine read rejecting) resolves `'unavailable'`.
+ * Never throws — every failure (including an engine read rejecting) resolves `'unavailable'`. Two
+ * fixed-string warns tell the cases apart: 'continuity: registration code holder key not found'
+ * (silent-looking holder-key miss) and 'continuity: code availability read failed' (a read threw).
  */
 export async function resolveRegistrationCodeAvailability(
 	deps: ContinuityDeps,
@@ -119,6 +121,8 @@ export async function resolveRegistrationCodeAvailability(
 
 		const holderKey = await association.getRegistrationCodeHolderKey(registrantId);
 		if (holderKey === undefined) {
+			// Fixed string only (T-62-28-01 / T-62-51-01): no registrant id, key or error text.
+			console.warn('continuity: registration code holder key not found');
 			return {kind: 'unavailable'};
 		}
 		if (holderKey !== identityKey) {
