@@ -1,7 +1,7 @@
 /**
  * @format
  *
- * T-62-28-01 (62-SECURITY.md, Open Threats) - the continuity screen must not write error text,
+ * T-62-28-01 (62-SECURITY.md, Open Threats) - the continuity screens must not write error text,
  * error objects, or any evidence / code / identity value to device logs. Every console call in
  * the target files may carry only string literals and `errorClassName(<identifier>)`.
  *
@@ -17,7 +17,10 @@ import * as path from 'path';
 
 const APP_ROOT = path.resolve(__dirname, '..');
 
-const TARGET_FILES = ['src/screens/registration/ContinueOnAnotherDeviceScreen.tsx'];
+const TARGET_FILES = [
+	'src/screens/registration/ContinueOnAnotherDeviceScreen.tsx',
+	'src/screens/registration/ConfirmationScreen.tsx',
+];
 
 /** Strip comments while preserving line numbers (block comments keep their newlines). */
 function stripComments(source: string): string {
