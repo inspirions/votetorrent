@@ -21,12 +21,16 @@
  *     and rethrow the original error (the keys might belong to a keyholder that did commit).
  *  4. D-21: every accept provisions a brand-new identity; this module never touches the officer's
  *     device signing key.
+ *  5. The slot Cid is resolved from the pasted share (by InviteKey + Type) BEFORE provisioning, so an
+ *     unknown, malformed or wrong-type invite costs zero auth wraps (zero biometric prompts) and
+ *     leaves zero identities (UAT 62 test 10).
  */
 
 import type { IInvitationEngine } from '@votetorrent/vote-core';
 import type { IKeyVault } from '@votetorrent/vote-engine/rn';
 import { discardKeyholderIdentity, provisionKeyholderIdentity } from '../../engines/keyholder-identity';
 import type { KeyVaultStorage } from '../../engines/key-vault';
+import { resolveInviteFromShare } from '../invitations/invite-share';
 
 export interface KeyholderAcceptDeps {
 	invitationEngine: IInvitationEngine;
@@ -36,19 +40,20 @@ export interface KeyholderAcceptDeps {
 
 export async function acceptKeyholderInvitation(
 	deps: KeyholderAcceptDeps,
-	invitationId: string,
-	invitePrivate: string | undefined
-): Promise<{ userId: string }> {
-	const identity = await provisionKeyholderIdentity({ vault: deps.vault, storage: deps.storage }, invitationId);
+	shareText: string
+): Promise<{ userId: string; slotCid: string }> {
+	// Step 0: resolve and validate the slot BEFORE any identity is provisioned (zero prompts on failure).
+	const { slotCid, invitePrivate } = await resolveInviteFromShare(deps.invitationEngine, shareText, 'k');
+	const identity = await provisionKeyholderIdentity({ vault: deps.vault, storage: deps.storage }, slotCid);
 
 	try {
 		try {
-			await deps.invitationEngine.respondToInvite(invitationId, true, invitePrivate, undefined, identity.userId, identity.provisioning);
-			return { userId: identity.userId };
+			await deps.invitationEngine.respondToInvite(slotCid, true, invitePrivate, undefined, identity.userId, identity.provisioning);
+			return { userId: identity.userId, slotCid };
 		} catch (originalError) {
 			let reread: Awaited<ReturnType<IInvitationEngine['getKeyholderInvite']>>;
 			try {
-				reread = await deps.invitationEngine.getKeyholderInvite(invitationId);
+				reread = await deps.invitationEngine.getKeyholderInvite(slotCid);
 			} catch {
 				// The outcome is UNKNOWN — the keys might belong to a keyholder that DID commit.
 				// Discard nothing; surface the original error.
@@ -57,7 +62,7 @@ export async function acceptKeyholderInvitation(
 			if (reread?.result?.isAccepted === true && reread.result.invokedId === identity.userId) {
 				// The accept actually committed despite the thrown error — never orphan a
 				// committed keyholder's keys.
-				return { userId: identity.userId };
+				return { userId: identity.userId, slotCid };
 			}
 			await discardKeyholderIdentity({ vault: deps.vault, storage: deps.storage }, identity.userId).catch(() => undefined);
 			throw originalError;

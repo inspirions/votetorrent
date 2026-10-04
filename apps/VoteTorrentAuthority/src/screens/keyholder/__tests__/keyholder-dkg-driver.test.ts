@@ -7,6 +7,8 @@
  * `dkg-keyholders.ts` itself is not a mapped jest path).
  */
 
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { bytesToHex } from '@noble/curves/utils.js';
 import { ElectionsEngine, InvitationEngine, KeyholderDkgEngine, peekNextElectionTid, keyholderDkgShareAlias } from '@votetorrent/vote-engine/rn';
 import {
 	addTestAuthority,
@@ -210,8 +212,8 @@ describe('driveKeyholderDkg with fakes (D1-D4)', () => {
 // R1-R3 — real schema, two devices over one shared DB
 // ---------------------------------------------------------------------------
 
-function makeKeyholderInvite(name: string): KeyholderInvite {
-	return { name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: 'k'.repeat(66), inviteSignature: '' };
+function makeKeyholderInvite(name: string, inviteKey = 'k'.repeat(66)): KeyholderInvite {
+	return { name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey, inviteSignature: '' };
 }
 
 /** Builds a fresh election whose revision-0 KeyholderThreshold = `threshold`, mirroring 62-17's
@@ -279,9 +281,11 @@ async function acceptOnDevice(
 	name: string
 ): Promise<Device> {
 	const invitationEngine = new InvitationEngine(seeded.auth.ctx);
-	await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite(name), seeded.electionId, makeTestSignCallback(seeded.auth.user));
-	const slotRow = await seeded.auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name });
-	const slotCid = slotRow!.Cid as string;
+	const privBytes = secp256k1.utils.randomSecretKey();
+	const invitePrivate = bytesToHex(privBytes);
+	const inviteKey = bytesToHex(secp256k1.getPublicKey(privBytes));
+	await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite(name, inviteKey), seeded.electionId, makeTestSignCallback(seeded.auth.user));
+	const shareText = JSON.stringify({ invitePrivate, inviteKey, expiration: 'x', type: 'k', name });
 
 	const wrapper = createFakeSecretWrapper();
 	const vault = createAuthorityKeyVault({
@@ -291,7 +295,7 @@ async function acceptOnDevice(
 	});
 	const storage = createMapStorage();
 
-	const { userId } = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, slotCid, undefined);
+	const { userId } = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
 	return { userId, vault, storage, wrapper };
 }
 
