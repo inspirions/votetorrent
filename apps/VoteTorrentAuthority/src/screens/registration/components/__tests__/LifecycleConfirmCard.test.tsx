@@ -534,4 +534,19 @@ describe('LifecycleConfirmCard — D-10', () => {
     expect(tr.root.findByProps({ testID: 'confirm-revoke-typed-input' }).props.value).toBe('');
     expect(isDisabled(tr, 'confirm-revoke-confirm')).toBe(true);
   });
+
+  // STRUCTURAL pin only: react-test-renderer runs no Yoga pass, so this is NOT a
+  // geometry proof. CustomButton's `flex` style (flex:1 + alignSelf:stretch)
+  // assumes a ROW parent; inside these column-direction slots it zeroes the
+  // vertical flex-basis and the button collapsed to 32px on Pixel_8. The real
+  // proof is scripts/assert-card-button-geometry.mjs against a device dump.
+  it('23. structural: neither card button passes the CustomButton `flex` prop (not a geometry proof)', () => {
+    const { tr } = renderCard();
+    for (const id of ['lifecycle-confirm-dismiss', 'lifecycle-confirm-confirm']) {
+      const wrapper = tr.root.findByProps({ testID: id });
+      const thin = wrapper.findAll((n) => n.props.size === 'thin' && 'title' in n.props);
+      expect(thin.length).toBeGreaterThan(0);
+      for (const n of thin) expect(n.props.flex).toBeFalsy();
+    }
+  });
 });

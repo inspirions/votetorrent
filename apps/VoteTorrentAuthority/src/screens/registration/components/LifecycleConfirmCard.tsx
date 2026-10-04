@@ -256,9 +256,16 @@ export function LifecycleConfirmCard({
 
 			<View style={localStyles.buttonRow}>
 				<View testID={`${testIDPrefix}-dismiss`} style={localStyles.buttonSlot}>
+					{/*
+						 * No `flex` prop: CustomButton's `flex` style (flex:1 + alignSelf:stretch)
+						 * assumes a ROW parent. In this column-direction slot it zeroes the
+						 * vertical flex-basis and the button collapsed to its 12dp padding
+						 * (32px on Pixel_8, UAT 62 test 13; Yoga model in
+						 * .planning/debug/reject-sheet-buttons-clipped.md). Width is already
+						 * handled by the slot's flex:1.
+						 */}
 					<CustomButton
 						size="thin"
-						flex
 						title={dismissLabel}
 						backgroundColor={dismissBackground}
 						disabled={submitState !== "idle"}
@@ -266,9 +273,16 @@ export function LifecycleConfirmCard({
 					/>
 				</View>
 				<View testID={`${testIDPrefix}-confirm`} style={localStyles.buttonSlot}>
+					{/*
+						 * No `flex` prop: CustomButton's `flex` style (flex:1 + alignSelf:stretch)
+						 * assumes a ROW parent. In this column-direction slot it zeroes the
+						 * vertical flex-basis and the button collapsed to its 12dp padding
+						 * (32px on Pixel_8, UAT 62 test 13; Yoga model in
+						 * .planning/debug/reject-sheet-buttons-clipped.md). Width is already
+						 * handled by the slot's flex:1.
+						 */}
 					<CustomButton
 						size="thin"
-						flex
 						title={confirmLabel}
 						backgroundColor={confirmBackground}
 						disabled={!canConfirm}
