@@ -21,15 +21,27 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { bytesToHex } from '@noble/curves/utils.js';
 
 // ---------------------------------------------------------------------------
 // Mutable module-level slots (prefixed `mock` so jest.mock factories may
 // reference them per the jest babel transform's hoist-safe naming rule).
 // ---------------------------------------------------------------------------
+function makeShare(type: string) {
+  const priv = secp256k1.utils.randomSecretKey();
+  const invitePrivate = bytesToHex(priv);
+  return {
+    invitePrivate,
+    text: JSON.stringify({ invitePrivate, inviteKey: bytesToHex(secp256k1.getPublicKey(priv)), expiration: 'x', type, name: 'Invitee' }),
+  };
+}
+const mockResolveInviteSlotCid = jest.fn(async (_key: string, _type: string): Promise<string | undefined> => 'slot-cid-1');
+
 const mockGoBack = jest.fn();
 const mockSetOptions = jest.fn();
 
-let mockRouteParams: { mode: 'send' | 'accept'; invitationId?: string } = { mode: 'send' };
+let mockRouteParams: { mode: 'send' | 'accept'; initialShare?: string } = { mode: 'send' };
 
 // Signer echoes nothing meaningful — INV-02 only asserts on the CALL, not the
 // signature bytes (that binding is covered engine-side).
@@ -64,8 +76,9 @@ const mockNetworksEngine = {
 // getEngine<T>(name) — dispatch by engine name. 'network' backs the header
 // load effect (best-effort; failures there must not block onSend).
 const mockRespondToInvite = jest.fn(async () => {});
-const mockGetAuthorityInvite = jest.fn(async () => undefined);
+const mockGetAuthorityInvite = jest.fn(async (_cid: string): Promise<any> => undefined);
 const mockInvitationEngine = {
+  resolveInviteSlotCid: mockResolveInviteSlotCid,
   respondToInvite: mockRespondToInvite,
   getAuthorityInvite: mockGetAuthorityInvite,
 };
@@ -196,58 +209,87 @@ describe('AuthorityInvitationScreen — INV-02 (send mode real invitePrivate sha
   });
 });
 
-describe('AuthorityInvitationScreen — INV-04/05 (accept mode success-gated navigation)', () => {
+describe('AuthorityInvitationScreen - accept mode resolves the slot from the paste', () => {
+  const SLOT = 'slot-cid-1';
+  let share!: { invitePrivate: string; text: string };
   beforeEach(() => {
-    mockRouteParams = { mode: 'accept', invitationId: 'invite-1' };
+    share = makeShare('au');
+    mockRouteParams = { mode: 'accept', initialShare: share.text };
+    mockResolveInviteSlotCid.mockResolvedValue(SLOT);
+    mockGetAuthorityInvite.mockResolvedValue({ invite: { name: 'Invitee' } });
   });
 
-  it('onAccept navigates back on a successful respondToInvite', async () => {
+  it('resolves by (InviteKey, au), loads the invite from the resolved Cid, and accept signs with it', async () => {
     const tr = await render();
-
+    expect(mockResolveInviteSlotCid).toHaveBeenCalledWith(expect.any(String), 'au');
+    expect(mockGetAuthorityInvite).toHaveBeenCalledWith(SLOT);
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
       await Promise.resolve();
     });
-
-    expect(mockRespondToInvite).toHaveBeenCalledWith('invite-1', true, undefined);
+    expect(mockRespondToInvite).toHaveBeenCalledWith(SLOT, true, share.invitePrivate);
     expect(mockGoBack).toHaveBeenCalledTimes(1);
   });
 
-  it('onAccept does NOT navigate back and sets errorMessage when respondToInvite throws', async () => {
-    mockRespondToInvite.mockRejectedValueOnce(new Error('accept rejected by server'));
+  it('decline signs with the resolved Cid and navigates back', async () => {
     const tr = await render();
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'reject').props.onPress();
+      await Promise.resolve();
+    });
+    expect(mockRespondToInvite).toHaveBeenCalledWith(SLOT, false, share.invitePrivate);
+    expect(mockGoBack).toHaveBeenCalledTimes(1);
+  });
 
+  it('a respondToInvite failure maps to invitationAcceptFailed, shows no engine text, does not navigate', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(new Error('InvitationEngine.respondToInvite: InviteSlot not found for Cid: x'));
+    const tr = await render();
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
       await Promise.resolve();
     });
-
+    const rendered = JSON.stringify(tr.toJSON());
     expect(mockGoBack).not.toHaveBeenCalled();
-    expect(JSON.stringify(tr.toJSON())).toContain('accept rejected by server');
+    expect(rendered).toContain('invitationAcceptFailed');
+    expect(rendered).not.toContain('InvitationEngine');
+    expect(rendered).not.toContain('Cid');
   });
 
-  it('onDecline navigates back on a successful respondToInvite', async () => {
+  it('not-found renders invitationAcceptNotFound and never navigates', async () => {
+    mockResolveInviteSlotCid.mockResolvedValue(undefined);
     const tr = await render();
-
     await renderer.act(async () => {
-      await buttonByTitle(tr, 'reject').props.onPress();
+      await buttonByTitle(tr, 'accept').props.onPress();
       await Promise.resolve();
     });
-
-    expect(mockRespondToInvite).toHaveBeenCalledWith('invite-1', false, undefined);
-    expect(mockGoBack).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptNotFound');
+    expect(mockRespondToInvite).not.toHaveBeenCalled();
+    expect(mockGoBack).not.toHaveBeenCalled();
   });
 
-  it('onDecline does NOT navigate back and sets errorMessage when respondToInvite throws', async () => {
-    mockRespondToInvite.mockRejectedValueOnce(new Error('decline rejected by server'));
+  it('a share of another type renders invitationAcceptWrongType and never signs', async () => {
+    mockRouteParams = { mode: 'accept', initialShare: makeShare('k').text };
     const tr = await render();
-
     await renderer.act(async () => {
-      await buttonByTitle(tr, 'reject').props.onPress();
+      await buttonByTitle(tr, 'accept').props.onPress();
       await Promise.resolve();
     });
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptWrongType');
+    expect(mockRespondToInvite).not.toHaveBeenCalled();
+  });
 
-    expect(mockGoBack).not.toHaveBeenCalled();
-    expect(JSON.stringify(tr.toJSON())).toContain('decline rejected by server');
+  it('with no paste, accept and reject are disabled and the paste hint shows', async () => {
+    mockRouteParams = { mode: 'accept' };
+    const tr = await render();
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(true);
+    expect(buttonByTitle(tr, 'reject').props.disabled).toBe(true);
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).toContain('invitationAcceptPasteHint');
+    expect(rendered).not.toContain('"loading"');
+  });
+
+  it('uses the shared paste placeholder, not hardcoded English', async () => {
+    const tr = await render();
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptPastePlaceholder');
   });
 });
