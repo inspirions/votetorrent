@@ -252,6 +252,7 @@ describe('createStrandDbFactory — P2P-03 / D-14 / D-07', () => {
       Id: 'networkhash123',
       MemberPrivateKey: null,
       Type: 'o',
+      FounderOwnerKey: null,
     });
     // The factory strips the `declare schema main { ... } apply schema main;` wrapper
     // so cadre-core (which re-wraps under `declare schema App { ... }`) does not nest
