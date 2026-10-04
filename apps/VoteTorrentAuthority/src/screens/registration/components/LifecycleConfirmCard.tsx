@@ -257,15 +257,17 @@ export function LifecycleConfirmCard({
 			<View style={localStyles.buttonRow}>
 				<View testID={`${testIDPrefix}-dismiss`} style={localStyles.buttonSlot}>
 					{/*
-						 * No `flex` prop: CustomButton's `flex` style (flex:1 + alignSelf:stretch)
-						 * assumes a ROW parent. In this column-direction slot it zeroes the
-						 * vertical flex-basis and the button collapsed to its 12dp padding
-						 * (32px on Pixel_8, UAT 62 test 13; Yoga model in
-						 * .planning/debug/reject-sheet-buttons-clipped.md). Width is already
-						 * handled by the slot's flex:1.
+						 * Geometry: each slot is a ROW (see buttonSlot) so CustomButton's `flex`
+						 * (flex:1 + alignSelf:stretch, built for a row parent) stretches the button to
+						 * the row height instead of collapsing. In the earlier column-slot form it
+						 * zeroed the vertical flex-basis: 32px on Pixel_8 (UAT 62 test 13). Dropping
+						 * `flex` alone (62-52 first attempt) left a one-line thin button at its natural
+						 * 36dp (95px measured on device) beside a 2-line neighbour: below the 44dp floor
+						 * and uneven. The geometry gate is scripts/assert-card-button-geometry.mjs.
 						 */}
 					<CustomButton
 						size="thin"
+						flex
 						title={dismissLabel}
 						backgroundColor={dismissBackground}
 						disabled={submitState !== "idle"}
@@ -274,15 +276,17 @@ export function LifecycleConfirmCard({
 				</View>
 				<View testID={`${testIDPrefix}-confirm`} style={localStyles.buttonSlot}>
 					{/*
-						 * No `flex` prop: CustomButton's `flex` style (flex:1 + alignSelf:stretch)
-						 * assumes a ROW parent. In this column-direction slot it zeroes the
-						 * vertical flex-basis and the button collapsed to its 12dp padding
-						 * (32px on Pixel_8, UAT 62 test 13; Yoga model in
-						 * .planning/debug/reject-sheet-buttons-clipped.md). Width is already
-						 * handled by the slot's flex:1.
+						 * Geometry: each slot is a ROW (see buttonSlot) so CustomButton's `flex`
+						 * (flex:1 + alignSelf:stretch, built for a row parent) stretches the button to
+						 * the row height instead of collapsing. In the earlier column-slot form it
+						 * zeroed the vertical flex-basis: 32px on Pixel_8 (UAT 62 test 13). Dropping
+						 * `flex` alone (62-52 first attempt) left a one-line thin button at its natural
+						 * 36dp (95px measured on device) beside a 2-line neighbour: below the 44dp floor
+						 * and uneven. The geometry gate is scripts/assert-card-button-geometry.mjs.
 						 */}
 					<CustomButton
 						size="thin"
+						flex
 						title={confirmLabel}
 						backgroundColor={confirmBackground}
 						disabled={!canConfirm}
@@ -316,6 +320,9 @@ const localStyles = StyleSheet.create({
 	// instead of clipping. `minWidth: 0` is already RN's flex default; it
 	// is declared explicitly as the intent marker this rule pins.
 	buttonSlot: {
+		// Row direction on purpose: CustomButton's `flex` assumes a row parent (see the note at
+		// each button). The slot still splits the row 50/50 via flex:1 + minWidth:0.
+		flexDirection: "row",
 		flex: 1,
 		minWidth: 0,
 	},
