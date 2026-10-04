@@ -2260,11 +2260,18 @@ declare schema main
 			)
 		),
 		constraint DecidedAtValid check (isISODatetime(new.DecidedAt) and like('%Z', new.DecidedAt)),
-		-- V-4 now covers decision rows (62-46): a decision Cursor is exactly 16 ASCII digits within
-		-- 0000000000000001..9007199254740991. This closes the cursor-collation wedge (CR-01), where
-		-- officer-written non-digit or non-BMP cursors could make the allocator walk throw. Rows written
-		-- before this check stay stored (NoUpdate/NoDelete, D-07) and the engine allocator and readers
-		-- still tolerate them. The bounded-step rule stays engine-side.
+		-- V-4 on decision rows (62-46): this CHECK refuses any Cursor that is not exactly 16 ASCII digits
+		-- within 0000000000000001..9007199254740991. It is defence in depth for locally inserted rows only:
+		-- it is immediate and runs when a row is inserted through this peer's own Quereus (local inserts).
+		-- Re-validation of rows that arrive by replication is NOT ESTABLISHED (62-48: no
+		-- createQuereusValidator registration found in @serfab/cadre-core, and unvalidatablePendPolicy
+		-- defaults to 'accept'), so rows from older builds, raw clients or replication, and rows written
+		-- before this CHECK (kept forever by NoUpdate/NoDelete, D-07), can still be non-conforming.
+		-- The control for the cursor-collation wedge (CR-01) is the engine: insertWithCursorRetry's
+		-- code-point progress guard (compareStagingCursorText) and rowCount/64 + 2 page bound, plus the
+		-- readers that drop non-conforming rows (readConformingRows, readDecisionRows), in
+		-- p2p-staging-seam.ts (62-44). That engine tolerance must not be removed on the strength of this CHECK.
+		-- The bounded-step rule stays engine-side.
 		constraint CursorWellFormed check (
 			length(new.Cursor) = 16
 			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
@@ -2558,11 +2565,18 @@ declare schema main
 			)
 		),
 		constraint DecidedAtValid check (isISODatetime(new.DecidedAt) and like('%Z', new.DecidedAt)),
-		-- V-4 now covers decision rows (62-46): a decision Cursor is exactly 16 ASCII digits within
-		-- 0000000000000001..9007199254740991. This closes the cursor-collation wedge (CR-01), where
-		-- officer-written non-digit or non-BMP cursors could make the allocator walk throw. Rows written
-		-- before this check stay stored (NoUpdate/NoDelete, D-07) and the engine allocator and readers
-		-- still tolerate them. The bounded-step rule stays engine-side.
+		-- V-4 on decision rows (62-46): this CHECK refuses any Cursor that is not exactly 16 ASCII digits
+		-- within 0000000000000001..9007199254740991. It is defence in depth for locally inserted rows only:
+		-- it is immediate and runs when a row is inserted through this peer's own Quereus (local inserts).
+		-- Re-validation of rows that arrive by replication is NOT ESTABLISHED (62-48: no
+		-- createQuereusValidator registration found in @serfab/cadre-core, and unvalidatablePendPolicy
+		-- defaults to 'accept'), so rows from older builds, raw clients or replication, and rows written
+		-- before this CHECK (kept forever by NoUpdate/NoDelete, D-07), can still be non-conforming.
+		-- The control for the cursor-collation wedge (CR-01) is the engine: insertWithCursorRetry's
+		-- code-point progress guard (compareStagingCursorText) and rowCount/64 + 2 page bound, plus the
+		-- readers that drop non-conforming rows (readConformingRows, readDecisionRows), in
+		-- p2p-staging-seam.ts (62-44). That engine tolerance must not be removed on the strength of this CHECK.
+		-- The bounded-step rule stays engine-side.
 		constraint CursorWellFormed check (
 			length(new.Cursor) = 16
 			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
