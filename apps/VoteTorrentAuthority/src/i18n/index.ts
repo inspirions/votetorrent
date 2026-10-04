@@ -73,6 +73,12 @@ const resources = {
 			newAuthority: 'New Authority',
 			invitationName: 'Invitation Name',
 			invitationKey: 'Invitation Key',
+			invitationAcceptPasteHint: 'Paste the invitation text you received.',
+			invitationAcceptPastePlaceholder: 'Paste the invitation here',
+			invitationAcceptMalformed: "This doesn't look like a complete invitation. Copy it again and paste all of it.",
+			invitationAcceptWrongType: 'This invitation is for a different role. Open it from Accept an Invitation in Settings.',
+			invitationAcceptNotFound: "This invitation hasn't reached this device yet, or it is no longer valid.",
+			invitationAcceptFailed: 'Could not respond to the invitation. Try again.',
 			soleInitialAdministratorNote:
 				'Please create a user on this network. Your user will be the sole initial administrator.',
 			userIsSoleAdministratorNote:
@@ -1126,6 +1132,12 @@ const resources = {
 			newAuthority: 'Nueva Autoridad',
 			invitationName: 'Nombre de Invitación',
 			invitationKey: 'Clave de Invitación',
+			invitationAcceptPasteHint: 'Pega el texto de la invitación que recibiste.',
+			invitationAcceptPastePlaceholder: 'Pega la invitación aquí',
+			invitationAcceptMalformed: 'Esto no parece una invitación completa. Cópiala de nuevo y pégala entera.',
+			invitationAcceptWrongType: 'Esta invitación es para otra función. Ábrela desde Aceptar una Invitación en Ajustes.',
+			invitationAcceptNotFound: 'Esta invitación aún no ha llegado a este dispositivo o ya no es válida.',
+			invitationAcceptFailed: 'No se pudo responder a la invitación. Inténtalo de nuevo.',
 			soleInitialAdministratorNote:
 				'Cree un usuario en esta red. Su usuario será el único administrador inicial.',
 			userIsSoleAdministratorNote:

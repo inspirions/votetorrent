@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useState } from "react";
+import React, { useLayoutEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
@@ -25,13 +25,14 @@ import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { resolveKeyholderKeyVault } from "../../engines/keyholder-vault";
 import { acceptKeyholderInvitation } from "./keyholder-accept";
+import { inviteShareErrorKey, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 type KeyholderInvitationParams = {
 	mode: "send" | "accept";
-	invitationId?: string;
+	initialShare?: string;
 	electionEngine?: IElectionEngine;
 	keyholder?: InviteStatus<SentKeyholderInvite>;
 };
@@ -40,7 +41,7 @@ export function KeyholderInvitationScreen() {
 	const { t } = useTranslation();
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-	const { mode, invitationId, electionEngine, keyholder } = useRoute().params as KeyholderInvitationParams;
+	const { mode, initialShare, electionEngine, keyholder } = useRoute().params as KeyholderInvitationParams;
 	const { getEngine } = useApp();
 
 	// Send-mode form state
@@ -52,32 +53,15 @@ export function KeyholderInvitationScreen() {
 	const [isAccepting, setIsAccepting] = useState(false);
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
-	// Accept-mode paste field (D-06)
-	const [pastedInvite, setPastedInvite] = useState<string>("");
-
-	// Accept-mode fetched invite
-	const [invite, setInvite] = useState<InviteStatus<SentKeyholderInvite> | undefined>(undefined);
+	// Accept-mode paste field (D-06); seeded by an entry route that already holds the share.
+	const [pastedInvite, setPastedInvite] = useState<string>(initialShare ?? "");
+	const parsed = useMemo(() => parseInviteShare(pastedInvite), [pastedInvite]);
 
 	useLayoutEffect(() => {
 		navigation.setOptions({
 			title: mode === "send" ? t("sendInvitation") : t("invitation"),
 		});
 	}, [navigation, t, mode]);
-
-	useEffect(() => {
-		async function loadInvite() {
-			if (mode !== "accept" || !invitationId) return;
-			try {
-				const engine = await getEngine<IInvitationEngine>("invitations");
-				const status = await engine.getKeyholderInvite(invitationId);
-				setInvite(status);
-			} catch (error) {
-				console.warn("Error loading keyholder invite:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
-			}
-		}
-		loadInvite();
-	}, [mode, invitationId, getEngine]);
 
 	// INV-03: real keyholder invite send via un-gated inviteKeyholder (21-05)
 	const onSend = async () => {
@@ -157,59 +141,48 @@ export function KeyholderInvitationScreen() {
 		}
 	};
 
-	// D-06/D-21/D-26: accept — invitee pastes the share text; the screen reconstructs the
-	// ephemeral invitePrivate, then acceptKeyholderInvitation provisions a FRESH keyholder
-	// identity (D-21) and passes its signed binding (D-26) to respondToInvite in one call. The
-	// officer's device key is never used for a keyholder accept.
+	// Map a failed accept/decline to user copy. Never render engine text or any Cid.
+	const mapAcceptError = (error: unknown): string => {
+		const shareKey = inviteShareErrorKey(error);
+		if (shareKey) return t(shareKey);
+		const code = (error as { code?: unknown } | undefined)?.code;
+		if (code === "auth-denied") return t("deviceSigningErrorGeneric");
+		return t("invitationAcceptFailed");
+	};
+
+	// D-06/D-21/D-26: accept - the invitee pastes the share text; acceptKeyholderInvitation resolves
+	// the slot from the share alone (before any prompt), provisions a FRESH keyholder identity (D-21)
+	// and passes its signed binding (D-26) to respondToInvite in one call. The officer's device key is
+	// never used for a keyholder accept.
 	const onAccept = async () => {
 		if (isAccepting) return;
+		setErrorMessage("");
 		setIsAccepting(true);
 		try {
 			const engine = await getEngine<IInvitationEngine>("invitations");
-			let invitePrivate: string | undefined;
-			if (pastedInvite.trim()) {
-				try {
-					const parsed = JSON.parse(pastedInvite.trim());
-					invitePrivate = parsed.invitePrivate as string | undefined;
-				} catch {
-					invitePrivate = pastedInvite.trim();
-				}
-			}
-			await acceptKeyholderInvitation({ invitationEngine: engine, vault: resolveKeyholderKeyVault() }, invitationId ?? "", invitePrivate);
-			// GAP-2: navigate ONLY on success — the InviteResult is now written.
+			await acceptKeyholderInvitation({ invitationEngine: engine, vault: resolveKeyholderKeyVault() }, pastedInvite);
+			// GAP-2: navigate ONLY on success - the InviteResult is now written.
 			navigation.goBack();
 		} catch (error) {
-			console.warn("Error responding to invite:", error);
-			const code = (error as { code?: unknown } | undefined)?.code;
-			if (code === "auth-denied") {
-				setErrorMessage(t("deviceSigningErrorGeneric"));
-			} else {
-				setErrorMessage(error instanceof Error ? error.message : String(error));
-			}
+			console.warn("Error responding to invite:", error instanceof Error ? error.name : "unknown");
+			setErrorMessage(mapAcceptError(error));
 		} finally {
 			setIsAccepting(false);
 		}
 	};
 
 	const onDecline = async () => {
+		setErrorMessage("");
 		try {
 			const engine = await getEngine<IInvitationEngine>("invitations");
-			let invitePrivate: string | undefined;
-			if (pastedInvite.trim()) {
-				try {
-					const parsed = JSON.parse(pastedInvite.trim());
-					invitePrivate = parsed.invitePrivate as string | undefined;
-				} catch {
-					invitePrivate = pastedInvite.trim();
-				}
-			}
+			const { slotCid, invitePrivate } = await resolveInviteFromShare(engine, pastedInvite, "k");
 			// T-21-11-03: decline calls the SAME signed respondToInvite path (D-09).
-			await engine.respondToInvite(invitationId ?? "", false, invitePrivate);
-			// GAP-2: navigate ONLY on success — the InviteResult is now written.
+			await engine.respondToInvite(slotCid, false, invitePrivate);
+			// GAP-2: navigate ONLY on success - the InviteResult is now written.
 			navigation.goBack();
 		} catch (error) {
-			console.warn("Error responding to invite:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			console.warn("Error responding to invite:", error instanceof Error ? error.name : "unknown");
+			setErrorMessage(mapAcceptError(error));
 		}
 	};
 
@@ -265,7 +238,6 @@ export function KeyholderInvitationScreen() {
 	}
 
 	// Accept mode
-	const seedInvite = invite?.invite;
 	return (
 		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container}>
@@ -273,13 +245,13 @@ export function KeyholderInvitationScreen() {
 					<ThemedText type="title" style={styles.sectionTitle}>
 						{t("keyholderInvitation")}
 					</ThemedText>
-					{seedInvite ? (
+					{parsed?.name ? (
 						<View style={styles.detailRow}>
 							<ThemedText type="defaultSemiBold">{t("name")}: </ThemedText>
-							<ThemedText>{seedInvite.name}</ThemedText>
+							<ThemedText testID="keyholder-invitation-name">{parsed.name}</ThemedText>
 						</View>
 					) : (
-						<ThemedText>{t("loading")}</ThemedText>
+						<ThemedText>{t("invitationAcceptPasteHint")}</ThemedText>
 					)}
 
 					{/* D-06: paste field for the share text the sender copied */}
@@ -290,7 +262,7 @@ export function KeyholderInvitationScreen() {
 						title={t("invitationKey")}
 						value={pastedInvite}
 						onChangeText={setPastedInvite}
-						placeholder="Paste the invite text from the sender"
+						placeholder={t("invitationAcceptPastePlaceholder")}
 					/>
 				</View>
 			</ScrollView>
@@ -301,7 +273,7 @@ export function KeyholderInvitationScreen() {
 				onReject={onDecline}
 				acceptLabel={t("accept")}
 				rejectLabel={t("decline")}
-				disabled={isAccepting}
+				disabled={isAccepting || !parsed}
 			/>
 		</KeyboardAvoidingScreen>
 	);
