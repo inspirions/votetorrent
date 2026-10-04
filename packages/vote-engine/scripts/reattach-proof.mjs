@@ -12,7 +12,8 @@
 //
 // Two real modes, driven by run-reattach-proof.sh:
 //   node reattach-proof.mjs --seed <dbPath> --schema <file> [--negative-control]
-//   node reattach-proof.mjs --reopen <dbPath> [--negative-control]
+//   node reattach-proof.mjs --reopen <dbPath> [--expected-counts <file>] [--baseline-schema <file>]
+//                           [--seed-manifest <file>] [--negative-control]
 //
 // --seed applies the schema read from <file> (a `schema-sql.ts`-shaped module
 // exporting `VOTETORRENT_SCHEMA_SQL`) to a FRESH on-disk store at <dbPath>,
@@ -312,7 +313,7 @@ const baselineSchemaFile = flagValue('--baseline-schema')
 
 if (!seedPath && !reopenPath) {
 	console.error('usage: node reattach-proof.mjs --seed <dbPath> --schema <file> [--negative-control]')
-	console.error('       node reattach-proof.mjs --reopen <dbPath> [--negative-control]')
+	console.error('       node reattach-proof.mjs --reopen <dbPath> [--expected-counts <file>] [--baseline-schema <file>] [--seed-manifest <file>] [--negative-control]')
 	process.exit(2)
 }
 
@@ -469,19 +470,43 @@ async function runSeed (dbPath) {
 		)
 	}
 
-	// 4. 62-46 (D-22, CR-01, D-07): when the BASELINE declares the decision tables, seed one
-	//    officer-signed row in each at a cursor that is legal under the baseline's length-only
-	//    CursorWidth (16 UTF-16 units: 14 zeros + one astral code point) but violates the new
-	//    CursorWellFormed. This makes the gate exercise the real drift trap: amending a CHECK on a
-	//    live table that already holds rows violating the new CHECK. Signed over the same Digest
-	//    arguments the transports use, by the founding officer (who holds vrg).
-	const hasDecisionTables = /\ttable RegistrationDecision \(/.test(oldSchemaSql) && /\ttable AssociationDecision \(/.test(oldSchemaSql)
-	const legacyDecisionCursors = {}
-	if (hasDecisionTables) {
+	// 4. 62-46 / 62-49 (D-22, CR-01, D-07): the decision-row SHAPE is chosen from the BASELINE's own
+	//    decision-table CHECK text, never assumed:
+	//      absent                - the baseline declares neither decision table: nothing is seeded.
+	//      legacy-non-conforming - both tables declare only the length-only CursorWidth check: seed
+	//                              one astral-cursor row each (16 UTF-16 units: 14 zeros + one astral
+	//                              code point), legal there but violating the current
+	//                              CursorWellFormed. This exercises the real drift trap (amending a
+	//                              CHECK on a live table already holding violating rows).
+	//      conforming            - both tables already declare CursorWellFormed: that baseline cannot
+	//                              hold a non-conforming row, so seed 16-digit rows. The drift-trap leg
+	//                              is therefore only exercised against a pre-0655ea77 baseline such
+	//                              as 1c7e3593.
+	//    Signed over the same Digest arguments the transports use, by the founding officer (who
+	//    holds vrg). The seeded cursors are printed so --reopen compares against what was SEEDED.
+	const decisionCheckKind = (table) => {
+		const m = oldSchemaSql.match(new RegExp('\\ttable ' + table + ' \\([\\s\\S]*?\\n\\t\\)'))
+		if (!m) return 'none'
+		const lines = m[0].split('\n').filter((l) => !/^\s*--/.test(l))
+		const wellFormed = lines.some((l) => l.includes('constraint CursorWellFormed check'))
+		const width = lines.some((l) => l.includes('constraint CursorWidth check (length(new.Cursor) = 16)'))
+		if (wellFormed) return 'cursor-well-formed'
+		if (width) return 'cursor-width'
+		return 'unknown'
+	}
+	const regKind = decisionCheckKind('RegistrationDecision')
+	const assocKind = decisionCheckKind('AssociationDecision')
+	let decisionShape
+	if (regKind === 'none' && assocKind === 'none') decisionShape = 'absent'
+	else if (regKind === 'cursor-width' && assocKind === 'cursor-width') decisionShape = 'legacy-non-conforming'
+	else if (regKind === 'cursor-well-formed' && assocKind === 'cursor-well-formed') decisionShape = 'conforming'
+	else throw new Error(`runSeed: unsupported decision-table baseline (RegistrationDecision=${regKind}, AssociationDecision=${assocKind})`)
+	const seededDecisionCursors = {}
+	if (decisionShape !== 'absent') {
 		const decidedAt = toIsoZDatetime(Date.now())
 		const strandId = 'reattach-proof-strand'
-		const regCursor = '00000000000000' + String.fromCodePoint(0x1F600)
-		const assocCursor = '00000000000000' + String.fromCodePoint(0x1F601)
+		const regCursor = decisionShape === 'legacy-non-conforming' ? '00000000000000' + String.fromCodePoint(0x1F600) : '0000000000000001'
+		const assocCursor = decisionShape === 'legacy-non-conforming' ? '00000000000000' + String.fromCodePoint(0x1F601) : '0000000000000002'
 		const regRequestId = 'reattach-proof-legacy-reg'
 		const regDigest = (await ctx.db.prepare("select Digest('RegistrationDecision', :strandId, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt) as d")
 			.get({ strandId, requestId: regRequestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt }))?.d
@@ -502,13 +527,13 @@ async function runSeed (dbPath) {
 			 values (:strandId, :cursor, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt, :deciderKey, :deciderSignature)`,
 			{ strandId, cursor: assocCursor, requestId: assocRequestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt, deciderKey: assocSig.signerKey, deciderSignature: assocSig.signature, now: nowCanonicalDatetime() }
 		)
-		legacyDecisionCursors.RegistrationDecision = regCursor
-		legacyDecisionCursors.AssociationDecision = assocCursor
+		seededDecisionCursors.RegistrationDecision = regCursor
+		seededDecisionCursors.AssociationDecision = assocCursor
 	}
 
 	const counts = {}
 	const countedTables = ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']
-	if (hasDecisionTables) countedTables.push('RegistrationDecision', 'AssociationDecision')
+	if (decisionShape !== 'absent') countedTables.push('RegistrationDecision', 'AssociationDecision')
 	for (const table of countedTables) {
 		const row = await ctx.db.prepare(`select count(*) as n from ${table}`).get()
 		counts[table] = Number(row?.n ?? 0)
@@ -518,8 +543,8 @@ async function runSeed (dbPath) {
 	console.log(JSON.stringify({
 		mode: 'seed', negativeControl: false, dbPath,
 		challengeShape: legacyChallenge ? 'legacy-7-arg' : 'current-6-arg',
-		decisionShape: hasDecisionTables ? 'legacy-non-conforming' : 'absent',
-		legacyDecisionCursors,
+		decisionShape,
+		seededDecisionCursors,
 		counts,
 	}, null, 2))
 }
@@ -626,21 +651,61 @@ async function runReopen (dbPath) {
 		}
 	}
 
-	// 62-46 (D-07): the legacy non-conforming decision cursors seeded under the baseline must read
-	// back byte-identical after re-attach under CursorWellFormed. Only asserted when the seed
-	// counted the decision tables.
-	assertions.legacyDecisionCursorsIntact = true
-	const observedCursors = {}
-	if (expectedCounts && 'RegistrationDecision' in expectedCounts && 'AssociationDecision' in expectedCounts) {
-		const want = {
-			RegistrationDecision: '00000000000000' + String.fromCodePoint(0x1F600),
-			AssociationDecision: '00000000000000' + String.fromCodePoint(0x1F601),
+	// 62-49 (D-22, CR-01, WR-01): the decision leg compares the observed cursors to the SEEDED
+	// cursors recorded in the seed manifest, never to hardcoded literals. null means "not
+	// exercised"; only an explicit false fails the verdict, and an unusable manifest fails closed.
+	assertions.decisionCursorsIntact = null
+	assertions.legacyDecisionCursorsIntact = null
+	let manifestConsistent = true
+	let decisionLeg = null
+	let decisionLegProblem = null
+	let manifest = null
+	const manifestPath = flagValue('--seed-manifest')
+	if (manifestPath && existsSync(manifestPath)) {
+		manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+	}
+	const decisionTables = ['RegistrationDecision', 'AssociationDecision']
+	const countsHaveDecision = decisionTables.map((t) => !!expectedCounts && t in expectedCounts)
+	const shape = manifest?.decisionShape ?? null
+	const seededCursors = manifest?.seededDecisionCursors ?? {}
+	if (!manifest) {
+		if (countsHaveDecision.some(Boolean)) {
+			manifestConsistent = false
+			decisionLegProblem = 'expected counts include the decision tables but no --seed-manifest was given'
 		}
-		for (const table of Object.keys(want)) {
+	} else if (!['absent', 'legacy-non-conforming', 'conforming'].includes(shape)) {
+		manifestConsistent = false
+		decisionLegProblem = `unrecognized decisionShape in the seed manifest: ${String(shape)}`
+	} else if (shape === 'absent' && countsHaveDecision.some(Boolean)) {
+		manifestConsistent = false
+		decisionLegProblem = 'manifest says decisionShape=absent but expected counts include a decision table'
+	} else if (shape !== 'absent' && !countsHaveDecision.every(Boolean)) {
+		manifestConsistent = false
+		decisionLegProblem = `manifest says decisionShape=${shape} but expected counts lack a decision table`
+	} else if (shape !== 'absent' && !decisionTables.every((t) => typeof seededCursors[t] === 'string' && seededCursors[t].length > 0)) {
+		manifestConsistent = false
+		decisionLegProblem = 'manifest is missing a seeded cursor for a decision table'
+	}
+	const observedCursors = {}
+	if (manifestConsistent && shape === 'absent') {
+		decisionLeg = 'skipped-absent'
+	} else if (manifestConsistent && manifest) {
+		let intact = true
+		for (const table of decisionTables) {
 			const rows = []
 			for await (const r of db.eval(`select Cursor from ${table}`)) rows.push(r)
 			observedCursors[table] = rows.map((r) => r.Cursor)
-			if (rows.length !== 1 || rows[0].Cursor !== want[table]) assertions.legacyDecisionCursorsIntact = false
+			if (rows.length !== 1 || rows[0].Cursor !== seededCursors[table]) intact = false
+		}
+		const allConforming = decisionTables.every((t) => /^[0-9]{16}$/.test(seededCursors[t]))
+		const noneConforming = decisionTables.every((t) => !/^[0-9]{16}$/.test(seededCursors[t]))
+		if (shape === 'legacy-non-conforming') {
+			assertions.decisionCursorsIntact = intact
+			assertions.legacyDecisionCursorsIntact = intact && noneConforming
+			decisionLeg = 'legacy-checked'
+		} else {
+			assertions.decisionCursorsIntact = intact && allConforming
+			decisionLeg = 'conforming-checked'
 		}
 	}
 
@@ -686,7 +751,8 @@ async function runReopen (dbPath) {
 	await db.close()
 
 	const verdict = (
-		assertions.noThrow && assertions.noAlterColumn && assertions.rowsReadable && assertions.legacyDecisionCursorsIntact && expirationGone
+		assertions.noThrow && assertions.noAlterColumn && assertions.rowsReadable && expirationGone
+		&& manifestConsistent && assertions.decisionCursorsIntact !== false && assertions.legacyDecisionCursorsIntact !== false
 		&& (baselineSchemaFile ? newTablesQueryable === true : true)
 	) ? 'PASS' : 'FAIL'
 
@@ -697,6 +763,9 @@ async function runReopen (dbPath) {
 		assertions: { ...assertions, expirationColumnGone: expirationGone },
 		counts,
 		observedDecisionCursors: observedCursors,
+		decisionLeg,
+		seededDecisionShape: shape,
+		decisionLegProblem,
 		expectedCounts: expectedCounts ?? null,
 		attestationChallengeColumns: columnNames,
 		newTables,
