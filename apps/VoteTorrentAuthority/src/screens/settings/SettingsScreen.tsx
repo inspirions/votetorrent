@@ -341,6 +341,19 @@ export default function SettingsScreen() {
 					/>
 				</View>
 
+				{/* Accept an Invitation: the production entry into every invitation accept flow.
+				    Deliberately NO scope gate: an invitee holds no scopes yet, by definition, the
+				    same reasoning as the provisioning rows above. Accepting still needs the
+				    sender's one-time key from the pasted share and a device-key act. */}
+				<View testID="settings-accept-invitation-entry">
+					<InfoCard
+						title={t("invitationAcceptTitle")}
+						titleType="defaultSemiBold"
+						icon="chevron-right"
+						onPress={() => navigation.navigate("AcceptInvitation")}
+					/>
+				</View>
+
 				{/* 50-07 (D-09) — the dashboard bearer sign-in code producer entry,
 				    placed adjacent to the two device-level provisioning rows above for
 				    the same reason: it exports only data the officer's own device

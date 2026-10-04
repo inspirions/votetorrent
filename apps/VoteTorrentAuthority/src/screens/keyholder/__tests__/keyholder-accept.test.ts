@@ -180,7 +180,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		expect(await listKeyholderIdentities(storage)).toHaveLength(1);
 	});
 
-	it('A6: the engine receives exactly (invitationId, true, invitePrivate, undefined, userId, provisioning), and release() has run by the time the promise settles', async () => {
+	it('A6: the engine receives exactly (slotCid, true, invitePrivate, undefined, userId, provisioning), and release() has run by the time the promise settles', async () => {
 		const seeded = await seedElection();
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Hank');
 		const { vault, storage } = makeVaultHarness();

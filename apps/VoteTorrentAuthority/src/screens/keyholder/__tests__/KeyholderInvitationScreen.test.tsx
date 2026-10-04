@@ -53,7 +53,7 @@ jest.mock('../keyholder-accept', () => ({
 
 const mockRespondToInvite = jest.fn(
   async (
-    _invitationId: string,
+    _slotCid: string,
     _accept: boolean,
     _invitePrivate?: string,
     _digest?: string,

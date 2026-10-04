@@ -13,6 +13,7 @@ interface FullButtonProps {
 	forceDarkText?: boolean;
 	size?: "tall" | "thin";
 	flex?: boolean;
+	testID?: string;
 	onPress: () => void;
 }
 
@@ -25,6 +26,7 @@ export function CustomButton({
 	forceDarkText,
 	size = "tall",
 	flex = false,
+	testID,
 	onPress,
 }: FullButtonProps) {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -45,6 +47,7 @@ export function CustomButton({
 			]}
 			onPress={onPress}
 			disabled={disabled}
+			testID={testID}
 			// Explicit label: otherwise Android concatenates the icon glyph's empty text
 			// with the title and screen readers announce ", TITLE".
 			accessibilityRole="button"
