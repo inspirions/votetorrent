@@ -16,7 +16,7 @@ type ContinuityNamespace = Record<string, string>;
 const enContinuity = resources.en.continuity as unknown as ContinuityNamespace;
 const esContinuity = resources.es.continuity as unknown as ContinuityNamespace;
 
-// The 31 catalog keys from 62-10-PLAN.md's copy_catalog (code.* 7, newDevice.* 19,
+// The 32 catalog keys from 62-10-PLAN.md's copy_catalog (code.* 7, plus code.checking from 62-51, newDevice.* 19,
 // deviceRetired.* 2, restart.* 3), in catalog order. This namespace is new and fully owned by this
 // plan, so the key set is checked EXACTLY (not presence-only like timeline-copy-hygiene.test.ts).
 const REQUIRED_CONTINUITY_KEYS = [
@@ -27,6 +27,7 @@ const REQUIRED_CONTINUITY_KEYS = [
 	'code.showAgainLink',
 	'code.unavailable',
 	'code.notAvailableOnDevice',
+	'code.checking',
 	'newDevice.screenTitle',
 	'newDevice.codeFieldLabel',
 	'newDevice.codeFieldPlaceholder',
@@ -61,11 +62,11 @@ const PHASE_OR_DECISION_ID_PATTERN = /phase\s*\d+|D-\d{2}/i;
 const QR_SCAN_PATTERN = /\bQR\b|camera|c[aá]mara|\bscan|escane/i;
 
 describe('continuity i18n copy hygiene (62-10)', () => {
-	test('the namespace exists with exactly the 31 required keys, in both locales', () => {
+	test('the namespace exists with exactly the 32 required keys, in both locales', () => {
 		expect(new Set(Object.keys(enContinuity))).toEqual(new Set(REQUIRED_CONTINUITY_KEYS));
-		expect(Object.keys(enContinuity)).toHaveLength(31);
+		expect(Object.keys(enContinuity)).toHaveLength(32);
 		expect(new Set(Object.keys(esContinuity))).toEqual(new Set(REQUIRED_CONTINUITY_KEYS));
-		expect(Object.keys(esContinuity)).toHaveLength(31);
+		expect(Object.keys(esContinuity)).toHaveLength(32);
 	});
 
 	test.each(REQUIRED_CONTINUITY_KEYS)('en.continuity[%s] is a non-empty, non-whitespace string', key => {
