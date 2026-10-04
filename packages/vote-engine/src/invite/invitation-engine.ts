@@ -12,6 +12,7 @@ import type {
   SentAuthorityInvite,
   SentKeyholderInvite,
   KeyholderAcceptProvisioning,
+  InviteType,
 } from '@votetorrent/vote-core'
 
 /**
@@ -30,6 +31,25 @@ import type {
  */
 export class InvitationEngine implements IInvitationEngine {
   constructor (private readonly ctx: EngineContext) {}
+
+  /**
+   * Resolve the InviteSlot Cid for an invitee's share by (InviteKey, Type). Returns the Cid only
+   * when exactly one row matches (fail closed).
+   */
+  async resolveInviteSlotCid (inviteKey: string, type: InviteType): Promise<string | undefined> {
+    try {
+      const cids: string[] = []
+      for await (const row of this.ctx.db.eval(
+        'SELECT Cid FROM InviteSlot WHERE InviteKey = :inviteKey AND Type = :slotType',
+        { inviteKey, slotType: type }
+      )) {
+        cids.push(row.Cid as string)
+      }
+      return cids.length === 1 ? cids[0] : undefined
+    } catch (err) {
+      this.rethrow(err, 'resolveInviteSlotCid')
+    }
+  }
 
   /**
    * Return all pending officer InviteSlot rows (Type = 'of') that have no

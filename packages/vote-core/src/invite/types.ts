@@ -1,4 +1,4 @@
-import type { InviteStatus, KeyholderAcceptProvisioning } from './models.js';
+import type { InviteStatus, InviteType, KeyholderAcceptProvisioning } from './models.js';
 import type { SentOfficerInvite, SentAuthorityInvite } from '../authority/models.js';
 import type { SentKeyholderInvite } from '../election/models.js';
 
@@ -13,9 +13,17 @@ export interface IInvitationEngine {
 	getAuthorityInvite(id: string): Promise<InviteStatus<SentAuthorityInvite> | undefined>;
 	getKeyholderInvite(id: string): Promise<InviteStatus<SentKeyholderInvite> | undefined>;
 	/**
+	 * Resolve the InviteSlot an invitee holds the share for, by the share's public key and type
+	 * (D-05 pattern, as NetworkEngine.respondToInvite). Returns undefined when no row, or more than
+	 * one row, matches (fail closed). This is the ONLY way an invitee obtains a Cid, because the Cid
+	 * digests fields (ElectionId, InviteSignature, SigningNonce) the share does not carry.
+	 */
+	resolveInviteSlotCid(inviteKey: string, type: InviteType): Promise<string | undefined>;
+	/**
 	 * Respond to an invitation (accept or decline).
 	 *
-	 * @param invitationId  - The InviteSlot CID being responded to.
+	 * @param invitationId  - The InviteSlot CID being responded to. Callers obtain it from
+	 *                        `resolveInviteSlotCid`.
 	 * @param accept        - true = accept, false = decline (signed authenticated "no", INV-05 / D-09).
 	 * @param invitePrivate - Optional: hex-encoded ephemeral secp256k1 private key from the pasted
 	 *                        invite share (D-06). When provided, the InviteSignature is produced under

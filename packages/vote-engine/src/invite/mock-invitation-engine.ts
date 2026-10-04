@@ -3,7 +3,8 @@ import type {
   InviteStatus,
   SentOfficerInvite,
   SentAuthorityInvite,
-  SentKeyholderInvite
+  SentKeyholderInvite,
+  InviteType
 } from '@votetorrent/vote-core'
 
 /**
@@ -42,6 +43,11 @@ const MOCK_PENDING_AUTHORITY_INVITES: Array<InviteStatus<SentAuthorityInvite>> =
 ]
 
 export class MockInvitationEngine implements IInvitationEngine {
+  // The mock seeds no slots, so every share is honestly not-found.
+  async resolveInviteSlotCid (_inviteKey: string, _type: InviteType): Promise<string | undefined> {
+    return undefined
+  }
+
   async getPendingOfficerInvites (): Promise<Array<InviteStatus<SentOfficerInvite>>> {
     return MOCK_PENDING_OFFICER_INVITES
   }
