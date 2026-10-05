@@ -409,6 +409,20 @@ async function computeRosterDigest (
 }
 
 /**
+ * 62-65: the founder's `User.Name` is the ENTERED admin name (`officerInit.name`), not
+ * `auth.user.name` — and `resolveAdminRoster` resolves an `.existing` entry's
+ * `proposedName` from that DB row. Any hand-built roster for the founder must use this
+ * value, exactly as the engine does, or the pre-signed digest will not match.
+ */
+async function founderDisplayName (auth: TestAuthorityContext): Promise<string> {
+  const row = await auth.ctx.db
+    .prepare('select Name from User where Id = :id')
+    .get({ id: auth.user.id })
+  if (!row) throw new Error('founderDisplayName: founder User row missing')
+  return row.Name as string
+}
+
+/**
  * 57-14 (CR-01, promote-side closure): seed a THIRD, fully-independent User
  * row beyond `createPromotionFixture()`'s founder + `secondUser` — the
  * hijack case needs an attacker identity distinct from both. Mirrors
@@ -507,7 +521,7 @@ async function primeUserForRename (auth: TestAuthorityContext, user: User, effec
   const rosterDigest = await computeRosterDigest(
     auth,
     [
-      { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+      { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
       { proposedName: user.name, userId: user.id, title: 'Priming Officer', scopes: ['vrg'] }
     ],
     effectiveAt,
@@ -1589,7 +1603,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -1637,7 +1651,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -1681,7 +1695,7 @@ describe('AuthorityEngine', () => {
       // 57-08 (Trigger A): bare Signature, not the callback — see C1's comment.
       const rosterDigest = await computeRosterDigest(
         auth,
-        [{ proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
+        [{ proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
         effectiveAt,
         proposal.proposed.thresholdPolicies
       )
@@ -1729,7 +1743,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -1752,7 +1766,7 @@ describe('AuthorityEngine', () => {
       const recomputed = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -1806,7 +1820,7 @@ describe('AuthorityEngine', () => {
       // "zero writes" assertion for a reason unrelated to what N1 tests.
       const rosterDigest = await computeRosterDigest(
         auth,
-        [{ proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
+        [{ proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
         effectiveAt,
         proposal.proposed.thresholdPolicies
       )
@@ -1886,7 +1900,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -2026,7 +2040,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -2113,7 +2127,7 @@ describe('AuthorityEngine', () => {
       // the SAME userIds the real proposeAdmin call above resolved, or this
       // regression guard's recomputed digest will not match.
       const rebuiltRoster = sortRosterEntriesExported([
-        { proposedName: 'Test User', userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+        { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
         { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
       ])
       const officersJson = JSON.stringify(rebuiltRoster)
@@ -2176,7 +2190,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['rad', 'vrg'] }
         ],
         effectiveAt,
@@ -2296,7 +2310,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -2616,6 +2630,47 @@ describe('AuthorityEngine', () => {
         'admin.admin.effectiveAt must correspond to the PROPOSED effective date, not the founding one'
       ).to.equal(fromCanonicalDatetime(toCanonicalDatetime(proposedEffectiveAtMs)))
       expect(after.admin.effectiveAt).to.not.equal(before.admin.effectiveAt)
+    })
+
+    // 62-65 regression guard: the founder's display name (User.Name = the entered
+    // officerInit.name) deliberately differs from the provisioned device user's name.
+    // Identity is the userId + registered key, never the name — so the production shape
+    // (proposeAdmin with a device-signer callback, Trigger A promotion) must still work,
+    // and the persisted roster must carry the ENTERED name bound to the founder's userId.
+    it('62-65: a founder whose display name differs from the device user name can still propose and promote', async () => {
+      const foundingEffectiveAtMs = Date.now() - FOUNDING_PAST_MS
+      const { auth, secondUser } = await createPromotionFixture({ foundingEffectiveAt: foundingEffectiveAtMs })
+      const displayName = await founderDisplayName(auth)
+      expect(displayName, 'fixture precondition: founded with the entered admin name').to.equal('Admin A')
+      expect(displayName, 'fixture precondition: display name differs from the device user name').to.not.equal(auth.user.name)
+
+      const proposedEffectiveAtMs = Date.now() - PROMOTION_PAST_MS
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { existing: { userId: secondUser.id, authorityId: auth.authority.id, title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt: proposedEffectiveAtMs,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, makeTestSignCallback(auth.user))
+
+      const outcome = (auth.authorityEngine as unknown as { lastPromotionOutcome?: { status?: string, reason?: string } }).lastPromotionOutcome
+      expect(outcome?.status, `promotion must apply (reason=${outcome?.reason})`).to.equal('promoted')
+
+      const proposedFounder = await auth.ctx.db
+        .prepare('select ProposedName from ProposedOfficer where AuthorityId = :a and AdminEffectiveAt = :e and UserId = :u')
+        .get({ a: auth.authority.id, e: toCanonicalDatetime(proposedEffectiveAtMs), u: auth.user.id })
+      expect(proposedFounder?.ProposedName, 'the signed roster carries the entered display name').to.equal(displayName)
+
+      const after = await auth.authorityEngine.getAdminDetails()
+      expect(after.admin.effectiveAt).to.equal(fromCanonicalDatetime(toCanonicalDatetime(proposedEffectiveAtMs)))
+      const founderOfficer = after.admin.officers.find((o) => o.userId === auth.user.id)
+      expect(founderOfficer?.title, 'the founder is promoted by userId despite the name difference').to.equal('Chair')
+      expect(after.admin.officers.find((o) => o.userId === secondUser.id)?.scopes).to.deep.equal(['vrg'])
     })
 
     // D-03's cost made visible instead of silent (inherited finding 4): an `.init` officer

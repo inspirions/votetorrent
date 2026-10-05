@@ -215,7 +215,11 @@ describe('UserEngine', () => {
       const { engine, user } = await createUserEngineForExistingNetwork()
       const summary = await engine.getSummary()
       expect(summary?.id).to.equal(user.id)
-      expect(summary?.name).to.equal(user.name)
+      // 62-65: the founder's DB User.Name is the entered admin name, not the in-memory
+      // device user's name — proving the value is read from the DB row.
+      const enteredAdminName = makeNetworkInit().admin.officers[0]!.init!.name
+      expect(enteredAdminName).to.not.equal(user.name)
+      expect(summary?.name).to.equal(enteredAdminName)
     })
 
     // Needs a populated DB to assert the undefined branch is reachable via

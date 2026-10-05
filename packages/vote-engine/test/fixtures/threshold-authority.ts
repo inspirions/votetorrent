@@ -43,7 +43,7 @@ export interface ThresholdAuthorityOptions {
 }
 
 export interface ThresholdAuthorityFixture {
-  /** Founder context; ctx.user is holders[0].user. */
+  /** Founder context; ctx.user has holders[0].user's id (holders[0].user.name is the DB User.Name). */
   elec: TestElectionContext
   authorityId: string
   adminEffectiveAt: string | number
@@ -155,7 +155,16 @@ export async function createThresholdAuthority (opts?: ThresholdAuthorityOptions
   const elec = await addTestElection(auth)
   const authorityId = elec.authority.id
 
-  const founder: ThresholdOfficer = { user: elec.user, scopes: holderScopes, sign: makeTestSignCallback(elec.user) }
+  // 62-65: the founder's `User.Name` is the ENTERED admin name ('Admin A' above), not the
+  // device user's name — and `.existing` roster entries resolve ProposedName from that DB
+  // row. Carry the DB name on `founder.user` so `holders[i].user.name` is each officer's
+  // `User.Name` for every holder, founder included (identity stays `elec.user.id`).
+  const founderRow = await elec.ctx.db
+    .prepare('select Name from User where Id = :id')
+    .get({ id: elec.user.id })
+  if (!founderRow) throw new Error('createThresholdAuthority: founder User row missing')
+  const founderUser: User = { ...elec.user, name: founderRow.Name as string }
+  const founder: ThresholdOfficer = { user: founderUser, scopes: holderScopes, sign: makeTestSignCallback(elec.user) }
   const holders: ThresholdOfficer[] = [founder]
 
   // 62-03: `makeDistinctTestUser()` gives every call the SAME literal `name` ('Distinct
