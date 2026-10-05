@@ -13,6 +13,11 @@ function ballot (id: string): Ballot {
   return { id, electionId: 'e1', authorityId: 'a1', description: 'd', districts: [], questions: [] }
 }
 
+// The mock's ballot list is private; specs read it to prove a refusal wrote nothing.
+function ballotsOf (engine: MockElectionEngine): Ballot[] {
+  return (engine as unknown as { ballots: Ballot[] }).ballots
+}
+
 describe('MockElectionEngine submit parity (62-55)', () => {
   it('rejects a never-proposed id with the real engine message', async () => {
     const engine = new MockElectionEngine(new MockBallotConfirmationState())
@@ -56,5 +61,45 @@ describe('MockElectionEngine submit parity (62-55)', () => {
       msg = (e as Error).message
     }
     expect(msg).to.match(/already confirmed/)
+  })
+
+  it('refuses to re-propose a submitted ballot, leaving the entry unchanged', async () => {
+    const engine = new MockElectionEngine(new MockBallotConfirmationState())
+    await engine.proposeBallot(ballot('b3'))
+    await engine.submitBallotForConfirmation('b3')
+    const before = JSON.stringify(ballotsOf(engine))
+    let msg = ''
+    try {
+      await engine.proposeBallot({ ...ballot('b3'), description: 'changed' })
+    } catch (e) {
+      msg = (e as Error).message
+    }
+    expect(msg).to.match(/out for confirmation/)
+    expect(JSON.stringify(ballotsOf(engine))).to.equal(before)
+  })
+
+  it('refuses to re-propose a confirmed ballot', async () => {
+    const engine = new MockElectionEngine(new MockBallotConfirmationState())
+    await engine.proposeBallot(ballot('b4'))
+    await engine.submitBallotForConfirmation('b4')
+    engine.markBallotConfirmed('b4')
+    const before = JSON.stringify(ballotsOf(engine))
+    let msg = ''
+    try {
+      await engine.proposeBallot({ ...ballot('b4'), description: 'changed' })
+    } catch (e) {
+      msg = (e as Error).message
+    }
+    expect(msg).to.match(/already confirmed/)
+    expect(JSON.stringify(ballotsOf(engine))).to.equal(before)
+  })
+
+  it('accepts a re-proposal after withdraw', async () => {
+    const engine = new MockElectionEngine(new MockBallotConfirmationState())
+    await engine.proposeBallot(ballot('b5'))
+    await engine.submitBallotForConfirmation('b5')
+    await engine.withdrawBallotConfirmation('b5')
+    await engine.proposeBallot({ ...ballot('b5'), description: 'after withdraw' })
+    expect(ballotsOf(engine).find((b) => b.id === 'b5')?.description).to.equal('after withdraw')
   })
 })

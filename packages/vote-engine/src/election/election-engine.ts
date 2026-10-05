@@ -489,13 +489,34 @@ export class ElectionEngine implements IElectionEngine {
    * `verifyUserKeyMembership` — not a signature verification. The Ballot
    * insert itself (via AdminSignature pipeline) lives downstream once the
    * proposal is accepted.
+   *
+   * The engine, not only the UI, enforces the edit lock (CR-03, 62-REVIEW.md): a
+   * ballot with an open signature session, or a finalized Ballot row, is refused
+   * before any write. `insert or replace` remains the upsert for an unlocked ballot.
    */
   async proposeBallot (ballot: Ballot): Promise<void> {
-    const tid = await allocateTid(this.ctx.db, 'election')
-    const userId = this.ctx.user?.id ?? null
-    const signerKey = this.ctx.user?.activeKeys?.[0]?.key ?? null
-    const membership = await verifyUserKeyMembership(this.ctx, userId, signerKey)
     try {
+      // Deliberately WITHOUT getBallotConfirmationState's AdminSignature clause: an open
+      // sibling of a reached-but-not-yet-finalized session must also block an overwrite.
+      const open = await this.ctx.db
+        .prepare(
+          `select 1 as x from Task T join BallotSignatureTaskExtension B on B.TaskId = T.Id
+           where B.BallotId = :ballotId and T.Type = 'signature' and T.SignatureType = 'ballot' and T.IsCompleted = 0`
+        )
+        .get({ ballotId: ballot.id })
+      if (open) {
+        throw new Error('This ballot is out for confirmation and cannot be edited. Withdraw it first.')
+      }
+      const confirmed = await this.ctx.db
+        .prepare('select 1 as x from Ballot where Id = :ballotId')
+        .get({ ballotId: ballot.id })
+      if (confirmed) {
+        throw new Error('This ballot is already confirmed and can no longer be edited.')
+      }
+      const tid = await allocateTid(this.ctx.db, 'election')
+      const userId = this.ctx.user?.id ?? null
+      const signerKey = this.ctx.user?.activeKeys?.[0]?.key ?? null
+      const membership = await verifyUserKeyMembership(this.ctx, userId, signerKey)
       await this.ctx.db.exec(
 				`insert or replace into ProposedBallot (
 					Id,

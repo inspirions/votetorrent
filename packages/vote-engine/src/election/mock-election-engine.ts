@@ -174,6 +174,15 @@ export class MockElectionEngine implements IElectionEngine {
 	}
 
 	async proposeBallot(ballot: Ballot): Promise<void> {
+		// Real-engine parity (CR-03): a ballot out for confirmation or confirmed cannot be
+		// overwritten. Same text as ElectionEngine.proposeBallot.
+		const lockState = this.confirmationState.get(ballot.id);
+		if (lockState === 'submitted') {
+			throw new Error('This ballot is out for confirmation and cannot be edited. Withdraw it first.');
+		}
+		if (lockState === 'confirmed') {
+			throw new Error('This ballot is already confirmed and can no longer be edited.');
+		}
 		const idx = this.ballots.findIndex((b) => b.id === ballot.id);
 		if (idx >= 0) {
 			this.ballots[idx] = ballot;
