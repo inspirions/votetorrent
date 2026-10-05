@@ -321,7 +321,7 @@ describe('NetworksEngine', () => {
     const userRow = await ctxAfterOpen!.db
       .prepare(`select Name from User where Id = :userId`)
       .get({ userId: user.id })
-    expect(userRow?.['Name'], 'User.Name should round-trip from create()').to.equal(user.name)
+    expect(userRow?.['Name'], 'User.Name should round-trip from create()').to.equal('Admin A') // the entered admin name (makeNetworkInit), not user.name
   })
 
   it('NET-03: open() throws when called with an unknown ref hash', async () => {
