@@ -94,3 +94,24 @@ export class RegistrationContentAccessError extends Error {
     this.requestId = requestId
   }
 }
+
+/**
+ * Thrown by the decision paths (reject / approve of a RegistrationRequest, challenge and terminal
+ * transitions of an AssociationRequest) when the requester's signature does not verify against ANY
+ * raw ISO-Z spelling of the stored SubmittedAt, so the row could never be written by a decision.
+ * Raised BEFORE any officer signature is requested or spent (UAT 62 gap 2). The message carries
+ * the table and request id only.
+ */
+export class RequesterSignatureUnverifiableError extends Error {
+  readonly code: 'requester-signature-unverifiable'
+  readonly table: 'RegistrationRequest' | 'AssociationRequest'
+  readonly requestId: string
+
+  constructor (table: 'RegistrationRequest' | 'AssociationRequest', requestId: string) {
+    super(`${table} ${requestId}: the requester's signature does not verify against any form of its stored SubmittedAt, so it cannot be decided`)
+    this.name = 'RequesterSignatureUnverifiableError'
+    this.code = 'requester-signature-unverifiable'
+    this.table = table
+    this.requestId = requestId
+  }
+}

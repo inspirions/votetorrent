@@ -3,6 +3,7 @@ import { digestToBytes, nowCanonicalDatetime, parseJsonOr, asText, asNumberOr, S
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { readAuthorityThreshold } from '../signing/threshold.js'
 import { allocateTid } from '../database/tid-allocator.js'
+import { resolveSignedSubmittedAt } from '../signing/signed-submitted-at.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, restoreCanonicalDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { RegistrationRegisterBuilder } from './builders/registration-register-builder.js'
 import { validateFieldPolicy } from './field-policy.js'
@@ -38,7 +39,8 @@ import {
   VERIFICATION_CHECKLIST_ITEM_ORDER,
   verificationCid as computeVerificationCidFor,
   RegistrantAlreadyExistsError,
-  RegistrationDuplicateError
+  RegistrationDuplicateError,
+  RequesterSignatureUnverifiableError
 } from '@votetorrent/vote-core'
 import type { SqlValue } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
@@ -3087,7 +3089,8 @@ export class RegistrationEngine implements IRegistrationEngine {
         )
       }
 
-      const submittedAt = restoreCanonicalDatetime(asText(row.SubmittedAt, 'RegistrationRequest.SubmittedAt'))
+      // The exact spelling the requester signed (resolveSignedSubmittedAt), resolved BEFORE any officer signature.
+      const submittedAt = await resolveSignedSubmittedAt(ctx.db, 'RegistrationRequest', requestId, asText(row.SubmittedAt, 'RegistrationRequest.SubmittedAt'))
       const receivedAt = restoreCanonicalDatetime(asText(row.ReceivedAt, 'RegistrationRequest.ReceivedAt'))
 
       // rejectionReason is optional on the TYPE (meaningless on the accept
@@ -3220,7 +3223,7 @@ export class RegistrationEngine implements IRegistrationEngine {
         }
       )
     } catch (err) {
-      if (err instanceof RegistrationDuplicateError) throw err
+      if (err instanceof RegistrationDuplicateError || err instanceof RequesterSignatureUnverifiableError) throw err
       this.rethrow(err, 'rejectRegistrationRequest')
     }
   }
