@@ -105,7 +105,7 @@ jest.mock("../../../providers/AppProvider", () => ({
 	useApp: () => ({ getEngine: mockGetEngine }),
 }));
 
-const mockPersistProvisionedDeviceUser = jest.fn(async (_displayName: string, publicKeyCompressedHex: string) => ({
+const mockPersistProvisionedDeviceUser = jest.fn(async (_displayName: string, publicKeyCompressedHex: string, _options?: { userId?: string }) => ({
 	id: "user-1",
 	name: "Officer One",
 	activeKeys: [{ key: publicKeyCompressedHex, type: "P", expiration: Date.now() }],
@@ -121,8 +121,11 @@ const mockMarkRecoveryInProgress = jest.fn(async () => {});
 const mockClearRecoveryInProgress = jest.fn(async () => {});
 
 jest.mock("../../../engines/device-user", () => ({
-	persistProvisionedDeviceUser: (displayName: string, publicKeyCompressedHex: string) =>
-		mockPersistProvisionedDeviceUser(displayName, publicKeyCompressedHex),
+	persistProvisionedDeviceUser: (displayName: string, publicKeyCompressedHex: string, options?: { userId?: string }) =>
+		// Forward only the arguments actually passed, so first-run assertions stay two-argument.
+		options === undefined
+			? mockPersistProvisionedDeviceUser(displayName, publicKeyCompressedHex)
+			: mockPersistProvisionedDeviceUser(displayName, publicKeyCompressedHex, options),
 	persistDeviceProvisioningRecord: (record: unknown) => mockPersistDeviceProvisioningRecord(record),
 	getDeviceUser: () => mockGetDeviceUser(),
 	getDeviceProvisioningRecord: () => mockGetDeviceProvisioningRecord(),
@@ -625,10 +628,35 @@ describe("ProvisionSigningKeyScreen — 49-10 recovery variant (D-16) and D-18 t
 		expect(addedKey.key).toBe(NEW_SIGNING_KEY_HEX);
 		expect(typeof mockAddKey.mock.calls[0]![1]).toBe("function");
 
-		expect(mockPersistProvisionedDeviceUser).toHaveBeenCalledWith("Officer One", NEW_SIGNING_KEY_HEX);
+		expect(mockPersistProvisionedDeviceUser).toHaveBeenCalledWith("Officer One", NEW_SIGNING_KEY_HEX, { userId: "user-1" });
 
 		const json = JSON.stringify(tr.toJSON());
 		expect(json).toContain("signingKeyProvisioningSuccessHeading");
+	});
+
+	it("(f) R1/R2: recovery keeps the network user's id and name end to end (one identity)", async () => {
+		mockGetSummary.mockResolvedValue({
+			id: "net-user-1",
+			name: "Una Tester",
+			activeKeys: [
+				{ key: OLD_SIGNING_KEY_HEX, type: "P", expiration: Date.now() + 1000 },
+				{ key: RECOVERY_KEY_HEX, type: "P", expiration: Date.now() + 1000 },
+			],
+		});
+		nativeFake.provisionDeviceKey.mockResolvedValue({
+			publicKeyBase64: "NEW-SIGNING-SPKI-DER-BASE64",
+			publicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+		});
+		nativeFake.signWithRecoveryKey.mockResolvedValue({ signatureHex: "cafebabe" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(mockPersistProvisionedDeviceUser).toHaveBeenCalledWith("Una Tester", NEW_SIGNING_KEY_HEX, {
+			userId: "net-user-1",
+		});
+		const revokeSignature = mockRevokeKey.mock.calls[0]![1] as { signerUserId: string };
+		expect(revokeSignature.signerUserId).toBe("net-user-1");
 	});
 
 	it("(c) refreshes the provisioning record with the new attested key and an EMPTY certificateChainBase64 — no produceAttestation on this path", async () => {

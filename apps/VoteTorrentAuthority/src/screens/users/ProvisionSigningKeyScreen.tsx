@@ -564,8 +564,14 @@ export default function ProvisionSigningKeyScreen() {
 			);
 
 			// Update the persisted local device identity so activeKeys[0] is the replacement key.
-			const displayName = beforeSummary?.name ?? "Device User";
-			await persistProvisionedDeviceUser(displayName, deviceKey.publicKeyCompressedHex);
+			// Keep the NETWORK user's id and name: re-minting an id forks the device from its
+			// network User (loses officer standing, fails AdminSigning.UserIdValid).
+			if (!beforeSummary) {
+				throw new Error("ProvisionSigningKeyScreen.handleRecovery: network user summary unavailable; refusing to mint a new identity.");
+			}
+			await persistProvisionedDeviceUser(beforeSummary.name, deviceKey.publicKeyCompressedHex, {
+				userId: beforeSummary.id,
+			});
 
 			// Refresh the 49-16 provisioning record so it never keeps pointing at the previous
 			// (now-invalidated) attested key. `certificateChainBase64` is set to an empty array —

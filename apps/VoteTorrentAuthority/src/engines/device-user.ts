@@ -74,9 +74,8 @@ export const DEVICE_PROVISIONING_KEY = 'deviceSigningProvisioning'
  *
  * **What this does NOT cover:** a device whose desync predates this marker's existence (the
  * interruption happened before this code shipped) — no marker was ever written for it. That
- * device's rescue path is the SEPARATE, message-based `isSignatureDesyncError` classification in
- * `deviceSigningError.ts`, which recognizes the resulting `SignatureValid` CHECK failure itself
- * and routes the officer back into `handleRecovery` regardless of marker state — `handleRecovery`
+ * device's rescue path is `device-signer.ts`'s per-signature self-verify, which detects the
+ * Keystore/recorded-key mismatch itself and routes the officer back into `handleRecovery` regardless of marker state — `handleRecovery`
  * re-running is self-healing either way, since it always re-derives the currently-registered
  * network key from a fresh `getSummary()` read (never from local storage) and unconditionally
  * overwrites local storage at the end.
@@ -159,11 +158,16 @@ export async function getDeviceUser(): Promise<User | undefined> {
 export async function persistProvisionedDeviceUser(
 	displayName: string,
 	publicKeyCompressedHex: string,
+	options?: { userId?: string },
 ): Promise<User> {
+	// Recovery MUST pass the existing network user id: a minted id forks the device from its
+	// network User, losing officer standing (`o.userId === deviceUser.id`) and failing
+	// `AdminSigning.UserIdValid`. Only first-run provisioning mints a fresh id.
 	// Hermes (RN 0.78+) exposes crypto.randomUUID() at runtime; cast to satisfy the app's TS
 	// config, which omits the dom lib declarations.
+	const keptId = typeof options?.userId === 'string' && options.userId.length > 0 ? options.userId : undefined
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	const userId: string = (globalThis as any).crypto.randomUUID()
+	const userId: string = keptId ?? (globalThis as any).crypto.randomUUID()
 	const user: User = {
 		id: userId,
 		name: displayName,
