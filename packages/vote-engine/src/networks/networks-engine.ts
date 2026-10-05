@@ -122,6 +122,9 @@ export class NetworksEngine implements INetworksEngine {
 			throw new Error('Failed to create network: Officer init is required');
 		}
 		const officerInit = firstOfficer.init;
+		// The entered admin name is the founder's network display name (UAT 62 gap 4 item 5);
+		// the provisioned device user's name is only a fallback.
+		const founderName = officerInit.name?.trim() || user.name;
 		const officerScopesJson = JSON.stringify(officerInit.scopes);
 
 		const firstKey = user.activeKeys?.[0];
@@ -152,7 +155,7 @@ export class NetworksEngine implements INetworksEngine {
 			userId: user.id,
 			title: officerInit.title,
 			scopes: officerScopesJson,
-			userName: user.name,
+			userName: founderName,
 			userImageRef: userImageRefJson,
 			// 49-02 bugfix: this was hardcoded to the literal string 'user' — a value
 			// that is not any valid UserKeyType code ('M'/'Y'/'P') — so the founding

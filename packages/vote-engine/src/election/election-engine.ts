@@ -239,19 +239,20 @@ export class ElectionEngine implements IElectionEngine {
     try {
       // Seed with finalized Ballot rows.
       for await (const row of this.ctx.db.eval(
-				`select Id, ElectionId, AuthorityId from Ballot where ElectionId = :electionId`,
+				`select Id, ElectionId, AuthorityId, Description from Ballot where ElectionId = :electionId`,
         { electionId: this.election.id }
       )) {
         const id = row.Id as string
         byId.set(id, {
           id,
           electionId: row.ElectionId as string,
-          authorityId: row.AuthorityId as string
+          authorityId: row.AuthorityId as string,
+          description: (row.Description as string) ?? ''
         })
       }
       // Add ProposedBallot rows only if Id is not already present (finalized preferred).
       for await (const row of this.ctx.db.eval(
-				`select Id, ElectionId, AuthorityId from ProposedBallot where ElectionId = :electionId`,
+				`select Id, ElectionId, AuthorityId, Description from ProposedBallot where ElectionId = :electionId`,
         { electionId: this.election.id }
       )) {
         const id = row.Id as string
@@ -259,7 +260,8 @@ export class ElectionEngine implements IElectionEngine {
           byId.set(id, {
             id,
             electionId: row.ElectionId as string,
-            authorityId: row.AuthorityId as string
+            authorityId: row.AuthorityId as string,
+            description: (row.Description as string) ?? ''
           })
         }
       }

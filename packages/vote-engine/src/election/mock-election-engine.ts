@@ -90,10 +90,11 @@ export class MockElectionEngine implements IElectionEngine {
 	}
 
 	async getBallots(): Promise<BallotSummary[]> {
-		return this.ballots.map(({ id, electionId, authorityId }) => ({
+		return this.ballots.map(({ id, electionId, authorityId, description }) => ({
 			id,
 			electionId,
 			authorityId,
+			description,
 		}));
 	}
 
