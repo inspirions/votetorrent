@@ -1,13 +1,17 @@
 /**
- * BallotConfirmation.test.tsx — RTL coverage for D-03/D-05/D-09 (31-05).
+ * BallotConfirmation.test.tsx — RTL coverage for D-03/D-05/D-09 (31-05), rewritten by
+ * 62-55 (UAT 62 test 13).
  *
- * Covers:
- *   (a) submit → locked: electionEngine.getBallotConfirmationState returns locked after submit,
- *       and CreateBallotScreen UI shows the Withdraw button (i18n key: withdrawConfirmation)
- *   (b) withdraw → unlocked: state reverts, Submit button re-appears
- *   (c) confirmed badge path — reach confirmed=true by an explicit named path:
- *       - directly via electionEngine.markBallotConfirmed (hook)
- *       - via MockSignatureTasksEngine.completeSignature (paired engines over shared confirmState)
+ * The earlier suite mocked BallotDraftProvider with a pre-seeded id, rendered only
+ * CreateBallotScreen, and used a mock engine that never checked the ProposedBallot row,
+ * so it passed a Submit button that failed on device. This suite instead:
+ *   - uses the REAL BallotDraftProvider and a REAL MockElectionEngine (rebuilt dist),
+ *   - proposes the ballot through the engine first, then renders EditBallotScreen,
+ *   - asserts CreateBallotScreen offers Propose only.
+ *
+ * Covers: submit/withdraw/confirmed/readOnly footer states on EditBallotScreen, the lazy
+ * device-signer wiring (never invoked at threshold 1), mapped error copy (never engine
+ * text), and the engine-contract confirm path.
  *
  * Mock wiring follows 31-04 contract exactly:
  *   new MockBallotConfirmationState() → new MockElectionEngine(confirmState)
@@ -26,6 +30,9 @@ import renderer from 'react-test-renderer';
 // reference it — the jest babel transform allows `mock*` variable access).
 // ---------------------------------------------------------------------------
 let mockCurrentElectionEngine: unknown = null;
+let mockReadOnly = false;
+const mockBallotId = 'mock-ballot-id';
+const BALLOT_ID = mockBallotId;
 
 // ---------------------------------------------------------------------------
 // Module mocks (all heavy native deps)
@@ -50,23 +57,6 @@ jest.mock('@votetorrent/vote-engine/rn', () => ({}), { virtual: true });
 // SettingsProvider
 jest.mock('../../../providers/SettingsProvider', () => ({
   useSettings: () => ({ showHelpIcons: false }),
-}));
-
-// BallotDraftProvider — seed ballot id so the screen has a stable ballot to submit.
-jest.mock('../providers/BallotDraftProvider', () => ({
-  useBallotDraft: () => ({
-    ballotDraft: {
-      id: 'mock-ballot-id',
-      electionId: 'test-election',
-      description: '',
-      districts: [],
-      questions: [],
-    },
-    setBallotDraft: jest.fn(),
-    addQuestion: jest.fn(),
-    updateQuestion: jest.fn(),
-    removeQuestion: jest.fn(),
-  }),
 }));
 
 // AppProvider — no network engine needed for these ballot-screen tests.
@@ -125,6 +115,8 @@ jest.mock('@react-navigation/native', () => ({
       electionTitle: 'Test Election',
       electionDate: '2026-12-01',
       electionEngine: mockCurrentElectionEngine,
+      ballotId: mockBallotId,
+      readOnly: mockReadOnly,
     },
   }),
   useNavigation: () => ({
@@ -133,8 +125,13 @@ jest.mock('@react-navigation/native', () => ({
     setOptions: jest.fn(),
     setParams: mockSetParams,
   }),
-  // useFocusEffect: call the callback immediately (synchronous focus in tests).
-  useFocusEffect: (cb: () => void | (() => void)) => { cb(); },
+  // useFocusEffect: effect-based, mirroring the real hook.
+  useFocusEffect: (cb: () => void | (() => void)) => {
+    // Run on focus (mount / callback change) via an effect, like the real hook. A bare
+    // synchronous call on every render loops forever now that the focus read sets an object.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('react').useEffect(() => cb(), [cb]);
+  },
 }));
 
 // ---------------------------------------------------------------------------
@@ -153,245 +150,187 @@ const { MockBallotConfirmationState, MockElectionEngine } = require(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Serialize the rendered tree to JSON and search for a text string.
- * CustomButton renders its title via .toUpperCase() — so we search
- * case-insensitively to match both the i18n key and its uppercased form.
- */
 function treeContainsText(tr: renderer.ReactTestRenderer, text: string): boolean {
   const json = JSON.stringify(tr.toJSON()).toLowerCase();
   return json.includes(text.toLowerCase());
 }
 
-async function renderCreateBallotScreen(): Promise<renderer.ReactTestRenderer> {
+function newEngine() {
+  const confirmState = new MockBallotConfirmationState();
+  const engine = new MockElectionEngine(confirmState);
+  return { confirmState, engine };
+}
+
+async function propose(engine: any, id = BALLOT_ID) {
+  await engine.proposeBallot({
+    id,
+    electionId: 'test-election',
+    authorityId: 'auth-1',
+    description: 'Test ballot',
+    districts: [],
+    questions: [],
+  });
+}
+
+async function renderScreen(screen: 'Edit' | 'Create'): Promise<renderer.ReactTestRenderer> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const CreateBallotModule = require('../CreateBallotScreen');
-  const CreateBallotScreen =
-    CreateBallotModule.default ?? CreateBallotModule.CreateBallotScreen;
+  const { BallotDraftProvider } = require('../providers/BallotDraftProvider');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = screen === 'Edit' ? require('../EditBallotScreen') : require('../CreateBallotScreen');
+  const Screen = mod.default;
 
   let tr!: renderer.ReactTestRenderer;
   await renderer.act(async () => {
-    tr = renderer.create(<CreateBallotScreen />);
+    tr = renderer.create(
+      <BallotDraftProvider>
+        <Screen />
+      </BallotDraftProvider>
+    );
   });
-  // Flush async effects (useFocusEffect + useEffect promise resolution).
   await renderer.act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
   });
   return tr;
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+async function press(tr: renderer.ReactTestRenderer, testID: string) {
+  const node = tr.root.findAllByProps({ testID })[0];
+  await renderer.act(async () => {
+    node.props.onPress();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  });
+}
+
+const hasTestID = (tr: renderer.ReactTestRenderer, testID: string) =>
+  tr.root.findAllByProps({ testID }).length > 0;
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockCurrentElectionEngine = null;
+  mockReadOnly = false;
   mockCreateDeviceSigner.mockReset();
   mockHandleDeviceSigningError = jest.fn(() => ({ handled: false }));
-  // Do NOT reset modules — the top-level require for MockElectionEngine/MockSignatureTasksEngine
-  // must remain cached across tests; resetModules would break mock factory closures.
+  jest.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
-describe('BallotConfirmation — D-03/D-05/D-09 RTL coverage', () => {
-
-  // -------------------------------------------------------------------------
-  // (a) submit → locked
-  // -------------------------------------------------------------------------
-
-  it('(a) submit → locked: getBallotConfirmationState returns locked after submitBallotForConfirmation', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const electionEngine = new MockElectionEngine(confirmState);
-
-    // Initially unlocked.
-    const before = await electionEngine.getBallotConfirmationState('mock-ballot-id');
-    expect(before.locked).toBe(false);
-    expect(before.confirmed).toBe(false);
-
-    // Submit.
-    await electionEngine.submitBallotForConfirmation('mock-ballot-id');
-
-    // After submit: locked=true, confirmed=false.
-    const after = await electionEngine.getBallotConfirmationState('mock-ballot-id');
-    expect(after.locked).toBe(true);
-    expect(after.confirmed).toBe(false);
-  });
-
-  it('(a) submit → locked UI: when engine is locked, Withdraw button shown and Submit hidden', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const electionEngine = new MockElectionEngine(confirmState);
-
-    // Pre-submit so the screen opens in locked state.
-    await electionEngine.submitBallotForConfirmation('mock-ballot-id');
-
-    // Inject the locked engine.
-    mockCurrentElectionEngine = electionEngine;
-    const tr = await renderCreateBallotScreen();
-
-    // Withdraw action should be visible (i18n key echoed by mock t()).
-    expect(treeContainsText(tr, 'withdrawConfirmation')).toBe(true);
-    // Submit action should NOT be visible when locked.
-    expect(treeContainsText(tr, 'submitForConfirmation')).toBe(false);
-  });
-
-  it('(a) edit-lock: Propose button is disabled when the ballot is locked', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const electionEngine = new MockElectionEngine(confirmState);
-
-    // Pre-submit (locked).
-    await electionEngine.submitBallotForConfirmation('mock-ballot-id');
-    mockCurrentElectionEngine = electionEngine;
-    const tr = await renderCreateBallotScreen();
-
-    // In the locked UI, the Propose button should not appear (footer shows Withdraw instead).
-    expect(treeContainsText(tr, 'propose')).toBe(false);
-  });
-
-  // -------------------------------------------------------------------------
-  // (b) withdraw → unlocked
-  // -------------------------------------------------------------------------
-
-  it('(b) withdraw → unlocked: getBallotConfirmationState returns unlocked after withdraw', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const electionEngine = new MockElectionEngine(confirmState);
-
-    await electionEngine.submitBallotForConfirmation('mock-ballot-id');
-    await electionEngine.withdrawBallotConfirmation('mock-ballot-id');
-
-    const after = await electionEngine.getBallotConfirmationState('mock-ballot-id');
-    expect(after.locked).toBe(false);
-    expect(after.confirmed).toBe(false);
-  });
-
-  it('(b) withdraw → unlocked UI: Submit button shown, Withdraw hidden when unlocked', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const electionEngine = new MockElectionEngine(confirmState);
-
-    // Unlocked (default state).
-    mockCurrentElectionEngine = electionEngine;
-    const tr = await renderCreateBallotScreen();
-
-    // Submit button should be present (ballot id exists + engine present).
-    expect(treeContainsText(tr, 'submitForConfirmation')).toBe(true);
-    // Withdraw button should NOT be present when unlocked.
-    expect(treeContainsText(tr, 'withdrawConfirmation')).toBe(false);
-  });
-
-  // -------------------------------------------------------------------------
-  // (c) confirmed badge path — explicit named paths
-  // -------------------------------------------------------------------------
-
-  it('(c) confirmed via markBallotConfirmed hook — explicit named path (D-10)', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const electionEngine = new MockElectionEngine(confirmState);
-
-    // Submit then confirm via the explicit hook.
-    await electionEngine.submitBallotForConfirmation('mock-ballot-id');
-    electionEngine.markBallotConfirmed('mock-ballot-id');
-
-    const cs = await electionEngine.getBallotConfirmationState('mock-ballot-id');
-    expect(cs.confirmed).toBe(true);
-    expect(cs.locked).toBe(false);
-    // The shared confirmState object reflects the flip.
-    expect(confirmState.get('mock-ballot-id')).toBe('confirmed');
-  });
-
-  it('(c) pending ballot shows Proposed state, confirmed ballot shows Confirmed state', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const electionEngine = new MockElectionEngine(confirmState);
-
-    // Propose a ballot.
-    await electionEngine.proposeBallot({
-      id: 'mock-ballot-id',
-      electionId: 'test-election',
-      authorityId: 'auth-1',
-      description: 'Test ballot',
-      districts: [],
-      questions: [],
-    });
-
-    // Pending (not confirmed) state.
-    const pendingState = await electionEngine.getBallotConfirmationState('mock-ballot-id');
-    expect(pendingState.confirmed).toBe(false);
-    expect(confirmState.get('mock-ballot-id')).toBe('proposed');
-
-    // Confirm via the explicit named path.
-    await electionEngine.submitBallotForConfirmation('mock-ballot-id');
-    electionEngine.markBallotConfirmed('mock-ballot-id');
-
-    const confirmedState = await electionEngine.getBallotConfirmationState('mock-ballot-id');
-    expect(confirmedState.confirmed).toBe(true);
-    expect(confirmState.get('mock-ballot-id')).toBe('confirmed');
-  });
-
-  it('(c) confirmed via paired completeSignature — shared state object drives the flip (D-09/D-10)', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { MockSignatureTasksEngine } = require(
-      '../../../../../../packages/vote-engine/dist/tasks/mock-signature-tasks-engine'
-    );
-
-    // Wire mocks per 31-04 contract.
-    const confirmState = new MockBallotConfirmationState();
-    const electionEngine = new MockElectionEngine(confirmState);
-    const tasksEngine = new MockSignatureTasksEngine(electionEngine);
-
-    // Submit ballot so it is in 'submitted' state.
-    await electionEngine.submitBallotForConfirmation('mock-ballot-id');
-
-    // Get the pending ballot signature task.
-    const tasks = await tasksEngine.getRequestedSignatures(true);
-    const ballotTask = tasks.find((t: { signatureType: string }) => t.signatureType === 'ballot');
-    expect(ballotTask).toBeDefined();
-
-    // Complete with accepted=true — this calls markBallotConfirmed internally.
-    await tasksEngine.completeSignature(ballotTask, {
-      isAccepted: true,
-      signature: {
-        signature: 'mock-sig',
-        signerKey: 'mock-key',
-        signerUserId: 'mock-user',
-      },
-    });
-
-    // The shared confirmState is flipped to 'confirmed' via MockElectionEngine.
-    const cs = await electionEngine.getBallotConfirmationState('mock-ballot-id');
-    expect(cs.confirmed).toBe(true);
-
-    // The ballot task is removed from the pending inbox (D-09).
-    const remaining = await tasksEngine.getRequestedSignatures(true);
-    const stillHasBallotTask = remaining.some(
-      (t: { signatureType: string }) => t.signatureType === 'ballot'
-    );
-    expect(stillHasBallotTask).toBe(false);
-  });
-
-  // -------------------------------------------------------------------------
-  // (d)-(g) 62-11 (D-08/D-13): the lazy device-signer wiring and its error routing
-  // -------------------------------------------------------------------------
-
-  it('(d) submit calls submitBallotForConfirmation with a lazy signer callback; createDeviceSigner is never invoked at threshold 1', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const engine = new MockElectionEngine(confirmState);
+describe('EditBallotScreen — submit / withdraw on the persisted ballot (62-55)', () => {
+  it('unlocked + unconfirmed: Propose and Submit render; Submit calls the engine once with a lazy signer, then only Withdraw remains and the form is disabled', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
     const submitSpy = jest.spyOn(engine, 'submitBallotForConfirmation');
     mockCurrentElectionEngine = engine;
 
-    const tr = await renderCreateBallotScreen();
-    const submitButton = tr.root.findByProps({ accessibilityLabel: 'submitForConfirmation' });
-    await renderer.act(async () => {
-      submitButton.props.onPress();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    const tr = await renderScreen('Edit');
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+
+    await press(tr, 'edit-ballot-submit');
 
     expect(submitSpy).toHaveBeenCalledTimes(1);
-    expect(submitSpy).toHaveBeenCalledWith('mock-ballot-id', expect.any(Function));
+    expect(submitSpy).toHaveBeenCalledWith(BALLOT_ID, expect.any(Function));
+    // Threshold-1 property: the lazy signer is never invoked when the engine does not call it.
     expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+    expect(await engine.getBallotConfirmationState(BALLOT_ID)).toEqual({ locked: true, confirmed: false });
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
   });
 
-  it('(e) routed, handled: a device-signing error is routed to the hook; the raw message never renders and the screen does not lock', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const engine = new MockElectionEngine(confirmState);
+  it('locked on open: the footer is visible with Withdraw; pressing it calls withdraw and Propose/Submit return', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    await engine.submitBallotForConfirmation(BALLOT_ID);
+    const withdrawSpy = jest.spyOn(engine, 'withdrawBallotConfirmation');
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+
+    await press(tr, 'edit-ballot-withdraw');
+
+    expect(withdrawSpy).toHaveBeenCalledWith(BALLOT_ID);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+  });
+
+  it('confirmed: neither Submit nor Withdraw nor Propose renders', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    await engine.submitBallotForConfirmation(BALLOT_ID);
+    engine.markBallotConfirmed(BALLOT_ID);
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+  });
+
+  it('readOnly preview: no footer at all', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    mockReadOnly = true;
+
+    const tr = await renderScreen('Edit');
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+  });
+
+  it('submit failure with engine text renders ballotSubmitFailed and never the engine text', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    engine.submitBallotForConfirmation = jest.fn(async () => {
+      throw new Error('ElectionEngine.submitBallotForConfirmation: ProposedBallot not found: x');
+    });
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    await press(tr, 'edit-ballot-submit');
+
+    expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(true);
+    expect(treeContainsText(tr, 'ProposedBallot not found')).toBe(false);
+    expect(treeContainsText(tr, 'ElectionEngine.')).toBe(false);
+  });
+
+  it('withdraw failure renders ballotWithdrawFailed, never engine text', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    await engine.submitBallotForConfirmation(BALLOT_ID);
+    engine.withdrawBallotConfirmation = jest.fn(async () => {
+      throw new Error('engine-withdraw-internal');
+    });
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    await press(tr, 'edit-ballot-withdraw');
+
+    expect(treeContainsText(tr, 'ballotWithdrawFailed')).toBe(true);
+    expect(treeContainsText(tr, 'engine-withdraw-internal')).toBe(false);
+  });
+
+  it('propose failure renders ballotProposeFailed, never engine text', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    engine.proposeBallot = jest.fn(async () => {
+      throw new Error('engine-propose-internal');
+    });
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    await press(tr, 'edit-ballot-propose');
+
+    expect(treeContainsText(tr, 'ballotProposeFailed')).toBe(true);
+    expect(treeContainsText(tr, 'engine-propose-internal')).toBe(false);
+  });
+
+  it('a device-signing error is routed to the hook; raw text never renders and the screen does not lock', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
     const thrown = Object.assign(new Error('raw-signer-text'), { code: 'KEY_INVALIDATED' });
     engine.submitBallotForConfirmation = jest.fn(async () => {
       throw thrown;
@@ -399,64 +338,92 @@ describe('BallotConfirmation — D-03/D-05/D-09 RTL coverage', () => {
     mockHandleDeviceSigningError = jest.fn(() => ({ handled: true }));
     mockCurrentElectionEngine = engine;
 
-    const tr = await renderCreateBallotScreen();
-    const submitButton = tr.root.findByProps({ accessibilityLabel: 'submitForConfirmation' });
-    await renderer.act(async () => {
-      submitButton.props.onPress();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    const tr = await renderScreen('Edit');
+    await press(tr, 'edit-ballot-submit');
 
-    expect(mockHandleDeviceSigningError).toHaveBeenCalledTimes(1);
     expect(mockHandleDeviceSigningError).toHaveBeenCalledWith(thrown);
     expect(treeContainsText(tr, 'raw-signer-text')).toBe(false);
-    // handled: true means the catch returns early — confirmationLocked never flips, the
-    // Submit button (not Withdraw) stays visible.
-    expect(treeContainsText(tr, 'submitForConfirmation')).toBe(true);
-    expect(treeContainsText(tr, 'withdrawConfirmation')).toBe(false);
+    expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
   });
 
-  it('(f) routed, inline copy: an unhandled outcome with a mapped message shows the mapped copy, not the raw one', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const engine = new MockElectionEngine(confirmState);
-    const thrown = new Error('raw-signer-text-2');
+  it('an unhandled signing outcome with a mapped message shows the mapped copy, not raw text', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
     engine.submitBallotForConfirmation = jest.fn(async () => {
-      throw thrown;
+      throw new Error('raw-signer-text-2');
     });
     mockHandleDeviceSigningError = jest.fn(() => ({ handled: false, message: 'mapped-copy' }));
     mockCurrentElectionEngine = engine;
 
-    const tr = await renderCreateBallotScreen();
-    const submitButton = tr.root.findByProps({ accessibilityLabel: 'submitForConfirmation' });
-    await renderer.act(async () => {
-      submitButton.props.onPress();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    const tr = await renderScreen('Edit');
+    await press(tr, 'edit-ballot-submit');
 
     expect(treeContainsText(tr, 'mapped-copy')).toBe(true);
     expect(treeContainsText(tr, 'raw-signer-text-2')).toBe(false);
   });
+});
 
-  it('(g) not mine: a plain engine error with an unhandled outcome shows the raw message, exactly as today', async () => {
-    const confirmState = new MockBallotConfirmationState();
-    const engine = new MockElectionEngine(confirmState);
-    const thrown = new Error('engine-failure');
-    engine.submitBallotForConfirmation = jest.fn(async () => {
-      throw thrown;
-    });
-    mockHandleDeviceSigningError = jest.fn(() => ({ handled: false }));
+describe('CreateBallotScreen — Propose only (62-55)', () => {
+  it('renders Propose and no Submit for confirmation / Withdraw, even with a draft id present', async () => {
+    const { engine } = newEngine();
     mockCurrentElectionEngine = engine;
 
-    const tr = await renderCreateBallotScreen();
-    const submitButton = tr.root.findByProps({ accessibilityLabel: 'submitForConfirmation' });
-    await renderer.act(async () => {
-      submitButton.props.onPress();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(treeContainsText(tr, 'engine-failure')).toBe(true);
+    const tr = await renderScreen('Create');
+    expect(treeContainsText(tr, 'propose')).toBe(true);
+    expect(treeContainsText(tr, 'submitForConfirmation')).toBe(false);
+    expect(treeContainsText(tr, 'withdrawConfirmation')).toBe(false);
   });
 
+  it('propose failure renders ballotProposeFailed, never engine text', async () => {
+    const { engine } = newEngine();
+    engine.proposeBallot = jest.fn(async () => {
+      throw new Error('engine-propose-internal');
+    });
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Create');
+    const btn = tr.root.findAllByProps({ accessibilityLabel: 'propose' })[0];
+    await renderer.act(async () => {
+      btn.props.onPress();
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    expect(treeContainsText(tr, 'ballotProposeFailed')).toBe(true);
+    expect(treeContainsText(tr, 'engine-propose-internal')).toBe(false);
+  });
+});
+
+describe('BallotConfirmation — engine contract confirm path (D-09/D-10)', () => {
+  it('confirmed via markBallotConfirmed hook after propose + submit', async () => {
+    const { engine, confirmState } = newEngine();
+    await propose(engine);
+    await engine.submitBallotForConfirmation(BALLOT_ID);
+    engine.markBallotConfirmed(BALLOT_ID);
+    const cs = await engine.getBallotConfirmationState(BALLOT_ID);
+    expect(cs).toEqual({ locked: false, confirmed: true });
+    expect(confirmState.get(BALLOT_ID)).toBe('confirmed');
+  });
+
+  it('confirmed via paired completeSignature — shared state object drives the flip', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { MockSignatureTasksEngine } = require(
+      '../../../../../../packages/vote-engine/dist/tasks/mock-signature-tasks-engine'
+    );
+    const { engine } = newEngine();
+    const tasksEngine = new MockSignatureTasksEngine(engine);
+    await propose(engine);
+    await engine.submitBallotForConfirmation(BALLOT_ID);
+
+    const tasks = await tasksEngine.getRequestedSignatures(true);
+    const ballotTask = tasks.find((t: { signatureType: string }) => t.signatureType === 'ballot');
+    expect(ballotTask).toBeDefined();
+    await tasksEngine.completeSignature(ballotTask, {
+      isAccepted: true,
+      signature: { signature: 'mock-sig', signerKey: 'mock-key', signerUserId: 'mock-user' },
+    });
+    expect((await engine.getBallotConfirmationState(BALLOT_ID)).confirmed).toBe(true);
+    const remaining = await tasksEngine.getRequestedSignatures(true);
+    expect(remaining.some((t: { signatureType: string }) => t.signatureType === 'ballot')).toBe(false);
+  });
 });

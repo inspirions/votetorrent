@@ -14,6 +14,8 @@ import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
 import { useApp } from "../../providers/AppProvider";
 import { loadAuthoritiesWithRetry } from "../../utils/loadAuthoritiesWithRetry";
+import { createDeviceSigner } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import type { Authority, Ballot, INetworkEngine } from "@votetorrent/vote-core";
 
 /**
@@ -27,6 +29,12 @@ import type { Authority, Ballot, INetworkEngine } from "@votetorrent/vote-core";
  * the form pre-populates AND retains the SAME id. On PROPOSE, calls
  * engine.proposeBallot(ballot) with the existing id — the engine upserts by id
  * (from 09-09) so editing replaces the card instead of inserting a duplicate.
+ *
+ * UAT 62 test 13: "Submit for confirmation" and "Withdraw" live HERE, on the
+ * persisted ballot. CreateBallotScreen's draft id has no ProposedBallot row, so the
+ * engine refuses a submit from there; every persisted ballot opens this screen.
+ * The footer is therefore state-driven: unlocked -> Propose + Submit, locked ->
+ * Withdraw, confirmed -> no footer, readOnly preview -> no footer.
  */
 const EditBallotScreen = () => {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -42,7 +50,10 @@ const EditBallotScreen = () => {
 	const [loadError, setLoadError] = useState("");
 	const [errorMessage, setErrorMessage] = useState("");
 	const [proposing, setProposing] = useState(false);
-	const [confirmationLocked, setConfirmationLocked] = useState(false);
+	const [submitting, setSubmitting] = useState(false);
+	const [withdrawing, setWithdrawing] = useState(false);
+	const [confirmationState, setConfirmationState] = useState<{ locked: boolean; confirmed: boolean } | null>(null);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const [authorities, setAuthorities] = useState<Authority[]>([]);
 	const { ballotDraft, setBallotDraft, addQuestion, updateQuestion, removeQuestion } = useBallotDraft();
 
@@ -126,14 +137,66 @@ const EditBallotScreen = () => {
 			const checkLock = async () => {
 				try {
 					const state = await electionEngine.getBallotConfirmationState(ballotId);
-					setConfirmationLocked(state.locked);
+					setConfirmationState({ locked: !!state.locked, confirmed: !!state.confirmed });
 				} catch (error) {
 					console.warn("getBallotConfirmationState error", error);
+					// Do not strand the officer with no footer if the read fails.
+					setConfirmationState((prev) => prev ?? { locked: false, confirmed: false });
 				}
 			};
 			checkLock();
 		}, [electionEngine, ballotId])
 	);
+
+	const refreshConfirmationState = async () => {
+		try {
+			const state = await electionEngine.getBallotConfirmationState(ballotId);
+			setConfirmationState({ locked: !!state.locked, confirmed: !!state.confirmed });
+		} catch (error) {
+			console.warn("getBallotConfirmationState error", error);
+		}
+	};
+
+	// D-03/D-08: Submit the persisted ballot for confirmation.
+	// `lazySign` is a LAZY factory thunk: `createDeviceSigner` is only invoked if the engine
+	// actually calls this callback, which happens only when the authority's ceb threshold is
+	// above 1 (IElectionEngine.submitBallotForConfirmation's own doc comment). A threshold-1
+	// authority therefore needs neither a provisioned key nor a biometric prompt to submit
+	// (it self-confirms), exactly as before 62-11.
+	const handleSubmitForConfirmation = async () => {
+		if (!electionEngine || !ballotId) return;
+		setErrorMessage("");
+		setSubmitting(true);
+		try {
+			const lazySign = async (digest: Uint8Array) => (await createDeviceSigner("Device User"))(digest);
+			await electionEngine.submitBallotForConfirmation(ballotId, lazySign);
+			// Re-read rather than guess: threshold 1 returns confirmed, higher thresholds locked.
+			await refreshConfirmationState();
+		} catch (error) {
+			console.warn("submitBallotForConfirmation error", error);
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			setErrorMessage(outcome.message ?? t("ballotSubmitFailed"));
+		} finally {
+			setSubmitting(false);
+		}
+	};
+
+	// D-05: Withdraw the pending confirmation — unlocks the ballot for editing.
+	const handleWithdrawConfirmation = async () => {
+		if (!electionEngine || !ballotId) return;
+		setErrorMessage("");
+		setWithdrawing(true);
+		try {
+			await electionEngine.withdrawBallotConfirmation(ballotId);
+			await refreshConfirmationState();
+		} catch (error) {
+			console.warn("withdrawBallotConfirmation error", error);
+			setErrorMessage(t("ballotWithdrawFailed"));
+		} finally {
+			setWithdrawing(false);
+		}
+	};
 
 	// Carry-back from EditQuestionScreen SAVE: when editing an existing template,
 	// EditQuestion popTos here with the assembled `question`. Merge it into the
@@ -190,7 +253,7 @@ const EditBallotScreen = () => {
 			navigation.goBack();
 		} catch (error) {
 			console.warn("proposeBallot error", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			setErrorMessage(t("ballotProposeFailed"));
 		} finally {
 			setProposing(false);
 		}
@@ -225,7 +288,11 @@ const EditBallotScreen = () => {
 	};
 
 	// D-05: edit is blocked when the ballot has a pending confirmation task.
-	const editingDisabled = readOnly || confirmationLocked;
+	const locked = confirmationState?.locked === true;
+	const confirmed = confirmationState?.confirmed === true;
+	// No engine/ballot (standalone) -> nothing to poll; otherwise wait for the first read.
+	const stateKnown = !electionEngine || !ballotId || confirmationState !== null;
+	const editingDisabled = readOnly || locked || confirmed;
 
 	return (
 		<View style={globalStyles.content}>
@@ -246,17 +313,40 @@ const EditBallotScreen = () => {
 			/>
 			<InlineError message={loadError} />
 			<InlineError message={errorMessage} />
-			{/* Footer: PROPOSE — hidden in readOnly (preview) mode or when locked. */}
-			{!readOnly && !confirmationLocked && (
+			{/* Footer (UAT 62 test 13): hidden in readOnly preview and once confirmed.
+			    Locked -> Withdraw only; otherwise Propose + Submit for confirmation. */}
+			{!readOnly && stateKnown && !confirmed && (
 				<View style={[globalStyles.footer, { backgroundColor: colors.card, paddingBottom: insets.bottom + 16 }]}>
-					<CustomButton
-						title={t("propose")}
-						icon="floppy-disk"
-						onPress={handlePropose}
-						backgroundColor={colors.success}
-						forceDarkText={true}
-						disabled={proposing}
-					/>
+					{locked ? (
+						<CustomButton
+							testID="edit-ballot-withdraw"
+							title={t("withdrawConfirmation")}
+							icon="rotate-left"
+							onPress={handleWithdrawConfirmation}
+							backgroundColor={colors.warning ?? colors.accent}
+							disabled={withdrawing}
+						/>
+					) : (
+						<>
+							<CustomButton
+								testID="edit-ballot-propose"
+								title={t("propose")}
+								icon="floppy-disk"
+								onPress={handlePropose}
+								backgroundColor={colors.success}
+								forceDarkText={true}
+								disabled={proposing || submitting}
+							/>
+							<CustomButton
+								testID="edit-ballot-submit"
+								title={t("submitForConfirmation")}
+								icon="paper-plane"
+								onPress={handleSubmitForConfirmation}
+								backgroundColor={colors.accent}
+								disabled={submitting || proposing}
+							/>
+						</>
+					)}
 				</View>
 			)}
 		</View>
