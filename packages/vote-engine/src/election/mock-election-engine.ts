@@ -215,12 +215,13 @@ export class MockElectionEngine implements IElectionEngine {
 		if (!this.ballots.some((b) => b.id === ballotId)) {
 			throw new Error(`ProposedBallot not found: ${ballotId}`);
 		}
+		// Same fixed, id-free text as ElectionEngine (WR-04 parity).
 		const current = this.confirmationState.get(ballotId);
 		if (current === 'submitted') {
-			throw new Error(`Ballot ${ballotId} is already submitted for confirmation`);
+			throw new Error('This ballot is already submitted for confirmation.');
 		}
 		if (current === 'confirmed') {
-			throw new Error(`Ballot ${ballotId} is already confirmed`);
+			throw new Error('This ballot is already confirmed.');
 		}
 		// D-04 parity: ProposedBallot (this.ballots entry) is retained — only the state flag changes.
 		this.confirmationState.set(ballotId, 'submitted');

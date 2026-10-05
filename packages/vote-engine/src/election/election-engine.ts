@@ -482,6 +482,27 @@ export class ElectionEngine implements IElectionEngine {
   }
 
   /**
+   * The ONE ballot lock read for proposeBallot, submitBallotForConfirmation and
+   * getBallotConfirmationState (WR-04, 62-REVIEW.md). `open` = a ballot signature Task is still
+   * open for this ballot; `confirmed` = a finalized Ballot row exists. A session that reached its
+   * threshold but whose finalize failed keeps its Task open, so it is still `open` here and
+   * therefore locked. Deliberately NO AdminSignature clause: an open sibling of a reached session
+   * must also block an overwrite or a second submit.
+   */
+  private async readBallotLock (ballotId: string): Promise<{ open: boolean; confirmed: boolean }> {
+    const openRow = await this.ctx.db
+      .prepare(
+        `select 1 as x from Task T join BallotSignatureTaskExtension B on B.TaskId = T.Id
+         where B.BallotId = :ballotId and T.Type = 'signature' and T.SignatureType = 'ballot' and T.IsCompleted = 0`
+      )
+      .get({ ballotId })
+    const confirmedRow = await this.ctx.db
+      .prepare('select 1 as x from Ballot where Id = :ballotId')
+      .get({ ballotId })
+    return { open: openRow !== undefined, confirmed: confirmedRow !== undefined }
+  }
+
+  /**
    * ELEC-06 — INSERT a ProposedBallot row. The schema's UserValid CHECK is a
    * dumb `context.IsUserValid` gate the engine computes into. D-21 (Class B):
    * this path carries no `Signature` argument, so `IsUserValid` is bound to
@@ -496,22 +517,12 @@ export class ElectionEngine implements IElectionEngine {
    */
   async proposeBallot (ballot: Ballot): Promise<void> {
     try {
-      // Deliberately WITHOUT getBallotConfirmationState's AdminSignature clause: an open
-      // sibling of a reached-but-not-yet-finalized session must also block an overwrite.
-      const open = await this.ctx.db
-        .prepare(
-          `select 1 as x from Task T join BallotSignatureTaskExtension B on B.TaskId = T.Id
-           where B.BallotId = :ballotId and T.Type = 'signature' and T.SignatureType = 'ballot' and T.IsCompleted = 0`
-        )
-        .get({ ballotId: ballot.id })
-      if (open) {
-        throw new Error('This ballot is out for confirmation and cannot be edited. Withdraw it first.')
-      }
-      const confirmed = await this.ctx.db
-        .prepare('select 1 as x from Ballot where Id = :ballotId')
-        .get({ ballotId: ballot.id })
-      if (confirmed) {
+      const lock = await this.readBallotLock(ballot.id)
+      if (lock.confirmed) {
         throw new Error('This ballot is already confirmed and can no longer be edited.')
+      }
+      if (lock.open) {
+        throw new Error('This ballot is out for confirmation and cannot be edited. Withdraw it first.')
       }
       const tid = await allocateTid(this.ctx.db, 'election')
       const userId = this.ctx.user?.id ?? null
@@ -908,6 +919,8 @@ export class ElectionEngine implements IElectionEngine {
   /**
    * D-03/D-07/D-06/D-08 — Submit a ProposedBallot for authority confirmation.
    *
+   * 0. Refuse an already-submitted or already-confirmed ballot before any write (WR-04; one
+   *    session per submission, D-08/D-12).
    * 1. Read the ProposedBallot row.
    * 2. Re-validate ballot invariants (D-07): non-empty description, ≥1 question,
    *    ≥2 options for 'select'-type questions. Throw before any write on failure.
@@ -939,6 +952,18 @@ export class ElectionEngine implements IElectionEngine {
    */
   async submitBallotForConfirmation (ballotId: string, sign?: (digest: Uint8Array) => Promise<Signature>): Promise<void> {
     try {
+      // Step 0 (WR-04, D-08/D-12: one session per submission): refuse a ballot that is already
+      // confirmed or out for confirmation BEFORE any read-for-write, allocateTid, or the
+      // proposer's sign callback. Confirmed first: a confirmed ballot with open D-09 siblings is
+      // "already confirmed", not "out for confirmation".
+      const lock = await this.readBallotLock(ballotId)
+      if (lock.confirmed) {
+        throw new Error('This ballot is already confirmed.')
+      }
+      if (lock.open) {
+        throw new Error('This ballot is already submitted for confirmation.')
+      }
+
       // Step 1: read the ProposedBallot row
       const ballotRow = await this.ctx.db
         .prepare(
@@ -1250,37 +1275,17 @@ export class ElectionEngine implements IElectionEngine {
   /**
    * D-05/D-09 — Report the lock and confirmed state of a ProposedBallot.
    *
-   * `locked` = a pending (IsCompleted=0) ballot Task exists for a session that has NOT yet
-   * reached its threshold. 62-11 (D-09): above threshold 1, open D-09 siblings of an ALREADY
-   * reached (confirmed) session must not read as locked — the `not exists AdminSignature`
-   * clause below is what keeps a confirmed ballot's still-open siblings from flipping
-   * `locked` back to `true`. At threshold 1 this clause is a no-op (a confirmed ballot there
-   * never has an open Task left — the session's only Task was completed by the single signer),
-   * so this is purely additive, not a behavior change at threshold 1.
+   * `locked` = a ballot signature Task is open AND no finalized Ballot row exists (WR-04, the
+   * shared readBallotLock predicate). A confirmed ballot whose D-09 siblings are still open
+   * (62-11) reads unlocked because the Ballot row exists. A session that reached its threshold
+   * but whose finalize failed (AdminSignature committed, Task open, no Ballot row) now reads
+   * locked, matching proposeBallot and submitBallotForConfirmation, which refuse it.
    * `confirmed` = a finalized Ballot row exists for this id.
    */
   async getBallotConfirmationState (ballotId: string): Promise<{ locked: boolean; confirmed: boolean }> {
     try {
-      const lockRow = await this.ctx.db
-        .prepare(
-          `select 1 as exists_ from Task T
-             join BallotSignatureTaskExtension B on B.TaskId = T.Id
-             where B.BallotId = :ballotId
-               and T.Type = 'signature'
-               and T.SignatureType = 'ballot'
-               and T.IsCompleted = 0
-               and not exists (select 1 from AdminSignature S where S.SigningNonce = T.SigningNonce)`
-        )
-        .get({ ballotId })
-
-      const confirmedRow = await this.ctx.db
-        .prepare('select 1 as exists_ from Ballot where Id = :ballotId')
-        .get({ ballotId })
-
-      return {
-        locked: lockRow !== undefined,
-        confirmed: confirmedRow !== undefined,
-      }
+      const { open, confirmed } = await this.readBallotLock(ballotId)
+      return { locked: open && !confirmed, confirmed }
     } catch (err) {
       this.rethrow(err, 'getBallotConfirmationState')
     }

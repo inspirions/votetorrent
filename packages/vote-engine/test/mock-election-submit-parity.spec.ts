@@ -102,4 +102,16 @@ describe('MockElectionEngine submit parity (62-55)', () => {
     await engine.proposeBallot({ ...ballot('b5'), description: 'after withdraw' })
     expect(ballotsOf(engine).find((b) => b.id === 'b5')?.description).to.equal('after withdraw')
   })
+  it('P1: refuses submit with the real engine\'s fixed, id-free messages (WR-04)', async () => {
+    const engine = new MockElectionEngine(new MockBallotConfirmationState())
+    await engine.proposeBallot(ballot('b6'))
+    await engine.submitBallotForConfirmation('b6')
+    let submitted = ''
+    try { await engine.submitBallotForConfirmation('b6') } catch (e) { submitted = (e as Error).message }
+    expect(submitted).to.equal('This ballot is already submitted for confirmation.')
+    engine.markBallotConfirmed('b6')
+    let confirmed = ''
+    try { await engine.submitBallotForConfirmation('b6') } catch (e) { confirmed = (e as Error).message }
+    expect(confirmed).to.equal('This ballot is already confirmed.')
+  })
 })
