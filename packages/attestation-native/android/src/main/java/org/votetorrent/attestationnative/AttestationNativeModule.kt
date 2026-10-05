@@ -150,7 +150,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		enablePlayIntegrity: Boolean,
 		promise: Promise,
 	) {
-		val activity = currentActivity as? FragmentActivity
+		val activity = reactApplicationContext.currentActivity as? FragmentActivity
 		if (activity == null) {
 			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
 			return
@@ -201,7 +201,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		promptNegativeButton: String,
 		promise: Promise,
 	) {
-		val activity = currentActivity as? FragmentActivity
+		val activity = reactApplicationContext.currentActivity as? FragmentActivity
 		if (activity == null) {
 			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
 			return
@@ -248,7 +248,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		promptNegativeButton: String,
 		promise: Promise,
 	) {
-		val activity = currentActivity as? FragmentActivity
+		val activity = reactApplicationContext.currentActivity as? FragmentActivity
 		if (activity == null) {
 			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the recovery ceremony")
 			return
@@ -351,7 +351,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		}
 
 		val activity = if (requireAuth) {
-			val a = currentActivity as? FragmentActivity
+			val a = reactApplicationContext.currentActivity as? FragmentActivity
 			if (a == null) {
 				promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
 				return
@@ -406,7 +406,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		}
 
 		val activity = if (requireAuth) {
-			val a = currentActivity as? FragmentActivity
+			val a = reactApplicationContext.currentActivity as? FragmentActivity
 			if (a == null) {
 				promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
 				return
