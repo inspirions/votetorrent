@@ -11,6 +11,7 @@
 		"start": "react-native start",
 		"test": "jest",
 		"test:node": "jest --config jest.node.config.js",
+		"test:require-exports": "node --test test/node/workspace-require-exports.test.mjs",
 		"typecheck": "tsc --noEmit",
 		"build": "bin/build.sh",
 		"verify:keystore": "cd android && bundle exec fastlane android verify_keystore",
