@@ -1331,11 +1331,19 @@ export class AuthorityEngine implements IAuthorityEngine {
 	}
 
 	/**
-	 * SURF-03 (D-05/D-06): cancel a pending invitation by inserting an append-only
-	 * InviteCancellation marker keyed by the InviteSlot Cid. NON-signing: the
-	 * context envelope carries only Tid + now. The InviteSlot is never mutated
-	 * (InviteSlot is InsertOnly); the slot simply drops off getPendingInviteCids
-	 * on the next read because of the InviteCancellation NOT EXISTS filter.
+	 * SURF-03 (D-05/D-06): cancel a pending invitation by inserting append-only
+	 * InviteCancellation markers. NON-signing: the context envelope carries only
+	 * Tid + now. InviteSlot rows are never mutated (InsertOnly).
+	 *
+	 * A share is ONE invitation. getPendingInviteCids lists every row of a resend
+	 * chain (no auto-supersede), so a withdrawal of ANY visible row must close the
+	 * whole share: this cancels every row of the chain (same InviteKey, Type and
+	 * SigningNonce) in one BEGIN/COMMIT. Cancellation and ResendSalt timestamps
+	 * are one-second precision and cancellation Tids are not persisted, so the
+	 * resolver cannot reliably order a cancel against a resend; the write side
+	 * cancels the whole chain instead (CR-02, 62-REVIEW.md). A resend issued
+	 * AFTER the cancel is a fresh uncancelled head, so re-issue still works.
+	 * Rows already cancelled are skipped (idempotent).
 	 *
 	 * Throws when the slot does not exist (the marker's SlotExists CHECK also
 	 * enforces this at the schema boundary — belt and suspenders).
@@ -1343,20 +1351,53 @@ export class AuthorityEngine implements IAuthorityEngine {
 	async cancelInvite(slotCid: string): Promise<void> {
 		try {
 			const slot = await this.ctx.db
-				.prepare('select Cid from InviteSlot where Cid = :slotCid')
+				.prepare('select Cid, InviteKey, Type, SigningNonce from InviteSlot where Cid = :slotCid')
 				.get({ slotCid });
 			if (!slot) {
 				throw new Error(`InviteSlot not found: ${slotCid}`);
 			}
+			// The chain: two-equality read, SigningNonce filtered in TypeScript so an
+			// unrelated invite that shares a key is never cancelled.
+			const chain: string[] = [];
+			for await (const row of this.ctx.db.eval(
+				'select Cid, SigningNonce from InviteSlot where InviteKey = :inviteKey and Type = :slotType',
+				{ inviteKey: slot.InviteKey as string, slotType: slot.Type as string },
+			)) {
+				if (row.SigningNonce === slot.SigningNonce) chain.push(row.Cid as string);
+			}
+			const toCancel: string[] = [];
+			for (const cid of chain) {
+				const marker = await this.ctx.db
+					.prepare('select 1 as x from InviteCancellation where SlotCid = :slotCid')
+					.get({ slotCid: cid });
+				if (!marker) toCancel.push(cid);
+			}
+			if (toCancel.length === 0) {
+				return;
+			}
 			// Allocate to a local first, then interpolate (the site sits inside a
 			// `with context` string, not a bound param).
 			const tid = await allocateTid(this.ctx.db, 'authority');
-			await this.ctx.db.exec(
-				`insert into InviteCancellation (SlotCid, CancelledAt)
-					with context Tid = ${tid}, now = :now
-				values (:slotCid, :now)`,
-				{ slotCid, now: nowCanonicalDatetime() },
-			);
+			const now = nowCanonicalDatetime();
+			await this.ctx.db.exec('BEGIN');
+			try {
+				for (const cid of toCancel) {
+					await this.ctx.db.exec(
+						`insert into InviteCancellation (SlotCid, CancelledAt)
+							with context Tid = ${tid}, now = :now
+						values (:slotCid, :now)`,
+						{ slotCid: cid, now },
+					);
+				}
+				await this.ctx.db.exec('COMMIT');
+			} catch (innerErr) {
+				try {
+					await this.ctx.db.exec('ROLLBACK');
+				} catch {
+					// already rolled back by the failed statement — the original error is what matters.
+				}
+				throw innerErr;
+			}
 		} catch (err) {
 			this.rethrow(err, 'cancelInvite');
 		}

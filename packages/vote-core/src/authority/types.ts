@@ -20,10 +20,13 @@ export interface IAuthorityEngine {
   getAuthorityInvites(): Promise<Array<InviteStatus<SentAuthorityInvite>>>
   /**
    * SURF-03 (D-05/D-06): cancel a pending invitation. NON-signing this phase.
-   * Inserts an append-only InviteCancellation marker keyed by the InviteSlot
-   * Cid; the slot itself is never mutated (InviteSlot is InsertOnly). Pending
-   * reads filter cancelled slots out via NOT EXISTS, so the item drops off the
-   * pending list while the audit trail persists.
+   * Inserts append-only InviteCancellation markers keyed by InviteSlot Cid; the
+   * slot itself is never mutated (InviteSlot is InsertOnly). A share is one
+   * invitation, so this cancels EVERY row of the share's resend chain (same
+   * InviteKey, Type and SigningNonce) atomically, whichever row is passed;
+   * rows already cancelled are skipped (idempotent). Pending reads filter
+   * cancelled slots out via NOT EXISTS, so the items drop off the pending list
+   * while the audit trail persists.
    */
   cancelInvite(slotCid: string): Promise<void>
   /**
