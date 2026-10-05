@@ -4,6 +4,8 @@
 // Usage:
 //   node scripts/assert-card-button-geometry.mjs <dump.xml> --density-dpi 420 \
 //        --label "KEEP REVIEWING" --label "CONFIRM REJECTION"
+//   node scripts/assert-card-button-geometry.mjs <dump.xml> --density-dpi 420 \
+//        --label "APPROVE REGISTRATION" --label "REJECT REQUEST"   (request-detail footer)
 //   node scripts/assert-card-button-geometry.mjs --selftest
 //
 // For each --label: find the node whose `text` equals the label, then its nearest
@@ -119,6 +121,10 @@ if (argv.includes("--selftest")) {
 		// 62-54 device reading: slot wrapper 137px (passes a slot-only check) but the
 		// clickable button inside is 95px < 116px floor. The gate measures the button.
 		["share-network-slot-ok-button-short.xml", "FAIL", ["DON'T SHARE", "SHARE FILE"]],
+		// UAT 62 gap 4 item 2: the request-detail footer buttons measured 95px (thin, 36dp) on
+		// Pixel_8; the tall size is 147px (56dp at 420dpi).
+		["approval-footer-thin.xml", "FAIL", ["APPROVE REGISTRATION", "REJECT REQUEST"]],
+		["approval-footer-tall.xml", "PASS", ["APPROVE REGISTRATION", "REJECT REQUEST"]],
 	]) {
 		const got = run(readFileSync(join(dir, f), "utf8"), fixtureLabels ?? labels, 420) ? "PASS" : "FAIL";
 		console.log(`SELFTEST ${f}: expected ${expected} got ${got}`);
