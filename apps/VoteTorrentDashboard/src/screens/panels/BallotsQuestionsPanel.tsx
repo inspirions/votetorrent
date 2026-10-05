@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react';
 import type { PanelComponent } from './types.js';
 import { t } from '@votetorrent/ui-web';
-import { readBallots, readQuestions, countBallotSigningTasks, selectActiveElection } from '@votetorrent/web-data/officer';
+import { readBallots, readQuestions, parseOptionRange, countBallotSigningTasks, selectActiveElection } from '@votetorrent/web-data/officer';
 import './election-ops.css';
 
 // Field labels reproduced VERBATIM from the schema (rule R1), rendered as
@@ -35,18 +35,14 @@ interface BallotsState {
 	data: BallotsData | null;
 }
 
-/** Parse an `OptionRange` JSON column into a `"min-max"` figure. Never throws. */
+/**
+ * Render an `OptionRange` column as a `"min-max"` figure. The column holds the
+ * pg form `{min, max}` (or, on rows confirmed before the writer fix, JSON);
+ * `parseOptionRange` reads both. Never throws; unreadable yields ''.
+ */
 function optionRangeFigure(raw: unknown): string {
-	try {
-		const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-		if (parsed && typeof parsed === 'object') {
-			const { min, max } = parsed as { min?: number; max?: number };
-			return `${min ?? ''}-${max ?? ''}`;
-		}
-	} catch {
-		// fall through to empty figure below
-	}
-	return '';
+	const r = parseOptionRange(raw);
+	return r ? `${r.min}-${r.max}` : '';
 }
 
 const BallotsQuestionsPanel: PanelComponent = ({ capability, db }) => {
