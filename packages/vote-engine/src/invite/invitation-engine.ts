@@ -3,10 +3,11 @@ import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
-import { digestToBytes, inviteResultSignedBytes, nowCanonicalDatetime, toCanonicalDatetime, verifyAdHocInviteSignature } from '../utils.js'
+import { digestToBytes, fromCanonicalDatetime, inviteResultSignedBytes, nowCanonicalDatetime, toCanonicalDatetime, verifyAdHocInviteSignature } from '../utils.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import type {
   IInvitationEngine,
+  InviteSlotResolution,
   InviteStatus,
   SentOfficerInvite,
   SentAuthorityInvite,
@@ -33,22 +34,29 @@ export class InvitationEngine implements IInvitationEngine {
   constructor (private readonly ctx: EngineContext) {}
 
   /**
-   * Resolve the InviteSlot Cid for an invitee's share by (InviteKey, Type). Returns the Cid only
-   * when exactly one row matches (fail closed).
+   * Resolve an invitee's share to its InviteSlot chain and report its state. A resend inserts a second
+   * InviteSlot with the same InviteKey and Type, so the share maps to a CHAIN of rows; the newest row
+   * (the head) is the one to accept and the head decides liveness (a cancelled or expired head closes
+   * the share, with no fall-back to an older row). A non-head cancellation strictly later than the
+   * head's resend time also closes it (backstop for markers not written by
+   * AuthorityEngine.cancelInvite). See `InviteSlotResolution` for the precedence rules and CR-01 /
+   * CR-02 in 62-REVIEW.md for the reasoning.
+   */
+  async resolveInviteSlot (inviteKey: string, type: InviteType): Promise<InviteSlotResolution> {
+    try {
+      return await this.readInviteChain(inviteKey, type, nowCanonicalDatetime())
+    } catch (err) {
+      this.rethrow(err, 'resolveInviteSlot')
+    }
+  }
+
+  /**
+   * Resolve the InviteSlot Cid for an invitee's share by (InviteKey, Type): the chain head's Cid only
+   * when the share is live, otherwise undefined (fail closed).
    */
   async resolveInviteSlotCid (inviteKey: string, type: InviteType): Promise<string | undefined> {
-    try {
-      const cids: string[] = []
-      for await (const row of this.ctx.db.eval(
-        'SELECT Cid FROM InviteSlot WHERE InviteKey = :inviteKey AND Type = :slotType',
-        { inviteKey, slotType: type }
-      )) {
-        cids.push(row.Cid as string)
-      }
-      return cids.length === 1 ? cids[0] : undefined
-    } catch (err) {
-      this.rethrow(err, 'resolveInviteSlotCid')
-    }
+    const resolution = await this.resolveInviteSlot(inviteKey, type)
+    return resolution.status === 'live' ? resolution.cid : undefined
   }
 
   /**
@@ -567,6 +575,81 @@ export class InvitationEngine implements IInvitationEngine {
   }
 
   // ---------- helpers ----------
+
+  /**
+   * The ONE copy of the share-liveness rule, used by resolveInviteSlot and respondToInvite.
+   * Chain = every InviteSlot with (InviteKey, Type). Per-row facts are read with separate PK-keyed
+   * single-row reads (never one compound WHERE: the Quereus AND+IN/OR zero-row trap would make a
+   * silently empty read look like a refusal).
+   */
+  private async readInviteChain (inviteKey: string, slotType: string, now: string): Promise<InviteSlotResolution> {
+    const rows: Array<{ cid: string, nonce: string, salt: string | null }> = []
+    for await (const row of this.ctx.db.eval(
+      'SELECT Cid, SigningNonce, ResendSalt FROM InviteSlot WHERE InviteKey = :inviteKey AND Type = :slotType',
+      { inviteKey, slotType }
+    )) {
+      rows.push({ cid: row.Cid as string, nonce: row.SigningNonce as string, salt: (row.ResendSalt as string | null) ?? null })
+    }
+    if (rows.length === 0) return { status: 'not-found' }
+
+    // Per-row facts.
+    const cancelledAt = new Map<string, string | number>()
+    let answeredCid: string | undefined
+    for (const r of rows) {
+      const result = await this.ctx.db
+        .prepare('SELECT 1 AS x FROM InviteResult WHERE SlotCid = :slotCid')
+        .get({ slotCid: r.cid })
+      if (result && answeredCid === undefined) answeredCid = r.cid
+      const cancel = await this.ctx.db
+        .prepare('SELECT CancelledAt FROM InviteCancellation WHERE SlotCid = :slotCid')
+        .get({ slotCid: r.cid })
+      if (cancel) cancelledAt.set(r.cid, cancel.CancelledAt as string | number)
+    }
+    if (answeredCid !== undefined) return { status: 'answered', cid: answeredCid }
+
+    // Fail closed on structure: one signing nonce, one original, parseable salts, distinct order keys.
+    if (new Set(rows.map(r => r.nonce)).size > 1) return { status: 'ambiguous' }
+    if (rows.filter(r => r.salt === null).length > 1) return { status: 'ambiguous' }
+    const ordered: Array<{ cid: string, tid: number, nowMs: number }> = []
+    for (const r of rows) {
+      if (r.salt === null) {
+        ordered.push({ cid: r.cid, tid: -1, nowMs: 0 })
+        continue
+      }
+      const parts = r.salt.split('|')
+      const tid = Number(parts[1])
+      const nowMs = fromCanonicalDatetime(parts[2] ?? '')
+      if (parts.length !== 3 || parts[0] !== 'resend' || !Number.isInteger(tid) || Number.isNaN(nowMs)) {
+        return { status: 'ambiguous' }
+      }
+      ordered.push({ cid: r.cid, tid, nowMs })
+    }
+    ordered.sort((a, b) => a.tid - b.tid || a.nowMs - b.nowMs)
+    for (let i = 1; i < ordered.length; i++) {
+      const cur = ordered[i]
+      const prev = ordered[i - 1]
+      if (cur && prev && cur.tid === prev.tid && cur.nowMs === prev.nowMs) return { status: 'ambiguous' }
+    }
+    const head = ordered[ordered.length - 1]
+    if (!head) return { status: 'not-found' }
+
+    // Backstop: a non-head cancellation strictly later than the head's resend time.
+    let backstopClosed = false
+    for (const o of ordered.slice(0, -1)) {
+      const at = cancelledAt.get(o.cid)
+      if (at === undefined) continue
+      const atMs = fromCanonicalDatetime(at)
+      if (Number.isNaN(atMs)) return { status: 'ambiguous' }
+      if (atMs > head.nowMs) backstopClosed = true
+    }
+
+    if (cancelledAt.has(head.cid) || backstopClosed) return { status: 'no-longer-valid' }
+    const unexpired = await this.ctx.db
+      .prepare('SELECT 1 AS x FROM InviteSlot WHERE Cid = :slotCid AND Expiration > :now')
+      .get({ slotCid: head.cid, now })
+    if (!unexpired) return { status: 'no-longer-valid' }
+    return { status: 'live', cid: head.cid }
+  }
 
   private rethrow (err: unknown, method: string): never {
     if (err instanceof QuereusError) {

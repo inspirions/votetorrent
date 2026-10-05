@@ -1,5 +1,6 @@
 import type {
   IInvitationEngine,
+  InviteSlotResolution,
   InviteStatus,
   SentOfficerInvite,
   SentAuthorityInvite,
@@ -43,6 +44,11 @@ const MOCK_PENDING_AUTHORITY_INVITES: Array<InviteStatus<SentAuthorityInvite>> =
 ]
 
 export class MockInvitationEngine implements IInvitationEngine {
+  // The mock seeds no slots, so every share is honestly not-found.
+  async resolveInviteSlot (_inviteKey: string, _type: InviteType): Promise<InviteSlotResolution> {
+    return { status: 'not-found' }
+  }
+
   // The mock seeds no slots, so every share is honestly not-found.
   async resolveInviteSlotCid (_inviteKey: string, _type: InviteType): Promise<string | undefined> {
     return undefined
