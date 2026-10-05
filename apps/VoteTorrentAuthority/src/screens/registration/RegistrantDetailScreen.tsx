@@ -19,6 +19,7 @@ import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { DateField } from "../../components/DateField";
 import { InlineError } from "../../components/InlineError";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
@@ -504,7 +505,12 @@ export default function RegistrantDetailScreen() {
 		privateReadState === "readable" ? privateTier?.privateDetails : undefined
 	);
 
+	// The typed LifecycleConfirmCard holds a text input inside the ScrollView. Under forced
+	// edge-to-edge (targetSdk 35) adjustResize is inert, so the shell pads by the IME height and
+	// the ScrollView viewport ends at the top of the keyboard (same cause as the approval
+	// screen's reject card, UAT 62 gap 3).
 	return (
+		<KeyboardAvoidingScreen testID="registrant-detail-screen">
 		<ScrollView
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
@@ -748,6 +754,7 @@ export default function RegistrantDetailScreen() {
 			    because the trail's rows are private field NAMES. */}
 			<AccessHistorySection registrantId={registrantId} canView={canViewPrivate} />
 		</ScrollView>
+		</KeyboardAvoidingScreen>
 	);
 }
 
