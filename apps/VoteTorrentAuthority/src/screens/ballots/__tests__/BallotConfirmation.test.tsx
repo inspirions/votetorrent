@@ -514,6 +514,125 @@ describe('EditBallotScreen — fails closed on an unknown confirmation state (CR
   });
 });
 
+describe('EditBallotScreen — re-reads the lock after a refused Propose or Submit (WR-04)', () => {
+  const SUBMIT_REFUSAL = 'ElectionEngine.submitBallotForConfirmation: This ballot is already submitted for confirmation.';
+  const PROPOSE_REFUSAL = 'ElectionEngine.proposeBallot: This ballot is out for confirmation and cannot be edited. Withdraw it first.';
+
+  it('E1 stale Submit: refused as already submitted -> footer swaps to Withdraw, no failure copy', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen('Edit');
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false });
+    engine.submitBallotForConfirmation = jest.fn(async () => { throw new Error(SUBMIT_REFUSAL); });
+    await press(tr, 'edit-ballot-submit');
+
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
+  });
+
+  it('E2 stale Propose: refused as out for confirmation -> Withdraw renders, no failure copy', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen('Edit');
+
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false });
+    engine.proposeBallot = jest.fn(async () => { throw new Error(PROPOSE_REFUSAL); });
+    await press(tr, 'edit-ballot-propose');
+
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(treeContainsText(tr, 'ballotProposeFailed')).toBe(false);
+  });
+
+  it('E3 refusal into confirmed: no footer buttons and no failure copy', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen('Edit');
+
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: false, confirmed: true });
+    engine.submitBallotForConfirmation = jest.fn(async () => { throw new Error('ElectionEngine.submitBallotForConfirmation: This ballot is already confirmed.'); });
+    await press(tr, 'edit-ballot-submit');
+
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
+  });
+
+  it('E4 positive control: a non-lock failure with the ballot still unlocked keeps the failure copy and both buttons', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen('Edit');
+
+    engine.submitBallotForConfirmation = jest.fn(async () => { throw new Error('some other failure'); });
+    await press(tr, 'edit-ballot-submit');
+
+    expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+  });
+
+  it('E5 through the real mock engine: another officer submits, then Submit is refused and the footer flips to Withdraw', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen('Edit');
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+
+    await engine.submitBallotForConfirmation(BALLOT_ID); // another officer, behind the screen's back
+    await press(tr, 'edit-ballot-submit');
+
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+    expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
+  });
+
+  it('E6 a refresh that rejects after a refused Submit fails closed (no Propose/Submit/Withdraw, Retry shows)', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen('Edit');
+
+    jest.spyOn(engine, 'getBallotConfirmationState').mockRejectedValue(new Error('boom'));
+    engine.submitBallotForConfirmation = jest.fn(async () => { throw new Error(SUBMIT_REFUSAL); });
+    await press(tr, 'edit-ballot-submit');
+
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-state-retry')).toBe(true);
+  });
+
+  it('E7 reached-but-unfinalized pin (T-62-62-08): locked footer; a refused Withdraw shows ballotWithdrawFailed and never offers Propose/Submit', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false });
+    engine.withdrawBallotConfirmation = jest.fn(async () => {
+      throw new Error('ElectionEngine.withdrawBallotConfirmation: This ballot is already confirmed and can no longer be withdrawn.');
+    });
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen('Edit');
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+
+    await press(tr, 'edit-ballot-withdraw');
+
+    expect(treeContainsText(tr, 'ballotWithdrawFailed')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+  });
+});
+
 describe('CreateBallotScreen — Propose only (62-55)', () => {
   it('renders Propose and no Submit for confirmation / Withdraw, even with a draft id present', async () => {
     const { engine } = newEngine();

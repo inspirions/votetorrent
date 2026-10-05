@@ -139,14 +139,18 @@ const EditBallotScreen = () => {
 
 	// One read path for the focus effect, the post-Submit/Withdraw refresh and Retry. Success
 	// clears the failure flag; failure sets it (fail closed, CR-03) and logs the error CLASS only.
-	const readConfirmationState = useCallback(async () => {
+	// Returns the state it read ({ locked, confirmed }), or null when the read failed.
+	const readConfirmationState = useCallback(async (): Promise<{ locked: boolean; confirmed: boolean } | null> => {
 		try {
 			const state = await electionEngine.getBallotConfirmationState(ballotId);
-			setConfirmationState({ locked: !!state.locked, confirmed: !!state.confirmed });
+			const fresh = { locked: !!state.locked, confirmed: !!state.confirmed };
+			setConfirmationState(fresh);
 			setStateReadFailed(false);
+			return fresh;
 		} catch (error) {
 			console.warn("getBallotConfirmationState failed", error instanceof Error ? error.name : "unknown");
 			setStateReadFailed(true);
+			return null;
 		}
 	}, [electionEngine, ballotId]);
 
@@ -190,7 +194,15 @@ const EditBallotScreen = () => {
 			console.warn("submitBallotForConfirmation error", error);
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? t("ballotSubmitFailed"));
+			// The engine refuses a ballot that is out for confirmation or confirmed (proposeBallot,
+			// and since WR-04 submitBallotForConfirmation); a stale screen re-reads so its footer
+			// follows the engine instead of inviting a retry that cannot succeed (WR-04, 62-REVIEW.md).
+			const fresh = await readConfirmationState();
+			if (fresh && (fresh.locked || fresh.confirmed)) {
+				setErrorMessage("");
+			} else {
+				setErrorMessage(outcome.message ?? t("ballotSubmitFailed"));
+			}
 		} finally {
 			submittingRef.current = false;
 			setSubmitting(false);
@@ -269,7 +281,14 @@ const EditBallotScreen = () => {
 			navigation.goBack();
 		} catch (error) {
 			console.warn("proposeBallot error", error);
-			setErrorMessage(t("ballotProposeFailed"));
+			// Same re-read as the submit catch: a refusal because the ballot is now out for
+			// confirmation or confirmed must leave the footer matching the engine (WR-04).
+			const fresh = await readConfirmationState();
+			if (fresh && (fresh.locked || fresh.confirmed)) {
+				setErrorMessage("");
+			} else {
+				setErrorMessage(t("ballotProposeFailed"));
+			}
 		} finally {
 			setProposing(false);
 		}
