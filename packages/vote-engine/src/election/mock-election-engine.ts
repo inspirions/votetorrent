@@ -196,7 +196,16 @@ export class MockElectionEngine implements IElectionEngine {
 	// ---------- confirm-path (D-10 mock parity, 31-04) ----------
 	// Real in-memory behavior mirroring the real engine's submit → confirm → finalize → withdraw flow.
 
-	async submitBallotForConfirmation(ballotId: string): Promise<void> {
+	async submitBallotForConfirmation(
+		ballotId: string,
+		_sign?: (digest: Uint8Array) => Promise<Signature>,
+	): Promise<void> {
+		// Real-engine parity (election-engine.ts ~L937, UAT 62 test 13): a ballot that
+		// was never proposed has no ProposedBallot row, so submit is refused with the
+		// same message. Without this check jest passed a Submit that fails on device.
+		if (!this.ballots.some((b) => b.id === ballotId)) {
+			throw new Error(`ProposedBallot not found: ${ballotId}`);
+		}
 		const current = this.confirmationState.get(ballotId);
 		if (current === 'submitted') {
 			throw new Error(`Ballot ${ballotId} is already submitted for confirmation`);
