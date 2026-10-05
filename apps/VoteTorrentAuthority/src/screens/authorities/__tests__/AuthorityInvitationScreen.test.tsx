@@ -21,6 +21,8 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
+import { StyleSheet } from 'react-native';
+import { globalStyles } from '../../../theme/styles';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
 
@@ -255,6 +257,21 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
     expect(rendered).not.toContain('Cid');
   });
 
+  it('the refusal copy renders inside the screen padding, not flush at x=0 (UAT gap 4 item 6)', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(new Error('boom'));
+    const tr = await render();
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'accept').props.onPress();
+      await Promise.resolve();
+    });
+    const wrapper = tr.root.findByProps({ testID: 'authority-invitation-error' });
+    const style = StyleSheet.flatten(wrapper.props.style);
+    expect(style.paddingHorizontal).toBe(globalStyles.container.padding);
+    // the copy itself is a descendant of the padded wrapper
+    const texts = wrapper.findAll((n) => n.props?.children === 'invitationAcceptFailed');
+    expect(texts.length).toBeGreaterThan(0);
+  });
+
   it('not-found renders invitationAcceptNotFound and never navigates', async () => {
     mockResolveInviteSlot.mockResolvedValue({ status: 'not-found' });
     const tr = await render();
@@ -318,5 +335,19 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
   it('uses the shared paste placeholder, not hardcoded English', async () => {
     const tr = await render();
     expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptPastePlaceholder');
+  });
+});
+
+describe('AuthorityInvitationScreen - create mode error placement (UAT gap 4 item 6)', () => {
+  it('the name-required error renders inside the screen padding', async () => {
+    mockRouteParams = { mode: 'send' };
+    const tr = await render();
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'send').props.onPress();
+      await Promise.resolve();
+    });
+    const wrapper = tr.root.findByProps({ testID: 'authority-invitation-error' });
+    expect(StyleSheet.flatten(wrapper.props.style).paddingHorizontal).toBe(globalStyles.container.padding);
+    expect(JSON.stringify(tr.toJSON())).toContain('errAuthorityNameRequired');
   });
 });

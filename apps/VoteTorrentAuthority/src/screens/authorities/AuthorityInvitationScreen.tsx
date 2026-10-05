@@ -281,7 +281,10 @@ export default function AuthorityInvitationScreen() {
 						) : null}
 					</View>
 				</ScrollView>
-				<InlineError message={errorMessage} />
+				{/* Padded like the ScrollView content: refusal copy must not sit flush at x=0 (UAT 62 gap 4 item 6) */}
+				<View testID="authority-invitation-error" style={{ paddingHorizontal: globalStyles.container.padding }}>
+					<InlineError message={errorMessage} />
+				</View>
 				{!shareText ? (
 					<Footer>
 						<CustomButton
@@ -401,7 +404,9 @@ export default function AuthorityInvitationScreen() {
 				</View>
 			</ScrollView>
 			{/* GAP-2: surface respondToInvite failures inline in accept mode */}
-			<InlineError message={errorMessage} />
+			<View testID="authority-invitation-error" style={{ paddingHorizontal: globalStyles.container.padding }}>
+				<InlineError message={errorMessage} />
+			</View>
 			<SignatureTaskFooter
 				onAccept={onAccept}
 				onReject={onDecline}

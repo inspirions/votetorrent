@@ -331,7 +331,9 @@ export default function AdministratorInvitationScreen() {
 				</View>
 			</ScrollView>
 			{/* GAP-2: surface respondToInvite failures inline in accept mode */}
-			<InlineError message={errorMessage} />
+			<View testID="administrator-invitation-error" style={{ paddingHorizontal: globalStyles.container.padding }}>
+				<InlineError message={errorMessage} />
+			</View>
 			<SignatureTaskFooter
 				onAccept={onAccept}
 				onReject={onDecline}

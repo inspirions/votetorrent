@@ -19,6 +19,8 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
+import { StyleSheet } from 'react-native';
+import { globalStyles } from '../../../theme/styles';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
 
@@ -234,6 +236,21 @@ describe('AdministratorInvitationScreen - accept mode resolves the slot from the
     expect(rendered).toContain('invitationAcceptFailed');
     expect(rendered).not.toContain('InvitationEngine');
     expect(rendered).not.toContain('Cid');
+  });
+
+  it('the refusal copy renders inside the screen padding, not flush at x=0 (UAT gap 4 item 6)', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(new Error('boom'));
+    const tr = await render();
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'accept').props.onPress();
+      await Promise.resolve();
+    });
+    const wrapper = tr.root.findByProps({ testID: 'administrator-invitation-error' });
+    const style = StyleSheet.flatten(wrapper.props.style);
+    expect(style.paddingHorizontal).toBe(globalStyles.container.padding);
+    // the copy itself is a descendant of the padded wrapper
+    const texts = wrapper.findAll((n) => n.props?.children === 'invitationAcceptFailed');
+    expect(texts.length).toBeGreaterThan(0);
   });
 
   it('not-found renders invitationAcceptNotFound and never navigates', async () => {

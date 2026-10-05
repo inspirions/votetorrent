@@ -329,7 +329,8 @@ export default function ElectionDetailsScreen() {
 						return (
 							<InfoCard
 								key={ballot.id}
-								title={ballot.authorityId || t("ballotTemplate")}
+								// The row names the ballot, never the authority's raw id (UAT 62 gap 4 item 4).
+								title={ballot.description?.trim() || t("ballotTemplate")}
 								subtitle={statusLabel}
 								icon="chevron-right"
 								onPress={() =>
