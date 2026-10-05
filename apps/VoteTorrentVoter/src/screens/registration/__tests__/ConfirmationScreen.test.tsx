@@ -18,6 +18,7 @@
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
+import {Linking} from 'react-native';
 import '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 const mockPopToTop = jest.fn();
@@ -59,9 +60,9 @@ jest.mock('@react-navigation/native', () => ({
 	}),
 }));
 
-jest.mock('react-native/Libraries/Linking/Linking', () => ({
-	sendIntent: (...args: unknown[]) => mockSendIntent(...args),
-}));
+// Route the public `Linking.sendIntent` through mockSendIntent. A jest.mock of the deep
+// `react-native/Libraries/Linking/Linking` path stopped working on RN 0.79+ (internal modules
+// moved to `export default`, so a factory without `default` yields an undefined Linking).
 
 // ---- Mocked engine boundary: getEngine('network') ----
 
@@ -352,6 +353,7 @@ beforeEach(() => {
 	mockDeviceSign.mockClear();
 	mockGetOrCreateDeviceUser.mockClear();
 	mockSendIntent.mockClear();
+	jest.spyOn(Linking, 'sendIntent').mockImplementation((...args: Parameters<typeof Linking.sendIntent>) => mockSendIntent(...args));
 	mockProvisionDeviceKey.mockClear();
 	mockProduce.mockClear();
 	mockSignDeviceKeyDigest.mockClear();

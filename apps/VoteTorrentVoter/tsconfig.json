@@ -1,5 +1,5 @@
 {
-  "extends": "@react-native/typescript-config/tsconfig.json",
+  "extends": "@react-native/typescript-config",
   "compilerOptions": {
     // Phase 59 plan 59-02 (D-21): `@votetorrent/ui-web/lifecycle-core` is a
     // plain-JS, JSDoc-typed module with no `.d.ts` and no build step (D-19 --

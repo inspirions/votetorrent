@@ -20,7 +20,7 @@ const UINT8ARRAYS_DIST = (() => {
 })();
 
 module.exports = {
-  preset: 'react-native',
+  preset: '@react-native/jest-preset',
   // 2026-08-29 (Phase 51 Nyquist audit). Jest's implicit per-test budget is 5000ms, which this
   // app's render-heavy screen/navigation suites cannot hold on a COLD cache: a clean
   // `yarn jest --clearCache && yarn jest` runs ~98 suites whose Babel transforms all miss at

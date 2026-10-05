@@ -3,7 +3,7 @@ import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import React, { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { ScrollView, StyleSheet, TouchableOpacity, View, Image, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
+import { ScrollView, StyleSheet, TouchableOpacity, View, Image, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent, type ScrollViewInstance } from "react-native";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
@@ -60,7 +60,7 @@ export default function AddNetworkScreen() {
 	// this the screen looks frozen for the whole `builder.commit()` await — indistinguishable
 	// from a hang.
 	const [creating, setCreating] = useState(false);
-	const scrollViewRef = useRef<ScrollView>(null);
+	const scrollViewRef = useRef<ScrollViewInstance>(null);
 	// When the inline error appears it grows the footer, which shrinks the scroll
 	// viewport. Android keeps the old scroll offset, so if the user was at the bottom
 	// the last controls (e.g. ADD RELAY) slide out of view behind the error. Track

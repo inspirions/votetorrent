@@ -23,7 +23,7 @@
  */
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {ActivityIndicator, AppState, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View} from 'react-native';
-import type {LayoutChangeEvent} from 'react-native';
+import type {LayoutChangeEvent, ScrollViewInstance} from 'react-native';
 import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
@@ -113,7 +113,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 	const answeredRef = useRef(false);
 	const advanceInFlightRef = useRef(false);
 
-	const scrollRef = useRef<ScrollView>(null);
+	const scrollRef = useRef<ScrollViewInstance>(null);
 	const viewportHeightRef = useRef(0);
 	const fieldFramesRef = useRef<Record<string, {y: number; height: number}>>({});
 	const focusedFieldKeyRef = useRef<string | null>(null);

@@ -1,5 +1,5 @@
 module.exports = {
-  preset: 'react-native',
+  preset: '@react-native/jest-preset',
   // @react-navigation/* ships ESM-only (package.json "main" points at lib/module/index.js,
   // no commonjs build) and react-native-vector-icons' per-family entry files (e.g.
   // FontAwesome6.js) are also plain ESM source — Babel must transform both like first-party
