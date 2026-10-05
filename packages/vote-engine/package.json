@@ -18,7 +18,8 @@
 		},
 		"./rn": {
 			"types": "./dist/rn-entry.d.ts",
-			"import": "./dist/rn-entry.js"
+			"import": "./dist/rn-entry.js",
+			"default": "./dist/rn-entry.js"
 		},
 		"./browser": {
 			"types": "./dist/browser-entry.d.ts",
