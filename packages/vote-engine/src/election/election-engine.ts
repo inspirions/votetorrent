@@ -1,4 +1,4 @@
-import { MisuseError, QuereusError } from '@quereus/quereus'
+import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import type { SqlValue } from '@quereus/quereus'
 import { digestToBytes, formatPgRange, fromCanonicalDatetime, keyholderInviteSignedBytes, nowCanonicalDatetime, parseJsonOr, parseKeyholdersAsInviteStatus, parsePgRange, verifyAdHocInviteSignature } from '../utils.js'
 import type { EngineContext } from '../types.js'
@@ -1389,14 +1389,6 @@ export class ElectionEngine implements IElectionEngine {
   }
 
   private rethrow (err: unknown, method: string): never {
-    if (err instanceof QuereusError) {
-      throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
-    } else if (err instanceof MisuseError) {
-      throw new Error(`API misuse: ${err.message}`)
-    } else if (err instanceof Error) {
-      throw new Error(`ElectionEngine.${method}: ${err.message}`)
-    } else {
-      throw new Error(`ElectionEngine.${method}: unknown error: ${String(err)}`)
-    }
+    return rethrowHelper(err, 'ElectionEngine', method)
   }
 }

@@ -138,7 +138,12 @@ export function rethrow (err: unknown, engineName: string, method: string): neve
   } else if (err instanceof MisuseError) {
     throw new Error(`API misuse: ${err.message}`)
   } else if (err instanceof Error) {
-    throw new Error(`${engineName}.${method}: ${err.message}`)
+    const wrapped = new Error(`${engineName}.${method}: ${err.message}`)
+    // The app routes engine/signer refusals by `code` (e.g. KEY_INVALIDATED_REASSOCIATE), never by
+    // message text — carry it across the boundary, only when the source actually has a string one.
+    const code = (err as { code?: unknown }).code
+    if (typeof code === 'string') Object.assign(wrapped, { code })
+    throw wrapped
   } else {
     throw new Error(`${engineName}.${method}: unknown error: ${String(err)}`)
   }

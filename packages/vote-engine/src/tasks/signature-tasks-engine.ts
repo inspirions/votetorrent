@@ -1,4 +1,3 @@
-import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { SqlValue, Database } from '@quereus/quereus'
 import { SigningEngine } from '../signing/signing-engine.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
@@ -7,7 +6,7 @@ import { readSessionThreshold } from '../signing/threshold.js'
 import { fanOutSignatureTasks } from '../signing/fan-out.js'
 import { findPendingAdminTaskRow, findPendingTaskNonce, findRegistrantSessionNonce } from './task-signing-status.js'
 import { resolveSignedSubmittedAt } from '../signing/signed-submitted-at.js'
-import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
+import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { digestToBytes, formatPgRange, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError, RegistrationDuplicateError, RegistrationContentAccessError, RequesterSignatureUnverifiableError } from '@votetorrent/vote-core'
@@ -2108,16 +2107,6 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
   }
 
   private rethrow (err: unknown, method: string): never {
-    if (err instanceof QuereusError) {
-      throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
-    } else if (err instanceof MisuseError) {
-      throw new Error(`API misuse: ${err.message}`)
-    } else if (err instanceof Error) {
-      throw new Error(`SignatureTasksEngine.${method}: ${err.message}`)
-    } else {
-      throw new Error(
-				`SignatureTasksEngine.${method}: unknown error: ${String(err)}`
-      )
-    }
+    return rethrowHelper(err, 'SignatureTasksEngine', method)
   }
 }

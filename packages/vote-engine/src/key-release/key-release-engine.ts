@@ -263,7 +263,7 @@
 // device proof debt: item 15, tracked for 62-30 — never claim device proof
 // for this review.
 
-import { MisuseError, QuereusError } from '@quereus/quereus'
+import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import type {
@@ -876,9 +876,6 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
   private rethrow (err: unknown, method: string): never {
     if (err instanceof KeyReleaseError) throw err
     if (err instanceof KeyVaultError) throw err
-    if (err instanceof QuereusError) throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
-    if (err instanceof MisuseError) throw new Error(`API misuse: ${err.message}`)
-    if (err instanceof Error) throw new Error(`KeyReleaseEngine.${method}: ${err.message}`)
-    throw new Error(`KeyReleaseEngine.${method}: unknown error: ${String(err)}`)
+    return rethrowHelper(err, 'KeyReleaseEngine', method)
   }
 }

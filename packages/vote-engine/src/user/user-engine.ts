@@ -1,4 +1,4 @@
-import { MisuseError, QuereusError } from '@quereus/quereus'
+import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { FeatureNotAvailableError, toImageRef, UserHistoryEvent, UserKeyType } from '@votetorrent/vote-core'
 import { bytesToBase64url, digestToBytes, fromCanonicalDatetime, nowCanonicalDatetime, parseJsonOr, toCanonicalDatetime } from '../utils.js'
 import { verifySig, verifySigP256 } from '../database/initialize.js'
@@ -618,14 +618,6 @@ export class UserEngine implements IUserEngine {
   }
 
   private rethrow (err: unknown, method: string): never {
-    if (err instanceof QuereusError) {
-      throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
-    } else if (err instanceof MisuseError) {
-      throw new Error(`API misuse: ${err.message}`)
-    } else if (err instanceof Error) {
-      throw new Error(`UserEngine.${method}: ${err.message}`)
-    } else {
-      throw new Error(`UserEngine.${method}: unknown error: ${String(err)}`)
-    }
+    return rethrowHelper(err, 'UserEngine', method)
   }
 }

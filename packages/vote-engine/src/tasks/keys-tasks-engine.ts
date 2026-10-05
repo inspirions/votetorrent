@@ -1,4 +1,4 @@
-import { MisuseError, QuereusError } from '@quereus/quereus'
+import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { fromCanonicalDatetime, parseJsonOr, parseKeyholdersAsInviteStatus } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import type {
@@ -266,14 +266,6 @@ export class KeysTasksEngine implements IKeysTasksEngine {
   }
 
   private rethrow (err: unknown, method: string): never {
-    if (err instanceof QuereusError) {
-      throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
-    } else if (err instanceof MisuseError) {
-      throw new Error(`API misuse: ${err.message}`)
-    } else if (err instanceof Error) {
-      throw new Error(`KeysTasksEngine.${method}: ${err.message}`)
-    } else {
-      throw new Error(`KeysTasksEngine.${method}: unknown error: ${String(err)}`)
-    }
+    return rethrowHelper(err, 'KeysTasksEngine', method)
   }
 }

@@ -1,7 +1,7 @@
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { MisuseError, QuereusError } from '@quereus/quereus'
+import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import type { EngineContext } from '../types.js'
 import { digestToBytes, fromCanonicalDatetime, inviteResultSignedBytes, nowCanonicalDatetime, toCanonicalDatetime, verifyAdHocInviteSignature } from '../utils.js'
 import { allocateTid } from '../database/tid-allocator.js'
@@ -608,14 +608,6 @@ export class InvitationEngine implements IInvitationEngine {
   }
 
   private rethrow (err: unknown, method: string): never {
-    if (err instanceof QuereusError) {
-      throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
-    } else if (err instanceof MisuseError) {
-      throw new Error(`API misuse: ${err.message}`)
-    } else if (err instanceof Error) {
-      throw new Error(`InvitationEngine.${method}: ${err.message}`)
-    } else {
-      throw new Error(`InvitationEngine.${method}: unknown error: ${String(err)}`)
-    }
+    return rethrowHelper(err, 'InvitationEngine', method)
   }
 }

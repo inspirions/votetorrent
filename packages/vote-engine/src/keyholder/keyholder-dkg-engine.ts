@@ -395,7 +395,7 @@
 // Hermes device proof debt: see item 19. Tracked for 62-30 — never claim
 // device proof for this review.
 
-import { MisuseError, QuereusError } from '@quereus/quereus'
+import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import {
   DKG_MAX_ATTEMPTS,
@@ -1118,9 +1118,6 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
   private rethrow (err: unknown, method: string): never {
     if (err instanceof KeyholderDkgError) throw err
     if (err instanceof KeyVaultError) throw err
-    if (err instanceof QuereusError) throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
-    if (err instanceof MisuseError) throw new Error(`API misuse: ${err.message}`)
-    if (err instanceof Error) throw new Error(`KeyholderDkgEngine.${method}: ${err.message}`)
-    throw new Error(`KeyholderDkgEngine.${method}: unknown error: ${String(err)}`)
+    return rethrowHelper(err, 'KeyholderDkgEngine', method)
   }
 }
