@@ -17,6 +17,7 @@
  */
 
 import React from 'react';
+import { StyleSheet } from 'react-native';
 import renderer from 'react-test-renderer';
 
 jest.mock('react-native-vector-icons/FontAwesome6', () => 'FontAwesome6');
@@ -109,6 +110,19 @@ function styleValue(tr: renderer.ReactTestRenderer, testID: string, key: string)
     (s: unknown) => s !== null && typeof s === 'object' && key in (s as Record<string, unknown>),
   ) as Record<string, unknown> | undefined;
   return withKey?.[key];
+}
+
+/**
+ * The CLICKABLE element's margin: read from CustomButton's real styles (via the rendered
+ * touchable inside the slot), so changing CustomButton.marginVertical breaks the pin below.
+ */
+function buttonVerticalMargin(tr: renderer.ReactTestRenderer, slotTestID: string): number {
+  const slot = tr.root.findByProps({ testID: slotTestID });
+  const touchable = slot.findAll(
+    (n) => n.props.accessibilityRole === 'button' && n.props.style !== undefined,
+  )[0];
+  const flat = StyleSheet.flatten(touchable.props.style) as { marginVertical?: number };
+  return flat.marginVertical ?? 0;
 }
 
 function buttonBackground(tr: renderer.ReactTestRenderer, wrapperTestID: string): unknown {
@@ -544,7 +558,12 @@ describe('LifecycleConfirmCard — D-10', () => {
     const { tr } = renderCard();
     for (const id of ['lifecycle-confirm-dismiss', 'lifecycle-confirm-confirm']) {
       expect(styleValue(tr, id, 'flexDirection')).toBe('row');
-      expect(styleValue(tr, id, 'minHeight')).toBeGreaterThanOrEqual(48);
+      // The clickable button is the slot minus its own vertical margins (flex stretch), so the
+      // slot floor must be 48dp of button PLUS 2 x marginVertical. A bare 48 floor never bound:
+      // the 36dp thin button plus 16dp of margin is already 52dp.
+      expect(
+        (styleValue(tr, id, 'minHeight') as number) - 2 * buttonVerticalMargin(tr, id),
+      ).toBeGreaterThanOrEqual(48);
     }
   });
 });

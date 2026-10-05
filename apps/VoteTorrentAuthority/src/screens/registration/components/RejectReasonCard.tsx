@@ -241,6 +241,11 @@ export function RejectReasonCard({
 	);
 }
 
+/** Minimum clickable height of a card button, dp (Android 48dp touch target). */
+const BUTTON_MIN_HEIGHT = 48;
+/** CustomButton styles.button.marginVertical, dp, each side. */
+const BUTTON_MARGIN_VERTICAL = 8;
+
 const localStyles = StyleSheet.create({
 	buttonRow: {
 		flexDirection: "row",
@@ -252,9 +257,13 @@ const localStyles = StyleSheet.create({
 		// Row direction on purpose: CustomButton's `flex` assumes a row parent (see the note at
 		// each button). The slot still splits the row 50/50 via flex:1 + minWidth:0.
 		flexDirection: "row",
-		// 48dp floor: a one-line thin CustomButton is 36dp (95px on Pixel_8, measured on the
-		// Share Network confirm). The row stretches to this, and `flex` stretches the button.
-		minHeight: 48,
+		// Floor on the CLICKABLE button, not the slot: `flex` stretches the button to the slot
+		// height MINUS CustomButton's own marginVertical (8 top + 8 bottom). A one-line thin
+		// button is 36dp natural (95px on Pixel_8), so a bare 48 slot floor never bound (36 + 16
+		// = 52 > 48) and the button stayed at 36dp. So the slot floor is 48dp of button plus the
+		// margins. If CustomButton's marginVertical changes, update BUTTON_MARGIN_VERTICAL
+		// (the jest structural pin reads the real margin and fails on a mismatch).
+		minHeight: BUTTON_MIN_HEIGHT + 2 * BUTTON_MARGIN_VERTICAL,
 		flex: 1,
 		minWidth: 0,
 	},

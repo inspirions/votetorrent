@@ -113,11 +113,14 @@ if (argv.includes("--selftest")) {
 	const dir = join(dirname(fileURLToPath(import.meta.url)), "lib", "__fixtures__", "card-button-geometry");
 	const labels = ["KEEP REVIEWING", "CONFIRM REJECTION"];
 	let ok = true;
-	for (const [f, expected] of [
+	for (const [f, expected, fixtureLabels] of [
 		["reject-card-collapsed.xml", "FAIL"],
 		["reject-card-healthy.xml", "PASS"],
+		// 62-54 device reading: slot wrapper 137px (passes a slot-only check) but the
+		// clickable button inside is 95px < 116px floor. The gate measures the button.
+		["share-network-slot-ok-button-short.xml", "FAIL", ["DON'T SHARE", "SHARE FILE"]],
 	]) {
-		const got = run(readFileSync(join(dir, f), "utf8"), labels, 420) ? "PASS" : "FAIL";
+		const got = run(readFileSync(join(dir, f), "utf8"), fixtureLabels ?? labels, 420) ? "PASS" : "FAIL";
 		console.log(`SELFTEST ${f}: expected ${expected} got ${got}`);
 		if (got !== expected) ok = false;
 	}
