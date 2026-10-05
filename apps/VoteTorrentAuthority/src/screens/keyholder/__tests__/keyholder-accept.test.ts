@@ -21,7 +21,7 @@ import { createFakeSecretWrapper, createMapStorage } from '../../../engines/__fi
 import { listKeyholderIdentities } from '../../../engines/keyholder-identity';
 import type { KeyVaultStorage } from '../../../engines/key-vault';
 import { acceptKeyholderInvitation } from '../keyholder-accept';
-import { InviteShareError } from '../../invitations/invite-share';
+import { InviteShareError, inviteShareErrorKey } from '../../invitations/invite-share';
 
 async function seedElection() {
 	const net = await createTestNetwork();
@@ -162,12 +162,15 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const seeded = await seedElection();
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Frank');
 		const { vault, storage } = makeVaultHarness();
+		let statusCalls = 0;
 		const unknownOutcomeEngine = {
 			resolveInviteSlotCid: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlotCid(k, t)),
 			respondToInvite: jest.fn(async () => {
 				throw new Error('original failure');
 			}),
-			getKeyholderInvite: jest.fn(async () => {
+			// The first read is the answered-slot pre-check (must succeed); the reconcile re-read fails.
+			getKeyholderInvite: jest.fn(async (id: string) => {
+				if (++statusCalls === 1) return new InvitationEngine(seeded.auth.ctx).getKeyholderInvite(id);
 				throw new Error('re-read also failed');
 			}),
 		};
@@ -243,5 +246,24 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 
 		expect(wrapper.authWraps).toBe(0);
 		expect(await listKeyholderIdentities(storage)).toHaveLength(0);
+	});
+
+	it('A10: re-accepting an ALREADY-ANSWERED slot rejects already-answered with 0 further wraps and 0 further identities', async () => {
+		const seeded = await seedElection();
+		const { shareText } = await inviteKeyholder(seeded, 'Kay Two');
+		const { vault, storage, wrapper } = makeVaultHarness();
+		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+
+		await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
+		expect(wrapper.authWraps).toBe(2);
+		expect(await listKeyholderIdentities(storage)).toHaveLength(1);
+
+		const err = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText).catch((e) => e);
+
+		expect(err).toBeInstanceOf(InviteShareError);
+		expect(err.code).toBe('already-answered');
+		expect(inviteShareErrorKey(err)).toBe('invitationAcceptAlreadyAnswered');
+		expect(wrapper.authWraps).toBe(2);
+		expect(await listKeyholderIdentities(storage)).toHaveLength(1);
 	});
 });

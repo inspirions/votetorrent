@@ -17,12 +17,13 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js';
 import type { IInvitationEngine, InviteType } from '@votetorrent/vote-core';
 
-export type InviteShareErrorCode = 'malformed' | 'wrong-type' | 'not-found';
+export type InviteShareErrorCode = 'malformed' | 'wrong-type' | 'not-found' | 'already-answered';
 
 const MESSAGES: Record<InviteShareErrorCode, string> = {
 	malformed: 'Invitation text is malformed',
 	'wrong-type': 'Invitation is for a different role',
 	'not-found': 'Invitation not found on this device',
+	'already-answered': 'Invitation has already been answered',
 };
 
 export class InviteShareError extends Error {
@@ -83,7 +84,7 @@ export function parseInviteShare(text: string): ParsedInviteShare | undefined {
 }
 
 export async function resolveInviteFromShare(
-	engine: Pick<IInvitationEngine, 'resolveInviteSlotCid'>,
+	engine: Pick<IInvitationEngine, 'resolveInviteSlotCid' | 'getKeyholderInvite' | 'getOfficerInvite' | 'getAuthorityInvite'>,
 	text: string,
 	expectedType: InviteType
 ): Promise<{ slotCid: string; invitePrivate: string; share: ParsedInviteShare }> {
@@ -92,6 +93,17 @@ export async function resolveInviteFromShare(
 	if (share.type !== undefined && share.type !== expectedType) throw new InviteShareError('wrong-type');
 	const slotCid = await engine.resolveInviteSlotCid(share.inviteKey, expectedType);
 	if (!slotCid) throw new InviteShareError('not-found');
+	// Refuse an already-answered slot (accepted OR declined) BEFORE any caller provisions keys or
+	// signs: respondToInvite does not refuse it up front, so the biometric prompts would fire first.
+	const status =
+		expectedType === 'k'
+			? await engine.getKeyholderInvite(slotCid)
+			: expectedType === 'of'
+				? await engine.getOfficerInvite(slotCid)
+				: expectedType === 'au'
+					? await engine.getAuthorityInvite(slotCid)
+					: undefined;
+	if (status?.result !== undefined) throw new InviteShareError('already-answered');
 	return { slotCid, invitePrivate: share.invitePrivate, share };
 }
 
@@ -104,5 +116,7 @@ export function inviteShareErrorKey(err: unknown): string | undefined {
 			return 'invitationAcceptWrongType';
 		case 'not-found':
 			return 'invitationAcceptNotFound';
+		case 'already-answered':
+			return 'invitationAcceptAlreadyAnswered';
 	}
 }

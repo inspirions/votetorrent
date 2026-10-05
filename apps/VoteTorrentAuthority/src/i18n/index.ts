@@ -81,6 +81,7 @@ const resources = {
 			invitationAcceptMalformed: "This doesn't look like a complete invitation. Copy it again and paste all of it.",
 			invitationAcceptWrongType: 'This invitation is for a different role. Open it from Accept an Invitation in Settings.',
 			invitationAcceptNotFound: "This invitation hasn't reached this device yet, or it is no longer valid.",
+			invitationAcceptAlreadyAnswered: 'This invitation has already been answered. It cannot be accepted or declined again.',
 			invitationAcceptFailed: 'Could not respond to the invitation. Try again.',
 			soleInitialAdministratorNote:
 				'Please create a user on this network. Your user will be the sole initial administrator.',
@@ -1143,6 +1144,7 @@ const resources = {
 			invitationAcceptMalformed: 'Esto no parece una invitación completa. Cópiala de nuevo y pégala entera.',
 			invitationAcceptWrongType: 'Esta invitación es para otra función. Ábrela desde Aceptar una Invitación en Ajustes.',
 			invitationAcceptNotFound: 'Esta invitación aún no ha llegado a este dispositivo o ya no es válida.',
+			invitationAcceptAlreadyAnswered: 'Esta invitación ya fue respondida. No se puede aceptar ni rechazar de nuevo.',
 			invitationAcceptFailed: 'No se pudo responder a la invitación. Inténtalo de nuevo.',
 			soleInitialAdministratorNote:
 				'Cree un usuario en esta red. Su usuario será el único administrador inicial.',
