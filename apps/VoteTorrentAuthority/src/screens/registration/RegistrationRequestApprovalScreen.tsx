@@ -19,6 +19,8 @@ import { isChecklistGateMet } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
@@ -235,6 +237,7 @@ export default function RegistrationRequestApprovalScreen() {
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
+	const keyboardInset = useKeyboardInset();
 	const { getEngine, createPeerStagingTransports } = useApp();
 	const { scopes } = useCurrentOfficerScopes(authorityId);
 
@@ -655,7 +658,7 @@ export default function RegistrationRequestApprovalScreen() {
 	const rejectedMeta = REGISTRATION_REQUEST_STATUS_META.r;
 
 	return (
-		<View testID="registration-request-approval-screen" style={styles.content}>
+		<KeyboardAvoidingScreen testID="registration-request-approval-screen">
 			{/* Neither decided mode renders a footer (see below), so nothing else
 			    clears the Android gesture bar / iOS home indicator below the last
 			    line of the approved or rejected block — the rejected block's
@@ -935,7 +938,13 @@ export default function RegistrationRequestApprovalScreen() {
 			) : null}
 
 			{mode === "pending" && showRejectCard && read ? (
-				<View testID="registration-request-approval-reject-card-host" style={{ paddingBottom: insets.bottom }}>
+				// Under forced edge-to-edge (targetSdk 35) adjustResize is inert: the shell pads by the IME
+				// height, and the IME already covers the gesture bar, so adding insets.bottom too would push
+				// the card up by a phantom gap.
+				<View
+					testID="registration-request-approval-reject-card-host"
+					style={{ paddingBottom: keyboardInset > 0 ? 0 : insets.bottom }}
+				>
 				<RejectReasonCard
 					decisionGateMet={checklistGateMet}
 					requesterName={registrationRequestDisplayName({
@@ -949,7 +958,7 @@ export default function RegistrationRequestApprovalScreen() {
 				/>
 				</View>
 			) : null}
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 
