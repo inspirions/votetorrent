@@ -34,7 +34,6 @@
 
 import type { Signature } from '@votetorrent/vote-core'
 import { UserKeyType } from '@votetorrent/vote-core'
-import { verifySigP256 } from '@votetorrent/vote-engine/rn'
 import i18n from '../i18n'
 import { getDeviceUser, isRecoveryInProgress } from './device-user'
 // Type-only import — erased at compile time (isolatedModules requires this to be explicit), so
@@ -147,6 +146,19 @@ function assertNativeSigningAvailable(): NativeAttestationSpec {
  * why a cast, not an ambient declaration, is required under this app's `dom`-lib-free
  * `tsconfig.json`).
  */
+/**
+ * Lazy for the same reason as `getNative()`: `@votetorrent/vote-engine/rn` pulls the whole engine
+ * graph, and this file is imported transitively by suites that stub `@votetorrent/vote-core`.
+ * Resolved only when a signature is actually verified.
+ */
+function verifySigP256Lazy(digest: string, signature: string, signerKey: string): boolean {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires -- deliberate lazy require, see comment above.
+	const { verifySigP256 } = require('@votetorrent/vote-engine/rn') as {
+		verifySigP256: (d: string, s: string, k: string) => boolean
+	}
+	return verifySigP256(digest, signature, signerKey)
+}
+
 function base64urlFromDigestBytes(digest: Uint8Array): string {
 	// Unpadded base64url of the digest bytes: the `Digest()` output form `verifySigP256` expects.
 	return base64FromDigestBytes(digest).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -253,7 +265,7 @@ export async function createDeviceSigner (displayName: string): Promise<SignCall
 			i18n.t('deviceSigningPromptNegativeButton'),
 		)) as { signatureHex: string }
 
-		if (!verifySigP256(base64urlFromDigestBytes(digest), result.signatureHex, signerKey)) {
+		if (!verifySigP256Lazy(base64urlFromDigestBytes(digest), result.signatureHex, signerKey)) {
 			throw keyInvalidated(
 				'device-signer: the Keystore signing key does not match the recorded signer key. Re-run key recovery.',
 			)
