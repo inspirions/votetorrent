@@ -62,9 +62,9 @@ const mockRespondToInvite = jest.fn(
   ) => {}
 );
 const mockGetKeyholderInvite = jest.fn(async () => undefined);
-const mockResolveInviteSlotCid = jest.fn(async (_key: string, _type: string): Promise<string | undefined> => 'cid-1');
+const mockResolveInviteSlot = jest.fn(async (_key: string, _type: string): Promise<any> => ({ status: 'live', cid: 'cid-1' }));
 const mockInvitationEngine = {
-  resolveInviteSlotCid: mockResolveInviteSlotCid,
+  resolveInviteSlot: mockResolveInviteSlot,
   respondToInvite: mockRespondToInvite,
   getKeyholderInvite: mockGetKeyholderInvite,
 };
@@ -165,7 +165,7 @@ function makeFakeVault(overrides?: { putSecret?: jest.Mock }) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockRespondToInvite.mockResolvedValue(undefined);
-  mockResolveInviteSlotCid.mockResolvedValue('cid-1');
+  mockResolveInviteSlot.mockResolvedValue({ status: 'live', cid: 'cid-1' });
   mockAcceptKeyholderInvitation.mockResolvedValue({ userId: 'u', slotCid: 'cid-1' });
   setKeyholderKeyVaultForTests(makeFakeVault() as never);
 });
@@ -213,6 +213,7 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
     ['not-found', 'invitationAcceptNotFound'],
     ['wrong-type', 'invitationAcceptWrongType'],
     ['malformed', 'invitationAcceptMalformed'],
+    ['no-longer-valid', 'invitationAcceptNoLongerValid'],
   ])('accept failure %s renders mapped copy', async (code, key) => {
     mockAcceptKeyholderInvitation.mockRejectedValueOnce(new InviteShareError(code as never));
     const tr = await render();
@@ -261,7 +262,7 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
   });
 
   it('Decline with an unresolvable share renders not-found copy and does not respond', async () => {
-    mockResolveInviteSlotCid.mockResolvedValueOnce(undefined);
+    mockResolveInviteSlot.mockResolvedValueOnce({ status: 'not-found' });
     const tr = await render();
     await paste(tr, makeShareText().text);
     await renderer.act(async () => {
@@ -270,6 +271,23 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
     expect(mockRespondToInvite).not.toHaveBeenCalled();
     expect(mockGoBack).not.toHaveBeenCalled();
     expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptNotFound');
+  });
+
+  it('Decline of a withdrawn or expired share renders invitationAcceptNoLongerValid with no prompt and no response', async () => {
+    mockResolveInviteSlot.mockResolvedValueOnce({ status: 'no-longer-valid' });
+    const tr = await render();
+    await paste(tr, makeShareText().text);
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'decline').props.onPress();
+    });
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).toContain('invitationAcceptNoLongerValid');
+    expect(rendered).not.toContain('InvitationEngine');
+    expect(rendered).not.toContain('Cid');
+    expect(mockRespondToInvite).not.toHaveBeenCalled();
+    expect(mockAcceptKeyholderInvitation).not.toHaveBeenCalled();
+    expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+    expect(mockGoBack).not.toHaveBeenCalled();
   });
 
   it('Decline failure maps to invitationAcceptFailed', async () => {

@@ -119,7 +119,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Dana');
 		const { vault, storage } = makeVaultHarness();
 		const failingEngine = {
-			resolveInviteSlotCid: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlotCid(k, t)),
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async () => {
 				throw new Error('bad invitePrivate');
 			}),
@@ -142,7 +142,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const realEngine = new InvitationEngine(seeded.auth.ctx);
 		let committedUserId: string | undefined;
 		const reconcileEngine = {
-			resolveInviteSlotCid: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlotCid(k, t)),
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async (...args: Parameters<InvitationEngine['respondToInvite']>) => {
 				committedUserId = args[4];
 				await realEngine.respondToInvite(...args);
@@ -164,7 +164,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const { vault, storage } = makeVaultHarness();
 		let statusCalls = 0;
 		const unknownOutcomeEngine = {
-			resolveInviteSlotCid: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlotCid(k, t)),
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async () => {
 				throw new Error('original failure');
 			}),
@@ -190,7 +190,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const realEngine = new InvitationEngine(seeded.auth.ctx);
 		let capturedArgs: unknown[] | undefined;
 		const capturingEngine = {
-			resolveInviteSlotCid: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlotCid(k, t)),
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async (...args: Parameters<InvitationEngine['respondToInvite']>) => {
 				capturedArgs = args;
 				return realEngine.respondToInvite(...args);

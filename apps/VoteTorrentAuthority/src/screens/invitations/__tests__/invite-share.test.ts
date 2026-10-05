@@ -1,6 +1,7 @@
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
 import { InvitationEngine } from '@votetorrent/vote-engine/rn';
+// @ts-ignore TS2307: the test fixture is mapped by jest.config.js moduleNameMapper only, not by tsc (same pattern as keyholder-accept.test.ts; ignore keeps the typecheck ceiling flat)
 import { addTestAuthority, createTestNetwork, makeTestSignCallback } from '@votetorrent/vote-engine/test/fixtures/test-context';
 import type { InviteSlotResolution } from '@votetorrent/vote-core';
 import { InviteShareError, inviteShareErrorKey, parseInviteShare, resolveInviteFromShare } from '../invite-share';

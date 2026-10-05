@@ -36,7 +36,7 @@ function makeShare(type: string) {
     text: JSON.stringify({ invitePrivate, inviteKey: bytesToHex(secp256k1.getPublicKey(priv)), expiration: 'x', type, name: 'Invitee' }),
   };
 }
-const mockResolveInviteSlotCid = jest.fn(async (_key: string, _type: string): Promise<string | undefined> => 'slot-cid-1');
+const mockResolveInviteSlot = jest.fn(async (_key: string, _type: string): Promise<any> => ({ status: 'live', cid: 'slot-cid-1' }));
 
 const mockGoBack = jest.fn();
 const mockSetOptions = jest.fn();
@@ -78,7 +78,7 @@ const mockNetworksEngine = {
 const mockRespondToInvite = jest.fn(async () => {});
 const mockGetAuthorityInvite = jest.fn(async (_cid: string): Promise<any> => undefined);
 const mockInvitationEngine = {
-  resolveInviteSlotCid: mockResolveInviteSlotCid,
+  resolveInviteSlot: mockResolveInviteSlot,
   respondToInvite: mockRespondToInvite,
   getAuthorityInvite: mockGetAuthorityInvite,
 };
@@ -215,13 +215,13 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
   beforeEach(() => {
     share = makeShare('au');
     mockRouteParams = { mode: 'accept', initialShare: share.text };
-    mockResolveInviteSlotCid.mockResolvedValue(SLOT);
+    mockResolveInviteSlot.mockResolvedValue({ status: 'live', cid: SLOT });
     mockGetAuthorityInvite.mockResolvedValue({ invite: { name: 'Invitee' } });
   });
 
   it('resolves by (InviteKey, au), loads the invite from the resolved Cid, and accept signs with it', async () => {
     const tr = await render();
-    expect(mockResolveInviteSlotCid).toHaveBeenCalledWith(expect.any(String), 'au');
+    expect(mockResolveInviteSlot).toHaveBeenCalledWith(expect.any(String), 'au');
     expect(mockGetAuthorityInvite).toHaveBeenCalledWith(SLOT);
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
@@ -256,7 +256,7 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
   });
 
   it('not-found renders invitationAcceptNotFound and never navigates', async () => {
-    mockResolveInviteSlotCid.mockResolvedValue(undefined);
+    mockResolveInviteSlot.mockResolvedValue({ status: 'not-found' });
     const tr = await render();
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
@@ -264,6 +264,33 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
     });
     expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptNotFound');
     expect(mockRespondToInvite).not.toHaveBeenCalled();
+    expect(mockGoBack).not.toHaveBeenCalled();
+  });
+
+  it('a withdrawn or expired share renders invitationAcceptNoLongerValid, disables accept and reject, and never signs', async () => {
+    mockResolveInviteSlot.mockResolvedValue({ status: 'no-longer-valid' });
+    const tr = await render();
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).toContain('invitationAcceptNoLongerValid');
+    expect(rendered).not.toContain('InvitationEngine');
+    expect(rendered).not.toContain('Cid');
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(true);
+    expect(buttonByTitle(tr, 'reject').props.disabled).toBe(true);
+    expect(mockRespondToInvite).not.toHaveBeenCalled();
+    expect(mockGoBack).not.toHaveBeenCalled();
+  });
+
+  it('an engine-side refusal that races past the helper renders the generic failure copy, not the engine text', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(new Error('InvitationEngine.respondToInvite: This invitation was withdrawn or has expired'));
+    const tr = await render();
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'accept').props.onPress();
+      await Promise.resolve();
+    });
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).toContain('invitationAcceptFailed');
+    expect(rendered).not.toContain('InvitationEngine');
+    expect(rendered).not.toContain('withdrawn');
     expect(mockGoBack).not.toHaveBeenCalled();
   });
 
