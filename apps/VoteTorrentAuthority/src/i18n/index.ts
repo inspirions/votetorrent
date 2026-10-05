@@ -445,6 +445,8 @@ const resources = {
 				'You can resend the invitation or cancel it if no longer needed.',
 			authorityDetailResend: 'Resend Invitation',
 			authorityDetailCancelInvitation: 'Cancel Invitation',
+			authorityDetailAlreadyAnswered: "This invitation has already been answered, so it can't be withdrawn or sent again.",
+			authorityDetailActionFailed: "Couldn't update this invitation. Try again.",
 			// Frame 18 — Sent confirmation
 			editElectionWithFilterTitle: 'Request Sent',
 			editElectionWithFilterBodyPrimary: 'Your request has been submitted successfully.',
@@ -1482,6 +1484,8 @@ const resources = {
 				'Puedes reenviar la invitación o cancelarla si ya no es necesaria.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailResend: 'Reenviar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailCancelInvitation: 'Cancelar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			authorityDetailAlreadyAnswered: 'Esta invitación ya fue respondida, así que no se puede retirar ni volver a enviar.',
+			authorityDetailActionFailed: 'No se pudo actualizar esta invitación. Inténtalo de nuevo.',
 			editElectionWithFilterTitle: 'Solicitud Enviada', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterBodyPrimary: 'Tu solicitud ha sido enviada exitosamente.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterGotIt: 'Entendido', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
