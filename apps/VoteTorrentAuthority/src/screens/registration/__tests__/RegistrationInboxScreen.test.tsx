@@ -1105,6 +1105,25 @@ describe("RegistrationInboxScreen — D-03/D-09/D-12 (48-18)", () => {
 		// fresh `renderer.create` call, which this test never makes.
 	});
 
+	it("a duplicate-closed request reads Closed under All, never Pending; Pending filter hides it (UAT 62 test 12)", async () => {
+		const A = "fixture-request-pending-duplicate-a";
+		const B = "fixture-request-pending-duplicate-b";
+		mockRegistrationEngine.markDuplicateClosure(A, "closed");
+		const tr = await renderScreen();
+		await press(tr, "registration-inbox-filter-status-all");
+
+		const closed = JSON.stringify(findJsonNodeByTestID(tr.toJSON(), "registration-request-row-status-" + A));
+		expect(closed).toContain("registrationRequestStatusClosedDuplicate");
+		expect(closed).not.toContain("registrationRequestStatusPending");
+		const open = JSON.stringify(findJsonNodeByTestID(tr.toJSON(), "registration-request-row-status-" + B));
+		expect(open).toContain("registrationRequestStatusPending");
+		expect(open).not.toContain("registrationRequestStatusClosedDuplicate");
+
+		await press(tr, "registration-inbox-filter-status-p");
+		expect(findJsonNodeByTestID(tr.toJSON(), "registration-request-row-" + A)).toBeFalsy();
+		expect(findJsonNodeByTestID(tr.toJSON(), "registration-request-row-" + B)).toBeTruthy();
+	});
+
 	it("the transparency card renders new totals on re-focus, with no filter change in between", async () => {
 		const tr = await renderScreen();
 

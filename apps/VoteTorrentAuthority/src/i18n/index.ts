@@ -877,6 +877,7 @@ const resources = {
 			registrationRequestStatusPending: 'Pending',
 			registrationRequestStatusApproved: 'Approved',
 			registrationRequestStatusRejected: 'Rejected',
+			registrationRequestStatusClosedDuplicate: 'Closed',
 			// Phase 48 (D-06/D-07) — registrationRequestApproval* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			registrationRequestApprovalScreenTitle: 'Request Detail',
 			registrationRequestApprovalSummaryTitle: 'Request',
@@ -1927,6 +1928,7 @@ const resources = {
 			registrationRequestStatusPending: 'Pendiente',
 			registrationRequestStatusApproved: 'Aprobada',
 			registrationRequestStatusRejected: 'Rechazada',
+			registrationRequestStatusClosedDuplicate: 'Cerrada',
 			// Phase 48 (D-06/D-07) — registrationRequestApproval* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			registrationRequestApprovalScreenTitle: 'Detalle de la Solicitud',
 			registrationRequestApprovalSummaryTitle: 'Solicitud',

@@ -1,4 +1,4 @@
-import type { RegistrationRequestStatus } from "@votetorrent/vote-core";
+import type { RegistrationRequestListRow, RegistrationRequestStatus } from "@votetorrent/vote-core";
 import { truncateId } from "./registrant-display";
 
 /**
@@ -34,6 +34,27 @@ export const REGISTRATION_REQUEST_STATUS_META: Record<
 	a: { labelKey: "registrationRequestStatusApproved", colorKey: "success" },
 	r: { labelKey: "registrationRequestStatusRejected", colorKey: "error" },
 };
+
+export type RequestRowPillColorKey = "success" | "warning" | "error" | "textSecondary";
+
+/**
+ * The inbox row's pill meta. D-44 duplicate closure deliberately leaves
+ * `RegistrationRequest.Status = 'p'` (62-19) and surfaces closure only through
+ * `row.duplicateClosure`, so a status-only lookup shows a closed request as Pending.
+ * Both `'closed'` and `'closing'` render the closed pill, matching the approval
+ * screen (`closedAsDuplicate = closure !== undefined`). `textSecondary` is neutral and
+ * never collides with the warning=pending / bridge-border disambiguation rule.
+ * Returns undefined for an unknown status code with no closure, so the row keeps its
+ * raw-code fallback.
+ */
+export function resolveRequestRowStatusMeta(
+	row: Pick<RegistrationRequestListRow, "status" | "duplicateClosure">,
+): { labelKey: string; colorKey: RequestRowPillColorKey } | undefined {
+	if (row.duplicateClosure === "closed" || row.duplicateClosure === "closing") {
+		return { labelKey: "registrationRequestStatusClosedDuplicate", colorKey: "textSecondary" };
+	}
+	return REGISTRATION_REQUEST_STATUS_META[row.status];
+}
 
 /**
  * Structural source type for `registrationRequestDisplayName`. The list row
