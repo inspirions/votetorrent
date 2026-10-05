@@ -163,4 +163,47 @@ describe('respondToInvite liveness (CR-02)', () => {
     await expectRefusal(fx.invitation.respondToInvite(head, true, s.invitePrivate), /already been answered/)
     expect(await resultRows(fx, [s.cid, head])).to.equal(1)
   })
+
+  it('a cancellation landing while the keyholder signing prompt is open is refused inside the transaction (WR-08)', async () => {
+    const fx = await makeChainFixture()
+    const s = await seedKeyholder(fx, 'Race Keyholder')
+    const base = makeKeyholderProvisioning()
+    const counter = { calls: 0 }
+    // keyholder.sign is caller-supplied and awaited before BEGIN: this is the real window (a cancel
+    // replicated or tapped while the biometric prompt is open).
+    const provisioning = {
+      ...base,
+      sign: async (digest: Uint8Array): Promise<Signature> => {
+        counter.calls += 1
+        await fx.authority.cancelInvite(s.cid)
+        return base.sign(digest)
+      },
+    }
+    const userId = crypto.randomUUID()
+    await expectRefusal(fx.invitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning), WITHDRAWN)
+    expect(counter.calls).to.equal(1)
+    expect(await countRows(fx, 'InviteCancellation', 'SlotCid', s.cid)).to.equal(1)
+    expect(await countRows(fx, 'InviteResult', 'SlotCid', s.cid)).to.equal(0)
+    expect(await countRows(fx, 'User', 'Id', userId)).to.equal(0)
+    expect(await countRows(fx, 'UserKey', 'UserId', userId)).to.equal(0)
+    expect(await countRows(fx, 'Keyholder', 'UserId', userId)).to.equal(0)
+    expect(await countRows(fx, 'KeyholderDkgBinding', 'UserId', userId)).to.equal(0)
+  })
+
+  it('the same signing wrapper without a cancellation accepts (positive control)', async () => {
+    const fx = await makeChainFixture()
+    const s = await seedKeyholder(fx, 'Race Control Keyholder')
+    const base = makeKeyholderProvisioning()
+    const provisioning = {
+      ...base,
+      sign: async (digest: Uint8Array): Promise<Signature> => {
+        await Promise.resolve()
+        return base.sign(digest)
+      },
+    }
+    const userId = crypto.randomUUID()
+    await fx.invitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning)
+    expect(await countRows(fx, 'User', 'Id', userId)).to.equal(1)
+    expect(await countRows(fx, 'KeyholderDkgBinding', 'UserId', userId)).to.equal(1)
+  })
 })

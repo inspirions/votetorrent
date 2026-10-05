@@ -8,7 +8,7 @@ import type { InviteType, Scope } from '@votetorrent/vote-core'
 import { AuthorityEngine } from '../../src/authority/authority-engine.js'
 import { allocateTid } from '../../src/database/tid-allocator.js'
 import { InvitationEngine } from '../../src/invite/invitation-engine.js'
-import { fromCanonicalDatetime } from '../../src/utils.js'
+import { fromCanonicalDatetime, nowCanonicalDatetime } from '../../src/utils.js'
 import { createTestNetwork, addTestAuthority, makeTestSignCallback } from './test-context.js'
 import type { TestAuthorityContext } from './test-context.js'
 
@@ -125,4 +125,43 @@ export async function insertExpiredSlot (fx: ChainFixture): Promise<SentShare> {
     { cid, name, expiration, inviteKey, inviteSignature, nonce },
   )
   return { cid, inviteKey, invitePrivate: bytesToHex(priv), type: 'of' }
+}
+
+/**
+ * Insert a raw InviteSlot into an existing share's chain (same InviteKey and Type), overriding the
+ * ResendSalt and optionally the Name, SigningNonce, Expiration and the context now. The Cid is computed
+ * the way resendInvite does (7-field Digest when a salt is given, 6-field otherwise). Returns the new Cid.
+ */
+export async function insertRawChainRow (
+  fx: ChainFixture,
+  base: SentShare,
+  opts: { resendSalt: string | null, name?: string, nonce?: string, expiration?: string, contextNow?: string },
+): Promise<string> {
+  const db = fx.auth.ctx.db
+  const baseRow = await db
+    .prepare('select Type, Name, Expiration, InviteKey, InviteSignature, SigningNonce from InviteSlot where Cid = :cid')
+    .get({ cid: base.cid })
+  if (!baseRow) throw new Error('insertRawChainRow: base slot not found')
+  const slotType = baseRow.Type as string
+  const name = opts.name ?? (baseRow.Name as string)
+  const expiration = opts.expiration ?? (baseRow.Expiration as string)
+  const inviteKey = baseRow.InviteKey as string
+  const inviteSignature = baseRow.InviteSignature as string
+  const nonce = opts.nonce ?? (baseRow.SigningNonce as string)
+  const cidRow = opts.resendSalt === null
+    ? await db
+      .prepare('select cid(Digest(:expiration, :inviteKey, :inviteSignature, :name, :nonce, :slotType)) as c')
+      .get({ expiration, inviteKey, inviteSignature, name, nonce, slotType })
+    : await db
+      .prepare('select cid(Digest(:expiration, :inviteKey, :inviteSignature, :name, :nonce, :slotType, :resendSalt)) as c')
+      .get({ expiration, inviteKey, inviteSignature, name, nonce, slotType, resendSalt: opts.resendSalt })
+  const cid = cidRow!.c as string
+  const tid = await allocateTid(db, 'authority')
+  await db.exec(
+    `insert into InviteSlot (Cid, Type, Name, Expiration, InviteKey, InviteSignature, SigningNonce, ResendSalt)
+      with context Tid = ${tid}, now = :now, IsSignatureValid = true, IsInsertValid = true
+      values (:cid, :slotType, :name, :expiration, :inviteKey, :inviteSignature, :nonce, :resendSalt)`,
+    { cid, slotType, name, expiration, inviteKey, inviteSignature, nonce, resendSalt: opts.resendSalt, now: opts.contextNow ?? nowCanonicalDatetime() },
+  )
+  return cid
 }
