@@ -173,6 +173,27 @@ describe("RegistrationRequestRow — status ladder", () => {
 		}
 	});
 
+	it("a duplicate-closed or closing row renders the Closed pill in textSecondary, never Pending (UAT 62 test 12)", () => {
+		for (const duplicateClosure of ["closed", "closing"] as const) {
+			const row = makeRow({ status: "p", duplicateClosure });
+			const tr = renderRow(row);
+			const pillNodes = hostNodes(tr, "registration-request-row-status-" + row.requestId);
+			expect(pillNodes).toHaveLength(1);
+			const texts = pillNodes[0]
+				.findAll((n) => typeof n.type === "string" && (n.type as unknown) === "Text")
+				.map((n) => textOf(n));
+			expect(texts).toContain("registrationRequestStatusClosedDuplicate");
+			expect(texts).not.toContain("registrationRequestStatusPending");
+			const label = pillNodes[0]
+				.findAll((n) => typeof n.type === "string" && (n.type as unknown) === "Text")
+				.find((n) => textOf(n) === "registrationRequestStatusClosedDuplicate");
+			expect(colorOf(label!)).toBe("sentinel-textSecondary");
+			renderer.act(() => {
+				tr.unmount();
+			});
+		}
+	});
+
 	it("unknown status code renders the raw code with zero status pill nodes and does not throw", () => {
 		const row = makeRow({ status: "z" as unknown as RegistrationRequestListRow["status"] });
 		expect(() => renderRow(row)).not.toThrow();

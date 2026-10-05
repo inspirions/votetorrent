@@ -29,3 +29,10 @@ export const USE_STUB_PLAY_INTEGRITY = false;
 // provably inert outside __DEV__ and can never weaken CR-03 / T-45-05-04. Committed
 // default false — never commit an enabled override.
 export const USE_REAL_ATTESTATION_PRODUCER = false;
+
+// 62-51: opt-in toggle for the phase-59 D-23(f) registered-state dev fixture (an active Registrant
+// plus an Association bound to the stub device key). Consumed ONLY by dev-seed.ts, which is itself
+// __DEV__-only. Committed default false - never commit an enabled override. Setting it true
+// restores the registered Timeline panel for manual QA; it is NEVER evidence that the registration
+// ceremony works.
+export const SEED_REGISTERED_STATE_FIXTURE = false;

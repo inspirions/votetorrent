@@ -9,11 +9,16 @@
 #      Registrant/AttestationChallenge ceremony, via the real vote-engine classes). The
 #      challenge SHAPE (legacy 7-arg vs current 6-arg) is detected from the baseline
 #      schema text itself (reattach-proof.mjs), not hardcoded.
+#      The decision-row SHAPE (absent / legacy-non-conforming / conforming) is chosen from the
+#      baseline's own decision-table CHECK text; the shape and the seeded cursors are written to
+#      a seed manifest that --reopen compares against.
 #   3. --reopen the SAME on-disk path under the CURRENT (post-change) schema and
 #      assert: no throw, no ALTER COLUMN, rows still readable at the seeded counts
 #      (Authority/Registrant/AttestationChallenge/Admin/Officer/UserKey), the
 #      Expiration column is genuinely gone, and every table the current schema added
-#      since the baseline is queryable (--baseline-schema).
+#      since the baseline is queryable (--baseline-schema), and any decision rows read back
+#      byte-identical to the SEEDED cursors (--seed-manifest). A decision leg that did not
+#      run is reported under NOT ESTABLISHED, never as established.
 #   4. NEGATIVE CONTROL: repeat --seed/--reopen against a tiny one-table schema
 #      exercising a KNOWN Quereus re-attach defect class (boolean-default column
 #      type change) and confirm the harness correctly reports it as a FAILURE —
@@ -59,6 +64,7 @@ git show "${RESOLVED_BASELINE}:packages/vote-engine/src/database/schema-sql.ts" 
 
 DB_PATH="$WORKDIR/reattach-proof-db"
 COUNTS_FILE="$WORKDIR/seed-counts.json"
+MANIFEST_FILE="$WORKDIR/seed-manifest.json"
 
 echo "=== scripted re-attach proof (baseline=$RESOLVED_BASELINE) ==="
 echo "Baseline ref (pre-change schema): $RESOLVED_BASELINE"
@@ -82,11 +88,19 @@ echo "$SEED_OUT" | node -e '
 		process.stdout.write(JSON.stringify(parsed.counts));
 	});
 ' > "$COUNTS_FILE"
+echo "$SEED_OUT" | node -e '
+	let s=""; process.stdin.on("data", d => s += d);
+	process.stdin.on("end", () => {
+		const parsed = JSON.parse(s);
+		process.stdout.write(JSON.stringify({ decisionShape: parsed.decisionShape, seededDecisionCursors: parsed.seededDecisionCursors }));
+	});
+' > "$MANIFEST_FILE"
+echo "Seed decision shape: $(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).decisionShape))' "$MANIFEST_FILE")"
 echo
 
 echo "--- [2/3] reopen: current (post-change) schema, on the SAME on-disk store ---"
 set +e
-REOPEN_OUT="$(run_node --reopen "$DB_PATH" --expected-counts "$COUNTS_FILE" --baseline-schema "$OLD_SCHEMA_FILE")"
+REOPEN_OUT="$(run_node --reopen "$DB_PATH" --expected-counts "$COUNTS_FILE" --baseline-schema "$OLD_SCHEMA_FILE" --seed-manifest "$MANIFEST_FILE")"
 MAIN_EXIT=$?
 set -e
 echo "$REOPEN_OUT"
@@ -116,9 +130,37 @@ if [ "$MAIN_EXIT" -eq 0 ] && [ "$NEG_EXIT" -eq 1 ]; then
 	# syntactically invalid DDL string. That proves the harness can report a PARSE failure. It
 	# does NOT prove the harness can detect a RECONCILE incompatibility — the only class D-10's
 	# column removal could plausibly hit.
+	DECISION_LEG="$(echo "$REOPEN_OUT" | node -e '
+		let s=""; process.stdin.on("data", d => s += d);
+		process.stdin.on("end", () => {
+			try { process.stdout.write(String(JSON.parse(s).decisionLeg ?? "")); } catch { process.stdout.write(""); }
+		});
+	')"
+	COUNT_CLAUSE=""
+	DECISION_CLAUSE=""
+	EXTRA_LINE=""
+	case "$DECISION_LEG" in
+		legacy-checked)
+			COUNT_CLAUSE=", plus RegistrationDecision/AssociationDecision"
+			DECISION_CLAUSE=" the legacy non-conforming decision rows (astral cursors, legal under the baseline's length-only CursorWidth check) re-attached under the current CursorWellFormed check and read back byte-identical to the seeded cursors;"
+			;;
+		conforming-checked)
+			COUNT_CLAUSE=", plus RegistrationDecision/AssociationDecision"
+			DECISION_CLAUSE=" the seeded conforming decision rows (the baseline already declares CursorWellFormed) re-attached and read back byte-identical to the seeded cursors;"
+			EXTRA_LINE="  NOT ESTABLISHED: the legacy non-conforming decision-row leg (decisionShape=conforming: the baseline already refuses non-conforming cursors, so none could be seeded; that drift trap is exercised only against a pre-0655ea77 baseline such as 1c7e3593)."
+			;;
+		skipped-absent)
+			EXTRA_LINE="  NOT ESTABLISHED: any decision-row leg (decisionShape=absent: the baseline declares no decision tables)."
+			;;
+		*)
+			echo "FINAL VERDICT: FAIL (baseline=$RESOLVED_BASELINE; unrecognized decisionLeg '$DECISION_LEG' in the reopen output)"
+			exit 1
+			;;
+	esac
 	echo "FINAL VERDICT: NO-REGRESSION (baseline=$RESOLVED_BASELINE db=$DB_PATH schema=$OLD_SCHEMA_FILE)"
-	echo "  ESTABLISHED: re-attach did not throw; the pre-existing rows (Authority/Registrant/AttestationChallenge/Admin/Officer/UserKey) are still readable at the exact seeded counts; no 'ALTER COLUMN' appeared in any error; the Expiration column is absent; every table the current schema added since the baseline is queryable and empty (new-table queryability, --baseline-schema)."
+	echo "  ESTABLISHED: re-attach did not throw; the pre-existing rows (Authority/Registrant/AttestationChallenge/Admin/Officer/UserKey${COUNT_CLAUSE}) are still readable at the exact seeded counts; no 'ALTER COLUMN' appeared in any error;${DECISION_CLAUSE} the Expiration column is absent; every table the current schema added since the baseline is queryable and empty (new-table queryability, --baseline-schema)."
 	echo "  NOT ESTABLISHED: that a SILENT reconcile incompatibility would have been detected. The negative control (exit=1, as required) exercises only the PARSE-failure path."
+	if [ -n "$EXTRA_LINE" ]; then echo "$EXTRA_LINE"; fi
 	exit 0
 else
 	echo "FINAL VERDICT: FAIL (baseline=$RESOLVED_BASELINE db=$DB_PATH schema=$OLD_SCHEMA_FILE; main_exit=$MAIN_EXIT neg_exit=$NEG_EXIT — neg_exit must be exactly 1)"

@@ -90,10 +90,11 @@ export class MockElectionEngine implements IElectionEngine {
 	}
 
 	async getBallots(): Promise<BallotSummary[]> {
-		return this.ballots.map(({ id, electionId, authorityId }) => ({
+		return this.ballots.map(({ id, electionId, authorityId, description }) => ({
 			id,
 			electionId,
 			authorityId,
+			description,
 		}));
 	}
 
@@ -174,6 +175,15 @@ export class MockElectionEngine implements IElectionEngine {
 	}
 
 	async proposeBallot(ballot: Ballot): Promise<void> {
+		// Real-engine parity (CR-03): a ballot out for confirmation or confirmed cannot be
+		// overwritten. Same text as ElectionEngine.proposeBallot.
+		const lockState = this.confirmationState.get(ballot.id);
+		if (lockState === 'submitted') {
+			throw new Error('This ballot is out for confirmation and cannot be edited. Withdraw it first.');
+		}
+		if (lockState === 'confirmed') {
+			throw new Error('This ballot is already confirmed and can no longer be edited.');
+		}
 		const idx = this.ballots.findIndex((b) => b.id === ballot.id);
 		if (idx >= 0) {
 			this.ballots[idx] = ballot;
@@ -196,13 +206,23 @@ export class MockElectionEngine implements IElectionEngine {
 	// ---------- confirm-path (D-10 mock parity, 31-04) ----------
 	// Real in-memory behavior mirroring the real engine's submit → confirm → finalize → withdraw flow.
 
-	async submitBallotForConfirmation(ballotId: string): Promise<void> {
+	async submitBallotForConfirmation(
+		ballotId: string,
+		_sign?: (digest: Uint8Array) => Promise<Signature>,
+	): Promise<void> {
+		// Real-engine parity (election-engine.ts ~L937, UAT 62 test 13): a ballot that
+		// was never proposed has no ProposedBallot row, so submit is refused with the
+		// same message. Without this check jest passed a Submit that fails on device.
+		if (!this.ballots.some((b) => b.id === ballotId)) {
+			throw new Error(`ProposedBallot not found: ${ballotId}`);
+		}
+		// Same fixed, id-free text as ElectionEngine (WR-04 parity).
 		const current = this.confirmationState.get(ballotId);
 		if (current === 'submitted') {
-			throw new Error(`Ballot ${ballotId} is already submitted for confirmation`);
+			throw new Error('This ballot is already submitted for confirmation.');
 		}
 		if (current === 'confirmed') {
-			throw new Error(`Ballot ${ballotId} is already confirmed`);
+			throw new Error('This ballot is already confirmed.');
 		}
 		// D-04 parity: ProposedBallot (this.ballots entry) is retained — only the state flag changes.
 		this.confirmationState.set(ballotId, 'submitted');

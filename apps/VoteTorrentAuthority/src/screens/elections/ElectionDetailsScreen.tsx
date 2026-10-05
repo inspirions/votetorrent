@@ -183,7 +183,7 @@ export default function ElectionDetailsScreen() {
 							navigation.navigate("EditBallot", {
 								electionId: election.id,
 								electionTitle: election.title,
-								electionDate: formatDate(election.revisionDeadline),
+								electionDate: formatDate(election.date),
 								ballotId: ballots[0].id,
 								electionEngine,
 								readOnly: true,
@@ -323,18 +323,21 @@ export default function ElectionDetailsScreen() {
 						const cs = ballotConfirmationStates[ballot.id];
 						const statusLabel = cs?.confirmed
 							? t("statusConfirmed")
-							: t("statusProposed");
+							: cs?.locked
+								? t("statusAwaitingConfirmation")
+								: t("statusProposed");
 						return (
 							<InfoCard
 								key={ballot.id}
-								title={ballot.authorityId || t("ballotTemplate")}
+								// The row names the ballot, never the authority's raw id (UAT 62 gap 4 item 4).
+								title={ballot.description?.trim() || t("ballotTemplate")}
 								subtitle={statusLabel}
 								icon="chevron-right"
 								onPress={() =>
 									navigation.navigate("EditBallot", {
 										electionId: election.id,
 										electionTitle: election.title,
-										electionDate: formatDate(election.revisionDeadline),
+										electionDate: formatDate(election.date),
 										ballotId: ballot.id,
 										electionEngine,
 									} as any)
@@ -354,7 +357,7 @@ export default function ElectionDetailsScreen() {
 								navigation.navigate("CreateBallot", {
 									electionId: election.id,
 									electionTitle: election.title,
-									electionDate: formatDate(election.revisionDeadline),
+									electionDate: formatDate(election.date),
 									electionEngine,
 								} as any)
 							}

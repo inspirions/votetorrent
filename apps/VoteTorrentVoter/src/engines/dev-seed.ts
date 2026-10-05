@@ -61,6 +61,7 @@ import {
 import { createDeviceSigner, type SignCallback } from './device-signer'
 import { getOrCreateDeviceUser } from './device-user'
 import { resolveAttestationProducer } from './attestation-producer'
+import { SEED_REGISTERED_STATE_FIXTURE } from './proof-flags.generated'
 
 /** Display name used for the seeded device identity (voter + founding officer, one identity). */
 const DEV_SEED_DISPLAY_NAME = 'Dev Voter'
@@ -120,6 +121,11 @@ function loadRegistrantAssociationSeeder(): SeedRegistrantAssociationFn | undefi
  * SAME P-256 device key `resolveAttestationProducer().provisionDeviceKey()` returns
  * (resolved by CALLING the producer, never a hardcoded placeholder — D-23b), so a real
  * device-key round trip through `getAssociationsByDeviceKey` finds it.
+ *
+ * OPT-IN (62-51): this fixture is no longer seeded by default. A default-on binding of the stub
+ * device key made every fresh dev Voter read as registered-without-a-code (UAT 62 test 14), hiding
+ * the Continue on This Device entry link. Enable it with `SEED_REGISTERED_STATE_FIXTURE` in
+ * `proof-flags.generated.ts` or the `registeredStateFixture` option of `seedDevNetwork`.
  *
  * HONESTY FENCE: this seeds a UI FIXTURE. It is NEVER evidence that the real
  * registration ceremony works — the real ceremony requires a cross-device authority
@@ -238,13 +244,17 @@ export interface DevSeedResult {
  * composition root passes the `rnDbFactory`-backed instance it already owns
  * (`EngineFactory.getNetworksEngine()`); tests may pass an in-memory-backed one.
  */
-export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<DevSeedResult> {
+export async function seedDevNetwork(
+	networksEngine: NetworksEngine,
+	options?: { registeredStateFixture?: boolean },
+): Promise<DevSeedResult> {
 	if (!(globalThis as { __DEV__?: boolean }).__DEV__) {
 		throw new Error('seedDevNetwork: must never run outside __DEV__ — this is a dev-only fixture (D-07)')
 	}
 
 	const deviceUser = await getOrCreateDeviceUser(DEV_SEED_DISPLAY_NAME)
 	const sign = await createDeviceSigner(DEV_SEED_DISPLAY_NAME)
+	const wantFixture = options?.registeredStateFixture ?? SEED_REGISTERED_STATE_FIXTURE
 
 	// Idempotency: if the dev-seed network already exists (by its marker name),
 	// re-attach instead of re-creating (a second networksEngine.create() would
@@ -274,7 +284,7 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 		// idempotent (seedRegistrantAssociation re-attaches to the existing rows rather
 		// than duplicating them), and a re-opened network must not silently lose the
 		// registered state a PRIOR boot already seeded.
-		await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+		if (wantFixture) await seedRegisteredAssociationFixture(ctx, authorityId, sign)
 		await seedDevBallot(ctx, electionId, authorityId)
 
 		return { networkReference: existingRef, electionId, deviceUser, sign }
@@ -452,7 +462,7 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 	// sunset obligation. This grants dev-seed.ts NO ceremony token of its own; the
 	// forbidden identifiers stay inside the engine-side module reached through
 	// loadRegistrantAssociationSeeder().
-	await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+	if (wantFixture) await seedRegisteredAssociationFixture(ctx, authorityId, sign)
 
 	// (5) The election's ballot (see seedDevBallot).
 	await seedDevBallot(ctx, electionId, authorityId)

@@ -5,6 +5,8 @@
  * `keyholder-dkg-binding.spec.ts` (62-02) and `keyholder-identity.spec.ts` (62-09) use.
  */
 
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { bytesToHex } from '@noble/curves/utils.js';
 import { InvitationEngine } from '@votetorrent/vote-engine/rn';
 import {
 	addTestAuthority,
@@ -19,6 +21,7 @@ import { createFakeSecretWrapper, createMapStorage } from '../../../engines/__fi
 import { listKeyholderIdentities } from '../../../engines/keyholder-identity';
 import type { KeyVaultStorage } from '../../../engines/key-vault';
 import { acceptKeyholderInvitation } from '../keyholder-accept';
+import { InviteShareError, inviteShareErrorKey } from '../../invitations/invite-share';
 
 async function seedElection() {
 	const net = await createTestNetwork();
@@ -27,21 +30,31 @@ async function seedElection() {
 	return { auth, electionEngine, electionsEngine };
 }
 
-function makeKeyholderInvite(name: string): KeyholderInvite {
+function makeKeyholderInvite(name: string, inviteKey: string): KeyholderInvite {
 	return {
 		name,
 		type: 'k',
 		expiration: new Date(Date.now() + 3_600_000).toISOString(),
-		inviteKey: 'k'.repeat(66),
+		inviteKey,
 		inviteSignature: '',
 	};
 }
 
-async function inviteKeyholder(seeded: Awaited<ReturnType<typeof seedElection>>, name: string): Promise<string> {
+/** A fresh share in the exact onSend shape; the share is built WITHOUT any DB Cid query. */
+function makeShare(name: string, type: 'k' | 'of' = 'k') {
+	const priv = secp256k1.utils.randomSecretKey();
+	const invitePrivate = bytesToHex(priv);
+	const inviteKey = bytesToHex(secp256k1.getPublicKey(priv));
+	return { invitePrivate, inviteKey, text: JSON.stringify({ invitePrivate, inviteKey, expiration: 'x', type, name }) };
+}
+
+/** Sends a real keyholder invite and returns the share text. The slot Cid is read ONLY for assertions. */
+async function inviteKeyholder(seeded: Awaited<ReturnType<typeof seedElection>>, name: string): Promise<{ shareText: string; slotCid: string }> {
+	const share = makeShare(name);
 	const electionId = (await seeded.electionEngine.getElectionDetails()).election.id;
-	await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite(name), electionId, makeTestSignCallback(seeded.auth.user));
+	await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite(name, share.inviteKey), electionId, makeTestSignCallback(seeded.auth.user));
 	const slotRow = await seeded.auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name });
-	return slotRow!.Cid as string;
+	return { shareText: share.text, slotCid: slotRow!.Cid as string };
 }
 
 function makeVaultHarness() {
@@ -56,13 +69,13 @@ function makeVaultHarness() {
 }
 
 describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
-	it('A1/A6: accept writes InviteResult/User/UserKey/Keyholder/KeyholderDkgBinding atomically, with the exact 6-arg call shape', async () => {
+	it('A1/A6: accept writes InviteResult/User/UserKey/Keyholder/KeyholderDkgBinding atomically, with the exact 6-arg call shape, from the share string alone', async () => {
 		const seeded = await seedElection();
-		const slotCid = await inviteKeyholder(seeded, 'Alice');
+		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Alice');
 		const { vault, storage } = makeVaultHarness();
 		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
 
-		const result = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, slotCid, undefined);
+		const result = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
 
 		const irCount = (await seeded.auth.ctx.db.prepare('select count(*) as c from InviteResult where SlotCid = :cid').get({ cid: slotCid }))!.c as number;
 		expect(irCount).toBe(1);
@@ -83,13 +96,13 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 
 	it('A2: the minted userId and signing key differ from the officer; two accepts on one device/storage are fully distinct', async () => {
 		const seeded = await seedElection();
-		const slotAlice = await inviteKeyholder(seeded, 'Alice');
-		const slotCarol = await inviteKeyholder(seeded, 'Carol');
+		const Alice = await inviteKeyholder(seeded, 'Alice');
+		const Carol = await inviteKeyholder(seeded, 'Carol');
 		const { vault, storage } = makeVaultHarness();
 		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
 
-		const alice = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, slotAlice, undefined);
-		const carol = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, slotCarol, undefined);
+		const alice = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, Alice.shareText);
+		const carol = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, Carol.shareText);
 
 		expect(alice.userId).not.toBe(seeded.auth.user.id);
 		expect(alice.userId).not.toBe(carol.userId);
@@ -103,16 +116,17 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 
 	it('A3: a failure before any write rejects with the original error and leaves nothing behind', async () => {
 		const seeded = await seedElection();
-		const slotCid = await inviteKeyholder(seeded, 'Dana');
+		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Dana');
 		const { vault, storage } = makeVaultHarness();
 		const failingEngine = {
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async () => {
 				throw new Error('bad invitePrivate');
 			}),
 			getKeyholderInvite: jest.fn(async () => undefined),
 		};
 
-		await expect(acceptKeyholderInvitation({ invitationEngine: failingEngine as never, vault, storage }, slotCid, undefined)).rejects.toThrow(
+		await expect(acceptKeyholderInvitation({ invitationEngine: failingEngine as never, vault, storage }, shareText)).rejects.toThrow(
 			'bad invitePrivate'
 		);
 
@@ -123,11 +137,12 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 
 	it('A4: a failure AFTER commit (reconcile) resolves success and keeps the keys', async () => {
 		const seeded = await seedElection();
-		const slotCid = await inviteKeyholder(seeded, 'Erin');
+		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Erin');
 		const { vault, storage } = makeVaultHarness();
 		const realEngine = new InvitationEngine(seeded.auth.ctx);
 		let committedUserId: string | undefined;
 		const reconcileEngine = {
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async (...args: Parameters<InvitationEngine['respondToInvite']>) => {
 				committedUserId = args[4];
 				await realEngine.respondToInvite(...args);
@@ -136,7 +151,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 			getKeyholderInvite: jest.fn(async (id: string) => realEngine.getKeyholderInvite(id)),
 		};
 
-		const result = await acceptKeyholderInvitation({ invitationEngine: reconcileEngine as never, vault, storage }, slotCid, undefined);
+		const result = await acceptKeyholderInvitation({ invitationEngine: reconcileEngine as never, vault, storage }, shareText);
 
 		expect(result.userId).toBe(committedUserId);
 		expect(await vault.hasSecret(`vt.keyholder-signing.${result.userId}`)).toBe(true);
@@ -145,32 +160,37 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 
 	it('A5: a failure whose reconcile re-read ALSO rejects rethrows the original error and discards nothing', async () => {
 		const seeded = await seedElection();
-		const slotCid = await inviteKeyholder(seeded, 'Frank');
+		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Frank');
 		const { vault, storage } = makeVaultHarness();
+		let statusCalls = 0;
 		const unknownOutcomeEngine = {
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async () => {
 				throw new Error('original failure');
 			}),
-			getKeyholderInvite: jest.fn(async () => {
+			// The first read is the answered-slot pre-check (must succeed); the reconcile re-read fails.
+			getKeyholderInvite: jest.fn(async (id: string) => {
+				if (++statusCalls === 1) return new InvitationEngine(seeded.auth.ctx).getKeyholderInvite(id);
 				throw new Error('re-read also failed');
 			}),
 		};
 
 		await expect(
-			acceptKeyholderInvitation({ invitationEngine: unknownOutcomeEngine as never, vault, storage }, slotCid, undefined)
+			acceptKeyholderInvitation({ invitationEngine: unknownOutcomeEngine as never, vault, storage }, shareText)
 		).rejects.toThrow('original failure');
 
 		// Unknown outcome — nothing is discarded.
 		expect(await listKeyholderIdentities(storage)).toHaveLength(1);
 	});
 
-	it('A6: the engine receives exactly (invitationId, true, invitePrivate, undefined, userId, provisioning), and release() has run by the time the promise settles', async () => {
+	it('A6: the engine receives exactly (slotCid, true, invitePrivate, undefined, userId, provisioning), and release() has run by the time the promise settles', async () => {
 		const seeded = await seedElection();
-		const slotCid = await inviteKeyholder(seeded, 'Hank');
+		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Hank');
 		const { vault, storage } = makeVaultHarness();
 		const realEngine = new InvitationEngine(seeded.auth.ctx);
 		let capturedArgs: unknown[] | undefined;
 		const capturingEngine = {
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async (...args: Parameters<InvitationEngine['respondToInvite']>) => {
 				capturedArgs = args;
 				return realEngine.respondToInvite(...args);
@@ -178,12 +198,12 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 			getKeyholderInvite: jest.fn(async (id: string) => realEngine.getKeyholderInvite(id)),
 		};
 
-		const result = await acceptKeyholderInvitation({ invitationEngine: capturingEngine as never, vault, storage }, slotCid, undefined);
+		const result = await acceptKeyholderInvitation({ invitationEngine: capturingEngine as never, vault, storage }, shareText);
 
 		expect(capturedArgs).toHaveLength(6);
 		expect(capturedArgs![0]).toBe(slotCid);
 		expect(capturedArgs![1]).toBe(true);
-		expect(capturedArgs![2]).toBeUndefined();
+		expect(typeof capturedArgs![2]).toBe('string');
 		expect(capturedArgs![3]).toBeUndefined();
 		expect(capturedArgs![4]).toBe(result.userId);
 		const provisioning = capturedArgs![5] as { sign: (digest: Uint8Array) => Promise<unknown> };
@@ -192,13 +212,58 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 
 	it('A7 budget: one accept performs exactly 2 auth-required wraps and 0 unwraps', async () => {
 		const seeded = await seedElection();
-		const slotCid = await inviteKeyholder(seeded, 'Grace');
+		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Grace');
 		const { vault, storage, wrapper } = makeVaultHarness();
 		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
 
-		await acceptKeyholderInvitation({ invitationEngine, vault, storage }, slotCid, undefined);
+		await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
 
 		expect(wrapper.authWraps).toBe(2);
 		expect(wrapper.authUnwraps).toBe(0);
+	});
+
+	it('A8: a share for an invite that does not exist rejects not-found with 0 auth wraps and 0 identities', async () => {
+		const seeded = await seedElection();
+		const { vault, storage, wrapper } = makeVaultHarness();
+		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+
+		const err = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, makeShare('Ghost').text).catch((e) => e);
+
+		expect(err).toBeInstanceOf(InviteShareError);
+		expect(err.code).toBe('not-found');
+		expect(wrapper.authWraps).toBe(0);
+		expect(await listKeyholderIdentities(storage)).toHaveLength(0);
+	});
+
+	it('A9: an officer share pasted into keyholder accept rejects wrong-type with 0 wraps', async () => {
+		const seeded = await seedElection();
+		const { vault, storage, wrapper } = makeVaultHarness();
+		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+
+		await expect(
+			acceptKeyholderInvitation({ invitationEngine, vault, storage }, makeShare('Officer', 'of').text)
+		).rejects.toMatchObject({ code: 'wrong-type' });
+
+		expect(wrapper.authWraps).toBe(0);
+		expect(await listKeyholderIdentities(storage)).toHaveLength(0);
+	});
+
+	it('A10: re-accepting an ALREADY-ANSWERED slot rejects already-answered with 0 further wraps and 0 further identities', async () => {
+		const seeded = await seedElection();
+		const { shareText } = await inviteKeyholder(seeded, 'Kay Two');
+		const { vault, storage, wrapper } = makeVaultHarness();
+		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+
+		await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
+		expect(wrapper.authWraps).toBe(2);
+		expect(await listKeyholderIdentities(storage)).toHaveLength(1);
+
+		const err = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText).catch((e) => e);
+
+		expect(err).toBeInstanceOf(InviteShareError);
+		expect(err.code).toBe('already-answered');
+		expect(inviteShareErrorKey(err)).toBe('invitationAcceptAlreadyAnswered');
+		expect(wrapper.authWraps).toBe(2);
+		expect(await listKeyholderIdentities(storage)).toHaveLength(1);
 	});
 });

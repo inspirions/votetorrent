@@ -233,3 +233,25 @@ export function parseRound4Payload (text: string): DkgRound4Payload | null {
   }
   return { groupPublicKey: obj.groupPublicKey, groupCommitments: commitments }
 }
+
+/**
+ * Guarded parse of the `ElectionKey.GroupCommitments` column (a replicated, write-once value any live keyholder may
+ * publish). Returns the commitment array, or `null` unless `text` is a string that parses to a non-empty array of
+ * valid compressed secp256k1 points. NEVER throws: every reader treats `null` as "malformed on the row".
+ */
+export function parseElectionKeyCommitments (text: unknown): string[] | null {
+  if (typeof text !== 'string') return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null
+  const out: string[] = []
+  for (const c of parsed) {
+    if (!isPointHex(c)) return null
+    out.push(c)
+  }
+  return out
+}

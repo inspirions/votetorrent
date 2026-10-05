@@ -28,6 +28,8 @@ import { InMemoryTestKeyVault, KEYHOLDER_DKG_RECEIVING_KEY_POLICY, KeyVaultError
 import { allocateTid } from '../src/database/tid-allocator.js'
 import { parseRound1Payload, parseRound2Payload, serializeRound2Payload, serializeRound3Payload } from '../src/keyholder/dkg-payloads.js'
 import { KeyholderDkgEngine, KeyholderDkgError } from '../src/keyholder/keyholder-dkg-engine.js'
+import { KeyReleaseEngine } from '../src/key-release/key-release-engine.js'
+import { releasingKeysAt } from '../src/key-release/release-window.js'
 import {
   inviteAndAcceptKeyholder,
   postSignedDkgMessage,
@@ -119,6 +121,29 @@ async function driveRound0And1WithDealerFirst (db: Database, electionId: string,
   await runDkgToQuiescence(rest, electionId, {
     stopWhen: async () => (await countRows(db, electionId, revision, attempt, 1)) === rest.length + 1
   })
+}
+
+/**
+ * V-1 regression (62-34): after a RETRIED DKG every honest participant must
+ * still hold its share, and once the releasingKeys window opens (D-20) each
+ * can release it and the release status reaches 'reconstructable'.
+ */
+async function expectHonestSharesSurviveAndRelease (
+  db: Database, electionId: string, revision: number, honest: DkgTestParticipant[]
+): Promise<void> {
+  for (const p of honest) {
+    expect(await p.vault.hasSecret(keyholderDkgShareAlias(electionId, revision, p.userId)), `${p.name} share survives the retry`).to.equal(true)
+  }
+  const tlRow = await db.prepare('select Timeline from ElectionRevision where ElectionId = :electionId').get({ electionId })
+  const at = releasingKeysAt(JSON.parse(tlRow!.Timeline as string) as Record<string, number>)
+  expect(at, 'fixture has a releasingKeys timeline entry').to.not.equal(null)
+  for (const p of honest.slice(0, 3)) {
+    const engine = new KeyReleaseEngine({ db }, { vault: p.vault, now: () => at! + 1 })
+    const outcome = await engine.releaseKeyShare(electionId, p.signer)
+    expect(outcome.outcome, `${p.name} release`).to.not.equal('already-released')
+  }
+  const status = await new KeyReleaseEngine({ db }, { now: () => at! + 1 }).getKeyReleaseStatus(electionId)
+  expect(status.phase).to.equal('reconstructable')
 }
 
 describe('dkg.spec: KeyholderDkgEngine over one shared DB', function () {
@@ -241,6 +266,9 @@ describe('dkg.spec: KeyholderDkgEngine over one shared DB', function () {
       expect(await D!.vault.hasSecret(keyholderDkgShareAlias(electionId, revision, D!.userId))).to.equal(false)
       expect(await readRoundRecord(D!, electionId, revision, 2, 1)).to.equal(null)
       expect(await readRoundRecord(D!, electionId, revision, 2, 2)).to.equal(null)
+
+      // V-1 (62-34): every honest participant keeps its share across the retry and can release it.
+      await expectHonestSharesSurviveAndRelease(db, electionId, revision, rest)
     })
   })
 
@@ -329,6 +357,9 @@ describe('dkg.spec: KeyholderDkgEngine over one shared DB', function () {
       const ek = await participants[0]!.engine.getElectionKey(electionId)
       expect(ek!.attempt).to.equal(2)
       expect(ek!.participants).to.equal(4)
+
+      // V-1 (62-34): every honest participant (all but the falsely complaining X) keeps its share and can release it.
+      await expectHonestSharesSurviveAndRelease(db, electionId, revision, participants.filter((p) => p.userId !== X!.userId))
     })
   })
 

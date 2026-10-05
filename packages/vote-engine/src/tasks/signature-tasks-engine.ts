@@ -6,10 +6,11 @@ import { adminSigningKeyValidity } from '../signing/signer-validity.js'
 import { readSessionThreshold } from '../signing/threshold.js'
 import { fanOutSignatureTasks } from '../signing/fan-out.js'
 import { findPendingAdminTaskRow, findPendingTaskNonce, findRegistrantSessionNonce } from './task-signing-status.js'
+import { resolveSignedSubmittedAt } from '../signing/signed-submitted-at.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime } from '../signing/ceremony-helpers.js'
-import { digestToBytes, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
+import { digestToBytes, formatPgRange, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
-import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError, RegistrationDuplicateError, RegistrationContentAccessError } from '@votetorrent/vote-core'
+import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError, RegistrationDuplicateError, RegistrationContentAccessError, RequesterSignatureUnverifiableError } from '@votetorrent/vote-core'
 import { openRegistrationPayload } from '../registration/sealed-registration-content.js'
 import type {
   ISigningEngine,
@@ -871,7 +872,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           // RegistrationDuplicateError through undecorated — this.rethrow() below wraps any plain
           // Error into a fresh `new Error(...)` and would destroy the instanceof check each typed
           // error exists to provide.
-          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError || err instanceof RegistrationContentAccessError) {
+          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError || err instanceof RegistrationContentAccessError || err instanceof RequesterSignatureUnverifiableError) {
             throw err
           }
           this.rethrow(err, 'completeSignature (registrant pre-check)')
@@ -1050,7 +1051,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
           // site above — finalizeRegistrantApproval's own defence-in-depth guard, and register()
           // itself, can both throw RegistrantAlreadyExistsError; resolveAcceptableRegistrantApproval
           // (called internally) can throw RegistrationDuplicateError. Neither may be re-wrapped.
-          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError || err instanceof RegistrationContentAccessError) {
+          if (err instanceof RegistrantAlreadyExistsError || err instanceof RegistrationDuplicateError || err instanceof RegistrationContentAccessError || err instanceof RequesterSignatureUnverifiableError) {
             throw err
           }
           this.rethrow(err, 'completeSignature (finalize registrant)')
@@ -1169,8 +1170,11 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       // Resolve defaults JS-side (mirrors seedQuestion's Pitfall 4 fix — avoids binding NULL into
       // default-valued columns, which trips the Quereus 3.3.0 NULL-bug):
       const dependsOn = q.dependsOn ? JSON.stringify(q.dependsOn) : null
-      const optionRange = q.optionRange ? JSON.stringify(q.optionRange) : '{1, 1}'
-      const scoreRange = q.scoreRange ? JSON.stringify(q.scoreRange) : null
+      // Ranges are written in pg range notation via formatPgRange, never JSON (UAT gap 1):
+      // getBallotDetails reads them with parsePgRange. The Digest and the INSERT bind
+      // these same variables (Question.MutationValid recompute).
+      const optionRange = q.optionRange ? formatPgRange(q.optionRange) : '{1, 1}'
+      const scoreRange = q.scoreRange ? formatPgRange(q.scoreRange) : null
       const grouping = q.group ?? null
       const sequence = q.sequence ?? null
       // Required is now `integer default 1` (37-04 / D-05b re-attach fix — was
@@ -1586,7 +1590,8 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       throw new Error(`SignatureTasksEngine.resolveAcceptableRegistrantApproval: no RegistrantSignatureTaskExtension for taskId=${taskId}`)
     }
     const requestId = extRow.RequestId
-    const submittedAt = restoreCanonicalDatetime(extRow.SubmittedAt)
+    // The exact spelling the requester signed (resolveSignedSubmittedAt); ReceivedAt is engine-written.
+    const submittedAt = await resolveSignedSubmittedAt(this.ctx!.db, 'RegistrationRequest', requestId, extRow.SubmittedAt)
     const receivedAt = restoreCanonicalDatetime(extRow.ReceivedAt)
 
     // A decided request is not re-decidable — DecisionValid enforces this too; this engine-side

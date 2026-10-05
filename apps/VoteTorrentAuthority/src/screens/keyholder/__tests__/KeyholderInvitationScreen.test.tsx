@@ -25,19 +25,35 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { bytesToHex } from '@noble/curves/utils.js';
 import { setKeyholderKeyVaultForTests } from '../../../engines/keyholder-vault';
+import { InviteShareError } from '../../invitations/invite-share';
+
+function makeShareText(type = 'k', name = 'Ada Keyholder') {
+  const priv = secp256k1.utils.randomSecretKey();
+  const invitePrivate = bytesToHex(priv);
+  return {
+    invitePrivate,
+    text: JSON.stringify({ invitePrivate, inviteKey: bytesToHex(secp256k1.getPublicKey(priv)), expiration: 'x', type, name }),
+  };
+}
 
 const mockGoBack = jest.fn();
 const mockSetOptions = jest.fn();
 
-const mockRouteParams: { mode: 'send' | 'accept'; invitationId?: string } = {
+const mockRouteParams: { mode: 'send' | 'accept'; initialShare?: string } = {
   mode: 'accept',
-  invitationId: 'invite-1',
 };
+
+const mockAcceptKeyholderInvitation = jest.fn(async (_deps: unknown, _text: string) => ({ userId: 'u', slotCid: 'cid-1' }));
+jest.mock('../keyholder-accept', () => ({
+  acceptKeyholderInvitation: (deps: unknown, text: string) => mockAcceptKeyholderInvitation(deps, text),
+}));
 
 const mockRespondToInvite = jest.fn(
   async (
-    _invitationId: string,
+    _slotCid: string,
     _accept: boolean,
     _invitePrivate?: string,
     _digest?: string,
@@ -46,7 +62,9 @@ const mockRespondToInvite = jest.fn(
   ) => {}
 );
 const mockGetKeyholderInvite = jest.fn(async () => undefined);
+const mockResolveInviteSlot = jest.fn(async (_key: string, _type: string): Promise<any> => ({ status: 'live', cid: 'cid-1' }));
 const mockInvitationEngine = {
+  resolveInviteSlot: mockResolveInviteSlot,
   respondToInvite: mockRespondToInvite,
   getKeyholderInvite: mockGetKeyholderInvite,
 };
@@ -113,6 +131,13 @@ const KeyholderInvitationModule = require('../KeyholderInvitationScreen');
 const KeyholderInvitationScreen =
   KeyholderInvitationModule.default ?? KeyholderInvitationModule.KeyholderInvitationScreen;
 
+async function paste(tr: renderer.ReactTestRenderer, text: string) {
+  const input = tr.root.findAll((n) => typeof n.props?.onChangeText === 'function')[0];
+  await renderer.act(async () => {
+    input.props.onChangeText(text);
+  });
+}
+
 async function render() {
   let tr!: renderer.ReactTestRenderer;
   await renderer.act(async () => {
@@ -140,6 +165,8 @@ function makeFakeVault(overrides?: { putSecret?: jest.Mock }) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockRespondToInvite.mockResolvedValue(undefined);
+  mockResolveInviteSlot.mockResolvedValue({ status: 'live', cid: 'cid-1' });
+  mockAcceptKeyholderInvitation.mockResolvedValue({ userId: 'u', slotCid: 'cid-1' });
   setKeyholderKeyVaultForTests(makeFakeVault() as never);
 });
 
@@ -147,156 +174,167 @@ afterEach(() => {
   setKeyholderKeyVaultForTests(undefined);
 });
 
-describe('KeyholderInvitationScreen — INV-04/05 + D-21/D-26 (accept mode)', () => {
-  it('S1: onAccept calls respondToInvite with 6 arguments (a fresh provisioning), never createDeviceSigner, then navigates back', async () => {
+describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', () => {
+  it('renders the paste hint and disabled Accept/Decline before any paste, never Loading', async () => {
     const tr = await render();
+    const json = JSON.stringify(tr.toJSON());
+    expect(json).toContain('invitationAcceptPasteHint');
+    expect(json).not.toContain('loading');
+    expect(json).toContain('invitationAcceptPastePlaceholder');
+    expect(json).not.toContain('Paste the invite text from the sender');
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(true);
+    expect(buttonByTitle(tr, 'decline').props.disabled).toBe(true);
+  });
 
+  it('pasting a share shows the invitee name and enables Accept/Decline', async () => {
+    const tr = await render();
+    await paste(tr, makeShareText().text);
+    const name = tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-name');
+    expect(name.length).toBeGreaterThan(0);
+    expect(JSON.stringify(tr.toJSON())).toContain('Ada Keyholder');
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(false);
+    expect(buttonByTitle(tr, 'decline').props.disabled).toBe(false);
+  });
+
+  it('Accept calls acceptKeyholderInvitation(deps, pastedText) with 2 args and navigates back', async () => {
+    const tr = await render();
+    const { text } = makeShareText();
+    await paste(tr, text);
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
-      await Promise.resolve();
     });
-
-    expect(mockRespondToInvite).toHaveBeenCalledTimes(1);
-    const callArgs = mockRespondToInvite.mock.calls[0];
-    expect(callArgs).toHaveLength(6);
-    expect(callArgs[0]).toBe('invite-1');
-    expect(callArgs[1]).toBe(true);
-    expect(callArgs[2]).toBeUndefined();
-    expect(callArgs[3]).toBeUndefined();
-    expect(typeof callArgs[4]).toBe('string');
-    expect(callArgs[4]).toMatch(/^[0-9a-f-]{36}$/i);
-    const provisioning = callArgs[5] as { signingKey: { type: string }; dkgPublicKey: string; sign: unknown };
-    expect(provisioning.signingKey.type).toBe('M');
-    expect(provisioning.dkgPublicKey).toMatch(/^(02|03)[0-9a-f]{64}$/);
-    expect(typeof provisioning.sign).toBe('function');
-
-    expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+    expect(mockAcceptKeyholderInvitation).toHaveBeenCalledTimes(1);
+    expect(mockAcceptKeyholderInvitation.mock.calls[0]).toHaveLength(2);
+    expect(mockAcceptKeyholderInvitation.mock.calls[0][1]).toBe(text);
     expect(mockGoBack).toHaveBeenCalledTimes(1);
   });
 
-  it('S2: a respondToInvite rejection keeps the screen open, shows the message, and discards the minted identity', async () => {
-    mockRespondToInvite.mockRejectedValueOnce(new Error('keyholder accept rejected'));
-    const fakeVault = makeFakeVault();
-    setKeyholderKeyVaultForTests(fakeVault as never);
+  it.each([
+    ['not-found', 'invitationAcceptNotFound'],
+    ['wrong-type', 'invitationAcceptWrongType'],
+    ['malformed', 'invitationAcceptMalformed'],
+    ['no-longer-valid', 'invitationAcceptNoLongerValid'],
+  ])('accept failure %s renders mapped copy', async (code, key) => {
+    mockAcceptKeyholderInvitation.mockRejectedValueOnce(new InviteShareError(code as never));
     const tr = await render();
-
+    await paste(tr, makeShareText().text);
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
-      await Promise.resolve();
     });
-
     expect(mockGoBack).not.toHaveBeenCalled();
-    expect(JSON.stringify(tr.toJSON())).toContain('keyholder accept rejected');
-    expect(fakeVault.deleteSecret).toHaveBeenCalled();
-    const deletedAliases: string[] = fakeVault.deleteSecret.mock.calls.map((c: unknown[]) => c[0] as string);
-    expect(deletedAliases.some((a) => a.startsWith('vt.keyholder-signing.'))).toBe(true);
+    expect(JSON.stringify(tr.toJSON())).toContain(key);
   });
 
-  it('S3: a vault put rejecting auth-denied renders deviceSigningErrorGeneric, and respondToInvite is never called', async () => {
-    const authDeniedError = Object.assign(new Error('nope'), { name: 'KeyVaultError', code: 'auth-denied' });
-    setKeyholderKeyVaultForTests(makeFakeVault({ putSecret: jest.fn(async () => { throw authDeniedError; }) }) as never);
+  it('auth-denied renders deviceSigningErrorGeneric and not the raw message', async () => {
+    mockAcceptKeyholderInvitation.mockRejectedValueOnce(Object.assign(new Error('nope'), { code: 'auth-denied' }));
     const tr = await render();
-
+    await paste(tr, makeShareText().text);
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
-      await Promise.resolve();
     });
-
-    expect(mockRespondToInvite).not.toHaveBeenCalled();
     expect(JSON.stringify(tr.toJSON())).toContain('deviceSigningErrorGeneric');
     expect(JSON.stringify(tr.toJSON())).not.toContain('nope');
   });
 
-  it('S4: onDecline calls respondToInvite with exactly 3 arguments and provisions nothing', async () => {
-    const fakeVault = makeFakeVault();
-    setKeyholderKeyVaultForTests(fakeVault as never);
+  it('an engine error renders invitationAcceptFailed with no engine text or Cid', async () => {
+    mockAcceptKeyholderInvitation.mockRejectedValueOnce(new Error('InvitationEngine.respondToInvite: InviteSlot not found for Cid: abc123'));
     const tr = await render();
+    await paste(tr, makeShareText().text);
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'accept').props.onPress();
+    });
+    const json = JSON.stringify(tr.toJSON());
+    expect(json).toContain('invitationAcceptFailed');
+    expect(json).not.toContain('InvitationEngine');
+    expect(json).not.toContain('Cid');
+  });
 
+  it('Decline resolves the slot then calls respondToInvite(slotCid, false, invitePrivate) with exactly 3 args', async () => {
+    const tr = await render();
+    const { text, invitePrivate } = makeShareText();
+    await paste(tr, text);
     await renderer.act(async () => {
       await buttonByTitle(tr, 'decline').props.onPress();
-      await Promise.resolve();
     });
-
-    expect(mockRespondToInvite).toHaveBeenCalledWith('invite-1', false, undefined);
+    expect(mockRespondToInvite).toHaveBeenCalledWith('cid-1', false, invitePrivate);
     expect(mockRespondToInvite.mock.calls[0]).toHaveLength(3);
-    expect(fakeVault.putSecret).not.toHaveBeenCalled();
     expect(mockGoBack).toHaveBeenCalledTimes(1);
   });
 
-  it('onDecline does NOT navigate back and sets errorMessage when respondToInvite throws', async () => {
-    mockRespondToInvite.mockRejectedValueOnce(new Error('keyholder decline rejected'));
+  it('Decline with an unresolvable share renders not-found copy and does not respond', async () => {
+    mockResolveInviteSlot.mockResolvedValueOnce({ status: 'not-found' });
     const tr = await render();
-
+    await paste(tr, makeShareText().text);
     await renderer.act(async () => {
       await buttonByTitle(tr, 'decline').props.onPress();
-      await Promise.resolve();
     });
-
+    expect(mockRespondToInvite).not.toHaveBeenCalled();
     expect(mockGoBack).not.toHaveBeenCalled();
-    expect(JSON.stringify(tr.toJSON())).toContain('keyholder decline rejected');
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptNotFound');
   });
 
-  it('S2b: isAccepting resets after a failure, allowing a retry that succeeds', async () => {
-    mockRespondToInvite.mockRejectedValueOnce(new Error('transient failure'));
+  it('Decline of a withdrawn or expired share renders invitationAcceptNoLongerValid with no prompt and no response', async () => {
+    mockResolveInviteSlot.mockResolvedValueOnce({ status: 'no-longer-valid' });
     const tr = await render();
-
+    await paste(tr, makeShareText().text);
     await renderer.act(async () => {
-      await buttonByTitle(tr, 'accept').props.onPress();
-      await Promise.resolve();
+      await buttonByTitle(tr, 'decline').props.onPress();
+    });
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).toContain('invitationAcceptNoLongerValid');
+    expect(rendered).not.toContain('InvitationEngine');
+    expect(rendered).not.toContain('Cid');
+    expect(mockRespondToInvite).not.toHaveBeenCalled();
+    expect(mockAcceptKeyholderInvitation).not.toHaveBeenCalled();
+    expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+    expect(mockGoBack).not.toHaveBeenCalled();
+  });
+
+  it('Decline failure maps to invitationAcceptFailed', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(new Error('InvitationEngine.respondToInvite: boom'));
+    const tr = await render();
+    await paste(tr, makeShareText().text);
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'decline').props.onPress();
     });
     expect(mockGoBack).not.toHaveBeenCalled();
-
-    await renderer.act(async () => {
-      await buttonByTitle(tr, 'accept').props.onPress();
-      await Promise.resolve();
-    });
-    expect(mockRespondToInvite).toHaveBeenCalledTimes(2);
-    expect(mockGoBack).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptFailed');
+    expect(JSON.stringify(tr.toJSON())).not.toContain('InvitationEngine');
   });
 
-  it('S1b: a pasted raw (non-JSON) invite string is still forwarded as invitePrivate', async () => {
-    const tr = await render();
-    const input = tr.root.findAll((n) => typeof n.props?.onChangeText === 'function')[0];
-
-    await renderer.act(async () => {
-      input.props.onChangeText('deadbeef');
-    });
-    await renderer.act(async () => {
-      await buttonByTitle(tr, 'accept').props.onPress();
-      await Promise.resolve();
-    });
-
-    expect(mockRespondToInvite.mock.calls[0][2]).toBe('deadbeef');
-  });
-
-  it('S5: while an accept is in flight, the footer disables and a second press does not start a second accept', async () => {
-    let resolveRespond!: () => void;
-    mockRespondToInvite.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveRespond = resolve;
-        })
+  it('S5: while an accept is in flight a second press does not start a second accept', async () => {
+    let resolveAccept!: () => void;
+    mockAcceptKeyholderInvitation.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveAccept = () => resolve({ userId: 'u', slotCid: 'cid-1' }); })
     );
     const tr = await render();
+    await paste(tr, makeShareText().text);
 
     let pressPromise!: Promise<void>;
     await renderer.act(async () => {
       pressPromise = buttonByTitle(tr, 'accept').props.onPress();
       await Promise.resolve();
     });
-
-    // A second press while in flight must not start a second accept.
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
-      await Promise.resolve();
     });
-    expect(mockRespondToInvite).toHaveBeenCalledTimes(1);
+    expect(mockAcceptKeyholderInvitation).toHaveBeenCalledTimes(1);
 
     await renderer.act(async () => {
-      resolveRespond();
+      resolveAccept();
       await pressPromise;
-      await Promise.resolve();
     });
     expect(mockGoBack).toHaveBeenCalledTimes(1);
+  });
+
+  it('seeds the paste field from the initialShare route param', async () => {
+    mockRouteParams.initialShare = makeShareText('k', 'Seeded Name').text;
+    try {
+      const tr = await render();
+      expect(JSON.stringify(tr.toJSON())).toContain('Seeded Name');
+      expect(buttonByTitle(tr, 'accept').props.disabled).toBe(false);
+    } finally {
+      delete mockRouteParams.initialShare;
+    }
   });
 });

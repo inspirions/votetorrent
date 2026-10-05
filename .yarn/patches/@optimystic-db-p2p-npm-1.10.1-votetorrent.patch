@@ -1,5 +1,5 @@
 diff --git a/dist/src/cluster/cluster-repo.js b/dist/src/cluster/cluster-repo.js
-index 45345eb..984bdd5 100644
+index 45345ebd779263a109630251da8ab299eba821c8..984bdd50d5db4076edd96e499bdc1aa67236419a 100644
 --- a/dist/src/cluster/cluster-repo.js
 +++ b/dist/src/cluster/cluster-repo.js
 @@ -250,12 +250,17 @@ export class ClusterMember {

@@ -325,6 +325,7 @@ const resources = {
 			'code.showAgainLink': 'Show my registration code',
 			'code.unavailable':
 				"Your registration code isn't available right now. Try again in a moment.",
+			'code.checking': 'Checking your registration…',
 			'code.notAvailableOnDevice':
 				"A registration code isn't available on this device. If you move to another device, you'll confirm your identity there instead.",
 			'newDevice.screenTitle': 'Continue on This Device',
@@ -608,6 +609,7 @@ const resources = {
 			'code.showAgainLink': 'Mostrar mi código de registro',
 			'code.unavailable':
 				'Tu código de registro no está disponible en este momento. Inténtalo de nuevo en un momento.',
+			'code.checking': 'Comprobando tu registro…',
 			'code.notAvailableOnDevice':
 				'No hay un código de registro disponible en este dispositivo. Si cambias a otro dispositivo, confirmarás tu identidad allí.',
 			'newDevice.screenTitle': 'Continuar en Este Dispositivo',

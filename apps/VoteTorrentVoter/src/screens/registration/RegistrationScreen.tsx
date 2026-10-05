@@ -18,7 +18,10 @@
  * Phase 62 Plan 28 (D-40/D-45) addition: below the card, a `useFocusEffect`-driven read of
  * `resolveRegistrationCodeAvailability` offers 'available' -> the show-again link (re-resolves
  * fresh on tap, never cached — 59 D-23), 'not-registered' -> `newDevice.entryLink` into
- * `ContinueOnAnotherDevice`, 'not-sent'/'not-holder' -> the code-unavailable notice.
+ * `ContinueOnAnotherDevice`, 'not-sent'/'not-holder'/'unavailable' -> the code-unavailable notice,
+ * and an unsettled read (null) -> a distinct "checking" line, so "still loading" is never visually
+ * identical to "settled with nothing to show" (UAT 62 test 14: a settled 'unavailable' rendered
+ * nothing and read as a hang).
  * Known limitation (flagged in the plan SUMMARY): this read is independent of the session-only
  * `isRegistered` toggle above, so a toggled-off approved device can show the not-registered card
  * alongside "Show my registration code".
@@ -132,12 +135,22 @@ export default function RegistrationScreen() {
 							</Text>
 						</Pressable>
 					</View>
-				) : codeAvailability?.kind === 'not-sent' || codeAvailability?.kind === 'not-holder' ? (
+				) : codeAvailability?.kind === 'not-sent' ||
+				  codeAvailability?.kind === 'not-holder' ||
+				  codeAvailability?.kind === 'unavailable' ? (
 					<View style={styles.codeSection}>
 						<Text
 							testID="registration-code-not-available"
 							style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize}}>
 							{t('code.notAvailableOnDevice')}
+						</Text>
+					</View>
+				) : codeAvailability === null && isInitialized ? (
+					<View style={styles.codeSection}>
+						<Text
+							testID="registration-code-checking"
+							style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize}}>
+							{t('code.checking')}
 						</Text>
 					</View>
 				) : null}

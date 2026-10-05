@@ -38,6 +38,159 @@ export const STAGING_CURSOR_WIDTH = 16
 /** Bounded retry limit for the D-05 client-side max+1 cursor race (`insertWithCursorRetry`). */
 export const STAGING_CURSOR_MAX_ATTEMPTS = 5
 
+/** The largest cursor the schema's `CursorWellFormed` CHECK admits: 2^53 - 1, the largest exact
+ * integer, as 16 digits (V-4). */
+export const STAGING_CURSOR_MAX_TEXT = '9007199254740991'
+
+/** How far above the strand's row count a cursor may sit and still count as in sequence (V-4).
+ * Honest allocation is dense (max + 1, with race retries and no gaps), so an honest cursor never
+ * exceeds the row count; the slack only absorbs a replica that has not yet seen every row. */
+export const STAGING_CURSOR_MAX_STEP = 1000
+
+const STAGING_CURSOR_CAP = BigInt(STAGING_CURSOR_MAX_TEXT)
+const STAGING_CURSOR_PATTERN = /^[0-9]{16}$/
+
+/**
+ * True only for exactly 16 ASCII digits whose value is within 1..9007199254740991. Never throws;
+ * every non-string input is non-conforming (V-4).
+ */
+export function isConformingStagingCursor (value: unknown): value is string {
+  if (typeof value !== 'string' || !STAGING_CURSOR_PATTERN.test(value)) return false
+  const n = BigInt(value)
+  return n >= BigInt(1) && n <= STAGING_CURSOR_CAP
+}
+
+/**
+ * The highest cursor that counts as IN SEQUENCE on a strand: its row count plus
+ * `STAGING_CURSOR_MAX_STEP`, clamped to the cap and padded to 16 digits (V-4). It is engine-side
+ * on purpose: the same rule as a schema CHECK would be a self-referential subquery, which Quereus
+ * defers and mis-evaluates when batched.
+ *
+ * What the ceiling does and does not do:
+ *  (a) It bounds where ALLOCATION starts (the greatest conforming cursor at or below it) and which
+ *      cursor may become a staging report's high-water mark (`inSequenceHighWater`). It never
+ *      blocks allocation: `insertWithCursorRetry` walks past every occupied slot above it.
+ *  (b) The staging report readers (`readConformingRows`) deliver EVERY conforming row, so a forged
+ *      high cursor is re-reported on every read (consumers are idempotent, D-05) and never
+ *      advances the high-water mark; an honest row that had to land above the ceiling is still
+ *      delivered.
+ *  (c) The decision readers (`readDecisionRows`) also deliver EVERY conforming row (WR-01); the
+ *      ceiling only picks the forward cursor. Consumers forward their notice cursors between
+ *      polls (62-38, T-62-38-05), so the `cursor` a notice carries is a resume cursor: the row's
+ *      own cursor when in sequence, otherwise the last in-sequence cursor of the read. A forged
+ *      high decision is therefore re-delivered on every poll and never adopted as a forward
+ *      cursor, and an honest decision walked above the ceiling is delivered at once.
+ *  (d) A non-conforming `sinceCursor` is treated as absent, so the caller re-reads from the start
+ *      and may see rows it already processed.
+ */
+export async function stagingCursorCeiling (port: StagingSqlPort, table: StagingCursorTable, strandId: string): Promise<string> {
+  return (await stagingCursorBounds(port, table, strandId)).ceiling
+}
+
+/** One count query, two uses: the in-sequence ceiling and the strand's row count (the walk bound). */
+async function stagingCursorBounds (port: StagingSqlPort, table: StagingCursorTable, strandId: string): Promise<{ ceiling: string, rowCount: bigint }> {
+  const rows = await port.query<{ RowCount: number | string | bigint | null }>(
+    `select count(*) as RowCount from ${table} where StrandId = :strandId`,
+    { strandId }
+  )
+  const raw = rows[0]?.RowCount
+  let count = BigInt(0)
+  try {
+    count = raw === null || raw === undefined ? BigInt(0) : BigInt(raw)
+  } catch {
+    count = BigInt(0)
+  }
+  let ceiling = count + BigInt(STAGING_CURSOR_MAX_STEP)
+  if (ceiling > STAGING_CURSOR_CAP) ceiling = STAGING_CURSOR_CAP
+  return { ceiling: ceiling.toString().padStart(STAGING_CURSOR_WIDTH, '0'), rowCount: count }
+}
+
+/**
+ * Orders cursor text by Unicode code point, exactly like Quereus BINARY collation. It mirrors
+ * `@quereus/quereus` `compareCodePoints` (4.20.0, `dist/src/util/comparison.js`). SQL
+ * `order by Cursor` and `Cursor > :x` use that order, whereas JS `<` / `>` on strings use UTF-16
+ * code-unit order, which disagrees when one string has a supplementary-plane character and the
+ * other a BMP character in U+E000-U+FFFF (CR-01). It is local rather than imported to keep this
+ * seam free of a new runtime import; the CP0 spec pins parity with Quereus's own function. Any
+ * comparison of SQL-ordered, possibly non-conforming cursor text must go through it.
+ */
+export function compareStagingCursorText (a: string, b: string): number {
+  if (a === b) return 0
+  const n = Math.min(a.length, b.length)
+  for (let i = 0; i < n; i++) {
+    const ua = a.charCodeAt(i)
+    const ub = b.charCodeAt(i)
+    if (ua === ub) continue
+    // Lift high surrogates above the BMP range U+E000-U+FFFF, as a code-point order would.
+    const ra = ua >= 0xD800 && ua <= 0xDBFF ? ua + 0x2800 : ua
+    const rb = ub >= 0xD800 && ub <= 0xDBFF ? ub + 0x2800 : ub
+    return ra < rb ? -1 : 1
+  }
+  return a.length < b.length ? -1 : 1
+}
+
+/**
+ * Staging report reader front end (CR-01, IN-03): runs `selectSql` (which must bind `:strandId`
+ * and `:sinceCursor` and order by Cursor asc) and returns EVERY row whose Cursor conforms, with
+ * NO ceiling filter, plus the in-sequence ceiling so the caller can gate its high-water mark with
+ * `inSequenceHighWater`. A non-conforming `sinceCursor` is bound as null.
+ */
+export async function readConformingRows<T extends { Cursor: string }> (
+  port: StagingSqlPort,
+  table: StagingCursorTable,
+  strandId: string,
+  selectSql: string,
+  sinceCursor: string | undefined
+): Promise<{ rows: T[], ceiling: string }> {
+  const since = sinceCursor !== undefined && isConformingStagingCursor(sinceCursor) ? sinceCursor : null
+  const ceiling = await stagingCursorCeiling(port, table, strandId)
+  const rows = await port.query<T>(selectSql, { strandId, sinceCursor: since })
+  return { rows: rows.filter((row) => isConformingStagingCursor(row.Cursor)), ceiling }
+}
+
+/**
+ * The `sinceCursor` a consumer forwards to re-read from the very start: 16 characters but
+ * deliberately NON-conforming (`isConformingStagingCursor` requires a value of at least 1), so
+ * every P2P reader treats it as an absent `sinceCursor` (WR-01).
+ */
+export const STAGING_CURSOR_REREAD = '0000000000000000'
+
+/**
+ * Decision reader front end (V-4, WR-01): `readConformingRows`, then pairs EVERY conforming row
+ * (none is dropped for sitting above the ceiling) with a forward-safe RESUME cursor. A row at or
+ * below the ceiling carries its own cursor; a row above it carries the greatest in-sequence
+ * cursor of this read, else the caller's conforming `sinceCursor`, else `STAGING_CURSOR_REREAD`.
+ * Consumers forward the last notice's cursor between polls (62-38, T-62-38-05), so a forged
+ * far-high decision is re-delivered on every poll and never adopted as a forward cursor, while an
+ * honest decision walked above the ceiling is delivered at once.
+ */
+export async function readDecisionRows<T extends { Cursor: string }> (
+  port: StagingSqlPort,
+  table: StagingCursorTable,
+  strandId: string,
+  selectSql: string,
+  sinceCursor: string | undefined
+): Promise<Array<{ row: T, resumeCursor: string }>> {
+  const { rows, ceiling } = await readConformingRows<T>(port, table, strandId, selectSql, sinceCursor)
+  const since = sinceCursor !== undefined && isConformingStagingCursor(sinceCursor) ? sinceCursor : undefined
+  let highWater: string | undefined
+  return rows.map((row) => {
+    highWater = inSequenceHighWater(highWater, row.Cursor, ceiling)
+    return { row, resumeCursor: highWater ?? since ?? STAGING_CURSOR_REREAD }
+  })
+}
+
+/**
+ * The next high-water mark: `cursor` only when it is conforming, at or below the ceiling and
+ * greater than `current`; otherwise `current`. A forged or out-of-sequence high cursor is
+ * therefore never adopted as a high-water mark. It compares only conforming 16-digit ASCII
+ * values, for which JS order equals code-point order.
+ */
+export function inSequenceHighWater (current: string | undefined, cursor: string, ceiling: string): string | undefined {
+  if (!isConformingStagingCursor(cursor) || cursor > ceiling) return current
+  return current === undefined || cursor > current ? cursor : current
+}
+
 /**
  * Requester side (D-03/D-04). `plaintext` is the JSON string this transport builds (the encoded
  * `RegistrationStagingPlaintext` / `AssociationStagingPlaintext` / `AssociationAttestationAnswer`
@@ -83,6 +236,7 @@ export interface StagingDecisionSigner {
 export type P2pStagingErrorCode =
   | 'no-sealer' | 'no-opener' | 'no-decision-signer' | 'sealer-authority-mismatch'
   | 'duplicate-request-id' | 'duplicate-decision' | 'cursor-exhausted' | 'rejected' | 'digest-unavailable'
+  | 'code-binding-requires-signer'
 
 /**
  * Every message is built from a code and a call-site label only — never a payload, plaintext,
@@ -122,8 +276,11 @@ export interface StagingReadReport<T> {
   /** Opened rows, in cursor order. */
   readonly delivered: T[]
   readonly unreadable: StagingUnreadableRow[]
-  /** The greatest cursor among EVERY row read this call, delivered or unreadable — so a caller
-   * can advance its own `sinceCursor` past an unreadable row instead of re-reading it forever. */
+  /** The greatest CONFORMING cursor at or below the in-sequence ceiling among every row read this
+   * call, delivered or unreadable — so a caller can advance its own `sinceCursor` past an
+   * unreadable row instead of re-reading it forever. Rows above the ceiling are still delivered
+   * or reported but never count here (V-4, `inSequenceHighWater`), so a forged high cursor is
+   * re-reported on every read and never adopted. */
   readonly highWaterCursor?: string
 }
 
@@ -147,8 +304,23 @@ export type StagingCursorTable =
  * explicitly; this one is left out on purpose).
  *
  * For attempt 1..`STAGING_CURSOR_MAX_ATTEMPTS`:
- *   1. Allocate the cursor via `select max(Cursor) from <table> where StrandId = :strandId`, +1,
- *      padded to `STAGING_CURSOR_WIDTH` (a null max gives `'0000000000000001'`).
+ *   1. Allocate the cursor (V-4): the greatest CONFORMING, IN-SEQUENCE cursor (at or below
+ *      `stagingCursorCeiling`: row count + `STAGING_CURSOR_MAX_STEP`) is `base`; the candidate is
+ *      max(`base`, `floor`) + 1, then WALKED upward past every occupied slot (ascending pages of
+ *      64 rows), because the strand's (StrandId, Cursor) unique index refuses an occupied slot
+ *      and re-deriving the same candidate would wedge allocation (CR-01). The walk pages by the
+ *      last row seen (not by the candidate), so a page holding only non-conforming rows still
+ *      advances; it is bounded to `STAGING_CURSOR_MAX_TEXT`, so above-cap rows are never paged,
+ *      while non-digit and wrong-width rows that sort at or below the cap ARE paged and skipped.
+ *      The progress guard compares cursors by code point (`compareStagingCursorText`) because SQL
+ *      orders by code point (CR-01). The walk is bounded by `rowCount / 64 + 2` pages; a page that
+ *      does not advance, or a walk past that bound, throws `cursor-exhausted`; cost grows by one
+ *      query per 64 planted in-range rows (IN-05).
+ *      `floor` is the slot a genuine race just took. Static occupied slots, however many a
+ *      forger planted, never consume an attempt; only real concurrent inserts do. A malformed
+ *      cursor is skipped. If the free slot is above the cap it throws `cursor-exhausted` without
+ *      calling `mutate`. The bound is engine-side, not a schema CHECK: a self-referential CHECK
+ *      is deferred and Quereus mis-evaluates batched deferred CHECKs.
  *   2. `port.mutate(insertSql, { ...params, cursor })`. On success, return
  *      `{ cursor, idempotent: false }`.
  *   3. On any rejection, first run the identity read (`args.identity`). If it returns rows, call
@@ -156,7 +328,7 @@ export type StagingCursorTable =
  *      `idempotent: true`; otherwise the returned `P2pStagingError` is thrown.
  *   4. Otherwise probe whether the allocated cursor is now taken
  *      (`select Cursor from <table> where StrandId = :strandId and Cursor = :cursor`). If taken,
- *      continue to the next attempt (re-allocate from the now-current max).
+ *      raise `floor` to it and continue to the next attempt (re-allocate past it).
  *   5. Otherwise the rejection is some OTHER schema refusal (a forged signature, a CHECK the row
  *      fails on its own merits) — throw `P2pStagingError('rejected', ...)` immediately, with the
  *      underlying error as `cause`.
@@ -179,16 +351,80 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
   where: string
 }): Promise<{ cursor: string, idempotent: boolean }> {
   const { table, strandId, insertSql, params, identity, onIdentityConflict, where } = args
-  const maxCursorSql = `select max(Cursor) as MaxCursor from ${table} where StrandId = :strandId`
   const cursorProbeSql = `select Cursor from ${table} where StrandId = :strandId and Cursor = :cursor`
+  const topPageSql = `select Cursor from ${table} where StrandId = :strandId and Cursor <= :ceiling order by Cursor desc limit 64`
+  const nextPageSql = `select Cursor from ${table} where StrandId = :strandId and Cursor <= :ceiling and Cursor < :beforeCursor order by Cursor desc limit 64`
+  const walkPageSql = `select Cursor from ${table} where StrandId = :strandId and Cursor > :afterCursor and Cursor <= :capCursor order by Cursor asc limit 64`
 
   let lastError: unknown
+  let floor = BigInt(0)
 
   for (let attempt = 1; attempt <= STAGING_CURSOR_MAX_ATTEMPTS; attempt++) {
-    const maxRows = await port.query<{ MaxCursor: string | null }>(maxCursorSql, { strandId })
-    const maxCursor = maxRows[0]?.MaxCursor ?? null
-    const next = maxCursor === null || maxCursor === '' ? 1 : Number(maxCursor) + 1
-    const cursor = String(next).padStart(STAGING_CURSOR_WIDTH, '0')
+    const { ceiling, rowCount } = await stagingCursorBounds(port, table, strandId)
+    const maxWalkPages = rowCount / BigInt(64) + BigInt(2)
+    let walkPages = BigInt(0)
+    // Greatest CONFORMING cursor at or below the ceiling; non-conforming rows are skipped.
+    let maxConforming = BigInt(0)
+    let before: string | undefined
+    for (;;) {
+      const page = await port.query<{ Cursor: unknown }>(
+        before === undefined ? topPageSql : nextPageSql,
+        before === undefined ? { strandId, ceiling } : { strandId, ceiling, beforeCursor: before }
+      )
+      const hit = page.find((row) => isConformingStagingCursor(row.Cursor))
+      if (hit !== undefined) {
+        maxConforming = BigInt(hit.Cursor as string)
+        break
+      }
+      const last = page[page.length - 1]?.Cursor
+      if (page.length < 64 || typeof last !== 'string') break
+      before = last
+    }
+    let nextValue = (maxConforming > floor ? maxConforming : floor) + BigInt(1)
+    // Walk past every occupied slot. The walk pages by the LAST ROW SEEN (never by the
+    // candidate, which does not move across a page of non-conforming rows) and is bounded to the
+    // conforming range (`Cursor <= STAGING_CURSOR_MAX_TEXT`), so above-cap rows are never paged
+    // (non-digit and wrong-width rows at or below the cap ARE paged and skipped) and every query
+    // starts strictly after the previous page. The progress guard compares by code point, as SQL
+    // orders (CR-01). A page that fails to advance, or a walk past `rowCount / 64 + 2` pages,
+    // throws `cursor-exhausted`. Cost: one query per 64 planted in-range rows (IN-05).
+    let afterCursor = (nextValue - BigInt(1)).toString().padStart(STAGING_CURSOR_WIDTH, '0')
+    for (; nextValue <= STAGING_CURSOR_CAP;) {
+      walkPages += BigInt(1)
+      if (walkPages > maxWalkPages) {
+        throw new P2pStagingError(
+          'cursor-exhausted',
+          `${where}: the cursor walk read more pages than the strand holds rows`,
+          { cause: lastError }
+        )
+      }
+      const page = await port.query<{ Cursor: unknown }>(walkPageSql, { strandId, afterCursor, capCursor: STAGING_CURSOR_MAX_TEXT })
+      let free = false
+      for (const row of page) {
+        if (!isConformingStagingCursor(row.Cursor)) continue
+        const rowValue = BigInt(row.Cursor)
+        if (rowValue === nextValue) nextValue += BigInt(1)
+        else if (rowValue > nextValue) { free = true; break }
+      }
+      if (free || page.length < 64 || nextValue > STAGING_CURSOR_CAP) break
+      const last = page[page.length - 1]?.Cursor
+      if (typeof last !== 'string' || compareStagingCursorText(last, afterCursor) <= 0) {
+        throw new P2pStagingError(
+          'cursor-exhausted',
+          `${where}: the strand returned a cursor page that does not advance`,
+          { cause: lastError }
+        )
+      }
+      afterCursor = last
+    }
+    if (nextValue > STAGING_CURSOR_CAP) {
+      throw new P2pStagingError(
+        'cursor-exhausted',
+        `${where}: the staging cursor space is exhausted`,
+        { cause: lastError }
+      )
+    }
+    const cursor = nextValue.toString().padStart(STAGING_CURSOR_WIDTH, '0')
 
     try {
       await port.mutate(insertSql, { ...params, cursor })
@@ -216,7 +452,8 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
       const cursorProbe = await port.query<{ Cursor: string }>(cursorProbeSql, { strandId, cursor })
       if (cursorProbe.length > 0) {
         // Genuine cursor race: someone else landed this exact cursor between our SELECT and our
-        // INSERT. Retry from the top — the next attempt's max-cursor read sees the new row.
+        // INSERT. Retry past it: the floor keeps the next candidate above the collided slot.
+        floor = nextValue
         continue
       }
 

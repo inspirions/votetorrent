@@ -4,12 +4,14 @@
  * no RN module mocks — nothing in the module under test touches React Native.
  */
 
+import { resources } from "../../../i18n";
 import {
 	REGISTRATION_REQUEST_STATUS_META,
 	registrationRequestDisplayName,
 	resolveBridgeLabel,
 	formatRequestTimestamp,
 	resolveRowTimestamps,
+	resolveRequestRowStatusMeta,
 } from "../registration-request-display";
 
 describe("REGISTRATION_REQUEST_STATUS_META", () => {
@@ -131,5 +133,34 @@ describe("resolveRowTimestamps", () => {
 		});
 		expect(result.received).toBe("2026-08-05");
 		expect(result.claimed).toBe("2026-07-06");
+	});
+});
+
+describe("resolveRequestRowStatusMeta (UAT 62 test 12)", () => {
+	const closed = { labelKey: "registrationRequestStatusClosedDuplicate", colorKey: "textSecondary" };
+
+	it("closed and closing duplicate closure override status p with the neutral closed pill", () => {
+		expect(resolveRequestRowStatusMeta({ status: "p", duplicateClosure: "closed" })).toEqual(closed);
+		expect(resolveRequestRowStatusMeta({ status: "p", duplicateClosure: "closing" })).toEqual(closed);
+	});
+
+	it("without closure it falls through to the status ladder, undefined for an unknown code", () => {
+		expect(resolveRequestRowStatusMeta({ status: "p" })).toEqual(REGISTRATION_REQUEST_STATUS_META.p);
+		expect(resolveRequestRowStatusMeta({ status: "a" })).toEqual(REGISTRATION_REQUEST_STATUS_META.a);
+		expect(resolveRequestRowStatusMeta({ status: "r" })).toEqual(REGISTRATION_REQUEST_STATUS_META.r);
+		expect(resolveRequestRowStatusMeta({ status: "z" as never })).toBeUndefined();
+	});
+
+	// Clipping PROXY only: jest cannot measure layout. The closed label is no longer than a
+	// label the pill already renders in that locale.
+	it.each(["en", "es"] as const)("%s closed label is no longer than the longest existing pill label (clipping proxy)", (lng) => {
+		const tr = (resources as Record<string, { translation: Record<string, string> }>)[lng].translation;
+		expect(tr.registrationRequestStatusClosedDuplicate).toBeTruthy();
+		const longest = Math.max(
+			tr.registrationRequestStatusPending.length,
+			tr.registrationRequestStatusApproved.length,
+			tr.registrationRequestStatusRejected.length,
+		);
+		expect(tr.registrationRequestStatusClosedDuplicate.length).toBeLessThanOrEqual(longest);
 	});
 });

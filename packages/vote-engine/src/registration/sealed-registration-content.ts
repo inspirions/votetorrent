@@ -21,8 +21,18 @@
 // recipient when a row was sealed (joined later, or had not enabled encrypted intake) reads that row
 // as `'not-a-recipient'` — there is no re-wrap ceremony. See `62-31-SECURITY-REVIEW.md`.
 
+// D-52 (62-36, T-62-31-13): `RegistrantSelective.SelectiveDetails` is sealed the same way as the
+// private tier. Difference: its Cid is cid(set_commit(PLAINTEXT leaves)) — recipients verify
+// disclosures against that root with `setVerify` — so the Cid is computed BEFORE sealing and the
+// envelope binding includes it (`registrantSelectiveBinding`). The schema `CidValid` that recomputed
+// it from the stored column was dropped by 62-33, so `openRegistrantSelectiveDetails` re-checks
+// `cid(set_commit(plaintext)) === Cid` at every open, sealed or legacy, failing closed as 'tampered'.
+// Plaintext leaves and salts live in memory only. Legacy plaintext rows read 'unsealed' (D-07); an
+// officer who was not a recipient at write time reads 'not-a-recipient' (D-51, no re-wrap).
+
 import type { Database } from '@quereus/quereus'
 import type { PrivateDetail, RegisterInit, RegistrationContentAccess } from '@votetorrent/vote-core'
+import type { SelectiveLeaf } from '@votetorrent/vote-core'
 import { envelopeRecipientUserIds } from '../crypto/index.js'
 import type { EnvelopeBinding } from '../crypto/index.js'
 import { intakeQueryPortFromDb } from '../intake/query-port.js'
@@ -199,6 +209,93 @@ export async function openRegistrantPrivateDetails (db: Database, opener: Intake
   }
   if (!Array.isArray(parsed)) return { access: 'unreadable', details: undefined }
   return { access: sealed ? 'opened' : 'unsealed', details: parsed as PrivateDetail[] }
+}
+
+export const REGISTRANT_SELECTIVE_BINDING_LABEL = 'vt-registrant-selective-1'
+
+/** `RegistrantSelective`'s envelope binding: `{ requestId: registrantId, digest: Digest(label,
+ * registrantId, cid) }`, computed in the DB. Including the Cid means an envelope moved to another
+ * registrant or row fails authentication. */
+export async function registrantSelectiveBinding (db: Database, registrantId: string, cid: string): Promise<EnvelopeBinding> {
+  const row = await db
+    .prepare('select Digest(:bindingLabel, :registrantId, :cid) as d')
+    .get({ bindingLabel: REGISTRANT_SELECTIVE_BINDING_LABEL, registrantId, cid })
+  if (!row || row.d == null) {
+    throw new Error('registrantSelectiveBinding: Digest() returned null — crypto plugin not registered?')
+  }
+  return { requestId: registrantId, digest: row.d as string }
+}
+
+/**
+ * Seals `JSON.stringify(leaves)` under `registrantSelectiveBinding` to the current officers of
+ * `authorityId`. The caller guarantees `leaves` is non-empty and that `cid` is
+ * cid(set_commit(leaves)) computed BEFORE sealing. Throws `IntakeError` unchanged ('no-recipients').
+ */
+export async function sealRegistrantSelectiveDetails (db: Database, args: {
+  authorityId: string
+  registrantId: string
+  cid: string
+  leaves: readonly SelectiveLeaf[]
+}): Promise<string> {
+  const binding = await registrantSelectiveBinding(db, args.registrantId, args.cid)
+  const sealer = createIntakeSealer({ port: intakeQueryPortFromDb(db), authorityId: args.authorityId })
+  return sealer.seal(JSON.stringify(args.leaves), binding)
+}
+
+export type RegistrantSelectiveRead =
+  | { readonly access: 'opened' | 'unsealed'; readonly leaves: SelectiveLeaf[] }
+  | { readonly access: 'no-opener' | 'not-a-recipient' | 'unreadable' | 'tampered'; readonly leaves: undefined }
+
+/**
+ * Never throws for content. Order: (1) non-string -> 'unreadable'; (2) sealed: no opener ->
+ * 'no-opener', else open under the binding (failures via `mapOpenFailure`); (3) unsealed: plaintext
+ * = stored; (4) parse to an array of objects with string `name` and `salt`, else
+ * 'unreadable' (WR-02: an unsealed empty set is the pre-D-52 "no selective fields" constant and
+ * passes the same Cid recheck; a sealed empty set is never written by the engine and stays unreadable); (5) TIER-2 RECHECK: `cid(set_commit(plaintext)) !== cid` -> 'tampered', for sealed
+ * and unsealed rows alike.
+ */
+export async function openRegistrantSelectiveDetails (db: Database, opener: IntakeOpener | undefined, row: {
+  registrantId: string
+  cid: string
+  stored: unknown
+}): Promise<RegistrantSelectiveRead> {
+  if (typeof row.stored !== 'string') return { access: 'unreadable', leaves: undefined }
+
+  const sealed = isSealedRegistrationContent(row.stored)
+  let plaintext: string
+  if (sealed) {
+    if (opener === undefined) return { access: 'no-opener', leaves: undefined }
+    const binding = await registrantSelectiveBinding(db, row.registrantId, row.cid)
+    const result = await opener.open(row.stored, binding)
+    if (!result.ok) return { access: mapOpenFailure(result.reason), leaves: undefined }
+    plaintext = result.plaintext
+  } else {
+    plaintext = row.stored
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(plaintext)
+  } catch {
+    return { access: 'unreadable', leaves: undefined }
+  }
+  if (!Array.isArray(parsed)) return { access: 'unreadable', leaves: undefined }
+  // WR-02: an unsealed '[]' is the pre-D-52 "no selective fields" constant and falls through to the Cid recheck.
+  if (parsed.length === 0 && sealed) return { access: 'unreadable', leaves: undefined }
+  for (const leaf of parsed) {
+    if (leaf === null || typeof leaf !== 'object' || typeof (leaf as { name?: unknown }).name !== 'string' || typeof (leaf as { salt?: unknown }).salt !== 'string') {
+      return { access: 'unreadable', leaves: undefined }
+    }
+  }
+
+  // TIER-2 RECHECK — replaces the RegistrantSelective.CidValid CHECK 62-33 dropped.
+  const recheck = await db.prepare('select cid(set_commit(:plaintextLeaves)) as c').get({ plaintextLeaves: plaintext })
+  if (!recheck || recheck.c == null) {
+    throw new Error('openRegistrantSelectiveDetails: cid(set_commit(...)) returned null — crypto plugin not registered?')
+  }
+  if ((recheck.c as string) !== row.cid) return { access: 'tampered', leaves: undefined }
+
+  return { access: sealed ? 'opened' : 'unsealed', leaves: parsed as SelectiveLeaf[] }
 }
 
 // Re-exported type-only so a caller can annotate a destructured `access` field without a second

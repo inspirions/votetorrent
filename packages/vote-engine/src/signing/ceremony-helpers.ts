@@ -84,10 +84,10 @@ export function reZuluDatetime (stored: string): string {
 }
 
 /**
- * 48-11/48-12: reconstructs the EXACT canonical `toIsoZDatetime` byte form (a trailing 'Z' and
+ * 48-11/48-12: reconstructs (ENGINE-WRITTEN values only; a SUBMITTER-signed SubmittedAt must use `resolveSignedSubmittedAt` in signed-submitted-at.ts — UAT 62 gap 2) the EXACT canonical `toIsoZDatetime` byte form (a trailing 'Z' and
  * fixed 3-digit milliseconds) from a value that has been through a Quereus plain-SELECT
  * round-trip — which strips the trailing 'Z' AND drops trailing zero fractional digits
- * (T-42-06). Every write of a `datetime`-typed column in this codebase goes through
+ * (T-42-06). Engine-written `datetime` columns (e.g. ReceivedAt) go through
  * `toIsoZDatetime`, which (for a numeric `Timestamp`) always emits EXACTLY 3 fractional
  * digits via `Date.prototype.toISOString()` — so Quereus's "minimal precision" stripping only
  * ever REMOVES trailing zeros, never changes a non-zero digit. Padding back up to 3 digits is

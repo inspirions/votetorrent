@@ -264,3 +264,45 @@ export const PRIVATE_TIER_READ_STATE_COPY = {
 	"no-key": "registrationContentNoKey",
 	unreadable: "registrantPrivateUnreadable",
 } as const;
+
+/** How the Selective tier's sealed details read on THIS device (D-52, D-51). */
+export type SelectiveTierReadState = "readable" | "not-a-recipient" | "no-key" | "unreadable" | "tampered";
+
+/**
+ * Maps `RegistrantSelective.detailsAccess` onto the Selective tier's render state. undefined means
+ * "not reported" (a mock engine) and reads as 'readable'. 'tampered' means the details do not match
+ * the registrant's signed commitment: an integrity failure, shown distinctly so it is never mistaken
+ * for a device or key problem. 'unreadable' stays its own device-side state.
+ */
+export function selectiveTierReadState(access: RegistrationContentAccess | undefined): SelectiveTierReadState {
+	switch (access) {
+		case undefined:
+		case "opened":
+		case "unsealed":
+			return "readable";
+		case "not-a-recipient":
+			return "not-a-recipient";
+		case "no-opener":
+			return "no-key";
+		case "unreadable":
+			return "unreadable";
+		case "tampered":
+			return "tampered";
+		default: {
+			const unreachable: never = access;
+			return unreachable;
+		}
+	}
+}
+
+/**
+ * i18n key per unread selective state (D-52). Fixed keys only: no value, salt or failure detail is
+ * ever copy. The no-key state reuses `registrationContentNoKey`, whose wording (this device has no
+ * encrypted intake key) applies equally to the selective tier.
+ */
+export const SELECTIVE_TIER_READ_STATE_COPY = {
+	"not-a-recipient": "registrantSelectiveNotRecipient",
+	"no-key": "registrationContentNoKey",
+	unreadable: "registrantSelectiveUnreadable",
+	tampered: "registrantSelectiveTampered",
+} as const;

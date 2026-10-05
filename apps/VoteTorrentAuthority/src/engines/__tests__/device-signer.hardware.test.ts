@@ -52,6 +52,7 @@ jest.mock('../device-user', () => ({
 
 import type { User } from '@votetorrent/vote-core'
 import { UserKeyType } from '@votetorrent/vote-core'
+import { p256 } from '@noble/curves/nist.js'
 import { createDeviceSigner } from '../device-signer'
 import { getDeviceUser, isRecoveryInProgress } from '../device-user'
 
@@ -63,10 +64,16 @@ const { __attestationNativeFake: nativeFake } = require('react-native') as {
 const mockGetDeviceUser = getDeviceUser as jest.MockedFunction<typeof getDeviceUser>
 const mockIsRecoveryInProgress = isRecoveryInProgress as jest.MockedFunction<typeof isRecoveryInProgress>
 
+// The signer self-verifies every native signature against the recorded key, so this suite needs a
+// real P-256 key pair and a real signature (a fake hex string is correctly refused as a desync).
+const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
+const SIGNING_PRIV = p256.utils.randomSecretKey()
+const signDigest = (d: Uint8Array) => hex(p256.sign(d, SIGNING_PRIV, { lowS: true }))
+
 const PROVISIONED_USER: User = {
 	id: 'user-1',
 	name: 'Officer One',
-	activeKeys: [{ key: 'aabbccdd', type: UserKeyType.p256, expiration: Date.now() + 1000 }],
+	activeKeys: [{ key: hex(p256.getPublicKey(SIGNING_PRIV, true)), type: UserKeyType.p256, expiration: Date.now() + 1000 }],
 }
 
 describe('device-signer.ts — hardware rewrite (49-07)', () => {
@@ -79,10 +86,11 @@ describe('device-signer.ts — hardware rewrite (49-07)', () => {
 
 	it('(a) base64-encodes the digest and passes the alias + three prompt strings through unchanged', async () => {
 		mockGetDeviceUser.mockResolvedValue(PROVISIONED_USER)
-		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: 'deadbeef' })
+		const digest = new Uint8Array([1, 2, 3, 4])
+		const goodSig = signDigest(digest)
+		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: goodSig })
 
 		const sign = await createDeviceSigner('Officer One')
-		const digest = new Uint8Array([1, 2, 3, 4])
 		const signature = await sign(digest)
 
 		expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1)
@@ -104,7 +112,7 @@ describe('device-signer.ts — hardware rewrite (49-07)', () => {
 			signerUserId: PROVISIONED_USER.id,
 			signerKey: PROVISIONED_USER.activeKeys[0]!.key,
 			// Returned hex is passed through verbatim — never re-normalized.
-			signature: 'deadbeef',
+			signature: goodSig,
 		})
 	})
 
@@ -141,10 +149,12 @@ describe('device-signer.ts — hardware rewrite (49-07)', () => {
 		it('signs normally when no recovery is in progress (explicit false, not just the default)', async () => {
 			mockGetDeviceUser.mockResolvedValue(PROVISIONED_USER)
 			mockIsRecoveryInProgress.mockResolvedValue(false)
-			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: 'deadbeef' })
+			const digest = new Uint8Array([1, 2, 3])
+			const goodSig = signDigest(digest)
+			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: goodSig })
 
 			const sign = await createDeviceSigner('Officer One')
-			await expect(sign(new Uint8Array([1, 2, 3]))).resolves.toMatchObject({ signature: 'deadbeef' })
+			await expect(sign(digest)).resolves.toMatchObject({ signature: goodSig })
 			expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1)
 		})
 

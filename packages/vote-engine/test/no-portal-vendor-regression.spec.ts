@@ -128,7 +128,7 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.9.x, @optimystic/db-* 1.9.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.12.x, @optimystic/db-* 1.10.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
@@ -157,8 +157,13 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // state) and @optimystic 1.8.1, ending the sereus-master vendor copy.
       // 2026-10-02: @optimystic 1.8.1 -> 1.9.0 (needs libp2p ^3.3.11 / @libp2p/interface ^3.3.0;
       // the db-p2p `.unref?.()` patch carried forward unchanged). @serfab stays 1.9.0.
-      // @serfab/* and @optimystic/db-* are both on the 1.9 line as of 2026-10-02.
-      const expectedPrefix = pkg === '@serfab/strand-proto' ? '0.11.' : '1.9.'
+      // 2026-10-05: @serfab 1.9.0 -> 1.12.0 (strandReactivity, pending joins, formation
+      // responder installed by start(); the public-observer + cohort-topic patch re-seated) and
+      // @optimystic 1.9.0 -> 1.10.1 (reactivity substrate; the `.unref?.()` patch carried forward
+      // unchanged — Optimystic#28 still open). The two families are on DIFFERENT lines from here on.
+      const expectedPrefix = pkg === '@serfab/strand-proto'
+        ? '0.11.'
+        : pkg.startsWith('@serfab/') ? '1.12.' : '1.10.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

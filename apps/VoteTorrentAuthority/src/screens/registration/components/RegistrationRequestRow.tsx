@@ -7,8 +7,8 @@ import type { RegistrationRequestListRow } from "@votetorrent/vote-core";
 import { ThemedText } from "../../../components/ThemedText";
 import { globalStyles } from "../../../theme/styles";
 import {
-	REGISTRATION_REQUEST_STATUS_META,
 	registrationRequestDisplayName,
+	resolveRequestRowStatusMeta,
 	resolveBridgeLabel,
 	resolveRowTimestamps,
 } from "../registration-request-display";
@@ -36,7 +36,8 @@ export function RegistrationRequestRow({ row, onPress }: RegistrationRequestRowP
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 
-	const meta = REGISTRATION_REQUEST_STATUS_META[row.status];
+	// A duplicate-closed request keeps status 'p'; the pill must read closed (UAT 62 test 12).
+	const meta = resolveRequestRowStatusMeta(row);
 	const isBridge = row.issuerType === "bridge";
 	const bridgeLabel = isBridge ? resolveBridgeLabel(row) : undefined;
 	const stamps = resolveRowTimestamps(row);

@@ -13,7 +13,10 @@ import {
   P2pStagingError,
   encodeStagingPlaintext,
   decodeStagingPlaintext,
-  insertWithCursorRetry
+  insertWithCursorRetry,
+  readConformingRows,
+  readDecisionRows,
+  inSequenceHighWater
 } from '../../registration/transport/p2p-staging-seam.js'
 import type { StagingSealer, StagingOpener, StagingDecisionSigner, StagingReadReport, StagingUnreadableRow, StagingSqlPort } from '../../registration/transport/p2p-staging-seam.js'
 import { bytesToBase64url, digestToBytes, nowCanonicalDatetime } from '../../utils.js'
@@ -174,6 +177,15 @@ export interface P2pAssociationDecisionRecord {
   decidedAt: string
   deciderKey: string
   deciderSignature: string
+  /**
+   * A resume cursor, not a row identifier: forward the last value as `sinceCursor` to continue
+   * (re-delivery is permitted, loss is not). Opaque; compare for equality only. In the P2P binding
+   * a decision above the in-sequence ceiling carries the last in-sequence cursor of the read (else
+   * the caller's conforming `sinceCursor`, else the re-read sentinel `0000000000000000`), so
+   * several notices can share one value and it can differ from the cursor `publishDecision`
+   * returned. See `readDecisionRows` in `p2p-staging-seam.ts`.
+   * Audit consumers must not key records on it.
+   */
   cursor: string
 }
 
@@ -413,19 +425,20 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
    * advance monotonically; a stale cursor re-delivers rather than losing a row. `AssociationDecision`
    * carries no Status vocabulary CHECK — an out-of-vocabulary status (e.g. 'x') THROWS here
    * (unchanged from before this plan), via `assertKnownAssociationStatus`.
+   *
+   * Every conforming decision is delivered (WR-01). `cursor` is a forward-safe resume cursor: the
+   * row's own cursor when in sequence, otherwise the last in-sequence cursor of the read, so
+   * forwarding the last notice's cursor re-delivers and never skips.
    */
   async pollDecisions (sinceCursor?: string): Promise<AssociationDecisionNotice[]> {
     const port = await this.strand()
-    const rows = await port.query<DecisionRow>(DECISION_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
-    return rows.map((row) => ({
+    const rows = await readDecisionRows<DecisionRow>(port, 'AssociationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.map(({ row, resumeCursor }) => ({
       requestId: row.RequestId,
       status: assertKnownAssociationStatus(row.Status, 'P2pAssociationTransport.pollDecisions'),
       challengeNonce: row.ChallengeNonce ?? undefined,
       reason: row.Reason ?? undefined,
-      cursor: row.Cursor
+      cursor: resumeCursor
     }))
   }
 
@@ -439,17 +452,14 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
       throw new P2pStagingError('no-opener', 'P2pAssociationTransport.readStagedRequestsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await port.query<StagingRow>(STAGING_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
+    const { rows, ceiling } = await readConformingRows<StagingRow>(port, 'AssociationRequestStaging', this.strandId, STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedAssociationRequest[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (highWaterCursor === undefined || row.Cursor > highWaterCursor) highWaterCursor = row.Cursor
+      highWaterCursor = inSequenceHighWater(highWaterCursor, row.Cursor, ceiling)
 
       let signature: Signature
       try {
@@ -511,17 +521,14 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
       throw new P2pStagingError('no-opener', 'P2pAssociationTransport.readStagedAttestationsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await port.query<AttestationStagingRow>(ATTESTATION_STAGING_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
+    const { rows, ceiling } = await readConformingRows<AttestationStagingRow>(port, 'AssociationAttestationStaging', this.strandId, ATTESTATION_STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedAttestation[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (highWaterCursor === undefined || row.Cursor > highWaterCursor) highWaterCursor = row.Cursor
+      highWaterCursor = inSequenceHighWater(highWaterCursor, row.Cursor, ceiling)
 
       let signature: Signature
       try {
@@ -619,15 +626,13 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
     return cursor
   }
 
-  /** `readDecisionRecords` — every column of `P2pAssociationDecisionRecord`. Routes `Status`
+  /** `readDecisionRecords` — every column of `P2pAssociationDecisionRecord` except `cursor`, which is
+   * the resume cursor described on the record type. Routes `Status`
    * through `assertKnownAssociationStatus` (unknown status THROWS, unchanged). */
   async readDecisionRecords (sinceCursor?: string): Promise<P2pAssociationDecisionRecord[]> {
     const port = await this.strand()
-    const rows = await port.query<DecisionRow>(DECISION_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
-    return rows.map((row) => ({
+    const rows = await readDecisionRows<DecisionRow>(port, 'AssociationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.map(({ row, resumeCursor }) => ({
       requestId: row.RequestId,
       authorityId: row.AuthorityId,
       status: assertKnownAssociationStatus(row.Status, 'P2pAssociationTransport.readDecisionRecords'),
@@ -638,7 +643,7 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
       decidedAt: row.DecidedAt,
       deciderKey: row.DeciderKey,
       deciderSignature: row.DeciderSignature,
-      cursor: row.Cursor
+      cursor: resumeCursor
     }))
   }
 

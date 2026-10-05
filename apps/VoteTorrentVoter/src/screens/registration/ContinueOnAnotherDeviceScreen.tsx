@@ -47,6 +47,7 @@ import {
 import type {IdentityFallbackInput, ReassociationCeremonyDeps, ReassociationEvidenceInput} from '../../engines/continuity';
 import type {AssociationRequestInit} from '@votetorrent/vote-core';
 import {globalStyles} from '../../theme/styles';
+import {errorClassName} from '../../utils/errorClassName';
 import type {RegistrationStackParamList} from '../../navigation/types';
 
 type ContinueNavigationProp = NativeStackNavigationProp<RegistrationStackParamList, 'ContinueOnAnotherDevice'>;
@@ -183,7 +184,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 					setBranch('code');
 				}
 			} catch (err) {
-				console.error('ContinueOnAnotherDeviceScreen: bootstrap failed:', err);
+				console.error('ContinueOnAnotherDeviceScreen: bootstrap failed:', errorClassName(err));
 				if (!cancelled) setBranch('code');
 			}
 		}
@@ -236,7 +237,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 				answeredRef.current = progress.answered;
 			}
 		} catch (err) {
-			console.error('ContinueOnAnotherDeviceScreen: advance failed:', err);
+			console.error('ContinueOnAnotherDeviceScreen: advance failed:', errorClassName(err));
 			setFailureClass(classifyAttestationFailure(err));
 		} finally {
 			advanceInFlightRef.current = false;
@@ -312,7 +313,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 			setFailureClass(null);
 			setBranch('pending');
 		} catch (err) {
-			console.error('ContinueOnAnotherDeviceScreen: submit failed:', err);
+			console.error('ContinueOnAnotherDeviceScreen: submit failed:', errorClassName(err));
 			setSubmitError(t('newDevice.submitError'));
 		}
 	}
@@ -354,11 +355,11 @@ export default function ContinueOnAnotherDeviceScreen() {
 		try {
 			await Linking.sendIntent('android.settings.BIOMETRIC_ENROLL');
 		} catch (err) {
-			console.error('ContinueOnAnotherDeviceScreen: BIOMETRIC_ENROLL intent failed, falling back:', err);
+			console.error('ContinueOnAnotherDeviceScreen: BIOMETRIC_ENROLL intent failed, falling back:', errorClassName(err));
 			try {
 				await Linking.sendIntent('android.settings.SECURITY_SETTINGS');
 			} catch (fallbackErr) {
-				console.error('ContinueOnAnotherDeviceScreen: SECURITY_SETTINGS fallback intent also failed:', fallbackErr);
+				console.error('ContinueOnAnotherDeviceScreen: SECURITY_SETTINGS fallback intent also failed:', errorClassName(fallbackErr));
 			}
 		}
 	}

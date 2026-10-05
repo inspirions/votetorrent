@@ -8,6 +8,10 @@
  * is created fresh by every PUBLIC entry point in `driver.ts` and dropped at the end of that call,
  * so an opened plaintext never outlives the request that needed it.
  *
+ * V-3 (62-35): a registration code is read only through `openRegistrationCode`, which accepts a code
+ * solely when the requester's binding signature over (RequestId, code) verifies against the
+ * approved request's own `RequesterKey`; legacy binding-less codes read `unverifiable` (D-54).
+ *
  * D-49 (62-31): `RegistrationRequest.Payload` may now hold a sealed D-49 envelope. `opener` here is
  * a `ReassociationOpener` (structurally identical to 62-14's `IntakeOpener` — `.open(sealed,
  * binding)`, same result shape — but declared without `IntakeOpener`'s `userId` field, since
@@ -23,6 +27,7 @@ import { decodeStagingPlaintext } from '../../registration/transport/p2p-staging
 import { openRegistrationPayload } from '../../registration/sealed-registration-content.js'
 import type { IntakeOpener } from '../../intake/types.js'
 import { asText } from '../../utils.js'
+import { verifyRegistrationCodeBinding } from './registration-code.js'
 
 /** One approved registration, resolved to its ALREADY-active registrant. */
 export interface ApprovedRegistration {
@@ -101,35 +106,85 @@ export async function listApprovedRegistrations (db: Database, authorityId: stri
 }
 
 /**
- * Opens `requestId`'s own `RegistrationRequestStaging` row and extracts its sealed registration
- * code. `'unverifiable'` covers every failure mode uniformly (no staging row — REST bridge or
- * filesystem import, 62-01's documented limit; the opener refuses; the decoded plaintext fails
- * version/id/shape checks) — none of them distinguish "wrong code" from "cannot check the code
- * at all", which is exactly why they route to manual review (D-46) rather than a silent denial.
+ * Reads `requestId`'s registration code from its staging rows — and ONLY a code the requester
+ * itself signed (V-3, D-41, D-45).
+ *
+ * Why `RequesterKey` equality is not enough: a staging row's key, Digest and signature are
+ * cleartext, so any strand writer can replay a victim's and seal its own code under them. The
+ * requester's signature over (RequestId, code) is therefore carried INSIDE the sealed plaintext,
+ * and a candidate counts only when that binding verifies against the APPROVED
+ * `RegistrationRequest.RequesterKey`. Every staging row for the RequestId (any StrandId) is
+ * examined; rows that fail to open, decode or verify are ignored (a peer can always add junk rows,
+ * which must not block an honest code).
+ *
+ * Distinct verified codes (D-55): byte-identical verified codes (a replay of the victim's own row
+ * onto another strand) collapse to ONE candidate, because only the victim's key can produce a
+ * verified row and a registrant has one deterministic code — counting a harmless replay as an
+ * ambiguity would let any peer downgrade a victim to manual review for free. Exactly one distinct
+ * code is `{ status: 'code' }`; none, or two or more distinct, is `'unverifiable'`.
+ *
+ * D-54: a registration staged before the binding existed (no `registrationCodeSignature`), and any
+ * bridge/import registration (no staging row at all), has NO code evidence and reads
+ * `'unverifiable'` — never a match, never the automatic route; the request falls back to
+ * identity-field matching under manual review (D-45/D-46). `'unverifiable'` also covers an
+ * opener that refuses and a plaintext that fails the version/id/shape checks.
  */
 export async function openRegistrationCode (db: Database, opener: ReassociationOpener, requestId: string): Promise<OpenedCode> {
-  const row = await db
-    .prepare('select Digest, InitJson from RegistrationRequestStaging where RequestId = :requestId')
+  const keyRow = await db
+    .prepare("select RequesterKey from RegistrationRequest where Id = :requestId and Status = 'a'")
     .get({ requestId })
-  if (!row) return { status: 'unverifiable' }
+  if (!keyRow) return { status: 'unverifiable' }
+  const requesterKey = asText(keyRow.RequesterKey, 'RegistrationRequest.RequesterKey')
 
-  const digest = asText(row.Digest, 'RegistrationRequestStaging.Digest')
-  const initJson = asText(row.InitJson, 'RegistrationRequestStaging.InitJson')
-  const opened = await opener.open(initJson, { requestId, digest })
-  if (!opened.ok) return { status: 'unverifiable' }
-
-  const decoded = decodeStagingPlaintext(opened.plaintext) as
-    { readonly version?: unknown; readonly init?: { readonly id?: unknown }; readonly registrationCode?: unknown } | undefined
-  if (
-    decoded === undefined || decoded === null || typeof decoded !== 'object' ||
-    decoded.version !== 1 ||
-    decoded.init === null || typeof decoded.init !== 'object' ||
-    (decoded.init as { id?: unknown }).id !== requestId ||
-    typeof decoded.registrationCode !== 'string'
-  ) {
-    return { status: 'unverifiable' }
+  // Collect first, open after: never nest an opener/verifier call inside a live eval cursor.
+  const rows: Array<{ digest: string; initJson: string }> = []
+  for await (const row of db.eval(
+    'select StrandId, Digest, InitJson from RegistrationRequestStaging where RequestId = :requestId',
+    { requestId }
+  )) {
+    rows.push({
+      digest: asText(row.Digest, 'RegistrationRequestStaging.Digest'),
+      initJson: asText(row.InitJson, 'RegistrationRequestStaging.InitJson')
+    })
   }
-  return { status: 'code', code: decoded.registrationCode }
+
+  const verifiedCodes: string[] = []
+  for (const row of rows) {
+    const opened = await opener.open(row.initJson, { requestId, digest: row.digest })
+    if (!opened.ok) continue
+
+    const decoded = decodeStagingPlaintext(opened.plaintext) as
+      {
+        readonly version?: unknown
+        readonly init?: { readonly id?: unknown }
+        readonly registrationCode?: unknown
+        readonly registrationCodeSignature?: { readonly signature?: unknown }
+      } | undefined
+    if (
+      decoded === undefined || decoded === null || typeof decoded !== 'object' ||
+      decoded.version !== 1 ||
+      decoded.init === null || typeof decoded.init !== 'object' ||
+      (decoded.init as { id?: unknown }).id !== requestId ||
+      typeof decoded.registrationCode !== 'string' ||
+      decoded.registrationCodeSignature === null || typeof decoded.registrationCodeSignature !== 'object' ||
+      typeof decoded.registrationCodeSignature.signature !== 'string'
+    ) continue
+
+    const verified = await verifyRegistrationCodeBinding(db, {
+      requestId,
+      code: decoded.registrationCode,
+      signature: decoded.registrationCodeSignature.signature,
+      requesterKey
+    })
+    if (verified) verifiedCodes.push(decoded.registrationCode)
+  }
+
+  const distinct: string[] = []
+  for (const code of verifiedCodes) {
+    if (!distinct.some((seen) => registrationCodesEqual(seen, code))) distinct.push(code)
+  }
+  if (distinct.length !== 1) return { status: 'unverifiable' }
+  return { status: 'code', code: distinct[0]! }
 }
 
 async function openCached (db: Database, opener: ReassociationOpener, requestId: string, cache: Map<string, OpenedCode>): Promise<OpenedCode> {

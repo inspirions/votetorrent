@@ -110,6 +110,27 @@ export interface InviteAction<TInvokes> {
 export type InviteType = 'au' | 'of' | 'k' | 'r';
 
 /**
+ * Outcome of resolving an invitee's share to its InviteSlot (see IInvitationEngine.resolveInviteSlot).
+ *
+ * A share maps to a CHAIN of slots: every InviteSlot with the share's InviteKey and Type (a resend adds
+ * a row). The chain HEAD is the newest row (the ResendSalt-null original is oldest; resend rows order by
+ * the Tid in `resend|<tid>|<now>`). The head decides: a cancelled or expired head closes the share and
+ * the resolver never falls back to an older row. Backstop: a non-head cancellation strictly later than
+ * the head's resend time also closes the share.
+ *
+ * Precedence: any chain member with an InviteResult -> 'answered'; else any structural ambiguity (two
+ * signing nonces, two originals, an unparseable salt or timestamp, equal order keys) -> 'ambiguous';
+ * else cancelled / expired -> 'no-longer-valid'; else 'live' with the head's Cid; no rows ->
+ * 'not-found'.
+ */
+export type InviteSlotResolution =
+	| { status: 'live'; cid: string }
+	| { status: 'answered'; cid: string }
+	| { status: 'no-longer-valid' }
+	| { status: 'not-found' }
+	| { status: 'ambiguous' };
+
+/**
  * Officer invite + the one-time invite private key. One-time use only —
  * discard the OfficerInviteShare reference after the share-link / QR
  * moment per Phase 3 D-27. The base `OfficerInvite` type intentionally

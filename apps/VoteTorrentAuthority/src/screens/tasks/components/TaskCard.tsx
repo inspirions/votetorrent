@@ -33,6 +33,16 @@ interface TaskCardProps {
 	thresholdStatus?: SigningStatus | null;
 }
 
+/**
+ * A date renders only for a finite timestamp; never "Invalid Date" (UAT 62 gap 4 item 3).
+ * Do not invent a ballot timestamp: the engine does not carry one.
+ */
+function formatTaskDate(value: unknown): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	const time = new Date(value as number | string).getTime();
+	return Number.isFinite(time) ? new Date(time).toLocaleDateString() : undefined;
+}
+
 export function TaskCard({
 	task,
 	onPress,
@@ -53,7 +63,7 @@ export function TaskCard({
 		const determineInfo = () => {
 			if (task.type === "release-key") {
 				setTitle(task.election.election.title);
-				setDate(new Date(task.election.election.date).toLocaleDateString());
+				setDate(formatTaskDate(task.election.election.date));
 				setSubtitle(t("ready") + " - " + t("remaining"));
 				setImageUrl(task.network.imageUrl);
 				setNetworkName(task.network.name);
@@ -85,7 +95,7 @@ export function TaskCard({
 					case "election":
 						tempTask = task as ElectionSignatureTask;
 						setTitle(tempTask.election.proposed.election.title);
-						setDate(new Date(tempTask.election.proposed.election.date).toLocaleDateString());
+						setDate(formatTaskDate(tempTask.election.proposed.election.date));
 						setSubtitle(t("electionRevision"));
 						setImageUrl(tempTask.network.imageUrl);
 						setNetworkName(tempTask.network.name);
@@ -93,7 +103,7 @@ export function TaskCard({
 					case "election-revision":
 						tempTask = task as ElectionRevisionSignatureTask;
 						setTitle(tempTask.election.proposed.election.title);
-						setDate(new Date(tempTask.election.proposed.election.date).toLocaleDateString());
+						setDate(formatTaskDate(tempTask.election.proposed.election.date));
 						setSubtitle(t("electionRevision"));
 						setImageUrl(tempTask.network.imageUrl);
 						setNetworkName(tempTask.network.name);
@@ -101,7 +111,7 @@ export function TaskCard({
 					case "ballot":
 						tempTask = task as BallotSignatureTask;
 						setTitle(tempTask.ballot.proposed.description);
-						setDate(new Date(tempTask.ballot.proposed.timestamp).toLocaleDateString());
+						setDate(formatTaskDate((tempTask.ballot as { timestamp?: number }).timestamp));
 						setSubtitle(t("ballotRevision"));
 						setImageUrl(tempTask.network.imageUrl);
 						setNetworkName(tempTask.network.name);

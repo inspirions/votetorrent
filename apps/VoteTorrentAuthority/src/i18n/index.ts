@@ -73,6 +73,17 @@ const resources = {
 			newAuthority: 'New Authority',
 			invitationName: 'Invitation Name',
 			invitationKey: 'Invitation Key',
+			invitationAcceptTitle: 'Accept an Invitation',
+			invitationAcceptBody: "Paste the invitation someone shared with you. You'll see who it's from before you accept.",
+			invitationAcceptContinue: 'Continue',
+			invitationAcceptPasteHint: 'Paste the invitation text you received.',
+			invitationAcceptPastePlaceholder: 'Paste the invitation here',
+			invitationAcceptMalformed: "This doesn't look like a complete invitation. Copy it again and paste all of it.",
+			invitationAcceptWrongType: 'This invitation is for a different role. Open it from Accept an Invitation in Settings.',
+			invitationAcceptNotFound: "This invitation hasn't reached this device yet, or it is no longer valid.",
+			invitationAcceptAlreadyAnswered: 'This invitation has already been answered. It cannot be accepted or declined again.',
+			invitationAcceptNoLongerValid: 'This invitation was withdrawn or has expired. Ask the sender for a new one.',
+			invitationAcceptFailed: 'Could not respond to the invitation. Try again.',
 			soleInitialAdministratorNote:
 				'Please create a user on this network. Your user will be the sole initial administrator.',
 			userIsSoleAdministratorNote:
@@ -434,6 +445,8 @@ const resources = {
 				'You can resend the invitation or cancel it if no longer needed.',
 			authorityDetailResend: 'Resend Invitation',
 			authorityDetailCancelInvitation: 'Cancel Invitation',
+			authorityDetailAlreadyAnswered: "This invitation has already been answered, so it can't be withdrawn or sent again.",
+			authorityDetailActionFailed: "Couldn't update this invitation. Try again.",
 			// Frame 18 — Sent confirmation
 			editElectionWithFilterTitle: 'Request Sent',
 			editElectionWithFilterBodyPrimary: 'Your request has been submitted successfully.',
@@ -551,6 +564,12 @@ const resources = {
 			withdrawConfirmation: 'Withdraw',
 			statusProposed: 'Proposed',
 			statusConfirmed: 'Confirmed',
+			statusAwaitingConfirmation: 'Awaiting Confirmation',
+			ballotSubmitFailed: 'Could not submit the ballot for confirmation. Try again.',
+			ballotWithdrawFailed: 'Could not withdraw the ballot from confirmation. Try again.',
+			ballotProposeFailed: 'Could not save the ballot. Try again.',
+			ballotStateLoadFailed: "Couldn't check whether this ballot is out for confirmation, so editing is paused.",
+			ballotStateRetry: 'Try Again',
 			// Debug seed keys — debug-only affordance; never appears in release UI
 			debugSeedTasksTitle: 'Seed Pending Tasks (Debug)',
 			debugSeedTasksSuccess: 'Pending tasks seeded — check Tasks tab',
@@ -863,6 +882,7 @@ const resources = {
 			registrationRequestStatusPending: 'Pending',
 			registrationRequestStatusApproved: 'Approved',
 			registrationRequestStatusRejected: 'Rejected',
+			registrationRequestStatusClosedDuplicate: 'Closed',
 			// Phase 48 (D-06/D-07) — registrationRequestApproval* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			registrationRequestApprovalScreenTitle: 'Request Detail',
 			registrationRequestApprovalSummaryTitle: 'Request',
@@ -880,6 +900,9 @@ const resources = {
 			registrationRequestRejectReasonPlaceholder: 'Reason for rejection',
 			registrationRequestRejectConfirmButton: 'Confirm Rejection',
 			registrationRequestRejectKeepReviewingButton: 'Keep Reviewing',
+			registrationRequestRejectChecklistRequired: 'Complete the verification checklist before rejecting.',
+			registrationRequestRejectFailed: 'Could not record the rejection. Try again.',
+			registrationRequestUnverifiable: "This request's signature can't be verified, so it can't be approved or rejected here. No signature of yours was used.",
 			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			bridgeSourceBadgeLabel: 'Bridge Import',
 			bridgeSourceCalloutHeading: 'Submitted by an import bridge',
@@ -1047,6 +1070,11 @@ const resources = {
 			registrantPrivateNotRecipient:
 				'These private details were sealed before you became an officer, so they cannot be shown on this device.',
 			registrantPrivateUnreadable: 'These private details could not be read on this device.',
+			registrantSelectiveNotRecipient:
+				'These selective-disclosure details were sealed before you became an officer, so they cannot be shown on this device.',
+			registrantSelectiveUnreadable: 'These selective-disclosure details could not be read on this device.',
+			registrantSelectiveTampered:
+				"These selective-disclosure details do not match the registrant's signed record. Do not rely on them.",
 		},
 	},
 	es: {
@@ -1119,6 +1147,17 @@ const resources = {
 			newAuthority: 'Nueva Autoridad',
 			invitationName: 'Nombre de Invitación',
 			invitationKey: 'Clave de Invitación',
+			invitationAcceptTitle: 'Aceptar una Invitación',
+			invitationAcceptBody: 'Pega la invitación que alguien compartió contigo. Verás de quién es antes de aceptarla.',
+			invitationAcceptContinue: 'Continuar',
+			invitationAcceptPasteHint: 'Pega el texto de la invitación que recibiste.',
+			invitationAcceptPastePlaceholder: 'Pega la invitación aquí',
+			invitationAcceptMalformed: 'Esto no parece una invitación completa. Cópiala de nuevo y pégala entera.',
+			invitationAcceptWrongType: 'Esta invitación es para otra función. Ábrela desde Aceptar una Invitación en Ajustes.',
+			invitationAcceptNotFound: 'Esta invitación aún no ha llegado a este dispositivo o ya no es válida.',
+			invitationAcceptAlreadyAnswered: 'Esta invitación ya fue respondida. No se puede aceptar ni rechazar de nuevo.',
+			invitationAcceptNoLongerValid: 'Esta invitación fue retirada o ha caducado. Pide una nueva a quien te la envió.',
+			invitationAcceptFailed: 'No se pudo responder a la invitación. Inténtalo de nuevo.',
 			soleInitialAdministratorNote:
 				'Cree un usuario en esta red. Su usuario será el único administrador inicial.',
 			userIsSoleAdministratorNote:
@@ -1446,6 +1485,8 @@ const resources = {
 				'Puedes reenviar la invitación o cancelarla si ya no es necesaria.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailResend: 'Reenviar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailCancelInvitation: 'Cancelar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			authorityDetailAlreadyAnswered: 'Esta invitación ya fue respondida, así que no se puede retirar ni volver a enviar.',
+			authorityDetailActionFailed: 'No se pudo actualizar esta invitación. Inténtalo de nuevo.',
 			editElectionWithFilterTitle: 'Solicitud Enviada', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterBodyPrimary: 'Tu solicitud ha sido enviada exitosamente.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterGotIt: 'Entendido', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
@@ -1580,6 +1621,12 @@ const resources = {
 			withdrawConfirmation: 'Retirar',
 			statusProposed: 'Propuesto',
 			statusConfirmed: 'Confirmado',
+			statusAwaitingConfirmation: 'Esperando Confirmación',
+			ballotSubmitFailed: 'No se pudo enviar la boleta para confirmación. Inténtalo de nuevo.',
+			ballotWithdrawFailed: 'No se pudo retirar la boleta de la confirmación. Inténtalo de nuevo.',
+			ballotProposeFailed: 'No se pudo guardar la boleta. Inténtalo de nuevo.',
+			ballotStateLoadFailed: 'No se pudo comprobar si esta boleta está en confirmación, así que la edición está en pausa.',
+			ballotStateRetry: 'Intentar de Nuevo',
 			// Debug seed keys — Spanish mirrors
 			debugSeedTasksTitle: 'Sembrar Tareas Pendientes (Debug)',
 			debugSeedTasksSuccess: 'Tareas pendientes sembradas — ver pestaña Tareas',
@@ -1892,6 +1939,7 @@ const resources = {
 			registrationRequestStatusPending: 'Pendiente',
 			registrationRequestStatusApproved: 'Aprobada',
 			registrationRequestStatusRejected: 'Rechazada',
+			registrationRequestStatusClosedDuplicate: 'Cerrada',
 			// Phase 48 (D-06/D-07) — registrationRequestApproval* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			registrationRequestApprovalScreenTitle: 'Detalle de la Solicitud',
 			registrationRequestApprovalSummaryTitle: 'Solicitud',
@@ -1909,6 +1957,9 @@ const resources = {
 			registrationRequestRejectReasonPlaceholder: 'Motivo del rechazo',
 			registrationRequestRejectConfirmButton: 'Confirmar Rechazo',
 			registrationRequestRejectKeepReviewingButton: 'Seguir Revisando',
+			registrationRequestRejectChecklistRequired: 'Completa la lista de verificación antes de rechazar.',
+			registrationRequestRejectFailed: 'No se pudo registrar el rechazo. Inténtalo de nuevo.',
+			registrationRequestUnverifiable: 'La firma de esta solicitud no se puede verificar, así que no se puede aprobar ni rechazar aquí. No se usó ninguna firma tuya.',
 			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			bridgeSourceBadgeLabel: 'Importación por Puente',
 			bridgeSourceCalloutHeading: 'Enviada por un puente de importación',
@@ -2074,6 +2125,11 @@ const resources = {
 			registrantPrivateNotRecipient:
 				'Estos datos privados se sellaron antes de que fueras funcionario, así que no se pueden mostrar en este dispositivo.',
 			registrantPrivateUnreadable: 'No se pudieron leer estos datos privados en este dispositivo.',
+			registrantSelectiveNotRecipient:
+				'Estos datos de divulgación selectiva se sellaron antes de que fueras funcionario, así que no se pueden mostrar en este dispositivo.',
+			registrantSelectiveUnreadable: 'No se pudieron leer estos datos de divulgación selectiva en este dispositivo.',
+			registrantSelectiveTampered:
+				'Estos datos de divulgación selectiva no coinciden con el registro firmado del registrante. No confíes en ellos.',
 		},
 	},
 };

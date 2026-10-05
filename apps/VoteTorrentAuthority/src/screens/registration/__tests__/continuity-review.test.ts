@@ -11,6 +11,7 @@ import {
 	isPeerReviewUnavailable,
 	isRegistrationContentAccessError,
 	isThresholdCoSignRefusal,
+	isRequesterSignatureUnverifiableError,
 	openPeerReviewSession,
 	publishRegistrationDecisionAfterDecide,
 	reassociationRegistrantLabel,
@@ -225,6 +226,13 @@ describe("CR4 classifiers", () => {
 		expect(isClosedAsDuplicateError({ name: "Error", code: "closed-as-duplicate" })).toBe(false);
 		expect(isClosedAsDuplicateError(null)).toBe(false);
 		expect(isClosedAsDuplicateError("closed-as-duplicate")).toBe(false);
+	});
+
+	it("C1: isRequesterSignatureUnverifiableError matches the name+code pair only", () => {
+		expect(isRequesterSignatureUnverifiableError({ name: "RequesterSignatureUnverifiableError", code: "requester-signature-unverifiable" })).toBe(true);
+		expect(isRequesterSignatureUnverifiableError(new Error("SignatureValid failed"))).toBe(false);
+		expect(isRequesterSignatureUnverifiableError({ name: "RegistrationDuplicateError", code: "closed-as-duplicate" })).toBe(false);
+		expect(isRequesterSignatureUnverifiableError({ name: "RequesterSignatureUnverifiableError", code: "other" })).toBe(false);
 	});
 
 	it("isThresholdCoSignRefusal covers ReassociationError and IntakeError only", () => {

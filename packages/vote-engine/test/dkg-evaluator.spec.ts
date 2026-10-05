@@ -719,7 +719,8 @@ describe('dkg-evaluator: ElectionKey consistency', () => {
     const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), {
       electionKey: {
         electionId: 'e', revision: 0, attempt: 1, jointPublicKey: sim.groupPublicKey, groupCommitments: sim.groupCommitments,
-        threshold: 2, participants: 3, publishedAt: '2026-01-01T00:00:00Z', publisherUserId: publisher, signatureValid: true
+        threshold: 2, participants: 3, publishedAt: '2026-01-01T00:00:00Z', publisherUserId: publisher, signatureValid: true,
+        commitmentsWellFormed: true
       }
     }))
     expect(ev.phase).to.equal('complete')
@@ -732,9 +733,55 @@ describe('dkg-evaluator: ElectionKey consistency', () => {
     const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), {
       electionKey: {
         electionId: 'e', revision: 0, attempt: 1, jointPublicKey: wrongKey, groupCommitments: sim.groupCommitments,
-        threshold: 2, participants: 3, publishedAt: '2026-01-01T00:00:00Z', publisherUserId: publisher, signatureValid: true
+        threshold: 2, participants: 3, publishedAt: '2026-01-01T00:00:00Z', publisherUserId: publisher, signatureValid: true,
+        commitmentsWellFormed: true
       }
     }))
+    expect(ev.phase).to.equal('failed')
+    expect(ev.failedReason).to.equal('election-key-mismatch')
+  })
+  // 62-34 V-2: rule 9 binds commitments, threshold and participants to the agreed round-4 result.
+  function ekFor (sim: ReturnType<typeof simulateHonestDkg>, over: Record<string, unknown> = {}) {
+    return {
+      electionId: 'e', revision: 0, attempt: 1, jointPublicKey: sim.groupPublicKey, groupCommitments: [...sim.groupCommitments],
+      threshold: 2, participants: 3, publishedAt: '2026-01-01T00:00:00Z', publisherUserId: sim.userIds[0]!, signatureValid: true,
+      commitmentsWellFormed: true, ...over
+    }
+  }
+
+  it('62-34: honest consistent ElectionKey (positive control) gives complete', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), { electionKey: ekFor(sim) }))
+    expect(ev.phase).to.equal('complete')
+  })
+
+  it('62-34: commitments differing in one element give failed/election-key-mismatch', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const other = bytesToHex(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true))
+    const forged = [...sim.groupCommitments]
+    forged[1] = other
+    const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), { electionKey: ekFor(sim, { groupCommitments: forged }) }))
+    expect(ev.phase).to.equal('failed')
+    expect(ev.failedReason).to.equal('election-key-mismatch')
+  })
+
+  it('62-34: a threshold differing from the agreed attempt gives failed/election-key-mismatch', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), { electionKey: ekFor(sim, { threshold: 3 }) }))
+    expect(ev.phase).to.equal('failed')
+    expect(ev.failedReason).to.equal('election-key-mismatch')
+  })
+
+  it('62-34: participants differing from the agreed roster gives failed/election-key-mismatch', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), { electionKey: ekFor(sim, { participants: 2 }) }))
+    expect(ev.phase).to.equal('failed')
+    expect(ev.failedReason).to.equal('election-key-mismatch')
+  })
+
+  it('62-34: commitmentsWellFormed false (malformed column) gives failed/election-key-mismatch', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), { electionKey: ekFor(sim, { groupCommitments: [], commitmentsWellFormed: false }) }))
     expect(ev.phase).to.equal('failed')
     expect(ev.failedReason).to.equal('election-key-mismatch')
   })

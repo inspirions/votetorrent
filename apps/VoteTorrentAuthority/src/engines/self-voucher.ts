@@ -16,7 +16,7 @@
  *
  * Pinned to cadre-core 1.6.0's `hasAnchoredVoucher` shape — a future cadre-core bump
  * should re-diff this against the new `cadre-node.js` before trusting it unchanged.
- * Re-diffed on cadre-core 1.9.0 (2026-10-01): `hasAnchoredVoucher` is byte-identical.
+ * Re-diffed on cadre-core 1.9.0 (2026-10-01) and again on 1.12.0 (2026-10-05): `hasAnchoredVoucher` is byte-identical.
  */
 
 import { verifyCadrePeerVoucher } from '@serfab/cadre-core';

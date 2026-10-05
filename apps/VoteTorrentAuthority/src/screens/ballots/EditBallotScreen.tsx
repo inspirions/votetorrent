@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import { ExtendedTheme, useTheme, useNavigation, useRoute, useFocusEffect } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -14,6 +14,8 @@ import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
 import { useApp } from "../../providers/AppProvider";
 import { loadAuthoritiesWithRetry } from "../../utils/loadAuthoritiesWithRetry";
+import { createDeviceSigner } from "../../engines/device-signer";
+import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import type { Authority, Ballot, INetworkEngine } from "@votetorrent/vote-core";
 
 /**
@@ -27,6 +29,13 @@ import type { Authority, Ballot, INetworkEngine } from "@votetorrent/vote-core";
  * the form pre-populates AND retains the SAME id. On PROPOSE, calls
  * engine.proposeBallot(ballot) with the existing id — the engine upserts by id
  * (from 09-09) so editing replaces the card instead of inserting a duplicate.
+ *
+ * UAT 62 test 13: "Submit for confirmation" and "Withdraw" live HERE, on the
+ * persisted ballot. CreateBallotScreen's draft id has no ProposedBallot row, so the
+ * engine refuses a submit from there; every persisted ballot opens this screen.
+ * The footer is therefore state-driven: unlocked -> Propose + Submit, locked ->
+ * Withdraw, confirmed -> no footer, readOnly preview -> no footer, unknown lock state
+ * (pending or failed read) -> disabled form with Retry only (CR-03, 62-REVIEW.md).
  */
 const EditBallotScreen = () => {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -42,7 +51,17 @@ const EditBallotScreen = () => {
 	const [loadError, setLoadError] = useState("");
 	const [errorMessage, setErrorMessage] = useState("");
 	const [proposing, setProposing] = useState(false);
-	const [confirmationLocked, setConfirmationLocked] = useState(false);
+	const [submitting, setSubmitting] = useState(false);
+	const [withdrawing, setWithdrawing] = useState(false);
+	const [confirmationState, setConfirmationState] = useState<{ locked: boolean; confirmed: boolean } | null>(null);
+	// CR-03 (62-REVIEW.md): a failed confirmation-state read must FAIL CLOSED. The edit lock
+	// is unknown, so the form is disabled and the footer shows Retry only.
+	const [stateReadFailed, setStateReadFailed] = useState(false);
+	// WR-03 (62-REVIEW.md): synchronous in-flight guard. `submitting` state only updates on
+	// the next render, so two presses in one tick would both pass a state check; the ref is
+	// the guard (same reasoning as RegistrationRequestApprovalScreen's submittingRef).
+	const submittingRef = useRef(false);
+	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const [authorities, setAuthorities] = useState<Authority[]>([]);
 	const { ballotDraft, setBallotDraft, addQuestion, updateQuestion, removeQuestion } = useBallotDraft();
 
@@ -118,22 +137,93 @@ const EditBallotScreen = () => {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [ballotId]);
 
+	// One read path for the focus effect, the post-Submit/Withdraw refresh and Retry. Success
+	// clears the failure flag; failure sets it (fail closed, CR-03) and logs the error CLASS only.
+	// Returns the state it read ({ locked, confirmed }), or null when the read failed.
+	const readConfirmationState = useCallback(async (): Promise<{ locked: boolean; confirmed: boolean } | null> => {
+		try {
+			const state = await electionEngine.getBallotConfirmationState(ballotId);
+			const fresh = { locked: !!state.locked, confirmed: !!state.confirmed };
+			setConfirmationState(fresh);
+			setStateReadFailed(false);
+			return fresh;
+		} catch (error) {
+			console.warn("getBallotConfirmationState failed", error instanceof Error ? error.name : "unknown");
+			setStateReadFailed(true);
+			return null;
+		}
+	}, [electionEngine, ballotId]);
+
 	// D-05: poll confirmation lock state on every focus so an edit screen opened
 	// while a confirmation is pending shows the correct locked UI immediately.
 	useFocusEffect(
 		useCallback(() => {
 			if (!electionEngine || !ballotId) return;
-			const checkLock = async () => {
-				try {
-					const state = await electionEngine.getBallotConfirmationState(ballotId);
-					setConfirmationLocked(state.locked);
-				} catch (error) {
-					console.warn("getBallotConfirmationState error", error);
-				}
-			};
-			checkLock();
-		}, [electionEngine, ballotId])
+			readConfirmationState();
+		}, [electionEngine, ballotId, readConfirmationState])
 	);
+
+	const refreshConfirmationState = readConfirmationState;
+
+	// D-05 / CR-03: edit is blocked when the ballot has a pending or confirmed confirmation, and
+	// ALSO when that state is unknown (first read pending or the last read failed).
+	const locked = confirmationState?.locked === true;
+	const confirmed = confirmationState?.confirmed === true;
+	const stateUnknown = !!electionEngine && !!ballotId && (confirmationState === null || stateReadFailed);
+	const editingDisabled = readOnly || locked || confirmed || stateUnknown;
+
+	// D-03/D-08: Submit the persisted ballot for confirmation.
+	// `lazySign` is a LAZY factory thunk: `createDeviceSigner` is only invoked if the engine
+	// actually calls this callback, which happens only when the authority's ceb threshold is
+	// above 1 (IElectionEngine.submitBallotForConfirmation's own doc comment). A threshold-1
+	// authority therefore needs neither a provisioned key nor a biometric prompt to submit
+	// (it self-confirms), exactly as before 62-11.
+	const handleSubmitForConfirmation = async () => {
+		if (!electionEngine || !ballotId) return;
+		if (stateUnknown || locked || confirmed) return;
+		if (submittingRef.current) return;
+		submittingRef.current = true;
+		setErrorMessage("");
+		setSubmitting(true);
+		try {
+			const lazySign = async (digest: Uint8Array) => (await createDeviceSigner("Device User"))(digest);
+			await electionEngine.submitBallotForConfirmation(ballotId, lazySign);
+			// Re-read rather than guess: threshold 1 returns confirmed, higher thresholds locked.
+			await refreshConfirmationState();
+		} catch (error) {
+			console.warn("submitBallotForConfirmation error", error);
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			// The engine refuses a ballot that is out for confirmation or confirmed (proposeBallot,
+			// and since WR-04 submitBallotForConfirmation); a stale screen re-reads so its footer
+			// follows the engine instead of inviting a retry that cannot succeed (WR-04, 62-REVIEW.md).
+			const fresh = await readConfirmationState();
+			if (fresh && (fresh.locked || fresh.confirmed)) {
+				setErrorMessage("");
+			} else {
+				setErrorMessage(outcome.message ?? t("ballotSubmitFailed"));
+			}
+		} finally {
+			submittingRef.current = false;
+			setSubmitting(false);
+		}
+	};
+
+	// D-05: Withdraw the pending confirmation — unlocks the ballot for editing.
+	const handleWithdrawConfirmation = async () => {
+		if (!electionEngine || !ballotId) return;
+		setErrorMessage("");
+		setWithdrawing(true);
+		try {
+			await electionEngine.withdrawBallotConfirmation(ballotId);
+			await refreshConfirmationState();
+		} catch (error) {
+			console.warn("withdrawBallotConfirmation error", error);
+			setErrorMessage(t("ballotWithdrawFailed"));
+		} finally {
+			setWithdrawing(false);
+		}
+	};
 
 	// Carry-back from EditQuestionScreen SAVE: when editing an existing template,
 	// EditQuestion popTos here with the assembled `question`. Merge it into the
@@ -175,6 +265,7 @@ const EditBallotScreen = () => {
 			navigation.goBack();
 			return;
 		}
+		if (stateUnknown || locked || confirmed) return;
 		setErrorMessage("");
 		setProposing(true);
 		const ballot: Ballot = {
@@ -190,7 +281,14 @@ const EditBallotScreen = () => {
 			navigation.goBack();
 		} catch (error) {
 			console.warn("proposeBallot error", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			// Same re-read as the submit catch: a refusal because the ballot is now out for
+			// confirmation or confirmed must leave the footer matching the engine (WR-04).
+			const fresh = await readConfirmationState();
+			if (fresh && (fresh.locked || fresh.confirmed)) {
+				setErrorMessage("");
+			} else {
+				setErrorMessage(t("ballotProposeFailed"));
+			}
 		} finally {
 			setProposing(false);
 		}
@@ -224,9 +322,6 @@ const EditBallotScreen = () => {
 		} as any);
 	};
 
-	// D-05: edit is blocked when the ballot has a pending confirmation task.
-	const editingDisabled = readOnly || confirmationLocked;
-
 	return (
 		<View style={globalStyles.content}>
 			<BallotTemplateForm
@@ -246,17 +341,55 @@ const EditBallotScreen = () => {
 			/>
 			<InlineError message={loadError} />
 			<InlineError message={errorMessage} />
-			{/* Footer: PROPOSE — hidden in readOnly (preview) mode or when locked. */}
-			{!readOnly && !confirmationLocked && (
+			{!readOnly && stateReadFailed && (
+				<>
+					<InlineError message={t("ballotStateLoadFailed")} />
+					<View style={[globalStyles.footer, { backgroundColor: colors.card, paddingBottom: insets.bottom + 16 }]}>
+						<CustomButton
+							testID="edit-ballot-state-retry"
+							title={t("ballotStateRetry")}
+							icon="rotate-right"
+							onPress={readConfirmationState}
+							backgroundColor={colors.accent}
+						/>
+					</View>
+				</>
+			)}
+			{/* Footer (UAT 62 test 13): hidden in readOnly preview, once confirmed, and while the
+			    lock state is unknown (CR-03 fail closed). Locked -> Withdraw only; otherwise
+			    Propose + Submit for confirmation. */}
+			{!readOnly && !stateUnknown && !confirmed && (
 				<View style={[globalStyles.footer, { backgroundColor: colors.card, paddingBottom: insets.bottom + 16 }]}>
-					<CustomButton
-						title={t("propose")}
-						icon="floppy-disk"
-						onPress={handlePropose}
-						backgroundColor={colors.success}
-						forceDarkText={true}
-						disabled={proposing}
-					/>
+					{locked ? (
+						<CustomButton
+							testID="edit-ballot-withdraw"
+							title={t("withdrawConfirmation")}
+							icon="rotate-left"
+							onPress={handleWithdrawConfirmation}
+							backgroundColor={colors.warning ?? colors.accent}
+							disabled={withdrawing}
+						/>
+					) : (
+						<>
+							<CustomButton
+								testID="edit-ballot-propose"
+								title={t("propose")}
+								icon="floppy-disk"
+								onPress={handlePropose}
+								backgroundColor={colors.success}
+								forceDarkText={true}
+								disabled={proposing || submitting}
+							/>
+							<CustomButton
+								testID="edit-ballot-submit"
+								title={t("submitForConfirmation")}
+								icon="paper-plane"
+								onPress={handleSubmitForConfirmation}
+								backgroundColor={colors.accent}
+								disabled={submitting || proposing}
+							/>
+						</>
+					)}
 				</View>
 			)}
 		</View>

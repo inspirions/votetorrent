@@ -36,9 +36,15 @@
 // BEFORE step 1 is deleted (crash safety -- see `dkg-vault.ts`'s header) and
 // itself deleted right after round 4 is posted. `cleanupVault` additionally
 // sweeps every attempt's round-secret aliases once that attempt is known
-// ABORTED, and the own share alias whenever an attempt aborts with no
-// ElectionKey yet published -- so a disqualified or superseded attempt never
-// leaves a stale secret behind.
+// ABORTED. The own share is swept only when its PRODUCING attempt is proven
+// aborted: `executePostRound4` writes a non-secret marker
+// (`keyholderDkgShareAttemptAlias`) naming the attempt beside the share, and
+// `cleanupVault` deletes the share (then the marker) only when the marker
+// parses AND names an aborted attempt AND no ElectionKey exists. The old
+// attempt-agnostic sweep ("any attempt aborted, no key yet") deleted the
+// FRESH share of a retried DKG right after round 4 (V-1), leaving a complete
+// election key no one could release. A missing or unparseable marker never
+// deletes the share (fail-safe toward keeping key material).
 //
 // No device ever holds the full election private key: `src/keyholder/*`
 // never calls `combineSecret`/`reconstructGroupSecret` (D-16 grep gate).
@@ -153,7 +159,11 @@
 //     `KeyholderDkgBinding.DkgPublicKey` (`executePostRound2` reads
 //     `snapshot.bindings`, never a signing key) — D-26. Control (h).
 // 10. R4 agreement and the published `ElectionKey`'s consistency with the
-//     agreed `Y` are both checked (`evaluateDkgRevision`'s final
+//     agreed `Y`, the derived group commitments, the revision's threshold
+//     and the agreed roster length (V-2) are all checked; a malformed
+//     GroupCommitments column is guarded (`parseElectionKeyCommitments`,
+//     `[]` on the record means "malformed on the row") and reads as a
+//     mismatch, never a throw. Both are checked (`evaluateDkgRevision`'s final
 //     `electionKeyConsistent` pass; `verifyDkgTranscript`). Evidence: the
 //     two "ElectionKey consistency" cases in `dkg-evaluator.spec.ts`, and
 //     scenario A's `verifyDkgTranscript` assertion.
@@ -168,15 +178,51 @@
 //     step-2 record is written BEFORE step 1 is deleted
 //     (`executePostRound2`); `cleanupVault` sweeps every ABORTED attempt's
 //     round-secret aliases (and, once `complete`, every attempt's) after
-//     every action. Evidence: scenario A ("round-secret aliases all
+//     every action. The SHARE sweep is attempt-bound (V-1): only a share
+//     whose attempt marker names an aborted attempt, with no ElectionKey,
+//     is deleted; a marker-less share is never deleted. Evidence: scenarios
+//     B and D (every honest share survives a retry and releases). Scenario A ("round-secret aliases all
 //     swept"), scenario E ("no vault holds a round-secret alias"). Control
 //     (j).
 // 13. Read-side signature verification of replicated rows: `loadSnapshot`
-//     recomputes `SignatureValid(...)  or SignatureValidP256(...)` AND an
-//     EXISTS over `UserKey` for every `KeyholderDkgMessage`/`ElectionKey`
-//     row in SQL — a replicated row is never trusted on the strength of
-//     having replicated. `evaluateDkgRevision` drops a `signatureValid:
+//     recomputes `SignatureValid(...)  or SignatureValidP256(...)` over every
+//     `KeyholderDkgMessage`/`ElectionKey` row in SQL against the row's OWN
+//     stored key. That proves only that the row is consistent with that key.
+//     AUTHORSHIP (that the key belonged to `SenderUserId` /
+//     `PublisherUserId` when the row was written) rests on the insert-time
+//     CHECK (`SenderKeyIsUsers` / `PublisherKeyIsUsers`) on immutable
+//     NoUpdate/NoDelete rows, and is deliberately NOT re-required at read
+//     (WR-02, mirroring 62-39's CR-02 release reads): a later rotation or
+//     revocation must not turn a healthy transcript into `failed /
+//     election-key-mismatch`. `evaluateDkgRevision` drops a `signatureValid:
 //     false` row into `invalidRows` and never attributes it. Control (i).
+//     A revoked key still cannot write: `advanceDkg` checks the current key
+//     and the schema refuses the insert.
+//     ACCEPTED SCOPE (T-62-42-05): since 62-42, rows signed by a key later
+//     revoked stay valid for EVERY consumer of `loadSnapshot`: `getDkgStatus`,
+//     `verifyDkgTranscript`, `advanceDkg`'s `evaluateDkgRevision` /
+//     `planDkgAction` (complaints, disqualification, ElectionKey
+//     publication) and `cleanupVault`. If a key is revoked BECAUSE it was
+//     compromised, its earlier rows keep counting in all of them.
+//     REPLICATION RE-VALIDATION: only partly established. The installed
+//     optimystic validator re-executes a pend's statements through the
+//     registered engine (db-core/dist/src/transaction/validator.js:100,
+//     `registration.engine.execute(transaction)`), which would evaluate the
+//     insert CHECKs, and cluster members call it from
+//     db-p2p/dist/src/cluster/cluster-repo.js:976 (`validatePendOperations`).
+//     NOT ESTABLISHED: that this deployment registers that validator (no
+//     `createQuereusValidator` call was found under @serfab/cadre-core/dist,
+//     and `unvalidatablePendPolicy` defaults to 'accept' at
+//     cluster-repo.js:239), and that block-level sync/restore paths re-run
+//     the CHECKs at all. A replication path that applied rows without
+//     re-running insert CHECKs would let a self-signed row impersonate a
+//     participant.
+//     REJECTED variant: drop the membership requirement only once
+//     an ElectionKey is published; a row's validity must not depend on whether
+//     a LATER row exists, and a pre-publish rotation could still invalidate an
+//     honest participant's earlier rounds mid-DKG (DS5 pins that a mid-DKG
+//     rotation completes under the current read; its negative control
+//     re-adds the membership EXISTS and turns it red).
 // 14. No secret bytes in error messages, and no `console` use. The
 //     `KeyholderDkgError`/`KeyVaultError` codes and ids are the only error
 //     content; `decodeDkgRoundVaultRecord`'s own corruption messages name
@@ -321,6 +367,10 @@
 //       missing member" — got an immediate `aborted/unresolved-complaint`
 //       instead of `collecting`.
 //
+//   (l) WR-02 controls (62-42): re-add an EXISTS over UserKey at the
+//       KeyholderDkgMessage read (DS2 goes red); at the ElectionKey read (DS3
+//       goes red); delete the advanceDkg current-key check (DS4b goes red).
+//
 // Findings table (id, severity, status):
 //
 //   F-01 | LOW    | accepted — control (a) could not be live-mutated (see
@@ -361,7 +411,7 @@ import {
 import type { EngineContext } from '../types.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { digestToBytes } from '../utils.js'
-import { KEYHOLDER_SHARE_POLICY, KeyVaultError, keyholderDkgReceivingKeyAlias, keyholderDkgShareAlias, type IKeyVault } from '../crypto/vault.js'
+import { KEYHOLDER_SHARE_ATTEMPT_POLICY, KEYHOLDER_SHARE_POLICY, KeyVaultError, keyholderDkgReceivingKeyAlias, keyholderDkgShareAlias, keyholderDkgShareAttemptAlias, type IKeyVault } from '../crypto/vault.js'
 import {
   buildComplaintEvidence,
   commitRound1,
@@ -383,6 +433,7 @@ import {
   type EncryptedShare
 } from '../crypto/dkg.js'
 import {
+  parseElectionKeyCommitments,
   parseRound0Payload,
   parseRound1Payload,
   parseRound2Payload,
@@ -518,11 +569,8 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
     for await (const row of this.ctx.db.eval(
       `select Attempt, DkgRound, SenderUserId, Payload, ResultKey,
           (
-            (
-              SignatureValid(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
-                or SignatureValidP256(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
-            )
-            and exists (select 1 from UserKey K where K.UserId = SenderUserId and K.PubKey = SenderKey)
+            SignatureValid(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
+              or SignatureValidP256(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
           ) as SigValid
         from KeyholderDkgMessage
         where ElectionId = :electionId and ElectionRevision = :revision`,
@@ -538,16 +586,13 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
       })
     }
 
-    let electionKey: (ElectionKeyRecord & { signatureValid: boolean }) | null = null
+    let electionKey: (ElectionKeyRecord & { signatureValid: boolean, commitmentsWellFormed: boolean }) | null = null
     const ekRow = await this.ctx.db
       .prepare(
         `select Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId,
             (
-              (
-                SignatureValid(Digest('ElectionKey', ElectionId, ElectionRevision, Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId), Signature, PublisherKey)
-                  or SignatureValidP256(Digest('ElectionKey', ElectionId, ElectionRevision, Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId), Signature, PublisherKey)
-              )
-              and exists (select 1 from UserKey K where K.UserId = PublisherUserId and K.PubKey = PublisherKey)
+              SignatureValid(Digest('ElectionKey', ElectionId, ElectionRevision, Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId), Signature, PublisherKey)
+                or SignatureValidP256(Digest('ElectionKey', ElectionId, ElectionRevision, Attempt, JointPublicKey, GroupCommitments, Threshold, Participants, PublishedAt, PublisherUserId), Signature, PublisherKey)
             ) as SigValid
           from ElectionKey where ElectionId = :electionId and ElectionRevision = :revision`
       )
@@ -558,12 +603,13 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
         revision,
         attempt: ekRow.Attempt as number,
         jointPublicKey: ekRow.JointPublicKey as string,
-        groupCommitments: JSON.parse(ekRow.GroupCommitments as string) as string[],
+        groupCommitments: parseElectionKeyCommitments(ekRow.GroupCommitments) ?? [],
         threshold: ekRow.Threshold as number,
         participants: ekRow.Participants as number,
         publishedAt: ekRow.PublishedAt as string,
         publisherUserId: ekRow.PublisherUserId as string,
-        signatureValid: normalizeBool(ekRow.SigValid)
+        signatureValid: normalizeBool(ekRow.SigValid),
+        commitmentsWellFormed: parseElectionKeyCommitments(ekRow.GroupCommitments) !== null
       }
     }
 
@@ -604,7 +650,8 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
         revision: rev,
         attempt: row.Attempt as number,
         jointPublicKey: row.JointPublicKey as string,
-        groupCommitments: JSON.parse(row.GroupCommitments as string) as string[],
+        // `[]` means "malformed on the row" (the public record shape is unchanged).
+        groupCommitments: parseElectionKeyCommitments(row.GroupCommitments) ?? [],
         threshold: row.Threshold as number,
         participants: row.Participants as number,
         publishedAt: row.PublishedAt as string,
@@ -943,6 +990,7 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
     }
 
     const shareAlias = keyholderDkgShareAlias(electionId, revision, signer.userId)
+    const markerAlias = keyholderDkgShareAttemptAlias(electionId, revision, signer.userId)
     const existingShareBytes = await this.deps.vault.getSecret(shareAlias)
     if (existingShareBytes !== null) {
       const stillValid = validateReleasedShare(evaluation.threshold!, evaluation.roster.length, material.groupCommitments, {
@@ -950,12 +998,17 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
         signingShare: bytesToHex(existingShareBytes)
       })
       if (!stillValid) {
+        await this.deps.vault.deleteSecret(markerAlias)
         await this.deps.vault.deleteSecret(shareAlias)
         await this.deps.vault.putSecret(shareAlias, material.signingShare, KEYHOLDER_SHARE_POLICY)
       }
     } else {
       await this.deps.vault.putSecret(shareAlias, material.signingShare, KEYHOLDER_SHARE_POLICY)
     }
+    // Record the producing attempt AFTER the share is in the vault on every branch (a crash between the two
+    // leaves a marker-less share, which the sweep never deletes). `putSecret` refuses an existing alias.
+    await this.deps.vault.deleteSecret(markerAlias)
+    await this.deps.vault.putSecret(markerAlias, new TextEncoder().encode(String(attempt)), KEYHOLDER_SHARE_ATTEMPT_POLICY)
 
     const payload = serializeRound4Payload({ groupPublicKey: material.groupPublicKey, groupCommitments: material.groupCommitments })
     await this.postMessage(electionId, revision, attempt, 4, material.groupPublicKey, payload, signer)
@@ -1038,10 +1091,21 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
       }
     }
 
-    const hadAbortedAttempt = evaluation.attempts.some((a) => a.outcome === 'aborted')
-    if (hadAbortedAttempt && evaluation.electionKey === null) {
-      const shareAlias = keyholderDkgShareAlias(electionId, revision, signer.userId)
-      if (await this.deps.vault.deleteSecret(shareAlias)) didSomething = true
+    // V-1: the share is deleted only when the attempt that PRODUCED it is proven aborted (and no key exists).
+    if (evaluation.electionKey === null) {
+      const markerAlias = keyholderDkgShareAttemptAlias(electionId, revision, signer.userId)
+      const markerBytes = await this.deps.vault.getSecret(markerAlias)
+      if (markerBytes !== null) {
+        const text = new TextDecoder().decode(markerBytes)
+        const producing = /^[1-9][0-9]*$/.test(text) ? Number(text) : null
+        const aborted = producing !== null && evaluation.attempts.some((a) => a.attempt === producing && a.outcome === 'aborted')
+        if (aborted) {
+          const shareAlias = keyholderDkgShareAlias(electionId, revision, signer.userId)
+          await this.deps.vault.deleteSecret(shareAlias)
+          await this.deps.vault.deleteSecret(markerAlias)
+          didSomething = true
+        }
+      }
     }
 
     return didSomething

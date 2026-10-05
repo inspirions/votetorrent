@@ -82,7 +82,9 @@ export type RegistrationCodeAvailability =
  *   3. This device staged that registration over P2P (`ownStagedRegistrationRequestIds` contains
  *      the registration request id, which equals the registrantId).
  *   4. `deriveRegistrationCode` succeeds.
- * Never throws — every failure (including an engine read rejecting) resolves `'unavailable'`.
+ * Never throws — every failure (including an engine read rejecting) resolves `'unavailable'`. Two
+ * fixed-string warns tell the cases apart: 'continuity: registration code holder key not found'
+ * (silent-looking holder-key miss) and 'continuity: code availability read failed' (a read threw).
  */
 export async function resolveRegistrationCodeAvailability(
 	deps: ContinuityDeps,
@@ -119,6 +121,8 @@ export async function resolveRegistrationCodeAvailability(
 
 		const holderKey = await association.getRegistrationCodeHolderKey(registrantId);
 		if (holderKey === undefined) {
+			// Fixed string only (T-62-28-01 / T-62-51-01): no registrant id, key or error text.
+			console.warn('continuity: registration code holder key not found');
 			return {kind: 'unavailable'};
 		}
 		if (holderKey !== identityKey) {
@@ -277,7 +281,9 @@ export type ReassociationProgress =
  * Up to `REASSOCIATION_MAX_POLL_ROUNDS` rounds of `pollDecisions`, forwarding the cursor between
  * calls. A `'c'` notice (with a nonce, not yet answered) drives `producer.produce` then
  * `submitAttestation` — a `'duplicate-request-id'` rejection from `submitAttestation` is treated
- * as already-answered, not an error. Timer-free; an empty round ends the run as pending.
+ * as already-answered, not an error. Timer-free; an empty round, or a round whose resume cursor did
+ * not move (above-ceiling decisions are re-delivered with an unchanged cursor), ends the run as
+ * pending and the next call resumes. Cursors are compared for equality only.
  */
 export async function advanceReassociation(
 	deps: ReassociationCeremonyDeps,
@@ -288,6 +294,7 @@ export async function advanceReassociation(
 	let isAnswered = answered;
 
 	for (let round = 0; round < REASSOCIATION_MAX_POLL_ROUNDS; round++) {
+		const forwarded = cursor;
 		const notices = await deps.transports.associationTransport.pollDecisions(cursor);
 		if (notices.length === 0) {
 			return {kind: 'pending', answered: isAnswered};
@@ -301,6 +308,9 @@ export async function advanceReassociation(
 			}
 		}
 		if (!latest) {
+			if (cursor === forwarded) {
+				return {kind: 'pending', answered: isAnswered};
+			}
 			continue;
 		}
 
@@ -343,7 +353,11 @@ export async function advanceReassociation(
 				}
 			}
 		}
-		// A 'c' notice already answered, or any other status, just keeps polling.
+		// A 'c' notice already answered, or any other status, just keeps polling — unless the resume
+		// cursor did not move, in which case another round would re-read the same rows.
+		if (cursor === forwarded) {
+			return {kind: 'pending', answered: isAnswered};
+		}
 	}
 
 	return {kind: 'pending', answered: isAnswered};

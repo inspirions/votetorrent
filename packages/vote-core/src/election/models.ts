@@ -221,6 +221,9 @@ export interface BallotSummary {
 
   /** The id of the authority posting the ballot */
   authorityId: string
+
+  /** The ballot's description (finalized Ballot.Description preferred) */
+  description: string
 }
 
 export interface Option {

@@ -11,7 +11,10 @@ import {
   P2pStagingError,
   encodeStagingPlaintext,
   decodeStagingPlaintext,
-  insertWithCursorRetry
+  insertWithCursorRetry,
+  readConformingRows,
+  readDecisionRows,
+  inSequenceHighWater
 } from './p2p-staging-seam.js'
 import type {
   StagingSealer,
@@ -25,6 +28,7 @@ import type {
   StagingSqlPort
 } from './p2p-staging-seam.js'
 import { bytesToBase64url, digestToBytes, nowCanonicalDatetime } from '../../utils.js'
+import { registrationCodeBindingDigest } from '../../association/reassociation/registration-code.js'
 
 // Re-exported so 62-18/62-19/62-21/62-22/62-24 can import the whole seam from this one module
 // (explicit names only — never `export *` of the seam — so `insertWithCursorRetry` and the
@@ -161,6 +165,8 @@ interface RegistrationStagingPlaintextShape {
   version: 1
   init: RegistrationRequestInit
   registrationCode?: string
+  /** V-3: the requester's signature over (RequestId, registrationCode); sealed with the rest. */
+  registrationCodeSignature?: Signature
 }
 
 export interface P2pStagedRequest extends StagedRequest {
@@ -186,6 +192,15 @@ export interface P2pRegistrationDecisionRecord {
   decidedAt: string
   deciderKey: string
   deciderSignature: string
+  /**
+   * A resume cursor, not a row identifier: forward the last value as `sinceCursor` to continue
+   * (re-delivery is permitted, loss is not). Opaque; compare for equality only. In the P2P binding
+   * a decision above the in-sequence ceiling carries the last in-sequence cursor of the read (else
+   * the caller's conforming `sinceCursor`, else the re-read sentinel `0000000000000000`), so
+   * several notices can share one value and it can differ from the cursor `publishDecision`
+   * returned. See `readDecisionRows` in `p2p-staging-seam.ts`.
+   * Audit consumers must not key records on it.
+   */
   cursor: string
 }
 
@@ -281,6 +296,12 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
    * copied through verbatim inside the sealed plaintext, exactly like the filesystem and REST
    * bindings copy them in the clear. This transport never receives, derives, or persists key
    * material: it holds either a finished `Signature` or a callback, never a raw private key.
+   *
+   * V-3 binding: when a registration code is carried, the requester's key also signs
+   * `sha256(REGISTRATION_CODE_BINDING_DOMAIN, RequestId, code)` through the SAME callback (a signer
+   * that unwraps its key once adds no extra prompt) and the signature is sealed inside the
+   * plaintext. A finished `Signature` cannot produce that binding, so a code with one is refused
+   * with 'code-binding-requires-signer' before any signing, sealing or write.
    */
   async submitRequest (
     init: RegistrationRequestInit,
@@ -298,15 +319,35 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
       )
     }
 
+    const registrationCode = extras?.registrationCode
+    if (registrationCode !== undefined && typeof signatureOrCallback !== 'function') {
+      throw new P2pStagingError(
+        'code-binding-requires-signer',
+        'P2pRegistrationTransport.submitRequest: a registration code needs a signing callback to produce its binding signature'
+      )
+    }
+
     const digestBytes = await this.computeDigest(init, requesterKey)
     const signature = typeof signatureOrCallback === 'function'
       ? await signatureOrCallback(digestBytes)
       : signatureOrCallback
     const digest = bytesToBase64url(digestBytes)
 
-    const plaintextValue: RegistrationStagingPlaintextShape = extras?.registrationCode === undefined
-      ? { version: 1, init }
-      : { version: 1, init, registrationCode: extras.registrationCode }
+    let plaintextValue: RegistrationStagingPlaintextShape
+    if (registrationCode === undefined) {
+      plaintextValue = { version: 1, init }
+    } else {
+      const bindingSignature = await (signatureOrCallback as (digest: Uint8Array) => Promise<Signature>)(
+        registrationCodeBindingDigest(init.id, registrationCode)
+      )
+      if (bindingSignature.signerKey !== requesterKey) {
+        throw new P2pStagingError(
+          'rejected',
+          'P2pRegistrationTransport.submitRequest: the registration code binding was not signed by the requester key'
+        )
+      }
+      plaintextValue = { version: 1, init, registrationCode, registrationCodeSignature: bindingSignature }
+    }
     const initJson = await this.sealer.seal(encodeStagingPlaintext(plaintextValue), { requestId: init.id, digest })
 
     const port = await this.strand()
@@ -345,22 +386,23 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
    * (closed-as-duplicate) row maps to `{ status: 'r', reason: REGISTRATION_DUPLICATE_CLOSED_REASON }`
    * rather than throwing — without this mapping a single closed-duplicate row on a shared strand
    * would make every voter's poll throw.
+   *
+   * Every conforming decision is delivered (WR-01). `cursor` is a forward-safe resume cursor: the
+   * row's own cursor when in sequence, otherwise the last in-sequence cursor of the read, so
+   * forwarding the last notice's cursor re-delivers and never skips.
    */
   async pollDecisions (sinceCursor?: string): Promise<RegistrationDecisionNotice[]> {
     const port = await this.strand()
-    const rows = await port.query<DecisionRow>(DECISION_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
-    return rows.map((row) => {
+    const rows = await readDecisionRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.map(({ row, resumeCursor }) => {
       if (row.Status === 'd') {
-        return { requestId: row.RequestId, status: 'r', reason: REGISTRATION_DUPLICATE_CLOSED_REASON, cursor: row.Cursor }
+        return { requestId: row.RequestId, status: 'r', reason: REGISTRATION_DUPLICATE_CLOSED_REASON, cursor: resumeCursor }
       }
       return {
         requestId: row.RequestId,
         status: assertKnownRegistrationStatus(row.Status, 'P2pRegistrationTransport.pollDecisions'),
         reason: row.Reason ?? undefined,
-        cursor: row.Cursor
+        cursor: resumeCursor
       }
     })
   }
@@ -376,17 +418,14 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
       throw new P2pStagingError('no-opener', 'P2pRegistrationTransport.readStagedRequestsReport: no opener was supplied')
     }
     const port = await this.strand()
-    const rows = await port.query<StagingRow>(STAGING_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
+    const { rows, ceiling } = await readConformingRows<StagingRow>(port, 'RegistrationRequestStaging', this.strandId, STAGING_SELECT_SQL, sinceCursor)
 
     const delivered: P2pStagedRequest[] = []
     const unreadable: StagingUnreadableRow[] = []
     let highWaterCursor: string | undefined
 
     for (const row of rows) {
-      if (highWaterCursor === undefined || row.Cursor > highWaterCursor) highWaterCursor = row.Cursor
+      highWaterCursor = inSequenceHighWater(highWaterCursor, row.Cursor, ceiling)
 
       let signature: Signature
       try {
@@ -480,15 +519,12 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
     return cursor
   }
 
-  /** `readDecisionRecords` — every column of `P2pRegistrationDecisionRecord`, including D-44's
-   * 'd' status. Throws (naming only the offending status) on anything outside `a`/`r`/`d`. */
+  /** `readDecisionRecords` — every column of `P2pRegistrationDecisionRecord` except `cursor`, which is
+   * the resume cursor described on the record type, including D-44's 'd' status. Throws (naming only the offending status) on anything outside `a`/`r`/`d`. */
   async readDecisionRecords (sinceCursor?: string): Promise<P2pRegistrationDecisionRecord[]> {
     const port = await this.strand()
-    const rows = await port.query<DecisionRow>(DECISION_SELECT_SQL, {
-      strandId: this.strandId,
-      sinceCursor: sinceCursor ?? null
-    })
-    return rows.map((row) => {
+    const rows = await readDecisionRows<DecisionRow>(port, 'RegistrationDecision', this.strandId, DECISION_SELECT_SQL, sinceCursor)
+    return rows.map(({ row, resumeCursor }) => {
       if (row.Status !== 'a' && row.Status !== 'r' && row.Status !== 'd') {
         throw new Error(`P2pRegistrationTransport.readDecisionRecords: decision record carries a status outside a/r/d: ${JSON.stringify(row.Status)}`)
       }
@@ -501,7 +537,7 @@ export class P2pRegistrationTransport implements IRegistrationRequestTransport, 
         decidedAt: row.DecidedAt,
         deciderKey: row.DeciderKey,
         deciderSignature: row.DeciderSignature,
-        cursor: row.Cursor
+        cursor: resumeCursor
       }
     })
   }

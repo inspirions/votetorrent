@@ -280,7 +280,7 @@ describe('RegistrationScreen — registration code re-show / entry links (D-40/D
 		},
 	);
 
-	it("'unavailable' renders neither link nor the notAvailableOnDevice notice", async () => {
+	it("'unavailable' renders the registration-code-not-available notice (code.notAvailableOnDevice), no numberOfLines, neither link", async () => {
 		mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind: 'unavailable'}));
 		setProviderState();
 		let tr!: renderer.ReactTestRenderer;
@@ -295,6 +295,38 @@ describe('RegistrationScreen — registration code re-show / entry links (D-40/D
 
 		expect(tr.root.findAllByProps({testID: 'registration-code-show-again-link'})).toHaveLength(0);
 		expect(tr.root.findAllByProps({testID: 'continue-device-entry-link'})).toHaveLength(0);
-		expect(tr.root.findAllByProps({testID: 'registration-code-not-available'})).toHaveLength(0);
+		const notice = tr.root.findByProps({testID: 'registration-code-not-available'});
+		expect(notice.props.numberOfLines).toBeUndefined();
+	});
+
+	it('renders registration-code-checking until the availability read settles, then the settled branch', async () => {
+		let resolveRead!: (v: {kind: 'not-registered'}) => void;
+		mockResolveRegistrationCodeAvailability.mockImplementation(
+			() => new Promise(resolve => {
+				resolveRead = resolve as typeof resolveRead;
+			}),
+		);
+		setProviderState();
+		let tr!: renderer.ReactTestRenderer;
+		await renderer.act(async () => {
+			tr = renderer.create(
+				<ThemeProvider value={lightTheme}>
+					<RegistrationScreen />
+				</ThemeProvider>,
+			);
+			await flush();
+		});
+
+		expect(tr.root.findAllByProps({testID: 'registration-code-checking'}).length).toBeGreaterThan(0);
+		for (const id of ['registration-code-show-again-link', 'continue-device-entry-link', 'registration-code-not-available']) {
+			expect(tr.root.findAllByProps({testID: id})).toHaveLength(0);
+		}
+
+		await renderer.act(async () => {
+			resolveRead({kind: 'not-registered'});
+			await flush();
+		});
+		expect(tr.root.findAllByProps({testID: 'registration-code-checking'})).toHaveLength(0);
+		expect(tr.root.findAllByProps({testID: 'continue-device-entry-link'}).length).toBeGreaterThan(0);
 	});
 });

@@ -2152,7 +2152,7 @@ declare schema main
 	-- it is not an offline dictionary oracle over registration contents (T-62-01-08, T-62-01-09).
 	table RegistrationRequestStaging (
 		StrandId text,
-		Cursor text, -- 16-digit zero-padded decimal, per the P2P transport convention
+		Cursor text, -- 16-digit zero-padded decimal within 1..9007199254740991 (CursorWellFormed, V-4)
 		RequestId text,
 		Digest text,
 		InitJson text, -- sealed RegistrationStagingPlaintext envelope (62-04); see table comment
@@ -2172,7 +2172,18 @@ declare schema main
 			cast(json_extract(new.SignatureJson, '$.signerKey') as text) = new.RequesterKey
 		),
 		constraint DigestPresent check (length(new.Digest) > 0),
-		constraint CursorWidth check (length(new.Cursor) = 16),
+		-- V-4: a staging Cursor is exactly 16 ASCII digits within 0000000000000001..9007199254740991
+		-- (the largest exact integer). Digits-only is proven by deleting every digit and requiring the
+		-- empty string (no GLOB or printf here); for equal-length digit strings text order is numeric order,
+		-- so the two bounds are plain comparisons. The bounded-step rule (a cursor must stay close to the
+		-- row count) is enforced by the engine allocator and readers, not here: a self-referential CHECK
+		-- would be deferred, and batched deferred CHECKs mis-evaluate.
+		constraint CursorWellFormed check (
+			length(new.Cursor) = 16
+			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
+			and new.Cursor >= '0000000000000001'
+			and new.Cursor <= '9007199254740991'
+		),
 		constraint StagedAtValid check (isISODatetime(new.StagedAt) and like('%Z', new.StagedAt)),
 		-- D-07: staged requests are kept forever.
 		constraint NoUpdate check on update (false),
@@ -2249,7 +2260,24 @@ declare schema main
 			)
 		),
 		constraint DecidedAtValid check (isISODatetime(new.DecidedAt) and like('%Z', new.DecidedAt)),
-		constraint CursorWidth check (length(new.Cursor) = 16),
+		-- V-4 on decision rows (62-46): this CHECK refuses any Cursor that is not exactly 16 ASCII digits
+		-- within 0000000000000001..9007199254740991. It is defence in depth for locally inserted rows only:
+		-- it is immediate and runs when a row is inserted through this peer's own Quereus (local inserts).
+		-- Re-validation of rows that arrive by replication is NOT ESTABLISHED (62-48: no
+		-- createQuereusValidator registration found in @serfab/cadre-core, and unvalidatablePendPolicy
+		-- defaults to 'accept'), so rows from older builds, raw clients or replication, and rows written
+		-- before this CHECK (kept forever by NoUpdate/NoDelete, D-07), can still be non-conforming.
+		-- The control for the cursor-collation wedge (CR-01) is the engine: insertWithCursorRetry's
+		-- code-point progress guard (compareStagingCursorText) and rowCount/64 + 2 page bound, plus the
+		-- readers that drop non-conforming rows (readConformingRows, readDecisionRows), in
+		-- p2p-staging-seam.ts (62-44). That engine tolerance must not be removed on the strength of this CHECK.
+		-- The bounded-step rule stays engine-side.
+		constraint CursorWellFormed check (
+			length(new.Cursor) = 16
+			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
+			and new.Cursor >= '0000000000000001'
+			and new.Cursor <= '9007199254740991'
+		),
 		constraint StatusValid check (new.Status in (select Code from RegistrationDecisionStatus)),
 		constraint ClosesRequestIdValid check (
 			new.ClosesRequestId is null or (new.Status in ('a', 'r') and new.ClosesRequestId <> new.RequestId)
@@ -2421,7 +2449,18 @@ declare schema main
 			cast(json_extract(new.SignatureJson, '$.signerKey') as text) = new.RequesterKey
 		),
 		constraint DigestPresent check (length(new.Digest) > 0),
-		constraint CursorWidth check (length(new.Cursor) = 16),
+		-- V-4: a staging Cursor is exactly 16 ASCII digits within 0000000000000001..9007199254740991
+		-- (the largest exact integer). Digits-only is proven by deleting every digit and requiring the
+		-- empty string (no GLOB or printf here); for equal-length digit strings text order is numeric order,
+		-- so the two bounds are plain comparisons. The bounded-step rule (a cursor must stay close to the
+		-- row count) is enforced by the engine allocator and readers, not here: a self-referential CHECK
+		-- would be deferred, and batched deferred CHECKs mis-evaluate.
+		constraint CursorWellFormed check (
+			length(new.Cursor) = 16
+			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
+			and new.Cursor >= '0000000000000001'
+			and new.Cursor <= '9007199254740991'
+		),
 		constraint StagedAtValid check (isISODatetime(new.StagedAt) and like('%Z', new.StagedAt)),
 		constraint NoUpdate check on update (false),
 		constraint NoDelete check on delete (false)
@@ -2452,7 +2491,18 @@ declare schema main
 			cast(json_extract(new.SignatureJson, '$.signerKey') as text) = new.RequesterKey
 		),
 		constraint DigestPresent check (length(new.Digest) > 0),
-		constraint CursorWidth check (length(new.Cursor) = 16),
+		-- V-4: a staging Cursor is exactly 16 ASCII digits within 0000000000000001..9007199254740991
+		-- (the largest exact integer). Digits-only is proven by deleting every digit and requiring the
+		-- empty string (no GLOB or printf here); for equal-length digit strings text order is numeric order,
+		-- so the two bounds are plain comparisons. The bounded-step rule (a cursor must stay close to the
+		-- row count) is enforced by the engine allocator and readers, not here: a self-referential CHECK
+		-- would be deferred, and batched deferred CHECKs mis-evaluate.
+		constraint CursorWellFormed check (
+			length(new.Cursor) = 16
+			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
+			and new.Cursor >= '0000000000000001'
+			and new.Cursor <= '9007199254740991'
+		),
 		constraint StagedAtValid check (isISODatetime(new.StagedAt) and like('%Z', new.StagedAt)),
 		constraint NoUpdate check on update (false),
 		constraint NoDelete check on delete (false)
@@ -2515,7 +2565,24 @@ declare schema main
 			)
 		),
 		constraint DecidedAtValid check (isISODatetime(new.DecidedAt) and like('%Z', new.DecidedAt)),
-		constraint CursorWidth check (length(new.Cursor) = 16),
+		-- V-4 on decision rows (62-46): this CHECK refuses any Cursor that is not exactly 16 ASCII digits
+		-- within 0000000000000001..9007199254740991. It is defence in depth for locally inserted rows only:
+		-- it is immediate and runs when a row is inserted through this peer's own Quereus (local inserts).
+		-- Re-validation of rows that arrive by replication is NOT ESTABLISHED (62-48: no
+		-- createQuereusValidator registration found in @serfab/cadre-core, and unvalidatablePendPolicy
+		-- defaults to 'accept'), so rows from older builds, raw clients or replication, and rows written
+		-- before this CHECK (kept forever by NoUpdate/NoDelete, D-07), can still be non-conforming.
+		-- The control for the cursor-collation wedge (CR-01) is the engine: insertWithCursorRetry's
+		-- code-point progress guard (compareStagingCursorText) and rowCount/64 + 2 page bound, plus the
+		-- readers that drop non-conforming rows (readConformingRows, readDecisionRows), in
+		-- p2p-staging-seam.ts (62-44). That engine tolerance must not be removed on the strength of this CHECK.
+		-- The bounded-step rule stays engine-side.
+		constraint CursorWellFormed check (
+			length(new.Cursor) = 16
+			and replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(new.Cursor, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', '') = ''
+			and new.Cursor >= '0000000000000001'
+			and new.Cursor <= '9007199254740991'
+		),
 		constraint ChallengeNonceShape check (
 			(new.Status = 'c' and new.ChallengeNonce is not null) or (new.Status <> 'c' and new.ChallengeNonce is null)
 		),
@@ -2673,16 +2740,20 @@ declare schema main
 	-- PrivateDetails. Which fields are disclosed and to whom (e.g. same-district neighbors, or everyone)
 	-- is decided per-election by ElectionDisclosurePolicy. Salts are random_bytes (>=128 bits); duplicate
 	-- names and empty salts are rejected at commit. (Ref: Optimystic issue #5 — the landed flat-set design.)
+	--
+	-- D-52: the stored column holds a sealed envelope, so the schema can no longer recompute the set
+	-- commitment from it; the earlier schema-side recompute was dropped (the 62-03 payload-cid precedent).
+	-- The engine checks cid(set_commit(opened plaintext)) against Cid at every open. The registrant-cid
+	-- match and the officer signature over the stored text remain enforced here.
 	table RegistrantSelective (
-		Cid text, -- content-addressed CIDv1 of this record: cid(set_commit(SelectiveDetails))
+		Cid text, -- content-addressed CIDv1 of the PLAINTEXT leaves: cid(set_commit(<plaintext leaves>)), computed by the engine before sealing and re-checked at every open
 		RegistrantId text, -- references Registrant.Id
 		Expiration datetime,
-		SelectiveDetails text null, -- json array of flat { name, value, salt } salted leaves (SaltedLeaf[]); disclosed per-field per election policy via setDisclose/setVerify
+		SelectiveDetails text null, -- from D-52 a sealed D-04 envelope (legacy rows keep the plaintext json array of flat { name, value, salt } salted leaves, SaltedLeaf[]); disclosed per-field per election policy via setDisclose/setVerify after opening
 		primary key (RegistrantId, Cid), -- registrant-clustered storage key (one ranged fetch per registrant); Cid retains its content-integrity role
 		constraint RegistrantIdValid check (exists (select 1 from Registrant R where R.Id = new.RegistrantId)),
 		constraint ExpirationValid check (isISODatetime(Expiration) and like('%Z', Expiration)),
 		constraint ExpirationFuture check on insert (Expiration > context.now),
-		constraint CidValid check (Cid = cid(set_commit(SelectiveDetails))),
 		constraint RegistrantCidMatch check (exists (select 1 from Registrant R where R.Id = new.RegistrantId and R.SelectiveCid = new.Cid)),
 		constraint InsertOnly check on update, delete (false),
 		constraint InsertValid check on insert (

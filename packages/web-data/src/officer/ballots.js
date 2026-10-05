@@ -59,11 +59,48 @@ export async function readBallots(db, electionId) {
  * @property {string} Code
  * @property {string} Title
  * @property {string} TypeName
- * @property {unknown} OptionRange - raw JSON column value
+ * @property {unknown} OptionRange - raw column value: pg form `{min, max}` (vote-engine formatPgRange), or legacy JSON; read it with `parseOptionRange`
  * @property {number} Required
  * @property {string | null} Grouping
  * @property {number} OptionCount
  */
+
+/**
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+const isInt = (v) => typeof v === 'number' && Number.isInteger(v);
+
+/**
+ * Read a `Question.OptionRange` column value into `{min, max}`. Never throws.
+ *
+ * The column is written in the pg form `{min, max}` (vote-engine
+ * `formatPgRange`). Confirmed rows written before UAT 62 gap 1 hold a JSON
+ * object (`{"min":1,"max":1}`) and are signed, so they cannot be rewritten;
+ * both forms are read here. Anything else yields null.
+ *
+ * @param {unknown} raw
+ * @returns {{min: number, max: number} | null}
+ */
+export function parseOptionRange(raw) {
+	/** @type {unknown} */
+	let v = raw;
+	if (typeof raw === 'string') {
+		const s = raw.trim();
+		const m = /^\{(\s*-?\d+)\s*,\s*(-?\d+\s*)\}$/.exec(s);
+		if (m) return { min: Number(m[1]), max: Number(m[2]) };
+		try {
+			v = JSON.parse(s);
+		} catch {
+			return null;
+		}
+	}
+	if (v && typeof v === 'object' && !Array.isArray(v)) {
+		const { min, max } = /** @type {{min?: unknown, max?: unknown}} */ (v);
+		if (isInt(min) && isInt(max)) return { min: /** @type {number} */ (min), max: /** @type {number} */ (max) };
+	}
+	return null;
+}
 
 /**
  * @param {import('@quereus/quereus').Database} db

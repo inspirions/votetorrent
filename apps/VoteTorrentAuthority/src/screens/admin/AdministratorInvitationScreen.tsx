@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
@@ -30,10 +30,11 @@ import { globalStyles } from "../../theme/styles";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { inviteShareErrorKey, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 
 type AdministratorInvitationParams = {
 	mode: "send" | "accept";
-	invitationId?: string;
+	initialShare?: string;
 	authority?: Authority;
 };
 
@@ -41,8 +42,8 @@ export default function AdministratorInvitationScreen() {
 	const { t } = useTranslation();
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-	const { mode, invitationId, authority } = useRoute().params as AdministratorInvitationParams;
-	const { getEngine, hasNetwork } = useApp();
+	const { mode, initialShare, authority } = useRoute().params as AdministratorInvitationParams;
+	const { getEngine } = useApp();
 
 	// Send-mode form state
 	const [name, setName] = useState("");
@@ -54,7 +55,10 @@ export default function AdministratorInvitationScreen() {
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Accept-mode paste field (D-06 — invitee pastes the share text here)
-	const [pastedInvite, setPastedInvite] = useState<string>("");
+	const [pastedInvite, setPastedInvite] = useState<string>(initialShare ?? "");
+	const parsed = useMemo(() => parseInviteShare(pastedInvite), [pastedInvite]);
+	// The slot resolved from the paste (by InviteKey + type); accept and decline sign against it.
+	const [resolved, setResolved] = useState<{ slotCid: string; invitePrivate: string } | undefined>(undefined);
 
 	// Accept-mode fetched invite
 	const [invite, setInvite] = useState<InviteStatus<SentOfficerInvite> | undefined>(undefined);
@@ -82,22 +86,46 @@ export default function AdministratorInvitationScreen() {
 		});
 	}, [navigation, t, mode]);
 
+	// Map a failed resolve/accept/decline to user copy. Never render engine text or any Cid.
+	const mapAcceptError = (error: unknown): string => {
+		const shareKey = inviteShareErrorKey(error);
+		if (shareKey) return t(shareKey);
+		return t("invitationAcceptFailed");
+	};
+
+	// Resolve the slot from the pasted share, then load the invite details from the resolved Cid.
 	useEffect(() => {
-		async function loadInvite() {
-			if (mode !== "accept" || !invitationId) return;
+		if (mode !== "accept") return;
+		setResolved(undefined);
+		setInvite(undefined);
+		setInviteLoadFailed(false);
+		if (!pastedInvite.trim()) {
+			setErrorMessage("");
+			return;
+		}
+		if (!parsed) return; // still typing; the paste hint stays up
+		let cancelled = false;
+		(async () => {
 			try {
 				const engine = await getEngine<IInvitationEngine>("invitations");
-				const status = await engine.getOfficerInvite(invitationId);
+				const r = await resolveInviteFromShare(engine, pastedInvite, "of");
+				const status = await engine.getOfficerInvite(r.slotCid);
+				if (cancelled) return;
+				setErrorMessage("");
+				setResolved({ slotCid: r.slotCid, invitePrivate: r.invitePrivate });
 				setInvite(status);
 			} catch (error) {
-				// Log the engine detail for developers; officers get plain copy below instead of
-				// strings like `EngineFactory: Network context not established — call getEngine(...)`.
-				console.warn("Error loading officer invite:", error);
+				if (cancelled) return;
+				console.warn("Error loading officer invite:", error instanceof Error ? error.name : "unknown");
 				setInviteLoadFailed(true);
+				setErrorMessage(mapAcceptError(error));
 			}
-		}
-		loadInvite();
-	}, [mode, invitationId, getEngine]);
+		})();
+		return () => {
+			cancelled = true;
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [mode, pastedInvite, getEngine]);
 
 	// INV-01: real officer invite send with device signature (D-01/D-03/D-04)
 	const onSend = async () => {
@@ -157,60 +185,23 @@ export default function AdministratorInvitationScreen() {
 		}
 	};
 
-	// D-06: accept — invitee pastes the share text; screen reconstructs ephemeral invitePrivate.
-	const onAccept = async () => {
+	// D-06: accept - the slot is resolved from the pasted share, never from a route id.
+	const respond = async (accept: boolean) => {
+		setErrorMessage("");
 		try {
 			const engine = await getEngine<IInvitationEngine>("invitations");
-			// Reconstruct invitePrivate from pasted text (D-06).
-			let invitePrivate: string | undefined;
-			if (pastedInvite.trim()) {
-				try {
-					const parsed = JSON.parse(pastedInvite.trim());
-					invitePrivate = parsed.invitePrivate as string | undefined;
-				} catch {
-					// Not valid JSON — treat as raw invitePrivate hex
-					invitePrivate = pastedInvite.trim();
-				}
-			}
-			// T-21-11-03: accept calls the SIGNED respondToInvite path (D-09).
-			await engine.respondToInvite(
-				invitationId ?? "",
-				true,
-				invitePrivate,
-			);
-			// GAP-2: navigate ONLY on success — the InviteResult is now written.
+			const target = resolved ?? (await resolveInviteFromShare(engine, pastedInvite, "of"));
+			// T-21-11-03: accept and decline both call the SIGNED respondToInvite path (D-09).
+			await engine.respondToInvite(target.slotCid, accept, target.invitePrivate);
+			// GAP-2: navigate ONLY on success - the InviteResult is now written.
 			navigation.goBack();
 		} catch (error) {
-			console.warn("Error responding to invite (accept):", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			console.warn("Error responding to invite:", error instanceof Error ? error.name : "unknown");
+			setErrorMessage(mapAcceptError(error));
 		}
 	};
-
-	const onDecline = async () => {
-		try {
-			const engine = await getEngine<IInvitationEngine>("invitations");
-			// T-21-11-03: decline calls the SAME signed respondToInvite path (D-09).
-			let invitePrivate: string | undefined;
-			if (pastedInvite.trim()) {
-				try {
-					const parsed = JSON.parse(pastedInvite.trim());
-					invitePrivate = parsed.invitePrivate as string | undefined;
-				} catch {
-					invitePrivate = pastedInvite.trim();
-				}
-			}
-			await engine.respondToInvite(
-				invitationId ?? "",
-				false,
-				invitePrivate,
-			);
-			// GAP-2: navigate ONLY on success — the InviteResult is now written.
-			navigation.goBack();
-		} catch (error) {
-			console.warn("Error responding to invite (decline):", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
-		}
-	};
+	const onAccept = () => respond(true);
+	const onDecline = () => respond(false);
 
 	if (mode === "send") {
 		return (
@@ -320,32 +311,35 @@ export default function AdministratorInvitationScreen() {
 								size="thin"
 								onPress={() => {}}
 							/>
-
-							{/* D-06: paste field for the share text the sender copied */}
-							<ThemedText type="defaultSemiBold" style={styles.shareLabel}>
-								{t("invitationKey")}
-							</ThemedText>
-							<CustomTextInput
-								title={t("invitationKey")}
-								value={pastedInvite}
-								onChangeText={setPastedInvite}
-								placeholder="Paste the invite text from the sender"
-							/>
 						</>
-					) : inviteLoadFailed ? (
-						<ThemedText>{t(hasNetwork ? "invitationLoadFailed" : "invitationNeedsNetwork")}</ThemedText>
-					) : (
+					) : !parsed ? (
+						<ThemedText>{t("invitationAcceptPasteHint")}</ThemedText>
+					) : inviteLoadFailed ? null : (
 						<ThemedText>{t("loading")}</ThemedText>
 					)}
+
+					{/* D-06: paste field for the share text the sender copied */}
+					<ThemedText type="defaultSemiBold" style={styles.shareLabel}>
+						{t("invitationKey")}
+					</ThemedText>
+					<CustomTextInput
+						title={t("invitationKey")}
+						value={pastedInvite}
+						onChangeText={setPastedInvite}
+						placeholder={t("invitationAcceptPastePlaceholder")}
+					/>
 				</View>
 			</ScrollView>
 			{/* GAP-2: surface respondToInvite failures inline in accept mode */}
-			<InlineError message={errorMessage} />
+			<View testID="administrator-invitation-error" style={{ paddingHorizontal: globalStyles.container.padding }}>
+				<InlineError message={errorMessage} />
+			</View>
 			<SignatureTaskFooter
 				onAccept={onAccept}
 				onReject={onDecline}
 				acceptLabel={t("accept")}
 				rejectLabel={t("reject")}
+				disabled={!resolved}
 			/>
 		</KeyboardAvoidingScreen>
 	);

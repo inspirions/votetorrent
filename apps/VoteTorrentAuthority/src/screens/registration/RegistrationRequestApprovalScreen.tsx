@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
-import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
+import { ExtendedTheme, useFocusEffect, useNavigation, useRoute, useTheme } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
@@ -19,6 +19,8 @@ import { isChecklistGateMet } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
+import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
@@ -41,6 +43,7 @@ import {
 	createLazyDeviceSign,
 	isClosedAsDuplicateError,
 	isRegistrationContentAccessError,
+	isRequesterSignatureUnverifiableError,
 	publishRegistrationDecisionAfterDecide,
 	registrationContentUnreadKey,
 } from "./continuity-review";
@@ -235,8 +238,16 @@ export default function RegistrationRequestApprovalScreen() {
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
+	const keyboardInset = useKeyboardInset();
 	const { getEngine, createPeerStagingTransports } = useApp();
-	const { scopes } = useCurrentOfficerScopes(authorityId);
+	const { scopes, refresh: refreshScopes } = useCurrentOfficerScopes(authorityId);
+	// UAT 62 gap 4 item 1: officer standing can change while this screen is backgrounded (for
+	// example after Replace Signing Key), so re-read it on every focus; canDecide never stays stale.
+	useFocusEffect(
+		React.useCallback(() => {
+			refreshScopes();
+		}, [refreshScopes])
+	);
 
 	useLayoutEffect(() => {
 		navigation.setOptions({ title: t("registrationRequestApprovalScreenTitle") });
@@ -404,6 +415,21 @@ export default function RegistrationRequestApprovalScreen() {
 	// An officer cannot refuse a request they cannot see, but may refuse content that fails its
 	// signed digest: refusing under uncertainty is the safe direction.
 	const rejectableUnread = read?.payloadAccess === "tampered";
+	// D-07: derived from `checked` directly (not the `gateMet` state), because `checked` can be
+	// seeded from `read.verificationChecklist` before VerificationChecklist reports.
+	const checklistGateMet = isChecklistGateMet(checked);
+	// One definition shared by the readable branch and the tampered branch.
+	const checklistElement = (
+		<VerificationChecklist
+			checked={checked}
+			onChange={(next, met) => {
+				setChecked(next);
+				setGateMet(met);
+			}}
+			readOnly={mode !== "pending"}
+			decidedAt={read?.decidedAt}
+		/>
+	);
 	// 62-31 degrades an unread registrant task to the base task, so a missing own task does not
 	// mean the officer voted.
 	const voteRecorded = mode === "pending" && thresholdAboveOne && !task && !unreachable && contentReadable;
@@ -492,6 +518,10 @@ export default function RegistrationRequestApprovalScreen() {
 				// code; its message (request id plus access code) is never rendered.
 				carryMessageRef.current = t(registrationContentUnreadKey(err.access) ?? "registrationContentUnreadable");
 				setReloadNonce((n) => n + 1);
+			} else if (isRequesterSignatureUnverifiableError(err)) {
+				// The engine refused before any signature was spent: the request itself is undecidable, so
+				// fixed copy with no retry invitation and never the engine text.
+				setErrorMessage(t("registrationRequestUnverifiable"));
 			} else {
 				const outcome = handleDeviceSigningError(err);
 				if (!outcome.handled) {
@@ -522,6 +552,13 @@ export default function RegistrationRequestApprovalScreen() {
 	// `getSignatureDigest` and never invokes `signer(digest)` itself.
 	async function handleReject(reason: string): Promise<void> {
 		setErrorMessage("");
+		// D-07 / WR-02: the engine refuses an ungated reject, and the buttons are disabled on the
+		// same predicate; this is the belt to those braces so an ungated press spends NO biometric
+		// prompt. Fixed text, no request id. Rethrown so RejectReasonCard's latch returns to idle.
+		if (!isChecklistGateMet(checked)) {
+			setErrorMessage(t("registrationRequestRejectChecklistRequired"));
+			throw new Error("reject checklist gate not met");
+		}
 		try {
 			const reg = await getEngine<IRegistrationEngine>("registration");
 			// The screen never calls getSignatureDigest and never invokes
@@ -576,10 +613,13 @@ export default function RegistrationRequestApprovalScreen() {
 				setErrorMessage("");
 				setShowRejectCard(false);
 				setReloadNonce((n) => n + 1);
+			} else if (isRequesterSignatureUnverifiableError(err)) {
+				// 62-64 refusal: undecidable request, refused before any officer signature.
+				setErrorMessage(t("registrationRequestUnverifiable"));
 			} else {
 				const outcome = handleDeviceSigningError(err);
 				if (!outcome.handled) {
-					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+					setErrorMessage(outcome.message ?? t("registrationRequestRejectFailed"));
 				}
 			}
 			// Re-thrown so RejectReasonCard's own submit latch (idle ->
@@ -633,7 +673,7 @@ export default function RegistrationRequestApprovalScreen() {
 	const rejectedMeta = REGISTRATION_REQUEST_STATUS_META.r;
 
 	return (
-		<View testID="registration-request-approval-screen" style={styles.content}>
+		<KeyboardAvoidingScreen testID="registration-request-approval-screen">
 			{/* Neither decided mode renders a footer (see below), so nothing else
 			    clears the Android gesture bar / iOS home indicator below the last
 			    line of the approved or rejected block — the rejected block's
@@ -652,7 +692,8 @@ export default function RegistrationRequestApprovalScreen() {
 				{/* InlineError renders null for an empty message and carries no
 				    testID prop, so its absence is otherwise unassertable — the
 				    wrapping View is what makes presence/absence testable. */}
-				{errorMessage ? (
+				{/* One error surface at a time: while the reject card is open it shows the failure itself. */}
+				{errorMessage && !(mode === "pending" && showRejectCard && read) ? (
 					<View testID="registration-request-approval-error">
 						<InlineError message={errorMessage} />
 					</View>
@@ -735,6 +776,7 @@ export default function RegistrationRequestApprovalScreen() {
 						    never an empty form. The copy is a Group K key; no payload text, request id or
 						    access code reaches this node. */}
 						{!contentReadable ? (
+							<>
 							<View
 								testID="registration-request-approval-content-unreadable"
 								style={[
@@ -749,6 +791,13 @@ export default function RegistrationRequestApprovalScreen() {
 									</ThemedText>
 								</View>
 							</View>
+							{/* D-07 + WR-02: the tampered state is still rejectable, and the engine refuses
+							    any reject whose checklist does not meet the gate. Without the checklist here
+							    a fresh tampered read has `checked = []` and Reject could never be enabled.
+							    Only the tampered state gets it; the checklist carries no payload content, so
+							    D-49's never-render posture is unaffected. */}
+							{rejectableUnread ? checklistElement : null}
+							</>
 						) : (
 						<>
 						<View
@@ -784,15 +833,7 @@ export default function RegistrationRequestApprovalScreen() {
 							))}
 						</View>
 
-						<VerificationChecklist
-							checked={checked}
-							onChange={(next, met) => {
-								setChecked(next);
-								setGateMet(met);
-							}}
-							readOnly={mode !== "pending"}
-							decidedAt={read.decidedAt}
-						/>
+						{checklistElement}
 						</>
 						)}
 
@@ -865,14 +906,15 @@ export default function RegistrationRequestApprovalScreen() {
 					    2026-08-07-custombutton-label-clips-instead-of-wrapping.md).
 					    A full-width column slot leaves ~276dp, comfortably fitting
 					    both EN and ES labels on one line without touching the shared
-					    component. */}
+					    component. The buttons use the default tall size: the thin size
+					    measured 95px = 36dp on Pixel_8 (UAT 62 gap 4 item 2), under the
+					    44dp floor, which hitSlop does not lift in uiautomator bounds. */}
 					<Footer>
 						<View testID="registration-request-approval-approve" style={localStyles.footerSlot}>
 							<CustomButton
 								title={t("registrationRequestApprovalApproveButton")}
 								icon="check"
 								backgroundColor={colors.success}
-								size="thin"
 								// WR-13: reads the STATE, not the ref — a ref mutation schedules no render, so
 								// the ref-based form never produced a visual disable while the ceremony ran.
 								disabled={
@@ -894,8 +936,8 @@ export default function RegistrationRequestApprovalScreen() {
 								title={t("registrationRequestApprovalRejectButton")}
 								icon="xmark"
 								backgroundColor={colors.error}
-								size="thin"
 								disabled={
+									!checklistGateMet ||
 									!canDecide ||
 									closedAsDuplicate ||
 									(thresholdAboveOne && !task) ||
@@ -912,7 +954,16 @@ export default function RegistrationRequestApprovalScreen() {
 			) : null}
 
 			{mode === "pending" && showRejectCard && read ? (
+				// Under forced edge-to-edge (targetSdk 35) adjustResize is inert: the shell pads by the IME
+				// height, and the IME already covers the gesture bar, so adding insets.bottom too would push
+				// the card up by a phantom gap.
+				<View
+					testID="registration-request-approval-reject-card-host"
+					style={{ paddingBottom: keyboardInset > 0 ? 0 : insets.bottom }}
+				>
 				<RejectReasonCard
+					decisionGateMet={checklistGateMet && canDecide}
+					errorMessage={errorMessage}
 					requesterName={registrationRequestDisplayName({
 						requestId,
 						lastName: read.payload.public?.lastName,
@@ -922,8 +973,9 @@ export default function RegistrationRequestApprovalScreen() {
 					onConfirm={handleReject}
 					onDismiss={() => setShowRejectCard(false)}
 				/>
+				</View>
 			) : null}
-		</View>
+		</KeyboardAvoidingScreen>
 	);
 }
 

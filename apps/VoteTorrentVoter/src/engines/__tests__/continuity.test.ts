@@ -163,6 +163,29 @@ describe('resolveRegistrationCodeAvailability (D-45)', () => {
 		expect(await getDeviceIdentityKeyState()).toBe('absent');
 	});
 
+	test('unavailable: holder key undefined logs exactly one fixed-string warn (T-62-51-01) and the catch-path warn stays distinct', async () => {
+		const association = {
+			getAssociationsByDeviceKey: jest.fn(async () => [{registrantId: 'R1', deviceKey: P256_PUB}]),
+			getRegistrationCodeHolderKey: jest.fn(async () => undefined),
+			deriveRegistrationCode: jest.fn(),
+		};
+		const registration = {getRegistrant: jest.fn(async () => ({id: 'R1', authorityId: AUTHORITY_ID, status: 'a'}))};
+		const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const result = await resolveRegistrationCodeAvailability(makeContinuityDeps({association, registration}));
+			expect(result).toEqual({kind: 'unavailable'});
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0]).toEqual(['continuity: registration code holder key not found']);
+
+			warn.mockClear();
+			const failing = {getAssociationsByDeviceKey: jest.fn(async () => { throw new Error('boom'); })};
+			expect(await resolveRegistrationCodeAvailability(makeContinuityDeps({association: failing}))).toEqual({kind: 'unavailable'});
+			expect(warn.mock.calls[0]![0]).toBe('continuity: code availability read failed');
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	test('not-registered: a suspended (s) registrant is also not-registered', async () => {
 		const association = {
 			getAssociationsByDeviceKey: jest.fn(async () => [{registrantId: 'R1', deviceKey: P256_PUB}]),
@@ -589,6 +612,47 @@ describe('advanceReassociation', () => {
 
 		const result = await advanceReassociation(deps, 'Q', false);
 		expect(result).toEqual({kind: 'pending', answered: false});
+		expect(pollDecisions).toHaveBeenCalledTimes(1);
+	});
+
+	test('IN-02a: a re-delivered non-matching notice with an unmoved resume cursor ends the run as pending after two polls', async () => {
+		const pollDecisions = jest.fn(async () => [{requestId: 'someone-else', status: 'c', challengeNonce: 'N', cursor: 'R'}]);
+		const transports = makeTransports({
+			associationTransport: {submitRequest: jest.fn(), submitAttestation: jest.fn(), pollDecisions},
+		});
+		const deps = makeCeremonyDeps({transports});
+
+		const result = await advanceReassociation(deps, 'Q', false);
+		expect(result).toEqual({kind: 'pending', answered: false});
+		expect(pollDecisions).toHaveBeenCalledTimes(2);
+		expect(pollDecisions).toHaveBeenNthCalledWith(2, 'R');
+	});
+
+	test('IN-02b: a re-delivered challenge for our request is answered exactly once, then the run ends pending after two polls', async () => {
+		const pollDecisions = jest.fn(async () => [{requestId: 'Q', status: 'c', challengeNonce: 'N', cursor: 'R'}]);
+		const submitAttestation = jest.fn(async (_a: unknown, _k: unknown, _s: unknown) => undefined);
+		const produce = jest.fn(async () => ({publicKey: P256_PUB, deviceId: 'd', attestationTime: 1, certificateChain: ['c']}));
+		const transports = makeTransports({
+			associationTransport: {submitRequest: jest.fn(), submitAttestation, pollDecisions},
+		});
+		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), produce, signDeviceKeyDigest: jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: '', signature: 'sig'}))}});
+
+		const result = await advanceReassociation(deps, 'Q', false);
+		expect(result).toEqual({kind: 'pending', answered: true});
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(submitAttestation).toHaveBeenCalledTimes(1);
+		expect(pollDecisions).toHaveBeenCalledTimes(2);
+	});
+
+	test('IN-02c: a re-delivered approval with an unmoved resume cursor still resolves approved', async () => {
+		const pollDecisions = jest.fn(async () => [{requestId: 'Q', status: 'a', cursor: 'R'}]);
+		const transports = makeTransports({
+			associationTransport: {submitRequest: jest.fn(), submitAttestation: jest.fn(), pollDecisions},
+		});
+		const deps = makeCeremonyDeps({transports});
+
+		const result = await advanceReassociation(deps, 'Q', false);
+		expect(result).toEqual({kind: 'approved'});
 		expect(pollDecisions).toHaveBeenCalledTimes(1);
 	});
 

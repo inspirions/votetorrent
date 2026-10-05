@@ -1,4 +1,4 @@
-import type { InviteStatus, KeyholderAcceptProvisioning } from './models.js';
+import type { InviteSlotResolution, InviteStatus, InviteType, KeyholderAcceptProvisioning } from './models.js';
 import type { SentOfficerInvite, SentAuthorityInvite } from '../authority/models.js';
 import type { SentKeyholderInvite } from '../election/models.js';
 
@@ -13,9 +13,24 @@ export interface IInvitationEngine {
 	getAuthorityInvite(id: string): Promise<InviteStatus<SentAuthorityInvite> | undefined>;
 	getKeyholderInvite(id: string): Promise<InviteStatus<SentKeyholderInvite> | undefined>;
 	/**
+	 * Resolve the invitee's share to its InviteSlot chain and report its state (live, answered,
+	 * no-longer-valid, not-found, ambiguous). A resend adds a row to the share's chain; the newest row
+	 * (the head) is the one to accept. See `InviteSlotResolution`.
+	 */
+	resolveInviteSlot(inviteKey: string, type: InviteType): Promise<InviteSlotResolution>;
+	/**
+	 * Resolve the InviteSlot an invitee holds the share for, by the share's public key and type
+	 * (D-05 pattern, as NetworkEngine.respondToInvite). Returns the head Cid only when
+	 * `resolveInviteSlot` reports `live`, otherwise undefined (fail closed). This is the ONLY way an
+	 * invitee obtains a Cid, because the Cid digests fields (ElectionId, InviteSignature,
+	 * SigningNonce) the share does not carry.
+	 */
+	resolveInviteSlotCid(inviteKey: string, type: InviteType): Promise<string | undefined>;
+	/**
 	 * Respond to an invitation (accept or decline).
 	 *
-	 * @param invitationId  - The InviteSlot CID being responded to.
+	 * @param invitationId  - The InviteSlot CID being responded to. Callers obtain it from
+	 *                        `resolveInviteSlotCid`.
 	 * @param accept        - true = accept, false = decline (signed authenticated "no", INV-05 / D-09).
 	 * @param invitePrivate - Optional: hex-encoded ephemeral secp256k1 private key from the pasted
 	 *                        invite share (D-06). When provided, the InviteSignature is produced under

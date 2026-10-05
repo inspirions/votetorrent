@@ -206,6 +206,7 @@ function makeSnapshot (overrides: Partial<KeyReleaseSnapshot> = {}): KeyReleaseS
     electionKey: makeElectionKeyRecord(),
     r4ParticipantUserIds: [...USERS].sort(),
     releases: [],
+    transcriptCommitments: DKG.keys[0]!.groupCommitments,
     ...overrides
   }
 }
@@ -251,10 +252,23 @@ describe('key-release: evaluateKeyRelease (D-14, D-17)', () => {
       expect(ev.status.phase).to.equal('election-key-inconsistent')
     })
 
-    it('groupCommitments[0] !== jointPublicKey gives election-key-inconsistent', () => {
+    it('transcript commitments[0] !== jointPublicKey gives election-key-inconsistent', () => {
       const badCommitments = [`02${'11'.repeat(32)}`, ...DKG.keys[0]!.groupCommitments.slice(1)]
-      const ev = evaluateKeyRelease(makeSnapshot({ electionKey: makeElectionKeyRecord({ groupCommitments: badCommitments }) }))
+      const ev = evaluateKeyRelease(makeSnapshot({ transcriptCommitments: badCommitments }))
       expect(ev.status.phase).to.equal('election-key-inconsistent')
+    })
+
+    it('62-34: transcriptCommitments null (no derivable transcript) gives election-key-inconsistent', () => {
+      const ev = evaluateKeyRelease(makeSnapshot({ transcriptCommitments: null }))
+      expect(ev.status.phase).to.equal('election-key-inconsistent')
+    })
+
+    it('62-34: junk electionKey.groupCommitments with a correct transcript validates shares against the transcript', () => {
+      const junk = [`02${'11'.repeat(32)}`, `02${'22'.repeat(32)}`]
+      const rows = USERS.slice(0, THRESHOLD).map((u) => honestRow(u))
+      const ev = evaluateKeyRelease(makeSnapshot({ electionKey: makeElectionKeyRecord({ groupCommitments: junk }), releases: rows }))
+      expect(ev.status.phase).to.equal('reconstructable')
+      expect(ev.status.rejectedReleases).to.deep.equal([])
     })
 
     it('a consistent key with zero releases and now < releasingKeysAt gives before-release-window, awaiting all participants', () => {

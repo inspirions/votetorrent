@@ -33,8 +33,9 @@ export type RootStackParamList = {
 	ProposedAdministration: { authorityId: string };
 	OfficerDetails: { officer: Officer; userName?: string; authority: Authority };
 	// Phase 8 plan 08-03 — Administrator + Authority invitation routes (D-08, D-09)
-	AdministratorInvitation: { mode: "send" | "accept"; invitationId?: string; authority?: Authority };
-	AuthorityInvitation: { mode: "send" | "accept"; invitationId?: string };
+	AcceptInvitation: undefined;
+	AdministratorInvitation: { mode: "send" | "accept"; initialShare?: string; authority?: Authority };
+	AuthorityInvitation: { mode: "send" | "accept"; initialShare?: string };
 	EditOfficer: {
 		authority: Authority;
 		officerId?: string;
@@ -50,7 +51,7 @@ export type RootStackParamList = {
 	// Phase 10 plan 10-02 (KHUI-01/02; D-05, D-06) — keyholder detail + invitation routes
 	Keyholder: { keyholder: InviteStatus<SentKeyholderInvite>; electionEngine: IElectionEngine };
 	// 21-11 (INV-03): extended with electionEngine + keyholder so send mode can call inviteKeyholder
-	KeyholderInvitation: { mode: "send" | "accept"; invitationId?: string; electionEngine?: IElectionEngine; keyholder?: InviteStatus<SentKeyholderInvite> };
+	KeyholderInvitation: { mode: "send" | "accept"; initialShare?: string; electionEngine?: IElectionEngine; keyholder?: InviteStatus<SentKeyholderInvite> };
 	SignatureTask: { task: SignatureTask };
 	// Phase 7 scaffold routes (07-05; renamed by 07-08) — standalone screens per D-09; real impls land in Phases 8–10
 	EditElection: { taskId?: string };

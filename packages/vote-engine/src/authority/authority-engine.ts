@@ -18,6 +18,7 @@ import { Temporal } from 'temporal-polyfill';
 import { SigningEngine } from '../signing/signing-engine.js';
 import { adminSigningKeyValidity } from '../signing/signer-validity.js';
 import { allocateTid } from '../database/tid-allocator.js';
+import { readInviteChain } from '../invite/read-invite-chain.js';
 import { verifySig, verifySigP256 } from '../database/initialize.js';
 import {
 	adminSignatureTaskExtensionInserter,
@@ -84,6 +85,9 @@ import {
 	AuthorityProposeAdminBuilder,
 	AuthoritySaveInviteWithSigningBuilder,
 } from './builders/index.js';
+
+/** Stable code on the refusal of cancelling or re-sending an answered invitation; the app maps it by code, never by message. */
+const INVITE_ALREADY_ANSWERED = 'invite-already-answered';
 
 /**
  * 57-01 (D-02): one entry in the admin roster covered by the 'rad' digest.
@@ -1298,23 +1302,26 @@ export class AuthorityEngine implements IAuthorityEngine {
 	// ---- SURF-03: pending-invite read + cancel/resend (non-signing, D-05/06/07) ----
 
 	/**
-	 * SURF-03 read surface: return the Cids of pending officer-invite InviteSlots
-	 * (Type = 'of') for this authority's signing scope, filtered to drop any slot
-	 * that has been responded to (InviteResult) OR cancelled (InviteCancellation).
+	 * SURF-03 read surface: return the Cids of pending officer-invites
+	 * (Type = 'of') for this authority's signing scope. One entry per live
+	 * invitation: the chain head (the newest copy). An invitation whose chain
+	 * is answered, withdrawn, expired, backstop-closed or ambiguous is not
+	 * listed (CR-01, 62-REVIEW.md).
 	 *
-	 * The cancellation filter is the second `NOT EXISTS` clause appended to the
-	 * existing `getPendingOfficerInvites` template (invitation-engine.ts:35-38):
-	 * a slot with a matching InviteCancellation marker drops off the list while
-	 * the append-only marker — and the slot itself — persist for audit (D-06).
+	 * The per-row NOT EXISTS clauses (InviteResult / InviteCancellation) are only
+	 * a prefilter; the decision is the shared chain rule (readInviteChain) applied
+	 * to each candidate's chain, so the officer-side list agrees with what the
+	 * invitee can actually accept.
 	 *
 	 * Scoped to this authority via the AdminSigning join used by
 	 * getAuthorityInvites (scope 'rad' = officer-invite admin approval).
 	 */
 	async getPendingInviteCids(): Promise<string[]> {
 		try {
-			const cids: string[] = [];
+			const candidates: Array<{ inviteKey: string; nonce: string }> = [];
+			const seen = new Set<string>();
 			for await (const row of this.ctx.db.eval(
-				`select IS_.Cid from InviteSlot IS_
+				`select IS_.Cid, IS_.InviteKey, IS_.SigningNonce from InviteSlot IS_
 					join AdminSigning ADS on IS_.SigningNonce = ADS.Nonce
 				where IS_.Type = 'of'
 					and ADS.AuthorityId = :id
@@ -1322,7 +1329,17 @@ export class AuthorityEngine implements IAuthorityEngine {
 					and not exists (select 1 from InviteCancellation C where C.SlotCid = IS_.Cid)`,
 				{ id: this.authority.id },
 			)) {
-				cids.push(row.Cid as string);
+				const inviteKey = row.InviteKey as string;
+				const nonce = row.SigningNonce as string;
+				const groupKey = `${inviteKey}|${nonce}`;
+				if (seen.has(groupKey)) continue;
+				seen.add(groupKey);
+				candidates.push({ inviteKey, nonce });
+			}
+			const cids: string[] = [];
+			for (const c of candidates) {
+				const resolution = await readInviteChain(this.ctx.db, c.inviteKey, 'of', nowCanonicalDatetime(), c.nonce);
+				if (resolution.status === 'live' && !cids.includes(resolution.cid)) cids.push(resolution.cid);
 			}
 			return cids;
 		} catch (err) {
@@ -1331,11 +1348,38 @@ export class AuthorityEngine implements IAuthorityEngine {
 	}
 
 	/**
-	 * SURF-03 (D-05/D-06): cancel a pending invitation by inserting an append-only
-	 * InviteCancellation marker keyed by the InviteSlot Cid. NON-signing: the
-	 * context envelope carries only Tid + now. The InviteSlot is never mutated
-	 * (InviteSlot is InsertOnly); the slot simply drops off getPendingInviteCids
-	 * on the next read because of the InviteCancellation NOT EXISTS filter.
+	 * Refuse (before any write) to withdraw or re-send an invitation that has
+	 * already been answered. Only 'answered' is refused: cancelling an
+	 * already-withdrawn chain stays an idempotent no-op, a resend after a cancel
+	 * stays allowed, and an ambiguous chain is safe to withdraw (CR-01).
+	 */
+	private async assertChainUnanswered(slot: { InviteKey: string; Type: string; SigningNonce: string }): Promise<void> {
+		const chain = await readInviteChain(this.ctx.db, slot.InviteKey, slot.Type, nowCanonicalDatetime(), slot.SigningNonce);
+		if (chain.status === 'answered') {
+			throw Object.assign(
+				new Error('This invitation has already been answered, so it can no longer be withdrawn or re-sent'),
+				{ code: INVITE_ALREADY_ANSWERED },
+			);
+		}
+	}
+
+	/**
+	 * SURF-03 (D-05/D-06): cancel a pending invitation by inserting append-only
+	 * InviteCancellation markers. NON-signing: the context envelope carries only
+	 * Tid + now. InviteSlot rows are never mutated (InsertOnly).
+	 *
+	 * A share is ONE invitation, so a withdrawal of ANY row must close the
+	 * whole share: this cancels every row of the chain (same InviteKey, Type and
+	 * SigningNonce) in one BEGIN/COMMIT. Cancellation and ResendSalt timestamps
+	 * are one-second precision and cancellation Tids are not persisted, so the
+	 * resolver cannot reliably order a cancel against a resend; the write side
+	 * cancels the whole chain instead (CR-02, 62-REVIEW.md). A resend issued
+	 * AFTER the cancel is a fresh uncancelled head, so re-issue still works.
+	 * Rows already cancelled are skipped (idempotent).
+	 *
+	 * Refuses an invitation that has already been answered (accepted or
+	 * declined) with an Error whose `code` is 'invite-already-answered', before
+	 * any write (CR-01, 62-REVIEW.md).
 	 *
 	 * Throws when the slot does not exist (the marker's SlotExists CHECK also
 	 * enforces this at the schema boundary — belt and suspenders).
@@ -1343,20 +1387,58 @@ export class AuthorityEngine implements IAuthorityEngine {
 	async cancelInvite(slotCid: string): Promise<void> {
 		try {
 			const slot = await this.ctx.db
-				.prepare('select Cid from InviteSlot where Cid = :slotCid')
+				.prepare('select Cid, InviteKey, Type, SigningNonce from InviteSlot where Cid = :slotCid')
 				.get({ slotCid });
 			if (!slot) {
 				throw new Error(`InviteSlot not found: ${slotCid}`);
 			}
+			await this.assertChainUnanswered({
+				InviteKey: slot.InviteKey as string,
+				Type: slot.Type as string,
+				SigningNonce: slot.SigningNonce as string,
+			});
+			// The chain: two-equality read, SigningNonce filtered in TypeScript so an
+			// unrelated invite that shares a key is never cancelled.
+			const chain: string[] = [];
+			for await (const row of this.ctx.db.eval(
+				'select Cid, SigningNonce from InviteSlot where InviteKey = :inviteKey and Type = :slotType',
+				{ inviteKey: slot.InviteKey as string, slotType: slot.Type as string },
+			)) {
+				if (row.SigningNonce === slot.SigningNonce) chain.push(row.Cid as string);
+			}
+			const toCancel: string[] = [];
+			for (const cid of chain) {
+				const marker = await this.ctx.db
+					.prepare('select 1 as x from InviteCancellation where SlotCid = :slotCid')
+					.get({ slotCid: cid });
+				if (!marker) toCancel.push(cid);
+			}
+			if (toCancel.length === 0) {
+				return;
+			}
 			// Allocate to a local first, then interpolate (the site sits inside a
 			// `with context` string, not a bound param).
 			const tid = await allocateTid(this.ctx.db, 'authority');
-			await this.ctx.db.exec(
-				`insert into InviteCancellation (SlotCid, CancelledAt)
-					with context Tid = ${tid}, now = :now
-				values (:slotCid, :now)`,
-				{ slotCid, now: nowCanonicalDatetime() },
-			);
+			const now = nowCanonicalDatetime();
+			await this.ctx.db.exec('BEGIN');
+			try {
+				for (const cid of toCancel) {
+					await this.ctx.db.exec(
+						`insert into InviteCancellation (SlotCid, CancelledAt)
+							with context Tid = ${tid}, now = :now
+						values (:slotCid, :now)`,
+						{ slotCid: cid, now },
+					);
+				}
+				await this.ctx.db.exec('COMMIT');
+			} catch (innerErr) {
+				try {
+					await this.ctx.db.exec('ROLLBACK');
+				} catch {
+					// already rolled back by the failed statement — the original error is what matters.
+				}
+				throw innerErr;
+			}
 		} catch (err) {
 			this.rethrow(err, 'cancelInvite');
 		}
@@ -1369,8 +1451,10 @@ export class AuthorityEngine implements IAuthorityEngine {
 	 * no SigningEngine.sign). A fresh, unique Cid is derived by Digesting the
 	 * original fields together with the resend timestamp + a per-process Tid salt
 	 * (so the new row never PK-collides with the original). No marker links
-	 * old→new and there is no auto-supersede — both old and new may legitimately
-	 * appear in the pending list. Returns the new slot's Cid.
+	 * old→new and there is no auto-supersede; the pending list shows only the
+	 * newest copy. Refuses an invitation that has already been answered with an
+	 * Error whose `code` is 'invite-already-answered', before any write (CR-01).
+	 * Returns the new slot's Cid.
 	 *
 	 * D-03 Option B (Phase 36): the resend salt is persisted as a real
 	 * `InviteSlot.ResendSalt` column (not just fed into the Digest arg list) so
@@ -1390,6 +1474,11 @@ export class AuthorityEngine implements IAuthorityEngine {
 			if (!orig) {
 				throw new Error(`InviteSlot not found: ${slotCid}`);
 			}
+			await this.assertChainUnanswered({
+				InviteKey: orig.InviteKey as string,
+				Type: orig.Type as string,
+				SigningNonce: orig.SigningNonce as string,
+			});
 			const tid = await allocateTid(this.ctx.db, 'authority');
 			const now = nowCanonicalDatetime();
 			const resendSalt = `resend|${tid}|${now}`;
@@ -1495,7 +1584,11 @@ export class AuthorityEngine implements IAuthorityEngine {
 		} else if (err instanceof MisuseError) {
 			throw new Error(`API misuse: ${err.message}`);
 		} else if (err instanceof Error) {
-			throw new Error(`AuthorityEngine.${method}: ${err.message}`);
+			const wrapped = new Error(`AuthorityEngine.${method}: ${err.message}`);
+			// The app maps engine refusals by code, never by message text.
+			const code = (err as { code?: unknown }).code;
+			if (typeof code === 'string') Object.assign(wrapped, { code });
+			throw wrapped;
 		} else {
 			throw new Error(`AuthorityEngine.${method}: unknown error: ${String(err)}`);
 		}

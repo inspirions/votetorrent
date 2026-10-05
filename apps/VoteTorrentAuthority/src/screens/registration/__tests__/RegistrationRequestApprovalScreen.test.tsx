@@ -195,6 +195,10 @@ jest.mock("react-i18next", () => ({
 }));
 
 jest.mock("@react-navigation/native", () => ({
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		require("react").useEffect(() => cb(), [cb]);
+	},
 	// Distinct sentinel values for every color token so a color assertion can
 	// never pass by accidental equality between two tokens.
 	dark: false,
@@ -234,7 +238,7 @@ jest.mock("../../../engines/device-signer", () => ({
 }));
 
 jest.mock("../../../hooks/useCurrentOfficerScopes", () => ({
-	useCurrentOfficerScopes: (_authorityId: string) => ({ scopes: mockScopes, loading: false }),
+	useCurrentOfficerScopes: (_authorityId: string) => ({ scopes: mockScopes, loading: false, refresh: () => undefined }),
 }));
 
 jest.mock("../../../providers/SettingsProvider", () => ({
@@ -498,9 +502,11 @@ describe("RegistrationRequestApprovalScreen — Group A (render order, D-03)", (
 // ---------------------------------------------------------------------------
 
 describe("RegistrationRequestApprovalScreen — Group B (D-07 gate, accept ceremony)", () => {
-	it("5. at mount Approve is disabled and Reject is not", async () => {
+	it("5. at mount Approve and Reject are both disabled (D-07: Reject mirrors the engine's checklist gate)", async () => {
 		const tr = await renderScreen();
 		expect(isDisabled(tr, "registration-request-approval-approve")).toBe(true);
+		expect(isDisabled(tr, "registration-request-approval-reject")).toBe(true);
+		press(tr, "verification-checklist-toggle-id");
 		expect(isDisabled(tr, "registration-request-approval-reject")).toBe(false);
 	});
 
@@ -685,6 +691,7 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 
 	it("13. a non-empty reason enables Confirm; confirming calls rejectRegistrationRequest once with the TRIMMED reason", async () => {
 		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
 		press(tr, "registration-request-approval-reject");
 
 		const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
@@ -704,6 +711,7 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 
 	it("14. the no-sign discipline: getSignatureDigest is called zero times on reject, and completeSignature carries the blank triple with no sign/decision", async () => {
 		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
 		press(tr, "registration-request-approval-reject");
 
 		const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
@@ -733,6 +741,7 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 		mockCompleteSignature.mockRejectedValueOnce(new Error("task close failed"));
 
 		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
 		press(tr, "registration-request-approval-reject");
 		const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
 		renderer.act(() => {
@@ -755,6 +764,7 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 		mockRejectRegistrationRequest.mockRejectedValueOnce(new Error("rejection failed"));
 
 		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
 		press(tr, "registration-request-approval-reject");
 		const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
 		renderer.act(() => {
@@ -763,8 +773,73 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 		await pressAsync(tr, "reject-reason-confirm");
 
 		expect(mockCompleteSignature).not.toHaveBeenCalled();
-		expect(exists(tr, "registration-request-approval-error")).toBe(true);
+		expect(exists(tr, "reject-reason-error")).toBe(true);
 		expect(mockGoBack).not.toHaveBeenCalled();
+	});
+
+	it("15b. (D-07) with the card open, unticking the checklist disables Confirm and shows the gate hint; re-ticking restores it", async () => {
+		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
+		press(tr, "registration-request-approval-reject");
+		const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
+		renderer.act(() => {
+			input.props.onChangeText("dup");
+		});
+		expect(isDisabled(tr, "reject-reason-confirm")).toBe(false);
+		expect(exists(tr, "reject-reason-gate-hint")).toBe(false);
+		press(tr, "verification-checklist-toggle-id");
+		expect(isDisabled(tr, "reject-reason-confirm")).toBe(true);
+		expect(textOf(tr, "reject-reason-gate-hint")).toBe("registrationRequestRejectChecklistRequired");
+		press(tr, "verification-checklist-toggle-id");
+		expect(isDisabled(tr, "reject-reason-confirm")).toBe(false);
+	});
+
+	it("15c. (D-07) an ungated confirm invoked directly sets the checklist-required copy, rethrows, and spends no signer or engine call", async () => {
+		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
+		press(tr, "registration-request-approval-reject");
+		press(tr, "verification-checklist-toggle-id");
+		// Read the handler AFTER the untick so it closes over the unmet checklist.
+		const onConfirm = tr.root.findAll((n) => typeof n.props.onConfirm === "function" && "decisionGateMet" in n.props)[0].props.onConfirm;
+		let thrown: unknown;
+		await renderer.act(async () => {
+			try {
+				await onConfirm("dup");
+			} catch (e) {
+				thrown = e;
+			}
+		});
+		expect(thrown).toBeInstanceOf(Error);
+		expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+		expect(mockRejectRegistrationRequest).not.toHaveBeenCalled();
+		expect(jsonSubtreeText(tr, "reject-reason-error")).toContain("registrationRequestRejectChecklistRequired");
+	});
+
+	it("15d. (T-62-52-01) a non-signing reject failure renders the fixed failed copy, never the engine text", async () => {
+		mockRejectRegistrationRequest.mockRejectedValueOnce(
+			new Error("RegistrationEngine.rejectRegistrationRequest: decision.checklist does not satisfy the D-07 gate (req-1)")
+		);
+		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
+		press(tr, "registration-request-approval-reject");
+		const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
+		renderer.act(() => {
+			input.props.onChangeText("dup");
+		});
+		await pressAsync(tr, "reject-reason-confirm");
+		const shown = jsonSubtreeText(tr, "reject-reason-error");
+		expect(shown).toContain("registrationRequestRejectFailed");
+		expect(shown).not.toContain("RegistrationEngine");
+		expect(shown).not.toContain("D-07");
+	});
+
+	it("15e. the reject card host pads the bottom by the safe-area inset", async () => {
+		const tr = await renderScreen();
+		press(tr, "verification-checklist-toggle-id");
+		press(tr, "registration-request-approval-reject");
+		const host = tr.root.findByProps({ testID: "registration-request-approval-reject-card-host" });
+		const style = Array.isArray(host.props.style) ? Object.assign({}, ...host.props.style.flat(5)) : host.props.style;
+		expect(typeof style.paddingBottom).toBe("number");
 	});
 
 	it("15. dismiss restores the footer and still fires zero engine calls", async () => {

@@ -72,7 +72,7 @@ export {
 	TABLES_READ as ELECTIONS_TABLES_READ,
 } from './elections.js';
 
-export { readBallots, readQuestions, countBallotSigningTasks, TABLES_READ as BALLOTS_TABLES_READ } from './ballots.js';
+export { readBallots, readQuestions, parseOptionRange, countBallotSigningTasks, TABLES_READ as BALLOTS_TABLES_READ } from './ballots.js';
 
 export {
 	ROSTER_PAGE_SIZE,

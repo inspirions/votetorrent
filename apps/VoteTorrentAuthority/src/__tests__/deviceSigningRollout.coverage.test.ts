@@ -12,13 +12,13 @@
  * Reconciliation this test encodes (so a future reader does not conclude the rollout is short):
  *   - 27 non-test files under `src` reference `device-signer` in some form.
  *   - 25 of those actually INVOKE `createDeviceSigner(` (a call expression, not a comment) —
- *     62-11's `screens/ballots/CreateBallotScreen.tsx` (the lazy ballot-submit signer), 62-23's
+ *     62-11's lazy ballot-submit signer, now `screens/ballots/EditBallotScreen.tsx` (moved there from CreateBallotScreen by 62-55: the persisted ballot is where submit lives; inventory unchanged at 25), 62-23's
  *     `screens/networks/components/FoundingBundleExportCard.tsx` (the founding-bundle export
  *     signer), and 62-25's `screens/registration/BulkImportSyncScreen.tsx` (the registration
  *     bridge-URL save action) are all among them.
  *   - 23 of the 25 route through `useDeviceSigningErrorHandler` (8 from 49-11, 9 from 49-12,
  *     1 from 50-15's `DashboardSignInCodeScreen.tsx` — the CR-04 presence-proof gate, 1 from
- *     62-11's `screens/ballots/CreateBallotScreen.tsx`, 1 from 62-23's
+ *     62-11's ballot-submit signer (now `screens/ballots/EditBallotScreen.tsx` after the 62-55 move; routed count unchanged at 23), 1 from 62-23's
  *     `screens/networks/components/FoundingBundleExportCard.tsx`, and 1 from 62-25's
  *     `screens/registration/BulkImportSyncScreen.tsx`), and 2 from 62-27
  *     (`screens/registration/AssociationRequestApprovalScreen.tsx`, the device-change review

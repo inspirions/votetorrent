@@ -3,24 +3,26 @@ import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { MisuseError, QuereusError } from '@quereus/quereus'
 import type { EngineContext } from '../types.js'
-import { digestToBytes, inviteResultSignedBytes, nowCanonicalDatetime, toCanonicalDatetime, verifyAdHocInviteSignature } from '../utils.js'
+import { digestToBytes, fromCanonicalDatetime, inviteResultSignedBytes, nowCanonicalDatetime, toCanonicalDatetime, verifyAdHocInviteSignature } from '../utils.js'
 import { allocateTid } from '../database/tid-allocator.js'
+import { readInviteChain } from './read-invite-chain.js'
 import type {
   IInvitationEngine,
+  InviteSlotResolution,
   InviteStatus,
   SentOfficerInvite,
   SentAuthorityInvite,
   SentKeyholderInvite,
   KeyholderAcceptProvisioning,
+  InviteType,
 } from '@votetorrent/vote-core'
 
 /**
  * Real InvitationEngine — Phase 15 (D-08 / SWAP-04).
  *
  * Reads InviteSlot and InviteResult rows from the shared EngineContext
- * database. The write-side (`respondToInvite`) is BLOCKED — it requires the
- * full secp256k1 invite-signing pipeline (D-08) and will be implemented in a
- * future phase.
+ * database. The write-side (`respondToInvite`) writes the local
+ * InviteResult under the secp256k1 invite-signing pipeline (D-08).
  *
  * title/scopes storage gap (Q4 option 3): InviteSlot stores only `Name`.
  * `OfficerInit.title` and `.scopes` are required fields on the TypeScript type
@@ -30,6 +32,32 @@ import type {
  */
 export class InvitationEngine implements IInvitationEngine {
   constructor (private readonly ctx: EngineContext) {}
+
+  /**
+   * Resolve an invitee's share to its InviteSlot chain and report its state. A resend inserts a second
+   * InviteSlot with the same InviteKey and Type, so the share maps to a CHAIN of rows; the newest row
+   * (the head) is the one to accept and the head decides liveness (a cancelled or expired head closes
+   * the share, with no fall-back to an older row). A non-head cancellation strictly later than the
+   * head's resend time also closes it (backstop for markers not written by
+   * AuthorityEngine.cancelInvite). See `InviteSlotResolution` for the precedence rules and CR-01 /
+   * CR-02 in 62-REVIEW.md for the reasoning.
+   */
+  async resolveInviteSlot (inviteKey: string, type: InviteType): Promise<InviteSlotResolution> {
+    try {
+      return await readInviteChain(this.ctx.db, inviteKey, type, nowCanonicalDatetime())
+    } catch (err) {
+      this.rethrow(err, 'resolveInviteSlot')
+    }
+  }
+
+  /**
+   * Resolve the InviteSlot Cid for an invitee's share by (InviteKey, Type): the chain head's Cid only
+   * when the share is live, otherwise undefined (fail closed).
+   */
+  async resolveInviteSlotCid (inviteKey: string, type: InviteType): Promise<string | undefined> {
+    const resolution = await this.resolveInviteSlot(inviteKey, type)
+    return resolution.status === 'live' ? resolution.cid : undefined
+  }
 
   /**
    * Return all pending officer InviteSlot rows (Type = 'of') that have no
@@ -232,6 +260,10 @@ export class InvitationEngine implements IInvitationEngine {
    *   — noble v2 defaults (prehash:true); NEVER { prehash: false }
    *   where digestToken = digest for accept, 'null' for decline
    *
+   * CR-01 / CR-02 (62-REVIEW.md): the slot must be the LIVE HEAD of its invitation's resend
+   * chain; a cancelled, expired, superseded or already-answered slot is refused before any
+   * signing prompt and before any write.
+   *
    * The device user's private key MUST NOT enter this method (T-21-04-05).
    * Only the ephemeral one-time invite key (from D-06 paste) is permitted.
    *
@@ -270,7 +302,7 @@ export class InvitationEngine implements IInvitationEngine {
       // InviteSignature (of the InviteSlot itself) are read for the keyholder
       // accept-time User+Keyholder minting below (second-keyholder-invite-unique fix).
       const slotRow = await this.ctx.db
-        .prepare('SELECT Cid, InviteKey, Type, Name, ElectionId, InviteSignature FROM InviteSlot WHERE Cid = :slotCid')
+        .prepare('SELECT Cid, InviteKey, Type, Name, ElectionId, InviteSignature, SigningNonce FROM InviteSlot WHERE Cid = :slotCid')
         .get({ slotCid }) as {
           Cid: string
           InviteKey: string
@@ -278,10 +310,16 @@ export class InvitationEngine implements IInvitationEngine {
           Name: string
           ElectionId: string | null
           InviteSignature: string | null
+          SigningNonce: string
         } | undefined
       if (!slotRow) {
         throw new Error(`InviteSlot not found for Cid: ${slotCid}`)
       }
+
+      // CR-01 / CR-02 (62-REVIEW.md): the slot must be the LIVE HEAD of its invitation's resend
+      // chain. Checked here, before the keyholder provisioning is validated or signed and before
+      // any write, with the same rule resolveInviteSlot uses.
+      await this.assertSlotIsLiveHead(slotRow)
 
       // second-keyholder-invite-unique fix: an accepted keyholder ('k') invite mints a
       // NEW User (there is no existing identity for a name-only invitee pre-acceptance)
@@ -457,6 +495,11 @@ export class InvitationEngine implements IInvitationEngine {
       const tid = await allocateTid(this.ctx.db, 'user')
       await this.ctx.db.exec('BEGIN')
       try {
+        // A cancellation can land while the signing prompt was open: re-check first thing inside
+        // the transaction (the catch below rolls back). Residual: InviteResult rows replicated from
+        // another device are not re-validated against cancellation (P2P concern, tier-2 engine
+        // control, not schema).
+        await this.assertSlotIsLiveHead(slotRow)
         await this.ctx.db.exec(inviteResultSql, inviteResultParams)
 
           await this.ctx.db.exec(
@@ -547,6 +590,22 @@ export class InvitationEngine implements IInvitationEngine {
   }
 
   // ---------- helpers ----------
+
+  /** Throws a fixed, identifier-free message unless `slot` is the live head of its invitation's chain. */
+  private async assertSlotIsLiveHead (slot: { Cid: string, InviteKey: string, Type: string, SigningNonce: string }): Promise<void> {
+    const chain = await readInviteChain(this.ctx.db, slot.InviteKey, slot.Type, nowCanonicalDatetime(), slot.SigningNonce)
+    if (chain.status === 'live' && chain.cid === slot.Cid) return
+    switch (chain.status) {
+      case 'answered':
+        throw new Error('This invitation has already been answered')
+      case 'no-longer-valid':
+        throw new Error('This invitation was withdrawn or has expired')
+      case 'live':
+        throw new Error('This invitation was replaced by a newer copy')
+      default:
+        throw new Error('This invitation cannot be verified on this device')
+    }
+  }
 
   private rethrow (err: unknown, method: string): never {
     if (err instanceof QuereusError) {
