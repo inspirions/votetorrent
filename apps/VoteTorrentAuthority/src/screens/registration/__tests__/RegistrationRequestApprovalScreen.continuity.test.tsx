@@ -159,6 +159,10 @@ jest.mock("react-i18next", () => ({
 	initReactI18next: { type: "3rdParty", init: jest.fn() },
 }));
 jest.mock("@react-navigation/native", () => ({
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		require("react").useEffect(() => cb(), [cb]);
+	},
 	dark: false,
 	useTheme: () => ({
 		dark: false,
@@ -195,7 +199,7 @@ jest.mock("../../../engines/key-vault", () => ({
 	resolveAuthorityKeyVault: jest.fn(() => ({ __vault: true })),
 }));
 jest.mock("../../../hooks/useCurrentOfficerScopes", () => ({
-	useCurrentOfficerScopes: (_a: string) => ({ scopes: mockScopes, loading: false }),
+	useCurrentOfficerScopes: (_a: string) => ({ scopes: mockScopes, loading: false, refresh: () => undefined }),
 }));
 jest.mock("../../../providers/SettingsProvider", () => ({
 	useSettings: () => ({ showHelpIcons: false }),

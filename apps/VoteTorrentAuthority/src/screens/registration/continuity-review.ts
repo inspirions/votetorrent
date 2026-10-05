@@ -202,6 +202,15 @@ export function isClosedAsDuplicateError(e: unknown): boolean {
 	return hasNameAndCode(e) && e.name === 'RegistrationDuplicateError' && e.code === 'closed-as-duplicate';
 }
 
+/**
+ * The engine refused to decide a request whose requester signature cannot be verified
+ * (RequesterSignatureUnverifiableError, code 'requester-signature-unverifiable'). Fires before any
+ * officer signature. Structural like its siblings, so a rethrown/cloned error still matches.
+ */
+export function isRequesterSignatureUnverifiableError(e: unknown): boolean {
+	return hasNameAndCode(e) && e.name === 'RequesterSignatureUnverifiableError' && e.code === 'requester-signature-unverifiable';
+}
+
 export function isThresholdCoSignRefusal(e: unknown): boolean {
 	return (
 		hasNameAndCode(e) &&

@@ -302,4 +302,20 @@ describe('useCurrentOfficerScopes — D-10 / T-46-03', () => {
 
     errorSpy.mockRestore();
   });
+
+  it('H1: refresh() re-runs the officer lookup', async () => {
+    let refresh!: () => void;
+    function Host() {
+      refresh = useCurrentOfficerScopes('auth-1').refresh;
+      return null;
+    }
+    await renderer.act(async () => {
+      renderer.create(<Host />);
+    });
+    expect(mockGetAdminDetails).toHaveBeenCalledTimes(1);
+    await renderer.act(async () => {
+      refresh();
+    });
+    expect(mockGetAdminDetails).toHaveBeenCalledTimes(2);
+  });
 });

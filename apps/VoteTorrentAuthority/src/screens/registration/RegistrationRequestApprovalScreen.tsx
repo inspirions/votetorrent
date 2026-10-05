@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
-import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
+import { ExtendedTheme, useFocusEffect, useNavigation, useRoute, useTheme } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
@@ -43,6 +43,7 @@ import {
 	createLazyDeviceSign,
 	isClosedAsDuplicateError,
 	isRegistrationContentAccessError,
+	isRequesterSignatureUnverifiableError,
 	publishRegistrationDecisionAfterDecide,
 	registrationContentUnreadKey,
 } from "./continuity-review";
@@ -239,7 +240,14 @@ export default function RegistrationRequestApprovalScreen() {
 	const insets = useSafeAreaInsets();
 	const keyboardInset = useKeyboardInset();
 	const { getEngine, createPeerStagingTransports } = useApp();
-	const { scopes } = useCurrentOfficerScopes(authorityId);
+	const { scopes, refresh: refreshScopes } = useCurrentOfficerScopes(authorityId);
+	// UAT 62 gap 4 item 1: officer standing can change while this screen is backgrounded (for
+	// example after Replace Signing Key), so re-read it on every focus; canDecide never stays stale.
+	useFocusEffect(
+		React.useCallback(() => {
+			refreshScopes();
+		}, [refreshScopes])
+	);
 
 	useLayoutEffect(() => {
 		navigation.setOptions({ title: t("registrationRequestApprovalScreenTitle") });
@@ -510,6 +518,10 @@ export default function RegistrationRequestApprovalScreen() {
 				// code; its message (request id plus access code) is never rendered.
 				carryMessageRef.current = t(registrationContentUnreadKey(err.access) ?? "registrationContentUnreadable");
 				setReloadNonce((n) => n + 1);
+			} else if (isRequesterSignatureUnverifiableError(err)) {
+				// The engine refused before any signature was spent: the request itself is undecidable, so
+				// fixed copy with no retry invitation and never the engine text.
+				setErrorMessage(t("registrationRequestUnverifiable"));
 			} else {
 				const outcome = handleDeviceSigningError(err);
 				if (!outcome.handled) {
@@ -601,6 +613,9 @@ export default function RegistrationRequestApprovalScreen() {
 				setErrorMessage("");
 				setShowRejectCard(false);
 				setReloadNonce((n) => n + 1);
+			} else if (isRequesterSignatureUnverifiableError(err)) {
+				// 62-64 refusal: undecidable request, refused before any officer signature.
+				setErrorMessage(t("registrationRequestUnverifiable"));
 			} else {
 				const outcome = handleDeviceSigningError(err);
 				if (!outcome.handled) {
@@ -677,7 +692,8 @@ export default function RegistrationRequestApprovalScreen() {
 				{/* InlineError renders null for an empty message and carries no
 				    testID prop, so its absence is otherwise unassertable — the
 				    wrapping View is what makes presence/absence testable. */}
-				{errorMessage ? (
+				{/* One error surface at a time: while the reject card is open it shows the failure itself. */}
+				{errorMessage && !(mode === "pending" && showRejectCard && read) ? (
 					<View testID="registration-request-approval-error">
 						<InlineError message={errorMessage} />
 					</View>
@@ -890,14 +906,15 @@ export default function RegistrationRequestApprovalScreen() {
 					    2026-08-07-custombutton-label-clips-instead-of-wrapping.md).
 					    A full-width column slot leaves ~276dp, comfortably fitting
 					    both EN and ES labels on one line without touching the shared
-					    component. */}
+					    component. The buttons use the default tall size: the thin size
+					    measured 95px = 36dp on Pixel_8 (UAT 62 gap 4 item 2), under the
+					    44dp floor, which hitSlop does not lift in uiautomator bounds. */}
 					<Footer>
 						<View testID="registration-request-approval-approve" style={localStyles.footerSlot}>
 							<CustomButton
 								title={t("registrationRequestApprovalApproveButton")}
 								icon="check"
 								backgroundColor={colors.success}
-								size="thin"
 								// WR-13: reads the STATE, not the ref — a ref mutation schedules no render, so
 								// the ref-based form never produced a visual disable while the ceremony ran.
 								disabled={
@@ -919,7 +936,6 @@ export default function RegistrationRequestApprovalScreen() {
 								title={t("registrationRequestApprovalRejectButton")}
 								icon="xmark"
 								backgroundColor={colors.error}
-								size="thin"
 								disabled={
 									!checklistGateMet ||
 									!canDecide ||
@@ -946,7 +962,8 @@ export default function RegistrationRequestApprovalScreen() {
 					style={{ paddingBottom: keyboardInset > 0 ? 0 : insets.bottom }}
 				>
 				<RejectReasonCard
-					decisionGateMet={checklistGateMet}
+					decisionGateMet={checklistGateMet && canDecide}
+					errorMessage={errorMessage}
 					requesterName={registrationRequestDisplayName({
 						requestId,
 						lastName: read.payload.public?.lastName,

@@ -902,6 +902,7 @@ const resources = {
 			registrationRequestRejectKeepReviewingButton: 'Keep Reviewing',
 			registrationRequestRejectChecklistRequired: 'Complete the verification checklist before rejecting.',
 			registrationRequestRejectFailed: 'Could not record the rejection. Try again.',
+			registrationRequestUnverifiable: "This request's signature can't be verified, so it can't be approved or rejected here. No signature of yours was used.",
 			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			bridgeSourceBadgeLabel: 'Bridge Import',
 			bridgeSourceCalloutHeading: 'Submitted by an import bridge',
@@ -1958,6 +1959,7 @@ const resources = {
 			registrationRequestRejectKeepReviewingButton: 'Seguir Revisando',
 			registrationRequestRejectChecklistRequired: 'Completa la lista de verificación antes de rechazar.',
 			registrationRequestRejectFailed: 'No se pudo registrar el rechazo. Inténtalo de nuevo.',
+			registrationRequestUnverifiable: 'La firma de esta solicitud no se puede verificar, así que no se puede aprobar ni rechazar aquí. No se usó ninguna firma tuya.',
 			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			bridgeSourceBadgeLabel: 'Importación por Puente',
 			bridgeSourceCalloutHeading: 'Enviada por un puente de importación',

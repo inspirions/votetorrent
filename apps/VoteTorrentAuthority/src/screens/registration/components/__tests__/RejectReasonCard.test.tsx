@@ -395,4 +395,15 @@ describe('RejectReasonCard — D-06', () => {
     expect(tr.root.findAllByProps({ testID: `${PREFIX}-gate-hint` }).length).toBe(0);
     expect(isDisabled(tr, `${PREFIX}-confirm`)).toBe(false);
   });
+
+  it('RC1: errorMessage renders inside the card only when non-empty', () => {
+    const empty = renderCard();
+    expect(empty.tr.root.findAllByProps({ testID: `${PREFIX}-error` }).length).toBe(0);
+    const blank = renderCard({ errorMessage: '' });
+    expect(blank.tr.root.findAllByProps({ testID: `${PREFIX}-error` }).length).toBe(0);
+    const shown = renderCard({ errorMessage: 'Something failed' });
+    const card = shown.tr.root.findByProps({ testID: `${PREFIX}-card` });
+    expect(card.findAllByProps({ testID: `${PREFIX}-error` }).length).toBeGreaterThan(0);
+    expect(treeText(shown.tr)).toContain('Something failed');
+  });
 });

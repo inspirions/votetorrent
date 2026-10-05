@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { ThemedText } from "../../../components/ThemedText";
 import { CustomButton } from "../../../components/CustomButton";
 import { CustomTextInput } from "../../../components/CustomTextInput";
+import { InlineError } from "../../../components/InlineError";
 import { globalStyles } from "../../../theme/styles";
 
 /**
@@ -95,6 +96,12 @@ export interface RejectReasonCardProps {
 	 * `reject-reason-dismiss`.
 	 */
 	testIDPrefix?: string;
+	/**
+	 * Failure copy owned by the host, shown inside the card above the buttons so a failed
+	 * confirmation is visible next to the control just pressed (UAT 62 gap 4 item 1). The card
+	 * only displays what it is given; it never derives copy from a caught error.
+	 */
+	errorMessage?: string;
 }
 
 export function RejectReasonCard({
@@ -103,6 +110,7 @@ export function RejectReasonCard({
 	onDismiss,
 	decisionGateMet,
 	testIDPrefix = "reject-reason",
+	errorMessage,
 }: RejectReasonCardProps) {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
@@ -196,6 +204,11 @@ export function RejectReasonCard({
 				<ThemedText type="small" testID={`${testIDPrefix}-gate-hint`} style={{ color: colors.textSecondary }}>
 					{t("registrationRequestRejectChecklistRequired")}
 				</ThemedText>
+			) : null}
+			{errorMessage ? (
+				<View testID={`${testIDPrefix}-error`}>
+					<InlineError message={errorMessage} />
+				</View>
 			) : null}
 			<View style={localStyles.buttonRow}>
 				<View testID={`${testIDPrefix}-dismiss`} style={localStyles.buttonSlot}>

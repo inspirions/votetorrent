@@ -65,13 +65,17 @@ jest.mock("@react-navigation/native", () => ({
 		dark: false,
 		colors: new Proxy({}, { get: (_t, k) => `sentinel-${String(k)}` }),
 	}),
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		require("react").useEffect(() => cb(), [cb]);
+	},
 	useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn(), setOptions: jest.fn() }),
 	useRoute: () => ({ params: { requestId: "req-pending-1", authorityId: "auth-1" } }),
 }));
 jest.mock("../../../providers/AppProvider", () => ({ useApp: () => ({ getEngine: mockGetEngine }) }));
 jest.mock("../../../engines/device-signer", () => ({ createDeviceSigner: jest.fn() }));
 jest.mock("../../../hooks/useCurrentOfficerScopes", () => ({
-	useCurrentOfficerScopes: () => ({ scopes: ["vrg"], loading: false }),
+	useCurrentOfficerScopes: () => ({ scopes: ["vrg"], loading: false, refresh: () => undefined }),
 }));
 jest.mock("../../../providers/SettingsProvider", () => ({ useSettings: () => ({ showHelpIcons: false }) }));
 

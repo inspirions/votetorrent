@@ -195,6 +195,10 @@ jest.mock("react-i18next", () => ({
 }));
 
 jest.mock("@react-navigation/native", () => ({
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		require("react").useEffect(() => cb(), [cb]);
+	},
 	// Distinct sentinel values for every color token so a color assertion can
 	// never pass by accidental equality between two tokens.
 	dark: false,
@@ -234,7 +238,7 @@ jest.mock("../../../engines/device-signer", () => ({
 }));
 
 jest.mock("../../../hooks/useCurrentOfficerScopes", () => ({
-	useCurrentOfficerScopes: (_authorityId: string) => ({ scopes: mockScopes, loading: false }),
+	useCurrentOfficerScopes: (_authorityId: string) => ({ scopes: mockScopes, loading: false, refresh: () => undefined }),
 }));
 
 jest.mock("../../../providers/SettingsProvider", () => ({
@@ -769,7 +773,7 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 		await pressAsync(tr, "reject-reason-confirm");
 
 		expect(mockCompleteSignature).not.toHaveBeenCalled();
-		expect(exists(tr, "registration-request-approval-error")).toBe(true);
+		expect(exists(tr, "reject-reason-error")).toBe(true);
 		expect(mockGoBack).not.toHaveBeenCalled();
 	});
 
@@ -808,7 +812,7 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 		expect(thrown).toBeInstanceOf(Error);
 		expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
 		expect(mockRejectRegistrationRequest).not.toHaveBeenCalled();
-		expect(jsonSubtreeText(tr, "registration-request-approval-error")).toContain("registrationRequestRejectChecklistRequired");
+		expect(jsonSubtreeText(tr, "reject-reason-error")).toContain("registrationRequestRejectChecklistRequired");
 	});
 
 	it("15d. (T-62-52-01) a non-signing reject failure renders the fixed failed copy, never the engine text", async () => {
@@ -823,7 +827,7 @@ describe("RegistrationRequestApprovalScreen — Group C (D-06 reject gate, no-si
 			input.props.onChangeText("dup");
 		});
 		await pressAsync(tr, "reject-reason-confirm");
-		const shown = jsonSubtreeText(tr, "registration-request-approval-error");
+		const shown = jsonSubtreeText(tr, "reject-reason-error");
 		expect(shown).toContain("registrationRequestRejectFailed");
 		expect(shown).not.toContain("RegistrationEngine");
 		expect(shown).not.toContain("D-07");
