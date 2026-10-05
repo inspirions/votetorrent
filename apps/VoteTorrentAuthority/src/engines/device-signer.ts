@@ -33,6 +33,8 @@
  */
 
 import type { Signature } from '@votetorrent/vote-core'
+import { UserKeyType } from '@votetorrent/vote-core'
+import { verifySigP256 } from '@votetorrent/vote-engine/rn'
 import i18n from '../i18n'
 import { getDeviceUser, isRecoveryInProgress } from './device-user'
 // Type-only import — erased at compile time (isolatedModules requires this to be explicit), so
@@ -145,6 +147,17 @@ function assertNativeSigningAvailable(): NativeAttestationSpec {
  * why a cast, not an ambient declaration, is required under this app's `dom`-lib-free
  * `tsconfig.json`).
  */
+function base64urlFromDigestBytes(digest: Uint8Array): string {
+	// Unpadded base64url of the digest bytes: the `Digest()` output form `verifySigP256` expects.
+	return base64FromDigestBytes(digest).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function keyInvalidated(message: string): Error & { code: string } {
+	const err = new Error(message) as Error & { code: string }
+	err.code = 'KEY_INVALIDATED_REASSOCIATE'
+	return err
+}
+
 function base64FromDigestBytes(digest: Uint8Array): string {
 	let binary = ''
 	for (let i = 0; i < digest.length; i++) binary += String.fromCharCode(digest[i]!)
@@ -209,7 +222,23 @@ export async function createDeviceSigner (displayName: string): Promise<SignCall
 		throw err
 	}
 
+	// The hardware signer only produces P-256 signatures; any other recorded type cannot match it.
+	const recordedKeyIsP256 = user.activeKeys[0]?.type === UserKeyType.p256
+
+	/**
+	 * Deterministic desync detection (UAT 62 gap 2): every native signature is verified against the
+	 * recorded `signerKey` with the schema's own verifier before it reaches any engine write. A
+	 * mismatch is exactly the 49-14 Keystore/metadata desync (with or without the recovery marker)
+	 * and routes the officer to key replacement via KEY_INVALIDATED_REASSOCIATE. It never fires for
+	 * another party's signature (e.g. a requester's), which is why the old message-based
+	 * SignatureValid route was retired: Quereus CHECK messages carry no table name.
+	 */
 	return async (digest: Uint8Array): Promise<Signature> => {
+		if (!recordedKeyIsP256) {
+			throw keyInvalidated(
+				'device-signer: the recorded signer key is not a P-256 key, so it cannot match the hardware signing key. Re-run key recovery.',
+			)
+		}
 		const digestBase64 = base64FromDigestBytes(digest)
 
 		// Do NOT catch, wrap, or re-map native rejections here. A native rejection's typed `code`
@@ -223,6 +252,12 @@ export async function createDeviceSigner (displayName: string): Promise<SignCall
 			i18n.t('deviceSigningPromptSubtitle'),
 			i18n.t('deviceSigningPromptNegativeButton'),
 		)) as { signatureHex: string }
+
+		if (!verifySigP256(base64urlFromDigestBytes(digest), result.signatureHex, signerKey)) {
+			throw keyInvalidated(
+				'device-signer: the Keystore signing key does not match the recorded signer key. Re-run key recovery.',
+			)
+		}
 
 		return {
 			signerUserId: user.id,
