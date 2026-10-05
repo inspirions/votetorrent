@@ -183,7 +183,7 @@ export default function ElectionDetailsScreen() {
 							navigation.navigate("EditBallot", {
 								electionId: election.id,
 								electionTitle: election.title,
-								electionDate: formatDate(election.revisionDeadline),
+								electionDate: formatDate(election.date),
 								ballotId: ballots[0].id,
 								electionEngine,
 								readOnly: true,
@@ -323,7 +323,9 @@ export default function ElectionDetailsScreen() {
 						const cs = ballotConfirmationStates[ballot.id];
 						const statusLabel = cs?.confirmed
 							? t("statusConfirmed")
-							: t("statusProposed");
+							: cs?.locked
+								? t("statusAwaitingConfirmation")
+								: t("statusProposed");
 						return (
 							<InfoCard
 								key={ballot.id}
@@ -334,7 +336,7 @@ export default function ElectionDetailsScreen() {
 									navigation.navigate("EditBallot", {
 										electionId: election.id,
 										electionTitle: election.title,
-										electionDate: formatDate(election.revisionDeadline),
+										electionDate: formatDate(election.date),
 										ballotId: ballot.id,
 										electionEngine,
 									} as any)
@@ -354,7 +356,7 @@ export default function ElectionDetailsScreen() {
 								navigation.navigate("CreateBallot", {
 									electionId: election.id,
 									electionTitle: election.title,
-									electionDate: formatDate(election.revisionDeadline),
+									electionDate: formatDate(election.date),
 									electionEngine,
 								} as any)
 							}
