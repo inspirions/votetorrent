@@ -365,6 +365,155 @@ describe('EditBallotScreen — submit / withdraw on the persisted ballot (62-55)
   });
 });
 
+describe('EditBallotScreen — fails closed on an unknown confirmation state (CR-03, WR-03)', () => {
+  const noFooter = (tr: renderer.ReactTestRenderer) => {
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+  };
+
+  it('first read rejects: no Propose/Submit/Withdraw, mapped copy and Retry show, form disabled', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    jest.spyOn(engine, 'getBallotConfirmationState').mockRejectedValueOnce(new Error('boom-secret'));
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    noFooter(tr);
+    expect(treeContainsText(tr, 'ballotStateLoadFailed')).toBe(true);
+    expect(treeContainsText(tr, 'boom-secret')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-state-retry')).toBe(true);
+    // Locked-case parity: the add-question affordance is withdrawn.
+    expect(treeContainsText(tr, 'addQuestion')).toBe(false);
+    // Fixed string + error class name only, never the raw message.
+    expect(console.warn).toHaveBeenCalledWith('getBallotConfirmationState failed', 'Error');
+  });
+
+  it('Retry re-reads; an unlocked result restores Propose and Submit and clears the error', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    jest.spyOn(engine, 'getBallotConfirmationState').mockRejectedValueOnce(new Error('boom'));
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    noFooter(tr);
+    await press(tr, 'edit-ballot-state-retry');
+
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-state-retry')).toBe(false);
+    expect(treeContainsText(tr, 'ballotStateLoadFailed')).toBe(false);
+  });
+
+  it('a Retry that finds the ballot locked shows Withdraw only', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    await engine.submitBallotForConfirmation(BALLOT_ID);
+    jest.spyOn(engine, 'getBallotConfirmationState').mockRejectedValueOnce(new Error('boom'));
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    noFooter(tr);
+    await press(tr, 'edit-ballot-state-retry');
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
+  });
+
+  it('a successful first read followed by a failing re-focus read fails closed again', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { BallotDraftProvider } = require('../providers/BallotDraftProvider');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Screen = require('../EditBallotScreen').default;
+    const element = (
+      <BallotDraftProvider>
+        <Screen />
+      </BallotDraftProvider>
+    );
+    let tr!: renderer.ReactTestRenderer;
+    await renderer.act(async () => {
+      tr = renderer.create(element);
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+
+    // Re-focus: the effect-based useFocusEffect mock re-runs when the callback identity
+    // changes, which a new engine reference under the route provokes.
+    const { engine: engine2 } = newEngine();
+    await propose(engine2);
+    jest.spyOn(engine2, 'getBallotConfirmationState').mockRejectedValue(new Error('boom'));
+    mockCurrentElectionEngine = engine2;
+    await renderer.act(async () => {
+      tr.update(<BallotDraftProvider><Screen /></BallotDraftProvider>);
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+    noFooter(tr);
+    expect(hasTestID(tr, 'edit-ballot-state-retry')).toBe(true);
+  });
+
+  it('the refresh read after Submit rejecting fails closed (no Propose/Submit/Withdraw, Retry shows)', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen('Edit');
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+
+    jest.spyOn(engine, 'getBallotConfirmationState').mockRejectedValue(new Error('boom'));
+    await press(tr, 'edit-ballot-submit');
+
+    noFooter(tr);
+    expect(hasTestID(tr, 'edit-ballot-state-retry')).toBe(true);
+    expect(treeContainsText(tr, 'ballotStateLoadFailed')).toBe(true);
+  });
+
+  it('while the first read is pending the form is disabled and no footer renders', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    let release!: (v: { locked: boolean; confirmed: boolean }) => void;
+    jest
+      .spyOn(engine, 'getBallotConfirmationState')
+      .mockImplementationOnce(() => new Promise((res) => { release = res; }));
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    noFooter(tr);
+    expect(hasTestID(tr, 'edit-ballot-state-retry')).toBe(false);
+    expect(treeContainsText(tr, 'addQuestion')).toBe(false);
+
+    await renderer.act(async () => {
+      release({ locked: false, confirmed: false });
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+    expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
+  });
+
+  it('two synchronous Submit presses call submitBallotForConfirmation exactly once (WR-03 latch)', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    let finish!: () => void;
+    const submitSpy = jest
+      .spyOn(engine, 'submitBallotForConfirmation')
+      .mockImplementation(() => new Promise<void>((res) => { finish = res; }));
+    mockCurrentElectionEngine = engine;
+
+    const tr = await renderScreen('Edit');
+    const node = tr.root.findAllByProps({ testID: 'edit-ballot-submit' })[0];
+    await renderer.act(async () => {
+      node.props.onPress();
+      node.props.onPress();
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+    });
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    await renderer.act(async () => {
+      finish();
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+  });
+});
+
 describe('CreateBallotScreen — Propose only (62-55)', () => {
   it('renders Propose and no Submit for confirmation / Withdraw, even with a draft id present', async () => {
     const { engine } = newEngine();

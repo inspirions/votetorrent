@@ -565,6 +565,8 @@ const resources = {
 			ballotSubmitFailed: 'Could not submit the ballot for confirmation. Try again.',
 			ballotWithdrawFailed: 'Could not withdraw the ballot from confirmation. Try again.',
 			ballotProposeFailed: 'Could not save the ballot. Try again.',
+			ballotStateLoadFailed: "Couldn't check whether this ballot is out for confirmation, so editing is paused.",
+			ballotStateRetry: 'Try Again',
 			// Debug seed keys — debug-only affordance; never appears in release UI
 			debugSeedTasksTitle: 'Seed Pending Tasks (Debug)',
 			debugSeedTasksSuccess: 'Pending tasks seeded — check Tasks tab',
@@ -1616,6 +1618,8 @@ const resources = {
 			ballotSubmitFailed: 'No se pudo enviar la boleta para confirmación. Inténtalo de nuevo.',
 			ballotWithdrawFailed: 'No se pudo retirar la boleta de la confirmación. Inténtalo de nuevo.',
 			ballotProposeFailed: 'No se pudo guardar la boleta. Inténtalo de nuevo.',
+			ballotStateLoadFailed: 'No se pudo comprobar si esta boleta está en confirmación, así que la edición está en pausa.',
+			ballotStateRetry: 'Intentar de Nuevo',
 			// Debug seed keys — Spanish mirrors
 			debugSeedTasksTitle: 'Sembrar Tareas Pendientes (Debug)',
 			debugSeedTasksSuccess: 'Tareas pendientes sembradas — ver pestaña Tareas',
