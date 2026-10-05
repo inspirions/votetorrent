@@ -4,7 +4,9 @@
  * Why the slot Cid must be RESOLVED: the share carries {invitePrivate, inviteKey, expiration, type,
  * name}, but the slot Cid digests ElectionId, InviteSignature and SigningNonce, which the share does
  * not carry. The invitee therefore cannot recompute it; it is looked up engine-side by
- * (InviteKey, Type) via `IInvitationEngine.resolveInviteSlotCid`.
+ * (InviteKey, Type) via `IInvitationEngine.resolveInviteSlot`, which resolves a resent share to the
+ * live head of its resend chain (62-REVIEW.md CR-01) and reports a withdrawn or expired share as
+ * `no-longer-valid` instead of handing back a stale slot (CR-02).
  *
  * Cross-device precondition: the lookup only finds a slot whose InviteSlot row is present in this
  * device's database. Replication of that row to the invitee's strand is a separate (P2P) concern.
@@ -17,13 +19,14 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js';
 import type { IInvitationEngine, InviteType } from '@votetorrent/vote-core';
 
-export type InviteShareErrorCode = 'malformed' | 'wrong-type' | 'not-found' | 'already-answered';
+export type InviteShareErrorCode = 'malformed' | 'wrong-type' | 'not-found' | 'already-answered' | 'no-longer-valid';
 
 const MESSAGES: Record<InviteShareErrorCode, string> = {
 	malformed: 'Invitation text is malformed',
 	'wrong-type': 'Invitation is for a different role',
 	'not-found': 'Invitation not found on this device',
 	'already-answered': 'Invitation has already been answered',
+	'no-longer-valid': 'Invitation was withdrawn or has expired',
 };
 
 export class InviteShareError extends Error {
@@ -84,15 +87,33 @@ export function parseInviteShare(text: string): ParsedInviteShare | undefined {
 }
 
 export async function resolveInviteFromShare(
-	engine: Pick<IInvitationEngine, 'resolveInviteSlotCid' | 'getKeyholderInvite' | 'getOfficerInvite' | 'getAuthorityInvite'>,
+	engine: Pick<IInvitationEngine, 'resolveInviteSlot' | 'getKeyholderInvite' | 'getOfficerInvite' | 'getAuthorityInvite'>,
 	text: string,
 	expectedType: InviteType
 ): Promise<{ slotCid: string; invitePrivate: string; share: ParsedInviteShare }> {
 	const share = parseInviteShare(text);
 	if (!share) throw new InviteShareError('malformed');
 	if (share.type !== undefined && share.type !== expectedType) throw new InviteShareError('wrong-type');
-	const slotCid = await engine.resolveInviteSlotCid(share.inviteKey, expectedType);
-	if (!slotCid) throw new InviteShareError('not-found');
+	const resolution = await engine.resolveInviteSlot(share.inviteKey, expectedType);
+	let slotCid: string;
+	switch (resolution.status) {
+		case 'live':
+			slotCid = resolution.cid;
+			break;
+		case 'answered':
+			throw new InviteShareError('already-answered');
+		case 'no-longer-valid':
+			throw new InviteShareError('no-longer-valid');
+		case 'not-found':
+		case 'ambiguous':
+			throw new InviteShareError('not-found');
+		default: {
+			// A future status must never fall through to success.
+			const _exhaustive: never = resolution;
+			void _exhaustive;
+			throw new InviteShareError('not-found');
+		}
+	}
 	// Refuse an already-answered slot (accepted OR declined) BEFORE any caller provisions keys or
 	// signs: respondToInvite does not refuse it up front, so the biometric prompts would fire first.
 	const status =
@@ -118,5 +139,7 @@ export function inviteShareErrorKey(err: unknown): string | undefined {
 			return 'invitationAcceptNotFound';
 		case 'already-answered':
 			return 'invitationAcceptAlreadyAnswered';
+		case 'no-longer-valid':
+			return 'invitationAcceptNoLongerValid';
 	}
 }
