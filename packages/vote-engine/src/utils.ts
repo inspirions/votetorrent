@@ -88,7 +88,14 @@ export const parseKeyholdersAsInviteStatus = (
  * Parsing rules:
  *   - `null` / `undefined`  → `undefined`
  *   - `{min, max}`          → `{ min: number, max: number }`
+ *   - legacy JSON object    → `{ min, max }` (integer min/max only; see below)
  *   - anything else         → throws (field name included for diagnostics)
+ *
+ * Legacy read: `finalizeBallot` wrote these columns as a JSON object from
+ * 31-03 until the UAT 62 gap 1 fix. Those Question rows are signed by
+ * Question.MutationValid and cannot be rewritten, so the reader tolerates
+ * exactly that shape: a plain object whose `min` and `max` are integers
+ * (an integer `step` may ride along and is ignored).
  */
 export const parsePgRange = (
   value: unknown,
@@ -97,8 +104,24 @@ export const parsePgRange = (
   if (value === null || value === undefined) return undefined
   const s = value.toString().trim()
   const m = /^\{(\s*-?\d+)\s*,\s*(-?\d+\s*)\}$/.exec(s)
-  if (!m) throw new Error(`${field} has invalid range format: ${s}`)
-  return { min: Number(m[1]), max: Number(m[2]) }
+  if (m) return { min: Number(m[1]), max: Number(m[2]) }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(s)
+  } catch {
+    parsed = undefined
+  }
+  if (
+    parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) &&
+    Number.isInteger((parsed as Record<string, unknown>).min) &&
+    Number.isInteger((parsed as Record<string, unknown>).max) &&
+    ((parsed as Record<string, unknown>).step === undefined ||
+      Number.isInteger((parsed as Record<string, unknown>).step))
+  ) {
+    const o = parsed as { min: number; max: number }
+    return { min: o.min, max: o.max }
+  }
+  throw new Error(`${field} has invalid range format: ${s}`)
 }
 
 /**

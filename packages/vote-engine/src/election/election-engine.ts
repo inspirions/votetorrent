@@ -634,8 +634,9 @@ export class ElectionEngine implements IElectionEngine {
             ? JSON.stringify(question.dependsOn)
             : null,
           type: question.type,
+          // pg range notation via formatPgRange, not JSON (matches the OptionRange write above).
           scoreRange: question.scoreRange
-            ? JSON.stringify(question.scoreRange)
+            ? formatPgRange(question.scoreRange)
             : null,
           grouping: question.group ?? null,
           sequence: question.sequence ?? null,
