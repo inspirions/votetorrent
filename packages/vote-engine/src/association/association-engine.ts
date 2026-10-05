@@ -4,6 +4,7 @@ import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { asText, digestToBytes, nowCanonicalDatetime, SEQUENCE_ALLOCATION_ATTEMPTS } from '../utils.js'
 import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { allocateTid } from '../database/tid-allocator.js'
+import { resolveSignedSubmittedAt } from '../signing/signed-submitted-at.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, reZuluDatetime, restoreCanonicalDatetime, resolveSign as resolveSignHelper, requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { verifySig, verifySigP256 } from '../database/initialize.js'
 import { StubAttestationVerifier } from './stub-attestation-verifier.js'
@@ -1449,7 +1450,8 @@ export class AssociationEngine implements IAssociationEngine, IReassociationEngi
     if (!rowBefore) {
       throw new Error(`writeChallengeTransition: AssociationRequest ${requestId} disappeared before the transition UPDATE`)
     }
-    const submittedAt = restoreCanonicalDatetime(rowBefore.SubmittedAt as string)
+    // The exact spelling the requester signed (resolveSignedSubmittedAt), before allocateTid/signing.
+    const submittedAt = await resolveSignedSubmittedAt(ctx.db, 'AssociationRequest', requestId, rowBefore.SubmittedAt as string)
     const receivedAt = restoreCanonicalDatetime(rowBefore.ReceivedAt as string)
 
     const tid = await allocateTid(ctx.db, 'association-request')
@@ -1488,7 +1490,8 @@ export class AssociationEngine implements IAssociationEngine, IReassociationEngi
     if (!rowBefore) {
       throw new Error(`writeTerminalTransition: AssociationRequest ${requestId} disappeared before the transition UPDATE`)
     }
-    const submittedAt = restoreCanonicalDatetime(rowBefore.SubmittedAt as string)
+    // The exact spelling the requester signed (resolveSignedSubmittedAt), before allocateTid/signing.
+    const submittedAt = await resolveSignedSubmittedAt(ctx.db, 'AssociationRequest', requestId, rowBefore.SubmittedAt as string)
     const receivedAt = restoreCanonicalDatetime(rowBefore.ReceivedAt as string)
     const tid = await allocateTid(ctx.db, 'association-request')
     const decidedAt = toIsoZDatetime(Date.now())
