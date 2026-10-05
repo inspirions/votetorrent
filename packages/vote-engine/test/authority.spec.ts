@@ -3251,7 +3251,7 @@ describe('AuthorityEngine', () => {
       expect(slot?.Cid).to.equal(inviteSlotCid)
     })
 
-    it('resendInvite emits a fresh slot (new Cid) reusing the original nonce/signature; no auto-supersede', async () => {
+    it('resendInvite emits a fresh slot (new Cid) reusing the original nonce/signature; the pending list shows only the newest copy', async () => {
       const { authorityEngine, ctx, inviteSlotCid } = await seedPendingInvite()
 
       const orig = await ctx.db
@@ -3269,9 +3269,9 @@ describe('AuthorityEngine', () => {
       expect(fresh.SigningNonce).to.equal(orig.SigningNonce)
       expect(fresh.InviteSignature).to.equal(orig.InviteSignature)
 
-      // No auto-supersede: original was NOT cancelled, so BOTH appear in pending.
+      // One entry per invitation (CR-01): only the newest copy is listed.
       const pending = await authorityEngine.getPendingInviteCids()
-      expect(pending).to.include(inviteSlotCid)
+      expect(pending).to.not.include(inviteSlotCid)
       expect(pending).to.include(newCid)
     })
 
@@ -3318,10 +3318,10 @@ describe('AuthorityEngine', () => {
       expect(row.InviteSignature).to.equal(orig.InviteSignature)
       expect(row.ResendSalt, 'a genuine resend row must persist a non-null ResendSalt').to.be.a('string').and.have.length.greaterThan(0)
 
-      // All three generations remain independently present (no auto-supersede).
+      // One entry per invitation (CR-01): only the newest generation is listed.
       const pending = await authorityEngine.getPendingInviteCids()
-      expect(pending).to.include(origCid)
-      expect(pending).to.include(resend1Cid)
+      expect(pending).to.not.include(origCid)
+      expect(pending).to.not.include(resend1Cid)
       expect(pending).to.include(resend2Cid)
     })
 
