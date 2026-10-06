@@ -52,6 +52,7 @@
 import type { AttestationChallenge, DeviceAttestation, Signature } from '@votetorrent/vote-core'
 import { createRealAttestationProducer } from '@votetorrent/attestation-native'
 import { USE_STUB_PLAY_INTEGRITY, USE_REAL_ATTESTATION_PRODUCER } from './proof-flags.generated'
+import { dismissKeyboardForSystemPrompt } from '../utils/dismissKeyboardForSystemPrompt'
 
 /**
  * A device-side attestation producer (D-11 two-step seam):
@@ -173,15 +174,41 @@ export function resolveRealProducerForced(): boolean {
  * way, so the two flags (`USE_REAL_ATTESTATION_PRODUCER` / `USE_STUB_PLAY_INTEGRITY`)
  * stay independent of each other.
  */
+/**
+ * Wraps the REAL producer so the soft keyboard is closed (and gone) before either call that raises
+ * a native BiometricPrompt: `produce` and `signDeviceKeyDigest`. On MIUI/Android 10 a prompt
+ * started over an open IME is never drawn and times out ~10 min later; the continue-on-another-
+ * device flow reaches `produce` straight from a typed code with the keyboard still up.
+ * `provisionDeviceKey` raises no prompt and passes through untouched (including any extra fields
+ * the real producer returns).
+ */
+export function withKeyboardDismissedBeforePrompts(producer: AttestationProducer): AttestationProducer {
+	const wrapped: AttestationProducer = {
+		provisionDeviceKey: () => producer.provisionDeviceKey(),
+		produce: async (challenge: AttestationChallenge) => {
+			await dismissKeyboardForSystemPrompt()
+			return producer.produce(challenge)
+		},
+	}
+	if (typeof producer.signDeviceKeyDigest === 'function') {
+		const sign = producer.signDeviceKeyDigest.bind(producer)
+		wrapped.signDeviceKeyDigest = async (digest: Uint8Array) => {
+			await dismissKeyboardForSystemPrompt()
+			return sign(digest)
+		}
+	}
+	return wrapped
+}
+
 export function resolveAttestationProducer(realProducer?: AttestationProducer): AttestationProducer {
 	if (realProducer !== undefined) {
 		return realProducer
 	}
 	if (resolveRealProducerForced()) {
-		return createRealAttestationProducer({ enablePlayIntegrity: resolvePlayIntegrityEnabled() })
+		return withKeyboardDismissedBeforePrompts(createRealAttestationProducer({ enablePlayIntegrity: resolvePlayIntegrityEnabled() }))
 	}
 	if (__DEV__) {
 		return StubAttestationProducer
 	}
-	return createRealAttestationProducer({ enablePlayIntegrity: resolvePlayIntegrityEnabled() })
+	return withKeyboardDismissedBeforePrompts(createRealAttestationProducer({ enablePlayIntegrity: resolvePlayIntegrityEnabled() }))
 }
