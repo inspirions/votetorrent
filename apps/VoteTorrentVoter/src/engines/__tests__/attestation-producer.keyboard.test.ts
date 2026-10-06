@@ -13,6 +13,10 @@ const mockRealProducer = {
 		order.push('provision')
 		return { publicKey: 'PUB', reprovisioned: false }
 	}),
+	getCurrentDeviceKey: jest.fn(async () => {
+		order.push('current')
+		return { publicKey: 'PUB' }
+	}),
 	produce: jest.fn(async () => {
 		order.push('produce')
 		return { attestation: true }
@@ -67,6 +71,14 @@ describe('attestation-producer — keyboard dismissed before native prompts', ()
 		expect(mockRealProducer.produce).toHaveBeenCalledWith(CHALLENGE)
 	})
 
+	it('getCurrentDeviceKey is a prompt-free pass-through: no keyboard dismissal, no provisioning (63-18)', async () => {
+		mockRealProducer.provisionDeviceKey.mockClear()
+		const producer = resolveAttestationProducer()
+		expect(await producer.getCurrentDeviceKey()).toEqual({ publicKey: 'PUB' })
+		expect(order).toEqual(['current'])
+		expect(mockRealProducer.provisionDeviceKey).not.toHaveBeenCalled()
+	})
+
 	it('with the keyboard open, produce waits for keyboardDidHide before the native call', async () => {
 		;(Keyboard.isVisible as jest.Mock).mockReturnValue(true)
 		const producer = resolveAttestationProducer()
@@ -79,7 +91,7 @@ describe('attestation-producer — keyboard dismissed before native prompts', ()
 	})
 
 	it('a supplied producer and the __DEV__ stub are returned untouched (no wrapping)', () => {
-		const supplied: AttestationProducer = { provisionDeviceKey: jest.fn(), produce: jest.fn() }
+		const supplied: AttestationProducer = { provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce: jest.fn() }
 		expect(resolveAttestationProducer(supplied)).toBe(supplied)
 		;(globalThis as { __DEV__?: boolean }).__DEV__ = true
 		expect(resolveAttestationProducer()).toBe(StubAttestationProducer)

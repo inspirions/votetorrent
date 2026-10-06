@@ -42,6 +42,7 @@ jest.mock('react-native', () => {
 	const actual: Record<string, unknown> = jest.requireActual('react-native')
 	const attestationNativeFake = {
 		provisionDeviceKey: jest.fn(),
+		getCurrentDeviceKey: jest.fn(),
 		produceAttestation: jest.fn(),
 		signWithDeviceKey: jest.fn(),
 	}
@@ -99,7 +100,7 @@ import { p256 } from '@noble/curves/nist.js'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the react-native mock above.
 const { __attestationNativeFake: nativeFake, __platformState: platformState } = require('react-native') as {
-	__attestationNativeFake: { provisionDeviceKey: jest.Mock; produceAttestation: jest.Mock; signWithDeviceKey: jest.Mock }
+	__attestationNativeFake: { provisionDeviceKey: jest.Mock; getCurrentDeviceKey: jest.Mock; produceAttestation: jest.Mock; signWithDeviceKey: jest.Mock }
 	__platformState: { OS: string }
 }
 
@@ -566,6 +567,82 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 				negativeButton: 'Cancel',
 			})
 			expect(Object.isFrozen(DEFAULT_DEVICE_KEY_SIGN_PROMPT)).toBe(true)
+		})
+	})
+
+	describe('getCurrentDeviceKey (63-18: read-only lookup, never rotates)', () => {
+		const CUR_HEX = '02' + 'cd'.repeat(32)
+
+		beforeEach(() => {
+			nativeFake.provisionDeviceKey.mockReset()
+			nativeFake.getCurrentDeviceKey.mockReset()
+			nativeFake.produceAttestation.mockReset()
+			nativeFake.signWithDeviceKey.mockReset()
+		})
+
+		it('Android: resolves publicKeyBase64 exactly as provisionDeviceKey would, calling ONLY the read-only native method', async () => {
+			platformState.OS = 'android'
+			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyBase64: 'cur-b64', publicKeyCompressedHex: CUR_HEX, keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			expect(await producer.getCurrentDeviceKey()).toEqual({ publicKey: 'cur-b64' })
+			expect(nativeFake.getCurrentDeviceKey).toHaveBeenCalledWith('VOTETORRENT_DEVICE_KEY_V1')
+			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
+			expect(nativeFake.produceAttestation).not.toHaveBeenCalled()
+		})
+
+		it('iOS: resolves publicKeyCompressedHex', async () => {
+			platformState.OS = 'ios'
+			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyCompressedHex: CUR_HEX, keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			expect(await producer.getCurrentDeviceKey()).toEqual({ publicKey: CUR_HEX })
+			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
+		})
+
+		it('no rotation: repeated lookups return the same key and never touch provisionDeviceKey', async () => {
+			platformState.OS = 'android'
+			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyBase64: 'stable-b64', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			const a = await producer.getCurrentDeviceKey()
+			const b = await producer.getCurrentDeviceKey()
+			expect(a).toEqual(b)
+			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
+		})
+
+		it('negative control: provisionDeviceKey on a rotating native DOES call the creating method (the spy can fail)', async () => {
+			platformState.OS = 'android'
+			let n = 0
+			nativeFake.provisionDeviceKey.mockImplementation(async () => ({ publicKeyBase64: `rotated-${++n}`, keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' }))
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			const a = await producer.provisionDeviceKey()
+			const b = await producer.provisionDeviceKey()
+			expect(a.publicKey).not.toBe(b.publicKey)
+			expect(nativeFake.provisionDeviceKey).toHaveBeenCalledTimes(2)
+		})
+
+		it.each(['DEVICE_KEY_ABSENT', 'DEVICE_KEY_INVALIDATED'])('propagates the native %s rejection verbatim (code preserved) and creates nothing', async (code) => {
+			platformState.OS = 'android'
+			nativeFake.getCurrentDeviceKey.mockRejectedValue(Object.assign(new Error(code), { code }))
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await expect(producer.getCurrentDeviceKey()).rejects.toMatchObject({ code })
+			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
+		})
+
+		it('fails closed when native resolves no key field', async () => {
+			platformState.OS = 'android'
+			nativeFake.getCurrentDeviceKey.mockResolvedValue({ keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await expect(producer.getCurrentDeviceKey()).rejects.toThrow(/native resolved no publicKeyBase64/)
+		})
+
+		it('keeps the current-key cache consistent: signDeviceKeyDigest reports the looked-up key as signerKey', async () => {
+			platformState.OS = 'android'
+			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyBase64: 'looked-up-b64', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
+			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: 'ab'.repeat(64) })
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await producer.getCurrentDeviceKey()
+			const sig = await producer.signDeviceKeyDigest(Uint8Array.from({ length: 32 }, (_, i) => i))
+			expect(sig.signerKey).toBe('looked-up-b64')
+			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
 		})
 	})
 

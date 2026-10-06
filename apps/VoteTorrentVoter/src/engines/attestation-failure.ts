@@ -78,3 +78,21 @@ export function classifyAttestationFailure(err: unknown): AttestationFailureClas
 	// LOCKOUT, PLAY_INTEGRITY_ERROR, PLAY_INTEGRITY_NETWORK, and any unknown/missing code.
 	return 'recoverable-transient'
 }
+
+/**
+ * 63-18 fix: reject codes of the READ-ONLY `getCurrentDeviceKey()` lookup. They are NOT ceremony
+ * failures, so `classifyAttestationFailure` deliberately leaves them as `'recoverable-transient'`;
+ * lookup callers branch on these predicates instead.
+ *   - `DEVICE_KEY_ABSENT`: no key under the alias yet (a fresh install) — nothing was created.
+ *   - `DEVICE_KEY_INVALIDATED`: the key is permanently invalidated — surfaced, never deleted.
+ */
+export const DEVICE_KEY_ABSENT_CODE = 'DEVICE_KEY_ABSENT'
+export const DEVICE_KEY_INVALIDATED_CODE = 'DEVICE_KEY_INVALIDATED'
+
+export function isDeviceKeyAbsent(err: unknown): boolean {
+	return (err as {code?: unknown} | null | undefined)?.code === DEVICE_KEY_ABSENT_CODE
+}
+
+export function isDeviceKeyInvalidated(err: unknown): boolean {
+	return (err as {code?: unknown} | null | undefined)?.code === DEVICE_KEY_INVALIDATED_CODE
+}

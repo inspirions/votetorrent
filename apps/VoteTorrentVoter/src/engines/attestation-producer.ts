@@ -74,6 +74,13 @@ import { dismissKeyboardForSystemPrompt } from '../utils/dismissKeyboardForSyste
  */
 export interface AttestationProducer {
 	provisionDeviceKey(): Promise<{ publicKey: string }>
+	/**
+	 * READ-ONLY lookup of the CURRENT device key (63-18 fix): never generates, rotates or prompts.
+	 * Every LOOKUP (association queries, registration status, continuity) must use this;
+	 * `provisionDeviceKey` is for CREATION flows only, because on Android it mints a NEW key on
+	 * every call. Rejects with code `DEVICE_KEY_ABSENT` / `DEVICE_KEY_INVALIDATED`.
+	 */
+	getCurrentDeviceKey(): Promise<{ publicKey: string }>
 	produce(challenge: AttestationChallenge): Promise<DeviceAttestation>
 	signDeviceKeyDigest?(digest: Uint8Array, options?: SignDeviceKeyDigestOptions): Promise<Signature>
 }
@@ -98,6 +105,11 @@ export type VoteSigningProducer = AttestationProducer & {
  */
 export const StubAttestationProducer: AttestationProducer = {
 	async provisionDeviceKey(): Promise<{ publicKey: string }> {
+		return { publicKey: 'STUB_DEVICE_PUBLIC_KEY_PLACEHOLDER_NOT_REAL' }
+	},
+
+	// Same placeholder as provisionDeviceKey: the stub has one fixed key, so lookup === creation.
+	async getCurrentDeviceKey(): Promise<{ publicKey: string }> {
 		return { publicKey: 'STUB_DEVICE_PUBLIC_KEY_PLACEHOLDER_NOT_REAL' }
 	},
 
@@ -192,12 +204,13 @@ export function resolveRealProducerForced(): boolean {
  * a native BiometricPrompt: `produce` and `signDeviceKeyDigest`. On MIUI/Android 10 a prompt
  * started over an open IME is never drawn and times out ~10 min later; the continue-on-another-
  * device flow reaches `produce` straight from a typed code with the keyboard still up.
- * `provisionDeviceKey` raises no prompt and passes through untouched (including any extra fields
+ * `provisionDeviceKey` and `getCurrentDeviceKey` raise no prompt and pass through untouched (including any extra fields
  * the real producer returns).
  */
 export function withKeyboardDismissedBeforePrompts(producer: AttestationProducer): AttestationProducer {
 	const wrapped: AttestationProducer = {
 		provisionDeviceKey: () => producer.provisionDeviceKey(),
+		getCurrentDeviceKey: () => producer.getCurrentDeviceKey(),
 		produce: async (challenge: AttestationChallenge) => {
 			await dismissKeyboardForSystemPrompt()
 			return producer.produce(challenge)

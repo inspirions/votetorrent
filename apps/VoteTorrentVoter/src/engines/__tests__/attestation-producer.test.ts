@@ -29,6 +29,7 @@ import type { AttestationChallenge } from '@votetorrent/vote-core'
 
 const mockCreateRealAttestationProducer = jest.fn((_opts: { enablePlayIntegrity: boolean }) => ({
 	provisionDeviceKey: jest.fn(),
+	getCurrentDeviceKey: jest.fn(),
 	produce: jest.fn(),
 	signDeviceKeyDigest: jest.fn(),
 }))
@@ -60,6 +61,13 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 	}
 
 	describe('StubAttestationProducer', () => {
+		it('getCurrentDeviceKey resolves the SAME placeholder key as provisionDeviceKey (63-18 stub parity)', async () => {
+			const provisioned = await StubAttestationProducer.provisionDeviceKey()
+			const current = await StubAttestationProducer.getCurrentDeviceKey()
+			expect(current.publicKey).toBe(provisioned.publicKey)
+			expect(current.publicKey).not.toBe('')
+		})
+
 		it('provisionDeviceKey() resolves a non-empty placeholder public key', async () => {
 			const { publicKey } = await StubAttestationProducer.provisionDeviceKey()
 
@@ -100,6 +108,7 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 			;(globalThis as { __DEV__?: boolean }).__DEV__ = true
 			const realProducer: AttestationProducer = {
 				provisionDeviceKey: jest.fn(),
+				getCurrentDeviceKey: jest.fn(),
 				produce: jest.fn(),
 			}
 
@@ -121,6 +130,7 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 			;(globalThis as { __DEV__?: boolean }).__DEV__ = false
 			const realProducer: AttestationProducer = {
 				provisionDeviceKey: jest.fn(),
+				getCurrentDeviceKey: jest.fn(),
 				produce: jest.fn(),
 			}
 
@@ -179,6 +189,7 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 
 				const localMockCreateRealAttestationProducer = jest.fn((_opts: { enablePlayIntegrity: boolean }) => ({
 					provisionDeviceKey: jest.fn(),
+					getCurrentDeviceKey: jest.fn(),
 					produce: jest.fn(),
 					signDeviceKeyDigest: jest.fn(),
 				}))
@@ -299,7 +310,7 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 					const isolated = loadIsolated({ useRealAttestationProducer: forced, useStubPlayIntegrity: stubPi })
 
 					const suppliedProducer: AttestationProducer | undefined = supplied
-						? { provisionDeviceKey: jest.fn(), produce: jest.fn() }
+						? { provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce: jest.fn() }
 						: undefined
 
 					const producer = isolated.resolveAttestationProducer(suppliedProducer)
@@ -405,13 +416,13 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 			})
 
 			it('returns a capable override by identity without building a real producer', () => {
-				const override: AttestationProducer = { provisionDeviceKey: jest.fn(), produce: jest.fn(), signDeviceKeyDigest: jest.fn() }
+				const override: AttestationProducer = { provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce: jest.fn(), signDeviceKeyDigest: jest.fn() }
 				expect(resolveVoteSigningProducer(override)).toBe(override)
 				expect(mockCreateRealAttestationProducer).not.toHaveBeenCalled()
 			})
 
 			it('throws on an override that cannot sign, without building a real producer', () => {
-				const override: AttestationProducer = { provisionDeviceKey: jest.fn(), produce: jest.fn() }
+				const override: AttestationProducer = { provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce: jest.fn() }
 				expect(() => resolveVoteSigningProducer(override)).toThrow(
 					'resolveVoteSigningProducer: the supplied producer cannot sign (signDeviceKeyDigest missing)',
 				)
