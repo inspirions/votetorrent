@@ -260,7 +260,7 @@ export default function TimelineScreen() {
 	// from the timeline-read effect above -- `resolveRegistrationStatus` never reads the clock
 	// (it derives from `Association`/`Registrant`/`AssociationRequestRead` rows only), so it must
 	// not re-run every time the __DEV__ clock-offset control changes `nowMs`. Same `let live =
-	// true` cancellation guard; `resolveAttestationProducer().provisionDeviceKey` is passed --
+	// true` cancellation guard; `resolveAttestationProducer().getCurrentDeviceKey` is passed --
 	// NEVER `getOrCreateDeviceUser` (F1: the wrong key silently reads "not registered" forever).
 	//
 	// `useFocusEffect` (not a bare `useEffect`), matching `DeviceAttestationScreen.tsx`'s own
@@ -284,7 +284,7 @@ export default function TimelineScreen() {
 			(async () => {
 				const result = await resolveRegistrationStatus({
 					getEngine,
-					provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+					getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
 					electionId: resolvedElectionId,
 				});
 				if (live) setRegistrationStatus(result);

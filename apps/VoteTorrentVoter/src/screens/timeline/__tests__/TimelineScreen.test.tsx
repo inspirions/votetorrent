@@ -182,12 +182,17 @@ const mockGetElection = jest.fn(async () => {
 	throw new Error('getElection() must never be called by TimelineScreen (D-04 read-scope fence)');
 });
 
-// ---- 59-09: `resolveAttestationProducer().provisionDeviceKey()` -- mocked exactly as
+// ---- 59-09: `resolveAttestationProducer().getCurrentDeviceKey()` -- mocked exactly as
 // `ConfirmationScreen.test.tsx` mocks the same module, so this suite never reaches the REAL
 // hardware-backed producer (`@votetorrent/attestation-native`'s `TurboModuleRegistry` call,
 // which is unregistered under Jest and throws `Invariant Violation`).
 const mockProvisionDeviceKey = jest.fn(async () => ({publicKey: 'p256-stub-device-key'}));
-const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({provisionDeviceKey: mockProvisionDeviceKey}));
+// 63-18: the status read is a LOOKUP; it must use getCurrentDeviceKey and never the creating call.
+const mockGetCurrentDeviceKey = jest.fn(async () => ({publicKey: 'p256-stub-device-key'}));
+const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({
+	provisionDeviceKey: mockProvisionDeviceKey,
+	getCurrentDeviceKey: mockGetCurrentDeviceKey,
+}));
 jest.mock('../../../engines/attestation-producer', () => ({
 	resolveAttestationProducer: (...args: unknown[]) => mockResolveAttestationProducer(...args),
 }));
@@ -311,6 +316,7 @@ beforeEach(() => {
 	mockGetElectionDetails.mockClear();
 	mockGetNetworkDetails.mockClear();
 	mockProvisionDeviceKey.mockClear();
+	mockGetCurrentDeviceKey.mockClear();
 	mockGetAssociationsByDeviceKey.mockClear();
 	mockListAssociationRequests.mockClear();
 	mockReadSavedVoteStatus.mockReset();
@@ -1107,6 +1113,10 @@ describe('TimelineScreen — registration panel re-reads on focus (regression, s
 		const refocusedSentence = tr.root.findByProps({testID: 'timeline-registration-panel-sentence'});
 		expect(textOf(refocusedSentence)).toContain('awaiting a decision');
 		expect(textOf(refocusedSentence)).not.toContain('You are not registered');
+
+		// 63-18: the status read is a lookup; refocusing must NEVER mint a device key.
+		expect(mockGetCurrentDeviceKey).toHaveBeenCalled();
+		expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
 	});
 
 	it('a refocus with an unchanged answer does not spam the association engine (no refresh storm)', async () => {

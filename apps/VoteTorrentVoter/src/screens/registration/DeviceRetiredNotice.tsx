@@ -92,7 +92,7 @@ export function useDeviceRetired(): boolean {
 			if (retiredRef.current) return;
 			const result = await resolveDeviceRetired({
 				getEngine,
-				provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+				getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
 			});
 			if (!mountedRef.current) return;
 			if (result) {

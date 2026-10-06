@@ -97,6 +97,7 @@ jest.mock('../../../providers/VoterAppProvider', () => ({
 }));
 
 const mockProvisionDeviceKey = jest.fn(async () => ({publicKey: P256_PUB}));
+const mockGetCurrentDeviceKey = jest.fn(async () => ({publicKey: P256_PUB}));
 const mockProduce = jest.fn(async (challenge: {nonce: string}) => ({
 	publicKey: P256_PUB,
 	deviceId: 'DEVICE_ID',
@@ -111,6 +112,7 @@ const mockSignDeviceKeyDigest = jest.fn(async (_digest: Uint8Array) => ({
 }));
 const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({
 	provisionDeviceKey: mockProvisionDeviceKey,
+	getCurrentDeviceKey: mockGetCurrentDeviceKey,
 	produce: mockProduce,
 	signDeviceKeyDigest: mockSignDeviceKeyDigest,
 }));
@@ -200,6 +202,7 @@ beforeEach(() => {
 	mockListAssociationRequests.mockImplementation(async () => []);
 	mockGetEngine.mockClear();
 	mockProvisionDeviceKey.mockClear();
+	mockGetCurrentDeviceKey.mockClear();
 	mockProvisionDeviceKey.mockImplementation(async () => ({publicKey: P256_PUB}));
 	mockProduce.mockClear();
 	mockSignDeviceKeyDigest.mockClear();
@@ -228,6 +231,11 @@ describe('ContinueOnAnotherDeviceScreen — default branch (Surface 8, D-45)', (
 		expect(text).toContain('My registration is still pending');
 
 		expect(tr.root.findByProps({testID: 'continue-device-close'})).toBeDefined();
+
+		// 63-18: bootstrap CREATES the key exactly once; the resume lookup reads it back and must not
+		// mint a second one (on Android a second provision would orphan the first key).
+		expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+		expect(mockGetCurrentDeviceKey).toHaveBeenCalledTimes(1);
 
 		const pressables = [
 			'continue-device-close',

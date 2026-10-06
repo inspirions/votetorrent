@@ -62,7 +62,7 @@ export default function RegistrationInfoScreen() {
 				}
 				const result = await resolveRegistrationStatus({
 					getEngine,
-					provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+					getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
 					...(electionId ? {electionId} : {}),
 				}).catch((): RegistrationStatusResult => ({kind: 'indeterminate'}));
 				if (live) setStatus(result);

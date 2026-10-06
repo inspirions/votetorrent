@@ -11,7 +11,7 @@
  * duplicates a fact the `Association` table already holds, and it widens the existing plaintext-
  * `AsyncStorage` device-key surface (`device-user.ts`) for no gain.
  *
- * The device's stable handle is the P-256 public key `resolveAttestationProducer().provisionDeviceKey()`
+ * The device's stable handle is the P-256 public key `resolveAttestationProducer().getCurrentDeviceKey()`
  * returns — NOT `getOrCreateDeviceUser()`'s secp256k1 key. `ConfirmationScreen.tsx` uses two
  * distinct keypairs in the registration ceremony: the P-256 key is the one `Association.DeviceKey`
  * is keyed on; the secp256k1 key only signs the registration REQUEST document. Passing the wrong
@@ -28,6 +28,7 @@
 import type {Association, IAssociationEngine, INetworkEngine, IRegistrationEngine} from '@votetorrent/vote-core';
 import {resolveVoterRequestTransports} from '../screens/registration/attach-voter-request-transport';
 import type {VoterRequestTransportDeps, VoterRequestTransports} from '../screens/registration/attach-voter-request-transport';
+import {isDeviceKeyAbsent} from './attestation-failure';
 
 export type RegistrationStatusKind = 'registered' | 'pending' | 'notRegistered' | 'indeterminate';
 
@@ -41,9 +42,10 @@ export interface RegistrationStatusResult {
 export interface RegistrationStatusDeps {
 	/** `useVoterApp()`'s own composition-root read. */
 	getEngine: <T>(engineName: string, initParams?: unknown) => Promise<T>;
-	/** The P-256 device-key provisioner — pass `() => resolveAttestationProducer().provisionDeviceKey()`,
-	 * never `getOrCreateDeviceUser` (see this file's header). */
-	provisionDeviceKey: () => Promise<{publicKey: string}>;
+	/** READ-ONLY current P-256 device-key lookup — pass `() => resolveAttestationProducer().getCurrentDeviceKey()`,
+	 * never `provisionDeviceKey` (Android mints a NEW key per call, 63-18) and never `getOrCreateDeviceUser`
+	 * (see this file's header). */
+	getCurrentDeviceKey: () => Promise<{publicKey: string}>;
 	/** Defaults to `resolveVoterRequestTransports` — injected so every branch below is testable
 	 * without the real P2P/strand transport source (D-28/D-32). */
 	resolveTransports?: (deps: VoterRequestTransportDeps) => Promise<VoterRequestTransports | undefined>;
@@ -63,12 +65,21 @@ export async function resolveRegistrationStatus(deps: RegistrationStatusDeps): P
 	try {
 		// The P-256 device key — the SAME key `Association.DeviceKey` is keyed on
 		// (`ConfirmationScreen.tsx:154-155`). Never the secp256k1 `deviceUserKey`.
-		const {publicKey: p256DeviceKey} = await deps.provisionDeviceKey();
+		let p256DeviceKey: string | undefined;
+		try {
+			p256DeviceKey = (await deps.getCurrentDeviceKey()).publicKey;
+		} catch (err) {
+			// A fresh install has no device key: not registered. Never create one for a status read.
+			if (!isDeviceKeyAbsent(err)) throw err;
+		}
 
 		const network = await deps.getEngine<INetworkEngine>('network');
 		const details = await network.getDetails();
 		networkName = details.network.name;
 		const authorityId = details.network.primaryAuthorityId;
+		if (p256DeviceKey === undefined) {
+			return {kind: 'notRegistered', networkName};
+		}
 
 		const association = await deps.getEngine<IAssociationEngine>('association');
 		const rows: Association[] = await association.getAssociationsByDeviceKey(p256DeviceKey);

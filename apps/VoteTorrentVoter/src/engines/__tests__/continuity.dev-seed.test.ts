@@ -45,7 +45,7 @@ async function resolveAfterSeed(options?: {registeredStateFixture?: boolean}) {
 			if (name in engines) return engines[name]
 			throw new Error(`continuity.dev-seed.test.ts: unexpected engine "${name}"`)
 		}) as never,
-		provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+		getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
 	})
 }
 

@@ -75,7 +75,7 @@ export default function RegistrationScreen() {
 			(async () => {
 				const result = await resolveRegistrationCodeAvailability({
 					getEngine,
-					provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+					getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
 				});
 				if (!cancelled) setCodeAvailability(result);
 			})();
@@ -90,7 +90,7 @@ export default function RegistrationScreen() {
 	async function onShowAgain() {
 		const result = await resolveRegistrationCodeAvailability({
 			getEngine,
-			provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+			getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
 		});
 		setRevealed(result);
 	}

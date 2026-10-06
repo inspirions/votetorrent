@@ -97,7 +97,8 @@ type SignFake = (digest: Uint8Array, opts?: unknown) => Promise<{ signature: str
 
 function signingProducer (key = KEY_A, sign?: SignFake) {
 	return {
-		provisionDeviceKey: jest.fn(async () => ({ publicKey: key.spki })),
+		provisionDeviceKey: jest.fn(async () => { throw new Error('a vote-casting lookup must never provision a device key (63-18)') }),
+		getCurrentDeviceKey: jest.fn(async () => ({ publicKey: key.spki })),
 		produce: jest.fn(),
 		signDeviceKeyDigest: jest.fn(sign ?? (async (digest: Uint8Array) => ({
 			signature: bytesToHex(p256.sign(digest, key.sk)),
@@ -239,7 +240,9 @@ describe('castVote happy path', () => {
 		const { signature: _s, ...rest } = (await openStored('e-1', 3)).voter
 		expect(Array.from(digestBytes)).toEqual(Array.from(b64urlToBytes(voterEntryDigest(rest as VoterEntryUnsigned))))
 		expect(opts).toEqual({ prompt: SIGN_PROMPT })
-		expect(producer.provisionDeviceKey).toHaveBeenCalledTimes(1)
+		expect(producer.getCurrentDeviceKey).toHaveBeenCalledTimes(1)
+		// 63-18: Submit looks the key up; it must never mint one.
+		expect(producer.provisionDeviceKey).not.toHaveBeenCalled()
 	})
 
 	it('C4b with no producer override the one real producer both provisions and signs', async () => {
@@ -249,14 +252,15 @@ describe('castVote happy path', () => {
 		delete deps.producer
 		expectSaved(await castVote(deps))
 		expect(mockCreateRealAttestationProducer).toHaveBeenCalledTimes(1)
-		expect(real.provisionDeviceKey).toHaveBeenCalledTimes(1)
+		expect(real.getCurrentDeviceKey).toHaveBeenCalledTimes(1)
+		expect(real.provisionDeviceKey).not.toHaveBeenCalled()
 		expect(real.signDeviceKeyDigest).toHaveBeenCalledTimes(1)
 	})
 
 	it('C5 order: provision, sign, wrap, record write, marker write', async () => {
 		const wrapSpy = jest.spyOn(wrapper, 'wrapSecret')
 		await castVote(depsOf())
-		const provision = producer.provisionDeviceKey.mock.invocationCallOrder[0]!
+		const provision = producer.getCurrentDeviceKey.mock.invocationCallOrder[0]!
 		const sign = producer.signDeviceKeyDigest.mock.invocationCallOrder[0]!
 		const wrap = wrapSpy.mock.invocationCallOrder[0]!
 		const [first, second] = setItem.mock.invocationCallOrder

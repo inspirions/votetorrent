@@ -19,7 +19,7 @@
  * Fail-closed: any read failure refuses with a closed reason and never enables Submit. The only
  * rejection is a producer override that cannot sign, which is a programming error.
  *
- * It never signs: this function only provisions and reads the key. It never uses the secp256k1
+ * It never signs: this function only reads the current key (never provisions). It never uses the secp256k1
  * device user, because that key is not the one an Association names and would read "not
  * registered" forever. It never touches AsyncStorage: the saved-vote state arrives only through
  * the store's guard. It does not log; the closed reason is the only diagnostic.
@@ -43,6 +43,7 @@ import type { IAssociationEngine, IRegistrationEngine } from '@votetorrent/vote-
 import { readVoteContext, toVoterBallot } from './election-read'
 import type { ElectionReadDeps, VoteContext } from './election-read'
 import { resolveVoteSigningProducer } from './attestation-producer'
+import { isDeviceKeyAbsent, isDeviceKeyInvalidated } from './attestation-failure'
 import type { AttestationProducer, VoteSigningProducer } from './attestation-producer'
 import { buildVoteMarker, guard as readVoteGuard, VoteStoreWriteError, writeVoteRecord } from './vote-record-store'
 import type { VoteGuardResult, VoteStoreWriteReason } from './vote-record-store'
@@ -88,7 +89,7 @@ export interface VotingIdentity {
 	privateCid: string
 	publicCid: string | null
 	attestationCid: string | null
-	/** The raw string `provisionDeviceKey` returned (SPKI base64 on Android). */
+	/** The raw string `getCurrentDeviceKey` returned (SPKI base64 on Android). */
 	currentDeviceKey: string
 	/** `checkVotingKey`'s compressed key, the value the voter entry carries. */
 	compressedDeviceKey: string
@@ -113,7 +114,7 @@ export interface VoteEligible {
 	selections: VoteSelections
 	blankQuestions: VoteQuestionRef[]
 	voter: VotingIdentity
-	/** The instance whose `provisionDeviceKey()` produced `voter.currentDeviceKey`; sign on it. */
+	/** The instance whose `getCurrentDeviceKey()` produced `voter.currentDeviceKey`; sign on it. */
 	producer: VoteSigningProducer
 	replacesStale: boolean
 }
@@ -238,9 +239,15 @@ async function resolveVotingRegistrant (
 > {
 	let publicKey: string
 	try {
-		const provisioned = await producer.provisionDeviceKey()
-		publicKey = provisioned.publicKey
-	} catch {
+		// LOOKUP, never creation: `provisionDeviceKey` regenerates the key on Android, so using it
+		// here made every registered voter read as `not-registered` (63-18 device evidence).
+		const current = await producer.getCurrentDeviceKey()
+		publicKey = current.publicKey
+	} catch (err) {
+		// No key under the alias: this device never registered. A permanently invalidated key is
+		// the registered key being unusable, i.e. the registration no longer matches the device.
+		if (isDeviceKeyAbsent(err)) return { ok: false, reason: 'not-registered' }
+		if (isDeviceKeyInvalidated(err)) return { ok: false, reason: 'device-key-rotated' }
 		return { ok: false, reason: 'device-check-failed' }
 	}
 	if (typeof publicKey !== 'string' || publicKey === '') return { ok: false, reason: 'device-check-failed' }

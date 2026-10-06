@@ -31,6 +31,7 @@ import { FieldPolicyViolationError } from '@votetorrent/vote-engine'
 import { seedDevNetwork, confirmDevBallot, DEV_SEED_NETWORK_NAME, DEV_SEED_BALLOT_QUESTIONS } from '../dev-seed'
 import { readVoteContext, readVoterBallot, readVoterElection, toVoterBallot } from '../election-read'
 import { resolveAttestationProducer } from '../attestation-producer'
+import * as attestationProducerModule from '../attestation-producer'
 import { setDeviceKeyWrapProviderForTests } from '../device-key-wrap'
 import { createInMemoryKeyWrapProviderForTests } from '../__fixtures__/in-memory-key-wrap-provider'
 
@@ -536,6 +537,49 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		await confirmDevBallot(ctx, seeded.networkReference, seeded.electionId, resumed.id, seeded.sign)
 		expect(await electionEngine.getBallotConfirmationState(resumed.id)).toEqual({ locked: false, confirmed: true })
 		expect(await taskCount()).toBe(3)
+	})
+
+	describe('63-18: the registered-state fixture binds the CURRENT key and creates one at most once', () => {
+		afterEach(() => {
+			jest.restoreAllMocks()
+		})
+
+		function stubProducer(producer: { getCurrentDeviceKey: () => Promise<{ publicKey: string }>, provisionDeviceKey: jest.Mock }) {
+			jest.spyOn(attestationProducerModule, 'resolveAttestationProducer').mockReturnValue(producer as never)
+		}
+
+		it('an existing key is bound as-is and provisionDeviceKey is NEVER called', async () => {
+			const provisionDeviceKey = jest.fn(async () => ({ publicKey: 'ROTATED-NEW-KEY' }))
+			stubProducer({ getCurrentDeviceKey: async () => ({ publicKey: 'CURRENT-KEY' }), provisionDeviceKey })
+			const { ctx } = await setup({ registeredStateFixture: true })
+			const associations = new AssociationEngine(ctx)
+			expect(await associations.getAssociationsByDeviceKey('CURRENT-KEY')).toHaveLength(1)
+			expect(await associations.getAssociationsByDeviceKey('ROTATED-NEW-KEY')).toEqual([])
+			expect(provisionDeviceKey).not.toHaveBeenCalled()
+		})
+
+		it('an absent key (fresh install) is created exactly once and that key is bound', async () => {
+			const provisionDeviceKey = jest.fn(async () => ({ publicKey: 'CREATED-KEY' }))
+			const getCurrentDeviceKey = jest.fn(async () => {
+				throw Object.assign(new Error('absent'), { code: 'DEVICE_KEY_ABSENT' })
+			})
+			stubProducer({ getCurrentDeviceKey, provisionDeviceKey })
+			const { ctx } = await setup({ registeredStateFixture: true })
+			expect(await new AssociationEngine(ctx).getAssociationsByDeviceKey('CREATED-KEY')).toHaveLength(1)
+			expect(provisionDeviceKey).toHaveBeenCalledTimes(1)
+		})
+
+		it('any other lookup failure (e.g. DEVICE_KEY_INVALIDATED) is NOT papered over by creating a key', async () => {
+			const provisionDeviceKey = jest.fn(async () => ({ publicKey: 'SHOULD-NOT-EXIST' }))
+			stubProducer({
+				getCurrentDeviceKey: async () => {
+					throw Object.assign(new Error('invalid'), { code: 'DEVICE_KEY_INVALIDATED' })
+				},
+				provisionDeviceKey,
+			})
+			await expect(setup({ registeredStateFixture: true })).rejects.toThrow()
+			expect(provisionDeviceKey).not.toHaveBeenCalled()
+		})
 	})
 
 	it('62-51: default re-attach run also binds nothing to the stub device key', async () => {

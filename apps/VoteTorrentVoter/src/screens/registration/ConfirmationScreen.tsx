@@ -396,7 +396,7 @@ export default function ConfirmationScreen() {
 			(async () => {
 				const result = await resolveRegistrationCodeAvailability({
 					getEngine,
-					provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+					getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
 				});
 				if (!cancelled) setCodeAvailability(result);
 			})();

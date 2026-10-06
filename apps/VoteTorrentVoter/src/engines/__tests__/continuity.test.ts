@@ -52,7 +52,7 @@ interface ContinuityDepsOverrides {
 	association?: any;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	registration?: any;
-	provisionDeviceKey?: ContinuityDeps['provisionDeviceKey'];
+	getCurrentDeviceKey?: ContinuityDeps['getCurrentDeviceKey'];
 	resolveTransports?: ContinuityDeps['resolveTransports'];
 }
 
@@ -69,7 +69,7 @@ function makeContinuityDeps(overrides: ContinuityDepsOverrides = {}): Continuity
 	return {
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		getEngine: getEngine as any,
-		provisionDeviceKey: overrides.provisionDeviceKey ?? (async () => ({publicKey: P256_PUB})),
+		getCurrentDeviceKey: overrides.getCurrentDeviceKey ?? (async () => ({publicKey: P256_PUB})),
 		resolveTransports: overrides.resolveTransports,
 	};
 }
@@ -440,6 +440,7 @@ describe('submitReassociationRequest', () => {
 			transports: makeTransports(),
 			producer: {
 				provisionDeviceKey: jest.fn(async () => ({publicKey: P256_PUB})),
+				getCurrentDeviceKey: jest.fn(async () => ({publicKey: P256_PUB})),
 				produce: jest.fn(),
 				signDeviceKeyDigest: jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: P256_PUB, signature: 'sig'})),
 			},
@@ -454,7 +455,7 @@ describe('submitReassociationRequest', () => {
 		const submitRequest = transports.associationTransport.submitRequest as jest.Mock;
 		submitRequest.mockImplementation(async (init: {id: string}) => init.id);
 		const signDeviceKeyDigest = jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: P256_PUB, signature: 'sig'}));
-		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), produce: jest.fn(), signDeviceKeyDigest}});
+		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce: jest.fn(), signDeviceKeyDigest}});
 		const init = buildReassociationRequestInit({
 			id: 'req-1',
 			authorityId: AUTHORITY_ID,
@@ -478,7 +479,7 @@ describe('submitReassociationRequest', () => {
 	test('a producer without signDeviceKeyDigest rejects before any submit', async () => {
 		const transports = makeTransports();
 		const submitRequest = transports.associationTransport.submitRequest as jest.Mock;
-		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), produce: jest.fn()}});
+		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce: jest.fn()}});
 		const init = buildReassociationRequestInit({
 			id: 'req-1',
 			authorityId: AUTHORITY_ID,
@@ -502,6 +503,7 @@ describe('advanceReassociation', () => {
 		return {
 			producer: {
 				provisionDeviceKey: jest.fn(async () => ({publicKey: P256_PUB})),
+				getCurrentDeviceKey: jest.fn(async () => ({publicKey: P256_PUB})),
 				produce: jest.fn(async () => ({publicKey: P256_PUB, deviceId: 'd', attestationTime: 1, certificateChain: ['c']})),
 				signDeviceKeyDigest: jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: P256_PUB, signature: 'sig'})),
 			},
@@ -526,7 +528,7 @@ describe('advanceReassociation', () => {
 		const transports = makeTransports({
 			associationTransport: {submitRequest: jest.fn(), submitAttestation, pollDecisions},
 		});
-		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), produce, signDeviceKeyDigest: jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: '', signature: 'sig'}))}});
+		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce, signDeviceKeyDigest: jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: '', signature: 'sig'}))}});
 
 		const result = await advanceReassociation(deps, 'Q', false);
 
@@ -585,7 +587,7 @@ describe('advanceReassociation', () => {
 		const transports = makeTransports({
 			associationTransport: {submitRequest: jest.fn(), submitAttestation: jest.fn(), pollDecisions},
 		});
-		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), produce, signDeviceKeyDigest: jest.fn()}});
+		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce, signDeviceKeyDigest: jest.fn()}});
 
 		const result = await advanceReassociation(deps, 'Q', true);
 		expect(produce).not.toHaveBeenCalled();
@@ -635,7 +637,7 @@ describe('advanceReassociation', () => {
 		const transports = makeTransports({
 			associationTransport: {submitRequest: jest.fn(), submitAttestation, pollDecisions},
 		});
-		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), produce, signDeviceKeyDigest: jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: '', signature: 'sig'}))}});
+		const deps = makeCeremonyDeps({transports, producer: {provisionDeviceKey: jest.fn(), getCurrentDeviceKey: jest.fn(), produce, signDeviceKeyDigest: jest.fn(async (): Promise<Signature> => ({signerUserId: '', signerKey: '', signature: 'sig'}))}});
 
 		const result = await advanceReassociation(deps, 'Q', false);
 		expect(result).toEqual({kind: 'pending', answered: true});
@@ -676,6 +678,49 @@ describe('advanceReassociation', () => {
 // -------------------------------------------------------------------------------------------
 // resolveReassociationResume
 // -------------------------------------------------------------------------------------------
+
+describe('63-18: lookups never create a device key', () => {
+	const absent = () => Object.assign(new Error('absent'), {code: 'DEVICE_KEY_ABSENT'});
+
+	test('code availability: DEVICE_KEY_ABSENT -> not-registered, with no engine read', async () => {
+		const deps = makeContinuityDeps({getCurrentDeviceKey: async () => { throw absent(); }});
+		expect(await resolveRegistrationCodeAvailability(deps)).toEqual({kind: 'not-registered'});
+		expect(deps.getEngine).not.toHaveBeenCalled();
+	});
+
+	test('code availability: any other key lookup failure stays unavailable', async () => {
+		const deps = makeContinuityDeps({
+			getCurrentDeviceKey: async () => { throw Object.assign(new Error('invalid'), {code: 'DEVICE_KEY_INVALIDATED'}); },
+		});
+		expect(await resolveRegistrationCodeAvailability(deps)).toEqual({kind: 'unavailable'});
+	});
+
+	test('reassociation resume and retired notice fail soft on an absent key (fresh / false)', async () => {
+		const deps = makeContinuityDeps({getCurrentDeviceKey: async () => { throw absent(); }});
+		expect(await resolveReassociationResume(deps)).toEqual({kind: 'fresh'});
+		expect(await resolveDeviceRetired({getEngine: deps.getEngine, getCurrentDeviceKey: deps.getCurrentDeviceKey, identityKeyState: async () => 'wrapped'})).toBe(false);
+	});
+
+	test('the three resolvers read the key through getCurrentDeviceKey exactly once each', async () => {
+		const getCurrentDeviceKey = jest.fn(async () => ({publicKey: P256_PUB}));
+		const deps = makeContinuityDeps({getCurrentDeviceKey});
+		await resolveRegistrationCodeAvailability(deps);
+		await resolveReassociationResume(deps);
+		await resolveDeviceRetired({getEngine: deps.getEngine, getCurrentDeviceKey, identityKeyState: async () => 'wrapped'});
+		expect(getCurrentDeviceKey).toHaveBeenCalledTimes(3);
+	});
+
+	test('source gate with negative control: continuity.ts contains no provisionDeviceKey( call; a planted one is detected', () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require('fs') as typeof import('fs');
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require('path') as typeof import('path');
+		const text = fs.readFileSync(path.join(__dirname, '..', 'continuity.ts'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+		const re = /\bprovisionDeviceKey\s*\(/;
+		expect(re.test(text)).toBe(false);
+		expect(re.test(text + '\nawait deps.provisionDeviceKey();')).toBe(true);
+	});
+});
 
 describe('resolveReassociationResume', () => {
 	test('an own sentinel \'p\' row resolves pending with its requestId', async () => {
@@ -751,10 +796,10 @@ describe('resolveDeviceRetired (D-41)', () => {
 	test('returns true iff getDeviceRetirement resolves a record', async () => {
 		const getDeviceRetirement = jest.fn(async () => ({deviceKey: P256_PUB, requestId: 'req-1', decidedAt: '2026-01-01T00:00:00.000Z'}));
 		const getEngine = jest.fn(async () => ({getDeviceRetirement}));
-		const provisionDeviceKey = jest.fn(async () => ({publicKey: P256_PUB}));
+		const getCurrentDeviceKey = jest.fn(async () => ({publicKey: P256_PUB}));
 
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const result = await resolveDeviceRetired({getEngine: getEngine as any, provisionDeviceKey, identityKeyState: async () => 'wrapped'});
+		const result = await resolveDeviceRetired({getEngine: getEngine as any, getCurrentDeviceKey, identityKeyState: async () => 'wrapped'});
 		expect(result).toBe(true);
 		expect(getDeviceRetirement).toHaveBeenCalledWith(P256_PUB);
 	});
@@ -762,33 +807,33 @@ describe('resolveDeviceRetired (D-41)', () => {
 	test('returns false when getDeviceRetirement resolves undefined', async () => {
 		const getDeviceRetirement = jest.fn(async () => undefined);
 		const getEngine = jest.fn(async () => ({getDeviceRetirement}));
-		const provisionDeviceKey = jest.fn(async () => ({publicKey: P256_PUB}));
+		const getCurrentDeviceKey = jest.fn(async () => ({publicKey: P256_PUB}));
 
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const result = await resolveDeviceRetired({getEngine: getEngine as any, provisionDeviceKey, identityKeyState: async () => 'wrapped'});
+		const result = await resolveDeviceRetired({getEngine: getEngine as any, getCurrentDeviceKey, identityKeyState: async () => 'wrapped'});
 		expect(result).toBe(false);
 	});
 
-	test('identity state \'absent\' returns false WITHOUT calling provisionDeviceKey or getEngine', async () => {
+	test('identity state \'absent\' returns false WITHOUT calling getCurrentDeviceKey or getEngine', async () => {
 		const getEngine = jest.fn();
-		const provisionDeviceKey = jest.fn();
+		const getCurrentDeviceKey = jest.fn();
 
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const result = await resolveDeviceRetired({getEngine: getEngine as any, provisionDeviceKey, identityKeyState: async () => 'absent'});
+		const result = await resolveDeviceRetired({getEngine: getEngine as any, getCurrentDeviceKey, identityKeyState: async () => 'absent'});
 		expect(result).toBe(false);
 		expect(getEngine).not.toHaveBeenCalled();
-		expect(provisionDeviceKey).not.toHaveBeenCalled();
+		expect(getCurrentDeviceKey).not.toHaveBeenCalled();
 	});
 
 	test('a thrown read returns false', async () => {
-		const provisionDeviceKey = jest.fn(async () => {
+		const getCurrentDeviceKey = jest.fn(async () => {
 			throw new Error('boom');
 		});
 
 		const result = await resolveDeviceRetired({
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			getEngine: jest.fn() as any,
-			provisionDeviceKey,
+			getCurrentDeviceKey,
 			identityKeyState: async () => 'wrapped',
 		});
 		expect(result).toBe(false);

@@ -64,6 +64,7 @@ import {
 import { createDeviceSigner, type SignCallback } from './device-signer'
 import { getOrCreateDeviceUser } from './device-user'
 import { resolveAttestationProducer } from './attestation-producer'
+import { isDeviceKeyAbsent } from './attestation-failure'
 import { SEED_REGISTERED_STATE_FIXTURE } from './proof-flags.generated'
 
 /** Display name used for the seeded device identity (voter + founding officer, one identity). */
@@ -121,7 +122,7 @@ function loadRegistrantAssociationSeeder(): SeedRegistrantAssociationFn | undefi
 /**
  * D-23(f)/D-23(b)/D-23(c) — seeds (or re-attaches to) the dev-only `registered`-state
  * fixture: a `Status = 'a'` `Registrant` and its matching `Association`, bound to the
- * SAME P-256 device key `resolveAttestationProducer().provisionDeviceKey()` returns
+ * SAME P-256 device key `resolveAttestationProducer().getCurrentDeviceKey()` returns
  * (resolved by CALLING the producer, never a hardcoded placeholder — D-23b), so a real
  * device-key round trip through `getAssociationsByDeviceKey` finds it.
  *
@@ -153,7 +154,17 @@ async function seedRegisteredAssociationFixture(
 	// be a silent no-op, never a throw.
 	if (!seedRegistrantAssociation) return;
 
-	const { publicKey: deviceKey } = await resolveAttestationProducer().provisionDeviceKey();
+	// Bind the association to the CURRENT key. `provisionDeviceKey` regenerates the key on Android, so
+	// calling it on a device that already has one would orphan the association (63-18). Create the
+	// key (once) only when none exists, i.e. a fresh install.
+	const producer = resolveAttestationProducer();
+	let deviceKey: string;
+	try {
+		deviceKey = (await producer.getCurrentDeviceKey()).publicKey;
+	} catch (err) {
+		if (!isDeviceKeyAbsent(err)) throw err;
+		deviceKey = (await producer.provisionDeviceKey()).publicKey;
+	}
 	await seedRegistrantAssociation(ctx, authorityId, { id: DEV_SEED_ASSOCIATION_REGISTRANT_ID }, deviceKey, sign);
 }
 

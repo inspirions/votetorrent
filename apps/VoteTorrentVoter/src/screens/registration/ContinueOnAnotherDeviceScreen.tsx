@@ -172,7 +172,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 
 				const resume = await resolveReassociationResume({
 					getEngine,
-					provisionDeviceKey: () => producer.provisionDeviceKey(),
+					getCurrentDeviceKey: () => producer.getCurrentDeviceKey(),
 				});
 				if (cancelled) return;
 				if (resume.kind === 'pending') {

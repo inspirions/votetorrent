@@ -60,7 +60,8 @@ const KEY_B = makeKey()
 
 function keyProducer (publicKey: string) {
 	return {
-		provisionDeviceKey: jest.fn(async () => ({ publicKey })),
+		provisionDeviceKey: jest.fn(async () => { throw new Error('a vote-casting lookup must never provision a device key (63-18)') }),
+		getCurrentDeviceKey: jest.fn(async () => ({ publicKey })),
 		produce: jest.fn(),
 		signDeviceKeyDigest: jest.fn(),
 	}
@@ -136,7 +137,7 @@ describe('vote eligibility over the real seeded engines', () => {
 		const producer = keyProducer(KEY_A.spki)
 		const r = await evaluate(s, producer, { nowMs: Date.now() })
 		expect(r).toMatchObject({ eligible: false, reason: 'window-closed' })
-		expect(producer.provisionDeviceKey).not.toHaveBeenCalled()
+		expect(producer.getCurrentDeviceKey).not.toHaveBeenCalled()
 	})
 
 	it('RE3 D-04: an empty selection refuses with the required questions', async () => {

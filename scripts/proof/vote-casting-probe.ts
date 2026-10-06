@@ -225,7 +225,7 @@ async function runProbe (env: ProbeEnv): Promise<void> {
 		await windowed('preflight', async () => {
 			const stubOk = resolveVoteSigningProducer() !== StubAttestationProducer && resolveAttestationProducer() !== StubAttestationProducer
 			const p = resolveVoteSigningProducer()
-			publicKey = (await p.provisionDeviceKey()).publicKey
+			publicKey = (await p.getCurrentDeviceKey()).publicKey
 			L('raw-key form=' + rawKeyForm(publicKey) + ' len=' + publicKey.length)
 			const rows = await (await getEngine<IAssociationEngine>('association')).getAssociationsByDeviceKey(publicKey)
 			const registrant = rows.length > 0 ? await (await getEngine<IRegistrationEngine>('registration')).getRegistrant(rows[0]!.registrantId) : undefined

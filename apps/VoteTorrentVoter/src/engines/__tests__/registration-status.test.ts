@@ -140,7 +140,7 @@ function makeTransports(
 }
 
 interface BuildDepsParams {
-	provisionDeviceKey?: RegistrationStatusDeps['provisionDeviceKey'];
+	getCurrentDeviceKey?: RegistrationStatusDeps['getCurrentDeviceKey'];
 	networkEngine?: ReturnType<typeof makeNetworkEngine>;
 	associationEngine?: ReturnType<typeof makeAssociationEngine>;
 	registrationEngine?: ReturnType<typeof makeRegistrationEngine>;
@@ -168,7 +168,7 @@ function buildDeps(params: BuildDepsParams = {}): RegistrationStatusDeps {
 
 	return {
 		getEngine: getEngine as unknown as RegistrationStatusDeps['getEngine'],
-		provisionDeviceKey: params.provisionDeviceKey ?? (async () => ({publicKey: DEVICE_KEY})),
+		getCurrentDeviceKey: params.getCurrentDeviceKey ?? (async () => ({publicKey: DEVICE_KEY})),
 		resolveTransports: params.resolveTransports,
 		electionId: params.electionId,
 	};
@@ -208,6 +208,31 @@ describe('resolveRegistrationStatus (D-06/D-23, four-outcome derived read)', () 
 		const result = await resolveRegistrationStatus(buildDeps({associationEngine, registrationEngine}));
 
 		expect(result).toEqual({kind: 'notRegistered', networkName: NETWORK_NAME});
+	});
+
+	test('63-18: no device key yet (DEVICE_KEY_ABSENT) resolves notRegistered with the network name, never provisioning a key', async () => {
+		const getCurrentDeviceKey = jest.fn(async () => {
+			throw Object.assign(new Error('absent'), {code: 'DEVICE_KEY_ABSENT'});
+		});
+		const associationEngine = makeAssociationEngine({rows: [makeAssociation('anyone')]});
+
+		const result = await resolveRegistrationStatus(buildDeps({getCurrentDeviceKey, associationEngine}));
+
+		expect(result).toEqual({kind: 'notRegistered', networkName: NETWORK_NAME});
+		expect(associationEngine.getAssociationsByDeviceKey).not.toHaveBeenCalled();
+	});
+
+	test('63-18: a permanently invalidated key (DEVICE_KEY_INVALIDATED) is indeterminate, not notRegistered', async () => {
+		const getCurrentDeviceKey = jest.fn(async () => {
+			throw Object.assign(new Error('invalid'), {code: 'DEVICE_KEY_INVALIDATED'});
+		});
+		const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await resolveRegistrationStatus(buildDeps({getCurrentDeviceKey}));
+			expect(result.kind).toBe('indeterminate');
+		} finally {
+			spy.mockRestore();
+		}
 	});
 
 	test('notRegistered (never registered): zero Association rows, no matching request, no transport resolves notRegistered', async () => {

@@ -54,12 +54,14 @@ import {createDeviceSigner} from './device-signer';
 import {getDeviceIdentityKeyState, getOrCreateDeviceUser} from './device-user';
 import type {DeviceIdentityKeyState} from './device-user';
 import type {AttestationProducer} from './attestation-producer';
+import {isDeviceKeyAbsent} from './attestation-failure';
 
 export interface ContinuityDeps {
 	/** `useVoterApp()`'s own composition-root read. */
 	getEngine: <T>(engineName: string, initParams?: unknown) => Promise<T>;
-	/** The P-256 device-key provisioner — pass `() => resolveAttestationProducer().provisionDeviceKey()`. */
-	provisionDeviceKey: () => Promise<{publicKey: string}>;
+	/** READ-ONLY current P-256 device-key lookup — pass `() => resolveAttestationProducer().getCurrentDeviceKey()`.
+	 * Never `provisionDeviceKey`: on Android that mints a NEW key on every call (63-18). */
+	getCurrentDeviceKey: () => Promise<{publicKey: string}>;
 	/** Defaults to `resolveVoterRequestTransports` — injected so every branch is testable without
 	 * the real P2P/strand transport source (D-28/D-32). */
 	resolveTransports?: (deps: VoterRequestTransportDeps) => Promise<VoterRequestTransports | undefined>;
@@ -90,7 +92,14 @@ export async function resolveRegistrationCodeAvailability(
 	deps: ContinuityDeps,
 ): Promise<RegistrationCodeAvailability> {
 	try {
-		const {publicKey: p256DeviceKey} = await deps.provisionDeviceKey();
+		let p256DeviceKey: string;
+		try {
+			({publicKey: p256DeviceKey} = await deps.getCurrentDeviceKey());
+		} catch (err) {
+			// No device key yet (fresh install) means nothing was ever registered — never create one here.
+			if (isDeviceKeyAbsent(err)) return {kind: 'not-registered'};
+			throw err;
+		}
 
 		const network = await deps.getEngine<INetworkEngine>('network');
 		const details = await network.getDetails();
@@ -375,7 +384,7 @@ export type ReassociationResume =
  */
 export async function resolveReassociationResume(deps: ContinuityDeps): Promise<ReassociationResume> {
 	try {
-		const {publicKey: p256DeviceKey} = await deps.provisionDeviceKey();
+		const {publicKey: p256DeviceKey} = await deps.getCurrentDeviceKey();
 
 		const network = await deps.getEngine<INetworkEngine>('network');
 		const details = await network.getDetails();
@@ -406,12 +415,12 @@ export async function resolveReassociationResume(deps: ContinuityDeps): Promise<
 /**
  * D-41: the old device's own read of whether it has been retired by a completed re-association.
  * Fail-open (`false`) on any read error — the actual security property is enforced by the deleted
- * `Association` row, not by this notice (T-62-28-07). Never calls `provisionDeviceKey`/`getEngine`
+ * `Association` row, not by this notice (T-62-28-07). Never calls `getCurrentDeviceKey`/`getEngine`
  * when the identity key state is `'absent'` (a never-registered phone does no hardware-key
  * provisioning at app open).
  */
 export async function resolveDeviceRetired(
-	deps: Pick<ContinuityDeps, 'getEngine' | 'provisionDeviceKey'> & {
+	deps: Pick<ContinuityDeps, 'getEngine' | 'getCurrentDeviceKey'> & {
 		identityKeyState?: () => Promise<DeviceIdentityKeyState>;
 	},
 ): Promise<boolean> {
@@ -422,7 +431,7 @@ export async function resolveDeviceRetired(
 			return false;
 		}
 
-		const {publicKey: p256DeviceKey} = await deps.provisionDeviceKey();
+		const {publicKey: p256DeviceKey} = await deps.getCurrentDeviceKey();
 		const association = await deps.getEngine<IReassociationEngine>('association');
 		// No `source` argument — the established ctx's own replicated `AssociationDecision` table is
 		// the read, per 62-18.

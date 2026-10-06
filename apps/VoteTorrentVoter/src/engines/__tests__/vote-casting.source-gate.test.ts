@@ -74,9 +74,11 @@ describe('vote-casting eligibility source gate', () => {
 
 	it('SG2 resolveVotingRegistrant carries the whole D-06 / D-07 read chain', () => {
 		const slice = sliceFunction(SOURCE, 'resolveVotingRegistrant')
-		for (const needle of ['provisionDeviceKey(', 'getAssociationsByDeviceKey(', 'getRegistrant(', "status === 'a'", 'checkVotingKey(']) {
+		for (const needle of ['getCurrentDeviceKey(', 'getAssociationsByDeviceKey(', 'getRegistrant(', "status === 'a'", 'checkVotingKey(']) {
 			expect(slice).toContain(needle)
 		}
+		// 63-18: the lookup is read-only. A creating call here rotates the Android key.
+		expect(slice).not.toContain('.provisionDeviceKey(')
 	})
 
 	it('SG2 evaluateVoteEligibility resolves the producer lazily, after the selection gate', () => {

@@ -64,7 +64,8 @@ const KEY_A = makeKey()
 
 function keyProducer (key = KEY_A) {
 	return {
-		provisionDeviceKey: jest.fn(async () => ({ publicKey: key.spki })),
+		provisionDeviceKey: jest.fn(async () => { throw new Error('a vote-casting lookup must never provision a device key (63-18)') }),
+		getCurrentDeviceKey: jest.fn(async () => ({ publicKey: key.spki })),
 		produce: jest.fn(),
 		signDeviceKeyDigest: jest.fn(async (digest: Uint8Array) => ({
 			signature: bytesToHex(p256.sign(digest, key.sk)),

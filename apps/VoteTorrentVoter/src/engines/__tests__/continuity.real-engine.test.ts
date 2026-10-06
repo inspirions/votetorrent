@@ -140,7 +140,7 @@ describe('resolveRegistrationCodeAvailability against the real engines (V-5)', (
 				if (name in engines) return engines[name]
 				throw new Error(`unexpected engine ${name}`)
 			}) as never,
-			provisionDeviceKey: async () => ({ publicKey: 'p256-device-key' }),
+			getCurrentDeviceKey: async () => ({ publicKey: 'p256-device-key' }),
 			resolveTransports: async () =>
 				({
 					registrationTransport: {},

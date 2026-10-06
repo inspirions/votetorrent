@@ -13,9 +13,10 @@ import { NoElectionError, type VoteContext } from '../election-read'
 import type { AttestationProducer } from '../attestation-producer'
 import type { VoteGuardResult } from '../vote-record-store'
 
-const mockProducers: Array<{ provisionDeviceKey: jest.Mock; produce: jest.Mock; signDeviceKeyDigest: jest.Mock }> = []
+const mockProducers: Array<{ provisionDeviceKey: jest.Mock; getCurrentDeviceKey: jest.Mock; produce: jest.Mock; signDeviceKeyDigest: jest.Mock }> = []
 const mockCreateRealAttestationProducer = jest.fn((_opts: { enablePlayIntegrity: boolean }) => ({
 	provisionDeviceKey: jest.fn(),
+	getCurrentDeviceKey: jest.fn(),
 	produce: jest.fn(),
 	signDeviceKeyDigest: jest.fn(),
 }))
@@ -101,7 +102,8 @@ function ctxOf (overrides: Partial<VoteContext> = {}): VoteContext {
 
 function fakeProducer (publicKey: string | (() => Promise<{ publicKey: string }>)) {
 	const p = {
-		provisionDeviceKey: jest.fn(typeof publicKey === 'function' ? publicKey : async () => ({ publicKey })),
+		provisionDeviceKey: jest.fn(async () => { throw new Error('a vote-casting lookup must never provision a device key (63-18)') }),
+		getCurrentDeviceKey: jest.fn(typeof publicKey === 'function' ? publicKey : async () => ({ publicKey })),
 		produce: jest.fn(),
 		signDeviceKeyDigest: jest.fn(),
 	}
@@ -220,7 +222,7 @@ describe('E1 D-01 window', () => {
 		expect(r.lifecycleState).toBe(state)
 		expect(h.readContext).toHaveBeenCalledTimes(1)
 		expect(h.readContext).toHaveBeenCalledWith({ getEngine: h.deps.getEngine, fallbackElectionId: 'fb-1' }, 1234)
-		expect(h.producer.provisionDeviceKey).not.toHaveBeenCalled()
+		expect(h.producer.getCurrentDeviceKey).not.toHaveBeenCalled()
 		expect(h.engines.requested).toEqual([])
 		expect(h.guard).not.toHaveBeenCalled()
 	})
@@ -282,7 +284,7 @@ describe('E5 selection-invalid', () => {
 		const h = happy({ selectionMap: { ...GOOD_SELECTION, 'b-9:q-x': ['b-9:q-x:x'] } })
 		const r = expectRefusal(await evaluateVoteEligibility(h.deps), 'selection-invalid')
 		expect(r.questions).toEqual([])
-		expect(h.producer.provisionDeviceKey).not.toHaveBeenCalled()
+		expect(h.producer.getCurrentDeviceKey).not.toHaveBeenCalled()
 	})
 	it('an empty selection for an unknown office is ignored', async () => {
 		expectEligible(await evaluateVoteEligibility(happy({ selectionMap: { ...GOOD_SELECTION, 'b-9:q-x': [] } }).deps))
@@ -345,14 +347,32 @@ describe('E8 R-3 all blank', () => {
 describe('E9 D-06 registered device', () => {
 	const rowA: Row = { registrantId: 'r-1', deviceKey: KEY_A.compressed }
 
-	it('provisionDeviceKey rejecting -> device-check-failed', async () => {
+	it('getCurrentDeviceKey rejecting -> device-check-failed', async () => {
 		const h = happy()
-		h.producer.provisionDeviceKey.mockRejectedValue(new Error('native'))
+		h.producer.getCurrentDeviceKey.mockRejectedValue(new Error('native'))
 		expectRefusal(await evaluateVoteEligibility(h.deps), 'device-check-failed')
+	})
+	it('DEVICE_KEY_ABSENT -> not-registered, and never provisions a key (63-18)', async () => {
+		const h = happy()
+		h.producer.getCurrentDeviceKey.mockRejectedValue(Object.assign(new Error('absent'), { code: 'DEVICE_KEY_ABSENT' }))
+		expectRefusal(await evaluateVoteEligibility(h.deps), 'not-registered')
+		expect(h.producer.provisionDeviceKey).not.toHaveBeenCalled()
+		expect(h.engines.requested).toEqual([])
+	})
+	it('DEVICE_KEY_INVALIDATED -> device-key-rotated, and never provisions a key (63-18)', async () => {
+		const h = happy()
+		h.producer.getCurrentDeviceKey.mockRejectedValue(Object.assign(new Error('invalid'), { code: 'DEVICE_KEY_INVALIDATED' }))
+		expectRefusal(await evaluateVoteEligibility(h.deps), 'device-key-rotated')
+		expect(h.producer.provisionDeviceKey).not.toHaveBeenCalled()
+	})
+	it('a lookup that DOES provision is caught by the spy (negative control)', async () => {
+		const h = happy()
+		await h.producer.provisionDeviceKey().catch(() => undefined)
+		expect(h.producer.provisionDeviceKey).toHaveBeenCalledTimes(1)
 	})
 	it('an empty public key -> device-check-failed', async () => {
 		const h = happy()
-		h.producer.provisionDeviceKey.mockResolvedValue({ publicKey: '' })
+		h.producer.getCurrentDeviceKey.mockResolvedValue({ publicKey: '' })
 		expectRefusal(await evaluateVoteEligibility(h.deps), 'device-check-failed')
 	})
 	it('the association read rejecting -> device-check-failed', async () => {
@@ -398,7 +418,7 @@ describe('E10 D-07 key check', () => {
 	})
 	it('the stub key on both sides -> unreadable-key', async () => {
 		const h = happy({ engines: { rows: [{ registrantId: 'r-1', deviceKey: STUB_KEY }], registrants: { 'r-1': activeReg('r-1') } } })
-		h.producer.provisionDeviceKey.mockResolvedValue({ publicKey: STUB_KEY })
+		h.producer.getCurrentDeviceKey.mockResolvedValue({ publicKey: STUB_KEY })
 		expectRefusal(await evaluateVoteEligibility(h.deps), 'unreadable-key')
 		expect(h.guard).not.toHaveBeenCalled()
 	})
@@ -429,7 +449,7 @@ describe('E12 identity', () => {
 		const r = expectEligible(await evaluateVoteEligibility(h.deps))
 		expect(r.voter).toEqual({ registrantId: 'r-1', privateCid: 'priv-r-1', publicCid: null, attestationCid: null, currentDeviceKey: KEY_A.spki, compressedDeviceKey: KEY_A.compressed })
 		expect(r.producer).toBe(h.producer)
-		expect(h.producer.provisionDeviceKey).toHaveBeenCalledTimes(1)
+		expect(h.producer.getCurrentDeviceKey).toHaveBeenCalledTimes(1)
 	})
 	it('present cids are carried', async () => {
 		const h = happy({ engines: { rows: [{ registrantId: 'r-1', deviceKey: KEY_A.compressed, attestationCid: 'att-1' }], registrants: { 'r-1': activeReg('r-1', { publicCid: 'pub-1' }) } } })
@@ -463,7 +483,7 @@ describe('E13 gate order', () => {
 			guardResult: 'already-saved',
 			...(failing('election-unavailable') ? { readContext: jest.fn(async () => { throw new Error('x') }) } : {}),
 		})
-		h.producer.provisionDeviceKey.mockImplementation(async () => {
+		h.producer.getCurrentDeviceKey.mockImplementation(async () => {
 			if (failing('device-check-failed') && i === 9) throw new Error('native')
 			return { publicKey: stubMode ? STUB_KEY : KEY_A.spki }
 		})
@@ -472,18 +492,18 @@ describe('E13 gate order', () => {
 	it.each(VOTE_INELIGIBLE_REASONS.map((reason, i) => [reason, i] as const))('%s is the first refusal (#%d)', async (reason, i) => {
 		const h = build(i)
 		expectRefusal(await evaluateVoteEligibility(h.deps), reason)
-		if (i <= VOTE_INELIGIBLE_REASONS.indexOf('below-minimum')) expect(h.producer.provisionDeviceKey).not.toHaveBeenCalled()
+		if (i <= VOTE_INELIGIBLE_REASONS.indexOf('below-minimum')) expect(h.producer.getCurrentDeviceKey).not.toHaveBeenCalled()
 		if (i <= VOTE_INELIGIBLE_REASONS.indexOf('unreadable-key')) expect(h.guard).not.toHaveBeenCalled()
 	})
 })
 
 describe('E14 producer resolution', () => {
 	it('an override that cannot sign rejects loudly once gates 1-5 pass', async () => {
-		const h = happy({ producer: { provisionDeviceKey: async () => ({ publicKey: KEY_A.spki }), produce: jest.fn() } as unknown as AttestationProducer })
+		const h = happy({ producer: { getCurrentDeviceKey: async () => ({ publicKey: KEY_A.spki }), produce: jest.fn() } as unknown as AttestationProducer })
 		await expect(evaluateVoteEligibility(h.deps)).rejects.toThrow(/cannot sign/)
 	})
 	it('the same override with the window closed still refuses window-closed (lazy)', async () => {
-		const h = happy({ ctx: { open: false }, producer: { provisionDeviceKey: async () => ({ publicKey: KEY_A.spki }), produce: jest.fn() } as unknown as AttestationProducer })
+		const h = happy({ ctx: { open: false }, producer: { getCurrentDeviceKey: async () => ({ publicKey: KEY_A.spki }), produce: jest.fn() } as unknown as AttestationProducer })
 		expectRefusal(await evaluateVoteEligibility(h.deps), 'window-closed')
 	})
 	it('an omitted producer is the real one, created exactly once', async () => {
@@ -494,7 +514,7 @@ describe('E14 producer resolution', () => {
 		const r = expectEligible(await evaluateVoteEligibility(rest))
 		expect(mockCreateRealAttestationProducer).toHaveBeenCalledTimes(1)
 		expect(r.producer).toBe(real)
-		expect(real.provisionDeviceKey).toHaveBeenCalledTimes(1)
+		expect(real.getCurrentDeviceKey).toHaveBeenCalledTimes(1)
 	})
 })
 
