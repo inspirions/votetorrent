@@ -247,12 +247,14 @@ describe('D-27: engine reads join the Keyholder table', () => {
 
     const carol = await readAcceptedKeyholder(elec.ctx, carolCid)
     const irRow = await elec.ctx.db.prepare('select InviteSignature from InviteResult where SlotCid = :cid').get({ cid: carolCid })
+    const slotRow = await elec.ctx.db.prepare('select Expiration from InviteSlot where Cid = :cid').get({ cid: carolCid })
 
     const details = await elec.electionEngine.getElectionDetails()
     expect(details.current.keyholders).to.deep.equal([
       {
         invite: { name: 'Carol Keyholder' },
         result: { isAccepted: true, invitationSignature: irRow!.InviteSignature as string, invokedId: carol.userId },
+        sent: { state: 'answered', expiration: String(slotRow!.Expiration) },
       },
     ])
 
@@ -274,12 +276,14 @@ describe('D-27: engine reads join the Keyholder table', () => {
 
     const alice = await readAcceptedKeyholder(auth.ctx, aliceCid)
     const irRow = await auth.ctx.db.prepare('select InviteSignature from InviteResult where SlotCid = :cid').get({ cid: aliceCid })
+    const slotRow = await auth.ctx.db.prepare('select Expiration from InviteSlot where Cid = :cid').get({ cid: aliceCid })
 
     const details = await electionEngine.getElectionDetails()
     expect(details.current.keyholders, 'invitee-JSON order preserved, no duplicate Alice entry').to.have.length(2)
     expect(details.current.keyholders[0]).to.deep.equal({
       invite: { name: 'Alice Keyholder' },
       result: { isAccepted: true, invitationSignature: irRow!.InviteSignature as string, invokedId: alice.userId },
+      sent: { state: 'answered', expiration: String(slotRow!.Expiration) },
     })
     expect(details.current.keyholders[1], 'Bob is still pending — no result').to.deep.equal({
       invite: { name: 'Bob Keyholder' },
