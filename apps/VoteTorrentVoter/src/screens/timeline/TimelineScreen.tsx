@@ -130,7 +130,7 @@ export default function TimelineScreen() {
 	// D-06/SHELL-03 (mirrors HomeScreen.tsx): every screen routes through useVoterApp() — no
 	// inline mock-data-module import, and no direct election-record read either (D-04 read-scope
 	// fence: this screen touches only the engine chain below).
-	const {getEngine, seededElectionId} = useVoterApp();
+	const {getEngine, seededElectionId, clockOffsetMs, setClockOffsetMs, nowMs: readSharedNowMs} = useVoterApp();
 	const {colors, fonts, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('timeline');
 	const {t: tCommon} = useTranslation('common');
@@ -156,21 +156,20 @@ export default function TimelineScreen() {
 	// not a push, and no new i18n key.
 	const [dialogStageId, setDialogStageId] = useState<TimelineStageId | null>(null);
 
-	// D-05: the __DEV__-only clock-offset control. `clockOffsetMs` (0 = live) is the ONLY thing
-	// the control ever touches -- it shifts the `now` the rail compares against and nothing else
-	// (never the timeline blob, never the engine read, never a write). `clockStopIndex` is the
-	// cycling position (0 = live, 1..N = the Nth present stage stop in D-09 order) -- tracked
-	// separately from the offset value itself because the offset is recomputed fresh at each
-	// press (`instant + 60_000 - Date.now()` at press time, so a later effect run still lands
-	// close to `instant + 60_000` regardless of how long the re-fetch that follows takes), and an
-	// index survives that recomputation exactly while a raw offset value would not.
-	const [clockOffsetMs, setClockOffsetMs] = useState(0);
+	// D-05/D-02: the __DEV__-only clock-offset control. The offset (0 = live) now lives in
+	// VoterAppProvider (D-02), so Home and the vote window gate see the same clock; the control only
+	// ever moves that shared offset -- it shifts the `now` the rail compares against and nothing else
+	// (never the timeline blob, never the engine read, never a write). `clockStopIndex` stays
+	// component-local control-UI state: the cycling position (0 = live, 1..N = the Nth present stage
+	// stop in D-09 order), tracked separately from the offset value because the offset is recomputed
+	// fresh at each press. If the Timeline remounts with a non-zero shared offset, `clockStopIndex`
+	// restarts at 0 and the existing IN-05 branch labels the live offset (`+N`), never as live.
 	const [clockStopIndex, setClockStopIndex] = useState(0);
 
-	// Recomputed on every clockOffsetMs/reloadNonce change, using Date.now() AT THAT MOMENT --
-	// never read once and cached, per the "no ambient clock capture" spirit this screen owns
-	// (deriveTimeline itself never reads the clock; this is the one place that does, exactly
-	// once per state change).
+	// Recomputed on every clockOffsetMs/reloadNonce change, from the provider's shared __DEV__ clock
+	// (D-02) AT THAT MOMENT -- never read once and cached, per the "no ambient clock capture" spirit
+	// this screen owns (deriveTimeline itself never reads the clock; this is the one place that
+	// does, exactly once per state change).
 	// WR-10: `reloadNonce` is a deliberate CACHE-BUSTING dependency -- it is intentionally not
 	// referenced in the callback body, which is exactly why the rule flags it. Do NOT "fix" this by
 	// deleting the dep: `nowMs` would then stay frozen across a pull-to-reload whenever
@@ -179,7 +178,7 @@ export default function TimelineScreen() {
 	// there for the same reason). No test covers reload freshness today, so this comment is the
 	// only thing standing between that dep and a well-meaning lint cleanup.
 	// eslint-disable-next-line react-hooks/exhaustive-deps
-	const nowMs = useMemo(() => Date.now() + clockOffsetMs, [clockOffsetMs, reloadNonce]);
+	const nowMs = useMemo(() => readSharedNowMs(), [readSharedNowMs, clockOffsetMs, reloadNonce]);
 
 	// CR-01: resolved once per mount, never re-read per render -- the device's zone does not
 	// change mid-session, and re-invoking `Intl.DateTimeFormat` on every render would be wasted

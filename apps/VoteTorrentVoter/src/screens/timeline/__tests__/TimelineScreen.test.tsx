@@ -194,14 +194,34 @@ jest.mock('../../../engines/attestation-producer', () => ({
 
 let mockSeededElectionId: string | undefined = SEEDED_ELECTION_ID;
 
+const mockSetClockOffsetMs = jest.fn();
+
 jest.mock('../../../providers/VoterAppProvider', () => ({
-	useVoterApp: () => ({
-		getEngine: mockGetEngine,
-		getElection: mockGetElection,
-		get seededElectionId() {
-			return mockSeededElectionId;
-		},
-	}),
+	useVoterApp: () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const {useState, useCallback} = jest.requireActual('react');
+		const [clockOffsetMs, setOffset] = useState(0);
+		const dev = () => (globalThis as {__DEV__?: boolean}).__DEV__ === true;
+		// stable identities per offset, like the real provider's useCallbacks (an unstable nowMs
+		// would re-fire the screen's read effect every render).
+		const setClockOffsetMs = useCallback((ms: number) => {
+			mockSetClockOffsetMs(ms);
+			if (dev() && Number.isFinite(ms)) {
+				setOffset(ms);
+			}
+		}, []);
+		const nowMs = useCallback(() => Date.now() + (dev() ? clockOffsetMs : 0), [clockOffsetMs]);
+		return {
+			getEngine: mockGetEngine,
+			getElection: mockGetElection,
+			get seededElectionId() {
+				return mockSeededElectionId;
+			},
+			clockOffsetMs,
+			setClockOffsetMs,
+			nowMs,
+		};
+	},
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -498,6 +518,53 @@ describe('TimelineScreen — D-04/D-12 read-scope source fence', () => {
 		for (const forbidden of ['ElectionCard', 'mockData', 'devLifecycleFixtures', 'LIFECYCLE_CONTENT', 'keysReleased', 'checksComplete']) {
 			expect(source).not.toContain(forbidden);
 		}
+	});
+});
+
+function stripCommentsPreservingLines(src: string): string {
+	const noBlock = src.replace(/\/\*[\s\S]*?\*\//g, block => block.replace(/[^\n]/g, ' '));
+	return noBlock.replace(/\/\/.*$/gm, '');
+}
+
+/** D-02: returns the list of violations of the shared-clock contract in a TimelineScreen source. */
+function sharedClockViolations(rawSource: string): string[] {
+	const source = stripCommentsPreservingLines(rawSource);
+	const violations: string[] = [];
+	if (/\[\s*clockOffsetMs\s*,\s*setClockOffsetMs\s*\]\s*=\s*useState/.test(source)) {
+		violations.push('local clockOffsetMs useState');
+	}
+	if (source.includes('Date.now() + clockOffsetMs')) {
+		violations.push('Date.now() + clockOffsetMs');
+	}
+	const destructure = /const\s*\{([^}]*)\}\s*=\s*useVoterApp\(\)/.exec(source);
+	for (const name of ['clockOffsetMs', 'setClockOffsetMs', 'nowMs']) {
+		if (!destructure || !new RegExp(`\\b${name}\\b`).test(destructure[1])) {
+			violations.push(`useVoterApp() does not name ${name}`);
+		}
+	}
+	return violations;
+}
+
+describe('TimelineScreen — shared __DEV__ clock source fence (D-02)', () => {
+	it('the screen holds no local clock offset state and reads the shared clock', () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require('fs');
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require('path');
+		const source: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
+		expect(sharedClockViolations(source)).toEqual([]);
+	});
+
+	it('self-check: a planted local-clock source is reported', () => {
+		const planted = [
+			'const {getEngine} = useVoterApp();',
+			'const [clockOffsetMs, setClockOffsetMs] = useState(0);',
+			'const nowMs = useMemo(() => Date.now() + clockOffsetMs, [clockOffsetMs]);',
+		].join('\n');
+		const found = sharedClockViolations(planted);
+		expect(found).toContain('local clockOffsetMs useState');
+		expect(found).toContain('Date.now() + clockOffsetMs');
+		expect(found.length).toBeGreaterThanOrEqual(3);
 	});
 });
 
@@ -819,6 +886,26 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
 		expect(textOf(label)).toContain('0');
 		expect(currentStageId(tr)).toBeUndefined();
+	});
+
+	it('a press moves the SHARED clock through setClockOffsetMs with a finite non-zero offset (D-02)', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+		await pressClockOffset(tr);
+		expect(mockSetClockOffsetMs).toHaveBeenCalled();
+		const arg = mockSetClockOffsetMs.mock.calls[mockSetClockOffsetMs.mock.calls.length - 1][0];
+		expect(Number.isFinite(arg)).toBe(true);
+		expect(arg).not.toBe(0);
+	});
+
+	it('wrapping back to live sets the shared offset to exactly 0 (D-02)', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+		// stages + final-day probe + the wrap back to live (same cycle the WR-01 probe test walks)
+		for (let i = 0; i < TIMELINE_STAGE_IDS.length + 2; i++) {
+			await pressClockOffset(tr);
+		}
+		expect(mockSetClockOffsetMs.mock.calls[mockSetClockOffsetMs.mock.calls.length - 1][0]).toBe(0);
 	});
 
 	it('walking the full press cycle makes each of the ten stages current exactly once, collected as a SET (D-09) -- not a spot check', async () => {
