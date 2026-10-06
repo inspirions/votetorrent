@@ -65,6 +65,19 @@ function isUserCancel(err: unknown): boolean {
 	return picker.isErrorWithCode(err) && err.code === picker.errorCodes.OPERATION_CANCELED;
 }
 
+/**
+ * `isUserCancel` for a catch block: if the picker module itself cannot load (the very failure that
+ * may have landed us in the catch), the check must not throw again out of the catch (IN-07). A
+ * failed check is "not a cancel", so the caller reports the error.
+ */
+function isUserCancelSafe(err: unknown): boolean {
+	try {
+		return isUserCancel(err);
+	} catch {
+		return false;
+	}
+}
+
 function logExportFailure(err: unknown): void {
 	const code = (err as { code?: unknown } | null | undefined)?.code;
 	const token = typeof code === "string" ? code : "failed";
@@ -191,9 +204,12 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 				await Share.share({ url: file.uri, title: file.fileName });
 			}
 		} catch (err) {
-			// A dismissed share sheet is not an error; any real failure routes to the error state.
+			// RN's Share.share resolves on dismissal ({ action: "dismissedAction" }) and never rejects
+			// for it, and the Android file share resolves once the chooser launches, so every
+			// rejection here is a real failure (a FileShareError or not) and must reach the error
+			// state rather than leave the tap doing nothing (WR-05).
 			logExportFailure(err);
-			if (mountedRef.current && err instanceof FileShareError) {
+			if (mountedRef.current) {
 				setErrorMessage(undefined);
 				setState("error");
 			}
@@ -221,7 +237,7 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 			}
 			setSavedNotice(true);
 		} catch (err) {
-			if (isUserCancel(err)) return;
+			if (isUserCancelSafe(err)) return;
 			logExportFailure(err);
 			if (mountedRef.current) {
 				setErrorMessage(undefined);
