@@ -82,6 +82,11 @@ const GROUPS: readonly Group[] = [
 			"networkFoundingExportGenerating",
 			"networkFoundingImportViewNetworkButton",
 			"networkFoundingImportChooseAnotherFileButton",
+			"networkFoundingExportReadyBody",
+			"networkFoundingExportSaveButton",
+			"networkFoundingExportSaved",
+			"networkFoundingExportDoneButton",
+			"networkFoundingExportTextFallback",
 		],
 	],
 	[
