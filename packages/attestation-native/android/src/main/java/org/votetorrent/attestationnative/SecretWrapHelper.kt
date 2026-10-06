@@ -6,7 +6,9 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import android.security.keystore.UserNotAuthenticatedException
 import android.util.Log
+import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -44,6 +46,30 @@ internal fun authWindowSecondsOrNull(raw: Double, requireAuth: Boolean): Int? {
 	return raw.toInt()
 }
 
+/**
+ * D-14 / A3: the auth window an existing key actually carries, as a number comparable with the
+ * requested `authWindowSeconds` (0 = per-use). A key with no user-auth requirement, or with a raw
+ * `KeyInfo.userAuthenticationValidityDurationSeconds` of 0 or less, is per-use, so the result is 0.
+ * Otherwise the result is the raw value. Android documents -1 for keys that need authentication on
+ * every use, and some implementations may report 0 for `setUserAuthenticationParameters(0, ...)`;
+ * this rule maps both to per-use, so it is correct whichever way per-use is reported.
+ *
+ * The authenticator TYPE is deliberately NOT compared: a key created on API < 30 with a validity
+ * duration reads back as biometric-or-credential after an OS upgrade to API 30+, and comparing the
+ * type would turn an OS upgrade into a permanent policy mismatch (a lost vote record).
+ */
+internal fun observedAuthWindowSeconds(isUserAuthenticationRequired: Boolean, rawValiditySeconds: Int): Int {
+	if (!isUserAuthenticationRequired || rawValiditySeconds <= 0) return 0
+	return rawValiditySeconds
+}
+
+/** D-14 A3 read-back: logs the RAW `KeyInfo` validity value on every existing-alias check. */
+private const val TAG_WRAP_KEY_POLICY = "VtWrapKeyPolicy"
+
+/** D-14 windowed-path observability: closed `path` tokens only (no-prompt, prompted,
+ * reinit-unauthenticated). */
+private const val TAG_WRAP_WINDOW = "VtWrapWindow"
+
 /** D-07-style rung observability for the wrap-key StrongBox->TEE ladder, distinct from
  * [KeyAttestationHelper]'s `VtKeygenRung` tag (different keys, same reasoning). */
 private const val TAG_WRAP_KEY_RUNG = "VtWrapKeyRung"
@@ -52,7 +78,7 @@ private const val TAG_WRAP_KEY_RUNG = "VtWrapKeyRung"
 class InvalidWrapKeyAliasException(alias: String) : Exception("invalid wrap key alias: $alias")
 
 /** Typed exception mapping to `WRAP_KEY_POLICY_MISMATCH` — an existing alias's stored
- * auth policy (or key type) does not match the caller's `requireAuth` request. Never silently
+ * auth policy (requireAuth and window, or key type) does not match the caller's `requireAuth` request. Never silently
  * downgraded/upgraded (T-62-08-11). */
 class WrapKeyPolicyMismatchException(message: String) : Exception(message)
 
@@ -73,6 +99,19 @@ class NoWrapKeyException(alias: String) : Exception("no wrap key under alias $al
  * `deleteEntry` call anywhere, and [getOrCreateKey] NEVER regenerates an alias that already
  * exists — it returns the existing key, or rejects `WRAP_KEY_POLICY_MISMATCH` if the existing
  * key's auth policy does not match the request.
+ *
+ * **D-14 (Phase 63) time-bound mode.** `authWindowSeconds > 0` is legal only with `requireAuth`;
+ * its only caller is the vote-record alias, with R-5's 10 s window. The key is created time-bound:
+ * `setUserAuthenticationParameters(n, AUTH_BIOMETRIC_STRONG)` on API >= 30 and
+ * `setUserAuthenticationValidityDurationSeconds(n)` on API < 30. On API < 30 that also admits a
+ * device credential (assumption A2, unproven; the device proof covers one API-37 AVD). Use is
+ * try-init-first: `Cipher.init` runs with no prompt, and on `UserNotAuthenticatedException` there
+ * is exactly ONE BIOMETRIC_STRONG prompt WITHOUT a CryptoObject, then exactly one re-init. Per-use
+ * keys need a CryptoObject; time-bound keys accept a recent authentication (the D-26 precedent).
+ * Do not mix the two. The residual: inside the window, any code in this app's process can use the
+ * key; this is D-14's accepted trade. Windows remain forbidden for the P-256 signing and recovery
+ * keys (KeyAttestationHelper D-10/D-26a); this mode exists only for wrap aliases. One alias = one
+ * policy (requireAuth AND window), enforced through [observedAuthWindowSeconds].
  */
 class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 
@@ -81,7 +120,7 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 	/** Get-or-create the AES-256-GCM wrap key under [alias]. Serialized so a concurrent
 	 * create/create race can never generate two keys under the same alias (T-62-08-03). */
 	@Synchronized
-	fun getOrCreateKey(alias: String, requireAuth: Boolean): Pair<SecretKey, String> {
+	fun getOrCreateKey(alias: String, requireAuth: Boolean, authWindowSeconds: Int): Pair<SecretKey, String> {
 		if (!WRAP_KEY_ALIAS_PATTERN.matches(alias)) {
 			throw InvalidWrapKeyAliasException(alias)
 		}
@@ -102,13 +141,22 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 						"but this call requested requireAuth=$requireAuth",
 				)
 			}
+			val raw = keyInfo.userAuthenticationValidityDurationSeconds
+			val observed = observedAuthWindowSeconds(keyInfo.isUserAuthenticationRequired, raw)
+			Log.i(TAG_WRAP_KEY_POLICY, "alias=$alias requireAuth=${keyInfo.isUserAuthenticationRequired} rawValiditySeconds=$raw observedWindow=$observed requestedWindow=$authWindowSeconds")
+			if (observed != authWindowSeconds) {
+				throw WrapKeyPolicyMismatchException(
+					"alias $alias was created with authWindowSeconds=$observed, " +
+						"but this call requested authWindowSeconds=$authWindowSeconds",
+				)
+			}
 			return secretKey to resolveSecurityLevel(keyInfo)
 		}
 
-		return generateKey(alias, requireAuth)
+		return generateKey(alias, requireAuth, authWindowSeconds)
 	}
 
-	private fun buildSpec(alias: String, requireAuth: Boolean, strongBox: Boolean): KeyGenParameterSpec {
+	private fun buildSpec(alias: String, requireAuth: Boolean, authWindowSeconds: Int, strongBox: Boolean): KeyGenParameterSpec {
 		val builder = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
 			.setBlockModes(KeyProperties.BLOCK_MODE_GCM)
 			.setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
@@ -116,15 +164,24 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 			.setRandomizedEncryptionRequired(true)
 			// D-42/Pitfall 2: the identity alias passes requireAuth=false — protection here is
 			// against EXTRACTION (a rooted device / backup / stolen RKStorage file), not against
-			// use by whoever already holds the unlocked device. NEVER
-			// setUserAuthenticationValidityDurationSeconds — an auth-per-use-or-never contract
-			// only, matching D-10's reasoning for the P-256 signing keys.
+			// use by whoever already holds the unlocked device. A
+			// requireAuth=false alias never gets any auth setting; a validity duration is used ONLY
+			// by the D-14 windowed branch below API 30 (see the class comment).
 			.setUserAuthenticationRequired(requireAuth)
 		if (requireAuth) {
 			// Only the auth-required branch (e.g. 62-26's keyholder-share alias) sets these —
 			// the D-42 identity alias (requireAuth=false) never does.
 			builder.setInvalidatedByBiometricEnrollment(true)
-			if (Build.VERSION.SDK_INT >= 30) {
+			if (authWindowSeconds > 0) {
+				// D-14: time-bound key, applied on every API level so a device upgraded across
+				// API 30 keeps its policy.
+				if (Build.VERSION.SDK_INT >= 30) {
+					builder.setUserAuthenticationParameters(authWindowSeconds, KeyProperties.AUTH_BIOMETRIC_STRONG)
+				} else {
+					@Suppress("DEPRECATION")
+					builder.setUserAuthenticationValidityDurationSeconds(authWindowSeconds)
+				}
+			} else if (Build.VERSION.SDK_INT >= 30) {
 				builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG) // 0 = per-use
 			}
 		}
@@ -136,10 +193,10 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 
 	/** StrongBox->TEE rung ladder (D-07 class), no debug software-stub rung — a keygen failure on
 	 * either rung is WRAP_FAILED. */
-	private fun generateKey(alias: String, requireAuth: Boolean): Pair<SecretKey, String> {
+	private fun generateKey(alias: String, requireAuth: Boolean, authWindowSeconds: Int): Pair<SecretKey, String> {
 		try {
 			val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-			generator.init(buildSpec(alias, requireAuth, strongBox = true))
+			generator.init(buildSpec(alias, requireAuth, authWindowSeconds, strongBox = true))
 			val key = generator.generateKey()
 			Log.i(TAG_WRAP_KEY_RUNG, "StrongBox rung selected for alias=$alias")
 			return key to "strongbox"
@@ -153,7 +210,7 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		}
 
 		val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-		generator.init(buildSpec(alias, requireAuth, strongBox = false))
+		generator.init(buildSpec(alias, requireAuth, authWindowSeconds, strongBox = false))
 		val key = generator.generateKey()
 		return key to "tee"
 	}
@@ -184,22 +241,26 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		onResult: (ciphertext: ByteArray, iv: ByteArray, securityLevel: String) -> Unit,
 		onError: (code: String, throwable: Throwable?) -> Unit,
 	) {
-		// D-14 pass-through guard (63-16): this build supports only per-use keys. Rejecting before any
-		// getOrCreateKey means it can never create an alias whose fixed policy differs from what the
-		// caller asked for (the V1 alias-policy hazard). 63-17 replaces this guard with the time-bound
-		// branch.
-		if (authWindowSeconds != 0) {
-			onError("INVALID_ARGUMENT", UnsupportedOperationException("authWindowSeconds > 0 is not supported by this build"))
+		// D-14 window bounds (63-17): defence in depth beside the JS validation and
+		// authWindowSecondsOrNull. Runs before any getOrCreateKey, so no alias is ever created under a
+		// policy the caller did not validly ask for.
+		if (authWindowSeconds < 0 || authWindowSeconds > MAX_AUTH_WINDOW_SECONDS || (authWindowSeconds > 0 && !requireAuth)) {
+			onError("INVALID_ARGUMENT", IllegalArgumentException("authWindowSeconds out of bounds"))
 			return
 		}
 		val (key, securityLevel) = try {
-			getOrCreateKey(alias, requireAuth)
+			getOrCreateKey(alias, requireAuth, authWindowSeconds)
 		} catch (e: InvalidWrapKeyAliasException) {
 			onError("INVALID_ARGUMENT", e); return
 		} catch (e: WrapKeyPolicyMismatchException) {
 			onError("WRAP_KEY_POLICY_MISMATCH", e); return
 		} catch (e: Exception) {
 			onError("WRAP_FAILED", e); return
+		}
+
+		if (requireAuth && authWindowSeconds > 0) {
+			wrapWindowed(alias, key, securityLevel, plaintext, aad, activity, promptTitle, promptSubtitle, promptNegativeButton, onResult, onError)
+			return
 		}
 
 		val cipher: Cipher
@@ -278,12 +339,11 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		onResult: (plaintext: ByteArray) -> Unit,
 		onError: (code: String, throwable: Throwable?) -> Unit,
 	) {
-		// D-14 pass-through guard (63-16): this build supports only per-use keys. Rejecting before any
-		// getOrCreateKey means it can never create an alias whose fixed policy differs from what the
-		// caller asked for (the V1 alias-policy hazard). 63-17 replaces this guard with the time-bound
-		// branch.
-		if (authWindowSeconds != 0) {
-			onError("INVALID_ARGUMENT", UnsupportedOperationException("authWindowSeconds > 0 is not supported by this build"))
+		// D-14 window bounds (63-17): defence in depth beside the JS validation and
+		// authWindowSecondsOrNull. Runs before any getOrCreateKey, so no alias is ever created under a
+		// policy the caller did not validly ask for.
+		if (authWindowSeconds < 0 || authWindowSeconds > MAX_AUTH_WINDOW_SECONDS || (authWindowSeconds > 0 && !requireAuth)) {
+			onError("INVALID_ARGUMENT", IllegalArgumentException("authWindowSeconds out of bounds"))
 			return
 		}
 		if (!WRAP_KEY_ALIAS_PATTERN.matches(alias)) {
@@ -299,11 +359,16 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		}
 
 		val (key, _) = try {
-			getOrCreateKey(alias, requireAuth)
+			getOrCreateKey(alias, requireAuth, authWindowSeconds)
 		} catch (e: WrapKeyPolicyMismatchException) {
 			onError("WRAP_KEY_POLICY_MISMATCH", e); return
 		} catch (e: Exception) {
 			onError("UNWRAP_FAILED", e); return
+		}
+
+		if (requireAuth && authWindowSeconds > 0) {
+			unwrapWindowed(alias, key, ciphertext, iv, aad, activity, promptTitle, promptSubtitle, promptNegativeButton, onResult, onError)
+			return
 		}
 
 		val cipher: Cipher
@@ -366,6 +431,193 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 				},
 			)
 			biometricPrompt.authenticate(promptInfo, cryptoObject)
+		}
+	}
+
+	/**
+	 * D-14 time-bound wrap: try `Cipher.init` with NO prompt first (a biometric authentication inside
+	 * the window, e.g. the vote-signing prompt, already authorises the key). On
+	 * [UserNotAuthenticatedException] show exactly ONE BIOMETRIC_STRONG prompt with NO CryptoObject,
+	 * then re-init exactly once. Never loops. Logs carry only the alias, op and a closed path token.
+	 */
+	private fun wrapWindowed(
+		alias: String,
+		key: SecretKey,
+		securityLevel: String,
+		plaintext: ByteArray,
+		aad: ByteArray,
+		activity: FragmentActivity?,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		onResult: (ciphertext: ByteArray, iv: ByteArray, securityLevel: String) -> Unit,
+		onError: (code: String, throwable: Throwable?) -> Unit,
+	) {
+		fun initCipher(): Cipher {
+			val c = Cipher.getInstance("AES/GCM/NoPadding")
+			c.init(Cipher.ENCRYPT_MODE, key)
+			return c
+		}
+
+		fun finish(c: Cipher) {
+			try {
+				c.updateAAD(aad)
+				val ciphertext = c.doFinal(plaintext)
+				val iv = c.iv
+				if (iv.size != 12) {
+					onError("WRAP_FAILED", IllegalStateException("unexpected IV length ${iv.size}")); return
+				}
+				onResult(ciphertext, iv, securityLevel)
+			} catch (e: Exception) {
+				onError("WRAP_FAILED", e)
+			}
+		}
+
+		try {
+			val c = initCipher()
+			Log.i(TAG_WRAP_WINDOW, "alias=$alias op=wrap path=no-prompt")
+			finish(c)
+			return
+		} catch (e: KeyPermanentlyInvalidatedException) {
+			onError("KEY_INVALIDATED", e); return
+		} catch (e: UserNotAuthenticatedException) {
+			// Fall through to the single prompt below.
+		} catch (e: Exception) {
+			onError("WRAP_FAILED", e); return
+		}
+
+		if (activity == null) {
+			onError("NO_ACTIVITY", IllegalStateException("no current FragmentActivity available to host the BiometricPrompt"))
+			return
+		}
+
+		val promptInfo = BiometricPrompt.PromptInfo.Builder()
+			.setTitle(promptTitle)
+			.setSubtitle(promptSubtitle)
+			.setNegativeButtonText(promptNegativeButton)
+			.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+			.build()
+
+		UiThreadUtil.runOnUiThread {
+			val biometricPrompt = BiometricPrompt(
+				activity,
+				ContextCompat.getMainExecutor(reactContext),
+				object : BiometricPrompt.AuthenticationCallback() {
+					override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+						Log.i(TAG_WRAP_WINDOW, "alias=$alias op=wrap path=prompted")
+						try {
+							finish(initCipher())
+						} catch (e: KeyPermanentlyInvalidatedException) {
+							onError("KEY_INVALIDATED", e)
+						} catch (e: UserNotAuthenticatedException) {
+							Log.w(TAG_WRAP_WINDOW, "alias=$alias op=wrap path=reinit-unauthenticated")
+							onError("WRAP_FAILED", e)
+						} catch (e: Exception) {
+							onError("WRAP_FAILED", e)
+						}
+					}
+
+					override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+						onError(mapBiometricErrorCode(errorCode), RuntimeException(errString.toString()))
+					}
+
+					override fun onAuthenticationFailed() {
+						// Biometric mismatch — a retry, not an error (BiometricPrompt re-prompts itself).
+					}
+				},
+			)
+			biometricPrompt.authenticate(promptInfo)
+		}
+	}
+
+	/** D-14 time-bound unwrap: mirrors [wrapWindowed] (try-init, one CryptoObject-free prompt, one re-init). */
+	private fun unwrapWindowed(
+		alias: String,
+		key: SecretKey,
+		ciphertext: ByteArray,
+		iv: ByteArray,
+		aad: ByteArray,
+		activity: FragmentActivity?,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		onResult: (plaintext: ByteArray) -> Unit,
+		onError: (code: String, throwable: Throwable?) -> Unit,
+	) {
+		fun initCipher(): Cipher {
+			val c = Cipher.getInstance("AES/GCM/NoPadding")
+			c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+			return c
+		}
+
+		fun finish(c: Cipher) {
+			try {
+				c.updateAAD(aad)
+				val plaintext = c.doFinal(ciphertext)
+				onResult(plaintext)
+			} catch (e: KeyPermanentlyInvalidatedException) {
+				onError("KEY_INVALIDATED", e)
+			} catch (e: AEADBadTagException) {
+				onError("UNWRAP_TAG_MISMATCH", e)
+			} catch (e: Exception) {
+				onError("UNWRAP_FAILED", e)
+			}
+		}
+
+		try {
+			val c = initCipher()
+			Log.i(TAG_WRAP_WINDOW, "alias=$alias op=unwrap path=no-prompt")
+			finish(c)
+			return
+		} catch (e: KeyPermanentlyInvalidatedException) {
+			onError("KEY_INVALIDATED", e); return
+		} catch (e: UserNotAuthenticatedException) {
+			// Fall through to the single prompt below.
+		} catch (e: Exception) {
+			onError("UNWRAP_FAILED", e); return
+		}
+
+		if (activity == null) {
+			onError("NO_ACTIVITY", IllegalStateException("no current FragmentActivity available to host the BiometricPrompt"))
+			return
+		}
+
+		val promptInfo = BiometricPrompt.PromptInfo.Builder()
+			.setTitle(promptTitle)
+			.setSubtitle(promptSubtitle)
+			.setNegativeButtonText(promptNegativeButton)
+			.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+			.build()
+
+		UiThreadUtil.runOnUiThread {
+			val biometricPrompt = BiometricPrompt(
+				activity,
+				ContextCompat.getMainExecutor(reactContext),
+				object : BiometricPrompt.AuthenticationCallback() {
+					override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+						Log.i(TAG_WRAP_WINDOW, "alias=$alias op=unwrap path=prompted")
+						try {
+							finish(initCipher())
+						} catch (e: KeyPermanentlyInvalidatedException) {
+							onError("KEY_INVALIDATED", e)
+						} catch (e: UserNotAuthenticatedException) {
+							Log.w(TAG_WRAP_WINDOW, "alias=$alias op=unwrap path=reinit-unauthenticated")
+							onError("UNWRAP_FAILED", e)
+						} catch (e: Exception) {
+							onError("UNWRAP_FAILED", e)
+						}
+					}
+
+					override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+						onError(mapBiometricErrorCode(errorCode), RuntimeException(errString.toString()))
+					}
+
+					override fun onAuthenticationFailed() {
+						// Biometric mismatch — a retry, not an error.
+					}
+				},
+			)
+			biometricPrompt.authenticate(promptInfo)
 		}
 	}
 

@@ -188,8 +188,8 @@ export interface Spec extends TurboModule {
 	 *
 	 * `authWindowSeconds` (D-14, Phase 63 plan 16) is an integer 0..60; 0 means per-use. A value
 	 * above 0 means one successful biometric authentication keeps the key usable for that many
-	 * seconds with no `CryptoObject`. It is only valid with `requireAuth` true. Android honours it
-	 * from plan 63-17 on, and until then rejects anything above 0 with `INVALID_ARGUMENT`. iOS
+	 * seconds with no `CryptoObject`. It is only valid with `requireAuth` true. Android honours a
+	 * window above 0 with a time-bound key (try-init, then one prompt without a CryptoObject); iOS
 	 * accepts and ignores it, so it stays per-use (D-14 accept-two).
 	 *
 	 * Byte contract, identical on both platforms: `plaintextBase64`/`ciphertextBase64` are PLAIN

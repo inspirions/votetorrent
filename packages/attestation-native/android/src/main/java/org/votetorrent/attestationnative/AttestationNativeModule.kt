@@ -330,8 +330,9 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 	 * `NO_ACTIVITY`/`CANCELED`/`NO_BIOMETRICS_ENROLLED`/`LOCKOUT`/`LOCKOUT_PERMANENT`/
 	 * `BIOMETRIC_ERROR` classes, reused verbatim when `requireAuth` is true.
 	 *
-	 * D-14 (63-16): both methods take a trailing `authWindowSeconds`; this build's helper rejects any
-	 * value above 0 (the `D-14 pass-through guard (63-16)`) until 63-17 adds the time-bound branch.
+	 * D-14 (63-16): both methods take a trailing `authWindowSeconds`; Android honours a window above 0
+	 * with a time-bound key (try-init, then one prompt without a CryptoObject); iOS accepts and
+	 * ignores it.
 	 */
 	override fun wrapSecret(
 		keyAlias: String,

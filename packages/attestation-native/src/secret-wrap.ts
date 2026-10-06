@@ -70,8 +70,8 @@ export interface SecretWrapOptions {
 	 * D-14: seconds one biometric authentication keeps the wrap key usable. Integer 0..60; absent
 	 * or 0 means per-use (today's behaviour). Fixed when an alias's key is first created, so one
 	 * alias has one policy (requireAuth AND window) forever. Requires `requireAuth`. Android honours
-	 * a value above 0 from 63-17 on (until then it rejects INVALID_ARGUMENT); iOS accepts and
-	 * ignores it (stays per-use). The only planned consumer is the vote-record alias
+	 * a window above 0 with a time-bound key (try-init, then one prompt without a CryptoObject); iOS
+	 * accepts and ignores it (stays per-use). The only planned consumer is the vote-record alias
 	 * (63-17's `VOTE_RECORD_AUTH_WINDOW_SECONDS`).
 	 */
 	authWindowSeconds?: number
