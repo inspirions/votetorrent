@@ -394,7 +394,7 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		const networksEngine = new NetworksEngine(new LocalStorageReact())
 		const first = await seedDevNetwork(networksEngine)
 		const ctx = networksEngine.getEstablishedContext(first.networkReference.hash)!
-		const count = async (sql: string, p: Record<string, unknown> = {}) =>
+		const count = async (sql: string, p: Record<string, string> = {}) =>
 			Number((await ctx.db.prepare(sql).get(p))!.n)
 		const e = { e: first.electionId }
 		const signingBefore = await count('select count(*) as n from AdminSigning')
