@@ -36,6 +36,7 @@ type AdministratorInvitationParams = {
 	mode: "send" | "accept";
 	initialShare?: string;
 	authority?: Authority;
+	officerInit?: { name: string; title: string };
 };
 
 export default function AdministratorInvitationScreen() {
