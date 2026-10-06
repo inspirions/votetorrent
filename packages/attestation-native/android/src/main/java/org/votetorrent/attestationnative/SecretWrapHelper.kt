@@ -29,6 +29,21 @@ private const val ANDROID_KEYSTORE = "AndroidKeyStore"
  * `VOTETORRENT_AUTHORITY_SIGNING_KEY_V1`, `VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1`). */
 private val WRAP_KEY_ALIAS_PATTERN = Regex("^VOTETORRENT_[A-Z0-9_]+_WRAP_KEY_V[0-9]+$")
 
+/** D-14 upper bound on `authWindowSeconds`. Must equal `MAX_AUTH_WINDOW_SECONDS` in secret-wrap.ts
+ * (checked by the Voter's secret-wrap-abi.gate.test.ts). */
+internal const val MAX_AUTH_WINDOW_SECONDS = 60
+
+/** D-14 defence in depth beside the JS check: an integer in 0..[MAX_AUTH_WINDOW_SECONDS], and 0
+ * unless [requireAuth]. Returns null when [raw] is not acceptable. */
+internal fun authWindowSecondsOrNull(raw: Double, requireAuth: Boolean): Int? {
+	if (raw.isNaN() || raw.isInfinite() || raw < 0.0 || raw > MAX_AUTH_WINDOW_SECONDS ||
+		raw != Math.floor(raw) || (raw > 0.0 && !requireAuth)
+	) {
+		return null
+	}
+	return raw.toInt()
+}
+
 /** D-07-style rung observability for the wrap-key StrongBox->TEE ladder, distinct from
  * [KeyAttestationHelper]'s `VtKeygenRung` tag (different keys, same reasoning). */
 private const val TAG_WRAP_KEY_RUNG = "VtWrapKeyRung"
@@ -165,9 +180,18 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		promptTitle: String,
 		promptSubtitle: String,
 		promptNegativeButton: String,
+		authWindowSeconds: Int,
 		onResult: (ciphertext: ByteArray, iv: ByteArray, securityLevel: String) -> Unit,
 		onError: (code: String, throwable: Throwable?) -> Unit,
 	) {
+		// D-14 pass-through guard (63-16): this build supports only per-use keys. Rejecting before any
+		// getOrCreateKey means it can never create an alias whose fixed policy differs from what the
+		// caller asked for (the V1 alias-policy hazard). 63-17 replaces this guard with the time-bound
+		// branch.
+		if (authWindowSeconds != 0) {
+			onError("INVALID_ARGUMENT", UnsupportedOperationException("authWindowSeconds > 0 is not supported by this build"))
+			return
+		}
 		val (key, securityLevel) = try {
 			getOrCreateKey(alias, requireAuth)
 		} catch (e: InvalidWrapKeyAliasException) {
@@ -250,9 +274,18 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		promptTitle: String,
 		promptSubtitle: String,
 		promptNegativeButton: String,
+		authWindowSeconds: Int,
 		onResult: (plaintext: ByteArray) -> Unit,
 		onError: (code: String, throwable: Throwable?) -> Unit,
 	) {
+		// D-14 pass-through guard (63-16): this build supports only per-use keys. Rejecting before any
+		// getOrCreateKey means it can never create an alias whose fixed policy differs from what the
+		// caller asked for (the V1 alias-policy hazard). 63-17 replaces this guard with the time-bound
+		// branch.
+		if (authWindowSeconds != 0) {
+			onError("INVALID_ARGUMENT", UnsupportedOperationException("authWindowSeconds > 0 is not supported by this build"))
+			return
+		}
 		if (!WRAP_KEY_ALIAS_PATTERN.matches(alias)) {
 			onError("INVALID_ARGUMENT", InvalidWrapKeyAliasException(alias)); return
 		}

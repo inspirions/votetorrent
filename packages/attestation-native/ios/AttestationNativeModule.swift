@@ -629,7 +629,12 @@ class AttestationNativeModule: NSObject {
   /// Android (used only when `requireAuth` is true, which iOS surfaces via `promptSubtitle` as
   /// the Keychain read's `LAContext.localizedReason` — there is no separate title/negative-button
   /// surface for a Keychain item read the way `BiometricPrompt` has one).
-  @objc(wrapSecret:plaintextBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:resolver:rejecter:)
+  ///
+  /// D-14 (63-16): `authWindowSeconds` is accepted for ABI parity and deliberately IGNORED. iOS keeps
+  /// the per-use `.biometryCurrentSet` item with a fresh `LAContext` per call, so Submit costs two
+  /// prompts on iOS by design (D-14 accept-two; an iOS window is unproven and its device proof is
+  /// deferred).
+  @objc(wrapSecret:plaintextBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:authWindowSeconds:resolver:rejecter:)
   func wrapSecret(_ keyAlias: String,
                   plaintextBase64: String,
                   aadBase64: String,
@@ -637,6 +642,7 @@ class AttestationNativeModule: NSObject {
                   promptTitle: String,
                   promptSubtitle: String,
                   promptNegativeButton: String,
+                  authWindowSeconds: Double,
                   resolver resolve: @escaping RCTPromiseResolveBlock,
                   rejecter reject: @escaping RCTPromiseRejectBlock) {
     secretWrapQueue.async {
@@ -667,7 +673,7 @@ class AttestationNativeModule: NSObject {
   }
 
   /// Answers `unwrapSecret`. Same prompt-surface note as `wrapSecret` above.
-  @objc(unwrapSecret:ciphertextBase64:ivBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:resolver:rejecter:)
+  @objc(unwrapSecret:ciphertextBase64:ivBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:authWindowSeconds:resolver:rejecter:)
   func unwrapSecret(_ keyAlias: String,
                     ciphertextBase64: String,
                     ivBase64: String,
@@ -676,6 +682,7 @@ class AttestationNativeModule: NSObject {
                     promptTitle: String,
                     promptSubtitle: String,
                     promptNegativeButton: String,
+                    authWindowSeconds: Double,
                     resolver resolve: @escaping RCTPromiseResolveBlock,
                     rejecter reject: @escaping RCTPromiseRejectBlock) {
     secretWrapQueue.async {

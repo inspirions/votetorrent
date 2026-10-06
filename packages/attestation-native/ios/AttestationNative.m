@@ -49,8 +49,8 @@ RCT_EXTERN_METHOD(signWithRecoveryKey:(NSString *)keyAlias
 
 // D-42 (Phase 62 plan 08) — generic secret-wrap. Selectors must match the Swift
 // `@objc(wrapSecret:plaintextBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:
-// promptNegativeButton:resolver:rejecter:)` / `@objc(unwrapSecret:ciphertextBase64:ivBase64:
-// aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:resolver:rejecter:)`
+// promptNegativeButton:authWindowSeconds:resolver:rejecter:)` / `@objc(unwrapSecret:ciphertextBase64:ivBase64:
+// aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:authWindowSeconds:resolver:rejecter:)`
 // strings EXACTLY (see this file's header comment).
 RCT_EXTERN_METHOD(wrapSecret:(NSString *)keyAlias
                   plaintextBase64:(NSString *)plaintextBase64
@@ -59,6 +59,7 @@ RCT_EXTERN_METHOD(wrapSecret:(NSString *)keyAlias
                   promptTitle:(NSString *)promptTitle
                   promptSubtitle:(NSString *)promptSubtitle
                   promptNegativeButton:(NSString *)promptNegativeButton
+                  authWindowSeconds:(double)authWindowSeconds
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
@@ -70,6 +71,7 @@ RCT_EXTERN_METHOD(unwrapSecret:(NSString *)keyAlias
                   promptTitle:(NSString *)promptTitle
                   promptSubtitle:(NSString *)promptSubtitle
                   promptNegativeButton:(NSString *)promptNegativeButton
+                  authWindowSeconds:(double)authWindowSeconds
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

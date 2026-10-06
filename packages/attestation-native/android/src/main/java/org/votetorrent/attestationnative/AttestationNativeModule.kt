@@ -329,6 +329,9 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 	 * `UNWRAP_TAG_MISMATCH`, `KEY_INVALIDATED`, `WRAP_FAILED`, `UNWRAP_FAILED` — plus the existing
 	 * `NO_ACTIVITY`/`CANCELED`/`NO_BIOMETRICS_ENROLLED`/`LOCKOUT`/`LOCKOUT_PERMANENT`/
 	 * `BIOMETRIC_ERROR` classes, reused verbatim when `requireAuth` is true.
+	 *
+	 * D-14 (63-16): both methods take a trailing `authWindowSeconds`; this build's helper rejects any
+	 * value above 0 (the `D-14 pass-through guard (63-16)`) until 63-17 adds the time-bound branch.
 	 */
 	override fun wrapSecret(
 		keyAlias: String,
@@ -338,6 +341,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		promptTitle: String,
 		promptSubtitle: String,
 		promptNegativeButton: String,
+		authWindowSeconds: Double,
 		promise: Promise,
 	) {
 		val plaintext: ByteArray
@@ -347,6 +351,12 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 			aad = Base64.decode(aadBase64, Base64.NO_WRAP)
 		} catch (e: Exception) {
 			promise.reject("INVALID_ENCODING", e)
+			return
+		}
+
+		val window = authWindowSecondsOrNull(authWindowSeconds, requireAuth)
+		if (window == null) {
+			promise.reject("INVALID_ARGUMENT", "authWindowSeconds must be an integer in 0..$MAX_AUTH_WINDOW_SECONDS, and 0 unless requireAuth")
 			return
 		}
 
@@ -370,6 +380,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 			promptTitle = promptTitle,
 			promptSubtitle = promptSubtitle,
 			promptNegativeButton = promptNegativeButton,
+			authWindowSeconds = window,
 			onResult = { ciphertext, iv, securityLevel ->
 				promise.resolve(Arguments.createMap().apply {
 					putString("ciphertextBase64", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
@@ -391,6 +402,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		promptTitle: String,
 		promptSubtitle: String,
 		promptNegativeButton: String,
+		authWindowSeconds: Double,
 		promise: Promise,
 	) {
 		val ciphertext: ByteArray
@@ -402,6 +414,12 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 			aad = Base64.decode(aadBase64, Base64.NO_WRAP)
 		} catch (e: Exception) {
 			promise.reject("INVALID_ENCODING", e)
+			return
+		}
+
+		val window = authWindowSecondsOrNull(authWindowSeconds, requireAuth)
+		if (window == null) {
+			promise.reject("INVALID_ARGUMENT", "authWindowSeconds must be an integer in 0..$MAX_AUTH_WINDOW_SECONDS, and 0 unless requireAuth")
 			return
 		}
 
@@ -426,6 +444,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 			promptTitle = promptTitle,
 			promptSubtitle = promptSubtitle,
 			promptNegativeButton = promptNegativeButton,
+			authWindowSeconds = window,
 			onResult = { plaintext ->
 				promise.resolve(Arguments.createMap().apply {
 					putString("plaintextBase64", Base64.encodeToString(plaintext, Base64.NO_WRAP))
