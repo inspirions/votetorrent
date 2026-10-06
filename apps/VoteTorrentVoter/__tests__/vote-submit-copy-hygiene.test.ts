@@ -148,7 +148,7 @@ function walkNonTestSources(root: string): string[] {
 }
 
 describe('no false submitted claim (D-10)', () => {
-	it('F1: no bundle key or value claims a vote was submitted or sent', () => {
+	it('F1: no bundle key or value claims a vote went out', () => {
 		const report: {keys: string[]; values: string[]} = {keys: [], values: []};
 		for (const lang of ['en', 'es'] as const) {
 			const namespaces = resources[lang] as unknown as Record<string, Record<string, string>>;
