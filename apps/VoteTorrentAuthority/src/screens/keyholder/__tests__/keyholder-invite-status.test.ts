@@ -20,15 +20,26 @@ describe("keyholderInviteState", () => {
 	it("answered without a result (replication lag) -> sent", () => {
 		expect(keyholderInviteState({ invite: inv, sent: { state: "answered", expiration: exp } } as S)).toBe("sent");
 	});
-	it("no-longer-valid -> expired", () => {
-		expect(keyholderInviteState({ invite: inv, sent: { state: "no-longer-valid", expiration: exp } } as S)).toBe("expired");
+	it("no-longer-valid (cancelled, expired or superseded) -> no-longer-valid", () => {
+		expect(keyholderInviteState({ invite: inv, sent: { state: "no-longer-valid", expiration: exp } } as S)).toBe("no-longer-valid");
+	});
+	it("unknown (ambiguous chain or unreadable invitation table) -> unknown, never not-sent", () => {
+		expect(keyholderInviteState({ invite: inv, sent: { state: "unknown", expiration: "" } } as S)).toBe("unknown");
+	});
+	it("unknown with a declined result -> declined (the response wins)", () => {
+		const s = { invite: inv, result: { isAccepted: false }, sent: { state: "unknown", expiration: "" } } as unknown as S;
+		expect(keyholderInviteState(s)).toBe("declined");
 	});
 	it("no sent -> not-sent", () => {
 		expect(keyholderInviteState({ invite: inv } as S)).toBe("not-sent");
 	});
 	it("META tones and labels", () => {
 		expect(KEYHOLDER_INVITE_STATE_META.sent).toEqual({ labelKey: "keyholderStatusSent", colorKey: "warning" });
-		expect(KEYHOLDER_INVITE_STATE_META.expired).toEqual({ labelKey: "keyholderStatusExpired", colorKey: "error" });
+		expect(KEYHOLDER_INVITE_STATE_META["no-longer-valid"]).toEqual({ labelKey: "keyholderStatusNoLongerValid", colorKey: "error" });
+		expect(KEYHOLDER_INVITE_STATE_META.unknown).toEqual({ labelKey: "keyholderStatusUnknown", colorKey: "warning" });
+		expect(Object.keys(KEYHOLDER_INVITE_STATE_META).sort()).toEqual(
+			["accepted", "declined", "no-longer-valid", "not-sent", "sent", "unknown"],
+		);
 		expect(KEYHOLDER_INVITE_STATE_META["not-sent"]).toEqual({ labelKey: "keyholderStatusNotSent", colorKey: "warning" });
 		expect(KEYHOLDER_INVITE_STATE_META.accepted.colorKey).toBe("success");
 		expect(KEYHOLDER_INVITE_STATE_META.declined.colorKey).toBe("error");
