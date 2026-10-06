@@ -128,7 +128,7 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.12.x, @optimystic/db-* 1.10.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.13.x, @optimystic/db-* 1.11.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
@@ -161,9 +161,13 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // responder installed by start(); the public-observer + cohort-topic patch re-seated) and
       // @optimystic 1.9.0 -> 1.10.1 (reactivity substrate; the `.unref?.()` patch carried forward
       // unchanged — Optimystic#28 still open). The two families are on DIFFERENT lines from here on.
+      // 2026-10-06: @serfab 1.12.0 -> 1.13.0 (control node dials bootstrap peers after bring-up;
+      // native block digest in cadre-rn; the public-observer + cohort-topic patch carried verbatim)
+      // and @optimystic 1.10.1 -> 1.11.0 (Optimystic#27 and #28 fixed; the db-p2p `.unref?.()`
+      // patch RETIRED — every timer now goes through upstream's guarded `unrefTimer`).
       const expectedPrefix = pkg === '@serfab/strand-proto'
         ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.12.' : '1.10.'
+        : pkg.startsWith('@serfab/') ? '1.13.' : '1.11.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`
