@@ -20,8 +20,9 @@ export const VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1 = 'VOTETORRENT_VOTER_IDENTIT
 
 /**
  * Alias naming rule for every consumer of this module:
- * `VOTETORRENT_<APP>_<PURPOSE>_WRAP_KEY_V<n>`. One alias = one auth policy, forever — a consumer
- * must never reuse an alias with a different `requireAuth` value (native rejects
+ * `VOTETORRENT_<APP>_<PURPOSE>_WRAP_KEY_V<n>`. One alias = one auth policy, forever (BOTH
+ * `requireAuth` AND `authWindowSeconds`) — a consumer must never reuse an alias with a different
+ * `requireAuth` or window value (native rejects
  * `WRAP_KEY_POLICY_MISMATCH` rather than silently downgrading).
  */
 export const WRAP_KEY_ALIAS_PATTERN = /^VOTETORRENT_[A-Z0-9_]+_WRAP_KEY_V[0-9]+$/
@@ -53,11 +54,27 @@ export interface SecretWrapPrompt {
 	negativeButton: string
 }
 
+/**
+ * Upper bound on `SecretWrapOptions.authWindowSeconds`, so no caller can turn an auth-required key
+ * into an effectively unlocked one. Must equal `MAX_AUTH_WINDOW_SECONDS` in SecretWrapHelper.kt
+ * (the secret-wrap ABI gate checks this).
+ */
+export const MAX_AUTH_WINDOW_SECONDS = 60
+
 export interface SecretWrapOptions {
 	requireAuth: boolean
 	aad: Uint8Array
 	/** Required iff `requireAuth` is true. */
 	prompt?: SecretWrapPrompt
+	/**
+	 * D-14: seconds one biometric authentication keeps the wrap key usable. Integer 0..60; absent
+	 * or 0 means per-use (today's behaviour). Fixed when an alias's key is first created, so one
+	 * alias has one policy (requireAuth AND window) forever. Requires `requireAuth`. Android honours
+	 * a value above 0 from 63-17 on (until then it rejects INVALID_ARGUMENT); iOS accepts and
+	 * ignores it (stays per-use). The only planned consumer is the vote-record alias
+	 * (63-17's `VOTE_RECORD_AUTH_WINDOW_SECONDS`).
+	 */
+	authWindowSeconds?: number
 }
 
 export interface SecretWrapper {
@@ -159,6 +176,15 @@ function validatePlaintextLength(length: number): void {
 function validateOptions(options: SecretWrapOptions): void {
 	if (options.requireAuth && options.prompt === undefined) {
 		throw new SecretWrapError('INVALID_ARGUMENT', 'prompt is required when requireAuth is true')
+	}
+	const window = options.authWindowSeconds
+	if (window !== undefined) {
+		if (typeof window !== 'number' || !Number.isInteger(window) || window < 0 || window > MAX_AUTH_WINDOW_SECONDS) {
+			throw new SecretWrapError('INVALID_ARGUMENT', 'authWindowSeconds must be an integer in 0..' + MAX_AUTH_WINDOW_SECONDS)
+		}
+		if (window > 0 && !options.requireAuth) {
+			throw new SecretWrapError('INVALID_ARGUMENT', 'authWindowSeconds requires requireAuth')
+		}
 	}
 }
 
@@ -269,6 +295,7 @@ export function createNativeSecretWrapper(): SecretWrapper {
 					prompt.title,
 					prompt.subtitle,
 					prompt.negativeButton,
+					options.authWindowSeconds ?? 0,
 				)
 			} catch (err) {
 				if (err instanceof SecretWrapError) throw err
@@ -301,6 +328,7 @@ export function createNativeSecretWrapper(): SecretWrapper {
 					prompt.title,
 					prompt.subtitle,
 					prompt.negativeButton,
+					options.authWindowSeconds ?? 0,
 				)
 			} catch (err) {
 				if (err instanceof SecretWrapError) throw err

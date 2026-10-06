@@ -182,9 +182,15 @@ export interface Spec extends TurboModule {
 	 * D-42: wraps an arbitrary `plaintextBase64` secret (1..4096 bytes) under a generic,
 	 * alias-keyed, non-exportable AES-256-GCM key. This is a SEPARATE capability from the P-256
 	 * signing keys above — it protects a secret AT REST (encrypt/decrypt), not a signing operation.
-	 * One alias = one auth policy, forever: `requireAuth` is fixed when the alias's wrap key is
-	 * first created, and a later call with a different `requireAuth` for the SAME alias rejects
-	 * `WRAP_KEY_POLICY_MISMATCH` rather than silently downgrading or upgrading it.
+	 * One alias = one auth policy, forever: `requireAuth` AND `authWindowSeconds` are fixed when the
+	 * alias's wrap key is first created, and a later call with a different `requireAuth` for the
+	 * SAME alias rejects `WRAP_KEY_POLICY_MISMATCH` rather than silently downgrading or upgrading it.
+	 *
+	 * `authWindowSeconds` (D-14, Phase 63 plan 16) is an integer 0..60; 0 means per-use. A value
+	 * above 0 means one successful biometric authentication keeps the key usable for that many
+	 * seconds with no `CryptoObject`. It is only valid with `requireAuth` true. Android honours it
+	 * from plan 63-17 on, and until then rejects anything above 0 with `INVALID_ARGUMENT`. iOS
+	 * accepts and ignores it, so it stays per-use (D-14 accept-two).
 	 *
 	 * Byte contract, identical on both platforms: `plaintextBase64`/`ciphertextBase64` are PLAIN
 	 * standard-alphabet base64 (NEVER base64url). The native side generates a fresh 12-byte IV per
@@ -221,11 +227,12 @@ export interface Spec extends TurboModule {
 		promptTitle: string,
 		promptSubtitle: string,
 		promptNegativeButton: string,
+		authWindowSeconds: number,
 	): Promise<Object>
 
 	/**
 	 * D-42: the inverse of `wrapSecret` — decrypts a `WrappedSecret` previously produced by
-	 * `wrapSecret` under the SAME `keyAlias`, `ivBase64`, `aadBase64` and `requireAuth`. Resolves
+	 * `wrapSecret` under the SAME `keyAlias`, `ivBase64`, `aadBase64`, `requireAuth` and `authWindowSeconds`. Resolves
 	 * `{ plaintextBase64 }` (plain standard-alphabet base64 of the decrypted bytes).
 	 *
 	 * `aadBase64` MUST equal the AAD used at wrap time, or the GCM tag check fails and this rejects
@@ -246,6 +253,7 @@ export interface Spec extends TurboModule {
 		promptTitle: string,
 		promptSubtitle: string,
 		promptNegativeButton: string,
+		authWindowSeconds: number,
 	): Promise<Object>
 
 	/**

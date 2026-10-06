@@ -37,6 +37,7 @@ export type { SignDeviceKeyDigestOptions } from './real-attestation-producer'
 export {
 	VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1,
 	WRAP_KEY_ALIAS_PATTERN,
+	MAX_AUTH_WINDOW_SECONDS,
 	isValidWrapKeyAlias,
 	SECRET_WRAP_ERROR_CODES,
 	SecretWrapError,
