@@ -28,8 +28,11 @@
  * startup, by `migrateLegacyPlaintextIdentityKey` (wired from `VoterAppProvider.tsx`). Per D-40
  * there is no export or backup path for this key, and a record that cannot be unwrapped (lost
  * wrap key after a backup restore, tag mismatch, AAD/key mismatch) fails closed with
- * `DeviceIdentityKeyUnavailableError` and is NEVER regenerated or overwritten — recovery is D-40
- * re-association, not key recovery.
+ * `DeviceIdentityKeyUnavailableError` and is never SILENTLY regenerated or overwritten — recovery is
+ * D-40 re-association, not key recovery. The only replacement path is the user-confirmed
+ * `replaceUnrecoverableDeviceIdentity`, which yields a brand-new identity (a new device in protocol
+ * terms: re-association under D-40/D-41 or re-registration under D-43) and never recovers, exports
+ * or reuses the old key.
  *
  * Scope: this hardens only the enrollment-identity key. The voting-authorization key
  * (`Association.DeviceKey`) is already a hardware P-256 key (`device-key-wrap.ts`'s header
@@ -202,50 +205,81 @@ export async function getOrCreateDeviceUser(displayName: string): Promise<User> 
 			throw new DeviceIdentityKeyUnavailableError('ambiguous-record')
 		}
 
-		// absent — generate a real secp256k1 keypair (CSPRNG).
-		const privKey = secp256k1.utils.randomSecretKey()
-		const pubKey = secp256k1.getPublicKey(privKey, true) // compressed (33 bytes)
-
-		// AUTH-01: hex-encode via bytesToHex (not the native Uint8Array serializer).
-		const pubHex = bytesToHex(pubKey)
-
-		// Hermes (RN 0.78+) exposes crypto.randomUUID() at runtime; cast to satisfy
-		// the app's TS config which omits the dom lib declarations.
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const userId: string = (globalThis as any).crypto.randomUUID()
-		const user: User = {
-			id: userId,
-			name: displayName,
-			activeKeys: [
-				{
-					key: pubHex,
-					type: UserKeyType.mobile,
-					expiration: Date.now() + TEN_YEARS_MS,
-				},
-			],
-		}
-
-		const provider = resolveDeviceKeyWrapProvider()
-		const aad = buildIdentityKeyAad(userId, pubHex)
-		let wrapped: WrappedSecret
-		try {
-			wrapped = await provider.wrap(privKey, aad)
-			// Verify before writing: unwrap the fresh wrap and require byte equality.
-			const verifyBytes = await provider.unwrap(wrapped, aad)
-			if (!bytesEqual(verifyBytes, privKey)) {
-				throw new Error('wrap verify mismatch')
-			}
-			verifyBytes.fill(0)
-		} catch {
-			throw new DeviceIdentityKeyUnavailableError('wrap-unavailable')
-		}
-
-		const record: WrappedStoredDeviceUser = { v: 2, user, wrappedPrivKey: wrapped }
-		await AsyncStorage.setItem(DEVICE_USER_KEY, JSON.stringify(record))
-		privKey.fill(0)
-
-		return user
+		// absent — generate a real secp256k1 keypair (CSPRNG), wrap, verify, write.
+		return createAndStoreWrappedIdentity(displayName)
 	})
+}
+
+/** Generate a fresh identity, wrap + verify it BEFORE writing, then write it. Caller holds the lock. */
+async function createAndStoreWrappedIdentity(displayName: string): Promise<User> {
+	const privKey = secp256k1.utils.randomSecretKey()
+	const pubKey = secp256k1.getPublicKey(privKey, true) // compressed (33 bytes)
+
+	// AUTH-01: hex-encode via bytesToHex (not the native Uint8Array serializer).
+	const pubHex = bytesToHex(pubKey)
+
+	// Hermes (RN 0.78+) exposes crypto.randomUUID() at runtime; cast to satisfy
+	// the app's TS config which omits the dom lib declarations.
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const userId: string = (globalThis as any).crypto.randomUUID()
+	const user: User = {
+		id: userId,
+		name: displayName,
+		activeKeys: [
+			{
+				key: pubHex,
+				type: UserKeyType.mobile,
+				expiration: Date.now() + TEN_YEARS_MS,
+			},
+		],
+	}
+
+	const provider = resolveDeviceKeyWrapProvider()
+	const aad = buildIdentityKeyAad(userId, pubHex)
+	let wrapped: WrappedSecret
+	try {
+		wrapped = await provider.wrap(privKey, aad)
+		// Verify before writing: unwrap the fresh wrap and require byte equality.
+		const verifyBytes = await provider.unwrap(wrapped, aad)
+		if (!bytesEqual(verifyBytes, privKey)) {
+			throw new Error('wrap verify mismatch')
+		}
+		verifyBytes.fill(0)
+	} catch {
+		throw new DeviceIdentityKeyUnavailableError('wrap-unavailable')
+	}
+
+	const record: WrappedStoredDeviceUser = { v: 2, user, wrappedPrivKey: wrapped }
+	await AsyncStorage.setItem(DEVICE_USER_KEY, JSON.stringify(record))
+	privKey.fill(0)
+
+	return user
+}
+
+/** Unwrap a wrapped record's private key and prove it matches the stored public key. Throws
+ * `DeviceIdentityKeyUnavailableError` with the specific reason. Caller holds the lock. */
+async function unwrapWrappedRecord(user: User, wrappedSecret: WrappedSecret): Promise<Uint8Array> {
+	const pubHex = user.activeKeys[0]!.key
+	const provider = resolveDeviceKeyWrapProvider()
+	const aad = buildIdentityKeyAad(user.id, pubHex)
+
+	let privBytes: Uint8Array
+	try {
+		privBytes = await provider.unwrap(wrappedSecret, aad)
+	} catch (err) {
+		if (err instanceof SecretWrapError) {
+			if (err.code === 'NO_WRAP_KEY') throw new DeviceIdentityKeyUnavailableError('no-wrap-key')
+			if (err.code === 'UNWRAP_TAG_MISMATCH') throw new DeviceIdentityKeyUnavailableError('tag-mismatch')
+		}
+		throw new DeviceIdentityKeyUnavailableError('native-error')
+	}
+
+	const derivedPub = bytesToHex(secp256k1.getPublicKey(privBytes, true))
+	if (derivedPub !== pubHex) {
+		privBytes.fill(0)
+		throw new DeviceIdentityKeyUnavailableError('key-mismatch')
+	}
+	return privBytes
 }
 
 /**
@@ -275,26 +309,7 @@ export async function getDevicePrivKeyHex(): Promise<string | undefined> {
 		}
 
 		// wrapped
-		const pubHex = classified.user.activeKeys[0]!.key
-		const provider = resolveDeviceKeyWrapProvider()
-		const aad = buildIdentityKeyAad(classified.user.id, pubHex)
-
-		let privBytes: Uint8Array
-		try {
-			privBytes = await provider.unwrap(classified.wrapped, aad)
-		} catch (err) {
-			if (err instanceof SecretWrapError) {
-				if (err.code === 'NO_WRAP_KEY') throw new DeviceIdentityKeyUnavailableError('no-wrap-key')
-				if (err.code === 'UNWRAP_TAG_MISMATCH') throw new DeviceIdentityKeyUnavailableError('tag-mismatch')
-			}
-			throw new DeviceIdentityKeyUnavailableError('native-error')
-		}
-
-		const derivedPub = bytesToHex(secp256k1.getPublicKey(privBytes, true))
-		if (derivedPub !== pubHex) {
-			throw new DeviceIdentityKeyUnavailableError('key-mismatch')
-		}
-
+		const privBytes = await unwrapWrappedRecord(classified.user, classified.wrapped)
 		const hex = bytesToHex(privBytes)
 		privBytes.fill(0)
 		return hex
@@ -414,6 +429,74 @@ async function restoreBestEffort(raw: string): Promise<void> {
 	} catch {
 		// Best effort only.
 	}
+}
+
+/** The only reasons for which a record is PERMANENTLY unrecoverable (the wrap key is gone or the
+ * ciphertext no longer matches). Transient reasons are never replaceable. */
+export const REPLACEABLE_IDENTITY_REASONS = ['no-wrap-key', 'tag-mismatch', 'key-mismatch'] as const
+
+export function isReplaceableIdentityError(err: unknown): boolean {
+	if (typeof err !== 'object' || err === null) return false
+	const e = err as { name?: unknown; reason?: unknown }
+	return (
+		e.name === 'DeviceIdentityKeyUnavailableError' &&
+		typeof e.reason === 'string' &&
+		(REPLACEABLE_IDENTITY_REASONS as readonly string[]).includes(e.reason)
+	)
+}
+
+function identityNotReplaceable(message: string): Error {
+	const err = new Error(message)
+	err.name = 'IdentityNotReplaceableError'
+	return err
+}
+
+/**
+ * User-confirmed replacement of a permanently unrecoverable identity with a brand-new one.
+ * Runs in ONE lock body: re-attempts the unwrap, and proceeds ONLY when it fails with a
+ * permanent reason (`REPLACEABLE_IDENTITY_REASONS`). Readable records, transient failures and an
+ * absent record are refused with `IdentityNotReplaceableError`, record untouched. On any failure
+ * after removal the original raw string is restored byte-identical. No old key byte is ever
+ * returned or logged. Never called from a boot path — only from an explicit confirm tap.
+ */
+export async function replaceUnrecoverableDeviceIdentity(displayName: string): Promise<User> {
+	return withDeviceUserLock(async () => {
+		const raw = await AsyncStorage.getItem(DEVICE_USER_KEY)
+		const classified = classify(raw)
+		if (raw === null || classified.kind === 'absent') {
+			throw identityNotReplaceable('no identity to replace')
+		}
+
+		if (classified.kind === 'wrapped') {
+			try {
+				const bytes = await unwrapWrappedRecord(classified.user, classified.wrapped)
+				bytes.fill(0)
+				throw identityNotReplaceable('identity is readable')
+			} catch (err) {
+				if (!isReplaceableIdentityError(err)) {
+					if (err instanceof Error && err.name === 'IdentityNotReplaceableError') throw err
+					throw identityNotReplaceable('identity failure is not permanent')
+				}
+			}
+		} else {
+			// legacy plaintext is readable; an unreadable record is ambiguous — never replaced.
+			throw identityNotReplaceable('identity record is not a permanently locked wrapped record')
+		}
+
+		await AsyncStorage.removeItem(DEVICE_USER_KEY)
+		try {
+			const user = await createAndStoreWrappedIdentity(displayName)
+			// Read back and prove the new record is wrapped and unwrappable.
+			const readBack = classify(await AsyncStorage.getItem(DEVICE_USER_KEY))
+			if (readBack.kind !== 'wrapped') throw new Error('replacement read-back failed')
+			const bytes = await unwrapWrappedRecord(readBack.user, readBack.wrapped)
+			bytes.fill(0)
+			return user
+		} catch (err) {
+			await restoreBestEffort(raw)
+			throw err
+		}
+	})
 }
 
 /**
