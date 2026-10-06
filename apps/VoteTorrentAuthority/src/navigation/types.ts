@@ -34,7 +34,12 @@ export type RootStackParamList = {
 	OfficerDetails: { officer: Officer; userName?: string; authority: Authority };
 	// Phase 8 plan 08-03 — Administrator + Authority invitation routes (D-08, D-09)
 	AcceptInvitation: undefined;
-	AdministratorInvitation: { mode: "send" | "accept"; initialShare?: string; authority?: Authority };
+	AdministratorInvitation: {
+		mode: "send" | "accept";
+		initialShare?: string;
+		authority?: Authority;
+		officerInit?: { name: string; title: string };
+	};
 	AuthorityInvitation: { mode: "send" | "accept"; initialShare?: string };
 	EditOfficer: {
 		authority: Authority;

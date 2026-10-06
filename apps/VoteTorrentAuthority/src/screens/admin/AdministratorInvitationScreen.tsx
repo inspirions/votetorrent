@@ -42,12 +42,12 @@ export default function AdministratorInvitationScreen() {
 	const { t } = useTranslation();
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-	const { mode, initialShare, authority } = useRoute().params as AdministratorInvitationParams;
+	const { mode, initialShare, authority, officerInit } = useRoute().params as AdministratorInvitationParams;
 	const { getEngine } = useApp();
 
 	// Send-mode form state
-	const [name, setName] = useState("");
-	const [title, setTitle] = useState("");
+	const [name, setName] = useState(mode === "send" ? (officerInit?.name ?? "") : "");
+	const [title, setTitle] = useState(mode === "send" ? (officerInit?.title ?? "") : "");
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
 	const [errorMessage, setErrorMessage] = useState<string>("");

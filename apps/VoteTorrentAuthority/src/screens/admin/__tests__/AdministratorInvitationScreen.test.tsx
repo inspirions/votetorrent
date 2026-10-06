@@ -41,6 +41,7 @@ let mockRouteParams: {
   mode: 'send' | 'accept';
   initialShare?: string;
   authority?: { id: string };
+  officerInit?: { name: string; title: string };
 } = { mode: 'send', authority: { id: 'authority-1' } };
 
 const mockCreateOfficerInvite = jest.fn();
@@ -189,6 +190,28 @@ describe('AdministratorInvitationScreen — INV-02 (send mode real invitePrivate
     const rendered = JSON.stringify(tr.toJSON());
     expect(rendered).toContain('invitePrivate');
     expect(rendered).toContain('admin-ephemeral-private-hex');
+  });
+});
+
+describe('AdministratorInvitationScreen - send mode prefill', () => {
+  const inputByTitle = (tr: renderer.ReactTestRenderer, title: string) =>
+    tr.root.findAll((n) => n.props?.title === title && typeof n.props?.onChangeText === 'function')[0];
+
+  it('starts Name and Title from officerInit and keeps them editable', async () => {
+    mockRouteParams = { mode: 'send', authority: { id: 'authority-1' }, officerInit: { name: 'Bea Two', title: 'Clerk' } };
+    const tr = await render();
+    expect(inputByTitle(tr, 'name').props.value).toBe('Bea Two');
+    expect(inputByTitle(tr, 'title').props.value).toBe('Clerk');
+    await renderer.act(async () => {
+      inputByTitle(tr, 'name').props.onChangeText('Bea Three');
+    });
+    expect(inputByTitle(tr, 'name').props.value).toBe('Bea Three');
+  });
+
+  it('starts empty without officerInit', async () => {
+    const tr = await render();
+    expect(inputByTitle(tr, 'name').props.value).toBe('');
+    expect(inputByTitle(tr, 'title').props.value).toBe('');
   });
 });
 

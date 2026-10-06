@@ -365,13 +365,19 @@ export default function AuthorityDetailsScreen() {
 									image={user?.image?.url ? { uri: user.image.url } : undefined}
 									inviteId={(officerSelection as any)?.inviteId}
 									status={status}
-									onInvite={() =>
-										navigation.navigate("AdministratorInvitation", {
-											mode: "send",
-											authority,
-										})
+									onInvite={
+										officerSelection.existing || !officerSelection.init
+											? undefined
+											: () =>
+													navigation.navigate("AdministratorInvitation", {
+														mode: "send",
+														authority,
+														officerInit: {
+															name: officerSelection.init!.name,
+															title: officerSelection.init!.title,
+														},
+													})
 									}
-									onRemove={() => {}}
 								/>
 							);
 						})}
@@ -379,6 +385,7 @@ export default function AuthorityDetailsScreen() {
 
 					<AuthorizationSection
 						admin={adminDetails}
+						signedOfficerIds={adminDetails.proposed.signers}
 						onAdjustProposal={() =>
 							navigation.navigate("ProposedAdministration", {
 								authorityId: authority.id,

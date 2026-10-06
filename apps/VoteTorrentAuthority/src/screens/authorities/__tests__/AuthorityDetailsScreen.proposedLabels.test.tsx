@@ -63,7 +63,7 @@ function makeAdminDetails() {
 				effectiveAt: Date.UTC(2027, 9, 1),
 				thresholdPolicies: [],
 			},
-			signers: [],
+			signers: ["user-1"],
 		},
 	};
 }
@@ -134,5 +134,34 @@ describe("AuthorityDetailsScreen — administration dates and the proposed CID (
 		const texts = leafTexts(tr).join(" | ");
 		expect(texts).toContain("Bea Two");
 		expect(texts).toContain("proposedAdministration");
+	});
+});
+
+describe("AuthorityDetailsScreen - proposed roster actions", () => {
+	const inviteButtons = (tr: renderer.ReactTestRenderer) =>
+		tr.root.findAll((n) => n.props?.label === "invite" && typeof n.props?.onPress === "function");
+
+	it("offers INVITE only on the init officer and prefills the invitation from that card", async () => {
+		const tr = await renderScreen();
+		const buttons = inviteButtons(tr);
+		expect(buttons).toHaveLength(1);
+		buttons[0].props.onPress();
+		expect(mockNavigate).toHaveBeenCalledWith("AdministratorInvitation", {
+			mode: "send",
+			authority: AUTHORITY_FIXTURE,
+			officerInit: { name: "Bea Two", title: "Clerk" },
+		});
+	});
+
+	it("renders no remove button on the proposed roster", async () => {
+		const tr = await renderScreen();
+		expect(tr.root.findAll((n) => n.props?.name === "xmark")).toHaveLength(0);
+	});
+
+	it("hands the proposal's signers to the authorization section", async () => {
+		const tr = await renderScreen();
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const { AuthorizationSection } = require("../../../components/AuthorizationSection");
+		expect(tr.root.findByType(AuthorizationSection).props.signedOfficerIds).toEqual(["user-1"]);
 	});
 });
