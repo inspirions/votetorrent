@@ -238,6 +238,10 @@ const resources = {
 			// [AUTHORED] — the authority's intake refused the request (vote-engine IntakeError): the
 			// device is fine, so this must not blame it.
 			'confirmation.error.intakeUnavailable': "We couldn't send your registration to the authority right now. Try again later.",
+			// [AUTHORED] — the retry label on the confirm/retry buttons after a failed attempt.
+			'confirmation.retryCta': 'Try Again',
+			// [AUTHORED] — shown once the requests are submitted and the authority's decision is pending.
+			'confirmation.pending': "Your registration has been submitted. We'll let you know once the authority confirms your device.",
 			// [AUTHORED] — native-stack header titles for the form-step routes (41-08).
 			formHeaderTitle: 'Register',
 			confirmHeaderTitle: 'Confirm',
@@ -552,6 +556,8 @@ const resources = {
 			'confirmation.error.transient': 'Algo salió mal al verificar tu dispositivo. Inténtalo de nuevo.',
 			'confirmation.error.terminal': 'Este dispositivo no se puede usar para votar',
 			'confirmation.error.intakeUnavailable': 'No pudimos enviar tu registro a la autoridad en este momento. Inténtalo más tarde.',
+			'confirmation.retryCta': 'Intentar de nuevo',
+			'confirmation.pending': 'Tu registro ha sido enviado. Te avisaremos cuando la autoridad confirme tu dispositivo.',
 			formHeaderTitle: 'Registrarse',
 			confirmHeaderTitle: 'Confirmar',
 		},

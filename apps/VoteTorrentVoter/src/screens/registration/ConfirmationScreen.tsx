@@ -483,8 +483,7 @@ export default function ConfirmationScreen() {
 								lineHeight: typeScale.body.lineHeight,
 							},
 						]}>
-						Your registration has been submitted. We'll let you know once the authority confirms
-						your device.
+						{t('confirmation.pending')}
 					</Text>
 					{/* UI-SPEC Screen Composition Reference: appended, never replacing the pending
 					    content above (D-45). */}
@@ -538,7 +537,7 @@ export default function ConfirmationScreen() {
 								onPress={onConfirm}
 								disabled={isSubmitting}
 								style={[styles.retryCta, {borderColor: colors.primary, borderRadius: radii.pill}]}>
-								<Text style={[styles.ctaLabel, {color: colors.primary}]}>Try Again</Text>
+								<Text style={[styles.ctaLabel, {color: colors.primary}]}>{t('confirmation.retryCta')}</Text>
 							</Pressable>
 						</>
 					) : (
@@ -548,7 +547,7 @@ export default function ConfirmationScreen() {
 							disabled={isSubmitting}
 							style={[styles.cta, {backgroundColor: colors.primary, borderRadius: radii.pill}]}>
 							<Text style={[styles.ctaLabel, {color: colors.light}]}>
-								{errorCopy ? 'Try Again' : ctaCopy}
+								{errorCopy ? t('confirmation.retryCta') : ctaCopy}
 							</Text>
 						</Pressable>
 					)}

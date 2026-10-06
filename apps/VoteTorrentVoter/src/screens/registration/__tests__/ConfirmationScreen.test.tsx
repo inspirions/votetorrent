@@ -19,7 +19,7 @@
 import React from 'react';
 import renderer from 'react-test-renderer';
 import {Linking, Platform} from 'react-native';
-import '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
+import i18n from '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 const mockPopToTop = jest.fn();
 const mockSendIntent = jest.fn(async (..._args: unknown[]) => undefined);
@@ -443,6 +443,45 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 			expect(text).toContain('Confirm your registration with your fingerprint or face unlock');
 			expect(text).toContain('Follow the prompt on your device to confirm');
 			expect(text).toContain('Confirm with biometrics');
+		});
+	});
+
+	describe('localized pending + retry copy (no hard-coded English)', () => {
+		afterEach(async () => {
+			await renderer.act(async () => {
+				await i18n.changeLanguage('en');
+			});
+		});
+
+		it('en: the pending text and the retry label come from the bundle', async () => {
+			const ok = renderScreen();
+			await pressConfirm(ok);
+			expect(JSON.stringify(ok.toJSON())).toContain(
+				"Your registration has been submitted. We'll let you know once the authority confirms your device.",
+			);
+
+			mockProduce.mockRejectedValueOnce({code: 'LOCKOUT'});
+			const failed = renderScreen();
+			await pressConfirm(failed);
+			expect(JSON.stringify(failed.toJSON())).toContain('Try Again');
+		});
+
+		it('es: the pending text and the retry label render in Spanish', async () => {
+			await renderer.act(async () => {
+				await i18n.changeLanguage('es');
+			});
+			const ok = renderScreen();
+			await pressConfirm(ok);
+			const okText = JSON.stringify(ok.toJSON());
+			expect(okText).toContain('Tu registro ha sido enviado. Te avisaremos cuando la autoridad confirme tu dispositivo.');
+			expect(okText).not.toContain('Your registration has been submitted');
+
+			mockProduce.mockRejectedValueOnce({code: 'LOCKOUT'});
+			const failed = renderScreen();
+			await pressConfirm(failed);
+			const failedText = JSON.stringify(failed.toJSON());
+			expect(failedText).toContain('Intentar de nuevo');
+			expect(failedText).not.toContain('Try Again');
 		});
 	});
 
