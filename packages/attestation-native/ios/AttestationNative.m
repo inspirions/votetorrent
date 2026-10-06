@@ -20,6 +20,10 @@ RCT_EXTERN_METHOD(provisionDeviceKey:(NSString *)keyAlias
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(getCurrentDeviceKey:(NSString *)keyAlias
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(produceAttestation:(NSString *)keyAlias
                   boundDigest:(NSString *)boundDigest
                   assertionDigest:(NSString *)assertionDigest

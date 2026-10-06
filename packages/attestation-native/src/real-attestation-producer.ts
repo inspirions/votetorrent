@@ -262,6 +262,13 @@ interface RealAttestationProducer {
 	 * this device. `voteKeyProbe` carries the raw liveness verdict for diagnostics.
 	 */
 	provisionDeviceKey(): Promise<{ publicKey: string; reprovisioned?: boolean; voteKeyProbe?: string }>
+	/**
+	 * READ-ONLY lookup of the CURRENT device key (63-18 fix). Normalized exactly like
+	 * `provisionDeviceKey`'s `publicKey`, but never generates, rotates, deletes or prompts. Rejects
+	 * with `code` `DEVICE_KEY_ABSENT` / `DEVICE_KEY_INVALIDATED` (see `attestation-failure.ts`).
+	 * Use this for every LOOKUP (association queries, status); `provisionDeviceKey` is for CREATION.
+	 */
+	getCurrentDeviceKey(): Promise<{ publicKey: string }>
 	produce(challenge: AttestationChallenge): Promise<DeviceAttestation>
 	/**
 	 * Signs `digest` under the device key. `options.prompt` optionally supplies the biometric prompt
@@ -479,8 +486,29 @@ export function createRealAttestationProducer(opts: {
 		return { publicKey, reprovisioned: result.reprovisioned, voteKeyProbe: result.voteKeyProbe }
 	}
 
+	// Shared field selection for provision + current-key reads (see the encoding notes above).
+	async function doGetCurrentDeviceKey(): Promise<{ publicKey: string }> {
+		const native = getNative()
+		const result = (await native.getCurrentDeviceKey(KEY_ALIAS)) as {
+			publicKeyBase64?: string
+			publicKeyCompressedHex?: string
+		}
+		const isIos = getPlatformOS() === 'ios'
+		const publicKey = isIos ? result.publicKeyCompressedHex : result.publicKeyBase64
+		if (typeof publicKey !== 'string' || publicKey === '') {
+			throw new Error(
+				`getCurrentDeviceKey: native resolved no ${isIos ? 'publicKeyCompressedHex' : 'publicKeyBase64'} ` +
+					`(got: ${Object.keys(result).join(', ') || 'no keys'}) — refusing to look up an undefined device key.`,
+			)
+		}
+		// The key under the alias IS the current key, so refreshing the cache keeps it consistent.
+		currentDeviceKey = publicKey
+		return { publicKey }
+	}
+
 	return {
 		provisionDeviceKey: doProvisionDeviceKey,
+		getCurrentDeviceKey: doGetCurrentDeviceKey,
 
 		async produce(challenge: AttestationChallenge): Promise<DeviceAttestation> {
 			// BOUND_DIGEST is IDENTICAL on both platforms (ATTESTATION-CONTRACT-IOS.md §1) — it is the

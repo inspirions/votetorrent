@@ -281,6 +281,20 @@ class RecoveryKeyInvalidatedException(cause: Throwable) : Exception(
 	cause,
 )
 
+/** [KeyAttestationHelper.readCurrentKey]: no key exists under the alias. Nothing is created. */
+class DeviceKeyAbsentException(keyAlias: String) : Exception(
+	"no device key exists under alias $keyAlias (read-only lookup — nothing was generated)",
+)
+
+/**
+ * [KeyAttestationHelper.readCurrentKey]: the key under the alias is permanently invalidated
+ * (KeyPermanentlyInvalidatedException from initSign). Surfaced, never deleted or regenerated.
+ */
+class DeviceKeyInvalidatedException(cause: Throwable) : Exception(
+	"device key at this alias has been permanently invalidated (KeyPermanentlyInvalidatedException)",
+	cause,
+)
+
 /**
  * KeyAttestationHelper — P-256 StrongBox->TEE->(debug-only)stub keygen, per-use biometric gate,
  * cert-chain export (leaf+intermediates, no root), and KeyPermanentlyInvalidatedException
@@ -320,6 +334,35 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	 */
 	fun generateProvisionKey(keyAlias: String): ProvisionResult {
 		return generateKey(keyAlias, attestationChallenge = null, authenticator = KeyAuthenticator.BIOMETRIC_STRONG)
+	}
+
+	/**
+	 * READ-ONLY current-key accessor. Resolves the public key presently stored under [keyAlias]
+	 * WITHOUT generating, deleting, prompting, or otherwise mutating the Keystore. Unlike
+	 * [generateProvisionKey] (which regenerates the alias on every call), this is safe for pure
+	 * lookups. `initSign` is the same validity probe [reuseExistingRecoveryKey] uses: it throws
+	 * [KeyPermanentlyInvalidatedException] before any prompt is shown.
+	 */
+	fun readCurrentKey(keyAlias: String): ProvisionResult {
+		if (!keyStore.containsAlias(keyAlias)) {
+			throw DeviceKeyAbsentException(keyAlias)
+		}
+		try {
+			val privateKey = keyStore.getKey(keyAlias, null) as? PrivateKey
+				?: throw DeviceKeyAbsentException(keyAlias)
+			Signature.getInstance("SHA256withECDSA").initSign(privateKey)
+		} catch (e: KeyPermanentlyInvalidatedException) {
+			throw DeviceKeyInvalidatedException(e)
+		}
+		val certificate = keyStore.getCertificate(keyAlias)
+			?: throw DeviceKeyAbsentException(keyAlias)
+		val publicKey = certificate.publicKey
+		return ProvisionResult(
+			publicKeyBase64 = Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP),
+			keyAlias = keyAlias,
+			securityLevel = resolveExistingKeySecurityLevel(keyAlias),
+			publicKeyCompressedHex = spkiToCompressedPointHex(publicKey.encoded),
+		)
 	}
 
 	/**

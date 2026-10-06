@@ -107,6 +107,25 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		}
 	}
 
+	override fun getCurrentDeviceKey(keyAlias: String, promise: Promise) {
+		try {
+			// READ-ONLY (63-18 fix): never generates, prompts or mutates the Keystore.
+			val result = keyAttestationHelper.readCurrentKey(keyAlias)
+			promise.resolve(Arguments.createMap().apply {
+				putString("publicKeyBase64", result.publicKeyBase64)
+				putString("keyAlias", result.keyAlias)
+				putString("securityLevel", result.securityLevel)
+				putString("publicKeyCompressedHex", result.publicKeyCompressedHex)
+			})
+		} catch (e: DeviceKeyAbsentException) {
+			promise.reject("DEVICE_KEY_ABSENT", e)
+		} catch (e: DeviceKeyInvalidatedException) {
+			promise.reject("DEVICE_KEY_INVALIDATED", e)
+		} catch (e: Exception) {
+			promise.reject("DEVICE_KEY_READ_FAILED", e)
+		}
+	}
+
 	private fun noBiometricEnrolled(): Boolean =
 		BiometricManager.from(reactApplicationContext)
 			.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==

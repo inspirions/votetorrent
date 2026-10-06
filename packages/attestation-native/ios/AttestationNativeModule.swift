@@ -275,6 +275,38 @@ class AttestationNativeModule: NSObject {
     }
   }
 
+  // MARK: - (1b) getCurrentDeviceKey
+
+  /// READ-ONLY lookup of the existing Secure Enclave vote key (63-18 fix). Never generates, deletes,
+  /// prompts or mutates the Keychain. Resolves `{ publicKeyCompressedHex, keyAlias }` — the same
+  /// key `provisionDeviceKey` would reuse. Rejects `DEVICE_KEY_ABSENT` (no key) or
+  /// `DEVICE_KEY_INVALIDATED` (POSITIVE invalidation signal only; `.indeterminate` is treated usable).
+  @objc(getCurrentDeviceKey:resolver:rejecter:)
+  func getCurrentDeviceKey(_ keyAlias: String,
+                           resolver resolve: @escaping RCTPromiseResolveBlock,
+                           rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard let voteKey = self.loadKey(tag: Self.voteKeyTag) else {
+      reject("DEVICE_KEY_ABSENT", "no device key exists (read-only lookup — nothing was generated)", nil)
+      return
+    }
+    let probe = self.probeKeyLiveness(tag: Self.voteKeyTag)
+    if probe.liveness == .invalidated {
+      reject("DEVICE_KEY_INVALIDATED", "device key is permanently invalidated (\(probe.detail))", nil)
+      return
+    }
+    guard let pub = SecKeyCopyPublicKey(voteKey) else {
+      reject("DEVICE_KEY_READ_FAILED", "could not derive the vote key's public key", nil); return
+    }
+    do {
+      resolve([
+        "publicKeyCompressedHex": try self.compressedHex(from: pub),
+        "keyAlias": keyAlias
+      ])
+    } catch {
+      reject("DEVICE_KEY_READ_FAILED", error.localizedDescription, error)
+    }
+  }
+
   // MARK: - (2) produceAttestation
 
   /// Answers an issued challenge. Implements ATTESTATION-CONTRACT-IOS.md §2 and §3.

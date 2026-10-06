@@ -52,6 +52,17 @@ export interface Spec extends TurboModule {
 	provisionDeviceKey(keyAlias: string): Promise<Object>
 
 	/**
+	 * 63-18 fix: READ-ONLY lookup of the CURRENT device key under `keyAlias`. Never generates,
+	 * deletes, prompts or mutates the Keystore/Keychain — unlike `provisionDeviceKey`, which on
+	 * Android regenerates the alias on every call. Resolves the same public-key shape
+	 * `provisionDeviceKey` does (`publicKeyBase64` + `publicKeyCompressedHex` on Android;
+	 * `publicKeyCompressedHex` on iOS). Rejects `DEVICE_KEY_ABSENT` (no key under the alias),
+	 * `DEVICE_KEY_INVALIDATED` (permanently invalidated; never deleted), or
+	 * `DEVICE_KEY_READ_FAILED`.
+	 */
+	getCurrentDeviceKey(keyAlias: string): Promise<Object>
+
+	/**
 	 * Answers an already-issued challenge bound to the key from `provisionDeviceKey`.
 	 * `boundDigest` is the base64url `Digest(nonce, deviceKey)` string (Play Integrity
 	 * Classic nonce, AS-IS); `boundDigestUtf8Base64` is the base64 encoding of the
