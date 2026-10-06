@@ -19,6 +19,7 @@ import { createInMemorySecretWrapperForTests, type InMemorySecretWrapper } from 
 import { createVoteRecordWrapProvider, setVoteRecordWrapProviderForTests } from '../vote-record-wrap'
 import { openVoteRecord } from '../vote-record-vault'
 import { guard, readSavedVote, readVoteMarker, voteMarkerKey, voteRecordKey } from '../vote-record-store'
+import { loadVoteReceipt, revealVoteReceipt } from '../vote-receipt'
 
 const mockCreateRealAttestationProducer = jest.fn((_opts: { enablePlayIntegrity: boolean }): unknown => undefined)
 
@@ -459,6 +460,30 @@ describe('castVote refusals and failures', () => {
 		expect(producer.getCurrentDeviceKey).not.toHaveBeenCalled()
 		expect(producer.signDeviceKeyDigest).not.toHaveBeenCalled()
 		expectNothingPersisted()
+	})
+
+	it('C14b WR-02 a stale replace whose marker write fails is not saved and its record is never revealed', async () => {
+		expectSaved(await castVote(depsOf()))
+		revisionNow = 4
+		const realImpl = setItem.getMockImplementation() as (k: string, v: string) => Promise<void>
+		setItem.mockImplementationOnce(realImpl)
+		setItem.mockImplementationOnce(() => Promise.reject(new Error('disk full NEEDLE')))
+		const r = await castVote(depsOf())
+		expect(r).toEqual({ ok: false, stage: 'store', reason: 'storage-failed' })
+		const marker = await readVoteMarker('e-1')
+		expect(marker.kind === 'ok' && marker.marker.electionRevision).toBe(3)
+		expect(await guard('e-1', 4)).toBe('stale')
+
+		const load = await loadVoteReceipt('e-1', 4)
+		if (load.kind !== 'stale') throw new Error('expected the stale receipt state')
+		expect(await revealVoteReceipt('e-1', load.envelope, VIEW_PROMPT)).toEqual({ kind: 'unreadable' })
+
+		// The retry commits both keys, and that record reveals.
+		expect(await castVote(depsOf())).toMatchObject({ ok: true, replacedStale: true, electionRevision: 4 })
+		const again = await loadVoteReceipt('e-1', 4)
+		if (again.kind !== 'saved') throw new Error('expected the saved receipt state')
+		const shown = await revealVoteReceipt('e-1', again.envelope, VIEW_PROMPT)
+		expect(shown.kind === 'ok' && shown.record.electionRevision).toBe(4)
 	})
 
 	it('C15 a digest the builder cannot use is a build failure before any prompt', async () => {

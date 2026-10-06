@@ -10,6 +10,17 @@
  * Write order is record first, marker second. The marker is the commit point. The batch write
  * API is deliberately not used, because its atomicity on Android is ASSUMED (RESEARCH A5).
  *
+ * WR-02: because the record is overwritten before the marker, a failed marker write can leave a
+ * record the marker does not describe (on the D-21 stale path: the old marker over the new
+ * record). Such a record is UNCOMMITTED. Two rules keep marker and record from disagreeing:
+ *   - a marker write that rejects is read back. Only if the stored marker is exactly the new one
+ *     (the write landed and then reported failure) is the save reported as committed; otherwise
+ *     it fails `storage-failed`, matching what is stored;
+ *   - any reader that decrypts the record must check it with `voteRecordMatchesMarker` against the
+ *     stored marker and treat a mismatch as unreadable, never reveal it (`revealVoteReceipt`).
+ * No rollback write is made: the store has exactly two writes (the 63-08 persistence gate), and
+ * the next Submit overwrites the uncommitted record because the guard reads only the marker.
+ *
  * Fail closed: an unreadable marker or record never re-enables Submit, and nothing is ever
  * deleted, regenerated or reconciled (the device-user D-42 precedent).
  *
@@ -103,6 +114,32 @@ export function buildVoteMarker(record: VoteRecord): VoteMarker {
 		ballotIds: record.voter.ballots.map((b) => b.ballotId),
 		savedAt: record.savedAt,
 		status: 'saved-not-sent',
+	}
+}
+
+function sameMarker(a: VoteMarker, b: VoteMarker): boolean {
+	return (
+		a.v === b.v &&
+		a.electionId === b.electionId &&
+		a.electionRevision === b.electionRevision &&
+		a.savedAt === b.savedAt &&
+		a.status === b.status &&
+		a.ballotIds.length === b.ballotIds.length &&
+		a.ballotIds.every((id, i) => id === b.ballotIds[i])
+	)
+}
+
+/**
+ * WR-02: whether a decrypted record is the one `marker` commits: same election, revision, save
+ * time and ballot ids, the exact fields `buildVoteMarker` derives. False for an invalid record or
+ * marker; never throws.
+ */
+export function voteRecordMatchesMarker(record: VoteRecord, marker: VoteMarker): boolean {
+	try {
+		if (!isVoteRecord(record) || !isVoteMarker(marker)) return false
+		return sameMarker(buildVoteMarker(record), marker)
+	} catch {
+		return false
 	}
 }
 
@@ -205,6 +242,9 @@ export async function writeVoteRecord(envelope: VoteRecordEnvelope, marker: Vote
 	try {
 		await AsyncStorage.setItem(voteMarkerKey(marker.electionId), JSON.stringify(marker))
 	} catch {
+		// WR-02: report what is stored. The save committed only if the new marker is what reads back.
+		const stored = await readVoteMarker(marker.electionId)
+		if (stored.kind === 'ok' && sameMarker(stored.marker, marker)) return
 		throw new VoteStoreWriteError('storage-failed')
 	}
 }
