@@ -305,6 +305,9 @@ const resources = {
 				"Connecting another device to this user isn't available yet. This version of the app can't pair devices.",
 			connectDeviceFailed:
 				"Couldn't prepare the connection details. Make sure a network is selected, then try again.",
+			// AddDeviceScreen: getEngine("user") resolved no engine — no user is bound on this network.
+			connectDeviceNoUser:
+				"Your user isn't set up on this network yet, so this device can't share connection details.",
 			select: 'Select',
 			hash: 'Hash',
 			requiredTimestampAuthorities: 'Required Timestamp Authorities',
@@ -1374,6 +1377,8 @@ const resources = {
 				'Conectar otro dispositivo a este usuario aún no está disponible. Esta versión de la aplicación no puede vincular dispositivos.',
 			connectDeviceFailed:
 				'No se pudieron preparar los datos de conexión. Asegúrate de haber seleccionado una red e inténtalo de nuevo.',
+			connectDeviceNoUser:
+				'Tu usuario aún no está configurado en esta red, así que este dispositivo no puede compartir los datos de conexión.',
 			select: 'Seleccionar',
 			hash: 'Hash',
 			requiredTimestampAuthorities: 'Autoridades de Temporizador Requeridas',

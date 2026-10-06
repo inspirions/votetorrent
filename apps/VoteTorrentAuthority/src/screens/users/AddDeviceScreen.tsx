@@ -31,6 +31,7 @@ type ScreenState =
 	| { kind: "loading" }
 	| { kind: "ready"; advertisement: DeviceAdvertisement }
 	| { kind: "unavailable" }
+	| { kind: "noUser" }
 	| { kind: "failed" };
 
 /** `instanceof` alone can miss when two copies of vote-core are bundled; the name is the contract. */
@@ -50,6 +51,13 @@ export function AddDeviceScreen() {
 		(async () => {
 			try {
 				const userEngine = await getEngine<IUserEngine>("user");
+				// No user engine means no user is bound to the session on this network — a distinct,
+				// explainable state, not an engine failure (it used to surface as a TypeError and the
+				// generic "make sure a network is selected" copy while a network WAS selected).
+				if (!userEngine) {
+					if (live) setState({ kind: "noUser" });
+					return;
+				}
 				const advertisement = await userEngine.connectDevice();
 				if (live) setState({ kind: "ready", advertisement });
 			} catch (err) {
@@ -73,6 +81,9 @@ export function AddDeviceScreen() {
 				{state.kind === "loading" ? <ThemedText>{t("loading")}</ThemedText> : null}
 				{state.kind === "unavailable" ? (
 					<ThemedText testID="add-device-unavailable">{t("connectDeviceUnavailable")}</ThemedText>
+				) : null}
+				{state.kind === "noUser" ? (
+					<ThemedText testID="add-device-no-user">{t("connectDeviceNoUser")}</ThemedText>
 				) : null}
 				{state.kind === "failed" ? (
 					<ThemedText testID="add-device-failed">{t("connectDeviceFailed")}</ThemedText>

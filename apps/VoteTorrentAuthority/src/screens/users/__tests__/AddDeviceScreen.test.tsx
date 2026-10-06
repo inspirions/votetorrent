@@ -172,6 +172,21 @@ describe('AddDeviceScreen — connection details come from IUserEngine.connectDe
 		warn.mockRestore();
 	});
 
+	it('an undefined user engine (no user bound on this network) renders the no-user state, not the generic failure', async () => {
+		const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		mockGetEngine.mockImplementationOnce(async () => undefined as never);
+		const tr = await renderScreen();
+		expect(tr.root.findAllByProps({testID: 'add-device-no-user'}).length).toBeGreaterThan(0);
+		expect(textOf(tr)).toContain('connectDeviceNoUser');
+		expect(tr.root.findAllByProps({testID: 'add-device-failed'})).toHaveLength(0);
+		expect(tr.root.findAllByProps({testID: 'add-device-unavailable'})).toHaveLength(0);
+		expect(textOf(tr)).not.toContain('qrInformation');
+		expect(mockConnectDevice).not.toHaveBeenCalled();
+		// Not a failure: nothing is logged as a connectDevice error.
+		expect(warn).not.toHaveBeenCalled();
+		warn.mockRestore();
+	});
+
 	it('the screen source carries no hardcoded connection values', () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const fs = require('fs');
