@@ -33,3 +33,7 @@ export * from './keyholder/index.js'
 // reconstruction and the D-18 block-payload contract. Named-export barrel —
 // see src/key-release/index.ts's header.
 export * from './key-release/index.js'
+// Phase 63 Plan 03 (D-23/D-28): the voting module (vote/voter entry builders, the template digest,
+// the canonical ordering rule and the voting-key normalisation). Named-export barrel; see
+// src/voting/index.ts's header.
+export * from './voting/index.js'

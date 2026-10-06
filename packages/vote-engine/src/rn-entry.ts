@@ -223,3 +223,28 @@ export type {
 // `src/index.ts` — src/registration/index.ts and src/association/transport/index.ts already reach it (62-15 Task 3).
 export * from './registration/transport/p2p-registration-transport.js'
 export * from './association/transport/p2p-association-transport.js'
+// Phase 63 Plan 03 (D-23/D-26/D-28/D-07): the voting module, re-exported by name (never `export *`)
+// for its RN consumers. Those are 63-10/63-11 (Voter eligibility and castVote) and 63-15 (the
+// device-proof probe). Mirrors the exact name list on src/voting/index.ts. Deliberately NOT on
+// browser-entry.ts (owner resolution R-6): its purity allowlist does not carry
+// @noble/curves/nist.js, and the dashboard has no consumer.
+export {
+	VOTE_ENTRY_KEYS,
+	VOTER_ENTRY_KEYS,
+	ballotTemplateDigest,
+	makeVoteNonce,
+	buildVoteEntry,
+	voterEntryDigest,
+	canonicalJson,
+	sortByCanonicalBytes,
+	p256KeyToCompressedHex,
+	checkVotingKey
+} from './voting/index.js'
+export type {
+	VoteAnswer,
+	VoteEntry,
+	VoterEntryUnsigned,
+	VoterEntry,
+	TemplateBallot,
+	VotingKeyCheck
+} from './voting/index.js'
