@@ -72,7 +72,9 @@ let wrapper: InMemorySecretWrapper
 const deps: ElectionReadDeps = { getEngine: jest.fn(), fallbackElectionId: undefined }
 
 function reading(revision: number | null): jest.Mock<Promise<ReceiptElection | null>, [ElectionReadDeps, number, string]> {
-	return jest.fn(async () => (revision === null ? null : { revision, ballots: [] }))
+	return jest.fn(async (_d: ElectionReadDeps, _n: number, _id: string): Promise<ReceiptElection | null> =>
+		revision === null ? null : { revision, ballots: [] },
+	)
 }
 
 function counters() {
@@ -123,7 +125,7 @@ describe('readSavedVoteStatus', () => {
 	it('SV4: an unreadable revision reads saved with revisionKnown false, resolving null or rejecting', async () => {
 		await save(makeRecord({ electionRevision: 2 }))
 		await expect(readSavedVoteStatus(deps, 1000, E, reading(null))).resolves.toEqual({ state: 'saved', revisionKnown: false })
-		const rejecting = jest.fn(async () => {
+		const rejecting = jest.fn(async (_d: ElectionReadDeps, _n: number, _id: string): Promise<ReceiptElection | null> => {
 			throw new Error('boom')
 		})
 		await expect(readSavedVoteStatus(deps, 1000, E, rejecting)).resolves.toEqual({ state: 'saved', revisionKnown: false })
