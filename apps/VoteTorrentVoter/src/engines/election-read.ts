@@ -16,6 +16,7 @@
  */
 import type {
 	Ballot,
+	ElectionDetails,
 	ElectionSummary,
 	IElectionEngine,
 	IElectionsEngine,
@@ -128,6 +129,18 @@ export function lifecycleFromTimeline (
 }
 
 /**
+ * The ONE `deriveTimeline` argument list, shared by Home (`readVoterElection`) and the vote gate
+ * (`readVoteContext`) so the two can never drift (D-01).
+ */
+function deriveDetailsTimeline (details: ElectionDetails, nowMs: number) {
+	return deriveTimeline({
+		timeline: details.current.timeline,
+		now: nowMs,
+		election: { ballotDeadline: details.election.ballotDeadline, date: details.election.date },
+	})
+}
+
+/**
  * Reads the current election and derives its card state at `nowMs`. Rejects with
  * `NoElectionError` when there is nothing to read, and with a plain `Error` when the election's
  * timeline is indeterminate (the Timeline tab's own D-03 rule: never a guessed state).
@@ -135,11 +148,7 @@ export function lifecycleFromTimeline (
 export async function readVoterElection (deps: ElectionReadDeps, nowMs: number): Promise<VoterElection> {
 	const { electionId, engine } = await openCurrentElection(deps)
 	const details = await engine.getElectionDetails()
-	const view = deriveTimeline({
-		timeline: details.current.timeline,
-		now: nowMs,
-		election: { ballotDeadline: details.election.ballotDeadline, date: details.election.date },
-	})
+	const view = deriveDetailsTimeline(details, nowMs)
 	if (view.indeterminate) {
 		throw new Error(`Election ${electionId} has an indeterminate timeline: ${view.reason}`)
 	}
@@ -248,4 +257,82 @@ export async function readVoterBallot (deps: ElectionReadDeps, options: { includ
 			).filter((summary): summary is (typeof summaries)[number] => summary !== null)
 	const ballots = await Promise.all(offered.map(async summary => (await engine.getBallotDetails(summary.id)).ballot))
 	return toVoterBallot(electionId, ballots)
+}
+
+/** Everything the vote gate, `castVote` and Review/Submit need from the engine, at one instant. */
+export interface VoteContext {
+	electionId: string
+	/** `details.current.revision`; the D-21 stale comparison input. */
+	revision: number
+	/** `details.election.authorityId`. */
+	authorityId: string
+	/** The D-01 gate: false when the window is not Open, the timeline is indeterminate or `nowMs` is non-finite. */
+	open: boolean
+	/** The derived state at `nowMs`; null means indeterminate (for reason copy only). */
+	lifecycleState: LifecycleState | null
+	/** Confirmed ballots only, raw, sorted by `id` ascending, questions in engine order. */
+	ballots: Ballot[]
+	/** Ids of ballots that are not officer-confirmed, sorted. Their details are never read. */
+	unconfirmedBallotIds: string[]
+	/** Unsupported (non-`select`) questions over `ballots`. */
+	unsupportedQuestionCount: number
+}
+
+/**
+ * The vote-time read for the eligibility gate and `castVote`. It derives the window from the
+ * election timeline at the caller's `nowMs` and deliberately takes NO lifecycle override, because
+ * `getElection().lifecycleState` is forced by the `__DEV__` cycler and must never open or close
+ * Submit (D-01). An indeterminate timeline or a non-finite clock means closed. Only confirmed
+ * ballots are returned and there is no `includeProposed` path (D-03). Questions stay in engine
+ * order (Code order for a confirmed ballot), so consumers key by `questionCode`, never by index.
+ *
+ * Call contract: pass `{getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined}`
+ * and `useVoterApp().nowMs()`, read fresh per evaluation and never cached (D-02). Rejects with
+ * `NoElectionError` when there is no election, and with a plain `Error` on an unreadable revision
+ * or authority id. It does not reject on an indeterminate timeline.
+ */
+export async function readVoteContext (deps: ElectionReadDeps, nowMs: number): Promise<VoteContext> {
+	const { electionId, engine } = await openCurrentElection(deps)
+	const details = await engine.getElectionDetails()
+
+	// The engine casts the revision with an unchecked `as number`; D-21 compares it by `!==`.
+	const raw: unknown = details.current.revision
+	const revision = typeof raw === 'bigint' ? Number(raw) : raw
+	if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) {
+		throw new Error(`Election ${electionId} has an unreadable revision`)
+	}
+	const authorityId: unknown = details.election.authorityId
+	if (typeof authorityId !== 'string' || authorityId === '') {
+		throw new Error(`Election ${electionId} has an unreadable authority`)
+	}
+
+	let lifecycleState: LifecycleState | null = null
+	if (Number.isFinite(nowMs)) {
+		const view = deriveDetailsTimeline(details, nowMs)
+		lifecycleState = view.indeterminate ? null : lifecycleFromTimeline(view, nowMs).lifecycleState
+	}
+	const open = lifecycleState === 'Open'
+
+	const summaries = await engine.getBallots()
+	const states = await Promise.all(summaries.map(summary => engine.getBallotConfirmationState(summary.id)))
+	const confirmed: typeof summaries = []
+	const unconfirmedBallotIds: string[] = []
+	summaries.forEach((summary, i) => {
+		if (states[i]?.confirmed === true) confirmed.push(summary)
+		else unconfirmedBallotIds.push(summary.id)
+	})
+	unconfirmedBallotIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+	const ballots = (await Promise.all(confirmed.map(async summary => (await engine.getBallotDetails(summary.id)).ballot)))
+		.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+
+	return {
+		electionId,
+		revision,
+		authorityId,
+		open,
+		lifecycleState,
+		ballots,
+		unconfirmedBallotIds,
+		unsupportedQuestionCount: toVoterBallot(electionId, ballots).unsupportedQuestionCount,
+	}
 }

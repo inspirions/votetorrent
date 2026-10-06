@@ -3,8 +3,10 @@
  * fixture). The engine chain is stubbed at the `getEngine('elections')` boundary; everything past
  * it (election pick, timeline derivation, ballot flattening, the confirmed-only filter) is real.
  */
+import fs from 'fs';
+import path from 'path';
 import type {Ballot, Question} from '@votetorrent/vote-core';
-import {NoElectionError, readVoterBallot, readVoterElection, toVoterBallot} from '../election-read';
+import {NoElectionError, readVoteContext, readVoterBallot, readVoterElection, toVoterBallot} from '../election-read';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -27,6 +29,8 @@ interface FakeOptions {
 	summaries?: Array<{id: string; date: number}>;
 	timeline?: unknown;
 	keyholders?: unknown[];
+	revision?: unknown;
+	authorityId?: unknown;
 	ballots?: Array<{ballot: Ballot; confirmed: boolean}>;
 	/** Serves the vault-less 'keyRelease' engine; when omitted, getEngine('keyRelease') THROWS like any unknown name. */
 	keyRelease?: {getKeyReleaseStatus: (electionId: string) => Promise<unknown>};
@@ -35,14 +39,18 @@ interface FakeOptions {
 function fakeDeps(options: FakeOptions = {}, fallbackElectionId?: string) {
 	const ballots = options.ballots ?? [];
 	const opened: string[] = [];
+	const detailsCalls: string[] = [];
 	const electionEngine = {
 		getElectionDetails: async () => ({
-			election: {id: 'e-1', authorityId: 'a-1', title: 'Real Election', date: D, revisionDeadline: D - 30 * DAY, ballotDeadline: D - 7 * DAY, type: 'a'},
-			current: {timeline: options.timeline ?? TIMELINE, keyholders: options.keyholders ?? []},
+			election: {id: 'e-1', authorityId: 'authorityId' in options ? options.authorityId : 'a-1', title: 'Real Election', date: D, revisionDeadline: D - 30 * DAY, ballotDeadline: D - 7 * DAY, type: 'a'},
+			current: {revision: 'revision' in options ? options.revision : 3, timeline: options.timeline ?? TIMELINE, keyholders: options.keyholders ?? []},
 		}),
 		getBallots: async () => ballots.map(({ballot}) => ({id: ballot.id, electionId: ballot.electionId, authorityId: ballot.authorityId})),
 		getBallotConfirmationState: async (id: string) => ({locked: false, confirmed: ballots.find(b => b.ballot.id === id)!.confirmed}),
-		getBallotDetails: async (id: string) => ({ballot: ballots.find(b => b.ballot.id === id)!.ballot}),
+		getBallotDetails: async (id: string) => {
+			detailsCalls.push(id);
+			return {ballot: ballots.find(b => b.ballot.id === id)!.ballot};
+		},
 	};
 	const electionsEngine = {
 		getElections: async () => (options.summaries ?? [{id: 'e-1', date: D}]).map(s => ({...s, title: 't', authorityName: 'a', type: 'a'})),
@@ -56,7 +64,7 @@ function fakeDeps(options: FakeOptions = {}, fallbackElectionId?: string) {
 		if (name !== 'elections') throw new Error(`unexpected engine ${name}`);
 		return electionsEngine as unknown as T;
 	};
-	return {deps: {getEngine, fallbackElectionId}, opened};
+	return {deps: {getEngine, fallbackElectionId}, opened, detailsCalls};
 }
 
 function question(code: string, overrides: Partial<Question> = {}): Question {
@@ -310,5 +318,161 @@ describe('readVoterBallot — only officer-confirmed ballots reach a voter', () 
 
 	it('returns an empty ballot (not a rejection) when the election has none', async () => {
 		expect((await readVoterBallot(fakeDeps().deps, {includeProposed: false})).offices).toEqual([]);
+	});
+});
+
+describe('readVoteContext — the vote window, confirmed ballots and revision (D-01, D-03, D-05)', () => {
+	it('R1: Open mid-window, with the election id, authority and revision', async () => {
+		const ctx = await readVoteContext(fakeDeps().deps, D - 10 * DAY);
+		expect(ctx).toMatchObject({open: true, lifecycleState: 'Open', electionId: 'e-1', authorityId: 'a-1', revision: 3});
+	});
+
+	it.each([
+		[TIMELINE.votingStarts - 60_000, false, 'Upcoming'],
+		[TIMELINE.votingStarts + 60_000, true, 'Open'],
+		[TIMELINE.accruingVotes - 60_000, true, 'Open'],
+		[TIMELINE.accruingVotes + 60_000, false, 'ReleasingKeys'],
+		[D + 4 * DAY, false, 'Complete'],
+	] as const)('R2: edge %#: open=%s state=%s', async (now, open, state) => {
+		const ctx = await readVoteContext(fakeDeps().deps, now);
+		expect(ctx.open).toBe(open);
+		expect(ctx.lifecycleState).toBe(state);
+	});
+
+	it('R3: agrees with the Home derivation across a boundary sweep', async () => {
+		const {deps} = fakeDeps();
+		const sweep = [
+			D - 60 * DAY, TIMELINE.votingStarts - 1, TIMELINE.votingStarts, TIMELINE.votingStarts + 1, D - 10 * DAY,
+			TIMELINE.accruingVotes - 1, TIMELINE.accruingVotes, TIMELINE.accruingVotes + 1, D - 6 * HOUR, D + 2.5 * DAY, D + 4 * DAY,
+		];
+		for (const t of sweep) {
+			const ctx = await readVoteContext(deps, t);
+			const home = await readVoterElection(deps, t);
+			expect(ctx.lifecycleState).toBe(home.lifecycleState);
+			expect(ctx.open).toBe(ctx.lifecycleState === 'Open');
+		}
+	});
+
+	it('R4: an indeterminate timeline reads as closed and does not reject', async () => {
+		const ctx = await readVoteContext(
+			fakeDeps({timeline: {}, ballots: [{ballot: ballot('b-1', [question('q1')]), confirmed: true}]}).deps,
+			D - 10 * DAY
+		);
+		expect(ctx.open).toBe(false);
+		expect(ctx.lifecycleState).toBeNull();
+		expect(ctx.revision).toBe(3);
+		expect(ctx.authorityId).toBe('a-1');
+		expect(ctx.ballots.map(b => b.id)).toEqual(['b-1']);
+	});
+
+	it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])('R5: a non-finite clock (%s) reads as closed', async now => {
+		const ctx = await readVoteContext(fakeDeps().deps, now);
+		expect(ctx.open).toBe(false);
+		expect(ctx.lifecycleState).toBeNull();
+	});
+
+	it('R6: only confirmed ballots are returned; unconfirmed are listed and never read (D-03)', async () => {
+		const {deps, detailsCalls} = fakeDeps({
+			ballots: [
+				{ballot: ballot('b-2', [question('q')]), confirmed: true},
+				{ballot: ballot('b-p', [question('q')]), confirmed: false},
+				{ballot: ballot('b-1', [question('q')]), confirmed: true},
+			],
+		});
+		const ctx = await readVoteContext(deps, D - 10 * DAY);
+		expect(ctx.ballots.map(b => b.id)).toEqual(['b-1', 'b-2']);
+		expect(ctx.unconfirmedBallotIds).toEqual(['b-p']);
+		expect(detailsCalls).not.toContain('b-p');
+
+		const none = fakeDeps({ballots: [{ballot: ballot('b-z', [question('q')]), confirmed: false}, {ballot: ballot('b-y', [question('q')]), confirmed: false}]});
+		const allUnconfirmed = await readVoteContext(none.deps, D - 10 * DAY);
+		expect(allUnconfirmed.ballots).toEqual([]);
+		expect(allUnconfirmed.unconfirmedBallotIds).toEqual(['b-y', 'b-z']);
+		expect(none.detailsCalls).toEqual([]);
+
+		const empty = await readVoteContext(fakeDeps().deps, D - 10 * DAY);
+		expect(empty.ballots).toEqual([]);
+		expect(empty.unconfirmedBallotIds).toEqual([]);
+	});
+
+	it('R7: ballots are the raw engine objects, in engine question order, keeping dependsOn and optionRange', async () => {
+		const raw = ballot('b-1', [
+			question('a-q', {sequence: 3, dependsOn: {code: 'm-q'}, optionRange: {min: 2, max: 3}}),
+			question('m-q', {sequence: 1}),
+			question('z-q', {sequence: 2}),
+		]);
+		const ctx = await readVoteContext(fakeDeps({ballots: [{ballot: raw, confirmed: true}]}).deps, D - 10 * DAY);
+		expect(ctx.ballots[0]).toBe(raw);
+		expect(ctx.ballots[0].questions.map(q => q.code)).toEqual(['a-q', 'm-q', 'z-q']);
+		expect(ctx.ballots[0].questions[0].dependsOn).toEqual({code: 'm-q'});
+		expect(ctx.ballots[0].questions[0].optionRange).toEqual({min: 2, max: 3});
+	});
+
+	it('R8: counts unsupported questions over confirmed ballots only', async () => {
+		const ctx = await readVoteContext(
+			fakeDeps({
+				ballots: [
+					{ballot: ballot('b-1', [question('s'), question('r', {type: 'rank'}), question('t', {type: 'text'})]), confirmed: true},
+					{ballot: ballot('b-2', [question('u', {type: 'rank'})]), confirmed: false},
+				],
+			}).deps,
+			D - 10 * DAY
+		);
+		expect(ctx.unsupportedQuestionCount).toBe(2);
+		expect(ctx.unconfirmedBallotIds).toEqual(['b-2']);
+
+		const onlyUnconfirmed = await readVoteContext(
+			fakeDeps({ballots: [{ballot: ballot('b-2', [question('u', {type: 'rank'})]), confirmed: false}]}).deps,
+			D - 10 * DAY
+		);
+		expect(onlyUnconfirmed.unsupportedQuestionCount).toBe(0);
+	});
+
+	it('R9: normalises a bigint revision; rejects an unreadable revision or authority', async () => {
+		expect((await readVoteContext(fakeDeps({revision: 4n}).deps, D)).revision).toBe(4);
+		for (const revision of ['3', 1.5, -1, undefined, Number.NaN]) {
+			await expect(readVoteContext(fakeDeps({revision}).deps, D)).rejects.toThrow(/unreadable revision/);
+		}
+		await expect(readVoteContext(fakeDeps({authorityId: ''}).deps, D)).rejects.toThrow(/unreadable authority/);
+	});
+
+	it('R10: rejects with NoElectionError when there is no election', async () => {
+		await expect(readVoteContext(fakeDeps({summaries: []}).deps, D)).rejects.toBeInstanceOf(NoElectionError);
+	});
+});
+
+describe('readVoteContext — source gate: derived window only, no dev override (D-01)', () => {
+	function stripCommentsPreservingLines (src: string): string {
+		return src
+			.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
+			.replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+	}
+	function bodyOf (src: string): string {
+		const start = src.indexOf('export async function readVoteContext');
+		if (start < 0) return '';
+		const rest = src.slice(start + 1);
+		const next = rest.indexOf('\nexport ');
+		return next < 0 ? rest : rest.slice(0, next);
+	}
+	function readVoteContextViolations (src: string): string[] {
+		const body = bodyOf(src);
+		const required = ['lifecycleFromTimeline(', 'deriveDetailsTimeline(', 'getBallotConfirmationState('];
+		const banned = ['lifecycleOverride', 'includeProposed', 'Date.now(', 'DEV_LIFECYCLE', 'console.'];
+		return [
+			...required.filter(t => !body.includes(t)).map(t => `missing ${t}`),
+			...banned.filter(t => body.includes(t)).map(t => `contains ${t}`),
+		];
+	}
+	const source = stripCommentsPreservingLines(fs.readFileSync(path.join(__dirname, '..', 'election-read.ts'), 'utf8'));
+
+	it('R11: readVoteContext derives the window and partitions confirmed ballots, with no override or wall clock', () => {
+		expect(readVoteContextViolations(source)).toEqual([]);
+		const helper = source.slice(source.indexOf('function deriveDetailsTimeline'));
+		expect(helper.slice(0, helper.indexOf('\n}'))).toContain('deriveTimeline(');
+	});
+
+	it('R11 self-check: the checker reports a planted override', () => {
+		const planted = 'export async function readVoteContext () { lifecycleFromTimeline( deriveDetailsTimeline( getBallotConfirmationState( lifecycleOverride }';
+		expect(readVoteContextViolations(planted)).toEqual(['contains lifecycleOverride']);
 	});
 });
