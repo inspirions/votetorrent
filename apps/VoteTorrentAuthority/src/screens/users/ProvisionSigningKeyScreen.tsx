@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
+import type { NavigationProp } from "../../navigation/types";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
@@ -136,7 +137,7 @@ export default function ProvisionSigningKeyScreen() {
 	const insets = useSafeAreaInsets();
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
-	const navigation = useNavigation();
+	const navigation = useNavigation<NavigationProp>();
 	const { getEngine } = useApp();
 	const { reason } = useRoute().params as { reason: ProvisionReason };
 
@@ -694,6 +695,19 @@ export default function ProvisionSigningKeyScreen() {
 						title={t("signingKeyProvisioningNetworkUserUnresolvedRetryButton")}
 						backgroundColor={colors.accent}
 						onPress={() => handleFirstRun()}
+					/>
+				</View>
+				{/* UAT 62 Q: "not synced yet" and "this device has no account on the network" are
+				    indistinguishable here (getCurrentUser finds no User row in both), and waiting never
+				    fixes the second. Settings > Connect to existing user is not a way out: its
+				    connectDevice() is still phase-gated (FeatureNotAvailableError) and an unbound device
+				    lands on its noUser state. Accepting an administrator invitation is the working path. */}
+				<View testID="signing-key-provisioning-accept-invitation-button">
+					<CustomButton
+						title={t("signingKeyProvisioningNetworkUserUnresolvedInviteButton")}
+						backgroundColor={colors.card}
+						size="thin"
+						onPress={() => navigation.navigate("AcceptInvitation")}
 					/>
 				</View>
 			</ScrollView>

@@ -277,9 +277,12 @@ const resources = {
 			// device's account on it did not (see ProvisionSigningKeyScreen.tsx's
 			// tryResolveNetworkUserEngine doc comment).
 			signingKeyProvisioningNetworkUserUnresolvedHeading: "We couldn't find your account on this network",
+			// Two causes look identical from this device (getCurrentUser finds no User row either way):
+			// the officer account has not synced here yet, or this device has no account on the network.
 			signingKeyProvisioningNetworkUserUnresolvedBody:
-				"This device is connected, but your officer account hasn't finished syncing to this network yet. Wait a moment and try again.",
+				"This device is connected to the network, but your officer account isn't on it here. If it is still syncing, wait a moment and try again. If waiting doesn't help, this device has no officer account on this network: ask an officer to send it an administrator invitation, then accept it in Settings > Accept an Invitation.",
 			signingKeyProvisioningNetworkUserUnresolvedRetryButton: 'Try Again',
+			signingKeyProvisioningNetworkUserUnresolvedInviteButton: 'Accept an Invitation',
 			signingKeyProvisioningRecoveryHeading: 'Your signing key needs to be replaced',
 			signingKeyProvisioningRecoveryBody:
 				"Your device's biometrics changed, which invalidated your previous signing key for security. Verify with your device PIN, pattern, or password to sign in a replacement key.",
@@ -1362,8 +1365,9 @@ const resources = {
 			signingKeyProvisioningContinueButton: 'Continuar',
 			signingKeyProvisioningNetworkUserUnresolvedHeading: 'No pudimos encontrar tu cuenta en esta red',
 			signingKeyProvisioningNetworkUserUnresolvedBody:
-				'Este dispositivo está conectado, pero tu cuenta de funcionario aún no ha terminado de sincronizarse con esta red. Espera un momento e inténtalo de nuevo.',
+				'Este dispositivo está conectado a la red, pero tu cuenta de funcionario no aparece aquí. Si aún se está sincronizando, espera un momento e inténtalo de nuevo. Si esperar no ayuda, este dispositivo no tiene una cuenta de funcionario en esta red: pide a un funcionario que le envíe una invitación de administrador y acéptala en Ajustes > Aceptar una Invitación.',
 			signingKeyProvisioningNetworkUserUnresolvedRetryButton: 'Intentar de Nuevo',
+			signingKeyProvisioningNetworkUserUnresolvedInviteButton: 'Aceptar una Invitación',
 			signingKeyProvisioningRecoveryHeading: 'Tu clave de firma debe reemplazarse',
 			signingKeyProvisioningRecoveryBody:
 				'La biometría de tu dispositivo cambió, lo que invalidó tu clave de firma anterior por seguridad. Verifica con el PIN, patrón o contraseña de tu dispositivo para firmar una clave de reemplazo.',

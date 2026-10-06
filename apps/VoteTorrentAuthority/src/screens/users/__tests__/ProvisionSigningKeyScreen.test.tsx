@@ -886,3 +886,22 @@ describe("ProvisionSigningKeyScreen — D-14 boot invariant", () => {
 		expect(appProviderSource).not.toContain("ProvisionSigningKey");
 	});
 });
+
+describe("ProvisionSigningKeyScreen network-user-unresolved (UAT 62 Q)", () => {
+	it("explains both causes and offers Accept an Invitation alongside Try Again", async () => {
+		mockHappyPathNative();
+		mockGetCurrentUser.mockRejectedValueOnce(new Error("User not found"));
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningNetworkUserUnresolvedBody");
+		expect(tr.root.findByProps({ testID: "signing-key-provisioning-retry-button" })).toBeTruthy();
+
+		const inviteButton = tr.root.findByProps({ testID: "signing-key-provisioning-accept-invitation-button" });
+		const pressable = inviteButton.findAll((node) => typeof node.props.onPress === "function")[0]!;
+		await renderer.act(async () => pressable.props.onPress());
+		expect(mockNavigate).toHaveBeenCalledWith("AcceptInvitation");
+	});
+});
