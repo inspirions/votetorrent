@@ -18,6 +18,10 @@
  * (39-04 precedent) applied at the module level instead of per-test-file. 51-12 (D-09/D-20):
  * `VoterAppContextType` no longer has a `sign` field at all (see `types.ts`'s doc comment), so
  * this mock has nothing to stand in for there.
+ *
+ * D-02: also mirrors the shared clock (`clockOffsetMs`/`setClockOffsetMs`/`nowMs`). Deviation from
+ * 63-PATTERNS: the setter is STATEFUL (inert outside `__DEV__`), not a no-op, because later screen
+ * tests drive the dev clock through this mock.
  */
 import React, {createContext, useCallback, useContext, useState} from 'react';
 import type {PropsWithChildren} from 'react';
@@ -51,6 +55,14 @@ export function useVoterApp(): VoterAppContextType {
 export function VoterAppProvider({children}: PropsWithChildren) {
 	const [lifecycleOverride, setLifecycleOverride] = useState<LifecycleState | null>(null);
 
+	const [clockOffsetMs, setClockOffsetMsState] = useState(0);
+	const setClockOffsetMs = useCallback((ms: number) => {
+		if (__DEV__ && Number.isFinite(ms)) {
+			setClockOffsetMsState(ms);
+		}
+	}, []);
+	const nowMs = useCallback(() => Date.now() + (__DEV__ ? clockOffsetMs : 0), [clockOffsetMs]);
+
 	// Live mode reports 'Upcoming' (the fixture has no timeline to derive from); an override forces
 	// the state and overlays its review fixture, exactly like the real provider.
 	const getElection = useCallback(async (): Promise<VoterElection> => {
@@ -79,6 +91,9 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				isInitialized: true,
 				lifecycleOverride,
 				setLifecycleOverride,
+				clockOffsetMs,
+				setClockOffsetMs,
+				nowMs,
 				getElection,
 				getBallot,
 				hasNetwork: false,

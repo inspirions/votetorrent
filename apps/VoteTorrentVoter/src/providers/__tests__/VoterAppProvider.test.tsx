@@ -86,6 +86,15 @@ jest.mock('../../engines/device-user', () => ({
 	migrateLegacyPlaintextIdentityKey: () => mockMigrateLegacyPlaintextIdentityKey(),
 }));
 
+// D-02: passthrough spy over the real read so a test can observe the clock the provider hands it.
+jest.mock('../../engines/election-read', () => {
+	const actual = jest.requireActual('../../engines/election-read');
+	return {
+		...actual,
+		readVoterElection: jest.fn((...args: unknown[]) => actual.readVoterElection(...args)),
+	};
+});
+
 import {VoterAppProvider, useVoterApp} from '../VoterAppProvider';
 import type {VoterAppContextType} from '../types';
 import {hideSplash} from 'react-native-splash-view';
@@ -256,6 +265,64 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 		expect(text).toContain('Try Again');
 		expect(text).toContain('Start Fresh');
 		expect(hideSplash).toHaveBeenCalled();
+	});
+});
+
+describe('VoterAppProvider — shared __DEV__ clock (D-02)', () => {
+	const DAY = 86_400_000;
+	async function boot() {
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		const r = renderProvider();
+		await flushBoot(15, () => r.captured.value !== null);
+		return r.captured;
+	}
+
+	it('A: defaults to live (offset 0, nowMs ~ Date.now())', async () => {
+		const captured = await boot();
+		expect(captured.value!.clockOffsetMs).toBe(0);
+		expect(typeof captured.value!.setClockOffsetMs).toBe('function');
+		expect(typeof captured.value!.nowMs).toBe('function');
+		expect(Math.abs(captured.value!.nowMs() - Date.now())).toBeLessThan(1000);
+	});
+
+	it('B: a dev shift moves nowMs and changes getElection identity', async () => {
+		const captured = await boot();
+		const before = captured.value!.getElection;
+		renderer.act(() => captured.value!.setClockOffsetMs(DAY));
+		expect(captured.value!.clockOffsetMs).toBe(DAY);
+		expect(Math.abs(captured.value!.nowMs() - Date.now() - DAY)).toBeLessThan(1000);
+		expect(captured.value!.getElection).not.toBe(before);
+	});
+
+	it('C: getElection derives against the shared clock', async () => {
+		const readMock = jest.requireMock('../../engines/election-read').readVoterElection as jest.Mock;
+		const captured = await boot();
+		renderer.act(() => captured.value!.setClockOffsetMs(DAY));
+		readMock.mockResolvedValueOnce({id: 'e', title: 't', lifecycleState: 'Upcoming'});
+		await captured.value!.getElection();
+		const lastCall = readMock.mock.calls[readMock.mock.calls.length - 1];
+		expect(Math.abs((lastCall[1] as number) - (Date.now() + DAY))).toBeLessThan(5000);
+	});
+
+	it('D: release build is inert (offset stays 0)', async () => {
+		const captured = await boot();
+		const g = globalThis as {__DEV__?: boolean};
+		const saved = g.__DEV__;
+		try {
+			g.__DEV__ = false;
+			renderer.act(() => captured.value!.setClockOffsetMs(DAY));
+			expect(captured.value!.clockOffsetMs).toBe(0);
+			expect(Math.abs(captured.value!.nowMs() - Date.now())).toBeLessThan(1000);
+		} finally {
+			g.__DEV__ = saved;
+		}
+	});
+
+	it('E: non-finite offsets are ignored', async () => {
+		const captured = await boot();
+		renderer.act(() => captured.value!.setClockOffsetMs(Number.NaN));
+		renderer.act(() => captured.value!.setClockOffsetMs(Number.POSITIVE_INFINITY));
+		expect(captured.value!.clockOffsetMs).toBe(0);
 	});
 });
 

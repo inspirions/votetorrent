@@ -89,6 +89,17 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		}
 	}, []);
 
+	// D-02: the one shared __DEV__ clock (Timeline, Home and the vote window gate all read it).
+	// The setter is inert outside __DEV__ and ignores non-finite input; nowMs() re-checks __DEV__
+	// as defence in depth, so a release build always reads the real clock.
+	const [clockOffsetMs, setClockOffsetMsState] = useState(0);
+	const setClockOffsetMs = useCallback((ms: number) => {
+		if (__DEV__ && Number.isFinite(ms)) {
+			setClockOffsetMsState(ms);
+		}
+	}, []);
+	const nowMs = useCallback(() => Date.now() + (__DEV__ ? clockOffsetMs : 0), [clockOffsetMs]);
+
 	// D-02/D-04: one app-lifetime EngineFactory via useRef (constructed once, stable across
 	// renders) — mirrors the authority app's AppProvider (44-PATTERNS.md).
 	const engineFactoryRef = useRef<EngineFactory | null>(null);
@@ -278,13 +289,13 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		setIsInitialized(true);
 	}, []);
 
-	// Real reads against the same election every tab resolves. `Date.now()` is read per call, so
+	// Real reads against the same election every tab resolves. `nowMs()` (the shared dev-aware clock) is read per call, so
 	// each fetch derives the card state for the moment it runs. Under a __DEV__ override the
 	// real title/id stay, and the forced state's review fixture replaces the derived content.
 	const getElection = useCallback(async (): Promise<VoterElection> => {
 		const election = await readVoterElection(
 			{getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined},
-			Date.now(),
+			nowMs(),
 		);
 		if (__DEV__ && lifecycleOverride !== null) {
 			return {
@@ -295,7 +306,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 			};
 		}
 		return election;
-	}, [getEngine, seededElectionId, lifecycleOverride]);
+	}, [getEngine, seededElectionId, lifecycleOverride, clockOffsetMs, nowMs]);
 
 	// Officer-confirmed ballots only; __DEV__ also admits the dev seed's proposed ballot (the seed
 	// cannot run the officer confirmation ceremony).
@@ -372,6 +383,9 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				isInitialized,
 				lifecycleOverride,
 				setLifecycleOverride,
+				clockOffsetMs,
+				setClockOffsetMs,
+				nowMs,
 				getElection,
 				getBallot,
 				hasNetwork,

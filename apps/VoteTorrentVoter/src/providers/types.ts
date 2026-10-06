@@ -183,6 +183,19 @@ export interface VoterAppContextType {
 	 */
 	lifecycleOverride: LifecycleState | null;
 	setLifecycleOverride: (state: LifecycleState | null) => void;
+	/**
+	 * D-02: the `__DEV__`-only offset in ms added to the wall clock; 0 = live. Always 0 in a
+	 * release build (the setter is inert).
+	 */
+	clockOffsetMs: number;
+	/** D-02: inert unless `__DEV__`; ignores non-finite input. */
+	setClockOffsetMs: (ms: number) => void;
+	/**
+	 * D-02: the one clock every election-window read uses (Home card state, Timeline rail, the
+	 * Submit window gate). Equals `Date.now()` in a release build. Consumers call `nowMs()` per
+	 * read and never cache it.
+	 */
+	nowMs: () => number;
 	/** Real read of the current election. Rejects when there is no election to read. */
 	getElection: () => Promise<VoterElection>;
 	/** Real read of the current election's ballot. Rejects when there is no election to read. */
