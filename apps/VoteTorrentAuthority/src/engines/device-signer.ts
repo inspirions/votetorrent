@@ -36,6 +36,7 @@ import type { Signature } from '@votetorrent/vote-core'
 import { UserKeyType } from '@votetorrent/vote-core'
 import i18n from '../i18n'
 import { getDeviceUser, isRecoveryInProgress } from './device-user'
+import { dismissKeyboardForSystemPrompt } from '../utils/dismissKeyboardForSystemPrompt'
 // Type-only import — erased at compile time (isolatedModules requires this to be explicit), so
 // it produces NO runtime require of '@votetorrent/attestation-native/src/specs/NativeAttestation'
 // and therefore does not trigger that module's top-level `TurboModuleRegistry.getEnforcing(...)`
@@ -252,6 +253,11 @@ export async function createDeviceSigner (displayName: string): Promise<SignCall
 			)
 		}
 		const digestBase64 = base64FromDigestBytes(digest)
+
+		// Every officer signature funnels through this closure, so this is the one place the IME is
+		// closed before the native BiometricPrompt starts. On MIUI/Android 10 a prompt started over an
+		// open keyboard is never drawn and times out ~10 min later (see the helper's doc comment).
+		await dismissKeyboardForSystemPrompt()
 
 		// Do NOT catch, wrap, or re-map native rejections here. A native rejection's typed `code`
 		// (D-13) must reach the call site UNWRAPPED so `deviceSigningError.ts`'s

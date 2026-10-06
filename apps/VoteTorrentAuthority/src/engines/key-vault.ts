@@ -22,6 +22,7 @@ import { createNativeSecretWrapper, WRAP_KEY_ALIAS_PATTERN } from '@votetorrent/
 import type { SecretWrapper, WrappedSecret, SecretWrapOptions, SecretWrapPrompt } from '@votetorrent/attestation-native';
 import { utf8ToBytes } from '@noble/hashes/utils.js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { dismissKeyboardForSystemPrompt } from '../utils/dismissKeyboardForSystemPrompt';
 
 /** Native alias for every `requireUserAuth: false` secret this vault stores (point 2 above). */
 export const VOTETORRENT_AUTHORITY_OFFICER_ENC_WRAP_KEY_V1 = 'VOTETORRENT_AUTHORITY_OFFICER_ENC_WRAP_KEY_V1';
@@ -181,6 +182,10 @@ export function createAuthorityKeyVault(options?: AuthorityKeyVaultOptions): IKe
 				);
 			}
 
+			// An auth-required wrap raises a BiometricPrompt: close the IME first (an open keyboard
+			// leaves the prompt undrawn on MIUI/Android 10 — see the helper's doc comment).
+			if (target.options.requireAuth) await dismissKeyboardForSystemPrompt();
+
 			const secretCopy = Uint8Array.from(secret);
 			let wrapped: WrappedSecret;
 			try {
@@ -218,6 +223,8 @@ export function createAuthorityKeyVault(options?: AuthorityKeyVaultOptions): IKe
 					`key-vault: getSecret for alias '${alias}' requires user auth but no authRequiredWrap was configured`,
 				);
 			}
+
+			if (target.options.requireAuth) await dismissKeyboardForSystemPrompt();
 
 			let plaintext: Uint8Array;
 			try {
