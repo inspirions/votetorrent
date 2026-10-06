@@ -1,10 +1,18 @@
 import { expect } from 'chai'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import type { Ballot, Question } from '@votetorrent/vote-core'
 import { digestFields, resolveHasher, resolveOutputEncoder } from '@optimystic/quereus-plugin-crypto'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import {
-  ballotTemplateDigest, buildVoteEntry, makeVoteNonce, voterEntryDigest,
-  type TemplateBallot, type VoterEntryUnsigned
+  VOTE_ENTRY_KEYS, VOTER_ENTRY_KEYS, ballotTemplateDigest, buildVoteEntry, makeVoteNonce, voterEntryDigest,
+  type TemplateBallot, type VoteEntry, type VoterEntryUnsigned
 } from '../src/voting/vote-entries.js'
+import { AssociationEngine } from '../src/association/association-engine.js'
+import { RegistrationEngine } from '../src/registration/registration-engine.js'
+import { seedRegistrantAssociation } from '../src/dev/seed-registrant-association.js'
+import { addTestAuthority, addTestElection, createTestNetwork, makeTestSignCallback } from './fixtures/test-context.js'
+import { makeP256TestKey } from './fixtures/p256-signer.js'
 import { canonicalJson, sortByCanonicalBytes } from '../src/voting/canonical.js'
 
 const rand32 = (): Uint8Array => crypto.getRandomValues(new Uint8Array(32))
@@ -207,6 +215,222 @@ describe('voting/vote-entries (63-01: D-16, D-23, D-24, D-25, D-27, D-28)', func
       expect(input).to.have.length(3)
       input.forEach((x, i) => expect(x).to.equal(snapshot[i]))
       expect(out.map(x => x.t)).to.deep.equal(['a', 'b', 'c'])
+    })
+  })
+
+  describe('spike-096 harness port (real engine reads)', function () {
+    this.timeout(60000)
+
+    function q (code: string, title: string, max: number, options: Array<[string, string]>): Question {
+      return { code, title, instructions: '', type: 'select', optionRange: { min: 1, max }, options: options.map(([c, t]) => ({ code: c, title: t })) }
+    }
+
+    let electionId: string
+    let electionRevision: number
+    let associationsLength: number
+    let registrantStatus: string | undefined
+    let confirmed: boolean
+    let ballotsLength: number
+    let ballotOk: boolean
+    let ballot: TemplateBallot
+    let reread: TemplateBallot
+    let unsigned: VoterEntryUnsigned
+
+    before(async function () {
+      this.timeout(120000)
+      const net = await createTestNetwork()
+      const auth = await addTestAuthority(net)
+      const elec = await addTestElection(auth)
+      const electionRow = await auth.ctx.db.prepare('select Id from Election where AuthorityId = :a limit 1').get({ a: auth.authority.id })
+      electionId = electionRow!.Id as string
+      const ballotIn: Ballot = {
+        id: crypto.randomUUID(), electionId, authorityId: auth.authority.id, description: 'Spike 096 ballot', districts: ['d-1'],
+        questions: [
+          q('us-senate', 'U.S. Senate', 1, [['diana', 'Diana Foster'], ['marcus', 'Marcus Whitfield'], ['elena', 'Elena Vasquez']]),
+          q('school-board', 'School Board', 2, [['angela', 'Angela Torres'], ['brian', 'Brian Michaels'], ['cynthia', 'Cynthia Park']])
+        ]
+      }
+      await elec.electionEngine.proposeBallot(ballotIn)
+
+      const device = makeP256TestKey()
+      const registrantId = `spike096-registrant-${Date.now()}`
+      await seedRegistrantAssociation(auth.ctx, auth.authority.id, { id: registrantId }, device.pubHex, makeTestSignCallback(auth.user))
+
+      const associations = await new AssociationEngine(auth.ctx).getAssociationsByDeviceKey(device.pubHex)
+      associationsLength = associations.length
+      const assoc = associations[0]!
+      const registrant = await new RegistrationEngine(auth.ctx).getRegistrant(assoc.registrantId)
+      registrantStatus = registrant?.status
+      const details = await elec.electionEngine.getElectionDetails()
+      electionRevision = details.current.revision
+      const summaries = await elec.electionEngine.getBallots()
+      const ballots = await Promise.all(summaries.map(async s => (await elec.electionEngine.getBallotDetails(s.id)).ballot))
+      ballotsLength = ballots.length
+      ballotOk = ballots.length === 1 && ballots[0]!.questions.length === 2 && ballots[0]!.questions.every(x => x.options.length > 0)
+      const confirmation = await elec.electionEngine.getBallotConfirmationState(ballots[0]!.id)
+      confirmed = confirmation.confirmed
+      // No cast: vote-core `Ballot` must structurally satisfy `TemplateBallot` (63-11 relies on it).
+      ballot = ballots[0]!
+      reread = (await elec.electionEngine.getBallotDetails(ballot.id)).ballot
+      unsigned = {
+        v: 1, electionId, electionRevision,
+        registrantId: assoc.registrantId,
+        privateCid: registrant!.privateCid,
+        publicCid: registrant!.publicCid ?? null,
+        deviceKey: assoc.deviceKey,
+        attestationCid: assoc.attestationCid ?? null,
+        ballots: [{ ballotId: ballot.id, templateDigest: ballotTemplateDigest(ballot, electionRevision) }]
+      }
+    })
+
+    it('F1 the device key alone resolves exactly one Association', function () {
+      expect(associationsLength).to.equal(1)
+    })
+    it('F2 the Association resolves an active Registrant', function () {
+      expect(registrantStatus).to.equal('a')
+    })
+    it('F3 election revision is readable', function () {
+      expect(Number.isInteger(electionRevision)).to.equal(true)
+    })
+    it('F4 the ballot reads back with its questions and options', function () {
+      expect(ballotsLength).to.equal(1)
+      expect(ballotOk).to.equal(true)
+    })
+    it('F5 (finding) the seeded ballot is PROPOSED, not confirmed', function () {
+      expect(confirmed).to.equal(false)
+    })
+    it('F6 every required voter-entry field is filled from an engine read', function () {
+      for (const v of [unsigned.registrantId, unsigned.privateCid, unsigned.deviceKey]) {
+        expect(typeof v === 'string' && v.length > 0).to.equal(true)
+      }
+    })
+    it('F7 (finding) privateCid is the dev seed placeholder, not a real CID', function () {
+      expect(/placeholder|PLACEHOLDER/i.test(unsigned.privateCid) || !/^b[a-z2-7]{20,}$/.test(unsigned.privateCid)).to.equal(true)
+    })
+
+    it('T1 template digest is stable across two engine reads', function () {
+      expect(ballotTemplateDigest(reread, electionRevision)).to.equal(ballotTemplateDigest(ballot, electionRevision))
+    })
+    it('T2 template digest ignores question/option storage order', function () {
+      const shuffled: TemplateBallot = { ...ballot, questions: [...ballot.questions].reverse().map(x => ({ ...x, options: [...x.options].reverse() })) }
+      expect(ballotTemplateDigest(shuffled, electionRevision)).to.equal(ballotTemplateDigest(ballot, electionRevision))
+    })
+
+    const mutationNames = ['option title', 'added option', 'vote-for limit', 'question title', 'election revision']
+    for (const [idx, what] of mutationNames.entries()) {
+      it(`T3 template digest changes when the ${what} changes`, function () {
+        const td = ballotTemplateDigest(ballot, electionRevision)
+        const mutated: Array<[TemplateBallot, number]> = [
+          [{ ...ballot, questions: ballot.questions.map((x, i) => i === 0 ? { ...x, options: x.options.map((o, j) => j === 0 ? { ...o, title: o.title + '!' } : o) } : x) }, electionRevision],
+          [{ ...ballot, questions: ballot.questions.map((x, i) => i === 0 ? { ...x, options: [...x.options, { code: 'zed', title: 'Zed' }] } : x) }, electionRevision],
+          [{ ...ballot, questions: ballot.questions.map((x, i) => i === 1 ? { ...x, optionRange: { min: 1, max: 3 } } : x) }, electionRevision],
+          [{ ...ballot, questions: ballot.questions.map((x, i) => i === 1 ? { ...x, title: 'School Board (at large)' } : x) }, electionRevision],
+          [ballot, electionRevision + 1]
+        ]
+        const [b, rev] = mutated[idx]!
+        expect(ballotTemplateDigest(b, rev)).to.not.equal(td)
+      })
+    }
+
+    // Unlinkability gate: a named-check function so the mutation probe can aim at it.
+    function linkability (vote: Record<string, unknown>, voter: VoterEntryUnsigned & { signature?: string }): Array<[string, boolean]> {
+      const identifying = new Set([voter.registrantId, voter.privateCid, voter.publicCid, voter.deviceKey, voter.attestationCid, voter.signature]
+        .filter((x): x is string => typeof x === 'string' && x.length > 0))
+      const leaves: string[] = []
+      const walk = (x: unknown): void => {
+        if (typeof x === 'string') leaves.push(x)
+        else if (Array.isArray(x)) x.forEach(walk)
+        else if (x && typeof x === 'object') { for (const [k, v] of Object.entries(x)) { leaves.push(k); walk(v) } }
+      }
+      walk(vote)
+      return [
+        ['U1-key-allowlist', canonicalJson(Object.keys(vote).sort()) === canonicalJson([...VOTE_ENTRY_KEYS])],
+        // Any 16-char run of an identifier inside any leaf: a truncated or embedded identifier is
+        // still a link (the first probe run MISSED `nonce = deviceKey.slice(0, 64)`).
+        ['U1-no-identifying-value', !leaves.some(l => [...identifying].some(id => {
+          if (id.length <= 16) return l.includes(id)
+          for (let i = 0; i + 16 <= id.length; i++) if (l.includes(id.slice(i, i + 16))) return true
+          return false
+        }))],
+        ['U1-no-time-field', !leaves.some(l => /^\d{4}-\d{2}-\d{2}T/.test(l)) && !Object.values(vote).some(v => typeof v === 'number' && v > 1e12)]
+      ]
+    }
+    const signed = (): VoterEntryUnsigned & { signature: string } => ({ ...unsigned, signature: 'ab'.repeat(64) })
+    const makeVoteA = (): VoteEntry => buildVoteEntry({
+      ballot, electionRevision, selections: { 'us-senate': ['elena'], 'school-board': ['cynthia', 'angela'] }, nonce: makeVoteNonce(rand32())
+    })
+    const gate = (name: string): boolean =>
+      linkability(makeVoteA() as unknown as Record<string, unknown>, signed()).find(([n]) => n === name)![1]
+
+    it('U1-key-allowlist the vote entry has exactly the allowlisted keys', function () {
+      expect(gate('U1-key-allowlist')).to.equal(true)
+    })
+    it('U1-no-identifying-value no leaf carries any identifier run', function () {
+      expect(gate('U1-no-identifying-value')).to.equal(true)
+    })
+    it('U1-no-time-field the vote entry carries no timestamp', function () {
+      expect(gate('U1-no-time-field')).to.equal(true)
+    })
+
+    it('U2 same choices, different voters and tap order -> identical except the nonce', function () {
+      const voteA = makeVoteA()
+      const voteB = buildVoteEntry({
+        ballot, electionRevision, selections: { 'school-board': ['angela', 'cynthia', 'angela'], 'us-senate': ['elena'] }, nonce: makeVoteNonce(rand32())
+      })
+      const strip = (v: VoteEntry): string => canonicalJson({ ...v, nonce: '' })
+      expect(strip(voteA)).to.equal(strip(voteB))
+      expect(voteA.nonce).to.not.equal(voteB.nonce)
+    })
+
+    it('U3 changing answers/nonce never changes the voter-entry digest', function () {
+      const d0 = voterEntryDigest(unsigned)
+      const voteA = makeVoteA()
+      const voteC = buildVoteEntry({ ballot, electionRevision, selections: { 'us-senate': ['diana'] }, nonce: makeVoteNonce(rand32()) })
+      expect(voterEntryDigest({ ...unsigned })).to.equal(d0)
+      expect(voteC.templateDigest).to.equal(voteA.templateDigest)
+    })
+    it('U3b the voter-entry digest DOES change with each identity field', function () {
+      const d0 = voterEntryDigest(unsigned)
+      for (const k of ['registrantId', 'privateCid', 'deviceKey', 'electionRevision'] as const) {
+        expect(voterEntryDigest({ ...unsigned, [k]: k === 'electionRevision' ? electionRevision + 1 : 'x' }), k).to.not.equal(d0)
+      }
+    })
+    it('U4 voter entry key set is exactly the allowlist', function () {
+      expect(canonicalJson(Object.keys({ ...unsigned, signature: '' }).sort())).to.equal(canonicalJson([...VOTER_ENTRY_KEYS]))
+    })
+
+    it('V1 an option not on the ballot is refused', function () {
+      expect(() => buildVoteEntry({ ballot, electionRevision, selections: { 'us-senate': ['write-in: bob'] }, nonce: makeVoteNonce(rand32()) }))
+        .to.throw(/unknown option/)
+    })
+
+    it('M1 mutation probe: every planted leak is caught by its named check', function () {
+      const voteA = makeVoteA()
+      const plants: Array<[string, Record<string, unknown>]> = [
+        ['U1-key-allowlist', { ...voteA, registrant: 'x' }],
+        ['U1-no-identifying-value', { ...voteA, answers: [...voteA.answers, { questionCode: unsigned.registrantId, optionCodes: [] }] }],
+        ['U1-no-identifying-value', { ...voteA, nonce: unsigned.deviceKey.slice(0, 64) }],
+        ['U1-no-time-field', { ...voteA, electionRevision: Date.now() }],
+        ['U1-no-time-field', { ...voteA, ballotId: new Date().toISOString() }]
+      ]
+      let caught = 0
+      const missed: string[] = []
+      for (const [expected, planted] of plants) {
+        const failed = linkability(planted, signed()).filter(([, ok]) => !ok).map(([n]) => n)
+        if (failed.includes(expected)) caught++
+        else missed.push(`planted for ${expected}, failing=${JSON.stringify(failed)}`)
+      }
+      expect(caught, `probe MISSED: ${missed.join('; ')}`).to.equal(plants.length)
+      expect(plants).to.have.length(5)
+    })
+
+    it('port completeness: all 28 spike-096 check ids are present', function () {
+      const text = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+      const titles = [...text.matchAll(/^\s*it\(\s*[`'"]([^`'"]*)/gm)].map(m => m[1]!)
+      const ids = ['H0', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'T1', 'T2', 'T3', 'N1', 'N2', 'N3', 'N4',
+        'U1-key-allowlist', 'U1-no-identifying-value', 'U1-no-time-field', 'U2', 'U3', 'U3b', 'U4', 'V1', 'M1']
+      for (const id of ids) expect(titles.some(t => t === id || t.startsWith(id + ' ')), id).to.equal(true)
+      expect(mutationNames).to.have.length(5)
     })
   })
 })
