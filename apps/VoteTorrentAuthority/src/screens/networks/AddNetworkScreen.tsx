@@ -23,6 +23,8 @@ import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegist
 import { useMediaPin } from "../../hooks/useMediaPin";
 import {
 	RECONCILE_TIMEOUT_MS,
+	LATE_COMMIT_BUDGET_MS,
+	awaitLateCommit,
 	createStepTimeoutError,
 	timedOutStep,
 	findLandedNetwork,
@@ -60,6 +62,17 @@ export default function AddNetworkScreen() {
 	// this the screen looks frozen for the whole `builder.commit()` await — indistinguishable
 	// from a hang.
 	const [creating, setCreating] = useState(false);
+	// Neutral status shown while a commit that missed its 45 s deadline is still being awaited.
+	const [stillFinishing, setStillFinishing] = useState(false);
+	// A late commit can land after the officer left this screen. selectNetwork must still run then
+	// (it gives the session its user) but nothing may setState or navigate.
+	const mountedRef = useRef(true);
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+		};
+	}, []);
 	const scrollViewRef = useRef<ScrollViewInstance>(null);
 	// When the inline error appears it grows the footer, which shrinks the scroll
 	// viewport. Android keeps the old scroll offset, so if the user was at the bottom
@@ -322,8 +335,10 @@ export default function AddNetworkScreen() {
 			// stub guard). Race against a timeout so an indefinite stall surfaces an error.
 			console.info("[network-create] commit() start", { network: networkName });
 			let networkRef: NetworkReference;
+			// Held un-raced: after the 45 s deadline the SAME promise is handed to awaitLateCommit.
+			const commitPromise = builder.commit();
 			try {
-				const networkEngine = await withTimeout(builder.commit(), "commit");
+				const networkEngine = await withTimeout(commitPromise, "commit");
 				console.info("[network-create] commit() done");
 				// Pitfall 4: re-establish currentNetworkHash in the factory by calling
 				// getEngine("network", ref) with the full NetworkReference that the concrete
@@ -338,13 +353,32 @@ export default function AddNetworkScreen() {
 				// timely commit and a reconciled-landed commit must produce the identical tail
 				// (selectNetwork -> the recovery-key gate -> goBack), never a duplicated copy of it.
 				const landed = await reconcileLandedNetwork(networksEng, recentsSnapshot);
-				if (!landed) {
-					// D-03: never claim failure, never blame the connection -- only that the
-					// outcome could not be confirmed.
-					setErrorMessage(t("networkCreateUnconfirmed"));
-					return;
+				if (landed) {
+					networkRef = landed;
+				} else {
+					// The commit is most likely still running (a low-end phone can block the JS
+					// thread for minutes), so keep awaiting the ORIGINAL promise for a bounded
+					// budget instead of reporting anything. Neutral status only -- not an error.
+					if (mountedRef.current) setStillFinishing(true);
+					console.info("[network-create] late commit: waiting");
+					const late = await awaitLateCommit(commitPromise, LATE_COMMIT_BUDGET_MS);
+					if (mountedRef.current) setStillFinishing(false);
+					console.info(`[network-create] late commit: ${late.status}`);
+					if (late.status === "landed") {
+						networkRef = (late.value as unknown as { init: NetworkReference }).init;
+					} else if (late.status === "failed") {
+						throw late.error;
+					} else {
+						const second = await reconcileLandedNetwork(networksEng, recentsSnapshot);
+						if (!second) {
+							// D-03: never claim failure, never blame the connection -- only that
+							// the outcome could not be confirmed.
+							if (mountedRef.current) setErrorMessage(t("networkCreateUnconfirmed"));
+							return;
+						}
+						networkRef = second;
+					}
 				}
-				networkRef = landed;
 			}
 			// Auto-select the just-created network: bind it AND flip hasNetwork so the
 			// app lands on the populated network home instead of "No network selected".
@@ -353,6 +387,9 @@ export default function AddNetworkScreen() {
 			console.info("[network-create] selectNetwork() start");
 			await withTimeout(selectNetwork(networkRef), "select");
 			console.info("[network-create] selectNetwork() done");
+			// The officer left while a late commit was landing: the session now has its user,
+			// but there is nothing to show and nowhere to navigate.
+			if (!mountedRef.current) return;
 
 			// 49-19 (recovery-key-registration gap): networks-engine.create() registers ONLY the
 			// founding signing key -- its bootstrap branch writes user.activeKeys[0] and has no
@@ -396,7 +433,10 @@ export default function AddNetworkScreen() {
 		} finally {
 			// Always clear the in-flight flag so the button re-enables on error/timeout
 			// (on success the screen unmounts via goBack, so this is a harmless no-op).
-			setCreating(false);
+			if (mountedRef.current) {
+				setCreating(false);
+				setStillFinishing(false);
+			}
 		}
 		navigation.goBack();
 	};
@@ -583,6 +623,15 @@ export default function AddNetworkScreen() {
 				{/* Inside the Footer so it picks up the footer's horizontal padding
 				    instead of running flush against the screen edge. */}
 				<InlineError message={errorMessage} />
+				{stillFinishing ? (
+					<ThemedText
+						type="small"
+						testID="network-create-still-finishing"
+						style={{ color: colors.textSecondary }}
+					>
+						{t("networkCreateStillFinishing")}
+					</ThemedText>
+				) : null}
 				<CustomButton
 					title={creating ? t("creating") : t("create")}
 					icon={creating ? "spinner" : "floppy-disk"}

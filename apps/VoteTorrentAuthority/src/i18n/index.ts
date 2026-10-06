@@ -118,6 +118,8 @@ const resources = {
 			creating: 'Creating…',
 			networkCreateTimeout:
 				'The network did not finish the {{step}} step in time. It may still complete — check your networks list before creating it again.',
+			networkCreateStillFinishing:
+				'Still creating the network on this phone. Keep this screen open; on some phones this takes a few minutes.',
 			networkCreateUnconfirmed:
 				'Could not confirm whether the network was created. It may still be finishing — check your networks list before creating it again, so you do not create it twice.',
 			errRelayRequired:
@@ -1223,6 +1225,8 @@ const resources = {
 			creating: 'Creando…',
 			networkCreateTimeout:
 				'La red no completó el paso {{step}} a tiempo. Puede que aún se complete: revise su lista de redes antes de volver a crearla.',
+			networkCreateStillFinishing:
+				'Todavía se está creando la red en este teléfono. Mantenga esta pantalla abierta; en algunos teléfonos tarda unos minutos.',
 			networkCreateUnconfirmed:
 				'No se pudo confirmar si la red fue creada. Puede que aún se esté completando: revise su lista de redes antes de volver a crearla, para no crearla dos veces.',
 			errRelayRequired:

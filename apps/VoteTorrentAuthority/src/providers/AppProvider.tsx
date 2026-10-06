@@ -339,6 +339,13 @@ export function AppProvider({ children }: PropsWithChildren) {
 		const defaultUserEng = await factory.getEngine<IDefaultUserEngine>("defaultUser");
 		const defaultUser = await defaultUserEng.get();
 		const user = await getOrCreateDeviceUser(defaultUser?.name ?? "Device User");
+		// Same D-19 rationale as the boot re-attach block below: Settings reads DefaultUser via
+		// defaultUserEngine.get(), so a first create (which never goes through boot) must persist
+		// one too or Settings reads "No default user found" until a restart. Write only when
+		// absent, and set ONLY { name } -- never overwrite a user's edited name.
+		if (defaultUser === undefined) {
+			await defaultUserEng.set({ name: user.name });
+		}
 		factory.setCurrentUser(user);
 		// open() is cache-first (D-06): a just-created network hits the cache; a recent
 		// network re-attaches. It also writes networkRef to the recentNetworks list.

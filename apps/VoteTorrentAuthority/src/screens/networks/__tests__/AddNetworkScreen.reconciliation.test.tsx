@@ -96,6 +96,7 @@ import AddNetworkScreen from "../AddNetworkScreen";
 import type { NetworkReference } from "@votetorrent/vote-core";
 import {
 	RECONCILE_TIMEOUT_MS,
+	LATE_COMMIT_BUDGET_MS,
 	NETWORK_CREATE_STEP_TIMEOUT,
 	createStepTimeoutError,
 	timedOutStep,
@@ -222,7 +223,11 @@ const LANDED_REF: NetworkReference = {
 type CommitBehavior =
 	| { kind: "resolve"; ref: NetworkReference }
 	| { kind: "reject"; error: Error }
-	| { kind: "pending" };
+	| { kind: "pending" }
+	| { kind: "deferred" };
+
+/** Controls for the "deferred" commit: settles only when the spec says so. */
+let deferredCommit: { resolve: (v: unknown) => void; reject: (e: unknown) => void } | undefined;
 
 function armCreate(behavior: CommitBehavior) {
 	mockGetOrCreateDeviceUser.mockResolvedValue({
@@ -237,6 +242,11 @@ function armCreate(behavior: CommitBehavior) {
 			commit: () => {
 				if (behavior.kind === "resolve") return Promise.resolve({ init: behavior.ref });
 				if (behavior.kind === "reject") return Promise.reject(behavior.error);
+				if (behavior.kind === "deferred") {
+					return new Promise((resolve, reject) => {
+						deferredCommit = { resolve, reject };
+					});
+				}
 				return new Promise(() => {
 					/* never settles */
 				});
@@ -400,13 +410,21 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 	it("(3, D-01/D-03) deadline fires; the re-read returns the unchanged list -> reports networkCreateUnconfirmed, no select, no goBack", async () => {
 		jest.useFakeTimers();
 		armCreate({ kind: "pending" });
-		mockNetworksEngine.getRecentNetworks.mockResolvedValueOnce(BEFORE).mockResolvedValueOnce(BEFORE);
+		mockNetworksEngine.getRecentNetworks
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE);
 
 		const tr = await renderScreen();
 		const { promise: createPromise } = await signAndPressCreateWithoutAwaiting(tr);
 
 		await renderer.act(async () => {
 			await jest.advanceTimersByTimeAsync(60_000);
+		});
+		// Still inside the late-commit budget: neutral status, never the unconfirmed copy.
+		expect(inlineErrorMessage(tr)).toBe("");
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
 			await createPromise;
 		});
 
@@ -438,6 +456,11 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 		// advanceTimersByTimeAsync resolves, so it needs a second, separate advance.
 		await renderer.act(async () => {
 			await jest.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + 1);
+		});
+		// The reconcile miss no longer ends the create: the late-commit wait begins.
+		expect(inlineErrorMessage(tr)).toBe("");
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
 			await createPromise;
 		});
 
@@ -447,13 +470,21 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 	it("(5, finally on every path) after the unconfirmed outcome, the CREATE button re-enables", async () => {
 		jest.useFakeTimers();
 		armCreate({ kind: "pending" });
-		mockNetworksEngine.getRecentNetworks.mockResolvedValueOnce(BEFORE).mockResolvedValueOnce(BEFORE);
+		mockNetworksEngine.getRecentNetworks
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE);
 
 		const tr = await renderScreen();
 		const { promise: createPromise } = await signAndPressCreateWithoutAwaiting(tr);
 
 		await renderer.act(async () => {
 			await jest.advanceTimersByTimeAsync(60_000);
+		});
+		// Still inside the late-commit budget: neutral status, never the unconfirmed copy.
+		expect(inlineErrorMessage(tr)).toBe("");
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
 			await createPromise;
 		});
 
@@ -580,5 +611,114 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 
 		setSpy.mockRestore();
 		clearSpy.mockRestore();
+	});
+});
+
+describe("AddNetworkScreen — late commit (commit outlives its deadline)", () => {
+	beforeEach(() => {
+		jest.clearAllMocks();
+		deferredCommit = undefined;
+		mockGetDefaultUser.mockResolvedValue({ name: "Device User" });
+		mockGetDeviceProvisioningRecord.mockResolvedValue(undefined);
+		mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [] });
+	});
+
+	afterEach(() => {
+		jest.useRealTimers();
+	});
+
+	const LATE_REF: NetworkReference = {
+		hash: "late-hash",
+		name: "Test Net",
+		primaryAuthorityDomainName: "",
+		relays: [],
+	};
+
+	async function startAndMissDeadline() {
+		jest.useFakeTimers();
+		armCreate({ kind: "deferred" });
+		const tr = await renderScreen();
+		const { promise } = await signAndPressCreateWithoutAwaiting(tr);
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(60_000);
+		});
+		return { tr, promise };
+	}
+
+	function stillFinishingShown(tr: renderer.ReactTestRenderer) {
+		return findByProps(tr, (p) => p.testID === "network-create-still-finishing").length > 0;
+	}
+
+	it("(A) shows the neutral status while waiting, then runs the tail exactly once when the commit lands", async () => {
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const { tr, promise } = await startAndMissDeadline();
+
+		expect(stillFinishingShown(tr)).toBe(true);
+		expect(inlineErrorMessage(tr)).toBe("");
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+
+		await renderer.act(async () => {
+			deferredCommit!.resolve({ init: LATE_REF });
+			await promise;
+		});
+
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+		expect(mockSelectNetwork).toHaveBeenCalledWith(LATE_REF);
+		expect(mockGoBack).toHaveBeenCalledTimes(1);
+		expect(inlineErrorMessage(tr)).toBe("");
+		expect(stillFinishingShown(tr)).toBe(false);
+	});
+
+	it("(B) a late rejection goes through the normal error path: no select, message shown, CREATE re-enabled", async () => {
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			deferredCommit!.reject(new Error("late boom"));
+			await promise;
+		});
+
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockGoBack).not.toHaveBeenCalled();
+		expect(inlineErrorMessage(tr)).toBe("late boom");
+		expect(getCreateButton(tr).props.disabled).toBe(false);
+		expect(stillFinishingShown(tr)).toBe(false);
+	});
+
+	it("(C) budget exhausted and a second reconcile that lands -> the normal tail", async () => {
+		mockNetworksEngine.getRecentNetworks
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce([...BEFORE, LANDED_REF]);
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
+			await promise;
+		});
+
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+		expect(mockSelectNetwork).toHaveBeenCalledWith(LANDED_REF);
+		expect(mockGoBack).toHaveBeenCalledTimes(1);
+		expect(inlineErrorMessage(tr)).toBe("");
+	});
+
+	it("(D) screen unmounted while waiting: the late commit still selects the network, but no gate and no navigation", async () => {
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		await renderer.act(async () => {
+			deferredCommit!.resolve({ init: LATE_REF });
+			await promise;
+		});
+
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+		expect(mockSelectNetwork).toHaveBeenCalledWith(LATE_REF);
+		expect(mockGoBack).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+		expect(mockGetCurrentUser).not.toHaveBeenCalled();
 	});
 });
