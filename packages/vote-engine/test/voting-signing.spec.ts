@@ -31,7 +31,7 @@ interface SpecEntry {
 function specVoterDigest (e: SpecEntry): string {
   return digestFields(
     ['VoterEntry', e.v, e.electionId, e.electionRevision, e.registrantId, e.privateCid, e.publicCid, e.deviceKey, e.attestationCid, JSON.stringify(e.ballots)] as never,
-    resolveHasher('sha256'), resolveOutputEncoder('base64url'))
+    resolveHasher('sha256'), resolveOutputEncoder('base64url')) as string
 }
 
 interface DeviceKey { priv: KeyObject, privRaw: Uint8Array, spkiBase64: string, compressedHex: string }
