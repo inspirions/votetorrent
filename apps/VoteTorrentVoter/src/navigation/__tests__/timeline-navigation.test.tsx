@@ -158,6 +158,8 @@ const TIMELINE_ROUTE_NAMES = new Set([
 	'Ballot',
 	'IndividualQuestion',
 	'ReviewSubmit',
+	// 63-12: Vote receipt, registered on both stacks
+	'VoteReceipt',
 	'RegistrationHome',
 	'RegistrationInfo',
 	'DeviceAttestation',
@@ -178,6 +180,7 @@ const TIMELINE_STACK_COMPONENT_FILES = [
 	'../../screens/ballot/BallotScreen.tsx',
 	'../../screens/ballot/IndividualQuestionScreen.tsx',
 	'../../screens/ballot/ReviewSubmitScreen.tsx',
+	'../../screens/ballot/VoteReceiptScreen.tsx',
 	'../../screens/registration/RegistrationScreen.tsx',
 	'../../screens/registration/RegistrationInfoScreen.tsx',
 	'../../screens/registration/DeviceAttestationScreen.tsx',
@@ -218,6 +221,17 @@ describe('Gate B -- route-closure gate (D-14)', () => {
 			}
 		}
 		expect(offenders).toEqual([]);
+	});
+
+	it('registers VoteReceipt exactly once on each of the Vote and Timeline stacks (63-12)', () => {
+		for (const body of [voteStackBody, timelineStackBody]) {
+			expect((body!.match(/name="VoteReceipt"/g) ?? []).length).toBe(1);
+			expect((body!.match(/component=\{VoteReceiptScreen\}/g) ?? []).length).toBe(1);
+		}
+	});
+
+	it('(anti-vacuity) the receipt screen only pops: it has no navigate/replace targets (63-12)', () => {
+		expect(collectNavigationTargets('../../screens/ballot/VoteReceiptScreen.tsx')).toEqual([]);
 	});
 });
 

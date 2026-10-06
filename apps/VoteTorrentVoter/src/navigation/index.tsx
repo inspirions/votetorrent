@@ -32,6 +32,7 @@ import ValidationDetailsScreen from '../screens/home/ValidationDetailsScreen';
 import BallotScreen from '../screens/ballot/BallotScreen';
 import IndividualQuestionScreen from '../screens/ballot/IndividualQuestionScreen';
 import ReviewSubmitScreen from '../screens/ballot/ReviewSubmitScreen';
+import VoteReceiptScreen from '../screens/ballot/VoteReceiptScreen';
 import RegistrationScreen from '../screens/registration/RegistrationScreen';
 import DeviceAttestationScreen from '../screens/registration/DeviceAttestationScreen';
 import RegisterPersonalScreen from '../screens/registration/RegisterPersonalScreen';
@@ -109,6 +110,12 @@ function VoteStackNavigator() {
 				component={ReviewSubmitScreen}
 				options={{title: tBallot('reviewSubmitTitle')}}
 			/>
+			{/* D-10: plain push. Params carry only electionId and revealOnOpen, never a record field. */}
+			<VoteStack.Screen
+				name="VoteReceipt"
+				component={VoteReceiptScreen}
+				options={{title: tBallot('receipt.title')}}
+			/>
 		</VoteStack.Navigator>
 	);
 }
@@ -158,6 +165,13 @@ function TimelineStackNavigator() {
 				name="ReviewSubmit"
 				component={ReviewSubmitScreen}
 				options={{title: tBallot('reviewSubmitTitle')}}
+			/>
+			{/* D-10: plain push; registered on both stacks so a Timeline-initiated Submit does not
+			    dead-end (route closure). Params carry only electionId and revealOnOpen. */}
+			<TimelineStack.Screen
+				name="VoteReceipt"
+				component={VoteReceiptScreen}
+				options={{title: tBallot('receipt.title')}}
 			/>
 			{/* headerShown:false — RegistrationScreen renders the branded blue NetworkHeader itself. */}
 			<TimelineStack.Screen

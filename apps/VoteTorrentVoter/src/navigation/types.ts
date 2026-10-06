@@ -7,10 +7,18 @@
  * plus a `RootTabParamList` for the tab navigator.
  *
  * All params are `undefined` this phase — no route params for placeholders (39-05 scope). Wired
- * together by 39-07's RootNavigator.
+ * together by 39-07's RootNavigator. The one exception is `VoteReceipt` (Phase 63, D-10): it takes
+ * `VoteReceiptParams`.
  *
  * The 5 tabs (Phase 59, D-13): Vote · Timeline · Registration · Scan · Settings.
  */
+
+/**
+ * The one route with params (D-10). `electionId` is a non-secret identifier. `revealOnOpen` is set
+ * only by Review/Submit straight after a successful save (R-4). Params must never carry a choice,
+ * a nonce, an envelope or any record field: navigation state can be persisted and inspected.
+ */
+export type VoteReceiptParams = { electionId: string; revealOnOpen?: boolean };
 
 // Vote tab: Home root + Ballot pushed + the IndividualQuestion modal (D-09 topology; the
 // election/office/candidate "Learn about" info is an in-place InfoDialog, not a route) +
@@ -24,6 +32,8 @@ export type VoteStackParamList = {
 	// like every other entry above: selection state (selectionMap, currentQuestionIndex) lives
 	// on BallotSelectionProvider, never a navigation param.
 	ReviewSubmit: undefined;
+	// Phase 63 (D-10): registered on both stacks (route closure, D-14).
+	VoteReceipt: VoteReceiptParams;
 };
 
 // Registration tab: root + Device Attestation + Confirmation modals + the 3 form-step
@@ -77,6 +87,8 @@ export type TimelineStackParamList = {
 	Ballot: undefined;
 	IndividualQuestion: undefined;
 	ReviewSubmit: undefined;
+	// Phase 63 (D-10): registered on both stacks (route closure, D-14).
+	VoteReceipt: VoteReceiptParams;
 	RegistrationHome: undefined;
 	RegistrationInfo: undefined;
 	DeviceAttestation: undefined;
