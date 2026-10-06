@@ -68,8 +68,8 @@ export interface VoterEntry extends VoterEntryUnsigned {
 }
 
 /**
- * The ballot fields a template digest binds. Mirrors vote-core `Ballot` + `Question` + `Option`
- * structurally (vote-core is deliberately not imported: it is not on the purity allowlist).
+ * The ballot fields a template digest binds. Mirrors the core `Ballot` + `Question` + `Option` models
+ * structurally (the core package is deliberately not imported: it is not on the purity allowlist).
  */
 export interface TemplateBallot {
   id: string
@@ -140,7 +140,7 @@ export function buildVoteEntry (args: {
   const { ballot, electionRevision, selections, nonce } = args
   if (!/^[0-9a-f]{64}$/.test(nonce)) throw new Error('buildVoteEntry: nonce must be 64 lowercase hex')
   // Each question carries its option set and its cap: Math.max(1, optionRange.max), 1 when absent
-  // (vote-core's "default 1 and 1", and the Voter UI cap). optionRange.min is NOT checked here.
+  // (the model default of 1 and 1, and the Voter UI cap). optionRange.min is NOT checked here.
   const known = new Map(ballot.questions.map(q => [
     q.code,
     { allowed: new Set(q.options.map(o => o.code)), cap: Math.max(1, q.optionRange?.max ?? 1) }
