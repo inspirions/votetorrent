@@ -180,7 +180,10 @@ async function readKeysReleased (deps: ElectionReadDeps, electionId: string, sta
  * Flattens the election's ballots into the voter's single office list: `select` questions only
  * (the rest are counted in `unsupportedQuestionCount`), ballots in id order, questions grouped by
  * `group` in first-appearance order and ordered by `sequence` within a group (declaration order
- * breaks ties and orders unsequenced questions).
+ * breaks ties and orders unsequenced questions). The structured fields carry the codes the vote
+ * builders need. Office order follows group first appearance in ENGINE read order, which for a
+ * confirmed ballot is Code order (63-04 finding), so consumers must key by `questionCode`, never
+ * by position.
  */
 export function toVoterBallot (electionId: string, ballots: Ballot[]): VoterBallot {
 	const entries: Array<{ office: Office, question: Question, index: number }> = []
@@ -197,11 +200,16 @@ export function toVoterBallot (electionId: string, ballots: Ballot[]): VoterBall
 				index: entries.length,
 				office: {
 					id: `${ballot.id}:${question.code}`,
+					ballotId: ballot.id,
+					questionCode: question.code,
+					required: question.required !== false,
+					hasDependsOn: question.dependsOn != null,
 					title: question.title,
 					...(group ? { group } : {}),
 					voteFor: Math.max(1, question.optionRange?.max ?? 1),
 					candidates: question.options.map(option => ({
 						id: `${ballot.id}:${question.code}:${option.code}`,
+						optionCode: option.code,
 						name: option.title,
 						...(option.details ? { party: option.details } : {}),
 					})),

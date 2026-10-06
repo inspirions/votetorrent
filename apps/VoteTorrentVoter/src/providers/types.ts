@@ -127,8 +127,14 @@ export type VoterElection = {
  * content is election data, so it is shown exactly as the authority published it.
  */
 export interface Candidate {
-	/** `${ballotId}:${questionCode}:${optionCode}` — unique across every ballot in the election. */
+	/**
+	 * `${ballotId}:${questionCode}:${optionCode}` — unique across every ballot in the election. A
+	 * display/selection key only: code that needs the codes reads the structured fields and never
+	 * splits this id on `:`.
+	 */
 	id: string;
+	/** The authority's `Option.code`, the value a vote answer carries (D-23). Use it instead of parsing `id`. */
+	optionCode: string;
 	name: string;
 	/** `Option.details` — the secondary line under the name (e.g. a party). Absent when unpublished. */
 	party?: string;
@@ -142,8 +148,19 @@ export interface Candidate {
  * both the "Vote for N" header and radio-(1)-vs-capped-checkbox-(>1) rendering (D-03).
  */
 export interface Office {
-	/** `${ballotId}:${questionCode}`. */
+	/**
+	 * `${ballotId}:${questionCode}` — a display/selection key only; never split it on `:`, read
+	 * `ballotId` / `questionCode` instead.
+	 */
 	id: string;
+	/** The owning `Ballot.id`. */
+	ballotId: string;
+	/** `Question.code`, the key a vote answer carries. */
+	questionCode: string;
+	/** `Question.required !== false`; vote-core defaults an absent flag to required (D-04). */
+	required: boolean;
+	/** `Question.dependsOn != null`; this app cannot evaluate a dependency, so Submit is blocked (D-05). */
+	hasDependsOn: boolean;
 	title: string;
 	group?: string;
 	voteFor: number;

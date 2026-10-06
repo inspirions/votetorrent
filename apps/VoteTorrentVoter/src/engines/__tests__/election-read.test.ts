@@ -198,12 +198,16 @@ describe('toVoterBallot — authority ballot -> voter offices', () => {
 			offices: [
 				{
 					id: 'b-1:q1',
+					ballotId: 'b-1',
+					questionCode: 'q1',
 					title: 'Title q1',
 					group: 'Federal',
 					voteFor: 2,
+					required: true,
+					hasDependsOn: false,
 					candidates: [
-						{id: 'b-1:q1:x', name: 'q1 X', party: 'Party X'},
-						{id: 'b-1:q1:y', name: 'q1 Y'},
+						{id: 'b-1:q1:x', optionCode: 'x', name: 'q1 X', party: 'Party X'},
+						{id: 'b-1:q1:y', optionCode: 'y', name: 'q1 Y'},
 					],
 				},
 			],
@@ -239,6 +243,52 @@ describe('toVoterBallot — authority ballot -> voter offices', () => {
 	it('flattens several ballots in id order with ids unique across ballots', () => {
 		const result = toVoterBallot('e-1', [ballot('b-2', [question('q')]), ballot('b-1', [question('q')])]);
 		expect(result.offices.map(o => o.id)).toEqual(['b-1:q', 'b-2:q']);
+	});
+});
+
+describe('toVoterBallot — structured codes for the vote builders (D-04, D-05, spike 096 finding 6)', () => {
+	const requiredOf = (q: Question) => toVoterBallot('e-1', [ballot('b-1', [q])]).offices[0].required;
+
+	it('S2: an absent required flag reads as required; true is required; false is optional (D-04)', () => {
+		expect(requiredOf(question('q1'))).toBe(true);
+		expect(requiredOf(question('q1', {required: true}))).toBe(true);
+		expect(requiredOf(question('q1', {required: false}))).toBe(false);
+	});
+
+	it('S3: dependsOn present is detected; absent or null is not (R-2)', () => {
+		const has = (q: Question) => toVoterBallot('e-1', [ballot('b-1', [q])]).offices[0].hasDependsOn;
+		expect(has(question('q1', {dependsOn: {code: 'q0'}}))).toBe(true);
+		expect(has(question('q1'))).toBe(false);
+		expect(has(question('q1', {dependsOn: null as unknown as Question['dependsOn']}))).toBe(false);
+	});
+
+	it('S4: codes containing the id separator survive; nothing is recovered by splitting', () => {
+		const result = toVoterBallot('e-1', [ballot('b:1', [question('q:2', {options: [{code: 'o:3', title: 'O'}]})])]);
+		const office = result.offices[0];
+		expect(office.id).toBe('b:1:q:2');
+		expect(office.ballotId).toBe('b:1');
+		expect(office.questionCode).toBe('q:2');
+		expect(office.candidates[0].id).toBe('b:1:q:2:o:3');
+		expect(office.candidates[0].optionCode).toBe('o:3');
+	});
+
+	it('S5: the structured fields are independent of the question read order (proposal vs Code order)', () => {
+		const make = (code: string) => question(code, {
+			required: code !== 'governor',
+			dependsOn: code === 'us-house' ? {code: 'governor'} : undefined,
+			options: [{code: `${code}-a`, title: 'A'}, {code: `${code}-b`, title: 'B'}],
+		});
+		const byCode = (codes: string[]) => new Map(
+			toVoterBallot('e-1', [ballot('b-1', codes.map(make))]).offices.map(o => [
+				o.questionCode,
+				{ballotId: o.ballotId, required: o.required, hasDependsOn: o.hasDependsOn, optionCodes: o.candidates.map(c => c.optionCode)},
+			])
+		);
+		const proposal = byCode(['us-senate', 'us-house', 'governor']);
+		const codeOrder = byCode(['governor', 'us-house', 'us-senate']);
+		expect(proposal).toEqual(codeOrder);
+		expect(proposal.get('governor')).toEqual({ballotId: 'b-1', required: false, hasDependsOn: false, optionCodes: ['governor-a', 'governor-b']});
+		expect(proposal.get('us-house')?.hasDependsOn).toBe(true);
 	});
 });
 

@@ -9,23 +9,31 @@ import type { Office } from '../types';
 const MIXED_OFFICES: Office[] = [
 	{
 		id: 'office-1',
+		ballotId: 'b-1',
+		questionCode: 'office-1',
+		required: true,
+		hasDependsOn: false,
 		title: 'Office 1',
 		group: 'Federal',
 		voteFor: 1,
 		candidates: [
-			{ id: 'cand-a', name: 'a', party: 'democratic' },
-			{ id: 'cand-b', name: 'b', party: 'republican' },
+			{ id: 'cand-a', optionCode: 'a', name: 'a', party: 'democratic' },
+			{ id: 'cand-b', optionCode: 'b', name: 'b', party: 'republican' },
 		],
 	},
 	{
 		id: 'office-2',
+		ballotId: 'b-1',
+		questionCode: 'office-2',
+		required: true,
+		hasDependsOn: false,
 		title: 'Office 2',
 		group: 'State',
 		voteFor: 3,
 		candidates: [
-			{ id: 'cand-x', name: 'x', party: 'democratic' },
-			{ id: 'cand-y', name: 'y', party: 'republican' },
-			{ id: 'cand-z', name: 'z', party: 'independent' },
+			{ id: 'cand-x', optionCode: 'x', name: 'x', party: 'democratic' },
+			{ id: 'cand-y', optionCode: 'y', name: 'y', party: 'republican' },
+			{ id: 'cand-z', optionCode: 'z', name: 'z', party: 'independent' },
 		],
 	},
 ];
