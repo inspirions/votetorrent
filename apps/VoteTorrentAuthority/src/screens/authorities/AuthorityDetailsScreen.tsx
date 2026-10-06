@@ -196,26 +196,26 @@ export default function AuthorityDetailsScreen() {
 				</View>
 				<View style={styles.detail}>
 					<ThemedText type="defaultSemiBold">{t("name")}: </ThemedText>
-					<ThemedText numberOfLines={1} ellipsizeMode="tail">
+					<ThemedText numberOfLines={1} ellipsizeMode="tail" style={styles.detailValue}>
 						{authority.name}
 					</ThemedText>
 				</View>
 				<View style={styles.detail}>
 					<ThemedText type="defaultSemiBold">{t("domainName")}: </ThemedText>
-					<ThemedText numberOfLines={1} ellipsizeMode="tail">
+					<ThemedText numberOfLines={1} ellipsizeMode="tail" style={styles.detailValue}>
 						{authority.domainName}
 					</ThemedText>
 				</View>
 				<View style={styles.detail}>
 					<ThemedText type="defaultSemiBold">{t("cid")}: </ThemedText>
-					<ThemedText numberOfLines={1} ellipsizeMode="tail">
+					<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
 						{authority.id}
 					</ThemedText>
 				</View>
 				{authority.imageRef?.url ? (
 					<View style={styles.detail}>
 						<ThemedText type="defaultSemiBold">{t("imageUrl")}: </ThemedText>
-						<ThemedText numberOfLines={1} ellipsizeMode="tail">
+						<ThemedText numberOfLines={1} ellipsizeMode="tail" style={styles.detailValue}>
 							{authority.imageRef.url}
 						</ThemedText>
 					</View>
@@ -223,7 +223,7 @@ export default function AuthorityDetailsScreen() {
 				{(authority as any).address ? (
 					<View style={styles.detail}>
 						<ThemedText type="defaultSemiBold">{t("address")}: </ThemedText>
-						<ThemedText numberOfLines={1} ellipsizeMode="middle">
+						<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
 							{(authority as any).address}
 						</ThemedText>
 					</View>
@@ -247,7 +247,7 @@ export default function AuthorityDetailsScreen() {
 				{(adminDetails?.admin as any)?.priorId ? (
 					<View style={styles.detail}>
 						<ThemedText type="defaultSemiBold">{t("priorCid")}: </ThemedText>
-						<ThemedText numberOfLines={1} ellipsizeMode="tail">
+						<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
 							{(adminDetails?.admin as any).priorId}
 						</ThemedText>
 					</View>
@@ -266,7 +266,7 @@ export default function AuthorityDetailsScreen() {
 							<View style={styles.subDetails}>
 								{adminSignatures.map((signature, idx) => (
 									<View key={signature.signerKey ?? idx} style={styles.detail}>
-										<ThemedText numberOfLines={1} ellipsizeMode="middle">
+										<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
 											{signature.name ? `${signature.name} ` : ""}[{signature.signerKey}]
 										</ThemedText>
 										<ThemedText> ({t("valid")})</ThemedText>
@@ -279,7 +279,7 @@ export default function AuthorityDetailsScreen() {
 				{adminDetails?.admin.id ? (
 					<View style={styles.detail}>
 						<ThemedText type="defaultSemiBold">{t("cid")}: </ThemedText>
-						<ThemedText numberOfLines={1} ellipsizeMode="tail">
+						<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
 							{adminDetails.admin.id}
 						</ThemedText>
 					</View>
@@ -332,7 +332,7 @@ export default function AuthorityDetailsScreen() {
 						{adminDetails.admin.id ? (
 							<View style={styles.detail}>
 								<ThemedText type="defaultSemiBold">{t("cid")}: </ThemedText>
-								<ThemedText numberOfLines={1} ellipsizeMode="tail">
+								<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
 									{adminDetails.admin.id}
 								</ThemedText>
 							</View>
@@ -492,6 +492,13 @@ const localStyles = StyleSheet.create({
 	},
 	detail: {
 		flexDirection: "row",
+	},
+	// The value beside a "Label: " in a detail row. Yoga defaults flexShrink to 0, so without
+	// this a one-line value measures at the full row width and the label pushes it past the
+	// right edge — clipped, with numberOfLines/ellipsizeMode never engaging (a long CID ran off
+	// a 360dp screen). Ids ellipsize in the middle so both the head and the suffix stay visible.
+	detailValue: {
+		flexShrink: 1,
 	},
 	subDetails: {
 		marginLeft: 8,
