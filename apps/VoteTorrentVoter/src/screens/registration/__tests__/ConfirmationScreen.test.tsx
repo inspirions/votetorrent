@@ -18,7 +18,7 @@
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
-import {Linking} from 'react-native';
+import {Linking, Platform} from 'react-native';
 import '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 const mockPopToTop = jest.fn();
@@ -419,6 +419,31 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 
 		const cta = tr.root.findByProps({testID: 'confirmation-confirm-face-id'});
 		expect(cta).toBeDefined();
+	});
+
+	describe('platform-appropriate biometric copy', () => {
+		const originalOS = Platform.OS;
+		afterEach(() => {
+			Object.defineProperty(Platform, 'OS', {value: originalOS, configurable: true});
+		});
+
+		it('iOS keeps the Face ID framing', () => {
+			Object.defineProperty(Platform, 'OS', {value: 'ios', configurable: true});
+			const text = JSON.stringify(renderScreen().toJSON());
+			expect(text).toContain('Confirm your registration with Face ID');
+			expect(text).toContain('Look at your device to confirm');
+			expect(text).toContain('Confirm with Face ID');
+		});
+
+		it('Android never mentions Face ID — fingerprint / face unlock framing instead', () => {
+			Object.defineProperty(Platform, 'OS', {value: 'android', configurable: true});
+			const text = JSON.stringify(renderScreen().toJSON());
+			expect(text).not.toContain('Face ID');
+			expect(text).not.toContain('Look at your device');
+			expect(text).toContain('Confirm your registration with your fingerprint or face unlock');
+			expect(text).toContain('Follow the prompt on your device to confirm');
+			expect(text).toContain('Confirm with biometrics');
+		});
 	});
 
 	it('does NOT navigate on mount (only on the deliberate press)', () => {

@@ -61,7 +61,7 @@
  * device both staged the registration over P2P and holds the derived code's matching identity key.
  */
 import React, {useCallback, useRef, useState} from 'react';
-import {Linking, Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
+import {Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
@@ -404,6 +404,14 @@ export default function ConfirmationScreen() {
 		}, [isPending]),
 	);
 
+	// The confirm copy names the platform's own biometric: Face ID on iOS, the BIOMETRIC_STRONG
+	// prompt (fingerprint / face unlock) on Android. Literal keys per branch keep the i18n parity
+	// scan able to resolve each one.
+	const isIos = Platform.OS === 'ios';
+	const bodyCopy = isIos ? t('confirmation.body') : t('confirmation.body.android');
+	const captionCopy = isIos ? t('confirmation.caption') : t('confirmation.caption.android');
+	const ctaCopy = isIos ? t('confirmation.cta') : t('confirmation.cta.android');
+
 	const errorCopy =
 		failureClass === 'recoverable-action'
 			? t('confirmation.error.biometricNotEnrolled')
@@ -441,7 +449,7 @@ export default function ConfirmationScreen() {
 						lineHeight: typeScale.body.lineHeight,
 					},
 				]}>
-				{t('confirmation.body')}
+				{bodyCopy}
 			</Text>
 			<View style={styles.iconWrap}>
 				<FontAwesome6 name="fingerprint" size={96} color={colors.primary} />
@@ -457,7 +465,7 @@ export default function ConfirmationScreen() {
 						lineHeight: typeScale.caption.lineHeight,
 					},
 				]}>
-				{t('confirmation.caption')}
+				{captionCopy}
 			</Text>
 			{isPending ? (
 				<>
@@ -538,7 +546,7 @@ export default function ConfirmationScreen() {
 							disabled={isSubmitting}
 							style={[styles.cta, {backgroundColor: colors.primary, borderRadius: radii.pill}]}>
 							<Text style={[styles.ctaLabel, {color: colors.light}]}>
-								{errorCopy ? 'Try Again' : t('confirmation.cta')}
+								{errorCopy ? 'Try Again' : ctaCopy}
 							</Text>
 						</Pressable>
 					)}

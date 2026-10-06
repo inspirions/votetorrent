@@ -219,6 +219,14 @@ const resources = {
 			'confirmation.cta': 'Confirm with Face ID',
 			// [AUTHORED]
 			'confirmation.caption': 'Look at your device to confirm',
+			// [AUTHORED] — Android variants of the three confirm strings above. The Android ceremony
+			// is a BIOMETRIC_STRONG prompt (fingerprint or class-3 face unlock, no PIN fallback),
+			// so the iOS Face ID framing is wrong there. The screen picks by Platform.OS.
+			'confirmation.body.android': 'Confirm your registration with your fingerprint or face unlock',
+			// [AUTHORED]
+			'confirmation.cta.android': 'Confirm with biometrics',
+			// [AUTHORED]
+			'confirmation.caption.android': 'Follow the prompt on your device to confirm',
 			// [AUTHORED] — Phase 45-06 (D-09) three-way attestation failure UX.
 			'confirmation.error.biometricNotEnrolled': 'Set up fingerprint or face unlock to continue',
 			// [AUTHORED]
@@ -533,6 +541,9 @@ const resources = {
 			'confirmation.body': 'Confirma tu registro con Face ID',
 			'confirmation.cta': 'Confirmar con Face ID',
 			'confirmation.caption': 'Mira tu dispositivo para confirmar',
+			'confirmation.body.android': 'Confirma tu registro con tu huella o desbloqueo facial',
+			'confirmation.cta.android': 'Confirmar con biometría',
+			'confirmation.caption.android': 'Sigue las indicaciones de tu dispositivo para confirmar',
 			'confirmation.error.biometricNotEnrolled': 'Configura el desbloqueo por huella o rostro para continuar',
 			'confirmation.error.setupCta': 'Configurar desbloqueo del dispositivo',
 			'confirmation.error.transient': 'Algo salió mal al verificar tu dispositivo. Inténtalo de nuevo.',
