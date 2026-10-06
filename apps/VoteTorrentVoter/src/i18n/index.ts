@@ -33,6 +33,19 @@ const resources = {
 			// under the loading spinner while a joiner waits on cadre-core's first-sync
 			// gate (mirrors the authority app's SyncChip copy, `syncSyncing`).
 			syncSyncing: 'Syncing',
+			// Boot failure screens: translated copy only, raw engine text goes to the console.
+			'bootError.generic': "We couldn't open the voting network on this phone.",
+			'bootError.tryAgain': 'Try Again',
+			'bootError.continueWithoutNetwork': 'Continue without a network',
+			'bootError.identityLost.title': "This phone's voter identity can't be unlocked",
+			'bootError.identityLost.body':
+				'The key that protects your voter identity on this phone is gone. This can happen after restoring a backup or resetting the phone\'s security. It cannot be recovered.',
+			'bootError.identityLost.create': 'Create a new identity',
+			'bootError.identityLost.confirmBody':
+				'Create a new identity on this phone? The old one cannot be recovered. You will need to register again, or ask your authority to approve this phone.',
+			'bootError.identityLost.confirm': 'Confirm',
+			'bootError.identityLost.cancel': 'Cancel',
+			'bootError.identityLost.replaceFailed': "We couldn't create a new identity. Try again.",
 		},
 		home: {
 			headerTitle: 'Vote',
@@ -392,6 +405,18 @@ const resources = {
 			'breadcrumb.ballot': 'Papeleta',
 			configNotConfigured: 'Sin configurar',
 			syncSyncing: 'Sincronizando',
+			'bootError.generic': 'No pudimos abrir la red de votación en este teléfono.',
+			'bootError.tryAgain': 'Intentar de nuevo',
+			'bootError.continueWithoutNetwork': 'Continuar sin red',
+			'bootError.identityLost.title': 'No se puede desbloquear la identidad de votante de este teléfono',
+			'bootError.identityLost.body':
+				'La clave que protege tu identidad de votante en este teléfono ya no existe. Esto puede ocurrir al restaurar una copia de seguridad o restablecer la seguridad del teléfono. No se puede recuperar.',
+			'bootError.identityLost.create': 'Crear una nueva identidad',
+			'bootError.identityLost.confirmBody':
+				'¿Crear una nueva identidad en este teléfono? La anterior no se puede recuperar. Tendrás que registrarte de nuevo o pedir a tu autoridad que apruebe este teléfono.',
+			'bootError.identityLost.confirm': 'Confirmar',
+			'bootError.identityLost.cancel': 'Cancelar',
+			'bootError.identityLost.replaceFailed': 'No pudimos crear una nueva identidad. Inténtalo de nuevo.',
 		},
 		home: {
 			headerTitle: 'Votar',

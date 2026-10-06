@@ -37,7 +37,14 @@ import type {IDefaultUserEngine, NetworkReference} from '@votetorrent/vote-core'
 import {EngineFactory} from '../engines/engine-factory';
 import {LocalStorageReact} from '@votetorrent/vote-engine/rn';
 import {rnDbFactory} from '../engines/rn-db-factory';
-import {getOrCreateDeviceUser, migrateLegacyPlaintextIdentityKey} from '../engines/device-user';
+import {
+	getOrCreateDeviceUser,
+	isReplaceableIdentityError,
+	migrateLegacyPlaintextIdentityKey,
+	replaceUnrecoverableDeviceIdentity,
+} from '../engines/device-user';
+import {errorClassName} from '../utils/errorClassName';
+import {IdentityRecoveryView} from '../components/IdentityRecoveryView';
 import {seedDevNetwork} from '../engines/dev-seed';
 import {useCadreNode} from './CadreNodeProvider';
 import {readVoterBallot, readVoterElection} from '../engines/election-read';
@@ -60,7 +67,9 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	const {t} = useTranslation('common');
 	const [isInitialized, setIsInitialized] = useState(false);
 	const [hasNetwork, setHasNetwork] = useState(false);
-	const [initError, setInitError] = useState<string | null>(null);
+	// The caught boot error, kept as an object so the render can classify it. It is NEVER
+	// rendered as text (translated copy only); console output carries the class name only.
+	const [initError, setInitError] = useState<{error: unknown} | null>(null);
 	// CR-02 parity: bump this to re-run the init effect ("Try Again"). The init effect's dep
 	// array includes initNonce; setIsInitialized(false) alone cannot re-fire it.
 	const [initNonce, setInitNonce] = useState(0);
@@ -237,8 +246,8 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 						if (cancelled) return;
 						// D-15 parity: surface the recoverable error; spinner resolves to an
 						// error view. NEVER fall back to a silent empty in-memory network.
-						console.error('seedDevNetwork failed:', seedError);
-						setInitError(String(seedError));
+						console.error('seedDevNetwork failed:', errorClassName(seedError));
+						setInitError({error: seedError});
 						// fall through to setIsInitialized(true) below so the spinner never
 						// hangs.
 					}
@@ -256,8 +265,8 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				if (cancelled) return;
 				// Outer catch handles failures before/after the seed/re-attach block (e.g.
 				// LocalStorageReact init failure).
-				console.error('Fatal init error:', fatalError);
-				setInitError(String(fatalError));
+				console.error('Fatal init error:', errorClassName(fatalError));
+				setInitError({error: fatalError});
 				setIsInitialized(true);
 				hideSplash();
 			}
@@ -287,6 +296,23 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		engineFactoryRef.current?.clearEngineCache();
 		setInitError(null);
 		setIsInitialized(true);
+	}, []);
+
+	// Explicit, user-confirmed "create a new identity" (IdentityRecoveryView confirm step only).
+	// Replaces the permanently unrecoverable identity, drops the dev network the old identity
+	// founded (__DEV__ only; release has no seeded network), and re-runs the boot.
+	const createNewIdentity = useCallback(async () => {
+		const factory = engineFactoryRef.current!;
+		const defaultUserEng = await factory.getEngine<IDefaultUserEngine>('defaultUser');
+		const defaultUser = await defaultUserEng.get();
+		await replaceUnrecoverableDeviceIdentity(defaultUser?.name ?? (__DEV__ ? 'Dev Voter' : 'Device User'));
+		if (__DEV__) {
+			await factory.getNetworksEngine().clearRecentNetworks();
+		}
+		factory.clearEngineCache();
+		setInitError(null);
+		setIsInitialized(false);
+		setInitNonce(n => n + 1);
 	}, []);
 
 	// Real reads against the same election every tab resolves. `nowMs()` (the shared dev-aware clock) is read per call, so
@@ -344,7 +370,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 							startFresh();
 						}}
 						style={{marginTop: 8}}>
-						<Text>{'Start Fresh'}</Text>
+						<Text>{t('bootError.continueWithoutNetwork')}</Text>
 					</TouchableOpacity>
 				)}
 			</View>
@@ -355,23 +381,23 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// visual redesign. Never fabricate an empty in-memory context; user must retry or start
 	// fresh. No GSD phase numbers in this user-facing copy (project rule).
 	if (initError && !hasNetwork) {
+		const tryAgain = () => {
+			// Try Again: reset error state and re-run initialize().
+			setInitError(null);
+			setIsInitialized(false);
+			setInitNonce(n => n + 1);
+		};
+		if (isReplaceableIdentityError(initError.error)) {
+			return <IdentityRecoveryView onCreateNewIdentity={createNewIdentity} onRetry={tryAgain} />;
+		}
 		return (
 			<View style={{flex: 1, justifyContent: 'center', alignItems: 'center'}}>
-				<Text style={{marginBottom: 16, textAlign: 'center'}}>
-					{'Failed to load network: ' + initError}
-				</Text>
-				<TouchableOpacity
-					onPress={() => {
-						// Try Again: reset error state and re-run initialize().
-						setInitError(null);
-						setIsInitialized(false);
-						setInitNonce(n => n + 1);
-					}}
-					style={{marginBottom: 8}}>
-					<Text>{'Try Again'}</Text>
+				<Text style={{marginBottom: 16, textAlign: 'center'}}>{t('bootError.generic')}</Text>
+				<TouchableOpacity onPress={tryAgain} style={{marginBottom: 8, minHeight: 44, justifyContent: 'center'}}>
+					<Text>{t('bootError.tryAgain')}</Text>
 				</TouchableOpacity>
-				<TouchableOpacity onPress={startFresh}>
-					<Text>{'Start Fresh'}</Text>
+				<TouchableOpacity onPress={startFresh} style={{minHeight: 44, justifyContent: 'center'}}>
+					<Text>{t('bootError.continueWithoutNetwork')}</Text>
 				</TouchableOpacity>
 			</View>
 		);

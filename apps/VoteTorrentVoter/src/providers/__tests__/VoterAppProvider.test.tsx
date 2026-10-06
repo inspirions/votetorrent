@@ -29,7 +29,8 @@ import {Database} from '@quereus/quereus';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {UserKeyType, ElectionType} from '@votetorrent/vote-core';
 import type {NetworkInit, Scope, Signature, User} from '@votetorrent/vote-core';
-import type {NetworksEngine} from '@votetorrent/vote-engine/rn';
+import {NetworksEngine} from '@votetorrent/vote-engine/rn';
+import {DeviceIdentityKeyUnavailableError} from '../../engines/device-user';
 import type {DevSeedResult} from '../../engines/dev-seed';
 
 // This test drives real NetworksEngine.create()/open() DB operations (not pure UI rendering),
@@ -81,9 +82,11 @@ jest.mock('../../engines/dev-seed', () => ({
 // provider-plumbing test does not need to exercise (device-user.migration.test.ts already proves
 // it) — stub it to a quiet 'absent' outcome and keep every other device-user export real.
 const mockMigrateLegacyPlaintextIdentityKey = jest.fn().mockResolvedValue('absent');
+const mockReplaceUnrecoverableDeviceIdentity = jest.fn();
 jest.mock('../../engines/device-user', () => ({
 	...jest.requireActual('../../engines/device-user'),
 	migrateLegacyPlaintextIdentityKey: () => mockMigrateLegacyPlaintextIdentityKey(),
+	replaceUnrecoverableDeviceIdentity: (...args: unknown[]) => mockReplaceUnrecoverableDeviceIdentity(...args),
 }));
 
 // D-02: passthrough spy over the real read so a test can observe the clock the provider hands it.
@@ -210,6 +213,7 @@ async function flushBoot(ticks = 15, until?: () => boolean) {
 beforeEach(async () => {
 	mockSeedDevNetwork.mockReset();
 	mockMigrateLegacyPlaintextIdentityKey.mockClear().mockResolvedValue('absent');
+	mockReplaceUnrecoverableDeviceIdentity.mockReset();
 	(hideSplash as jest.Mock).mockClear();
 	mockCadreNodeValue.node = null;
 	mockCadreNodeValue.syncState = 'offline';
@@ -262,9 +266,123 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 		await flushBoot();
 
 		const text = JSON.stringify(tr.toJSON());
-		expect(text).toContain('Try Again');
-		expect(text).toContain('Start Fresh');
+		expect(text).toContain('bootError.tryAgain');
+		expect(text).toContain('bootError.continueWithoutNetwork');
 		expect(hideSplash).toHaveBeenCalled();
+	});
+
+	it('keeps every VoterAppContext key it exposed before the recovery work (superset check, not a snapshot)', async () => {
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		const {captured} = renderProvider();
+		await flushBoot(15, () => captured.value !== null);
+		const keys = Object.keys(captured.value!);
+		for (const key of [
+			'isInitialized',
+			'lifecycleOverride',
+			'setLifecycleOverride',
+			'getElection',
+			'getBallot',
+			'hasNetwork',
+			'getEngine',
+			'hasEngine',
+			'selectNetwork',
+			'seededElectionId',
+		]) {
+			expect(keys).toContain(key);
+		}
+	});
+});
+
+describe('VoterAppProvider — boot errors never show raw engine text', () => {
+	const RAW = ['DeviceIdentityKeyUnavailableError', 'no-wrap-key', 'Failed to load network', 'boom'];
+	function expectNoRawText(tr: renderer.ReactTestRenderer) {
+		const text = JSON.stringify(tr.toJSON());
+		for (const raw of RAW) {
+			expect(text).not.toContain(raw);
+		}
+	}
+	function findByTestId(tr: renderer.ReactTestRenderer, id: string) {
+		return tr.root.findAll(n => n.props.testID === id && typeof n.props.onPress === 'function')[0];
+	}
+
+	it('1: an unwrappable identity renders the translated recovery view', async () => {
+		mockSeedDevNetwork.mockRejectedValue(new DeviceIdentityKeyUnavailableError('no-wrap-key'));
+		const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		const {tr} = renderProvider();
+		await flushBoot();
+		expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('bootError.identityLost.title');
+		expect(text).toContain('bootError.identityLost.body');
+		expectNoRawText(tr);
+		// Console carries the class name only.
+		expect(errSpy.mock.calls.flat().join(' ')).not.toContain('no-wrap-key');
+		errSpy.mockRestore();
+	});
+
+	it('2: confirm creates a new identity, clears the dev recents and re-runs the boot; cancel does nothing', async () => {
+		mockSeedDevNetwork.mockRejectedValueOnce(new DeviceIdentityKeyUnavailableError('no-wrap-key'));
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		mockReplaceUnrecoverableDeviceIdentity.mockResolvedValue(FAKE_USER);
+		const clearSpy = jest.spyOn(NetworksEngine.prototype, 'clearRecentNetworks');
+		jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		const {tr, captured} = renderProvider();
+		await flushBoot();
+		expect(mockSeedDevNetwork).toHaveBeenCalledTimes(1);
+
+		renderer.act(() => findByTestId(tr, 'identity-recovery-create').props.onPress());
+		expect(JSON.stringify(tr.toJSON())).toContain('bootError.identityLost.confirmBody');
+		renderer.act(() => findByTestId(tr, 'identity-recovery-cancel').props.onPress());
+		expect(mockReplaceUnrecoverableDeviceIdentity).not.toHaveBeenCalled();
+
+		renderer.act(() => findByTestId(tr, 'identity-recovery-create').props.onPress());
+		await renderer.act(async () => {
+			findByTestId(tr, 'identity-recovery-confirm').props.onPress();
+		});
+		await flushBoot(30, () => captured.value !== null && captured.value.isInitialized === true);
+
+		expect(mockReplaceUnrecoverableDeviceIdentity).toHaveBeenCalledTimes(1);
+		expect(clearSpy).toHaveBeenCalledTimes(1);
+		expect(mockSeedDevNetwork).toHaveBeenCalledTimes(2);
+		expect(captured.value!.isInitialized).toBe(true);
+		clearSpy.mockRestore();
+		jest.restoreAllMocks();
+	});
+
+	it('3: a failed replacement shows translated failure copy, no raw text, and Try Again', async () => {
+		mockSeedDevNetwork.mockRejectedValue(new DeviceIdentityKeyUnavailableError('tag-mismatch'));
+		mockReplaceUnrecoverableDeviceIdentity.mockRejectedValue(new Error('boom'));
+		jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		const {tr} = renderProvider();
+		await flushBoot();
+		renderer.act(() => findByTestId(tr, 'identity-recovery-create').props.onPress());
+		await renderer.act(async () => {
+			findByTestId(tr, 'identity-recovery-confirm').props.onPress();
+		});
+		await flushBoot(5);
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('bootError.identityLost.replaceFailed');
+		expect(text).toContain('bootError.tryAgain');
+		expectNoRawText(tr);
+		jest.restoreAllMocks();
+	});
+
+	it.each([
+		['wrap-unavailable', new DeviceIdentityKeyUnavailableError('wrap-unavailable')],
+		['plain error', new Error('boom')],
+	])('4: %s renders the generic translated view, never the create-identity button', async (_label, error) => {
+		mockSeedDevNetwork.mockRejectedValue(error);
+		jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		const {tr} = renderProvider();
+		await flushBoot();
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('bootError.generic');
+		expect(text).toContain('bootError.tryAgain');
+		expect(text).toContain('bootError.continueWithoutNetwork');
+		expect(text).not.toContain('bootError.identityLost.create');
+		expectNoRawText(tr);
+		jest.restoreAllMocks();
 	});
 });
 
@@ -343,8 +461,9 @@ function findTouchableWithText(tr: renderer.ReactTestRenderer, text: string) {
 	);
 }
 
+// The escape's label is now the translated "continue without a network" copy (echoed key in tests).
 function findStartFreshButton(tr: renderer.ReactTestRenderer) {
-	return findTouchableWithText(tr, 'Start Fresh');
+	return findTouchableWithText(tr, 'bootError.continueWithoutNetwork');
 }
 
 /** True if the localized Syncing label (echoed key 'syncSyncing') is rendered anywhere. */
