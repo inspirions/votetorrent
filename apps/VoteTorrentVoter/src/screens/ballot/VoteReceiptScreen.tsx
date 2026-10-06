@@ -1,6 +1,6 @@
 /**
  * VoteReceiptScreen (Phase 63 plan 12) - the dedicated vote receipt (D-10), replacing the old
- * inline "Your ballot was submitted" view.
+ * old inline mock confirmation view.
  *
  * D-11 / D-22: the status line and the loss line render from the non-secret marker with no
  * fingerprint prompt. D-13 / D-15: choices and vote codes appear only after `revealVoteReceipt`

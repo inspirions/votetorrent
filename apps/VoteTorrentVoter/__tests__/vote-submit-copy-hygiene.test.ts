@@ -159,8 +159,10 @@ describe('no false submitted claim (D-10)', () => {
 					}
 					const claim =
 						lang === 'en'
-							? WAS_SUBMITTED.test(value) || /\b(has been|have been) (sent|submitted)\b/i.test(value)
-							: /(fue enviad|ha sido enviad)/i.test(value);
+							? WAS_SUBMITTED.test(value) ||
+								// Only the ballot namespace: registration really is submitted to the authority.
+								(ns === 'ballot' && /\b(has been|have been) (sent|submitted)\b/i.test(value))
+							: ns === 'ballot' && /(fue enviad|ha sido enviad)/i.test(value);
 					if (claim) {
 						report.values.push(`${lang}.${ns}.${key}: ${value}`);
 					}
