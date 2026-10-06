@@ -56,11 +56,24 @@ jest.mock("@votetorrent/attestation-native", () => {
 });
 
 const mockSave = jest.fn();
-jest.mock("@react-native-documents/picker", () => ({
-	saveDocuments: (...a: unknown[]) => mockSave(...a),
-	errorCodes: { OPERATION_CANCELED: "OPERATION_CANCELED" },
-	isErrorWithCode: (e: any) => typeof e?.code === "string",
-}));
+// `loadFails` makes the picker module itself fail to load (its TurboModule absent from the binary).
+// jest never caches a factory that throws, but it DOES cache the first successful load for the rest
+// of the file, so the load-failure test is declared FIRST in this file (before any test has loaded
+// the picker) and counts `loadThrows` to prove the require really threw. `jest.resetModules()` and
+// `jest.isolateModules` are not used: the first loads a second React for later tests, and the second
+// still falls through to the file-wide mock cache.
+const mockPickerState = { loadFails: false, loadThrows: 0 };
+jest.mock("@react-native-documents/picker", () => {
+	if (mockPickerState.loadFails) {
+		mockPickerState.loadThrows += 1;
+		throw new Error("RNDocumentPicker TurboModule is not registered");
+	}
+	return {
+		saveDocuments: (...a: unknown[]) => mockSave(...a),
+		errorCodes: { OPERATION_CANCELED: "OPERATION_CANCELED" },
+		isErrorWithCode: (e: any) => typeof e?.code === "string",
+	};
+});
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { FoundingBundleExportCard } = require("../FoundingBundleExportCard");
@@ -130,6 +143,39 @@ beforeEach(() => {
 
 afterEach(() => {
 	shareSpy.mockRestore();
+	mockPickerState.loadFails = false;
+});
+
+// Declared first on purpose: see the picker mock above (the first successful load is cached).
+describe("IN-07: Save to this phone when the picker module cannot load", () => {
+	it("shows the error state with no unhandled rejection", async () => {
+		const info = jest.spyOn(console, "info").mockImplementation(() => {});
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const { tr } = await renderReady();
+			mockPickerState.loadFails = true;
+			mockPickerState.loadThrows = 0;
+			let pending!: Promise<unknown>;
+			await act(async () => {
+				pending = (byTestID(tr, "founding-export-save-file")[0].props as any).onPress();
+			});
+			await expect(pending).resolves.toBeUndefined();
+			await flush();
+			// Both the save prologue's require and the catch's cancel check hit the failing load.
+			expect(mockPickerState.loadThrows).toBe(2);
+			expect(mockSave).not.toHaveBeenCalled();
+			expect(exists(tr, "founding-export-body-error")).toBe(true);
+			expect(info).toHaveBeenCalledWith("[founding-bundle] export: failed");
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			info.mockRestore();
+		}
+	});
 });
 
 describe("FoundingBundleExportCard file handoff", () => {
@@ -207,7 +253,9 @@ describe("FoundingBundleExportCard file handoff", () => {
 		});
 		const { tr } = await renderReady();
 		expect(exists(tr, "founding-export-body-error")).toBe(true);
+		expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportError);
 		expect(shareSpy).not.toHaveBeenCalled();
+		expect(JSON.stringify(tr.toJSON())).not.toContain(T.networkFoundingExportTextFallback);
 		info.mockRestore();
 	});
 
@@ -218,6 +266,96 @@ describe("FoundingBundleExportCard file handoff", () => {
 		expect(json).not.toContain(URI);
 		expect(json).not.toContain(REF.hash);
 		expect(json).toContain(FILE);
+	});
+
+	describe("WR-05: every share rejection reaches the error state", () => {
+		let info: jest.SpyInstance;
+		beforeEach(() => {
+			info = jest.spyOn(console, "info").mockImplementation(() => {});
+		});
+		afterEach(() => {
+			info.mockRestore();
+		});
+
+		it("ios: a Share.share rejection shows the error state and is logged", async () => {
+			setOS("ios");
+			const { tr } = await renderReady();
+			shareSpy.mockRejectedValue(new Error("cannot present"));
+			await press(tr, "founding-export-share-file");
+			expect(exists(tr, "founding-export-body-error")).toBe(true);
+			expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportError);
+			expect(info).toHaveBeenCalledWith("[founding-bundle] export: failed");
+		});
+
+		it("ios: a dismissed share sheet stays ready with no error", async () => {
+			setOS("ios");
+			const { tr } = await renderReady();
+			shareSpy.mockResolvedValue({ action: "dismissedAction" });
+			await press(tr, "founding-export-share-file");
+			expect(shareSpy).toHaveBeenCalledWith({ url: URI, title: FILE });
+			expect(exists(tr, "founding-export-body-ready")).toBe(true);
+			expect(exists(tr, "founding-export-body-error")).toBe(false);
+		});
+
+		it("android: a share-failed FileShareError shows the error state", async () => {
+			const { tr } = await renderReady();
+			mockShareAndroid.mockImplementation(async () => {
+				throw new FileShareError("share-failed", "no activity");
+			});
+			await press(tr, "founding-export-share-file");
+			expect(exists(tr, "founding-export-body-error")).toBe(true);
+			expect(info).toHaveBeenCalledWith("[founding-bundle] export: share-failed");
+		});
+
+		it("android: a plain Error from the file share shows the error state", async () => {
+			const { tr } = await renderReady();
+			mockShareAndroid.mockImplementation(async () => {
+				throw new Error("bridge exploded");
+			});
+			await press(tr, "founding-export-share-file");
+			expect(exists(tr, "founding-export-body-error")).toBe(true);
+			expect(info).toHaveBeenCalledWith("[founding-bundle] export: failed");
+		});
+
+		it("unmounted before the share rejection settles: no state update", async () => {
+			const errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+			try {
+				let rejectShare!: (e: unknown) => void;
+				const { tr } = await renderReady();
+				mockShareAndroid.mockImplementation(
+					() =>
+						new Promise<void>((_resolve, reject) => {
+							rejectShare = reject;
+						}),
+				);
+				let pending!: Promise<unknown>;
+				await act(async () => {
+					pending = (byTestID(tr, "founding-export-share-file")[0].props as any).onPress();
+				});
+				await act(async () => {
+					tr.unmount();
+				});
+				rejectShare(new FileShareError("share-failed", "late"));
+				await expect(pending).resolves.toBeUndefined();
+				await flush();
+				expect(info).toHaveBeenCalledWith("[founding-bundle] export: share-failed");
+				expect(errSpy).not.toHaveBeenCalled();
+			} finally {
+				errSpy.mockRestore();
+			}
+		});
+	});
+
+	describe("IN-07: a user cancel is still not an error", () => {
+		it("a user cancel from the picker stays ready with no error", async () => {
+			const { tr } = await renderReady();
+			mockSave.mockImplementation(async () => {
+				throw Object.assign(new Error("cancel"), { code: "OPERATION_CANCELED" });
+			});
+			await press(tr, "founding-export-save-file");
+			expect(exists(tr, "founding-export-body-ready")).toBe(true);
+			expect(exists(tr, "founding-export-body-error")).toBe(false);
+		});
 	});
 
 	it("Done closes the card", async () => {
