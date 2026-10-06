@@ -12,6 +12,10 @@
  *   - `'recoverable-transient'` — a retry alone might succeed (network hiccup, lockout timeout,
  *     an unrecognized/future code). This is also the safe DEFAULT for any unknown code — a
  *     mystery error must never permanently wall a voter.
+ *   - `'intake-unavailable'` — the device is fine, but the vote-engine intake refused to hand the
+ *     request to the authority (an `IntakeError`, e.g. `no-recipients` when the authority has no
+ *     officer able to receive it yet). Blaming the device here misleads the voter; the copy
+ *     instead says the authority can't take the registration right now. Retry stays available.
  *
  * Release-only terminal invariant (D-09/D-07): a terminal-class code is downgraded to
  * `'recoverable-transient'` whenever `__DEV__` is true, so the emulator (which has no real
@@ -24,7 +28,11 @@
  */
 
 /** D-09 three-way failure UX class. */
-export type AttestationFailureClass = 'terminal' | 'recoverable-action' | 'recoverable-transient'
+export type AttestationFailureClass =
+	| 'terminal'
+	| 'recoverable-action'
+	| 'recoverable-transient'
+	| 'intake-unavailable'
 
 /** Terminal-class native reject codes (45-02 native reject mapping / 45-05 wrapper contract). */
 const TERMINAL_CODES = new Set(['NO_STRONGBOX_OR_TEE', 'DEVICE_INTEGRITY_FAILED', 'PROVISION_FAILED'])
@@ -35,9 +43,15 @@ const RECOVERABLE_ACTION_CODES = new Set(['NO_BIOMETRICS_ENROLLED'])
 /**
  * Classify a rejection thrown by the attestation producer (`provisionDeviceKey()` /
  * `produce()`) into a D-09 UX class. Reads `(err as {code?: string}).code`; any unrecognized or
- * missing code classifies as `'recoverable-transient'` (never silently terminal).
+ * missing code classifies as `'recoverable-transient'` (never silently terminal). A vote-engine
+ * `IntakeError` (matched by `name`, since its kebab-case codes are not native reject codes)
+ * classifies as `'intake-unavailable'`.
  */
 export function classifyAttestationFailure(err: unknown): AttestationFailureClass {
+	if ((err as {name?: unknown} | null | undefined)?.name === 'IntakeError') {
+		return 'intake-unavailable'
+	}
+
 	const code = (err as {code?: string} | null | undefined)?.code
 
 	if (code !== undefined && TERMINAL_CODES.has(code)) {

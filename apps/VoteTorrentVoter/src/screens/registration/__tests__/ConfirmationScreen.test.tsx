@@ -549,6 +549,27 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(mockClearDraft).not.toHaveBeenCalled();
 	});
 
+	it('a vote-engine IntakeError from submitRequest surfaces the intake-unavailable copy (never device blame, never raw text) with a retry', async () => {
+		const intakeError = Object.assign(new Error('createIntakeSealer.seal: no-recipients'), {
+			name: 'IntakeError',
+			code: 'no-recipients',
+		});
+		mockRegistrationSubmitRequest.mockRejectedValueOnce(intakeError);
+
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain("We couldn't send your registration to the authority right now. Try again later.");
+		expect(text).not.toContain('Something went wrong verifying your device');
+		expect(text).not.toContain('no-recipients');
+		expect(text).not.toContain('createIntakeSealer');
+		expect(tr.root.findByProps({testID: 'confirmation-confirm-face-id'})).toBeDefined();
+		expect(text).toContain('Try Again');
+		expect(mockClearDraft).not.toHaveBeenCalled();
+		expect(mockPopToTop).not.toHaveBeenCalled();
+	});
+
 	it('a pollDecisions that never yields a challenge-issued notice within the bounded attempts surfaces the generic failure class', async () => {
 		mockPollDecisions.mockImplementation(async () => {
 			callOrder.push('association.pollDecisions');

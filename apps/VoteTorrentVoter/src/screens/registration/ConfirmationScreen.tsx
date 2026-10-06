@@ -419,7 +419,9 @@ export default function ConfirmationScreen() {
 				? t('confirmation.error.terminal')
 				: failureClass === 'recoverable-transient'
 					? t('confirmation.error.transient')
-					: null;
+					: failureClass === 'intake-unavailable'
+						? t('confirmation.error.intakeUnavailable')
+						: null;
 
 	return (
 		<ScrollView

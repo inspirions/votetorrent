@@ -235,6 +235,9 @@ const resources = {
 			'confirmation.error.transient': 'Something went wrong verifying your device. Try again.',
 			// [AUTHORED]
 			'confirmation.error.terminal': "This device can't be used to vote",
+			// [AUTHORED] — the authority's intake refused the request (vote-engine IntakeError): the
+			// device is fine, so this must not blame it.
+			'confirmation.error.intakeUnavailable': "We couldn't send your registration to the authority right now. Try again later.",
 			// [AUTHORED] — native-stack header titles for the form-step routes (41-08).
 			formHeaderTitle: 'Register',
 			confirmHeaderTitle: 'Confirm',
@@ -548,6 +551,7 @@ const resources = {
 			'confirmation.error.setupCta': 'Configurar desbloqueo del dispositivo',
 			'confirmation.error.transient': 'Algo salió mal al verificar tu dispositivo. Inténtalo de nuevo.',
 			'confirmation.error.terminal': 'Este dispositivo no se puede usar para votar',
+			'confirmation.error.intakeUnavailable': 'No pudimos enviar tu registro a la autoridad en este momento. Inténtalo más tarde.',
 			formHeaderTitle: 'Registrarse',
 			confirmHeaderTitle: 'Confirmar',
 		},

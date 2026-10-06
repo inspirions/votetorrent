@@ -386,7 +386,9 @@ export default function ContinueOnAnotherDeviceScreen() {
 				? tRegistration('confirmation.error.terminal')
 				: failureClass === 'recoverable-transient'
 					? tRegistration('confirmation.error.transient')
-					: null;
+					: failureClass === 'intake-unavailable'
+						? tRegistration('confirmation.error.intakeUnavailable')
+						: null;
 
 	return (
 		<View

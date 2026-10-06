@@ -517,6 +517,30 @@ describe('ContinueOnAnotherDeviceScreen — failures', () => {
 		expect(tr.root.findByProps({testID: 'continue-device-setup-cta'})).toBeDefined();
 		expect(tr.root.findByProps({testID: 'continue-device-retry'})).toBeDefined();
 	});
+
+	it("an IntakeError while advancing renders the intake-unavailable copy (not device blame, not the pending heading) with a retryButton retry", async () => {
+		mockSubmitAttestation.mockRejectedValueOnce(
+			Object.assign(new Error('createIntakeSealer.seal: no-recipients'), {name: 'IntakeError', code: 'no-recipients'}),
+		);
+		pollDecisionsImpl = async () => [{requestId: associationSubmitRequestCalls[0]?.init.id, status: 'c', challengeNonce: 'nonce-1', cursor: '1'}];
+
+		const tr = await mountAndFlush();
+		renderer.act(() => {
+			tr.root.findByProps({testID: 'continue-device-code-input'}).props.onChangeText('wwwww-wwwww');
+		});
+		await renderer.act(async () => {
+			tr.root.findByProps({testID: 'continue-device-code-submit'}).props.onPress();
+			await flush(60);
+		});
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain("We couldn't send your registration to the authority right now. Try again later.");
+		expect(text).not.toContain('Something went wrong verifying your device');
+		expect(text).not.toContain('no-recipients');
+		expect(tr.root.findAllByProps({testID: 'continue-device-pending-heading'})).toHaveLength(0);
+		expect(tr.root.findAllByProps({testID: 'continue-device-setup-cta'})).toHaveLength(0);
+		expect(tr.root.findByProps({testID: 'continue-device-retry'})).toBeDefined();
+	});
 });
 
 describe('ContinueOnAnotherDeviceScreen — IME geometry', () => {

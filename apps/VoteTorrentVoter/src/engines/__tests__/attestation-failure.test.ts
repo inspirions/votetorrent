@@ -81,6 +81,32 @@ describe('classifyAttestationFailure — D-09 three-way classifier', () => {
 		});
 	});
 
+	describe('vote-engine IntakeError — the authority intake, not the device', () => {
+		function intakeError(code: string): Error {
+			const err = new Error(`createIntakeSealer.seal: ${code}`) as Error & {code: string};
+			err.name = 'IntakeError';
+			err.code = code;
+			return err;
+		}
+
+		it("classifies an IntakeError('no-recipients') as 'intake-unavailable'", () => {
+			expect(classifyAttestationFailure(intakeError('no-recipients'))).toBe('intake-unavailable');
+		});
+
+		it("classifies every IntakeError code as 'intake-unavailable', in release and __DEV__", () => {
+			for (const dev of [false, true]) {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = dev;
+				for (const code of ['no-recipients', 'too-many-recipients', 'seal-failed', 'not-authorized', 'invalid-argument']) {
+					expect(classifyAttestationFailure(intakeError(code))).toBe('intake-unavailable');
+				}
+			}
+		});
+
+		it("a bare {code: 'no-recipients'} without the IntakeError name stays 'recoverable-transient'", () => {
+			expect(classifyAttestationFailure({code: 'no-recipients'})).toBe('recoverable-transient');
+		});
+	});
+
 	describe('unknown / missing code — never silently terminal', () => {
 		it("classifies an empty error object as 'recoverable-transient'", () => {
 			expect(classifyAttestationFailure({})).toBe('recoverable-transient');
