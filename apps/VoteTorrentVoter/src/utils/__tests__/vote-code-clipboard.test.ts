@@ -68,6 +68,57 @@ describe('copyVoteCode', () => {
 		});
 	});
 
+	describe('WR-03: the sensitive native copy comes first', () => {
+		function withNative(result: 'copied' | 'failed' | 'unsupported'): {
+			copy: (n: string) => string;
+			sensitive: jest.Mock;
+			plain: jest.Mock;
+		} {
+			let out: {copy: (n: string) => string; sensitive: jest.Mock; plain: jest.Mock} | undefined;
+			jest.isolateModules(() => {
+				const sensitive = jest.fn(() => result);
+				const plain = jest.fn();
+				jest.doMock('@votetorrent/attestation-native', () => ({copySensitiveText: sensitive}));
+				jest.doMock('@react-native-clipboard/clipboard', () => ({default: {setString: plain}}));
+				// eslint-disable-next-line @typescript-eslint/no-require-imports
+				const isolated = require('../vote-code-clipboard');
+				out = {copy: isolated.copyVoteCode, sensitive, plain};
+			});
+			return out!;
+		}
+		afterEach(() => {
+			jest.dontMock('@votetorrent/attestation-native');
+		});
+
+		it('copied by the native sensitive path: the plain clipboard is never touched', () => {
+			const {copy, sensitive, plain} = withNative('copied');
+			expect(copy(NONCE)).toBe('copied');
+			expect(sensitive).toHaveBeenCalledTimes(1);
+			expect(sensitive).toHaveBeenCalledWith(NONCE);
+			expect(plain).not.toHaveBeenCalled();
+		});
+
+		it('a native failure reports unavailable and never falls back to the unmarked copy', () => {
+			const {copy, plain} = withNative('failed');
+			expect(copy(NONCE)).toBe('unavailable');
+			expect(plain).not.toHaveBeenCalled();
+		});
+
+		it('a binary without the native method falls back to the plain copy', () => {
+			const {copy, sensitive, plain} = withNative('unsupported');
+			expect(copy(NONCE)).toBe('copied');
+			expect(sensitive).toHaveBeenCalledTimes(1);
+			expect(plain).toHaveBeenCalledWith(NONCE);
+		});
+
+		it('an invalid code reaches neither path', () => {
+			const {copy, sensitive, plain} = withNative('copied');
+			expect(() => copy('nope')).toThrow(TypeError);
+			expect(sensitive).not.toHaveBeenCalled();
+			expect(plain).not.toHaveBeenCalled();
+		});
+	});
+
 	it('source: lazy require only, no console, no Share', () => {
 		// eslint-disable-next-line @typescript-eslint/no-require-imports
 		const fs = require('fs') as {readFileSync(p: string, e: string): string};
