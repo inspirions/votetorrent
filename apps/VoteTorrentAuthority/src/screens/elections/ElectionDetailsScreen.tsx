@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View, ScrollView, StyleSheet, Share } from "react-native";
 import { ExtendedTheme, useRoute, useTheme, useNavigation, useFocusEffect } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -7,6 +7,8 @@ import { ThemedText } from "../../components/ThemedText";
 import type { BallotSummary, ElectionDetails, IElectionEngine, ElectionRevisionSignatureTask } from "@votetorrent/vote-core";
 import { globalStyles } from "../../theme/styles";
 import { InlineError } from "../../components/InlineError";
+import { PeerReadUnavailableNotice } from "../../components/PeerReadUnavailableNotice";
+import { classifyPeerReadFailure } from "../../engines/peer-read-unavailable";
 import { ElectionDetailsBlock } from "./components/ElectionDetailsBlock";
 import { ElectionTimelineList } from "./components/ElectionTimelineList";
 import { ChipButton } from "../../components/ChipButton";
@@ -46,6 +48,18 @@ export default function ElectionDetailsScreen() {
 	const [ballotConfirmationStates, setBallotConfirmationStates] = useState<Record<string, { locked: boolean; confirmed: boolean }>>({});
 	const [moreOpen, setMoreOpen] = useState(false);
 	const [errorMessage, setErrorMessage] = useState("");
+	// Gap 7: a details read that could not reach the other devices. Kept apart from errorMessage so
+	// the ballots focus effect (which clears errorMessage) cannot erase it. The notice variant is
+	// derived at render: 'stale' while the details this device last read are still shown,
+	// 'unavailable' when nothing has been read yet.
+	const [peerUnavailable, setPeerUnavailable] = useState(false);
+	const mountedRef = useRef(true);
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+		};
+	}, []);
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NavigationProp>();
 	const insets = useSafeAreaInsets();
@@ -53,28 +67,47 @@ export default function ElectionDetailsScreen() {
 	// UAT 62 M: re-read on every focus, not once per mount. The keyholder cards are derived from
 	// these details, so a send or a same-device accept that happened while this screen sat under
 	// the stack never reached them until the screen was rebuilt.
+	const loadElectionDetails = useCallback(
+		async (isActive: () => boolean) => {
+			try {
+				if (electionEngine) {
+					// D-27: keyholders come from the engine only — no AsyncStorage merge.
+					const details = await electionEngine.getElectionDetails();
+					if (isActive()) {
+						setElectionDetails(details);
+						setPeerUnavailable(false);
+					}
+				}
+			} catch (error) {
+				const peerFailure = classifyPeerReadFailure(error);
+				if (peerFailure) {
+					// Gap 7 (D-23/D-39): the network could not answer, which is not the same as the
+					// election being absent. Keep what this device already read; never surface the
+					// engine message (it names block ids). Reason token only in the log.
+					console.warn("[election-details] peer read unavailable:", peerFailure.reason);
+					if (isActive()) setPeerUnavailable(true);
+					return;
+				}
+				console.warn("Error loading election details:", error);
+				if (isActive()) setErrorMessage(error instanceof Error ? error.message : String(error));
+			}
+		},
+		[electionEngine]
+	);
+
 	useFocusEffect(
 		useCallback(() => {
 			let active = true;
-			const loadElectionDetails = async () => {
-				try {
-					if (electionEngine) {
-						// D-27: keyholders come from the engine only — no AsyncStorage merge.
-						const details = await electionEngine.getElectionDetails();
-						if (active) setElectionDetails(details);
-					}
-				} catch (error) {
-					console.warn("Error loading election details:", error);
-					if (active) setErrorMessage(error instanceof Error ? error.message : String(error));
-				}
-			};
-
-			loadElectionDetails();
+			loadElectionDetails(() => active);
 			return () => {
 				active = false;
 			};
-		}, [electionEngine])
+		}, [loadElectionDetails])
 	);
+
+	const retryElectionDetails = useCallback(() => {
+		loadElectionDetails(() => mountedRef.current);
+	}, [loadElectionDetails]);
 
 	// G2/G12: Refresh ballot list on every focus so newly proposed templates appear
 	// immediately on return from CreateBallot/EditBallot.
@@ -127,7 +160,11 @@ export default function ElectionDetailsScreen() {
 	if (!electionDetails) {
 		return (
 			<View style={styles.container}>
-				<ThemedText>{t("loading")}</ThemedText>
+				{peerUnavailable ? (
+					<PeerReadUnavailableNotice variant="unavailable" onRetry={retryElectionDetails} />
+				) : (
+					<ThemedText>{t("loading")}</ThemedText>
+				)}
 			</View>
 		);
 	}
@@ -146,6 +183,7 @@ export default function ElectionDetailsScreen() {
 			{/* SC6 error state — surfaces load failures inline (D-19) */}
 			<View style={styles.section}>
 				<InlineError message={errorMessage} />
+				{peerUnavailable ? <PeerReadUnavailableNotice variant="stale" onRetry={retryElectionDetails} /> : null}
 			</View>
 
 			{/* 1. Immutable core block (title + Authority/Type/Date + Core Signature) */}

@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Image, ScrollView, StyleSheet, View } from "react-native";
 import { ChipButton } from "../../components/ChipButton";
 import { ThemedText } from "../../components/ThemedText";
 import { InlineError } from "../../components/InlineError";
+import { PeerReadUnavailableNotice } from "../../components/PeerReadUnavailableNotice";
+import { classifyPeerReadFailure } from "../../engines/peer-read-unavailable";
 import type {
 	Authority,
 	IAuthorityEngine,
@@ -44,6 +46,14 @@ export default function AuthorityDetailsScreen() {
 	const [inviteSearch, setInviteSearch] = useState("");
 	const [invitedAuthorities, setInvitedAuthorities] = useState<InvitedAuthority[]>([]);
 	const [errorMessage, setErrorMessage] = useState("");
+	// Gap 7: a read that could not reach the other devices. The notice variant is derived at render:
+	// 'stale' while the administration this device last read is still shown, 'unavailable' when
+	// nothing has been read yet. Never rendered as absence ("N/A", missing officers).
+	const [peerUnavailable, setPeerUnavailable] = useState(false);
+	// Try Again bumps this to re-run getAuthorityData.
+	const [reloadNonce, setReloadNonce] = useState(0);
+	const officerUsersRef = useRef(officerUsers);
+	officerUsersRef.current = officerUsers;
 
 	const handlePinToggle = async () => {
 		setErrorMessage("");
@@ -90,7 +100,17 @@ export default function AuthorityDetailsScreen() {
 				setPinned(pinnedAuthorities.some((a: Authority) => a.id === authority.id));
 				const details = await authorityEngine.getAdminDetails();
 				setAdminDetails(details);
+				setPeerUnavailable(false);
 			} catch (error) {
+				const peerFailure = classifyPeerReadFailure(error);
+				if (peerFailure) {
+					// Gap 7 (D-23/D-39): the network could not answer, which is not the same as the
+					// administration being absent. Keep adminDetails / pinned exactly as they were and
+					// never surface the engine message (it names block ids). Reason token only.
+					console.warn("[authority-details] peer read unavailable:", peerFailure.reason);
+					setPeerUnavailable(true);
+					return;
+				}
 				console.warn("Error checking pinned status:", error);
 				setPinned(false);
 				setAdminDetails(null);
@@ -98,7 +118,7 @@ export default function AuthorityDetailsScreen() {
 			}
 		}
 		getAuthorityData();
-	}, [networkEngine, authorityEngine, authority.id]);
+	}, [networkEngine, authorityEngine, authority.id, reloadNonce]);
 
 	useEffect(() => {
 		async function getUsers() {
@@ -132,18 +152,32 @@ export default function AuthorityDetailsScreen() {
 					});
 				}
 
-				// Fetch all users
+				// Fetch all users. A user read that could not reach the other devices keeps the
+				// summary this device last read for that user (gap 7) instead of failing the list.
+				let peerFailureReason: string | undefined;
 				const userEnginePromises = Array.from(userIds).map(async (userId) => {
-					const userEngine = await networkEngine.getUser(userId);
-					if (userEngine) {
-						const details = await userEngine.getSummary();
-						if (details) {
-							userMap.set(userId, details);
+					try {
+						const userEngine = await networkEngine.getUser(userId);
+						if (userEngine) {
+							const details = await userEngine.getSummary();
+							if (details) {
+								userMap.set(userId, details);
+							}
 						}
+					} catch (error) {
+						const peerFailure = classifyPeerReadFailure(error);
+						if (!peerFailure) throw error;
+						peerFailureReason = peerFailure.reason;
+						const lastRead = officerUsersRef.current.get(userId);
+						if (lastRead) userMap.set(userId, lastRead);
 					}
 				});
 				await Promise.all(userEnginePromises);
 				setOfficerUsers(userMap);
+				if (peerFailureReason) {
+					console.warn("[authority-details] peer read unavailable:", peerFailureReason);
+					setPeerUnavailable(true);
+				}
 			} catch (error) {
 				console.warn("Error fetching users:", error);
 				setOfficers([]);
@@ -244,85 +278,98 @@ export default function AuthorityDetailsScreen() {
 			<View style={styles.section}>
 				<ThemedText type="title">{t("administration")}</ThemedText>
 
-				{(adminDetails?.admin as any)?.priorId ? (
-					<View style={styles.detail}>
-						<ThemedText type="defaultSemiBold">{t("priorCid")}: </ThemedText>
-						<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
-							{(adminDetails?.admin as any).priorId}
-						</ThemedText>
-					</View>
-				) : null}
-
-				{(() => {
-					const adminSignatures = (adminDetails?.admin as any)?.signatures as
-						| Array<{ name?: string; signerKey?: string; valid?: boolean }>
-						| undefined;
-					if (!adminSignatures || adminSignatures.length === 0) return null;
-					return (
-						<View>
-							<View style={styles.detail}>
-								<ThemedText type="defaultSemiBold">{t("handoffSignatures")}: </ThemedText>
-							</View>
-							<View style={styles.subDetails}>
-								{adminSignatures.map((signature, idx) => (
-									<View key={signature.signerKey ?? idx} style={styles.detail}>
-										<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
-											{signature.name ? `${signature.name} ` : ""}[{signature.signerKey}]
-										</ThemedText>
-										<ThemedText> ({t("valid")})</ThemedText>
-									</View>
-								))}
-							</View>
-						</View>
-					);
-				})()}
-				{adminDetails?.admin.id ? (
-					<View style={styles.detail}>
-						<ThemedText type="defaultSemiBold">{t("cid")}: </ThemedText>
-						<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
-							{adminDetails.admin.id}
-						</ThemedText>
-					</View>
-				) : null}
-				{/* UAT 62: effectiveAt is when the administration STARTS, not an expiry. */}
-				<View style={styles.detail}>
-					<ThemedText type="defaultSemiBold">{t("effective")}: </ThemedText>
-					<ThemedText>{formatDate(adminDetails?.admin.effectiveAt)}</ThemedText>
-				</View>
-
-				{officers.map((officer) => {
-					const user = officerUsers.get(officer.userId);
-					// Figma frame 7: compact card (image · name · role · CID) + chevron.
-					return (
-						<InfoCard
-							key={officer.userId}
-							image={(user as any)?.image?.url ? { uri: (user as any).image.url } : undefined}
-							title={user?.name || officer.userId}
-							subtitle={officer.title}
-							additionalInfo={[{ label: t("cid"), value: officer.userId }]}
-							icon="chevron-right"
-							onPress={() =>
-								navigation.navigate("OfficerDetails", {
-									officer: officer,
-									userName: user?.name,
-									authority: authority,
-								})
-							}
-						/>
-					);
-				})}
-
-				{!adminDetails?.proposed && (
-					<CustomButton
-						title={t("reviseAdministration")}
-						icon="pencil"
-						size="thin"
-						onPress={() =>
-							navigation.navigate("ProposedAdministration", {
-								authorityId: authority.id,
-							})
-						}
+				{peerUnavailable ? (
+					<PeerReadUnavailableNotice
+						variant={adminDetails ? "stale" : "unavailable"}
+						onRetry={() => setReloadNonce((n) => n + 1)}
 					/>
+				) : null}
+
+				{/* Gap 7: an administration that could not be read is not shown as one with no date
+				    and no officers. The notice above stands in for the Effective line and the cards. */}
+				{peerUnavailable && !adminDetails ? null : (
+					<>
+						{(adminDetails?.admin as any)?.priorId ? (
+							<View style={styles.detail}>
+								<ThemedText type="defaultSemiBold">{t("priorCid")}: </ThemedText>
+								<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
+									{(adminDetails?.admin as any).priorId}
+								</ThemedText>
+							</View>
+						) : null}
+
+						{(() => {
+							const adminSignatures = (adminDetails?.admin as any)?.signatures as
+								| Array<{ name?: string; signerKey?: string; valid?: boolean }>
+								| undefined;
+							if (!adminSignatures || adminSignatures.length === 0) return null;
+							return (
+								<View>
+									<View style={styles.detail}>
+										<ThemedText type="defaultSemiBold">{t("handoffSignatures")}: </ThemedText>
+									</View>
+									<View style={styles.subDetails}>
+										{adminSignatures.map((signature, idx) => (
+											<View key={signature.signerKey ?? idx} style={styles.detail}>
+												<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
+													{signature.name ? `${signature.name} ` : ""}[{signature.signerKey}]
+												</ThemedText>
+												<ThemedText> ({t("valid")})</ThemedText>
+											</View>
+										))}
+									</View>
+								</View>
+							);
+						})()}
+						{adminDetails?.admin.id ? (
+							<View style={styles.detail}>
+								<ThemedText type="defaultSemiBold">{t("cid")}: </ThemedText>
+								<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
+									{adminDetails.admin.id}
+								</ThemedText>
+							</View>
+						) : null}
+						{/* UAT 62: effectiveAt is when the administration STARTS, not an expiry. */}
+						<View style={styles.detail}>
+							<ThemedText type="defaultSemiBold">{t("effective")}: </ThemedText>
+							<ThemedText>{formatDate(adminDetails?.admin.effectiveAt)}</ThemedText>
+						</View>
+
+						{officers.map((officer) => {
+							const user = officerUsers.get(officer.userId);
+							// Figma frame 7: compact card (image · name · role · CID) + chevron.
+							return (
+								<InfoCard
+									key={officer.userId}
+									image={(user as any)?.image?.url ? { uri: (user as any).image.url } : undefined}
+									title={user?.name || officer.userId}
+									subtitle={officer.title}
+									additionalInfo={[{ label: t("cid"), value: officer.userId }]}
+									icon="chevron-right"
+									onPress={() =>
+										navigation.navigate("OfficerDetails", {
+											officer: officer,
+											userName: user?.name,
+											authority: authority,
+										})
+									}
+								/>
+							);
+						})}
+
+						{!adminDetails?.proposed && (
+							<CustomButton
+								title={t("reviseAdministration")}
+								icon="pencil"
+								size="thin"
+								onPress={() =>
+									navigation.navigate("ProposedAdministration", {
+										authorityId: authority.id,
+									})
+								}
+							/>
+						)}
+					</>
 				)}
 			</View>
 
