@@ -1,7 +1,8 @@
-import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import {
 	ExtendedTheme,
+	useFocusEffect,
 	useNavigation,
 	useRoute,
 	useTheme,
@@ -85,81 +86,86 @@ export default function ProposedAdministrationScreen() {
 
 	// Load proposed officers from AdminDetails (or fall back to current officers
 	// as the starting candidate set when no proposal exists yet).
-	useEffect(() => {
-		let cancelled = false;
-		async function load() {
-			try {
-				const networkEngine = await getEngine<INetworkEngine>("network");
-				if (!networkEngine) return;
-				const authorityEngine = await networkEngine.openAuthority(
-					authorityId
-				);
-				if (!authorityEngine) return;
-				const details: AdminDetails = await (
-					authorityEngine as IAuthorityEngine
-				).getAdminDetails();
-
-				// Lift the full Authority object for navigation params
-				// (gap-closure 08-07 Task 1 — see 08-UAT.md test 6).
-				const authorityDetails = await (
-					authorityEngine as IAuthorityEngine
-				).getDetails();
-				if (!cancelled) {
-					setAuthority(authorityDetails.authority);
-				}
-
-				// Prefer a live proposal's officer selections; otherwise wrap each
-				// current officer as { existing: officer } so the OfficerCard render
-				// path stays unified.
-				let selections: OfficerSelection[];
-				if (details.proposed?.proposed.officers?.length) {
-					selections = details.proposed.proposed.officers;
-				} else {
-					selections = details.admin.officers.map(
-						(o: Officer): OfficerSelection => ({ existing: o })
+	// UAT 62: re-read on every focus, not once per mount. EditOfficer persists an
+	// added/edited administrator through proposeAdmin and goes back here — a
+	// mount-only load never showed that new proposal.
+	useFocusEffect(
+		useCallback(() => {
+			let cancelled = false;
+			async function load() {
+				try {
+					const networkEngine = await getEngine<INetworkEngine>("network");
+					if (!networkEngine) return;
+					const authorityEngine = await networkEngine.openAuthority(
+						authorityId
 					);
-				}
+					if (!authorityEngine) return;
+					const details: AdminDetails = await (
+						authorityEngine as IAuthorityEngine
+					).getAdminDetails();
 
-				// Resolve user names for any "existing" officers (Officer has no
-				// `name` field — vote-core/authority/models.ts:90–102).
-				const userMap = new Map<string, User>();
-				await Promise.all(
-					selections
-						.filter((s) => s.existing)
-						.map(async (s) => {
-							try {
-								const userEngine = await networkEngine.getUser(
-									s.existing!.userId
-								);
-								const summary = await userEngine?.getSummary();
-								if (summary) {
-									userMap.set(s.existing!.userId, summary);
+					// Lift the full Authority object for navigation params
+					// (gap-closure 08-07 Task 1 — see 08-UAT.md test 6).
+					const authorityDetails = await (
+						authorityEngine as IAuthorityEngine
+					).getDetails();
+					if (!cancelled) {
+						setAuthority(authorityDetails.authority);
+					}
+
+					// Prefer a live proposal's officer selections; otherwise wrap each
+					// current officer as { existing: officer } so the OfficerCard render
+					// path stays unified.
+					let selections: OfficerSelection[];
+					if (details.proposed?.proposed.officers?.length) {
+						selections = details.proposed.proposed.officers;
+					} else {
+						selections = details.admin.officers.map(
+							(o: Officer): OfficerSelection => ({ existing: o })
+						);
+					}
+
+					// Resolve user names for any "existing" officers (Officer has no
+					// `name` field — vote-core/authority/models.ts:90–102).
+					const userMap = new Map<string, User>();
+					await Promise.all(
+						selections
+							.filter((s) => s.existing)
+							.map(async (s) => {
+								try {
+									const userEngine = await networkEngine.getUser(
+										s.existing!.userId
+									);
+									const summary = await userEngine?.getSummary();
+									if (summary) {
+										userMap.set(s.existing!.userId, summary);
+									}
+								} catch (e) {
+									console.warn(
+										"Error loading user for officer:",
+										e
+									);
 								}
-							} catch (e) {
-								console.warn(
-									"Error loading user for officer:",
-									e
-								);
-							}
-						})
-				);
+							})
+					);
 
-				if (!cancelled) {
-					setProposedOfficers(selections);
-					setOfficerUsers(userMap);
+					if (!cancelled) {
+						setProposedOfficers(selections);
+						setOfficerUsers(userMap);
+					}
+				} catch (e) {
+					console.warn("Error loading proposed administration:", e);
+					if (!cancelled) setErrorMessage(e instanceof Error ? e.message : String(e));
+				} finally {
+					if (!cancelled) setIsLoading(false);
 				}
-			} catch (e) {
-				console.warn("Error loading proposed administration:", e);
-				if (!cancelled) setErrorMessage(e instanceof Error ? e.message : String(e));
-			} finally {
-				if (!cancelled) setIsLoading(false);
 			}
-		}
-		load();
-		return () => {
-			cancelled = true;
-		};
-	}, [getEngine, authorityId]);
+			load();
+			return () => {
+				cancelled = true;
+			};
+		}, [getEngine, authorityId])
+	);
 
 	// Initialize per-scope thresholds to 1 once we know the officer count.
 	useEffect(() => {
