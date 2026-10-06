@@ -384,11 +384,18 @@ export default function AddNetworkScreen() {
 			// app lands on the populated network home instead of "No network selected".
 			// (selectNetwork re-establishes currentNetworkHash like the old getEngine call,
 			// plus sets hasNetwork — Pitfall 4 still satisfied via its internal getEngine.)
+			// WR-01 (62-88): a commit that lands after the officer left Add Network must NOT re-point
+			// the session behind their back (up to LATE_COMMIT_BUDGET_MS later, they may already be
+			// working in another network). The network is in recents; they select it from Networks.
+			if (!mountedRef.current) {
+				console.info("[network-create] late commit landed after leave; not auto-selecting");
+				return;
+			}
 			console.info("[network-create] selectNetwork() start");
 			await withTimeout(selectNetwork(networkRef), "select");
 			console.info("[network-create] selectNetwork() done");
-			// The officer left while a late commit was landing: the session now has its user,
-			// but there is nothing to show and nowhere to navigate.
+			// selectNetwork itself can outlive an unmount (the officer leaves while it runs): the
+			// session now has its user, but there is nothing to show and nowhere to navigate.
 			if (!mountedRef.current) return;
 
 			// 49-19 (recovery-key-registration gap): networks-engine.create() registers ONLY the
@@ -416,6 +423,15 @@ export default function AddNetworkScreen() {
 			// in-flight flag is cleared exactly as it is on every other exit.
 			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
 		} catch (err) {
+			// WR-01 (62-88): a failure that arrives after the officer left neither routes nor sets
+			// screen state. Log the error class name only.
+			if (!mountedRef.current) {
+				console.info(
+					"[network-create] late commit failed after leave:",
+					err instanceof Error ? err.name : typeof err,
+				);
+				return;
+			}
 			console.error("handleCreate error:", err);
 			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory
 			// (device-signer.ts's exported creator) and is therefore outside the 20-file rollout
