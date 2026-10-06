@@ -63,8 +63,8 @@ export function NetworkDetailsScreen() {
 				const currentUser = await engine.getCurrentUser();
 				setCurrentUserId((await currentUser?.getSummary())?.id);
 			} catch (error) {
-				console.warn("Failed to load network details:", error);
-				setLoadError(error instanceof Error ? error.message : String(error));
+				console.warn("Failed to load network details:", error instanceof Error ? error.name : typeof error);
+				setLoadError(t("networkDetailsLoadFailed"));
 			}
 		};
 		loadNetwork();
@@ -131,8 +131,8 @@ export function NetworkDetailsScreen() {
 				if (__DEV__) console.info("[network-details] administration", administration);
 				setPrimaryAuthorityAdmin(administration);
 			} catch (error) {
-				console.warn("Failed to load primary authority details:", error);
-				setLoadError(error instanceof Error ? error.message : String(error));
+				console.warn("Failed to load primary authority details:", error instanceof Error ? error.name : typeof error);
+				setLoadError(t("networkDetailsLoadFailed"));
 			}
 		};
 		loadPrimaryAuthority();
@@ -165,7 +165,7 @@ export function NetworkDetailsScreen() {
 			setApplyError(
 				error instanceof Error && error.name === "FeatureNotAvailableError"
 					? t("applyRevisionNeedsCoSigners")
-					: outcome.message ?? (error instanceof Error ? error.message : String(error)),
+					: outcome.message ?? t("applyRevisionFailed"),
 			);
 		} finally {
 			setApplying(false);

@@ -30,11 +30,12 @@ jest.mock('@react-navigation/native', () => ({
 }));
 
 const mockSelectNetwork = jest.fn();
+const mockGetEngine = jest.fn(async (..._args: any[]): Promise<any> => {
+  throw new Error('not under test');
+});
 jest.mock('../../../providers/AppProvider', () => ({
   useApp: () => ({
-    getEngine: jest.fn(async () => {
-      throw new Error('not under test');
-    }),
+    getEngine: mockGetEngine,
     selectNetwork: mockSelectNetwork,
     resolveDeviceSigner: jest.fn(),
   }),
@@ -69,6 +70,9 @@ async function renderAndSelect() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockGetEngine.mockImplementation(async () => {
+    throw new Error('not under test');
+  });
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
@@ -97,5 +101,39 @@ describe('NetworkDetailsScreen SELECT', () => {
     await renderAndSelect();
     expect(mockGate).toHaveBeenCalled();
     expect(mockGoBack).toHaveBeenCalled();
+  });
+});
+
+describe('NetworkDetailsScreen load failures', () => {
+  async function renderOnly() {
+    let tr!: renderer.ReactTestRenderer;
+    await act(async () => {
+      tr = renderer.create(<NetworkDetailsScreen />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    return tr;
+  }
+
+  it('shows translated copy when the network details fail to load', async () => {
+    mockGetEngine.mockRejectedValueOnce(new Error('ElectionEngine.something raw'));
+    const json = JSON.stringify((await renderOnly()).toJSON());
+    expect(json).toContain('networkDetailsLoadFailed');
+    expect(json).not.toContain('ElectionEngine');
+  });
+
+  it('shows translated copy when the primary authority fails to load', async () => {
+    const networkEngine = {
+      getDetails: async () => ({ network: { primaryAuthorityId: 'a-1', name: 'Net' } }),
+      getCurrentUser: async () => undefined,
+    };
+    mockGetEngine.mockImplementation(async (name: string) => {
+      if (name === 'network') return networkEngine;
+      throw new Error('ElectionEngine.something raw');
+    });
+    const json = JSON.stringify((await renderOnly()).toJSON());
+    expect(json).toContain('networkDetailsLoadFailed');
+    expect(json).not.toContain('ElectionEngine');
   });
 });
