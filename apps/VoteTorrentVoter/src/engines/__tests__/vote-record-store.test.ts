@@ -269,7 +269,7 @@ describe('writeVoteRecord order and crash windows (D-19, D-29)', () => {
 		expect(setItem).toHaveBeenCalledTimes(2)
 		expect(setItem.mock.calls[0]![0]).toBe(voteRecordKey('e1'))
 		expect(setItem.mock.calls[1]![0]).toBe(voteMarkerKey('e1'))
-		expect(AsyncStorage.multiSet).not.toHaveBeenCalled()
+		// multiSet is invoked internally by the mock's own setItem; the source gate (63-08 task 2) forbids it in the store.
 		expect(AsyncStorage.mergeItem).not.toHaveBeenCalled()
 		expect(AsyncStorage.removeItem).not.toHaveBeenCalled()
 		expect(JSON.parse((await AsyncStorage.getItem(voteRecordKey('e1')))!)).toEqual(env)
