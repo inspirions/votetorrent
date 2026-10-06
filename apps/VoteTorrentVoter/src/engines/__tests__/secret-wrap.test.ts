@@ -47,7 +47,12 @@ jest.mock('react-native', () => {
 	})
 })
 
-import { createNativeSecretWrapper, SecretWrapError, type WrappedSecret } from '@votetorrent/attestation-native'
+import {
+	createNativeSecretWrapper,
+	MAX_AUTH_WINDOW_SECONDS,
+	SecretWrapError,
+	type WrappedSecret,
+} from '@votetorrent/attestation-native'
 import { createInMemoryKeyWrapProviderForTests } from '../__fixtures__/in-memory-key-wrap-provider'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the react-native mock above.
@@ -131,6 +136,7 @@ describe('createNativeSecretWrapper — D-42 (Phase 62 plan 08)', () => {
 			'',
 			'',
 			'',
+			0,
 		)
 		expect(result.v).toBe(1)
 		expect(result.alg).toBe('AES-256-GCM')
@@ -176,6 +182,7 @@ describe('createNativeSecretWrapper — D-42 (Phase 62 plan 08)', () => {
 			'Title',
 			'Subtitle',
 			'Nope',
+			0,
 		)
 	})
 
@@ -279,6 +286,79 @@ describe('createNativeSecretWrapper — D-42 (Phase 62 plan 08)', () => {
 		const err = new SecretWrapError('WRAP_FAILED', 'boom')
 		expect(err).toBeInstanceOf(Error)
 		expect(err.code).toBe('WRAP_FAILED')
+	})
+})
+
+describe('authWindowSeconds pass-through (D-14, Phase 63 plan 16)', () => {
+	const aad = new Uint8Array([1])
+	const prompt = { title: 'T', subtitle: 'S', negativeButton: 'N' }
+
+	beforeEach(() => {
+		nativeFake.wrapSecret.mockReset()
+		nativeFake.unwrapSecret.mockReset()
+		mockGetEnforcingState.shouldThrow = false
+		nativeFake.wrapSecret.mockResolvedValue(fakeWrapResolution(new Uint8Array([1, 2])))
+		nativeFake.unwrapSecret.mockResolvedValue({ plaintextBase64: base64FromBytes(new Uint8Array([1])) })
+	})
+
+	it('MAX_AUTH_WINDOW_SECONDS is 60', () => {
+		expect(MAX_AUTH_WINDOW_SECONDS).toBe(60)
+	})
+
+	it('absent authWindowSeconds sends a trailing 0: wrapSecret has 8 args, unwrapSecret has 9', async () => {
+		const wrapper = createNativeSecretWrapper()
+		await wrapper.wrapSecret(VALID_ALIAS, new Uint8Array([1, 2]), { requireAuth: false, aad })
+		await wrapper.unwrapSecret(makeWrapped(), { requireAuth: false, aad })
+		expect(nativeFake.wrapSecret.mock.calls[0]).toHaveLength(8)
+		expect(nativeFake.wrapSecret.mock.calls[0][7]).toBe(0)
+		expect(nativeFake.unwrapSecret.mock.calls[0]).toHaveLength(9)
+		expect(nativeFake.unwrapSecret.mock.calls[0][8]).toBe(0)
+	})
+
+	it.each([0, 10, MAX_AUTH_WINDOW_SECONDS])('requireAuth true with authWindowSeconds %i passes it through as the last argument', async (window) => {
+		const wrapper = createNativeSecretWrapper()
+		await wrapper.wrapSecret(VALID_ALIAS, new Uint8Array([1, 2]), { requireAuth: true, aad, prompt, authWindowSeconds: window })
+		await wrapper.unwrapSecret(makeWrapped(), { requireAuth: true, aad, prompt, authWindowSeconds: window })
+		expect(nativeFake.wrapSecret.mock.calls[0]).toHaveLength(8)
+		expect(nativeFake.wrapSecret.mock.calls[0][7]).toBe(window)
+		expect(nativeFake.unwrapSecret.mock.calls[0]).toHaveLength(9)
+		expect(nativeFake.unwrapSecret.mock.calls[0][8]).toBe(window)
+	})
+
+	const bad: Array<[string, unknown, boolean]> = [
+		['-1', -1, true],
+		['1.5', 1.5, true],
+		['NaN', NaN, true],
+		['Infinity', Infinity, true],
+		['61', 61, true],
+		["'10' (string)", '10', true],
+		['5 without requireAuth', 5, false],
+	]
+
+	it.each(bad)('wrapSecret rejects authWindowSeconds %s INVALID_ARGUMENT with 0 native calls', async (_label, value, requireAuth) => {
+		const wrapper = createNativeSecretWrapper()
+		await expect(
+			wrapper.wrapSecret(VALID_ALIAS, new Uint8Array([1, 2]), {
+				requireAuth,
+				aad,
+				prompt: requireAuth ? prompt : undefined,
+				authWindowSeconds: value as number,
+			}),
+		).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+		expect(nativeFake.wrapSecret).not.toHaveBeenCalled()
+	})
+
+	it.each(bad)('unwrapSecret rejects authWindowSeconds %s INVALID_ARGUMENT with 0 native calls', async (_label, value, requireAuth) => {
+		const wrapper = createNativeSecretWrapper()
+		await expect(
+			wrapper.unwrapSecret(makeWrapped(), {
+				requireAuth,
+				aad,
+				prompt: requireAuth ? prompt : undefined,
+				authWindowSeconds: value as number,
+			}),
+		).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+		expect(nativeFake.unwrapSecret).not.toHaveBeenCalled()
 	})
 })
 
