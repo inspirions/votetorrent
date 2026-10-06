@@ -38,6 +38,7 @@ Keep it running in its own terminal. Stop it with Ctrl-C (`SIGINT`) or `kill <pi
 ### Environment
 
 - `DRONE_STRAND_ROLE` — `found` | `join`. Unset keeps today's behaviour: the control founder founds the strand, a joiner drone leaves founder-ness to cadre-core's derivation. An invalid value exits before the node starts. The drone logs `STRAND_ROLE=<role>` before the strand-started line.
+  `scripts/run-replication-proof.sh` now passes `DRONE_STRAND_ROLE=join` to both drones by default: its `STRAND_ID` is always the hash of the network the emulator device created, and the old unset default made drone-A (the control founder) found a second history under that id (round-3 UAT test 15). Run it with `DRONE_STRAND_ROLE=found` to reproduce a historical run. A drone started directly with `STRAND_ID` and no role is not refused yet, so set the role yourself (see below).
 - `STRAND_ID` — the test-network hash to host as the VoteTorrent strand. Defaults to the placeholder `UPDATE_WITH_TEST_NETWORK_HASH`; set it to the network hash exported by the device peer that creates the network so the drone's strand matches.
 
 ### Joining a strand a device already founded

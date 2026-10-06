@@ -429,7 +429,11 @@ echo "[run-replication-proof] STRAND_ID captured: ${STRAND_ID}"
 # ── STEP 3: LAUNCH THE DRONE with STRAND_ID (D-07 automated injection) ───────
 # Source nvm, run drone under Node 22. Capture READY line and inject ws multiaddr
 # into the runner's generated config so it connects automatically.
-echo "[run-replication-proof] Step 3: launching drone with STRAND_ID=${STRAND_ID} under Node 22 ..."
+# STRAND_ID is the hash of the network the device created, so the drone must JOIN that strand, not
+# found a second history under the same id (round-3 UAT test 15: while peered, the device's own
+# committed rows read as missing). Default join for both drones; pass DRONE_STRAND_ROLE=found to
+# reproduce a historical run (the drone then founds the strand, as every run before this default did).
+echo "[run-replication-proof] Step 3: launching drone with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_STRAND_ROLE:-join} under Node 22 ..."
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [ -s "${NVM_DIR}/nvm.sh" ]; then
   # shellcheck source=/dev/null
@@ -463,7 +467,7 @@ fi
 # which says whether the cold-start carve-out is still open.
 # DRONE_LOG is retained through the FULL run (no rm -f below) — only the EXIT trap removes it.
 DRONE_LOG=$(mktemp /tmp/drone-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" DRONE_STRAND_ROLE="${DRONE_STRAND_ROLE:-join}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
 DRONE_PID=$!
 echo "[run-replication-proof] Drone launched (PID ${DRONE_PID}, DEBUG= cluster-error logging armed), waiting for READY line ..."
 
@@ -555,10 +559,11 @@ echo "[run-replication-proof] Drone invite captured (${#DRONE_INVITE} chars)"
 # device-rewritten 10.0.2.2 addrs below — drone-A and drone-B are both host-side
 # Node processes talking to each other directly over loopback (Pitfall 2: distinct
 # host-loopback vs emulator-alias address spaces).
-echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} under Node 22 ..."
+echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_STRAND_ROLE:-join} under Node 22 ..."
 DRONE_B_LOG=$(mktemp /tmp/drone-b-full-run-XXXXXX.log)
 DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" \
   STRAND_ID="${STRAND_ID}" \
+  DRONE_STRAND_ROLE="${DRONE_STRAND_ROLE:-join}" \
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
   DRONE_BOOTSTRAP_STRAND_ADDR="${STRAND_ADDR}" \
   DRONE_INVITE="${DRONE_INVITE}" \
