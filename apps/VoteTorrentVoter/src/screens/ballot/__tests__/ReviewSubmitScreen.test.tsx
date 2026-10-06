@@ -145,6 +145,7 @@ function renderScreen() {
 			</NavigationContainer>,
 		);
 	});
+	mountedTrees.push(tr);
 	return {tr, captured, navRef};
 }
 
@@ -186,6 +187,7 @@ function press(tr: renderer.ReactTestRenderer, testID: string) {
 
 const OFFICES = FIXTURE_BALLOT.offices;
 const consoleSpies: jest.SpyInstance[] = [];
+const mountedTrees: renderer.ReactTestRenderer[] = [];
 
 beforeEach(() => {
 	evaluateMock.mockReset();
@@ -201,6 +203,14 @@ beforeEach(() => {
 
 afterEach(async () => {
 	const calls = consoleSpies.map(spy => spy.mock.calls.length);
+	for (const tree of mountedTrees.splice(0)) {
+		try {
+			renderer.act(() => tree.unmount());
+		} catch {
+			// already unmounted by the test
+		}
+	}
+
 	consoleSpies.splice(0).forEach(spy => spy.mockRestore());
 	await i18n.changeLanguage('en');
 	expect(calls).toEqual([0, 0, 0, 0, 0]);
@@ -332,8 +342,17 @@ describe('ReviewSubmitScreen (VOTE-04)', () => {
 			}
 		}
 		expect(has(tr, `review-blank-${OFFICES[0].id}`)).toBe(false);
-		const order = blanks.map(o => JSON.stringify(list.props.children ?? '').length); // non-empty
-		expect(order.length).toBe(blanks.length);
+		const order = list
+			.findAll(
+				n =>
+					typeof n.type === 'string' &&
+					typeof n.props.testID === 'string' &&
+					n.props.testID.startsWith('review-blank-') &&
+					n.props.testID !== 'review-blank-list' &&
+					!n.props.testID.startsWith('review-blank-required-'),
+			)
+			.map(n => n.props.testID);
+		expect(order).toEqual(blanks.map(o => `review-blank-${o.id}`));
 
 		renderer.act(() => {
 			for (const office of blanks) {
@@ -414,7 +433,9 @@ describe('ReviewSubmitScreen (VOTE-04)', () => {
 	});
 
 	it('RS11 (es): the prompts and the R-1 reason render in Spanish', async () => {
-		await i18n.changeLanguage('es');
+		await renderer.act(async () => {
+			await i18n.changeLanguage('es');
+		});
 		const pending = deferred<CastVoteResult>();
 		castMock.mockReturnValue(pending.promise);
 		const {tr} = await boot();
