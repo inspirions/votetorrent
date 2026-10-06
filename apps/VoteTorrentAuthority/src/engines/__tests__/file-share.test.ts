@@ -57,6 +57,10 @@ describe('file-share wrapper', () => {
 	it('maps a getEnforcing throw to unavailable', async () => {
 		mockState.shouldThrow = true
 		await expect(writeShareFile('a.json', '{}')).rejects.toMatchObject({ name: 'FileShareError', code: 'unavailable' })
+		await expect(shareFileAndroid('file:///x', SHARE_OPTS)).rejects.toMatchObject({
+			name: 'FileShareError',
+			code: 'unavailable',
+		})
 	})
 
 	it('returns the uri the native write resolves', async () => {
@@ -77,6 +81,48 @@ describe('file-share wrapper', () => {
 		await expect(writeShareFile('a.json', '{}')).rejects.toMatchObject({ code })
 		await expect(shareFileAndroid('file:///x', SHARE_OPTS)).rejects.toBeInstanceOf(FileShareError)
 		await expect(shareFileAndroid('file:///x', SHARE_OPTS)).rejects.toMatchObject({ code })
+	})
+
+	// WR-05: a real native failure must never read as "binary predates the seam" ('unavailable'),
+	// or the export card silently falls back to a text share with the old-binary copy.
+	it('maps an unknown native code to write-failed / share-failed, never unavailable', async () => {
+		const err = Object.assign(new Error('x'), { code: 'SOMETHING_NEW' })
+		fake.writeShareFile.mockRejectedValue(err)
+		fake.shareFile.mockRejectedValue(err)
+		await expect(writeShareFile('a.json', '{}')).rejects.toMatchObject({
+			name: 'FileShareError',
+			code: 'write-failed',
+			message: 'x',
+		})
+		await expect(shareFileAndroid('file:///x', SHARE_OPTS)).rejects.toMatchObject({
+			name: 'FileShareError',
+			code: 'share-failed',
+			message: 'x',
+		})
+	})
+
+	it('maps a native reject with no code to write-failed / share-failed, never unavailable', async () => {
+		fake.writeShareFile.mockRejectedValue(new Error('no code here'))
+		fake.shareFile.mockRejectedValue(new Error('no code here'))
+		await expect(writeShareFile('a.json', '{}')).rejects.toMatchObject({ code: 'write-failed', message: 'no code here' })
+		await expect(shareFileAndroid('file:///x', SHARE_OPTS)).rejects.toMatchObject({
+			code: 'share-failed',
+			message: 'no code here',
+		})
+	})
+
+	it('maps a non-Error rejection (no code, no message) to write-failed / share-failed', async () => {
+		fake.writeShareFile.mockRejectedValue(undefined)
+		fake.shareFile.mockRejectedValue(null)
+		await expect(writeShareFile('a.json', '{}')).rejects.toMatchObject({ code: 'write-failed' })
+		await expect(shareFileAndroid('file:///x', SHARE_OPTS)).rejects.toMatchObject({ code: 'share-failed' })
+	})
+
+	it('keeps write-failed when the native write resolves without a uri', async () => {
+		fake.writeShareFile.mockResolvedValue({})
+		await expect(writeShareFile('a.json', '{}')).rejects.toMatchObject({ code: 'write-failed' })
+		fake.writeShareFile.mockResolvedValue({ uri: '' })
+		await expect(writeShareFile('a.json', '{}')).rejects.toMatchObject({ code: 'write-failed' })
 	})
 
 	it('reports unavailable (not a TypeError) when the binary predates the methods', async () => {
