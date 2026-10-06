@@ -253,8 +253,8 @@ describe("multipeer-continuity-keys (62-10, D-31/D-36/D-41/D-43/D-45/D-46/D-49/D
 		});
 	});
 
-	test("the total catalog is 95 keys per locale (94 + keyholderDkgStatusThresholdTooLow, UAT 62)", () => {
-		expect(ALL_CATALOG_KEYS).toHaveLength(95);
+	test("the total catalog is 100 keys per locale (94 + keyholderDkgStatusThresholdTooLow, UAT 62, + 5 founding-export file-handoff keys)", () => {
+		expect(ALL_CATALOG_KEYS).toHaveLength(100);
 	});
 
 	test.each(ALL_CATALOG_KEYS)("%s: non-empty value in both locales, EN !== ES", (key) => {
