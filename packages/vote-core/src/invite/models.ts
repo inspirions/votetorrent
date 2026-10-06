@@ -37,9 +37,26 @@ export interface Invite {
 	inviteSignature: string;
 }
 
+/**
+ * Whether an invitation slot was sent, and whether it is still usable.
+ * 'live' = sent and still answerable; 'answered' = the invitee responded;
+ * 'no-longer-valid' = cancelled, expired, or superseded and closed.
+ */
+export interface InviteSentState {
+	state: 'live' | 'answered' | 'no-longer-valid';
+	/** Expiration of the invitation (the chain head's when it is live or answered). */
+	expiration: string;
+}
+
 export interface InviteStatus<TSentInvite> {
 	invite: TSentInvite;
 	result?: InviteResult;
+	/**
+	 * Set only by projections that can read invitation slots (today the election keyholder
+	 * projection). Absent means "no invitation slot was found" - never "not sent" for other
+	 * invite kinds, which do not fill it.
+	 */
+	sent?: InviteSentState;
 }
 
 // TODO(compat): Legacy shape used by older vote-engine mocks.

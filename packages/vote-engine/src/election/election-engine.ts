@@ -17,6 +17,7 @@ import type {
   IElectionProposeBallotBuilder,
   IElectionProposeRevisionBuilder,
   IElectionRevokeKeyholderBuilder,
+  InviteSentState,
   InviteStatus,
   ISigningEngine,
   KeyholderInvite,
@@ -31,6 +32,7 @@ import { ElectionProposeRevisionBuilder } from './builders/election-propose-revi
 import { ElectionInviteKeyholderBuilder } from './builders/election-invite-keyholder-builder.js'
 import { ElectionRevokeKeyholderBuilder } from './builders/election-revoke-keyholder-builder.js'
 import { allocateTid } from '../database/tid-allocator.js'
+import { readInviteChain } from '../invite/read-invite-chain.js'
 import { verifyUserKeyMembership } from '../user/verify-user-key.js'
 import { SigningEngine } from '../signing/signing-engine.js'
 import { fanOutSignatureTasks } from '../signing/fan-out.js'
@@ -1369,20 +1371,65 @@ export class ElectionEngine implements IElectionEngine {
       invokedId: row.UserId
     })
 
+    // 62-76: sent state. Read the election's keyholder slots (two equality terms only), collect them
+    // before any further query (no nested cursor), then decide liveness once per distinct InviteKey with
+    // the shared readInviteChain rule. 'ambiguous' / 'not-found' fail closed: no sent entry.
+    type SlotRow = { Name: string, InviteKey: string, Cid: string, Expiration: string }
+    const slotRows: SlotRow[] = []
+    for await (const row of this.ctx.db.eval(
+      'select Cid, Name, InviteKey, Expiration from InviteSlot where ElectionId = :electionId and Type = :slotType',
+      { electionId, slotType: 'k' }
+    )) {
+      slotRows.push({
+        Cid: row.Cid as string,
+        Name: row.Name as string,
+        InviteKey: row.InviteKey as string,
+        Expiration: String(row.Expiration)
+      })
+    }
+    const byKey = new Map<string, SlotRow[]>()
+    for (const r of slotRows) {
+      const list = byKey.get(r.InviteKey)
+      if (list) list.push(r)
+      else byKey.set(r.InviteKey, [r])
+    }
+    const sentEntries: Array<{ name: string, sent: InviteSentState }> = []
+    const now = nowCanonicalDatetime()
+    for (const [inviteKey, chainRows] of byKey) {
+      const chain = await readInviteChain(this.ctx.db, inviteKey, 'k', now)
+      if (chain.status === 'not-found' || chain.status === 'ambiguous') continue
+      const headRow = chain.status === 'no-longer-valid' ? undefined : chainRows.find(r => r.Cid === chain.cid)
+      const expiration = headRow?.Expiration ??
+        chainRows.map(r => r.Expiration).sort().pop() ?? ''
+      sentEntries.push({
+        name: chainRows[0]!.Name,
+        sent: { state: chain.status, expiration }
+      })
+    }
+    const sentConsumed = new Set<number>()
+    const takeSent = (name: string): InviteSentState | undefined => {
+      const i = sentEntries.findIndex((e, j) => !sentConsumed.has(j) && e.name === name)
+      if (i < 0) return undefined
+      sentConsumed.add(i)
+      return sentEntries[i]!.sent
+    }
+
     const consumed = new Set<number>()
     const out: Array<InviteStatus<SentKeyholderInvite>> = []
     for (const invitee of invitees) {
       const idx = rows.findIndex((r, i) => !consumed.has(i) && r.Name === invitee.invite.name)
+      const sent = takeSent(invitee.invite.name)
       if (idx >= 0) {
         consumed.add(idx)
-        out.push({ invite: invitee.invite, result: toResult(rows[idx]!) })
+        out.push({ invite: invitee.invite, result: toResult(rows[idx]!), ...(sent ? { sent } : {}) })
       } else {
-        out.push(invitee)
+        out.push({ ...invitee, ...(sent ? { sent } : {}) })
       }
     }
     for (let i = 0; i < rows.length; i++) {
       if (!consumed.has(i)) {
-        out.push({ invite: { name: rows[i]!.Name }, result: toResult(rows[i]!) })
+        const sent = takeSent(rows[i]!.Name)
+        out.push({ invite: { name: rows[i]!.Name }, result: toResult(rows[i]!), ...(sent ? { sent } : {}) })
       }
     }
     return out
