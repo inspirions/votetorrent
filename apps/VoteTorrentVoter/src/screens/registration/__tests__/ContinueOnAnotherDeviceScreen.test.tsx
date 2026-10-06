@@ -89,8 +89,11 @@ const mockGetEngine = jest.fn(async (engineName: string) => {
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
 
+const mockCreateNewIdentity = jest.fn(async (): Promise<void> => undefined);
+
 jest.mock('../../../providers/VoterAppProvider', () => ({
 	useVoterApp: () => ({
+		createNewIdentity: mockCreateNewIdentity,
 		getEngine: mockGetEngine,
 		seededElectionId: SEEDED_ELECTION_ID,
 	}),
@@ -194,6 +197,7 @@ async function mountAndFlush(times = 30) {
 
 beforeEach(() => {
 	mockNavigate.mockClear();
+	mockCreateNewIdentity.mockClear();
 	mockGoBack.mockClear();
 	mockPopToTop.mockClear();
 	mockAddListener.mockClear();
@@ -547,6 +551,69 @@ describe('ContinueOnAnotherDeviceScreen — failures', () => {
 		expect(text).not.toContain('no-recipients');
 		expect(tr.root.findAllByProps({testID: 'continue-device-pending-heading'})).toHaveLength(0);
 		expect(tr.root.findAllByProps({testID: 'continue-device-setup-cta'})).toHaveLength(0);
+		expect(tr.root.findByProps({testID: 'continue-device-retry'})).toBeDefined();
+	});
+});
+
+describe("ContinueOnAnotherDeviceScreen — 'identity-lost' (WR-02)", () => {
+	function identityError(reason: string): Error {
+		return Object.assign(new Error(`device identity key unavailable (${reason})`), {
+			name: 'DeviceIdentityKeyUnavailableError',
+			reason,
+		});
+	}
+
+	async function submitCode(tr: renderer.ReactTestRenderer) {
+		renderer.act(() => {
+			tr.root.findByProps({testID: 'continue-device-code-input'}).props.onChangeText('wwwww-wwwww');
+		});
+		await renderer.act(async () => {
+			tr.root.findByProps({testID: 'continue-device-code-submit'}).props.onPress();
+			await flush(60);
+		});
+	}
+
+	it('a lost identity while advancing renders the identity recovery view (no transient copy, no retry), and Create -> Confirm calls createNewIdentity once', async () => {
+		mockSubmitAttestation.mockRejectedValueOnce(identityError('no-wrap-key'));
+		pollDecisionsImpl = async () => [{requestId: associationSubmitRequestCalls[0]?.init.id, status: 'c', challengeNonce: 'nonce-1', cursor: '1'}];
+
+		const tr = await mountAndFlush();
+		await submitCode(tr);
+
+		expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).not.toContain('Something went wrong verifying your device');
+		expect(text).not.toContain('no-wrap-key');
+		expect(tr.root.findAllByProps({testID: 'continue-device-retry'})).toHaveLength(0);
+
+		renderer.act(() => {
+			tr.root.findByProps({testID: 'identity-recovery-create'}).props.onPress();
+		});
+		await renderer.act(async () => {
+			tr.root.findByProps({testID: 'identity-recovery-confirm'}).props.onPress();
+			await flush(5);
+		});
+		expect(mockCreateNewIdentity).toHaveBeenCalledTimes(1);
+	});
+
+	it('a lost identity on submit renders the same recovery view, not the generic submit error', async () => {
+		mockAssociationSubmitRequest.mockRejectedValueOnce(identityError('key-mismatch'));
+
+		const tr = await mountAndFlush();
+		await submitCode(tr);
+
+		expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
+	});
+
+	it('a transient identity reason while advancing keeps the transient copy and the retry', async () => {
+		mockSubmitAttestation.mockRejectedValueOnce(identityError('native-error'));
+		pollDecisionsImpl = async () => [{requestId: associationSubmitRequestCalls[0]?.init.id, status: 'c', challengeNonce: 'nonce-1', cursor: '1'}];
+
+		const tr = await mountAndFlush();
+		await submitCode(tr);
+
+		expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view')).toHaveLength(0);
+		expect(JSON.stringify(tr.toJSON())).toContain('Something went wrong verifying your device');
 		expect(tr.root.findByProps({testID: 'continue-device-retry'})).toBeDefined();
 	});
 });

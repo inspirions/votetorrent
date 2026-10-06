@@ -102,8 +102,12 @@ const mockSign = jest.fn(async () => ({
 	signature: 'stub-officer-signature',
 }));
 
+// WR-02: the provider's explicit, user-confirmed identity replacement (re-runs the boot).
+const mockCreateNewIdentity = jest.fn(async (): Promise<void> => undefined);
+
 jest.mock('../../../providers/VoterAppProvider', () => ({
 	useVoterApp: () => ({
+		createNewIdentity: mockCreateNewIdentity,
 		seededElectionId: mockSeededElectionId,
 		// Kept on the provider mock (51-12 owns the provider blast radius) even though this
 		// rewritten screen never destructures it — the point under test is that it is never REACHED,
@@ -353,6 +357,7 @@ beforeEach(() => {
 	mockCreateDeviceSigner.mockClear();
 	mockDeviceSign.mockClear();
 	mockGetOrCreateDeviceUser.mockClear();
+	mockCreateNewIdentity.mockClear();
 	mockSendIntent.mockClear();
 	jest.spyOn(Linking, 'sendIntent').mockImplementation((...args: Parameters<typeof Linking.sendIntent>) => mockSendIntent(...args));
 	mockProvisionDeviceKey.mockClear();
@@ -808,6 +813,72 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 			expect(text).toContain('Try Again');
 			const cta = tr.root.findByProps({testID: 'confirmation-confirm-face-id'});
 			expect(cta).toBeDefined();
+		});
+
+		describe("'identity-lost' — the identity can no longer be unwrapped (WR-02)", () => {
+			const originalDev = (globalThis as {__DEV__?: boolean}).__DEV__;
+			afterEach(() => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = originalDev;
+			});
+
+			function identityError(reason: string): Error {
+				return Object.assign(new Error(`device identity key unavailable (${reason})`), {
+					name: 'DeviceIdentityKeyUnavailableError',
+					reason,
+				});
+			}
+
+			it('release build (__DEV__ false): renders the identity recovery view, never the transient retry, and Create -> Confirm calls createNewIdentity once', async () => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+				mockGetOrCreateDeviceUser.mockRejectedValueOnce(identityError('no-wrap-key'));
+
+				const tr = renderScreen();
+				await pressConfirm(tr);
+
+				expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
+				const text = JSON.stringify(tr.toJSON());
+				expect(text).not.toContain('Something went wrong verifying your device');
+				expect(text).not.toContain('no-wrap-key');
+				expect(text).not.toContain('DeviceIdentityKeyUnavailableError');
+				expect(tr.root.findAllByProps({testID: 'confirmation-confirm-face-id'})).toHaveLength(0);
+				expect(tr.root.findAllByProps({testID: 'confirmation-retry-cta'})).toHaveLength(0);
+				expect(tr.root.findAllByProps({testID: 'confirmation-error'})).toHaveLength(0);
+				expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+
+				renderer.act(() => {
+					tr.root.findByProps({testID: 'identity-recovery-create'}).props.onPress();
+				});
+				expect(mockCreateNewIdentity).not.toHaveBeenCalled();
+				await renderer.act(async () => {
+					tr.root.findByProps({testID: 'identity-recovery-confirm'}).props.onPress();
+					await flushMicrotasks(5);
+				});
+				expect(mockCreateNewIdentity).toHaveBeenCalledTimes(1);
+			});
+
+			it.each(['tag-mismatch', 'key-mismatch'])('__DEV__ true: %s also renders the recovery view', async reason => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+				mockGetOrCreateDeviceUser.mockRejectedValueOnce(identityError(reason));
+
+				const tr = renderScreen();
+				await pressConfirm(tr);
+
+				expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
+			});
+
+			it('a transient identity reason keeps the generic transient copy and its Try Again', async () => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+				mockGetOrCreateDeviceUser.mockRejectedValueOnce(identityError('wrap-unavailable'));
+
+				const tr = renderScreen();
+				await pressConfirm(tr);
+
+				const text = JSON.stringify(tr.toJSON());
+				expect(text).toContain('Something went wrong verifying your device. Try again.');
+				expect(text).toContain('Try Again');
+				expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view')).toHaveLength(0);
+				expect(tr.root.findByProps({testID: 'confirmation-confirm-face-id'})).toBeDefined();
+			});
 		});
 
 		it('a terminal-class code (release build, __DEV__ false) renders the terminal wall with NO retry CTA', async () => {
