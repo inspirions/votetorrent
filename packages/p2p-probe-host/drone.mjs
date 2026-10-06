@@ -31,6 +31,7 @@
  */
 import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { CadreNode } from '@serfab/cadre-core';
+import { resolveStrandRole, strandFounderOption } from './strand-role.mjs';
 import { MemoryRawStorage } from '@optimystic/db-p2p';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
@@ -66,6 +67,8 @@ const VOTETORRENT_QSQL = VOTETORRENT_QSQL_RAW
 // with these unset (empty defaults) — it remains the first bootstrap peer. Follows the
 // existing `process.env.X ?? default` pattern used by STRAND_ID below.
 const DRONE_BOOTSTRAP_CONTROL_ADDR = process.env.DRONE_BOOTSTRAP_CONTROL_ADDR ?? '';
+// Resolved here (same expression as IS_FOUNDER below) so a bad DRONE_STRAND_ROLE exits before the node starts.
+const STRAND_ROLE = resolveStrandRole(process.env, !DRONE_BOOTSTRAP_CONTROL_ADDR);
 const DRONE_BOOTSTRAP_STRAND_ADDR = process.env.DRONE_BOOTSTRAP_STRAND_ADDR ?? '';
 
 const node = new CadreNode({
@@ -444,13 +447,18 @@ await node.addStrand({
   // machine joined" and every write fails with "no active strand database" -- which reads exactly
   // like a peer-reachability failure. An explicit value wins over the derivation. Left undefined
   // on a joiner drone, so its gating is the real thing.
-  ...(IS_FOUNDER && { founder: true }),
+  // founder:true only when this drone founds the strand. An unset DRONE_STRAND_ROLE keeps today's
+  // options (control founder -> founder:true, joiner drone -> no founder key). An explicit
+  // DRONE_STRAND_ROLE=join (founder:false) is REQUIRED when STRAND_ID is a network a device
+  // created, else two histories share one id (round-3 test 15).
+  ...strandFounderOption(STRAND_ROLE),
   // Belt and braces for the joiner drone: `awaitFirstSync: false` returns as soon as the runtime
   // is launched (possibly 'syncing' with no database) instead of blocking the whole rig's start-up
   // on a sibling that may not be up yet -- run 30 died here after 30002 ms, as did
   // tools/multipeer-gate. The documented other half is that the caller awaits writability itself.
   awaitFirstSync: false,
 });
+L('STRAND_ROLE=' + STRAND_ROLE.role + (STRAND_ROLE.explicit ? '' : ' (default)'));
 L(`[replication-proof] strand started, strandId=${STRAND_ID}`);
 // Advertise the drone's strand-node listen multiaddr so the harness can inject it
 // into the runner's STRAND_BOOTSTRAP_ADDR and peers can dial the strand cohort.

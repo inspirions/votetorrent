@@ -37,7 +37,18 @@ Keep it running in its own terminal. Stop it with Ctrl-C (`SIGINT`) or `kill <pi
 
 ### Environment
 
+- `DRONE_STRAND_ROLE` — `found` | `join`. Unset keeps today's behaviour: the control founder founds the strand, a joiner drone leaves founder-ness to cadre-core's derivation. An invalid value exits before the node starts. The drone logs `STRAND_ROLE=<role>` before the strand-started line.
 - `STRAND_ID` — the test-network hash to host as the VoteTorrent strand. Defaults to the placeholder `UPDATE_WITH_TEST_NETWORK_HASH`; set it to the network hash exported by the device peer that creates the network so the drone's strand matches.
+
+### Joining a strand a device already founded
+
+When `STRAND_ID` is the hash of a network a device created, the drone must NOT found it again:
+
+```
+STRAND_ID=<the device network's hash from Network details> DRONE_STRAND_ROLE=join node drone.mjs
+```
+
+Without it the drone creates a second, independent history under the same strand id; while peered, the device's own committed rows read as missing (round-3 UAT test 15: a pending officer and the officer card vanished) and return after the drone stops. `join` passes `founder: false`, so the drone waits for the device's history (the device is the founder: it wrote the Header). Only use it for a strand a device really founded; with no founder anywhere every node deadlocks waiting for a Header. Devices still enrol through the drone's control cadre (control owner genesis is unchanged).
 
 ## Dial-probe workflow
 
