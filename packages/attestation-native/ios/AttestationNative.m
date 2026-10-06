@@ -73,6 +73,20 @@ RCT_EXTERN_METHOD(unwrapSecret:(NSString *)keyAlias
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Plan 62-75 (D-36) — file share. Selectors must match the Swift `@objc(writeShareFile:contents:
+// resolver:rejecter:)` / `@objc(shareFile:mimeType:subject:dialogTitle:resolver:rejecter:)` EXACTLY.
+RCT_EXTERN_METHOD(writeShareFile:(NSString *)fileName
+                  contents:(NSString *)contents
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(shareFile:(NSString *)uri
+                  mimeType:(NSString *)mimeType
+                  subject:(NSString *)subject
+                  dialogTitle:(NSString *)dialogTitle
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 + (BOOL)requiresMainQueueSetup { return NO; }
 
 @end

@@ -714,4 +714,47 @@ class AttestationNativeModule: NSObject {
       }
     }
   }
+
+  // MARK: - Plan 62-75 file share (D-36)
+
+  /// Writes UTF-8 `contents` to `NSTemporaryDirectory()/vt-share/<fileName>`, emptying the directory
+  /// first. Resolves `["uri": file URL string]`. Name rule mirrors Android and the JS wrapper.
+  @objc(writeShareFile:contents:resolver:rejecter:)
+  func writeShareFile(_ fileName: String,
+                      contents: String,
+                      resolver resolve: @escaping RCTPromiseResolveBlock,
+                      rejecter reject: @escaping RCTPromiseRejectBlock) {
+    let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+    let nameOk = !fileName.isEmpty
+      && fileName.count <= 100
+      && !fileName.contains("..")
+      && fileName.unicodeScalars.allSatisfy { allowed.contains($0) }
+    if !nameOk {
+      reject("INVALID_NAME", "file name must match [A-Za-z0-9._-]{1,100} and not contain '..'", nil); return
+    }
+    do {
+      let fm = FileManager.default
+      let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("vt-share", isDirectory: true)
+      try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+      for existing in try fm.contentsOfDirectory(atPath: dir.path) {
+        try fm.removeItem(at: dir.appendingPathComponent(existing))
+      }
+      let url = dir.appendingPathComponent(fileName)
+      try contents.write(to: url, atomically: true, encoding: .utf8)
+      resolve(["uri": url.absoluteString])
+    } catch {
+      reject("WRITE_FAILED", error.localizedDescription, error)
+    }
+  }
+
+  /// Android-only seam. iOS shares through RN `Share.share({ url })`, whose sheet includes Save to Files.
+  @objc(shareFile:mimeType:subject:dialogTitle:resolver:rejecter:)
+  func shareFile(_ uri: String,
+                 mimeType: String,
+                 subject: String,
+                 dialogTitle: String,
+                 resolver resolve: @escaping RCTPromiseResolveBlock,
+                 rejecter reject: @escaping RCTPromiseRejectBlock) {
+    reject("UNSUPPORTED", "shareFile is Android-only; on iOS share the file URL through RN Share.share({ url })", nil)
+  }
 }
