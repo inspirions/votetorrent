@@ -4,8 +4,12 @@
  *
  * Same lazy-native rule as `secret-wrap.ts`: `getNative()` requires the TurboModule inside each
  * call, never at module scope, because `TurboModuleRegistry.getEnforcing` throws under Node/jest.
- * Any failure to reach the module, or a binary that predates these methods, surfaces as
- * `FileShareError('unavailable')` so callers can fall back instead of crashing.
+ * Only a failure to reach the module, or a binary that predates these methods, surfaces as
+ * `FileShareError('unavailable')` (from `resolveNative`) so callers can fall back instead of
+ * crashing. A rejection from the native call itself is a real failure: a recognised native code
+ * maps to its own code, and anything else (unknown or missing code) maps to the method's
+ * fallback, `write-failed` or `share-failed` — never `unavailable`, which callers read as "old
+ * binary" and answer with a text share.
  */
 import { Platform } from 'react-native'
 import type { Spec as NativeAttestationSpec } from './specs/NativeAttestation'
@@ -50,12 +54,21 @@ function resolveNative(method: 'writeShareFile' | 'shareFile'): NativeAttestatio
 	return native
 }
 
-function mapNativeError(e: unknown): FileShareError {
+/**
+ * Maps a rejection from a native file-share call. A FileShareError passes through; a recognised
+ * native code wins; anything else becomes `fallback`. Never yields `unavailable` — that code is
+ * reserved for `resolveNative` (module or method missing from the binary).
+ */
+function mapNativeError(e: unknown, fallback: 'write-failed' | 'share-failed'): FileShareError {
 	if (e instanceof FileShareError) return e
-	const code = (e as { code?: unknown } | null)?.code
-	const mapped = typeof code === 'string' ? NATIVE_CODE_MAP[code] : undefined
-	const message = (e as { message?: unknown } | null)?.message
-	return new FileShareError(mapped ?? 'unavailable', typeof message === 'string' ? message : 'file share failed')
+	const code = (e as { code?: unknown } | null | undefined)?.code
+	// Own-property check: a native code such as 'toString' must not resolve through the prototype.
+	const mapped =
+		typeof code === 'string' && Object.prototype.hasOwnProperty.call(NATIVE_CODE_MAP, code)
+			? NATIVE_CODE_MAP[code]
+			: undefined
+	const message = (e as { message?: unknown } | null | undefined)?.message
+	return new FileShareError(mapped ?? fallback, typeof message === 'string' ? message : 'file share failed')
 }
 
 /**
@@ -75,7 +88,7 @@ export async function writeShareFile(fileName: string, contents: string): Promis
 		}
 		return result.uri
 	} catch (e) {
-		throw mapNativeError(e)
+		throw mapNativeError(e, 'write-failed')
 	}
 }
 
@@ -91,6 +104,6 @@ export async function shareFileAndroid(
 	try {
 		await native.shareFile(uri, opts.mimeType, opts.subject, opts.dialogTitle)
 	} catch (e) {
-		throw mapNativeError(e)
+		throw mapNativeError(e, 'share-failed')
 	}
 }
