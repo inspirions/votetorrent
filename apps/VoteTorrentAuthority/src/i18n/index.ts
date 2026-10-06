@@ -195,6 +195,7 @@ const resources = {
 			noNetwork:
 				'Tap “Select Network” at the top to join an existing network — or create your own.',
 			selectNetwork: 'Select Network',
+			networkSelectFailed: "Couldn't open this network. Try again.",
 			remove: 'Remove',
 			permissions: 'Permissions',
 			publicKey: 'Public Key',
@@ -1283,6 +1284,7 @@ const resources = {
 			noNetwork:
 				'Toca «Seleccionar Red» en la parte superior para unirte a una red existente, o crea la tuya propia.',
 			selectNetwork: 'Seleccionar Red',
+			networkSelectFailed: 'No se pudo abrir esta red. Inténtalo de nuevo.',
 			remove: 'Eliminar',
 			permissions: 'Permisos',
 			publicKey: 'Clave Pública',

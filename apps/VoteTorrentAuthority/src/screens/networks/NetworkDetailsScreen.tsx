@@ -191,8 +191,14 @@ export function NetworkDetailsScreen() {
 			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
 			navigation.goBack();
 		} catch (error) {
-			console.warn("Failed to select network:", error);
-			setSelectError(error instanceof Error ? error.message : String(error));
+			// A device with no signing key (`getOrCreateDeviceUser` rejects with code
+			// NO_KEY_PROVISIONED) goes to the provisioning ceremony. Any other failure shows
+			// translated copy, never the raw error text (it carried developer prose and an internal
+			// decision id on a fresh second device).
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			console.warn("Failed to select network:", error instanceof Error ? error.name : typeof error);
+			setSelectError(outcome.message ?? t("networkSelectFailed"));
 		}
 	};
 
