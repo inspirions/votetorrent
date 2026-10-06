@@ -1,7 +1,7 @@
 import { ExtendedTheme, useTheme, useNavigation, useFocusEffect } from "@react-navigation/native";
-import React, { useCallback, useLayoutEffect, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ScrollView, StyleSheet, TouchableOpacity, View } from "react-native";
+import { Keyboard, ScrollView, StyleSheet, TouchableOpacity, View } from "react-native";
 import { multiaddr } from "@multiformats/multiaddr";
 import { InfoCard } from "../../components/InfoCard";
 import { ThemedText } from "../../components/ThemedText";
@@ -33,6 +33,28 @@ export default function NetworksScreen() {
 	const [exportTargetHash, setExportTargetHash] = useState<string | null>(null);
 	const navigation = useNavigation<NavigationProp>();
 	const insets = useSafeAreaInsets();
+	const scrollRef = useRef<ScrollView>(null);
+	const directFocusedRef = useRef(false);
+
+	// The Direct (advanced) field and CONNECT are the LAST section. On API 35+ (forced
+	// edge-to-edge) the window is not resized for the IME, so useKeyboardInset pads the content
+	// and we scroll to the end once that padding is laid out (next frame) so the field and CONNECT
+	// sit above the keyboard. Only while the Direct field is focused. On API < 35 the platform
+	// resizes the window (useKeyboardInset returns 0) and scrollToEnd is harmless; the separate
+	// post-IME relayout defect on API 29 is diagnosed elsewhere, not fixed here.
+	const scrollDirectIntoView = useCallback(() => {
+		requestAnimationFrame(() => {
+			scrollRef.current?.scrollToEnd({ animated: true });
+		});
+	}, []);
+	useEffect(() => {
+		const sub = Keyboard.addListener("keyboardDidShow", () => {
+			if (directFocusedRef.current) {
+				scrollDirectIntoView();
+			}
+		});
+		return () => sub.remove();
+	}, [scrollDirectIntoView]);
 
 	// NETOP-03 / D-39: join a bootstrap peer from a pasted multiaddr (advanced / dev fallback).
 	// The multiaddr is parsed/validated BEFORE any use so a malformed paste produces an inline
@@ -122,6 +144,7 @@ export default function NetworksScreen() {
 
 	return (
 		<ScrollView
+			ref={scrollRef}
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 16 + keyboardInset }}
 		>
@@ -214,6 +237,15 @@ export default function NetworksScreen() {
 					onChangeText={setBootstrapAddr}
 					autoCapitalize="none"
 					autoCorrect={false}
+					onFocus={() => {
+						directFocusedRef.current = true;
+						if (Keyboard.isVisible()) {
+							scrollDirectIntoView();
+						}
+					}}
+					onBlur={() => {
+						directFocusedRef.current = false;
+					}}
 				/>
 				<CustomButton title={t("connect")} onPress={handleBootstrapConnect} />
 				{joinError !== "" && (
