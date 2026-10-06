@@ -31,6 +31,18 @@ export function isValidWrapKeyAlias(alias: string): boolean {
 	return WRAP_KEY_ALIAS_PATTERN.test(alias)
 }
 
+/**
+ * Phase 63 review CR-02: the ONLY aliases `deleteWrapKey` may delete, the vote-record wrap-key
+ * family. It never matches the identity alias (`VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1`) nor any
+ * signing alias. Must equal `DELETABLE_WRAP_KEY_ALIAS_PATTERN` in SecretWrapHelper.kt and the Swift
+ * `deletableWrapKeyAliasPattern` (the Voter's secure-surface ABI gate checks all three).
+ */
+export const VOTE_RECORD_WRAP_KEY_ALIAS_PATTERN = /^VOTETORRENT_VOTE_RECORD_WRAP_KEY_V[0-9]+$/
+
+export function isDeletableWrapKeyAlias(alias: string): boolean {
+	return VOTE_RECORD_WRAP_KEY_ALIAS_PATTERN.test(alias)
+}
+
 /** Reported, never asserted — this module makes no hardware-backing guarantee beyond what the OS
  * actually reports. `'test-stub'` is reserved for the jest-only in-memory provider and is REJECTED
  * as a native result (T-62-08-07 — a test provider must never masquerade as a real one). */
@@ -80,6 +92,16 @@ export interface SecretWrapOptions {
 export interface SecretWrapper {
 	wrapSecret(keyAlias: string, plaintext: Uint8Array, options: SecretWrapOptions): Promise<WrappedSecret>
 	unwrapSecret(wrapped: WrappedSecret, options: SecretWrapOptions): Promise<Uint8Array>
+}
+
+/**
+ * Phase 63 review CR-02: a `SecretWrapper` that can also delete a vote-record wrap key, so a key a
+ * biometric enrollment change invalidated can be replaced. `deleteWrapKey` refuses (INVALID_ARGUMENT,
+ * before any native call) every alias outside `VOTE_RECORD_WRAP_KEY_ALIAS_PATTERN`. Resolves whether
+ * a key existed. A separate interface so existing `SecretWrapper` implementations are unaffected.
+ */
+export interface ReplaceableSecretWrapper extends SecretWrapper {
+	deleteWrapKey(keyAlias: string): Promise<boolean>
 }
 
 /** The closed set of native reject codes (NativeAttestation.ts's wrapSecret/unwrapSecret doc
@@ -269,9 +291,37 @@ function parseUnwrapResult(raw: unknown): Uint8Array {
 	}
 }
 
-/** Create a `SecretWrapper` backed by the native `wrapSecret`/`unwrapSecret` TurboModule methods. */
-export function createNativeSecretWrapper(): SecretWrapper {
+/** Create a `SecretWrapper` backed by the native `wrapSecret`/`unwrapSecret`/`deleteWrapKey`
+ * TurboModule methods. */
+export function createNativeSecretWrapper(): ReplaceableSecretWrapper {
 	return {
+		async deleteWrapKey(keyAlias: string): Promise<boolean> {
+			if (!isDeletableWrapKeyAlias(keyAlias)) {
+				throw new SecretWrapError('INVALID_ARGUMENT', `wrap key alias may not be deleted: ${keyAlias}`)
+			}
+			let native: NativeAttestationSpec
+			try {
+				native = getNative()
+			} catch {
+				throw new SecretWrapError('NATIVE_UNAVAILABLE', 'the AttestationNative TurboModule is not available')
+			}
+			if (typeof native.deleteWrapKey !== 'function') {
+				// A binary built before this method existed.
+				throw new SecretWrapError('NATIVE_UNAVAILABLE', 'deleteWrapKey is not available in this binary')
+			}
+			let raw: unknown
+			try {
+				raw = await native.deleteWrapKey(keyAlias)
+			} catch (err) {
+				throw mapNativeError(err, 'WRAP_FAILED')
+			}
+			const deleted = (raw as { deleted?: unknown } | null)?.deleted
+			if (typeof deleted !== 'boolean') {
+				throw new SecretWrapError('MALFORMED_NATIVE_RESULT', 'deleteWrapKey result is missing deleted')
+			}
+			return deleted
+		},
+
 		async wrapSecret(keyAlias: string, plaintext: Uint8Array, options: SecretWrapOptions): Promise<WrappedSecret> {
 			validateAlias(keyAlias)
 			validatePlaintextLength(plaintext.length)

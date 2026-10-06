@@ -268,6 +268,41 @@ export interface Spec extends TurboModule {
 	): Promise<Object>
 
 	/**
+	 * Phase 63 review CR-02: deletes the wrap key under `keyAlias` so the next `wrapSecret` creates a
+	 * fresh one. Used ONLY to replace a vote-record wrap key that a biometric enrollment change
+	 * invalidated. Every ciphertext wrapped under the deleted key becomes permanently unreadable, which
+	 * is already true of an invalidated key.
+	 *
+	 * Restricted, natively and in JS, to the vote-record alias family
+	 * `^VOTETORRENT_VOTE_RECORD_WRAP_KEY_V[0-9]+$`. Any other alias (the identity wrap key, the
+	 * device signing key, the recovery key) rejects `INVALID_ARGUMENT` before the Keystore/Keychain is
+	 * touched. Resolves `{ deleted: boolean }` (`false` when no key existed). Rejects
+	 * `INVALID_ARGUMENT`, `WRAP_KEY_POLICY_MISMATCH` (the alias holds something other than an AES wrap
+	 * key; never deleted) or `WRAP_FAILED`.
+	 */
+	deleteWrapKey(keyAlias: string): Promise<Object>
+
+	/**
+	 * Phase 63 review CR-01: Android adds (`enabled` true) or clears (`false`) `FLAG_SECURE` on the
+	 * current Activity's window, on the UI thread, so the task-switcher snapshot and screenshots of a
+	 * screen showing decrypted choices are blank. Resolves `{ applied: boolean }`. Rejects
+	 * `NO_ACTIVITY` or `SECURE_SCREEN_FAILED`. iOS has no equivalent flag: it resolves
+	 * `{ applied: false }` and the screen renders its own privacy cover on `inactive` instead.
+	 */
+	setSecureScreen(enabled: boolean): Promise<Object>
+
+	/**
+	 * Phase 63 review WR-03: SYNCHRONOUS. Copies `text` to the system clipboard marked sensitive.
+	 * Android: a plain-text `ClipData` whose description extras carry
+	 * `ClipDescription.EXTRA_IS_SENSITIVE` (API 33+; the same `android.content.extra.IS_SENSITIVE` key
+	 * by literal below 33), so the Android 13+ clipboard overlay hides the preview and keyboards do not
+	 * keep it in clipboard history; a best-effort clear runs 60 s later if the clip is still ours.
+	 * iOS: `UIPasteboard` items with `localOnly` (no Universal Clipboard) and a 60 s expiration.
+	 * Returns `true` when the copy was issued, `false` when it failed. Never throws.
+	 */
+	copySensitiveText(text: string): boolean
+
+	/**
 	 * Writes UTF-8 `contents` to a per-app cache file named `fileName` inside a private `vt-share`
 	 * directory (Android `cacheDir/vt-share`, iOS `NSTemporaryDirectory()/vt-share`), emptying that
 	 * directory first so only the newest export lingers. Resolves `{ uri }` (a `file://` URI).

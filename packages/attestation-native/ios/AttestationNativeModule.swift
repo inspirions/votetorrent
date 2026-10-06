@@ -40,6 +40,7 @@ import DeviceCheck
 import CryptoKit
 import LocalAuthentication
 import Security
+import UIKit
 
 @objc(AttestationNative)
 class AttestationNativeModule: NSObject {
@@ -563,7 +564,12 @@ class AttestationNativeModule: NSObject {
     }
 
     let wantedMarker = requireAuth ? "auth=1" : "auth=0"
+    // CR-02: true once we know an item already exists under the alias (marker read, or a duplicate on
+    // add). A `.biometryCurrentSet` item that then reads as errSecItemNotFound was invalidated by a
+    // biometric enrollment change, and is reported KEY_INVALIDATED rather than NO_WRAP_KEY.
+    var itemExisted = false
     if let existingMarker = readWrapKeyPolicyMarker(alias: alias) {
+      itemExisted = true
       if existingMarker != wantedMarker {
         throw SecretWrapNativeError.code(
           "WRAP_KEY_POLICY_MISMATCH",
@@ -603,7 +609,9 @@ class AttestationNativeModule: NSObject {
       let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
       // A concurrent create lost the race — re-read rather than treat as a failure. NEVER update
       // or overwrite an existing item (T-62-08-03).
-      if addStatus != errSecSuccess && addStatus != errSecDuplicateItem {
+      if addStatus == errSecDuplicateItem {
+        itemExisted = true
+      } else if addStatus != errSecSuccess {
         throw SecretWrapNativeError.code("WRAP_FAILED", "SecItemAdd failed with OSStatus \(addStatus)")
       }
     }
@@ -625,6 +633,11 @@ class AttestationNativeModule: NSObject {
     let status = SecItemCopyMatching(readQuery as CFDictionary, &item)
     guard status == errSecSuccess, let data = item as? Data else {
       if status == errSecItemNotFound {
+        // CR-02: an auth-required item that exists but cannot be found on a data read is the
+        // reported iOS behaviour of an invalidated `.biometryCurrentSet` item (unproven on device).
+        if requireAuth && itemExisted {
+          throw SecretWrapNativeError.code("KEY_INVALIDATED", "wrap key under alias \(alias) was invalidated")
+        }
         throw SecretWrapNativeError.code("NO_WRAP_KEY", "no wrap key under alias \(alias)")
       }
       throw mapOSStatusOrLAError(status)
@@ -752,6 +765,67 @@ class AttestationNativeModule: NSObject {
         reject("UNWRAP_FAILED", error.localizedDescription, error)
       }
     }
+  }
+
+  // MARK: - Phase 63 review: wrap-key replacement, secure screen, sensitive copy
+
+  /// CR-02: the ONLY aliases `deleteWrapKey` may delete (the vote-record family). Must equal
+  /// `DELETABLE_WRAP_KEY_ALIAS_PATTERN` in SecretWrapHelper.kt and `VOTE_RECORD_WRAP_KEY_ALIAS_PATTERN`
+  /// in secret-wrap.ts.
+  private static let deletableWrapKeyAliasPattern = try! NSRegularExpression(pattern: "^VOTETORRENT_VOTE_RECORD_WRAP_KEY_V[0-9]+$")
+
+  /// CR-02: deletes the wrap-key item under `keyAlias` so the next `wrapSecret` creates a fresh one.
+  /// Refuses every alias outside the vote-record family before touching the Keychain. Deletion needs
+  /// no authentication, so an invalidated item is deletable. Resolves `["deleted": Bool]`.
+  @objc(deleteWrapKey:resolver:rejecter:)
+  func deleteWrapKey(_ keyAlias: String,
+                     resolver resolve: @escaping RCTPromiseResolveBlock,
+                     rejecter reject: @escaping RCTPromiseRejectBlock) {
+    secretWrapQueue.async {
+      let range = NSRange(keyAlias.startIndex..<keyAlias.endIndex, in: keyAlias)
+      guard Self.deletableWrapKeyAliasPattern.firstMatch(in: keyAlias, range: range) != nil else {
+        reject("INVALID_ARGUMENT", "alias \(keyAlias) may not be deleted", nil); return
+      }
+      let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: Self.secretWrapService,
+        kSecAttrAccount as String: keyAlias
+      ]
+      let status = SecItemDelete(query as CFDictionary)
+      if status == errSecSuccess {
+        resolve(["deleted": true])
+      } else if status == errSecItemNotFound {
+        resolve(["deleted": false])
+      } else {
+        reject("WRAP_FAILED", "SecItemDelete failed with OSStatus \(status)", nil)
+      }
+    }
+  }
+
+  /// CR-01: iOS has no FLAG_SECURE. Resolves `["applied": false]`; the receipt screen renders its own
+  /// opaque privacy cover on AppState 'inactive' instead.
+  @objc(setSecureScreen:resolver:rejecter:)
+  func setSecureScreen(_ enabled: Bool,
+                       resolver resolve: @escaping RCTPromiseResolveBlock,
+                       rejecter reject: @escaping RCTPromiseRejectBlock) {
+    resolve(["applied": false])
+  }
+
+  /// WR-03: SYNCHRONOUS (blocking) method. Puts `text` on the general pasteboard as a local-only item
+  /// (no Universal Clipboard) that expires after 60 s. The write is dispatched to the main queue;
+  /// `setItems` has no failure signal, so this returns true once the write is scheduled.
+  @objc(copySensitiveText:)
+  func copySensitiveText(_ text: String) -> NSNumber {
+    DispatchQueue.main.async {
+      UIPasteboard.general.setItems(
+        [["public.utf8-plain-text": text]],
+        options: [
+          UIPasteboard.OptionsKey.localOnly: true,
+          UIPasteboard.OptionsKey.expirationDate: Date().addingTimeInterval(60)
+        ]
+      )
+    }
+    return NSNumber(value: true)
   }
 
   // MARK: - Plan 62-75 file share (D-36)

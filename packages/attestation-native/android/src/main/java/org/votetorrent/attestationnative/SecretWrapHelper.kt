@@ -31,6 +31,27 @@ private const val ANDROID_KEYSTORE = "AndroidKeyStore"
  * `VOTETORRENT_AUTHORITY_SIGNING_KEY_V1`, `VOTETORRENT_AUTHORITY_RECOVERY_KEY_V1`). */
 private val WRAP_KEY_ALIAS_PATTERN = Regex("^VOTETORRENT_[A-Z0-9_]+_WRAP_KEY_V[0-9]+$")
 
+/** Phase 63 review CR-02: the ONLY aliases [SecretWrapHelper.deleteWrapKey] may delete — the
+ * vote-record wrap-key family. It can never match the identity wrap key
+ * (`VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1`) or any EC signing/recovery alias. Must equal
+ * `VOTE_RECORD_WRAP_KEY_ALIAS_PATTERN` in secret-wrap.ts (checked by the Voter's ABI gate). */
+internal val DELETABLE_WRAP_KEY_ALIAS_PATTERN = Regex("^VOTETORRENT_VOTE_RECORD_WRAP_KEY_V[0-9]+$")
+
+/** The lowest API level that may create a time-bound wrap key (Phase 63 review WR-04). */
+internal const val MIN_SDK_FOR_AUTH_WINDOW = 30
+
+/**
+ * Phase 63 review WR-04: the auth window actually applied. Below API 30 the only time-bound key
+ * Android offers is `setUserAuthenticationValidityDurationSeconds`, which any lock-screen
+ * authentication satisfies (a PIN or pattern too) and which `setInvalidatedByBiometricEnrollment`
+ * does not govern. So below API 30 every window is downgraded to 0 (per-use, biometric CryptoObject),
+ * which is strictly stronger than what was asked. The JS layer already asks for 0 there; this is
+ * defence in depth. Both creation and the existing-alias policy comparison use this value, so the
+ * policy check stays coherent.
+ */
+internal fun effectiveAuthWindowSeconds(requested: Int, sdkInt: Int): Int =
+	if (sdkInt < MIN_SDK_FOR_AUTH_WINDOW) 0 else requested
+
 /** D-14 upper bound on `authWindowSeconds`. Must equal `MAX_AUTH_WINDOW_SECONDS` in secret-wrap.ts
  * (checked by the Voter's secret-wrap-abi.gate.test.ts). */
 internal const val MAX_AUTH_WINDOW_SECONDS = 60
@@ -91,20 +112,24 @@ class NoWrapKeyException(alias: String) : Exception("no wrap key under alias $al
  * Generic across every `VOTETORRENT_*_WRAP_KEY_V<n>` alias — this is NOT the P-256 signing-key
  * flow [KeyAttestationHelper] owns.
  *
- * **CRITICAL — never regenerate, never delete.** Unlike [KeyAttestationHelper.regenerateAttested]
+ * **CRITICAL — never regenerate; delete only through [deleteWrapKey].** Unlike [KeyAttestationHelper.regenerateAttested]
  * (which deliberately deletes and regenerates its alias on every call — D-13 key non-reuse, the
  * right design for an attested SIGNING key), a wrap key protects the ONLY copy of a secret
  * (D-42/D-40's enrollment identity key is the first consumer). Deleting or regenerating it would
- * make every ciphertext wrapped under it permanently unreadable. This class contains no
- * `deleteEntry` call anywhere, and [getOrCreateKey] NEVER regenerates an alias that already
- * exists — it returns the existing key, or rejects `WRAP_KEY_POLICY_MISMATCH` if the existing
- * key's auth policy does not match the request.
+ * make every ciphertext wrapped under it permanently unreadable. [getOrCreateKey] NEVER
+ * regenerates an alias that already exists — it returns the existing key, or rejects
+ * `WRAP_KEY_POLICY_MISMATCH` if the existing key's auth policy does not match the request. The single
+ * `deleteEntry` call lives in [deleteWrapKey], which is restricted to
+ * [DELETABLE_WRAP_KEY_ALIAS_PATTERN] (the vote-record family, whose key only protects per-election
+ * data keys and is useless once a biometric change invalidates it — Phase 63 review CR-02). The
+ * identity alias can never be deleted.
  *
  * **D-14 (Phase 63) time-bound mode.** `authWindowSeconds > 0` is legal only with `requireAuth`;
- * its only caller is the vote-record alias, with R-5's 10 s window. The key is created time-bound:
- * `setUserAuthenticationParameters(n, AUTH_BIOMETRIC_STRONG)` on API >= 30 and
- * `setUserAuthenticationValidityDurationSeconds(n)` on API < 30. On API < 30 that also admits a
- * device credential (assumption A2, unproven; the device proof covers one API-37 AVD). Use is
+ * its only caller is the vote-record alias, with R-5's 10 s window. The key is created time-bound
+ * with `setUserAuthenticationParameters(n, AUTH_BIOMETRIC_STRONG)`, on API >= 30 only. Below API 30
+ * [effectiveAuthWindowSeconds] downgrades every window to 0 (per-use), because the pre-30
+ * validity-duration API also admits a device credential and escapes biometric-enrollment
+ * invalidation (Phase 63 review WR-04); [buildSpec] refuses a window below API 30 outright. Use is
  * try-init-first: `Cipher.init` runs with no prompt, and on `UserNotAuthenticatedException` there
  * is exactly ONE BIOMETRIC_STRONG prompt WITHOUT a CryptoObject, then exactly one re-init. Per-use
  * keys need a CryptoObject; time-bound keys accept a recent authentication (the D-26 precedent).
@@ -173,14 +198,12 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 			// the D-42 identity alias (requireAuth=false) never does.
 			builder.setInvalidatedByBiometricEnrollment(true)
 			if (authWindowSeconds > 0) {
-				// D-14: time-bound key, applied on every API level so a device upgraded across
-				// API 30 keeps its policy.
-				if (Build.VERSION.SDK_INT >= 30) {
-					builder.setUserAuthenticationParameters(authWindowSeconds, KeyProperties.AUTH_BIOMETRIC_STRONG)
-				} else {
-					@Suppress("DEPRECATION")
-					builder.setUserAuthenticationValidityDurationSeconds(authWindowSeconds)
+				// D-14: time-bound key, BIOMETRIC_STRONG only. WR-04: never below API 30, where the
+				// only time-bound API admits a PIN; effectiveAuthWindowSeconds already made this 0.
+				if (Build.VERSION.SDK_INT < MIN_SDK_FOR_AUTH_WINDOW) {
+					throw IllegalStateException("a time-bound wrap key needs API $MIN_SDK_FOR_AUTH_WINDOW+")
 				}
+				builder.setUserAuthenticationParameters(authWindowSeconds, KeyProperties.AUTH_BIOMETRIC_STRONG)
 			} else if (Build.VERSION.SDK_INT >= 30) {
 				builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG) // 0 = per-use
 			}
@@ -227,6 +250,27 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		return if (keyInfo.isInsideSecureHardware) "tee" else "software"
 	}
 
+	/**
+	 * Phase 63 review CR-02: delete the wrap key under [alias] so the next [wrap] creates a fresh one.
+	 * ONLY for [DELETABLE_WRAP_KEY_ALIAS_PATTERN] (the vote-record family); every other alias throws
+	 * [InvalidWrapKeyAliasException] before the Keystore is touched. An alias holding anything other
+	 * than a SecretKeyEntry is never deleted ([WrapKeyPolicyMismatchException]). Returns false when no
+	 * key existed. Serialized with [getOrCreateKey].
+	 */
+	@Synchronized
+	fun deleteWrapKey(alias: String): Boolean {
+		if (!DELETABLE_WRAP_KEY_ALIAS_PATTERN.matches(alias)) {
+			throw InvalidWrapKeyAliasException(alias)
+		}
+		if (!keyStore.containsAlias(alias)) return false
+		if (!keyStore.entryInstanceOf(alias, KeyStore.SecretKeyEntry::class.java)) {
+			throw WrapKeyPolicyMismatchException("alias $alias does not hold a SecretKeyEntry; refusing to delete")
+		}
+		keyStore.deleteEntry(alias)
+		Log.i(TAG_WRAP_KEY_POLICY, "alias=$alias op=delete-wrap-key")
+		return true
+	}
+
 	/** Wrap [plaintext] under [alias]'s key. Native generates a fresh 12-byte IV (no caller IV). */
 	fun wrap(
 		alias: String,
@@ -248,8 +292,13 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 			onError("INVALID_ARGUMENT", IllegalArgumentException("authWindowSeconds out of bounds"))
 			return
 		}
+		// WR-04: below API 30 the window is downgraded to per-use, for creation AND the policy check.
+		val window = effectiveAuthWindowSeconds(authWindowSeconds, Build.VERSION.SDK_INT)
+		if (window != authWindowSeconds) {
+			Log.i(TAG_WRAP_WINDOW, "alias=$alias op=wrap path=window-downgraded-below-api30")
+		}
 		val (key, securityLevel) = try {
-			getOrCreateKey(alias, requireAuth, authWindowSeconds)
+			getOrCreateKey(alias, requireAuth, window)
 		} catch (e: InvalidWrapKeyAliasException) {
 			onError("INVALID_ARGUMENT", e); return
 		} catch (e: WrapKeyPolicyMismatchException) {
@@ -258,7 +307,7 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 			onError("WRAP_FAILED", e); return
 		}
 
-		if (requireAuth && authWindowSeconds > 0) {
+		if (requireAuth && window > 0) {
 			wrapWindowed(alias, key, securityLevel, plaintext, aad, activity, promptTitle, promptSubtitle, promptNegativeButton, onResult, onError)
 			return
 		}
@@ -267,6 +316,10 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		try {
 			cipher = Cipher.getInstance("AES/GCM/NoPadding")
 			cipher.init(Cipher.ENCRYPT_MODE, key)
+		} catch (e: KeyPermanentlyInvalidatedException) {
+			// CR-02: the per-use path (every vote-record seal below API 30, WR-04) must report an
+			// invalidated key as such, so the caller can replace it rather than read WRAP_FAILED.
+			onError("KEY_INVALIDATED", e); return
 		} catch (e: Exception) {
 			onError("WRAP_FAILED", e); return
 		}
@@ -346,6 +399,8 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 			onError("INVALID_ARGUMENT", IllegalArgumentException("authWindowSeconds out of bounds"))
 			return
 		}
+		// WR-04: below API 30 the window is downgraded to per-use, for the policy check AND the path.
+		val window = effectiveAuthWindowSeconds(authWindowSeconds, Build.VERSION.SDK_INT)
 		if (!WRAP_KEY_ALIAS_PATTERN.matches(alias)) {
 			onError("INVALID_ARGUMENT", InvalidWrapKeyAliasException(alias)); return
 		}
@@ -359,14 +414,14 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 		}
 
 		val (key, _) = try {
-			getOrCreateKey(alias, requireAuth, authWindowSeconds)
+			getOrCreateKey(alias, requireAuth, window)
 		} catch (e: WrapKeyPolicyMismatchException) {
 			onError("WRAP_KEY_POLICY_MISMATCH", e); return
 		} catch (e: Exception) {
 			onError("UNWRAP_FAILED", e); return
 		}
 
-		if (requireAuth && authWindowSeconds > 0) {
+		if (requireAuth && window > 0) {
 			unwrapWindowed(alias, key, ciphertext, iv, aad, activity, promptTitle, promptSubtitle, promptNegativeButton, onResult, onError)
 			return
 		}
