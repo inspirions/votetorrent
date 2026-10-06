@@ -4,7 +4,7 @@
  *
  * `FoundingImportState` names the seven distinct bodies 62-UI-SPEC.md's Surface 2 import screen
  * renders (idle, picking, validating, invalidSignature, alreadyJoined, success, genericError).
- * `FoundingExportState` names the export card's five states (idle — "not mounted", owned by the
+ * `FoundingExportState` names the export card's six states (idle — "not mounted", owned by the
  * screen, not this card). `mapFoundingImportResult` is the ONE place 62-16's
  * `FoundingBundleImportResult` (see `62-16-SUMMARY.md`'s "Interfaces for downstream plans" /
  * `FOUNDING_FAILURE_CATEGORY`) is translated into a UI outcome:
@@ -27,7 +27,7 @@ export type FoundingImportState =
 	| 'success'
 	| 'genericError'
 
-export type FoundingExportState = 'idle' | 'confirming' | 'generating' | 'sharing' | 'error'
+export type FoundingExportState = 'idle' | 'confirming' | 'generating' | 'sharing' | 'ready' | 'error'
 
 export type FoundingImportOutcome =
 	| { readonly state: 'success'; readonly networkRef: NetworkReference }

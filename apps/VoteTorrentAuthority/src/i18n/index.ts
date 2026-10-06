@@ -1011,6 +1011,13 @@ const resources = {
 			networkFoundingImportGenericError: 'Could not import this file.',
 			networkFoundingExportCancelButton: "Don't Share",
 			networkFoundingExportGenerating: 'Preparing the network file…',
+			networkFoundingExportSaveButton: 'Save to this phone',
+			networkFoundingExportDoneButton: 'Done',
+			networkFoundingExportReadyBody:
+				'The network file is ready. Share it, or save it to this phone and send it later.',
+			networkFoundingExportSaved: 'Saved. You can now send the file from Files.',
+			networkFoundingExportTextFallback:
+				'This version of the app could not attach a file, so the network was shared as text. Save it as a .json file before importing.',
 			networkFoundingImportViewNetworkButton: 'View Network',
 			networkFoundingImportChooseAnotherFileButton: 'Choose a Different File',
 			// 62-UI-SPEC Surface 3 — possibleDuplicate* group (D-44). Consumer: 62-27.
@@ -2092,6 +2099,13 @@ const resources = {
 			networkFoundingImportGenericError: 'No se pudo importar este archivo.',
 			networkFoundingExportCancelButton: 'No Compartir',
 			networkFoundingExportGenerating: 'Preparando el archivo de la red…',
+			networkFoundingExportSaveButton: 'Guardar en este teléfono',
+			networkFoundingExportDoneButton: 'Listo',
+			networkFoundingExportReadyBody:
+				'El archivo de la red está listo. Compártelo, o guárdalo en este teléfono y envíalo después.',
+			networkFoundingExportSaved: 'Guardado. Ahora puedes enviar el archivo desde Archivos.',
+			networkFoundingExportTextFallback:
+				'Esta versión de la app no pudo adjuntar un archivo, así que la red se compartió como texto. Guárdalo como archivo .json antes de importar.',
 			networkFoundingImportViewNetworkButton: 'Ver Red',
 			networkFoundingImportChooseAnotherFileButton: 'Elegir Otro Archivo',
 			// 62-UI-SPEC Surface 3 — possibleDuplicate* group (D-44). Consumer: 62-27.

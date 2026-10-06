@@ -2,7 +2,8 @@
  * FoundingBundleExportCard.tsx — Surface 2 export card (D-35, D-36, D-37 — Authority only).
  *
  * A founding officer on the network's founding device shares the network's signed founding
- * bundle through the OS share sheet (`Share.share`), so a second Authority device can import it
+ * bundle as a FILE (62-75 `writeShareFile`, then the Android file share or the iOS url share, or
+ * a local save through the document picker), so a second Authority device can import it
  * (`ImportFoundingBundleScreen.tsx`) and become the same network. The export digest is signed by
  * the device's own hardware-backed key (`createDeviceSigner` — D-01: the private key NEVER
  * enters JS, signing happens inside the Android Keystore behind the biometric prompt). This file
@@ -13,7 +14,8 @@
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Share, View } from "react-native";
+import { Platform, Share, View } from "react-native";
+import { FileShareError, shareFileAndroid, writeShareFile } from "@votetorrent/attestation-native";
 import { ThemedText } from "../../../components/ThemedText";
 import { CustomButton } from "../../../components/CustomButton";
 import { LifecycleConfirmCard } from "../../registration/components/LifecycleConfirmCard";
@@ -53,6 +55,16 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	});
 }
 
+const BUNDLE_MIME_TYPE = "application/json";
+
+function isUserCancel(err: unknown): boolean {
+	// Lazy require: the picker package's module scope touches a TurboModule that is absent under jest
+	// (same reasoning as engines/pick-founding-bundle-file.ts).
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const picker = require("@react-native-documents/picker") as typeof import("@react-native-documents/picker");
+	return picker.isErrorWithCode(err) && err.code === picker.errorCodes.OPERATION_CANCELED;
+}
+
 function logExportFailure(err: unknown): void {
 	const code = (err as { code?: unknown } | null | undefined)?.code;
 	const token = typeof code === "string" ? code : "failed";
@@ -68,6 +80,10 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 
 	const [state, setState] = useState<FoundingExportState>("confirming");
 	const [errorMessage, setErrorMessage] = useState<string | undefined>(undefined);
+	const [fileName, setFileName] = useState<string | undefined>(undefined);
+	const [usedTextFallback, setUsedTextFallback] = useState(false);
+	const [savedNotice, setSavedNotice] = useState(false);
+	const fileRef = useRef<{ uri: string; fileName: string } | undefined>(undefined);
 	const mountedRef = useRef(true);
 	const inFlightRef = useRef(false);
 
@@ -119,11 +135,31 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 			});
 
 			if (mountedRef.current) setState("sharing");
-			await Share.share(
-				{ message: exported.text, title: exported.fileName },
-				{ subject: exported.fileName, dialogTitle: t("networkFoundingExportShareButton") },
-			);
-			onClose();
+			let uri: string;
+			try {
+				uri = await writeShareFile(exported.fileName, exported.text);
+			} catch (writeErr) {
+				if (writeErr instanceof FileShareError && writeErr.code === "unavailable") {
+					// An older binary without the native file seam: share the text, with a visible notice.
+					await Share.share(
+						{ message: exported.text, title: exported.fileName },
+						{ subject: exported.fileName, dialogTitle: t("networkFoundingExportShareButton") },
+					);
+					if (mountedRef.current) {
+						setUsedTextFallback(true);
+						setState("ready");
+					}
+					return;
+				}
+				throw writeErr;
+			}
+			fileRef.current = { uri, fileName: exported.fileName };
+			if (mountedRef.current) {
+				setFileName(exported.fileName);
+				setUsedTextFallback(false);
+				setSavedNotice(false);
+				setState("ready");
+			}
 		} catch (err) {
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) {
@@ -140,7 +176,104 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 		}
 	}, [networkRef, networksEngine, onClose, handleDeviceSigningError, t]);
 
+	const shareFile = useCallback(async () => {
+		const file = fileRef.current;
+		if (!file) return;
+		setSavedNotice(false);
+		try {
+			if (Platform.OS === "android") {
+				await shareFileAndroid(file.uri, {
+					mimeType: BUNDLE_MIME_TYPE,
+					subject: file.fileName,
+					dialogTitle: t("networkFoundingExportShareButton"),
+				});
+			} else {
+				await Share.share({ url: file.uri, title: file.fileName });
+			}
+		} catch (err) {
+			// A dismissed share sheet is not an error; any real failure routes to the error state.
+			logExportFailure(err);
+			if (mountedRef.current && err instanceof FileShareError) {
+				setErrorMessage(undefined);
+				setState("error");
+			}
+		}
+	}, [t]);
+
+	const saveFile = useCallback(async () => {
+		const file = fileRef.current;
+		if (!file) return;
+		try {
+			// eslint-disable-next-line @typescript-eslint/no-var-requires
+			const picker = require("@react-native-documents/picker") as typeof import("@react-native-documents/picker");
+			const results = await picker.saveDocuments({
+				sourceUris: [file.uri],
+				fileName: file.fileName,
+				mimeType: BUNDLE_MIME_TYPE,
+			});
+			if (!mountedRef.current) return;
+			if (results[0]?.error) {
+				logExportFailure(undefined);
+				setSavedNotice(false);
+				setErrorMessage(undefined);
+				setState("error");
+				return;
+			}
+			setSavedNotice(true);
+		} catch (err) {
+			if (isUserCancel(err)) return;
+			logExportFailure(err);
+			if (mountedRef.current) {
+				setErrorMessage(undefined);
+				setState("error");
+			}
+		}
+	}, []);
+
 	switch (state) {
+		case "ready":
+			return (
+				<View testID="founding-export-body-ready" style={{ gap: 8 }}>
+					{usedTextFallback ? (
+						<ThemedText type="default" style={{ color: colors.textSecondary }}>
+							{t("networkFoundingExportTextFallback")}
+						</ThemedText>
+					) : (
+						<>
+							<ThemedText type="default" style={{ color: colors.textSecondary }}>
+								{t("networkFoundingExportReadyBody")}
+							</ThemedText>
+							{fileName !== undefined && (
+								<ThemedText type="small" style={{ color: colors.textSecondary }}>
+									{fileName}
+								</ThemedText>
+							)}
+							<CustomButton
+								testID="founding-export-share-file"
+								title={t("networkFoundingExportShareButton")}
+								onPress={shareFile}
+							/>
+							{Platform.OS === "android" && (
+								<CustomButton
+									testID="founding-export-save-file"
+									title={t("networkFoundingExportSaveButton")}
+									onPress={saveFile}
+								/>
+							)}
+							{savedNotice && (
+								<ThemedText type="small" testID="founding-export-saved" style={{ color: colors.textSecondary }}>
+									{t("networkFoundingExportSaved")}
+								</ThemedText>
+							)}
+						</>
+					)}
+					<CustomButton
+						testID="founding-export-done"
+						title={t("networkFoundingExportDoneButton")}
+						onPress={onClose}
+					/>
+				</View>
+			);
 		case "generating":
 			return (
 				<View testID="founding-export-body-generating">
