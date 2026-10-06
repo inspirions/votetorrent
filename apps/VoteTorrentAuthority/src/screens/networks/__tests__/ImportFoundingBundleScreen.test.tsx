@@ -508,3 +508,40 @@ describe("S-9: no console call leaks a sentinel planted in the bundle text or th
 		spy.mockRestore();
 	});
 });
+
+/** Sum of left padding across a body's ancestors (padding / paddingHorizontal / paddingLeft). */
+function leftGutter(path: any[]): number {
+	let total = 0;
+	for (const ancestor of path) {
+		const flat = (StyleSheet.flatten([ancestor.props?.style, ancestor.props?.contentContainerStyle]) ?? {}) as Record<string, number>;
+		total += flat.paddingLeft ?? flat.paddingHorizontal ?? flat.padding ?? 0;
+	}
+	return total;
+}
+
+describe("S-10: every state body sits inside the 16dp screen gutter with message/button spacing (UAT 62 O)", () => {
+	const cases: Array<[string, () => FoundingBundleImportResult]> = [
+		["invalidSignature", invalidBundleResult],
+		["genericError", errorResult],
+		["alreadyJoined", alreadyJoinedResult],
+		["success", () => okResult("replayed")],
+	];
+	for (const [state, result] of cases) {
+		it(`${state}: >= 16dp left gutter and a gap between message and button`, async () => {
+			mockSelectNetwork.mockImplementationOnce(() => new Promise(() => {}));
+			mockNetworksEngine = { importFoundingBundle: jest.fn(async () => result()) };
+			const tr = await pickAndResolve({ kind: "picked", text: "bundle" });
+			const found = findJsonByTestID(tr.toJSON(), `founding-import-body-${state}`)!;
+			expect(found).toBeTruthy();
+			expect(leftGutter(found.path)).toBeGreaterThanOrEqual(16);
+			const bodyFlat = StyleSheet.flatten(found.node.props.style) as Record<string, number>;
+			expect(bodyFlat.gap).toBeGreaterThanOrEqual(8);
+		});
+	}
+
+	it("idle: the Choose File body is inside the gutter too", async () => {
+		const tr = await mount();
+		const found = findJsonByTestID(tr.toJSON(), "founding-import-body-idle")!;
+		expect(leftGutter(found.path)).toBeGreaterThanOrEqual(16);
+	});
+});

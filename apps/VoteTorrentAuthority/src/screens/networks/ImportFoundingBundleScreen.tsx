@@ -19,7 +19,7 @@
 import { ExtendedTheme, useTheme, useNavigation } from '@react-navigation/native'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ScrollView, View } from 'react-native'
+import { ScrollView, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ThemedText } from '../../components/ThemedText'
 import { CustomButton } from '../../components/CustomButton'
@@ -28,6 +28,7 @@ import { getDeviceUser } from '../../engines/device-user'
 import { pickFoundingBundleFile } from '../../engines/pick-founding-bundle-file'
 import { mapFoundingImportResult, type FoundingImportState } from './foundingBundleState'
 import type { NavigationProp } from '../../navigation/types'
+import { globalStyles } from '../../theme/styles'
 import type { NetworkReference } from '@votetorrent/vote-core'
 
 interface ScreenState {
@@ -143,7 +144,7 @@ export default function ImportFoundingBundleScreen() {
 		switch (screenState.kind) {
 			case 'idle':
 				return (
-					<View testID="founding-import-body-idle">
+					<View testID="founding-import-body-idle" style={localStyles.body}>
 						<CustomButton title={t('networkFoundingImportChooseFileButton')} onPress={handleChooseFile} />
 					</View>
 				)
@@ -151,7 +152,7 @@ export default function ImportFoundingBundleScreen() {
 				return <View testID="founding-import-body-picking" />
 			case 'validating':
 				return (
-					<View testID="founding-import-body-validating">
+					<View testID="founding-import-body-validating" style={localStyles.body}>
 						<ThemedText type="default" style={{ color: colors.textSecondary }}>
 							{t('networkFoundingImportValidating')}
 						</ThemedText>
@@ -159,7 +160,7 @@ export default function ImportFoundingBundleScreen() {
 				)
 			case 'invalidSignature':
 				return (
-					<View testID="founding-import-body-invalidSignature">
+					<View testID="founding-import-body-invalidSignature" style={localStyles.body}>
 						<ThemedText type="default" style={{ color: colors.error }}>
 							{t('networkFoundingImportInvalidSignature')}
 						</ThemedText>
@@ -171,7 +172,7 @@ export default function ImportFoundingBundleScreen() {
 				)
 			case 'genericError':
 				return (
-					<View testID="founding-import-body-genericError">
+					<View testID="founding-import-body-genericError" style={localStyles.body}>
 						<ThemedText type="default" style={{ color: colors.error }}>
 							{t('networkFoundingImportGenericError')}
 						</ThemedText>
@@ -183,7 +184,7 @@ export default function ImportFoundingBundleScreen() {
 				)
 			case 'alreadyJoined':
 				return (
-					<View testID="founding-import-body-alreadyJoined">
+					<View testID="founding-import-body-alreadyJoined" style={localStyles.body}>
 						<ThemedText type="default" style={{ color: colors.textSecondary }}>
 							{t('networkFoundingImportAlreadyJoined')}
 						</ThemedText>
@@ -199,7 +200,7 @@ export default function ImportFoundingBundleScreen() {
 				)
 			case 'success':
 				return (
-					<View testID="founding-import-body-success">
+					<View testID="founding-import-body-success" style={localStyles.body}>
 						<ThemedText type="default" style={{ color: colors.success }}>
 							{t('networkFoundingImportSuccess')}
 						</ThemedText>
@@ -209,6 +210,17 @@ export default function ImportFoundingBundleScreen() {
 	}
 
 	return (
-		<ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 16 }}>{renderBody()}</ScrollView>
+		// The screen's standard 16dp gutter (globalStyles.container, as every sibling network screen
+		// uses). Without it the error copy ran from x = 0 to the right edge on a 360dp Redmi 8.
+		<ScrollView style={globalStyles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 16 }}>
+			{renderBody()}
+		</ScrollView>
 	)
 }
+
+const localStyles = StyleSheet.create({
+	// Space between a state's message and its button (on top of CustomButton's own 8dp margin).
+	body: {
+		gap: 8,
+	},
+})
