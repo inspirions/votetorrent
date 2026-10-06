@@ -4,7 +4,7 @@ import { InvitationEngine } from '@votetorrent/vote-engine/rn';
 // @ts-ignore TS2307: the test fixture is mapped by jest.config.js moduleNameMapper only, not by tsc (same pattern as keyholder-accept.test.ts; ignore keeps the typecheck ceiling flat)
 import { addTestAuthority, createTestNetwork, makeTestSignCallback } from '@votetorrent/vote-engine/test/fixtures/test-context';
 import type { InviteSlotResolution } from '@votetorrent/vote-core';
-import { InviteShareError, inviteShareErrorKey, parseInviteShare, resolveInviteFromShare } from '../invite-share';
+import { InviteShareError, inviteShareErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from '../invite-share';
 
 function kp() {
 	const priv = secp256k1.utils.randomSecretKey();
@@ -23,7 +23,7 @@ function share(over: Record<string, unknown> = {}) {
 describe('parseInviteShare', () => {
 	it('parses the onSend JSON share', () => {
 		const { k, text } = share();
-		expect(parseInviteShare(`  ${text}\n`)).toEqual({ invitePrivate: k.invitePrivate, inviteKey: k.inviteKey, type: 'k', name: 'Ada Secret' });
+		expect(parseInviteShare(`  ${text}\n`)).toEqual({ invitePrivate: k.invitePrivate, inviteKey: k.inviteKey, type: 'k', name: 'Ada Secret', expiration: 'x' });
 	});
 	it('parses a raw 64-hex private key with no type', () => {
 		const k = kp();
@@ -167,5 +167,44 @@ describe('inviteShareErrorKey', () => {
 		expect(inviteShareErrorKey(new InviteShareError('not-found'))).toBe('invitationAcceptNotFound');
 		expect(inviteShareErrorKey(new InviteShareError('already-answered'))).toBe('invitationAcceptAlreadyAnswered');
 		expect(inviteShareErrorKey(new Error('x'))).toBeUndefined();
+	});
+});
+
+describe('invite expiration (UTC reads)', () => {
+	const prevTz = process.env.TZ;
+	beforeAll(() => {
+		process.env.TZ = 'Asia/Kathmandu';
+	});
+	afterAll(() => {
+		if (prevTz === undefined) delete process.env.TZ;
+		else process.env.TZ = prevTz;
+	});
+	it('reads a designator-less value as UTC regardless of the local zone', () => {
+		expect(parseInviteExpirationMs('2026-10-06T08:49:05.107')).toBe(Date.UTC(2026, 9, 6, 8, 49, 5, 107));
+	});
+	it('honours Z and explicit offsets', () => {
+		expect(parseInviteExpirationMs('2026-10-06T08:49:05.107Z')).toBe(Date.UTC(2026, 9, 6, 8, 49, 5, 107));
+		expect(parseInviteExpirationMs('2026-10-06T08:49:05+05:45')).toBe(Date.UTC(2026, 9, 6, 3, 4, 5));
+		expect(parseInviteExpirationMs('2026-10-06T08:49:05-06:00')).toBe(Date.UTC(2026, 9, 6, 14, 49, 5));
+	});
+	it('returns undefined for garbage', () => {
+		expect(parseInviteExpirationMs('nope')).toBeUndefined();
+		expect(parseInviteExpirationMs('')).toBeUndefined();
+	});
+	it('parseInviteShare keeps a string expiration and ignores a non-string', () => {
+		const k = kp();
+		expect(parseInviteShare(JSON.stringify({ ...k, expiration: '2026-10-06T08:49:05' }))?.expiration).toBe('2026-10-06T08:49:05');
+		const p = parseInviteShare(JSON.stringify({ ...k, expiration: 5 }));
+		expect(p).toBeDefined();
+		expect(p?.expiration).toBeUndefined();
+		expect(parseInviteShare(JSON.stringify(k))?.expiration).toBeUndefined();
+	});
+	it('isShareExpired is true only for a parsed expiration at or before now', () => {
+		const base = { invitePrivate: 'a', inviteKey: 'b' };
+		const at = Date.UTC(2026, 9, 6, 8, 49, 5);
+		expect(isShareExpired({ ...base, expiration: '2026-10-06T08:49:05' }, at)).toBe(true);
+		expect(isShareExpired({ ...base, expiration: '2026-10-06T08:49:05' }, at - 1)).toBe(false);
+		expect(isShareExpired({ ...base, expiration: 'garbage' }, at)).toBe(false);
+		expect(isShareExpired(base, at)).toBe(false);
 	});
 });

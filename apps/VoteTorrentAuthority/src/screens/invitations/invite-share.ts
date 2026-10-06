@@ -11,6 +11,10 @@
  * Cross-device precondition: the lookup only finds a slot whose InviteSlot row is present in this
  * device's database. Replication of that row to the invitee's strand is a separate (P2P) concern.
  *
+ * Expiration spelling: the engine stores/signs a designator-less UTC datetime (e.g.
+ * '2026-10-06T08:49:05.107'). That spelling is an input to the InviteSlot Cid digest and the invite
+ * signature, so it is intentionally NOT rewritten; readers use parseInviteExpirationMs instead.
+ *
  * No-raw-text rule: error messages are FIXED strings per code. They never include the key, the Cid,
  * or the name, and nothing in this module logs share content.
  */
@@ -43,6 +47,7 @@ export interface ParsedInviteShare {
 	inviteKey: string;
 	type?: InviteType;
 	name?: string;
+	expiration?: string;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/i;
@@ -83,7 +88,29 @@ export function parseInviteShare(text: string): ParsedInviteShare | undefined {
 	const parsed: ParsedInviteShare = { invitePrivate: rec.invitePrivate, inviteKey: derived };
 	if (typeof rec.type === 'string' && TYPES.includes(rec.type)) parsed.type = rec.type as InviteType;
 	if (typeof rec.name === 'string') parsed.name = rec.name;
+	if (typeof rec.expiration === 'string') parsed.expiration = rec.expiration;
 	return parsed;
+}
+
+const HAS_DESIGNATOR = /(Z|[+-]\d{2}:?\d{2})$/i;
+
+/**
+ * Epoch ms of an invite expiration. A value with no zone designator (no trailing Z and no +hh:mm /
+ * -hh:mm offset) is UTC, the same rule as vote-engine's fromCanonicalDatetime (utils.ts); Date.parse
+ * would otherwise read it as local time. Unparseable -> undefined.
+ */
+export function parseInviteExpirationMs(value: string): number | undefined {
+	const v = (value ?? '').trim();
+	if (!v) return undefined;
+	const ms = Date.parse(HAS_DESIGNATOR.test(v) ? v : `${v}Z`);
+	return Number.isNaN(ms) ? undefined : ms;
+}
+
+/** True only when the share's expiration parses and is at or before now; unknown -> false (engine decides). */
+export function isShareExpired(share: ParsedInviteShare, nowMs: number): boolean {
+	if (share.expiration === undefined) return false;
+	const ms = parseInviteExpirationMs(share.expiration);
+	return ms !== undefined && ms <= nowMs;
 }
 
 export async function resolveInviteFromShare(
