@@ -8,7 +8,10 @@ import React from 'react';
 import renderer from 'react-test-renderer';
 import {ThemeProvider} from '@react-navigation/native';
 import FontAwesome6 from 'react-native-vector-icons/FontAwesome6';
+import * as fs from 'fs';
+import * as path from 'path';
 import {ElectionCard} from '../ElectionCard';
+import type {ElectionCardProps} from '../ElectionCard';
 import {CountdownTimer} from '../CountdownTimer';
 import {ProgressBar} from '../ProgressBar';
 import {lightTheme} from '../../theme/themes';
@@ -61,10 +64,10 @@ type Callbacks = Partial<{
 // test file's module registry is torn down.
 const activeRenderers: renderer.ReactTestRenderer[] = [];
 
-function renderCard(election: VoterElection, callbacks: Callbacks = {}, hasVoted?: boolean) {
+function renderCard(election: VoterElection, callbacks: Callbacks = {}, extraProps: Partial<ElectionCardProps> = {}) {
 	let tr!: renderer.ReactTestRenderer;
 	renderer.act(() => {
-		tr = renderer.create(withTheme(<ElectionCard election={election} hasVoted={hasVoted} {...callbacks} />));
+		tr = renderer.create(withTheme(<ElectionCard election={election} {...callbacks} {...extraProps} />));
 	});
 	activeRenderers.push(tr);
 	return tr;
@@ -245,37 +248,86 @@ describe('ElectionCard (HOME-01/02/03)', () => {
 		});
 	});
 
-	describe('hasVoted (VOTE-04 / D-08 Home CTA reflection)', () => {
-		it('hasVoted omitted on the Open state renders the vote-now Pressable unchanged (no voted pill)', () => {
-			const tr = renderCard(electionFor('Open'));
+	describe('saved vote on the card (D-12, D-21)', () => {
+		const STALE = 'The election changed after you voted. Please vote again.';
+		const find = (tr: renderer.ReactTestRenderer, testID: string) => tr.root.findAllByProps({testID}, {deep: false});
+		const textOf = (node: renderer.ReactTestInstance): string => {
+			const out: string[] = [];
+			const walk = (n: renderer.ReactTestInstance | string) => {
+				if (typeof n === 'string') out.push(n);
+				else n.children.forEach(walk);
+			};
+			walk(node);
+			return out.join('');
+		};
 
-			expect(tr.root.findAllByProps({testID: 'election-card-vote-now'}, {deep: false}).length).toBe(1);
-			expect(tr.root.findAllByProps({testID: 'election-card-voted'}, {deep: false}).length).toBe(0);
+		it('EC1: Open with no savedVote or none renders vote-now and no saved-vote node', () => {
+			for (const extra of [{}, {savedVote: {state: 'none' as const}}]) {
+				const tr = renderCard(electionFor('Open'), {}, extra);
+				expect(find(tr, 'election-card-vote-now').length).toBe(1);
+				expect(find(tr, 'election-card-saved-vote').length).toBe(0);
+				expect(JSON.stringify(tr.toJSON())).not.toContain('election-card-saved-vote');
+			}
 		});
 
-		it('hasVoted=false on the Open state renders the vote-now Pressable unchanged (no voted pill)', () => {
-			const tr = renderCard(electionFor('Open'), {} as Callbacks, false);
-
-			expect(tr.root.findAllByProps({testID: 'election-card-vote-now'}, {deep: false}).length).toBe(1);
-			expect(tr.root.findAllByProps({testID: 'election-card-voted'}, {deep: false}).length).toBe(0);
+		it('EC2: Open + saved shows the status and the view link, hides vote-now', () => {
+			const onViewSavedVote = jest.fn();
+			const tr = renderCard(electionFor('Open'), {}, {savedVote: {state: 'saved', revisionKnown: true}, onViewSavedVote});
+			expect(textOf(find(tr, 'election-card-saved-vote-status')[0])).toBe('Vote saved — not sent');
+			const view = find(tr, 'election-card-saved-vote-view');
+			expect(view.length).toBe(1);
+			expect(textOf(view[0])).toBe('View saved vote');
+			expect(find(tr, 'election-card-vote-now').length).toBe(0);
+			renderer.act(() => view[0].props.onPress());
+			expect(onViewSavedVote).toHaveBeenCalledTimes(1);
 		});
 
-		it('hasVoted=true on the Open state renders the disabled voted pill instead of vote-now', () => {
-			const tr = renderCard(electionFor('Open'), {}, true);
-
-			const votedPill = tr.root.findAllByProps({testID: 'election-card-voted'}, {deep: false});
-			expect(votedPill.length).toBe(1);
-			expect(votedPill[0].props.onPress).toBeUndefined();
-			expect(tr.root.findAllByProps({testID: 'election-card-vote-now'}, {deep: false}).length).toBe(0);
+		it('EC3: revision unknown adds the honest note', () => {
+			const tr = renderCard(electionFor('Open'), {}, {savedVote: {state: 'saved', revisionKnown: false}});
+			expect(textOf(find(tr, 'election-card-saved-vote-revision-unknown')[0])).toBe(
+				"We couldn't check whether the election has changed since you voted.",
+			);
 		});
 
-		it('hasVoted=true on a non-Open state is unaffected (no voted pill, no vote-now)', () => {
-			const tr = renderCard(electionFor('ValidationDetails'), {}, true);
+		it('EC4: stale shows the exact D-21 line, vote-now and the link, with no status line', () => {
+			const tr = renderCard(electionFor('Open'), {}, {savedVote: {state: 'stale', revisionKnown: true}, onViewSavedVote: jest.fn()});
+			expect(textOf(find(tr, 'election-card-saved-vote-stale')[0])).toBe(STALE);
+			expect(find(tr, 'election-card-vote-now').length).toBe(1);
+			expect(find(tr, 'election-card-saved-vote-view').length).toBe(1);
+			expect(find(tr, 'election-card-saved-vote-status').length).toBe(0);
+		});
 
-			expect(tr.root.findAllByProps({testID: 'election-card-voted'}, {deep: false}).length).toBe(0);
-			expect(tr.root.findAllByProps({testID: 'election-card-vote-now'}, {deep: false}).length).toBe(0);
-			// The ValidationDetails action is untouched by hasVoted.
-			expect(tr.root.findAllByProps({testID: 'election-card-view-validation-details'}, {deep: false}).length).toBe(1);
+		it('EC5: unreadable shows the unreadable line and the link, hides vote-now', () => {
+			const tr = renderCard(electionFor('Open'), {}, {savedVote: {state: 'unreadable'}, onViewSavedVote: jest.fn()});
+			expect(textOf(find(tr, 'election-card-saved-vote-unreadable')[0])).toBe("Your saved vote can't be read on this phone.");
+			expect(find(tr, 'election-card-saved-vote-view').length).toBe(1);
+			expect(find(tr, 'election-card-vote-now').length).toBe(0);
+		});
+
+		it('EC6: non-Open states still show the saved status; ValidationDetails keeps its action', () => {
+			const rk = renderCard(electionFor('ReleasingKeys'), {}, {savedVote: {state: 'saved', revisionKnown: true}, onViewSavedVote: jest.fn()});
+			expect(find(rk, 'election-card-saved-vote-status').length).toBe(1);
+			expect(find(rk, 'election-card-saved-vote-view').length).toBe(1);
+			const vd = renderCard(electionFor('ValidationDetails'), {}, {savedVote: {state: 'saved', revisionKnown: true}});
+			expect(find(vd, 'election-card-saved-vote-status').length).toBe(1);
+			expect(find(vd, 'election-card-view-validation-details').length).toBe(1);
+		});
+
+		it('EC7: no view link without onViewSavedVote', () => {
+			const tr = renderCard(electionFor('Open'), {}, {savedVote: {state: 'saved', revisionKnown: true}});
+			expect(find(tr, 'election-card-saved-vote-view').length).toBe(0);
+		});
+
+		it('EC8: the old voted pill is gone and the card stays presentational', () => {
+			for (const savedVote of [undefined, {state: 'saved' as const, revisionKnown: true}]) {
+				const tr = renderCard(electionFor('Open'), {}, {savedVote});
+				expect(JSON.stringify(tr.toJSON())).not.toContain('election-card-voted');
+			}
+			const src = fs
+				.readFileSync(path.join(__dirname, '..', 'ElectionCard.tsx'), 'utf8')
+				.replace(/\/\*[\s\S]*?\*\//g, '')
+				.replace(/^\s*\/\/.*$/gm, '');
+			for (const needle of ['hasVoted', 'votedCta', 'useVoterApp', 'useNavigation']) expect(src).not.toContain(needle);
 		});
 	});
 

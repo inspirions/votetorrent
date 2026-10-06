@@ -13,6 +13,9 @@ const esBallot = resources.es.ballot as unknown as Record<string, string>;
 const enTimeline = resources.en.timeline as unknown as Record<string, string>;
 const esTimeline = resources.es.timeline as unknown as Record<string, string>;
 
+const enHome = resources.en.home as unknown as Record<string, string>;
+const esHome = resources.es.home as unknown as Record<string, string>;
+
 const EN_VALUES = [enBallot['savedVote.status'], enBallot['savedVote.viewCta'], enTimeline['voting.viewSubmissionCta']];
 const ES_VALUES = [esBallot['savedVote.status'], esBallot['savedVote.viewCta'], esTimeline['voting.viewSubmissionCta']];
 
@@ -61,5 +64,15 @@ describe('saved-vote copy (D-12, D-21)', () => {
 	it('C7: the old Timeline label is gone', () => {
 		const old = 'View ' + 'submission';
 		for (const v of Object.values(enTimeline)) expect(v).not.toBe(old);
+	});
+
+	it('C8: the old voted pill key and copy are gone', () => {
+		const key = 'voted' + 'Cta';
+		expect(key in enHome).toBe(false);
+		expect(key in esHome).toBe(false);
+		const old = 'You ' + 'voted';
+		for (const ns of [enHome, enBallot, enTimeline]) {
+			for (const v of Object.values(ns)) expect(v).not.toBe(old);
+		}
 	});
 });
