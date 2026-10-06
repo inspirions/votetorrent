@@ -92,9 +92,6 @@ const resources = {
 			'states.validation.pendingSummary': 'Election keys released — results are being tallied and validated.',
 			'states.complete.closedSummary': 'This election is closed.',
 			electionUnavailable: 'No election is available on this network yet.',
-			// Phase 42 (VOTE-04/D-08) — the Open card's minimal voted-state reflection: once
-			// hasVoted flips true, the "Vote now" CTA becomes this disabled pill instead.
-			votedCta: 'You voted',
 			'validationDetails.columnCheck': 'Check',
 			'validationDetails.columnResult': 'Result',
 			'validationDetails.columnTime': 'Time',
@@ -523,7 +520,6 @@ const resources = {
 				'Claves de la elección liberadas — los resultados se están contando y validando.',
 			'states.complete.closedSummary': 'Esta elección ha cerrado.',
 			electionUnavailable: 'Aún no hay ninguna elección disponible en esta red.',
-			votedCta: 'Ya votaste',
 			'validationDetails.columnCheck': 'Verificación',
 			'validationDetails.columnResult': 'Resultado',
 			'validationDetails.columnTime': 'Tiempo',

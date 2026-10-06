@@ -327,7 +327,7 @@ describe('ElectionCard (HOME-01/02/03)', () => {
 				.readFileSync(path.join(__dirname, '..', 'ElectionCard.tsx'), 'utf8')
 				.replace(/\/\*[\s\S]*?\*\//g, '')
 				.replace(/^\s*\/\/.*$/gm, '');
-			for (const needle of ['hasVoted', 'votedCta', 'useVoterApp', 'useNavigation']) expect(src).not.toContain(needle);
+			for (const needle of ['has' + 'Voted', 'voted' + 'Cta', 'useVoterApp', 'useNavigation']) expect(src).not.toContain(needle);
 		});
 	});
 

@@ -310,14 +310,14 @@ describe('HomeScreen saved vote (D-12, D-19, D-21)', () => {
 				expect(code).toContain(needle);
 			},
 		);
-		it.each(['hasVoted', 'revealOnOpen', 'AsyncStorage', 'voteMarkerKey', 'openVoteRecord', 'console.'])(
+		it.each(['has' + 'Voted', 'revealOnOpen', 'AsyncStorage', 'voteMarkerKey', 'openVoteRecord', 'console.'])(
 			'does not contain %s',
 			needle => {
 				expect(code).not.toContain(needle);
 			},
 		);
 		it('the raw file has no stale flag comment', () => {
-			expect(raw).not.toContain('hasVoted');
+			expect(raw).not.toContain('has' + 'Voted');
 			expect(raw.toLowerCase()).not.toContain('submitted');
 		});
 	});

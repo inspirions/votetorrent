@@ -6,6 +6,7 @@
  * Pure presentational (`election: VoterElection` prop + optional navigation CALLBACK props) — does
  * NOT call `useVoterApp()` or `useNavigation()` (RESEARCH.md Anti-Patterns / SHELL-03 spirit), so
  * every state is unit-testable directly with a fixture election, no provider/navigator required.
+ * The saved-vote notice (D-12) arrives from a prop too, read by the screen from the marker, never here.
  * `HomeScreen` owns the provider read and maps these callbacks to real navigation. The `__DEV__`
  * shared-clock offset (D-02) likewise arrives by the `nowOffsetMs` prop, matching `CountdownTimer`.
  */
@@ -19,6 +20,8 @@ import {globalStyles} from '../theme/styles';
 import type {LifecycleState, VoterElection} from '../providers/types';
 import {CountdownTimer} from './CountdownTimer';
 import {ProgressBar} from './ProgressBar';
+import {SavedVoteNotice} from './SavedVoteNotice';
+import type {SavedVoteStatus} from '../engines/saved-vote-status';
 
 type IconColorRole = 'muted' | 'success' | 'primary';
 
@@ -124,7 +127,12 @@ export interface ElectionCardProps {
 	onVoteNow?: () => void;
 	onViewValidationDetails?: () => void;
 	onLearnAboutElection?: () => void;
-	hasVoted?: boolean;
+	/**
+	 * The saved-vote status the screen read from the marker (D-19). The card never reads it itself.
+	 */
+	savedVote?: SavedVoteStatus;
+	/** Opens the saved-vote receipt. The link renders only when this is supplied. */
+	onViewSavedVote?: () => void;
 	/**
 	 * The `__DEV__` shared-clock offset (D-02), passed by the screen and never read from a provider.
 	 * 0 by default.
@@ -132,11 +140,15 @@ export interface ElectionCardProps {
 	nowOffsetMs?: number;
 }
 
-export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLearnAboutElection, hasVoted, nowOffsetMs = 0}: ElectionCardProps) {
+export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLearnAboutElection, savedVote, onViewSavedVote, nowOffsetMs = 0}: ElectionCardProps) {
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('home');
 
 	const display = STATE_DISPLAY[election.lifecycleState];
+	const savedState = savedVote?.state ?? 'none';
+	// Mirrors the 63-08 guard (D-20 convenience): a saved or unreadable vote hides Vote now, and a
+	// stale one offers it again (D-21). The guard inside the submit path is the enforcement.
+	const voteBlocked = savedState === 'saved' || savedState === 'unreadable';
 	const fallback = SUMMARY_FALLBACK[election.lifecycleState];
 	const summaryKey = fallback && !fallback.isKnown(election) ? fallback.summaryKey : display.summaryKey;
 	// No engine source for turnout yet: the bar renders only when a progress value exists.
@@ -230,21 +242,19 @@ export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLe
 				</View>
 			) : null}
 
-			{display.showAction === 'vote' ? (
-				hasVoted ? (
-					<View
-						testID="election-card-voted"
-						style={[styles.actionButton, styles.actionButtonOutline, {backgroundColor: colors.secondaryButtonSurface, borderColor: colors.muted, borderRadius: radii.pill}]}>
-						<Text style={[styles.actionLabel, {color: colors.muted}]}>{t('votedCta')}</Text>
-					</View>
-				) : (
-					<Pressable
-						testID="election-card-vote-now"
-						onPress={onVoteNow}
-						style={[styles.actionButton, {backgroundColor: colors.primary, borderRadius: radii.pill}]}>
-						<Text style={[styles.actionLabel, {color: colors.light}]}>{t('voteNowCta')}</Text>
-					</Pressable>
-				)
+			{savedVote && savedState !== 'none' ? (
+				<View style={styles.savedVote}>
+					<SavedVoteNotice status={savedVote} onView={onViewSavedVote} testID="election-card-saved-vote" />
+				</View>
+			) : null}
+
+			{display.showAction === 'vote' && !voteBlocked ? (
+				<Pressable
+					testID="election-card-vote-now"
+					onPress={onVoteNow}
+					style={[styles.actionButton, {backgroundColor: colors.primary, borderRadius: radii.pill}]}>
+					<Text style={[styles.actionLabel, {color: colors.light}]}>{t('voteNowCta')}</Text>
+				</Pressable>
 			) : null}
 
 			{display.showAction === 'validationDetails' ? (
@@ -289,6 +299,9 @@ const styles = StyleSheet.create({
 		marginTop: 16, // md-ish spacing, matches card padding rhythm
 	},
 	progress: {
+		marginTop: 16,
+	},
+	savedVote: {
 		marginTop: 16,
 	},
 	progressLabel: {

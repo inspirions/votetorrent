@@ -10,16 +10,15 @@
  * is presentational (election prop + navigation callback props), never reading the provider or
  * `useNavigation()` itself (RESEARCH.md Anti-Patterns).
  *
- * Phase 44-07 (D-02): `hasVoted` is no longer a `useVoterApp()` context field (the mock booleans
- * were removed alongside the registration-flow real-engine swap) — it is now local, session-only
- * component state, mirroring `ReviewSubmitScreen`'s own local `submitted` flag. This is a
- * deliberate, documented simplification (not a silent regression): Phase 44's scope is the
- * registration flow only (44-CONTEXT.md Phase Boundary), so cross-screen vote-status sync via a
- * shared real engine read is deferred to the phase that swaps the ballot/vote surface for real.
+ * The saved-vote state (D-12, D-19) is read from the stored marker through `readSavedVoteStatus` on
+ * every focus. It is never cached, needs no fingerprint, and Home never holds the record. The card
+ * shows "Vote saved — not sent" with a link to the receipt, the stale line when the election
+ * changed after the vote (D-21), or an unreadable state. Vote now is hidden while a current vote
+ * is saved (a local convenience, D-20).
  */
 import React, {useCallback, useEffect, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {useNavigation, useTheme} from '@react-navigation/native';
+import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
@@ -33,13 +32,15 @@ import {ConfigFaultNotice} from '../../components/ConfigFaultNotice';
 import {InfoDialog} from '../../components/InfoDialog';
 import {InfoDetails} from '../../components/InfoDetails';
 import {readElectionInfo} from '../../engines/info-read';
+import {readSavedVoteStatus} from '../../engines/saved-vote-status';
+import type {SavedVoteStatus} from '../../engines/saved-vote-status';
 import {useInfoRead} from '../../hooks/useInfoRead';
 
 type HomeNavigationProp = NativeStackNavigationProp<VoteStackParamList, 'Home'>;
 
 export default function HomeScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
-	const {isInitialized, lifecycleOverride, setLifecycleOverride, clockOffsetMs, getElection, getEngine, seededElectionId} = useVoterApp();
+	const {isInitialized, lifecycleOverride, setLifecycleOverride, clockOffsetMs, nowMs, getElection, getEngine, seededElectionId} = useVoterApp();
 	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t, i18n} = useTranslation('home');
 	const {t: tCommon} = useTranslation('common');
@@ -47,8 +48,7 @@ export default function HomeScreen() {
 	const [election, setElection] = useState<VoterElection | null>(null);
 	const [unavailable, setUnavailable] = useState(false);
 	const [electionInfoVisible, setElectionInfoVisible] = useState(false);
-	// Phase 44-07 (D-02): local session-only flag — see file header comment.
-	const [hasVoted] = useState(false);
+	const [savedVote, setSavedVote] = useState<{electionId: string; status: SavedVoteStatus} | null>(null);
 	// The election dialog's authority-published detail, read only while the dialog is open.
 	const loadElectionInfo = useCallback(
 		() => readElectionInfo({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined}),
@@ -82,6 +82,35 @@ export default function HomeScreen() {
 		};
 	}, [getElection]);
 
+	// Re-read the marker on every focus, so returning from the receipt or from Submit shows the
+	// fresh state. The `nowMs` identity changes with the dev clock (D-02). Nothing is cached, and a
+	// failed read fails closed to unreadable (the error is never read or logged).
+	const electionId = election?.id;
+	useFocusEffect(
+		useCallback(() => {
+			let live = true;
+			if (electionId) {
+				readSavedVoteStatus({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined}, nowMs(), electionId).then(
+					status => {
+						if (live) {
+							setSavedVote({electionId, status});
+						}
+					},
+					() => {
+						if (live) {
+							setSavedVote({electionId, status: {state: 'unreadable'}});
+						}
+					},
+				);
+			}
+			return () => {
+				live = false;
+			};
+		}, [electionId, getEngine, seededElectionId, nowMs]),
+	);
+	// Per-election binding: a status read for one election never decorates another.
+	const cardSavedVote = savedVote && savedVote.electionId === electionId ? savedVote.status : undefined;
+
 	// live -> LIFECYCLE_ORDER[0] -> ... -> LIFECYCLE_ORDER[last] -> live.
 	const nextLifecycleOverride = () => {
 		const currentIndex = lifecycleOverride === null ? -1 : LIFECYCLE_ORDER.indexOf(lifecycleOverride);
@@ -102,7 +131,9 @@ export default function HomeScreen() {
 						onVoteNow={() => navigation.navigate('Ballot')}
 						onViewValidationDetails={() => navigation.navigate('ValidationDetails')}
 						onLearnAboutElection={() => setElectionInfoVisible(true)}
-						hasVoted={hasVoted}
+						savedVote={cardSavedVote}
+						// Params carry only electionId and no `revealOnOpen`, so a later visit asks for a fingerprint (D-13, R-4).
+						onViewSavedVote={() => navigation.navigate('VoteReceipt', {electionId: election.id})}
 						nowOffsetMs={clockOffsetMs}
 					/>
 				) : null}
