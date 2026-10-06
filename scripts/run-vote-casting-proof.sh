@@ -95,13 +95,17 @@ rn_triple_ok() {
   node -e '
     const fs = require("fs")
     const text = fs.readFileSync(process.argv[1], "utf8")
+    // RN <= 0.86 ships an object literal; RN 0.87 ships class statics (X.major = 0; X.minor = 87; ...).
     const re = /major:\s*0,\s*minor:\s*(\d+),\s*patch:\s*(\d+)/g
+    const re2 = /\.major = 0;\s*\w+\.minor = (\d+);\s*\w+\.patch = (\d+);/g
     let m
     let ok = false
     const seen = []
-    while ((m = re.exec(text)) !== null) {
-      seen.push("0." + m[1] + "." + m[2])
-      if (m[1] === process.argv[2] && m[2] === process.argv[3]) ok = true
+    for (const r of [re, re2]) {
+      while ((m = r.exec(text)) !== null) {
+        seen.push("0." + m[1] + "." + m[2])
+        if (m[1] === process.argv[2] && m[2] === process.argv[3]) ok = true
+      }
     }
     console.log(seen.join(" "))
     process.exit(ok ? 0 : 1)
@@ -279,6 +283,9 @@ run_selftest() {
   printf 'x = {\n  major: 0,\n  minor: 99,\n  patch: 3,\n  prerelease: null\n};\n' > "$d/rn.js"
   st_check rn-triple-match st_quiet rn_triple_ok "$d/rn.js" 99 3
   st_check rn-triple-98-rejected st_not rn_triple_ok "$d/rn.js" 98 3
+  printf 'V.major = 0;\n  V.minor = 99;\n  V.patch = 3;\n' > "$d/rn2.js"
+  st_check rn-triple-statics-match st_quiet rn_triple_ok "$d/rn2.js" 99 3
+  st_check rn-triple-statics-98-rejected st_not rn_triple_ok "$d/rn2.js" 98 3
 
   printf 'I ReactNativeJS: [vcp] leg guard PASS {}\nI ReactNativeJS: [vcp] leg tamper FAIL {}\nI ReactNativeJS: [vcp] leg stale PASS {}\nI ReactNativeJS: [vcp] leg stale FAIL {}\n' > "$d/js.txt"
   st_check leg-pass st_eq "$(leg_status "$d/js.txt" guard)" PASS
