@@ -26,7 +26,9 @@ export {
 	computeAssertionDigest,
 	computePopDigest,
 	createRealAttestationProducer,
+	DEFAULT_DEVICE_KEY_SIGN_PROMPT,
 } from './real-attestation-producer'
+export type { SignDeviceKeyDigestOptions } from './real-attestation-producer'
 
 // D-42 (Phase 62 plan 08): the generic, alias-keyed AES-256-GCM secret-wrap capability consumed
 // by this plan's Voter `device-key-wrap.ts` and by later plans (62-21, 62-26) in other apps. Same

@@ -23,6 +23,8 @@ import type { AttestationChallenge, DeviceAttestation, IOSAttestationDetails, Si
 // that module's top-level `TurboModuleRegistry.getEnforcing(...)` call. The runtime value is
 // obtained lazily via `require(...)` inside `getNative()` below.
 import type { Spec as NativeAttestationSpec } from './specs/NativeAttestation'
+// Type-only: no runtime import edge, so module purity is preserved.
+import type { SecretWrapPrompt } from './secret-wrap'
 
 // Resolved ONCE at module scope — must match packages/vote-engine/ATTESTATION-CONTRACT.md §1 and
 // database/initialize.ts's registered SQL Digest() config exactly, or the producer's digest
@@ -213,6 +215,32 @@ function getPlatformOS(): string {
 	return (require('react-native') as { Platform: { OS: string } }).Platform.OS
 }
 
+/** Optional arguments to `signDeviceKeyDigest`. */
+export interface SignDeviceKeyDigestOptions {
+	/** Biometric prompt copy. Used whole or rejected; never merged with the defaults. */
+	prompt?: SecretWrapPrompt
+}
+
+/**
+ * The prompt copy of the registration and continuity ceremonies. Changing these strings changes
+ * those ceremonies' biometric prompts.
+ */
+export const DEFAULT_DEVICE_KEY_SIGN_PROMPT: Readonly<SecretWrapPrompt> = Object.freeze({
+	title: 'Confirm this request',
+	subtitle: 'Sign this request with your device key',
+	negativeButton: 'Cancel',
+})
+
+function resolveSignPrompt(options: SignDeviceKeyDigestOptions | undefined): SecretWrapPrompt {
+	const prompt = options?.prompt
+	if (prompt === undefined) return DEFAULT_DEVICE_KEY_SIGN_PROMPT
+	const ok = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0
+	if (!ok(prompt.title) || !ok(prompt.subtitle) || !ok(prompt.negativeButton)) {
+		throw new Error('signDeviceKeyDigest: prompt.title, prompt.subtitle and prompt.negativeButton must be non-empty strings')
+	}
+	return prompt
+}
+
 /**
  * Package-local three-method producer shape (D-08 — structurally, not nominally, typed).
  *
@@ -235,7 +263,11 @@ interface RealAttestationProducer {
 	 */
 	provisionDeviceKey(): Promise<{ publicKey: string; reprovisioned?: boolean; voteKeyProbe?: string }>
 	produce(challenge: AttestationChallenge): Promise<DeviceAttestation>
-	signDeviceKeyDigest(digest: Uint8Array): Promise<Signature>
+	/**
+	 * Signs `digest` under the device key. `options.prompt` optionally supplies the biometric prompt
+	 * copy (D-09 vote copy is supplied by the caller); omitted, the legacy ceremony copy is used.
+	 */
+	signDeviceKeyDigest(digest: Uint8Array, options?: SignDeviceKeyDigestOptions): Promise<Signature>
 }
 
 /**
@@ -536,8 +568,12 @@ export function createRealAttestationProducer(opts: {
 		 *     do the SAME for its own caller-supplied `digest`.
 		 * Digest contract otherwise unchanged: PLAIN standard-alphabet base64 (NOT base64url, NOT
 		 * UTF-8-of-a-string) of whichever 32 raw bytes are actually being signed.
+		 *
+		 * `options.prompt` is display copy only: it never enters the signed bytes, and iOS shows only
+		 * the subtitle (as the LAContext reason). An invalid prompt is refused before any native call.
 		 */
-		async signDeviceKeyDigest(digest: Uint8Array): Promise<Signature> {
+		async signDeviceKeyDigest(digest: Uint8Array, options?: SignDeviceKeyDigestOptions): Promise<Signature> {
+			const prompt = resolveSignPrompt(options)
 			const native = getNative()
 			let signerKey = currentDeviceKey
 			if (signerKey === undefined) {
@@ -555,9 +591,9 @@ export function createRealAttestationProducer(opts: {
 			const result = (await native.signWithDeviceKey(
 				KEY_ALIAS,
 				digestBase64,
-				'Confirm this request',
-				'Sign this request with your device key',
-				'Cancel',
+				prompt.title,
+				prompt.subtitle,
+				prompt.negativeButton,
 			)) as { signatureHex: string }
 
 			return {

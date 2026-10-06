@@ -77,7 +77,12 @@ jest.mock('react-native', () => {
 })
 
 import type { AttestationChallenge } from '@votetorrent/vote-core'
-import { computeAssertionDigest, computeBoundDigest, createRealAttestationProducer } from '@votetorrent/attestation-native'
+import {
+	computeAssertionDigest,
+	computeBoundDigest,
+	createRealAttestationProducer,
+	DEFAULT_DEVICE_KEY_SIGN_PROMPT,
+} from '@votetorrent/attestation-native'
 // Plan 51-14 (Task 2): real p256 crypto (NOT a mock) so the discrimination assertions below prove
 // something — `verify()` is the exact function `packages/vote-engine/src/database/initialize.ts`'s
 // `verifySigP256` wraps for the schema-level P-256 check. `verify()`'s DEFAULT is `prehash: true`
@@ -467,6 +472,100 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 
 			expect(nativeFake.provisionDeviceKey).toHaveBeenCalledTimes(1)
 			expect(signature.signerKey).toBe(SIGN_VOTE_KEY_HEX)
+		})
+	})
+
+	describe('signDeviceKeyDigest prompt copy (D-09)', () => {
+		const KEY_HEX = '02' + 'ef'.repeat(32)
+		const sha256 = resolveHasher('sha256')
+		// D-09 sample copy, test data only; the shipped en/es strings live in the i18n tables.
+		const VOTE_PROMPT = {
+			title: 'Confirm your vote',
+			subtitle: 'Sign your vote with your device key',
+			negativeButton: 'Cancel',
+		}
+		const digest = Uint8Array.from({ length: 32 }, (_, i) => i)
+
+		beforeEach(() => {
+			nativeFake.provisionDeviceKey.mockReset().mockResolvedValue({
+				publicKeyCompressedHex: KEY_HEX,
+				publicKeyBase64: 'fake-public-key-b64',
+				appAttestKeyId: 'fake-appattest-key-id',
+				keyAlias: 'VOTETORRENT_DEVICE_KEY_V1',
+			})
+			nativeFake.produceAttestation.mockReset()
+			nativeFake.signWithDeviceKey.mockReset().mockResolvedValue({ signatureHex: 'ab'.repeat(64) })
+		})
+
+		it('no options: passes the three legacy strings, arity 5', async () => {
+			platformState.OS = 'android'
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await producer.provisionDeviceKey()
+			await producer.signDeviceKeyDigest(digest)
+			const args = nativeFake.signWithDeviceKey.mock.calls[0] as unknown[]
+			expect(args).toHaveLength(5)
+			expect(args.slice(2)).toEqual(['Confirm this request', 'Sign this request with your device key', 'Cancel'])
+		})
+
+		it.each([[{}], [{ prompt: undefined }]])('options %j give the same five arguments as no options', async (options) => {
+			platformState.OS = 'android'
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await producer.provisionDeviceKey()
+			await producer.signDeviceKeyDigest(digest)
+			await producer.signDeviceKeyDigest(digest, options)
+			expect(nativeFake.signWithDeviceKey.mock.calls[1]).toEqual(nativeFake.signWithDeviceKey.mock.calls[0])
+		})
+
+		it('Android: custom prompt reaches native positionally; digest argument unchanged', async () => {
+			platformState.OS = 'android'
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await producer.provisionDeviceKey()
+			await producer.signDeviceKeyDigest(digest)
+			const sig = await producer.signDeviceKeyDigest(digest, { prompt: VOTE_PROMPT })
+			const plain = nativeFake.signWithDeviceKey.mock.calls[0] as unknown[]
+			const custom = nativeFake.signWithDeviceKey.mock.calls[1] as unknown[]
+			expect(custom.slice(2)).toEqual([VOTE_PROMPT.title, VOTE_PROMPT.subtitle, VOTE_PROMPT.negativeButton])
+			expect(custom[1]).toBe(plain[1])
+			expect(sig).toEqual({ signature: 'ab'.repeat(64), signerKey: 'fake-public-key-b64', signerUserId: '' })
+		})
+
+		it('iOS: custom subtitle is the reason; digest is still sha256 pre-hashed', async () => {
+			platformState.OS = 'ios'
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await producer.provisionDeviceKey()
+			await producer.signDeviceKeyDigest(digest)
+			await producer.signDeviceKeyDigest(digest, { prompt: VOTE_PROMPT })
+			const plain = nativeFake.signWithDeviceKey.mock.calls[0] as string[]
+			const custom = nativeFake.signWithDeviceKey.mock.calls[1] as string[]
+			expect(custom[3]).toBe(VOTE_PROMPT.subtitle)
+			expect(custom[1]).toBe(plain[1])
+			expect(Buffer.from(custom[1], 'base64')).toEqual(Buffer.from(sha256(digest)))
+		})
+
+		const bad: Array<[string, unknown]> = [
+			['empty title', { ...VOTE_PROMPT, title: '' }],
+			['blank subtitle', { ...VOTE_PROMPT, subtitle: '   ' }],
+			['empty negativeButton', { ...VOTE_PROMPT, negativeButton: '' }],
+			['non-string title', { ...VOTE_PROMPT, title: 7 }],
+			['missing negativeButton', { title: 'a', subtitle: 'b' }],
+		]
+		it.each(bad)('rejects %s before any native call', async (_name, prompt) => {
+			platformState.OS = 'android'
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			await expect(
+				producer.signDeviceKeyDigest(digest, { prompt } as unknown as Parameters<typeof producer.signDeviceKeyDigest>[1]),
+			).rejects.toThrow(/non-empty strings/)
+			expect(nativeFake.signWithDeviceKey).not.toHaveBeenCalled()
+			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
+		})
+
+		it('DEFAULT_DEVICE_KEY_SIGN_PROMPT is frozen and holds the legacy strings', () => {
+			expect(DEFAULT_DEVICE_KEY_SIGN_PROMPT).toEqual({
+				title: 'Confirm this request',
+				subtitle: 'Sign this request with your device key',
+				negativeButton: 'Cancel',
+			})
+			expect(Object.isFrozen(DEFAULT_DEVICE_KEY_SIGN_PROMPT)).toBe(true)
 		})
 	})
 
