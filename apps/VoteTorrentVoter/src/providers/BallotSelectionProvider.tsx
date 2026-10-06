@@ -28,6 +28,9 @@ import type { Candidate, Office } from './types';
  * is a provider, not a screen; it intentionally lives outside the `src/screens/` scan root
  * exercised by `__tests__/no-inline-mock-imports.test.ts`).
  *
+ * `clearSelections` exists for the post-save reset: Review/Submit empties the in-memory choices
+ * once the vote is stored (63-13).
+ *
  * Pattern references: apps/VoteTorrentVoter/src/providers/RegistrationDraftProvider.tsx
  * (skeleton), apps/VoteTorrentAuthority/src/screens/ballots/providers/BallotDraftProvider.tsx
  * (immutable nested-array update discipline).
@@ -50,6 +53,11 @@ export interface BallotSelectionContextType {
 	goToNextQuestion: (offices: Office[]) => void;
 	/** Decrements currentQuestionIndex, clamped at 0 (no wrap-around, D-06). */
 	goToPreviousQuestion: () => void;
+	/**
+	 * Resets `selectionMap` to `{}` and `currentQuestionIndex` to 0. Review/Submit calls it only
+	 * after a vote is saved on this phone (D-10), so a saved vote's choices do not linger in memory.
+	 */
+	clearSelections: () => void;
 }
 
 const BallotSelectionContext = createContext<BallotSelectionContextType | null>(null);
@@ -100,6 +108,11 @@ export function BallotSelectionProvider({ children }: PropsWithChildren) {
 		setCurrentQuestionIndex((prev) => Math.max(prev - 1, 0));
 	}, []);
 
+	const clearSelections = useCallback(() => {
+		setSelectionMap({});
+		setCurrentQuestionIndex(0);
+	}, []);
+
 	return (
 		<BallotSelectionContext.Provider
 			value={{
@@ -109,6 +122,7 @@ export function BallotSelectionProvider({ children }: PropsWithChildren) {
 				toggleCandidate,
 				goToNextQuestion,
 				goToPreviousQuestion,
+				clearSelections,
 			}}>
 			{children}
 		</BallotSelectionContext.Provider>
