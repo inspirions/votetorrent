@@ -27,6 +27,7 @@ const PARITY_PACKAGES = [
   'react-native-safe-area-context',
   'react-native-vector-icons',
   '@types/react-native-vector-icons',
+  '@react-native-clipboard/clipboard', // R-7: same resolution as the Authority (one lock entry)
 ];
 
 describe('dependency version parity (D-18)', () => {

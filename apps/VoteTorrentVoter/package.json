@@ -39,6 +39,7 @@
 		"@quereus/quereus": "patch:@quereus/quereus@npm%3A4.20.1#~/.yarn/patches/@quereus-quereus-npm-4.20.1-votetorrent.patch",
 		"@quereus/store": "^4.20.1",
 		"@react-native-async-storage/async-storage": "^2.1.2",
+		"@react-native-clipboard/clipboard": "^1.16.3",
 		"@react-native/gradle-plugin": "0.87.1",
 		"@react-navigation/bottom-tabs": "^7.0.0",
 		"@react-navigation/native": "^7.0.0",

@@ -36,6 +36,8 @@ module.exports = {
     // unrelated screen importing useVoterApp) resolves an inert stub instead of crashing at
     // require-time. See __mocks__/react-native-splash-view.js for the full rationale.
     '^react-native-splash-view$': '<rootDir>/__mocks__/react-native-splash-view.js',
+    // The native TurboModule cannot load under jest; the mock is copied verbatim from the Authority (R-7).
+    '^@react-native-clipboard/clipboard$': '<rootDir>/__mocks__/@react-native-clipboard/clipboard.js',
     '^@quereus/plugin-react-native-leveldb$':
       '<rootDir>/node_modules/@quereus/plugin-react-native-leveldb/dist/src/index.js',
     '^@optimystic/db-p2p$': '<rootDir>/__mocks__/@optimystic/db-p2p.js',

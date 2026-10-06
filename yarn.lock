@@ -22292,6 +22292,7 @@ __metadata:
     "@quereus/quereus": "patch:@quereus/quereus@npm%3A4.20.1#~/.yarn/patches/@quereus-quereus-npm-4.20.1-votetorrent.patch"
     "@quereus/store": "npm:^4.20.1"
     "@react-native-async-storage/async-storage": "npm:^2.1.2"
+    "@react-native-clipboard/clipboard": "npm:^1.16.3"
     "@react-native-community/cli": "npm:20.2.0"
     "@react-native-community/cli-platform-android": "npm:20.2.0"
     "@react-native-community/cli-platform-ios": "npm:20.2.0"
