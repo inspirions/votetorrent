@@ -12,6 +12,8 @@ import {
 	formatRequestTimestamp,
 	resolveRowTimestamps,
 	resolveRequestRowStatusMeta,
+	KNOWN_REQUEST_FIELD_LABEL_KEYS,
+	humanizeFieldName,
 } from "../registration-request-display";
 
 describe("REGISTRATION_REQUEST_STATUS_META", () => {
@@ -162,5 +164,45 @@ describe("resolveRequestRowStatusMeta (UAT 62 test 12)", () => {
 			tr.registrationRequestStatusRejected.length,
 		);
 		expect(tr.registrationRequestStatusClosedDuplicate.length).toBeLessThanOrEqual(longest);
+	});
+});
+
+describe("KNOWN_REQUEST_FIELD_LABEL_KEYS", () => {
+	it("covers exactly the field names the Voter app submits — no invented label table", () => {
+		expect(Object.keys(KNOWN_REQUEST_FIELD_LABEL_KEYS).sort()).toEqual(
+			["addressLine1", "addressLine2", "addressLine3", "dob", "email", "firstName", "lastName", "party", "phone"].sort()
+		);
+	});
+
+	it("every key resolves in both EN and ES, with a Spanish value that is not the English one", () => {
+		const en = resources.en.translation as Record<string, string>;
+		const es = resources.es.translation as Record<string, string>;
+		for (const key of Object.values(KNOWN_REQUEST_FIELD_LABEL_KEYS)) {
+			expect(typeof en[key]).toBe("string");
+			expect(typeof es[key]).toBe("string");
+			expect(es[key]).not.toBe(en[key]);
+		}
+		expect(en[KNOWN_REQUEST_FIELD_LABEL_KEYS.lastName]).toBe("Last name");
+		expect(es[KNOWN_REQUEST_FIELD_LABEL_KEYS.lastName]).toBe("Apellido");
+		expect(en[KNOWN_REQUEST_FIELD_LABEL_KEYS.firstName]).toBe("First name");
+		expect(es[KNOWN_REQUEST_FIELD_LABEL_KEYS.firstName]).toBe("Nombre");
+		expect(en[KNOWN_REQUEST_FIELD_LABEL_KEYS.dob]).toBe("Date of birth");
+		expect(es[KNOWN_REQUEST_FIELD_LABEL_KEYS.dob]).toBe("Fecha de nacimiento");
+	});
+});
+
+describe("humanizeFieldName — fallback for unknown/custom field names", () => {
+	it.each([
+		["district", "District"],
+		["ssn", "Ssn"],
+		["homeCounty", "Home county"],
+		["home_county", "Home county"],
+		["home-county", "Home county"],
+		["precinctId2", "Precinct id 2"],
+		["homeCounty_code2", "Home county code 2"],
+		["voterIDNumber", "Voter id number"],
+		["address.lineTwo", "Address / Line two"],
+	])("%s -> %s", (raw, expected) => {
+		expect(humanizeFieldName(raw)).toBe(expected);
 	});
 });

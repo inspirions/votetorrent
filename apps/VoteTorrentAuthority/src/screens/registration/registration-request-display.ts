@@ -168,3 +168,42 @@ export function resolveRowTimestamps(source: { submittedAt: string; receivedAt: 
 	}
 	return { received, claimed: claimedFormatted };
 }
+
+/**
+ * i18n keys for the payload field names the Voter app actually submits (public `firstName`/
+ * `lastName`, private `dob`/`email`/`phone`/`addressLine1..3`, selective `party`). Deliberately
+ * no wider: every other name falls back to `humanizeFieldName`.
+ */
+export const KNOWN_REQUEST_FIELD_LABEL_KEYS: Readonly<Record<string, string>> = {
+	firstName: "registrationRequestFieldFirstName",
+	lastName: "registrationRequestFieldLastName",
+	dob: "registrationRequestFieldDob",
+	email: "registrationRequestFieldEmail",
+	phone: "registrationRequestFieldPhone",
+	addressLine1: "registrationRequestFieldAddressLine1",
+	addressLine2: "registrationRequestFieldAddressLine2",
+	addressLine3: "registrationRequestFieldAddressLine3",
+	party: "registrationRequestFieldParty",
+};
+
+/**
+ * Readable label for an unknown/custom payload field name: camelCase, snake_case and kebab-case
+ * split into words, digits split off, first letter capitalized ("homeCounty_code2" -> "Home county
+ * code 2"). A dotted nested name humanizes each segment and joins them with " / ".
+ */
+export function humanizeFieldName(name: string): string {
+	return name
+		.split(".")
+		.map((segment) => {
+			const words = segment
+				.replace(/([a-z])([A-Z])/g, "$1 $2")
+				.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+				.replace(/([A-Za-z])([0-9])/g, "$1 $2")
+				.replace(/([0-9])([A-Za-z])/g, "$1 $2")
+				.replace(/[_\-\s]+/g, " ")
+				.trim()
+				.toLowerCase();
+			return words.length > 0 ? words.charAt(0).toUpperCase() + words.slice(1) : segment;
+		})
+		.join(" / ");
+}

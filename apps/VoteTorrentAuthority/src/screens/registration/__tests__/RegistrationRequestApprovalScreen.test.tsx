@@ -501,6 +501,67 @@ describe("RegistrationRequestApprovalScreen — Group A (render order, D-03)", (
 // Group B — the D-07 checklist gate and the accept ceremony.
 // ---------------------------------------------------------------------------
 
+describe("RegistrationRequestApprovalScreen — payload field labels (never raw keys)", () => {
+	it("known Voter fields render their translation keys; unknown fields render a humanized label", async () => {
+		const tr = await renderScreen();
+		expect(textOf(tr, "registration-request-approval-summary-label-public-lastname")).toBe(
+			"registrationRequestFieldLastName"
+		);
+		expect(textOf(tr, "registration-request-approval-summary-label-public-firstname")).toBe(
+			"registrationRequestFieldFirstName"
+		);
+		// Not submitted by the Voter app — humanized fallback, not the raw key.
+		expect(textOf(tr, "registration-request-approval-summary-label-public-district")).toBe("District");
+		expect(textOf(tr, "registration-request-approval-summary-label-public-note")).toBe("Note");
+		expect(textOf(tr, "registration-request-approval-summary-label-private-ssn")).toBe("Ssn");
+	});
+
+	it("buildRequestSummaryRows: every field the Voter submits maps to a labelKey and no row label is a raw camelCase key", () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const { buildRequestSummaryRows } = require("../RegistrationRequestApprovalScreen");
+		const rows = buildRequestSummaryRows({
+			...PENDING_READ,
+			payload: {
+				electionId: "e-1",
+				registrant: { id: "r-1", authorityId: "auth-1", expiration: FUTURE_EXPIRATION },
+				public: { firstName: "María", lastName: "Fernández" },
+				private: {
+					expiration: FUTURE_EXPIRATION,
+					details: [
+						{ name: "dob", value: "01/02/1990" },
+						{ name: "email", value: "m@example.org" },
+						{ name: "phone", value: "5551234567" },
+						{ name: "addressLine1", value: "1 Main St" },
+						{ name: "addressLine2", value: "Apt 2" },
+						{ name: "addressLine3", value: "Springfield" },
+						{ name: "homeCounty_code2", value: "x" },
+					],
+				},
+				selective: { expiration: FUTURE_EXPIRATION, details: [{ name: "party", value: "independent" }] },
+			},
+		});
+		const byKey = new Map(rows.map((r: any) => [r.key, r]));
+		const expected: Record<string, string> = {
+			"public-firstname": "registrationRequestFieldFirstName",
+			"public-lastname": "registrationRequestFieldLastName",
+			"private-dob": "registrationRequestFieldDob",
+			"private-email": "registrationRequestFieldEmail",
+			"private-phone": "registrationRequestFieldPhone",
+			"private-addressline1": "registrationRequestFieldAddressLine1",
+			"private-addressline2": "registrationRequestFieldAddressLine2",
+			"private-addressline3": "registrationRequestFieldAddressLine3",
+			"selective-party": "registrationRequestFieldParty",
+		};
+		for (const [key, labelKey] of Object.entries(expected)) {
+			expect((byKey.get(key) as any)?.labelKey).toBe(labelKey);
+		}
+		expect((byKey.get("private-homecounty-code2") as any)?.label).toBe("Home county code 2");
+		for (const row of rows as any[]) {
+			if (row.label !== undefined) expect(row.label).not.toMatch(/[a-z][A-Z]|_/);
+		}
+	});
+});
+
 describe("RegistrationRequestApprovalScreen — Group B (D-07 gate, accept ceremony)", () => {
 	it("5. at mount Approve and Reject are both disabled (D-07: Reject mirrors the engine's checklist gate)", async () => {
 		const tr = await renderScreen();

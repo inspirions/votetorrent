@@ -28,8 +28,10 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import {
+	KNOWN_REQUEST_FIELD_LABEL_KEYS,
 	REGISTRATION_REQUEST_STATUS_META,
 	formatRequestTimestamp,
+	humanizeFieldName,
 	registrationRequestDisplayName,
 } from "./registration-request-display";
 import { truncateId } from "./registrant-display";
@@ -127,10 +129,15 @@ function slugifyFieldName(name: string): string {
 	return name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
-/** Pushes one row IFF `value` is not `undefined`/`null` — an empty string IS pushed (a declared-but-blank field is information the officer needs). Coerces with `String(...)`. */
-function pushFieldRow(rows: RequestSummaryRow[], key: string, label: string, value: unknown): void {
+/** Pushes one row IFF `value` is not `undefined`/`null` — an empty string IS pushed (a declared-but-blank field is information the officer needs). Coerces with `String(...)`. A known field name gets a translated `labelKey`; any other name a humanized `label` — never the raw key. */
+function pushFieldRow(rows: RequestSummaryRow[], key: string, fieldName: string, value: unknown): void {
 	if (value === undefined || value === null) return;
-	rows.push({ key, label, value: String(value) });
+	const labelKey = Object.prototype.hasOwnProperty.call(KNOWN_REQUEST_FIELD_LABEL_KEYS, fieldName)
+		? KNOWN_REQUEST_FIELD_LABEL_KEYS[fieldName]
+		: undefined;
+	rows.push(
+		labelKey ? { key, labelKey, value: String(value) } : { key, label: humanizeFieldName(fieldName), value: String(value) }
+	);
 }
 
 function pushPrivateDetailRows(
@@ -159,8 +166,9 @@ function pushPrivateDetailRows(
 /**
  * `buildRequestSummaryRows` — the pure, exported helper the render loop
  * consumes. No React, no `t()`, no theme: the caller translates `labelKey`
- * and renders `label` verbatim (there is NO i18n key for a dynamic payload
- * field name — 48-03 owns the i18n map and none is invented here).
+ * and renders `label` verbatim. Payload fields the Voter submits carry a
+ * `labelKey` (`KNOWN_REQUEST_FIELD_LABEL_KEYS`); any other field name carries
+ * a humanized `label`, never the raw key.
  *
  * Rows 1 and 2 are the provenance pair and they LEAD the summary — this
  * ordering is a safety property, not a layout preference. `submittedAt` is
