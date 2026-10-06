@@ -13,6 +13,10 @@
  * tab's own election card and its per-state fixture data, D-12) is never referenced here — that
  * surface keeps consuming the mock data it always has, unchanged.
  *
+ * The Voting Period row reflects the vote saved on this phone, read from the non-secret marker
+ * through `readSavedVoteStatus` on every focus (D-12, D-19): no fingerprint, no direct storage
+ * access, nothing cached. Its link opens the saved-vote receipt for the resolved election.
+ *
  * `TimelineRail` / `TimelineRow` stay presentational (props only) — this file is the one place on
  * this surface that calls `useVoterApp()` and `useNavigation()`.
  */
@@ -34,6 +38,9 @@ import type {TimelineStageId, TimelineViewModelConfident} from '../../timeline';
 import {resolveRegistrationStatus} from '../../engines/registration-status';
 import type {RegistrationStatusResult} from '../../engines/registration-status';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
+import {readSavedVoteStatus} from '../../engines/saved-vote-status';
+import type {SavedVoteStatus} from '../../engines/saved-vote-status';
+import {SavedVoteNotice} from '../../components/SavedVoteNotice';
 
 // D-02's election-identity rule now lives in engines/election-read.ts (shared with the Home and
 // Ballot reads); re-exported here so existing importers keep resolving it from this module.
@@ -149,6 +156,7 @@ export default function TimelineScreen() {
 	// `null` while the read is in flight; the panel renders nothing during that window rather
 	// than a guessed "not registered" placeholder (D-23 e).
 	const [resolvedElectionId, setResolvedElectionId] = useState<string | undefined>(undefined);
+	const [savedVote, setSavedVote] = useState<{electionId: string; status: SavedVoteStatus} | null>(null);
 	const [registrationStatus, setRegistrationStatus] = useState<RegistrationStatusResult | null>(null);
 	// D-20 discretion: neither `see details` nor the row `?` help affordance has a Details route
 	// (59-05 fixed the Timeline stack's param list at five entries) or its own copy, so both open
@@ -286,6 +294,34 @@ export default function TimelineScreen() {
 				live = false;
 			};
 		}, [getEngine, resolvedElectionId]),
+	);
+
+	// Separate from the timeline read above: re-run on every focus so a save made in the Ballot
+	// flow shows on return. Nothing is cached, and a failed read fails closed to unreadable (the
+	// error is never read or logged).
+	useFocusEffect(
+		useCallback(() => {
+			let live = true;
+
+			if (resolvedElectionId === undefined) {
+				return () => {
+					live = false;
+				};
+			}
+
+			readSavedVoteStatus({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined}, readSharedNowMs(), resolvedElectionId).then(
+				status => {
+					if (live) setSavedVote({electionId: resolvedElectionId, status});
+				},
+				() => {
+					if (live) setSavedVote({electionId: resolvedElectionId, status: {state: 'unreadable'}});
+				},
+			);
+
+			return () => {
+				live = false;
+			};
+		}, [getEngine, seededElectionId, resolvedElectionId, readSharedNowMs]),
 	);
 
 	if (state.kind === 'indeterminate') {
@@ -432,6 +468,10 @@ export default function TimelineScreen() {
 		setClockOffsetMs(stop.nowMs - Date.now());
 	};
 
+	// Plain render-time values (not hooks), bound to the election on screen.
+	const railSavedVote = savedVote && savedVote.electionId === resolvedElectionId ? savedVote : null;
+	const savedState = railSavedVote?.status.state ?? 'none';
+
 	return (
 		<>
 			<ScrollView style={[styles.screen, {backgroundColor: colors.background}]} contentContainerStyle={styles.content}>
@@ -487,14 +527,22 @@ export default function TimelineScreen() {
 								onEditRegistration={() => navigation.navigate('RegistrationHome')}
 								onViewRegistration={() => navigation.navigate('RegistrationHome')}
 							/>
+						) : stageId === 'votingStarts' && railSavedVote && savedState !== 'none' ? (
+							<SavedVoteNotice status={railSavedVote.status} testID="timeline-saved-vote" />
 						) : null
 					}
 					onHelp={stageId => setDialogStageId(stageId)}
 					onSeeDetails={stageId => setDialogStageId(stageId)}
 					onEditRegistration={() => navigation.navigate('RegistrationHome')}
 					onPreviewBallot={() => navigation.navigate('Ballot')}
-					onVoteNow={() => navigation.navigate('Ballot')}
-					onViewSubmission={() => navigation.navigate('ReviewSubmit')}
+					// Saved and unreadable hide Vote now, mirroring the 63-08 guard (D-20); stale offers it again (D-21).
+					onVoteNow={savedState === 'none' || savedState === 'stale' ? () => navigation.navigate('Ballot') : undefined}
+					// Params carry only electionId and no `revealOnOpen`, so the receipt asks for a fingerprint (D-13, R-4).
+					onViewSubmission={
+						railSavedVote && savedState !== 'none'
+							? () => navigation.navigate('VoteReceipt', {electionId: railSavedVote.electionId})
+							: undefined
+					}
 					onViewKeyholders={() => navigation.navigate('Keyholders')}
 				/>
 			</ScrollView>
