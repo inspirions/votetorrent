@@ -88,7 +88,7 @@ internal fun observedAuthWindowSeconds(isUserAuthenticationRequired: Boolean, ra
 private const val TAG_WRAP_KEY_POLICY = "VtWrapKeyPolicy"
 
 /** D-14 windowed-path observability: closed `path` tokens only (no-prompt, prompted,
- * reinit-unauthenticated). */
+ * reinit-unauthenticated-invalidated). */
 private const val TAG_WRAP_WINDOW = "VtWrapWindow"
 
 /** D-07-style rung observability for the wrap-key StrongBox->TEE ladder, distinct from
@@ -565,8 +565,13 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 						} catch (e: KeyPermanentlyInvalidatedException) {
 							onError("KEY_INVALIDATED", e)
 						} catch (e: UserNotAuthenticatedException) {
-							Log.w(TAG_WRAP_WINDOW, "alias=$alias op=wrap path=reinit-unauthenticated")
-							onError("WRAP_FAILED", e)
+							// CR-02, measured on device (Pixel_8_b API 37): after a biometric enrollment
+							// change a time-bound key does NOT throw KeyPermanentlyInvalidatedException;
+							// it stays unauthenticated even right after a successful BIOMETRIC_STRONG
+							// prompt, because no current biometric can authorize it any more. That is
+							// permanent invalidation, so report it as such (never a retryable failure).
+							Log.w(TAG_WRAP_WINDOW, "alias=$alias op=wrap path=reinit-unauthenticated-invalidated")
+							onError("KEY_INVALIDATED", e)
 						} catch (e: Exception) {
 							onError("WRAP_FAILED", e)
 						}
@@ -656,8 +661,13 @@ class SecretWrapHelper(private val reactContext: ReactApplicationContext) {
 						} catch (e: KeyPermanentlyInvalidatedException) {
 							onError("KEY_INVALIDATED", e)
 						} catch (e: UserNotAuthenticatedException) {
-							Log.w(TAG_WRAP_WINDOW, "alias=$alias op=unwrap path=reinit-unauthenticated")
-							onError("UNWRAP_FAILED", e)
+							// CR-02, measured on device (Pixel_8_b API 37): after a biometric enrollment
+							// change a time-bound key does NOT throw KeyPermanentlyInvalidatedException;
+							// it stays unauthenticated even right after a successful BIOMETRIC_STRONG
+							// prompt, because no current biometric can authorize it any more. That is
+							// permanent invalidation, so report it as such (never a retryable failure).
+							Log.w(TAG_WRAP_WINDOW, "alias=$alias op=unwrap path=reinit-unauthenticated-invalidated")
+							onError("KEY_INVALIDATED", e)
 						} catch (e: Exception) {
 							onError("UNWRAP_FAILED", e)
 						}

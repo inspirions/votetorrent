@@ -111,6 +111,20 @@ export function checkSecretWrapWindow(kotlinText: string): string[] {
 			violations.push(`G3: ${name} is missing setAllowedAuthenticators(BIOMETRIC_STRONG)`)
 		}
 		if (body.includes('CryptoObject')) violations.push(`G3: ${name} must not use a CryptoObject`)
+		// G8 (CR-02, device-measured): a re-init that is STILL unauthenticated right after a successful
+		// prompt is how an enrollment-invalidated time-bound key presents; it must be KEY_INVALIDATED.
+		const reinit = /catch \(e: UserNotAuthenticatedException\) \{([\s\S]*?)\n\t*\}/g
+		let m: RegExpExecArray | null
+		let sawPostPrompt = false
+		while ((m = reinit.exec(body)) !== null) {
+			if (m[1]!.includes('onError(')) {
+				sawPostPrompt = true
+				if (!m[1]!.includes('onError("KEY_INVALIDATED", e)')) {
+					violations.push(`G8: ${name} maps a post-prompt UserNotAuthenticatedException to something other than KEY_INVALIDATED`)
+				}
+			}
+		}
+		if (!sawPostPrompt) violations.push(`G8: ${name} has no post-prompt UserNotAuthenticatedException branch`)
 	}
 
 	// G4: wrap/unwrap keep the per-use CryptoObject prompt and dispatch to the windowed path once.
@@ -303,6 +317,15 @@ describe('secret-wrap-window gate (D-14, 63-17)', () => {
 			const planted = real.replace('if (!DELETABLE_WRAP_KEY_ALIAS_PATTERN.matches(alias)) {', 'if (alias.isEmpty()) {')
 			expect(planted).not.toBe(real)
 			expect(checkSecretWrapWindow(planted).some((v) => v.startsWith('G6'))).toBe(true)
+		})
+
+		it('P11: mapping the post-prompt unauthenticated re-init back to WRAP_FAILED reports G8', () => {
+			const planted = real.replace(
+				'op=wrap path=reinit-unauthenticated-invalidated")\n\t\t\t\t\t\t\tonError("KEY_INVALIDATED", e)',
+				'op=wrap path=reinit-unauthenticated-invalidated")\n\t\t\t\t\t\t\tonError("WRAP_FAILED", e)',
+			)
+			expect(planted).not.toBe(real)
+			expect(checkSecretWrapWindow(planted).some((v) => v.startsWith('G8: wrapWindowed'))).toBe(true)
 		})
 
 		it('P6: an empty file reports every group', () => {
