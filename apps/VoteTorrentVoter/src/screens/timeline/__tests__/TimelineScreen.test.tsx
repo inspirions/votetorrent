@@ -192,6 +192,12 @@ jest.mock('../../../engines/attestation-producer', () => ({
 	resolveAttestationProducer: (...args: unknown[]) => mockResolveAttestationProducer(...args),
 }));
 
+// 63-14: the saved-vote marker read. `mock`-prefixed so babel-plugin-jest-hoist accepts the closure.
+const mockReadSavedVoteStatus = jest.fn((..._args: unknown[]) => Promise.resolve<unknown>({state: 'none'}));
+jest.mock('../../../engines/saved-vote-status', () => ({
+	readSavedVoteStatus: (...args: unknown[]) => mockReadSavedVoteStatus(...args),
+}));
+
 let mockSeededElectionId: string | undefined = SEEDED_ELECTION_ID;
 
 const mockSetClockOffsetMs = jest.fn();
@@ -307,6 +313,8 @@ beforeEach(() => {
 	mockProvisionDeviceKey.mockClear();
 	mockGetAssociationsByDeviceKey.mockClear();
 	mockListAssociationRequests.mockClear();
+	mockReadSavedVoteStatus.mockReset();
+	mockReadSavedVoteStatus.mockImplementation(async () => ({state: 'none'}));
 
 	mockGetEngine.mockImplementation(async (engineName: string) => {
 		if (engineName === 'elections') {
@@ -784,17 +792,17 @@ describe('TimelineScreen — rail composition and callback wiring (Task 2)', () 
 			'onEditRegistration',
 			'onPreviewBallot',
 			'onVoteNow',
-			'onViewSubmission',
 			'onViewKeyholders',
 		]) {
 			expect(typeof rail.props[propName]).toBe('function');
 		}
+		// 63-14: the saved-vote link is offered only when a vote is saved, so it is unbound by default.
+		expect(rail.props.onViewSubmission).toBeUndefined();
 	});
 
 	it.each([
 		['onVoteNow', 'Ballot'],
 		['onPreviewBallot', 'Ballot'],
-		['onViewSubmission', 'ReviewSubmit'],
 		['onEditRegistration', 'RegistrationHome'],
 		['onViewKeyholders', 'Keyholders'],
 	])('%s navigates to %s', async (propName, routeName) => {
@@ -1125,5 +1133,139 @@ describe('TimelineScreen — device time-zone resolution degrades safely (WR-01)
 		// The rail must still be on screen. Before the fix this line is never reached: the throw
 		// escapes `resolveDeviceTimeZone()` during render and takes the whole screen down.
 		expect(hasTestId(tr, 'timeline-rail')).toBe(true);
+	});
+});
+
+describe('TimelineScreen — saved vote on the Voting Period row (D-12, D-21)', () => {
+	const STALE = 'The election changed after you voted. Please vote again.';
+
+	// anchor = now + 1 day puts votingStarts one day back and accruingVotes ahead: CURRENT.
+	function openVoting(): void {
+		const anchor = Date.now() + 86_400_000;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+	}
+	function hostsById(tr: renderer.ReactTestRenderer, id: string) {
+		return tr.root.findAll(n => typeof n.type === 'string' && n.props.testID === id);
+	}
+	function nodeText(n: renderer.ReactTestInstance | string): string {
+		return typeof n === 'string' ? n : n.children.map(c => nodeText(c as renderer.ReactTestInstance | string)).join('');
+	}
+	async function mountWith(status: unknown) {
+		openVoting();
+		mockReadSavedVoteStatus.mockImplementation(async () => status);
+		return renderAndFlush();
+	}
+	const railOf = (tr: renderer.ReactTestRenderer) => tr.root.findByType(TimelineRail);
+
+	it('TS1: reads the status with the engine deps, a numeric clock and the resolved election id (D-19)', async () => {
+		await mountWith({state: 'none'});
+		expect(mockReadSavedVoteStatus).toHaveBeenCalled();
+		const [deps, nowMs, electionId] = mockReadSavedVoteStatus.mock.calls[0];
+		expect(deps).toEqual({getEngine: mockGetEngine, fallbackElectionId: 'election-1'});
+		expect(typeof nowMs).toBe('number');
+		expect(electionId).toBe('election-1');
+	});
+
+	it('TS2: none offers Vote now and no saved-vote link or panel', async () => {
+		const tr = await mountWith({state: 'none'});
+		expect(typeof railOf(tr).props.onVoteNow).toBe('function');
+		expect(railOf(tr).props.onViewSubmission).toBeUndefined();
+		expect(JSON.stringify(tr.toJSON())).not.toContain('timeline-saved-vote');
+	});
+
+	it('TS3: saved hides Vote now, shows the status, and the link opens the receipt with electionId only', async () => {
+		const tr = await mountWith({state: 'saved', revisionKnown: true});
+		const rail = railOf(tr);
+		expect(rail.props.onVoteNow).toBeUndefined();
+		expect(typeof rail.props.onViewSubmission).toBe('function');
+		renderer.act(() => {
+			(rail.props.onViewSubmission as () => void)();
+		});
+		expect(mockNavigate).toHaveBeenCalledWith('VoteReceipt', {electionId: 'election-1'});
+		expect(nodeText(hostsById(tr, 'timeline-saved-vote-status')[0])).toBe('Vote saved — not sent');
+		expect(hostsById(tr, 'timeline-row-view-submission-votingStarts').length).toBeGreaterThan(0);
+		expect(hostsById(tr, 'timeline-row-vote-now-votingStarts').length).toBe(0);
+	});
+
+	it('TS4: stale shows the exact D-21 line and keeps Vote now', async () => {
+		const tr = await mountWith({state: 'stale', revisionKnown: true});
+		expect(typeof railOf(tr).props.onVoteNow).toBe('function');
+		expect(typeof railOf(tr).props.onViewSubmission).toBe('function');
+		expect(nodeText(hostsById(tr, 'timeline-saved-vote-stale')[0])).toBe(STALE);
+	});
+
+	it('TS5: unreadable hides Vote now and shows the unreadable line', async () => {
+		const tr = await mountWith({state: 'unreadable'});
+		expect(railOf(tr).props.onVoteNow).toBeUndefined();
+		expect(typeof railOf(tr).props.onViewSubmission).toBe('function');
+		expect(hostsById(tr, 'timeline-saved-vote-unreadable').length).toBe(1);
+	});
+
+	it('TS6: an unknown revision adds the honest note', async () => {
+		const tr = await mountWith({state: 'saved', revisionKnown: false});
+		expect(hostsById(tr, 'timeline-saved-vote-revision-unknown').length).toBe(1);
+	});
+
+	it('TS7: re-reads on every focus and never caches', async () => {
+		const tr = await mountWith({state: 'none'});
+		expect(hostsById(tr, 'timeline-saved-vote-status').length).toBe(0);
+		const before = mockReadSavedVoteStatus.mock.calls.length;
+		mockReadSavedVoteStatus.mockImplementation(async () => ({state: 'saved', revisionKnown: true}));
+		await renderer.act(async () => {
+			mockTriggerFocus();
+			await flushMicrotasks(30);
+		});
+		expect(mockReadSavedVoteStatus.mock.calls.length).toBe(before + 1);
+		expect(hostsById(tr, 'timeline-saved-vote-status').length).toBe(1);
+	});
+
+	it('TS8: a rejected read fails closed to unreadable', async () => {
+		openVoting();
+		mockReadSavedVoteStatus.mockImplementation(async () => {
+			throw new Error('secret failure detail');
+		});
+		const tr = await renderAndFlush();
+		expect(hostsById(tr, 'timeline-saved-vote-unreadable').length).toBe(1);
+		expect(railOf(tr).props.onVoteNow).toBeUndefined();
+		expect(JSON.stringify(tr.toJSON())).not.toContain('secret failure detail');
+	});
+
+	it('TS9: on a past Voting Period row the link appears only when a vote is saved', async () => {
+		const anchor = Date.now() - 2 * 3_600_000 + 20 * 3_600_000;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+		const none = await renderAndFlush();
+		const row = (railOf(none).props.rows as Array<{stageId: string; status: string}>).find(r => r.stageId === 'votingStarts');
+		expect(row?.status).toBe('past');
+		expect(hostsById(none, 'timeline-row-view-submission-votingStarts').length).toBe(0);
+
+		mockReadSavedVoteStatus.mockImplementation(async () => ({state: 'saved', revisionKnown: true}));
+		const saved = await renderAndFlush();
+		expect(hostsById(saved, 'timeline-row-view-submission-votingStarts').length).toBeGreaterThan(0);
+	});
+
+	it('TS10: with no readable election no saved-vote read happens', async () => {
+		mockGetElections.mockImplementation(async () => {
+			throw new Error('boom');
+		});
+		await renderAndFlush();
+		expect(mockReadSavedVoteStatus).not.toHaveBeenCalled();
+	});
+
+	describe('TS11: source discipline', () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require('fs');
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require('path');
+		const raw: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
+		const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+		it.each(['readSavedVoteStatus(', "navigation.navigate('VoteReceipt', {electionId", 'useFocusEffect('])('contains %s', needle => {
+			expect(code).toContain(needle);
+		});
+		it.each(["navigation.navigate('ReviewSubmit')", 'revealOnOpen', 'AsyncStorage', 'openVoteRecord', 'console.'])(
+			'does not contain %s',
+			needle => {
+				expect(code).not.toContain(needle);
+			},
+		);
 	});
 });
