@@ -93,6 +93,21 @@ jest.mock("../../../engines/device-user", () => ({
 	getDeviceUser: () => mockGetDeviceUser(),
 }));
 
+const mockWriteShareFile = jest.fn(async (..._args: unknown[]) => "file:///cache/founding-bundle.json");
+jest.mock("@votetorrent/attestation-native", () => {
+	const actual = jest.requireActual("@votetorrent/attestation-native");
+	return {
+		...actual,
+		writeShareFile: (...a: unknown[]) => mockWriteShareFile(...a),
+		shareFileAndroid: jest.fn(async () => undefined),
+	};
+});
+jest.mock("@react-native-documents/picker", () => ({
+	saveDocuments: jest.fn(async () => []),
+	errorCodes: { OPERATION_CANCELED: "OPERATION_CANCELED" },
+	isErrorWithCode: (e: any) => typeof e?.code === "string",
+}));
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const NetworksScreenModule = require("../NetworksScreen");
 const NetworksScreen = NetworksScreenModule.default ?? NetworksScreenModule.NetworksScreen;
@@ -284,16 +299,14 @@ async function openAndConfirm(tr: renderer.ReactTestRenderer, networkRef = NETWO
 	});
 }
 
-describe("E-3: confirm -> generating -> export call order -> sharing -> Share.share -> close", () => {
-	it("calls createDeviceSigner, getDeviceUser, open(ref,user,false), exportFoundingBundle(hash,{userId,signerKey,sign}), then Share.share, then closes", async () => {
-		let resolveShare!: (v: unknown) => void;
-		const shareSpy = jest
-			.spyOn(Share, "share")
-			.mockImplementation(() => new Promise((resolve) => (resolveShare = resolve)));
+describe("E-3: confirm -> generating -> export call order -> file written -> ready -> Done closes", () => {
+	it("calls createDeviceSigner, getDeviceUser, open(ref,user,false), exportFoundingBundle, writes the file once, shows ready, Done closes the card and the row remains", async () => {
+		const shareSpy = jest.spyOn(Share, "share").mockResolvedValue({ action: "sharedAction" });
 
 		const tr = await renderScreen();
 		await openAndConfirm(tr);
 		await act(async () => {
+			await Promise.resolve();
 			await Promise.resolve();
 			await Promise.resolve();
 			await Promise.resolve();
@@ -306,20 +319,19 @@ describe("E-3: confirm -> generating -> export call order -> sharing -> Share.sh
 			signerKey: "key-1",
 			sign: expect.any(Function),
 		});
+		expect(mockWriteShareFile).toHaveBeenCalledTimes(1);
+		expect(mockWriteShareFile).toHaveBeenCalledWith("founding-bundle.json", "BUNDLE-TEXT");
+		expect(shareSpy).not.toHaveBeenCalled();
 
-		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-sharing")).toBeTruthy();
-		expect(shareSpy).toHaveBeenCalledWith(
-			{ message: "BUNDLE-TEXT", title: "founding-bundle.json" },
-			expect.objectContaining({ subject: "founding-bundle.json" }),
-		);
-
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-ready")).toBeTruthy();
+		const done = findByProps(tr, (p) => p.testID === "founding-export-done" && p.title !== undefined)[0];
 		await act(async () => {
-			resolveShare(undefined);
-			await Promise.resolve();
+			(done.props as any).onPress();
 		});
 
 		expect(findJsonByTestID(tr.toJSON(), "founding-export-card")).toBeNull();
-		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-sharing")).toBeNull();
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-ready")).toBeNull();
+		expect(findJsonByTestID(tr.toJSON(), `founding-export-entry-${NETWORK_A.hash}`)).toBeTruthy();
 		shareSpy.mockRestore();
 	});
 });
@@ -354,7 +366,7 @@ describe("E-4: exportFoundingBundle rejection (not-founding-officer) -> error st
 	});
 });
 
-describe("E-5: createDeviceSigner CANCELED closes silently; Share.share rejection -> error; open() timeout -> error", () => {
+describe("E-5: createDeviceSigner CANCELED closes silently; file write rejection -> error; open() timeout -> error", () => {
 	it("E-5a: createDeviceSigner rejecting with code CANCELED closes the card silently (no error text)", async () => {
 		mockCreateDeviceSigner.mockImplementation(async () => {
 			throw Object.assign(new Error("user canceled"), { code: "CANCELED" });
@@ -372,8 +384,9 @@ describe("E-5: createDeviceSigner CANCELED closes silently; Share.share rejectio
 		expect(JSON.stringify(tr.toJSON())).not.toContain(resources.en.translation.networkFoundingExportError);
 	});
 
-	it("E-5b: a Share.share rejection leads to the error state", async () => {
-		const shareSpy = jest.spyOn(Share, "share").mockRejectedValue(new Error("share failed"));
+	it("E-5b: a file write failure leads to the error state", async () => {
+		const info = jest.spyOn(console, "info").mockImplementation(() => {});
+		mockWriteShareFile.mockRejectedValueOnce(new Error("write failed"));
 		const tr = await renderScreen();
 		await openAndConfirm(tr);
 		await act(async () => {
@@ -383,7 +396,7 @@ describe("E-5: createDeviceSigner CANCELED closes silently; Share.share rejectio
 			await Promise.resolve();
 		});
 		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-error")).toBeTruthy();
-		shareSpy.mockRestore();
+		info.mockRestore();
 	});
 
 	it("E-5c: open() exceeding 45000ms leads to the error state (fake timers)", async () => {
