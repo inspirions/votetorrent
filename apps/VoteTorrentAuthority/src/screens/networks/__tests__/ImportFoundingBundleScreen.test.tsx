@@ -528,7 +528,8 @@ describe("S-10: every state body sits inside the 16dp screen gutter with message
 	];
 	for (const [state, result] of cases) {
 		it(`${state}: >= 16dp left gutter and a gap between message and button`, async () => {
-			mockSelectNetwork.mockImplementationOnce(() => new Promise(() => {}));
+			// Only the success state calls selectNetwork; a queued Once on any other state would leak.
+			if (state === "success") mockSelectNetwork.mockImplementationOnce(() => new Promise(() => {}));
 			mockNetworksEngine = { importFoundingBundle: jest.fn(async () => result()) };
 			const tr = await pickAndResolve({ kind: "picked", text: "bundle" });
 			const found = findJsonByTestID(tr.toJSON(), `founding-import-body-${state}`)!;
@@ -543,5 +544,50 @@ describe("S-10: every state body sits inside the 16dp screen gutter with message
 		const tr = await mount();
 		const found = findJsonByTestID(tr.toJSON(), "founding-import-body-idle")!;
 		expect(leftGutter(found.path)).toBeGreaterThanOrEqual(16);
+	});
+});
+
+describe("S-11: a failed post-import select never strands the officer (UAT 62 P2)", () => {
+	async function settle() {
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+	}
+
+	it("NO_KEY_PROVISIONED routes to the first-run provisioning ceremony", async () => {
+		mockSelectNetwork.mockRejectedValueOnce(
+			Object.assign(new Error("getOrCreateDeviceUser: no device signing key provisioned"), { code: "NO_KEY_PROVISIONED" }),
+		);
+		mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
+		const tr = await pickAndResolve({ kind: "picked", text: "bundle" });
+		await settle();
+
+		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "first-run" });
+		expect(mockNavigate).not.toHaveBeenCalledWith("Home");
+		expect(findJsonByTestID(tr.toJSON(), "founding-import-success-view-network")).toBeNull();
+	});
+
+	it("any other select failure shows View Network, which opens NetworkDetails", async () => {
+		mockSelectNetwork.mockRejectedValueOnce(new Error("boom"));
+		mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
+		const tr = await pickAndResolve({ kind: "picked", text: "bundle" });
+		await settle();
+
+		const found = findJsonByTestID(tr.toJSON(), "founding-import-body-success")!;
+		expect(found.node.children[0].children).toEqual([resources.en.translation.networkFoundingImportSuccess]);
+		expect(findJsonByTestID(tr.toJSON(), "founding-import-success-view-network")).toBeTruthy();
+		await pressButton(tr, resources.en.translation.networkFoundingImportViewNetworkButton);
+		expect(mockNavigate).toHaveBeenCalledWith("NetworkDetails", { networkRef: NETWORK_REF });
+		expect(mockNavigate).not.toHaveBeenCalledWith("ProvisionSigningKey", expect.anything());
+	});
+
+	it("a successful select shows no View Network button", async () => {
+		mockSelectNetwork.mockImplementationOnce(() => new Promise(() => {}));
+		mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
+		const tr = await pickAndResolve({ kind: "picked", text: "bundle" });
+		await settle();
+		expect(findJsonByTestID(tr.toJSON(), "founding-import-success-view-network")).toBeNull();
 	});
 });

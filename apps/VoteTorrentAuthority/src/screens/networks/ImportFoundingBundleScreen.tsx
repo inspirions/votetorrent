@@ -29,6 +29,7 @@ import { pickFoundingBundleFile } from '../../engines/pick-founding-bundle-file'
 import { mapFoundingImportResult, type FoundingImportState } from './foundingBundleState'
 import type { NavigationProp } from '../../navigation/types'
 import { globalStyles } from '../../theme/styles'
+import { useDeviceSigningErrorHandler } from '../../hooks/useDeviceSigningErrorHandler'
 import type { NetworkReference } from '@votetorrent/vote-core'
 
 interface ScreenState {
@@ -49,6 +50,16 @@ export default function ImportFoundingBundleScreen() {
 	const insets = useSafeAreaInsets()
 
 	const [screenState, setScreenState] = useState<ScreenState>({ kind: 'idle' })
+	// The post-import selectNetwork failed and was not a routable device-signing condition: the
+	// success body then offers View Network so the officer is never stranded on "Network joined".
+	const [selectFailed, setSelectFailed] = useState(false)
+	const handleDeviceSigningError = useDeviceSigningErrorHandler()
+	// Latest-value refs: the select effect below must run ONCE per success state. Re-running it on
+	// a navigation/handler identity change would retry selectNetwork behind the officer's back.
+	const navigationRef = useRef(navigation)
+	navigationRef.current = navigation
+	const handleDeviceSigningErrorRef = useRef(handleDeviceSigningError)
+	handleDeviceSigningErrorRef.current = handleDeviceSigningError
 	const mountedRef = useRef(true)
 	const inFlightRef = useRef(false)
 
@@ -62,6 +73,7 @@ export default function ImportFoundingBundleScreen() {
 	const handleChooseFile = useCallback(async () => {
 		if (inFlightRef.current) return
 		inFlightRef.current = true
+		setSelectFailed(false)
 		if (mountedRef.current) setScreenState({ kind: 'picking' })
 		try {
 			const picked = await pickFoundingBundleFile()
@@ -119,8 +131,10 @@ export default function ImportFoundingBundleScreen() {
 		}
 	}, [networksEngine])
 
-	// Success auto-navigates: await selectNetwork(networkRef), then go Home. A rejection logs and
-	// leaves the success body on screen — the network is already in recentNetworks regardless.
+	// Success auto-navigates: await selectNetwork(networkRef), then go Home. On a rejection the
+	// network is already in recentNetworks regardless: a device with no signing key
+	// (NO_KEY_PROVISIONED) goes to the provisioning ceremony; any other failure keeps the success
+	// body and adds a View Network button (it used to be a dead end with no control at all).
 	useEffect(() => {
 		if (screenState.kind !== 'success' || !screenState.networkRef) return
 		let cancelled = false
@@ -128,17 +142,20 @@ export default function ImportFoundingBundleScreen() {
 		;(async () => {
 			try {
 				await selectNetwork(networkRef)
-				if (!cancelled) navigation.navigate('Home')
-			} catch {
+				if (!cancelled) navigationRef.current.navigate('Home')
+			} catch (err) {
+				const code = (err as { code?: unknown } | null | undefined)?.code
 				// eslint-disable-next-line no-console -- closed token only.
-				console.info('[founding-bundle] select failed')
+				console.info(`[founding-bundle] select failed: ${typeof code === 'string' ? code : 'uncoded'}`)
+				if (cancelled || !mountedRef.current) return
+				if (handleDeviceSigningErrorRef.current(err).handled) return
+				setSelectFailed(true)
 			}
 		})()
 		return () => {
 			cancelled = true
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps -- re-run only when the state/ref identity changes.
-	}, [screenState, selectNetwork, navigation])
+	}, [screenState, selectNetwork])
 
 	function renderBody() {
 		switch (screenState.kind) {
@@ -204,6 +221,17 @@ export default function ImportFoundingBundleScreen() {
 						<ThemedText type="default" style={{ color: colors.success }}>
 							{t('networkFoundingImportSuccess')}
 						</ThemedText>
+						{selectFailed && screenState.networkRef ? (
+							<CustomButton
+								testID="founding-import-success-view-network"
+								title={t('networkFoundingImportViewNetworkButton')}
+								onPress={() => {
+									if (screenState.networkRef) {
+										navigation.navigate('NetworkDetails', { networkRef: screenState.networkRef })
+									}
+								}}
+							/>
+						) : null}
 					</View>
 				)
 		}
