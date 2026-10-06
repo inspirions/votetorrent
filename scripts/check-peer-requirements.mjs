@@ -199,8 +199,12 @@ const execAsync = promisify(exec);
 // re-keyed. yarn.lock holds exactly ONE resolved @optimystic/quereus-plugin-crypto version
 // (1.10.1); its peer range is still ^4.20.0 (satisfied by the single patched 4.20.0 copy) and the
 // cause is still the missing @quereus/quereus declaration in packages/attestation-native.
+//
+// @optimystic 1.10.1 -> 1.11.0 + @serfab 1.12.0 -> 1.13.0 bump (2026-10-06): same single
+// mismatch, re-keyed. The peer range moved to ^4.20.1, which dragged @quereus/quereus 4.20.0 ->
+// 4.20.1; YN0002 still names packages/attestation-native as the workspace that does not provide it.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.10.1',
+  '@optimystic/quereus-plugin-crypto@npm:1.11.0',
 ]);
 
 // The ✘ marker (U+2718)
