@@ -6,6 +6,11 @@
  * gate, the Kotlin compile and the debug APK's dex check are the only pre-device evidence for the
  * windowed branch. Real prompt counts come only from 63-18's `prompts` leg on a device.
  *
+ * Phase 63 review: WR-04 removed the pre-API-30 time-bound key (`setUserAuthenticationValidityDurationSeconds`
+ * admits a PIN), so G2 now pins that setter to ZERO occurrences and G7 pins the below-30 downgrade.
+ * CR-02 added exactly one `deleteEntry`, inside the alias-restricted `deleteWrapKey`, so G6 pins
+ * that instead of "never delete". The D-14 assertions (G3-G5) are unchanged.
+ *
  * Every check runs on COMMENT-STRIPPED text (except G1, which deliberately scans the raw file), so
  * KDoc prose cannot satisfy or trip a structural rule. The checker is a pure function so the planted
  * self-tests below can prove it can fail.
@@ -68,23 +73,24 @@ export function checkSecretWrapWindow(kotlinText: string): string[] {
 		violations.push('G1: the file still mentions the 63-16 pass-through guard')
 	}
 
-	// G2: buildSpec carries all four spec calls; the validity-duration setter occurs exactly once.
+	// G2: buildSpec carries the BIOMETRIC_STRONG spec calls and refuses a window below API 30; the
+	// pre-30 validity-duration setter (it admits a device PIN, WR-04) occurs nowhere.
 	const buildSpec = functionBody(stripped, /private fun buildSpec\(/)
 	if (buildSpec === undefined) {
 		violations.push('G2: buildSpec not found')
 	} else {
 		for (const needle of [
 			'setUserAuthenticationParameters(authWindowSeconds, KeyProperties.AUTH_BIOMETRIC_STRONG)',
-			'setUserAuthenticationValidityDurationSeconds(authWindowSeconds)',
 			'setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)',
 			'setInvalidatedByBiometricEnrollment(true)',
+			'Build.VERSION.SDK_INT < MIN_SDK_FOR_AUTH_WINDOW',
 		]) {
 			if (!buildSpec.includes(needle)) violations.push(`G2: buildSpec is missing ${needle}`)
 		}
 	}
 	const durationCalls = count(stripped, 'setUserAuthenticationValidityDurationSeconds(')
-	if (durationCalls !== 1) {
-		violations.push(`G2: setUserAuthenticationValidityDurationSeconds( occurs ${durationCalls} times, expected 1`)
+	if (durationCalls !== 0) {
+		violations.push(`G2: setUserAuthenticationValidityDurationSeconds( occurs ${durationCalls} times, expected 0 (WR-04)`)
 	}
 
 	// G3: the windowed bodies prompt once, without a CryptoObject, BIOMETRIC_STRONG only.
@@ -105,6 +111,20 @@ export function checkSecretWrapWindow(kotlinText: string): string[] {
 			violations.push(`G3: ${name} is missing setAllowedAuthenticators(BIOMETRIC_STRONG)`)
 		}
 		if (body.includes('CryptoObject')) violations.push(`G3: ${name} must not use a CryptoObject`)
+		// G8 (CR-02, device-measured): a re-init that is STILL unauthenticated right after a successful
+		// prompt is how an enrollment-invalidated time-bound key presents; it must be KEY_INVALIDATED.
+		const reinit = /catch \(e: UserNotAuthenticatedException\) \{([\s\S]*?)\n\t*\}/g
+		let m: RegExpExecArray | null
+		let sawPostPrompt = false
+		while ((m = reinit.exec(body)) !== null) {
+			if (m[1]!.includes('onError(')) {
+				sawPostPrompt = true
+				if (!m[1]!.includes('onError("KEY_INVALIDATED", e)')) {
+					violations.push(`G8: ${name} maps a post-prompt UserNotAuthenticatedException to something other than KEY_INVALIDATED`)
+				}
+			}
+		}
+		if (!sawPostPrompt) violations.push(`G8: ${name} has no post-prompt UserNotAuthenticatedException branch`)
 	}
 
 	// G4: wrap/unwrap keep the per-use CryptoObject prompt and dispatch to the windowed path once.
@@ -120,7 +140,17 @@ export function checkSecretWrapWindow(kotlinText: string): string[] {
 		const windowedCalls = count(body, 'Windowed(')
 		if (windowedCalls !== 1) violations.push(`G4: ${name} has ${windowedCalls} Windowed( calls, expected 1`)
 		if (!body.includes('authWindowSeconds > 0')) {
-			violations.push(`G4: ${name} does not branch on authWindowSeconds > 0`)
+			violations.push(`G4: ${name} does not bound-check authWindowSeconds > 0`)
+		}
+		// WR-04: the dispatch and the policy check use the EFFECTIVE window, never the raw request.
+		if (!body.includes('val window = effectiveAuthWindowSeconds(authWindowSeconds, Build.VERSION.SDK_INT)')) {
+			violations.push(`G4: ${name} does not compute the effective window`)
+		}
+		if (!body.includes('if (requireAuth && window > 0)')) {
+			violations.push(`G4: ${name} does not dispatch on the effective window`)
+		}
+		if (!body.includes('getOrCreateKey(alias, requireAuth, window)')) {
+			violations.push(`G4: ${name} does not compare the alias policy against the effective window`)
 		}
 	}
 
@@ -147,11 +177,28 @@ export function checkSecretWrapWindow(kotlinText: string): string[] {
 		violations.push('G5: observedAuthWindowSeconds is not declared with the agreed signature')
 	}
 
-	// G6: never delete; the bound constant is unchanged.
-	if (stripped.includes('deleteEntry')) violations.push('G6: the file calls deleteEntry')
+	// G6: exactly one deleteEntry, inside deleteWrapKey, after the vote-record alias guard (CR-02);
+	// the bound constant is unchanged.
+	const deleteCount = count(stripped, 'deleteEntry')
+	const deleteBody = functionBody(stripped, /\bfun deleteWrapKey\(/)
+	if (deleteCount !== 1) violations.push(`G6: deleteEntry occurs ${deleteCount} times, expected exactly 1 (inside deleteWrapKey)`)
+	if (deleteBody === undefined || !deleteBody.includes('deleteEntry')) {
+		violations.push('G6: deleteEntry is not inside deleteWrapKey')
+	} else {
+		const guard = deleteBody.indexOf('DELETABLE_WRAP_KEY_ALIAS_PATTERN.matches(alias)')
+		if (guard < 0 || guard > deleteBody.indexOf('deleteEntry')) violations.push('G6: deleteWrapKey does not check the vote-record alias guard first')
+	}
+	if (!stripped.includes('internal val DELETABLE_WRAP_KEY_ALIAS_PATTERN = Regex("^VOTETORRENT_VOTE_RECORD_WRAP_KEY_V[0-9]+$")')) {
+		violations.push('G6: DELETABLE_WRAP_KEY_ALIAS_PATTERN is not the vote-record family')
+	}
 	if (!stripped.includes('internal const val MAX_AUTH_WINDOW_SECONDS = 60')) {
 		violations.push('G6: MAX_AUTH_WINDOW_SECONDS = 60 is missing')
 	}
+
+	// G7 (WR-04): the downgrade below API 30 exists with the agreed shape.
+	if (!stripped.includes('internal const val MIN_SDK_FOR_AUTH_WINDOW = 30')) violations.push('G7: MIN_SDK_FOR_AUTH_WINDOW = 30 is missing')
+	const effLine = /internal fun effectiveAuthWindowSeconds\(requested: Int, sdkInt: Int\): Int =\s*if \(sdkInt < MIN_SDK_FOR_AUTH_WINDOW\) 0 else requested/.test(stripped)
+	if (!effLine) violations.push('G7: effectiveAuthWindowSeconds does not downgrade below MIN_SDK_FOR_AUTH_WINDOW to 0')
 
 	return violations
 }
@@ -165,7 +212,7 @@ describe('secret-wrap-window gate (D-14, 63-17)', () => {
 
 	const real = existsSync(HELPER) ? readFileSync(HELPER, 'utf8') : ''
 
-	it('the real file satisfies G1-G6', () => {
+	it('the real file satisfies G1-G7', () => {
 		expect(checkSecretWrapWindow(real)).toEqual([])
 	})
 
@@ -173,11 +220,11 @@ describe('secret-wrap-window gate (D-14, 63-17)', () => {
 		expect(real.includes('pass-through' + ' guard')).toBe(false)
 	})
 
-	it('G2: exactly one validity-duration setter, inside buildSpec', () => {
+	it('G2: no pre-API-30 validity-duration setter anywhere (WR-04), BIOMETRIC_STRONG window in buildSpec', () => {
 		const stripped = stripCommentsPreservingLines(real)
-		expect(count(stripped, 'setUserAuthenticationValidityDurationSeconds(')).toBe(1)
+		expect(count(stripped, 'setUserAuthenticationValidityDurationSeconds(')).toBe(0)
 		expect(functionBody(stripped, /private fun buildSpec\(/)).toContain(
-			'setUserAuthenticationValidityDurationSeconds(authWindowSeconds)',
+			'setUserAuthenticationParameters(authWindowSeconds, KeyProperties.AUTH_BIOMETRIC_STRONG)',
 		)
 	})
 
@@ -202,8 +249,10 @@ describe('secret-wrap-window gate (D-14, 63-17)', () => {
 		expect(count(unwrap!, 'Windowed(')).toBe(1)
 	})
 
-	it('G6: the never-delete invariant holds on comment-stripped text', () => {
-		expect(stripCommentsPreservingLines(real).includes('deleteEntry')).toBe(false)
+	it('G6: the only deleteEntry is the guarded one in deleteWrapKey (CR-02)', () => {
+		const stripped = stripCommentsPreservingLines(real)
+		expect(count(stripped, 'deleteEntry')).toBe(1)
+		expect(functionBody(stripped, /\bfun deleteWrapKey\(/)).toContain('deleteEntry')
 	})
 
 	describe('planted self-tests (the checker can fail)', () => {
@@ -238,14 +287,50 @@ describe('secret-wrap-window gate (D-14, 63-17)', () => {
 			expect(functionBody(text, /\bfun unwrap\(/)).toBeDefined()
 		})
 
-		it('P5: a deleteEntry call reports G6', () => {
+		it('P5: a deleteEntry call outside deleteWrapKey reports G6', () => {
 			const planted = real.replace('class SecretWrapHelper', 'class SecretWrapHelper') + '\nfun x() { keyStore.deleteEntry("a") }\n'
 			expect(checkSecretWrapWindow(planted).some((v) => v.startsWith('G6'))).toBe(true)
 		})
 
+		it('P7: a re-inserted pre-30 validity-duration setter reports G2', () => {
+			const planted = real.replace(
+				'builder.setUserAuthenticationParameters(authWindowSeconds, KeyProperties.AUTH_BIOMETRIC_STRONG)',
+				'builder.setUserAuthenticationValidityDurationSeconds(authWindowSeconds)',
+			)
+			expect(planted).not.toBe(real)
+			expect(checkSecretWrapWindow(planted).some((v) => v.startsWith('G2'))).toBe(true)
+		})
+
+		it('P8: dispatching on the raw request instead of the effective window reports G4', () => {
+			const planted = real.replace('if (requireAuth && window > 0) {\n\t\t\twrapWindowed(', 'if (requireAuth && authWindowSeconds > 0) {\n\t\t\twrapWindowed(')
+			expect(planted).not.toBe(real)
+			expect(checkSecretWrapWindow(planted).some((v) => v.includes('G4: wrap does not dispatch on the effective window'))).toBe(true)
+		})
+
+		it('P9: removing the below-30 downgrade reports G7', () => {
+			const planted = real.replace('if (sdkInt < MIN_SDK_FOR_AUTH_WINDOW) 0 else requested', 'requested')
+			expect(planted).not.toBe(real)
+			expect(checkSecretWrapWindow(planted).some((v) => v.startsWith('G7'))).toBe(true)
+		})
+
+		it('P10: an unguarded deleteWrapKey reports G6', () => {
+			const planted = real.replace('if (!DELETABLE_WRAP_KEY_ALIAS_PATTERN.matches(alias)) {', 'if (alias.isEmpty()) {')
+			expect(planted).not.toBe(real)
+			expect(checkSecretWrapWindow(planted).some((v) => v.startsWith('G6'))).toBe(true)
+		})
+
+		it('P11: mapping the post-prompt unauthenticated re-init back to WRAP_FAILED reports G8', () => {
+			const planted = real.replace(
+				'op=wrap path=reinit-unauthenticated-invalidated")\n\t\t\t\t\t\t\tonError("KEY_INVALIDATED", e)',
+				'op=wrap path=reinit-unauthenticated-invalidated")\n\t\t\t\t\t\t\tonError("WRAP_FAILED", e)',
+			)
+			expect(planted).not.toBe(real)
+			expect(checkSecretWrapWindow(planted).some((v) => v.startsWith('G8: wrapWindowed'))).toBe(true)
+		})
+
 		it('P6: an empty file reports every group', () => {
 			const v = checkSecretWrapWindow('')
-			for (const g of ['G2', 'G3', 'G4', 'G5', 'G6']) {
+			for (const g of ['G2', 'G3', 'G4', 'G5', 'G6', 'G7']) {
 				expect(v.some((x) => x.startsWith(g))).toBe(true)
 			}
 		})

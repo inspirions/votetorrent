@@ -1,11 +1,21 @@
 package org.votetorrent.attestationnative
 
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
+import android.content.Context
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PersistableBundle
 import android.util.Base64
+import android.view.WindowManager
 import androidx.biometric.BiometricManager
 import androidx.fragment.app.FragmentActivity
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.UiThreadUtil
 import com.facebook.react.module.annotations.ReactModule
 
 /**
@@ -474,6 +484,86 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		)
 	}
 
+	/**
+	 * Phase 63 review CR-02: delete a vote-record wrap key so the next seal creates a fresh one. The
+	 * alias restriction lives in [SecretWrapHelper.deleteWrapKey] (identity and signing aliases are
+	 * refused before the Keystore is touched). Resolves `{ deleted }`.
+	 */
+	override fun deleteWrapKey(keyAlias: String, promise: Promise) {
+		try {
+			val deleted = secretWrapHelper.deleteWrapKey(keyAlias)
+			promise.resolve(Arguments.createMap().apply { putBoolean("deleted", deleted) })
+		} catch (e: InvalidWrapKeyAliasException) {
+			promise.reject("INVALID_ARGUMENT", e)
+		} catch (e: WrapKeyPolicyMismatchException) {
+			promise.reject("WRAP_KEY_POLICY_MISMATCH", e)
+		} catch (e: Exception) {
+			promise.reject("WRAP_FAILED", e)
+		}
+	}
+
+	/**
+	 * Phase 63 review CR-01: add or clear FLAG_SECURE on the current Activity's window, on the UI
+	 * thread, so the Recents snapshot and screenshots of the decrypted receipt are blank.
+	 */
+	override fun setSecureScreen(enabled: Boolean, promise: Promise) {
+		val activity = reactApplicationContext.currentActivity
+		if (activity == null) {
+			promise.reject("NO_ACTIVITY", "no current Activity to apply FLAG_SECURE to")
+			return
+		}
+		UiThreadUtil.runOnUiThread {
+			try {
+				if (enabled) {
+					activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+				} else {
+					activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+				}
+				promise.resolve(Arguments.createMap().apply { putBoolean("applied", enabled) })
+			} catch (e: Exception) {
+				promise.reject("SECURE_SCREEN_FAILED", e)
+			}
+		}
+	}
+
+	/**
+	 * Phase 63 review WR-03: SYNCHRONOUS sensitive copy. The clip's description extras carry
+	 * EXTRA_IS_SENSITIVE (API 33+; the same key by literal below 33, which older systems ignore), so the
+	 * Android 13+ overlay hides the preview and IMEs keep it out of clipboard history. A private token
+	 * in the extras lets the 60 s best-effort clear recognise its own clip from the DESCRIPTION alone,
+	 * never reading the clip text (no "pasted from clipboard" notice). The clear only happens while the
+	 * app can still see the clipboard (foreground on API 29+); otherwise it is a no-op.
+	 */
+	override fun copySensitiveText(text: String): Boolean {
+		return try {
+			val clipboard = reactApplicationContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+			val token = java.util.UUID.randomUUID().toString()
+			val clip = ClipData.newPlainText("", text)
+			clip.description.extras = PersistableBundle().apply {
+				putBoolean(if (Build.VERSION.SDK_INT >= 33) ClipDescription.EXTRA_IS_SENSITIVE else LEGACY_EXTRA_IS_SENSITIVE, true)
+				putString(CLIP_TOKEN_EXTRA, token)
+			}
+			clipboard.setPrimaryClip(clip)
+			Handler(Looper.getMainLooper()).postDelayed({
+				try {
+					val desc = clipboard.primaryClipDescription
+					if (desc != null && desc.extras?.getString(CLIP_TOKEN_EXTRA) == token) {
+						if (Build.VERSION.SDK_INT >= 28) {
+							clipboard.clearPrimaryClip()
+						} else {
+							clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+						}
+					}
+				} catch (e: Exception) {
+					// Best effort only.
+				}
+			}, SENSITIVE_CLIP_CLEAR_MS)
+			true
+		} catch (e: Exception) {
+			false
+		}
+	}
+
 	/** Plan 62-75: write a sanitized cache file; resolves `{ uri }`. Rejects INVALID_NAME / WRITE_FAILED. */
 	override fun writeShareFile(fileName: String, contents: String, promise: Promise) {
 		Thread {
@@ -509,5 +599,10 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 
 	companion object {
 		const val NAME = "AttestationNative"
+
+		/** ClipDescription.EXTRA_IS_SENSITIVE's value, for API levels whose SDK predates the constant. */
+		private const val LEGACY_EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
+		private const val CLIP_TOKEN_EXTRA = "org.votetorrent.clipToken"
+		private const val SENSITIVE_CLIP_CLEAR_MS = 60_000L
 	}
 }

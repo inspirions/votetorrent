@@ -280,10 +280,18 @@ describe('E4 D-05 / R-2 unsupported and dependent questions', () => {
 })
 
 describe('E5 selection-invalid', () => {
-	it('a non-empty selection for an unknown office refuses', async () => {
-		const h = happy({ selectionMap: { ...GOOD_SELECTION, 'b-9:q-x': ['b-9:q-x:x'] } })
+	it('WR-01: a non-empty selection for an office not on the ballot is ignored and never signed', async () => {
+		const h = happy({ selectionMap: { ...GOOD_SELECTION, 'b-9:q-x': ['b-9:q-x:x'], 'b-1:q-gone': ['b-1:q-gone:x'] } })
+		const r = expectEligible(await evaluateVoteEligibility(h.deps))
+		expect(r.selections).toEqual({ 'b-1': { 'q-req': ['x'] } })
+	})
+	it('WR-01: an orphan non-array entry is ignored too', async () => {
+		expectEligible(await evaluateVoteEligibility(happy({ selectionMap: { ...GOOD_SELECTION, 'b-9:q-x': 'nope' as unknown as string[] } }).deps))
+	})
+	it('WR-01: an orphan alongside a bad live selection still refuses, naming only the live question', async () => {
+		const h = happy({ selectionMap: { 'b-1:q-req': ['b-1:q-req:zzz'], 'b-9:q-x': ['b-9:q-x:x'] } })
 		const r = expectRefusal(await evaluateVoteEligibility(h.deps), 'selection-invalid')
-		expect(r.questions).toEqual([])
+		expect(r.questions).toEqual([{ officeId: 'b-1:q-req', ballotId: 'b-1', questionCode: 'q-req' }])
 		expect(h.producer.getCurrentDeviceKey).not.toHaveBeenCalled()
 	})
 	it('an empty selection for an unknown office is ignored', async () => {
@@ -294,7 +302,8 @@ describe('E5 selection-invalid', () => {
 		expect(r.questions).toEqual([{ officeId: 'b-1:q-req', ballotId: 'b-1', questionCode: 'q-req' }])
 	})
 	it('two distinct candidates on a voteFor 1 office refuse', async () => {
-		expectRefusal(await evaluateVoteEligibility(happy({ selectionMap: { 'b-1:q-req': ['b-1:q-req:x', 'b-1:q-req:y'] } }).deps), 'selection-invalid')
+		const r = expectRefusal(await evaluateVoteEligibility(happy({ selectionMap: { 'b-1:q-req': ['b-1:q-req:x', 'b-1:q-req:y'] } }).deps), 'selection-invalid')
+		expect(r.questions).toEqual([{ officeId: 'b-1:q-req', ballotId: 'b-1', questionCode: 'q-req' }])
 	})
 	it('a duplicated candidate is one option', async () => {
 		const r = expectEligible(await evaluateVoteEligibility(happy({ selectionMap: { 'b-1:q-req': ['b-1:q-req:x', 'b-1:q-req:x'] } }).deps))
@@ -469,7 +478,8 @@ describe('E13 gate order', () => {
 		let selectionMap: Record<string, string[]> = { 'b-1:q-req': ['b-1:q-req:x'] }
 		if (failing('below-minimum')) selectionMap['b-1:q-multi'] = ['b-1:q-multi:a']
 		if (failing('required-unanswered')) selectionMap = { ...(failing('below-minimum') ? { 'b-1:q-multi': ['b-1:q-multi:a'] } : {}) }
-		if (failing('selection-invalid')) selectionMap['b-9:q-x'] = ['b-9:q-x:x']
+		// A candidate a live office does not offer (an orphan office is ignored since WR-01).
+		if (failing('selection-invalid')) selectionMap['b-1:q-opt'] = ['b-1:q-opt:zzz']
 		const stubMode = i === 13
 		const rowKey = stubMode ? STUB_KEY : i === 12 ? KEY_B.compressed : KEY_A.compressed
 		let engines: Parameters<typeof fakeEngines>[0]
@@ -544,6 +554,6 @@ describe('E16 resolveVoteSelections purity', () => {
 	})
 	it('a non-array value is invalid, never a throw', () => {
 		const r = resolveVoteSelections(c(), { 'b-1:q-req': 'nope' as unknown as string[] })
-		expect(r).toMatchObject({ ok: false, reason: 'selection-invalid' })
+		expect(r).toMatchObject({ ok: false, reason: 'selection-invalid', questions: [{ officeId: 'b-1:q-req', ballotId: 'b-1', questionCode: 'q-req' }] })
 	})
 })

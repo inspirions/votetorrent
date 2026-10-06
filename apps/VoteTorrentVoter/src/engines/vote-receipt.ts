@@ -2,15 +2,16 @@
  * vote-receipt.ts - the receipt's read model (Phase 63 plan 12; D-11, D-13, D-15, D-18, D-21, D-22).
  *
  * Status and loss facts come from the 63-08 marker with no keystore call. Choices and nonces come
- * only from `openVoteRecord`, which prompts for a fingerprint. Storage is reached ONLY through the
- * store's `readVoteMarker` and `readSavedVote` (gate K1). This module never writes, deletes or
+ * only from `openVoteRecord`, which prompts for a fingerprint, and only when the decrypted record
+ * matches the stored marker (WR-02). Storage is reached ONLY through the store's `readVoteMarker`
+ * and `readSavedVote` (gate K1). This module never writes, deletes or
  * regenerates anything, and it caches nothing at module level. No logging.
  */
 
 import type { SecretWrapPrompt } from '@votetorrent/attestation-native'
 import type { Ballot } from '@votetorrent/vote-core'
 import { readVoteContext, type ElectionReadDeps } from './election-read'
-import { readSavedVote, readVoteMarker, type VoteMarker } from './vote-record-store'
+import { readSavedVote, readVoteMarker, voteRecordMatchesMarker, type VoteMarker } from './vote-record-store'
 import {
 	openVoteRecord,
 	VoteRecordUnavailableError,
@@ -101,15 +102,28 @@ const REVEAL_BY_REASON: Record<VoteRecordUnavailableReason, VoteReceiptReveal['k
 	'native-error': 'failed',
 }
 
-/** The one place choices and nonces are decrypted. Never rejects and never logs. */
+/**
+ * The one place choices and nonces are decrypted. Never rejects and never logs.
+ *
+ * WR-02: the record is shown only if it is the one the stored marker commits. The marker is read
+ * fresh before the prompt (absent or unreadable: `unreadable`, no prompt), and the decrypted record
+ * must match it (`voteRecordMatchesMarker`: election, revision, save time, ballot ids). A record a
+ * failed save left under an older marker is therefore `unreadable`, never revealed.
+ */
 export async function revealVoteReceipt(
 	electionId: string,
 	envelope: VoteRecordEnvelope,
 	prompt: SecretWrapPrompt,
 ): Promise<VoteReceiptReveal> {
 	try {
+		const stored = await readVoteMarker(electionId)
+		if (stored.kind !== 'ok') return { kind: 'unreadable' }
 		const record = await openVoteRecord(electionId, envelope, { prompt })
-		if (record.electionId !== electionId || !record.votes.every((v) => NONCE_RE.test(v.nonce))) {
+		if (
+			record.electionId !== electionId ||
+			!voteRecordMatchesMarker(record, stored.marker) ||
+			!record.votes.every((v) => NONCE_RE.test(v.nonce))
+		) {
 			return { kind: 'unreadable' }
 		}
 		return { kind: 'ok', record }

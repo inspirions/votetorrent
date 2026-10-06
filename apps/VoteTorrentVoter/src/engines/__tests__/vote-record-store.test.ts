@@ -34,6 +34,7 @@ import {
 	readVoteMarker,
 	voteMarkerKey,
 	voteRecordKey,
+	voteRecordMatchesMarker,
 	writeVoteRecord,
 	type VoteMarker,
 } from '../vote-record-store'
@@ -371,6 +372,79 @@ describe('stale replace (D-21)', () => {
 		expect(stored).toEqual(env2)
 		expect(stored.ct).not.toBe(env1.ct)
 		expect(await guard('e1', 2)).toBe('already-saved')
+	})
+})
+
+describe('WR-02 marker write failure on the stale replace', () => {
+	function failMarkerWrite(after?: 'land'): void {
+		const realImpl = setItem.getMockImplementation() as (k: string, v: string) => Promise<void>
+		setItem.mockImplementationOnce(realImpl)
+		setItem.mockImplementationOnce(async (k: string, v: string) => {
+			if (after === 'land') await realImpl(k, v)
+			throw new Error('disk full NEEDLE-TEXT')
+		})
+	}
+
+	it('fails storage-failed, keeps the old marker, and the new record is not what the marker commits', async () => {
+		const first = makeRecord({ electionRevision: 1 }).record
+		await save(first)
+		const second = { ...makeRecord({ electionRevision: 2 }).record, savedAt: '2026-10-06T13:00:00.000Z' }
+		const env2 = await sealed(second)
+		failMarkerWrite()
+		expect(await reasonOf(writeVoteRecord(env2, buildVoteMarker(second)))).toBe('storage-failed')
+
+		const kept = await readVoteMarker('e1')
+		expect(kept.kind === 'ok' && kept.marker).toEqual(buildVoteMarker(first))
+		// The record key holds the uncommitted second record; the marker does not describe it.
+		const read = await readSavedVote('e1', 2)
+		expect(read.state).toBe('stale')
+		const opened = await openVoteRecord('e1', read.envelope!, { prompt: PROMPT })
+		expect(opened).toEqual(second)
+		expect(voteRecordMatchesMarker(opened, read.marker!)).toBe(false)
+		// The guard reads only the marker, so a retry is allowed and commits both keys.
+		expect(await guard('e1', 2)).toBe('stale')
+		await writeVoteRecord(await sealed(second), buildVoteMarker(second))
+		const now = await readSavedVote('e1', 2)
+		expect(now.state).toBe('saved')
+		expect(voteRecordMatchesMarker(await openVoteRecord('e1', now.envelope!, { prompt: PROMPT }), now.marker!)).toBe(true)
+	})
+
+	it('a marker write that lands and then rejects is reported as committed', async () => {
+		const { record } = makeRecord()
+		failMarkerWrite('land')
+		await expect(writeVoteRecord(await sealed(record), buildVoteMarker(record))).resolves.toBeUndefined()
+		expect(await guard('e1', 1)).toBe('already-saved')
+	})
+
+	it('a rejected marker write whose read-back also fails is storage-failed', async () => {
+		const { record } = makeRecord()
+		const env = await sealed(record)
+		failMarkerWrite('land')
+		const realGet = getItem.getMockImplementation() as (k: string) => Promise<string | null>
+		getItem.mockImplementationOnce(realGet) // the pre-write guard read
+		getItem.mockImplementationOnce(() => Promise.reject(new Error('read failed')))
+		expect(await reasonOf(writeVoteRecord(env, buildVoteMarker(record)))).toBe('storage-failed')
+	})
+})
+
+describe('WR-02 voteRecordMatchesMarker', () => {
+	const { record } = makeRecord({ electionRevision: 4 })
+	const marker = buildVoteMarker(record)
+	it('matches the marker built from the record', () => {
+		expect(voteRecordMatchesMarker(record, marker)).toBe(true)
+	})
+	it.each<[string, Partial<VoteMarker>]>([
+		['revision', { electionRevision: 3 }],
+		['savedAt', { savedAt: '2026-10-06T12:00:00.001Z' }],
+		['ballot ids', { ballotIds: ['ballot-1'] }],
+		['ballot order', { ballotIds: ['ballot-2', 'ballot-1'] }],
+		['election', { electionId: 'e2' }],
+	])('a %s mismatch does not match', (_n, change) => {
+		expect(voteRecordMatchesMarker(record, { ...marker, ...change })).toBe(false)
+	})
+	it('invalid inputs are false, never a throw', () => {
+		expect(voteRecordMatchesMarker({} as VoteRecord, marker)).toBe(false)
+		expect(voteRecordMatchesMarker(record, null as unknown as VoteMarker)).toBe(false)
 	})
 })
 

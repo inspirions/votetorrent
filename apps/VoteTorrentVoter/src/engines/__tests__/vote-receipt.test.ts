@@ -329,6 +329,51 @@ describe('revealVoteReceipt', () => {
 		expect(await revealVoteReceipt('e1', env, PROMPT)).toEqual({ kind })
 	})
 
+	it('WR-02: a stale replace whose marker write failed never reveals the new record', async () => {
+		await save(makeRecord({ electionRevision: 3 }))
+		const second = { ...makeRecord({ electionRevision: 4 }), savedAt: '2026-10-06T13:00:00.000Z' }
+		const env2 = await vault.sealVoteRecord(second, { prompt: PROMPT })
+		const setItem = AsyncStorage.setItem as jest.Mock
+		const realImpl = setItem.getMockImplementation() as (k: string, v: string) => Promise<void>
+		setItem.mockImplementationOnce(realImpl)
+		setItem.mockImplementationOnce(() => Promise.reject(new Error('disk full')))
+		await expect(writeVoteRecord(env2, buildVoteMarker(second))).rejects.toMatchObject({ reason: 'storage-failed' })
+
+		// The marker still says revision 3, so the receipt is stale; the record key now holds revision 4.
+		const load = await loadVoteReceipt('e1', 4)
+		expect(load.kind).toBe('stale')
+		if (load.kind !== 'stale') throw new Error('unreachable')
+		expect(load.marker.electionRevision).toBe(3)
+		expect(load.envelope).toEqual(env2)
+		const out = await revealVoteReceipt('e1', load.envelope, PROMPT)
+		expect(out).toEqual({ kind: 'unreadable' })
+		expect(JSON.stringify(out)).not.toContain(second.votes[0]!.nonce)
+	})
+
+	it('WR-02 negative control: a record under a marker of another revision is unreadable', async () => {
+		const record = makeRecord({ electionRevision: 4 })
+		const env = await vault.sealVoteRecord(record, { prompt: PROMPT })
+		await AsyncStorage.setItem(voteRecordKey('e1'), JSON.stringify(env))
+		await AsyncStorage.setItem(voteMarkerKey('e1'), JSON.stringify({ ...buildVoteMarker(record), electionRevision: 3 }))
+		expect(await revealVoteReceipt('e1', env, PROMPT)).toEqual({ kind: 'unreadable' })
+	})
+
+	it('WR-02 negative control: the same revision with another save time is unreadable', async () => {
+		const record = makeRecord({ electionRevision: 3 })
+		const env = await vault.sealVoteRecord(record, { prompt: PROMPT })
+		await AsyncStorage.setItem(voteMarkerKey('e1'), JSON.stringify({ ...buildVoteMarker(record), savedAt: '2026-10-06T11:59:59.000Z' }))
+		expect(await revealVoteReceipt('e1', env, PROMPT)).toEqual({ kind: 'unreadable' })
+	})
+
+	it('WR-02: with no readable marker the reveal is unreadable and never prompts', async () => {
+		const env = await vault.sealVoteRecord(makeRecord(), { prompt: PROMPT })
+		const before = wrapper.promptCount
+		expect(await revealVoteReceipt('e1', env, PROMPT)).toEqual({ kind: 'unreadable' })
+		await AsyncStorage.setItem(voteMarkerKey('e1'), '{garbage')
+		expect(await revealVoteReceipt('e1', env, PROMPT)).toEqual({ kind: 'unreadable' })
+		expect(wrapper.promptCount).toBe(before)
+	})
+
 	it('treats an opened record with a malformed nonce as unreadable', async () => {
 		const env = await save(makeRecord())
 		const bad = makeRecord()

@@ -9,7 +9,7 @@
  *   2. every ballot confirmed, and at least one ballot (D-03);
  *   3. no unsupported question and no `dependsOn` question (D-05, R-2);
  *   4. selections usable, required questions answered, `optionRange.min` met for answered
- *      questions (D-04, R-2);
+ *      questions (D-04, R-2); a selection for an office not on the ballot is ignored (WR-01);
  *   5. an all-blank ballot is eligible when nothing is required (R-3);
  *   6. a registered device: the P-256 device key, the exact `Association.DeviceKey` lookup, an
  *      active Registrant of the election's authority (D-06);
@@ -141,6 +141,12 @@ function compareRefs (a: VoteQuestionRef, b: VoteQuestionRef): number {
  * Maps the UI selection map to structured codes through the confirmed ballots' offices
  * (`Office.ballotId` / `questionCode`, `Candidate.optionCode`); an id is never split. Pure: never
  * mutates its input and never throws on map contents.
+ *
+ * WR-01: an entry whose office is not on the confirmed ballots is an orphan (a question dropped or
+ * re-coded by a later revision, or another election's selection). It is ignored, so it is never
+ * signed and never blocks Submit; the voter cannot see or clear it. An entry for an office that IS
+ * on the ballot but is unusable (not an array, a candidate the office does not offer, more options
+ * than `voteFor`) still refuses `selection-invalid`, and always names that question.
  */
 export function resolveVoteSelections (
 	context: Pick<VoteContext, 'electionId' | 'ballots'>,
@@ -153,18 +159,14 @@ export function resolveVoteSelections (
 
 	for (const [officeId, ids] of Object.entries(selectionMap)) {
 		const office = byId.get(officeId)
+		// WR-01: an orphan office is not on this ballot, so nothing of it can be signed.
+		if (office === undefined) continue
+		const ref = { officeId, ballotId: office.ballotId, questionCode: office.questionCode }
 		if (!Array.isArray(ids)) {
-			if (office !== undefined) invalid.set(officeId, { officeId, ballotId: office.ballotId, questionCode: office.questionCode })
-			else invalid.set(officeId, { officeId, ballotId: '', questionCode: '' })
+			invalid.set(officeId, ref)
 			continue
 		}
 		if (ids.length === 0) continue
-		if (office === undefined) {
-			// An unknown office carries no question ref.
-			invalid.set(officeId, { officeId, ballotId: '', questionCode: '' })
-			continue
-		}
-		const ref = { officeId, ballotId: office.ballotId, questionCode: office.questionCode }
 		const codes = new Set<string>()
 		let bad = false
 		for (const id of ids) {
@@ -183,8 +185,8 @@ export function resolveVoteSelections (
 	}
 
 	if (invalid.size > 0) {
-		const questions = [...invalid.values()].filter(r => r.ballotId !== '').sort(compareRefs)
-		return { ok: false, reason: 'selection-invalid', questions }
+		// Every invalid entry is on the ballot, so every refusal names at least one question.
+		return { ok: false, reason: 'selection-invalid', questions: [...invalid.values()].sort(compareRefs) }
 	}
 
 	const selections: VoteSelections = {}

@@ -19,6 +19,7 @@ import { createInMemorySecretWrapperForTests, type InMemorySecretWrapper } from 
 import { createVoteRecordWrapProvider, setVoteRecordWrapProviderForTests } from '../vote-record-wrap'
 import { openVoteRecord } from '../vote-record-vault'
 import { guard, readSavedVote, readVoteMarker, voteMarkerKey, voteRecordKey } from '../vote-record-store'
+import { loadVoteReceipt, revealVoteReceipt } from '../vote-receipt'
 
 const mockCreateRealAttestationProducer = jest.fn((_opts: { enablePlayIntegrity: boolean }): unknown => undefined)
 
@@ -432,6 +433,57 @@ describe('castVote refusals and failures', () => {
 			expect(v.templateDigest).toBe(ballotTemplateDigest(ctx.ballots[i]!, 4))
 		})
 		expect(await castVote(depsOf())).toMatchObject({ ok: false, stage: 'ineligible', eligibility: { reason: 'already-saved' } })
+	})
+
+	it('C18 WR-01 an orphan selection does not block Submit and is not in the signed entries', async () => {
+		// q-gone was on the ballot the voter saw, b-9 is another election's office: neither is on this ballot.
+		const selectionMap = { ...GOOD, 'b-1:q-gone': ['b-1:q-gone:x'], 'b-9:q-x': ['b-9:q-x:y'] }
+		const r = expectSaved(await castVote(depsOf({ selectionMap })))
+		expect(r.ballotIds).toEqual(['b-1', 'b-2'])
+		expect(producer.signDeviceKeyDigest).toHaveBeenCalledTimes(1)
+		const record = await openStored('e-1', 3)
+		expect(record.votes[0]!.answers).toEqual([{ questionCode: 'q-req', optionCodes: ['x'] }])
+		expect(record.votes[1]!.answers).toEqual([])
+		const all = JSON.stringify(record)
+		expect(all).not.toContain('q-gone')
+		expect(all).not.toContain('b-9')
+	})
+
+	it('C19 WR-01 a bad selection for a question still on the ballot blocks Submit and names it', async () => {
+		const selectionMap = { ...GOOD, 'b-1:q-opt': ['b-1:q-opt:zzz'], 'b-9:q-x': ['b-9:q-x:y'] }
+		const r = await castVote(depsOf({ selectionMap }))
+		expect(r).toMatchObject({
+			ok: false,
+			stage: 'ineligible',
+			eligibility: { reason: 'selection-invalid', questions: [{ officeId: 'b-1:q-opt', ballotId: 'b-1', questionCode: 'q-opt' }] },
+		})
+		expect(producer.getCurrentDeviceKey).not.toHaveBeenCalled()
+		expect(producer.signDeviceKeyDigest).not.toHaveBeenCalled()
+		expectNothingPersisted()
+	})
+
+	it('C14b WR-02 a stale replace whose marker write fails is not saved and its record is never revealed', async () => {
+		expectSaved(await castVote(depsOf()))
+		revisionNow = 4
+		const realImpl = setItem.getMockImplementation() as (k: string, v: string) => Promise<void>
+		setItem.mockImplementationOnce(realImpl)
+		setItem.mockImplementationOnce(() => Promise.reject(new Error('disk full NEEDLE')))
+		const r = await castVote(depsOf())
+		expect(r).toEqual({ ok: false, stage: 'store', reason: 'storage-failed' })
+		const marker = await readVoteMarker('e-1')
+		expect(marker.kind === 'ok' && marker.marker.electionRevision).toBe(3)
+		expect(await guard('e-1', 4)).toBe('stale')
+
+		const load = await loadVoteReceipt('e-1', 4)
+		if (load.kind !== 'stale') throw new Error('expected the stale receipt state')
+		expect(await revealVoteReceipt('e-1', load.envelope, VIEW_PROMPT)).toEqual({ kind: 'unreadable' })
+
+		// The retry commits both keys, and that record reveals.
+		expect(await castVote(depsOf())).toMatchObject({ ok: true, replacedStale: true, electionRevision: 4 })
+		const again = await loadVoteReceipt('e-1', 4)
+		if (again.kind !== 'saved') throw new Error('expected the saved receipt state')
+		const shown = await revealVoteReceipt('e-1', again.envelope, VIEW_PROMPT)
+		expect(shown.kind === 'ok' && shown.record.electionRevision).toBe(4)
 	})
 
 	it('C15 a digest the builder cannot use is a build failure before any prompt', async () => {

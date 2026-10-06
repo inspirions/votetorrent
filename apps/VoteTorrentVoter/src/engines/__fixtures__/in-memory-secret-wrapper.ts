@@ -49,6 +49,7 @@ const nodeCrypto = require('crypto') as {
 }
 
 import {
+	isDeletableWrapKeyAlias,
 	isValidWrapKeyAlias,
 	MAX_AUTH_WINDOW_SECONDS,
 	SecretWrapError,
@@ -114,11 +115,45 @@ export type InMemorySecretWrapper = SecretWrapper & {
 	noteExternalAuthentication(): void
 	/** The alias's fixed auth policy, or undefined when the alias has no key yet. */
 	aliasPolicy(alias: string): { requireAuth: boolean; authWindowSeconds: number } | undefined
+	/**
+	 * CR-02: models a biometric enrollment change. Every later wrap/unwrap under [alias] rejects
+	 * `KEY_INVALIDATED` with NO prompt (native fails at Cipher.init, before any prompt) until the alias
+	 * is deleted. Throws when the alias has no key.
+	 */
+	invalidateAlias(alias: string): void
+	/** Aliases passed to `deleteWrapKey`, in order (only present when `replaceable`). */
+	readonly deleteCalls: readonly string[]
+	/** Makes the next `deleteWrapKey` reject `WRAP_FAILED` without deleting. */
+	failNextDelete(): void
 }
 
-export function createInMemorySecretWrapperForTests(config?: { nowMs?: () => number }): InMemorySecretWrapper {
+/** The fixture plus the CR-02 `deleteWrapKey` capability (`replaceable: true`). */
+export type ReplaceableInMemorySecretWrapper = InMemorySecretWrapper & {
+	deleteWrapKey(keyAlias: string): Promise<boolean>
+}
+
+export function createInMemorySecretWrapperForTests(config: {
+	nowMs?: () => number
+	replaceable: true
+}): ReplaceableInMemorySecretWrapper
+export function createInMemorySecretWrapperForTests(config?: { nowMs?: () => number; replaceable?: false }): InMemorySecretWrapper
+export function createInMemorySecretWrapperForTests(config?: {
+	nowMs?: () => number
+	replaceable?: boolean
+}): InMemorySecretWrapper | ReplaceableInMemorySecretWrapper {
 	const nowMs = config?.nowMs
-	const keys = new Map<string, { key: Uint8Array; requireAuth: boolean; authWindowSeconds: number }>()
+	const keys = new Map<string, { key: Uint8Array; requireAuth: boolean; authWindowSeconds: number; invalidated?: boolean }>()
+	const deleteCalls: string[] = []
+	let failDelete = false
+
+	/** CR-02 model: an invalidated alias fails before any prompt, as native does. */
+	function rejectIfInvalidated(op: 'wrap' | 'unwrap', keyAlias: string, options: SecretWrapOptions): void {
+		if (keys.get(keyAlias)?.invalidated !== true) return
+		if (op === 'wrap') wrapCalls += 1
+		else unwrapCalls += 1
+		calls.push({ op, keyAlias, requireAuth: options.requireAuth, promptTitle: options.requireAuth ? options.prompt!.title : null })
+		throw new SecretWrapError('KEY_INVALIDATED', 'in-memory-secret-wrapper: alias invalidated')
+	}
 	// ONE value for the whole fixture, not per alias: mirrors KeyMint's per-user auth token, which any
 	// timeout key accepts (A1).
 	let lastAuthAtMs: number | undefined
@@ -174,7 +209,18 @@ export function createInMemorySecretWrapperForTests(config?: { nowMs?: () => num
 		if (prompted && nowMs !== undefined) lastAuthAtMs = nowMs()
 	}
 
-	return {
+	const fixture: InMemorySecretWrapper = {
+		get deleteCalls() {
+			return deleteCalls
+		},
+		invalidateAlias(alias) {
+			const entry = keys.get(alias)
+			if (entry === undefined) throw new Error('in-memory-secret-wrapper: no key to invalidate under ' + alias)
+			entry.invalidated = true
+		},
+		failNextDelete() {
+			failDelete = true
+		},
 		get promptCount() {
 			return promptCount
 		},
@@ -217,6 +263,7 @@ export function createInMemorySecretWrapperForTests(config?: { nowMs?: () => num
 					`plaintext must be 1..${MAX_PLAINTEXT_BYTES} bytes, got ${plaintext.length}`,
 				)
 			}
+			rejectIfInvalidated('wrap', keyAlias, options)
 			begin('wrap', keyAlias, options)
 			lastWrapPlaintext = plaintext
 			let entry = keys.get(keyAlias)
@@ -246,6 +293,7 @@ export function createInMemorySecretWrapperForTests(config?: { nowMs?: () => num
 		},
 
 		async unwrapSecret(wrapped: WrappedSecret, options: SecretWrapOptions): Promise<Uint8Array> {
+			rejectIfInvalidated('unwrap', wrapped.keyAlias, options)
 			begin('unwrap', wrapped.keyAlias, options)
 			const entry = keys.get(wrapped.keyAlias)
 			if (!entry) throw new SecretWrapError('NO_WRAP_KEY', 'no wrap key for alias')
@@ -269,4 +317,19 @@ export function createInMemorySecretWrapperForTests(config?: { nowMs?: () => num
 			return out
 		},
 	}
+	if (config?.replaceable !== true) return fixture
+	return Object.assign(fixture, {
+		async deleteWrapKey(keyAlias: string): Promise<boolean> {
+			// Mirrors native: only the vote-record family may be deleted, checked before anything else.
+			if (!isDeletableWrapKeyAlias(keyAlias)) {
+				throw new SecretWrapError('INVALID_ARGUMENT', `wrap key alias may not be deleted: ${keyAlias}`)
+			}
+			deleteCalls.push(keyAlias)
+			if (failDelete) {
+				failDelete = false
+				throw new SecretWrapError('WRAP_FAILED', 'in-memory-secret-wrapper: injected delete failure')
+			}
+			return keys.delete(keyAlias)
+		},
+	})
 }

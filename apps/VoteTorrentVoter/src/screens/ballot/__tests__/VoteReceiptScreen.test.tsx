@@ -15,6 +15,11 @@ import type {ParamListBase} from '@react-navigation/native';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';
 import type {Ballot} from '@votetorrent/vote-core';
 jest.mock('../../../providers/VoterAppProvider');
+// CR-01 (review): observe the FLAG_SECURE toggle; everything else in the package stays real.
+jest.mock('@votetorrent/attestation-native', () => ({
+	...jest.requireActual('@votetorrent/attestation-native'),
+	setSecureScreen: jest.fn(async () => false),
+}));
 jest.mock('../../../engines/vote-receipt', () => ({
 	...jest.requireActual('../../../engines/vote-receipt'),
 	readReceiptElection: jest.fn(),
@@ -39,6 +44,9 @@ import VoteReceiptScreen from '../VoteReceiptScreen';
 import {ToastProvider} from '../../../components/Toast';
 import {lightTheme} from '../../../theme/themes';
 import i18n, {resources} from '../../../i18n';
+import {setSecureScreen} from '@votetorrent/attestation-native';
+
+const secureCalls = setSecureScreen as jest.Mock;
 
 const readElection = receipt.readReceiptElection as jest.Mock;
 
@@ -305,24 +313,87 @@ describe('VoteReceiptScreen', () => {
 		expect(nonceGroups(0)).toHaveLength(16);
 	});
 
-	it('S4b: the app going to the background clears the record', async () => {
-		let handler: ((s: string) => void) | undefined;
+	it('S4b: inactive covers the record without clearing it; background clears it (CR-01)', async () => {
+		const handlers: Array<(s: string) => void> = [];
 		jest.spyOn(AppState, 'addEventListener').mockImplementation(((_e: string, h: (s: string) => void) => {
-			handler = h;
+			handlers.push(h);
+			return {remove: () => undefined};
+		}) as never);
+		const emit = (state: string) => handlers.forEach(h => h(state));
+		const record = makeRecord();
+		await save(record);
+		await mount({electionId: 'e1'});
+		await press('receipt-reveal');
+		expect(nonceGroups(0)).toHaveLength(16);
+		expect(has('receipt-privacy-cover')).toBe(false);
+		await renderer.act(async () => {
+			emit('inactive');
+		});
+		// The cover is up and no plaintext choice or code is anywhere in the tree.
+		expect(has('receipt-privacy-cover')).toBe(true);
+		expect(nonceGroups(0)).toHaveLength(0);
+		const tree = everything();
+		expect(tree).not.toContain('Diana Foster');
+		expect(tree).not.toContain('Mayor question');
+		for (const v of record.votes) {
+			expect(tree).not.toContain(v.nonce.slice(0, 4));
+		}
+		// Back to active: the same record is shown again with no new prompt.
+		const prompts = wrapper.promptCount;
+		await renderer.act(async () => {
+			emit('active');
+		});
+		expect(has('receipt-privacy-cover')).toBe(false);
+		expect(nonceGroups(0)).toHaveLength(16);
+		expect(wrapper.promptCount).toBe(prompts);
+		await renderer.act(async () => {
+			emit('inactive');
+		});
+		await renderer.act(async () => {
+			emit('background');
+		});
+		await renderer.act(async () => {
+			emit('active');
+		});
+		expect(nonceGroups(0)).toHaveLength(0);
+		expect(has('receipt-reveal')).toBe(true);
+	});
+
+	it('S4c: FLAG_SECURE is on while the receipt is focused, off on blur and on unmount (CR-01)', async () => {
+		secureCalls.mockClear();
+		await save(makeRecord());
+		await mount({electionId: 'e1'});
+		expect(secureCalls.mock.calls).toEqual([[true]]);
+		await renderer.act(async () => {
+			navRef.navigate('Other');
+		});
+		await flush();
+		expect(secureCalls.mock.calls).toEqual([[true], [false]]);
+		await renderer.act(async () => {
+			navRef.goBack();
+		});
+		await flush();
+		expect(secureCalls.mock.calls).toEqual([[true], [false], [true]]);
+		await renderer.act(async () => {
+			tr!.unmount();
+		});
+		tr = null;
+		expect(secureCalls.mock.calls).toEqual([[true], [false], [true], [false]]);
+	});
+
+	it('S4d: the cover is not shown when nothing is revealed (no plaintext to hide)', async () => {
+		const handlers: Array<(s: string) => void> = [];
+		jest.spyOn(AppState, 'addEventListener').mockImplementation(((_e: string, h: (s: string) => void) => {
+			handlers.push(h);
 			return {remove: () => undefined};
 		}) as never);
 		await save(makeRecord());
 		await mount({electionId: 'e1'});
-		await press('receipt-reveal');
-		expect(nonceGroups(0)).toHaveLength(16);
 		await renderer.act(async () => {
-			handler!('inactive');
+			handlers.forEach(h => h('inactive'));
 		});
-		expect(nonceGroups(0)).toHaveLength(16);
-		await renderer.act(async () => {
-			handler!('background');
-		});
-		expect(nonceGroups(0)).toHaveLength(0);
+		expect(has('receipt-privacy-cover')).toBe(false);
+		expect(has('receipt-reveal')).toBe(true);
 	});
 
 	it('S5: copies the ungrouped code and shows the warning for every ballot', async () => {

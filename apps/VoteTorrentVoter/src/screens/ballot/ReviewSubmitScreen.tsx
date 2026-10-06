@@ -14,6 +14,10 @@
  *
  * Blank questions are listed (D-04, R-3); an eligible all-blank vote is allowed and stated.
  *
+ * WR-01: once the ballot loads, selections it no longer shows are pruned from the provider, so
+ * what Review lists is exactly what Submit can sign. A selection that is unusable for a question
+ * still on the ballot keeps Submit disabled and is named under the reason.
+ *
  * Submit calls `castVote` with the vote prompt copy (D-09) and passes no signing override, so
  * signing is always the real device-key signer (D-08); the dev stub is never reachable from here.
  * `castVote` re-checks eligibility itself.
@@ -180,7 +184,7 @@ const CHECK_FAILED: VoteEligibility = {
 export default function ReviewSubmitScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() - no inline fixture-module import.
 	const {getBallot, getEngine, seededElectionId, nowMs} = useVoterApp();
-	const {selectionMap, clearSelections} = useBallotSelection();
+	const {selectionMap, clearSelections, pruneSelections} = useBallotSelection();
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('ballot');
 	const navigation = useNavigation<ReviewSubmitNavigationProp>();
@@ -201,6 +205,15 @@ export default function ReviewSubmitScreen() {
 			mounted.current = false;
 		};
 	}, []);
+
+	// WR-01: drop selections the loaded ballot no longer shows (an office or candidate a later
+	// revision removed, or another election's choice). The voter cannot see or clear them, so they
+	// must neither block Submit nor be signed. Only a loaded ballot prunes; a failed read never does.
+	useEffect(() => {
+		if (ballot !== null && !failed) {
+			pruneSelections(ballot.offices);
+		}
+	}, [ballot, failed, pruneSelections]);
 
 	useFocusEffect(
 		useCallback(() => {

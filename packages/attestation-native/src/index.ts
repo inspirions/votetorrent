@@ -37,6 +37,8 @@ export type { SignDeviceKeyDigestOptions } from './real-attestation-producer'
 export {
 	VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1,
 	WRAP_KEY_ALIAS_PATTERN,
+	VOTE_RECORD_WRAP_KEY_ALIAS_PATTERN,
+	isDeletableWrapKeyAlias,
 	MAX_AUTH_WINDOW_SECONDS,
 	isValidWrapKeyAlias,
 	SECRET_WRAP_ERROR_CODES,
@@ -49,6 +51,7 @@ export type {
 	SecretWrapPrompt,
 	SecretWrapOptions,
 	SecretWrapper,
+	ReplaceableSecretWrapper,
 	SecretWrapErrorCode,
 } from './secret-wrap'
 
@@ -56,3 +59,8 @@ export type {
 // "no re-export of the TurboModule default" rule as above; `file-share.ts` requires it lazily.
 export { FileShareError, writeShareFile, shareFileAndroid } from './file-share'
 export type { FileShareErrorCode } from './file-share'
+
+// Phase 63 review (CR-01, WR-03): FLAG_SECURE toggle and sensitive clipboard copy. Named exports
+// only; `secure-surface.ts` requires the TurboModule lazily and never throws.
+export { setSecureScreen, copySensitiveText } from './secure-surface'
+export type { SensitiveCopyResult } from './secure-surface'
