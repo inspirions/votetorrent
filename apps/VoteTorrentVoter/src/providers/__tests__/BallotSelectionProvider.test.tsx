@@ -179,3 +179,39 @@ describe('BallotSelectionProvider / useBallotSelection (VOTE-02, D-01)', () => {
 		expect(captured.value!.currentQuestionIndex).toBe(1);
 	});
 });
+
+describe('BallotSelectionProvider clearSelections (post-save reset, D-10)', () => {
+	it('P1: resets selectionMap to {} and currentQuestionIndex to 0', () => {
+		const { captured } = renderProvider();
+
+		renderer.act(() => {
+			captured.value!.toggleCandidate('office-1', 'cand-a', 3);
+			captured.value!.toggleCandidate('office-2', 'cand-x', 1);
+			captured.value!.setCurrentQuestionIndex(1);
+		});
+		expect(Object.keys(captured.value!.selectionMap)).toHaveLength(2);
+		expect(captured.value!.currentQuestionIndex).toBe(1);
+
+		renderer.act(() => {
+			captured.value!.clearSelections();
+		});
+		expect(captured.value!.selectionMap).toEqual({});
+		expect(captured.value!.currentQuestionIndex).toBe(0);
+	});
+
+	it('P2: keeps a stable identity across re-renders and is idempotent on an empty map', () => {
+		const { captured } = renderProvider();
+		const first = captured.value!.clearSelections;
+
+		renderer.act(() => {
+			captured.value!.toggleCandidate('office-2', 'cand-y', 1);
+		});
+		expect(captured.value!.clearSelections).toBe(first);
+
+		renderer.act(() => {
+			captured.value!.clearSelections();
+			captured.value!.clearSelections();
+		});
+		expect(captured.value!.selectionMap).toEqual({});
+	});
+});

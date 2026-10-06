@@ -27,15 +27,27 @@
  * R-1: the D-06 lookup is the exact `Association.DeviceKey` match, so a rotated Android key reads
  * as not-registered. `checkVotingKey` runs after a hit as defence in depth, and no other lookup
  * route exists.
+ *
+ * castVote is the local Submit: fresh eligibility, then build, ONE signature, self-check, seal and
+ * store, in that order (D-23, D-29). Nonces come only from the CSPRNG, one per ballot, with no voter
+ * entropy (D-16, D-27). The voter entry carries the normalized compressed key (D-26) and the
+ * signature covers only `voterEntryDigest`, never answers or nonces (D-25). Signing uses only the
+ * producer instance eligibility returned, which is real in every build (D-08); the dev stub producer
+ * is never reachable from here. A failure after signing persists nothing (the store's marker is the
+ * commit point) and returns a closed reason; nothing is logged.
  */
-import { checkVotingKey } from '@votetorrent/vote-engine/rn'
+import { buildVoteEntry, checkVotingKey, makeVoteNonce, verifySigP256, voterEntryDigest } from '@votetorrent/vote-engine/rn'
+import type { VoteEntry, VoterEntry, VoterEntryUnsigned } from '@votetorrent/vote-engine/rn'
+import type { SecretWrapPrompt } from '@votetorrent/attestation-native'
 import type { IAssociationEngine, IRegistrationEngine } from '@votetorrent/vote-core'
 import { readVoteContext, toVoterBallot } from './election-read'
 import type { ElectionReadDeps, VoteContext } from './election-read'
 import { resolveVoteSigningProducer } from './attestation-producer'
 import type { AttestationProducer, VoteSigningProducer } from './attestation-producer'
-import { guard as readVoteGuard } from './vote-record-store'
-import type { VoteGuardResult } from './vote-record-store'
+import { buildVoteMarker, guard as readVoteGuard, VoteStoreWriteError, writeVoteRecord } from './vote-record-store'
+import type { VoteGuardResult, VoteStoreWriteReason } from './vote-record-store'
+import { sealVoteRecord, VoteRecordUnavailableError } from './vote-record-vault'
+import type { VoteRecord, VoteRecordUnavailableReason } from './vote-record-vault'
 import type { LifecycleState } from '../providers/types'
 
 export const VOTE_INELIGIBLE_REASONS = [
@@ -319,5 +331,151 @@ export async function evaluateVoteEligibility (deps: VoteEligibilityDeps): Promi
 		voter: registrant.voter,
 		producer,
 		replacesStale: saved === 'stale',
+	}
+}
+
+export interface CastVoteDeps extends VoteEligibilityDeps {
+	signPrompt: SecretWrapPrompt
+	recordPrompt: SecretWrapPrompt
+}
+
+export type CastVoteFailureStage = 'ineligible' | 'build' | 'sign' | 'seal' | 'store'
+
+export type CastVoteSignFailureReason = 'canceled' | 'biometric-unavailable' | 'sign-failed' | 'signature-invalid'
+
+export interface CastVoteSaved {
+	ok: true
+	electionId: string
+	electionRevision: number
+	ballotIds: string[]
+	savedAt: string
+	replacedStale: boolean
+}
+
+export type CastVoteFailure =
+	| { ok: false, stage: 'ineligible', eligibility: VoteIneligible }
+	| { ok: false, stage: 'build', reason: 'build-failed' }
+	| { ok: false, stage: 'sign', reason: CastVoteSignFailureReason }
+	| { ok: false, stage: 'seal', reason: VoteRecordUnavailableReason }
+	| { ok: false, stage: 'store', reason: VoteStoreWriteReason }
+
+export type CastVoteResult = CastVoteSaved | CastVoteFailure
+
+function assertPromptCopy (prompt: SecretWrapPrompt): void {
+	const ok = (v: unknown): boolean => typeof v === 'string' && v !== ''
+	if (prompt == null || !ok(prompt.title) || !ok(prompt.subtitle) || !ok(prompt.negativeButton)) {
+		throw new TypeError('castVote prompt copy must be non-empty')
+	}
+}
+
+function freshVoteNonce (): string {
+	const random = (globalThis as unknown as { crypto: { getRandomValues<T extends Uint8Array> (a: T): T } }).crypto.getRandomValues(new Uint8Array(32))
+	return makeVoteNonce(random)
+}
+
+function digestBytesFromBase64Url (digest: string): Uint8Array {
+	if (!/^[A-Za-z0-9_-]{43}$/.test(digest)) throw new Error('digest is not 43 base64url characters')
+	const padded = digest.replace(/-/g, '+').replace(/_/g, '/') + '='
+	const binary = (globalThis as unknown as { atob: (s: string) => string }).atob(padded)
+	if (binary.length !== 32) throw new Error('digest is not 32 bytes')
+	const out = new Uint8Array(32)
+	for (let i = 0; i < 32; i++) out[i] = binary.charCodeAt(i)
+	return out
+}
+
+function classifySignFailure (err: unknown): CastVoteSignFailureReason {
+	const code = (err as { code?: unknown } | null)?.code
+	if (code === 'CANCELED') return 'canceled'
+	if (
+		code === 'NO_BIOMETRICS_ENROLLED' || code === 'LOCKOUT' || code === 'LOCKOUT_PERMANENT'
+		|| code === 'BIOMETRIC_ERROR' || code === 'NO_ACTIVITY' || code === 'DEVICE_LOCKED'
+	) return 'biometric-unavailable'
+	return 'sign-failed'
+}
+
+export async function castVote (deps: CastVoteDeps): Promise<CastVoteResult> {
+	assertPromptCopy(deps.signPrompt)
+	assertPromptCopy(deps.recordPrompt)
+
+	const eligibility = await evaluateVoteEligibility(deps)
+	if (!eligibility.eligible) return { ok: false, stage: 'ineligible', eligibility }
+
+	const revision = eligibility.context.revision
+	let votes: VoteEntry[]
+	let unsigned: VoterEntryUnsigned
+	let digest: string
+	let digestBytes: Uint8Array
+	try {
+		const nonces = eligibility.context.ballots.map(() => freshVoteNonce())
+		votes = eligibility.context.ballots.map((ballot, i) => buildVoteEntry({
+			ballot,
+			electionRevision: revision,
+			selections: eligibility.selections[ballot.id] ?? {},
+			nonce: nonces[i] as string,
+		}))
+		unsigned = {
+			v: 1,
+			electionId: eligibility.context.electionId,
+			electionRevision: revision,
+			registrantId: eligibility.voter.registrantId,
+			privateCid: eligibility.voter.privateCid,
+			publicCid: eligibility.voter.publicCid,
+			deviceKey: eligibility.voter.compressedDeviceKey,
+			attestationCid: eligibility.voter.attestationCid,
+			ballots: votes.map(v => ({ ballotId: v.ballotId, templateDigest: v.templateDigest })),
+		}
+		digest = voterEntryDigest(unsigned)
+		digestBytes = digestBytesFromBase64Url(digest)
+	} catch {
+		return { ok: false, stage: 'build', reason: 'build-failed' }
+	}
+
+	let signed: { signature: string }
+	try {
+		signed = await eligibility.producer.signDeviceKeyDigest(digestBytes, { prompt: deps.signPrompt })
+	} catch (err) {
+		return { ok: false, stage: 'sign', reason: classifySignFailure(err) }
+	}
+
+	let valid = false
+	try {
+		valid = typeof signed?.signature === 'string' && verifySigP256(digest, signed.signature, eligibility.voter.compressedDeviceKey)
+	} catch {
+		valid = false
+	}
+	if (!valid) return { ok: false, stage: 'sign', reason: 'signature-invalid' }
+
+	const voter: VoterEntry = { ...unsigned, signature: signed.signature }
+	const record: VoteRecord = {
+		v: 1,
+		electionId: unsigned.electionId,
+		electionRevision: revision,
+		savedAt: new Date().toISOString(),
+		votes,
+		voter,
+	}
+
+	let envelope: Awaited<ReturnType<typeof sealVoteRecord>>
+	try {
+		envelope = await sealVoteRecord(record, { prompt: deps.recordPrompt })
+	} catch (err) {
+		return { ok: false, stage: 'seal', reason: err instanceof VoteRecordUnavailableError ? err.reason : 'native-error' }
+	}
+
+	let marker: ReturnType<typeof buildVoteMarker>
+	try {
+		marker = buildVoteMarker(record)
+		await writeVoteRecord(envelope, marker)
+	} catch (err) {
+		return { ok: false, stage: 'store', reason: err instanceof VoteStoreWriteError ? err.reason : 'storage-failed' }
+	}
+
+	return {
+		ok: true,
+		electionId: marker.electionId,
+		electionRevision: marker.electionRevision,
+		ballotIds: [...marker.ballotIds],
+		savedAt: marker.savedAt,
+		replacedStale: eligibility.replacesStale,
 	}
 }
