@@ -77,7 +77,7 @@
 		"react-native-quick-base64": "3.0.1",
 		"react-native-quick-crypto": "^1.1.7",
 		"react-native-safe-area-context": "^5.2.0",
-		"react-native-screens": "4.28.0",
+		"react-native-screens": "patch:react-native-screens@npm%3A4.28.0#~/.yarn/patches/react-native-screens-npm-4.28.0-votetorrent.patch",
 		"react-native-splash-view": "^0.0.22",
 		"react-native-vector-icons": "^10.0.0",
 		"readable-stream": "^4.7.0",

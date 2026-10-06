@@ -18780,6 +18780,19 @@ __metadata:
   languageName: node
   linkType: hard
 
+"react-native-screens@patch:react-native-screens@npm%3A4.28.0#~/.yarn/patches/react-native-screens-npm-4.28.0-votetorrent.patch":
+  version: 4.28.0
+  resolution: "react-native-screens@patch:react-native-screens@npm%3A4.28.0#~/.yarn/patches/react-native-screens-npm-4.28.0-votetorrent.patch::version=4.28.0&hash=eecb79"
+  dependencies:
+    react-freeze: "npm:^1.0.0"
+    warn-once: "npm:^0.1.0"
+  peerDependencies:
+    react: "*"
+    react-native: "*"
+  checksum: 10c0/ca7b13117cbe5c37806a08173245abe89b62ecece74fc142d2751535e75d990388255412d1af8077e67cb110a7b613f637693e37e04c25351c43972635440a02
+  languageName: node
+  linkType: hard
+
 "react-native-splash-view@npm:^0.0.22":
   version: 0.0.22
   resolution: "react-native-splash-view@npm:0.0.22"
@@ -22197,7 +22210,7 @@ __metadata:
     react-native-quick-base64: "npm:3.0.1"
     react-native-quick-crypto: "npm:^1.1.7"
     react-native-safe-area-context: "npm:^5.2.0"
-    react-native-screens: "npm:4.28.0"
+    react-native-screens: "patch:react-native-screens@npm%3A4.28.0#~/.yarn/patches/react-native-screens-npm-4.28.0-votetorrent.patch"
     react-native-splash-view: "npm:^0.0.22"
     react-native-vector-icons: "npm:^10.0.0"
     react-test-renderer: "npm:19.2.3"
@@ -22331,7 +22344,7 @@ __metadata:
     react-native-get-random-values: "npm:^2.0.0"
     react-native-localize: "npm:^3.4.1"
     react-native-safe-area-context: "npm:^5.2.0"
-    react-native-screens: "npm:4.28.0"
+    react-native-screens: "patch:react-native-screens@npm%3A4.28.0#~/.yarn/patches/react-native-screens-npm-4.28.0-votetorrent.patch"
     react-native-splash-view: "npm:^0.0.22"
     react-native-vector-icons: "npm:^10.0.0"
     react-test-renderer: "npm:19.2.3"
