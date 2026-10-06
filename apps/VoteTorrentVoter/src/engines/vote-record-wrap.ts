@@ -5,14 +5,14 @@
  * alias (device-key-wrap.ts): `requireAuth: true` on every wrap and unwrap, so viewing saved
  * choices needs a fingerprint.
  *
- * Today it is per-use. Submit costs two prompts (sign, then seal) and every receipt view costs
- * one. That is already an accepted D-14 outcome.
+ * Android uses a time-bound key (D-14): `VOTE_RECORD_AUTH_WINDOW_SECONDS` is passed only through
+ * `voteRecordWrapOptions`, on wrap and on unwrap. If the vote-signing prompt opens the window,
+ * Submit costs one prompt; otherwise two, which is an accepted D-14 outcome. Opening a saved receipt
+ * after the window lapses prompts once (D-13). iOS ignores the window and stays per-use. The R-5
+ * fallback to per-use is the constant set to 0, with no native change.
  *
- * 63-17 adds the named constant `VOTE_RECORD_AUTH_WINDOW_SECONDS` to this file and passes it only
- * through `voteRecordWrapOptions`.
- *
- * One alias means one policy forever, fixed at key creation. V1 has never shipped, so it may
- * adopt the windowed policy.
+ * One alias means one policy forever, fixed at key creation. V1 has never shipped, so it adopted
+ * the windowed policy.
  *
  * Never reuse the identity alias or its provider.
  */
@@ -34,11 +34,34 @@ export interface VoteRecordWrapProvider {
 }
 
 /**
- * The ONLY place the vote alias's wrap options are built. 63-17 turns the key time-bound (D-14)
- * by editing this one return value.
+ * D-14 / R-5: the auth window, in seconds, of the vote-record wrap key. D-14's aim is one prompt at
+ * Submit and its accepted worst case is two. A 10 s window lets the vote-signing prompt authorise
+ * the seal that follows it within a fraction of a second. It is no longer, to keep the "view the
+ * saved choices without a prompt right after Submit" gap (R-4) narrow.
+ *
+ * R-5 decision rule, applied by the device proof (63-18) after it counts the prompts at Submit:
+ * - 1 prompt: keep this at 10 and record "one prompt".
+ * - 2 prompts, or the windowed path is unstable on device: flip this to 0 and record "two prompts".
+ *   0 restores per-use with ZERO native change, because the per-use native path is untouched. A
+ *   window that saves no prompt buys nothing and still carries the 10 s residual, so per-use is then
+ *   strictly better. Both outcomes satisfy D-14.
+ *
+ * V1 alias hazard: this value is part of `VOTETORRENT_VOTE_RECORD_WRAP_KEY_V1`'s fixed policy. An
+ * install that created V1 under another value gets `WRAP_KEY_POLICY_MISMATCH`, which the vault maps
+ * to `policy-mismatch`. The proof therefore runs `pm clear` first, and again after any flip, then
+ * re-grants ACCESS_LOCAL_NETWORK. Once a build carrying V1 ships, a change needs a new
+ * `VOTETORRENT_VOTE_RECORD_WRAP_KEY_V2` alias; it never deletes V1.
+ *
+ * iOS ignores the value and stays per-use.
+ */
+export const VOTE_RECORD_AUTH_WINDOW_SECONDS = 10
+
+/**
+ * The ONLY place the vote alias's wrap options are built. Every vote-record wrap and unwrap is
+ * auth-required, with the D-14 window.
  */
 export function voteRecordWrapOptions(aad: Uint8Array, prompt: SecretWrapPrompt): SecretWrapOptions {
-	return { requireAuth: true, aad, prompt }
+	return { requireAuth: true, aad, prompt, authWindowSeconds: VOTE_RECORD_AUTH_WINDOW_SECONDS }
 }
 
 export function createVoteRecordWrapProvider(wrapper: SecretWrapper): VoteRecordWrapProvider {
