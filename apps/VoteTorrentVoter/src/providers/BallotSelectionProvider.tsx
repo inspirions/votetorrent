@@ -31,6 +31,11 @@ import type { Candidate, Office } from './types';
  * `clearSelections` exists for the post-save reset: Review/Submit empties the in-memory choices
  * once the vote is stored (63-13).
  *
+ * `pruneSelections` (63 WR-01) drops what the current ballot no longer shows: an office that is
+ * not on it, and a candidate id its office no longer offers. Such an entry is invisible on the
+ * Ballot and Review screens, so the voter could neither see nor clear it, and a hidden candidate
+ * would still count toward the `voteFor` cap. Review/Submit calls it whenever its ballot loads.
+ *
  * Pattern references: apps/VoteTorrentVoter/src/providers/RegistrationDraftProvider.tsx
  * (skeleton), apps/VoteTorrentAuthority/src/screens/ballots/providers/BallotDraftProvider.tsx
  * (immutable nested-array update discipline).
@@ -58,6 +63,12 @@ export interface BallotSelectionContextType {
 	 * after a vote is saved on this phone (D-10), so a saved vote's choices do not linger in memory.
 	 */
 	clearSelections: () => void;
+	/**
+	 * Keeps only entries whose office is in `offices`, and only the candidate ids that office still
+	 * offers. A no-op (the same map object) when nothing is stale, so calling it on every ballot load
+	 * never re-renders. Never adds or re-orders a selection, and never touches `currentQuestionIndex`.
+	 */
+	pruneSelections: (offices: readonly Office[]) => void;
 }
 
 const BallotSelectionContext = createContext<BallotSelectionContextType | null>(null);
@@ -113,6 +124,10 @@ export function BallotSelectionProvider({ children }: PropsWithChildren) {
 		setCurrentQuestionIndex(0);
 	}, []);
 
+	const pruneSelections = useCallback((offices: readonly Office[]) => {
+		setSelectionMap((prev) => prunedSelectionMap(prev, offices));
+	}, []);
+
 	return (
 		<BallotSelectionContext.Provider
 			value={{
@@ -123,10 +138,43 @@ export function BallotSelectionProvider({ children }: PropsWithChildren) {
 				goToNextQuestion,
 				goToPreviousQuestion,
 				clearSelections,
+				pruneSelections,
 			}}>
 			{children}
 		</BallotSelectionContext.Provider>
 	);
+}
+
+/**
+ * The pure core of `pruneSelections` (63 WR-01): `prev` restricted to the offices and candidates
+ * the given ballot shows. Returns `prev` itself when nothing was dropped.
+ */
+export function prunedSelectionMap(
+	prev: Record<string, string[]>,
+	offices: readonly Office[],
+): Record<string, string[]> {
+	const byId = new Map(offices.map((o) => [o.id, o]));
+	const next: Record<string, string[]> = {};
+	let changed = false;
+	for (const [officeId, ids] of Object.entries(prev)) {
+		const office = byId.get(officeId);
+		if (office === undefined) {
+			changed = true;
+			continue;
+		}
+		if (!Array.isArray(ids)) {
+			// Not a selection shape this provider ever writes; leave it for castVote to refuse by name.
+			next[officeId] = ids;
+			continue;
+		}
+		const offered = new Set(office.candidates.map((c) => c.id));
+		const kept = ids.filter((id) => offered.has(id));
+		if (kept.length !== ids.length) {
+			changed = true;
+		}
+		next[officeId] = kept.length === ids.length ? ids : kept;
+	}
+	return changed ? next : prev;
 }
 
 /**

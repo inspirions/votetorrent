@@ -434,6 +434,33 @@ describe('castVote refusals and failures', () => {
 		expect(await castVote(depsOf())).toMatchObject({ ok: false, stage: 'ineligible', eligibility: { reason: 'already-saved' } })
 	})
 
+	it('C18 WR-01 an orphan selection does not block Submit and is not in the signed entries', async () => {
+		// q-gone was on the ballot the voter saw, b-9 is another election's office: neither is on this ballot.
+		const selectionMap = { ...GOOD, 'b-1:q-gone': ['b-1:q-gone:x'], 'b-9:q-x': ['b-9:q-x:y'] }
+		const r = expectSaved(await castVote(depsOf({ selectionMap })))
+		expect(r.ballotIds).toEqual(['b-1', 'b-2'])
+		expect(producer.signDeviceKeyDigest).toHaveBeenCalledTimes(1)
+		const record = await openStored('e-1', 3)
+		expect(record.votes[0]!.answers).toEqual([{ questionCode: 'q-req', optionCodes: ['x'] }])
+		expect(record.votes[1]!.answers).toEqual([])
+		const all = JSON.stringify(record)
+		expect(all).not.toContain('q-gone')
+		expect(all).not.toContain('b-9')
+	})
+
+	it('C19 WR-01 a bad selection for a question still on the ballot blocks Submit and names it', async () => {
+		const selectionMap = { ...GOOD, 'b-1:q-opt': ['b-1:q-opt:zzz'], 'b-9:q-x': ['b-9:q-x:y'] }
+		const r = await castVote(depsOf({ selectionMap }))
+		expect(r).toMatchObject({
+			ok: false,
+			stage: 'ineligible',
+			eligibility: { reason: 'selection-invalid', questions: [{ officeId: 'b-1:q-opt', ballotId: 'b-1', questionCode: 'q-opt' }] },
+		})
+		expect(producer.getCurrentDeviceKey).not.toHaveBeenCalled()
+		expect(producer.signDeviceKeyDigest).not.toHaveBeenCalled()
+		expectNothingPersisted()
+	})
+
 	it('C15 a digest the builder cannot use is a build failure before any prompt', async () => {
 		const sign = jest.fn()
 		await jest.isolateModulesAsync(async () => {

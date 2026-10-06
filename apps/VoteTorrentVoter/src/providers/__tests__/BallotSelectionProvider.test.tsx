@@ -7,7 +7,7 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
-import { BallotSelectionProvider, useBallotSelection } from '../BallotSelectionProvider';
+import { BallotSelectionProvider, prunedSelectionMap, useBallotSelection } from '../BallotSelectionProvider';
 import type { BallotSelectionContextType } from '../BallotSelectionProvider';
 import type { Office } from '../types';
 
@@ -213,5 +213,62 @@ describe('BallotSelectionProvider clearSelections (post-save reset, D-10)', () =
 			captured.value!.clearSelections();
 		});
 		expect(captured.value!.selectionMap).toEqual({});
+	});
+});
+
+describe('BallotSelectionProvider pruneSelections (63 WR-01, stale selections)', () => {
+	it('P3: drops an office not on the ballot and a candidate its office no longer offers', () => {
+		const { captured } = renderProvider();
+		renderer.act(() => {
+			captured.value!.toggleCandidate('office-1', 'cand-a', 3);
+			captured.value!.toggleCandidate('office-1', 'cand-b', 3);
+			captured.value!.toggleCandidate('office-2', 'cand-x', 1);
+			captured.value!.toggleCandidate('office-gone', 'cand-z', 1);
+			captured.value!.setCurrentQuestionIndex(1);
+		});
+		// The next revision dropped office-gone and re-coded cand-b away.
+		const next: Office[] = [
+			{ ...OFFICES[0]!, candidates: OFFICES[0]!.candidates.filter((c) => c.id !== 'cand-b') },
+			OFFICES[1]!,
+		];
+		renderer.act(() => {
+			captured.value!.pruneSelections(next);
+		});
+		expect(captured.value!.selectionMap).toEqual({ 'office-1': ['cand-a'], 'office-2': ['cand-x'] });
+		expect(captured.value!.currentQuestionIndex).toBe(1);
+	});
+
+	it('P4: a pruned hidden candidate no longer counts toward the voteFor cap', () => {
+		const { captured } = renderProvider();
+		renderer.act(() => {
+			captured.value!.toggleCandidate('office-1', 'cand-a', 2);
+			captured.value!.toggleCandidate('office-1', 'cand-b', 2);
+		});
+		const next: Office[] = [{ ...OFFICES[0]!, voteFor: 2, candidates: OFFICES[0]!.candidates.filter((c) => c.id !== 'cand-b') }];
+		renderer.act(() => {
+			captured.value!.pruneSelections(next);
+			captured.value!.toggleCandidate('office-1', 'cand-c', 2);
+		});
+		expect(captured.value!.selectionMap).toEqual({ 'office-1': ['cand-a', 'cand-c'] });
+	});
+
+	it('P5: is a no-op returning the same map when nothing is stale, with a stable identity', () => {
+		const { captured } = renderProvider();
+		const prune = captured.value!.pruneSelections;
+		renderer.act(() => {
+			captured.value!.toggleCandidate('office-2', 'cand-y', 1);
+		});
+		const before = captured.value!.selectionMap;
+		renderer.act(() => {
+			captured.value!.pruneSelections(OFFICES);
+		});
+		expect(captured.value!.selectionMap).toBe(before);
+		expect(captured.value!.pruneSelections).toBe(prune);
+	});
+
+	it('P6: prunedSelectionMap never adds, and keeps an empty deselected entry', () => {
+		const prev = { 'office-2': [] as string[], 'office-1': ['cand-d'] };
+		expect(prunedSelectionMap(prev, OFFICES)).toBe(prev);
+		expect(prunedSelectionMap(prev, [])).toEqual({});
 	});
 });

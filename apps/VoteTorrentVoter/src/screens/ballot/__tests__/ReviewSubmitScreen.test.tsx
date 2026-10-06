@@ -569,6 +569,74 @@ describe('ReviewSubmitScreen (VOTE-04)', () => {
 		expect(textOf(find(second.tr, 'review-local-note'))).toBe(en['submit.localNote']);
 	});
 
+	it('RS19 (WR-01): selections the loaded ballot no longer shows are pruned and never reach eligibility', async () => {
+		const sboe = OFFICES.find(o => o.voteFor === 2)!;
+		const {tr, captured} = await boot();
+		renderer.act(() => {
+			captured.value!.toggleCandidate(OFFICES[0].id, OFFICES[0].candidates[0].id, OFFICES[0].voteFor);
+			// An office a later revision dropped, and a candidate it re-coded away.
+			captured.value!.toggleCandidate('office-dropped-by-revision', 'cand-gone', 1);
+			captured.value!.toggleCandidate(sboe.id, 'cand-sboe-recoded-away', sboe.voteFor);
+			captured.value!.toggleCandidate(sboe.id, sboe.candidates[0].id, sboe.voteFor);
+		});
+		await openReview(tr);
+		expect(captured.value!.selectionMap).toEqual({
+			[OFFICES[0].id]: [OFFICES[0].candidates[0].id],
+			[sboe.id]: [sboe.candidates[0].id],
+		});
+		const calls = evaluateMock.mock.calls;
+		expect(calls[calls.length - 1][0].selectionMap).toEqual(captured.value!.selectionMap);
+		expect(find(tr, 'review-submit').props.disabled).toBe(false);
+
+		castMock.mockResolvedValue(saved);
+		press(tr, 'review-submit');
+		await settle();
+		expect(castMock).toHaveBeenCalledTimes(1);
+		expect(Object.keys(castMock.mock.calls[0][0].selectionMap).sort()).toEqual([OFFICES[0].id, sboe.id].sort());
+	});
+
+	it('RS20 (WR-01): an unusable selection for a question still on the ballot keeps Submit disabled and names it', async () => {
+		const office = OFFICES[0];
+		const ref = {officeId: office.id, ballotId: office.ballotId, questionCode: office.questionCode};
+		evaluateMock.mockResolvedValue(ineligible('selection-invalid', [ref]));
+		const {tr, captured} = await boot();
+		renderer.act(() => {
+			// Two live candidates on a voteFor 1 office (a revision lowered the cap): not stale, so kept.
+			captured.value!.toggleCandidate(office.id, office.candidates[0].id, 2);
+			captured.value!.toggleCandidate(office.id, office.candidates[1].id, 2);
+		});
+		await openReview(tr);
+		expect(captured.value!.selectionMap[office.id]).toEqual([office.candidates[0].id, office.candidates[1].id]);
+		expect(textOf(find(tr, 'review-ineligible'))).toBe(en['submit.reason.selectionInvalid']);
+		expect(textOf(find(tr, `review-reason-question-${office.id}`))).toBe(office.title);
+		expect(find(tr, 'review-submit').props.disabled).toBe(true);
+		press(tr, 'review-submit');
+		await settle();
+		expect(castMock).not.toHaveBeenCalled();
+	});
+
+	it('RS21 (WR-01): a failed ballot read never prunes', async () => {
+		const mockModule = jest.requireMock('../../../providers/VoterAppProvider') as {
+			__setMockGetBallot: (reader?: () => Promise<unknown>) => void;
+		};
+		mockModule.__setMockGetBallot(() => Promise.reject(new Error('no election')));
+		try {
+			const {tr, captured, navRef} = await boot();
+			renderer.act(() => {
+				captured.value!.toggleCandidate('office-dropped-by-revision', 'cand-gone', 1);
+			});
+			// The Ballot screen offers no Review button without a ballot; go to Review directly.
+			renderer.act(() => {
+				navRef.navigate('ReviewSubmit');
+			});
+			await settle();
+			expect(has(tr, 'review-ballot-unavailable')).toBe(true);
+			expect(captured.value!.selectionMap).toEqual({'office-dropped-by-revision': ['cand-gone']});
+		} finally {
+			mockModule.__setMockGetBallot();
+		}
+	});
+
 	it('RS18: source assertions on the comment-stripped screen', () => {
 		const raw = fs.readFileSync(path.join(__dirname, '../ReviewSubmitScreen.tsx'), 'utf8');
 		const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -578,6 +646,7 @@ describe('ReviewSubmitScreen (VOTE-04)', () => {
 			'evaluateVoteEligibility(',
 			'castVote(',
 			'clearSelections()',
+			'pruneSelections(ballot.offices)',
 			'useFocusEffect(',
 			'revealOnOpen: true',
 			"t('submit.signPrompt.title')",
