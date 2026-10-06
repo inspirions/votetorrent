@@ -318,10 +318,8 @@ export default function AdministratorInvitationScreen() {
 						<ThemedText>{t("loading")}</ThemedText>
 					)}
 
-					{/* D-06: paste field for the share text the sender copied */}
-					<ThemedText type="defaultSemiBold" style={styles.shareLabel}>
-						{t("invitationKey")}
-					</ThemedText>
+					{/* D-06: paste field for the share text the sender copied. CustomTextInput's `title` is
+					    the field's only label (a separate heading here rendered it twice). */}
 					<CustomTextInput
 						title={t("invitationKey")}
 						value={pastedInvite}

@@ -175,6 +175,12 @@ afterEach(() => {
 });
 
 describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', () => {
+  it('labels the paste field once: no duplicate invitationKey heading above the input (UAT 62 K)', async () => {
+    const tr = await render();
+    const labels = tr.root.findAll((n) => (n.type as unknown) === 'Text' && n.props.children === 'invitationKey');
+    expect(labels).toHaveLength(1);
+  });
+
   it('renders the paste hint and disabled Accept/Decline before any paste, never Loading', async () => {
     const tr = await render();
     const json = JSON.stringify(tr.toJSON());

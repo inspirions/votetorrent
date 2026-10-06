@@ -317,4 +317,10 @@ describe('AdministratorInvitationScreen - accept mode resolves the slot from the
     const tr = await render();
     expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptPastePlaceholder');
   });
+
+  it('labels the paste field once: no duplicate invitationKey heading above the input (UAT 62 K)', async () => {
+    const tr = await render();
+    const labels = tr.root.findAll((n) => (n.type as unknown) === 'Text' && n.props.children === 'invitationKey');
+    expect(labels).toHaveLength(1);
+  });
 });
