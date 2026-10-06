@@ -703,8 +703,13 @@ describe("AddNetworkScreen — late commit (commit outlives its deadline)", () =
 		expect(inlineErrorMessage(tr)).toBe("");
 	});
 
-	it("(D) screen unmounted while waiting: the late commit still selects the network, but no gate and no navigation", async () => {
+	// WR-01 (62-88) deliberately supersedes 62-71 truth 3 ("the late commit still selects"): a
+	// commit that lands up to LATE_COMMIT_BUDGET_MS after the officer left Add Network must NOT
+	// re-point the session behind their back. The network is in recents; they select it from
+	// Networks.
+	it("(D, WR-01) screen unmounted while waiting: the late commit lands -> NOT auto-selected, no gate, no navigation", async () => {
 		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
 		const { tr, promise } = await startAndMissDeadline();
 
 		await renderer.act(async () => {
@@ -715,10 +720,79 @@ describe("AddNetworkScreen — late commit (commit outlives its deadline)", () =
 			await promise;
 		});
 
-		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
-		expect(mockSelectNetwork).toHaveBeenCalledWith(LATE_REF);
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
 		expect(mockGoBack).not.toHaveBeenCalled();
 		expect(mockNavigate).not.toHaveBeenCalled();
 		expect(mockGetCurrentUser).not.toHaveBeenCalled();
+		expect(infoSpy).toHaveBeenCalledWith(
+			"[network-create] late commit landed after leave; not auto-selecting",
+		);
+		infoSpy.mockRestore();
+	});
+
+	it("(D2, WR-01) screen unmounted while waiting: the budget runs out and the second reconcile finds the network -> NOT auto-selected", async () => {
+		mockNetworksEngine.getRecentNetworks
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce([...BEFORE, LANDED_REF]);
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
+			await promise;
+		});
+
+		// Precondition: the second reconcile actually ran (otherwise "not selected" is vacuous).
+		expect(mockNetworksEngine.getRecentNetworks).toHaveBeenCalledTimes(3);
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockGoBack).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+		expect(mockGetCurrentUser).not.toHaveBeenCalled();
+		expect(infoSpy).toHaveBeenCalledWith(
+			"[network-create] late commit landed after leave; not auto-selecting",
+		);
+		infoSpy.mockRestore();
+	});
+
+	it("(D3, WR-01) screen unmounted while waiting: the late commit FAILS -> no routing, no screen state, only the error class name is logged", async () => {
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		// A NO_KEY_PROVISIONED rejection is the one the device-signing handler routes (it would
+		// navigate to ProvisionSigningKey), so "not navigated" proves the handler was not called.
+		const rejection = Object.assign(new TypeError("secret late detail"), {
+			code: "NO_KEY_PROVISIONED",
+		});
+		await renderer.act(async () => {
+			deferredCommit!.reject(rejection);
+			await promise;
+		});
+
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+		expect(mockGoBack).not.toHaveBeenCalled();
+		// No setErrorMessage on an unmounted screen (React would log an act/unmounted warning) and
+		// no full-error log line.
+		expect(errorSpy).not.toHaveBeenCalled();
+		const allLogged = [...infoSpy.mock.calls, ...errorSpy.mock.calls]
+			.flat()
+			.map((a) => (a instanceof Error ? a.message : String(a)))
+			.join("\n");
+		expect(allLogged).not.toContain("secret late detail");
+		expect(infoSpy).toHaveBeenCalledWith(
+			"[network-create] late commit failed after leave:",
+			"TypeError",
+		);
+		infoSpy.mockRestore();
+		errorSpy.mockRestore();
 	});
 });
