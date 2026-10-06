@@ -432,6 +432,17 @@ pump_until() {
         win="$(window_of "$js")"
         title="$(prompt_title)"
         printf '%s\t%s\t%s\n' "$(date +%s)" "$win" "$title" >> "$OUT/prompts.tsv"
+      else
+        # Back-to-back prompts never leave focus between them, so a focus-only episode count merges
+        # them. Every probe prompt has its own title: a different title while still in a prompt is a
+        # new episode (an instrument defect found on the first device run, 63-18).
+        ntitle="$(prompt_title)"
+        if [ "$ntitle" != unknown ] && [ "$ntitle" != "$title" ]; then
+          touches=0
+          title="$ntitle"
+          win="$(window_of "$js")"
+          printf '%s\t%s\t%s\n' "$(date +%s)" "$win" "$title" >> "$OUT/prompts.tsv"
+        fi
       fi
       if [ "$touches" -lt 5 ]; then
         touch1
@@ -755,7 +766,8 @@ run_device() {
   # shellcheck disable=SC2086 # validated hex words
   sweep 3 $needles1 $needles2 $signature || sweep3_rc=$?
   leaf='votetorrent.''voteRecord.'
-  leaf_hits="$(adb_ shell "run-as $PKG sh -c \"grep -rla '$leaf' . 2>/dev/null\"" | tr -d '\r' | tr '\n' ' ' || true)"
+  # The dev bundle cache in files/ carries the key-prefix literal as source text; it is not storage.
+  leaf_hits="$(adb_ shell "run-as $PKG sh -c \"find . -type f ! -name BridgelessReactNativeDevBundle.js -exec grep -la '$leaf' {} + 2>/dev/null\"" | tr -d '\r' | tr '\n' ' ' || true)"
 
   # ---- legs and verdict
   local legs="$OUT/legs.txt"
