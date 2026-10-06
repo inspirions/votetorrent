@@ -58,7 +58,7 @@ beforeEach(() => {
 		return { remove };
 	}) as any);
 	jest.spyOn(Keyboard, "isVisible").mockReturnValue(false);
-	jest.spyOn(globalThis, "requestAnimationFrame").mockImplementation(((cb: FrameRequestCallback) => {
+	jest.spyOn(globalThis, "requestAnimationFrame").mockImplementation(((cb: (t: number) => void) => {
 		cb(0);
 		return 0;
 	}) as any);

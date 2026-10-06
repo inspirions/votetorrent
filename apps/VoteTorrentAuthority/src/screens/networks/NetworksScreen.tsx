@@ -33,7 +33,7 @@ export default function NetworksScreen() {
 	const [exportTargetHash, setExportTargetHash] = useState<string | null>(null);
 	const navigation = useNavigation<NavigationProp>();
 	const insets = useSafeAreaInsets();
-	const scrollRef = useRef<ScrollView>(null);
+	const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
 	const directFocusedRef = useRef(false);
 
 	// The Direct (advanced) field and CONNECT are the LAST section. On API 35+ (forced
