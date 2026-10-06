@@ -8,7 +8,7 @@
  * consumed once, on first focus; every later visit needs an explicit tap. The decrypted record
  * lives only in this component's state and is cleared on blur, on app background and on unmount.
  * D-17: a code is copied only on a tap through `copyVoteCode`, with the warning rendered beside
- * each button; there is no share sheet and no selectable text. D-18: each code is shown as 16
+ * each button; there is no share sheet and no selectable text. The copy result is a toast. D-18: each code is shown as 16
  * wrapped groups of the exact stored characters. D-21: a revision mismatch shows the stale line.
  *
  * Storage is reached only through `engines/vote-receipt.ts` (gate K1). Nothing is logged.
@@ -21,6 +21,7 @@ import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
 import type {Ballot} from '@votetorrent/vote-core';
 import {useVoterApp} from '../../providers/VoterAppProvider';
+import {useToast} from '../../components/Toast';
 import {globalStyles} from '../../theme/styles';
 import type {VoteStackParamList} from '../../navigation/types';
 import {
@@ -51,6 +52,7 @@ export default function VoteReceiptScreen() {
 	const {t} = useTranslation('ballot');
 	const route = useRoute<ReceiptRoute>();
 	const navigation = useNavigation<ReceiptNavigation>();
+	const showToast = useToast();
 
 	const rawId: unknown = route.params?.electionId;
 	const electionId = typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined;
@@ -59,7 +61,6 @@ export default function VoteReceiptScreen() {
 	const [ballots, setBallots] = useState<Ballot[]>([]);
 	const [record, setRecord] = useState<VoteRecord | null>(null);
 	const [notice, setNotice] = useState<RevealNotice | null>(null);
-	const [copied, setCopied] = useState<Record<number, VoteCodeCopyResult>>({});
 	const [busy, setBusy] = useState(false);
 
 	const autoRevealConsumed = useRef(false);
@@ -145,7 +146,6 @@ export default function VoteReceiptScreen() {
 				focused.current = false;
 				setRecord(null);
 				setNotice(null);
-				setCopied({});
 			};
 		}, [electionId, navigation, reveal]),
 	);
@@ -155,7 +155,6 @@ export default function VoteReceiptScreen() {
 			// Not 'inactive': iOS goes inactive while its own biometric sheet is up.
 			if (state === 'background') {
 				setRecord(null);
-				setCopied({});
 			}
 		});
 		return () => sub.remove();
@@ -186,7 +185,11 @@ export default function VoteReceiptScreen() {
 		} catch {
 			result = 'unavailable';
 		}
-		setCopied(prev => ({...prev, [index]: result}));
+		if (result === 'copied') {
+			showToast(t('receipt.copied'), {testID: `receipt-copied-${index}`});
+		} else {
+			showToast(t('receipt.copyFailed'), {testID: `receipt-copy-failed-${index}`});
+		}
 	};
 
 	return (
@@ -318,16 +321,6 @@ export default function VoteReceiptScreen() {
 														{t('receipt.copyWarning')}
 													</Text>
 												</View>
-												{copied[i] === 'copied' ? (
-													<Text testID={`receipt-copied-${i}`} style={[captionFont, {color: colors.success}]}>
-														{t('receipt.copied')}
-													</Text>
-												) : null}
-												{copied[i] === 'unavailable' ? (
-													<Text testID={`receipt-copy-failed-${i}`} style={[captionFont, {color: colors.error}]}>
-														{t('receipt.copyFailed')}
-													</Text>
-												) : null}
 											</>
 										)}
 									</View>
