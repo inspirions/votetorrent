@@ -89,6 +89,8 @@ const resources = {
 			userIsSoleAdministratorNote:
 				'Your following user profile will be the sole initial administrator for the new authority.',
 			expires: 'Expires',
+			// UAT 62: an administration's EffectiveAt is when it STARTS — labelled Expires before.
+			effective: 'Effective',
 			position: 'Position',
 			switchingNetworks: 'Switching networks...',
 			officer: 'Officer',
@@ -1193,6 +1195,7 @@ const resources = {
 			userIsSoleAdministratorNote:
 				'El siguiente perfil de usuario será el único administrador inicial de la nueva autoridad.',
 			expires: 'Expira',
+			effective: 'Vigente desde',
 			position: 'Cargo',
 			switchingNetworks: 'Cambiando redes...',
 			officer: 'Oficial',

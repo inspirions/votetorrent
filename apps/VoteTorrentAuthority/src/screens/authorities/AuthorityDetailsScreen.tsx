@@ -284,8 +284,9 @@ export default function AuthorityDetailsScreen() {
 						</ThemedText>
 					</View>
 				) : null}
+				{/* UAT 62: effectiveAt is when the administration STARTS, not an expiry. */}
 				<View style={styles.detail}>
-					<ThemedText type="defaultSemiBold">{t("expires")}: </ThemedText>
+					<ThemedText type="defaultSemiBold">{t("effective")}: </ThemedText>
 					<ThemedText>{formatDate(adminDetails?.admin.effectiveAt)}</ThemedText>
 				</View>
 
@@ -329,16 +330,10 @@ export default function AuthorityDetailsScreen() {
 				<View>
 					<View style={styles.section}>
 						<ThemedText type="title">{t("proposedAdministration")}</ThemedText>
-						{adminDetails.admin.id ? (
-							<View style={styles.detail}>
-								<ThemedText type="defaultSemiBold">{t("cid")}: </ThemedText>
-								<ThemedText numberOfLines={1} ellipsizeMode="middle" style={styles.detailValue}>
-									{adminDetails.admin.id}
-								</ThemedText>
-							</View>
-						) : null}
+						{/* UAT 62: no CID row here. It showed the CURRENT administration's id, and a
+						    proposal (Proposal<AdminInit>) carries no id of its own until promoted. */}
 						<View style={styles.detail}>
-							<ThemedText type="defaultSemiBold">{t("expires")}: </ThemedText>
+							<ThemedText type="defaultSemiBold">{t("effective")}: </ThemedText>
 							<ThemedText>{formatDate(adminDetails.proposed.proposed.effectiveAt)}</ThemedText>
 						</View>
 						<ThemedText type="defaultSemiBold" style={styles.administratorsHeading}>
