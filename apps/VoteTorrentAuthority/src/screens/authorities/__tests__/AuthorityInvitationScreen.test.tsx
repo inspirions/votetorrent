@@ -344,6 +344,35 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
   });
 });
 
+describe('AuthorityInvitationScreen - expired share', () => {
+  const withExp = (text: string, expiration: string) => JSON.stringify({ ...JSON.parse(text), expiration });
+
+  it('shows the expired notice and disables Accept for a past, Z-less (UTC) expiration; no lookup, no signing', async () => {
+    mockRouteParams = { mode: 'accept', initialShare: withExp(makeShare('au').text, '2020-01-01T00:00:00.000') };
+    const tr = await render();
+    expect(tr.root.findAll((n) => n.props?.testID === 'invitation-expired-notice').length).toBeGreaterThan(0);
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptExpired');
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(true);
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'accept').props.onPress();
+    });
+    expect(mockResolveInviteSlot).not.toHaveBeenCalled();
+    expect(mockGetAuthorityInvite).not.toHaveBeenCalled();
+    expect(mockRespondToInvite).not.toHaveBeenCalled();
+    expect(mockGoBack).not.toHaveBeenCalled();
+  });
+
+  it('a future expiration (Z-less) still resolves and stays acceptable', async () => {
+    mockRouteParams = { mode: 'accept', initialShare: withExp(makeShare('au').text, new Date(Date.now() + 3_600_000).toISOString().replace('Z', '')) };
+    mockGetAuthorityInvite.mockResolvedValue({ invite: { name: 'Invitee', title: 'Clerk', scopes: [] } });
+    mockResolveInviteSlot.mockResolvedValue({ status: 'live', cid: 'slot-cid-1' });
+    const tr = await render();
+    expect(tr.root.findAll((n) => n.props?.testID === 'invitation-expired-notice')).toHaveLength(0);
+    expect(mockResolveInviteSlot).toHaveBeenCalled();
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(false);
+  });
+});
+
 describe('AuthorityInvitationScreen - create mode error placement (UAT gap 4 item 6)', () => {
   it('the name-required error renders inside the screen padding', async () => {
     mockRouteParams = { mode: 'send' };

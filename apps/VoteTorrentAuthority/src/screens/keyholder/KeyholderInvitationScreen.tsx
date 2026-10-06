@@ -25,7 +25,7 @@ import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { resolveKeyholderKeyVault } from "../../engines/keyholder-vault";
 import { acceptKeyholderInvitation } from "./keyholder-accept";
-import { inviteShareErrorKey, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
+import { inviteShareErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
@@ -56,6 +56,13 @@ export function KeyholderInvitationScreen() {
 	// Accept-mode paste field (D-06); seeded by an entry route that already holds the share.
 	const [pastedInvite, setPastedInvite] = useState<string>(initialShare ?? "");
 	const parsed = useMemo(() => parseInviteShare(pastedInvite), [pastedInvite]);
+	// An expired share is shown as expired before any prompt or engine write; the engine refusal stays the authority.
+	const expiredAt = useMemo(() => {
+		if (!parsed || !isShareExpired(parsed, Date.now())) return undefined;
+		const ms = parseInviteExpirationMs(parsed.expiration as string);
+		return ms === undefined ? undefined : new Date(ms).toLocaleString();
+	}, [parsed]);
+	const expired = expiredAt !== undefined;
 
 	useLayoutEffect(() => {
 		navigation.setOptions({
@@ -155,7 +162,7 @@ export function KeyholderInvitationScreen() {
 	// and passes its signed binding (D-26) to respondToInvite in one call. The officer's device key is
 	// never used for a keyholder accept.
 	const onAccept = async () => {
-		if (isAccepting) return;
+		if (isAccepting || expired) return;
 		setErrorMessage("");
 		setIsAccepting(true);
 		try {
@@ -229,6 +236,9 @@ export function KeyholderInvitationScreen() {
 					<ThemedText type="title" style={styles.sectionTitle}>
 						{t("keyholderInvitation")}
 					</ThemedText>
+					{expired ? (
+						<ThemedText testID="invitation-expired-notice">{t("invitationAcceptExpired", { when: expiredAt })}</ThemedText>
+					) : null}
 					{parsed?.name ? (
 						<View style={styles.detailRow}>
 							<ThemedText type="defaultSemiBold">{t("name")}: </ThemedText>
@@ -255,7 +265,7 @@ export function KeyholderInvitationScreen() {
 				onReject={onDecline}
 				acceptLabel={t("accept")}
 				rejectLabel={t("decline")}
-				disabled={isAccepting || !parsed}
+				disabled={isAccepting || !parsed || expired}
 			/>
 		</KeyboardAvoidingScreen>
 	);

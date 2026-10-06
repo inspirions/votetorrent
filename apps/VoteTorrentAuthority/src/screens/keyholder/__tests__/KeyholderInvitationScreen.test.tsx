@@ -349,6 +349,38 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
   });
 });
 
+describe('KeyholderInvitationScreen - expired share', () => {
+  const withExp = (text: string, expiration: string) => JSON.stringify({ ...JSON.parse(text), expiration });
+
+  it('shows the expired notice and disables Accept for a past, Z-less (UTC) expiration; pressing does nothing', async () => {
+    const tr = await render();
+    await paste(tr, withExp(makeShareText().text, '2020-01-01T00:00:00.000'));
+    expect(tr.root.findAll((n) => n.props?.testID === 'invitation-expired-notice').length).toBeGreaterThan(0);
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptExpired');
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(true);
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'accept').props.onPress();
+    });
+    expect(mockAcceptKeyholderInvitation).not.toHaveBeenCalled();
+    expect(mockResolveInviteSlot).not.toHaveBeenCalled();
+    expect(mockRespondToInvite).not.toHaveBeenCalled();
+    expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+  });
+
+  it('a Z-suffixed past expiration is expired too', async () => {
+    const tr = await render();
+    await paste(tr, withExp(makeShareText().text, '2020-01-01T00:00:00.000Z'));
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(true);
+  });
+
+  it('a future expiration (Z-less) stays acceptable with no notice', async () => {
+    const tr = await render();
+    await paste(tr, withExp(makeShareText().text, new Date(Date.now() + 3_600_000).toISOString().replace('Z', '')));
+    expect(tr.root.findAll((n) => n.props?.testID === 'invitation-expired-notice')).toHaveLength(0);
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(false);
+  });
+});
+
 describe('KeyholderInvitationScreen - send mode (UAT 62 L)', () => {
   const mockInviteKeyholder = jest.fn(async (..._args: unknown[]) => undefined);
   const electionEngine = {

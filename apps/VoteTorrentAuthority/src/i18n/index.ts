@@ -83,6 +83,7 @@ const resources = {
 			invitationAcceptNotFound: "This invitation hasn't reached this device yet, or it is no longer valid.",
 			invitationAcceptAlreadyAnswered: 'This invitation has already been answered. It cannot be accepted or declined again.',
 			invitationAcceptNoLongerValid: 'This invitation was withdrawn or has expired. Ask the sender for a new one.',
+			invitationAcceptExpired: 'This invitation expired on {{when}}. Ask the sender for a new one.',
 			invitationAcceptFailed: 'Could not respond to the invitation. Try again.',
 			soleInitialAdministratorNote:
 				'Please create a user on this network. Your user will be the sole initial administrator.',
@@ -1206,6 +1207,7 @@ const resources = {
 			invitationAcceptNotFound: 'Esta invitación aún no ha llegado a este dispositivo o ya no es válida.',
 			invitationAcceptAlreadyAnswered: 'Esta invitación ya fue respondida. No se puede aceptar ni rechazar de nuevo.',
 			invitationAcceptNoLongerValid: 'Esta invitación fue retirada o ha caducado. Pide una nueva a quien te la envió.',
+			invitationAcceptExpired: 'Esta invitación caducó el {{when}}. Pide una nueva a quien te la envió.',
 			invitationAcceptFailed: 'No se pudo responder a la invitación. Inténtalo de nuevo.',
 			soleInitialAdministratorNote:
 				'Cree un usuario en esta red. Su usuario será el único administrador inicial.',

@@ -29,7 +29,7 @@ import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
-import { inviteShareErrorKey, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
+import { inviteShareErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 
 type AuthorityInvitationParams = {
 	mode: "send" | "accept";
@@ -65,6 +65,13 @@ export default function AuthorityInvitationScreen() {
 	// D-06: paste field in accept mode.
 	const [pastedInvite, setPastedInvite] = useState<string>(initialShare ?? "");
 	const parsed = useMemo(() => parseInviteShare(pastedInvite), [pastedInvite]);
+	// An expired share is shown as expired before any prompt or engine write; the engine refusal stays the authority.
+	const expiredAt = useMemo(() => {
+		if (!parsed || !isShareExpired(parsed, Date.now())) return undefined;
+		const ms = parseInviteExpirationMs(parsed.expiration as string);
+		return ms === undefined ? undefined : new Date(ms).toLocaleString();
+	}, [parsed]);
+	const expired = expiredAt !== undefined;
 	// The slot resolved from the paste (by InviteKey + type); accept and decline sign against it.
 	const [resolved, setResolved] = useState<{ slotCid: string; invitePrivate: string } | undefined>(undefined);
 
@@ -110,6 +117,7 @@ export default function AuthorityInvitationScreen() {
 			return;
 		}
 		if (!parsed) return; // still typing; the paste hint stays up
+		if (expired) return; // expired share: no engine lookup; the notice explains
 		let cancelled = false;
 		(async () => {
 			try {
@@ -130,7 +138,7 @@ export default function AuthorityInvitationScreen() {
 			cancelled = true;
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [mode, pastedInvite, getEngine]);
+	}, [mode, pastedInvite, getEngine, expired]);
 
 	// INV-02: onSend invites onto the network's EXISTING primary authority.
 	// D-05: a Copy-to-clipboard share is added after a successful send.
@@ -235,7 +243,7 @@ export default function AuthorityInvitationScreen() {
 			setErrorMessage(mapAcceptError(error));
 		}
 	};
-	const onAccept = () => respond(true);
+	const onAccept = () => (expired ? undefined : respond(true));
 	const onDecline = () => respond(false);
 
 	if (mode === "send") {
@@ -293,6 +301,9 @@ export default function AuthorityInvitationScreen() {
 			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
 					{!parsed ? <ThemedText>{t("invitationAcceptPasteHint")}</ThemedText> : null}
+					{expired ? (
+						<ThemedText testID="invitation-expired-notice">{t("invitationAcceptExpired", { when: expiredAt })}</ThemedText>
+					) : null}
 					{/* Inviting context */}
 					{networkName ? (
 						<View style={styles.detailRow}>
@@ -394,7 +405,7 @@ export default function AuthorityInvitationScreen() {
 				onReject={onDecline}
 				acceptLabel={t("accept")}
 				rejectLabel={t("reject")}
-				disabled={!resolved}
+				disabled={!resolved || expired}
 			/>
 		</KeyboardAvoidingScreen>
 	);

@@ -30,7 +30,7 @@ import { globalStyles } from "../../theme/styles";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
-import { inviteShareErrorKey, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
+import { inviteShareErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 
 type AdministratorInvitationParams = {
 	mode: "send" | "accept";
@@ -58,6 +58,13 @@ export default function AdministratorInvitationScreen() {
 	// Accept-mode paste field (D-06 — invitee pastes the share text here)
 	const [pastedInvite, setPastedInvite] = useState<string>(initialShare ?? "");
 	const parsed = useMemo(() => parseInviteShare(pastedInvite), [pastedInvite]);
+	// An expired share is shown as expired before any prompt or engine write; the engine refusal stays the authority.
+	const expiredAt = useMemo(() => {
+		if (!parsed || !isShareExpired(parsed, Date.now())) return undefined;
+		const ms = parseInviteExpirationMs(parsed.expiration as string);
+		return ms === undefined ? undefined : new Date(ms).toLocaleString();
+	}, [parsed]);
+	const expired = expiredAt !== undefined;
 	// The slot resolved from the paste (by InviteKey + type); accept and decline sign against it.
 	const [resolved, setResolved] = useState<{ slotCid: string; invitePrivate: string } | undefined>(undefined);
 
@@ -105,6 +112,7 @@ export default function AdministratorInvitationScreen() {
 			return;
 		}
 		if (!parsed) return; // still typing; the paste hint stays up
+		if (expired) return; // expired share: no engine lookup; the notice explains
 		let cancelled = false;
 		(async () => {
 			try {
@@ -126,7 +134,7 @@ export default function AdministratorInvitationScreen() {
 			cancelled = true;
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [mode, pastedInvite, getEngine]);
+	}, [mode, pastedInvite, getEngine, expired]);
 
 	// INV-01: real officer invite send with device signature (D-01/D-03/D-04)
 	const onSend = async () => {
@@ -201,7 +209,7 @@ export default function AdministratorInvitationScreen() {
 			setErrorMessage(mapAcceptError(error));
 		}
 	};
-	const onAccept = () => respond(true);
+	const onAccept = () => (expired ? undefined : respond(true));
 	const onDecline = () => respond(false);
 
 	if (mode === "send") {
@@ -249,6 +257,9 @@ export default function AdministratorInvitationScreen() {
 		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
+					{expired ? (
+						<ThemedText testID="invitation-expired-notice">{t("invitationAcceptExpired", { when: expiredAt })}</ThemedText>
+					) : null}
 					{seedInvite ? (
 						<>
 							{networkName ? (
@@ -299,7 +310,7 @@ export default function AdministratorInvitationScreen() {
 						</>
 					) : !parsed ? (
 						<ThemedText>{t("invitationAcceptPasteHint")}</ThemedText>
-					) : inviteLoadFailed ? null : (
+					) : inviteLoadFailed || expired ? null : (
 						<ThemedText>{t("loading")}</ThemedText>
 					)}
 
@@ -322,7 +333,7 @@ export default function AdministratorInvitationScreen() {
 				onReject={onDecline}
 				acceptLabel={t("accept")}
 				rejectLabel={t("reject")}
-				disabled={!resolved}
+				disabled={!resolved || expired}
 			/>
 		</KeyboardAvoidingScreen>
 	);
