@@ -41,6 +41,8 @@ jest.mock("react-i18next", () => ({
 }));
 
 const mockNavigate = jest.fn();
+// Recorded so a test can simulate a RE-focus (UAT 62 P2b) by invoking the latest callback.
+const mockFocusCallbacks: Array<() => void | (() => void)> = [];
 jest.mock("@react-navigation/native", () => ({
 	useTheme: () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -48,6 +50,17 @@ jest.mock("@react-navigation/native", () => ({
 		return theme;
 	},
 	useNavigation: () => ({ navigate: mockNavigate }),
+	// First focus on mount, like the real hook.
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		mockFocusCallbacks.push(cb);
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const ReactLib = require("react");
+		ReactLib.useEffect(() => {
+			const cleanup = cb();
+			return typeof cleanup === "function" ? cleanup : undefined;
+			// eslint-disable-next-line react-hooks/exhaustive-deps
+		}, []);
+	},
 }));
 
 let mockNetworksEngine: { importFoundingBundle: jest.Mock } | undefined;
@@ -148,6 +161,9 @@ const STATES = ["idle", "picking", "validating", "invalidSignature", "alreadyJoi
 
 beforeEach(() => {
 	jest.clearAllMocks();
+	// clearAllMocks keeps unconsumed *Once values; drop them so one test's queue never leaks into the next.
+	mockSelectNetwork.mockReset();
+	mockSelectNetwork.mockImplementation(async () => undefined);
 	mockCurrentLocale = "en";
 	mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
 	mockGetDeviceUser.mockImplementation(async () => ({ id: "user-1" } as any));
@@ -566,7 +582,63 @@ describe("S-11: a failed post-import select never strands the officer (UAT 62 P2
 
 		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "first-run" });
 		expect(mockNavigate).not.toHaveBeenCalledWith("Home");
-		expect(findJsonByTestID(tr.toJSON(), "founding-import-success-view-network")).toBeNull();
+		// UAT 62 P2b: the routed case keeps View Network too — the ceremony's CONTINUE pops back here.
+		expect(findJsonByTestID(tr.toJSON(), "founding-import-success-view-network")).toBeTruthy();
+	});
+
+	async function refocus() {
+		const callbacks = mockFocusCallbacks.splice(0);
+		await act(async () => {
+			callbacks.slice(-1).forEach((cb) => cb());
+		});
+		await settle();
+	}
+
+	it("UAT 62 P2b: back from the NO_KEY_PROVISIONED ceremony, the select is retried once and lands Home", async () => {
+		mockSelectNetwork.mockRejectedValueOnce(
+			Object.assign(new Error("getOrCreateDeviceUser: no device signing key provisioned"), { code: "NO_KEY_PROVISIONED" }),
+		);
+		mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
+		await pickAndResolve({ kind: "picked", text: "bundle" });
+		await settle();
+		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "first-run" });
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+
+		// Provisioning done; its CONTINUE pops back to this screen.
+		mockSelectNetwork.mockResolvedValueOnce(undefined);
+		await refocus();
+
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(2);
+		expect(mockSelectNetwork).toHaveBeenLastCalledWith(NETWORK_REF);
+		expect(mockNavigate).toHaveBeenCalledWith("Home");
+
+		// Once only: a later focus does not select again.
+		await refocus();
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(2);
+	});
+
+	it("UAT 62 P2b: a failed retry is not routed again and View Network stays", async () => {
+		const noKey = () =>
+			Object.assign(new Error("getOrCreateDeviceUser: no device signing key provisioned"), { code: "NO_KEY_PROVISIONED" });
+		mockSelectNetwork.mockRejectedValueOnce(noKey()).mockRejectedValueOnce(noKey());
+		mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
+		const tr = await pickAndResolve({ kind: "picked", text: "bundle" });
+		await settle();
+		await refocus();
+
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(2);
+		expect(mockNavigate.mock.calls.filter(([route]) => route === "ProvisionSigningKey")).toHaveLength(1);
+		expect(mockNavigate).not.toHaveBeenCalledWith("Home");
+		expect(findJsonByTestID(tr.toJSON(), "founding-import-success-view-network")).toBeTruthy();
+	});
+
+	it("a non-routed failure does not retry on re-focus", async () => {
+		mockSelectNetwork.mockRejectedValueOnce(new Error("boom"));
+		mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
+		await pickAndResolve({ kind: "picked", text: "bundle" });
+		await settle();
+		await refocus();
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
 	});
 
 	it("any other select failure shows View Network, which opens NetworkDetails", async () => {

@@ -16,7 +16,7 @@
  * body here, so this screen's own JSX never repeats that key.
  */
 
-import { ExtendedTheme, useTheme, useNavigation } from '@react-navigation/native'
+import { ExtendedTheme, useFocusEffect, useTheme, useNavigation } from '@react-navigation/native'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ScrollView, StyleSheet, View } from 'react-native'
@@ -50,8 +50,8 @@ export default function ImportFoundingBundleScreen() {
 	const insets = useSafeAreaInsets()
 
 	const [screenState, setScreenState] = useState<ScreenState>({ kind: 'idle' })
-	// The post-import selectNetwork failed and was not a routable device-signing condition: the
-	// success body then offers View Network so the officer is never stranded on "Network joined".
+	// The post-import selectNetwork failed (routed or not): the success body then offers View
+	// Network so the officer is never stranded on "Network joined".
 	const [selectFailed, setSelectFailed] = useState(false)
 	const handleDeviceSigningError = useDeviceSigningErrorHandler()
 	// Latest-value refs: the select effect below must run ONCE per success state. Re-running it on
@@ -60,8 +60,13 @@ export default function ImportFoundingBundleScreen() {
 	navigationRef.current = navigation
 	const handleDeviceSigningErrorRef = useRef(handleDeviceSigningError)
 	handleDeviceSigningErrorRef.current = handleDeviceSigningError
+	const selectNetworkRef = useRef(selectNetwork)
+	selectNetworkRef.current = selectNetwork
 	const mountedRef = useRef(true)
 	const inFlightRef = useRef(false)
+	// UAT 62 P2b: set when a select failure was ROUTED (e.g. NO_KEY_PROVISIONED -> the provisioning
+	// ceremony). That ceremony's CONTINUE pops back here, so the next focus retries the select once.
+	const retryOnFocusRef = useRef<NetworkReference | null>(null)
 
 	useEffect(
 		() => () => {
@@ -133,8 +138,9 @@ export default function ImportFoundingBundleScreen() {
 
 	// Success auto-navigates: await selectNetwork(networkRef), then go Home. On a rejection the
 	// network is already in recentNetworks regardless: a device with no signing key
-	// (NO_KEY_PROVISIONED) goes to the provisioning ceremony; any other failure keeps the success
-	// body and adds a View Network button (it used to be a dead end with no control at all).
+	// (NO_KEY_PROVISIONED) goes to the provisioning ceremony and the select is retried on return;
+	// every failure keeps the success body and adds a View Network button (it used to be a dead
+	// end with no control at all).
 	useEffect(() => {
 		if (screenState.kind !== 'success' || !screenState.networkRef) return
 		let cancelled = false
@@ -148,7 +154,11 @@ export default function ImportFoundingBundleScreen() {
 				// eslint-disable-next-line no-console -- closed token only.
 				console.info(`[founding-bundle] select failed: ${typeof code === 'string' ? code : 'uncoded'}`)
 				if (cancelled || !mountedRef.current) return
-				if (handleDeviceSigningErrorRef.current(err).handled) return
+				if (handleDeviceSigningErrorRef.current(err).handled) {
+					retryOnFocusRef.current = networkRef
+				}
+				// Routed or not, the success body keeps View Network: if the officer comes back
+				// without the retry landing Home, "Network joined" must never be a dead end.
 				setSelectFailed(true)
 			}
 		})()
@@ -156,6 +166,28 @@ export default function ImportFoundingBundleScreen() {
 			cancelled = true
 		}
 	}, [screenState, selectNetwork])
+
+	// UAT 62 P2b: back from the routed ceremony (its CONTINUE pops to this screen), retry the select
+	// ONCE and go Home on success. A failure is not routed again (no ceremony loop); View Network,
+	// already showing, stays the way on. Latest-value refs keep this a focus-only effect: an
+	// identity change of selectNetwork mid-retry must not cancel the Home navigation.
+	useFocusEffect(
+		useCallback(() => {
+			const networkRef = retryOnFocusRef.current
+			if (!networkRef) return
+			retryOnFocusRef.current = null
+			;(async () => {
+				try {
+					await selectNetworkRef.current(networkRef)
+					if (mountedRef.current) navigationRef.current.navigate('Home')
+				} catch (err) {
+					const code = (err as { code?: unknown } | null | undefined)?.code
+					// eslint-disable-next-line no-console -- closed token only.
+					console.info(`[founding-bundle] select retry failed: ${typeof code === 'string' ? code : 'uncoded'}`)
+				}
+			})()
+		}, []),
+	)
 
 	function renderBody() {
 		switch (screenState.kind) {
