@@ -21,6 +21,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { mapElectionError } from "./election-error-messages";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { findAuthorityName } from "../../utils/findAuthorityName";
 import {
 	resolveElectionTimeline,
 	findTimelineOrderViolation,
@@ -85,11 +86,18 @@ export function CreateElectionScreen() {
 			try {
 				const engine = await getEngine<INetworkEngine>("network");
 				const details = await engine?.getDetails();
-				if (details?.network?.primaryAuthorityId) {
-					setAuthorityId(details.network.primaryAuthorityId);
-				}
-				if (details?.network?.name) {
-					setAuthorityName(details.network.name);
+				const primaryAuthorityId = details?.network?.primaryAuthorityId;
+				if (primaryAuthorityId) {
+					setAuthorityId(primaryAuthorityId);
+					// The AUTHORITY's name, not the network's (it used to show network.name). Falls back
+					// to the id when the authority row can't be read yet.
+					let name: string | undefined;
+					try {
+						name = engine ? await findAuthorityName(engine, primaryAuthorityId) : undefined;
+					} catch (lookupError) {
+						console.warn("Error looking up authority name:", lookupError instanceof Error ? lookupError.name : typeof lookupError);
+					}
+					setAuthorityName(name ?? primaryAuthorityId);
 				}
 			} catch (error) {
 				console.warn("Error loading authority for election:", error);
@@ -297,7 +305,7 @@ export function CreateElectionScreen() {
 				<View style={styles.section}>
 					<View style={localStyles.contextRow}>
 						<ThemedText type="defaultSemiBold">{t("authority")}: </ThemedText>
-						<ThemedText type="default">{authorityName || "Loading..."}</ThemedText>
+						<ThemedText type="default" testID="create-election-authority" numberOfLines={1} ellipsizeMode="middle" style={{ flexShrink: 1 }}>{authorityName || "Loading..."}</ThemedText>
 					</View>
 
 					{/* EUI-02 (D-05): radio control replaces read-only "{t("official")}" row */}
