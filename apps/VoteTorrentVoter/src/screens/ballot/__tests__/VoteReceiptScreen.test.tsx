@@ -41,6 +41,7 @@ import {
 	writeVoteRecord,
 } from '../../../engines/vote-record-store';
 import VoteReceiptScreen from '../VoteReceiptScreen';
+import {ToastProvider} from '../../../components/Toast';
 import {lightTheme} from '../../../theme/themes';
 import i18n, {resources} from '../../../i18n';
 import {setSecureScreen} from '@votetorrent/attestation-native';
@@ -153,11 +154,13 @@ async function mount(params: {electionId: string; revealOnOpen?: boolean} | unde
 		tr = renderer.create(
 			<NavigationContainer ref={navRef} theme={lightTheme}>
 				<VoterAppProvider>
-					<Stack.Navigator initialRouteName="Home" screenOptions={{headerShown: false}}>
-						<Stack.Screen name="Home" component={DummyScreen} />
-						<Stack.Screen name="Other" component={DummyScreen} />
-						<Stack.Screen name="VoteReceipt" component={VoteReceiptScreen} />
-					</Stack.Navigator>
+					<ToastProvider>
+						<Stack.Navigator initialRouteName="Home" screenOptions={{headerShown: false}}>
+							<Stack.Screen name="Home" component={DummyScreen} />
+							<Stack.Screen name="Other" component={DummyScreen} />
+							<Stack.Screen name="VoteReceipt" component={VoteReceiptScreen} />
+						</Stack.Navigator>
+					</ToastProvider>
 				</VoterAppProvider>
 			</NavigationContainer>,
 		);
@@ -404,12 +407,12 @@ describe('VoteReceiptScreen', () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(spy).toHaveBeenCalledWith(record.votes[0]!.nonce);
 		expect(spy.mock.calls[0]![0]).not.toContain(' ');
-		expect(has('receipt-copied-0')).toBe(true);
+		expect(textById('receipt-copied-0')).toBe('Copied');
 		expect(textById('receipt-copy-warning-0')).toBe(EN_WARNING);
 		expect(textById('receipt-copy-warning-1')).toBe(EN_WARNING);
 	});
 
-	it('S6: a failing clipboard shows the copy-failed line', async () => {
+	it('S6: a failing clipboard shows the copy-failed toast', async () => {
 		await save(makeRecord());
 		await mount({electionId: 'e1'});
 		await press('receipt-reveal');
@@ -417,7 +420,7 @@ describe('VoteReceiptScreen', () => {
 			throw new Error('no native module');
 		});
 		await press('receipt-copy-0');
-		expect(has('receipt-copy-failed-0')).toBe(true);
+		expect(textById('receipt-copy-failed-0')).toBe("Copying isn't available on this phone.");
 		expect(has('receipt-copied-0')).toBe(false);
 	});
 

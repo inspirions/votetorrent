@@ -2,7 +2,7 @@
  * InviteShareBlock (UAT 62 L2/L3, Redmi 8). The invite JSON used to be cut at 4 lines with no
  * ellipsis, and SHARE silently called Clipboard.setString, which left the system clipboard empty
  * with no feedback. The block now shows the whole text, SHARE opens the OS share sheet, and COPY
- * reports "Copied" only after an Android read-back matches.
+ * toasts "Copied" only after an Android read-back matches.
  */
 
 import React from 'react';
@@ -22,6 +22,10 @@ jest.mock('@react-navigation/native', () => ({
   }),
 }));
 
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+}));
+
 const mockSetString = jest.fn();
 const mockGetString = jest.fn(async () => '');
 jest.mock('@react-native-clipboard/clipboard', () => ({
@@ -34,6 +38,8 @@ jest.mock('@react-native-clipboard/clipboard', () => ({
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { InviteShareBlock } = require('../InviteShareBlock');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { ToastProvider } = require('../../../components/Toast');
 
 const SHARE = JSON.stringify({
   invitePrivate: 'a'.repeat(64),
@@ -46,7 +52,11 @@ const SHARE = JSON.stringify({
 function render() {
   let tr!: renderer.ReactTestRenderer;
   act(() => {
-    tr = renderer.create(<InviteShareBlock label="invitationKey" shareText={SHARE} testIDPrefix="p" />);
+    tr = renderer.create(
+      <ToastProvider>
+        <InviteShareBlock label="invitationKey" shareText={SHARE} testIDPrefix="p" />
+      </ToastProvider>,
+    );
   });
   return tr;
 }
@@ -60,6 +70,11 @@ async function press(tr: renderer.ReactTestRenderer, testID: string) {
 
 function statusText(tr: renderer.ReactTestRenderer): string | undefined {
   const found = tr.root.findAll((n) => n.props?.testID === 'p-status' && typeof n.props?.children === 'string');
+  return found[0]?.props.children;
+}
+
+function toastText(tr: renderer.ReactTestRenderer): string | undefined {
+  const found = tr.root.findAll((n) => n.props?.testID === 'toast-message' && typeof n.props?.children === 'string');
   return found[0]?.props.children;
 }
 
@@ -90,6 +105,7 @@ describe('InviteShareBlock', () => {
     await press(tr, 'p-share');
     expect(spy).toHaveBeenCalledWith({ message: SHARE });
     expect(statusText(tr)).toBeUndefined();
+    expect(toastText(tr)).toBeUndefined();
   });
 
   it('a share-sheet failure shows the share-failed copy', async () => {
@@ -99,28 +115,29 @@ describe('InviteShareBlock', () => {
     expect(statusText(tr)).toBe('invitationShareSheetFailed');
   });
 
-  it('COPY confirms "Copied" only when the Android read-back matches', async () => {
+  it('COPY toasts "Copied" only when the Android read-back matches, with no inline line', async () => {
     mockGetString.mockResolvedValueOnce(SHARE);
     const tr = render();
     await press(tr, 'p-copy');
     expect(mockSetString).toHaveBeenCalledWith(SHARE);
-    expect(statusText(tr)).toBe('invitationShareCopied');
+    expect(toastText(tr)).toBe('invitationShareCopied');
+    expect(statusText(tr)).toBeUndefined();
   });
 
-  it('COPY reports a failure when the clipboard stays empty (the Redmi 8 symptom)', async () => {
+  it('COPY toasts a failure when the clipboard stays empty (the Redmi 8 symptom)', async () => {
     mockGetString.mockResolvedValueOnce('');
     const tr = render();
     await press(tr, 'p-copy');
-    expect(statusText(tr)).toBe('invitationShareCopyFailed');
+    expect(toastText(tr)).toBe('invitationShareCopyFailed');
   });
 
-  it('COPY reports a failure when the clipboard module throws', async () => {
+  it('COPY toasts a failure when the clipboard module throws', async () => {
     mockSetString.mockImplementationOnce(() => {
       throw new Error('TurboModuleRegistry: RNCClipboard not found');
     });
     const tr = render();
     await press(tr, 'p-copy');
-    expect(statusText(tr)).toBe('invitationShareCopyFailed');
+    expect(toastText(tr)).toBe('invitationShareCopyFailed');
   });
 
   it('iOS skips the read-back (it would raise the Allow Paste prompt) and confirms the copy', async () => {
@@ -128,6 +145,6 @@ describe('InviteShareBlock', () => {
     const tr = render();
     await press(tr, 'p-copy');
     expect(mockGetString).not.toHaveBeenCalled();
-    expect(statusText(tr)).toBe('invitationShareCopied');
+    expect(toastText(tr)).toBe('invitationShareCopied');
   });
 });
