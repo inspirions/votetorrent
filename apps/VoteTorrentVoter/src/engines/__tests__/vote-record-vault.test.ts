@@ -17,6 +17,7 @@ import {
 } from '@votetorrent/attestation-native'
 import { createInMemorySecretWrapperForTests, type InMemorySecretWrapper } from '../__fixtures__/in-memory-secret-wrapper'
 import {
+	VOTE_RECORD_AUTH_WINDOW_SECONDS,
 	VOTETORRENT_VOTE_RECORD_WRAP_KEY_V1,
 	createVoteRecordWrapProvider,
 	setVoteRecordWrapProviderForTests,
@@ -351,5 +352,35 @@ describe('no logging', () => {
 
 	it('no console method was called during this suite so far', () => {
 		for (const s of consoleSpies) expect(s).not.toHaveBeenCalled()
+	})
+})
+
+describe('auth window model (D-14, R-4)', () => {
+	let t: number
+	let clocked: InMemorySecretWrapper
+
+	beforeEach(() => {
+		t = 5_000_000
+		clocked = createInMemorySecretWrapperForTests({ nowMs: () => t })
+		setVoteRecordWrapProviderForTests(createVoteRecordWrapProvider(clocked))
+	})
+
+	it('signing opened the window: seal is unprompted, an open at +2 s is unprompted, an open after the window lapses prompts once', async () => {
+		const { record } = makeRecord()
+		clocked.noteExternalAuthentication()
+		const env = await sealVoteRecord(record, OPTS)
+		expect(clocked.promptCount).toBe(0)
+		t += 2000
+		await openVoteRecord(record.electionId, env, OPTS)
+		expect(clocked.promptCount).toBe(0)
+		t += VOTE_RECORD_AUTH_WINDOW_SECONDS * 1000 + 1000
+		await openVoteRecord(record.electionId, env, OPTS)
+		expect(clocked.promptCount).toBe(1)
+	})
+
+	it('without an external authentication the seal itself prompts once', async () => {
+		const { record } = makeRecord()
+		await sealVoteRecord(record, OPTS)
+		expect(clocked.promptCount).toBe(1)
 	})
 })
