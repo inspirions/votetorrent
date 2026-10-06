@@ -349,9 +349,24 @@ export class AuthorityEngine implements IAuthorityEngine {
 					'Admin.ThresholdPolicies',
 				),
 			};
+			// UAT 62: ProposedAdmin rows are never deleted, so an unordered `.get()`
+			// returned the EARLIEST proposal (on device: an older empty one). Read the
+			// LATEST proposal that no Admin has reached yet. Promotion
+			// (applyAdminProposal) inserts Admin at the proposal's own EffectiveAt, so
+			// `A.EffectiveAt >= P.EffectiveAt` excludes a promoted proposal AND any older
+			// one a later promotion superseded. Proven against a real Quereus DB in
+			// test/authority.spec.ts (getAdminDetails / UAT 62).
 			const proposedAdminDB = await this.ctx.db
 				.prepare(
-					'select EffectiveAt, ThresholdPolicies from ProposedAdmin where AuthorityId = :id',
+					`select P.EffectiveAt, P.ThresholdPolicies
+						from ProposedAdmin P
+					where P.AuthorityId = :id
+						and not exists (
+							select 1 from Admin A
+							where A.AuthorityId = P.AuthorityId and A.EffectiveAt >= P.EffectiveAt
+						)
+					order by P.EffectiveAt desc
+					limit 1`,
 				)
 				.get({ id: this.authority.id });
 			if (!proposedAdminDB) {
@@ -365,13 +380,29 @@ export class AuthorityEngine implements IAuthorityEngine {
 					effectiveAt: proposedAdminDB.EffectiveAt as string,
 				},
 			)) {
-				proposedOfficersDB.push({
-					init: {
-						name: officer.ProposedName as string,
-						title: officer.Title as string,
-						scopes: parseJsonOr<Scope[]>(officer.Scopes, [], 'Officer.Scopes'),
-					},
-				});
+				const scopes = parseJsonOr<Scope[]>(officer.Scopes, [], 'Officer.Scopes');
+				// UAT 62: a row with a UserId (57-13) is an EXISTING officer; only a
+				// null-UserId row is a not-yet-joined `.init` invitee. Mapping both to
+				// `.init` dropped the identity and gave every proposed officer an Invite.
+				const userId = officer.UserId as string | null | undefined;
+				proposedOfficersDB.push(
+					userId
+						? {
+								existing: {
+									userId,
+									authorityId: this.authority.id,
+									title: officer.Title as string,
+									scopes,
+								},
+							}
+						: {
+								init: {
+									name: officer.ProposedName as string,
+									title: officer.Title as string,
+									scopes,
+								},
+							},
+				);
 			}
 			// AUTH-05 / D-22: populate signers from the most recent AdminSigning
 			// for scope 'rad' (admin-proposal scope) joined via OfficerSignature.

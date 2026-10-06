@@ -699,6 +699,93 @@ describe('AuthorityEngine', () => {
       expect(proposedOfficers).to.be.an('array').with.length.greaterThan(0)
     })
 
+    // UAT 62: ProposedAdmin rows are never deleted, and the read used to be an unordered
+    // `.get()` — so it returned the EARLIEST row. On device that was an older empty proposal:
+    // the proposed roster read empty and the new invitee had no Invite button.
+    async function seedProposedAdmin (ctx: EngineContext, authorityId: string, effectiveAt: string): Promise<void> {
+      const sig = makeRealSignature('user-1')
+      await ctx.db.exec(
+        `insert into ProposedAdmin (AuthorityId, EffectiveAt, ThresholdPolicies)
+         with context UserId = :uid, UserKey = :pubKey, Signature = :sig, Tid = 7, now = ${Date.now()}, IsUserValid = true
+         values (:authId, :eff, :tp)`,
+        {
+          uid: 'user-1',
+          pubKey: sig.signerKey,
+          sig: sig.signature,
+          authId: authorityId,
+          eff: effectiveAt,
+          tp: JSON.stringify([{ policy: 'rad', threshold: 1 }])
+        }
+      )
+    }
+
+    async function seedProposedOfficer (
+      ctx: EngineContext,
+      authorityId: string,
+      effectiveAt: string,
+      officer: { name: string, title: string, scopes: string[], userId: string | null }
+    ): Promise<void> {
+      const sig = makeRealSignature('user-1')
+      await ctx.db.exec(
+        `insert into ProposedOfficer (AuthorityId, AdminEffectiveAt, ProposedName, Title, Scopes, UserId)
+         with context UserId = :uid, UserKey = :pubKey, Signature = :sig, Tid = 7, now = ${Date.now()}, IsUserValid = true
+         values (:authId, :eff, :name, :title, :scopes, :officerUserId)`,
+        {
+          uid: 'user-1',
+          pubKey: sig.signerKey,
+          sig: sig.signature,
+          authId: authorityId,
+          eff: effectiveAt,
+          name: officer.name,
+          title: officer.title,
+          scopes: JSON.stringify(officer.scopes),
+          officerUserId: officer.userId
+        }
+      )
+    }
+
+    it('UAT 62: returns the LATEST unpromoted proposal, not an older empty one, with existing and init officers shaped apart', async () => {
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const before = await authorityEngine.getAdminDetails()
+      const foundingUserId = before.admin.officers[0]!.userId
+
+      const olderEmpty = toCanonicalDatetime(Date.now() + 60_000)
+      const newer = toCanonicalDatetime(Date.now() + 120_000)
+      await seedProposedAdmin(ctx, authority.id, olderEmpty)
+      await seedProposedAdmin(ctx, authority.id, newer)
+      await seedProposedOfficer(ctx, authority.id, newer, { name: 'Founding Chair', title: 'Chair', scopes: ['rad', 'rn'], userId: foundingUserId })
+      await seedProposedOfficer(ctx, authority.id, newer, { name: 'Bea Two', title: 'Clerk', scopes: ['vrg'], userId: null })
+
+      const details = await authorityEngine.getAdminDetails()
+      expect(details.proposed, 'a proposal is pending').to.not.equal(undefined)
+      expect(details.proposed!.proposed.effectiveAt).to.equal(fromCanonicalDatetime(newer))
+      const officers = details.proposed!.proposed.officers
+      expect(officers).to.have.length(2)
+      const existing = officers.find((o) => o.existing)
+      const init = officers.find((o) => o.init)
+      expect(existing, 'the officer with a UserId is an existing officer').to.deep.equal({
+        existing: { userId: foundingUserId, authorityId: authority.id, title: 'Chair', scopes: ['rad', 'rn'] }
+      })
+      expect(init, 'the null-UserId invitee stays an init officer').to.deep.equal({
+        init: { name: 'Bea Two', title: 'Clerk', scopes: ['vrg'] }
+      })
+    })
+
+    it('UAT 62: a ProposedAdmin already promoted to Admin is not reported as a pending proposal', async () => {
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      // Promotion inserts Admin at the proposal's own EffectiveAt, so a ProposedAdmin whose
+      // EffectiveAt matches an Admin row is history (also the debug task-seed's shape).
+      const adminRow = await ctx.db
+        .prepare('select EffectiveAt from Admin where AuthorityId = :id')
+        .get({ id: authority.id })
+      await seedProposedAdmin(ctx, authority.id, adminRow!.EffectiveAt as string)
+
+      const details = await authorityEngine.getAdminDetails()
+      expect(details.proposed).to.equal(undefined)
+    })
+
     it('should throw Admin not found when the AuthorityEngine is bound to an unknown authority id', async () => {
       const { authorityEngine } = await createNetworkAndAuthority()
       const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
