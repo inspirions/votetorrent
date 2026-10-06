@@ -1,20 +1,29 @@
 import type { InviteStatus, SentKeyholderInvite } from "@votetorrent/vote-core";
 
-export type KeyholderInviteState = "accepted" | "declined" | "pending";
+export type KeyholderInviteState = "accepted" | "declined" | "sent" | "expired" | "not-sent";
 
 /**
- * What a keyholder's `InviteStatus` can honestly say. The election engine's keyholder projection
- * (D-27) sets `result` ONLY from a real `Keyholder` row (the invitee ACCEPTED) or an
- * `InviteResult`. It carries no signal that an invite slot was sent. So `result` means
- * "responded", never "sent".
+ * What a keyholder's `InviteStatus` says. `result` is set only from a real `Keyholder` row (the
+ * invitee ACCEPTED) or an `InviteResult`, so it means "responded". The election engine's keyholder
+ * projection also reports `sent` (live | answered | no-longer-valid) read from the invitation
+ * slots, which is what lets the officer see "Sent" before any response.
  *
- * The old UI read `Boolean(result)` as Sent/Unsent. The result: "Unsent" after two successful
- * sends, then "Sent" after the keyholder had actually accepted. Absent a result the honest state
- * is "pending" (not accepted yet, whether or not an invite went out).
+ * - response wins: accepted / declined regardless of `sent`
+ * - live, or answered without a visible result yet (replication lag): sent
+ * - no-longer-valid (cancelled or expired): expired, send again
+ * - no slot found: not sent
  */
 export function keyholderInviteState(status: InviteStatus<SentKeyholderInvite>): KeyholderInviteState {
-	if (!status.result) return "pending";
-	return status.result.isAccepted ? "accepted" : "declined";
+	if (status.result) return status.result.isAccepted ? "accepted" : "declined";
+	switch (status.sent?.state) {
+		case "live":
+		case "answered":
+			return "sent";
+		case "no-longer-valid":
+			return "expired";
+		default:
+			return "not-sent";
+	}
 }
 
 /** i18n key + theme color key for a keyholder invite state. */
@@ -24,5 +33,7 @@ export const KEYHOLDER_INVITE_STATE_META: Record<
 > = {
 	accepted: { labelKey: "accepted", colorKey: "success" },
 	declined: { labelKey: "keyholderStatusDeclined", colorKey: "error" },
-	pending: { labelKey: "pending", colorKey: "warning" },
+	sent: { labelKey: "keyholderStatusSent", colorKey: "warning" },
+	expired: { labelKey: "keyholderStatusExpired", colorKey: "error" },
+	"not-sent": { labelKey: "keyholderStatusNotSent", colorKey: "warning" },
 };

@@ -207,10 +207,10 @@ describe('KeyholderScreen — invite status line (UAT 62 M)', () => {
     expect(statusText(tr)).toBe('accepted');
   });
 
-  it('a keyholder with no result reads pending (not "sent"/"unsent")', async () => {
+  it('a keyholder with no result reads not-sent', async () => {
     mockRouteParams.keyholder = { invite: { name: 'Bob' } };
     const tr = await render();
-    expect(statusText(tr)).toBe('pending');
+    expect(statusText(tr)).toBe('keyholderStatusNotSent');
   });
 
   it('on focus, swaps in the fresh engine keyholder: an accept since the card was tapped reads accepted and drives the DKG as that user', async () => {
