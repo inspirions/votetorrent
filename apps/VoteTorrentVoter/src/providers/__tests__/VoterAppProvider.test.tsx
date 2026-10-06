@@ -31,6 +31,8 @@ import {UserKeyType, ElectionType} from '@votetorrent/vote-core';
 import type {NetworkInit, Scope, Signature, User} from '@votetorrent/vote-core';
 import {NetworksEngine} from '@votetorrent/vote-engine/rn';
 import {DeviceIdentityKeyUnavailableError} from '../../engines/device-user';
+import {identityNotReplaceableError} from '../../engines/identity-errors';
+import {IdentityRecoveryView} from '../../components/IdentityRecoveryView';
 import type {DevSeedResult} from '../../engines/dev-seed';
 
 // This test drives real NetworksEngine.create()/open() DB operations (not pure UI rendering),
@@ -287,6 +289,7 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 			'hasEngine',
 			'selectNetwork',
 			'seededElectionId',
+			'createNewIdentity',
 		]) {
 			expect(keys).toContain(key);
 		}
@@ -304,6 +307,10 @@ describe('VoterAppProvider — boot errors never show raw engine text', () => {
 	function findByTestId(tr: renderer.ReactTestRenderer, id: string) {
 		return tr.root.findAll(n => n.props.testID === id && typeof n.props.onPress === 'function')[0];
 	}
+	// A failed assertion skips a test's trailing restoreAllMocks; never leak its spies onward.
+	afterEach(() => {
+		jest.restoreAllMocks();
+	});
 
 	it('1: an unwrappable identity renders the translated recovery view', async () => {
 		mockSeedDevNetwork.mockRejectedValue(new DeviceIdentityKeyUnavailableError('no-wrap-key'));
@@ -365,6 +372,124 @@ describe('VoterAppProvider — boot errors never show raw engine text', () => {
 		expect(text).toContain('bootError.identityLost.replaceFailed');
 		expect(text).toContain('bootError.tryAgain');
 		expectNoRawText(tr);
+		jest.restoreAllMocks();
+	});
+
+	// WR-03: a step AFTER the replacement fails. The retry must finish the remaining steps, never
+	// call replaceUnrecoverableDeviceIdentity on the now-readable record (refused forever).
+	it('5: a failed step after the replacement is finished by the retry without replacing again', async () => {
+		mockSeedDevNetwork.mockRejectedValueOnce(new DeviceIdentityKeyUnavailableError('no-wrap-key'));
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		mockReplaceUnrecoverableDeviceIdentity.mockResolvedValue(FAKE_USER);
+		const clearRecentsSpy = jest
+			.spyOn(NetworksEngine.prototype, 'clearRecentNetworks')
+			.mockRejectedValueOnce(new Error('boom'));
+		const clearCacheSpy = jest.spyOn(EngineFactory.prototype, 'clearEngineCache');
+		jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		const {tr, captured} = renderProvider();
+		await flushBoot();
+
+		renderer.act(() => findByTestId(tr, 'identity-recovery-create').props.onPress());
+		await renderer.act(async () => {
+			findByTestId(tr, 'identity-recovery-confirm').props.onPress();
+		});
+		await flushBoot(5);
+		expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-failed').length).toBeGreaterThan(0);
+		expect(mockReplaceUnrecoverableDeviceIdentity).toHaveBeenCalledTimes(1);
+		expect(clearRecentsSpy).toHaveBeenCalledTimes(1);
+		expect(clearCacheSpy).not.toHaveBeenCalled();
+		expectNoRawText(tr);
+
+		renderer.act(() => findByTestId(tr, 'identity-recovery-create').props.onPress());
+		await renderer.act(async () => {
+			findByTestId(tr, 'identity-recovery-confirm').props.onPress();
+		});
+		await flushBoot(30, () => captured.value !== null && captured.value.isInitialized === true);
+
+		expect(mockReplaceUnrecoverableDeviceIdentity).toHaveBeenCalledTimes(1);
+		expect(clearRecentsSpy).toHaveBeenCalledTimes(2);
+		expect(clearCacheSpy).toHaveBeenCalledTimes(1);
+		expect(mockSeedDevNetwork).toHaveBeenCalledTimes(2);
+		expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view')).toHaveLength(0);
+		expect(captured.value!.isInitialized).toBe(true);
+		jest.restoreAllMocks();
+	});
+
+	// T-62-87-01: nothing was replaced this session, so a 'readable' refusal is a real refusal —
+	// it surfaces as the failed state and the next press asks the engine again (no skip).
+	it('6: a readable refusal on the first attempt surfaces and is not treated as already replaced', async () => {
+		mockSeedDevNetwork.mockRejectedValue(new DeviceIdentityKeyUnavailableError('no-wrap-key'));
+		mockReplaceUnrecoverableDeviceIdentity.mockRejectedValue(
+			identityNotReplaceableError('identity is readable', 'readable'),
+		);
+		const clearRecentsSpy = jest.spyOn(NetworksEngine.prototype, 'clearRecentNetworks');
+		const clearCacheSpy = jest.spyOn(EngineFactory.prototype, 'clearEngineCache');
+		jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		const {tr} = renderProvider();
+		await flushBoot();
+		for (let attempt = 1; attempt <= 2; attempt++) {
+			renderer.act(() => findByTestId(tr, 'identity-recovery-create').props.onPress());
+			// eslint-disable-next-line no-await-in-loop
+			await renderer.act(async () => {
+				findByTestId(tr, 'identity-recovery-confirm').props.onPress();
+			});
+			// eslint-disable-next-line no-await-in-loop
+			await flushBoot(5);
+			expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-failed').length).toBeGreaterThan(0);
+			expect(mockReplaceUnrecoverableDeviceIdentity).toHaveBeenCalledTimes(attempt);
+		}
+		expect(clearRecentsSpy).not.toHaveBeenCalled();
+		expect(clearCacheSpy).not.toHaveBeenCalled();
+		expect(mockSeedDevNetwork).toHaveBeenCalledTimes(1);
+		jest.restoreAllMocks();
+	});
+
+	it('7: after a fully successful createNewIdentity the session flag resets, so a later loss is replaced again', async () => {
+		mockSeedDevNetwork.mockRejectedValueOnce(new DeviceIdentityKeyUnavailableError('no-wrap-key'));
+		mockSeedDevNetwork.mockRejectedValueOnce(new DeviceIdentityKeyUnavailableError('tag-mismatch'));
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		mockReplaceUnrecoverableDeviceIdentity.mockResolvedValue(FAKE_USER);
+		jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		const {tr, captured} = renderProvider();
+		await flushBoot();
+		for (let attempt = 1; attempt <= 2; attempt++) {
+			renderer.act(() => findByTestId(tr, 'identity-recovery-create').props.onPress());
+			// eslint-disable-next-line no-await-in-loop
+			await renderer.act(async () => {
+				findByTestId(tr, 'identity-recovery-confirm').props.onPress();
+			});
+			// eslint-disable-next-line no-await-in-loop
+			await flushBoot(30, () =>
+				mockSeedDevNetwork.mock.calls.length > attempt &&
+				(tr.root.findAll(n => n.props.testID === 'identity-recovery-create').length > 0 ||
+					(captured.value !== null && captured.value.isInitialized === true)),
+			);
+			expect(mockReplaceUnrecoverableDeviceIdentity).toHaveBeenCalledTimes(attempt);
+		}
+		await flushBoot(30, () => captured.value !== null && captured.value.isInitialized === true);
+		expect(mockSeedDevNetwork).toHaveBeenCalledTimes(3);
+		expect(captured.value!.isInitialized).toBe(true);
+		jest.restoreAllMocks();
+	});
+
+	it('8: useVoterApp().createNewIdentity is the same function the boot recovery view receives', async () => {
+		mockSeedDevNetwork.mockRejectedValueOnce(new DeviceIdentityKeyUnavailableError('no-wrap-key'));
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		mockReplaceUnrecoverableDeviceIdentity.mockResolvedValue(FAKE_USER);
+		jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		const {tr, captured} = renderProvider();
+		await flushBoot();
+		const fromView = tr.root.findByType(IdentityRecoveryView).props.onCreateNewIdentity;
+		expect(typeof fromView).toBe('function');
+		await renderer.act(async () => {
+			await fromView();
+		});
+		await flushBoot(30, () => captured.value !== null && captured.value.isInitialized === true);
+		expect(captured.value!.createNewIdentity).toBe(fromView);
 		jest.restoreAllMocks();
 	});
 

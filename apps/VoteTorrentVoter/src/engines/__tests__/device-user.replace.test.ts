@@ -15,9 +15,11 @@ import {
 	buildIdentityKeyAad,
 	getDevicePrivKeyHex,
 	getOrCreateDeviceUser,
+	isIdentityNotReplaceable,
 	isReplaceableIdentityError,
 	replaceUnrecoverableDeviceIdentity,
 } from '../device-user'
+import * as identityErrors from '../identity-errors'
 import { setDeviceKeyWrapProviderForTests, type DeviceKeyWrapProvider } from '../device-key-wrap'
 import { createInMemoryKeyWrapProviderForTests } from '../__fixtures__/in-memory-key-wrap-provider'
 
@@ -105,11 +107,13 @@ describe('replaceUnrecoverableDeviceIdentity', () => {
 		expect(replaced.id).not.toBe('u1')
 	})
 
-	it('a readable record is refused and left byte-identical', async () => {
+	it('a readable record is refused (reason readable, message unchanged) and left byte-identical', async () => {
 		await getOrCreateDeviceUser('Voter')
 		const before = await stored()
 		await expect(replaceUnrecoverableDeviceIdentity('Voter')).rejects.toMatchObject({
 			name: 'IdentityNotReplaceableError',
+			reason: 'readable',
+			message: 'identity is readable',
 		})
 		expect(await stored()).toBe(before)
 	})
@@ -120,6 +124,8 @@ describe('replaceUnrecoverableDeviceIdentity', () => {
 		mode = 'native-error'
 		await expect(replaceUnrecoverableDeviceIdentity('Voter')).rejects.toMatchObject({
 			name: 'IdentityNotReplaceableError',
+			reason: 'not-permanent',
+			message: 'identity failure is not permanent',
 		})
 		expect(await stored()).toBe(before)
 	})
@@ -139,6 +145,8 @@ describe('replaceUnrecoverableDeviceIdentity', () => {
 	it('an absent record is refused', async () => {
 		await expect(replaceUnrecoverableDeviceIdentity('Voter')).rejects.toMatchObject({
 			name: 'IdentityNotReplaceableError',
+			reason: 'no-identity',
+			message: 'no identity to replace',
 		})
 		expect(await stored()).toBeNull()
 	})
@@ -147,6 +155,8 @@ describe('replaceUnrecoverableDeviceIdentity', () => {
 		await AsyncStorage.setItem(DEVICE_USER_KEY, '{not json')
 		await expect(replaceUnrecoverableDeviceIdentity('Voter')).rejects.toMatchObject({
 			name: 'IdentityNotReplaceableError',
+			reason: 'not-wrapped',
+			message: 'identity record is not a permanently locked wrapped record',
 		})
 		expect(await stored()).toBe('{not json')
 	})
@@ -163,5 +173,33 @@ describe('isReplaceableIdentityError', () => {
 		expect(isReplaceableIdentityError(new Error('no-wrap-key'))).toBe(false)
 		expect(isReplaceableIdentityError('no-wrap-key')).toBe(false)
 		expect(isReplaceableIdentityError(null)).toBe(false)
+	})
+})
+
+describe('isIdentityNotReplaceable (typed refusal reason, WR-03)', () => {
+	it('matches the readable refusal only when asked for readable', async () => {
+		await getOrCreateDeviceUser('Voter')
+		const readable = await replaceUnrecoverableDeviceIdentity('Voter').catch((e: unknown) => e)
+		expect(isIdentityNotReplaceable(readable)).toBe(true)
+		expect(isIdentityNotReplaceable(readable, 'readable')).toBe(true)
+		expect(isIdentityNotReplaceable(readable, 'not-permanent')).toBe(false)
+
+		await AsyncStorage.clear()
+		const absent = await replaceUnrecoverableDeviceIdentity('Voter').catch((e: unknown) => e)
+		expect(isIdentityNotReplaceable(absent, 'no-identity')).toBe(true)
+		expect(isIdentityNotReplaceable(absent, 'readable')).toBe(false)
+	})
+
+	it('never matches on message text or on an unrelated error', () => {
+		expect(isIdentityNotReplaceable(new Error('identity is readable'), 'readable')).toBe(false)
+		expect(isIdentityNotReplaceable(new DeviceIdentityKeyUnavailableError('no-wrap-key'))).toBe(false)
+		expect(isIdentityNotReplaceable(null)).toBe(false)
+		expect(isIdentityNotReplaceable('readable', 'readable')).toBe(false)
+	})
+
+	it('device-user re-exports the dependency-free predicates unchanged', () => {
+		expect(isReplaceableIdentityError).toBe(identityErrors.isReplaceableIdentityError)
+		expect(isIdentityNotReplaceable).toBe(identityErrors.isIdentityNotReplaceable)
+		expect(REPLACEABLE_IDENTITY_REASONS).toBe(identityErrors.REPLACEABLE_IDENTITY_REASONS)
 	})
 })
