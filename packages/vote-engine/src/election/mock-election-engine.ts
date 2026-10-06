@@ -17,6 +17,7 @@ import { ElectionInviteKeyholderBuilder } from './builders/election-invite-keyho
 import { ElectionProposeBallotBuilder } from './builders/election-propose-ballot-builder.js';
 import { ElectionProposeRevisionBuilder } from './builders/election-propose-revision-builder.js';
 import { ElectionRevokeKeyholderBuilder } from './builders/election-revoke-keyholder-builder.js';
+import { fromCanonicalDatetime, toCanonicalDatetime } from '../utils.js';
 
 // Phase 9 plan 09-01 (D-14, D-18) — seed data for the demo Timeline + Ballot
 // renderers. Anchored to "now + N days" so the Timeline's past/current/future
@@ -70,11 +71,12 @@ export class MockElectionEngine implements IElectionEngine {
 	// can call markBallotConfirmed on the same state object.
 	private confirmationState: MockBallotConfirmationState;
 
-	// 62-76: keyholder invitations received via inviteKeyholder, name -> expiration. Feeds the
-	// `sent` field of the keyholder projection with the same three-state rule as the real engine
-	// (an invitee that has a result is 'answered', else an expired invite is 'no-longer-valid',
-	// else 'live'; never-invited invitees carry no `sent`).
-	private sentKeyholderInvites = new Map<string, string>();
+	// 62-76: keyholder invitations received via inviteKeyholder, name -> every expiration sent to that
+	// name (62-84: appended on each send, like the real engine's one chain per send). Feeds the `sent`
+	// field of the keyholder projection with the real engine's ranking: an invitee that has a result is
+	// 'answered', else any unexpired send makes it 'live' (the latest such expiration), else
+	// 'no-longer-valid' with the latest expiration; never-invited invitees carry no `sent`.
+	private sentKeyholderInvites = new Map<string, string[]>();
 
 	constructor(confirmationState?: MockBallotConfirmationState) {
 		this.confirmationState = confirmationState ?? new MockBallotConfirmationState();
@@ -169,12 +171,22 @@ export class MockElectionEngine implements IElectionEngine {
 		// revised, so the Proposed-Revision UI must stay hidden until a real
 		// proposed revision exists. (The blanket demo seed added in 09-15 made every
 		// election show a phantom revision — removed per UAT.)
+		const now = Date.now();
+		// IN-06: parse with the engine's own datetime reader (canonicalise first: callers may pass a
+		// trailing Z or an offset). An unparseable value sorts last and never reads live.
+		const expirationMs = (value: string): number => {
+			const ms = fromCanonicalDatetime(toCanonicalDatetime(value));
+			return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+		};
+		const latest = (values: string[]): string =>
+			values.reduce((best, v) => (expirationMs(v) > expirationMs(best) ? v : best));
 		mockElection.current.keyholders = mockElection.current.keyholders.map((k) => {
-			const expiration = this.sentKeyholderInvites.get(k.invite.name);
-			if (expiration === undefined) return k;
-			const expired = !(Date.parse(expiration.endsWith('Z') || /[+-]\d\d:\d\d$/.test(expiration) ? expiration : `${expiration}Z`) > Date.now());
-			const state = k.result ? 'answered' : expired ? 'no-longer-valid' : 'live';
-			return { ...k, sent: { state, expiration } };
+			const sends = this.sentKeyholderInvites.get(k.invite.name);
+			if (sends === undefined || sends.length === 0) return k;
+			if (k.result) return { ...k, sent: { state: 'answered' as const, expiration: latest(sends) } };
+			const live = sends.filter((v) => expirationMs(v) > now);
+			if (live.length > 0) return { ...k, sent: { state: 'live' as const, expiration: latest(live) } };
+			return { ...k, sent: { state: 'no-longer-valid' as const, expiration: latest(sends) } };
 		});
 		return Promise.resolve(mockElection);
 	}
@@ -184,7 +196,9 @@ export class MockElectionEngine implements IElectionEngine {
 		_electionId: string,
 		_signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>),
 	): Promise<void> {
-		this.sentKeyholderInvites.set(keyholder.name, keyholder.expiration);
+		const sends = this.sentKeyholderInvites.get(keyholder.name);
+		if (sends) sends.push(keyholder.expiration);
+		else this.sentKeyholderInvites.set(keyholder.name, [keyholder.expiration]);
 		return Promise.resolve();
 	}
 

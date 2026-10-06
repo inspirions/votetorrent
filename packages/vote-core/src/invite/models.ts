@@ -40,11 +40,16 @@ export interface Invite {
 /**
  * Whether an invitation slot was sent, and whether it is still usable.
  * 'live' = sent and still answerable; 'answered' = the invitee responded;
- * 'no-longer-valid' = cancelled, expired, or superseded and closed.
+ * 'no-longer-valid' = cancelled, expired, or superseded and closed;
+ * 'unknown' = the chain exists but its state could not be decided: structurally ambiguous, or the
+ * network could not serve the invitation tables. It is deliberately NOT "not sent".
  */
 export interface InviteSentState {
-	state: 'live' | 'answered' | 'no-longer-valid';
-	/** Expiration of the invitation (the chain head's when it is live or answered). */
+	state: 'live' | 'answered' | 'no-longer-valid' | 'unknown';
+	/**
+	 * Expiration of the invitation (the chain head's when it is live or answered; the latest of the
+	 * chain's rows otherwise). '' when nothing could be read ('unknown' from an unreadable table).
+	 */
 	expiration: string;
 }
 

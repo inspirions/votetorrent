@@ -55,6 +55,60 @@ import { readAuthorityThreshold, listCurrentScopeHolders } from '../signing/thre
  */
 export const BALLOT_HEADER_TID = 1
 
+/**
+ * 62-84 (CR-01, D-14, D-27): rank of a keyholder invitation chain's sent state. Every chain sent to one
+ * keyholder name is ranked and the most useful one is reported first, so "send again" (a second chain under a
+ * new InviteKey) reads Sent whichever InviteSlot Cid sorts first. answered and live are decided facts and win.
+ * 'unknown' (an ambiguous chain, or an unreadable invitation table) outranks no-longer-valid on purpose: an
+ * ambiguous chain may be live, and reporting it as dead would invite a duplicate resend. Ties break on the
+ * latest expiration.
+ */
+const SENT_STATE_RANK: Record<InviteSentState['state'], number> = {
+  answered: 4,
+  live: 3,
+  unknown: 2,
+  'no-longer-valid': 1
+}
+
+/** Expiration as epoch ms for ranking; an empty or unparseable value sorts last (never throws). */
+function sentExpirationMs (expiration: string): number {
+  if (!expiration) return Number.NEGATIVE_INFINITY
+  const ms = fromCanonicalDatetime(expiration)
+  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms
+}
+
+function compareSentStates (a: InviteSentState, b: InviteSentState): number {
+  const byRank = SENT_STATE_RANK[b.state] - SENT_STATE_RANK[a.state]
+  if (byRank !== 0) return byRank
+  const am = sentExpirationMs(a.expiration)
+  const bm = sentExpirationMs(b.expiration)
+  if (am === bm) return 0
+  return bm > am ? 1 : -1
+}
+
+const PEER_UNAVAILABLE_ERROR_NAMES = new Set(['BlockUnavailableError', 'BlockPossiblyStaleError'])
+const PEER_UNAVAILABLE_MESSAGE = /\bBlock \S+ (is unavailable \(|may be stale:)/
+
+/**
+ * 62-84 (D-23, gap 7): structural match for an optimystic peer-read failure (the repo could not serve a block
+ * while peered). vote-engine does not import the @optimystic/db-core classes, so this matches by error name
+ * or by the two message shapes, on the error itself or up to five `cause` levels below it (the quereus vtab
+ * may wrap it). Returns the matched error's name, or undefined for any other error.
+ */
+function isPeerReadUnavailable (err: unknown): string | undefined {
+  let cur: unknown = err
+  for (let depth = 0; depth <= 5 && cur !== null && typeof cur === 'object'; depth++) {
+    const name = (cur as { name?: unknown }).name
+    const message = (cur as { message?: unknown }).message
+    if (typeof name === 'string' && PEER_UNAVAILABLE_ERROR_NAMES.has(name)) return name
+    if (typeof message === 'string' && PEER_UNAVAILABLE_MESSAGE.test(message)) {
+      return typeof name === 'string' && name ? name : 'Error'
+    }
+    cur = (cur as { cause?: unknown }).cause
+  }
+  return undefined
+}
+
 /** Minimal Election identifier the engine is constructed against. */
 export interface ElectionSubject {
   id: string
@@ -1331,7 +1385,10 @@ export class ElectionEngine implements IElectionEngine {
    * over (accepted keyholders never named in the original invitee JSON — see
    * D-27 read c) are appended at the end. A `Keyholder` row is never dropped
    * and never duplicated — residual: with two SAME-NAME invitees in the JSON,
-   * the FIRST slot absorbs the acceptance (display-only; T-62-09-05).
+   * the FIRST slot absorbs the acceptance (display-only; T-62-09-05). The
+   * sent state follows the same per-name order: same-name invitees take the
+   * name's ranked sent entries in turn (the first gets the best-ranked chain),
+   * independently of which `Keyholder` row each absorbed.
    */
   private async readRevisionKeyholders (
     electionId: string,
@@ -1373,45 +1430,65 @@ export class ElectionEngine implements IElectionEngine {
 
     // 62-76: sent state. Read the election's keyholder slots (two equality terms only), collect them
     // before any further query (no nested cursor), then decide liveness once per distinct InviteKey with
-    // the shared readInviteChain rule. 'ambiguous' / 'not-found' fail closed: no sent entry.
-    type SlotRow = { Name: string, InviteKey: string, Cid: string, Expiration: string }
-    const slotRows: SlotRow[] = []
-    for await (const row of this.ctx.db.eval(
-      'select Cid, Name, InviteKey, Expiration from InviteSlot where ElectionId = :electionId and Type = :slotType',
-      { electionId, slotType: 'k' }
-    )) {
-      slotRows.push({
-        Cid: row.Cid as string,
-        Name: row.Name as string,
-        InviteKey: row.InviteKey as string,
-        Expiration: String(row.Expiration)
-      })
+    // the shared readInviteChain rule. 'not-found' yields no entry.
+    // 62-84 (CR-01, WR-04): 'ambiguous' is carried as 'unknown' (never dropped, so the label cannot read
+    // "Not sent" for an invitation that was sent). All of a name's chains go into one list sorted by
+    // SENT_STATE_RANK (answered > live > unknown > no-longer-valid), ties on the latest expiration, and
+    // takeSent hands out the head - never InviteSlot row (Cid hash) order. Same-name invitees each take
+    // their own entry; an extra chain is dropped only after every same-name invitee has one.
+    // 62-84 (D-23, gap 7): sent state is auxiliary. When the network cannot serve the invitation tables
+    // (a peer-read failure, see isPeerReadUnavailable), every keyholder reads 'unknown' instead of the
+    // whole election read throwing. Any other error rethrows unchanged.
+    const sentByName = new Map<string, InviteSentState[]>()
+    let sentUnavailable = false
+    try {
+      type SlotRow = { Name: string, InviteKey: string, Cid: string, Expiration: string }
+      const slotRows: SlotRow[] = []
+      for await (const row of this.ctx.db.eval(
+        'select Cid, Name, InviteKey, Expiration from InviteSlot where ElectionId = :electionId and Type = :slotType',
+        { electionId, slotType: 'k' }
+      )) {
+        slotRows.push({
+          Cid: row.Cid as string,
+          Name: row.Name as string,
+          InviteKey: row.InviteKey as string,
+          Expiration: String(row.Expiration)
+        })
+      }
+      const byKey = new Map<string, SlotRow[]>()
+      for (const r of slotRows) {
+        const list = byKey.get(r.InviteKey)
+        if (list) list.push(r)
+        else byKey.set(r.InviteKey, [r])
+      }
+      const now = nowCanonicalDatetime()
+      const latestExpiration = (chainRows: SlotRow[]): string =>
+        chainRows.map(r => r.Expiration).sort((a, b) => sentExpirationMs(a) - sentExpirationMs(b) || (a < b ? -1 : a > b ? 1 : 0)).pop() ?? ''
+      for (const [inviteKey, chainRows] of byKey) {
+        const chain = await readInviteChain(this.ctx.db, inviteKey, 'k', now)
+        if (chain.status === 'not-found') continue
+        let sent: InviteSentState
+        if (chain.status === 'ambiguous') {
+          sent = { state: 'unknown', expiration: latestExpiration(chainRows) }
+        } else {
+          const headRow = chain.status === 'no-longer-valid' ? undefined : chainRows.find(r => r.Cid === chain.cid)
+          sent = { state: chain.status, expiration: headRow?.Expiration ?? latestExpiration(chainRows) }
+        }
+        const name = chainRows[0]!.Name
+        const list = sentByName.get(name)
+        if (list) list.push(sent)
+        else sentByName.set(name, [sent])
+      }
+      for (const list of sentByName.values()) list.sort(compareSentStates)
+    } catch (err) {
+      const peerError = isPeerReadUnavailable(err)
+      if (peerError === undefined) throw err
+      console.warn('[keyholders] sent state unavailable:', peerError)
+      sentUnavailable = true
     }
-    const byKey = new Map<string, SlotRow[]>()
-    for (const r of slotRows) {
-      const list = byKey.get(r.InviteKey)
-      if (list) list.push(r)
-      else byKey.set(r.InviteKey, [r])
-    }
-    const sentEntries: Array<{ name: string, sent: InviteSentState }> = []
-    const now = nowCanonicalDatetime()
-    for (const [inviteKey, chainRows] of byKey) {
-      const chain = await readInviteChain(this.ctx.db, inviteKey, 'k', now)
-      if (chain.status === 'not-found' || chain.status === 'ambiguous') continue
-      const headRow = chain.status === 'no-longer-valid' ? undefined : chainRows.find(r => r.Cid === chain.cid)
-      const expiration = headRow?.Expiration ??
-        chainRows.map(r => r.Expiration).sort().pop() ?? ''
-      sentEntries.push({
-        name: chainRows[0]!.Name,
-        sent: { state: chain.status, expiration }
-      })
-    }
-    const sentConsumed = new Set<number>()
     const takeSent = (name: string): InviteSentState | undefined => {
-      const i = sentEntries.findIndex((e, j) => !sentConsumed.has(j) && e.name === name)
-      if (i < 0) return undefined
-      sentConsumed.add(i)
-      return sentEntries[i]!.sent
+      if (sentUnavailable) return { state: 'unknown', expiration: '' }
+      return sentByName.get(name)?.shift()
     }
 
     const consumed = new Set<number>()

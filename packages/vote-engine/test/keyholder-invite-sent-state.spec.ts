@@ -5,6 +5,11 @@
  * slot was sent and whether it is still live, answered, or no longer valid, using the one shared
  * invite-chain rule (readInviteChain). Real-DB cases S1-S6, then mock parity M1-M3.
  *
+ * 62-84 (CR-01, WR-04, gap 7): S7-S7c rank every chain of a name (answered > live > unknown >
+ * no-longer-valid, ties on the latest expiration) and are seeded in BOTH InviteSlot Cid orders with
+ * the order asserted; S8 carries an ambiguous chain as 'unknown'; S9 degrades an unreadable slot table
+ * to 'unknown' without failing the election read; M4 is mock parity for repeated sends.
+ *
  * Fixtures are built only through real engine paths: createElection with invitees, inviteKeyholder,
  * InvitationEngine.respondToInvite, AuthorityEngine.cancelInvite/resendInvite. The one raw write is
  * an already-expired 'k' slot (the engine refuses to send an expired one), inserted under a past
@@ -18,6 +23,7 @@ import type { KeyholderInvite, Signature } from '@votetorrent/vote-core'
 import { InvitationEngine } from '../src/invite/invitation-engine.js'
 import { ElectionsEngine, peekNextElectionTid } from '../src/elections/elections-engine.js'
 import { allocateTid } from '../src/database/tid-allocator.js'
+import { toCanonicalDatetime } from '../src/utils.js'
 import type { AuthorityEngine } from '../src/authority/authority-engine.js'
 import { MockElectionEngine } from '../src/election/mock-election-engine.js'
 import {
@@ -199,6 +205,234 @@ describe('keyholder invite sent state (62-76)', () => {
   })
 })
 
+/** A canonical (no Z) future expiration, so a precomputed Cid uses exactly the stored value. */
+function futureCanonical (ms = 3_600_000): string {
+  return toCanonicalDatetime(new Date(Date.now() + ms))
+}
+
+async function storedExpiration (fx: Fixture, cid: string): Promise<string> {
+  const row = await fx.auth.ctx.db.prepare('select Expiration from InviteSlot where Cid = :cid').get({ cid })
+  return String(row!.Expiration)
+}
+
+/**
+ * Raw 'k' slot insert (the S4 technique, generalised): an already-expired slot is written under a past
+ * context now; any other row (e.g. a second original under an existing InviteKey) under the current now.
+ */
+async function insertRawKSlot (
+  fx: Fixture,
+  opts: { name: string, inviteKey?: string, expiration: string, contextNow?: string },
+): Promise<string> {
+  const db = fx.auth.ctx.db
+  const inviteKey = opts.inviteKey ?? freshInviteKey()
+  const nonce = bytesToHex(secp256k1.utils.randomSecretKey())
+  const cidRow = await db
+    .prepare('select cid(Digest(:electionId, :expiration, :inviteKey, :inviteSignature, :name, :nonce, :type)) as c')
+    .get({ electionId: fx.electionId, expiration: opts.expiration, inviteKey, inviteSignature: '', name: opts.name, nonce, type: 'k' })
+  const tid = await allocateTid(db, 'election')
+  await db.exec(
+    `insert into InviteSlot (Cid, Type, Name, Expiration, InviteKey, InviteSignature, SigningNonce, ElectionId)
+      with context Tid = ${tid}, now = :now, IsSignatureValid = true, IsInsertValid = true
+      values (:cid, 'k', :name, :expiration, :inviteKey, :inviteSignature, :nonce, :electionId)`,
+    { cid: cidRow!.c as string, name: opts.name, expiration: opts.expiration, inviteKey, inviteSignature: '', nonce, electionId: fx.electionId, now: opts.contextNow ?? toCanonicalDatetime(new Date()) }
+  )
+  return cidRow!.c as string
+}
+
+async function insertExpiredKSlot (fx: Fixture, name: string, expiration = '2000-01-02T00:00:00'): Promise<string> {
+  return insertRawKSlot(fx, { name, expiration, contextNow: '2000-01-01T00:00:00' })
+}
+
+type NonceSeam = { signingEngine: { generateSigningNonce(): string } }
+
+/**
+ * Send a live invite for `name` through the real inviteKeyholder whose InviteSlot Cid sorts on the wanted
+ * side of `otherCid`. The engine mints a random signing nonce, so the nonce is pinned for this one send
+ * (an own property on the engine's signing engine, removed afterwards) and the Cid is predicted with the
+ * same Digest expression; the InviteKey is regenerated until the order holds (bounded at 64 tries). The
+ * ACTUAL stored Cid is returned and the caller asserts the order on it.
+ */
+async function sendOrdered (fx: Fixture, name: string, otherCid: string, wantOtherFirst: boolean): Promise<{ cid: string, invite: KeyholderInvite }> {
+  const expiration = futureCanonical()
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const invite = makeInvite(name, expiration)
+    const nonce = crypto.randomUUID()
+    const predicted = await fx.auth.ctx.db
+      .prepare('select cid(Digest(:electionId, :expiration, :inviteKey, :inviteSignature, :name, :nonce, :type)) as c')
+      .get({ electionId: fx.electionId, expiration, inviteKey: invite.inviteKey, inviteSignature: '', name, nonce, type: 'k' })
+    const cid = predicted!.c as string
+    if ((otherCid < cid) !== wantOtherFirst) continue
+    const signing = (fx.electionEngine as unknown as NonceSeam).signingEngine
+    signing.generateSigningNonce = () => nonce
+    try {
+      const actual = await send(fx, invite)
+      expect(actual).to.equal(cid)
+      return { cid: actual, invite }
+    } finally {
+      delete (signing as Partial<NonceSeam['signingEngine']>).generateSigningNonce
+    }
+  }
+  throw new Error('sendOrdered: no InviteKey produced the wanted Cid order in 64 tries')
+}
+
+const BOTH_ORDERS: Array<{ label: string, otherFirst: boolean }> = [
+  { label: 'Cid(A) < Cid(B)', otherFirst: true },
+  { label: 'Cid(A) > Cid(B)', otherFirst: false },
+]
+
+describe('keyholder invite sent state - every chain of a name is ranked (62-84)', () => {
+  for (const order of BOTH_ORDERS) {
+    it('S7: expired chain A then a live resend chain B reads live with B\'s expiration (' + order.label + ')', async () => {
+      const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+      const cidA = await insertExpiredKSlot(fx, 'Kay')
+      const b = await sendOrdered(fx, 'Kay', cidA, order.otherFirst)
+      expect(cidA < b.cid).to.equal(order.otherFirst)
+      const kh = await projection(fx)
+      expect(kh).to.have.length(2)
+      expect(kh[0]!.sent).to.deep.equal({ state: 'live', expiration: await storedExpiration(fx, b.cid) })
+      expect(kh[1]!.sent).to.equal(undefined)
+    })
+
+    it('S7: cancelled chain A then a live resend chain B reads live with B\'s expiration (' + order.label + ')', async () => {
+      const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+      const cidA = await send(fx, makeInvite('Kay'))
+      await (fx.auth.authorityEngine as unknown as AuthorityEngine).cancelInvite(cidA)
+      const b = await sendOrdered(fx, 'Kay', cidA, order.otherFirst)
+      expect(cidA < b.cid).to.equal(order.otherFirst)
+      const kh = await projection(fx)
+      expect(kh[0]!.sent).to.deep.equal({ state: 'live', expiration: await storedExpiration(fx, b.cid) })
+      expect(kh[1]!.sent).to.equal(undefined)
+    })
+
+    it('S7b: an answered chain A outranks a live chain B (' + order.label + ')', async () => {
+      const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+      const cidA = await send(fx, makeInvite('Kay'))
+      await new InvitationEngine(fx.auth.ctx).respondToInvite(cidA, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+      const b = await sendOrdered(fx, 'Kay', cidA, order.otherFirst)
+      expect(cidA < b.cid).to.equal(order.otherFirst)
+      const kh = await projection(fx)
+      expect(kh[0]!.sent?.state).to.equal('answered')
+      expect(kh[0]!.result?.isAccepted).to.equal(true)
+    })
+  }
+
+  it('S7c: two same-name invitees and three chains (one live, two expired) - live first, then no-longer-valid, no duplicate', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Kay'])
+    await insertExpiredKSlot(fx, 'Kay', '2000-01-02T00:00:00')
+    const liveCid = await send(fx, makeInvite('Kay', futureCanonical()))
+    await insertExpiredKSlot(fx, 'Kay', '2000-01-03T00:00:00')
+    const kh = await projection(fx)
+    expect(kh).to.have.length(2)
+    expect(kh[0]!.sent).to.deep.equal({ state: 'live', expiration: await storedExpiration(fx, liveCid) })
+    // Ties inside a rank break on the latest expiration: the later of the two dead chains is handed out.
+    expect(kh[1]!.sent).to.deep.equal({ state: 'no-longer-valid', expiration: '2000-01-03T00:00:00' })
+  })
+})
+
+describe('keyholder invite sent state - ambiguous chains are carried, not dropped (62-84)', () => {
+  /** Two originals (two signing nonces) under one InviteKey: readInviteChain reports 'ambiguous'. */
+  async function ambiguousChain (fx: Fixture): Promise<{ inviteKey: string, latest: string }> {
+    const invite = makeInvite('Kay', futureCanonical(3_600_000))
+    const cid = await send(fx, invite)
+    const second = futureCanonical(7_200_000)
+    await insertRawKSlot(fx, { name: 'Kay', inviteKey: invite.inviteKey, expiration: second })
+    const first = await storedExpiration(fx, cid)
+    return { inviteKey: invite.inviteKey, latest: first > second ? first : second }
+  }
+
+  it('S8: an ambiguous chain reports sent unknown (never omitted, so the label cannot read Not sent)', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    const { latest } = await ambiguousChain(fx)
+    const kh = await projection(fx)
+    expect(kh[0]!.sent).to.deep.equal({ state: 'unknown', expiration: latest })
+    expect(kh[0]!.result).to.equal(undefined)
+    expect(kh[1]!.sent).to.equal(undefined)
+  })
+
+  it('S8: a live chain outranks an ambiguous one for the same name', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    await ambiguousChain(fx)
+    const liveCid = await send(fx, makeInvite('Kay', futureCanonical(1_800_000)))
+    const kh = await projection(fx)
+    expect(kh[0]!.sent).to.deep.equal({ state: 'live', expiration: await storedExpiration(fx, liveCid) })
+  })
+
+  it('S8: an ambiguous chain outranks a no-longer-valid one for the same name', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    const { latest } = await ambiguousChain(fx)
+    await insertExpiredKSlot(fx, 'Kay')
+    const kh = await projection(fx)
+    expect(kh[0]!.sent).to.deep.equal({ state: 'unknown', expiration: latest })
+  })
+})
+
+describe('keyholder invite sent state - an unreadable invitation table degrades (62-84)', () => {
+  const SLOT_READ = /from InviteSlot where ElectionId = :electionId/
+
+  type EvalFn = Fixture['auth']['ctx']['db']['eval']
+
+  /** Replace ONLY the projection's InviteSlot select with one that throws `err`; restore afterwards. */
+  async function withFailingSlotRead<T> (fx: Fixture, err: unknown, body: () => Promise<T>): Promise<T> {
+    const db = fx.auth.ctx.db
+    const original = db.eval
+    const stub = function (this: typeof db, sql: string, ...rest: unknown[]) {
+      if (SLOT_READ.test(sql)) {
+        return (async function * () { throw err })()
+      }
+      return (original as (...a: unknown[]) => unknown).call(this, sql, ...rest)
+    }
+    db.eval = stub as unknown as EvalFn
+    try {
+      return await body()
+    } finally {
+      db.eval = original
+    }
+  }
+
+  function peerUnavailable (): Error {
+    const e = new Error('Block default/app/InviteSlot is unavailable (cohort-unreachable): the repo could not determine whether it exists')
+    e.name = 'BlockUnavailableError'
+    return e
+  }
+
+  it('S9: a BlockUnavailableError on the slot read still returns the election; every keyholder reads unknown', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    const cid = await send(fx, makeInvite('Kay'))
+    await new InvitationEngine(fx.auth.ctx).respondToInvite(cid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    const details = await withFailingSlotRead(fx, peerUnavailable(), () => fx.electionEngine.getElectionDetails())
+    const kh = details.current.keyholders
+    expect(details.election.id).to.equal(fx.electionId)
+    expect(kh).to.have.length(2)
+    for (const k of kh) expect(k.sent).to.deep.equal({ state: 'unknown', expiration: '' })
+    expect(kh[0]!.result?.isAccepted).to.equal(true)
+    // The stub is gone: the next read sees the real tables again.
+    expect((await projection(fx))[0]!.sent?.state).to.equal('answered')
+  })
+
+  it('S9: a peer-unavailable error wrapped as a cause, or a possibly-stale block, also degrades', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    await send(fx, makeInvite('Kay'))
+    const wrapped = new Error('vtab read failed', { cause: new Error('outer', { cause: peerUnavailable() }) })
+    const stale = Object.assign(new Error('Block default/app/InviteSlot may be stale: no peer confirmed the latest revision'), { name: 'BlockPossiblyStaleError' })
+    for (const err of [wrapped, stale]) {
+      const kh = (await withFailingSlotRead(fx, err, () => fx.electionEngine.getElectionDetails())).current.keyholders
+      for (const k of kh) expect(k.sent?.state).to.equal('unknown')
+    }
+  })
+
+  it('S9: any other error from the same read still rejects getElectionDetails (not masked)', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    let caught: unknown
+    try {
+      await withFailingSlotRead(fx, new Error('boom'), () => fx.electionEngine.getElectionDetails())
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).to.be.instanceOf(Error)
+    expect(String((caught as Error).message)).to.contain('boom')
+  })
+})
+
 describe('keyholder invite sent state - mock parity (62-76)', () => {
   async function mockKeyholders (m: MockElectionEngine) {
     return (await m.getElectionDetails()).current.keyholders
@@ -229,5 +463,18 @@ describe('keyholder invite sent state - mock parity (62-76)', () => {
     const kh = await mockKeyholders(m)
     expect(kh.find(k => k.invite.name === 'Dr. Sarah Chen')!.sent).to.equal(undefined)
     expect(kh.find(k => k.invite.name === 'Judge Michael Rodriguez')!.sent).to.equal(undefined)
+  })
+
+  it('M4: repeated sends to one name read live with the future expiration, in either send order', async () => {
+    const past = '2000-01-02T00:00:00'
+    for (const order of [[past, 'future'], ['future', past]]) {
+      const m = new MockElectionEngine()
+      const future = futureIso()
+      for (const exp of order) {
+        await m.inviteKeyholder(makeInvite('Dr. Sarah Chen', exp === 'future' ? future : exp), 'election-2', async () => { throw new Error('unused') })
+      }
+      const sarah = (await mockKeyholders(m)).find(k => k.invite.name === 'Dr. Sarah Chen')!
+      expect(sarah.sent).to.deep.equal({ state: 'live', expiration: future })
+    }
   })
 })
