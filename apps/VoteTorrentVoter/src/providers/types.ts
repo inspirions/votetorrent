@@ -241,4 +241,12 @@ export interface VoterAppContextType {
 	 * Only set in `__DEV__`; `undefined` otherwise (no production join flow yet).
 	 */
 	seededElectionId: string | undefined;
+	/**
+	 * Replace a PERMANENTLY unrecoverable device identity (lost wrap key, tag or key mismatch)
+	 * with a brand-new one, then re-run the boot. Explicit and user-confirmed only — wire it to
+	 * `IdentityRecoveryView`'s confirm step; never call it from a boot path or automatically.
+	 * Nothing is recovered (D-40). A refusal (e.g. the identity is readable) rejects; a retry
+	 * after a later step failed finishes that step without replacing a second time.
+	 */
+	createNewIdentity: () => Promise<void>;
 }

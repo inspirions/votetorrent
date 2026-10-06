@@ -47,6 +47,12 @@ import type { User } from '@votetorrent/vote-core'
 import { UserKeyType } from '@votetorrent/vote-core'
 import { SecretWrapError, type WrappedSecret } from '@votetorrent/attestation-native'
 import { resolveDeviceKeyWrapProvider, type DeviceKeyWrapProvider } from './device-key-wrap'
+import {
+	identityNotReplaceableError,
+	isIdentityNotReplaceable,
+	isReplaceableIdentityError,
+	type IdentityNotReplaceableReason,
+} from './identity-errors'
 
 /** AsyncStorage key under which the device identity record is persisted. */
 export const DEVICE_USER_KEY = 'votingDeviceUser'
@@ -431,31 +437,25 @@ async function restoreBestEffort(raw: string): Promise<void> {
 	}
 }
 
-/** The only reasons for which a record is PERMANENTLY unrecoverable (the wrap key is gone or the
- * ciphertext no longer matches). Transient reasons are never replaceable. */
-export const REPLACEABLE_IDENTITY_REASONS = ['no-wrap-key', 'tag-mismatch', 'key-mismatch'] as const
+// The recognition predicates live in the dependency-free `identity-errors` module (the failure
+// classifier imports them without pulling in storage or native crypto); re-exported here so every
+// existing `device-user` import keeps working.
+export {
+	REPLACEABLE_IDENTITY_REASONS,
+	isIdentityNotReplaceable,
+	isReplaceableIdentityError,
+} from './identity-errors'
+export type { IdentityNotReplaceableReason } from './identity-errors'
 
-export function isReplaceableIdentityError(err: unknown): boolean {
-	if (typeof err !== 'object' || err === null) return false
-	const e = err as { name?: unknown; reason?: unknown }
-	return (
-		e.name === 'DeviceIdentityKeyUnavailableError' &&
-		typeof e.reason === 'string' &&
-		(REPLACEABLE_IDENTITY_REASONS as readonly string[]).includes(e.reason)
-	)
-}
-
-function identityNotReplaceable(message: string): Error {
-	const err = new Error(message)
-	err.name = 'IdentityNotReplaceableError'
-	return err
+function identityNotReplaceable(message: string, reason: IdentityNotReplaceableReason): Error {
+	return identityNotReplaceableError(message, reason)
 }
 
 /**
  * User-confirmed replacement of a permanently unrecoverable identity with a brand-new one.
  * Runs in ONE lock body: re-attempts the unwrap, and proceeds ONLY when it fails with a
  * permanent reason (`REPLACEABLE_IDENTITY_REASONS`). Readable records, transient failures and an
- * absent record are refused with `IdentityNotReplaceableError`, record untouched. On any failure
+ * absent record are refused with `IdentityNotReplaceableError` (typed `reason`), record untouched. On any failure
  * after removal the original raw string is restored byte-identical. No old key byte is ever
  * returned or logged. Never called from a boot path — only from an explicit confirm tap.
  */
@@ -464,23 +464,23 @@ export async function replaceUnrecoverableDeviceIdentity(displayName: string): P
 		const raw = await AsyncStorage.getItem(DEVICE_USER_KEY)
 		const classified = classify(raw)
 		if (raw === null || classified.kind === 'absent') {
-			throw identityNotReplaceable('no identity to replace')
+			throw identityNotReplaceable('no identity to replace', 'no-identity')
 		}
 
 		if (classified.kind === 'wrapped') {
 			try {
 				const bytes = await unwrapWrappedRecord(classified.user, classified.wrapped)
 				bytes.fill(0)
-				throw identityNotReplaceable('identity is readable')
+				throw identityNotReplaceable('identity is readable', 'readable')
 			} catch (err) {
 				if (!isReplaceableIdentityError(err)) {
-					if (err instanceof Error && err.name === 'IdentityNotReplaceableError') throw err
-					throw identityNotReplaceable('identity failure is not permanent')
+					if (isIdentityNotReplaceable(err)) throw err
+					throw identityNotReplaceable('identity failure is not permanent', 'not-permanent')
 				}
 			}
 		} else {
 			// legacy plaintext is readable; an unreadable record is ambiguous — never replaced.
-			throw identityNotReplaceable('identity record is not a permanently locked wrapped record')
+			throw identityNotReplaceable('identity record is not a permanently locked wrapped record', 'not-wrapped')
 		}
 
 		await AsyncStorage.removeItem(DEVICE_USER_KEY)

@@ -19,6 +19,8 @@
  * `VoterAppContextType` no longer has a `sign` field at all (see `types.ts`'s doc comment), so
  * this mock has nothing to stand in for there.
  *
+ * `createNewIdentity` is the exported `__mockCreateNewIdentity` jest.fn (resolves undefined).
+ *
  * D-02: also mirrors the shared clock (`clockOffsetMs`/`setClockOffsetMs`/`nowMs`). Deviation from
  * 63-PATTERNS: the setter is STATEFUL (inert outside `__DEV__`), not a no-op, because later screen
  * tests drive the dev clock through this mock.
@@ -43,6 +45,9 @@ export function __setMockGetBallot(reader?: () => Promise<VoterBallot>): void {
 export function __setMockGetElectionFailure(error?: Error): void {
 	electionFailure = error ?? null;
 }
+// The context's createNewIdentity: a jest.fn resolving undefined. Assert on it via
+// `jest.requireMock(...).__mockCreateNewIdentity`; tests that use it should clear it in `afterEach`.
+export const __mockCreateNewIdentity = jest.fn(async (): Promise<void> => undefined);
 
 export function useVoterApp(): VoterAppContextType {
 	const context = useContext(VoterAppContext);
@@ -101,6 +106,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				hasEngine,
 				selectNetwork,
 				seededElectionId: undefined,
+				createNewIdentity: __mockCreateNewIdentity,
 			}}>
 			{children}
 		</VoterAppContext.Provider>

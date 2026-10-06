@@ -39,10 +39,10 @@ import {LocalStorageReact} from '@votetorrent/vote-engine/rn';
 import {rnDbFactory} from '../engines/rn-db-factory';
 import {
 	getOrCreateDeviceUser,
-	isReplaceableIdentityError,
 	migrateLegacyPlaintextIdentityKey,
 	replaceUnrecoverableDeviceIdentity,
 } from '../engines/device-user';
+import {isReplaceableIdentityError} from '../engines/identity-errors';
 import {errorClassName} from '../utils/errorClassName';
 import {IdentityRecoveryView} from '../components/IdentityRecoveryView';
 import {seedDevNetwork} from '../engines/dev-seed';
@@ -298,18 +298,32 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		setIsInitialized(true);
 	}, []);
 
-	// Explicit, user-confirmed "create a new identity" (IdentityRecoveryView confirm step only).
-	// Replaces the permanently unrecoverable identity, drops the dev network the old identity
-	// founded (__DEV__ only; release has no seeded network), and re-runs the boot.
+	// Explicit, user-confirmed "create a new identity" (IdentityRecoveryView confirm step only —
+	// from the boot error view or a registration screen's 'identity-lost' failure; never a boot
+	// path). Replaces the permanently unrecoverable identity, drops the dev network the old
+	// identity founded (__DEV__ only; release has no seeded network), and re-runs the boot.
+	//
+	// WR-03: once the replacement has succeeded the record is READABLE, so a second
+	// replaceUnrecoverableDeviceIdentity call would be refused forever. If a later step fails, the
+	// view offers Create again; that retry must SKIP the replacement THIS session already completed
+	// and only finish the remaining (idempotent) steps. The skip is keyed on this ref, never on the
+	// refusal's message or reason: a refusal while nothing was replaced (e.g. 'readable' on the
+	// first attempt) propagates to the view's failed state untouched (T-62-87-01).
+	const replacedThisSessionRef = useRef(false);
 	const createNewIdentity = useCallback(async () => {
 		const factory = engineFactoryRef.current!;
-		const defaultUserEng = await factory.getEngine<IDefaultUserEngine>('defaultUser');
-		const defaultUser = await defaultUserEng.get();
-		await replaceUnrecoverableDeviceIdentity(defaultUser?.name ?? (__DEV__ ? 'Dev Voter' : 'Device User'));
+		if (!replacedThisSessionRef.current) {
+			const defaultUserEng = await factory.getEngine<IDefaultUserEngine>('defaultUser');
+			const defaultUser = await defaultUserEng.get();
+			await replaceUnrecoverableDeviceIdentity(defaultUser?.name ?? (__DEV__ ? 'Dev Voter' : 'Device User'));
+			replacedThisSessionRef.current = true;
+		}
 		if (__DEV__) {
 			await factory.getNetworksEngine().clearRecentNetworks();
 		}
 		factory.clearEngineCache();
+		// The whole sequence succeeded: a later, separate loss in this session is replaced again.
+		replacedThisSessionRef.current = false;
 		setInitError(null);
 		setIsInitialized(false);
 		setInitNonce(n => n + 1);
@@ -419,6 +433,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				hasEngine,
 				selectNetwork,
 				seededElectionId,
+				createNewIdentity,
 			}}>
 			{children}
 		</VoterAppContext.Provider>
