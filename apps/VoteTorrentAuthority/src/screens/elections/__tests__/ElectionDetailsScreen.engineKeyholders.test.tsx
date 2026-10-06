@@ -174,3 +174,31 @@ describe("ElectionDetailsScreen — keyholders render from the engine only (D-27
 		expect(policyText(tr)).toBe("1 of 0");
 	});
 });
+
+describe("ElectionDetailsScreen — keyholder INVITE prefill (UAT 62 L1)", () => {
+	async function pressInvite(tr: renderer.ReactTestRenderer) {
+		const invite = tr.root.findAll((n) => n.props?.title === "invite" && typeof n.props?.onPress === "function")[0];
+		await renderer.act(async () => invite.props.onPress());
+	}
+
+	it("passes the single not-yet-accepted keyholder so the send form's Name is prefilled", async () => {
+		const kay = { invite: { name: "Kay Holder" } };
+		mockElectionEngine = makeElectionEngine({
+			keyholders: [{ invite: { name: "Ann" }, result: { isAccepted: true, invitationSignature: "", invokedId: "u-ann" } }, kay],
+			keyholderThreshold: 2,
+		});
+		const tr = await renderScreen();
+		await pressInvite(tr);
+		expect(mockNavigate).toHaveBeenCalledWith("KeyholderInvitation", expect.objectContaining({ mode: "send", keyholder: kay }));
+	});
+
+	it("passes no keyholder when the invitee is ambiguous", async () => {
+		mockElectionEngine = makeElectionEngine({
+			keyholders: [{ invite: { name: "Ann" } }, { invite: { name: "Bob" } }],
+			keyholderThreshold: 2,
+		});
+		const tr = await renderScreen();
+		await pressInvite(tr);
+		expect(mockNavigate).toHaveBeenCalledWith("KeyholderInvitation", expect.objectContaining({ mode: "send", keyholder: undefined }));
+	});
+});

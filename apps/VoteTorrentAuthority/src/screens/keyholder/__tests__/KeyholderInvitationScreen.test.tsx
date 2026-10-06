@@ -42,7 +42,7 @@ function makeShareText(type = 'k', name = 'Ada Keyholder') {
 const mockGoBack = jest.fn();
 const mockSetOptions = jest.fn();
 
-const mockRouteParams: { mode: 'send' | 'accept'; initialShare?: string } = {
+const mockRouteParams: { mode: 'send' | 'accept'; initialShare?: string; electionEngine?: unknown; keyholder?: unknown } = {
   mode: 'accept',
 };
 
@@ -172,6 +172,10 @@ beforeEach(() => {
 
 afterEach(() => {
   setKeyholderKeyVaultForTests(undefined);
+  mockRouteParams.mode = 'accept';
+  delete mockRouteParams.initialShare;
+  delete mockRouteParams.electionEngine;
+  delete mockRouteParams.keyholder;
 });
 
 describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', () => {
@@ -342,5 +346,49 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
     } finally {
       delete mockRouteParams.initialShare;
     }
+  });
+});
+
+describe('KeyholderInvitationScreen - send mode (UAT 62 L)', () => {
+  const mockInviteKeyholder = jest.fn(async (..._args: unknown[]) => undefined);
+  const electionEngine = {
+    getElectionDetails: jest.fn(async () => ({ election: { id: 'election-1' } })),
+    inviteKeyholder: (...args: unknown[]) => mockInviteKeyholder(...args),
+  };
+
+  beforeEach(() => {
+    mockRouteParams.mode = 'send';
+    mockRouteParams.electionEngine = electionEngine;
+    mockGetEngine.mockImplementation(async (name: string): Promise<any> => {
+      if (name === 'defaultUser') return { get: async () => ({ name: 'Officer' }) };
+      if (name === 'invitations') return mockInvitationEngine;
+      return undefined;
+    });
+  });
+
+  function nameInput(tr: renderer.ReactTestRenderer) {
+    return tr.root.findAll((n) => (n.type as unknown) === 'TextInput' && n.props.accessibilityLabel === 'name')[0];
+  }
+
+  it('prefills Name from the route keyholder', async () => {
+    mockRouteParams.keyholder = { invite: { name: 'Kay Holder' } };
+    const tr = await render();
+    expect(nameInput(tr).props.value).toBe('Kay Holder');
+  });
+
+  it('after SEND the full invite text renders in the share block with SHARE and COPY', async () => {
+    mockRouteParams.keyholder = { invite: { name: 'Kay Holder' } };
+    const tr = await render();
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'send').props.onPress();
+    });
+    expect(mockInviteKeyholder).toHaveBeenCalledTimes(1);
+    const text = tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-text' && typeof n.props?.children === 'string')[0];
+    expect(text.props.numberOfLines).toBeUndefined();
+    const payload = JSON.parse(text.props.children);
+    expect(payload.name).toBe('Kay Holder');
+    expect(payload.invitePrivate).toMatch(/^[0-9a-f]{64}$/);
+    expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-share').length).toBeGreaterThan(0);
+    expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-copy').length).toBeGreaterThan(0);
   });
 });

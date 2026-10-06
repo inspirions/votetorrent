@@ -13,11 +13,11 @@ import type {
 	SentOfficerInvite,
 } from "@votetorrent/vote-core";
 import { scopeDescriptions } from "@votetorrent/vote-core";
-import Clipboard from "@react-native-clipboard/clipboard";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
 import { CustomTextInput } from "../../components/CustomTextInput";
+import { InviteShareBlock } from "../invitations/InviteShareBlock";
 import { Footer } from "../../components/Footer";
 import { InfoCard } from "../../components/InfoCard";
 import { InlineError } from "../../components/InlineError";
@@ -216,23 +216,7 @@ export default function AdministratorInvitationScreen() {
 
 						{/* D-05: render share text + Copy button after a successful send */}
 						{shareText ? (
-							<>
-								<ThemedText type="defaultSemiBold" style={styles.shareLabel}>
-									{t("invitationKey")}
-								</ThemedText>
-								<ThemedText
-									style={styles.shareText}
-									selectable
-									numberOfLines={4}
-								>
-									{shareText}
-								</ThemedText>
-								<CustomButton
-									title={t("share")}
-									icon="copy"
-									onPress={() => Clipboard.setString(shareText)}
-								/>
-							</>
+							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="administrator-invitation-share" />
 						) : null}
 
 						{/* Pattern B error display */}
@@ -355,14 +339,6 @@ const localStyles = StyleSheet.create({
 	orText: {
 		textAlign: "center",
 		marginVertical: 8,
-	},
-	shareLabel: {
-		marginTop: 12,
-		marginBottom: 4,
-	},
-	shareText: {
-		marginBottom: 8,
-		fontFamily: "monospace",
 	},
 	scopesSection: {
 		marginTop: 16,

@@ -11,13 +11,13 @@ import type {
 	KeyholderInvite,
 	SentKeyholderInvite,
 } from "@votetorrent/vote-core";
-import Clipboard from "@react-native-clipboard/clipboard";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex } from "@noble/curves/utils.js";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
 import { CustomTextInput } from "../../components/CustomTextInput";
+import { InviteShareBlock } from "../invitations/InviteShareBlock";
 import { InlineError } from "../../components/InlineError";
 import { SignatureTaskFooter } from "../../components/SignatureTaskFooter";
 import type { RootStackParamList } from "../../navigation/types";
@@ -198,23 +198,7 @@ export function KeyholderInvitationScreen() {
 
 						{/* D-05: render share text + Copy button after a successful send */}
 						{shareText ? (
-							<>
-								<ThemedText type="defaultSemiBold" style={styles.shareLabel}>
-									{t("invitationKey")}
-								</ThemedText>
-								<ThemedText
-									style={styles.shareText}
-									selectable
-									numberOfLines={4}
-								>
-									{shareText}
-								</ThemedText>
-								<CustomButton
-									title={t("share")}
-									icon="copy"
-									onPress={() => Clipboard.setString(shareText)}
-								/>
-							</>
+							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="keyholder-invitation-share" />
 						) : null}
 
 						{/* Pattern B error display */}
@@ -281,14 +265,6 @@ const localStyles = StyleSheet.create({
 	detailRow: {
 		flexDirection: "row",
 		marginBottom: 8,
-	},
-	shareLabel: {
-		marginTop: 12,
-		marginBottom: 4,
-	},
-	shareText: {
-		marginBottom: 8,
-		fontFamily: "monospace",
 	},
 });
 

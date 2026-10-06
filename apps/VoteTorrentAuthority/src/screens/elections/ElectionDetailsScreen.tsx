@@ -208,7 +208,17 @@ export default function ElectionDetailsScreen() {
 					icon="paper-plane"
 					backgroundColor={colors.accent}
 					size="thin"
-					onPress={() => navigation.navigate("KeyholderInvitation", { mode: "send", electionEngine })}
+					// UAT 62 L1: this INVITE used to open the send form with an empty Name. When exactly
+					// one keyholder has not accepted yet it is the obvious invitee, so prefill it (the
+					// accept is matched to the keyholder card by that name). Otherwise leave it blank.
+					onPress={() => {
+						const pending = current.keyholders.filter((k) => !k.result);
+						navigation.navigate("KeyholderInvitation", {
+							mode: "send",
+							electionEngine,
+							keyholder: pending.length === 1 ? pending[0] : undefined,
+						});
+					}}
 				/>
 			</View>
 
