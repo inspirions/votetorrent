@@ -12,6 +12,8 @@
  *   - `'recoverable-transient'` — a retry alone might succeed (network hiccup, lockout timeout,
  *     an unrecognized/future code). This is also the safe DEFAULT for any unknown code — a
  *     mystery error must never permanently wall a voter.
+ *   - `'no-election'` — there is no election on this phone to register for (a
+ *     `NoElectionConfiguredError`, thrown before any device step). Retry is not offered.
  *   - `'intake-unavailable'` — the device is fine, but the vote-engine intake refused to hand the
  *     request to the authority (an `IntakeError`, e.g. `no-recipients` when the authority has no
  *     officer able to receive it yet). Blaming the device here misleads the voter; the copy
@@ -33,6 +35,7 @@ export type AttestationFailureClass =
 	| 'recoverable-action'
 	| 'recoverable-transient'
 	| 'intake-unavailable'
+	| 'no-election'
 
 /** Terminal-class native reject codes (45-02 native reject mapping / 45-05 wrapper contract). */
 const TERMINAL_CODES = new Set(['NO_STRONGBOX_OR_TEE', 'DEVICE_INTEGRITY_FAILED', 'PROVISION_FAILED'])
@@ -48,6 +51,11 @@ const RECOVERABLE_ACTION_CODES = new Set(['NO_BIOMETRICS_ENROLLED'])
  * classifies as `'intake-unavailable'`.
  */
 export function classifyAttestationFailure(err: unknown): AttestationFailureClass {
+	// No election on this phone (named error thrown by ConfirmationScreen before any ceremony
+	// step): retrying cannot help and the device is not at fault.
+	if ((err as {name?: unknown} | null | undefined)?.name === 'NoElectionConfiguredError') {
+		return 'no-election'
+	}
 	if ((err as {name?: unknown} | null | undefined)?.name === 'IntakeError') {
 		return 'intake-unavailable'
 	}

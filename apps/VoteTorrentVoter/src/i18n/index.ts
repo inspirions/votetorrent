@@ -251,6 +251,7 @@ const resources = {
 			// [AUTHORED] — the authority's intake refused the request (vote-engine IntakeError): the
 			// device is fine, so this must not blame it.
 			'confirmation.error.intakeUnavailable': "We couldn't send your registration to the authority right now. Try again later.",
+			'confirmation.error.noElection': 'There is no election to register for on this phone yet.',
 			// [AUTHORED] — the retry label on the confirm/retry buttons after a failed attempt.
 			'confirmation.retryCta': 'Try Again',
 			// [AUTHORED] — shown once the requests are submitted and the authority's decision is pending.
@@ -581,6 +582,7 @@ const resources = {
 			'confirmation.error.transient': 'Algo salió mal al verificar tu dispositivo. Inténtalo de nuevo.',
 			'confirmation.error.terminal': 'Este dispositivo no se puede usar para votar',
 			'confirmation.error.intakeUnavailable': 'No pudimos enviar tu registro a la autoridad en este momento. Inténtalo más tarde.',
+			'confirmation.error.noElection': 'Todavía no hay una elección para registrarte en este teléfono.',
 			'confirmation.retryCta': 'Intentar de nuevo',
 			'confirmation.pending': 'Tu registro ha sido enviado. Te avisaremos cuando la autoridad confirme tu dispositivo.',
 			formHeaderTitle: 'Registrarse',

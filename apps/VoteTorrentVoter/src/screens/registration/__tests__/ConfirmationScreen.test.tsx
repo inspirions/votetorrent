@@ -89,6 +89,7 @@ const mockGetEngine = jest.fn(async (engineName: string) => {
 });
 
 const SEEDED_ELECTION_ID = 'election-1';
+let mockSeededElectionId: string | undefined = SEEDED_ELECTION_ID;
 const P256_PUB = 'P256_PUB';
 const CHALLENGE_NONCE = 'challenge-nonce-abc';
 const DEVICE_IDENTITY_PUBLIC_KEY = 'DEVICE_IDENTITY_SECP256K1_PUBLIC_KEY';
@@ -103,7 +104,7 @@ const mockSign = jest.fn(async () => ({
 
 jest.mock('../../../providers/VoterAppProvider', () => ({
 	useVoterApp: () => ({
-		seededElectionId: SEEDED_ELECTION_ID,
+		seededElectionId: mockSeededElectionId,
 		// Kept on the provider mock (51-12 owns the provider blast radius) even though this
 		// rewritten screen never destructures it — the point under test is that it is never REACHED,
 		// not that the provider stopped exposing it.
@@ -607,6 +608,33 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(text).toContain('Try Again');
 		expect(mockClearDraft).not.toHaveBeenCalled();
 		expect(mockPopToTop).not.toHaveBeenCalled();
+	});
+
+	it('classifyAttestationFailure maps NoElectionConfiguredError to no-election and leaves IntakeError alone', () => {
+		const {classifyAttestationFailure} = require('../../../engines/attestation-failure');
+		expect(classifyAttestationFailure(Object.assign(new Error('x'), {name: 'NoElectionConfiguredError'}))).toBe('no-election');
+		expect(classifyAttestationFailure(Object.assign(new Error('x'), {name: 'IntakeError', code: 'no-recipients'}))).toBe(
+			'intake-unavailable',
+		);
+	});
+
+	it('no election on this phone shows its own copy, never device blame, and never touches the device key', async () => {
+		mockSeededElectionId = undefined;
+		try {
+			const tr = renderScreen();
+			await pressConfirm(tr);
+
+			const text = JSON.stringify(tr.toJSON());
+			expect(text).toContain('There is no election to register for on this phone yet.');
+			expect(text).not.toContain('verifying your device');
+			expect(text).not.toContain("This device can't be used to vote");
+			expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+			// Retrying cannot help: no retry CTA, no retry label.
+			expect(tr.root.findAllByProps({testID: 'confirmation-confirm-face-id'}).length).toBe(0);
+			expect(text).not.toContain('Try Again');
+		} finally {
+			mockSeededElectionId = SEEDED_ELECTION_ID;
+		}
 	});
 
 	it('a pollDecisions that never yields a challenge-issued notice within the bounded attempts surfaces the generic failure class', async () => {

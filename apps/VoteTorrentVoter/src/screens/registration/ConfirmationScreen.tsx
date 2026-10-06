@@ -180,7 +180,10 @@ export default function ConfirmationScreen() {
 			// WR-03: the registration request's payload only enforces field policy when
 			// init.electionId is set. Fail closed rather than submit with policy unenforced.
 			if (!seededElectionId) {
-				throw new Error('No election configured — cannot register (field policy would be unenforced).');
+				throw Object.assign(
+					new Error('No election configured — cannot register (field policy would be unenforced).'),
+					{name: 'NoElectionConfiguredError'},
+				);
 			}
 
 			// D-11: resolve the producer once and provision the hardware P-256 key BEFORE any
@@ -421,7 +424,9 @@ export default function ConfirmationScreen() {
 					? t('confirmation.error.transient')
 					: failureClass === 'intake-unavailable'
 						? t('confirmation.error.intakeUnavailable')
-						: null;
+						: failureClass === 'no-election'
+							? t('confirmation.error.noElection')
+							: null;
 
 	return (
 		<ScrollView
@@ -524,7 +529,7 @@ export default function ConfirmationScreen() {
 							{errorCopy}
 						</Text>
 					) : null}
-					{failureClass === 'terminal' ? null : failureClass === 'recoverable-action' ? (
+					{failureClass === 'terminal' || failureClass === 'no-election' ? null : failureClass === 'recoverable-action' ? (
 						<>
 							<Pressable
 								testID="confirmation-setup-cta"
