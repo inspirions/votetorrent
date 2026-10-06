@@ -24,8 +24,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import type { RegisterInit, Signature } from '@votetorrent/vote-core'
-import { NetworksEngine, RegistrationEngine, AssociationEngine, ElectionsEngine, IntakeEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
+import type { Ballot, BallotSignatureTask, RegisterInit, Signature } from '@votetorrent/vote-core'
+import { NetworksEngine, RegistrationEngine, AssociationEngine, ElectionsEngine, IntakeEngine, SignatureTasksEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
 import type { EngineContext } from '@votetorrent/vote-engine/rn'
 import { FieldPolicyViolationError } from '@votetorrent/vote-engine'
 import { seedDevNetwork, DEV_SEED_NETWORK_NAME } from '../dev-seed'
@@ -103,6 +103,20 @@ async function ensureIntakeRecipient(
 
 const FUTURE_EXPIRATION = Date.now() + 365 * 86_400_000
 
+async function setup(options?: { registeredStateFixture?: boolean }) {
+	const networksEngine = new NetworksEngine(new LocalStorageReact())
+	const seeded = await seedDevNetwork(networksEngine, options)
+	const ctx = networksEngine.getEstablishedContext(seeded.networkReference.hash)
+	if (!ctx) throw new Error('test setup: no established context after seedDevNetwork')
+	const registrationEngine = new RegistrationEngine(ctx)
+	const authorityRow = await ctx.db
+		.prepare('select AuthorityId from Election where Id = :electionId')
+		.get({ electionId: seeded.electionId })
+	const authorityId = authorityRow!.AuthorityId as string
+	await ensureIntakeRecipient(ctx, authorityId, seeded.sign)
+	return { seeded, ctx, registrationEngine, authorityId }
+}
+
 describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed register', () => {
 	// Test isolation: the RN AsyncStorage jest mock is a module-scope singleton
 	// store shared across every `it()` in this file (unlike the fresh in-memory
@@ -116,20 +130,6 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 	beforeEach(async () => {
 		await AsyncStorage.clear()
 	})
-
-	async function setup(options?: { registeredStateFixture?: boolean }) {
-		const networksEngine = new NetworksEngine(new LocalStorageReact())
-		const seeded = await seedDevNetwork(networksEngine, options)
-		const ctx = networksEngine.getEstablishedContext(seeded.networkReference.hash)
-		if (!ctx) throw new Error('test setup: no established context after seedDevNetwork')
-		const registrationEngine = new RegistrationEngine(ctx)
-		const authorityRow = await ctx.db
-			.prepare('select AuthorityId from Election where Id = :electionId')
-			.get({ electionId: seeded.electionId })
-		const authorityId = authorityRow!.AuthorityId as string
-		await ensureIntakeRecipient(ctx, authorityId, seeded.sign)
-		return { seeded, ctx, registrationEngine, authorityId }
-	}
 
 	it('is __DEV__-guarded — throws when __DEV__ is false', async () => {
 		const original = (globalThis as { __DEV__?: boolean }).__DEV__
@@ -389,5 +389,61 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		// Exactly one ballot — the re-attach must not propose a second one.
 		const electionEngine = await new ElectionsEngine(ctx).openElection(second.electionId)
 		expect(await electionEngine.getBallots()).toHaveLength(1)
+	})
+})
+
+describe('A7 — a mel-only founding officer confirms a threshold-1 ballot', () => {
+	beforeEach(async () => {
+		await AsyncStorage.clear()
+	})
+
+	it("A7: the seeded founding officer (scopes ['mel'] only) confirms a threshold-1 ballot through submitBallotForConfirmation + completeSignature", async () => {
+		const { seeded, ctx, authorityId } = await setup()
+		const electionEngine = await new ElectionsEngine(ctx).openElection(seeded.electionId)
+
+		const probeId: string = (globalThis as any).crypto.randomUUID()
+		const probe: Ballot = {
+			id: probeId,
+			electionId: seeded.electionId,
+			authorityId,
+			description: 'A7 probe ballot',
+			districts: [],
+			questions: [
+				{
+					code: 'a7-q',
+					title: 'A7 question',
+					instructions: '',
+					type: 'select',
+					optionRange: { min: 1, max: 1 },
+					group: 'A7',
+					sequence: 0,
+					required: true,
+					options: [
+						{ code: 'a7-x', title: 'X', details: '' },
+						{ code: 'a7-y', title: 'Y', details: '' },
+					],
+				},
+			],
+		}
+		await electionEngine.proposeBallot(probe)
+		await electionEngine.submitBallotForConfirmation(probeId)
+
+		const tasks = new SignatureTasksEngine(seeded.networkReference, ctx)
+		const task = (await tasks.getRequestedSignatures(true)).find(
+			(t) => t.signatureType === 'ballot' && (t as BallotSignatureTask).ballot?.proposed?.id === probeId,
+		)
+		expect(task).toBeDefined()
+
+		const digest = await tasks.getSignatureDigest(task!)
+		await tasks.completeSignature(task!, { isAccepted: true, signature: await seeded.sign(digest), sign: seeded.sign })
+
+		expect(await electionEngine.getBallotConfirmationState(probeId)).toEqual({ locked: false, confirmed: true })
+		expect(await ctx.db.prepare('select Id from Ballot where Id = :id').get({ id: probeId })).toBeTruthy()
+		expect((await electionEngine.getBallotDetails(probeId)).ballot.questions).toHaveLength(1)
+
+		const officerRow = await ctx.db
+			.prepare('select Scopes from Officer where UserId = :userId')
+			.get({ userId: seeded.deviceUser.id })
+		expect(JSON.parse(officerRow!.Scopes as string)).toEqual(['mel'])
 	})
 })
